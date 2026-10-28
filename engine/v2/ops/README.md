@@ -156,7 +156,8 @@ row's ordered forecast outputs and exact/alias driver roles, gate, policy key,
 source-bundle strategy and optional driver-name override. All resolved drivers
 contribute features, recipes, identities and request artifact references.
 STR-THRU, STR-RUNUP, TWIN-P, TWIN-P5, BFLY-P, BFLY-P5, CTR5, RAMP7 and CND-PS are registered (the seven entry-rule strategies are gate-less: entry-rule gate over a frozen paired pool and trailing cutoff). RUNUP requires both verified champion
-residual pools and a unique exact-key payoff surface; its model gate does not
+residual pools and the unique payoff surface with greatest DATA cutoff at or
+before the row cutoff; its model gate does not
 request separate simulation. Missing/unusable model artifacts refuse its row.
 There is no runtime registration API or chooser execution contract.
 

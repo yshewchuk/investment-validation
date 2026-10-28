@@ -12,6 +12,8 @@ from engine.v2.models.analog_artifact import (
     make_board_analog_pool_artifact,
 )
 from engine.v2.models.lineage import Lineage
+from engine.v2.models.payoff_artifact import make_payoff_line_artifact
+from engine.v2.models.recalibration_artifact import make_recalibration_map_artifact
 from engine.v2.ops import native_score_batch
 from engine.v2.ops.native_board_universe import BoardRequest
 from engine.v2.ops.native_score_batch import _with_release_artifacts
@@ -47,10 +49,27 @@ def _bundle() -> SourceBundle:
         analog_recipe={}, gate_recipe={})
 
 
-def _declare(pools, payoff_artifacts=()):
+def _release_model_artifacts():
+    line = make_payoff_line_artifact(
+        {"n": 2, "resid_sd": 0.1, "r": None, "residuals": (0.1, -0.1),
+         "intercept": 0.1, "slope": 0.2},
+        strategy="STR-THRU", driver="implied_t1", alpha=0.5, cutoff="2026-01-08")
+    recalibration = make_recalibration_map_artifact(
+        None, strategy="STR-THRU", alpha=0.5, cutoff="2026-01-08", min_pairs=10)
+    return {
+        "payoff_artifacts": {"STR-THRU": (line,)},
+        "recalibration_artifacts": {"STR-THRU": (recalibration,)},
+    }
+
+
+def _declare(pools, payoff_artifacts=None):
+    models = _release_model_artifacts()
+    if payoff_artifacts is None:
+        payoff_artifacts = models["payoff_artifacts"]["STR-THRU"]
     binding = SimpleNamespace(
         analog_artifacts={"STR-THRU": tuple(pools)},
         payoff_artifacts={"STR-THRU": tuple(payoff_artifacts)},
+        recalibration_artifacts=models["recalibration_artifacts"],
         driver_residual_artifacts={}, model_release="rel", frozen_inference="inf")
     return _with_release_artifacts(
         _bundle(), binding=binding, key=_KEY, strategy="STR-THRU",
@@ -91,7 +110,8 @@ def test_release_without_analog_pools_refuses_the_row():
     assert isinstance(result, NativeScoreBatchRowRefusal)
     assert result.code == "MODEL_NOT_READY"
     assert result.detail == (
-        "nightly_source_bundle refused: MODEL_NOT_READY: exact-cutoff analog pool missing")
+        "nightly_source_bundle refused: MODEL_NOT_READY: "
+        "exact-cutoff analog pool missing")
 
 
 def test_payoff_family_without_one_exact_cutoff_refuses_the_row():
@@ -100,15 +120,13 @@ def test_payoff_family_without_one_exact_cutoff_refuses_the_row():
     result = _declare([pool], [wrong_cutoff])
     assert isinstance(result, NativeScoreBatchRowRefusal)
     assert result.code == "MODEL_NOT_READY"
-    assert result.detail == (
-        "nightly_source_bundle refused: MODEL_NOT_READY: exact-cutoff payoff artifact missing")
+    assert result.detail == "nightly_source_bundle refused: MODEL_NOT_READY"
 
     exact = SimpleNamespace(key=("STR-THRU", 0.5, "2026-01-10"))
     duplicate = _declare([pool], [exact, exact])
     assert isinstance(duplicate, NativeScoreBatchRowRefusal)
     assert duplicate.code == "MODEL_NOT_READY"
-    assert duplicate.detail == (
-        "nightly_source_bundle refused: MODEL_NOT_READY: duplicate exact-cutoff payoff artifact")
+    assert duplicate.detail == "nightly_source_bundle refused: MODEL_NOT_READY"
 
 
 def _real_pool(cutoff, strategy="STR-THRU"):
@@ -136,7 +154,8 @@ def test_assembly_builds_the_analog_query_from_the_panel_row(tmp_path):
     pool = _real_pool("2026-01-08")
     decoy = _real_pool("2026-01-10")
     binding = dataclasses.replace(
-        _stage(tmp_path, [SIZE, GATE]), analog_artifacts={"STR-THRU": (decoy, pool)})
+        _stage(tmp_path, [SIZE, GATE]), analog_artifacts={"STR-THRU": (decoy, pool)},
+        **_release_model_artifacts())
     event = _panel_event(calendar_row=_calendar_row(entry_date="2026-01-08"))
     assembled, refusals = _assemble(binding, [event])
     assert refusals == ()
@@ -150,7 +169,8 @@ def test_assembly_builds_the_analog_query_from_the_panel_row(tmp_path):
 def test_assembly_refuses_when_release_has_no_exact_strategy_pool(tmp_path):
     other = _real_pool("2026-01-08", strategy="STR-OTHER")
     binding = dataclasses.replace(
-        _stage(tmp_path, [SIZE, GATE]), analog_artifacts={"STR-OTHER": (other,)})
+        _stage(tmp_path, [SIZE, GATE]), analog_artifacts={"STR-OTHER": (other,)},
+        **_release_model_artifacts())
     event = _panel_event(calendar_row=_calendar_row(entry_date="2026-01-08"))
     assembled, refusals = _assemble(binding, [event])
     assert assembled == {}
@@ -172,7 +192,8 @@ def test_analog_only_release_with_null_entry_date_refuses_the_row(tmp_path):
 def _declared_recipe(tmp_path, *, snapshot_id, ticker, event_day, expiry):
     pool = _real_pool("2026-01-08")
     binding = dataclasses.replace(
-        _stage(tmp_path, [SIZE, GATE]), analog_artifacts={"STR-THRU": (pool,)})
+        _stage(tmp_path, [SIZE, GATE]), analog_artifacts={"STR-THRU": (pool,)},
+        **_release_model_artifacts())
     event = _event_inputs(
         ticker=ticker, event_date=pd.Timestamp(event_day),
         calendar_row=_calendar_row(ticker=ticker, event_date=event_day,

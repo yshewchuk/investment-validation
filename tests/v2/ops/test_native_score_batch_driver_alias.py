@@ -75,7 +75,7 @@ def _linear_payload(feature_order) -> bytes:
     }, sort_keys=True).encode()
 
 
-def _stage(tmp_path, specs, release_id="r1", rows=None):
+def _stage(tmp_path, specs, release_id="r1", rows=None, include_str_thru_artifacts=True):
     """Stage one binding per ``(role, strategy_id, feature_order)`` spec,
     promote, and return the real, resolved ScoringReleaseBinding. Every
     clock id is "entry-close". ``rows`` (when given) becomes the release's
@@ -157,19 +157,27 @@ def _stage(tmp_path, specs, release_id="r1", rows=None):
     deployment.promote(dep_root, release_id)
     fold_object = (None if fold_cache is None
                    else staged_fold_object(fold_cache, manifest, dep_root))
+    from tests.v2.ops.runup_helpers import native_artifact_rows, write_catalog_with_rows
+
+    strategies = {strategy_id for _, strategy_id, _ in specs}
+    default_rows = native_artifact_rows(tmp_path, strategies | {"STR-THRU"})
     if rows is None:
-        write_catalog(tmp_path, release_id, fold_object)
+        rows = default_rows
     else:
-        _write_catalog(tmp_path, release_id=release_id, rows=rows)
-        if fold_object is not None:
-            catalog_path = tmp_path / "phase5_release.json"
-            body = json.loads(catalog_path.read_text())
-            body["members"].append({
-                "member_id": "tier4_folds:size", "status": "STAGED",
-                "objects": [fold_object]})
-            body["manifest_hash"] = content_hash(
-                {k: v for k, v in body.items() if k != "manifest_hash"})
-            catalog_path.write_text(json.dumps(body, sort_keys=True))
+        rows = list(rows)
+        supplied = {row["member_id"] for row in rows}
+        rows.extend(
+            row for row in default_rows
+            if (
+                row["member_id"].startswith("recalibration_map:")
+                or (
+                    include_str_thru_artifacts
+                    and row["member_id"] == "payoff_line:STR-THRU"
+                )
+            )
+            and row["member_id"] not in supplied
+        )
+    write_catalog_with_rows(tmp_path, release_id, rows, fold_object)
     return resolve_release_binding(tmp_path)
 
 
@@ -459,12 +467,14 @@ def _staged_payoff_line(tmp_path, *, alpha=0.5, cutoff="2026-01-10"):
 
 
 def test_release_backed_bundle_declares_driver_pool_and_payoff_artifact(tmp_path):
-    """A promoted release carrying a verified driver residual pool and payoff
-    line makes the real ``_assemble_one_event``/``build_native_score_inputs``
-    path declare all four SourceBundle fields: the pool under slot ``driver``
-    with its causal recipe, and the payoff artifact selected by the canonical
-    ``(strategy, 0.5, cutoff)`` key with its ``before`` recipe. The declared
-    identities/content are the release's own artifact objects."""
+    """A promoted release carrying a verified residual pool, payoff line,
+    recalibration artifact, and bound cutoff provenance makes the real
+    ``_assemble_one_event``/``build_native_score_inputs`` path declare them:
+    the pool under slot ``driver`` with its causal recipe, the payoff
+    artifact selected by the canonical ``(strategy, 0.5, cutoff)`` key with
+    its ``before`` recipe, the recalibration artifact, and the bound cutoff
+    provenance. The declared identities/content are the release's own
+    artifact objects."""
     driver, driver_row = _staged_driver_pool(tmp_path)
     payoff, payoff_row = _staged_payoff_line(tmp_path, cutoff="2026-01-08")
     binding = _stage(tmp_path, [SIZE, GATE], rows=[driver_row, payoff_row])
@@ -478,8 +488,13 @@ def test_release_backed_bundle_declares_driver_pool_and_payoff_artifact(tmp_path
         "role": "size", "model_id": "m-size-*", "fold": None,
         "content_hash": driver.content_hash}}
     assert model["payoff_artifact"] == payoff
-    assert model["payoff_recipe"] == {"before": "2026-01-08"}
+    assert model["payoff_recipe"] == {"before": "2026-01-08",
+                                      "bound_cutoff": "2026-01-08",
+                                      "recalibration_bound_cutoff": "2026-01-01"}
     assert native_inputs.simulation == {}
+    assert model["recalibration_artifact"] == binding.recalibration_artifacts["STR-THRU"][0]
+    assert native_inputs.context["payoff_artifact_cutoff"] == "2026-01-08"
+    assert native_inputs.context["recalibration_artifact_cutoff"] == "2026-01-01"
 
 
 def test_null_entry_date_refuses_required_str_thru_analog_without_cutoff(tmp_path):
@@ -493,12 +508,13 @@ def test_null_entry_date_refuses_required_str_thru_analog_without_cutoff(tmp_pat
         (event.key, "MISSING_STAGED_INPUT")]
 
 
-def test_release_without_artifacts_ignores_row_markers(tmp_path):
-    """The release is the sole source: a release with no driver-pool or payoff
-    member leaves every declaration absent even when the event's Tier-4 and
-    panel rows carry residual/payoff-like marker values, so request rows can
-    never populate the model block."""
-    binding = _stage(tmp_path, [SIZE, GATE])
+def test_release_without_payoff_artifacts_refuses_despite_row_markers(tmp_path):
+    """The release is the sole source: a release without payoff artifacts
+    refuses the row despite the event's Tier-4 and panel rows carrying
+    residual/payoff-like marker values, so request rows can never populate the
+    model block."""
+    binding = _stage(
+        tmp_path, [SIZE, GATE], rows=[], include_str_thru_artifacts=False)
     event = _event_inputs(
         tier4_row={"pred_abs_move": 0.05,
                    "pred_abs_move_fold_start": "2026-01-01",
@@ -511,9 +527,9 @@ def test_release_without_artifacts_ignores_row_markers(tmp_path):
                    "payoff_artifact": "bogus"},
     )
     assembled, refusals = _assemble(binding, [event])
-    assert refusals == ()
-    _, native_inputs = assembled[event.key]
-    assert native_inputs.model == {}
+    assert not assembled
+    assert len(refusals) == 1
+    assert refusals[0].code == "MODEL_NOT_READY"
 
 
 def test_malformed_driver_pool_refuses_model_not_ready(tmp_path):

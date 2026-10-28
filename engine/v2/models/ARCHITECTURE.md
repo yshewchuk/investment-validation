@@ -173,6 +173,21 @@ size check. Existing callers omitting the ceiling retain their read contract.
 
 `PayoffArtifactLoader` and `RecalibrationArtifactLoader` read artifact files through `read_artifact_bytes` (regular file, at most `MAX_ARTIFACT_BYTES` = 512 MiB, else the loader's "missing artifact" error) and expose `load_bytes(raw, content_hash)`, which verifies `raw` against `content_hash` (hash mismatch refuses, also on a cache hit) and then applies the same parse and validation as `load`.
 
+**Scoring cutoff binding.** A scoring row may bind the latest payoff line,
+payoff surface, or (where scoring applies it) recalibration map for its
+strategy and alpha whose artifact `cutoff` is at or before that row's causal
+cutoff. Eligibility and ordering use the artifact's DATA cutoff, never
+`computed_at`; an artifact after the row cutoff is ineligible. The selected
+cutoffs are recorded in the payoff artifact recipe. When a recalibration
+cutoff is bound, scoring also requires a string requested row cutoff and refuses
+if the bound cutoff is later, even if the recipe omits `before`. When no
+eligible artifact exists, scoring retains its typed
+`MODEL_NOT_READY` refusal; it does not fit or fall back to another source.
+Callers without a recorded bound cutoff retain exact-key matching through the
+normalized payoff key, including date-like `before` values.
+STR-RUNUP retains legacy's raw win-rate behavior and does not apply
+recalibration.
+
 ### Snapshot-pinned D14 monthly datasets
 
 `training.build_d14_dataset` builds only the `implied_t1` and `runup_move`

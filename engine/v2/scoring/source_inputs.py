@@ -1,6 +1,7 @@
 """Build bounded native scoring inputs from answer-free source material."""
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass, field
 from datetime import date
@@ -9,13 +10,17 @@ from typing import Any, Mapping, Sequence
 
 from engine.v2.domain.generation import DISABLED, STRATEGIES
 from engine.v2.foundation import DocumentError
+from engine.v2.foundation.canonical import CONTENT_HASH_PREFIX
 from engine.v2.models.admissible_table import AdmissibleDepthTable
 from engine.v2.models.analog_artifact import BoardAnalogPoolArtifact
 from engine.v2.models.chooser_analog_pool import ChooserAnalogPoolArtifact
 from engine.v2.models.contracts import ModelBinding, ModelRelease
 from engine.v2.models.loader import FrozenInference
 from engine.v2.models.payoff_artifact import PayoffLineArtifact, PayoffSurfaceArtifact
-from engine.v2.models.recalibration_artifact import RecalibrationMapArtifact
+from engine.v2.models.recalibration_artifact import (
+    RecalibrationMapArtifact,
+    serialize_recalibration_artifact,
+)
 from engine.v2.models.residual_artifact import (
     DriverResidualPoolArtifact,
     PairedResidualPoolArtifact,
@@ -178,7 +183,9 @@ _PAYOFF_RECIPE_FIELDS = frozenset({
 # trusting release selection alone). Mutually exclusive with
 # payoff_recipe/payoff_source_rows (the source-rows compatibility path); see
 # `_model_block`.
-_PAYOFF_ARTIFACT_RECIPE_FIELDS = frozenset({"before", "draw_count", "seed"})
+_PAYOFF_ARTIFACT_RECIPE_FIELDS = frozenset({
+    "before", "bound_cutoff", "recalibration_bound_cutoff", "draw_count", "seed",
+})
 _MODEL_RESIDUAL_RECIPE_FIELDS = frozenset({"deciles", "min_pool"})
 # Frozen residual pools (P5-4). Each declared slot names the causal key the
 # request expects; ``content_hash`` optionally pins the exact artifact the
@@ -1156,6 +1163,12 @@ def _with_recalibration_block(bundle: SourceBundle, block: dict[str, Any]) -> di
     artifact = bundle.recalibration_artifact
     if artifact is not None and not isinstance(artifact, RecalibrationMapArtifact):
         raise ValueError("recalibration_artifact must be a RecalibrationMapArtifact")
+    if artifact is not None:
+        content_hash = CONTENT_HASH_PREFIX + hashlib.sha256(
+            serialize_recalibration_artifact(artifact)).hexdigest()
+        if content_hash != artifact.content_hash:
+            raise ValueError(
+                "recalibration_artifact content_hash does not match payload")
     if not block:
         raise ValueError("recalibration_artifact declared without a payoff recipe")
     return {**block, "recalibration_artifact": artifact}
