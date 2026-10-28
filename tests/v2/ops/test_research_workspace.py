@@ -530,3 +530,17 @@ def test_storage_failures_leave_the_entry_points_as_typed_refusals(prod, monkeyp
     assert caught.value.code == "WORKSPACE_REFUSED"
     assert caught.value.problem.details.get("reason") == "storage_failure"
     assert caught.value.problem.details.get("cause") == "ValueError"
+
+
+def test_second_create_of_the_same_name_refuses_and_leaves_the_first_intact(prod):
+    first = _create(prod, "same")
+    identity_before = first.identity
+    with pytest.raises(OpsError) as caught:
+        _create(prod, "same")
+    assert caught.value.code == "WORKSPACE_REFUSED"
+    assert caught.value.problem.details.get("reason") == "root_not_empty"
+    assert (prod.tmp / "same" / ".research_workspace").exists()
+    first.close()
+    with _reopen(prod, "same") as again:
+        assert again.identity == identity_before
+    assert not [p for p in prod.tmp.iterdir() if p.name.startswith(".creating-")]

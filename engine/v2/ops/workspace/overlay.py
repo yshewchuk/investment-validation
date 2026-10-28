@@ -15,6 +15,7 @@ when the open-time closure, the stored identity or the pin disagree).
 """
 from __future__ import annotations
 
+import errno
 import functools
 import json
 import os
@@ -22,6 +23,7 @@ import shutil
 import sqlite3
 import stat
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -305,17 +307,6 @@ class ResearchWorkspace:
         self.close()
 
 
-def _clear(root: Path, created: bool) -> None:
-    if created:
-        shutil.rmtree(root, ignore_errors=True)
-        return
-    for child in root.iterdir():
-        if child.is_dir() and not child.is_symlink():
-            shutil.rmtree(child, ignore_errors=True)
-        else:
-            child.unlink(missing_ok=True)
-
-
 def _check_arguments(root, production_catalog, production_store, *strings) -> None:
     """Both entry points refuse wrongly typed arguments with a typed refusal."""
     paths = (root, production_catalog, production_store)
@@ -333,20 +324,20 @@ def create_workspace(root, *, production_catalog, production_store, snapshot_id:
     base = _checked_root(root, catalog, store_root)
     if base.exists() and (not base.is_dir() or any(base.iterdir())):
         raise _refuse("root_not_empty")
-    created, paths = not base.exists(), _paths(base)
     _log(f"stage=create start snapshot={snapshot_id}")
     source_conn, conn = _open_readonly(catalog), None
+    staging = Path(tempfile.mkdtemp(dir=base.parent, prefix=".creating-"))
     try:
         source_store = ArtifactStore(store_root)
         closure = verify_snapshot_closure(source_conn, source_store, snapshot_id, manifest_hash,
                                           deep=deep)
         snapshot = Repository(_BoundedConn(source_conn)).resolve(snapshot_id)
-        base.mkdir(mode=0o700, exist_ok=True)
-        os.chmod(base, 0o700)
-        (base / MARKER).write_text(SCHEMA_VERSION + "\n", encoding="utf-8")
+        staged_paths = _paths(staging)
+        os.chmod(staging, 0o700)
+        (staging / MARKER).write_text(SCHEMA_VERSION + "\n", encoding="utf-8")
         for name in _DIRECTORIES:
-            (base / name).mkdir(mode=0o700)
-        conn, store = open_catalog(paths.catalog, clock=clock), ArtifactStore(paths.store)
+            (staging / name).mkdir(mode=0o700)
+        conn, store = open_catalog(staged_paths.catalog, clock=clock), ArtifactStore(staged_paths.store)
         pin = store.publish_bytes(dumps(snapshot).encode("utf-8"), schema_ref=PIN_SCHEMA_REF)
         with transaction(conn):
             register_artifact(conn, pin, None, clock)
@@ -354,21 +345,31 @@ def create_workspace(root, *, production_catalog, production_store, snapshot_id:
                     "manifest_hash": manifest_hash, "identity_digest": closure.identity_digest,
                     "production_catalog": str(catalog), "production_store": str(store_root),
                     "pin_artifact_id": pin.artifact_id}
-        staged = base / (IDENTITY_FILE + ".tmp")
+        staged = staging / (IDENTITY_FILE + ".tmp")
         fd = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         try:
             os.write(fd, json.dumps(identity, sort_keys=True).encode("utf-8"))
             os.fsync(fd)
         finally:
             os.close(fd)
-        os.replace(staged, base / IDENTITY_FILE)
-        fsync_directory(base)
+        os.replace(staged, staging / IDENTITY_FILE)
+        fsync_directory(staging)
+        conn.close()
+        conn = None
+        try:
+            os.rename(staging, base)  # atomic; replaces only an empty directory, never a peer's workspace
+        except OSError as exc:
+            if exc.errno in (errno.ENOTEMPTY, errno.EEXIST):
+                raise _refuse("root_not_empty") from None
+            raise
+        fsync_directory(base.parent)
+        paths = _paths(base)
+        conn, store = open_catalog(paths.catalog, clock=clock), ArtifactStore(paths.store)
     except BaseException:
         source_conn.close()
         if conn is not None:
             conn.close()
-        if base.exists():
-            _clear(base, created)
+        shutil.rmtree(staging, ignore_errors=True)  # only this caller's own staging directory
         raise
     _log("stage=create done")
     return ResearchWorkspace(paths, identity, closure, conn, store, source_conn, source_store)
