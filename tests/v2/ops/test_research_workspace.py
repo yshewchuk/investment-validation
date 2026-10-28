@@ -27,6 +27,7 @@ from engine.v2.ops import executor  # noqa: E402
 from engine.v2.ops.catalog import register_artifact, transaction  # noqa: E402
 from engine.v2.ops.errors import OpsError  # noqa: E402
 from engine.v2.ops.supervisor import Service  # noqa: E402
+from engine.v2.ops.workspace import closure as closure_module  # noqa: E402
 from engine.v2.ops.workspace.guard import refuse_workspace_execution  # noqa: E402
 from engine.v2.ops.workspace.overlay import create_workspace, open_workspace  # noqa: E402
 from tests.data_scan_support import (  # noqa: E402
@@ -299,3 +300,18 @@ def test_read_pins_land_only_in_the_workspace(prod):
             ws.record_read_pin("", {}, clock=prod.clock)
         assert _details(caught) == ("WORKSPACE_REFUSED", "pin_name_invalid")
     assert _state(prod) == before
+
+
+def test_closure_byte_and_row_caps_refuse_with_typed_reasons(prod, monkeypatch):
+    # The probes query the migrated columns (data_fragments.input_receipt_refs_json from migration 2,
+    # data_price_captures.contract_id from migration 9): a zero budget must refuse, not raise SQL errors.
+    monkeypatch.setattr(closure_module, "_MAX_ROW_BYTES", 0)
+    with pytest.raises(DataError) as caught:
+        _create(prod, "bytes")
+    assert _details(caught) == ("SNAPSHOT_CLOSURE_BROKEN", "closure_bytes_over_cap")
+    monkeypatch.setattr(closure_module, "_MAX_ROW_BYTES", 256 * 1024 * 1024)
+    monkeypatch.setattr(closure_module, "_MAX_ROWS", 0)
+    with pytest.raises(DataError) as caught:
+        _create(prod, "rows")
+    assert _details(caught) == ("SNAPSHOT_CLOSURE_BROKEN", "closure_rows_over_cap")
+    assert not (prod.tmp / "bytes").exists() and not (prod.tmp / "rows").exists()
