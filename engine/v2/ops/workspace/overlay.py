@@ -223,7 +223,9 @@ def _read_identity(root: Path) -> dict:
         if len(data) > _MAX_METADATA_BYTES:
             raise ValueError
         identity = json.loads(data.decode("utf-8"))
-        if not isinstance(identity, dict) or any(key not in identity for key in _IDENTITY_KEYS):
+        if (not isinstance(identity, dict) or any(key not in identity for key in _IDENTITY_KEYS)
+                or any(not isinstance(identity[key], str)
+                       for key in _IDENTITY_KEYS if key != "schema_version")):
             raise ValueError
     except (OSError, ValueError):
         raise _refuse("identity_unreadable") from None

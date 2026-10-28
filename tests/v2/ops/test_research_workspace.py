@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import json
 import os
 import sqlite3
 import sys
@@ -29,7 +30,11 @@ from engine.v2.ops.errors import OpsError  # noqa: E402
 from engine.v2.ops.supervisor import Service  # noqa: E402
 from engine.v2.ops.workspace import closure as closure_module  # noqa: E402
 from engine.v2.ops.workspace.guard import refuse_workspace_execution  # noqa: E402
-from engine.v2.ops.workspace.overlay import create_workspace, open_workspace  # noqa: E402
+from engine.v2.ops.workspace.overlay import (  # noqa: E402
+    IDENTITY_FILE,
+    create_workspace,
+    open_workspace,
+)
 from tests.data_scan_support import (  # noqa: E402
     RECEIPT,
     catalog_and_store,
@@ -389,3 +394,14 @@ def test_capture_rows_change_the_closure_identity(prod):
     with _create(prod, "after") as ws:
         after = ws.closure.identity_digest
     assert before != after
+
+
+def test_reopen_refuses_malformed_identity_field_types(prod):
+    with _create(prod, "typed") as ws:
+        identity_path = ws.paths.root / IDENTITY_FILE
+    identity = json.loads(identity_path.read_text())
+    identity["snapshot_id"] = ["not", "a", "string"]
+    identity_path.write_text(json.dumps(identity))
+    with pytest.raises(OpsError) as caught:
+        _reopen(prod, "typed")
+    assert _details(caught) == ("WORKSPACE_REFUSED", "identity_unreadable")
