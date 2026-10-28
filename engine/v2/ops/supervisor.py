@@ -1702,10 +1702,20 @@ class Service:
             overlay_read_set(launch.root, destination)
 
     def _reuse_staged_checkpoint(self, claim, launch=None):
-        schema = "receipt.v1.0" if claim.spec.kind == "artifact_check" else "legacy_action.v1.0"
+        if claim.spec.kind == "artifact_check":
+            schema = "receipt.v1.0"
+        elif claim.spec.kind == "nightly_preview_inputs":
+            schema = "nightly_preview_input.v1.0"
+        else:
+            schema = "legacy_action.v1.0"
         # Resolve without materializing (B1a): a cache hit here never launches
         # the worker, so nothing is staged or recorded for this attempt.
-        resolved = resolve_bindings(self.conn, self.store, claim.spec)
+        max_artifact_bytes = None
+        if claim.spec.kind == "nightly_preview_inputs":
+            from engine.v2.ops.nightly_preview_inputs import MAX_INPUT_BYTES
+            max_artifact_bytes = MAX_INPUT_BYTES
+        resolved = resolve_bindings(self.conn, self.store, claim.spec,
+                                    max_artifact_bytes=max_artifact_bytes)
         cache_key = cache_identity(
             kind=claim.spec.kind,
             inputs=cache_inputs(resolved_inputs_hash(claim.spec, resolved), launch),

@@ -14,7 +14,7 @@ from types import SimpleNamespace
 import pytest
 
 import engine.v2.ops.nightly_preview_inputs as nightly_preview_inputs
-from engine.v2.ops import executor, input_bindings
+from engine.v2.ops import executor, input_bindings, supervisor
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.nightly import build_legacy_job_requests, build_nightly_plan
 from engine.v2.ops.nightly_preview_inputs import run
@@ -206,3 +206,37 @@ def test_oversized_registered_preview_binding_refuses_before_verification(monkey
     assert oversized.value.code == "RESOURCE_LIMIT_EXCEEDED"
     assert oversized.value.problem.details == {"name": "score.json", "limit_bytes": 3,
                                                "observed_bytes": 4}
+
+
+def test_preview_checkpoint_reuse_passes_cap_and_uses_output_schema(monkeypatch):
+    captured = {}
+    resolved = {"score.json": SimpleNamespace(name="score.json", artifact_id="artifact")}
+
+    def resolve(conn, store, spec, *, max_artifact_bytes=None):
+        captured["max_artifact_bytes"] = max_artifact_bytes
+        return resolved
+
+    def make_cache_key(**values):
+        captured["identity"] = values
+        return "preview-cache-key"
+
+    def reuse(conn, store, cache_key):
+        captured["lookup_key"] = cache_key
+        return None
+
+    monkeypatch.setattr(supervisor, "resolve_bindings", resolve)
+    monkeypatch.setattr(supervisor, "cache_identity", make_cache_key)
+    monkeypatch.setattr(supervisor, "reuse", reuse)
+    spec = SimpleNamespace(
+        kind="nightly_preview_inputs",
+        parameters={"expected_ids": ("nightly_preview_inputs",),
+                    "snapshot_id": _SNAPSHOT_ID,
+                    "input_bindings": {"score.json": "job_score#legacy_score"}},
+        input_refs=(), implementation_ref="impl", environment_ref="env")
+    claim = SimpleNamespace(spec=spec)
+    service = SimpleNamespace(conn=object(), store=object())
+
+    assert supervisor.Service._reuse_staged_checkpoint(service, claim, None) is False
+    assert captured["max_artifact_bytes"] == nightly_preview_inputs.MAX_INPUT_BYTES
+    assert captured["identity"]["schema"] == "nightly_preview_input.v1.0"
+    assert captured["lookup_key"] == "preview-cache-key"

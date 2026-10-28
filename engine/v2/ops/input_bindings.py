@@ -59,8 +59,9 @@ def resolve_bindings(conn, store, spec, *, max_artifact_bytes=None):
     """Resolve every ``input_bindings`` entry to its committed artifact.
 
     Pure read: nothing is recorded and nothing is copied into staging. Raises
-    ``OpsError`` (``INPUT_CHANGED`` or ``VALIDATION_FAILED``) on the first
-    binding that is not admitted; never a bare ``ValueError``.
+    ``OpsError`` (``INPUT_CHANGED`` or ``VALIDATION_FAILED``) for an inadmissible
+    binding, or ``RESOURCE_LIMIT_EXCEEDED`` when the optional per-artifact size
+    ceiling is exceeded; never a bare ``ValueError``.
     """
     bindings = spec.parameters.get("input_bindings") or {}
     admitted_refs = set(spec.input_refs)
