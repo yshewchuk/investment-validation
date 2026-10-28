@@ -33,6 +33,7 @@ SNAPSHOT_CLOSURE_SCHEMA = "snapshot_closure.v1.0"
 _MAX_CHAIN = 100_000
 _MAX_ROWS = 2_000_000
 _MAX_RECEIPTS = 1_000
+_MAX_LINEAGE = 10_000
 _MAX_ROW_BYTES = 256 * 1024 * 1024
 _PROGRESS_SECONDS = 30.0
 
@@ -134,6 +135,8 @@ def _lineage(conn, receipt_ids) -> tuple[str, ...]:
                 raise _broken("lineage_receipt_missing", receipt_id=current)
             hops.add(current)
             found.add(current)
+            if len(found) > _MAX_LINEAGE:
+                raise _broken("closure_rows_over_cap", table="data_receipt_lineage")
     return tuple(sorted(found))
 
 
@@ -161,10 +164,14 @@ def _coverage_rows(conn, snapshot_id: str) -> list:
 
 def _capture_rows(conn, receipt_ids) -> list:
     rows: list = []
+    used = 0
     for receipt_id in receipt_ids:
-        _bound_bytes(conn, "SELECT SUM(LENGTH(CAST(capture_id || ticker || source_kind || source_hash "
-                     "|| retrieved_at || outcome || contract_id AS BLOB))) FROM data_price_captures "
-                     "WHERE receipt_id = ?", (receipt_id,), "data_price_captures")
+        used += conn.execute(
+            "SELECT COALESCE(SUM(LENGTH(CAST(capture_id || ticker || source_kind || source_hash "
+            "|| retrieved_at || outcome || contract_id AS BLOB))), 0) FROM data_price_captures "
+            "WHERE receipt_id = ?", (receipt_id,)).fetchone()[0]
+        if used > _MAX_ROW_BYTES:
+            raise _broken("closure_bytes_over_cap", table="data_price_captures")
         cursor = conn.execute("SELECT * FROM data_price_captures "
                               "WHERE receipt_id = ? ORDER BY capture_id", (receipt_id,))
         rows += [list(row) for row in cursor.fetchmany(_MAX_ROWS + 1 - len(rows))]
