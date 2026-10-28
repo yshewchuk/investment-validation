@@ -210,6 +210,15 @@ def test_missing_commit_receipt_refuses(prod):
     assert _details(caught) == ("SNAPSHOT_CLOSURE_BROKEN", "commit_receipt_missing")
 
 
+def test_commit_receipt_ref_mismatch_refuses(prod):
+    _rewrite_without_triggers(prod, "data_snapshots",
+                              "UPDATE data_snapshots SET commit_receipt_ref = 'not-the-receipt' "
+                              "WHERE snapshot_id = ?", (prod.snap.snapshot_id,))
+    with pytest.raises(DataError) as caught:
+        _create(prod)
+    assert _details(caught) == ("SNAPSHOT_CLOSURE_BROKEN", "commit_receipt_ref_mismatch")
+
+
 def test_roots_and_paths_are_refused_with_typed_reasons(prod):
     (prod.tmp / "real").mkdir()
     (prod.tmp / "link").symlink_to(prod.tmp / "real")

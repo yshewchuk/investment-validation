@@ -88,7 +88,7 @@ def _bound_fragments(conn, snapshot_id: str) -> None:
     _bound_bytes(
         conn,
         "SELECT SUM(LENGTH(CAST(d.dataset_version_id || d.contract_id || d.manifest_hash "
-        "|| d.evidence_json || COALESCE(d.parent_dataset_version_id, '') "
+        "|| d.evidence_json || d.partition_logical_hashes_json || COALESCE(d.parent_dataset_version_id, '') "
         "AS BLOB))) FROM data_dataset_versions d WHERE d.dataset_version_id IN "
         "(SELECT dataset_version_id FROM data_snapshot_tables WHERE snapshot_id = ?)",
         (snapshot_id,), "data_dataset_versions")
@@ -104,6 +104,10 @@ def _bound_fragments(conn, snapshot_id: str) -> None:
         "|| source_priority_version || knowledge_mode_by_table_json || commit_receipt_ref || registered_at "
         "|| COALESCE(parent_snapshot_id, '') AS BLOB))) FROM data_snapshots WHERE snapshot_id = ?",
         (snapshot_id,), "data_snapshots")
+    _bound_bytes(
+        conn,
+        "SELECT SUM(LENGTH(CAST(snapshot_id || table_name || dataset_version_id AS BLOB))) "
+        "FROM data_snapshot_tables WHERE snapshot_id = ?", (snapshot_id,), "data_snapshot_tables")
     tables = conn.execute("SELECT COUNT(*) FROM data_snapshot_tables WHERE snapshot_id = ?",
                           (snapshot_id,)).fetchone()[0]
     if tables > _MAX_RECEIPTS:
@@ -161,6 +165,12 @@ def _commit_receipts(conn, snapshot_id: str) -> tuple[str, ...]:
         raise _broken("commit_receipt_missing", snapshot_id=snapshot_id)
     if len(rows) > _MAX_RECEIPTS:
         raise _broken("closure_rows_over_cap", table="data_import_receipts")
+    ref = conn.execute("SELECT LENGTH(CAST(commit_receipt_ref AS BLOB)), "
+                       "CASE WHEN LENGTH(CAST(commit_receipt_ref AS BLOB)) > ? THEN NULL "
+                       "ELSE commit_receipt_ref END FROM data_snapshots WHERE snapshot_id = ?",
+                       (_MAX_PROBLEM_BYTES, snapshot_id)).fetchone()
+    if ref is None or ref[1] not in {row["receipt_id"] for row in rows}:
+        raise _broken("commit_receipt_ref_mismatch", snapshot_id=snapshot_id)
     return tuple(row["receipt_id"] for row in rows)
 
 
