@@ -189,9 +189,16 @@ def _open_readonly(catalog: Path) -> sqlite3.Connection:
 
 def _read_identity(root: Path) -> dict:
     try:
-        if os.lstat(root / IDENTITY_FILE).st_size > _MAX_METADATA_BYTES:
+        fd = os.open(root / IDENTITY_FILE, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise ValueError
+            data = os.read(fd, _MAX_METADATA_BYTES + 1)
+        finally:
+            os.close(fd)
+        if len(data) > _MAX_METADATA_BYTES:
             raise ValueError
-        identity = json.loads((root / IDENTITY_FILE).read_text(encoding="utf-8"))
+        identity = json.loads(data.decode("utf-8"))
         if not isinstance(identity, dict) or any(key not in identity for key in _IDENTITY_KEYS):
             raise ValueError
     except (OSError, ValueError):
