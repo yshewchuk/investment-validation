@@ -32,6 +32,7 @@ __all__ = ["SNAPSHOT_CLOSURE_SCHEMA", "SnapshotClosure", "verify_snapshot_closur
 SNAPSHOT_CLOSURE_SCHEMA = "snapshot_closure.v1.0"
 _MAX_CHAIN = 100_000
 _MAX_ROWS = 2_000_000
+_MAX_RECEIPTS = 1_000
 _PROGRESS_SECONDS = 30.0
 
 
@@ -107,9 +108,12 @@ def _committed(conn, receipt_id: str) -> bool:
 def _commit_receipts(conn, snapshot_id: str) -> tuple[str, ...]:
     rows = conn.execute(
         "SELECT receipt_id FROM data_import_receipts WHERE result_snapshot_id = ? "
-        "AND status = 'committed' ORDER BY receipt_id", (snapshot_id,)).fetchall()
+        "AND status = 'committed' ORDER BY receipt_id LIMIT ?",
+        (snapshot_id, _MAX_RECEIPTS + 1)).fetchall()
     if not rows:
         raise _broken("commit_receipt_missing", snapshot_id=snapshot_id)
+    if len(rows) > _MAX_RECEIPTS:
+        raise _broken("closure_rows_over_cap", table="data_import_receipts")
     return tuple(row["receipt_id"] for row in rows)
 
 
