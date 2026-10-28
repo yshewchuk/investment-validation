@@ -867,7 +867,8 @@ def computed_moves_command(args, root, conn, clock, *, history=None, include_sou
     ``history`` is an optional ``(cache, fetch)`` pair with the shape
     ``tier1_yfinance_history_fetcher`` returns (a pinned manifest's fetcher);
     default is the newest-wins Tier-1 rule. ``include_source_bounds`` is passed
-    to the refresh unchanged (default False keeps the CLI's output bytes).
+    to the refresh (default False). The report always carries ``parent_snapshot_id``,
+    the plan's parent read under the supervisor lock; other behaviour is unchanged.
     """
     from engine.v2.data.repository import Repository
     from engine.v2.ops import computed_moves_store

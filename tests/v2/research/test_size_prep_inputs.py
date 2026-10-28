@@ -3,6 +3,7 @@ import gzip
 import hashlib
 import json
 from copy import deepcopy
+from pathlib import Path
 
 import pytest
 
@@ -21,6 +22,9 @@ from tests.v2.ops.test_v2_ops_computed_moves_store import (
 @pytest.fixture(autouse=True)
 def _small_bar(monkeypatch):
     monkeypatch.setattr(computed_moves_store, "MIN_SCOREABLE", 5)
+
+
+_PRODUCTION = (Path("/stand-in-production-root"),)
 
 
 def _put(source_root, ticker, key, fetched_at, body):
@@ -112,7 +116,8 @@ def test_generate_bounds_writes_only_the_write_root_and_labels_provenance(source
     root, parent = workspace
     manifest = prep.build_manifest(source_root, session_ceiling=_AS_OF, tickers=["AAAA"])
     source_before = _tree(source_root)
-    record = prep.generate_bounds(root, source_root=source_root, manifest=manifest, scope="shadow", as_of=_AS_OF)
+    record = prep.generate_bounds(root, source_root=source_root, manifest=manifest, scope="shadow", as_of=_AS_OF,
+                                  production_roots=_PRODUCTION)
     assert _tree(source_root) == source_before
     assert record["label"] == "reconstructed"
     assert record["refresh_noop"] is False
@@ -133,14 +138,14 @@ def test_generate_bounds_refusals_happen_before_any_write(source_root, workspace
     root, _ = workspace
     manifest = prep.build_manifest(source_root, session_ceiling=_AS_OF, tickers=["AAAA"])
     _refusal(lambda: prep.generate_bounds(root, source_root=source_root, manifest=manifest, scope="shadow",
-                                          as_of="2024-02-06"), "INVALID_REQUEST")
+                                          as_of="2024-02-06", production_roots=_PRODUCTION), "INVALID_REQUEST")
     empty = tmp_path / "empty"
     empty.mkdir()
     _refusal(lambda: prep.generate_bounds(empty, source_root=source_root, manifest=manifest, scope="shadow",
-                                          as_of=_AS_OF), "INVALID_REQUEST")
+                                          as_of=_AS_OF, production_roots=_PRODUCTION), "INVALID_REQUEST")
     (source_root / "data/raw/fetch/yfinance/aa/aa02.body.gz").write_bytes(gzip.compress(b"x", mtime=0))
     _refusal(lambda: prep.generate_bounds(root, source_root=source_root, manifest=manifest, scope="shadow",
-                                          as_of=_AS_OF), "INPUT_CHANGED")
+                                          as_of=_AS_OF, production_roots=_PRODUCTION), "INPUT_CHANGED")
     assert not (root / "size_prep").exists() and list(empty.iterdir()) == []
 
 
@@ -177,7 +182,7 @@ def test_generate_bounds_refuses_unpinned_targets_without_committing(source_root
                         lambda *a, **k: (["AAAA", "CCCC"], {}))
     manifest = prep.build_manifest(source_root, session_ceiling=_AS_OF, tickers=["AAAA"])
     _refusal(lambda: prep.generate_bounds(root, source_root=source_root, manifest=manifest, scope="shadow",
-                                          as_of=_AS_OF), "SOURCE_NOT_FOUND")
+                                          as_of=_AS_OF, production_roots=_PRODUCTION), "SOURCE_NOT_FOUND")
     conn = open_catalog(root / "catalog.sqlite", clock=FakeClock())
     try:
         assert _head_row(conn)["snapshot_id"] == parent
@@ -199,8 +204,10 @@ def test_missing_source_root_and_oversized_sidecar_are_typed_refusals(source_roo
 def test_rerun_after_commit_is_marked_noop_and_still_proves_bounds(source_root, workspace):
     root, _ = workspace
     manifest = prep.build_manifest(source_root, session_ceiling=_AS_OF, tickers=["AAAA"])
-    first = prep.generate_bounds(root, source_root=source_root, manifest=manifest, scope="shadow", as_of=_AS_OF)
-    second = prep.generate_bounds(root, source_root=source_root, manifest=manifest, scope="shadow", as_of=_AS_OF)
+    first = prep.generate_bounds(root, source_root=source_root, manifest=manifest, scope="shadow", as_of=_AS_OF,
+                                 production_roots=_PRODUCTION)
+    second = prep.generate_bounds(root, source_root=source_root, manifest=manifest, scope="shadow", as_of=_AS_OF,
+                                  production_roots=_PRODUCTION)
     assert second["refresh_noop"] is True
     assert second["source_snapshot_id"] == second["bounds_snapshot_id"] == first["bounds_snapshot_id"]
 
@@ -221,7 +228,8 @@ def test_a_stand_in_production_root_is_never_opened_or_changed(source_root, work
     assert before
     root, _ = workspace
     manifest = prep.build_manifest(source_root, session_ceiling=_AS_OF, tickers=["AAAA"])
-    record = prep.generate_bounds(root, source_root=source_root, manifest=manifest, scope="shadow", as_of=_AS_OF)
+    record = prep.generate_bounds(root, source_root=source_root, manifest=manifest, scope="shadow", as_of=_AS_OF,
+                                  production_roots=[production])
     assert _digest(production) == before
     assert not any(p.is_relative_to(production) for p in (root / "size_prep").parents)
     assert record["bounds_snapshot_id"] != record["source_snapshot_id"]
@@ -230,5 +238,22 @@ def test_a_stand_in_production_root_is_never_opened_or_changed(source_root, work
     other.mkdir()
     (other / "catalog.sqlite").symlink_to(production / "catalog.sqlite")
     _refusal(lambda: prep.generate_bounds(other, source_root=source_root, manifest=manifest, scope="shadow",
-                                          as_of=_AS_OF), "INVALID_REQUEST")
+                                          as_of=_AS_OF, production_roots=[production]), "INVALID_REQUEST")
     assert _digest(production) == before
+
+
+def test_write_root_related_to_a_production_root_is_refused(source_root, workspace, tmp_path):
+    root, _ = workspace
+    manifest = prep.build_manifest(source_root, session_ceiling=_AS_OF, tickers=["AAAA"])
+    base = dict(source_root=source_root, manifest=manifest, scope="shadow", as_of=_AS_OF)
+    for production in ([root], [root.parent], [root / "sub"], []):
+        _refusal(lambda: prep.generate_bounds(root, production_roots=production, **base), "INVALID_REQUEST")
+    link = tmp_path / "link"
+    link.symlink_to(root)
+    _refusal(lambda: prep.generate_bounds(link, production_roots=_PRODUCTION, **base), "INVALID_REQUEST")
+    assert not (root / "size_prep").exists()
+
+
+def test_unhashable_ticker_entries_are_a_typed_refusal(source_root):
+    _refusal(lambda: prep.build_manifest(source_root, session_ceiling=_AS_OF, tickers=[["AAAA"]]), "INVALID_REQUEST")
+    _refusal(lambda: prep.build_manifest(source_root, session_ceiling=_AS_OF, tickers=[{"a": 1}]), "INVALID_REQUEST")

@@ -6,6 +6,7 @@ import os
 import stat
 import zlib
 import sys
+import tempfile
 import time
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -15,7 +16,7 @@ from engine.data.fetch import CachedEntry
 from engine.v2.data.repository import Repository
 from engine.v2.data.computed_move_bounds import TABLE
 from engine.v2.foundation import ArtifactStore, SystemClock, canonical_json, content_hash
-from engine.v2.ops.catalog import connect
+from engine.v2.ops.bootstrap import open_catalog
 from engine.v2.ops.errors import fail
 
 MANIFEST_VERSION = "tier1_history_manifest.v1"
@@ -90,8 +91,9 @@ def _identity(manifest):
 def build_manifest(source_root, *, session_ceiling, tickers):
     """Pin the entry the existing Tier-1 rule would pick for each explicit ticker."""
     _day(session_ceiling)
-    if (type(tickers) is not list or not tickers or len(set(tickers)) != len(tickers)
-            or any(type(t) is not str or not t or t != t.strip() for t in tickers)):
+    if (type(tickers) is not list or not tickers
+            or any(type(t) is not str or not t or t != t.strip() for t in tickers)
+            or len(set(tickers)) != len(tickers)):
         raise fail("INVALID_REQUEST", "explicit unique ticker list required")
     cache = {}
     for entry in _entries(source_root):
@@ -183,26 +185,56 @@ def _write_record(write_root, record):
     directory = Path(write_root) / "size_prep"
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / ("provenance-" + record["record_id"].split(":", 1)[1] + ".json")
-    staging = path.with_name(path.name + ".tmp-" + str(os.getpid()))
-    staging.write_text(canonical_json(record))
-    os.replace(staging, path)
+    descriptor, name = tempfile.mkstemp(dir=directory, prefix=path.name + ".tmp-")
+    try:
+        with os.fdopen(descriptor, "w") as handle:
+            handle.write(canonical_json(record))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(name, path)
+    except BaseException:
+        Path(name).unlink(missing_ok=True)
+        raise
+    directory_fd = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
 
 
-def generate_bounds(write_root, *, source_root, manifest, scope, as_of):
-    """Refresh the catalog in ``write_root`` with source bounds from pinned inputs; return the provenance record."""
+def _related(left, right):
+    return left == right or left in right.parents or right in left.parents
+
+
+def _checked_write_root(write_root, production_roots):
+    """Literal path equals its realpath and is unrelated to every named production root.
+
+    TODO: consolidate with the research workspace's root check (PR #1506 ``_checked_root``) once merged.
+    """
+    literal = Path(os.path.abspath(write_root))
+    if Path(os.path.realpath(literal)) != literal:
+        raise fail("INVALID_REQUEST", "the write root must not traverse a symlink")
+    production = [Path(os.path.realpath(p)) for p in production_roots]
+    if not production or any(_related(literal, p) for p in production):
+        raise fail("INVALID_REQUEST", "the write root must name production roots and be unrelated to each")
+    return literal
+
+
+def generate_bounds(write_root, *, source_root, manifest, scope, as_of, production_roots):
+    """Refresh the catalog in ``write_root`` (unrelated to every ``production_roots`` entry) with source bounds from pinned inputs; return the provenance record."""
     from engine.v2.ops.cli import computed_moves_command
 
     validate_manifest(manifest)
     if as_of != manifest["session_ceiling"]:
         raise fail("INVALID_REQUEST", "as_of must equal the manifest session ceiling")
-    root = Path(write_root).resolve()
+    root = _checked_write_root(write_root, production_roots)
     catalog = root / "catalog.sqlite"
     if not catalog.is_file() or catalog.resolve().parent != root:
         raise fail("INVALID_REQUEST", "catalog.sqlite must exist directly inside the write root")
     started = time.monotonic()
     print("[size-prep] bounds start entries=" + str(len(manifest["entries"])), file=sys.stderr)
     history = pinned_history_fetcher(source_root, manifest, strict=True)
-    conn = connect(str(catalog), must_exist=True)
+    conn = open_catalog(catalog, clock=SystemClock())
     try:
         args = SimpleNamespace(source_root=Path(source_root), scope=scope, as_of=as_of, dry_run=False)
         report = computed_moves_command(args, root, conn, SystemClock(), history=history, include_source_bounds=True)
