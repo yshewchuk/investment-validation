@@ -1,5 +1,6 @@
 """Pinned Tier-1 manifest, write-root bounds generation and reconstructed provenance (synthetic data only)."""
 import gzip
+import hashlib
 import json
 from copy import deepcopy
 
@@ -202,3 +203,32 @@ def test_rerun_after_commit_is_marked_noop_and_still_proves_bounds(source_root, 
     second = prep.generate_bounds(root, source_root=source_root, manifest=manifest, scope="shadow", as_of=_AS_OF)
     assert second["refresh_noop"] is True
     assert second["source_snapshot_id"] == second["bounds_snapshot_id"] == first["bounds_snapshot_id"]
+
+
+def _digest(root):
+    return {name: hashlib.sha256((root / name).read_bytes()).hexdigest() for name, _ in _tree(root)}
+
+
+def test_a_stand_in_production_root_is_never_opened_or_changed(source_root, workspace, tmp_path):
+    """A second, fully built catalog plays production; generation reads/writes only the given write root."""
+    production = tmp_path / "production"
+    production.mkdir()
+    clock = FakeClock()
+    conn = open_catalog(production / "catalog.sqlite", clock=clock)
+    _build_parent(conn, clock, ArtifactStore(production), events_rows=[_event_row("AAAA", day) for day in _EVENT_DAYS])
+    conn.close()
+    before = _digest(production)
+    assert before
+    root, _ = workspace
+    manifest = prep.build_manifest(source_root, session_ceiling=_AS_OF, tickers=["AAAA"])
+    record = prep.generate_bounds(root, source_root=source_root, manifest=manifest, scope="shadow", as_of=_AS_OF)
+    assert _digest(production) == before
+    assert not any(p.is_relative_to(production) for p in (root / "size_prep").parents)
+    assert record["bounds_snapshot_id"] != record["source_snapshot_id"]
+    # the strict-confinement guard: a write root that is not the catalog's own directory is refused
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / "catalog.sqlite").symlink_to(production / "catalog.sqlite")
+    _refusal(lambda: prep.generate_bounds(other, source_root=source_root, manifest=manifest, scope="shadow",
+                                          as_of=_AS_OF), "INVALID_REQUEST")
+    assert _digest(production) == before
