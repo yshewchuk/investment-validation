@@ -162,6 +162,9 @@ def _checked_root(root, catalog: Path, store_root: Path) -> Path:
 
 
 def _check_layout(paths: WorkspacePaths, production_catalog: Path) -> None:
+    root_info = _lstat(paths.root)
+    if root_info is not None and stat.S_IMODE(root_info.st_mode) & 0o077:
+        raise _refuse("layout_invalid", path=paths.root.name)
     for directory in (paths.root, paths.store, paths.scratch, paths.output):
         info = _lstat(directory)
         if info is None or not stat.S_ISDIR(info.st_mode):
@@ -271,6 +274,7 @@ def create_workspace(root, *, production_catalog, production_store, snapshot_id:
                                           deep=deep)
         snapshot = Repository(source_conn).resolve(snapshot_id)
         base.mkdir(mode=0o700, exist_ok=True)
+        os.chmod(base, 0o700)
         (base / MARKER).write_text(SCHEMA_VERSION + "\n", encoding="utf-8")
         for name in _DIRECTORIES:
             (base / name).mkdir(mode=0o700)
