@@ -112,8 +112,6 @@ def pack_size_registration(store, document):
 def hydrate_size_registration(store, compact_document):
     """Verify referenced CAS shards and return the logical registration object."""
     size_registration_artifact_bytes(compact_document)
-    if not isinstance(compact_document, dict):
-        raise fail("EXPERIMENT_IDENTITY_CONFLICT", "SIZE registration envelope is invalid")
     artifacts = compact_document.get("size_artifacts")
     if not isinstance(artifacts, dict):
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "SIZE registration artifact map is invalid")
