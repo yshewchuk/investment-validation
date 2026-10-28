@@ -128,6 +128,14 @@ def test_recalibration_stage_accepts_bound_prior_and_refuses_future_cutoff():
     assert future == {}
     assert future_flags == ["MODEL_NOT_READY"]
 
+    missing_cutoff_flags = []
+    missing_cutoff = _recalibrated_output(
+        {"recalibration_artifact": recalibration("2026-10-16")},
+        {"recalibration_bound_cutoff": "2026-10-16"},
+        "STR-THRU", {"fill": 0.5}, output, missing_cutoff_flags)
+    assert missing_cutoff == {}
+    assert missing_cutoff_flags == ["MODEL_NOT_READY"]
+
 
 def test_str_thru_declaration_binds_latest_line_and_recalibration_cutoffs():
     def line(cutoff):

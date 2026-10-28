@@ -178,8 +178,10 @@ payoff surface, or (where scoring applies it) recalibration map for its
 strategy and alpha whose artifact `cutoff` is at or before that row's causal
 cutoff. Eligibility and ordering use the artifact's DATA cutoff, never
 `computed_at`; an artifact after the row cutoff is ineligible. The selected
-cutoffs are recorded in the payoff artifact recipe. When no eligible artifact
-exists, scoring retains its typed
+cutoffs are recorded in the payoff artifact recipe. When a recalibration
+cutoff is bound, scoring also requires a string requested row cutoff and refuses
+if the bound cutoff is later, even if the recipe omits `before`. When no
+eligible artifact exists, scoring retains its typed
 `MODEL_NOT_READY` refusal; it does not fit or fall back to another source.
 STR-RUNUP retains legacy's raw win-rate behavior and does not apply
 recalibration.

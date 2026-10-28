@@ -2492,8 +2492,9 @@ def _recalibrated_output(
     selected_cutoff = requested_cutoff if bound_cutoff is None else bound_cutoff
     if (alpha is None or not isinstance(artifact, RecalibrationMapArtifact)
             or artifact.key != recalibration_artifact_key(name, alpha, selected_cutoff)
-            or (requested_cutoff is not None
-                and (not isinstance(artifact.cutoff, str)
+            or (bound_cutoff is not None
+                and (not isinstance(requested_cutoff, str)
+                     or not isinstance(artifact.cutoff, str)
                      or artifact.cutoff > requested_cutoff))):
         _add_flag(flags, "MODEL_NOT_READY")
         return {}
