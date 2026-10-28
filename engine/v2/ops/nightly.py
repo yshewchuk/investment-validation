@@ -159,11 +159,13 @@ def _legacy_action(stage):
 
 #: Stages whose worker kind IS the stage name (never a ``legacy_*`` action):
 #: ``decision_evidence`` (P2-5/B1c) and the four effects-graph coordinator
-#: stages wired in P2-5/Task5. Each has a trivial pure worker; the real
+#: stages wired in P2-5/Task5 have trivial pure workers; their real
 #: catalog/outbox/filesystem work runs in the supervisor's coordinator effect
-#: (``engine.v2.ops.effects_graph``), never in the worker subprocess.
+#: (``engine.v2.ops.effects_graph``), never in the worker subprocess. Unlike
+#: them, ``nightly_preview_inputs`` hashes bound staged inputs and writes two
+#: staged JSON outputs in private attempt staging, with no coordinator effect.
 PURE_STAGES = frozenset({"decision_evidence", "ledger_export", "engineering_gate",
-                         "publication", "backup"})
+                         "publication", "backup", "nightly_preview_inputs"})
 
 #: R3B-3: the "refresh" stage's native job kind, chosen only when a plan
 #: explicitly pins ``refresh_mode="native"`` (``plans.py::nightly_plan``) --
@@ -238,6 +240,13 @@ def _decision_bindings(keys):
             "finality.json": _job_output("finality", keys),
             "decision_plan.json": keys["decision_evidence"] + "#decision_plan",
             "decision_evidence.json": keys["decision_evidence"] + "#decision_evidence"}
+
+
+def _nightly_preview_input_bindings(keys):
+    return {"score.json": _job_output("score", keys),
+            "bundle.tar": _job_output("projection", keys),
+            "finality.json": _job_output("finality", keys),
+            "model_evidence.json": _job_output("model_evidence", keys)}
 
 
 def _render_bindings(keys, prior_selfcheck_ref):
@@ -395,7 +404,8 @@ def _sidecar_runtime_identity(kind):
 #: The legacy worker DAG's stages when prerequisites are not included.
 _DAG_STAGES = ("finality", "features", "score", "decision_replay", "decision_evidence",
                "decision_commit", "settlement", "model_evidence", "ledger_export",
-               "engineering_gate", "projection", "selfcheck", "publication", "backup")
+               "engineering_gate", "projection", "selfcheck", "publication", "backup",
+               "nightly_preview_inputs")
 # P2-5/Task5: ``ledger_export`` and ``backup`` name ``decision_commit`` as
 # their only hard scheduler dependency, never ``settlement`` — a failed
 # settlement job would otherwise cascade through ``block_descendants``
@@ -413,6 +423,8 @@ _DAG_PARENTS = {"finality": (), "features": ("finality",),
                 "engineering_gate": (),
                 "projection": ("ledger_export", "model_evidence", "finality", "score"),
                 "selfcheck": ("projection",),
+                "nightly_preview_inputs": ("score", "projection", "finality",
+                                           "model_evidence"),
                 "publication": ("selfcheck", "engineering_gate", "projection", "decision_commit",
                                 "finality"),
                 "backup": ("decision_commit",)}
@@ -447,6 +459,8 @@ _SNAPSHOT_REQUIRED = ("snapshot_ref_artifact_id", "materialization_request_ref",
 def _checkpoint_contract(kind):
     if kind == "decision_evidence":
         return "decision_evidence_pair.v1.0"
+    if kind == "nightly_preview_inputs":
+        return "nightly_preview_inputs.v1.0"
     if kind in ("ledger_export", "engineering_gate", "publication", "backup", "retrain_step"):
         return "effect_receipt.v1.0"
     if kind == "legacy_materialize":
@@ -468,24 +482,30 @@ def _snapshot_inputs(input_mode, snapshot_inputs, include_prerequisites):
 
 def _plan_identity(plan, input_refs):
     """The saved plan's own identity: pinned implementation, decision clock,
-    and legacy manifest -- exactly what the Sep-14 operator trace (guide
-    §5.5 item 1) found ``_scope_hash`` omitted.
+    legacy manifest, and the optional saved snapshot pin -- exactly what the
+    Sep-14 operator trace (guide §5.5 item 1) found ``_scope_hash`` omitted.
 
-    These three values are written ONCE into the immutable plan document at
+    These values are written ONCE into the immutable plan document at
     planning time (``plans.py::nightly_plan``/``build_nightly_plan``) and the
     manifest artifact a caller resolves alongside it. Resubmitting the SAME
-    saved plan artifact (a retry) reads all three back completely unchanged,
+    saved plan artifact (a retry) reads them all back completely unchanged,
     so this identity -- and therefore every stage key derived from it --
     stays identical. A fresh ``ops plan nightly`` call always re-pins
     ``decision_clock`` from the current clock, so a genuinely new same-
     session plan always changes this identity even when
     tickers/years/population/snapshot happen to match exactly; a code or
     manifest change (the operator's actual Sep-14 scenario) changes it
-    independently of the clock.
+    independently of the clock. The slice-1 ``snapshot_id`` joins the identity
+    only when the saved plan pins a nonempty one, so pre-pin lower-level plans
+    preserve their old request keys.
     """
-    return {"implementation_ref": plan.get("implementation_ref") or "",
-            "decision_clock": plan.get("decision_clock") or "",
-            "legacy_manifest_ref": input_refs[0] if input_refs else ""}
+    identity = {"implementation_ref": plan.get("implementation_ref") or "",
+                "decision_clock": plan.get("decision_clock") or "",
+                "legacy_manifest_ref": input_refs[0] if input_refs else ""}
+    snapshot_id = plan.get("snapshot_id")
+    if isinstance(snapshot_id, str) and snapshot_id:
+        identity["snapshot_id"] = snapshot_id
+    return identity
 
 
 def _scope_hash(tickers, year_start, year_end, expected_population, snapshot, context_tickers=(),
@@ -502,6 +522,10 @@ def _scope_hash(tickers, year_start, year_end, expected_population, snapshot, co
 
 def _stage_parameters(stage, plan, tickers, year_start, year_end, keys, effect_scope, snapshot,
                       prior_selfcheck_ref=None, context_tickers=()):
+    if stage == "nightly_preview_inputs":
+        return {"expected_ids": ("nightly_preview_inputs",),
+                "snapshot_id": plan.get("snapshot_id", ""),
+                "input_bindings": _nightly_preview_input_bindings(keys)}
     if stage == "materialize":
         return {"expected_ids": ("legacy_materialize",), "input_bindings": {},
                 "scratch_estimate_bytes": int(snapshot["scratch_estimate_bytes"])}
@@ -524,6 +548,8 @@ def _stage_parameters(stage, plan, tickers, year_start, year_end, keys, effect_s
 
 def _stage_inputs(stage, parameters, keys, input_refs, snapshot):
     """Bind one stage's inputs for the plan's input mode; returns its ``input_refs``."""
+    if stage == "nightly_preview_inputs":
+        return ()
     bindings = parameters["input_bindings"]
     if snapshot is not None and stage in CROSS_CHECK_STAGES:
         # Last read-set gap fix (2026-09-15): keep the ordinary barrier
@@ -824,6 +850,8 @@ def _stage_sequence(plan, include_prerequisites, snapshot, refresh_mode):
     # supervisor.Service's own tick sidecar does (see ARCHITECTURE.md
     # "Outputs").
     stages = tuple(stage for stage in stages if stage != "native_score_batch")
+    if not plan.get("snapshot_id"):
+        stages = tuple(stage for stage in stages if stage != "nightly_preview_inputs")
     return stages
 
 
@@ -1401,7 +1429,7 @@ def _stage_request_for(stage, kind, plan, key, keys, *, tickers, year_start, yea
     refs = _stage_inputs(stage, parameters, keys, input_refs, snapshot)
     if stage == "projection" and prior_selfcheck_ref:
         refs = tuple(refs) + (prior_selfcheck_ref,)
-    if stage != "materialize":
+    if stage not in ("materialize", "nightly_preview_inputs"):
         parameters["expected_population"] = tuple(expected_population)
         parameters["alt_strikes"] = int(alt_strikes)
     parents = _stage_parents(stage, include_prerequisites, snapshot)

@@ -356,7 +356,8 @@ def test_o16_whole_legacy_nightly_is_not_an_adapter_entry(tmp_path):
     original_root_env = os.environ.get("INVESTING_PLAN_ROOT")
     try:
         assert not any("nightly" in name for name in ACTION_NAMES)
-        assert not any("nightly" in name for name in registry().names())
+        assert {name for name in registry().names() if "nightly" in name} == {
+            "nightly_preview_inputs"}
         with pytest.raises(OpsError):
             legacy_action("run_nightly", {}, tmp_path)
         with pytest.raises(OpsError, match="not audited"):

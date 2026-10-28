@@ -157,6 +157,13 @@ def _dispatch_massive(worker, parameters, root, envelope):
     return run(parameters, root, envelope)
 
 
+def _dispatch_nightly_preview_artifact(worker, parameters, root):
+    if worker == "native_parity":
+        return _dispatch_native_parity(parameters, root)
+    from engine.v2.ops.nightly_preview_inputs import run
+    return run(parameters, root)
+
+
 def dispatch(worker, parameters, root, *, envelope=None):
     envelope = envelope or {}
     if worker in ("massive_acquisition", "massive_daily_snapshot"):
@@ -175,8 +182,8 @@ def dispatch(worker, parameters, root, *, envelope=None):
         return _dispatch_adhoc_rescore(parameters, root)
     if worker == "native_score_batch":
         return _dispatch_native_score_batch(parameters, root)
-    if worker == "native_parity":
-        return _dispatch_native_parity(parameters, root)
+    if worker in ("native_parity", "nightly_preview_inputs"):
+        return _dispatch_nightly_preview_artifact(worker, parameters, root)
     if worker in ("snapshot_import", "legacy_rebuild_candidate"):
         return _dispatch_snapshot_import(worker, parameters, root)
     if worker in ("ledger_export", "engineering_gate", "publication", "backup",

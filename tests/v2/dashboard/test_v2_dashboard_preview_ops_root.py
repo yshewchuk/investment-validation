@@ -29,7 +29,7 @@ from tests.ops_support import TEST_POLICY
 REPO = Path(__file__).resolve().parents[3]
 TOKEN = "refresh-launcher-secret"
 SESSION = "2026-09-10"
-_NIGHTLY_JOB_COUNT = 15  # the 14 legacy-mode DAG stages + the planned restage job (#805)
+_NIGHTLY_JOB_COUNT = 16  # the 15 legacy-mode DAG stages + the planned restage job (#805)
 
 
 # --------------------------------------------------------------------------
@@ -157,6 +157,7 @@ def test_ops_root_refresh_returns_202_jobs_and_repeat_is_idempotent(tmp_path, mo
         body = json.loads(first.read())
         job_ids = [job["job_id"] for job in body["jobs"]]
         assert len(job_ids) == _NIGHTLY_JOB_COUNT
+        assert "nightly_preview_inputs" in {job["kind"] for job in body["jobs"]}
         assert TOKEN not in json.dumps(body)
 
         second = _post_refresh(server, {"plan_ref": plan_ref})

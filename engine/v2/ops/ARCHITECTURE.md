@@ -892,46 +892,27 @@ waits without submitting until its paired succeeded inputs are ready.
   `snapshot_promotion.py`, `snapshot_stages.py`, and `supervisor.py` itself
   — `effects_graph.py` is one of several implementation modules, not the
   only one.
-- Private shadow artifacts only: `build_nightly_plan` refuses any `mode`
-  other than `"shadow"` (`INVALID_REQUEST`), so this package's nightly
-  output never reaches the legacy board.
-- **`native_parity_report.json`.** `run_native_parity_worker` writes the
-  report as an ordinary staged attempt output, `name="report"`, durably
-  addressed `job_<native_parity job id>#report` — resolvable through
-  `input_bindings.resolve_bindings` exactly like `score.json`'s own
-  `job_<id>#score` binding, so a future job can bind
-  `{"native_parity_report.json": "job_<id>#report"}` the same way
-  `_decision_bindings`/`_render_bindings` already do. This is the same
-  staged-attempt-output mechanism `records.json`/`score.json` use: the
-  report stages privately and only becomes visible once the attempt is
-  recorded `succeeded` — a killed worker leaves no output row, never a
-  half-written file. No dashboard-facing "latest" pointer exists; a reader
-  finds the report by job id (`ops get`/`ops logs`/`ops explain <job_id>`).
-  Schema `native_parity_report.v1.1` adds `"native_refused"` (a
-  `population_key`-matched legacy row moved out of `only_legacy`) and
-  `"native_refused_unmatched"` (a native refusal with no legacy row to
-  move) to v1.0's `compared`/`only_legacy`/`only_native`/`mismatches`/
-  `tolerance_policy_id` fields; `only_legacy` now excludes rows
-  `native_refused` claims. `nightly.submit_native_parity_if_ready` and its tick-loop caller, `Service._reconcile_native_parity`, submit such a job automatically once its inputs are ready. `v1.2` (cutover PR-4 slice 1 of #327) adds top-level `as_of`/`generated_at` (run identity, stamped by `_stamp_report_identity` at the write step, after `apply_native_refusals`, in both `run_native_parity_worker` and `native_parity_handler` -- never inside `compare_native_vs_legacy`/`_empty_native_report`, which stay wall-clock-free) and, inside each `mismatches` entry, `values` (that entry's own mismatched fields only, `{legacy, native}` -- `engine/v2/parity/ARCHITECTURE.md`); `v1.3` adds `ticker` and `reason` to every native refusal entry.
-- `forward_calendar_store.run_forward_calendar_refresh` commits revisions
-  into the existing `earnings_events` contract through
-  `engine.v2.data.generic_incremental` — never `engine.data.rebuild.rebuild`
-  — and returns a `RefreshCallbackResult` (`status` one of `complete`/`noop`;
-  invalid input or an unconfigured fetcher pair raises `OpsError` instead of
-  returning a `"failed"` result). A run whose merged claims equal the parent
-  snapshot's own rows reports `noop` rather than a spurious `complete` (the
-  commit layer's own equality check decides this, never key presence in the
-  parent).
-- `training`/`models_promote`/`models_rollback` are `_core_kinds()` jobs, not
-  `supervisor._COORDINATOR_EFFECT_KINDS`; subprocesses do their writes (so does `phase5_state_stage`, registry-added, via `tools/phase5_state_stage_job.py`: models doc §2.2).
-  `run_training_worker` uses the legacy tool by default; `input_mode="native_d14"` selects receipt-verified `build_d14_dataset` only for monthly `implied_t1`/`runup_move`, then passes `training_inputs` to the same resumable training job and writes `training_result.json`.
-  The worker code manifest includes the tracked `engine/models/registry.json` used for recipe feature order and seeds. Native plans require absolute `catalog_path`/`objects_root` and explicit `snapshot_id`/`receipt_id`; incomplete, mixed legacy or unsupported recipe bindings refuse before source reads. No mutable-head discovery, legacy staging/lease or cross-run cache reuse occurs. Source failures map to `INPUT_CHANGED` with `data_code`; training resume mismatch remains `CHECKPOINT_INCOMPATIBLE`. `run_promote_worker` calls `deployment.promote`;
-  `run_rollback_worker` uses its plan-pinned incumbent and target, then writes `pointer_state.json`. Recovery recognizes that exact prior swap without moving the pointer again. None run in the nightly DAG; the pool sidecar (models doc §2.2.1) or operators submit with
-  `ops plan training|promote|rollback` + `ops submit`. Rollback uses principal
-  `operator`, namespace `shadow` and the caller idempotency key like promote.
-- `board_requests`: a tuple of `BoardRequest`, ordered by
-  `(event_date, ticker)` outer, native-covered and disabled (CAL-P, CND-P) strategies alphabetically
-  then `DYN-SV` last inner. No side effect, no write.
+- Private shadow artifacts only: `build_nightly_plan` refuses any `mode` other than `"shadow"` (`INVALID_REQUEST`), so this package's nightly output never reaches the legacy board.
+- **`native_parity_report.json`.** `run_native_parity_worker` writes the report as an ordinary staged attempt output, `name="report"`, durably addressed `job_<native_parity job id>#report` — resolvable through `input_bindings.resolve_bindings` exactly like `score.json`'s own `job_<id>#legacy_score` binding, so a future job can bind `{"native_parity_report.json": "job_<id>#report"}` the same way `_decision_bindings`/`_render_bindings` already do. This is the same staged-attempt-output mechanism `records.json`/`score.json` use: the report stages privately and only becomes visible once the attempt is recorded `succeeded` — a killed worker leaves no output row, never a half-written file. No dashboard-facing "latest" pointer exists; a reader finds the report by job id (`ops get`/`ops logs`/`ops explain <job_id>`).
+  Schema `native_parity_report.v1.1` adds `"native_refused"` (a `population_key`-matched legacy row moved out of `only_legacy`) and `"native_refused_unmatched"` (a native refusal with no legacy row to move) to v1.0's `compared`/`only_legacy`/`only_native`/`mismatches`/`tolerance_policy_id` fields; `only_legacy` now excludes rows `native_refused` claims. `nightly.submit_native_parity_if_ready` and its tick-loop caller, `Service._reconcile_native_parity`, submit such a job automatically once its inputs are ready.
+  `v1.2` (cutover PR-4 slice 1 of #327) adds top-level `as_of`/`generated_at` (run identity, stamped by `_stamp_report_identity` at the write step, after `apply_native_refusals`, in both `run_native_parity_worker` and `native_parity_handler` -- never inside `compare_native_vs_legacy`/`_empty_native_report`, which stay wall-clock-free) and, inside each `mismatches` entry, `values` (that entry's own mismatched fields only, `{legacy, native}` -- `engine/v2/parity/ARCHITECTURE.md`); `v1.3` adds `ticker` and `reason` to every native refusal entry.
+- `forward_calendar_store.run_forward_calendar_refresh` commits revisions into the existing `earnings_events` contract through `engine.v2.data.generic_incremental` — never `engine.data.rebuild.rebuild` — and returns a `RefreshCallbackResult` (`status` one of `complete`/`noop`; invalid input or an unconfigured fetcher pair raises `OpsError` instead of returning a `"failed"` result). A run whose merged claims equal the parent snapshot's own rows reports `noop` rather than a spurious `complete` (the commit layer's own equality check decides this, never key presence in the parent).
+- `training`/`models_promote`/`models_rollback` are `_core_kinds()` jobs, not `supervisor._COORDINATOR_EFFECT_KINDS`; subprocesses do their writes (so does `phase5_state_stage`, registry-added, via `tools/phase5_state_stage_job.py`: models doc §2.2). `run_training_worker` uses the legacy tool by default; `input_mode="native_d14"` selects receipt-verified `build_d14_dataset` only for monthly `implied_t1`/`runup_move`, then passes `training_inputs` to the same resumable training job and writes `training_result.json`.
+  The worker code manifest includes the tracked `engine/models/registry.json` used for recipe feature order and seeds. Native plans require absolute `catalog_path`/`objects_root` and explicit `snapshot_id`/`receipt_id`; incomplete, mixed legacy or unsupported recipe bindings refuse before source reads. No mutable-head discovery, legacy staging/lease or cross-run cache reuse occurs. Source failures map to `INPUT_CHANGED` with `data_code`; training resume mismatch remains `CHECKPOINT_INCOMPATIBLE`. `run_promote_worker` calls `deployment.promote`; `run_rollback_worker` uses its plan-pinned incumbent and target, then writes `pointer_state.json`. Recovery recognizes that exact prior swap without moving the pointer again. None run in the nightly DAG; the pool sidecar (models doc §2.2.1) or operators submit with `ops plan training|promote|rollback` + `ops submit`. Rollback uses principal `operator`, namespace `shadow` and the caller idempotency key like promote.
+- `board_requests`: a tuple of `BoardRequest`, ordered by `(event_date, ticker)` outer, native-covered and disabled (CAL-P, CND-P) strategies alphabetically then `DYN-SV` last inner. No side effect, no write.
+
+**Nightly preview inputs.** The `nightly_preview_inputs` job emits staged
+`preview_input.json` (`nightly_preview_input.v1.0`) and `source_provenance.json`
+(`nightly_source_provenance.v1.0`) from succeeded `score`, `projection`
+(render bundle), `finality`, and `model_evidence` outputs, each launch-bound by
+`job_<id>#<output>` to record its exact artifact ID/hash. Both documents carry
+the saved plan's `snapshot_id`, each input's producer job/output and SHA-256 of
+its staged bytes; provenance also lists unique producer job IDs and algorithm.
+This is nightly lineage only: no Phase 3 score/render verdict or comparison
+receipt is claimed. The verifier `tools/v2_dashboard_verified_input.py` and
+its `PreviewInput`/Phase 3 contract are unchanged. The producer exposes both
+outputs through ordinary job bindings; it does not emit a Phase 3 comparison
+verdict.
 
 **`computed_moves_refresh` and `forward_calendar_refresh` nightly wiring.**
 Both job kinds dispatch through `worker.py` to `calendar_moves_jobs`.
@@ -1091,6 +1072,17 @@ Every stage/effect follows the root doc's 4c R1–R6 template (missing input, ca
 | R4 | Catalog writes go through `catalog.transaction`. A coordinator effect's own filesystem write must be replay-safe and idempotent, not atomic with the DB commit (root doc §6) — one exception, legacy `experiment_effect`, appends a ledger CSV row inside the transaction and recovers by replay. An explicit variant ID must be a non-blank string; only `None` defaults to the resolved spec hash. A fixed-arm run validates one primary arm before runner execution and records one immutable variant identity/count in its report and durable run evidence; reuse refuses a conflicting stored identity/count or an existing `ran` ledger identity, and its ledger row carries the same registered identity. Registered runner/arm pairs without an audited fixed-arm selector are refused before runner invocation and variant-count recording. Smoke execution passes `--no-ledger`. A primary registered run is authorized in the operator and experiment-kind `primary` namespaces; it stages its wrapper, registered spec at `HERE/spec.yaml`, declared runtime sources, and declared runtime input files at their checkout-relative paths as input bindings. A binding path that resolves outside the checkout is refused with `VALIDATION_FAILED` before its bytes are published. The wrapper writes its report at the staging root for worker publication. A wrapper enters staging mode only when the adapter-only `INVESTING_PLAN_PINNED_SOURCE` is set, which `run_legacy_script` sets only for a runner with declared runtime sources (and clears otherwise); `INVESTING_PLAN_ROOT` stays the general root and never selects staging, so a direct wrapper run is unchanged. If it is set but a staged input (pinned source, spec) is missing, the wrapper fails loading it, the runner exits non-zero and the worker refuses `VALIDATION_FAILED`; it never falls back to checkout paths. |
 | R5 | Artifact publication is atomic (`ArtifactStore`): a killed process leaves the old artifact or nothing. |
 | R6 | Job identity is `job_id_for(namespace, key)`; a resubmission in the same namespace with the same key and a different digest is refused `IDEMPOTENCY_CONFLICT`, never merged. A new key scheme is checked against legacy's own keyspace, not only sibling native writers. The common worker manifest conservatively includes the native child, its static source closure and the explicit evaluation runner asset `experiments/v2_gate.py` for every kind: changes can refuse previously planned non-native jobs with `INPUT_CHANGED` at launch and prevent reuse of their implementation-bound checkpoints. Native gate jobs already disable cache reuse. |
+
+The nightly preview-input producer applies R1–R6 as follows:
+
+| # | `nightly_preview_inputs` outcome |
+|---|---|
+| R1 | A missing or failed parent output, or missing input binding, refuses the job. Plans without a pinned snapshot ID omit this producer stage. No file is inferred from the mutable dashboard or Phase 3 receipts. |
+| R2 | Reuse is valid only for the same saved-plan identity and the exact launch-resolved parent artifact IDs/hashes. A changed parent output changes the job input identity; missing or mismatched content refuses. During supervisor staging, a registered input over 512 MiB is refused as `RESOURCE_LIMIT_EXCEEDED` with its name and recorded size before its bytes are materialized. Before hashing, all four staged inputs are preflighted; any input over 512 MiB refuses `RESOURCE_LIMIT_EXCEEDED` with its name and observed size. A streaming guard also catches growth past the cap before digesting excess bytes. Refusal writes neither JSON output. |
+| R3 | A retry reuses the saved plan's snapshot ID and the same dependency job identities. Transient job failures follow the bounded job retry policy; invalid pins or bindings require a valid new plan. |
+| R4 | The worker writes only in its private attempt staging directory. The supervisor publishes both named outputs only after validating the completed worker result and committing the successful attempt. |
+| R5 | Each JSON file is written atomically within staging. A killed/failed worker publishes neither job output; successful artifact registration is handled by the normal attempt commit, with no cross-filesystem transaction claim. |
+| R6 | The saved plan and resolved input digests define stable retry identity. Each document describes the bytes actually consumed from its declared job outputs; inputs from separate producer identities are never merged and no comparison verdict is invented. |
 
 | Experiment execution condition | Outcome |
 |---|---|

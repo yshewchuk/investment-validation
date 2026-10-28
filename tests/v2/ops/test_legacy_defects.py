@@ -90,7 +90,7 @@ def _stub_features_current(monkeypatch, root, *, panel_sha256="panel-sha", tier4
     something else about ``_action_score`` — writes a receipt and stubs the
     "current on disk" hashes to match it, never touching real
     ``engine.paths``/panel/tier4 files. The check's own behaviour (all three
-    states) is covered directly in ``tests/test_v2_ops_legacy_features.py``."""
+    states) is covered directly in ``tests/v2/ops/test_v2_ops_legacy_features.py``."""
     (root / "features.json").write_text(json.dumps({
         "schema_version": "features.v1.0",
         "panel_sha256": panel_sha256, "tier4_sha256": tier4_sha256}))

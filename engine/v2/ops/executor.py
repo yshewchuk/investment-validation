@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 
 from engine.v2.foundation import ensure_directory, safe_relative_path
 from engine.v2.ops.catalog import dumps, transaction
-from engine.v2.ops.checkpoints import artifact
+from engine.v2.ops.checkpoints import registered_artifact
 from engine.v2.ops.errors import fail
 from engine.v2.ops.executor_watchdog import observe, process_info, signal_owned
 from engine.v2.ops.input_bindings import resolve_and_record
@@ -104,10 +104,22 @@ def _materialize_inputs(conn, claim, store, staging):
     recorded ``attempt_input_bindings`` rows instead of re-resolving a
     ``job_`` binding against the parent's possibly-changed current state.
     """
-    resolved = resolve_and_record(conn, store, claim)
+    max_artifact_bytes = None
+    if claim.spec.kind == "nightly_preview_inputs":
+        from engine.v2.ops.nightly_preview_inputs import MAX_INPUT_BYTES
+        max_artifact_bytes = MAX_INPUT_BYTES
+    resolved = resolve_and_record(conn, store, claim,
+                                  max_artifact_bytes=max_artifact_bytes)
     for name, item in resolved.items():
         parts = safe_relative_path(name)
-        ref = artifact(conn, store, item.artifact_id)
+        ref = registered_artifact(conn, item.artifact_id)
+        if claim.spec.kind == "nightly_preview_inputs":
+            from engine.v2.ops.nightly_preview_inputs import MAX_INPUT_BYTES
+            if ref.byte_size > MAX_INPUT_BYTES:
+                raise fail("RESOURCE_LIMIT_EXCEEDED", "nightly preview input exceeds size limit",
+                           details={"name": name, "limit_bytes": MAX_INPUT_BYTES,
+                                    "observed_bytes": ref.byte_size})
+        store.verify(ref)
         destination = staging.joinpath(*parts)
         ensure_directory(destination.parent)
         if destination.exists() or destination.is_symlink():

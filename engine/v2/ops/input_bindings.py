@@ -13,7 +13,7 @@ from dataclasses import dataclass
 
 from engine.v2.foundation import content_hash
 from engine.v2.ops.catalog import transaction
-from engine.v2.ops.checkpoints import artifact
+from engine.v2.ops.checkpoints import registered_artifact
 from engine.v2.ops.errors import fail
 
 __all__ = ["ResolvedBinding", "record_resolved_bindings", "recorded_bindings",
@@ -55,12 +55,13 @@ def _resolve_job_binding(conn, spec, binding):
     return output_row[0]
 
 
-def resolve_bindings(conn, store, spec):
+def resolve_bindings(conn, store, spec, *, max_artifact_bytes=None):
     """Resolve every ``input_bindings`` entry to its committed artifact.
 
     Pure read: nothing is recorded and nothing is copied into staging. Raises
-    ``OpsError`` (``INPUT_CHANGED`` or ``VALIDATION_FAILED``) on the first
-    binding that is not admitted; never a bare ``ValueError``.
+    ``OpsError`` (``INPUT_CHANGED`` or ``VALIDATION_FAILED``) for an inadmissible
+    binding, or ``RESOURCE_LIMIT_EXCEEDED`` when the optional per-artifact size
+    ceiling is exceeded; never a bare ``ValueError``.
     """
     bindings = spec.parameters.get("input_bindings") or {}
     admitted_refs = set(spec.input_refs)
@@ -74,7 +75,12 @@ def resolve_bindings(conn, store, spec):
         else:
             raise fail("INPUT_CHANGED", "input binding names an artifact outside input_refs",
                        details={"name": name})
-        ref = artifact(conn, store, artifact_id)
+        ref = registered_artifact(conn, artifact_id)
+        if max_artifact_bytes is not None and ref.byte_size > max_artifact_bytes:
+            raise fail("RESOURCE_LIMIT_EXCEEDED", "input artifact exceeds size limit",
+                       details={"name": name, "limit_bytes": max_artifact_bytes,
+                                "observed_bytes": ref.byte_size})
+        store.verify(ref)
         resolved[name] = ResolvedBinding(name=name, binding=binding,
                                          artifact_id=ref.artifact_id, content_hash=ref.content_hash)
     return resolved
@@ -110,9 +116,10 @@ def resolved_inputs_hash(spec, resolved):
     return content_hash({"input_refs": sorted(spec.input_refs), "bindings": pairs})
 
 
-def resolve_and_record(conn, store, claim):
+def resolve_and_record(conn, store, claim, *, max_artifact_bytes=None):
     """Resolve every binding and durably record it before anything is staged."""
-    resolved = resolve_bindings(conn, store, claim.spec)
+    resolved = resolve_bindings(conn, store, claim.spec,
+                                max_artifact_bytes=max_artifact_bytes)
     with transaction(conn):
         record_resolved_bindings(conn, claim.attempt_id, resolved)
     return resolved
