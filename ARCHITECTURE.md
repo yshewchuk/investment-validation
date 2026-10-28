@@ -67,6 +67,7 @@ request body and, if durable, in the operator guides instead — see
 | `engine/v2/serving/` | [`engine/v2/serving/ARCHITECTURE.md`](engine/v2/serving/ARCHITECTURE.md) |
 | `engine/v2/ops/` | [`engine/v2/ops/ARCHITECTURE.md`](engine/v2/ops/ARCHITECTURE.md) |
 | `engine/v2/ops/stores/massive/` | [`engine/v2/ops/stores/massive/ARCHITECTURE.md`](engine/v2/ops/stores/massive/ARCHITECTURE.md) |
+| `engine/v2/ops/workspace/` | [`engine/v2/ops/workspace/ARCHITECTURE.md`](engine/v2/ops/workspace/ARCHITECTURE.md) |
 | `engine/v2/diagnosis/` | (pending) |
 | `engine/v2/dashboard/` | [`engine/v2/dashboard/ARCHITECTURE.md`](engine/v2/dashboard/ARCHITECTURE.md) |
 | `ui/` | [`ui/ARCHITECTURE.md`](ui/ARCHITECTURE.md) |
