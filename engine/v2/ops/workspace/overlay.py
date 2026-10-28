@@ -31,7 +31,7 @@ from engine.v2.ops.bootstrap import open_catalog, require_compatible_catalog
 from engine.v2.ops.catalog import dumps, register_artifact, transaction
 from engine.v2.ops.checkpoints import registered_artifact
 from engine.v2.ops.errors import OpsError, fail
-from engine.v2.ops.workspace.closure import SnapshotClosure, verify_snapshot_closure
+from engine.v2.ops.workspace.closure import SnapshotClosure, _BoundedConn, verify_snapshot_closure
 from engine.v2.ops.workspace.guard import MARKER
 
 __all__ = ["IDENTITY_FILE", "MARKER", "ResearchWorkspace", "SnapshotOnlyRepository",
@@ -241,7 +241,7 @@ class ResearchWorkspace:
         self.snapshot_id, self.manifest_hash = identity["snapshot_id"], identity["manifest_hash"]
         self.conn, self.store = conn, store
         self._source_conn, self._source_store = source_conn, source_store
-        self.source = SnapshotOnlyRepository(source_conn, source_store, self.snapshot_id)
+        self.source = SnapshotOnlyRepository(_BoundedConn(source_conn), source_store, self.snapshot_id)
 
     def source_snapshot(self):
         """The pinned ``SnapshotRef``; its id and manifest hash must equal the pin."""

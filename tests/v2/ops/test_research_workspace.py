@@ -468,3 +468,11 @@ def test_bounded_cursor_refuses_on_rows_and_bytes_and_covers_coverage_reads(prod
         closure_module._commit_receipts(closure_module._BoundedConn(ro), prod.snap.snapshot_id)
     assert _details(caught) == ("SNAPSHOT_CLOSURE_BROKEN", "closure_rows_over_cap")
     ro.close()
+
+
+def test_source_view_reads_go_through_the_bounded_cursor(prod, monkeypatch):
+    with _create(prod) as ws:
+        monkeypatch.setattr(closure_module, "_MAX_ROWS", 0)
+        with pytest.raises(DataError) as caught:
+            ws.source.fragment_records(ws.source_snapshot(), "securities")
+        assert _details(caught)[1] == "closure_rows_over_cap"
