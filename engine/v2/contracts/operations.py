@@ -109,8 +109,9 @@ FAILURE_CODES: dict[str, tuple[str, bool]] = {
     "PUBLICATION_REFUSED": ("validation", False),
     "IDEMPOTENCY_CONFLICT": ("validation", False),
     "INVALID_REQUEST": ("validation", False),
-    # Experiment research workspace (ops/workspace/overlay.py, guard.py): a production root, a path or
-    # symlink escape, a non-empty root, an identity mismatch, or execution from a workspace.
+    # Experiment research workspace (ops/workspace/overlay.py, scope.py, guard.py):
+    # a root/path/identity refusal, invalid scope or workspace handle, scope mismatch,
+    # storage failure, or execution from a workspace.
     # Never retryable: only a different request or root fixes it.
     "WORKSPACE_REFUSED": ("validation", False),
     # P6 experiment platform (ops/experiments.py, ARCHITECTURE.md section R1):

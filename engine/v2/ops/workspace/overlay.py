@@ -9,7 +9,8 @@ supervisor and job launcher refuse to run from it (``workspace.guard``).
 
 Refusals are typed: ``WORKSPACE_REFUSED`` (``details["reason"]``: production_root,
 symlink_path, parent_missing, root_not_empty, production_missing, production_mismatch,
-layout_invalid, identity_unreadable, source_method_refused, pin_name_invalid) and ``SNAPSHOT_CLOSURE_BROKEN`` (from
+layout_invalid, identity_unreadable, source_method_refused, pin_name_invalid, scope_invalid, workspace_invalid,
+scope_mismatch, storage_failure) and ``SNAPSHOT_CLOSURE_BROKEN`` (from
 ``workspace.closure``, plus ``closure_changed``/``manifest_mismatch``/``pin_mismatch``
 when the open-time closure, the stored identity or the pin disagree).
 """
