@@ -16,7 +16,6 @@ from tests.fixtures.size_serving_header import HEADER
 from tests.v2.models.serving_fold_support import (
     release_inputs,
     staged_fold_object,
-    write_catalog,
 )
 from engine.v2.models import (
     ArtifactInventoryMember,
@@ -153,7 +152,9 @@ def _stage_release(tmp_path, *, roles=("driver", "gate"),
     deployment.promote(dep_root, release_id)
     fold_object = (None if cache is None
                    else staged_fold_object(cache, manifest, dep_root))
-    write_catalog(tmp_path, release_id, fold_object)
+    from tests.v2.ops.runup_helpers import native_artifact_rows, write_catalog_with_rows
+    write_catalog_with_rows(
+        tmp_path, release_id, native_artifact_rows(tmp_path, {"STR-THRU"}), fold_object)
     return resolve_release_binding(tmp_path)
 
 
