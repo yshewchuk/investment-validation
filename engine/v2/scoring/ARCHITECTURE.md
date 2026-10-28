@@ -190,7 +190,32 @@ native pricing and simulation. Invalid declared frozen state flags
 `MODEL_NOT_READY`; missing/nonfinite champion inputs flag the advisory
 `CHOOSER_MISSING_FEATURES` and withhold `chooser_score`.
 Feature math never fits; frozen executors own model inference. `release_bindings`
-exposes verified chooser pools/depth tables; nightly declares no chooser block.
+exposes verified chooser pools/depth tables and selects the chooser state for
+the request's cutoff. Nightly declares a chooser block for registered member
+rows; missing required state refuses that member row with typed
+`MODEL_NOT_READY`.
+Missing, ambiguous or unusable exact-cutoff chooser state refuses only that
+member row as `MODEL_NOT_READY`; missing champion features remain the separate
+advisory `CHOOSER_MISSING_FEATURES` outcome.
+Chooser producer folds require a canonical `training_cutoff` in both the
+descriptor and hash-verified estimator metadata, strictly before the decision
+session and strictly before the selected held-out fold start. Missing,
+malformed, mismatched, same-day or later cutoffs refuse the member row as
+`MODEL_NOT_READY` with the fixed `chooser fold training cutoff provenance missing or unusable`
+cause; the cache key includes the decision day and only entries produced by
+the validated fold loader are reusable. Existing folds without this field are
+not consumed; member rows refuse until provenance-bearing folds are produced
+and released. No cutoff is inferred from fold dates or runtime time. Request
+artifact refs also bind the selected size estimator, each chooser producer
+descriptor hash and policy hash, including its `interval_floor`, because those
+declarations contribute to chooser inputs.
+Selector dates
+must be canonical ISO dates or timezone-naive datetimes; timezone-aware or
+noncanonical values refuse as `MODEL_NOT_READY`. The required producer
+`training_cutoff` is part of the chooser fold contract. Descriptor and request
+hashes bind the declaration and selected size fold's effective `interval_floor`,
+but neither proves source finality or training membership; those claims remain
+a producer responsibility.
 
 `application.score_event` requires the complete ordered `DYNAMIC_MENU`, scores
 its members and resolves DYN-SV over finite simulation-bearing candidates:

@@ -47,6 +47,7 @@ from engine.v2.scoring.release_bindings import (
     ModelIdentity,
     ModelNotReady,
     ScoringReleaseBinding,
+    select_chooser_state,
 )
 from engine.v2.scoring.source_inputs import (
     AnswerFieldsInSource,
@@ -93,6 +94,7 @@ class _StrategySpec:
     gate_role: str | None = None
     gate_policy_key: str | None = None
     driver_name: str | None = None
+    chooser: bool = False
 
     def __post_init__(self) -> None:
         if (not isinstance(self.drivers, tuple) or not self.drivers
@@ -133,7 +135,7 @@ _ENTRY_RULE_SPECS = {
     name: _StrategySpec(
         drivers=(_DriverSpec("forecast_abs_move", "size:*"),
                  _DriverSpec("pred_iv_crush_30", "iv_crush:*")),
-        bundle_strategy=name, entry_rule=True)
+        bundle_strategy=name, entry_rule=True, chooser=True)
     for name in ("TWIN-P", "TWIN-P5", "BFLY-P", "BFLY-P5", "CTR5", "RAMP7", "CND-PS")
 }
 
@@ -493,6 +495,7 @@ _RELEASE_ARTIFACT_REFUSAL_LABELS: Mapping[tuple[str, str], str] = {
         "duplicate RUNUP payoff surface",
     ("MODEL_NOT_READY", "RUNUP payoff surface is numerically unusable"):
         "RUNUP payoff surface unusable",
+    ("MODEL_NOT_READY", "chooser state is missing or unusable"): "DYN-SV chooser state missing or unusable",
 }
 
 
@@ -682,6 +685,44 @@ def _gate_source_or_refusal(
     return source
 
 
+def _declared_chooser_artifact_refs(recipe: Mapping) -> list[str]:
+    refs: list[str] = []
+    for key in ("analog_pool", "admissible_table"):
+        entry = recipe.get(key)
+        if isinstance(entry, Mapping):
+            content_hash = entry.get("content_hash")
+            if isinstance(content_hash, str):
+                refs.append(content_hash)
+    artifact_refs = recipe.get("artifact_refs")
+    if isinstance(artifact_refs, (list, tuple)):
+        refs.extend(ref for ref in artifact_refs if isinstance(ref, str))
+    return refs
+
+
+def _chooser_artifact_refs(bundle) -> tuple[str, ...]:
+    recipe = getattr(bundle, "chooser_recipe", None)
+    refs: list[str] = []
+    if isinstance(recipe, Mapping) and recipe:
+        chosen_binding_ids = set()
+        top_level_binding_id = recipe.get("binding_id")
+        if isinstance(top_level_binding_id, str):
+            chosen_binding_ids.add(top_level_binding_id)
+        producers = recipe.get("producers")
+        if isinstance(producers, Mapping):
+            for producer in producers.values():
+                if isinstance(producer, Mapping):
+                    binding_id = producer.get("binding_id")
+                    if isinstance(binding_id, str):
+                        chosen_binding_ids.add(binding_id)
+        for binding in bundle.model_release.bindings:
+            if binding.binding_id in chosen_binding_ids:
+                for member in binding.members:
+                    if member.name == "estimator":
+                        refs.append(member.content_hash)
+        refs.extend(_declared_chooser_artifact_refs(recipe))
+    return tuple(refs)
+
+
 def _score_artifact_refs(drivers, gate_identity: ModelIdentity | None, bundle) -> tuple[str, ...]:
     refs = [driver.identity.artifact_hash for driver in drivers]
     if gate_identity is not None:
@@ -689,6 +730,7 @@ def _score_artifact_refs(drivers, gate_identity: ModelIdentity | None, bundle) -
     gate_source = bundle.gate_forecast_source
     if gate_source is not None:
         refs.append(gate_source.artifact_hash)
+    refs.extend(_chooser_artifact_refs(bundle))
     return tuple(dict.fromkeys(refs))
 
 
@@ -719,6 +761,87 @@ def _gate_policy_and_feature_names(
     return feature_names, None
 
 
+_CHOOSER_STATE_FAILURE_DETAIL = "chooser state is missing or unusable"
+
+_CHOOSER_REFUSAL_CAUSE_LABELS: Mapping[str, str] = {
+    "chooser_analog_pool": "chooser analog pool missing or unusable",
+    "admissible_table:dyn_sv": "chooser admissible table missing or unusable",
+    "tier4_folds:size": "chooser size fold missing or unusable",
+    "phase5_release.json": "chooser release catalog missing or unusable",
+    "chooser_training_cutoff": "chooser fold training cutoff provenance missing or unusable",
+    "chooser_champion": "chooser champion binding missing or unusable",
+    "chooser_producer": "chooser producer binding missing or unusable",
+    "chooser state": "chooser state missing or unusable",
+}
+
+
+def _chooser_bundle_or_refusal(
+    bundle: Any, key: BoardRequest, *, binding: ScoringReleaseBinding,
+    event_date: Any, as_of: Any, fold_cache: dict[tuple[int, str], Any],
+) -> Any | NativeScoreBatchRowRefusal:
+    try:
+        state = select_chooser_state(binding, event_date, as_of, fold_cache=fold_cache)
+        chooser = binding.model_identity.get("chooser:DYN-SV")
+        implied = state.producer_bindings.get("pred_im_t1_d14")
+        runup = state.producer_bindings.get("pred_runup_abs_move_d14")
+        if (chooser is None
+                or not isinstance(getattr(chooser, "binding_id", None), str)
+                or not chooser.binding_id):
+            raise ModelNotReady("chooser_champion", _CHOOSER_STATE_FAILURE_DETAIL)
+        if (implied is None or runup is None
+                or not isinstance(getattr(implied, "binding_id", None), str)
+                or not implied.binding_id
+                or not isinstance(getattr(runup, "binding_id", None), str)
+                or not runup.binding_id):
+            raise ModelNotReady("chooser_producer", _CHOOSER_STATE_FAILURE_DETAIL)
+        bindings = list(bundle.model_release.bindings)
+        known_ids = {item.binding_id for item in bindings}
+        for selected in (implied, runup):
+            if selected.binding_id not in known_ids:
+                bindings.append(selected)
+                known_ids.add(selected.binding_id)
+        model_release = replace(bundle.model_release, bindings=tuple(bindings))
+        return replace(bundle, chooser_recipe={
+            "binding_id": chooser.binding_id,
+            "artifact_refs": list(state.artifact_refs),
+            "fold_provenance": state.fold_provenance,
+            "producers": {
+                "pred_im_t1_d14": {"binding_id": implied.binding_id},
+                "pred_runup_abs_move_d14": {"binding_id": runup.binding_id},
+            },
+            "analog_pool": {
+                "pool_id": state.analog_pool.pool_id,
+                "cutoff": state.analog_pool.cutoff,
+                "content_hash": state.analog_pool.content_hash,
+            },
+            "admissible_table": {
+                "table_id": state.admissible_table.table_id,
+                "version": state.admissible_table.version,
+                "content_hash": state.admissible_table.content_hash,
+            },
+        }, chooser_fold_pools=state.fold_pools,
+           chooser_analog_pool=state.analog_pool,
+           chooser_admissible_table=state.admissible_table,
+           model_release=model_release)
+    except ModelNotReady as exc:
+        label = _CHOOSER_REFUSAL_CAUSE_LABELS.get(
+            exc.member_id, "chooser state missing or unusable")
+        return NativeScoreBatchRowRefusal(key, "MODEL_NOT_READY", "DYN-SV " + label)
+
+
+def _apply_declared_chooser(
+    bundle: Any, key: BoardRequest, spec: _StrategySpec, event: NightlyEventInputs,
+    *, binding: ScoringReleaseBinding, as_of: Any,
+    fold_cache: dict[tuple[int, str], Any],
+) -> Any | NativeScoreBatchRowRefusal:
+    if not spec.chooser:
+        return bundle
+    return _chooser_bundle_or_refusal(
+        bundle, key, binding=binding,
+        event_date=event.calendar_row.get("event_date"), as_of=as_of,
+        fold_cache=fold_cache)
+
+
 def _assemble_one_event(
     event: NightlyEventInputs,
     *,
@@ -731,12 +854,7 @@ def _assemble_one_event(
     driver_name: str,
     gate_source_cache: dict[tuple[int, str], Any],
 ) -> tuple[ScoreRequest, NativeScoreInputs] | NativeScoreBatchRowRefusal:
-    """One event's ``(ScoreRequest, NativeScoreInputs)`` pair, or its refusal.
-
-    Split out of :func:`assemble_score_batch_inputs` (which owns the batch-
-    level checks and the loop) purely to keep each function under its line/
-    complexity budget -- see that function's docstring for the refusal codes.
-    """
+    """Assemble one event's request and native inputs, or its refusal."""
     key = event.key
     try:
         _board_request_key(key)
@@ -779,6 +897,11 @@ def _assemble_one_event(
         panel_row=event.panel_row,
         entry_rule_ids=((drivers[0].identity, drivers[1].identity)
                         if spec.entry_rule else None))
+    if isinstance(bundle, NativeScoreBatchRowRefusal):
+        return bundle
+    bundle = _apply_declared_chooser(
+        bundle, key, spec, event, binding=binding, as_of=as_of,
+        fold_cache=gate_source_cache)
     if isinstance(bundle, NativeScoreBatchRowRefusal):
         return bundle
     try:

@@ -154,6 +154,8 @@ def test_twin_row_assembly_declares_entry_rule_and_planned_exit(tmp_path, monkey
         return object()
 
     monkeypatch.setattr(nsb, "build_native_score_inputs", fake_build)
+    monkeypatch.setattr(nsb, "_apply_declared_chooser",
+                        lambda bundle, *_args, **_kwargs: bundle)
 
     assembled, refusals = _assemble(binding, [event])
     assert refusals == ()

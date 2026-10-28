@@ -5,7 +5,8 @@ constructed ``FrozenInference``, and the frozen scoring state artifacts
 from a live ``deployment.current_pointer()`` -- the failure-semantics contract
 is ``engine/v2/scoring/ARCHITECTURE.md``'s ``release_bindings.py`` section (the
 "4c R1-R6 template"). Native batch and the supervisor's release-readiness
-check consume this reader; chooser state selection is not wired into nightly.
+check consume this reader; nightly selects exact-cutoff chooser state and
+causal producer folds for registered menu-member rows.
 
 Every refusal below is path-free by construction: a fixed message plus the
 exact ``member_id``/field name (and, where useful, a type name), never a raw
@@ -19,13 +20,14 @@ import math
 import os
 import stat
 from dataclasses import dataclass, field
+from datetime import date, datetime
 from pathlib import Path
 from types import MappingProxyType
-from typing import Callable, Mapping, TypeVar
+from typing import Any, Callable, Mapping, TypeVar
 
-from engine.v2.foundation import content_hash
+from engine.v2.foundation import content_hash, from_document
 from engine.v2.models import deployment
-from engine.v2.models.admissible_table import AdmissibleDepthTable
+from engine.v2.models.admissible_table import N_ADMISSIBLE_TABLE_ID, AdmissibleDepthTable
 from engine.v2.models.analog_artifact import BoardAnalogPoolArtifact
 from engine.v2.models.chooser_analog_pool import ChooserAnalogPoolArtifact
 from engine.v2.models.contracts import MODEL_NOT_READY, ModelRelease
@@ -50,10 +52,17 @@ from engine.v2.models.residual_artifact import (
     ResidualArtifactError,
     residual_artifact_from_document,
 )
+from engine.v2.models.serving_fold_loader import load_chooser_serving_fold
+from engine.v2.models.serving_folds import ChooserServingFoldDescriptor
 from engine.v2.models.trailing_cutoff_artifact import TrailingCutoffArtifact
-from engine.v2.scoring.gate_fold_selection import SizeFoldCatalog, index_size_folds
+from engine.v2.scoring.gate_fold_selection import (
+    SizeFoldCatalog,
+    index_size_folds,
+    select_gate_forecast_source,
+)
 
 __all__ = [
+    "ChooserState",
     "ModelIdentity",
     "ModelNotReady",
     "NoCurrentRelease",
@@ -62,6 +71,7 @@ __all__ = [
     "resolve_gate_policy",
     "resolve_production_release_binding",
     "resolve_release_binding",
+    "select_chooser_state",
 ]
 
 _DEPLOYMENT_DIR = "deployment"
@@ -168,6 +178,8 @@ class ScoringReleaseBinding:
     #: Indexed descriptors of the release's ``tier4_folds:size`` member; absent
     #: or not STAGED -> empty. See ARCHITECTURE.md ("Forward forecast assembly").
     size_folds: "SizeFoldCatalog | None" = None
+    chooser_fold_catalog_json: str = field(default="", repr=False, compare=False)
+    chooser_parent_manifest: Any = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "model_identity", MappingProxyType(dict(self.model_identity)))
@@ -251,7 +263,216 @@ def resolve_release_binding(release_root: Path | str) -> ScoringReleaseBinding:
         chooser_admissible_artifacts=chooser_admissible,
         paired_residual_artifacts=paired_residual,
         trailing_cutoff_artifacts=trailing_cutoff, size_folds=size_folds,
+        chooser_fold_catalog_json=json.dumps(catalog, sort_keys=True, separators=(",", ":")),
+        chooser_parent_manifest=manifest,
     )
+
+
+@dataclass(frozen=True, kw_only=True)
+class ChooserState:
+    analog_pool: ChooserAnalogPoolArtifact
+    admissible_table: AdmissibleDepthTable
+    fold_pools: Mapping[str, Mapping[str, Any]]
+    fold_provenance: Mapping[str, Mapping[str, str]]
+    producer_bindings: Mapping[str, Any]
+    artifact_refs: tuple[str, ...]
+
+
+_CHOOSER_FOLD_CACHE_TOKEN = object()
+
+
+@dataclass(frozen=True, kw_only=True)
+class _ChooserFoldCacheEntry:
+    validation_token: object
+    fold_state: tuple[dict[str, Any], dict[str, Any], dict[str, dict[str, str]], tuple[str, ...]]
+
+
+def _chooser_fold_cache_lookup(
+    fold_cache: dict[tuple[int, str], Any] | None,
+    cache_key: tuple[int, str],
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, dict[str, str]], tuple[str, ...]] | None:
+    if fold_cache is None:
+        return None
+    if type(fold_cache) is not dict:
+        raise ModelNotReady("chooser state", "chooser state is missing or unusable") from None
+    entry = fold_cache.get(cache_key)
+    if entry is None:
+        return None
+    if type(entry) is not _ChooserFoldCacheEntry:
+        raise ModelNotReady("chooser state", "chooser state is missing or unusable") from None
+    if entry.validation_token is not _CHOOSER_FOLD_CACHE_TOKEN:
+        raise ModelNotReady("chooser state", "chooser state is missing or unusable") from None
+    state = entry.fold_state
+    if type(state) is not tuple or len(state) != 4:
+        raise ModelNotReady("chooser state", "chooser state is missing or unusable") from None
+    pools, producers, fold_provenance, artifact_refs = state
+    if type(pools) is not dict or type(producers) is not dict:
+        raise ModelNotReady("chooser state", "chooser state is missing or unusable") from None
+    if type(fold_provenance) is not dict:
+        raise ModelNotReady("chooser state", "chooser state is missing or unusable") from None
+    if type(artifact_refs) is not tuple or not all(type(ref) is str for ref in artifact_refs):
+        raise ModelNotReady("chooser state", "chooser state is missing or unusable") from None
+    return pools, producers, fold_provenance, artifact_refs
+
+
+def _chooser_day(value: Any) -> str:
+    try:
+        if isinstance(value, datetime):
+            if value.utcoffset() is not None:
+                raise ValueError("timezone-aware datetime is not supported")
+            day = value.date()
+        elif isinstance(value, date):
+            day = value
+        elif isinstance(value, str):
+            if len(value) == 10:
+                day = date.fromisoformat(value)
+                if day.isoformat() != value:
+                    raise ValueError("date string is not canonical")
+            elif len(value) > 10 and value[10] in ("T", " "):
+                parsed = datetime.fromisoformat(value)
+                if parsed.utcoffset() is not None:
+                    raise ValueError("timezone-aware datetime string is not supported")
+                day = parsed.date()
+                if parsed.isoformat() != value:
+                    raise ValueError("datetime string is not canonical")
+            else:
+                raise ValueError("unsupported chooser day string form")
+        else:
+            raise ValueError("unsupported chooser day type")
+        return day.isoformat()
+    except (TypeError, ValueError, OverflowError):
+        raise ModelNotReady("chooser state", "chooser state is missing or unusable") from None
+
+
+def _require_causal_chooser_cutoff(
+    training_cutoff: Any, fold_start: str, decision_cutoff: str,
+) -> None:
+    if not isinstance(training_cutoff, str):
+        raise ModelNotReady("chooser_training_cutoff", "chooser state is missing or unusable") from None
+    try:
+        parsed_training = date.fromisoformat(training_cutoff)
+        parsed_fold = date.fromisoformat(fold_start)
+        parsed_decision = date.fromisoformat(decision_cutoff)
+    except (TypeError, ValueError, OverflowError):
+        raise ModelNotReady("chooser_training_cutoff", "chooser state is missing or unusable") from None
+    if parsed_training.isoformat() != training_cutoff:
+        raise ModelNotReady("chooser_training_cutoff", "chooser state is missing or unusable") from None
+    if parsed_fold.isoformat() != fold_start:
+        raise ModelNotReady("chooser_training_cutoff", "chooser state is missing or unusable") from None
+    if parsed_training >= parsed_decision or parsed_training >= parsed_fold:
+        raise ModelNotReady("chooser_training_cutoff", "chooser state is missing or unusable") from None
+
+
+def _chooser_fold_descriptor(
+    binding: ScoringReleaseBinding, catalog: Mapping[str, Any],
+    role: str, fold_start: str, decision_cutoff: str,
+) -> ChooserServingFoldDescriptor:
+    members = catalog.get("members")
+    if not isinstance(members, list):
+        raise ValueError("chooser fold catalog malformed")
+    rows = [row for row in members if isinstance(row, dict)
+            and row.get("member_id") == f"tier4_folds:{role}"]
+    if len(rows) != 1 or rows[0].get("status") != "STAGED":
+        raise ValueError("chooser fold member missing")
+    objects = rows[0].get("objects")
+    if not isinstance(objects, list):
+        raise ValueError("chooser fold objects malformed")
+    matches = []
+    for obj in objects:
+        descriptor = obj.get("serving_fold") if isinstance(obj, dict) else None
+        policy = descriptor.get("policy") if isinstance(descriptor, dict) else None
+        if (isinstance(descriptor, dict) and isinstance(policy, dict)
+                and policy.get("role") == role
+                and descriptor.get("fold_start") == fold_start):
+            matches.append(descriptor)
+    if len(matches) != 1:
+        raise ValueError("chooser fold for cutoff missing or ambiguous")
+    _require_causal_chooser_cutoff(
+        matches[0].get("training_cutoff"), fold_start, decision_cutoff)
+    descriptor = from_document(ChooserServingFoldDescriptor, matches[0])
+    return descriptor
+
+
+def _load_chooser_fold_state(
+    binding: ScoringReleaseBinding, event_date: Any, as_of: Any,
+    fold_start: str, decision_cutoff: str,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, dict[str, str]], tuple[str, ...]]:
+    size = select_gate_forecast_source(binding, event_date, as_of)
+    size_hash = getattr(size, "artifact_hash", None)
+    if not isinstance(size_hash, str) or not size_hash:
+        raise ValueError("size artifact hash missing")
+    refs: list[str] = [
+        size_hash, content_hash({"interval_floor": size.interval_floor})]
+    pools = {"pred_abs_move": {
+        "predictions": size.pool_pred, "residuals": size.pool_res,
+        "interval_floor": size.interval_floor,
+    }}
+    producers = {}
+    fold_provenance: dict[str, dict[str, str]] = {}
+    catalog_text = binding.chooser_fold_catalog_json
+    parent = binding.chooser_parent_manifest
+    if not catalog_text or parent is None:
+        raise ValueError("chooser fold catalog missing")
+    catalog = json.loads(catalog_text)
+    for role in ("implied_t1", "runup_move"):
+        descriptor = _chooser_fold_descriptor(binding, catalog, role, fold_start, decision_cutoff)
+        ref = load_chooser_serving_fold(
+            binding.frozen_inference, descriptor,
+            verified_parent_manifest=parent, verified_catalog=catalog)
+        if not ref.release.bindings:
+            raise ValueError("chooser producer binding missing")
+        pools[descriptor.producer_output] = {
+            "predictions": ref.pool_pred, "residuals": ref.pool_res,
+            "interval_floor": descriptor.policy.interval_floor,
+        }
+        producers[descriptor.producer_output] = ref.release.bindings[0]
+        fold_provenance[descriptor.producer_output] = {
+            "training_cutoff": descriptor.training_cutoff,
+            "fold_start": descriptor.fold_start,
+            "descriptor_hash": descriptor.descriptor_hash,
+        }
+        refs.extend((descriptor.descriptor_hash, content_hash(descriptor.policy)))
+    return pools, producers, fold_provenance, tuple(refs)
+
+
+def select_chooser_state(
+    binding: ScoringReleaseBinding, event_date: Any, as_of: Any,
+    *, fold_cache: dict[tuple[int, str], Any] | None = None,
+) -> ChooserState:
+    """Select exact cutoff chooser artifacts and causal Tier-4 pools."""
+    cutoff = _chooser_day(as_of)
+    analog = [item for item in binding.chooser_analog_artifacts if item.cutoff == cutoff]
+    if len(analog) != 1:
+        raise ModelNotReady("chooser_analog_pool", "chooser state is missing or unusable")
+    tables = [item for item in binding.chooser_admissible_artifacts
+              if item.key == (N_ADMISSIBLE_TABLE_ID, "v1")]
+    if len(tables) != 1:
+        raise ModelNotReady("admissible_table:dyn_sv", "chooser state is missing or unusable")
+    try:
+        event_month = date.fromisoformat(_chooser_day(event_date)).replace(day=1)
+        decision_month = date.fromisoformat(cutoff).replace(day=1)
+    except (TypeError, ValueError, OverflowError):
+        raise ModelNotReady("chooser state", "chooser state is missing or unusable") from None
+    fold_start = min(event_month, decision_month).isoformat()
+    cache_key = (id(binding), f"chooser:{fold_start}:{cutoff}")
+    fold_state = _chooser_fold_cache_lookup(fold_cache, cache_key)
+    if fold_state is None:
+        try:
+            fold_state = _load_chooser_fold_state(
+                binding, event_date, as_of, fold_start, cutoff)
+        except ModelNotReady:
+            raise
+        except (OSError, ValueError, TypeError, KeyError, AttributeError, OverflowError):
+            raise ModelNotReady("chooser state", "chooser state is missing or unusable") from None
+        if fold_cache is not None:
+            fold_cache[cache_key] = _ChooserFoldCacheEntry(
+                validation_token=_CHOOSER_FOLD_CACHE_TOKEN,
+                fold_state=fold_state)
+    pools, producers, fold_provenance, artifact_refs = fold_state
+    return ChooserState(
+        analog_pool=analog[0], admissible_table=tables[0], fold_pools=pools,
+        fold_provenance=fold_provenance,
+        producer_bindings=producers, artifact_refs=artifact_refs)
 
 
 def resolve_production_release_binding() -> ScoringReleaseBinding:
