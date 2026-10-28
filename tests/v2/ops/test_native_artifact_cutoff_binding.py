@@ -156,3 +156,53 @@ def test_str_thru_declaration_binds_latest_line_and_recalibration_cutoffs():
         "bound_cutoff": "2026-10-15",
         "recalibration_bound_cutoff": "2026-10-15",
     }
+
+
+def test_str_thru_refuses_when_no_eligible_line_or_recalibration_map():
+    binding = SimpleNamespace(recalibration_artifacts={"STR-THRU": ()})
+    row = {"entry_date": "2026-10-15"}
+
+    with pytest.raises(NightlySourceBundleRefusal) as missing_line:
+        _release_payoff_declarations(
+            binding, "STR-THRU", (), "2026-10-20", row)
+    assert missing_line.value.code == "MODEL_NOT_READY"
+
+    line = make_payoff_line_artifact(
+        {
+            "n": 2,
+            "resid_sd": 0.1,
+            "r": None,
+            "residuals": (0.1, -0.1),
+            "intercept": 0.1,
+            "slope": 0.2,
+        },
+        strategy="STR-THRU",
+        driver="implied_t1",
+        alpha=0.5,
+        cutoff="2026-10-01",
+    )
+    with pytest.raises(NightlySourceBundleRefusal) as missing_map:
+        _release_payoff_declarations(
+            binding, "STR-THRU", (line,), "2026-10-20", row)
+    assert missing_map.value.code == "MODEL_NOT_READY"
+
+
+def test_runup_refuses_duplicate_artifacts_at_latest_eligible_cutoff():
+    def surface():
+        return make_payoff_surface_artifact(
+            {
+                "n": 2,
+                "resid_sd": 0.1,
+                "r": None,
+                "residuals": (0.1, -0.1),
+                "coefficients": (0.0,) * len(RUNUP_TERMS),
+            },
+            alpha=0.5,
+            cutoff="2026-10-15",
+        )
+
+    binding = SimpleNamespace(
+        payoff_artifacts={"STR-RUNUP": (surface(), surface())})
+    with pytest.raises(NightlySourceBundleRefusal) as raised:
+        _surface(binding, cutoff="2026-10-15", fill_alpha=0.5)
+    assert raised.value.code == "MODEL_NOT_READY"
