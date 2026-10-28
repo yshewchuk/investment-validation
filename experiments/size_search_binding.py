@@ -1,11 +1,12 @@
 """Explicit v2 SIZE source/fold binding; installed panel admission, no hidden builds."""
+import json
 import sys
 from datetime import date
 from hashlib import sha256
 from pathlib import Path
 
 from engine.v2.contracts import SnapshotRef
-from engine.v2.foundation import canonical_json, content_hash, from_document
+from engine.v2.foundation import artifact_reference, canonical_json, content_hash, from_document
 from engine.v2.models.frozen_state_io import BoundedStateReadError, read_bounded_state
 from engine.v2.ops.errors import fail
 from engine.v2.ops.fingerprints import environment_identity, source_closure
@@ -16,6 +17,10 @@ from engine.v2.research.magnitude_inputs import (
 )
 from experiments.magnitude_candidate_recipe import candidate_recipe
 from experiments.magnitude_search_request_versions import compile_request
+from experiments.size_registration_artifacts import (
+    pack_size_registration,
+    size_registration_artifact_bytes,
+)
 from experiments.native_registration import (
     MAX_NATIVE_EVIDENCE_BYTES,
     NativeRegistration,
@@ -24,12 +29,23 @@ from experiments.native_registration import (
 )
 from experiments.size_comparator import recipe as comparison_recipe
 
-SCHEMA = "native_experiment_registration.v1.6"
+SCHEMA = "native_experiment_registration.v1.7"
 
 
 def _require(condition):
     if not condition:
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "qualified SIZE source/fold binding differs")
+
+
+class _PreviewStore:
+    def publish_bytes(self, payload, schema_ref=None):
+        return artifact_reference(payload, schema_ref)
+
+
+def _preview_payload(binding):
+    compact, _ = pack_size_registration(_PreviewStore(), binding)
+    size_registration_artifact_bytes(compact)
+    return canonical_json(compact).encode("utf-8")
 
 
 def validate_panel_request(value):
@@ -73,7 +89,8 @@ def _read_panel(repository, source, request, *, columns):
     return read(repository, source, feature, columns=columns, **args)
 
 
-def prepare(repository, spec, request, panel_request, *, scope, training_start, labels_before):
+def prepare(repository, spec, request, panel_request, *, scope, training_start, labels_before,
+            publish_artifacts=True):
     """Prepare a new development anchor; caller explicitly reserves it separately."""
     from engine.v2.research.magnitude_panel_qualified_table import recipe
     sources = _sources()
@@ -87,7 +104,7 @@ def prepare(repository, spec, request, panel_request, *, scope, training_start, 
              and panel_request["horizons"] == [1, 3, 5])
     base, spec = prepare_native_registration(repository, spec, code_root=Path(__file__).resolve().parents[1],
         scope=scope, as_of_month=panel_request["as_of_month"], event_ids=panel_request["event_ids"],
-        magnitude_training_start=training_start, magnitude_labels_before=labels_before)
+        magnitude_training_start=training_start, magnitude_labels_before=labels_before, defer_serialization=True)
     binding = base.document
     _require(binding["execution_plan"]["runner"] == "experiments/size_search.py")
     binding["source_closure"] = sources
@@ -101,12 +118,17 @@ def prepare(repository, spec, request, panel_request, *, scope, training_start, 
     binding.update(schema_version=SCHEMA, size_request=schedule["request"], size_panel_request=panel_request,
         size_panel={"context": context, "feature_snapshot": panel["feature_snapshot"]},
         size_comparison=comparison_recipe())
-    payload = canonical_json(binding).encode()
-    if len(payload) > MAX_NATIVE_EVIDENCE_BYTES:
+    preview = _preview_payload(binding)
+    if len(preview) > MAX_NATIVE_EVIDENCE_BYTES:
         raise fail("RESOURCE_LIMIT_EXCEEDED", "native registration exceeds its UTF-8 byte budget",
-            details={"registration_bytes": len(payload), "max_registration_bytes": MAX_NATIVE_EVIDENCE_BYTES})
+            details={"registration_bytes": len(preview), "max_registration_bytes": MAX_NATIVE_EVIDENCE_BYTES})
     _folds(binding, schedule["request"])
-    return NativeRegistration(base.run_id, payload), spec
+    if not publish_artifacts:
+        return NativeRegistration(base.run_id, b"", binding), spec
+    compact, logical = pack_size_registration(repository._store, binding)
+    payload = canonical_json(compact).encode("utf-8")
+    _require(payload == preview)
+    return NativeRegistration(base.run_id, payload, logical), spec
 
 
 def _source_files():
@@ -132,7 +154,8 @@ def _sources():
 
 
 def verify_installation(binding):
-    _require(binding["schema_version"] == SCHEMA and binding["environment"] == environment_identity(1)
+    _require(binding["schema_version"] in ("native_experiment_registration.v1.6", SCHEMA)
+        and binding["environment"] == environment_identity(1)
         and binding["source_closure"] == _sources())
     _require(binding["size_comparison"] == comparison_recipe())
 
@@ -161,7 +184,9 @@ def prepare_plan(conn, store, registration, request):
     _require(schedule["request"] == binding["size_request"])
     folds = _folds(binding, request)
     candidates = []
-    source_binding_id = content_hash(binding["size_panel"])
+    source_binding_id = (content_hash(json.loads(registration.binding_json)["size_panel"])
+                         if binding["schema_version"] == "native_experiment_registration.v1.7"
+                         else content_hash(binding["size_panel"]))
     for spec in schedule["candidate_specs"]:
         recipe = candidate_recipe(spec["family"], spec["parameters"], columns=spec["feature_recipe"]["model_columns"],
                                   feature_dictionary_hash=spec["feature_recipe"]["dictionary_hash"])
@@ -181,7 +206,7 @@ def prepare_plan(conn, store, registration, request):
 
 def execution_for_candidate(binding, candidate):
     execution = {**binding["magnitude_execution"], "fit_recipe": candidate["recipe"]}
-    if binding.get("schema_version") == SCHEMA:
+    if binding.get("schema_version") in ("native_experiment_registration.v1.6", SCHEMA):
         execution.update(schema_version="size_candidate_execution.v1", features=candidate["recipe"]["features"],
                          model=candidate["recipe"]["model"])
     return execution

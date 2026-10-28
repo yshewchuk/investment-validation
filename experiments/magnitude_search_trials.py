@@ -53,6 +53,9 @@ def _candidate_failure(problem):
     return problem["code"] == "EXPERIMENT_VARIANT_FAILED"
 
 
+_NOT_ADMITTED = object()
+
+
 class SearchTrials:
     """Native inner fits or submitted forecasts; no outer evaluation or final authority."""
 
@@ -143,8 +146,8 @@ class SearchTrials:
         """Claim once, then bind native inputs; interrupted starts cannot be restarted."""
         return self._start(outer_year, inner_year, candidate_id)
 
-    def _start(self, outer_year, inner_year, candidate_id, execution=None):
-        plan = self._admit()
+    def _start(self, outer_year, inner_year, candidate_id, execution=None, admitted=_NOT_ADMITTED):
+        plan = self._admit() if admitted is _NOT_ADMITTED else admitted
         key, inner, candidate = self._trial(plan, outer_year, inner_year, candidate_id)
         started = {"trial_id": key, "outer_year": outer_year, "inner_year": inner_year, "candidate": candidate}
         if execution is not None:
@@ -177,7 +180,7 @@ class SearchTrials:
         forbid_fitting("SearchTrials.execute")
         forbid_legacy_fitting("SearchTrials.execute")
         resolved = resolved_limits(self.conn, self.store, self.registration, plan, limits) if plan.get("schema_version") == "magnitude_search_plan.v2" else execution_limits(limits)
-        started = self._start(outer_year, inner_year, candidate_id, attempt)
+        started = self._start(outer_year, inner_year, candidate_id, attempt, plan)
         inputs = started["inputs"]
         execution = execution_for_candidate(self.registration.document, candidate)
         fits, pending = [], []

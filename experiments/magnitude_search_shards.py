@@ -321,15 +321,27 @@ def _verified_keys(rows, key, first, last):
     return keys
 
 
-def iter_section(store, section, entry, key):
-    """Stream one section's verified rows in order, holding one shard at a time."""
+def iter_section(store, section, entry, key, *, verified_rows=None):
+    """Stream one section's verified rows in order, holding one shard at a time.
+
+    ``verified_rows`` is keyed by the complete artifact reference and section,
+    so a cached shard cannot be reused across a section or a different artifact
+    identity (schema, storage key, content hash or byte size).
+    """
     _, bindings = _bindings(entry)
     for ref, expected, first, last in bindings:
-        try:
-            payload = store.read_verified(ref)
-        except (ArtifactError, OSError) as error:
-            raise _artifact_failure(error, "read", unsafe_is_conflict=False) from None
-        rows = _payload_rows(payload, section, expected)
+        cache_key = (section, ref.schema_ref, ref.storage_key, ref.content_hash, ref.byte_size)
+        if verified_rows is not None and cache_key in verified_rows:
+            rows = verified_rows[cache_key]
+            if not isinstance(rows, list) or len(rows) != expected:
+                raise fail(_CONFLICT, "search cohort shard binding is invalid")
+            rows = untag_nonfinite(rows)
+        else:
+            try:
+                payload = store.read_verified(ref)
+            except (ArtifactError, OSError) as error:
+                raise _artifact_failure(error, "read", unsafe_is_conflict=False) from None
+            rows = _payload_rows(payload, section, expected)
         _verified_keys(rows, key, first, last)
         yield from rows
 

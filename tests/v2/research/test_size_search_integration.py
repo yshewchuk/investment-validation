@@ -1,4 +1,5 @@
 """Synthetic native source→stored panel→v2 journal→bounded child→comparison path."""
+import json
 from copy import deepcopy
 from types import SimpleNamespace
 
@@ -65,8 +66,9 @@ def case(tmp_path_factory):
         pass
 
 
-def test_native_v16_anchor_and_explicit_v2_fitted_identities(case):
+def test_native_v17_anchor_and_explicit_v2_fitted_identities(case):
     verify_native_registration(case.conn, case.store, case.registration)
+    assert case.registration.document["schema_version"] == "native_experiment_registration.v1.7"
     plan = case.plan
     assert plan["schema_version"] == "magnitude_search_plan.v2"
     assert plan["candidate_count"] == 33 and plan["planned_fit_count"] == 102
@@ -75,8 +77,122 @@ def test_native_v16_anchor_and_explicit_v2_fitted_identities(case):
     assert case.registration.document["size_comparison"]["component_parameters"]["mlp"]["random_state"] == 20260829
     assert len({c["candidate_id"] for c in plan["candidates"]}) == 33
     assert all(c["candidate_id"] == content_hash({k: v for k, v in c.items() if k != "candidate_id"})
-               and c["source_binding_id"] == content_hash(case.registration.document["size_panel"]) for c in plan["candidates"])
+               and c["source_binding_id"] == content_hash(json.loads(case.registration.binding_json)["size_panel"]) for c in plan["candidates"])
     assert {len(c["recipe"]["features"]) for c in plan["candidates"]} == {11, 28, 43}
+
+
+def test_native_registration_detaches_caller_document(case):
+    from experiments.native_registration import NativeRegistration
+
+    source = case.registration.document
+    registration = NativeRegistration(case.registration.run_id, case.registration.binding_json, source)
+    snapshot = registration.document
+    source["size_panel_request"]["event_ids"].append("caller-mutation")
+    assert registration.document == snapshot
+
+
+def test_verified_shard_cache_requires_full_binding(case):
+    from experiments.magnitude_search_shards import iter_section
+    from experiments.size_registration_artifacts import _position
+
+    compact = json.loads(case.registration.binding_json)
+    descriptor = next(iter(compact["size_artifacts"].values()))
+    section, entry = descriptor["section"], descriptor["entry"]
+    ref = from_document(ArtifactRef, entry["shards"][0]["ref"])
+    rows = json.loads(case.store.read_verified(ref))["rows"]
+    full_key = (section, ref.schema_ref, ref.storage_key, ref.content_hash, ref.byte_size)
+    assert len(list(iter_section(case.store, section, entry, _position,
+                                 verified_rows={full_key: rows}))) == len(rows)
+    old_cache = {ref.storage_key: rows}
+    with pytest.raises(OpsError):
+        list(iter_section(case.store, section + ":changed", entry, _position, verified_rows=old_cache))
+
+    changed = deepcopy(entry)
+    old_hash = changed["shards"][0]["ref"]["content_hash"]
+    zero_hash = "sha256:" + "0" * 64
+    changed["shards"][0]["ref"]["content_hash"] = zero_hash if old_hash != zero_hash else "sha256:" + "1" * 64
+    with pytest.raises(OpsError):
+        list(iter_section(case.store, section, changed, _position, verified_rows=old_cache))
+
+
+def test_v17_admission_checks_shard_boundaries_paths_and_map_rows(case):
+    from engine.v2.ops.native_registration import _size_artifact_verified
+    from experiments.magnitude_search_shards import write_section
+    from experiments.size_registration_artifacts import _position
+
+    compact = json.loads(case.registration.binding_json)
+    map_descriptor = next(descriptor for descriptor in compact["size_artifacts"].values()
+                          if descriptor["kind"] == "map")
+    assert _size_artifact_verified(case.store, map_descriptor)
+
+    bad_boundary = deepcopy(map_descriptor)
+    bad_boundary["entry"]["shards"][0]["first_key"] = [100]
+    assert not _size_artifact_verified(case.store, bad_boundary)
+
+    unsafe_path = deepcopy(map_descriptor)
+    unsafe_path["entry"]["shards"][0]["ref"]["storage_key"] = "../outside.json"
+    assert not _size_artifact_verified(case.store, unsafe_path)
+
+    section = "size_registration.v1.7:synthetic-malformed-map"
+    malformed_map = {
+        "kind": "map",
+        "section": section,
+        "entry": write_section(case.store, section,
+                                [{"position": 0, "row": ["missing-value"]}], _position),
+    }
+    assert not _size_artifact_verified(case.store, malformed_map)
+
+
+def test_v17_storage_outages_stay_retryable_through_library_and_cli(case, monkeypatch, capsys):
+    from engine.v2.ops.errors import fail
+    from experiments import size_search
+    from experiments.native_registration import read_native_registration
+    from experiments.size_registration_artifacts import hydrate_size_registration
+
+    class RawUnavailableStore:
+        root = case.store.root
+
+        def read_verified(self, ref):
+            if ref.schema_ref == "magnitude_search_shard.v1":
+                raise OSError("synthetic storage I/O failure")
+            return case.store.read_verified(ref)
+
+    with pytest.raises(OSError, match="synthetic storage I/O failure"):
+        read_native_registration(case.conn, RawUnavailableStore(), case.spec)
+
+    class TypedUnavailableStore:
+        root = case.store.root
+
+        def read_verified(self, ref):
+            if ref.schema_ref == "magnitude_search_shard.v1":
+                raise fail("RESOURCE_UNAVAILABLE", "synthetic shard I/O failure")
+            return case.store.read_verified(ref)
+
+    with pytest.raises(OpsError) as caught:
+        hydrate_size_registration(TypedUnavailableStore(), json.loads(case.registration.binding_json))
+    assert caught.value.code == "RESOURCE_UNAVAILABLE"
+    assert caught.value.problem.retryable is True
+
+    class ConnectionProxy:
+        def __getattr__(self, name):
+            return getattr(case.conn, name)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(size_search, "_read_document", lambda path: case.request if path == "request.json" else {})
+    monkeypatch.setattr(size_search, "_contain", lambda request: None)
+    monkeypatch.setattr(size_search, "experiment_spec_from_document", lambda document: case.spec)
+    monkeypatch.setattr(size_search, "connect", lambda *args, **kwargs: ConnectionProxy())
+    monkeypatch.setattr(size_search, "ArtifactStore", lambda root: RawUnavailableStore())
+    monkeypatch.setattr(size_search, "Repository", lambda *args, **kwargs: object())
+    result = size_search.main([
+        "report", "--spec", "spec.json", "--request", "request.json",
+        "--catalog", "catalog.sqlite", "--store-root", str(case.store.root),
+        "--plan-ref", "plan-ref.json", "--no-ledger",
+    ])
+    assert result == 2
+    assert json.loads(capsys.readouterr().out)["refused"] == "RESOURCE_UNAVAILABLE"
 
 
 def test_preflight_missing_inner_year_refuses_before_reservation(case):
@@ -172,7 +288,7 @@ def test_completed_search_exact_and_expired_replay(completed_case, monkeypatch):
 
 
 @pytest.mark.parametrize("field", ["size_request", "size_panel_request", "size_panel", "size_comparison"])
-def test_native_v16_missing_or_nondictionary_additive_field_refuses(case, field):
+def test_native_v17_missing_or_nondictionary_additive_field_refuses(case, field):
     from engine.v2.ops.native_registration import _magnitude_binding
     for bad in (None, [], "untrusted"):
         document = case.registration.document
@@ -257,7 +373,6 @@ def test_report_replays_comparator_evidence(completed_case, monkeypatch, slot, m
 
 @pytest.mark.parametrize("headroom", [-1, 0, 1])
 def test_prepared_registration_byte_boundary_matches_reserve_and_verify(case, monkeypatch, headroom):
-    from engine.v2.foundation import canonical_json
     from experiments.native_registration import read_native_registration
     expected = case.registration.binding_json
     budget = len(expected) + headroom
@@ -286,7 +401,8 @@ def test_prepared_registration_byte_boundary_matches_reserve_and_verify(case, mo
             assert caught.value.problem.details == {"registration_bytes": len(expected), "max_registration_bytes": budget}
     else:
         prepared, spec = binding.prepare(case.repository, case.spec, case.request, case.panel_request, **case.args)
-        assert prepared.binding_json == expected == canonical_json(prepared.document).encode()
+        assert prepared.binding_json == expected
+        assert prepared.document == case.registration.document
         assert reserve_native_registration(case.conn, case.store, prepared, spec,
                                             max_evidence_bytes=budget) == prepared
         verify_native_registration(case.conn, case.store, prepared, max_evidence_bytes=budget)
@@ -382,3 +498,180 @@ def test_public_fold_inputs_refuses_caller_drift_before_dependent_reads(case, mo
     assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
     assert caught.value.problem.retryable is False
     assert case.conn.total_changes == before
+
+
+def test_v17_large_registration_is_compact_and_missing_shard_refuses(case):
+    from collections import Counter
+    from engine.v2.foundation import ArtifactError, canonical_json
+    from experiments.native_registration import NativeRegistration, read_native_registration
+    from experiments.size_registration_artifacts import pack_size_registration
+
+    logical = case.registration.document
+    context = logical["size_panel"]["context"]
+    context["confirmed_metadata"] = {
+        "schema_version": "magnitude_confirmed_metadata.v1",
+        "policy": {"mode": "synthetic"},
+        "source": {"fragment_records": [{"fragment_id": "synthetic-fragment",
+                                          "content_hash": "sha256:synthetic"}]},
+        "tickers": ["SYN"],
+        "sequences": [{
+            "ticker": "SYN", "status": "complete", "selected_rows": 4200,
+            "confirmed_rows": 4200, "first_confirmed_date": "2020-01-01",
+            "events": [{"ordinal": index, "warmup_complete": True,
+                        "source_note": "m" * 4096} for index in range(4200)],
+        }],
+        "counts": {"tickers": 1, "events": 4200},
+        "index_id": "synthetic-large",
+    }
+    context["context_id"] = content_hash({key: value for key, value in context.items() if key != "context_id"})
+    spec = prediction_spec(experiment_id="synthetic-large-size-registration",
+                           folds=("2024",), runner="experiments/size_search.py")
+    logical["spec_hash"] = spec.spec_hash
+    key = content_hash({"experiment_id": spec.experiment_id, "arm": spec.primary_arm_id})
+    run_id = "native_" + key.removeprefix("sha256:")
+    compact, logical = pack_size_registration(case.store, logical)
+    assert any(descriptor.get("kind") == "map" for descriptor in compact["size_artifacts"].values())
+    assert any(descriptor.get("kind") == "list"
+               and descriptor.get("entry", {}).get("row_count") == 4200
+               for descriptor in compact["size_artifacts"].values())
+    from engine.v2.foundation.canonical import iter_canonical_json
+    old_bytes = sum(len(chunk.encode("utf-8")) for chunk in iter_canonical_json(logical))
+    payload = canonical_json(compact).encode()
+    assert old_bytes > 16 * 1024 * 1024
+    assert 0 < len(payload) < 1024 * 1024
+    assert len(payload) < 16 * 1024 * 1024
+    registration = NativeRegistration(run_id, payload, logical)
+    reserve_native_registration(case.conn, case.store, registration, spec)
+
+    class CountingStore:
+        def __init__(self):
+            self.root = case.store.root
+            self.reads = Counter()
+
+        def read_verified(self, ref):
+            self.reads[ref.storage_key] += 1
+            return case.store.read_verified(ref)
+
+    counting_store = CountingStore()
+    replayed = read_native_registration(case.conn, counting_store, spec)
+    assert replayed.document == logical
+    assert replayed.binding_json == payload
+    for descriptor in compact["size_artifacts"].values():
+        for shard in descriptor["entry"]["shards"]:
+            assert counting_store.reads[shard["ref"]["storage_key"]] == 1
+    sealed = planner.seal_search_plan(case.conn, case.store, replayed, case.request)
+    plan_ref = from_document(ArtifactRef, sealed["plan_ref"])
+    assert planner.read_search_plan(case.conn, case.store, replayed, case.request, plan_ref) == sealed["plan"]
+    print(f"v1.7 registration bytes: {len(payload)}")
+
+    first = next(iter(compact["size_artifacts"].values()))["entry"]["shards"][0]
+    missing_ref = first["ref"]
+
+    class MissingShardStore:
+        root = case.store.root
+
+        def read_verified(self, ref):
+            from engine.v2.contracts import ArtifactRef
+            from engine.v2.foundation import from_document
+            if ref == from_document(ArtifactRef, missing_ref):
+                raise ArtifactError("INTEGRITY_FAILED", "synthetic missing registration shard")
+            return case.store.read_verified(ref)
+
+    with pytest.raises(OpsError) as caught:
+        verify_native_registration(case.conn, MissingShardStore(), replayed)
+    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+
+    class AlteredShardStore:
+        root = case.store.root
+
+        def read_verified(self, ref):
+            from engine.v2.contracts import ArtifactRef
+            from engine.v2.foundation import from_document
+            payload = case.store.read_verified(ref)
+            if ref == from_document(ArtifactRef, missing_ref):
+                return payload[:-1]
+            return payload
+
+    with pytest.raises(OpsError) as caught:
+        verify_native_registration(case.conn, AlteredShardStore(), replayed)
+    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+
+
+def test_v17_packer_refuses_non_object_document_before_publish(case, monkeypatch):
+    from experiments.size_registration_artifacts import pack_size_registration
+
+    published = []
+    publish_bytes = case.store.publish_bytes
+
+    def record_publish(payload, *, schema_ref):
+        published.append((payload, schema_ref))
+        return publish_bytes(payload, schema_ref=schema_ref)
+
+    monkeypatch.setattr(case.store, "publish_bytes", record_publish)
+    with pytest.raises(OpsError) as caught:
+        pack_size_registration(case.store, [])
+    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert not published
+
+
+def test_v17_artifact_cap_precedes_publish_and_preflight_is_read_only(case, monkeypatch):
+    from experiments import size_registration_artifacts as artifacts
+    from experiments.magnitude_search_shards import write_section
+
+    published = []
+    publish_bytes = case.store.publish_bytes
+    def record_publish(payload, *, schema_ref):
+        published.append((payload, schema_ref))
+        return publish_bytes(payload, schema_ref=schema_ref)
+    monkeypatch.setattr(case.store, "publish_bytes", record_publish)
+
+    cap = artifacts.MAX_SIZE_ARTIFACT_BYTES
+    monkeypatch.setattr(artifacts, "MAX_SIZE_ARTIFACT_BYTES", 1)
+    with pytest.raises(OpsError) as caught:
+        binding._preview_payload(case.registration.document)
+    assert caught.value.code == "RESOURCE_LIMIT_EXCEEDED"
+    assert not published
+
+    monkeypatch.setattr(artifacts, "MAX_SIZE_ARTIFACT_BYTES", cap)
+    shard_limit = artifacts.MAX_SHARDS
+    monkeypatch.setattr(artifacts, "MAX_SHARDS", 0)
+    with pytest.raises(OpsError) as caught:
+        binding.prepare(case.repository, case.spec, case.request, case.panel_request,
+                        publish_artifacts=True, **case.args)
+    assert caught.value.code == "RESOURCE_LIMIT_EXCEEDED"
+    assert not published
+    monkeypatch.setattr(artifacts, "MAX_SHARDS", shard_limit)
+    prepared, _ = binding.prepare(case.repository, case.spec, case.request, case.panel_request,
+                                  publish_artifacts=False, **case.args)
+    assert prepared.binding_json == b""
+    assert not published
+
+    with pytest.raises(OpsError) as caught:
+        write_section(case.store, "synthetic:oversized-row",
+                      [{"position": 0, "row": "x" * (8 * 1024 * 1024)}],
+                      lambda row: (row["position"],))
+    assert caught.value.code == "RESOURCE_LIMIT_EXCEEDED"
+    assert not published
+
+
+def test_v16_inline_size_registration_still_round_trips(case):
+    from engine.v2.foundation import canonical_json
+    from experiments.native_registration import NativeRegistration, read_native_registration
+
+    logical = case.registration.document
+    logical["schema_version"] = "native_experiment_registration.v1.6"
+    spec = prediction_spec(experiment_id="synthetic-legacy-v16-registration",
+                           folds=("2024",), runner="experiments/size_search.py")
+    logical["spec_hash"] = spec.spec_hash
+    key = content_hash({"experiment_id": spec.experiment_id, "arm": spec.primary_arm_id})
+    run_id = "native_" + key.removeprefix("sha256:")
+    payload = canonical_json(logical).encode()
+    registration = NativeRegistration(run_id, payload)
+    reserve_native_registration(case.conn, case.store, registration, spec)
+    replayed = read_native_registration(case.conn, case.store, spec)
+    assert replayed.document == logical
+    assert replayed.binding_json == payload
+    verify_native_registration(case.conn, case.store, replayed)
+    sealed = planner.seal_search_plan(case.conn, case.store, replayed, case.request)
+    plan_ref = from_document(ArtifactRef, sealed["plan_ref"])
+    assert planner.read_search_plan(case.conn, case.store, replayed, case.request, plan_ref) == sealed["plan"]
