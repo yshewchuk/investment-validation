@@ -429,7 +429,7 @@ schedule it now, well before Phase 7.
 
 `native_score_batch` is an optional sidecar submitted by `Service._reconcile_native_score_batch_shadow` after a snapshot-pinned score; `GRAPH` documents its score edge, and the pool-cycle gate below orders it after pool reconciliation.
 
-**Cutover PR-7b (implemented, #145/#150):** `nightly_trigger._default_plan` pins the shadow snapshot used by legacy scoring and native board enumeration; it runs on its own 30-minute systemd timer, separate from the legacy nightly.
+The nightly plan pins the shadow snapshot used by legacy scoring and native board enumeration; it runs on a separate 30-minute systemd timer.
 
 `nightly_trigger._ensure_shadow_snapshot(root, as_of, clock, attempt, ...) -> (status, snapshot_id | None)`, called from `_submit_plan` immediately before `plan_fn`, on every pre-plan attempt:
 
