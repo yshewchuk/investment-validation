@@ -405,3 +405,17 @@ def test_reopen_refuses_malformed_identity_field_types(prod):
     with pytest.raises(OpsError) as caught:
         _reopen(prod, "typed")
     assert _details(caught) == ("WORKSPACE_REFUSED", "identity_unreadable")
+
+
+def test_reopen_refuses_a_different_schema_version_with_its_own_reason(prod):
+    with _create(prod, "schema") as ws:
+        identity_path = ws.paths.root / IDENTITY_FILE
+    identity = json.loads(identity_path.read_text())
+    if isinstance(identity["schema_version"], int):
+        identity["schema_version"] += 1
+    else:
+        identity["schema_version"] = "other"
+    identity_path.write_text(json.dumps(identity))
+    with pytest.raises(OpsError) as caught:
+        _reopen(prod, "schema")
+    assert _details(caught) == ("WORKSPACE_REFUSED", "schema_mismatch")

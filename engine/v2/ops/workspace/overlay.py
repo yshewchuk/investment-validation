@@ -349,7 +349,9 @@ def open_workspace(root, *, production_catalog, production_store, clock,
     paths = _paths(base)
     _check_layout(paths, catalog)
     identity = _read_identity(base)
-    if (identity["schema_version"] != SCHEMA_VERSION or identity["production_catalog"] != str(catalog)
+    if identity["schema_version"] != SCHEMA_VERSION:
+        raise _refuse("schema_mismatch")
+    if (identity["production_catalog"] != str(catalog)
             or identity["production_store"] != str(store_root)):
         raise _refuse("production_mismatch")
     _log(f"stage=open start snapshot={identity['snapshot_id']}")

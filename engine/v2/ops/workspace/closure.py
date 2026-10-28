@@ -81,14 +81,15 @@ def _bound_fragments(conn, snapshot_id: str) -> None:
         "SELECT SUM(LENGTH(CAST(f.fragment_id || f.object_id || f.contract_id || f.partition_key "
         "|| f.byte_hash || f.logical_content_hash || f.key_bounds_json "
         "|| COALESCE(f.time_bounds_json, '') || f.import_request_hash "
-        "|| f.input_receipt_refs_json AS BLOB))) FROM data_fragments f WHERE f.fragment_id IN "
+        "|| f.input_receipt_refs_json || f.registered_at AS BLOB))) FROM data_fragments f WHERE f.fragment_id IN "
         "(SELECT fragment_id FROM data_version_fragments WHERE dataset_version_id IN "
         "(SELECT dataset_version_id FROM data_snapshot_tables WHERE snapshot_id = ?))",
         (snapshot_id,), "data_fragments")
     _bound_bytes(
         conn,
         "SELECT SUM(LENGTH(CAST(d.dataset_version_id || d.contract_id || d.manifest_hash "
-        "|| d.evidence_json || d.partition_logical_hashes_json || COALESCE(d.parent_dataset_version_id, '') "
+        "|| d.evidence_json || d.partition_logical_hashes_json || d.registered_at "
+        "|| COALESCE(d.parent_dataset_version_id, '') "
         "AS BLOB))) FROM data_dataset_versions d WHERE d.dataset_version_id IN "
         "(SELECT dataset_version_id FROM data_snapshot_tables WHERE snapshot_id = ?)",
         (snapshot_id,), "data_dataset_versions")
