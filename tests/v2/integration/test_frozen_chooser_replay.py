@@ -51,7 +51,7 @@ def test_frozen_replay_refuses_missing_or_noncausal_fold_provenance(monkeypatch,
     assert "chooser:fold_provenance:unverifiable" in result["detail"]
 
 
-def test_frozen_replay_accepts_canonical_causal_cutoffs():
+def test_frozen_replay_requires_provenance_bound_to_staged_descriptors():
     provenance = {
         "pred_im_t1_d14": {
             "training_cutoff": "2026-09-30", "fold_start": "2026-10-01",
@@ -65,5 +65,19 @@ def test_frozen_replay_accepts_canonical_causal_cutoffs():
         "artifact_refs": ["descriptor-implied", "descriptor-runup"],
     }
     request = SimpleNamespace(requested_decision_at="2026-10-27")
+    staged = {
+        "__chooser_descriptor__:descriptor-implied":
+            "pred_im_t1_d14\x1f2026-09-30\x1f2026-10-01",
+        "__chooser_descriptor__:descriptor-runup":
+            "pred_runup_abs_move_d14\x1f2026-09-30\x1f2026-10-01",
+    }
 
-    assert phase5_phase4_replay._has_causal_chooser_fold_provenance(recipe, request)
+    assert phase5_phase4_replay._has_causal_chooser_fold_provenance(
+        recipe, request, staged)
+    assert not phase5_phase4_replay._has_causal_chooser_fold_provenance(
+        recipe, request, {})
+    mismatched = dict(staged)
+    mismatched["__chooser_descriptor__:descriptor-implied"] = (
+        "pred_im_t1_d14\x1f2026-10-01\x1f2026-10-01")
+    assert not phase5_phase4_replay._has_causal_chooser_fold_provenance(
+        recipe, request, mismatched)

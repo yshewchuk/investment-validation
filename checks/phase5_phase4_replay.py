@@ -63,15 +63,36 @@ _STAGED_STATE_PREFIXES = ("tier4_folds:", "trailing_pnl_cutoff", "chooser_analog
 def staged_model_objects(model_release, manifest: Mapping[str, Any]) -> dict[str, str]:
     """``content_hash -> member id`` for every object a frozen binding, or an
     entry-rule gate's trailing cutoff, may read."""
+    from engine.v2.foundation import from_document
+    from engine.v2.models.serving_folds import ChooserServingFoldDescriptor
+
     staged: dict[str, str] = {}
     for binding in model_release.bindings:
         for member in binding.members:
             staged.setdefault(member.content_hash,
                               f"model:{binding.role}:{binding.strategy_id}")
     for row in manifest.get("members", ()):
-        if str(row.get("member_id", "")).startswith(_STAGED_STATE_PREFIXES):
-            for obj in row.get("objects", ()):
-                staged.setdefault(obj["content_hash"], row["member_id"])
+        if not isinstance(row, Mapping):
+            continue
+        member_id = row.get("member_id", "")
+        if not isinstance(member_id, str) or not member_id.startswith(_STAGED_STATE_PREFIXES):
+            continue
+        for obj in row.get("objects", ()):
+            if not isinstance(obj, Mapping):
+                continue
+            content_hash = obj.get("content_hash")
+            if not isinstance(content_hash, str):
+                continue
+            staged.setdefault(content_hash, member_id)
+            doc = obj.get("serving_fold")
+            if isinstance(doc, Mapping):
+                try:
+                    descriptor = from_document(ChooserServingFoldDescriptor, doc)
+                except Exception:  # noqa: BLE001 -- malformed descriptor never binds
+                    continue
+                staged[f"__chooser_descriptor__:{descriptor.descriptor_hash}"] = (
+                    f"{descriptor.producer_output}\x1f{descriptor.training_cutoff}"
+                    f"\x1f{descriptor.fold_start}")
     return staged
 
 
@@ -129,7 +150,8 @@ def _staged_state(release_root: Path, staged: Mapping[str, str], prefix: str, ar
     return None, None
 
 
-def _has_causal_chooser_fold_provenance(recipe: Any, request: Any) -> bool:
+def _has_causal_chooser_fold_provenance(recipe: Any, request: Any,
+                                        staged: Mapping[str, str]) -> bool:
     from datetime import date, datetime
 
     if not isinstance(recipe, Mapping):
@@ -158,7 +180,7 @@ def _has_causal_chooser_fold_provenance(recipe: Any, request: Any) -> bool:
     else:
         if decision_day.isoformat() != requested_at:
             return False
-    for item in provenance.values():
+    for producer_output, item in provenance.items():
         if not isinstance(item, Mapping) or set(item) != {
                 "training_cutoff", "fold_start", "descriptor_hash"}:
             return False
@@ -166,6 +188,9 @@ def _has_causal_chooser_fold_provenance(recipe: Any, request: Any) -> bool:
         descriptor_hash = item.get("descriptor_hash")
         if (not isinstance(cutoff_text, str) or not isinstance(fold_text, str)
                 or not isinstance(descriptor_hash, str) or descriptor_hash not in artifact_refs):
+            return False
+        if staged.get(f"__chooser_descriptor__:{descriptor_hash}") != (
+                f"{producer_output}\x1f{cutoff_text}\x1f{fold_text}"):
             return False
         try:
             cutoff_day, fold_day = date.fromisoformat(cutoff_text), date.fromisoformat(fold_text)
@@ -191,7 +216,7 @@ def rebind_chooser(chooser, request, release_root: Path, staged: Mapping[str, st
     from engine.v2.models.loader import FrozenInference
     from engine.v2.scoring.chooser_inputs import frozen_chooser_block
 
-    if not _has_causal_chooser_fold_provenance(chooser.recipe, request):
+    if not _has_causal_chooser_fold_provenance(chooser.recipe, request, staged):
         return None, [("chooser:fold_provenance", "unverifiable")], set()
     release, absent, used = _rebind_release(chooser.release, staged)
     served = {}
