@@ -87,6 +87,7 @@ def verified_registration_bytes(conn, store, run_id, *, expected_ref=None, max_e
         binding = store.read_verified(ref)
         document = json.loads(binding)
         _check_size_artifact_budget(document)
+        verified_size_rows = _size_verification_cache(document, verified_size_rows)
         valid = _matches(row, evidence, ref, binding, document, store, verified_size_rows)
     except (ArtifactError, ValueError, TypeError, KeyError):
         valid = False
@@ -97,6 +98,13 @@ def verified_registration_bytes(conn, store, run_id, *, expected_ref=None, max_e
     if not valid:
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "native registration differs from its immutable binding")
     return binding
+
+
+def _size_verification_cache(document, verified_size_rows):
+    if (verified_size_rows is None and isinstance(document, dict)
+            and document.get("schema_version") == "native_experiment_registration.v1.7"):
+        return {}
+    return verified_size_rows
 
 
 def _size_artifact_byte_total(document):
@@ -167,7 +175,10 @@ def _size_artifact_verified(store, descriptor, verified_size_rows=None):
 
 def _matches(row, evidence, ref, binding, document, store, verified_size_rows=None):
     variant = content_hash(document)
-    return (_magnitude_binding(document) and _size_artifacts_verified(store, document, verified_size_rows) and document["schema_version"] == ref.schema_ref
+    return (_magnitude_binding(document) and _size_artifacts_verified(store, document, verified_size_rows)
+            and (document["schema_version"] != "native_experiment_registration.v1.7"
+                 or _magnitude_binding(document, verified_size_rows))
+            and document["schema_version"] == ref.schema_ref
             and canonical_json(document).encode() == binding
             and artifact_reference(binding, ref.schema_ref) == ref
             and row["spec_hash"] == document["spec_hash"] and row["mode"] == "primary"
@@ -187,10 +198,10 @@ def validate_magnitude_execution(document):
     raise fail("EXPERIMENT_IDENTITY_CONFLICT", "magnitude execution requires a sealed v1.3 plan")
 
 
-def _magnitude_binding(document):
+def _magnitude_binding(document, verified_size_rows=None):
     """Check stored plan integrity and cross-links, never reconstruct or authorize."""
     if document["schema_version"] == "native_experiment_registration.v1.7":
-        return _size_binding_v17(document)
+        return _size_binding_v17(document, verified_size_rows)
     if document["schema_version"] == "native_experiment_registration.v1.6":
         return _size_binding(document)
     if document["schema_version"] == "native_experiment_registration.v1.5":
@@ -219,7 +230,7 @@ def _magnitude_binding(document):
             and (not executable or _magnitude_execution(document, plan)))
 
 
-def _size_binding_v17(document):
+def _size_binding_v17(document, verified_size_rows=None):
     """Structural v1.7 placeholder envelope; full SIZE validation follows hydration."""
     try:
         if set(document) != {"schema_version", "spec_hash", "execution_plan", "snapshot", "scope",
@@ -228,14 +239,14 @@ def _size_binding_v17(document):
                              "size_request", "size_panel_request", "size_panel",
                              "size_comparison", "size_artifacts"}:
             return False
-        return (_size_artifact_map_v17(document)
+        return (_size_artifact_map_v17(document, verified_size_rows)
                 and _size_plan_v17(document)
                 and _size_panel_v17(document))
     except (KeyError, TypeError, ValueError, AttributeError, ArtifactError, RecursionError):
         return False
 
 
-def _size_artifact_map_v17(document):
+def _size_artifact_map_v17(document, verified_size_rows=None):
     artifacts = document["size_artifacts"]
     if not isinstance(artifacts, dict):
         return False
@@ -243,7 +254,13 @@ def _size_artifact_map_v17(document):
     for key, value in document.items():
         if key != "size_artifacts" and not _size_placeholders_v17(value, found):
             return False
-    if set(found) != set(artifacts):
+    if verified_size_rows is not None:
+        for rows in verified_size_rows.values():
+            if not _size_placeholders_v17(rows, found):
+                return False
+        if set(found) != set(artifacts):
+            return False
+    elif not set(found) <= set(artifacts):
         return False
     shard_total = 0
     for artifact_id, descriptor in artifacts.items():

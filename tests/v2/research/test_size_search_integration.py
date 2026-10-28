@@ -502,6 +502,14 @@ def test_v17_artifact_cap_precedes_publish_and_preflight_is_read_only(case, monk
     assert not published
 
     monkeypatch.setattr(artifacts, "MAX_SIZE_ARTIFACT_BYTES", cap)
+    shard_limit = artifacts.MAX_SHARDS
+    monkeypatch.setattr(artifacts, "MAX_SHARDS", 0)
+    with pytest.raises(OpsError) as caught:
+        binding.prepare(case.repository, case.spec, case.request, case.panel_request,
+                        publish_artifacts=True, **case.args)
+    assert caught.value.code == "RESOURCE_LIMIT_EXCEEDED"
+    assert not published
+    monkeypatch.setattr(artifacts, "MAX_SHARDS", shard_limit)
     prepared, _ = binding.prepare(case.repository, case.spec, case.request, case.panel_request,
                                   publish_artifacts=False, **case.args)
     assert prepared.binding_json == b""

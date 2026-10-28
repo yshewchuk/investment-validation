@@ -4,7 +4,7 @@ import hashlib
 
 from engine.v2.foundation.canonical import iter_canonical_json
 from engine.v2.ops.errors import OpsError, fail
-from experiments.magnitude_search_shards import iter_section, write_section
+from experiments.magnitude_search_shards import MAX_SHARDS, iter_section, write_section
 
 _PLACEHOLDER = "$size_artifact"
 _ARTIFACT_KEYS = frozenset({"events", "target_events", "event_ids", "fragments",
@@ -23,6 +23,7 @@ def size_registration_artifact_bytes(compact_document):
     if not isinstance(artifacts, dict):
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "SIZE registration artifact map is invalid")
     total = 0
+    shard_total = 0
     for identifier, descriptor in artifacts.items():
         if (not isinstance(identifier, str) or not isinstance(descriptor, dict)
                 or set(descriptor) != {"kind", "section", "entry"}
@@ -31,7 +32,11 @@ def size_registration_artifact_bytes(compact_document):
                 or not isinstance(descriptor["entry"], dict)
                 or not isinstance(descriptor["entry"].get("shards"), list)):
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "SIZE registration artifact reference is invalid")
-        for shard in descriptor["entry"]["shards"]:
+        shards = descriptor["entry"]["shards"]
+        shard_total += len(shards)
+        if shard_total > MAX_SHARDS:
+            raise fail("RESOURCE_LIMIT_EXCEEDED", "SIZE registration artifact shard limit exceeded")
+        for shard in shards:
             if not isinstance(shard, dict) or not isinstance(shard.get("ref"), dict):
                 raise fail("EXPERIMENT_IDENTITY_CONFLICT", "SIZE registration artifact reference is invalid")
             byte_size = shard["ref"].get("byte_size")
