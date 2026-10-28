@@ -405,7 +405,7 @@ Library-only helpers for preparing SIZE inputs inside a caller-supplied write ro
 | `write_root` a symlink path, empty `production_roots`, or `write_root` equal to, containing or contained by a production root; unhashable or non-string ticker entries | `INVALID_REQUEST` |
 | Refusals raised by the shared refresh (`computed_moves_command`: missing scope head, held supervisor lock, input or contract mismatches) | propagated unchanged |
 | Refresh was a no-op and the head carries no source bounds | `PUBLICATION_REFUSED` |
-| Decompressed cache body above `MAX_BODY_BYTES` (64 MiB) | `RESOURCE_LIMIT_EXCEEDED` |
+| Decompressed cache body above `MAX_BODY_BYTES` (64 MiB), or more than `MAX_SIDECARS` (2,000,000) sidecars scanned | `RESOURCE_LIMIT_EXCEEDED` |
 | Pinned entry missing, `fetched_at`, status or body hash changed | `INPUT_CHANGED` |
 | `as_of` differs from `session_ceiling` | `INVALID_REQUEST` |
 | Another supervisor holds the write-root catalog | `RESOURCE_UNAVAILABLE` |

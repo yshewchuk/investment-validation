@@ -343,3 +343,15 @@ def test_manifest_ignores_non_history_non_max_and_failed_entries(source_root):
     cc03_meta.write_text(cc03_meta.read_text().replace('"period": "max"', '"period": "1y"'))
     manifest = prep.build_manifest(source_root, session_ceiling=_AS_OF, tickers=["CCCC"])
     assert manifest["entries"][0]["key"] == "cc01"
+
+
+def test_bounds_option_is_validated_at_the_cli_boundary_even_for_dry_run(tmp_path):
+    from types import SimpleNamespace
+
+    from engine.v2.ops.cli import computed_moves_command
+
+    args = SimpleNamespace(source_root=tmp_path, scope="shadow", as_of=_AS_OF, dry_run=True)
+    for invalid in ("yes", 1, None):
+        _refusal(lambda: computed_moves_command(args, tmp_path, None, None, include_source_bounds=invalid),
+                 "INVALID_REQUEST")
+    assert not (tmp_path / computed_moves_store.INPUT_PATH).exists()

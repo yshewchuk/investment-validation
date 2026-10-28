@@ -862,12 +862,12 @@ def _computed_moves_capture_report(dry_run, targets, cache):
 
 
 def computed_moves_command(args, root, conn, clock, *, history=None, include_source_bounds=False):
-    """Build one computed_moves.v5 generation from the local Tier-1 cache.
+    """Tier-1 computed_moves.v5 generation; ``history`` is an optional ``(cache, fetch)`` pair (default newest-wins).
 
-    ``history``: optional ``(cache, fetch)`` pair shaped like ``tier1_yfinance_history_fetcher``'s
-    (default newest-wins); ``include_source_bounds`` goes to the refresh. Only when either is used
-    the report adds ``parent_snapshot_id`` (the plan's parent, read under the lock).
+    ``include_source_bounds`` (bool) goes to the refresh; with either option the report adds ``parent_snapshot_id``.
     """
+    if type(include_source_bounds) is not bool:
+        raise fail("INVALID_REQUEST", "include_source_bounds must be boolean")
     from engine.v2.data.repository import Repository
     from engine.v2.ops import computed_moves_store
     from engine.v2.ops.calendar_moves_jobs import CalendarMovesParameters
