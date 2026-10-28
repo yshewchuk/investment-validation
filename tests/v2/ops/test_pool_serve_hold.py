@@ -70,6 +70,8 @@ def test_hold_for_pool_keeps_until_false_while_a_cycle_is_pending(monkeypatch):
 
 def test_hold_for_pool_lets_until_finish_once_the_cycle_is_done(monkeypatch):
     captured = _capture_until(monkeypatch)
+    monkeypatch.setattr(nightly_trigger, "_native_score_batch_pending",
+                        lambda conn, job_ids: False)
     monkeypatch.setattr(nightly_trigger, "_pool_pending", lambda conn: False)
     conn = _FakeConn(("succeeded", "succeeded"))
 
@@ -85,6 +87,8 @@ def test_hold_for_pool_passes_the_conn_and_resolved_release_root(monkeypatch, tm
     from engine.v2.ops import pool_refresh
 
     captured = _capture_until(monkeypatch)
+    monkeypatch.setattr(nightly_trigger, "_native_score_batch_pending",
+                        lambda conn, job_ids: False)
     calls = []
     pending = {"value": True}
 
@@ -112,6 +116,8 @@ def test_pool_pending_exception_does_not_hold(monkeypatch):
     from engine.v2.ops import pool_refresh
 
     captured = _capture_until(monkeypatch)
+    monkeypatch.setattr(nightly_trigger, "_native_score_batch_pending",
+                        lambda conn, job_ids: False)
 
     def broken(conn, release_root):
         raise RuntimeError("boom")
@@ -179,3 +185,53 @@ def test_default_serve_holds_for_the_pool(tmp_path, monkeypatch):
 
     assert nightly_trigger._default_serve(tmp_path, "plan_hold", _FakeClock()) == "completed"
     assert captured["hold_for_pool"] is True
+
+
+class _NativeBatchConn:
+    def __init__(self):
+        self.batch_state = "queued"
+        self.sql = ""
+        self.params = ()
+
+    def execute(self, sql, params=()):
+        self.sql, self.params = sql, params
+        return self
+
+    def fetchall(self):
+        if self.sql.startswith("SELECT state FROM jobs WHERE job_id IN"):
+            return [{"state": "succeeded"}]
+        return []
+
+    def fetchone(self):
+        if "kind = 'score'" in self.sql:
+            if ("score-job" in self.params
+                    and self.params[-1] == "nightly:2026-09-26:sha256:scope:score"):
+                return {"1": 1}
+            return None
+        if self.sql.startswith("SELECT state FROM jobs WHERE job_id = ?"):
+            if self.params == ("native-job",):
+                return {"state": self.batch_state}
+        return None
+
+
+def test_hold_for_pool_waits_for_its_native_score_batch(monkeypatch):
+    from engine.v2.ops import nightly, submission
+
+    captured = _capture_until(monkeypatch)
+    monkeypatch.setattr(nightly_trigger, "_pool_pending", lambda conn: False)
+    monkeypatch.setattr(
+        nightly, "native_score_batch_identity",
+        lambda conn: ("2026-09-26", "sha256:scope", object()))
+    monkeypatch.setattr(
+        nightly, "_native_score_batch_key",
+        lambda session, scope: "nightly:2026-09-26:sha256:scope:native_score_batch")
+    monkeypatch.setattr(submission, "job_id_for", lambda namespace, key: "native-job")
+    conn = _NativeBatchConn()
+
+    outcome = nightly_trigger._drive_jobs_to_terminal(
+        None, conn, ("score-job",), None, hold_for_pool=True)
+
+    assert outcome == "timed_out"
+    assert captured["until"]() is False
+    conn.batch_state = "succeeded"
+    assert captured["until"]() is True
