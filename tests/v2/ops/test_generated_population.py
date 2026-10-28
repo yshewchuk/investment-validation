@@ -201,7 +201,8 @@ def test_an_empty_window_is_a_typed_refusal_not_an_empty_plan(env):
 def test_an_unreadable_head_artifact_is_input_changed_with_the_artifact_error(monkeypatch, code):
     from engine.v2.foundation import ArtifactError
 
-    monkeypatch.setattr(planning, "resolve_snapshot_head", lambda *a, **k: "head")
+    head_ref = type("HeadRef", (), {"byte_size": 1})()
+    monkeypatch.setattr(planning, "resolve_snapshot_head", lambda *a, **k: head_ref)
 
     class _Store:
         def read_verified(self, head):
@@ -220,7 +221,8 @@ def test_an_unreadable_head_artifact_is_input_changed_with_the_artifact_error(mo
 def test_pin_snapshot_inputs_maps_an_unreadable_head_artifact_to_input_changed(monkeypatch, code):
     from engine.v2.foundation import ArtifactError
 
-    monkeypatch.setattr(planning, "resolve_snapshot_head", lambda *a, **k: "head")
+    head_ref = type("HeadRef", (), {"byte_size": 1})()
+    monkeypatch.setattr(planning, "resolve_snapshot_head", lambda *a, **k: head_ref)
 
     class _Store:
         def read_verified(self, head):

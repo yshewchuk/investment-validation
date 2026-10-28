@@ -467,7 +467,7 @@ Per-ticker fetch failures handled by `run_refresh` are retained in the refresh r
 The private per-session price report lists each planned ticker without any captured rows with `PRICE_HISTORY_NOT_AVAILABLE`; this presence check reports without refusing the plan or scoring rows and does not establish a usable session close.
 Capture optionally checks `expected_snapshot_id` under its lock and again before committing; a changed head is `INPUT_CHANGED`. The captured snapshot ID becomes the plan's expected pin, whose existing final equality guard remains in force.
 If capture committed before a later failure or crash, its rows and fetched bytes remain. A stale import pin on retry refuses, advances `snapshot_attempt`, and causes the next trigger attempt to import afresh within the existing retry budget.
-The report is replaced atomically after capture; a report-write failure leaves the committed capture available. A saved plan resumes without another refresh. Direct `ops plan` and standalone `price-refresh` retain their existing behavior. The planned refresh also refreshes `gspc_daily.csv` as described for `price-refresh`; `engine.paths.WRITABLE_EXCEPTIONS` makes that one file writable inside the otherwise read-only `earnings_predictions` tree, and its outcome is in the report as `gspc_daily`.
+The report is replaced atomically after capture; a report-write failure leaves the committed capture available. A saved plan resumes without another refresh. Direct `ops plan` commands other than `plan nightly`, and standalone `price-refresh`, retain their existing behavior. The planned refresh also refreshes `gspc_daily.csv` as described for `price-refresh`; `engine.paths.WRITABLE_EXCEPTIONS` makes that one file writable inside the otherwise read-only `earnings_predictions` tree, and its outcome is in the report as `gspc_daily`.
 
 ### Current nightly orchestration boundary
 
@@ -557,7 +557,7 @@ Entry/exit/expiry, spot and calendar-observed-through are caller-staged; validat
 
 ## Inputs
 
-- Plan documents built by `plans.py::nightly_plan`/`build_nightly_plan` (pinned decision clock, read set, session).
+- Nightly plans built by `plans.py::nightly_plan`/`build_nightly_plan` may carry a snapshot ID when supplied. `ops plan nightly` gets native IDs from pinned inputs and resolves the legacy shadow head once: absent raises typed `SNAPSHOT_NOT_READY` before save; other resolution errors, unreadable, malformed or over-64-MiB refs raise `INPUT_CHANGED` with `data_code` where applicable; a valid ref's ID enters the plan and identity hash. Retries reuse the saved ID; a fresh plan resolves a new pin.
 - The operations catalog (sqlite, via `catalog.py`'s `transaction`) — job
   rows, leases, retry history, provider-account budgets.
 - The artifact store (`ArtifactStore`, filesystem-backed) for refresh plans
