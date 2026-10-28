@@ -485,3 +485,10 @@ def test_pin_resolution_in_create_goes_through_the_bounded_cursor(prod, monkeypa
     with pytest.raises(DataError) as caught:
         _create(prod, "pinbound")
     assert _details(caught)[1] == "closure_rows_over_cap"
+
+
+def test_schema_compatibility_read_goes_through_the_bounded_cursor(prod, monkeypatch):
+    monkeypatch.setattr(closure_module, "_MAX_ROWS", 0)
+    with pytest.raises(DataError) as caught:
+        _create(prod, "schemabound")
+    assert _details(caught)[1] == "closure_rows_over_cap"

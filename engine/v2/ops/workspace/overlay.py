@@ -204,7 +204,7 @@ def _open_readonly(catalog: Path) -> sqlite3.Connection:
     try:
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA query_only = ON")
-        require_compatible_catalog(conn)
+        require_compatible_catalog(_BoundedConn(conn))
     except BaseException:
         conn.close()
         raise
