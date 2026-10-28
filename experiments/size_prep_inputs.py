@@ -130,11 +130,6 @@ def pinned_history_fetcher(source_root, manifest, *, strict=False):
     return cache, fetch
 
 
-def _head(conn, scope):
-    row = conn.execute("SELECT snapshot_id FROM data_snapshot_heads WHERE scope = ?", (scope,)).fetchone()
-    return row["snapshot_id"] if row else None
-
-
 def _provenance(manifest, source_snapshot_id, bounds_snapshot_id):
     entries = manifest["entries"]
     ceiling = date.fromisoformat(manifest["session_ceiling"])
@@ -173,13 +168,13 @@ def generate_bounds(write_root, *, source_root, manifest, scope, as_of):
     history = pinned_history_fetcher(source_root, manifest, strict=True)
     conn = connect(str(catalog), must_exist=True)
     try:
-        before = _head(conn, scope)
         args = SimpleNamespace(source_root=Path(source_root), scope=scope, as_of=as_of, dry_run=False)
-        computed_moves_command(args, root, conn, SystemClock(), history=history, include_source_bounds=True)
-        after = _head(conn, scope)
+        report = computed_moves_command(args, root, conn, SystemClock(), history=history, include_source_bounds=True)
     finally:
         conn.close()
-    record = _provenance(manifest, before, after)
+    source = report["parent_snapshot_id"]
+    bounds = report["result"].get("candidate_snapshot_id") or source
+    record = _provenance(manifest, source, bounds)
     _write_record(root, record)
     print("[size-prep] bounds end elapsed=" + format(time.monotonic() - started, ".1f") + "s", file=sys.stderr)
     return record

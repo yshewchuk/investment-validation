@@ -904,6 +904,7 @@ def computed_moves_command(args, root, conn, clock, *, history=None, include_sou
             provider_account=NATIVE_COMPUTED_MOVES_ACCOUNT,
             expected_head_generation=int(head["generation"]))
         report = _computed_moves_capture_report(args.dry_run, targets, cache)
+        report["parent_snapshot_id"] = plan.parent_snapshot_id
         if args.dry_run:
             return report
 
