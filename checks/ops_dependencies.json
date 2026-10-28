@@ -16,7 +16,7 @@
       "price_history_store", "reclaim", "refresh_staging", "snapshot_import", "snapshot_planning", "snapshot_promotion", "snapshots", "stores",
       "native_registration", "stores.refresh_contracts", "stores.massive", "stores.massive.acquisition", "stores.massive.coverage", "stores.massive.journal", "stores.massive.pages", "stores.massive.pinned", "stores.massive.snapshot", "unit_receipts"],
     "native": ["carried_set", "native", "native.input_decoding", "native.parity_inputs", "native_board_universe", "native_entry_rule_inputs", "native_parity_report", "native_runup_inputs", "native_score_batch", "native_score_batch_types", "native_shadow_render", "nightly_calendar_inputs",
-      "nightly_chain_batch", "nightly_quote_rows", "nightly_raw_row_producer", "nightly_raw_rows", "nightly_read_summary", "source_availability"],
+      "nightly_chain_batch", "nightly_quote_rows", "nightly_raw_row_producer", "nightly_raw_rows", "nightly_preview_inputs", "nightly_read_summary", "source_availability"],
     "providers": ["providers", "providers.massive", "providers.massive_policy", "providers.nasdaq_calendar", "providers.orats_daily_market", "providers.yfinance_edge"]
   },
   "exceptions": {
