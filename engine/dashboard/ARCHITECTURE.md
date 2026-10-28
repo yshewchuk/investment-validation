@@ -34,8 +34,9 @@ re-renders, re-publishes, and the ledger refuses duplicate `row_id` writes.
   checking it does not read the stored GSPC file. The helper checks minimum coverage before
   reading or replacing the stored file; a stale source leaves it untouched.
   With refresh disabled, both refresh and panel rebuild are skipped. The v2
-  `price-refresh` stage omits the new optional cutoff and keeps its existing
-  behaviour.
+  `price-refresh` stage omits the new optional cutoff and instead passes its
+  run session as a ceiling. The legacy nightly also passes that expected
+  (previous) session as the ceiling, so a bar dated after it is never stored.
 
 - `nightly.py` — the orchestrator; run as the legacy nightly entrypoint
   (root doc §4). Public helpers for the Tier-4 gap repair:
@@ -166,13 +167,15 @@ inside function bodies):
   `nightly.py::_panel_staleness_flags`/`_recently_printed`/`run_nightly`/
   `validate_refresh`, `render.py::freshness_summary`); `engine.data.fetch`
   (`nightly.py::backfill_ticker_history`/`refresh_calendar_data`/
-  `refresh_forward_chains`/`run_nightly`); `engine.data.finality`
+  `refresh_forward_chains`/`_refresh_one_session`/`run_nightly`); `engine.data.finality`
   (`nightly.py::run_nightly`); `engine.data.pulls`
   (`nightly.py::run_nightly`, including `gspc_refresh::refresh_gspc_daily`);
   `engine.data.pulls.forward_calendar`
   (`nightly.py::refresh_calendar_data`); `engine.data.rebuild`
   (`nightly.py::refresh_calendar_data`/`run_nightly`/`mark_tiers_degraded`);
-  `engine.data.manifest` (`nightly.py::_write_flag_report`);
+  `engine.data.manifest` (`nightly.py::_write_flag_report`/
+  `_write_chain_retry`); `engine.replay`
+  (`nightly.py::refresh_forward_chains`);
   `engine.data.normalize.n_daily`
   (`nightly.py::run_nightly`); `engine.data.schemas`
   (`model_evidence.py::_replay_trades`); `engine.entry_rules`
@@ -240,6 +243,18 @@ publish command, per `publish.py`'s `CommandPublisher` variant);
   to cached data (staleness stays visible in `meta.json`) — except a rotated
   credential, which stops the run rather than burning retries against a dead
   key. `^GSPC` refresh failures use the typed refusal above.
+- **Forward-chain retry ledger** — transient (non-404) failures, wrong-shape
+  or non-JSON 200s and quota/abnormal-exit remainders are saved to
+  `reports/orats_chain_retry.json` and re-asked for 14 days, including after
+  their session leaves the two-session window (`older_retried`); a re-ask is
+  a fresh provider call, never a replay of a cached bad body. Nothing is
+  skipped because of earlier misses. A bad, oversized or unwritable ledger
+  never stops the refresh (a lost ledger costs a re-buy window). Outcomes:
+  transient or bad-body response → name stays owed; HTTP 404 → not owed;
+  quota exhausted → remainder saved, run degrades to cached data; credential
+  rotated → remainder saved, run stops. The chain loop logs a start line,
+  bounded progress/ETA lines and an end line (calls, failed, missing, RSS)
+  to stderr.
 - **Tier-4 gap repair** — with refresh and tiers on, at most one SNAPSHOT per run:
   on the repair path it is written after the Tier-4 gap check; a degraded
   tiers step writes its own (see table); a failed write keeps the previous

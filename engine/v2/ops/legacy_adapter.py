@@ -367,13 +367,17 @@ def invoke_score_calendar(root, as_of, *, scorer, tickers=None, horizon_days=35)
                           scorer=scorer, tickers=tickers, progress_every=10)
 
 
-def _refresh_gspc(fetcher, source_root) -> dict:
+def _refresh_gspc(fetcher, source_root, session) -> dict:
     """Refresh the legacy ``^GSPC`` daily series through the shared Fetcher.
 
     Writes into ``<source_root>/earnings_predictions/data/raw/polygon/
     gspc_daily.csv`` when a source root is given, else
     ``engine.paths.GSPC_DAILY``, and passes a unique ``refetch_token`` so a
-    stale cached body is kept and never served.
+    stale cached body is kept and never served. ``session`` is the run's
+    session, passed through as the refresh ceiling (#1491): rows dated after
+    it are dropped before every guard and the write, and a session whose
+    regular close plus the coverage buffer has not passed is refused
+    ``session_not_final`` before any fetch.
     """
     from datetime import datetime, timezone
     from uuid import uuid4
@@ -389,7 +393,7 @@ def _refresh_gspc(fetcher, source_root) -> dict:
     else:
         gspc_path = paths.GSPC_DAILY
     return refresh_gspc_daily(
-        fetcher, gspc_path,
+        fetcher, gspc_path, session=session,
         refetch_token=f"{datetime.now(timezone.utc).isoformat()}-{uuid4().hex}")
 
 
@@ -407,7 +411,8 @@ def invoke_price_refresh(session, *, dry_run: bool = False,
     separately maintained universe or process-global data roots. A real run
     also refreshes the legacy ``^GSPC`` daily series through
     ``engine.data.pulls.gspc_refresh`` -- into the same source root when one
-    is given, else ``engine.paths.GSPC_DAILY`` -- and reports its outcome as
+    is given, else ``engine.paths.GSPC_DAILY``, with this run's ``session``
+    as the refresh ceiling (#1491) -- and reports its outcome as
     the extra ``gspc_daily`` key next to the unchanged ``plan``/``report``.
     """
     if source_root is not None and planned_tickers is None:
@@ -460,7 +465,7 @@ def invoke_price_refresh(session, *, dry_run: bool = False,
     # share the rooted Tier-1 cache and its throttle/backoff.
     fetcher = Fetcher(root=fetch_root)
     report = run_refresh(plan, fetcher)
-    gspc_daily = _refresh_gspc(fetcher, source_root)
+    gspc_daily = _refresh_gspc(fetcher, source_root, session)
     return {"plan": plan, "report": report, "gspc_daily": gspc_daily}
 
 

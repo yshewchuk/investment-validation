@@ -115,6 +115,7 @@ is an ordinary downward import, never the reverse. The serving-side
 `experiments/v2_runup_exits.py` and `experiments/v2_magnitude_search_run.py` consume `Repository`, typed errors and
 `documents.reject_duplicate_keys`, the public stdlib JSON object-pairs hook
 shared with `loads_document`; duplicate names raise `DocumentError` without I/O.
+`experiments/size_prep_inputs.py` consumes `Repository` and `computed_move_bounds.TABLE` to check that a no-op refresh head already carries source bounds.
 `experiments/registered_runup.py` consumes typed data refusals; `experiments/v2_runup_study.py` also consumes `Repository` and the duplicate-key hook for registered RUNUP admission.
 
 `engine.v2.features` reads one pinned ticker/date window through `Repository`

@@ -44,7 +44,9 @@ review thread: `Out of scope for this PR (<reason>); tracked in
 One concern per pull request: something a reviewer can hold in their head
 in one pass. If the description needs "and also", split it.
 
-Aim for roughly 300 changed non-test lines and about 5 non-test files;
+Aim for roughly 150 added non-test code lines (limit about 300; PRs opened
+before 2026-10-28 retain the previous ~400-line limit) and about 5
+non-test files;
 tests and generated fixtures don't count toward that target. A pull
 request that goes over either target should say why it can't be split.
 Every fix made in response to review feedback ships with a test that
