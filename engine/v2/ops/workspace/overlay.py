@@ -9,7 +9,7 @@ supervisor and job launcher refuse to run from it (``workspace.guard``).
 
 Refusals are typed: ``WORKSPACE_REFUSED`` (``details["reason"]``: production_root,
 symlink_path, parent_missing, root_not_empty, production_missing, production_mismatch,
-layout_invalid, identity_unreadable) and ``SNAPSHOT_CLOSURE_BROKEN`` (from
+layout_invalid, identity_unreadable, source_method_refused, pin_name_invalid) and ``SNAPSHOT_CLOSURE_BROKEN`` (from
 ``workspace.closure``, plus ``closure_changed``/``manifest_mismatch``/``pin_mismatch``
 when the open-time closure, the stored identity or the pin disagree).
 """
@@ -26,7 +26,7 @@ from pathlib import Path
 
 from engine.v2.data import errors as data_errors
 from engine.v2.data.repository import Repository
-from engine.v2.foundation import ArtifactError, ArtifactStore
+from engine.v2.foundation import ArtifactError, ArtifactStore, canonical_json
 from engine.v2.ops.bootstrap import open_catalog, require_compatible_catalog
 from engine.v2.ops.catalog import dumps, register_artifact, transaction
 from engine.v2.ops.checkpoints import registered_artifact
@@ -39,9 +39,14 @@ __all__ = ["IDENTITY_FILE", "MARKER", "ResearchWorkspace", "SnapshotOnlyReposito
 
 SCHEMA_VERSION = "research_workspace.v1.0"
 PIN_SCHEMA_REF = "research_workspace_pin.v1.0"
+READ_PIN_SCHEMA_REF = "research_workspace_read_pin.v1.0"
 IDENTITY_FILE = "workspace.json"
 _DIRECTORIES = ("store", "scratch", "output")
 _MAX_METADATA_BYTES = 64 * 1024
+_SOURCE_METHODS = frozenset({
+    "resolve", "resolve_full", "scan", "table_contract", "fragment_records", "get_event",
+    "get_chain", "get_price_series", "get_close", "scan_population_bound", "explain_dependencies",
+    "pins_snapshots", "read_counters"})
 _IDENTITY_KEYS = ("schema_version", "snapshot_id", "manifest_hash", "identity_digest",
                   "production_catalog", "production_store", "pin_artifact_id")
 
@@ -75,11 +80,17 @@ def _paths(root: Path) -> WorkspacePaths:
 
 
 class SnapshotOnlyRepository(Repository):
-    """The production source view: only the pinned snapshot id resolves, never a head."""
+    """The production source view: an allowlist of read methods, each bound to the pinned snapshot id."""
 
     def __init__(self, conn, store, snapshot_id: str) -> None:
         super().__init__(conn, store, pin_snapshots=True)
         self._only = snapshot_id
+
+    def __getattribute__(self, name):
+        if name.startswith("_") or name in _SOURCE_METHODS:
+            return super().__getattribute__(name)
+        raise fail("WORKSPACE_REFUSED", "method not available on the pinned source view",
+                   details={"reason": "source_method_refused", "method": name})
 
     def _check(self, snapshot_id: str) -> None:
         if snapshot_id != self._only:
@@ -93,11 +104,6 @@ class SnapshotOnlyRepository(Repository):
     def resolve_full(self, snapshot_id: str):
         self._check(snapshot_id)
         return super().resolve_full(snapshot_id)
-
-    def _by_head(self, *args, **kwargs):
-        raise data_errors.fail("SNAPSHOT_UNRESOLVED", "a workspace resolves by snapshot id only")
-
-    resolve_pinned = resolve_full_pinned = latest_dataset_version = _by_head
 
     def table_contract(self, snapshot_ref, table_name):
         self._check(snapshot_ref.snapshot_id)
@@ -126,6 +132,11 @@ class SnapshotOnlyRepository(Repository):
     def scan(self, query, *, table_name, max_object_bytes=None):
         self._check(query.snapshot_id)
         return super().scan(query, table_name=table_name, max_object_bytes=max_object_bytes)
+
+    def explain_dependencies(self, query, *, table_name=None, snapshot_ref=None):
+        self._check(snapshot_ref.snapshot_id if snapshot_ref is not None
+                    else getattr(query, "snapshot_id", None))
+        return super().explain_dependencies(query, table_name=table_name, snapshot_ref=snapshot_ref)
 
     def scan_population_bound(self, snapshot_id, **kwargs):
         self._check(snapshot_id)
@@ -235,6 +246,18 @@ class ResearchWorkspace:
                 or closure.stat_digest != self.closure.stat_digest):
             raise _changed("closure_changed", snapshot_id=self.snapshot_id)
         return closure
+
+    def record_read_pin(self, name: str, document: dict, *, clock):
+        """Preflight hook: publish a read-pin document to the WORKSPACE store and catalog only."""
+        if not isinstance(name, str) or not 0 < len(name) <= 128:
+            raise _refuse("pin_name_invalid")
+        body = canonical_json({"schema_version": READ_PIN_SCHEMA_REF, "name": name,
+                               "snapshot_id": self.snapshot_id,
+                               "manifest_hash": self.manifest_hash, "pin": document})
+        ref = self.store.publish_bytes(body.encode("utf-8"), schema_ref=READ_PIN_SCHEMA_REF)
+        with transaction(self.conn):
+            register_artifact(self.conn, ref, None, clock)
+        return ref
 
     def close(self) -> None:
         self.conn.close()

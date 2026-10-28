@@ -7,6 +7,7 @@ Synthetic only: a tiny two-snapshot production catalog/store is built in ``tmp_p
 """
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import os
 import sqlite3
@@ -143,12 +144,10 @@ def test_identities_resolve_identically_and_only_by_snapshot_id(prod):
         with pytest.raises(DataError) as caught:
             ws.source.resolve("snap_other")
         assert caught.value.code == "SNAPSHOT_NOT_FOUND"
-        for call in (lambda: ws.source.resolve_pinned("shadow"),
-                     lambda: ws.source.resolve_full_pinned("shadow"),
-                     lambda: ws.source.latest_dataset_version("securities.v1")):
-            with pytest.raises(DataError) as caught:
-                call()
-            assert caught.value.code == "SNAPSHOT_UNRESOLVED"
+        for name in ("resolve_pinned", "resolve_full_pinned", "latest_dataset_version", "commit"):
+            with pytest.raises(OpsError) as caught:
+                getattr(ws.source, name)
+            assert _details(caught) == ("WORKSPACE_REFUSED", "source_method_refused")
         digest = ws.closure.identity_digest
     with _reopen(prod) as again:
         assert again.source_snapshot().manifest_hash == prod.snap.manifest_hash
@@ -261,3 +260,36 @@ def test_no_supervisor_or_job_launches_from_a_workspace(prod):
                             ws.paths.scratch, clock=None, boot_id="b")
         assert caught.value.code == "WORKSPACE_REFUSED"
     refuse_workspace_execution(prod.root, prod.tmp / "elsewhere", None)
+
+
+def test_foreign_snapshot_refs_and_queries_are_refused_on_the_source_view(prod):
+    foreign = dataclasses.replace(prod.snap, snapshot_id="snap_foreign")
+    with _create(prod) as ws:
+        calls = (lambda: ws.source.table_contract(foreign, "securities"),
+                 lambda: ws.source.fragment_records(foreign, "securities"),
+                 lambda: ws.source.get_event(None, foreign),
+                 lambda: ws.source.get_chain(None, foreign),
+                 lambda: ws.source.get_price_series(None, foreign),
+                 lambda: ws.source.get_close("AAA", "2024-01-02", "2024-01-03", foreign),
+                 lambda: ws.source.explain_dependencies(None, snapshot_ref=foreign),
+                 lambda: ws.source.scan(SimpleNamespace(snapshot_id="snap_foreign"),
+                                        table_name="securities"),
+                 lambda: ws.source.scan_population_bound("snap_foreign", table_name="securities"))
+        for call in calls:
+            with pytest.raises(DataError) as caught:
+                call()
+            assert caught.value.code == "SNAPSHOT_NOT_FOUND"
+        assert ws.source.table_contract(ws.source_snapshot(), "securities").table_name == "securities"
+
+
+def test_read_pins_land_only_in_the_workspace(prod):
+    before = _state(prod)
+    with _create(prod) as ws:
+        ref = ws.record_read_pin("preflight", {"history_snapshot": "snap_x"}, clock=prod.clock)
+        assert ws.store.read_verified(ref).startswith(b"{")
+        assert (ws.paths.store / ref.storage_key).is_file()
+        assert not (prod.store / ref.storage_key).exists()
+        with pytest.raises(OpsError) as caught:
+            ws.record_read_pin("", {}, clock=prod.clock)
+        assert _details(caught) == ("WORKSPACE_REFUSED", "pin_name_invalid")
+    assert _state(prod) == before

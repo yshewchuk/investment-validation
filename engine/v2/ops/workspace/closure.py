@@ -122,8 +122,8 @@ def _lineage(conn, receipt_ids) -> tuple[str, ...]:
 
 def _coverage_rows(conn, snapshot_id: str) -> list:
     rows = conn.execute(
-        "SELECT table_name, coverage_id, import_receipt_id, coverage_hash FROM "
-        "data_snapshot_coverage WHERE snapshot_id = ? ORDER BY table_name, coverage_id",
+        "SELECT * FROM data_snapshot_coverage WHERE snapshot_id = ? "
+        "ORDER BY table_name, coverage_id",
         (snapshot_id,)).fetchall()
     for receipt_id in sorted({row["import_receipt_id"] for row in rows}):
         if not _committed(conn, receipt_id):
@@ -135,9 +135,14 @@ def _capture_rows(conn, receipt_ids) -> list:
     rows: list = []
     for receipt_id in receipt_ids:
         rows += [list(row) for row in conn.execute(
-            "SELECT capture_id, ticker, outcome, source_hash FROM data_price_captures "
+            "SELECT * FROM data_price_captures "
             "WHERE receipt_id = ? ORDER BY capture_id", (receipt_id,))]
     return rows
+
+
+def _receipt_facts(conn, receipt_ids) -> list:
+    return [list(conn.execute("SELECT * FROM data_import_receipts WHERE receipt_id = ?",
+                              (receipt_id,)).fetchone()) for receipt_id in sorted(receipt_ids)]
 
 
 def _object_stats(store: ArtifactStore, refs, deep: bool) -> tuple[list, int]:
@@ -190,6 +195,7 @@ def verify_snapshot_closure(conn, store: ArtifactStore, snapshot_id: str, manife
         "schema": SNAPSHOT_CLOSURE_SCHEMA, "snapshot_id": snapshot_id,
         "manifest_hash": manifest_hash, "parent_chain": list(chain),
         "commit_receipts": list(commits), "lineage": list(lineage), "coverage": coverage,
+        "receipts": _receipt_facts(conn, (*commits, *lineage)),
         "captures": captures, "records": len(resolved.records),
         "objects": [[ref.object_id, ref.content_hash, ref.byte_size]
                     for ref in sorted(resolved.objects, key=lambda r: r.object_id)]})
