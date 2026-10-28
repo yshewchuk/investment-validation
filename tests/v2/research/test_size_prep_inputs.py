@@ -363,7 +363,7 @@ def test_history_pair_is_validated_at_the_cli_boundary(tmp_path):
     from engine.v2.ops.cli import computed_moves_command
 
     args = SimpleNamespace(source_root=tmp_path, scope="shadow", as_of=_AS_OF, dry_run=True)
-    for invalid in ((), [], (None, None), (1, 2, 3), ({}, None), "ab"):
+    for invalid in ((), [], (None, None), (1, 2, 3), ({}, None), "ab", ("ab", len), ([], len)):
         _refusal(lambda: computed_moves_command(args, tmp_path, None, None, history=invalid),
                  "INVALID_REQUEST")
 
