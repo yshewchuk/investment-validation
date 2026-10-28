@@ -85,6 +85,24 @@ def _bound_fragments(conn, snapshot_id: str) -> None:
         "(SELECT fragment_id FROM data_version_fragments WHERE dataset_version_id IN "
         "(SELECT dataset_version_id FROM data_snapshot_tables WHERE snapshot_id = ?))",
         (snapshot_id,), "data_fragments")
+    _bound_bytes(
+        conn,
+        "SELECT SUM(LENGTH(CAST(d.dataset_version_id || d.contract_id || d.manifest_hash "
+        "|| d.evidence_json || COALESCE(d.parent_dataset_version_id, '') "
+        "AS BLOB))) FROM data_dataset_versions d WHERE d.dataset_version_id IN "
+        "(SELECT dataset_version_id FROM data_snapshot_tables WHERE snapshot_id = ?)",
+        (snapshot_id,), "data_dataset_versions")
+    _bound_bytes(
+        conn,
+        "SELECT SUM(LENGTH(CAST(c.contract_id || c.definition_hash || c.definition_json AS BLOB))) "
+        "FROM data_contracts c WHERE c.contract_id IN (SELECT d.contract_id FROM data_dataset_versions d "
+        "WHERE d.dataset_version_id IN (SELECT dataset_version_id FROM data_snapshot_tables "
+        "WHERE snapshot_id = ?))", (snapshot_id,), "data_contracts")
+    _bound_bytes(
+        conn,
+        "SELECT SUM(LENGTH(CAST(snapshot_id || manifest_hash || finality_receipt_refs_json "
+        "|| COALESCE(parent_snapshot_id, '') AS BLOB))) FROM data_snapshots WHERE snapshot_id = ?",
+        (snapshot_id,), "data_snapshots")
 
 
 def _dataset_parents(conn, resolved) -> None:
