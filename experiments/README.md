@@ -382,3 +382,30 @@ The panel-request wire envelope is closed and typed before source/catalog access
 Source seals include the dynamic fit-worker entrypoint and its estimator imports.
 Child jobs count inner candidates + outer challengers + outer comparators:
 the 603-search-fit example has 204 children, even if every comparator abstains.
+
+
+## SIZE real-data preparation (`size_prep_inputs`)
+
+Library-only helpers for preparing SIZE inputs inside a caller-supplied write root. They grant no data-run, registration, fitting or final-holdout authority; the user authorizes local runs separately. Holdout, embargo and fold-cutoff controls are never reimplemented here: they stay in `ExperimentHoldouts` (3% random plus rolling six months), `eligibility_policy` (`grouped_ticker_embargo.v1`, 30 days) and the registration's metadata folds, consumed by `eligible_history` and `size_panel`.
+
+**`tier1_history_manifest.v1`** `{schema_version, session_ceiling, entries, manifest_id}`; each entry is `{ticker, key, fetched_at, body_sha256}` (sorted by ticker, one per ticker). `manifest_id` is `content_hash` of the other fields. `build_manifest(source_root, *, session_ceiling, tickers)` pins, per explicit ticker, the entry the existing Tier-1 rule would pick (newest successful `yfinance` `history period=max`). `pinned_history_fetcher(source_root, manifest)` returns a no-network fetcher with the `tier1_yfinance_history_fetcher` shape; it serves only pinned entries and re-verifies on construction that each key still exists with the same `fetched_at`, status 200 and body hash, and `fetch` re-hashes the bytes it serves (`INPUT_CHANGED` on mismatch). Outside the manifest the default fetcher returns `legitimate_empty` (never newest-wins); `generate_bounds` uses `strict=True`, which refuses any unpinned refresh target instead, so no ticker silently commits as no-price history.
+
+**Two dates, never merged.** `session_ceiling` bounds the market sessions used: it must equal the refresh `as_of`, which truncates each series. `fetched_at` is the retrieval vintage of the pinned bytes and may be later than the ceiling. Close prices are split-adjusted as of retrieval, so a late `fetched_at` is reconstructed provenance, not a point-in-time vintage.
+
+**`generate_bounds(...)`** runs `run_computed_moves_refresh(..., include_source_bounds=True, use_cached_receipts=False)` with the pinned fetcher against `<write_root>/catalog.sqlite` (must exist and resolve directly inside `write_root`, opened with the migrating `open_catalog`); `write_root` must be a literal non-symlink path and unrelated (equal, ancestor or descendant) to every path in the required `production_roots` argument, which must be non-empty; the object root is `write_root` itself; its input document and the supervisor lock are written there only. The refresh regenerates `computed_moves` for the snapshot's own refresh targets (each must be pinned; an unpinned target refuses before commit), adds the `computed_move_bounds.v1` sibling table, and commits one new snapshot that advances the selected scope's head in that write-root catalog (catalog rows and objects included); it writes nothing outside `write_root`.
+
+**`size_prep_provenance.v1`** `{schema_version, label: "reconstructed", refresh_noop, session_ceiling, manifest_id, manifest_entry_count, entry_count, earliest_fetched_at, latest_fetched_at, entries_fetched_after_ceiling, source_snapshot_id, bounds_snapshot_id, record_id}` is written to `<write_root>/size_prep/provenance-<hash>.json` (atomic rename) and returned. `entry_count`, `earliest/latest_fetched_at` and `entries_fetched_after_ceiling` describe only the pinned entries the refresh actually served (`manifest_entry_count` is the whole manifest); a no-op rerun that re-fetches the same bytes reports them for that run. `source_snapshot_id` is the pre-refresh parent; `bounds_snapshot_id` is the refresh result (equal to the parent, with `refresh_noop: true`, if the refresh committed nothing; this is accepted only when the head already carries source bounds, so a rerun after an interrupted earlier run records the parent that already holds the bounds, not the original pre-bounds source).
+
+| Failure | Code |
+|---|---|
+| Malformed manifest, ceiling, ticker list, or `catalog.sqlite` not directly inside `write_root` | `INVALID_REQUEST` |
+| Requested ticker has no eligible Tier-1 entry at build; or, in `generate_bounds` (strict fetcher), a refresh target not pinned in the manifest (refused during capture, before any commit) | `SOURCE_NOT_FOUND` |
+| `source_root` not an existing directory (`build_manifest`, pinned fetcher, `generate_bounds`) | `INVALID_REQUEST` |
+| Sidecar or cache body not a regular file (symlink, FIFO), sidecar above `MAX_META_BYTES` (1 MiB), an unreadable file, or a corrupt gzip body; each file is opened once with `O_NOFOLLOW|O_NONBLOCK`, checked with `fstat` and read through a byte cap (non-JSON sidecars, and sidecars whose `key` differs from the file name, are skipped as not entries). Scans and generation log bounded progress (every 100,000 sidecars: count, rate, ETA bound, RSS) to stderr | `SOURCE_INVALID` |
+| `write_root` a symlink path, empty `production_roots`, or `write_root` equal to, containing or contained by a production root; unhashable or non-string ticker entries | `INVALID_REQUEST` |
+| Refusals raised by the shared refresh (`computed_moves_command`: missing scope head, held supervisor lock, input or contract mismatches) | propagated unchanged |
+| Refresh was a no-op and the head carries no source bounds | `PUBLICATION_REFUSED` |
+| Decompressed cache body above `MAX_BODY_BYTES` (64 MiB), or more than `MAX_SIDECARS` (2,000,000) sidecars scanned | `RESOURCE_LIMIT_EXCEEDED` |
+| Pinned entry missing, `fetched_at`, status or body hash changed | `INPUT_CHANGED` |
+| `as_of` differs from `session_ceiling` | `INVALID_REQUEST` |
+| Another supervisor holds the write-root catalog | `RESOURCE_UNAVAILABLE` |

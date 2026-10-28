@@ -741,13 +741,14 @@ def test_computed_moves_command_stages_parent_receipt_pin(tmp_path, monkeypatch)
     class Staged(Exception):
         pass
 
-    def stop_after_staging(parameters, root, *, as_of, fetcher, use_cached_receipts):
+    def stop_after_staging(parameters, root, *, as_of, fetcher, use_cached_receipts, include_source_bounds):
         document = json.loads((root / computed_moves_store.INPUT_PATH).read_text())
         assert document["parent_receipt_id"] == head["parent_receipt_id"]
         assert parameters.parent_receipt_id == head["parent_receipt_id"]
         # The CLI's selected Tier-1 source root is authoritative: it must tell
         # the runner to bypass the catalog receipt cache.
         assert use_cached_receipts is False
+        assert include_source_bounds is False
         raise Staged
 
     monkeypatch.setattr(computed_moves_store, "run_computed_moves_refresh", stop_after_staging)
