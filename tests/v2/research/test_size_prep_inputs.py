@@ -367,6 +367,15 @@ def test_history_pair_is_validated_at_the_cli_boundary(tmp_path):
         _refusal(lambda: computed_moves_command(args, tmp_path, None, None, history=invalid),
                  "INVALID_REQUEST")
 
+    from engine.v2.ops.recovery import SupervisorLock
+
+    holder = SupervisorLock(tmp_path / "supervisor.lock")
+    assert holder.acquire()
+    try:
+        _refusal(lambda: computed_moves_command(args, tmp_path, None, None, history=[]), "INVALID_REQUEST")
+    finally:
+        holder.release()
+
 
 def test_sidecar_whose_meta_key_differs_from_its_file_name_is_ignored(source_root):
     meta = source_root / "data/raw/fetch/yfinance/bb/bb01.meta.json"
