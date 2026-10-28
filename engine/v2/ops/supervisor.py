@@ -625,13 +625,15 @@ class Service:
                 os.close(running.result_fd)
                 del self.running[attempt_id]
                 self.observed.pop(attempt_id, None)
+        pool_submitted = self._reconcile_pool_nightly_refresh()
+        deferred_native_ids = self._queued_native_score_batch_ids_waiting_for_pool()
         claim = claim_next(self.conn, policy=self.policy, sample=sample_capacity(self.root, clock=self.clock),
-                           supervisor=self.identity, clock=self.clock, registry=self.registry)
+                           supervisor=self.identity, clock=self.clock, registry=self.registry,
+                           deferred_job_ids=deferred_native_ids)
         if claim:
             self._launch(claim)
         self._reconcile_publication_status()
         self._reconcile_computed_moves_refresh()
-        pool_submitted = self._reconcile_pool_nightly_refresh()
         self._reconcile_native_score_batch_shadow()
         self._reconcile_native_parity()
         return bool(self.running or claim or pool_submitted)
@@ -873,6 +875,38 @@ class Service:
                               "exception_type": type(exc).__name__}),
                   file=sys.stderr)
             return None
+
+    def _queued_native_score_batch_ids_waiting_for_pool(self):
+        """Queued ``native_score_batch`` job IDs whose pool cycle is still
+        ``active``, deferred from this tick's claim pass. Each queued job's
+        idempotency key is parsed to its ``(occurrence, scope_hash)`` and its
+        pool cycle classified: only ``active`` defers the job (``promoted``,
+        ``failed`` and ``skipped`` stay claimable). A parse or lookup that
+        raises fails closed for this tick (the ID is deferred) with one
+        redacted stderr event naming only the exception type. Read-only: no
+        job row or memo state is changed."""
+        from engine.v2.ops.nightly import scope_from_native_score_batch_key
+        from engine.v2.ops.pool_refresh import pool_cycle_outcome
+
+        deferred = set()
+        rows = self.conn.execute(
+            "SELECT job_id, idempotency_key FROM jobs "
+            "WHERE state = 'queued' AND kind = 'native_score_batch'").fetchall()
+        for row in rows:
+            try:
+                occurrence, _scope_hash = scope_from_native_score_batch_key(
+                    row["idempotency_key"])
+                outcome = pool_cycle_outcome(self.conn, occurrence)
+            except Exception as exc:  # noqa: BLE001 - fail closed for this tick
+                deferred.add(row["job_id"])
+                print(json.dumps({"event": "native_score_batch_pool_gate_lookup_failed",
+                                  "job_id": row["job_id"],
+                                  "exception_type": type(exc).__name__}),
+                      file=sys.stderr)
+                continue
+            if outcome == "active":
+                deferred.add(row["job_id"])
+        return frozenset(deferred)
 
     def _report_native_worker_release_problem(self, claim, problem):
         """A worker-side release refusal must leave the same durable row the

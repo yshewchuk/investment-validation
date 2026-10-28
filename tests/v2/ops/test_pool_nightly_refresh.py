@@ -786,6 +786,7 @@ def test_tick_calls_reconcile_pool_nightly_refresh(monkeypatch):
     fake_self = SimpleNamespace(
         _clock_check=lambda: None,
         _reclaim_terminal_staging=lambda: None,
+        _queued_native_score_batch_ids_waiting_for_pool=lambda: frozenset(),
         reconcile=lambda: None,
         running={},
         conn=None,

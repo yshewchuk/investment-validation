@@ -1425,16 +1425,42 @@ def test_pool_state_read_error_defers_only_this_native_tick(
 
 
 def test_service_tick_reconciles_pool_before_native_score(tmp_path, monkeypatch):
-    conn, clock, _ = catalog(tmp_path)
-    service = Service(conn, tmp_path, registry(), _POLICY, clock=clock,
+    conn, clock, supervisor = catalog(tmp_path)
+    session = "2026-01-15"
+    _pool_key, pool_job_id = _add_pool_phase(
+        conn, clock, session=session, phase=pool_refresh.TRAINING_PHASES[0],
+        state="queued")
+    pool_claim = claim_next(conn, policy=TEST_POLICY, sample=sample(clock),
+                            supervisor=supervisor, clock=clock, registry=registry())
+    assert pool_claim is not None and pool_claim.job_id == pool_job_id
+    native_request = SubmitRequest(
+        namespace="shadow",
+        idempotency_key=nightly._native_score_batch_key(session, "scope-hash"),
+        principal="operator",
+        job=JobSpec(
+            kind="native_score_batch", implementation_ref="code", spec_hash=None,
+            environment_ref="env",
+            parameters={
+                "expected_ids": (), "release_root": "release-root", "as_of": session,
+                "snapshot_id": "snapshot-1", "calendar_revision": "calendar-1",
+                "feature_names": (),
+            },
+            output_namespace="shadow", resource_class="projection",
+            retry_policy_ref="bounded",
+            checkpoint_contract_ref="native_score_batch_records.v2.0"))
+    receipt = submit(conn, registry(), _POLICY, native_request, clock=clock)
+    service = Service(conn, tmp_path, registry(), TEST_POLICY, clock=clock,
                       code_source=ROOT, store_root=tmp_path)
+    service.identity = supervisor
     events = []
     monkeypatch.setattr(service, "_clock_check", lambda: None)
     monkeypatch.setattr(service, "_reclaim_terminal_staging", lambda: None)
     monkeypatch.setattr(supervisor_module, "expire_leases", lambda *args, **kwargs: None)
     monkeypatch.setattr(service, "reconcile", lambda: None)
-    monkeypatch.setattr(supervisor_module, "sample_capacity", lambda *args, **kwargs: None)
-    monkeypatch.setattr(supervisor_module, "claim_next", lambda *args, **kwargs: None)
+    monkeypatch.setattr(supervisor_module, "sample_capacity",
+                        lambda *args, **kwargs: sample(clock))
+    monkeypatch.setattr(pool_refresh, "pool_cycle_outcome",
+                        lambda *args, **kwargs: "active")
     monkeypatch.setattr(service, "_reconcile_publication_status",
                         lambda: events.append("publication"))
     monkeypatch.setattr(service, "_reconcile_computed_moves_refresh",
@@ -1448,4 +1474,10 @@ def test_service_tick_reconciles_pool_before_native_score(tmp_path, monkeypatch)
 
     service.tick()
 
+    row = conn.execute("SELECT state, attempt_count FROM jobs WHERE job_id = ?",
+                       (receipt.job_id,)).fetchone()
     assert events.index("pool") < events.index("native_score")
+    assert tuple(row) == ("queued", 0)
+    assert conn.execute("SELECT 1 FROM attempts WHERE job_id = ?",
+                        (receipt.job_id,)).fetchone() is None
+    conn.close()
