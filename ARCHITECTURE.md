@@ -519,6 +519,15 @@ Only a tracked path absent from the worktree reads as empty.
   before returning. See `engine/v2/ops/ARCHITECTURE.md` for the full
   stage graph and its `OPTIONAL` markings and this same distinction.
 
+  The submitted DAG now ends with a leaf `serving_projection` job after
+  `publication`. It consumes the succeeded publication's verified artifact
+  bindings in a child process that calls `tools.v2_dashboard_project`;
+  `delivery`, `backup` and publication do not depend on it. The projection
+  job is required for its own result (not an `OPTIONAL` stage), while a
+  failure leaves publication and delivery successful and does not move the
+  serving `CURRENT` pointer. Pointer publication and read-back remain a
+  later slice; see the [serving projection job contract](guides/serving_projection_job.md).
+
   `computed_moves_refresh` reaches production submission through a
   FOURTH path, entirely outside `GRAPH`/`_DAG_STAGES`/
   `build_legacy_job_requests`: `supervisor.Service`'s own tick-loop
@@ -694,6 +703,7 @@ flowchart LR
         SUP -- "tick-loop sidecars:<br/>native_parity,<br/>native_score_batch,<br/>computed_moves_refresh,<br/>pool_nightly_refresh" --> QUEUE
         SUP --> DAG["submitted DAG stages<br/>(nightly.py _DAG_STAGES,<br/>include_prerequisites=False)"]
         DAG --> PUB["shadow publication<br/>(private artifacts)"]
+        PUB --> SP["serving_projection<br/>(child process)"]
         DASH["engine.v2.dashboard._server"] -. "lazy import:<br/>cli.refresh_action" .-> SUBMIT
     end
     Tools["tools/*, experiments/*"] --> Legacy

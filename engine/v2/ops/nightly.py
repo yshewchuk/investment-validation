@@ -163,7 +163,7 @@ def _legacy_action(stage):
 #: catalog/outbox/filesystem work runs in the supervisor's coordinator effect
 #: (``engine.v2.ops.effects_graph``), never in the worker subprocess.
 PURE_STAGES = frozenset({"decision_evidence", "ledger_export", "engineering_gate",
-                         "publication", "backup"})
+                         "publication", "serving_projection", "backup"})
 
 #: R3B-3: the "refresh" stage's native job kind, chosen only when a plan
 #: explicitly pins ``refresh_mode="native"`` (``plans.py::nightly_plan``) --
@@ -313,7 +313,32 @@ def _legacy_params(action, plan, tickers, year_start, year_end, keys, *, effect_
         # this exact saved plan (see effects_graph.publication_effect).
         params.update(_generation_pin(plan))
         params["input_bindings"] = _publication_bindings(keys)
+    if action == "serving_projection":
+        params.update(_serving_projection_params(plan, keys))
     return params
+
+
+def _serving_projection_params(plan, keys):
+    if plan.get("snapshot_id"):
+        snapshot_id = plan["snapshot_id"]
+    elif isinstance(plan.get("snapshot_inputs"), dict):
+        snapshot_id = plan["snapshot_inputs"].get("snapshot_id", "")
+    else:
+        snapshot_id = ""
+    bindings = {
+        "bundle.tar": _job_output("projection", keys),
+        "finality.json": _job_output("finality", keys),
+        "score.json": _job_output("score", keys),
+    }
+    bindings.update(plan.get("serving_projection_bindings", {}))
+    return {
+        **_generation_pin(plan),
+        "snapshot_id": snapshot_id,
+        "requested_as_of": plan.get("requested_as_of", plan["session"]),
+        "resolved_as_of": plan.get("resolved_as_of", plan["session"]),
+        "bundle_format": "legacy",
+        "input_bindings": bindings,
+    }
 
 
 def effect_scope_for(tickers, full_universe=None):
@@ -367,6 +392,8 @@ def _legacy_resource(kind):
     # small "materialize" profile (2 GiB, profiles.py has the measurement).
     if kind == "legacy_materialize":
         return "materialize"
+    if kind == "serving_projection":
+        return "projection"
     if kind == "legacy_render":
         return "projection"
     if kind in ("ledger_export", "engineering_gate", "publication", "backup", "retrain_step"):
@@ -395,7 +422,8 @@ def _sidecar_runtime_identity(kind):
 #: The legacy worker DAG's stages when prerequisites are not included.
 _DAG_STAGES = ("finality", "features", "score", "decision_replay", "decision_evidence",
                "decision_commit", "settlement", "model_evidence", "ledger_export",
-               "engineering_gate", "projection", "selfcheck", "publication", "backup")
+               "engineering_gate", "projection", "selfcheck", "publication",
+               "serving_projection", "backup")
 # P2-5/Task5: ``ledger_export`` and ``backup`` name ``decision_commit`` as
 # their only hard scheduler dependency, never ``settlement`` — a failed
 # settlement job would otherwise cascade through ``block_descendants``
@@ -415,6 +443,7 @@ _DAG_PARENTS = {"finality": (), "features": ("finality",),
                 "selfcheck": ("projection",),
                 "publication": ("selfcheck", "engineering_gate", "projection", "decision_commit",
                                 "finality"),
+                "serving_projection": ("publication",),
                 "backup": ("decision_commit",)}
 #: P2-6 §9.3: DAG stages whose kinds read a verified snapshot materialization
 #: in snapshot input mode. Every other stage keeps the Phase 1 barrier.
@@ -451,6 +480,8 @@ def _checkpoint_contract(kind):
         return "effect_receipt.v1.0"
     if kind == "legacy_materialize":
         return "legacy_materialization_manifest.v1.0"
+    if kind == "serving_projection":
+        return "serving_projection_result.v1.0"
     return "legacy_action.v1.0"
 
 

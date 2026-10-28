@@ -4,6 +4,17 @@
 
 Standalone operator tools. `bounded_run.py` is the wrapper every heavy job runs under: CPU pinning, memory, swap and box-floor limits, test slots and the heavy reservation. Its module docstring is the flag reference; `engine/v2/ops/ARCHITECTURE.md` describes it as an executor adapter.
 
+## Serving projection worker
+
+The nightly `serving_projection` job uses a fixed child-process entrypoint in
+`tools/` to compose the ops artifact bindings with
+`v2_dashboard_project.run_projection`. The worker receives only verified
+staged inputs and the configured serving root; it does not use a checkout
+path or resolve a latest artifact. A projection failure reports to that job
+and leaves publication, delivery and the serving pointer untouched. Moving
+the serving pointer and verifying its read-back belong to the later slice in
+[`guides/serving_projection_job.md`](../guides/serving_projection_job.md).
+
 ## Mutation snapshot-worker budget
 
 The mutation driver limits concurrent synthetic snapshot-worker reservations, not whole-run RSS. It neither provisions a larger runner nor changes time budgets.
