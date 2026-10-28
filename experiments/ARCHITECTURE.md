@@ -235,46 +235,24 @@ both flag states publish/verify the same plan and never write a ledger.
 
 ## Stage-2 declarations and qualified execution
 
-`magnitude_search_request.compile_request` remains a source-free closed v2-request
-validator. `magnitude_search_request_versions` explicitly selects v1/v2/v3 dictionaries;
-legacy declaration outputs remain unchanged. JSON/product and canonical hashing
-provide normalization/enumeration; no extra schema library or scheduler is needed.
-H/HM/HMO cross fixed Ridge/ElasticNet/HGB grids: 33 candidates. The six-inner,
-three-outer example has 603 search fits plus 9 logical/18 component comparison fits.
-Counts cap attempts, not completed fits, input bytes, coverage or cost feasibility.
-Unknown shapes, columns, hashes, grids, policies or insufficient caps refuse before
-expansion. A preview grants no source, fit, selection or holdout authority.
+`magnitude_search_request.compile_request` remains a source-free closed v2-request validator. `magnitude_search_request_versions` explicitly selects v1/v2/v3 dictionaries; legacy declaration outputs remain unchanged. JSON/product and canonical hashing provide normalization/enumeration; no extra schema library or scheduler is needed.
+H/HM/HMO cross fixed Ridge/ElasticNet/HGB grids: 33 candidates. The six-inner, three-outer example has 603 search fits plus 9 logical/18 component comparison fits. Counts cap attempts, not completed fits, input bytes, coverage or cost feasibility.
+Unknown shapes, columns, hashes, grids, policies or insufficient caps refuse before expansion. A preview grants no source, fit, selection or holdout authority.
 
 New SIZE registrations use v1.7: the compact binding retains source, request, fold and execution identity while large ordered values (plan events, panel target events, metadata and fragment lists) are stored as bounded immutable CAS shards. The binding carries content-hash references and row counts; metadata mappings use sorted key/value rows. Logical artifact hashes bind the canonical value and artifact kind. Shards preserve order and each row is limited to 8 MiB; compact registration remains limited to 16 MiB and referenced shards to 1 GiB.
 
 Preparation checks the compact budget and aggregate shard cap with a no-write preview before publication; preflight publishes nothing. Native admission checks the v1.7 reference envelope and aggregate cap before shard reads, then verifies each CAS object. The SIZE registration loader hydrates rows and recomputes logical artifact hashes for existing planner consumers; registration storage and hashing never assemble the cohort into one JSON byte payload. Missing, altered, malformed or hash-mismatched shards refuse `EXPERIMENT_IDENTITY_CONFLICT`; aggregate overflow refuses `RESOURCE_LIMIT_EXCEEDED`. Existing v1.5/v1.6 registrations retain inline admission and replay unchanged. Scientific membership, targets, fold cutoffs, selection and scoring semantics are unchanged.
 
-`size_search` is the local no-ledger preflight/register/seal/run/report entrypoint.
-Parent/job wall and address-space limits are CLI-owned; child memory cannot exceed
-the inherited parent hard ceiling. Libraries require external parent containment.
-Build limits describe separately produced artifacts: execution never builds features.
-`SearchTrials`/outer reuse sharded inputs, the bounded fit-only worker and immutable
-zero-retry journal. Candidate IDs bind full numeric recipes, ordered dictionary,
-context and sources. ElasticNet convergence/coefficients/selected columns survive
-in verified receipts. Only inner scores select; outer outcomes cannot choose models.
+`size_search` is the local no-ledger preflight/register/seal/run/report entrypoint. Parent/job wall and address-space limits are CLI-owned; child memory cannot exceed the inherited parent hard ceiling. Libraries require external parent containment. Build limits describe separately produced artifacts: execution never builds features.
+`SearchTrials`/outer reuse sharded inputs, the bounded fit-only worker and immutable zero-retry journal. Candidate IDs bind full numeric recipes, ordered dictionary, context and sources. ElasticNet convergence/coefficients/selected columns survive in verified receipts. Only inner scores select; outer outcomes cannot choose models.
 
-`size_comparison_run` admits the exact sealed plan/fold before a fresh comparator
-claim, checks both no-fit guards first, and freezes forecasts before outer labels.
-`size_comparator` uses fourteen causal inputs, complete-row/n_prior>=4 training,
-500-row minimum, fixed target/predictor masks and native OLS+MLP construction. Comparator fit markers bind filtered ordered 14-column training/prediction arrays and training labels; `fit_eligible` distinguishes the 500-row threshold, not estimator entry. Full admitted inputs remain separately bound; terminal fit details count actual logical/component fits.
-Missing inputs (including source-zero quotes stored as null) abstain; no quote reconstruction. Raw negative blends stay negative. Its history
-mean reference uses the same admitted history, not live aggregates or new weights.
-Completed CLI replay verifies outer/comparison journals read-only without an execution deadline; interrupted claims
-cannot restart. Source, registry, policy, limits or context drift refuses before recipe evaluation; registry fingerprints use bounded raw bytes. Failed startup capture cannot become a trusted baseline after file repair: admission refuses until a fresh process.
+`size_comparison_run` admits the exact sealed plan/fold before a fresh comparator claim, checks both no-fit guards first, and freezes forecasts before outer labels.
+`size_comparator` uses fourteen causal inputs, complete-row/n_prior>=4 training, 500-row minimum, fixed target/predictor masks and native OLS+MLP construction. Comparator fit markers bind filtered ordered 14-column training/prediction arrays and training labels; `fit_eligible` distinguishes the 500-row threshold, not estimator entry. Full admitted inputs remain separately bound; terminal fit details count actual logical/component fits.
+Missing inputs (including source-zero quotes stored as null) abstain; no quote reconstruction. Raw negative blends stay negative. Its history mean reference uses the same admitted history, not live aggregates or new weights. Completed CLI replay verifies outer/comparison journals read-only without an execution deadline; interrupted claims cannot restart. Source, registry, policy, limits or context drift refuses before recipe evaluation; registry fingerprints use bounded raw bytes. Failed startup capture cannot become a trusted baseline after file repair: admission refuses until a fresh process.
 
-`size_search_report` verifies complete journals, then `size_paired_report` matches
-whole three-horizon events, retains all coverage/label exclusions and broad sanity
-metrics, and reports equal-event paired RMSE/MAE differences, bias, large-move
-underprediction and 2,000 seed-zero quarter-block/issuer bootstrap intervals.
-Results concern the frozen dataset's development population, not source-wide
-completeness, untouched confirmation, production reproduction or release authority.
-Publication/event-schedule knowledge remains reconstructed/unverified; known dates,
-actual label windows, holdout union and source ceilings are still mandatory.
+`size_search_report` verifies complete journals, then `size_paired_report` matches whole three-horizon events, retains all coverage/label exclusions and broad sanity metrics, and reports equal-event paired RMSE/MAE differences, bias, large-move underprediction and 2,000 seed-zero quarter-block/issuer bootstrap intervals.
+Results concern the frozen dataset's development population, not source-wide completeness, untouched confirmation, production reproduction or release authority.
+Publication/event-schedule knowledge remains reconstructed/unverified; known dates, actual label windows, holdout union and source ceilings are still mandatory.
 
 | Qualified SIZE condition | Outcome |
 | --- | --- |
