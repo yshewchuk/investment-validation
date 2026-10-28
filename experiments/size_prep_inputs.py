@@ -64,7 +64,7 @@ def _entries(source_root, keys=None):
         except (OSError, ValueError):
             continue
         body_path = meta_path.with_name(key + ".body.gz")
-        if isinstance(meta, dict) and body_path.exists():
+        if isinstance(meta, dict) and meta.get("key") == key and body_path.exists():
             yield CachedEntry(meta=meta, path=body_path)
 
 
@@ -187,6 +187,8 @@ def _provenance(manifest, served, source_snapshot_id, bounds_snapshot_id, *, ref
 
 def _write_record(write_root, record):
     directory = Path(write_root) / "size_prep"
+    if directory.is_symlink():
+        raise fail("INVALID_REQUEST", "the provenance directory must not be a symlink")
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / ("provenance-" + record["record_id"].split(":", 1)[1] + ".json")
     descriptor, name = tempfile.mkstemp(dir=directory, prefix=path.name + ".tmp-")

@@ -355,3 +355,20 @@ def test_bounds_option_is_validated_at_the_cli_boundary_even_for_dry_run(tmp_pat
         _refusal(lambda: computed_moves_command(args, tmp_path, None, None, include_source_bounds=invalid),
                  "INVALID_REQUEST")
     assert not (tmp_path / computed_moves_store.INPUT_PATH).exists()
+
+
+def test_sidecar_whose_meta_key_differs_from_its_file_name_is_ignored(source_root):
+    meta = source_root / "data/raw/fetch/yfinance/bb/bb01.meta.json"
+    meta.write_text(meta.read_text().replace('"key": "bb01"', '"key": "other"'))
+    _refusal(lambda: prep.build_manifest(source_root, session_ceiling=_AS_OF, tickers=["BBBB"]), "SOURCE_NOT_FOUND")
+
+
+def test_symlinked_provenance_directory_is_refused_before_any_write(source_root, workspace, tmp_path):
+    root, _ = workspace
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (root / "size_prep").symlink_to(outside)
+    manifest = prep.build_manifest(source_root, session_ceiling=_AS_OF, tickers=["AAAA"])
+    _refusal(lambda: prep.generate_bounds(root, source_root=source_root, manifest=manifest, scope="shadow",
+                                          as_of=_AS_OF, production_roots=_PRODUCTION), "INVALID_REQUEST")
+    assert list(outside.iterdir()) == []
