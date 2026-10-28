@@ -68,6 +68,8 @@ def _artifact_identifier(value, kind):
 
 def pack_size_registration(store, document):
     """Return a compact reference document and the original logical source document."""
+    if not isinstance(document, dict):
+        raise fail("EXPERIMENT_IDENTITY_CONFLICT", "SIZE registration document must be an object")
     artifacts = {}
     digest_to_descriptor = {}
 

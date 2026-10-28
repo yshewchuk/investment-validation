@@ -597,6 +597,23 @@ def test_v17_large_registration_is_compact_and_missing_shard_refuses(case):
     assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
 
 
+def test_v17_packer_refuses_non_object_document_before_publish(case, monkeypatch):
+    from experiments.size_registration_artifacts import pack_size_registration
+
+    published = []
+    publish_bytes = case.store.publish_bytes
+
+    def record_publish(payload, *, schema_ref):
+        published.append((payload, schema_ref))
+        return publish_bytes(payload, schema_ref=schema_ref)
+
+    monkeypatch.setattr(case.store, "publish_bytes", record_publish)
+    with pytest.raises(OpsError) as caught:
+        pack_size_registration(case.store, [])
+    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert not published
+
+
 def test_v17_artifact_cap_precedes_publish_and_preflight_is_read_only(case, monkeypatch):
     from experiments import size_registration_artifacts as artifacts
     from experiments.magnitude_search_shards import write_section
