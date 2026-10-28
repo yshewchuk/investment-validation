@@ -357,6 +357,26 @@ def test_bounds_option_is_validated_at_the_cli_boundary_even_for_dry_run(tmp_pat
     assert not (tmp_path / computed_moves_store.INPUT_PATH).exists()
 
 
+def test_history_pair_is_validated_at_the_cli_boundary(tmp_path):
+    from types import SimpleNamespace
+
+    from engine.v2.ops.cli import computed_moves_command
+
+    args = SimpleNamespace(source_root=tmp_path, scope="shadow", as_of=_AS_OF, dry_run=True)
+    for invalid in ((), [], (None, None), (1, 2, 3), ({}, None), "ab", ("ab", len), ([], len)):
+        _refusal(lambda: computed_moves_command(args, tmp_path, None, None, history=invalid),
+                 "INVALID_REQUEST")
+
+    from engine.v2.ops.recovery import SupervisorLock
+
+    holder = SupervisorLock(tmp_path / "supervisor.lock")
+    assert holder.acquire()
+    try:
+        _refusal(lambda: computed_moves_command(args, tmp_path, None, None, history=[]), "INVALID_REQUEST")
+    finally:
+        holder.release()
+
+
 def test_sidecar_whose_meta_key_differs_from_its_file_name_is_ignored(source_root):
     meta = source_root / "data/raw/fetch/yfinance/bb/bb01.meta.json"
     meta.write_text(meta.read_text().replace('"key": "bb01"', '"key": "other"'))
@@ -392,9 +412,10 @@ def test_fifo_and_symlink_cache_files_are_refused_without_blocking(source_root):
 def test_scan_logs_bounded_progress_to_stderr(source_root, monkeypatch, capsys):
     monkeypatch.setattr(prep, "PROGRESS_EVERY", 1)
     prep.build_manifest(source_root, session_ceiling=_AS_OF, tickers=["AAAA"])
-    err = capsys.readouterr().err
+    captured = capsys.readouterr()
+    err = captured.err
     assert "[size-prep] scan 1 of at most" in err and "ETA<=" in err and "rss_kib=" in err
-    assert "manifest end" in err and capsys.readouterr().out == ""
+    assert "manifest end" in err and captured.out == ""
 
 
 def test_production_roots_must_be_a_collection_of_paths(source_root, workspace):
