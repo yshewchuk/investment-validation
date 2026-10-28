@@ -178,7 +178,9 @@ _PAYOFF_RECIPE_FIELDS = frozenset({
 # trusting release selection alone). Mutually exclusive with
 # payoff_recipe/payoff_source_rows (the source-rows compatibility path); see
 # `_model_block`.
-_PAYOFF_ARTIFACT_RECIPE_FIELDS = frozenset({"before", "draw_count", "seed"})
+_PAYOFF_ARTIFACT_RECIPE_FIELDS = frozenset({
+    "before", "bound_cutoff", "recalibration_bound_cutoff", "draw_count", "seed",
+})
 _MODEL_RESIDUAL_RECIPE_FIELDS = frozenset({"deciles", "min_pool"})
 # Frozen residual pools (P5-4). Each declared slot names the causal key the
 # request expects; ``content_hash`` optionally pins the exact artifact the

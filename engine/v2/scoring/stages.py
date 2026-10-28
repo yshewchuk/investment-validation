@@ -1915,41 +1915,44 @@ def _model_driver_and_cost(
 
 def _artifact_key_mismatch(
     artifact: Any, expected_type: type, name: str, alpha: float | None, cutoff: Any,
+    bound_cutoff: Any = None,
 ) -> bool:
-    """True unless ``artifact`` is the right kind AND its full causal key
-    (strategy, alpha, cutoff) equals the one the inline fit would have used
-    for THIS request.
+    """True unless the selected frozen artifact is causally eligible.
 
-    Coordinator decision, 2026-09-18: choosing the right artifact is the
-    release's job, but the stage must not simply trust that choice -- a
-    wrong-fold artifact (wrong alpha, or a LATER cutoff than this request's
-    own, i.e. a leaked future fold) must not silently produce a
-    plausible-looking number. ``alpha`` is ``None`` when the pricing stage
-    never resolved a fill alpha (should not happen once pricing has run, but
-    a missing identity component can never match, not "match by omission").
+    Existing callers without ``bound_cutoff`` retain exact-key behavior.
+    Nightly callers record the selected DATA cutoff and may reuse an artifact
+    at or before the request cutoff; a later cutoff always refuses.
     """
     from engine.v2.models.payoff_artifact import payoff_artifact_key
 
     if alpha is None or not isinstance(artifact, expected_type):
         return True
-    return artifact.key != payoff_artifact_key(name, alpha, cutoff)
+    selected_cutoff = cutoff if bound_cutoff is None else bound_cutoff
+    artifact_cutoff = getattr(artifact, "cutoff", None)
+    if artifact_cutoff != selected_cutoff:
+        return True
+    if artifact_cutoff is None:
+        return (bound_cutoff is not None or cutoff is not None
+                or artifact.key != payoff_artifact_key(name, alpha, None))
+    if not isinstance(artifact_cutoff, str):
+        return True
+    if bound_cutoff is not None and (
+        not isinstance(cutoff, str) or artifact_cutoff > cutoff
+    ):
+        return True
+    return artifact.key != payoff_artifact_key(name, alpha, artifact_cutoff)
 
 
 def _line_fit_from_artifact(
     artifact: Any, name: str, alpha: float | None, cutoff: Any, flags: list[str],
+    bound_cutoff: Any = None,
 ) -> dict[str, Any] | None:
-    """Read a frozen ``PayoffLineArtifact``'s line/residuals -- never fits (P5-4).
-
-    ``None`` means MODEL_NOT_READY was already added: no artifact, the wrong
-    kind (a surface artifact on a single-driver strategy), or a causal key
-    (strategy, alpha, cutoff) that disagrees with this request's own --
-    including a LATER cutoff, which would leak a future fold. There is no
-    fallback to fitting from source rows here -- that is the separate,
-    mutually exclusive compatibility path in ``_model_fit_and_pool``.
-    """
+    """Read a frozen ``PayoffLineArtifact``'s line/residuals -- never fits (P5-4)."""
     from engine.v2.models.payoff_artifact import PayoffLineArtifact
 
-    if _artifact_key_mismatch(artifact, PayoffLineArtifact, name, alpha, cutoff):
+    if _artifact_key_mismatch(
+        artifact, PayoffLineArtifact, name, alpha, cutoff, bound_cutoff,
+    ):
         _add_flag(flags, "MODEL_NOT_READY")
         return None
     return {
@@ -1964,12 +1967,14 @@ def _line_fit_from_artifact(
 
 def _surface_fit_from_artifact(
     artifact: Any, name: str, alpha: float | None, cutoff: Any, flags: list[str],
+    bound_cutoff: Any = None,
 ) -> dict[str, Any] | None:
-    """Read a frozen ``PayoffSurfaceArtifact``'s coefficients/residuals -- never
-    fits (P5-4). Same full-key check as ``_line_fit_from_artifact``."""
+    """Read a frozen ``PayoffSurfaceArtifact``'s coefficients/residuals -- never fits."""
     from engine.v2.models.payoff_artifact import PayoffSurfaceArtifact
 
-    if _artifact_key_mismatch(artifact, PayoffSurfaceArtifact, name, alpha, cutoff):
+    if _artifact_key_mismatch(
+        artifact, PayoffSurfaceArtifact, name, alpha, cutoff, bound_cutoff,
+    ):
         _add_flag(flags, "MODEL_NOT_READY")
         return None
     return {
@@ -2032,6 +2037,7 @@ def _model_fit_and_pool(
         alpha = _finite(values.get("fill"))
         fit = _line_fit_from_artifact(
             block.get("payoff_artifact"), name, alpha, recipe.get("before"), flags,
+            recipe.get("bound_cutoff"),
         )
     else:
         rows = block.get("payoff_source_rows")
@@ -2115,7 +2121,7 @@ def _runup_fit_and_pool(
         alpha = _finite(values.get("fill"))
         fit = _surface_fit_from_artifact(
             block.get("payoff_artifact"), "STR-RUNUP", alpha, recipe.get("before"),
-            flags,
+            flags, recipe.get("bound_cutoff"),
         )
     else:
         rows = block.get("payoff_source_rows")
@@ -2481,8 +2487,14 @@ def _recalibrated_output(
 
     artifact = block.get("recalibration_artifact")
     alpha = _finite(values.get("fill"))
+    requested_cutoff = recipe.get("before")
+    bound_cutoff = recipe.get("recalibration_bound_cutoff")
+    selected_cutoff = requested_cutoff if bound_cutoff is None else bound_cutoff
     if (alpha is None or not isinstance(artifact, RecalibrationMapArtifact)
-            or artifact.key != recalibration_artifact_key(name, alpha, recipe.get("before"))):
+            or artifact.key != recalibration_artifact_key(name, alpha, selected_cutoff)
+            or (requested_cutoff is not None
+                and (not isinstance(artifact.cutoff, str)
+                     or artifact.cutoff > requested_cutoff))):
         _add_flag(flags, "MODEL_NOT_READY")
         return {}
     return {**output, "win_model": artifact.transform(output["win_model"])}

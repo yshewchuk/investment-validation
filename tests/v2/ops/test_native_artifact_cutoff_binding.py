@@ -1,0 +1,112 @@
+"""Causal cutoff selection for frozen scoring artifacts."""
+from types import SimpleNamespace
+
+import pytest
+
+from engine.v2.models.payoff_artifact import make_payoff_surface_artifact
+from engine.v2.models.recalibration_artifact import make_recalibration_map_artifact
+from engine.v2.ops.native_runup_inputs import (
+    _surface,
+    latest_artifacts_at_or_before,
+)
+from engine.v2.scoring.native_payoff import RUNUP_TERMS
+from engine.v2.scoring.nightly_source_bundle import NightlySourceBundleRefusal
+from engine.v2.scoring.stages import _recalibrated_output, _surface_fit_from_artifact
+
+
+def test_latest_artifact_uses_data_cutoff_and_admits_equal_cutoff():
+    before = SimpleNamespace(
+        cutoff="2026-10-01", alpha=0.5, computed_at="2026-10-30T00:00:00Z")
+    at = SimpleNamespace(
+        cutoff="2026-10-15", alpha=0.5, computed_at="2026-10-01T00:00:00Z")
+    after = SimpleNamespace(
+        cutoff="2026-10-16", alpha=0.5, computed_at="2026-10-02T00:00:00Z")
+
+    selected = latest_artifacts_at_or_before(
+        (before, at, after), cutoff="2026-10-15", fill_alpha=0.5)
+
+    assert selected == (at,)
+
+
+def test_runup_surface_keeps_typed_refusal_when_no_causal_artifact_exists():
+    binding = SimpleNamespace(payoff_artifacts={"STR-RUNUP": ()})
+
+    with pytest.raises(NightlySourceBundleRefusal) as raised:
+        _surface(binding, cutoff="2026-10-15", fill_alpha=0.5)
+
+    assert raised.value.code == "MODEL_NOT_READY"
+
+
+def test_scoring_stage_accepts_recorded_prior_cutoff_and_refuses_future():
+    def surface(cutoff):
+        return make_payoff_surface_artifact(
+            {
+                "n": 2,
+                "resid_sd": 0.1,
+                "r": None,
+                "residuals": (0.1, -0.1),
+                "coefficients": (0.0,) * len(RUNUP_TERMS),
+            },
+            alpha=0.5,
+            cutoff=cutoff,
+        )
+
+    flags = []
+    selected = _surface_fit_from_artifact(
+        surface("2026-10-01"), "STR-RUNUP", 0.5, "2026-10-15", flags,
+        "2026-10-01",
+    )
+    assert selected is not None
+    assert flags == []
+
+    future_flags = []
+    future = _surface_fit_from_artifact(
+        surface("2026-10-16"), "STR-RUNUP", 0.5, "2026-10-15", future_flags,
+        "2026-10-16",
+    )
+    assert future is None
+    assert future_flags == ["MODEL_NOT_READY"]
+
+
+def test_runup_surface_binds_latest_data_cutoff_at_or_before_row():
+    def surface(cutoff):
+        return make_payoff_surface_artifact(
+            {
+                "n": 2,
+                "resid_sd": 0.1,
+                "r": None,
+                "residuals": (0.1, -0.1),
+                "coefficients": (0.0,) * len(RUNUP_TERMS),
+            },
+            alpha=0.5,
+            cutoff=cutoff,
+        )
+
+    artifacts = tuple(surface(day) for day in (
+        "2026-10-01", "2026-10-15", "2026-10-16"))
+    binding = SimpleNamespace(payoff_artifacts={"STR-RUNUP": artifacts})
+
+    assert _surface(binding, cutoff="2026-10-15", fill_alpha=0.5).cutoff == "2026-10-15"
+
+
+def test_recalibration_stage_accepts_bound_prior_and_refuses_future_cutoff():
+    def recalibration(cutoff):
+        return make_recalibration_map_artifact(
+            None, strategy="STR-THRU", alpha=0.5, cutoff=cutoff, min_pairs=10)
+
+    flags = []
+    output = {"win_model": 0.5}
+    prior = _recalibrated_output(
+        {"recalibration_artifact": recalibration("2026-10-01")},
+        {"before": "2026-10-15", "recalibration_bound_cutoff": "2026-10-01"},
+        "STR-THRU", {"fill": 0.5}, output, flags)
+    assert prior == output
+    assert flags == []
+
+    future_flags = []
+    future = _recalibrated_output(
+        {"recalibration_artifact": recalibration("2026-10-16")},
+        {"before": "2026-10-15", "recalibration_bound_cutoff": "2026-10-16"},
+        "STR-THRU", {"fill": 0.5}, output, future_flags)
+    assert future == {}
+    assert future_flags == ["MODEL_NOT_READY"]

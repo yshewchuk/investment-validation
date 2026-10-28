@@ -25,10 +25,14 @@ import pandas as pd
 
 from engine.v2.contracts import ScoreBatch, ScoreRequest
 from engine.v2.foundation import canonical_json, content_hash, to_document
-from engine.v2.models.payoff_artifact import payoff_artifact_key
+from engine.v2.models.payoff_artifact import PayoffLineArtifact
+from engine.v2.models.recalibration_artifact import RecalibrationMapArtifact
 from engine.v2.ops.native_board_universe import BoardRequest
 from engine.v2.ops.native_entry_rule_inputs import entry_rule_declarations
-from engine.v2.ops.native_runup_inputs import runup_model_declarations
+from engine.v2.ops.native_runup_inputs import (
+    latest_artifacts_at_or_before,
+    runup_model_declarations,
+)
 from engine.v2.ops.native_score_batch_types import (
     NativeScoreBatchRowRefusal,
     _event_date_identity,
@@ -416,6 +420,53 @@ def _entry_rule_declarations_or_refusal(
     return declarations
 
 
+def _release_payoff_declarations(
+    binding: ScoringReleaseBinding,
+    strategy: str,
+    artifacts: Sequence[Any],
+    as_of: Any,
+    calendar_row: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Select the latest causal payoff and recalibration inputs for one row."""
+    if not artifacts and strategy != "STR-THRU":
+        return {}
+    cutoff = _row_cutoff(as_of, calendar_row)
+    lines = tuple(artifact for artifact in artifacts
+                  if isinstance(artifact, PayoffLineArtifact))
+    matches = latest_artifacts_at_or_before(
+        lines, cutoff=cutoff, fill_alpha=_SHADOW_FILL_ALPHA)
+    if len(matches) > 1:
+        raise NightlySourceBundleRefusal(
+            "MODEL_NOT_READY", "release carries duplicate latest eligible payoff lines")
+    if not matches:
+        raise NightlySourceBundleRefusal(
+            "MODEL_NOT_READY", "release lacks an eligible payoff line")
+    payoff = matches[0]
+    declarations: dict[str, Any] = {
+        "payoff_artifact": payoff,
+        "payoff_artifact_recipe": {"before": cutoff, "bound_cutoff": payoff.cutoff},
+    }
+    if strategy != "STR-THRU":
+        return declarations
+    recalibration = tuple(
+        artifact for artifact in binding.recalibration_artifacts.get(strategy, ())
+        if isinstance(artifact, RecalibrationMapArtifact))
+    recalibration_matches = latest_artifacts_at_or_before(
+        recalibration, cutoff=cutoff, fill_alpha=_SHADOW_FILL_ALPHA)
+    if len(recalibration_matches) > 1:
+        raise NightlySourceBundleRefusal(
+            "MODEL_NOT_READY", "release carries duplicate latest eligible recalibration maps")
+    if not recalibration_matches:
+        raise NightlySourceBundleRefusal(
+            "MODEL_NOT_READY", "release lacks an eligible recalibration map")
+    recalibration_artifact = recalibration_matches[0]
+    declarations["recalibration_declared"] = True
+    declarations["recalibration_artifact"] = recalibration_artifact
+    declarations["payoff_artifact_recipe"]["recalibration_bound_cutoff"] = (
+        recalibration_artifact.cutoff)
+    return declarations
+
+
 def _release_artifact_declarations(
     binding: ScoringReleaseBinding,
     strategy: str,
@@ -423,22 +474,14 @@ def _release_artifact_declarations(
     as_of: Any,
     calendar_row: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """The release-backed P5-4 SourceBundle declarations for one row.
+    """Declare frozen driver, payoff and recalibration inputs for one row.
 
-    The release is the SOLE source: the driver role's verified residual pool
-    (slot ``driver``) with its causal recipe, and the strategy's payoff
-    artifact selected by the canonical ``(strategy, fill alpha, cutoff)`` key
-    (``payoff_artifact_key``) with its ``before`` recipe. A missing driver pool
-    leaves its declaration absent. If a payoff family is present, exactly one
-    artifact must match the row's key or assembly refuses the row; when no
-    payoff family is present, the optional payoff declaration stays absent.
-    No member is filled from request/event/panel/Tier-4 rows. Malformed members
-    never reach here: they already refused ``resolve_release_binding`` with
-    ``ModelNotReady``.
+    Artifact data cutoffs establish eligibility and ordering; computed_at is
+    never consulted. No request/event/panel rows or fitting provide fallback.
     """
     pool = binding.driver_residual_artifacts.get(driver_identity.role)
     artifacts = binding.payoff_artifacts.get(strategy) or ()
-    if pool is None and not artifacts:
+    if pool is None and not artifacts and strategy != "STR-THRU":
         return {}
     declarations: dict[str, Any] = {}
     if pool is not None:
@@ -450,18 +493,8 @@ def _release_artifact_declarations(
         declarations["model_residual_artifact_recipe"] = {"driver": {
             "role": pool.role, "model_id": pool.model_id, "fold": pool.fold,
             "content_hash": pool.content_hash}}
-    if artifacts:
-        cutoff = _row_cutoff(as_of, calendar_row)
-        key = payoff_artifact_key(strategy, _SHADOW_FILL_ALPHA, cutoff)
-        matches = [artifact for artifact in artifacts if artifact.key == key]
-        if len(matches) > 1:
-            raise NightlySourceBundleRefusal(
-                "MODEL_NOT_READY", "release carries duplicate exact-cutoff payoff artifacts")
-        if not matches:
-            raise NightlySourceBundleRefusal(
-                "MODEL_NOT_READY", "release lacks the exact-cutoff payoff artifact")
-        declarations["payoff_artifact"] = matches[0]
-        declarations["payoff_artifact_recipe"] = {"before": cutoff}
+    declarations.update(_release_payoff_declarations(
+        binding, strategy, artifacts, as_of, calendar_row))
     return declarations
 
 
@@ -555,6 +588,13 @@ def _with_release_artifacts(
         else:
             declarations = _release_artifact_declarations(
                 binding, strategy, drivers[0].identity, as_of, calendar_row)
+        for artifact_name, context_name in (
+            ("payoff_artifact", "payoff_artifact_cutoff"),
+            ("recalibration_artifact", "recalibration_artifact_cutoff"),
+        ):
+            artifact = declarations.get(artifact_name)
+            if artifact is not None:
+                context[context_name] = artifact.cutoff
         analogs = binding.analog_artifacts.get(strategy) or ()
         if analogs or strategy == "STR-THRU":
             analog_declaration = analog_declarations(
