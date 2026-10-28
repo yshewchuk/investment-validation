@@ -257,3 +257,8 @@ def test_write_root_related_to_a_production_root_is_refused(source_root, workspa
 def test_unhashable_ticker_entries_are_a_typed_refusal(source_root):
     _refusal(lambda: prep.build_manifest(source_root, session_ceiling=_AS_OF, tickers=[["AAAA"]]), "INVALID_REQUEST")
     _refusal(lambda: prep.build_manifest(source_root, session_ceiling=_AS_OF, tickers=[{"a": 1}]), "INVALID_REQUEST")
+
+
+def test_sidecar_scan_limit_is_a_typed_refusal(source_root, monkeypatch):
+    monkeypatch.setattr(prep, "MAX_SIDECARS", 1)
+    _refusal(lambda: prep.build_manifest(source_root, session_ceiling=_AS_OF, tickers=["AAAA"]), "RESOURCE_LIMIT_EXCEEDED")

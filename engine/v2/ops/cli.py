@@ -864,11 +864,9 @@ def _computed_moves_capture_report(dry_run, targets, cache):
 def computed_moves_command(args, root, conn, clock, *, history=None, include_source_bounds=False):
     """Build one computed_moves.v5 generation from the local Tier-1 cache.
 
-    ``history`` is an optional ``(cache, fetch)`` pair with the shape
-    ``tier1_yfinance_history_fetcher`` returns (a pinned manifest's fetcher);
-    default is the newest-wins Tier-1 rule. ``include_source_bounds`` is passed
-    to the refresh (default False). The report always carries ``parent_snapshot_id``,
-    the plan's parent read under the supervisor lock; other behaviour is unchanged.
+    ``history``: optional ``(cache, fetch)`` pair shaped like ``tier1_yfinance_history_fetcher``'s
+    (default newest-wins); ``include_source_bounds`` goes to the refresh. Only when either is used
+    the report adds ``parent_snapshot_id`` (the plan's parent, read under the lock).
     """
     from engine.v2.data.repository import Repository
     from engine.v2.ops import computed_moves_store
@@ -905,7 +903,8 @@ def computed_moves_command(args, root, conn, clock, *, history=None, include_sou
             provider_account=NATIVE_COMPUTED_MOVES_ACCOUNT,
             expected_head_generation=int(head["generation"]))
         report = _computed_moves_capture_report(args.dry_run, targets, cache)
-        report["parent_snapshot_id"] = plan.parent_snapshot_id
+        if history is not None or include_source_bounds:
+            report["parent_snapshot_id"] = plan.parent_snapshot_id
         if args.dry_run:
             return report
 

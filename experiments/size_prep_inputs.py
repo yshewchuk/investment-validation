@@ -40,15 +40,19 @@ def _body(entry):
 
 
 MAX_META_BYTES = 1024 * 1024
+MAX_SIDECARS = 2_000_000
 
 
 def _entries(source_root, keys=None):
-    """Tier-1 yfinance sidecars as CachedEntry objects; capped, regular-file reads only."""
+    """Stream Tier-1 yfinance sidecars as CachedEntry objects; at most MAX_SIDECARS scanned, capped regular-file reads only."""
     base = Path(source_root) / "data" / "raw" / "fetch" / "yfinance"
     if not Path(source_root).is_dir():
         raise fail("INVALID_REQUEST", "source root must be an existing directory")
-    found = []
-    for meta_path in sorted(base.glob("*/*.meta.json")):
+    scanned = 0
+    for meta_path in base.glob("*/*.meta.json"):
+        scanned += 1
+        if scanned > MAX_SIDECARS:
+            raise fail("RESOURCE_LIMIT_EXCEEDED", "the Tier-1 cache holds more sidecars than the scan limit")
         key = meta_path.name[: -len(".meta.json")]
         if keys is not None and key not in keys:
             continue
@@ -61,8 +65,7 @@ def _entries(source_root, keys=None):
             continue
         body_path = meta_path.with_name(key + ".body.gz")
         if isinstance(meta, dict) and body_path.exists():
-            found.append(CachedEntry(meta=meta, path=body_path))
-    return found
+            yield CachedEntry(meta=meta, path=body_path)
 
 
 def _day(value):
