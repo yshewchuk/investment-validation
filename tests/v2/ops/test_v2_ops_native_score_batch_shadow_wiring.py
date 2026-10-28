@@ -1458,7 +1458,7 @@ def test_service_tick_reconciles_pool_before_native_score(tmp_path, monkeypatch)
     monkeypatch.setattr(supervisor_module, "expire_leases", lambda *args, **kwargs: None)
     monkeypatch.setattr(service, "reconcile", lambda: None)
     monkeypatch.setattr(supervisor_module, "sample_capacity",
-                        lambda *args, **kwargs: sample(clock))
+                        lambda *args, **kwargs: events.append("claim") or sample(clock))
     monkeypatch.setattr(pool_refresh, "pool_cycle_outcome",
                         lambda *args, **kwargs: "active")
     monkeypatch.setattr(service, "_reconcile_publication_status",
@@ -1477,6 +1477,7 @@ def test_service_tick_reconciles_pool_before_native_score(tmp_path, monkeypatch)
     row = conn.execute("SELECT state, attempt_count FROM jobs WHERE job_id = ?",
                        (receipt.job_id,)).fetchone()
     assert events.index("pool") < events.index("native_score")
+    assert events.index("pool") < events.index("claim")
     assert tuple(row) == ("queued", 0)
     assert conn.execute("SELECT 1 FROM attempts WHERE job_id = ?",
                         (receipt.job_id,)).fetchone() is None
