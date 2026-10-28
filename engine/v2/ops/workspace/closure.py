@@ -13,7 +13,10 @@ Failure semantics: every defect raises ``SNAPSHOT_CLOSURE_BROKEN`` whose ``detai
 names it; nothing is repaired, skipped or retried. Raw receipts and normalizations behind
 ``daily_market`` revisions are outside this closure: a snapshot reader scans fragments only.
 Progress goes to stderr at a bounded cadence; the result is a value, never stdout.
-Coverage and capture rows are capped at 2,000,000 each (`closure_rows_over_cap`); the object and fragment set is the snapshot itself, read by the same `Repository.resolve_full` the nightly uses.
+Reads trust the production catalog (our own pipeline wrote it). One overall guard, kept only
+against our own bugs, refuses a snapshot whose fragment set exceeds 2,000,000 rows or 256 MiB
+of stored text (`closure_rows_over_cap` / `closure_bytes_over_cap`) before
+``Repository.resolve_full`` materializes it; there are no per-column, per-table or cumulative caps.
 """
 from __future__ import annotations
 
@@ -32,10 +35,7 @@ __all__ = ["SNAPSHOT_CLOSURE_SCHEMA", "SnapshotClosure", "verify_snapshot_closur
 SNAPSHOT_CLOSURE_SCHEMA = "snapshot_closure.v1.0"
 _MAX_CHAIN = 100_000
 _MAX_ROWS = 2_000_000
-_MAX_RECEIPTS = 1_000
-_MAX_LINEAGE = 10_000
 _MAX_ROW_BYTES = 256 * 1024 * 1024
-_MAX_PROBLEM_BYTES = 64 * 1024
 _PROGRESS_SECONDS = 30.0
 
 
@@ -69,58 +69,20 @@ def _log(message: str) -> None:
 
 
 def _bound_fragments(conn, snapshot_id: str) -> None:
-    """Refuse before ``resolve_full`` materializes an over-large fragment set (rows and bytes)."""
-    count = conn.execute(
-        "SELECT COUNT(*) FROM data_version_fragments WHERE dataset_version_id IN "
-        "(SELECT dataset_version_id FROM data_snapshot_tables WHERE snapshot_id = ?)",
-        (snapshot_id,)).fetchone()[0]
-    if count > _MAX_ROWS:
-        raise _broken("closure_rows_over_cap", table="data_version_fragments", rows=count)
-    _bound_bytes(
-        conn,
-        "SELECT SUM(LENGTH(CAST(f.fragment_id || f.object_id || f.contract_id || f.partition_key "
-        "|| f.byte_hash || f.logical_content_hash || f.key_bounds_json "
+    """The single size guard: refuse an over-large fragment set before ``resolve_full`` loads it."""
+    scope = ("FROM data_fragments f WHERE f.fragment_id IN (SELECT fragment_id FROM "
+             "data_version_fragments WHERE dataset_version_id IN (SELECT dataset_version_id "
+             "FROM data_snapshot_tables WHERE snapshot_id = ?))")
+    rows, size = conn.execute(
+        "SELECT COUNT(*), SUM(LENGTH(CAST(f.fragment_id || f.object_id || f.contract_id "
+        "|| f.partition_key || f.byte_hash || f.logical_content_hash || f.key_bounds_json "
         "|| COALESCE(f.time_bounds_json, '') || f.import_request_hash "
-        "|| f.input_receipt_refs_json || f.registered_at AS BLOB))) FROM data_fragments f WHERE f.fragment_id IN "
-        "(SELECT fragment_id FROM data_version_fragments WHERE dataset_version_id IN "
-        "(SELECT dataset_version_id FROM data_snapshot_tables WHERE snapshot_id = ?))",
-        (snapshot_id,), "data_fragments")
-    _bound_bytes(
-        conn,
-        "SELECT SUM(LENGTH(CAST(d.dataset_version_id || d.contract_id || d.manifest_hash "
-        "|| d.evidence_json || d.partition_logical_hashes_json || d.registered_at "
-        "|| COALESCE(d.parent_dataset_version_id, '') "
-        "AS BLOB))) FROM data_dataset_versions d WHERE d.dataset_version_id IN "
-        "(SELECT dataset_version_id FROM data_snapshot_tables WHERE snapshot_id = ?)",
-        (snapshot_id,), "data_dataset_versions")
-    _bound_bytes(
-        conn,
-        "SELECT SUM(LENGTH(CAST(c.contract_id || c.definition_hash || c.definition_json AS BLOB))) "
-        "FROM data_contracts c WHERE c.contract_id IN (SELECT d.contract_id FROM data_dataset_versions d "
-        "WHERE d.dataset_version_id IN (SELECT dataset_version_id FROM data_snapshot_tables "
-        "WHERE snapshot_id = ?))", (snapshot_id,), "data_contracts")
-    _bound_bytes(
-        conn,
-        "SELECT SUM(LENGTH(CAST(snapshot_id || manifest_hash || finality_receipt_refs_json || calendar_version "
-        "|| source_priority_version || knowledge_mode_by_table_json || commit_receipt_ref || registered_at "
-        "|| COALESCE(parent_snapshot_id, '') AS BLOB))) FROM data_snapshots WHERE snapshot_id = ?",
-        (snapshot_id,), "data_snapshots")
-    _bound_bytes(
-        conn,
-        "SELECT SUM(LENGTH(CAST(snapshot_id || table_name || dataset_version_id AS BLOB))) "
-        "FROM data_snapshot_tables WHERE snapshot_id = ?", (snapshot_id,), "data_snapshot_tables")
-    tables = conn.execute("SELECT COUNT(*) FROM data_snapshot_tables WHERE snapshot_id = ?",
-                          (snapshot_id,)).fetchone()[0]
-    if tables > _MAX_RECEIPTS:
-        raise _broken("closure_rows_over_cap", table="data_snapshot_tables", rows=tables)
-    _bound_bytes(
-        conn,
-        "SELECT SUM(LENGTH(CAST(o.object_id || o.kind || o.content_hash || o.storage_key "
-        "|| o.registered_at AS BLOB))) FROM data_objects o WHERE o.object_id IN "
-        "(SELECT f.object_id FROM data_fragments f WHERE f.fragment_id IN "
-        "(SELECT fragment_id FROM data_version_fragments WHERE dataset_version_id IN "
-        "(SELECT dataset_version_id FROM data_snapshot_tables WHERE snapshot_id = ?)))",
-        (snapshot_id,), "data_objects")
+        "|| f.input_receipt_refs_json || f.registered_at AS BLOB))) " + scope,
+        (snapshot_id,)).fetchone()
+    if rows > _MAX_ROWS:
+        raise _broken("closure_rows_over_cap", table="data_fragments", rows=rows)
+    if (size or 0) > _MAX_ROW_BYTES:
+        raise _broken("closure_bytes_over_cap", table="data_fragments")
 
 
 def _dataset_parents(conn, resolved) -> None:
@@ -137,13 +99,15 @@ def _parent_chain(conn, snapshot) -> tuple[str, ...]:
     while current is not None:
         if current in seen or len(chain) >= _MAX_CHAIN:
             raise _broken("parent_chain_invalid", snapshot_id=current)
-        row = conn.execute("SELECT parent_snapshot_id FROM data_snapshots WHERE snapshot_id = ?",
+        row = conn.execute("SELECT CASE WHEN LENGTH(CAST(parent_snapshot_id AS BLOB)) > 256 THEN NULL ELSE parent_snapshot_id END, LENGTH(CAST(parent_snapshot_id AS BLOB)) FROM data_snapshots WHERE snapshot_id = ?",
                            (current,)).fetchone()
         if row is None:
             raise _broken("parent_missing", snapshot_id=current)
+        if (row[1] or 0) > 256:
+            raise _broken("parent_chain_invalid", snapshot_id=current)
         seen.add(current)
         chain.append(current)
-        current = row["parent_snapshot_id"]
+        current = row[0]
     return tuple(chain)
 
 
@@ -154,29 +118,23 @@ def _committed(conn, receipt_id: str) -> bool:
 
 
 def _commit_receipts(conn, snapshot_id: str) -> tuple[str, ...]:
-    _bound_bytes(conn, "SELECT SUM(LENGTH(CAST(receipt_id || attempt_id || source_manifest_hash "
-                 "|| COALESCE(result_snapshot_id, '') || status || registered_at || scope AS BLOB))) "
-                 "FROM data_import_receipts WHERE result_snapshot_id = ? AND status = 'committed'",
-                 (snapshot_id,), "data_import_receipts")
     rows = conn.execute(
         "SELECT receipt_id FROM data_import_receipts WHERE result_snapshot_id = ? "
-        "AND status = 'committed' ORDER BY receipt_id LIMIT ?",
-        (snapshot_id, _MAX_RECEIPTS + 1)).fetchall()
+        "AND status = 'committed' ORDER BY receipt_id",
+        (snapshot_id,)).fetchall()
     if not rows:
         raise _broken("commit_receipt_missing", snapshot_id=snapshot_id)
-    if len(rows) > _MAX_RECEIPTS:
-        raise _broken("closure_rows_over_cap", table="data_import_receipts")
-    ref = conn.execute("SELECT LENGTH(CAST(commit_receipt_ref AS BLOB)), "
-                       "CASE WHEN LENGTH(CAST(commit_receipt_ref AS BLOB)) > ? THEN NULL "
-                       "ELSE commit_receipt_ref END FROM data_snapshots WHERE snapshot_id = ?",
-                       (_MAX_PROBLEM_BYTES, snapshot_id)).fetchone()
-    if ref is None or ref[1] not in {row["receipt_id"] for row in rows}:
+    ref = conn.execute("SELECT commit_receipt_ref FROM data_snapshots WHERE snapshot_id = ?",
+                       (snapshot_id,)).fetchone()
+    if ref is None or ref[0] not in {row["receipt_id"] for row in rows}:
         raise _broken("commit_receipt_ref_mismatch", snapshot_id=snapshot_id)
     return tuple(row["receipt_id"] for row in rows)
 
 
-def _lineage(conn, receipt_ids) -> tuple[str, ...]:
+def _lineage(conn, receipt_ids) -> tuple[tuple[str, ...], list]:
+    """Base receipts reachable by the lineage walk, plus the (receipt, base) edges walked."""
     found: set[str] = set()
+    edges: set[tuple[str, str]] = set()
     for start in receipt_ids:
         hops, current = {start}, start
         while True:
@@ -184,34 +142,23 @@ def _lineage(conn, receipt_ids) -> tuple[str, ...]:
                                "WHERE receipt_id = ?", (current,)).fetchone()
             if row is None:
                 break
-            current = row["base_receipt_id"]
-            if current in hops or len(hops) > _MAX_CHAIN:
-                raise _broken("lineage_cycle", receipt_id=current)
-            if not _committed(conn, current):
-                raise _broken("lineage_receipt_missing", receipt_id=current)
-            hops.add(current)
-            found.add(current)
-            if len(found) > _MAX_LINEAGE:
-                raise _broken("closure_rows_over_cap", table="data_receipt_lineage")
-    return tuple(sorted(found))
-
-
-def _bound_bytes(conn, sql: str, args: tuple, table: str) -> None:
-    """Refuse before fetching rows whose stored text exceeds the total byte budget."""
-    if (conn.execute(sql, args).fetchone()[0] or 0) > _MAX_ROW_BYTES:
-        raise _broken("closure_bytes_over_cap", table=table)
+            base = row["base_receipt_id"]
+            if base in hops or len(hops) > _MAX_CHAIN:
+                raise _broken("lineage_cycle", receipt_id=base)
+            if not _committed(conn, base):
+                raise _broken("lineage_receipt_missing", receipt_id=base)
+            edges.add((current, base))
+            hops.add(base)
+            found.add(base)
+            current = base
+    return tuple(sorted(found)), [list(edge) for edge in sorted(edges)]
 
 
 def _coverage_rows(conn, snapshot_id: str) -> list:
-    _bound_bytes(conn, "SELECT SUM(LENGTH(CAST(snapshot_id || table_name || coverage_id || import_receipt_id || coverage_hash || coverage_json AS BLOB))) "
-                 "FROM data_snapshot_coverage WHERE snapshot_id = ?", (snapshot_id,),
-                 "data_snapshot_coverage")
     rows = conn.execute(
         "SELECT * FROM data_snapshot_coverage WHERE snapshot_id = ? "
         "ORDER BY table_name, coverage_id",
-        (snapshot_id,)).fetchmany(_MAX_ROWS + 1)
-    if len(rows) > _MAX_ROWS:
-        raise _broken("closure_rows_over_cap", table="data_snapshot_coverage")
+        (snapshot_id,)).fetchall()
     for receipt_id in sorted({row["import_receipt_id"] for row in rows}):
         if not _committed(conn, receipt_id):
             raise _broken("coverage_receipt_missing", receipt_id=receipt_id)
@@ -220,39 +167,19 @@ def _coverage_rows(conn, snapshot_id: str) -> list:
 
 def _capture_rows(conn, receipt_ids) -> list:
     rows: list = []
-    used = 0
     for receipt_id in receipt_ids:
-        used += conn.execute(
-            "SELECT COALESCE(SUM(LENGTH(CAST(capture_id || ticker || source_kind || source_hash "
-            "|| retrieved_at || outcome || contract_id || receipt_id || created_at AS BLOB))), 0) FROM data_price_captures "
-            "WHERE receipt_id = ?", (receipt_id,)).fetchone()[0]
-        if used > _MAX_ROW_BYTES:
-            raise _broken("closure_bytes_over_cap", table="data_price_captures")
         cursor = conn.execute("SELECT * FROM data_price_captures "
                               "WHERE receipt_id = ? ORDER BY capture_id", (receipt_id,))
-        rows += [list(row) for row in cursor.fetchmany(_MAX_ROWS + 1 - len(rows))]
-        if len(rows) > _MAX_ROWS:
-            raise _broken("closure_rows_over_cap", table="data_price_captures")
+        rows += [list(row) for row in cursor.fetchall()]
     return rows
 
 
 def _receipt_facts(conn, receipt_ids) -> list:
-    """Full receipt rows for the digest; an over-long ``problem_json`` refuses."""
-    facts = []
-    for receipt_id in sorted(receipt_ids):
-        _bound_bytes(conn, "SELECT SUM(LENGTH(CAST(receipt_id || attempt_id || source_manifest_hash "
-                     "|| COALESCE(result_snapshot_id, '') || status || registered_at || scope AS BLOB))) "
-                     "FROM data_import_receipts WHERE receipt_id = ?", (receipt_id,),
-                     "data_import_receipts")
-        row = conn.execute(
-            "SELECT receipt_id, attempt_id, fence, source_manifest_hash, result_snapshot_id, status, "
-            "LENGTH(CAST(problem_json AS BLOB)), CASE WHEN LENGTH(CAST(problem_json AS BLOB)) > ? "
-            "THEN NULL ELSE problem_json END, registered_at, scope FROM data_import_receipts "
-            "WHERE receipt_id = ?", (_MAX_PROBLEM_BYTES, receipt_id)).fetchone()
-        if (row[6] or 0) > _MAX_PROBLEM_BYTES:
-            raise _broken("closure_bytes_over_cap", table="data_import_receipts")
-        facts.append(list(row))
-    return facts
+    """Full receipt rows for the digest."""
+    return [list(conn.execute(
+        "SELECT receipt_id, attempt_id, fence, source_manifest_hash, result_snapshot_id, status, "
+        "problem_json, registered_at, scope FROM data_import_receipts WHERE receipt_id = ?",
+        (receipt_id,)).fetchone()) for receipt_id in sorted(receipt_ids)]
 
 
 def _object_stats(store: ArtifactStore, refs, deep: bool) -> tuple[list, int]:
@@ -298,14 +225,15 @@ def verify_snapshot_closure(conn, store: ArtifactStore, snapshot_id: str, manife
     _dataset_parents(conn, resolved)
     chain = _parent_chain(conn, snapshot)
     commits = _commit_receipts(conn, snapshot_id)
-    lineage = _lineage(conn, commits)
+    lineage, lineage_edges = _lineage(conn, commits)
     coverage = _coverage_rows(conn, snapshot_id)
     captures = _capture_rows(conn, commits)
     items, total = _object_stats(store, resolved.objects, deep)
     identity = _digest({
         "schema": SNAPSHOT_CLOSURE_SCHEMA, "snapshot_id": snapshot_id,
         "manifest_hash": manifest_hash, "parent_chain": list(chain),
-        "commit_receipts": list(commits), "lineage": list(lineage), "coverage": coverage,
+        "commit_receipts": list(commits), "lineage": list(lineage), "lineage_edges": lineage_edges,
+        "coverage": coverage,
         "receipts": _receipt_facts(conn, (*commits, *lineage)),
         "captures": captures, "records": len(resolved.records),
         "objects": [[ref.object_id, ref.content_hash, ref.byte_size]

@@ -419,3 +419,25 @@ def test_reopen_refuses_a_different_schema_version_with_its_own_reason(prod):
     with pytest.raises(OpsError) as caught:
         _reopen(prod, "schema")
     assert _details(caught) == ("WORKSPACE_REFUSED", "schema_mismatch")
+
+
+def test_lineage_edges_change_the_closure_identity(prod):
+    committed = _receipt_id(prod)
+    copy = ("INSERT INTO data_import_receipts (receipt_id, attempt_id, fence, source_manifest_hash, "
+            "result_snapshot_id, status, problem_json, registered_at, scope) "
+            "SELECT ?, attempt_id, fence, source_manifest_hash, ?, status, problem_json, "
+            "registered_at, scope FROM data_import_receipts WHERE receipt_id = ?")
+    _rewrite_without_triggers(prod, "data_import_receipts", copy,
+                              ("second-commit", prod.snap.snapshot_id, committed))
+    _rewrite_without_triggers(prod, "data_import_receipts", copy,
+                              ("base-a", prod.snap.snapshot_id, committed))
+    edge = "INSERT INTO data_receipt_lineage (receipt_id, base_receipt_id, kind) VALUES (?, ?, ?)"
+    _rewrite_without_triggers(prod, "data_receipt_lineage", edge,
+                              (committed, "base-a", "price_history_capture"))
+    with _create(prod, "edges-before") as ws:
+        before = ws.closure.identity_digest
+    _rewrite_without_triggers(prod, "data_receipt_lineage", edge,
+                              ("second-commit", "base-a", "price_history_capture"))
+    with _create(prod, "edges-after") as ws:
+        after = ws.closure.identity_digest
+    assert before != after
