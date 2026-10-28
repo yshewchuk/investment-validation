@@ -237,6 +237,32 @@ def _state(conn, key):
     return None if row is None else row["state"]
 
 
+def pool_cycle_outcome(conn, session):
+    """Classify the durable pool-nightly cycle for one session.
+
+    Returns ``"skipped"`` when no pool job exists, ``"active"`` while the
+    cycle has no terminal result, ``"failed"`` when any phase failed, and
+    ``"promoted"`` only after a pool promote phase succeeded. The query is
+    bounded and uses the ``jobs`` idempotency-key range for this session.
+    """
+    if conn is None or not isinstance(session, str) or not session:
+        return "skipped"
+    prefix = f"nightly:{session}:pool"
+    rows = conn.execute(
+        "SELECT idempotency_key, state FROM jobs "
+        "WHERE namespace = 'shadow' AND idempotency_key >= ? "
+        "AND idempotency_key < ? ORDER BY idempotency_key DESC LIMIT 256",
+        (prefix + ":", prefix + ";")).fetchall()
+    if not rows:
+        return "skipped"
+    if any(row["state"] in {"failed", "cancelled", "blocked"} for row in rows):
+        return "failed"
+    if any(":pool:promote:" in row["idempotency_key"]
+           and row["state"] == "succeeded" for row in rows):
+        return "promoted"
+    return "active"
+
+
 def _started_family(conn, session, prior_token, tag):
     """The family of the cycle already started for this (session, prior token,
     tag), else ``None``: ``train-chooser`` is bootstrap-only, ``train-paired``

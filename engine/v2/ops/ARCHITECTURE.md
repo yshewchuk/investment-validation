@@ -427,25 +427,9 @@ change; only a `store_domains` write against a legacy-owned table, or a
 neither is true of `native_parity`, which is exactly why this redo can
 schedule it now, well before Phase 7.
 
-**Cutover PR-7a (implemented — wiring and refusal gate only).**
-`native_score_batch` is registered as a job kind
-(`stages.py::_native_score_batch_kind`) and has a production caller —
-`supervisor.Service`'s tick sidecar, alongside legacy scoring, with no
-authority change. Three symbols, mirroring `computed_moves_refresh`'s own
-shape: `supervisor.Service._reconcile_native_score_batch_shadow`
-(tick-loop sidecar, called from `Service.tick`);
-`nightly.submit_native_score_batch_shadow_if_ready` (the builder the
-sidecar calls — see "Raw-row producer" below for what it does once a
-`"score"` job pins a snapshot); `nightly.native_score_batch_identity` (a
-cheap catalog-only identity check parsing the paired `"score"` job's own
-idempotency key to recover `(session, scope_hash, snapshot_pinned)`, or
-`None`). `nightly.GRAPH` gains a `"native_score_batch": ("score",)` node
-(topological documentation only — no submission path reads it) and
-`OPTIONAL` gains `"native_score_batch"`. A legacy-input-mode plan created
-directly with `ops plan` has no pinned native identity; therefore the sidecar
-does not classify it as a release binding failure (see "Failure semantics").
+**Cutover PR-7a (implemented — wiring and refusal gate only).** `native_score_batch` is optional, submitted by `Service._reconcile_native_score_batch_shadow` after a snapshot-pinned score; `GRAPH` documents its score edge, tick order is below.
 
-**Cutover PR-7b (implemented, #145/#150): the shadow nightly plan pins a snapshot before scoring.** `nightly_trigger._default_plan` runs in `input_mode="snapshot"`, `snapshot_scope="shadow"`: legacy `"score"`/`"decision_replay"`/`"projection"`/`"selfcheck"`/`"model_evidence"` read through that pinned snapshot. `pin_snapshot_inputs` binds the scheduled plan to the exact `snapshot_id` produced by its price-history capture; its three required bindings are `core/snapshot_contracts.py::SNAPSHOT_BINDINGS`. The native batch worker resolves that pinned snapshot and enumerates its forward board. This never starts the real legacy nightly: `nightly_trigger.py` runs on its own systemd timer (`ops/systemd/native-nightly-trigger.timer`, every 30 minutes), separate from whatever schedules the legacy nightly.
+**Cutover PR-7b (implemented, #145/#150):** `nightly_trigger._default_plan` pins the shadow snapshot used by legacy scoring and native board enumeration; it runs on its own 30-minute systemd timer, separate from the legacy nightly.
 
 `nightly_trigger._ensure_shadow_snapshot(root, as_of, clock, attempt, ...) -> (status, snapshot_id | None)`, called from `_submit_plan` immediately before `plan_fn`, on every pre-plan attempt:
 
@@ -1205,6 +1189,21 @@ job.
 | a `native_parity` job reaches `run_native_parity_worker` with a stale schema tag anyway (e.g. the generic job-submission API used directly) | the worker's own independent check fails `VALIDATION_FAILED` |
 
 ### Tick-loop sidecars: submission identity
+
+#### Pool refresh before native scoring (R1–R6)
+
+Each tick reconciles the session's pool cycle before scoring: succeeded promote
+uses the promoted release; skipped or terminal failure uses the deployed one;
+active defers the batch. Pool failure never blocks native scoring or the board.
+
+| R | `native_score_batch` pool-cycle contract |
+|---|---|
+| R1 | No eligible pool cycle for the session is classified skipped; native scoring proceeds with the currently deployed release. |
+| R2 | The sidecar reads only durable pool-cycle job state. A nonterminal cycle defers native submission for this tick; a succeeded promote releases the gate. |
+| R3 | A terminal failed pool phase releases the gate and is not retried by native scoring; the pool sidecar owns its bounded retries and classification. |
+| R4 | Pool reconciliation and native submission persist through their existing catalog/job transactions; no cross-job transaction is claimed. |
+| R5 | A failed or skipped cycle publishes no new pool release. Native scoring resolves the still-deployed prior release and records that binding in its existing job parameters/results. |
+| R6 | Native job identity remains the succeeded score job's session/scope key. Deferring while the pool cycle is active creates no native job and consumes no submission retry; re-evaluation on later ticks is idempotent. |
 
 | Sidecar | Missing-input case | Idempotency key scope |
 |---|---|---|

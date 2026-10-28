@@ -631,9 +631,9 @@ class Service:
             self._launch(claim)
         self._reconcile_publication_status()
         self._reconcile_computed_moves_refresh()
+        pool_submitted = self._reconcile_pool_nightly_refresh()
         self._reconcile_native_score_batch_shadow()
         self._reconcile_native_parity()
-        pool_submitted = self._reconcile_pool_nightly_refresh()
         return bool(self.running or claim or pool_submitted)
 
     def record_nightly_completion(self, identity: SessionIdentity, generation: int,
@@ -1224,7 +1224,11 @@ class Service:
 
         identity lookup runs first and returns without a release check when no
         eligible identity exists or the identity is not snapshot-pinned
-        (`producer_parameters is None`); otherwise release binding is checked.
+        (`producer_parameters is None`); otherwise the pool outcome gate and
+        release binding are checked. An ``active`` pool cycle defers without
+        consuming the native submission memo; ``promoted``, ``failed``, and
+        ``skipped`` proceed to release resolution. A failed or skipped cycle
+        therefore uses whatever release is still deployed.
         An existing native job does not skip release re-check or reconciliation;
         the idempotent submit path handles the existing job. A
         release-unavailable result never consumes `_native_score_batch_memo`
@@ -1247,6 +1251,10 @@ class Service:
             return
         session, scope_hash, producer_parameters = identity
         if producer_parameters is None:
+            return
+        from engine.v2.ops.pool_refresh import pool_cycle_outcome
+        pool_outcome = pool_cycle_outcome(self.conn, session)
+        if pool_outcome == "active":
             return
         release_root = self._native_release_root_or_none(
             occurrence=session, scope_hash=scope_hash)
