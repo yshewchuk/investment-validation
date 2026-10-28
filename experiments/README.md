@@ -401,7 +401,7 @@ Library-only helpers for preparing SIZE inputs inside a caller-supplied write ro
 | Malformed manifest, ceiling, ticker list, or `catalog.sqlite` not directly inside `write_root` | `INVALID_REQUEST` |
 | Requested ticker has no eligible Tier-1 entry at build; or, in `generate_bounds` (strict fetcher), a refresh target not pinned in the manifest (refused during capture, before any commit) | `SOURCE_NOT_FOUND` |
 | `source_root` not an existing directory (`build_manifest`, pinned fetcher, `generate_bounds`) | `INVALID_REQUEST` |
-| Sidecar or cache body not a regular file (symlink, FIFO), sidecar above `MAX_META_BYTES` (1 MiB), or a corrupt gzip body (unreadable or non-JSON sidecars are skipped as not entries) | `SOURCE_INVALID` |
+| Sidecar or cache body not a regular file (symlink, FIFO), sidecar above `MAX_META_BYTES` (1 MiB), an unreadable file, or a corrupt gzip body; each file is opened once with `O_NOFOLLOW|O_NONBLOCK`, checked with `fstat` and read through a byte cap (non-JSON sidecars, and sidecars whose `key` differs from the file name, are skipped as not entries). Scans and generation log bounded progress (every 100,000 sidecars: count, rate, ETA bound, RSS) to stderr | `SOURCE_INVALID` |
 | `write_root` a symlink path, empty `production_roots`, or `write_root` equal to, containing or contained by a production root; unhashable or non-string ticker entries | `INVALID_REQUEST` |
 | Refusals raised by the shared refresh (`computed_moves_command`: missing scope head, held supervisor lock, input or contract mismatches) | propagated unchanged |
 | Refresh was a no-op and the head carries no source bounds | `PUBLICATION_REFUSED` |

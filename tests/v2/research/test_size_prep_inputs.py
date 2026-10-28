@@ -372,3 +372,26 @@ def test_symlinked_provenance_directory_is_refused_before_any_write(source_root,
     _refusal(lambda: prep.generate_bounds(root, source_root=source_root, manifest=manifest, scope="shadow",
                                           as_of=_AS_OF, production_roots=_PRODUCTION), "INVALID_REQUEST")
     assert list(outside.iterdir()) == []
+
+
+def test_fifo_and_symlink_cache_files_are_refused_without_blocking(source_root):
+    import os
+
+    manifest = prep.build_manifest(source_root, session_ceiling=_AS_OF, tickers=["BBBB"])
+    body = source_root / "data/raw/fetch/yfinance/bb/bb01.body.gz"
+    body.unlink()
+    os.mkfifo(body)
+    _refusal(lambda: prep.pinned_history_fetcher(source_root, manifest), "SOURCE_INVALID")
+    body.unlink()
+    meta = source_root / "data/raw/fetch/yfinance/bb/bb01.meta.json"
+    meta.rename(meta.with_name("real.json"))
+    meta.symlink_to(meta.with_name("real.json"))
+    _refusal(lambda: prep.build_manifest(source_root, session_ceiling=_AS_OF, tickers=["BBBB"]), "SOURCE_INVALID")
+
+
+def test_scan_logs_bounded_progress_to_stderr(source_root, monkeypatch, capsys):
+    monkeypatch.setattr(prep, "PROGRESS_EVERY", 1)
+    prep.build_manifest(source_root, session_ceiling=_AS_OF, tickers=["AAAA"])
+    err = capsys.readouterr().err
+    assert "[size-prep] scan 1 of at most" in err and "ETA<=" in err and "rss_kib=" in err
+    assert "manifest end" in err and capsys.readouterr().out == ""

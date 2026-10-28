@@ -3,6 +3,7 @@ import hashlib
 import gzip
 import json
 import os
+import resource
 import stat
 import zlib
 import sys
@@ -25,22 +26,42 @@ _ENTRY_KEYS = {"ticker", "key", "fetched_at", "body_sha256"}
 MAX_BODY_BYTES = 64 * 1024 * 1024
 
 
-def _body(entry):
-    """Decompressed cache body, read from a regular non-symlink file and refused above MAX_BODY_BYTES."""
+def _read_regular(path, limit, *, gz=False):
+    """Read at most ``limit + 1`` bytes from ONE open of a regular, non-symlink file; None if absent."""
     try:
-        if not stat.S_ISREG(os.lstat(entry.path).st_mode):
-            raise fail("SOURCE_INVALID", "a Tier-1 cache body must be a regular file")
-        with gzip.open(entry.path, "rb") as handle:
-            body = handle.read(MAX_BODY_BYTES + 1)
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        raise fail("SOURCE_INVALID", "a Tier-1 cache file cannot be opened as a regular file") from None
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise fail("SOURCE_INVALID", "a Tier-1 cache file must be a regular file")
+        with os.fdopen(descriptor, "rb") as handle:
+            descriptor = None
+            return (gzip.GzipFile(fileobj=handle) if gz else handle).read(limit + 1)
     except (OSError, EOFError, zlib.error):
-        raise fail("SOURCE_INVALID", "a Tier-1 cache body is unreadable or corrupt") from None
+        raise fail("SOURCE_INVALID", "a Tier-1 cache file is unreadable or corrupt") from None
+
+
+def _body(entry):
+    """Decompressed cache body from a single capped regular-file open, refused above MAX_BODY_BYTES."""
+    body = _read_regular(entry.path, MAX_BODY_BYTES, gz=True)
+    if body is None:
+        raise fail("SOURCE_INVALID", "a Tier-1 cache body disappeared")
     if len(body) > MAX_BODY_BYTES:
         raise fail("RESOURCE_LIMIT_EXCEEDED", "a Tier-1 cache body exceeds the decompressed size limit")
     return body
 
 
+def _log(message, started):
+    rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    print("[size-prep] " + message + " elapsed=" + format(time.monotonic() - started, ".1f") + "s rss_kib=" + str(rss), file=sys.stderr)
+
+
 MAX_META_BYTES = 1024 * 1024
 MAX_SIDECARS = 2_000_000
+PROGRESS_EVERY = 100_000
 
 
 def _entries(source_root, keys=None):
@@ -48,24 +69,31 @@ def _entries(source_root, keys=None):
     base = Path(source_root) / "data" / "raw" / "fetch" / "yfinance"
     if not Path(source_root).is_dir():
         raise fail("INVALID_REQUEST", "source root must be an existing directory")
-    scanned = 0
+    scanned, started = 0, time.monotonic()
     for meta_path in base.glob("*/*.meta.json"):
         scanned += 1
         if scanned > MAX_SIDECARS:
             raise fail("RESOURCE_LIMIT_EXCEEDED", "the Tier-1 cache holds more sidecars than the scan limit")
+        if scanned % PROGRESS_EVERY == 0:
+            rate = scanned / max(time.monotonic() - started, 1e-9)
+            _log("scan " + str(scanned) + " of at most " + str(MAX_SIDECARS) + " sidecars, " + format(rate, ".0f")
+                 + "/s, ETA<=" + format((MAX_SIDECARS - scanned) / max(rate, 1e-9), ".0f") + "s", started)
         key = meta_path.name[: -len(".meta.json")]
         if keys is not None and key not in keys:
             continue
+        raw = _read_regular(meta_path, MAX_META_BYTES)
+        if raw is None:
+            continue
+        if len(raw) > MAX_META_BYTES:
+            raise fail("SOURCE_INVALID", "a Tier-1 sidecar must be within the size limit")
         try:
-            info = os.lstat(meta_path)
-            if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_META_BYTES:
-                raise fail("SOURCE_INVALID", "a Tier-1 sidecar must be a regular file within the size limit")
-            meta = json.loads(meta_path.read_text())
-        except (OSError, ValueError):
+            meta = json.loads(raw)
+        except ValueError:
             continue
         body_path = meta_path.with_name(key + ".body.gz")
         if isinstance(meta, dict) and meta.get("key") == key and body_path.exists():
             yield CachedEntry(meta=meta, path=body_path)
+    _log("scan end " + str(scanned) + " sidecars", started)
 
 
 def _day(value):
@@ -98,6 +126,8 @@ def build_manifest(source_root, *, session_ceiling, tickers):
             or any(type(t) is not str or not t or t != t.strip() for t in tickers)
             or len(set(tickers)) != len(tickers)):
         raise fail("INVALID_REQUEST", "explicit unique ticker list required")
+    started = time.monotonic()
+    _log("manifest start tickers=" + str(len(tickers)), started)
     cache = {}
     for entry in _entries(source_root):
         if entry.endpoint != "history" or entry.params.get("period") != "max" or str(entry.meta.get("status")) != "200":
@@ -115,6 +145,7 @@ def build_manifest(source_root, *, session_ceiling, tickers):
         _retrieved(fetched_at)
         entries.append({"ticker": ticker, "key": entry.key, "fetched_at": fetched_at,
                         "body_sha256": hashlib.sha256(_body(entry)).hexdigest()})
+    _log("manifest end entries=" + str(len(entries)), started)
     manifest = {"schema_version": MANIFEST_VERSION, "session_ceiling": session_ceiling, "entries": entries}
     return {**manifest, "manifest_id": _identity(manifest)}
 
@@ -238,7 +269,7 @@ def generate_bounds(write_root, *, source_root, manifest, scope, as_of, producti
     if not catalog.is_file() or catalog.resolve().parent != root:
         raise fail("INVALID_REQUEST", "catalog.sqlite must exist directly inside the write root")
     started = time.monotonic()
-    print("[size-prep] bounds start entries=" + str(len(manifest["entries"])), file=sys.stderr)
+    _log("bounds start entries=" + str(len(manifest["entries"])), started)
     cache, fetch = pinned_history_fetcher(source_root, manifest, strict=True)
     served = set()
 
@@ -264,5 +295,5 @@ def generate_bounds(write_root, *, source_root, manifest, scope, as_of, producti
     pinned = [e for e in manifest["entries"] if e["ticker"] in served]
     record = _provenance(manifest, pinned, source, bounds, refresh_noop=candidate is None)
     _write_record(root, record)
-    print("[size-prep] bounds end elapsed=" + format(time.monotonic() - started, ".1f") + "s", file=sys.stderr)
+    _log("bounds end", started)
     return record
