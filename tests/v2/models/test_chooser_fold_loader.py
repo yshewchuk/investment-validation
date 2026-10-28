@@ -469,7 +469,8 @@ def test_no_fit_network_write_or_source_ready_claim(setup, monkeypatch):
             "descriptor", "catalog_hash", "pool_pred", "pool_res", "inference", "release"
         }
         assert {field.name for field in fields(metadata)} == {
-            "model_id", "fold_start", "panel_sha256", "feature_order", "pool_pred", "pool_res"
+            "model_id", "fold_start", "panel_sha256", "feature_order", "pool_pred", "pool_res",
+            "training_cutoff"
         }
         assert not any(hasattr(metadata, key) for key in ("fit", "estimator", "header"))
         assert not any(hasattr(value, key) for value in (ref, metadata)

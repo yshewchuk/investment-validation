@@ -36,6 +36,7 @@ def _descriptor_document(role):
         "decision_clock_id": "entry-close", "pool_count": 2,
         "output_name": OUTPUTS[role][0], "producer_output": OUTPUTS[role][1],
         "pool_pred_field": "pool_pred", "pool_res_field": "pool_res",
+        "training_cutoff": None,
         "estimator": {"schema_version": "artifact_member.v1.0", "name": "estimator",
                       "path": "objects/" + "c" * 64, "content_hash": "sha256:" + "c" * 64},
     }

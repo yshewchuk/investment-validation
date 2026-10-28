@@ -685,6 +685,35 @@ def _gate_source_or_refusal(
     return source
 
 
+def _chooser_artifact_refs(bundle) -> tuple[str, ...]:
+    recipe = getattr(bundle, "chooser_recipe", None)
+    refs: list[str] = []
+    if isinstance(recipe, Mapping) and recipe:
+        chosen_binding_ids = set()
+        top_level_binding_id = recipe.get("binding_id")
+        if isinstance(top_level_binding_id, str):
+            chosen_binding_ids.add(top_level_binding_id)
+        producers = recipe.get("producers")
+        if isinstance(producers, Mapping):
+            for producer in producers.values():
+                if isinstance(producer, Mapping):
+                    binding_id = producer.get("binding_id")
+                    if isinstance(binding_id, str):
+                        chosen_binding_ids.add(binding_id)
+        for binding in bundle.model_release.bindings:
+            if binding.binding_id in chosen_binding_ids:
+                for member in binding.members:
+                    if member.name == "estimator":
+                        refs.append(member.content_hash)
+        for key in ("analog_pool", "admissible_table"):
+            entry = recipe.get(key)
+            if isinstance(entry, Mapping):
+                content_hash = entry.get("content_hash")
+                if isinstance(content_hash, str):
+                    refs.append(content_hash)
+    return tuple(refs)
+
+
 def _score_artifact_refs(drivers, gate_identity: ModelIdentity | None, bundle) -> tuple[str, ...]:
     refs = [driver.identity.artifact_hash for driver in drivers]
     if gate_identity is not None:
@@ -692,6 +721,7 @@ def _score_artifact_refs(drivers, gate_identity: ModelIdentity | None, bundle) -
     gate_source = bundle.gate_forecast_source
     if gate_source is not None:
         refs.append(gate_source.artifact_hash)
+    refs.extend(_chooser_artifact_refs(bundle))
     return tuple(dict.fromkeys(refs))
 
 

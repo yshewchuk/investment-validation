@@ -276,17 +276,61 @@ class ChooserState:
     producer_bindings: Mapping[str, Any]
 
 
+_CHOOSER_FOLD_CACHE_TOKEN = object()
+
+
+@dataclass(frozen=True, kw_only=True)
+class _ChooserFoldCacheEntry:
+    validation_token: object
+    fold_state: tuple[dict[str, Any], dict[str, Any]]
+
+
+def _chooser_fold_cache_lookup(
+    fold_cache: dict[tuple[int, str], Any] | None,
+    cache_key: tuple[int, str],
+) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    if fold_cache is None:
+        return None
+    if type(fold_cache) is not dict:
+        raise ModelNotReady("chooser state", "chooser state is missing or unusable") from None
+    entry = fold_cache.get(cache_key)
+    if entry is None:
+        return None
+    if type(entry) is not _ChooserFoldCacheEntry:
+        raise ModelNotReady("chooser state", "chooser state is missing or unusable") from None
+    if entry.validation_token is not _CHOOSER_FOLD_CACHE_TOKEN:
+        raise ModelNotReady("chooser state", "chooser state is missing or unusable") from None
+    state = entry.fold_state
+    if type(state) is not tuple or len(state) != 2:
+        raise ModelNotReady("chooser state", "chooser state is missing or unusable") from None
+    pools, producers = state
+    if type(pools) is not dict or type(producers) is not dict:
+        raise ModelNotReady("chooser state", "chooser state is missing or unusable") from None
+    return pools, producers
+
+
 def _chooser_day(value: Any) -> str:
     try:
         if isinstance(value, datetime):
+            if value.utcoffset() is not None:
+                raise ValueError("timezone-aware datetime is not supported")
             day = value.date()
         elif isinstance(value, date):
             day = value
         elif isinstance(value, str):
-            if len(value) > 10 and value[10] in ("T", " "):
-                day = datetime.fromisoformat(value).date()
-            else:
+            if len(value) == 10:
                 day = date.fromisoformat(value)
+                if day.isoformat() != value:
+                    raise ValueError("date string is not canonical")
+            elif len(value) > 10 and value[10] in ("T", " "):
+                parsed = datetime.fromisoformat(value)
+                if parsed.utcoffset() is not None:
+                    raise ValueError("timezone-aware datetime string is not supported")
+                day = parsed.date()
+                if parsed.isoformat() != value:
+                    raise ValueError("datetime string is not canonical")
+            else:
+                raise ValueError("unsupported chooser day string form")
         else:
             raise ValueError("unsupported chooser day type")
         return day.isoformat()
@@ -390,7 +434,7 @@ def select_chooser_state(
         raise ModelNotReady("chooser state", "chooser state is missing or unusable") from None
     fold_start = min(event_month, decision_month).isoformat()
     cache_key = (id(binding), f"chooser:{fold_start}:{cutoff}")
-    fold_state = None if fold_cache is None else fold_cache.get(cache_key)
+    fold_state = _chooser_fold_cache_lookup(fold_cache, cache_key)
     if fold_state is None:
         try:
             fold_state = _load_chooser_fold_state(
@@ -400,7 +444,9 @@ def select_chooser_state(
         except (OSError, ValueError, TypeError, KeyError, AttributeError, OverflowError):
             raise ModelNotReady("chooser state", "chooser state is missing or unusable") from None
         if fold_cache is not None:
-            fold_cache[cache_key] = fold_state
+            fold_cache[cache_key] = _ChooserFoldCacheEntry(
+                validation_token=_CHOOSER_FOLD_CACHE_TOKEN,
+                fold_state=fold_state)
     pools, producers = fold_state
     return ChooserState(
         analog_pool=analog[0], admissible_table=tables[0], fold_pools=pools,

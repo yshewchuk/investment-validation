@@ -200,8 +200,10 @@ advisory `CHOOSER_MISSING_FEATURES` outcome.
 Chooser producer folds require a canonical `training_cutoff` in both the
 descriptor and hash-verified estimator metadata, strictly before the decision
 session. Missing, malformed, mismatched, same-day or later cutoffs refuse the
-member row as `MODEL_NOT_READY` before cache lookup, and the cache key includes
-the decision day. Legacy artifacts without this field are not consumed. The
+member row as `MODEL_NOT_READY`; the cache key includes the decision day and
+only entries produced by the validated fold loader are reusable. Selector dates
+must be canonical ISO dates or timezone-naive datetimes; timezone-aware or
+noncanonical values refuse as `MODEL_NOT_READY`. Legacy artifacts without this field are not consumed. The
 hashes bind the declaration but do not prove source finality or training
 membership; producer provenance remains follow-up work.
 

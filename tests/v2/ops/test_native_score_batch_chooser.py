@@ -1,5 +1,6 @@
 import json
 from dataclasses import make_dataclass
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -45,6 +46,21 @@ def test_chooser_selector_rejects_malformed_as_of_with_populated_cache(bad_as_of
     with pytest.raises(ModelNotReady):
         select_chooser_state(
             binding, "2026-10-27", bad_as_of, fold_cache=cache)
+
+
+@pytest.mark.parametrize(
+    "bad_as_of",
+    [
+        datetime(2026, 10, 27, tzinfo=timezone.utc),
+        "2026-10-27T00:00:00+00:00",
+        "20261027",
+        "2026-10-27 00:00:00",
+    ],
+)
+def test_chooser_selector_rejects_noncanonical_as_of(bad_as_of):
+    binding = _binding()
+    with pytest.raises(ModelNotReady):
+        select_chooser_state(binding, "2026-10-27", bad_as_of)
 
 
 @pytest.mark.parametrize(
@@ -192,6 +208,11 @@ def test_chooser_selector_selects_folds_and_caches(monkeypatch):
         binding, "2026-09-27", "2026-10-27", fold_cache=cache)
     assert len(loader_calls) == 2
 
+    cache[(id(binding), "chooser:2026-09-01:2026-10-27")] = object()
+    with pytest.raises(ModelNotReady):
+        release_bindings.select_chooser_state(
+            binding, "2026-09-27", "2026-10-27", fold_cache=cache)
+
 
 def test_chooser_bundle_wires_producer_bindings_and_pools(monkeypatch):
     implied = SimpleNamespace(binding_id="fold:implied_t1")
@@ -252,3 +273,36 @@ def test_chooser_bundle_wires_producer_bindings_and_pools(monkeypatch):
     assert result.model_release.bindings == (existing, implied, runup)
     assert result.chooser_fold_pools == {"fold": "pools"}
     assert result.chooser_analog_pool.pool_id == "analog"
+
+
+def test_score_artifact_refs_includes_chooser_artifacts():
+    chooser = SimpleNamespace(
+        binding_id="chooser",
+        members=(SimpleNamespace(name="estimator", content_hash="chooser-hash"),),
+    )
+    implied = SimpleNamespace(
+        binding_id="implied",
+        members=(SimpleNamespace(name="estimator", content_hash="implied-hash"),),
+    )
+    runup = SimpleNamespace(
+        binding_id="runup",
+        members=(SimpleNamespace(name="estimator", content_hash="runup-hash"),),
+    )
+    recipe = {
+        "binding_id": "chooser",
+        "producers": {
+            "pred_im_t1_d14": {"binding_id": "implied"},
+            "pred_runup_abs_move_d14": {"binding_id": "runup"},
+        },
+        "analog_pool": {"content_hash": "analog-hash"},
+        "admissible_table": {"content_hash": "table-hash"},
+    }
+    bundle = SimpleNamespace(
+        gate_forecast_source=None,
+        chooser_recipe=recipe,
+        model_release=SimpleNamespace(bindings=(chooser, implied, runup)),
+    )
+    refs = native_score_batch._score_artifact_refs((), None, bundle)
+    assert set(refs) == {
+        "chooser-hash", "implied-hash", "runup-hash", "analog-hash", "table-hash"}
+    assert len(refs) == 5
