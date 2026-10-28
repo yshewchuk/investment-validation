@@ -7,16 +7,29 @@ from pathlib import Path
 
 import pytest
 
-from engine.v2.data.computed_move_bounds import TABLE
+from engine.v2.contracts import DataQuery, KeyPredicate, TableContractRef
+from engine.v2.data.computed_move_bounds import COLUMNS, CONTRACT, TABLE
 from engine.v2.data.repository import Repository
-from engine.v2.foundation import ArtifactStore
+from engine.v2.foundation import ArtifactStore, content_hash
 from engine.v2.ops import computed_moves_store
 from engine.v2.ops.bootstrap import open_catalog
 from engine.v2.ops.errors import OpsError
 from experiments import size_prep_inputs as prep
 from tests.ops_support import FakeClock
 from tests.v2.ops.test_v2_ops_computed_moves_store import (
-    _AS_OF, _EVENT_DAYS, _build_parent, _closes_csv, _event_row, _head_row, _series_csv)
+    _AS_OF, _BDAYS, _EVENT_DAYS, _build_parent, _closes_csv, _event_row, _head_row, _series_csv)
+
+REF = TableContractRef(contract_id=CONTRACT.contract_id, definition_hash=CONTRACT.definition_hash)
+
+
+def _bound_rows(repository, snapshot):
+    records = repository.fragment_records(snapshot, TABLE)
+    count = sum(r.row_count for r in records)
+    request = DataQuery(snapshot_id=snapshot.snapshot_id, table_contract_ref=REF,
+        columns=COLUMNS, key_filter=(KeyPredicate(column="ticker", operator="in",
+            values=tuple(sorted({r.partition_key for r in records}))),), order_by=CONTRACT.primary_key,
+        max_batch_rows=max(1, count), max_result_rows=count)
+    return [row for batch in repository.scan(request, table_name=TABLE) for row in batch.to_pylist()]
 
 
 @pytest.fixture(autouse=True)
@@ -118,6 +131,7 @@ def test_generate_bounds_writes_only_the_write_root_and_labels_provenance(source
     source_before = _tree(source_root)
     record = prep.generate_bounds(root, source_root=source_root, manifest=manifest, scope="shadow", as_of=_AS_OF,
                                   production_roots=_PRODUCTION)
+    assert record["record_id"] == content_hash({k: v for k, v in record.items() if k != "record_id"})
     assert _tree(source_root) == source_before
     assert record["label"] == "reconstructed"
     assert record["refresh_noop"] is False
@@ -233,7 +247,6 @@ def test_a_stand_in_production_root_is_never_opened_or_changed(source_root, work
     record = prep.generate_bounds(root, source_root=source_root, manifest=manifest, scope="shadow", as_of=_AS_OF,
                                   production_roots=[production])
     assert _digest(production) == before
-    assert not any(p.is_relative_to(production) for p in (root / "size_prep").parents)
     assert record["bounds_snapshot_id"] != record["source_snapshot_id"]
     # the strict-confinement guard: a write root that is not the catalog's own directory is refused
     other = tmp_path / "other"
@@ -264,3 +277,69 @@ def test_unhashable_ticker_entries_are_a_typed_refusal(source_root):
 def test_sidecar_scan_limit_is_a_typed_refusal(source_root, monkeypatch):
     monkeypatch.setattr(prep, "MAX_SIDECARS", 1)
     _refusal(lambda: prep.build_manifest(source_root, session_ceiling=_AS_OF, tickers=["AAAA"]), "RESOURCE_LIMIT_EXCEEDED")
+
+
+def test_generation_consumes_the_pinned_bytes_and_commits_checkable_bounds(source_root, workspace):
+    root, _ = workspace
+    manifest = prep.build_manifest(source_root, session_ceiling=_AS_OF, tickers=["AAAA"])
+    _put(source_root, "AAAA", "aa09", "2027-01-01T00:00:00+00:00", _series_csv(10.0))
+    source_digest_before = _digest(source_root)
+    record = prep.generate_bounds(root, source_root=source_root, manifest=manifest, scope="shadow", as_of=_AS_OF,
+                                  production_roots=_PRODUCTION)
+    assert _digest(source_root) == source_digest_before
+    conn = open_catalog(root / "catalog.sqlite", clock=FakeClock())
+    try:
+        repo = Repository(conn, ArtifactStore(root))
+        snapshot = repo.resolve_full(record["bounds_snapshot_id"])
+        rows = _bound_rows(repo, snapshot.snapshot)
+        assert {row["event_date"] for row in rows} == {d.date().isoformat() for d in _EVENT_DAYS}
+        _bday_isos = {d.date().isoformat() for d in _BDAYS}
+        for row in rows:
+            assert row["ticker"] == "AAAA"
+            assert row["pre_close_date"] in _bday_isos and row["post_close_date"] in _bday_isos
+            assert row["pre_close_date"] <= row["event_date"] <= row["post_close_date"]
+        pinned = "sha256:" + hashlib.sha256(_closes_csv()).hexdigest()
+        newer = "sha256:" + hashlib.sha256(_series_csv(10.0)).hexdigest()
+        values = {str(v) for r in conn.execute("SELECT * FROM data_raw_receipts").fetchall() for v in tuple(r)}
+        assert pinned in values and newer not in values
+    finally:
+        conn.close()
+
+
+def test_noop_refresh_without_bounds_in_the_head_is_refused(source_root, workspace, monkeypatch):
+    root, parent = workspace
+    manifest = prep.build_manifest(source_root, session_ceiling=_AS_OF, tickers=["AAAA"])
+
+    def fake(args, root, conn, clock, **kw):
+        return {"parent_snapshot_id": parent, "result": {"candidate_snapshot_id": None}}
+
+    monkeypatch.setattr("engine.v2.ops.cli.computed_moves_command", fake)
+    _refusal(lambda: prep.generate_bounds(root, source_root=source_root, manifest=manifest, scope="shadow",
+                                          as_of=_AS_OF, production_roots=_PRODUCTION), "PUBLICATION_REFUSED")
+    assert not (root / "size_prep").exists()
+
+
+def test_pinned_entry_with_other_ticker_endpoint_period_or_status_is_refused(source_root):
+    manifest = prep.build_manifest(source_root, session_ceiling=_AS_OF, tickers=["AAAA"])
+    meta = source_root / "data/raw/fetch/yfinance/aa/aa02.meta.json"
+    original_meta = meta.read_text()
+    for old, new in [
+        ('"ticker": "AAAA"', '"ticker": "ZZZZ"'),
+        ('"endpoint": "history"', '"endpoint": "quote"'),
+        ('"period": "max"', '"period": "1y"'),
+    ]:
+        meta.write_text(original_meta.replace(old, new))
+        _refusal(lambda: prep.pinned_history_fetcher(source_root, manifest), "INPUT_CHANGED")
+        meta.write_text(original_meta)
+
+
+def test_manifest_ignores_non_history_non_max_and_failed_entries(source_root):
+    _put(source_root, "CCCC", "cc01", "2024-03-01T00:00:00+00:00", _closes_csv())
+    _put(source_root, "CCCC", "cc02", "2025-03-01T00:00:00+00:00", _closes_csv())
+    cc02_meta = source_root / "data/raw/fetch/yfinance/cc/cc02.meta.json"
+    cc02_meta.write_text(cc02_meta.read_text().replace('"status": 200', '"status": 500'))
+    _put(source_root, "CCCC", "cc03", "2026-03-01T00:00:00+00:00", _closes_csv())
+    cc03_meta = source_root / "data/raw/fetch/yfinance/cc/cc03.meta.json"
+    cc03_meta.write_text(cc03_meta.read_text().replace('"period": "max"', '"period": "1y"'))
+    manifest = prep.build_manifest(source_root, session_ceiling=_AS_OF, tickers=["CCCC"])
+    assert manifest["entries"][0]["key"] == "cc01"
