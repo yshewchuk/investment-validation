@@ -279,6 +279,12 @@ def test_foreign_snapshot_refs_and_queries_are_refused_on_the_source_view(prod):
             with pytest.raises(DataError) as caught:
                 call()
             assert caught.value.code == "SNAPSHOT_NOT_FOUND"
+        forged = dataclasses.replace(prod.snap, table_versions={})
+        for call in (lambda: ws.source.table_contract(forged, "securities"),
+                     lambda: ws.source.fragment_records(forged, "securities")):
+            with pytest.raises(DataError) as caught:
+                call()
+            assert caught.value.code == "SNAPSHOT_NOT_FOUND"
         assert ws.source.table_contract(ws.source_snapshot(), "securities").table_name == "securities"
 
 

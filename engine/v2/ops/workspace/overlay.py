@@ -97,6 +97,13 @@ class SnapshotOnlyRepository(Repository):
             raise data_errors.fail("SNAPSHOT_NOT_FOUND", "only the pinned snapshot resolves here",
                                    details={"snapshot_id": snapshot_id})
 
+    def _check_ref(self, snapshot_ref) -> None:
+        """A ref must be the pinned snapshot exactly, not merely carry its id."""
+        self._check(snapshot_ref.snapshot_id)
+        if snapshot_ref != super().resolve(self._only):
+            raise data_errors.fail("SNAPSHOT_NOT_FOUND", "reference is not the pinned snapshot",
+                                   details={"snapshot_id": snapshot_ref.snapshot_id})
+
     def resolve(self, snapshot_id: str):
         self._check(snapshot_id)
         return super().resolve(snapshot_id)
@@ -106,27 +113,27 @@ class SnapshotOnlyRepository(Repository):
         return super().resolve_full(snapshot_id)
 
     def table_contract(self, snapshot_ref, table_name):
-        self._check(snapshot_ref.snapshot_id)
+        self._check_ref(snapshot_ref)
         return super().table_contract(snapshot_ref, table_name)
 
     def fragment_records(self, snapshot_ref, table_name):
-        self._check(snapshot_ref.snapshot_id)
+        self._check_ref(snapshot_ref)
         return super().fragment_records(snapshot_ref, table_name)
 
     def get_event(self, event_ref, snapshot_ref):
-        self._check(snapshot_ref.snapshot_id)
+        self._check_ref(snapshot_ref)
         return super().get_event(event_ref, snapshot_ref)
 
     def get_chain(self, query, snapshot_ref):
-        self._check(snapshot_ref.snapshot_id)
+        self._check_ref(snapshot_ref)
         return super().get_chain(query, snapshot_ref)
 
     def get_price_series(self, query, snapshot_ref):
-        self._check(snapshot_ref.snapshot_id)
+        self._check_ref(snapshot_ref)
         return super().get_price_series(query, snapshot_ref)
 
     def get_close(self, ticker, date, observation_ceiling, snapshot_ref):
-        self._check(snapshot_ref.snapshot_id)
+        self._check_ref(snapshot_ref)
         return super().get_close(ticker, date, observation_ceiling, snapshot_ref)
 
     def scan(self, query, *, table_name, max_object_bytes=None):
@@ -134,8 +141,10 @@ class SnapshotOnlyRepository(Repository):
         return super().scan(query, table_name=table_name, max_object_bytes=max_object_bytes)
 
     def explain_dependencies(self, query, *, table_name=None, snapshot_ref=None):
-        self._check(snapshot_ref.snapshot_id if snapshot_ref is not None
-                    else getattr(query, "snapshot_id", None))
+        if snapshot_ref is not None:
+            self._check_ref(snapshot_ref)
+        else:
+            self._check(getattr(query, "snapshot_id", None))
         return super().explain_dependencies(query, table_name=table_name, snapshot_ref=snapshot_ref)
 
     def scan_population_bound(self, snapshot_id, **kwargs):
