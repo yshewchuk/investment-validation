@@ -73,9 +73,9 @@ reviews:
 
         Flag a code PR that adds more than ~300 non-test code lines
         (target ~150; PRs opened before 2026-10-28 keep ~400) or
-        more than ~120 doc lines (tests and generated fixtures don't count).
+        more than ~120 added doc lines (tests and generated fixtures don't count).
         Flag a design PR (an ARCHITECTURE.md/design-doc change with no
-        implementation) that exceeds ~300 doc lines, or whose description
+        implementation) that adds more than ~300 doc lines, or whose description
         has no split list naming each follow-up code PR's estimated code,
         test and doc lines. Oversize work should be split — add, then wire,
         then remove — not justified by a stated reason.
