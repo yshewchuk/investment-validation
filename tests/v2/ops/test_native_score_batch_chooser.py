@@ -79,9 +79,10 @@ def test_chooser_fold_descriptor_refuses_missing_or_noncausal_training_cutoff(
     monkeypatch.setattr(
         release_bindings, "from_document",
         lambda cls, doc: SimpleNamespace(training_cutoff=doc.get("training_cutoff")))
-    with pytest.raises(ModelNotReady):
+    with pytest.raises(ModelNotReady) as exc:
         release_bindings._chooser_fold_descriptor(
             object(), catalog, "implied_t1", "2026-09-01", "2026-10-27")
+    assert exc.value.member_id == "chooser_training_cutoff"
 
 
 def test_chooser_fold_metadata_cutoff_must_equal_descriptor_cutoff():
@@ -135,7 +136,39 @@ def test_missing_chooser_state_becomes_typed_member_refusal():
         event_date="2026-10-27", as_of="2026-10-27", fold_cache={})
     assert isinstance(refusal, NativeScoreBatchRowRefusal)
     assert refusal.code == "MODEL_NOT_READY"
-    assert refusal.detail == "DYN-SV chooser state missing or unusable"
+    assert refusal.detail == "DYN-SV chooser analog pool missing or unusable"
+
+
+@pytest.mark.parametrize(
+    ("member_id", "safe_label"),
+    [
+        ("chooser_analog_pool", "chooser analog pool missing or unusable"),
+        ("admissible_table:dyn_sv", "chooser admissible table missing or unusable"),
+        ("tier4_folds:size", "chooser size fold missing or unusable"),
+        ("phase5_release.json", "chooser release catalog missing or unusable"),
+        ("chooser_training_cutoff", "chooser training cutoff missing or unusable"),
+        ("chooser_champion", "chooser champion binding missing or unusable"),
+        ("chooser_producer", "chooser producer binding missing or unusable"),
+        ("chooser state", "chooser state missing or unusable"),
+        ("private/path", "chooser state missing or unusable"),
+    ],
+)
+def test_chooser_bundle_refusal_cause_labels(
+        monkeypatch, member_id, safe_label):
+    def raise_not_ready(*args, **kwargs):
+        raise ModelNotReady(member_id, "secret path and detail")
+
+    monkeypatch.setattr(
+        native_score_batch, "select_chooser_state", raise_not_ready)
+    refusal = _chooser_bundle_or_refusal(
+        object(), SimpleNamespace(strategy="TWIN-P"), binding=object(),
+        event_date="2026-10-27", as_of="2026-10-27", fold_cache={})
+    assert isinstance(refusal, NativeScoreBatchRowRefusal)
+    assert refusal.code == "MODEL_NOT_READY"
+    assert refusal.detail == "DYN-SV " + safe_label
+    assert "secret" not in refusal.detail
+    if member_id != "chooser state":
+        assert member_id not in refusal.detail
 
 
 def test_chooser_selector_selects_folds_and_caches(monkeypatch):

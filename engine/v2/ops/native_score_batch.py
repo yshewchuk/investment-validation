@@ -763,6 +763,17 @@ def _gate_policy_and_feature_names(
 
 _CHOOSER_STATE_FAILURE_DETAIL = "chooser state is missing or unusable"
 
+_CHOOSER_REFUSAL_CAUSE_LABELS: Mapping[str, str] = {
+    "chooser_analog_pool": "chooser analog pool missing or unusable",
+    "admissible_table:dyn_sv": "chooser admissible table missing or unusable",
+    "tier4_folds:size": "chooser size fold missing or unusable",
+    "phase5_release.json": "chooser release catalog missing or unusable",
+    "chooser_training_cutoff": "chooser training cutoff missing or unusable",
+    "chooser_champion": "chooser champion binding missing or unusable",
+    "chooser_producer": "chooser producer binding missing or unusable",
+    "chooser state": "chooser state missing or unusable",
+}
+
 
 def _chooser_bundle_or_refusal(
     bundle: Any, key: BoardRequest, *, binding: ScoringReleaseBinding,
@@ -773,14 +784,16 @@ def _chooser_bundle_or_refusal(
         chooser = binding.model_identity.get("chooser:DYN-SV")
         implied = state.producer_bindings.get("pred_im_t1_d14")
         runup = state.producer_bindings.get("pred_runup_abs_move_d14")
-        if (chooser is None or implied is None or runup is None
+        if (chooser is None
                 or not isinstance(getattr(chooser, "binding_id", None), str)
-                or not chooser.binding_id
+                or not chooser.binding_id):
+            raise ModelNotReady("chooser_champion", _CHOOSER_STATE_FAILURE_DETAIL)
+        if (implied is None or runup is None
                 or not isinstance(getattr(implied, "binding_id", None), str)
                 or not implied.binding_id
                 or not isinstance(getattr(runup, "binding_id", None), str)
                 or not runup.binding_id):
-            raise ModelNotReady("chooser state", _CHOOSER_STATE_FAILURE_DETAIL)
+            raise ModelNotReady("chooser_producer", _CHOOSER_STATE_FAILURE_DETAIL)
         bindings = list(bundle.model_release.bindings)
         known_ids = {item.binding_id for item in bindings}
         for selected in (implied, runup):
@@ -809,10 +822,10 @@ def _chooser_bundle_or_refusal(
            chooser_analog_pool=state.analog_pool,
            chooser_admissible_table=state.admissible_table,
            model_release=model_release)
-    except ModelNotReady:
-        label = _RELEASE_ARTIFACT_REFUSAL_LABELS[
-            ("MODEL_NOT_READY", _CHOOSER_STATE_FAILURE_DETAIL)]
-        return NativeScoreBatchRowRefusal(key, "MODEL_NOT_READY", label)
+    except ModelNotReady as exc:
+        label = _CHOOSER_REFUSAL_CAUSE_LABELS.get(
+            exc.member_id, "chooser state missing or unusable")
+        return NativeScoreBatchRowRefusal(key, "MODEL_NOT_READY", "DYN-SV " + label)
 
 
 def _apply_declared_chooser(

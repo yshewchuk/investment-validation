@@ -346,19 +346,19 @@ def _require_causal_chooser_cutoff(
 ) -> None:
     training_cutoff = getattr(descriptor, "training_cutoff", None)
     if not isinstance(training_cutoff, str):
-        raise ModelNotReady("chooser state", "chooser state is missing or unusable") from None
+        raise ModelNotReady("chooser_training_cutoff", "chooser state is missing or unusable") from None
     try:
         parsed_training = date.fromisoformat(training_cutoff)
         parsed_fold = date.fromisoformat(fold_start)
         parsed_decision = date.fromisoformat(decision_cutoff)
     except (TypeError, ValueError, OverflowError):
-        raise ModelNotReady("chooser state", "chooser state is missing or unusable") from None
+        raise ModelNotReady("chooser_training_cutoff", "chooser state is missing or unusable") from None
     if parsed_training.isoformat() != training_cutoff:
-        raise ModelNotReady("chooser state", "chooser state is missing or unusable") from None
+        raise ModelNotReady("chooser_training_cutoff", "chooser state is missing or unusable") from None
     if parsed_fold.isoformat() != fold_start:
-        raise ModelNotReady("chooser state", "chooser state is missing or unusable") from None
+        raise ModelNotReady("chooser_training_cutoff", "chooser state is missing or unusable") from None
     if parsed_training >= parsed_decision or parsed_training >= parsed_fold:
-        raise ModelNotReady("chooser state", "chooser state is missing or unusable") from None
+        raise ModelNotReady("chooser_training_cutoff", "chooser state is missing or unusable") from None
 
 
 def _chooser_fold_descriptor(
