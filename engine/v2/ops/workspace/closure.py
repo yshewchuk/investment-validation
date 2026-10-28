@@ -118,6 +118,10 @@ def _committed(conn, receipt_id: str) -> bool:
 
 
 def _commit_receipts(conn, snapshot_id: str) -> tuple[str, ...]:
+    _bound_bytes(conn, "SELECT SUM(LENGTH(CAST(receipt_id || attempt_id || source_manifest_hash "
+                 "|| COALESCE(result_snapshot_id, '') || status || registered_at || scope AS BLOB))) "
+                 "FROM data_import_receipts WHERE result_snapshot_id = ? AND status = 'committed'",
+                 (snapshot_id,), "data_import_receipts")
     rows = conn.execute(
         "SELECT receipt_id FROM data_import_receipts WHERE result_snapshot_id = ? "
         "AND status = 'committed' ORDER BY receipt_id LIMIT ?",
@@ -194,6 +198,10 @@ def _receipt_facts(conn, receipt_ids) -> list:
     """Full receipt rows for the digest; an over-long ``problem_json`` refuses."""
     facts = []
     for receipt_id in sorted(receipt_ids):
+        _bound_bytes(conn, "SELECT SUM(LENGTH(CAST(receipt_id || attempt_id || source_manifest_hash "
+                     "|| COALESCE(result_snapshot_id, '') || status || registered_at || scope AS BLOB))) "
+                     "FROM data_import_receipts WHERE receipt_id = ?", (receipt_id,),
+                     "data_import_receipts")
         row = conn.execute(
             "SELECT receipt_id, attempt_id, fence, source_manifest_hash, result_snapshot_id, status, "
             "LENGTH(CAST(problem_json AS BLOB)), CASE WHEN LENGTH(CAST(problem_json AS BLOB)) > ? "
