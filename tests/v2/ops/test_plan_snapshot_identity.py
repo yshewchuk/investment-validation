@@ -3,9 +3,12 @@ from types import SimpleNamespace
 
 import pytest
 
+from engine.v2.data.errors import DataError
+from engine.v2.data.errors import fail as data_fail
 from engine.v2.ops import cli
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.plans import nightly_plan
+from engine.v2.ops.snapshot_planning import MAX_SNAPSHOT_REF_BYTES, _load_snapshot_ref
 from engine.v2.ops.workflows import commands
 from tests.ops_support import FakeClock
 
@@ -36,6 +39,27 @@ def test_nightly_plan_hashes_pinned_snapshot_id_for_legacy_and_native_modes():
                      snapshot_inputs=native_inputs, snapshot_id="snap-other", **common)
     assert raised.value.problem.code == "INVALID_REQUEST"
 
+    blank_inputs = dict(native_inputs, snapshot_id="")
+    with pytest.raises(OpsError) as raised:
+        nightly_plan(source_root, "2026-10-28", input_mode="snapshot",
+                     snapshot_inputs=blank_inputs, **common)
+    assert raised.value.problem.code == "INVALID_REQUEST"
+
+
+def test_load_snapshot_ref_refuses_oversized_head():
+    reads = []
+
+    class Store:
+        def read_verified(self, ref):
+            reads.append(ref)
+            raise AssertionError("the oversized head must not be read")
+
+    store = Store()
+    with pytest.raises(OpsError) as raised:
+        _load_snapshot_ref(store, SimpleNamespace(byte_size=MAX_SNAPSHOT_REF_BYTES + 1))
+    assert raised.value.problem.code == "INPUT_CHANGED"
+    assert reads == []
+
 
 def test_legacy_ops_plan_resolves_shadow_head_once_and_saves_its_id(monkeypatch, tmp_path):
     args = cli.parser().parse_args(["plan", "nightly", "--as-of", "2026-10-28"])
@@ -52,8 +76,10 @@ def test_legacy_ops_plan_resolves_shadow_head_once_and_saves_its_id(monkeypatch,
     def resolve_head(conn, store, scope, *, clock):
         resolved.append(scope)
         assert scope == "shadow"
-        return SimpleNamespace(artifact_id="snapshot-ref")
+        return SimpleNamespace(artifact_id="snapshot-ref", byte_size=32)
 
+    monkeypatch.setattr("engine.v2.ops.snapshot_planning._load_snapshot_ref",
+                        lambda store, head: SimpleNamespace(snapshot_id="snap-shadow"))
     monkeypatch.setattr(commands, "ArtifactStore", Store)
     monkeypatch.setattr(commands, "_planned_population",
                         lambda *args: (("FAKE|TWIN-P|2026-10-28",), None, ()))
@@ -71,3 +97,18 @@ def test_legacy_ops_plan_resolves_shadow_head_once_and_saves_its_id(monkeypatch,
 
     assert resolved == ["shadow"]
     assert result["plan"]["snapshot_id"] == "snap-shadow"
+
+    def resolve_head_missing(conn, store, scope, *, clock):
+        resolved.append(scope)
+        assert scope == "shadow"
+        raise DataError(data_fail("SNAPSHOT_NOT_READY", "no shadow head").problem)
+
+    def save_plan_missing(conn, root, plan, *, clock):
+        pytest.fail("save_plan must not be invoked")
+
+    monkeypatch.setattr("engine.v2.ops.snapshots.resolve_snapshot_head", resolve_head_missing)
+    monkeypatch.setattr(commands, "save_plan", save_plan_missing)
+
+    with pytest.raises(OpsError) as raised:
+        commands._plan_command(args, tmp_path, object(), FakeClock())
+    assert raised.value.problem.code == "SNAPSHOT_NOT_READY"

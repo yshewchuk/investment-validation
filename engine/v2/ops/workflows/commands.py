@@ -290,10 +290,17 @@ def _plan_command(args, root, conn, clock):
         snapshot_inputs = _snapshot_inputs(args, root, conn, clock, context_tickers,
                                            population, planned_snapshot_id)
         if snapshot_inputs is None:
+            from engine.v2.data.errors import DataError
+            from engine.v2.ops.snapshot_planning import _load_snapshot_ref
             from engine.v2.ops.snapshots import resolve_snapshot_head
             store = ArtifactStore(root)
-            snapshot_ref = resolve_snapshot_head(conn, store, "shadow", clock=clock)
-            snapshot_id = json.loads(store.read_verified(snapshot_ref))["snapshot_id"]
+            try:
+                snapshot_ref = resolve_snapshot_head(conn, store, "shadow", clock=clock)
+            except DataError as exc:
+                raise fail("SNAPSHOT_NOT_READY",
+                           "no shadow snapshot head is available for a legacy nightly plan",
+                           details={"data_code": exc.code}) from None
+            snapshot_id = _load_snapshot_ref(store, snapshot_ref).snapshot_id
         else:
             snapshot_id = snapshot_inputs["snapshot_id"]
         from engine.v2.ops.snapshot_stages import _catalog_path

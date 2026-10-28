@@ -66,6 +66,7 @@ REQUEST_SCHEMA_REF = "legacy_materialization_request.v1.0"
 #: Mirrors ``engine.dashboard.nightly.HORIZON_DAYS`` (as ``nightly_trigger._LEGACY_HORIZON_DAYS`` does);
 #: v2 may not import the legacy dashboard.
 GENERATED_HORIZON_DAYS = 35
+MAX_SNAPSHOT_REF_BYTES = 64 * 1024 * 1024
 
 
 def require_valid_population_keys(keys) -> None:
@@ -178,6 +179,9 @@ def _resolve_scope_snapshot(conn, store, scope, *, clock, expected_snapshot_id=N
 
 
 def _load_snapshot_ref(store, head):
+    if head.byte_size > MAX_SNAPSHOT_REF_BYTES:
+        raise fail("INPUT_CHANGED", "the shadow snapshot head artifact exceeds the size limit",
+                   details={"byte_size": head.byte_size, "max_bytes": MAX_SNAPSHOT_REF_BYTES})
     try:
         document = json.loads(store.read_verified(head))
         return from_document(SnapshotRef, document)
