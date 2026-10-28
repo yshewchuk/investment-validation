@@ -140,7 +140,7 @@ def _size_artifacts_verified(store, document, verified_size_rows=None):
             if not _size_artifact_verified(store, descriptor, verified_size_rows):
                 return False
         return True
-    except (ArtifactError, OSError, ValueError, TypeError, KeyError, AttributeError, RecursionError):
+    except (ArtifactError, ValueError, TypeError, KeyError, AttributeError, RecursionError):
         return False
 
 
@@ -235,7 +235,7 @@ def _size_artifact_verified(store, descriptor, verified_size_rows=None):
         if not _size_artifact_total_valid(kind, entry, position):
             return False
         return True
-    except (ArtifactError, OSError, ValueError, TypeError, KeyError, AttributeError, RecursionError):
+    except (ArtifactError, ValueError, TypeError, KeyError, AttributeError, RecursionError):
         return False
 
 

@@ -260,6 +260,7 @@ Publication/event-schedule knowledge remains reconstructed/unverified; known dat
 | Changed binding/hash/environment, driver seal or replay receipt | `EXPERIMENT_IDENTITY_CONFLICT`; no replacement, new fit or replay write. Native admission failures retain their own codes. |
 | Compact registration or installed registry over 16 MiB; referenced v1.7 shard bytes over 1 GiB; an individual shard row over 8 MiB; new work beyond original deadline | `RESOURCE_LIMIT_EXCEEDED`; preserve existing evidence, no retry or automatic cap increase. Shards already published before a compact-size refusal remain unreferenced CAS objects. |
 | Missing, altered, malformed or content-hash-mismatched referenced v1.7 shard | `EXPERIMENT_IDENTITY_CONFLICT` before plan replay; no replacement or replay write. |
+| Raw storage exception during native v1.7 admission, or typed `RESOURCE_UNAVAILABLE` during shard hydration | Preserve the storage failure for the caller; do not misclassify an outage as `EXPERIMENT_IDENTITY_CONFLICT`. |
 | Read-only collection: complete expired replay; missing terminal | Verified read-only report remains available; missing evidence refuses before work, never invokes a mutable fallback. |
 | CLI malformed reference/spec; raw storage failure; recoverable parent `MemoryError`; unexpected programming error | Typed `INVALID_EXPERIMENT_SPEC`; sanitized `RESOURCE_UNAVAILABLE`; static `RESOURCE_LIMIT_EXCEEDED` JSON and exit 2 if refusal output/cleanup can complete; unexpected errors propagate. Fatal OS/interpreter exhaustion cannot guarantee a response. |
 

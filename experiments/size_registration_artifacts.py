@@ -3,7 +3,7 @@
 import hashlib
 
 from engine.v2.foundation.canonical import iter_canonical_json
-from engine.v2.ops.errors import OpsError, fail
+from engine.v2.ops.errors import fail
 from experiments.magnitude_search_shards import MAX_SHARDS, iter_section, write_section
 
 _PLACEHOLDER = "$size_artifact"
@@ -127,7 +127,7 @@ def hydrate_size_registration(store, compact_document, *, verified_rows=None):
                             or row["position"] != index):
                         raise ValueError
                     values.append(walk(row["row"]))
-            except (OpsError, ValueError, TypeError, KeyError, RecursionError):
+            except (ValueError, TypeError, KeyError, RecursionError):
                 raise fail("EXPERIMENT_IDENTITY_CONFLICT", "SIZE registration artifact failed verification") from None
             if descriptor["kind"] == "list":
                 reconstructed = values

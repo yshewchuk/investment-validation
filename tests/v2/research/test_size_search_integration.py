@@ -143,6 +143,58 @@ def test_v17_admission_checks_shard_boundaries_paths_and_map_rows(case):
     assert not _size_artifact_verified(case.store, malformed_map)
 
 
+def test_v17_storage_outages_stay_retryable_through_library_and_cli(case, monkeypatch, capsys):
+    from engine.v2.ops.errors import fail
+    from experiments import size_search
+    from experiments.native_registration import read_native_registration
+    from experiments.size_registration_artifacts import hydrate_size_registration
+
+    class RawUnavailableStore:
+        root = case.store.root
+
+        def read_verified(self, ref):
+            if ref.schema_ref == "magnitude_search_shard.v1":
+                raise OSError("synthetic storage I/O failure")
+            return case.store.read_verified(ref)
+
+    with pytest.raises(OSError, match="synthetic storage I/O failure"):
+        read_native_registration(case.conn, RawUnavailableStore(), case.spec)
+
+    class TypedUnavailableStore:
+        root = case.store.root
+
+        def read_verified(self, ref):
+            if ref.schema_ref == "magnitude_search_shard.v1":
+                raise fail("RESOURCE_UNAVAILABLE", "synthetic shard I/O failure")
+            return case.store.read_verified(ref)
+
+    with pytest.raises(OpsError) as caught:
+        hydrate_size_registration(TypedUnavailableStore(), json.loads(case.registration.binding_json))
+    assert caught.value.code == "RESOURCE_UNAVAILABLE"
+    assert caught.value.problem.retryable is True
+
+    class ConnectionProxy:
+        def __getattr__(self, name):
+            return getattr(case.conn, name)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(size_search, "_read_document", lambda path: case.request if path == "request.json" else {})
+    monkeypatch.setattr(size_search, "_contain", lambda request: None)
+    monkeypatch.setattr(size_search, "experiment_spec_from_document", lambda document: case.spec)
+    monkeypatch.setattr(size_search, "connect", lambda *args, **kwargs: ConnectionProxy())
+    monkeypatch.setattr(size_search, "ArtifactStore", lambda root: RawUnavailableStore())
+    monkeypatch.setattr(size_search, "Repository", lambda *args, **kwargs: object())
+    result = size_search.main([
+        "report", "--spec", "spec.json", "--request", "request.json",
+        "--catalog", "catalog.sqlite", "--store-root", str(case.store.root),
+        "--plan-ref", "plan-ref.json", "--no-ledger",
+    ])
+    assert result == 2
+    assert json.loads(capsys.readouterr().out)["refused"] == "RESOURCE_UNAVAILABLE"
+
+
 def test_preflight_missing_inner_year_refuses_before_reservation(case):
     changed = deepcopy(case.request)
     changed["inner_years"] = {"2024": ["2020"]}
