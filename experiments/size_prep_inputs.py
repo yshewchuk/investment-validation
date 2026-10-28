@@ -251,6 +251,9 @@ def _checked_write_root(write_root, production_roots):
     literal = Path(os.path.abspath(write_root))
     if Path(os.path.realpath(literal)) != literal:
         raise fail("INVALID_REQUEST", "the write root must not traverse a symlink")
+    if (type(production_roots) not in (list, tuple)
+            or any(not isinstance(p, (str, os.PathLike)) for p in production_roots)):
+        raise fail("INVALID_REQUEST", "production_roots must be a list or tuple of paths")
     production = [Path(os.path.realpath(p)) for p in production_roots]
     if not production or any(_related(literal, p) for p in production):
         raise fail("INVALID_REQUEST", "the write root must name production roots and be unrelated to each")

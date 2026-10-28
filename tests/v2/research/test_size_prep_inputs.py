@@ -395,3 +395,12 @@ def test_scan_logs_bounded_progress_to_stderr(source_root, monkeypatch, capsys):
     err = capsys.readouterr().err
     assert "[size-prep] scan 1 of at most" in err and "ETA<=" in err and "rss_kib=" in err
     assert "manifest end" in err and capsys.readouterr().out == ""
+
+
+def test_production_roots_must_be_a_collection_of_paths(source_root, workspace):
+    root, _ = workspace
+    manifest = prep.build_manifest(source_root, session_ceiling=_AS_OF, tickers=["AAAA"])
+    base = dict(source_root=source_root, manifest=manifest, scope="shadow", as_of=_AS_OF)
+    for bad in (str(root), root, None, [1], b"x"):
+        _refusal(lambda: prep.generate_bounds(root, production_roots=bad, **base), "INVALID_REQUEST")
+    assert not (root / "size_prep").exists()
