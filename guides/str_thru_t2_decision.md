@@ -494,7 +494,8 @@ reading the entry-date value; that is a one-day leak in the top feature.
 ### 5.6 `engine/dashboard/nightly.py` and `render.py`
 
 - No extra ORATS cost. `refresh_forward_chains` already pulls
-  `tradeDate = as_of` for every board ticker (~18 calls/night); under Arm A that
+  `tradeDate = as_of` for every board ticker (~365 calls for the newest
+  session; the older heal sessions are near-free once held); under Arm A that
   *is* the decision-date chain.
 - The board needs a **Trade on** column — the entry date — next to the existing
   event date, and a row filter for "decision date == today", which is the set

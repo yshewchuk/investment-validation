@@ -38,6 +38,7 @@ import fcntl
 import gc
 import json
 import os
+import stat
 import subprocess
 import sys
 import time
@@ -293,6 +294,133 @@ def _remember_unknown_symbol(ticker: str) -> None:
         pass
 
 
+#: The chain retry ledger ``{"owed": {"<YYYY-MM-DD>": ["TICK", ...]}}``: the
+#: per-session memo for transient/quota-cut failures (definitive 404s never
+#: owe). A fetched session owes its whole intended list up front and every
+#: exit path merges the real failures in, so a hard kill leaves the debt for
+#: the next run. Past-window dates in the 14-day retention are re-asked by
+#: :func:`refresh_forward_chains` with the run day as ``refetch_token``; a
+#: flat legacy file reads as the owed section.
+CHAIN_RETRY_PATH = paths.REPORTS / "orats_chain_retry.json"
+
+#: Cap on the ledger's on-disk size: a file this big is not a memo anyone
+#: wrote deliberately, and parsing it would stall the refresh for no reason.
+CHAIN_RETRY_MAX_BYTES = 1_000_000
+
+
+def _read_chain_retry() -> dict[str, set[str]]:
+    """The ledger's ``owed`` section; a missing or invalid file is empty.
+
+    Never raises. The fd-based open (``O_NOFOLLOW`` | ``O_NONBLOCK``) plus
+    fstat is race-free; a failed open, a non-regular file and an over-cap
+    file are announced once on stderr and ignored, and every other invalid
+    content (junk JSON, over-nested JSON, wrong shapes, read errors) is
+    ignored silently.
+    A flat legacy file reads as the owed section.
+    """
+    try:
+        fd = os.open(CHAIN_RETRY_PATH,
+                     os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return {}  # missing: the common case — nothing owed
+    except OSError as exc:  # ELOOP on a symlink, ENOTDIR, EACCES, EISDIR...
+        print(f"[chains] ignoring {CHAIN_RETRY_PATH.name}: {exc}", file=sys.stderr)
+        return {}
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            print(f"[chains] ignoring {CHAIN_RETRY_PATH.name}: not a regular file",
+                  file=sys.stderr)
+            return {}
+        if st.st_size > CHAIN_RETRY_MAX_BYTES:
+            print(f"[chains] ignoring {CHAIN_RETRY_PATH.name}: {st.st_size} bytes "
+                  f"over the {CHAIN_RETRY_MAX_BYTES}-byte cap", file=sys.stderr)
+            return {}
+        # closefd=False: the fd stays ours to close in the finally; reading
+        # one past the cap detects a file that grew between fstat and read.
+        with os.fdopen(fd, "rb", closefd=False) as fh:
+            data = fh.read(CHAIN_RETRY_MAX_BYTES + 1)
+        if len(data) > CHAIN_RETRY_MAX_BYTES:
+            print(f"[chains] ignoring {CHAIN_RETRY_PATH.name}: grew past the "
+                  f"{CHAIN_RETRY_MAX_BYTES}-byte cap while being read",
+                  file=sys.stderr)
+            return {}
+        raw = json.loads(data)
+        if not isinstance(raw, dict):
+            return {}
+        owed_raw = raw["owed"] if "owed" in raw else raw  # legacy flat shape
+        if not isinstance(owed_raw, dict):
+            return {}
+        return {str(d): {str(t) for t in ts}
+                for d, ts in owed_raw.items() if isinstance(ts, list)}
+    except (OSError, ValueError, TypeError, AttributeError, RecursionError):
+        # RecursionError: a deeply nested file ("[" x 100000) blows the JSON
+        # parser's stack inside json.loads; like any invalid content it is
+        # invalid, not exceptional — the never-raises promise covers it.
+        return {}
+    finally:
+        os.close(fd)
+
+
+def _write_chain_retry(owed: dict[str, set[str]]) -> None:
+    from engine.data.manifest import write_text_atomic
+
+    ledger = {"owed": {d: sorted(ts) for d, ts in sorted(owed.items())}}
+    try:
+        paths.assert_writable(CHAIN_RETRY_PATH).parent.mkdir(parents=True, exist_ok=True)
+        write_text_atomic(CHAIN_RETRY_PATH, json.dumps(ledger, indent=1))
+        # write_text_atomic fsyncs the temp file, not the directory that
+        # records the os.replace rename; a failed sync shares the handler below.
+        fd = os.open(CHAIN_RETRY_PATH.parent, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except OSError as exc:  # a lost memo costs a re-buy window, never a crashed nightly
+        print(f"[chains] could not write {CHAIN_RETRY_PATH.name}: {exc}", file=sys.stderr)
+
+
+def _canonical_chain_day(key) -> pd.Timestamp | None:
+    """The day behind a canonical ``YYYY-MM-DD`` key, else None; never raises.
+
+    A key counts only when it is exactly that day's ISO date string. Shared
+    by the prune and the older-memo re-ask so both agree on what a date key is.
+    """
+    try:
+        day = pd.Timestamp(key)
+    except (ValueError, TypeError, OverflowError):
+        return None
+    if pd.isna(day) or key != str(day.date()):
+        return None
+    return day
+
+
+def _persist_chain_retry(stamp: str, retry: set[str], attempted: set[str]) -> None:
+    """Merge one session's owed entry and write the whole ledger.
+
+    Merge = (names on file - attempted) | retry, so this call's verdict only
+    replaces names it attempted and an older pass's debt survives; an entry
+    that merges to empty is deleted. Called before the first fetch with the
+    whole intended list (the hard-kill survivor) and on every exit path with
+    the real failures. Non-canonical keys and dates past the 14-day retention
+    are pruned on the way out, cut at ``stamp`` minus 14 days — never moved
+    by a future-dated key on file, which once erased in-retention debt before
+    the older pass could re-ask it.
+    """
+    owed = _read_chain_retry()
+    if not retry and stamp not in owed:
+        return  # nothing owed and none recorded: leave the file alone
+    merged = (owed.get(stamp, set()) - attempted) | retry
+    if merged:
+        owed[stamp] = merged
+    else:
+        owed.pop(stamp, None)
+    cutoff = pd.Timestamp(stamp) - pd.Timedelta(days=14)
+    _write_chain_retry({k: v for k, v in owed.items()
+                        if (day := _canonical_chain_day(k)) is not None
+                        and day >= cutoff})
+
+
 #: Market-context tickers the nightly's per-ticker history backfill keeps
 #: populated: SPY here only retains its ``daily_market`` history for the
 #: legacy market-wide read -- the v2 regime features never read it (they read
@@ -425,6 +553,11 @@ CHAIN_DTE = "1,75"
 #: actually held, and `skip_held` makes an already-held one free.
 CHAIN_SESSIONS = 2
 
+#: P19 cadence for the chunk loop in :func:`_refresh_one_session`: a progress
+#: line at most every CHAIN_PROGRESS_SECONDS seconds, whatever the chunk
+#: count — a ~365-call session logs a handful of lines, never one per call.
+CHAIN_PROGRESS_SECONDS = 60
+
 
 def refresh_forward_chains(tickers, as_of, *, fetcher=None, batch: int = CHAIN_BATCH,
                            sessions: int = CHAIN_SESSIONS, skip_held: bool = True) -> dict:
@@ -457,6 +590,14 @@ def refresh_forward_chains(tickers, as_of, *, fetcher=None, batch: int = CHAIN_B
     This is a CONTENT check, not a cache-key check — `Fetcher.has` only
     recognises an identical ticker batch, and the board's ticker set changes
     nightly, so every key would miss.
+
+    Memo dates past the ``sessions`` window but inside the ledger's 14-day
+    retention (the owed names still unheld) are re-asked after the loop
+    (``only=``) before the prune drops them for good.
+
+    Failure verdicts: a 404 is a definitive no-chain — the chunk's names are
+    counted ``missing``, never owed; any other failure (429, 502, transport,
+    a bad body) is transient — the chunk is owed the date in the ledger.
     """
     from engine.data.fetch import Fetcher
 
@@ -488,49 +629,233 @@ def refresh_forward_chains(tickers, as_of, *, fetcher=None, batch: int = CHAIN_B
             held = set()
 
     out = {"as_of": stamp, "sessions": stamps, "requested": len(wanted_all),
-           "returned": 0, "rows": 0, "calls": 0, "cache_hits": 0,
+           "returned": 0, "rows": 0, "calls": 0, "requests": 0, "cache_hits": 0,
            "skipped_held": 0, "missing": [], "failed": []}
-    for stamp in stamps:
+    # The retry memo, read once for the older-date pass below; owed names
+    # are still asked by the ordinary heal like any other unheld pair.
+    owed_now = _read_chain_retry()
+    wanted_set = set(wanted_all)
+    # The run day is the refetch_token for every chunk holding a memo-owed
+    # name (see :func:`_refresh_one_session`): one value per run => at most
+    # one fresh provider call per memo name per day.
+    refetch_day = str(pd.Timestamp.now(tz="UTC").date())
+    for session in stamps:
         _refresh_one_session(
-            fetcher, wanted_all, stamp, held, batch=batch, out=out, skip_held=skip_held
+            fetcher, wanted_all, session, held, batch=batch, out=out,
+            skip_held=skip_held, refetch_day=refetch_day
         )
+
+    if skip_held and stamps:
+        # The memo reaches past `sessions`: re-ask the gap's owed unheld names
+        # once, before the prune. Cutoff and key rule are the prune's own (see
+        # :func:`_persist_chain_retry` and :func:`_canonical_chain_day`), so
+        # nothing ages out before this pass could re-ask it.
+        newest = pd.Timestamp(stamps[0])
+        cutoff = newest - pd.Timedelta(days=14)  # the same cutoff as the prune
+        non_canonical = 0
+        for d in sorted(owed_now):
+            if d in stamps:
+                continue  # the heal loop above already handled this session
+            day = _canonical_chain_day(d)
+            if day is None:
+                non_canonical += 1  # a time part, or not a date at all
+                continue
+            if day < cutoff or day >= newest:
+                continue  # past retention, or not older than this run
+            owed = sorted({t for t in owed_now[d] & wanted_set
+                           if (t, day) not in held})
+            if not owed:
+                continue
+            out.setdefault("older_retried", []).append({"session": d, "names": len(owed)})
+            print(f"[chains] session {d}: past the heal window, re-asking "
+                  f"{len(owed)} retry-file names before they age out "
+                  "(transient failures and quota cuts)",
+                  file=sys.stderr)
+            _refresh_one_session(fetcher, wanted_all, str(day.date()), held,
+                                 batch=batch, out=out, skip_held=skip_held,
+                                 only=owed, refetch_day=refetch_day)
+        if non_canonical:
+            print(f"[chains] retry memo: ignored {non_canonical} "
+                  f"non-canonical date key(s) (expected 'YYYY-MM-DD')",
+                  file=sys.stderr)
     return out
 
 
-def _refresh_one_session(fetcher, wanted_all, stamp, held, *, batch, out, skip_held) -> None:
-    """Fetch one trade date for whatever part of the universe still needs it."""
+def _refresh_one_session(fetcher, wanted_all, stamp, held, *, batch, out, skip_held,
+                         only: list[str] | None = None,
+                         refetch_day: str | None = None) -> None:
+    """Fetch one trade date for whatever part of the universe still needs it.
+
+    ``only`` (an older memo date's owed list) replaces the wanted computation;
+    batching, the 404-vs-transient split and the persist-on-any-exit protocol
+    are unchanged. A chunk containing a memo-owed name is fetched with
+    ``refetch_day`` as its ``refetch_token`` — its cached body may be the
+    malformed 200 that filed the debt, so at most one fresh call per name per
+    day. The memo is read before this session's up-front persist, so the run's
+    own entry never counts against it.
+    """
     session_day = pd.Timestamp(stamp).normalize()
-    if skip_held:
+    if only is not None:
+        wanted = list(only)
+    elif skip_held:
         wanted = [t for t in wanted_all if (t, session_day) not in held]
         out["skipped_held"] += len(wanted_all) - len(wanted)
     else:
         wanted = list(wanted_all)
-    for start in range(0, len(wanted), batch):
-        chunk = wanted[start : start + batch]
-        params = {"ticker": ",".join(chunk), "tradeDate": stamp,
-                  "dte": CHAIN_DTE, "fields": CHAIN_FIELDS}
-        try:
-            record = fetcher.fetch("orats", "hist/strikes", params,
-                                   note="phase3 forward chains")
-        except QuotaExhausted:
-            raise
-        except Exception as exc:  # noqa: BLE001 — reported, never swallowed
-            out["failed"].append(f"{chunk[0]}..: {str(exc)[-40:]}")
-            continue
-        out["calls"] += 0 if record.from_cache else 1
-        out["cache_hits"] += 1 if record.from_cache else 0
-        rows = record.json().get("data") or []
-        out["rows"] += len(rows)
-        got = {r.get("ticker") for r in rows}
-        out["returned"] += len(got & set(chunk))
-        # A short response has TWO causes and they look identical: the endpoint
-        # truncating (it caps at 10 and returns HTTP 200 regardless), or the
-        # ticker genuinely having no chain on this date. Both are recorded as
-        # `missing` rather than asserting one — a single-ticker retry is what
-        # distinguishes them, and on the first real board all 7 were 404s, i.e.
-        # genuinely absent. Calling that "truncated" would have blamed the
-        # batching for the data's own gap.
-        out["missing"].extend(t for t in chunk if t not in got)
+    from engine.data.fetch import CredentialRotated
+
+    # Snapshot BEFORE the up-front persist below: filed after it, the run's
+    # own whole-intended-list entry would make every chunk look memo-owed.
+    owed = _read_chain_retry().get(stamp, set())
+    retry: set[str] = set()
+    attempted = set(wanted)
+    total_chunks = (len(wanted) + batch - 1) // batch
+    t_start = time.monotonic()
+    last_progress_at = t_start
+    calls_in, failed_in, missing_in = out["calls"], len(out["failed"]), len(out["missing"])
+    requests_in, cache_in = out["requests"], out["cache_hits"]
+
+    def _log_chunk_progress(done: int) -> None:
+        # P19 bounded cadence: never a line per chunk — the ONLY gate is that
+        # >= CHAIN_PROGRESS_SECONDS passed since the last progress line (or
+        # the loop start), whatever the chunk count; that gate keeps elapsed
+        # >= CHAIN_PROGRESS_SECONDS, so the rate divides.
+        nonlocal last_progress_at
+        now = time.monotonic()
+        if now - last_progress_at < CHAIN_PROGRESS_SECONDS:
+            return
+        elapsed = now - t_start
+        rate = (out["requests"] - requests_in) / elapsed
+        print(f"[chains] {stamp}: {done}/{total_chunks} chunks, "
+              f"{rate:.1f} req/s, ETA {(total_chunks - done) / rate:.0f}s",
+              file=sys.stderr)
+        last_progress_at = now
+
+    if wanted:
+        print(f"[chains] {stamp}: fetching {len(wanted)} names in {total_chunks} "
+              f"calls, rss={memprobe.rss_bytes() / 1e9:.2f}G", file=sys.stderr)
+        # Hard-kill safety: the whole intended list is owed the date BEFORE
+        # the first fetch; the exit-path persists below merge the failures in.
+        _persist_chain_retry(stamp, attempted, attempted)
+    # The loop cursor, pre-bound: an exit before the first chunk owes every
+    # name, exactly as the up-front persist filed them.
+    start = 0
+    # Chunks FULLY processed — failed/404 ones included, since the chunk was
+    # asked and answered for. An exit that escapes the loop mid-chunk must
+    # report this count, never total_chunks: an interrupted session that
+    # printed N/N would claim work it did not do.
+    done_chunks = 0
+    exit_kind = "error"
+    try:
+        for done, start in enumerate(range(0, len(wanted), batch)):
+            if done:
+                _log_chunk_progress(done)  # `done` chunks completed already
+            done_chunks = done  # chunks before this one; this one is in flight
+            chunk = wanted[start : start + batch]
+            # Only a memo-owed chunk gets the token; an all-first-fetch chunk
+            # stays cache-first, and an old-signature fetcher sees no new kwarg.
+            kw = {"note": "phase3 forward chains"}
+            if owed & set(chunk):
+                kw["refetch_token"] = refetch_day
+            params = {"ticker": ",".join(chunk), "tradeDate": stamp,
+                      "dte": CHAIN_DTE, "fields": CHAIN_FIELDS}
+            # Every chunk asks exactly once: the attempt is counted before the
+            # call, so 404s, exceptions and bad bodies all land in `requests`.
+            out["requests"] += 1
+            try:
+                record = fetcher.fetch("orats", "hist/strikes", params, **kw)
+            except (QuotaExhausted, CredentialRotated):
+                # Save the cut-off tail before re-raising. CredentialRotated is
+                # a FetchError subclass: without this arm the generic arm below
+                # would treat a dead key as transient and keep buying against it.
+                retry.update(wanted[start:])
+                _persist_chain_retry(stamp, retry, attempted)
+                raise
+            except Exception as exc:  # noqa: BLE001 — reported, never swallowed
+                out["failed"].append(f"{chunk[0]}..: {str(exc)[-40:]}")
+                if "HTTP 404" in str(exc):
+                    # Definitive no-chain, like the 200-but-short response
+                    # below: recorded as missing, never retried.
+                    out["missing"].extend(chunk)
+                else:
+                    # Transient (429, 502, transport): owed the date —
+                    # retried from the ledger.
+                    retry.update(chunk)
+                continue
+            out["calls"] += 0 if record.from_cache else 1
+            out["cache_hits"] += 1 if record.from_cache else 0
+            try:
+                payload = record.json()
+            except Exception as exc:  # noqa: BLE001 — reported, never swallowed
+                # A non-JSON 200 is a transient bad answer, not a verdict: owed
+                # the date, reported, and the session continues with later batches.
+                out["failed"].append(f"{chunk[0]}..: {str(exc)[-40:]}")
+                retry.update(chunk)
+                continue
+            data = payload.get("data") if isinstance(payload, dict) else None
+            if not isinstance(data, list):
+                # The only usable shape is a dict with a list "data"; anything
+                # else is the same transient class as a non-JSON 200 — owed the
+                # date, reported, and the session continues.
+                out["failed"].append(f"{chunk[0]}..: response JSON is not a "
+                                     "dict with a list 'data'")
+                retry.update(chunk)
+                continue
+            rows = data
+            if any(not (isinstance(r, dict) and isinstance(r.get("ticker"), str))
+                   for r in rows):
+                # A usable row is an object with a string "ticker": a non-object
+                # crashes `r.get`, a bad ticker slips past the `got` check and
+                # books the chunk's names as definitively no-chain. Transient
+                # bad answer: retry the chunk whole, book none of its rows.
+                out["failed"].append(f"{chunk[0]}..: response 'data' rows are "
+                                     "not all objects with a string 'ticker'")
+                retry.update(chunk)
+                continue
+            out["rows"] += len(rows)
+            got = {r["ticker"] for r in rows}
+            out["returned"] += len(got & set(chunk))
+            # A short response has TWO causes and they look identical: the
+            # endpoint truncating (it caps at 10 and returns HTTP 200
+            # regardless), or the ticker genuinely having no chain on this
+            # date. Both are recorded as `missing` rather than asserting one —
+            # a single-ticker retry is what distinguishes them, and on the
+            # first real board all 7 were 404s, i.e. genuinely absent. Calling
+            # that "truncated" would have blamed the batching for the data's
+            # own gap.
+            out["missing"].extend(t for t in chunk if t not in got)
+        # A fetched-OK or 404 name drops out of this session's entry by not being
+        # re-added; only this run's transient failures and quota-cut remainder stay.
+        _persist_chain_retry(stamp, retry, attempted)
+        done_chunks = total_chunks  # the loop ran every chunk to completion
+        exit_kind = "ok"
+    except BaseException as exc:
+        # Any other exit unwinds the session: put the current chunk and every
+        # later unasked one in the retry file first; the raise arms above
+        # already persisted theirs.
+        if not isinstance(exc, (QuotaExhausted, CredentialRotated)):
+            retry.update(wanted[start:])
+            _persist_chain_retry(stamp, retry, attempted)
+        raise
+    finally:
+        # Stage end (P19), on EVERY exit (ok, quota/credential re-raise, any
+        # escaping BaseException): this session's own deltas (`out` is shared
+        # across sessions and memo passes). Guarded so it can never raise out
+        # of the finally and mask the exit it is reporting.
+        if wanted:
+            try:
+                _log_chunk_progress(done_chunks)
+                elapsed = time.monotonic() - t_start
+                print(f"[chains] {stamp}: done in {elapsed:.1f}s, "
+                      f"chunks={done_chunks}/{total_chunks}, exit={exit_kind}, "
+                      f"requests={out['requests'] - requests_in}, "
+                      f"calls={out['calls'] - calls_in}, "
+                      f"cache_hits={out['cache_hits'] - cache_in}, "
+                      f"failed={len(out['failed']) - failed_in}, "
+                      f"missing={len(out['missing']) - missing_in}, "
+                      f"rss={memprobe.rss_bytes() / 1e9:.2f}G", file=sys.stderr)
+            except Exception:  # noqa: BLE001 — diagnostics never mask the exit
+                pass
 
 
 def _market_wide_days(as_of: pd.Timestamp, lookback: int = 6) -> list:
