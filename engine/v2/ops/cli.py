@@ -866,7 +866,8 @@ def _history_pair(history, source_root):
 
     if history is None:
         return computed_moves_store.tier1_yfinance_history_fetcher(source_root)
-    if not isinstance(history, tuple) or len(history) != 2:
+    if (not isinstance(history, tuple) or len(history) != 2
+            or not hasattr(history[0], "__contains__") or not callable(history[1])):
         raise fail("INVALID_REQUEST", "history must be a (cache, fetch) pair")
     return history
 
@@ -888,11 +889,11 @@ def computed_moves_command(args, root, conn, clock, *, history=None, include_sou
         raise fail("INVALID_REQUEST", "--source-root must be an existing directory",
                    details={"source_root": str(args.source_root)})
     as_of = computed_moves_store._as_of_day(args.as_of)
+    cache, fetcher = _history_pair(history, args.source_root)
     lock = SupervisorLock(root / "supervisor.lock")
     if not lock.acquire():
         raise fail("RESOURCE_UNAVAILABLE", "a running supervisor holds this catalog")
     try:
-        cache, fetcher = _history_pair(history, args.source_root)
         head = conn.execute(
             "SELECT snapshot_id, generation FROM data_snapshot_heads WHERE scope = ?",
             (args.scope,)).fetchone()

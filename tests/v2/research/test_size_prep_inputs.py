@@ -357,6 +357,17 @@ def test_bounds_option_is_validated_at_the_cli_boundary_even_for_dry_run(tmp_pat
     assert not (tmp_path / computed_moves_store.INPUT_PATH).exists()
 
 
+def test_history_pair_is_validated_at_the_cli_boundary(tmp_path):
+    from types import SimpleNamespace
+
+    from engine.v2.ops.cli import computed_moves_command
+
+    args = SimpleNamespace(source_root=tmp_path, scope="shadow", as_of=_AS_OF, dry_run=True)
+    for invalid in ((), [], (None, None), (1, 2, 3), ({}, None), "ab"):
+        _refusal(lambda: computed_moves_command(args, tmp_path, None, None, history=invalid),
+                 "INVALID_REQUEST")
+
+
 def test_sidecar_whose_meta_key_differs_from_its_file_name_is_ignored(source_root):
     meta = source_root / "data/raw/fetch/yfinance/bb/bb01.meta.json"
     meta.write_text(meta.read_text().replace('"key": "bb01"', '"key": "other"'))
