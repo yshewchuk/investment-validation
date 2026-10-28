@@ -422,26 +422,19 @@ def test_reopen_refuses_a_different_schema_version_with_its_own_reason(prod):
     assert _details(caught) == ("WORKSPACE_REFUSED", "schema_mismatch")
 
 
-def test_lineage_edges_change_the_closure_identity(prod):
+def test_unrelated_committed_receipt_does_not_change_the_closure_identity(prod):
     committed = _receipt_id(prod)
     copy = ("INSERT INTO data_import_receipts (receipt_id, attempt_id, fence, source_manifest_hash, "
             "result_snapshot_id, status, problem_json, registered_at, scope) "
             "SELECT ?, attempt_id, fence, source_manifest_hash, ?, status, problem_json, "
             "registered_at, scope FROM data_import_receipts WHERE receipt_id = ?")
+    with _create(prod, "before") as ws:
+        before = ws.closure.identity_digest
     _rewrite_without_triggers(prod, "data_import_receipts", copy,
                               ("second-commit", prod.snap.snapshot_id, committed))
-    _rewrite_without_triggers(prod, "data_import_receipts", copy,
-                              ("base-a", prod.snap.snapshot_id, committed))
-    edge = "INSERT INTO data_receipt_lineage (receipt_id, base_receipt_id, kind) VALUES (?, ?, ?)"
-    _rewrite_without_triggers(prod, "data_receipt_lineage", edge,
-                              (committed, "base-a", "price_history_capture"))
-    with _create(prod, "edges-before") as ws:
-        before = ws.closure.identity_digest
-    _rewrite_without_triggers(prod, "data_receipt_lineage", edge,
-                              ("second-commit", "base-a", "price_history_capture"))
-    with _create(prod, "edges-after") as ws:
+    with _create(prod, "after") as ws:
         after = ws.closure.identity_digest
-    assert before != after
+    assert after == before
 
 
 def test_bounded_cursor_refuses_on_rows_and_bytes_and_covers_coverage_reads(prod, monkeypatch):
@@ -525,3 +518,15 @@ def test_malformed_public_arguments_refuse_with_typed_errors(prod):
     with pytest.raises(OpsError) as caught:
         overlay_module.SnapshotOnlyRepository(None, None, ["x"])
     assert caught.value.problem.details.get("reason") == "argument_invalid"
+
+
+def test_storage_failures_leave_the_entry_points_as_typed_refusals(prod, monkeypatch):
+    def broken(*args, **kwargs):
+        raise ValueError("boom")
+
+    monkeypatch.setattr(overlay_module, "verify_snapshot_closure", broken)
+    with pytest.raises(OpsError) as caught:
+        _create(prod, "storagefail")
+    assert caught.value.code == "WORKSPACE_REFUSED"
+    assert caught.value.problem.details.get("reason") == "storage_failure"
+    assert caught.value.problem.details.get("cause") == "ValueError"

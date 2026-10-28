@@ -168,7 +168,10 @@ def _commit_receipts(conn, snapshot_id: str) -> tuple[str, ...]:
                        (snapshot_id,)).fetchone()
     if ref is None or ref[0] not in {row["receipt_id"] for row in rows}:
         raise _broken("commit_receipt_ref_mismatch", snapshot_id=snapshot_id)
-    return tuple(row["receipt_id"] for row in rows)
+    # Only the snapshot's own commit receipt (``commit_receipt_ref``) is part of its identity: a later
+    # same-data import may add another committed receipt for the same snapshot id, which must not
+    # invalidate an existing workspace.
+    return (ref[0],)
 
 
 def _lineage(conn, receipt_ids) -> tuple[tuple[str, ...], list]:

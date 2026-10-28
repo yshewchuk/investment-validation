@@ -13,7 +13,7 @@ Reads only: catalog queries on the caller's connection and one `lstat` per objec
 | no committed import receipt for the snapshot, or `commit_receipt_ref` naming none of them (`commit_receipt_ref_mismatch`); a `data_receipt_lineage` base missing, uncommitted or cyclic; a coverage row naming an uncommitted receipt | `commit_receipt_missing`; `lineage_receipt_missing`, `lineage_cycle`; `coverage_receipt_missing` |
 | object file absent; not a regular file or wrong size; unreadable; (deep) bytes differ from `content_hash` | `object_missing`; `object_changed`; `object_unreadable`; `object_changed` |
 
-`identity_digest` hashes catalog facts (ancestors, receipts, lineage, coverage and the snapshot's own capture rows, every object id, hash and size): stable across restarts. `stat_digest` adds each object's inode and mtime, so a same-size rewrite after open is caught at seal without `deep`. Raw receipts and normalizations behind `daily_market` revisions are outside the closure: snapshot readers scan fragments only. Cost: one `resolve_full` plus about 250,000 `lstat`s for the full closure; progress to stderr every 30 s.
+`identity_digest` hashes catalog facts (only the snapshot's own `commit_receipt_ref` receipt counts, so a later same-data import adding another committed receipt does not change it; ancestors, receipts, lineage, coverage and the snapshot's own capture rows, every object id, hash and size): stable across restarts. `stat_digest` adds each object's inode and mtime, so a same-size rewrite after open is caught at seal without `deep`. Raw receipts and normalizations behind `daily_market` revisions are outside the closure: snapshot readers scan fragments only. Cost: one `resolve_full` plus about 250,000 `lstat`s for the full closure; progress to stderr every 30 s.
 
 ## Workspace (`overlay.create_workspace` / `open_workspace` -> `ResearchWorkspace`)
 
@@ -34,7 +34,8 @@ Create order: validate roots, open production read-only, verify the closure, the
 | root equals, contains or lies under the production store or the catalog's directory; reopened catalog is the production file | `production_root` |
 | path crosses a symlink; parent missing; existing root not empty; production paths missing | `symlink_path`; `parent_missing`; `root_not_empty`; `production_missing` |
 | reopen: marker, `workspace.json`, catalog or a subdirectory missing, a symlink, or the catalog hard-linked | `layout_invalid` |
-| create: `root`, `snapshot_id` or `manifest_hash` of the wrong type | `argument_invalid` |
+| create/reopen: `root`, production paths, `snapshot_id` or `manifest_hash` of the wrong type | `argument_invalid` |
+| create, reopen or seal: any other storage or metadata failure (filesystem, schema admission, malformed documents), with `cause` the exception class | `storage_failure` |
 | reopen: `workspace.json` unreadable or incomplete; `schema_version` differs; recorded production paths differ | `identity_unreadable`; `schema_mismatch`; `production_mismatch` |
 | execution root at or under a workspace | `execution_in_workspace` |
 

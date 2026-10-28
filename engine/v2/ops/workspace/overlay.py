@@ -15,6 +15,7 @@ when the open-time closure, the stored identity or the pin disagree).
 """
 from __future__ import annotations
 
+import functools
 import json
 import os
 import shutil
@@ -59,6 +60,19 @@ _IDENTITY_KEYS = ("schema_version", "snapshot_id", "manifest_hash", "identity_di
 def _refuse(reason: str, **details):
     return fail("WORKSPACE_REFUSED", "research workspace request refused",
                 details={"reason": reason, **details})
+
+
+def _typed_boundary(func):
+    """Storage and metadata failures leave a public entry point only as a typed refusal."""
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except (OpsError, data_errors.DataError):
+            raise
+        except Exception as exc:
+            raise _refuse("storage_failure", cause=type(exc).__name__) from exc
+    return wrapper
 
 
 def _changed(reason: str, **details):
@@ -258,6 +272,7 @@ class ResearchWorkspace:
             raise _changed("manifest_mismatch", snapshot_id=self.snapshot_id)
         return ref
 
+    @_typed_boundary
     def verify_before_seal(self, *, deep: bool = False) -> SnapshotClosure:
         """Re-verify the closure; it must equal the one verified at open, stat included."""
         closure = verify_snapshot_closure(self._source_conn, self._source_store, self.snapshot_id,
@@ -309,6 +324,7 @@ def _check_arguments(root, production_catalog, production_store, *strings) -> No
         raise _refuse("argument_invalid")
 
 
+@_typed_boundary
 def create_workspace(root, *, production_catalog, production_store, snapshot_id: str,
                      manifest_hash: str, clock, deep: bool = False) -> ResearchWorkspace:
     """Verify the pinned snapshot's closure, then lay out and open a new workspace."""
@@ -358,6 +374,7 @@ def create_workspace(root, *, production_catalog, production_store, snapshot_id:
     return ResearchWorkspace(paths, identity, closure, conn, store, source_conn, source_store)
 
 
+@_typed_boundary
 def open_workspace(root, *, production_catalog, production_store, clock,
                    deep: bool = False) -> ResearchWorkspace:
     """Re-open a workspace: layout, production binding, closure and pin must all still hold."""
