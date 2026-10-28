@@ -21,6 +21,7 @@ our own bugs; there are no per-column, per-table or cumulative caps.
 from __future__ import annotations
 
 import os
+import sqlite3
 import stat
 import sys
 import time
@@ -36,6 +37,7 @@ SNAPSHOT_CLOSURE_SCHEMA = "snapshot_closure.v1.0"
 _MAX_CHAIN = 100_000
 _MAX_ROWS = 2_000_000
 _MAX_ROW_BYTES = 256 * 1024 * 1024
+_MAX_VALUE_BYTES = 64 * 1024 * 1024  # SQLite length limit on the read connection: caps any single value
 _PROGRESS_SECONDS = 30.0
 
 
@@ -72,6 +74,14 @@ def _row_bytes(row) -> int:
     return sum(len(value) if isinstance(value, (str, bytes)) else 8 for value in tuple(row))
 
 
+def _guarded(call, *args):
+    """Run a cursor call; SQLite's per-value length limit becomes the typed byte-cap refusal."""
+    try:
+        return call(*args)
+    except sqlite3.DataError:
+        raise _broken("closure_bytes_over_cap") from None
+
+
 class _BoundedCursor:
     """The one bounding mechanism: ``fetchall`` streams rows and refuses past one rows/bytes cap."""
 
@@ -80,7 +90,7 @@ class _BoundedCursor:
 
     def fetchall(self) -> list:
         rows, size = [], 0
-        while batch := self._cursor.fetchmany(100):
+        while batch := _guarded(self._cursor.fetchmany, 100):
             rows += batch
             size += sum(_row_bytes(row) for row in batch)
             if len(rows) > _MAX_ROWS:
@@ -90,7 +100,7 @@ class _BoundedCursor:
         return rows
 
     def fetchone(self):
-        row = self._cursor.fetchone()
+        row = _guarded(self._cursor.fetchone)
         if row is not None and _row_bytes(row) > _MAX_ROW_BYTES:
             raise _broken("closure_bytes_over_cap")
         return row
@@ -109,7 +119,7 @@ class _BoundedConn:
         self._conn = conn
 
     def execute(self, sql, params=()):
-        return _BoundedCursor(self._conn.execute(sql, params))
+        return _BoundedCursor(_guarded(self._conn.execute, sql, params))
 
     def __getattr__(self, name):
         return getattr(self._conn, name)

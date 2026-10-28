@@ -492,3 +492,14 @@ def test_schema_compatibility_read_goes_through_the_bounded_cursor(prod, monkeyp
     with pytest.raises(DataError) as caught:
         _create(prod, "schemabound")
     assert _details(caught)[1] == "closure_rows_over_cap"
+
+
+def test_single_value_over_the_sqlite_length_limit_refuses_with_the_byte_cap(prod, monkeypatch):
+    monkeypatch.setattr(overlay_module, "_MAX_VALUE_BYTES", 200)
+    with pytest.raises(DataError) as caught:
+        _create(prod, "bigvalue")
+    assert _details(caught) == ("SNAPSHOT_CLOSURE_BROKEN", "closure_bytes_over_cap")
+    assert not (prod.tmp / "bigvalue").exists()
+    monkeypatch.undo()
+    with _create(prod, "smallvalue") as ws:  # default 64 MiB cap: normal reads still work
+        assert ws.closure.object_count >= 1

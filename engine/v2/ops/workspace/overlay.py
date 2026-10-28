@@ -31,7 +31,12 @@ from engine.v2.ops.bootstrap import open_catalog, require_compatible_catalog
 from engine.v2.ops.catalog import dumps, register_artifact, transaction
 from engine.v2.ops.checkpoints import registered_artifact
 from engine.v2.ops.errors import OpsError, fail
-from engine.v2.ops.workspace.closure import SnapshotClosure, _BoundedConn, verify_snapshot_closure
+from engine.v2.ops.workspace.closure import (
+    _MAX_VALUE_BYTES,
+    SnapshotClosure,
+    _BoundedConn,
+    verify_snapshot_closure,
+)
 from engine.v2.ops.workspace.guard import MARKER
 
 __all__ = ["IDENTITY_FILE", "MARKER", "ResearchWorkspace", "SnapshotOnlyRepository",
@@ -204,6 +209,7 @@ def _open_readonly(catalog: Path) -> sqlite3.Connection:
     try:
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA query_only = ON")
+        conn.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, _MAX_VALUE_BYTES)
         require_compatible_catalog(_BoundedConn(conn))
     except BaseException:
         conn.close()
