@@ -33,6 +33,7 @@ SNAPSHOT_CLOSURE_SCHEMA = "snapshot_closure.v1.0"
 _MAX_CHAIN = 100_000
 _MAX_ROWS = 2_000_000
 _MAX_RECEIPTS = 1_000
+_MAX_ROW_BYTES = 256 * 1024 * 1024
 _PROGRESS_SECONDS = 30.0
 
 
@@ -136,7 +137,16 @@ def _lineage(conn, receipt_ids) -> tuple[str, ...]:
     return tuple(sorted(found))
 
 
+def _bound_bytes(conn, sql: str, args: tuple, table: str) -> None:
+    """Refuse before fetching rows whose stored text exceeds the total byte budget."""
+    if (conn.execute(sql, args).fetchone()[0] or 0) > _MAX_ROW_BYTES:
+        raise _broken("closure_bytes_over_cap", table=table)
+
+
 def _coverage_rows(conn, snapshot_id: str) -> list:
+    _bound_bytes(conn, "SELECT SUM(LENGTH(CAST(coverage_json AS BLOB)) + LENGTH(CAST(coverage_id AS BLOB))) "
+                 "FROM data_snapshot_coverage WHERE snapshot_id = ?", (snapshot_id,),
+                 "data_snapshot_coverage")
     rows = conn.execute(
         "SELECT * FROM data_snapshot_coverage WHERE snapshot_id = ? "
         "ORDER BY table_name, coverage_id",
@@ -152,6 +162,9 @@ def _coverage_rows(conn, snapshot_id: str) -> list:
 def _capture_rows(conn, receipt_ids) -> list:
     rows: list = []
     for receipt_id in receipt_ids:
+        _bound_bytes(conn, "SELECT SUM(LENGTH(CAST(capture_id || ticker || source_kind || source_hash "
+                     "|| retrieved_at || outcome || contract_id AS BLOB))) FROM data_price_captures "
+                     "WHERE receipt_id = ?", (receipt_id,), "data_price_captures")
         cursor = conn.execute("SELECT * FROM data_price_captures "
                               "WHERE receipt_id = ? ORDER BY capture_id", (receipt_id,))
         rows += [list(row) for row in cursor.fetchmany(_MAX_ROWS + 1 - len(rows))]
