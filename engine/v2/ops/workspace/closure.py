@@ -100,9 +100,22 @@ def _bound_fragments(conn, snapshot_id: str) -> None:
         "WHERE snapshot_id = ?))", (snapshot_id,), "data_contracts")
     _bound_bytes(
         conn,
-        "SELECT SUM(LENGTH(CAST(snapshot_id || manifest_hash || finality_receipt_refs_json "
+        "SELECT SUM(LENGTH(CAST(snapshot_id || manifest_hash || finality_receipt_refs_json || calendar_version "
+        "|| source_priority_version || knowledge_mode_by_table_json || commit_receipt_ref || registered_at "
         "|| COALESCE(parent_snapshot_id, '') AS BLOB))) FROM data_snapshots WHERE snapshot_id = ?",
         (snapshot_id,), "data_snapshots")
+    tables = conn.execute("SELECT COUNT(*) FROM data_snapshot_tables WHERE snapshot_id = ?",
+                          (snapshot_id,)).fetchone()[0]
+    if tables > _MAX_RECEIPTS:
+        raise _broken("closure_rows_over_cap", table="data_snapshot_tables", rows=tables)
+    _bound_bytes(
+        conn,
+        "SELECT SUM(LENGTH(CAST(o.object_id || o.kind || o.content_hash || o.storage_key "
+        "|| o.registered_at AS BLOB))) FROM data_objects o WHERE o.object_id IN "
+        "(SELECT f.object_id FROM data_fragments f WHERE f.fragment_id IN "
+        "(SELECT fragment_id FROM data_version_fragments WHERE dataset_version_id IN "
+        "(SELECT dataset_version_id FROM data_snapshot_tables WHERE snapshot_id = ?)))",
+        (snapshot_id,), "data_objects")
 
 
 def _dataset_parents(conn, resolved) -> None:

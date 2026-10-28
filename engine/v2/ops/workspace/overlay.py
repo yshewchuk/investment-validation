@@ -26,7 +26,7 @@ from pathlib import Path
 
 from engine.v2.data import errors as data_errors
 from engine.v2.data.repository import Repository
-from engine.v2.foundation import ArtifactError, ArtifactStore, canonical_json
+from engine.v2.foundation import ArtifactError, ArtifactStore, canonical_json, fsync_directory
 from engine.v2.ops.bootstrap import open_catalog, require_compatible_catalog
 from engine.v2.ops.catalog import dumps, register_artifact, transaction
 from engine.v2.ops.checkpoints import registered_artifact
@@ -319,8 +319,14 @@ def create_workspace(root, *, production_catalog, production_store, snapshot_id:
                     "production_catalog": str(catalog), "production_store": str(store_root),
                     "pin_artifact_id": pin.artifact_id}
         staged = base / (IDENTITY_FILE + ".tmp")
-        staged.write_text(json.dumps(identity, sort_keys=True), encoding="utf-8")
+        fd = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            os.write(fd, json.dumps(identity, sort_keys=True).encode("utf-8"))
+            os.fsync(fd)
+        finally:
+            os.close(fd)
         os.replace(staged, base / IDENTITY_FILE)
+        fsync_directory(base)
     except BaseException:
         source_conn.close()
         if conn is not None:
