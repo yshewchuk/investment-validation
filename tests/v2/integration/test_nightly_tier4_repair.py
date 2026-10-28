@@ -1209,7 +1209,8 @@ def test_run_nightly_refuses_stale_panel_input_when_gspc_refresh_fails(
     import pandas as pd
     attempted = []
 
-    def fail_gspc(fetcher, path, *, refetch_token=None, minimum_last_date=None):
+    def fail_gspc(fetcher, path, *, refetch_token=None, minimum_last_date=None,
+                  session=None):
         attempted.append((fetcher, path, refetch_token, minimum_last_date))
         return {"ok": False, "reason": "fetch_failed"}
 
@@ -1279,7 +1280,8 @@ def test_run_nightly_refuses_stale_gspc_coverage_and_rotation(
     import pandas as pd
     attempted = []
 
-    def fail_gspc(fetcher, path, *, refetch_token=None, minimum_last_date=None):
+    def fail_gspc(fetcher, path, *, refetch_token=None, minimum_last_date=None,
+                  session=None):
         attempted.append((refetch_token, minimum_last_date))
         if failure_kind == "rotated":
             from engine.data.sources.base import CredentialRotated
