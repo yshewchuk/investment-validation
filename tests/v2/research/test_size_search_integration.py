@@ -438,6 +438,53 @@ def test_v17_large_registration_is_compact_and_missing_shard_refuses(case):
         verify_native_registration(case.conn, MissingShardStore(), replayed)
     assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
 
+    class AlteredShardStore:
+        root = case.store.root
+
+        def read_verified(self, ref):
+            from engine.v2.contracts import ArtifactRef
+            from engine.v2.foundation import from_document
+            payload = case.store.read_verified(ref)
+            if ref == from_document(ArtifactRef, missing_ref):
+                return payload[:-1]
+            return payload
+
+    with pytest.raises(OpsError) as caught:
+        verify_native_registration(case.conn, AlteredShardStore(), replayed)
+    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+
+
+def test_v17_artifact_cap_precedes_publish_and_preflight_is_read_only(case, monkeypatch):
+    from experiments import size_registration_artifacts as artifacts
+    from experiments.magnitude_search_shards import write_section
+
+    published = []
+    publish_bytes = case.store.publish_bytes
+    def record_publish(payload, *, schema_ref):
+        published.append((payload, schema_ref))
+        return publish_bytes(payload, schema_ref=schema_ref)
+    monkeypatch.setattr(case.store, "publish_bytes", record_publish)
+
+    cap = artifacts.MAX_SIZE_ARTIFACT_BYTES
+    monkeypatch.setattr(artifacts, "MAX_SIZE_ARTIFACT_BYTES", 1)
+    with pytest.raises(OpsError) as caught:
+        binding._preview_payload(case.registration.document)
+    assert caught.value.code == "RESOURCE_LIMIT_EXCEEDED"
+    assert not published
+
+    monkeypatch.setattr(artifacts, "MAX_SIZE_ARTIFACT_BYTES", cap)
+    prepared, _ = binding.prepare(case.repository, case.spec, case.request, case.panel_request,
+                                  publish_artifacts=False, **case.args)
+    assert prepared.binding_json == b""
+    assert not published
+
+    with pytest.raises(OpsError) as caught:
+        write_section(case.store, "synthetic:oversized-row",
+                      [{"position": 0, "row": "x" * (8 * 1024 * 1024)}],
+                      lambda row: (row["position"],))
+    assert caught.value.code == "RESOURCE_LIMIT_EXCEEDED"
+    assert not published
+
 
 def test_v16_inline_size_registration_still_round_trips(case):
     from engine.v2.foundation import canonical_json

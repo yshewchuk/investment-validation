@@ -17,7 +17,10 @@ from engine.v2.research.magnitude_inputs import (
 )
 from experiments.magnitude_candidate_recipe import candidate_recipe
 from experiments.magnitude_search_request_versions import compile_request
-from experiments.size_registration_artifacts import pack_size_registration
+from experiments.size_registration_artifacts import (
+    pack_size_registration,
+    size_registration_artifact_bytes,
+)
 from experiments.native_registration import (
     MAX_NATIVE_EVIDENCE_BYTES,
     NativeRegistration,
@@ -41,6 +44,7 @@ class _PreviewStore:
 
 def _preview_payload(binding):
     compact, _ = pack_size_registration(_PreviewStore(), binding)
+    size_registration_artifact_bytes(compact)
     return canonical_json(compact).encode("utf-8")
 
 
