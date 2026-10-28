@@ -1006,6 +1006,14 @@ class Service:
             min(memo["attempts"] - 1, len(self._COMPUTED_MOVES_BACKOFF_SECONDS) - 1)]
         self._native_score_batch_memo = memo
 
+    def native_score_batch_submission_exhausted(self, session, scope_hash):
+        """Whether this score identity has spent its scheduled submit attempts."""
+        memo = self._native_score_batch_memo
+        return bool(
+            memo is not None
+            and memo["identity"][:2] == (session, scope_hash)
+            and memo["attempts"] >= self._COMPUTED_MOVES_MAX_ATTEMPTS)
+
     def _report_native_score_batch_problem(self, exc):
         """Dedup-by-(code, message, error-type) report, identical pattern to
         _report_computed_moves_problem (Cutover PR-7a)."""

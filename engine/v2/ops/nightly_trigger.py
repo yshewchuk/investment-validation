@@ -1070,7 +1070,7 @@ def _drive_jobs_to_terminal(service, conn, job_ids,
             return True
         if _pool_pending(conn):
             return False
-        return not _native_score_batch_pending(conn, job_ids)
+        return not _native_score_batch_pending(conn, job_ids, service)
 
     outcome = serve(service, until=until, deadline_at=deadline_at)
     if outcome == "deadline_exceeded":
@@ -1078,8 +1078,8 @@ def _drive_jobs_to_terminal(service, conn, job_ids,
     return "completed" if _jobs_succeeded(conn, job_ids) else "failed"
 
 
-def _native_score_batch_pending(conn, plan_job_ids) -> bool:
-    """Hold a scheduled serve for its released snapshot-pinned native batch."""
+def _native_score_batch_pending(conn, plan_job_ids, service) -> bool:
+    """Hold for this plan's eligible batch unless submission is terminally blocked."""
     from engine.v2.ops import nightly
     from engine.v2.ops.submission import job_id_for
 
@@ -1088,12 +1088,10 @@ def _native_score_batch_pending(conn, plan_job_ids) -> bool:
         if identity is None:
             return False
         session, scope_hash, snapshot_parameters = identity
-        if snapshot_parameters is None:
+        if snapshot_parameters is None or not plan_job_ids:
             return False
         score_key = f"nightly:{session}:{scope_hash}:score"
         placeholders = ", ".join("?" for _ in plan_job_ids)
-        if not plan_job_ids:
-            return False
         score = conn.execute(
             f"SELECT 1 FROM jobs WHERE job_id IN ({placeholders}) "
             "AND kind = 'score' AND idempotency_key = ? LIMIT 1",
@@ -1101,12 +1099,22 @@ def _native_score_batch_pending(conn, plan_job_ids) -> bool:
         if score is None:
             return False
         batch_id = job_id_for(
-            "shadow", nightly._native_score_batch_key(session, scope_hash))
+            "shadow", nightly.native_score_batch_key(session, scope_hash))
         row = conn.execute("SELECT state FROM jobs WHERE job_id = ?",
                            (batch_id,)).fetchone()
-        return row is None or str(row["state"]) not in TERMINAL_JOB_STATES
+        if row is not None:
+            return str(row["state"]) not in TERMINAL_JOB_STATES
+        failure = conn.execute(
+            "SELECT 1 FROM native_stage_failures WHERE occurrence = ? "
+            "AND scope_hash = ? AND stage_id = 'native_score_batch' "
+            "AND status = 'FAILED' AND resolved_at IS NULL LIMIT 1",
+            (session, scope_hash)).fetchone()
+        if failure is not None:
+            return False
+        exhausted = getattr(service, "native_score_batch_submission_exhausted", None)
+        return not (callable(exhausted) and exhausted(session, scope_hash))
     except Exception:
-        # Keep the bounded scheduled serve alive if the eligibility read fails.
+        # Keep the existing serve deadline as the bound if durable state is unreadable.
         return True
 
 

@@ -1222,6 +1222,11 @@ def _native_score_batch_key(session, scope_hash):
     return "nightly:" + session + ":" + scope_hash + ":native_score_batch"
 
 
+def native_score_batch_key(session, scope_hash):
+    """Return the idempotency key for a snapshot-pinned native score batch."""
+    return _native_score_batch_key(session, scope_hash)
+
+
 def _session_scope_from_score_key(idempotency_key):
     """Recover ``(session, scope_hash)`` from a legacy "score" job's own
     idempotency key (``"nightly:<session>:<scope_hash>:score"``) -- mirrors
@@ -1382,7 +1387,7 @@ def submit_native_score_batch_shadow_if_ready(conn, registry, policy, store, rel
         # R1: production's default "legacy" input mode pins no snapshot --
         # see ARCHITECTURE.md "Cutover PR-7a's input sourcing".
         return None
-    key = _native_score_batch_key(session, scope_hash)
+    key = native_score_batch_key(session, scope_hash)
     exists = conn.execute("SELECT 1 FROM jobs WHERE job_id = ?",
                           (job_id_for("shadow", key),)).fetchone()
     if exists is not None:

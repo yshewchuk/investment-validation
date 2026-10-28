@@ -437,6 +437,15 @@ def _family_cycle_pending(conn, session, family, prior_token, tag, prior_id, rel
     return prior_id != release_id
 
 
+def _started_cycle_wait_pending(conn, session, prior_token, tag, release_id,
+                                family, prior_id, cycle_started):
+    if (cycle_started and _started_pool_cycle_outcome(
+            conn, session, prior_token, tag, release_id, family) == "failed"):
+        return False
+    return _family_cycle_pending(conn, session, family, prior_token, tag,
+                                 prior_id, release_id)
+
+
 def pool_cycle_pending(conn, release_root):
     """Is the latest session's pool cycle still pending?
 
@@ -453,7 +462,9 @@ def pool_cycle_pending(conn, release_root):
     blocks the sidecar. ``False``
     when there is no connection, no identity, no readable pointer, any of the
     cycle's five phase jobs is in a terminal stall state, or the pointer names
-    the candidate and every existing phase job succeeded. Reads only the same
+    the candidate and every existing phase job succeeded. ``False`` when all
+    training prerequisites succeeded but stage or promote has no row after
+    reconciliation (the refusal gap classified as failed). Reads only the same
     durable state as the sidecar and never writes."""
     if conn is None:
         return False
@@ -477,6 +488,7 @@ def pool_cycle_pending(conn, release_root):
         prior_id = None if pointer is None else pointer.release_id
         prior_token = "none" if prior_id is None else prior_id
         family = _started_family(conn, session, prior_token, tag)
+        cycle_started = family is not None
         if family is None:
             prior = _classify_prior(Path(release_root), prior_id)
             if prior_id is None:
@@ -491,8 +503,9 @@ def pool_cycle_pending(conn, release_root):
                 family = "carry"
     except Exception:
         return False
-    return _family_cycle_pending(conn, session, family, prior_token, tag,
-                                 prior_id, release_id)
+    return _started_cycle_wait_pending(
+        conn, session, prior_token, tag, release_id, family, prior_id,
+        cycle_started)
 
 
 def submit_pool_nightly_refresh_if_ready(conn, registry, policy, store, release_root, *,

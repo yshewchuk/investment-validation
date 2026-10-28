@@ -295,6 +295,17 @@ def test_pool_cycle_pending_false_when_the_promote_failed(tmp_path):
     assert pool_refresh.pool_cycle_pending(conn, tmp_path) is False
 
 
+def test_pool_cycle_pending_false_after_training_when_stage_and_promote_are_missing(
+        tmp_path):
+    conn = _db()
+    _add_score(conn)
+    _write_pointer(tmp_path, PRIOR)
+    for phase in pool_refresh.TRAINING_PHASES:
+        _add_training(conn, phase, state="succeeded")
+
+    assert pool_refresh.pool_cycle_pending(conn, tmp_path) is False
+
+
 def test_pool_cycle_pending_false_without_a_pointer(tmp_path):
     conn = _db()
     _add_score(conn)
