@@ -29,6 +29,7 @@ from engine.v2.ops.catalog import register_artifact, transaction  # noqa: E402
 from engine.v2.ops.errors import OpsError  # noqa: E402
 from engine.v2.ops.supervisor import Service  # noqa: E402
 from engine.v2.ops.workspace import closure as closure_module  # noqa: E402
+from engine.v2.ops.workspace import overlay as overlay_module  # noqa: E402
 from engine.v2.ops.workspace.guard import refuse_workspace_execution  # noqa: E402
 from engine.v2.ops.workspace.overlay import (  # noqa: E402
     IDENTITY_FILE,
@@ -476,3 +477,11 @@ def test_source_view_reads_go_through_the_bounded_cursor(prod, monkeypatch):
         with pytest.raises(DataError) as caught:
             ws.source.fragment_records(ws.source_snapshot(), "securities")
         assert _details(caught)[1] == "closure_rows_over_cap"
+
+
+def test_pin_resolution_in_create_goes_through_the_bounded_cursor(prod, monkeypatch):
+    monkeypatch.setattr(overlay_module, "verify_snapshot_closure", lambda *a, **k: None)
+    monkeypatch.setattr(closure_module, "_MAX_ROWS", 0)
+    with pytest.raises(DataError) as caught:
+        _create(prod, "pinbound")
+    assert _details(caught)[1] == "closure_rows_over_cap"

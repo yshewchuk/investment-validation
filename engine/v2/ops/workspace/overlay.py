@@ -307,7 +307,7 @@ def create_workspace(root, *, production_catalog, production_store, snapshot_id:
         source_store = ArtifactStore(store_root)
         closure = verify_snapshot_closure(source_conn, source_store, snapshot_id, manifest_hash,
                                           deep=deep)
-        snapshot = Repository(source_conn).resolve(snapshot_id)
+        snapshot = Repository(_BoundedConn(source_conn)).resolve(snapshot_id)
         base.mkdir(mode=0o700, exist_ok=True)
         os.chmod(base, 0o700)
         (base / MARKER).write_text(SCHEMA_VERSION + "\n", encoding="utf-8")
@@ -363,7 +363,7 @@ def open_workspace(root, *, production_catalog, production_store, clock,
         if closure.identity_digest != identity["identity_digest"]:
             raise _changed("closure_changed", snapshot_id=identity["snapshot_id"])
         conn, store = open_catalog(paths.catalog, clock=clock), ArtifactStore(paths.store)
-        snapshot = Repository(source_conn).resolve(identity["snapshot_id"])
+        snapshot = Repository(_BoundedConn(source_conn)).resolve(identity["snapshot_id"])
         expected = dumps(snapshot).encode("utf-8")
         try:
             ref = registered_artifact(conn, identity["pin_artifact_id"],
