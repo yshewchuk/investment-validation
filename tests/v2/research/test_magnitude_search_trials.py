@@ -133,6 +133,21 @@ def test_native_complete_journal_pools_metrics_freezes_latest_and_replays(case, 
     assert trial_slots(case) == before
 
 
+def test_execute_admits_sealed_registration_once_before_start(case, monkeypatch):
+    args = trial_cases(case)[0]
+    original = case.recorder._admit
+    admissions = []
+
+    def admit():
+        admissions.append(True)
+        return original()
+
+    monkeypatch.setattr(case.recorder, "_admit", admit)
+    limits = {"memory_bytes": 2 * 1024 ** 3, "cpu_seconds": 30, "wall_seconds": 60}
+    case.recorder.execute(*args, limits=limits)
+    assert len(admissions) == 1
+
+
 def test_shared_training_cohort_and_forecasts_committed_before_validation(case, monkeypatch):
     args, other = trial_cases(case)[:2]
     one, two = case.recorder.start(*args), case.recorder.start(*other)

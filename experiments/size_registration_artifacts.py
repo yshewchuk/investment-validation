@@ -52,14 +52,6 @@ def _position(row):
     return (row["position"],)
 
 
-def _plain(value):
-    if isinstance(value, dict):
-        return {key: _plain(item) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_plain(item) for item in value]
-    return value
-
-
 def _publish(store, rows, kind, identifier):
     section = "size_registration.v1.7:" + identifier
     entry = write_section(store, section, rows, _position)
@@ -86,11 +78,9 @@ def pack_size_registration(store, document):
             return {_PLACEHOLDER: cached[0]}
         if kind == "list":
             rows = ({"position": index, "row": walk(item)} for index, item in enumerate(value))
-        elif kind == "map":
+        else:
             rows = ({"position": index, "row": [name, walk(value[name], name)]}
                     for index, name in enumerate(sorted(value)))
-        else:
-            rows = iter(({"position": 0, "row": _plain(value)},))
         placeholder, descriptor = _publish(store, rows, kind, identifier)
         digest_to_descriptor[identifier] = (identifier, descriptor)
         artifacts[identifier] = descriptor
