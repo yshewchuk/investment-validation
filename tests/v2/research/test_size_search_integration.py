@@ -1,4 +1,5 @@
 """Synthetic native source→stored panel→v2 journal→bounded child→comparison path."""
+import json
 from copy import deepcopy
 from types import SimpleNamespace
 
@@ -65,8 +66,9 @@ def case(tmp_path_factory):
         pass
 
 
-def test_native_v16_anchor_and_explicit_v2_fitted_identities(case):
+def test_native_v17_anchor_and_explicit_v2_fitted_identities(case):
     verify_native_registration(case.conn, case.store, case.registration)
+    assert case.registration.document["schema_version"] == "native_experiment_registration.v1.7"
     plan = case.plan
     assert plan["schema_version"] == "magnitude_search_plan.v2"
     assert plan["candidate_count"] == 33 and plan["planned_fit_count"] == 102
@@ -75,7 +77,7 @@ def test_native_v16_anchor_and_explicit_v2_fitted_identities(case):
     assert case.registration.document["size_comparison"]["component_parameters"]["mlp"]["random_state"] == 20260829
     assert len({c["candidate_id"] for c in plan["candidates"]}) == 33
     assert all(c["candidate_id"] == content_hash({k: v for k, v in c.items() if k != "candidate_id"})
-               and c["source_binding_id"] == content_hash(case.registration.document["size_panel"]) for c in plan["candidates"])
+               and c["source_binding_id"] == content_hash(json.loads(case.registration.binding_json)["size_panel"]) for c in plan["candidates"])
     assert {len(c["recipe"]["features"]) for c in plan["candidates"]} == {11, 28, 43}
 
 
@@ -172,7 +174,7 @@ def test_completed_search_exact_and_expired_replay(completed_case, monkeypatch):
 
 
 @pytest.mark.parametrize("field", ["size_request", "size_panel_request", "size_panel", "size_comparison"])
-def test_native_v16_missing_or_nondictionary_additive_field_refuses(case, field):
+def test_native_v17_missing_or_nondictionary_additive_field_refuses(case, field):
     from engine.v2.ops.native_registration import _magnitude_binding
     for bad in (None, [], "untrusted"):
         document = case.registration.document
@@ -257,7 +259,6 @@ def test_report_replays_comparator_evidence(completed_case, monkeypatch, slot, m
 
 @pytest.mark.parametrize("headroom", [-1, 0, 1])
 def test_prepared_registration_byte_boundary_matches_reserve_and_verify(case, monkeypatch, headroom):
-    from engine.v2.foundation import canonical_json
     from experiments.native_registration import read_native_registration
     expected = case.registration.binding_json
     budget = len(expected) + headroom
@@ -286,7 +287,8 @@ def test_prepared_registration_byte_boundary_matches_reserve_and_verify(case, mo
             assert caught.value.problem.details == {"registration_bytes": len(expected), "max_registration_bytes": budget}
     else:
         prepared, spec = binding.prepare(case.repository, case.spec, case.request, case.panel_request, **case.args)
-        assert prepared.binding_json == expected == canonical_json(prepared.document).encode()
+        assert prepared.binding_json == expected
+        assert prepared.document == case.registration.document
         assert reserve_native_registration(case.conn, case.store, prepared, spec,
                                             max_evidence_bytes=budget) == prepared
         verify_native_registration(case.conn, case.store, prepared, max_evidence_bytes=budget)
@@ -382,3 +384,72 @@ def test_public_fold_inputs_refuses_caller_drift_before_dependent_reads(case, mo
     assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
     assert caught.value.problem.retryable is False
     assert case.conn.total_changes == before
+
+
+def test_v17_large_registration_is_compact_and_missing_shard_refuses(case):
+    from engine.v2.foundation import ArtifactError, canonical_json
+    from experiments.native_registration import NativeRegistration, read_native_registration
+    from experiments.size_registration_artifacts import pack_size_registration
+
+    logical = case.registration.document
+    context = logical["size_panel"]["context"]
+    context["metadata"] = [{"position": index, "value": "m" * 4096} for index in range(4200)]
+    context["context_id"] = content_hash({key: value for key, value in context.items() if key != "context_id"})
+    spec = prediction_spec(experiment_id="synthetic-large-size-registration",
+                           folds=("2024",), runner="experiments/size_search.py")
+    logical["spec_hash"] = spec.spec_hash
+    key = content_hash({"experiment_id": spec.experiment_id, "arm": spec.primary_arm_id})
+    run_id = "native_" + key.removeprefix("sha256:")
+    compact, logical = pack_size_registration(case.store, logical)
+    from engine.v2.foundation.canonical import iter_canonical_json
+    old_bytes = sum(len(chunk.encode("utf-8")) for chunk in iter_canonical_json(logical))
+    payload = canonical_json(compact).encode()
+    assert old_bytes > 16 * 1024 * 1024
+    assert len(payload) == 171535
+    assert len(payload) < 16 * 1024 * 1024
+    registration = NativeRegistration(run_id, payload, logical)
+    reserve_native_registration(case.conn, case.store, registration, spec)
+    replayed = read_native_registration(case.conn, case.store, spec)
+    assert replayed.document == logical
+    assert replayed.binding_json == payload
+    sealed = planner.seal_search_plan(case.conn, case.store, replayed, case.request)
+    plan_ref = from_document(ArtifactRef, sealed["plan_ref"])
+    assert planner.read_search_plan(case.conn, case.store, replayed, case.request, plan_ref) == sealed["plan"]
+    print(f"v1.7 registration bytes: {len(payload)}")
+
+    first = next(iter(compact["size_artifacts"].values()))["entry"]["shards"][0]
+    missing_ref = first["ref"]
+
+    class MissingShardStore:
+        root = case.store.root
+
+        def read_verified(self, ref):
+            from engine.v2.contracts import ArtifactRef
+            from engine.v2.foundation import from_document
+            if ref == from_document(ArtifactRef, missing_ref):
+                raise ArtifactError("INTEGRITY_FAILED", "synthetic missing registration shard")
+            return case.store.read_verified(ref)
+
+    with pytest.raises(OpsError) as caught:
+        verify_native_registration(case.conn, MissingShardStore(), replayed)
+    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+
+
+def test_v16_inline_size_registration_still_round_trips(case):
+    from engine.v2.foundation import canonical_json
+    from experiments.native_registration import NativeRegistration, read_native_registration
+
+    logical = case.registration.document
+    logical["schema_version"] = "native_experiment_registration.v1.6"
+    spec = prediction_spec(experiment_id="synthetic-legacy-v16-registration",
+                           folds=("2024",), runner="experiments/size_search.py")
+    logical["spec_hash"] = spec.spec_hash
+    key = content_hash({"experiment_id": spec.experiment_id, "arm": spec.primary_arm_id})
+    run_id = "native_" + key.removeprefix("sha256:")
+    payload = canonical_json(logical).encode()
+    registration = NativeRegistration(run_id, payload)
+    reserve_native_registration(case.conn, case.store, registration, spec)
+    replayed = read_native_registration(case.conn, case.store, spec)
+    assert replayed.document == logical
+    assert replayed.binding_json == payload
+    verify_native_registration(case.conn, case.store, replayed)

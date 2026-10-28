@@ -245,10 +245,9 @@ Counts cap attempts, not completed fits, input bytes, coverage or cost feasibili
 Unknown shapes, columns, hashes, grids, policies or insufficient caps refuse before
 expansion. A preview grants no source, fit, selection or holdout authority.
 
-`size_search_binding.prepare` explicitly creates native registration v1.6 from metadata temporal folds and installed `size_panel.read` admission. It binds the complete v3 context/snapshots, all-horizon 30-day eligibility, request, full causal
-comparator recipe (including registry-derived native recipe and sklearn defaults), source closure/environment and actual label anchors. Inner-year feasibility and
-label-end purging run before reservation. Native catalog reservation and search journal ownership stay unchanged; no new store, scheduler or ledger is introduced.
-`magnitude_search_plan` routes only a v1.6 anchor plus v2 request to executable v2 plans. Historical v1 execution semantics remain explicit, never a latest default.
+`size_search_binding.prepare` writes native registration v1.7. Its small canonical registration retains the source, request, fold and execution identity while large ordered values (plan events, panel target events, metadata and fragment lists) live in bounded immutable CAS shards. The registration references each section by its shard references and row count. Shard identity uses the existing `magnitude_search_shards` format and ordering checks; no single cohort-sized JSON encoding is used for registration hashing, reservation, admission or replay. The 16 MiB registration limit is unchanged.
+
+Native admission dispatches v1.7 to its reference validator and verifies every referenced CAS object independently. SIZE replay streams verified sections into the same logical plan and panel fields consumed by the v1.6 planner. Existing v1.5/v1.6 registrations retain their inline validation and replay unchanged; no migration or rewrite occurs. Scientific membership, targets, fold cutoffs, selection and scoring semantics are unchanged. `magnitude_search_plan` admits v1.6 and v1.7 anchors for the v2 request; historical v1 execution semantics remain explicit, never a latest default.
 
 `size_search` is the local no-ledger preflight/register/seal/run/report entrypoint.
 Parent/job wall and address-space limits are CLI-owned; child memory cannot exceed

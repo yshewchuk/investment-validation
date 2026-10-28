@@ -6,7 +6,7 @@ from engine.v2.ops.errors import fail
 
 
 def keys(binding):
-    return {"diagnostics"} if binding.get("schema_version") == "native_experiment_registration.v1.6" else set()
+    return {"diagnostics"} if binding.get("schema_version") in ("native_experiment_registration.v1.6", "native_experiment_registration.v1.7") else set()
 
 
 def evidence(result, execution, horizons):

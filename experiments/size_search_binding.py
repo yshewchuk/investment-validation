@@ -1,4 +1,5 @@
 """Explicit v2 SIZE source/fold binding; installed panel admission, no hidden builds."""
+import json
 import sys
 from datetime import date
 from hashlib import sha256
@@ -16,6 +17,7 @@ from engine.v2.research.magnitude_inputs import (
 )
 from experiments.magnitude_candidate_recipe import candidate_recipe
 from experiments.magnitude_search_request_versions import compile_request
+from experiments.size_registration_artifacts import pack_size_registration
 from experiments.native_registration import (
     MAX_NATIVE_EVIDENCE_BYTES,
     NativeRegistration,
@@ -24,7 +26,7 @@ from experiments.native_registration import (
 )
 from experiments.size_comparator import recipe as comparison_recipe
 
-SCHEMA = "native_experiment_registration.v1.6"
+SCHEMA = "native_experiment_registration.v1.7"
 
 
 def _require(condition):
@@ -87,7 +89,7 @@ def prepare(repository, spec, request, panel_request, *, scope, training_start, 
              and panel_request["horizons"] == [1, 3, 5])
     base, spec = prepare_native_registration(repository, spec, code_root=Path(__file__).resolve().parents[1],
         scope=scope, as_of_month=panel_request["as_of_month"], event_ids=panel_request["event_ids"],
-        magnitude_training_start=training_start, magnitude_labels_before=labels_before)
+        magnitude_training_start=training_start, magnitude_labels_before=labels_before, defer_serialization=True)
     binding = base.document
     _require(binding["execution_plan"]["runner"] == "experiments/size_search.py")
     binding["source_closure"] = sources
@@ -101,12 +103,13 @@ def prepare(repository, spec, request, panel_request, *, scope, training_start, 
     binding.update(schema_version=SCHEMA, size_request=schedule["request"], size_panel_request=panel_request,
         size_panel={"context": context, "feature_snapshot": panel["feature_snapshot"]},
         size_comparison=comparison_recipe())
-    payload = canonical_json(binding).encode()
+    compact, logical = pack_size_registration(repository._store, binding)
+    payload = canonical_json(compact).encode()
     if len(payload) > MAX_NATIVE_EVIDENCE_BYTES:
         raise fail("RESOURCE_LIMIT_EXCEEDED", "native registration exceeds its UTF-8 byte budget",
             details={"registration_bytes": len(payload), "max_registration_bytes": MAX_NATIVE_EVIDENCE_BYTES})
     _folds(binding, schedule["request"])
-    return NativeRegistration(base.run_id, payload), spec
+    return NativeRegistration(base.run_id, payload, logical), spec
 
 
 def _source_files():
@@ -161,7 +164,9 @@ def prepare_plan(conn, store, registration, request):
     _require(schedule["request"] == binding["size_request"])
     folds = _folds(binding, request)
     candidates = []
-    source_binding_id = content_hash(binding["size_panel"])
+    source_binding_id = (content_hash(json.loads(registration.binding_json)["size_panel"])
+                         if binding["schema_version"] == "native_experiment_registration.v1.7"
+                         else content_hash(binding["size_panel"]))
     for spec in schedule["candidate_specs"]:
         recipe = candidate_recipe(spec["family"], spec["parameters"], columns=spec["feature_recipe"]["model_columns"],
                                   feature_dictionary_hash=spec["feature_recipe"]["dictionary_hash"])

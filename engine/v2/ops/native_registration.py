@@ -75,7 +75,8 @@ def verified_registration_bytes(conn, store, run_id, *, expected_ref=None, max_e
         if (ref.schema_ref not in ("native_experiment_registration.v1.0", "native_experiment_registration.v1.1",
                                   "native_experiment_registration.v1.2", "native_experiment_registration.v1.3",
                                   "native_experiment_registration.v1.4", "native_experiment_registration.v1.5",
-                                  "native_experiment_registration.v1.6")
+                                  "native_experiment_registration.v1.6",
+                                  "native_experiment_registration.v1.7")
                 or (expected_ref is not None and ref != expected_ref)):
             raise ValueError
         if max_evidence_bytes is not None and ref.byte_size > max_evidence_bytes:
@@ -83,7 +84,7 @@ def verified_registration_bytes(conn, store, run_id, *, expected_ref=None, max_e
                        details={"registration_bytes": ref.byte_size, "max_registration_bytes": max_evidence_bytes})
         binding = store.read_verified(ref)
         document = json.loads(binding)
-        valid = _matches(row, evidence, ref, binding, document)
+        valid = _matches(row, evidence, ref, binding, document, store)
     except (ArtifactError, ValueError, TypeError, KeyError):
         valid = False
     except RecursionError:
@@ -95,9 +96,51 @@ def verified_registration_bytes(conn, store, run_id, *, expected_ref=None, max_e
     return binding
 
 
-def _matches(row, evidence, ref, binding, document):
+def _size_artifacts_verified(store, document):
+    """Hash-check each v1.7 shard independently without assembling section JSON."""
+    if document.get("schema_version") != "native_experiment_registration.v1.7":
+        return True
+    try:
+        artifacts = document["size_artifacts"]
+        for artifact_id, descriptor in artifacts.items():
+            if not _size_artifact_verified(store, descriptor):
+                return False
+        return True
+    except (ArtifactError, OSError, ValueError, TypeError, KeyError, AttributeError, RecursionError):
+        return False
+
+
+def _size_artifact_verified(store, descriptor):
+    """Verify one artifact descriptor's shards, row totals, and object cardinality."""
+    try:
+        entry = descriptor["entry"]
+        section = descriptor["section"]
+        position = 0
+        for shard in entry["shards"]:
+            ref = from_document(ArtifactRef, shard["ref"])
+            payload = store.read_verified(ref)
+            stored = json.loads(payload)
+            rows = stored["rows"]
+            if (set(stored) != {"schema_version", "section", "rows"}
+                    or stored["schema_version"] != "magnitude_search_shard.v1"
+                    or stored["section"] != section or len(rows) != shard["rows"]):
+                return False
+            if any(not isinstance(row, dict) or set(row) != {"position", "row"}
+                   or row["position"] != position + offset for offset, row in enumerate(rows)):
+                return False
+            position += len(rows)
+        if position != entry["row_count"]:
+            return False
+        if descriptor["kind"] == "object" and position != 1:
+            return False
+        return True
+    except (ArtifactError, OSError, ValueError, TypeError, KeyError, AttributeError, RecursionError):
+        return False
+
+
+def _matches(row, evidence, ref, binding, document, store):
     variant = content_hash(document)
-    return (_magnitude_binding(document) and document["schema_version"] == ref.schema_ref
+    return (_magnitude_binding(document) and _size_artifacts_verified(store, document) and document["schema_version"] == ref.schema_ref
             and canonical_json(document).encode() == binding
             and artifact_reference(binding, ref.schema_ref) == ref
             and row["spec_hash"] == document["spec_hash"] and row["mode"] == "primary"
@@ -119,6 +162,8 @@ def validate_magnitude_execution(document):
 
 def _magnitude_binding(document):
     """Check stored plan integrity and cross-links, never reconstruct or authorize."""
+    if document["schema_version"] == "native_experiment_registration.v1.7":
+        return _size_binding_v17(document)
     if document["schema_version"] == "native_experiment_registration.v1.6":
         return _size_binding(document)
     if document["schema_version"] == "native_experiment_registration.v1.5":
@@ -145,6 +190,116 @@ def _magnitude_binding(document):
     return (_magnitude_metadata(plan) and _magnitude_sources(plan, document["snapshot"])
             and _magnitude_context(document, plan, request)
             and (not executable or _magnitude_execution(document, plan)))
+
+
+def _size_binding_v17(document):
+    """Structural v1.7 placeholder envelope; full SIZE validation follows hydration."""
+    try:
+        if set(document) != {"schema_version", "spec_hash", "execution_plan", "snapshot", "scope",
+                             "source_closure", "environment", "event_ids", "holdouts",
+                             "magnitude_request", "magnitude_plan", "magnitude_execution",
+                             "size_request", "size_panel_request", "size_panel",
+                             "size_comparison", "size_artifacts"}:
+            return False
+        return (_size_artifact_map_v17(document)
+                and _size_plan_v17(document)
+                and _size_panel_v17(document))
+    except (KeyError, TypeError, ValueError, AttributeError, ArtifactError, RecursionError):
+        return False
+
+
+def _size_artifact_map_v17(document):
+    artifacts = document["size_artifacts"]
+    if not isinstance(artifacts, dict):
+        return False
+    found = []
+    for key, value in document.items():
+        if key != "size_artifacts" and not _size_placeholders_v17(value, found):
+            return False
+    if set(found) != set(artifacts):
+        return False
+    shard_total = 0
+    for artifact_id, descriptor in artifacts.items():
+        if not _size_descriptor_v17(descriptor, artifact_id):
+            return False
+        shard_total += len(descriptor["entry"]["shards"])
+    return shard_total <= 8192
+
+
+def _size_plan_v17(document):
+    plan = document["magnitude_plan"]
+    return (isinstance(plan, dict)
+            and set(plan) == {"schema_version", "snapshot_id", "holdout_as_of_month",
+                              "random_membership_version", "rolling_membership_version",
+                              "training_start", "evaluation_years", "horizons",
+                              "target_recipe", "fold_policy", "population_input",
+                              "calendar_input", "events", "folds", "availability", "plan_id"}
+            and _size_placeholder_v17(plan["events"])
+            and _size_placeholder_v17(document["event_ids"]))
+
+
+def _size_panel_v17(document):
+    panel = document["size_panel"]
+    if not isinstance(panel, dict) or set(panel) != {"context", "feature_snapshot"}:
+        return False
+    context, feature = panel["context"], panel["feature_snapshot"]
+    if not isinstance(context, dict) or not isinstance(feature, dict):
+        return False
+    request = context.get("request")
+    if (context.get("schema_version") != "magnitude_panel_context.v3"
+            or not isinstance(context.get("context_id"), str)
+            or context.get("source_snapshot") != document["snapshot"]
+            or not _size_placeholder_v17(context.get("target_events"))
+            or not isinstance(request, dict)
+            or not _size_placeholder_v17(request.get("event_ids"))
+            or not isinstance(feature.get("snapshot_id"), str)):
+        return False
+    return (document["size_request"]["schema_version"] == "magnitude_search_request.v2"
+            and document["size_comparison"]["schema_version"] == "size_causal_comparator.v1"
+            and isinstance(document["size_panel_request"], dict))
+
+
+def _size_placeholders_v17(node, found):
+    """Gather exact compact placeholders, rejecting mixed $size_artifact nodes."""
+    if isinstance(node, dict):
+        if "$size_artifact" in node:
+            if set(node) != {"$size_artifact"} or not isinstance(node["$size_artifact"], str):
+                return False
+            found.append(node["$size_artifact"])
+            return True
+        return all(_size_placeholders_v17(value, found) for value in node.values())
+    if isinstance(node, list):
+        return all(_size_placeholders_v17(item, found) for item in node)
+    return True
+
+
+def _size_placeholder_v17(value):
+    return (isinstance(value, dict) and set(value) == {"$size_artifact"}
+            and isinstance(value["$size_artifact"], str))
+
+
+def _size_descriptor_v17(descriptor, artifact_id):
+    if (not isinstance(descriptor, dict) or set(descriptor) != {"kind", "section", "entry"}
+            or descriptor["kind"] not in ("list", "object")
+            or descriptor["section"] != f"size_registration.v1.7:{artifact_id}"):
+        return False
+    entry = descriptor["entry"]
+    if (not isinstance(entry, dict) or set(entry) != {"row_count", "shards"}
+            or type(entry["row_count"]) is not int or entry["row_count"] < 0
+            or not isinstance(entry["shards"], list)):
+        return False
+    return all(_size_shard_v17(shard) for shard in entry["shards"])
+
+
+def _size_shard_v17(shard):
+    if not isinstance(shard, dict) or set(shard) != {"ref", "rows", "first_key", "last_key"}:
+        return False
+    ref = from_document(ArtifactRef, shard["ref"])
+    return (ref.schema_ref == "magnitude_search_shard.v1"
+            and 1 <= ref.byte_size <= 8 * 1024 * 1024
+            and type(shard["rows"]) is int and shard["rows"] > 0
+            and isinstance(shard["first_key"], list)
+            and isinstance(shard["last_key"], list))
 
 
 def _size_binding(document):

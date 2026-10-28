@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -28,6 +29,7 @@ from engine.v2.ops.experiments import (
 )
 from engine.v2.ops.fingerprints import environment_identity, source_closure
 from engine.v2.ops.native_registration import (
+    _size_binding,
     MAX_NATIVE_EVIDENCE_BYTES,
     magnitude_execution_document,
     magnitude_fitted_execution_document,
@@ -42,6 +44,7 @@ from engine.v2.research._pricing import STRUCTURES
 from engine.v2.research.experiment_population import load_population
 from engine.v2.research.magnitude_folds import magnitude_window, plan_magnitude_folds
 from experiments.magnitude_history_inputs import history_binding
+from experiments.size_registration_artifacts import hydrate_size_registration
 
 MAX_GATE_SWEEP_BYTES = 16 * 1024 * 1024
 
@@ -77,23 +80,26 @@ def decode_native_gate_sweep(payload, *, failure_code="EXPERIMENT_IDENTITY_CONFL
 
 @dataclass(frozen=True)
 class NativeRegistration:
-    """Immutable canonical binding; each document access returns a fresh copy."""
+    """Immutable binding; optionally retain a detached logical SIZE document."""
     run_id: str
     binding_json: bytes
+    document_value: dict | None = None
 
     @property
     def document(self):
-        return json.loads(self.binding_json)
+        return deepcopy(self.document_value) if self.document_value is not None else json.loads(self.binding_json)
 
     @property
     def variant_id(self):
+        if self.document_value is not None and self.document_value.get("schema_version") == "native_experiment_registration.v1.7":
+            return content_hash(json.loads(self.binding_json))
         return content_hash(self.document)
 
 
 def prepare_native_registration(repository, spec, *, code_root, as_of_month, scope, event_ids,
              final_read=None, expected=None, magnitude_training_start=None, magnitude_labels_before=None,
              admission=None, magnitude_feature_snapshot_id=None, magnitude_history_start=None, magnitude_fit_model=None,
-             snapshot=None, extra_environment=None, max_evidence_bytes=None):
+             snapshot=None, extra_environment=None, max_evidence_bytes=None, defer_serialization=False):
     """Prepare immutable registration/spec inputs without reserving or evaluating."""
     if max_evidence_bytes is not None and not valid_registration_read_budget(max_evidence_bytes):
         raise fail("INVALID_EXPERIMENT_SPEC", "registration read requires a positive SQLite-safe byte budget")
@@ -222,7 +228,22 @@ def prepare_native_registration(repository, spec, *, code_root, as_of_month, sco
         validate_magnitude_fitted_execution(document)
     elif history_request is not None:
         validate_magnitude_history_execution(document)
+    if defer_serialization:
+        return NativeRegistration(run_id, b"", document), spec
     return NativeRegistration(run_id, canonical_json(document).encode("utf-8")), spec
+
+
+def load_registration_document(store, binding):
+    """Decode one registration, hydrating and validating only the v1.7 SIZE form."""
+    document = json.loads(binding)
+    if document.get("schema_version") != "native_experiment_registration.v1.7":
+        return document
+    logical = hydrate_size_registration(store, document)
+    logical["schema_version"] = "native_experiment_registration.v1.6"
+    if not _size_binding(logical):
+        raise fail("EXPERIMENT_IDENTITY_CONFLICT", "SIZE registration artifacts do not match their logical binding")
+    logical["schema_version"] = "native_experiment_registration.v1.7"
+    return logical
 
 
 def native_registration_exists(conn, store, registration, *, max_evidence_bytes=None):
@@ -231,6 +252,8 @@ def native_registration_exists(conn, store, registration, *, max_evidence_bytes=
         ref = artifact_reference(registration.binding_json, registration.document["schema_version"])
         binding = verified_registration_bytes(conn, store, registration.run_id, expected_ref=ref,
                                               max_evidence_bytes=max_evidence_bytes)
+        if binding is not None:
+            load_registration_document(store, binding)
         return binding is not None
     except (ArtifactError, ValueError, TypeError, KeyError):
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "native registration differs from its immutable binding") from None
@@ -363,7 +386,9 @@ def read_native_registration(conn, store, spec, *, max_evidence_bytes=MAX_NATIVE
     if binding is None:
         raise fail("INVALID_EXPERIMENT_SPEC", "native experiment has not been preregistered")
     try:
-        registration = NativeRegistration(run_id, binding)
+        document = load_registration_document(store, binding)
+        registration = NativeRegistration(run_id, binding,
+            document if document.get("schema_version") == "native_experiment_registration.v1.7" else None)
         if registration.document["spec_hash"] != spec.spec_hash:
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "requested specification differs from registration")
         return registration
