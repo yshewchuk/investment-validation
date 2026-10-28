@@ -131,7 +131,7 @@ def _implementation(binding):
 def _prepare(conn, store, registration, request):
     request_version = request.get("schema_version") if isinstance(request, dict) else None
     anchor_version = getattr(registration, "document", {}).get("schema_version")
-    qualified = anchor_version == "native_experiment_registration.v1.6"
+    qualified = anchor_version in ("native_experiment_registration.v1.6", "native_experiment_registration.v1.7")
     if request_version != ("magnitude_search_request.v2" if qualified else "magnitude_search_request.v1"):
         raise fail("INVALID_EXPERIMENT_SPEC", "search requires explicit valid axes, inner years and count caps")
     if qualified:

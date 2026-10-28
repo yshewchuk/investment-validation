@@ -172,7 +172,7 @@ def _execute_admitted(conn, store, repository, registration, plan, fold, selecti
         return read_record(conn, store, registration.run_id, "outer-" + slot + ":" + key)
     def append(slot, body):
         return append_record(conn, store, registration.run_id, "outer-" + slot + ":" + key, body, replay=False)
-    if binding.get("schema_version") == "native_experiment_registration.v1.6":
+    if binding.get("schema_version") in ("native_experiment_registration.v1.6", "native_experiment_registration.v1.7"):
         from experiments.size_comparison_run import execute as compare
         _equal(limits, plan["request"]["limits"]["child"])
         compare(conn, store, repository, registration, plan, fold, limits=limits, replay_only=replay_only)
@@ -181,7 +181,7 @@ def _execute_admitted(conn, store, repository, registration, plan, fold, selecti
         return _replay(saved, store, started, fold, plan, execution)
     forbid_fitting("execute_outer_fold")
     forbid_legacy_fitting("execute_outer_fold")
-    resolved = resolved_limits(conn, store, registration, plan, limits) if binding.get("schema_version") == "native_experiment_registration.v1.6" else execution_limits(limits)
+    resolved = resolved_limits(conn, store, registration, plan, limits) if binding.get("schema_version") in ("native_experiment_registration.v1.6", "native_experiment_registration.v1.7") else execution_limits(limits)
     append("start", started)
     inputs = _inputs(repository, binding, fold)
     manifest, inputs_id = publish_inputs(store, inputs)
@@ -200,7 +200,7 @@ def _execute_admitted(conn, store, repository, registration, plan, fold, selecti
         else:
             fits.append(pending.pop())
     source = {"manifest": manifest, "inputs_id": inputs_id, "store_root": str(store.root)}
-    if binding.get("schema_version") == "native_experiment_registration.v1.6":
+    if binding.get("schema_version") in ("native_experiment_registration.v1.6", "native_experiment_registration.v1.7"):
         resolved = resolved_limits(conn, store, registration, plan, limits)
     result = run_fitted_trial(source, fold, plan, execution, resolved, progress)
     succeeded = result.get("event") == "succeeded"

@@ -18,7 +18,7 @@ OMISSION_REASONS = frozenset({"skipped", "not_orats", "no_session", "no_price_wi
 
 def admit_fold_inputs(repository, binding, fold, *, history_failure, strict_json=False):
     """Load preflighted native inputs; the caller supplies its history-conflict envelope."""
-    if binding.get("schema_version") == "native_experiment_registration.v1.6":
+    if binding.get("schema_version") in ("native_experiment_registration.v1.6", "native_experiment_registration.v1.7"):
         from experiments.size_search_binding import fold_inputs
         return fold_inputs(repository, binding, fold)
     snapshot = from_document(SnapshotRef, binding["snapshot"])
