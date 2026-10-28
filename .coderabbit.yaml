@@ -71,7 +71,7 @@ reviews:
         stands, and any part of a pre-existing defect the PR makes worse
         or newly reachable.
 
-        Flag a code PR that changes more than ~400 non-test code lines or
+        Flag a code PR that changes more than ~300 non-test code lines (target ~150; PRs opened before 2026-10-28 keep ~400) or
         more than ~120 doc lines (tests and generated fixtures don't count).
         Flag a design PR (an ARCHITECTURE.md/design-doc change with no
         implementation) that exceeds ~300 doc lines, or whose description
