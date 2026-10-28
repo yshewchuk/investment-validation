@@ -544,3 +544,80 @@ def test_second_create_of_the_same_name_refuses_and_leaves_the_first_intact(prod
     with _reopen(prod, "same") as again:
         assert again.identity == identity_before
     assert not [p for p in prod.tmp.iterdir() if p.name.startswith(".creating-")]
+
+
+def test_workspace_scope_repository_binds_reads_to_the_pinned_snapshot(prod):
+    from engine.v2.ops.workspace.scope import size_scope_repository
+
+    before = _state(prod)
+    with _create(prod) as workspace:
+        view = size_scope_repository(workspace, "size-prep", clock=prod.clock)
+        pinned = view.resolve_pinned("size-prep")
+        assert (pinned.snapshot_id, pinned.manifest_hash) == (
+            prod.snap.snapshot_id, prod.snap.manifest_hash)
+        assert view.resolve(pinned.snapshot_id).snapshot_id == pinned.snapshot_id
+        with pytest.raises(OpsError) as caught:
+            view.resolve_pinned("other")
+        assert _details(caught) == ("WORKSPACE_REFUSED", "scope_mismatch")
+    assert _state(prod) == before
+
+
+def test_workspace_scope_repository_refuses_invalid_scope_before_workspace_access():
+    from engine.v2.ops.workspace.scope import size_scope_repository
+
+    class UnreadableWorkspace:
+        def source_snapshot(self):
+            raise AssertionError("invalid scope must be checked first")
+
+    for scope in ("", " size-prep", "x" * 101, "bad\x00scope"):
+        with pytest.raises(OpsError) as caught:
+            size_scope_repository(UnreadableWorkspace(), scope, clock=None)
+        assert _details(caught) == ("WORKSPACE_REFUSED", "scope_invalid")
+
+
+def test_workspace_scope_repository_refuses_changed_pin():
+    from engine.v2.ops.workspace.scope import size_scope_repository
+
+    original = SimpleNamespace(snapshot_id="snap_a", manifest_hash="hash_a")
+    changed = SimpleNamespace(snapshot_id="snap_b", manifest_hash="hash_b")
+
+    class ChangingWorkspace:
+        snapshot_id = "snap_a"
+        manifest_hash = "hash_a"
+
+        def __init__(self):
+            self.reads = 0
+
+        def source_snapshot(self):
+            self.reads += 1
+            return original if self.reads == 1 else changed
+
+        def record_read_pin(self, name, document, *, clock):
+            self.pin = (name, document)
+
+    workspace = ChangingWorkspace()
+    view = size_scope_repository(workspace, "size-prep", clock=object())
+    with pytest.raises(DataError) as caught:
+        view.resolve_pinned("size-prep")
+    assert caught.value.code == "SNAPSHOT_CLOSURE_BROKEN"
+    assert caught.value.details["reason"] == "pin_mismatch"
+
+
+def test_workspace_scope_repository_types_storage_failure():
+    from engine.v2.ops.workspace.scope import size_scope_repository
+
+    snapshot = SimpleNamespace(snapshot_id="snap_a", manifest_hash="hash_a")
+
+    class BrokenWorkspace:
+        snapshot_id = "snap_a"
+        manifest_hash = "hash_a"
+
+        def source_snapshot(self):
+            return snapshot
+
+        def record_read_pin(self, name, document, *, clock):
+            raise OSError("synthetic catalog failure")
+
+    with pytest.raises(OpsError) as caught:
+        size_scope_repository(BrokenWorkspace(), "size-prep", clock=object())
+    assert _details(caught) == ("WORKSPACE_REFUSED", "storage_failure")

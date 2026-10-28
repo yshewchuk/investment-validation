@@ -40,3 +40,33 @@ Create order: validate roots, open production read-only, verify the closure, the
 | execution root at or under a workspace | `execution_in_workspace` |
 
 At open or seal the closure may also refuse `closure_changed` (digest differs), `pin_mismatch` or `manifest_mismatch`. Progress goes to stderr (`[workspace]`, `[closure]`); no stdout.
+
+## SIZE workspace scope head
+
+`size_scope_repository(workspace, scope, *, clock)` adapts the workspace's
+snapshot-only source to the existing research contract that resolves a scope
+head. It publishes a `research_workspace_scope_head.v1.0` read pin in the
+workspace catalog and store, binding the exact scope name to the workspace's
+`snapshot_id` and `manifest_hash`. The binding identity hashes the schema
+version, scope, snapshot id and manifest hash. The returned repository view delegates reads to `workspace.source`;
+`resolve_pinned(scope)` returns `workspace.source_snapshot()` only for the
+bound scope. It never reads a production head or accepts a different snapshot.
+
+The local catalog does not contain production `data_snapshots`, so this is a
+workspace-local scope binding, not a native `data_snapshot_heads` row. No
+snapshot metadata or objects are copied. A standard package or library does
+not provide this repository-specific pin contract; the adapter reuses the
+existing `ResearchWorkspace.record_read_pin`, `SnapshotOnlyRepository` and
+`SnapshotRef` behavior.
+
+| Failure | Outcome |
+|---|---|
+| Scope is empty, malformed or over 100 characters | `WORKSPACE_REFUSED`, `scope_invalid`; no read pin is written. |
+| Workspace pin no longer resolves to its recorded snapshot and manifest | `SNAPSHOT_CLOSURE_BROKEN`, preserving the existing reason; no fallback. |
+| A different scope is resolved through the returned view | `WORKSPACE_REFUSED`, `scope_mismatch`. |
+| Read-pin publication or catalog storage fails | Existing typed workspace storage refusal propagates; an unreferenced complete CAS object may remain. |
+
+R1–R6 follow the workspace failure contract: stable typed refusal; no partial
+result; no repair or retry; stale scope fails closed; production remains
+read-only and the read pin writes only inside the workspace; unknown states
+refuse. Existing workspaces and native catalog heads are unchanged.
