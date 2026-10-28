@@ -8,6 +8,7 @@ import pytest
 from checks import phase4_real, phase5_phase4_replay
 from engine.v2 import foundation
 from engine.v2.models import deployment, loader, serving_fold_loader
+from engine.v2.models.serving_folds import ChooserServingFoldDescriptor, ServingFoldDescriptor
 
 
 @pytest.mark.parametrize(
@@ -112,30 +113,61 @@ def test_replay_pool_values_must_match_staged_fold_estimators(monkeypatch, tmp_p
         provenance[output] = {
             "training_cutoff": "2026-09-30", "fold_start": "2026-10-01",
             "descriptor_hash": digest}
-        rows.append({"member_id": f"tier4_folds:{output}", "objects": [
-            {"serving_fold": {"descriptor_hash": digest}}]})
+        rows.append({"member_id": f"tier4_folds:{'implied_t1' if index == 0 else 'runup_move'}",
+                     "objects": [{"serving_fold": {"descriptor_hash": digest}}]})
         pools[output] = {
-            "predictions": np.array([99.0, 99.0]),
-            "residuals": refs[output].pool_res,
+            "predictions": refs[output].pool_pred.copy(),
+            "residuals": refs[output].pool_res.copy(),
             "interval_floor": 0.25}
-    monkeypatch.setattr(foundation, "from_document",
-                        lambda _kind, doc: descriptors[doc["descriptor_hash"]])
+
+    size_descriptor = SimpleNamespace(
+        descriptor_hash="size", parent_release_id="parent",
+        estimator=SimpleNamespace(content_hash="hash:size"),
+        policy=SimpleNamespace(interval_floor=0.4))
+    size_ref = SimpleNamespace(
+        pool_pred=np.array([10.0, 11.0]), pool_res=np.array([12.0, 13.0]))
+    descriptors["size"] = size_descriptor
+    rows.append({"member_id": "tier4_folds:size", "objects": [
+        {"serving_fold": {"descriptor_hash": "size"},
+         "content_hash": "hash:size"}]})
+    pools["pred_abs_move"] = {
+        "predictions": size_ref.pool_pred.copy(),
+        "residuals": size_ref.pool_res.copy(),
+        "interval_floor": 0.4}
+
+    def decode(kind, doc):
+        descriptor = descriptors[doc["descriptor_hash"]]
+        if kind is ChooserServingFoldDescriptor and descriptor is size_descriptor:
+            raise ValueError("size fold must not be parsed as chooser fold")
+        if kind is ServingFoldDescriptor and descriptor is not size_descriptor:
+            raise ValueError("chooser fold must not be parsed as size fold")
+        return descriptor
+
+    monkeypatch.setattr(foundation, "from_document", decode)
     monkeypatch.setattr(phase5_phase4_replay, "deployment_root", lambda root: root)
     monkeypatch.setattr(deployment, "read_manifest", lambda _root, _release: object())
     monkeypatch.setattr(loader, "FrozenInference", lambda _root: object())
+    monkeypatch.setattr(serving_fold_loader, "validate_serving_fold_object", lambda *_args: None)
+    monkeypatch.setattr(serving_fold_loader, "load_serving_fold",
+                        lambda *_args, **_kwargs: size_ref)
     monkeypatch.setattr(
         serving_fold_loader, "load_chooser_serving_fold",
         lambda _inference, descriptor, **_kwargs: refs[descriptor.producer_output])
     chooser = SimpleNamespace(
-        recipe={"fold_provenance": provenance}, fold_pools=pools)
-    manifest = {"members": rows}
+        recipe={"fold_provenance": provenance,
+                "artifact_refs": ["hash:size", *(f"hash:{output}" for output in outputs)]},
+        fold_pools=pools)
+    manifest = {"manifest_hash": "sha256:catalog", "members": rows}
 
+    pools["pred_abs_move"]["predictions"] = np.array([99.0, 99.0])
     assert phase5_phase4_replay._staged_chooser_pools(
         chooser, tmp_path, manifest) is None
-    for output, ref in refs.items():
-        pools[output]["predictions"] = ref.pool_pred.copy()
+
+    pools["pred_abs_move"]["predictions"] = size_ref.pool_pred.copy()
     verified = phase5_phase4_replay._staged_chooser_pools(
         chooser, tmp_path, manifest)
     assert verified is not None
     for output, ref in refs.items():
         assert np.array_equal(verified[output]["predictions"], ref.pool_pred)
+    assert np.array_equal(verified["pred_abs_move"]["predictions"], size_ref.pool_pred)
+    assert np.array_equal(verified["pred_abs_move"]["residuals"], size_ref.pool_res)

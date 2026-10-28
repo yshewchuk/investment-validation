@@ -209,30 +209,93 @@ def _staged_chooser_pools(chooser, release_root: Path, manifest):
     from numpy import array_equal, asarray
     from engine.v2.foundation import from_document
     from engine.v2.models import deployment
-    from engine.v2.models.serving_fold_loader import load_chooser_serving_fold
-    from engine.v2.models.serving_folds import ChooserServingFoldDescriptor
+    from engine.v2.models.serving_fold_loader import (
+        load_chooser_serving_fold, load_serving_fold, validate_serving_fold_object,
+    )
+    from engine.v2.models.serving_folds import (
+        ChooserServingFoldDescriptor, ServingFoldDescriptor,
+    )
     from engine.v2.models.loader import FrozenInference
 
+    members = manifest.get("members")
+    if not isinstance(members, (list, tuple)):
+        return None
     docs = {}
+    size_docs = []
     try:
-        for row in manifest.get("members", ()):
-            if not isinstance(row, Mapping) or not str(row.get("member_id", "")).startswith("tier4_folds:"):
+        for row in members:
+            if not isinstance(row, Mapping):
                 continue
-            for obj in row.get("objects", ()):
-                doc = obj.get("serving_fold") if isinstance(obj, Mapping) else None
-                if isinstance(doc, Mapping):
-                    descriptor = from_document(ChooserServingFoldDescriptor, doc)
-                    if descriptor.descriptor_hash in docs:
-                        return None
-                    docs[descriptor.descriptor_hash] = descriptor
+            member_id = row.get("member_id")
+            objects = row.get("objects", ())
+            if not isinstance(objects, (list, tuple)):
+                return None
+            if member_id in {"tier4_folds:implied_t1", "tier4_folds:runup_move"}:
+                for obj in objects:
+                    doc = obj.get("serving_fold") if isinstance(obj, Mapping) else None
+                    if isinstance(doc, Mapping):
+                        descriptor = from_document(ChooserServingFoldDescriptor, doc)
+                        if descriptor.descriptor_hash in docs:
+                            return None
+                        docs[descriptor.descriptor_hash] = descriptor
+            elif member_id == "tier4_folds:size":
+                for obj in objects:
+                    doc = obj.get("serving_fold") if isinstance(obj, Mapping) else None
+                    if isinstance(doc, Mapping):
+                        descriptor = from_document(ServingFoldDescriptor, doc)
+                        size_docs.append((obj, descriptor))
     except (OSError, ValueError, TypeError, KeyError, AttributeError, OverflowError):
         return None
-    recipe_provenance = getattr(chooser, "recipe", {}).get("fold_provenance", {})
+
+    recipe = getattr(chooser, "recipe", None)
+    artifact_refs = recipe.get("artifact_refs") if isinstance(recipe, Mapping) else None
+    if (not isinstance(artifact_refs, (list, tuple))
+            or any(not isinstance(ref, str) for ref in artifact_refs)):
+        return None
+    size_matches = [(obj, descriptor) for obj, descriptor in size_docs
+                    if descriptor.estimator.content_hash in artifact_refs]
+    if len(size_matches) != 1:
+        return None
+    size_obj, size_descriptor = size_matches[0]
+    try:
+        validate_serving_fold_object(size_obj, size_descriptor)
+    except (OSError, ValueError, TypeError, KeyError, AttributeError, OverflowError):
+        return None
+
+    recipe_provenance = recipe.get("fold_provenance", {})
     fold_pools = getattr(chooser, "fold_pools", None)
     if not isinstance(fold_pools, Mapping):
         return None
+    catalog_hash = manifest.get("manifest_hash")
+    if not isinstance(catalog_hash, str):
+        return None
     root = deployment_root(release_root)
     verified = dict(fold_pools)
+    try:
+        parent = deployment.read_manifest(root, size_descriptor.parent_release_id)
+        if parent is None:
+            return None
+        size_ref = load_serving_fold(
+            FrozenInference(root), size_descriptor,
+            verified_parent_manifest=parent, catalog_hash=catalog_hash)
+    except (OSError, ValueError, TypeError, KeyError, AttributeError, OverflowError):
+        return None
+    expected_size = {
+        "predictions": size_ref.pool_pred, "residuals": size_ref.pool_res,
+        "interval_floor": size_descriptor.policy.interval_floor,
+    }
+    actual_size = fold_pools.get("pred_abs_move")
+    if (not isinstance(actual_size, Mapping) or set(actual_size) != set(expected_size)
+            or actual_size.get("interval_floor") != expected_size["interval_floor"]):
+        return None
+    try:
+        if (not array_equal(asarray(actual_size["predictions"]), asarray(expected_size["predictions"]))
+                or not array_equal(asarray(actual_size["residuals"]), asarray(expected_size["residuals"]))):
+            return None
+    except (TypeError, ValueError, KeyError):
+        return None
+    verified["pred_abs_move"] = expected_size
+
     for output in ("pred_im_t1_d14", "pred_runup_abs_move_d14"):
         item = recipe_provenance.get(output) if isinstance(recipe_provenance, Mapping) else None
         descriptor = docs.get(item.get("descriptor_hash")) if isinstance(item, Mapping) else None
