@@ -290,7 +290,9 @@ def generate_bounds(write_root, *, source_root, manifest, scope, as_of, producti
         candidate = report["result"].get("candidate_snapshot_id")
         bounds = candidate or source
         if candidate is None:
-            parent = Repository(conn, ArtifactStore(root)).resolve_full(source)
+            parent = Repository(
+                conn, ArtifactStore(root), pin_snapshots=True
+            ).resolve_full(source)
             if TABLE not in parent.table_manifests:
                 raise fail("PUBLICATION_REFUSED", "the refresh committed nothing and the head carries no source bounds")
     finally:
