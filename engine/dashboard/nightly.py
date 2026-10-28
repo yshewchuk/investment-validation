@@ -1577,7 +1577,7 @@ def run_nightly(
             refetch_token = f"legacy-nightly-{time.time_ns()}"
             result = refresh_gspc_daily(
                 fetcher, paths.GSPC_DAILY, refetch_token=refetch_token,
-                minimum_last_date=expected,
+                minimum_last_date=expected, session=expected,
             )
             _log_rss("gspc refresh end")
             report.mark("gspc_refresh", started=started)
