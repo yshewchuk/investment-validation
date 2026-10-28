@@ -13,6 +13,7 @@ Failure semantics: every defect raises ``SNAPSHOT_CLOSURE_BROKEN`` whose ``detai
 names it; nothing is repaired, skipped or retried. Raw receipts and normalizations behind
 ``daily_market`` revisions are outside this closure: a snapshot reader scans fragments only.
 Progress goes to stderr at a bounded cadence; the result is a value, never stdout.
+Coverage and capture rows are capped at 2,000,000 each (`closure_rows_over_cap`); the object and fragment set is the snapshot itself, read by the same `Repository.resolve_full` the nightly uses.
 """
 from __future__ import annotations
 
@@ -30,6 +31,7 @@ __all__ = ["SNAPSHOT_CLOSURE_SCHEMA", "SnapshotClosure", "verify_snapshot_closur
 
 SNAPSHOT_CLOSURE_SCHEMA = "snapshot_closure.v1.0"
 _MAX_CHAIN = 100_000
+_MAX_ROWS = 2_000_000
 _PROGRESS_SECONDS = 30.0
 
 
@@ -124,7 +126,9 @@ def _coverage_rows(conn, snapshot_id: str) -> list:
     rows = conn.execute(
         "SELECT * FROM data_snapshot_coverage WHERE snapshot_id = ? "
         "ORDER BY table_name, coverage_id",
-        (snapshot_id,)).fetchall()
+        (snapshot_id,)).fetchmany(_MAX_ROWS + 1)
+    if len(rows) > _MAX_ROWS:
+        raise _broken("closure_rows_over_cap", table="data_snapshot_coverage")
     for receipt_id in sorted({row["import_receipt_id"] for row in rows}):
         if not _committed(conn, receipt_id):
             raise _broken("coverage_receipt_missing", receipt_id=receipt_id)
@@ -134,9 +138,11 @@ def _coverage_rows(conn, snapshot_id: str) -> list:
 def _capture_rows(conn, receipt_ids) -> list:
     rows: list = []
     for receipt_id in receipt_ids:
-        rows += [list(row) for row in conn.execute(
-            "SELECT * FROM data_price_captures "
-            "WHERE receipt_id = ? ORDER BY capture_id", (receipt_id,))]
+        cursor = conn.execute("SELECT * FROM data_price_captures "
+                              "WHERE receipt_id = ? ORDER BY capture_id", (receipt_id,))
+        rows += [list(row) for row in cursor.fetchmany(_MAX_ROWS + 1 - len(rows))]
+        if len(rows) > _MAX_ROWS:
+            raise _broken("closure_rows_over_cap", table="data_price_captures")
     return rows
 
 
