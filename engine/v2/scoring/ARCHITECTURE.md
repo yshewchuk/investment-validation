@@ -197,11 +197,13 @@ rows; missing required state refuses that member row with typed
 Missing, ambiguous or unusable exact-cutoff chooser state refuses only that
 member row as `MODEL_NOT_READY`; missing champion features remain the separate
 advisory `CHOOSER_MISSING_FEATURES` outcome.
-Chooser producer folds are eligible only when their declared `fold_start` is
-strictly before the decision session; a same-day or later fold refuses the
-member row as `MODEL_NOT_READY`, including when a fold is cached. This guard
-does not establish source finality or causal training bounds for the producer
-data; the fold provenance contract remains follow-up work.
+Chooser producer folds require a canonical `training_cutoff` in both the
+descriptor and hash-verified estimator metadata, strictly before the decision
+session. Missing, malformed, mismatched, same-day or later cutoffs refuse the
+member row as `MODEL_NOT_READY` before cache lookup, and the cache key includes
+the decision day. Legacy artifacts without this field are not consumed. The
+hashes bind the declaration but do not prove source finality or training
+membership; producer provenance remains follow-up work.
 
 `application.score_event` requires the complete ordered `DYNAMIC_MENU`, scores
 its members and resolves DYN-SV over finite simulation-bearing candidates:

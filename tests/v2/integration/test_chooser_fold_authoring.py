@@ -313,6 +313,7 @@ def _assert_published_descriptor(root, role, cache, *, release_id="r1", clock="e
         expected["policy"].update(schema_version="size_fold_policy.v1.0", interval_policy="size-heldout-deciles.v1")
         del expected["policy"]["role"]
     else:
+        expected["training_cutoff"] = None
         expected["producer_output"] = OUTPUTS[role][1]
     assert obj["serving_fold"] == expected
     descriptor = from_document(descriptor_type, obj["serving_fold"])
@@ -699,6 +700,7 @@ def test_empty_and_thin_pools_keep_explicit_counts(role, count):
     expected = {"fold_start": "2026-02-01", "decision_clock_id": "entry-close",
                 "digest": hashlib.sha256(data).hexdigest(), "pool_count": count,
                 "policy": policy, "release": release}
+    expected["training_cutoff"] = None
     assert vars(validated) == expected
     assert {field.name for field in dataclasses.fields(validated)} == set(expected)
     with pytest.raises(dataclasses.FrozenInstanceError):

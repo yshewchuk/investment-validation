@@ -294,9 +294,26 @@ def _chooser_day(value: Any) -> str:
         raise ModelNotReady("chooser state", "chooser state is missing or unusable") from None
 
 
+def _require_causal_chooser_cutoff(
+    descriptor: ChooserServingFoldDescriptor, decision_cutoff: str,
+) -> None:
+    training_cutoff = getattr(descriptor, "training_cutoff", None)
+    if not isinstance(training_cutoff, str):
+        raise ModelNotReady("chooser state", "chooser state is missing or unusable") from None
+    try:
+        parsed_training = date.fromisoformat(training_cutoff)
+        parsed_decision = date.fromisoformat(decision_cutoff)
+    except (TypeError, ValueError, OverflowError):
+        raise ModelNotReady("chooser state", "chooser state is missing or unusable") from None
+    if parsed_training.isoformat() != training_cutoff:
+        raise ModelNotReady("chooser state", "chooser state is missing or unusable") from None
+    if parsed_training >= parsed_decision:
+        raise ModelNotReady("chooser state", "chooser state is missing or unusable") from None
+
+
 def _chooser_fold_descriptor(
     binding: ScoringReleaseBinding, catalog: Mapping[str, Any],
-    role: str, fold_start: str,
+    role: str, fold_start: str, decision_cutoff: str,
 ) -> ChooserServingFoldDescriptor:
     members = catalog.get("members")
     if not isinstance(members, list):
@@ -318,12 +335,14 @@ def _chooser_fold_descriptor(
             matches.append(descriptor)
     if len(matches) != 1:
         raise ValueError("chooser fold for cutoff missing or ambiguous")
-    return from_document(ChooserServingFoldDescriptor, matches[0])
+    descriptor = from_document(ChooserServingFoldDescriptor, matches[0])
+    _require_causal_chooser_cutoff(descriptor, decision_cutoff)
+    return descriptor
 
 
 def _load_chooser_fold_state(
     binding: ScoringReleaseBinding, event_date: Any, as_of: Any,
-    fold_start: str,
+    fold_start: str, decision_cutoff: str,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     size = select_gate_forecast_source(binding, event_date, as_of)
     pools = {"pred_abs_move": {
@@ -337,7 +356,7 @@ def _load_chooser_fold_state(
         raise ValueError("chooser fold catalog missing")
     catalog = json.loads(catalog_text)
     for role in ("implied_t1", "runup_move"):
-        descriptor = _chooser_fold_descriptor(binding, catalog, role, fold_start)
+        descriptor = _chooser_fold_descriptor(binding, catalog, role, fold_start, decision_cutoff)
         ref = load_chooser_serving_fold(
             binding.frozen_inference, descriptor,
             verified_parent_manifest=parent, verified_catalog=catalog)
@@ -370,14 +389,12 @@ def select_chooser_state(
     except (TypeError, ValueError, OverflowError):
         raise ModelNotReady("chooser state", "chooser state is missing or unusable") from None
     fold_start = min(event_month, decision_month).isoformat()
-    if date.fromisoformat(fold_start) >= date.fromisoformat(cutoff):
-        raise ModelNotReady("chooser state", "chooser state is missing or unusable")
-    cache_key = (id(binding), f"chooser:{fold_start}")
+    cache_key = (id(binding), f"chooser:{fold_start}:{cutoff}")
     fold_state = None if fold_cache is None else fold_cache.get(cache_key)
     if fold_state is None:
         try:
             fold_state = _load_chooser_fold_state(
-                binding, event_date, as_of, fold_start)
+                binding, event_date, as_of, fold_start, cutoff)
         except ModelNotReady:
             raise
         except (OSError, ValueError, TypeError, KeyError, AttributeError, OverflowError):

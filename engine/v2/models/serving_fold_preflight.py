@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
+from datetime import date
 
 from engine.v2.foundation import from_document, to_document
 from engine.v2.models import ArtifactMember, ModelRelease
@@ -52,6 +53,7 @@ class ValidatedChooserFold:
     pool_count: int
     policy: ChooserFoldPolicy
     release: ModelRelease
+    training_cutoff: str | None = None
 
 
 def preflight_size_fold(data: bytes, name: str, policy: SizeFoldPolicy,
@@ -93,10 +95,26 @@ def _preflight_fold(data, name, policy, release, *, role, output, interval_polic
     if name != f"{policy.model_id}_{fold:%Y%m}_{policy.panel_sha256[:12]}.joblib":
         raise ValueError("serving fold filename disagrees with header")
     pools = held_out_pools(stored)
+    extra = {}
+    if result_type is ValidatedChooserFold:
+        training_cutoff = stored.get("training_cutoff")
+        if training_cutoff is not None:
+            if isinstance(training_cutoff, str):
+                try:
+                    parsed_cutoff = date.fromisoformat(training_cutoff)
+                    valid_cutoff = (parsed_cutoff.isoformat() == training_cutoff
+                                    and parsed_cutoff < fold)
+                except (TypeError, ValueError):
+                    valid_cutoff = False
+            else:
+                valid_cutoff = False
+            if not valid_cutoff:
+                raise ValueError("invalid chooser training cutoff")
+        extra["training_cutoff"] = training_cutoff
     return result_type(fold_start=fold.isoformat(),
                        decision_clock_id=binding.decision_clock_id,
                        digest=hashlib.sha256(data).hexdigest(), pool_count=len(pools[0]),
-                       policy=policy, release=release)
+                       policy=policy, release=release, **extra)
 
 
 def _descriptor_from_validated(validated: ValidatedSizeFold | ValidatedChooserFold,
@@ -107,7 +125,8 @@ def _descriptor_from_validated(validated: ValidatedSizeFold | ValidatedChooserFo
     descriptor, extra = ServingFoldDescriptor, {}
     if isinstance(validated, ValidatedChooserFold):
         output, column = chooser_fold_outputs(validated.policy.role)
-        descriptor, extra = ChooserServingFoldDescriptor, {"output_name": output, "producer_output": column}
+        descriptor, extra = ChooserServingFoldDescriptor, {"output_name": output, "producer_output": column,
+                                                           "training_cutoff": validated.training_cutoff}
     return descriptor(
         parent_release_id=manifest.release.release_id, parent_release_hash=manifest.release_hash,
         policy=validated.policy, fold_start=validated.fold_start,

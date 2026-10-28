@@ -99,6 +99,9 @@ def _pools(metadata, descriptor):
             or len(metadata.pool_pred) != descriptor.pool_count
             or len(metadata.pool_res) != descriptor.pool_count):
         raise ServingFoldError()
+    if (isinstance(descriptor, ChooserServingFoldDescriptor)
+            and metadata.training_cutoff != descriptor.training_cutoff):
+        raise ServingFoldError()
     return metadata.pool_pred, metadata.pool_res
 
 

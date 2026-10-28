@@ -47,17 +47,69 @@ def test_chooser_selector_rejects_malformed_as_of_with_populated_cache(bad_as_of
             binding, "2026-10-27", bad_as_of, fold_cache=cache)
 
 
-def test_chooser_selector_refuses_fold_starting_on_decision_session_before_cache():
-    binding = SimpleNamespace(
-        chooser_analog_artifacts=(SimpleNamespace(cutoff="2026-10-01"),),
-        chooser_admissible_artifacts=(
-            SimpleNamespace(key=(N_ADMISSIBLE_TABLE_ID, "v1")),
-        ),
-    )
-    cache = {(id(binding), "chooser:2026-10-01"): object()}
+@pytest.mark.parametrize(
+    "training_cutoff", [None, "2026-10-27", "2026-10-28", "2026-27-10"])
+def test_chooser_fold_descriptor_refuses_missing_or_noncausal_training_cutoff(
+        monkeypatch, training_cutoff):
+    serving_fold = {
+        "policy": {"role": "implied_t1"}, "fold_start": "2026-09-01",
+    }
+    if training_cutoff is not None:
+        serving_fold["training_cutoff"] = training_cutoff
+    catalog = {"members": [
+        {"member_id": "tier4_folds:implied_t1", "status": "STAGED",
+         "objects": [{"serving_fold": serving_fold}]}
+    ]}
+    monkeypatch.setattr(
+        release_bindings, "from_document",
+        lambda cls, doc: SimpleNamespace(training_cutoff=doc.get("training_cutoff")))
     with pytest.raises(ModelNotReady):
-        select_chooser_state(
-            binding, "2026-10-01", "2026-10-01", fold_cache=cache)
+        release_bindings._chooser_fold_descriptor(
+            object(), catalog, "implied_t1", "2026-09-01", "2026-10-27")
+
+
+def test_chooser_fold_metadata_cutoff_must_equal_descriptor_cutoff():
+    from engine.v2.models import ArtifactMember
+    from engine.v2.models.serving_folds import (
+        ChooserFoldPolicy,
+        ChooserServingFoldDescriptor,
+    )
+    from engine.v2.models.serving_fold_loader import ServingFoldError, _pools
+
+    policy = ChooserFoldPolicy(
+        role="implied_t1",
+        model_id="m",
+        feature_order=("x",),
+        panel_sha256="a" * 64,
+        interval_floor=None,
+    )
+    descriptor = ChooserServingFoldDescriptor(
+        parent_release_id="r",
+        parent_release_hash="sha256:" + "b" * 64,
+        policy=policy,
+        fold_start="2026-09-01",
+        training_cutoff="2026-09-15",
+        decision_clock_id="clock",
+        estimator=ArtifactMember(
+            name="estimator",
+            content_hash="sha256:" + "c" * 64,
+            path="objects/" + "c" * 64,
+        ),
+        pool_count=1,
+        output_name="driver_prediction",
+        producer_output="pred_im_t1_d14",
+    )
+    metadata = SimpleNamespace(
+        model_id="m",
+        fold_start="2026-09-01",
+        panel_sha256="a" * 64,
+        feature_order=("x",),
+        pool_pred=(1.0,),
+        pool_res=(0.0,),
+        training_cutoff=None,
+    )
+    with pytest.raises(ServingFoldError):
+        _pools(metadata, descriptor)
 
 
 def test_missing_chooser_state_becomes_typed_member_refusal():
@@ -75,7 +127,8 @@ def test_chooser_selector_selects_folds_and_caches(monkeypatch):
     catalog = {"members": [
         {"member_id": f"tier4_folds:{role}", "status": "STAGED",
          "objects": [{"serving_fold": {
-             "policy": {"role": role}, "fold_start": "2026-09-01"}}]}
+             "policy": {"role": role}, "fold_start": "2026-09-01",
+             "training_cutoff": "2026-09-15"}}]}
         for role in roles
     ]}
     binding = SimpleNamespace(
@@ -99,7 +152,8 @@ def test_chooser_selector_selects_folds_and_caches(monkeypatch):
         role = doc["policy"]["role"]
         return SimpleNamespace(
             policy=SimpleNamespace(role=role, interval_floor=0.2),
-            fold_start=doc["fold_start"], producer_output=roles[role])
+            fold_start=doc["fold_start"], producer_output=roles[role],
+            training_cutoff=doc.get("training_cutoff"))
 
     monkeypatch.setattr(release_bindings, "from_document", fake_from_document)
     loader_calls = []
