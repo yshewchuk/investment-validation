@@ -199,9 +199,13 @@ member row as `MODEL_NOT_READY`; missing champion features remain the separate
 advisory `CHOOSER_MISSING_FEATURES` outcome.
 Chooser producer folds require a canonical `training_cutoff` in both the
 descriptor and hash-verified estimator metadata, strictly before the decision
-session. Missing, malformed, mismatched, same-day or later cutoffs refuse the
-member row as `MODEL_NOT_READY`; the cache key includes the decision day and
-only entries produced by the validated fold loader are reusable. Selector dates
+session and strictly before the selected held-out fold start. Missing,
+malformed, mismatched, same-day or later cutoffs refuse the member row as
+`MODEL_NOT_READY`; the cache key includes the decision day and only entries
+produced by the validated fold loader are reusable. Request artifact refs also
+bind the selected size estimator and each producer's full chooser policy,
+including its `interval_floor`, because both contribute to chooser inputs.
+Selector dates
 must be canonical ISO dates or timezone-naive datetimes; timezone-aware or
 noncanonical values refuse as `MODEL_NOT_READY`. Legacy artifacts without this field are not consumed. The
 hashes bind the declaration but do not prove source finality or training

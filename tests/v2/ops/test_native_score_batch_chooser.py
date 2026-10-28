@@ -64,7 +64,7 @@ def test_chooser_selector_rejects_noncanonical_as_of(bad_as_of):
 
 
 @pytest.mark.parametrize(
-    "training_cutoff", [None, "2026-10-27", "2026-10-28", "2026-27-10"])
+    "training_cutoff", [None, "2026-10-27", "2026-10-28", "2026-27-10", "2026-09-01"])
 def test_chooser_fold_descriptor_refuses_missing_or_noncausal_training_cutoff(
         monkeypatch, training_cutoff):
     serving_fold = {
@@ -144,7 +144,7 @@ def test_chooser_selector_selects_folds_and_caches(monkeypatch):
         {"member_id": f"tier4_folds:{role}", "status": "STAGED",
          "objects": [{"serving_fold": {
              "policy": {"role": role}, "fold_start": "2026-09-01",
-             "training_cutoff": "2026-09-15"}}]}
+             "training_cutoff": "2026-08-31"}}]}
         for role in roles
     ]}
     binding = SimpleNamespace(
@@ -161,7 +161,12 @@ def test_chooser_selector_selects_folds_and_caches(monkeypatch):
     monkeypatch.setattr(
         release_bindings, "select_gate_forecast_source",
         lambda binding, event_date, as_of: SimpleNamespace(
-            pool_pred="size-pred", pool_res="size-res", interval_floor=0.1),
+            pool_pred="size-pred", pool_res="size-res", interval_floor=0.1,
+            artifact_hash="size-hash"),
+    )
+    monkeypatch.setattr(
+        release_bindings, "content_hash",
+        lambda policy: f"policy:{policy.role}",
     )
 
     def fake_from_document(cls, doc):
@@ -202,6 +207,8 @@ def test_chooser_selector_selects_folds_and_caches(monkeypatch):
         "interval_floor": 0.2}
     assert state.producer_bindings["pred_im_t1_d14"].binding_id == "fold:implied_t1"
     assert state.producer_bindings["pred_runup_abs_move_d14"].binding_id == "fold:runup_move"
+    assert state.artifact_refs == (
+        "size-hash", "policy:implied_t1", "policy:runup_move")
     assert loader_calls == ["implied_t1", "runup_move"]
 
     release_bindings.select_chooser_state(
@@ -228,6 +235,7 @@ def test_chooser_bundle_wires_producer_bindings_and_pools(monkeypatch):
         admissible_table=SimpleNamespace(
             table_id=N_ADMISSIBLE_TABLE_ID, version="v1", content_hash="h-t"),
         fold_pools={"fold": "pools"},
+        artifact_refs=("size-hash", "policy-implied", "policy-runup"),
     )
     monkeypatch.setattr(
         native_score_batch, "select_chooser_state",
@@ -270,6 +278,8 @@ def test_chooser_bundle_wires_producer_bindings_and_pools(monkeypatch):
         "pool_id": "analog", "cutoff": "2026-10-27", "content_hash": "h-a"}
     assert result.chooser_recipe["admissible_table"] == {
         "table_id": N_ADMISSIBLE_TABLE_ID, "version": "v1", "content_hash": "h-t"}
+    assert result.chooser_recipe["artifact_refs"] == [
+        "size-hash", "policy-implied", "policy-runup"]
     assert result.model_release.bindings == (existing, implied, runup)
     assert result.chooser_fold_pools == {"fold": "pools"}
     assert result.chooser_analog_pool.pool_id == "analog"
@@ -296,6 +306,8 @@ def test_score_artifact_refs_includes_chooser_artifacts():
         },
         "analog_pool": {"content_hash": "analog-hash"},
         "admissible_table": {"content_hash": "table-hash"},
+        "artifact_refs": [
+            "size-hash", "implied-policy-hash", "runup-policy-hash"],
     }
     bundle = SimpleNamespace(
         gate_forecast_source=None,
@@ -304,5 +316,7 @@ def test_score_artifact_refs_includes_chooser_artifacts():
     )
     refs = native_score_batch._score_artifact_refs((), None, bundle)
     assert set(refs) == {
-        "chooser-hash", "implied-hash", "runup-hash", "analog-hash", "table-hash"}
-    assert len(refs) == 5
+        "chooser-hash", "implied-hash", "runup-hash", "analog-hash",
+        "table-hash", "size-hash", "implied-policy-hash",
+        "runup-policy-hash"}
+    assert len(refs) == 8

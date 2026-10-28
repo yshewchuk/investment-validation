@@ -685,6 +685,20 @@ def _gate_source_or_refusal(
     return source
 
 
+def _declared_chooser_artifact_refs(recipe: Mapping) -> list[str]:
+    refs: list[str] = []
+    for key in ("analog_pool", "admissible_table"):
+        entry = recipe.get(key)
+        if isinstance(entry, Mapping):
+            content_hash = entry.get("content_hash")
+            if isinstance(content_hash, str):
+                refs.append(content_hash)
+    artifact_refs = recipe.get("artifact_refs")
+    if isinstance(artifact_refs, (list, tuple)):
+        refs.extend(ref for ref in artifact_refs if isinstance(ref, str))
+    return refs
+
+
 def _chooser_artifact_refs(bundle) -> tuple[str, ...]:
     recipe = getattr(bundle, "chooser_recipe", None)
     refs: list[str] = []
@@ -705,12 +719,7 @@ def _chooser_artifact_refs(bundle) -> tuple[str, ...]:
                 for member in binding.members:
                     if member.name == "estimator":
                         refs.append(member.content_hash)
-        for key in ("analog_pool", "admissible_table"):
-            entry = recipe.get(key)
-            if isinstance(entry, Mapping):
-                content_hash = entry.get("content_hash")
-                if isinstance(content_hash, str):
-                    refs.append(content_hash)
+        refs.extend(_declared_chooser_artifact_refs(recipe))
     return tuple(refs)
 
 
@@ -781,6 +790,7 @@ def _chooser_bundle_or_refusal(
         model_release = replace(bundle.model_release, bindings=tuple(bindings))
         return replace(bundle, chooser_recipe={
             "binding_id": chooser.binding_id,
+            "artifact_refs": list(state.artifact_refs),
             "producers": {
                 "pred_im_t1_d14": {"binding_id": implied.binding_id},
                 "pred_runup_abs_move_d14": {"binding_id": runup.binding_id},
