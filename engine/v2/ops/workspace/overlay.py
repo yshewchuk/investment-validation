@@ -143,8 +143,9 @@ class SnapshotOnlyRepository(Repository):
     def explain_dependencies(self, query, *, table_name=None, snapshot_ref=None):
         if snapshot_ref is not None:
             self._check_ref(snapshot_ref)
-        else:
-            self._check(getattr(query, "snapshot_id", None))
+        query_snapshot = getattr(query, "snapshot_id", None)
+        if snapshot_ref is None or query_snapshot is not None:
+            self._check(query_snapshot)
         return super().explain_dependencies(query, table_name=table_name, snapshot_ref=snapshot_ref)
 
     def scan_population_bound(self, snapshot_id, **kwargs):

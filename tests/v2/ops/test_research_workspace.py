@@ -282,6 +282,8 @@ def test_foreign_snapshot_refs_and_queries_are_refused_on_the_source_view(prod):
                  lambda: ws.source.get_price_series(None, foreign),
                  lambda: ws.source.get_close("AAA", "2024-01-02", "2024-01-03", foreign),
                  lambda: ws.source.explain_dependencies(None, snapshot_ref=foreign),
+                 lambda: ws.source.explain_dependencies(SimpleNamespace(snapshot_id="snap_foreign"),
+                                                        snapshot_ref=ws.source_snapshot()),
                  lambda: ws.source.scan(SimpleNamespace(snapshot_id="snap_foreign"),
                                         table_name="securities"),
                  lambda: ws.source.scan_population_bound("snap_foreign", table_name="securities"))
@@ -324,3 +326,66 @@ def test_closure_byte_and_row_caps_refuse_with_typed_reasons(prod, monkeypatch):
         _create(prod, "rows")
     assert _details(caught) == ("SNAPSHOT_CLOSURE_BROKEN", "closure_rows_over_cap")
     assert not (prod.tmp / "bytes").exists() and not (prod.tmp / "rows").exists()
+
+
+def _receipt_id(prod):
+    conn = sqlite3.connect(prod.catalog)
+    try:
+        row = conn.execute("SELECT receipt_id FROM data_import_receipts "
+                           "WHERE result_snapshot_id = ?",
+                           (prod.snap.snapshot_id,)).fetchone()
+    finally:
+        conn.close()
+    assert row is not None
+    return row[0]
+
+
+def test_lineage_base_uncommitted_refuses(prod):
+    _rewrite_without_triggers(
+        prod, "data_receipt_lineage",
+        "INSERT INTO data_receipt_lineage (receipt_id, base_receipt_id, kind) "
+        "VALUES (?, ?, ?)",
+        (_receipt_id(prod), "no-such-receipt", "price_history_capture"))
+    with pytest.raises(DataError) as caught:
+        _create(prod)
+    assert _details(caught) == ("SNAPSHOT_CLOSURE_BROKEN", "lineage_receipt_missing")
+
+
+def test_lineage_cycle_refuses(prod):
+    receipt = _receipt_id(prod)
+    _rewrite_without_triggers(
+        prod, "data_receipt_lineage",
+        "INSERT INTO data_receipt_lineage (receipt_id, base_receipt_id, kind) "
+        "VALUES (?, ?, ?)",
+        (receipt, receipt, "price_history_capture"))
+    with pytest.raises(DataError) as caught:
+        _create(prod)
+    assert _details(caught) == ("SNAPSHOT_CLOSURE_BROKEN", "lineage_cycle")
+
+
+def test_coverage_naming_uncommitted_receipt_refuses(prod):
+    _rewrite_without_triggers(
+        prod, "data_snapshot_coverage",
+        "INSERT INTO data_snapshot_coverage (snapshot_id, table_name, coverage_id, "
+        "import_receipt_id, coverage_hash, coverage_json) VALUES (?, ?, ?, ?, ?, ?)",
+        (prod.snap.snapshot_id, "securities", "cov-test", "no-such-receipt",
+         fake_hash("coverage"), "{}"))
+    with pytest.raises(DataError) as caught:
+        _create(prod)
+    assert _details(caught) == ("SNAPSHOT_CLOSURE_BROKEN", "coverage_receipt_missing")
+
+
+def test_capture_rows_change_the_closure_identity(prod):
+    with _create(prod, "before") as ws:
+        before = ws.closure.identity_digest
+    _rewrite_without_triggers(
+        prod, "data_price_captures",
+        "INSERT INTO data_price_captures (capture_id, receipt_id, ticker, source_kind, "
+        "source_hash, retrieved_at, outcome, rows_added, rows_tombstoned, created_at, "
+        "contract_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ("cap-test", _receipt_id(prod), "AAA", "orats", fake_hash("source"),
+         "2024-01-02T00:00:00Z", "added", 1, 0, "2024-01-02T00:00:00Z",
+         "price_history.v1"))
+    with _create(prod, "after") as ws:
+        after = ws.closure.identity_digest
+    assert before != after
