@@ -40,10 +40,10 @@ def test_frozen_replay_refuses_missing_or_noncausal_fold_provenance(monkeypatch,
         recipe["artifact_refs"] = ["descriptor-implied", "descriptor-runup"]
     chooser = SimpleNamespace(recipe=recipe)
     request = SimpleNamespace(
-        event_date="2026-10-27", requested_decision_at="2026-10-27",
-        strategy_version="TWIN-P")
+        requested_decision_at="2026-10-27", strategy_version="TWIN-P")
     verified = {
         "request": request,
+        "legacy_event_date": "2026-10-27",
         "inputs": SimpleNamespace(gate={"mode": "chooser"}, chooser=None),
         "frozen_replay": None,
         "frozen_chooser": chooser,
@@ -78,8 +78,8 @@ def test_frozen_replay_requires_provenance_bound_to_staged_descriptors():
         "fold_provenance": provenance,
         "artifact_refs": ["descriptor-implied", "descriptor-runup"],
     }
-    request = SimpleNamespace(
-        event_date="2026-09-15", requested_decision_at="2026-10-27")
+    request = SimpleNamespace(requested_decision_at="2026-10-27")
+    legacy_event_date = "2026-09-15"
     staged = {
         "__chooser_descriptor__:descriptor-implied":
             "pred_im_t1_d14\x1f2026-08-31\x1f2026-09-01",
@@ -88,14 +88,14 @@ def test_frozen_replay_requires_provenance_bound_to_staged_descriptors():
     }
 
     assert phase5_phase4_replay._has_causal_chooser_fold_provenance(
-        recipe, request, staged)
+        recipe, request, staged, legacy_event_date)
     assert not phase5_phase4_replay._has_causal_chooser_fold_provenance(
-        recipe, request, {})
+        recipe, request, {}, legacy_event_date)
     mismatched = dict(staged)
     mismatched["__chooser_descriptor__:descriptor-implied"] = (
         "pred_im_t1_d14\x1f2026-08-01\x1f2026-09-01")
     assert not phase5_phase4_replay._has_causal_chooser_fold_provenance(
-        recipe, request, mismatched)
+        recipe, request, mismatched, legacy_event_date)
 
     later_provenance = {
         output: {**item, "fold_start": "2026-10-01"}
@@ -108,7 +108,7 @@ def test_frozen_replay_requires_provenance_bound_to_staged_descriptors():
         for output, item in later_provenance.items()
     }
     assert not phase5_phase4_replay._has_causal_chooser_fold_provenance(
-        later_recipe, request, later_staged)
+        later_recipe, request, later_staged, legacy_event_date)
 
 
 def test_replay_pool_values_must_match_staged_fold_estimators(monkeypatch, tmp_path):
@@ -175,20 +175,23 @@ def test_replay_pool_values_must_match_staged_fold_estimators(monkeypatch, tmp_p
         fold_pools=pools)
     manifest = {"manifest_hash": "sha256:catalog", "members": rows}
 
-    request = SimpleNamespace(
-        event_date="2026-09-15", requested_decision_at="2026-10-27")
+    request = SimpleNamespace(requested_decision_at="2026-10-27")
+    legacy_event_date = "2026-09-15"
     size_descriptor.fold_start = "2026-10-01"
     assert phase5_phase4_replay._staged_chooser_pools(
-        chooser, request, tmp_path, manifest) is None
+        chooser, request, tmp_path, manifest,
+        legacy_event_date=legacy_event_date) is None
     size_descriptor.fold_start = "2026-09-01"
 
     pools["pred_abs_move"]["predictions"] = np.array([99.0, 99.0])
     assert phase5_phase4_replay._staged_chooser_pools(
-        chooser, request, tmp_path, manifest) is None
+        chooser, request, tmp_path, manifest,
+        legacy_event_date=legacy_event_date) is None
 
     pools["pred_abs_move"]["predictions"] = size_ref.pool_pred.copy()
     verified = phase5_phase4_replay._staged_chooser_pools(
-        chooser, request, tmp_path, manifest)
+        chooser, request, tmp_path, manifest,
+        legacy_event_date=legacy_event_date)
     assert verified is not None
     for output, ref in refs.items():
         assert np.array_equal(verified[output]["predictions"], ref.pool_pred)

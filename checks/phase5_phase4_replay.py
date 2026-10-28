@@ -150,7 +150,7 @@ def _staged_state(release_root: Path, staged: Mapping[str, str], prefix: str, ar
     return None, None
 
 
-def _chooser_replay_dates(request: Any):
+def _chooser_replay_dates(request: Any, legacy_event_date: Any = None):
     from datetime import date, datetime
 
     def parse(value):
@@ -170,7 +170,7 @@ def _chooser_replay_dates(request: Any):
             return None
         return parsed
 
-    event_day = parse(getattr(request, "event_date", None))
+    event_day = parse(legacy_event_date)
     decision_day = parse(getattr(request, "requested_decision_at", None))
     if event_day is None or decision_day is None:
         return None
@@ -178,7 +178,8 @@ def _chooser_replay_dates(request: Any):
 
 
 def _has_causal_chooser_fold_provenance(recipe: Any, request: Any,
-                                        staged: Mapping[str, str]) -> bool:
+                                        staged: Mapping[str, str],
+                                        legacy_event_date: Any = None) -> bool:
     from datetime import date
 
     if not isinstance(recipe, Mapping):
@@ -191,7 +192,7 @@ def _has_causal_chooser_fold_provenance(recipe: Any, request: Any,
     if (not isinstance(artifact_refs, (list, tuple))
             or any(not isinstance(ref, str) for ref in artifact_refs)):
         return False
-    replay_dates = _chooser_replay_dates(request)
+    replay_dates = _chooser_replay_dates(request, legacy_event_date)
     if replay_dates is None:
         return False
     event_day, decision_day = replay_dates
@@ -219,10 +220,11 @@ def _has_causal_chooser_fold_provenance(recipe: Any, request: Any,
     return True
 
 
-def _staged_chooser_pools(chooser, request, release_root: Path, manifest):
+def _staged_chooser_pools(chooser, request, release_root: Path, manifest,
+                          legacy_event_date: Any = None):
     if not isinstance(manifest, Mapping):
         return None
-    replay_dates = _chooser_replay_dates(request)
+    replay_dates = _chooser_replay_dates(request, legacy_event_date)
     if replay_dates is None:
         return None
     event_day, decision_day = replay_dates
@@ -350,7 +352,8 @@ def _staged_chooser_pools(chooser, request, release_root: Path, manifest):
     return verified
 
 
-def rebind_chooser(chooser, request, release_root: Path, staged: Mapping[str, str], manifest=None):
+def rebind_chooser(chooser, request, release_root: Path, staged: Mapping[str, str],
+                   manifest=None, legacy_event_date: Any = None):
     """``(chooser block served from the staged release, absent, used)``.
 
     The frozen chooser's champion and Tier-4 producer folds are rebound by
@@ -364,9 +367,11 @@ def rebind_chooser(chooser, request, release_root: Path, staged: Mapping[str, st
     from engine.v2.models.loader import FrozenInference
     from engine.v2.scoring.chooser_inputs import frozen_chooser_block
 
-    if not _has_causal_chooser_fold_provenance(chooser.recipe, request, staged):
+    if not _has_causal_chooser_fold_provenance(
+            chooser.recipe, request, staged, legacy_event_date):
         return None, [("chooser:fold_provenance", "unverifiable")], set()
-    fold_pools = _staged_chooser_pools(chooser, request, release_root, manifest)
+    fold_pools = _staged_chooser_pools(
+        chooser, request, release_root, manifest, legacy_event_date)
     if fold_pools is None:
         return None, [("chooser:fold_pools", "unverifiable")], set()
     release, absent, used = _rebind_release(chooser.release, staged)
@@ -443,7 +448,8 @@ def _rebound_inputs(verified, release_root: Path, staged: Mapping[str, str], man
         used.update(plan_used)
     if chooser is not None:
         block, chooser_absent, chooser_used = rebind_chooser(
-            chooser, verified["request"], release_root, staged, manifest)
+            chooser, verified["request"], release_root, staged, manifest,
+            legacy_event_date=verified.get("legacy_event_date"))
         absent.extend(chooser_absent)
         used.update(chooser_used)
         if block is not None:
