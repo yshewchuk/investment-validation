@@ -588,13 +588,6 @@ def _with_release_artifacts(
         else:
             declarations = _release_artifact_declarations(
                 binding, strategy, drivers[0].identity, as_of, calendar_row)
-        for artifact_name, context_name in (
-            ("payoff_artifact", "payoff_artifact_cutoff"),
-            ("recalibration_artifact", "recalibration_artifact_cutoff"),
-        ):
-            artifact = declarations.get(artifact_name)
-            if artifact is not None:
-                context[context_name] = artifact.cutoff
         analogs = binding.analog_artifacts.get(strategy) or ()
         if analogs or strategy == "STR-THRU":
             analog_declaration = analog_declarations(
@@ -605,6 +598,13 @@ def _with_release_artifacts(
                 raise NightlySourceBundleRefusal(
                     "MODEL_NOT_READY", "release lacks the exact-cutoff analog pool")
             declarations.update(analog_declaration)
+        for artifact_name, context_name in (
+            ("payoff_artifact", "payoff_artifact_cutoff"),
+            ("recalibration_artifact", "recalibration_artifact_cutoff"),
+        ):
+            artifact = declarations.get(artifact_name)
+            if artifact is not None:
+                context[context_name] = artifact.cutoff
     except NightlySourceBundleRefusal as exc:
         return NativeScoreBatchRowRefusal(
             key, exc.code, _nightly_source_bundle_refusal_detail(exc))
