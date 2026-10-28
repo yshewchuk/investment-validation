@@ -105,8 +105,9 @@ def main(argv=None):
             store, clock = ArtifactStore(args.store_root), SystemClock()
             repository = Repository(conn, store, pin_snapshots=True)
             if fresh:
+                options = {"publish_artifacts": False} if args.action == "preflight" else {}
                 registration, spec = prepare(repository, spec, request, panel_request,
-                    scope=args.scope, training_start=args.training_start, labels_before=args.labels_before)
+                    scope=args.scope, training_start=args.training_start, labels_before=args.labels_before, **options)
                 if args.action == "preflight":
                     from experiments.magnitude_search_request_versions import compile_request
                     result = resource_report({"counts": compile_request(request)["counts"], "request": request})

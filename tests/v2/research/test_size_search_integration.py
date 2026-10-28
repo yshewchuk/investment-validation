@@ -393,7 +393,7 @@ def test_v17_large_registration_is_compact_and_missing_shard_refuses(case):
 
     logical = case.registration.document
     context = logical["size_panel"]["context"]
-    context["metadata"] = [{"position": index, "value": "m" * 4096} for index in range(4200)]
+    context["confirmed_metadata"] = {f"synthetic-{index}": {"value": "m" * 4096} for index in range(4200)}
     context["context_id"] = content_hash({key: value for key, value in context.items() if key != "context_id"})
     spec = prediction_spec(experiment_id="synthetic-large-size-registration",
                            folds=("2024",), runner="experiments/size_search.py")
@@ -401,11 +401,15 @@ def test_v17_large_registration_is_compact_and_missing_shard_refuses(case):
     key = content_hash({"experiment_id": spec.experiment_id, "arm": spec.primary_arm_id})
     run_id = "native_" + key.removeprefix("sha256:")
     compact, logical = pack_size_registration(case.store, logical)
+    assert any(
+        descriptor.get("kind") == "map" or descriptor.get("entry", {}).get("kind") == "map"
+        for descriptor in compact["size_artifacts"].values()
+    )
     from engine.v2.foundation.canonical import iter_canonical_json
     old_bytes = sum(len(chunk.encode("utf-8")) for chunk in iter_canonical_json(logical))
     payload = canonical_json(compact).encode()
     assert old_bytes > 16 * 1024 * 1024
-    assert len(payload) == 171535
+    assert len(payload) == 170832
     assert len(payload) < 16 * 1024 * 1024
     registration = NativeRegistration(run_id, payload, logical)
     reserve_native_registration(case.conn, case.store, registration, spec)
@@ -453,3 +457,6 @@ def test_v16_inline_size_registration_still_round_trips(case):
     assert replayed.document == logical
     assert replayed.binding_json == payload
     verify_native_registration(case.conn, case.store, replayed)
+    sealed = planner.seal_search_plan(case.conn, case.store, replayed, case.request)
+    plan_ref = from_document(ArtifactRef, sealed["plan_ref"])
+    assert planner.read_search_plan(case.conn, case.store, replayed, case.request, plan_ref) == sealed["plan"]

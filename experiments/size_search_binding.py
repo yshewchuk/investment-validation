@@ -6,7 +6,7 @@ from hashlib import sha256
 from pathlib import Path
 
 from engine.v2.contracts import SnapshotRef
-from engine.v2.foundation import canonical_json, content_hash, from_document
+from engine.v2.foundation import artifact_reference, canonical_json, content_hash, from_document
 from engine.v2.models.frozen_state_io import BoundedStateReadError, read_bounded_state
 from engine.v2.ops.errors import fail
 from engine.v2.ops.fingerprints import environment_identity, source_closure
@@ -32,6 +32,16 @@ SCHEMA = "native_experiment_registration.v1.7"
 def _require(condition):
     if not condition:
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "qualified SIZE source/fold binding differs")
+
+
+class _PreviewStore:
+    def publish_bytes(self, payload, schema_ref=None):
+        return artifact_reference(payload, schema_ref)
+
+
+def _preview_payload(binding):
+    compact, _ = pack_size_registration(_PreviewStore(), binding)
+    return canonical_json(compact).encode("utf-8")
 
 
 def validate_panel_request(value):
@@ -75,7 +85,8 @@ def _read_panel(repository, source, request, *, columns):
     return read(repository, source, feature, columns=columns, **args)
 
 
-def prepare(repository, spec, request, panel_request, *, scope, training_start, labels_before):
+def prepare(repository, spec, request, panel_request, *, scope, training_start, labels_before,
+            publish_artifacts=True):
     """Prepare a new development anchor; caller explicitly reserves it separately."""
     from engine.v2.research.magnitude_panel_qualified_table import recipe
     sources = _sources()
@@ -103,12 +114,16 @@ def prepare(repository, spec, request, panel_request, *, scope, training_start, 
     binding.update(schema_version=SCHEMA, size_request=schedule["request"], size_panel_request=panel_request,
         size_panel={"context": context, "feature_snapshot": panel["feature_snapshot"]},
         size_comparison=comparison_recipe())
-    compact, logical = pack_size_registration(repository._store, binding)
-    payload = canonical_json(compact).encode()
-    if len(payload) > MAX_NATIVE_EVIDENCE_BYTES:
+    preview = _preview_payload(binding)
+    if len(preview) > MAX_NATIVE_EVIDENCE_BYTES:
         raise fail("RESOURCE_LIMIT_EXCEEDED", "native registration exceeds its UTF-8 byte budget",
-            details={"registration_bytes": len(payload), "max_registration_bytes": MAX_NATIVE_EVIDENCE_BYTES})
+            details={"registration_bytes": len(preview), "max_registration_bytes": MAX_NATIVE_EVIDENCE_BYTES})
     _folds(binding, schedule["request"])
+    if not publish_artifacts:
+        return NativeRegistration(base.run_id, b"", binding), spec
+    compact, logical = pack_size_registration(repository._store, binding)
+    payload = canonical_json(compact).encode("utf-8")
+    _require(payload == preview)
     return NativeRegistration(base.run_id, payload, logical), spec
 
 
@@ -135,7 +150,8 @@ def _sources():
 
 
 def verify_installation(binding):
-    _require(binding["schema_version"] == SCHEMA and binding["environment"] == environment_identity(1)
+    _require(binding["schema_version"] in ("native_experiment_registration.v1.6", SCHEMA)
+        and binding["environment"] == environment_identity(1)
         and binding["source_closure"] == _sources())
     _require(binding["size_comparison"] == comparison_recipe())
 
@@ -186,7 +202,7 @@ def prepare_plan(conn, store, registration, request):
 
 def execution_for_candidate(binding, candidate):
     execution = {**binding["magnitude_execution"], "fit_recipe": candidate["recipe"]}
-    if binding.get("schema_version") == SCHEMA:
+    if binding.get("schema_version") in ("native_experiment_registration.v1.6", SCHEMA):
         execution.update(schema_version="size_candidate_execution.v1", features=candidate["recipe"]["features"],
                          model=candidate["recipe"]["model"])
     return execution

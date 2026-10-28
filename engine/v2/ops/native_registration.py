@@ -16,6 +16,7 @@ from engine.v2.ops.catalog import decode_bounded_text, sql_text_budget
 from engine.v2.ops.errors import OpsError, fail
 
 MAX_NATIVE_EVIDENCE_BYTES = 16 * 1024 * 1024
+MAX_NATIVE_SIZE_ARTIFACT_BYTES = 1024 * 1024 * 1024
 
 
 def read_native_evidence(conn, run_id, *, max_bytes=MAX_NATIVE_EVIDENCE_BYTES):
@@ -84,6 +85,7 @@ def verified_registration_bytes(conn, store, run_id, *, expected_ref=None, max_e
                        details={"registration_bytes": ref.byte_size, "max_registration_bytes": max_evidence_bytes})
         binding = store.read_verified(ref)
         document = json.loads(binding)
+        _check_size_artifact_budget(document)
         valid = _matches(row, evidence, ref, binding, document, store)
     except (ArtifactError, ValueError, TypeError, KeyError):
         valid = False
@@ -94,6 +96,28 @@ def verified_registration_bytes(conn, store, run_id, *, expected_ref=None, max_e
     if not valid:
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "native registration differs from its immutable binding")
     return binding
+
+
+def _size_artifact_byte_total(document):
+    """Sum v1.7 shard bytes; malformed shapes surface as identity conflicts."""
+    try:
+        return sum(
+            from_document(ArtifactRef, shard["ref"]).byte_size
+            for descriptor in document["size_artifacts"].values()
+            for shard in descriptor["entry"]["shards"])
+    except (ArtifactError, ValueError, TypeError, KeyError, AttributeError):
+        raise ValueError("malformed size artifact descriptor") from None
+
+
+def _check_size_artifact_budget(document):
+    """Enforce the v1.7 aggregate size artifact byte cap."""
+    if not isinstance(document, dict) or document.get("schema_version") != "native_experiment_registration.v1.7":
+        return
+    size_artifact_bytes = _size_artifact_byte_total(document)
+    if size_artifact_bytes > MAX_NATIVE_SIZE_ARTIFACT_BYTES:
+        raise fail("RESOURCE_LIMIT_EXCEEDED", "native registration size artifacts exceed their byte budget",
+                   details={"size_artifact_bytes": size_artifact_bytes,
+                            "max_size_artifact_bytes": MAX_NATIVE_SIZE_ARTIFACT_BYTES})
 
 
 def _size_artifacts_verified(store, document):
@@ -280,7 +304,7 @@ def _size_placeholder_v17(value):
 
 def _size_descriptor_v17(descriptor, artifact_id):
     if (not isinstance(descriptor, dict) or set(descriptor) != {"kind", "section", "entry"}
-            or descriptor["kind"] not in ("list", "object")
+            or descriptor["kind"] not in ("list", "object", "map")
             or descriptor["section"] != f"size_registration.v1.7:{artifact_id}"):
         return False
     entry = descriptor["entry"]

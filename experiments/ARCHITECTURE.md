@@ -11,7 +11,7 @@ The caller supplies the checkout root used for source fingerprinting.
 `read_native_registration` uses the ops bounded verifier with the existing native 16 MiB UTF-8 default evidence/object budget: one SQL snapshot caps evidence transfer
 (twice the budget for UTF-16, followed by UTF-8 admission), then validates the registration reference size before the verified object read. Missing registration remains R1;
 malformed/conflicting evidence and oversized catalog evidence remain R6. Raw storage exceptions propagate. This bounds transferred/serialized bytes, not
-SQLite internals or decoded-object overhead. It loads v1.0–v1.6 without rewriting saved bindings; current-source admission still requires a matching closure.
+SQLite internals or decoded-object overhead. It loads v1.0–v1.7 without rewriting saved bindings; current-source admission still requires a matching closure.
 Larger legitimate registrations can supply `max_evidence_bytes`, also exposed as `--max-registration-bytes` by the gate, prediction, search-plan and serial-search CLIs; magnitude
 history binds its temporal plan twice, so 16 MiB is not a universal population bound (nor a feature-matrix cap). The pure `valid_registration_read_budget` predicate admits only built-in integer
 budgets in `[1, 2**62 - 1]`, leaving SQLite headroom for UTF-16. The loader and all five CLI parsers (including RUNUP's evidence-budget flag) and `register_native` share it; None cannot disable either public boundary.
@@ -245,9 +245,9 @@ Counts cap attempts, not completed fits, input bytes, coverage or cost feasibili
 Unknown shapes, columns, hashes, grids, policies or insufficient caps refuse before
 expansion. A preview grants no source, fit, selection or holdout authority.
 
-`size_search_binding.prepare` writes native registration v1.7. Its small canonical registration retains the source, request, fold and execution identity while large ordered values (plan events, panel target events, metadata and fragment lists) live in bounded immutable CAS shards. The registration references each section by its shard references and row count. Shard identity uses the existing `magnitude_search_shards` format and ordering checks; no single cohort-sized JSON encoding is used for registration hashing, reservation, admission or replay. The 16 MiB registration limit is unchanged.
+`size_search_binding.prepare` writes new native registration v1.7. Its small canonical registration retains source, request, fold and execution identity while large ordered values (plan events, panel target events, metadata and fragment lists) live in bounded immutable CAS shards. The registration references each section by its shard references and row count. Metadata mappings are encoded as sorted key/value rows; lists and legacy object artifacts retain their v1.7 descriptors. Artifact identity hashes the canonical logical value plus artifact kind and is recomputed after hydration. The existing `magnitude_search_shards` format enforces ordering and an 8 MiB row limit. The 16 MiB compact-registration limit remains unchanged; the sum of referenced shard bytes is capped at 1 GiB.
 
-Native admission dispatches v1.7 to its reference validator and verifies every referenced CAS object independently. SIZE replay streams verified sections into the same logical plan and panel fields consumed by the v1.6 planner. Existing v1.5/v1.6 registrations retain their inline validation and replay unchanged; no migration or rewrite occurs. Scientific membership, targets, fold cutoffs, selection and scoring semantics are unchanged. `magnitude_search_plan` admits v1.6 and v1.7 anchors for the v2 request; historical v1 execution semantics remain explicit, never a latest default.
+Preflight validates folds and the compact byte budget through a no-write preview of the same shard format. The register path validates folds and budget before publishing bounded immutable shards and before catalog reservation; a failed catalog reservation can leave only unreferenced CAS objects. Native admission dispatches v1.7 to its reference validator, checks the total referenced-byte cap before shard reads, and verifies each referenced CAS object independently. Hydration then materializes the existing logical plan and panel fields for the v1.6 planner; it never serializes the cohort into one JSON payload. Missing, altered, malformed or hash-mismatched shards refuse `EXPERIMENT_IDENTITY_CONFLICT`; an aggregate shard-byte total over 1 GiB refuses `RESOURCE_LIMIT_EXCEEDED`. Existing v1.5/v1.6 registrations retain their inline validation and replay unchanged; no migration or rewrite occurs. Scientific membership, targets, fold cutoffs, selection and scoring semantics are unchanged. `magnitude_search_plan` admits v1.6 and v1.7 anchors for the v2 request; historical v1 execution semantics remain explicit, never a latest default.
 
 `size_search` is the local no-ledger preflight/register/seal/run/report entrypoint.
 Parent/job wall and address-space limits are CLI-owned; child memory cannot exceed
@@ -280,7 +280,8 @@ actual label windows, holdout union and source ceilings are still mandatory.
 | --- | --- |
 | Malformed closed panel request or mismatched request/anchor version | `INVALID_EXPERIMENT_SPEC` before reservation/execution. |
 | Changed binding/hash/environment, driver seal or replay receipt | `EXPERIMENT_IDENTITY_CONFLICT`; no replacement, new fit or replay write. Native admission failures retain their own codes. |
-| Prepared/stored registration or installed registry over 16 MiB; new work beyond original deadline | `RESOURCE_LIMIT_EXCEEDED`; preserve existing evidence, no retry or automatic cap increase. |
+| Compact registration or installed registry over 16 MiB; referenced v1.7 shard bytes over 1 GiB; an individual shard row over 8 MiB; new work beyond original deadline | `RESOURCE_LIMIT_EXCEEDED`; preserve existing evidence, no retry or automatic cap increase. Shards already published before a compact-size refusal remain unreferenced CAS objects. |
+| Missing, altered, malformed or content-hash-mismatched referenced v1.7 shard | `EXPERIMENT_IDENTITY_CONFLICT` before plan replay; no replacement or replay write. |
 | Read-only collection: complete expired replay; missing terminal | Verified read-only report remains available; missing evidence refuses before work, never invokes a mutable fallback. |
 | CLI malformed reference/spec; raw storage failure; recoverable parent `MemoryError`; unexpected programming error | Typed `INVALID_EXPERIMENT_SPEC`; sanitized `RESOURCE_UNAVAILABLE`; static `RESOURCE_LIMIT_EXCEEDED` JSON and exit 2 if refusal output/cleanup can complete; unexpected errors propagate. Fatal OS/interpreter exhaustion cannot guarantee a response. |
 
@@ -314,7 +315,7 @@ this helper does not silently normalize it to Ridge/HGB's conversion policy.
 | Valid numeric call | Unmodified family result/schema/recipe ID; no new candidate seal or evidence of source qualification. |
 
 Qualified SIZE plan construction and its bounded worker now consume these helpers alongside synthetic tests; v1 execution remains explicit and unchanged.
-Columns/digests/arrays alone prove no source qualification or fit permission: the v1.6 binding, admitted stored inputs and v2 journal route supply those checks.
+Columns/digests/arrays alone prove no source qualification or fit permission: the v1.6/v1.7 binding, admitted stored inputs and v2 journal route supply those checks.
 
 ## Recorded magnitude-search selection
 

@@ -252,8 +252,10 @@ def native_registration_exists(conn, store, registration, *, max_evidence_bytes=
         ref = artifact_reference(registration.binding_json, registration.document["schema_version"])
         binding = verified_registration_bytes(conn, store, registration.run_id, expected_ref=ref,
                                               max_evidence_bytes=max_evidence_bytes)
-        if binding is not None:
-            load_registration_document(store, binding)
+        document = None if binding is None else load_registration_document(store, binding)
+        if (document is not None and registration.document_value is not None
+                and document != registration.document_value):
+            raise fail("EXPERIMENT_IDENTITY_CONFLICT", "native registration differs from its supplied document")
         return binding is not None
     except (ArtifactError, ValueError, TypeError, KeyError):
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "native registration differs from its immutable binding") from None
