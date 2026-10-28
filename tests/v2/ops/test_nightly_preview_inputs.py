@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+import engine.v2.ops.nightly_preview_inputs as nightly_preview_inputs
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.nightly import build_legacy_job_requests, build_nightly_plan
 from engine.v2.ops.nightly_preview_inputs import run
@@ -103,6 +104,24 @@ def test_nightly_preview_inputs_reject_missing_pin_or_binding(tmp_path):
     with pytest.raises(OpsError) as blank:
         run(_parameters(snapshot_id=""), tmp_path)
     assert blank.value.code == "INVALID_REQUEST"
+
+
+def test_oversized_input_refuses_before_hashing(tmp_path, monkeypatch):
+    _write_inputs(tmp_path)
+    (tmp_path / "bundle.tar").write_bytes(b"x" * 22)
+    monkeypatch.setattr(nightly_preview_inputs, "MAX_INPUT_BYTES", 21)
+
+    def _forbidden_sha256():
+        raise AssertionError("hashing started before size preflight")
+
+    monkeypatch.setattr(nightly_preview_inputs.hashlib, "sha256", _forbidden_sha256)
+    with pytest.raises(OpsError) as oversized:
+        run(_parameters(), tmp_path)
+    assert oversized.value.code == "RESOURCE_LIMIT_EXCEEDED"
+    assert oversized.value.problem.details == {"name": "bundle.tar", "limit_bytes": 21,
+                                               "observed_bytes": 22}
+    assert not (tmp_path / "preview_input.json").exists()
+    assert not (tmp_path / "source_provenance.json").exists()
 
 
 def test_pinned_nightly_plan_declares_preview_output_bindings():

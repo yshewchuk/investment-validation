@@ -41,7 +41,7 @@ from engine.v2.ops.nightly import (
 )
 from engine.v2.ops.stages import registry
 
-REPO_ROOT = __import__("pathlib").Path(__file__).resolve().parents[1]
+REPO_ROOT = __import__("pathlib").Path(__file__).resolve().parents[3]
 
 
 # --------------------------------------------------------------------------
@@ -240,6 +240,25 @@ def test_every_dag_stage_dispatches_to_a_known_action(monkeypatch, tmp_path):
     for stage in _DAG_STAGES:
         kind = _action_for(stage)
         calls.clear()
+        if kind == "nightly_preview_inputs":
+            for name in ("score.json", "bundle.tar", "finality.json", "model_evidence.json"):
+                (tmp_path / name).write_bytes(b"tiny")
+            result = worker.dispatch(kind, {
+                "expected_ids": ("nightly_preview_inputs",),
+                "snapshot_id": "snap_pinned",
+                "input_bindings": {
+                    "score.json": "job_score#legacy_score",
+                    "bundle.tar": "job_projection#legacy_render",
+                    "finality.json": "job_finality#legacy_finality",
+                    "model_evidence.json": "job_evidence#legacy_model_evidence",
+                },
+            }, tmp_path)
+            assert result is not None, f"stage {stage!r} (kind {kind!r}) did not dispatch"
+            assert result["completed_ids"] == ["nightly_preview_inputs"]
+            assert [output["name"] for output in result["outputs"]] == [
+                "preview_input", "source_provenance"]
+            assert not calls, f"stage {stage!r} (kind {kind!r}) reached a fake handler"
+            continue
         result = worker.dispatch(kind, {}, tmp_path)
         assert result is not None, f"stage {stage!r} (kind {kind!r}) did not dispatch"
         assert calls, f"stage {stage!r} (kind {kind!r}) reached no known stub"

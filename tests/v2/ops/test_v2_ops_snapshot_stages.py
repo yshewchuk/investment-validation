@@ -627,6 +627,10 @@ def test_snapshot_plan_pins_head_once_and_binds_all_three_artifacts(case, monkey
     assert finality_bindings["legacy_manifest.json"] == planned["plan"]["input_manifest_ref"]
     assert materialize_id in finality_spec["dependency_job_ids"]
     for kind, (_, spec) in by_kind.items():
+        if kind == "nightly_preview_inputs":
+            # Binds its four parent job outputs; covered by its own dedicated
+            # exact-binding test in tests/v2/ops/test_nightly_preview_inputs.py.
+            continue
         if kind == "retrain_step":
             continue
         if kind == "retrain_step":

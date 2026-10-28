@@ -1078,7 +1078,7 @@ The nightly preview-input producer applies R1–R6 as follows:
 | # | `nightly_preview_inputs` outcome |
 |---|---|
 | R1 | A missing/failed parent output, missing pinned snapshot ID, or missing input binding refuses the job; no file is inferred from the mutable dashboard or Phase 3 receipts. |
-| R2 | Reuse is valid only for the same saved-plan identity and the exact launch-resolved parent artifact IDs/hashes. A changed parent output changes the job input identity; missing or mismatched content refuses. |
+| R2 | Reuse is valid only for the same saved-plan identity and the exact launch-resolved parent artifact IDs/hashes. A changed parent output changes the job input identity; missing or mismatched content refuses. Before hashing, all four staged inputs are preflighted; any input over 512 MiB refuses `RESOURCE_LIMIT_EXCEEDED` with its name and observed size. A streaming guard also catches growth past the cap before digesting excess bytes. Refusal writes neither JSON output. |
 | R3 | A retry reuses the saved plan's snapshot ID and the same dependency job identities. Transient job failures follow the bounded job retry policy; invalid pins or bindings require a valid new plan. |
 | R4 | The worker writes only in its private attempt staging directory. The supervisor publishes both named outputs only after validating the completed worker result and committing the successful attempt. |
 | R5 | Each JSON file is written atomically within staging. A killed/failed worker publishes neither job output; successful artifact registration is handled by the normal attempt commit, with no cross-filesystem transaction claim. |

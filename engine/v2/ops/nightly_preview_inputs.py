@@ -10,6 +10,8 @@ from pathlib import Path
 from engine.v2.ops.errors import fail
 
 _INPUTS = ("score.json", "bundle.tar", "finality.json", "model_evidence.json")
+MAX_INPUT_BYTES = 512 * 1024 * 1024
+_HASH_CHUNK_BYTES = 1024 * 1024
 
 
 def _write_atomic(path: Path, payload: bytes) -> None:
@@ -29,7 +31,7 @@ def _write_atomic(path: Path, payload: bytes) -> None:
 
 
 def _input_provenance(root, bindings):
-    inputs = {}
+    prepared = []
     for name in _INPUTS:
         binding = bindings[name]
         parent, separator, output = binding.partition("#") if isinstance(binding, str) else ("", "", "")
@@ -40,10 +42,34 @@ def _input_provenance(root, bindings):
         if not path.is_file():
             raise fail("INPUT_CHANGED", "nightly preview input is missing",
                        details={"name": name})
+        size = path.stat().st_size
+        if size > MAX_INPUT_BYTES:
+            raise fail("RESOURCE_LIMIT_EXCEEDED", "nightly preview input exceeds size limit",
+                       details={"name": name, "limit_bytes": MAX_INPUT_BYTES,
+                                "observed_bytes": size})
+        prepared.append((name, parent, output, path, size))
+    inputs = {}
+    for name, parent, output, path, size in prepared:
+        digest = hashlib.sha256()
+        streamed = 0
         with path.open("rb") as stream:
-            digest = hashlib.file_digest(stream, "sha256").hexdigest()
+            while True:
+                chunk = stream.read(_HASH_CHUNK_BYTES)
+                if not chunk:
+                    break
+                if streamed + len(chunk) > MAX_INPUT_BYTES:
+                    raise fail("RESOURCE_LIMIT_EXCEEDED",
+                               "nightly preview input exceeds size limit",
+                               details={"name": name, "limit_bytes": MAX_INPUT_BYTES,
+                                        "observed_bytes": streamed + len(chunk)})
+                digest.update(chunk)
+                streamed += len(chunk)
+        if streamed != size:
+            raise fail("INPUT_CHANGED", "nightly preview input changed during hashing",
+                       details={"name": name, "expected_bytes": size,
+                                "observed_bytes": streamed})
         inputs[name] = {"producer_job_id": parent, "output_name": output,
-                        "content_hash": "sha256:" + digest}
+                        "content_hash": "sha256:" + digest.hexdigest()}
     return inputs
 
 
