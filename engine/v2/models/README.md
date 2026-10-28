@@ -141,9 +141,11 @@ declare the separate implied-t1/runup-move offline fold contract. Release
 preparation binds exact role/output, parent, panel, bytes and pool metadata;
 `load_chooser_serving_fold` verifies exact catalog membership and returns immutable
 artifact metadata/pools with an ephemeral inference view. It preserves raw D14
-outputs without runup scaling. It does not select a causal fold or construct a
-source-ready chooser declaration; genuine source finality/publication and training
-bounds are still missing upstream prerequisites. Nightly refusal remains.
+outputs without runup scaling. The descriptor requires a canonical `training_cutoff`,
+but that field does not prove source finality or training membership. No Tier-4
+producer currently populates it, so member rows remain `MODEL_NOT_READY` until
+provenance-bearing folds are released. The loader does not select a causal fold or
+construct a source-ready chooser declaration.
 `FrozenInference.prepare_serving_fold` returns detached `ServingFoldMetadata` with
 a required positive byte limit and optional exact `expected_bytes`; bounded
 regular-file/no-follow verification shares the inference cache without exposing it.

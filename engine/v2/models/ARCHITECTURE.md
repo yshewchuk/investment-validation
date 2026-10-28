@@ -571,7 +571,7 @@ The chooser descriptor requires a canonical `training_cutoff` day as part of the
 The descriptor hash covers its canonical typed document, including parent, role, estimator identity and required `training_cutoff`.
 Without pinned COPY, the panel digest is caller-asserted; preparation does not verify panel bytes.
 
-**Compatibility.** Existing chooser folds without this producer-declared cutoff are refused during release preparation or per-row selection as `MODEL_NOT_READY`; no cutoff is inferred from fold dates or runtime time. Menu-member rows remain unavailable until a provenance-bearing fold is produced and released.
+**Compatibility.** Existing chooser folds without this producer-declared cutoff are rejected during release preparation; if missing state reaches per-row chooser selection, the member row is refused as `MODEL_NOT_READY`. No cutoff is inferred from fold dates or runtime time. Menu-member rows remain unavailable until a provenance-bearing fold is produced and released.
 
 | Chooser fold authoring condition | Outcome |
 |---|---|
@@ -733,8 +733,8 @@ per the root doc's layer table; `checks/import_layers.py` enforces this.
 - `engine.v2.scoring` — `gate_fold_selection.py` calls `load_serving_fold`,
   `validate_serving_fold_object` and `validate_serving_fold_descriptor` from
   `serving_fold_loader`; the verified frozen inference contract/loader for
-  the model stage, the payoff-calibration artifact type, and
-  `release_bindings.py`'s reads of `deployment.current_pointer`,
+  the model stage, the payoff-calibration artifact type; `release_bindings.py`
+  calls `load_chooser_serving_fold` and reads `deployment.current_pointer`,
   `deployment._read_manifest`, `deployment._manifest_hash_matches`,
   `deployment.production_release_root`, and `deployment.MissingReleaseRoot`.
 - `engine.v2.models.training` — the same artifact types and no-fit guards, plus
