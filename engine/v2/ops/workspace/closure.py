@@ -147,7 +147,7 @@ def _bound_bytes(conn, sql: str, args: tuple, table: str) -> None:
 
 
 def _coverage_rows(conn, snapshot_id: str) -> list:
-    _bound_bytes(conn, "SELECT SUM(LENGTH(CAST(coverage_json AS BLOB)) + LENGTH(CAST(coverage_id AS BLOB))) "
+    _bound_bytes(conn, "SELECT SUM(LENGTH(CAST(snapshot_id || table_name || coverage_id || import_receipt_id || coverage_hash || coverage_json AS BLOB))) "
                  "FROM data_snapshot_coverage WHERE snapshot_id = ?", (snapshot_id,),
                  "data_snapshot_coverage")
     rows = conn.execute(
@@ -168,7 +168,7 @@ def _capture_rows(conn, receipt_ids) -> list:
     for receipt_id in receipt_ids:
         used += conn.execute(
             "SELECT COALESCE(SUM(LENGTH(CAST(capture_id || ticker || source_kind || source_hash "
-            "|| retrieved_at || outcome || contract_id AS BLOB))), 0) FROM data_price_captures "
+            "|| retrieved_at || outcome || contract_id || receipt_id || created_at AS BLOB))), 0) FROM data_price_captures "
             "WHERE receipt_id = ?", (receipt_id,)).fetchone()[0]
         if used > _MAX_ROW_BYTES:
             raise _broken("closure_bytes_over_cap", table="data_price_captures")
@@ -181,8 +181,15 @@ def _capture_rows(conn, receipt_ids) -> list:
 
 
 def _receipt_facts(conn, receipt_ids) -> list:
-    return [list(conn.execute("SELECT * FROM data_import_receipts WHERE receipt_id = ?",
-                              (receipt_id,)).fetchone()) for receipt_id in sorted(receipt_ids)]
+    """Receipt rows for the digest; ``problem_json`` is read as its length (a committed receipt has none)."""
+    facts = []
+    for receipt_id in sorted(receipt_ids):
+        row = conn.execute(
+            "SELECT receipt_id, attempt_id, fence, source_manifest_hash, result_snapshot_id, status, "
+            "LENGTH(CAST(problem_json AS BLOB)), registered_at, scope FROM data_import_receipts "
+            "WHERE receipt_id = ?", (receipt_id,)).fetchone()
+        facts.append(list(row))
+    return facts
 
 
 def _object_stats(store: ArtifactStore, refs, deep: bool) -> tuple[list, int]:
