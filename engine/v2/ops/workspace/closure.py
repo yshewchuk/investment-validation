@@ -35,6 +35,7 @@ _MAX_ROWS = 2_000_000
 _MAX_RECEIPTS = 1_000
 _MAX_LINEAGE = 10_000
 _MAX_ROW_BYTES = 256 * 1024 * 1024
+_MAX_PROBLEM_BYTES = 64 * 1024
 _PROGRESS_SECONDS = 30.0
 
 
@@ -68,13 +69,22 @@ def _log(message: str) -> None:
 
 
 def _bound_fragments(conn, snapshot_id: str) -> None:
-    """Refuse before ``resolve_full`` materializes an over-large fragment set."""
+    """Refuse before ``resolve_full`` materializes an over-large fragment set (rows and bytes)."""
     count = conn.execute(
         "SELECT COUNT(*) FROM data_version_fragments WHERE dataset_version_id IN "
         "(SELECT dataset_version_id FROM data_snapshot_tables WHERE snapshot_id = ?)",
         (snapshot_id,)).fetchone()[0]
     if count > _MAX_ROWS:
         raise _broken("closure_rows_over_cap", table="data_version_fragments", rows=count)
+    _bound_bytes(
+        conn,
+        "SELECT SUM(LENGTH(CAST(f.fragment_id || f.object_id || f.contract_id || f.partition_key "
+        "|| f.byte_hash || f.logical_content_hash || f.key_bounds_json "
+        "|| COALESCE(f.time_bounds_json, '') || f.import_request_hash "
+        "|| f.input_receipt_refs_json AS BLOB))) FROM data_fragments f WHERE f.fragment_id IN "
+        "(SELECT fragment_id FROM data_version_fragments WHERE dataset_version_id IN "
+        "(SELECT dataset_version_id FROM data_snapshot_tables WHERE snapshot_id = ?))",
+        (snapshot_id,), "data_fragments")
 
 
 def _dataset_parents(conn, resolved) -> None:
@@ -181,13 +191,16 @@ def _capture_rows(conn, receipt_ids) -> list:
 
 
 def _receipt_facts(conn, receipt_ids) -> list:
-    """Receipt rows for the digest; ``problem_json`` is read as its length (a committed receipt has none)."""
+    """Full receipt rows for the digest; an over-long ``problem_json`` refuses."""
     facts = []
     for receipt_id in sorted(receipt_ids):
         row = conn.execute(
             "SELECT receipt_id, attempt_id, fence, source_manifest_hash, result_snapshot_id, status, "
-            "LENGTH(CAST(problem_json AS BLOB)), registered_at, scope FROM data_import_receipts "
-            "WHERE receipt_id = ?", (receipt_id,)).fetchone()
+            "LENGTH(CAST(problem_json AS BLOB)), CASE WHEN LENGTH(CAST(problem_json AS BLOB)) > ? "
+            "THEN NULL ELSE problem_json END, registered_at, scope FROM data_import_receipts "
+            "WHERE receipt_id = ?", (_MAX_PROBLEM_BYTES, receipt_id)).fetchone()
+        if (row[6] or 0) > _MAX_PROBLEM_BYTES:
+            raise _broken("closure_bytes_over_cap", table="data_import_receipts")
         facts.append(list(row))
     return facts
 
