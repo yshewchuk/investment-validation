@@ -183,6 +183,8 @@ cutoff is bound, scoring also requires a string requested row cutoff and refuses
 if the bound cutoff is later, even if the recipe omits `before`. When no
 eligible artifact exists, scoring retains its typed
 `MODEL_NOT_READY` refusal; it does not fit or fall back to another source.
+Callers without a recorded bound cutoff retain exact-key matching through the
+normalized payoff key, including date-like `before` values.
 STR-RUNUP retains legacy's raw win-rate behavior and does not apply
 recalibration.
 

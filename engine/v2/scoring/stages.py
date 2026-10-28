@@ -1919,26 +1919,22 @@ def _artifact_key_mismatch(
 ) -> bool:
     """True unless the selected frozen artifact is causally eligible.
 
-    Existing callers without ``bound_cutoff`` retain exact-key behavior.
-    Nightly callers record the selected DATA cutoff and may reuse an artifact
-    at or before the request cutoff; a later cutoff always refuses.
+    Unbound callers use normalized exact-key matching. Bound nightly callers
+    verify the selected cutoff equals ``bound_cutoff`` and that the artifact's
+    cutoff is causally at or before the request cutoff.
     """
     from engine.v2.models.payoff_artifact import payoff_artifact_key
 
     if alpha is None or not isinstance(artifact, expected_type):
         return True
-    selected_cutoff = cutoff if bound_cutoff is None else bound_cutoff
+    if bound_cutoff is None:
+        return artifact.key != payoff_artifact_key(name, alpha, cutoff)
     artifact_cutoff = getattr(artifact, "cutoff", None)
-    if artifact_cutoff != selected_cutoff:
+    if artifact_cutoff != bound_cutoff:
         return True
-    if artifact_cutoff is None:
-        return (bound_cutoff is not None or cutoff is not None
-                or artifact.key != payoff_artifact_key(name, alpha, None))
     if not isinstance(artifact_cutoff, str):
         return True
-    if bound_cutoff is not None and (
-        not isinstance(cutoff, str) or artifact_cutoff > cutoff
-    ):
+    if not isinstance(cutoff, str) or artifact_cutoff > cutoff:
         return True
     return artifact.key != payoff_artifact_key(name, alpha, artifact_cutoff)
 

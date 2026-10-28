@@ -19,7 +19,9 @@ from engine.v2.foundation import DocumentError, from_document
 
 
 def _restore_model_artifact(
-    artifact_doc, *, path, parser, artifact_error, kind
+    artifact_doc, *, path, parser, artifact_error, kind,
+    supported_schema: str | None = None,
+    required_fields: tuple[str, ...] = (),
 ):
     """Validate and restore one typed artifact document under ``path``."""
     if not isinstance(artifact_doc, dict):
@@ -38,6 +40,21 @@ def _restore_model_artifact(
             "required",
         ) from None
     except artifact_error:
+        if supported_schema is not None:
+            if artifact_doc.get("schema_version") != supported_schema:
+                raise DocumentError(
+                    "BAD_SCHEMA_VERSION",
+                    f"{path}.schema_version",
+                    f"not a supported {kind} artifact schema_version",
+                ) from None
+            for name in required_fields:
+                if name not in artifact_doc:
+                    raise DocumentError(
+                        "MISSING_FIELD", f"{path}.{name}", "required"
+                    ) from None
+            raise DocumentError(
+                "BAD_VALUE", path, f"malformed {kind} artifact payload"
+            ) from None
         raise DocumentError(
             "BAD_SCHEMA_VERSION",
             f"{path}.schema_version",
@@ -87,6 +104,7 @@ def _restored_model_block(model: dict) -> dict:
         )
     if model.get("recalibration_artifact") is not None:
         from engine.v2.models.recalibration_artifact import (
+            RECALIBRATION_MAP_ARTIFACT_V1,
             RecalibrationArtifactError,
         )
         from engine.v2.models.recalibration_artifact import (
@@ -99,6 +117,12 @@ def _restored_model_block(model: dict) -> dict:
             parser=_recalibration_from_document,
             artifact_error=RecalibrationArtifactError,
             kind="recalibration",
+            supported_schema=RECALIBRATION_MAP_ARTIFACT_V1,
+            required_fields=(
+                "strategy", "alpha", "cutoff", "min_pairs", "fitted", "n",
+                "base_rate", "x_thresholds", "y_thresholds", "window_start",
+                "window_end",
+            ),
         )
     return block
 

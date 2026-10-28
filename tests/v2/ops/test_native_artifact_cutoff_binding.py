@@ -1,9 +1,10 @@
 """Causal cutoff selection for frozen scoring artifacts."""
+from datetime import date
 from types import SimpleNamespace
 
 import pytest
 
-from engine.v2.foundation import to_document
+from engine.v2.foundation import DocumentError, to_document
 from engine.v2.models.payoff_artifact import (
     PayoffLineArtifact,
     make_payoff_line_artifact,
@@ -83,6 +84,27 @@ def test_scoring_stage_accepts_recorded_prior_cutoff_and_refuses_future():
     )
     assert future is None
     assert future_flags == ["MODEL_NOT_READY"]
+
+
+@pytest.mark.parametrize(
+    "requested_cutoff", ["2026-10-15T00:00:00", date(2026, 10, 15)])
+def test_runup_surface_accepts_timestamp_or_date_requested_cutoff(requested_cutoff):
+    surface = make_payoff_surface_artifact(
+        {
+            "n": 2,
+            "resid_sd": 0.1,
+            "r": None,
+            "residuals": (0.1, -0.1),
+            "coefficients": (0.0,) * len(RUNUP_TERMS),
+        },
+        alpha=0.5,
+        cutoff="2026-10-15",
+    )
+    flags = []
+    selected = _surface_fit_from_artifact(
+        surface, "STR-RUNUP", 0.5, requested_cutoff, flags)
+    assert selected is not None
+    assert flags == []
 
 
 def test_runup_surface_binds_latest_data_cutoff_at_or_before_row():
@@ -272,6 +294,30 @@ def test_roundtrip_restores_typed_artifacts_and_recalibrates_win_model():
     loaded = _load_native_score_inputs(doc)
     assert isinstance(loaded.model["payoff_artifact"], PayoffLineArtifact)
     assert isinstance(loaded.model["recalibration_artifact"], RecalibrationMapArtifact)
+
+    def assert_decode_error(artifact_doc, expected):
+        broken_doc = dict(doc)
+        broken_doc["model"] = dict(doc["model"])
+        broken_doc["model"]["recalibration_artifact"] = artifact_doc
+        with pytest.raises(DocumentError) as raised:
+            _load_native_score_inputs(broken_doc)
+        assert (raised.value.code, raised.value.path, raised.value.message) == expected
+
+    recalibration_doc = doc["model"]["recalibration_artifact"]
+    assert_decode_error(
+        {**recalibration_doc, "schema_version": "unsupported.v9"},
+        ("BAD_SCHEMA_VERSION", "$.model.recalibration_artifact.schema_version",
+         "not a supported recalibration artifact schema_version"),
+    )
+    assert_decode_error(
+        {key: value for key, value in recalibration_doc.items() if key != "n"},
+        ("MISSING_FIELD", "$.model.recalibration_artifact.n", "required"),
+    )
+    assert_decode_error(
+        {**recalibration_doc, "x_thresholds": (0.0, 1.0), "y_thresholds": (0.2,)},
+        ("BAD_VALUE", "$.model.recalibration_artifact",
+         "malformed recalibration artifact payload"),
+    )
 
     flags = []
     scored = _recalibrated_output(
