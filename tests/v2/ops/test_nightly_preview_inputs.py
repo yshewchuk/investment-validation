@@ -9,10 +9,12 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 import engine.v2.ops.nightly_preview_inputs as nightly_preview_inputs
+from engine.v2.ops import executor
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.nightly import build_legacy_job_requests, build_nightly_plan
 from engine.v2.ops.nightly_preview_inputs import run
@@ -122,6 +124,28 @@ def test_oversized_input_refuses_before_hashing(tmp_path, monkeypatch):
                                                "observed_bytes": 22}
     assert not (tmp_path / "preview_input.json").exists()
     assert not (tmp_path / "source_provenance.json").exists()
+
+
+def test_oversized_registered_preview_input_refuses_before_materialization(tmp_path, monkeypatch):
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    monkeypatch.setattr(nightly_preview_inputs, "MAX_INPUT_BYTES", 3)
+    monkeypatch.setattr(executor, "resolve_and_record",
+                        lambda conn, store, claim: {"score.json": SimpleNamespace(artifact_id="artifact")})
+    monkeypatch.setattr(executor, "registered_artifact",
+                        lambda conn, artifact_id: SimpleNamespace(byte_size=4))
+
+    def forbidden(*args):
+        raise AssertionError("oversized preview input was materialized")
+
+    store = SimpleNamespace(verify=forbidden, read_verified=forbidden)
+    claim = SimpleNamespace(spec=SimpleNamespace(kind="nightly_preview_inputs"))
+    with pytest.raises(OpsError) as oversized:
+        executor._materialize_inputs(object(), claim, store, staging)
+    assert oversized.value.code == "RESOURCE_LIMIT_EXCEEDED"
+    assert oversized.value.problem.details == {"name": "score.json", "limit_bytes": 3,
+                                               "observed_bytes": 4}
+    assert list(staging.iterdir()) == []
 
 
 def test_pinned_nightly_plan_declares_preview_output_bindings():
