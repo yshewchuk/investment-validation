@@ -510,6 +510,9 @@ def test_malformed_public_arguments_refuse_with_typed_errors(prod):
         _create(prod, "badid", snapshot_id=["not", "a", "string"])
     assert caught.value.code == "WORKSPACE_REFUSED"
     assert caught.value.problem.details.get("reason") == "argument_invalid"
+    with pytest.raises(OpsError) as caught:
+        open_workspace(None, production_catalog=prod.catalog, production_store=prod.store, clock=None)
+    assert caught.value.problem.details.get("reason") == "argument_invalid"
     with _create(prod) as ws:
         for call in (lambda: ws.source.scan(None, table_name="securities"),
                      lambda: ws.source.table_contract(None, "securities")):

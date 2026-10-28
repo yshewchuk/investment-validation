@@ -299,12 +299,18 @@ def _clear(root: Path, created: bool) -> None:
             child.unlink(missing_ok=True)
 
 
+def _check_arguments(root, production_catalog, production_store, *strings) -> None:
+    """Both entry points refuse wrongly typed arguments with a typed refusal."""
+    paths = (root, production_catalog, production_store)
+    if (not all(isinstance(path, (str, os.PathLike)) for path in paths)
+            or not all(isinstance(value, str) for value in strings)):
+        raise _refuse("argument_invalid")
+
+
 def create_workspace(root, *, production_catalog, production_store, snapshot_id: str,
                      manifest_hash: str, clock, deep: bool = False) -> ResearchWorkspace:
     """Verify the pinned snapshot's closure, then lay out and open a new workspace."""
-    if (not isinstance(root, (str, os.PathLike)) or not isinstance(snapshot_id, str)
-            or not isinstance(manifest_hash, str)):
-        raise _refuse("argument_invalid")
+    _check_arguments(root, production_catalog, production_store, snapshot_id, manifest_hash)
     catalog, store_root = _production(production_catalog, production_store)
     base = _checked_root(root, catalog, store_root)
     if base.exists() and (not base.is_dir() or any(base.iterdir())):
@@ -353,6 +359,7 @@ def create_workspace(root, *, production_catalog, production_store, snapshot_id:
 def open_workspace(root, *, production_catalog, production_store, clock,
                    deep: bool = False) -> ResearchWorkspace:
     """Re-open a workspace: layout, production binding, closure and pin must all still hold."""
+    _check_arguments(root, production_catalog, production_store)
     catalog, store_root = _production(production_catalog, production_store)
     base = _checked_root(root, catalog, store_root)
     paths = _paths(base)
