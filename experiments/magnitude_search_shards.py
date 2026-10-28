@@ -321,15 +321,21 @@ def _verified_keys(rows, key, first, last):
     return keys
 
 
-def iter_section(store, section, entry, key):
+def iter_section(store, section, entry, key, *, verified_rows=None):
     """Stream one section's verified rows in order, holding one shard at a time."""
     _, bindings = _bindings(entry)
     for ref, expected, first, last in bindings:
-        try:
-            payload = store.read_verified(ref)
-        except (ArtifactError, OSError) as error:
-            raise _artifact_failure(error, "read", unsafe_is_conflict=False) from None
-        rows = _payload_rows(payload, section, expected)
+        if verified_rows is not None and ref.storage_key in verified_rows:
+            rows = verified_rows[ref.storage_key]
+            if not isinstance(rows, list) or len(rows) != expected:
+                raise fail(_CONFLICT, "search cohort shard binding is invalid")
+            rows = untag_nonfinite(rows)
+        else:
+            try:
+                payload = store.read_verified(ref)
+            except (ArtifactError, OSError) as error:
+                raise _artifact_failure(error, "read", unsafe_is_conflict=False) from None
+            rows = _payload_rows(payload, section, expected)
         _verified_keys(rows, key, first, last)
         yield from rows
 

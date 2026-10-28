@@ -233,12 +233,12 @@ def prepare_native_registration(repository, spec, *, code_root, as_of_month, sco
     return NativeRegistration(run_id, canonical_json(document).encode("utf-8")), spec
 
 
-def load_registration_document(store, binding):
+def load_registration_document(store, binding, *, verified_size_rows=None):
     """Decode one registration, hydrating and validating only the v1.7 SIZE form."""
     document = json.loads(binding)
     if document.get("schema_version") != "native_experiment_registration.v1.7":
         return document
-    logical = hydrate_size_registration(store, document)
+    logical = hydrate_size_registration(store, document, verified_rows=verified_size_rows)
     logical["schema_version"] = "native_experiment_registration.v1.6"
     if not _size_binding(logical):
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "SIZE registration artifacts do not match their logical binding")
@@ -250,9 +250,12 @@ def native_registration_exists(conn, store, registration, *, max_evidence_bytes=
     """Read exact expected evidence: absent is false; changed or corrupt is R6."""
     try:
         ref = artifact_reference(registration.binding_json, registration.document["schema_version"])
+        verified_size_rows = {}
         binding = verified_registration_bytes(conn, store, registration.run_id, expected_ref=ref,
-                                              max_evidence_bytes=max_evidence_bytes)
-        document = None if binding is None else load_registration_document(store, binding)
+                                              max_evidence_bytes=max_evidence_bytes,
+                                              verified_size_rows=verified_size_rows)
+        document = None if binding is None else load_registration_document(
+            store, binding, verified_size_rows=verified_size_rows)
         if (document is not None and registration.document_value is not None
                 and document != registration.document_value):
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "native registration differs from its supplied document")
@@ -384,11 +387,13 @@ def read_native_registration(conn, store, spec, *, max_evidence_bytes=MAX_NATIVE
         raise fail("INVALID_EXPERIMENT_SPEC", "registration read requires a positive SQLite-safe byte budget")
     key = content_hash({"experiment_id": spec.experiment_id, "arm": spec.primary_arm_id})
     run_id = "native_" + key.removeprefix("sha256:")
-    binding = verified_registration_bytes(conn, store, run_id, max_evidence_bytes=max_evidence_bytes)
+    verified_size_rows = {}
+    binding = verified_registration_bytes(conn, store, run_id, max_evidence_bytes=max_evidence_bytes,
+                                          verified_size_rows=verified_size_rows)
     if binding is None:
         raise fail("INVALID_EXPERIMENT_SPEC", "native experiment has not been preregistered")
     try:
-        document = load_registration_document(store, binding)
+        document = load_registration_document(store, binding, verified_size_rows=verified_size_rows)
         registration = NativeRegistration(run_id, binding,
             document if document.get("schema_version") == "native_experiment_registration.v1.7" else None)
         if registration.document["spec_hash"] != spec.spec_hash:

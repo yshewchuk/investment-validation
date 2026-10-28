@@ -387,13 +387,28 @@ def test_public_fold_inputs_refuses_caller_drift_before_dependent_reads(case, mo
 
 
 def test_v17_large_registration_is_compact_and_missing_shard_refuses(case):
+    from collections import Counter
     from engine.v2.foundation import ArtifactError, canonical_json
     from experiments.native_registration import NativeRegistration, read_native_registration
     from experiments.size_registration_artifacts import pack_size_registration
 
     logical = case.registration.document
     context = logical["size_panel"]["context"]
-    context["confirmed_metadata"] = {f"synthetic-{index}": {"value": "m" * 4096} for index in range(4200)}
+    context["confirmed_metadata"] = {
+        "schema_version": "magnitude_confirmed_metadata.v1",
+        "policy": {"mode": "synthetic"},
+        "source": {"fragment_records": [{"fragment_id": "synthetic-fragment",
+                                          "content_hash": "sha256:synthetic"}]},
+        "tickers": ["SYN"],
+        "sequences": [{
+            "ticker": "SYN", "status": "complete", "selected_rows": 4200,
+            "confirmed_rows": 4200, "first_confirmed_date": "2020-01-01",
+            "events": [{"ordinal": index, "warmup_complete": True,
+                        "source_note": "m" * 4096} for index in range(4200)],
+        }],
+        "counts": {"tickers": 1, "events": 4200},
+        "index_id": "synthetic-large",
+    }
     context["context_id"] = content_hash({key: value for key, value in context.items() if key != "context_id"})
     spec = prediction_spec(experiment_id="synthetic-large-size-registration",
                            folds=("2024",), runner="experiments/size_search.py")
@@ -401,21 +416,35 @@ def test_v17_large_registration_is_compact_and_missing_shard_refuses(case):
     key = content_hash({"experiment_id": spec.experiment_id, "arm": spec.primary_arm_id})
     run_id = "native_" + key.removeprefix("sha256:")
     compact, logical = pack_size_registration(case.store, logical)
-    assert any(
-        descriptor.get("kind") == "map" or descriptor.get("entry", {}).get("kind") == "map"
-        for descriptor in compact["size_artifacts"].values()
-    )
+    assert any(descriptor.get("kind") == "map" for descriptor in compact["size_artifacts"].values())
+    assert any(descriptor.get("kind") == "list"
+               and descriptor.get("entry", {}).get("row_count") == 4200
+               for descriptor in compact["size_artifacts"].values())
     from engine.v2.foundation.canonical import iter_canonical_json
     old_bytes = sum(len(chunk.encode("utf-8")) for chunk in iter_canonical_json(logical))
     payload = canonical_json(compact).encode()
     assert old_bytes > 16 * 1024 * 1024
-    assert len(payload) == 170832
+    assert 0 < len(payload) < 1024 * 1024
     assert len(payload) < 16 * 1024 * 1024
     registration = NativeRegistration(run_id, payload, logical)
     reserve_native_registration(case.conn, case.store, registration, spec)
-    replayed = read_native_registration(case.conn, case.store, spec)
+
+    class CountingStore:
+        def __init__(self):
+            self.root = case.store.root
+            self.reads = Counter()
+
+        def read_verified(self, ref):
+            self.reads[ref.storage_key] += 1
+            return case.store.read_verified(ref)
+
+    counting_store = CountingStore()
+    replayed = read_native_registration(case.conn, counting_store, spec)
     assert replayed.document == logical
     assert replayed.binding_json == payload
+    for descriptor in compact["size_artifacts"].values():
+        for shard in descriptor["entry"]["shards"]:
+            assert counting_store.reads[shard["ref"]["storage_key"]] == 1
     sealed = planner.seal_search_plan(case.conn, case.store, replayed, case.request)
     plan_ref = from_document(ArtifactRef, sealed["plan_ref"])
     assert planner.read_search_plan(case.conn, case.store, replayed, case.request, plan_ref) == sealed["plan"]

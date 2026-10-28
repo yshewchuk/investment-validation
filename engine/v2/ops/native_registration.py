@@ -56,7 +56,8 @@ def native_evidence_json(document, *, max_bytes=MAX_NATIVE_EVIDENCE_BYTES):
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "native evidence exceeds its canonical object contract") from None
 
 
-def verified_registration_bytes(conn, store, run_id, *, expected_ref=None, max_evidence_bytes=None):
+def verified_registration_bytes(conn, store, run_id, *, expected_ref=None, max_evidence_bytes=None,
+                                 verified_size_rows=None):
     """Return exact verified registration bytes, or None for an absent reservation."""
     if max_evidence_bytes is None:
         row = conn.execute(
@@ -86,7 +87,7 @@ def verified_registration_bytes(conn, store, run_id, *, expected_ref=None, max_e
         binding = store.read_verified(ref)
         document = json.loads(binding)
         _check_size_artifact_budget(document)
-        valid = _matches(row, evidence, ref, binding, document, store)
+        valid = _matches(row, evidence, ref, binding, document, store, verified_size_rows)
     except (ArtifactError, ValueError, TypeError, KeyError):
         valid = False
     except RecursionError:
@@ -120,21 +121,21 @@ def _check_size_artifact_budget(document):
                             "max_size_artifact_bytes": MAX_NATIVE_SIZE_ARTIFACT_BYTES})
 
 
-def _size_artifacts_verified(store, document):
+def _size_artifacts_verified(store, document, verified_size_rows=None):
     """Hash-check each v1.7 shard independently without assembling section JSON."""
     if document.get("schema_version") != "native_experiment_registration.v1.7":
         return True
     try:
         artifacts = document["size_artifacts"]
         for artifact_id, descriptor in artifacts.items():
-            if not _size_artifact_verified(store, descriptor):
+            if not _size_artifact_verified(store, descriptor, verified_size_rows):
                 return False
         return True
     except (ArtifactError, OSError, ValueError, TypeError, KeyError, AttributeError, RecursionError):
         return False
 
 
-def _size_artifact_verified(store, descriptor):
+def _size_artifact_verified(store, descriptor, verified_size_rows=None):
     """Verify one artifact descriptor's shards, row totals, and object cardinality."""
     try:
         entry = descriptor["entry"]
@@ -152,6 +153,8 @@ def _size_artifact_verified(store, descriptor):
             if any(not isinstance(row, dict) or set(row) != {"position", "row"}
                    or row["position"] != position + offset for offset, row in enumerate(rows)):
                 return False
+            if verified_size_rows is not None:
+                verified_size_rows[ref.storage_key] = rows
             position += len(rows)
         if position != entry["row_count"]:
             return False
@@ -162,9 +165,9 @@ def _size_artifact_verified(store, descriptor):
         return False
 
 
-def _matches(row, evidence, ref, binding, document, store):
+def _matches(row, evidence, ref, binding, document, store, verified_size_rows=None):
     variant = content_hash(document)
-    return (_magnitude_binding(document) and _size_artifacts_verified(store, document) and document["schema_version"] == ref.schema_ref
+    return (_magnitude_binding(document) and _size_artifacts_verified(store, document, verified_size_rows) and document["schema_version"] == ref.schema_ref
             and canonical_json(document).encode() == binding
             and artifact_reference(binding, ref.schema_ref) == ref
             and row["spec_hash"] == document["spec_hash"] and row["mode"] == "primary"

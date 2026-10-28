@@ -80,9 +80,9 @@ def pack_size_registration(store, document):
         if cached is not None:
             return {_PLACEHOLDER: cached[0]}
         if kind == "list":
-            rows = ({"position": index, "row": _plain(item)} for index, item in enumerate(value))
+            rows = ({"position": index, "row": walk(item)} for index, item in enumerate(value))
         elif kind == "map":
-            rows = ({"position": index, "row": [name, _plain(value[name])]}
+            rows = ({"position": index, "row": [name, walk(value[name], name)]}
                     for index, name in enumerate(sorted(value)))
         else:
             rows = iter(({"position": 0, "row": _plain(value)},))
@@ -109,7 +109,7 @@ def pack_size_registration(store, document):
     return compact, document
 
 
-def hydrate_size_registration(store, compact_document):
+def hydrate_size_registration(store, compact_document, *, verified_rows=None):
     """Verify referenced CAS shards and return the logical registration object."""
     size_registration_artifact_bytes(compact_document)
     artifacts = compact_document.get("size_artifacts")
@@ -127,7 +127,7 @@ def hydrate_size_registration(store, compact_document):
             seen.add(identifier)
             try:
                 values = []
-                for index, row in enumerate(iter_section(store, descriptor["section"], descriptor["entry"], _position)):
+                for index, row in enumerate(iter_section(store, descriptor["section"], descriptor["entry"], _position, verified_rows=verified_rows)):
                     if (not isinstance(row, dict) or set(row) != {"position", "row"}
                             or row["position"] != index):
                         raise ValueError
