@@ -273,6 +273,7 @@ class ChooserState:
     analog_pool: ChooserAnalogPoolArtifact
     admissible_table: AdmissibleDepthTable
     fold_pools: Mapping[str, Mapping[str, Any]]
+    fold_provenance: Mapping[str, Mapping[str, str]]
     producer_bindings: Mapping[str, Any]
     artifact_refs: tuple[str, ...]
 
@@ -283,13 +284,13 @@ _CHOOSER_FOLD_CACHE_TOKEN = object()
 @dataclass(frozen=True, kw_only=True)
 class _ChooserFoldCacheEntry:
     validation_token: object
-    fold_state: tuple[dict[str, Any], dict[str, Any], tuple[str, ...]]
+    fold_state: tuple[dict[str, Any], dict[str, Any], dict[str, dict[str, str]], tuple[str, ...]]
 
 
 def _chooser_fold_cache_lookup(
     fold_cache: dict[tuple[int, str], Any] | None,
     cache_key: tuple[int, str],
-) -> tuple[dict[str, Any], dict[str, Any], tuple[str, ...]] | None:
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, dict[str, str]], tuple[str, ...]] | None:
     if fold_cache is None:
         return None
     if type(fold_cache) is not dict:
@@ -302,14 +303,16 @@ def _chooser_fold_cache_lookup(
     if entry.validation_token is not _CHOOSER_FOLD_CACHE_TOKEN:
         raise ModelNotReady("chooser state", "chooser state is missing or unusable") from None
     state = entry.fold_state
-    if type(state) is not tuple or len(state) != 3:
+    if type(state) is not tuple or len(state) != 4:
         raise ModelNotReady("chooser state", "chooser state is missing or unusable") from None
-    pools, producers, artifact_refs = state
+    pools, producers, fold_provenance, artifact_refs = state
     if type(pools) is not dict or type(producers) is not dict:
+        raise ModelNotReady("chooser state", "chooser state is missing or unusable") from None
+    if type(fold_provenance) is not dict:
         raise ModelNotReady("chooser state", "chooser state is missing or unusable") from None
     if type(artifact_refs) is not tuple or not all(type(ref) is str for ref in artifact_refs):
         raise ModelNotReady("chooser state", "chooser state is missing or unusable") from None
-    return pools, producers, artifact_refs
+    return pools, producers, fold_provenance, artifact_refs
 
 
 def _chooser_day(value: Any) -> str:
@@ -393,7 +396,7 @@ def _chooser_fold_descriptor(
 def _load_chooser_fold_state(
     binding: ScoringReleaseBinding, event_date: Any, as_of: Any,
     fold_start: str, decision_cutoff: str,
-) -> tuple[dict[str, Any], dict[str, Any], tuple[str, ...]]:
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, dict[str, str]], tuple[str, ...]]:
     size = select_gate_forecast_source(binding, event_date, as_of)
     size_hash = getattr(size, "artifact_hash", None)
     if not isinstance(size_hash, str) or not size_hash:
@@ -405,6 +408,7 @@ def _load_chooser_fold_state(
         "interval_floor": size.interval_floor,
     }}
     producers = {}
+    fold_provenance: dict[str, dict[str, str]] = {}
     catalog_text = binding.chooser_fold_catalog_json
     parent = binding.chooser_parent_manifest
     if not catalog_text or parent is None:
@@ -422,8 +426,13 @@ def _load_chooser_fold_state(
             "interval_floor": descriptor.policy.interval_floor,
         }
         producers[descriptor.producer_output] = ref.release.bindings[0]
-        refs.append(content_hash(descriptor.policy))
-    return pools, producers, tuple(refs)
+        fold_provenance[descriptor.producer_output] = {
+            "training_cutoff": descriptor.training_cutoff,
+            "fold_start": descriptor.fold_start,
+            "descriptor_hash": descriptor.descriptor_hash,
+        }
+        refs.extend((descriptor.descriptor_hash, content_hash(descriptor.policy)))
+    return pools, producers, fold_provenance, tuple(refs)
 
 
 def select_chooser_state(
@@ -459,9 +468,10 @@ def select_chooser_state(
             fold_cache[cache_key] = _ChooserFoldCacheEntry(
                 validation_token=_CHOOSER_FOLD_CACHE_TOKEN,
                 fold_state=fold_state)
-    pools, producers, artifact_refs = fold_state
+    pools, producers, fold_provenance, artifact_refs = fold_state
     return ChooserState(
         analog_pool=analog[0], admissible_table=tables[0], fold_pools=pools,
+        fold_provenance=fold_provenance,
         producer_bindings=producers, artifact_refs=artifact_refs)
 
 

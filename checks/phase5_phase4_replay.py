@@ -129,6 +129,54 @@ def _staged_state(release_root: Path, staged: Mapping[str, str], prefix: str, ar
     return None, None
 
 
+def _has_causal_chooser_fold_provenance(recipe: Any, request: Any) -> bool:
+    from datetime import date, datetime
+
+    if not isinstance(recipe, Mapping):
+        return False
+    provenance = recipe.get("fold_provenance")
+    expected = {"pred_im_t1_d14", "pred_runup_abs_move_d14"}
+    if not isinstance(provenance, Mapping) or set(provenance) != expected:
+        return False
+    artifact_refs = recipe.get("artifact_refs")
+    if (not isinstance(artifact_refs, (list, tuple))
+            or any(not isinstance(ref, str) for ref in artifact_refs)):
+        return False
+    requested_at = getattr(request, "requested_decision_at", None)
+    if not isinstance(requested_at, str):
+        return False
+    try:
+        decision_day = date.fromisoformat(requested_at)
+    except ValueError:
+        try:
+            requested_datetime = datetime.fromisoformat(requested_at)
+        except ValueError:
+            return False
+        if requested_datetime.tzinfo is not None or requested_datetime.isoformat() != requested_at:
+            return False
+        decision_day = requested_datetime.date()
+    else:
+        if decision_day.isoformat() != requested_at:
+            return False
+    for item in provenance.values():
+        if not isinstance(item, Mapping) or set(item) != {
+                "training_cutoff", "fold_start", "descriptor_hash"}:
+            return False
+        cutoff_text, fold_text = item.get("training_cutoff"), item.get("fold_start")
+        descriptor_hash = item.get("descriptor_hash")
+        if (not isinstance(cutoff_text, str) or not isinstance(fold_text, str)
+                or not isinstance(descriptor_hash, str) or descriptor_hash not in artifact_refs):
+            return False
+        try:
+            cutoff_day, fold_day = date.fromisoformat(cutoff_text), date.fromisoformat(fold_text)
+        except ValueError:
+            return False
+        if (cutoff_day.isoformat() != cutoff_text or fold_day.isoformat() != fold_text
+                or fold_day.day != 1 or cutoff_day >= decision_day or cutoff_day >= fold_day):
+            return False
+    return True
+
+
 def rebind_chooser(chooser, request, release_root: Path, staged: Mapping[str, str]):
     """``(chooser block served from the staged release, absent, used)``.
 
@@ -143,6 +191,8 @@ def rebind_chooser(chooser, request, release_root: Path, staged: Mapping[str, st
     from engine.v2.models.loader import FrozenInference
     from engine.v2.scoring.chooser_inputs import frozen_chooser_block
 
+    if not _has_causal_chooser_fold_provenance(chooser.recipe, request):
+        return None, [("chooser:fold_provenance", "unverifiable")], set()
     release, absent, used = _rebind_release(chooser.release, staged)
     served = {}
     for name, prefix in (("analog_pool", "chooser_analog_pool"),

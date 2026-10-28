@@ -193,7 +193,7 @@ Feature math never fits; frozen executors own model inference. `release_bindings
 exposes verified chooser pools/depth tables and selects the chooser state for
 the request's cutoff. Nightly declares a chooser block for registered member
 rows; missing required state refuses that member row with typed
-`MODEL_NOT_READY`. DYN-SV selection remains a separate slice.
+`MODEL_NOT_READY`.
 Missing, ambiguous or unusable exact-cutoff chooser state refuses only that
 member row as `MODEL_NOT_READY`; missing champion features remain the separate
 advisory `CHOOSER_MISSING_FEATURES` outcome.
@@ -205,9 +205,10 @@ malformed, mismatched, same-day or later cutoffs refuse the member row as
 cause; the cache key includes the decision day and only entries produced by
 the validated fold loader are reusable. Existing folds without this field are
 not consumed; member rows refuse until provenance-bearing folds are produced
-and released. No cutoff is inferred from fold dates or runtime time. Request artifact refs also
-bind the selected size estimator and each producer's full chooser policy,
-including its `interval_floor`, because both contribute to chooser inputs.
+and released. No cutoff is inferred from fold dates or runtime time. Request
+artifact refs also bind the selected size estimator, each chooser producer
+descriptor hash and policy hash, including its `interval_floor`, because those
+declarations contribute to chooser inputs.
 Selector dates
 must be canonical ISO dates or timezone-naive datetimes; timezone-aware or
 noncanonical values refuse as `MODEL_NOT_READY`. The required producer

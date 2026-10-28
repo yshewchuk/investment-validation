@@ -240,7 +240,8 @@ def test_chooser_selector_selects_folds_and_caches(monkeypatch):
         return SimpleNamespace(
             policy=SimpleNamespace(role=role, interval_floor=0.2),
             fold_start=doc["fold_start"], producer_output=roles[role],
-            training_cutoff=doc.get("training_cutoff"))
+            training_cutoff=doc.get("training_cutoff"),
+            descriptor_hash=f"descriptor:{role}:{doc['training_cutoff']}")
 
     monkeypatch.setattr(release_bindings, "from_document", fake_from_document)
     loader_calls = []
@@ -274,7 +275,17 @@ def test_chooser_selector_selects_folds_and_caches(monkeypatch):
     assert state.producer_bindings["pred_im_t1_d14"].binding_id == "fold:implied_t1"
     assert state.producer_bindings["pred_runup_abs_move_d14"].binding_id == "fold:runup_move"
     assert state.artifact_refs == (
-        "size-hash", "size-floor:0.1", "policy:implied_t1", "policy:runup_move")
+        "size-hash", "size-floor:0.1",
+        "descriptor:implied_t1:2026-08-31", "policy:implied_t1",
+        "descriptor:runup_move:2026-08-31", "policy:runup_move")
+    assert state.fold_provenance == {
+        "pred_im_t1_d14": {
+            "training_cutoff": "2026-08-31", "fold_start": "2026-09-01",
+            "descriptor_hash": "descriptor:implied_t1:2026-08-31"},
+        "pred_runup_abs_move_d14": {
+            "training_cutoff": "2026-08-31", "fold_start": "2026-09-01",
+            "descriptor_hash": "descriptor:runup_move:2026-08-31"},
+    }
     assert loader_calls == ["implied_t1", "runup_move"]
 
     release_bindings.select_chooser_state(
@@ -301,7 +312,16 @@ def test_chooser_bundle_wires_producer_bindings_and_pools(monkeypatch):
         admissible_table=SimpleNamespace(
             table_id=N_ADMISSIBLE_TABLE_ID, version="v1", content_hash="h-t"),
         fold_pools={"fold": "pools"},
-        artifact_refs=("size-hash", "policy-implied", "policy-runup"),
+        fold_provenance={
+            "pred_im_t1_d14": {
+                "training_cutoff": "2026-08-31", "fold_start": "2026-09-01",
+                "descriptor_hash": "descriptor-implied"},
+            "pred_runup_abs_move_d14": {
+                "training_cutoff": "2026-08-31", "fold_start": "2026-09-01",
+                "descriptor_hash": "descriptor-runup"},
+        },
+        artifact_refs=("size-hash", "descriptor-implied", "policy-implied",
+                       "descriptor-runup", "policy-runup"),
     )
     monkeypatch.setattr(
         native_score_batch, "select_chooser_state",
@@ -338,6 +358,7 @@ def test_chooser_bundle_wires_producer_bindings_and_pools(monkeypatch):
         binding=binding, as_of="2026-10-27", fold_cache={})
 
     assert result.chooser_recipe["binding_id"] == "chooser:dynsv"
+    assert result.chooser_recipe["fold_provenance"] == state.fold_provenance
     assert result.chooser_recipe["producers"]["pred_im_t1_d14"]["binding_id"] == "fold:implied_t1"
     assert result.chooser_recipe["producers"]["pred_runup_abs_move_d14"]["binding_id"] == "fold:runup_move"
     assert result.chooser_recipe["analog_pool"] == {
@@ -345,7 +366,8 @@ def test_chooser_bundle_wires_producer_bindings_and_pools(monkeypatch):
     assert result.chooser_recipe["admissible_table"] == {
         "table_id": N_ADMISSIBLE_TABLE_ID, "version": "v1", "content_hash": "h-t"}
     assert result.chooser_recipe["artifact_refs"] == [
-        "size-hash", "policy-implied", "policy-runup"]
+        "size-hash", "descriptor-implied", "policy-implied",
+        "descriptor-runup", "policy-runup"]
     assert result.model_release.bindings == (existing, implied, runup)
     assert result.chooser_fold_pools == {"fold": "pools"}
     assert result.chooser_analog_pool.pool_id == "analog"
@@ -373,7 +395,8 @@ def test_score_artifact_refs_includes_chooser_artifacts():
         "analog_pool": {"content_hash": "analog-hash"},
         "admissible_table": {"content_hash": "table-hash"},
         "artifact_refs": [
-            "size-hash", "implied-policy-hash", "runup-policy-hash"],
+            "size-hash", "implied-descriptor-hash", "implied-policy-hash",
+            "runup-descriptor-hash", "runup-policy-hash"],
     }
     bundle = SimpleNamespace(
         gate_forecast_source=None,
@@ -383,6 +406,6 @@ def test_score_artifact_refs_includes_chooser_artifacts():
     refs = native_score_batch._score_artifact_refs((), None, bundle)
     assert set(refs) == {
         "chooser-hash", "implied-hash", "runup-hash", "analog-hash",
-        "table-hash", "size-hash", "implied-policy-hash",
-        "runup-policy-hash"}
-    assert len(refs) == 8
+        "table-hash", "size-hash", "implied-descriptor-hash",
+        "implied-policy-hash", "runup-descriptor-hash", "runup-policy-hash"}
+    assert len(refs) == 10

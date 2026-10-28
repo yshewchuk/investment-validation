@@ -804,6 +804,7 @@ def _chooser_bundle_or_refusal(
         return replace(bundle, chooser_recipe={
             "binding_id": chooser.binding_id,
             "artifact_refs": list(state.artifact_refs),
+            "fold_provenance": state.fold_provenance,
             "producers": {
                 "pred_im_t1_d14": {"binding_id": implied.binding_id},
                 "pred_runup_abs_move_d14": {"binding_id": runup.binding_id},
