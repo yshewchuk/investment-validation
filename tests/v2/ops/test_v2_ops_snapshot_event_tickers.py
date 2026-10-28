@@ -183,12 +183,13 @@ def test_an_unreadable_head_artifact_is_input_changed_with_the_artifact_error(
         monkeypatch, payload, artifact_error, artifact_code):
     # The REAL _resolve_scope_snapshot path through snapshot_event_tickers: only the head
     # resolve is patched, the store's own read/decode refuses, and the scan never runs.
+    head_ref = SimpleNamespace(byte_size=1)
     monkeypatch.setattr(snapshot_planning, "resolve_snapshot_head",
-                        lambda *args, **kwargs: "head")
+                        lambda *args, **kwargs: head_ref)
     monkeypatch.setattr(snapshot_planning, "scan_forward_board_requests", _explode)
 
     def read_verified(head):
-        assert head == "head"
+        assert head is head_ref
         if isinstance(payload, Exception):
             raise payload
         return payload
