@@ -71,7 +71,7 @@
     "tests/test_v2_ops_incremental_refresh_wiring.py",
     "tests/test_v2_ops_incremental_registration.py",
     "tests/test_v2_ops_ledger_history_import.py",
-    "tests/test_v2_ops_legacy_features.py",
+    "tests/v2/ops/test_v2_ops_legacy_features.py",
     "tests/v2/ops/test_v2_ops_legacy_workflows.py",
     "tests/test_v2_ops_migrations.py",
     "tests/v2/ops/test_v2_ops_native_board_universe.py",
