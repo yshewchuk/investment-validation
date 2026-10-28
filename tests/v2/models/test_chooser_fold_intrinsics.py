@@ -36,7 +36,7 @@ def _descriptor_document(role):
         "decision_clock_id": "entry-close", "pool_count": 2,
         "output_name": OUTPUTS[role][0], "producer_output": OUTPUTS[role][1],
         "pool_pred_field": "pool_pred", "pool_res_field": "pool_res",
-        "training_cutoff": None,
+        "training_cutoff": "2026-01-31",
         "estimator": {"schema_version": "artifact_member.v1.0", "name": "estimator",
                       "path": "objects/" + "c" * 64, "content_hash": "sha256:" + "c" * 64},
     }
@@ -243,7 +243,7 @@ def test_valid_metadata_preserves_values_order_and_complete_identity(role, floor
 @pytest.mark.parametrize("role", OUTPUTS)
 @pytest.mark.parametrize("field", [
     "parent_release_id", "parent_release_hash", "model_id", "feature_order", "panel_sha256",
-    "interval_floor", "role", "fold_start", "decision_clock_id", "pool_count", "estimator", "estimator_name",
+    "interval_floor", "role", "fold_start", "training_cutoff", "decision_clock_id", "pool_count", "estimator", "estimator_name",
 ])
 def test_descriptor_hash_binds_every_variable_identity_field(role, field):
     original = _construct_descriptor(_descriptor_document(role))
@@ -251,7 +251,8 @@ def test_descriptor_hash_binds_every_variable_identity_field(role, field):
     policy_changes = {"model_id": "another-model", "feature_order": ["middle", "alpha", "zeta"],
                       "panel_sha256": "d" * 64, "interval_floor": 1.25}
     descriptor_changes = {"parent_release_id": "another-parent", "parent_release_hash": "sha256:" + "e" * 64,
-                          "fold_start": "2026-03-01", "decision_clock_id": "next-open", "pool_count": 3}
+                          "fold_start": "2026-03-01", "training_cutoff": "2026-02-28",
+                          "decision_clock_id": "next-open", "pool_count": 3}
     if field in policy_changes:
         document["policy"][field] = policy_changes[field]
     elif field in descriptor_changes:
