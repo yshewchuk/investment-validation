@@ -861,6 +861,16 @@ def _computed_moves_capture_report(dry_run, targets, cache):
     }
 
 
+def _history_pair(history, source_root):
+    from engine.v2.ops import computed_moves_store
+
+    if history is None:
+        return computed_moves_store.tier1_yfinance_history_fetcher(source_root)
+    if not isinstance(history, tuple) or len(history) != 2:
+        raise fail("INVALID_REQUEST", "history must be a (cache, fetch) pair")
+    return history
+
+
 def computed_moves_command(args, root, conn, clock, *, history=None, include_source_bounds=False):
     """Tier-1 computed_moves.v5 generation; ``history`` is an optional ``(cache, fetch)`` pair (default newest-wins).
 
@@ -882,7 +892,7 @@ def computed_moves_command(args, root, conn, clock, *, history=None, include_sou
     if not lock.acquire():
         raise fail("RESOURCE_UNAVAILABLE", "a running supervisor holds this catalog")
     try:
-        cache, fetcher = history or computed_moves_store.tier1_yfinance_history_fetcher(args.source_root)
+        cache, fetcher = _history_pair(history, args.source_root)
         head = conn.execute(
             "SELECT snapshot_id, generation FROM data_snapshot_heads WHERE scope = ?",
             (args.scope,)).fetchone()

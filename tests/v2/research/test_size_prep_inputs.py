@@ -392,9 +392,10 @@ def test_fifo_and_symlink_cache_files_are_refused_without_blocking(source_root):
 def test_scan_logs_bounded_progress_to_stderr(source_root, monkeypatch, capsys):
     monkeypatch.setattr(prep, "PROGRESS_EVERY", 1)
     prep.build_manifest(source_root, session_ceiling=_AS_OF, tickers=["AAAA"])
-    err = capsys.readouterr().err
+    captured = capsys.readouterr()
+    err = captured.err
     assert "[size-prep] scan 1 of at most" in err and "ETA<=" in err and "rss_kib=" in err
-    assert "manifest end" in err and capsys.readouterr().out == ""
+    assert "manifest end" in err and captured.out == ""
 
 
 def test_production_roots_must_be_a_collection_of_paths(source_root, workspace):
