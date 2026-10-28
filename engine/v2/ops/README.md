@@ -198,6 +198,8 @@ unrecorded evaluation evidence; operations success is not scientific sweep compl
 `experiments/native_sweep_collection.py` consumes `catalog.transaction`/`sql_text_budget`/`decode_bounded_text`,
 `checkpoints.registered_artifact`, `experiments.experiment_spec_from_document`,
 `fingerprints.source_closure`, `native_registration.read_native_evidence`/`native_evidence_json`/`MAX_NATIVE_EVIDENCE_BYTES`, `submission.get_job`/`MAX_JOB_FAILURE_BYTES` and `errors.OpsError`/`fail` for collection. It directly reads ops-owned `attempts` and `attempt_outputs` for the exact terminal attempt; `artifacts` remains accessed through `registered_artifact`.
+`experiments/size_prep_inputs.py` consumes `bootstrap.open_catalog`, `errors.fail` and `cli.computed_moves_command` (history and `include_source_bounds` options) for write-root source-bounds generation.
+
 `experiments/v2_gate_collect.py` consumes `catalog.connect`, `submission.get_job`/`MAX_JOB_FAILURE_BYTES` and `errors.OpsError`/`fail` for an observer-only CLI.
 
 No other production package imports ops. The CLI starts the coordinator, and
