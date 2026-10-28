@@ -50,7 +50,10 @@ load-bearing entrypoints:
   `replay(score_id, records, legacy_fields) -> (ScoreRecord, ReplayReceipt)`.
 - `source_inputs.py` — `SourceBundle` (answer-free source dataclass, frozen,
   `kw_only=True`) and `build_native_score_inputs(bundle) -> NativeScoreInputs`,
-  the boundary every acceptance/parity caller starts from.
+  the boundary every acceptance/parity caller starts from. A declared
+  recalibration artifact must be the typed artifact and its declared
+  `content_hash` must match the canonical serialized payload before it enters
+  scoring inputs.
 - `gate_fold_selection.py` — `SizeFoldCatalog`, `index_size_folds` and
   `select_gate_forecast_source`: the release's staged size-fold descriptors
   (`ScoringReleaseBinding.size_folds`) and the causal choice of one fold.

@@ -1,4 +1,5 @@
 """Causal cutoff selection for frozen scoring artifacts."""
+from dataclasses import replace
 from datetime import date
 from types import SimpleNamespace
 
@@ -22,6 +23,7 @@ from engine.v2.ops.native_runup_inputs import (
 from engine.v2.ops.native_score_batch import _release_payoff_declarations
 from engine.v2.scoring.native_payoff import RUNUP_TERMS
 from engine.v2.scoring.nightly_source_bundle import NightlySourceBundleRefusal
+from engine.v2.scoring.source_inputs import _with_recalibration_block
 from engine.v2.scoring.stages import (
     STAGE_NAMES,
     NativeScoreInputs,
@@ -278,6 +280,11 @@ def test_roundtrip_restores_typed_artifacts_and_recalibrates_win_model():
         cutoff="2026-10-15",
         min_pairs=10,
     )
+    forged = replace(recalibration, content_hash="forged")
+    bundle = SimpleNamespace(
+        recalibration_declared=True, recalibration_artifact=forged)
+    with pytest.raises(ValueError, match="content_hash does not match payload"):
+        _with_recalibration_block(bundle, {"payoff_artifact": line})
     receipts = tuple(
         StageReceipt(stage, "declared-input", "declared-output")
         for stage in STAGE_NAMES if stage != "diagnostics")
