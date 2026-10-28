@@ -112,10 +112,34 @@ def _normalize_candidate_exclusions(records):
                   key=lambda exclusion: exclusion["ticker"])
 
 
+def _pin_snapshot_identity(identity, plan, input_mode, snapshot_inputs, snapshot_id):
+    if input_mode not in ("legacy", "snapshot"):
+        raise fail("INVALID_REQUEST", "input mode must be legacy or snapshot")
+    if snapshot_id is not None and (not isinstance(snapshot_id, str) or not snapshot_id):
+        raise fail("INVALID_REQUEST", "snapshot_id must be a nonempty string")
+    resolved_snapshot_id = snapshot_id
+    if input_mode == "snapshot":
+        if not snapshot_inputs:
+            raise fail("INVALID_REQUEST", "snapshot input mode needs pinned snapshot inputs")
+        pinned_inputs = dict(snapshot_inputs)
+        pinned_snapshot_id = pinned_inputs.get("snapshot_id")
+        if not isinstance(pinned_snapshot_id, str) or not pinned_snapshot_id:
+            raise fail("INVALID_REQUEST", "snapshot_id must be a nonempty string")
+        if resolved_snapshot_id is not None and resolved_snapshot_id != pinned_snapshot_id:
+            raise fail("INVALID_REQUEST", "snapshot_id differs from pinned snapshot inputs")
+        resolved_snapshot_id = pinned_snapshot_id
+        identity.update(input_mode=input_mode, snapshot_inputs=snapshot_inputs)
+        plan.update(input_mode=input_mode, snapshot_inputs=pinned_inputs)
+    if resolved_snapshot_id is not None:
+        identity["snapshot_id"] = resolved_snapshot_id
+        plan["snapshot_id"] = resolved_snapshot_id
+
+
 def nightly_plan(source_root, session, *, mode="shadow", manifest_ref=None,
                  tickers=(), context_tickers=(), year_start=2024, year_end=2026,
                  expected_population=(), candidate_exclusions=(), clock=None, input_mode="legacy",
-                 snapshot_inputs=None, full_run=False, refresh_mode="legacy", refresh_plan=None,
+                 snapshot_inputs=None, snapshot_id: str | None = None, full_run=False,
+                 refresh_mode="legacy", refresh_plan=None,
                  catalog_path=None, objects_root=None, retrain=None):
     """``full_run`` (``--full-run``, decision: writing the global ``"shadow"``
     effect scope must be explicit) records this plan's universe declaration.
@@ -167,13 +191,7 @@ def nightly_plan(source_root, session, *, mode="shadow", manifest_ref=None,
                 "expected_population": list(population),
                 "candidate_exclusions": list(exclusions),
                 "implementation": plan["implementation_ref"]}
-    if input_mode != "legacy":
-        # P2-6 §9.3/§8.1: the head was resolved once by the caller; the plan
-        # carries those exact refs, so a new head needs a new plan.
-        if input_mode != "snapshot" or not snapshot_inputs:
-            raise fail("INVALID_REQUEST", "snapshot input mode needs pinned snapshot inputs")
-        identity.update(input_mode=input_mode, snapshot_inputs=snapshot_inputs)
-        plan.update(input_mode=input_mode, snapshot_inputs=dict(snapshot_inputs))
+    _pin_snapshot_identity(identity, plan, input_mode, snapshot_inputs, snapshot_id)
     _pin_refresh_mode(identity, plan, refresh_mode, refresh_plan,
                       catalog_path=catalog_path, objects_root=objects_root, retrain=retrain)
     plan.update(kind="nightly", session=session, graph=NIGHTLY_GRAPH,
