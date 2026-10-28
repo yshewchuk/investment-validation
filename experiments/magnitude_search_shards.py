@@ -322,11 +322,17 @@ def _verified_keys(rows, key, first, last):
 
 
 def iter_section(store, section, entry, key, *, verified_rows=None):
-    """Stream one section's verified rows in order, holding one shard at a time."""
+    """Stream one section's verified rows in order, holding one shard at a time.
+
+    ``verified_rows`` is keyed by the complete artifact reference and section,
+    so a cached shard cannot be reused across a section or a different artifact
+    identity (schema, storage key, content hash or byte size).
+    """
     _, bindings = _bindings(entry)
     for ref, expected, first, last in bindings:
-        if verified_rows is not None and ref.storage_key in verified_rows:
-            rows = verified_rows[ref.storage_key]
+        cache_key = (section, ref.schema_ref, ref.storage_key, ref.content_hash, ref.byte_size)
+        if verified_rows is not None and cache_key in verified_rows:
+            rows = verified_rows[cache_key]
             if not isinstance(rows, list) or len(rows) != expected:
                 raise fail(_CONFLICT, "search cohort shard binding is invalid")
             rows = untag_nonfinite(rows)

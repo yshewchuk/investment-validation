@@ -162,7 +162,8 @@ def _size_artifact_verified(store, descriptor, verified_size_rows=None):
                    or row["position"] != position + offset for offset, row in enumerate(rows)):
                 return False
             if verified_size_rows is not None:
-                verified_size_rows[ref.storage_key] = rows
+                verified_size_rows[(section, ref.schema_ref, ref.storage_key, ref.content_hash,
+                                    ref.byte_size)] = rows
             position += len(rows)
         if position != entry["row_count"]:
             return False

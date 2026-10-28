@@ -85,6 +85,10 @@ class NativeRegistration:
     binding_json: bytes
     document_value: dict | None = None
 
+    def __post_init__(self):
+        if self.document_value is not None:
+            object.__setattr__(self, "document_value", deepcopy(self.document_value))
+
     @property
     def document(self):
         return deepcopy(self.document_value) if self.document_value is not None else json.loads(self.binding_json)

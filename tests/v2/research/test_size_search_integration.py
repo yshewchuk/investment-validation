@@ -81,6 +81,40 @@ def test_native_v17_anchor_and_explicit_v2_fitted_identities(case):
     assert {len(c["recipe"]["features"]) for c in plan["candidates"]} == {11, 28, 43}
 
 
+def test_native_registration_detaches_caller_document(case):
+    from experiments.native_registration import NativeRegistration
+
+    source = case.registration.document
+    registration = NativeRegistration(case.registration.run_id, case.registration.binding_json, source)
+    snapshot = registration.document
+    source["size_panel_request"]["event_ids"].append("caller-mutation")
+    assert registration.document == snapshot
+
+
+def test_verified_shard_cache_requires_full_binding(case):
+    from experiments.magnitude_search_shards import iter_section
+    from experiments.size_registration_artifacts import _position
+
+    compact = json.loads(case.registration.binding_json)
+    descriptor = next(iter(compact["size_artifacts"].values()))
+    section, entry = descriptor["section"], descriptor["entry"]
+    ref = from_document(ArtifactRef, entry["shards"][0]["ref"])
+    rows = json.loads(case.store.read_verified(ref))["rows"]
+    full_key = (section, ref.schema_ref, ref.storage_key, ref.content_hash, ref.byte_size)
+    assert len(list(iter_section(case.store, section, entry, _position,
+                                 verified_rows={full_key: rows}))) == len(rows)
+    old_cache = {ref.storage_key: rows}
+    with pytest.raises(OpsError):
+        list(iter_section(case.store, section + ":changed", entry, _position, verified_rows=old_cache))
+
+    changed = deepcopy(entry)
+    old_hash = changed["shards"][0]["ref"]["content_hash"]
+    zero_hash = "sha256:" + "0" * 64
+    changed["shards"][0]["ref"]["content_hash"] = zero_hash if old_hash != zero_hash else "sha256:" + "1" * 64
+    with pytest.raises(OpsError):
+        list(iter_section(case.store, section, changed, _position, verified_rows=old_cache))
+
+
 def test_preflight_missing_inner_year_refuses_before_reservation(case):
     changed = deepcopy(case.request)
     changed["inner_years"] = {"2024": ["2020"]}
