@@ -861,8 +861,13 @@ def _computed_moves_capture_report(dry_run, targets, cache):
     }
 
 
-def computed_moves_command(args, root, conn, clock):
-    """Build one computed_moves.v5 generation from the local Tier-1 cache."""
+def computed_moves_command(args, root, conn, clock, *, history=None, include_source_bounds=False):
+    """Tier-1 computed_moves.v5 generation; ``history`` is an optional ``(cache, fetch)`` pair (default newest-wins).
+
+    ``include_source_bounds`` (bool) goes to the refresh; with either option the report adds ``parent_snapshot_id``.
+    """
+    if type(include_source_bounds) is not bool:
+        raise fail("INVALID_REQUEST", "include_source_bounds must be boolean")
     from engine.v2.data.repository import Repository
     from engine.v2.ops import computed_moves_store
     from engine.v2.ops.calendar_moves_jobs import CalendarMovesParameters
@@ -877,7 +882,7 @@ def computed_moves_command(args, root, conn, clock):
     if not lock.acquire():
         raise fail("RESOURCE_UNAVAILABLE", "a running supervisor holds this catalog")
     try:
-        cache, fetcher = computed_moves_store.tier1_yfinance_history_fetcher(args.source_root)
+        cache, fetcher = history or computed_moves_store.tier1_yfinance_history_fetcher(args.source_root)
         head = conn.execute(
             "SELECT snapshot_id, generation FROM data_snapshot_heads WHERE scope = ?",
             (args.scope,)).fetchone()
@@ -898,6 +903,8 @@ def computed_moves_command(args, root, conn, clock):
             provider_account=NATIVE_COMPUTED_MOVES_ACCOUNT,
             expected_head_generation=int(head["generation"]))
         report = _computed_moves_capture_report(args.dry_run, targets, cache)
+        if history is not None or include_source_bounds:
+            report["parent_snapshot_id"] = plan.parent_snapshot_id
         if args.dry_run:
             return report
 
@@ -927,7 +934,8 @@ def computed_moves_command(args, root, conn, clock):
             as_of=as_of,
         )
         result = computed_moves_store.run_computed_moves_refresh(
-            parameters, root, as_of=as_of, fetcher=fetcher, use_cached_receipts=False)
+            parameters, root, as_of=as_of, fetcher=fetcher, use_cached_receipts=False,
+            include_source_bounds=include_source_bounds)
         report["result"] = to_document(result)
         return report
     finally:
