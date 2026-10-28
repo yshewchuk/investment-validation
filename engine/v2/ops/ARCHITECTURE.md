@@ -893,7 +893,7 @@ waits without submitting until its paired succeeded inputs are ready.
   — `effects_graph.py` is one of several implementation modules, not the
   only one.
 - Private shadow artifacts only: `build_nightly_plan` refuses any `mode` other than `"shadow"` (`INVALID_REQUEST`), so this package's nightly output never reaches the legacy board.
-- **`native_parity_report.json`.** `run_native_parity_worker` writes the report as an ordinary staged attempt output, `name="report"`, durably addressed `job_<native_parity job id>#report` — resolvable through `input_bindings.resolve_bindings` exactly like `score.json`'s own `job_<id>#score` binding, so a future job can bind `{"native_parity_report.json": "job_<id>#report"}` the same way `_decision_bindings`/`_render_bindings` already do. This is the same staged-attempt-output mechanism `records.json`/`score.json` use: the report stages privately and only becomes visible once the attempt is recorded `succeeded` — a killed worker leaves no output row, never a half-written file. No dashboard-facing "latest" pointer exists; a reader finds the report by job id (`ops get`/`ops logs`/`ops explain <job_id>`).
+- **`native_parity_report.json`.** `run_native_parity_worker` writes the report as an ordinary staged attempt output, `name="report"`, durably addressed `job_<native_parity job id>#report` — resolvable through `input_bindings.resolve_bindings` exactly like `score.json`'s own `job_<id>#legacy_score` binding, so a future job can bind `{"native_parity_report.json": "job_<id>#report"}` the same way `_decision_bindings`/`_render_bindings` already do. This is the same staged-attempt-output mechanism `records.json`/`score.json` use: the report stages privately and only becomes visible once the attempt is recorded `succeeded` — a killed worker leaves no output row, never a half-written file. No dashboard-facing "latest" pointer exists; a reader finds the report by job id (`ops get`/`ops logs`/`ops explain <job_id>`).
   Schema `native_parity_report.v1.1` adds `"native_refused"` (a `population_key`-matched legacy row moved out of `only_legacy`) and `"native_refused_unmatched"` (a native refusal with no legacy row to move) to v1.0's `compared`/`only_legacy`/`only_native`/`mismatches`/`tolerance_policy_id` fields; `only_legacy` now excludes rows `native_refused` claims. `nightly.submit_native_parity_if_ready` and its tick-loop caller, `Service._reconcile_native_parity`, submit such a job automatically once its inputs are ready.
   `v1.2` (cutover PR-4 slice 1 of #327) adds top-level `as_of`/`generated_at` (run identity, stamped by `_stamp_report_identity` at the write step, after `apply_native_refusals`, in both `run_native_parity_worker` and `native_parity_handler` -- never inside `compare_native_vs_legacy`/`_empty_native_report`, which stay wall-clock-free) and, inside each `mismatches` entry, `values` (that entry's own mismatched fields only, `{legacy, native}` -- `engine/v2/parity/ARCHITECTURE.md`); `v1.3` adds `ticker` and `reason` to every native refusal entry.
 - `forward_calendar_store.run_forward_calendar_refresh` commits revisions into the existing `earnings_events` contract through `engine.v2.data.generic_incremental` — never `engine.data.rebuild.rebuild` — and returns a `RefreshCallbackResult` (`status` one of `complete`/`noop`; invalid input or an unconfigured fetcher pair raises `OpsError` instead of returning a `"failed"` result). A run whose merged claims equal the parent snapshot's own rows reports `noop` rather than a spurious `complete` (the commit layer's own equality check decides this, never key presence in the parent).
@@ -910,9 +910,9 @@ the saved plan's `snapshot_id`, each input's producer job/output and SHA-256 of
 its staged bytes; provenance also lists unique producer job IDs and algorithm.
 This is nightly lineage only: no Phase 3 score/render verdict or comparison
 receipt is claimed. The verifier `tools/v2_dashboard_verified_input.py` and
-its `PreviewInput`/Phase 3 contract are unchanged. Output job refs are exposed
-for a future consumer; slice 2 does not bind `serving_projection` (#1500 stays
-parked).
+its `PreviewInput`/Phase 3 contract are unchanged. The producer exposes both
+outputs through ordinary job bindings; it does not emit a Phase 3 comparison
+verdict.
 
 **`computed_moves_refresh` and `forward_calendar_refresh` nightly wiring.**
 Both job kinds dispatch through `worker.py` to `calendar_moves_jobs`.
@@ -1077,7 +1077,7 @@ The nightly preview-input producer applies R1–R6 as follows:
 
 | # | `nightly_preview_inputs` outcome |
 |---|---|
-| R1 | A missing/failed parent output, missing pinned snapshot ID, or missing input binding refuses the job; no file is inferred from the mutable dashboard or Phase 3 receipts. |
+| R1 | A missing or failed parent output, or missing input binding, refuses the job. Plans without a pinned snapshot ID omit this producer stage. No file is inferred from the mutable dashboard or Phase 3 receipts. |
 | R2 | Reuse is valid only for the same saved-plan identity and the exact launch-resolved parent artifact IDs/hashes. A changed parent output changes the job input identity; missing or mismatched content refuses. Before hashing, all four staged inputs are preflighted; any input over 512 MiB refuses `RESOURCE_LIMIT_EXCEEDED` with its name and observed size. A streaming guard also catches growth past the cap before digesting excess bytes. Refusal writes neither JSON output. |
 | R3 | A retry reuses the saved plan's snapshot ID and the same dependency job identities. Transient job failures follow the bounded job retry policy; invalid pins or bindings require a valid new plan. |
 | R4 | The worker writes only in its private attempt staging directory. The supervisor publishes both named outputs only after validating the completed worker result and committing the successful attempt. |

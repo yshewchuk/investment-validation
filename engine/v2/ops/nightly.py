@@ -159,9 +159,11 @@ def _legacy_action(stage):
 
 #: Stages whose worker kind IS the stage name (never a ``legacy_*`` action):
 #: ``decision_evidence`` (P2-5/B1c) and the four effects-graph coordinator
-#: stages wired in P2-5/Task5. Each has a trivial pure worker; the real
+#: stages wired in P2-5/Task5 have trivial pure workers; their real
 #: catalog/outbox/filesystem work runs in the supervisor's coordinator effect
-#: (``engine.v2.ops.effects_graph``), never in the worker subprocess.
+#: (``engine.v2.ops.effects_graph``), never in the worker subprocess. Unlike
+#: them, ``nightly_preview_inputs`` hashes bound staged inputs and writes two
+#: staged JSON outputs in private attempt staging, with no coordinator effect.
 PURE_STAGES = frozenset({"decision_evidence", "ledger_export", "engineering_gate",
                          "publication", "backup", "nightly_preview_inputs"})
 
