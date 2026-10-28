@@ -38,8 +38,10 @@ re-renders, re-publishes, and the ledger refuses duplicate `row_id` writes.
   run session as a ceiling. The legacy nightly keeps that expected (previous)
   session as its freshness minimum and caps at the finality-resolved as-of
   session. If the calendar universe is empty and that ceiling is not final,
-  the helper refuses before fetch and the caller falls back to the expected
-  previous session.
+  the helper refuses before fetch and the caller retries with the expected
+  previous session as ceiling, reusing the same refetch token. A refusal of
+  that retry stops the run. With a non-empty universe, `session_not_final`
+  stops at `gspc_refresh` without retry.
 
 - `nightly.py` — the orchestrator; run as the legacy nightly entrypoint
   (root doc §4). Public helpers for the Tier-4 gap repair:
@@ -223,7 +225,10 @@ publish command, per `publish.py`'s `CommandPublisher` variant);
 - **`^GSPC` refresh failure or stale success** — when both refresh and tiers
   are enabled, ordinary helper refusal stops full and fetch-only runs with
   `GSPC_REFRESH_FAILED: <reason>`; credential rotation uses the fixed detail
-  `GSPC_REFRESH_FAILED: credential_rotated`. A source response that does not
+  `GSPC_REFRESH_FAILED: credential_rotated`. For an empty calendar universe
+  only, `session_not_final` on the as-of ceiling retries at the expected
+  previous session with the same refetch token; a refusal of that retry stops
+  normally. A non-empty universe does not retry. A source response that does not
   contain the last NYSE session strictly before the resolved decision date
   stops with `GSPC_REFRESH_STALE: expected through <date>, got source missing
   or ending before cutoff`. Both are `NightlyStop` at `gspc_refresh`, after calendar refresh
@@ -271,6 +276,7 @@ publish command, per `publish.py`'s `CommandPublisher` variant);
 
   | Condition | Outcome |
   | --- | --- |
+  | Empty calendar universe and GSPC helper returns `session_not_final` for the as-of ceiling | Retry once at the expected previous session with the same refetch token; any retry refusal follows the `^GSPC` refresh failure outcome above |
   | `^GSPC` refresh refuses (`GSPC_REFRESH_FAILED`) or source lacks the last NYSE session strictly before the resolved decision date (`GSPC_REFRESH_STALE`; with refresh and tiers on) | `NightlyStop` at `gspc_refresh`; exit 1 after calendar refresh and finality resolution, but before panel rebuild, warm or score; previous panel and published board remain; stale source is refused before the stored series is read or written |
   | Warm step (default scorer, or `--fetch-only`): subprocess exits non-zero, cannot start, times out (3 h), fails to plan/verify, leaves a fit missing or not ready, or the panel changed under it | `NightlyStop` `WARM_SERVING_FAILED`; exit 1; nothing scored; no in-process refit |
   | Incremental build leaves an out-of-window gap (`tier4_gap_partial`) | Full Tier-4 rebuild (no `--since`); no gap flag once repaired |

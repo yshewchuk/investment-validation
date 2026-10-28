@@ -1900,7 +1900,8 @@ def run_nightly(
             ]
             expected = previous_sessions[-1]
             refetch_token = f"legacy-nightly-{time.time_ns()}"
-            # expected is the prior-session freshness minimum; the as-of run session is the finality-checked ceiling (the run is post-close).
+            # expected remains the previous-session freshness minimum; resolved as-of is the
+            # inclusive run-session ceiling; the scheduled nightly is post-close.
             result = refresh_gspc_daily(
                 fetcher, paths.GSPC_DAILY, refetch_token=refetch_token,
                 minimum_last_date=expected, session=as_of.strftime("%Y-%m-%d"),
@@ -1913,6 +1914,11 @@ def run_nightly(
                 # session_not_final is returned before fetch, so this fallback makes only one GSPC
                 # fetch and uses the completed previous session when no ticker universe exists to
                 # resolve as_of.
+                print(
+                    "[nightly] as-of ceiling refused; retrying with prior completed "
+                    "session because the calendar universe is empty",
+                    file=sys.stderr,
+                )
                 result = refresh_gspc_daily(
                     fetcher, paths.GSPC_DAILY, refetch_token=refetch_token,
                     minimum_last_date=expected, session=expected,

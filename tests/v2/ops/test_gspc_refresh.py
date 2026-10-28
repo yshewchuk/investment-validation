@@ -249,6 +249,7 @@ def test_session_ceiling_keeps_the_stored_history_prefix(tmp_path):
     before = _write_legacy(path, CEIL_DATES[:2])
 
     result = refresh_gspc_daily(StubFetcher(body=_body(CEIL_DATES)), path,
+                                minimum_last_date="2026-08-26",
                                 session="2026-08-27", refetch_token="run-1",
                                 now=CEILING_NOW)
 
