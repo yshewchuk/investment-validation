@@ -156,8 +156,9 @@ def test_a_data_error_from_the_head_resolve_is_the_same_input_changed_mapping(mo
 def test_a_head_that_moves_vs_the_expected_snapshot_id_is_refused_before_the_scan(monkeypatch):
     # The shared helper's own refusal fires before Repository/scan are even built --
     # generated_population reaches this same refusal through the same helper.
+    head_ref = SimpleNamespace(byte_size=1)
     monkeypatch.setattr(snapshot_planning, "resolve_snapshot_head",
-                        lambda *args, **kwargs: "artifact-1")
+                        lambda *args, **kwargs: head_ref)
     monkeypatch.setattr(snapshot_planning, "from_document",
                         lambda cls, document: SimpleNamespace(snapshot_id="snap_other"))
     monkeypatch.setattr(snapshot_planning, "Repository", _explode)
