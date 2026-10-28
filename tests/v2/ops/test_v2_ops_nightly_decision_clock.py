@@ -15,6 +15,15 @@ from tests.ops_support import sample
 SESSION = "2026-09-12"
 
 
+def _stub_shadow_snapshot_head(monkeypatch):
+    def resolve(conn, store, scope, *, clock):
+        assert scope == "shadow"
+        return store.publish_bytes(
+            json.dumps({"snapshot_id": "test-shadow-snapshot"}).encode(),
+            schema_ref="snapshot_ref.v1.0")
+    monkeypatch.setattr("engine.v2.ops.snapshots.resolve_snapshot_head", resolve)
+
+
 @pytest.mark.parametrize("host_cpu_count", [8, 12])
 def test_plan_nightly_pins_decision_clock_and_resubmission_reuses_it(
         tmp_path, capsys, monkeypatch, host_cpu_count):
@@ -24,6 +33,7 @@ def test_plan_nightly_pins_decision_clock_and_resubmission_reuses_it(
     capacity = sample(SystemClock())
     monkeypatch.setattr(commands, "sample_capacity", lambda *args, **kwargs: capacity)
     root = tmp_path / "ops"
+    _stub_shadow_snapshot_head(monkeypatch)
     population_file = tmp_path / "population.json"
     population_file.write_text(json.dumps(["FAKE|TWIN-P|" + SESSION]))
     manifest_file = tmp_path / "manifest.json"
@@ -50,6 +60,7 @@ def test_plan_nightly_pins_decision_clock_and_resubmission_reuses_it(
                      "--tickers", "FAKE", "--input-manifest", str(manifest_file),
                      "--expected-population", str(population_file)]) == 0
     plan_doc = json.loads(capsys.readouterr().out)
+    assert plan_doc["plan"]["snapshot_id"] == "test-shadow-snapshot"
     decision_clock = plan_doc["plan"]["decision_clock"]
     assert decision_clock
     plan_ref = plan_doc["plan_ref"]

@@ -557,7 +557,7 @@ Entry/exit/expiry, spot and calendar-observed-through are caller-staged; validat
 
 ## Inputs
 
-- Plan documents built by `plans.py::nightly_plan`/`build_nightly_plan` (pinned decision clock, read set, session).
+- Plan documents built by `plans.py::nightly_plan`/`build_nightly_plan` (pinned decision clock, read set, session, snapshot ID). `ops plan nightly` gets native IDs from pinned inputs and resolves the legacy shadow head once, then stores the ID in the plan and identity hash. A missing legacy head raises `SNAPSHOT_NOT_READY` before plan save; retries reuse the saved ID and a fresh plan invocation resolves a new pin.
 - The operations catalog (sqlite, via `catalog.py`'s `transaction`) — job
   rows, leases, retry history, provider-account budgets.
 - The artifact store (`ArtifactStore`, filesystem-backed) for refresh plans

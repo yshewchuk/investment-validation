@@ -29,6 +29,15 @@ from engine.v2.ops.submission import NamespacePolicy, submit
 REPO = Path(__file__).resolve().parents[3]
 
 
+def _stub_shadow_snapshot_head(monkeypatch):
+    def resolve(conn, store, scope, *, clock):
+        assert scope == "shadow"
+        return store.publish_bytes(
+            json.dumps({"snapshot_id": "test-shadow-snapshot"}).encode(),
+            schema_ref="snapshot_ref.v1.0")
+    monkeypatch.setattr("engine.v2.ops.snapshots.resolve_snapshot_head", resolve)
+
+
 # --------------------------------------------------------------------------
 # A2: the planned population is keyed before strike/expiry exist
 # --------------------------------------------------------------------------
@@ -144,7 +153,8 @@ def test_nightly_plan_population_is_required_before_submit_and_hashed():
     assert planned["plan_hash"] != other["plan_hash"]
 
 
-def test_cli_submit_refuses_a_nightly_plan_with_blocked_prerequisites(tmp_path, capsys):
+def test_cli_submit_refuses_a_nightly_plan_with_blocked_prerequisites(tmp_path, capsys, monkeypatch):
+    _stub_shadow_snapshot_head(monkeypatch)
     root = tmp_path / "ops"
     assert cli.main(["--root", str(root), "init"]) == 0
     capsys.readouterr()
@@ -157,7 +167,8 @@ def test_cli_submit_refuses_a_nightly_plan_with_blocked_prerequisites(tmp_path, 
     assert out["code"] == "INVALID_REQUEST"
 
 
-def test_cli_plan_nightly_accepts_expected_population_file(tmp_path, capsys):
+def test_cli_plan_nightly_accepts_expected_population_file(tmp_path, capsys, monkeypatch):
+    _stub_shadow_snapshot_head(monkeypatch)
     root = tmp_path / "ops"
     population_file = tmp_path / "population.json"
     population_file.write_text(json.dumps(["FAKE|TWIN-P|2026-09-12"]))

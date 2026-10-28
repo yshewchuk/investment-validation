@@ -85,6 +85,15 @@ POLICY = NamespacePolicy({"operator": frozenset({"shadow"})})
 SESSION = "2026-09-10"
 
 
+def _stub_shadow_snapshot_head(monkeypatch):
+    def resolve(conn, store, scope, *, clock):
+        assert scope == "shadow"
+        return store.publish_bytes(
+            json.dumps({"snapshot_id": "test-shadow-snapshot"}).encode(),
+            schema_ref="snapshot_ref.v1.0")
+    monkeypatch.setattr("engine.v2.ops.snapshots.resolve_snapshot_head", resolve)
+
+
 def _nightly_manifest_dict(note: str = "") -> dict:
     """A minimal manifest dict that satisfies the capture-inputs plan-time
     guard (``engine.v2.data.legacy_nightly_read_plan.manifest_problems``) --
@@ -144,6 +153,7 @@ def test_identical_resubmission_of_the_same_plan_returns_the_same_jobs(tmp_path)
 
 def test_operator_scenario_replan_after_manifest_change_gets_fresh_jobs_and_old_rows_survive(
         tmp_path, monkeypatch, capsys):
+    _stub_shadow_snapshot_head(monkeypatch)
     root = tmp_path / "ops"
     population_file = tmp_path / "population.json"
     population_file.write_text(json.dumps(["FAKE|TWIN-P|" + SESSION]))
@@ -216,6 +226,7 @@ def test_operator_scenario_replan_after_manifest_change_gets_fresh_jobs_and_old_
 
 
 def test_same_plan_different_cli_idempotency_key_is_still_a_retry(tmp_path, monkeypatch, capsys):
+    _stub_shadow_snapshot_head(monkeypatch)
     root = tmp_path / "ops"
     population_file = tmp_path / "population.json"
     population_file.write_text(json.dumps(["FAKE|TWIN-P|" + SESSION]))

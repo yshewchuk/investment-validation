@@ -285,8 +285,17 @@ def _plan_command(args, root, conn, clock):
     if args.kind == "nightly":
         tickers = _ticker_list(args.tickers)
         context_tickers = _ticker_list(args.context_tickers) or tickers
-        population, snapshot_id, candidate_exclusions = _planned_population(
+        population, planned_snapshot_id, candidate_exclusions = _planned_population(
             args, root, conn, clock, tickers)
+        snapshot_inputs = _snapshot_inputs(args, root, conn, clock, context_tickers,
+                                           population, planned_snapshot_id)
+        if snapshot_inputs is None:
+            from engine.v2.ops.snapshots import resolve_snapshot_head
+            store = ArtifactStore(root)
+            snapshot_ref = resolve_snapshot_head(conn, store, "shadow", clock=clock)
+            snapshot_id = json.loads(store.read_verified(snapshot_ref))["snapshot_id"]
+        else:
+            snapshot_id = snapshot_inputs["snapshot_id"]
         from engine.v2.ops.snapshot_stages import _catalog_path
         plan = nightly_plan(Path(__file__).resolve().parents[4], args.as_of,
                             mode=args.mode, manifest_ref=_read_input_manifest_ref(args, root, conn, clock),
@@ -295,8 +304,7 @@ def _plan_command(args, root, conn, clock):
                             expected_population=population, clock=clock,
                             input_mode=args.input_mode, full_run=args.full_run,
                             candidate_exclusions=candidate_exclusions,
-                            snapshot_inputs=_snapshot_inputs(args, root, conn, clock, context_tickers,
-                                                             population, snapshot_id),
+                            snapshot_inputs=snapshot_inputs, snapshot_id=snapshot_id,
                             refresh_mode=args.refresh_mode, refresh_plan=_read_refresh_plan(args),
                             catalog_path=_catalog_path(conn), objects_root=str(root),
                             retrain=_retrain_section(args, root, conn))
