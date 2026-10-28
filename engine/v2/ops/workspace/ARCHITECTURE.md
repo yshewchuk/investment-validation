@@ -4,7 +4,7 @@ An isolated experiment write sandbox over one **read-only** pinned snapshot: an 
 
 ## Closure (`closure.verify_snapshot_closure(conn, store, snapshot_id, manifest_hash, *, deep=False) -> SnapshotClosure`)
 
-Reads only: catalog queries on the caller's connection and one `lstat` per object (`deep` also re-hashes via `objects.verify_object_path`). The production catalog is trusted local data written by our own pipeline; one size guard (fragment set over 2,000,000 rows or 256 MiB of stored text refuses `closure_rows_over_cap` / `closure_bytes_over_cap`) exists only to catch our own bugs, not hostile rows. `Repository.resolve_full` re-derives dataset versions, fragments, objects and contracts; the module then checks the rest. Every defect is `SNAPSHOT_CLOSURE_BROKEN` (integrity, non-retryable) with `details.reason`; nothing is repaired.
+Reads only: catalog queries on the caller's connection and one `lstat` per object (`deep` also re-hashes via `objects.verify_object_path`). The production catalog is trusted local data written by our own pipeline; every catalog read, including `resolve_full`'s, goes through one bounded cursor (over 2,000,000 rows or 256 MiB in one read refuses `closure_rows_over_cap` / `closure_bytes_over_cap`) that exists only to catch our own bugs, not hostile rows. `Repository.resolve_full` re-derives dataset versions, fragments, objects and contracts; the module then checks the rest. Every defect is `SNAPSHOT_CLOSURE_BROKEN` (integrity, non-retryable) with `details.reason`; nothing is repaired.
 
 | Defect | `reason` |
 | --- | --- |

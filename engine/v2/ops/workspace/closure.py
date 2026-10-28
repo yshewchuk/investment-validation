@@ -13,10 +13,10 @@ Failure semantics: every defect raises ``SNAPSHOT_CLOSURE_BROKEN`` whose ``detai
 names it; nothing is repaired, skipped or retried. Raw receipts and normalizations behind
 ``daily_market`` revisions are outside this closure: a snapshot reader scans fragments only.
 Progress goes to stderr at a bounded cadence; the result is a value, never stdout.
-Reads trust the production catalog (our own pipeline wrote it). One overall guard, kept only
-against our own bugs, refuses a snapshot whose fragment set exceeds 2,000,000 rows or 256 MiB
-of stored text (`closure_rows_over_cap` / `closure_bytes_over_cap`) before
-``Repository.resolve_full`` materializes it; there are no per-column, per-table or cumulative caps.
+Reads trust the production catalog (our own pipeline wrote it). Every catalog read,
+including ``Repository.resolve_full``'s, goes through one bounded cursor (2,000,000 rows /
+256 MiB per read; ``closure_rows_over_cap`` / ``closure_bytes_over_cap``), kept only against
+our own bugs; there are no per-column, per-table or cumulative caps.
 """
 from __future__ import annotations
 
@@ -68,21 +68,51 @@ def _log(message: str) -> None:
     print("[closure] " + message, file=sys.stderr, flush=True)
 
 
-def _bound_fragments(conn, snapshot_id: str) -> None:
-    """The single size guard: refuse an over-large fragment set before ``resolve_full`` loads it."""
-    scope = ("FROM data_fragments f WHERE f.fragment_id IN (SELECT fragment_id FROM "
-             "data_version_fragments WHERE dataset_version_id IN (SELECT dataset_version_id "
-             "FROM data_snapshot_tables WHERE snapshot_id = ?))")
-    rows, size = conn.execute(
-        "SELECT COUNT(*), SUM(LENGTH(CAST(f.fragment_id || f.object_id || f.contract_id "
-        "|| f.partition_key || f.byte_hash || f.logical_content_hash || f.key_bounds_json "
-        "|| COALESCE(f.time_bounds_json, '') || f.import_request_hash "
-        "|| f.input_receipt_refs_json || f.registered_at AS BLOB))) " + scope,
-        (snapshot_id,)).fetchone()
-    if rows > _MAX_ROWS:
-        raise _broken("closure_rows_over_cap", table="data_fragments", rows=rows)
-    if (size or 0) > _MAX_ROW_BYTES:
-        raise _broken("closure_bytes_over_cap", table="data_fragments")
+def _row_bytes(row) -> int:
+    return sum(len(value) if isinstance(value, (str, bytes)) else 8 for value in tuple(row))
+
+
+class _BoundedCursor:
+    """The one bounding mechanism: ``fetchall`` streams rows and refuses past one rows/bytes cap."""
+
+    def __init__(self, cursor):
+        self._cursor = cursor
+
+    def fetchall(self) -> list:
+        rows, size = [], 0
+        while batch := self._cursor.fetchmany(100):
+            rows += batch
+            size += sum(_row_bytes(row) for row in batch)
+            if len(rows) > _MAX_ROWS:
+                raise _broken("closure_rows_over_cap")
+            if size > _MAX_ROW_BYTES:
+                raise _broken("closure_bytes_over_cap")
+        return rows
+
+    def fetchone(self):
+        row = self._cursor.fetchone()
+        if row is not None and _row_bytes(row) > _MAX_ROW_BYTES:
+            raise _broken("closure_bytes_over_cap")
+        return row
+
+    def __iter__(self):
+        return iter(self.fetchall())
+
+    def __getattr__(self, name):
+        return getattr(self._cursor, name)
+
+
+class _BoundedConn:
+    """Wraps the catalog connection so every closure and ``resolve_full`` read is bounded."""
+
+    def __init__(self, conn):
+        self._conn = conn
+
+    def execute(self, sql, params=()):
+        return _BoundedCursor(self._conn.execute(sql, params))
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
 
 
 def _dataset_parents(conn, resolved) -> None:
@@ -214,10 +244,12 @@ def verify_snapshot_closure(conn, store: ArtifactStore, snapshot_id: str, manife
     """Verify ``snapshot_id``'s whole closure against ``manifest_hash``; read-only."""
     started = time.monotonic()
     _log(f"stage=verify start snapshot={snapshot_id} deep={deep}")
-    _bound_fragments(conn, snapshot_id)
+    conn = _BoundedConn(conn)
     try:
         resolved = Repository(conn).resolve_full(snapshot_id)
     except errors.DataError as exc:
+        if exc.problem.details.get("reason") in ("closure_rows_over_cap", "closure_bytes_over_cap"):
+            raise
         raise _broken("snapshot_unresolved", snapshot_id=snapshot_id, cause=exc.code) from exc
     snapshot = resolved.snapshot
     if snapshot.manifest_hash != manifest_hash:

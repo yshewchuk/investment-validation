@@ -441,3 +441,30 @@ def test_lineage_edges_change_the_closure_identity(prod):
     with _create(prod, "edges-after") as ws:
         after = ws.closure.identity_digest
     assert before != after
+
+
+def test_bounded_cursor_refuses_on_rows_and_bytes_and_covers_coverage_reads(prod, monkeypatch):
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("CREATE TABLE t (v TEXT)")
+    conn.executemany("INSERT INTO t VALUES (?)", [("abcd",)] * 3)
+    bounded = closure_module._BoundedConn(conn)
+    assert len(bounded.execute("SELECT v FROM t").fetchall()) == 3
+    monkeypatch.setattr(closure_module, "_MAX_ROWS", 2)
+    with pytest.raises(DataError) as caught:
+        bounded.execute("SELECT v FROM t").fetchall()
+    assert _details(caught) == ("SNAPSHOT_CLOSURE_BROKEN", "closure_rows_over_cap")
+    monkeypatch.setattr(closure_module, "_MAX_ROWS", 2_000_000)
+    monkeypatch.setattr(closure_module, "_MAX_ROW_BYTES", 8)
+    with pytest.raises(DataError) as caught:
+        bounded.execute("SELECT v FROM t").fetchall()
+    assert _details(caught) == ("SNAPSHOT_CLOSURE_BROKEN", "closure_bytes_over_cap")
+    # a read that used to be uncapped (coverage rows) now goes through the same cursor
+    monkeypatch.setattr(closure_module, "_MAX_ROW_BYTES", 256 * 1024 * 1024)
+    ro = sqlite3.connect(prod.catalog.as_uri() + "?mode=ro", uri=True)
+    ro.row_factory = sqlite3.Row
+    monkeypatch.setattr(closure_module, "_MAX_ROWS", 0)
+    with pytest.raises(DataError) as caught:
+        closure_module._commit_receipts(closure_module._BoundedConn(ro), prod.snap.snapshot_id)
+    assert _details(caught) == ("SNAPSHOT_CLOSURE_BROKEN", "closure_rows_over_cap")
+    ro.close()
