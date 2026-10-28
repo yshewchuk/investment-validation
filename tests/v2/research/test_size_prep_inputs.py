@@ -114,6 +114,7 @@ def test_generate_bounds_writes_only_the_write_root_and_labels_provenance(source
     record = prep.generate_bounds(root, source_root=source_root, manifest=manifest, scope="shadow", as_of=_AS_OF)
     assert _tree(source_root) == source_before
     assert record["label"] == "reconstructed"
+    assert record["refresh_noop"] is False
     assert record["session_ceiling"] == _AS_OF and record["latest_fetched_at"] == "2026-01-01T00:00:00+00:00"
     assert record["entries_fetched_after_ceiling"] == 1
     assert record["source_snapshot_id"] == parent and record["bounds_snapshot_id"] != parent
@@ -182,3 +183,22 @@ def test_generate_bounds_refuses_unpinned_targets_without_committing(source_root
     finally:
         conn.close()
     assert not (root / "size_prep").exists()
+
+
+def test_missing_source_root_and_oversized_sidecar_are_typed_refusals(source_root, tmp_path, monkeypatch):
+    manifest = prep.build_manifest(source_root, session_ceiling=_AS_OF, tickers=["AAAA"])
+    missing = tmp_path / "nowhere"
+    _refusal(lambda: prep.build_manifest(missing, session_ceiling=_AS_OF, tickers=["AAAA"]), "INVALID_REQUEST")
+    _refusal(lambda: prep.pinned_history_fetcher(missing, manifest), "INVALID_REQUEST")
+    monkeypatch.setattr(prep, "MAX_META_BYTES", 10)
+    _refusal(lambda: prep.build_manifest(source_root, session_ceiling=_AS_OF, tickers=["AAAA"]), "SOURCE_INVALID")
+    _refusal(lambda: prep.pinned_history_fetcher(source_root, manifest), "SOURCE_INVALID")
+
+
+def test_rerun_after_commit_is_marked_noop_and_still_proves_bounds(source_root, workspace):
+    root, _ = workspace
+    manifest = prep.build_manifest(source_root, session_ceiling=_AS_OF, tickers=["AAAA"])
+    first = prep.generate_bounds(root, source_root=source_root, manifest=manifest, scope="shadow", as_of=_AS_OF)
+    second = prep.generate_bounds(root, source_root=source_root, manifest=manifest, scope="shadow", as_of=_AS_OF)
+    assert second["refresh_noop"] is True
+    assert second["source_snapshot_id"] == second["bounds_snapshot_id"] == first["bounds_snapshot_id"]

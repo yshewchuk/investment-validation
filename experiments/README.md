@@ -394,13 +394,15 @@ Library-only helpers for preparing SIZE inputs inside a caller-supplied write ro
 
 **`generate_bounds(...)`** runs `run_computed_moves_refresh(..., include_source_bounds=True, use_cached_receipts=False)` with the pinned fetcher against `<write_root>/catalog.sqlite` (must exist and resolve directly inside `write_root`); the object root is `write_root` itself; its input document and the supervisor lock are written there only. The refresh regenerates `computed_moves` for the pinned tickers, adds the `computed_move_bounds.v1` sibling table, and commits one new snapshot that advances the selected scope's head in that write-root catalog (catalog rows and objects included); it writes nothing outside `write_root`.
 
-**`size_prep_provenance.v1`** `{schema_version, label: "reconstructed", session_ceiling, manifest_id, entry_count, earliest_fetched_at, latest_fetched_at, entries_fetched_after_ceiling, source_snapshot_id, bounds_snapshot_id, record_id}` is written to `<write_root>/size_prep/provenance-<hash>.json` (atomic rename) and returned. `source_snapshot_id` is the pre-refresh parent; `bounds_snapshot_id` is the refresh result (equal to the parent if the refresh was a no-op).
+**`size_prep_provenance.v1`** `{schema_version, label: "reconstructed", refresh_noop, session_ceiling, manifest_id, entry_count, earliest_fetched_at, latest_fetched_at, entries_fetched_after_ceiling, source_snapshot_id, bounds_snapshot_id, record_id}` is written to `<write_root>/size_prep/provenance-<hash>.json` (atomic rename) and returned. `source_snapshot_id` is the pre-refresh parent; `bounds_snapshot_id` is the refresh result (equal to the parent, with `refresh_noop: true`, if the refresh committed nothing; this is accepted only when the head already carries source bounds, so a rerun after an interrupted earlier run records the parent that already holds the bounds, not the original pre-bounds source).
 
 | Failure | Code |
 |---|---|
 | Malformed manifest, ceiling, ticker list, or `catalog.sqlite` not directly inside `write_root` | `INVALID_REQUEST` |
 | Requested ticker has no eligible Tier-1 entry at build; or, in `generate_bounds` (strict fetcher), a refresh target not pinned in the manifest (refused during capture, before any commit) | `SOURCE_NOT_FOUND` |
-| Cache body not a regular file (symlink, FIFO), or unreadable/corrupt gzip | `SOURCE_INVALID` |
+| `source_root` not an existing directory (`build_manifest`, pinned fetcher, `generate_bounds`) | `INVALID_REQUEST` |
+| Sidecar or cache body not a regular file (symlink, FIFO), sidecar above `MAX_META_BYTES` (1 MiB), or unreadable/corrupt gzip | `SOURCE_INVALID` |
+| Refresh was a no-op and the head carries no source bounds | `PUBLICATION_REFUSED` |
 | Decompressed cache body above `MAX_BODY_BYTES` (64 MiB) | `RESOURCE_LIMIT_EXCEEDED` |
 | Pinned entry missing, `fetched_at`, status or body hash changed | `INPUT_CHANGED` |
 | `as_of` differs from `session_ceiling` | `INVALID_REQUEST` |
