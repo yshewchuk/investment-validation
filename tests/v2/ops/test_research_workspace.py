@@ -546,16 +546,27 @@ def test_second_create_of_the_same_name_refuses_and_leaves_the_first_intact(prod
     assert not [p for p in prod.tmp.iterdir() if p.name.startswith(".creating-")]
 
 
-def test_workspace_scope_repository_binds_reads_to_the_pinned_snapshot(prod):
-    from engine.v2.ops.workspace.scope import size_scope_repository
+def test_workspace_scope_repository_binds_reads_and_published_pin(prod):
+    from engine.v2.foundation import content_hash
+    from engine.v2.ops.workspace.scope import SCOPE_HEAD_VERSION, size_scope_repository
 
     before = _state(prod)
+    scope = "x" * 100
     with _create(prod) as workspace:
-        view = size_scope_repository(workspace, "size-prep", clock=prod.clock)
-        pinned = view.resolve_pinned("size-prep")
+        view = size_scope_repository(workspace, scope, clock=prod.clock)
+        pinned = view.resolve_pinned(scope)
         assert (pinned.snapshot_id, pinned.manifest_hash) == (
             prod.snap.snapshot_id, prod.snap.manifest_hash)
         assert view.resolve(pinned.snapshot_id).snapshot_id == pinned.snapshot_id
+        stored = json.loads(workspace.store.read_verified(view.read_pin_ref))
+        binding = stored["pin"]
+        assert binding["schema_version"] == SCOPE_HEAD_VERSION
+        assert binding["scope"] == scope
+        assert binding["snapshot_id"] == prod.snap.snapshot_id
+        assert binding["manifest_hash"] == prod.snap.manifest_hash
+        assert binding["binding_id"] == view.binding_id
+        assert view.binding_id == content_hash({k: v for k, v in binding.items()
+                                                if k != "binding_id"})
         with pytest.raises(OpsError) as caught:
             view.resolve_pinned("other")
         assert _details(caught) == ("WORKSPACE_REFUSED", "scope_mismatch")
@@ -569,41 +580,95 @@ def test_workspace_scope_repository_refuses_invalid_scope_before_workspace_acces
         def source_snapshot(self):
             raise AssertionError("invalid scope must be checked first")
 
-    for scope in ("", " size-prep", "x" * 101, "bad\x00scope"):
+    for scope in ("", " size-prep", "x" * 101, "bad\x00scope", "bad\ud800scope"):
         with pytest.raises(OpsError) as caught:
             size_scope_repository(UnreadableWorkspace(), scope, clock=None)
         assert _details(caught) == ("WORKSPACE_REFUSED", "scope_invalid")
 
 
-def test_workspace_scope_repository_refuses_changed_pin():
+def test_workspace_scope_repository_refuses_invalid_workspace():
     from engine.v2.ops.workspace.scope import size_scope_repository
 
-    original = SimpleNamespace(snapshot_id="snap_a", manifest_hash="hash_a")
-    changed = SimpleNamespace(snapshot_id="snap_b", manifest_hash="hash_b")
+    invalid = SimpleNamespace(snapshot_id="snap_a", manifest_hash="hash_a",
+                              source=object(),
+                              source_snapshot=lambda: None, record_read_pin=lambda *a, **k: None)
+    with pytest.raises(OpsError) as caught:
+        size_scope_repository(invalid, "size-prep", clock=object())
+    assert _details(caught) == ("WORKSPACE_REFUSED", "workspace_invalid")
 
-    class ChangingWorkspace:
+
+def test_workspace_scope_repository_refuses_changed_captured_pin(prod):
+    from engine.v2.ops.workspace.scope import size_scope_repository
+
+    with _create(prod) as workspace:
+        original = workspace.source_snapshot()
+        from engine.v2.data.repository import Repository
+        previous = Repository(workspace._source_conn).resolve(original.parent_snapshot_id)
+        view = size_scope_repository(workspace, "size-prep", clock=prod.clock)
+        workspace.source._only = previous.snapshot_id
+        workspace.snapshot_id = previous.snapshot_id
+        workspace.manifest_hash = previous.manifest_hash
+        with pytest.raises(DataError) as caught:
+            view.resolve_pinned("size-prep")
+        assert caught.value.code == "SNAPSHOT_CLOSURE_BROKEN"
+        assert caught.value.problem.details["reason"] == "pin_mismatch"
+
+
+def test_workspace_scope_repository_preserves_manifest_mismatch_reason(prod):
+    from engine.v2.ops.workspace.scope import size_scope_repository
+
+    with _create(prod) as workspace:
+        view = size_scope_repository(workspace, "size-prep", clock=prod.clock)
+        workspace.manifest_hash = "changed-manifest"
+        with pytest.raises(DataError) as caught:
+            view.resolve_pinned("size-prep")
+        assert caught.value.code == "SNAPSHOT_CLOSURE_BROKEN"
+        assert caught.value.problem.details["reason"] == "manifest_mismatch"
+
+
+def test_workspace_scope_repository_types_snapshot_read_failure():
+    from engine.v2.ops.workspace.scope import size_scope_repository
+
+    class BrokenWorkspace:
         snapshot_id = "snap_a"
         manifest_hash = "hash_a"
-
-        def __init__(self):
-            self.reads = 0
+        source = SimpleNamespace(resolve=lambda _snapshot_id: None)
 
         def source_snapshot(self):
-            self.reads += 1
-            return original if self.reads == 1 else changed
+            raise OSError("synthetic read failure")
 
         def record_read_pin(self, name, document, *, clock):
-            self.pin = (name, document)
+            raise AssertionError("snapshot failure must precede publication")
 
-    workspace = ChangingWorkspace()
-    view = size_scope_repository(workspace, "size-prep", clock=object())
-    with pytest.raises(DataError) as caught:
-        view.resolve_pinned("size-prep")
-    assert caught.value.code == "SNAPSHOT_CLOSURE_BROKEN"
-    assert caught.value.details["reason"] == "pin_mismatch"
+    with pytest.raises(OpsError) as caught:
+        size_scope_repository(BrokenWorkspace(), "size-prep", clock=object())
+    assert _details(caught) == ("WORKSPACE_REFUSED", "storage_failure")
 
 
-def test_workspace_scope_repository_types_storage_failure():
+def test_workspace_scope_repository_preserves_typed_read_pin_failure():
+    from engine.v2.ops.errors import fail
+    from engine.v2.ops.workspace.scope import size_scope_repository
+
+    snapshot = SimpleNamespace(snapshot_id="snap_a", manifest_hash="hash_a")
+    refusal = fail("RESOURCE_UNAVAILABLE", "synthetic typed failure")
+
+    class TypedFailureWorkspace:
+        snapshot_id = "snap_a"
+        manifest_hash = "hash_a"
+        source = SimpleNamespace(resolve=lambda _snapshot_id: snapshot)
+
+        def source_snapshot(self):
+            return snapshot
+
+        def record_read_pin(self, name, document, *, clock):
+            raise refusal
+
+    with pytest.raises(OpsError) as caught:
+        size_scope_repository(TypedFailureWorkspace(), "size-prep", clock=object())
+    assert caught.value is refusal
+
+
+def test_workspace_scope_repository_types_unexpected_read_pin_failure():
     from engine.v2.ops.workspace.scope import size_scope_repository
 
     snapshot = SimpleNamespace(snapshot_id="snap_a", manifest_hash="hash_a")
@@ -611,6 +676,7 @@ def test_workspace_scope_repository_types_storage_failure():
     class BrokenWorkspace:
         snapshot_id = "snap_a"
         manifest_hash = "hash_a"
+        source = SimpleNamespace(resolve=lambda _snapshot_id: snapshot)
 
         def source_snapshot(self):
             return snapshot

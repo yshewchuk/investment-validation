@@ -1,6 +1,6 @@
 # `engine/v2/ops/workspace` — architecture
 
-An isolated experiment write sandbox over one **read-only** pinned snapshot: an overlay, never a copy. Library only: no CLI, no heads, no scope, no supervisor. Modules: `closure.py` (read-only closure verification), `overlay.py` (create/open), `guard.py` (execution refusal).
+An isolated experiment write sandbox over one **read-only** pinned snapshot: an overlay, never a copy. Library only: no CLI, no native heads, no supervisor. Modules: `closure.py` (read-only closure verification), `overlay.py` (create/open), `scope.py` (workspace-local scope binding), `guard.py` (execution refusal).
 
 ## Closure (`closure.verify_snapshot_closure(conn, store, snapshot_id, manifest_hash, *, deep=False) -> SnapshotClosure`)
 
@@ -61,10 +61,12 @@ existing `ResearchWorkspace.record_read_pin`, `SnapshotOnlyRepository` and
 
 | Failure | Outcome |
 |---|---|
-| Scope is empty, malformed or over 100 characters | `WORKSPACE_REFUSED`, `scope_invalid`; no read pin is written. |
-| Workspace pin no longer resolves to its recorded snapshot and manifest | `SNAPSHOT_CLOSURE_BROKEN`, preserving the existing reason; no fallback. |
+| Scope is empty, malformed, contains an unpaired surrogate or is over 100 characters | `WORKSPACE_REFUSED`, `scope_invalid`; no workspace access or read pin write. |
+| Workspace handle lacks its snapshot reader, source view, pin writer or snapshot identity | `WORKSPACE_REFUSED`, `workspace_invalid`; no read pin write. |
 | A different scope is resolved through the returned view | `WORKSPACE_REFUSED`, `scope_mismatch`. |
-| Read-pin publication or catalog storage fails | Existing typed workspace storage refusal propagates; an unreferenced complete CAS object may remain. |
+| Captured binding differs from a subsequently resolved workspace snapshot or manifest | `SNAPSHOT_CLOSURE_BROKEN`, `pin_mismatch`. |
+| The pinned source snapshot is no longer resolvable | Existing `SNAPSHOT_NOT_FOUND` propagates; no fallback. A manifest mismatch propagates as `SNAPSHOT_CLOSURE_BROKEN`, `manifest_mismatch`. |
+| Read-pin publication or catalog storage fails | Existing `OpsError`/`DataError` propagates; unexpected exceptions become `WORKSPACE_REFUSED`, `storage_failure`. A complete unreferenced CAS object may remain. |
 
 R1–R6 follow the workspace failure contract: stable typed refusal; no partial
 result; no repair or retry; stale scope fails closed; production remains
