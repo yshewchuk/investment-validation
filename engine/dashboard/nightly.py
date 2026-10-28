@@ -1900,9 +1900,10 @@ def run_nightly(
             ]
             expected = previous_sessions[-1]
             refetch_token = f"legacy-nightly-{time.time_ns()}"
+            # expected is the prior-session freshness minimum; the as-of run session is the finality-checked ceiling (the run is post-close).
             result = refresh_gspc_daily(
                 fetcher, paths.GSPC_DAILY, refetch_token=refetch_token,
-                minimum_last_date=expected, session=expected,
+                minimum_last_date=expected, session=as_of.strftime("%Y-%m-%d"),
             )
             _log_rss("gspc refresh end")
             report.mark("gspc_refresh", started=started)

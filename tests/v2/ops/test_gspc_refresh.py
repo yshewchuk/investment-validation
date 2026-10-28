@@ -206,6 +206,26 @@ def test_session_ceiling_drops_rows_after_the_session(tmp_path):
     assert path.read_bytes() == _legacy_text(CEIL_DATES[:3]).encode("utf-8")
 
 
+def test_legacy_as_of_session_keeps_final_close_and_drops_future_row(tmp_path):
+    """The legacy run keeps D while enforcing prior-session minimum coverage."""
+    path = tmp_path / "gspc_daily.csv"
+    before = _write_legacy(path, CEIL_DATES[:3])
+    body_dates = CEIL_DATES
+    fetcher = StubFetcher(body=_body(body_dates))
+
+    result = refresh_gspc_daily(
+        fetcher, path, minimum_last_date="2026-08-26", session="2026-08-27",
+        refetch_token="legacy-run", now=CEILING_NOW,
+    )
+
+    assert result == {"ok": True, "last_date": "2026-08-27", "rows": 3}
+    assert fetcher.calls[0][-1] == "legacy-run"
+    assert path.read_bytes() == before
+    raw = pd.read_csv(path, skiprows=3, header=None)
+    assert [str(value) for value in raw[0]] == CEIL_DATES[:3]
+    assert "2026-08-28" not in path.read_text()
+
+
 def test_session_ceiling_keeps_the_stored_history_prefix(tmp_path):
     """Stored rows D1,D2 come back out of the capped rewrite byte-for-byte."""
     path = tmp_path / "gspc_daily.csv"

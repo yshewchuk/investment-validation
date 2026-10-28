@@ -180,7 +180,7 @@ def test_fetch_only_happy_path_skips_scoring_half(tmp_path, monkeypatch):
     _, gspc_kwargs = fake.gspc[0]
     assert gspc_kwargs["refetch_token"].startswith("legacy-nightly-")
     assert gspc_kwargs["minimum_last_date"] == pd.Timestamp("2026-10-20")
-    assert gspc_kwargs["session"] == gspc_kwargs["minimum_last_date"]
+    assert gspc_kwargs["session"] == "2026-10-21"
     assert report.steps["gspc_refresh"] == {
         "ok": True, "last_date": "2026-10-22", "rows": 1
     }
