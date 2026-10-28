@@ -150,9 +150,36 @@ def _staged_state(release_root: Path, staged: Mapping[str, str], prefix: str, ar
     return None, None
 
 
+def _chooser_replay_dates(request: Any):
+    from datetime import date, datetime
+
+    def parse(value):
+        if not isinstance(value, str):
+            return None
+        try:
+            parsed = date.fromisoformat(value)
+        except ValueError:
+            try:
+                parsed_datetime = datetime.fromisoformat(value)
+            except ValueError:
+                return None
+            if parsed_datetime.tzinfo is not None or parsed_datetime.isoformat() != value:
+                return None
+            return parsed_datetime.date()
+        if parsed.isoformat() != value:
+            return None
+        return parsed
+
+    event_day = parse(getattr(request, "event_date", None))
+    decision_day = parse(getattr(request, "requested_decision_at", None))
+    if event_day is None or decision_day is None:
+        return None
+    return event_day, decision_day
+
+
 def _has_causal_chooser_fold_provenance(recipe: Any, request: Any,
                                         staged: Mapping[str, str]) -> bool:
-    from datetime import date, datetime
+    from datetime import date
 
     if not isinstance(recipe, Mapping):
         return False
@@ -164,22 +191,11 @@ def _has_causal_chooser_fold_provenance(recipe: Any, request: Any,
     if (not isinstance(artifact_refs, (list, tuple))
             or any(not isinstance(ref, str) for ref in artifact_refs)):
         return False
-    requested_at = getattr(request, "requested_decision_at", None)
-    if not isinstance(requested_at, str):
+    replay_dates = _chooser_replay_dates(request)
+    if replay_dates is None:
         return False
-    try:
-        decision_day = date.fromisoformat(requested_at)
-    except ValueError:
-        try:
-            requested_datetime = datetime.fromisoformat(requested_at)
-        except ValueError:
-            return False
-        if requested_datetime.tzinfo is not None or requested_datetime.isoformat() != requested_at:
-            return False
-        decision_day = requested_datetime.date()
-    else:
-        if decision_day.isoformat() != requested_at:
-            return False
+    event_day, decision_day = replay_dates
+    expected_fold_start = min(event_day.replace(day=1), decision_day.replace(day=1)).isoformat()
     for producer_output, item in provenance.items():
         if not isinstance(item, Mapping) or set(item) != {
                 "training_cutoff", "fold_start", "descriptor_hash"}:
@@ -197,15 +213,20 @@ def _has_causal_chooser_fold_provenance(recipe: Any, request: Any,
         except ValueError:
             return False
         if (cutoff_day.isoformat() != cutoff_text or fold_day.isoformat() != fold_text
-                or fold_day.day != 1 or cutoff_day >= decision_day or cutoff_day >= fold_day
-                or fold_day > decision_day.replace(day=1)):
+                or fold_day.day != 1 or fold_text != expected_fold_start
+                or cutoff_day >= decision_day or cutoff_day >= fold_day):
             return False
     return True
 
 
-def _staged_chooser_pools(chooser, release_root: Path, manifest):
+def _staged_chooser_pools(chooser, request, release_root: Path, manifest):
     if not isinstance(manifest, Mapping):
         return None
+    replay_dates = _chooser_replay_dates(request)
+    if replay_dates is None:
+        return None
+    event_day, decision_day = replay_dates
+    expected_fold_start = min(event_day.replace(day=1), decision_day.replace(day=1)).isoformat()
     from numpy import array_equal, asarray
     from engine.v2.foundation import from_document
     from engine.v2.models import deployment
@@ -253,7 +274,8 @@ def _staged_chooser_pools(chooser, release_root: Path, manifest):
             or any(not isinstance(ref, str) for ref in artifact_refs)):
         return None
     size_matches = [(obj, descriptor) for obj, descriptor in size_docs
-                    if descriptor.estimator.content_hash in artifact_refs]
+                    if descriptor.estimator.content_hash in artifact_refs
+                    and descriptor.fold_start == expected_fold_start]
     if len(size_matches) != 1:
         return None
     size_obj, size_descriptor = size_matches[0]
@@ -344,7 +366,7 @@ def rebind_chooser(chooser, request, release_root: Path, staged: Mapping[str, st
 
     if not _has_causal_chooser_fold_provenance(chooser.recipe, request, staged):
         return None, [("chooser:fold_provenance", "unverifiable")], set()
-    fold_pools = _staged_chooser_pools(chooser, release_root, manifest)
+    fold_pools = _staged_chooser_pools(chooser, request, release_root, manifest)
     if fold_pools is None:
         return None, [("chooser:fold_pools", "unverifiable")], set()
     release, absent, used = _rebind_release(chooser.release, staged)

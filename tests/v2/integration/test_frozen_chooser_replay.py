@@ -40,7 +40,8 @@ def test_frozen_replay_refuses_missing_or_noncausal_fold_provenance(monkeypatch,
         recipe["artifact_refs"] = ["descriptor-implied", "descriptor-runup"]
     chooser = SimpleNamespace(recipe=recipe)
     request = SimpleNamespace(
-        requested_decision_at="2026-10-27", strategy_version="TWIN-P")
+        event_date="2026-10-27", requested_decision_at="2026-10-27",
+        strategy_version="TWIN-P")
     verified = {
         "request": request,
         "inputs": SimpleNamespace(gate={"mode": "chooser"}, chooser=None),
@@ -67,22 +68,23 @@ def test_frozen_replay_refuses_missing_or_noncausal_fold_provenance(monkeypatch,
 def test_frozen_replay_requires_provenance_bound_to_staged_descriptors():
     provenance = {
         "pred_im_t1_d14": {
-            "training_cutoff": "2026-09-30", "fold_start": "2026-10-01",
+            "training_cutoff": "2026-08-31", "fold_start": "2026-09-01",
             "descriptor_hash": "descriptor-implied"},
         "pred_runup_abs_move_d14": {
-            "training_cutoff": "2026-09-30", "fold_start": "2026-10-01",
+            "training_cutoff": "2026-08-31", "fold_start": "2026-09-01",
             "descriptor_hash": "descriptor-runup"},
     }
     recipe = {
         "fold_provenance": provenance,
         "artifact_refs": ["descriptor-implied", "descriptor-runup"],
     }
-    request = SimpleNamespace(requested_decision_at="2026-10-27")
+    request = SimpleNamespace(
+        event_date="2026-09-15", requested_decision_at="2026-10-27")
     staged = {
         "__chooser_descriptor__:descriptor-implied":
-            "pred_im_t1_d14\x1f2026-09-30\x1f2026-10-01",
+            "pred_im_t1_d14\x1f2026-08-31\x1f2026-09-01",
         "__chooser_descriptor__:descriptor-runup":
-            "pred_runup_abs_move_d14\x1f2026-09-30\x1f2026-10-01",
+            "pred_runup_abs_move_d14\x1f2026-08-31\x1f2026-09-01",
     }
 
     assert phase5_phase4_replay._has_causal_chooser_fold_provenance(
@@ -91,9 +93,22 @@ def test_frozen_replay_requires_provenance_bound_to_staged_descriptors():
         recipe, request, {})
     mismatched = dict(staged)
     mismatched["__chooser_descriptor__:descriptor-implied"] = (
-        "pred_im_t1_d14\x1f2026-10-01\x1f2026-10-01")
+        "pred_im_t1_d14\x1f2026-08-01\x1f2026-09-01")
     assert not phase5_phase4_replay._has_causal_chooser_fold_provenance(
         recipe, request, mismatched)
+
+    later_provenance = {
+        output: {**item, "fold_start": "2026-10-01"}
+        for output, item in provenance.items()
+    }
+    later_recipe = {**recipe, "fold_provenance": later_provenance}
+    later_staged = {
+        f"__chooser_descriptor__:{item['descriptor_hash']}":
+            f"{output}\x1f{item['training_cutoff']}\x1f{item['fold_start']}"
+        for output, item in later_provenance.items()
+    }
+    assert not phase5_phase4_replay._has_causal_chooser_fold_provenance(
+        later_recipe, request, later_staged)
 
 
 def test_replay_pool_values_must_match_staged_fold_estimators(monkeypatch, tmp_path):
@@ -104,14 +119,14 @@ def test_replay_pool_values_must_match_staged_fold_estimators(monkeypatch, tmp_p
         digest = f"hash:{output}"
         descriptors[digest] = SimpleNamespace(
             descriptor_hash=digest, producer_output=output,
-            training_cutoff="2026-09-30", fold_start="2026-10-01",
+            training_cutoff="2026-08-31", fold_start="2026-09-01",
             parent_release_id="parent",
             policy=SimpleNamespace(interval_floor=0.25))
         refs[output] = SimpleNamespace(
             pool_pred=np.array([index + 1.0, index + 2.0]),
             pool_res=np.array([index + 3.0, index + 4.0]))
         provenance[output] = {
-            "training_cutoff": "2026-09-30", "fold_start": "2026-10-01",
+            "training_cutoff": "2026-08-31", "fold_start": "2026-09-01",
             "descriptor_hash": digest}
         rows.append({"member_id": f"tier4_folds:{'implied_t1' if index == 0 else 'runup_move'}",
                      "objects": [{"serving_fold": {"descriptor_hash": digest}}]})
@@ -122,6 +137,7 @@ def test_replay_pool_values_must_match_staged_fold_estimators(monkeypatch, tmp_p
 
     size_descriptor = SimpleNamespace(
         descriptor_hash="size", parent_release_id="parent",
+        fold_start="2026-09-01",
         estimator=SimpleNamespace(content_hash="hash:size"),
         policy=SimpleNamespace(interval_floor=0.4))
     size_ref = SimpleNamespace(
@@ -159,13 +175,20 @@ def test_replay_pool_values_must_match_staged_fold_estimators(monkeypatch, tmp_p
         fold_pools=pools)
     manifest = {"manifest_hash": "sha256:catalog", "members": rows}
 
+    request = SimpleNamespace(
+        event_date="2026-09-15", requested_decision_at="2026-10-27")
+    size_descriptor.fold_start = "2026-10-01"
+    assert phase5_phase4_replay._staged_chooser_pools(
+        chooser, request, tmp_path, manifest) is None
+    size_descriptor.fold_start = "2026-09-01"
+
     pools["pred_abs_move"]["predictions"] = np.array([99.0, 99.0])
     assert phase5_phase4_replay._staged_chooser_pools(
-        chooser, tmp_path, manifest) is None
+        chooser, request, tmp_path, manifest) is None
 
     pools["pred_abs_move"]["predictions"] = size_ref.pool_pred.copy()
     verified = phase5_phase4_replay._staged_chooser_pools(
-        chooser, tmp_path, manifest)
+        chooser, request, tmp_path, manifest)
     assert verified is not None
     for output, ref in refs.items():
         assert np.array_equal(verified[output]["predictions"], ref.pool_pred)
