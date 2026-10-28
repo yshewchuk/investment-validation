@@ -383,6 +383,36 @@ def _menu_row_with_frozen_chooser(chooser_root, tmp_path, monkeypatch):  # noqa:
 
     _case, chooser_candidate = _captured_chooser(chooser_root, tmp_path, monkeypatch)
     source = chooser_candidate["legacy_trace"]["checkpoints"]["source_inputs"]["value"]
+    expected_folds = {"pred_im_t1_d14", "pred_runup_abs_move_d14"}
+    descriptor_hashes = {
+        "pred_im_t1_d14": "sha256:" + "1" * 64,
+        "pred_runup_abs_move_d14": "sha256:" + "2" * 64,
+    }
+
+    def attach_provenance(value):
+        if isinstance(value, dict):
+            recipe = value.get("recipe")
+            if (isinstance(recipe, dict)
+                    and isinstance(recipe.get("producers"), dict)
+                    and set(recipe["producers"]) == expected_folds
+                    and "fold_pools" in value):
+                recipe["artifact_refs"] = list(recipe.get("artifact_refs", ())) + list(
+                    descriptor_hashes.values())
+                recipe["fold_provenance"] = {
+                    output: {
+                        "training_cutoff": "1900-01-01",
+                        "fold_start": "1900-02-01",
+                        "descriptor_hash": descriptor_hashes[output],
+                    }
+                    for output in sorted(expected_folds)
+                }
+                return True
+            return any(attach_provenance(child) for child in value.values())
+        if isinstance(value, (list, tuple)):
+            return any(attach_provenance(child) for child in value)
+        return False
+
+    assert attach_provenance(source["frozen"])
     path, digest = _artifact(tmp_path)
     candidate = _full_strict_candidate(
         fixture_id="twin", ticker="AAA", strategy="TWIN-P", driver_vector={"x": 2.0},
