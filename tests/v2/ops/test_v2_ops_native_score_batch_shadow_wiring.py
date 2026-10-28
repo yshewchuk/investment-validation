@@ -1253,33 +1253,53 @@ def test_failed_native_batch_stays_failed_after_release_success_then_resolves(
     conn.close()
 
 
-def _add_pool_phase(conn, clock, *, session, phase, state):
-    key = pool_refresh.phase_key(session, phase, "prior-release", "tag12345")
-    request = SubmitRequest(
-        namespace="shadow", idempotency_key=key, principal="operator",
-        job=JobSpec(
-            kind="models_promote", implementation_ref="code", spec_hash=None,
-            environment_ref="env",
-            parameters={
-                "expected_ids": ("models_promote",), "release_root": "release-root",
-                "release_id": f"pools-{session}-tag12345",
-                "expected_previous_release_id": "prior-release",
-            },
-            output_namespace="shadow", resource_class="delivery",
-            retry_policy_ref="bounded",
-            checkpoint_contract_ref="promote_pointer_state.v1.0"))
-    receipt = submit(conn, registry(), _POLICY, request, clock=clock)
-    conn.execute("UPDATE jobs SET state = ? WHERE job_id = ?", (state, receipt.job_id))
-    conn.commit()
-    return key, receipt.job_id
+def _add_pool_phase(conn, clock, *, session, phase, state, tag=None,
+                    prior="prior-release"):
+    if tag is None:
+        tag = pool_refresh.manifest_tag("pool-cycle-test-manifest")
+
+    def add_one(phase_name, phase_state):
+        key = pool_refresh.phase_key(session, phase_name, prior, tag)
+        request = SubmitRequest(
+            namespace="shadow", idempotency_key=key, principal="operator",
+            job=JobSpec(
+                kind="models_promote", implementation_ref="code", spec_hash=None,
+                environment_ref="env",
+                parameters={
+                    "expected_ids": ("models_promote",), "release_root": "release-root",
+                    "release_id": f"pools-{session}-{tag}",
+                    "expected_previous_release_id": prior,
+                },
+                output_namespace="shadow", resource_class="delivery",
+                retry_policy_ref="bounded",
+                checkpoint_contract_ref="promote_pointer_state.v1.0"))
+        receipt = submit(conn, registry(), _POLICY, request, clock=clock)
+        conn.execute("UPDATE jobs SET state = ? WHERE job_id = ?",
+                     (phase_state, receipt.job_id))
+        conn.commit()
+        return key, receipt.job_id
+
+    for training_phase in pool_refresh.TRAINING_PHASES:
+        if training_phase == phase:
+            continue
+        add_one(training_phase, "succeeded")
+    return add_one(phase, state)
 
 
-def _pool_gated_service(conn, tmp_path, monkeypatch, clock, release_roots):
+def _pool_gated_service(conn, tmp_path, monkeypatch, clock, release_roots,
+                        capture_submission=True):
     session = "2026-01-01"
+    manifest_id = "pool-cycle-test-manifest"
     _mark_score_succeeded(conn, clock, session=session)
     identity = (session, "scope-hash", SimpleNamespace(
         snapshot_generation_id="snapshot-1", tickers=(), horizon_days=35))
     monkeypatch.setattr(nightly, "native_score_batch_identity", lambda _conn: identity)
+    monkeypatch.setattr(pool_refresh, "pool_refresh_identity",
+                        lambda _conn: (session, manifest_id))
+    monkeypatch.setattr(pool_refresh.deployment, "production_release_root",
+                        lambda: str(tmp_path))
+    monkeypatch.setattr(pool_refresh, "_read_pointer",
+                        lambda _path: SimpleNamespace(release_id="prior-release"))
     service = Service(conn, tmp_path, registry(), _POLICY, clock=clock,
                       code_source=ROOT, store_root=tmp_path)
     resolved = []
@@ -1294,7 +1314,9 @@ def _pool_gated_service(conn, tmp_path, monkeypatch, clock, release_roots):
         return "submitted"
 
     monkeypatch.setattr(service, "_native_release_root_or_none", resolve)
-    monkeypatch.setattr(nightly, "submit_native_score_batch_shadow_if_ready", submit_native)
+    if capture_submission:
+        monkeypatch.setattr(nightly, "submit_native_score_batch_shadow_if_ready",
+                            submit_native)
     return service, session, resolved, submitted
 
 
@@ -1310,20 +1332,28 @@ def test_pool_cycle_skipped_does_not_block_native_scoring(tmp_path, monkeypatch)
     assert submitted == ["previous-release-root"]
 
 
-def test_failed_pool_cycle_scores_against_recorded_previous_release(tmp_path, monkeypatch):
+@pytest.mark.parametrize("pool_state", ["failed", "cancelled", "blocked"])
+def test_failed_pool_cycle_scores_against_recorded_previous_release(
+        tmp_path, monkeypatch, pool_state):
     conn, clock, _ = catalog(tmp_path)
     service, session, resolved, submitted = _pool_gated_service(
-        conn, tmp_path, monkeypatch, clock, ["previous-release-root"])
+        conn, tmp_path, monkeypatch, clock, ["previous-release-root"],
+        capture_submission=False)
     key, job_id = _add_pool_phase(
-        conn, clock, session=session, phase="promote", state="failed")
+        conn, clock, session=session, phase="promote", state=pool_state)
 
     assert pool_refresh.pool_cycle_outcome(conn, session) == "failed"
     service._reconcile_native_score_batch_shadow()
 
-    assert conn.execute("SELECT state FROM jobs WHERE job_id = ?", (job_id,)).fetchone()["state"] == "failed"
+    assert conn.execute("SELECT state FROM jobs WHERE job_id = ?", (job_id,)).fetchone()["state"] == pool_state
     assert key.startswith(f"nightly:{session}:pool:promote:")
     assert len(resolved) == 1
-    assert submitted == ["previous-release-root"]
+    row = conn.execute(
+        "SELECT spec_json FROM jobs WHERE kind = ? AND state = ?",
+        ("native_score_batch", "queued")).fetchone()
+    assert row is not None
+    assert json.loads(row["spec_json"])["parameters"]["release_root"] == \
+        "previous-release-root"
 
 
 def test_pool_promote_success_releases_native_scoring_gate(tmp_path, monkeypatch):
@@ -1337,6 +1367,7 @@ def test_pool_promote_success_releases_native_scoring_gate(tmp_path, monkeypatch
     service._reconcile_native_score_batch_shadow()
     assert resolved == []
     assert submitted == []
+    assert service._native_score_batch_memo is None
 
     conn.execute("UPDATE jobs SET state = 'succeeded' WHERE job_id = ?", (job_id,))
     conn.commit()
@@ -1345,6 +1376,52 @@ def test_pool_promote_success_releases_native_scoring_gate(tmp_path, monkeypatch
 
     assert len(resolved) == 1
     assert submitted == ["promoted-release-root"]
+
+
+def test_stale_pool_cycles_do_not_release_current_native_gate(tmp_path, monkeypatch):
+    conn, clock, _ = catalog(tmp_path)
+    service, session, resolved, submitted = _pool_gated_service(
+        conn, tmp_path, monkeypatch, clock, ["previous-release-root"])
+    _add_pool_phase(conn, clock, session=session, phase="promote", state="succeeded",
+                    tag="oldest-manifest-tag")
+    _add_pool_phase(conn, clock, session=session, phase="promote", state="failed",
+                    tag="older-manifest-tag")
+    _add_pool_phase(conn, clock, session=session, phase="promote", state="queued")
+
+    assert pool_refresh.pool_cycle_outcome(conn, session) == "active"
+    service._reconcile_native_score_batch_shadow()
+
+    assert resolved == []
+    assert submitted == []
+
+
+def test_missing_promote_after_successful_stage_releases_native_gate(
+        tmp_path, monkeypatch):
+    conn, clock, _ = catalog(tmp_path)
+    service, session, resolved, submitted = _pool_gated_service(
+        conn, tmp_path, monkeypatch, clock, ["previous-release-root"])
+    _add_pool_phase(conn, clock, session=session, phase="stage", state="succeeded")
+
+    assert pool_refresh.pool_cycle_outcome(conn, session) == "failed"
+    service._reconcile_native_score_batch_shadow()
+
+    assert len(resolved) == 1
+    assert submitted == ["previous-release-root"]
+
+
+def test_pool_state_read_error_defers_only_this_native_tick(
+        tmp_path, monkeypatch, capsys):
+    conn, clock, _ = catalog(tmp_path)
+    service, session, resolved, submitted = _pool_gated_service(
+        conn, tmp_path, monkeypatch, clock, ["previous-release-root"])
+
+    conn.close()
+    service._reconcile_native_score_batch_shadow()
+
+    assert resolved == []
+    assert submitted == []
+    assert service._native_score_batch_memo is None
+    assert '"event": "native_score_batch_reconcile_failed"' in capsys.readouterr().out
 
 
 def test_service_tick_reconciles_pool_before_native_score(tmp_path, monkeypatch):

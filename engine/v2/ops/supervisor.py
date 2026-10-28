@@ -1253,7 +1253,11 @@ class Service:
         if producer_parameters is None:
             return
         from engine.v2.ops.pool_refresh import pool_cycle_outcome
-        pool_outcome = pool_cycle_outcome(self.conn, session)
+        try:
+            pool_outcome = pool_cycle_outcome(self.conn, session)
+        except Exception as exc:
+            self._report_native_score_batch_problem(exc)
+            return
         if pool_outcome == "active":
             return
         release_root = self._native_release_root_or_none(

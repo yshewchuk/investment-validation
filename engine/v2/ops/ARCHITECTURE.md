@@ -427,7 +427,7 @@ change; only a `store_domains` write against a legacy-owned table, or a
 neither is true of `native_parity`, which is exactly why this redo can
 schedule it now, well before Phase 7.
 
-**Cutover PR-7a (implemented — wiring and refusal gate only).** `native_score_batch` is optional, submitted by `Service._reconcile_native_score_batch_shadow` after a snapshot-pinned score; `GRAPH` documents its score edge, tick order is below.
+`native_score_batch` is an optional sidecar submitted by `Service._reconcile_native_score_batch_shadow` after a snapshot-pinned score; `GRAPH` documents its score edge, and the pool-cycle gate below orders it after pool reconciliation.
 
 **Cutover PR-7b (implemented, #145/#150):** `nightly_trigger._default_plan` pins the shadow snapshot used by legacy scoring and native board enumeration; it runs on its own 30-minute systemd timer, separate from the legacy nightly.
 
@@ -1192,18 +1192,16 @@ job.
 
 #### Pool refresh before native scoring (R1–R6)
 
-Each tick reconciles the session's pool cycle before scoring: succeeded promote
-uses the promoted release; skipped or terminal failure uses the deployed one;
-active defers the batch. Pool failure never blocks native scoring or the board.
+Each tick reconciles pool before native scoring and classifies only the current session/manifest/prior cycle: `active` defers native scoring for that tick; `skipped`, `failed`, and `promoted` proceed through the normal release resolver; pool outcomes do not hold board publication; lookup errors are reported and defer scoring for one tick before state is re-read.
 
 | R | `native_score_batch` pool-cycle contract |
 |---|---|
-| R1 | No eligible pool cycle for the session is classified skipped; native scoring proceeds with the currently deployed release. |
-| R2 | The sidecar reads only durable pool-cycle job state. A nonterminal cycle defers native submission for this tick; a succeeded promote releases the gate. |
-| R3 | A terminal failed pool phase releases the gate and is not retried by native scoring; the pool sidecar owns its bounded retries and classification. |
-| R4 | Pool reconciliation and native submission persist through their existing catalog/job transactions; no cross-job transaction is claimed. |
-| R5 | A failed or skipped cycle publishes no new pool release. Native scoring resolves the still-deployed prior release and records that binding in its existing job parameters/results. |
-| R6 | Native job identity remains the succeeded score job's session/scope key. Deferring while the pool cycle is active creates no native job and consumes no submission retry; re-evaluation on later ticks is idempotent. |
+| R1 | The tick attempts pool reconciliation before native scoring. The classifier selects only the current `(session, manifest tag, prior release)` cycle; rows from older keys do not affect its outcome. If there is no eligible identity or no current cycle, the outcome is `skipped`. |
+| R2 | A current cycle with any nonterminal phase is `active`; native batch submission returns before release resolution and retry-memo access. A successful promote is `promoted` when its candidate is deployed or the current cycle's promote row succeeded. |
+| R3 | A current phase in `failed`, `cancelled`, or `blocked` is `failed`. If all training prerequisites succeeded but stage or promote has no row after reconciliation, that refusal gap is also `failed`; neither is retried by native scoring. Pool reconciliation retains its existing exception backoff. |
+| R4 | Pool reconciliation and native submission persist through their existing catalog/job transactions; no cross-job transaction is claimed. A pool-state lookup exception is reported by the supervisor and defers native scoring for that tick; it does not escape `tick()`. |
+| R5 | For `failed`, `skipped`, and `promoted`, native scoring proceeds through the normal release resolver and records the returned binding in its existing job parameters/results. If a promote changed the pointer before its job became terminal, the resolver records that deployed candidate even when the cycle classifies failed. |
+| R6 | Native job identity remains the succeeded score job's session/scope key. `active` creates no native job and consumes no submission retry; `failed`, `skipped`, and `promoted` release the gate. Later ticks re-read durable pool state and remain idempotent. A failed or skipped pool cycle never holds native scoring or board publication indefinitely. |
 
 | Sidecar | Missing-input case | Idempotency key scope |
 |---|---|---|

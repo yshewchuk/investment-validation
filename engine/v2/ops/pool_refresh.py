@@ -238,29 +238,58 @@ def _state(conn, key):
 
 
 def pool_cycle_outcome(conn, session):
-    """Classify the durable pool-nightly cycle for one session.
+    """Classify only the current manifest/prior-release pool cycle."""
+    if conn is None:
+        return "skipped"
+    if not isinstance(session, str) or not session:
+        raise fail("INVALID_REQUEST", "pool cycle session is required")
+    identity = pool_refresh_identity(conn)
+    if identity is None or identity[0] != session:
+        return "skipped"
+    return _pool_cycle_outcome_for_identity(conn, session, identity[1])
 
-    Returns ``"skipped"`` when no pool job exists, ``"active"`` while the
-    cycle has no terminal result, ``"failed"`` when any phase failed, and
-    ``"promoted"`` only after a pool promote phase succeeded. The query is
-    bounded and uses the ``jobs`` idempotency-key range for this session.
-    """
-    if conn is None or not isinstance(session, str) or not session:
+
+def _pool_cycle_outcome_for_identity(conn, session, manifest_id):
+    tag = manifest_tag(manifest_id)
+    release_id = f"pools-{session}-{tag}"
+    try:
+        release_root = deployment.production_release_root()
+    except deployment.MissingReleaseRoot:
         return "skipped"
-    prefix = f"nightly:{session}:pool"
-    rows = conn.execute(
-        "SELECT idempotency_key, state FROM jobs "
-        "WHERE namespace = 'shadow' AND idempotency_key >= ? "
-        "AND idempotency_key < ? ORDER BY idempotency_key DESC LIMIT 256",
-        (prefix + ":", prefix + ";")).fetchall()
-    if not rows:
+    pointer = _read_pointer(Path(release_root) / "deployment")
+    prior_id = None if pointer is None else pointer.release_id
+    if prior_id == release_id:
+        state = _pointer_named_candidate_states(conn, session, tag)
+        return {"active": "active", "stalled": "failed", "clear": "promoted"}[state]
+    prior_token = "none" if prior_id is None else prior_id
+    family = _started_family(conn, session, prior_token, tag)
+    if family is None:
         return "skipped"
-    if any(row["state"] in {"failed", "cancelled", "blocked"} for row in rows):
+    return _started_pool_cycle_outcome(conn, session, prior_token, tag,
+                                       release_id, family)
+
+
+def _started_pool_cycle_outcome(conn, session, prior_token, tag, release_id,
+                                family):
+    phases = BOOTSTRAP_PHASES if family == "bootstrap" else PHASES
+    training_phases = phases[:-2]
+    state = _cycle_job_states(conn, session, prior_token, tag, release_id,
+                              phases=phases)
+    if state == "stalled":
         return "failed"
-    if any(":pool:promote:" in row["idempotency_key"]
-           and row["state"] == "succeeded" for row in rows):
+    if state == "active":
+        return "active"
+    if any(_state(conn, phase_key(session, phase, prior_token, tag)) is None
+           for phase in training_phases):
+        from engine.v2.ops.retrain_due import chain_blocks_pool_sidecar
+        if chain_blocks_pool_sidecar(conn, session, log=False):
+            return "skipped"
+        return "active"
+    if _state(conn, phase_key(session, "promote", prior_token, tag)) == "succeeded":
         return "promoted"
-    return "active"
+    # Reconciliation ran first. With training complete, a missing stage or
+    # promote row is a refusal gap, not an indefinitely active cycle.
+    return "failed"
 
 
 def _started_family(conn, session, prior_token, tag):
