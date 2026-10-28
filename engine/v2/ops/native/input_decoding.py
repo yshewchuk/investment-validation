@@ -18,49 +18,88 @@ from math import isfinite
 from engine.v2.foundation import DocumentError, from_document
 
 
-def _restored_model_block(model: dict) -> dict:
-    """C3 (partial): rehydrate the typed payoff artifact inside a model block.
-
-    ``to_document(NativeScoreInputs)`` flattens a nested
-    ``PayoffLineArtifact``/``PayoffSurfaceArtifact`` into a plain JSON dict,
-    but the native model stage requires the concrete type
-    (``stages._artifact_key_mismatch``), so a valid serialized document would
-    otherwise score MODEL_NOT_READY. The dict is restored with
-    ``payoff_artifact._artifact_from_document`` (its ``schema_version`` picks
-    line vs surface) and the declared ``content_hash`` must be a string equal
-    to the restored artifact's recomputed hash. Refusals are ``DocumentError``
-    at ``$.model.payoff_artifact`` (or a child path) and never echo input
-    values. The caller's block is never mutated: a fresh dict is returned.
-    """
-    from engine.v2.models.payoff_artifact import (
-        PayoffArtifactError,
-        _artifact_from_document,
-    )
-
-    path = "$.model.payoff_artifact"
-    artifact_doc = model["payoff_artifact"]
+def _restore_model_artifact(
+    artifact_doc, *, path, parser, artifact_error, kind
+):
+    """Validate and restore one typed artifact document under ``path``."""
     if not isinstance(artifact_doc, dict):
-        raise DocumentError("BAD_TYPE", path, "expected a payoff artifact object")
+        raise DocumentError("BAD_TYPE", path, f"expected a {kind} artifact object")
     if "content_hash" not in artifact_doc:
         raise DocumentError("MISSING_FIELD", f"{path}.content_hash", "required")
     if not isinstance(artifact_doc["content_hash"], str):
         raise DocumentError("BAD_TYPE", f"{path}.content_hash", "expected a string")
     try:
-        artifact = _artifact_from_document(artifact_doc)
+        artifact = parser(artifact_doc)
     except KeyError as exc:
         field = exc.args[0] if exc.args and isinstance(exc.args[0], str) else ""
-        raise DocumentError("MISSING_FIELD",
-                            f"{path}.{field}" if field else path, "required") from None
-    except PayoffArtifactError:
-        raise DocumentError("BAD_SCHEMA_VERSION", f"{path}.schema_version",
-                            "not a supported payoff artifact schema_version") from None
+        raise DocumentError(
+            "MISSING_FIELD",
+            f"{path}.{field}" if field else path,
+            "required",
+        ) from None
+    except artifact_error:
+        raise DocumentError(
+            "BAD_SCHEMA_VERSION",
+            f"{path}.schema_version",
+            f"not a supported {kind} artifact schema_version",
+        ) from None
     except (TypeError, ValueError, OverflowError):
-        raise DocumentError("BAD_TYPE", path, "malformed payoff artifact document") from None
+        raise DocumentError(
+            "BAD_TYPE", path, f"malformed {kind} artifact document"
+        ) from None
     if artifact_doc["content_hash"] != artifact.content_hash:
-        raise DocumentError("CONTENT_HASH_MISMATCH", f"{path}.content_hash",
-                            "declared hash does not match the artifact payload")
+        raise DocumentError(
+            "CONTENT_HASH_MISMATCH",
+            f"{path}.content_hash",
+            "declared hash does not match the artifact payload",
+        )
+    return artifact
+
+
+def _restored_model_block(model: dict) -> dict:
+    """C3 (partial): rehydrate the typed artifacts inside a model block.
+
+    ``to_document(NativeScoreInputs)`` flattens nested
+    ``PayoffLineArtifact``/``PayoffSurfaceArtifact`` and
+    ``RecalibrationMapArtifact`` values into plain JSON dicts, but the native
+    model stage requires the concrete types, so a valid serialized document
+    would otherwise score MODEL_NOT_READY. Each present artifact is restored
+    with its module's ``_artifact_from_document`` (the payoff one picks line vs
+    surface from ``schema_version``) and its declared ``content_hash`` must be a
+    string equal to the restored artifact's recomputed hash. Refusals are
+    ``DocumentError`` under ``$.model.<field>`` (or a child path) and never
+    echo input values. The caller's block is never mutated: a fresh dict is
+    returned, and absent or ``None`` fields stay absent or ``None``.
+    """
     block = dict(model)
-    block["payoff_artifact"] = artifact
+    if model.get("payoff_artifact") is not None:
+        from engine.v2.models.payoff_artifact import (
+            PayoffArtifactError,
+            _artifact_from_document,
+        )
+
+        block["payoff_artifact"] = _restore_model_artifact(
+            model["payoff_artifact"],
+            path="$.model.payoff_artifact",
+            parser=_artifact_from_document,
+            artifact_error=PayoffArtifactError,
+            kind="payoff",
+        )
+    if model.get("recalibration_artifact") is not None:
+        from engine.v2.models.recalibration_artifact import (
+            RecalibrationArtifactError,
+        )
+        from engine.v2.models.recalibration_artifact import (
+            _artifact_from_document as _recalibration_from_document,
+        )
+
+        block["recalibration_artifact"] = _restore_model_artifact(
+            model["recalibration_artifact"],
+            path="$.model.recalibration_artifact",
+            parser=_recalibration_from_document,
+            artifact_error=RecalibrationArtifactError,
+            kind="recalibration",
+        )
     return block
 
 
@@ -92,7 +131,10 @@ def _load_native_score_inputs(doc: dict):
     )
     if "model" in doc:
         model = doc["model"]
-        if isinstance(model, dict) and model.get("payoff_artifact") is not None:
+        if isinstance(model, dict) and (
+            model.get("payoff_artifact") is not None
+            or model.get("recalibration_artifact") is not None
+        ):
             model = _restored_model_block(model)
         kwargs["model"] = model
     return NativeScoreInputs(**kwargs)

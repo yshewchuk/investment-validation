@@ -679,9 +679,10 @@ from the resolved binding when assembling release-backed bundles.
 
 The loader is read-only: a failure returns no partial binding and writes no
 state. Native batch binds verified pools and a selected payoff artifact with
-their causal recipes. RUNUP requires both champion residual slots and a unique
-exact-key, numerically usable surface; missing/mismatched state refuses its
-row with `MODEL_NOT_READY` (ops contract). Release-backed STR-THRU keeps the
+their causal recipes. RUNUP requires both champion residual slots and the
+unique numerically usable surface with greatest DATA cutoff at or before the
+row cutoff; missing/mismatched state refuses its row with `MODEL_NOT_READY`
+(ops contract). Release-backed STR-THRU keeps the
 simulation `residual_recipe` empty: this release binding supplies no paired
 residual inputs for planned-exit simulation, so the batch does not invent a
 recipe or source rows. A missing driver-pool member is never filled from
@@ -690,12 +691,15 @@ resolved driver identity, the row is refused with `MODEL_NOT_READY`. If no
 release resolves, `NoCurrentRelease` remains; a resolved binding missing
 required model roles keeps the native batch's existing per-row refusals.
 
-For STR-THRU, absence of a payoff family leaves the optional declaration
-absent. When the release contains a payoff family, native batch assembly
-requires exactly one `payoff_line` with the row's exact `(strategy, alpha,
-cutoff)` key; zero or multiple matches refuse that row with
-`MODEL_NOT_READY`. It does not silently score a residual-only block or select
-an older cutoff.
+For release-backed STR-THRU, batch assembly binds the unique payoff line and
+recalibration map with the greatest DATA cutoff no later than the row cutoff,
+including equality; `computed_at` never orders candidates. The selected
+cutoffs are recorded in the payoff recipe and rechecked during scoring. No
+eligible artifact or a duplicate latest eligible candidate refuses the row
+with `MODEL_NOT_READY`; the stage does not fit or fall back to older behavior.
+Captured `NativeScoreInputs` restore both typed artifacts and verify their
+content hashes before rescoring; malformed documents raise a sanitized
+`DocumentError` under the corresponding model field path.
 
 #### Paired residual and entry-rule declarations (issue #498)
 

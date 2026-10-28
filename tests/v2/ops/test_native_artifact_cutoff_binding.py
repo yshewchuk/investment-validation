@@ -3,11 +3,17 @@ from types import SimpleNamespace
 
 import pytest
 
+from engine.v2.foundation import to_document
 from engine.v2.models.payoff_artifact import (
+    PayoffLineArtifact,
     make_payoff_line_artifact,
     make_payoff_surface_artifact,
 )
-from engine.v2.models.recalibration_artifact import make_recalibration_map_artifact
+from engine.v2.models.recalibration_artifact import (
+    RecalibrationMapArtifact,
+    make_recalibration_map_artifact,
+)
+from engine.v2.ops.native.input_decoding import _load_native_score_inputs
 from engine.v2.ops.native_runup_inputs import (
     _surface,
     latest_artifacts_at_or_before,
@@ -15,7 +21,14 @@ from engine.v2.ops.native_runup_inputs import (
 from engine.v2.ops.native_score_batch import _release_payoff_declarations
 from engine.v2.scoring.native_payoff import RUNUP_TERMS
 from engine.v2.scoring.nightly_source_bundle import NightlySourceBundleRefusal
-from engine.v2.scoring.stages import _recalibrated_output, _surface_fit_from_artifact
+from engine.v2.scoring.stages import (
+    STAGE_NAMES,
+    NativeScoreInputs,
+    StageReceipt,
+    _execute_model,
+    _recalibrated_output,
+    _surface_fit_from_artifact,
+)
 
 
 def test_latest_artifact_uses_data_cutoff_and_admits_equal_cutoff():
@@ -206,3 +219,101 @@ def test_runup_refuses_duplicate_artifacts_at_latest_eligible_cutoff():
     with pytest.raises(NightlySourceBundleRefusal) as raised:
         _surface(binding, cutoff="2026-10-15", fill_alpha=0.5)
     assert raised.value.code == "MODEL_NOT_READY"
+
+
+def test_roundtrip_restores_typed_artifacts_and_recalibrates_win_model():
+    line = make_payoff_line_artifact(
+        {
+            "n": 2,
+            "resid_sd": 0.1,
+            "r": None,
+            "residuals": (0.1, -0.1),
+            "intercept": 0.1,
+            "slope": 0.2,
+        },
+        strategy="STR-THRU",
+        driver="implied_t1",
+        alpha=0.5,
+        cutoff="2026-10-15",
+    )
+    recalibration = make_recalibration_map_artifact(
+        {
+            "n": 10,
+            "base_rate": 0.5,
+            "x_thresholds": (0.0, 1.0),
+            "y_thresholds": (0.2, 0.8),
+        },
+        strategy="STR-THRU",
+        alpha=0.5,
+        cutoff="2026-10-15",
+        min_pairs=10,
+    )
+    receipts = tuple(
+        StageReceipt(stage, "declared-input", "declared-output")
+        for stage in STAGE_NAMES if stage != "diagnostics")
+    inputs = NativeScoreInputs(
+        context={}, features={}, forecast={}, geometry=None, pricing=None,
+        analogs={}, simulation={}, gate={}, chooser={}, diagnostics={},
+        source_ref="roundtrip-regression", stage_receipts=receipts,
+        model={"payoff_artifact": line, "recalibration_artifact": recalibration},
+    )
+
+    doc = to_document(inputs)
+    assert isinstance(doc["model"]["recalibration_artifact"], dict)
+
+    loaded = _load_native_score_inputs(doc)
+    assert isinstance(loaded.model["payoff_artifact"], PayoffLineArtifact)
+    assert isinstance(loaded.model["recalibration_artifact"], RecalibrationMapArtifact)
+
+    flags = []
+    scored = _recalibrated_output(
+        loaded.model,
+        {"before": "2026-10-15", "recalibration_bound_cutoff": "2026-10-15"},
+        "STR-THRU", {"fill": 0.5}, {"win_model": 0.25}, flags)
+    assert flags == []
+    assert scored["win_model"] == pytest.approx(0.35)
+
+
+def test_str_thru_model_stage_scores_known_hand_computed_return():
+    line = make_payoff_line_artifact(
+        {
+            "n": 2,
+            "resid_sd": 0.0,
+            "r": None,
+            "residuals": (0.0,),
+            "intercept": 0.05,
+            "slope": 0.5,
+        },
+        strategy="STR-THRU",
+        driver="implied_t1",
+        alpha=0.5,
+        cutoff="2026-10-15",
+    )
+    block = {
+        "payoff_artifact": line,
+        "payoff_recipe": {
+            "before": "2026-10-15",
+            "bound_cutoff": "2026-10-15",
+            "seed": 7,
+            "draw_count": 4,
+        },
+        "model_residual_rows": (
+            {"prediction": 0.10, "residual": 0.0},
+        ),
+    }
+    values = {
+        "fill": 0.5,
+        "driver_prediction": 0.10,
+        "spot": 100.0,
+        "entry_cost": 8.0,
+    }
+    flags = []
+
+    output = _execute_model(
+        SimpleNamespace(model=block), "STR-THRU", values, flags)
+
+    # Mutating the intercept from 0.05 to 0.10 (or the slope from 0.5 to 0.6)
+    # changes the terminal value, so exp_pnl_model would no longer be 0.25.
+    assert flags == []
+    assert output["exp_pnl_model"] == pytest.approx(0.25)
+    assert output["win_model"] == pytest.approx(1.0)
