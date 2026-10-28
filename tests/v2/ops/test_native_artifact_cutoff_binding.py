@@ -3,12 +3,16 @@ from types import SimpleNamespace
 
 import pytest
 
-from engine.v2.models.payoff_artifact import make_payoff_surface_artifact
+from engine.v2.models.payoff_artifact import (
+    make_payoff_line_artifact,
+    make_payoff_surface_artifact,
+)
 from engine.v2.models.recalibration_artifact import make_recalibration_map_artifact
 from engine.v2.ops.native_runup_inputs import (
     _surface,
     latest_artifacts_at_or_before,
 )
+from engine.v2.ops.native_score_batch import _release_payoff_declarations
 from engine.v2.scoring.native_payoff import RUNUP_TERMS
 from engine.v2.scoring.nightly_source_bundle import NightlySourceBundleRefusal
 from engine.v2.scoring.stages import _recalibrated_output, _surface_fit_from_artifact
@@ -110,3 +114,45 @@ def test_recalibration_stage_accepts_bound_prior_and_refuses_future_cutoff():
         "STR-THRU", {"fill": 0.5}, output, future_flags)
     assert future == {}
     assert future_flags == ["MODEL_NOT_READY"]
+
+
+def test_str_thru_declaration_binds_latest_line_and_recalibration_cutoffs():
+    def line(cutoff):
+        return make_payoff_line_artifact(
+            {
+                "n": 2,
+                "resid_sd": 0.1,
+                "r": None,
+                "residuals": (0.1, -0.1),
+                "intercept": 0.1,
+                "slope": 0.2,
+            },
+            strategy="STR-THRU",
+            driver="implied_t1",
+            alpha=0.5,
+            cutoff=cutoff,
+        )
+
+    def recalibration(cutoff):
+        return make_recalibration_map_artifact(
+            None, strategy="STR-THRU", alpha=0.5, cutoff=cutoff, min_pairs=10)
+
+    lines = tuple(line(day) for day in (
+        "2026-10-01", "2026-10-15", "2026-10-16"))
+    maps = tuple(recalibration(day) for day in (
+        "2026-10-01", "2026-10-15", "2026-10-16"))
+    binding = SimpleNamespace(
+        driver_residual_artifacts={},
+        recalibration_artifacts={"STR-THRU": maps},
+    )
+
+    declarations = _release_payoff_declarations(
+        binding, "STR-THRU", lines, "2026-10-20", {"entry_date": "2026-10-15"})
+
+    assert declarations["payoff_artifact"].cutoff == "2026-10-15"
+    assert declarations["recalibration_artifact"].cutoff == "2026-10-15"
+    assert declarations["payoff_artifact_recipe"] == {
+        "before": "2026-10-15",
+        "bound_cutoff": "2026-10-15",
+        "recalibration_bound_cutoff": "2026-10-15",
+    }
