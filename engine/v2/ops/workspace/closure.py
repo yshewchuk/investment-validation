@@ -64,6 +64,16 @@ def _log(message: str) -> None:
     print("[closure] " + message, file=sys.stderr, flush=True)
 
 
+def _bound_fragments(conn, snapshot_id: str) -> None:
+    """Refuse before ``resolve_full`` materializes an over-large fragment set."""
+    count = conn.execute(
+        "SELECT COUNT(*) FROM data_version_fragments WHERE dataset_version_id IN "
+        "(SELECT dataset_version_id FROM data_snapshot_tables WHERE snapshot_id = ?)",
+        (snapshot_id,)).fetchone()[0]
+    if count > _MAX_ROWS:
+        raise _broken("closure_rows_over_cap", table="data_version_fragments", rows=count)
+
+
 def _dataset_parents(conn, resolved) -> None:
     for name, manifest in sorted(resolved.table_manifests.items()):
         parent = manifest.parent_dataset_version_id
@@ -183,6 +193,7 @@ def verify_snapshot_closure(conn, store: ArtifactStore, snapshot_id: str, manife
     """Verify ``snapshot_id``'s whole closure against ``manifest_hash``; read-only."""
     started = time.monotonic()
     _log(f"stage=verify start snapshot={snapshot_id} deep={deep}")
+    _bound_fragments(conn, snapshot_id)
     try:
         resolved = Repository(conn).resolve_full(snapshot_id)
     except errors.DataError as exc:
