@@ -252,6 +252,8 @@ def _object_stats(store: ArtifactStore, refs, deep: bool) -> tuple[list, int]:
 def verify_snapshot_closure(conn, store: ArtifactStore, snapshot_id: str, manifest_hash: str,
                             *, deep: bool = False) -> SnapshotClosure:
     """Verify ``snapshot_id``'s whole closure against ``manifest_hash``; read-only."""
+    if not isinstance(snapshot_id, str) or not isinstance(manifest_hash, str):
+        raise _broken("argument_invalid")
     started = time.monotonic()
     _log(f"stage=verify start snapshot={snapshot_id} deep={deep}")
     conn = _BoundedConn(conn)

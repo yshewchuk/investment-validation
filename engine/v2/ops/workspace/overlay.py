@@ -88,6 +88,8 @@ class SnapshotOnlyRepository(Repository):
     """The production source view: an allowlist of read methods, each bound to the pinned snapshot id."""
 
     def __init__(self, conn, store, snapshot_id: str) -> None:
+        if not isinstance(snapshot_id, str):
+            raise _refuse("argument_invalid")
         super().__init__(conn, store, pin_snapshots=True)
         self._only = snapshot_id
 

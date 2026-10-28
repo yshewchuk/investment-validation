@@ -519,3 +519,9 @@ def test_malformed_public_arguments_refuse_with_typed_errors(prod):
             with pytest.raises(DataError) as caught:
                 call()
             assert caught.value.code == "SNAPSHOT_NOT_FOUND"
+    with pytest.raises(DataError) as caught:
+        closure_module.verify_snapshot_closure(None, None, ["x"], "h")
+    assert _details(caught) == ("SNAPSHOT_CLOSURE_BROKEN", "argument_invalid")
+    with pytest.raises(OpsError) as caught:
+        overlay_module.SnapshotOnlyRepository(None, None, ["x"])
+    assert caught.value.problem.details.get("reason") == "argument_invalid"
