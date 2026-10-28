@@ -81,7 +81,7 @@ def _published_nightly_plan(tmp_path: Path, capsys, monkeypatch) -> tuple[Path, 
     assert cli.main(["--root", str(ops_root), "init"]) == 0
     capsys.readouterr()
     monkeypatch.setattr(
-        "engine.v2.ops.snapshots.resolve_snapshot_head",
+        "engine.v2.ops.snapshot_planning.resolve_snapshot_head",
         lambda *args, **kwargs: SimpleNamespace(artifact_id="snapshot-ref", byte_size=32),
     )
     monkeypatch.setattr("engine.v2.ops.snapshot_planning._load_snapshot_ref",

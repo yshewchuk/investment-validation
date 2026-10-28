@@ -6,8 +6,9 @@ from types import SimpleNamespace
 
 import pytest
 
+from engine.v2.contracts.data import SnapshotRef
 from engine.v2.data.legacy_nightly_read_plan import NIGHTLY_CAPTURE_IMPLEMENTATION_REF
-from engine.v2.foundation import SystemClock
+from engine.v2.foundation import SystemClock, to_document
 from engine.v2.ops import cli
 from engine.v2.ops.workflows import commands
 from tests.ops_support import sample
@@ -18,10 +19,19 @@ SESSION = "2026-09-12"
 def _stub_shadow_snapshot_head(monkeypatch):
     def resolve(conn, store, scope, *, clock):
         assert scope == "shadow"
+        document = to_document(SnapshotRef(
+            snapshot_id="test-shadow-snapshot",
+            manifest_hash="a" * 64,
+            table_versions={},
+            calendar_version="calendar-v1",
+            source_priority_version="source-priority-v1",
+            finality_receipt_refs=(),
+            knowledge_mode_by_table={},
+        ))
         return store.publish_bytes(
-            json.dumps({"snapshot_id": "test-shadow-snapshot"}).encode(),
+            json.dumps(document).encode(),
             schema_ref="snapshot_ref.v1.0")
-    monkeypatch.setattr("engine.v2.ops.snapshots.resolve_snapshot_head", resolve)
+    monkeypatch.setattr("engine.v2.ops.snapshot_planning.resolve_snapshot_head", resolve)
 
 
 @pytest.mark.parametrize("host_cpu_count", [8, 12])

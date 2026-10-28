@@ -14,7 +14,8 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from engine.v2.foundation import ArtifactStore, SystemClock, content_hash
+from engine.v2.contracts.data import SnapshotRef
+from engine.v2.foundation import ArtifactStore, SystemClock, content_hash, to_document
 from engine.v2.ops import cli, legacy_adapter
 from engine.v2.ops.bootstrap import open_catalog
 from engine.v2.ops.errors import OpsError
@@ -32,10 +33,18 @@ REPO = Path(__file__).resolve().parents[3]
 def _stub_shadow_snapshot_head(monkeypatch):
     def resolve(conn, store, scope, *, clock):
         assert scope == "shadow"
+        document = to_document(SnapshotRef(
+            snapshot_id="test-shadow-snapshot",
+            manifest_hash="a" * 64,
+            table_versions={},
+            calendar_version="calendar-v1",
+            source_priority_version="source-priority-v1",
+            finality_receipt_refs=(),
+            knowledge_mode_by_table={}))
         return store.publish_bytes(
-            json.dumps({"snapshot_id": "test-shadow-snapshot"}).encode(),
+            json.dumps(document).encode(),
             schema_ref="snapshot_ref.v1.0")
-    monkeypatch.setattr("engine.v2.ops.snapshots.resolve_snapshot_head", resolve)
+    monkeypatch.setattr("engine.v2.ops.snapshot_planning.resolve_snapshot_head", resolve)
 
 
 # --------------------------------------------------------------------------

@@ -57,6 +57,7 @@ from types import SimpleNamespace
 import pytest
 
 from engine.v2.contracts import JobSpec, SubmitRequest
+from engine.v2.contracts.data import SnapshotRef
 from engine.v2.foundation import ArtifactStore, SystemClock, content_hash, to_document
 from engine.v2.ops import cli
 from engine.v2.ops import effects_graph
@@ -88,10 +89,19 @@ SESSION = "2026-09-10"
 def _stub_shadow_snapshot_head(monkeypatch):
     def resolve(conn, store, scope, *, clock):
         assert scope == "shadow"
+        snapshot = SnapshotRef(
+            snapshot_id="test-shadow-snapshot",
+            manifest_hash="a" * 64,
+            table_versions={},
+            calendar_version="calendar-v1",
+            source_priority_version="source-priority-v1",
+            finality_receipt_refs=(),
+            knowledge_mode_by_table={},
+        )
         return store.publish_bytes(
-            json.dumps({"snapshot_id": "test-shadow-snapshot"}).encode(),
+            json.dumps(to_document(snapshot)).encode(),
             schema_ref="snapshot_ref.v1.0")
-    monkeypatch.setattr("engine.v2.ops.snapshots.resolve_snapshot_head", resolve)
+    monkeypatch.setattr("engine.v2.ops.snapshot_planning.resolve_snapshot_head", resolve)
 
 
 def _nightly_manifest_dict(note: str = "") -> dict:
