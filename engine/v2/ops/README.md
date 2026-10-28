@@ -69,7 +69,7 @@ Stored history additionally exposes `native_registration.magnitude_history_reque
 seal/check v1.4. `native_registration.magnitude_fitted_execution_document` and `native_registration.validate_magnitude_fitted_execution`
 seal/check v1.5 recipes owned by registration, without importing training.
 `native_registration.verified_registration_bytes` admits native v1.6 and v1.7 SIZE integrity envelopes for `experiments.size_search_binding`. The ops verifier checks the compact registration and v1.7 shard references/byte cap; experiments hydrates and validates the full logical SIZE cross-links against the prepared document. These checks grant no read or fit authority.
-`native_registration._size_binding` is consumed by `experiments/native_registration.py` to validate the compact SIZE registration during registration admission; it checks structure and cross-links but does not hydrate artifacts or grant read/fit authority.
+`native_registration._size_binding` is consumed by `experiments/native_registration.load_registration_document` after v1.7 hydration to validate the reconstructed logical SIZE document. The compact v1.7 reference envelope is structurally checked by native admission before artifact reads; neither check grants read or fit authority.
 These constructors/validators do not grant read authority.
 They compose one resolved plan, source/environment binding and primary catalog
 reservation; the caller owns the transaction around the reservation helper.
