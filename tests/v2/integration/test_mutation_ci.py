@@ -2902,6 +2902,9 @@ def test_shipped_toml_declares_the_engine_v2_tree_scanner_test():
         ".coderabbit.yaml": ["tests/v2/integration/test_performance_review_config.py"],
         "AGENTS.md": ["tests/v2/integration/test_performance_review_config.py"],
         "docs/performance_review.md": ["tests/v2/integration/test_performance_review_config.py"],
+        "engine/v2/models/*": ["tests/v2/integration/test_live_experiment_isolation.py"],
+        "engine/v2/ops/*": ["tests/v2/integration/test_live_experiment_isolation.py"],
+        "checks/live_experiment_isolation*": ["tests/v2/integration/test_live_experiment_isolation.py"],
     }
 
 
