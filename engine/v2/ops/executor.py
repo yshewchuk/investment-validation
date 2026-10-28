@@ -102,7 +102,12 @@ def _materialize_inputs(conn, claim, store, staging):
     recorded ``attempt_input_bindings`` rows instead of re-resolving a
     ``job_`` binding against the parent's possibly-changed current state.
     """
-    resolved = resolve_and_record(conn, store, claim)
+    max_artifact_bytes = None
+    if claim.spec.kind == "nightly_preview_inputs":
+        from engine.v2.ops.nightly_preview_inputs import MAX_INPUT_BYTES
+        max_artifact_bytes = MAX_INPUT_BYTES
+    resolved = resolve_and_record(conn, store, claim,
+                                  max_artifact_bytes=max_artifact_bytes)
     for name, item in resolved.items():
         parts = safe_relative_path(name)
         ref = registered_artifact(conn, item.artifact_id)

@@ -14,7 +14,7 @@ from types import SimpleNamespace
 import pytest
 
 import engine.v2.ops.nightly_preview_inputs as nightly_preview_inputs
-from engine.v2.ops import executor
+from engine.v2.ops import executor, input_bindings
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.nightly import build_legacy_job_requests, build_nightly_plan
 from engine.v2.ops.nightly_preview_inputs import run
@@ -130,8 +130,14 @@ def test_oversized_registered_preview_input_refuses_before_materialization(tmp_p
     staging = tmp_path / "staging"
     staging.mkdir()
     monkeypatch.setattr(nightly_preview_inputs, "MAX_INPUT_BYTES", 3)
-    monkeypatch.setattr(executor, "resolve_and_record",
-                        lambda conn, store, claim: {"score.json": SimpleNamespace(artifact_id="artifact")})
+    resolved = {"score.json": SimpleNamespace(artifact_id="artifact")}
+    captured = {}
+
+    def resolve(conn, store, claim, *, max_artifact_bytes):
+        captured["limit"] = max_artifact_bytes
+        return resolved
+
+    monkeypatch.setattr(executor, "resolve_and_record", resolve)
     monkeypatch.setattr(executor, "registered_artifact",
                         lambda conn, artifact_id: SimpleNamespace(byte_size=4))
 
@@ -142,6 +148,7 @@ def test_oversized_registered_preview_input_refuses_before_materialization(tmp_p
     claim = SimpleNamespace(spec=SimpleNamespace(kind="nightly_preview_inputs"))
     with pytest.raises(OpsError) as oversized:
         executor._materialize_inputs(object(), claim, store, staging)
+    assert captured["limit"] == 3
     assert oversized.value.code == "RESOURCE_LIMIT_EXCEEDED"
     assert oversized.value.problem.details == {"name": "score.json", "limit_bytes": 3,
                                                "observed_bytes": 4}
@@ -178,3 +185,24 @@ def test_pinned_nightly_plan_declares_preview_output_bindings():
     assert other_preview.idempotency_key != preview.idempotency_key
 
     assert "serving_projection" not in {request.job.kind for request in requests}
+
+
+def test_oversized_registered_preview_binding_refuses_before_verification(monkeypatch):
+    monkeypatch.setattr(input_bindings, "_resolve_job_binding",
+                        lambda conn, spec, binding: "artifact")
+    monkeypatch.setattr(input_bindings, "registered_artifact",
+                        lambda conn, artifact_id: SimpleNamespace(
+                            artifact_id="artifact", content_hash="sha256:test", byte_size=4))
+
+    def forbidden(*args):
+        raise AssertionError("oversized preview input was verified")
+
+    store = SimpleNamespace(verify=forbidden)
+    spec = SimpleNamespace(kind="nightly_preview_inputs",
+                           parameters={"input_bindings": {"score.json": "job_score#legacy_score"}},
+                           input_refs=(), dependency_job_ids=())
+    with pytest.raises(OpsError) as oversized:
+        input_bindings.resolve_bindings(object(), store, spec, max_artifact_bytes=3)
+    assert oversized.value.code == "RESOURCE_LIMIT_EXCEEDED"
+    assert oversized.value.problem.details == {"name": "score.json", "limit_bytes": 3,
+                                               "observed_bytes": 4}
