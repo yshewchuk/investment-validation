@@ -6,6 +6,7 @@ import json
 import math
 import sqlite3
 import time
+from collections.abc import Mapping
 from pathlib import Path
 
 from engine.v2.foundation import (
@@ -861,6 +862,20 @@ def _computed_moves_capture_report(dry_run, targets, cache):
     }
 
 
+def _check_history_pair(history):
+    if history is not None and (not isinstance(history, tuple) or len(history) != 2
+                                or not isinstance(history[0], Mapping) or not callable(history[1])):
+        raise fail("INVALID_REQUEST", "history must be a (cache, fetch) pair")
+
+
+def _resolve_history(history, source_root):
+    from engine.v2.ops import computed_moves_store
+
+    if history is not None:
+        return history
+    return computed_moves_store.tier1_yfinance_history_fetcher(source_root)
+
+
 def computed_moves_command(args, root, conn, clock, *, history=None, include_source_bounds=False):
     """Tier-1 computed_moves.v5 generation; ``history`` is an optional ``(cache, fetch)`` pair (default newest-wins).
 
@@ -878,11 +893,12 @@ def computed_moves_command(args, root, conn, clock, *, history=None, include_sou
         raise fail("INVALID_REQUEST", "--source-root must be an existing directory",
                    details={"source_root": str(args.source_root)})
     as_of = computed_moves_store._as_of_day(args.as_of)
+    _check_history_pair(history)
     lock = SupervisorLock(root / "supervisor.lock")
     if not lock.acquire():
         raise fail("RESOURCE_UNAVAILABLE", "a running supervisor holds this catalog")
     try:
-        cache, fetcher = history or computed_moves_store.tier1_yfinance_history_fetcher(args.source_root)
+        cache, fetcher = _resolve_history(history, args.source_root)
         head = conn.execute(
             "SELECT snapshot_id, generation FROM data_snapshot_heads WHERE scope = ?",
             (args.scope,)).fetchone()
