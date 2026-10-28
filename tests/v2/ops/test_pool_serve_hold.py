@@ -206,7 +206,7 @@ class _NativeBatchConn:
         return []
 
     def fetchone(self):
-        if "kind = 'score'" in self.sql:
+        if "kind = 'legacy_score'" in self.sql:
             if ("score-job" in self.params
                     and self.params[-1] == "nightly:2026-09-26:sha256:scope:score"):
                 return {"1": 1}

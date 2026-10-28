@@ -1094,7 +1094,7 @@ def _native_score_batch_pending(conn, plan_job_ids, service) -> bool:
         placeholders = ", ".join("?" for _ in plan_job_ids)
         score = conn.execute(
             f"SELECT 1 FROM jobs WHERE job_id IN ({placeholders}) "
-            "AND kind = 'score' AND idempotency_key = ? LIMIT 1",
+            "AND kind = 'legacy_score' AND idempotency_key = ? LIMIT 1",
             (*plan_job_ids, score_key)).fetchone()
         if score is None:
             return False
