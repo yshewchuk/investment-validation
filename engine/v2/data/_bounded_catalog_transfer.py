@@ -18,8 +18,8 @@ class _Evidence:
 
 @dataclass(frozen=True)
 class _Keys:
-    primary_key_min: tuple[str | int | bool, ...]
-    primary_key_max: tuple[str | int | bool, ...]
+    primary_key_min: tuple[str | int | bool | float, ...]
+    primary_key_max: tuple[str | int | bool | float, ...]
 
 
 @dataclass(frozen=True)

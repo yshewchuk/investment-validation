@@ -243,8 +243,8 @@ class FragmentInspection:
     row_count: int
     byte_hash: str
     logical_content_hash: str
-    primary_key_min: tuple[str | int | bool, ...] | None
-    primary_key_max: tuple[str | int | bool, ...] | None
+    primary_key_min: tuple[str | int | bool | float, ...] | None
+    primary_key_max: tuple[str | int | bool | float, ...] | None
     time_min: str | None
     time_max: str | None
 
