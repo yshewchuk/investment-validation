@@ -185,6 +185,9 @@ def anchor_lookup(records, *, daily_contract=None):
 
     def lookup(ticker, day, version=None):
         return json.loads(encoded(ticker, day, canonical_json(version)))
+
+    lookup.clear = encoded.cache_clear
+    lookup.size = lambda: encoded.cache_info().currsize
     return lookup
 
 
