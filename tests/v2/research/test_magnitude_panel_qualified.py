@@ -259,11 +259,11 @@ def test_stored_rows_detect_identity_or_feature_corruption(panel_data):
         changed = [dict(r) for r in rows]
         changed[0][key] = value
         with pytest.raises(DataError):
-            store._validate(changed, artifact["context"])
+            list(store._validate(changed, artifact["context"]))
     with pytest.raises(DataError):
-        store._validate(rows[:-1], artifact["context"])
+        list(store._validate(rows[:-1], artifact["context"]))
     with pytest.raises(DataError):
-        store._validate([*rows, rows[0]], artifact["context"])
+        list(store._validate([*rows, rows[0]], artifact["context"]))
 
 
 def test_daily_nonfinite_and_negative_quote_refused():
@@ -446,14 +446,14 @@ def test_panel_uses_public_history_admission_before_backend(panel_data, monkeypa
     def refused(*args, **kwargs):
         from engine.v2.data.errors import fail
         raise fail("INPUT_CHANGED", "synthetic imported history drift")
-    monkeypatch.setattr(eligible_history, "read", refused)
+    monkeypatch.setattr(eligible_history, "iter_read", refused)
     with pytest.raises(DataError, match="synthetic imported history drift"):
         size_panel.materialize(data.repository, data.panel_source, **data.panel_request)
 
 
 @pytest.mark.parametrize("columns", [["realized_move_pct"], ["or_implied"], [None]])
 def test_public_projection_refuses_before_history_access(monkeypatch, columns):
-    monkeypatch.setattr(eligible_history, "read", lambda *a, **k: pytest.fail("history was read"))
+    monkeypatch.setattr(eligible_history, "iter_read", lambda *a, **k: pytest.fail("history was read"))
     with pytest.raises(DataError) as refused:
         size_panel.read(None, None, None, columns=columns)
     assert refused.value.code == "HOLDOUT_ACCESS_DENIED"
@@ -736,3 +736,24 @@ def test_daily_lineage_matches_native_mixed_ticker_membership(panel_data, monkey
             assert anchor["fragments"] == identities
             assert {item["object_id"] for item in identities} <= seen
         assert row["n_prior"] == 3 and row["mean_prior_or_implied"] == 4.
+
+
+def test_streamed_history_panel_rows_match_materialized_history(panel_data):
+    from engine.v2.research import magnitude_panel_qualified as builder
+
+    data = panel_data
+    history_request = {key: data.panel_request[key] for key in data.request}
+    from engine.v2.research.eligible_history_table import FEATURES as HISTORY_FEATURES
+    columns = list(HISTORY_FEATURES)
+    materialized = eligible_history.read(data.repository, data.panel_source, data.panel_request["history_snapshot"],
+        columns=columns, **history_request)
+    streamed = eligible_history.iter_read(data.repository, data.panel_source, data.panel_request["history_snapshot"],
+        columns=columns, **history_request)
+    producer = size_panel._producer({})
+    materialized_prepared = builder._prepare(data.repository, data.panel_source,
+        producer=producer, history_admitted=materialized, **data.panel_request)
+    streamed_prepared = builder._prepare(data.repository, data.panel_source,
+        producer=producer, history_admitted=streamed, **data.panel_request)
+
+    assert list(builder._rows(data.repository, data.panel_source, data.prices, streamed_prepared)) == \
+        list(builder._rows(data.repository, data.panel_source, data.prices, materialized_prepared))

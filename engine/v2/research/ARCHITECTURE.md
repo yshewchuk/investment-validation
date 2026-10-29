@@ -1018,6 +1018,6 @@ flowchart LR
 
 | Qualified panel admission condition | Outcome before dependent reads |
 | --- | --- |
-| Missing/extra/malformed request or empty required source inventory | `CONTRACT_MISMATCH` |
-| Caller producer override or incompatible frozen SIZE policy | `HOLDOUT_ACCESS_DENIED` |
+| Missing/extra/malformed request, empty required source inventory, caller producer override or incompatible frozen SIZE policy | `CONTRACT_MISMATCH` for request/inventory; `HOLDOUT_ACCESS_DENIED` for producer/policy |
+| Memory/bounds | Eligible-history rows stream through one scanner batch at a time. The first pass retains only unique `(event_id, fragment_id, object_id, content_hash)` contributor identities; the second decodes one row at a time. Panel rows validate in canonical key order and serialize in the existing three-row fragments. Working memory is one history scanner batch, one decoded history row, the O(unique contributors) identity index, and at most three output rows; explicit request row and byte limits apply. Snapshot commit follows full validation; a later refusal can leave unreferenced content objects, but no partial readable panel snapshot. |
 | Non-native snapshot reference shape | `SNAPSHOT_UNRESOLVED` |

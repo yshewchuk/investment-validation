@@ -100,8 +100,12 @@ def quote_plan(repository, source, index, history_context, request, price_metada
 
 def signed_moves(repository, source, admitted, population):
     """One guarded read per qualified union contributor, not signs inferred from H11."""
-    histories = [json.loads(row["history_json"]) for row in admitted["rows"]]
-    expected = {entry["event_id"]: entry for h in histories for entry in h["history"]}
+    expected = {}
+    for row in admitted["rows"]:
+        history = json.loads(row["history_json"])
+        for entry in history["history"]:
+            expected[entry["event_id"]] = {name: entry[name] for name in
+                ("fragment_id", "object_id", "content_hash")}
     candidates = population[population.event_id.isin(expected)].sort_values(["event_date", "event_id"])
     plans, reader = event_history.plan_with_reader(repository, source, candidates,
         repository.table_contract(source, "computed_moves"))

@@ -342,18 +342,39 @@ def _stored_query(repository, feature_snapshot, context, columns, limits):
     return query_
 
 
-def _read(repository, source, feature_snapshot, *, columns, **request):
-    """Only this committed policy-qualified table may supply experiment fields."""
+def _iter_read(repository, source, feature_snapshot, *, columns, **request):
+    """Validate committed history rows incrementally for bounded consumers."""
     context = _prepare(repository, source, **request)[0]
     if (_existing(repository, context) != feature_snapshot or set(feature_snapshot.table_versions) != {TABLE}):
         raise fail("HOLDOUT_ACCESS_DENIED", "experiment input is not the exact eligible-history artifact")
     admit_fields(repository.table_contract(feature_snapshot, TABLE), context,
         policy_id=request["policy"]["policy_id"], columns=columns)
     query_ = _stored_query(repository, feature_snapshot, context, columns, request["limits"])
-    rows = [row for batch in repository.scan(query_, table_name=TABLE,
-        max_object_bytes=request["limits"]["max_object_bytes"]) for row in batch.to_pylist()]
     expected = [(t["event_id"], c["horizon_sessions"], c["cutoff_id"], c["source_session_ceiling"])
         for t in context["targets"] for c in t["forecasts"]]
-    if [(r["event_id"], r["horizon_sessions"], r["cutoff_id"], r["source_session_ceiling"]) for r in rows] != expected:
-        raise fail("CONTRACT_MISMATCH", "stored history target/cutoff coverage differs")
-    return {"context": context, "feature_snapshot": to_document(feature_snapshot), "rows": rows}
+
+    def rows():
+        position = 0
+        for batch in repository.scan(query_, table_name=TABLE,
+                max_object_bytes=request["limits"]["max_object_bytes"]):
+            for row in batch.to_pylist():
+                if (position >= len(expected)
+                        or (row["event_id"], row["horizon_sessions"], row["cutoff_id"],
+                            row["source_session_ceiling"]) != expected[position]):
+                    raise fail("CONTRACT_MISMATCH", "stored history target/cutoff coverage differs")
+                position += 1
+                yield row
+        if position != len(expected):
+            raise fail("CONTRACT_MISMATCH", "stored history target/cutoff coverage differs")
+
+    class RowStream:
+        def __iter__(self):
+            return rows()
+
+    return {"context": context, "feature_snapshot": to_document(feature_snapshot), "rows": RowStream()}
+
+
+def _read(repository, source, feature_snapshot, *, columns, **request):
+    """Preserve the detached list API for callers that require a complete result."""
+    result = _iter_read(repository, source, feature_snapshot, columns=columns, **request)
+    return {**result, "rows": list(result["rows"])}

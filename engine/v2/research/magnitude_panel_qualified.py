@@ -86,6 +86,13 @@ def _price_versions(context):
     return {(ticker, row["date"]): row for ticker, rows in context["price_row_metadata"].items() for row in rows}
 
 
+def _next_history_row(rows, key):
+    row = next(rows)
+    if (row["event_id"], row["horizon_sessions"]) != key:
+        raise fail("CONTRACT_MISMATCH", "streamed history target/cutoff order differs")
+    return row
+
+
 def _rows(repository, source, price_snapshot, prepared):
     context, admitted, daily_records, price_records = prepared
     daily_anchors = sources.anchor_lookup(daily_records,
@@ -95,7 +102,7 @@ def _rows(repository, source, price_snapshot, prepared):
     versions = _price_versions(context)
     population = load_population(repository, source, as_of_month=request["as_of_month"])
     moves = sources.signed_moves(repository, source, admitted, population)
-    histories = {(r["event_id"], r["horizon_sessions"]): r for r in admitted["rows"]}
+    history_rows = iter(admitted["rows"])
     targets = context["target_events"]
     ceiling = max(c["source_session_ceiling"] for t in targets for c in t["forecasts"])
     regime = daily._read_regime_series(repository, price_snapshot, request["source_start"], ceiling,
@@ -115,7 +122,7 @@ def _rows(repository, source, price_snapshot, prepared):
         for target in selected:
             for cutoff in target["forecasts"]:
                 key = target["event_id"], cutoff["horizon_sessions"]
-                stored = histories[key]
+                stored = _next_history_row(history_rows, key)
                 history = json.loads(stored["history_json"])
                 prior = {"signed_streak": sources.streak(history, moves),
                     "ema12r_abs": stored["ema12_prior_abs_move"] if stored["n_prior"] >= 12
@@ -142,6 +149,13 @@ def _rows(repository, source, price_snapshot, prepared):
                     "mean_prior_or_implied": implied}
                 yield {**row, "row_id": content_hash(row)}
             meter.tick()
+
+    try:
+        next(history_rows)
+    except StopIteration:
+        pass
+    else:
+        raise fail("CONTRACT_MISMATCH", "streamed history has extra rows")
 
 
 def _materialize(repository, source, **request):

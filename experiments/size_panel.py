@@ -57,7 +57,7 @@ def _request(source, request):
 
 def _history(repository, source, request):
     panel._policy(request["policy"])
-    return eligible_history.read(repository, source, request["history_snapshot"], columns=list(FEATURES),
+    return eligible_history.iter_read(repository, source, request["history_snapshot"], columns=list(FEATURES),
         **{k: request[k] for k in ("as_of_month", "policy", "event_ids", "horizons", "history_start", "limits")})
 
 
