@@ -70,7 +70,7 @@ def quote_plan(repository, source, index, history_context, request, price_metada
     groups, excluded = [], []
     meter = Progress("qualified quote group metadata", len(index["sequences"]))
     for sequence in index["sequences"]:
-        sd = np.array([r["date"] for r in price_metadata[sequence["ticker"]]], dtype="datetime64[ns]")
+        sd = price_metadata[sequence["ticker"]]
         latest = max(c["source_session_ceiling"] for t in history_context["targets"]
                      if t["ticker"] == sequence["ticker"] for c in t["forecasts"])
         for event in sequence["events"]:

@@ -95,7 +95,9 @@ def test_public_full_table_and_independent_missing_realized_quote(panel_data, mo
     artifact = size_panel.materialize(data.repository, data.panel_source, **data.panel_request)
     result = read(data, artifact)
     assert [r["horizon_sessions"] for r in result["rows"]] == [1, 3, 5]
-    assert artifact["context"]["schema_version"] == "magnitude_panel_context.v3"
+    assert artifact["context"]["schema_version"] == "magnitude_panel_context.v4"
+    assert "price_row_metadata" not in artifact["context"]
+    assert set(artifact["context"]["price_row_digests"]) >= {"^GSPC"}
     plan = artifact["context"]["eligibility_plan"]
     assert plan["plan_id"] == content_hash({k: v for k, v in plan.items() if k != "plan_id"})
     assert plan["policy"]["policy_id"] == data.panel_request["policy"]["policy_id"]
@@ -824,9 +826,7 @@ def test_panel_rows_consume_canonical_history_order_across_prefix_tickers(monkey
             "history_start": "2023-01-01", "limits": {"max_source_rows": 20, "max_object_bytes": 100}},
         "target_events": targets,
         "confirmed_metadata": {"sequences": [{"ticker": "M"}, {"ticker": "MA"}]},
-        "price_row_metadata": {"M": [{"date": "2024-01-01"}],
-                                "MA": [{"date": "2024-01-01"}],
-                                "^GSPC": [{"date": "2024-01-01"}]},
+        "price_row_digests": {t: {"rows": 1, "digest": content_hash([{"date": "2024-01-01"}])} for t in ("M", "MA", "^GSPC")},
         "quote_eligibility_plan": {"retained_event_ids": []}, "daily_source_start": "2023-01-01",
         "context_id": "panel-context"}
     admitted = {"context": {"context_id": "history-context"}, "rows": rows}
@@ -861,6 +861,7 @@ def test_panel_rows_consume_canonical_history_order_across_prefix_tickers(monkey
         "quote_status": "missing", "anchor": None,
         "values": {name: None for name in builder.daily._DAILY}})
     monkeypatch.setattr(builder, "_block", lambda values, anchors: {})
+    monkeypatch.setattr(sources, "price_dates", lambda *args: [{"date": "2024-01-01"}])
 
     repository = SimpleNamespace(table_contract=lambda *args: object())
     emitted = list(builder._rows(repository, object(), object(), prepared))

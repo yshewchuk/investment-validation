@@ -1,4 +1,5 @@
 """quote_plan: events before a ticker's first price date are excluded; other bracket misses refuse."""
+import numpy as np
 import pytest
 
 from engine.v2.data.errors import DataError
@@ -20,7 +21,7 @@ def _run(monkeypatch, days, events):
     monkeypatch.setattr(sources.eligibility_policy, "plan_eligibility",
         lambda repository, source, **kw: seen.setdefault("metadata", kw["metadata"]) and "plan")
     index = {"sequences": [{"ticker": "FOX", "events": events}]}
-    meta = {"FOX": [{"date": d} for d in days], "^GSPC": []}
+    meta = {"FOX": np.array(days, dtype="datetime64[ns]"), "^GSPC": np.array([], dtype="datetime64[ns]")}
     before = repr(index)
     plan, excluded = sources.quote_plan(None, {}, index, CONTEXT, REQUEST, meta)
     assert plan == "plan"  # quote_plan returns the eligibility plan unchanged as its first element
