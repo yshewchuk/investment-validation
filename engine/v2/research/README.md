@@ -370,9 +370,10 @@ snapshot recorded, and an explicit `--snapshot-id` honoured.
 `grouped_ticker_embargo.v1`; whole calendar-day width is explicit, not globally 30.
 `eligibility_policy.plan_eligibility` rederives random/rolling membership from
 pinned canonical event metadata and returns a content-addressed development
-exclusion plan with retained IDs, reasons, coverage and separate evaluation IDs.
-It merges same-ticker random windows and uses inclusive interval overlap;
-one overlapping horizon excludes the whole event, not individual price bars.
+exclusion plan with retained IDs, reasons, coverage, filtered evaluation IDs,
+ambiguous-random event IDs and evaluation exclusion reasons. It merges
+same-ticker random windows and uses inclusive interval overlap; one overlapping
+horizon excludes the whole event, not individual price bars.
 
 The closed `event_group_bounds.v1` input binds the full `source_snapshot`,
 `holdout_as_of_month`, `policy_id`, sorted positive `horizons`, `groups`, and
@@ -382,9 +383,12 @@ per horizon with `horizon_sessions`, `decision_date`, `source_session_ceiling`.
 Dates are canonical ISO calendar days. Producers must establish these bounds;
 missing bounds refuse. A caller's digest is not evidence of their truth.
 
-The eligible-history builder below consumes this metadata policy. Evaluation IDs
-are preserved, not authorized for reading; annual development targets still need
-retained eligibility. Existing v1 behavior is unchanged.
+The eligible-history builder below consumes this metadata policy. Evaluation
+IDs outside an ambiguous-random ticker are preserved, not authorized for reading;
+IDs on that ticker are listed in `evaluation_exclusions`. Annual development
+targets still need retained eligibility. The policy identity and dependent
+request/dictionary hashes are unchanged; the embargo appears only in plan content,
+and only when an ambiguous random event exists, so earlier plans keep their IDs.
 Integration sequencing belongs to the [stage-2 design](../../../experiments/SUPER_SIZE/STAGE2_DESIGN.md).
 
 ## Confirmed metadata index (synthetic only)
