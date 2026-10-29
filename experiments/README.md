@@ -77,6 +77,8 @@ Saved identity and later outcome/worker APIs' separate read policies do not chan
 
 ## Consumers and authority
 
+`distribution_report.paired_report` is currently imported only by `tests/v2/research/test_distribution_report.py`; it is library-only and unreachable from a production entrypoint. D4 will compose its forecast report, with runner wiring in later D slices.
+
 `record_export` (run-record export) is consumed by `v2_gate` and `v2_prediction` `run`; it depends on `lib` (EXP numbering) and ops errors only.
 
 `v2_magnitude_search_run` consumes `magnitude_search_plan.read_search_plan`, `magnitude_search_records.MIGRATIONS`/`OWNER`/`append_record`/`read_record`, `magnitude_search_trials.SearchTrials`, `magnitude_search_execution.validate_execution_limits`, and `magnitude_search_outer.execute_outer_fold`/`collect_outer_results` for source-sealed serial orchestration.
