@@ -22,5 +22,6 @@ Isolated experiment research workspaces under the planned dependency policy
 
 `overlay.create_workspace`, `overlay.open_workspace`, `overlay.ResearchWorkspace`,
 `overlay.SnapshotOnlyRepository`, `closure.verify_snapshot_closure`, `closure.SnapshotClosure`
+`scope.validate_size_scope_request`, `scope.resolve_size_scope_snapshot`,
 `scope.size_scope_repository`, `scope.WorkspaceScopeRepository`, and
 `guard.refuse_workspace_execution` (the last is imported by `supervisor` and `executor`).

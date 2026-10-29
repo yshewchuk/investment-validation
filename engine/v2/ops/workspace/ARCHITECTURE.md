@@ -43,6 +43,14 @@ At open or seal the closure may also refuse `closure_changed` (digest differs), 
 
 ## SIZE workspace scope head
 
+`validate_size_scope_request(workspace, scope)` performs the same local
+workspace-handle and scope checks as `size_scope_repository` without reading
+the pinned source or writing a read pin. `resolve_size_scope_snapshot(workspace,
+scope)` applies those checks before reading the pinned source and uses the
+shared typed storage-error mapping; it also writes no read pin. Admission uses
+this helper so invalid requests fail before source access and snapshot read
+failures retain the scope API's typed refusal.
+
 `size_scope_repository(workspace, scope, *, clock)` adapts the workspace's
 snapshot-only source to the existing research contract that resolves a scope
 head. It publishes a `research_workspace_scope_head.v1.0` read pin in the
