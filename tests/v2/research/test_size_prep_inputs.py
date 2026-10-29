@@ -3,6 +3,7 @@ import gzip
 import hashlib
 import json
 from copy import deepcopy
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
@@ -558,9 +559,47 @@ def test_listed_exclusions_fetch_empty_even_under_strict(source_root):
     _refusal(lambda: strict("QQQQ"), "SOURCE_NOT_FOUND")
 
 
+def test_admission_validates_scope_before_workspace_source_read(source_root):
+    manifest = prep.build_manifest(source_root, session_ceiling=_AS_OF, tickers=["AAAA"],
+                                   allow_exclusions=True)
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("workspace was touched before scope validation")
+
+    workspace = SimpleNamespace(source_snapshot=unexpected, record_read_pin=unexpected,
+        source=SimpleNamespace(resolve=lambda *_: None), snapshot_id="snapshot", manifest_hash="manifest")
+    with pytest.raises(OpsError) as raised:
+        prep.admit_manifest(workspace, " bad ", manifest, clock=FakeClock())
+    assert raised.value.code == "WORKSPACE_REFUSED"
+    assert raised.value.problem.details["reason"] == "scope_invalid"
+
+
+def test_admission_maps_workspace_snapshot_read_failure(source_root):
+    manifest = prep.build_manifest(source_root, session_ceiling=_AS_OF, tickers=["AAAA"])
+
+    def broken_snapshot():
+        raise OSError("synthetic snapshot read failure")
+
+    workspace = SimpleNamespace(source_snapshot=broken_snapshot,
+        record_read_pin=lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("unexpected write")),
+        source=SimpleNamespace(resolve=lambda *_: None), snapshot_id="snapshot", manifest_hash="manifest")
+    with pytest.raises(OpsError) as raised:
+        prep.admit_manifest(workspace, "size-prep", manifest, clock=FakeClock())
+    assert raised.value.code == "WORKSPACE_REFUSED"
+    assert raised.value.problem.details == {"reason": "storage_failure", "cause": "OSError"}
+
+
 def test_admission_refuses_event_bearing_exclusions_before_any_workspace_write(pinned_ws, source_root,
                                                                                capsys, monkeypatch):
     workspace, clock, prod = pinned_ws
+    scan_caps = []
+    original_scan = prep.Repository.scan
+
+    def recording_scan(self, query, *, table_name, max_object_bytes=None):
+        scan_caps.append(max_object_bytes)
+        yield from original_scan(self, query, table_name=table_name, max_object_bytes=max_object_bytes)
+
+    monkeypatch.setattr(prep.Repository, "scan", recording_scan)
     before, prod_before = _ws_state(workspace), _digest_tree(prod)
     manifest = prep.build_manifest(source_root, session_ceiling=_AS_OF, tickers=["AAAA", "EEEE", "ZZZZ"],
                                    allow_exclusions=True)
@@ -573,6 +612,7 @@ def test_admission_refuses_event_bearing_exclusions_before_any_workspace_write(p
     assert _ws_state(workspace) == before and _digest_tree(prod) == prod_before
     err = capsys.readouterr().err
     assert "excluded=2" in err and "EEEE (+1 more)" in err
+    assert scan_caps == [prep.MAX_EVENT_OBJECT_BYTES]
 
 
 def test_admission_records_manifest_cas_and_read_pin_in_workspace_only(pinned_ws, source_root):

@@ -22,7 +22,7 @@ from engine.v2.foundation import ArtifactStore, SystemClock, canonical_json, con
 from engine.v2.ops.bootstrap import open_catalog
 from engine.v2.ops.catalog import register_artifact, transaction
 from engine.v2.ops.errors import fail
-from engine.v2.ops.workspace.scope import size_scope_repository
+from engine.v2.ops.workspace.scope import resolve_size_scope_snapshot, size_scope_repository
 
 MANIFEST_VERSION = "tier1_history_manifest.v1"
 EXCLUSION_MANIFEST_VERSION = "tier1_history_manifest.v2"
@@ -33,6 +33,7 @@ _MANIFEST_KEYS = {"schema_version", "session_ceiling", "entries", "manifest_id"}
 _EXCLUDED_KEY = "excluded_tickers"
 MAX_BODY_BYTES = 64 * 1024 * 1024
 MAX_LOGGED_NAMES = 20
+MAX_EVENT_OBJECT_BYTES = 64 * 1024 * 1024
 
 
 def _read_regular(path, limit, *, gz=False):
@@ -383,7 +384,8 @@ def _excluded_event_tickers(source, snapshot, excluded, started):
     query = DataQuery(snapshot_id=snapshot.snapshot_id, table_contract_ref=ref, columns=("ticker",),
                       key_filter=(predicate,), order_by=tuple(contract.primary_key),
                       max_batch_rows=min(bound, contract.maximum_batch_rows), max_result_rows=bound)
-    return sorted({row["ticker"] for batch in source.scan(query, table_name=EVENTS_TABLE)
+    return sorted({row["ticker"] for batch in source.scan(query, table_name=EVENTS_TABLE,
+                                                          max_object_bytes=MAX_EVENT_OBJECT_BYTES)
                    for row in batch.to_pylist()})
 
 
@@ -394,7 +396,7 @@ def admit_manifest(workspace, scope, manifest, *, clock):
     validate_manifest(manifest)
     started = time.monotonic()
     excluded = sorted(set(manifest.get(_EXCLUDED_KEY) or ()))
-    snapshot = workspace.source_snapshot()
+    snapshot = resolve_size_scope_snapshot(workspace, scope)
     _log("admission start snapshot=" + snapshot.snapshot_id + " excluded=" + str(len(excluded))
          + " names=" + (_names(excluded) if excluded else "none"), started)
     offenders = _excluded_event_tickers(workspace.source, snapshot, excluded, started)
