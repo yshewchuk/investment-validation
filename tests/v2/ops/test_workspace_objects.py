@@ -14,6 +14,7 @@ from tests.v2.ops.test_research_workspace import (  # noqa: F401
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.workspace.catalog_rows import copy_closure_rows
 from engine.v2.ops.workspace.objects import admit_closure_objects
+from engine.v2.ops.workspace import objects as objects_module
 
 
 def _key(path):
@@ -72,6 +73,7 @@ def test_changed_source_object_refuses_and_leaves_no_partial(prod):
         before = _admitted(ws)
         data = bytearray(prod.object.read_bytes())
         data[-1] ^= 0xFF
+        prod.object.chmod(0o644)
         prod.object.write_bytes(bytes(data))
         with pytest.raises(OpsError) as caught:
             admit_closure_objects(ws)
@@ -124,9 +126,24 @@ def test_source_object_that_grew_is_refused_without_partial(prod):
     with _create(prod) as ws:
         copy_closure_rows(ws)
         before = _admitted(ws)
+        prod.object.chmod(0o644)
         prod.object.write_bytes(prod.object.read_bytes() + b"extra")
         with pytest.raises(OpsError) as caught:
             admit_closure_objects(ws)
         assert _details(caught) == ("WORKSPACE_REFUSED", "object_changed")
         assert _admitted(ws) == before
+        assert not list((ws.store.root / "objects").rglob("*.part"))
+
+
+def test_publication_never_overwrites_a_destination_created_after_the_check(prod, monkeypatch):
+    with _create(prod) as ws:
+        copy_closure_rows(ws)
+        destination = ws.store.root / "objects" / prod.object.parent.name / prod.object.name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(b"raced")
+        monkeypatch.setattr(objects_module, "_present", lambda *a, **k: False)
+        with pytest.raises(OpsError) as caught:
+            admit_closure_objects(ws)
+        assert _details(caught) == ("WORKSPACE_REFUSED", "destination_conflict")
+        assert destination.read_bytes() == b"raced"
         assert not list((ws.store.root / "objects").rglob("*.part"))

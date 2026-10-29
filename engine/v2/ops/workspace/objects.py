@@ -18,11 +18,11 @@ _PROGRESS_SECONDS = 30
 _CHUNK = 1 << 20
 _HASH = re.compile(r"sha256:([0-9a-f]{64})\Z")
 _NAMED = (
-    "SELECT DISTINCT o.object_id, o.content_hash, o.byte_size, o.storage_key FROM data_objects o "
+    "SELECT DISTINCT substr(o.object_id, 1, 201), substr(o.content_hash, 1, 201), o.byte_size, substr(o.storage_key, 1, 201) FROM data_objects o "
     "JOIN data_fragments f ON f.object_id = o.object_id "
     "JOIN data_version_fragments vf ON vf.fragment_id = f.fragment_id "
     "JOIN data_snapshot_tables st ON st.dataset_version_id = vf.dataset_version_id "
-    "WHERE st.snapshot_id = ? ORDER BY o.object_id"
+    "WHERE st.snapshot_id = ? ORDER BY 1"
 )
 
 
@@ -84,7 +84,10 @@ def _copy(source, destination, digest: str, size: int, object_id: str) -> None:
                 os.fsync(writer.fileno())
         if total != size or hasher.hexdigest() != digest:
             raise _refuse("object_changed", object_id=object_id)
-        os.replace(part, destination)
+        try:
+            os.link(part, destination)
+        except FileExistsError:
+            raise _refuse("destination_conflict", object_id=object_id) from None
         fsync_directory(destination.parent)
     finally:
         try:
@@ -101,6 +104,16 @@ def admit_closure_objects(workspace) -> dict:
         raise
     except Exception as exc:
         raise _refuse("storage_failure", cause=type(exc).__name__) from exc
+
+
+def _digest(object_id, content_hash, size, storage_key) -> str:
+    """The sha256 hex of a well-formed object row; anything else is refused."""
+    match = _HASH.match(content_hash) if isinstance(content_hash, str) else None
+    if (len(object_id) > 200 or len(storage_key) > 200 or match is None
+            or type(size) is not int or size < 0
+            or storage_key != f"objects/{match.group(1)[:2]}/{match.group(1)}"):
+        raise _refuse("object_ref_invalid", object_id=object_id[:80])
+    return match.group(1)
 
 
 def _admit(workspace) -> dict:
@@ -123,18 +136,15 @@ def _admit(workspace) -> dict:
             conn.execute(_NAMED, (snapshot_id,)), 1):
         if index > _MAX_OBJECTS:
             raise _refuse("objects_over_cap")
-        match = _HASH.match(content_hash) if isinstance(content_hash, str) else None
-        if (match is None or type(size) is not int or size < 0
-                or storage_key != f"objects/{match.group(1)[:2]}/{match.group(1)}"):
-            raise _refuse("object_ref_invalid", object_id=object_id)
+        digest = _digest(object_id, content_hash, size, storage_key)
         total_bytes += size
         if total_bytes > _MAX_BYTES:
             raise _refuse("bytes_over_cap", object_id=object_id)
         destination = target_root / storage_key
-        if _present(destination, size, match.group(1), object_id):
+        if _present(destination, size, digest, object_id):
             present += 1
         else:
-            _copy(source_root / storage_key, destination, match.group(1), size, object_id)
+            _copy(source_root / storage_key, destination, digest, size, object_id)
             copied += 1
             copied_bytes += size
         if time.monotonic() - last >= _PROGRESS_SECONDS:
