@@ -79,6 +79,28 @@ STATES = {
 }
 
 
+def trailing_payload(object_name: str) -> bytes:
+    """A valid trailing-cutoff artifact JSON whose lineage ends at the object name's month."""
+    from engine.v2.models.lineage import DataDependency, Lineage
+    from engine.v2.models.trailing_cutoff_artifact import (
+        PNL_HISTORY_ID, make_trailing_cutoff_artifact)
+    month = object_name.rsplit("|", 1)[-1][:7] + "-01"
+    artifact = make_trailing_cutoff_artifact(
+        month=month, cutoff=50.0,
+        lineage=Lineage(data=(DataDependency(table=PNL_HISTORY_ID, end_exclusive=month),)))
+    return json.dumps(artifact.payload()).encode()
+
+
+def state_bytes(member: str, object_name: str, file_name: str) -> bytes:
+    """Fixture payload for a staged state file: valid trailing JSON, else opaque bytes."""
+    if member == "trailing_pnl_cutoff":
+        try:
+            return trailing_payload(object_name)
+        except ValueError:
+            return f"state-{file_name}".encode()
+    return f"state-{file_name}".encode()
+
+
 BOOTSTRAP = {
     "tier4_dir": "/tmp/tier4",
     "panel_catalog": "/tmp/panel",

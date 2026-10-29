@@ -88,7 +88,7 @@ def test_none_prior_submits_the_twelve_training_jobs(monkeypatch, tmp_path, caps
                          "cutoffs": (SESSION,)},
         "train-board": {"mode": "board_analog", "alpha": pool_refresh.FILL_ALPHA,
                         "cutoffs": (SESSION,)},
-        "train-trailing": {"mode": "trailing_cutoff", "cutoffs": (SESSION,)},
+        "train-trailing": {"mode": "trailing_cutoff", "cutoffs": (SESSION, "2026-02-01")},
         "train-driver-size": {"mode": "state", "state": "driver_residual_pool:size"},
         "train-driver-implied_t1": {"mode": "state",
                                     "state": "driver_residual_pool:implied_t1"},
