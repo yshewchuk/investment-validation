@@ -1053,8 +1053,9 @@ def _drive_jobs_to_terminal(service, conn, job_ids,
     """Poll ``service`` until every job in ``job_ids`` is terminal or
     ``deadline_at`` fires. With ``hold_for_pool`` true, the scheduled serve also
     stays up while the latest session's pool cycle is pending and until the
-    eligible native score batch for this plan is terminal, bounded by
-    ``deadline_at``. Returns
+    eligible native score batch for this plan is terminal (or its submission is
+    terminally blocked), bounded by ``deadline_at``. It does not wait for the
+    follow-on ``native_parity`` job. Returns
     ``"timed_out"`` on ``serve``'s own ``"deadline_exceeded"``, else
     ``"completed"`` when every job succeeded, else ``"failed"``. Shared by
     ``_default_serve`` and
