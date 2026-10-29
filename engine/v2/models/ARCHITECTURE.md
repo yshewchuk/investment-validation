@@ -642,10 +642,10 @@ metadata and descriptor. Identical verified inputs produce identical references.
 
 `load_chooser_serving_fold` prepares the separately typed implied-t1/runup-move
 artifact from its exact `tier4_folds:<role>` catalog member. It rechecks catalog
-schema/self-hash/release/deployment, unique membership, descriptor/object identity,
-and the matching wildcard parent binding before decoding. The returned immutable
-`ChooserServingFoldRef` preserves the raw D14 producer output and paired held-out
-interval arrays; these are not the chooser k-NN population or driver residual state.
+schema/self-hash/release/deployment, unique membership, descriptor/object
+identity, exact parent ID/hash and matching wildcard parent binding before decoding.
+`ChooserServingFoldRef` keeps raw D14 output and paired held-out intervals, not the
+chooser k-NN population or driver residual state.
 It makes no event-month selection or source-ready declaration. Genuine
 training-source completion/finality, coordinator publication and per-request causal
 bounds are required for admission. Artifact headers/descriptors alone do not
@@ -746,7 +746,7 @@ per the root doc's layer table; `checks/import_layers.py` enforces this.
   `serving_fold_loader`; the verified frozen inference contract/loader for
   the model stage, the payoff-calibration artifact type, and
   `release_bindings.py`'s reads of `deployment.current_pointer`,
-  `deployment._read_manifest`, `deployment._manifest_hash_matches`,
+  `deployment._read_manifest`, `deployment.manifest_hash_matches`,
   `deployment.production_release_root`, and `deployment.MissingReleaseRoot`.
 - `engine.v2.models.training` — the same artifact types and no-fit guards, plus
   closed ElasticNet and Ridge/HGB recipe validation; never imported *by* this package (one-way).

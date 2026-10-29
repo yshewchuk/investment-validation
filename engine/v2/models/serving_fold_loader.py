@@ -7,7 +7,7 @@ from datetime import date
 from engine.v2.foundation import content_hash, from_document, to_document
 
 from .contracts import MODEL_NOT_READY, ModelRelease
-from .deployment import StagedManifest, _manifest_hash_matches
+from .deployment import StagedManifest, manifest_hash_matches
 from .loader import FrozenInference
 from .serving_folds import ChooserServingFoldDescriptor, ServingFoldDescriptor
 
@@ -74,10 +74,12 @@ def validate_serving_fold_descriptor(descriptor):
 
 def _view(descriptor, parent, catalog_hash, *, role="size"):
     policy = descriptor.policy
-    # The descriptor parent records where the fold was authored. Carried
-    # catalogs can retain that provenance; the current model compatibility is
-    # verified below against the containing release's size binding.
-    if not _hash_valid(catalog_hash) or not _manifest_hash_matches(parent):
+    # Size folds may carry their authoring provenance into a later release;
+    # chooser folds retain the exact parent check below.
+    if not _hash_valid(catalog_hash) or not manifest_hash_matches(parent):
+        raise ServingFoldError()
+    if role != "size" and (descriptor.parent_release_id != parent.release.release_id
+                           or descriptor.parent_release_hash != parent.release_hash):
         raise ServingFoldError()
     bindings = [b for b in parent.release.bindings if b.role == role and b.strategy_id == "*"]
     if (len(bindings) != 1 or bindings[0].model_id != policy.model_id
