@@ -48,6 +48,7 @@ _TABLES = (
 )
 
 _CHUNK = 5000
+_BATCH_BYTES = 16 << 20
 _MAX_ROWS = 2_000_000
 _MAX_BYTES = 1 << 30
 _REQUIRED = ("data_snapshots", "data_snapshot_tables",
@@ -59,14 +60,13 @@ class _Budget:
         self.rows = 0
         self.bytes = 0
 
-    def add(self, table: str, batch) -> None:
-        for row in batch:
-            self.rows += 1
-            self.bytes += len(repr(tuple(row)))
-            if self.rows > _MAX_ROWS:
-                raise _refuse("copy_rows_over_cap", table=table)
-            if self.bytes > _MAX_BYTES:
-                raise _refuse("copy_bytes_over_cap", table=table)
+    def add(self, table: str, row) -> None:
+        self.rows += 1
+        self.bytes += len(repr(tuple(row)).encode("utf-8"))
+        if self.rows > _MAX_ROWS:
+            raise _refuse("copy_rows_over_cap", table=table)
+        if self.bytes > _MAX_BYTES:
+            raise _refuse("copy_bytes_over_cap", table=table)
 
 
 def _refuse(reason: str, **details):
@@ -106,12 +106,20 @@ def _insert_rows(src, dst, sid) -> dict:
         placeholders = ",".join("?" * len(source_columns))
         statement = "INSERT OR IGNORE INTO %s VALUES (%s)" % (table, placeholders)
         count = 0
-        batch = cursor.fetchmany(_CHUNK)
-        while batch:
-            budget.add(table, batch)
+        batch = []
+        batch_bytes = 0
+        for row in cursor:
+            budget.add(table, row)
+            batch.append(row)
+            batch_bytes += len(repr(tuple(row)).encode("utf-8"))
+            if len(batch) >= _CHUNK or batch_bytes > _BATCH_BYTES:
+                dst.executemany(statement, batch)
+                count += len(batch)
+                batch = []
+                batch_bytes = 0
+        if batch:
             dst.executemany(statement, batch)
             count += len(batch)
-            batch = cursor.fetchmany(_CHUNK)
         counts[table] = count
     return counts
 
@@ -119,15 +127,15 @@ def _insert_rows(src, dst, sid) -> dict:
 def _verify_rows(src, dst, sid, started) -> None:
     for table, where in _TABLES:
         source_digest, source_count = _digest(_read(src, table, where, sid))
-        destination_digest, _ = _digest(_read(dst, table, where, sid))
         if source_count <= 0 and table in _REQUIRED:
             raise _refuse("source_row_missing", table=table)
-        if source_digest != destination_digest:
-            raise _refuse("row_mismatch", table=table)
         destination_count = dst.execute(
             "SELECT COUNT(*) FROM %s" % table).fetchone()[0]
         if destination_count != source_count:
             raise _refuse("unexpected_rows", table=table)
+        destination_digest, _ = _digest(_read(dst, table, where, sid))
+        if source_digest != destination_digest:
+            raise _refuse("row_mismatch", table=table)
         _log(f"stage=copy table={table} rows={source_count} "
              f"{time.monotonic() - started:.2f}s elapsed")
 
@@ -172,14 +180,14 @@ def copy_closure_rows(workspace) -> dict:
                 _verify_catalog(dst)
                 workspace.source_snapshot()
                 chain = _chain(dst, sid)
+                _log(f"stage=copy done snapshot={sid} tables={len(counts)} "
+                     f"{time.monotonic() - started:.2f}s elapsed")
                 dst.commit()
             except BaseException:
                 dst.rollback()
                 raise
         finally:
             src.rollback()
-        _log(f"stage=copy done snapshot={sid} tables={len(counts)} "
-             f"{time.monotonic() - started:.2f}s elapsed")
         return {"snapshot_id": sid, "manifest_hash": pinned.manifest_hash,
                 "chain": chain, "rows": counts}
     except (OpsError, data_errors.DataError):

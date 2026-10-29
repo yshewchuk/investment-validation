@@ -1,6 +1,6 @@
 # `engine/v2/ops/workspace` — architecture
 
-An isolated experiment write sandbox over one **read-only** pinned snapshot: an overlay, never a copy. Library only: no CLI, no native heads, no supervisor. Modules: `closure.py` (read-only closure verification), `overlay.py` (create/open), `scope.py` (workspace-local scope binding), `catalog_rows.py` (bounded copy of the pinned snapshot's catalog rows), `guard.py` (execution refusal).
+An isolated experiment write sandbox over one **read-only** pinned snapshot: an overlay, never a copy of its objects (only catalog rows are copied, by `catalog_rows.py`). Library only: no CLI, no native heads, no supervisor. Modules: `closure.py` (read-only closure verification), `overlay.py` (create/open), `scope.py` (workspace-local scope binding), `catalog_rows.py` (bounded copy of the pinned snapshot's catalog rows), `guard.py` (execution refusal).
 
 ## Closure (`closure.verify_snapshot_closure(conn, store, snapshot_id, manifest_hash, *, deep=False) -> SnapshotClosure`)
 
@@ -104,7 +104,7 @@ R1–R6, all `WORKSPACE_REFUSED` unless noted:
 | R1 typed reason | `workspace_invalid` (workspace handle already in a transaction), `source_row_missing` (the source has no `data_snapshots`, `data_snapshot_tables`, `data_dataset_versions` or `data_contracts` row for S; fragment and object tables may legitimately be empty), `schema_mismatch` (column lists differ), `copy_rows_over_cap`, `copy_bytes_over_cap`, `unexpected_rows` (workspace holds rows beyond the closure), `row_mismatch` (a digest differs, including a conflicting existing row), `foreign_key_violation`, `storage_failure` (other exceptions, with `cause`). An unknown S propagates the existing `SNAPSHOT_NOT_FOUND`. |
 | R2 no partial result | One transaction; any refusal rolls it back, so no row and no head remains. Nothing after commit can refuse. |
 | R3 no repair | No overwrite, delete or retry; a conflicting row refuses. |
-| R4 stale pin | `workspace.source_snapshot()` runs before the read and before commit; a changed pin propagates `SNAPSHOT_CLOSURE_BROKEN`. Its resolution is memoised, so drift of the production rows themselves is caught by the digest comparison (`row_mismatch`). |
+| R4 stale pin | `workspace.source_snapshot()` runs before the read and before commit; a changed pin propagates `SNAPSHOT_CLOSURE_BROKEN`. Drift of the production rows themselves is caught by the digest comparison (`row_mismatch`). |
 | R5 read-only production | Only the existing read-only source connection is read; all writes go to `workspace.conn`. |
 | R6 unknown state | Malformed handle, unreadable rows or any unexpected exception refuses; nothing is guessed. |
 
