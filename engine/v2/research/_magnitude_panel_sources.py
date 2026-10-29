@@ -22,7 +22,7 @@ from engine.v2.research import magnitude_panel_daily as daily
 from engine.v2.research import magnitude_panel_qualified_table as table_contract
 from engine.v2.research.magnitude_features import calendar_input
 from engine.v2.research.magnitude_inputs import forecast_cutoff
-from engine.v2.research.progress import Progress
+from engine.v2.research.progress import Progress, decision
 
 
 def inventory(repository, snapshot, table, limits):
@@ -67,7 +67,7 @@ def price_dates(repository, snapshot, ticker, limits):
 def quote_plan(repository, source, index, history_context, request, price_metadata):
     """Independent quote population; missing realized labels never select quotes."""
     calendar, _ = calendar_input(repository, source)
-    groups = []
+    groups, excluded = [], []
     meter = Progress("qualified quote group metadata", len(index["sequences"]))
     for sequence in index["sequences"]:
         sd = np.array([r["date"] for r in price_metadata[sequence["ticker"]]], dtype="datetime64[ns]")
@@ -78,6 +78,9 @@ def quote_plan(repository, source, index, history_context, request, price_metada
             if event["ordinal"] < 4 or event["event_date"] < request["history_start"]:
                 continue
             if event["event_date"] >= latest:
+                continue
+            if sd.size and np.datetime64(event["event_date"], "ns") < sd.min():
+                excluded.append(event["event_id"])  # before price coverage: no bracket can ever exist
                 continue
             lo, hi = source_bounds(sd, event["event_date"], event["session"])
             if lo is None:
@@ -94,8 +97,17 @@ def quote_plan(repository, source, index, history_context, request, price_metada
         "holdout_as_of_month": request["as_of_month"], "policy_id": request["policy"]["policy_id"],
         "horizons": [1, 3, 5], "groups": groups}
     metadata["metadata_id"] = content_hash(metadata)
-    return eligibility_policy.plan_eligibility(repository, source, as_of_month=request["as_of_month"],
+    if excluded:
+        decision("quote plan", f"excluded {len(excluded)} events dated before price coverage (before_price_coverage)")
+    plan = eligibility_policy.plan_eligibility(repository, source, as_of_month=request["as_of_month"],
         policy=request["policy"], metadata=metadata, evaluation_event_ids=[])
+    return plan, sorted(excluded)
+
+
+def precoverage_document(excluded):
+    """Context entry for pre-coverage exclusions; empty when none, so existing context ids are unchanged."""
+    return {"quote_precoverage_excluded": {"reason": "before_price_coverage",
+        "count": len(excluded), "event_ids": list(excluded)}} if excluded else {}
 
 
 def signed_moves(repository, source, admitted, population):

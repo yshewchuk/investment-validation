@@ -100,6 +100,7 @@ def test_public_full_table_and_independent_missing_realized_quote(panel_data, mo
     assert plan["policy"]["policy_id"] == data.panel_request["policy"]["policy_id"]
     assert artifact["context"]["target_events"][0]["label_end"] == "2024-06-18"
     assert artifact["context"]["quote_label_windows"] == "independent_pinned_price_dates_not_computed_outcome_capture"
+    assert "quote_precoverage_excluded" not in artifact["context"]  # no pre-coverage events: identity unchanged
     for row in result["rows"]:
         assert row["n_prior"] == 3
         assert row["mean_prior_move"] == 0.
