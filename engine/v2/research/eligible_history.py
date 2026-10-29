@@ -327,7 +327,8 @@ def _materialize(repository, snapshot, **request):
 
 
 def _stored_query(repository, feature_snapshot, context, columns, limits):
-    """Bound the exact immutable feature read before opening any payload."""
+    """Bound the exact immutable feature read before opening any payload.
+    The batch cap is the largest fragment's row count, not the total: history_json cells are ~1 MB."""
     count = sum(len(t["forecasts"]) for t in context["targets"])
     records = repository.fragment_records(feature_snapshot, TABLE)
     if (sum(r.row_count for r in records) != count
@@ -338,7 +339,8 @@ def _stored_query(repository, feature_snapshot, context, columns, limits):
         table_contract_ref=feature_snapshot.table_versions[TABLE].table_contract_ref,
         columns=(*METADATA, *columns), order_by=CONTRACT.primary_key,
         key_filter=(KeyPredicate(column="context_id", operator="eq", values=(context["context_id"],)),),
-        max_batch_rows=min(count, CONTRACT.maximum_batch_rows), max_result_rows=count)
+        max_batch_rows=min(count, max((r.row_count for r in records), default=0),
+            CONTRACT.maximum_batch_rows), max_result_rows=count)
     return query_
 
 
