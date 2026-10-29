@@ -152,12 +152,17 @@ def _native_has_no_analog_field(native: Mapping[str, Any]) -> bool:
 
 
 def _legacy_analog_placeholder(legacy: Mapping[str, Any], native: Mapping[str, Any]) -> bool:
-    """Legacy ``n_analogs == 0`` is the dataclass default of a stage that never ran
-    (user decision 2026-09-23).  "Never ran" comes from the rows' own evidence: the
-    legacy CI is also absent and native carries no analog field.  A real 0-analog
-    result (CI present) or any native value keeps the ``0`` comparable.
+    """Legacy ``n_analogs == 0`` is the dataclass default of a stage that never ran.
+
+    "Never ran" comes from the legacy row itself: a matcher that ran and found no
+    rows also yields ``n_analogs == 0`` with no CI, but ``engine/score.py`` then
+    flags ``THIN_ANALOGS``.  So the placeholder needs a ``flags`` list without that
+    flag, no legacy CI, and no native analog field.  A real 0-analog result or any
+    native value keeps the ``0`` comparable.
     """
+    flags = legacy.get("flags")
     return (legacy.get("n_analogs") == 0
+            and isinstance(flags, list) and "THIN_ANALOGS" not in flags
             and legacy.get("ci_low") is None and legacy.get("ci_high") is None
             and _native_has_no_analog_field(native))
 
