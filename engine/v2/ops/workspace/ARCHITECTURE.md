@@ -80,3 +80,34 @@ R1–R6 follow the workspace failure contract: stable typed refusal; no partial
 result; no repair or retry; stale scope fails closed; production remains
 read-only and the read pin writes only inside the workspace; unknown states
 refuse. Existing workspaces and native catalog heads are unchanged.
+
+## SIZE workspace closure catalog rows (`catalog_rows.copy_closure_rows(workspace) -> dict`)
+
+Slice (i) of #1614 part 2b. A native scope head in the workspace catalog (slice (ii), the head commit and the parent receipt's reference inputs) needs the pinned snapshot's catalog rows, including the `parent_snapshot_id` chain, because `manifest_hash` covers the parent and `data_snapshots.parent_snapshot_id` is a foreign key. This function copies those rows from the read-only source connection into `workspace.conn`. It copies no object files, writes no head, no receipt and no reference input; the production catalog is only read. Catalog is 7 GB, so there is no whole-catalog copy; a standard tool (`sqlite3` backup/`VACUUM INTO`) copies whole files only, which is why this is a bounded row copy.
+
+**Bound.** With S the pinned snapshot, the rows copied are exactly these and the workspace catalog must hold no other row in these tables:
+
+| Table | Rows |
+|---|---|
+| `data_snapshots` | S and every ancestor through `parent_snapshot_id` |
+| `data_snapshot_tables` | S's rows only |
+| `data_dataset_versions` | the versions S names plus their `parent_dataset_version_id` chains |
+| `data_version_fragments`, `data_fragments`, `data_objects` | those of the versions S names directly (not of ancestors or dataset-version parents) |
+| `data_contracts` | contracts of the copied versions and fragments |
+
+Receipts, lineage, coverage, captures and heads are outside this slice.
+
+**Procedure.** Resolve the pin (`workspace.source_snapshot()`), read the source under one read transaction, insert in one workspace transaction with deferred foreign keys using `INSERT OR IGNORE`, then verify per table: the workspace row count equals the closure's, and an ordered content digest of the closure rows equals the source's. Before commit, `PRAGMA foreign_key_check` is empty and `Repository.resolve_full(S).snapshot.manifest_hash` over the workspace catalog equals the pinned hash. Returns the snapshot id, manifest hash, ancestor chain and per-table row counts. Progress per table goes to stderr (`[workspace]`).
+
+R1–R6, all `WORKSPACE_REFUSED` unless noted:
+
+| Rule | Behaviour |
+|---|---|
+| R1 typed reason | `source_row_missing` (S or a referenced row absent in the source), `schema_mismatch` (column lists differ), `unexpected_rows` (workspace holds rows beyond the closure), `row_mismatch` (a digest differs, including a conflicting existing row), `foreign_key_violation`, `manifest_mismatch`, `storage_failure` (other exceptions, with `cause`). |
+| R2 no partial result | One transaction; any refusal rolls it back, so no row and no head remains. |
+| R3 no repair | No overwrite, delete or retry; a conflicting row refuses. |
+| R4 stale pin | `workspace.source_snapshot()` runs before and after the read; a changed pin propagates `SNAPSHOT_CLOSURE_BROKEN`. |
+| R5 read-only production | Only the existing read-only source connection is used; all writes go to `workspace.conn`. |
+| R6 unknown state | Malformed workspace handle or unreadable rows refuse; nothing is guessed. |
+
+Idempotent: a re-run over a complete copy inserts nothing and returns the same result; a re-run after a failure converges because failure leaves no rows.
