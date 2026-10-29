@@ -259,11 +259,13 @@ def test_hold_for_pool_waits_for_its_native_score_batch(monkeypatch):
         (sql, params) for sql, params in conn.queries
         if "idempotency_key" in sql and "CASE WHEN typeof(spec_json)" in sql
     ]
-    assert len(spec_queries) == 1
-    spec_sql, spec_params = spec_queries[0]
-    assert "length(CAST(spec_json AS BLOB)) <= ?" in spec_sql
-    assert spec_params[0] == nightly.NATIVE_SCORE_BATCH_SPEC_MAX_BYTES
-    assert spec_params[1:] == ("score-job",)
+    # Each until() poll re-reads the plan's score job (batch state changes between
+    # polls), so there is one bounded spec query per poll, never an unbounded one.
+    assert len(spec_queries) >= 3
+    for spec_sql, spec_params in spec_queries:
+        assert "length(CAST(spec_json AS BLOB)) <= ?" in spec_sql
+        assert spec_params[0] == nightly.NATIVE_SCORE_BATCH_SPEC_MAX_BYTES
+        assert spec_params[1:] == ("score-job",)
 
 
 def test_hold_for_pool_releases_when_plan_batch_was_superseded_before_submit(monkeypatch):
