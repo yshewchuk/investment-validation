@@ -43,11 +43,14 @@ def _present(path, size: int, digest: str, object_id: str) -> bool:
         return False
     if not stat.S_ISREG(info.st_mode) or info.st_size != size:
         raise _refuse("destination_conflict", object_id=object_id)
-    hasher = hashlib.sha256()
+    hasher, total = hashlib.sha256(), 0
     with open(path, "rb") as reader:
-        while chunk := reader.read(_CHUNK):
+        while chunk := reader.read(min(_CHUNK, size + 1 - total)):
             hasher.update(chunk)
-    if hasher.hexdigest() != digest:
+            total += len(chunk)
+            if total > size:
+                raise _refuse("object_changed", object_id=object_id)
+    if total != size or hasher.hexdigest() != digest:
         raise _refuse("object_changed", object_id=object_id)
     return True
 
