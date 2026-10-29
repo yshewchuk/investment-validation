@@ -122,7 +122,7 @@ R1–R6, `WORKSPACE_REFUSED` unless noted:
 
 | Rule | Behaviour |
 |---|---|
-| R1 typed reason | `scope_invalid`, `workspace_invalid` (from the scope validators), `pin_mismatch` (`resolve_full` differs from the pin), `storage_failure` (other exceptions, with `cause`). `copy_closure_rows` refusals, `SNAPSHOT_NOT_READY` (no reference inputs), `SNAPSHOT_CONFLICT` (scope already has a different head) and `IDENTITY_CONFLICT` propagate unchanged. |
+| R1 typed reason | `scope_invalid`, `workspace_invalid` (from the scope validators), `receipt_missing` (S's copied row names no import receipt), `reference_inputs_over_cap` (the receipt pins more than 10,000 inputs, checked before they are read), `pin_mismatch` (`resolve_full` differs from the pin), `storage_failure` (other exceptions, with `cause`). `copy_closure_rows` refusals, `SNAPSHOT_NOT_READY` (no reference inputs), `SNAPSHOT_CONFLICT` (scope already has a different head) and `IDENTITY_CONFLICT` propagate unchanged. |
 | R2 no partial result | The receipt, reference inputs and head are one transaction inside `commit_snapshot`; any failure rolls all three back, so a failed call leaves no head. |
 | R3 no repair | An existing different head or receipt is never overwritten or repaired; there is no retry. |
 | R4 stale pin | `workspace.source_snapshot()` runs before the commit; a changed pin propagates `SNAPSHOT_CLOSURE_BROKEN`. A head moved by another writer fails the compare-and-swap with `SNAPSHOT_CONFLICT`. |

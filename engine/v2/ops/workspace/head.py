@@ -12,6 +12,8 @@ from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.workspace.catalog_rows import copy_closure_rows
 from engine.v2.ops.workspace.scope import validate_size_scope_request
 
+_MAX_REFERENCE_INPUTS = 10_000
+
 
 def _refuse(reason: str, **details):
     return fail("WORKSPACE_REFUSED", "research workspace scope head refused",
@@ -36,6 +38,11 @@ def commit_scope_head(workspace, scope: str, *, clock) -> dict:
             (sid,)).fetchone()
         if row is None or not row[0]:
             raise _refuse("receipt_missing", snapshot_id=sid)
+        count = workspace._source_conn.execute(
+            "SELECT COUNT(*) FROM (SELECT 1 FROM data_import_reference_inputs "
+            "WHERE receipt_id = ? LIMIT ?)", (row[0], _MAX_REFERENCE_INPUTS + 1)).fetchone()[0]
+        if count > _MAX_REFERENCE_INPUTS:
+            raise _refuse("reference_inputs_over_cap", receipt_id=row[0])
         inputs = reference_catalog.reference_inputs_for_receipt(
             workspace._source_conn, receipt_id=row[0])
         resolved = workspace.source.resolve_full(sid)

@@ -17,6 +17,7 @@ from engine.v2.data import errors as data_errors
 from engine.v2.data import reference_catalog
 from engine.v2.data.repository import Repository
 from engine.v2.ops.errors import OpsError
+from engine.v2.ops.workspace import head as head_module
 from engine.v2.ops.workspace.head import commit_scope_head
 
 SCOPE = "size-scope"
@@ -124,3 +125,13 @@ def test_production_is_unchanged(prod):
     with _create(prod) as ws:
         commit_scope_head(ws, SCOPE, clock=prod.clock)
     assert _state(prod) == before
+
+
+def test_reference_inputs_over_cap_refuses_without_head(prod, monkeypatch):
+    _add_inputs(prod)
+    monkeypatch.setattr(head_module, "_MAX_REFERENCE_INPUTS", 1)
+    with _create(prod) as ws:
+        with pytest.raises(OpsError) as caught:
+            commit_scope_head(ws, SCOPE, clock=prod.clock)
+        assert _details(caught) == ("WORKSPACE_REFUSED", "reference_inputs_over_cap")
+        assert _heads(ws) == 0
