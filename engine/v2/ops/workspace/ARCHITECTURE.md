@@ -61,8 +61,8 @@ version, scope, snapshot id and manifest hash. The returned repository view dele
 bound scope. It never reads a production head or accepts a different snapshot.
 
 The local catalog does not contain production `data_snapshots`, so this is a
-workspace-local scope binding, not a native `data_snapshot_heads` row. No
-snapshot metadata or objects are copied. A standard package or library does
+workspace-local scope binding, not a native `data_snapshot_heads` row. The
+scope adapter itself copies nothing; `catalog_rows.copy_closure_rows` (below) copies the snapshot's catalog rows, never objects. A standard package or library does
 not provide this repository-specific pin contract; the adapter reuses the
 existing `ResearchWorkspace.record_read_pin`, `SnapshotOnlyRepository` and
 `SnapshotRef` behavior.
@@ -104,7 +104,7 @@ R1–R6, all `WORKSPACE_REFUSED` unless noted:
 | R1 typed reason | `workspace_invalid` (workspace handle already in a transaction), `source_row_missing` (the source has no `data_snapshots`, `data_snapshot_tables`, `data_dataset_versions` or `data_contracts` row for S; fragment and object tables may legitimately be empty), `schema_mismatch` (column lists differ), `copy_rows_over_cap`, `copy_bytes_over_cap`, `unexpected_rows` (workspace holds rows beyond the closure), `row_mismatch` (a digest differs, including a conflicting existing row), `foreign_key_violation`, `storage_failure` (other exceptions, with `cause`). An unknown S propagates the existing `SNAPSHOT_NOT_FOUND`. |
 | R2 no partial result | One transaction; any refusal rolls it back, so no row and no head remains. Nothing after commit can refuse. |
 | R3 no repair | No overwrite, delete or retry; a conflicting row refuses. |
-| R4 stale pin | `workspace.source_snapshot()` runs before the read and before commit; a changed pin propagates `SNAPSHOT_CLOSURE_BROKEN`. Drift of the production rows themselves is caught by the digest comparison (`row_mismatch`). |
+| R4 stale pin | `workspace.source_snapshot()` runs before the read and before commit; a changed pin propagates `SNAPSHOT_CLOSURE_BROKEN`. Production rows are immutable and the source is read inside one read transaction; a conflicting workspace row is caught by the digest comparison (`row_mismatch`). |
 | R5 read-only production | Only the existing read-only source connection is read; all writes go to `workspace.conn`. |
 | R6 unknown state | Malformed handle, unreadable rows or any unexpected exception refuses; nothing is guessed. |
 
