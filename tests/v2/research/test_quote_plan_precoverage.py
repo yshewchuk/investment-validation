@@ -23,6 +23,7 @@ def _run(monkeypatch, days, events):
     meta = {"FOX": [{"date": d} for d in days], "^GSPC": []}
     before = repr(index)
     plan, excluded = sources.quote_plan(None, {}, index, CONTEXT, REQUEST, meta)
+    assert plan == "plan"  # quote_plan returns the eligibility plan unchanged as its first element
     assert repr(index) == before  # the confirmed-metadata index is never mutated
     return plan, excluded, seen["metadata"]
 
@@ -71,3 +72,9 @@ def test_multiple_pre_coverage_events_are_returned_sorted(monkeypatch):
     events = [_event("z-early", "2019-01-02"), _event("a-early", "2019-02-06")]
     _, excluded, metadata = _run(monkeypatch, DAYS, events)
     assert excluded == ["a-early", "z-early"] and metadata["groups"] == []
+
+
+def test_bmo_event_on_first_price_date_still_refuses(monkeypatch):
+    with pytest.raises(DataError) as err:
+        _run(monkeypatch, DAYS, [_event("fox-bmo-first", "2019-03-13")])
+    assert err.value.code == "CONTRACT_MISMATCH"
