@@ -796,8 +796,8 @@ and planning refusals report only the native error code, not row values.
 | Missing/duplicate classifier columns, malformed event IDs or metadata values that prevent classification | `CONTRACT_MISMATCH` |
 | Invalid scalar dates/sessions or structural collisions handled by membership classification | Successful classification with `ambiguous` membership; structural ambiguity IDs returned |
 | Invalid as-of month, unknown group/evaluation identity or colliding canonical population IDs | `HOLDOUT_ACCESS_DENIED` |
-| Ambiguous random-event identity or overflowing window bounds | `HOLDOUT_ACCESS_DENIED` |
-| Valid protected/overlapping development group | Excluded whole event with reasons; evaluation IDs preserved |
+| Random event is structurally ambiguous | With a usable ticker/date, keep membership unchanged, record its ID and add an inclusive `date.min`–`date.max` ticker window; exclude and label development groups and evaluation IDs for that ticker, while preserving other evaluation IDs; without usable ticker/date, `HOLDOUT_ACCESS_DENIED` |
+| Valid protected/overlapping development group | Excluded whole event with reasons; evaluation IDs for other tickers are preserved |
 
 This is neither a physical-read capability nor a statistical isolation guarantee.
 Long-memory/cross-ticker effects remain; chronological and random holdouts are

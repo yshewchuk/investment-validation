@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from bisect import bisect_right
 from copy import deepcopy
-from datetime import timedelta
+from datetime import date, timedelta
 
 from engine.v2.data import errors
 from engine.v2.foundation import content_hash, to_document
@@ -95,19 +95,36 @@ def _metadata(snapshot, as_of_month, policy, metadata):
         raise errors.fail("CONTRACT_MISMATCH", "invalid or stale eligibility policy/group metadata") from None
 
 
+def _add_random_window(event, memberships, ambiguous, delta, by_ticker, ambiguous_random_events):
+    if "random" not in memberships:
+        return
+    if event.event_id in ambiguous:
+        ticker = event.ticker
+        canonical_ticker = event.canonical_ticker
+        if type(ticker) is not str or not ticker or ticker != ticker.strip():
+            raise ValueError
+        if (type(canonical_ticker) is not str or not canonical_ticker
+                or canonical_ticker != canonical_ticker.strip() or canonical_ticker != ticker):
+            raise ValueError
+        calendar_date(event.event_date)
+        calendar_date(event.canonical_date)
+        by_ticker.setdefault(ticker, []).append((date.min, date.max))
+        ambiguous_random_events.add(event.event_id)
+        return
+    day = calendar_date(event.event_date)
+    by_ticker.setdefault(event.ticker, []).append((day - delta, day + delta))
+
+
 def _windows(events, labels, width, ambiguous):
     """One sorted union per ticker; no per-group scan of all protected events."""
     by_ticker = {}
     try:
         delta = timedelta(days=width)
         meter = progress.Progress("eligibility windows", len(events))
+        ambiguous_random_events = set()
         for event in events.itertuples(index=False):
-            memberships = labels.get(event.event_id, set())
-            if "random" in memberships:
-                if event.event_id in ambiguous:
-                    raise ValueError
-                day = calendar_date(event.event_date)
-                by_ticker.setdefault(event.ticker, []).append((day - delta, day + delta))
+            _add_random_window(event, labels.get(event.event_id, set()), ambiguous,
+                               delta, by_ticker, ambiguous_random_events)
             meter.tick()
         merged = {}
         merging = progress.Progress("eligibility window merge", sum(map(len, by_ticker.values())))
@@ -120,9 +137,22 @@ def _windows(events, labels, width, ambiguous):
                     union.append((start, end))
                 merging.tick()
             merged[ticker] = union
-        return merged
+        return merged, sorted(ambiguous_random_events)
     except (TypeError, ValueError, OverflowError):
         raise errors.fail("HOLDOUT_ACCESS_DENIED", "random holdout window bounds cannot be established") from None
+
+
+def _exclude_embargoed_evaluation(evaluation, indexed, ambiguous_random_events):
+    tickers = {indexed.loc[key, "ticker"] for key in ambiguous_random_events}
+    retained, excluded = [], []
+    meter = progress.Progress("eligibility evaluation embargo", len(evaluation))
+    for key in evaluation:
+        if indexed.loc[key, "ticker"] in tickers:
+            excluded.append({"event_id": key, "reasons": ["embargo_ticker"]})
+        else:
+            retained.append(key)
+        meter.tick()
+    return retained, excluded
 
 
 def _overlaps(intervals, starts, start, end):
@@ -183,17 +213,22 @@ def plan_eligibility(repository, snapshot, *, as_of_month, policy, metadata, eva
         indexed = events.set_index("event_id")
         if set(evaluation) - set(indexed.index):
             raise errors.fail("HOLDOUT_ACCESS_DENIED", "evaluation membership cannot be resolved")
-        windows = _windows(canonical, labels, policy["embargo_days"], ambiguous)
-        retained, exclusions = _classify_groups(groups, indexed, labels, windows)
+        merged, ambiguous_random_events = _windows(canonical, labels, policy["embargo_days"], ambiguous)
+        evaluation, evaluation_exclusions = _exclude_embargoed_evaluation(
+            evaluation, indexed, ambiguous_random_events)
+        retained, exclusions = _classify_groups(groups, indexed, labels, merged)
         identity = {"schema_version": "group_eligibility_plan.v1", **context,
             "source_snapshot": to_document(snapshot), "policy": policy,
             "metadata_id": metadata_id, "groups": groups,
             "random_windows": [{"ticker": ticker, "start": start.isoformat(), "end": end.isoformat()}
-                for ticker, union in windows.items() for start, end in union],
+                for ticker, union in merged.items() for start, end in union],
+            "ambiguous_random_events": ambiguous_random_events,
             "retained_event_ids": retained, "exclusions": exclusions,
             "evaluation_event_ids": evaluation,
+            "evaluation_exclusions": evaluation_exclusions,
             "coverage": {"development_groups": len(groups), "retained_groups": len(retained),
                          "excluded_groups": len(exclusions), "evaluation_groups": len(evaluation)}}
         progress.decision("eligibility plan", f"retained {len(retained)}/{len(groups)} development groups; "
-                          f"preserved {len(evaluation)} evaluation IDs")
+                          f"preserved {len(evaluation)} evaluation IDs; "
+                          f"excluded {len(evaluation_exclusions)} by ambiguous-random ticker embargo")
         return {**identity, "plan_id": content_hash(identity)}
