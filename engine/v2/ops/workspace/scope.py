@@ -78,19 +78,26 @@ def _valid_workspace(workspace) -> bool:
         return False
 
 
+def validate_size_scope_request(workspace, scope: str) -> None:
+    _validate_scope(scope)
+    if not _valid_workspace(workspace):
+        raise _refuse("workspace_invalid")
+
+
+def resolve_size_scope_snapshot(workspace, scope: str):
+    """Validate a workspace scope before resolving its pinned snapshot; write no read pin."""
+    validate_size_scope_request(workspace, scope)
+    return _resolve_snapshot(workspace)
+
+
 def size_scope_repository(workspace, scope: str, *, clock) -> WorkspaceScopeRepository:
     """Persist and return a scope binding to this workspace's pinned source snapshot.
 
     The binding is a workspace read pin, not a native catalog head: the isolated
     workspace catalog has no production ``data_snapshots`` rows to reference.
     """
-    _validate_scope(scope)
-    if not _valid_workspace(workspace):
-        raise _refuse("workspace_invalid")
-
-    # ResearchWorkspace.source_snapshot already verifies this ref against the
-    # current workspace identity; the returned view captures it for later checks.
-    snapshot = _resolve_snapshot(workspace)
+    # The shared resolver validates before source access and keeps storage errors typed.
+    snapshot = resolve_size_scope_snapshot(workspace, scope)
     fields = {"schema_version": SCOPE_HEAD_VERSION, "scope": scope,
               "snapshot_id": snapshot.snapshot_id, "manifest_hash": snapshot.manifest_hash}
     binding_id = content_hash(fields)
