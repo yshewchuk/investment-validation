@@ -256,7 +256,7 @@ Publication/event-schedule knowledge remains reconstructed/unverified; known dat
 
 | Qualified SIZE condition | Outcome |
 | --- | --- |
-| Malformed closed panel request or mismatched request/anchor version | `INVALID_EXPERIMENT_SPEC` before reservation/execution. |
+| Malformed closed panel request or mismatched request/anchor version; an ambiguous-random ticker embargo leaving a fold with no evaluation IDs | `INVALID_EXPERIMENT_SPEC` before reservation/execution (the fold case before target preflight; no scoring). |
 | Changed binding/hash/environment, driver seal or replay receipt | `EXPERIMENT_IDENTITY_CONFLICT`; no replacement, new fit or replay write. Native admission failures retain their own codes. |
 | Compact registration or installed registry over 16 MiB; referenced v1.7 shard bytes over 1 GiB; an individual shard row over 8 MiB; new work beyond original deadline | `RESOURCE_LIMIT_EXCEEDED`; preserve existing evidence, no retry or automatic cap increase. Shards already published before a compact-size refusal remain unreferenced CAS objects. |
 | Missing, altered, malformed or content-hash-mismatched referenced v1.7 shard | `EXPERIMENT_IDENTITY_CONFLICT` before plan replay; no replacement or replay write. |
