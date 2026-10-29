@@ -184,6 +184,17 @@ def test_shared_cluster_rows_are_unconfirmed_and_counted():
     assert counts == {"unconfirmed_date_conflict": 0, "unconfirmed_cluster_ambiguous": 2}
 
 
+def test_shared_cluster_keeps_other_reasons_and_counts_unconfirmed_siblings():
+    events = frame().iloc[:6].copy()
+    events.loc[1:3, "event_cluster_id"] = "shared"
+    events.loc[1, "src_orats"] = False
+    events.loc[2, "date_conflict"] = True
+    sequences, counts = reducer.reduce_with_counts(events, tickers=["A"])
+    assert counts == {"unconfirmed_date_conflict": 1, "unconfirmed_cluster_ambiguous": 1}
+    assert [event["event_id"] for event in sequences[0]["events"]] == [
+        "opaque/0", "opaque/4", "opaque/5"]
+
+
 def test_duplicate_identity_or_day_still_refuses():
     duplicate = frame().iloc[:2].copy()
     duplicate.loc[1, "event_id"] = duplicate.loc[0, "event_id"]
