@@ -195,9 +195,7 @@ candidate still needs exactly one isolated fragment, and a candidate with no fra
 refuses `HOLDOUT_ACCESS_DENIED`. `prediction_inputs` does not use that guard: it refuses a
 table whose contract is neither native contract with `CONTRACT_MISMATCH` before any target
 scan, and a v5 skipped row with `EXPERIMENT_VARIANT_FAILED` naming the reason (the v5 contract
-requires one; a reason-less skipped row is malformed and gets the generic target message).
-It returns the signed move, binary `positive_move` target, and
-`target_available_on` date. The date is required and later than the event;
+requires one; a reason-less skipped row is malformed and gets the generic target message). It returns the signed move, binary `positive_move` target, and `target_available_on` date. The date is required and later than the event;
 fold consumers must admit training labels only when available before their
 decision cutoff. This input prerequisite performs no feature construction,
 model fitting, or report/ledger publication, and has no supervisor caller.
@@ -1021,3 +1019,4 @@ flowchart LR
 | Request/admission refusals | Malformed request or empty required inventory: `CONTRACT_MISMATCH`; caller producer override or incompatible frozen SIZE policy: `HOLDOUT_ACCESS_DENIED` |
 | Memory/bounds | Peak memory is bounded by explicit query/source limits plus selected targets, the unique contributor union and the active ticker's source window. Streaming adds one scanner batch, one decoded history row and up to three output rows; no fixed RSS cap is claimed. Stored reads and receipt replays validate complete history coverage before returning. Coverage mismatch refuses `CONTRACT_MISMATCH`; panel publication exposes no partial snapshot. |
 | Non-native snapshot reference shape | `SNAPSHOT_UNRESOLVED` |
+| Confirmed event dated strictly before its ticker's first non-deleted price date | No label bracket can exist, so `quote_plan` (returns `(plan, excluded)`) leaves it out of the quote groups with reason `before_price_coverage` instead of refusing. It is then absent from the retained quote ids, so implied-history marks it ineligible. The panel context carries `quote_precoverage_excluded` (`reason`, `count`, sorted `event_ids`) only when non-empty, so other context ids are unchanged; one stderr decision line is logged. The confirmed-metadata index is not mutated. Any other bracket miss (inside the coverage range, after the last price date, or a `BMO` event on the first date, which has no prior session) still refuses `CONTRACT_MISMATCH`; no substitute bracket or retry. |

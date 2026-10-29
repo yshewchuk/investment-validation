@@ -47,7 +47,7 @@ def _prepare(repository, source, *, history_snapshot, price_history_snapshot, as
     index = magnitude_confirmed_metadata.build_index(repository, source, tickers=tickers, limits=metadata_limits)
     price_metadata = {ticker: sources.price_dates(repository, price_history_snapshot, ticker, limits)
                       for ticker in sorted(set(tickers) | {"^GSPC"})}
-    quotes = sources.quote_plan(repository, source, index, history, request, price_metadata)
+    quotes, precoverage = sources.quote_plan(repository, source, index, history, request, price_metadata)
     groups = {g["event_id"]: g for g in history["eligibility"]["groups"]}
     targets = [{**t, **{k: groups[t["event_id"]][k] for k in ("label_start", "label_end")}}
                for t in targets]
@@ -65,6 +65,7 @@ def _prepare(repository, source, *, history_snapshot, price_history_snapshot, as
         "availability": "reconstructed_prefix_publication_and_schedule_unverified",
         "source_fragments": {"daily_market": [to_document(r) for r in daily_records],
                              "price_history": [to_document(r) for r in price_records]}}
+    identity.update(sources.precoverage_document(precoverage))
     context = {**identity, "context_id": content_hash(identity)}
     if len(canonical_json(context).encode()) > limits["max_total_bytes"]:
         raise fail("RESULT_LIMIT_EXCEEDED", "panel context exceeds explicit byte limit")
