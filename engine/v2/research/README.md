@@ -119,7 +119,8 @@ not a public index builder. It returns detached per-ticker sequences from a comp
 caller-supplied seven-column view, using data's public confirmation/sequence primitives.
 `confirmed_metadata.validate_tickers` sorts canonical names without rewriting them;
 `confirmed_metadata.metadata_rows(events, *, tickers)` validates/detaches rows/reasons,
-not source completeness or cross-row conflicts (the full reducer checks conflicts).
+not source completeness or cross-row conflicts. The full reducer refuses duplicate IDs or ticker/days, unconfirms
+date-conflict and duplicated ticker/cluster rows, and `reduce_with_counts` also returns those unconfirmed counts.
 It proves neither source completeness nor coverage/eligibility and performs no I/O.
 
 The replay half: `replay.replay`, `replay.replay_one`, `replay.ALPHA_GRID`,
