@@ -42,8 +42,8 @@ EXPECTED_MEAN = {"schema_version": "magnitude_protected_implied_mean.v1",
     "current_quote_mask": "not_applied_to_history_or_mean", "observable_source_violation": "refuse_not_winsorize",
     "missing_required_provenance": "refuse_before_values", "aggregate_reuse": "no_production_computed_moves_or_resumed_aggregate",
     "eligibility": {"schema_version": "grouped_ticker_embargo.v1", "embargo_days": 30, "endpoints": "inclusive",
-        "group_key": "event_id", "window_key": "ticker", "applies_to": "development", "evaluation": "preserve_membership",
-        "policy_id": "sha256:dff629fde866872115a22f90305909b9f7176451439a3cc8f27e3e884c22376c"}}
+        "group_key": "event_id", "window_key": "ticker", "applies_to": "development", "evaluation": "preserve_outside_ambiguous_random_ticker",
+        "policy_id": "sha256:c6a72238ffba179ad6f4824e3df766902eb739d49b789b530bd3f2116235a992"}}
 EXPECTED_SPECIAL = {
     "ema12r_abs": {"schema_version": "magnitude_ema12r_abs.v1",
         "condition": {"feature": "n_prior", "operator": ">=", "value": 12}, "if_true": "ema12_prior_abs_move",

@@ -16,7 +16,7 @@ from tests.v2.research.magnitude_panel_policy_support import forbid_policy_io
 from tests.v2.research.test_magnitude_panel_v2_table import _expected_dictionary
 
 V1_COMPILE, V1_REQUEST = legacy.compiler.compile_request, legacy.request
-V2_HASH = "sha256:21a88956f12177613742de95834c7f310216825e01da1f2d813dba3589991505"
+V2_HASH = "sha256:7a4cc533d5564e7ebd463e283e2cb7f5ef9e6bedc373ff0c52d60f3c3072da16"
 no_expansion = legacy.no_expansion
 
 
@@ -94,7 +94,7 @@ def test_pinned_complete_v1_output_and_unchanged_source_bytes(monkeypatch):
     def no_whole_file_read(*_, **__):
         pytest.fail("source digest must not materialize a whole file")
     monkeypatch.setattr(Path, "read_bytes", no_whole_file_read)
-    expected = "sha256:31b7f493b3f2742e4a948767a352f3fa2bbe408b01898fcb9e0371c4b598fac0"
+    expected = "sha256:5a3b26bf1861c261393679ace50995ed1111220274532a30faa34dd3da2dd31e"
     assert _hash(V1_COMPILE(V1_REQUEST())) == expected
     assert _hash(versions.compile_request(V1_REQUEST())) == expected
     root = Path(__file__).resolve().parents[3]
