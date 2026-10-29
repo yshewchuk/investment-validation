@@ -68,8 +68,9 @@ def commit_scope_head(workspace, scope: str, *, clock) -> dict:
         if row is None or not row[0]:
             raise _refuse("receipt_missing", snapshot_id=sid)
         count, size = workspace._source_conn.execute(
-            "SELECT COUNT(*), COALESCE(SUM(length(legacy_path) + length(kind) + "
-            "length(object_id) + length(content_hash)), 0) FROM (SELECT * FROM "
+            "SELECT COUNT(*), COALESCE(SUM(length(CAST(legacy_path AS BLOB)) + "
+            "length(CAST(kind AS BLOB)) + length(CAST(object_id AS BLOB)) + "
+            "length(CAST(content_hash AS BLOB)) + length(CAST(fold AS BLOB))), 0) FROM (SELECT * FROM "
             "data_import_reference_inputs WHERE receipt_id = ? LIMIT ?)",
             (row[0], _MAX_REFERENCE_INPUTS + 1)).fetchone()
         if count > _MAX_REFERENCE_INPUTS or size > _MAX_REFERENCE_BYTES:
