@@ -112,7 +112,7 @@ is an ordinary downward import, never the reverse. The serving-side
 
 `engine.v2.research` — research tools reading pinned snapshots (Phase 6 slice 6).
 
-The `experiments.size_prep_inputs` library also reads pinned `earnings_events` rows through the workspace repository to validate Tier-1 history exclusions during SIZE manifest admission.
+SIZE manifest admission also reads `earnings_events` by ticker from its pinned workspace snapshot to validate explicit Tier-1 history exclusions.
 
 `experiments/v2_runup_exits.py` and `experiments/v2_magnitude_search_run.py` consume `Repository`, typed errors and
 `documents.reject_duplicate_keys`, the public stdlib JSON object-pairs hook
