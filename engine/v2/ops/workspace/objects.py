@@ -22,7 +22,7 @@ _NAMED = (
     "JOIN data_fragments f ON f.object_id = o.object_id "
     "JOIN data_version_fragments vf ON vf.fragment_id = f.fragment_id "
     "JOIN data_snapshot_tables st ON st.dataset_version_id = vf.dataset_version_id "
-    "WHERE st.snapshot_id = ? ORDER BY 1"
+    "WHERE st.snapshot_id = ? LIMIT " + str(_MAX_OBJECTS + 1)
 )
 
 
