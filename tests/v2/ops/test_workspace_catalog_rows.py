@@ -249,6 +249,17 @@ def test_byte_cap_refuses(prod, monkeypatch):
         assert _details(caught) == ("WORKSPACE_REFUSED", "copy_bytes_over_cap")
 
 
+def test_oversized_destination_value_refuses_without_leaving_limit(prod, monkeypatch):
+    with _create(prod) as ws:
+        before = ws.conn.getlimit(sqlite3.SQLITE_LIMIT_LENGTH)
+        monkeypatch.setattr(catalog_rows, "_MAX_VALUE_BYTES", 8)
+        with pytest.raises(OpsError) as caught:
+            copy_closure_rows(ws)
+        assert _details(caught) == ("WORKSPACE_REFUSED", "storage_failure")
+        assert ws.conn.getlimit(sqlite3.SQLITE_LIMIT_LENGTH) == before
+        assert ws.conn.execute("SELECT COUNT(*) FROM data_snapshots").fetchone()[0] == 0
+
+
 def test_unexpected_extra_row_refuses_and_rolls_back(prod):
     with _create(prod) as ws:
         _insert_contract(ws, prod, "other", "sha256:" + "0" * 64)

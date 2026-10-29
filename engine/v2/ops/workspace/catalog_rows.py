@@ -51,6 +51,7 @@ _CHUNK = 5000
 _BATCH_BYTES = 16 << 20
 _MAX_ROWS = 8_000_000
 _MAX_BYTES = 3 << 30
+_MAX_VALUE_BYTES = 64 << 20
 _REQUIRED = ("data_snapshots", "data_snapshot_tables",
              "data_dataset_versions", "data_contracts")
 
@@ -180,22 +181,26 @@ def copy_closure_rows(workspace) -> dict:
             raise _refuse("workspace_invalid")
         src.execute("BEGIN")
         try:
-            dst.execute("BEGIN IMMEDIATE")
+            previous = dst.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, _MAX_VALUE_BYTES)
             try:
-                dst.execute("PRAGMA defer_foreign_keys = ON")
-                budget = _Budget()
-                counts = _insert_rows(src, dst, sid, budget)
-                _verify_rows(src, dst, sid, started, budget)
-                # Identical digests above prove the rows equal the source; resolve_full cannot run inside this transaction.
-                _verify_catalog(dst)
-                workspace.source_snapshot()
-                chain = _chain(dst, sid)
-                _log(f"stage=copy done snapshot={sid} tables={len(counts)} "
-                     f"{time.monotonic() - started:.2f}s elapsed")
-                dst.commit()
-            except BaseException:
-                dst.rollback()
-                raise
+                dst.execute("BEGIN IMMEDIATE")
+                try:
+                    dst.execute("PRAGMA defer_foreign_keys = ON")
+                    budget = _Budget()
+                    counts = _insert_rows(src, dst, sid, budget)
+                    _verify_rows(src, dst, sid, started, budget)
+                    # Identical digests above prove the rows equal the source; resolve_full cannot run inside this transaction.
+                    _verify_catalog(dst)
+                    workspace.source_snapshot()
+                    chain = _chain(dst, sid)
+                    _log(f"stage=copy done snapshot={sid} tables={len(counts)} "
+                         f"{time.monotonic() - started:.2f}s elapsed")
+                    dst.commit()
+                except BaseException:
+                    dst.rollback()
+                    raise
+            finally:
+                dst.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, previous)
         finally:
             src.rollback()
         return {"snapshot_id": sid, "manifest_hash": pinned.manifest_hash,
