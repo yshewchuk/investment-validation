@@ -140,6 +140,8 @@ def build_manifest(source_root, *, session_ceiling, tickers, allow_exclusions=Fa
     byte-for-byte.
     """
     _day(session_ceiling)
+    if type(allow_exclusions) is not bool:
+        raise fail("INVALID_REQUEST", "allow_exclusions must be a boolean")
     if (type(tickers) is not list or not tickers
             or any(type(t) is not str or not t or t != t.strip() for t in tickers)
             or len(set(tickers)) != len(tickers)):
@@ -194,12 +196,11 @@ def validate_manifest(manifest):
     excluded = manifest.get(_EXCLUDED_KEY)
     if version == EXCLUSION_MANIFEST_VERSION and type(excluded) is not list:
         raise fail("INVALID_REQUEST", "invalid Tier-1 history manifest exclusion list")
-    if excluded is not None and (type(excluded) is not list
-            or any(type(t) is not str or not t or t != t.strip() for t in excluded)
+    if excluded is not None and (any(type(t) is not str or not t or t != t.strip() for t in excluded)
             or excluded != sorted(set(excluded))):
         raise fail("INVALID_REQUEST", "invalid Tier-1 history manifest exclusion list")
     if not manifest["entries"] and not (excluded or []):
-        raise fail("INVALID_REQUEST", "empty bounds require an explicit exclusion admission")
+        raise fail("INVALID_REQUEST", "empty manifest requires a nonempty v2 exclusion list")
     _day(manifest["session_ceiling"])
     for entry in manifest["entries"]:
         if (type(entry) is not dict or set(entry) != _ENTRY_KEYS

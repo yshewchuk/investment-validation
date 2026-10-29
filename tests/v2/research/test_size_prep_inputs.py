@@ -10,6 +10,7 @@ import pytest
 
 from engine.v2.contracts import DataQuery, KeyPredicate, TableContractRef
 from engine.v2.data.computed_move_bounds import COLUMNS, CONTRACT, TABLE
+from engine.v2.data import errors as data_errors
 from engine.v2.data.repository import Repository
 from engine.v2.foundation import ArtifactStore, canonical_json, content_hash
 from engine.v2.ops import computed_moves_store
@@ -489,6 +490,10 @@ def test_v1_manifest_shape_is_unchanged_when_no_exclusions_are_requested(source_
     assert prep.validate_manifest(deepcopy(v1)) == v1
 
 
+def test_build_manifest_requires_boolean_exclusion_opt_in(source_root):
+    _refusal(lambda: prep.build_manifest(source_root, session_ceiling=_AS_OF, tickers=["AAAA"], allow_exclusions=1), "INVALID_REQUEST")
+
+
 def test_exclusion_manifest_is_distinctly_identified_and_canonical(source_root):
     plain = prep.build_manifest(source_root, session_ceiling=_AS_OF, tickers=["AAAA"])
     with_empty = prep.build_manifest(source_root, session_ceiling=_AS_OF, tickers=["AAAA"],
@@ -574,6 +579,14 @@ def test_admission_validates_scope_before_workspace_source_read(source_root):
     assert raised.value.problem.details["reason"] == "scope_invalid"
 
 
+def test_admission_reject_missing_workspace_before_source_read(source_root):
+    manifest = prep.build_manifest(source_root, session_ceiling=_AS_OF, tickers=["AAAA"])
+    with pytest.raises(OpsError) as raised:
+        prep.admit_manifest(None, "size-prep", manifest, clock=FakeClock())
+    assert raised.value.code == "WORKSPACE_REFUSED"
+    assert raised.value.problem.details["reason"] == "workspace_invalid"
+
+
 def test_admission_maps_workspace_snapshot_read_failure(source_root):
     manifest = prep.build_manifest(source_root, session_ceiling=_AS_OF, tickers=["AAAA"])
 
@@ -593,10 +606,12 @@ def test_admission_refuses_event_bearing_exclusions_before_any_workspace_write(p
                                                                                capsys, monkeypatch):
     workspace, clock, prod = pinned_ws
     scan_caps = []
+    scan_queries = []
     original_scan = prep.Repository.scan
 
     def recording_scan(self, query, *, table_name, max_object_bytes=None):
         scan_caps.append(max_object_bytes)
+        scan_queries.append(query)
         yield from original_scan(self, query, table_name=table_name, max_object_bytes=max_object_bytes)
 
     monkeypatch.setattr(prep.Repository, "scan", recording_scan)
@@ -613,6 +628,20 @@ def test_admission_refuses_event_bearing_exclusions_before_any_workspace_write(p
     err = capsys.readouterr().err
     assert "excluded=2" in err and "EEEE (+1 more)" in err
     assert scan_caps == [prep.MAX_EVENT_OBJECT_BYTES]
+    assert scan_queries[0].key_filter == (
+        KeyPredicate(column="ticker", operator="in", values=("EEEE", "ZZZZ")),)
+
+
+def test_admission_refuses_oversized_event_fragment(pinned_ws, source_root, monkeypatch):
+    workspace, clock, prod = pinned_ws
+    before, prod_before = _ws_state(workspace), _digest_tree(prod)
+    manifest = prep.build_manifest(source_root, session_ceiling=_AS_OF, tickers=["AAAA", "EEEE", "ZZZZ"],
+                                   allow_exclusions=True)
+    monkeypatch.setattr(prep, "MAX_EVENT_OBJECT_BYTES", 1)
+    with pytest.raises(data_errors.DataError) as raised:
+        prep.admit_manifest(workspace, "size-prep", manifest, clock=clock)
+    assert raised.value.code == "RESULT_LIMIT_EXCEEDED"
+    assert _ws_state(workspace) == before and _digest_tree(prod) == prod_before
 
 
 def test_admission_records_manifest_cas_and_read_pin_in_workspace_only(pinned_ws, source_root):
@@ -649,6 +678,7 @@ def test_admission_refuses_when_the_snapshot_lacks_the_events_table(no_events_ws
         prep.admit_manifest(workspace, "size-prep", manifest, clock=clock)
     assert raised.value.code == "PUBLICATION_REFUSED"
     assert raised.value.problem.details["reason"] == "event_coverage_unavailable"
+    assert raised.value.problem.details["excluded_count"] == 1
     assert _ws_state(workspace) == before and _digest_tree(prod) == prod_before
 
 
