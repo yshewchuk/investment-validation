@@ -149,8 +149,13 @@ def active_reservations(conn: sqlite3.Connection, now: datetime) -> list[ActiveR
 
 
 def claim_next(conn: sqlite3.Connection, *, policy: ResourcePolicy, sample: CapacitySample,
-               supervisor: Supervisor, clock: Clock, registry=None) -> Claim | None:
-    """Claim the best admissible ready job, or record why each one waits."""
+               supervisor: Supervisor, clock: Clock, registry=None,
+               defer_claim=None) -> Claim | None:
+    """Claim the best admissible ready job, or record why each one waits.
+
+    When ``defer_claim`` returns true for a ready row, that row remains queued and
+    untouched for a later claim pass.
+    """
     now = clock.now()
     stamp = format_timestamp(now)
     with transaction(conn):
@@ -159,6 +164,8 @@ def claim_next(conn: sqlite3.Connection, *, policy: ResourcePolicy, sample: Capa
         active = active_reservations(conn, now)
         heavy_held = False
         for row in conn.execute(_READY, {"now": stamp}).fetchall():
+            if defer_claim is not None and defer_claim(row):
+                continue
             claim, heavy_held = _claim_row(conn, policy, sample, active, registry, row,
                                            heavy_held, supervisor, now)
             if claim is not None:

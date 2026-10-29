@@ -27,7 +27,7 @@ from engine.v2.contracts import JobReceipt, JobSpec, SubmitRequest
 from engine.v2.data.repository import Repository
 from engine.v2.foundation import ArtifactStore, content_hash
 from engine.v2.models import deployment
-from engine.v2.ops import nightly
+from engine.v2.ops import nightly, pool_refresh, supervisor as supervisor_module
 from engine.v2.ops.errors import OpsError, make_problem
 from engine.v2.ops.fingerprints import environment_identity
 from engine.v2.ops.profiles import DEFAULT_POLICY, profile_named
@@ -1250,4 +1250,266 @@ def test_failed_native_batch_stays_failed_after_release_success_then_resolves(
         "WHERE occurrence = ? AND scope_hash = ? AND stage_id = ?",
         ("2026-01-15", "scope-hash", "native_score_batch")).fetchone()
     assert row["resolved_at"] is not None
+    conn.close()
+
+
+def _add_pool_phase(conn, clock, *, session, phase, state, tag=None,
+                    prior="prior-release"):
+    if tag is None:
+        tag = pool_refresh.manifest_tag("pool-cycle-test-manifest")
+
+    def add_one(phase_name, phase_state):
+        key = pool_refresh.phase_key(session, phase_name, prior, tag)
+        request = SubmitRequest(
+            namespace="shadow", idempotency_key=key, principal="operator",
+            job=JobSpec(
+                kind="models_promote", implementation_ref="code", spec_hash=None,
+                environment_ref="env",
+                parameters={
+                    "expected_ids": ("models_promote",), "release_root": "release-root",
+                    "release_id": f"pools-{session}-{tag}",
+                    "expected_previous_release_id": prior,
+                },
+                output_namespace="shadow", resource_class="delivery",
+                retry_policy_ref="bounded",
+                checkpoint_contract_ref="promote_pointer_state.v1.0"))
+        receipt = submit(conn, registry(), _POLICY, request, clock=clock)
+        conn.execute("UPDATE jobs SET state = ? WHERE job_id = ?",
+                     (phase_state, receipt.job_id))
+        conn.commit()
+        return key, receipt.job_id
+
+    for training_phase in pool_refresh.TRAINING_PHASES:
+        if training_phase == phase:
+            continue
+        add_one(training_phase, "succeeded")
+    return add_one(phase, state)
+
+
+def _pool_gated_service(conn, tmp_path, monkeypatch, clock, release_roots,
+                        capture_submission=True):
+    session = "2026-01-01"
+    manifest_id = "pool-cycle-test-manifest"
+    _mark_score_succeeded(conn, clock, session=session)
+    identity = (session, "scope-hash", SimpleNamespace(
+        snapshot_generation_id="snapshot-1", tickers=(), horizon_days=35))
+    monkeypatch.setattr(nightly, "native_score_batch_identity", lambda _conn: identity)
+    monkeypatch.setattr(pool_refresh, "pool_refresh_identity",
+                        lambda _conn: (session, manifest_id))
+    monkeypatch.setattr(pool_refresh.deployment, "production_release_root",
+                        lambda: str(tmp_path))
+    monkeypatch.setattr(pool_refresh, "_read_pointer",
+                        lambda _path: SimpleNamespace(release_id="prior-release"))
+    service = Service(conn, tmp_path, registry(), _POLICY, clock=clock,
+                      code_source=ROOT, store_root=tmp_path)
+    resolved = []
+    submitted = []
+
+    def resolve(**kwargs):
+        resolved.append(kwargs)
+        return release_roots[-1]
+
+    def submit_native(*args, **kwargs):
+        submitted.append(args[4])
+        return "submitted"
+
+    monkeypatch.setattr(service, "_native_release_root_or_none", resolve)
+    if capture_submission:
+        monkeypatch.setattr(nightly, "submit_native_score_batch_shadow_if_ready",
+                            submit_native)
+    return service, session, resolved, submitted
+
+
+def test_pool_cycle_skipped_does_not_block_native_scoring(tmp_path, monkeypatch):
+    conn, clock, _ = catalog(tmp_path)
+    service, session, resolved, submitted = _pool_gated_service(
+        conn, tmp_path, monkeypatch, clock, ["previous-release-root"])
+
+    assert pool_refresh.pool_cycle_outcome(conn, session) == "skipped"
+    service._reconcile_native_score_batch_shadow()
+
+    assert len(resolved) == 1
+    assert submitted == ["previous-release-root"]
+
+
+@pytest.mark.parametrize("pool_state", ["failed", "cancelled", "blocked"])
+def test_failed_pool_cycle_scores_against_recorded_previous_release(
+        tmp_path, monkeypatch, pool_state):
+    conn, clock, _ = catalog(tmp_path)
+    service, session, resolved, submitted = _pool_gated_service(
+        conn, tmp_path, monkeypatch, clock, ["previous-release-root"],
+        capture_submission=False)
+    key, job_id = _add_pool_phase(
+        conn, clock, session=session, phase="promote", state=pool_state)
+
+    assert pool_refresh.pool_cycle_outcome(conn, session) == "failed"
+    service._reconcile_native_score_batch_shadow()
+
+    assert conn.execute("SELECT state FROM jobs WHERE job_id = ?", (job_id,)).fetchone()["state"] == pool_state
+    assert key.startswith(f"nightly:{session}:pool:promote:")
+    assert len(resolved) == 1
+    row = conn.execute(
+        "SELECT spec_json FROM jobs WHERE kind = ? AND state = ?",
+        ("native_score_batch", "queued")).fetchone()
+    assert row is not None
+    assert json.loads(row["spec_json"])["parameters"]["release_root"] == \
+        "previous-release-root"
+
+
+def test_pool_promote_success_releases_native_scoring_gate(tmp_path, monkeypatch):
+    conn, clock, _ = catalog(tmp_path)
+    service, session, resolved, submitted = _pool_gated_service(
+        conn, tmp_path, monkeypatch, clock, ["promoted-release-root"])
+    _key, job_id = _add_pool_phase(
+        conn, clock, session=session, phase="promote", state="queued")
+
+    assert pool_refresh.pool_cycle_outcome(conn, session) == "active"
+    service._reconcile_native_score_batch_shadow()
+    assert resolved == []
+    assert submitted == []
+    assert service._native_score_batch_memo is None
+
+    conn.execute("UPDATE jobs SET state = 'succeeded' WHERE job_id = ?", (job_id,))
+    conn.commit()
+    assert pool_refresh.pool_cycle_outcome(conn, session) == "promoted"
+    service._reconcile_native_score_batch_shadow()
+
+    assert len(resolved) == 1
+    assert submitted == ["promoted-release-root"]
+
+
+def test_stale_pool_cycles_do_not_release_current_native_gate(tmp_path, monkeypatch):
+    conn, clock, _ = catalog(tmp_path)
+    service, session, resolved, submitted = _pool_gated_service(
+        conn, tmp_path, monkeypatch, clock, ["previous-release-root"])
+    _add_pool_phase(conn, clock, session=session, phase="promote", state="succeeded",
+                    tag="oldest-manifest-tag")
+    _add_pool_phase(conn, clock, session=session, phase="promote", state="failed",
+                    tag="older-manifest-tag")
+    _add_pool_phase(conn, clock, session=session, phase="promote", state="queued")
+
+    assert pool_refresh.pool_cycle_outcome(conn, session) == "active"
+    service._reconcile_native_score_batch_shadow()
+
+    assert resolved == []
+    assert submitted == []
+
+
+def test_missing_promote_after_successful_stage_releases_native_gate(
+        tmp_path, monkeypatch):
+    conn, clock, _ = catalog(tmp_path)
+    service, session, resolved, submitted = _pool_gated_service(
+        conn, tmp_path, monkeypatch, clock, ["previous-release-root"])
+    _add_pool_phase(conn, clock, session=session, phase="stage", state="succeeded")
+
+    assert pool_refresh.pool_cycle_outcome(conn, session) == "failed"
+    service._reconcile_native_score_batch_shadow()
+
+    assert len(resolved) == 1
+    assert submitted == ["previous-release-root"]
+
+
+def test_pool_state_read_error_defers_only_this_native_tick(
+        tmp_path, monkeypatch, capsys):
+    conn, clock, _ = catalog(tmp_path)
+    service, session, resolved, submitted = _pool_gated_service(
+        conn, tmp_path, monkeypatch, clock, ["previous-release-root"])
+
+    conn.close()
+    service._reconcile_native_score_batch_shadow()
+
+    assert resolved == []
+    assert submitted == []
+    assert service._native_score_batch_memo is None
+    assert '"event": "native_score_batch_reconcile_failed"' in capsys.readouterr().out
+
+
+def test_service_tick_reconciles_pool_before_native_score(tmp_path, monkeypatch):
+    conn, clock, supervisor = catalog(tmp_path)
+    session = "2026-01-15"
+    _pool_key, pool_job_id = _add_pool_phase(
+        conn, clock, session=session, phase=pool_refresh.TRAINING_PHASES[0],
+        state="queued")
+    pool_claim = claim_next(conn, policy=TEST_POLICY, sample=sample(clock),
+                            supervisor=supervisor, clock=clock, registry=registry())
+    assert pool_claim is not None and pool_claim.job_id == pool_job_id
+    native_request = SubmitRequest(
+        namespace="shadow",
+        idempotency_key=nightly._native_score_batch_key(session, "scope-hash"),
+        principal="operator",
+        job=JobSpec(
+            kind="native_score_batch", implementation_ref="code", spec_hash=None,
+            environment_ref="env",
+            parameters={
+                "expected_ids": (), "release_root": "release-root", "as_of": session,
+                "snapshot_id": "snapshot-1", "calendar_revision": "calendar-1",
+                "feature_names": (),
+            },
+            output_namespace="shadow", resource_class="projection",
+            retry_policy_ref="bounded",
+            checkpoint_contract_ref="native_score_batch_records.v2.0"))
+    receipt = submit(conn, registry(), _POLICY, native_request, clock=clock)
+    service = Service(conn, tmp_path, registry(), TEST_POLICY, clock=clock,
+                      code_source=ROOT, store_root=tmp_path)
+    service.identity = supervisor
+    events = []
+    monkeypatch.setattr(service, "_clock_check", lambda: None)
+    monkeypatch.setattr(service, "_reclaim_terminal_staging", lambda: None)
+    monkeypatch.setattr(supervisor_module, "expire_leases", lambda *args, **kwargs: None)
+    monkeypatch.setattr(service, "reconcile", lambda: None)
+    monkeypatch.setattr(supervisor_module, "sample_capacity",
+                        lambda *args, **kwargs: events.append("claim") or sample(clock))
+    monkeypatch.setattr(pool_refresh, "pool_cycle_outcome",
+                        lambda *args, **kwargs: "active")
+    monkeypatch.setattr(service, "_reconcile_publication_status",
+                        lambda: events.append("publication"))
+    monkeypatch.setattr(service, "_reconcile_computed_moves_refresh",
+                        lambda: events.append("computed_moves"))
+    monkeypatch.setattr(service, "_reconcile_pool_nightly_refresh",
+                        lambda: events.append("pool") or False)
+    monkeypatch.setattr(service, "_reconcile_native_score_batch_shadow",
+                        lambda: events.append("native_score"))
+    monkeypatch.setattr(service, "_reconcile_native_parity",
+                        lambda: events.append("native_parity"))
+
+    service.tick()
+
+    row = conn.execute("SELECT state, attempt_count FROM jobs WHERE job_id = ?",
+                       (receipt.job_id,)).fetchone()
+    assert events.index("pool") < events.index("native_score")
+    assert events.index("pool") < events.index("claim")
+    assert tuple(row) == ("queued", 0)
+    assert conn.execute("SELECT 1 FROM attempts WHERE job_id = ?",
+                        (receipt.job_id,)).fetchone() is None
+    conn.close()
+
+
+def test_scheduler_admits_ordinary_manual_native_batch_key(tmp_path):
+    """A plain operator-supplied native batch key still claims normally.
+
+    The service's defer hook only holds back ``nightly:``-keyed batches, so an
+    ordinary manually keyed ``native_score_batch`` is admitted by the real
+    scheduler path.
+    """
+    conn, clock, supervisor = catalog(tmp_path)
+    request = SubmitRequest(
+        namespace="shadow", idempotency_key="manual-batch", principal="operator",
+        job=JobSpec(
+            kind="native_score_batch", implementation_ref="code", spec_hash=None,
+            environment_ref="env",
+            parameters={
+                "expected_ids": (), "release_root": "release-root",
+                "as_of": "2026-01-15", "snapshot_id": "snapshot-1",
+                "calendar_revision": "calendar-1", "feature_names": (),
+            },
+            output_namespace="shadow", resource_class="projection",
+            retry_policy_ref="bounded",
+            checkpoint_contract_ref="native_score_batch_records.v2.0"))
+    receipt = submit(conn, registry(), _POLICY, request, clock=clock)
+    service = Service(conn, tmp_path, registry(), TEST_POLICY, clock=clock,
+                      code_source=ROOT, store_root=tmp_path)
+    claim = claim_next(conn, policy=TEST_POLICY, sample=sample(clock),
+                       supervisor=supervisor, clock=clock, registry=registry(),
+                       defer_claim=service._native_score_batch_claim_deferred)
+    assert claim is not None and claim.job_id == receipt.job_id
     conn.close()

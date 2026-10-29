@@ -35,16 +35,22 @@ def existing(repository, context):
 def _validate(rows, context):
     expected = {(t["event_id"], c["horizon_sessions"]): (t, c)
                 for t in context["target_events"] for c in t["forecasts"]}
-    seen = set()
-    for row in rows:
-        key = row["event_id"], row["horizon_sessions"]
-        if key not in expected or key in seen or set(row) != {c.name for c in table.CONTRACT.columns}:
-            raise fail("CONTRACT_MISMATCH", "qualified panel cohort differs")
-        target, cutoff = expected[key]
-        _validate_row(row, context, target, cutoff)
-        seen.add(key)
-    if seen != expected.keys():
-        raise fail("CONTRACT_MISMATCH", "qualified panel cohort incomplete")
+    ordered = sorted(expected)
+
+    def validated():
+        position = 0
+        for row in rows:
+            key = row["event_id"], row["horizon_sessions"]
+            if position >= len(ordered) or key != ordered[position] or set(row) != {c.name for c in table.CONTRACT.columns}:
+                raise fail("CONTRACT_MISMATCH", "qualified panel cohort differs")
+            target, cutoff = expected[key]
+            _validate_row(row, context, target, cutoff)
+            position += 1
+            yield row
+        if position != len(ordered):
+            raise fail("CONTRACT_MISMATCH", "qualified panel cohort incomplete")
+
+    return validated()
 
 
 def _validate_row(row, context, target, cutoff):
@@ -67,15 +73,15 @@ def _validate_row(row, context, target, cutoff):
 def publish(repository, source, context, rows):
     limits = context["request"]["limits"]
     # Explicit row bound is checked by history admission before construction.
-    rows = sorted(rows, key=lambda r: (r["event_id"], r["horizon_sessions"]))
-    _validate(rows, context)
+    rows = iter(_validate(rows, context))
     store, records, total = artifact_store(repository), [], 0
     ref = TableContractRef(contract_id=table.CONTRACT.contract_id, definition_hash=table.CONTRACT.definition_hash)
     schema = pa.schema([pa.field(c.name, query.arrow_type_for(c.physical_type), nullable=c.nullable)
                         for c in table.CONTRACT.columns])
-    for offset in range(0, len(rows), 3):
+    def publish_chunk(chunk):
+        nonlocal total
         sink = pa.BufferOutputStream()
-        pq.write_table(pa.Table.from_pylist(rows[offset:offset + 3], schema=schema), sink)
+        pq.write_table(pa.Table.from_pylist(chunk, schema=schema), sink)
         payload = sink.getvalue().to_pybytes()
         total += len(payload)
         if len(payload) > limits["max_object_bytes"] or total > limits["max_total_bytes"]:
@@ -93,6 +99,15 @@ def publish(repository, source, context, rows):
         inspected = objects.inspect_fragment(store, obj, table.CONTRACT, ref, context["context_id"])
         records.append(manifests.fragment_record(inspected, ref, input_receipt_refs=(),
                                                 import_request_hash=context["context_id"]))
+
+    chunk = []
+    for row in rows:
+        chunk.append(row)
+        if len(chunk) == 3:
+            publish_chunk(chunk)
+            chunk = []
+    if chunk:
+        publish_chunk(chunk)
     logical = objects.partition_logical_hash(store, [r.object_ref for r in records], table.CONTRACT,
                                              ref, context["context_id"])
     manifest = manifests.dataset_manifest(ref, records, knowledge_mode="reconstructed",
@@ -127,5 +142,5 @@ def read(repository, snapshot, context, columns):
         max_batch_rows=min(count, table.CONTRACT.maximum_batch_rows), max_result_rows=count)
     rows = [r for b in repository.scan(request, table_name=table.TABLE,
         max_object_bytes=limits["max_object_bytes"]) for r in b.to_pylist()]
-    _validate(rows, context)
+    rows = list(_validate(rows, context))
     return [{k: row[k] for k in (*table.METADATA, *columns)} for row in rows]

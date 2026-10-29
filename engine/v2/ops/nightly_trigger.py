@@ -1052,7 +1052,10 @@ def _drive_jobs_to_terminal(service, conn, job_ids,
                             deadline_at, *, hold_for_pool=False) -> ServeOutcome:
     """Poll ``service`` until every job in ``job_ids`` is terminal or
     ``deadline_at`` fires. With ``hold_for_pool`` true, the scheduled serve also
-    stays up while the latest session's pool cycle is pending. Returns
+    stays up while the latest session's pool cycle is pending and until the
+    eligible native score batch for this plan is terminal (or its submission is
+    terminally blocked), bounded by ``deadline_at``. It does not wait for the
+    follow-on ``native_parity`` job. Returns
     ``"timed_out"`` on ``serve``'s own ``"deadline_exceeded"``, else
     ``"completed"`` when every job succeeded, else ``"failed"``. Shared by
     ``_default_serve`` and
@@ -1064,12 +1067,68 @@ def _drive_jobs_to_terminal(service, conn, job_ids,
     def until() -> bool:
         if not _jobs_terminal(conn, job_ids):
             return False
-        return not (hold_for_pool and _pool_pending(conn))
+        if not hold_for_pool:
+            return True
+        if _pool_pending(conn):
+            return False
+        return not _native_score_batch_pending(conn, job_ids, service)
 
     outcome = serve(service, until=until, deadline_at=deadline_at)
     if outcome == "deadline_exceeded":
         return "timed_out"
     return "completed" if _jobs_succeeded(conn, job_ids) else "failed"
+
+
+def _native_score_batch_pending(conn, plan_job_ids, service) -> bool:
+    """Hold for this plan's eligible batch unless submission is terminally blocked."""
+    from engine.v2.ops import nightly
+    from engine.v2.ops.submission import job_id_for
+
+    try:
+        if not plan_job_ids:
+            return False
+        placeholders = ", ".join("?" for _ in plan_job_ids)
+        rows = conn.execute(
+            f"SELECT idempotency_key, "
+            "CASE WHEN typeof(spec_json) = 'text' AND "
+            "length(CAST(spec_json AS BLOB)) <= ? THEN spec_json ELSE NULL END AS spec_json "
+            "FROM jobs "
+            f"WHERE job_id IN ({placeholders}) "
+            "AND kind = 'legacy_score' AND state = 'succeeded'",
+            (nightly.NATIVE_SCORE_BATCH_SPEC_MAX_BYTES, *plan_job_ids)).fetchall()
+        session = scope_hash = None
+        for row in rows:
+            parsed = nightly._session_scope_from_score_key(row["idempotency_key"])
+            if parsed is None:
+                continue
+            parameters = nightly._native_score_batch_parameters(row["spec_json"])
+            if parameters is None or not parameters.get("snapshot_generation_id"):
+                continue
+            session, scope_hash = parsed
+            break
+        if session is None:
+            return False
+        batch_id = job_id_for(
+            "shadow", nightly.native_score_batch_key(session, scope_hash))
+        row = conn.execute("SELECT state FROM jobs WHERE job_id = ?",
+                           (batch_id,)).fetchone()
+        if row is not None:
+            return str(row["state"]) not in TERMINAL_JOB_STATES
+        failure = conn.execute(
+            "SELECT 1 FROM native_stage_failures WHERE occurrence = ? "
+            "AND scope_hash = ? AND stage_id = 'native_score_batch' "
+            "AND status = 'FAILED' AND resolved_at IS NULL LIMIT 1",
+            (session, scope_hash)).fetchone()
+        if failure is not None:
+            return False
+        batch_identity = nightly.native_score_batch_identity(conn)
+        if batch_identity is None or batch_identity[:2] != (session, scope_hash):
+            return False
+        exhausted = getattr(service, "native_score_batch_submission_exhausted", None)
+        return not (callable(exhausted) and exhausted(session, scope_hash))
+    except Exception:
+        # Keep the existing serve deadline as the bound if durable state is unreadable.
+        return True
 
 
 def _job_states(conn, job_ids) -> tuple[str, ...]:

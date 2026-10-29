@@ -297,12 +297,20 @@ def test_pool_cycle_pending_false_without_a_pointer_and_without_bootstrap_jobs(t
     assert pool_refresh.pool_cycle_pending(conn, tmp_path) is False
 
 
-def test_pool_cycle_pending_true_between_phases_of_a_started_bootstrap(tmp_path):
+def test_pool_cycle_pending_false_for_bootstrap_refusal_gaps(tmp_path):
     conn = _db()
     _add_score(conn)
-    _bootstrap_training_succeeded(conn)  # missing pointer, 12 succeeded, no stage yet
-    assert pool_refresh.pool_cycle_pending(conn, tmp_path) is True
-    _add_training(conn, "stage", prior="none", state="succeeded")  # no promote yet
+    _bootstrap_training_succeeded(conn)  # no stage row after reconciliation
+    assert pool_refresh.pool_cycle_pending(conn, tmp_path) is False
+    _add_training(conn, "stage", prior="none", state="succeeded")  # no promote row after reconciliation
+    assert pool_refresh.pool_cycle_pending(conn, tmp_path) is False
+
+
+def test_pool_cycle_pending_true_while_a_bootstrap_stage_runs(tmp_path):
+    conn = _db()
+    _add_score(conn)
+    _bootstrap_training_succeeded(conn)
+    _add_training(conn, "stage", prior="none", state="running")
     assert pool_refresh.pool_cycle_pending(conn, tmp_path) is True
 
 
