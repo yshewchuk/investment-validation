@@ -266,6 +266,25 @@ def test_stored_rows_detect_identity_or_feature_corruption(panel_data):
         list(store._validate([*rows, rows[0]], artifact["context"]))
 
 
+def test_size_panel_read_revalidates_history_coverage(panel_data, monkeypatch):
+    data = panel_data
+    artifact = size_panel.materialize(data.repository, data.panel_source, **data.panel_request)
+    original_scan = data.repository.scan
+
+    def shortened_history_scan(query, **kwargs):
+        batches = original_scan(query, **kwargs)
+        if kwargs.get("table_name") != "research_eligible_history":
+            return batches
+        batches = list(batches)
+        assert batches
+        batches[-1] = batches[-1].slice(0, batches[-1].num_rows - 1)
+        return iter(batches)
+
+    monkeypatch.setattr(data.repository, "scan", shortened_history_scan)
+    with pytest.raises(DataError):
+        read(data, artifact)
+
+
 def test_daily_nonfinite_and_negative_quote_refused():
     row = {name: 1. for name in sources.daily._DAILY}
     row.update(ticker="A", date="2020-01-01", mcap_asof="2020-01-01")
@@ -757,3 +776,56 @@ def test_streamed_history_panel_rows_match_materialized_history(panel_data):
 
     assert list(builder._rows(data.repository, data.panel_source, data.prices, streamed_prepared)) == \
         list(builder._rows(data.repository, data.panel_source, data.prices, materialized_prepared))
+
+
+def test_panel_rows_consume_canonical_history_order_across_prefix_tickers(monkeypatch):
+    from engine.v2.research import magnitude_panel_qualified as builder
+    from engine.v2.research.eligible_history_table import FEATURES as HISTORY_FEATURES
+
+    targets = []
+    rows = []
+    for event_id, ticker in (("M_2024-01-02", "M"), ("MA_2024-01-02", "MA")):
+        forecasts = [{"horizon_sessions": horizon, "cutoff_id": f"{event_id}:{horizon}",
+            "source_session_ceiling": "2024-01-01"} for horizon in (1, 3, 5)]
+        targets.append({"event_id": event_id, "ticker": ticker, "event_date": "2024-01-02",
+            "forecasts": forecasts})
+        for cutoff in forecasts:
+            rows.append({**{name: None for name in HISTORY_FEATURES},
+                "event_id": event_id, "horizon_sessions": cutoff["horizon_sessions"],
+                "history_json": json.dumps({"history": []}), "n_prior": 0,
+                "ema12_prior_abs_move": None, "mean_prior_abs_move": None})
+    rows.sort(key=lambda row: (row["event_id"], row["horizon_sessions"]))
+    context = {"request": {"as_of_month": "2024-01", "source_start": "2023-01-01",
+            "history_start": "2023-01-01", "limits": {"max_source_rows": 20, "max_object_bytes": 100}},
+        "target_events": targets,
+        "confirmed_metadata": {"sequences": [{"ticker": "M"}, {"ticker": "MA"}]},
+        "price_row_metadata": {"M": [{"date": "2024-01-01"}],
+                                "MA": [{"date": "2024-01-01"}],
+                                "^GSPC": [{"date": "2024-01-01"}]},
+        "quote_eligibility_plan": {"retained_event_ids": []}, "daily_source_start": "2023-01-01",
+        "context_id": "panel-context"}
+    admitted = {"context": {"context_id": "history-context"}, "rows": rows}
+    prepared = (context, admitted, [], [])
+    monkeypatch.setattr(builder, "load_population", lambda *args, **kwargs: object())
+    monkeypatch.setattr(sources, "signed_moves", lambda *args: {})
+    monkeypatch.setattr(sources, "anchor_lookup", lambda *args, **kwargs: lambda *args: {})
+    monkeypatch.setattr(sources, "prices_for", lambda *args: [])
+    monkeypatch.setattr(sources, "runup", lambda selected, prices: {
+        (target["event_id"], cutoff["horizon_sessions"]): ({}, [])
+        for target in selected for cutoff in target["forecasts"]})
+    monkeypatch.setattr(sources, "daily_surface", lambda *args: [])
+    monkeypatch.setattr(sources, "streak", lambda *args: 0.)
+    monkeypatch.setattr(sources, "implied_history", lambda *args: (None, {}))
+    monkeypatch.setattr(builder.daily, "_read_regime_series", lambda *args: [])
+    monkeypatch.setattr(builder.daily, "_spy_blocks", lambda selected, regime: {
+        (target["event_id"], cutoff["horizon_sessions"]): {"values": {}, "source_dates": []}
+        for target in selected for cutoff in target["forecasts"]})
+    monkeypatch.setattr(builder.daily, "_daily", lambda *args: {
+        "quote_status": "missing", "anchor": None,
+        "values": {name: None for name in builder.daily._DAILY}})
+    monkeypatch.setattr(builder, "_block", lambda values, anchors: {})
+
+    repository = SimpleNamespace(table_contract=lambda *args: object())
+    emitted = list(builder._rows(repository, object(), object(), prepared))
+    assert [row["event_id"] for row in emitted] == [row["event_id"] for row in rows]
+    assert [row["horizon_sessions"] for row in emitted] == [row["horizon_sessions"] for row in rows]

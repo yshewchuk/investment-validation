@@ -74,5 +74,8 @@ def read(repository, source, feature_snapshot, *, columns=None, **request):
     _request(source, request)
     snapshot_reference(feature_snapshot)
     producer = _producer(request)
+    history_admitted = _history(repository, source, request)
+    for _ in history_admitted["rows"]:
+        pass
     return panel._read(repository, source, feature_snapshot, columns=columns,
-                       producer=producer, history_admitted=_history(repository, source, request), **request)
+                       producer=producer, history_admitted=history_admitted, **request)
