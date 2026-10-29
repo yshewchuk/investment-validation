@@ -62,10 +62,11 @@ def panel_data(tmp_path, request):
         partition_logical_hashes=hashes, scope="panel-source", receipt_id="panel-source", attempt_id="panel-source")
     price_records = []
     for ticker in ("SYNTH", "^GSPC"):
+        first = spec.get("price_start") if ticker == "SYNTH" else None  # SYNTH coverage may start late
         rows = [dict(ticker=ticker, date=day, close_adj=100. + i / 10,
             close_raw=200. + i / 10, high_raw=201. + i / 10, retrieved_at="2025-01-01T00:00:00Z",
             deleted=False, source_kind="massive", source_hash="sha256:" + "ab" * 32,
-            capture_id="synthetic-prices") for i, day in enumerate(days)]
+            capture_id="synthetic-prices") for i, day in enumerate(days) if not first or day >= first]
         price_records.append(publish_and_inspect(store, PRICE_HISTORY_CONTRACT,
             contract_ref_for(PRICE_HISTORY_CONTRACT), rows, ticker))
     prices = commit_tables(data.conn, SystemClock(), {"price_history": price_records},
@@ -121,6 +122,17 @@ def test_public_full_table_and_independent_missing_realized_quote(panel_data, mo
     poison_outcomes(monkeypatch, data.repository, data.panel_source, (), all_outcomes=True)
     assert size_panel.materialize(data.repository, data.panel_source, **data.panel_request) == artifact
     assert read(data, artifact) == result
+
+
+@pytest.mark.parametrize("panel_data", [{"price_start": "2023-05-20"}], indirect=True)
+def test_pre_coverage_event_is_recorded_in_the_panel_context(panel_data):
+    data = panel_data
+    artifact = size_panel.materialize(data.repository, data.panel_source, **data.panel_request)
+    excluded = artifact["context"]["quote_precoverage_excluded"]
+    assert excluded["reason"] == "before_price_coverage" and excluded["count"] == 1
+    assert len(excluded["event_ids"]) == 1
+    kept = {g["event_id"] for g in artifact["context"]["quote_eligibility_plan"]["groups"]}
+    assert excluded["event_ids"][0] not in kept
 
 
 def test_versioned_recipe_preserves_existing_hashes_and_dictionary_order():
