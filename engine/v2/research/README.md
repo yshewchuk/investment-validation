@@ -418,9 +418,10 @@ Use pure `experiments.eligible_history.validate_request` for closed request shap
 Public malformed requests/SIZE artifact envelopes refuse `CONTRACT_MISMATCH` before
 fingerprints or source access; a valid non-30-day SIZE policy still refuses `HOLDOUT_ACCESS_DENIED`.
 Use `experiments.eligible_history.materialize/read` for complete list results, or
-`iter_read` for incremental rows with the same admission and coverage checks. The
-library-only `experiments.size_panel` wrapper uses `iter_read`; no production or
-nightly entrypoint invokes that wrapper without separate authorization. Supply an
+`experiments.eligible_history.iter_read` for incremental rows with the same
+admission and coverage checks. The library-only `experiments.size_panel` wrapper
+uses `iter_read`; no production or nightly entrypoint invokes it without separate
+authorization. Supply an
 explicit source snapshot, holdout month, grouped policy, target IDs, horizons
 `[1, 3, 5]`, history start and limits (`max_source_rows`, `max_fragments`,
 `max_object_bytes`, `max_total_bytes`, `max_output_rows`). The separate
@@ -474,8 +475,9 @@ Eligibility precedes decoding; one scan per required ticker/year preserves nativ
 file/byte limits. Realized-outcome objects remain separately protected.
 The SIZE wrapper compares a fresh source/environment fingerprint to its immutable
 import-time baseline before admission; drift requires restart (`INPUT_CHANGED`).
-It obtains history only through public `experiments.eligible_history.read`, never
-by treating the raw private history fingerprint as an admission capability.
+SIZE obtains history through public `experiments.eligible_history.iter_read`, never
+by treating the raw private history fingerprint as an admission capability. The
+stream is exhausted for stored reads and receipt replay before the panel is returned.
 Panel publication bounds compressed bytes and the native all-column uncompressed
 row-group sum before storing each fragment, preserving same-budget bounded replay.
 Lineage anchor indexes/caches are invocation-local and version-keyed; returned

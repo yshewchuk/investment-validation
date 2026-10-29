@@ -258,12 +258,18 @@ def test_stored_rows_detect_identity_or_feature_corruption(panel_data):
                        ("current_quote_status", "present"), ("n_prior", float("inf"))):
         changed = [dict(r) for r in rows]
         changed[0][key] = value
-        with pytest.raises(DataError):
+        with pytest.raises(DataError) as caught:
             list(store._validate(changed, artifact["context"]))
-    with pytest.raises(DataError):
+        assert caught.value.code == "CONTRACT_MISMATCH"
+    with pytest.raises(DataError) as caught:
         list(store._validate(rows[:-1], artifact["context"]))
-    with pytest.raises(DataError):
+    assert caught.value.code == "CONTRACT_MISMATCH"
+    with pytest.raises(DataError) as caught:
         list(store._validate([*rows, rows[0]], artifact["context"]))
+    assert caught.value.code == "CONTRACT_MISMATCH"
+    with pytest.raises(DataError) as caught:
+        list(store._validate([rows[1], rows[0], *rows[2:]], artifact["context"]))
+    assert caught.value.code == "CONTRACT_MISMATCH"
 
 
 def test_size_panel_read_revalidates_history_coverage(panel_data, monkeypatch):
@@ -281,8 +287,12 @@ def test_size_panel_read_revalidates_history_coverage(panel_data, monkeypatch):
         return iter(batches)
 
     monkeypatch.setattr(data.repository, "scan", shortened_history_scan)
-    with pytest.raises(DataError):
+    with pytest.raises(DataError) as caught:
         read(data, artifact)
+    assert caught.value.code == "CONTRACT_MISMATCH"
+    with pytest.raises(DataError) as caught:
+        size_panel.materialize(data.repository, data.panel_source, **data.panel_request)
+    assert caught.value.code == "CONTRACT_MISMATCH"
 
 
 def test_daily_nonfinite_and_negative_quote_refused():
@@ -774,8 +784,10 @@ def test_streamed_history_panel_rows_match_materialized_history(panel_data):
     streamed_prepared = builder._prepare(data.repository, data.panel_source,
         producer=producer, history_admitted=streamed, **data.panel_request)
 
-    assert list(builder._rows(data.repository, data.panel_source, data.prices, streamed_prepared)) == \
-        list(builder._rows(data.repository, data.panel_source, data.prices, materialized_prepared))
+    streamed_rows = list(builder._rows(data.repository, data.panel_source, data.prices, streamed_prepared))
+    materialized_rows = list(builder._rows(data.repository, data.panel_source, data.prices, materialized_prepared))
+    assert len(streamed_rows) == 3
+    assert streamed_rows == materialized_rows
 
 
 def test_panel_rows_consume_canonical_history_order_across_prefix_tickers(monkeypatch):
@@ -809,13 +821,25 @@ def test_panel_rows_consume_canonical_history_order_across_prefix_tickers(monkey
     monkeypatch.setattr(builder, "load_population", lambda *args, **kwargs: object())
     monkeypatch.setattr(sources, "signed_moves", lambda *args: {})
     monkeypatch.setattr(sources, "anchor_lookup", lambda *args, **kwargs: lambda *args: {})
-    monkeypatch.setattr(sources, "prices_for", lambda *args: [])
+    price_tickers = []
+
+    def prices_for(repository, price_snapshot, ticker, *args):
+        price_tickers.append(ticker)
+        return []
+
+    monkeypatch.setattr(sources, "prices_for", prices_for)
     monkeypatch.setattr(sources, "runup", lambda selected, prices: {
         (target["event_id"], cutoff["horizon_sessions"]): ({}, [])
         for target in selected for cutoff in target["forecasts"]})
     monkeypatch.setattr(sources, "daily_surface", lambda *args: [])
     monkeypatch.setattr(sources, "streak", lambda *args: 0.)
-    monkeypatch.setattr(sources, "implied_history", lambda *args: (None, {}))
+    implied_tickers = []
+
+    def implied_history(sequence, target, *args):
+        implied_tickers.append((sequence["ticker"], target["ticker"]))
+        return None, {}
+
+    monkeypatch.setattr(sources, "implied_history", implied_history)
     monkeypatch.setattr(builder.daily, "_read_regime_series", lambda *args: [])
     monkeypatch.setattr(builder.daily, "_spy_blocks", lambda selected, regime: {
         (target["event_id"], cutoff["horizon_sessions"]): {"values": {}, "source_dates": []}
@@ -829,3 +853,6 @@ def test_panel_rows_consume_canonical_history_order_across_prefix_tickers(monkey
     emitted = list(builder._rows(repository, object(), object(), prepared))
     assert [row["event_id"] for row in emitted] == [row["event_id"] for row in rows]
     assert [row["horizon_sessions"] for row in emitted] == [row["horizon_sessions"] for row in rows]
+    assert price_tickers == ["MA", "M"]
+    assert implied_tickers == [(row["ticker"], row["ticker"]) for row in
+        [target for target in targets for _ in target["forecasts"]][::-1]]

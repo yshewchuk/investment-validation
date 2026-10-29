@@ -352,11 +352,12 @@ def _iter_read(repository, source, feature_snapshot, *, columns, **request):
     query_ = _stored_query(repository, feature_snapshot, context, columns, request["limits"])
     expected = [(t["event_id"], c["horizon_sessions"], c["cutoff_id"], c["source_session_ceiling"])
         for t in context["targets"] for c in t["forecasts"]]
+    max_object_bytes = request["limits"]["max_object_bytes"]
 
     def rows():
         position = 0
         for batch in repository.scan(query_, table_name=TABLE,
-                max_object_bytes=request["limits"]["max_object_bytes"]):
+                max_object_bytes=max_object_bytes):
             for row in batch.to_pylist():
                 if (position >= len(expected)
                         or (row["event_id"], row["horizon_sessions"], row["cutoff_id"],

@@ -64,26 +64,25 @@ def materialize(repository, snapshot, **request):
     return history._materialize(repository, snapshot, producer=_admitted_producer(request), **request)
 
 
-def read(repository, source, feature_snapshot, *, columns=None, **request):
-    """Re-derive producer/source/policy identity before admitting model inputs."""
+def _admit_read(source, feature_snapshot, columns, request):
     validate_request(request)
     snapshot_reference(source)
     snapshot_reference(feature_snapshot)
     if (type(columns) not in (list, tuple) or not columns
             or any(type(c) is not str or c not in FEATURES for c in columns) or len(set(columns)) != len(columns)):
         raise fail("HOLDOUT_ACCESS_DENIED", "experiment fields require exact eligible-history provenance")
+
+
+def read(repository, source, feature_snapshot, *, columns=None, **request):
+    """Re-derive producer/source/policy identity before admitting model inputs."""
+    _admit_read(source, feature_snapshot, columns, request)
     return history._read(repository, source, feature_snapshot, columns=columns,
                          producer=_admitted_producer(request), **request)
 
 
 def iter_read(repository, source, feature_snapshot, *, columns=None, **request):
     """Admit history metadata once and yield committed rows lazily for bounded consumers."""
-    validate_request(request)
-    snapshot_reference(source)
-    snapshot_reference(feature_snapshot)
-    if (type(columns) not in (list, tuple) or not columns
-            or any(type(c) is not str or c not in FEATURES for c in columns) or len(set(columns)) != len(columns)):
-        raise fail("HOLDOUT_ACCESS_DENIED", "experiment fields require exact eligible-history provenance")
+    _admit_read(source, feature_snapshot, columns, request)
     admitted = history._iter_read(repository, source, feature_snapshot, columns=columns,
                                   producer=_admitted_producer(request), **request)
     return admitted

@@ -86,20 +86,10 @@ def _price_versions(context):
     return {(ticker, row["date"]): row for ticker, rows in context["price_row_metadata"].items() for row in rows}
 
 
-def _history_target(targets_by_id, cutoffs, key):
-    target = targets_by_id.get(key[0])
-    cutoff = cutoffs.get(key)
-    if target is None or cutoff is None:
-        raise fail("CONTRACT_MISMATCH", "stored history contains an unknown panel target/cutoff")
-    return target, cutoff
-
-
 def _ticker_inputs(repository, source, price_snapshot, context, ticker, sequences,
                    selected_by_ticker, request):
-    sequence = sequences.get(ticker)
-    selected = selected_by_ticker.get(ticker)
-    if sequence is None or not selected:
-        raise fail("CONTRACT_MISMATCH", "panel target has no confirmed ticker sequence")
+    sequence = sequences[ticker]
+    selected = selected_by_ticker[ticker]
     end = max(c["source_session_ceiling"] for t in selected for c in t["forecasts"])
     prices = sources.prices_for(repository, price_snapshot, ticker, request["source_start"],
                                 end, request["limits"])
@@ -137,7 +127,8 @@ def _rows(repository, source, price_snapshot, prepared):
     current_ticker = None
     for stored in history_rows:
         key = stored["event_id"], stored["horizon_sessions"]
-        target, cutoff = _history_target(targets_by_id, cutoffs, key)
+        target = targets_by_id[key[0]]
+        cutoff = cutoffs[key]
         ticker = target["ticker"]
         if ticker != current_ticker:
             sequence, runup, surface, dates = _ticker_inputs(repository, source, price_snapshot,
@@ -179,6 +170,12 @@ def _materialize(repository, source, **request):
         prepared = _prepare(repository, source, **request)
     existing = store.existing(repository, prepared[0])
     if existing is not None:
+        admitted = prepared[1]
+        total = sum(len(target["forecasts"]) for target in admitted["context"]["targets"])
+        with stage("qualified panel replay history validation", report_refusals=True):
+            meter = Progress("qualified panel replay history", total)
+            for _ in admitted["rows"]:
+                meter.tick()
         return {"context": prepared[0], "feature_snapshot": existing}
     with stage("qualified panel values", report_refusals=True):
         rows = _rows(repository, source, request["price_history_snapshot"], prepared)

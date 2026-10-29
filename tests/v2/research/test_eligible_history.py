@@ -690,20 +690,26 @@ def test_iter_read_matches_list_read_and_scans_rows_lazily(data, monkeypatch):
         columns=columns, **data.request)
     from engine.v2.research.eligible_history_table import TABLE as HISTORY_TABLE
     scanned = []
+    scanned_limits = []
     original_scan = data.repository.scan
 
     def track_history_scan(query, **kwargs):
         if kwargs.get("table_name") == HISTORY_TABLE:
             scanned.append(True)
+            scanned_limits.append(kwargs["max_object_bytes"])
         return original_scan(query, **kwargs)
 
     monkeypatch.setattr(data.repository, "scan", track_history_scan)
+    stream_request = {**data.request, "limits": dict(data.request["limits"])}
+    admitted_max_object_bytes = stream_request["limits"]["max_object_bytes"]
     streamed = history.iter_read(data.repository, data.snapshot, artifact["feature_snapshot"],
-        columns=columns, **data.request)
+        columns=columns, **stream_request)
     assert streamed["context"] == expected["context"]
     assert scanned == []
+    stream_request["limits"]["max_object_bytes"] = admitted_max_object_bytes + 1
 
     rows = iter(streamed["rows"])
     first = next(rows)
     assert scanned
+    assert scanned_limits and set(scanned_limits) == {admitted_max_object_bytes}
     assert [first, *rows] == expected["rows"]

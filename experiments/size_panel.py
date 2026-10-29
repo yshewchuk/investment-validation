@@ -9,6 +9,7 @@ from engine.v2.research import magnitude_panel_qualified as panel
 from engine.v2.research.eligible_history_table import FEATURES
 from engine.v2.research.magnitude_panel_qualified_table import admit_columns
 from engine.v2.research.magnitude_panel_table import canonical_day
+from engine.v2.research.progress import Progress, stage
 from engine.v2.research.snapshot_inputs import snapshot_reference
 from experiments import eligible_history
 
@@ -61,6 +62,14 @@ def _history(repository, source, request):
         **{k: request[k] for k in ("as_of_month", "policy", "event_ids", "horizons", "history_start", "limits")})
 
 
+def _consume_history(admitted):
+    total = sum(len(target["forecasts"]) for target in admitted["context"]["targets"])
+    with stage("SIZE stored-history validation", report_refusals=True):
+        meter = Progress("SIZE stored-history rows", total)
+        for _ in admitted["rows"]:
+            meter.tick()
+
+
 def materialize(repository, source, **request):
     """Publish immutable complete reconstructed rows after source qualification."""
     _request(source, request)
@@ -75,7 +84,6 @@ def read(repository, source, feature_snapshot, *, columns=None, **request):
     snapshot_reference(feature_snapshot)
     producer = _producer(request)
     history_admitted = _history(repository, source, request)
-    for _ in history_admitted["rows"]:
-        pass
+    _consume_history(history_admitted)
     return panel._read(repository, source, feature_snapshot, columns=columns,
                        producer=producer, history_admitted=history_admitted, **request)
