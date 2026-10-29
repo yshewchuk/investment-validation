@@ -57,6 +57,13 @@ def test_head_resolves_to_pinned_snapshot_with_reference_inputs(prod):
         assert result["manifest_hash"] == prod.snap.manifest_hash
         assert result["generation"] == 1
         assert result["reference_inputs"] == 2
+        pointer = ws.conn.execute(
+            "SELECT commit_receipt_ref FROM data_snapshots WHERE snapshot_id = ?",
+            (prod.snap.snapshot_id,)).fetchone()[0]
+        assert pointer == original
+        assert tuple(ws.conn.execute(
+            "SELECT result_snapshot_id, status FROM data_import_receipts WHERE receipt_id = ?",
+            (pointer,)).fetchone()) == (prod.snap.snapshot_id, "committed")
         head = Repository(ws.conn).resolve_pinned(SCOPE)
         assert head.snapshot_id == prod.snap.snapshot_id
         assert head.manifest_hash == prod.snap.manifest_hash
@@ -103,7 +110,9 @@ def test_failed_commit_leaves_no_head_and_rerun_converges(prod, monkeypatch):
             commit_scope_head(ws, SCOPE, clock=prod.clock)
         assert _details(caught) == ("WORKSPACE_REFUSED", "storage_failure")
         assert _heads(ws) == 0
-        assert ws.conn.execute("SELECT COUNT(*) FROM data_import_receipts").fetchone()[0] == 0
+        assert ws.conn.execute(
+            "SELECT COUNT(*) FROM data_import_receipts WHERE receipt_id LIKE 'size-head-%'"
+        ).fetchone()[0] == 0
         monkeypatch.setattr(reference_catalog, "insert_reference_inputs", real)
         result = commit_scope_head(ws, SCOPE, clock=prod.clock)
         assert result["reference_inputs"] == 2
@@ -130,6 +139,16 @@ def test_production_is_unchanged(prod):
 def test_reference_inputs_over_cap_refuses_without_head(prod, monkeypatch):
     _add_inputs(prod)
     monkeypatch.setattr(head_module, "_MAX_REFERENCE_INPUTS", 1)
+    with _create(prod) as ws:
+        with pytest.raises(OpsError) as caught:
+            commit_scope_head(ws, SCOPE, clock=prod.clock)
+        assert _details(caught) == ("WORKSPACE_REFUSED", "reference_inputs_over_cap")
+        assert _heads(ws) == 0
+
+
+def test_oversized_reference_inputs_bytes_refuse(prod, monkeypatch):
+    _add_inputs(prod)
+    monkeypatch.setattr(head_module, "_MAX_REFERENCE_BYTES", 10)
     with _create(prod) as ws:
         with pytest.raises(OpsError) as caught:
             commit_scope_head(ws, SCOPE, clock=prod.clock)

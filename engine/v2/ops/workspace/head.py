@@ -8,11 +8,13 @@ from engine.v2.data import errors as data_errors
 from engine.v2.data import reference_catalog
 from engine.v2.data.catalog import commit_snapshot
 from engine.v2.foundation import content_hash
+from engine.v2.ops.catalog import transaction
 from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.workspace.catalog_rows import copy_closure_rows
 from engine.v2.ops.workspace.scope import validate_size_scope_request
 
 _MAX_REFERENCE_INPUTS = 10_000
+_MAX_REFERENCE_BYTES = 16 << 20
 
 
 def _refuse(reason: str, **details):
@@ -22,6 +24,22 @@ def _refuse(reason: str, **details):
 
 def _log(message: str) -> None:
     print("[workspace] " + message, file=sys.stderr, flush=True)
+
+
+def _copy_original_receipt(workspace, receipt_id: str, snapshot_id: str) -> None:
+    """Copy the snapshot's own import receipt so ``commit_receipt_ref`` resolves in the workspace."""
+    source = workspace._source_conn.execute(
+        "SELECT * FROM data_import_receipts WHERE receipt_id = ?", (receipt_id,)).fetchone()
+    if source is None or tuple(source)[4] != snapshot_id or tuple(source)[5] != "committed":
+        raise _refuse("receipt_missing", snapshot_id=snapshot_id)
+    with transaction(workspace.conn):
+        workspace.conn.execute(
+            "INSERT OR IGNORE INTO data_import_receipts VALUES (%s)" % ",".join("?" * len(source)),
+            tuple(source))
+        stored = workspace.conn.execute(
+            "SELECT * FROM data_import_receipts WHERE receipt_id = ?", (receipt_id,)).fetchone()
+        if tuple(stored) != tuple(source):
+            raise _refuse("row_mismatch", table="data_import_receipts")
 
 
 def commit_scope_head(workspace, scope: str, *, clock) -> dict:
@@ -38,10 +56,12 @@ def commit_scope_head(workspace, scope: str, *, clock) -> dict:
             (sid,)).fetchone()
         if row is None or not row[0]:
             raise _refuse("receipt_missing", snapshot_id=sid)
-        count = workspace._source_conn.execute(
-            "SELECT COUNT(*) FROM (SELECT 1 FROM data_import_reference_inputs "
-            "WHERE receipt_id = ? LIMIT ?)", (row[0], _MAX_REFERENCE_INPUTS + 1)).fetchone()[0]
-        if count > _MAX_REFERENCE_INPUTS:
+        count, size = workspace._source_conn.execute(
+            "SELECT COUNT(*), COALESCE(SUM(length(legacy_path) + length(kind) + "
+            "length(object_id) + length(content_hash)), 0) FROM (SELECT * FROM "
+            "data_import_reference_inputs WHERE receipt_id = ? LIMIT ?)",
+            (row[0], _MAX_REFERENCE_INPUTS + 1)).fetchone()
+        if count > _MAX_REFERENCE_INPUTS or size > _MAX_REFERENCE_BYTES:
             raise _refuse("reference_inputs_over_cap", receipt_id=row[0])
         inputs = reference_catalog.reference_inputs_for_receipt(
             workspace._source_conn, receipt_id=row[0])
@@ -49,6 +69,7 @@ def commit_scope_head(workspace, scope: str, *, clock) -> dict:
         if (resolved.snapshot.snapshot_id != sid
                 or resolved.snapshot.manifest_hash != manifest_hash):
             raise _refuse("pin_mismatch", snapshot_id=sid)
+        _copy_original_receipt(workspace, row[0], sid)
         identity = {"workspace_scope_head": scope, "snapshot_id": sid,
                     "manifest_hash": manifest_hash}
         request_hash = content_hash(identity)
