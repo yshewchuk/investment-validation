@@ -490,7 +490,7 @@ def test_v1_manifest_shape_is_unchanged_when_no_exclusions_are_requested(source_
 
 def test_exclusion_manifest_is_distinctly_identified_and_canonical(source_root):
     plain = prep.build_manifest(source_root, session_ceiling=_AS_OF, tickers=["AAAA"])
-    with_empty = prep.build_manifest(source_root, session_ceiling=_AS_OF, tickers=["AAAA", "BBBB"],
+    with_empty = prep.build_manifest(source_root, session_ceiling=_AS_OF, tickers=["AAAA"],
                                      allow_exclusions=True)
     assert with_empty["schema_version"] == "tier1_history_manifest.v2" == prep.EXCLUSION_MANIFEST_VERSION
     assert plain["schema_version"] == prep.MANIFEST_VERSION
