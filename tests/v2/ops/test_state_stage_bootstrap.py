@@ -21,6 +21,7 @@ from engine.v2.models.payoff_artifact import (
 from engine.v2.models.recalibration_artifact import serialize_recalibration_artifact
 from engine.v2.models.training.recalibration import build_recalibration_map_artifact
 from engine.v2.ops.errors import OpsError
+from engine.v2.ops.pool_refresh import _training_plans
 from engine.v2.ops.state_stage import (
     StateStageParameters,
     run_state_stage_worker,
@@ -413,15 +414,32 @@ def test_pool_object_cutoff_mismatch_refuses(tmp_path, monkeypatch, member):
     assert err.value.problem.details == {"members": [member]}
 
 
-def test_trailing_month_after_cutoff_refuses(tmp_path, monkeypatch):
+def test_trailing_next_month_is_admitted(tmp_path, monkeypatch):
     states = _bootstrap_states()
     states["trailing_pnl_cutoff.json"] = ("trailing_pnl_cutoff", "hist|2026-11")
+    parameters, staging = _mock_bootstrap_inputs(monkeypatch, tmp_path, states=states)
+    phase5_release.catalog_path(tmp_path, "prior1").unlink()
+    result = run_state_stage_worker(parameters, staging)
+    assert result["completed_ids"] == ["phase5_state_stage"]
+    assert ("trailing_pnl_cutoff", "hist|2026-11") in _catalog_pairs(tmp_path)
+
+
+def test_trailing_month_after_cutoff_refuses(tmp_path, monkeypatch):
+    states = _bootstrap_states()
+    states["trailing_pnl_cutoff.json"] = ("trailing_pnl_cutoff", "hist|2026-12")
     parameters, staging = _mock_bootstrap_inputs(monkeypatch, tmp_path, states=states)
     phase5_release.catalog_path(tmp_path, "prior1").unlink()
     with pytest.raises(OpsError) as err:
         run_state_stage_worker(parameters, staging)
     assert str(err.value) == "VALIDATION_FAILED: a trailing object month starts after cutoff"
-    assert err.value.problem.details == {"months": ["hist|2026-11"]}
+    assert err.value.problem.details == {"months": ["hist|2026-12"]}
+
+
+def test_carry_trailing_plan_requests_session_and_next_month():
+    assert _training_plans("2026-10-27", "manifest", ["train-trailing"])[
+        "train-trailing"]["parameters"]["cutoffs"] == ("2026-10-27", "2026-11-01")
+    assert _training_plans("2026-12-29", "manifest", ["train-trailing"])[
+        "train-trailing"]["parameters"]["cutoffs"] == ("2026-12-29", "2027-01-01")
 
 
 def test_damaged_prior_still_refuses(tmp_path, monkeypatch):

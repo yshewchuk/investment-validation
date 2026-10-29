@@ -356,7 +356,7 @@ stages a candidate release; it never touches `DEPLOYED` (`models_promote` is sep
   inventory comes from the legacy champion registry under the new id; drift refuses before any write.
 - Refusals map to `VALIDATION_FAILED` with fixed messages and `details` (`code` of a
   `ReleaseAssemblyRefusal`, or `PRIOR_USABLE`, `BINDINGS_DIFFER`, `EMPTY_MEMBER` in `bootstrap` mode (§2.2.2), `members`, `member`, `issues`, `months`; plan-time `INVALID_REQUEST`
-  carries `problems`). A trailing object's month may not start after `cutoff`. An unreadable prior
+  carries `problems`). A trailing object's month may not start after the first day of the next calendar month, and its lineage must end exclusively at its own month start. An unreadable prior
   refuses "prior release could not be read"; an inventory artifact or registry that is a symlink,
   not a regular file, or over its size cap refuses "release inventory could not be built". One attempt only.
 
@@ -380,18 +380,18 @@ row whose cutoff is not the session cutoff still needs a release carrying it, wh
 
 Phases, each only after the previous succeeded: three `training` jobs (one per advancing member) bound to the session's
 scoring manifest; one `phase5_state_stage` job staging a candidate release from their outputs; one `models_promote` job
-guarded by `expected_previous_release_id` = the prior release. The scan for the latest scoring session covers a bounded window
-of the newest nightly jobs, so a score older than that window is not found.
+guarded by `expected_previous_release_id` = the prior release. The `train-trailing` job requests the session and next-month dates; it uses only data dates before each month's first day, never `computed_at`, and staging checks that exclusive lineage boundary. Staging admits only the current or next month; later months or mismatched lineage refuse.
+The scan for the latest scoring session covers a bounded window of the newest nightly jobs, so a score older than that window is not found.
 
 | Rule | Behaviour |
 |---|---|
-| R1 verified input | session and manifest id from the latest succeeded `finality`/`features` job (its `legacy_manifest.json` binding); prior release from the live pointer, classified with `classify_prior`: `USABLE` runs this carry cycle, `NONE`/`NO_POOL_CATALOG` start the bootstrap cycle (§2.2.2), `DAMAGED` submits nothing and reports `VALIDATION_FAILED` `PRIOR_MISMATCH` (deduped) |
+| R1 verified input | session and manifest id from the latest succeeded `finality`/`features` job (its `legacy_manifest.json` binding); prior release from the live pointer, classified with `classify_prior`: `USABLE` runs this carry cycle, `NONE`/`NO_POOL_CATALOG` start the bootstrap cycle (§2.2.2), `DAMAGED` submits nothing and reports `VALIDATION_FAILED` `PRIOR_MISMATCH` (deduped). The trailing job binds artifacts for the session month and next calendar month; each artifact's data lineage ends at that artifact month's first day, exclusive. |
 | R7 serve lifetime | the scheduled serve (not the snapshot-import serve) also stays up while the latest session's pool cycle is pending: a candidate release for it is not yet deployed, or a phase job (including the promote) is still running, and no phase job has failed; a missing release root or a failed phase ends the wait, and the serve deadline still bounds it |
 | R2 cache | durable job and pointer state is re-read each tick; no memo (reads are cheap indexed selects) |
 | R3 retry | an existing phase key in any state is never resubmitted; a failed phase or stale-champion refusal stalls that cycle for operator recovery (#154); an incumbent changed before staging starts a new cycle under new keys; once a candidate is staged, the staged id or the guarded promote refuses and the cycle stalls |
-| R4 transaction | phase N+1 is submitted only once every phase-N job has succeeded; a sidecar failure is caught and reported (deduped), never raised |
-| R5 partial failure | succeeded jobs and staged objects may remain; no later phase or pointer change occurs until prerequisites succeed; before the pointer swap the prior release stays deployed, and a failure after the swap follows the §7.2 history rules |
-| R6 idempotency | phase keys are stable per session, scoring manifest and prior release, so a rerun scored from a new manifest retrains; the candidate release id is `pools-{session}-{tag}` and does not include the prior release (the stage refusal carries `ID_CONFLICT` in `details` when the same candidate id is reused with different content; promotion separately checks `expected_previous_release_id`, R3); a deployed release already named so ends the cycle |
+| R4 transaction | phase N+1 is submitted only once every phase-N job has succeeded; the current- and next-month trailing artifacts are produced together by the one trailing training job; a sidecar failure is caught and reported (deduped), never raised |
+| R5 partial failure | succeeded jobs and staged objects may remain; no later phase or pointer change occurs until prerequisites succeed; before the pointer swap the prior release stays deployed, and a failure after the swap follows the §7.2 history rules. A failed trailing job therefore cannot publish either cutoff or hold native scoring indefinitely; the existing failed-cycle rules apply. |
+| R6 idempotency | phase keys are stable per session, scoring manifest and prior release, so a rerun scored from a new manifest retrains; the candidate release id is `pools-{session}-{tag}` and does not include the prior release (the stage refusal carries `ID_CONFLICT` in `details` when the same candidate id is reused with different content; promotion separately checks `expected_previous_release_id`, R3); a deployed release already named so ends the cycle. Both requested trailing months are part of the same deterministic phase output. |
 
 ### 2.2.2 Bootstrap cycle (#1102; stage job, sidecar submission and promote guard built)
 
@@ -432,7 +432,7 @@ The pointer is re-read before each phase submit; if its class or id changed sinc
 | Registry drift, inventory unreadable; every other refusal below marked "message only" | fixed message, `details` as §2.2 (`issues` for drift, `members`, `member`); nothing written unless stated |
 | Bindings differ from the incumbent's | `BINDINGS_DIFFER`; nothing written |
 | A catalog state not `STAGED` | `EMPTY_MEMBER`, `details.members`; nothing written |
-| A bound file or model artifact unreadable, oversize, unclassifiable, duplicating an object, or naming a member outside the catalog's states; a pool object cutoff, or a trailing object month after the session cutoff | message only; nothing written |
+| A bound file or model artifact unreadable, oversize, unclassifiable, duplicating an object, or naming a member outside the catalog's states; a pool object cutoff, a trailing object month later than the next calendar month, or a trailing lineage that does not end at its month start | message only; nothing written |
 | Champion registry or Tier-4 producer recipe unreadable or disagreeing with the registered recipe (`RegistryError`, `Tier4Error`) | message only; nothing written |
 | The staging-success record cannot be written after a successful read-back | "staging success could not be recorded"; the candidate stays staged and unpromotable until a rerun |
 | The staging-success record cannot be restored after an id conflict | "candidate release could not be published" (no `ID_CONFLICT` code) |

@@ -356,6 +356,29 @@ def test_training_job_freezes_one_state_per_month_and_the_preparer_stages_it(tmp
     assert staged == serialize_frozen_state(build_trailing_cutoff_artifact(rows, month="2026-03-01"))
 
 
+def test_training_job_trailing_cutoff_takes_october_rows_before_the_month(tmp_path):
+    import json
+
+    from tools import phase5_prepare_release as prep
+    from tools.phase5_training_job import run_trailing_cutoff_job
+
+    early = pd.DataFrame({"event_date": pd.date_range("2026-05-01", periods=100),
+                          "exp_pnl_sim": 1.0, "computed_at": "2026-11-30"})
+    october = pd.DataFrame({"event_date": pd.date_range("2026-10-01", periods=30),
+                            "exp_pnl_sim": 50.0, "computed_at": "2026-10-31"})
+    cutoff_day = pd.DataFrame({"event_date": [pd.Timestamp("2026-11-01")] * 101,
+                               "exp_pnl_sim": 10000.0, "computed_at": "2026-09-01"})
+    history = pd.concat([early, october, cutoff_day], ignore_index=True)
+    summary = run_trailing_cutoff_job(tmp_path, as_of=["2026-11-05"], history=history)
+    assert summary["months"] == ["2026-11-01"]
+    found = prep.frozen_state_payloads([tmp_path])
+    key = "features.pnl_sim_history|2026-11-01"
+    assert key in found["trailing_pnl_cutoff"]
+    artifact = trailing_cutoff_from_document(json.loads(found["trailing_pnl_cutoff"][key]))
+    assert artifact.cutoff == 50.0
+    assert artifact.lineage.data[0].end_exclusive == "2026-11-01"
+
+
 def test_score_one_runs_the_entry_rule_after_the_simulation():
     """End to end: the gate stage reads the simulation stage's own
     ``exp_pnl_sim`` and the priced legs; an undetermined verdict flags
