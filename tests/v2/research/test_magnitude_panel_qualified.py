@@ -805,6 +805,13 @@ def test_streamed_history_panel_rows_match_materialized_history(panel_data):
     assert streamed_rows == materialized_rows
 
 
+class _StubLookup:
+    clear = staticmethod(lambda: None)
+
+    def __call__(self, *args):
+        return {}
+
+
 def test_panel_rows_consume_canonical_history_order_across_prefix_tickers(monkeypatch):
     from engine.v2.research import magnitude_panel_qualified as builder
     from engine.v2.research.eligible_history_table import FEATURES as HISTORY_FEATURES
@@ -833,7 +840,7 @@ def test_panel_rows_consume_canonical_history_order_across_prefix_tickers(monkey
     prepared = (context, admitted, [], [])
     monkeypatch.setattr(builder, "load_population", lambda *args, **kwargs: object())
     monkeypatch.setattr(sources, "signed_moves", lambda *args: {})
-    monkeypatch.setattr(sources, "anchor_lookup", lambda *args, **kwargs: lambda *args: {})
+    monkeypatch.setattr(sources, "anchor_lookup", lambda *args, **kwargs: _StubLookup())
     price_tickers = []
 
     def prices_for(repository, price_snapshot, ticker, *args):

@@ -121,6 +121,7 @@ def _rows(repository, source, price_snapshot, prepared):
     daily_anchors = sources.anchor_lookup(daily_records,
         daily_contract=repository.table_contract(source, "daily_market"))
     price_anchors = sources.anchor_lookup(price_records)
+    gspc_anchors = sources.anchor_lookup(price_records)  # regime dates only; survives ticker changes
     request = context["request"]
     population = load_population(repository, source, as_of_month=request["as_of_month"])
     moves = sources.signed_moves(repository, source, admitted, population)
@@ -149,6 +150,8 @@ def _rows(repository, source, price_snapshot, prepared):
         cutoff = cutoffs[key]
         ticker = target["ticker"]
         if ticker != current_ticker:
+            price_anchors.clear()  # anchor caches are per active ticker, not per run
+            daily_anchors.clear()
             sequence, runup, surface, dates = _ticker_inputs(repository, source, price_snapshot,
                 context, ticker, sequences, selected_by_ticker, request)
             versions = _versions(repository, price_snapshot, context, ticker)
@@ -165,7 +168,7 @@ def _rows(repository, source, price_snapshot, prepared):
         blocks = {"history": _block(history_values, history["history"]),
             "prior_events": _block(prior, history["history"]),
             "runup": _block(runvalues, [price_anchors(ticker, d, versions[d]) for d in rundates]),
-            "spy": _block(spy[key]["values"], [price_anchors("^GSPC", d, gspc_versions[d])
+            "spy": _block(spy[key]["values"], [gspc_anchors("^GSPC", d, gspc_versions[d])
                                               for d in spy[key]["source_dates"]]),
             "daily_market": _daily_lineage(market, daily_anchors, ticker),
             "implied_history": implied_lineage}
