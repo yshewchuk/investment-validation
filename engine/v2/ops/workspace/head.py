@@ -47,9 +47,11 @@ def _copy_original_receipt(workspace, receipt_id: str, snapshot_id: str) -> None
         workspace.conn.execute(
             "INSERT OR IGNORE INTO data_import_receipts VALUES (%s)" % ",".join("?" * len(source)),
             tuple(source))
-        stored = workspace.conn.execute(
-            "SELECT * FROM data_import_receipts WHERE receipt_id = ?", (receipt_id,)).fetchone()
-        if tuple(stored) != tuple(source):
+        # Compare inside SQLite so an oversized conflicting row is never materialised here.
+        same = workspace.conn.execute(
+            "SELECT 1 FROM data_import_receipts WHERE %s" % " AND ".join(
+                "%s IS ?" % name for name in source.keys()), tuple(source)).fetchone()
+        if same is None:
             raise _refuse("row_mismatch", table="data_import_receipts")
 
 

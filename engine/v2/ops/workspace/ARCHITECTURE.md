@@ -60,8 +60,8 @@ version, scope, snapshot id and manifest hash. The returned repository view dele
 `resolve_pinned(scope)` returns `workspace.source_snapshot()` only for the
 bound scope. It never reads a production head or accepts a different snapshot.
 
-The local catalog does not contain production `data_snapshots`, so this is a
-workspace-local scope binding, not a native `data_snapshot_heads` row. The
+This adapter is a workspace-local scope binding and writes no
+`data_snapshot_heads` row (`head.commit_scope_head`, below, does). The
 scope adapter itself copies nothing; `catalog_rows.copy_closure_rows` (below) copies the snapshot's catalog rows, never objects. A standard package or library does
 not provide this repository-specific pin contract; the adapter reuses the
 existing `ResearchWorkspace.record_read_pin`, `SnapshotOnlyRepository` and

@@ -19,6 +19,7 @@ from engine.v2.data.repository import Repository
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.workspace import head as head_module
 from engine.v2.ops.workspace.head import commit_scope_head
+from engine.v2.ops.workspace.catalog_rows import copy_closure_rows
 
 SCOPE = "size-scope"
 
@@ -170,3 +171,21 @@ def test_replay_after_head_moved_refuses_conflict(prod):
         assert ws.conn.execute(
             "SELECT snapshot_id FROM data_snapshot_heads WHERE scope = ?", (SCOPE,)
         ).fetchone()[0] == prod.snap.parent_snapshot_id
+
+
+def test_conflicting_existing_receipt_row_refuses(prod):
+    original = _add_inputs(prod)
+    with _create(prod) as ws:
+        copy_closure_rows(ws)
+        ro = sqlite3.connect(prod.catalog.as_uri() + "?mode=ro", uri=True)
+        row = list(ro.execute(
+            "SELECT * FROM data_import_receipts WHERE receipt_id = ?", (original,)).fetchone())
+        ro.close()
+        row[1] = row[1] + "-conflict"
+        ws.conn.execute(
+            "INSERT INTO data_import_receipts VALUES (%s)" % ",".join("?" * len(row)), row)
+        ws.conn.commit()
+        with pytest.raises(OpsError) as caught:
+            commit_scope_head(ws, SCOPE, clock=prod.clock)
+        assert _details(caught) == ("WORKSPACE_REFUSED", "row_mismatch")
+        assert _heads(ws) == 0
