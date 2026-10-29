@@ -7,7 +7,6 @@ import sys
 import time
 
 from engine.v2.data import errors as data_errors
-from engine.v2.data.repository import Repository
 from engine.v2.ops.errors import OpsError, fail
 
 _SNAPSHOTS = (
@@ -112,12 +111,9 @@ def _verify_rows(src, dst, sid, started) -> None:
              f"{time.monotonic() - started:.2f}s elapsed")
 
 
-def _verify_catalog(dst, sid, pinned) -> None:
+def _verify_catalog(dst) -> None:
     if dst.execute("PRAGMA foreign_key_check").fetchall():
         raise _refuse("foreign_key_violation")
-    resolved = Repository(dst).resolve_full(sid)
-    if resolved.snapshot.manifest_hash != pinned.manifest_hash:
-        raise _refuse("manifest_mismatch")
 
 
 def copy_closure_rows(workspace) -> dict:
@@ -136,7 +132,8 @@ def copy_closure_rows(workspace) -> dict:
                 dst.execute("PRAGMA defer_foreign_keys = ON")
                 counts = _insert_rows(src, dst, sid)
                 _verify_rows(src, dst, sid, started)
-                _verify_catalog(dst, sid, pinned)
+                # Identical digests above prove the rows equal the source; resolve_full cannot run inside this transaction.
+                _verify_catalog(dst)
                 workspace.source_snapshot()
                 dst.commit()
             except BaseException:

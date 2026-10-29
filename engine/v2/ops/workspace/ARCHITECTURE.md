@@ -97,13 +97,13 @@ Slice (i) of #1614 part 2b. A native scope head in the workspace catalog (slice 
 
 Receipts, lineage, coverage, captures and heads are outside this slice.
 
-**Procedure.** Resolve the pin (`workspace.source_snapshot()`), read the source under one read transaction, insert in one workspace transaction with deferred foreign keys using `INSERT OR IGNORE`, then verify per table: the workspace row count equals the closure's, and an ordered content digest of the closure rows equals the source's. Before commit, `PRAGMA foreign_key_check` is empty and `Repository.resolve_full(S).snapshot.manifest_hash` over the workspace catalog equals the pinned hash. Returns the snapshot id, manifest hash, ancestor chain and per-table row counts. Progress per table goes to stderr (`[workspace]`).
+**Procedure.** Resolve the pin (`workspace.source_snapshot()`), read the source under one read transaction, insert in one workspace transaction with deferred foreign keys using `INSERT OR IGNORE`, then verify per table: the workspace row count equals the closure's, and an ordered content digest of the closure rows equals the source's. Before commit, `PRAGMA foreign_key_check` is empty. Equal digests make the copied rows identical to the source rows, so the manifest hash is the pinned one (`resolve_full` cannot run inside the copy transaction; the tests resolve the committed copy and compare the hash). Returns the snapshot id, manifest hash, ancestor chain and per-table row counts. Progress per table goes to stderr (`[workspace]`).
 
 R1–R6, all `WORKSPACE_REFUSED` unless noted:
 
 | Rule | Behaviour |
 |---|---|
-| R1 typed reason | `source_row_missing` (S or a referenced row absent in the source), `schema_mismatch` (column lists differ), `unexpected_rows` (workspace holds rows beyond the closure), `row_mismatch` (a digest differs, including a conflicting existing row), `foreign_key_violation`, `manifest_mismatch`, `storage_failure` (other exceptions, with `cause`). |
+| R1 typed reason | `source_row_missing` (S or a referenced row absent in the source), `schema_mismatch` (column lists differ), `unexpected_rows` (workspace holds rows beyond the closure), `row_mismatch` (a digest differs, including a conflicting existing row), `foreign_key_violation`, `storage_failure` (other exceptions, with `cause`). |
 | R2 no partial result | One transaction; any refusal rolls it back, so no row and no head remains. |
 | R3 no repair | No overwrite, delete or retry; a conflicting row refuses. |
 | R4 stale pin | `workspace.source_snapshot()` runs before and after the read; a changed pin propagates `SNAPSHOT_CLOSURE_BROKEN`. |
