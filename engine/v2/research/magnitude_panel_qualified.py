@@ -86,6 +86,19 @@ def _price_versions(context):
     return {(ticker, row["date"]): row for ticker, rows in context["price_row_metadata"].items() for row in rows}
 
 
+def _ticker_inputs(repository, source, price_snapshot, context, ticker, sequences,
+                   selected_by_ticker, request):
+    sequence = sequences[ticker]
+    selected = selected_by_ticker[ticker]
+    end = max(c["source_session_ceiling"] for t in selected for c in t["forecasts"])
+    prices = sources.prices_for(repository, price_snapshot, ticker, request["source_start"],
+                                end, request["limits"])
+    runup = sources.runup(selected, prices)
+    surface = sources.daily_surface(repository, source, ticker, context["daily_source_start"],
+                                   end, request["limits"])
+    return sequence, runup, surface, [row["date"] for row in surface]
+
+
 def _rows(repository, source, price_snapshot, prepared):
     context, admitted, daily_records, price_records = prepared
     daily_anchors = sources.anchor_lookup(daily_records,
@@ -95,52 +108,58 @@ def _rows(repository, source, price_snapshot, prepared):
     versions = _price_versions(context)
     population = load_population(repository, source, as_of_month=request["as_of_month"])
     moves = sources.signed_moves(repository, source, admitted, population)
-    histories = {(r["event_id"], r["horizon_sessions"]): r for r in admitted["rows"]}
     targets = context["target_events"]
+    targets_by_id = {target["event_id"]: target for target in targets}
+    cutoffs = {(target["event_id"], cutoff["horizon_sessions"]): cutoff
+        for target in targets for cutoff in target["forecasts"]}
+    selected_by_ticker = {}
+    for target in targets:
+        selected_by_ticker.setdefault(target["ticker"], []).append(target)
+    sequences = {sequence["ticker"]: sequence
+        for sequence in context["confirmed_metadata"]["sequences"]}
     ceiling = max(c["source_session_ceiling"] for t in targets for c in t["forecasts"])
     regime = daily._read_regime_series(repository, price_snapshot, request["source_start"], ceiling,
         request["limits"]["max_source_rows"], request["limits"]["max_object_bytes"])
     spy = daily._spy_blocks(targets, regime)
     retained = set(context["quote_eligibility_plan"]["retained_event_ids"])
     meter = Progress("qualified panel events", len(targets))
-    for sequence in context["confirmed_metadata"]["sequences"]:
-        ticker = sequence["ticker"]
-        selected = [t for t in targets if t["ticker"] == ticker]
-        end = max(c["source_session_ceiling"] for t in selected for c in t["forecasts"])
-        prices = sources.prices_for(repository, price_snapshot, ticker, request["source_start"],
-                                    end, request["limits"])
-        runup = sources.runup(selected, prices)
-        surface = sources.daily_surface(repository, source, ticker, context["daily_source_start"], end, request["limits"])
-        dates = [r["date"] for r in surface]
-        for target in selected:
-            for cutoff in target["forecasts"]:
-                key = target["event_id"], cutoff["horizon_sessions"]
-                stored = histories[key]
-                history = json.loads(stored["history_json"])
-                prior = {"signed_streak": sources.streak(history, moves),
-                    "ema12r_abs": stored["ema12_prior_abs_move"] if stored["n_prior"] >= 12
-                    else stored["mean_prior_abs_move"]}
-                runvalues, rundates = runup[key]
-                market = daily._daily(surface, dates, cutoff["source_session_ceiling"])
-                implied, implied_lineage = sources.implied_history(sequence, target,
-                    cutoff["source_session_ceiling"], retained, surface, daily_anchors, request["history_start"])
-                history_values = {name: stored[name] for name in HISTORY}
-                blocks = {"history": _block(history_values, history["history"]),
-                    "prior_events": _block(prior, history["history"]),
-                    "runup": _block(runvalues, [price_anchors(ticker, d, versions[ticker, d]) for d in rundates]),
-                    "spy": _block(spy[key]["values"], [price_anchors("^GSPC", d, versions["^GSPC", d])
-                                                      for d in spy[key]["source_dates"]]),
-                    "daily_market": _daily_lineage(market, daily_anchors, ticker),
-                    "implied_history": implied_lineage}
-                row = {"schema_version": table.CONTRACT.contract_id, "event_id": key[0],
-                    "context_id": context["context_id"], "history_context_id": admitted["context"]["context_id"],
-                    "horizon_sessions": key[1], "event_date": target["event_date"],
-                    "cutoff_id": cutoff["cutoff_id"], "source_session_ceiling": cutoff["source_session_ceiling"],
-                    "lineage": canonical_json(blocks), "current_quote_status": market["quote_status"],
-                    "has_implied_quote": int(market["quote_status"] == "present"), **history_values,
-                    **prior, **runvalues, **spy[key]["values"], **market["values"],
-                    "mean_prior_or_implied": implied}
-                yield {**row, "row_id": content_hash(row)}
+    history_rows = iter(admitted["rows"])
+    current_ticker = None
+    for stored in history_rows:
+        key = stored["event_id"], stored["horizon_sessions"]
+        target = targets_by_id[key[0]]
+        cutoff = cutoffs[key]
+        ticker = target["ticker"]
+        if ticker != current_ticker:
+            sequence, runup, surface, dates = _ticker_inputs(repository, source, price_snapshot,
+                context, ticker, sequences, selected_by_ticker, request)
+            current_ticker = ticker
+        history = json.loads(stored["history_json"])
+        prior = {"signed_streak": sources.streak(history, moves),
+            "ema12r_abs": stored["ema12_prior_abs_move"] if stored["n_prior"] >= 12
+            else stored["mean_prior_abs_move"]}
+        runvalues, rundates = runup[key]
+        market = daily._daily(surface, dates, cutoff["source_session_ceiling"])
+        implied, implied_lineage = sources.implied_history(sequence, target,
+            cutoff["source_session_ceiling"], retained, surface, daily_anchors, request["history_start"])
+        history_values = {name: stored[name] for name in HISTORY}
+        blocks = {"history": _block(history_values, history["history"]),
+            "prior_events": _block(prior, history["history"]),
+            "runup": _block(runvalues, [price_anchors(ticker, d, versions[ticker, d]) for d in rundates]),
+            "spy": _block(spy[key]["values"], [price_anchors("^GSPC", d, versions["^GSPC", d])
+                                              for d in spy[key]["source_dates"]]),
+            "daily_market": _daily_lineage(market, daily_anchors, ticker),
+            "implied_history": implied_lineage}
+        row = {"schema_version": table.CONTRACT.contract_id, "event_id": key[0],
+            "context_id": context["context_id"], "history_context_id": admitted["context"]["context_id"],
+            "horizon_sessions": key[1], "event_date": target["event_date"],
+            "cutoff_id": cutoff["cutoff_id"], "source_session_ceiling": cutoff["source_session_ceiling"],
+            "lineage": canonical_json(blocks), "current_quote_status": market["quote_status"],
+            "has_implied_quote": int(market["quote_status"] == "present"), **history_values,
+            **prior, **runvalues, **spy[key]["values"], **market["values"],
+            "mean_prior_or_implied": implied}
+        yield {**row, "row_id": content_hash(row)}
+        if key[1] == target["forecasts"][-1]["horizon_sessions"]:
             meter.tick()
 
 
@@ -151,6 +170,12 @@ def _materialize(repository, source, **request):
         prepared = _prepare(repository, source, **request)
     existing = store.existing(repository, prepared[0])
     if existing is not None:
+        admitted = prepared[1]
+        total = sum(len(target["forecasts"]) for target in admitted["context"]["targets"])
+        with stage("qualified panel replay history validation", report_refusals=True):
+            meter = Progress("qualified panel replay history", total)
+            for _ in admitted["rows"]:
+                meter.tick()
         return {"context": prepared[0], "feature_snapshot": existing}
     with stage("qualified panel values", report_refusals=True):
         rows = _rows(repository, source, request["price_history_snapshot"], prepared)
