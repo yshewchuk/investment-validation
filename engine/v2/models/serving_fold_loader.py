@@ -74,9 +74,10 @@ def validate_serving_fold_descriptor(descriptor):
 
 def _view(descriptor, parent, catalog_hash, *, role="size"):
     policy = descriptor.policy
-    if (not _hash_valid(catalog_hash) or not _manifest_hash_matches(parent)
-            or descriptor.parent_release_id != parent.release.release_id
-            or descriptor.parent_release_hash != parent.release_hash):
+    # The descriptor parent records where the fold was authored. Carried
+    # catalogs can retain that provenance; the current model compatibility is
+    # verified below against the containing release's size binding.
+    if not _hash_valid(catalog_hash) or not _manifest_hash_matches(parent):
         raise ServingFoldError()
     bindings = [b for b in parent.release.bindings if b.role == role and b.strategy_id == "*"]
     if (len(bindings) != 1 or bindings[0].model_id != policy.model_id
