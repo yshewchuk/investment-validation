@@ -346,7 +346,8 @@ def test_all_training_phases_missing_submit_three(monkeypatch, tmp_path):
         f"nightly:{SESSION}:pool:{phase}:{TAG}:{PRIOR}"
         for phase in pool_refresh.TRAINING_PHASES]
     for call in rec.training:
-        assert call["cutoffs"] == (SESSION,)
+        expected_cutoffs = (SESSION, "2026-02-01") if call["mode"] == "trailing_cutoff" else (SESSION,)
+        assert call["cutoffs"] == expected_cutoffs
         assert call["manifest_ref"] == MANIFEST
     modes = {call["mode"]: call for call in rec.training}
     assert modes["state"]["state"] == "paired_residual_pool"
@@ -942,7 +943,7 @@ def test_real_training_planners_build_the_three_phase_plans(monkeypatch, tmp_pat
     assert paired["state"] == "paired_residual_pool" and paired["cutoffs"] == (SESSION,)
     assert board["alpha"] == pool_refresh.FILL_ALPHA and board["cutoffs"] == (SESSION,)
     assert board["strategies"] == ()
-    assert trailing["cutoffs"] == (SESSION,)
+    assert trailing["cutoffs"] == (SESSION, "2026-02-01")
     for parameters in plans.values():
         assert parameters["input_bindings"] == {"legacy_manifest.json": MANIFEST}
     impl = content_hash(worker_source_manifest(REPO_ROOT))

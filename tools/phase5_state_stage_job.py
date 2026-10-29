@@ -8,6 +8,7 @@ Never touches ``DEPLOYED``.
 from __future__ import annotations
 
 import dataclasses
+import json
 import stat
 from datetime import date
 from pathlib import Path
@@ -94,21 +95,41 @@ def classify(root: Path, names, *, monthly: bool = False) -> dict[str, dict[str,
 
 
 def check_trailing_months(new: dict[str, dict[str, bytes]], cutoff: str) -> None:
-    """A trailing object's month (last name segment, ``YYYY-MM...``) may not start after ``cutoff``."""
+    """A trailing object's month may not start after the month following ``cutoff``'s month."""
+    from engine.v2.models.trailing_cutoff_artifact import trailing_cutoff_from_document
+
     try:
         cutoff_day = date.fromisoformat(cutoff)
     except ValueError as exc:
         raise StageRefused("cutoff is not an ISO date") from exc
+    if cutoff_day.month == 12:
+        month_limit = date(cutoff_day.year + 1, 1, 1)
+    else:
+        month_limit = date(cutoff_day.year, cutoff_day.month + 1, 1)
     late = []
     for name in new["trailing_pnl_cutoff"]:
         try:
             month_start = date.fromisoformat(name.rsplit("|", 1)[-1][:7] + "-01")
         except ValueError as exc:
             raise StageRefused("a trailing object month is not a date", {"months": [name]}) from exc
-        if month_start > cutoff_day:
+        if month_start > month_limit:
             late.append(name)
     if late:
         raise StageRefused("a trailing object month starts after cutoff", {"months": sorted(late)})
+    for name, data in new["trailing_pnl_cutoff"].items():
+        try:
+            artifact = trailing_cutoff_from_document(json.loads(data))
+            dependencies = artifact.lineage.data
+            if (len(dependencies) != 1
+                    or dependencies[0].table != artifact.history_id
+                    or dependencies[0].end_exclusive != artifact.month):
+                raise StageRefused("a trailing object lineage does not match its month",
+                                   {"months": [name]})
+        except StageRefused:
+            raise
+        except (ValueError, KeyError, TypeError, AttributeError, RecursionError) as exc:
+            raise StageRefused("a trailing object lineage does not match its month",
+                               {"months": [name]}) from exc
 
 
 def light_checks(release_root: Path, parameters, new_hashes: set[str]) -> None:

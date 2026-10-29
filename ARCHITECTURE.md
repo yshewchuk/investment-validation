@@ -593,7 +593,7 @@ Only a tracked path absent from the worktree reads as empty.
   `trailing_cutoff`/`ResidualPool`). One more `Service.tick()` sidecar,
   `Service._reconcile_pool_nightly_refresh` — never a `nightly.py`
   `GRAPH`/`_DAG_STAGES` node — trains the board-analog and paired residual
-  pools and the trailing cutoff at the session cutoff, stages a candidate
+  pools at the session cutoff and the trailing cutoff for the session and next month, stages a candidate
   release and promotes it behind an expected-incumbent guard; driver pools
   and the chooser stay carried. Contract: `engine/v2/models/ARCHITECTURE.md`
   §2.2.1; monthly retraining contract: §2.3.

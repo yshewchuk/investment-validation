@@ -19,6 +19,7 @@ import json
 import os
 import sys
 from collections.abc import Mapping
+from datetime import date
 from pathlib import Path
 
 from engine.v2.foundation import ArtifactError, content_hash, from_document
@@ -303,6 +304,17 @@ def _started_family(conn, session, prior_token, tag):
     return None
 
 
+def _next_month_start(session):
+    """The first day of the calendar month after ``session``'s ISO month."""
+    session_date = date.fromisoformat(session)
+    year = session_date.year
+    month = session_date.month + 1
+    if month > 12:
+        year += 1
+        month = 1
+    return date(year, month, 1).isoformat()
+
+
 def _training_plans(session, manifest_id, phases):
     builders = {
         "train-paired": lambda: training.training_plan(
@@ -312,7 +324,9 @@ def _training_plans(session, manifest_id, phases):
             mode="board_analog", alpha=FILL_ALPHA, cutoffs=(session,),
             manifest_ref=manifest_id),
         "train-trailing": lambda: training.training_plan(
-            mode="trailing_cutoff", cutoffs=(session,), manifest_ref=manifest_id),
+            mode="trailing_cutoff",
+            cutoffs=(session, _next_month_start(session)),
+            manifest_ref=manifest_id),
         "train-driver-size": lambda: training.training_plan(
             mode="state", state="driver_residual_pool:size", manifest_ref=manifest_id),
         "train-driver-implied_t1": lambda: training.training_plan(
