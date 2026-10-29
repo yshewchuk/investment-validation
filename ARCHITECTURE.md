@@ -47,6 +47,7 @@ request body and, if durable, in the operator guides instead — see
 |---|---|
 | `checks/` | [`checks/ARCHITECTURE.md`](checks/ARCHITECTURE.md) |
 | `tools/` | [`tools/ARCHITECTURE.md`](tools/ARCHITECTURE.md) |
+| Distribution research policy | [`experiments/ARCHITECTURE.md#distribution-explicit-policy`](experiments/ARCHITECTURE.md#distribution-explicit-policy) |
 | `experiments/` | [`experiments/ARCHITECTURE.md`](experiments/ARCHITECTURE.md) |
 | `engine/v2/contracts/` | (pending) |
 | `engine/v2/foundation/` | [`engine/v2/foundation/ARCHITECTURE.md`](engine/v2/foundation/ARCHITECTURE.md) |
