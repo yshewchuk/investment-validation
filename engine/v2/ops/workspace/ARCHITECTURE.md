@@ -122,10 +122,10 @@ R1–R6, `WORKSPACE_REFUSED` unless noted:
 
 | Rule | Behaviour |
 |---|---|
-| R1 typed reason | `scope_invalid`, `workspace_invalid` (from the scope validators), `receipt_missing` (S's copied row names no committed import receipt for S), `row_mismatch` (the workspace holds a different row for that receipt), `reference_inputs_over_cap` (the receipt pins more than 10,000 inputs, checked before they are read), `pin_mismatch` (`resolve_full` differs from the pin), `storage_failure` (other exceptions, with `cause`). `copy_closure_rows` refusals, `SNAPSHOT_NOT_READY` (no reference inputs), `SNAPSHOT_CONFLICT` (scope already has a different head) and `IDENTITY_CONFLICT` propagate unchanged. |
+| R1 typed reason | `scope_invalid`, `workspace_invalid` (from the scope validators), `receipt_missing` (S's copied row names no committed import receipt for S), `row_mismatch` (the workspace holds a different row for that receipt), `reference_inputs_over_cap` (the receipt pins more than 10,000 inputs or 16 MiB of rendered text, checked before they are read), `pin_mismatch` (`resolve_full` differs from the pin), `storage_failure` (other exceptions, with `cause`). `copy_closure_rows` refusals, `SNAPSHOT_NOT_READY` (no reference inputs), `SNAPSHOT_CONFLICT` (scope already has a different head) and `IDENTITY_CONFLICT` propagate unchanged. |
 | R2 no partial result | The receipt, reference inputs and head are one transaction inside `commit_snapshot`; any failure rolls all three back, so a failed call leaves no head. |
 | R3 no repair | An existing different head or receipt is never overwritten or repaired; there is no retry. |
-| R4 stale pin | `workspace.source_snapshot()` runs before the commit; a changed pin propagates `SNAPSHOT_CLOSURE_BROKEN`. A head moved by another writer fails the compare-and-swap with `SNAPSHOT_CONFLICT`. |
+| R4 stale pin | `workspace.source_snapshot()` runs before the commit; a changed pin propagates `SNAPSHOT_CLOSURE_BROKEN`. A head moved by another writer refuses `SNAPSHOT_CONFLICT`: the compare-and-swap catches it on a fresh commit, and a check run first inside the commit transaction catches it on a receipt replay. |
 | R5 read-only production | Only the source connection is read; all writes go to `workspace.conn`. |
 | R6 unknown state | Malformed handle, missing receipt row or any unexpected exception refuses. |
 

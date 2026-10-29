@@ -26,6 +26,17 @@ def _log(message: str) -> None:
     print("[workspace] " + message, file=sys.stderr, flush=True)
 
 
+def _head_check(scope: str, snapshot_id: str):
+    """Run first inside the commit transaction, so a receipt replay cannot hide a moved head."""
+    def check(conn) -> None:
+        row = conn.execute("SELECT snapshot_id FROM data_snapshot_heads WHERE scope = ?",
+                           (scope,)).fetchone()
+        if row is not None and row[0] != snapshot_id:
+            raise data_errors.fail("SNAPSHOT_CONFLICT", "scope head is not the pinned snapshot",
+                                   details={"scope": scope, "snapshot_id": snapshot_id})
+    return check
+
+
 def _copy_original_receipt(workspace, receipt_id: str, snapshot_id: str) -> None:
     """Copy the snapshot's own import receipt so ``commit_receipt_ref`` resolves in the workspace."""
     source = workspace._source_conn.execute(
@@ -80,7 +91,7 @@ def commit_scope_head(workspace, scope: str, *, clock) -> dict:
             records=resolved.records, manifests=list(resolved.table_manifests.values()),
             snapshot=resolved.snapshot, expected_head_snapshot_id=None,
             expected_head_generation=0, receipt_id=receipt_id, attempt_id=receipt_id,
-            fence=1, fence_check=lambda _conn: None, clock=clock, store=workspace.store,
+            fence=1, fence_check=_head_check(scope, sid), clock=clock, store=workspace.store,
             record_references=lambda conn, rid: reference_catalog.insert_reference_inputs(
                 conn, rid, inputs),
             audit_partitions=False)

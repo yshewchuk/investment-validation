@@ -13,7 +13,7 @@ from tests.v2.ops.test_research_workspace import (  # noqa: F401
     prod,
 )
 
-from engine.v2.data import errors as data_errors
+from engine.v2.data import catalog, errors as data_errors
 from engine.v2.data import reference_catalog
 from engine.v2.data.repository import Repository
 from engine.v2.ops.errors import OpsError
@@ -154,3 +154,19 @@ def test_oversized_reference_inputs_bytes_refuse(prod, monkeypatch):
             commit_scope_head(ws, SCOPE, clock=prod.clock)
         assert _details(caught) == ("WORKSPACE_REFUSED", "reference_inputs_over_cap")
         assert _heads(ws) == 0
+
+
+def test_replay_after_head_moved_refuses_conflict(prod):
+    _add_inputs(prod)
+    with _create(prod) as ws:
+        result = commit_scope_head(ws, SCOPE, clock=prod.clock)
+        catalog.move_head(
+            ws.conn, scope=SCOPE, to_snapshot_id=prod.snap.parent_snapshot_id,
+            expected_snapshot_id=prod.snap.snapshot_id, expected_generation=1,
+            receipt_ref=result["receipt_id"], clock=prod.clock)
+        with pytest.raises(data_errors.DataError) as caught:
+            commit_scope_head(ws, SCOPE, clock=prod.clock)
+        assert caught.value.problem.code == "SNAPSHOT_CONFLICT"
+        assert ws.conn.execute(
+            "SELECT snapshot_id FROM data_snapshot_heads WHERE scope = ?", (SCOPE,)
+        ).fetchone()[0] == prod.snap.parent_snapshot_id
