@@ -77,30 +77,28 @@ are caller responsibilities, not guarantees derived from these arrays.
 | Same valid inputs and numerical environment | Deterministic fresh fit, not cached or journal replay |
 | Cache, transaction or partial-write concerns | No cache, I/O, persistence or publication; v1 recipes and results are unchanged |
 
-The separate `magnitude_ridge_hgb_recipe` API constructs/validates source-free
-`magnitude_ridge_hgb_recipe.v1` metadata for the bounded stage-2 Ridge/HGB grid.
-It binds explicit ordered unique columns, a canonical dictionary hash, fixed
-preprocessing/estimator policy and derived width; no dictionary or source is read.
-The `history_ridge`/`history_hgb` family names reuse the training-layer private
-estimator constructor (`training/_magnitude_estimators.build_estimator`,
-imported by the training fitters) unchanged; each numeric adapter owns its
-guards and fitting, not the constructor. This is not the fixed eleven-column
-v1 execution envelope. Dictionary membership and truthful matrix order remain caller-owned; a hash alone grants no admission.
-`training.magnitude_ridge_hgb.fit_ridge_hgb_predictions(..., columns=...)`
-checks both no-fit guards before inspecting metadata or numeric inputs, validates
-the closed recipe and exact declared column order, then copies numeric matrices.
-A fresh one-thread fit learns only training rows: Ridge keeps every selected column
-through median imputation, full missing flags and scaling; HGB freezes training-all-null columns to
-zero at training/prediction while routing partial nulls natively. It returns
-`magnitude_ridge_hgb_fit.v1` with the validated recipe hash and detached finite
-nonnegative predictions. This is a production-unwired numeric boundary: no source/holdout/fold
-admission, CLI, selection or registration; existing eleven-column recipes, fitters
-and source closures remain unchanged.
+The `magnitude_ridge_hgb_recipe` API constructs/validates source-free closed
+variable-width policies; ordered columns, dictionary hash and fixed estimator
+parameters bind the recipe, not source admission or dictionary membership.
+`regression_ridge_hgb_recipe.regression_recipe` adds a distinct
+`regression_ridge_hgb_recipe.v1` identity with explicit `signed`/`nonnegative`
+target domain and respectively `none`/`clip_zero` projection. Its validator
+refuses unknown fields or inconsistent domain/projection pairs; no training imports.
+`training.magnitude_ridge_hgb.fit_regression_predictions` uses that new policy;
+`fit_ridge_hgb_predictions` retains its existing magnitude recipe/result schema.
+Both guards precede inspection; the shared private fitter copies arrays, learns
+Ridge imputation/indicators/scaling only on training rows and freezes HGB's
+training-all-null columns to zero. Fresh sklearn estimators use one thread.
+Signed labels/predictions need only be finite (no floor, absolute value or log);
+nonnegative labels still reject negatives and predictions clip at zero.
+The new result is `regression_ridge_hgb_fit.v1` with recipe hash and detached
+forecasts. No I/O, cache, retries, source/fold/holdout admission or release occurs.
+Existing magnitude numerics remain unchanged; source closures require resealing.
 
 | Ridge/HGB condition | Outcome |
 |---|---|
 | Either no-fit guard active | Its `RuntimeFitForbidden` precedes recipe, column or array inspection |
-| Invalid closed policy/order, unconvertible inputs, matrix shape, infinite features or nonfinite/negative labels | `ValueError` before fit; no partial result |
+| Invalid closed policy/order, unconvertible inputs, matrix shape, infinite features or labels outside the recipe domain | `ValueError` before fit; no partial result |
 | Wrong prediction shape or nonfinite predictions | `ValueError` after fit, before projection; no partial result |
 | Same valid inputs and numerical environment | Deterministic fresh fit, not cached or journal replay |
 | Cache, retry, transaction or partial-write concerns | No cache, retry, persistence or publication |
