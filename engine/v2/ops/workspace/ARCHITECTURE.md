@@ -1,6 +1,6 @@
 # `engine/v2/ops/workspace` — architecture
 
-An isolated experiment write sandbox over one **read-only** pinned snapshot: an overlay, never a copy. Library only: no CLI, no heads, no scope, no supervisor. Modules: `closure.py` (read-only closure verification), `overlay.py` (create/open), `guard.py` (execution refusal).
+An isolated experiment write sandbox over one **read-only** pinned snapshot: an overlay, never a copy. Library only: no CLI, no native heads, no supervisor. Modules: `closure.py` (read-only closure verification), `overlay.py` (create/open), `scope.py` (workspace-local scope binding), `guard.py` (execution refusal).
 
 ## Closure (`closure.verify_snapshot_closure(conn, store, snapshot_id, manifest_hash, *, deep=False) -> SnapshotClosure`)
 
@@ -20,8 +20,8 @@ Reads only: catalog queries on the caller's connection and one `lstat` per objec
 | Item | Contract |
 | --- | --- |
 | Layout | `.research_workspace` marker, `workspace.json`, `catalog.sqlite` (`open_catalog`), `store/`, `scratch/`, `output/` (0700). `workspace.json` (`research_workspace.v1.0`): `snapshot_id`, `manifest_hash`, `identity_digest`, resolved production catalog and store paths, `pin_artifact_id`; written last by temp file and `os.replace`. |
-| Read pin | The resolved `SnapshotRef` published into the workspace store as `research_workspace_pin.v1.0` and registered in the workspace catalog; `open_workspace` requires it to equal a fresh production resolution byte for byte. |
-| Read path | `ResearchWorkspace.source`: `SnapshotOnlyRepository` over a `mode=ro` + `query_only` production connection and store. An allowlist of read methods (`resolve`, `resolve_full`, `scan`, `table_contract`, `fragment_records`, `get_event`, `get_chain`, `get_price_series`, `get_close`, `scan_population_bound`, `explain_dependencies`), each refusing `SNAPSHOT_NOT_FOUND` for any snapshot id or `SnapshotRef` other than the pinned one; every other public method (head lookups included) refuses `WORKSPACE_REFUSED` `source_method_refused`. |
+| Read pin | The resolved `SnapshotRef` published into the workspace store as `research_workspace_read_pin.v1.0` and registered in the workspace catalog; `open_workspace` requires it to equal a fresh production resolution byte for byte. |
+| Read path | `ResearchWorkspace.source`: `SnapshotOnlyRepository` over a `mode=ro` + `query_only` production connection and store. An allowlist of read methods (`resolve`, `resolve_full`, `scan`, `table_contract`, `fragment_records`, `get_event`, `get_chain`, `get_price_series`, `get_close`, `scan_population_bound`, `explain_dependencies`), each refusing `SNAPSHOT_NOT_FOUND` for any snapshot id or `SnapshotRef` other than the pinned one; every other public method (head lookups included) refuses `WORKSPACE_REFUSED` `source_method_refused`. `ResearchWorkspace.source_snapshot()` resolves the workspace pin and checks its snapshot identity and manifest. |
 | Read pins | `ResearchWorkspace.record_read_pin(name, document, *, clock)` is the hook PR 3's preflight calls: it publishes canonical JSON (`research_workspace_read_pin.v1.0`: name, pinned snapshot id and manifest hash, document) into the workspace store and registers it in the workspace catalog; never production. A bad name refuses `pin_name_invalid`. |
 | Write path | `conn` (workspace catalog) and `store` only. Derived snapshots go to this local catalog; reading source and derived snapshots through one handle is the consumer's concern. |
 | Seal | `verify_before_seal(deep=False)` re-runs the closure; `identity_digest` and `stat_digest` must equal open time. A same-size rewrite that restores mtime is detected only with `deep=True`; the seal path (PR 3 registration seal) must call `verify_before_seal(deep=True)`, while create/open and preflight use the default. |
@@ -40,3 +40,35 @@ Create order: validate roots, open production read-only, verify the closure, the
 | execution root at or under a workspace | `execution_in_workspace` |
 
 At open or seal the closure may also refuse `closure_changed` (digest differs), `pin_mismatch` or `manifest_mismatch`. Progress goes to stderr (`[workspace]`, `[closure]`); no stdout.
+
+## SIZE workspace scope head
+
+`size_scope_repository(workspace, scope, *, clock)` adapts the workspace's
+snapshot-only source to the existing research contract that resolves a scope
+head. It publishes a `research_workspace_scope_head.v1.0` read pin in the
+workspace catalog and store, binding the exact scope name to the workspace's
+`snapshot_id` and `manifest_hash`. The binding identity hashes the schema
+version, scope, snapshot id and manifest hash. The returned repository view delegates reads to `workspace.source`;
+`resolve_pinned(scope)` returns `workspace.source_snapshot()` only for the
+bound scope. It never reads a production head or accepts a different snapshot.
+
+The local catalog does not contain production `data_snapshots`, so this is a
+workspace-local scope binding, not a native `data_snapshot_heads` row. No
+snapshot metadata or objects are copied. A standard package or library does
+not provide this repository-specific pin contract; the adapter reuses the
+existing `ResearchWorkspace.record_read_pin`, `SnapshotOnlyRepository` and
+`SnapshotRef` behavior.
+
+| Failure | Outcome |
+|---|---|
+| Scope is empty, malformed, contains an unpaired surrogate or is over 100 characters | `WORKSPACE_REFUSED`, `scope_invalid`; no workspace access or read pin write. |
+| Workspace handle lacks its snapshot reader, source view, pin writer or snapshot identity | `WORKSPACE_REFUSED`, `workspace_invalid`; no read pin write. |
+| A different scope is resolved through the returned view | `WORKSPACE_REFUSED`, `scope_mismatch`. |
+| Captured binding differs from a subsequently resolved workspace snapshot ID | `SNAPSHOT_CLOSURE_BROKEN`, `pin_mismatch`. If `ResearchWorkspace.source_snapshot()` detects a workspace manifest that no longer matches its pin, it propagates `SNAPSHOT_CLOSURE_BROKEN`, `manifest_mismatch`. |
+| The pinned source snapshot is no longer resolvable | Existing `SNAPSHOT_NOT_FOUND` propagates; no fallback. A manifest mismatch propagates as `SNAPSHOT_CLOSURE_BROKEN`, `manifest_mismatch`. |
+| Read-pin publication or catalog storage fails | Existing `OpsError`/`DataError` propagates; unexpected exceptions become `WORKSPACE_REFUSED`, `storage_failure`. A complete unreferenced CAS object may remain. |
+
+R1–R6 follow the workspace failure contract: stable typed refusal; no partial
+result; no repair or retry; stale scope fails closed; production remains
+read-only and the read pin writes only inside the workspace; unknown states
+refuse. Existing workspaces and native catalog heads are unchanged.
