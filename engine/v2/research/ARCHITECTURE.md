@@ -74,7 +74,7 @@ Panel boundaries require plain JSON (nested history before normalization); detac
 
 ## Partial daily-market blocks
 
-`magnitude_panel_daily.build_daily_blocks` is an opt-in library-only reader; only synthetic tests call it. Inputs are pinned source/history/price_history snapshots, the unchanged metadata-only v1 plan, plain-JSON producer metadata, grouped eligibility declarations and explicit source/event/byte bounds. Output has a distinct versioned context and detached daily-market/regime blocks, never stored-panel admission. The context binds the parent, bounds, policy, exclusions, snapshot fragment inventory and producer. Producer and label bounds are declarations, not installed-code attestation or verified outcome intervals. Protected evaluation membership confers no reads; grouped exclusions retain or remove all event horizons.
+`magnitude_panel_daily.build_daily_blocks` is an opt-in library-only reader; only synthetic tests call it. Inputs are pinned source/history/price_history snapshots, the metadata-only v1 plan (unchanged unless an ambiguous random event exists), plain-JSON producer metadata, grouped eligibility declarations and explicit source/event/byte bounds. Output has a distinct versioned context and detached daily-market/regime blocks, never stored-panel admission. The context binds the parent, bounds, policy, exclusions, snapshot fragment inventory and producer. Producer and label bounds are declarations, not installed-code attestation or verified outcome intervals. Protected evaluation membership confers no reads; grouped exclusions retain or remove all event horizons.
 
 The thirteen daily fields and nine historical `spy_*` values obey each forecast's source ceiling. Regime closes come from pinned `price_history` `REGIME_TICKER` (`^GSPC`) via `get_price_series`, never daily SPY spot; that snapshot binds the context. Reads are row-capped: one ticker/year scan per event ticker plus one regime-series read at the latest ceiling. Daily anchors require IV surfaces; regime uses admitted closes. Availability is reconstructed, not observed-PIT/fit-admissible; fragment inventory and regime source dates remain explicit.
 Row bounds apply across years per ticker; event bounds apply before exclusions. No cross-call cache/retry.
@@ -767,7 +767,7 @@ The original full-row `read_stored` API and its returned envelope remain unchang
 
 `eligibility_policy.eligibility_policy` declares an explicit supported version and
 nonnegative integer calendar-day width. `plan_eligibility` is metadata-only and
-opt-in; existing consumers are unchanged, and the policy identity is unchanged. It uses `experiment_population.canonical_events`
+opt-in. The policy identity (including its `preserve_membership` label, kept for replay) and plans without an ambiguous random event are unchanged; with one, evaluation IDs on that ticker are filtered. Eligible-history planning passes no evaluation IDs, so the SIZE fold binder applies the same embargo to fold IDs. It uses `experiment_population.canonical_events`
 for exact committed-snapshot admission and the six-column metadata projection and `experiment_trades.classify_events`
 for detached membership/structural ambiguity labels and caller-pinned context.
 Shared `snapshot_inputs` validates reference shape and exact committed identity;

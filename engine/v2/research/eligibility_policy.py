@@ -194,7 +194,8 @@ def plan_eligibility(repository, snapshot, *, as_of_month, policy, metadata, eva
     Producer-declared label/forecast bounds must already be established against
     the pinned source. They are validated structurally, NOT proven from payloads.
     Consumers must bind/apply this plan before preprocessing, selection and fits.
-    Existing consumers are unchanged; neither a hash nor this plan authorizes IO.
+    Plans and policy identity are unchanged unless an ambiguous random event exists; the
+    "preserve_membership" label keeps v1.5/v1.6 hashes. Neither a hash nor this plan authorizes IO.
     """
     with progress.stage("eligibility admission", report_refusals=True):
         admit_snapshot(repository, snapshot)
