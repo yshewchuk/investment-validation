@@ -298,7 +298,13 @@ Columns/digests/arrays alone prove no source qualification or fit permission: th
 
 ## Distribution explicit policy
 
-`distribution_run_request.validate_request` and `distribution_book.validate_book_config` are source-free research policy validators, consumed by explicit local callers and synthetic tests. They detach the closed request and refuse unsupported/missing values as `INVALID_EXPERIMENT_SPEC`; no pricing, registration, fitting, execution or holdout authority. Existing stdlib/ArtifactRef and native execution-limit validation suffice. [Field units and limitations](README.md#distribution-explicit-policy) are part of the contract.
+`distribution_run_request.validate_request` and `distribution_book.validate_book_config` are source-free research policy validators, consumed by explicit local callers and synthetic tests. They detach the closed request and refuse unsupported/missing values as `INVALID_EXPERIMENT_SPEC`; no pricing, registration, fitting or holdout authority. `distribution_book.funded_book` consumes separate immutable intents and later USD quotes to compute the research-only settlement cash overlay. Its complete-report-horizon policy requires every supplied scheduled exit and its calendar-day settlement to be on or before `report_end`, regardless of exit-quote availability. Existing stdlib/ArtifactRef, native execution-limit validation and `engine.v2.research.progress` provide dependencies. [Field units and limitations](README.md#distribution-explicit-policy) and the [book contract](README.md#distribution-premium-funded-book) apply.
+
+| Funded-book condition | Outcome |
+| --- | --- |
+| Supplied exit or settlement is after `report_end`, or supported input/arithmetic is invalid | Whole call refuses `INVALID_EXPERIMENT_SPEC`; no partial result or publication. |
+| Exit/settlement dates are covered but a funded trade has missing `exit_cash` | Position remains reserved with unknown profit through `report_end`; full net profit per opportunity is unavailable. |
+| A selected entry quote is missing, or an entry funding limit fails | Per-event execution-refusal disposition; no debit or unresolved funded position. |
 
 ## Recorded magnitude-search selection
 

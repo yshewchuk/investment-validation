@@ -27,6 +27,7 @@ The owning modules expose these helpers to native experiment callers; no compati
 | `size_paired_report.paired_report` | SIZE collector passes events, challenger/incumbent forecasts, targets and optional exclusions; returns matched metrics/coverage/bootstrap without I/O/fits. Structural/numeric errors propagate; missing incumbent inputs remain abstentions. |
 | `size_search_report.collect` / `resource_report` | SIZE CLI uses verified read-only driver/outer/comparator replay for paired reports; the pure latter reports schedule-dependent maximum counts and configured bounds, not measured feasibility. No missing-work fallback; admission/receipt failures propagate. |
 | `distribution_run_request.validate_request` / `distribution_book.validate_book_config` | Validate explicit research request/book policies; detached request and book mappings, no data access or execution. [Contract and units](#distribution-explicit-policy). |
+| `distribution_book.funded_book(intents, quotes, *, config, report_end)` | Explicit research callers/tests supply immutable intents, total-USD quotes and a complete reporting horizon; returns detached event dispositions, settlement curve and summary without source/storage I/O. [Book contract](#distribution-premium-funded-book). |
 | `magnitude_candidate_recipe.candidate_recipe` | Exact family/parameter keys plus ordered columns and dictionary hash yield the existing closed family recipe; no training, source reads or admission proof. |
 | `magnitude_candidate_fit.fit_candidate` | Both no-fit guards precede inspection; exact schema/model dispatch delegates one horizon to the existing numeric fitter and preserves its complete result and native errors. No source qualification, selection, retry or I/O. |
 | `magnitude_report.magnitude_metrics` | Complete scored rows yield stable pooled RMSE, MAE and count; empty rows or nonfinite metrics refuse `EXPERIMENT_VARIANT_FAILED`. Fixed and history reporters, the search recorder and the outer evaluator (fold and aggregate metrics) share this scorer. |
@@ -411,6 +412,14 @@ Library-only helpers for preparing SIZE inputs inside a caller-supplied write ro
 | Pinned entry missing, `fetched_at`, status or body hash changed | `INPUT_CHANGED` |
 | `as_of` differs from `session_ceiling` | `INVALID_REQUEST` |
 | Another supervisor holds the write-root catalog | `RESOURCE_UNAVAILABLE` |
+
+## Distribution premium-funded book
+
+`distribution_book.funded_book(intents, quotes, *, config, report_end)` consumes unique event/ticker/date intents with an immutable selected flag and separate total-USD entry/exit quotes. The caller owns native clocks, contract identity, multiplier/quantity, quote quality and all costs; the book checks the supplied quantity/multiplier and limits but does not price or authenticate quotes. It returns `distribution_book.v1` with per-event dispositions, settlement curve and summary, leaving inputs unchanged. Invalid supported inputs/arithmetic refuse `INVALID_EXPERIMENT_SPEC`; there is no source/storage I/O, source admission, retry or partial publication.
+
+Premium/capacity remain reserved through calendar-day settlement, not merely exit. Explicit same-time ordering and lexicographic event IDs resolve competition; no fractional contracts. Entry debit includes supplied entry costs. `report_end` must cover every supplied scheduled exit and its settlement date: either date beyond it refuses the whole input, even with missing exit cash. This is a complete-report-horizon contract, not an interim report of trades scheduled to close later. Missing entry is an execution refusal; missing exit cash with covered dates remains funded and unknown through report end. A trade's future exit availability does not change its own frozen selection or entry affordability; earlier realized settlements do affect cash available to later entries. Exact decimal-spelling Fraction arithmetic avoids comparison epsilons; O(n log n) time and O(n) workspace, bounded-cadence stderr progress.
+
+Closing costs may produce negative cash, so this is not a fully fee-reserved executable allocator. Equity/drawdown use settled P&L with open positions displayed at debit cost, not mark-to-market or Sharpe. Full net profit per common opportunity is unavailable with unresolved positions; zero funded trades are not evidence of profitability/capacity. No production ledger, eligibility policy or holdout authority.
 
 ## Distribution explicit policy
 
