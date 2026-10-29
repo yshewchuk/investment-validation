@@ -68,6 +68,11 @@ class _Budget:
         if self.bytes > _MAX_BYTES:
             raise _refuse("copy_bytes_over_cap", table=table)
 
+    def charge(self, table: str, rows: int) -> None:
+        self.rows += rows
+        if self.rows > _MAX_ROWS:
+            raise _refuse("copy_rows_over_cap", table=table)
+
 
 def _refuse(reason: str, **details):
     return fail("WORKSPACE_REFUSED", "research workspace closure copy refused",
@@ -131,7 +136,9 @@ def _verify_rows(src, dst, sid, started, budget: _Budget) -> None:
         if source_count <= 0 and table in _REQUIRED:
             raise _refuse("source_row_missing", table=table)
         destination_count = dst.execute(
-            "SELECT COUNT(*) FROM %s" % table).fetchone()[0]
+            "SELECT COUNT(*) FROM (SELECT 1 FROM %s LIMIT ?)" % table,
+            (source_count + 1,)).fetchone()[0]
+        budget.charge(table, destination_count)
         if destination_count != source_count:
             raise _refuse("unexpected_rows", table=table)
         destination_digest, _ = _digest(
