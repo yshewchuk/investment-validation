@@ -48,6 +48,25 @@ _TABLES = (
 )
 
 _CHUNK = 5000
+_MAX_ROWS = 2_000_000
+_MAX_BYTES = 1 << 30
+_REQUIRED = ("data_snapshots", "data_snapshot_tables",
+             "data_dataset_versions", "data_contracts")
+
+
+class _Budget:
+    def __init__(self):
+        self.rows = 0
+        self.bytes = 0
+
+    def add(self, table: str, batch) -> None:
+        for row in batch:
+            self.rows += 1
+            self.bytes += len(repr(tuple(row)))
+            if self.rows > _MAX_ROWS:
+                raise _refuse("copy_rows_over_cap", table=table)
+            if self.bytes > _MAX_BYTES:
+                raise _refuse("copy_bytes_over_cap", table=table)
 
 
 def _refuse(reason: str, **details):
@@ -75,6 +94,7 @@ def _read(conn: sqlite3.Connection, table: str, where: str, sid: str):
 
 def _insert_rows(src, dst, sid) -> dict:
     counts = {}
+    budget = _Budget()
     for table, where in _TABLES:
         cursor = _read(src, table, where, sid)
         source_columns = tuple(column[0] for column in cursor.description)
@@ -88,6 +108,7 @@ def _insert_rows(src, dst, sid) -> dict:
         count = 0
         batch = cursor.fetchmany(_CHUNK)
         while batch:
+            budget.add(table, batch)
             dst.executemany(statement, batch)
             count += len(batch)
             batch = cursor.fetchmany(_CHUNK)
@@ -99,7 +120,7 @@ def _verify_rows(src, dst, sid, started) -> None:
     for table, where in _TABLES:
         source_digest, source_count = _digest(_read(src, table, where, sid))
         destination_digest, _ = _digest(_read(dst, table, where, sid))
-        if source_count <= 0:
+        if source_count <= 0 and table in _REQUIRED:
             raise _refuse("source_row_missing", table=table)
         if source_digest != destination_digest:
             raise _refuse("row_mismatch", table=table)
@@ -112,8 +133,23 @@ def _verify_rows(src, dst, sid, started) -> None:
 
 
 def _verify_catalog(dst) -> None:
-    if dst.execute("PRAGMA foreign_key_check").fetchall():
+    if dst.execute("PRAGMA foreign_key_check").fetchone():
         raise _refuse("foreign_key_violation")
+
+
+def _chain(dst, sid) -> list[str]:
+    chain = []
+    current = sid
+    while True:
+        row = dst.execute(
+            "SELECT parent_snapshot_id FROM data_snapshots WHERE snapshot_id = ?",
+            (current,)).fetchone()
+        parent = row[0] if row else None
+        if parent is None:
+            break
+        chain.append(parent)
+        current = parent
+    return chain
 
 
 def copy_closure_rows(workspace) -> dict:
@@ -135,15 +171,13 @@ def copy_closure_rows(workspace) -> dict:
                 # Identical digests above prove the rows equal the source; resolve_full cannot run inside this transaction.
                 _verify_catalog(dst)
                 workspace.source_snapshot()
+                chain = _chain(dst, sid)
                 dst.commit()
             except BaseException:
                 dst.rollback()
                 raise
         finally:
             src.rollback()
-        chain = [row[0] for row in dst.execute(
-            "SELECT snapshot_id FROM data_snapshots WHERE snapshot_id <> ? ORDER BY 1",
-            (sid,)).fetchall()]
         _log(f"stage=copy done snapshot={sid} tables={len(counts)} "
              f"{time.monotonic() - started:.2f}s elapsed")
         return {"snapshot_id": sid, "manifest_hash": pinned.manifest_hash,

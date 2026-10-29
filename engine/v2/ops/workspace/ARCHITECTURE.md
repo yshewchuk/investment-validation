@@ -1,6 +1,6 @@
 # `engine/v2/ops/workspace` — architecture
 
-An isolated experiment write sandbox over one **read-only** pinned snapshot: an overlay, never a copy. Library only: no CLI, no native heads, no supervisor. Modules: `closure.py` (read-only closure verification), `overlay.py` (create/open), `scope.py` (workspace-local scope binding), `guard.py` (execution refusal).
+An isolated experiment write sandbox over one **read-only** pinned snapshot: an overlay, never a copy. Library only: no CLI, no native heads, no supervisor. Modules: `closure.py` (read-only closure verification), `overlay.py` (create/open), `scope.py` (workspace-local scope binding), `catalog_rows.py` (bounded copy of the pinned snapshot's catalog rows), `guard.py` (execution refusal).
 
 ## Closure (`closure.verify_snapshot_closure(conn, store, snapshot_id, manifest_hash, *, deep=False) -> SnapshotClosure`)
 
@@ -83,9 +83,9 @@ refuse. Existing workspaces and native catalog heads are unchanged.
 
 ## SIZE workspace closure catalog rows (`catalog_rows.copy_closure_rows(workspace) -> dict`)
 
-Slice (i) of #1614 part 2b. A native scope head in the workspace catalog (slice (ii), the head commit and the parent receipt's reference inputs) needs the pinned snapshot's catalog rows, including the `parent_snapshot_id` chain, because `manifest_hash` covers the parent and `data_snapshots.parent_snapshot_id` is a foreign key. This function copies those rows from the read-only source connection into `workspace.conn`. It copies no object files, writes no head, no receipt and no reference input; the production catalog is only read. Catalog is 7 GB, so there is no whole-catalog copy; a standard tool (`sqlite3` backup/`VACUUM INTO`) copies whole files only, which is why this is a bounded row copy.
+Copies the pinned snapshot S's catalog rows, including its `parent_snapshot_id` chain, from the read-only source connection into `workspace.conn`. A native scope head needs them: `manifest_hash` covers the parent and `data_snapshots.parent_snapshot_id` is a foreign key. No object file, head, receipt, lineage, coverage, capture or reference input is copied or written. The 7 GB catalog rules out a whole-file copy (`VACUUM INTO`, sqlite backup), hence a bounded row copy.
 
-**Bound.** With S the pinned snapshot, the rows copied are exactly these and the workspace catalog must hold no other row in these tables:
+**Bound.** Exactly these rows; the workspace catalog must hold no other row in these tables:
 
 | Table | Rows |
 |---|---|
@@ -95,19 +95,17 @@ Slice (i) of #1614 part 2b. A native scope head in the workspace catalog (slice 
 | `data_version_fragments`, `data_fragments`, `data_objects` | those of the versions S names directly (not of ancestors or dataset-version parents) |
 | `data_contracts` | contracts of the copied versions and fragments |
 
-Receipts, lineage, coverage, captures and heads are outside this slice.
-
-**Procedure.** Resolve the pin (`workspace.source_snapshot()`), read the source under one read transaction, insert in one workspace transaction with deferred foreign keys using `INSERT OR IGNORE`, then verify per table: the workspace row count equals the closure's, and an ordered content digest of the closure rows equals the source's. Before commit, `PRAGMA foreign_key_check` is empty. Equal digests make the copied rows identical to the source rows, so the manifest hash is the pinned one (`resolve_full` cannot run inside the copy transaction; the tests resolve the committed copy and compare the hash). Returns the snapshot id, manifest hash, ancestor chain and per-table row counts. Progress per table goes to stderr (`[workspace]`).
+Reads are capped cumulatively at 2,000,000 rows and 1 GiB of rendered row text, and the foreign-key check reads at most one violation. All inserts are `INSERT OR IGNORE` in one workspace transaction with deferred foreign keys; per table, the workspace row count and an ordered content digest of the closure rows must equal the source's (equal digests make the manifest hash the pinned one; `resolve_full` cannot run inside the transaction). The return value has `snapshot_id`, `manifest_hash`, `chain` (ancestor ids, direct parent first), and per-table `rows`, computed before commit. Progress per table goes to stderr (`[workspace]`).
 
 R1–R6, all `WORKSPACE_REFUSED` unless noted:
 
 | Rule | Behaviour |
 |---|---|
-| R1 typed reason | `source_row_missing` (S or a referenced row absent in the source), `schema_mismatch` (column lists differ), `unexpected_rows` (workspace holds rows beyond the closure), `row_mismatch` (a digest differs, including a conflicting existing row), `foreign_key_violation`, `storage_failure` (other exceptions, with `cause`). |
-| R2 no partial result | One transaction; any refusal rolls it back, so no row and no head remains. |
+| R1 typed reason | `workspace_invalid` (workspace handle already in a transaction), `source_row_missing` (the source has no `data_snapshots`, `data_snapshot_tables`, `data_dataset_versions` or `data_contracts` row for S; fragment and object tables may legitimately be empty), `schema_mismatch` (column lists differ), `copy_rows_over_cap`, `copy_bytes_over_cap`, `unexpected_rows` (workspace holds rows beyond the closure), `row_mismatch` (a digest differs, including a conflicting existing row), `foreign_key_violation`, `storage_failure` (other exceptions, with `cause`). An unknown S propagates the existing `SNAPSHOT_NOT_FOUND`. |
+| R2 no partial result | One transaction; any refusal rolls it back, so no row and no head remains. Nothing after commit can refuse. |
 | R3 no repair | No overwrite, delete or retry; a conflicting row refuses. |
-| R4 stale pin | `workspace.source_snapshot()` runs before and after the read; a changed pin propagates `SNAPSHOT_CLOSURE_BROKEN`. |
-| R5 read-only production | Only the existing read-only source connection is used; all writes go to `workspace.conn`. |
-| R6 unknown state | Malformed workspace handle or unreadable rows refuse; nothing is guessed. |
+| R4 stale pin | `workspace.source_snapshot()` runs before the read and before commit; a changed pin propagates `SNAPSHOT_CLOSURE_BROKEN`. Its resolution is memoised, so drift of the production rows themselves is caught by the digest comparison (`row_mismatch`). |
+| R5 read-only production | Only the existing read-only source connection is read; all writes go to `workspace.conn`. |
+| R6 unknown state | Malformed handle, unreadable rows or any unexpected exception refuses; nothing is guessed. |
 
 Idempotent: a re-run over a complete copy inserts nothing and returns the same result; a re-run after a failure converges because failure leaves no rows.
