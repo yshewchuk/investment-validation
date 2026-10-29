@@ -457,7 +457,8 @@ Supply exact source/history/price snapshots, `as_of_month`, frozen 30-day `polic
 Materialize returns a native feature_snapshot and context; read additionally takes
 that snapshot and explicit columns, returning metadata plus projected features.
 The v3 recipe preserves numeric order but has new eligible-history source hashes;
-old v1/v2 helpers and partial daily artifacts are unchanged. H/HM/HMO are 11/28/42
+v1/v2 helper schemas and partial daily artifacts are unchanged, while dependent
+dictionary and request hashes include the shared eligibility policy identity. H/HM/HMO are 11/28/42
 numeric columns; only HMO uses the appended quote indicator. Rows include quote
 status, cutoff/context IDs, per-block anchors/missingness and a canonical row hash.
 The independent historical-quote population preserves full metadata ordinals even

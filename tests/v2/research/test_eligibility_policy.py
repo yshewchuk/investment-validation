@@ -318,12 +318,15 @@ def test_ambiguous_random_metadata_keeps_membership_and_excludes_same_ticker(tmp
         assert result["evaluation_exclusions"] == [
             {"event_id": held["event_id"], "reasons": ["embargo_ticker"]},
             {"event_id": dev["event_id"], "reasons": ["embargo_ticker"]}]
+        assert result["coverage"] == {"development_groups": 3, "retained_groups": 1,
+            "excluded_groups": 2, "evaluation_groups": 1}
+        assert result["plan_id"] == content_hash({key: value for key, value in result.items() if key != "plan_id"})
     finally:
         conn.close()
 
 
 def test_public_path_negative_control(tmp_path, monkeypatch):
-    """An ambiguous event outside a random window is not treated as random."""
+    """A structurally ambiguous event with non-random membership creates no random window."""
     from engine.v2.foundation.experiment_holdouts import ExperimentHoldouts
 
     held = history_event("2024-06-14", protected=True)
@@ -348,7 +351,8 @@ def test_public_path_negative_control(tmp_path, monkeypatch):
         conn.close()
 
 
-@pytest.mark.parametrize("kind", ["missing_ticker", "unusable_date"])
+@pytest.mark.parametrize("kind", ["missing_ticker", "blank_ticker", "padded_ticker",
+    "unusable_event_date", "unusable_canonical_date"])
 def test_ambiguous_random_event_refuses(tmp_path, monkeypatch, kind):
     event = history_event("2024-06-14", protected=True)
     conn, repository, snapshot, _ = setup(tmp_path, monkeypatch, [event])
@@ -356,11 +360,13 @@ def test_ambiguous_random_event_refuses(tmp_path, monkeypatch, kind):
         original = eligibility.canonical_events
         def ambiguous(repository, snapshot):
             rows = original(repository, snapshot)
-            if kind == "missing_ticker":
-                rows.loc[0, "ticker"] = None
+            if kind in {"missing_ticker", "blank_ticker", "padded_ticker"}:
+                rows.loc[0, "ticker"] = {"missing_ticker": None, "blank_ticker": "",
+                    "padded_ticker": " SYNTH"}[kind]
             else:
                 import pandas as pd
-                rows.loc[0, "event_date"] = pd.NaT
+                date_column = "event_date" if kind == "unusable_event_date" else "canonical_date"
+                rows.loc[0, date_column] = pd.NaT
             return rows
         monkeypatch.setattr(eligibility, "canonical_events", ambiguous)
         with refuses("HOLDOUT_ACCESS_DENIED", "random holdout window bounds cannot be established"):

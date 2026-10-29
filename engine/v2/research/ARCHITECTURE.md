@@ -779,14 +779,12 @@ Bounds contain the event, with source ceiling <= decision <= event. These are
 producer declarations, not proof of price-bracketing or publication times.
 No calendar guessing, outcome/feature decoding, write, registration or fit occurs.
 
-Random-held windows are merged per ticker. Inclusive event/label interval or
-forecast-point overlap excludes an entire development group; shared random,
-rolling and ambiguous labels also exclude it. Results bind sorted groups, policy,
-metadata identity, merged windows, retained IDs, development reasons, coverage, `ambiguous_random_events`,
-filtered `evaluation_event_ids` and `evaluation_exclusions` into `plan_id`. Supplied documents are detached.
-There are no retries, persistence, cache or partial results. Bounded membership,
-metadata, window and group progress plus stage timing/RSS go to stderr; admission
-and planning refusals report only the native error code, not row values.
+Random-held windows merge per ticker. Inclusive event/label or forecast-point overlap
+excludes a whole development group; shared random, rolling and ambiguous labels do too.
+The plan ID binds groups/policy/metadata, windows, retained IDs, development reasons,
+coverage, ambiguous IDs and filtered evaluation IDs/reasons. Inputs are detached.
+There are no retries, persistence, cache or partial results. Bounded progress and stage
+timing/RSS go to stderr; refusals report only native error codes, not row values.
 
 | Condition | Outcome |
 | --- | --- |
@@ -794,10 +792,12 @@ and planning refusals report only the native error code, not row values.
 | Repository integrity failure other than unknown snapshot | Original native error propagates |
 | Unsupported policy, stale digest/envelope, malformed bounds, duplicate declared group IDs or malformed/duplicate evaluation IDs | `CONTRACT_MISMATCH` |
 | Missing/duplicate classifier columns, malformed event IDs or metadata values that prevent classification | `CONTRACT_MISMATCH` |
-| Invalid scalar dates/sessions or structural collisions handled by membership classification | Successful classification with `ambiguous` membership; structural ambiguity IDs returned |
+| Invalid scalar dates/sessions or structural collisions handled by membership classification | Successful classification with `ambiguous` membership and IDs; if a random member lacks usable ticker/date bounds, `HOLDOUT_ACCESS_DENIED` |
 | Invalid as-of month, unknown group/evaluation identity or colliding canonical population IDs | `HOLDOUT_ACCESS_DENIED` |
-| Random event is structurally ambiguous | With a usable ticker/date, keep membership unchanged, record its ID and add an inclusive `date.min`–`date.max` ticker window; exclude and label development groups and evaluation IDs for that ticker, while preserving other evaluation IDs; without usable ticker/date, or if bounded window arithmetic overflows, `HOLDOUT_ACCESS_DENIED` |
-| Valid protected/overlapping development group | Excluded whole event with reasons; evaluation IDs outside an ambiguous-random ticker are preserved and listed in `evaluation_event_ids` |
+| Structurally ambiguous random event with usable identity | Keep membership unchanged, record its ID and add an inclusive `date.min`–`date.max` ticker window; exclude matching development groups and evaluation IDs, with `embargo_ticker` as the evaluation reason |
+| Ordinary random-event window arithmetic exceeds the supported date range | `HOLDOUT_ACCESS_DENIED` |
+| Evaluation IDs matching an ambiguous-random ticker embargo | Excluded with `embargo_ticker`; all other IDs remain in `evaluation_event_ids` |
+| Valid protected/overlapping development group | Excluded whole event with development reasons |
 
 This is neither a physical-read capability nor a statistical isolation guarantee.
 Long-memory/cross-ticker effects remain; chronological and random holdouts are

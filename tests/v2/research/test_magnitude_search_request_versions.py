@@ -118,7 +118,7 @@ def test_v2_golden_recipes_columns_counts_and_every_identity():
         "total_logical_fits": 612, "total_component_fits": 621}
     recipes = {"H": "91bfbb589cb732b09d1ef315a2e3c5431d93f5cc901883c431435fd1a026cf46",
         "HM": "bd3fe95c79f492dc7fc0af5294701dc4e57854f7596747cded43cdebb4a311ee",
-        "HMO": "59c80937103e378d6d3ea6bfe976bc2c2b83d4a159db44a2414f236405028ed0"}
+        "HMO": "20f8597d5a1dc94d91fedfaa54fa653bcc5d9042c50769095f63de8ea03792c5"}
     ids = [spec["candidate_spec_id"] for spec in actual["candidate_specs"]]
     assert len(set(ids)) == 33 and ids == sorted(ids)
     assert actual["request_id"] != surrogate["request_id"]
