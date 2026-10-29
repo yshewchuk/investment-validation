@@ -13,7 +13,7 @@ from engine.v2.foundation import (
     to_document,
 )
 from engine.v2.models.payoff_artifact import make_payoff_line_artifact, serialize_payoff_artifact
-from engine.v2.ops.errors import OpsError
+from engine.v2.ops.errors import OpsError, fail
 from engine.v2.research._chains import ChainIndex
 from engine.v2.research._pricing import ChainSnapshot, FillModel, TradingCalendar, price_structure
 from experiments import distribution_market as market
@@ -138,6 +138,52 @@ def test_decision_wide_quote_abstains_without_dropping_event(quotes):
     event, _, _ = quotes
     decisions = market.decision_quotes(None, None, [event], [.25], economics(max_relative_spread=.1))[.25]
     assert set(decisions) == {"e"} and decisions["e"][1] is None
+
+
+@pytest.mark.parametrize("reader", ["decision", "outcome"])
+@pytest.mark.parametrize("alpha", [-.1, 1.1, float("nan"), float("inf"), float("-inf"), True, False, ".25", None])
+def test_invalid_alpha_refuses_before_any_native_input_read(monkeypatch, reader, alpha):
+    def forbidden(*args, **kwargs):
+        pytest.fail("invalid alpha reached native input or plan")
+    for name in ("trading_calendar_from_snapshot", "plan_events", "load_chain_index"):
+        monkeypatch.setattr(market, name, forbidden)
+    with pytest.raises(OpsError) as caught:
+        if reader == "decision":
+            market.decision_quotes(None, None, [], [.25, alpha], economics())
+        else:
+            market.outcome_quotes(None, None, {}, alpha, economics(), 2)
+    assert caught.value.problem == fail("INVALID_EXPERIMENT_SPEC", "invalid distribution run contract").problem
+
+
+@pytest.mark.parametrize("reader", ["decision", "outcome"])
+@pytest.mark.parametrize("alpha", [-.1, 1.1, float("nan"), float("inf"), True])
+def test_invalid_alpha_is_not_converted_to_unavailable_native_quote(quotes, reader, alpha):
+    event, _, _ = quotes
+    decisions = market.decision_quotes(None, None, [event], [.25], economics())[.25]
+    with pytest.raises(OpsError) as caught:
+        if reader == "decision":
+            market.decision_quotes(None, None, [event], [alpha], economics())
+        else:
+            market.outcome_quotes(None, None, decisions, alpha, economics(), 2)
+    assert caught.value.problem == fail("INVALID_EXPERIMENT_SPEC", "invalid distribution run contract").problem
+
+
+def test_wide_adverse_pinned_exit_is_priced_but_same_wide_entry_is_refused(quotes):
+    event, frames, _ = quotes
+    policy = economics(max_relative_spread=.8)
+    decisions = market.decision_quotes(None, None, [event], [.25], policy)[.25]
+    # Put spread/mid = 3.5 / 2 = 1.75 exceeds .8. Closing value is
+    # (7 + .25*2) + (.25 + .25*3.5) = 8.625/share, not unavailable.
+    frames["SYN", pd.Timestamp("2026-01-07")] = chain("2026-01-07", 120, (7, 9), (.25, 3.75))
+    result = market.outcome_quotes(None, None, decisions, .25, policy, 2)
+    assert result == {"e": dict(entry_cash=2209, exit_cash=1716,
+        exit_at="2026-01-07", contracts=2, multiplier=100)}
+    assert result["e"]["exit_cash"] - result["e"]["entry_cash"] == -493
+    assert market.decision_quotes(None, None, [event], [.25], policy)[.25] == decisions
+    frames["SYN", pd.Timestamp("2026-01-06")] = chain("2026-01-06", 120, (6, 8), (.25, 3.75))
+    refused = market.outcome_quotes(None, None, decisions, .25, policy, 2)
+    assert refused == {"e": dict(entry_cash=None, exit_cash=1716,
+        exit_at="2026-01-07", contracts=2, multiplier=100)}
 
 
 def bridge_entry(store, **changes):

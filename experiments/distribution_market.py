@@ -102,6 +102,7 @@ def _price(index, row, when, alpha, economics, *, pin=None, closing=False):
 
 def decision_quotes(repository, snapshot, events, alphas, economics, *, calendar=None):
     """Read D-1 only; return every plan including missing decision quotes."""
+    require(all(number(alpha) <= 1 for alpha in alphas))
     number(economics["max_relative_spread"])
     calendar = calendar if calendar is not None else trading_calendar_from_snapshot(repository, snapshot, extend_days=0)
     clocks = {event["event_id"]: next(c for c in event["forecasts"] if c["horizon_sessions"] == 1) for event in events}
@@ -118,6 +119,7 @@ def decision_quotes(repository, snapshot, events, alphas, economics, *, calendar
 
 def outcome_quotes(repository, snapshot, decisions, alpha, economics, contracts):
     """Only after intents are committed: D0/D+1 with the exact D-1 contracts."""
+    require(number(alpha) <= 1)
     fee = side_cost(economics, contracts)
     scale = contracts * economics["multiplier"]
     number(economics["max_relative_spread"])

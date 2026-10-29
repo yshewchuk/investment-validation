@@ -302,7 +302,7 @@ Columns/digests/arrays alone prove no source qualification or fit permission: th
 
 | Distribution book/adapter condition | Outcome |
 | --- | --- |
-| Book: supplied exit/settlement after `report_end` or invalid supported input/arithmetic. Adapter: root ref outside (0,16MiB], bridge outer-year mismatch or invalid consumed cost/quantity/spread. | `INVALID_EXPERIMENT_SPEC`: whole book call refuses without partial result/publication; adapter refuses before storage/native quote reads. Full policy schema remains D1-owned. |
+| Book: supplied exit/settlement after `report_end` or invalid supported input/arithmetic. Adapter: root ref outside (0,16MiB], bridge outer-year mismatch, invalid alpha or invalid consumed cost/quantity/spread. | `INVALID_EXPERIMENT_SPEC`: whole book call refuses without partial result/publication; adapter refuses before storage/native quote reads. Full policy schema remains D1-owned. |
 | Missing quotes or insufficient entry funding | Book: covered-date funded trade with missing `exit_cash` stays reserved, profit unknown through `report_end`, full net profit per opportunity unavailable. Missing selected entry quote or failed funding limit gives a per-event execution refusal, no debit/unresolved funded position. Adapter: unplannable/missing/unpriceable quote gives an absent map entry or None; caller rejoins the original cohort without survivor filtering. |
 | Adapter native artifact/storage or unexpected malformed-input error | Propagates; no partial publication, source mutation or automatic retry. |
 
