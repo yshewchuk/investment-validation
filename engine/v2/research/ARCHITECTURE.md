@@ -74,7 +74,7 @@ Panel boundaries require plain JSON (nested history before normalization); detac
 
 ## Partial daily-market blocks
 
-`magnitude_panel_daily.build_daily_blocks` is an opt-in library-only reader; only synthetic tests call it. Inputs are pinned source/history/price_history snapshots, the unchanged metadata-only v1 plan, plain-JSON producer metadata, grouped eligibility declarations and explicit source/event/byte bounds. Output has a distinct versioned context and detached daily-market/regime blocks, never stored-panel admission. The context binds the parent, bounds, policy, exclusions, snapshot fragment inventory and producer. Producer and label bounds are declarations, not installed-code attestation or verified outcome intervals. Protected evaluation membership confers no reads; grouped exclusions retain or remove all event horizons.
+`magnitude_panel_daily.build_daily_blocks` is an opt-in library-only reader; only synthetic tests call it. Inputs are pinned source/history/price_history snapshots, the metadata-only v1 plan (unchanged unless an ambiguous random event exists), plain-JSON producer metadata, grouped eligibility declarations and explicit source/event/byte bounds. Output has a distinct versioned context and detached daily-market/regime blocks, never stored-panel admission. The context binds the parent, bounds, policy, exclusions, snapshot fragment inventory and producer. Producer and label bounds are declarations, not installed-code attestation or verified outcome intervals. Protected evaluation membership confers no reads; grouped exclusions retain or remove all event horizons.
 
 The thirteen daily fields and nine historical `spy_*` values obey each forecast's source ceiling. Regime closes come from pinned `price_history` `REGIME_TICKER` (`^GSPC`) via `get_price_series`, never daily SPY spot; that snapshot binds the context. Reads are row-capped: one ticker/year scan per event ticker plus one regime-series read at the latest ceiling. Daily anchors require IV surfaces; regime uses admitted closes. Availability is reconstructed, not observed-PIT/fit-admissible; fragment inventory and regime source dates remain explicit.
 Row bounds apply across years per ticker; event bounds apply before exclusions. No cross-call cache/retry.
@@ -767,7 +767,7 @@ The original full-row `read_stored` API and its returned envelope remain unchang
 
 `eligibility_policy.eligibility_policy` declares an explicit supported version and
 nonnegative integer calendar-day width. `plan_eligibility` is metadata-only and
-opt-in; existing consumers are unchanged. It uses `experiment_population.canonical_events`
+opt-in. The policy identity (including its `preserve_membership` label, kept for replay) and plans without an ambiguous random event are unchanged; with one, evaluation IDs on that ticker are filtered. Eligible-history planning passes no evaluation IDs and refuses development targets on such a ticker, so only the SIZE fold binder's defensive check filters fold IDs. It uses `experiment_population.canonical_events`
 for exact committed-snapshot admission and the six-column metadata projection and `experiment_trades.classify_events`
 for detached membership/structural ambiguity labels and caller-pinned context.
 Shared `snapshot_inputs` validates reference shape and exact committed identity;
@@ -779,14 +779,12 @@ Bounds contain the event, with source ceiling <= decision <= event. These are
 producer declarations, not proof of price-bracketing or publication times.
 No calendar guessing, outcome/feature decoding, write, registration or fit occurs.
 
-Random-held windows are merged per ticker. Inclusive event/label interval or
-forecast-point overlap excludes an entire development group; shared random,
-rolling and ambiguous labels also exclude it. Results bind sorted groups, policy,
-metadata identity, merged windows, retained IDs, reasons, coverage and a separately
-preserved evaluation manifest into `plan_id`. Supplied documents are detached.
-There are no retries, persistence, cache or partial results. Bounded membership,
-metadata, window and group progress plus stage timing/RSS go to stderr; admission
-and planning refusals report only the native error code, not row values.
+Random-held windows merge per ticker. Inclusive event/label or forecast-point overlap
+excludes a whole development group; shared random, rolling and ambiguous labels do too.
+The plan ID binds groups/policy/metadata, windows, retained IDs, development reasons,
+coverage, ambiguous IDs and filtered evaluation IDs/reasons. Inputs are detached.
+There are no retries, persistence, cache or partial results. Bounded progress and stage
+timing/RSS go to stderr; refusals report only native error codes, not row values.
 
 | Condition | Outcome |
 | --- | --- |
@@ -794,10 +792,12 @@ and planning refusals report only the native error code, not row values.
 | Repository integrity failure other than unknown snapshot | Original native error propagates |
 | Unsupported policy, stale digest/envelope, malformed bounds, duplicate declared group IDs or malformed/duplicate evaluation IDs | `CONTRACT_MISMATCH` |
 | Missing/duplicate classifier columns, malformed event IDs or metadata values that prevent classification | `CONTRACT_MISMATCH` |
-| Invalid scalar dates/sessions or structural collisions handled by membership classification | Successful classification with `ambiguous` membership; structural ambiguity IDs returned |
+| Invalid scalar dates/sessions or structural collisions handled by membership classification | Successful classification with `ambiguous` membership and IDs; a random member with a missing, blank, padded or non-string ticker, or without usable event/canonical dates, refuses with `HOLDOUT_ACCESS_DENIED` |
 | Invalid as-of month, unknown group/evaluation identity or colliding canonical population IDs | `HOLDOUT_ACCESS_DENIED` |
-| Ambiguous random-event identity or overflowing window bounds | `HOLDOUT_ACCESS_DENIED` |
-| Valid protected/overlapping development group | Excluded whole event with reasons; evaluation IDs preserved |
+| Structurally ambiguous random event with usable identity | Keep membership unchanged, record its ID and add an inclusive `date.min`–`date.max` ticker window; exclude matching development groups and evaluation IDs, with `embargo_ticker` as the evaluation reason |
+| Ordinary random-event window arithmetic exceeds the supported date range | `HOLDOUT_ACCESS_DENIED` |
+| Evaluation IDs matching an ambiguous-random ticker embargo | Excluded with `embargo_ticker`; all other IDs remain in `evaluation_event_ids` |
+| Valid protected/overlapping development group | Excluded whole event with development reasons |
 
 This is neither a physical-read capability nor a statistical isolation guarantee.
 Long-memory/cross-ticker effects remain; chronological and random holdouts are
@@ -1014,7 +1014,7 @@ flowchart LR
 
 ### Qualified SIZE panel composition
 
-`experiments.size_panel` is the installed public boundary over internal composition/storage helpers. Its v3 dictionary binds eligible history without changing v1/v2 identities; complete metadata, independent quote groups and daily/runup/^GSPC inputs preserve projection-independent source admission. Native clocks/outcome guards, exact versioned anchors and ticker/year/date fragment membership bind lineage; date-only quote windows do not attest computed-outcome capture. Native immutable catalog/Parquet storage enforces physical/expanded limits and exact bounded receipt/context replay. Fitting authority belongs to the execution/fold consumer; see the stage-2 contract for reconstruction limits and synthetic-only verification.
+`experiments.size_panel` is the installed public boundary over internal composition/storage helpers. Its v3 dictionary binds eligible history without changing v1/v2 identities. Complete metadata, independent quote groups and daily/runup/^GSPC inputs preserve projection-independent source admission. Native clocks/outcome guards, exact versioned anchors and ticker/year/date fragment membership bind lineage; date-only quote windows do not attest computed-outcome capture. Native immutable catalog/Parquet storage enforces physical/expanded limits and exact bounded receipt/context replay. Fitting authority belongs to the execution/fold consumer; see the stage-2 contract for reconstruction limits and synthetic-only verification.
 
 | Qualified panel admission condition | Outcome before dependent reads |
 | --- | --- |

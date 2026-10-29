@@ -164,12 +164,26 @@ def _folds(binding, request):
     from experiments.magnitude_search_plan import _nested
     context = binding["size_panel"]["context"]
     events = {e["event_id"]: e for e in context["target_events"]}
+    full_start, full_end = date.min.isoformat(), date.max.isoformat()
+    embargoed_tickers = {w["ticker"] for w in context.get("eligibility_plan", {}).get("random_windows", [])
+        if w["start"] == full_start and w["end"] == full_end}
+    def hit(event_id):
+        return bool(embargoed_tickers) and events[event_id]["ticker"] in embargoed_tickers
     folds = _nested(binding, request)
     for group in folds:
         for fold in [group["outer"], *group["inner"]]:
             fold["training_candidate_event_ids"] = [e for e in fold["training_candidate_event_ids"]
-                if events[e]["label_end"] < fold["training_labels_before"]]
+                if events[e]["label_end"] < fold["training_labels_before"]
+                and not hit(e)]
             _require(bool(fold["training_candidate_event_ids"]))
+            retained = [e for e in fold["evaluation_event_ids"] if not hit(e)]
+            if embargoed_tickers and not retained:
+                raise fail("INVALID_EXPERIMENT_SPEC", "ambiguous-random ticker embargo removed every fold evaluation event")
+            excluded = [e for e in fold["evaluation_event_ids"] if hit(e)]
+            fold["evaluation_event_ids"] = retained
+            if excluded:
+                fold["evaluation_exclusions"] = [{"event_id": eid, "reasons": ["embargo_ticker"]}
+                    for eid in excluded]
             cutoff = fold.get("evaluation_labels_before", binding["magnitude_execution"]["evaluation_labels_before"])
             _require(all(events[e]["label_end"] < cutoff for e in fold["evaluation_event_ids"]))
     return folds
