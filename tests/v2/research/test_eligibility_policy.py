@@ -363,12 +363,20 @@ def test_ambiguous_random_event_refuses(tmp_path, monkeypatch, kind):
             if kind in {"missing_ticker", "blank_ticker", "padded_ticker"}:
                 rows.loc[0, "ticker"] = {"missing_ticker": None, "blank_ticker": "",
                     "padded_ticker": " SYNTH"}[kind]
-            else:
+            elif kind == "unusable_event_date":
                 import pandas as pd
-                date_column = "event_date" if kind == "unusable_event_date" else "canonical_date"
-                rows.loc[0, date_column] = pd.NaT
+                rows.loc[0, "event_date"] = pd.NaT
             return rows
         monkeypatch.setattr(eligibility, "canonical_events", ambiguous)
+        if kind == "unusable_canonical_date":
+            import pandas as pd
+            original_classify = eligibility.classify_events
+            def classify(rows, snapshot, **kwargs):
+                canonical, labels, ambiguous_ids, context = original_classify(rows, snapshot, **kwargs)
+                canonical.loc[canonical["event_id"] == event["event_id"], "canonical_date"] = pd.NaT
+                ambiguous_ids.add(event["event_id"])
+                return canonical, labels, ambiguous_ids, context
+            monkeypatch.setattr(eligibility, "classify_events", classify)
         with refuses("HOLDOUT_ACCESS_DENIED", "random holdout window bounds cannot be established"):
             plan(repository, snapshot, [], evaluation=[])
     finally:

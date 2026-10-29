@@ -64,12 +64,17 @@ def _forecasts(forecasts, horizons, event):
     return sorted(deepcopy(forecasts), key=lambda f: f["horizon_sessions"])
 
 
+def _ticker(value):
+    if type(value) is not str or not value or value != value.strip():
+        raise ValueError
+    return value
+
+
 def _group(group, horizons):
     if type(group) is not dict or set(group) != {
             "event_id", "ticker", "event_date", "label_start", "label_end", "forecasts"}:
         raise ValueError
-    if type(group["ticker"]) is not str or not group["ticker"] or group["ticker"] != group["ticker"].strip():
-        raise ValueError
+    _ticker(group["ticker"])
     event = _day(group["event_date"])
     if not _day(group["label_start"]) <= event <= _day(group["label_end"]):
         raise ValueError
@@ -98,17 +103,15 @@ def _metadata(snapshot, as_of_month, policy, metadata):
 def _add_random_window(event, memberships, ambiguous, delta, by_ticker, ambiguous_random_events):
     if "random" not in memberships:
         return
+    ticker = _ticker(event.ticker)
     if event.event_id in ambiguous:
-        ticker = event.ticker
-        if type(ticker) is not str or not ticker or ticker != ticker.strip():
-            raise ValueError
         calendar_date(event.event_date)
         calendar_date(event.canonical_date)
         by_ticker.setdefault(ticker, []).append((date.min, date.max))
         ambiguous_random_events.add(event.event_id)
         return
     day = calendar_date(event.event_date)
-    by_ticker.setdefault(event.ticker, []).append((day - delta, day + delta))
+    by_ticker.setdefault(ticker, []).append((day - delta, day + delta))
 
 
 def _windows(events, labels, width, ambiguous):

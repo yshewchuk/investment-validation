@@ -386,7 +386,9 @@ missing bounds refuse. A caller's digest is not evidence of their truth.
 The eligible-history builder below consumes this metadata policy. Evaluation
 IDs outside an ambiguous-random ticker are preserved, not authorized for reading;
 IDs on that ticker are listed in `evaluation_exclusions`. Annual development
-targets still need retained eligibility. Existing v1 behavior is unchanged.
+targets still need retained eligibility. Shared policy identity changes update
+dependent request and dictionary hashes; regenerate previously pinned requests
+against the new identity.
 Integration sequencing belongs to the [stage-2 design](../../../experiments/SUPER_SIZE/STAGE2_DESIGN.md).
 
 ## Confirmed metadata index (synthetic only)
