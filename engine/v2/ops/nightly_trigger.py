@@ -1084,19 +1084,25 @@ def _native_score_batch_pending(conn, plan_job_ids, service) -> bool:
     from engine.v2.ops.submission import job_id_for
 
     try:
-        identity = nightly.native_score_batch_identity(conn)
-        if identity is None:
+        if not plan_job_ids:
             return False
-        session, scope_hash, snapshot_parameters = identity
-        if snapshot_parameters is None or not plan_job_ids:
-            return False
-        score_key = f"nightly:{session}:{scope_hash}:score"
         placeholders = ", ".join("?" for _ in plan_job_ids)
-        score = conn.execute(
-            f"SELECT 1 FROM jobs WHERE job_id IN ({placeholders}) "
-            "AND kind = 'legacy_score' AND idempotency_key = ? LIMIT 1",
-            (*plan_job_ids, score_key)).fetchone()
-        if score is None:
+        rows = conn.execute(
+            f"SELECT idempotency_key, spec_json FROM jobs "
+            f"WHERE job_id IN ({placeholders}) "
+            "AND kind = 'legacy_score' AND state = 'succeeded'",
+            tuple(plan_job_ids)).fetchall()
+        session = scope_hash = None
+        for row in rows:
+            parsed = nightly._session_scope_from_score_key(row["idempotency_key"])
+            if parsed is None:
+                continue
+            parameters = nightly._native_score_batch_parameters(row["spec_json"])
+            if parameters is None or not parameters.get("snapshot_generation_id"):
+                continue
+            session, scope_hash = parsed
+            break
+        if session is None:
             return False
         batch_id = job_id_for(
             "shadow", nightly.native_score_batch_key(session, scope_hash))

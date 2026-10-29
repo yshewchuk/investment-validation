@@ -886,9 +886,15 @@ class Service:
         from engine.v2.ops.nightly import scope_from_native_score_batch_key
         from engine.v2.ops.pool_refresh import pool_cycle_outcome
 
+        idempotency_key = row["idempotency_key"]
+        if not idempotency_key.startswith("nightly:"):
+            return False
         try:
-            occurrence, _scope_hash = scope_from_native_score_batch_key(
-                row["idempotency_key"])
+            parsed = scope_from_native_score_batch_key(idempotency_key)
+            if parsed is None:
+                raise ValueError(
+                    "unreadable nightly native_score_batch idempotency key")
+            occurrence, _scope_hash = parsed
             outcome = pool_cycle_outcome(self.conn, occurrence)
         except Exception as exc:  # noqa: BLE001 - fail closed for this ready row
             print(json.dumps({"event": "native_score_batch_pool_gate_lookup_failed",

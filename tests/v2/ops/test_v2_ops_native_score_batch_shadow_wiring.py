@@ -1482,3 +1482,34 @@ def test_service_tick_reconciles_pool_before_native_score(tmp_path, monkeypatch)
     assert conn.execute("SELECT 1 FROM attempts WHERE job_id = ?",
                         (receipt.job_id,)).fetchone() is None
     conn.close()
+
+
+def test_scheduler_admits_ordinary_manual_native_batch_key(tmp_path):
+    """A plain operator-supplied native batch key still claims normally.
+
+    The service's defer hook only holds back ``nightly:``-keyed batches, so an
+    ordinary manually keyed ``native_score_batch`` is admitted by the real
+    scheduler path.
+    """
+    conn, clock, supervisor = catalog(tmp_path)
+    request = SubmitRequest(
+        namespace="shadow", idempotency_key="manual-batch", principal="operator",
+        job=JobSpec(
+            kind="native_score_batch", implementation_ref="code", spec_hash=None,
+            environment_ref="env",
+            parameters={
+                "expected_ids": (), "release_root": "release-root",
+                "as_of": "2026-01-15", "snapshot_id": "snapshot-1",
+                "calendar_revision": "calendar-1", "feature_names": (),
+            },
+            output_namespace="shadow", resource_class="projection",
+            retry_policy_ref="bounded",
+            checkpoint_contract_ref="native_score_batch_records.v2.0"))
+    receipt = submit(conn, registry(), _POLICY, request, clock=clock)
+    service = Service(conn, tmp_path, registry(), TEST_POLICY, clock=clock,
+                      code_source=ROOT, store_root=tmp_path)
+    claim = claim_next(conn, policy=TEST_POLICY, sample=sample(clock),
+                       supervisor=supervisor, clock=clock, registry=registry(),
+                       defer_claim=service._native_score_batch_claim_deferred)
+    assert claim is not None and claim.job_id == receipt.job_id
+    conn.close()

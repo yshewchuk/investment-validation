@@ -203,14 +203,14 @@ class _NativeBatchConn:
     def fetchall(self):
         if self.sql.startswith("SELECT state FROM jobs WHERE job_id IN"):
             return [{"state": "succeeded"}]
+        if "SELECT idempotency_key, spec_json FROM jobs" in self.sql:
+            return [{
+                "idempotency_key": "nightly:2026-09-26:sha256:scope:score",
+                "spec_json": '{"parameters":{"snapshot_generation_id":"plan-snapshot"}}',
+            }]
         return []
 
     def fetchone(self):
-        if "kind = 'legacy_score'" in self.sql:
-            if ("score-job" in self.params
-                    and self.params[-1] == "nightly:2026-09-26:sha256:scope:score"):
-                return {"1": 1}
-            return None
         if "FROM native_stage_failures" in self.sql:
             return {"1": 1} if self.failure_recorded else None
         if self.sql.startswith("SELECT state FROM jobs WHERE job_id = ?"):
@@ -226,11 +226,18 @@ def test_hold_for_pool_waits_for_its_native_score_batch(monkeypatch):
     monkeypatch.setattr(nightly_trigger, "_pool_pending", lambda conn: False)
     monkeypatch.setattr(
         nightly, "native_score_batch_identity",
-        lambda conn: ("2026-09-26", "sha256:scope", object()))
+        lambda conn: ("2026-09-27", "sha256:newer", object()))
+    key_args = []
+
+    def fake_batch_key(session, scope):
+        key_args.append((session, scope))
+        return f"nightly:{session}:{scope}:native_score_batch"
+
+    seen_keys = []
+    monkeypatch.setattr(nightly, "native_score_batch_key", fake_batch_key)
     monkeypatch.setattr(
-        nightly, "native_score_batch_key",
-        lambda session, scope: "nightly:2026-09-26:sha256:scope:native_score_batch")
-    monkeypatch.setattr(submission, "job_id_for", lambda namespace, key: "native-job")
+        submission, "job_id_for",
+        lambda namespace, key: (seen_keys.append(key), "native-job")[1])
     conn = _NativeBatchConn()
 
     outcome = nightly_trigger._drive_jobs_to_terminal(
@@ -242,6 +249,10 @@ def test_hold_for_pool_waits_for_its_native_score_batch(monkeypatch):
     assert captured["until"]() is True
     conn.batch_state = "succeeded"
     assert captured["until"]() is True
+    assert key_args, "the batch key must be constructed from the plan row"
+    assert key_args[-1][:2] == ("2026-09-26", "sha256:scope")
+    assert seen_keys
+    assert seen_keys[-1] == "nightly:2026-09-26:sha256:scope:native_score_batch"
 
 
 class _RetryableNativeWaitService:
