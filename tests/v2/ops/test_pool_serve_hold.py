@@ -205,7 +205,7 @@ class _NativeBatchConn:
     def fetchall(self):
         if self.sql.startswith("SELECT state FROM jobs WHERE job_id IN"):
             return [{"state": "succeeded"}]
-        if "SELECT idempotency_key, spec_json FROM jobs" in self.sql:
+        if "idempotency_key" in self.sql and "CASE WHEN typeof(spec_json)" in self.sql:
             return [{
                 "idempotency_key": "nightly:2026-09-26:sha256:scope:score",
                 "spec_json": '{"parameters":{"snapshot_generation_id":"plan-snapshot"}}',
@@ -264,6 +264,23 @@ def test_hold_for_pool_waits_for_its_native_score_batch(monkeypatch):
     assert "length(CAST(spec_json AS BLOB)) <= ?" in spec_sql
     assert spec_params[0] == nightly.NATIVE_SCORE_BATCH_SPEC_MAX_BYTES
     assert spec_params[1:] == ("score-job",)
+
+
+def test_hold_for_pool_releases_when_plan_batch_was_superseded_before_submit(monkeypatch):
+    from engine.v2.ops import nightly
+
+    conn = _NativeBatchConn()
+    conn.batch_state = None
+    captured = _native_wait_setup(monkeypatch)
+    monkeypatch.setattr(
+        nightly, "native_score_batch_identity",
+        lambda _conn: ("2026-09-27", "sha256:newer", object()))
+
+    nightly_trigger._drive_jobs_to_terminal(
+        _RetryableNativeWaitService(), conn, ("score-job",), None,
+        hold_for_pool=True)
+
+    assert captured["until"]() is True
 
 
 class _RetryableNativeWaitService:

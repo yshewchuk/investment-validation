@@ -1120,6 +1120,9 @@ def _native_score_batch_pending(conn, plan_job_ids, service) -> bool:
             (session, scope_hash)).fetchone()
         if failure is not None:
             return False
+        batch_identity = nightly.native_score_batch_identity(conn)
+        if batch_identity is None or batch_identity[:2] != (session, scope_hash):
+            return False
         exhausted = getattr(service, "native_score_batch_submission_exhausted", None)
         return not (callable(exhausted) and exhausted(session, scope_hash))
     except Exception:
