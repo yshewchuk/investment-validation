@@ -1,6 +1,6 @@
 # `engine/v2/ops/workspace` — architecture
 
-An isolated experiment write sandbox over one **read-only** pinned snapshot: an overlay, never a copy of its objects (only catalog rows are copied, by `catalog_rows.py`). Library only: no CLI, no native heads, no supervisor. Modules: `closure.py` (read-only closure verification), `overlay.py` (create/open), `scope.py` (workspace-local scope binding), `catalog_rows.py` (bounded copy of the pinned snapshot's catalog rows), `guard.py` (execution refusal).
+An isolated experiment write sandbox over one **read-only** pinned snapshot: an overlay, never a copy of its objects (only catalog rows are copied, by `catalog_rows.py`). Library only: no CLI, no production head writes (`head.py` writes a native head into the workspace catalog only), no supervisor. Modules: `closure.py` (read-only closure verification), `overlay.py` (create/open), `scope.py` (workspace-local scope binding), `catalog_rows.py` (bounded copy of the pinned snapshot's catalog rows), `head.py` (workspace-catalog scope head with reference inputs), `guard.py` (execution refusal).
 
 ## Closure (`closure.verify_snapshot_closure(conn, store, snapshot_id, manifest_hash, *, deep=False) -> SnapshotClosure`)
 
@@ -60,8 +60,8 @@ version, scope, snapshot id and manifest hash. The returned repository view dele
 `resolve_pinned(scope)` returns `workspace.source_snapshot()` only for the
 bound scope. It never reads a production head or accepts a different snapshot.
 
-The local catalog does not contain production `data_snapshots`, so this is a
-workspace-local scope binding, not a native `data_snapshot_heads` row. The
+This adapter is a workspace-local scope binding and writes no
+`data_snapshot_heads` row (`head.commit_scope_head`, below, does). The
 scope adapter itself copies nothing; `catalog_rows.copy_closure_rows` (below) copies the snapshot's catalog rows, never objects. A standard package or library does
 not provide this repository-specific pin contract; the adapter reuses the
 existing `ResearchWorkspace.record_read_pin`, `SnapshotOnlyRepository` and
@@ -109,3 +109,28 @@ R1–R6, all `WORKSPACE_REFUSED` unless noted:
 | R6 unknown state | Malformed handle, unreadable rows or any unexpected exception refuses; nothing is guessed. |
 
 Idempotent: a re-run over a complete copy inserts nothing and returns the same result; a re-run after a failure converges because failure leaves no rows.
+
+## SIZE workspace scope head (`head.commit_scope_head(workspace, scope, *, clock) -> dict`)
+
+Creates the workspace catalog's native `data_snapshot_heads` row for `scope` at the pinned snapshot S, with S's committed import receipt and that receipt's reference inputs, in one commit. Without the inputs a refresh commit that copies its parent receipt's inputs refuses `SNAPSHOT_NOT_READY`. This is distinct from the read-pin binding above (`scope.size_scope_repository`), which is unchanged.
+
+Order: (1) `validate_size_scope_request`; (2) `catalog_rows.copy_closure_rows` (idempotent, its own transaction, so a failure later leaves rows but never a head); (3) the original receipt id is the `commit_receipt_ref` of S's copied `data_snapshots` row, and its reference inputs are read from the read-only source with `reference_catalog.reference_inputs_for_receipt` (an empty set propagates `SNAPSHOT_NOT_READY` before the head commit; the count and rendered size are capped at 10,000 rows and 16 MiB before the read); (4) `workspace.source.resolve_full(S)` supplies contracts, objects, records and manifests, and its snapshot id and manifest hash must equal the pin; (4b) the snapshot's own committed import receipt row (the `commit_receipt_ref` target) is copied unchanged into the workspace in its own transaction, so the pointer resolves there, and a differing existing row refuses `row_mismatch`; (5) the existing `catalog.commit_snapshot` compare-and-swap (`expected_head_snapshot_id=None`, generation 0, `audit_partitions=False`) inserts a new committed receipt, calls `insert_reference_inputs` for that receipt in the same transaction, and sets the head. The receipt, attempt and request ids are derived from the scope, snapshot id and manifest hash, so a repeat call is the existing receipt replay. No object file is copied; no production write.
+
+For the commit the workspace connection's single-value limit is lowered to 64 MiB and restored afterwards, so an oversized existing receipt value refuses `storage_failure` before it is materialised.
+
+No production caller yet, by design: this is the library half of #1614 slice 2b; the workspace bounds publication (slice 2c) is its first caller, and the `size_search` entry point (slice 4) follows.
+
+The return value has `scope`, `snapshot_id`, `manifest_hash`, `receipt_id`, `generation` and `reference_inputs` (count).
+
+R1–R6, `WORKSPACE_REFUSED` unless noted:
+
+| Rule | Behaviour |
+|---|---|
+| R1 typed reason | `scope_invalid`, `workspace_invalid` (from the scope validators), `receipt_missing` (S's copied row names no committed import receipt for S), `row_mismatch` (the workspace holds a different row for that receipt), `reference_inputs_over_cap` (the receipt pins more than 10,000 inputs or 16 MiB of UTF-8 bytes across all fetched columns, checked before they are read), `pin_mismatch` (`resolve_full` differs from the pin), `storage_failure` (other exceptions, with `cause`). `copy_closure_rows` refusals, `SNAPSHOT_NOT_READY` (no reference inputs), `SNAPSHOT_CONFLICT` (scope already has a different head) and `IDENTITY_CONFLICT` propagate unchanged. |
+| R2 no partial result | The receipt, reference inputs and head are one transaction inside `commit_snapshot`; any failure rolls all three back, so a failed call leaves no head. |
+| R3 no repair | An existing different head or receipt is never overwritten or repaired; there is no retry. |
+| R4 stale pin | `workspace.source_snapshot()` runs before the commit; a changed pin propagates `SNAPSHOT_CLOSURE_BROKEN`. A head moved by another writer refuses `SNAPSHOT_CONFLICT`: the compare-and-swap catches it on a fresh commit, and a check run first inside the commit transaction catches it on a receipt replay. |
+| R5 read-only production | Only the source connection is read; all writes go to `workspace.conn`. |
+| R6 unknown state | Malformed handle, missing receipt row or any unexpected exception refuses. |
+
+Idempotent: a repeat call with the same scope returns the same receipt id and writes nothing, even though the original compare-and-swap expectation (no head) no longer holds. A re-run after a failure converges because failure leaves no head.
