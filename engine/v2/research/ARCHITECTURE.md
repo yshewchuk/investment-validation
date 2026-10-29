@@ -767,7 +767,7 @@ The original full-row `read_stored` API and its returned envelope remain unchang
 
 `eligibility_policy.eligibility_policy` declares an explicit supported version and
 nonnegative integer calendar-day width. `plan_eligibility` is metadata-only and
-opt-in. The policy identity (including its `preserve_membership` label, kept for replay) and plans without an ambiguous random event are unchanged; with one, evaluation IDs on that ticker are filtered. Eligible-history planning passes no evaluation IDs, so the SIZE fold binder applies the same embargo to fold IDs. It uses `experiment_population.canonical_events`
+opt-in. The policy identity (including its `preserve_membership` label, kept for replay) and plans without an ambiguous random event are unchanged; with one, evaluation IDs on that ticker are filtered. Eligible-history planning passes no evaluation IDs and refuses development targets on such a ticker, so only the SIZE fold binder's defensive check filters fold IDs. It uses `experiment_population.canonical_events`
 for exact committed-snapshot admission and the six-column metadata projection and `experiment_trades.classify_events`
 for detached membership/structural ambiguity labels and caller-pinned context.
 Shared `snapshot_inputs` validates reference shape and exact committed identity;

@@ -329,13 +329,15 @@ use an inclusive ±30-calendar-day ticker/date window; structurally ambiguous ra
 events use a whole-ticker window. Exclude a whole development event (all 1/3/5-session
 horizons) when its label interval, event date or any forecast decision/source-session
 ceiling overlaps a window. Apply metadata-first exclusions before preprocessing,
-selection, calibration and fits, including the legacy baseline. The SIZE fold binder
-must also apply the eligibility plan's ambiguous-random tickers to independently
-generated outer and inner fold IDs before target preflight or scoring: remove matching
-IDs from training and evaluation, record removed evaluation IDs in the fold's
-`evaluation_exclusions` with reason `embargo_ticker`, and preserve all other IDs.
-Excluded IDs do not enter target loading, matrices, forecasts or coverage. If an outer
-or inner fold has no evaluation IDs left, refuse `INVALID_EXPERIMENT_SPEC`. Freeze the
+selection, calibration and fits, including the legacy baseline. On the SIZE path a
+requested development target on an ambiguous-random ticker is excluded, so panel
+preparation refuses `HOLDOUT_ACCESS_DENIED` before any binding exists; fold IDs are
+drawn from those targets, so valid bindings hold none. The fold binder repeats the
+check as defence in depth on the eligibility plan's ambiguous-random tickers: it removes
+matching IDs from outer and inner training and evaluation, records removed evaluation
+IDs in `evaluation_exclusions` with reason `embargo_ticker`, and preserves all other
+IDs; a fold left with no evaluation IDs refuses `INVALID_EXPERIMENT_SPEC`. This
+binder path is exercised by synthetic fold tests only. Freeze the
 window/manifest before outcomes, with no tuning.
 This excludes examples, not individual price bars; do not alter rolling formulas.
 
