@@ -7,14 +7,23 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests.data_scan_support import catalog_and_store
+from tests.data_scan_support import (
+    RECEIPT,
+    catalog_and_store,
+    fake_hash,
+    publish_and_inspect,
+)
 from tests.v2.ops.test_research_workspace import (  # noqa: F401
+    _SEC,
+    _SEC_REF,
     _commit,
     _create,
     _details,
+    _row,
     prod,
 )
 
+from engine.v2.data import catalog, manifests
 from engine.v2.data.repository import Repository
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.workspace import catalog_rows
@@ -61,6 +70,43 @@ def _insert_contract(ws, prod, contract_id, definition_hash):
     ws.conn.commit()
 
 
+def _commit_with_version_parent(conn, clock, store, ticker, receipt_id, head, generation,
+                                parent_version_id):
+    record = publish_and_inspect(store, _SEC, _SEC_REF, [_row(ticker)], partition_key="2024")
+    manifest = manifests.dataset_manifest(
+        _SEC_REF, [record], knowledge_mode="reconstructed", coverage_receipt_refs=(RECEIPT,),
+        availability_evidence_refs=(), parent_dataset_version_id=parent_version_id)
+    snap = manifests.snapshot_ref({"securities": manifest}, calendar_version="cal.v1",
+                                  source_priority_version="prio.v1",
+                                  finality_receipt_refs=(RECEIPT,), parent_snapshot_id=head)
+    receipt = catalog.commit_snapshot(
+        conn, scope="shadow", request_hash=fake_hash(receipt_id), contracts=[_SEC],
+        objects=[record.object_ref], records=[record], manifests=[manifest], snapshot=snap,
+        expected_head_snapshot_id=head, expected_head_generation=generation,
+        receipt_id=receipt_id, attempt_id="att-" + receipt_id, fence=1,
+        fence_check=lambda _c: None, clock=clock, store=store)
+    return receipt.snapshot_ref, record, manifest
+
+
+@pytest.fixture
+def prod_dv(tmp_path):
+    root = tmp_path / "prod_dv"
+    root.mkdir()
+    conn, clock, store = catalog_and_store(root)
+    first, _, first_manifest = _commit_with_version_parent(
+        conn, clock, store, "AAA", "r1", None, 0, None)
+    snap, record, _ = _commit_with_version_parent(
+        conn, clock, store, "BBB", "r2", first.snapshot_id, 1,
+        first_manifest.dataset_version_ref.dataset_version_id)
+    conn.close()
+    digest = record.object_ref.content_hash.removeprefix("sha256:")
+    return SimpleNamespace(
+        root=root, catalog=root / "catalog.sqlite", store=root / "store", snap=snap,
+        clock=clock, tmp=tmp_path,
+        object=root / "store" / "objects" / digest[:2] / digest,
+        first_version=first_manifest.dataset_version_ref.dataset_version_id)
+
+
 @pytest.fixture
 def prod3(tmp_path):
     root = tmp_path / "prod3"
@@ -92,6 +138,26 @@ def test_copy_brings_chain_and_manifest_hash(prod):
         resolved = Repository(ws.conn).resolve_full(prod.snap.snapshot_id)
         assert resolved.snapshot.manifest_hash == prod.snap.manifest_hash
         assert ws.conn.execute("SELECT COUNT(*) FROM data_snapshot_heads").fetchone()[0] == 0
+
+
+def test_dataset_version_parent_chain_is_copied(prod_dv):
+    with _create(prod_dv) as ws:
+        copy_closure_rows(ws)
+        versions = {row[0] for row in ws.conn.execute(
+            "SELECT dataset_version_id FROM data_dataset_versions")}
+        assert len(versions) == 2
+        assert prod_dv.first_version in versions
+        pinned_version = ws.conn.execute(
+            "SELECT dataset_version_id FROM data_snapshot_tables WHERE snapshot_id = ?",
+            (prod_dv.snap.snapshot_id,)).fetchone()[0]
+        assert ws.conn.execute(
+            "SELECT COUNT(*) FROM data_version_fragments").fetchone()[0] == 1
+        assert {row[0] for row in ws.conn.execute(
+            "SELECT dataset_version_id FROM data_version_fragments")} == {pinned_version}
+        assert ws.conn.execute("SELECT COUNT(*) FROM data_fragments").fetchone()[0] == 1
+        assert ws.conn.execute("SELECT COUNT(*) FROM data_contracts").fetchone()[0] == 1
+        resolved = Repository(ws.conn).resolve_full(prod_dv.snap.snapshot_id)
+        assert resolved.snapshot.manifest_hash == prod_dv.snap.manifest_hash
 
 
 def test_chain_is_parent_first(prod3):
