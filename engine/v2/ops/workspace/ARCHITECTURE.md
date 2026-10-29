@@ -1,6 +1,6 @@
 # `engine/v2/ops/workspace` — architecture
 
-An isolated experiment write sandbox over one **read-only** pinned snapshot: an overlay, never a copy of its objects (only catalog rows are copied, by `catalog_rows.py`). Library only: no CLI, no production head writes (`head.py` writes a native head into the workspace catalog only), no supervisor. Modules: `closure.py` (read-only closure verification), `overlay.py` (create/open), `scope.py` (workspace-local scope binding), `catalog_rows.py` (bounded copy of the pinned snapshot's catalog rows), `head.py` (workspace-catalog scope head with reference inputs), `guard.py` (execution refusal).
+An isolated experiment write sandbox over one **read-only** pinned snapshot: an overlay. Catalog rows are copied by `catalog_rows.py`; objects are copied only by the explicit, bounded `objects.admit_closure_objects` below, never implicitly. Library only: no CLI, no production head writes (`head.py` writes a native head into the workspace catalog only), no supervisor. Modules: `closure.py` (read-only closure verification), `overlay.py` (create/open), `scope.py` (workspace-local scope binding), `catalog_rows.py` (bounded copy of the pinned snapshot's catalog rows), `head.py` (workspace-catalog scope head with reference inputs), `objects.py` (closure object admission), `guard.py` (execution refusal).
 
 ## Closure (`closure.verify_snapshot_closure(conn, store, snapshot_id, manifest_hash, *, deep=False) -> SnapshotClosure`)
 
@@ -134,3 +134,20 @@ R1–R6, `WORKSPACE_REFUSED` unless noted:
 | R6 unknown state | Malformed handle, missing receipt row or any unexpected exception refuses. |
 
 Idempotent: a repeat call with the same scope returns the same receipt id and writes nothing, even though the original compare-and-swap expectation (no head) no longer holds. A re-run after a failure converges because failure leaves no head.
+
+## SIZE workspace closure object admission (`objects.admit_closure_objects(workspace) -> dict`)
+
+A bounds refresh (slice 2c-ii) opens `ArtifactStore(<store>)` and reads fragment objects through `store.root/<storage_key>` paths, so the objects must exist in the workspace store; a read-through fallback cannot work. This copies, from the read-only production store into `workspace.store`, exactly the objects named by the pinned snapshot S: `data_objects` rows reached through S's `data_snapshot_tables`, `data_version_fragments` and `data_fragments` rows in the workspace catalog (copied earlier by `catalog_rows.copy_closure_rows`). Nothing else is admitted: no raw-receipt, normalization, ancestor-snapshot or other production object, and the workspace catalog must hold no `data_raw_receipts` row. (The live run's 2,972 hand-copied nightly unit-receipt objects were needed only because it copied the production receipt rows.) Each object is keyed `objects/<hh>/<hex>` from its `content_hash`, streamed to a `.part` file in the destination directory while hashing, fsynced and renamed into place. Caps: 1,000,000 objects, 16 GiB. The return value has `snapshot_id`, `objects`, `copied`, `present` and `bytes` (copied). Progress goes to stderr (`[workspace]`) every 30 s.
+
+R1–R6, all `WORKSPACE_REFUSED`:
+
+| Rule | Behaviour |
+|---|---|
+| R1 typed reason | `workspace_invalid` (handle lacks its catalog, stores or snapshot id, or the catalog has no `data_snapshot_tables` row for S: run `copy_closure_rows` first), `receipts_present` (any `data_raw_receipts` row in the workspace catalog), `object_ref_invalid` (`content_hash` not `sha256:` plus 64 lowercase hex, or `storage_key` differs from the key derived from it), `object_missing` (not a regular file in the source store), `object_changed` (size or sha256 differs from the row), `destination_conflict` (a destination exists that is not a regular file of the recorded size), `objects_over_cap`, `bytes_over_cap`, `storage_failure` (other exceptions, with `cause`). |
+| R2 no partial result | Each object is complete or absent (`.part` removed on failure). A refusal part-way leaves earlier admitted objects: complete, hash-verified, unreferenced by any head, and reused by a re-run. Nothing is returned. |
+| R3 no repair | An existing destination is never overwritten, deleted or re-hashed; a wrong-sized one refuses. No retry. |
+| R4 stale pin | `workspace.source_snapshot()` runs before the first copy and after the last; a changed pin propagates `SNAPSHOT_CLOSURE_BROKEN`. |
+| R5 read-only production | The source store is only opened for reading (`O_NOFOLLOW`); every write is inside `workspace.store.root/objects`. |
+| R6 unknown state | A symlink, directory or other non-regular file, a malformed row or any unexpected exception refuses. |
+
+Idempotent: a re-run copies only absent objects. An existing destination of the recorded size is trusted, not re-hashed; `verify_before_seal(deep=True)` is the integrity check.
