@@ -129,9 +129,7 @@ def test_policy_literal_identity_and_no_default():
         "group_key": "event_id", "window_key": "ticker", "applies_to": "development",
         "evaluation": "preserve_outside_ambiguous_random_ticker", "policy_id": "sha256:c6a72238ffba179ad6f4824e3df766902eb739d49b789b530bd3f2116235a992"}
     assert policy == expected
-    corrupted = {**policy, "embargo_days": 31}
-    with pytest.raises(AssertionError):
-        assert corrupted == expected
+    assert eligibility.eligibility_policy(version=VERSION, embargo_days=31)["policy_id"] != expected["policy_id"]
     with pytest.raises(TypeError):
         eligibility.eligibility_policy(version=VERSION)
 
@@ -340,9 +338,10 @@ def test_public_path_negative_control(tmp_path, monkeypatch):
                 break
     conn, repository, snapshot, _ = setup(tmp_path, monkeypatch, [held, dev])
     try:
-        result = plan(repository, snapshot, [group(dev)],
+        result = plan(repository, snapshot, [group(dev), group(held)],
                       evaluation=[held["event_id"], dev["event_id"]])
         assert result["ambiguous_random_events"] == []
+        assert result["exclusions"] == [{"event_id": held["event_id"], "reasons": ["ambiguous"]}]
         assert result["random_windows"] == []
         assert result["retained_event_ids"] == [dev["event_id"]]
         assert result["evaluation_event_ids"] == sorted([held["event_id"], dev["event_id"]])
