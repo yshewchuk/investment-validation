@@ -189,3 +189,20 @@ def test_conflicting_existing_receipt_row_refuses(prod):
             commit_scope_head(ws, SCOPE, clock=prod.clock)
         assert _details(caught) == ("WORKSPACE_REFUSED", "row_mismatch")
         assert _heads(ws) == 0
+
+
+def test_commit_runs_under_value_limit_and_restores_it(prod, monkeypatch):
+    _add_inputs(prod)
+    seen = []
+    real = head_module.commit_snapshot
+
+    def spy(conn, **kwargs):
+        seen.append(conn.getlimit(sqlite3.SQLITE_LIMIT_LENGTH))
+        return real(conn, **kwargs)
+
+    monkeypatch.setattr(head_module, "commit_snapshot", spy)
+    with _create(prod) as ws:
+        before = ws.conn.getlimit(sqlite3.SQLITE_LIMIT_LENGTH)
+        commit_scope_head(ws, SCOPE, clock=prod.clock)
+        assert seen == [head_module._MAX_VALUE_BYTES]
+        assert ws.conn.getlimit(sqlite3.SQLITE_LIMIT_LENGTH) == before

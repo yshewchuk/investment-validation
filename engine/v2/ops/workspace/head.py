@@ -1,6 +1,8 @@
 """Create the workspace catalog's native scope head over the pinned snapshot."""
 from __future__ import annotations
 
+import contextlib
+import sqlite3
 import sys
 import time
 
@@ -15,6 +17,7 @@ from engine.v2.ops.workspace.scope import validate_size_scope_request
 
 _MAX_REFERENCE_INPUTS = 10_000
 _MAX_REFERENCE_BYTES = 16 << 20
+_MAX_VALUE_BYTES = 64 << 20
 
 
 def _refuse(reason: str, **details):
@@ -24,6 +27,16 @@ def _refuse(reason: str, **details):
 
 def _log(message: str) -> None:
     print("[workspace] " + message, file=sys.stderr, flush=True)
+
+
+@contextlib.contextmanager
+def _value_limit(conn):
+    """Cap one SQLite value on the workspace connection while the commit reads existing rows."""
+    previous = conn.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, _MAX_VALUE_BYTES)
+    try:
+        yield
+    finally:
+        conn.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, previous)
 
 
 def _head_check(scope: str, snapshot_id: str):
@@ -88,16 +101,17 @@ def commit_scope_head(workspace, scope: str, *, clock) -> dict:
                     "manifest_hash": manifest_hash}
         request_hash = content_hash(identity)
         receipt_id = "size-head-" + request_hash.split(":")[-1][:32]
-        receipt = commit_snapshot(
-            workspace.conn, scope=scope, request_hash=request_hash,
-            contracts=resolved.contracts, objects=resolved.objects,
-            records=resolved.records, manifests=list(resolved.table_manifests.values()),
-            snapshot=resolved.snapshot, expected_head_snapshot_id=None,
-            expected_head_generation=0, receipt_id=receipt_id, attempt_id=receipt_id,
-            fence=1, fence_check=_head_check(scope, sid), clock=clock, store=workspace.store,
-            record_references=lambda conn, rid: reference_catalog.insert_reference_inputs(
-                conn, rid, inputs),
-            audit_partitions=False)
+        with _value_limit(workspace.conn):
+            receipt = commit_snapshot(
+                workspace.conn, scope=scope, request_hash=request_hash,
+                contracts=resolved.contracts, objects=resolved.objects,
+                records=resolved.records, manifests=list(resolved.table_manifests.values()),
+                snapshot=resolved.snapshot, expected_head_snapshot_id=None,
+                expected_head_generation=0, receipt_id=receipt_id, attempt_id=receipt_id,
+                fence=1, fence_check=_head_check(scope, sid), clock=clock, store=workspace.store,
+                record_references=lambda conn, rid: reference_catalog.insert_reference_inputs(
+                    conn, rid, inputs),
+                audit_partitions=False)
         _log(f"stage=head done scope={scope} snapshot={sid} reference_inputs={len(inputs)} "
              f"{time.monotonic() - started:.2f}s elapsed")
         return {"scope": scope, "snapshot_id": sid, "manifest_hash": manifest_hash,
