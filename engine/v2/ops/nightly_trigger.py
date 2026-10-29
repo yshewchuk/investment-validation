@@ -1088,10 +1088,13 @@ def _native_score_batch_pending(conn, plan_job_ids, service) -> bool:
             return False
         placeholders = ", ".join("?" for _ in plan_job_ids)
         rows = conn.execute(
-            f"SELECT idempotency_key, spec_json FROM jobs "
+            f"SELECT idempotency_key, "
+            "CASE WHEN typeof(spec_json) = 'text' AND "
+            "length(CAST(spec_json AS BLOB)) <= ? THEN spec_json ELSE NULL END AS spec_json "
+            "FROM jobs "
             f"WHERE job_id IN ({placeholders}) "
             "AND kind = 'legacy_score' AND state = 'succeeded'",
-            tuple(plan_job_ids)).fetchall()
+            (nightly.NATIVE_SCORE_BATCH_SPEC_MAX_BYTES, *plan_job_ids)).fetchall()
         session = scope_hash = None
         for row in rows:
             parsed = nightly._session_scope_from_score_key(row["idempotency_key"])

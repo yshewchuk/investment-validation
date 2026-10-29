@@ -195,9 +195,11 @@ class _NativeBatchConn:
         self.failure_recorded = False
         self.sql = ""
         self.params = ()
+        self.queries = []
 
     def execute(self, sql, params=()):
         self.sql, self.params = sql, params
+        self.queries.append((sql, params))
         return self
 
     def fetchall(self):
@@ -253,6 +255,15 @@ def test_hold_for_pool_waits_for_its_native_score_batch(monkeypatch):
     assert key_args[-1][:2] == ("2026-09-26", "sha256:scope")
     assert seen_keys
     assert seen_keys[-1] == "nightly:2026-09-26:sha256:scope:native_score_batch"
+    spec_queries = [
+        (sql, params) for sql, params in conn.queries
+        if "idempotency_key" in sql and "CASE WHEN typeof(spec_json)" in sql
+    ]
+    assert len(spec_queries) == 1
+    spec_sql, spec_params = spec_queries[0]
+    assert "length(CAST(spec_json AS BLOB)) <= ?" in spec_sql
+    assert spec_params[0] == nightly.NATIVE_SCORE_BATCH_SPEC_MAX_BYTES
+    assert spec_params[1:] == ("score-job",)
 
 
 class _RetryableNativeWaitService:
