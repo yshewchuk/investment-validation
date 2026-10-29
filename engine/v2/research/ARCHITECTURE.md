@@ -987,14 +987,14 @@ an uncaught traceback instead.
 - A trade-table write always goes through
   `engine.v2.data.generic_incremental`'s fenced commit — never a
   read-modify-write of an existing table version.
-- Pricing/planning/chain-indexing cores that moved from legacy
-  (`replay.py`, `_plan.py`, `_chains.py`, `_trades_table.py`) stay
-  byte-identical to their legacy counterparts; only the store-reaching
-  edges were rewritten, so the v2 path and the legacy board cannot drift
-  on arithmetic. `tests/test_v2_research_tools.py` /
-  `test_v2_research_replay.py` / `test_v2_research_build_trades.py` /
-  `test_v2_research_reconcile_trades.py` enforce this by comparing against
-  the legacy function on the same synthetic frame.
+- Pure pricing/planning/chain cores (`replay.py`, `_plan.py`, `_chains.py`, `_trades_table.py`) retain legacy arithmetic; only store edges changed. Synthetic legacy parity remains covered by the research tools/replay/build-trades/reconcile-trades tests.
+
+## Source-free regression evidence
+
+`regression_evidence.normalize_forecasts` validates exact supplied event/horizon coverage, explicit prediction-column names and signed/nonnegative domains; complete finite Real/Integral rows normalize to detached ordered JSON floats/ints. Strict JSON mode rejects non-native numeric types; Booleans, duplicates, extra fields and nonfinite values refuse.
+`error_metrics` pools finite residuals at equal row weight, scaling before squaring, and returns count/RMSE/MAE; empty, nonnumeric or nonfinite residuals refuse. Complete equal horizon coverage yields equal event weight; the caller owns that coverage and the subtraction producing residuals.
+Both helpers raise numeric/structural exceptions without partial results, I/O, fitting, cache, retries or publication. They use stdlib arithmetic/statistics. Membership/domain arguments are caller declarations, not sealed target identity, source admission or holdout authority.
+Existing experiment magnitude normalization delegates with fixed nonnegative domain/column; magnitude metrics preserve their typed failure envelope and numeric results. Signed use is an additive platform primitive, not a registered IV experiment.
 
 ## Diagram
 
