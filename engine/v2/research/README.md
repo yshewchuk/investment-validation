@@ -491,3 +491,5 @@ access. Empty required source inventories refuse `CONTRACT_MISMATCH`, not an
 unbounded query or builtin error; snapshot shape failures remain `SNAPSHOT_UNRESOLVED`.
 Daily quote lineage uses native ticker/year/date fragment membership planning;
 yearly files pruned for other tickers are not reported as consumed quote sources.
+
+The experiment-owned `distribution_market` adapter also consumes the native calendar, chain, plan and pricing helpers for pinned STR-THRU research quotes; it adds no shared eligibility or source-reader policy.
