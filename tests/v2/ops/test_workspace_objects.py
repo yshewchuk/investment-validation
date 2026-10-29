@@ -106,3 +106,27 @@ def test_wrong_sized_destination_is_never_repaired(prod):
             admit_closure_objects(ws)
         assert _details(caught) == ("WORKSPACE_REFUSED", "destination_conflict")
         assert destination.read_bytes() == b"short"
+
+
+def test_same_size_corrupt_destination_is_refused(prod):
+    with _create(prod) as ws:
+        copy_closure_rows(ws)
+        destination = ws.store.root / "objects" / prod.object.parent.name / prod.object.name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(b"x" * prod.object.stat().st_size)
+        with pytest.raises(OpsError) as caught:
+            admit_closure_objects(ws)
+        assert _details(caught) == ("WORKSPACE_REFUSED", "object_changed")
+        assert destination.read_bytes() == b"x" * prod.object.stat().st_size
+
+
+def test_source_object_that_grew_is_refused_without_partial(prod):
+    with _create(prod) as ws:
+        copy_closure_rows(ws)
+        before = _admitted(ws)
+        prod.object.write_bytes(prod.object.read_bytes() + b"extra")
+        with pytest.raises(OpsError) as caught:
+            admit_closure_objects(ws)
+        assert _details(caught) == ("WORKSPACE_REFUSED", "object_changed")
+        assert _admitted(ws) == before
+        assert not list((ws.store.root / "objects").rglob("*.part"))

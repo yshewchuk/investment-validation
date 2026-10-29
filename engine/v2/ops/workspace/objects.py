@@ -8,6 +8,7 @@ import stat
 import sys
 import time
 
+from engine.v2.data.errors import DataError
 from engine.v2.foundation.artifacts import ensure_directory, fsync_directory
 from engine.v2.ops.errors import OpsError, fail
 
@@ -34,13 +35,20 @@ def _log(message: str) -> None:
     print("[workspace] " + message, file=sys.stderr, flush=True)
 
 
-def _present(path, size: int, object_id: str) -> bool:
+def _present(path, size: int, digest: str, object_id: str) -> bool:
+    """True if a complete, hash-verified destination exists; a bad one is never repaired."""
     try:
         info = os.lstat(path)
     except FileNotFoundError:
         return False
     if not stat.S_ISREG(info.st_mode) or info.st_size != size:
         raise _refuse("destination_conflict", object_id=object_id)
+    hasher = hashlib.sha256()
+    with open(path, "rb") as reader:
+        while chunk := reader.read(_CHUNK):
+            hasher.update(chunk)
+    if hasher.hexdigest() != digest:
+        raise _refuse("object_changed", object_id=object_id)
     return True
 
 
@@ -57,15 +65,17 @@ def _open_source(path, object_id: str):
 
 def _copy(source, destination, digest: str, size: int, object_id: str) -> None:
     ensure_directory(destination.parent)
-    part = destination.with_name(destination.name + ".part")
+    part = destination.with_name(f"{destination.name}.{os.getpid()}.{time.monotonic_ns()}.part")
     try:
         hasher, total = hashlib.sha256(), 0
         with _open_source(source, object_id) as reader:
             out = os.open(part, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
             with os.fdopen(out, "wb") as writer:
-                while chunk := reader.read(_CHUNK):
+                while chunk := reader.read(min(_CHUNK, size + 1 - total)):
                     hasher.update(chunk)
                     total += len(chunk)
+                    if total > size:
+                        raise _refuse("object_changed", object_id=object_id)
                     writer.write(chunk)
                 writer.flush()
                 os.fsync(writer.fileno())
@@ -84,7 +94,7 @@ def admit_closure_objects(workspace) -> dict:
     """Copy exactly the pinned snapshot's fragment objects from the read-only source store."""
     try:
         return _admit(workspace)
-    except OpsError:
+    except (OpsError, DataError):
         raise
     except Exception as exc:
         raise _refuse("storage_failure", cause=type(exc).__name__) from exc
@@ -103,31 +113,32 @@ def _admit(workspace) -> dict:
     if conn.execute("SELECT 1 FROM data_raw_receipts LIMIT 1").fetchone() is not None:
         raise _refuse("receipts_present")
     workspace.source_snapshot()
-    rows = conn.execute(_NAMED, (snapshot_id,)).fetchall()
-    if len(rows) > _MAX_OBJECTS:
-        raise _refuse("objects_over_cap", objects=len(rows))
     started = last = time.monotonic()
-    _log(f"object admission start objects={len(rows)}")
-    copied = present = copied_bytes = 0
-    for index, (object_id, content_hash, size, storage_key) in enumerate(rows, 1):
+    _log("object admission start")
+    copied = present = copied_bytes = total_bytes = index = 0
+    for index, (object_id, content_hash, size, storage_key) in enumerate(
+            conn.execute(_NAMED, (snapshot_id,)), 1):
+        if index > _MAX_OBJECTS:
+            raise _refuse("objects_over_cap")
         match = _HASH.match(content_hash) if isinstance(content_hash, str) else None
         if (match is None or type(size) is not int or size < 0
                 or storage_key != f"objects/{match.group(1)[:2]}/{match.group(1)}"):
             raise _refuse("object_ref_invalid", object_id=object_id)
+        total_bytes += size
+        if total_bytes > _MAX_BYTES:
+            raise _refuse("bytes_over_cap", object_id=object_id)
         destination = target_root / storage_key
-        if _present(destination, size, object_id):
+        if _present(destination, size, match.group(1), object_id):
             present += 1
         else:
-            if copied_bytes + size > _MAX_BYTES:
-                raise _refuse("bytes_over_cap", object_id=object_id)
             _copy(source_root / storage_key, destination, match.group(1), size, object_id)
             copied += 1
             copied_bytes += size
         if time.monotonic() - last >= _PROGRESS_SECONDS:
             last = time.monotonic()
-            _log(f"{index}/{len(rows)} objects, {copied} copied, {last - started:.0f}s elapsed")
+            _log(f"{index} objects, {copied} copied, {last - started:.0f}s elapsed")
     workspace.source_snapshot()
     _log(f"object admission end copied={copied} present={present} bytes={copied_bytes} "
          f"{time.monotonic() - started:.0f}s elapsed")
-    return {"snapshot_id": snapshot_id, "objects": len(rows), "copied": copied,
+    return {"snapshot_id": snapshot_id, "objects": index, "copied": copied,
             "present": present, "bytes": copied_bytes}
