@@ -1,6 +1,7 @@
 """Workspace closure catalog rows: bounded copy from the read-only source."""
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import sqlite3
 from types import SimpleNamespace
@@ -28,6 +29,15 @@ from engine.v2.data.repository import Repository
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.workspace import catalog_rows
 from engine.v2.ops.workspace.catalog_rows import copy_closure_rows
+
+_PARENT_SEC = dataclasses.replace(
+    _SEC, contract_id=_SEC.contract_id + ".parent", table_name="securities_parent",
+    definition_hash="sha256:" + "0" * 64)
+_PARENT_SEC = dataclasses.replace(
+    _PARENT_SEC, definition_hash=manifests.table_contract_hash(_PARENT_SEC))
+_PARENT_SEC_REF = dataclasses.replace(
+    _SEC_REF, contract_id=_PARENT_SEC.contract_id,
+    definition_hash=_PARENT_SEC.definition_hash)
 
 
 def _production_fragments(prod, snapshot_id):
@@ -71,16 +81,17 @@ def _insert_contract(ws, prod, contract_id, definition_hash):
 
 
 def _commit_with_version_parent(conn, clock, store, ticker, receipt_id, head, generation,
-                                parent_version_id):
-    record = publish_and_inspect(store, _SEC, _SEC_REF, [_row(ticker)], partition_key="2024")
+                                parent_version_id, *, contract=_SEC, contract_ref=_SEC_REF,
+                                table_name="securities"):
+    record = publish_and_inspect(store, contract, contract_ref, [_row(ticker)], partition_key="2024")
     manifest = manifests.dataset_manifest(
-        _SEC_REF, [record], knowledge_mode="reconstructed", coverage_receipt_refs=(RECEIPT,),
+        contract_ref, [record], knowledge_mode="reconstructed", coverage_receipt_refs=(RECEIPT,),
         availability_evidence_refs=(), parent_dataset_version_id=parent_version_id)
-    snap = manifests.snapshot_ref({"securities": manifest}, calendar_version="cal.v1",
+    snap = manifests.snapshot_ref({table_name: manifest}, calendar_version="cal.v1",
                                   source_priority_version="prio.v1",
                                   finality_receipt_refs=(RECEIPT,), parent_snapshot_id=head)
     receipt = catalog.commit_snapshot(
-        conn, scope="shadow", request_hash=fake_hash(receipt_id), contracts=[_SEC],
+        conn, scope="shadow", request_hash=fake_hash(receipt_id), contracts=[contract],
         objects=[record.object_ref], records=[record], manifests=[manifest], snapshot=snap,
         expected_head_snapshot_id=head, expected_head_generation=generation,
         receipt_id=receipt_id, attempt_id="att-" + receipt_id, fence=1,
@@ -94,7 +105,8 @@ def prod_dv(tmp_path):
     root.mkdir()
     conn, clock, store = catalog_and_store(root)
     first, _, first_manifest = _commit_with_version_parent(
-        conn, clock, store, "AAA", "r1", None, 0, None)
+        conn, clock, store, "AAA", "r1", None, 0, None, contract=_PARENT_SEC,
+        contract_ref=_PARENT_SEC_REF, table_name="securities_parent")
     snap, record, _ = _commit_with_version_parent(
         conn, clock, store, "BBB", "r2", first.snapshot_id, 1,
         first_manifest.dataset_version_ref.dataset_version_id)
@@ -155,7 +167,10 @@ def test_dataset_version_parent_chain_is_copied(prod_dv):
         assert {row[0] for row in ws.conn.execute(
             "SELECT dataset_version_id FROM data_version_fragments")} == {pinned_version}
         assert ws.conn.execute("SELECT COUNT(*) FROM data_fragments").fetchone()[0] == 1
-        assert ws.conn.execute("SELECT COUNT(*) FROM data_contracts").fetchone()[0] == 1
+        assert ws.conn.execute("SELECT COUNT(*) FROM data_contracts").fetchone()[0] == 2
+        assert {row[0] for row in ws.conn.execute(
+            "SELECT contract_id FROM data_contracts")} == {
+                _SEC.contract_id, _PARENT_SEC.contract_id}
         resolved = Repository(ws.conn).resolve_full(prod_dv.snap.snapshot_id)
         assert resolved.snapshot.manifest_hash == prod_dv.snap.manifest_hash
 
