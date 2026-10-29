@@ -127,7 +127,7 @@ def test_policy_literal_identity_and_no_default():
     policy = eligibility.eligibility_policy(version=VERSION, embargo_days=30)
     expected = {"schema_version": VERSION, "embargo_days": 30, "endpoints": "inclusive",
         "group_key": "event_id", "window_key": "ticker", "applies_to": "development",
-        "evaluation": "preserve_membership", "policy_id": "sha256:dff629fde866872115a22f90305909b9f7176451439a3cc8f27e3e884c22376c"}
+        "evaluation": "preserve_outside_ambiguous_random_ticker", "policy_id": "sha256:c6a72238ffba179ad6f4824e3df766902eb739d49b789b530bd3f2116235a992"}
     assert policy == expected
     corrupted = {**policy, "embargo_days": 31}
     with pytest.raises(AssertionError):
@@ -284,10 +284,15 @@ def test_ambiguous_random_metadata_keeps_membership_and_excludes_same_ticker(tmp
     held = history_event("2024-06-14", protected=True)
     dev = history_event("2024-11-01")
     other = history_event("2024-06-14", ticker="OTHER")
-    held[field] = value
     events = [held, dev, other]
     conn, repository, snapshot, _ = setup(tmp_path, monkeypatch, events)
     try:
+        original = eligibility.canonical_events
+        def ambiguous(repository, snapshot):
+            rows = original(repository, snapshot)
+            rows.loc[rows["event_id"] == held["event_id"], field] = value
+            return rows
+        monkeypatch.setattr(eligibility, "canonical_events", ambiguous)
         groups = [group(e) for e in events]
         result = plan(repository, snapshot, groups, evaluation=[held["event_id"], dev["event_id"], other["event_id"]])
         assert "ambiguous_random_events" in result
@@ -301,6 +306,11 @@ def test_ambiguous_random_metadata_keeps_membership_and_excludes_same_ticker(tmp
         assert "random" in exclusions[held["event_id"]]
         assert "ambiguous" in exclusions[held["event_id"]]
         assert sum(1 for ex in result["exclusions"] if "random" in ex["reasons"]) == 1
+        assert result["exclusions"] == [
+            {"event_id": held["event_id"], "reasons": ["ambiguous", "random", "embargo_decision_date",
+                "embargo_event_window", "embargo_label_window", "embargo_source_session_ceiling"]},
+            {"event_id": dev["event_id"], "reasons": ["embargo_decision_date", "embargo_event_window",
+                "embargo_label_window", "embargo_source_session_ceiling"]}]
         assert held["event_id"] not in result["retained_event_ids"]
         assert dev["event_id"] not in result["retained_event_ids"]
         assert result["retained_event_ids"] == [other["event_id"]]
@@ -308,6 +318,32 @@ def test_ambiguous_random_metadata_keeps_membership_and_excludes_same_ticker(tmp
         assert result["evaluation_exclusions"] == [
             {"event_id": held["event_id"], "reasons": ["embargo_ticker"]},
             {"event_id": dev["event_id"], "reasons": ["embargo_ticker"]}]
+    finally:
+        conn.close()
+
+
+def test_public_path_negative_control(tmp_path, monkeypatch):
+    """An ambiguous event outside a random window is not treated as random."""
+    from engine.v2.foundation.experiment_holdouts import ExperimentHoldouts
+
+    held = history_event("2024-06-14", protected=True)
+    dev = history_event("2024-11-01")
+    held["date_conflict"] = True
+    for prefix, event in (("AMBIGUOUS", held), ("DEVELOPMENT", dev)):
+        for i in range(100):
+            candidate = f"{prefix}:{i}"
+            if not ExperimentHoldouts.random_membership(candidate):
+                event["event_id"] = candidate
+                break
+    conn, repository, snapshot, _ = setup(tmp_path, monkeypatch, [held, dev])
+    try:
+        result = plan(repository, snapshot, [group(dev)],
+                      evaluation=[held["event_id"], dev["event_id"]])
+        assert result["ambiguous_random_events"] == []
+        assert result["random_windows"] == []
+        assert result["retained_event_ids"] == [dev["event_id"]]
+        assert result["evaluation_event_ids"] == sorted([held["event_id"], dev["event_id"]])
+        assert result["evaluation_exclusions"] == []
     finally:
         conn.close()
 

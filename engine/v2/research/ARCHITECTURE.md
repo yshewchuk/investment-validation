@@ -782,8 +782,8 @@ No calendar guessing, outcome/feature decoding, write, registration or fit occur
 Random-held windows are merged per ticker. Inclusive event/label interval or
 forecast-point overlap excludes an entire development group; shared random,
 rolling and ambiguous labels also exclude it. Results bind sorted groups, policy,
-metadata identity, merged windows, retained IDs, reasons, coverage and a separately
-preserved evaluation manifest into `plan_id`. Supplied documents are detached.
+metadata identity, merged windows, retained IDs, development reasons, coverage, `ambiguous_random_events`,
+filtered `evaluation_event_ids` and `evaluation_exclusions` into `plan_id`. Supplied documents are detached.
 There are no retries, persistence, cache or partial results. Bounded membership,
 metadata, window and group progress plus stage timing/RSS go to stderr; admission
 and planning refusals report only the native error code, not row values.
@@ -796,8 +796,8 @@ and planning refusals report only the native error code, not row values.
 | Missing/duplicate classifier columns, malformed event IDs or metadata values that prevent classification | `CONTRACT_MISMATCH` |
 | Invalid scalar dates/sessions or structural collisions handled by membership classification | Successful classification with `ambiguous` membership; structural ambiguity IDs returned |
 | Invalid as-of month, unknown group/evaluation identity or colliding canonical population IDs | `HOLDOUT_ACCESS_DENIED` |
-| Random event is structurally ambiguous | With a usable ticker/date, keep membership unchanged, record its ID and add an inclusive `date.min`–`date.max` ticker window; exclude and label development groups and evaluation IDs for that ticker, while preserving other evaluation IDs; without usable ticker/date, `HOLDOUT_ACCESS_DENIED` |
-| Valid protected/overlapping development group | Excluded whole event with reasons; evaluation IDs for other tickers are preserved |
+| Random event is structurally ambiguous | With a usable ticker/date, keep membership unchanged, record its ID and add an inclusive `date.min`–`date.max` ticker window; exclude and label development groups and evaluation IDs for that ticker, while preserving other evaluation IDs; without usable ticker/date, or if bounded window arithmetic overflows, `HOLDOUT_ACCESS_DENIED` |
+| Valid protected/overlapping development group | Excluded whole event with reasons; evaluation IDs outside an ambiguous-random ticker are preserved and listed in `evaluation_event_ids` |
 
 This is neither a physical-read capability nor a statistical isolation guarantee.
 Long-memory/cross-ticker effects remain; chronological and random holdouts are

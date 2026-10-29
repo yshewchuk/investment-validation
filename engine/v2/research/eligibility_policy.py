@@ -20,7 +20,7 @@ def eligibility_policy(*, version, embargo_days):
         raise errors.fail("CONTRACT_MISMATCH", "explicit supported policy and nonnegative integer days required")
     identity = {"schema_version": version, "embargo_days": embargo_days,
         "endpoints": "inclusive", "group_key": "event_id", "window_key": "ticker",
-        "applies_to": "development", "evaluation": "preserve_membership"}
+        "applies_to": "development", "evaluation": "preserve_outside_ambiguous_random_ticker"}
     return {**identity, "policy_id": content_hash(identity)}
 
 
@@ -100,11 +100,7 @@ def _add_random_window(event, memberships, ambiguous, delta, by_ticker, ambiguou
         return
     if event.event_id in ambiguous:
         ticker = event.ticker
-        canonical_ticker = event.canonical_ticker
         if type(ticker) is not str or not ticker or ticker != ticker.strip():
-            raise ValueError
-        if (type(canonical_ticker) is not str or not canonical_ticker
-                or canonical_ticker != canonical_ticker.strip() or canonical_ticker != ticker):
             raise ValueError
         calendar_date(event.event_date)
         calendar_date(event.canonical_date)
@@ -189,7 +185,8 @@ def _classify_groups(groups, indexed, labels, windows):
 
 
 def plan_eligibility(repository, snapshot, *, as_of_month, policy, metadata, evaluation_event_ids):
-    """Recheck population membership; retain evaluation IDs without granting reads.
+    """Recheck population membership; exclude evaluation IDs on ambiguous-random
+    tickers and record those exclusions without granting reads.
 
     Producer-declared label/forecast bounds must already be established against
     the pinned source. They are validated structurally, NOT proven from payloads.
