@@ -49,8 +49,8 @@ _TABLES = (
 
 _CHUNK = 5000
 _BATCH_BYTES = 16 << 20
-_MAX_ROWS = 2_000_000
-_MAX_BYTES = 1 << 30
+_MAX_ROWS = 8_000_000
+_MAX_BYTES = 3 << 30
 _REQUIRED = ("data_snapshots", "data_snapshot_tables",
              "data_dataset_versions", "data_contracts")
 
@@ -78,10 +78,11 @@ def _log(message: str) -> None:
     print("[workspace] " + message, file=sys.stderr, flush=True)
 
 
-def _digest(rows):
+def _digest(rows, budget: _Budget, table: str):
     digest = hashlib.sha256()
     count = 0
     for row in rows:
+        budget.add(table, row)
         digest.update(repr(tuple(row)).encode("utf-8"))
         count += 1
     return digest.hexdigest(), count
@@ -92,9 +93,8 @@ def _read(conn: sqlite3.Connection, table: str, where: str, sid: str):
                         {"s": sid})
 
 
-def _insert_rows(src, dst, sid) -> dict:
+def _insert_rows(src, dst, sid, budget: _Budget) -> dict:
     counts = {}
-    budget = _Budget()
     for table, where in _TABLES:
         cursor = _read(src, table, where, sid)
         source_columns = tuple(column[0] for column in cursor.description)
@@ -124,16 +124,18 @@ def _insert_rows(src, dst, sid) -> dict:
     return counts
 
 
-def _verify_rows(src, dst, sid, started) -> None:
+def _verify_rows(src, dst, sid, started, budget: _Budget) -> None:
     for table, where in _TABLES:
-        source_digest, source_count = _digest(_read(src, table, where, sid))
+        source_digest, source_count = _digest(
+            _read(src, table, where, sid), budget, table)
         if source_count <= 0 and table in _REQUIRED:
             raise _refuse("source_row_missing", table=table)
         destination_count = dst.execute(
             "SELECT COUNT(*) FROM %s" % table).fetchone()[0]
         if destination_count != source_count:
             raise _refuse("unexpected_rows", table=table)
-        destination_digest, _ = _digest(_read(dst, table, where, sid))
+        destination_digest, _ = _digest(
+            _read(dst, table, where, sid), budget, table)
         if source_digest != destination_digest:
             raise _refuse("row_mismatch", table=table)
         _log(f"stage=copy table={table} rows={source_count} "
@@ -174,8 +176,9 @@ def copy_closure_rows(workspace) -> dict:
             dst.execute("BEGIN IMMEDIATE")
             try:
                 dst.execute("PRAGMA defer_foreign_keys = ON")
-                counts = _insert_rows(src, dst, sid)
-                _verify_rows(src, dst, sid, started)
+                budget = _Budget()
+                counts = _insert_rows(src, dst, sid, budget)
+                _verify_rows(src, dst, sid, started, budget)
                 # Identical digests above prove the rows equal the source; resolve_full cannot run inside this transaction.
                 _verify_catalog(dst)
                 workspace.source_snapshot()
