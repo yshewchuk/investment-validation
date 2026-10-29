@@ -163,6 +163,20 @@ def test_json_syntax_duplicates_and_native_shapes_refuse(catalog, table, field, 
     assert refuse(catalog).problem.message == "catalog transfer malformed"
 
 
+def test_float_key_bound_scalar_is_admitted(catalog):
+    catalog.execute("UPDATE data_fragments SET key_bounds_json=?",
+                    ('{"primary_key_min":["first",1,22.5],"primary_key_max":["last",9,23.0]}',))
+    payload = read(catalog)
+    assert payload.fragments[0]["f.key_bounds_json"].primary_key_min[2] == 22.5
+
+
+@pytest.mark.parametrize("bound", ['Infinity', '-Infinity', 'NaN', 'null', '[1]', '{"a":1}'])
+def test_nonfinite_or_other_key_bound_scalar_refuses(catalog, bound):
+    catalog.execute("UPDATE data_fragments SET key_bounds_json=?",
+                    ('{"primary_key_min":["first",1,%s],"primary_key_max":["last",9,true]}' % bound,))
+    refuse(catalog)
+
+
 def test_recursion_error_during_json_decode_is_redacted(catalog, monkeypatch):
     def deep(*_, **__):
         raise RecursionError("private")
