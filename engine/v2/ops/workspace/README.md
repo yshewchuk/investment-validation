@@ -10,11 +10,12 @@ Isolated experiment research workspaces under the planned dependency policy
 - Verify a pinned snapshot's complete closure read-only (`closure`).
 - Create and reopen a write sandbox over that snapshot with its own catalog, store, scratch and output (`overlay`).
 - Bind a logical consumer scope to that immutable workspace snapshot with a read pin (`scope`).
+- Copy the pinned snapshot's catalog rows, including its ancestor chain, into the workspace catalog (`catalog_rows`).
 - Refuse supervisor or job execution from inside a workspace (`guard`).
 
 ## Non-responsibilities
 
-- **Copy production data** — the snapshot is read in place.
+- **Copy production data** — the snapshot is read in place; only catalog rows are copied, never object files.
 - **Build panels, bounds or registrations** — consumers do, inside the workspace.
 - **Read or update a native scope head** — the scope adapter records a workspace-local binding to the pinned snapshot; it never consults or mutates `data_snapshot_heads`.
 
@@ -23,5 +24,6 @@ Isolated experiment research workspaces under the planned dependency policy
 `overlay.create_workspace`, `overlay.open_workspace`, `overlay.ResearchWorkspace`,
 `overlay.SnapshotOnlyRepository`, `closure.verify_snapshot_closure`, `closure.SnapshotClosure`
 `scope.validate_size_scope_request`, `scope.resolve_size_scope_snapshot`,
-`scope.size_scope_repository`, `scope.WorkspaceScopeRepository`, and
+`scope.size_scope_repository`, `scope.WorkspaceScopeRepository`,
+`catalog_rows.copy_closure_rows`, and
 `guard.refuse_workspace_execution` (the last is imported by `supervisor` and `executor`).
