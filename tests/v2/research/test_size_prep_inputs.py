@@ -10,16 +10,21 @@ import pytest
 from engine.v2.contracts import DataQuery, KeyPredicate, TableContractRef
 from engine.v2.data.computed_move_bounds import COLUMNS, CONTRACT, TABLE
 from engine.v2.data.repository import Repository
-from engine.v2.foundation import ArtifactStore, content_hash
+from engine.v2.foundation import ArtifactStore, canonical_json, content_hash
 from engine.v2.ops import computed_moves_store
 from engine.v2.ops.bootstrap import open_catalog
 from engine.v2.ops.errors import OpsError
+from engine.v2.ops.workspace.overlay import create_workspace
+from engine.v2.ops.workspace.scope import SCOPE_HEAD_VERSION
 from experiments import size_prep_inputs as prep
 from tests.ops_support import FakeClock
+from tests.data_scan_support import catalog_and_store, commit_tables, contract_for, contract_ref_for, publish_and_inspect
 from tests.v2.ops.test_v2_ops_computed_moves_store import (
     _AS_OF, _BDAYS, _EVENT_DAYS, _build_parent, _closes_csv, _event_row, _head_row, _series_csv)
 
 REF = TableContractRef(contract_id=CONTRACT.contract_id, definition_hash=CONTRACT.definition_hash)
+_EVENTS = contract_for("earnings_events")
+_EVENTS_REF = contract_ref_for(_EVENTS)
 
 
 def _bound_rows(repository, snapshot):
@@ -425,3 +430,194 @@ def test_production_roots_must_be_a_collection_of_paths(source_root, workspace):
     for bad in (str(root), root, None, [1], b"x"):
         _refusal(lambda: prep.generate_bounds(root, production_roots=bad, **base), "INVALID_REQUEST")
     assert not (root / "size_prep").exists()
+
+
+def _digest_tree(root):
+    return {str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in sorted(root.rglob("*")) if path.is_file()}
+
+
+@pytest.fixture
+def pinned_ws(tmp_path):
+    """A real research workspace over a production snapshot whose earnings_events carry only EEEE rows."""
+    prod = tmp_path / "wsprod"
+    prod.mkdir()
+    conn, clock, store = catalog_and_store(prod)
+    record = publish_and_inspect(store, _EVENTS, _EVENTS_REF,
+                                 [_event_row("EEEE", day) for day in _EVENT_DAYS], "2024")
+    snap = commit_tables(conn, clock, {"earnings_events": [record]}, {"earnings_events": _EVENTS},
+                         store=store)
+    conn.close()
+    workspace = create_workspace(tmp_path / "ws", production_catalog=prod / "catalog.sqlite",
+                                 production_store=prod / "store", snapshot_id=snap.snapshot_id,
+                                 manifest_hash=snap.manifest_hash, clock=clock)
+    return workspace, clock, prod
+
+
+@pytest.fixture
+def no_events_ws(tmp_path):
+    """A real research workspace over a production snapshot that carries no earnings_events table."""
+    prod = tmp_path / "nsprod"
+    prod.mkdir()
+    conn, clock, store = catalog_and_store(prod)
+    securities = contract_for("securities")
+    row = dict(ticker="EEEE", year=2024, first_date=None, last_date=None, mcap_usd=1.5e9,
+               mcap_log=21.1, mcap_raw=1.5, mcap_unit_era="billions", mcap_quantized=False,
+               n_obs=250, src="orats")
+    record = publish_and_inspect(store, securities, contract_ref_for(securities), [row], "2024")
+    snap = commit_tables(conn, clock, {"securities": [record]}, {"securities": securities}, store=store)
+    conn.close()
+    workspace = create_workspace(tmp_path / "nsws", production_catalog=prod / "catalog.sqlite",
+                                 production_store=prod / "store", snapshot_id=snap.snapshot_id,
+                                 manifest_hash=snap.manifest_hash, clock=clock)
+    return workspace, clock, prod
+
+
+def _ws_state(workspace):
+    files = _digest_tree(workspace.paths.store)
+    artifacts = workspace.conn.execute("SELECT COUNT(*) FROM artifacts").fetchone()[0]
+    return files, artifacts
+
+
+def test_v1_manifest_shape_is_unchanged_when_no_exclusions_are_requested(source_root):
+    v1 = prep.build_manifest(source_root, session_ceiling=_AS_OF, tickers=["AAAA"])
+    assert v1["schema_version"] == "tier1_history_manifest.v1" == prep.MANIFEST_VERSION
+    assert set(v1) == {"schema_version", "session_ceiling", "entries", "manifest_id"}
+    assert "excluded_tickers" not in canonical_json(v1)
+    assert v1["manifest_id"] == content_hash({k: v for k, v in v1.items() if k != "manifest_id"})
+    assert prep.validate_manifest(deepcopy(v1)) == v1
+
+
+def test_exclusion_manifest_is_distinctly_identified_and_canonical(source_root):
+    plain = prep.build_manifest(source_root, session_ceiling=_AS_OF, tickers=["AAAA"])
+    with_empty = prep.build_manifest(source_root, session_ceiling=_AS_OF, tickers=["AAAA", "BBBB"],
+                                     allow_exclusions=True)
+    assert with_empty["schema_version"] == "tier1_history_manifest.v2" == prep.EXCLUSION_MANIFEST_VERSION
+    assert plain["schema_version"] == prep.MANIFEST_VERSION
+    assert with_empty["excluded_tickers"] == [] and with_empty["entries"] == plain["entries"]
+    assert with_empty["manifest_id"] != plain["manifest_id"]
+    v2 = prep.build_manifest(source_root, session_ceiling=_AS_OF, tickers=["QQQQ", "AAAA", "ZZZZ"],
+                             allow_exclusions=True)
+    assert v2["excluded_tickers"] == ["QQQQ", "ZZZZ"] and prep.validate_manifest(deepcopy(v2)) == v2
+    assert v2["manifest_id"] == content_hash({k: v for k, v in v2.items() if k != "manifest_id"})
+    for mutate in (lambda m: m.update(excluded_tickers=["ZZZZ", "QQQQ"]),
+                   lambda m: m.update(excluded_tickers=["QQQQ", "QQQQ"]),
+                   lambda m: m.update(excluded_tickers=[" ZZZZ"]),
+                   lambda m: m.update(excluded_tickers=["AAAA"]),
+                   lambda m: (m.update(excluded_tickers=[]), m["entries"].clear())):
+        tampered = deepcopy(v2)
+        mutate(tampered)
+        tampered["manifest_id"] = prep._identity(tampered)
+        _refusal(lambda: prep.validate_manifest(tampered), "INVALID_REQUEST")
+    stripped = deepcopy(v2)
+    del stripped["excluded_tickers"]
+    _refusal(lambda: prep.validate_manifest(stripped), "INVALID_REQUEST")
+    for pair in (lambda m: m.update(schema_version=prep.MANIFEST_VERSION),
+                 lambda m: m.update(schema_version="tier1_history_manifest.v3")):
+        tampered = deepcopy(v2)
+        pair(tampered)
+        tampered["manifest_id"] = prep._identity(tampered)
+        _refusal(lambda: prep.validate_manifest(tampered), "INVALID_REQUEST")
+    promoted = deepcopy(plain)
+    promoted["excluded_tickers"] = []
+    promoted["manifest_id"] = prep._identity(promoted)
+    _refusal(lambda: prep.validate_manifest(promoted), "INVALID_REQUEST")
+
+
+def test_legacy_generate_bounds_refuses_v2_manifests_before_opening_the_catalog(source_root, workspace):
+    root, parent = workspace
+    manifest = prep.build_manifest(source_root, session_ceiling=_AS_OF, tickers=["AAAA", "ZZZZ"],
+                                   allow_exclusions=True)
+    with pytest.raises(OpsError) as raised:
+        prep.generate_bounds(root, source_root=source_root, manifest=manifest, scope="shadow",
+                             as_of=_AS_OF, production_roots=_PRODUCTION)
+    assert raised.value.code == "WORKSPACE_REFUSED"
+    assert raised.value.problem.details["reason"] == "workspace_admission_required"
+    assert not (root / "size_prep").exists()
+    conn = open_catalog(root / "catalog.sqlite", clock=FakeClock())
+    try:
+        assert _head_row(conn)["snapshot_id"] == parent
+    finally:
+        conn.close()
+
+
+def test_listed_exclusions_fetch_empty_even_under_strict(source_root):
+    manifest = prep.build_manifest(source_root, session_ceiling=_AS_OF, tickers=["AAAA", "ZZZZ"],
+                                   allow_exclusions=True)
+    _, lenient = prep.pinned_history_fetcher(source_root, manifest)
+    assert lenient("ZZZZ") == lenient("QQQQ") == (b"", "legitimate_empty", {}, [])
+    cache, strict = prep.pinned_history_fetcher(source_root, manifest, strict=True)
+    assert cache["AAAA"].key == "aa02"
+    assert strict("AAAA")[1] == "complete" and strict("ZZZZ") == (b"", "legitimate_empty", {}, [])
+    _refusal(lambda: strict("QQQQ"), "SOURCE_NOT_FOUND")
+
+
+def test_admission_refuses_event_bearing_exclusions_before_any_workspace_write(pinned_ws, source_root,
+                                                                               capsys, monkeypatch):
+    workspace, clock, prod = pinned_ws
+    before, prod_before = _ws_state(workspace), _digest_tree(prod)
+    manifest = prep.build_manifest(source_root, session_ceiling=_AS_OF, tickers=["AAAA", "EEEE", "ZZZZ"],
+                                   allow_exclusions=True)
+    monkeypatch.setattr(prep, "MAX_LOGGED_NAMES", 1)
+    with pytest.raises(OpsError) as raised:
+        prep.admit_manifest(workspace, "size-prep", manifest, clock=clock)
+    assert raised.value.code == "PUBLICATION_REFUSED"
+    assert raised.value.problem.details["reason"] == "excluded_ticker_has_events"
+    assert _ws_state(workspace) == before and _digest_tree(prod) == prod_before
+    err = capsys.readouterr().err
+    assert "excluded=2" in err and "EEEE (+1 more)" in err
+
+
+def test_admission_records_manifest_cas_and_read_pin_in_workspace_only(pinned_ws, source_root):
+    workspace, clock, prod = pinned_ws
+    manifest = prep.build_manifest(source_root, session_ceiling=_AS_OF, tickers=["AAAA", "ZZZZ"],
+                                   allow_exclusions=True)
+    prod_before = _digest_tree(prod)
+    admission = prep.admit_manifest(workspace, "size-prep", manifest, clock=clock)
+    fields = {k: v for k, v in admission.items() if k not in ("admission_id", "manifest_ref", "read_pin_ref")}
+    assert admission["admission_id"] == content_hash(fields)
+    assert fields == {"schema_version": prep.ADMISSION_VERSION, "scope": "size-prep",
+        "scope_binding_id": content_hash({"schema_version": SCOPE_HEAD_VERSION, "scope": "size-prep",
+            "snapshot_id": workspace.snapshot_id, "manifest_hash": workspace.manifest_hash}),
+        "snapshot_id": workspace.snapshot_id, "manifest_hash": workspace.manifest_hash,
+        "manifest_id": manifest["manifest_id"], "manifest_object": admission["manifest_ref"].content_hash,
+        "session_ceiling": _AS_OF, "entry_count": 1, "excluded_count": 1}
+    assert admission["manifest_ref"].schema_ref == prep.EXCLUSION_MANIFEST_VERSION
+    assert workspace.store.read_verified(admission["manifest_ref"]) == canonical_json(manifest).encode("utf-8")
+    pin = json.loads(workspace.store.read_verified(admission["read_pin_ref"]))
+    assert pin["pin"] == fields and pin["name"].startswith("size-prep-manifest:")
+    for ref in (admission["manifest_ref"], admission["read_pin_ref"]):
+        row = workspace.conn.execute("SELECT ref_json FROM artifacts WHERE artifact_id = ?",
+                                     (ref.artifact_id,)).fetchone()
+        assert row is not None
+    assert _digest_tree(prod) == prod_before
+
+
+def test_admission_refuses_when_the_snapshot_lacks_the_events_table(no_events_ws, source_root):
+    workspace, clock, prod = no_events_ws
+    before, prod_before = _ws_state(workspace), _digest_tree(prod)
+    manifest = prep.build_manifest(source_root, session_ceiling=_AS_OF, tickers=["AAAA", "ZZZZ"],
+                                   allow_exclusions=True)
+    with pytest.raises(OpsError) as raised:
+        prep.admit_manifest(workspace, "size-prep", manifest, clock=clock)
+    assert raised.value.code == "PUBLICATION_REFUSED"
+    assert raised.value.problem.details["reason"] == "event_coverage_unavailable"
+    assert _ws_state(workspace) == before and _digest_tree(prod) == prod_before
+
+
+def test_admission_needs_no_event_coverage_without_exclusions(no_events_ws, source_root):
+    workspace, clock, _ = no_events_ws
+    manifest = prep.build_manifest(source_root, session_ceiling=_AS_OF, tickers=["AAAA"])
+    admission = prep.admit_manifest(workspace, "size-prep", manifest, clock=clock)
+    assert admission["excluded_count"] == 0
+    assert admission["manifest_ref"].schema_ref == prep.MANIFEST_VERSION
+
+
+def test_event_coverage_helper_refuses_a_missing_events_table_directly():
+    from types import SimpleNamespace
+    snapshot = SimpleNamespace(table_versions={})
+    with pytest.raises(OpsError) as raised:
+        prep._excluded_event_tickers(None, snapshot, ["ZZZZ"], 0.0)
+    assert raised.value.code == "PUBLICATION_REFUSED"
+    assert raised.value.problem.details["reason"] == "event_coverage_unavailable"
+    assert prep._excluded_event_tickers(None, snapshot, [], 0.0) == []
