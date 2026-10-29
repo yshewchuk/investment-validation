@@ -20,7 +20,7 @@ def eligibility_policy(*, version, embargo_days):
         raise errors.fail("CONTRACT_MISMATCH", "explicit supported policy and nonnegative integer days required")
     identity = {"schema_version": version, "embargo_days": embargo_days,
         "endpoints": "inclusive", "group_key": "event_id", "window_key": "ticker",
-        "applies_to": "development", "evaluation": "preserve_outside_ambiguous_random_ticker"}
+        "applies_to": "development", "evaluation": "preserve_membership"}
     return {**identity, "policy_id": content_hash(identity)}
 
 
@@ -222,10 +222,10 @@ def plan_eligibility(repository, snapshot, *, as_of_month, policy, metadata, eva
             "metadata_id": metadata_id, "groups": groups,
             "random_windows": [{"ticker": ticker, "start": start.isoformat(), "end": end.isoformat()}
                 for ticker, union in merged.items() for start, end in union],
-            "ambiguous_random_events": ambiguous_random_events,
             "retained_event_ids": retained, "exclusions": exclusions,
             "evaluation_event_ids": evaluation,
-            "evaluation_exclusions": evaluation_exclusions,
+            **({"ambiguous_random_events": ambiguous_random_events,
+                "evaluation_exclusions": evaluation_exclusions} if ambiguous_random_events else {}),
             "coverage": {"development_groups": len(groups), "retained_groups": len(retained),
                          "excluded_groups": len(exclusions), "evaluation_groups": len(evaluation)}}
         progress.decision("eligibility plan", f"retained {len(retained)}/{len(groups)} development groups; "

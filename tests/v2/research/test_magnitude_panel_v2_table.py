@@ -195,7 +195,7 @@ def test_factories_do_not_read_sources_or_admit_rows(subset, factory, monkeypatc
 
 
 @pytest.mark.parametrize("subset,expected", [
-    ("H", "sha256:baafd78e86ae6583c561e0ecabf9735ad612d2cd2fe4915e1ef36096ca90075f"), ("HM", "sha256:cf021a739db8007593e7401f2bfe3744ab69795401ff43908605c95de9684df9"), ("HMO", "sha256:7a4cc533d5564e7ebd463e283e2cb7f5ef9e6bedc373ff0c52d60f3c3072da16")])
+    ("H", "sha256:baafd78e86ae6583c561e0ecabf9735ad612d2cd2fe4915e1ef36096ca90075f"), ("HM", "sha256:cf021a739db8007593e7401f2bfe3744ab69795401ff43908605c95de9684df9"), ("HMO", "sha256:21a88956f12177613742de95834c7f310216825e01da1f2d813dba3589991505")])
 def test_literal_dictionary_ids_and_policy_order_sensitivity(subset, expected):
     dictionary = v2.feature_dictionary(subset)
     assert _stdlib_hash(dictionary) == expected

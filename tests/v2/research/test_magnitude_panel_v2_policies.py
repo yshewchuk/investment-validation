@@ -123,7 +123,7 @@ def test_policy_hashes_are_canonical_content_not_source_attestation():
         (source, result["source_policies"]["market_context"],
          "sha256:7c34967ce46ef061a3edca503e359e5450bc9cb811fd1cf98f66d43b6ada3f0a"),
         (mean, result["derivation_policies"]["mean_prior_or_implied"],
-         "sha256:5dcd47cbe45930d4512015ff4eab8f243584bf29c0d031bd2039b7f5c7082a69"),
+         "sha256:f867553f03fd532fd68fe380530f7a0ca5ac216f08c87bbfa7b83ba1d0b8a965"),
     ):
         canonical = json.dumps(document, sort_keys=True, separators=(",", ":")).encode()
         assert "sha256:" + hashlib.sha256(canonical).hexdigest() == expected

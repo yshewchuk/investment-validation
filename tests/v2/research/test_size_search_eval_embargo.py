@@ -62,5 +62,5 @@ def test_fold_binding_refuses_when_embargo_removes_every_evaluation(monkeypatch)
     with pytest.raises(OpsError) as caught:
         binding._folds(_binding(), {})
 
-    assert caught.value.code == "POPULATION_COLLAPSED"
+    assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
     assert caught.value.problem.message == "ambiguous-random ticker embargo removed every fold evaluation event"

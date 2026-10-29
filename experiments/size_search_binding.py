@@ -165,7 +165,7 @@ def _folds(binding, request):
     context = binding["size_panel"]["context"]
     events = {e["event_id"]: e for e in context["target_events"]}
     full_start, full_end = date.min.isoformat(), date.max.isoformat()
-    embargoed_tickers = {w["ticker"] for w in context["eligibility_plan"]["random_windows"]
+    embargoed_tickers = {w["ticker"] for w in context.get("eligibility_plan", {}).get("random_windows", [])
         if w["start"] == full_start and w["end"] == full_end}
     folds = _nested(binding, request)
     for group in folds:
@@ -176,7 +176,7 @@ def _folds(binding, request):
             _require(bool(fold["training_candidate_event_ids"]))
             retained = [e for e in fold["evaluation_event_ids"] if events[e]["ticker"] not in embargoed_tickers]
             if not retained:
-                raise fail("POPULATION_COLLAPSED", "ambiguous-random ticker embargo removed every fold evaluation event")
+                raise fail("INVALID_EXPERIMENT_SPEC", "ambiguous-random ticker embargo removed every fold evaluation event")
             excluded = [e for e in fold["evaluation_event_ids"] if events[e]["ticker"] in embargoed_tickers]
             fold["evaluation_event_ids"] = retained
             if excluded:

@@ -767,7 +767,7 @@ The original full-row `read_stored` API and its returned envelope remain unchang
 
 `eligibility_policy.eligibility_policy` declares an explicit supported version and
 nonnegative integer calendar-day width. `plan_eligibility` is metadata-only and
-opt-in; shared policy identity changes dependent request/dictionary hashes, so pinned requests must be regenerated. It uses `experiment_population.canonical_events`
+opt-in; existing consumers are unchanged, and the policy identity is unchanged. It uses `experiment_population.canonical_events`
 for exact committed-snapshot admission and the six-column metadata projection and `experiment_trades.classify_events`
 for detached membership/structural ambiguity labels and caller-pinned context.
 Shared `snapshot_inputs` validates reference shape and exact committed identity;
@@ -1014,7 +1014,7 @@ flowchart LR
 
 ### Qualified SIZE panel composition
 
-`experiments.size_panel` is the installed public boundary over internal composition/storage helpers. Its v3 dictionary binds eligible history; the shared eligibility policy identity also changes dependent v1/v2 request and dictionary hashes, though their helper schemas and partial daily artifacts are unchanged. Complete metadata, independent quote groups and daily/runup/^GSPC inputs preserve projection-independent source admission. Native clocks/outcome guards, exact versioned anchors and ticker/year/date fragment membership bind lineage; date-only quote windows do not attest computed-outcome capture. Native immutable catalog/Parquet storage enforces physical/expanded limits and exact bounded receipt/context replay. Fitting authority belongs to the execution/fold consumer; see the stage-2 contract for reconstruction limits and synthetic-only verification.
+`experiments.size_panel` is the installed public boundary over internal composition/storage helpers. Its v3 dictionary binds eligible history without changing v1/v2 identities. Complete metadata, independent quote groups and daily/runup/^GSPC inputs preserve projection-independent source admission. Native clocks/outcome guards, exact versioned anchors and ticker/year/date fragment membership bind lineage; date-only quote windows do not attest computed-outcome capture. Native immutable catalog/Parquet storage enforces physical/expanded limits and exact bounded receipt/context replay. Fitting authority belongs to the execution/fold consumer; see the stage-2 contract for reconstruction limits and synthetic-only verification.
 
 | Qualified panel admission condition | Outcome before dependent reads |
 | --- | --- |

@@ -97,7 +97,6 @@ def test_inclusive_boundaries_ticker_isolation_and_full_group_oracle(tmp_path, m
             "rolling_membership_version": "calendar-months.v1", "source_snapshot": to_document(snapshot),
             "policy": expected_policy, "metadata_id": seal(snapshot, expected_policy, saved)["metadata_id"],
             "groups": sorted(saved, key=lambda g: g["event_id"]),
-            "ambiguous_random_events": [],
             "random_windows": [{"ticker": "SYNTH", "start": "2024-05-15", "end": "2024-07-14"}],
             "retained_event_ids": ["OTHER:2024-06-14:0", "SYNTH:2024-05-14:0", "SYNTH:2024-07-15:0"],
             "exclusions": [{"event_id": left["event_id"], "reasons": full},
@@ -105,7 +104,6 @@ def test_inclusive_boundaries_ticker_isolation_and_full_group_oracle(tmp_path, m
                 {"event_id": right["event_id"], "reasons": full},
                 {"event_id": rolling["event_id"], "reasons": ["rolling"]}],
             "evaluation_event_ids": sorted([held["event_id"], right["event_id"]]),
-            "evaluation_exclusions": [],
             "coverage": {"development_groups": 7, "retained_groups": 3, "excluded_groups": 4, "evaluation_groups": 2}}
         expected = {**expected, "plan_id": content_hash(expected)}
         assert result == expected
@@ -127,7 +125,7 @@ def test_policy_literal_identity_and_no_default():
     policy = eligibility.eligibility_policy(version=VERSION, embargo_days=30)
     expected = {"schema_version": VERSION, "embargo_days": 30, "endpoints": "inclusive",
         "group_key": "event_id", "window_key": "ticker", "applies_to": "development",
-        "evaluation": "preserve_outside_ambiguous_random_ticker", "policy_id": "sha256:c6a72238ffba179ad6f4824e3df766902eb739d49b789b530bd3f2116235a992"}
+        "evaluation": "preserve_membership", "policy_id": "sha256:dff629fde866872115a22f90305909b9f7176451439a3cc8f27e3e884c22376c"}
     assert policy == expected
     assert eligibility.eligibility_policy(version=VERSION, embargo_days=31)["policy_id"] != expected["policy_id"]
     with pytest.raises(TypeError):
@@ -340,12 +338,12 @@ def test_public_path_negative_control(tmp_path, monkeypatch):
     try:
         result = plan(repository, snapshot, [group(dev), group(held)],
                       evaluation=[held["event_id"], dev["event_id"]])
-        assert result["ambiguous_random_events"] == []
+        assert "ambiguous_random_events" not in result  # plans without an ambiguous random event keep their pre-embargo identity
         assert result["exclusions"] == [{"event_id": held["event_id"], "reasons": ["ambiguous"]}]
         assert result["random_windows"] == []
         assert result["retained_event_ids"] == [dev["event_id"]]
         assert result["evaluation_event_ids"] == sorted([held["event_id"], dev["event_id"]])
-        assert result["evaluation_exclusions"] == []
+        assert "evaluation_exclusions" not in result
     finally:
         conn.close()
 

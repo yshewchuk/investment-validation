@@ -1,4 +1,4 @@
-"""Eligible-history binding; dependent dictionary/request hashes include policy identity."""
+"""Additive eligible-history binding; existing v1/v2 descriptors stay frozen."""
 from dataclasses import replace
 
 from engine.v2.contracts.data import ColumnContract

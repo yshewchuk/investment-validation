@@ -386,9 +386,9 @@ missing bounds refuse. A caller's digest is not evidence of their truth.
 The eligible-history builder below consumes this metadata policy. Evaluation
 IDs outside an ambiguous-random ticker are preserved, not authorized for reading;
 IDs on that ticker are listed in `evaluation_exclusions`. Annual development
-targets still need retained eligibility. Shared policy identity changes update
-dependent request and dictionary hashes; regenerate previously pinned requests
-against the new identity.
+targets still need retained eligibility. The policy identity and dependent
+request/dictionary hashes are unchanged; the embargo appears only in plan content,
+and only when an ambiguous random event exists, so earlier plans keep their IDs.
 Integration sequencing belongs to the [stage-2 design](../../../experiments/SUPER_SIZE/STAGE2_DESIGN.md).
 
 ## Confirmed metadata index (synthetic only)
@@ -464,8 +464,7 @@ Supply exact source/history/price snapshots, `as_of_month`, frozen 30-day `polic
 Materialize returns a native feature_snapshot and context; read additionally takes
 that snapshot and explicit columns, returning metadata plus projected features.
 The v3 recipe preserves numeric order but has new eligible-history source hashes;
-v1/v2 helper schemas and partial daily artifacts are unchanged, while dependent
-dictionary and request hashes include the shared eligibility policy identity. H/HM/HMO are 11/28/42
+old v1/v2 helpers and partial daily artifacts are unchanged. H/HM/HMO are 11/28/42
 numeric columns; only HMO uses the appended quote indicator. Rows include quote
 status, cutoff/context IDs, per-block anchors/missingness and a canonical row hash.
 The independent historical-quote population preserves full metadata ordinals even

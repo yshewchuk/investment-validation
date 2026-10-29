@@ -321,8 +321,8 @@ They cannot replace time holdouts. Report layers separately; preregister the joi
 
 Platform ownership: a reusable versioned eligibility policy in `engine/v2/research`,
 not a SUPER SIZE filter. New consumers bind sealed policy IDs/parameters and exclusion
-manifests into run identity/coverage. Policy identity changes propagate into dependent
-dictionary and request hashes; consumers bind the new identity explicitly. Cross-consumer
+manifests into run identity/coverage. Policy identity and dependent hashes are unchanged;
+the embargo lives in plan content only when an ambiguous random event exists. Cross-consumer
 tests must prove identical grouped admission and refusal on missing/conflicting policy identities.
 SUPER SIZE preregisters 30 days (not a platform constant): ordinary random-held events
 use an inclusive ±30-calendar-day ticker/date window; structurally ambiguous random-held
@@ -335,7 +335,7 @@ generated outer and inner fold IDs before target preflight or scoring: remove ma
 IDs from training and evaluation, record removed evaluation IDs in the fold's
 `evaluation_exclusions` with reason `embargo_ticker`, and preserve all other IDs.
 Excluded IDs do not enter target loading, matrices, forecasts or coverage. If an outer
-or inner fold has no evaluation IDs left, refuse `POPULATION_COLLAPSED`. Freeze the
+or inner fold has no evaluation IDs left, refuse `INVALID_EXPERIMENT_SPEC`. Freeze the
 window/manifest before outcomes, with no tuning.
 This excludes examples, not individual price bars; do not alter rolling formulas.
 
@@ -796,8 +796,7 @@ All horizons are qualified independently of feature projection.
 `research_magnitude_panel.v3` / `magnitude_panel_context.v3` explicitly replace
 v2's incompatible `stored_magnitude_history.v1` source policy with
 `eligible_history_features.v1`. Numeric names/order/units remain 11/28/42;
-shared eligibility policy identity changes propagate into dependent dictionary and
-request hashes. This is source compatibility,
+new dictionary hashes preserve old v1/v2 identities. This is source compatibility,
 not another search axis: the existing 33-candidate plan remains fixed.
 Context exposes source/history/price snapshots, admitted history context,
 unaltered native `eligibility_plan` (policy ID under `policy`), and `target_events` with actual
