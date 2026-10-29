@@ -268,6 +268,22 @@ as_of) -> GateForecastSource` picks the fold by the legacy rule
 loads that one fold through `load_serving_fold` and the binding's shared
 `FrozenInference`, and returns the source.
 
+The descriptor's `parent_release_id` and `parent_release_hash` retain the
+release where the fold was prepared. A later pool release may carry that
+descriptor unchanged. The loader verifies the fold against the current release's
+compatible `size:*` binding and the descriptor's policy/object metadata; it does
+not require the provenance release identity to equal the containing release.
+This preserves exact-month selection while allowing a compatible carried fold.
+
+**Carried fold loading (R1–R6).** R1: the caller verifies the containing
+manifest/catalog and passes the selected descriptor plus declared bytes when
+available; the descriptor parent identifies authoring provenance and may be
+older. R2: estimator reuse stays in the shared `FrozenInference` cache. R3:
+no retry or fold fallback. R4: loading is read-only. R5: the current size
+binding, object and pools must verify or the row gets `MODEL_NOT_READY`. R6:
+the view identity is deterministic from the active release, catalog hash and
+descriptor; carrying the same fold into a new release yields a new view.
+
 | Condition | Outcome |
 | --- | --- |
 | Release stages no `tier4_folds:size` member, or it is not `STAGED` | Empty catalog; selection raises `ModelNotReady` |
@@ -276,7 +292,7 @@ loads that one fold through `load_serving_fold` and the binding's shared
 | `binding.size_folds` is `None` (hand-built binding) | `ModelNotReady` at selection |
 | `SizeFoldCatalog` whose issuance proof (a hash over its `catalog_hash`, descriptors and catalog-declared object bytes) is absent or does not match, including a `dataclasses.replace` that swaps descriptors or bytes; the declared bytes are enforced when the fold is loaded | `TypeError`; selection also refuses any object that is not a `SizeFoldCatalog` |
 | No staged fold for the selected month, or the catalog entry's descriptor `fold_start` differs from its key (caller-built catalog) | `ModelNotReady("tier4_folds:size", ...)`; never an older fold |
-| Fold fails verification or loading (`ServingFoldError`) | `ModelNotReady`; no fallback to another fold |
+| Selected fold fails active-binding compatibility, object verification or loading (`ServingFoldError`) | `ModelNotReady`; no fallback to another fold |
 | `event_date` or `as_of` not an ISO date | `ValueError` |
 
 Selection does no writes and keeps no state beyond the shared inference cache.

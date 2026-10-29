@@ -535,7 +535,7 @@ Binding user decisions D1-D10 (2026-10-25, recorded in #805). Once per calendar 
 Its held-out prediction/residual arrays belong to that same object. Offline release preparation records this metadata in the hashed state catalog; a read-only loader verifies it against bounded, hash-checked bytes. Existing catalogs without this declaration require offline restaging, not a nightly fit or a guessed interval policy. Verified loading covers size folds and the chooser producer artifacts below; this alone admits neither training sources nor a nightly chooser declaration.
 
 Selection uses the exact earlier of the event month and decision month, and the registered size model and feature order. It never chooses the newest available fold or substitutes a full-refit model. The panel hash comes from the already-pinned snapshot's single original `feature_panel` object; an unsupported multi-fragment layout is refused. The scoring selector (`gate_fold_selection.py`) applies the month rule and the release-staged descriptor checks only; comparing the descriptor's panel hash with the pinned snapshot is not done by the selector.
-Snapshot ID, dataset version and panel byte hash remain distinct identities. Selection returns a separate content-addressed, single-binding inference view linked to its parent release and descriptor; it does not mutate or promote the champion `ModelRelease`. The existing `tier4-serving-fold.v1` adapter executes that binding through `FrozenInference`; no second prediction engine is added.
+Snapshot ID, dataset version and panel byte hash remain distinct identities. Selection returns a separate content-addressed, single-binding inference view linked to its active containing release and descriptor; the descriptor's parent ID/hash retain authoring provenance and may identify an earlier release after carry-forward. `serving_fold_loader` checks active binding compatibility rather than parent equality, then verifies the bounded estimator bytes and held-out pools. It does not mutate or promote the champion `ModelRelease`. The existing `tier4-serving-fold.v1` adapter executes that binding through `FrozenInference`; no second prediction engine is added.
 
 | Forward fold condition | Outcome |
 |---|---|
@@ -555,7 +555,7 @@ Serving-fold writers (`tier4.serving_model`, Phase-4 build/backfill) use binary 
 Release preparation (`--tier4-dir` and raw-byte APIs) requires trusted uncompressed inputs from supported writers; it does not refuse arbitrary compressed inputs before decoding.
 Hashes verify bytes, not provenance. The serialized byte cap is not a decoded-memory bound.
 Champion registry artifacts retain their separate `compress=3` format.
-Retained fold-parent checks reuse deployment's semantic release identity:
+At authoring, retained fold-parent checks reuse deployment's semantic release identity:
 binding/member collection order and storage paths may differ on retry;
 feature and output order, and every other identity field, remain significant.
 All Tier-4 collector roles and chooser/pinned-size destination reads admit
@@ -642,10 +642,10 @@ metadata and descriptor. Identical verified inputs produce identical references.
 
 `load_chooser_serving_fold` prepares the separately typed implied-t1/runup-move
 artifact from its exact `tier4_folds:<role>` catalog member. It rechecks catalog
-schema/self-hash/release/deployment, unique membership, descriptor/object identity,
-and the matching wildcard parent binding before decoding. The returned immutable
-`ChooserServingFoldRef` preserves the raw D14 producer output and paired held-out
-interval arrays; these are not the chooser k-NN population or driver residual state.
+schema/self-hash/release/deployment, unique membership, descriptor/object
+identity, exact parent ID/hash and matching wildcard parent binding before decoding.
+`ChooserServingFoldRef` keeps raw D14 output and paired held-out intervals, not the
+chooser k-NN population or driver residual state.
 It makes no event-month selection or source-ready declaration. Genuine
 training-source completion/finality, coordinator publication and per-request causal
 bounds are required for admission. Artifact headers/descriptors alone do not
@@ -746,7 +746,7 @@ per the root doc's layer table; `checks/import_layers.py` enforces this.
   `serving_fold_loader`; the verified frozen inference contract/loader for
   the model stage, the payoff-calibration artifact type, and
   `release_bindings.py`'s reads of `deployment.current_pointer`,
-  `deployment._read_manifest`, `deployment._manifest_hash_matches`,
+  `deployment._read_manifest`, `deployment.manifest_hash_matches`,
   `deployment.production_release_root`, and `deployment.MissingReleaseRoot`.
 - `engine.v2.models.training` — the same artifact types and no-fit guards, plus
   closed ElasticNet and Ridge/HGB recipe validation; never imported *by* this package (one-way).
