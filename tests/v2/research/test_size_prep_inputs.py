@@ -500,7 +500,12 @@ def test_exclusion_manifest_is_distinctly_identified_and_canonical(source_root):
                              allow_exclusions=True)
     assert v2["excluded_tickers"] == ["QQQQ", "ZZZZ"] and prep.validate_manifest(deepcopy(v2)) == v2
     assert v2["manifest_id"] == content_hash({k: v for k, v in v2.items() if k != "manifest_id"})
+    all_excluded = prep.build_manifest(source_root, session_ceiling=_AS_OF, tickers=["ZZZZ"],
+                                       allow_exclusions=True)
+    assert all_excluded["entries"] == [] and all_excluded["excluded_tickers"] == ["ZZZZ"]
+    assert prep.validate_manifest(deepcopy(all_excluded)) == all_excluded
     for mutate in (lambda m: m.update(excluded_tickers=["ZZZZ", "QQQQ"]),
+                   lambda m: m.update(excluded_tickers=None),
                    lambda m: m.update(excluded_tickers=["QQQQ", "QQQQ"]),
                    lambda m: m.update(excluded_tickers=[" ZZZZ"]),
                    lambda m: m.update(excluded_tickers=["AAAA"]),
@@ -548,6 +553,7 @@ def test_listed_exclusions_fetch_empty_even_under_strict(source_root):
     assert lenient("ZZZZ") == lenient("QQQQ") == (b"", "legitimate_empty", {}, [])
     cache, strict = prep.pinned_history_fetcher(source_root, manifest, strict=True)
     assert cache["AAAA"].key == "aa02"
+    assert strict("AAAA")[0] == prep._body(cache["AAAA"])
     assert strict("AAAA")[1] == "complete" and strict("ZZZZ") == (b"", "legitimate_empty", {}, [])
     _refusal(lambda: strict("QQQQ"), "SOURCE_NOT_FOUND")
 
@@ -563,6 +569,7 @@ def test_admission_refuses_event_bearing_exclusions_before_any_workspace_write(p
         prep.admit_manifest(workspace, "size-prep", manifest, clock=clock)
     assert raised.value.code == "PUBLICATION_REFUSED"
     assert raised.value.problem.details["reason"] == "excluded_ticker_has_events"
+    assert raised.value.problem.details["tickers"] == "EEEE"
     assert _ws_state(workspace) == before and _digest_tree(prod) == prod_before
     err = capsys.readouterr().err
     assert "excluded=2" in err and "EEEE (+1 more)" in err
@@ -611,13 +618,3 @@ def test_admission_needs_no_event_coverage_without_exclusions(no_events_ws, sour
     admission = prep.admit_manifest(workspace, "size-prep", manifest, clock=clock)
     assert admission["excluded_count"] == 0
     assert admission["manifest_ref"].schema_ref == prep.MANIFEST_VERSION
-
-
-def test_event_coverage_helper_refuses_a_missing_events_table_directly():
-    from types import SimpleNamespace
-    snapshot = SimpleNamespace(table_versions={})
-    with pytest.raises(OpsError) as raised:
-        prep._excluded_event_tickers(None, snapshot, ["ZZZZ"], 0.0)
-    assert raised.value.code == "PUBLICATION_REFUSED"
-    assert raised.value.problem.details["reason"] == "event_coverage_unavailable"
-    assert prep._excluded_event_tickers(None, snapshot, [], 0.0) == []

@@ -191,6 +191,8 @@ def validate_manifest(manifest):
     if set(manifest) != expected_keys or type(manifest["entries"]) is not list:
         raise fail("INVALID_REQUEST", "invalid Tier-1 history manifest")
     excluded = manifest.get(_EXCLUDED_KEY)
+    if version == EXCLUSION_MANIFEST_VERSION and type(excluded) is not list:
+        raise fail("INVALID_REQUEST", "invalid Tier-1 history manifest exclusion list")
     if excluded is not None and (type(excluded) is not list
             or any(type(t) is not str or not t or t != t.strip() for t in excluded)
             or excluded != sorted(set(excluded))):
