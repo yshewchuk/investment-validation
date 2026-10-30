@@ -4,10 +4,10 @@ from pathlib import Path
 
 from engine.v2.data.repository import Repository
 from engine.v2.foundation import canonical_json, content_hash
-from engine.v2.ops.errors import fail
+from engine.v2.ops.errors import OpsError, fail
 from engine.v2.research.eligibility_policy import eligibility_policy
 from experiments import eligible_history, size_panel
-from experiments.size_prep_inputs import PROVENANCE_VERSION, _log
+from experiments.size_prep_inputs import PROVENANCE_VERSION, _log, _read_regular
 
 HISTORY_TABLES = ("earnings_events", "daily_market", "computed_moves", "computed_move_bounds", "price_history")
 PANEL_VERSION = "size_prep_panel.v1"
@@ -59,8 +59,9 @@ def _record_matches(workspace, record):
             return False
         path = (Path(workspace.paths.root) / "size_prep"
                 / ("provenance-" + record_id.split(":", 1)[1] + ".json"))
-        return not path.is_symlink() and path.is_file() and path.read_text() == canonical_json(record)
-    except (AttributeError, IndexError, KeyError, OSError, TypeError, ValueError):
+        expected = canonical_json(record).encode("utf-8")
+        return _read_regular(path, len(expected)) == expected
+    except (AttributeError, IndexError, KeyError, OSError, OpsError, TypeError, ValueError):
         return False
 
 

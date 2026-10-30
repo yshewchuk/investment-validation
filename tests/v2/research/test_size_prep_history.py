@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from engine.v2.data.repository import Repository
-from engine.v2.foundation import content_hash
+from engine.v2.foundation import canonical_json, content_hash
 from engine.v2.ops.errors import OpsError, fail
 from experiments import size_prep_history as hist
 from experiments import size_prep_inputs as prep
@@ -135,6 +135,19 @@ def test_head_must_be_the_bounds_snapshot(bounds_ws, source_root, monkeypatch):
     assert calls == {"history": [], "panel": []}
 
 
+def test_moved_head_is_refused(bounds_ws, source_root, monkeypatch):
+    ws, clock, record, _, snapshot = _repo_record(bounds_ws, source_root)
+    calls = _fake(monkeypatch)
+    monkeypatch.setattr(hist, "HISTORY_TABLES",
+                        tuple(t for t in hist.HISTORY_TABLES if t in snapshot.table_versions))
+    with ws.conn:
+        ws.conn.execute("UPDATE data_snapshot_heads SET snapshot_id = ?, generation = generation + 1 "
+                        "WHERE scope = 'shadow'", (ws.snapshot_id,))
+    _refusal(lambda: hist.prepare_workspace_panel(ws, "shadow", record, **_args(clock)),
+             "WORKSPACE_REFUSED", "head_not_bounds")
+    assert calls["history"] == []
+
+
 def test_producer_error_propagates_unchanged_without_a_panel_pin(bounds_ws, source_root, monkeypatch):
     ws, clock, record, _, snapshot = _repo_record(bounds_ws, source_root)
     calls = _fake(monkeypatch)
@@ -164,3 +177,24 @@ def test_malformed_inputs_are_refused_before_producers(bounds_ws, source_root, m
                  {"metadata_limits": []}, {"scope": 123}):
         _refusal(lambda over=over: call(**over), "INVALID_REQUEST")
     assert calls == {"history": [], "panel": []}
+
+
+def test_provenance_file_that_is_oversized_or_a_symlink_is_refused(bounds_ws, source_root, monkeypatch):
+    ws, clock, record, _, snapshot = _repo_record(bounds_ws, source_root)
+    calls = _fake(monkeypatch)
+    monkeypatch.setattr(hist, "HISTORY_TABLES",
+                        tuple(t for t in hist.HISTORY_TABLES if t in snapshot.table_versions))
+    path = (ws.paths.root / "size_prep"
+            / ("provenance-" + record["record_id"].split(":", 1)[1] + ".json"))
+    with path.open("a") as handle:
+        handle.write(" " * (1 << 20))
+    _refusal(lambda: hist.prepare_workspace_panel(ws, "shadow", record, **_args(clock)),
+             "PUBLICATION_REFUSED", "record_invalid")
+    assert calls["history"] == []
+    path.unlink()
+    elsewhere = ws.paths.root / "elsewhere.json"
+    elsewhere.write_text(canonical_json(record))
+    path.symlink_to(elsewhere)
+    _refusal(lambda: hist.prepare_workspace_panel(ws, "shadow", record, **_args(clock)),
+             "PUBLICATION_REFUSED", "record_invalid")
+    assert calls["history"] == []
