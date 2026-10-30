@@ -123,7 +123,7 @@ def main(argv=None):
                 else:
                     try:
                         receipt_ref = from_document(ArtifactRef, _read_document(args.receipt_ref))
-                    except OSError:
+                    except FileNotFoundError:
                         raise fail("INVALID_EXPERIMENT_SPEC", "SIZE preflight receipt is missing", details={"reason": "receipt_missing"}) from None
                     registration, spec = admit(store, receipt_ref, bind(), spec)
                     reserve_native_registration(conn, store, registration, spec, max_evidence_bytes=MAX_NATIVE_EVIDENCE_BYTES)

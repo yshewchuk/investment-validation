@@ -326,6 +326,33 @@ def test_register_missing_receipt_file_is_receipt_missing(monkeypatch, tmp_path,
     assert "receipt is missing" in result["message"]
 
 
+def test_register_unreadable_receipt_file_is_storage_unavailable(monkeypatch, tmp_path, capsys):
+    from experiments import size_search as cli
+
+    store_root = tmp_path / "store"
+    store_root.mkdir()
+    setup_cli(monkeypatch)
+
+    def read_document(path):
+        if path == "receipt":
+            raise PermissionError(path)
+        if path == "request":
+            return request_fixture()
+        if path == "panel":
+            return panel_request()
+        return {}
+
+    monkeypatch.setattr(cli, "_read_document", read_document)
+    monkeypatch.setattr(cli, "input_bindings", lambda *args, **kwargs: {})
+    assert cli.main(["register", "--spec", "spec", "--request", "request",
+                     "--catalog", "catalog", "--store-root", str(store_root), "--no-ledger",
+                     "--panel-request", "panel", "--scope", "development",
+                     "--training-start", "2010-01-01", "--labels-before", "2025-01-01",
+                     "--receipt-ref", "receipt"]) == 2
+    result = json.loads(capsys.readouterr().out)
+    assert result["refused"] == "RESOURCE_UNAVAILABLE"
+
+
 def test_validator_identity_covers_receipt_module():
     sources = binding.validator_identity()["source_closure"]
     assert "experiments/size_preflight_receipt.py" in sources
