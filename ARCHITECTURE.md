@@ -60,7 +60,7 @@ request body and, if durable, in the operator guides instead — see
 | `engine/v2/domain/valuation/` | (pending) |
 | `engine/v2/domain/simulation/` | (pending) |
 | `engine/v2/scoring/` | [`engine/v2/scoring/ARCHITECTURE.md`](engine/v2/scoring/ARCHITECTURE.md) |
-| `engine/v2/evaluation/` | (pending) |
+| `engine/v2/evaluation/` | [`engine/v2/evaluation/ARCHITECTURE.md`](engine/v2/evaluation/ARCHITECTURE.md) |
 | `engine/v2/ledger/` | [`engine/v2/ledger/ARCHITECTURE.md`](engine/v2/ledger/ARCHITECTURE.md) |
 | `engine/v2/models/training/` | (pending) |
 | `engine/v2/research/` | [`engine/v2/research/ARCHITECTURE.md`](engine/v2/research/ARCHITECTURE.md) |
