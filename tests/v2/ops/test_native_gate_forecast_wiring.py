@@ -1,10 +1,13 @@
 import json
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pandas as pd
 
 from engine.v2.ops import native_score_batch
 from engine.v2.ops.native_board_universe import BoardRequest
+from engine.v2.scoring.application import score_one
+from engine.v2.scoring.stages import _execute_forecast_band
 from tests.v2.ops.analog_fixtures import with_synthetic_exact_analogs
 from tests.v2.ops.test_native_score_batch import (
     _assemble,
@@ -69,6 +72,57 @@ def test_production_sizing_band_uses_selected_verified_fold_pool(tmp_path):
         "residuals": selected.pool_res,
         "interval_floor": selected.interval_floor,
     }
+
+
+def test_production_str_thru_score_emits_selected_fold_band(tmp_path, monkeypatch):
+    binding = _stage_release(tmp_path)
+    original_selector = native_score_batch.select_gate_forecast_source
+
+    def selector(*args, **kwargs):
+        source = original_selector(*args, **kwargs)
+        return replace(
+            source,
+            pool_pred=(source.pool_pred[0],) * 250,
+            pool_res=(-0.4,) * 83 + (-0.2,) * 83 + (0.1,) * 83 + (0.3,),
+            interval_floor=0.15,
+        )
+
+    monkeypatch.setattr(
+        native_score_batch, "select_gate_forecast_source", selector)
+    event = _event_inputs(panel_row={"date": "2026-01-15", "x": -0.45})
+    assembled, refusals = _assemble(
+        binding, [event], as_of="2026-01-10", feature_names=("x",))
+
+    assert refusals == ()
+    request, native_inputs = assembled[event.key]
+    observations = []
+    score_one(request, native_inputs, observer=observations.append)
+    forecast = next(
+        item.output_document for item in observations
+        if item.receipt.stage == "forecast"
+    )
+
+    assert "driver_prediction" in forecast
+    assert "forecast_abs_move" not in forecast
+    assert forecast["forecast_p10"] == 0.15
+    assert abs(forecast["forecast_p90"] - 0.2) < 1e-12
+    assert abs(forecast["forecast_sd"] - 0.2075893381976376) < 1e-12
+
+
+def test_non_str_thru_does_not_use_driver_prediction_for_sizing_band():
+    output = {"driver_prediction": 0.5}
+    block = {"forecast_pool": {
+        "predictions": (0.5,) * 250,
+        "residuals": (0.2,) * 250,
+        "interval_floor": 0.0,
+    }}
+
+    _execute_forecast_band(block, output, "DYN-SV")
+
+    assert "forecast_abs_move" not in output
+    assert "forecast_p10" not in output
+    assert "forecast_p90" not in output
+    assert "forecast_sd" not in output
 
 
 def test_missing_event_id_refuses_before_missing_fold(tmp_path):

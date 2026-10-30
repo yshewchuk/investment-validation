@@ -1070,15 +1070,23 @@ def _execute_local_forecast(
     return declared
 
 
-def _execute_forecast_band(block: Mapping[str, Any], output: dict[str, Any]) -> None:
+def _execute_forecast_band(
+    block: Mapping[str, Any], output: dict[str, Any], strategy: str | None = None,
+) -> None:
     """engine/score.py ``Scorer._size_from_forecast``: the served size
     fold's band (``forecast_p10``/``_p90``/``_sd``) from its own held-out
     pool (R4-20 gap 3, sizing side). Absent when the forecast is
     missing/non-finite or the fold declared no pool -- never a fabricated
-    band, mirroring ``gate_forecast_columns``."""
+    band, mirroring ``gate_forecast_columns``.
+
+    STR-THRU's band is taken around its top-level ``driver_prediction`` when
+    ``forecast_abs_move`` is absent; the fold's pool remains the interval
+    source either way."""
     from engine.v2.scoring import native_gate_features as derived
 
     forecast = output.get("forecast_abs_move")
+    if forecast is None and strategy == "STR-THRU":
+        forecast = output.get("driver_prediction")
     if forecast is None or forecast != forecast:
         return
     pool = block.get("forecast_pool")
@@ -1186,7 +1194,7 @@ def _execute_forecast(inputs: NativeScoreInputs, values: dict[str, Any],
         inputs, block, values, output, invalid_fields, flags, undetermined,
         deferred,
     )
-    _execute_forecast_band(block, output)
+    _execute_forecast_band(block, output, strategy)
     _validate_forecast_roles(
         inputs, output, flags, strategy, invalid_fields,
     )
