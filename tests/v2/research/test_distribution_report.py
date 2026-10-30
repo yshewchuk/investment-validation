@@ -58,6 +58,16 @@ def test_common_denominator_primary_secondary_and_unavailable_references():
     assert result["final_read_authority"] == "none"
 
 
+def test_nondefault_uncertainty_settings_are_preserved_in_metadata():
+    opportunities, books = fixture()
+    result = report(opportunities, books, seed=31, resamples=96, block_days=5,
+        block_origin="2025-12-29", confidence=.8)
+    assert result["uncertainty"] == {
+        "seed": 31, "resamples": 96, "block_days": 5, "block_origin": "2025-12-29",
+        "confidence": .8, "calendar_blocks": "occupied_fixed_nonoverlapping",
+        "interpretation": "conditional_on_realized_policy_not_portfolio_replay"}
+
+
 def test_calendar_and_ticker_interval_match_direct_aggregate_bootstrap():
     opportunities, books = fixture()
     result = report(opportunities, books)["contrasts"]["same_mean"]
@@ -157,7 +167,7 @@ def test_optional_incumbent_is_compared_only_when_present():
     assert result["contrasts"]["incumbent"]["net_delta_per_opportunity"] == 10
 
 
-@pytest.mark.parametrize("changes", [dict(seed=True), dict(seed=-1), dict(resamples=0),
+@pytest.mark.parametrize("changes", [dict(seed=True), dict(seed=-1), dict(resamples=0), dict(resamples=True),
     dict(resamples=1.5), dict(block_days=0), dict(block_days=True), dict(confidence=0),
     dict(confidence=1), dict(confidence=float("nan")), dict(block_origin="20260101")])
 def test_uncertainty_configuration_is_explicit_and_validated(changes):
@@ -242,8 +252,14 @@ def test_missing_book_contract_fields_refuse(field):
     invalid(lambda: report(opportunities, books))
 
 
-@pytest.mark.parametrize("field,value", [("schema_version", "distribution_book.v2"),
-    ("config", None), ("config", []),
+@pytest.mark.parametrize("arm", ["histogram", "same_mean", "matched_point"])
+def test_wrong_book_schema_refuses_for_each_required_arm(arm):
+    opportunities, books = fixture()
+    books[arm]["schema_version"] = "distribution_book.v2"
+    invalid(lambda: report(opportunities, books))
+
+
+@pytest.mark.parametrize("field,value", [("config", None), ("config", []),
     ("config", {"initial_cash": float("nan")}), ("config", {"initial_cash": []}),
     ("config", {1: 3}), ("config", {"initial_cash": True}), ("report_end", []),
     ("per_event", None), ("per_event", {}), ("per_event", ()),
