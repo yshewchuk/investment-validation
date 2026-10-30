@@ -1,6 +1,7 @@
 """Explicit v2 SIZE source/fold binding; installed panel admission, no hidden builds."""
 import json
 import sys
+import time
 from datetime import date
 from hashlib import sha256
 from pathlib import Path
@@ -234,19 +235,28 @@ def fold_inputs(repository, binding, fold):
         "evaluation_labels_before": binding["magnitude_execution"]["evaluation_labels_before"]}
         for group in _folds(binding, binding["size_request"])))
     source = from_document(SnapshotRef, binding["snapshot"])
+    started = time.monotonic()
     panel = _read_panel(repository, source, binding["size_panel_request"], columns=recipe("HMO")["model_columns"])
     _require({"context": panel["context"], "feature_snapshot": panel["feature_snapshot"]} == binding["size_panel"])
     participants = set(fold["training_candidate_event_ids"] + fold["evaluation_event_ids"])
     events = {e["event_id"]: e for e in panel["context"]["target_events"]}
     _require(participants <= set(events) and all(events[e]["label_end"] < fold["training_labels_before"]
              for e in fold["training_candidate_event_ids"]))
+    print(f"[stage] read_panel done in {time.monotonic() - started:.1f}s", file=sys.stderr)
     month = binding["holdouts"]["holdout_as_of_month"]
+    started = time.monotonic()
     preflight = preflight_magnitude_targets(repository, source, as_of_month=month, event_ids=sorted(participants))
+    print(f"[stage] preflight done in {time.monotonic() - started:.1f}s", file=sys.stderr)
+    started = time.monotonic()
     train = qualify_magnitude_training_targets(repository, source, as_of_month=month,
         labels_before=fold["training_labels_before"], event_ids=fold["training_candidate_event_ids"])
-    return {"preflight": preflight, "stored_inputs_id": content_hash(binding["size_panel"]),
+    print(f"[stage] qualify done in {time.monotonic() - started:.1f}s", file=sys.stderr)
+    started = time.monotonic()
+    result = {"preflight": preflight, "stored_inputs_id": content_hash(binding["size_panel"]),
         "training_inputs": dict(train.attrs), "training": train[["event_id", "absolute_move_pct"]].to_dict("records"),
         "features": [r for r in panel["rows"] if r["event_id"] in participants]}
+    print(f"[stage] publish done in {time.monotonic() - started:.1f}s", file=sys.stderr)
+    return result
 
 
 def validator_identity():
