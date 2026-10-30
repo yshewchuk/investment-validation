@@ -86,14 +86,14 @@ refuses unknown fields or inconsistent domain/projection pairs; no training impo
 `fit_ridge_hgb_predictions` retains its existing magnitude recipe/result schema.
 Both guards precede inspection; the shared private fitter copies arrays, learns Ridge imputation/indicators/scaling only on training rows and freezes HGB's
 training-all-null columns to zero. Fresh sklearn estimators use one thread.
-Signed labels/predictions need only be finite (no floor, absolute value or log);
-nonnegative labels still reject negatives and predictions clip at zero.
+Signed labels/predictions need only be finite (no floor, absolute value or log); nonnegative labels still reject negatives and predictions clip at zero.
 The new result is `regression_ridge_hgb_fit.v1` with recipe hash and detached
 forecasts. No I/O, cache, retries, source/fold/holdout admission or release occurs.
 Existing magnitude numerics remain unchanged; source closures require resealing.
 `regression_candidate.regression_candidate_recipe` accepts only ridge/alpha, hgb/max_leaf_nodes or elasticnet/alpha+l1_ratio and delegates explicit signed/nonnegative policy construction; it imports no training or source admission.
 `training.regression_candidate.fit_regression_candidate` checks both no-fit guards before inspection, dispatches only matching regression schema/model pairs, then preserves the existing fitter result/validation/errors. Unsupported pairs refuse ValueError; no reads, selection, retries, writes or production caller.
-Existing experiment magnitude recipe/fit dispatch is unchanged and refuses the new schemas.
+Existing experiment magnitude recipe dispatch is unchanged; its fit adapter lazily delegates to shared `training.magnitude_candidate.fit_candidate`, still refusing the new schemas before training imports via shared `magnitude_candidate.magnitude_candidate_family` metadata validation.
+`training.fit_routes.fit_execution` accepts only magnitude/magnitude_candidate/regression_candidate numeric routes, checks both guards first and original magnitude column order against its admitted recipe, and preserves delegated errors/results (original magnitude lists become predictions-only dictionaries). It grants no source/registration authority and has no production caller; legacy exception translation stays in experiment wrappers.
 
 | Ridge/HGB condition | Outcome |
 |---|---|
