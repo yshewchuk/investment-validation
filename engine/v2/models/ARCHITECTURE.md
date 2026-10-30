@@ -77,23 +77,23 @@ No I/O, publication, release or production wiring; source closures need resealin
 | Same valid inputs and numerical environment | Deterministic fresh fit, not cached or journal replay |
 | Cache, transaction or partial-write concerns | No cache, I/O, persistence or publication; v1 recipes and results are unchanged |
 
-The `magnitude_ridge_hgb_recipe` API constructs/validates source-free closed
-variable-width policies; ordered columns, dictionary hash and fixed estimator
-parameters bind the recipe, not source admission or dictionary membership.
+`magnitude_ridge_hgb_recipe` constructs/validates closed variable-width policies binding ordered columns, dictionary hash and fixed estimator parameters, not source admission or dictionary membership.
 `regression_ridge_hgb_recipe.regression_recipe` adds a distinct
 `regression_ridge_hgb_recipe.v1` identity with explicit `signed`/`nonnegative`
 target domain and respectively `none`/`clip_zero` projection. Its validator
 refuses unknown fields or inconsistent domain/projection pairs; no training imports.
 `training.magnitude_ridge_hgb.fit_regression_predictions` uses that new policy;
 `fit_ridge_hgb_predictions` retains its existing magnitude recipe/result schema.
-Both guards precede inspection; the shared private fitter copies arrays, learns
-Ridge imputation/indicators/scaling only on training rows and freezes HGB's
+Both guards precede inspection; the shared private fitter copies arrays, learns Ridge imputation/indicators/scaling only on training rows and freezes HGB's
 training-all-null columns to zero. Fresh sklearn estimators use one thread.
 Signed labels/predictions need only be finite (no floor, absolute value or log);
 nonnegative labels still reject negatives and predictions clip at zero.
 The new result is `regression_ridge_hgb_fit.v1` with recipe hash and detached
 forecasts. No I/O, cache, retries, source/fold/holdout admission or release occurs.
 Existing magnitude numerics remain unchanged; source closures require resealing.
+`regression_candidate.regression_candidate_recipe` accepts only ridge/alpha, hgb/max_leaf_nodes or elasticnet/alpha+l1_ratio and delegates explicit signed/nonnegative policy construction; it imports no training or source admission.
+`training.regression_candidate.fit_regression_candidate` checks both no-fit guards before inspection, dispatches only matching regression schema/model pairs, then preserves the existing fitter result/validation/errors. Unsupported pairs refuse ValueError; no reads, selection, retries, writes or production caller.
+Existing experiment magnitude recipe/fit dispatch is unchanged and refuses the new schemas.
 
 | Ridge/HGB condition | Outcome |
 |---|---|
