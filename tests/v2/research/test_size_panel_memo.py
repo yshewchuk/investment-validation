@@ -5,6 +5,7 @@ import pytest
 from engine.v2.contracts import SnapshotRef
 from engine.v2.foundation import content_hash, to_document
 from engine.v2.ops.errors import OpsError
+from engine.v2.research.eligibility_policy import eligibility_policy
 from experiments import size_search_binding as binding_mod
 from experiments.size_search_binding import _stored_panel
 
@@ -35,10 +36,25 @@ def _panel():
             "rows": [{"event_id": "t1", "v": 1}, {"event_id": "e1", "v": 2}]}
 
 
+def _panel_request():
+    return {"feature_snapshot_id": "snap", "history_snapshot": "hist",
+            "price_history_snapshot": "price", "as_of_month": "2025-01",
+            "history_start": "2010-01-01", "source_start": "2015-01-01",
+            "policy": eligibility_policy(version="grouped_ticker_embargo.v1", embargo_days=30),
+            "event_ids": ["e1", "t1"], "horizons": [1, 3, 5],
+            "limits": dict.fromkeys(["max_source_rows", "max_fragments", "max_object_bytes",
+                                     "max_total_bytes", "max_output_rows"], 1000),
+            "metadata_limits": dict.fromkeys(["max_catalog_tables", "max_catalog_fragments",
+                                              "max_catalog_bytes", "max_fragments", "max_partitions",
+                                              "max_tickers", "max_scan_rows", "max_object_bytes",
+                                              "max_total_object_bytes", "max_batch_rows",
+                                              "max_retained_rows", "max_retained_metadata_bytes",
+                                              "max_proof_bytes"], 100)}
+
+
 def _binding():
     panel = _panel()
-    return {"size_panel_request": {"feature_snapshot_id": "snap", "history_snapshot": "hist",
-                                   "price_history_snapshot": "price"},
+    return {"size_panel_request": _panel_request(),
             "size_panel": {"context": panel["context"], "feature_snapshot": panel["feature_snapshot"]}}
 
 
@@ -89,6 +105,16 @@ def test_different_key_triggers_second_read(counting_read):
     assert len(binding_mod._PANEL_MEMO) == 1
 
 
+def test_warm_memo_still_type_validates_horizons(counting_read):
+    repo, source, binding = _Repo(), _snapshot("snap-4b"), _binding()
+    _stored_panel(repo, source, binding, ["a", "b"])
+    binding["size_panel_request"]["horizons"] = [1.0, 3, 5]
+    with pytest.raises(OpsError) as error:
+        _stored_panel(repo, source, binding, ["a", "b"])
+    assert error.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert counting_read["n"] == 1
+
+
 def test_returned_frame_is_a_private_copy(counting_read):
     repo, source, binding = _Repo(), _snapshot("snap-5"), _binding()
     first = _stored_panel(repo, source, binding, ["a", "b"])
@@ -110,8 +136,7 @@ def test_fold_inputs_reuses_panel_once_per_process(counting_read, monkeypatch):
     monkeypatch.setattr(binding_mod, "qualify_magnitude_training_targets", lambda *a, **k: train)
     panel = _panel()
     binding = {"size_request": {"inner_years": {}}, "snapshot": to_document(_snapshot("snap-6")),
-               "size_panel_request": {"feature_snapshot_id": "snap", "history_snapshot": "hist",
-                   "price_history_snapshot": "price"},
+               "size_panel_request": _panel_request(),
                "size_panel": {"context": panel["context"], "feature_snapshot": panel["feature_snapshot"]},
                "magnitude_execution": {"evaluation_labels_before": "2024-01-01"},
                "holdouts": {"holdout_as_of_month": "2024-02"}}

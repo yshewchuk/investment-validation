@@ -96,6 +96,7 @@ _PANEL_MEMO = {}
 
 def _stored_panel(repository, source, binding, columns):
     """Full admission on a process-fresh key; later calls reuse the memo after a hash check."""
+    validate_panel_request(binding["size_panel_request"])
     key = (id(repository), content_hash(to_document(source)),
            content_hash(binding["size_panel_request"]), tuple(columns))
     entry = _PANEL_MEMO.get(key)
