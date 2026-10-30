@@ -1,5 +1,6 @@
 # `engine/v2/models` — architecture
 
+`regression_target.target_descriptor` / `validate_target` are source-free closed metadata: explicit label/prediction columns, signed/nonnegative domain and definition hash bind a target ID. Temporal planning consumes them; malformed/stale identities raise `ValueError` before source access, without proving target availability or granting reads.
 See the root [`ARCHITECTURE.md`](../../../ARCHITECTURE.md) for the layer
 table and enforced import direction. This doc follows
 `docs/COMPONENT_ARCHITECTURE_TEMPLATE.md`'s section order.

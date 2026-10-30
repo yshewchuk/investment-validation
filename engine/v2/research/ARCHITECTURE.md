@@ -374,9 +374,9 @@ The adapter has no fitting, target-join, CLI, provider, report, ledger or final-
 caller, and no retry, write or partial result; its only cache is the
 observed-session read (see its failure row); Repository failures propagate.
 
-`magnitude_folds.plan_magnitude_folds(repository, snapshot, *, as_of_month,
-evaluation_years, training_start, event_ids=None)` plans metadata-only expanding
-annual evaluation folds from one admitted snapshot and its pinned calendar.
+`magnitude_folds.plan_magnitude_folds(repository, snapshot, *, as_of_month, evaluation_years, training_start, event_ids=None)` plans metadata-only expanding annual evaluation folds from one admitted snapshot and its pinned calendar.
+`plan_regression_folds` shares that population/calendar implementation but binds a validated explicit target descriptor into `regression_temporal_plan.v1`; legacy magnitude plans remain byte-identical. IV metadata planning uses its annual candidate folds and 5/3/1 clocks, not label qualification, native registration or nested search.
+No outcomes, writes, caches, retries or target-snapshot identity are introduced; native admission failures propagate. Complexity and metadata scans are unchanged from magnitude planning.
 `magnitude_folds.magnitude_window(evaluation_years, training_start)` exposes the
 same pure request validation to native preregistration and returns a detached
 canonical window; invalid requests refuse `CONTRACT_MISMATCH` without reads.
