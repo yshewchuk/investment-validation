@@ -1,10 +1,11 @@
 """Shared native fold inputs and pure evidence checks for inner/outer search."""
 import math
-from numbers import Integral, Real
+from numbers import Real
 
 from engine.v2.contracts import SnapshotRef
 from engine.v2.foundation import canonical_json, content_hash, from_document
 from engine.v2.research.magnitude_history_store import read_stored_for_events
+from engine.v2.research.regression_evidence import normalize_forecasts as normalize_regression_forecasts
 from engine.v2.research.magnitude_inputs import (
     magnitude_recipe,
     preflight_magnitude_targets,
@@ -60,23 +61,8 @@ def fit_evidence(inputs, fold, plan, execution):
 
 def normalize_forecasts(rows, fold, horizons, *, strict_json=False):
     """Require exact finite nonnegative coverage; preserve submitted Real/Integral admission."""
-    expected = {(event, horizon) for event in fold["evaluation_event_ids"] for horizon in horizons}
-    if not isinstance(rows, list) or len(rows) != len(expected):
-        raise ValueError
-    found = {}
-    for row in rows:
-        if not isinstance(row, dict) or set(row) != {"event_id", "horizon_sessions", "predicted_absolute_move_pct"}:
-            raise ValueError
-        horizon, value = row["horizon_sessions"], row["predicted_absolute_move_pct"]
-        if (isinstance(horizon, bool) or not isinstance(horizon, Integral)
-                or isinstance(value, bool) or not isinstance(value, Real) or value < 0
-                or (strict_json and (type(horizon) is not int or type(value) not in (int, float)))):
-            raise ValueError
-        pair, value = (row["event_id"], int(horizon)), float(value)
-        if pair not in expected or pair in found or not math.isfinite(value):
-            raise ValueError
-        found[pair] = {"event_id": pair[0], "horizon_sessions": pair[1], "predicted_absolute_move_pct": value}
-    return [found[pair] for pair in sorted(expected)]
+    return normalize_regression_forecasts(rows, fold, horizons,
+        prediction_column="predicted_absolute_move_pct", target_domain="nonnegative", strict_json=strict_json)
 
 
 def validate_targets(preflight, fold, evaluation_inputs, targets, *, strict_json=False):
