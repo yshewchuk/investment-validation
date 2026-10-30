@@ -784,7 +784,7 @@ change their arithmetic or imply that source receipt production is available.
   registration source closure; caller data paths stay explicit),
   `experiments.native_sweep_collection`, `experiments.v2_prediction`,
   `experiments.magnitude_history_store`, `experiments.size_panel` and the search source seals in
-  `experiments.magnitude_search_plan`, `experiments.magnitude_search_trials`,
+  `experiments.magnitude_search_plan`, `experiments.distribution_plan`, `experiments.magnitude_search_trials`,
   `experiments.magnitude_search_outer`, `experiments.v2_magnitude_search_run`
   and `experiments.record_export` (installed checkout's git commit id only)
   derive installed roots from `__file__`

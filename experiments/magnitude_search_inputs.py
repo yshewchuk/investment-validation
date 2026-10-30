@@ -88,7 +88,7 @@ def load_inputs(store, record, expected_id):
 
 
 def load_fit_inputs(store, manifest, expected_id, evaluation_event_ids, horizons, feature_columns):
-    """Stream only the rows the fit child consumes from a sharded manifest.
+    """Stream stored training/feature rows for fixed fitting or admission replay.
 
     Verifies the manifest against ``expected_id`` and reads only its ``training`` and
     ``features`` sections, shard by shard. Returns ``{"features", "training"}``: training rows
@@ -96,8 +96,9 @@ def load_fit_inputs(store, manifest, expected_id, evaluation_event_ids, horizons
     events at the selected horizons, reduced to (event_id, context_id, horizon_sessions,
     *feature_columns), in stored order. A manifest, hash, shard or inline-path mismatch is
     EXPERIMENT_IDENTITY_CONFLICT (retryable store errors propagate); a row missing a
-    requested column raises KeyError, and the fit child reports any loader failure as
-    unavailable. Both loaders share ``_admit_manifest``; projection arguments must be
+    requested column raises KeyError. The magnitude fit child reports MemoryError as
+    resource_limit and other loader failures as unavailable; library callers retain the error.
+    Both loaders share ``_admit_manifest``; projection arguments must be
     lists or tuples (INVALID_EXPERIMENT_SPEC otherwise).
     """
     if not isinstance(manifest, dict) or manifest.get("schema_version") != MANIFEST_SCHEMA:
