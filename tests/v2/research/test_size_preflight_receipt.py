@@ -196,6 +196,17 @@ def test_payload_panel_not_bound_to_receipt_refuses(case, change):
     assert caught.value.problem.details == {"reason": "receipt_corrupt"}
 
 
+def test_payload_request_not_bound_to_receipt_refuses(case):
+    bindings = bindings_for(case)
+    changed = deepcopy(bindings)
+    changed["size_request"] = "sha256:" + "2" * 64
+    ref = issue(case.store, changed, case.registration)
+    with pytest.raises(OpsError) as caught:
+        admit(case.store, ref, changed, case.spec)
+    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert caught.value.problem.details == {"reason": "receipt_corrupt"}
+
+
 @pytest.mark.parametrize("run_id", ["native_forged", 5])
 def test_forged_run_id_refuses(case, run_id):
     bindings = bindings_for(case)

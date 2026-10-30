@@ -15,6 +15,7 @@ from engine.v2.foundation import (
 )
 from engine.v2.ops.errors import fail
 from engine.v2.ops.experiments import resolve_experiment_plan
+from experiments.magnitude_search_request_versions import compile_request
 from experiments.native_registration import (
     MAX_NATIVE_EVIDENCE_BYTES,
     NativeRegistration,
@@ -32,6 +33,7 @@ def input_bindings(repository, spec, request, panel_request, *, scope, training_
     return {
         "spec_hash": spec.spec_hash,
         "request": content_hash(request),
+        "size_request": content_hash(compile_request(request)["request"]),
         "panel_request": content_hash(panel_request),
         "scope": scope,
         "training_start": training_start,
@@ -124,10 +126,11 @@ def admit(store, ref, bindings, spec):
     try:
         panel_request = document["size_panel_request"]
         snapshots = bindings["snapshots"]
-        bound = content_hash(panel_request) == bindings["panel_request"] and all(
-            panel_request[name] == snapshots[name]["snapshot_id"]
-            for name in ("feature_snapshot_id", "history_snapshot",
-                         "price_history_snapshot"))
+        bound = (content_hash(panel_request) == bindings["panel_request"]
+                 and content_hash(document["size_request"]) == bindings["size_request"]
+                 and all(panel_request[name] == snapshots[name]["snapshot_id"]
+                         for name in ("feature_snapshot_id", "history_snapshot",
+                                      "price_history_snapshot")))
     except (KeyError, TypeError):
         bound = False
     if (not bound
