@@ -34,6 +34,7 @@ The owning modules expose these helpers to native experiment callers; no compati
 | `size_registration_artifacts.pack_size_registration` / `hydrate_size_registration` / `size_registration_artifact_bytes` / `native_registration.load_registration_document` | Registration preparation writes bounded CAS sections for large ordered SIZE values and stores content-hash descriptors; hydration checks the aggregate 1 GiB reference-byte cap, verifies each shard and recomputes logical artifact hashes before restoring planner fields. Missing, altered or malformed objects refuse `EXPERIMENT_IDENTITY_CONFLICT`; aggregate overflow refuses `RESOURCE_LIMIT_EXCEEDED`. |
 | `size_search_binding.fold_inputs` / `execution_for_candidate` | Comparison/search evidence and `DistributionTrials.start` use the former to require an exact reconstructed inner/normalized outer fold before re-admitting stored rows and qualified training targets; trials/outer use the latter to bind a candidate execution dict. No hidden materialization or fitting; admission failures propagate. |
 | `size_comparator.COLUMNS` / `native_recipe` / `recipe` / `fit_evidence` / `forecasts` | Binding/comparison/worker consume ordered input names, native/complete detached recipes and causal OLS+MLP forecasts from admitted arrays. Reads installed registry metadata, not market sources; fresh guarded fits or explicit abstention, unchanged raw predictions; invalid recipe/metadata raises `ValueError`, bounded registry refusal raises typed `OpsError`. `fit_evidence(inputs, fold, plan)` binds eligible ordered 14-column arrays, not estimator entry; the full admitted cohort remains in the input manifest. |
+| `iv_crush_comparator.COLUMNS` / `native_recipe` / `recipe` / `fit_evidence` / `forecasts` | Synthetic callers only: pinned native IV HGB causal refits use 41 ordered features from 38 forecast-cutoff columns, including explicit `has_implied_quote`. Both no-fit guards precede forecast input inspection; complete finite predictors and 500 eligible training rows govern incumbent abstention, while arithmetic training mean uses all admitted labels. Empty/nonfinite training refuses `INVALID_EXPERIMENT_SPEC`; recipe drift raises `ValueError`, bounded registry failures retain typed resource errors. No evaluation labels, source loader, journal/CLI integration, clipping or production-population reproduction. |
 | `size_comparison_run.execute` | Outer execution passes sealed plan/fold/limits; returns validated forecasts and persists create-only input/fit/terminal receipts. `replay_only=True` reads exact evidence or refuses, never fits/writes; identity/resource/native failures retain their policy. |
 | `size_fit_diagnostics.keys` / `evidence` | Trials/outer select versioned receipt keys and validate child diagnostics against execution recipe/horizons; pure set/dict results, no I/O; mismatches refuse `EXPERIMENT_IDENTITY_CONFLICT`. |
 | `size_job_budget.remaining` / `resolved_limits` | CLI/trials/outer/comparison supply an admitted plan; persist the first immutable deadline, then return seconds/clamped child limits. No reset/retry; mismatched evidence/limits or exhausted/backward time refuse. |
@@ -526,3 +527,23 @@ Only after full native admission are feature rows projected to the recipe's inst
 | Failure before a successful start claim (including missing/oversized implementation source, `INPUT_CHANGED`), nonretryable `OpsError`/`DataError`, untyped error, or failure during `read_admission` | Original failure and retryability propagate. Existing append transactions own atomic associations; an already committed claim stays consumed, and replay verifies stored evidence only. |
 
 Current consumers are synthetic unit/native-catalog tests only. Dependencies are native registration, public SIZE plan/fold admission, shared cohort publisher/loader and immutable journal/migrations, foundation hashing/CAS, installed fingerprints and bounded stderr stage logging. No estimator, provider, CLI, final read or production path is added. Native v1.7 hydration and cohort processing retain their existing bounds; this adapter does not establish memory feasibility or add a scheduler. C/D must supply causal OOF/result contracts and a narrow bounded distribution-worker dispatch rather than coercing histogram output into scalar `SearchTrials` forecasts.
+
+### IV causal incumbent numeric policy
+
+`iv_crush_comparator` maps nine legacy `or_*` names to the qualified daily-state aliases;
+`pre_iv30`, `pre_iv10`, `pre_exern_iv30`, `pre_exern_iv10` read the supplied horizon
+row’s `iv30`, `iv10`, `exern_iv30`, `exern_iv10`, never future pre-print target fields.
+`abs_dist_high` is `abs(dist_high)`; the other 27 inputs retain their native names.
+No units are rescaled. This is a causal refit, not exact legacy population reproduction:
+no source-level `n_prior>=4` filter is invented beyond the explicit native recipe.
+`forecasts` accepts admitted indexed feature rows, a training-only DataFrame, fold/plan
+metadata, the exact recipe and a progress callback. Each eligible horizon constructs
+a fresh one-thread native HGB (learning rate 0.06, 300 iterations, seed 20260829).
+`fit_evidence` reuses shared ordered matrix hashes and marks eligibility, not actual
+estimator entry. Incomplete rows abstain; missing required projected fields refuse.
+Estimator errors propagate without retry or partial returned results. Registry metadata
+is the only file input; numeric fitting opens no repository, provider or target source.
+
+```bash
+python -m pytest tests/v2/research/test_iv_crush_comparator.py
+```
