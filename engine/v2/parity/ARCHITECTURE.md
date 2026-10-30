@@ -227,9 +227,11 @@ Missing or unequal required context resolves to `EXACT`; matching context
 with valid scale endpoints applies the derived allowance. The non-finite and
 reversed-endpoint fallback guards are implemented in `_scaled_tolerance`,
 with dedicated input tests still tracked as follow-up work.
-Stage hashes reflect the active policy comparison: leaves accepted by a
-tolerance are canonicalized to the left-side value for hashing, while findings
-and reported field values remain based on the original records.
+Stage hashes retain each side's raw typed output fields. A tolerance can make
+the comparison verdict `agree` while the stage's output hashes differ; the
+native hash always describes the native record, and the legacy hash describes
+the legacy record. Findings and reported field values likewise retain the
+original values.
 
 ## Invariants
 

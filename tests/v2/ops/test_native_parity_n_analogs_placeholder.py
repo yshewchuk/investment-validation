@@ -112,7 +112,7 @@ def test_ci_finding_names_tolerance_reason_and_null_mask_is_exact():
     assert null_receipt.findings[0].tolerance_applied == "exact"
 
 
-def test_accepted_ci_tolerance_agrees_and_stage_hashes_agree():
+def test_accepted_ci_tolerance_agrees_and_stage_hashes_preserve_native_values():
     legacy = {"n_analogs": 20, "ci_low": 0.1, "ci_high": 0.5}
     native = {"n_analogs": 20, "ci_low": 0.13, "ci_high": 0.47}
     receipt = compare_records(
@@ -120,12 +120,27 @@ def test_accepted_ci_tolerance_agrees_and_stage_hashes_agree():
     assert receipt.verdict == AGREE
     assert receipt.findings == ()
     assert receipt.stage_hashes
-    assert all(row.agrees for row in receipt.stage_hashes)
+    assert all(
+        row.agrees for row in receipt.stage_hashes if row.stage_id != "analogs")
     expected = content_hash(
         {"ci_high": ["float", 0.5], "ci_low": ["float", 0.1], "n_analogs": ["int", 20]})
     analogs = next(row for row in receipt.stage_hashes if row.stage_id == "analogs")
     assert analogs.left_output_hash == expected
-    assert analogs.right_output_hash == expected
+    assert analogs.right_output_hash == content_hash(
+        {"ci_high": ["float", 0.47], "ci_low": ["float", 0.13],
+         "n_analogs": ["int", 20]})
+    assert analogs.agrees is False
+
+
+def test_huge_integer_ci_low_overflow_guard_yields_differ_without_exception():
+    legacy = {"n_analogs": 20, "ci_low": 0.1, "ci_high": 0.5}
+    native = {"n_analogs": 20, "ci_low": 10**400, "ci_high": 0.5}
+    receipt = compare_records(
+        legacy, native, tolerance_policy=NATIVE_PARITY_TOLERANCE)
+    assert receipt.verdict == DIFFER
+    assert len(receipt.findings) == 1
+    assert receipt.findings[0].field_path == "ci_low"
+    assert receipt.findings[0].right_value == 10**400
 
 
 def test_integer_ci_endpoints_use_declared_tolerance():

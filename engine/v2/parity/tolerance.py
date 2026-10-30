@@ -1,8 +1,9 @@
 """Per-field tolerance policies. There is no global tolerance, by construction.
 
 §3.2 and §7.3: exact comparison for IDs, selected contracts, integer
-quantities, gate verdicts, flags, null masks and frozen canonical records;
-declared **per-field** tolerances for independently recomputed floats; never a
+quantities, gate verdicts, flags, null masks and frozen canonical records,
+except where a field has an explicitly declared tolerance; declared
+**per-field** tolerances for independently recomputed numeric values; never a
 global tolerance, and never one widened to make a test pass.
 
 The default here is therefore *exact*, and a policy is a mapping of explicit

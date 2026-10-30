@@ -198,7 +198,9 @@ def _compare_field(path: str, left: Any, right: Any, policy: TolerancePolicy,
         if tol.is_exact:
             return _int_finding(path, left, right, stage)
         delta = right - left
-        allowed = tol.absolute + tol.relative * max(abs(left), abs(right))
+        allowed = tol.absolute
+        if tol.relative:
+            allowed += tol.relative * max(abs(left), abs(right))
         if abs(delta) <= allowed:
             return None
         return Finding(
@@ -420,11 +422,8 @@ def compare_records(
         )
 
     findings: list[Finding] = []
-    # Stage hashes represent the policy comparison, so accepted equivalences
-    # must hash equally: canonicalize the right side for HASHING ONLY where
-    # _compare_field accepted a tolerance difference. The compared mappings,
-    # findings and raw field values stay unchanged.
-    hash_right = dict(flat_right)
+    # Stage hashes are raw per-side record evidence: values are never rewritten
+    # for tolerance. Tolerance affects findings and the verdict only.
     for path in paths:
         left_value = flat_left.get(path, _ABSENT)
         right_value = flat_right.get(path, _ABSENT)
@@ -434,9 +433,7 @@ def compare_records(
             left_record=flat_left, right_record=flat_right)
         if finding is not None:
             findings.append(finding)
-        elif left_value != right_value:
-            hash_right[path] = left_value
-    rows = _stage_hashes(stage_plan, flat_left, hash_right, paths)
+    rows = _stage_hashes(stage_plan, flat_left, flat_right, paths)
     return ComparisonReceipt(
         receipt_id=content_hash([comparison_kind, left_ref, right_ref,
                                  [f.finding_id for f in findings]])[7:23],
