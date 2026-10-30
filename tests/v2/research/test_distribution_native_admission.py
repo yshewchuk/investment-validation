@@ -6,7 +6,7 @@ import pytest
 
 from engine.models.no_fit import no_fit_guard as legacy_no_fit
 from engine.v2.data.errors import fail as data_fail
-from engine.v2.foundation import SystemClock, canonical_json, content_hash
+from engine.v2.foundation import SystemClock, canonical_json, content_hash, to_document
 from engine.v2.models.no_fit import no_fit_guard
 from engine.v2.ops.errors import OpsError, fail
 from experiments import distribution_plan, distribution_trials
@@ -70,6 +70,9 @@ def test_native_admission_is_separate_compact_and_all_horizon(case, own, monkeyp
     adapter = trials(case, own, feature_set)
     with no_fit_guard(), legacy_no_fit():
         plan = adapter.seal(clock=SystemClock())
+        changes = case.conn.total_changes
+        assert adapter.seal(clock=SystemClock()) == plan
+        assert case.conn.total_changes == changes
         admitted = adapter.start(role, "2024", inner_year)
     assert own.run_id != case.registration.run_id
     assert source_records(case) == before
@@ -92,6 +95,38 @@ def test_native_admission_is_separate_compact_and_all_horizon(case, own, monkeyp
     assert {(row["event_id"], row["horizon_sessions"]) for row in loaded["features"]} == {
         (event, horizon) for event in events for horizon in (1, 3, 5)}
     assert {row["event_id"] for row in loaded["training"]}.isdisjoint(fold["evaluation_event_ids"])
+    # The fixture's admitted moves are -2, -4, +6; protected 9999 and
+    # unavailable labels never contribute. Expected values do not use fold_inputs.
+    by_date = {str(event["event_date"].date()): event["event_id"] for event in case.events}
+    target_values = {by_date["2022-06-02"]: 2.0}
+    if role == "outer":
+        target_values.update({by_date["2023-01-03"]: 4.0, by_date["2023-06-02"]: 6.0})
+    assert sorted(loaded["training"], key=lambda row: row["event_id"]) == [
+        {"event_id": event, "absolute_move_pct": value} for event, value in sorted(target_values.items())]
+    history = {by_date[date]: values for date, values in (
+        ("2022-06-02", (0, None, None, None, None)),
+        ("2023-01-03", (1, -2.0, 2.0, None, None)),
+        ("2023-06-02", (2, -3.0, 3.0, -10 / 3, 10 / 3)),
+        ("2024-06-17", (3, 0.0, 4.0, 26 / 9, 46 / 9)))}
+    for row in loaded["features"]:
+        expected_history = dict(zip(("n_prior", "mean_prior_move", "mean_prior_abs_move",
+                                    "ema2_prior_move", "ema2_prior_abs_move"), history[row["event_id"]]))
+        for name, value in expected_history.items():
+            assert row[name] is None if value is None else row[name] == pytest.approx(value)
+        assert all(row[f"ema{span}_prior_{kind}move"] is None for span in (4, 8, 12) for kind in ("", "abs_"))
+        if feature_set == "HMO":
+            # Zero quotes are planted only at the one-session June anchors;
+            # horizons 3/5 use earlier sessions, whose quotes remain eight.
+            has_quote = not (row["horizon_sessions"] == 1 and row["event_id"] in
+                             {by_date["2023-06-02"], by_date["2024-06-17"]})
+            assert row["has_implied_quote"] == int(has_quote)
+            assert row["implied_move"] == (8.0 if has_quote else None)
+    assert plan["source_plan_ref"] == to_document(case.ref)
+    assert plan["source_plan_id"] == case.plan["plan_id"]
+    assert plan["context_id"] == case.registration.document["size_panel"]["context"]["context_id"]
+    for name, registration in (("own", own), ("source", case.registration)):
+        assert plan["registrations"][name]["run_id"] == registration.run_id
+        assert plan["registrations"][name]["variant_id"] == registration.variant_id
     with monkeypatch.context() as patch:
         patch.setattr(distribution_trials, "fold_inputs", forbidden)
         assert adapter.read_admission(role, "2024", inner_year) == admitted
@@ -187,8 +222,13 @@ def test_schedule_budget_uses_two_estimators_not_source_grid(case, own):
     assert native["candidate_count"] == 33
     assert plan["budget"]["counts"] == {"classifier_fits": 6, "point_fits": 6, "total_fits": 12,
         "classifier_trees_upper": 48600, "point_trees_upper": 600, "total_trees_upper": 49200}
-    assert plan["budget"]["budget_id"] == content_hash({
-        key: value for key, value in plan["budget"].items() if key != "budget_id"})
+    expected = {"schema_version": "distribution_fit_budget.v1", "scope": "raw_histogram_and_matched_point_only",
+        "recipe_id": candidate_recipe("H")["recipe_id"], "inner_folds": 1, "outer_folds": 1, "horizons": [5, 3, 1],
+        "counts": {"classifier_fits": 6, "point_fits": 6, "total_fits": 12,
+            "classifier_trees_upper": 48600, "point_trees_upper": 600, "total_trees_upper": 49200},
+        **caps, "retries": 0, "excluded": ["additional_calibration_fits", "incumbent_refits", "payoff_refits",
+                                          "feature_preparation", "parent_and_job_containment"]}
+    assert plan["budget"] == {**expected, "budget_id": content_hash(expected)}
     smaller = deepcopy(caps)
     smaller["max_fits"] = 11
     with pytest.raises(OpsError) as caught:

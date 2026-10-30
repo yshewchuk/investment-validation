@@ -60,7 +60,7 @@ write path.
 provide a source-free absolute-magnitude histogram format and numerical refusals.
 `histogram([1.0] + [0.0] * 80)` returns a detached document with an explicit unresolved tail;
 `tail_excesses=[0.0, 2.0]` declares conditional excesses relative to 20 (zero means exactly 20).
-No sample is fitted/admitted. Consumers are the source-free magnitude math/payoff helpers
+No sample is fitted/admitted. Consumers are the source-free magnitude math/payoff helpers, `experiments.distribution_candidate_recipe` and `experiments.distribution_class_support`,
 and synthetic tests, including `tests/v2/research/test_magnitude_distribution.py`.
 
 `magnitude_distribution_math` exposes `components`, `cdf`, `mean`, `crps`,
@@ -274,6 +274,7 @@ Magnitude search/report wrappers retain their existing nonnegative contracts.
 `experiments/magnitude_search_request.py` consumes `magnitude_panel_table.recipe`
 and `eligibility_policy.eligibility_policy` for source-free dictionary/policy declarations, not data admission.
 `experiments/magnitude_search_request_versions.py` consumes both v1/v2 panel `recipe` APIs for dictionary dispatch only.
+`experiments/distribution_candidate_recipe.py` consumes the qualified v3 feature recipe and distribution format; `distribution_class_support.py` consumes histogram validation for explicit class mapping. `distribution_trials.py` consumes bounded progress/stage logging during admission and projection; these helpers grant no data or fitting authority.
 
 Which packages import this one, and for what. Checked against the import graph:
 a claimed consumer that does not import, or an omitted one that does, is a

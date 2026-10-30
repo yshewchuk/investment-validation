@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from engine.v2.data.errors import DataError, fail as data_fail
-from engine.v2.foundation import artifact_reference, canonical_json, content_hash
+from engine.v2.foundation import artifact_reference, canonical_json, content_hash, to_document
 from engine.v2.ops.errors import OpsError, fail
 from experiments import distribution_plan as planner
 from experiments import distribution_trials as journal
@@ -69,9 +69,10 @@ def context(monkeypatch):
     monkeypatch.setattr(journal, "require_current", lambda *args: events.append(("current",)))
     columns = args[-2]["point_recipe"]["features"]
     inputs = {"features": [{"event_id": event, "context_id": "panel-context", "horizon_sessions": horizon,
-              "unselected": 99, **dict.fromkeys(columns, 1.0)}
-              for event in ("train", "inner", "outer") for horizon in (5, 3, 1)],
-              "training": [{"event_id": "train", "absolute_move_pct": 1.0}]}
+              "unselected": 99, **{name: 10 * index + horizon + offset / 100
+                                      for offset, name in enumerate(columns)}}
+              for index, event in enumerate(("train", "inner", "outer")) for horizon in (5, 3, 1)],
+              "training": [{"event_id": "train", "absolute_move_pct": 7.25}]}
 
     def fold_inputs(repository, binding, fold):
         events.append(("fold_inputs", deepcopy(fold)))
@@ -120,7 +121,24 @@ def test_small_plan_uses_native_schedule_not_size_grid_and_detaches(context):
     assert plan["registrations"]["own"]["run_id"] == "own"
     assert plan["registrations"]["source"]["registration_ref"]["schema_ref"] == "native_experiment_registration.v1.7"
     assert "event_ids" not in canonical_json(plan) and "folds" not in plan
-    assert plan["plan_id"] == content_hash({key: value for key, value in plan.items() if key != "plan_id"})
+    own, source, ref, recipe, caps = (context.args[index] for index in (2, 3, 5, 6, 7))
+    budget = {"schema_version": "distribution_fit_budget.v1", "scope": "raw_histogram_and_matched_point_only",
+        "recipe_id": recipe["recipe_id"], "inner_folds": 1, "outer_folds": 1, "horizons": [5, 3, 1],
+        "counts": {"classifier_fits": 6, "point_fits": 6, "total_fits": 12,
+            "classifier_trees_upper": 48600, "point_trees_upper": 600, "total_trees_upper": 49200},
+        **caps, "retries": 0, "excluded": ["additional_calibration_fits", "incumbent_refits", "payoff_refits",
+                                          "feature_preparation", "parent_and_job_containment"]}
+    expected = {"schema_version": "distribution_plan.v1", "registrations": {
+        name: {"run_id": registration.run_id, "variant_id": registration.variant_id,
+            "registration_ref": to_document(artifact_reference(registration.binding_json, schema))}
+        for name, registration, schema in (("own", own, "native_experiment_registration.v1.0"),
+            ("source", source, "native_experiment_registration.v1.7"))},
+        "source_plan_ref": to_document(ref), "source_plan_id": content_hash("source-plan"),
+        "context_id": content_hash("qualified-source-context"),
+        "implementation": {"source_closure": {"experiments/distribution_trials.py": content_hash("runner")},
+                           "environment": {"test_environment": 1}},
+        "recipe": recipe, "budget": {**budget, "budget_id": content_hash(budget)}, "final_read_authority": "none"}
+    assert plan == {**expected, "plan_id": content_hash(expected)}
     plan["recipe"]["horizons"].clear()
     native["folds"].clear()
     assert planner.prepare_plan(*context.args)[0]["recipe"]["horizons"] == [5, 3, 1]
@@ -128,12 +146,24 @@ def test_small_plan_uses_native_schedule_not_size_grid_and_detaches(context):
 
 @pytest.mark.parametrize("field,value", [("schema_version", "native_experiment_registration.v1.3"),
     ("snapshot", {}), ("scope", "other"), ("holdouts", {}), ("event_ids", ["different"]),
-    ("environment", {}), ("source_closure", {}), ("final_read", {})])
+    ("environment", {}), ("source_closure", {}),
+    ("source_closure", {"experiments/distribution_trials.py": content_hash("changed runner bytes")}), ("final_read", {})])
 def test_owner_context_drift_refuses(context, field, value):
     args = list(context.args)
     args[2] = _registration("own", {**args[2].document, field: value})
     _code("EXPERIMENT_IDENTITY_CONFLICT", lambda: planner.prepare_plan(*args))
     assert not context.published
+
+
+def test_registered_runner_byte_drift_refuses_sealed_admission_before_claim(context, monkeypatch):
+    context.trials.seal(clock=1)
+    before = deepcopy(context.records)
+    monkeypatch.setattr(planner, "source_closure", lambda *args:
+        {"experiments/distribution_trials.py": content_hash("changed installed runner bytes")})
+    error = _code("EXPERIMENT_IDENTITY_CONFLICT", lambda: context.trials.start("inner", "2024", "2023"))
+    assert error.problem.message == "distribution installation differs from its registration"
+    assert context.records == before and not context.published
+    assert not any(event[0] == "fold_inputs" for event in context.events)
 
 
 @pytest.mark.parametrize("field,value", [("runner", "experiments/size_search.py"), ("seed", True),
@@ -182,6 +212,11 @@ def test_claim_precedes_native_admission_then_project_and_bind_actual_manifest(c
     assert receipt["fold_id"] == content_hash({"fold": fold, "role": role, "outer_year": year})
     assert all(set(row) == {"event_id", "context_id", "horizon_sessions", *c.columns}
                for row in c.published[0]["features"])
+    assert c.published == [{"features": [
+        {"event_id": event, "context_id": "panel-context", "horizon_sessions": horizon,
+         **{name: 10 * index + horizon + offset / 100 for offset, name in enumerate(c.columns)}}
+        for index, event in enumerate(("train", "inner", "outer")) for horizon in (5, 3, 1)],
+        "training": [{"event_id": "train", "absolute_move_pct": 7.25}]}]
     assert "unselected" in c.inputs["features"][0]
     assert {row["horizon_sessions"] for row in c.published[0]["features"]} == {1, 3, 5}
     assert [trial["horizon"] for trial in receipt["trials"]] == [5, 3, 1]
@@ -189,6 +224,24 @@ def test_claim_precedes_native_admission_then_project_and_bind_actual_manifest(c
                for trial in receipt["trials"])
     assert receipt["manifest"] == c.manifest and receipt["status"] == "admitted"
     assert receipt["final_read_authority"] == "none"
+    expected_fold = ({"year": "2023", "training_labels_before": "2023-01-01",
+        "evaluation_labels_before": "2024-01-01", "training_candidate_event_ids": ["train"],
+        "evaluation_event_ids": ["inner"]} if role == "inner" else
+        {"year": "2024", "training_labels_before": "2024-01-01", "evaluation_labels_before": "2025-01-01",
+         "training_candidate_event_ids": ["train", "inner"], "evaluation_event_ids": ["outer"]})
+    fold_id = content_hash({"fold": expected_fold, "role": role, "outer_year": "2024"})
+    expected_trials = []
+    for horizon in (5, 3, 1):
+        identity = {"schema_version": "distribution_trial_declaration.v1", "recipe_id": c.args[6]["recipe_id"],
+            "context_id": content_hash("qualified-source-context"), "fold_id": fold_id,
+            "inputs_id": content_hash({"schema_version": "test_manifest", "sections": {"features": "shards"}}),
+            "budget_id": plan["budget"]["budget_id"], "horizon": horizon, "role": role,
+            "calibration_identity": "uncalibrated", "retries": 0}
+        expected_trials.append({**identity, "trial_id": content_hash(identity)})
+    assert receipt == {"schema_version": "distribution_admission.v1", "plan_id": plan["plan_id"],
+        "fold_id": fold_id, "role": role, "outer_year": "2024", "inner_year": inner,
+        "inputs_id": c.inputs_id, "manifest": c.manifest, "trials": expected_trials,
+        "status": "admitted", "final_read_authority": "none"}
     assert {run for run, slot in c.records} == {"own"}
     assert all(slot.startswith("distribution:") for run, slot in c.records)
     receipt["manifest"]["sections"].clear()
@@ -205,6 +258,13 @@ def test_replay_revalidates_no_outcome_reread_or_write(context, monkeypatch):
     assert [event[0] for event in c.events] == ["current", "verify", "read_source_plan", "load_fit_inputs"]
     assert c.events[-1][1][2:] == (["inner"], [5, 3, 1], c.columns)
     assert set(receipt).isdisjoint({"features", "training", "forecasts", "completed"})
+
+
+def test_exact_seal_replay_preserves_the_only_record(context):
+    first = context.trials.seal(clock=1)
+    before = deepcopy(context.records)
+    assert context.trials.seal(clock=2) == first
+    assert context.records == before == {("own", "distribution:seal"): first}
 
 
 @pytest.mark.parametrize("role,year,inner", [("bad", "2024", None), (True, "2024", None),

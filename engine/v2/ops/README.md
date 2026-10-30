@@ -238,6 +238,7 @@ that fixed-child supervisor consumes `executor.THREAD_VARIABLES` and `errors.fai
 `experiments/magnitude_search_worker.py` consumes `errors.OpsError` to distinguish estimator-local failures; `experiments/magnitude_fitted.py` consumes `errors.OpsError`/`fail` for strict propagation and legacy failure mapping.
 `experiments/magnitude_search_outer.py` consumes `migrations.require_current`,
 `fingerprints.source_closure` and `errors.OpsError`/`fail` for selected outer evaluation.
+`experiments/distribution_candidate_recipe.py` and `distribution_class_support.py` consume typed declaration failures; `distribution_plan.py` consumes installed source/environment fingerprints and typed failures; `distribution_trials.py` consumes explicit journal migrations and typed admission/interruption failures, not the ops retry lifecycle.
 `experiments/v2_magnitude_search_run.py` consumes those same interfaces plus
 `catalog.connect` and `experiments.experiment_spec_from_document` for serial CLI admission.
 

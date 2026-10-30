@@ -52,7 +52,18 @@ def test_pair_reuses_exact_native_feature_order_and_point_policy(subset, width):
     assert shared["early_stopping"] is False
     assert shared["max_iter"] == 100
     assert shared["max_leaf_nodes"] == 7
-    assert result["recipe_id"] == content_hash({k: v for k, v in result.items() if k != "recipe_id"})
+    # Assemble the adapter's complete contract from native inputs, not its output.
+    expected = {"schema_version": "distribution_candidate_recipe.v1", "feature_set": subset,
+        "feature_schema": "research_magnitude_panel.v3", "point_recipe": point,
+        "classifier": {"class": "HistGradientBoostingClassifier", "params": shared,
+                       "preprocessing": point["preprocessing"]},
+        "output_recipe": output_recipe(), "horizons": [5, 3, 1], "primary_horizon": 1,
+        "class_policy": {"axis": list(range(81)), "mapping": "explicit_estimator_class_labels",
+            "minimum_observed_classes": 2, "absent_class_mass": 0, "smoothing": "none"},
+        "calibration": {"identity": "uncalibrated", "fit_count": 0},
+        "tail": {"policy": "training_only_empirical_excess", "no_samples": "unresolved"},
+        "comparison": "raw_histogram_and_same_feature_point", "retries": 0}
+    assert result == {**expected, "recipe_id": content_hash(expected)}
 
 
 def test_initial_raw_policy_and_detached_results_are_explicit():
@@ -115,7 +126,15 @@ def test_exact_boundary_counts_include_each_fold_horizon_and_both_arms():
     assert result["excluded"] == ["additional_calibration_fits", "incumbent_refits", "payoff_refits",
                                   "feature_preparation", "parent_and_job_containment"]
     assert _budget(inner_folds=1, outer_folds=1, max_fits=12, max_trees=49200)["counts"]["total_trees_upper"] == 49200
-    assert result["budget_id"] == content_hash({k: v for k, v in result.items() if k != "budget_id"})
+    expected = {"schema_version": "distribution_fit_budget.v1",
+        "scope": "raw_histogram_and_matched_point_only", "recipe_id": declaration.candidate_recipe("H")["recipe_id"],
+        "inner_folds": 6, "outer_folds": 3, "horizons": [5, 3, 1],
+        "counts": {"classifier_fits": 27, "point_fits": 27, "total_fits": 54,
+            "classifier_trees_upper": 218700, "point_trees_upper": 2700, "total_trees_upper": 221400},
+        "max_fits": 54, "max_trees": 221400, "child_limits": LIMITS, "retries": 0,
+        "excluded": ["additional_calibration_fits", "incumbent_refits", "payoff_refits",
+                     "feature_preparation", "parent_and_job_containment"]}
+    assert result == {**expected, "budget_id": content_hash(expected)}
     result["child_limits"].clear()
     assert LIMITS == {"memory_bytes": 1024, "cpu_seconds": 3, "wall_seconds": 5}
 
@@ -159,10 +178,10 @@ def test_each_resource_change_changes_identity_without_allocating_resources():
 def test_trial_binds_every_reference_role_and_horizon_but_not_source_authority(role, horizon):
     recipe = declaration.candidate_recipe("H")
     result = declaration.trial_identity(recipe, **REFS, role=role, horizon=horizon)
-    assert result == {"schema_version": "distribution_trial_declaration.v1", **REFS,
+    expected = {"schema_version": "distribution_trial_declaration.v1", **REFS,
         "recipe_id": recipe["recipe_id"], "role": role, "horizon": horizon,
-        "calibration_identity": "uncalibrated", "retries": 0,
-        "trial_id": content_hash({k: v for k, v in result.items() if k != "trial_id"})}
+        "calibration_identity": "uncalibrated", "retries": 0}
+    assert result == {**expected, "trial_id": content_hash(expected)}
     for key in REFS:
         changed = declaration.trial_identity(recipe, **{**REFS, key: "sha256:" + "9" * 64},
                                             role=role, horizon=horizon)
