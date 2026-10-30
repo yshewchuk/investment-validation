@@ -49,6 +49,7 @@ request body and, if durable, in the operator guides instead — see
 | `tools/` | [`tools/ARCHITECTURE.md`](tools/ARCHITECTURE.md) |
 | Distribution research policy, premium-funded book and paired reports | [`experiments/ARCHITECTURE.md#distribution-explicit-policy`](experiments/ARCHITECTURE.md#distribution-explicit-policy) |
 | `experiments/` | [`experiments/ARCHITECTURE.md`](experiments/ARCHITECTURE.md) |
+| Distribution experiment fitting and controls | [`experiments/STR_THRU_DISTRIBUTION/ARCHITECTURE.md`](experiments/STR_THRU_DISTRIBUTION/ARCHITECTURE.md) |
 | `engine/v2/contracts/` | (pending) |
 | `engine/v2/foundation/` | [`engine/v2/foundation/ARCHITECTURE.md`](engine/v2/foundation/ARCHITECTURE.md) |
 | `engine/v2/data/` | [`engine/v2/data/ARCHITECTURE.md`](engine/v2/data/ARCHITECTURE.md) |

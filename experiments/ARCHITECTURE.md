@@ -268,8 +268,7 @@ Publication/event-schedule knowledge remains reconstructed/unverified; known dat
 
 `magnitude_candidate_recipe.candidate_recipe(family, parameters, *, columns, feature_dictionary_hash)` maps exact `ridge`/`elasticnet`/`hgb` names and closed parameter-key sets to the existing public model recipe constructors. Those constructors own all values, ordered-column/hash validation and fixed policies; this helper returns their detached family recipe, not a new wrapper schema. It imports no training, sklearn, dictionary or admission module.
 
-`magnitude_candidate_fit.fit_candidate(recipe, train_features, train_labels, prediction_features, *, columns)` checks both legacy/v2 no-fit guards before inspection, then lazily imports the public fitter for the exact recipe schema/model. Successful dispatch also loads the existing training package's transitive legacy training/data modules; importing those definitions is not a source read or admission.
-One call delegates one horizon's fit exactly once and returns its entire result, including ElasticNet's coefficient/convergence evidence, without retry or wrapping. The existing family APIs own closed-policy/order checks, train-only preprocessing, fresh one-thread fitting and finite nonnegative predictions. Native family errors propagate: ElasticNet's numeric conversion can raise TypeError/OverflowError; this helper does not silently normalize it to Ridge/HGB's conversion policy.
+`magnitude_candidate_fit.fit_candidate(recipe, train_features, train_labels, prediction_features, *, columns)` checks both legacy/v2 no-fit guards before inspection, then lazily imports the public fitter for the exact recipe schema/model. Successful dispatch also loads the existing training package's transitive legacy training/data modules; importing those definitions is not a source read or admission. One call delegates one horizon's fit exactly once and returns its entire result, including ElasticNet's coefficient/convergence evidence, without retry or wrapping. The existing family APIs own closed-policy/order checks, train-only preprocessing, fresh one-thread fitting and finite nonnegative predictions. Native family errors propagate: ElasticNet's numeric conversion can raise TypeError/OverflowError; this helper does not silently normalize it to Ridge/HGB's conversion policy.
 
 | Condition | Outcome |
 | --- | --- |
@@ -279,8 +278,7 @@ One call delegates one horizon's fit exactly once and returns its entire result,
 | Valid dispatch envelope with invalid policy/order/numeric inputs | Existing family refusal; no retry or partial result. |
 | Valid numeric call | Unmodified family result/schema/recipe ID; no new candidate seal or evidence of source qualification. |
 
-Qualified SIZE plan construction and its bounded worker now consume these helpers alongside synthetic tests; v1 execution remains explicit and unchanged.
-Columns/digests/arrays alone prove no source qualification or fit permission: the v1.6/v1.7 binding, admitted stored inputs and v2 journal route supply those checks.
+Qualified SIZE plan construction and its bounded worker now consume these helpers alongside synthetic tests; v1 execution remains explicit and unchanged. Columns/digests/arrays alone prove no source qualification or fit permission: the v1.6/v1.7 binding, admitted stored inputs and v2 journal route supply those checks.
 
 ## Distribution explicit policy
 
@@ -298,13 +296,12 @@ Columns/digests/arrays alone prove no source qualification or fit permission: th
 
 ### Distribution native admission
 
-`distribution_plan.prepare_plan(...)` returns a compact installed-source/environment-bound distribution plan plus the verified native source plan. A distinct native v1.0 distribution run references SIZE v1.7 only for exact source/fold dependencies, with matching population/clocks and existing 16 MiB registration limits; neither SIZE execution nor copied panel payloads is introduced. `DistributionTrials.seal` binds the plan to the existing immutable journal; `start` owns a single-use fold claim and publishes admitted shared CAS cohorts; `read_admission` revalidates stored claims and shards without reopening native outcomes or fitting. Foundation/CAS, native registration, SIZE plan/fold admission, cohort loaders, migrations, native data/ops errors and bounded stderr progress are reused. Current consumers are synthetic tests; execution remains separate. [Full interface, identity, resource and interruption contract](README.md#distribution-native-admission).
+`distribution_plan.prepare_plan(...)` returns a compact installed-source/environment-bound distribution plan plus the verified native source plan. A distinct native v1.0 distribution run references SIZE v1.7 only for exact source/fold dependencies, with matching population/clocks and existing 16 MiB registration limits; neither SIZE execution nor copied panel payloads is introduced. `DistributionTrials.seal` binds the plan to the existing immutable journal; `start` owns a single-use fold claim and publishes admitted shared CAS cohorts; `read_admission` revalidates stored claims and shards without reopening native outcomes or fitting. A missing/noncallable repository resolver refuses `INVALID_EXPERIMENT_SPEC` before a claim; registrations over 16 MiB refuse `RESOURCE_LIMIT_EXCEEDED`, while missing/oversized implementation sources retain native `INPUT_CHANGED`. Verified identity mismatches refuse `EXPERIMENT_IDENTITY_CONFLICT`; dependency verification failures preserve native errors. Post-claim retryable `OpsError`/`DataError` becomes a fixed-message nonretryable `EXPERIMENT_IDENTITY_CONFLICT`; other errors and preclaim/read-only replay failures propagate unchanged. Claims stay consumed; no whole-operation rollback. Foundation/CAS, native registration, SIZE plan/fold admission, cohort loaders, migrations, native data/ops errors and bounded stderr progress are reused. Current consumers are the C adapters below and synthetic tests; bounded execution remains separate. [Full interface, identity, resource and interruption contract](README.md#distribution-native-admission).
 
-| Distribution condition | Outcome |
-| --- | --- |
-| Malformed declarations, recipe/caps/fold selector or missing/noncallable repository snapshot resolver; insufficient caps; registration over 16 MiB; degenerate class support | `INVALID_EXPERIMENT_SPEC` before a claim; insufficient caps or oversized registration instead use `RESOURCE_LIMIT_EXCEEDED`, degenerate support `EXPERIMENT_VARIANT_FAILED`, and numerical histogram refusals propagate `CONTRACT_MISMATCH`. Required-argument `TypeError` remains unchanged; no partial execution. |
-| Verified registration/plan/installed digest differs, seal/receipt mismatch or duplicate/interrupted start | Identity comparison refuses `EXPERIMENT_IDENTITY_CONFLICT` without restart; missing migrations retain `INTEGRITY_FAILED`. Dependency verification failures keep their native errors. |
-| Native/storage or installed-source verification failure | Missing/oversized implementation sources retain preclaim `INPUT_CHANGED`; other preclaim/read-only replay failures propagate unchanged. Post-claim retryable `OpsError`/`DataError` becomes a fixed-message nonretryable `EXPERIMENT_IDENTITY_CONFLICT`; other errors propagate. Claims stay consumed; no whole-operation rollback. |
+### Distribution fitting and earlier-OOF controls (Bundle C)
+
+`distribution_candidate_fit` supplies the raw fixed numeric pair; `distribution_fitted.DistributionFits` adds admitted, immutable single-use fit/results; `distribution_oof` builds strictly earlier-inner residual controls from centrally admitted training labels. [The complete contract](STR_THRU_DISTRIBUTION/ARCHITECTURE.md) specifies APIs, dependencies, refusal/replay, tail provenance, resource limits and the explicit distinction between residual controls and calibrated probabilities.
+The B `read_fit_context` seam returns verified plan/fold/admission and projected stored training/features without reopening native outcomes. C is synthetic-tested research code, not a bounded runner or production activation; D owns that boundary.
 
 ## Recorded magnitude-search selection
 
@@ -390,7 +387,7 @@ content-addressed shards, not one record or payload. Population-sized receipt li
 
 * `magnitude_search_inputs.load_inputs(store, record, expected_id)` is the one loader every
   consumer (`_record`, reconcile, freeze, outer replay, `_validation`) reads
-  through; the fit child and distribution admission replay call `load_fit_inputs` (same verification
+  through; the fit child and distribution admission/fit context instead call `load_fit_inputs` (same verification
   and reader, projected to the fit rows). A record with the manifest schema is verified against `expected_id`, its sections
   are streamed shard by shard and placed at their dotted paths beside the inline members, which
   are flat scalars keyed by dotted path (`preflight.count`); any other
