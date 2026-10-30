@@ -3,12 +3,11 @@
 The native adapter owns pricing, quantity/multiplier economics and quote clocks.
 No future exit availability filters a decision or its entry affordability.
 """
-from collections import defaultdict
 from datetime import date, timedelta
-from fractions import Fraction
-from itertools import groupby
 from math import isfinite
 
+from engine.v2.data.errors import DataError
+from engine.v2.evaluation.premium_settlement import settle_premiums
 from engine.v2.ops.errors import fail
 from engine.v2.research.progress import Progress, stage
 
@@ -38,13 +37,6 @@ def _date(value):
         _require(False)
 
 
-def _cash(value):
-    try:
-        return _number(float(value))
-    except OverflowError:
-        _require(False)
-
-
 def validate_book_config(config):
     """Validate every explicit limit; settlement delays are calendar days."""
     _require(type(config) is dict and set(config) == {"initial_cash", "contracts_per_trade",
@@ -68,8 +60,7 @@ def funded_book(intents, quotes, *, config, report_end):
     """
     config, end = validate_book_config(config), _date(report_end)
     _require(type(intents) is list and type(quotes) is dict)
-    rows, actions = {}, []
-    entry_phase = int(config["same_time_order"] == "settlements_before_entries")
+    rows = {}
     for intent in intents:
         _require(type(intent) is dict and set(intent) ==
             {"event_id", "ticker", "event_date", "decision_at", "entry_at", "selected"})
@@ -97,54 +88,31 @@ def funded_book(intents, quotes, *, config, report_end):
             except OverflowError:
                 _require(False)
             _require(entry < _date(quote["exit_at"]) <= settlement <= end)
-            actions.append((settlement, 1 - entry_phase, event, "settle"))
         rows[event]["quote"] = dict(quote) if quote is not None else None
-        actions.append((entry, entry_phase, event, "entry"))
     _require(set(quotes) <= set(rows))
-    money = {key: Fraction(str(config[key])) for key in ("initial_cash", "max_trade_debit", "max_ticker_debit")}
-    cash = peak = equity = money["initial_cash"]
-    locked, live, drawdown, capital_days = defaultdict(Fraction), set(), Fraction(), Fraction()
-    curve, progress = [], Progress("distribution book", len(actions))
+    records = []
+    for event, row in rows.items():
+        quote = row["quote"]
+        records.append(dict(id=event, bucket=row["ticker"], selected=row["selected"],
+            entry_date=_date(row["entry_at"]) if row["entry_at"] is not None else None,
+            settlement_date=_date(quote["exit_at"]) + timedelta(days=config["settlement_delay_days"]) if quote else None,
+            debit=quote["entry_cash"] if quote else None, credit=quote["exit_cash"] if quote else None))
+    progress = Progress("distribution book", sum((row["entry_date"] is not None) +
+                        (row["settlement_date"] is not None) for row in records))
+    order = "settlements_before_entries" if config["same_time_order"] == "settlements_before_entries" else "entries_before_settlements"
     with stage("distribution book"):
-        for day, batch in groupby(sorted(actions), key=lambda action: action[0]):
-            for _, _, event, action in batch:
-                row, quote = rows[event], rows[event]["quote"]
-                ticker = row["ticker"]
-                if action == "settle" and event in live and quote["exit_cash"] is not None:
-                    credit, debit = Fraction(str(quote["exit_cash"])), Fraction(str(quote["entry_cash"]))
-                    cash += credit
-                    row.update(status="settled", net_profit=_cash(credit - debit))
-                    row["capital_days"] = _cash(debit * (day - _date(row["entry_at"])).days)
-                    equity += credit - debit
-                    locked[ticker] -= debit
-                    live.remove(event)
-                elif action == "entry" and row["selected"]:
-                    debit = Fraction(str(quote["entry_cash"])) if quote is not None and quote["entry_cash"] is not None else None
-                    reason = ("missing_entry" if debit is None else "trade_cap" if debit > money["max_trade_debit"]
-                        else "ticker_cap" if locked[ticker] + debit > money["max_ticker_debit"]
-                        else "concurrent_cap" if len(live) >= config["max_concurrent"]
-                        else "cash" if debit > cash else "unresolved")
-                    row["status"] = reason
-                    if reason == "unresolved":
-                        cash -= debit
-                        locked[ticker] += debit
-                        live.add(event)
-                        row.update(debit=_cash(debit), net_profit=None,
-                            capital_days=_cash(debit * (end - _date(row["entry_at"])).days))
-                progress.tick()
-            peak = max(peak, equity)
-            drawdown = max(drawdown, peak - equity)
-            curve.append({"date": day.isoformat(), "cash": _cash(cash), "settlement_equity": _cash(equity)})
-    if not curve or curve[-1]["date"] != report_end:
-        curve.append({"date": report_end, "cash": _cash(cash), "settlement_equity": _cash(equity)})
-    ordered = [rows[event] for event in sorted(rows)]
-    for row in ordered:
-        capital_days += Fraction(str(row["capital_days"]))
-    funded = sum(row["debit"] > 0 for row in ordered)
+        try:
+            result = settle_premiums(records, initial_cash=config["initial_cash"],
+                max_trade_debit=config["max_trade_debit"], max_bucket_debit=config["max_ticker_debit"],
+                max_concurrent=config["max_concurrent"], report_end=end, same_time_order=order, on_action=progress.tick)
+        except DataError as exc:
+            if exc.code != "CONTRACT_MISMATCH":
+                raise
+            raise fail("INVALID_EXPERIMENT_SPEC", "invalid distribution book inputs or arithmetic") from None
+    for state in result.pop("per_opportunity"):
+        event = state.pop("id")
+        if state["status"] == "bucket_cap":
+            state["status"] = "ticker_cap"
+        rows[event].update(state)
     return {"schema_version": "distribution_book.v1", "config": config, "report_end": report_end,
-        "per_event": ordered, "curve": curve, "summary": {"opportunities": len(rows), "funded": funded,
-            "unresolved": len(live), "funded_coverage": funded / len(rows) if rows else None,
-            "settled_net_profit": _cash(equity - money["initial_cash"]), "cash": _cash(cash),
-            "settlement_equity": _cash(equity), "capital_days": _cash(capital_days), "settlement_drawdown": _cash(drawdown),
-            "net_profit_per_opportunity": _cash((equity - money["initial_cash"]) / len(rows)) if rows and not live else None},
-        "equity_policy": "settled_pnl_open_debit_cost_not_mtm", "capacity_policy": "reserved_until_settlement"}
+            "per_event": [rows[event] for event in sorted(rows)], **result}
