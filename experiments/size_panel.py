@@ -41,6 +41,8 @@ _METADATA_LIMITS = {"max_catalog_tables", "max_catalog_fragments", "max_catalog_
 
 def validate_panel_inputs(request):
     """Pure closed validation of the panel-only request fields; usable before any history is built."""
+    if type(request) is not dict or not {"source_start", "metadata_limits"} <= request.keys():
+        raise fail("CONTRACT_MISMATCH", "panel requires explicit source start and metadata limits")
     canonical_day(request["source_start"])
     limits = request["metadata_limits"]
     if (type(limits) is not dict or limits.keys() != _METADATA_LIMITS

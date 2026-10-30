@@ -13,7 +13,21 @@ from experiments import eligible_history, size_panel
 from experiments import size_prep_history as hist
 from experiments import size_prep_inputs as prep
 from tests.v2.research.test_size_prep_inputs import (  # noqa: F401
-    _AS_OF, _pin_names, _small_bar, bounds_ws, source_root)
+    _AS_OF, _small_bar, bounds_ws, source_root)
+
+
+def _pin_names(workspace):
+    names = set()
+    for path in (workspace.paths.store / "objects").rglob("*"):
+        if not path.is_file() or path.stat().st_size > (1 << 20):
+            continue
+        try:
+            document = json.loads(path.open("rb").read(1 << 20))
+        except ValueError:
+            continue
+        if isinstance(document, dict) and "pin" in document and "name" in document:
+            names.add(document["name"])
+    return names
 
 
 def _bounds(bounds_ws, source_root):
@@ -244,6 +258,13 @@ def test_panel_only_inputs_are_validated_before_history(bounds_ws, source_root, 
             hist.prepare_workspace_panel(ws, "shadow", record, **_args(clock, **over))
         assert raised.value.code == "CONTRACT_MISMATCH"
         assert calls["history"] == []
+
+
+def test_validate_panel_inputs_rejects_malformed_containers():
+    for request in (None, [], {}, {"source_start": "2021-01-01"}, {"metadata_limits": {}}):
+        with pytest.raises(data_errors.DataError) as raised:
+            hist.size_panel.validate_panel_inputs(request)
+        assert raised.value.code == "CONTRACT_MISMATCH"
 
 
 def test_scope_admission_is_complete_before_any_read(bounds_ws, source_root, monkeypatch):
