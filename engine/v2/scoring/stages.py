@@ -1078,7 +1078,9 @@ def _execute_forecast_band(
     Use ``forecast_abs_move`` as the interval location when present. For
     STR-THRU only, use ``driver_prediction`` when ``forecast_abs_move`` is
     absent. Missing/non-finite locations, an absent pool, or a thin pool leave
-    the uncertainty fields unavailable. This stage writes only
+    the uncertainty fields unavailable. STR-THRU uses flat residual
+    quantiles because its location is the full-refit champion while pool
+    predictions come from a selected size fold. This stage writes only
     ``forecast_p10``/``forecast_p90``/``forecast_sd``; it does not create a
     top-level sizing forecast or change structure selection."""
     from engine.v2.scoring import native_gate_features as derived
@@ -1101,6 +1103,7 @@ def _execute_forecast_band(
         p10, p90, sd, _ = derived.forecast_interval(
             [forecast], pool["predictions"], pool["residuals"],
             floor=pool.get("interval_floor", 0.0),
+            use_buckets=strategy != "STR-THRU",
         )
     except (KeyError, TypeError, ValueError):
         return

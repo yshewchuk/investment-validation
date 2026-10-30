@@ -239,7 +239,10 @@ pool supplies residual uncertainty for the STR-THRU forecast band. The fold's
 selected structure. Both execute in the existing scoring stages, never in the
 raw-row producer. The legacy scorer has corresponding `forecast_p10`,
 `forecast_p90`, and `forecast_sd` fields; this native STR-THRU uncertainty rule
-does not assume parity-identical values. Outcomes are in the table below.
+does not assume parity-identical values. Because its center is the full-refit
+champion while its pool predictions are from the selected size fold, STR-THRU
+uses flat residual quantiles instead of choosing fold-prediction decile buckets
+around the champion value. Outcomes are in the table below.
 RUNUP is unchanged.
 
 `SourceBundle.gate_forecast_source` (optional `GateForecastSource`) carries the
@@ -266,7 +269,7 @@ selected fold; it does not cause another release lookup or fold selection.
 | Non-finite value in any declared fold pool (`gate_forecast_pool`, `forecast_pool`, source pool, `interval_floor`) | `ValueError` at bundle build (`fold_pool` applies this to every pool) |
 | Gate names no forecast column | Executor and pool are built but the stage never calls them; no flag |
 | Source absent, gate names a forecast column | Bundle builds; the stage flags `MISSING_GATE_INPUT:forecast` |
-| STR-THRU has a finite `driver_prediction` and at least 250 finite residuals in the selected pool | The stage emits `forecast_p10`/`forecast_p90`/`forecast_sd` around `driver_prediction`; these are uncertainty fields only, with no sizing point forecast or structure change |
+| STR-THRU has a finite `driver_prediction` and at least 250 finite residuals in the selected pool | The stage emits `forecast_p10`/`forecast_p90`/`forecast_sd` around `driver_prediction` using flat residual quantiles; these are uncertainty fields only, with no sizing point forecast or structure change |
 | Missing/non-finite band location, absent pool, or thin pool | The bundle builds; the stage leaves the uncertainty fields unavailable |
 | Exact causal fold missing, or selected fold fails verification/load (`native_score_batch`) | Per-row `MODEL_NOT_READY`; no fallback |
 | Malformed release catalog or descriptor | Release resolution fails before row assembly; not a per-row fold refusal |

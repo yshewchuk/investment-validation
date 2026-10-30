@@ -82,8 +82,8 @@ def test_production_str_thru_score_emits_selected_fold_band(tmp_path, monkeypatc
         source = original_selector(*args, **kwargs)
         return replace(
             source,
-            pool_pred=(source.pool_pred[0],) * 250,
-            pool_res=(-0.4,) * 83 + (-0.2,) * 83 + (0.1,) * 83 + (0.3,),
+            pool_pred=tuple(index / 500 for index in range(500)),
+            pool_res=(-0.2,) * 250 + (0.4,) * 250,
             interval_floor=0.15,
         )
 
@@ -104,9 +104,9 @@ def test_production_str_thru_score_emits_selected_fold_band(tmp_path, monkeypatc
 
     assert "driver_prediction" in forecast
     assert "forecast_abs_move" not in forecast
-    assert forecast["forecast_p10"] == 0.15
-    assert abs(forecast["forecast_p90"] - 0.5) < 1e-12
-    assert abs(forecast["forecast_sd"] - 0.2075893381976376) < 1e-12
+    assert forecast["forecast_p10"] == 0.2
+    assert forecast["forecast_p90"] == 0.8
+    assert abs(forecast["forecast_sd"] - 0.3003004507513149) < 1e-12
 
 
 def test_non_str_thru_does_not_use_driver_prediction_for_sizing_band():
@@ -185,6 +185,36 @@ def test_supported_non_str_thru_forecast_location_emits_band():
     assert abs(output["forecast_p10"] - 0.6) < 1e-12
     assert abs(output["forecast_p90"] - 0.6) < 1e-12
     assert output["forecast_sd"] == 0.0
+
+
+def test_non_str_thru_interval_uses_nonconstant_bucket_for_band_location():
+    output = {"forecast_abs_move": 0.8, "driver_prediction": 0.1}
+    block = {"forecast_pool": {
+        "predictions": tuple(index / 5000 for index in range(5000)),
+        "residuals": (-0.2,) * 2500 + (0.4,) * 2500,
+        "interval_floor": 0.0,
+    }}
+
+    _execute_forecast_band(block, output, "STR-RUNUP")
+
+    assert abs(output["forecast_p10"] - 1.2) < 1e-12
+    assert abs(output["forecast_p90"] - 1.2) < 1e-12
+    assert output["forecast_sd"] == 0.0
+
+
+def test_nan_forecast_abs_move_does_not_fall_back_to_finite_str_thru_driver():
+    output = {"forecast_abs_move": float("nan"), "driver_prediction": 0.4}
+    block = {"forecast_pool": {
+        "predictions": (0.5,) * 250,
+        "residuals": (0.2,) * 250,
+        "interval_floor": 0.0,
+    }}
+
+    _execute_forecast_band(block, output, "STR-THRU")
+
+    assert "forecast_p10" not in output
+    assert "forecast_p90" not in output
+    assert "forecast_sd" not in output
 
 
 def test_missing_event_id_refuses_before_missing_fold(tmp_path):
