@@ -143,7 +143,8 @@ def _forecasts(event, horizons, calendar, clocks):
 
 
 def _plan(repository, snapshot, *, as_of_month, policy, event_ids, horizons, history_start, limits, strict):
-    """Shared planning path; strict refuses unavailable targets, non-strict records them as unavailable."""
+    """Shared planning path; strict refuses unavailable targets, non-strict records them as unavailable.
+    Non-strict also drops targets whose earliest ceiling precedes history_start as early."""
     _request(repository, snapshot, policy, event_ids, horizons, limits)
     targets = load_population(repository, snapshot, as_of_month=as_of_month, event_ids=event_ids)
     population = load_population(repository, snapshot, as_of_month=as_of_month)
@@ -151,6 +152,16 @@ def _plan(repository, snapshot, *, as_of_month, policy, event_ids, horizons, his
     clocks = {}
     forecasts = {event.event_id: _forecasts(event, horizons, calendar, clocks)
         for event in targets.itertuples(index=False)}
+    early = set()
+    if not strict:
+        early = {event_id for event_id, event_clocks in forecasts.items()
+            if min(c["source_session_ceiling"] for c in event_clocks) < history_start}
+        if early:
+            targets = targets[~targets.event_id.isin(early)]
+            forecasts = {key: value for key, value in forecasts.items() if key not in early}
+            event_ids = [key for key in event_ids if key not in early]
+            if targets.empty:
+                return {"early": sorted(early), "remaining": False}
     start, _ = event_history._window(history_start,
         min(c["source_session_ceiling"] for event_clocks in forecasts.values() for c in event_clocks))
     ceilings = {}
@@ -171,22 +182,22 @@ def _plan(repository, snapshot, *, as_of_month, policy, event_ids, horizons, his
     return {"targets": targets, "population": population, "calendar": calendar, "clocks": clocks,
         "forecasts": forecasts, "start": start, "ceilings": ceilings, "selected": selected,
         "qualified": qualified, "unavailable": unavailable, "eligibility": eligibility,
-        "calendar_source": calendar_source}
+        "calendar_source": calendar_source, "early": sorted(early), "remaining": True}
 
 
 def plan_targets(repository, snapshot, *, as_of_month, policy, event_ids, horizons, history_start, limits):
     """Public non-strict grouped-embargo plan: materializes nothing and writes nothing."""
     plan = _plan(repository, snapshot, as_of_month=as_of_month, policy=policy, event_ids=event_ids,
         horizons=horizons, history_start=history_start, limits=limits, strict=False)
-    eligibility, requested = plan["eligibility"], set(event_ids)
-    days = plan["population"].set_index("event_id", drop=False).event_date.dt.strftime("%Y-%m-%d")
-    start = plan["start"].isoformat()
-    before_start = sorted(key for key in requested if key in days.index and days[key] < start)
+    if not plan["remaining"]:
+        return {"plan_id": None, "retained": [], "unavailable": [], "exclusions": [],
+            "before_start": sorted(plan["early"])}
+    eligibility, requested = plan["eligibility"], set(event_ids) - set(plan["early"])
     return {"plan_id": eligibility["plan_id"],
         "retained": sorted(requested & set(eligibility["retained_event_ids"])),
         "unavailable": sorted(requested & set(plan["unavailable"])),
         "exclusions": [e for e in eligibility["exclusions"] if e["event_id"] in requested],
-        "before_start": before_start}
+        "before_start": plan["early"]}
 
 
 def _prepare(repository, snapshot, *, as_of_month, policy, event_ids, horizons, history_start, limits,

@@ -69,12 +69,12 @@ def derive_workspace_targets(workspace, scope, record, *, tickers, event_start, 
     for event_id in universe:
         if event_id in retained:
             continue
-        if event_id in excluded:
+        if event_id in before_start:
+            dropped.append({"event_id": event_id, "reasons": ["before_history_start"]})
+        elif event_id in excluded:
             dropped.append({"event_id": event_id, "reasons": excluded[event_id]})
         elif event_id in unavailable:
             dropped.append({"event_id": event_id, "reasons": ["label_bounds_unavailable"]})
-        elif event_id in before_start:
-            dropped.append({"event_id": event_id, "reasons": ["before_history_start"]})
         else:
             raise fail("PUBLICATION_REFUSED", "the eligibility plan does not account for a universe event",
                        details={"reason": "plan_incomplete"})
