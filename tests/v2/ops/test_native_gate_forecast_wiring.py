@@ -89,7 +89,7 @@ def test_production_str_thru_score_emits_selected_fold_band(tmp_path, monkeypatc
 
     monkeypatch.setattr(
         native_score_batch, "select_gate_forecast_source", selector)
-    event = _event_inputs(panel_row={"date": "2026-01-15", "x": -0.45})
+    event = _event_inputs(panel_row={"date": "2026-01-15", "x": -0.3})
     assembled, refusals = _assemble(
         binding, [event], as_of="2026-01-10", feature_names=("x",))
 
@@ -105,7 +105,7 @@ def test_production_str_thru_score_emits_selected_fold_band(tmp_path, monkeypatc
     assert "driver_prediction" in forecast
     assert "forecast_abs_move" not in forecast
     assert forecast["forecast_p10"] == 0.15
-    assert abs(forecast["forecast_p90"] - 0.2) < 1e-12
+    assert abs(forecast["forecast_p90"] - 0.5) < 1e-12
     assert abs(forecast["forecast_sd"] - 0.2075893381976376) < 1e-12
 
 
@@ -117,12 +117,59 @@ def test_non_str_thru_does_not_use_driver_prediction_for_sizing_band():
         "interval_floor": 0.0,
     }}
 
-    _execute_forecast_band(block, output, "DYN-SV")
+    _execute_forecast_band(block, output, "STR-RUNUP")
 
     assert "forecast_abs_move" not in output
     assert "forecast_p10" not in output
     assert "forecast_p90" not in output
     assert "forecast_sd" not in output
+
+
+def test_forecast_abs_move_precedes_str_thru_driver_location():
+    output = {"forecast_abs_move": 0.4, "driver_prediction": 0.1}
+    block = {"forecast_pool": {
+        "predictions": (0.5,) * 250,
+        "residuals": (0.2,) * 250,
+        "interval_floor": 0.0,
+    }}
+
+    _execute_forecast_band(block, output, "STR-THRU")
+
+    assert abs(output["forecast_p10"] - 0.6) < 1e-12
+    assert abs(output["forecast_p90"] - 0.6) < 1e-12
+    assert output["forecast_sd"] == 0.0
+
+
+def test_missing_or_nonfinite_str_thru_driver_location_leaves_band_unavailable():
+    block = {"forecast_pool": {
+        "predictions": (0.5,) * 250,
+        "residuals": (0.2,) * 250,
+        "interval_floor": 0.0,
+    }}
+
+    for location in (None, float("nan")):
+        output = {"driver_prediction": location}
+
+        _execute_forecast_band(block, output, "STR-THRU")
+
+        assert "forecast_p10" not in output
+        assert "forecast_p90" not in output
+        assert "forecast_sd" not in output
+
+
+def test_supported_non_str_thru_forecast_location_emits_band():
+    output = {"forecast_abs_move": 0.4, "driver_prediction": 0.1}
+    block = {"forecast_pool": {
+        "predictions": (0.5,) * 250,
+        "residuals": (0.2,) * 250,
+        "interval_floor": 0.0,
+    }}
+
+    _execute_forecast_band(block, output, "STR-RUNUP")
+
+    assert abs(output["forecast_p10"] - 0.6) < 1e-12
+    assert abs(output["forecast_p90"] - 0.6) < 1e-12
+    assert output["forecast_sd"] == 0.0
 
 
 def test_missing_event_id_refuses_before_missing_fold(tmp_path):

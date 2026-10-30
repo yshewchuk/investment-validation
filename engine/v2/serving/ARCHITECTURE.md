@@ -66,6 +66,10 @@ release that fails its contract, which includes an older schema, in addition to 
 native-parity freshness read of such a row (freshness outcomes are in the root `ARCHITECTURE.md` native-parity section). `build_candidate`
 refuses invalid `row_sources` with `ValueError` before any write (internal callers only).
 The projection tool exposes `run_projection(...)`; the CLI is a thin wrapper over it.
+Native shadow rows include non-null `forecast_p10`, `forecast_p90` and
+`forecast_sd` values from the score's uncertainty record; unavailable values
+are omitted. The legacy driver bands `driver_p10` and `driver_p90` remain
+unavailable and are omitted.
 
 | Tool condition (before any index write) | Outcome |
 |---|---|
@@ -84,7 +88,7 @@ detail projections from either producer:
 
 | Fields | Unit on the wire |
 |---|---|
-| `driver_forecast`, `market_implied_move`, `forecast_p10`, `forecast_p90`, `driver_p10`, `driver_p90` | Percentage points; `5.0` means `5.0%` of spot. |
+| `driver_forecast`, `market_implied_move`, `forecast_p10`, `forecast_p90`, `forecast_sd`, `driver_p10`, `driver_p90` | Percentage points; `5.0` means `5.0%` of spot. |
 | `entry_premium` | USD per position. |
 | `headline_expected_return` and `exp_pnl_model`, `exp_pnl_analog`, `exp_pnl_sim` | Fraction of entry cost; `0.05` means `5.0%`. |
 | `win_model`, `win_analog`, `win_sim` | Probability fraction in `[0, 1]`. |

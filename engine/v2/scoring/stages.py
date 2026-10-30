@@ -1073,15 +1073,14 @@ def _execute_local_forecast(
 def _execute_forecast_band(
     block: Mapping[str, Any], output: dict[str, Any], strategy: str | None = None,
 ) -> None:
-    """engine/score.py ``Scorer._size_from_forecast``: the served size
-    fold's band (``forecast_p10``/``_p90``/``_sd``) from its own held-out
-    pool (R4-20 gap 3, sizing side). Absent when the forecast is
-    missing/non-finite or the fold declared no pool -- never a fabricated
-    band, mirroring ``gate_forecast_columns``.
+    """Build native forecast uncertainty from the declared held-out pool.
 
-    STR-THRU's band is taken around its top-level ``driver_prediction`` when
-    ``forecast_abs_move`` is absent; the fold's pool remains the interval
-    source either way."""
+    Use ``forecast_abs_move`` as the interval location when present. For
+    STR-THRU only, use ``driver_prediction`` when ``forecast_abs_move`` is
+    absent. Missing/non-finite locations, an absent pool, or a thin pool leave
+    the uncertainty fields unavailable. This stage writes only
+    ``forecast_p10``/``forecast_p90``/``forecast_sd``; it does not create a
+    top-level sizing forecast or change structure selection."""
     from engine.v2.scoring import native_gate_features as derived
 
     forecast = output.get("forecast_abs_move")
