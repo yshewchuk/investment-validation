@@ -62,6 +62,9 @@ def issue(store, bindings, registration):
 
 def admit(store, ref, bindings, spec):
     """Verify the receipt against current cheap inputs; return registration and prepared spec."""
+    if spec.input_files:
+        raise fail("INVALID_EXPERIMENT_SPEC",
+                   "native registration requires a Python runner and no file inputs")
     if ref.byte_size > MAX_NATIVE_EVIDENCE_BYTES:
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "SIZE preflight receipt exceeds its byte budget",
                    details={"reason": "receipt_corrupt"})
@@ -84,6 +87,12 @@ def admit(store, ref, bindings, spec):
     except (ValueError, TypeError, KeyError):
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "SIZE preflight receipt is malformed",
                    details={"reason": "receipt_corrupt"}) from None
+    if receipt["bindings"] != bindings:
+        raise fail("EXPERIMENT_IDENTITY_CONFLICT", "SIZE preflight receipt inputs differ",
+                   details={"reason": "receipt_input_mismatch"})
+    if receipt["validator"] != validator_identity():
+        raise fail("EXPERIMENT_IDENTITY_CONFLICT", "SIZE preflight receipt validator is stale",
+                   details={"reason": "receipt_validator_stale"})
     plan = resolve_experiment_plan(spec)
     expected_run_id = ("native_" + content_hash({"experiment_id": plan.experiment_id,
                                                  "arm": plan.arms[0]}).removeprefix("sha256:"))
@@ -91,12 +100,6 @@ def admit(store, ref, bindings, spec):
         raise fail("EXPERIMENT_IDENTITY_CONFLICT",
                    "SIZE preflight receipt run_id is not bound to its plan",
                    details={"reason": "receipt_corrupt"})
-    if receipt["bindings"] != bindings:
-        raise fail("EXPERIMENT_IDENTITY_CONFLICT", "SIZE preflight receipt inputs differ",
-                   details={"reason": "receipt_input_mismatch"})
-    if receipt["validator"] != validator_identity():
-        raise fail("EXPERIMENT_IDENTITY_CONFLICT", "SIZE preflight receipt validator is stale",
-                   details={"reason": "receipt_validator_stale"})
     try:
         payload_ref = from_document(ArtifactRef, receipt["registration"])
         if payload_ref.byte_size > MAX_NATIVE_EVIDENCE_BYTES:

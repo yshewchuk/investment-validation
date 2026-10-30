@@ -109,6 +109,27 @@ def test_changed_input_refuses(case, change):
     assert caught.value.problem.details == {"reason": "receipt_input_mismatch"}
 
 
+def test_changed_experiment_id_is_input_mismatch(case):
+    bindings = bindings_for(case)
+    ref = issue(case.store, bindings, case.registration)
+    changed = dataclasses.replace(case.spec, experiment_id=case.spec.experiment_id + "-x")
+    changed_bindings = input_bindings(case.repository, changed, case.request,
+                                      case.panel_request, **case.args)
+    with pytest.raises(OpsError) as caught:
+        admit(case.store, ref, changed_bindings, changed)
+    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert caught.value.problem.details == {"reason": "receipt_input_mismatch"}
+
+
+def test_input_files_refused(case):
+    bindings = bindings_for(case)
+    ref = issue(case.store, bindings, case.registration)
+    with pytest.raises(OpsError) as caught:
+        admit(case.store, ref, bindings,
+              dataclasses.replace(case.spec, input_files=("x.csv",)))
+    assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
+
+
 def test_changed_validator_refuses(case, monkeypatch):
     bindings = bindings_for(case)
     ref = issue(case.store, bindings, case.registration)
