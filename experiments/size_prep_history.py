@@ -1,4 +1,4 @@
-"""Workspace eligible-history and size-panel preparation over a pinned bounds record."""
+"""Workspace eligible-history and size-panel preparation over a pinned bounds record. Library-only: no production caller yet; the supported size_search prep entry point (#1614 slice 4) wires it."""
 import time
 from pathlib import Path
 
