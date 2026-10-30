@@ -223,10 +223,15 @@ each endpoint may differ by at most 10% of the legacy CI width
 different analog pool size therefore keeps both endpoints exact. The report
 policy id is `score_record.parity.v2`; the shared `SCORE_RECORD_V1` remains
 exact with its original id.
-Missing or unequal required context resolves to `EXACT`; matching context
-with valid scale endpoints applies the derived allowance. The non-finite and
-reversed-endpoint fallback guards are implemented in `_scaled_tolerance`,
-with dedicated input tests still tracked as follow-up work.
+Missing or unequal required context resolves to `EXACT`; `n_analogs` enables
+the analog rule only when both values are nonnegative integers (booleans and
+integer-valued floats do not qualify). Matching context with finite ordered
+scale endpoints applies `absolute + relative * (high - low)`. Tolerance
+configuration is validated when a `Tolerance` is constructed: absolute and
+relative allowances must be finite nonnegative numbers, and scale/context
+field declarations must have the documented tuple shapes and nonempty names.
+Invalid configuration raises `ValueError` before comparison. Invalid scale
+values fall back to `EXACT`.
 Stage hashes retain each side's raw typed output fields. A tolerance can make
 the comparison verdict `agree` while the stage's output hashes differ; the
 native hash always describes the native record, and the legacy hash describes

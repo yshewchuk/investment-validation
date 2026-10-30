@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from engine.v2.foundation import content_hash
 from engine.v2.ops.native_parity_report import (
     NATIVE_PARITY_TOLERANCE,
@@ -7,6 +9,7 @@ from engine.v2.ops.native_parity_report import (
 )
 from engine.v2.parity.receipt import AGREE, DIFFER
 from engine.v2.parity.record_comparator import compare_records
+from engine.v2.parity.tolerance import Tolerance, TolerancePolicy
 
 _PLACEHOLDER = {"n_analogs": 0, "ci_low": None, "ci_high": None, "flags": []}
 
@@ -218,3 +221,41 @@ def test_no_pool_rows_are_listed_and_stay_mismatches():
     assert report["analog_no_pool"] == ["a|S|2026-01-02"]
     assert [m["row_key"] for m in report["mismatches"]] == ["a|S|2026-01-02"]
     assert "n_analogs" in report["mismatches"][0]["finding_fields"]
+
+
+def test_scaled_tolerance_preserves_explicit_absolute_allowance():
+    policy = TolerancePolicy(
+        policy_id="test.scaled",
+        rules=(
+            ("endpoint", Tolerance(
+                absolute=0.05,
+                relative=0.1,
+                reason="scaled test",
+                scale_fields=("low", "high"),
+            )),
+        ),
+    )
+    resolved = policy.for_field(
+        "endpoint", left_record={"low": 0.0, "high": 1.0})
+    assert resolved.exceeded_by(0.0, 0.15) == 0.0
+    assert resolved.exceeded_by(0.0, 0.150001) > 0.0
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"scale_fields": ()},
+        {"relative": float("inf"), "scale_fields": ("low", "high")},
+    ],
+)
+def test_malformed_contextual_tolerance_rejected(kwargs):
+    with pytest.raises(ValueError):
+        Tolerance(**kwargs)
+
+
+def test_boolean_n_analogs_does_not_enable_ci_tolerance():
+    legacy = {"n_analogs": True, "ci_low": 0.1, "ci_high": 0.5}
+    native = {"n_analogs": True, "ci_low": 0.13, "ci_high": 0.47}
+    receipt = compare_records(
+        legacy, native, tolerance_policy=NATIVE_PARITY_TOLERANCE)
+    assert {f.field_path for f in receipt.findings} == {"ci_low", "ci_high"}

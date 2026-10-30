@@ -27,6 +27,70 @@ from typing import Any, Mapping
 __all__ = ["Tolerance", "TolerancePolicy", "EXACT", "SCORE_RECORD_V1"]
 
 
+def _finite_number(value: Any) -> bool:
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return False
+    try:
+        return math.isfinite(value)
+    except (OverflowError, TypeError):
+        return False
+
+
+def _nonnegative_number(value: Any) -> bool:
+    return _finite_number(value) and value >= 0
+
+
+def _nonempty_str_tuple(value: Any, length: int | None = None) -> bool:
+    return (
+        isinstance(value, tuple)
+        and (length is None or len(value) == length)
+        and all(isinstance(item, str) and item for item in value)
+    )
+
+
+def _n_analogs_matches(left_value: Any, right_value: Any) -> bool:
+    return (
+        type(left_value) is int
+        and type(right_value) is int
+        and left_value >= 0
+        and right_value >= 0
+        and left_value == right_value
+    )
+
+
+def _context_value_matches(name: str, left_value: Any, right_value: Any) -> bool:
+    if name == "n_analogs":
+        return _n_analogs_matches(left_value, right_value)
+    return (
+        left_value is not None
+        and right_value is not None
+        and type(left_value) is type(right_value)
+        and left_value == right_value
+    )
+
+
+def _resolve_scaled_absolute(
+    tolerance: "Tolerance", low: Any, high: Any
+) -> float | None:
+    if not (_finite_number(low) and _finite_number(high)):
+        return None
+    try:
+        width = high - low
+        if not math.isfinite(width):
+            return None
+    except (OverflowError, TypeError):
+        return None
+    if high < low:
+        return None
+    try:
+        resolved = tolerance.absolute + tolerance.relative * width
+    except (OverflowError, TypeError):
+        return None
+    if not math.isfinite(resolved):
+        return None
+    return resolved
+
+
 @dataclass(frozen=True)
 class Tolerance:
     """How far two independently computed values of one field may differ."""
@@ -44,6 +108,22 @@ class Tolerance:
     scale_fields: tuple[str, str] | None = None
     #: Fields that must be equal across left and right for this rule to apply.
     require_equal_fields: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        for name in ("absolute", "relative"):
+            value = getattr(self, name)
+            if not isinstance(value, (int, float)) or isinstance(value, bool):
+                raise ValueError(f"{name} must be an int or float")
+            if not _nonnegative_number(value):
+                raise ValueError(f"{name} must be finite and >= 0")
+        if not isinstance(self.reason, str) or not self.reason:
+            raise ValueError("reason must be a nonempty string")
+        if self.scale_fields is not None and not _nonempty_str_tuple(
+            self.scale_fields, 2
+        ):
+            raise ValueError("scale_fields must be a tuple of two nonempty strings")
+        if not _nonempty_str_tuple(self.require_equal_fields):
+            raise ValueError("require_equal_fields must be a tuple of nonempty strings")
 
     @property
     def is_exact(self) -> bool:
@@ -68,15 +148,12 @@ def _context_matches(
         return True
     if not isinstance(left_record, Mapping) or not isinstance(right_record, Mapping):
         return False
-    return all(
-        name in left_record
-        and name in right_record
-        and left_record[name] is not None
-        and right_record[name] is not None
-        and type(left_record[name]) is type(right_record[name])
-        and left_record[name] == right_record[name]
-        for name in tolerance.require_equal_fields
-    )
+    for name in tolerance.require_equal_fields:
+        if name not in left_record or name not in right_record:
+            return False
+        if not _context_value_matches(name, left_record[name], right_record[name]):
+            return False
+    return True
 
 
 def _scaled_tolerance(
@@ -90,25 +167,13 @@ def _scaled_tolerance(
     low_field, high_field = tolerance.scale_fields
     if low_field not in left_record or high_field not in left_record:
         return EXACT
-    low = left_record[low_field]
-    high = left_record[high_field]
-    if not (
-        isinstance(low, (int, float))
-        and not isinstance(low, bool)
-        and isinstance(high, (int, float))
-        and not isinstance(high, bool)
-    ):
-        return EXACT
-    try:
-        finite = math.isfinite(low) and math.isfinite(high)
-        width = high - low
-        finite = finite and math.isfinite(width)
-    except (OverflowError, TypeError):
-        return EXACT
-    if not (finite and high >= low):
+    resolved_absolute = _resolve_scaled_absolute(
+        tolerance, left_record[low_field], left_record[high_field]
+    )
+    if resolved_absolute is None:
         return EXACT
     return Tolerance(
-        absolute=tolerance.relative * width,
+        absolute=resolved_absolute,
         relative=0.0,
         reason=tolerance.reason,
     )
