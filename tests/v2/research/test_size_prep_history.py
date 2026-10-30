@@ -1,4 +1,5 @@
 """Workspace panel preparation composes eligibility and panel producers over a bounds record."""
+import json
 from copy import deepcopy
 from types import SimpleNamespace
 
@@ -60,6 +61,24 @@ def _repo_record(bounds_ws, source_root):
     return ws, clock, record, repository, repository.resolve(record["bounds_snapshot_id"])
 
 
+def _expected_limits(ws, snapshot_id, tables, event_count, margin):
+    placeholders = ",".join("?" for _ in tables)
+    row = ws.conn.execute(
+        "SELECT COALESCE(SUM(f.row_count),0) AS rows, COUNT(*) AS frags, "
+        "COALESCE(SUM(o.byte_size),0) AS total, COALESCE(MAX(o.byte_size),0) AS biggest "
+        "FROM data_snapshot_tables t "
+        "JOIN data_version_fragments v ON v.dataset_version_id = t.dataset_version_id "
+        "JOIN data_fragments f ON f.fragment_id = v.fragment_id "
+        "JOIN data_objects o ON o.object_id = f.object_id "
+        "WHERE t.snapshot_id = ? AND t.table_name IN (" + placeholders + ")",
+        (snapshot_id, *tables)).fetchone()
+    limits = {"max_source_rows": row["rows"] * margin, "max_fragments": row["frags"] * margin,
+              "max_object_bytes": row["biggest"] * margin, "max_total_bytes": row["total"] * margin,
+              "max_output_rows": event_count * 3 * margin}
+    assert sum(limits.values()) > 0
+    return limits
+
+
 def test_happy_path_binds_history_panel_limits_and_read_pin(bounds_ws, source_root, monkeypatch):
     ws, clock, record, repository, snapshot = _repo_record(bounds_ws, source_root)
     calls = _fake(monkeypatch)
@@ -79,16 +98,34 @@ def test_happy_path_binds_history_panel_limits_and_read_pin(bounds_ws, source_ro
     assert panel["history_snapshot"].snapshot_id == "snap_hist"
     assert panel["price_history_snapshot"].snapshot_id == record["bounds_snapshot_id"]
     assert panel["source_start"] == "2021-01-01" and panel["metadata_limits"] == {"max_x": 1}
-    assert panel["limits"] == hist.derive_history_limits(repository, snapshot, len(ids))
-    assert any(name.startswith("size-prep-panel:") for name in _pin_names(ws))
+    expected = _expected_limits(ws, snapshot.snapshot_id, hist.HISTORY_TABLES, len(ids), 2)
+    assert panel["limits"] == expected
+    name = "size-prep-panel:" + doc["panel_id"].split(":", 1)[1]
+    bodies = []
+    for path in (ws.paths.store / "objects").rglob("*"):
+        if not path.is_file():
+            continue
+        try:
+            stored = json.loads(path.read_bytes())
+        except ValueError:
+            continue
+        if isinstance(stored, dict) and stored.get("name") == name:
+            bodies.append(stored)
+    assert len(bodies) == 1
+    pin = bodies[0]["pin"]
+    assert pin == {k: v for k, v in doc.items() if k != "read_pin_ref"}
+    assert pin["limits"] == expected
+    assert pin["record_id"] == record["record_id"]
 
 
 def test_limits_scale_with_margin_and_event_count(bounds_ws, source_root, monkeypatch):
-    _, _, _, repository, snapshot = _repo_record(bounds_ws, source_root)
+    ws, _, _, repository, snapshot = _repo_record(bounds_ws, source_root)
     present = tuple(t for t in hist.HISTORY_TABLES if t in snapshot.table_versions)
     monkeypatch.setattr(hist, "HISTORY_TABLES", present)
     two = hist.derive_history_limits(repository, snapshot, 10, margin=2)
     one = hist.derive_history_limits(repository, snapshot, 10, margin=1)
+    assert two == _expected_limits(ws, snapshot.snapshot_id, present, 10, 2)
+    assert one == _expected_limits(ws, snapshot.snapshot_id, present, 10, 1)
     assert two["max_output_rows"] == 60
     assert one["max_source_rows"] * 2 == two["max_source_rows"]
     for kwargs in ({"event_count": 0}, {"event_count": 10, "margin": 0}, {"event_count": True}):
@@ -184,12 +221,21 @@ def test_provenance_file_that_is_oversized_or_a_symlink_is_refused(bounds_ws, so
     calls = _fake(monkeypatch)
     monkeypatch.setattr(hist, "HISTORY_TABLES",
                         tuple(t for t in hist.HISTORY_TABLES if t in snapshot.table_versions))
+    real_read = hist._read_regular
+    recorded = []
+
+    def recording_read(path, limit, *args, **kwargs):
+        recorded.append(limit)
+        return real_read(path, limit, *args, **kwargs)
+
+    monkeypatch.setattr(hist, "_read_regular", recording_read)
     path = (ws.paths.root / "size_prep"
             / ("provenance-" + record["record_id"].split(":", 1)[1] + ".json"))
     with path.open("a") as handle:
         handle.write(" " * (1 << 20))
     _refusal(lambda: hist.prepare_workspace_panel(ws, "shadow", record, **_args(clock)),
              "PUBLICATION_REFUSED", "record_invalid")
+    assert recorded == [len(canonical_json(record).encode("utf-8"))]
     assert calls["history"] == []
     path.unlink()
     elsewhere = ws.paths.root / "elsewhere.json"
