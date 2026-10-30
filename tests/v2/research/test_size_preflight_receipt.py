@@ -6,10 +6,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from engine.v2.foundation import canonical_json, to_document
+from engine.v2.contracts import ArtifactRef
+from engine.v2.foundation import canonical_json, from_document, to_document
 from engine.v2.ops.errors import OpsError
 from experiments import eligible_history, size_panel, size_preflight_receipt
 from experiments import size_search_binding as binding
+from experiments.native_registration import MAX_NATIVE_EVIDENCE_BYTES
 from experiments.size_preflight_receipt import SCHEMA, admit, input_bindings, issue
 from tests.v2.research.test_magnitude_search_request import request as request_fixture
 from tests.v2.research.test_size_cli_admission import setup_cli
@@ -127,6 +129,41 @@ def test_corrupt_receipt_refuses(case, kind):
         ref = case.store.publish_bytes(canonical_json(receipt).encode("utf-8"), schema_ref=SCHEMA)
     with pytest.raises(OpsError) as caught:
         admit(case.store, ref, bindings, case.spec)
+    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert caught.value.problem.details == {"reason": "receipt_corrupt"}
+
+
+@pytest.mark.parametrize("run_id", ["native_forged", 5])
+def test_forged_run_id_refuses(case, run_id):
+    bindings = bindings_for(case)
+    ref = issue(case.store, bindings, case.registration)
+    receipt = json.loads(case.store.read_verified(ref))
+    receipt["run_id"] = run_id
+    forged = case.store.publish_bytes(canonical_json(receipt).encode("utf-8"), schema_ref=SCHEMA)
+    with pytest.raises(OpsError) as caught:
+        admit(case.store, forged, bindings, case.spec)
+    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert caught.value.problem.details == {"reason": "receipt_corrupt"}
+
+
+def test_oversized_payload_ref_refused_before_read(case, monkeypatch):
+    bindings = bindings_for(case)
+    ref = issue(case.store, bindings, case.registration)
+    receipt = json.loads(case.store.read_verified(ref))
+    payload = from_document(ArtifactRef, receipt["registration"])
+    oversized_payload = dataclasses.replace(payload, byte_size=MAX_NATIVE_EVIDENCE_BYTES + 1)
+    receipt["registration"] = to_document(oversized_payload)
+    oversized = case.store.publish_bytes(canonical_json(receipt).encode("utf-8"), schema_ref=SCHEMA)
+    read_verified = case.store.read_verified
+
+    def guarded(read_ref):
+        if read_ref == oversized_payload:
+            pytest.fail("oversized payload ref was read before its size check")
+        return read_verified(read_ref)
+
+    monkeypatch.setattr(case.store, "read_verified", guarded)
+    with pytest.raises(OpsError) as caught:
+        admit(case.store, oversized, bindings, case.spec)
     assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
     assert caught.value.problem.details == {"reason": "receipt_corrupt"}
 

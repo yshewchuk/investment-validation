@@ -79,6 +79,13 @@ def admit(store, ref, bindings, spec):
     except (ValueError, TypeError, KeyError):
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "SIZE preflight receipt is malformed",
                    details={"reason": "receipt_corrupt"}) from None
+    plan = resolve_experiment_plan(spec)
+    expected_run_id = ("native_" + content_hash({"experiment_id": plan.experiment_id,
+                                                 "arm": plan.arms[0]}).removeprefix("sha256:"))
+    if type(receipt["run_id"]) is not str or receipt["run_id"] != expected_run_id:
+        raise fail("EXPERIMENT_IDENTITY_CONFLICT",
+                   "SIZE preflight receipt run_id is not bound to its plan",
+                   details={"reason": "receipt_corrupt"})
     if receipt["bindings"] != bindings:
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "SIZE preflight receipt inputs differ",
                    details={"reason": "receipt_input_mismatch"})
@@ -86,7 +93,10 @@ def admit(store, ref, bindings, spec):
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "SIZE preflight receipt validator is stale",
                    details={"reason": "receipt_validator_stale"})
     try:
-        payload = store.read_verified(from_document(ArtifactRef, receipt["registration"]))
+        payload_ref = from_document(ArtifactRef, receipt["registration"])
+        if payload_ref.byte_size > MAX_NATIVE_EVIDENCE_BYTES:
+            raise ValueError
+        payload = store.read_verified(payload_ref)
         if len(payload) > MAX_NATIVE_EVIDENCE_BYTES:
             raise ValueError
         logical = load_registration_document(store, payload)
@@ -100,7 +110,6 @@ def admit(store, ref, bindings, spec):
     except (DocumentError, ValueError, KeyError, TypeError, OpsError):
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "SIZE preflight receipt payload is invalid",
                    details={"reason": "receipt_corrupt"}) from None
-    plan = resolve_experiment_plan(spec)
     prepared = dataclasses.replace(spec, economic_params=plan.as_document()["economic_params"],
                                    input_files=())
     document = registration.document
