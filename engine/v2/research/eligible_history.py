@@ -142,8 +142,8 @@ def _forecasts(event, horizons, calendar, clocks):
     return forecasts
 
 
-def _prepare(repository, snapshot, *, as_of_month, policy, event_ids, horizons, history_start, limits,
-             producer):
+def _plan(repository, snapshot, *, as_of_month, policy, event_ids, horizons, history_start, limits, strict):
+    """Shared planning path; strict refuses unavailable targets, non-strict records them as unavailable."""
     _request(repository, snapshot, policy, event_ids, horizons, limits)
     targets = load_population(repository, snapshot, as_of_month=as_of_month, event_ids=event_ids)
     population = load_population(repository, snapshot, as_of_month=as_of_month)
@@ -161,13 +161,39 @@ def _prepare(repository, snapshot, *, as_of_month, policy, event_ids, horizons, 
     selected = population[(population.ticker.isin(targets.ticker)) & (days >= start.isoformat())
         & ((days < population.ticker.map(ceilings)) | population.event_id.isin(event_ids))]
     groups, unavailable, qualified = _groups(repository, snapshot, selected, forecasts,
-        event_ids, horizons, calendar, clocks, limits)
+        event_ids, horizons, calendar, clocks, limits, strict)
     metadata = {"schema_version": "event_group_bounds.v1", "source_snapshot": to_document(snapshot),
         "holdout_as_of_month": as_of_month, "policy_id": policy["policy_id"], "horizons": horizons,
         "groups": groups}
     metadata["metadata_id"] = content_hash(metadata)
     eligibility = eligibility_policy.plan_eligibility(repository, snapshot, as_of_month=as_of_month,
         policy=policy, metadata=metadata, evaluation_event_ids=[])
+    return {"targets": targets, "population": population, "calendar": calendar, "clocks": clocks,
+        "forecasts": forecasts, "start": start, "ceilings": ceilings, "selected": selected,
+        "qualified": qualified, "unavailable": unavailable, "eligibility": eligibility,
+        "calendar_source": calendar_source}
+
+
+def plan_targets(repository, snapshot, *, as_of_month, policy, event_ids, horizons, history_start, limits):
+    """Public non-strict grouped-embargo plan: materializes nothing and writes nothing."""
+    plan = _plan(repository, snapshot, as_of_month=as_of_month, policy=policy, event_ids=event_ids,
+        horizons=horizons, history_start=history_start, limits=limits, strict=False)
+    eligibility, requested = plan["eligibility"], set(event_ids)
+    return {"plan_id": eligibility["plan_id"],
+        "retained": sorted(requested & set(eligibility["retained_event_ids"])),
+        "unavailable": sorted(requested & set(plan["unavailable"])),
+        "exclusions": [e for e in eligibility["exclusions"] if e["event_id"] in requested]}
+
+
+def _prepare(repository, snapshot, *, as_of_month, policy, event_ids, horizons, history_start, limits,
+             producer):
+    plan = _plan(repository, snapshot, as_of_month=as_of_month, policy=policy, event_ids=event_ids,
+        horizons=horizons, history_start=history_start, limits=limits, strict=True)
+    targets, population, forecasts = plan["targets"], plan["population"], plan["forecasts"]
+    start, ceilings, selected, qualified = (plan["start"], plan["ceilings"], plan["selected"],
+        plan["qualified"])
+    unavailable, eligibility, calendar_source = (plan["unavailable"], plan["eligibility"],
+        plan["calendar_source"])
     # Full canonical metadata is reread by plan_eligibility; unavailable contributors
     # above never remove a held event's window or confer a new read capability.
     retained = set(eligibility["retained_event_ids"])
@@ -196,7 +222,8 @@ def _prepare(repository, snapshot, *, as_of_month, policy, event_ids, horizons, 
     return context, targets.set_index("event_id", drop=False), population, plans, reader
 
 
-def _groups(repository, snapshot, selected, forecasts, event_ids, horizons, calendar, clocks, limits):
+def _groups(repository, snapshot, selected, forecasts, event_ids, horizons, calendar, clocks, limits,
+            strict=True):
     """Source-derived label windows; missing evidence differs from null labels."""
     anchors = _anchors(repository, snapshot, limits, required_tickers=selected.ticker.unique())
     records = {}
@@ -210,7 +237,7 @@ def _groups(repository, snapshot, selected, forecasts, event_ids, horizons, cale
         bound = _bound(event, anchors, records)
         if bound is None:
             unavailable.append(event.event_id)
-            if event.event_id in event_ids:
+            if strict and event.event_id in event_ids:
                 raise fail("CONTRACT_MISMATCH", "target label bounds are unavailable")
             continue
         qualified[event.event_id] = bound
