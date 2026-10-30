@@ -1,6 +1,8 @@
 """Complete immutable qualified SIZE panel; private installed-wrapper backend."""
 import json
 
+import numpy as np
+
 from engine.v2.data.errors import fail
 from engine.v2.foundation import canonical_json, content_hash, to_document
 from engine.v2.research import _magnitude_panel_sources as sources
@@ -28,6 +30,16 @@ def _daily_start(records):
     return min(dates)
 
 
+def _price_inputs(repository, snapshot, tickers, limits):
+    """Per-ticker row digests plus date arrays; each ticker's version rows are dropped after hashing."""
+    digests, dates = {}, {}
+    for ticker in sorted(set(tickers) | {"^GSPC"}):
+        rows = sources.price_dates(repository, snapshot, ticker, limits)
+        digests[ticker] = {"rows": len(rows), "digest": content_hash(rows)}
+        dates[ticker] = np.array([row["date"] for row in rows], dtype="datetime64[ns]")
+    return digests, dates
+
+
 def _prepare(repository, source, *, history_snapshot, price_history_snapshot, as_of_month,
              policy, event_ids, horizons, history_start, source_start, limits, metadata_limits, producer, history_admitted):
     _policy(policy)
@@ -45,18 +57,17 @@ def _prepare(repository, source, *, history_snapshot, price_history_snapshot, as
         raise fail("CONTRACT_MISMATCH", "panel source start exceeds forecast ceiling")
     tickers = sorted({t["ticker"] for t in targets})
     index = magnitude_confirmed_metadata.build_index(repository, source, tickers=tickers, limits=metadata_limits)
-    price_metadata = {ticker: sources.price_dates(repository, price_history_snapshot, ticker, limits)
-                      for ticker in sorted(set(tickers) | {"^GSPC"})}
-    quotes = sources.quote_plan(repository, source, index, history, request, price_metadata)
+    price_digests, price_day_arrays = _price_inputs(repository, price_history_snapshot, tickers, limits)
+    quotes, precoverage = sources.quote_plan(repository, source, index, history, request, price_day_arrays)
     groups = {g["event_id"]: g for g in history["eligibility"]["groups"]}
     targets = [{**t, **{k: groups[t["event_id"]][k] for k in ("label_start", "label_end")}}
                for t in targets]
-    identity = {"schema_version": "magnitude_panel_context.v3", "source_snapshot": to_document(source),
+    identity = {"schema_version": "magnitude_panel_context.v4", "source_snapshot": to_document(source),
         "history_snapshot": to_document(history_snapshot), "history_context": history,
         "price_history_snapshot": to_document(price_history_snapshot), "target_events": targets,
         "eligibility_plan": history["eligibility"],
         "quote_eligibility_plan": quotes, "confirmed_metadata": index, "producer": producer,
-        "price_row_metadata": price_metadata,
+        "price_row_digests": price_digests,
         "feature_recipe": table.recipe("HMO"), "request": {**request, "source_start": source_start,
             "metadata_limits": metadata_limits},
         "quote_label_windows": "independent_pinned_price_dates_not_computed_outcome_capture",
@@ -65,6 +76,7 @@ def _prepare(repository, source, *, history_snapshot, price_history_snapshot, as
         "availability": "reconstructed_prefix_publication_and_schedule_unverified",
         "source_fragments": {"daily_market": [to_document(r) for r in daily_records],
                              "price_history": [to_document(r) for r in price_records]}}
+    identity.update(sources.precoverage_document(precoverage))
     context = {**identity, "context_id": content_hash(identity)}
     if len(canonical_json(context).encode()) > limits["max_total_bytes"]:
         raise fail("RESULT_LIMIT_EXCEEDED", "panel context exceeds explicit byte limit")
@@ -82,8 +94,13 @@ def _daily_lineage(market, anchor_for, ticker):
     return {**market, "sources": anchors}
 
 
-def _price_versions(context):
-    return {(ticker, row["date"]): row for ticker, rows in context["price_row_metadata"].items() for row in rows}
+def _versions(repository, price_snapshot, context, ticker):
+    """Re-read one ticker's version rows and verify them against the context digest."""
+    rows = sources.price_dates(repository, price_snapshot, ticker, context["request"]["limits"])
+    pin = context["price_row_digests"][ticker]
+    if len(rows) != pin["rows"] or content_hash(rows) != pin["digest"]:
+        raise fail("IDENTITY_CONFLICT", "price version rows differ from the panel context")
+    return {row["date"]: row for row in rows}
 
 
 def _ticker_inputs(repository, source, price_snapshot, context, ticker, sequences,
@@ -104,8 +121,8 @@ def _rows(repository, source, price_snapshot, prepared):
     daily_anchors = sources.anchor_lookup(daily_records,
         daily_contract=repository.table_contract(source, "daily_market"))
     price_anchors = sources.anchor_lookup(price_records)
+    gspc_anchors = sources.anchor_lookup(price_records)  # regime dates only; survives ticker changes
     request = context["request"]
-    versions = _price_versions(context)
     population = load_population(repository, source, as_of_month=request["as_of_month"])
     moves = sources.signed_moves(repository, source, admitted, population)
     targets = context["target_events"]
@@ -121,6 +138,8 @@ def _rows(repository, source, price_snapshot, prepared):
     regime = daily._read_regime_series(repository, price_snapshot, request["source_start"], ceiling,
         request["limits"]["max_source_rows"], request["limits"]["max_object_bytes"])
     spy = daily._spy_blocks(targets, regime)
+    gspc_versions = _versions(repository, price_snapshot, context, "^GSPC")
+    versions = {}
     retained = set(context["quote_eligibility_plan"]["retained_event_ids"])
     meter = Progress("qualified panel events", len(targets))
     history_rows = iter(admitted["rows"])
@@ -131,8 +150,11 @@ def _rows(repository, source, price_snapshot, prepared):
         cutoff = cutoffs[key]
         ticker = target["ticker"]
         if ticker != current_ticker:
+            price_anchors.clear()  # anchor caches are per active ticker, not per run
+            daily_anchors.clear()
             sequence, runup, surface, dates = _ticker_inputs(repository, source, price_snapshot,
                 context, ticker, sequences, selected_by_ticker, request)
+            versions = _versions(repository, price_snapshot, context, ticker)
             current_ticker = ticker
         history = json.loads(stored["history_json"])
         prior = {"signed_streak": sources.streak(history, moves),
@@ -145,8 +167,8 @@ def _rows(repository, source, price_snapshot, prepared):
         history_values = {name: stored[name] for name in HISTORY}
         blocks = {"history": _block(history_values, history["history"]),
             "prior_events": _block(prior, history["history"]),
-            "runup": _block(runvalues, [price_anchors(ticker, d, versions[ticker, d]) for d in rundates]),
-            "spy": _block(spy[key]["values"], [price_anchors("^GSPC", d, versions["^GSPC", d])
+            "runup": _block(runvalues, [price_anchors(ticker, d, versions[d]) for d in rundates]),
+            "spy": _block(spy[key]["values"], [gspc_anchors("^GSPC", d, gspc_versions[d])
                                               for d in spy[key]["source_dates"]]),
             "daily_market": _daily_lineage(market, daily_anchors, ticker),
             "implied_history": implied_lineage}

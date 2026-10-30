@@ -77,30 +77,28 @@ are caller responsibilities, not guarantees derived from these arrays.
 | Same valid inputs and numerical environment | Deterministic fresh fit, not cached or journal replay |
 | Cache, transaction or partial-write concerns | No cache, I/O, persistence or publication; v1 recipes and results are unchanged |
 
-The separate `magnitude_ridge_hgb_recipe` API constructs/validates source-free
-`magnitude_ridge_hgb_recipe.v1` metadata for the bounded stage-2 Ridge/HGB grid.
-It binds explicit ordered unique columns, a canonical dictionary hash, fixed
-preprocessing/estimator policy and derived width; no dictionary or source is read.
-The `history_ridge`/`history_hgb` family names reuse the training-layer private
-estimator constructor (`training/_magnitude_estimators.build_estimator`,
-imported by the training fitters) unchanged; each numeric adapter owns its
-guards and fitting, not the constructor. This is not the fixed eleven-column
-v1 execution envelope. Dictionary membership and truthful matrix order remain caller-owned; a hash alone grants no admission.
-`training.magnitude_ridge_hgb.fit_ridge_hgb_predictions(..., columns=...)`
-checks both no-fit guards before inspecting metadata or numeric inputs, validates
-the closed recipe and exact declared column order, then copies numeric matrices.
-A fresh one-thread fit learns only training rows: Ridge keeps every selected column
-through median imputation, full missing flags and scaling; HGB freezes training-all-null columns to
-zero at training/prediction while routing partial nulls natively. It returns
-`magnitude_ridge_hgb_fit.v1` with the validated recipe hash and detached finite
-nonnegative predictions. This is a production-unwired numeric boundary: no source/holdout/fold
-admission, CLI, selection or registration; existing eleven-column recipes, fitters
-and source closures remain unchanged.
+The `magnitude_ridge_hgb_recipe` API constructs/validates source-free closed
+variable-width policies; ordered columns, dictionary hash and fixed estimator
+parameters bind the recipe, not source admission or dictionary membership.
+`regression_ridge_hgb_recipe.regression_recipe` adds a distinct
+`regression_ridge_hgb_recipe.v1` identity with explicit `signed`/`nonnegative`
+target domain and respectively `none`/`clip_zero` projection. Its validator
+refuses unknown fields or inconsistent domain/projection pairs; no training imports.
+`training.magnitude_ridge_hgb.fit_regression_predictions` uses that new policy;
+`fit_ridge_hgb_predictions` retains its existing magnitude recipe/result schema.
+Both guards precede inspection; the shared private fitter copies arrays, learns
+Ridge imputation/indicators/scaling only on training rows and freezes HGB's
+training-all-null columns to zero. Fresh sklearn estimators use one thread.
+Signed labels/predictions need only be finite (no floor, absolute value or log);
+nonnegative labels still reject negatives and predictions clip at zero.
+The new result is `regression_ridge_hgb_fit.v1` with recipe hash and detached
+forecasts. No I/O, cache, retries, source/fold/holdout admission or release occurs.
+Existing magnitude numerics remain unchanged; source closures require resealing.
 
 | Ridge/HGB condition | Outcome |
 |---|---|
 | Either no-fit guard active | Its `RuntimeFitForbidden` precedes recipe, column or array inspection |
-| Invalid closed policy/order, unconvertible inputs, matrix shape, infinite features or nonfinite/negative labels | `ValueError` before fit; no partial result |
+| Invalid closed policy/order, unconvertible inputs, matrix shape, infinite features or labels outside the recipe domain | `ValueError` before fit; no partial result |
 | Wrong prediction shape or nonfinite predictions | `ValueError` after fit, before projection; no partial result |
 | Same valid inputs and numerical environment | Deterministic fresh fit, not cached or journal replay |
 | Cache, retry, transaction or partial-write concerns | No cache, retry, persistence or publication |
@@ -535,7 +533,7 @@ Binding user decisions D1-D10 (2026-10-25, recorded in #805). Once per calendar 
 Its held-out prediction/residual arrays belong to that same object. Offline release preparation records this metadata in the hashed state catalog; a read-only loader verifies it against bounded, hash-checked bytes. Existing catalogs without this declaration require offline restaging, not a nightly fit or a guessed interval policy. Verified loading covers size folds and the chooser producer artifacts below; this alone admits neither training sources nor a nightly chooser declaration.
 
 Selection uses the exact earlier of the event month and decision month, and the registered size model and feature order. It never chooses the newest available fold or substitutes a full-refit model. The panel hash comes from the already-pinned snapshot's single original `feature_panel` object; an unsupported multi-fragment layout is refused. The scoring selector (`gate_fold_selection.py`) applies the month rule and the release-staged descriptor checks only; comparing the descriptor's panel hash with the pinned snapshot is not done by the selector.
-Snapshot ID, dataset version and panel byte hash remain distinct identities. Selection returns a separate content-addressed, single-binding inference view linked to its parent release and descriptor; it does not mutate or promote the champion `ModelRelease`. The existing `tier4-serving-fold.v1` adapter executes that binding through `FrozenInference`; no second prediction engine is added.
+Snapshot ID, dataset version and panel byte hash remain distinct identities. Selection returns a separate content-addressed, single-binding inference view linked to its active containing release and descriptor; the descriptor's parent ID/hash retain authoring provenance and may identify an earlier release after carry-forward. `serving_fold_loader` checks active binding compatibility rather than parent equality, then verifies the bounded estimator bytes and held-out pools. It does not mutate or promote the champion `ModelRelease`. The existing `tier4-serving-fold.v1` adapter executes that binding through `FrozenInference`; no second prediction engine is added.
 
 | Forward fold condition | Outcome |
 |---|---|
@@ -555,7 +553,7 @@ Serving-fold writers (`tier4.serving_model`, Phase-4 build/backfill) use binary 
 Release preparation (`--tier4-dir` and raw-byte APIs) requires trusted uncompressed inputs from supported writers; it does not refuse arbitrary compressed inputs before decoding.
 Hashes verify bytes, not provenance. The serialized byte cap is not a decoded-memory bound.
 Champion registry artifacts retain their separate `compress=3` format.
-Retained fold-parent checks reuse deployment's semantic release identity:
+At authoring, retained fold-parent checks reuse deployment's semantic release identity:
 binding/member collection order and storage paths may differ on retry;
 feature and output order, and every other identity field, remain significant.
 All Tier-4 collector roles and chooser/pinned-size destination reads admit
@@ -642,10 +640,10 @@ metadata and descriptor. Identical verified inputs produce identical references.
 
 `load_chooser_serving_fold` prepares the separately typed implied-t1/runup-move
 artifact from its exact `tier4_folds:<role>` catalog member. It rechecks catalog
-schema/self-hash/release/deployment, unique membership, descriptor/object identity,
-and the matching wildcard parent binding before decoding. The returned immutable
-`ChooserServingFoldRef` preserves the raw D14 producer output and paired held-out
-interval arrays; these are not the chooser k-NN population or driver residual state.
+schema/self-hash/release/deployment, unique membership, descriptor/object
+identity, exact parent ID/hash and matching wildcard parent binding before decoding.
+`ChooserServingFoldRef` keeps raw D14 output and paired held-out intervals, not the
+chooser k-NN population or driver residual state.
 It makes no event-month selection or source-ready declaration. Genuine
 training-source completion/finality, coordinator publication and per-request causal
 bounds are required for admission. Artifact headers/descriptors alone do not
@@ -746,7 +744,7 @@ per the root doc's layer table; `checks/import_layers.py` enforces this.
   `serving_fold_loader`; the verified frozen inference contract/loader for
   the model stage, the payoff-calibration artifact type, and
   `release_bindings.py`'s reads of `deployment.current_pointer`,
-  `deployment._read_manifest`, `deployment._manifest_hash_matches`,
+  `deployment._read_manifest`, `deployment.manifest_hash_matches`,
   `deployment.production_release_root`, and `deployment.MissingReleaseRoot`.
 - `engine.v2.models.training` — the same artifact types and no-fit guards, plus
   closed ElasticNet and Ridge/HGB recipe validation; never imported *by* this package (one-way).

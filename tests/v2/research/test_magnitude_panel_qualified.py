@@ -62,10 +62,11 @@ def panel_data(tmp_path, request):
         partition_logical_hashes=hashes, scope="panel-source", receipt_id="panel-source", attempt_id="panel-source")
     price_records = []
     for ticker in ("SYNTH", "^GSPC"):
+        first = spec.get("price_start") if ticker == "SYNTH" else None  # SYNTH coverage may start late
         rows = [dict(ticker=ticker, date=day, close_adj=100. + i / 10,
             close_raw=200. + i / 10, high_raw=201. + i / 10, retrieved_at="2025-01-01T00:00:00Z",
             deleted=False, source_kind="massive", source_hash="sha256:" + "ab" * 32,
-            capture_id="synthetic-prices") for i, day in enumerate(days)]
+            capture_id="synthetic-prices") for i, day in enumerate(days) if not first or day >= first]
         price_records.append(publish_and_inspect(store, PRICE_HISTORY_CONTRACT,
             contract_ref_for(PRICE_HISTORY_CONTRACT), rows, ticker))
     prices = commit_tables(data.conn, SystemClock(), {"price_history": price_records},
@@ -94,12 +95,15 @@ def test_public_full_table_and_independent_missing_realized_quote(panel_data, mo
     artifact = size_panel.materialize(data.repository, data.panel_source, **data.panel_request)
     result = read(data, artifact)
     assert [r["horizon_sessions"] for r in result["rows"]] == [1, 3, 5]
-    assert artifact["context"]["schema_version"] == "magnitude_panel_context.v3"
+    assert artifact["context"]["schema_version"] == "magnitude_panel_context.v4"
+    assert "price_row_metadata" not in artifact["context"]
+    assert set(artifact["context"]["price_row_digests"]) >= {"^GSPC"}
     plan = artifact["context"]["eligibility_plan"]
     assert plan["plan_id"] == content_hash({k: v for k, v in plan.items() if k != "plan_id"})
     assert plan["policy"]["policy_id"] == data.panel_request["policy"]["policy_id"]
     assert artifact["context"]["target_events"][0]["label_end"] == "2024-06-18"
     assert artifact["context"]["quote_label_windows"] == "independent_pinned_price_dates_not_computed_outcome_capture"
+    assert "quote_precoverage_excluded" not in artifact["context"]  # no pre-coverage events: identity unchanged
     for row in result["rows"]:
         assert row["n_prior"] == 3
         assert row["mean_prior_move"] == 0.
@@ -120,6 +124,17 @@ def test_public_full_table_and_independent_missing_realized_quote(panel_data, mo
     poison_outcomes(monkeypatch, data.repository, data.panel_source, (), all_outcomes=True)
     assert size_panel.materialize(data.repository, data.panel_source, **data.panel_request) == artifact
     assert read(data, artifact) == result
+
+
+@pytest.mark.parametrize("panel_data", [{"price_start": "2023-05-20"}], indirect=True)
+def test_pre_coverage_event_is_recorded_in_the_panel_context(panel_data):
+    data = panel_data
+    artifact = size_panel.materialize(data.repository, data.panel_source, **data.panel_request)
+    excluded = artifact["context"]["quote_precoverage_excluded"]
+    assert excluded["reason"] == "before_price_coverage" and excluded["count"] == 1
+    assert len(excluded["event_ids"]) == 1
+    kept = {g["event_id"] for g in artifact["context"]["quote_eligibility_plan"]["groups"]}
+    assert excluded["event_ids"][0] not in kept
 
 
 def test_versioned_recipe_preserves_existing_hashes_and_dictionary_order():
@@ -790,6 +805,13 @@ def test_streamed_history_panel_rows_match_materialized_history(panel_data):
     assert streamed_rows == materialized_rows
 
 
+class _StubLookup:
+    clear = staticmethod(lambda: None)
+
+    def __call__(self, *args):
+        return {}
+
+
 def test_panel_rows_consume_canonical_history_order_across_prefix_tickers(monkeypatch):
     from engine.v2.research import magnitude_panel_qualified as builder
     from engine.v2.research.eligible_history_table import FEATURES as HISTORY_FEATURES
@@ -811,16 +833,14 @@ def test_panel_rows_consume_canonical_history_order_across_prefix_tickers(monkey
             "history_start": "2023-01-01", "limits": {"max_source_rows": 20, "max_object_bytes": 100}},
         "target_events": targets,
         "confirmed_metadata": {"sequences": [{"ticker": "M"}, {"ticker": "MA"}]},
-        "price_row_metadata": {"M": [{"date": "2024-01-01"}],
-                                "MA": [{"date": "2024-01-01"}],
-                                "^GSPC": [{"date": "2024-01-01"}]},
+        "price_row_digests": {t: {"rows": 1, "digest": content_hash([{"date": "2024-01-01"}])} for t in ("M", "MA", "^GSPC")},
         "quote_eligibility_plan": {"retained_event_ids": []}, "daily_source_start": "2023-01-01",
         "context_id": "panel-context"}
     admitted = {"context": {"context_id": "history-context"}, "rows": rows}
     prepared = (context, admitted, [], [])
     monkeypatch.setattr(builder, "load_population", lambda *args, **kwargs: object())
     monkeypatch.setattr(sources, "signed_moves", lambda *args: {})
-    monkeypatch.setattr(sources, "anchor_lookup", lambda *args, **kwargs: lambda *args: {})
+    monkeypatch.setattr(sources, "anchor_lookup", lambda *args, **kwargs: _StubLookup())
     price_tickers = []
 
     def prices_for(repository, price_snapshot, ticker, *args):
@@ -848,6 +868,7 @@ def test_panel_rows_consume_canonical_history_order_across_prefix_tickers(monkey
         "quote_status": "missing", "anchor": None,
         "values": {name: None for name in builder.daily._DAILY}})
     monkeypatch.setattr(builder, "_block", lambda values, anchors: {})
+    monkeypatch.setattr(sources, "price_dates", lambda *args: [{"date": "2024-01-01"}])
 
     repository = SimpleNamespace(table_contract=lambda *args: object())
     emitted = list(builder._rows(repository, object(), object(), prepared))

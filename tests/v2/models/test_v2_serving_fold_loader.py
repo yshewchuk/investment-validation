@@ -128,7 +128,6 @@ def test_warm_legacy_entry_reused_and_limit_never_relaxes(setup, monkeypatch):
 
 
 @pytest.mark.parametrize("change", [
-    {"parent_release_id": "other"}, {"parent_release_hash": "sha256:" + "a" * 64},
     {"schema_version": "serving_fold_descriptor.v2.0"}, {"role": "iv_crush"},
     {"output_name": "wrong"}, {"pool_pred_field": "wrong"}, {"pool_count": -1},
     {"pool_count": 3}, {"decision_clock_id": "wrong"}, {"fold_start": "2026-10-02"},
@@ -162,6 +161,55 @@ def test_parent_catalog_and_identity(setup):
             _load(setup, parent=parent)
     with pytest.raises(loader.ServingFoldError):
         _load(setup, catalog_hash="bad")
+
+
+def test_carried_fold_loads_against_compatible_current_release(setup, tmp_path, monkeypatch):
+    inference, descriptor, original, path, cache = setup
+    catalog_hash = content_hash("carried-catalog")
+    first = _load(setup, catalog_hash=catalog_hash)
+    assert first.catalog_hash == catalog_hash
+    current = deployment.stage_release(
+        tmp_path, *release_inputs("size", cache, release_id="r2"))
+
+    assert descriptor.parent_release_id == original.release.release_id
+    assert descriptor.parent_release_id != current.release.release_id
+    assert descriptor.parent_release_hash != current.release_hash
+    ref = loader.load_serving_fold(
+        inference, descriptor, verified_parent_manifest=current,
+        catalog_hash=catalog_hash,
+        expected_bytes=path.stat().st_size)
+
+    assert ref.descriptor == descriptor
+    assert ref.catalog_hash == catalog_hash
+    expected_view_id = content_hash(
+        {"parent": current.release, "catalog": catalog_hash, "descriptor": descriptor})
+    assert ref.release.release_id == expected_view_id
+    assert ref.release.bindings[0].binding_id == expected_view_id
+    assert ref.release.release_id != current.release.release_id
+    assert ref.release.release_id != first.release.release_id
+    assert ref.pool_pred == (0.1, 0.2)
+    assert ref.pool_res == (-0.01, 0.02)
+    monkeypatch.setattr(
+        inference, "prepare_serving_fold",
+        lambda *a, **k: pytest.fail("active-binding mismatch reached artifact preparation"))
+    incompatible_cache = {**cache, "model_id": "incompatible_size"}
+    incompatible = deployment.stage_release(
+        tmp_path, *release_inputs("size", incompatible_cache, release_id="r3"))
+    with pytest.raises(loader.ServingFoldError, match="^serving fold is not ready$") as err:
+        loader.load_serving_fold(
+            inference, descriptor, verified_parent_manifest=incompatible,
+            catalog_hash=catalog_hash,
+            expected_bytes=path.stat().st_size)
+    assert err.value.code == MODEL_NOT_READY
+    reversed_cache = {**cache, "features": tuple(reversed(cache["features"]))}
+    reversed_release = deployment.stage_release(
+        tmp_path, *release_inputs("size", reversed_cache, release_id="r4"))
+    with pytest.raises(loader.ServingFoldError, match="^serving fold is not ready$") as err:
+        loader.load_serving_fold(
+            inference, descriptor, verified_parent_manifest=reversed_release,
+            catalog_hash=catalog_hash,
+            expected_bytes=path.stat().st_size)
+    assert err.value.code == MODEL_NOT_READY
 
 
 def test_legacy_minimal_fold_keeps_prediction_acceptance(setup, monkeypatch):

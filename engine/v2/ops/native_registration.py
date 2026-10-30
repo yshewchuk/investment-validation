@@ -348,6 +348,9 @@ def _size_plan_v17(document):
             and _size_placeholder_v17(document["event_ids"]))
 
 
+_SIZE_PANEL_CONTEXTS = ("magnitude_panel_context.v3", "magnitude_panel_context.v4")
+
+
 def _size_panel_v17(document):
     panel = document["size_panel"]
     if not isinstance(panel, dict) or set(panel) != {"context", "feature_snapshot"}:
@@ -356,7 +359,7 @@ def _size_panel_v17(document):
     if not isinstance(context, dict) or not isinstance(feature, dict):
         return False
     request = context.get("request")
-    if (context.get("schema_version") != "magnitude_panel_context.v3"
+    if (context.get("schema_version") not in _SIZE_PANEL_CONTEXTS
             or not isinstance(context.get("context_id"), str)
             or context.get("source_snapshot") != document["snapshot"]
             or not _size_placeholder_v17(context.get("target_events"))
@@ -423,7 +426,7 @@ def _size_binding(document):
     context = panel["context"]
     return (_size_panel_request(document) and document["size_comparison"]["schema_version"] == "size_causal_comparator.v1"
         and _magnitude_binding(baseline)
-        and context["schema_version"] == "magnitude_panel_context.v3"
+        and context["schema_version"] in _SIZE_PANEL_CONTEXTS
         and context["context_id"] == content_hash({k: v for k, v in context.items() if k != "context_id"})
         and context["source_snapshot"] == document["snapshot"]
         and request["schema_version"] == "magnitude_search_request.v2"

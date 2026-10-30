@@ -146,14 +146,46 @@ def _dimension_view(row: Mapping[str, Any], dimension: str, *,
     return view
 
 
+def _native_has_no_analog_field(native: Mapping[str, Any]) -> bool:
+    """True when the native row carries none of the analog fields (absent or None)."""
+    return all(native.get(name) is None for name in ANALOG_FIELDS)
+
+
+def _legacy_analog_placeholder(legacy: Mapping[str, Any], native: Mapping[str, Any]) -> bool:
+    """Legacy ``n_analogs == 0`` is the dataclass default of a stage that never ran.
+
+    "Never ran" comes from the legacy row itself: a matcher that ran and found no
+    rows also yields ``n_analogs == 0`` with no CI, but ``engine/score.py`` then
+    flags ``THIN_ANALOGS``.  So the placeholder needs a ``flags`` list without that
+    flag, no legacy CI, and no native analog field.  A real 0-analog result or any
+    native value keeps the ``0`` comparable.
+    """
+    flags = legacy.get("flags")
+    return (legacy.get("n_analogs") == 0
+            and isinstance(flags, list) and "THIN_ANALOGS" not in flags
+            and legacy.get("ci_low") is None and legacy.get("ci_high") is None
+            and _native_has_no_analog_field(native))
+
+
+def _is_analog_no_pool(legacy: Mapping[str, Any], native: Mapping[str, Any]) -> bool:
+    """Legacy ran analogs (``n_analogs > 0``) but native has no analog field at all."""
+    n = legacy.get("n_analogs")
+    return isinstance(n, (int, float)) and not isinstance(n, bool) and n > 0 \
+        and _native_has_no_analog_field(native)
+
+
 def _row_mismatches(key: str, legacy: Mapping[str, Any], native: Mapping[str, Any],
                     dimensions: tuple[str, ...], tolerance_policy: TolerancePolicy,
                     ) -> list[dict[str, Any]]:
     """Every dimension of one shared key that does not agree, with its receipt."""
     mismatches = []
+    placeholder = _legacy_analog_placeholder(legacy, native)
     for dimension in dimensions:
+        legacy_view = _dimension_view(legacy, dimension, legacy=True)
+        if dimension == "analogs" and placeholder:
+            legacy_view["n_analogs"] = None
         result = compare_dimension(
-            _dimension_view(legacy, dimension, legacy=True), _dimension_view(native, dimension),
+            legacy_view, _dimension_view(native, dimension),
             dimension, tolerance_policy=tolerance_policy)
         if not result["agree"]:
             mismatches.append({
@@ -350,6 +382,7 @@ def compare_native_vs_legacy(
     compared: list[str] = []
     only_legacy: list[str] = []
     only_native: list[str] = []
+    analog_no_pool: list[str] = []
     mismatches: list[dict[str, Any]] = []
     for key in sorted(set(legacy_rows) | set(native_rows)):
         legacy = legacy_rows.get(key)
@@ -360,6 +393,8 @@ def compare_native_vs_legacy(
             only_legacy.append(key)
         else:
             compared.append(key)
+            if _is_analog_no_pool(legacy, native):
+                analog_no_pool.append(key)
             mismatches.extend(_row_mismatches(key, legacy, native, dimensions, tolerance_policy))
     if not compared:
         raise fail("VALIDATION_FAILED", "native parity report shares no row key",
@@ -370,6 +405,7 @@ def compare_native_vs_legacy(
         "compared": compared,
         "only_legacy": only_legacy,
         "only_native": only_native,
+        "analog_no_pool": analog_no_pool,
         "mismatches": mismatches,
     }
 
@@ -399,6 +435,7 @@ def _empty_native_report(
         "compared": [],
         "only_legacy": sorted(legacy_rows),
         "only_native": sorted(native_rows),
+        "analog_no_pool": [],
         "mismatches": [],
     }
 

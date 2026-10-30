@@ -195,9 +195,7 @@ candidate still needs exactly one isolated fragment, and a candidate with no fra
 refuses `HOLDOUT_ACCESS_DENIED`. `prediction_inputs` does not use that guard: it refuses a
 table whose contract is neither native contract with `CONTRACT_MISMATCH` before any target
 scan, and a v5 skipped row with `EXPERIMENT_VARIANT_FAILED` naming the reason (the v5 contract
-requires one; a reason-less skipped row is malformed and gets the generic target message).
-It returns the signed move, binary `positive_move` target, and
-`target_available_on` date. The date is required and later than the event;
+requires one; a reason-less skipped row is malformed and gets the generic target message). It returns the signed move, binary `positive_move` target, and `target_available_on` date. The date is required and later than the event;
 fold consumers must admit training labels only when available before their
 decision cutoff. This input prerequisite performs no feature construction,
 model fitting, or report/ledger publication, and has no supervisor caller.
@@ -989,14 +987,14 @@ an uncaught traceback instead.
 - A trade-table write always goes through
   `engine.v2.data.generic_incremental`'s fenced commit — never a
   read-modify-write of an existing table version.
-- Pricing/planning/chain-indexing cores that moved from legacy
-  (`replay.py`, `_plan.py`, `_chains.py`, `_trades_table.py`) stay
-  byte-identical to their legacy counterparts; only the store-reaching
-  edges were rewritten, so the v2 path and the legacy board cannot drift
-  on arithmetic. `tests/test_v2_research_tools.py` /
-  `test_v2_research_replay.py` / `test_v2_research_build_trades.py` /
-  `test_v2_research_reconcile_trades.py` enforce this by comparing against
-  the legacy function on the same synthetic frame.
+- Pure pricing/planning/chain cores (`replay.py`, `_plan.py`, `_chains.py`, `_trades_table.py`) retain legacy arithmetic; only store edges changed. Synthetic legacy parity remains covered by the research tools/replay/build-trades/reconcile-trades tests.
+
+## Source-free regression evidence
+
+`regression_evidence.normalize_forecasts` validates exact supplied event/horizon coverage, explicit prediction-column names and signed/nonnegative domains; complete finite Real/Integral rows normalize to detached ordered JSON floats/ints. Strict JSON mode rejects non-native numeric types; Booleans, duplicates, extra fields and nonfinite values refuse.
+`error_metrics` pools finite residuals at equal row weight, scaling before squaring, and returns count/RMSE/MAE; empty, nonnumeric or nonfinite residuals refuse. Complete equal horizon coverage yields equal event weight; the caller owns that coverage and the subtraction producing residuals.
+Both helpers raise numeric/structural exceptions without partial results, I/O, fitting, cache, retries or publication. They use stdlib arithmetic/statistics. Membership/domain arguments are caller declarations, not sealed target identity, source admission or holdout authority.
+Existing experiment magnitude normalization delegates with fixed nonnegative domain/column; magnitude metrics preserve their typed failure envelope and numeric results. Signed use is an additive platform primitive, not a registered IV experiment.
 
 ## Diagram
 
@@ -1019,5 +1017,6 @@ flowchart LR
 | Qualified panel admission condition | Outcome before dependent reads |
 | --- | --- |
 | Request/admission refusals | Malformed request or empty required inventory: `CONTRACT_MISMATCH`; caller producer override or incompatible frozen SIZE policy: `HOLDOUT_ACCESS_DENIED` |
-| Memory/bounds | Peak memory is bounded by explicit query/source limits plus selected targets, the unique contributor union and the active ticker's source window. Streaming adds one scanner batch, one decoded history row and up to three output rows; no fixed RSS cap is claimed. Stored reads and receipt replays validate complete history coverage before returning. Coverage mismatch refuses `CONTRACT_MISMATCH`; panel publication exposes no partial snapshot. |
+| Memory/bounds | Peak memory is bounded by explicit query/source limits plus selected targets, the unique contributor union and the active ticker's source window. Streaming adds one scanner batch, one decoded history row and up to three output rows; no fixed RSS cap is claimed. The eligible-history stored-read batch cap is the largest stored fragment's `row_count` (the total only when the snapshot has one fragment); fragments are already bounded by `max_object_bytes`, so batch memory does not grow with fragment count. Rows, order, coverage checks and refusals are unchanged, and the cap is not part of any identity. Stored reads and receipt replays validate complete history coverage before returning. Coverage mismatch refuses `CONTRACT_MISMATCH`; panel publication exposes no partial snapshot. Context `magnitude_panel_context.v4` carries `price_row_digests` (`{ticker: {rows, digest}}`, `content_hash` of that ticker's non-deleted date/retrieved_at/deleted/source_hash/capture_id rows) instead of v3's inline `price_row_metadata`; per-date rows are held one ticker at a time, so identity memory is independent of total price rows (only dates are kept for the quote plan). Value build (not stored read, which recomputes the digests and so the `context_id`) re-reads each active ticker (and `^GSPC`) and a count or digest mismatch refuses `IDENTITY_CONFLICT` (R3); no identity-row cache or retry (R5); equal pinned inputs give equal `context_id`, any changed price-version row changes it (R6). Existing v3 registrations stay valid (the registration validator accepts v3 and v4); v3 panels are not re-derived, v4 has a new context id and slot, so new panels rebuild. Value-build anchor caches are per active ticker: `anchor_lookup` exposes `clear()` and a test-only `size()`, the ticker-scoped price and daily lookups are cleared when the ticker changes, and `^GSPC` regime anchors use their own lookup holding only regime dates, so retained anchor memory does not grow with ticker count (R1 bound: active ticker plus regime dates; R2 a cleared entry is recomputed from the same pinned fragment records, so rows, `row_id`s and published bytes are unchanged; R3 no new refusal; R4 nothing persisted; R5 no retry; R6 equal inputs give equal output). |
 | Non-native snapshot reference shape | `SNAPSHOT_UNRESOLVED` |
+| Confirmed event dated strictly before its ticker's first non-deleted price date | No label bracket can exist, so `quote_plan` (returns `(plan, excluded)`) leaves it out of the quote groups with reason `before_price_coverage` instead of refusing. It is then absent from the retained quote ids, so implied-history marks it ineligible. The panel context carries `quote_precoverage_excluded` (`reason`, `count`, sorted `event_ids`) only when non-empty, so other context ids are unchanged; one stderr decision line is logged. The confirmed-metadata index is not mutated. Any other bracket miss (inside the coverage range, after the last price date, or a `BMO` event on the first date, which has no prior session) still refuses `CONTRACT_MISMATCH`; no substitute bracket or retry. |
