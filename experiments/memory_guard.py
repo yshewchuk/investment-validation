@@ -20,6 +20,8 @@ def rss_bytes() -> int:
 
 def start_rss_watchdog(limit_bytes, interval=0.05):
     """Start the RSS watchdog for this process; returns a stop() callable."""
+    if not isinstance(interval, (int, float)) or interval <= 0:
+        raise fail("INVALID_EXPERIMENT_SPEC", "watchdog interval must be positive")
     main_thread = threading.get_ident()
     rss_bytes()
     stopped = threading.Event()
@@ -33,8 +35,8 @@ def start_rss_watchdog(limit_bytes, interval=0.05):
             except Exception:
                 exceeded = True
             if exceeded:
+                # Re-sent every interval while over the limit so a swallowed MemoryError cannot disable enforcement.
                 signal.pthread_kill(main_thread, signal.SIGUSR1)
-                return
 
     def exhausted(signum, frame):
         if active.is_set():

@@ -33,6 +33,26 @@ def test_rss_over_budget_is_refused():
                 time.sleep(0.01)
 
 
+def test_swallowed_memory_error_is_raised_again():
+    with rss_watchdog(rss_bytes() + 32 * 2 ** 20, interval=0.01):
+        hold = bytearray(128 * 2 ** 20)
+        hold[::4096] = b"\1" * len(range(0, len(hold), 4096))
+        count = 0
+        deadline = time.monotonic() + 3
+        while count < 2 and time.monotonic() < deadline:
+            try:
+                time.sleep(0.01)
+            except MemoryError:
+                count += 1
+        assert count >= 2
+
+
+def test_nonpositive_interval_is_refused():
+    with pytest.raises(OpsError):
+        with rss_watchdog(2 ** 40, interval=0):
+            pass
+
+
 def test_stopped_watchdog_ignores_late_signal():
     stop = start_rss_watchdog(rss_bytes() + 4 * 2 ** 30)
     stop()
