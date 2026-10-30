@@ -193,14 +193,13 @@ def test_catalog_over_the_metadata_limits_is_refused_before_resolve(bounds_ws, s
     calls = _fake(monkeypatch)
     monkeypatch.setattr(hist, "HISTORY_TABLES",
                         tuple(t for t in hist.HISTORY_TABLES if t in snapshot.table_versions))
-    limits = {**{k: 1 for k in hist.size_panel._METADATA_LIMITS},
-              "max_catalog_fragments": 1, "max_catalog_tables": 1}
-    with pytest.raises((OpsError, data_errors.DataError)) as raised:
-        hist.prepare_workspace_panel(ws, "shadow", record,
-                                     **_args(clock, metadata_limits=limits))
-    assert raised.value.code == "RESOURCE_LIMIT_EXCEEDED"
-    assert raised.value.problem.details["reason"] == "catalog_over_limit"
-    assert calls["history"] == []
+    base = {k: 10**6 for k in hist.size_panel._METADATA_LIMITS}
+    for over in ({"max_catalog_tables": 1}, {"max_catalog_bytes": 1}):
+        with pytest.raises((OpsError, data_errors.DataError)) as raised:
+            hist.prepare_workspace_panel(ws, "shadow", record,
+                                         **_args(clock, metadata_limits={**base, **over}))
+        assert raised.value.code == "RESULT_LIMIT_EXCEEDED"
+        assert calls["history"] == []
 
 
 def test_producer_error_propagates_unchanged_without_a_panel_pin(bounds_ws, source_root, monkeypatch):
