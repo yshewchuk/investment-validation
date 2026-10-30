@@ -113,6 +113,7 @@ def test_ci_finding_names_tolerance_reason_and_null_mask_is_exact():
         legacy, native_null, tolerance_policy=NATIVE_PARITY_TOLERANCE)
     assert len(null_receipt.findings) == 1
     assert null_receipt.findings[0].tolerance_applied == "exact"
+    assert null_receipt.findings[0].kind == "null_mask"
 
 
 def test_accepted_ci_tolerance_agrees_and_stage_hashes_preserve_native_values():
