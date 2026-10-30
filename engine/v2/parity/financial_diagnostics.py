@@ -11,7 +11,7 @@ from typing import Any, Mapping
 __all__ = ["expected_financial_diagnostics", "legacy_fair_premium"]
 
 
-def _number(value: Any) -> float | None:
+def _finite_number(value: Any) -> float | None:
     try:
         number = float(value)
     except (TypeError, ValueError, OverflowError):
@@ -29,16 +29,16 @@ _RUNUP_COEFFICIENTS = (
 def _runup_inputs(record: Mapping[str, Any], payoff: Mapping[str, Any],
                   driver: float | None):
     coefficients = payoff.get("coefficients") or {}
-    move = _number(record.get("runup_move_prediction"))
-    spot = _number(record.get("spot"))
-    strike = _number(record.get("strike"))
+    move = _finite_number(record.get("runup_move_prediction"))
+    spot = _finite_number(record.get("spot"))
+    strike = _finite_number(record.get("strike"))
     if (not isinstance(coefficients, Mapping) or driver is None or move is None
             or spot is None or strike is None or spot <= 0.0 or strike <= 0.0
             or any(name not in coefficients for name in _RUNUP_COEFFICIENTS)):
         return None
     numeric = {}
     for name in _RUNUP_COEFFICIENTS:
-        value = _number(coefficients[name])
+        value = _finite_number(coefficients[name])
         if value is None:
             return None
         numeric[name] = value
@@ -69,7 +69,7 @@ def _runup_fair_premium(record: Mapping[str, Any],
             if not math.isfinite(value):
                 return None
             values.append(value)
-    except (OverflowError, ValueError, ZeroDivisionError):
+    except (OverflowError, ValueError):
         return None
     fair = max(0.0, sum(values) / len(values) * 100.0)
     return fair if math.isfinite(fair) else None
@@ -77,8 +77,8 @@ def _runup_fair_premium(record: Mapping[str, Any],
 
 def _linear_fair_premium(payoff: Mapping[str, Any],
                          driver: float | None) -> float | None:
-    intercept = _number(payoff.get("intercept"))
-    slope = _number(payoff.get("slope"))
+    intercept = _finite_number(payoff.get("intercept"))
+    slope = _finite_number(payoff.get("slope"))
     if driver is None or intercept is None or slope is None:
         return None
     fair = max(0.0, (intercept + slope * driver) * 100.0)
@@ -90,7 +90,7 @@ def legacy_fair_premium(record: Mapping[str, Any]) -> float | None:
     payoff = record.get("payoff") or {}
     if not isinstance(payoff, Mapping):
         return None
-    driver = _number(record.get("driver_prediction"))
+    driver = _finite_number(record.get("driver_prediction"))
     if payoff.get("kind") == "runup_payoff_surface":
         return _runup_fair_premium(record, payoff, driver)
     return _linear_fair_premium(payoff, driver)
@@ -108,11 +108,11 @@ def expected_financial_diagnostics(
     record: Mapping[str, Any],
 ) -> dict[str, float | None]:
     """Compute expected diagnostics without importing native scoring code."""
-    cost = _number(record.get("entry_cost"))
-    spot = _number(record.get("spot"))
+    cost = _finite_number(record.get("entry_cost"))
+    spot = _finite_number(record.get("spot"))
     entry_cost_pct = _ratio(cost, spot, 100.0)
-    driver = _number(record.get("driver_prediction"))
-    implied = _number(record.get("implied_move"))
+    driver = _finite_number(record.get("driver_prediction"))
+    implied = _finite_number(record.get("implied_move"))
     model_vs_market = (
         _ratio(driver, implied * 0.645)
         if record.get("driver_name") == "abs_move" and implied is not None
@@ -120,7 +120,7 @@ def expected_financial_diagnostics(
     )
     fair = legacy_fair_premium(record)
     premium_vs_fair = _ratio(entry_cost_pct, fair)
-    width = _number(record.get("structure_width"))
+    width = _finite_number(record.get("structure_width"))
     cost_over_width = _ratio(cost, width)
     return {
         "entry_cost_pct": entry_cost_pct,

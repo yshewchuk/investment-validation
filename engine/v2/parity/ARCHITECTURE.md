@@ -58,8 +58,11 @@ from `engine/v2/diagnosis`) — this doc does not repeat it.
   (`financial_diagnostics.py`) — the shared legacy financial oracle used by
   the Phase 4 checker and native parity report to derive comparable values
   from source fields, without importing native scoring code. Missing,
-  nonnumeric, non-finite, invalid-domain and zero-denominator inputs yield
-  `None` for the affected diagnostic.
+  nonnumeric, non-finite and zero-denominator operands yield `None` for the
+  affected diagnostic; the runup formula also requires positive spot and
+  strike. The formulas impose no general sign restriction; the legacy linear
+  formula accepts signed numeric inputs and clamps a negative fair premium
+  to zero, preserving the frozen oracle's behavior.
 - `Tolerance(absolute=0.0, relative=0.0, reason="exact")`,
   `TolerancePolicy(policy_id, rules=())`, `EXACT`, `SCORE_RECORD_V1`
   (`tolerance.py`) — see "Cutover PR-4" below for what these are and the
@@ -117,9 +120,9 @@ compares (root doc §4.1) is structural here, not merely asserted.
 
 Callers, by real import (checked, not assumed): `checks/phase4_real.py`
 (the Phase 4 gate's own numeric comparison); `engine/v2/ops/native_parity_report.py`
-(the nightly `native_parity` stage's report, `engine/v2/ops/ARCHITECTURE.md`'s
-"Cutover PR-4" section); `engine/v2/diagnosis` (re-export only, never a
-second implementation). No other package imports this one.
+(the production `native_parity` worker's report); `engine/v2/diagnosis`
+(re-export only, never a second implementation). The checker and worker
+share the financial oracle; neither derives values for native rows.
 
 ## External systems and libraries
 
@@ -262,14 +265,9 @@ flowchart LR
 ```
 
 `compare_dimension` is the one entry point every caller in the diagram
-uses; `checks/phase4_real.py`, the Phase 4 gate's own
-verification/check tooling, calls it today, while
-`engine/v2/ops/native_parity_report.py` imports it too but today has
-only test callers of its own — a real production caller,
-`run_native_parity_worker` (a job kind's worker entrypoint, submitted by
-`supervisor.Service`'s own tick loop, never `run_shadow_nightly`), is
-designed in `engine/v2/ops/ARCHITECTURE.md`'s "Cutover PR-4 (redo)"
-section and lands with that PR's own Phase 2. `compare_records`
+uses; `checks/phase4_real.py` calls it from the Phase 4 gate, and
+`engine/v2/ops/native_parity_report.py` calls it from the production
+`run_native_parity_worker` path as well as tests. `compare_records`
 underneath it is the actual comparator, and
 `tolerance_policy` (the new pluggable seam) flows from the caller, through
 `compare_dimension`, into `compare_records`, never resolved or defaulted

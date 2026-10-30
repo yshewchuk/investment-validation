@@ -82,7 +82,10 @@ def test_row_mismatches_flag_a_wrong_native_entry_cost_pct(cost, spot, pct):
 def test_native_view_never_derives_entry_cost_pct():
     row = {"entry_cost": 3.0, "spot": 250.0}
     assert _dimension_view(row, "financial_diagnostics")["entry_cost_pct"] is None
-    assert _dimension_view(row, "financial_diagnostics", legacy=False)["entry_cost_pct"] is None
+    view = _dimension_view(row, "financial_diagnostics", legacy=False)
+    for field in ("entry_cost_pct", "model_vs_market", "fair_premium_pct",
+                  "premium_vs_fair", "cost_over_width"):
+        assert view[field] is None
 
 
 def test_row_mismatches_flags_a_native_row_missing_its_own_entry_cost_pct():
@@ -165,15 +168,15 @@ def test_legacy_runup_fair_premium_has_independent_expected_value():
     coefficients = dict(zip(_RUNUP_NAMES, (0.01, 0.02, 0.03, 0.04, 0.05, 0.06)))
     row = {
         "driver_prediction": 0.5,
-        "runup_move_prediction": 0.0,
+        "runup_move_prediction": 10.0,
         "spot": 100.0,
-        "strike": 90.48374180359595,
+        "strike": 100.0,
         "payoff": {"kind": "runup_payoff_surface", "coefficients": coefficients},
     }
 
     assert _dimension_view(row, "financial_diagnostics", legacy=True)[
         "fair_premium_pct"
-    ] == pytest.approx(125.0)
+    ] == pytest.approx(75.0)
 
 
 @pytest.mark.parametrize("row", [
@@ -207,6 +210,26 @@ def test_legacy_runup_fair_premium_has_independent_expected_value():
         "payoff": {
             "kind": "runup_payoff_surface",
             "coefficients": {name: 0.0 for name in _RUNUP_NAMES},
+        },
+    },
+    {
+        "driver_prediction": 0.5,
+        "runup_move_prediction": 1.0,
+        "spot": 100.0,
+        "strike": 90.0,
+        "payoff": {"kind": "runup_payoff_surface", "coefficients": [1.0]},
+    },
+    {
+        "driver_prediction": 0.5,
+        "runup_move_prediction": 100000.0,
+        "spot": 100.0,
+        "strike": 90.0,
+        "payoff": {
+            "kind": "runup_payoff_surface",
+            "coefficients": {
+                **{name: 0.0 for name in _RUNUP_NAMES},
+                "intercept": 1e308,
+            },
         },
     },
 ])
