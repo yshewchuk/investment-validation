@@ -219,6 +219,13 @@ def test_input_bindings_validates_panel_request(case, bad):
     assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
 
 
+@pytest.mark.parametrize("bad", [None, {}, "x"])
+def test_input_bindings_requires_experiment_spec(case, bad):
+    with pytest.raises(OpsError) as caught:
+        input_bindings(case.repository, bad, case.request, case.panel_request, **case.args)
+    assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
+
+
 def test_payload_request_not_bound_to_receipt_refuses(case):
     bindings = bindings_for(case)
     changed = deepcopy(bindings)

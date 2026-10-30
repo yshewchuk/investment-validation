@@ -15,7 +15,7 @@ from engine.v2.foundation import (
     to_document,
 )
 from engine.v2.ops.errors import fail
-from engine.v2.ops.experiments import resolve_experiment_plan
+from engine.v2.ops.experiments import ExperimentSpec, resolve_experiment_plan
 from experiments.magnitude_search_request_versions import compile_request
 from experiments.native_registration import (
     MAX_NATIVE_EVIDENCE_BYTES,
@@ -35,6 +35,8 @@ _RECEIPT_KEYS = frozenset({"schema_version", "bindings", "validator", "run_id", 
 def input_bindings(repository, spec, request, panel_request, *, scope, training_start,
                    labels_before):
     """Register-side cheap inputs only: hashes and resolved snapshot documents, no reads."""
+    if not isinstance(spec, ExperimentSpec):
+        raise fail("INVALID_EXPERIMENT_SPEC", "SIZE receipt requires an experiment specification")
     validate_panel_request(panel_request)
     for value in (training_start, labels_before):
         try:
