@@ -76,18 +76,36 @@ def metadata_rows(events, *, tickers):
 
 
 def _conflicts(rows):
-    ids, days, clusters = set(), set(), set()
+    ids, days = set(), set()
     for row in rows:
         identity = row["event_id"]
         day = (row["ticker"], row["event_date"])
-        cluster = (row["ticker"], row["event_cluster_id"])
-        if (identity in ids or day in days or row["date_conflict"]
-                or row["event_cluster_id"] is not None and cluster in clusters):
+        if identity in ids or day in days:
             raise fail("IDENTITY_CONFLICT", "metadata view has conflicting event identities")
         ids.add(identity)
         days.add(day)
-        if row["event_cluster_id"] is not None:
-            clusters.add(cluster)
+
+
+def _ambiguity(rows, reasons):
+    clusters = {}
+    for row in rows:
+        cluster = row["event_cluster_id"]
+        if cluster is not None:
+            key = (row["ticker"], cluster)
+            clusters[key] = clusters.get(key, 0) + 1
+    counts = {"unconfirmed_date_conflict": 0, "unconfirmed_cluster_ambiguous": 0}
+    updated = []
+    for row, reason in zip(rows, reasons):
+        cluster = row["event_cluster_id"]
+        if reason is None and row["date_conflict"]:
+            reason = "date_conflict"
+            counts["unconfirmed_date_conflict"] += 1
+        elif (reason is None and cluster is not None
+                and clusters[(row["ticker"], cluster)] > 1):
+            reason = "cluster_ambiguous"
+            counts["unconfirmed_cluster_ambiguous"] += 1
+        updated.append(reason)
+    return tuple(updated), counts
 
 
 def _sequence(ticker, selected, confirmed):
@@ -103,15 +121,12 @@ def _sequence(ticker, selected, confirmed):
             "events": events}
 
 
-def reduce_sequences(events: pd.DataFrame, *, tickers: list[str]) -> list[dict]:
-    """Reduce all supplied selected rows, or refuse without returning a partial view.
-
-    Caller owns allocation bounds and complete requested-ticker membership.
-    No source identity, time cutoff, coverage or payload authority is accepted.
-    """
+def reduce_with_counts(events: pd.DataFrame, *, tickers: list[str]) -> tuple[list[dict], dict]:
+    """Reduce all supplied selected rows and count date/cluster ambiguity reasons."""
     tickers = validate_tickers(tickers)
     rows, reasons = metadata_rows(events, tickers=tickers)
-    _conflicts(rows)  # Unconfirmed rows can invalidate the entire view.
+    _conflicts(rows)  # Duplicate identities invalidate the entire view.
+    reasons, counts = _ambiguity(rows, reasons)
     selected = dict.fromkeys(tickers, 0)
     confirmed = {ticker: [] for ticker in tickers}
     for row, reason in zip(rows, reasons):
@@ -119,4 +134,14 @@ def reduce_sequences(events: pd.DataFrame, *, tickers: list[str]) -> list[dict]:
         selected[ticker] += 1
         if reason is None:
             confirmed[ticker].append(row)
-    return [_sequence(ticker, selected[ticker], confirmed[ticker]) for ticker in tickers]
+    sequences = [_sequence(ticker, selected[ticker], confirmed[ticker]) for ticker in tickers]
+    return sequences, counts
+
+
+def reduce_sequences(events: pd.DataFrame, *, tickers: list[str]) -> list[dict]:
+    """Reduce all supplied selected rows, or refuse without returning a partial view.
+
+    Caller owns allocation bounds and complete requested-ticker membership.
+    No source identity, time cutoff, coverage or payload authority is accepted.
+    """
+    return reduce_with_counts(events, tickers=tickers)[0]
