@@ -157,6 +157,21 @@ def test_missing_or_nonfinite_str_thru_driver_location_leaves_band_unavailable()
         assert "forecast_sd" not in output
 
 
+def test_thin_str_thru_pool_leaves_band_unavailable():
+    output = {"driver_prediction": 0.4}
+    block = {"forecast_pool": {
+        "predictions": (0.5,) * 249,
+        "residuals": (0.2,) * 249,
+        "interval_floor": 0.0,
+    }}
+
+    _execute_forecast_band(block, output, "STR-THRU")
+
+    assert "forecast_p10" not in output
+    assert "forecast_p90" not in output
+    assert "forecast_sd" not in output
+
+
 def test_supported_non_str_thru_forecast_location_emits_band():
     output = {"forecast_abs_move": 0.4, "driver_prediction": 0.1}
     block = {"forecast_pool": {
