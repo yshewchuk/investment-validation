@@ -357,3 +357,15 @@ def test_validator_identity_covers_receipt_module():
     sources = binding.validator_identity()["source_closure"]
     assert "experiments/size_preflight_receipt.py" in sources
     assert "experiments/size_search.py" in sources
+
+
+@pytest.mark.parametrize("key,bad", [
+    (key, bad)
+    for key in ("training_start", "labels_before")
+    for bad in ("not-a-date", "2024-1-1", None)
+])
+def test_input_bindings_validate_cutoffs(case, key, bad):
+    with pytest.raises(OpsError) as caught:
+        input_bindings(case.repository, case.spec, case.request, case.panel_request,
+                       **{**case.args, key: bad})
+    assert caught.value.code == "INVALID_EXPERIMENT_SPEC"

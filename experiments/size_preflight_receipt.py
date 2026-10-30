@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+from datetime import date
 
 from engine.v2.contracts import ArtifactRef
 from engine.v2.foundation import (
@@ -35,6 +36,12 @@ def input_bindings(repository, spec, request, panel_request, *, scope, training_
                    labels_before):
     """Register-side cheap inputs only: hashes and resolved snapshot documents, no reads."""
     validate_panel_request(panel_request)
+    for value in (training_start, labels_before):
+        try:
+            if date.fromisoformat(value).isoformat() != value:
+                raise ValueError
+        except (TypeError, ValueError):
+            raise fail("INVALID_EXPERIMENT_SPEC", "invalid SIZE cutoff date")
     return {
         "spec_hash": spec.spec_hash,
         "request": content_hash(request),
