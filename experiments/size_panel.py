@@ -77,7 +77,7 @@ def materialize(repository, source, **request):
                               history_admitted=_history(repository, source, request), **request)
 
 
-def read(repository, source, feature_snapshot, *, columns=None, **request):
+def read(repository, source, feature_snapshot, *, columns=None, lineage=True, **request):
     """Re-admit exact stored rows; projections cannot relax grouped eligibility."""
     admit_columns(columns)
     _request(source, request)
@@ -85,5 +85,5 @@ def read(repository, source, feature_snapshot, *, columns=None, **request):
     producer = _producer(request)
     history_admitted = _history(repository, source, request)
     _consume_history(history_admitted)
-    return panel._read(repository, source, feature_snapshot, columns=columns,
+    return panel._read(repository, source, feature_snapshot, columns=columns, lineage=lineage,
                        producer=producer, history_admitted=history_admitted, **request)
