@@ -192,6 +192,7 @@ before selected outer refit claims; completed evidence replay never fits.
 `experiments/magnitude_candidate_recipe.py` consumes the closed family recipe
 constructors; `magnitude_candidate_fit.py` checks both legacy/v2 no-fit guards
 before recipe, column or array inspection, then delegates to the public fitter.
+`experiments/distribution_candidate_recipe.py` consumes `magnitude_ridge_hgb_recipe.ridge_hgb_recipe` for its source-free matched-point declaration; it does not fit.
 `serving_fold_preflight.py` consumes the chooser policy/descriptor types
 and `semantic_release_hash`, plus `engine.v2.foundation` typed-document conversion,
 for offline fold metadata; its helper `serving_fold_checks.py` imports
