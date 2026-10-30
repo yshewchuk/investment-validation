@@ -248,23 +248,13 @@ Malformed availability or invalid eligible values refuse
 `EXPERIMENT_VARIANT_FAILED`; repository failures propagate. The date bound is reconstructed source availability, not a claim of
 intraday publication/finality evidence. Pure `panel_math.history_features` owns
 the arithmetic: empty history and undersized EMAs retain `None`, never zero fill.
-Results carry features, `available`/`empty` status, ordered consumed event/object
-identities and availability, omitted-history reasons, snapshot/dataset/month/
-membership-version/cutoff pins and their deterministic history digest.
-The `research_event_history.v2` identity also binds `read_inputs`: every decoded
-candidate object, including skipped/unavailable labels omitted from arithmetic.
-No cache, automatic retry, transaction, write or partial return occurs.
-The reader performs no supervisor dispatch, provider/market-price access or
-publication; `experiments.gate_report` consumes it for fold-local exploratory
-reporting. Production panel reads and final-read authority remain unchanged.
+Results carry features/status, ordered consumed event/object identities and availability, omitted-history reasons, snapshot/dataset/month/membership/cutoff pins and a deterministic digest.
+The `research_event_history.v2` identity also binds every decoded `read_inputs` object, including skipped/unavailable labels omitted from arithmetic.
+No cache, retry, write, transaction, partial return, supervisor dispatch or provider access. `experiments.gate_report` consumes fold-local exploratory reporting; production and final authority are unchanged.
 
-`iv_crush_inputs.load_iv_crush_targets(repository, snapshot, *, as_of_month,
-labels_before, purpose="selection", event_ids=None)` reads signed relative IV30
-change from the exact current `iv_crush_targets` contract, including its definition
-hash (`iv_crush_targets.v2`, semantic version `2.0.0`). `preflight_iv_crush_targets(..., as_of_month, event_ids)` requires explicit
-selection participants (`CONTRACT_MISMATCH` when absent) and returns metadata-only planned-object evidence; it is
-not a capability, and the loader repeats admission. These offline library APIs
-do not publish sources, register experiments or participate in production entrypoints.
+`iv_crush_inputs.load_iv_crush_targets(repository, snapshot, *, as_of_month, labels_before, purpose="selection", event_ids=None)` reads signed relative IV30 change from the exact `iv_crush_targets.v2` contract/hash (semantic version `2.0.0`).
+`preflight_iv_crush_targets(..., as_of_month, event_ids)` requires explicit selection participants (`CONTRACT_MISMATCH` when absent) and returns metadata-only planned-object evidence, not a capability; the loader repeats admission.
+These offline APIs do not publish sources, register experiments or participate in production entrypoints.
 
 | IV-crush boundary | Outcome |
 |---|---|
@@ -276,9 +266,15 @@ do not publish sources, register experiments or participate in production entryp
 | Progress | Admission, planning and read stages report start/end/failure, elapsed time and peak RSS to stderr. Completed-item ticks report count/rate/ETA at most every 30 seconds. Aggregate decisions include bulk/explicit selection, admitted/holdout/ambiguity/cutoff counts and planned batch/byte limits; IV refusals include the native refusal code only, never message text, event identities or error details. Logging cannot change results, identities, errors or read authority. |
 | Effects/failures | No source-quote reads, target rebuilding, retries, persistent cache, writes, partial returns or experiment authority. Earlier admitted objects may decode availability before a late-label refusal. Native repository integrity/resource refusals propagate unchanged. |
 
-This consumer accepts only the exact definition, without grandfathering earlier hashes.
-`event_history.POPULATION_CONTEXT_COLUMNS` names the shared snapshot/holdout context.
-No publisher, source-receipt validation, forecast recipe or model is supplied.
+The reader accepts only the exact definition (no grandfathering), uses `event_history.POPULATION_CONTEXT_COLUMNS`, and supplies no source-receipt validation, forecast recipe or model.
+
+`event_target_store.publish_event_targets` is a shared, source-free publisher of explicit complete earnings metadata rows and a selected ticker/date target set, each with its exact contract.
+It preserves supplied metadata aliases/conflicts and nullable fields; every target must match metadata, but metadata need not have a target. Missing/extra fields, null required values, duplicate/non-string keys, unsupported or structurally invalid native-decoder contracts, or invalid caps refuse `CONTRACT_MISMATCH` before publication.
+Inputs include an asserted native source snapshot, nonempty JSON provenance with recursively string-only keys, explicit positive per-table row/per-object/total-byte caps, and an explicit output Repository. Non-JSON values, non-string keys or cyclic provenance refuse `CONTRACT_MISMATCH` before hashing/writes; native typed-document decoding detaches accepted values. Source/provenance bind the request hash but are not independently authenticated; caller owns admission and output workspace isolation.
+Rows sort deterministically. Caps apply to canonical row bytes and serialized Parquet output; exceeded caps refuse `RESULT_LIMIT_EXCEEDED`. PyArrow/native conversion, inspection and catalog errors propagate; no row repair or dropped fields.
+The standard PyArrow writer emits singleton target objects and partition-local metadata batches capped at 256 rows (or the smaller contract batch limit); native inspection derives bounds, and `partition_logical_hash` spans same-partition fragments. A single native `commit_snapshot` transaction publishes only earnings metadata and the target table in reconstructed knowledge mode.
+Return resolves the committed immutable `SnapshotRef`, including native reconciliation of reused content; exact reordered replay reuses the successful receipt without catalog changes. Different source/provenance/caps bind distinct receipt requests, not necessarily distinct content snapshots.
+Stages emit bounded progress/rate/ETA and RSS. This opt-in primitive has no production caller and is not reachable from a production entrypoint; current callers are synthetic tests. No provider/source reads, target arithmetic, fitting, implicit full-closure copy, holdout policy, cache or retry. Failure may leave unreferenced immutable objects but never a partial committed snapshot.
 
 `magnitude_inputs.forecast_cutoff(event_date, session, horizon, calendar)` is a
 pure contract over native `CalendarSessions`: horizons are five, three or one

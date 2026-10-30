@@ -20,6 +20,12 @@ Replaces (§4.4): `models/training/, rewritten above scoring rather than moved`.
 
 ## Public interface
 
+`regression_candidate.fit_regression_candidate` dispatches the new domain-aware
+Ridge/HGB or ElasticNet recipe to its existing guarded fitter. Both no-fit guards
+precede recipe/array inspection; delegated validation, results and errors remain
+unchanged. No source reads, retries, selection or persistence occur. Existing
+experiment magnitude dispatch remains fixed to nonnegative legacy recipe schemas.
+
 `magnitude.fit_magnitude_predictions` accepts an ops-admitted closed Ridge/HGB
 recipe as data and eleven-column numeric matrices
 (NaN features permitted), nonnegative finite labels and returns detached finite
@@ -146,7 +152,7 @@ both `tools/phase5_prepare_release.py` (which re-exports the names) and
 `tools/phase5_training_job.py`; it imports no `checks` module so the training
 job's worker path can read it.
 
-<!-- public-interface: fit_regression_predictions, fit_ridge_hgb_predictions, fit_elasticnet_predictions, build_d14_dataset, calculate_frame, input_rows, input_frame, decision_rows, daily_features, validate_role, fit_magnitude_predictions, build_payoff_line_artifact, build_payoff_surface_artifact, build_recalibration_map_artifact, fit_recalibration_map, CLOCK_ID, EqualWeightBlend, EstimatorSpec, FoldOutcome, FoldPlan, FoldScheme, LABEL_RECEIPT_V1, LEGACY_SEED, LabelRule, LogTargetModel, MEMBERSHIP_RECEIPT_V1, OWNER_P5_4, OWNER_TRAINING_JOB, PreparedDataset, RECIPE_V1, ReceiptIssue, RecipeDataError, RecipeKey, ResidualRule, RowFilter, SeedMeanEnsemble, TRAINING_JOB_V1, TargetSpec, ThresholdRule, TrainingJobResult, TrainingRecipe, TrainingRefused, UnsupportedEstimator, UpstreamDependency, ValueMask, current_recipes, dataset_fingerprint, fit_recipe_estimator, fold_receipts, plan_folds, prepare_dataset, receipt_issues, recipe_fingerprint, run_training_job, build_driver_residual_pool_artifact, build_paired_residual_pool_artifact, freeze_stored_driver_residual_pool, CHOOSER_POOL_ID, CHOOSER_POOL_MAX_BYTES, require_chooser_pool_columns, read_chooser_pool_frame, fit_regression_elasticnet_predictions -->
+<!-- public-interface: fit_regression_candidate, fit_regression_predictions, fit_ridge_hgb_predictions, fit_elasticnet_predictions, build_d14_dataset, calculate_frame, input_rows, input_frame, decision_rows, daily_features, validate_role, fit_magnitude_predictions, build_payoff_line_artifact, build_payoff_surface_artifact, build_recalibration_map_artifact, fit_recalibration_map, CLOCK_ID, EqualWeightBlend, EstimatorSpec, FoldOutcome, FoldPlan, FoldScheme, LABEL_RECEIPT_V1, LEGACY_SEED, LabelRule, LogTargetModel, MEMBERSHIP_RECEIPT_V1, OWNER_P5_4, OWNER_TRAINING_JOB, PreparedDataset, RECIPE_V1, ReceiptIssue, RecipeDataError, RecipeKey, ResidualRule, RowFilter, SeedMeanEnsemble, TRAINING_JOB_V1, TargetSpec, ThresholdRule, TrainingJobResult, TrainingRecipe, TrainingRefused, UnsupportedEstimator, UpstreamDependency, ValueMask, current_recipes, dataset_fingerprint, fit_recipe_estimator, fold_receipts, plan_folds, prepare_dataset, receipt_issues, recipe_fingerprint, run_training_job, build_driver_residual_pool_artifact, build_paired_residual_pool_artifact, freeze_stored_driver_residual_pool, CHOOSER_POOL_ID, CHOOSER_POOL_MAX_BYTES, require_chooser_pool_columns, read_chooser_pool_frame, fit_regression_elasticnet_predictions -->
 
 ## Consumers
 
