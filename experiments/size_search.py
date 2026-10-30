@@ -96,6 +96,8 @@ def main(argv=None):
     stack = ExitStack()
     try:
         request = _read_document(args.request)
+        if isinstance(request, dict) and request.get("schema_version") == "regression_search_request.v1":
+            raise fail("INVALID_EXPERIMENT_SPEC", "IV requires its dedicated CLI; use the admitted library path")
         panel_request = validate_panel_request(_read_document(args.panel_request)) if fresh else None
         memory = _contain(request)
         stack.enter_context(rss_watchdog(memory))

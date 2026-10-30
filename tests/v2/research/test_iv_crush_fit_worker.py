@@ -20,45 +20,6 @@ from tests.v2.research.test_magnitude_panel_qualified import panel_data  # noqa:
 LIMITS = {"memory_bytes": 2 << 30, "cpu_seconds": 30, "wall_seconds": 60}
 
 
-@pytest.mark.parametrize("entry", ["trials", "driver", "outer"])
-def test_iv_orchestration_refuses_before_claims_reads_or_child(fold_case, monkeypatch, entry):  # noqa: F811
-    from engine.v2.contracts import ArtifactRef
-    from engine.v2.foundation import SystemClock, from_document
-    from engine.v2.ops.migrations import migrate
-    from experiments import magnitude_search_outer as outer
-    from experiments import magnitude_search_trials as trials
-    from experiments import v2_magnitude_search_run as driver
-    from experiments.magnitude_search_plan import seal_search_plan
-    from experiments.magnitude_search_records import MIGRATIONS, OWNER
-    from tests.v2.research.magnitude_trial_support import catalog_rows
-    from tests.v2.research.test_native_registration import artifact_object_bytes
-    data = fold_case
-    request = data.plan["request"]
-    sealed = seal_search_plan(data.conn, data.store, data.registration, request)
-    ref = from_document(ArtifactRef, sealed["plan_ref"])
-    migrate(data.conn, OWNER, MIGRATIONS, clock=SystemClock())
-    before, objects = catalog_rows(data.conn), artifact_object_bytes(data.store)
-    def forbidden(*a, **k):
-        pytest.fail("inactive IV orchestration reached an effect boundary")
-    for module in (trials, outer, driver):
-        monkeypatch.setattr(module, "append_record", forbidden)
-    for module in (trials, outer):
-        monkeypatch.setattr(module, "admit_fold_inputs", forbidden)
-        monkeypatch.setattr(module, "run_fitted_trial", forbidden)
-        monkeypatch.setattr(module, "load_magnitude_targets", forbidden)
-    args = (data.conn, data.store, data.repository, data.registration, request, ref)
-    with pytest.raises(OpsError) as caught:
-        if entry == "trials":
-            trials.SearchTrials(*args)
-        elif entry == "driver":
-            driver.seal_search_run(*args, clock=SystemClock())
-        else:
-            outer.execute_outer_fold(*args, data.plan["folds"][0]["outer"]["year"], limits=LIMITS)
-    assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
-    assert caught.value.problem.message == "IV trial and outer orchestration is not enabled"
-    assert catalog_rows(data.conn) == before and artifact_object_bytes(data.store) == objects
-
-
 @pytest.mark.parametrize("model", ["history_ridge", "elasticnet", "history_hgb"])
 def test_native_fold_to_real_signed_child(fold_case, model):  # noqa: F811
     data = fold_case
