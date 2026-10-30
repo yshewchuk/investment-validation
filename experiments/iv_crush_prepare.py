@@ -73,7 +73,7 @@ def prepare_iv_crush_targets(workspace, *, as_of_month, max_rows, max_decoded_by
         coverage = dict(selected_events=len(targets), available=sum(not r["skipped"] for r in targets),
                         skipped_by_reason=dict(sorted(skipped.items())))
         decision("IV target coverage", f"selected={len(targets)}, available={coverage['available']}, skipped={dict(skipped)}")
-        target_snapshot = publish_event_targets(Repository(workspace.conn, workspace.store),
+        target_snapshot = publish_event_targets(Repository(workspace.conn, workspace.store, pin_snapshots=True),
             source_snapshot=snapshot, provenance=dict(producer="iv_crush_prepare.v1",
                 as_of_month=as_of_month, coverage=coverage), events_contract=event_contract,
             events=metadata, target_contract=IV_CRUSH_CONTRACT, targets=targets,

@@ -99,6 +99,29 @@ def test_amc_bmo_signs_holdout_exclusion_source_unchanged_and_reader_cutoff(tmp_
         assert error.value.code == "CONTRACT_MISMATCH"
 
 
+def test_destination_repository_pins_exact_snapshot_without_changing_publication(tmp_path, monkeypatch):
+    with workspace(tmp_path) as (work, root):
+        before = state(root)
+        with monkeypatch.context() as control:
+            control.setattr(iv_crush_prepare, "Repository",
+                lambda conn, store, **kwargs: Repository(conn, store, pin_snapshots=False))
+            expected = run(work)
+        opened = []
+        def destination(conn, store, **kwargs):
+            assert conn is work.conn and store is work.store
+            repository = Repository(conn, store, **kwargs)
+            opened.append(repository)
+            return repository
+        monkeypatch.setattr(iv_crush_prepare, "Repository", destination)
+        actual = run(work)
+        assert len(opened) == 1 and opened[0].pins_snapshots
+        assert actual == expected
+        assert actual["source_snapshot"] == work.source_snapshot()
+        assert actual["target_snapshot"] != actual["source_snapshot"]
+        assert opened[0].resolve(actual["target_snapshot"].snapshot_id) == actual["target_snapshot"]
+        assert state(root) == before
+
+
 def test_aliases_and_nullable_large_integer_metadata_are_preserved(tmp_path):
     good = history_event("2024-01-04", claim_count=9007199254740993)
     duplicate = history_event("2024-02-06")
