@@ -183,6 +183,30 @@ def test_size_guard_now_precedes_matrix_preparation_and_progress(guard, monkeypa
         legacy(progress=forbidden)
 
 
+@pytest.mark.parametrize("strict", [False, True])
+@pytest.mark.parametrize("candidate", [False, True])
+def test_size_empty_horizons_do_not_require_or_execute_a_recipe(monkeypatch, strict, candidate):
+    def forbidden(*args, **kwargs):
+        pytest.fail("empty horizon plan prepared, fitted or reported progress")
+    monkeypatch.setattr(horizon_fitted, "prepare_horizon_inputs", forbidden)
+    monkeypatch.setattr(horizon_fitted, "fit_execution", forbidden)
+    execution = {"features": []}
+    if candidate:
+        execution["schema_version"] = "size_candidate_execution.v1"
+    diagnostics = []
+    assert magnitude_forecasts({}, pd.DataFrame({"event_id": ["train"], "absolute_move_pct": [2.]}),
+        {"evaluation_event_ids": []}, {"horizons": []}, execution, progress=forbidden,
+        strict_failures=strict, diagnostics=diagnostics) == ({}, [])
+    assert diagnostics == []
+
+
+@pytest.mark.parametrize("guard", [legacy_guard, no_fit])
+def test_size_empty_horizons_still_honor_both_no_fit_guards(guard):
+    with guard.no_fit_guard(), pytest.raises(guard.RuntimeFitForbidden):
+        magnitude_forecasts({}, pd.DataFrame({"event_id": ["train"], "absolute_move_pct": [2.]}),
+            {"evaluation_event_ids": []}, {"horizons": []}, {"features": []})
+
+
 @pytest.mark.parametrize("phase", ["started", "completed"])
 @pytest.mark.parametrize("deferred", [False, True])
 def test_callback_mutation_cannot_change_returned_evidence(phase, deferred):

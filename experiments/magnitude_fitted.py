@@ -12,7 +12,7 @@ def fitted_forecasts(indexed, train, fold, plan, execution, *, progress=None, st
     try:
         return fit_horizons(indexed, train.event_id.tolist(), train.absolute_move_pct.to_numpy(dtype=float),
             fold["evaluation_event_ids"], plan["horizons"], execution["features"], target_column="absolute_move_pct",
-            target_domain="nonnegative", route=route, recipe=execution["fit_recipe"],
+            target_domain="nonnegative", route=route, recipe=execution["fit_recipe"] if plan["horizons"] else None,
             progress=progress, diagnostics=diagnostics)
     except HorizonFitFailure as failure:
         error = failure.__cause__
