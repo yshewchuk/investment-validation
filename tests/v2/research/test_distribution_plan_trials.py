@@ -96,7 +96,10 @@ def context(monkeypatch):
     monkeypatch.setattr(journal, "fold_inputs", fold_inputs)
     monkeypatch.setattr(journal, "publish_inputs", publish)
     monkeypatch.setattr(journal, "load_fit_inputs", load)
-    trials = journal.DistributionTrials(args[0], args[1], object(), *args[2:])
+    def premature_resolve(*args):
+        pytest.fail("repository validation must not read snapshot or outcome data")
+    repository = SimpleNamespace(resolve=premature_resolve)
+    trials = journal.DistributionTrials(args[0], args[1], repository, *args[2:])
     return SimpleNamespace(args=args, trials=trials, events=events, records=records, native=native,
         columns=columns, published=published, inputs=inputs, manifest=manifest, inputs_id=inputs_id)
 
@@ -219,6 +222,21 @@ def test_unsealed_and_changed_seal_refuse_before_claim(context):
     context.records["own", "distribution:seal"]["recipe"]["horizons"] = [1]
     _code("EXPERIMENT_IDENTITY_CONFLICT", lambda: context.trials.start("inner", "2024", "2023"))
     assert not context.published
+
+
+@pytest.mark.parametrize("repository", [None, object(), SimpleNamespace(resolve=None), SimpleNamespace(resolve=1)])
+def test_invalid_repository_refuses_before_claim_and_can_be_corrected(context, repository):
+    context.trials.seal(clock=1)
+    valid = context.trials.repository
+    context.trials.repository = repository
+    error = _code("INVALID_EXPERIMENT_SPEC", lambda: context.trials.start("inner", "2024", "2023"))
+    assert error.problem.retryable is False
+    assert error.problem.message == "distribution admission requires a repository snapshot resolver"
+    assert error.problem.details == {}
+    assert set(context.records) == {("own", "distribution:seal")}
+    assert not context.published and not any(event[0] == "fold_inputs" for event in context.events)
+    context.trials.repository = valid
+    assert context.trials.start("inner", "2024", "2023")["status"] == "admitted"
 
 
 @pytest.mark.parametrize("seam", ["fold_inputs", "publish_inputs", "append_record"])

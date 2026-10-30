@@ -109,6 +109,21 @@ def test_native_training_does_not_open_protected_or_evaluation_outcomes(case, ow
     assert admitted["status"] == "admitted"
 
 
+def test_missing_repository_does_not_consume_native_claim(case, own, monkeypatch):
+    adapter = trials(case, own, repository=None)
+    adapter.seal(clock=SystemClock())
+    before = case.conn.total_changes
+    with monkeypatch.context() as patch:
+        patch.setattr(distribution_trials, "fold_inputs", forbidden)
+        with pytest.raises(OpsError) as caught:
+            adapter.start("inner", "2024", "2023")
+    assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert caught.value.problem.retryable is False
+    assert case.conn.total_changes == before
+    adapter.repository = case.repository
+    assert adapter.start("inner", "2024", "2023")["status"] == "admitted"
+
+
 @pytest.mark.parametrize("seam", ["fold_inputs", "publish_inputs", "append_record"])
 @pytest.mark.parametrize("error", [fail("RESOURCE_UNAVAILABLE", "synthetic native admission interruption"),
     data_fail("INPUT_CHANGED", "synthetic private data detail", details={"secret": "not exposed"})])

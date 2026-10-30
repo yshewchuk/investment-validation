@@ -85,6 +85,8 @@ class DistributionTrials:
         """Claim before native training reads; interrupted claims can never restart."""
         plan, native = self._admit()
         fold, selected = self._select(native, role, outer_year, inner_year)
+        if not callable(getattr(self.repository, "resolve", None)):
+            raise fail("INVALID_EXPERIMENT_SPEC", "distribution admission requires a repository snapshot resolver")
         claim = {"plan_id": plan["plan_id"], **selected}
         key = claim["fold_id"]
         self._append("start:" + key, claim, replay=False)

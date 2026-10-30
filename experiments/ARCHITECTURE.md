@@ -292,7 +292,7 @@ Columns/digests/arrays alone prove no source qualification or fit permission: th
 | Missing quotes or insufficient entry funding | Book: covered-date funded trade with missing `exit_cash` stays reserved, profit unknown through `report_end`, full net profit per opportunity unavailable. Missing selected entry quote or failed funding limit gives a per-event execution refusal, no debit/unresolved funded position. Adapter: unplannable/missing/unpriceable quote gives an absent map entry or None; caller rejoins the original cohort without survivor filtering. Report: missing paired arm/outcome or insufficient clusters yields incomplete/unavailable contrasts or intervals, never zero substitutes. |
 | Adapter native artifact/storage or unexpected malformed-input error | Propagates; no partial publication, source mutation or automatic retry. |
 
-### Distribution declarations (Bundle B prerequisite)
+### Distribution declarations
 
 `distribution_candidate_recipe` declares and validates one raw histogram/matched-point H/HM/HMO recipe, conservative raw-pair fit/tree budget and opaque trial identities; `distribution_class_support` maps explicit observed classes to the unchanged 81-bin numerical histogram without smoothing. Public feature/model recipes, numerical histograms, foundation hashing, native errors and executor-limit validation own their contracts. These source-free declarations grant no admission, fitting, holdout or resource-reservation authority; [full policies and refusals](README.md#distribution-declarations-bundle-b-prerequisite) apply.
 
@@ -302,9 +302,9 @@ Columns/digests/arrays alone prove no source qualification or fit permission: th
 
 | Distribution condition | Outcome |
 | --- | --- |
-| Malformed declarations, recipe/caps or fold selector; insufficient caps; degenerate class support | `INVALID_EXPERIMENT_SPEC`; insufficient caps instead use `RESOURCE_LIMIT_EXCEEDED`, degenerate support `EXPERIMENT_VARIANT_FAILED`, and numerical histogram refusals propagate `CONTRACT_MISMATCH`. Required-argument `TypeError` remains unchanged; no partial execution. |
-| Changed/absent registration, plan, installed identity, seal or receipt; duplicate/interrupted start | Identity mismatch refuses `EXPERIMENT_IDENTITY_CONFLICT` without restart; missing migrations retain `INTEGRITY_FAILED`. |
-| Native/storage failure | Post-claim retryable `OpsError`/`DataError` becomes a fixed-message nonretryable `EXPERIMENT_IDENTITY_CONFLICT`; other errors and preclaim/read-only replay failures propagate unchanged. Claims stay consumed; no whole-operation rollback. |
+| Malformed declarations, recipe/caps/fold selector or missing/noncallable repository snapshot resolver; insufficient caps; registration over 16 MiB; degenerate class support | `INVALID_EXPERIMENT_SPEC` before a claim; insufficient caps or oversized registration instead use `RESOURCE_LIMIT_EXCEEDED`, degenerate support `EXPERIMENT_VARIANT_FAILED`, and numerical histogram refusals propagate `CONTRACT_MISMATCH`. Required-argument `TypeError` remains unchanged; no partial execution. |
+| Verified registration/plan/installed digest differs, seal/receipt mismatch or duplicate/interrupted start | Identity comparison refuses `EXPERIMENT_IDENTITY_CONFLICT` without restart; missing migrations retain `INTEGRITY_FAILED`. Dependency verification failures keep their native errors. |
+| Native/storage or installed-source verification failure | Missing/oversized implementation sources retain preclaim `INPUT_CHANGED`; other preclaim/read-only replay failures propagate unchanged. Post-claim retryable `OpsError`/`DataError` becomes a fixed-message nonretryable `EXPERIMENT_IDENTITY_CONFLICT`; other errors propagate. Claims stay consumed; no whole-operation rollback. |
 
 ## Recorded magnitude-search selection
 
@@ -390,7 +390,7 @@ content-addressed shards, not one record or payload. Population-sized receipt li
 
 * `magnitude_search_inputs.load_inputs(store, record, expected_id)` is the one loader every
   consumer (`_record`, reconcile, freeze, outer replay, `_validation`) reads
-  through; the one exception is the fit child, which calls `load_fit_inputs` (same verification
+  through; the fit child and distribution admission replay call `load_fit_inputs` (same verification
   and reader, projected to the fit rows). A record with the manifest schema is verified against `expected_id`, its sections
   are streamed shard by shard and placed at their dotted paths beside the inline members, which
   are flat scalars keyed by dotted path (`preflight.count`); any other
