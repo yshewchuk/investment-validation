@@ -244,6 +244,13 @@ inference (role `size`; the champion `model_release` is not consulted) and
 `gate.forecast_pool` from the pool. The champion release stays unchanged. The
 ordinary bundle path remains valid when the source is absent.
 
+The native nightly assembler also declares this selected source's same held-out
+pool in the `SourceBundle` returned by `assemble_nightly_source_bundle` as the
+top-level `forecast_pool`, which feeds the sizing
+`forecast_p10`/`forecast_p90`/`forecast_sd` band. This is the selected fold
+already loaded and verified by `select_gate_forecast_source`; production does
+not resolve a second release artifact or select another fold for the band.
+
 | Condition | Outcome |
 | --- | --- |
 | Source plus `gate_recipe.forecast`, or plus a non-empty `gate_forecast_pool` | `ValueError` at bundle build (row refused `NATIVE_INPUT_BUILD_FAILED`); never resolved by precedence |

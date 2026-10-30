@@ -21,7 +21,10 @@ def test_str_thru_selector_receives_binding_event_date_and_as_of(
     binding = _stage_release(tmp_path)
     event = _event_inputs()
     as_of = pd.Timestamp("2026-01-10").to_datetime64()
-    source = SimpleNamespace(binding_id="selected-gate-fold", artifact_hash="fold-hash")
+    source = SimpleNamespace(
+        binding_id="selected-gate-fold", artifact_hash="fold-hash",
+        pool_pred=(0.1, 0.2), pool_res=(0.01, 0.02), interval_floor=0.07,
+    )
     calls = []
     captured = []
 
@@ -45,6 +48,27 @@ def test_str_thru_selector_receives_binding_event_date_and_as_of(
     assert assembled[event.key][1] == "native-inputs"
     assert "fold-hash" in assembled[event.key][0].model_artifact_refs
     assert captured[0].gate_forecast_source is source
+    assert captured[0].forecast_pool == {
+        "predictions": source.pool_pred,
+        "residuals": source.pool_res,
+        "interval_floor": source.interval_floor,
+    }
+
+
+def test_production_sizing_band_uses_selected_verified_fold_pool(tmp_path):
+    binding = _stage_release(tmp_path)
+    event = _event_inputs()
+    selected = native_score_batch.select_gate_forecast_source(
+        binding, event.key.event_date, "2026-01-10")
+
+    assembled, refusals = _assemble(binding, [event])
+
+    assert refusals == ()
+    assert assembled[event.key][1].forecast["forecast_pool"] == {
+        "predictions": selected.pool_pred,
+        "residuals": selected.pool_res,
+        "interval_floor": selected.interval_floor,
+    }
 
 
 def test_missing_event_id_refuses_before_missing_fold(tmp_path):
@@ -170,8 +194,14 @@ def test_only_the_causal_month_with_a_staged_fold_is_assembled(tmp_path):
 def test_gate_source_cache_reuses_only_same_causal_month(tmp_path, monkeypatch):
     binding = _stage_release(tmp_path)
     as_of = pd.Timestamp("2026-03-10")
-    january = SimpleNamespace(binding_id="january-fold", artifact_hash="hash-january")
-    february = SimpleNamespace(binding_id="february-fold", artifact_hash="hash-february")
+    january = SimpleNamespace(
+        binding_id="january-fold", artifact_hash="hash-january",
+        pool_pred=(0.1, 0.2), pool_res=(0.01, 0.02), interval_floor=0.11,
+    )
+    february = SimpleNamespace(
+        binding_id="february-fold", artifact_hash="hash-february",
+        pool_pred=(0.3, 0.4), pool_res=(0.03, 0.04), interval_floor=0.17,
+    )
     calls = []
     captured = []
 
@@ -216,6 +246,14 @@ def test_gate_source_cache_reuses_only_same_causal_month(tmp_path, monkeypatch):
     ]
     assert [bundle.gate_forecast_source for bundle in captured] == [
         january, january, february,
+    ]
+    assert [bundle.forecast_pool for bundle in captured] == [
+        {"predictions": january.pool_pred, "residuals": january.pool_res,
+         "interval_floor": january.interval_floor},
+        {"predictions": january.pool_pred, "residuals": january.pool_res,
+         "interval_floor": january.interval_floor},
+        {"predictions": february.pool_pred, "residuals": february.pool_res,
+         "interval_floor": february.interval_floor},
     ]
     assert "hash-january" in assembled[events[0].key][0].model_artifact_refs
     assert "hash-january" in assembled[events[1].key][0].model_artifact_refs
