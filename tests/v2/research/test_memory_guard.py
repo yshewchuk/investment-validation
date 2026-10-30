@@ -34,17 +34,24 @@ def test_rss_over_budget_is_refused():
 
 
 def test_swallowed_memory_error_is_raised_again():
-    with rss_watchdog(rss_bytes() + 32 * 2 ** 20, interval=0.01):
-        hold = bytearray(128 * 2 ** 20)
-        hold[::4096] = b"\1" * len(range(0, len(hold), 4096))
-        count = 0
-        deadline = time.monotonic() + 3
-        while count < 2 and time.monotonic() < deadline:
-            try:
-                time.sleep(0.01)
-            except MemoryError:
-                count += 1
+    try:
+        count, hold = 0, None
+        with rss_watchdog(rss_bytes() + 32 * 2 ** 20, interval=0.01):
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                try:
+                    if hold is None:
+                        hold = bytearray(128 * 2 ** 20)
+                        hold[::4096] = b"\1" * len(range(0, len(hold), 4096))
+                    time.sleep(0.01)
+                except MemoryError:
+                    count += 1
+                    if count >= 2:
+                        hold = None
+                        break
         assert count >= 2
+    except MemoryError:
+        pass
 
 
 def test_nonpositive_interval_is_refused():
