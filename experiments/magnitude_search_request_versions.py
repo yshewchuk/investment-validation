@@ -14,12 +14,14 @@ _V3_HASH = v3_recipe("HMO")["dictionary_hash"]
 
 
 def compile_request(request):
-    """Preserve v1 replay; adapt only exact full-HMO v2/v3 declaration hashes.
+    """Preserve SIZE v1 replay; regression uses the core qualified-v3 policy.
 
     The surrogate is private validation state, never a source or fit identity.
     Public v1 validation checks caps before expansion. No admission, I/O or fit
     occurs; fixed metadata work is not an input-byte or resource-feasibility cap.
     """
+    if type(request) is dict and request.get("schema_version") == "regression_search_request.v1":
+        return compile_v1_request(request)
     dictionary = request.get("feature_dictionary_hash") if type(request) is dict else None
     selected = v3_recipe if dictionary == _V3_HASH else v2_recipe
     if (type(request) is not dict

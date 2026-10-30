@@ -60,6 +60,8 @@ class SearchTrials:
     """Native inner fits or submitted forecasts; no outer evaluation or final authority."""
 
     def __init__(self, conn, store, repository, registration, request, plan_ref):
+        if getattr(registration, "document", {}).get("schema_version") == "native_experiment_registration.v1.8":
+            raise fail("INVALID_EXPERIMENT_SPEC", "IV trial and outer orchestration is not enabled")
         self.conn, self.store, self.repository = conn, store, repository
         self.registration, self.plan_ref = registration, plan_ref
         self._memo = {}

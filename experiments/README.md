@@ -1,6 +1,6 @@
 # Native experiment interfaces
 
-`iv_crush_search.prepare` / `validate_registration` are registration-only APIs (no CLI/search activation or
+`iv_crush_search.prepare` / `validate_registration` are registration APIs (no CLI/search execution or
 production caller), using shared `native_registration.prepare_regression_registration`.
 It pins committed source, qualified-panel and IV-target snapshots plus explicit
 signed target/clocks; only metadata is read. Both preparation APIs admit specification type/plan fields through the existing resolver before dependent reads; the IV wrapper validates both snapshot-reference shapes before either table-contract lookup. Malformed specs/plans retain `INVALID_EXPERIMENT_SPEC`; malformed references retain native `SNAPSHOT_UNRESOLVED`. The ordinary native reserve/read/verify
@@ -110,9 +110,10 @@ Saved identity and later outcome/worker APIs' separate read policies do not chan
 Its CLI also consumes `native_registration.read_native_registration`/`valid_registration_read_budget`/`MAX_NATIVE_EVIDENCE_BYTES` and `native_gate_worker.read_native_staged_input`; direct engine dependencies are contracts, data, foundation and ops. The [driver section](#serial-magnitude-search-driver) defines the public seal/run helpers and each CLI action's authority.
 
 `magnitude_search_request.compile_request` returns source-free stage-2 request
-specifications and year/count previews for the full-HMO v1 dictionary.
+specifications and year/count previews for SIZE's full-HMO v1 dictionary or regression's qualified v3 dictionary.
 `magnitude_search_request_versions.compile_request` dispatches versioned dictionaries via public validation/panel recipes; the qualified SIZE binding/CLI consume it while legacy previews retain their outputs/refusals.
 It preserves the closed H/HM/HMO 33-candidate grid; compilation alone grants no source or fit authority.
+`regression_search_request.v1` adds a closed qualified-panel request and causal IV incumbent/training-mean comparison counts. Compilation and both plan bindings reuse pure `size_panel_request.validate_panel_request` (also re-exported by `size_search_binding`); malformed panels refuse `INVALID_EXPERIMENT_SPEC` before candidate expansion, without I/O or caller mutation; regression previews also require native price snapshot syntax, matching panel/request feature/history IDs and child memory within the parent cap. `magnitude_search_plan.seal_search_plan` / `read_search_plan` dispatch v1.8 anchors through IV-policy-checking `iv_crush_search.prepare_plan` to shared `regression_search_binding.prepare_plan`. The sealed target-aware nested plan requires the complete installed runner source closure (not worker-only additions), and verifies feature and target identity without reading their payloads; the existing trial/driver/outer execution refuses it with `INVALID_EXPERIMENT_SPEC` before claims or input reads until native activation. Native catalog/artifact and source-fingerprint errors retain their existing policy.
 `magnitude_candidate_recipe` and `magnitude_candidate_fit` are consumed by qualified plan construction and the bounded worker, as well as synthetic tests.
 They reuse public model recipe/fitter APIs; admitted stored inputs and the sealed execution route, not compiler specifications alone, authorize fitting.
 
