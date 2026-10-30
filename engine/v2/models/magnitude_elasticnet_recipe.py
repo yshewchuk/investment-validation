@@ -6,7 +6,8 @@ import re
 
 from engine.v2.foundation import canonical_json
 
-__all__ = ["elasticnet_recipe", "validate_elasticnet_recipe"]
+__all__ = ["elasticnet_recipe", "validate_elasticnet_recipe",
+           "regression_elasticnet_recipe", "validate_regression_elasticnet_recipe"]
 
 
 def elasticnet_recipe(*, columns, feature_dictionary_hash, alpha, l1_ratio) -> dict:
@@ -54,3 +55,29 @@ def validate_elasticnet_recipe(recipe) -> dict:
     except (KeyError, TypeError, ValueError, OverflowError, RecursionError):
         pass
     raise ValueError("invalid closed ElasticNet recipe")
+
+
+def regression_elasticnet_recipe(*, target_domain, columns, feature_dictionary_hash, alpha, l1_ratio):
+    """Bind signed/nonnegative outcomes while retaining the closed estimator policy."""
+    if type(target_domain) is not str or target_domain not in ("signed", "nonnegative"):
+        raise ValueError("regression requires a signed or nonnegative target domain")
+    recipe = elasticnet_recipe(columns=columns, feature_dictionary_hash=feature_dictionary_hash,
+                              alpha=alpha, l1_ratio=l1_ratio)
+    return {**recipe, "schema_version": "regression_elasticnet_recipe.v1",
+        "target_domain": target_domain,
+        "prediction_projection": "none" if target_domain == "signed" else "clip_zero"}
+
+
+def validate_regression_elasticnet_recipe(recipe):
+    """Return detached canonical policy; domain and projection cannot drift apart."""
+    try:
+        json.dumps(recipe, allow_nan=False)
+        params = recipe["estimator"]["params"]
+        expected = regression_elasticnet_recipe(target_domain=recipe["target_domain"],
+            columns=recipe["features"], feature_dictionary_hash=recipe["feature_dictionary_hash"],
+            alpha=params["alpha"], l1_ratio=params["l1_ratio"])
+        if canonical_json(recipe) == canonical_json(expected):
+            return expected
+    except (KeyError, TypeError, ValueError, OverflowError, RecursionError):
+        pass
+    raise ValueError("invalid closed domain-aware ElasticNet recipe")
