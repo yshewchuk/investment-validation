@@ -1,4 +1,5 @@
 """Explicit v2 SIZE source/fold binding; installed panel admission, no hidden builds."""
+import copy
 import json
 import sys
 import time
@@ -7,7 +8,7 @@ from hashlib import sha256
 from pathlib import Path
 
 from engine.v2.contracts import SnapshotRef
-from engine.v2.foundation import artifact_reference, canonical_json, content_hash, from_document
+from engine.v2.foundation import artifact_reference, canonical_json, content_hash, from_document, to_document
 from engine.v2.models.frozen_state_io import BoundedStateReadError, read_bounded_state
 from engine.v2.ops.errors import fail
 from engine.v2.ops.fingerprints import environment_identity, source_closure
@@ -88,6 +89,28 @@ def _read_panel(repository, source, request, *, columns):
     for name in ("history_snapshot", "price_history_snapshot"):
         args[name] = repository.resolve(args[name])
     return read(repository, source, feature, columns=columns, lineage=False, **args)
+
+
+_PANEL_MEMO = {}
+
+
+def _stored_panel(repository, source, binding, columns):
+    """Full admission on a process-fresh key; later calls reuse the memo after a hash check."""
+    validate_panel_request(binding["size_panel_request"])
+    key = (id(repository), content_hash(to_document(source)),
+           content_hash(binding["size_panel_request"]), tuple(columns))
+    entry = _PANEL_MEMO.get(key)
+    if entry is not None and entry["repository"] is repository:
+        panel = entry["panel"]
+        fingerprint = content_hash({"context": panel["context"], "feature_snapshot": panel["feature_snapshot"]})
+        _require(fingerprint == content_hash(binding["size_panel"]))
+    else:
+        panel = _read_panel(repository, source, binding["size_panel_request"], columns=columns)
+        _require({"context": panel["context"], "feature_snapshot": panel["feature_snapshot"]}
+                 == binding["size_panel"])
+        _PANEL_MEMO.clear()
+        _PANEL_MEMO[key] = {"repository": repository, "panel": panel}
+    return copy.deepcopy(panel)
 
 
 def prepare(repository, spec, request, panel_request, *, scope, training_start, labels_before,
@@ -236,8 +259,7 @@ def fold_inputs(repository, binding, fold):
         for group in _folds(binding, binding["size_request"])))
     source = from_document(SnapshotRef, binding["snapshot"])
     started = time.monotonic()
-    panel = _read_panel(repository, source, binding["size_panel_request"], columns=recipe("HMO")["model_columns"])
-    _require({"context": panel["context"], "feature_snapshot": panel["feature_snapshot"]} == binding["size_panel"])
+    panel = _stored_panel(repository, source, binding, recipe("HMO")["model_columns"])
     participants = set(fold["training_candidate_event_ids"] + fold["evaluation_event_ids"])
     events = {e["event_id"]: e for e in panel["context"]["target_events"]}
     _require(participants <= set(events) and all(events[e]["label_end"] < fold["training_labels_before"]
