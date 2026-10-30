@@ -17,7 +17,7 @@ from experiments.magnitude_search_evidence import fit_evidence
 from experiments.magnitude_search_records import append_record, read_record
 from experiments.magnitude_search_shards import iter_section, write_section
 
-__all__ = ["DistributionFits"]
+__all__ = ["DistributionFits", "validate_fit_output", "publish_fit_output"]
 
 
 def _require(condition):
@@ -38,6 +38,27 @@ def _tracked(name, rows, total):
     for row in rows:
         yield row
         progress.tick()
+
+
+def validate_fit_output(recipe, matrices, labels, events, result):
+    """Validate installed numeric output before either caller publishes CAS rows."""
+    _require(result["schema_version"] == "distribution_candidate_fit.v1" and result["recipe_id"] == recipe["recipe_id"])
+    _require(len(result["probabilities"]) == len(result["point_predictions"]) == len(events))
+    rows = [{"event_id": event, "probabilities": masses, "point_prediction": point}
+            for event, masses, point in zip(events, result["probabilities"], result["point_predictions"])]
+    DistributionFits._validate(recipe, matrices, labels, events, rows, result["tail"], result["diagnostics"])
+    return rows
+
+
+def publish_fit_output(store, rows, tail, diagnostics):
+    """Publish bounded result sections only; no admission or journal authority."""
+    with stage("distribution fitted publication"):
+        forecasts = write_section(store, "distribution_fit_forecasts",
+            _tracked("distribution forecast publication", sorted(rows, key=_event), len(rows)), _event)
+        tail = {**tail, "excesses": write_section(store, "distribution_fit_tail",
+            _tracked("distribution tail publication", ({"position": index, "excess": value}
+                for index, value in enumerate(tail["excesses"])), tail["sample_count"]), _position)}
+    return {"forecasts": forecasts, "tail": tail, "diagnostics": diagnostics}
 
 
 class DistributionFits:
@@ -137,19 +158,9 @@ class DistributionFits:
             return self._read(prepared, previous)
         self._record("fit-start:" + key, claim)
         result = fit_candidate(recipe, matrices[0], labels, matrices[1], columns=recipe["point_recipe"]["features"])
-        _require(result["schema_version"] == "distribution_candidate_fit.v1" and result["recipe_id"] == recipe["recipe_id"])
-        _require(len(result["probabilities"]) == len(result["point_predictions"]) == len(events))
-        rows = [{"event_id": event, "probabilities": masses, "point_prediction": point}
-                for event, masses, point in zip(events, result["probabilities"], result["point_predictions"])]
-        self._validate(recipe, matrices, labels, events, rows, result["tail"], result["diagnostics"])
-        with stage("distribution fitted publication"):
-            forecasts = write_section(self.trials.store, "distribution_fit_forecasts",
-                _tracked("distribution forecast publication", sorted(rows, key=_event), len(rows)), _event)
-            tail = {**result["tail"], "excesses": write_section(self.trials.store, "distribution_fit_tail",
-                _tracked("distribution tail publication", ({"position": index, "excess": value}
-                    for index, value in enumerate(result["tail"]["excesses"])), result["tail"]["sample_count"]), _position)}
-        body = {"schema_version": "distribution_fitted.v1", "claim": claim, "forecasts": forecasts, "tail": tail,
-                "diagnostics": result["diagnostics"], "status": "completed", "final_read_authority": "none"}
+        rows = validate_fit_output(recipe, matrices, labels, events, result)
+        output = publish_fit_output(self.trials.store, rows, result["tail"], result["diagnostics"])
+        body = {"schema_version": "distribution_fitted.v1", "claim": claim, **output, "status": "completed", "final_read_authority": "none"}
         record = self._record("fit-result:" + key, {**body, "result_id": content_hash(body)})
         return {"receipt": record, "rows": rows, "tail": result["tail"]}
 

@@ -249,8 +249,8 @@ def test_tiny_real_binary_and_multiclass_pairs(case, monkeypatch, labels, tail, 
     assert case.fits.read("inner", "2024", 1, "2023") == result
 
 
-def test_public_surface_is_one_wrapper():
-    assert fitted.__all__ == ["DistributionFits"]
+def test_public_surface_is_wrapper_validation_and_publication():
+    assert fitted.__all__ == ["DistributionFits", "validate_fit_output", "publish_fit_output"]
 
 
 @pytest.mark.parametrize("value", [True, -1, float("nan"), float("inf"), 10 ** 400])

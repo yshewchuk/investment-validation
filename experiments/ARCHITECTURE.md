@@ -301,7 +301,7 @@ Qualified SIZE plan construction and its bounded worker now consume these helper
 ### Distribution fitting and earlier-OOF controls (Bundle C)
 
 `distribution_candidate_fit` supplies the raw fixed numeric pair; `distribution_fitted.DistributionFits` adds admitted, immutable single-use fit/results; `distribution_oof` builds strictly earlier-inner residual controls from centrally admitted training labels. [The complete contract](STR_THRU_DISTRIBUTION/ARCHITECTURE.md) specifies APIs, dependencies, refusal/replay, tail provenance, resource limits and the explicit distinction between residual controls and calibrated probabilities.
-The B `read_fit_context` seam returns verified plan/fold/admission and projected stored training/features without reopening native outcomes. C is synthetic-tested research code, not a bounded runner or production activation; D owns that boundary.
+The B `read_fit_context` seam returns verified plan/fold/admission and projected stored training/features without reopening native outcomes. C is synthetic-tested research code, not a bounded runner or production activation. D's fixed CAS worker and transport-only publication seam are described in the linked contract; launch/verification and whole-job containment remain separate.
 
 ## Recorded magnitude-search selection
 
