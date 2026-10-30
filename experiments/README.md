@@ -9,6 +9,16 @@ for registration, single-arm evaluation and staged sweep contracts.
 isolated conditional-distribution and net-profit comparison, reusing SIZE's causal
 boundaries. Design only: no registered experiment, runnable recipe or read authority.
 
+## IV-crush preparation
+
+`iv_crush_prepare.prepare_iv_crush_targets` uses a pinned research workspace and
+shared selection controls to reconstruct signed IV30 targets and skip coverage.
+It streams daily rows with one-ticker quote lifetime, preserves full metadata,
+writes only after successful scan exhaustion, and returns separate source
+and target snapshots; no search registration, fitting or provider calls occur.
+This opt-in preparation API has no production caller or CLI wiring; only synthetic
+tests invoke it in this slice. It does not activate an IV search or experiment run.
+
 ## Shared APIs
 
 The owning modules expose these helpers to native experiment callers; no compatibility aliases are provided.
