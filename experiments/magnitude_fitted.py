@@ -1,22 +1,11 @@
 """Assemble sealed per-horizon fit inputs from admitted stored history only."""
 import math
 
-import numpy as np
-
 from engine.models.no_fit import RuntimeFitForbidden as LegacyRuntimeFitForbidden
-from engine.v2.foundation import content_hash
 from engine.v2.models.adapters import RuntimeFitForbidden
 from engine.v2.models.training.magnitude import fit_magnitude_predictions
 from engine.v2.ops.errors import OpsError, fail
-
-
-def _matrix(indexed, event_ids, horizon, columns):
-    """Keep nulls in canonical evidence while exposing float/NaN estimator arrays."""
-    rows = [indexed[event, horizon] for event in event_ids]
-    document = {"columns": columns, "row_keys": [
-        [row[key] for key in ("event_id", "context_id", "horizon_sessions")] for row in rows],
-        "values": [[row[column] for column in columns] for row in rows]}
-    return document, np.asarray(document["values"], dtype=float)
+from engine.v2.research.horizon_fit_inputs import prepare_horizon_inputs
 
 
 def fitted_forecasts(indexed, train, fold, plan, execution, *, progress=None, strict_failures=False, diagnostics=None):
@@ -25,13 +14,8 @@ def fitted_forecasts(indexed, train, fold, plan, execution, *, progress=None, st
     train_ids, test_ids = train.event_id.tolist(), fold["evaluation_event_ids"]
     labels = train.absolute_move_pct.to_numpy(dtype=float)
     for horizon in plan["horizons"]:
-        training, matrix = _matrix(indexed, train_ids, horizon, execution["features"])
-        prediction, test_matrix = _matrix(indexed, test_ids, horizon, execution["features"])
-        training["absolute_move_pct"] = labels.tolist()
-        # Hash original ordered values before an estimator can mutate its input buffers.
-        fit = {"horizon_sessions": horizon, "training_event_ids": list(train_ids),
-            "evaluation_event_ids": list(test_ids), "training_matrix_id": content_hash(training),
-            "prediction_matrix_id": content_hash(prediction)}
+        matrix, test_matrix, fit = prepare_horizon_inputs(indexed, train_ids, test_ids,
+            horizon, execution["features"], labels, target_column="absolute_move_pct")
         if progress is not None:
             progress("started", fit)
         try:

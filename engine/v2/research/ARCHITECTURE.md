@@ -217,13 +217,12 @@ model fitting, or report/ledger publication, and has no supervisor caller.
 These readers preserve no economic variant identity and cannot authorize the
 separate user-only final holdout read.
 
-`event_history.load_event_history(repository, snapshot, *, event_id, as_of_month,
-decision_session, history_start, purpose="selection")` constructs prior-event
-features for one admitted canonical target. Both dates are explicit calendar
-days with `history_start <= decision_session <= target event day`. Shared
-`load_population` admits the target and excludes random, rolling and ambiguous
-history identities before any outcome access. Candidates are the same ticker's
-events in `[history_start, min(target day, decision_session))`.
+`horizon_fit_inputs.prepare_horizon_inputs` assembles ordered selected-column training/prediction float arrays and freezes original null-preserving input hashes under an explicit training-target column; reserved matrix keys refuse ValueError before event-ID/column iterables are materialized once for reuse.
+It reads no evaluation targets, preserves signed labels without a floor and returns detached arrays/evidence. Caller owns target/domain validation, source/membership admission and fitting; no I/O, cache, guards, policy inference or production entrypoint. Its current caller is offline `experiments.magnitude_fitted`, preserving legacy magnitude evidence bytes.
+`event_history.load_event_history(repository, snapshot, *, event_id, as_of_month, decision_session, history_start, purpose="selection")` constructs prior-event features for one admitted canonical target.
+Both dates are explicit calendar days with `history_start <= decision_session <= target event day`.
+Shared `load_population` admits the target and excludes random, rolling and ambiguous history identities before any outcome access.
+Candidates are the same ticker's events in `[history_start, min(target day, decision_session))`.
 
 Every candidate query is planned before any outcome scan, using the same
 fragment planner as Repository. Preflight indexes fragment metadata once by
