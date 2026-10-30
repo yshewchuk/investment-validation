@@ -86,7 +86,7 @@ def _read_panel(repository, source, request, *, columns):
     feature = repository.resolve(args.pop("feature_snapshot_id"))
     for name in ("history_snapshot", "price_history_snapshot"):
         args[name] = repository.resolve(args[name])
-    return read(repository, source, feature, columns=columns, **args)
+    return read(repository, source, feature, columns=columns, lineage=False, **args)
 
 
 def prepare(repository, spec, request, panel_request, *, scope, training_start, labels_before,
