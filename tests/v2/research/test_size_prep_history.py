@@ -44,7 +44,7 @@ def _fake(monkeypatch):
 def _args(clock, **over):
     kwargs = dict(event_ids=["event-b", "event-a"], as_of_month="2024-01",
                   history_start="2020-01-01", source_start="2021-01-01",
-                  metadata_limits={k: 1 for k in hist.size_panel._METADATA_LIMITS}, clock=clock)
+                  metadata_limits={k: 10**6 for k in hist.size_panel._METADATA_LIMITS}, clock=clock)
     kwargs.update(over)
     return kwargs
 
@@ -75,7 +75,7 @@ def _expected_limits(ws, snapshot_id, tables, event_count, margin):
         "WHERE t.snapshot_id = ? AND t.table_name IN (" + placeholders + ")",
         (snapshot_id, *tables)).fetchone()
     limits = {"max_source_rows": row["rows"] * margin, "max_fragments": row["frags"] * margin,
-              "max_object_bytes": row["biggest"] * margin, "max_total_bytes": row["total"] * margin,
+              "max_object_bytes": row["biggest"] * margin * hist.EXPANSION_FACTOR, "max_total_bytes": row["total"] * margin,
               "max_output_rows": event_count * 3 * margin}
     assert sum(limits.values()) > 0
     return limits
@@ -100,7 +100,7 @@ def test_happy_path_binds_history_panel_limits_and_read_pin(bounds_ws, source_ro
     assert panel["history_snapshot"].snapshot_id == "snap_hist"
     assert panel["price_history_snapshot"].snapshot_id == record["bounds_snapshot_id"]
     assert panel["source_start"] == "2021-01-01" and panel["metadata_limits"] == {
-        k: 1 for k in hist.size_panel._METADATA_LIMITS}
+        k: 10**6 for k in hist.size_panel._METADATA_LIMITS}
     expected = _expected_limits(ws, snapshot.snapshot_id, hist.HISTORY_TABLES, len(ids), 2)
     assert panel["limits"] == expected
     name = "size-prep-panel:" + doc["panel_id"].split(":", 1)[1]
@@ -185,6 +185,21 @@ def test_moved_head_is_refused(bounds_ws, source_root, monkeypatch):
                         "WHERE scope = 'shadow'", (ws.snapshot_id,))
     _refusal(lambda: hist.prepare_workspace_panel(ws, "shadow", record, **_args(clock)),
              "WORKSPACE_REFUSED", "head_not_bounds")
+    assert calls["history"] == []
+
+
+def test_catalog_over_the_metadata_limits_is_refused_before_resolve(bounds_ws, source_root, monkeypatch):
+    ws, clock, record, _, snapshot = _repo_record(bounds_ws, source_root)
+    calls = _fake(monkeypatch)
+    monkeypatch.setattr(hist, "HISTORY_TABLES",
+                        tuple(t for t in hist.HISTORY_TABLES if t in snapshot.table_versions))
+    limits = {**{k: 1 for k in hist.size_panel._METADATA_LIMITS},
+              "max_catalog_fragments": 1, "max_catalog_tables": 1}
+    with pytest.raises((OpsError, data_errors.DataError)) as raised:
+        hist.prepare_workspace_panel(ws, "shadow", record,
+                                     **_args(clock, metadata_limits=limits))
+    assert raised.value.code == "RESOURCE_LIMIT_EXCEEDED"
+    assert raised.value.problem.details["reason"] == "catalog_over_limit"
     assert calls["history"] == []
 
 

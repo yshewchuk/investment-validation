@@ -12,6 +12,8 @@ from experiments.size_prep_inputs import PROVENANCE_VERSION, _log, _read_regular
 
 HISTORY_TABLES = ("earnings_events", "daily_market", "computed_moves", "computed_move_bounds", "price_history")
 PANEL_VERSION = "size_prep_panel.v1"
+# uncompressed/compressed allowance; the native reader bounds uncompressed row-group bytes by max_object_bytes
+EXPANSION_FACTOR = 16
 
 
 def _limits_refusal(table=None):
@@ -34,7 +36,7 @@ def derive_history_limits(repository, snapshot, event_count, *, margin=2):
         total_bytes += sum(record.object_ref.byte_size for record in records)
         biggest = max([biggest] + [record.object_ref.byte_size for record in records])
     limits = {"max_source_rows": rows * margin, "max_fragments": fragments * margin,
-              "max_object_bytes": biggest * margin, "max_total_bytes": total_bytes * margin,
+              "max_object_bytes": biggest * margin * EXPANSION_FACTOR, "max_total_bytes": total_bytes * margin,
               "max_output_rows": event_count * 3 * margin}
     if any(value <= 0 for value in limits.values()):
         raise _limits_refusal()
@@ -84,6 +86,18 @@ def prepare_workspace_panel(workspace, scope, record, *, event_ids, as_of_month,
     if row is None or row["snapshot_id"] != record["bounds_snapshot_id"]:
         raise fail("WORKSPACE_REFUSED", "the scope head is not the bounds snapshot",
                    details={"reason": "head_not_bounds", "scope": scope})
+    sid = record["bounds_snapshot_id"]
+    tables = workspace.conn.execute(
+        "SELECT COUNT(*) FROM data_snapshot_tables WHERE snapshot_id = ?", (sid,)).fetchone()[0]
+    fragments = workspace.conn.execute(
+        "SELECT COUNT(*) FROM data_snapshot_tables t "
+        "JOIN data_version_fragments v ON v.dataset_version_id = t.dataset_version_id "
+        "WHERE t.snapshot_id = ?", (sid,)).fetchone()[0]
+    if (tables > metadata_limits["max_catalog_tables"]
+            or fragments > metadata_limits["max_catalog_fragments"]):
+        raise fail("RESOURCE_LIMIT_EXCEEDED",
+                   "bounds snapshot catalog exceeds the metadata limits",
+                   details={"reason": "catalog_over_limit", "tables": tables, "fragments": fragments})
     started = time.monotonic()
     repository = Repository(workspace.conn, workspace.store, pin_snapshots=True)
     bounds = repository.resolve(record["bounds_snapshot_id"])
