@@ -252,7 +252,7 @@ submission path reads either edge (the rule Part 4 established for
   calling the SAME `compare_native_vs_legacy` (unchanged) and the new
   `apply_native_refusals` (below) — see "Outputs" for what it writes.
   This is the only production producer of `native_parity_report.json`; the one other producer of this format is the operator exporter `tools/captured_native_comparison.py`.
-- **`financial_diagnostics` view of a legacy row (#681).** Legacy score rows never carry `entry_cost_pct`; `_dimension_view` derives it as `entry_cost / spot * 100` (`None`, never an exception, when either is absent, non-numeric, non-finite or too large for `float()` (`OverflowError`, e.g. an integer beyond ~1e308), or `spot` is 0; the comparator reports `None` as a mismatch only when the other side has a value, and `None` against `None` agrees; `checks/phase4_real._expected_financial_diagnostics` arithmetic). A row that already carries the key keeps its value.
+- **`financial_diagnostics` view of a legacy row.** `_dimension_view` fills missing fields using `engine.v2.parity.financial_diagnostics.expected_financial_diagnostics`, the same oracle used by `checks/phase4_real`; missing, invalid, non-finite, out-of-domain or zero-denominator inputs yield `None` for the affected diagnostic. Explicit legacy values are preserved; native rows are never derived here.
 - **`native_parity_report._empty_native_report(legacy_rows, native_rows,
   dimensions, tolerance_policy) -> dict`** (new, private) — closes a real
   gap in `compare_native_vs_legacy`: its unchanged guards reject an empty

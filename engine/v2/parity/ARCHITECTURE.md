@@ -54,6 +54,12 @@ from `engine/v2/diagnosis`) — this doc does not repeat it.
   (`simulation`, `verdicts`, `analogs`) the "a stage that never ran is
   agreement, not a numeric finding" rule (user decision, 2026-09-23)
   applies to.
+- `expected_financial_diagnostics(record)` and `legacy_fair_premium(record)`
+  (`financial_diagnostics.py`) — the shared legacy financial oracle used by
+  the Phase 4 checker and native parity report to derive comparable values
+  from source fields, without importing native scoring code. Missing,
+  nonnumeric, non-finite, invalid-domain and zero-denominator inputs yield
+  `None` for the affected diagnostic.
 - `Tolerance(absolute=0.0, relative=0.0, reason="exact")`,
   `TolerancePolicy(policy_id, rules=())`, `EXACT`, `SCORE_RECORD_V1`
   (`tolerance.py`) — see "Cutover PR-4" below for what these are and the

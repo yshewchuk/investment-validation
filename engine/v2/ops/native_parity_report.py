@@ -33,7 +33,6 @@ exactly the DAG-shape drift ``nightly.GRAPH`` exists to avoid).
 from __future__ import annotations
 
 import json
-import math
 from collections.abc import Callable, Mapping
 from datetime import date, datetime
 from pathlib import Path
@@ -53,6 +52,7 @@ from engine.v2.parity.dimensions import (
     SIMULATION_FIELDS,
     compare_dimension,
 )
+from engine.v2.parity.financial_diagnostics import expected_financial_diagnostics
 from engine.v2.parity.tolerance import SCORE_RECORD_V1, TolerancePolicy
 
 __all__ = [
@@ -113,36 +113,21 @@ def _dimension_fields(dimension: str) -> tuple[str, ...]:
     return fields
 
 
-def _entry_cost_pct(row: Mapping[str, Any]) -> float | None:
-    """``entry_cost / spot * 100`` (checks/phase4_real._expected_financial_diagnostics).
-
-    Both operands are converted and validated first; a missing, non-numeric or
-    non-finite operand, or a ``spot`` that is zero after conversion, gives ``None``:
-    an unavailable value, never an exception. The comparator reports it as a
-    mismatch only when the other side has a value; ``None`` against ``None`` agrees.
-    """
-    try:
-        cost = float(row.get("entry_cost"))
-        spot = float(row.get("spot"))
-    except (TypeError, ValueError, OverflowError):
-        return None
-    if spot == 0.0 or not math.isfinite(cost) or not math.isfinite(spot):
-        return None
-    value = cost / spot * 100.0
-    return value if math.isfinite(value) else None
-
-
 def _dimension_view(row: Mapping[str, Any], dimension: str, *,
                     legacy: bool = False) -> dict[str, Any]:
     """One row's values for one dimension, read by the checker's field names.
 
-    Legacy score rows never carry ``entry_cost_pct`` (#681), so a LEGACY row
-    without the key has it derived from its own ``entry_cost`` and ``spot``. A
-    native row is never derived for: a missing native value stays missing.
+    Legacy diagnostic values absent from the row are derived by the shared
+    Phase 4 financial-diagnostics oracle; explicitly supplied legacy values are
+    preserved; native values are never derived.
     """
     view = {name: row.get(name) for name in _dimension_fields(dimension)}
-    if legacy and "entry_cost_pct" in view and "entry_cost_pct" not in row:
-        view["entry_cost_pct"] = _entry_cost_pct(row)
+    if (legacy and dimension == "financial_diagnostics"
+            and any(name not in row for name in view)):
+        expected = expected_financial_diagnostics(row)
+        for name, value in expected.items():
+            if name not in row:
+                view[name] = value
     return view
 
 
