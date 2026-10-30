@@ -66,16 +66,15 @@ release that fails its contract, which includes an older schema, in addition to 
 native-parity freshness read of such a row (freshness outcomes are in the root `ARCHITECTURE.md` native-parity section). `build_candidate`
 refuses invalid `row_sources` with `ValueError` before any write (internal callers only).
 The projection tool exposes `run_projection(...)`; the CLI is a thin wrapper over it.
-Native shadow rows include non-null `forecast_p10`, `forecast_p90` and
-`forecast_sd` values from the score's uncertainty record; unavailable values
-are omitted. The legacy driver bands `driver_p10` and `driver_p90` remain
-unavailable and are omitted.
 
 | Tool condition (before any index write) | Outcome |
 |---|---|
 | Native plan without native inputs | `INVALID_REQUEST` |
 | Plan over 1 MiB, unreadable, invalid JSON, or not a JSON object | `INVALID_REQUEST` |
 | `bundle_format` not `flat`/`legacy`, or an input artifact over the 64 MiB read cap | `INVALID_REQUEST`; a legacy-bundle member over the cap is a `LegacyBundleError` from the loader |
+| Native shadow score has a non-null forecast uncertainty value | The corresponding `forecast_p10`, `forecast_p90`, or `forecast_sd` is included in the display row |
+| A forecast uncertainty value is unavailable | Its display-row field is omitted |
+| Native score has a non-null legacy driver band (`driver_p10` or `driver_p90`) | Rendering refuses the unsupported computed field with `ValueError` |
 
 The plan is read once, and that one parse picks both the rows and `row_sources`. On any of
 these the release and the serving pointer are unchanged.

@@ -237,8 +237,10 @@ pool supplies residual uncertainty for the STR-THRU forecast band. The fold's
 `forecast_p10`/`forecast_p90`/`forecast_sd` around the champion's
 `driver_prediction`, not to create a top-level sizing forecast or change the
 selected structure. Both execute in the existing scoring stages, never in the
-raw-row producer. No legacy parity counterpart is claimed for this native
-STR-THRU uncertainty band. Outcomes are in the table below. RUNUP is unchanged.
+raw-row producer. The legacy scorer has corresponding `forecast_p10`,
+`forecast_p90`, and `forecast_sd` fields; this native STR-THRU uncertainty rule
+does not assume parity-identical values. Outcomes are in the table below.
+RUNUP is unchanged.
 
 `SourceBundle.gate_forecast_source` (optional `GateForecastSource`) carries the
 selected fold's `binding_id` and verified estimator `artifact_hash`, its fold-view `ModelRelease`, the shared
@@ -248,16 +250,14 @@ inference (role `size`; the champion `model_release` is not consulted) and
 `gate.forecast_pool` from the pool. The champion release stays unchanged. The
 ordinary bundle path remains valid when the source is absent.
 
-During nightly input assembly, `native_score_batch._bundle_or_refusal`
-declares the selected source's held-out pool as `SourceBundle.forecast_pool`.
-For STR-THRU, `_execute_forecast_band` uses the champion's `driver_prediction`
-as the interval location when `forecast_abs_move` is absent, and this pool for
-the `forecast_p10`/`forecast_p90`/`forecast_sd` residual interval. It publishes
-only those uncertainty fields: the separate fold's `pred_abs_move` remains
-gate-only and does not create a top-level sizing forecast or alter structure
-selection. The pool is from the fold already loaded and verified by
-`select_gate_forecast_source`; production does not resolve another release
-artifact or select another fold for the band.
+The production STR-THRU path reuses the selected verified size fold's held-out
+pool as `forecast_pool`. When `forecast_abs_move` is absent, the champion's
+`driver_prediction` locates the `forecast_p10`/`forecast_p90`/`forecast_sd`
+uncertainty interval. The band emits only those uncertainty fields; the fold's
+`pred_abs_move` remains gate-only and does not create a sizing forecast or
+change structure selection. A missing or non-finite location, absent pool, or
+thin pool leaves the uncertainty fields unavailable. The band uses the same
+selected fold; it does not cause another release lookup or fold selection.
 
 | Condition | Outcome |
 | --- | --- |

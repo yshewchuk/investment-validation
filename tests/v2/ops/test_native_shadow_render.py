@@ -246,6 +246,33 @@ def test_computed_forecast_band_is_preserved_in_native_display_row():
     assert row["forecast_sd"] == 0.2075893381976376
 
 
+def test_unavailable_forecast_bands_are_omitted_from_native_display_row():
+    request, inputs = next(iter(_pairs().values()))
+    record = score_one(request, inputs)
+    uncertainty = dict(record.uncertainty)
+    uncertainty.update({
+        "forecast_p10": None,
+        "forecast_p90": None,
+        "forecast_sd": None,
+    })
+    record = replace(record, uncertainty=uncertainty)
+
+    row = native_display_row(record)
+
+    assert not {"forecast_p10", "forecast_p90", "forecast_sd"} & row.keys()
+
+
+def test_computed_legacy_driver_band_is_refused_by_native_display_row():
+    request, inputs = next(iter(_pairs().values()))
+    record = score_one(request, inputs)
+    uncertainty = dict(record.uncertainty)
+    uncertainty["driver_p10"] = 0.1
+    record = replace(record, uncertainty=uncertainty)
+
+    with pytest.raises(ValueError, match="unsupported driver band"):
+        native_display_row(record)
+
+
 def test_the_nightly_plan_records_the_shadow_serving_scorer():
     """G5: the switch is a recorded plan field, not an env var or CLI flag."""
     repo = str(Path(__file__).resolve().parents[3])
