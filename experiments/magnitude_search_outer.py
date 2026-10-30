@@ -1,4 +1,6 @@
 """Bounded selected-candidate outer fits; immutable evidence, no final authority."""
+import sys
+import time
 from pathlib import Path
 
 from engine.models.no_fit import forbid_fitting as forbid_legacy_fitting
@@ -42,6 +44,8 @@ def _equal(left, right):
 
 def _native_selection(trials, plan, read):
     """Presence checks make public execution calls strictly completed replays."""
+    print("[stage] native_selection start", file=sys.stderr)
+    started = time.monotonic()
     selection = read("selection")
     if selection is None:
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "outer evaluation requires an existing frozen selection")
@@ -63,6 +67,7 @@ def _native_selection(trials, plan, read):
     _equal(trials.freeze(), selection)
     for args, limits in attempts:
         trials.execute(*args, limits=limits)
+    print(f"[stage] native_selection done in {time.monotonic() - started:.1f}s", file=sys.stderr)
     return selection
 
 
