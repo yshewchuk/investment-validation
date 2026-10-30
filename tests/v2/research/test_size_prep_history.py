@@ -135,6 +135,25 @@ def test_happy_path_binds_history_panel_limits_and_read_pin(bounds_ws, source_ro
     assert pin["record_id"] == record["record_id"]
 
 
+def test_per_table_fragment_cap_applies_to_every_history_table(bounds_ws, source_root, monkeypatch):
+    ws, clock, record, _, snapshot = _repo_record(bounds_ws, source_root)
+    calls = _fake(monkeypatch)
+    present = tuple(t for t in hist.HISTORY_TABLES if t in snapshot.table_versions)
+    assert len(present) >= 2
+    monkeypatch.setattr(hist, "HISTORY_TABLES", present)
+    real_probe = hist.probe_catalog
+    recorded = []
+
+    def recording_probe(conn, snapshot_id, table, limits):
+        recorded.append(table)
+        return real_probe(conn, snapshot_id, table, limits)
+
+    monkeypatch.setattr(hist, "probe_catalog", recording_probe)
+    hist.prepare_workspace_panel(ws, "shadow", record, **_args(clock))
+    assert recorded == list(present)
+    assert len(calls["history"]) == 1
+
+
 def test_limits_scale_with_margin_and_event_count(bounds_ws, source_root, monkeypatch):
     ws, _, _, repository, snapshot = _repo_record(bounds_ws, source_root)
     present = tuple(t for t in hist.HISTORY_TABLES if t in snapshot.table_versions)

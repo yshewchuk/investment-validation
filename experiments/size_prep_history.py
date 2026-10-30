@@ -92,7 +92,8 @@ def prepare_workspace_panel(workspace, scope, record, *, event_ids, as_of_month,
         "max_catalog_tables", "max_catalog_fragments", "max_catalog_bytes", "max_fragments", "max_partitions")}
     workspace.conn.execute("BEGIN")
     try:
-        probe_catalog(workspace.conn, record["bounds_snapshot_id"], HISTORY_TABLES[0], probe_limits)
+        for table in HISTORY_TABLES:
+            probe_catalog(workspace.conn, record["bounds_snapshot_id"], table, probe_limits)
     finally:
         if workspace.conn.in_transaction:
             workspace.conn.rollback()
