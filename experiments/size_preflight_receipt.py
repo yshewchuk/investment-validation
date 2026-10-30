@@ -6,6 +6,7 @@ import json
 from datetime import date
 
 from engine.v2.contracts import ArtifactRef
+from engine.v2.data.errors import DataError
 from engine.v2.foundation import (
     ArtifactError,
     DocumentError,
@@ -44,9 +45,13 @@ def input_bindings(repository, spec, request, panel_request, *, scope, training_
                 raise ValueError
         except (TypeError, ValueError):
             raise fail("INVALID_EXPERIMENT_SPEC", "invalid SIZE cutoff date")
-    if not isinstance(scope, str) or not scope.strip():
+    try:
+        if not isinstance(scope, str) or not scope.strip():
+            raise ValueError
+        scope_snapshot = repository.resolve_pinned(scope)
+    except (DataError, ValueError, TypeError, KeyError):
         raise fail("SNAPSHOT_UNRESOLVED",
-                   "native registration requires a current committed snapshot")
+                   "native registration requires a current committed snapshot") from None
     return {
         "spec_hash": spec.spec_hash,
         "request": content_hash(request),
@@ -55,7 +60,7 @@ def input_bindings(repository, spec, request, panel_request, *, scope, training_
         "scope": scope,
         "training_start": training_start,
         "labels_before": labels_before,
-        "scope_snapshot": to_document(repository.resolve_pinned(scope)),
+        "scope_snapshot": to_document(scope_snapshot),
         "snapshots": {name: to_document(repository.resolve(panel_request[name]))
                       for name in ("feature_snapshot_id", "history_snapshot",
                                    "price_history_snapshot")},

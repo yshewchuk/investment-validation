@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from engine.v2.contracts import ArtifactRef
+from engine.v2.data.errors import fail as data_fail
 from engine.v2.foundation import canonical_json, from_document, to_document
 from engine.v2.ops.errors import OpsError, fail
 from experiments import eligible_history, size_panel, size_preflight_receipt
@@ -392,4 +393,14 @@ def test_input_bindings_blank_scope_matches_prepare(case, bad):
     with pytest.raises(OpsError) as caught:
         input_bindings(case.repository, case.spec, case.request, case.panel_request,
                        **{**case.args, "scope": bad})
+    assert caught.value.code == "SNAPSHOT_UNRESOLVED"
+
+
+def test_input_bindings_unresolvable_scope_is_snapshot_unresolved(case, monkeypatch):
+    def unresolvable(*args, **kwargs):
+        raise data_fail("SNAPSHOT_NOT_READY", "no head")
+
+    monkeypatch.setattr(type(case.repository), "resolve_pinned", unresolvable)
+    with pytest.raises(OpsError) as caught:
+        bindings_for(case)
     assert caught.value.code == "SNAPSHOT_UNRESOLVED"
