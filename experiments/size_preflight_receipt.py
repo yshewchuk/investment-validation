@@ -13,7 +13,7 @@ from engine.v2.foundation import (
     from_document,
     to_document,
 )
-from engine.v2.ops.errors import OpsError, fail
+from engine.v2.ops.errors import fail
 from engine.v2.ops.experiments import resolve_experiment_plan
 from experiments.native_registration import (
     MAX_NATIVE_EVIDENCE_BYTES,
@@ -115,13 +115,23 @@ def admit(store, ref, bindings, spec):
                        "SIZE preflight receipt payload failed verification",
                        details={"reason": "receipt_corrupt"}) from None
         raise
-    except (DocumentError, ValueError, KeyError, TypeError, OpsError):
+    except (DocumentError, ValueError, KeyError, TypeError):
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "SIZE preflight receipt payload is invalid",
                    details={"reason": "receipt_corrupt"}) from None
     prepared = dataclasses.replace(spec, economic_params=plan.as_document()["economic_params"],
                                    input_files=())
     document = registration.document
-    if (document["spec_hash"] != prepared.spec_hash
+    try:
+        panel_request = document["size_panel_request"]
+        snapshots = bindings["snapshots"]
+        bound = content_hash(panel_request) == bindings["panel_request"] and all(
+            panel_request[name] == snapshots[name]["snapshot_id"]
+            for name in ("feature_snapshot_id", "history_snapshot",
+                         "price_history_snapshot"))
+    except (KeyError, TypeError):
+        bound = False
+    if (not bound
+            or document["spec_hash"] != prepared.spec_hash
             or document["snapshot"] != bindings["scope_snapshot"]
             or document["schema_version"] != "native_experiment_registration.v1.7"):
         raise fail("EXPERIMENT_IDENTITY_CONFLICT",

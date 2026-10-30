@@ -8,7 +8,7 @@ import pytest
 
 from engine.v2.contracts import ArtifactRef
 from engine.v2.foundation import canonical_json, from_document, to_document
-from engine.v2.ops.errors import OpsError
+from engine.v2.ops.errors import OpsError, fail
 from experiments import eligible_history, size_panel, size_preflight_receipt
 from experiments import size_search_binding as binding
 from experiments.native_registration import MAX_NATIVE_EVIDENCE_BYTES
@@ -161,6 +161,37 @@ def test_corrupt_receipt_refuses(case, kind):
         ref = case.store.publish_bytes(canonical_json(receipt).encode("utf-8"), schema_ref=SCHEMA)
     with pytest.raises(OpsError) as caught:
         admit(case.store, ref, bindings, case.spec)
+    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert caught.value.problem.details == {"reason": "receipt_corrupt"}
+
+
+@pytest.mark.parametrize("code", ["RESOURCE_LIMIT_EXCEEDED", "RESOURCE_UNAVAILABLE",
+                                  "EXPERIMENT_IDENTITY_CONFLICT"])
+def test_hydration_refusals_keep_their_codes(case, monkeypatch, code):
+    bindings = bindings_for(case)
+    ref = issue(case.store, bindings, case.registration)
+
+    def refuse(*args, **kwargs):
+        raise fail(code, "x")
+
+    monkeypatch.setattr(size_preflight_receipt, "load_registration_document", refuse)
+    with pytest.raises(OpsError) as caught:
+        admit(case.store, ref, bindings, case.spec)
+    assert caught.value.code == code
+    assert caught.value.problem.details.get("reason") != "receipt_corrupt"
+
+
+@pytest.mark.parametrize("change", ["panel_request", "feature_snapshot_id"])
+def test_payload_panel_not_bound_to_receipt_refuses(case, change):
+    bindings = bindings_for(case)
+    changed = deepcopy(bindings)
+    if change == "panel_request":
+        changed["panel_request"] = "sha256:" + "1" * 64
+    else:
+        changed["snapshots"]["feature_snapshot_id"]["snapshot_id"] = "sha256:" + "1" * 64
+    ref = issue(case.store, changed, case.registration)
+    with pytest.raises(OpsError) as caught:
+        admit(case.store, ref, changed, case.spec)
     assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
     assert caught.value.problem.details == {"reason": "receipt_corrupt"}
 
