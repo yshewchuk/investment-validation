@@ -121,7 +121,7 @@ def test_cli_run_after_deadline_collects_only_complete_replay(state, monkeypatch
     monkeypatch.setattr(cli, "read_native_registration", lambda *a: state.registration)
     monkeypatch.setattr(cli, "from_document", lambda *a: None)
     monkeypatch.setattr(cli, "_read_document", lambda *a: state.plan["request"])
-    monkeypatch.setattr(cli, "_contain", lambda *a: None)
+    monkeypatch.setattr(cli, "_contain", lambda *a: 2 ** 33)
     monkeypatch.setattr(cli.signal, "alarm", lambda *a: 0)  # main finally always cancels its alarm
     status = cli.main(["run", "--spec", "spec", "--request", "request", "--catalog", "catalog",
         "--store-root", str(tmp_path), "--plan-ref", "plan", "--no-ledger"])
