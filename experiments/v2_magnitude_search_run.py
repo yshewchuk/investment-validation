@@ -193,6 +193,8 @@ def main(argv=None):
                 spec = experiment_spec_from_document(_read_document(args.spec))
                 request = _read_document(args.request)
                 reference = from_document(ArtifactRef, _read_document(args.plan_ref))
+                if request.get("schema_version") == "regression_search_request.v1":
+                    raise fail("INVALID_EXPERIMENT_SPEC", "IV requires dedicated CLI containment; use the admitted library path")
                 if request.get("schema_version") == "magnitude_search_request.v2":
                     raise fail("INVALID_EXPERIMENT_SPEC", "qualified SIZE requires experiments.size_search CLI containment")
             except (DocumentError, TypeError):
