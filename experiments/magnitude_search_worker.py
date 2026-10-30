@@ -4,6 +4,8 @@ import os
 import resource
 import sys
 
+from experiments.memory_guard import start_rss_watchdog
+
 
 def emit(value):
     print(json.dumps(value, allow_nan=False, separators=(",", ":")), flush=True)
@@ -11,9 +13,9 @@ def emit(value):
 
 def main():
     limits = json.loads(sys.argv[2])
-    resource.setrlimit(resource.RLIMIT_AS, (limits["memory_bytes"],) * 2)
     resource.setrlimit(resource.RLIMIT_CPU, (limits["cpu_seconds"], limits["cpu_seconds"] + 1))
     os.sched_setaffinity(0, {limits["cpu_id"]})
+    start_rss_watchdog(limits["memory_bytes"])
     try:
         import pandas as pd
 

@@ -6,7 +6,7 @@ import signal
 import sqlite3
 import sys
 import time
-from contextlib import redirect_stdout
+from contextlib import ExitStack, redirect_stdout
 from pathlib import Path
 
 from engine.v2.contracts import ArtifactRef
@@ -25,6 +25,7 @@ from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.experiments import experiment_spec_from_document
 from experiments.magnitude_search_plan import seal_search_plan
 from experiments.magnitude_search_records import read_record
+from experiments.memory_guard import rss_watchdog
 from experiments.native_registration import (
     MAX_NATIVE_EVIDENCE_BYTES,
     read_native_registration,
@@ -48,14 +49,11 @@ def _contain(request):
     memory = limits["parent"]["memory_bytes"]
     if limits["child"]["memory_bytes"] > memory:
         raise fail("INVALID_EXPERIMENT_SPEC", "child memory must not exceed inherited parent limit")
-    current = resource.getrlimit(resource.RLIMIT_AS)
-    if current[1] != resource.RLIM_INFINITY and memory > current[1]:
-        raise fail("RESOURCE_LIMIT_EXCEEDED", "requested parent memory exceeds enclosing limit")
-    resource.setrlimit(resource.RLIMIT_AS, (memory, memory))
     def expired(signum, frame):
         raise fail("RESOURCE_LIMIT_EXCEEDED", "parent/job wall budget exhausted; no fit retry")
     signal.signal(signal.SIGALRM, expired)
     signal.alarm(min(limits["parent"]["wall_seconds"], limits["job"]["wall_seconds"]))
+    return memory
 
 
 def _run(context):
@@ -89,10 +87,12 @@ def main(argv=None):
     if not fresh and not args.plan_ref:
         parser.error("seal/run/report require plan-ref")
     conn, started = None, time.monotonic()
+    stack = ExitStack()
     try:
         request = _read_document(args.request)
         panel_request = validate_panel_request(_read_document(args.panel_request)) if fresh else None
-        _contain(request)
+        memory = _contain(request)
+        stack.enter_context(rss_watchdog(memory))
         print("[size] stage=" + args.action + " start rss_kib=" + str(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss), file=sys.stderr)
         with redirect_stdout(sys.stderr):
             if not Path(args.store_root).is_dir():
@@ -136,6 +136,7 @@ def main(argv=None):
         print(json.dumps({"refused": "RESOURCE_UNAVAILABLE", "message": "SIZE storage unavailable"}))
         return 2
     finally:
+        stack.close()
         signal.alarm(0)
         if conn is not None:
             conn.close()

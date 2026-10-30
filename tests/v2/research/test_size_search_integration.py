@@ -181,7 +181,7 @@ def test_v17_storage_outages_stay_retryable_through_library_and_cli(case, monkey
             pass
 
     monkeypatch.setattr(size_search, "_read_document", lambda path: case.request if path == "request.json" else {})
-    monkeypatch.setattr(size_search, "_contain", lambda request: None)
+    monkeypatch.setattr(size_search, "_contain", lambda request: 2 ** 33)
     monkeypatch.setattr(size_search, "experiment_spec_from_document", lambda document: case.spec)
     monkeypatch.setattr(size_search, "connect", lambda *args, **kwargs: ConnectionProxy())
     monkeypatch.setattr(size_search, "ArtifactStore", lambda root: RawUnavailableStore())

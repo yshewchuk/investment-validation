@@ -19,7 +19,7 @@ def args(action="report"):
 
 
 def setup_cli(monkeypatch):
-    monkeypatch.setattr(cli, "_contain", lambda request: None)
+    monkeypatch.setattr(cli, "_contain", lambda request: 2 ** 33)
     monkeypatch.setattr(cli, "_read_document", lambda path: {})
     monkeypatch.setattr(cli, "experiment_spec_from_document", lambda doc: object())
     monkeypatch.setattr(cli, "connect", lambda *a, **k: SimpleNamespace(close=lambda: None))
@@ -294,6 +294,7 @@ def contain(request):
     current = int(Path('/proc/self/statm').read_text().split()[0]) * resource.getpagesize()
     ceiling = current + (16 << 20)
     resource.setrlimit(resource.RLIMIT_AS, (ceiling, ceiling))
+    return ceiling
 cli._contain = contain
 def allocate(*args, **kwargs):
     return bytearray(64 << 20)
