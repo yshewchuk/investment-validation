@@ -121,7 +121,11 @@ def main(argv=None):
                     result = resource_report({"counts": compile_request(request)["counts"], "request": request})
                     result["receipt_ref"] = to_document(issue(store, bind(), registration))
                 else:
-                    registration, spec = admit(store, from_document(ArtifactRef, _read_document(args.receipt_ref)), bind(), spec)
+                    try:
+                        receipt_ref = from_document(ArtifactRef, _read_document(args.receipt_ref))
+                    except OSError:
+                        raise fail("INVALID_EXPERIMENT_SPEC", "SIZE preflight receipt is missing", details={"reason": "receipt_missing"}) from None
+                    registration, spec = admit(store, receipt_ref, bind(), spec)
                     reserve_native_registration(conn, store, registration, spec, max_evidence_bytes=MAX_NATIVE_EVIDENCE_BYTES)
                     result = seal_search_plan(conn, store, registration, request)
                 print("[size] receipt " + ("issued" if args.action == "preflight" else "admitted"), file=sys.stderr)
