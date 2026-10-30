@@ -241,7 +241,7 @@ def test_no_source_storage_or_fit_access(monkeypatch):
     assert run([record()])["summary"]["settled_net_profit"] == 20
 
 
-def test_normalized_parity_with_landed_book_across_multi_event_policies():
+def test_distribution_adapter_mapping_across_multi_event_policies():
     from experiments.distribution_book import funded_book
 
     rng = Random(931)
