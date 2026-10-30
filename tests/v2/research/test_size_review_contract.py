@@ -93,7 +93,7 @@ def test_cli_panel_refusal_precedes_catalog_store_or_containment(monkeypatch, ca
         monkeypatch.setattr(size_search, name, lambda *a, **k: pytest.fail("source/write/containment"))
     status = size_search.main([action, "--spec", "spec", "--request", "request", "--catalog", "catalog",
         "--store-root", "store", "--no-ledger", "--panel-request", "panel", "--scope", "development",
-        "--training-start", "2010-01-01", "--labels-before", "2025-01-01"])
+        "--training-start", "2010-01-01", "--labels-before", "2025-01-01", "--receipt-ref", "receipt"])
     assert status == 2
     assert capsys.readouterr().out == '{"refused": "INVALID_EXPERIMENT_SPEC", "message": "INVALID_EXPERIMENT_SPEC: invalid closed SIZE panel request"}\n'
 

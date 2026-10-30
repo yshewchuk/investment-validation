@@ -7,6 +7,7 @@ import sqlite3
 import sys
 import time
 from contextlib import redirect_stdout
+from functools import partial
 from pathlib import Path
 
 from engine.v2.contracts import ArtifactRef
@@ -19,6 +20,7 @@ from engine.v2.foundation import (
     SystemClock,
     content_hash,
     from_document,
+    to_document,
 )
 from engine.v2.ops.catalog import connect
 from engine.v2.ops.errors import OpsError, fail
@@ -31,6 +33,7 @@ from experiments.native_registration import (
     reserve_native_registration,
 )
 from experiments.size_job_budget import remaining
+from experiments.size_preflight_receipt import admit, input_bindings, issue
 from experiments.size_search_binding import prepare, validate_panel_request
 from experiments.size_search_report import collect, resource_report
 from experiments.v2_magnitude_search_run import (
@@ -79,13 +82,16 @@ def main(argv=None):
     parser.add_argument("action", choices=("preflight", "register", "seal", "run", "report"))
     for name in ("spec", "request", "catalog", "store-root"):
         parser.add_argument("--" + name, required=True)
-    for name in ("panel-request", "scope", "training-start", "labels-before", "plan-ref"):
+    for name in ("panel-request", "scope", "training-start", "labels-before", "plan-ref",
+                 "receipt-ref"):
         parser.add_argument("--" + name)
     parser.add_argument("--no-ledger", action="store_true", required=True)
     args = parser.parse_args(argv)
     fresh = args.action in ("preflight", "register")
     if fresh and not all((args.panel_request, args.scope, args.training_start, args.labels_before)):
         parser.error("preflight/register require panel-request, scope, training-start and labels-before")
+    if args.action == "register" and not args.receipt_ref:
+        parser.error("register requires receipt-ref")
     if not fresh and not args.plan_ref:
         parser.error("seal/run/report require plan-ref")
     conn, started = None, time.monotonic()
@@ -105,15 +111,20 @@ def main(argv=None):
             store, clock = ArtifactStore(args.store_root), SystemClock()
             repository = Repository(conn, store, pin_snapshots=True)
             if fresh:
-                options = {"publish_artifacts": False} if args.action == "preflight" else {}
-                registration, spec = prepare(repository, spec, request, panel_request,
-                    scope=args.scope, training_start=args.training_start, labels_before=args.labels_before, **options)
+                bind = partial(input_bindings, repository, spec, request, panel_request, scope=args.scope,
+                    training_start=args.training_start, labels_before=args.labels_before)
                 if args.action == "preflight":
+                    registration, spec = prepare(repository, spec, request, panel_request,
+                        scope=args.scope, training_start=args.training_start,
+                        labels_before=args.labels_before)
                     from experiments.magnitude_search_request_versions import compile_request
                     result = resource_report({"counts": compile_request(request)["counts"], "request": request})
+                    result["receipt_ref"] = to_document(issue(store, bind(), registration))
                 else:
+                    registration, spec = admit(store, from_document(ArtifactRef, _read_document(args.receipt_ref)), bind(), spec)
                     reserve_native_registration(conn, store, registration, spec, max_evidence_bytes=MAX_NATIVE_EVIDENCE_BYTES)
                     result = seal_search_plan(conn, store, registration, request)
+                print("[size] receipt " + ("issued" if args.action == "preflight" else "admitted"), file=sys.stderr)
             else:
                 registration = read_native_registration(conn, store, spec)
                 ref = from_document(ArtifactRef, _read_document(args.plan_ref))

@@ -96,16 +96,23 @@ def test_report_admits_driver_before_result_reads_or_work(monkeypatch, seal, act
 
 
 def test_size_register_refuses_oversized_binding_before_publication(monkeypatch, capsys):
+    from engine.v2.contracts import ArtifactRef
+    from engine.v2.foundation import to_document
     from tests.v2.research.test_size_review_contract import panel_request
+
+    RECEIPT_REF = to_document(ArtifactRef(artifact_id="a", content_hash="sha256:" + "0" * 64,
+        schema_ref="size_preflight_receipt.v1", byte_size=1, storage_key="objects/00/" + "0" * 64))
     setup_cli(monkeypatch)
-    monkeypatch.setattr(cli, "_read_document", lambda path: panel_request() if path == "panel" else {})
+    monkeypatch.setattr(cli, "_read_document", lambda path: panel_request() if path == "panel" else RECEIPT_REF if path == "receipt" else {})
     registration = SimpleNamespace(binding_json=b"x" * (cli.MAX_NATIVE_EVIDENCE_BYTES + 1))
-    monkeypatch.setattr(cli, "prepare", lambda *a, **k: (registration, object()))
+    monkeypatch.setattr(cli, "input_bindings", lambda *a, **k: {})
+    monkeypatch.setattr(cli, "admit", lambda *a, **k: (registration, object()))
     monkeypatch.setattr(cli, "seal_search_plan", lambda *a: pytest.fail("sealed oversized registration"))
     monkeypatch.setattr(cli, "ArtifactStore", lambda *a: SimpleNamespace(
         publish_bytes=lambda *a, **k: pytest.fail("published oversized registration")))
     argv = args("register") + ["--panel-request", "panel", "--scope", "development",
-        "--training-start", "2010-01-01", "--labels-before", "2025-01-01"]
+        "--training-start", "2010-01-01", "--labels-before", "2025-01-01",
+        "--receipt-ref", "receipt"]
     assert cli.main(argv) == 2
     assert json.loads(capsys.readouterr().out) == {"refused": "RESOURCE_LIMIT_EXCEEDED",
         "message": "RESOURCE_LIMIT_EXCEEDED: native registration exceeds its UTF-8 byte budget"}
