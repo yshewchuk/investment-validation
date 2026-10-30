@@ -265,12 +265,15 @@ def test_unavailable_forecast_bands_are_omitted_from_native_display_row():
 def test_computed_legacy_driver_band_is_refused_by_native_display_row():
     request, inputs = next(iter(_pairs().values()))
     record = score_one(request, inputs)
+    row = native_display_row(record)
     uncertainty = dict(record.uncertainty)
     uncertainty["driver_p10"] = 0.1
     record = replace(record, uncertainty=uncertainty)
 
     with pytest.raises(ValueError, match="unsupported driver band"):
         native_display_row(record)
+    assert "forecast_p90" not in row
+    assert "forecast_sd" not in row
 
 
 def test_the_nightly_plan_records_the_shadow_serving_scorer():

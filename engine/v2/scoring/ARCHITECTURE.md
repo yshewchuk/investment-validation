@@ -233,16 +233,20 @@ inputs use native market/history features from the pinned snapshot (cutover
 `driver_prediction`; a separate causally selected size fold supplies the
 gate's requested `pred_abs_move` family and `forecast_edge`, and its held-out
 pool supplies residual uncertainty for the STR-THRU forecast band. The fold's
-`pred_abs_move` remains gate-only: its pool is used only to calculate
-`forecast_p10`/`forecast_p90`/`forecast_sd` around the champion's
-`driver_prediction`, not to create a top-level sizing forecast or change the
-selected structure. Both execute in the existing scoring stages, never in the
-raw-row producer. The legacy scorer has corresponding `forecast_p10`,
+`pred_abs_move` remains gate-only: when `forecast_abs_move` is available, its
+pool also supplies bucketed uncertainty around that fold forecast; when it is
+absent, flat residual quantiles center on the full-refit champion's
+`driver_prediction` because fold-prediction buckets do not match the champion
+distribution. These fields are uncertainty only; they do not create a sizing
+point forecast or change the selected structure. These calculations run in
+existing scoring stages, never in the raw-row producer. The legacy scorer has
+corresponding `forecast_p10`,
 `forecast_p90`, and `forecast_sd` fields; this native STR-THRU uncertainty rule
 does not assume parity-identical values. Because its center is the full-refit
 champion while its pool predictions are from the selected size fold, STR-THRU
 uses flat residual quantiles instead of choosing fold-prediction decile buckets
-around the champion value. Outcomes are in the table below.
+around the champion value when it falls back to `driver_prediction`. Outcomes
+are in the table below.
 RUNUP is unchanged.
 
 `SourceBundle.gate_forecast_source` (optional `GateForecastSource`) carries the

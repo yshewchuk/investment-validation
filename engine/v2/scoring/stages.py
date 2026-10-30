@@ -1075,17 +1075,19 @@ def _execute_forecast_band(
 ) -> None:
     """Build native forecast uncertainty from the declared held-out pool.
 
-    Use ``forecast_abs_move`` as the interval location when present. For
-    STR-THRU only, use ``driver_prediction`` when ``forecast_abs_move`` is
-    absent. Missing/non-finite locations, an absent pool, or a thin pool leave
-    the uncertainty fields unavailable. STR-THRU uses flat residual
-    quantiles because its location is the full-refit champion while pool
-    predictions come from a selected size fold. This stage writes only
+    When ``forecast_abs_move`` is present, use that fold forecast as the
+    interval location and its bucketed residual interval. When it is absent
+    and the strategy is ``STR-THRU``, fall back to ``driver_prediction`` and use
+    flat residual quantiles, because that center belongs to the full-refit
+    champion, not the selected fold's prediction distribution. Missing or
+    non-finite locations, an absent pool, or a thin pool leave the uncertainty
+    fields unavailable. This stage writes only
     ``forecast_p10``/``forecast_p90``/``forecast_sd``; it does not create a
     top-level sizing forecast or change structure selection."""
     from engine.v2.scoring import native_gate_features as derived
 
     forecast = output.get("forecast_abs_move")
+    use_buckets = forecast is not None
     if forecast is None and strategy == "STR-THRU":
         forecast = output.get("driver_prediction")
     if forecast is None:
@@ -1103,7 +1105,7 @@ def _execute_forecast_band(
         p10, p90, sd, _ = derived.forecast_interval(
             [forecast], pool["predictions"], pool["residuals"],
             floor=pool.get("interval_floor", 0.0),
-            use_buckets=strategy != "STR-THRU",
+            use_buckets=use_buckets,
         )
     except (KeyError, TypeError, ValueError):
         return
