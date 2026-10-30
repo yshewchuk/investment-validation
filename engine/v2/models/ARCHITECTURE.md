@@ -55,19 +55,19 @@ Invalid shapes/nonfinite labels or predictions raise `ValueError`; the experimen
 caller translates fitting failures to `EXPERIMENT_VARIANT_FAILED`. The shared
 no-fit guard runs before work. Existing legacy-parity recipes are unchanged.
 
-`magnitude_elasticnet_recipe.elasticnet_recipe` builds closed JSON-only research
-metadata without importing training or sklearn. Ordered selected columns and a
-caller-supplied dictionary hash bind preprocessing, fixed estimator parameters,
-seed and projection; a recipe hash is not a source/fold/candidate seal or proof
-of dictionary membership. `training.magnitude_elasticnet.fit_elasticnet_predictions`
-consumes this recipe and matching named numeric matrices. It learns imputation,
-missing indicators and scaling from training rows only, returning finite nonnegative
-forecasts, the full standardized coefficient vector (values and missing indicators),
-selected source columns in recipe order, iterations and dual gap.
-The experiment dispatcher calls this adapter; production entrypoints remain unwired.
-Causal membership, source identities,
-inner-only subset/parameter choice, resource/attempt caps and failure recording
-are caller responsibilities, not guarantees derived from these arrays.
+`magnitude_elasticnet_recipe.elasticnet_recipe` binds ordered columns, dictionary hash, preprocessing and fixed sklearn parameters in closed JSON metadata.
+`magnitude_elasticnet_recipe.regression_elasticnet_recipe` adds the distinct
+`regression_elasticnet_recipe.v1` identity with explicit signed/nonnegative domain
+and corresponding none/clip_zero projection; its validator rejects policy drift.
+Neither metadata API imports training/sklearn or proves source/dictionary admission.
+`training.magnitude_elasticnet.fit_regression_elasticnet_predictions` consumes the
+new policy; `fit_elasticnet_predictions` keeps the original recipe/result identity.
+Both guarded APIs share fresh one-thread training-only imputation/indicators/scaling,
+coefficient/selection/convergence evidence and no-retry failure semantics. Signed
+labels and forecasts are finite, untransformed and unfloored; the old API still
+rejects negative labels and clips forecasts. New results use `regression_elasticnet_fit.v1`.
+Caller owns causal membership, source identities, inner-only selection and resource caps.
+No I/O, publication, release or production wiring; source closures need resealing.
 
 | ElasticNet condition | Outcome |
 |---|---|
@@ -77,23 +77,23 @@ are caller responsibilities, not guarantees derived from these arrays.
 | Same valid inputs and numerical environment | Deterministic fresh fit, not cached or journal replay |
 | Cache, transaction or partial-write concerns | No cache, I/O, persistence or publication; v1 recipes and results are unchanged |
 
-The `magnitude_ridge_hgb_recipe` API constructs/validates source-free closed
-variable-width policies; ordered columns, dictionary hash and fixed estimator
-parameters bind the recipe, not source admission or dictionary membership.
+`magnitude_ridge_hgb_recipe` constructs/validates closed variable-width policies binding ordered columns, dictionary hash and fixed estimator parameters, not source admission or dictionary membership.
 `regression_ridge_hgb_recipe.regression_recipe` adds a distinct
 `regression_ridge_hgb_recipe.v1` identity with explicit `signed`/`nonnegative`
 target domain and respectively `none`/`clip_zero` projection. Its validator
 refuses unknown fields or inconsistent domain/projection pairs; no training imports.
 `training.magnitude_ridge_hgb.fit_regression_predictions` uses that new policy;
 `fit_ridge_hgb_predictions` retains its existing magnitude recipe/result schema.
-Both guards precede inspection; the shared private fitter copies arrays, learns
-Ridge imputation/indicators/scaling only on training rows and freezes HGB's
+Both guards precede inspection; the shared private fitter copies arrays, learns Ridge imputation/indicators/scaling only on training rows and freezes HGB's
 training-all-null columns to zero. Fresh sklearn estimators use one thread.
 Signed labels/predictions need only be finite (no floor, absolute value or log);
 nonnegative labels still reject negatives and predictions clip at zero.
 The new result is `regression_ridge_hgb_fit.v1` with recipe hash and detached
 forecasts. No I/O, cache, retries, source/fold/holdout admission or release occurs.
 Existing magnitude numerics remain unchanged; source closures require resealing.
+`regression_candidate.regression_candidate_recipe` accepts only ridge/alpha, hgb/max_leaf_nodes or elasticnet/alpha+l1_ratio and delegates explicit signed/nonnegative policy construction; it imports no training or source admission.
+`training.regression_candidate.fit_regression_candidate` checks both no-fit guards before inspection, dispatches only matching regression schema/model pairs, then preserves the existing fitter result/validation/errors. Unsupported pairs refuse ValueError; no reads, selection, retries, writes or production caller.
+Existing experiment magnitude recipe/fit dispatch is unchanged and refuses the new schemas.
 
 | Ridge/HGB condition | Outcome |
 |---|---|

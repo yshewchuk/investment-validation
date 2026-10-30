@@ -205,11 +205,11 @@ def _materialize(repository, source, **request):
     return {"context": prepared[0], "feature_snapshot": snapshot}
 
 
-def _read(repository, source, feature_snapshot, *, columns, **request):
+def _read(repository, source, feature_snapshot, *, columns, lineage=True, **request):
     from engine.v2.research import _magnitude_panel_store as store
 
     table.admit_columns(columns)
     with stage("qualified stored panel admission", report_refusals=True):
         context = _prepare(repository, source, **request)[0]
-        rows = store.read(repository, feature_snapshot, context, columns)
+        rows = store.read(repository, feature_snapshot, context, columns, lineage)
     return {"context": context, "feature_snapshot": to_document(feature_snapshot), "rows": rows}
