@@ -106,10 +106,10 @@ def test_happy_path_binds_history_panel_limits_and_read_pin(bounds_ws, source_ro
     name = "size-prep-panel:" + doc["panel_id"].split(":", 1)[1]
     bodies = []
     for path in (ws.paths.store / "objects").rglob("*"):
-        if not path.is_file():
+        if not path.is_file() or path.stat().st_size > (1 << 20):
             continue
         try:
-            stored = json.loads(path.read_bytes())
+            stored = json.loads(path.open("rb").read(1 << 20))
         except ValueError:
             continue
         if isinstance(stored, dict) and stored.get("name") == name:
