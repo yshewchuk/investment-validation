@@ -223,6 +223,10 @@ each endpoint may differ by at most 10% of the legacy CI width
 different analog pool size therefore keeps both endpoints exact. The report
 policy id is `score_record.parity.v2`; the shared `SCORE_RECORD_V1` remains
 exact with its original id.
+Missing or unequal required context resolves to `EXACT`; matching context
+with valid scale endpoints applies the derived allowance. The non-finite and
+reversed-endpoint fallback guards are implemented in `_scaled_tolerance`,
+with dedicated input tests still tracked as follow-up work.
 Stage hashes reflect the active policy comparison: leaves accepted by a
 tolerance are canonicalized to the left-side value for hashing, while findings
 and reported field values remain based on the original records.

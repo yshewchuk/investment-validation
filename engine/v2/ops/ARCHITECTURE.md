@@ -110,7 +110,7 @@ The `native_parity` job kind -- `stages.py::_native_parity_kind`,
 its tick-loop caller, `supervisor.Service._reconcile_native_parity`, are
 both real too: `Service.tick()` calls it every tick the way
 `_reconcile_native_score_batch_shadow` (`#88`) already does (both reconcile methods run every tick; the release check inside the shadow one runs only after an eligible snapshot-pinned identity is selected — see "Native batch input sourcing" below; its failures print `native_score_batch_reconcile_failed` with `error_type` and the typed problem's code and bounded details: short scalars and short string lists). For non-`Problem` failures, at most the first 256 characters of `str(exc)` are kept only in the in-memory dedup key; nonempty text emits the fixed `<redacted>` `details.exception_message`, while empty text emits no `exception_message` (the details mapping is empty). `_bounded_problem_details` omits string values longer than 120 characters; these size limits do not sanitize exception text or make raw text safe to publish. The
-`nightly.GRAPH` node width is doc-only (`run_shadow_nightly`'s test-only graph walk; no submission path reads it). Cutover PR-3 (`native_score_batch.py`, `#66`) and cutover PR-7a's design (`#88`) and shadow-submission code (`#126`) are all already merged; PR-7a's code (`#126`) implemented the tick-loop submission sidecar only, not the `v2.0` schema this redo's design always said was `native_parity`'s own PR to build (see "the row-key/join gap is not designed here" below) — `#185` is that build. One piece is untouched by this redo, real code already on `main`, independent of everything `#66`/`#88`/`#126` supply: `native_parity_report.py`'s tolerance policy is already pluggable — see "the tolerance policy is now pluggable" below, unchanged.**
+`nightly.GRAPH` node width is doc-only (`run_shadow_nightly`'s test-only graph walk; no submission path reads it). Cutover PR-3 (`native_score_batch.py`, `#66`) and cutover PR-7a's design (`#88`) and shadow-submission code (`#126`) are already merged; PR-7a's code implemented the tick-loop submission sidecar, while `#185` built the `native_parity` schema. This change adds the report-specific analog CI tolerance policy described below.**
 
 `native_parity` closes the gap the root doc §4 and this doc's own
 "Diagrams" section both name: `run_shadow_nightly` "has no production
@@ -294,8 +294,9 @@ submission path reads either edge (the rule Part 4 established for
   Its current `UNSUPPORTED_STRATEGY` refusal belongs in `native_refused`
   when legacy emitted that row, otherwise `native_refused_unmatched`.
   DYN-SV uses the same keyed comparison/refusal classification, never a
-  wildcard exemption. Numeric comparisons continue to use the shared parity
-  comparator, with no special tolerance or legacy-derived native value.
+  wildcard exemption. Numeric comparisons use the shared parity comparator;
+  the report's `ci_low`/`ci_high` tolerance still requires matching
+  `n_analogs` and never fills a native value from legacy.
 - **`native_parity_report._population_key_from_board_request_key(key) ->
   str`** (new, private) — projects one `records.json`/`refusals.json` key
   (the 4-field canonical `BoardRequest` string `#88` specifies,
@@ -378,10 +379,11 @@ checker remains exact); `native_parity_report.compare_native_vs_legacy`/
 `native_parity_handler` use the report-specific `NATIVE_PARITY_TOLERANCE`
 by default and accept an explicit policy override, threaded straight down
 to `compare_dimension`. The default grants `ci_low` and `ci_high` a
-difference of at most 10% of the legacy CI width only when `n_analogs`
-matches. The written report records
+difference of at most 10% of the legacy CI width only when both records
+contain a non-null `n_analogs` value with the same type and value. The
+written report records
 `"tolerance_policy_id": tolerance_policy.policy_id` so a reader of
-`native_parity_report.json` can always see which policy compared it —
+`native_parity_report.json` can see which policy compared it —
 never an implicit, undiscoverable default. **Per-field tolerances come
 from ONE config policy, the `engine.v2.parity.tolerance.TolerancePolicy`
 type** (never a second ad hoc mechanism). `NATIVE_PARITY_TOLERANCE` is
@@ -389,7 +391,10 @@ type** (never a second ad hoc mechanism). `NATIVE_PARITY_TOLERANCE` is
 remains exact under the default policy. `compare_dimension`'s shared
 default `SCORE_RECORD_V1` remains unchanged and exact for Phase 4.
 The allowance is limited to the two endpoints and is scaled from the legacy
-CI width; the native CI width does not set the threshold.
+CI width; the native CI width does not set the threshold. It applies only
+when both records contain a non-null `n_analogs` value with the same type and
+value; missing, null, differently typed, or unequal counts keep the endpoints
+exact.
 
 **Legacy `n_analogs` placeholder.** Legacy `ScoreResult.n_analogs` defaults to `0` when the analog stage never ran. `_row_mismatches` reads such a legacy row's `n_analogs` as absent only when the row's own evidence shows it never ran: legacy `n_analogs == 0` with `ci_low` and `ci_high` both `None` and a `flags` list without `THIN_ANALOGS` (a matcher that ran and found no rows sets that flag), and native carrying none of the three analog fields. A legacy `0` with a CI value, or any `0` against a native value, still compares as `0`. The report also lists `analog_no_pool`: shared keys where legacy has `n_analogs > 0` and native has no analog field (native found no pool for the cutoff); their comparison is unchanged and they remain mismatches.
 

@@ -58,6 +58,19 @@ def test_equal_pool_ci_beyond_ten_percent_of_width_flags_low():
     assert _analog_findings(legacy, native) == ["ci_low"]
 
 
+def test_equal_pool_ci_just_beyond_ten_percent_of_width_flags_low():
+    legacy = {"n_analogs": 20, "ci_low": 0.0, "ci_high": 1.0}
+    native = {"n_analogs": 20, "ci_low": 0.1001, "ci_high": 1.0}
+    assert _analog_findings(legacy, native) == ["ci_low"]
+
+
+def test_shared_default_tolerance_is_exact_for_ci_endpoints():
+    legacy = {"n_analogs": 20, "ci_low": 0.0, "ci_high": 1.0}
+    native = {"n_analogs": 20, "ci_low": 0.1, "ci_high": 0.9}
+    receipt = compare_records(legacy, native)
+    assert {f.field_path for f in receipt.findings} == {"ci_low", "ci_high"}
+
+
 def test_ci_tolerance_scales_from_legacy_not_native_width():
     legacy = {"n_analogs": 20, "ci_low": 0.1, "ci_high": 0.5}
     native = {"n_analogs": 20, "ci_low": 0.136, "ci_high": 0.2}
@@ -109,6 +122,11 @@ def test_integer_ci_endpoints_use_declared_tolerance():
         legacy, native, tolerance_policy=NATIVE_PARITY_TOLERANCE)
     assert receipt.verdict == AGREE
     assert receipt.findings == ()
+
+    out_of_bound = compare_records(
+        legacy, {"n_analogs": 20, "ci_low": 2, "ci_high": 10},
+        tolerance_policy=NATIVE_PARITY_TOLERANCE)
+    assert {f.field_path for f in out_of_bound.findings} == {"ci_low"}
 
 
 def test_typed_pool_count_mismatch_disables_ci_tolerance():

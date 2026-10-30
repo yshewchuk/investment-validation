@@ -16,8 +16,10 @@ that used to live in `engine/v2/diagnosis`.
 
 ### Why the comparator core lives here, and why this layer is legal
 
-The nightly parity report (`engine/v2/ops/native_parity_report.py`) must run
-exactly the comparison the Phase 4 checker runs. Production may not import
+The nightly parity report (`engine/v2/ops/native_parity_report.py`) uses the
+shared comparator through `compare_dimension`. The report applies its
+report-specific analog CI tolerance; the Phase 4 checker keeps the exact
+`SCORE_RECORD_V1` default. Production may not import
 `checks/`, and `engine/v2/diagnosis` is a sink that no package may import, so
 the comparator had to move into a production package. It needs nothing but
 `engine.v2.foundation` (`content_hash`), so the layer map pins this package to
