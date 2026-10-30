@@ -55,6 +55,17 @@ def test_issue_is_deterministic(case):
     assert first == second
 
 
+def test_issue_refuses_when_scope_snapshot_moved(case, monkeypatch):
+    bindings = deepcopy(bindings_for(case))
+    bindings["scope_snapshot"]["snapshot_id"] = "moved"
+    monkeypatch.setattr(case.store, "publish_bytes",
+                        lambda *args, **kwargs: pytest.fail("issue published after moved scope"))
+    with pytest.raises(OpsError) as caught:
+        issue(case.store, bindings, case.registration)
+    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert caught.value.problem.details == {"reason": "receipt_input_mismatch"}
+
+
 def test_missing_receipt_refuses(case):
     bindings = bindings_for(case)
     ref = issue(case.store, bindings, case.registration)
@@ -188,9 +199,11 @@ def test_preflight_result_carries_receipt_ref(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(cli, "_read_document",
                         lambda path: request_fixture() if path == "request"
                         else panel_request() if path == "panel" else {})
-    monkeypatch.setattr(cli, "input_bindings", lambda *args, **kwargs: {})
+    monkeypatch.setattr(cli, "input_bindings",
+                        lambda *args, **kwargs: {"scope_snapshot": {"snapshot_id": "dev"}})
     monkeypatch.setattr(cli, "prepare", lambda *args, **kwargs: (
-        SimpleNamespace(binding_json=b"{}", run_id="synthetic-run"), object()))
+        SimpleNamespace(binding_json=b"{}", run_id="synthetic-run",
+                        document={"snapshot": {"snapshot_id": "dev"}}), object()))
     assert cli.main(["preflight", "--spec", "spec", "--request", "request",
                      "--catalog", "catalog", "--store-root", str(store_root), "--no-ledger",
                      "--panel-request", "panel", "--scope", "development",

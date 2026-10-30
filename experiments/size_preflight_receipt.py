@@ -47,6 +47,11 @@ def input_bindings(repository, spec, request, panel_request, *, scope, training_
 
 def issue(store, bindings, registration):
     """Publish the registration payload and its deterministic, timestamp-free receipt."""
+    document = registration.document
+    if document["snapshot"] != bindings["scope_snapshot"]:
+        raise fail("EXPERIMENT_IDENTITY_CONFLICT",
+                   "scope snapshot moved during preflight; rerun preflight",
+                   details={"reason": "receipt_input_mismatch"})
     payload_ref = store.publish_bytes(registration.binding_json,
                                       schema_ref=REGISTRATION_SCHEMA)
     receipt = {"schema_version": SCHEMA, "bindings": bindings,
