@@ -55,19 +55,19 @@ Invalid shapes/nonfinite labels or predictions raise `ValueError`; the experimen
 caller translates fitting failures to `EXPERIMENT_VARIANT_FAILED`. The shared
 no-fit guard runs before work. Existing legacy-parity recipes are unchanged.
 
-`magnitude_elasticnet_recipe.elasticnet_recipe` builds closed JSON-only research
-metadata without importing training or sklearn. Ordered selected columns and a
-caller-supplied dictionary hash bind preprocessing, fixed estimator parameters,
-seed and projection; a recipe hash is not a source/fold/candidate seal or proof
-of dictionary membership. `training.magnitude_elasticnet.fit_elasticnet_predictions`
-consumes this recipe and matching named numeric matrices. It learns imputation,
-missing indicators and scaling from training rows only, returning finite nonnegative
-forecasts, the full standardized coefficient vector (values and missing indicators),
-selected source columns in recipe order, iterations and dual gap.
-The experiment dispatcher calls this adapter; production entrypoints remain unwired.
-Causal membership, source identities,
-inner-only subset/parameter choice, resource/attempt caps and failure recording
-are caller responsibilities, not guarantees derived from these arrays.
+`magnitude_elasticnet_recipe.elasticnet_recipe` binds ordered columns, dictionary hash, preprocessing and fixed sklearn parameters in closed JSON metadata.
+`magnitude_elasticnet_recipe.regression_elasticnet_recipe` adds the distinct
+`regression_elasticnet_recipe.v1` identity with explicit signed/nonnegative domain
+and corresponding none/clip_zero projection; its validator rejects policy drift.
+Neither metadata API imports training/sklearn or proves source/dictionary admission.
+`training.magnitude_elasticnet.fit_regression_elasticnet_predictions` consumes the
+new policy; `fit_elasticnet_predictions` keeps the original recipe/result identity.
+Both guarded APIs share fresh one-thread training-only imputation/indicators/scaling,
+coefficient/selection/convergence evidence and no-retry failure semantics. Signed
+labels and forecasts are finite, untransformed and unfloored; the old API still
+rejects negative labels and clips forecasts. New results use `regression_elasticnet_fit.v1`.
+Caller owns causal membership, source identities, inner-only selection and resource caps.
+No I/O, publication, release or production wiring; source closures need resealing.
 
 | ElasticNet condition | Outcome |
 |---|---|

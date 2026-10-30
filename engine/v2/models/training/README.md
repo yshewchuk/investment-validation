@@ -39,6 +39,13 @@ The experiment dispatcher is a numeric caller, not a grid or production activati
 No validation-target selection, cache or persistence is added.
 Nonconvergence raises `ValueError` with no retry or partial result.
 
+`magnitude_elasticnet.fit_regression_elasticnet_predictions` accepts the distinct
+domain-aware ElasticNet policy through the same guarded, training-only fitter.
+Signed labels/forecasts are finite without a floor or transform; nonnegative
+labels still refuse negatives and forecasts clip at zero. The result uses
+`regression_elasticnet_fit.v1`, with bound recipe hash and unchanged coefficient
+and convergence evidence. No source admission, search or release is inferred.
+
 `magnitude_ridge_hgb.fit_ridge_hgb_predictions` separately accepts a closed
 variable-width recipe, caller-admitted numeric matrices and exact ordered
 `columns`. Both no-fit guards run before inspection; training-only preprocessing
@@ -139,7 +146,7 @@ both `tools/phase5_prepare_release.py` (which re-exports the names) and
 `tools/phase5_training_job.py`; it imports no `checks` module so the training
 job's worker path can read it.
 
-<!-- public-interface: fit_regression_predictions, fit_ridge_hgb_predictions, fit_elasticnet_predictions, build_d14_dataset, calculate_frame, input_rows, input_frame, decision_rows, daily_features, validate_role, fit_magnitude_predictions, build_payoff_line_artifact, build_payoff_surface_artifact, build_recalibration_map_artifact, fit_recalibration_map, CLOCK_ID, EqualWeightBlend, EstimatorSpec, FoldOutcome, FoldPlan, FoldScheme, LABEL_RECEIPT_V1, LEGACY_SEED, LabelRule, LogTargetModel, MEMBERSHIP_RECEIPT_V1, OWNER_P5_4, OWNER_TRAINING_JOB, PreparedDataset, RECIPE_V1, ReceiptIssue, RecipeDataError, RecipeKey, ResidualRule, RowFilter, SeedMeanEnsemble, TRAINING_JOB_V1, TargetSpec, ThresholdRule, TrainingJobResult, TrainingRecipe, TrainingRefused, UnsupportedEstimator, UpstreamDependency, ValueMask, current_recipes, dataset_fingerprint, fit_recipe_estimator, fold_receipts, plan_folds, prepare_dataset, receipt_issues, recipe_fingerprint, run_training_job, build_driver_residual_pool_artifact, build_paired_residual_pool_artifact, freeze_stored_driver_residual_pool, CHOOSER_POOL_ID, CHOOSER_POOL_MAX_BYTES, require_chooser_pool_columns, read_chooser_pool_frame -->
+<!-- public-interface: fit_regression_predictions, fit_ridge_hgb_predictions, fit_elasticnet_predictions, build_d14_dataset, calculate_frame, input_rows, input_frame, decision_rows, daily_features, validate_role, fit_magnitude_predictions, build_payoff_line_artifact, build_payoff_surface_artifact, build_recalibration_map_artifact, fit_recalibration_map, CLOCK_ID, EqualWeightBlend, EstimatorSpec, FoldOutcome, FoldPlan, FoldScheme, LABEL_RECEIPT_V1, LEGACY_SEED, LabelRule, LogTargetModel, MEMBERSHIP_RECEIPT_V1, OWNER_P5_4, OWNER_TRAINING_JOB, PreparedDataset, RECIPE_V1, ReceiptIssue, RecipeDataError, RecipeKey, ResidualRule, RowFilter, SeedMeanEnsemble, TRAINING_JOB_V1, TargetSpec, ThresholdRule, TrainingJobResult, TrainingRecipe, TrainingRefused, UnsupportedEstimator, UpstreamDependency, ValueMask, current_recipes, dataset_fingerprint, fit_recipe_estimator, fold_receipts, plan_folds, prepare_dataset, receipt_issues, recipe_fingerprint, run_training_job, build_driver_residual_pool_artifact, build_paired_residual_pool_artifact, freeze_stored_driver_residual_pool, CHOOSER_POOL_ID, CHOOSER_POOL_MAX_BYTES, require_chooser_pool_columns, read_chooser_pool_frame, fit_regression_elasticnet_predictions -->
 
 ## Consumers
 
