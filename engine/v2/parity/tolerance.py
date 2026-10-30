@@ -19,7 +19,9 @@ make the first run pass" is a listed failure mode.
 from __future__ import annotations
 
 import fnmatch
+import math
 from dataclasses import dataclass, field
+from typing import Any, Mapping
 
 __all__ = ["Tolerance", "TolerancePolicy", "EXACT", "SCORE_RECORD_V1"]
 
@@ -35,6 +37,12 @@ class Tolerance:
     #: Why this number and not a smaller one. Required: a tolerance without a
     #: stated derivation is a tolerance nobody can argue with later.
     reason: str = "exact"
+    #: ``(low_field, high_field)`` in the LEFT/legacy record. If present,
+    #: ``relative`` is the allowed fraction of ``high - low`` rather than of
+    #: the maximum endpoint magnitude.
+    scale_fields: tuple[str, str] | None = None
+    #: Fields that must be equal across left and right for this rule to apply.
+    require_equal_fields: tuple[str, ...] = ()
 
     @property
     def is_exact(self) -> bool:
@@ -50,6 +58,59 @@ class Tolerance:
 EXACT = Tolerance()
 
 
+def _context_matches(
+    tolerance: Tolerance,
+    left_record: Mapping[str, Any] | None,
+    right_record: Mapping[str, Any] | None,
+) -> bool:
+    if not tolerance.require_equal_fields:
+        return True
+    if not isinstance(left_record, Mapping) or not isinstance(right_record, Mapping):
+        return False
+    return all(
+        name in left_record
+        and name in right_record
+        and type(left_record[name]) is type(right_record[name])
+        and left_record[name] == right_record[name]
+        for name in tolerance.require_equal_fields
+    )
+
+
+def _scaled_tolerance(
+    tolerance: Tolerance,
+    left_record: Mapping[str, Any] | None,
+) -> Tolerance | None:
+    if tolerance.scale_fields is None:
+        return None
+    if not isinstance(left_record, Mapping):
+        return EXACT
+    low_field, high_field = tolerance.scale_fields
+    if low_field not in left_record or high_field not in left_record:
+        return EXACT
+    low = left_record[low_field]
+    high = left_record[high_field]
+    if not (
+        isinstance(low, (int, float))
+        and not isinstance(low, bool)
+        and isinstance(high, (int, float))
+        and not isinstance(high, bool)
+    ):
+        return EXACT
+    try:
+        finite = math.isfinite(low) and math.isfinite(high)
+        width = high - low
+        finite = finite and math.isfinite(width)
+    except (OverflowError, TypeError):
+        return EXACT
+    if not (finite and high >= low):
+        return EXACT
+    return Tolerance(
+        absolute=tolerance.relative * width,
+        relative=0.0,
+        reason=tolerance.reason,
+    )
+
+
 @dataclass(frozen=True)
 class TolerancePolicy:
     """An ordered list of ``(field glob, tolerance)``. First match wins."""
@@ -57,10 +118,20 @@ class TolerancePolicy:
     policy_id: str
     rules: tuple[tuple[str, Tolerance], ...] = field(default_factory=tuple)
 
-    def for_field(self, field_path: str) -> Tolerance:
+    def for_field(
+        self,
+        field_path: str,
+        *,
+        left_record: Mapping[str, Any] | None = None,
+        right_record: Mapping[str, Any] | None = None,
+    ) -> Tolerance:
         for pattern, tol in self.rules:
-            if fnmatch.fnmatchcase(field_path, pattern):
-                return tol
+            if not fnmatch.fnmatchcase(field_path, pattern):
+                continue
+            if not _context_matches(tol, left_record, right_record):
+                return EXACT
+            scaled = _scaled_tolerance(tol, left_record)
+            return scaled if scaled is not None else tol
         return EXACT
 
     def declared_fields(self) -> tuple[str, ...]:

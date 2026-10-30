@@ -374,40 +374,34 @@ whenever a real classifier exists.
 PR is real code, already merged into this push, independent of `#66`.**
 `engine.v2.parity.dimensions.compare_dimension` gained a keyword-only
 `tolerance_policy` parameter (default `SCORE_RECORD_V1`, so the Phase 4
-checker and every existing test are unaffected — none of them pass this
-argument, so none of them can observe a behavior change);
-`native_parity_report.compare_native_vs_legacy`/`native_parity_handler`
-each gained the identical parameter, threaded straight down to
-`compare_dimension`, and the written report now records
+checker remains exact); `native_parity_report.compare_native_vs_legacy`/
+`native_parity_handler` use the report-specific `NATIVE_PARITY_TOLERANCE`
+by default and accept an explicit policy override, threaded straight down
+to `compare_dimension`. The default grants `ci_low` and `ci_high` a
+difference of at most 10% of the legacy CI width only when `n_analogs`
+matches. The written report records
 `"tolerance_policy_id": tolerance_policy.policy_id` so a reader of
 `native_parity_report.json` can always see which policy compared it —
 never an implicit, undiscoverable default. **Per-field tolerances come
 from ONE config policy, the `engine.v2.parity.tolerance.TolerancePolicy`
-type** (never a second ad hoc mechanism): the default that ships in this
-PR is still `SCORE_RECORD_V1`, which declares zero per-field rules
-(`rules=()`), so every one of the five dimensions' 30 fields —
-`FORECAST_FIELDS` (12), `SIMULATION_FIELDS` (7), `FINANCIAL_FIELDS` (5),
-`GATE_FIELDS` (3), `ANALOG_FIELDS` (3) — still compares under exact
-equality until a caller explicitly plugs in a different policy. **No
-per-field tolerance VALUE is added, chosen, or implied by this PR** —
-that is a user decision, taken to the user separately, and per instruction
-none of those values belong in this doc, the PR body, or an issue; only a
-`TolerancePolicy` built and ratified elsewhere is ever passed in here.
-`tolerance.py`'s own docstring names the risk this design avoids: "chosen to make the first run pass" is a named failure mode, so this PR adds the SEAM a ratified policy plugs into, not a guess at what it should contain.
+type** (never a second ad hoc mechanism). `NATIVE_PARITY_TOLERANCE` is
+`score_record.parity.v2`; every field outside those two analog CI endpoints
+remains exact under the default policy. `compare_dimension`'s shared
+default `SCORE_RECORD_V1` remains unchanged and exact for Phase 4.
+The allowance is limited to the two endpoints and is scaled from the legacy
+CI width; the native CI width does not set the threshold.
 
 **Legacy `n_analogs` placeholder.** Legacy `ScoreResult.n_analogs` defaults to `0` when the analog stage never ran. `_row_mismatches` reads such a legacy row's `n_analogs` as absent only when the row's own evidence shows it never ran: legacy `n_analogs == 0` with `ci_low` and `ci_high` both `None` and a `flags` list without `THIN_ANALOGS` (a matcher that ran and found no rows sets that flag), and native carrying none of the three analog fields. A legacy `0` with a CI value, or any `0` against a native value, still compares as `0`. The report also lists `analog_no_pool`: shared keys where legacy has `n_analogs > 0` and native has no analog field (native found no pool for the cutoff); their comparison is unchanged and they remain mismatches.
 
 **Out of scope for this redo** (each a real gap, named rather than
-silently left implicit): the stale-px/finality-drift classifier and the
+silently left implicit): additional stale-px/finality-drift classification
+criteria beyond the approved analog CI tolerance, and the
 "explained" bucket mechanism the original PR-4 design specified (above —
 still no reusable classifier exists; a future PR adds it once one does,
 against `compare_native_vs_legacy`'s unchanged signature); a
 dashboard-facing "latest report" pointer path (this design's only durable
 location is the catalog-addressed `job_<id>#report` binding — see
-"Outputs" below); and building the actual user-approved, per-field
-`TolerancePolicy` object itself (the pluggable seam already in place
-takes it as a parameter — this redo does not construct one, and no
-tolerance value appears in this doc, a PR body, or an issue).
+"Outputs" below).
 
 **Corrected, not merely superseded: the original PR-4 design's own
 out-of-scope line said flipping `native_parity` "onto a schedule, a job

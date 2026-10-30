@@ -206,20 +206,23 @@ falling back to `EXACT` for anything undeclared (`tolerance.py`'s own
 and it declares `rules=()` — by design (its own docstring: a tier-0
 round trip that needs a tolerance has already lost information, which is
 the defect, not something to absorb) — so every field compares exact
-under it. Making `tolerance_policy` a parameter, rather than widening
-`SCORE_RECORD_V1` itself or hand-rolling a second policy object inside
-`engine/v2/ops`, is what keeps this a ONE-policy-type design: a future,
-user-ratified `TolerancePolicy` for the native-vs-legacy parity
-comparison specifically plugs into the SAME seam, is instantiated
-wherever that ratification lives, and is passed in by its caller — this
-package neither invents nor stores that object.
+under it. The native parity report supplies its own `NATIVE_PARITY_TOLERANCE`
+(`score_record.parity.v2`) through this same seam; it does not change the
+Phase 4/tier-0 policy. Contextual `Tolerance` rules can scale their allowance
+from named fields in the left record and require named fields to match on both
+sides before applying; rules without this context retain their ordinary
+absolute/relative behavior. The report policy is instantiated by its caller
+in `engine/v2/ops/native_parity_report.py`; this package neither invents nor
+stores that report-specific object. When a matched rule's required context is
+missing or unequal, it resolves to `EXACT`; first-match precedence means it
+does not continue to a later rule.
 
-**No per-field tolerance VALUE is added, chosen, or implied by this
-change, and none belongs in this doc** (`tolerance.py`'s own docstring
-names the failure mode this avoids: "chosen to make the first run pass").
-`engine/v2/ops/native_parity_report.py`'s own doc records that the
-default stays exact until a ratified policy is supplied there; this doc
-states only that the seam exists and how it is shaped, never a number.
+The report's approved per-field rules apply only to `ci_low` and `ci_high`:
+each endpoint may differ by at most 10% of the legacy CI width
+(`ci_high - ci_low`), and only when `n_analogs` is equal on both sides. A
+different analog pool size therefore keeps both endpoints exact. The report
+policy id is `score_record.parity.v2`; the shared `SCORE_RECORD_V1` remains
+exact with its original id.
 
 ## Invariants
 

@@ -187,13 +187,15 @@ def _float_finding(path: str, left: float, right: float, tol: Tolerance,
 
 
 def _compare_field(path: str, left: Any, right: Any, policy: TolerancePolicy,
-                   stage: str) -> Finding | None:
+                   stage: str, *, left_record: Mapping[str, Any],
+                   right_record: Mapping[str, Any]) -> Finding | None:
     """Compare one field path. Returns a finding, or None when they agree."""
+    tol = policy.for_field(path, left_record=left_record, right_record=right_record)
     kind = _kind(left, right)
     if _is_int(left) and _is_int(right):
         return None if kind is None else _int_finding(path, left, right, stage)
     if kind is None and isinstance(left, float) and isinstance(right, float):
-        return _float_finding(path, left, right, policy.for_field(path), stage)
+        return _float_finding(path, left, right, tol, stage)
     if kind is None:
         return None
     return Finding(
@@ -202,7 +204,7 @@ def _compare_field(path: str, left: Any, right: Any, policy: TolerancePolicy,
         field_path=path,
         left_value=None if left is _ABSENT else left,
         right_value=None if right is _ABSENT else right,
-        tolerance_applied=policy.for_field(path).reason,
+        tolerance_applied="exact",
         null_mask_left=left is None or left is _ABSENT,
         null_mask_right=right is None or right is _ABSENT,
         kind=kind,
@@ -401,7 +403,8 @@ def compare_records(
     findings = [
         f for f in (
             _compare_field(p, flat_left.get(p, _ABSENT), flat_right.get(p, _ABSENT),
-                           tolerance_policy, stage_plan.stage_of(p))
+                           tolerance_policy, stage_plan.stage_of(p),
+                           left_record=flat_left, right_record=flat_right)
             for p in paths
         ) if f is not None
     ]

@@ -423,8 +423,11 @@ def test_compare_reports_a_mismatch_without_raising_or_reconciling():
 
 
 def test_tolerance_policy_is_threaded_through_compare_dimension_and_report():
-    """A caller-supplied TolerancePolicy changes the verdict; the default
-    (SCORE_RECORD_V1, exact) does not. Proves the new ``tolerance_policy``
+    """A caller-supplied TolerancePolicy changes the verdict.
+
+    ``compare_dimension`` uses exact ``SCORE_RECORD_V1`` by default, while the
+    report uses ``NATIVE_PARITY_TOLERANCE``, which adds only analog CI rules
+    and still flags this simulation change. Proves the new ``tolerance_policy``
     keyword on ``compare_dimension`` and ``compare_native_vs_legacy`` is
     real, not a name that nothing reads."""
     rows = build_native_bundle_rows(_EMPTY_SCORE_DOC, _pairs())
@@ -444,7 +447,7 @@ def test_tolerance_policy_is_threaded_through_compare_dimension_and_report():
 
     default_report = compare_native_vs_legacy(legacy, rows, PARITY_DIMENSIONS)
     assert default_report["mismatches"] != []
-    assert default_report["tolerance_policy_id"] == "score_record.exact.v1"
+    assert default_report["tolerance_policy_id"] == "score_record.parity.v2"
 
     loose_report = compare_native_vs_legacy(
         legacy, rows, PARITY_DIMENSIONS, tolerance_policy=loose)
