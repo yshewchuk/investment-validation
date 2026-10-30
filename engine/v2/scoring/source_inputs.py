@@ -353,12 +353,13 @@ class SourceBundle:
     # which it conflicts with (refused at build, never resolved by
     # precedence). None: the ordinary path, unchanged.
     gate_forecast_source: "GateForecastSource | None" = None
-    # R4-20 gap 3 (sizing side): the SIZE fold's OWN held-out pool behind
-    # ``forecast_p10``/``_p90``/``_sd`` -- legacy
-    # ``Scorer._size_from_forecast``'s ``served.interval``, the fold's own
-    # ``pool_pred``/``pool_res`` in stored order (a model-owned population,
-    # like ``model_residual_rows``; never this row's answer). Not the gate's
-    # copy of it (``gate_forecast_pool`` above). Empty: undeclared.
+    # Native forecast uncertainty pool from the selected causal size fold:
+    # its ``pool_pred``/``pool_res`` in stored order (a model-owned population,
+    # never this row's answer). For STR-THRU, ``driver_prediction`` supplies
+    # the interval location when ``forecast_abs_move`` is absent; this pool
+    # does not create a sizing forecast or change structure selection.
+    # Separate from the gate's copy (``gate_forecast_pool`` above). Empty:
+    # undeclared.
     forecast_pool: Mapping[str, Any] = field(default_factory=dict)
     # R4-20 gap 5: the DYN-SV chooser champion as a frozen release binding,
     # ``{"binding_id"[, "output"]}``, for a DYNAMIC_MENU candidate. Empty:

@@ -688,7 +688,14 @@ def _bundle_or_refusal(
             key, binding, key.event_date, as_of, gate_source_cache)
         if isinstance(source, NativeScoreBatchRowRefusal):
             return source
-        return replace(bundle, gate_forecast_source=source)
+        return replace(
+            bundle, gate_forecast_source=source,
+            forecast_pool={
+                "predictions": source.pool_pred,
+                "residuals": source.pool_res,
+                "interval_floor": source.interval_floor,
+            },
+        )
     return bundle
 
 
