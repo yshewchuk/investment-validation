@@ -2,12 +2,12 @@
 import time
 
 from engine.v2.foundation import canonical_json, content_hash
-from engine.v2.foundation.experiment_holdouts import calendar_date
+from engine.v2.foundation.experiment_holdouts import ExperimentHoldouts, calendar_date
 from engine.v2.ops.errors import fail
 from engine.v2.research import eligible_history
 from engine.v2.research.eligibility_policy import eligibility_policy
 from engine.v2.research.experiment_population import load_population
-from experiments import size_prep_history
+from experiments import size_panel, size_prep_history
 from experiments.size_prep_inputs import _log
 
 TARGETS_VERSION = "size_prep_targets.v1"
@@ -22,8 +22,10 @@ def derive_workspace_targets(workspace, scope, record, *, tickers, event_start, 
                              history_start, metadata_limits, clock):
     """Derive universe ∩ retained development targets; refuses before writing; the read pin is last."""
     started = time.monotonic()
-    if (type(tickers) is not list or not tickers or tickers != sorted(set(tickers))
-            or any(type(t) is not str or not t for t in tickers)):
+    tickers_ok = (type(tickers) is list and bool(tickers)
+                  and all(type(t) is str and t for t in tickers)
+                  and tickers == sorted(set(tickers)))
+    if not tickers_ok:
         raise fail("INVALID_REQUEST", "sorted unique non-empty ticker list required")
     if (type(scope) is not str or type(as_of_month) is not str or type(history_start) is not str
             or type(event_start) is not str or type(event_end) is not str
@@ -35,6 +37,12 @@ def derive_workspace_targets(workspace, scope, record, *, tickers, event_start, 
         raise fail("INVALID_REQUEST", "canonical half-open event window required") from None
     if not first < last:
         raise fail("INVALID_REQUEST", "event window start must precede end")
+    size_panel.validate_panel_inputs({"source_start": event_start, "metadata_limits": metadata_limits})
+    try:
+        ExperimentHoldouts(as_of_month)
+        calendar_date(history_start)
+    except (ValueError, TypeError, OverflowError):
+        raise fail("INVALID_REQUEST", "canonical as-of month and history start required") from None
     _log("workspace targets start tickers=" + str(len(tickers)) + " window=" + event_start + ".." + event_end,
          started)
     repository, bounds = size_prep_history.checked_bounds(workspace, scope, record, metadata_limits)

@@ -48,7 +48,7 @@ def _prepared(bounds_ws, source_root, monkeypatch):
 
 
 def _fakes(monkeypatch, rows=_ROWS, plan=None):
-    calls = {"load": [], "plan": []}
+    calls = {"load": [], "plan": [], "bounds": []}
 
     def load(repository, snapshot, **kwargs):
         calls["load"].append(kwargs)
@@ -61,8 +61,15 @@ def _fakes(monkeypatch, rows=_ROWS, plan=None):
             raise plan
         return deepcopy(plan if plan is not None else _DEFAULT_PLAN)
 
+    real_bounds = hist.checked_bounds
+
+    def checked_bounds(workspace, scope, record, metadata_limits):
+        calls["bounds"].append(scope)
+        return real_bounds(workspace, scope, record, metadata_limits)
+
     monkeypatch.setattr(tgt, "load_population", load)
     monkeypatch.setattr(tgt.eligible_history, "plan_targets", plan_targets)
+    monkeypatch.setattr(hist, "checked_bounds", checked_bounds)
     return calls
 
 
@@ -99,17 +106,20 @@ def _pin_body(ws, name):
 
 def test_happy_path_filters_window_and_records_targets_pin(bounds_ws, source_root, monkeypatch):
     ws, clock, record, snapshot = _prepared(bounds_ws, source_root, monkeypatch)
-    calls = _fakes(monkeypatch)
+    rows = _ROWS + [("ev-onstart", "AAAA", "2024-01-01")]
+    universe = ["ev-onstart"] + _UNIVERSE
+    plan = {**_DEFAULT_PLAN, "retained": ["ev-onstart", "ev-start"]}
+    calls = _fakes(monkeypatch, rows=rows, plan=plan)
     doc = tgt.derive_workspace_targets(ws, "shadow", record, **_args(clock))
     assert calls["load"] == [{"as_of_month": "2024-01"}]
     kwargs = calls["plan"][0]
-    assert kwargs["event_ids"] == _UNIVERSE
+    assert "ev-onstart" in universe and kwargs["event_ids"] == universe
     assert kwargs["horizons"] == [1, 3, 5]
     assert kwargs["policy"] == eligibility_policy(version="grouped_ticker_embargo.v1", embargo_days=30)
     assert kwargs["as_of_month"] == "2024-01" and kwargs["history_start"] == "2020-01-01"
     assert kwargs["limits"] == hist._derive_history_limits(
-        Repository(ws.conn, ws.store, pin_snapshots=True), snapshot, len(_UNIVERSE))
-    assert doc["event_ids"] == ["ev-start"]
+        Repository(ws.conn, ws.store, pin_snapshots=True), snapshot, len(universe))
+    assert doc["event_ids"] == ["ev-onstart", "ev-start"]
     assert doc["dropped"] == [{"event_id": "ev-u", "reasons": ["label_bounds_unavailable"]},
                               {"event_id": "ev-x", "reasons": ["embargo_ticker"]}]
     assert doc["schema_version"] == tgt.TARGETS_VERSION
@@ -117,8 +127,8 @@ def test_happy_path_filters_window_and_records_targets_pin(bounds_ws, source_roo
     assert doc["bounds_snapshot_id"] == snapshot.snapshot_id
     assert doc["event_start"] == "2024-01-01" and doc["event_end"] == "2024-02-01"
     assert doc["tickers_sha"] == content_hash(["AAAA"])
-    assert doc["universe_count"] == 3 and doc["universe_sha"] == content_hash(_UNIVERSE)
-    assert doc["target_count"] == 1 and doc["targets_sha"] == content_hash(["ev-start"])
+    assert doc["universe_count"] == 4 and doc["universe_sha"] == content_hash(universe)
+    assert doc["target_count"] == 2 and doc["targets_sha"] == content_hash(["ev-onstart", "ev-start"])
     assert doc["dropped_count"] == 2 and doc["dropped_sha"] == content_hash(doc["dropped"])
     assert doc["eligibility_plan_id"] == "plan_1"
     assert doc["targets_id"] == content_hash(
@@ -145,7 +155,25 @@ def test_invalid_requests_refuse_before_any_read_or_pin(bounds_ws, source_root, 
                  {"event_start": "2024-1-1"}, {"event_end": "2024-02-30"},
                  {"event_start": "2024-02-01"}, {"event_start": "2024-02-02"}):
         _refusal(call(**over), "INVALID_REQUEST")
-    assert calls == {"load": [], "plan": []}
+    assert calls == {"load": [], "plan": [], "bounds": []}
+    assert _pin_names(ws) == pins
+
+
+def test_every_request_field_is_validated_before_any_read(bounds_ws, source_root, monkeypatch):
+    ws, clock, record, _ = _prepared(bounds_ws, source_root, monkeypatch)
+    calls = _fakes(monkeypatch)
+    pins = _pin_names(ws)
+
+    def call(**over):
+        return lambda: tgt.derive_workspace_targets(ws, "shadow", record, **_args(clock, **over))
+
+    for over, code in (({"tickers": [[]]}, "INVALID_REQUEST"),
+                       ({"tickers": [1, "A"]}, "INVALID_REQUEST"),
+                       ({"metadata_limits": {}}, "CONTRACT_MISMATCH"),
+                       ({"as_of_month": "bad"}, "INVALID_REQUEST"),
+                       ({"history_start": "bad"}, "INVALID_REQUEST")):
+        _refusal(call(**over), code)
+    assert calls == {"load": [], "plan": [], "bounds": []}
     assert _pin_names(ws) == pins
 
 
@@ -155,7 +183,7 @@ def test_empty_universe_refuses_no_targets_without_a_pin(bounds_ws, source_root,
     pins = _pin_names(ws)
     _refusal(lambda: tgt.derive_workspace_targets(ws, "shadow", record, **_args(clock)),
              "PUBLICATION_REFUSED", "no_targets")
-    assert calls == {"load": [{"as_of_month": "2024-01"}], "plan": []}
+    assert calls == {"load": [{"as_of_month": "2024-01"}], "plan": [], "bounds": ["shadow"]}
     assert _pin_names(ws) == pins
 
 
@@ -193,7 +221,7 @@ def test_moved_head_and_foreign_record_refuse_before_reads(bounds_ws, source_roo
     tampered["record_id"] = "sha256:" + "0" * 64
     _refusal(lambda: tgt.derive_workspace_targets(ws, "shadow", tampered, **_args(clock)),
              "PUBLICATION_REFUSED", "record_invalid")
-    assert calls == {"load": [], "plan": []}
+    assert calls == {"load": [], "plan": [], "bounds": ["shadow", "shadow"]}
     assert _pin_names(ws) == pins
 
 
