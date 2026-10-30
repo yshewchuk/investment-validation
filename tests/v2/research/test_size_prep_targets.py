@@ -27,7 +27,7 @@ _ROWS = [
 ]
 _UNIVERSE = ["ev-start", "ev-u", "ev-x"]
 _DEFAULT_PLAN = {"plan_id": "plan_1", "retained": ["ev-start"], "unavailable": ["ev-u"],
-                 "exclusions": [{"event_id": "ev-x", "reasons": ["embargo_ticker"]}]}
+                 "exclusions": [{"event_id": "ev-x", "reasons": ["embargo_ticker"]}], "before_start": []}
 
 
 def _bounds(bounds_ws, source_root):
@@ -149,7 +149,8 @@ def test_invalid_requests_refuse_before_any_read_or_pin(bounds_ws, source_root, 
         return lambda: tgt.derive_workspace_targets(ws, scope, record, **_args(clock, **over))
 
     for over in ({"tickers": ["BBBB", "AAAA"]}, {"tickers": ["AAAA", "AAAA"]}, {"tickers": []},
-                 {"tickers": [""]}, {"tickers": "AAAA"}, {"tickers": [1]},
+                 {"tickers": [""]}, {"tickers": [" AAAA"]}, {"tickers": ["AAAA "]}, {"tickers": "AAAA"},
+                 {"tickers": [1]},
                  {"scope": 123}, {"as_of_month": None}, {"history_start": 5},
                  {"metadata_limits": []}, {"metadata_limits": None},
                  {"event_start": "2024-1-1"}, {"event_end": "2024-02-30"},
@@ -201,7 +202,7 @@ def test_all_dropped_refuses_no_targets_without_a_pin(bounds_ws, source_root, mo
 def test_unaccounted_universe_event_refuses_plan_incomplete(bounds_ws, source_root, monkeypatch):
     ws, clock, record, _ = _prepared(bounds_ws, source_root, monkeypatch)
     _fakes(monkeypatch, plan={"plan_id": "plan_1", "retained": ["ev-start"],
-                              "unavailable": [], "exclusions": []})
+                              "unavailable": [], "exclusions": [], "before_start": []})
     pins = _pin_names(ws)
     _refusal(lambda: tgt.derive_workspace_targets(ws, "shadow", record, **_args(clock)),
              "PUBLICATION_REFUSED", "plan_incomplete")
@@ -223,6 +224,19 @@ def test_moved_head_and_foreign_record_refuse_before_reads(bounds_ws, source_roo
              "PUBLICATION_REFUSED", "record_invalid")
     assert calls == {"load": [], "plan": [], "bounds": ["shadow", "shadow"]}
     assert _pin_names(ws) == pins
+
+
+def test_before_start_universe_event_is_dropped_and_call_succeeds(bounds_ws, source_root, monkeypatch):
+    ws, clock, record, _ = _prepared(bounds_ws, source_root, monkeypatch)
+    calls = _fakes(monkeypatch, plan={"plan_id": "plan_1", "retained": ["ev-start"],
+                                      "unavailable": ["ev-u"], "exclusions": [],
+                                      "before_start": ["ev-x"]})
+    doc = tgt.derive_workspace_targets(ws, "shadow", record, **_args(clock))
+    assert doc["event_ids"] == ["ev-start"]
+    assert doc["dropped"] == [{"event_id": "ev-u", "reasons": ["label_bounds_unavailable"]},
+                              {"event_id": "ev-x", "reasons": ["before_history_start"]}]
+    assert doc["universe_count"] == 3 and doc["target_count"] == 1 and doc["dropped_count"] == 2
+    assert calls["plan"] and _pin_body(ws, "size-prep-targets:" + doc["targets_id"].split(":", 1)[1])
 
 
 def test_plan_producer_refusal_propagates_without_a_pin(bounds_ws, source_root, monkeypatch):

@@ -179,10 +179,14 @@ def plan_targets(repository, snapshot, *, as_of_month, policy, event_ids, horizo
     plan = _plan(repository, snapshot, as_of_month=as_of_month, policy=policy, event_ids=event_ids,
         horizons=horizons, history_start=history_start, limits=limits, strict=False)
     eligibility, requested = plan["eligibility"], set(event_ids)
+    days = plan["population"].set_index("event_id", drop=False).event_date.dt.strftime("%Y-%m-%d")
+    start = plan["start"].isoformat()
+    before_start = sorted(key for key in requested if key in days.index and days[key] < start)
     return {"plan_id": eligibility["plan_id"],
         "retained": sorted(requested & set(eligibility["retained_event_ids"])),
         "unavailable": sorted(requested & set(plan["unavailable"])),
-        "exclusions": [e for e in eligibility["exclusions"] if e["event_id"] in requested]}
+        "exclusions": [e for e in eligibility["exclusions"] if e["event_id"] in requested],
+        "before_start": before_start}
 
 
 def _prepare(repository, snapshot, *, as_of_month, policy, event_ids, horizons, history_start, limits,

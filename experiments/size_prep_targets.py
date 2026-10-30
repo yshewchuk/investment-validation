@@ -23,7 +23,7 @@ def derive_workspace_targets(workspace, scope, record, *, tickers, event_start, 
     """Derive universe ∩ retained development targets; refuses before writing; the read pin is last."""
     started = time.monotonic()
     tickers_ok = (type(tickers) is list and bool(tickers)
-                  and all(type(t) is str and t for t in tickers)
+                  and all(type(t) is str and t and t == t.strip() for t in tickers)
                   and tickers == sorted(set(tickers)))
     if not tickers_ok:
         raise fail("INVALID_REQUEST", "sorted unique non-empty ticker list required")
@@ -63,6 +63,7 @@ def derive_workspace_targets(workspace, scope, record, *, tickers, event_start, 
         raise _no_targets()
     excluded = {e["event_id"]: e["reasons"] for e in plan["exclusions"]}
     unavailable = set(plan["unavailable"])
+    before_start = set(plan["before_start"])
     retained = set(targets)
     dropped = []
     for event_id in universe:
@@ -72,6 +73,8 @@ def derive_workspace_targets(workspace, scope, record, *, tickers, event_start, 
             dropped.append({"event_id": event_id, "reasons": excluded[event_id]})
         elif event_id in unavailable:
             dropped.append({"event_id": event_id, "reasons": ["label_bounds_unavailable"]})
+        elif event_id in before_start:
+            dropped.append({"event_id": event_id, "reasons": ["before_history_start"]})
         else:
             raise fail("PUBLICATION_REFUSED", "the eligibility plan does not account for a universe event",
                        details={"reason": "plan_incomplete"})

@@ -1,4 +1,5 @@
 """Non-strict target planning in the eligible-history backend."""
+from datetime import date
 from types import SimpleNamespace
 
 import pandas as pd
@@ -42,7 +43,11 @@ def test_plan_targets_intersects_requests_without_materializing(monkeypatch):
                                 "retained_event_ids": ["ev-b", "contributor"],
                                 "exclusions": [{"event_id": "ev-a", "reasons": ["embargo_ticker"]},
                                                {"event_id": "absent", "reasons": ["other"]}]},
-                "unavailable": ["ev-c", "ghost"]}
+                "unavailable": ["ev-c", "ghost"], "start": date(2020, 1, 1),
+                "population": pd.DataFrame([
+                    {"event_id": "ev-a", "event_date": pd.Timestamp("2024-01-05")},
+                    {"event_id": "ev-b", "event_date": pd.Timestamp("2024-01-08")},
+                    {"event_id": "ev-c", "event_date": pd.Timestamp("2024-01-10")}])}
 
     monkeypatch.setattr(backend, "_plan", fake_plan)
     monkeypatch.setattr(backend, "_materialize",
@@ -52,4 +57,43 @@ def test_plan_targets_intersects_requests_without_materializing(monkeypatch):
                                   history_start="2020-01-01", limits={})
     assert captured["strict"] is False
     assert result == {"plan_id": "plan_1", "retained": ["ev-b"], "unavailable": ["ev-c"],
-                      "exclusions": [{"event_id": "ev-a", "reasons": ["embargo_ticker"]}]}
+                      "exclusions": [{"event_id": "ev-a", "reasons": ["embargo_ticker"]}],
+                      "before_start": []}
+
+
+def test_plan_targets_reports_events_before_history_start(monkeypatch):
+    def fake_plan(repository, snapshot, **kwargs):
+        return {"eligibility": {"plan_id": "plan_1", "retained_event_ids": ["ev-in"],
+                                "exclusions": [{"event_id": "ev-x", "reasons": ["embargo_ticker"]}]},
+                "unavailable": [], "start": date(2024, 1, 1),
+                "population": pd.DataFrame([
+                    {"event_id": "ev-before", "ticker": "AAAA", "event_date": pd.Timestamp("2023-12-31")},
+                    {"event_id": "ev-in", "ticker": "AAAA", "event_date": pd.Timestamp("2024-01-05")},
+                    {"event_id": "ev-x", "ticker": "AAAA", "event_date": pd.Timestamp("2024-01-15")}])}
+
+    monkeypatch.setattr(backend, "_plan", fake_plan)
+    monkeypatch.setattr(backend, "_materialize",
+                        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("materialized")))
+    result = backend.plan_targets(object(), object(), as_of_month="2024-01", policy={},
+                                  event_ids=["ev-before", "ev-in", "ev-x"], horizons=[1, 3, 5],
+                                  history_start="2024-01-01", limits={})
+    assert result["before_start"] == ["ev-before"]
+
+
+def test_plan_targets_reports_requested_events_before_history_start(monkeypatch):
+    def fake_plan(repository, snapshot, **kwargs):
+        return {"eligibility": {"plan_id": "plan_1", "retained_event_ids": [], "exclusions": []},
+                "unavailable": [], "start": date(2020, 1, 1),
+                "population": pd.DataFrame([
+                    {"event_id": "ev-before", "event_date": pd.Timestamp("2019-06-01")},
+                    {"event_id": "ev-early", "event_date": pd.Timestamp("2019-12-31")},
+                    {"event_id": "ev-onstart", "event_date": pd.Timestamp("2020-01-01")},
+                    {"event_id": "ev-after", "event_date": pd.Timestamp("2024-01-05")},
+                    {"event_id": "unrequested-old", "event_date": pd.Timestamp("2018-01-01")}])}
+
+    monkeypatch.setattr(backend, "_plan", fake_plan)
+    result = backend.plan_targets(object(), object(), as_of_month="2024-01", policy={},
+                                  event_ids=["ev-before", "ev-early", "ev-onstart", "ev-after"],
+                                  horizons=[1, 3, 5], history_start="2020-01-01", limits={})
+    assert result["before_start"] == ["ev-before", "ev-early"]
+    assert "unrequested-old" not in result["before_start"]
