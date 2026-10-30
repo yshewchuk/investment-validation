@@ -219,10 +219,10 @@ separate user-only final holdout read.
 
 `horizon_fit_inputs.prepare_horizon_inputs` assembles ordered selected-column training/prediction float arrays and freezes original null-preserving input hashes under an explicit training-target column; reserved matrix keys refuse ValueError before event-ID/column iterables are materialized once for reuse.
 It reads no evaluation targets, preserves signed labels without a floor and returns detached arrays/evidence. Caller owns target/domain validation, source/membership admission and fitting; no I/O, cache, guards, policy inference or production entrypoint. Its current caller is offline `experiments.magnitude_fitted`, preserving legacy magnitude evidence bytes.
-`event_history.load_event_history(repository, snapshot, *, event_id, as_of_month, decision_session, history_start, purpose="selection")` constructs prior-event features for one admitted canonical target.
-Both dates are explicit calendar days with `history_start <= decision_session <= target event day`.
-Shared `load_population` admits the target and excludes random, rolling and ambiguous history identities before any outcome access.
-Candidates are the same ticker's events in `[history_start, min(target day, decision_session))`.
+`horizon_fitted.fitted_forecasts` shares the per-horizon fit loop using closed numeric routes and explicit target column/domain. Both guards run before input inspection; ID/horizon/column iterables materialize once; regression recipe/domain must match and magnitude routes require nonnegative outcomes. Caller still owns sealed source/target identity and admitted membership; no evaluation labels or repository are accepted.
+Started/completed progress surrounds each fit; original inputs are hashed first and labels copied per horizon. Signed predictions need only be finite (no floor); nonnegative routes reject negative forecasts. Candidate diagnostics preserve full nonprediction results.
+Only fit/forecast-validation exceptions become native `HorizonFitFailure` with original `__cause__`; preparation/progress errors propagate. Callbacks receive deep-copied evidence. No partial predictions/evidence return, but callbacks/diagnostics are provisional. No retries, writes or production entrypoint; offline magnitude wrapper retains its legacy exception/strict-failure policy.
+`event_history.load_event_history(repository, snapshot, *, event_id, as_of_month, decision_session, history_start, purpose="selection")` constructs prior-event features for one admitted target, with explicit calendar days satisfying `history_start <= decision_session <= target event day`; shared `load_population` excludes random, rolling and ambiguous history before outcome reads. Candidates are same-ticker events in `[history_start, min(target day, decision_session))`.
 
 Every candidate query is planned before any outcome scan, using the same
 fragment planner as Repository. Preflight indexes fragment metadata once by
