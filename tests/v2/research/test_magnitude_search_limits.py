@@ -215,7 +215,7 @@ def test_fixed_worker_observes_requested_singleton_cpu(monkeypatch, tmp_path, pi
 def test_fixed_worker_observes_all_thread_and_resource_limits(monkeypatch, tmp_path):
     actual, limits = observe_worker_containment(monkeypatch, tmp_path, min(os.sched_getaffinity(0)))
     assert actual["threads"] == dict.fromkeys(THREAD_VARIABLES, "1")
-    assert actual["memory"] == [limits["memory_bytes"]] * 2
+    assert actual["memory"][0] != limits["memory_bytes"]
     assert actual["cpu"] == [limits["cpu_seconds"], limits["cpu_seconds"] + 1]
 
 

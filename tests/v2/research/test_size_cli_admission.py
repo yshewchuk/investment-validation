@@ -19,7 +19,7 @@ def args(action="report"):
 
 
 def setup_cli(monkeypatch):
-    monkeypatch.setattr(cli, "_contain", lambda request: None)
+    monkeypatch.setattr(cli, "_contain", lambda request: 2 ** 33)
     monkeypatch.setattr(cli, "_read_document", lambda path: {})
     monkeypatch.setattr(cli, "experiment_spec_from_document", lambda doc: object())
     monkeypatch.setattr(cli, "connect", lambda *a, **k: SimpleNamespace(close=lambda: None))
@@ -289,21 +289,26 @@ def test_parent_memory_error_has_static_refusal_and_closes_catalog(monkeypatch, 
     assert "Traceback" not in output.err and "private allocation detail" not in output.out
 
 
-def test_recoverable_real_parent_address_space_failure_is_json_exit_two():
+def test_recoverable_real_parent_rss_failure_is_json_exit_two():
     import subprocess
     import sys
-    code = '''import resource
+    code = '''import time
 from pathlib import Path
 from experiments import size_search as cli
 cli._read_document = lambda path: {}
 cli.experiment_spec_from_document = lambda doc: object()
 def contain(request):
-    current = int(Path('/proc/self/statm').read_text().split()[0]) * resource.getpagesize()
-    ceiling = current + (16 << 20)
-    resource.setrlimit(resource.RLIMIT_AS, (ceiling, ceiling))
+    with open('/proc/self/status', encoding='ascii') as stream:
+        for line in stream:
+            if line.startswith('VmRSS:'):
+                current = int(line.split()[1]) * 1024
+                break
+    return current + (32 << 20)
 cli._contain = contain
 def allocate(*args, **kwargs):
-    return bytearray(64 << 20)
+    block = bytearray(128 << 20)
+    block[::4096] = b"\\1" * len(range(0, len(block), 4096))
+    time.sleep(5)
 cli.connect = allocate
 raise SystemExit(cli.main(['report','--spec','spec','--request','request','--plan-ref','ref',
     '--catalog','catalog','--store-root','/tmp','--no-ledger']))
