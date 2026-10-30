@@ -8,6 +8,7 @@ import pytest
 from engine.v2.data.repository import Repository
 from engine.v2.foundation import canonical_json, content_hash
 from engine.v2.ops.errors import OpsError, fail
+from experiments import eligible_history, size_panel
 from experiments import size_prep_history as hist
 from experiments import size_prep_inputs as prep
 from tests.v2.research.test_size_prep_inputs import (  # noqa: F401
@@ -253,3 +254,23 @@ def test_provenance_file_that_is_oversized_or_a_symlink_is_refused(bounds_ws, so
     _refusal(lambda: hist.prepare_workspace_panel(ws, "shadow", record, **_args(clock)),
              "PUBLICATION_REFUSED", "record_invalid")
     assert calls["history"] == []
+
+
+def test_derived_limits_and_request_shape_are_accepted_by_the_real_producer_validators(
+        bounds_ws, source_root, monkeypatch):
+    ws, clock, record, _, snapshot = _repo_record(bounds_ws, source_root)
+    calls = _fake(monkeypatch)
+    monkeypatch.setattr(hist, "HISTORY_TABLES",
+                        tuple(t for t in hist.HISTORY_TABLES if t in snapshot.table_versions))
+    hist.prepare_workspace_panel(ws, "shadow", record, **_args(clock))
+    kw = calls["history"][0]
+    pk = calls["panel"][0]
+    eligible_history.validate_request(kw)
+    assert set(pk) == size_panel._HISTORY_KEYS | size_panel._PANEL_KEYS
+    assert {k: pk[k] for k in size_panel._HISTORY_KEYS} == kw
+    bad = deepcopy(kw)
+    bad["limits"] = dict(bad["limits"])
+    bad["limits"]["max_source_rows"] = 0
+    with pytest.raises(Exception) as raised:
+        eligible_history.validate_request(bad)
+    assert raised.value.code == "CONTRACT_MISMATCH"
