@@ -78,6 +78,9 @@ def issue(store, bindings, registration):
 
 def admit(store, ref, bindings, spec):
     """Verify the receipt against current cheap inputs; return registration and prepared spec."""
+    if not isinstance(spec, ExperimentSpec) or not isinstance(ref, ArtifactRef):
+        raise fail("INVALID_EXPERIMENT_SPEC",
+                   "SIZE receipt admission requires a specification and an artifact reference")
     if spec.input_files:
         raise fail("INVALID_EXPERIMENT_SPEC",
                    "native registration requires a Python runner and no file inputs")

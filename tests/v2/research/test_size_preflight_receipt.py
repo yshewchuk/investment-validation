@@ -121,6 +121,15 @@ def test_changed_experiment_id_is_input_mismatch(case):
     assert caught.value.problem.details == {"reason": "receipt_input_mismatch"}
 
 
+def test_admit_requires_typed_arguments(case):
+    bindings = bindings_for(case)
+    ref = issue(case.store, bindings, case.registration)
+    for spec, reference in ((None, ref), (case.spec, None), (case.spec, "x")):
+        with pytest.raises(OpsError) as caught:
+            admit(case.store, reference, bindings, spec)
+        assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
+
+
 def test_input_files_refused(case):
     bindings = bindings_for(case)
     ref = issue(case.store, bindings, case.registration)
