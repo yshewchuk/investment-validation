@@ -123,10 +123,14 @@ class SearchTrials:
             history_failure=fail("EXPERIMENT_IDENTITY_CONFLICT", "search native history binding changed"))
 
     def _cohort_inputs(self, cohort, inner):
-        """Admit a cohort once while it is the current one; only the latest cohort is retained; failures are never memoised."""
+        """Keep only the latest cohort resident; a revisit of a published cohort reloads its manifest; failures are never memoised."""
         if cohort not in self._memo:
-            self._memo.clear()  # at most one cohort resident: release the previous one before admitting
-            self._memo[cohort] = self._inputs(inner)
+            self._memo.clear()  # at most one cohort resident: release the previous one before loading
+            if cohort in self._published:
+                manifest, inputs_id = self._published[cohort]
+                self._memo[cohort] = load_inputs(self.store, manifest, inputs_id)
+            else:
+                self._memo[cohort] = self._inputs(inner)
         return self._memo[cohort]
 
     def _cohort(self, admitted):

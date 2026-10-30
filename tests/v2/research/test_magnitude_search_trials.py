@@ -350,6 +350,23 @@ def test_cohort_memo_holds_one_cohort_and_replays_unchanged(case, monkeypatch):
     assert case.recorder.freeze()
 
 
+def test_candidate_first_order_admits_each_cohort_once_and_revisits_match_published(case, monkeypatch):
+    admissions = []
+    original = case.recorder._inputs
+    monkeypatch.setattr(case.recorder, "_inputs", lambda fold: admissions.append(fold["year"]) or original(fold))
+    ordered = sorted(trial_cases(case), key=lambda args: (args[2], args[0], args[1]))  # production order: candidate outermost
+    first = {}
+    for args in ordered:
+        started = case.recorder.start(*args)
+        assert len(case.recorder._memo) == 1
+        first.setdefault((args[0], args[1]), started["inputs"])
+        assert started["inputs"] == first[(args[0], args[1])]
+        admitted = case.recorder._read("inputs:" + started["trial_id"])
+        assert admitted["inputs_id"] == publish_inputs(case.recorder.store, started["inputs"])[1]
+        case.recorder.record(*args, forecasts=trial_forecasts(case, args))
+    assert len(admissions) == len(first) > 1
+
+
 def test_record_compares_cohort_inputs_by_streaming_hash(case, monkeypatch):
     args = trial_cases(case)[0]
     started = case.recorder.start(*args)
@@ -367,6 +384,7 @@ def test_native_input_drift_blocks_selection_without_excluding_candidate(case, m
     args = trial_cases(case)[0]
     started = case.recorder.start(*args)
     case.recorder._memo.clear()
+    case.recorder._published.clear()  # a fresh instance has no published cohorts and re-admits
     original = case.recorder._inputs
     monkeypatch.setattr(case.recorder, "_inputs", lambda fold: {**original(fold), "stored_inputs_id": "changed"})
     monkeypatch.setattr(trials, "load_magnitude_targets", lambda *a, **k: pytest.fail("validation opened"))
@@ -381,6 +399,7 @@ def test_native_history_binding_drift_refuses_exactly_before_readmission(case, m
     args = trial_cases(case)[0]
     started = case.recorder.start(*args)
     case.recorder._memo.clear()
+    case.recorder._published.clear()  # a fresh instance has no published cohorts and re-admits
     changed = {**case.source.registration.document["magnitude_history"], "unexpected_identity": "changed"}
     monkeypatch.setattr(evidence, "history_binding", lambda *a, **k: changed)
     monkeypatch.setattr(evidence, "preflight_magnitude_targets", lambda *a, **k: pytest.fail("preflight opened"))
