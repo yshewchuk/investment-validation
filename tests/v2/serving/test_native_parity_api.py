@@ -141,7 +141,7 @@ def test_authenticated_summary_and_bounded_detail_pages(parity):
     assert summary["source_schema_version"] == "native_parity_report.v1.3"
     assert summary["as_of"] == AS_OF
     assert summary["generated_at"] == GENERATED_AT
-    assert summary["tolerance_policy_id"] == "score_record.exact.v1"
+    assert summary["tolerance_policy_id"] == "score_record.parity.v2"
     assert summary["compared_count"] == 3
     assert summary["matched_row_count"] == 1
     assert summary["mismatched_row_count"] == 2

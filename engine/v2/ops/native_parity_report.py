@@ -5,9 +5,10 @@ This module is the reporting half of the native shadow-serving seam
 it compares the legacy rows the projection already carries with the native rows
 ``build_native_bundle_rows`` built, and writes the differences down.  It is
 deliberately NOT a second comparator: every per-dimension verdict comes from
-``engine.v2.parity.dimensions.compare_dimension`` -- the same tolerance policy,
-the same ``engine.v2.diagnosis`` machinery and the same field groups the Phase
-4 corpus comparison uses -- so the nightly report can never drift away from the
+``engine.v2.parity.dimensions.compare_dimension`` -- the same shared comparator
+machinery and field groups as the Phase 4 corpus comparison, under this report's
+own tolerance policy while Phase 4 keeps its exact policy -- so the nightly
+report can never drift away from the
 checker it reports on.  That module is where the checker's comparator moved
 (``spec_ns_c`` part c: production never imports ``checks/``, and "never
 duplicate the comparison logic here"); no comparison rule is re-implemented in
@@ -53,9 +54,10 @@ from engine.v2.parity.dimensions import (
     compare_dimension,
 )
 from engine.v2.parity.financial_diagnostics import expected_financial_diagnostics
-from engine.v2.parity.tolerance import SCORE_RECORD_V1, TolerancePolicy
+from engine.v2.parity.tolerance import Tolerance, TolerancePolicy
 
 __all__ = [
+    "NATIVE_PARITY_TOLERANCE",
     "PARITY_DIMENSIONS",
     "SCHEMA_VERSION",
     "apply_native_refusals",
@@ -92,6 +94,28 @@ _DIMENSION_FIELDS: dict[str, tuple[str, ...]] = {
     "verdicts": GATE_FIELDS,
     "analogs": ANALOG_FIELDS,
 }
+
+#: The native-vs-legacy parity report's own tolerance policy: the two analog
+#: CI rules compare within 10% of the legacy analog CI width when the analog
+#: counts match.  This is report-specific; the Phase 4 exact policy
+#: (``SCORE_RECORD_V1``) remains unchanged.
+NATIVE_PARITY_TOLERANCE = TolerancePolicy(
+    policy_id="score_record.parity.v2",
+    rules=(
+        ("ci_low", Tolerance(
+            relative=0.10,
+            reason="within 10% of legacy analog CI width when n_analogs match",
+            scale_fields=("ci_low", "ci_high"),
+            require_equal_fields=("n_analogs",),
+        )),
+        ("ci_high", Tolerance(
+            relative=0.10,
+            reason="within 10% of legacy analog CI width when n_analogs match",
+            scale_fields=("ci_low", "ci_high"),
+            require_equal_fields=("n_analogs",),
+        )),
+    ),
+)
 
 #: Every one of the checker's five numeric field groups.  ``forecasts`` and
 #: ``financial_diagnostics`` carry the served numbers, so they are compared
@@ -337,7 +361,7 @@ def compare_native_vs_legacy(
     native_rows: dict[str, dict],
     dimensions: tuple[str, ...],
     *,
-    tolerance_policy: TolerancePolicy = SCORE_RECORD_V1,
+    tolerance_policy: TolerancePolicy = NATIVE_PARITY_TOLERANCE,
 ) -> dict:
     """Classify every row key against the checker's per-dimension comparator.
 
@@ -351,14 +375,15 @@ def compare_native_vs_legacy(
 
     ``tolerance_policy`` is the ONE config policy every numeric dimension's
     comparison reads (never a per-dimension or per-field override threaded
-    in some other way): it defaults to ``engine.v2.parity.tolerance.SCORE_RECORD_V1``,
-    which declares zero rules, so the default is exact for every field and
-    this parameter's addition changes no existing caller's behavior. A
-    caller that has a user-approved, per-field ``TolerancePolicy`` for the
-    native-vs-legacy comparison specifically (never for the Phase 4
-    checker's own tier-0-style exact check, which does not pass this
-    argument) supplies it here; this module invents no field's tolerance
-    value itself.
+    in some other way): it defaults to this report-specific policy,
+    :data:`NATIVE_PARITY_TOLERANCE`, which carries the two analog CI rules
+    (``ci_low``/``ci_high`` within 10% of the legacy analog CI width when
+    ``n_analogs`` match). The Phase 4 exact policy,
+    ``engine.v2.parity.tolerance.SCORE_RECORD_V1``, remains unchanged for
+    the checker's own tier-0-style exact check, which does not pass this
+    argument. A caller that has a user-approved, per-field
+    ``TolerancePolicy`` for the native-vs-legacy comparison specifically
+    supplies it here; this module invents no field's tolerance value itself.
 
     G2: this function classifies and returns; it has no path that writes a
     native value into a legacy row or the reverse, and a mismatch never raises.
@@ -654,11 +679,11 @@ def run_native_parity_worker(parameters: Mapping[str, Any], root: Path, *,
                 or not native_refusals and unkeyable_refusals)))
     if refusal_explains_absence:
         report = _empty_native_report(
-            legacy_rows, native_rows, PARITY_DIMENSIONS, SCORE_RECORD_V1)
+            legacy_rows, native_rows, PARITY_DIMENSIONS, NATIVE_PARITY_TOLERANCE)
     else:
         report = compare_native_vs_legacy(
             legacy_rows, native_rows, PARITY_DIMENSIONS,
-            tolerance_policy=SCORE_RECORD_V1)
+            tolerance_policy=NATIVE_PARITY_TOLERANCE)
     report = apply_native_refusals(report, native_refusals, unkeyable_refusals)
     report = _stamp_report_identity(report, as_of=as_of, clock=clock)
     (root / "native_parity_report.json").write_text(
@@ -680,7 +705,7 @@ def native_parity_handler(
     native_rows: dict[str, dict],
     report_path: Path | str,
     dimensions: tuple[str, ...] = PARITY_DIMENSIONS,
-    tolerance_policy: TolerancePolicy = SCORE_RECORD_V1,
+    tolerance_policy: TolerancePolicy = NATIVE_PARITY_TOLERANCE,
     clock: Clock = SystemClock(),
 ) -> Callable[[dict], dict]:
     """Build the ``nightly.GRAPH`` handler for the ``native_parity`` stage.
@@ -692,8 +717,9 @@ def native_parity_handler(
     ``write`` failures propagate: ``nightly._run_stage`` already degrades an
     OPTIONAL stage rather than blocking the board.
 
-    ``tolerance_policy`` defaults to ``SCORE_RECORD_V1`` (exact for every
-    field, unchanged from before this parameter existed) and is passed
+    ``tolerance_policy`` defaults to this report-specific policy,
+    :data:`NATIVE_PARITY_TOLERANCE` (the two analog CI rules; the Phase 4
+    exact policy ``SCORE_RECORD_V1`` remains unchanged), and is passed
     straight through to :func:`compare_native_vs_legacy` -- see that
     function's docstring for what a caller may plug in here.
 
