@@ -11,6 +11,8 @@ from engine.v2.foundation import SystemClock, content_hash
 from engine.v2.research import magnitude_panel_qualified_table as table
 from engine.v2.research._snapshot import artifact_store, catalog_connection
 
+_FRAGMENT_ROWS = 3  # one event's horizons per stored fragment
+
 
 def _slot(context):
     return "qualified-size-panel-" + context["context_id"].removeprefix("sha256:")
@@ -103,7 +105,7 @@ def publish(repository, source, context, rows):
     chunk = []
     for row in rows:
         chunk.append(row)
-        if len(chunk) == 3:
+        if len(chunk) == _FRAGMENT_ROWS:
             publish_chunk(chunk)
             chunk = []
     if chunk:
@@ -124,10 +126,7 @@ def publish(repository, source, context, rows):
     return committed.snapshot_ref
 
 
-def read(repository, snapshot, context, columns):
-    if (existing(repository, context) != snapshot or set(snapshot.table_versions) != {table.TABLE}
-            or repository.table_contract(snapshot, table.TABLE) != table.CONTRACT):
-        raise fail("HOLDOUT_ACCESS_DENIED", "input is not the exact qualified panel artifact")
+def _bounded_query(repository, snapshot, context):
     limits = context["request"]["limits"]
     count = len(context["target_events"]) * 3
     records = repository.fragment_records(snapshot, table.TABLE)
@@ -135,12 +134,21 @@ def read(repository, snapshot, context, columns):
             or any(r.object_ref.byte_size > limits["max_object_bytes"] for r in records)
             or sum(r.object_ref.byte_size for r in records) > limits["max_total_bytes"]):
         raise fail("RESULT_LIMIT_EXCEEDED", "stored panel exceeds explicit bounds")
-    request = DataQuery(snapshot_id=snapshot.snapshot_id,
+    return DataQuery(snapshot_id=snapshot.snapshot_id,
         table_contract_ref=snapshot.table_versions[table.TABLE].table_contract_ref,
         columns=tuple(c.name for c in table.CONTRACT.columns), order_by=table.CONTRACT.primary_key,
         key_filter=(KeyPredicate(column="context_id", operator="eq", values=(context["context_id"],)),),
-        max_batch_rows=min(count, table.CONTRACT.maximum_batch_rows), max_result_rows=count)
-    rows = [r for b in repository.scan(request, table_name=table.TABLE,
-        max_object_bytes=limits["max_object_bytes"]) for r in b.to_pylist()]
-    rows = list(_validate(rows, context))
-    return [{k: row[k] for k in (*table.METADATA, *columns)} for row in rows]
+        max_batch_rows=min(count, max((r.row_count for r in records), default=0),
+                           table.CONTRACT.maximum_batch_rows), max_result_rows=count)
+
+
+def read(repository, snapshot, context, columns, lineage=True):
+    if (existing(repository, context) != snapshot or set(snapshot.table_versions) != {table.TABLE}
+            or repository.table_contract(snapshot, table.TABLE) != table.CONTRACT):
+        raise fail("HOLDOUT_ACCESS_DENIED", "input is not the exact qualified panel artifact")
+    request = _bounded_query(repository, snapshot, context)
+    # Stream: lineage cells are multi-MB, so validate each row and keep only its projection.
+    batches = (r for b in repository.scan(request, table_name=table.TABLE,
+        max_object_bytes=context["request"]["limits"]["max_object_bytes"]) for r in b.to_pylist())
+    keep = (*(m for m in table.METADATA if lineage or m != "lineage"), *columns)
+    return [{k: row[k] for k in keep} for row in _validate(batches, context)]
