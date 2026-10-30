@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from engine.v2.data import errors as data_errors
 from engine.v2.data.repository import Repository
 from engine.v2.foundation import canonical_json, content_hash
 from engine.v2.ops.errors import OpsError, fail
@@ -43,7 +44,7 @@ def _fake(monkeypatch):
 def _args(clock, **over):
     kwargs = dict(event_ids=["event-b", "event-a"], as_of_month="2024-01",
                   history_start="2020-01-01", source_start="2021-01-01",
-                  metadata_limits={"max_x": 1}, clock=clock)
+                  metadata_limits={k: 1 for k in hist.size_panel._METADATA_LIMITS}, clock=clock)
     kwargs.update(over)
     return kwargs
 
@@ -98,7 +99,8 @@ def test_happy_path_binds_history_panel_limits_and_read_pin(bounds_ws, source_ro
     panel = calls["panel"][0]
     assert panel["history_snapshot"].snapshot_id == "snap_hist"
     assert panel["price_history_snapshot"].snapshot_id == record["bounds_snapshot_id"]
-    assert panel["source_start"] == "2021-01-01" and panel["metadata_limits"] == {"max_x": 1}
+    assert panel["source_start"] == "2021-01-01" and panel["metadata_limits"] == {
+        k: 1 for k in hist.size_panel._METADATA_LIMITS}
     expected = _expected_limits(ws, snapshot.snapshot_id, hist.HISTORY_TABLES, len(ids), 2)
     assert panel["limits"] == expected
     name = "size-prep-panel:" + doc["panel_id"].split(":", 1)[1]
@@ -215,6 +217,19 @@ def test_malformed_inputs_are_refused_before_producers(bounds_ws, source_root, m
                  {"metadata_limits": []}, {"scope": 123}):
         _refusal(lambda over=over: call(**over), "INVALID_REQUEST")
     assert calls == {"history": [], "panel": []}
+
+
+def test_panel_only_inputs_are_validated_before_history(bounds_ws, source_root, monkeypatch):
+    ws, clock, record, _, snapshot = _repo_record(bounds_ws, source_root)
+    calls = _fake(monkeypatch)
+    monkeypatch.setattr(hist, "HISTORY_TABLES",
+                        tuple(t for t in hist.HISTORY_TABLES if t in snapshot.table_versions))
+    for over in ({"metadata_limits": {"max_x": 1}}, {"source_start": "2021-1-1"},
+                 {"source_start": "not-a-date"}):
+        with pytest.raises(data_errors.DataError) as raised:
+            hist.prepare_workspace_panel(ws, "shadow", record, **_args(clock, **over))
+        assert raised.value.code == "CONTRACT_MISMATCH"
+        assert calls["history"] == []
 
 
 def test_scope_admission_is_complete_before_any_read(bounds_ws, source_root, monkeypatch):

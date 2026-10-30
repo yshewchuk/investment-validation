@@ -76,6 +76,7 @@ def prepare_workspace_panel(workspace, scope, record, *, event_ids, as_of_month,
             or type(metadata_limits) is not dict):
         raise fail("INVALID_REQUEST", "invalid workspace panel request")
     validate_size_scope_request(workspace, scope)
+    size_panel.validate_panel_inputs({"source_start": source_start, "metadata_limits": metadata_limits})
     if not _record_matches(workspace, record):
         raise _record_invalid()
     row = workspace.conn.execute(
