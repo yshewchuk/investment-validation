@@ -1,12 +1,12 @@
 # Experiments architecture
 
-## Native preregistration
+## IV-crush preparation and native preregistration
 
-`native_registration.register_native` explicitly registers one resolved arm before evaluation; `require_native_registration` is its read-only admission check.
-Both pin the current scope head once and read canonical event metadata through the shared holdout population reader, never outcomes or prior results.
-The stable registration key is experiment ID plus primary arm. Its immutable binding includes the full resolved plan, detached spec hash, exact snapshot,
-static source closure, numerical environment and declared single-thread policy, scope, eligible event IDs and versioned holdout context. External input files and non-Python runner paths are refused.
-The caller supplies the checkout root used for source fingerprinting.
+`iv_crush_prepare.prepare_iv_crush_targets` accepts a research workspace, selection month/optional event IDs, positive row/decoded-byte/object/output-byte caps; it returns distinct source/target snapshots and aggregate arithmetic target/skip coverage.
+Shared population admission precedes daily reads. All original earnings metadata (including excluded aliases/conflicts) survives; selected tickers retain all adjacent daily IV30 rows in percent units, streamed in primary-key order and consumed one ticker at a time. Canonical midnight dates are required; existing `iv_crush.build_rows` defines signed labels/skips without imputation or a -100 floor.
+Shared native-row reads avoid nullable-integer loss; shared event-target publication writes only the workspace catalog/store. Source identities and reconstructed availability are not authenticated publication evidence. Invalid workspace/dates/IV units refuse `CONTRACT_MISMATCH`; existing holdout/resource/native refusals propagate, no partial snapshot/retry/provider/fitting/registration. Metadata and targets remain collected; no full daily list or all-ticker quote copies remain. Publication starts only after successful scan exhaustion. Bounded stages, row/ticker progress and aggregate coverage/skip reasons go to stderr.
+`native_registration.register_native` registers one resolved arm before evaluation; `require_native_registration` is read-only admission. Both pin the scope head once and read only canonical metadata through shared holdout admission.
+The experiment-ID/primary-arm key binds resolved plan, detached spec hash, exact snapshot, static source closure, numerical environment/single-thread policy, scope, eligible IDs and versioned holdout context. External input files/non-Python runners refuse; caller supplies the fingerprinting checkout root.
 
 `read_native_registration` uses the ops bounded verifier with the existing native 16 MiB UTF-8 default evidence/object budget: one SQL snapshot caps evidence transfer
 (twice the budget for UTF-16, followed by UTF-8 admission), then validates the registration reference size before the verified object read. Missing registration remains R1;

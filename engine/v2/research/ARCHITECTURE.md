@@ -274,14 +274,14 @@ Inputs include an asserted native source snapshot, nonempty JSON provenance with
 Rows sort deterministically. Caps apply to canonical row bytes and serialized Parquet output; exceeded caps refuse `RESULT_LIMIT_EXCEEDED`. PyArrow/native conversion, inspection and catalog errors propagate; no row repair or dropped fields.
 The standard PyArrow writer emits singleton target objects and partition-local metadata batches capped at 256 rows (or the smaller contract batch limit); native inspection derives bounds, and `partition_logical_hash` spans same-partition fragments. A single native `commit_snapshot` transaction publishes only earnings metadata and the target table in reconstructed knowledge mode.
 Return resolves the committed immutable `SnapshotRef`, including native reconciliation of reused content; exact reordered replay reuses the successful receipt without catalog changes. Different source/provenance/caps bind distinct receipt requests, not necessarily distinct content snapshots.
-Stages emit bounded progress/rate/ETA and RSS. This opt-in primitive has no production caller and is not reachable from a production entrypoint; current callers are synthetic tests. No provider/source reads, target arithmetic, fitting, implicit full-closure copy, holdout policy, cache or retry. Failure may leave unreferenced immutable objects but never a partial committed snapshot.
+Stages emit bounded progress/rate/ETA and RSS. This opt-in primitive has no production caller and is not reachable from a production entrypoint; callers are explicit `experiments.iv_crush_prepare` workspace preparation and synthetic tests. No provider/source reads, target arithmetic, fitting, implicit full-closure copy, holdout policy, cache or retry. Failure may leave unreferenced immutable objects but never a partial committed snapshot.
 
-`magnitude_inputs.forecast_cutoff(event_date, session, horizon, calendar)` is a
-pure contract over native `CalendarSessions`: horizons are five, three or one
-full intervening sessions, counted backward from the shared last-pre-print
-close. Wednesday AMC at one uses Tuesday close; Wednesday BMO uses Monday.
-Invalid dates/sessions/horizons/calendars, projected anchors, gaps in the
-required session window or insufficient history refuse `CONTRACT_MISMATCH`.
+`snapshot_rows.iter_snapshot_rows` streams an exact committed snapshot/table projection with explicit key predicates as Arrow-native Python rows; `read_snapshot_rows` collects it without partial returns or pandas null/integer coercion.
+Positive candidate-row, cumulative decoded Arrow-byte, per-object and batch-row caps (default1024, bounded by contract/population) are required; invalid caps refuse `CONTRACT_MISMATCH`, exceeded row/decoded-byte caps refuse `RESULT_LIMIT_EXCEEDED`; native scan/integrity refusals propagate. Byte caps are not Python heap limits.
+Streaming rows remain provisional until exhaustion; abandoned streams must close. This layer releases each decoded batch before advancing; the collector retains its complete list. Bounded stage/progress telemetry, no retry/writes/outcome authority; callers own admission.
+
+`magnitude_inputs.forecast_cutoff(event_date, session, horizon, calendar)` uses native `CalendarSessions`: five, three or one full intervening sessions backward from the shared last-pre-print close; Wednesday AMC at one uses Tuesday close, BMO uses Monday.
+Invalid dates/sessions/horizons/calendars, projected anchors, required-session gaps or insufficient history refuse `CONTRACT_MISMATCH`.
 Its identity binds event/session/horizon, calendar contents, pre-print close
 and source-session ceiling. It does not assert an intraday issue time, source
 publication/finality or that the earnings schedule was known at that cutoff.
