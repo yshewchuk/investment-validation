@@ -5,6 +5,7 @@ from pathlib import Path
 from engine.v2.data.repository import Repository
 from engine.v2.foundation import canonical_json, content_hash
 from engine.v2.ops.errors import OpsError, fail
+from engine.v2.ops.workspace.scope import validate_size_scope_request
 from engine.v2.research.eligibility_policy import eligibility_policy
 from experiments import eligible_history, size_panel
 from experiments.size_prep_inputs import PROVENANCE_VERSION, _log, _read_regular
@@ -74,6 +75,7 @@ def prepare_workspace_panel(workspace, scope, record, *, event_ids, as_of_month,
             or type(history_start) is not str or type(source_start) is not str
             or type(metadata_limits) is not dict):
         raise fail("INVALID_REQUEST", "invalid workspace panel request")
+    validate_size_scope_request(workspace, scope)
     if not _record_matches(workspace, record):
         raise _record_invalid()
     row = workspace.conn.execute(

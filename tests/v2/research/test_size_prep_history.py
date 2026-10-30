@@ -216,6 +216,15 @@ def test_malformed_inputs_are_refused_before_producers(bounds_ws, source_root, m
     assert calls == {"history": [], "panel": []}
 
 
+def test_scope_admission_is_complete_before_any_read(bounds_ws, source_root, monkeypatch):
+    ws, clock, record, _, _ = _repo_record(bounds_ws, source_root)
+    calls = _fake(monkeypatch)
+    for scope in ("\ud800", "", " shadow", "a\x00b"):
+        _refusal(lambda scope=scope: hist.prepare_workspace_panel(ws, scope, record, **_args(clock)),
+                 "WORKSPACE_REFUSED", "scope_invalid")
+    assert calls["history"] == []
+
+
 def test_provenance_file_that_is_oversized_or_a_symlink_is_refused(bounds_ws, source_root, monkeypatch):
     ws, clock, record, _, snapshot = _repo_record(bounds_ws, source_root)
     calls = _fake(monkeypatch)
