@@ -42,6 +42,11 @@ def report(opportunities, books, **changes):
 def test_common_denominator_primary_secondary_and_unavailable_references():
     opportunities, books = fixture()
     result = report(opportunities, books)
+    assert result["schema_version"] == "distribution_paired_report.v1"
+    assert result["uncertainty"] == {
+        "seed": 17, "resamples": 128, "block_days": 7, "block_origin": "2026-01-01",
+        "confidence": .95, "calendar_blocks": "occupied_fixed_nonoverlapping",
+        "interpretation": "conditional_on_realized_policy_not_portfolio_replay"}
     assert result["opportunities"] == 4
     assert result["primary"] == "histogram_minus_same_mean"
     assert result["contrasts"]["same_mean"]["net_delta_per_opportunity"] == 10
@@ -157,8 +162,9 @@ def test_optional_incumbent_is_compared_only_when_present():
     dict(confidence=1), dict(confidence=float("nan")), dict(block_origin="20260101")])
 def test_uncertainty_configuration_is_explicit_and_validated(changes):
     opportunities, books = fixture()
-    with pytest.raises(OpsError, match="INVALID_EXPERIMENT_SPEC"):
+    with pytest.raises(OpsError, match="INVALID_EXPERIMENT_SPEC") as caught:
         report(opportunities, books, **changes)
+    assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
 
 
 @pytest.mark.parametrize("mutation", ["missing", "duplicate", "ticker", "date", "config", "end", "nonfinite", "null_status"])
@@ -181,15 +187,17 @@ def test_incompatible_population_or_book_identity_refuses(mutation):
         book["per_event"][0]["net_profit"] = float("nan")
     else:
         book["per_event"][0]["net_profit"] = None
-    with pytest.raises(OpsError):
+    with pytest.raises(OpsError) as caught:
         report(opportunities, books)
+    assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
 
 
 def test_duplicate_opportunities_refuse():
     opportunities, books = fixture()
     opportunities.append(opportunities[0])
-    with pytest.raises(OpsError):
+    with pytest.raises(OpsError) as caught:
         report(opportunities, books)
+    assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
 
 
 def test_empty_population_has_no_fabricated_effect_or_uncertainty():
@@ -234,7 +242,8 @@ def test_missing_book_contract_fields_refuse(field):
     invalid(lambda: report(opportunities, books))
 
 
-@pytest.mark.parametrize("field,value", [("config", None), ("config", []),
+@pytest.mark.parametrize("field,value", [("schema_version", "distribution_book.v2"),
+    ("config", None), ("config", []),
     ("config", {"initial_cash": float("nan")}), ("config", {"initial_cash": []}),
     ("config", {1: 3}), ("config", {"initial_cash": True}), ("report_end", []),
     ("per_event", None), ("per_event", {}), ("per_event", ()),
