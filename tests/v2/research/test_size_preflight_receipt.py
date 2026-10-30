@@ -196,6 +196,29 @@ def test_payload_panel_not_bound_to_receipt_refuses(case, change):
     assert caught.value.problem.details == {"reason": "receipt_corrupt"}
 
 
+@pytest.mark.parametrize("key,value", [
+    ("training_start", "2001-01-01"),
+    ("labels_before", "2001-01-01"),
+    ("scope", "other-scope"),
+])
+def test_payload_clocks_and_scope_not_bound_refuse(case, key, value):
+    bindings = bindings_for(case)
+    changed = deepcopy(bindings)
+    changed[key] = value
+    ref = issue(case.store, changed, case.registration)
+    with pytest.raises(OpsError) as caught:
+        admit(case.store, ref, changed, case.spec)
+    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert caught.value.problem.details == {"reason": "receipt_corrupt"}
+
+
+@pytest.mark.parametrize("bad", [{}, None, []])
+def test_input_bindings_validates_panel_request(case, bad):
+    with pytest.raises(OpsError) as caught:
+        input_bindings(case.repository, case.spec, case.request, bad, **case.args)
+    assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
+
+
 def test_payload_request_not_bound_to_receipt_refuses(case):
     bindings = bindings_for(case)
     changed = deepcopy(bindings)

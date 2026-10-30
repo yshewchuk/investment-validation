@@ -21,7 +21,11 @@ from experiments.native_registration import (
     NativeRegistration,
     load_registration_document,
 )
-from experiments.size_search_binding import SCHEMA as REGISTRATION_SCHEMA, validator_identity
+from experiments.size_search_binding import (
+    SCHEMA as REGISTRATION_SCHEMA,
+    validate_panel_request,
+    validator_identity,
+)
 
 SCHEMA = "size_preflight_receipt.v1"
 _RECEIPT_KEYS = frozenset({"schema_version", "bindings", "validator", "run_id", "registration"})
@@ -30,6 +34,7 @@ _RECEIPT_KEYS = frozenset({"schema_version", "bindings", "validator", "run_id", 
 def input_bindings(repository, spec, request, panel_request, *, scope, training_start,
                    labels_before):
     """Register-side cheap inputs only: hashes and resolved snapshot documents, no reads."""
+    validate_panel_request(panel_request)
     return {
         "spec_hash": spec.spec_hash,
         "request": content_hash(request),
@@ -130,7 +135,12 @@ def admit(store, ref, bindings, spec):
                  and content_hash(document["size_request"]) == bindings["size_request"]
                  and all(panel_request[name] == snapshots[name]["snapshot_id"]
                          for name in ("feature_snapshot_id", "history_snapshot",
-                                      "price_history_snapshot")))
+                                      "price_history_snapshot"))
+                 and document["scope"] == bindings["scope"]
+                 and document["magnitude_request"]["training_start"] == bindings["training_start"]
+                 and document["magnitude_execution"]["evaluation_labels_before"]
+                 == bindings["labels_before"]
+                 and document["execution_plan"] == plan.as_document())
     except (KeyError, TypeError):
         bound = False
     if (not bound
