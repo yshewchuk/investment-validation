@@ -6,14 +6,14 @@ from engine.v2.contracts import SnapshotRef
 from engine.v2.foundation import content_hash, to_document
 from engine.v2.ops.errors import OpsError
 from experiments import size_search_binding as binding_mod
-from experiments.size_search_binding import _stored_panel, clear_panel_memo
+from experiments.size_search_binding import _stored_panel
 
 
 @pytest.fixture(autouse=True)
 def _fresh_memo():
-    clear_panel_memo()
+    binding_mod._PANEL_MEMO.clear()
     yield
-    clear_panel_memo()
+    binding_mod._PANEL_MEMO.clear()
 
 
 class _Repo:

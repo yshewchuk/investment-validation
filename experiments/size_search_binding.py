@@ -93,11 +93,6 @@ def _read_panel(repository, source, request, *, columns):
 _PANEL_MEMO = {}
 
 
-def clear_panel_memo():
-    """Drop the in-process stored-panel memo (tests; one entry at most)."""
-    _PANEL_MEMO.clear()
-
-
 def _stored_panel(repository, source, binding, columns):
     """Full admission on a process-fresh key; later calls reuse the memo after a hash check."""
     key = (id(repository), content_hash(to_document(source)),
