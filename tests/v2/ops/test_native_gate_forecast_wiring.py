@@ -147,7 +147,7 @@ def test_missing_or_nonfinite_str_thru_driver_location_leaves_band_unavailable()
         "interval_floor": 0.0,
     }}
 
-    for location in (None, float("nan")):
+    for location in (None, float("nan"), float("inf"), float("-inf")):
         output = {"driver_prediction": location}
 
         _execute_forecast_band(block, output, "STR-THRU")

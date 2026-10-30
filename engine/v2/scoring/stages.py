@@ -1086,7 +1086,13 @@ def _execute_forecast_band(
     forecast = output.get("forecast_abs_move")
     if forecast is None and strategy == "STR-THRU":
         forecast = output.get("driver_prediction")
-    if forecast is None or forecast != forecast:
+    if forecast is None:
+        return
+    try:
+        forecast = float(forecast)
+    except (TypeError, ValueError):
+        return
+    if not np.isfinite(forecast):
         return
     pool = block.get("forecast_pool")
     if pool is None:
