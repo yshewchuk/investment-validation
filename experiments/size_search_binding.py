@@ -247,3 +247,8 @@ def fold_inputs(repository, binding, fold):
     return {"preflight": preflight, "stored_inputs_id": content_hash(binding["size_panel"]),
         "training_inputs": dict(train.attrs), "training": train[["event_id", "absolute_move_pct"]].to_dict("records"),
         "features": [r for r in panel["rows"] if r["event_id"] in participants]}
+
+
+def validator_identity():
+    """Source closure of the SIZE entrypoint plus environment; the receipt's validator binding."""
+    return {"source_closure": _sources(), "environment": environment_identity(1)}
