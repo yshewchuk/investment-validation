@@ -123,10 +123,10 @@ class SearchTrials:
             history_failure=fail("EXPERIMENT_IDENTITY_CONFLICT", "search native history binding changed"))
 
     def _cohort_inputs(self, cohort, inner):
-        """Admit each cohort once per instance; failures are never memoised."""
+        """Admit a cohort once while it is the current one; only the latest cohort is retained; failures are never memoised."""
         if cohort not in self._memo:
-            inputs = self._inputs(inner)
-            self._memo[cohort] = inputs
+            self._memo.clear()  # at most one cohort resident: release the previous one before admitting
+            self._memo[cohort] = self._inputs(inner)
         return self._memo[cohort]
 
     def _cohort(self, admitted):
@@ -387,12 +387,13 @@ class SearchTrials:
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "trial has no admitted native inputs")
         self._append("forecasts:" + key, submitted, replay=reconcile, absent=("terminal:" + key,))
         validation = self._read("validation:" + admitted["cohort"]) if reconcile else None
+        stored = None
         if validation is None:
             try:
                 stored = self._cohort(admitted)
             except ValueError:
                 raise fail("EXPERIMENT_IDENTITY_CONFLICT", "trial native inputs changed after start") from None
-            if canonical_json(self._cohort_inputs(admitted["cohort"], inner)) != canonical_json(stored):
+            if content_hash(self._cohort_inputs(admitted["cohort"], inner)) != content_hash(stored):
                 raise fail("EXPERIMENT_IDENTITY_CONFLICT", "trial native inputs changed after start")
             binding = self.registration.document
             labels = load_magnitude_targets(self.repository, from_document(SnapshotRef, binding["snapshot"]),
@@ -401,7 +402,7 @@ class SearchTrials:
             validation = {"inputs_id": admitted["inputs_id"], "evaluation_inputs": dict(labels.attrs),
                           "targets": labels[["event_id", "absolute_move_pct"]].to_dict("records")}
         try:
-            self._validation(inner, admitted, self._cohort(admitted), validation)
+            self._validation(inner, admitted, stored if stored is not None else self._cohort(admitted), validation)
         except (ValueError, TypeError, KeyError, OverflowError):
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search validation evidence differs") from None
         validation = self._append("validation:" + admitted["cohort"], validation)

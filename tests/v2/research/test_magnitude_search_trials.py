@@ -334,6 +334,35 @@ def test_source_and_plan_drift_refuse_before_native_payloads(case, monkeypatch):
         other.seal(clock=SystemClock())
 
 
+def test_cohort_memo_holds_one_cohort_and_replays_unchanged(case, monkeypatch):
+    admissions = []
+    original = case.recorder._inputs
+    monkeypatch.setattr(case.recorder, "_inputs", lambda fold: admissions.append(fold["year"]) or original(fold))
+    peak = 0
+    for args in trial_cases(case):
+        case.recorder.start(*args)
+        peak = max(peak, len(case.recorder._memo))
+        case.recorder.record(*args, forecasts=trial_forecasts(case, args))
+        peak = max(peak, len(case.recorder._memo))
+    assert peak == 1
+    cohorts = {(args[0], args[1]) for args in trial_cases(case)}
+    assert len(cohorts) > 1 and len(admissions) >= len(cohorts)
+    assert case.recorder.freeze()
+
+
+def test_record_compares_cohort_inputs_by_streaming_hash(case, monkeypatch):
+    args = trial_cases(case)[0]
+    started = case.recorder.start(*args)
+
+    def no_whole_cohort_json(value, **kwargs):
+        assert not (isinstance(value, dict) and "training_inputs" in value), "whole cohort serialised"
+        return canonical_json(value, **kwargs)
+
+    monkeypatch.setattr(trials, "canonical_json", no_whole_cohort_json)
+    case.recorder.record(*args, forecasts=trial_forecasts(case, args))
+    assert case.recorder._read("terminal:" + started["trial_id"])["status"] == "succeeded"
+
+
 def test_native_input_drift_blocks_selection_without_excluding_candidate(case, monkeypatch):
     args = trial_cases(case)[0]
     started = case.recorder.start(*args)
