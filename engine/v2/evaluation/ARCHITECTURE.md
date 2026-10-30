@@ -17,7 +17,7 @@ Summary includes all opportunities, funded/unresolved counts, funded coverage, s
 
 ## Dependencies and callers
 
-Only stdlib date/Fraction/grouping/math and lower-layer `data.errors` are imported. No ops or research dependency. Current callers are synthetic tests only; the distribution adapter is not wired. The optional callback enables caller-owned progress without an upward import.
+Only stdlib date/Fraction/grouping/math and lower-layer `data.errors` are imported. No ops or research dependency. Current callers are `experiments.distribution_book.funded_book` and synthetic tests; the adapter retains its original experiment admission, wrapper schema and error translation. The optional callback enables caller-owned progress without an upward import.
 
 ## External systems
 

@@ -34,7 +34,7 @@ Which packages import this one, and for what. Checked against the import graph:
 a claimed consumer that does not import, or an omitted one that does, is a
 failure rather than a stale sentence.
 
-Only synthetic tests currently call the helper. No package or production entrypoint imports it; the existing distribution book remains unchanged. A later adapter can project its admitted records and preserve its own schema/errors without moving experiment admission into this package.
+`experiments.distribution_book.funded_book` and synthetic tests call the helper. The distribution adapter retains experiment admission, quantity/clocks, schema and error translation; the core remains library-only, with no production entrypoint.
 
 <!-- consumers: none -->
 
@@ -54,4 +54,4 @@ For long calls the caller supplies bounded stage logging and an `on_action()` ca
 
 ## Testing
 
-`tests/v2/evaluation/test_premium_settlement.py` uses public synthetic records: complete hand-computed documents, exact money/cap boundaries, no-op curves, signed/missing credits, all explicit ordering choices, detached inputs and typed invalid-input/output-overflow refusals. A normalized differential oracle compares complete outputs with the landed distribution book across multi-event policies; this does not read licensed fixtures, fit models or establish real-market feasibility.
+`tests/v2/evaluation/test_premium_settlement.py` uses public synthetic records: complete hand-computed documents, exact money/cap boundaries, no-op curves, signed/missing credits, all explicit ordering choices, detached inputs and typed invalid-input/output-overflow refusals. A normalized cross-interface oracle checks distribution-adapter mapping across multi-event policies; independent hand oracles cover the shared recurrence. No licensed fixtures, model fitting or real-market feasibility claim.
