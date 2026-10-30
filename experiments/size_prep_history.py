@@ -24,7 +24,8 @@ def _limits_refusal(table=None):
     return fail("PUBLICATION_REFUSED", "history limits cannot be derived from the bounds snapshot", details=details)
 
 
-def derive_history_limits(repository, snapshot, event_count, *, margin=2):
+def _derive_history_limits(repository, snapshot, event_count, *, margin=2):
+    """Private: callers must bound the catalog first (prepare_workspace_panel runs the bounded probe)."""
     if type(event_count) is not int or event_count < 1 or type(margin) is not int or margin < 1:
         raise _limits_refusal()
     rows = fragments = total_bytes = biggest = 0
@@ -98,7 +99,7 @@ def prepare_workspace_panel(workspace, scope, record, *, event_ids, as_of_month,
     started = time.monotonic()
     repository = Repository(workspace.conn, workspace.store, pin_snapshots=True)
     bounds = repository.resolve(record["bounds_snapshot_id"])
-    limits = derive_history_limits(repository, bounds, len(event_ids))
+    limits = _derive_history_limits(repository, bounds, len(event_ids))
     _log("workspace panel start events=" + str(len(event_ids)) + " limits=" + canonical_json(limits), started)
     policy = eligibility_policy(version="grouped_ticker_embargo.v1", embargo_days=30)
     shared = dict(as_of_month=as_of_month, policy=policy, event_ids=list(event_ids), horizons=[1, 3, 5],

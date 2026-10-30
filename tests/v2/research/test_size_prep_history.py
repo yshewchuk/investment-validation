@@ -139,19 +139,19 @@ def test_limits_scale_with_margin_and_event_count(bounds_ws, source_root, monkey
     ws, _, _, repository, snapshot = _repo_record(bounds_ws, source_root)
     present = tuple(t for t in hist.HISTORY_TABLES if t in snapshot.table_versions)
     monkeypatch.setattr(hist, "HISTORY_TABLES", present)
-    two = hist.derive_history_limits(repository, snapshot, 10, margin=2)
-    one = hist.derive_history_limits(repository, snapshot, 10, margin=1)
+    two = hist._derive_history_limits(repository, snapshot, 10, margin=2)
+    one = hist._derive_history_limits(repository, snapshot, 10, margin=1)
     assert two == _expected_limits(ws, snapshot.snapshot_id, present, 10, 2)
     assert one == _expected_limits(ws, snapshot.snapshot_id, present, 10, 1)
     assert two["max_output_rows"] == 60
     assert one["max_source_rows"] * 2 == two["max_source_rows"]
     for kwargs in ({"event_count": 0}, {"event_count": 10, "margin": 0}, {"event_count": True}):
-        _refusal(lambda: hist.derive_history_limits(repository, snapshot, **kwargs),
+        _refusal(lambda: hist._derive_history_limits(repository, snapshot, **kwargs),
                  "PUBLICATION_REFUSED", "limits_unavailable")
     monkeypatch.undo()
     stripped = SimpleNamespace(table_versions={
         name: version for name, version in snapshot.table_versions.items() if name != "price_history"})
-    _refusal(lambda: hist.derive_history_limits(repository, stripped, 1),
+    _refusal(lambda: hist._derive_history_limits(repository, stripped, 1),
              "PUBLICATION_REFUSED", "limits_unavailable")
 
 
