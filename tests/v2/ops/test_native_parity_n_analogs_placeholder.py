@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+from engine.v2.foundation import content_hash
 from engine.v2.ops.native_parity_report import (
     NATIVE_PARITY_TOLERANCE,
     compare_native_vs_legacy,
 )
-from engine.v2.parity.receipt import AGREE
+from engine.v2.parity.receipt import AGREE, DIFFER
 from engine.v2.parity.record_comparator import compare_records
 
 _PLACEHOLDER = {"n_analogs": 0, "ci_low": None, "ci_high": None, "flags": []}
@@ -85,6 +86,14 @@ def test_equal_pool_ci_at_exactly_ten_percent_boundary_agrees():
     assert _analog_findings(legacy, native) == []
 
 
+def test_high_endpoint_allowance_is_ten_percent_of_legacy_width():
+    legacy = {"n_analogs": 20, "ci_low": 0.1, "ci_high": 0.5}
+    assert _analog_findings(
+        legacy, {"n_analogs": 20, "ci_low": 0.1, "ci_high": 0.46}) == []
+    assert _analog_findings(
+        legacy, {"n_analogs": 20, "ci_low": 0.1, "ci_high": 0.44}) == ["ci_high"]
+
+
 def test_ci_finding_names_tolerance_reason_and_null_mask_is_exact():
     legacy = {"n_analogs": 20, "ci_low": 0.0, "ci_high": 1.0}
     native = {"n_analogs": 20, "ci_low": 0.11, "ci_high": 1.0}
@@ -112,7 +121,11 @@ def test_accepted_ci_tolerance_agrees_and_stage_hashes_agree():
     assert receipt.findings == ()
     assert receipt.stage_hashes
     assert all(row.agrees for row in receipt.stage_hashes)
-    assert any(row.stage_id == "analogs" for row in receipt.stage_hashes)
+    expected = content_hash(
+        {"ci_high": ["float", 0.5], "ci_low": ["float", 0.1], "n_analogs": ["int", 20]})
+    analogs = next(row for row in receipt.stage_hashes if row.stage_id == "analogs")
+    assert analogs.left_output_hash == expected
+    assert analogs.right_output_hash == expected
 
 
 def test_integer_ci_endpoints_use_declared_tolerance():
@@ -127,6 +140,29 @@ def test_integer_ci_endpoints_use_declared_tolerance():
         legacy, {"n_analogs": 20, "ci_low": 2, "ci_high": 10},
         tolerance_policy=NATIVE_PARITY_TOLERANCE)
     assert {f.field_path for f in out_of_bound.findings} == {"ci_low"}
+
+
+def test_adjacent_integers_above_2_53_stay_exact_in_findings_and_hashes():
+    base = 2**53
+    legacy = {"n_analogs": 20, "ci_low": base, "ci_high": base + 1}
+    native = {"n_analogs": 20, "ci_low": base + 1, "ci_high": base + 1}
+    receipt = compare_records(
+        legacy, native, tolerance_policy=NATIVE_PARITY_TOLERANCE)
+    assert receipt.verdict == DIFFER
+    assert len(receipt.findings) == 1
+    finding = receipt.findings[0]
+    assert finding.field_path == "ci_low"
+    assert finding.left_value == base
+    assert finding.right_value == base + 1
+    assert finding.delta == 1
+    analogs = next(row for row in receipt.stage_hashes if row.stage_id == "analogs")
+    assert analogs.agrees is False
+    assert analogs.left_output_hash == content_hash(
+        {"ci_high": ["int", base + 1], "ci_low": ["int", base],
+         "n_analogs": ["int", 20]})
+    assert analogs.right_output_hash == content_hash(
+        {"ci_high": ["int", base + 1], "ci_low": ["int", base + 1],
+         "n_analogs": ["int", 20]})
 
 
 def test_typed_pool_count_mismatch_disables_ci_tolerance():

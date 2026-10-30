@@ -197,7 +197,22 @@ def _compare_field(path: str, left: Any, right: Any, policy: TolerancePolicy,
             return None
         if tol.is_exact:
             return _int_finding(path, left, right, stage)
-        return _float_finding(path, float(left), float(right), tol, stage)
+        delta = right - left
+        allowed = tol.absolute + tol.relative * max(abs(left), abs(right))
+        if abs(delta) <= allowed:
+            return None
+        return Finding(
+            finding_id=_finding_id(stage, path, "value"),
+            first_differing_stage=stage,
+            field_path=path,
+            left_value=left,
+            right_value=right,
+            delta=delta,
+            tolerance_applied=tol.reason,
+            exceeded_by=abs(delta) - allowed,
+            kind="value",
+            owning_stage=stage,
+        )
     if kind is None and isinstance(left, float) and isinstance(right, float):
         return _float_finding(path, left, right, tol, stage)
     if kind is None:
