@@ -214,8 +214,7 @@ sides before applying; rules without this context retain their ordinary
 absolute/relative behavior. The report policy is instantiated by its caller
 in `engine/v2/ops/native_parity_report.py`; this package neither invents nor
 stores that report-specific object. When a matched rule's required context is
-missing or unequal, it resolves to `EXACT`; first-match precedence means it
-does not continue to a later rule.
+missing or unequal, it resolves to `EXACT`.
 
 The report's approved per-field rules apply only to `ci_low` and `ci_high`:
 each endpoint may differ by at most 10% of the legacy CI width
