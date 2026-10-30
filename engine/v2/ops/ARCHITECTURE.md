@@ -670,14 +670,12 @@ every value it needs is already a committed job output:
   each binding is checked against `spec.dependency_job_ids` independently,
   so a spec that named only one of the two jobs would fail to resolve the
   other's binding.
-- **`tolerance_policy`.** Unchanged pluggable seam from `#72`: defaults to
-  `SCORE_RECORD_V1` (exact for every field). `NativeParityParameters`
-  carries no tolerance data of its own — a future, user-ratified
-  `TolerancePolicy` is instantiated in code wherever that ratification
-  lives and passed to `compare_native_vs_legacy` directly, never
-  round-tripped through a job parameter (matching `#72`'s own stance that
-  no tolerance value belongs in a doc, a PR body, an issue, or — this
-  redo adds — a job's persisted parameters row).
+- **`tolerance_policy`.** `compare_dimension` defaults to
+  `SCORE_RECORD_V1` (exact for every field). The native parity report uses
+  `NATIVE_PARITY_TOLERANCE`, whose `score_record.parity.v2` policy allows
+  the approved `ci_low`/`ci_high` differences when `n_analogs` matches.
+  `NativeParityParameters` carries no tolerance data; the report policy is
+  selected in code and is recorded in the report's `tolerance_policy_id`.
 
 **`records.json`/`refusals.json`'s own key schema — designed HERE, not by
 `#88`.** `#88`'s final text (above, "Row keys") deliberately does NOT

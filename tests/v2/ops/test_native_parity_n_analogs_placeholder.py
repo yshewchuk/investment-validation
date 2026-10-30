@@ -4,6 +4,7 @@ from engine.v2.ops.native_parity_report import (
     NATIVE_PARITY_TOLERANCE,
     compare_native_vs_legacy,
 )
+from engine.v2.parity.receipt import AGREE
 from engine.v2.parity.record_comparator import compare_records
 
 _PLACEHOLDER = {"n_analogs": 0, "ci_low": None, "ci_high": None, "flags": []}
@@ -79,12 +80,52 @@ def test_ci_finding_names_tolerance_reason_and_null_mask_is_exact():
     assert len(receipt.findings) == 1
     assert receipt.findings[0].tolerance_applied == (
         "within 10% of legacy analog CI width when n_analogs match")
+    assert receipt.findings[0].left_value == 0.0
+    assert receipt.findings[0].right_value == 0.11
 
     native_null = {"n_analogs": 20, "ci_low": None, "ci_high": 1.0}
     null_receipt = compare_records(
         legacy, native_null, tolerance_policy=NATIVE_PARITY_TOLERANCE)
     assert len(null_receipt.findings) == 1
     assert null_receipt.findings[0].tolerance_applied == "exact"
+
+
+def test_accepted_ci_tolerance_agrees_and_stage_hashes_agree():
+    legacy = {"n_analogs": 20, "ci_low": 0.1, "ci_high": 0.5}
+    native = {"n_analogs": 20, "ci_low": 0.13, "ci_high": 0.47}
+    receipt = compare_records(
+        legacy, native, tolerance_policy=NATIVE_PARITY_TOLERANCE)
+    assert receipt.verdict == AGREE
+    assert receipt.findings == ()
+    assert receipt.stage_hashes
+    assert all(row.agrees for row in receipt.stage_hashes)
+    assert any(row.stage_id == "analogs" for row in receipt.stage_hashes)
+
+
+def test_integer_ci_endpoints_use_declared_tolerance():
+    legacy = {"n_analogs": 20, "ci_low": 0, "ci_high": 10}
+    native = {"n_analogs": 20, "ci_low": 1, "ci_high": 9}
+    receipt = compare_records(
+        legacy, native, tolerance_policy=NATIVE_PARITY_TOLERANCE)
+    assert receipt.verdict == AGREE
+    assert receipt.findings == ()
+
+
+def test_typed_pool_count_mismatch_disables_ci_tolerance():
+    legacy = {"n_analogs": 20, "ci_low": 0.1, "ci_high": 0.5}
+    native = {"n_analogs": 20.0, "ci_low": 0.13, "ci_high": 0.47}
+    receipt = compare_records(
+        legacy, native, tolerance_policy=NATIVE_PARITY_TOLERANCE)
+    assert {f.field_path for f in receipt.findings} == {
+        "ci_low", "ci_high", "n_analogs"}
+
+
+def test_null_n_analogs_does_not_enable_ci_tolerance():
+    legacy = {"n_analogs": None, "ci_low": 0.1, "ci_high": 0.5}
+    native = {"n_analogs": None, "ci_low": 0.13, "ci_high": 0.47}
+    receipt = compare_records(
+        legacy, native, tolerance_policy=NATIVE_PARITY_TOLERANCE)
+    assert {f.field_path for f in receipt.findings} == {"ci_low", "ci_high"}
 
 
 def test_unequal_pool_disables_ci_tolerance():

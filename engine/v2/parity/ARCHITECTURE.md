@@ -63,7 +63,8 @@ from `engine/v2/diagnosis`) — this doc does not repeat it.
   strike. The formulas impose no general sign restriction; the legacy linear
   formula accepts signed numeric inputs and clamps a negative fair premium
   to zero, preserving the frozen oracle's behavior.
-- `Tolerance(absolute=0.0, relative=0.0, reason="exact")`,
+- `Tolerance(absolute=0.0, relative=0.0, reason="exact", scale_fields=None,
+  require_equal_fields=())`,
   `TolerancePolicy(policy_id, rules=())`, `EXACT`, `SCORE_RECORD_V1`
   (`tolerance.py`) — see "Cutover PR-4" below for what these are and the
   one config-policy design this package now exposes for a pluggable
@@ -222,6 +223,9 @@ each endpoint may differ by at most 10% of the legacy CI width
 different analog pool size therefore keeps both endpoints exact. The report
 policy id is `score_record.parity.v2`; the shared `SCORE_RECORD_V1` remains
 exact with its original id.
+Stage hashes reflect the active policy comparison: leaves accepted by a
+tolerance are canonicalized to the left-side value for hashing, while findings
+and reported field values remain based on the original records.
 
 ## Invariants
 

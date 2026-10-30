@@ -193,7 +193,11 @@ def _compare_field(path: str, left: Any, right: Any, policy: TolerancePolicy,
     tol = policy.for_field(path, left_record=left_record, right_record=right_record)
     kind = _kind(left, right)
     if _is_int(left) and _is_int(right):
-        return None if kind is None else _int_finding(path, left, right, stage)
+        if kind is None:
+            return None
+        if tol.is_exact:
+            return _int_finding(path, left, right, stage)
+        return _float_finding(path, float(left), float(right), tol, stage)
     if kind is None and isinstance(left, float) and isinstance(right, float):
         return _float_finding(path, left, right, tol, stage)
     if kind is None:
@@ -400,15 +404,24 @@ def compare_records(
             population, started,
         )
 
-    findings = [
-        f for f in (
-            _compare_field(p, flat_left.get(p, _ABSENT), flat_right.get(p, _ABSENT),
-                           tolerance_policy, stage_plan.stage_of(p),
-                           left_record=flat_left, right_record=flat_right)
-            for p in paths
-        ) if f is not None
-    ]
-    rows = _stage_hashes(stage_plan, flat_left, flat_right, paths)
+    findings: list[Finding] = []
+    # Stage hashes represent the policy comparison, so accepted equivalences
+    # must hash equally: canonicalize the right side for HASHING ONLY where
+    # _compare_field accepted a tolerance difference. The compared mappings,
+    # findings and raw field values stay unchanged.
+    hash_right = dict(flat_right)
+    for path in paths:
+        left_value = flat_left.get(path, _ABSENT)
+        right_value = flat_right.get(path, _ABSENT)
+        finding = _compare_field(
+            path, left_value, right_value, tolerance_policy,
+            stage_plan.stage_of(path),
+            left_record=flat_left, right_record=flat_right)
+        if finding is not None:
+            findings.append(finding)
+        elif left_value != right_value:
+            hash_right[path] = left_value
+    rows = _stage_hashes(stage_plan, flat_left, hash_right, paths)
     return ComparisonReceipt(
         receipt_id=content_hash([comparison_kind, left_ref, right_ref,
                                  [f.finding_id for f in findings]])[7:23],

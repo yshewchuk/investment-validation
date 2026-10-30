@@ -70,6 +70,8 @@ def _context_matches(
     return all(
         name in left_record
         and name in right_record
+        and left_record[name] is not None
+        and right_record[name] is not None
         and type(left_record[name]) is type(right_record[name])
         and left_record[name] == right_record[name]
         for name in tolerance.require_equal_fields
