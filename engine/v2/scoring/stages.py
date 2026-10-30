@@ -1070,16 +1070,33 @@ def _execute_local_forecast(
     return declared
 
 
-def _execute_forecast_band(block: Mapping[str, Any], output: dict[str, Any]) -> None:
-    """engine/score.py ``Scorer._size_from_forecast``: the served size
-    fold's band (``forecast_p10``/``_p90``/``_sd``) from its own held-out
-    pool (R4-20 gap 3, sizing side). Absent when the forecast is
-    missing/non-finite or the fold declared no pool -- never a fabricated
-    band, mirroring ``gate_forecast_columns``."""
+def _execute_forecast_band(
+    block: Mapping[str, Any], output: dict[str, Any], strategy: str | None = None,
+) -> None:
+    """Build native forecast uncertainty from the declared held-out pool.
+
+    When ``forecast_abs_move`` is present, use that fold forecast as the
+    interval location and its bucketed residual interval. When it is absent
+    and the strategy is ``STR-THRU``, fall back to ``driver_prediction`` and use
+    flat residual quantiles, because that center belongs to the full-refit
+    champion, not the selected fold's prediction distribution. Missing or
+    non-finite locations, an absent pool, or a thin pool leave the uncertainty
+    fields unavailable. This stage writes only
+    ``forecast_p10``/``forecast_p90``/``forecast_sd``; it does not create a
+    top-level sizing forecast or change structure selection."""
     from engine.v2.scoring import native_gate_features as derived
 
     forecast = output.get("forecast_abs_move")
-    if forecast is None or forecast != forecast:
+    use_buckets = forecast is not None
+    if forecast is None and strategy == "STR-THRU":
+        forecast = output.get("driver_prediction")
+    if forecast is None:
+        return
+    try:
+        forecast = float(forecast)
+    except (TypeError, ValueError):
+        return
+    if not np.isfinite(forecast):
         return
     pool = block.get("forecast_pool")
     if pool is None:
@@ -1088,6 +1105,7 @@ def _execute_forecast_band(block: Mapping[str, Any], output: dict[str, Any]) -> 
         p10, p90, sd, _ = derived.forecast_interval(
             [forecast], pool["predictions"], pool["residuals"],
             floor=pool.get("interval_floor", 0.0),
+            use_buckets=use_buckets,
         )
     except (KeyError, TypeError, ValueError):
         return
@@ -1186,7 +1204,7 @@ def _execute_forecast(inputs: NativeScoreInputs, values: dict[str, Any],
         inputs, block, values, output, invalid_fields, flags, undetermined,
         deferred,
     )
-    _execute_forecast_band(block, output)
+    _execute_forecast_band(block, output, strategy)
     _validate_forecast_roles(
         inputs, output, flags, strategy, invalid_fields,
     )

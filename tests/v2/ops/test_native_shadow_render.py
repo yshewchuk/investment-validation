@@ -51,11 +51,12 @@ from engine.v2.ops.nightly import (
     run_shadow_nightly,
 )
 from engine.v2.scoring import application
+from engine.v2.scoring.application import score_one
 from engine.v2.scoring.source_inputs import build_native_score_inputs
 from engine.v2.scoring.stages import analog_display_fields
 from engine.v2.serving import native_shadow_render as serving_shadow
 from engine.v2.serving import projections
-from engine.v2.serving.native_render import NATIVE_NEVER_COMPUTED
+from engine.v2.serving.native_render import NATIVE_NEVER_COMPUTED, native_display_row
 from engine.v2.serving.native_shadow_render import (
     NativeShadowConfigError,
     build_native_bundle_rows,
@@ -226,6 +227,53 @@ def test_g3_never_computed_band_stays_absent_through_the_full_path(tmp_path):
         "PRAGMA table_info(serving_score_summary)")}
     assert set(NATIVE_NEVER_COMPUTED).isdisjoint(columns)
     serving_conn.close()
+
+
+def test_computed_forecast_band_is_preserved_in_native_display_row():
+    request, inputs = next(iter(_pairs().values()))
+    record = score_one(request, inputs)
+    record = replace(record, uncertainty={
+        **record.uncertainty,
+        "forecast_p10": 0.15,
+        "forecast_p90": 0.5,
+        "forecast_sd": 0.2075893381976376,
+    })
+
+    row = native_display_row(record)
+
+    assert row["forecast_p10"] == 0.15
+    assert row["forecast_p90"] == 0.5
+    assert row["forecast_sd"] == 0.2075893381976376
+
+
+def test_unavailable_forecast_bands_are_omitted_from_native_display_row():
+    request, inputs = next(iter(_pairs().values()))
+    record = score_one(request, inputs)
+    uncertainty = dict(record.uncertainty)
+    uncertainty.update({
+        "forecast_p10": None,
+        "forecast_p90": None,
+        "forecast_sd": None,
+    })
+    record = replace(record, uncertainty=uncertainty)
+
+    row = native_display_row(record)
+
+    assert not {"forecast_p10", "forecast_p90", "forecast_sd"} & row.keys()
+
+
+def test_computed_legacy_driver_band_is_refused_by_native_display_row():
+    request, inputs = next(iter(_pairs().values()))
+    record = score_one(request, inputs)
+    row = native_display_row(record)
+    uncertainty = dict(record.uncertainty)
+    uncertainty["driver_p10"] = 0.1
+    record = replace(record, uncertainty=uncertainty)
+
+    with pytest.raises(ValueError, match="unsupported driver band"):
+        native_display_row(record)
+    assert "forecast_p90" not in row
+    assert "forecast_sd" not in row
 
 
 def test_the_nightly_plan_records_the_shadow_serving_scorer():

@@ -24,11 +24,14 @@ are consulted first where the record carries the name there, per the display
 mapping contract). Identity fields read their own named record attribute
 (``strategy``, ``gate_pass``, the chooser selection).
 
-Every name in :data:`NATIVE_NEVER_COMPUTED` is deliberately ABSENT from the
-row rather than present as ``None``: a ``display.get`` reader cannot tell the
-two apart, and the row's own ``forecasts``/``uncertainty`` failing loudly on a
-non-``None`` value is what keeps the "explicitly missing" guarantee true the
-day a stage starts computing the band (G3).
+Every name in :data:`NATIVE_NEVER_COMPUTED` -- the legacy driver bands
+``driver_p10``/``driver_p90`` -- is deliberately ABSENT from the row rather than
+present as ``None``: a ``display.get`` reader cannot tell the two apart, and the
+row's own ``forecasts``/``uncertainty`` failing loudly on a non-``None`` value is
+what keeps the "explicitly missing" guarantee true the day a stage starts
+computing those bands (G3). The computed forecast uncertainty values
+``forecast_p10``/``forecast_p90``/``forecast_sd`` are included in native display
+rows, and remain absent when their ``record.uncertainty`` value is ``None``.
 """
 from __future__ import annotations
 
@@ -48,23 +51,20 @@ __all__ = [
     "native_row_key",
 ]
 
-#: The forecast/driver band v2 does not compute today (memory
+#: The legacy driver bands v2 does not compute today (memory
 #: ``native-forecast-band-missing``); a row advertises these as missing by
-#: omitting the key, never by inventing a value.
-NATIVE_NEVER_COMPUTED = (
-    "forecast_p10", "forecast_p90", "forecast_sd", "driver_p10", "driver_p90",
-)
+#: omitting the key, never by inventing a value. Computed forecast uncertainty
+#: values (``forecast_p10``/``forecast_p90``/``forecast_sd``) are included in
+#: native display rows, and absent when ``None``.
+NATIVE_NEVER_COMPUTED = ("driver_p10", "driver_p90")
 
 
 def _reject_computed_band(record: ScoreRecord) -> None:
-    """Refuse a record that already carries a value for a never-computed band.
+    """Refuse a record that already carries an unsupported driver band value.
 
-    Only a non-``None`` value counts as computed: ``uncertainty`` always carries
-    the ``forecast_p10``/``forecast_p90``/``forecast_sd`` keys (with ``None``
-    values) because ``application._record_payload`` projects them by name, and a
-    key-presence test here would refuse every real record. A future stage that
-    starts filling one is a hard failure -- silently continuing would let the
-    row report a computed band as missing (G3).
+    Only a non-``None`` value counts as computed. A future stage that starts
+    filling one is a hard failure -- silently continuing would let the row
+    report a computed driver band as missing (G3).
     """
     computed = sorted(
         name for name in NATIVE_NEVER_COMPUTED
@@ -73,8 +73,8 @@ def _reject_computed_band(record: ScoreRecord) -> None:
     )
     if computed:
         raise ValueError(
-            f"native ScoreRecord already carries computed never-computed "
-            f"field(s): {computed}")
+            f"native ScoreRecord already carries computed unsupported driver "
+            f"band field(s): {computed}")
 
 
 def _strategy(resolved: Mapping[str, Any]) -> Any:
@@ -142,6 +142,10 @@ def native_display_row(
             row["n_analogs"] = n_analogs
     for name in DISPLAY_ANALOG_FIELDS:
         row[name] = tuple(analog.get(name, ()))
+    for name in ("forecast_p10", "forecast_p90", "forecast_sd"):
+        value = record.uncertainty.get(name)
+        if value is not None:
+            row[name] = value
     return row
 
 

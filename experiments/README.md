@@ -287,10 +287,13 @@ python -m experiments.v2_magnitude_search_run collect "${common[@]}"
 
 These three serial-search actions accept `--max-registration-bytes` (default 16777216); use an explicit larger finite budget for a larger saved registration. The shared loader validator requires an integer from 1 through `2**62 - 1` before storage access; here the option affects initial registration loading, not saved identity or later read policies. Prediction/gate registration also applies it before reservation, as described above.
 
-`run_search(conn, store, repository, registration, request, plan_ref, *, limits)`
+`run_search(conn, store, repository, registration, request, plan_ref, *, limits,
+collect_results=True)`
 is the same orchestration API. It traverses outer folds, candidates and inner
 folds in sealed plan order, one child at a time; then freezes all inner selections,
-evaluates each selected outer winner, and collects every completed outer fold.
+evaluates each selected outer winner, and collects every completed outer fold
+(`collect_results=False` skips that collect and returns None; `size_search` run
+collects once via `collect`).
 Valid candidate failures are excluded by the sealed policy; all-candidate failure
 refuses. It never chooses a winner from outer scores.
 
