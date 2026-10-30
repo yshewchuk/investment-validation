@@ -385,3 +385,11 @@ def test_input_bindings_validate_cutoffs(case, key, bad):
         input_bindings(case.repository, case.spec, case.request, case.panel_request,
                        **{**case.args, key: bad})
     assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
+
+
+@pytest.mark.parametrize("bad", ["", "  ", None])
+def test_input_bindings_blank_scope_matches_prepare(case, bad):
+    with pytest.raises(OpsError) as caught:
+        input_bindings(case.repository, case.spec, case.request, case.panel_request,
+                       **{**case.args, "scope": bad})
+    assert caught.value.code == "SNAPSHOT_UNRESOLVED"

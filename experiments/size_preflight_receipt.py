@@ -44,6 +44,9 @@ def input_bindings(repository, spec, request, panel_request, *, scope, training_
                 raise ValueError
         except (TypeError, ValueError):
             raise fail("INVALID_EXPERIMENT_SPEC", "invalid SIZE cutoff date")
+    if not isinstance(scope, str) or not scope.strip():
+        raise fail("SNAPSHOT_UNRESOLVED",
+                   "native registration requires a current committed snapshot")
     return {
         "spec_hash": spec.spec_hash,
         "request": content_hash(request),
