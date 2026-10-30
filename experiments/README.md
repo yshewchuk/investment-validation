@@ -490,6 +490,10 @@ Histogram minus same_mean is primary; matched_point/incumbent/gate are secondary
 
 Fixed occupied calendar blocks and ticker clusters resample whole-event paired deltas with a ratio-of-sums mean. Fewer than two clusters yields an unavailable interval. These intervals condition on the realized allocation and supplied fitted results; they do not refit models, replay competing cash allocations, correct multiple testing, establish executable capacity or support promotion/current-strategy superiority. Seed, resamples, confidence, block origin and block width are mandatory caller choices. Complexity is O(events log events + resamples × clusters) time and O(events + resamples) working memory per contrast; bounded-cadence stderr progress covers resampling.
 
+`magnitude_candidate_fit.fit_candidate` is the guarded lazy compatibility wrapper of shared
+`engine.v2.models.training.magnitude_candidate.fit_candidate`; SIZE recipes,
+results, both no-fit guards and errors remain unchanged.
+
 ### Distribution declarations (Bundle B prerequisite)
 
 `distribution_candidate_recipe.candidate_recipe(feature_set)` declares one explicit v3 H/HM/HMO feature subset, native seven-leaf HGB point recipe and matched log-loss classifier, the existing 81-bin output, train-only empirical tail policy and uncalibrated/no-smoothing/absent-zero policy. `validate_candidate_recipe` returns detached installed semantics with exact canonical identity; neither is preregistration, fitting or native admission.
