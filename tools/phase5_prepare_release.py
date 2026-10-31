@@ -655,6 +655,8 @@ def write_release(out: Path, release: ModelRelease, inventory: ModelReleaseInven
     ``StagingRefused`` carrying ``RELEASE_ID_REUSED``/``MANIFEST_UNREADABLE``).
     Any other failure leaves the record withdrawn as before.
     """
+    if sources is not None and not isinstance(sources, Mapping):
+        raise PrepareRefused("release sources must be a mapping")
     if sources and any(str(key).startswith(COPY_PREFIX) for key in sources):
         raise PrepareRefused(f"{COPY_PREFIX}refused: caller-supplied pinned sources")
     release, states = _rebase_member_paths(release, states, pinned_panel)

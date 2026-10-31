@@ -1217,6 +1217,30 @@ def test_phase5_prepare_rejects_non_mapping_sources():
         with_chooser_retrain_cutoff([], {})
 
 
+@pytest.mark.parametrize(
+    "sources",
+    [[], [("pool_cutoff", "2026-11-01")]],
+)
+def test_write_release_rejects_non_mapping_pinned_sources(tmp_path, monkeypatch, sources):
+    from tools import phase5_prepare_release as phase5
+
+    monkeypatch.setattr(
+        phase5,
+        "_rebase_member_paths",
+        lambda release, states, pinned_panel: (release, states),
+    )
+    with pytest.raises(PrepareRefused, match="release sources must be a mapping"):
+        phase5.write_release(
+            tmp_path / "release",
+            SimpleNamespace(),
+            None,
+            {},
+            [],
+            sources=sources,
+            pinned_panel=object(),
+        )
+
+
 def test_write_release_persists_chooser_cutoff(tmp_path, monkeypatch):
     from tools import phase5_prepare_release as phase5
 
