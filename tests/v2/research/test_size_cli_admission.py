@@ -55,7 +55,8 @@ def test_programming_error_is_not_storage_refusal(monkeypatch):
         cli.main(args())
 
 
-@pytest.mark.parametrize("schema", ["magnitude_search_request.v2", "magnitude_search_request.v3"])
+@pytest.mark.parametrize("schema", ["magnitude_search_request.v2", "magnitude_search_request.v3",
+                                     "magnitude_search_request.v4"])
 @pytest.mark.parametrize("action", ["seal", "run", "collect"])
 def test_legacy_cli_refuses_qualified_route_before_catalog_or_worker(monkeypatch, capsys, action, schema):
     monkeypatch.setattr(legacy, "_read_document", lambda path: {"schema_version": schema})

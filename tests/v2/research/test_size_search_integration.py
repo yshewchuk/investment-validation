@@ -168,6 +168,30 @@ def test_v3_qualified_request_seals_reconstructs_v2_plan(case):
     assert planner.read_search_plan(case.conn, case.store, registration, v3, ref) == sealed["plan"]
 
 
+def test_v4_qualified_request_seals_reconstructs_v3_plan(case):
+    v4 = deepcopy(case.request)
+    v4["schema_version"] = "magnitude_search_request.v4"
+    v4["space"] = {
+        "ridge": {"alpha": [0.01, 0.1, 1.0, 10.0, 100.0]},
+        "elasticnet": {"alpha": [0.001, 0.003, 0.01, 0.03, 0.1, 1.0],
+                       "l1_ratio": [0.25, 0.75]},
+        "hgb": {"learning_rate": [0.05, 0.1], "max_leaf_nodes": [7, 15],
+                "min_samples_leaf": [20, 100], "l2_regularization": [0.0, 1.0]}}
+    v4.update(max_candidates=99, max_fits=300)
+    spec = prediction_spec(experiment_id="synthetic-qualified-size-v4", folds=("2024",),
+                           runner="experiments/size_search.py")
+    registration, spec = binding.prepare(case.repository, spec, v4, case.panel_request, **case.args)
+    reserve_native_registration(case.conn, case.store, registration, spec)
+    verify_native_registration(case.conn, case.store, registration)
+    sealed = planner.seal_search_plan(case.conn, case.store, registration, v4)
+    assert sealed["plan"]["schema_version"] == "magnitude_search_plan.v3"
+    assert sealed["plan"]["candidate_count"] == 99
+    assert sum(candidate["recipe"]["schema_version"] == "magnitude_ridge_hgb_recipe.v2"
+               for candidate in sealed["plan"]["candidates"]) == 48
+    ref = from_document(ArtifactRef, sealed["plan_ref"])
+    assert planner.read_search_plan(case.conn, case.store, registration, v4, ref) == sealed["plan"]
+
+
 def test_native_registration_detaches_caller_document(case):
     from experiments.native_registration import NativeRegistration
 

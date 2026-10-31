@@ -24,15 +24,16 @@ def _is_default_selector(selector):
 
 
 def compile_request(request, *, horizons=(5, 3, 1)):
-    """Dispatch bounded v3 grids while preserving existing dictionary replay."""
+    """Dispatch bounded v3/v4 grids while preserving existing dictionary replay."""
     version = request.get("schema_version") if type(request) is dict else None
     if version in ("regression_search_request.v1", "magnitude_search_request.v1") and not _is_default_selector(horizons):
         raise fail("INVALID_EXPERIMENT_SPEC",
                    "stage-2 legacy requests do not accept a horizon selector")
     if version == "regression_search_request.v1":
         return compile_v1_request(request)
-    compiler = (compile_v3_request if version == "magnitude_search_request.v3"
-                else compile_v2_leads_request if version == "magnitude_search_request.v2"
+    compiler = (compile_v2_leads_request if version == "magnitude_search_request.v2"
+                else compile_v3_request
+                if version in ("magnitude_search_request.v3", "magnitude_search_request.v4")
                 else compile_v1_request)
     compile_kwargs = {"horizons": horizons} if version in ("magnitude_search_request.v2", "magnitude_search_request.v3") else {}
     dictionary = request.get("feature_dictionary_hash") if type(request) is dict else None
