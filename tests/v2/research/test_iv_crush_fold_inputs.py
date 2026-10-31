@@ -110,24 +110,29 @@ def test_changed_fold_or_binding_refuses_before_training(fold_case, monkeypatch,
 
 
 @pytest.mark.parametrize("missing", [False, True])
-def test_wrong_projection_target_refuses_before_any_shard(fold_case, monkeypatch, missing):
+@pytest.mark.parametrize("reader", ["fit", "whole"])
+def test_wrong_target_pin_refuses_before_any_shard(fold_case, monkeypatch, missing, reader):
     data = fold_case
     manifest, identity = inputs.publish_inputs(data.store, admit(data))
     before, saved = catalog_rows(data.conn), artifact_object_bytes(data.store)
     monkeypatch.setattr(data.store, "read_verified", lambda *a: pytest.fail("shard opened"))
     monkeypatch.setattr(data.store, "publish_bytes", lambda *a, **k: pytest.fail("CAS write"))
     expected = fail("EXPERIMENT_IDENTITY_CONFLICT", "search fit target differs from its cohort").problem
-    for column in ("absolute_move_pct", "other"):
-        with pytest.raises(OpsError) as caught:
-            inputs.load_fit_inputs(data.store, manifest, identity, [], [], [], target_column=column)
-        assert caught.value.problem == expected
+    if reader == "fit":
+        for column in ("absolute_move_pct", "other"):
+            with pytest.raises(OpsError) as caught:
+                inputs.load_fit_inputs(data.store, manifest, identity, [], [], [], target_column=column)
+            assert caught.value.problem == expected
     altered = deepcopy(manifest)
     if missing:
         del altered["inline"]["target.column"]
     else:
         altered["inline"]["target.column"] = "absolute_move_pct"
     with pytest.raises(OpsError) as caught:
-        inputs.load_fit_inputs(data.store, altered, content_hash(altered), [], [], [], target_column="crush_pct_iv30")
+        if reader == "fit":
+            inputs.load_fit_inputs(data.store, altered, content_hash(altered), [], [], [], target_column="crush_pct_iv30")
+        else:
+            inputs.load_inputs(data.store, altered, content_hash(altered))
     assert caught.value.problem == expected and caught.value.problem.retryable is False
     assert catalog_rows(data.conn) == before and artifact_object_bytes(data.store) == saved
 

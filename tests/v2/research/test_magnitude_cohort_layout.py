@@ -42,11 +42,14 @@ def test_unsupported_explicit_layout_refuses_before_shard_io(tmp_path, monkeypat
 
 
 @pytest.mark.parametrize("schema", ["absent", None, "research_magnitude_preflight.v1"])
-def test_legacy_magnitude_layout_and_whole_cohort_adapter_remain_unchanged(tmp_path, schema):
+@pytest.mark.parametrize("explicit_target", [False, True])
+def test_legacy_magnitude_layout_and_whole_cohort_adapter_remain_unchanged(tmp_path, schema, explicit_target):
     store = ArtifactStore(tmp_path / "store")
     cohort = deepcopy(COHORT)
     if schema != "absent":
         cohort["preflight"]["schema_version"] = schema
+    if explicit_target:
+        cohort["target"] = {"column": "absolute_move_pct"}
     manifest, identity = inputs.publish_inputs(store, cohort)
     assert set(manifest["sections"]) == {member["section"] for member in shards.LIST_MEMBERS}
     assert inputs.load_inputs(store, manifest, identity) == cohort
