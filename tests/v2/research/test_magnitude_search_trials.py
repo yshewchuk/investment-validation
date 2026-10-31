@@ -474,6 +474,55 @@ def test_submitted_forecasts_cannot_be_replaced_after_interruption(case, monkeyp
         case.recorder.record(*args, forecasts=trial_forecasts(case, args))
 
 
+@pytest.mark.parametrize("claim", ["start", "execution-start"])
+def test_fresh_v3_claim_is_create_only_against_concurrent_writer(case, monkeypatch, claim):
+    from experiments.magnitude_search_plan import PLAN_V3, trial_key
+
+    args = trial_cases(case)[0]
+    recorder = case.recorder
+    plan = {**case.plan, "schema_version": PLAN_V3}
+    monkeypatch.setattr(recorder, "_admit", lambda: plan)
+    key = trial_key(plan, *args)
+    slot = ("start:" if claim == "start" else "execution-start:") + key
+    original_append = recorder._append
+    raced = []
+
+    def append_with_competing_writer(target, body, **kwargs):
+        if target == slot and not raced:
+            raced.append(kwargs.get("replay"))
+            original_append(target, body, **kwargs)
+        return original_append(target, body, **kwargs)
+
+    def forbidden_admission(inner):
+        pytest.fail("a losing create-only claim must refuse before native admission")
+
+    monkeypatch.setattr(recorder, "_append", append_with_competing_writer)
+    monkeypatch.setattr(recorder, "_inputs", forbidden_admission)
+    with pytest.raises(OpsError) as error:
+        if claim == "start":
+            recorder.start(*args)
+        else:
+            recorder._start(*args, execution={"synthetic": True},
+                            admitted=plan)
+    assert error.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert raced == [False]
+    assert recorder._read("inputs:" + key) is None
+
+
+def test_verified_v3_start_replay_keeps_committed_inputs(case, monkeypatch):
+    from experiments.magnitude_search_plan import PLAN_V3
+
+    args = trial_cases(case)[0]
+    plan = {**case.plan, "schema_version": PLAN_V3}
+    monkeypatch.setattr(case.recorder, "_admit", lambda: plan)
+    first = case.recorder.start(*args)
+    replay = case.recorder.start(*args)
+    assert replay == first
+    admitted = case.recorder._read("inputs:" + first["trial_id"])
+    assert isinstance(admitted, dict)
+    assert set(admitted) == {"cohort", "inputs_id"}
+
+
 def test_artifact_publication_failure_leaves_no_admitted_start(case, monkeypatch):
     original = ArtifactStore.publish_bytes
     def unavailable(store, data, *, schema_ref):

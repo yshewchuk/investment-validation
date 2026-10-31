@@ -168,19 +168,20 @@ class SearchTrials:
         if execution is not None:
             started["execution"] = execution
         cohort = cohort_key(plan, owner_year, inner_year)
-        replay = plan.get("schema_version") == PLAN_V3
-        if replay and self._read("start:" + key) is not None:
+        existing_start = self._read("start:" + key)
+        if plan.get("schema_version") == PLAN_V3 and existing_start is not None:
             if execution is not None:
                 raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search trial is unfinished")
-            if canonical_json(self._read("start:" + key)) != canonical_json(started):
+            if canonical_json(existing_start) != canonical_json(started):
                 raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search trial is unfinished")
             admitted = self._read("inputs:" + key)
             if (not isinstance(admitted, dict) or set(admitted) != {"cohort", "inputs_id"}
                     or admitted["cohort"] != cohort or self._read("cohort:" + cohort) is None):
                 raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search trial is unfinished")
-        self._append("start:" + key, started, replay=replay)
+        else:
+            self._append("start:" + key, started, replay=False)
         if execution is not None:
-            self._append("execution-start:" + key, execution, replay=replay)
+            self._append("execution-start:" + key, execution, replay=False)
         inputs = self._cohort_inputs(cohort, inner)
         # Shards first (outside the catalog transaction); the manifest append is the commit point.
         if cohort not in self._published:

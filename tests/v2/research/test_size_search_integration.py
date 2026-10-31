@@ -711,6 +711,8 @@ def test_interrupted_v3_start_refuses_replay_before_native_read(case, monkeypatc
 
 def test_report_reuses_shared_execution_receipt_read_and_keeps_outer_rows(monkeypatch):
     from collections import Counter
+    import weakref
+
     from experiments import size_search_report as report
     from experiments.magnitude_search_plan import PLAN_V3
 
@@ -733,12 +735,22 @@ def test_report_reuses_shared_execution_receipt_read_and_keeps_outer_rows(monkey
     monkeypatch.setattr(report, "collect_outer_results", lambda *args: result)
     monkeypatch.setattr(report, "paired_report", lambda *args, **kwargs: {})
     reads = Counter()
+    payload_refs = []
+    alive_before_read = []
+
+    class ReceiptPayload:
+        def __init__(self):
+            self.training_rows = ["event-id"] * 10000
 
     def read_record(conn, store, run_id, slot):
         reads[slot] += 1
         if slot.startswith("execution:"):
+            alive_before_read.append(sum(ref() is not None for ref in payload_refs))
+            payload = ReceiptPayload()
+            payload_refs.append(weakref.ref(payload))
             return {"status": "succeeded", "fit_attempt_count": 1,
-                    "completed_fit_count": 1, "diagnostics": []}
+                    "completed_fit_count": 1, "diagnostics": [], "fits": payload,
+                    "training_event_ids": payload, "evaluation_event_ids": payload}
         if slot.startswith("outer-forecasts:"):
             return []
         if slot.startswith("comparison-terminal:"):
@@ -752,3 +764,5 @@ def test_report_reuses_shared_execution_receipt_read_and_keeps_outer_rows(monkey
     assert reads["execution:" + shared_key] == 1
     assert len(output["inner_fits"]) == 3
     assert [row["outer_year"] for row in output["inner_fits"]] == ["2024", "2025", "2025"]
+    assert alive_before_read == [0, 0]
+    assert all(ref() is None for ref in payload_refs)
