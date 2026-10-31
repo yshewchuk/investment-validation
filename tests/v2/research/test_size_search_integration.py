@@ -512,7 +512,7 @@ def test_public_fold_inputs_refuses_caller_drift_before_dependent_reads(case, mo
         fold = None
     def forbidden(*a, **k):
         pytest.fail("unregistered fold reached dependent panel or outcome reads")
-    for name in ("_read_panel", "preflight_magnitude_targets", "qualify_magnitude_training_targets"):
+    for name in ("read_panel", "preflight_magnitude_targets", "qualify_magnitude_training_targets"):
         monkeypatch.setattr(binding, name, forbidden)
     before = case.conn.total_changes
     with pytest.raises(OpsError) as caught:

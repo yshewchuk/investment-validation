@@ -104,6 +104,17 @@ LIST_MEMBERS = (
 )
 
 
+def list_members(preflight_schema):
+    """Select one closed receipt layout; legacy magnitude sections remain byte-identical."""
+    if preflight_schema == "research_iv_crush_preflight.v1":
+        return (LIST_MEMBERS[0], {**LIST_MEMBERS[1], "rows": ("event_id", "crush_pct_iv30")},
+            *LIST_MEMBERS[2:4], *({"section": "training_inputs." + name, "key": None}
+                for name in ("consumed_inputs", "excluded_future_events", "holdout_exclusions")))
+    if preflight_schema not in (None, "research_magnitude_preflight.v1"):
+        raise fail(_CONFLICT, "search cohort preflight schema is unsupported")
+    return LIST_MEMBERS
+
+
 def _artifact_failure(error, action, *, unsafe_is_conflict=True):
     message = "search cohort shard could not be " + action
     if isinstance(error, OSError):
