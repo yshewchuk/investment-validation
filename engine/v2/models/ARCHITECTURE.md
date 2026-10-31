@@ -773,8 +773,8 @@ per the root doc's layer table; `checks/import_layers.py` enforces this.
 - `tools/phase5_prepare_release.py` and `tools/phase5_inventory.py` — release preparation and
   inventory; the former imports `serving_fold_preflight`, `serving_fold_checks` (fold metadata and
   its policy/header checks) and `pinned_panel` (the pinned panel check), which live in this package.
-- `experiments/magnitude_search_trials.py` and `experiments/magnitude_search_execution.py`
-  — `no_fit.forbid_fitting` before native trial claims and fixed-child fitting.
+- `experiments/magnitude_search_trials.py`, `experiments/magnitude_search_execution.py`,
+  and `experiments/v2_magnitude_search_run.py` use the no-fit guards before claims/fits.
 - `experiments/magnitude_candidate_recipe.py` consumes the closed ElasticNet/Ridge/HGB
   recipe constructors; `magnitude_candidate_fit.py` checks both legacy/v2 no-fit
   guards before recipe, column or array inspection, then delegates to the public fitter.

@@ -209,7 +209,7 @@ def _admit_driver(conn, store, registration, request, plan_ref):
 
 
 def run_search(conn, store, repository, registration, request, plan_ref, *, limits, collect_results=True):
-    """Validate every claimed inner result before any fresh serial fit; never retry; collect_results=False returns None before the final collect."""
+    """Validate claimed inner results before fresh work; never retry; collect_results=False returns None before the final collect."""
     workers = validate_workers(request)
     request = {key: value for key, value in request.items() if key != "workers"}
     validate_execution_limits(limits)

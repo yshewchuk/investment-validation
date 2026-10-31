@@ -200,6 +200,8 @@ from causal source rows, and closed ElasticNet and Ridge/HGB recipe validation f
 (not a v2 package, so not part of this graph) is the P5-1 inventory's CLI.
 `experiments/magnitude_search_trials.py` and `experiments/magnitude_search_execution.py`
 consume `no_fit.forbid_fitting` before native trial claims and fixed-child fitting.
+`experiments/v2_magnitude_search_run.py` consumes the legacy and v2 no-fit guards
+before dispatching fresh worker trials.
 `experiments/magnitude_search_outer.py` consumes the legacy/v2 no-fit guards
 before selected outer refit claims; completed evidence replay never fits.
 `experiments/magnitude_candidate_recipe.py` consumes the closed family recipe
