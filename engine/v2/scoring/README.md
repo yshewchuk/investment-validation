@@ -140,8 +140,10 @@ imports `native_entry_rule.ENTRY_RULE_STRATEGIES`, `NightlySourceBundleRefusal`,
 `no_fit_guard()` block. `engine.v2.serving.native_render` (layer 7) imports
 `analog_display_fields`, `DISPLAY_ANALOG_FIELDS` and `StageObservation` to
 carry the analog stage's display-only row ids onto a native serving row.
-The strict scorer and capture consumer for chooser-fold references is part of
-the follow-up wiring slice; this slice provides the verified resolver contract.
+Strict Tier-0 capture opts into verified chooser-fold references, passes them
+through the scorer, and records validated references in strict trace metadata.
+`tools/capture_tier0_corpus.py` is an external compatibility caller of the
+release binding resolver and scorer; it is not a package-layer consumer.
 
 <!-- consumers: engine.v2.models.training, engine.v2.ops, engine.v2.serving -->
 
@@ -175,8 +177,9 @@ still wins for any derived column it declares; `dte_entry` is scorer-computed
 (from the priced legs and quote date) and no longer projected.
 The resolver exposes its verified `chooser_fold_references` map only when
 called with `include_chooser_fold_references=True`. Default resolution does not
-load chooser estimators. Scorer and strict-capture consumption of this map is
-part of the follow-up wiring slice.
+load chooser estimators. Strict production capture opts in and passes the map
+through the legacy scorer; the capture trace records only the verified
+reference for each served chooser producer fold.
 
 The current builder is deliberately bounded to its supported strategies
 (`SUPPORTED_STRATEGIES`) and their declared recipes. To add another strategy or recipe, extend `source_inputs.py` and add
