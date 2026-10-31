@@ -165,6 +165,77 @@ def test_strict_plan_still_refuses_ceiling_before_history_start(monkeypatch):
     assert calls["groups"] == [] and calls["eligibility"] == []
 
 
+def test_dated_before_history_start_target_never_reaches_forecasts(monkeypatch):
+    """forecast_cutoff can raise CONTRACT_MISMATCH for old events outside the calendar; the
+    non-strict planner must remove pre-history_start targets before deriving any forecast."""
+    calls = _stub_plan(monkeypatch,
+                       [{"event_id": "ev-old", "ticker": "AAAA",
+                         "event_date": pd.Timestamp("2020-06-10")},
+                        {"event_id": "ev-in", "ticker": "AAAA",
+                         "event_date": pd.Timestamp("2024-01-05")}],
+                       {"ev-old": "2020-06-20", "ev-in": "2024-01-20"},
+                       retained=["ev-old", "ev-in"], exclusions=[])
+    stub = backend._forecasts
+    seen = []
+
+    def guarded(event, horizons, calendar, clocks):
+        seen.append(event.event_id)
+        if event.event_id == "ev-old":
+            raise data_errors.fail("CONTRACT_MISMATCH", "old event is outside the forecast calendar")
+        return stub(event, horizons, calendar, clocks)
+
+    monkeypatch.setattr(backend, "_forecasts", guarded)
+    result = _plan_targets(["ev-old", "ev-in"])
+    assert "ev-old" not in seen
+    assert result == {"plan_id": "plan_1", "retained": ["ev-in"], "unavailable": [],
+                      "exclusions": [], "before_start": ["ev-old"]}
+    assert calls["groups"][0]["event_ids"] == ["ev-in"]
+
+
+def test_all_targets_dated_before_history_start_forecast_nothing(monkeypatch):
+    calls = _stub_plan(monkeypatch,
+                       [{"event_id": "ev-old-1", "ticker": "AAAA",
+                         "event_date": pd.Timestamp("2020-06-10")},
+                        {"event_id": "ev-old-2", "ticker": "AAAA",
+                         "event_date": pd.Timestamp("2020-07-10")}],
+                       {"ev-old-1": "2020-06-20", "ev-old-2": "2020-07-20"},
+                       retained=["ev-old-1", "ev-old-2"], exclusions=[])
+
+    def forbidden(event, horizons, calendar, clocks):
+        raise AssertionError("forecasts derived for targets dated before history_start")
+
+    monkeypatch.setattr(backend, "_forecasts", forbidden)
+    result = _plan_targets(["ev-old-1", "ev-old-2"])
+    assert result == {"plan_id": None, "retained": [], "unavailable": [], "exclusions": [],
+                      "before_start": ["ev-old-1", "ev-old-2"]}
+    assert calls["groups"] == [] and calls["eligibility"] == []
+
+
+def test_strict_plan_forecasts_every_target_including_dated_early(monkeypatch):
+    calls = _stub_plan(monkeypatch,
+                       [{"event_id": "ev-old", "ticker": "AAAA",
+                         "event_date": pd.Timestamp("2023-12-10")},
+                        {"event_id": "ev-in", "ticker": "AAAA",
+                         "event_date": pd.Timestamp("2024-01-05")}],
+                       {"ev-old": "2024-01-20", "ev-in": "2024-01-25"},
+                       retained=["ev-old", "ev-in"], exclusions=[])
+    stub = backend._forecasts
+    seen = []
+
+    def recording(event, horizons, calendar, clocks):
+        seen.append(event.event_id)
+        return stub(event, horizons, calendar, clocks)
+
+    monkeypatch.setattr(backend, "_forecasts", recording)
+    plan = backend._plan(object(), {}, as_of_month="2024-01", policy={"policy_id": "pol"},
+                         event_ids=["ev-old", "ev-in"], horizons=[1, 3, 5],
+                         history_start="2024-01-01", limits={}, strict=True)
+    assert sorted(seen) == ["ev-in", "ev-old"]
+    assert plan["early"] == [] and plan["remaining"] is True
+    assert sorted(plan["forecasts"]) == ["ev-in", "ev-old"]
+    assert calls["groups"][0]["strict"] is True
+
+
 # --- real planner over the synthetic native fixture (nothing stubbed) ---
 
 @pytest.fixture

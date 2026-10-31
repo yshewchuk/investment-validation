@@ -148,6 +148,26 @@ def _forecasts(event, horizons, calendar, clocks):
     return forecasts
 
 
+def _drop_dated_early(targets, event_ids, history_start):
+    # a target dated before history_start precedes the requested history outright: it can never enter the window or be retained, so it is removed before forecasts are derived (forecast_cutoff can raise CONTRACT_MISMATCH for old events outside the calendar) and reported as early rather than left unclassified.
+    dated_early = {target.event_id for target in targets.itertuples(index=False)
+        if target.event_date.strftime("%Y-%m-%d") < history_start}
+    targets = targets[~targets.event_id.isin(dated_early)]
+    event_ids = [key for key in event_ids if key not in dated_early]
+    return targets, event_ids, dated_early
+
+
+def _drop_ceiling_early(targets, forecasts, event_ids, history_start):
+    # events whose earliest forecast ceiling precedes history_start cannot be targets (the strict window would refuse them), even when the event date is inside the event window.
+    ceiling_early = {event_id for event_id, event_clocks in forecasts.items()
+        if min(c["source_session_ceiling"] for c in event_clocks) < history_start}
+    if ceiling_early:
+        targets = targets[~targets.event_id.isin(ceiling_early)]
+        forecasts = {key: value for key, value in forecasts.items() if key not in ceiling_early}
+        event_ids = [key for key in event_ids if key not in ceiling_early]
+    return targets, forecasts, event_ids, ceiling_early
+
+
 def _plan(repository, snapshot, *, as_of_month, policy, event_ids, horizons, history_start, limits, strict):
     """Shared planning path; strict refuses unavailable targets, non-strict records them as unavailable.
     Non-strict also drops targets dated before history_start, or whose earliest ceiling precedes it, as
@@ -157,22 +177,19 @@ def _plan(repository, snapshot, *, as_of_month, policy, event_ids, horizons, his
     population = load_population(repository, snapshot, as_of_month=as_of_month)
     calendar, calendar_source = calendar_input(repository, snapshot)
     clocks = {}
-    forecasts = {event.event_id: _forecasts(event, horizons, calendar, clocks)
-        for event in targets.itertuples(index=False)}
     early = set()
     if not strict:
-        # events whose earliest forecast ceiling precedes history_start cannot be targets (the strict window would refuse them), even when the event date is inside the event window.
-        early = {event_id for event_id, event_clocks in forecasts.items()
-            if min(c["source_session_ceiling"] for c in event_clocks) < history_start}
-        # a target dated before history_start precedes the requested history outright: it can never enter the window or be retained, so it is reported as early rather than left unclassified.
-        early |= {target.event_id for target in targets.itertuples(index=False)
-            if target.event_date.strftime("%Y-%m-%d") < history_start}
-        if early:
-            targets = targets[~targets.event_id.isin(early)]
-            forecasts = {key: value for key, value in forecasts.items() if key not in early}
-            event_ids = [key for key in event_ids if key not in early]
-            if targets.empty:
-                return {"early": sorted(early), "remaining": False}
+        targets, event_ids, early = _drop_dated_early(targets, event_ids, history_start)
+        if targets.empty:
+            return {"early": sorted(early), "remaining": False}
+    forecasts = {event.event_id: _forecasts(event, horizons, calendar, clocks)
+        for event in targets.itertuples(index=False)}
+    if not strict:
+        targets, forecasts, event_ids, ceiling_early = _drop_ceiling_early(
+            targets, forecasts, event_ids, history_start)
+        early |= ceiling_early
+        if targets.empty:
+            return {"early": sorted(early), "remaining": False}
     start, _ = event_history._window(history_start,
         min(c["source_session_ceiling"] for event_clocks in forecasts.values() for c in event_clocks))
     ceilings = {}
