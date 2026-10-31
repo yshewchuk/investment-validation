@@ -344,11 +344,12 @@ def test_native_progress_reuses_precomputed_evidence_but_receipts_rebuild_it(nat
 def test_strict_fit_failure_policy_is_opt_in(native, monkeypatch, error):
     import pandas as pd
 
+    from engine.v2.models.training import magnitude
     from experiments import magnitude_fitted
 
     def refuse(*a):
         raise error
-    monkeypatch.setattr(magnitude_fitted, "fit_magnitude_predictions", refuse)
+    monkeypatch.setattr(magnitude, "fit_magnitude_predictions", refuse)
     inputs = native.recorder._inputs(None)
     indexed = {(row["event_id"], row["horizon_sessions"]): row for row in inputs["features"]}
     arguments = (indexed, pd.DataFrame(inputs["training"]), native.plan["folds"][0]["inner"][0],
