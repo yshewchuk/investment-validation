@@ -1,13 +1,17 @@
 # STR-THRU distribution research
 
-[DESIGN.md](DESIGN.md) defines the four approved implementation bundles and scientific controls. [ARCHITECTURE.md](ARCHITECTURE.md) documents Bundle C's fitting/results and causal residual boundary; public modules remain in the parent `experiments` package.
+[DESIGN.md](DESIGN.md) defines the four approved implementation bundles and scientific controls. [ARCHITECTURE.md](ARCHITECTURE.md) documents fitting/results, causal residuals, the fixed child and run metadata; public modules remain in the parent `experiments` package.
 
 - A supplies magnitude histogram math and frozen payoff controls.
 - B supplies separate native ownership, source/fold admission, raw-pair budgets and claims.
 - C adds admitted numeric fit receipts and earlier-OOF residual controls; raw probabilities remain explicitly uncalibrated.
-- D's bounded runner, complete attempts, economics and portfolio reports are not implemented here.
+- D supplies separate policy/book/market helpers, a fixed child and metadata seals; the whole-experiment runner and complete attempts remain absent.
 
 Focused synthetic checks live in `tests/v2/research/test_distribution_*.py`. No real data, provider, final-holdout, deployment or automatic run authority follows from these APIs. Shared platform owners retain source eligibility, transport and holdout policy.
+
+`DistributionRunPlan` is the metadata/section-journal interface, not an executable runner. Its [run metadata and containment contract](ARCHITECTURE.md#run-metadata-and-containment) specifies artifact reads, explicit writes, partial-seal behavior and dedicated-process prerequisites. Each preflight reuses the request validator before metadata/artifact access and returns a detached policy: editing returned metadata cannot mutate the instance's request, and an invalid owned request refuses `INVALID_EXPERIMENT_SPEC`. `contained` rejects malformed resource limits and nonpositive, nonfinite or nonnumeric remaining duration before process-state access or watchdog startup; positive fractional seconds are supported. Preflight/collection do not install containment automatically or certify resource feasibility.
+
+Journal slots and section names must be nonempty strings. Appended bodies are dictionaries; section rows are mappings, with `position` reserved for the publisher. Completed records must contain a run-plan ID and named section descriptors. Shared manifest-builder validation checks descriptor metadata before a completion write and on read, without artifact I/O. Before append, the ID must equal the existing verified journal seal's ID; missing seals or mismatches refuse `INVALID_EXPERIMENT_SPEC`, leaving the immutable slot available for correction. This adds only a seal read, not repeated admission or report-shard reads. Malformed caller inputs/metadata use the same refusal; shared size limits and CAS verification retain native resource/integrity errors. Collection still reverifies admission and shard bytes. This does not authenticate execution or extend completion authority.
 
 ## Fixed CAS worker
 
