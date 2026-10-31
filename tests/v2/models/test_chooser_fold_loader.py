@@ -246,6 +246,25 @@ def test_descriptor_parent_identity_refuses_with_matching_catalog(setup, field, 
     assert setup[0].cache_size == 0
 
 
+def test_loader_rejects_carried_descriptor_without_authoring_parent(setup, monkeypatch):
+    inference, descriptor, parent, catalog, _path, _cache = setup
+    current_release = replace(parent.release, release_id="r2")
+    current_parent = replace(
+        parent, release=current_release, release_hash=semantic_release_hash(current_release))
+    carried_catalog = copy.deepcopy(catalog)
+    carried_catalog["release_id"] = current_release.release_id
+    carried_catalog.setdefault("sources", {})["carried_from"] = parent.release.release_id
+    monkeypatch.setattr(inference, "prepare_serving_fold",
+                        lambda *a, **k: pytest.fail("unverified current parent reached preparation"))
+
+    with pytest.raises(loader.ServingFoldError, match="^serving fold is not ready$") as caught:
+        loader.load_chooser_serving_fold(
+            inference, descriptor, verified_parent_manifest=current_parent,
+            verified_catalog=_rehash(carried_catalog))
+
+    assert caught.value.code == MODEL_NOT_READY
+
+
 def test_descriptor_pool_count_refuses_with_matching_catalog(setup):
     descriptor = replace(setup[1], pool_count=setup[1].pool_count + 1)
     catalog = copy.deepcopy(setup[3])
