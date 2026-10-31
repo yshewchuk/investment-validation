@@ -11,7 +11,7 @@ from engine.v2.models.adapters import RuntimeFitForbidden
 from engine.v2.models.no_fit import no_fit_guard
 from engine.v2.ops.errors import OpsError
 from engine.v2.research.magnitude_panel_qualified_table import recipe
-from experiments import eligible_history, size_panel
+from experiments import eligible_history, magnitude_search_request_versions, size_panel
 from experiments import magnitude_search_plan as planner
 from experiments import size_search_binding as binding
 from experiments.native_registration import reserve_native_registration, verify_native_registration
@@ -64,6 +64,73 @@ def case(tmp_path_factory):
         next(generator)
     except StopIteration:
         pass
+
+
+@pytest.fixture(scope="module")
+def lead_one_case(tmp_path_factory):
+    root = tmp_path_factory.mktemp("size-v2-lead-one")
+    generator = panel_data.__wrapped__(root, SimpleNamespace())
+    data = next(generator)
+    ids = [e["event_id"] for e in data.events if str(e["event_date"].date()) in
+           ("2022-06-02", "2023-01-03", "2023-06-02", "2024-06-17")]
+    history_request = {**data.request, "limits": data.panel_request["limits"], "event_ids": ids}
+    history_request["horizons"] = [1]
+    history = eligible_history.materialize(data.repository, data.panel_source, **history_request)
+    panel_request = {**data.panel_request, "event_ids": ids, "history_snapshot": history["feature_snapshot"]}
+    panel_request["horizons"] = [1]
+    panel = size_panel.materialize(data.repository, data.panel_source, **panel_request)
+    panel_request = {**panel_request, "feature_snapshot_id": panel["feature_snapshot"].snapshot_id,
+        "history_snapshot": history["feature_snapshot"].snapshot_id,
+        "price_history_snapshot": data.prices.snapshot_id}
+    request = request_fixture()
+    request.update(feature_dictionary_hash=recipe("HMO")["dictionary_hash"],
+        feature_snapshot_id=panel["feature_snapshot"].snapshot_id, history_snapshot_id=history["feature_snapshot"].snapshot_id,
+        outer_years=["2024"], inner_years={"2024": ["2023"]}, max_fits=34)
+    request["eligibility_policy_ref"].update(plan_id=panel["context"]["eligibility_plan"]["plan_id"])
+    request["limits"] = {"child": {"memory_bytes": 2 << 30, "cpu_seconds": 30, "wall_seconds": 60},
+        "parent": {"memory_bytes": 3 << 30, "wall_seconds": 600},
+        "build": {"memory_bytes": 3 << 30, "wall_seconds": 60}, "job": {"wall_seconds": 600}}
+    spec = prediction_spec(experiment_id="synthetic-qualified-size-lead-one", folds=("2024",),
+                           runner="experiments/size_search.py")
+    args = dict(scope="panel-source", training_start="2022-01-01", labels_before="2025-01-01")
+    registration, spec = binding.prepare(data.repository, spec, request, panel_request, **args)
+    store = data.repository._store
+    reserve_native_registration(data.conn, store, registration, spec)
+    sealed = planner.seal_search_plan(data.conn, store, registration, request)
+    ref = from_document(ArtifactRef, sealed["plan_ref"])
+    context = (data.conn, store, data.repository, registration, request, ref)
+    seal_search_run(*context, clock=SystemClock())
+    result = SimpleNamespace(**{**vars(data), "root": root})
+    result.__dict__.update(panel=panel, request=request, panel_request=panel_request,
+        spec=spec, registration=registration, store=store, plan=sealed["plan"], ref=ref, context=context, args=args)
+    yield result
+    try:
+        next(generator)
+    except StopIteration:
+        pass
+
+
+def test_lead_one_seals_single_horizon_plan_and_preserves_v2_request_identity(case, lead_one_case):
+    plan = lead_one_case.plan
+    assert plan["horizons"] == [1]
+    assert plan["planned_fit_count"] == 34
+    assert plan["counts"]["search_fits"] == 34
+    assert plan["counts"]["baseline_logical_fits"] == 1
+    assert plan["counts"]["baseline_component_fits"] == 2
+    assert plan["counts"]["total_component_fits"] == 36
+    multi = magnitude_search_request_versions.compile_request(case.request, horizons=(5, 3, 1))
+    lead = magnitude_search_request_versions.compile_request(case.request, horizons=(1,))
+    assert multi["request_id"] == lead["request_id"]
+    assert multi["candidate_specs"] == lead["candidate_specs"]
+    assert multi["counts"]["search_fits"] == 102
+    assert lead["counts"]["search_fits"] == 34
+
+
+def test_contain_accepts_request_when_given_single_horizon(case, monkeypatch):
+    from experiments import size_search
+    monkeypatch.setattr(size_search.signal, "signal", lambda *args: None)
+    monkeypatch.setattr(size_search.signal, "alarm", lambda seconds: 0)
+    assert size_search._contain(case.request, (1,)) == case.request["limits"]["parent"]["memory_bytes"]
 
 
 def test_native_v17_anchor_and_explicit_v2_fitted_identities(case):
@@ -225,7 +292,7 @@ def test_v17_storage_outages_stay_retryable_through_library_and_cli(case, monkey
             pass
 
     monkeypatch.setattr(size_search, "_read_document", lambda path: case.request if path == "request.json" else {})
-    monkeypatch.setattr(size_search, "_contain", lambda request: 2 ** 33)
+    monkeypatch.setattr(size_search, "_contain", lambda request, horizons=(5, 3, 1): 2 ** 33)
     monkeypatch.setattr(size_search, "experiment_spec_from_document", lambda document: case.spec)
     monkeypatch.setattr(size_search, "connect", lambda *args, **kwargs: ConnectionProxy())
     monkeypatch.setattr(size_search, "ArtifactStore", lambda root: RawUnavailableStore())
@@ -780,6 +847,7 @@ def test_report_reuses_shared_execution_receipt_read_and_keeps_outer_rows(monkey
     plan = {"schema_version": PLAN_V3, "plan_id": "plan", "candidates": [{"candidate_id": "c"}],
         "counts": {"candidates": 1, "inner_folds": 3, "outer_folds": 2},
         "request": {"limits": limits},
+        "horizons": [5, 3, 1],
         "folds": [
             {"outer": {"year": "2024", "evaluation_event_ids": ["evt"]},
              "inner": [{"year": "2023"}]},

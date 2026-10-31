@@ -55,7 +55,8 @@ def input_bindings(repository, spec, request, panel_request, *, scope, training_
     return {
         "spec_hash": spec.spec_hash,
         "request": content_hash(request),
-        "size_request": content_hash(compile_request(request)["request"]),
+        "size_request": content_hash(compile_request(
+            request, horizons=tuple(h for h in (5, 3, 1) if h in panel_request["horizons"]))["request"]),
         "panel_request": content_hash(panel_request),
         "scope": scope,
         "training_start": training_start,

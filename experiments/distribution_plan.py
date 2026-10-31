@@ -36,6 +36,10 @@ def prepare_plan(conn, store, own_registration, source_registration, source_requ
     verify_native_registration(conn, store, own_registration, max_evidence_bytes=MAX_NATIVE_EVIDENCE_BYTES)
     # The public source-plan reader verifies the stored source registration too.
     native = read_search_plan(conn, store, source_registration, source_request, source_plan_ref)
+    if set(recipe["horizons"]) - set(native["horizons"]):
+        raise fail("INVALID_EXPERIMENT_SPEC", "distribution SIZE plan must provide every recipe horizon")
+    if not {5, 3, 1} <= set(native["horizons"]):
+        raise fail("INVALID_EXPERIMENT_SPEC", "distribution SIZE plan must provide every native SIZE anchor horizon")
     own, source = own_registration.document, source_registration.document
     execution = own["execution_plan"]
     if (own["schema_version"] != "native_experiment_registration.v1.0"

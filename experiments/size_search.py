@@ -45,10 +45,10 @@ from experiments.v2_magnitude_search_run import (
 )
 
 
-def _contain(request):
+def _contain(request, horizons=(5, 3, 1)):
     """Apply explicit parent/job ceilings in the CLI process, never silently increase."""
     from experiments.magnitude_search_request_versions import compile_request
-    limits = compile_request(request)["request"]["limits"]
+    limits = compile_request(request, horizons=tuple(h for h in (5, 3, 1) if h in horizons))["request"]["limits"]
     memory = limits["parent"]["memory_bytes"]
     if limits["child"]["memory_bytes"] > memory:
         raise fail("INVALID_EXPERIMENT_SPEC", "child memory must not exceed inherited parent limit")
@@ -97,7 +97,9 @@ def main(argv=None):
     try:
         request = _read_document(args.request)
         panel_request = validate_panel_request(_read_document(args.panel_request)) if fresh else None
-        memory = _contain(request)
+        # _contain only extracts resource ceilings here for every action; exact fit-count
+        # feasibility is checked later by admitted plan validation, so non-fresh uses (1,).
+        memory = _contain(request, panel_request["horizons"] if fresh else (1,))
         stack.enter_context(rss_watchdog(memory))
         print("[size] stage=" + args.action + " start rss_kib=" + str(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss), file=sys.stderr)
         with redirect_stdout(sys.stderr):
@@ -118,7 +120,9 @@ def main(argv=None):
                         scope=args.scope, training_start=args.training_start,
                         labels_before=args.labels_before)
                     from experiments.magnitude_search_request_versions import compile_request
-                    result = resource_report({"counts": compile_request(request)["counts"], "request": request})
+                    counts = compile_request(request, horizons=tuple(h for h in (5, 3, 1)
+                        if h in panel_request["horizons"]))["counts"]
+                    result = resource_report({"counts": counts, "request": request})
                     result["receipt_ref"] = to_document(issue(store, bind(), registration))
                 else:
                     try:

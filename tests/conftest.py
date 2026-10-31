@@ -157,7 +157,9 @@ def _alarm(item, when: str):
         yield
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
-        signal.signal(signal.SIGALRM, previous)
+        # signal.signal returns None when SIGALRM was not previously handled;
+        # Python 3.14 rejects None as a handler, so restore the default instead.
+        signal.signal(signal.SIGALRM, signal.SIG_DFL if previous is None else previous)
 
 
 @pytest.hookimpl(wrapper=True)

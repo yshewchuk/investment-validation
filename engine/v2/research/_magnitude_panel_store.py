@@ -11,7 +11,7 @@ from engine.v2.foundation import SystemClock, content_hash
 from engine.v2.research import magnitude_panel_qualified_table as table
 from engine.v2.research._snapshot import artifact_store, catalog_connection
 
-_FRAGMENT_ROWS = 3  # one event's horizons per stored fragment
+_FRAGMENT_ROWS = 3  # maximum rows per stored fragment
 
 
 def _slot(context):
@@ -128,7 +128,7 @@ def publish(repository, source, context, rows):
 
 def _bounded_query(repository, snapshot, context):
     limits = context["request"]["limits"]
-    count = len(context["target_events"]) * 3
+    count = len(context["target_events"]) * len(context["request"]["horizons"])
     records = repository.fragment_records(snapshot, table.TABLE)
     if (sum(r.row_count for r in records) != count
             or any(r.object_ref.byte_size > limits["max_object_bytes"] for r in records)

@@ -86,7 +86,7 @@ def quote_plan(repository, source, index, history_context, request, price_metada
             if lo is None:
                 raise fail("CONTRACT_MISMATCH", "historical quote label bracket unavailable")
             clocks = [forecast_cutoff(pd.Timestamp(event["event_date"]), event["session"], h, calendar)
-                      for h in (1, 3, 5)]
+                      for h in request["horizons"]]
             groups.append({"event_id": event["event_id"], "ticker": event["ticker"],
                 "event_date": event["event_date"], "label_start": lo, "label_end": hi,
                 "forecasts": [{"horizon_sessions": c["horizon_sessions"],
@@ -95,7 +95,7 @@ def quote_plan(repository, source, index, history_context, request, price_metada
         meter.tick()
     metadata = {"schema_version": "event_group_bounds.v1", "source_snapshot": to_document(source),
         "holdout_as_of_month": request["as_of_month"], "policy_id": request["policy"]["policy_id"],
-        "horizons": [1, 3, 5], "groups": groups}
+        "horizons": list(request["horizons"]), "groups": groups}
     metadata["metadata_id"] = content_hash(metadata)
     if excluded:
         decision("quote plan", f"excluded {len(excluded)} events dated before price coverage (before_price_coverage)")
