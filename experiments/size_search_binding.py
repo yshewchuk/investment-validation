@@ -12,7 +12,6 @@ from engine.v2.foundation import artifact_reference, canonical_json, content_has
 from engine.v2.models.frozen_state_io import BoundedStateReadError, read_bounded_state
 from engine.v2.ops.errors import fail
 from engine.v2.ops.fingerprints import environment_identity, source_closure
-from engine.v2.research.eligibility_policy import eligibility_policy
 from engine.v2.research.magnitude_inputs import (
     preflight_magnitude_targets,
     qualify_magnitude_training_targets,
@@ -30,6 +29,7 @@ from experiments.native_registration import (
     verify_native_registration,
 )
 from experiments.size_comparator import recipe as comparison_recipe
+from experiments.size_panel_request import validate_panel_request
 
 SCHEMA = "native_experiment_registration.v1.7"
 
@@ -50,39 +50,8 @@ def _preview_payload(binding):
     return canonical_json(compact).encode("utf-8")
 
 
-def validate_panel_request(value):
-    """Closed local wire envelope only; installed readers retain source admission."""
-    try:
-        strings = {"feature_snapshot_id", "history_snapshot", "price_history_snapshot",
-                   "as_of_month", "history_start", "source_start"}
-        limits = {"limits": {"max_source_rows", "max_fragments", "max_object_bytes", "max_total_bytes", "max_output_rows"},
-            "metadata_limits": {"max_catalog_tables", "max_catalog_fragments", "max_catalog_bytes",
-                "max_fragments", "max_partitions", "max_tickers", "max_scan_rows", "max_object_bytes",
-                "max_total_object_bytes", "max_batch_rows", "max_retained_rows",
-                "max_retained_metadata_bytes", "max_proof_bytes"}}
-        if (type(value) is not dict or set(value) != strings | set(limits) | {"policy", "event_ids", "horizons"}
-                or any(type(value[k]) is not str or not value[k] or value[k] != value[k].strip() for k in strings)):
-            raise ValueError
-        for day in (value["history_start"], value["source_start"], value["as_of_month"] + "-01"):
-            if date.fromisoformat(day).isoformat() != day:
-                raise ValueError
-        events, horizons = value["event_ids"], value["horizons"]
-        if (type(events) is not list or not events or any(type(e) is not str or not e or e != e.strip() for e in events)
-                or len(set(events)) != len(events) or type(horizons) is not list or horizons != [1, 3, 5]
-                or any(type(h) is not int for h in horizons)
-                or type(value["policy"]) is not dict or type(value["policy"].get("embargo_days")) is not int
-                or value["policy"] != eligibility_policy(version="grouped_ticker_embargo.v1", embargo_days=30)):
-            raise ValueError
-        for key, fields in limits.items():
-            if (type(value[key]) is not dict or set(value[key]) != fields
-                    or any(type(n) is not int or not 0 < n < sys.maxsize for n in value[key].values())):
-                raise ValueError
-    except (KeyError, TypeError, ValueError, OverflowError):
-        raise fail("INVALID_EXPERIMENT_SPEC", "invalid closed SIZE panel request") from None
-    return value
-
-
-def _read_panel(repository, source, request, *, columns):
+def read_panel(repository, source, request, *, columns):
+    """Resolve the pinned request and delegate installed qualified-panel admission."""
     from experiments.size_panel import read
     args = dict(request)
     feature = repository.resolve(args.pop("feature_snapshot_id"))
@@ -105,7 +74,7 @@ def _stored_panel(repository, source, binding, columns):
         fingerprint = content_hash({"context": panel["context"], "feature_snapshot": panel["feature_snapshot"]})
         _require(fingerprint == content_hash(binding["size_panel"]))
     else:
-        panel = _read_panel(repository, source, binding["size_panel_request"], columns=columns)
+        panel = read_panel(repository, source, binding["size_panel_request"], columns=columns)
         _require({"context": panel["context"], "feature_snapshot": panel["feature_snapshot"]}
                  == binding["size_panel"])
         _PANEL_MEMO.clear()
@@ -133,7 +102,7 @@ def prepare(repository, spec, request, panel_request, *, scope, training_start, 
     _require(binding["execution_plan"]["runner"] == "experiments/size_search.py")
     binding["source_closure"] = sources
     _require(binding["magnitude_plan"]["evaluation_years"] == schedule["request"]["outer_years"])
-    panel = _read_panel(repository, from_document(SnapshotRef, binding["snapshot"]), panel_request,
+    panel = read_panel(repository, from_document(SnapshotRef, binding["snapshot"]), panel_request,
                         columns=recipe("HMO")["model_columns"])
     context = panel["context"]
     _require(set(binding["event_ids"]) == {e["event_id"] for e in context["target_events"]})
