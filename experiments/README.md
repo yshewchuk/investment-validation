@@ -1,5 +1,7 @@
 # Native experiment interfaces
 
+`iv_crush_plan.target` / `plan` provide metadata-only signed IV30 temporal planning via the shared admitted population/calendar path. No CLI, production caller, sealed registration, target read or fit is provided; invalid target metadata raises `ValueError`, native admission errors propagate.
+
 These unlayered entrypoints compose the v2 platform. See [ARCHITECTURE.md](ARCHITECTURE.md)
 for registration, single-arm evaluation and staged sweep contracts.
 
