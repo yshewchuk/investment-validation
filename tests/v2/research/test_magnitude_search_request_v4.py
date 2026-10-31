@@ -111,6 +111,28 @@ def test_v4_invalid_grids_refuse_before_expansion(monkeypatch, path, value):
     assert caught.value.problem.retryable is False
 
 
+def test_v4_candidate_ceiling_refuses_before_expansion(monkeypatch):
+    monkeypatch.setattr(compiler, "_specifications", fail_if_called)
+    document = v4_request()
+    document["space"]["hgb"] = {
+        "learning_rate": [round(0.001 * (index + 1), 4) for index in range(32)],
+        "max_leaf_nodes": list(range(2, 34)),
+        "min_samples_leaf": list(range(1, 33)),
+        "l2_regularization": [float(index) for index in range(32)]}
+    document["max_candidates"] = 10**9
+    document["max_fits"] = 10**12
+    with pytest.raises(OpsError) as caught:
+        versions.compile_request(document)
+    assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert caught.value.problem.retryable is False
+    assert "ceiling" in caught.value.problem.message
+
+
+def test_v4_design_grid_below_ceiling_still_compiles():
+    result = versions.compile_request(v4_request())
+    assert result["counts"]["candidates"] == 99
+
+
 def test_v3_replay_and_v4_axis_refusal_through_versions(monkeypatch):
     document = v3_request()
     result = versions.compile_request(document)

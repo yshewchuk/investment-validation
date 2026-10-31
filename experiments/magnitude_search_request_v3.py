@@ -9,6 +9,7 @@ from experiments import magnitude_search_request as v2
 __all__ = ["compile_request"]
 
 _MAX_AXIS_LENGTH = 32
+_MAX_V4_CANDIDATES = 1000
 _BOUNDS = {
     ("ridge", "alpha"): (1e-6, 1000.0),
     ("elasticnet", "alpha"): (1e-6, 1000.0),
@@ -99,6 +100,9 @@ def _counts(request):
                 "stage-2 inner years must be ordered and strictly earlier than their outer year")
     count = len(v2._SETS) * sum(math.prod(len(values) for values in axes.values())
                                 for axes in request["space"].values())
+    if request["schema_version"] == "magnitude_search_request.v4":
+        v2._require(count <= _MAX_V4_CANDIDATES,
+                    "stage-2 v4 grid exceeds the 1000-candidate ceiling")
     inners, outers = sum(map(len, inner.values())), len(outer)
     fits = 3 * (count * inners + outers)
     v2._require(v2._positive(request["max_candidates"]) and request["max_candidates"] >= count
