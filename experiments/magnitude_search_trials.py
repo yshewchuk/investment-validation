@@ -572,6 +572,12 @@ class SearchTrials:
         progress_started = last_progress
         print(f"[selection] planned trials={total_trials}", file=sys.stderr)
         policy = plan.get("request", {}).get("selection")
+        history_cohort_uses = {}
+        for planned_outer in plan["folds"]:
+            for planned_inner in planned_outer["inner"]:
+                owner_year, _ = canonical_inner(plan, planned_outer["outer"]["year"], planned_inner["year"])
+                cohort_id = cohort_key(plan, owner_year, planned_inner["year"])
+                history_cohort_uses[cohort_id] = history_cohort_uses.get(cohort_id, 0) + 1
         history_rows_cache = {}
         for outer in plan["folds"]:
             history_rows_by_year = {}
@@ -609,6 +615,7 @@ class SearchTrials:
                                 validation = self._read("validation:" + cohort_id)
                                 self._validation(inner, admitted, cohort, validation)
                                 history_rows_cache[cohort_id] = history_mean_rows(cohort, validation)
+                                del cohort, validation
                             history_rows_by_year[inner["year"]] = history_rows_cache[cohort_id]
                     uses[key] -= 1
                     if uses[key] == 0:
@@ -671,6 +678,13 @@ class SearchTrials:
             print(f"[selection] outer={selection['outer_year']} "
                   f"selected={selection['selected_candidate_id']} "
                   f"failed_candidates={failed_candidates}", file=sys.stderr)
+            for inner in outer["inner"]:
+                owner_year, _ = canonical_inner(plan, outer["outer"]["year"], inner["year"])
+                cohort_id = cohort_key(plan, owner_year, inner["year"])
+                history_cohort_uses[cohort_id] -= 1
+                if history_cohort_uses[cohort_id] == 0:
+                    history_rows_cache.pop(cohort_id, None)
+                history_rows_by_year.pop(inner["year"], None)
         result = {"plan_id": plan["plan_id"], "attempts": attempts, "selections": selections,
                   "prospective_candidate_id": selections[-1]["selected_candidate_id"],
                   "estimator_execution": "unverified_submitted_forecasts", "evaluation_authority": "none"}

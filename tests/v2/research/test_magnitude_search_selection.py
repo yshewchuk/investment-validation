@@ -1,13 +1,14 @@
 """Hand-computed oracles for per-event blended SIZE selection."""
 import copy
 import math
+import weakref
 
 import pytest
 
 from engine.v2.foundation import content_hash
 from engine.v2.ops.errors import OpsError
 from experiments import magnitude_search_trials as trials
-from experiments.magnitude_search_plan import PLAN_V3, trial_key
+from experiments.magnitude_search_plan import PLAN_V3, cohort_key, trial_key
 from experiments.magnitude_search_selection import (
     blended_event_score,
     history_mean_rows,
@@ -149,6 +150,7 @@ def test_freeze_reuses_verified_history_rows_for_shared_cohort(monkeypatch):
             {"outer": {"year": "2024"}, "inner": [{"year": "2023"}]},
             {"outer": {"year": "2025"}, "inner": [{"year": "2023"}]},
         ]}
+    shared_cohort = cohort_key(plan, "2024", "2023")
     prediction = {"status": "succeeded", "predictions": [{
         "event_id": "e1", "horizon_sessions": 1,
         "absolute_move_pct": 2.0, "predicted_absolute_move_pct": 3.0}]}
@@ -160,15 +162,26 @@ def test_freeze_reuses_verified_history_rows_for_shared_cohort(monkeypatch):
     monkeypatch.setattr(recorder, "_admit", lambda: plan)
     terminal_calls, cohort_calls, history_calls = [], [], []
 
+    class HistoryRows(list):
+        pass
+
+    class Hydrated(dict):
+        pass
+
+    history_refs = []
+    cohort_refs = []
+
     def terminal(plan_arg, outer_year, inner_year, candidate_id):
         key = trial_key(plan, outer_year, inner_year, candidate_id)
         terminal_calls.append(key)
+        if outer_year == "2025":
+            assert history_refs[0]() is not None
         return key, prediction
 
     def read(slot):
         if slot.startswith("inputs:"):
-            return {"cohort": "shared-cohort"}
-        if slot == "validation:shared-cohort":
+            return {"cohort": shared_cohort}
+        if slot == f"validation:{shared_cohort}":
             return validation
         raise AssertionError(slot)
 
@@ -176,13 +189,25 @@ def test_freeze_reuses_verified_history_rows_for_shared_cohort(monkeypatch):
 
     def history_rows(admitted, targets):
         history_calls.append(True)
-        return original_history_rows(admitted, targets)
+        cohort_refs.append(weakref.ref(admitted))
+        rows = HistoryRows(original_history_rows(admitted, targets))
+        history_refs.append(weakref.ref(rows))
+        return rows
+
+    def append(slot, body, **kwargs):
+        assert history_refs[0]() is None
+        assert cohort_refs[0]() is None
+        return body
+
+    def cohort(admitted):
+        cohort_calls.append(True)
+        return Hydrated(inputs)
 
     monkeypatch.setattr(recorder, "_terminal", terminal)
     monkeypatch.setattr(recorder, "_read", read)
-    monkeypatch.setattr(recorder, "_cohort", lambda admitted: cohort_calls.append(True) or inputs)
+    monkeypatch.setattr(recorder, "_cohort", cohort)
     monkeypatch.setattr(recorder, "_validation", lambda *args: None)
-    monkeypatch.setattr(recorder, "_append", lambda slot, body, **kwargs: body)
+    monkeypatch.setattr(recorder, "_append", append)
     monkeypatch.setattr(trials, "history_mean_rows", history_rows)
     frozen = recorder.freeze()
     assert len(terminal_calls) == 1
