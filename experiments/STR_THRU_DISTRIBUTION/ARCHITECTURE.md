@@ -51,7 +51,7 @@ C and the installed `distribution_worker` share `distribution_fitted.validate_fi
 
 ## Run metadata and containment
 
-`distribution_run_plan.DistributionRunPlan(trials, request)` is consumed by explicit local callers and synthetic tests. It detaches the existing closed D request and composes B `prepare_plan`, D7 bridge/benchmark readers, native snapshot resolution, source fingerprints, immutable journal and CAS sections. Stdlib resource/signal and the shared VmRSS watchdog provide containment; no new dependency, framework, source reader, eligibility filter or holdout policy. Population remains centrally admitted eligible events within the frozen selected dataset, not source-wide completeness.
+`distribution_run_plan.DistributionRunPlan(trials, request)` is consumed by explicit local callers and synthetic tests. It detaches the existing closed D request and composes B `prepare_plan`, D7 bridge/benchmark readers, native snapshot resolution, source fingerprints, immutable journal and CAS sections. The native SIZE anchor must provide every horizon in the distribution recipe `(5, 3, 1)`; a subset anchor refuses during plan preparation before a distribution receipt or claim is published. Stdlib resource/signal and the shared VmRSS watchdog provide containment; no new dependency, framework, source reader, eligibility filter or holdout policy. Population remains centrally admitted eligible events within the frozen selected dataset, not source-wide completeness.
 
 | API | Effects and contract |
 | --- | --- |
