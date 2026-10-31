@@ -109,7 +109,7 @@ validator and its closed H/HM/HMO 33-candidate grid.
 `magnitude_search_request_versions.compile_request` keeps v2 replay intact and
 dispatches `magnitude_search_request_v3.compile_request` requests with bounded
 request-declared Ridge/ElasticNet axes; HGB remains unchanged in v3. Qualified
-SIZE v1.6/v1.7 sealing and native admission accept both request versions.
+SIZE v1.6 keeps request v2 replay; v1.7 sealing and admission accept v2 and v3.
 `size_search.preflight` publishes the receipt consumed by `register`; legacy
 previews retain their outputs/refusals. The documented v3 grid example is ElasticNet
 alpha `[0.001, 0.003, 0.01, 0.03, 0.1, 1]`, l1 ratio `[0.25, 0.75]`, and Ridge
