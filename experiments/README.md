@@ -115,8 +115,8 @@ Saved identity and later outcome/worker APIs' separate read policies do not chan
 
 `record_export` (run-record export) is consumed by `v2_gate` and `v2_prediction` `run`; it depends on `lib` (EXP numbering) and ops errors only.
 
-`distribution_trials` and `distribution_fitted` also consume the shared immutable journal APIs. `v2_magnitude_search_run` consumes `magnitude_search_plan.read_search_plan`, `magnitude_search_records.MIGRATIONS`/`OWNER`/`append_record`/`read_record`, `magnitude_search_trials.SearchTrials`, `magnitude_search_execution.validate_execution_limits`, and `magnitude_search_outer.execute_outer_fold`/`collect_outer_results` for source-sealed serial orchestration.
-Its CLI also consumes `native_registration.read_native_registration`/`valid_registration_read_budget`/`MAX_NATIVE_EVIDENCE_BYTES` and `native_gate_worker.read_native_staged_input`; direct engine dependencies are contracts, data, foundation and ops. The [driver section](#serial-magnitude-search-driver) defines the public seal/run helpers and each CLI action's authority.
+`distribution_trials` and `distribution_fitted` also consume the shared immutable journal APIs. `v2_magnitude_search_run` consumes `magnitude_search_plan.read_search_plan`, `magnitude_search_records.MIGRATIONS`/`OWNER`/`append_record`/`read_record`, `magnitude_search_trials.SearchTrials`, `magnitude_search_execution.validate_execution_limits`, and `magnitude_search_outer.execute_outer_fold`/`collect_outer_results` for source-sealed orchestration. Fresh inner trials may use bounded process execution; replay and selected outer evaluation remain serial.
+Its CLI also consumes `native_registration.read_native_registration`/`valid_registration_read_budget`/`MAX_NATIVE_EVIDENCE_BYTES` and `native_gate_worker.read_native_staged_input`. The runner uses `magnitude_search_request.validate_workers`, `size_job_budget.remaining`, `memory_guard.start_rss_watchdog`, and both no-fit guards; direct engine dependencies are contracts, data, foundation, models and ops (including legacy `engine.models.no_fit`). The [driver section](#serial-magnitude-search-driver) defines the public seal/run helpers and each CLI action's authority.
 
 `magnitude_search_request.compile_request` preserves the source-free v2 request
 validator and its closed H/HM/HMO 33-candidate grid.
@@ -284,11 +284,10 @@ JSON-native numeric types. The static dependency is included in source seals.
 
 ## Magnitude search driver
 
-`python -m experiments.v2_magnitude_search_run` accepts `seal`, `run` or `collect`.
+`python -m experiments.v2_magnitude_search_run` accepts `seal`, `run` or `collect` for the low-level non-qualified request path. Qualified SIZE v2/v3 requests are refused by this CLI and must run through `python -m experiments.size_search` for job/parent containment.
 Every action requires `--spec SPEC.json --request REQUEST.json --plan-ref REF.json
 --catalog CATALOG --store-root STORE`. Supply the original registered v1.5 spec,
-the exact `magnitude_search_request.v2` or `.v3` request, and the `plan_ref` object returned
-by `v2_magnitude_search prepare` (not that command's entire output envelope).
+the supported non-qualified request, and its `plan_ref` object (not a command's entire output envelope).
 Inputs must be regular, nonsymlink-leaf JSON objects of at most 16 MiB; duplicate
 keys and nonfinite JSON constants refuse. The catalog and store must already exist.
 
@@ -315,7 +314,7 @@ These three search actions accept `--max-registration-bytes` (default 16777216);
 
 `run_search(conn, store, repository, registration, request, plan_ref, *, limits,
 collect_results=True)`
-is the same orchestration API. Only `magnitude_search_request.v2` and `.v3`
+is the same orchestration API used by the contained SIZE runner. Only `magnitude_search_request.v2` and `.v3`
 requests may declare `workers` from 1 through 8 (omission means 1); a declared
 field on a legacy or regression request refuses before admission. This execution
 setting is removed before request hashing and does not change candidate, plan or
@@ -330,16 +329,18 @@ collects once via `collect`).
 Each pool worker starts the same RSS watchdog for its own process, holds at most
 one decoded cohort and borrows that cohort read-only across its trials; serial
 and public callers still receive detached copies. Each worker launches at most
-one fit child at a time; both the worker and that fit child have independent
+one fit child at a time; its decoded cohort remains resident while trial records
+are verified and published. Both the worker and that fit child have independent
 `child.memory_bytes` RSS watchdogs. The process tree can therefore use about
 `2 * workers * child.memory_bytes`, plus the driver's own RSS. The admission
 check requires `workers * child.memory_bytes <= parent.memory_bytes`; these
 per-process limits and admission check do not reserve or cap total host memory.
-CPU, memory and file-backed-catalog checks run before any replay write. On an
-error from the pool map, queued tasks are
-cancelled and running workers terminated before the executor waits; normal
-completion uses ordinary shutdown, and the parent wall alarm stays active
-through cleanup.
+Parent CPU-availability, memory and file-backed-catalog checks run before
+replay writes. Worker startup and per-task affinity checks return tagged
+refusals; each dispatched trial applies the same unfinished-claim rule as the
+serial path. At most `workers` tasks and small status results are in flight at
+once, with each batch traversed in roster order. Pool errors cancel pending
+work; active fit children are stopped and reaped before workers exit.
 Valid candidate failures are excluded by the sealed policy; all-candidate failure
 refuses. It never chooses a winner from outer scores.
 

@@ -57,7 +57,8 @@ def _positive(value):
 
 def validate_workers(request):
     """Return the declared worker count (default 1); only v2/v3 requests may declare it."""
-    if type(request) is not dict or "workers" not in request:
+    _require(type(request) is dict, "stage-2 request requires an object")
+    if "workers" not in request:
         return 1
     _require(request.get("schema_version") in ("magnitude_search_request.v2", "magnitude_search_request.v3"),
              "stage-2 workers require a v2 or v3 search request")
@@ -172,7 +173,6 @@ def compile_request(request):
     if regression:
         _require(_shape(request, _KEYS | {"panel_request"}),
                  "stage-2 request requires its closed v2 schema")
-        validate_workers(request)
         validate_panel_request(request["panel_request"])
     else:
         _require((_shape(request, _KEYS) or _shape(request, _KEYS | {"workers"}))

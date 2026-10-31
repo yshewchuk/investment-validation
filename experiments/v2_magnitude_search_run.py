@@ -1,8 +1,9 @@
-"""Explicitly seal, serially run or read-only collect a registered magnitude search."""
+"""Explicitly seal, run or read-only collect a registered magnitude search."""
 import argparse
 import io
 import json
 import os
+import signal
 import sqlite3
 import sys
 import tempfile
@@ -15,6 +16,8 @@ from pathlib import Path
 from engine.v2.contracts import ArtifactRef, Problem
 from engine.v2.data.documents import reject_duplicate_keys
 from engine.v2.data.errors import DataError
+from engine.models.no_fit import forbid_fitting as forbid_legacy_fitting
+from engine.v2.models.no_fit import forbid_fitting
 from engine.v2.data.repository import Repository
 from engine.v2.foundation import (
     ArtifactError,
@@ -36,6 +39,7 @@ from experiments.magnitude_search_execution import validate_execution_limits
 from experiments.magnitude_search_outer import collect_outer_results, execute_outer_fold
 from experiments.magnitude_search_plan import read_search_plan, trial_key
 from experiments.magnitude_search_request import validate_workers
+from experiments.size_job_budget import remaining
 from experiments.magnitude_search_records import MIGRATIONS, OWNER, append_record, read_record
 from experiments.magnitude_search_trials import SearchTrials, require_execution_enabled
 from experiments.native_gate_worker import read_native_staged_input
@@ -49,15 +53,33 @@ from experiments.memory_guard import start_rss_watchdog
 _PARALLEL = None
 
 
+class _WorkerTerminating(BaseException):
+    """Pool termination arrives as SIGTERM; unwind the fit child's cleanup first."""
+
+
+def _terminate_worker(signum, frame):
+    raise _WorkerTerminating
+
+
 def _init_trial_worker(conn_path, store_root, registration, request, plan_ref, memory_bytes):
     global _PARALLEL
-    start_rss_watchdog(memory_bytes)
-    conn = connect(conn_path, must_exist=True)
-    conn.execute("PRAGMA busy_timeout=30000")
-    store = ArtifactStore(store_root)
-    repository = Repository(conn, store, pin_snapshots=True)
-    plan = read_search_plan(conn, store, registration, request, plan_ref)
-    _PARALLEL = (conn, store, SearchTrials(conn, store, repository, registration, request, plan_ref), registration, plan)
+    try:
+        signal.signal(signal.SIGTERM, _terminate_worker)
+        start_rss_watchdog(memory_bytes)
+        conn = connect(conn_path, must_exist=True)
+        conn.execute("PRAGMA busy_timeout=30000")
+        store = ArtifactStore(store_root)
+        repository = Repository(conn, store, pin_snapshots=True)
+        plan = read_search_plan(conn, store, registration, request, plan_ref)
+        _PARALLEL = (conn, store, SearchTrials(conn, store, repository, registration, request, plan_ref), registration, plan)
+    except (OpsError, DataError) as error:
+        _PARALLEL = _worker_problem(error)
+    except MemoryError:
+        _PARALLEL = _worker_problem(fail("RESOURCE_LIMIT_EXCEEDED", "search worker memory exhausted"))
+    except (OSError, sqlite3.Error):
+        _PARALLEL = _worker_problem(fail("RESOURCE_UNAVAILABLE", "search worker setup unavailable"))
+    except Exception:
+        _PARALLEL = _worker_problem(fail("RESOURCE_UNAVAILABLE", "search worker setup failed"))
 
 
 def _complete_trial(trials, action, args, key, *, limits, read):
@@ -72,19 +94,29 @@ def _complete_trial(trials, action, args, key, *, limits, read):
 
 
 def _worker_problem(error):
-    return {"worker_problem": to_document(error.problem)}
+    kind = "data" if isinstance(error, DataError) else "ops"
+    return {"worker_problem": to_document(error.problem), "worker_error_type": kind}
 
 
 def _parallel_trial_task(task):
     args, cpu_id, limits = task
-    os.sched_setaffinity(0, {cpu_id})
-    conn, store, trials, registration, plan = _PARALLEL
-    key = trial_key(plan, *args)
     try:
-        return _complete_trial(
+        if (isinstance(_PARALLEL, dict)
+                and set(_PARALLEL) == {"worker_problem", "worker_error_type"}):
+            return _PARALLEL
+        try:
+            os.sched_setaffinity(0, {cpu_id})
+        except (OSError, ValueError):
+            return _worker_problem(fail("RESOURCE_UNAVAILABLE", "search worker affinity unavailable"))
+        conn, store, trials, registration, plan = _PARALLEL
+        key = trial_key(plan, *args)
+        _complete_trial(
             trials, trials._execute_borrowed, args, key, limits=limits,
             read=lambda slot: read_record(conn, store, registration.run_id, slot))
-    except OpsError as error:
+        return None
+    except _WorkerTerminating:
+        os._exit(128 + signal.SIGTERM)
+    except (OpsError, DataError) as error:
         return _worker_problem(error)
     except MemoryError:
         return _worker_problem(fail("RESOURCE_LIMIT_EXCEEDED", "search worker memory exhausted"))
@@ -115,14 +147,17 @@ def _parallel_preflight(conn, request, limits, workers):
 
 
 def _abort_executor(executor):
-    """Cancel queued work and terminate running workers before the wait."""
+    """Cancel queued work, terminate workers, and join them after child cleanup."""
+    processes = list(getattr(executor, "_processes", {}).values())
     terminate = getattr(executor, "terminate_workers", None)
     if callable(terminate):
         terminate()
     else:
-        for process in list(getattr(executor, "_processes", {}).values()):
+        for process in processes:
             if process.is_alive():
                 process.terminate()
+    for process in processes:
+        process.join()
     executor.shutdown(wait=True, cancel_futures=True)
 
 MAX_REPORT_BYTES = 64 * 1024 * 1024
@@ -202,6 +237,9 @@ def run_search(conn, store, repository, registration, request, plan_ref, *, limi
     parallel = workers > 1 and bool(fresh)
     if parallel:
         cpus, conn_path = _parallel_preflight(conn, request, limits, workers)
+        forbid_fitting("run_search")
+        forbid_legacy_fitting("run_search")
+        remaining(conn, store, registration, plan)
     meter = Progress("search trials", len(claimed) + len(fresh))
     decision("search trials", f"{len(claimed)} replay claims; {len(fresh)} fresh trials; zero retries")
     for args, key in claimed:
@@ -223,12 +261,19 @@ def run_search(conn, store, repository, registration, request, plan_ref, *, limi
         with stage("search fresh trials"):
             parallel_meter = Progress("search fresh trials", len(fresh))
             try:
-                tasks = [(args, cpus[index % len(cpus)], limits) for index, (args, key) in enumerate(fresh)]
-                for receipt in executor.map(_parallel_trial_task, tasks):
-                    if isinstance(receipt, dict) and set(receipt) == {"worker_problem"}:
-                        raise OpsError(from_document(Problem, receipt["worker_problem"]))
-                    meter.tick()
-                    parallel_meter.tick()
+                for offset in range(0, len(fresh), workers):
+                    batch = [(fresh[offset + index][0], cpus[(offset + index) % len(cpus)], limits)
+                             for index in range(min(workers, len(fresh) - offset))]
+                    for receipt in executor.map(_parallel_trial_task, batch):
+                        if receipt is not None:
+                            if (isinstance(receipt, dict)
+                                    and set(receipt) == {"worker_problem", "worker_error_type"}
+                                    and receipt["worker_error_type"] in ("ops", "data")):
+                                problem = from_document(Problem, receipt["worker_problem"])
+                                raise DataError(problem) if receipt["worker_error_type"] == "data" else OpsError(problem)
+                            raise fail("RESOURCE_UNAVAILABLE", "search worker returned an invalid result")
+                        meter.tick()
+                        parallel_meter.tick()
             except BrokenProcessPool:
                 _abort_executor(executor)
                 raise fail("RESOURCE_UNAVAILABLE", "search worker process exited unexpectedly") from None
