@@ -274,3 +274,4 @@ def test_freeze_selects_hand_scored_candidate_within_history_mean_tie_band(monke
     assert selection["tie_band"]["tied_candidate_ids"] == ["a-near-tie", "z-best"]
     assert selection["selected_candidate_id"] == "a-near-tie"
     assert scores["a-near-tie"] == pytest.approx(expected_a)
+    assert scores["z-best"] == pytest.approx(expected_z)
