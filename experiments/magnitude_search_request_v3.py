@@ -88,9 +88,14 @@ def compile_request(request):
         request = json.loads(json.dumps(request, allow_nan=False))
     except (ValueError, TypeError, OverflowError, RecursionError):
         raise fail("INVALID_EXPERIMENT_SPEC", "stage-2 request requires plain finite JSON") from None
-    v2._require(v2._shape(request, v2._KEYS)
+    v2._require((v2._shape(request, v2._KEYS)
+                 or v2._shape(request, v2._KEYS | {"workers"}))
                 and request["schema_version"] == "magnitude_search_request.v3",
                 "stage-2 request requires its closed v3 schema")
+    if "workers" in request:
+        v2._require(type(request["workers"]) is int and 1 <= request["workers"] <= 8,
+                    "stage-2 workers requires an integer from 1 through 8")
+        request.pop("workers", None)
     v2._references(request)
     _space(request)
     counts = _counts(request)

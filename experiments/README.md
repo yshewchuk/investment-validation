@@ -271,7 +271,7 @@ it verifies the native inner inventory once per call, then independently replays
 No admission is cached across calls. It never launches missing work or chooses a
 winner using outer results: `prospective_candidate_id` is the latest fold's inner
 selection. Collection returns a dictionary only; it does not persist an aggregate
-artifact, export or ledger row. The serial CLI below composes these APIs.
+artifact, export or ledger row. The magnitude-search CLI below composes these APIs.
 No real-data execution, holdout/final access, ledger publication or release
 authority is implied.
 
@@ -280,12 +280,12 @@ forecast normalization and target-receipt validation. Inner wrappers retain subm
 Real/Integral support and their original refusal envelopes; outer wrappers enforce
 JSON-native numeric types. The static dependency is included in source seals.
 
-## Serial magnitude search driver
+## Magnitude search driver
 
 `python -m experiments.v2_magnitude_search_run` accepts `seal`, `run` or `collect`.
 Every action requires `--spec SPEC.json --request REQUEST.json --plan-ref REF.json
 --catalog CATALOG --store-root STORE`. Supply the original registered v1.5 spec,
-the exact `magnitude_search_request.v1` request, and the `plan_ref` object returned
+the exact `magnitude_search_request.v2` or `.v3` request, and the `plan_ref` object returned
 by `v2_magnitude_search prepare` (not that command's entire output envelope).
 Inputs must be regular, nonsymlink-leaf JSON objects of at most 16 MiB; duplicate
 keys and nonfinite JSON constants refuse. The catalog and store must already exist.
@@ -309,13 +309,18 @@ python -m experiments.v2_magnitude_search_run run "${common[@]}" \
 python -m experiments.v2_magnitude_search_run collect "${common[@]}"
 ```
 
-These three serial-search actions accept `--max-registration-bytes` (default 16777216); use an explicit larger finite budget for a larger saved registration. The shared loader validator requires an integer from 1 through `2**62 - 1` before storage access; here the option affects initial registration loading, not saved identity or later read policies. Prediction/gate registration also applies it before reservation, as described above.
+These three search actions accept `--max-registration-bytes` (default 16777216); use an explicit larger finite budget for a larger saved registration. The shared loader validator requires an integer from 1 through `2**62 - 1` before storage access; here the option affects initial registration loading, not saved identity or later read policies. Prediction/gate registration also applies it before reservation, as described above.
 
 `run_search(conn, store, repository, registration, request, plan_ref, *, limits,
 collect_results=True)`
-is the same orchestration API. It traverses outer folds, candidates and inner
-folds in sealed plan order, one child at a time; then freezes all inner selections,
-evaluates each selected outer winner, and collects every completed outer fold
+is the same orchestration API. The request may declare `workers` from 1 through
+8 (omission means 1); this execution setting is removed before request hashing
+and does not change candidate, plan or trial identities. It traverses outer
+folds, candidates and inner folds in sealed roster order. Fresh trials run
+serially with one worker or in a bounded process pool otherwise; claimed replay
+and completed outer replay stay serial. Results are collected in roster order,
+then the driver freezes selections, evaluates each selected outer winner, and
+collects every completed outer fold
 (`collect_results=False` skips that collect and returns None; `size_search` run
 collects once via `collect`).
 Valid candidate failures are excluded by the sealed policy; all-candidate failure

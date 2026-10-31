@@ -158,11 +158,18 @@ def compile_request(request):
     except (ValueError, TypeError, OverflowError, RecursionError):
         raise fail("INVALID_EXPERIMENT_SPEC", "stage-2 request requires plain finite JSON") from None
     regression = type(request) is dict and request.get("schema_version") == "regression_search_request.v1"
-    _require(_shape(request, _KEYS | ({"panel_request"} if regression else set()))
-             and request["schema_version"] in ("magnitude_search_request.v2", "regression_search_request.v1"),
-             "stage-2 request requires its closed v2 schema")
     if regression:
+        _require(_shape(request, _KEYS | {"panel_request"}),
+                 "stage-2 request requires its closed v2 schema")
         validate_panel_request(request["panel_request"])
+    else:
+        _require((_shape(request, _KEYS) or _shape(request, _KEYS | {"workers"}))
+                 and request["schema_version"] == "magnitude_search_request.v2",
+                 "stage-2 request requires its closed v2 schema")
+        if "workers" in request:
+            _require(type(request["workers"]) is int and 1 <= request["workers"] <= 8,
+                     "stage-2 workers requires an integer from 1 through 8")
+        request.pop("workers", None)
     recipe = qualified_recipe if regression else panel_recipe
     _references(request, recipe)
     _space(request)
