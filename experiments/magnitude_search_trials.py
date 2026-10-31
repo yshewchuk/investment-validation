@@ -69,10 +69,17 @@ _NOT_ADMITTED = object()
 _FREEZE_CACHE_BYTES = 32 << 20
 
 
+def require_execution_enabled(registration):
+    """Refuse metadata-only IV before execution-journal admission; legacy checks stay caller-owned."""
+    if getattr(registration, "document", {}).get("schema_version") == "native_experiment_registration.v1.8":
+        raise fail("INVALID_EXPERIMENT_SPEC", "IV trial and outer orchestration is not enabled")
+
+
 class SearchTrials:
     """Native inner fits or submitted forecasts; no outer evaluation or final authority."""
 
     def __init__(self, conn, store, repository, registration, request, plan_ref):
+        require_execution_enabled(registration)
         self.conn, self.store, self.repository = conn, store, repository
         self.registration, self.plan_ref = registration, plan_ref
         self._memo = {}
