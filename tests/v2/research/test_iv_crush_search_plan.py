@@ -75,6 +75,23 @@ def test_signed_native_seal_and_read_only_replay(prepared):  # noqa: F811
     assert inner["evaluation_labels_before"] == group["outer"]["training_labels_before"]
 
 
+def test_compiled_horizon_subset_preserves_identity_and_scales_counts(prepared):  # noqa: F811
+    document = request(prepared)
+    default = compile_request(document)
+    assert default["horizons"] == [5, 3, 1]
+    assert default["counts"] == {"candidates": 33, "inner_folds": 1, "outer_folds": 1,
+        "search_fits": 102, "baseline_logical_fits": 3, "baseline_component_fits": 3,
+        "total_logical_fits": 105, "total_component_fits": 105}
+    selected_document = deepcopy(document)
+    selected_document["panel_request"]["horizons"] = [1]
+    selected = compile_request(selected_document)
+    assert selected["horizons"] == [1]
+    assert selected["request_id"] == content_hash(selected["request"])
+    assert selected["counts"] == {"candidates": 33, "inner_folds": 1, "outer_folds": 1,
+        "search_fits": 34, "baseline_logical_fits": 1, "baseline_component_fits": 1,
+        "total_logical_fits": 35, "total_component_fits": 35}
+
+
 @pytest.mark.parametrize("change", ["features", "month", "events", "outer", "comparison", "caps", "shape"])
 def test_changed_or_malformed_request_refuses_without_publication(prepared, change):  # noqa: F811
     data = prepared

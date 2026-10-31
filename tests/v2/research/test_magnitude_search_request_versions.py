@@ -34,6 +34,13 @@ def test_v2_lead_compiler_refuses_invalid_horizons(bad_horizons):
     with pytest.raises(OpsError) as actual:
         leads.compile_request(_request(), horizons=bad_horizons)
     assert actual.value.problem.code == "INVALID_EXPERIMENT_SPEC"
+    assert actual.value.problem.message == "stage-2 horizons must be a nonempty unique subset of integer leads 1, 3, 5"
+
+
+@pytest.mark.parametrize("horizons,expected", [([1], [1]), ([1, 5], [5, 1]), ((5, 3, 1), [5, 3, 1])])
+def test_v2_lead_compiler_accepts_valid_horizons_in_order(horizons, expected):
+    actual = leads.compile_request(_request(), horizons=horizons)
+    assert actual["horizons"] == expected
 
 
 def _parity(document):
@@ -107,7 +114,7 @@ def test_pinned_complete_v1_output_and_current_source_bytes(monkeypatch):
     assert _hash(versions.compile_request(V1_REQUEST())) == expected
     root = Path(__file__).resolve().parents[3]
     for path, digest in (
-        ("experiments/magnitude_search_request.py", "272be0aaccae0a0020a5128a9d98cca59160b7265b56f400e09424c939b85eb1"),
+        ("experiments/magnitude_search_request.py", "a04523ef9c53b3978b5306efd469031e148150da279b4a9420f46b12b60dd4be"),
         ("engine/v2/research/magnitude_panel_table.py", "687d4d5341dd4e43879aee9d122507b8289150d7e73f1ccc527299182fe5aad4"),
         ("engine/v2/research/magnitude_panel_v2_table.py", "c753255acba0af3872f6a7bf1cbbdc59eb3b1097a2a06d89f6517d4c34111ce4")):
         with (root / path).open("rb") as source:
