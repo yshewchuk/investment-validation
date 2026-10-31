@@ -203,7 +203,7 @@ Registration/replay never fit. Native smoke/recorded publication remains unchang
 ## Sealed magnitude search plans
 
 `magnitude_search_plan.seal_search_plan` / `read_search_plan` compile and verify
-`magnitude_search_plan.v1` artifacts from a catalog-owned fitted v1.5 registration. Qualified SIZE plans separately use the versioned request compiler: request v2 replays its fixed grid, and request v3 compiles the bounded grid declared by the request before the plan is sealed or reconstructed.
+`magnitude_search_plan.v1` artifacts from a catalog-owned fitted v1.5 registration. Qualified SIZE plans separately use the versioned request compiler: request v2 replays its fixed grid, and request v3 compiles the bounded grid declared by the request into a v2 plan schema before sealing or reconstruction; the public preparation default follows the same request-to-plan schema mapping.
 The standalone `python -m experiments.v2_magnitude_search prepare|verify` CLI has no
 production caller. It consumes an existing native catalog/store, anchor spec and request
 JSON; verify additionally takes a plan-ref JSON. The public research fold rule supplies

@@ -238,6 +238,17 @@ def test_shared_inner_allows_cutoff_difference_when_membership_matches(monkeypat
     assert plan["schema_version"] == PLAN_V3
     assert [[fold["year"] for fold in group["inner"]] for group in plan["folds"]] == [
         ["2022", "2023"], ["2022", "2023"]]
+    v3 = deepcopy(request)
+    v3["schema_version"] = "magnitude_search_request.v3"
+    v3["space"] = {
+        "ridge": {"alpha": [0.01, 0.1, 1.0, 10.0, 100.0]},
+        "elasticnet": {"alpha": [0.001, 0.003, 0.01, 0.03, 0.1, 1.0],
+                      "l1_ratio": [0.25, 0.75]},
+        "hgb": {"max_leaf_nodes": [7, 15]},
+    }
+    v3.update(max_candidates=1000, max_fits=10000)
+    document["size_request"] = compile_request(v3)["request"]
+    assert binding.prepare_plan(None, None, registration, v3)["schema_version"] == PLAN_V2
 
 
 @pytest.mark.parametrize("plan_schema", ["magnitude_search_plan.v4", 0, []])
