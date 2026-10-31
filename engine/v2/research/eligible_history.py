@@ -15,6 +15,7 @@ from engine.v2.data.computed_move_bounds import TABLE as BOUNDS_TABLE
 from engine.v2.data.computed_moves_table import COMPUTED_MOVES_CONTRACT, COMPUTED_MOVES_V5_CONTRACT
 from engine.v2.data.errors import fail
 from engine.v2.foundation import SystemClock, canonical_json, content_hash, to_document
+from engine.v2.foundation.experiment_holdouts import ExperimentHoldouts, calendar_date
 from engine.v2.research import eligibility_policy, event_history
 from engine.v2.research._snapshot import artifact_store, catalog_connection
 from engine.v2.research.eligible_history_table import (
@@ -187,6 +188,11 @@ def _plan(repository, snapshot, *, as_of_month, policy, event_ids, horizons, his
 
 def plan_targets(repository, snapshot, *, as_of_month, policy, event_ids, horizons, history_start, limits):
     """Public non-strict grouped-embargo plan: materializes nothing and writes nothing."""
+    try:
+        ExperimentHoldouts(as_of_month)
+        calendar_date(history_start)
+    except (ValueError, TypeError, OverflowError):
+        raise fail("CONTRACT_MISMATCH", "canonical history start and holdout month required") from None
     plan = _plan(repository, snapshot, as_of_month=as_of_month, policy=policy, event_ids=event_ids,
         horizons=horizons, history_start=history_start, limits=limits, strict=False)
     if not plan["remaining"]:

@@ -6,6 +6,8 @@ import pytest
 
 from engine.v2.data import errors as data_errors
 from engine.v2.research import eligible_history as backend
+from experiments import eligible_history as public
+from tests.v2.research.test_eligible_history import source
 
 
 def _selected(event_ids):
@@ -141,3 +143,48 @@ def test_strict_plan_still_refuses_ceiling_before_history_start(monkeypatch):
                       history_start="2024-01-01", limits={}, strict=True)
     assert raised.value.code == "CONTRACT_MISMATCH"
     assert calls["groups"] == [] and calls["eligibility"] == []
+
+
+# --- real planner over the synthetic native fixture (nothing stubbed) ---
+
+@pytest.fixture
+def real(tmp_path):
+    data = source(tmp_path)
+    yield data
+    data.conn.close()
+
+
+def _request(data, indices, **changes):
+    return {**data.request, "event_ids": [data.events[i]["event_id"] for i in indices], **changes}
+
+
+def test_real_plan_targets_match_materialized_targets_and_plan_id(real):
+    request = _request(real, (1, 5, -1))
+    artifact = public.materialize(real.repository, real.snapshot, **request)
+    result = backend.plan_targets(real.repository, real.snapshot, **request)
+    expected = sorted(t["event_id"] for t in artifact["context"]["targets"])
+    assert expected == sorted(request["event_ids"])
+    assert result["retained"] == expected
+    assert result["unavailable"] == [] and result["before_start"] == []
+    assert result["plan_id"] == artifact["context"]["eligibility"]["plan_id"]
+
+
+def test_real_plan_targets_move_early_target_to_before_start(real):
+    event_ids = [real.events[i]["event_id"] for i in (1, 5, -1)]
+    result = backend.plan_targets(real.repository, real.snapshot,
+                                  **_request(real, (1, 5, -1), history_start="2023-03-01"))
+    assert result["before_start"] == [event_ids[0]]
+    assert result["retained"] == sorted(event_ids[1:])
+    assert result["unavailable"] == [] and result["plan_id"] is not None
+
+
+@pytest.mark.parametrize("changes", [{"history_start": "bad"}, {"history_start": 5},
+                                     {"as_of_month": "bad"}])
+def test_real_plan_targets_refuse_noncanonical_start_or_month_without_reads(real, monkeypatch, changes):
+    def forbidden(*args, **kwargs):
+        raise AssertionError("invalid request reached the repository")
+    monkeypatch.setattr(real.repository, "resolve", forbidden)
+    monkeypatch.setattr(real.repository, "scan", forbidden)
+    with pytest.raises(data_errors.DataError) as raised:
+        backend.plan_targets(real.repository, real.snapshot, **_request(real, (1, 5, -1), **changes))
+    assert raised.value.code == "CONTRACT_MISMATCH"
