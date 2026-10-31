@@ -62,7 +62,8 @@ def test_existing_size_dispatch_remains_nonnegative_and_rejects_new_schema(famil
 @pytest.mark.parametrize("family,parameters", [("unknown", {}), ([], {}), ("ridge", []),
     ("ridge", {}), ("ridge", {"alpha": 1., "extra": 1}), ("hgb", {"alpha": 1.}),
     ("elasticnet", {"alpha": .1}), ("ridge", {"alpha": True}),
-    ("elasticnet", {"alpha": .2, "l1_ratio": .75})])
+    ("elasticnet", {"alpha": 1e-7, "l1_ratio": .75}),
+    ("elasticnet", {"alpha": .2, "l1_ratio": 1.0001})])
 def test_closed_family_parameters_refuse(family, parameters):
     with pytest.raises(ValueError):
         policy(family, parameters)

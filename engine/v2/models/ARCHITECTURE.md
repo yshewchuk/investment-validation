@@ -55,7 +55,7 @@ Invalid shapes/nonfinite labels or predictions raise `ValueError`; the experimen
 caller translates fitting failures to `EXPERIMENT_VARIANT_FAILED`. The shared
 no-fit guard runs before work. Existing legacy-parity recipes are unchanged.
 
-`magnitude_elasticnet_recipe.elasticnet_recipe` binds ordered columns, dictionary hash, preprocessing and fixed sklearn parameters in closed JSON metadata.
+`magnitude_elasticnet_recipe.elasticnet_recipe` binds ordered columns, dictionary hash, preprocessing and closed sklearn parameters in JSON metadata. Request-v3 SIZE candidates admit finite positive alpha in `[1e-6, 1000]` and l1-ratio in `[1e-6, 1]`; the v2 compiler retains its original six alpha/l1 combinations.
 `magnitude_elasticnet_recipe.regression_elasticnet_recipe` adds the distinct
 `regression_elasticnet_recipe.v1` identity with explicit signed/nonnegative domain
 and corresponding none/clip_zero projection; its validator rejects policy drift.
@@ -77,7 +77,7 @@ No I/O, publication, release or production wiring; source closures need resealin
 | Same valid inputs and numerical environment | Deterministic fresh fit, not cached or journal replay |
 | Cache, transaction or partial-write concerns | No cache, I/O, persistence or publication; v1 recipes and results are unchanged |
 
-`magnitude_ridge_hgb_recipe` constructs/validates closed variable-width policies binding ordered columns, dictionary hash and fixed estimator parameters, not source admission or dictionary membership.
+`magnitude_ridge_hgb_recipe` constructs/validates closed variable-width policies binding ordered columns, dictionary hash and estimator parameters, not source admission or dictionary membership. Request-v3 SIZE Ridge candidates admit finite positive alpha in `[1e-6, 1000]`; the v2 compiler retains its existing grid.
 `regression_ridge_hgb_recipe.regression_recipe` adds a distinct
 `regression_ridge_hgb_recipe.v1` identity with explicit `signed`/`nonnegative`
 target domain and respectively `none`/`clip_zero` projection. Its validator

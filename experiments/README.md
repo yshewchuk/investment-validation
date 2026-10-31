@@ -106,10 +106,14 @@ Its CLI also consumes `native_registration.read_native_registration`/`valid_regi
 `magnitude_search_request.compile_request` preserves the source-free v2 request
 validator and its closed H/HM/HMO 33-candidate grid.
 `magnitude_search_request_versions.compile_request` keeps v2 replay intact and
-dispatches v3 requests with bounded request-declared Ridge/ElasticNet axes; HGB
-remains unchanged in v3. The qualified SIZE binding/CLI consume it, while
-legacy previews retain their outputs/refusals. The specified v3 axes produce 57
-candidates; compilation alone grants no source or fit authority.
+dispatches `magnitude_search_request_v3.compile_request` requests with bounded
+request-declared Ridge/ElasticNet axes; HGB remains unchanged in v3. Qualified
+SIZE v1.6/v1.7 sealing and native admission accept both request versions.
+`size_search.preflight` publishes the receipt consumed by `register`; legacy
+previews retain their outputs/refusals. The standard v3 grids are ElasticNet
+alpha `[0.001, 0.003, 0.01, 0.03, 0.1, 1]`, l1 ratio `[0.25, 0.75]`, and Ridge
+alpha `[0.01, 0.1, 1, 10, 100]`, producing 57 candidates. Compilation alone
+grants no source or fit authority.
 `magnitude_candidate_recipe` and `magnitude_candidate_fit` are consumed by qualified plan construction and the bounded worker, as well as synthetic tests.
 They reuse public model recipe/fitter APIs; admitted stored inputs and the sealed execution route, not compiler specifications alone, authorize fitting.
 
