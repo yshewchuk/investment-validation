@@ -296,7 +296,7 @@ def test_native_metrics_refusal_retains_successful_execution_for_replay_and_free
     assert receipt["forecasts_id"] == content_hash(rows(2.0))
     terminal = {"status": "refused", "problem": to_document(
         fail("EXPERIMENT_VARIANT_FAILED", "search trial did not complete").problem),
-        "score_seconds": 1.5, "rss_delta_kib": 12, "inner_metrics": []}
+        "score_seconds": 1.5, "rss_delta_kib": 12}
     assert native.recorder._read("terminal:" + key) == terminal
     before = native.conn.total_changes
     monkeypatch.setattr(trials, "run_fitted_trial", lambda *a: pytest.fail("refused replay fitted"))

@@ -7,6 +7,7 @@ import pytest
 
 from engine.models.no_fit import no_fit_guard as legacy_guard
 from engine.v2.foundation import content_hash
+from engine.v2.research import horizon_fitted
 from engine.v2.models.no_fit import no_fit_guard
 from engine.v2.ops.errors import OpsError, fail
 from experiments import magnitude_search_trials as trials
@@ -529,3 +530,21 @@ def test_new_recorder_reconciles_catalog_durable_result_after_reopen(native, mon
         assert recovered["terminal"]["status"] == "succeeded"
     finally:
         peer.close()
+
+
+def test_measured_completed_callback_cannot_mutate_returned_fit_evidence(monkeypatch):
+    fit = {"horizon_sessions": 1, "nested": {"evidence": ["sealed"]}}
+    monkeypatch.setattr(horizon_fitted, "prepare_horizon_inputs", lambda *a, **k: (None, None, fit))
+    monkeypatch.setattr(horizon_fitted, "fit_execution", lambda *a, **k: {"predictions": [2.0]})
+
+    def progress(state, marker):
+        if state == "completed":
+            marker["nested"]["evidence"].append("callback")
+
+    predictions, evidence = horizon_fitted.fitted_forecasts(
+        indexed=None, training_ids=["train"], labels=[1.0], evaluation_ids=["event"],
+        horizons=[1], columns=["feature"], target_column="target", target_domain="nonnegative",
+        route="magnitude", recipe={}, progress=progress, measure_fit_seconds=True)
+
+    assert predictions == {("event", 1): 2.0}
+    assert evidence == [{"horizon_sessions": 1, "nested": {"evidence": ["sealed"]}}]

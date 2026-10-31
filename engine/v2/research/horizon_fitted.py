@@ -46,7 +46,7 @@ def fitted_forecasts(indexed, training_ids, labels, evaluation_ids, horizons, co
         predictions.update({(event, horizon): float(value) for event, value in zip(evaluation_ids, values)})
         evidence.append(fit)
         if progress is not None:
-            completed = ({**fit, "fit_seconds": fit_seconds} if measure_fit_seconds
+            completed = ({**deepcopy(fit), "fit_seconds": fit_seconds} if measure_fit_seconds
                          else deepcopy(fit))
             progress("completed", completed)
     return predictions, evidence

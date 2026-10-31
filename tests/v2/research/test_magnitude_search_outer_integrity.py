@@ -667,3 +667,29 @@ def test_timed_failure_preserves_fit_markers_and_failure_classification(outer_ca
     for fit, marker in zip(fits[:-1], timed[:-1]):
         assert slot(case, "fit-completed:" + str(fit["horizon_sessions"])) == marker
     assert slot(case, "execution")["status"] == "failed"
+
+
+def test_outer_replay_uses_registered_diagnostic_keys(monkeypatch):
+    binding = {"diagnostic_contract": "sealed"}
+    execution = {"schema_version": "size_candidate_execution.v1"}
+    started = {"outer_id": "outer"}
+    fold = {"evaluation_event_ids": ["event"]}
+    plan = {"horizons": [1]}
+    forecasts = [{"event_id": "event", "horizon_sessions": 1,
+        "predicted_absolute_move_pct": 2.0}]
+    worker = {"event": "succeeded", "forecasts": forecasts, "custom_diagnostic": "value"}
+    terminal = {"inputs_id": "inputs"}
+    receipt = {"status": "succeeded", "fits": [], "fit_attempt_count": 0,
+        "completed_fit_count": 0, "forecasts_id": content_hash(forecasts),
+        "custom_diagnostic": "value"}
+    journal = {"start": started, "inputs": {"manifest": "manifest"}, "terminal": terminal,
+        "forecasts": forecasts, "worker-result": worker, "execution": receipt}
+    monkeypatch.setattr(outer, "diagnostic_keys", lambda _: {"custom_diagnostic"})
+    monkeypatch.setattr(outer, "diagnostic_evidence", lambda *a: {"custom_diagnostic": "value"})
+    monkeypatch.setattr(outer, "load_inputs", lambda *a: {})
+    monkeypatch.setattr(outer, "fit_evidence", lambda *a: [])
+    monkeypatch.setattr(outer, "_result", lambda *a: terminal)
+
+    result = outer._replay(lambda slot: journal[slot], None, started, fold, plan, execution, binding)
+
+    assert result == terminal

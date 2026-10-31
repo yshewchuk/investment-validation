@@ -142,7 +142,7 @@ def _result(started, inputs, inputs_id, execution, forecasts, validation, fold, 
     return {**result, "result_id": content_hash(result)}
 
 
-def _replay(read, store, started, fold, plan, execution):
+def _replay(read, store, started, fold, plan, execution, binding):
     try:
         _equal(read("start"), started)
         record = read("inputs")
@@ -159,7 +159,7 @@ def _replay(read, store, started, fold, plan, execution):
                    "completed_fit_count": len(fits), "forecasts_id": content_hash(forecasts)}
         if execution.get("schema_version") == "size_candidate_execution.v1":
             worker = read("worker-result")
-            if not _timed_shape(worker, {"event", "forecasts", "diagnostics"}):
+            if not _timed_shape(worker, {"event", "forecasts"} | diagnostic_keys(binding)):
                 raise _conflict()
             _equal(worker["forecasts"], forecasts)
             receipt.update(diagnostic_evidence(worker, execution, plan["horizons"]))
@@ -215,7 +215,7 @@ def _execute_admitted(conn, store, repository, registration, plan, fold, selecti
         compare(conn, store, repository, registration, plan, fold, limits=limits, replay_only=replay_only)
     execution = execution_for_candidate(binding, candidate)
     if replay_only or saved("terminal") is not None:
-        return _replay(saved, store, started, fold, plan, execution)
+        return _replay(saved, store, started, fold, plan, execution, binding)
     forbid_fitting("execute_outer_fold")
     forbid_legacy_fitting("execute_outer_fold")
     resolved = resolved_limits(conn, store, registration, plan, limits) if binding.get("schema_version") in ("native_experiment_registration.v1.6", "native_experiment_registration.v1.7") else execution_limits(limits)
@@ -267,7 +267,7 @@ def _execute_admitted(conn, store, repository, registration, plan, fold, selecti
     _validate_targets(inputs, validation, fold)
     append("validation", validation)
     append("terminal", _result(started, inputs, inputs_id, receipt, forecasts, validation, fold, plan["horizons"]))
-    return _replay(saved, store, started, fold, plan, execution)
+    return _replay(saved, store, started, fold, plan, execution, binding)
 
 
 def collect_outer_results(conn, store, repository, registration, request, plan_ref):

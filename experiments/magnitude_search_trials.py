@@ -108,7 +108,7 @@ class SearchTrials:
             completed = self._read("execution:" + key)
             if _timing(completed):
                 body.update({"score_seconds": completed["score_seconds"],
-                             "rss_delta_kib": completed["rss_delta_kib"], "inner_metrics": []})
+                             "rss_delta_kib": completed["rss_delta_kib"]})
             self._append("terminal:" + key, body)
         except (OpsError, OSError, sqlite3.Error) as publication_error:
             raise error from publication_error
@@ -429,7 +429,7 @@ class SearchTrials:
             body = {"status": "failed", "problem": problem}
             if execution is not None and _timing(completed):
                 body.update({"score_seconds": completed["score_seconds"],
-                             "rss_delta_kib": completed["rss_delta_kib"], "inner_metrics": []})
+                             "rss_delta_kib": completed["rss_delta_kib"]})
             terminal = self._append("terminal:" + key, body, absent=("forecasts:" + key,))
             # Native execute/reconcile verifies the receipt once at its return boundary.
             return terminal if native else self._terminal(plan, outer_year, inner_year, candidate_id)[1]
@@ -597,15 +597,14 @@ class SearchTrials:
                     normalized = _problem(from_document(Problem, record["problem"]))
                 except OpsError:
                     raise ValueError from None
-                fields = {"status", "problem"} | ({"score_seconds", "rss_delta_kib", "inner_metrics"} if timed else set())
+                fields = {"status", "problem"} | ({"score_seconds", "rss_delta_kib"} if timed else set())
                 if (set(record) != fields or normalized != record["problem"]
                         or not _candidate_failure(normalized)
                         or (record["status"] == "failed") != (submitted is None)):
                     raise ValueError
                 if timed:
                     if (record["score_seconds"] != execution["score_seconds"]
-                            or record["rss_delta_kib"] != execution["rss_delta_kib"]
-                            or record["inner_metrics"] != []):
+                            or record["rss_delta_kib"] != execution["rss_delta_kib"]):
                         raise ValueError
         except (ValueError, TypeError, KeyError, OverflowError):
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search trial evidence chain differs") from None
