@@ -215,3 +215,62 @@ def test_freeze_reuses_verified_history_rows_for_shared_cohort(monkeypatch):
     assert len(frozen["selections"]) == 2
     assert all(item["history_mean"]["blend_score"] == pytest.approx(1.0)
         for item in frozen["selections"])
+
+
+def test_freeze_selects_hand_scored_candidate_within_history_mean_tie_band(monkeypatch):
+    plan = {"schema_version": PLAN_V3, "plan_id": "oracle-plan",
+        "request": {"selection": copy.deepcopy(POLICY)},
+        "candidates": [{"candidate_id": "a-near-tie"}, {"candidate_id": "z-best"}],
+        "folds": [{"outer": {"year": "2024"}, "inner": [{"year": "2023"}]}]}
+    cohort_id = cohort_key(plan, "2024", "2023")
+    actuals = {"e0": 12.0, "e1": 4.0, "e2": 8.0}
+    predictions = {
+        "a-near-tie": {"e0": 10.99, "e1": 6.0, "e2": 10.0},
+        "z-best": {"e0": 11.0, "e1": 6.0, "e2": 10.0},
+    }
+    inputs = {"training": [{"absolute_move_pct": 2.0}], "features": [
+        {"event_id": event_id, "horizon_sessions": 1, "n_prior": 1,
+         "mean_prior_abs_move": value}
+        for event_id, value in (("e0", 10.0), ("e1", 6.0), ("e2", 10.0))]}
+    validation = {"targets": [
+        {"event_id": event_id, "absolute_move_pct": actual}
+        for event_id, actual in actuals.items()]}
+    recorder = object.__new__(trials.SearchTrials)
+    monkeypatch.setattr(recorder, "_admit", lambda: plan)
+
+    def terminal(plan_arg, outer_year, inner_year, candidate_id):
+        rows = [{"event_id": event_id, "horizon_sessions": 1,
+            "absolute_move_pct": actuals[event_id],
+            "predicted_absolute_move_pct": predictions[candidate_id][event_id]}
+            for event_id in actuals]
+        return trial_key(plan_arg, outer_year, inner_year, candidate_id), {
+            "status": "succeeded", "predictions": rows}
+
+    def read(slot):
+        if slot.startswith("inputs:"):
+            return {"cohort": cohort_id}
+        if slot == "validation:" + cohort_id:
+            return validation
+        raise AssertionError(slot)
+
+    monkeypatch.setattr(recorder, "_terminal", terminal)
+    monkeypatch.setattr(recorder, "_read", read)
+    monkeypatch.setattr(recorder, "_cohort", lambda admitted: inputs)
+    monkeypatch.setattr(recorder, "_validation", lambda *args: None)
+    monkeypatch.setattr(recorder, "_append", lambda slot, body, **kwargs: body)
+
+    frozen = recorder.freeze()
+    selection = frozen["selections"][0]
+    # history_mean errors are 2, 2, 2, so RMSE, MAE and large-move underprediction
+    # denominators are each 2. The 0.005 tie floor includes both candidates; the
+    # raw best is z-best, but the simpler lexicographic candidate wins in-band.
+    expected_a = (0.6 * math.sqrt((1.01**2 + 2.0**2 + 2.0**2) / 3) / 2
+        + 0.3 * (5.01 / 3) / 2 + 0.1 * (1.01 / 2))
+    expected_z = (0.6 * math.sqrt((1.0**2 + 2.0**2 + 2.0**2) / 3) / 2
+        + 0.3 * (5.0 / 3) / 2 + 0.1 * (1.0 / 2))
+    scores = {item["candidate_id"]: item["blend_score"] for item in selection["scores"]}
+    assert expected_z < expected_a < expected_z + 0.005
+    assert selection["tie_band"]["width"] == pytest.approx(0.005)
+    assert selection["tie_band"]["tied_candidate_ids"] == ["a-near-tie", "z-best"]
+    assert selection["selected_candidate_id"] == "a-near-tie"
+    assert scores["a-near-tie"] == pytest.approx(expected_a)
