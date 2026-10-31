@@ -455,7 +455,7 @@ See [the frozen contract](../../../experiments/SUPER_SIZE/CONFIRMED_METADATA_DES
 These are intentionally manual, research-only Python APIs, not production CLI,
 nightly or training entrypoints. A separately authorized research caller supplies
 the pinned source and explicit policy; this PR neither activates a data run nor
-wires production scoring. Synthetic tests are the only current invocations.
+wires production scoring. Synthetic tests and the library-only SIZE target derivation (`experiments.size_prep_targets`, itself uncalled until #1614 slice 4) are the only current invocations.
 The sole public build/read boundary is `experiments.eligible_history` (plus the read-only, non-materializing `plan_targets` planner used by SIZE target derivation); it rejects
 caller producer identities before source access and derives the installed identity.
 An immutable import-time source/environment baseline refuses later disk drift with
