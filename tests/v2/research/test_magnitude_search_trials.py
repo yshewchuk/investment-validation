@@ -584,22 +584,28 @@ def test_freeze_reuses_shared_terminals_once_per_call_and_preserves_attempt_rows
     from engine.v2.foundation import content_hash
     from experiments.magnitude_search_plan import PLAN_V3, trial_key
 
-    candidate_id = content_hash({"candidate": "only"})
+    candidate_a = content_hash({"candidate": "a"})
+    candidate_b = content_hash({"candidate": "b"})
     plan = {"schema_version": PLAN_V3, "plan_id": content_hash({"plan": "synthetic"}),
-            "candidates": [{"candidate_id": candidate_id}], "folds": [
+            "candidates": [{"candidate_id": candidate_a}, {"candidate_id": candidate_b}], "folds": [
                 {"outer": {"year": "2024"}, "inner": [{"year": "2021"}, {"year": "2022"}, {"year": "2023"}]},
                 {"outer": {"year": "2025"}, "inner": [{"year": "2022"}, {"year": "2023"}, {"year": "2024"}]},
                 {"outer": {"year": "2026"}, "inner": [{"year": "2023"}, {"year": "2024"}, {"year": "2025"}]}]}
-    records = {year: {"status": "succeeded", "predictions": [
-        {"event_id": year, "horizon_sessions": 1, "predicted_absolute_move_pct": 1.0,
-         "absolute_move_pct": 1.0}]} for year in ("2021", "2022", "2023", "2024", "2025")}
+    actuals = {"2021": 11.0, "2022": 12.0, "2023": 13.0, "2024": 14.0, "2025": 15.0}
+    predicted = {candidate_a: {"2021": 11.0, "2022": 12.0, "2023": 13.0, "2024": 99.0, "2025": 99.0},
+                 candidate_b: {year: 20.0 for year in actuals}}
+    records = {(candidate, year): {"status": "succeeded", "predictions": [
+        {"event_id": year, "horizon_sessions": 1,
+         "predicted_absolute_move_pct": predicted[candidate][year],
+         "absolute_move_pct": actuals[year]}]}
+        for candidate in (candidate_a, candidate_b) for year in actuals}
     recorder = object.__new__(trials.SearchTrials)
     calls = []
 
     def terminal(plan_arg, outer_year, inner_year, trial_candidate_id):
         key = trial_key(plan, outer_year, inner_year, trial_candidate_id)
         calls.append(key)
-        return key, records[inner_year]
+        return key, records[trial_candidate_id, inner_year]
 
     monkeypatch.setattr(recorder, "_admit", lambda: plan)
     monkeypatch.setattr(recorder, "_terminal", terminal)
@@ -609,18 +615,43 @@ def test_freeze_reuses_shared_terminals_once_per_call_and_preserves_attempt_rows
         for candidate in plan["candidates"]:
             for inner in outer["inner"]:
                 key = trial_key(plan, outer["outer"]["year"], inner["year"], candidate["candidate_id"])
-                expected_attempts.append({"trial_id": key, "terminal_id": content_hash(records[inner["year"]])})
-    unique = {trial_key(plan, outer["outer"]["year"], inner["year"], candidate_id)
-              for outer in plan["folds"] for inner in outer["inner"]}
-    assert len(unique) == 5
+                expected_attempts.append({"trial_id": key,
+                    "terminal_id": content_hash(records[candidate["candidate_id"], inner["year"]])})
+    unique = {trial_key(plan, outer["outer"]["year"], inner["year"], candidate["candidate_id"])
+              for outer in plan["folds"] for inner in outer["inner"] for candidate in plan["candidates"]}
+    assert len(unique) == 10
+
+    def expected_selection(outer_years):
+        scores, rmse_by_candidate = [], {}
+        for candidate in (candidate_a, candidate_b):
+            errors = [abs(predicted[candidate][year] - actuals[year]) for year in outer_years]
+            rmse = math.sqrt(math.fsum(error * error for error in errors) / len(errors))
+            rmse_by_candidate[candidate] = rmse
+            scores.append({"candidate_id": candidate, "metrics": {
+                "count": len(errors),
+                "mae": pytest.approx(math.fsum(errors) / len(errors)),
+                "rmse": pytest.approx(rmse)}})
+        selected = min(rmse_by_candidate, key=lambda candidate: (rmse_by_candidate[candidate], candidate))
+        return scores, selected
+
+    expected_selections = []
+    for outer in plan["folds"]:
+        scores, selected = expected_selection([inner["year"] for inner in outer["inner"]])
+        expected_selections.append({"outer_year": outer["outer"]["year"], "scores": scores,
+                                    "selected_candidate_id": selected})
+
     first = recorder.freeze()
     assert len(calls) == len(unique)
     assert first["attempts"] == expected_attempts
+    assert first["selections"] == expected_selections
+    assert [selection["selected_candidate_id"] for selection in first["selections"]] == [
+        candidate_a, candidate_b, candidate_b]
+    assert first["prospective_candidate_id"] == candidate_b
     second = recorder.freeze()
     assert first["selections"] == second["selections"]
-    assert len(calls) == 2 * len(unique) == 10
+    assert len(calls) == 2 * len(unique) == 20
 
-    record_bytes = len(trials.canonical_json(records["2021"]).encode("utf-8"))
+    record_bytes = len(trials.canonical_json(records[candidate_a, "2021"]).encode("utf-8"))
     monkeypatch.setattr(trials, "_FREEZE_CACHE_BYTES", record_bytes + 1)
     calls.clear()
     third = recorder.freeze()
@@ -634,7 +665,7 @@ def test_freeze_reuses_shared_terminals_once_per_call_and_preserves_attempt_rows
     fourth = recorder.freeze()
     assert fourth["selections"] == first["selections"]
     assert fourth["attempts"] == first["attempts"]
-    assert len(calls) == 9
+    assert len(calls) == 18
 
 
 def test_native_selection_checks_shared_trial_once_without_completed_reexecute():

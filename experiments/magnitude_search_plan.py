@@ -177,7 +177,8 @@ def _prepare(conn, store, registration, request, *, plan_schema=None):
         raise fail("INVALID_EXPERIMENT_SPEC", "search requires explicit valid axes, inner years and count caps")
     if qualified:
         from experiments.size_search_binding import prepare_plan
-        return prepare_plan(conn, store, registration, request, plan_schema=plan_schema or PLAN_V3)
+        default_schema = PLAN_V2 if request_version == "magnitude_search_request.v3" else PLAN_V3
+        return prepare_plan(conn, store, registration, request, plan_schema=plan_schema or default_schema)
     request, count = _request(request)
     verify_native_registration(conn, store, registration)
     binding = registration.document
