@@ -88,7 +88,8 @@ class DistributionFits:
         matrices = [[[indexed[event][name] for name in columns] for event in events]
                     for events in (evidence["training_event_ids"], evidence["evaluation_event_ids"])]
         labels = [row["absolute_move_pct"] for row in inputs["training"]]
-        return plan["recipe"], claim, matrices, labels, evidence["evaluation_event_ids"]
+        return (plan["recipe"], claim, matrices, labels, evidence["evaluation_event_ids"],
+                {"admission": admission, "plan": plan})
 
     @staticmethod
     def _validate(recipe, matrices, labels, events, rows, tail, diagnostics):
@@ -121,14 +122,26 @@ class DistributionFits:
                 if all(row[index] is None or isnan(row[index]) for row in matrices[0])]}
         _require(canonical_json(diagnostics) == canonical_json(expected))
 
-    def _read(self, prepared, record):
-        recipe, claim, matrices, labels, events = prepared
+    @staticmethod
+    def _execution_binding(prepared):
+        return {"plan_id": prepared[1]["plan_id"], "worker": "experiments/distribution_worker.py",
+            "limits": prepared[5]["plan"]["budget"]["child_limits"]}
+
+    def _read(self, prepared, record, *, bounded=False):
+        recipe, claim, matrices, labels, events = prepared[:5]
         _require(canonical_json(self._record("fit-start:" + claim["trial"]["trial_id"])) == canonical_json(claim))
-        _require(type(record) is dict and set(record) == {"schema_version", "claim", "result_id",
-            "forecasts", "tail", "diagnostics", "status", "final_read_authority"}
-            and record["schema_version"] == "distribution_fitted.v1" and record["status"] == "completed"
+        _require(type(record) is dict)
+        is_bounded = record.get("schema_version") == "distribution_fitted.v2"
+        _require(set(record) == {"schema_version", "claim", "result_id",
+            "forecasts", "tail", "diagnostics", "status", "final_read_authority"} | ({"execution"} if is_bounded else set())
+            and record["schema_version"] in ("distribution_fitted.v1", "distribution_fitted.v2") and record["status"] == "completed"
             and record["final_read_authority"] == "none" and canonical_json(record["claim"]) == canonical_json(claim))
         _require(record["result_id"] == content_hash({key: value for key, value in record.items() if key != "result_id"}))
+        _require(not bounded or is_bounded)
+        binding = self._execution_binding(prepared) if is_bounded else None
+        _require(canonical_json(self._record("fit-bound:" + claim["trial"]["trial_id"])) == canonical_json(binding))
+        if is_bounded:
+            _require(canonical_json(record["execution"]) == canonical_json(binding))
         descriptor = record["tail"]
         _require(type(descriptor) is dict and set(descriptor) == {"policy", "sample_count", "excesses"})
         _require(type(descriptor["sample_count"]) is int and 0 <= descriptor["sample_count"] <= len(labels))
@@ -146,17 +159,36 @@ class DistributionFits:
             self._validate(recipe, matrices, labels, events, rows, tail, record["diagnostics"])
         return {"receipt": record, "rows": rows, "tail": tail}
 
-    def fit(self, role, outer_year, horizon, inner_year=None):
+    def fit(self, role, outer_year, horizon, inner_year=None, *, bounded=False):
         """Claim before either estimator; completed replay is read-only, interruption final."""
         forbid_legacy_fitting("DistributionFits.fit")
         forbid_fitting("DistributionFits.fit")
+        if type(bounded) is not bool:
+            raise fail("INVALID_EXPERIMENT_SPEC", "distribution bounded option must be Boolean")
         prepared = self._context(role, outer_year, horizon, inner_year)
-        recipe, claim, matrices, labels, events = prepared
+        recipe, claim, matrices, labels, events = prepared[:5]
         key = claim["trial"]["trial_id"]
         previous = self._record("fit-result:" + key)
         if previous is not None:
-            return self._read(prepared, previous)
+            return self._read(prepared, previous, bounded=bounded)
+        binding = self._execution_binding(prepared) if bounded else None
         self._record("fit-start:" + key, claim)
+        if bounded:
+            self._record("fit-bound:" + key, binding)
+            from experiments.distribution_execution import run_distribution_fit
+            admission = prepared[5]["admission"]
+            output = run_distribution_fit({"manifest": admission["manifest"], "inputs_id": claim["trial"]["inputs_id"],
+                "store_root": str(self.trials.store.root)}, recipe, events, horizon, prepared[5]["plan"]["budget"]["child_limits"])
+            _require(type(output) is dict and set(output) == {"recipe_id", "evidence", "ordered_events_id",
+                "forecasts", "tail", "diagnostics"} and output["recipe_id"] == recipe["recipe_id"]
+                and output["evidence"] == claim["evidence"] and output["ordered_events_id"] == claim["ordered_events_id"])
+            body = {"schema_version": "distribution_fitted.v2", "claim": claim, "execution": binding,
+                **{key: output[key] for key in ("forecasts", "tail", "diagnostics")},
+                "status": "completed", "final_read_authority": "none"}
+            record = {**body, "result_id": content_hash(body)}
+            verified = self._read(prepared, record)
+            self._record("fit-result:" + key, record)
+            return verified
         result = fit_candidate(recipe, matrices[0], labels, matrices[1], columns=recipe["point_recipe"]["features"])
         rows = validate_fit_output(recipe, matrices, labels, events, result)
         output = publish_fit_output(self.trials.store, rows, result["tail"], result["diagnostics"])

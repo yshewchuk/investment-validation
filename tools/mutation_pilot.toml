@@ -495,7 +495,7 @@ tests = [
     "tests/test_v2_models_recalibration_artifact.py",
     "tests/test_v2_models_residual_artifact.py",
     "tests/test_v2_models_training_payoff.py",
-    "tests/test_v2_models_training_recipes.py",
+    "tests/v2/models/training/test_v2_models_training_recipes.py",
     "tests/v2/models/training/test_v2_models_training_recipe_fields.py",
     "tests/v2/scoring/test_v2_scoring_frozen_residuals.py",
     "tests/v2/scoring/test_driver_residual_array_cache.py",

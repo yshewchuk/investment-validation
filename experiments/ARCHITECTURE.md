@@ -170,9 +170,9 @@ Every fold/horizon uses a fresh estimator and only strictly qualified training
 events. Empty history is handled by the declared preprocessing, not mean fallback.
 
 The history reporter retains whole-run physical preflight and supported producer
-admission. `magnitude_candidate_fit` lazily delegates to shared training dispatch without changing SIZE errors/results; `magnitude_fitted` delegates matrices/input hashes to
-shared `research.horizon_fit_inputs` with fixed `absolute_move_pct` labels,
-and freezes detached forecasts before that fold's evaluation labels open.
+admission. `magnitude_candidate_fit` lazily delegates to shared training dispatch; `magnitude_fitted` delegates the horizon loop to shared `research.horizon_fitted` with fixed nonnegative `absolute_move_pct` labels.
+Its thin compatibility boundary preserves legacy guard exceptions and strict/non-strict estimator-failure policy; shared preparation/progress errors stay outside that mapping. Active guards now refuse before matrix preparation/progress (after the wrapper projects training labels), rather than first estimator entry.
+Ordered input hashes and detached forecasts still freeze before evaluation labels open; evidence/results remain unchanged.
 It never builds features. The result adds per-horizon fit evidence and a distinct
 schema; existing fixed-history result bytes/policy remain unchanged for identical inputs.
 Registration/replay never fit. Native smoke/recorded publication remains unchanged.
@@ -301,7 +301,7 @@ Qualified SIZE plan construction and its bounded worker now consume these helper
 ### Distribution fitting and earlier-OOF controls (Bundle C)
 
 `distribution_candidate_fit` supplies the raw fixed numeric pair; `distribution_fitted.DistributionFits` adds admitted, immutable single-use fit/results; `distribution_oof` builds strictly earlier-inner residual controls from centrally admitted training labels. [The complete contract](STR_THRU_DISTRIBUTION/ARCHITECTURE.md) specifies APIs, dependencies, refusal/replay, tail provenance, resource limits and the explicit distinction between residual controls and calibrated probabilities.
-The B `read_fit_context` seam returns verified plan/fold/admission and projected stored training/features without reopening native outcomes. C is synthetic-tested research code, not a bounded runner or production activation. D's fixed CAS worker and transport-only publication seam are described in the linked contract; launch/verification and whole-job containment remain separate.
+The B `read_fit_context` seam returns verified plan/fold/admission and projected stored training/features without reopening native outcomes. C is synthetic-tested research code, not a bounded runner or production activation. D's fixed CAS worker and transport-only publication seam are described in the linked contract; C can explicitly select bounded child launch/verification; whole-job containment remains separate.
 
 ## Recorded magnitude-search selection
 
