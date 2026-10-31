@@ -36,7 +36,7 @@ consume this API, never production entrypoints. Legacy error translation stays a
 Ridge/HGB or ElasticNet recipe to its existing guarded fitter. Both no-fit guards
 precede recipe/array inspection; delegated validation, results and errors remain
 unchanged. No source reads, retries, selection or persistence occur. Existing
-experiment magnitude dispatch remains fixed to nonnegative legacy recipe schemas.
+experiment magnitude dispatch remains fixed to nonnegative recipe schemas (Ridge v1, HGB v1 and v2, ElasticNet v1).
 
 `magnitude.fit_magnitude_predictions` accepts an ops-admitted closed Ridge/HGB
 recipe as data and eleven-column numeric matrices
