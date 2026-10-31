@@ -595,6 +595,10 @@ def _staging_id_conflict(exc) -> bool:
 def with_chooser_retrain_cutoff(sources, chooser_validated):
     if sources is not None and not isinstance(sources, Mapping):
         raise PrepareRefused("release sources must be a mapping")
+    if (sources is not None and "retrain_cutoff" in sources
+            and sources.get("pool_cutoff") is None):
+        raise PrepareRefused(
+            "retrain_cutoff requires canonical pool_cutoff on/after retrain_cutoff")
     if not chooser_validated:
         if sources is None or "retrain_cutoff" not in sources:
             return sources
@@ -620,13 +624,11 @@ def with_chooser_retrain_cutoff(sources, chooser_validated):
     if any(parsed.isoformat() != value for parsed, value in zip(parsed_starts, fold_starts)):
         raise PrepareRefused("chooser fold_start must be a canonical date")
     retrain_cutoff = max(parsed_starts).isoformat()
-    declared_cutoff = (sources or {}).get("retrain_cutoff")
-    if declared_cutoff is not None and declared_cutoff != retrain_cutoff:
+    if (sources is not None and "retrain_cutoff" in sources
+            and sources["retrain_cutoff"] != retrain_cutoff):
         raise PrepareRefused("chooser retrain_cutoff must match latest fold_start")
     pool_cutoff = (sources or {}).get("pool_cutoff")
-    if pool_cutoff is None:
-        pool_cutoff = retrain_cutoff
-    else:
+    if pool_cutoff is not None:
         try:
             parsed_pool_cutoff = date.fromisoformat(pool_cutoff)
         except (TypeError, ValueError) as exc:
@@ -635,11 +637,12 @@ def with_chooser_retrain_cutoff(sources, chooser_validated):
         if parsed_pool_cutoff.isoformat() != pool_cutoff or parsed_pool_cutoff < date.fromisoformat(retrain_cutoff):
             raise PrepareRefused(
                 "chooser pool_cutoff must be canonical and on/after retrain_cutoff")
-    return {
-        **dict(sources or {}),
-        "retrain_cutoff": retrain_cutoff,
-        "pool_cutoff": pool_cutoff,
-    }
+    result = {**dict(sources or {}), "retrain_cutoff": retrain_cutoff}
+    if pool_cutoff is None:
+        result.pop("pool_cutoff", None)
+    else:
+        result["pool_cutoff"] = pool_cutoff
+    return result
 
 
 def write_release(out: Path, release: ModelRelease, inventory: ModelReleaseInventory,

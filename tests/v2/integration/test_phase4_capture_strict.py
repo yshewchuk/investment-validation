@@ -1185,9 +1185,12 @@ def test_phase5_prepare_release_sets_canonical_chooser_cutoff():
     assert with_chooser_retrain_cutoff(sources, folds) == {
         **sources, "retrain_cutoff": "2026-10-01",
     }
-    assert with_chooser_retrain_cutoff({}, folds) == {
-        "retrain_cutoff": "2026-10-01", "pool_cutoff": "2026-10-01",
-    }
+    derived = with_chooser_retrain_cutoff({}, folds)
+    assert derived == {"retrain_cutoff": "2026-10-01"}
+    from engine.v2.models.release_layout import manifest_body, validate_catalog
+
+    catalog = manifest_body("chooser-only", "deployment-1", [], derived)
+    assert validate_catalog(catalog)["sources"] == derived
     assert with_chooser_retrain_cutoff(sources, {}) is sources
     with pytest.raises(PrepareRefused, match="chooser retrain_cutoff must match latest fold_start"):
         with_chooser_retrain_cutoff({**sources, "retrain_cutoff": "2026-09-01"}, folds)
@@ -1195,6 +1198,24 @@ def test_phase5_prepare_release_sets_canonical_chooser_cutoff():
         with_chooser_retrain_cutoff({**sources, "pool_cutoff": "2026-09-30"}, folds)
     with pytest.raises(PrepareRefused, match="chooser pool_cutoff must be canonical and on/after retrain_cutoff"):
         with_chooser_retrain_cutoff({**sources, "pool_cutoff": "20261001"}, folds)
+
+
+def test_chooser_only_catalog_remains_pool_bootstrap_eligible(tmp_path, monkeypatch):
+    from checks import phase5_release_assembly as assembly
+    from engine.v2.models.release_layout import manifest_body, validate_catalog
+
+    catalog = validate_catalog(manifest_body(
+        "chooser-only", "deployment-1", [], {"retrain_cutoff": "2026-10-01"}))
+    monkeypatch.setattr(assembly, "_load_catalog", lambda *args: catalog)
+    monkeypatch.setattr(assembly, "deployment_root", lambda root: tmp_path)
+    monkeypatch.setattr(assembly, "verify_staged", lambda *args: None)
+    monkeypatch.setattr(
+        assembly.deployment,
+        "resolve_release",
+        lambda *args: SimpleNamespace(deployment_id="deployment-1"),
+    )
+
+    assert assembly.classify_prior(tmp_path, "chooser-only").kind == assembly.PRIOR_NO_POOL_CATALOG
 
 
 @pytest.mark.parametrize(
@@ -1210,6 +1231,15 @@ def test_phase5_prepare_rejects_invalid_explicit_cutoffs_without_chooser_folds(s
         match="retrain_cutoff requires canonical pool_cutoff",
     ):
         with_chooser_retrain_cutoff(sources, {})
+
+
+def test_phase5_prepare_rejects_explicit_retrain_without_pool_with_chooser_folds():
+    folds = {"fold": SimpleNamespace(fold_start="2026-10-01")}
+    with pytest.raises(
+        PrepareRefused,
+        match="retrain_cutoff requires canonical pool_cutoff",
+    ):
+        with_chooser_retrain_cutoff({"retrain_cutoff": "2026-10-01"}, folds)
 
 
 def test_phase5_prepare_rejects_non_mapping_sources():
@@ -1261,7 +1291,7 @@ def test_write_release_persists_chooser_cutoff(tmp_path, monkeypatch):
     out = phase5.write_release(tmp_path / "release", release, None, {}, [], sources=sources)
     assert out == tmp_path / "release"
     assert written["body"]["sources"]["retrain_cutoff"] == "2026-09-01"
-    assert written["body"]["sources"]["pool_cutoff"] == "2026-09-01"
+    assert "pool_cutoff" not in written["body"]["sources"]
 
 
 def test_scorer_constructor_copies_chooser_fold_reference_map(monkeypatch):
