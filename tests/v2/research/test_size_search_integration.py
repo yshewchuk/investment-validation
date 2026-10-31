@@ -773,6 +773,8 @@ def test_report_reuses_shared_execution_receipt_read_and_keeps_outer_rows(monkey
     reads = Counter()
     payload_refs = []
     alive_before_read = []
+    terminal_payload_refs = []
+    alive_before_terminal_read = []
 
     class ReceiptPayload:
         def __init__(self):
@@ -792,8 +794,11 @@ def test_report_reuses_shared_execution_receipt_read_and_keeps_outer_rows(monkey
         if slot.startswith("comparison-terminal:"):
             return {"result": {"forecasts": [], "fit_details": []}}
         if slot.startswith("terminal:"):
+            alive_before_terminal_read.append(sum(ref() is not None for ref in terminal_payload_refs))
+            payload = ReceiptPayload()
+            terminal_payload_refs.append(weakref.ref(payload))
             return {"status": "succeeded", "score_seconds": 0.25, "rss_delta_kib": 64,
-                    "inner_metrics": []}
+                    "inner_metrics": [], "predictions": payload, "evaluation_receipt": payload}
         if slot.startswith("fit-completed:"):
             return {"fit_seconds": 0.125}
         pytest.fail("unexpected journal slot " + slot)
@@ -811,3 +816,5 @@ def test_report_reuses_shared_execution_receipt_read_and_keeps_outer_rows(monkey
     assert [row["outer_year"] for row in output["inner_fits"]] == ["2024", "2025", "2025"]
     assert alive_before_read == [0, 0]
     assert all(ref() is None for ref in payload_refs)
+    assert alive_before_terminal_read == [0, 0]
+    assert all(ref() is None for ref in terminal_payload_refs)

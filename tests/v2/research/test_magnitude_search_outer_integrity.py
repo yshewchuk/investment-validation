@@ -563,7 +563,7 @@ def test_fresh_child_progress_refuses_before_bad_event_publication(outer_case, m
             state = "completed"
         if kind == "unknown_state":
             state = "unexpected"
-        progress(state, fit)
+        progress(state, {**fit, "fit_seconds": 0.125} if state == "completed" else fit)
         pytest.fail("malformed live progress was accepted")
     monkeypatch.setattr(outer, "run_fitted_trial", fitted)
     monkeypatch.setattr(outer, "load_magnitude_targets", lambda *a, **kw: pytest.fail("bad progress opened labels"))

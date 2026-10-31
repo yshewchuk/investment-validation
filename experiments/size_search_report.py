@@ -29,6 +29,10 @@ def _candidate_evidence(conn, store, run_id, plan):
                     fit_attempt_count = execution.get("fit_attempt_count")
                     completed_fit_count = execution.get("completed_fit_count")
                     diagnostics = execution.get("diagnostics", []) if status == "succeeded" else []
+                    terminal_status = terminal.get("status")
+                    score_seconds = terminal.get("score_seconds")
+                    rss_delta_kib = terminal.get("rss_delta_kib")
+                    inner_metrics = terminal.get("inner_metrics")
                     fit_seconds = []
                     for horizon in plan["horizons"]:
                         slot = "fit-completed:" + key + ":" + str(horizon)
@@ -39,20 +43,22 @@ def _candidate_evidence(conn, store, run_id, plan):
                                 "seconds": completed["fit_seconds"],
                             })
                     evidence_by_key[key] = (
-                        terminal, status, fit_attempt_count, completed_fit_count, diagnostics, fit_seconds)
-                    del raw_execution, execution
-                terminal, status, fit_attempt_count, completed_fit_count, diagnostics, fit_seconds = evidence_by_key[key]
+                        terminal_status, score_seconds, rss_delta_kib, inner_metrics,
+                        status, fit_attempt_count, completed_fit_count, diagnostics, fit_seconds)
+                    del raw_execution, execution, terminal
+                (terminal_status, score_seconds, rss_delta_kib, inner_metrics,
+                 status, fit_attempt_count, completed_fit_count, diagnostics, fit_seconds) = evidence_by_key[key]
                 rows.append({
                     "trial_id": key, "run_id": run_id, "outer_year": outer_year,
                     "inner_year": inner_year, "candidate_id": candidate_id,
                     "execution_slot": "execution:" + key, "status": status,
-                    "terminal_status": terminal.get("status"),
+                    "terminal_status": terminal_status,
                     "fit_attempt_count": fit_attempt_count,
                     "completed_fit_count": completed_fit_count,
                     "fit_seconds": fit_seconds,
-                    "score_seconds": terminal.get("score_seconds"),
-                    "rss_delta_kib": terminal.get("rss_delta_kib"),
-                    "inner_metrics": terminal.get("inner_metrics"),
+                    "score_seconds": score_seconds,
+                    "rss_delta_kib": rss_delta_kib,
+                    "inner_metrics": inner_metrics,
                     "diagnostics": diagnostics})
     return rows
 
