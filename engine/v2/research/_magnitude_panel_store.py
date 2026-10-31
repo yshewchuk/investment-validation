@@ -128,7 +128,7 @@ def publish(repository, source, context, rows):
 
 def _bounded_query(repository, snapshot, context):
     limits = context["request"]["limits"]
-    count = len(context["target_events"]) * 3
+    count = len(context["target_events"]) * len(context["request"]["horizons"])
     records = repository.fragment_records(snapshot, table.TABLE)
     if (sum(r.row_count for r in records) != count
             or any(r.object_ref.byte_size > limits["max_object_bytes"] for r in records)

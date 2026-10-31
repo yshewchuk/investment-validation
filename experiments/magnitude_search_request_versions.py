@@ -6,6 +6,7 @@ from engine.v2.research.magnitude_panel_qualified_table import recipe as v3_reci
 from engine.v2.research.magnitude_panel_table import recipe as v1_recipe
 from engine.v2.research.magnitude_panel_v2_table import recipe as v2_recipe
 from experiments.magnitude_search_request import compile_request as compile_v1_request
+from experiments.magnitude_search_request_leads import compile_request as compile_v2_leads_request
 from experiments.magnitude_search_request_v3 import compile_request as compile_v3_request
 
 __all__ = ["compile_request"]
@@ -14,19 +15,21 @@ _V2_HASH = v2_recipe("HMO")["dictionary_hash"]
 _V3_HASH = v3_recipe("HMO")["dictionary_hash"]
 
 
-def compile_request(request):
+def compile_request(request, *, horizons=(5, 3, 1)):
     """Dispatch bounded v3 grids while preserving existing dictionary replay."""
     version = request.get("schema_version") if type(request) is dict else None
     compiler = (compile_v3_request if version == "magnitude_search_request.v3"
+                else compile_v2_leads_request if version == "magnitude_search_request.v2"
                 else compile_v1_request)
+    compile_kwargs = {"horizons": horizons} if version in ("magnitude_search_request.v2", "magnitude_search_request.v3") else {}
     dictionary = request.get("feature_dictionary_hash") if type(request) is dict else None
     if type(dictionary) is not str or dictionary not in (_V2_HASH, _V3_HASH):
-        return compiler(request)
+        return compiler(request, **compile_kwargs)
 
     selected = v3_recipe if dictionary == _V3_HASH else v2_recipe
     surrogate = dict(request)
     surrogate["feature_dictionary_hash"] = v1_recipe("HMO")["dictionary_hash"]
-    result = compiler(surrogate)
+    result = compiler(surrogate, **compile_kwargs)
     result["request"]["feature_dictionary_hash"] = dictionary
     result["request_id"] = content_hash(result["request"])
     recipes = {subset: selected(subset) for subset in result["request"]["feature_sets"]}

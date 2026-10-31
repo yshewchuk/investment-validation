@@ -896,8 +896,7 @@ Whole-cohort coverage and daily-mark units remain the exploratory comparison con
 
 ## Selected-candidate outer evaluation
 
-`magnitude_search_outer.execute_outer_fold` is a selected-fold runner. It requires an existing
-frozen selection and completed native execution/terminal evidence for every inner
+`magnitude_search_outer.execute_outer_fold` is a selected-fold runner. Qualified SIZE requests bind a nonempty ascending subset of `[1, 3, 5]`; the default keeps existing hashes, while plans filter the legacy `[5, 3, 1]` order. It requires an existing frozen selection and completed native execution/terminal evidence for every inner
 trial before public `freeze`/`execute` replay. Missing or submitted-only evidence
 never launches inner work; permitted candidate failures retain sealed exclusions.
 Exact inner-RMSE ties remain candidate-ID ordered. A distinct immutable `outer-*`
