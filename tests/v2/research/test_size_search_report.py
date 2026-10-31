@@ -17,17 +17,39 @@ def test_mixed_failed_and_successful_trials_report_diagnostics(monkeypatch):
     def read(conn, store, run, slot):
         if slot.startswith("execution:"):
             succeeded = slot.endswith(report.content_hash(["plan", "2024", "2023", "ok"]))
-            return {"status": "succeeded" if succeeded else "failed", "fit_attempt_count": 3,
-                "completed_fit_count": 3 if succeeded else 2,
-                **({"diagnostics": [{"converged": True}]} if succeeded else {})}
+            if succeeded:
+                return {"status": "succeeded", "fit_attempt_count": 3, "completed_fit_count": 3,
+                    "fits": [{"horizon_sessions": 1, "fit_seconds": 1.25},
+                             {"horizon_sessions": 5, "fit_seconds": 2.75}],
+                    "diagnostics": [{"converged": True}]}
+            return {"status": "failed", "fit_attempt_count": 3, "completed_fit_count": 2,
+                "fits": [{"horizon_sessions": 1, "fit_seconds": 0.5}],
+                "diagnostics": [{"converged": False}]}
+        if slot.startswith("terminal:"):
+            succeeded = slot.endswith(report.content_hash(["plan", "2024", "2023", "ok"]))
+            return {"status": "succeeded" if succeeded else "failed",
+                "score_seconds": 0.7 if succeeded else 0.3,
+                "rss_delta_kib": 2048 if succeeded else 512,
+                "inner_metrics": [{"horizon_sessions": 1, "mean_absolute_move_pct": 0.4 if succeeded else 0.1}]}
         if slot.startswith("outer-forecasts:"):
             return []
         return {"result": {"forecasts": [], "fit_details": [
             {"horizon_sessions": 1, "component_fits": 2, "logical_fits": 1}]}}
     monkeypatch.setattr(report, "read_record", read)
     observed = report.collect(None, None, None, registration, {}, None)
+    succeeded, failed = observed["inner_fits"]
     assert [f["status"] for f in observed["inner_fits"]] == ["succeeded", "failed"]
-    assert observed["inner_fits"][0]["diagnostics"] == [{"converged": True}]
-    assert observed["inner_fits"][1]["diagnostics"] == []
-    assert observed["inner_fits"][1]["completed_fit_count"] == 2
+    assert [f["fit_attempt_count"] for f in observed["inner_fits"]] == [3, 3]
+    assert [f["completed_fit_count"] for f in observed["inner_fits"]] == [3, 2]
+    assert succeeded["diagnostics"] == [{"converged": True}]
+    assert failed["diagnostics"] == []
+    assert succeeded["fit_seconds"] == [{"horizon_sessions": 1, "seconds": 1.25},
+                                        {"horizon_sessions": 5, "seconds": 2.75}]
+    assert failed["fit_seconds"] == [{"horizon_sessions": 1, "seconds": 0.5}]
+    assert succeeded["score_seconds"] == 0.7
+    assert failed["score_seconds"] == 0.3
+    assert succeeded["rss_delta_kib"] == 2048
+    assert failed["rss_delta_kib"] == 512
+    assert succeeded["inner_metrics"] == [{"horizon_sessions": 1, "mean_absolute_move_pct": 0.4}]
+    assert failed["inner_metrics"] == [{"horizon_sessions": 1, "mean_absolute_move_pct": 0.1}]
     assert observed["comparison_fits"][0]["component_fits"] == 2

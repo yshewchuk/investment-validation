@@ -1,5 +1,6 @@
 """Assemble sealed per-horizon fit inputs from admitted stored history only."""
 import math
+import time
 
 from engine.models.no_fit import RuntimeFitForbidden as LegacyRuntimeFitForbidden
 from engine.v2.models.adapters import RuntimeFitForbidden
@@ -18,6 +19,7 @@ def fitted_forecasts(indexed, train, fold, plan, execution, *, progress=None, st
             horizon, execution["features"], labels, target_column="absolute_move_pct")
         if progress is not None:
             progress("started", fit)
+        started = time.monotonic()
         try:
             if execution.get("schema_version") == "size_candidate_execution.v1":
                 from experiments.magnitude_candidate_fit import fit_candidate
@@ -31,6 +33,7 @@ def fitted_forecasts(indexed, train, fold, plan, execution, *, progress=None, st
             if (len(values) != len(test_ids) or any(isinstance(value, bool)
                     or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0 for value in values)):
                 raise ValueError
+            elapsed = max(0.0, time.monotonic() - started)
         except (RuntimeFitForbidden, LegacyRuntimeFitForbidden):
             raise
         except (MemoryError, OSError, ImportError, OpsError):
@@ -44,5 +47,5 @@ def fitted_forecasts(indexed, train, fold, plan, execution, *, progress=None, st
         predictions.update({(event, horizon): float(value) for event, value in zip(test_ids, values)})
         evidence.append(fit)
         if progress is not None:
-            progress("completed", fit)
+            progress("completed", {**fit, "fit_seconds": elapsed})
     return predictions, evidence

@@ -1,6 +1,7 @@
 """Durable post-fit publication repair: real journal, fault cuts, and no-fit oracles."""
 # ruff: noqa: F811
 import copy
+import math
 
 import pytest
 
@@ -32,6 +33,11 @@ def expected_fits():
                  "values": [[0.0] * 11], "absolute_move_pct": [2.0]}),
              "prediction_matrix_id": content_hash({"columns": columns, "row_keys": [["event", "history", horizon]],
                  "values": [[0.0] * 11]})} for horizon in (5, 3, 1)]
+
+
+def completed_fits():
+    """Static fit-started evidence plus the one completed-marker timing field."""
+    return [{**fit, "fit_seconds": 0.25} for fit in expected_fits()]
 
 
 def interrupt(monkeypatch, recorder, stage, after):
@@ -75,7 +81,7 @@ def failed_child(monkeypatch, completed):
         try:
             original(*args[:-1], progress)
         except StopIteration:
-            return {"event": "failed"}
+            return {"event": "failed", "score_seconds": 1.5, "rss_delta_kib": 12}
         raise AssertionError("missing fit admission")
     monkeypatch.setattr(trials, "run_fitted_trial", failed)
 
@@ -119,7 +125,8 @@ def test_publication_faults_reconcile_only_durable_results(native, monkeypatch, 
     durable = recorder._read("execution-result:" + KEY)
     assert durable == {"attempt": {"trial_id": KEY, "candidate_id": "a-first", "limits": LIMITS},
                        "inputs_id": content_hash(recorder._read("cohort:" + COHORT)),
-                       "result": {"event": "succeeded", "forecasts": rows(2.0)}}
+                       "result": {"event": "succeeded", "forecasts": rows(2.0),
+                                  "score_seconds": 1.5, "rss_delta_kib": 12}}
     if stage == "terminal" or (stage == "validation" and after):
         monkeypatch.setattr(recorder, "_inputs", lambda *a: pytest.fail("durable validation reopened inputs"))
         monkeypatch.setattr(trials, "load_magnitude_targets", lambda *a, **k: pytest.fail("durable validation reopened labels"))
@@ -127,7 +134,7 @@ def test_publication_faults_reconcile_only_durable_results(native, monkeypatch, 
         result = recorder.reconcile(*ARGS, limits=LIMITS)
     assert result["status"] == result["terminal"]["status"] == "succeeded"
     assert result["fit_attempt_count"] == result["completed_fit_count"] == 3
-    assert result["fits"] == expected_fits()
+    assert result["fits"] == completed_fits()
     assert result["terminal"]["metrics"] == {"count": 3, "rmse": 2.0, "mae": 2.0}
     assert result["evaluation_authority"] == "none"
     assert recorder._read("execution-result:" + KEY) == durable
@@ -155,7 +162,7 @@ def test_candidate_failure_reconciliation_retains_exact_attempt_prefix(native, m
     assert result["status"] == result["terminal"]["status"] == "failed"
     assert result["fit_attempt_count"] == completed + 1
     assert result["completed_fit_count"] == completed
-    assert result["fits"] == expected_fits()[:completed]
+    assert result["fits"] == completed_fits()[:completed]
     assert native.recorder._read("forecasts:" + KEY) is None
     with pytest.raises(OpsError) as caught:
         native.recorder.freeze()
@@ -182,9 +189,10 @@ def test_failed_result_corruption_cannot_publish_candidate_terminal(native, monk
     interrupt(monkeypatch, recorder, "execution-result", after=True)
     monkeypatch.setattr(recorder, "_append", append)
     if mutation in ("pending_completion", "beyond_completion"):
-        fit = expected_fits()[1 if mutation == "pending_completion" else 2]
+        fit = completed_fits()[1 if mutation == "pending_completion" else 2]
         append("fit-completed:" + KEY + ":" + str(fit["horizon_sessions"]), fit)
-    assert recorder._read("execution-result:" + KEY)["result"] == {"event": "failed"}
+    assert recorder._read("execution-result:" + KEY)["result"] == {
+        "event": "failed", "score_seconds": 1.5, "rss_delta_kib": 12}
     assert recorder._read("execution:" + KEY) is None
     before = durable_evidence(native)
     no_launch(monkeypatch)
@@ -379,8 +387,21 @@ def test_real_fixed_child_is_reaped_before_result_becomes_recoverable(native, mo
     with no_fit_guard(), legacy_guard():
         result = native.recorder.reconcile(*ARGS, limits=LIMITS)
     assert result["completed_fit_count"] == 3
-    assert result["fits"] == expected_fits()
-    assert native.recorder._read("execution-result:" + KEY)["result"] == {"event": "succeeded", "forecasts": rows(2.0)}
+    assert len(result["fits"]) == len(expected_fits())
+    for fit, expected in zip(result["fits"], expected_fits()):
+        assert {key: value for key, value in fit.items() if key != "fit_seconds"} == expected
+        seconds = fit["fit_seconds"]
+        assert isinstance(seconds, float) and not isinstance(seconds, bool)
+        assert math.isfinite(seconds) and seconds >= 0.0
+    result_record = native.recorder._read("execution-result:" + KEY)["result"]
+    assert result_record["event"] == "succeeded"
+    assert result_record["forecasts"] == rows(2.0)
+    score_seconds = result_record["score_seconds"]
+    assert isinstance(score_seconds, float) and not isinstance(score_seconds, bool)
+    assert math.isfinite(score_seconds) and score_seconds >= 0.0
+    rss_delta_kib = result_record["rss_delta_kib"]
+    assert isinstance(rss_delta_kib, int) and not isinstance(rss_delta_kib, bool)
+    assert rss_delta_kib >= 0
     assert native.recorder._read("forecasts:" + KEY) == rows(2.0)
     assert result["forecasts_id"] == content_hash(rows(2.0))
     assert result["terminal"]["predictions"] == [{**row, "absolute_move_pct": 4.0} for row in rows(2.0)]
@@ -449,7 +470,7 @@ def test_failed_scoring_publication_reconciles_to_original_refusal(native, monke
     assert caught.value.problem == fail("EXPERIMENT_VARIANT_FAILED", "synthetic candidate scoring refusal").problem
     result = native.recorder.reconcile(*ARGS, limits=LIMITS)
     assert result["status"] == "succeeded" and result["terminal"]["status"] == "refused"
-    assert result["fits"] == expected_fits()
+    assert result["fits"] == completed_fits()
     assert native.recorder._read("forecasts:" + KEY) == rows(1e308)
 
 
@@ -504,7 +525,7 @@ def test_new_recorder_reconciles_catalog_durable_result_after_reopen(native, mon
             recovered = recorder.reconcile(*ARGS, limits=LIMITS)
             assert native.recorder.reconcile(*ARGS, limits=LIMITS) == recovered
         assert recovered["completed_fit_count"] == 3
-        assert recovered["fits"] == expected_fits()
+        assert recovered["fits"] == completed_fits()
         assert recovered["terminal"]["status"] == "succeeded"
     finally:
         peer.close()
