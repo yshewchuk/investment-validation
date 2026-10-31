@@ -5,7 +5,7 @@ from bisect import bisect_right
 from copy import deepcopy
 from datetime import date, timedelta
 
-from engine.v2.data import errors
+from engine.v2.data import errors, objects
 from engine.v2.foundation import content_hash, to_document
 from engine.v2.foundation.experiment_holdouts import calendar_date
 from engine.v2.research import progress
@@ -200,7 +200,11 @@ def plan_eligibility(repository, snapshot, *, as_of_month, policy, metadata, eva
     Consumers must bind/apply this plan before preprocessing, selection and fits.
     Plans and policy identity are unchanged unless an ambiguous random event exists; the
     "preserve_membership" label keeps v1.5/v1.6 hashes. Neither a hash nor this plan authorizes IO.
+
+    An invalid ``max_object_bytes`` refuses eagerly, before snapshot admission.
     """
+    if max_object_bytes is not None:
+        objects.validate_max_object_bytes(max_object_bytes)
     with progress.stage("eligibility admission", report_refusals=True):
         admit_snapshot(repository, snapshot)
         policy, groups, metadata_id = _metadata(snapshot, as_of_month, policy, metadata)

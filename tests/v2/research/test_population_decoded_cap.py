@@ -14,7 +14,8 @@ from engine.v2.data.repository import Repository
 from engine.v2.foundation.experiment_holdouts import ExperimentHoldouts
 from engine.v2.research import magnitude_features
 from engine.v2.research._scan import read_table
-from engine.v2.research.experiment_population import load_population
+from engine.v2.research.eligibility_policy import plan_eligibility
+from engine.v2.research.experiment_population import canonical_events, load_population
 from tests.v2.research.test_eligible_history import source
 
 _COLUMNS = ("event_id", "ticker", "event_date", "session", "date_conflict", "event_cluster_id")
@@ -236,3 +237,66 @@ def test_fixture_calendar_input_decoded_cap_refuses_and_default_reads(tmp_path):
         assert calendar.days
     finally:
         data.conn.close()
+
+
+class _PinnedCappedCalendarRepository(_RecordingRepository):
+    """Pinned so the memo applies; a capped scan refuses like the bounded decoder."""
+
+    def __init__(self, snapshot, frame):
+        super().__init__(snapshot, frame)
+        self.pins_snapshots = True
+
+    def scan(self, query, *, table_name, max_object_bytes=None):
+        self.caps.append(max_object_bytes)
+        if max_object_bytes is not None:
+            raise errors.fail("RESULT_LIMIT_EXCEEDED", "capped scan refuses")
+        yield _Batch(self.frame)
+
+
+def test_calendar_cap_is_never_served_from_a_warm_uncapped_memo():
+    snapshot = _calendar_snapshot()
+    frame = pd.DataFrame({"date": [pd.Timestamp("2020-01-02"), pd.Timestamp("2020-01-03")]})
+    repository = _PinnedCappedCalendarRepository(snapshot, frame)
+    warm, _ = magnitude_features.calendar_input(repository, snapshot)
+    assert repository.caps == [None]
+    with pytest.raises(errors.DataError) as raised:
+        magnitude_features.calendar_input(repository, snapshot, max_object_bytes=1)
+    assert raised.value.code == "RESULT_LIMIT_EXCEEDED"
+    assert repository.caps == [None, 1]
+    again, _ = magnitude_features.calendar_input(repository, snapshot)
+    assert repository.caps == [None, 1]
+    assert again == warm
+
+
+class _UntouchableRepository:
+    """Any repository use means the invalid cap was not refused at entry."""
+
+    def __getattr__(self, name):
+        raise AssertionError("an invalid cap must refuse before any repository use")
+
+
+@pytest.mark.parametrize("cap", [0, True, -1])
+def test_canonical_events_refuses_invalid_cap_before_repository_use(cap):
+    snapshot = _snapshot()
+    with pytest.raises(errors.DataError) as raised:
+        canonical_events(_UntouchableRepository(), snapshot, max_object_bytes=cap)
+    assert raised.value.code == "QUERY_NOT_BOUNDED"
+
+
+@pytest.mark.parametrize("cap", [0, True, -1])
+def test_plan_eligibility_refuses_invalid_cap_before_repository_use(cap):
+    snapshot = _snapshot()
+    with pytest.raises(errors.DataError) as raised:
+        plan_eligibility(_UntouchableRepository(), snapshot, as_of_month="2026-01",
+                         policy=None, metadata=None, evaluation_event_ids=[],
+                         max_object_bytes=cap)
+    assert raised.value.code == "QUERY_NOT_BOUNDED"
+
+
+@pytest.mark.parametrize("cap", [0, True, -1])
+def test_calendar_input_refuses_invalid_cap_before_repository_use(cap):
+    snapshot = _calendar_snapshot()
+    with pytest.raises(errors.DataError) as raised:
+        magnitude_features.calendar_input(_UntouchableRepository(), snapshot,
+                                          max_object_bytes=cap)
+    assert raised.value.code == "QUERY_NOT_BOUNDED"

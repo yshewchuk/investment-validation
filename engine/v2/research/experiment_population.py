@@ -13,7 +13,10 @@ def canonical_events(repository, snapshot, *, max_object_bytes=None):
     """Read the six canonical metadata columns from a native snapshot reference.
 
     ``max_object_bytes``, when given, bounds the read's decoded row-group bytes;
-    an invalid cap refuses eagerly; ``None`` changes nothing."""
+    an invalid cap refuses eagerly, before snapshot admission; ``None``
+    changes nothing."""
+    if max_object_bytes is not None:
+        objects.validate_max_object_bytes(max_object_bytes)
     admit_snapshot(repository, snapshot)
     return _canonical_events(repository, snapshot, max_object_bytes=max_object_bytes)
 
