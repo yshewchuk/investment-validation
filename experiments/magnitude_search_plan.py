@@ -114,8 +114,6 @@ def canonical_inner(plan, outer_year, inner_year):
     raise fail("INVALID_EXPERIMENT_SPEC", "trial is outside the sealed search plan")
 
 
-
-
 def _nested(binding, request):
     """Preserve annual event groups; inner scoring labels must predate outer fitting."""
     temporal = binding["magnitude_plan"]

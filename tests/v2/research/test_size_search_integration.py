@@ -700,11 +700,27 @@ def test_v16_inline_size_registration_still_round_trips(case):
 
 
 def test_interrupted_v3_start_refuses_replay_before_native_read(case, monkeypatch):
+    """Interrupt a v3 start in a fresh journal namespace so replay refuses before native reads."""
+    from engine.v2.foundation import canonical_json
     from experiments.magnitude_search_plan import trial_key
     from experiments.magnitude_search_trials import SearchTrials
+    from experiments.native_registration import NativeRegistration
 
     assert case.plan["schema_version"] == "magnitude_search_plan.v3"
-    recorder = SearchTrials(*case.context)
+    # The module fixture's journal already owns other claims; a fresh registration
+    # run isolates this test's start/claim without deleting or mutating any row.
+    fresh_spec = prediction_spec(experiment_id="synthetic-interrupted-v3-start",
+                                 folds=("2024",), runner="experiments/size_search.py")
+    document = case.registration.document
+    document["schema_version"] = "native_experiment_registration.v1.6"
+    document["spec_hash"] = fresh_spec.spec_hash
+    registration_key = content_hash({"experiment_id": fresh_spec.experiment_id,
+                                     "arm": fresh_spec.primary_arm_id})
+    registration = NativeRegistration("native_" + registration_key.removeprefix("sha256:"),
+                                      canonical_json(document).encode())
+    reserve_native_registration(case.conn, case.store, registration, fresh_spec)
+    recorder = SearchTrials(case.conn, case.store, case.repository, registration, case.request, case.ref)
+    monkeypatch.setattr(recorder, "_admit", lambda: case.plan)
     outer = case.plan["folds"][0]
     inner = outer["inner"][0]
     candidate_id = case.plan["candidates"][0]["candidate_id"]
