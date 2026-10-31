@@ -6,6 +6,8 @@ import pytest
 
 from engine.v2.foundation import content_hash
 from engine.v2.ops.errors import OpsError
+from experiments import magnitude_search_trials as trials
+from experiments.magnitude_search_plan import PLAN_V3, trial_key
 from experiments.magnitude_search_selection import (
     blended_event_score,
     history_mean_rows,
@@ -122,6 +124,14 @@ def test_v3_policy_is_request_declared_validated_and_identity_bound():
     assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
 
 
+def test_new_v4_request_must_declare_selection_policy():
+    request = v4_request()
+    del request["selection"]
+    with pytest.raises(OpsError) as caught:
+        compile_request(request)
+    assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
+
+
 def test_v4_hgb_request_accepts_the_same_hashed_selection_declaration():
     request = v4_request()
     request["selection"] = copy.deepcopy(POLICY)
@@ -129,3 +139,54 @@ def test_v4_hgb_request_accepts_the_same_hashed_selection_declaration():
     assert compiled["request"]["schema_version"] == "magnitude_search_request.v4"
     assert compiled["request"]["selection"] == POLICY
     assert compiled["request_id"] == content_hash(compiled["request"])
+
+
+def test_freeze_reuses_verified_history_rows_for_shared_cohort(monkeypatch):
+    plan = {"schema_version": PLAN_V3, "plan_id": "synthetic-plan",
+        "request": {"selection": copy.deepcopy(POLICY)},
+        "candidates": [{"candidate_id": "candidate"}],
+        "folds": [
+            {"outer": {"year": "2024"}, "inner": [{"year": "2023"}]},
+            {"outer": {"year": "2025"}, "inner": [{"year": "2023"}]},
+        ]}
+    prediction = {"status": "succeeded", "predictions": [{
+        "event_id": "e1", "horizon_sessions": 1,
+        "absolute_move_pct": 2.0, "predicted_absolute_move_pct": 3.0}]}
+    validation = {"targets": [{"event_id": "e1", "absolute_move_pct": 2.0}]}
+    inputs = {"training": [{"absolute_move_pct": 2.0}], "features": [{
+        "event_id": "e1", "horizon_sessions": 1, "n_prior": 1,
+        "mean_prior_abs_move": 1.0}]}
+    recorder = object.__new__(trials.SearchTrials)
+    monkeypatch.setattr(recorder, "_admit", lambda: plan)
+    terminal_calls, cohort_calls, history_calls = [], [], []
+
+    def terminal(plan_arg, outer_year, inner_year, candidate_id):
+        key = trial_key(plan, outer_year, inner_year, candidate_id)
+        terminal_calls.append(key)
+        return key, prediction
+
+    def read(slot):
+        if slot.startswith("inputs:"):
+            return {"cohort": "shared-cohort"}
+        if slot == "validation:shared-cohort":
+            return validation
+        raise AssertionError(slot)
+
+    original_history_rows = history_mean_rows
+
+    def history_rows(admitted, targets):
+        history_calls.append(True)
+        return original_history_rows(admitted, targets)
+
+    monkeypatch.setattr(recorder, "_terminal", terminal)
+    monkeypatch.setattr(recorder, "_read", read)
+    monkeypatch.setattr(recorder, "_cohort", lambda admitted: cohort_calls.append(True) or inputs)
+    monkeypatch.setattr(recorder, "_validation", lambda *args: None)
+    monkeypatch.setattr(recorder, "_append", lambda slot, body, **kwargs: body)
+    monkeypatch.setattr(trials, "history_mean_rows", history_rows)
+    frozen = recorder.freeze()
+    assert len(terminal_calls) == 1
+    assert len(cohort_calls) == len(history_calls) == 1
+    assert len(frozen["selections"]) == 2
+    assert all(item["history_mean"]["blend_score"] == pytest.approx(1.0)
+        for item in frozen["selections"])

@@ -150,11 +150,13 @@ def compile_request(request):
         request = json.loads(json.dumps(request, allow_nan=False))
     except (ValueError, TypeError, OverflowError, RecursionError):
         raise fail("INVALID_EXPERIMENT_SPEC", "stage-2 request requires plain finite JSON") from None
-    v2._require(type(request) is dict
-                and set(request) in (v2._KEYS, v2._KEYS | {"selection"})
-                and request["schema_version"] in (
-                    "magnitude_search_request.v3", "magnitude_search_request.v4"),
-                "stage-2 request requires its closed v3 or v4 schema")
+    version = request.get("schema_version") if type(request) is dict else None
+    request_keys = set(request) if type(request) is dict else set()
+    v2._require((version == "magnitude_search_request.v3"
+                 and request_keys in (v2._KEYS, v2._KEYS | {"selection"}))
+                or (version == "magnitude_search_request.v4"
+                    and request_keys == v2._KEYS | {"selection"}),
+                "stage-2 request requires its closed v3/v4 schema and v4 selection policy")
     _selection(request)
     v2._references(request)
     _space(request)

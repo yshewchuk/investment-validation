@@ -1,7 +1,10 @@
 """Immutable search recording, bounded native inner fits and forecast-based selection."""
 import copy
 import json
+import resource
 import sqlite3
+import sys
+import time
 from pathlib import Path
 
 from engine.models.no_fit import forbid_fitting as forbid_legacy_fitting
@@ -542,6 +545,18 @@ class SearchTrials:
 
     def freeze(self):
         """Freeze every outer choice from all terminal attempts; no evaluation authority."""
+        started = time.monotonic()
+        print(f"[selection] freeze start rss_kib={resource.getrusage(resource.RUSAGE_SELF).ru_maxrss}",
+              file=sys.stderr)
+        try:
+            return self._freeze()
+        finally:
+            elapsed = time.monotonic() - started
+            print(f"[selection] freeze done elapsed={elapsed:.3f}s "
+                  f"rss_kib={resource.getrusage(resource.RUSAGE_SELF).ru_maxrss}", file=sys.stderr)
+
+    def _freeze(self):
+        """Freeze every outer choice from all terminal attempts; no evaluation authority."""
         plan = self._admit()
         uses = {}
         for outer in plan["folds"]:
@@ -551,6 +566,11 @@ class SearchTrials:
                     uses[key] = uses.get(key, 0) + 1
         cache, cache_bytes = {}, 0
         selections, attempts = [], []
+        total_trials = sum(uses.values())
+        processed_trials = 0
+        last_progress = time.monotonic()
+        progress_started = last_progress
+        print(f"[selection] planned trials={total_trials}", file=sys.stderr)
         policy = plan.get("request", {}).get("selection")
         history_rows_cache = {}
         for outer in plan["folds"]:
@@ -569,6 +589,14 @@ class SearchTrials:
                     else:
                         record, terminal_id, record_bytes = cached
                     attempts.append({"trial_id": key, "terminal_id": terminal_id})
+                    processed_trials += 1
+                    if time.monotonic() - last_progress >= 60:
+                        elapsed = time.monotonic() - progress_started
+                        rate = processed_trials / elapsed if elapsed > 0 else 0.0
+                        eta = (total_trials - processed_trials) / rate if rate > 0 else 0.0
+                        print(f"[selection] {processed_trials}/{total_trials} trials, "
+                              f"{rate:.3f} trials/s, ETA {eta:.0f}s", file=sys.stderr)
+                        last_progress = time.monotonic()
                     failed |= record["status"] != "succeeded"
                     if record["status"] == "succeeded":
                         rows.extend(record["predictions"])
@@ -639,6 +667,10 @@ class SearchTrials:
                     "history_mean": history_score, "tie_band": tie_band,
                     "selected_candidate_id": selected_id}
             selections.append(selection)
+            failed_candidates = sum(score["metrics"] is None for score in scores)
+            print(f"[selection] outer={selection['outer_year']} "
+                  f"selected={selection['selected_candidate_id']} "
+                  f"failed_candidates={failed_candidates}", file=sys.stderr)
         result = {"plan_id": plan["plan_id"], "attempts": attempts, "selections": selections,
                   "prospective_candidate_id": selections[-1]["selected_candidate_id"],
                   "estimator_execution": "unverified_submitted_forecasts", "evaluation_authority": "none"}

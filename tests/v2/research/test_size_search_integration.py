@@ -111,6 +111,12 @@ def test_v4_qualified_request_seals_reconstructs_v3_plan(case):
         "hgb": {"learning_rate": [0.05, 0.1], "max_leaf_nodes": [7, 15],
                 "min_samples_leaf": [20, 100], "l2_regularization": [0.0, 1.0]}}
     v4.update(max_candidates=99, max_fits=300)
+    v4["selection"] = {
+        "metric_weights": {"rmse": 0.6, "mae": 0.3, "large_move_underprediction": 0.1},
+        "lead_weights": {"1": 1.0, "3": 0.0, "5": 0.0},
+        "large_move_threshold_pct": 10.0,
+        "tie_band_floor": 0.005,
+    }
     spec = prediction_spec(experiment_id="synthetic-qualified-size-v4", folds=("2024",),
                            runner="experiments/size_search.py")
     registration, spec = binding.prepare(case.repository, spec, v4, case.panel_request, **case.args)
