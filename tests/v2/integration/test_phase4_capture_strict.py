@@ -1237,6 +1237,35 @@ def test_chooser_fold_reference_flows_through_real_scorer_checkpoint(tmp_path, m
     candidate.update({"event_id": "AAA_2026-09-17", "request": request_to_dict(request)})
     strict_trace_one(candidate, "snapshot-1", tmp_path / "release")
     assert observed["chooser_fold_references"] == captured
+    identity = reference.release_binding
+    assert observed["chooser_fold_references"] == {
+        "pred_im_t1_d14": {
+            "producer_output": reference.producer_output,
+            "descriptor_hash": reference.descriptor_hash,
+            "estimator_sha256": reference.estimator_sha256,
+            "training_cutoff": reference.training_cutoff,
+            "release_id": reference.release_id,
+            "fold_start": reference.fold_start,
+            "release_binding": {
+                "binding_id": identity.binding_id,
+                "model_id": identity.model_id,
+                "role": identity.role,
+                "strategy_id": identity.strategy_id,
+                "decision_clock_id": identity.decision_clock_id,
+                "adapter": identity.adapter,
+                "feature_order": list(identity.feature_order),
+                "output_names": list(identity.output_names),
+                "artifact_hash": identity.artifact_hash,
+            },
+        },
+    }
+
+    corrupted_candidate = copy.deepcopy(candidate)
+    corrupted_source = corrupted_candidate["legacy_trace"]["checkpoints"]["source_inputs"]["value"]
+    corrupted_source["frozen"]["chooser_references"]["pred_im_t1_d14"]["estimator_sha256"] = "sha256:" + "c" * 64
+    corrupted_candidate["legacy_trace"]["checkpoints"]["source_inputs"]["content_hash"] = content_hash(corrupted_source)
+    with pytest.raises(StrictTraceCaptureError, match="mismatches served producer"):
+        strict_trace_one(corrupted_candidate, "snapshot-1", tmp_path / "release")
 
     empty_candidate = _candidate(_collector())
     empty_candidate.update({"event_id": "AAA_2026-09-17", "request": request_to_dict(request)})

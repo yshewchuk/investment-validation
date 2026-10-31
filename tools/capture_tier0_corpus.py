@@ -4877,7 +4877,7 @@ def main(argv: Iterable[str] | None = None) -> int:
                 chooser_fold_references = resolve_production_release_binding(
                     include_chooser_fold_references=True).chooser_fold_references
             except ReleaseBindingError as exc:
-                ap.error(f"production chooser references unavailable: {type(exc).__name__}")
+                ap.error(f"production chooser references unavailable: {exc}")
         scorer = score_mod.Scorer(chooser_fold_references=chooser_fold_references)
         print(f"[corpus] scorer ready in {time.time()-started:.0f}s", flush=True)
 
