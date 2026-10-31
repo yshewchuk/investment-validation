@@ -135,17 +135,24 @@ def test_early_stopping_v2_recipe_fits_deterministically():
     assert all(np.isfinite(values)) and all(value >= 0 for value in values)
 
 
-def test_early_stopping_v2_matches_independent_estimator_and_recovers_signal():
+@pytest.mark.parametrize(
+    ("learning_rate", "max_leaf_nodes", "min_samples_leaf", "l2_regularization"),
+    [(0.1, 7, 20, 0.0), (0.05, 15, 100, 1.0)],
+)
+def test_early_stopping_v2_matches_independent_estimator_and_recovers_signal(
+        learning_rate, max_leaf_nodes, min_samples_leaf, l2_regularization):
     rng = np.random.default_rng(20261031)
     train = rng.normal(size=(400, 3))
     labels = np.where(train[:, 0] < 0, 2.0, 8.0)
     prediction = np.array([[-1.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
     recipe = ridge_hgb_recipe(model="history_hgb", columns=["x0", "x1", "x2"],
-        feature_dictionary_hash="sha256:" + "a" * 64, learning_rate=0.1, max_leaf_nodes=7,
-        min_samples_leaf=20, l2_regularization=0.0)
+        feature_dictionary_hash="sha256:" + "a" * 64, learning_rate=learning_rate,
+        max_leaf_nodes=max_leaf_nodes, min_samples_leaf=min_samples_leaf,
+        l2_regularization=l2_regularization)
     result = _fit(recipe, train, labels, prediction)
-    expected = HistGradientBoostingRegressor(loss="squared_error", learning_rate=0.1, max_iter=500,
-        max_leaf_nodes=7, min_samples_leaf=20, l2_regularization=0.0, early_stopping=True,
+    expected = HistGradientBoostingRegressor(loss="squared_error", learning_rate=learning_rate,
+        max_iter=500, max_leaf_nodes=max_leaf_nodes, min_samples_leaf=min_samples_leaf,
+        l2_regularization=l2_regularization, early_stopping=True,
         n_iter_no_change=10, validation_fraction=0.1, tol=1e-7, random_state=0)
     with threadpool_limits(limits=1):
         expected.fit(train, labels)
