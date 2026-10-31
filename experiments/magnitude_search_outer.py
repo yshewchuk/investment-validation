@@ -1,5 +1,4 @@
 """Bounded selected-candidate outer fits; immutable evidence, no final authority."""
-import math
 import sys
 import time
 from pathlib import Path
@@ -27,7 +26,11 @@ from experiments.magnitude_search_execution import (
 from experiments.magnitude_search_inputs import load_inputs, publish_inputs
 from experiments.magnitude_search_plan import read_search_plan
 from experiments.magnitude_search_records import MIGRATIONS, OWNER, append_record, read_record
-from experiments.magnitude_search_trials import SearchTrials
+from experiments.magnitude_search_trials import (
+    SearchTrials,
+    _completed_fit as _valid_completed_fit,
+    _timing as _valid_timing,
+)
 from experiments.size_fit_diagnostics import evidence as diagnostic_evidence
 from experiments.size_fit_diagnostics import keys as diagnostic_keys
 from experiments.size_job_budget import resolved_limits
@@ -43,33 +46,23 @@ def _equal(left, right):
         raise _conflict()
 
 
-def _seconds(value):
-    return type(value) in (int, float) and math.isfinite(value) and value >= 0
-
-
-def _rss_kib(value):
-    return type(value) is int and value >= 0
-
-
-def _timed_shape(result, keys):
+def _timed_shape(result, keys, *, legacy=False):
     if not isinstance(result, dict):
         return False
     observed = set(result)
     if observed == keys:
-        return True
-    return (observed == keys | {"score_seconds", "rss_delta_kib"}
-            and _seconds(result["score_seconds"]) and _rss_kib(result["rss_delta_kib"]))
+        return legacy
+    return observed == keys | {"score_seconds", "rss_delta_kib"} and _valid_timing(result)
 
 
-def _equal_completed_fit(fit, expected):
+def _equal_completed_fit(fit, expected, *, legacy=False):
     if not isinstance(fit, dict):
         raise _conflict()
-    observed = fit
-    if "fit_seconds" in fit:
-        if not _seconds(fit["fit_seconds"]):
+    if not legacy or "fit_seconds" in fit:
+        if not _valid_completed_fit(fit, expected):
             raise _conflict()
-        observed = {key: value for key, value in fit.items() if key != "fit_seconds"}
-    _equal(observed, expected)
+        return
+    _equal(fit, expected)
 
 
 def _native_selection(trials, plan, read):
@@ -159,14 +152,14 @@ def _replay(read, store, started, fold, plan, execution, binding):
                    "completed_fit_count": len(fits), "forecasts_id": content_hash(forecasts)}
         if execution.get("schema_version") == "size_candidate_execution.v1":
             worker = read("worker-result")
-            if not _timed_shape(worker, {"event", "forecasts"} | diagnostic_keys(binding)):
+            if not _timed_shape(worker, {"event", "forecasts"} | diagnostic_keys(binding), legacy=True):
                 raise _conflict()
             _equal(worker["forecasts"], forecasts)
             receipt.update(diagnostic_evidence(worker, execution, plan["horizons"]))
         _equal(read("execution"), receipt)
         for fit in fits:
             _equal(read("fit-started:" + str(fit["horizon_sessions"])), fit)
-            _equal_completed_fit(read("fit-completed:" + str(fit["horizon_sessions"])), fit)
+            _equal_completed_fit(read("fit-completed:" + str(fit["horizon_sessions"])), fit, legacy=True)
         result = _result(started, inputs, inputs_id, receipt, forecasts, read("validation"), fold, plan["horizons"])
         _equal(read("terminal"), result)
         return result
