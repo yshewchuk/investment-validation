@@ -706,14 +706,16 @@ def test_outer_replay_uses_registered_diagnostic_keys(monkeypatch):
     assert result == terminal
 
 
-@pytest.mark.parametrize("worker_timed, marker_timed, refuses", [
-    (True, False, True),   # worker timed, fit marker untimed -> refuse
-    (False, True, True),   # worker untimed, fit marker timed -> refuse
-    (False, False, False), # fully untimed legacy pair -> replay
-    (True, True, False),   # fully timed pair -> replay
+@pytest.mark.parametrize("worker_timed, marker_timed, worker_event, refuses", [
+    (True, False, "succeeded", True),   # worker timed, fit marker untimed -> refuse
+    (False, True, "succeeded", True),   # worker untimed, fit marker timed -> refuse
+    (False, False, "succeeded", False), # fully untimed legacy pair -> replay
+    (True, True, "succeeded", False),  # fully timed pair -> replay
+    (True, True, "failed", True),      # terminal cannot replay a failed worker
+    (True, True, "unexpected", True),  # terminal cannot replay an unknown worker event
 ])
 def test_outer_replay_requires_consistent_worker_and_fit_timing(
-        monkeypatch, worker_timed, marker_timed, refuses):
+        monkeypatch, worker_timed, marker_timed, worker_event, refuses):
     binding = {}
     execution = {"schema_version": "size_candidate_execution.v1"}
     started = {"outer_id": "outer"}
@@ -722,7 +724,7 @@ def test_outer_replay_requires_consistent_worker_and_fit_timing(
     forecasts = [{"event_id": "event", "horizon_sessions": 1,
         "predicted_absolute_move_pct": 2.0}]
     fit = {"horizon_sessions": 1}
-    worker = {"event": "succeeded", "forecasts": forecasts}
+    worker = {"event": worker_event, "forecasts": forecasts}
     if worker_timed:
         worker = {**worker, "score_seconds": 0.25, "rss_delta_kib": 64}
     terminal = {"inputs_id": "inputs"}

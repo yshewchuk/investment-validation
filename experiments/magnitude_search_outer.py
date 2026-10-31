@@ -166,6 +166,8 @@ def _replay(read, store, started, fold, plan, execution, binding):
         if worker is not None:
             if not _timed_shape(worker, {"event", "forecasts"} | diagnostic_keys(binding), legacy=True):
                 raise _conflict()
+            if worker.get("event") != "succeeded":
+                raise _conflict()
             timed_worker = "score_seconds" in worker
             _equal(worker["forecasts"], forecasts)
             if diagnostic_keys(binding):
