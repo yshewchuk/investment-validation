@@ -3,8 +3,9 @@ import json
 import os
 import resource
 import sys
+import time
 
-from experiments.memory_guard import start_rss_watchdog
+from experiments.memory_guard import rss_bytes, start_rss_watchdog
 
 
 def emit(value):
@@ -27,6 +28,15 @@ def main():
         # The header is small: limits-free request fields, the manifest, its expected id and the store root.
         # The child streams only manifest-named shards; it opens no repository, catalog or validation target.
         from experiments.magnitude_search_records import MAX_BYTES
+
+        started = time.monotonic()
+        rss_before_kib = rss_bytes() // 1024
+        rss_before_maxrss_kib = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+
+        def rss_delta_kib():
+            current_kib = rss_bytes() // 1024
+            current_ru_maxrss_kib = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+            return max(0, current_kib - rss_before_kib, current_ru_maxrss_kib - rss_before_maxrss_kib)
 
         # The header holds a manifest, which the journal caps at MAX_BYTES, so a larger file is not a header.
         with open(sys.argv[1], "rb") as stream:
@@ -56,10 +66,12 @@ def main():
         except OpsError as error:
             if error.code != "EXPERIMENT_VARIANT_FAILED":
                 raise
-            emit({"event": "failed"})
+            emit({"event": "failed", "score_seconds": max(0.0, time.monotonic() - started),
+                  "rss_delta_kib": rss_delta_kib()})
             return
         emit({"event": "succeeded", "forecasts": [{"event_id": event, "horizon_sessions": horizon,
             "predicted_absolute_move_pct": value} for (event, horizon), value in sorted(predictions.items())],
+            "score_seconds": max(0.0, time.monotonic() - started), "rss_delta_kib": rss_delta_kib(),
             **({"diagnostics": diagnostics} if request["execution"].get("schema_version") == "size_candidate_execution.v1" else {})})
     except MemoryError:
         emit({"event": "resource_limit"})

@@ -1,6 +1,7 @@
 """Consumed-only child inputs retain ordered fit evidence and the hard wire cap."""
 import copy
 import json
+import math
 
 import pandas as pd
 import pytest
@@ -109,10 +110,21 @@ def test_real_child_projection_preserves_exact_forecasts_and_fit_evidence(model,
         progress=lambda state, fit: expected_progress.append((state, fit)), strict_failures=True)
     progress = []
     result = run(source, fold, plan, policy, lambda state, fit: progress.append((state, fit)))
-    assert result == {"event": "succeeded", "forecasts": [{"event_id": event, "horizon_sessions": horizon,
-        "predicted_absolute_move_pct": value} for (event, horizon), value in sorted(expected.items())]}
-    assert progress == expected_progress
-    assert [fit for state, fit in progress if state == "completed"] == evidence
+    assert result["event"] == "succeeded"
+    assert result["forecasts"] == [{"event_id": event, "horizon_sessions": horizon,
+        "predicted_absolute_move_pct": value} for (event, horizon), value in sorted(expected.items())]
+    assert type(result["score_seconds"]) is float and math.isfinite(result["score_seconds"])
+    assert result["score_seconds"] > 0.0
+    assert isinstance(result["rss_delta_kib"], int) and result["rss_delta_kib"] >= 0
+    def static(events):
+        return [(state, {key: value for key, value in fit.items() if key != "fit_seconds"})
+                for state, fit in events]
+    assert static(progress) == static(expected_progress)
+    assert [fit for state, fit in static(progress) if state == "completed"] == [
+        {key: value for key, value in fit.items() if key != "fit_seconds"} for fit in evidence]
+    assert all(type(fit["fit_seconds"]) is float
+               and 0.0 < fit["fit_seconds"] < float("inf")
+               for state, fit in progress if state == "completed")
     assert [fit["horizon_sessions"] for fit in evidence] == [5, 1]
     assert all(fit["training_event_ids"] == ["train-b", "train-a"] for fit in evidence)
     assert all(fit["evaluation_event_ids"] == ["test-b", "test-a"] for fit in evidence)

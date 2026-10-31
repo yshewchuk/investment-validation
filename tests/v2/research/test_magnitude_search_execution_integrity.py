@@ -1,6 +1,7 @@
 """Small independent valid-hash negatives for the native execution evidence chain."""
 # ruff: noqa: F811
 import copy
+import math
 
 import pytest
 
@@ -44,8 +45,9 @@ def native(journal, monkeypatch):
                 "evaluation_event_ids": ["event"], "training_matrix_id": content_hash(training),
                 "prediction_matrix_id": content_hash(prediction)}
             progress("started", evidence)
-            progress("completed", evidence)
-        return {"event": "succeeded", "forecasts": rows(2.0)}
+            progress("completed", {**evidence, "fit_seconds": 0.25})
+        return {"event": "succeeded", "forecasts": rows(2.0),
+                "score_seconds": 1.5, "rss_delta_kib": 12}
     monkeypatch.setattr(trials, "run_fitted_trial", fit)
     return journal
 
@@ -68,7 +70,14 @@ def test_completed_native_replay_does_not_query_host_affinity(native, monkeypatc
         monkeypatch.delattr(execution.os, "sched_getaffinity")
     else:
         monkeypatch.setattr(execution.os, "sched_getaffinity", unavailable)
-    monkeypatch.setattr(native.recorder, "_append", lambda *a, **k: pytest.fail("replay appended evidence"))
+    append = native.recorder._append
+
+    def replay_append(slot, body, **kwargs):
+        if slot == "selection":
+            return append(slot, body, **kwargs)
+        pytest.fail("replay appended evidence")
+
+    monkeypatch.setattr(native.recorder, "_append", replay_append)
     monkeypatch.setattr(native.recorder, "_inputs", lambda *a: pytest.fail("replay opened native inputs"))
     monkeypatch.setattr(trials, "run_fitted_trial", lambda *a: pytest.fail("replay launched fit"))
     monkeypatch.setattr(trials, "load_magnitude_targets", lambda *a, **k: pytest.fail("replay opened labels"))
@@ -156,6 +165,18 @@ def test_native_freeze_requires_every_valid_hash_execution_link(native, monkeypa
     else:
         result = native.recorder.execute("2024", "2023", "a-first", limits=limits)
         assert result["terminal"]["metrics"] == {"count": 3, "rmse": 2.0, "mae": 2.0}
+        score_seconds = result["terminal"]["score_seconds"]
+        assert isinstance(score_seconds, float) and not isinstance(score_seconds, bool)
+        assert math.isfinite(score_seconds) and score_seconds >= 1.5
+        assert result["terminal"]["rss_delta_kib"] == 12
+        assert result["terminal"]["inner_metrics"] == [
+            {"horizon_sessions": horizon, "count": 1, "mae": 2.0, "rmse": 2.0,
+             "large_move_underprediction_rate": 0.0, "large_move_mean_shortfall": 0.0}
+            for horizon in (5, 3, 1)]
+        assert all("fit_seconds" not in fit for fit in result["fits"])
+        for fit in result["fits"]:
+            marker = native.recorder._read("fit-completed:" + result["attempt"]["trial_id"] + ":" + str(fit["horizon_sessions"]))
+            assert marker["fit_seconds"] == 0.25
         frozen = native.recorder.freeze()
         assert frozen["prospective_candidate_id"] == "a-first"
         assert native.recorder.freeze() == frozen
@@ -183,6 +204,54 @@ def test_shared_errors_never_create_candidate_terminal(native, monkeypatch, stag
     assert caught.value.problem == fail("EXPERIMENT_VARIANT_FAILED", "search selection requires every terminal attempt").problem
 
 
+def test_pre_evidence_native_journal_replays_without_rewriting(native, monkeypatch):
+    append = native.recorder._append
+
+    def old_writer(slot, body, **kwargs):
+        body = copy.deepcopy(body)
+        if slot.startswith("fit-completed:"):
+            body.pop("fit_seconds", None)
+        elif slot.startswith("execution-result:"):
+            body["result"].pop("score_seconds", None)
+            body["result"].pop("rss_delta_kib", None)
+        elif slot.startswith("execution:"):
+            body.pop("score_seconds", None)
+            body.pop("rss_delta_kib", None)
+            for fit in body["fits"]:
+                fit.pop("fit_seconds", None)
+        elif slot.startswith("terminal:"):
+            body.pop("score_seconds", None)
+            body.pop("rss_delta_kib", None)
+            body.pop("inner_metrics", None)
+        return append(slot, body, **kwargs)
+
+    monkeypatch.setattr(native.recorder, "_append", old_writer)
+    first = native.recorder.execute("2024", "2023", "a-first", limits=LIMITS)
+    second = native.recorder.execute("2024", "2023", "z-last", limits=LIMITS)
+    for candidate_id, result in (("a-first", first), ("z-last", second)):
+        key = content_hash(["plan", "2024", "2023", candidate_id])
+        assert "fit_seconds" not in native.recorder._read("fit-completed:" + key + ":5")
+        assert "score_seconds" not in native.recorder._read("execution-result:" + key)["result"]
+        assert "score_seconds" not in native.recorder._read("execution:" + key)
+        assert "fit_seconds" not in native.recorder._read("execution:" + key)["fits"][0]
+        assert "inner_metrics" not in result["terminal"]
+
+    with no_fit_guard(), legacy_guard():
+        selection = native.recorder.freeze()
+    changes = native.conn.total_changes
+    def replay_append(slot, body, **kwargs):
+        if slot == "selection":
+            return append(slot, body, **kwargs)
+        pytest.fail("legacy replay appended")
+
+    monkeypatch.setattr(native.recorder, "_append", replay_append)
+    with no_fit_guard(), legacy_guard():
+        assert native.recorder.execute("2024", "2023", "a-first", limits=LIMITS) == first
+        assert native.recorder.execute("2024", "2023", "z-last", limits=LIMITS) == second
+        assert native.recorder.freeze() == selection
+    assert native.conn.total_changes == changes
+
+
 def test_native_failure_still_requires_all_planned_candidates(native, monkeypatch):
     original = trials.run_fitted_trial
     def failed(*args):
@@ -193,7 +262,7 @@ def test_native_failure_still_requires_all_planned_candidates(native, monkeypatc
         try:
             original(*args[:-1], progress)
         except StopIteration:
-            return {"event": "failed"}
+            return {"event": "failed", "score_seconds": 1.5, "rss_delta_kib": 12}
         raise AssertionError("missing fit admission")
     monkeypatch.setattr(trials, "run_fitted_trial", failed)
     result = native.recorder.execute("2024", "2023", "z-last", limits=LIMITS)
@@ -229,7 +298,8 @@ def test_native_metrics_refusal_retains_successful_execution_for_replay_and_free
     assert receipt["fit_attempt_count"] == receipt["completed_fit_count"] == 3
     assert receipt["forecasts_id"] == content_hash(rows(2.0))
     terminal = {"status": "refused", "problem": to_document(
-        fail("EXPERIMENT_VARIANT_FAILED", "search trial did not complete").problem)}
+        fail("EXPERIMENT_VARIANT_FAILED", "search trial did not complete").problem),
+        "score_seconds": 1.5, "rss_delta_kib": 12}
     assert native.recorder._read("terminal:" + key) == terminal
     before = native.conn.total_changes
     monkeypatch.setattr(trials, "run_fitted_trial", lambda *a: pytest.fail("refused replay fitted"))
@@ -376,7 +446,7 @@ def test_public_record_cannot_recover_failed_native_failure_publication(native, 
         try:
             original(*args[:-1], progress)
         except StopIteration:
-            return {"event": "failed"}
+            return {"event": "failed", "score_seconds": 1.5, "rss_delta_kib": 12}
         raise AssertionError("missing fit admission")
     append = native.recorder._append
     def refuse(slot, body, **kw):
@@ -415,7 +485,7 @@ def test_parent_refuses_child_progress_before_committing_bad_marker(native, monk
             if mutation == "matrix":
                 progress(state, {**evidence, "training_matrix_id": "wrong"})
             elif mutation == "completion_first":
-                progress("completed", evidence)
+                progress("completed", {**evidence, "fit_seconds": 0.25})
             else:
                 progress(state, evidence)
                 progress(state, evidence)
@@ -434,9 +504,10 @@ def test_parent_refuses_child_completion_before_receipt_or_labels(native, monkey
     original = trials.run_fitted_trial
     def corrupt(*args):
         if mutation == "early_success":
-            return {"event": "succeeded", "forecasts": rows(2.0)}
+            return {"event": "succeeded", "forecasts": rows(2.0),
+                    "score_seconds": 1.5, "rss_delta_kib": 12}
         if mutation == "unstarted_failure":
-            return {"event": "failed"}
+            return {"event": "failed", "score_seconds": 1.5, "rss_delta_kib": 12}
         if mutation == "extra_success":
             return {**original(*args), "extra": True}
         def started(state, evidence):
@@ -444,7 +515,7 @@ def test_parent_refuses_child_completion_before_receipt_or_labels(native, monkey
             raise ValueError("stop after admitted fit")
         with pytest.raises(ValueError, match="stop after admitted fit"):
             original(*args[:-1], started)
-        return {"event": "failed", "extra": True}
+        return {"event": "failed", "score_seconds": 1.5, "rss_delta_kib": 12, "extra": True}
     monkeypatch.setattr(trials, "run_fitted_trial", corrupt)
     with pytest.raises(OpsError) as caught:
         native.recorder.execute("2024", "2023", "a-first", limits=LIMITS)
@@ -510,17 +581,23 @@ def expected_native_receipt(succeeded=True):
     validation = {"inputs_id": inputs_id,
         "evaluation_inputs": {**evaluation, "inputs_id": content_hash(evaluation), "holdout_exclusions": []},
         "targets": [{"event_id": "event", "absolute_move_pct": 4.0}]}
+    inner_metrics = [{"horizon_sessions": horizon, "count": 1, "mae": 2.0, "rmse": 2.0,
+        "large_move_underprediction_rate": 0.0, "large_move_mean_shortfall": 0.0}
+        for horizon in (5, 3, 1)]
     terminal = ({"status": "succeeded", "inputs_id": inputs_id,
         "validation_id": content_hash(validation), "evaluation_inputs": validation["evaluation_inputs"],
         "predictions": [{**row, "absolute_move_pct": 4.0} for row in rows(2.0)],
-        "metrics": {"count": 3, "rmse": 2.0, "mae": 2.0}} if succeeded else
+        "metrics": {"count": 3, "rmse": 2.0, "mae": 2.0},
+        "score_seconds": 1.5, "rss_delta_kib": 12, "inner_metrics": inner_metrics} if succeeded else
         {"status": "failed", "problem": to_document(fail("EXPERIMENT_VARIANT_FAILED",
-            "search trial did not complete").problem)})
+            "search trial did not complete").problem),
+        "score_seconds": 1.5, "rss_delta_kib": 12})
     return {"attempt": {"limits": LIMITS, "candidate_id": "a-first",
             "trial_id": content_hash(["plan", "2024", "2023", "a-first"])},
         "fit_attempt_count": 3 if succeeded else 1, "completed_fit_count": 3 if succeeded else 0,
         "fits": fits if succeeded else [], "status": "succeeded" if succeeded else "failed",
         "forecasts_id": content_hash(rows(2.0)) if succeeded else None,
+        "score_seconds": 1.5, "rss_delta_kib": 12,
         "terminal": terminal, "evaluation_authority": "none"}
 
 
@@ -539,7 +616,7 @@ def test_native_response_verifies_each_fit_marker_once_and_replays_fresh(
         def failed(source, inner, plan, execution, limits, progress):
             inputs = load_inputs(ArtifactStore(source["store_root"]), source["manifest"], source["inputs_id"])
             progress("started", trials.fit_evidence(inputs, inner, plan, execution)[0])
-            return {"event": "failed"}
+            return {"event": "failed", "score_seconds": 1.5, "rss_delta_kib": 12}
         monkeypatch.setattr(trials, "run_fitted_trial", failed)
     opened = Counter()
     read = ArtifactStore.read_verified
@@ -563,6 +640,8 @@ def test_native_response_verifies_each_fit_marker_once_and_replays_fresh(
         with no_fit_guard(), legacy_guard():
             result = native.recorder.reconcile("2024", "2023", "a-first", limits=LIMITS)
     expected = expected_native_receipt(succeeded)
+    expected["terminal"]["score_seconds"] = result["terminal"]["score_seconds"]
+    assert expected["terminal"]["score_seconds"] >= result["score_seconds"]
     assert result == expected
     assert opened["execution-result"] == 1
     assert opened["fit-started"] == (3 if succeeded else 1)
@@ -596,7 +675,9 @@ def test_completed_replay_rechecks_durable_result_after_prior_success(native, re
     expected = expected_native_receipt()
     expected["attempt"]["limits"] = limits
     replay = getattr(native.recorder, replay_method)
-    assert native.recorder.execute("2024", "2023", "a-first", limits=limits) == expected
+    result = native.recorder.execute("2024", "2023", "a-first", limits=limits)
+    expected["terminal"]["score_seconds"] = result["terminal"]["score_seconds"]
+    assert result == expected
     repeated = replay("2024", "2023", "a-first", limits=limits)
     assert repeated == expected
     assert repeated["attempt"]["limits"]["cpu_seconds"] == cpu_seconds
@@ -611,3 +692,14 @@ def test_completed_replay_rechecks_durable_result_after_prior_success(native, re
         replay("2024", "2023", "a-first", limits=limits)
     assert caught.value.problem.code == "EXPERIMENT_IDENTITY_CONFLICT"
     assert caught.value.problem.message == "search journal artifact could not be verified"
+
+
+def test_inner_metrics_limits_large_move_diagnostics_to_threshold_rows():
+    scored = [
+        {"horizon_sessions": 5, "absolute_move_pct": 12.0, "predicted_absolute_move_pct": 5.0},
+        {"horizon_sessions": 5, "absolute_move_pct": 9.9, "predicted_absolute_move_pct": 20.0},
+    ]
+    [metrics] = trials.SearchTrials._inner_metrics(scored, [5])
+    assert metrics["count"] == 2
+    assert metrics["large_move_underprediction_rate"] == 1.0
+    assert metrics["large_move_mean_shortfall"] == 7.0

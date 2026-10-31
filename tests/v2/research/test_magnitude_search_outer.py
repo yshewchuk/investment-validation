@@ -359,7 +359,7 @@ def test_collect_requires_all_folds_and_pools_errors_without_outer_selection(out
         pytest.fail("outer collection launched an inner execution")
     def replayed(read, store, started, fold, plan, execution):
         trace.append(("outer", fold["year"]))
-        return replay(read, store, started, fold, plan, execution)
+        return replay(read, store, started, fold, plan, execution, binding)
     monkeypatch.setattr(trials.SearchTrials, "freeze", frozen)
     monkeypatch.setattr(trials.SearchTrials, "execute", executed)
     monkeypatch.setattr(outer, "_replay", replayed)
@@ -449,7 +449,14 @@ def test_outer_fit_failure_retains_exact_prefix_without_replacement_or_retry(out
         "fit_attempt_count": number, "completed_fit_count": number - 1, "forecasts_id": None}
     for index, fit in enumerate(fits):
         assert slot(case, "fit-started:" + str(fit["horizon_sessions"])) == (fit if index < number else None)
-        assert slot(case, "fit-completed:" + str(fit["horizon_sessions"])) == (fit if index < number - 1 else None)
+        completed = slot(case, "fit-completed:" + str(fit["horizon_sessions"]))
+        if index >= number - 1:
+            assert completed is None
+        else:
+            fit_seconds = completed["fit_seconds"]
+            assert type(fit_seconds) is float
+            assert math.isfinite(fit_seconds) and fit_seconds >= 0
+            assert {key: value for key, value in completed.items() if key != "fit_seconds"} == fit
     assert all(slot(case, name) is None for name in ("forecasts", "validation", "terminal"))
     candidate = next(item for item in case.plan["candidates"]
                      if item["candidate_id"] == case.selected["selections"][0]["selected_candidate_id"])

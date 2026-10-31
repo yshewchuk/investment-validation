@@ -26,7 +26,11 @@ from experiments.magnitude_search_execution import (
 from experiments.magnitude_search_inputs import load_inputs, publish_inputs
 from experiments.magnitude_search_plan import PLAN_V2, PLAN_V3, read_search_plan, trial_key
 from experiments.magnitude_search_records import MIGRATIONS, OWNER, append_record, read_record
-from experiments.magnitude_search_trials import SearchTrials
+from experiments.magnitude_search_trials import (
+    SearchTrials,
+    _completed_fit as _valid_completed_fit,
+    _timing as _valid_timing,
+)
 from experiments.size_fit_diagnostics import evidence as diagnostic_evidence
 from experiments.size_fit_diagnostics import keys as diagnostic_keys
 from experiments.size_job_budget import resolved_limits
@@ -40,6 +44,25 @@ def _conflict():
 def _equal(left, right):
     if canonical_json(left) != canonical_json(right):
         raise _conflict()
+
+
+def _timed_shape(result, keys, *, legacy=False):
+    if not isinstance(result, dict):
+        return False
+    observed = set(result)
+    if observed == keys:
+        return legacy
+    return observed == keys | {"score_seconds", "rss_delta_kib"} and _valid_timing(result)
+
+
+def _equal_completed_fit(fit, expected, *, legacy=False):
+    if not isinstance(fit, dict):
+        raise _conflict()
+    if not legacy or "fit_seconds" in fit:
+        if not _valid_completed_fit(fit, expected):
+            raise _conflict()
+        return
+    _equal(fit, expected)
 
 
 def _native_selection(trials, plan, read):
@@ -122,7 +145,7 @@ def _result(started, inputs, inputs_id, execution, forecasts, validation, fold, 
     return {**result, "result_id": content_hash(result)}
 
 
-def _replay(read, store, started, fold, plan, execution):
+def _replay(read, store, started, fold, plan, execution, binding):
     try:
         _equal(read("start"), started)
         record = read("inputs")
@@ -137,14 +160,19 @@ def _replay(read, store, started, fold, plan, execution):
         forecasts = _forecasts(read("forecasts"), fold, plan["horizons"])
         receipt = {"status": "succeeded", "fits": fits, "fit_attempt_count": len(fits),
                    "completed_fit_count": len(fits), "forecasts_id": content_hash(forecasts)}
+        timed_worker = False
         if execution.get("schema_version") == "size_candidate_execution.v1":
             worker = read("worker-result")
+            if not _timed_shape(worker, {"event", "forecasts"} | diagnostic_keys(binding), legacy=True):
+                raise _conflict()
+            timed_worker = "score_seconds" in worker
             _equal(worker["forecasts"], forecasts)
             receipt.update(diagnostic_evidence(worker, execution, plan["horizons"]))
         _equal(read("execution"), receipt)
         for fit in fits:
-            for state in ("started", "completed"):
-                _equal(read("fit-" + state + ":" + str(fit["horizon_sessions"])), fit)
+            _equal(read("fit-started:" + str(fit["horizon_sessions"])), fit)
+            _equal_completed_fit(read("fit-completed:" + str(fit["horizon_sessions"])), fit,
+                                 legacy=not timed_worker)
         result = _result(started, inputs, inputs_id, receipt, forecasts, read("validation"), fold, plan["horizons"])
         _equal(read("terminal"), result)
         return result
@@ -193,7 +221,7 @@ def _execute_admitted(conn, store, repository, registration, plan, fold, selecti
         compare(conn, store, repository, registration, plan, fold, limits=limits, replay_only=replay_only)
     execution = execution_for_candidate(binding, candidate)
     if replay_only or saved("terminal") is not None:
-        return _replay(saved, store, started, fold, plan, execution)
+        return _replay(saved, store, started, fold, plan, execution, binding)
     forbid_fitting("execute_outer_fold")
     forbid_legacy_fitting("execute_outer_fold")
     resolved = resolved_limits(conn, store, registration, plan, limits) if binding.get("schema_version") in ("native_experiment_registration.v1.6", "native_experiment_registration.v1.7") else execution_limits(limits)
@@ -208,7 +236,10 @@ def _execute_admitted(conn, store, repository, registration, plan, fold, selecti
         if (state not in ("started", "completed") or index >= len(expected)
                 or (state == "started") == bool(pending)):
             raise _conflict()
-        _equal(fit, expected[index])
+        if state == "started":
+            _equal(fit, expected[index])
+        else:
+            _equal_completed_fit(fit, expected[index])
         append("fit-" + state + ":" + str(fit["horizon_sessions"]), fit)
         if state == "started":
             pending.append(fit)
@@ -219,8 +250,9 @@ def _execute_admitted(conn, store, repository, registration, plan, fold, selecti
         resolved = resolved_limits(conn, store, registration, plan, limits)
     result = run_fitted_trial(source, fold, plan, execution, resolved, progress)
     succeeded = result.get("event") == "succeeded"
-    if ((succeeded and (pending or len(fits) != len(expected) or set(result) != {"event", "forecasts"} | diagnostic_keys(binding)))
-            or (not succeeded and (result != {"event": "failed"} or len(pending) != 1))):
+    if ((succeeded and (pending or len(fits) != len(expected)
+                        or not _timed_shape(result, {"event", "forecasts"} | diagnostic_keys(binding))))
+            or (not succeeded and (not _timed_shape(result, {"event"}) or result.get("event") != "failed" or len(pending) != 1))):
         raise _conflict()
     forecasts = _forecasts(result["forecasts"], fold, plan["horizons"]) if succeeded else None
     receipt = {"status": result["event"], "fits": fits, "fit_attempt_count": len(fits) + len(pending),
@@ -241,7 +273,7 @@ def _execute_admitted(conn, store, repository, registration, plan, fold, selecti
     _validate_targets(inputs, validation, fold)
     append("validation", validation)
     append("terminal", _result(started, inputs, inputs_id, receipt, forecasts, validation, fold, plan["horizons"]))
-    return _replay(saved, store, started, fold, plan, execution)
+    return _replay(saved, store, started, fold, plan, execution, binding)
 
 
 def collect_outer_results(conn, store, repository, registration, request, plan_ref):
