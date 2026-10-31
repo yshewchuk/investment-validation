@@ -1701,14 +1701,22 @@ def _entry_dm_rows():
     return rows
 
 
-def _entry_scan(rows, *, decision):
+def _entry_read(rows, *, decision, session="AMC"):
+    """One scan over ``rows`` for an event dated ``_EVENT`` decided at
+    ``decision`` under ``session``; returns the full result and its repo."""
     snapshot = _snapshot()
     batches = _default_batches()
     batches[("daily_market", "AAA")] = rows
     repo = _FakeRepository(snapshot, _contracts(), batches)
-    panel = scan_panel_row(repo, snapshot, _key(), history_start=_HISTORY_START,
-                           decision_session=decision).panel_row
-    return panel, repo
+    key = BoardRequest(ticker="AAA", strategy="STR-X", event_date=_EVENT, session=session)
+    result = scan_panel_row(repo, snapshot, key, history_start=_HISTORY_START,
+                            decision_session=decision)
+    return result, repo
+
+
+def _entry_scan(rows, *, decision):
+    result, repo = _entry_read(rows, decision=decision)
+    return result.panel_row, repo
 
 
 def test_51_amc_event_day_decision_reads_entry_im_at_the_decision_date():
@@ -1755,3 +1763,38 @@ def test_54_near_zero_decision_date_quote_is_kept_as_entry_im():
     rows[1]["implied_move"] = 0.005
     panel, _ = _entry_scan(rows, decision=_EVENT)
     assert panel["entry_im"] == pytest.approx(0.005)
+
+
+def test_55_bmo_event_day_decision_never_reads_its_print_day_close():
+    """A BMO event decided on its own day keeps the strictly-before bound: no
+    second ``daily_market`` read, so ``entry_im`` is the reused 02-14 state and
+    the event-day 7.0 quote is never observed."""
+    result, repo = _entry_read(_entry_dm_rows(), decision=_EVENT, session="BMO")
+    panel = result.panel_row
+    assert panel["entry_im"] == pytest.approx(3.0)
+    assert panel["im"] == pytest.approx(3.0)
+    daily_market_queries = [query for query in repo.queries
+                            if query.table_contract_ref == _DM_REF]
+    assert len(daily_market_queries) == 1
+
+
+def test_56_amc_entry_source_advances_the_panel_anchor():
+    """The AMC entry read selects the event-day session, and that read's own
+    source session (2024-02-15, the freshest contributor) is what the panel
+    anchor reports -- not the earlier state read's 2024-02-14."""
+    result, _ = _entry_read(_entry_dm_rows(), decision=_EVENT)
+    assert result.panel_row["entry_im"] == pytest.approx(7.0)
+    assert result.panel_anchor == pd.Timestamp("2024-02-15")
+
+
+def test_57_missing_entry_date_session_selects_the_previous_eligible_one():
+    """The entry read follows the legacy on-or-before rule: with no row dated on
+    the event day (only 02-14 and 02-16 present), the AMC second read at the
+    event-day cap selects the previous eligible session's quote, never an absent
+    key and never the 02-16 row past the cap."""
+    rows = _dm_rows("AAA", ["2024-02-14", "2024-02-16"])
+    rows[0]["implied_move"] = 3.0
+    rows[1]["implied_move"] = 99.0
+    result, _ = _entry_read(rows, decision=_EVENT)
+    assert result.panel_row["entry_im"] == pytest.approx(3.0)
+    assert result.panel_anchor == pd.Timestamp("2024-02-14")

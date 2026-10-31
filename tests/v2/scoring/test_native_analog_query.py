@@ -117,7 +117,7 @@ def test_complete_query_moneyness_band(strike, band):
     ("im", "prior", "ratio"),
     [(0.09, 0.06, 1.5), (0.04, 0.08, 0.5), (0.12, 0.03, 4.0)],
 )
-def test_query_base_implied_ratio_is_im_over_prior(im, prior, ratio):
+def test_query_base_implied_ratio_is_entry_im_over_prior(im, prior, ratio):
     # Distinct ratios, none equal to 1.2 or its inverse: im/prior, not prior/im.
     got = analog_query_base({"entry_im": im, "mean_prior_or_implied": prior})
     assert got["implied_ratio"] == pytest.approx(ratio)
@@ -162,7 +162,7 @@ def test_query_base_drops_mcap_for_every_bad_mcap_log(bad):
 
 
 @pytest.mark.parametrize("bad", _BAD_NUMBERS)
-def test_query_base_drops_ratio_for_every_bad_im_or_prior(bad):
+def test_query_base_drops_ratio_for_every_bad_entry_im_or_prior(bad):
     base = {"mcap_log": math.log(5e9)}
     assert analog_query_base({**base, "entry_im": bad, "mean_prior_or_implied": 0.05})[
         "implied_ratio"] is None
