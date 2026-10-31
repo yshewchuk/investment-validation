@@ -1,5 +1,7 @@
 """Real native synthetic catalogs/panels, never SIZE fits or private inputs."""
 from copy import deepcopy
+from hashlib import sha256
+from io import BytesIO
 from pathlib import Path
 
 import pytest
@@ -57,6 +59,48 @@ def source_records(case):
 
 def forbidden(*args, **kwargs):
     pytest.fail("metadata admission must not execute a SIZE or distribution estimator")
+
+
+def test_native_plan_pins_fixed_worker_source_bytes(case, own):
+    adapter = trials(case, own)
+    with no_fit_guard(), legacy_no_fit():
+        plan = adapter.seal(clock=SystemClock())
+    worker = "experiments/distribution_worker.py"
+    assert plan["implementation"]["source_closure"][worker] == "sha256:" + sha256((ROOT / worker).read_bytes()).hexdigest()
+
+
+def test_worker_only_source_drift_changes_plan_and_refuses_old_seal(case, own, monkeypatch):
+    adapter = trials(case, own)
+    sealed = adapter.seal(clock=SystemClock())
+    assert adapter.seal(clock=SystemClock()) == sealed
+    worker = ROOT / "experiments/distribution_worker.py"
+    original = worker.read_bytes()
+    changed = original + b"\n# synthetic worker-only source drift\n"
+    original_open = Path.open
+
+    def changed_worker_bytes(path, mode="r", *args, **kwargs):
+        if path == worker and mode == "rb":
+            return BytesIO(changed)
+        return original_open(path, mode, *args, **kwargs)
+
+    before = case.conn.total_changes
+    with monkeypatch.context() as patch, no_fit_guard(), legacy_no_fit():
+        patch.setattr(Path, "open", changed_worker_bytes)
+        patch.setattr(distribution_trials, "fold_inputs", forbidden)
+        updated, _ = distribution_plan.prepare_plan(adapter.conn, adapter.store, adapter.own,
+            adapter.source, adapter.request, adapter.source_plan_ref, adapter.recipe, adapter.caps)
+        assert updated["plan_id"] != sealed["plan_id"]
+        old_sources, new_sources = (plan["implementation"]["source_closure"] for plan in (sealed, updated))
+        assert old_sources.keys() == new_sources.keys()
+        assert [name for name in new_sources if new_sources[name] != old_sources[name]] == ["experiments/distribution_worker.py"]
+        assert new_sources["experiments/distribution_worker.py"] == "sha256:" + sha256(changed).hexdigest()
+        for action in (lambda: adapter.seal(clock=SystemClock()), lambda: adapter.start("inner", "2024", "2023")):
+            with pytest.raises(OpsError) as caught:
+                action()
+            assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+        assert case.conn.total_changes == before
+    assert worker.read_bytes() == original
+    assert adapter.seal(clock=SystemClock()) == sealed
 
 
 @pytest.mark.parametrize("feature_set", ["H", "HM", "HMO"])
