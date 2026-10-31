@@ -119,6 +119,10 @@ def test_single_lead_horizon_report_covers_only_horizon_one():
     report = paired_report(events, challenger, incumbent, targets, horizons=(1,))
     assert report["forecast_matched_events"] == 1
     assert report["paired_events"] == 1
+    assert report["metrics"]["challenger"]["rmse"] == pytest.approx(0.1)
+    assert report["metrics"]["incumbent"]["rmse"] == pytest.approx(1.0)
+    assert report["difference"]["rmse"] == pytest.approx(-0.9)
+    assert report["difference"]["mae"] == pytest.approx(-0.9)
     assert {row["horizon_sessions"] for row in report["paired_rows"]} == {1}
     assert report["horizon_weight"] == 1
     assert set(report["per_horizon"]) == {"1"}

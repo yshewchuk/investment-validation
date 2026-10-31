@@ -130,7 +130,7 @@ def test_contain_accepts_request_when_given_single_horizon(case, monkeypatch):
     from experiments import size_search
     monkeypatch.setattr(size_search.signal, "signal", lambda *args: None)
     monkeypatch.setattr(size_search.signal, "alarm", lambda seconds: 0)
-    assert size_search._contain(case.request, (1,)) > 0
+    assert size_search._contain(case.request, (1,)) == case.request["limits"]["parent"]["memory_bytes"]
 
 
 def test_native_v17_anchor_and_explicit_v2_fitted_identities(case):
