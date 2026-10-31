@@ -162,7 +162,9 @@ def test_nested_multi_year_schedule_keeps_owner_specific_inner_folds():
     assert [group["outer"]["year"] for group in folds] == ["2024", "2025"]
     assert [[fold["year"] for fold in group["inner"]] for group in folds] == [
         ["2021", "2022", "2023"], ["2022", "2023", "2024"]]
-    _shared_inner(folds)
+    with pytest.raises(OpsError) as error:
+        _shared_inner(folds)
+    assert error.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
 
 
 def synthetic_plan(schema, candidates=("c1", "c2")):
@@ -203,10 +205,47 @@ def test_v2_trial_and_cohort_identities_remain_outer_scoped():
 
 def test_shared_inner_refuses_modified_shared_membership():
     plan = synthetic_plan(PLAN_V3)
+    for group in plan["folds"]:
+        for fold in group["inner"]:
+            fold["evaluation_labels_before"] = "2026-01-01"
     _shared_inner(plan["folds"])
     plan["folds"][1]["inner"][1]["training_candidate_event_ids"] = ["unshared"]
     with pytest.raises(OpsError, match="differ"):
         _shared_inner(plan["folds"])
+
+
+def test_shared_inner_refuses_divergent_shared_cutoff_on_synthetic_plan():
+    plan = synthetic_plan(PLAN_V3)
+    for group in plan["folds"]:
+        for fold in group["inner"]:
+            fold["evaluation_labels_before"] = "2026-01-01"
+    plan["folds"][1]["inner"][1]["evaluation_labels_before"] = "2025-12-31"
+    with pytest.raises(OpsError) as error:
+        _shared_inner(plan["folds"])
+    assert error.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+
+
+def test_prepare_plan_refuses_shared_inner_cutoff_mismatch_before_publication(monkeypatch):
+    from types import SimpleNamespace
+    from experiments import size_search_binding as binding
+    from tests.v2.research.test_magnitude_search_request import request as search_request
+    document, _ = multi_year_temporal()
+    request = search_request()
+    request["outer_years"] = ["2024", "2025"]
+    request["inner_years"] = {"2024": ["2022", "2023"], "2025": ["2022", "2023"]}
+    document["size_request"] = compile_request(request)["request"]
+    owners = [group["inner"][0] for group in _folds(document, request)]
+    assert [fold["year"] for fold in owners] == ["2022", "2022"]
+    assert owners[0]["evaluation_labels_before"] != owners[1]["evaluation_labels_before"]
+    assert owners[0]["training_candidate_event_ids"] == owners[1]["training_candidate_event_ids"]
+    assert owners[0]["evaluation_event_ids"] == owners[1]["evaluation_event_ids"]
+    monkeypatch.setattr(binding, "verify_native_registration", lambda *a, **k: None)
+    monkeypatch.setattr(binding, "verify_installation", lambda *a, **k: None)
+    registration = SimpleNamespace(run_id="synthetic-shared-cutoff",
+        variant_id="synthetic", document=document)
+    with pytest.raises(OpsError) as error:
+        binding.prepare_plan(None, None, registration, request)
+    assert error.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
 
 
 @pytest.mark.parametrize("plan_schema", ["magnitude_search_plan.v4", 0, []])
