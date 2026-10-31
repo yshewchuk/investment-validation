@@ -173,8 +173,11 @@ def _plan(repository, snapshot, *, as_of_month, policy, event_ids, horizons, his
     Non-strict also drops targets dated before history_start, or whose earliest ceiling precedes it, as
     early."""
     _request(repository, snapshot, policy, event_ids, horizons, limits)
-    targets = load_population(repository, snapshot, as_of_month=as_of_month, event_ids=event_ids)
-    population = load_population(repository, snapshot, as_of_month=as_of_month)
+    decoded_cap = None if strict else limits.get("max_object_bytes")
+    targets = load_population(repository, snapshot, as_of_month=as_of_month, event_ids=event_ids,
+                              max_object_bytes=decoded_cap)
+    population = load_population(repository, snapshot, as_of_month=as_of_month,
+                                 max_object_bytes=decoded_cap)
     calendar, calendar_source = calendar_input(repository, snapshot)
     clocks = {}
     early = set()

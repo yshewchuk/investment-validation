@@ -14,7 +14,7 @@ from experiments.size_prep_inputs import _log
 TARGETS_VERSION = "size_prep_targets.v1"
 
 
-# The cap is on compressed fragment bytes, the same semantics as eligible_history.admit_source (which materialize applies); decoded-byte bounding of load_population is tracked in #1870.
+# The cap is on compressed fragment bytes, the same semantics as eligible_history.admit_source (which materialize applies): _bound_events pre-checks the compressed bytes, and the load_population scan bounds decoded row-group bytes by the same max_object_bytes limit.
 def _bound_events(repository, bounds, metadata_limits):
     """Refuse an over-limit earnings_events read on pinned metadata bytes before any load."""
     records = repository.fragment_records(bounds, "earnings_events")
@@ -58,7 +58,8 @@ def derive_workspace_targets(workspace, scope, record, *, tickers, event_start, 
          started)
     repository, bounds = size_prep_history.checked_bounds(workspace, scope, record, metadata_limits)
     _bound_events(repository, bounds, metadata_limits)
-    population = load_population(repository, bounds, as_of_month=as_of_month)
+    population = load_population(repository, bounds, as_of_month=as_of_month,
+                                 max_object_bytes=metadata_limits["max_object_bytes"])
     days = population.event_date.dt.strftime("%Y-%m-%d")
     kept = population[population.ticker.isin(tickers) & (days >= event_start) & (days < event_end)]
     universe = sorted(kept.event_id.tolist())

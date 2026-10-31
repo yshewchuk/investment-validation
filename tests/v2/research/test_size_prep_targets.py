@@ -111,7 +111,7 @@ def test_happy_path_filters_window_and_records_targets_pin(bounds_ws, source_roo
     plan = {**_DEFAULT_PLAN, "retained": ["ev-onstart", "ev-start"]}
     calls = _fakes(monkeypatch, rows=rows, plan=plan)
     doc = tgt.derive_workspace_targets(ws, "shadow", record, **_args(clock))
-    assert calls["load"] == [{"as_of_month": "2024-01"}]
+    assert calls["load"] == [{"as_of_month": "2024-01", "max_object_bytes": 10**6}]
     kwargs = calls["plan"][0]
     assert "ev-onstart" in universe and kwargs["event_ids"] == universe
     assert kwargs["horizons"] == [1, 3, 5]
@@ -184,7 +184,8 @@ def test_empty_universe_refuses_no_targets_without_a_pin(bounds_ws, source_root,
     pins = _pin_names(ws)
     _refusal(lambda: tgt.derive_workspace_targets(ws, "shadow", record, **_args(clock)),
              "PUBLICATION_REFUSED", "no_targets")
-    assert calls == {"load": [{"as_of_month": "2024-01"}], "plan": [], "bounds": ["shadow"]}
+    assert calls == {"load": [{"as_of_month": "2024-01", "max_object_bytes": 10**6}],
+                     "plan": [], "bounds": ["shadow"]}
     assert _pin_names(ws) == pins
 
 
@@ -319,5 +320,5 @@ def test_events_at_exact_byte_limits_pass_and_load_proceeds(bounds_ws, source_ro
         **_args(clock, metadata_limits={**{k: 10**6 for k in hist.size_panel._METADATA_LIMITS},
                                         "max_total_object_bytes": total,
                                         "max_object_bytes": largest}))
-    assert calls["load"] == [{"as_of_month": "2024-01"}]
+    assert calls["load"] == [{"as_of_month": "2024-01", "max_object_bytes": largest}]
     assert doc["event_ids"] == ["ev-start"]

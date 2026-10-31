@@ -45,7 +45,8 @@ def next_representable(value: str) -> str:
 
 
 def read_table(repository, snapshot_ref: SnapshotRef, table_name: str, columns,
-               *, partition_keys=None, key_filter=(), batch_filter=None) -> pd.DataFrame:
+               *, partition_keys=None, key_filter=(), batch_filter=None,
+               max_object_bytes=None) -> pd.DataFrame:
     """Every row of ``table_name`` in ``snapshot_ref``, projected to ``columns``.
 
     ``partition_keys`` restricts the read to those manifest partitions (the
@@ -55,10 +56,13 @@ def read_table(repository, snapshot_ref: SnapshotRef, table_name: str, columns,
     when given, is called on each batch frame right after ``to_pandas()`` and
     before it accumulates, and must return the frame narrowed to the rows the
     caller wants (``None`` may be returned for "keep nothing"); a ``None`` or
-    omitted ``batch_filter`` changes nothing. Every scan is bounded by its own
-    pinned membership bound, so a complete partition is read fully. A table
-    absent from the snapshot refuses with ``CONTRACT_MISMATCH``; selected
-    partitions are scanned in full without an observation-time interval.
+    omitted ``batch_filter`` changes nothing. ``max_object_bytes``, when given,
+    bounds each fragment's decoded (expanded row-group) bytes inside
+    ``Repository.scan``'s bounded decoder; ``None`` or omitted changes nothing.
+    Every scan is bounded by its own pinned membership bound, so a complete
+    partition is read fully. A table absent from the snapshot refuses with
+    ``CONTRACT_MISMATCH``; selected partitions are scanned in full without an
+    observation-time interval.
     """
     if table_name not in snapshot_ref.table_versions:
         raise errors.fail("CONTRACT_MISMATCH", "table is not part of this snapshot",
@@ -75,7 +79,7 @@ def read_table(repository, snapshot_ref: SnapshotRef, table_name: str, columns,
         group = [record for record in records if record.partition_key == partition]
         frames.extend(_scan_partition(repository, snapshot_ref, table_name, contract, columns,
                                       group, key_filter=tuple(key_filter),
-                                      batch_filter=batch_filter))
+                                      batch_filter=batch_filter, max_object_bytes=max_object_bytes))
         reporter.tick()
     frames = [frame for frame in frames if not frame.empty]
     if not frames:
@@ -85,14 +89,15 @@ def read_table(repository, snapshot_ref: SnapshotRef, table_name: str, columns,
 
 def _scan_partition(repository, snapshot_ref: SnapshotRef, table_name: str, contract,
                     columns, records: list, *, key_filter,
-                    batch_filter=None) -> list[pd.DataFrame]:
+                    batch_filter=None, max_object_bytes=None) -> list[pd.DataFrame]:
     """Read one manifest partition completely in a single bounded scan."""
     partition_filter = _partition_filter(contract, table_name, records)
     predicates = tuple(key_filter)
     if partition_filter is not None:
         predicates = (*predicates, partition_filter)
     return _scan_interval(repository, snapshot_ref, table_name, contract, columns,
-                          predicates, None, batch_filter=batch_filter)
+                          predicates, None, batch_filter=batch_filter,
+                          max_object_bytes=max_object_bytes)
 
 
 def _partition_filter(contract, table_name: str, records: list) -> KeyPredicate | None:
@@ -127,7 +132,7 @@ def _partition_filter(contract, table_name: str, records: list) -> KeyPredicate 
 
 def _scan_interval(repository, snapshot_ref: SnapshotRef, table_name: str, contract,
                    columns, key_filter, interval: TimeInterval | None,
-                   *, batch_filter=None) -> list[pd.DataFrame]:
+                   *, batch_filter=None, max_object_bytes=None) -> list[pd.DataFrame]:
     """One bounded scan over ``interval`` (or the whole partition when ``None``).
 
     The query's result bound is exactly ``Repository.scan_population_bound``
@@ -143,7 +148,9 @@ def _scan_interval(repository, snapshot_ref: SnapshotRef, table_name: str, contr
     nothing contribute nothing. Frames stay local to this call: a typed failure
     after batches were yielded discards them, and the failure propagates without
     retry. The scan's own error contracts are unchanged, and bound planning adds
-    no retry: a planning ``DataError`` propagates exactly as raised.
+    no retry: a planning ``DataError`` propagates exactly as raised. A given
+    ``max_object_bytes`` bounds each fragment's decoded row-group bytes in the
+    scan's bounded decoder; ``None`` keeps the decoder default unchanged.
     """
     predicates = tuple(key_filter)
     contract_ref = snapshot_ref.table_versions[table_name].table_contract_ref
@@ -160,9 +167,10 @@ def _scan_interval(repository, snapshot_ref: SnapshotRef, table_name: str, contr
         max_result_rows=max_result_rows)
     frames: list[pd.DataFrame] = []
     retained = 0
+    scan_kwargs = {} if max_object_bytes is None else {"max_object_bytes": max_object_bytes}
     reporter = progress.Progress(f"read {table_name} rows/candidate bound; batch limit {max_batch_rows:,}", max_result_rows)
     with progress.stage(f"read {table_name} rows"):
-        for batch in repository.scan(query, table_name=table_name):
+        for batch in repository.scan(query, table_name=table_name, **scan_kwargs):
             frame = batch.to_pandas()
             if batch_filter is not None:
                 frame = batch_filter(frame)
