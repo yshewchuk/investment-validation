@@ -536,9 +536,9 @@ class SearchTrials:
             metrics = magnitude_metrics(rows)
             large = [row for row in rows if row["absolute_move_pct"] >= 10.0]
             under = (sum(1 for row in large if row["predicted_absolute_move_pct"] < row["absolute_move_pct"])
-                     / len(large)) if large else 0.0
+                     / len(large)) if large else None
             shortfall = (sum(max(row["absolute_move_pct"] - row["predicted_absolute_move_pct"], 0.0)
-                             for row in large) / len(large)) if large else 0.0
+                             for row in large) / len(large)) if large else None
             result.append({"horizon_sessions": horizon, "count": metrics["count"], "mae": metrics["mae"],
                            "rmse": metrics["rmse"], "large_move_underprediction_rate": under,
                            "large_move_mean_shortfall": shortfall})

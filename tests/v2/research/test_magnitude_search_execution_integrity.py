@@ -171,7 +171,7 @@ def test_native_freeze_requires_every_valid_hash_execution_link(native, monkeypa
         assert result["terminal"]["rss_delta_kib"] == 12
         assert result["terminal"]["inner_metrics"] == [
             {"horizon_sessions": horizon, "count": 1, "mae": 2.0, "rmse": 2.0,
-             "large_move_underprediction_rate": 0.0, "large_move_mean_shortfall": 0.0}
+             "large_move_underprediction_rate": None, "large_move_mean_shortfall": None}
             for horizon in (5, 3, 1)]
         assert all("fit_seconds" not in fit for fit in result["fits"])
         for fit in result["fits"]:
@@ -582,7 +582,7 @@ def expected_native_receipt(succeeded=True):
         "evaluation_inputs": {**evaluation, "inputs_id": content_hash(evaluation), "holdout_exclusions": []},
         "targets": [{"event_id": "event", "absolute_move_pct": 4.0}]}
     inner_metrics = [{"horizon_sessions": horizon, "count": 1, "mae": 2.0, "rmse": 2.0,
-        "large_move_underprediction_rate": 0.0, "large_move_mean_shortfall": 0.0}
+        "large_move_underprediction_rate": None, "large_move_mean_shortfall": None}
         for horizon in (5, 3, 1)]
     terminal = ({"status": "succeeded", "inputs_id": inputs_id,
         "validation_id": content_hash(validation), "evaluation_inputs": validation["evaluation_inputs"],
@@ -703,3 +703,14 @@ def test_inner_metrics_limits_large_move_diagnostics_to_threshold_rows():
     assert metrics["count"] == 2
     assert metrics["large_move_underprediction_rate"] == 1.0
     assert metrics["large_move_mean_shortfall"] == 7.0
+
+
+def test_inner_metrics_large_move_diagnostics_are_unavailable_below_threshold():
+    scored = [
+        {"horizon_sessions": 5, "absolute_move_pct": 9.9, "predicted_absolute_move_pct": 20.0},
+        {"horizon_sessions": 5, "absolute_move_pct": 2.0, "predicted_absolute_move_pct": 1.0},
+    ]
+    [metrics] = trials.SearchTrials._inner_metrics(scored, [5])
+    assert metrics["count"] == 2
+    assert metrics["large_move_underprediction_rate"] is None
+    assert metrics["large_move_mean_shortfall"] is None
