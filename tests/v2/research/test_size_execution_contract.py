@@ -207,3 +207,12 @@ def test_shared_inner_refuses_modified_shared_membership():
     plan["folds"][1]["inner"][1]["training_candidate_event_ids"] = ["unshared"]
     with pytest.raises(OpsError, match="differ"):
         _shared_inner(plan["folds"])
+
+
+@pytest.mark.parametrize("plan_schema", ["magnitude_search_plan.v4", 0, []])
+def test_prepare_plan_refuses_unsupported_schema_before_registration_reads(monkeypatch, plan_schema):
+    from experiments import size_search_binding as binding
+    monkeypatch.setattr(binding, "verify_native_registration", lambda *a, **k: pytest.fail("registration read"))
+    with pytest.raises(OpsError) as error:
+        binding.prepare_plan(None, None, None, {}, plan_schema=plan_schema)
+    assert error.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
