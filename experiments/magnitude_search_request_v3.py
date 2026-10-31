@@ -87,6 +87,7 @@ def _counts(request, horizons):
 
 def compile_request(request, *, horizons=(5, 3, 1)):
     """Return canonical declarations/counts; no source/fold verification or I/O."""
+    horizons = v2.validate_horizons(horizons)
     try:
         v2._plain(request)
         request = json.loads(json.dumps(request, allow_nan=False))

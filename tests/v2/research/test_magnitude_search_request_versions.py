@@ -10,6 +10,7 @@ from engine.v2.foundation import canonical_json
 from engine.v2.ops.errors import OpsError, make_problem
 from engine.v2.research import magnitude_panel_table as v1
 from engine.v2.research import magnitude_panel_v2_table as v2
+from experiments import magnitude_search_request_leads as leads
 from experiments import magnitude_search_request_versions as versions
 from tests.v2.research import test_magnitude_search_request as legacy
 from tests.v2.research.magnitude_panel_policy_support import forbid_policy_io
@@ -26,6 +27,13 @@ def _hash(value):
 
 def _request():
     return {**V1_REQUEST(), "feature_dictionary_hash": V2_HASH}
+
+
+@pytest.mark.parametrize("bad_horizons", [[], None, [1, 1], [2], [True], [1.0], [3, 1, 5]])
+def test_v2_lead_compiler_refuses_invalid_horizons(bad_horizons):
+    with pytest.raises(OpsError) as actual:
+        leads.compile_request(_request(), horizons=bad_horizons)
+    assert actual.value.problem.code == "INVALID_EXPERIMENT_SPEC"
 
 
 def _parity(document):
@@ -99,7 +107,7 @@ def test_pinned_complete_v1_output_and_current_source_bytes(monkeypatch):
     assert _hash(versions.compile_request(V1_REQUEST())) == expected
     root = Path(__file__).resolve().parents[3]
     for path, digest in (
-        ("experiments/magnitude_search_request.py", "91a978a5efc39b129e7d119ab02cdffef62e074678ddd2331cbff646ee20a9d5"),
+        ("experiments/magnitude_search_request.py", "272be0aaccae0a0020a5128a9d98cca59160b7265b56f400e09424c939b85eb1"),
         ("engine/v2/research/magnitude_panel_table.py", "687d4d5341dd4e43879aee9d122507b8289150d7e73f1ccc527299182fe5aad4"),
         ("engine/v2/research/magnitude_panel_v2_table.py", "c753255acba0af3872f6a7bf1cbbdc59eb3b1097a2a06d89f6517d4c34111ce4")):
         with (root / path).open("rb") as source:

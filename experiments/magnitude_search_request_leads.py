@@ -33,6 +33,7 @@ def _counts(request, horizons):
 
 def compile_request(request, *, horizons=(5, 3, 1)):
     """Compile v2 grids without binding the lead choice into request identity."""
+    horizons = base.validate_horizons(horizons)
     try:
         base._plain(request)
         request = json.loads(json.dumps(request, allow_nan=False))

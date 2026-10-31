@@ -6,6 +6,7 @@ import pytest
 from engine.v2.foundation import content_hash
 from engine.v2.ops.errors import OpsError
 from experiments import magnitude_search_request as compiler
+from experiments import magnitude_search_request_v3 as v3_compiler
 from experiments import magnitude_search_request_versions as versions
 from tests.v2.research.test_magnitude_search_request import request
 
@@ -112,6 +113,14 @@ def test_v3_invalid_grids_refuse_before_expansion(monkeypatch, path, value):
         versions.compile_request(document)
     assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
     assert caught.value.problem.retryable is False
+
+
+@pytest.mark.parametrize("bad_horizons", [
+    [], None, [1, 1], [2], [True], [1.0], [3, 1, 5]])
+def test_v3_invalid_horizons_refuse(bad_horizons):
+    with pytest.raises(OpsError) as caught:
+        v3_compiler.compile_request(v3_request(), horizons=bad_horizons)
+    assert caught.value.problem.code == "INVALID_EXPERIMENT_SPEC"
 
 
 def test_v2_fixture_replays_identically_through_both_entrypoints():

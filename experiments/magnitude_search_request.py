@@ -13,7 +13,7 @@ from engine.v2.research.magnitude_panel_table import recipe as panel_recipe
 from experiments.magnitude_search_execution import validate_execution_limits
 from experiments.size_panel_request import validate_panel_request
 
-__all__ = ["compile_request"]
+__all__ = ["compile_request", "validate_horizons"]
 
 _KEYS = {"schema_version", "feature_snapshot_id", "history_snapshot_id",
     "feature_dictionary_hash", "eligibility_policy_ref", "feature_sets", "space",
@@ -53,6 +53,20 @@ def _hash(value):
 
 def _positive(value):
     return type(value) is int and value > 0
+
+
+def validate_horizons(horizons):
+    """Validate accepted schedule-clock orders without changing request identity."""
+    message = "stage-2 horizons must be a nonempty unique subset of integer leads 1, 3, 5"
+    if type(horizons) not in (tuple, list) or not horizons:
+        raise fail("INVALID_EXPERIMENT_SPEC", message)
+    values = tuple(horizons)
+    if any(type(h) is not int or h not in (1, 3, 5) for h in values) or len(set(values)) != len(values):
+        raise fail("INVALID_EXPERIMENT_SPEC", message)
+    legacy_order = tuple(h for h in (5, 3, 1) if h in values)
+    if values != tuple(sorted(values)) and values != legacy_order:
+        raise fail("INVALID_EXPERIMENT_SPEC", message)
+    return values
 
 
 def _references(request, recipe=panel_recipe):

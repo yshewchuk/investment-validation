@@ -376,7 +376,7 @@ def test_public_request_shape_matrix_refuses_before_fingerprints_or_sources(data
         "as_of_month": [None, [], 202601, "2026-13", "2026-1"],
         "history_start": [None, [], 2022, "2022-02-30", "20220101"],
         "event_ids": [None, {}, "event", [], [None], [""], [" x"], ["x", "x"]],
-        "horizons": [None, {}, "1", [1], [True, 3, 5]],
+        "horizons": [None, {}, "1", [True, 3, 5]],
         "limits": [None, [], {}, {**LIMITS, "extra": 1},
                    *[{**LIMITS, key: value} for key in LIMITS for value in (None, True, 0, "1")]],
         "policy": [None, [], {}, {**POLICY, "extra": 1},
