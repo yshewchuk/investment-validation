@@ -7,7 +7,7 @@ import pytest
 from sklearn.ensemble import HistGradientBoostingRegressor
 from sklearn.linear_model import Ridge
 from sklearn.pipeline import Pipeline
-from threadpoolctl import threadpool_info
+from threadpoolctl import threadpool_info, threadpool_limits
 
 from engine.models import no_fit as legacy_no_fit
 from engine.v2.foundation import canonical_json, content_hash
@@ -115,6 +115,50 @@ def test_hgb_fixed_iteration_two_leaf_oracle(leaves):
     result = _fit(_recipe("history_hgb", max_leaf_nodes=leaves),
                   _matrix([0] * 20 + [1] * 20), [2] * 20 + [8] * 20, _matrix([0, 1]))
     assert result["predictions"] == pytest.approx([2 + 3 * 0.9**100, 8 - 3 * 0.9**100], abs=1e-6)
+
+
+def test_early_stopping_v2_recipe_fits_deterministically():
+    rng = np.random.default_rng(20261030)
+    train = rng.normal(size=(200, 3))
+    labels = np.abs(rng.normal(size=200))
+    prediction = rng.normal(size=(25, 3))
+    recipe = ridge_hgb_recipe(model="history_hgb", columns=["x0", "x1", "x2"],
+        feature_dictionary_hash="sha256:" + "a" * 64, learning_rate=0.05, max_leaf_nodes=7,
+        min_samples_leaf=20, l2_regularization=0.0)
+    first = _fit(recipe, train, labels, prediction)
+    second = _fit(recipe, train, labels, prediction)
+    assert first == second
+    assert first["schema_version"] == "magnitude_ridge_hgb_fit.v1"
+    assert first["recipe_id"] == content_hash(recipe)
+    values = first["predictions"]
+    assert len(values) == len(prediction)
+    assert all(np.isfinite(values)) and all(value >= 0 for value in values)
+
+
+@pytest.mark.parametrize(
+    ("learning_rate", "max_leaf_nodes", "min_samples_leaf", "l2_regularization"),
+    [(0.1, 7, 20, 0.0), (0.05, 15, 100, 1.0)],
+)
+def test_early_stopping_v2_matches_independent_estimator_and_recovers_signal(
+        learning_rate, max_leaf_nodes, min_samples_leaf, l2_regularization):
+    rng = np.random.default_rng(20261031)
+    train = rng.normal(size=(400, 3))
+    labels = np.where(train[:, 0] < 0, 2.0, 8.0)
+    prediction = np.array([[-1.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
+    recipe = ridge_hgb_recipe(model="history_hgb", columns=["x0", "x1", "x2"],
+        feature_dictionary_hash="sha256:" + "a" * 64, learning_rate=learning_rate,
+        max_leaf_nodes=max_leaf_nodes, min_samples_leaf=min_samples_leaf,
+        l2_regularization=l2_regularization)
+    result = _fit(recipe, train, labels, prediction)
+    expected = HistGradientBoostingRegressor(loss="squared_error", learning_rate=learning_rate,
+        max_iter=500, max_leaf_nodes=max_leaf_nodes, min_samples_leaf=min_samples_leaf,
+        l2_regularization=l2_regularization, early_stopping=True,
+        n_iter_no_change=10, validation_fraction=0.1, tol=1e-7, random_state=0)
+    with threadpool_limits(limits=1):
+        expected.fit(train, labels)
+    assert result["predictions"] == pytest.approx(expected.predict(prediction).tolist(), abs=1e-9)
+    assert result["predictions"] == pytest.approx([2.0, 8.0], abs=0.3)
+    assert expected.n_iter_ < 500
 
 
 @pytest.mark.parametrize("kind", KINDS)
