@@ -235,12 +235,12 @@ def test_before_start_universe_event_is_dropped_and_call_succeeds(bounds_ws, sou
     doc = tgt.derive_workspace_targets(ws, "shadow", record, **_args(clock))
     assert doc["event_ids"] == ["ev-start"]
     assert doc["dropped"] == [{"event_id": "ev-u", "reasons": ["label_bounds_unavailable"]},
-                              {"event_id": "ev-x", "reasons": ["before_history_start"]}]
+                              {"event_id": "ev-x", "reasons": ["forecast_before_history_start"]}]
     assert doc["universe_count"] == 3 and doc["target_count"] == 1 and doc["dropped_count"] == 2
     assert calls["plan"] and _pin_body(ws, "size-prep-targets:" + doc["targets_id"].split(":", 1)[1])
 
 
-def test_before_start_id_also_excluded_drops_as_before_history_start(bounds_ws, source_root, monkeypatch):
+def test_before_start_id_also_excluded_drops_as_forecast_before_history_start(bounds_ws, source_root, monkeypatch):
     ws, clock, record, _ = _prepared(bounds_ws, source_root, monkeypatch)
     _fakes(monkeypatch, plan={"plan_id": "plan_1", "retained": ["ev-start"],
                               "unavailable": ["ev-u"],
@@ -249,7 +249,7 @@ def test_before_start_id_also_excluded_drops_as_before_history_start(bounds_ws, 
     doc = tgt.derive_workspace_targets(ws, "shadow", record, **_args(clock))
     assert doc["event_ids"] == ["ev-start"]
     assert doc["dropped"] == [{"event_id": "ev-u", "reasons": ["label_bounds_unavailable"]},
-                              {"event_id": "ev-x", "reasons": ["before_history_start"]}]
+                              {"event_id": "ev-x", "reasons": ["forecast_before_history_start"]}]
 
 
 def test_all_early_plan_refuses_no_targets_without_a_pin(bounds_ws, source_root, monkeypatch):

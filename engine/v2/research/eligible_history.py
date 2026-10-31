@@ -160,6 +160,7 @@ def _plan(repository, snapshot, *, as_of_month, policy, event_ids, horizons, his
         for event in targets.itertuples(index=False)}
     early = set()
     if not strict:
+        # events whose earliest forecast ceiling precedes history_start cannot be targets (the strict window would refuse them), even when the event date is inside the event window.
         early = {event_id for event_id, event_clocks in forecasts.items()
             if min(c["source_session_ceiling"] for c in event_clocks) < history_start}
         if early:

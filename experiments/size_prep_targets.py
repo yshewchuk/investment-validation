@@ -70,7 +70,7 @@ def derive_workspace_targets(workspace, scope, record, *, tickers, event_start, 
         if event_id in retained:
             continue
         if event_id in before_start:
-            dropped.append({"event_id": event_id, "reasons": ["before_history_start"]})
+            dropped.append({"event_id": event_id, "reasons": ["forecast_before_history_start"]})
         elif event_id in excluded:
             dropped.append({"event_id": event_id, "reasons": excluded[event_id]})
         elif event_id in unavailable:
