@@ -114,7 +114,6 @@ def canonical_inner(plan, outer_year, inner_year):
     raise fail("INVALID_EXPERIMENT_SPEC", "trial is outside the sealed search plan")
 
 
-canonical_owner = canonical_inner
 
 
 def _nested(binding, request):
