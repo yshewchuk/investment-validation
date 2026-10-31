@@ -116,6 +116,25 @@ def test_ceiling_before_history_start_goes_to_before_start_not_window_refusal(mo
     assert len(calls["eligibility"]) == 1
 
 
+def test_event_date_before_history_start_goes_to_before_start_despite_later_ceiling(monkeypatch):
+    """Defensive: an artificial ceiling at or after history_start still cannot keep a pre-history event."""
+    calls = _stub_plan(monkeypatch,
+                       [{"event_id": "ev-before", "ticker": "AAAA",
+                         "event_date": pd.Timestamp("2023-12-10")},
+                        {"event_id": "ev-in", "ticker": "AAAA",
+                         "event_date": pd.Timestamp("2024-01-05")}],
+                       {"ev-before": "2024-01-20", "ev-in": "2024-01-25"},
+                       retained=["ev-before", "ev-in"],
+                       exclusions=[])
+    result = _plan_targets(["ev-before", "ev-in"])
+    assert result == {"plan_id": "plan_1", "retained": ["ev-in"], "unavailable": [],
+                      "exclusions": [], "before_start": ["ev-before"]}
+    groups_call = calls["groups"][0]
+    assert groups_call["event_ids"] == ["ev-in"]
+    assert "ev-before" not in groups_call["selected"]["event_id"].tolist()
+    assert len(calls["eligibility"]) == 1
+
+
 def test_all_early_targets_return_empty_plan_without_eligibility(monkeypatch):
     calls = _stub_plan(monkeypatch,
                        [{"event_id": "ev-early", "ticker": "AAAA",

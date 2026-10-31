@@ -150,7 +150,8 @@ def _forecasts(event, horizons, calendar, clocks):
 
 def _plan(repository, snapshot, *, as_of_month, policy, event_ids, horizons, history_start, limits, strict):
     """Shared planning path; strict refuses unavailable targets, non-strict records them as unavailable.
-    Non-strict also drops targets whose earliest ceiling precedes history_start as early."""
+    Non-strict also drops targets dated before history_start, or whose earliest ceiling precedes it, as
+    early."""
     _request(repository, snapshot, policy, event_ids, horizons, limits)
     targets = load_population(repository, snapshot, as_of_month=as_of_month, event_ids=event_ids)
     population = load_population(repository, snapshot, as_of_month=as_of_month)
@@ -163,6 +164,9 @@ def _plan(repository, snapshot, *, as_of_month, policy, event_ids, horizons, his
         # events whose earliest forecast ceiling precedes history_start cannot be targets (the strict window would refuse them), even when the event date is inside the event window.
         early = {event_id for event_id, event_clocks in forecasts.items()
             if min(c["source_session_ceiling"] for c in event_clocks) < history_start}
+        # a target dated before history_start precedes the requested history outright: it can never enter the window or be retained, so it is reported as early rather than left unclassified.
+        early |= {target.event_id for target in targets.itertuples(index=False)
+            if target.event_date.strftime("%Y-%m-%d") < history_start}
         if early:
             targets = targets[~targets.event_id.isin(early)]
             forecasts = {key: value for key, value in forecasts.items() if key not in early}
