@@ -657,28 +657,46 @@ def _chooser_fold_producer_identity(
     return matches[0]
 
 
-def _catalog_contains_chooser_object(catalog: Mapping, object_doc: Mapping) -> bool:
+def _catalog_contains_chooser_object(
+    catalog: Mapping, object_doc: Mapping, member_id: str,
+) -> bool:
     rows = catalog.get("members")
     if not isinstance(rows, list):
         return False
-    matches = []
-    for row in rows:
-        if not isinstance(row, Mapping):
-            return False
-        objects = row.get("objects", [])
-        if not isinstance(objects, list):
-            return False
-        matches.extend(obj for obj in objects
-                       if isinstance(obj, Mapping) and obj == object_doc)
+    matching_rows = [
+        row for row in rows
+        if isinstance(row, Mapping) and row.get("member_id") == member_id
+    ]
+    if len(matching_rows) != 1 or matching_rows[0].get("status") != "STAGED":
+        return False
+    objects = matching_rows[0].get("objects")
+    if not isinstance(objects, list):
+        return False
+    matches = [obj for obj in objects if isinstance(obj, Mapping) and obj == object_doc]
     return len(matches) == 1
 
 
+def _chooser_fold_member_id(descriptor: ChooserServingFoldDescriptor) -> str:
+    role = descriptor.policy.role
+    if role not in ("implied_t1", "runup_move"):
+        raise ValueError("chooser descriptor has an unsupported producer role")
+    return f"tier4_folds:{role}"
+
+
+def _require_chooser_catalog_member(
+    catalog: Mapping, obj: Mapping, member_id: str, detail: str,
+) -> None:
+    if not _catalog_contains_chooser_object(catalog, obj, member_id):
+        raise ValueError(detail)
+
+
 def _load_chooser_authoring_release(
-    authoring_id: str, object_doc: Mapping, root: Path, dep_root: Path,
+    authoring_id: str, object_doc: Mapping, member_id: str,
+    root: Path, dep_root: Path,
 ) -> tuple["deployment.StagedManifest", Mapping, date, Mapping[str, ModelIdentity]] | None:
     authoring_manifest = _read_and_verify_manifest(dep_root, authoring_id)
     authoring_catalog = _read_state_catalog(root, authoring_id)
-    if not _catalog_contains_chooser_object(authoring_catalog, object_doc):
+    if not _catalog_contains_chooser_object(authoring_catalog, object_doc, member_id):
         raise ValueError("chooser authoring descriptor is missing")
     authoring_sources = authoring_catalog.get("sources")
     authoring_cutoff = (authoring_sources.get("retrain_cutoff")
@@ -704,9 +722,13 @@ def _verified_chooser_fold_reference(
     member_id = "tier4_folds:chooser"
     try:
         descriptor = from_document(ChooserServingFoldDescriptor, obj["serving_fold"])
+        expected_member_id = _chooser_fold_member_id(descriptor)
         authoring_id = descriptor.parent_release_id
         authoring = authoring_releases.get(authoring_id)
         if authoring_id != manifest.release.release_id:
+            _require_chooser_catalog_member(
+                catalog, obj, expected_member_id,
+                "chooser descriptor is not in its staged producer member")
             sources = catalog.get("sources")
             carried_from = sources.get("carried_from") if isinstance(sources, Mapping) else None
             if (not isinstance(carried_from, str) or not carried_from
@@ -716,11 +738,12 @@ def _verified_chooser_fold_reference(
             if carried_catalog is None:
                 carried_catalog = _read_state_catalog(root, carried_from)
                 carried_catalogs[carried_from] = carried_catalog
-            if not _catalog_contains_chooser_object(carried_catalog, obj):
-                raise ValueError("carried chooser descriptor changed")
+            _require_chooser_catalog_member(
+                carried_catalog, obj, expected_member_id,
+                "carried chooser descriptor changed")
         if authoring is None:
             authoring = _load_chooser_authoring_release(
-                authoring_id, obj, root, dep_root)
+                authoring_id, obj, expected_member_id, root, dep_root)
             if authoring is None:
                 if authoring_id != manifest.release.release_id:
                     raise ModelNotReady(
@@ -728,7 +751,8 @@ def _verified_chooser_fold_reference(
                 return None
             authoring_releases[authoring_id] = authoring
         elif authoring_id != manifest.release.release_id:
-            if not _catalog_contains_chooser_object(authoring[1], obj):
+            if not _catalog_contains_chooser_object(
+                    authoring[1], obj, expected_member_id):
                 raise ValueError("chooser authoring descriptor is missing")
         authoring_manifest, authoring_catalog, _release_cutoff, authoring_identity = authoring
         identity = _chooser_fold_producer_identity(descriptor, authoring_identity)

@@ -695,10 +695,16 @@ def test_carried_chooser_reference_uses_verified_authoring_release(tmp_path, mon
     current_manifest = SimpleNamespace(release=SimpleNamespace(release_id="carried"))
     origin_manifest = SimpleNamespace(release=SimpleNamespace(release_id="origin"))
     descriptor_object = {"serving_fold": descriptor_doc}
-    carried_catalog = {"members": [{"objects": [descriptor_object]}]}
+    carried_catalog = {"members": [{
+        "member_id": "tier4_folds:implied_t1", "status": "STAGED",
+        "objects": [descriptor_object],
+    }]}
     authoring_catalog = {
         "sources": {"retrain_cutoff": "2026-08-31"},
-        "members": [{"objects": [descriptor_object]}],
+        "members": [{
+            "member_id": "tier4_folds:implied_t1", "status": "STAGED",
+            "objects": [descriptor_object],
+        }],
     }
     catalogs = {"prior": carried_catalog, "origin": authoring_catalog}
     manifests = {"origin": origin_manifest}
@@ -730,7 +736,13 @@ def test_carried_chooser_reference_uses_verified_authoring_release(tmp_path, mon
         return SimpleNamespace(descriptor=loaded_descriptor)
 
     monkeypatch.setattr(rb, "load_chooser_serving_fold", load)
-    current_catalog = {"sources": {"carried_from": "prior"}}
+    current_catalog = {
+        "sources": {"carried_from": "prior"},
+        "members": [{
+            "member_id": "tier4_folds:implied_t1", "status": "STAGED",
+            "objects": [descriptor_object],
+        }],
+    }
     authoring_releases = {}
     carried_catalogs = {}
     args = (descriptor_object, current_catalog, current_manifest, object(), tmp_path,
@@ -752,6 +764,19 @@ def test_carried_chooser_reference_uses_verified_authoring_release(tmp_path, mon
     assert catalog_reads == ["prior", "origin"]
     assert manifest_reads == ["origin"]
     assert identity_reads == ["origin"]
+
+    carried_row = carried_catalog["members"][0]
+    for member_id, status in (
+        ("tier4_folds:runup_move", "STAGED"),
+        ("tier4_folds:implied_t1", "PENDING"),
+    ):
+        carried_row["member_id"] = member_id
+        carried_row["status"] = status
+        with pytest.raises(rb.ModelNotReady) as error:
+            rb._verified_chooser_fold_reference(*args)
+        assert error.value.detail == "chooser fold could not be verified or loaded"
+    carried_row["member_id"] = "tier4_folds:implied_t1"
+    carried_row["status"] = "STAGED"
 
     mismatched_object = {**descriptor_object, "name": "changed-object"}
     with pytest.raises(rb.ModelNotReady):
