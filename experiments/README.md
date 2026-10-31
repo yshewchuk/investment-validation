@@ -3,7 +3,7 @@
 `iv_crush_search.prepare` / `validate_registration` are registration-only APIs (no CLI/search activation or
 production caller), using shared `native_registration.prepare_regression_registration`.
 It pins committed source, qualified-panel and IV-target snapshots plus explicit
-signed target/clocks; only metadata is read. Both preparation APIs admit specification type/plan fields through the existing resolver before dependent reads; the IV wrapper validates both snapshot-reference shapes before either table-contract lookup. Malformed specs/plans retain `INVALID_EXPERIMENT_SPEC`; malformed references retain native `SNAPSHOT_UNRESOLVED`. The ordinary native reserve/read/verify
+signed target/clocks; only metadata is read. Both preparation APIs admit specification type/plan fields through the existing resolver before dependent reads; the IV wrapper validates both snapshot-reference shapes before either table-contract lookup. Resolver field/type errors retain `INVALID_EXPERIMENT_SPEC`; annual-window errors retain native `CONTRACT_MISMATCH`, generic target-descriptor errors retain `ValueError`, and malformed references retain native `SNAPSHOT_UNRESOLVED`. The ordinary native reserve/read/verify
 APIs persist/replay it; reserve/read apply registration-only `iv_crush_registration` policy by requested
 spec runner even for downgraded documents, while generic verification stays target-agnostic. v1.8 requested reserve/read reuse preparation's supported-spec/no-external-input rule; prior size checks retain precedence. Preparation, default v1.8 reserve and low-level artifact reads use the existing 16 MiB cap;
 full panel/label qualification remains the later fold-admission responsibility.

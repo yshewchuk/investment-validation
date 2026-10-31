@@ -188,7 +188,7 @@ Registration/replay never fit. Native smoke/recorded publication remains unchang
 
 | Condition | Outcome |
 | --- | --- |
-| Invalid plan, external inputs, unsupported runner path, or missing/malformed/indirect source | `INVALID_EXPERIMENT_SPEC` before registration; regression preparation admits spec type/plan fields before dependent reads. The IV wrapper admits both feature/target reference shapes before either table-contract read; malformed references retain native `SNAPSHOT_UNRESOLVED`. v1.8 requested reserve/read also reuse preparation's supported-spec rule (no external inputs, safe Python runner, nonblank hypothesis/experiment/arm) before reservation or requested admission; prior size/refusal ordering is unchanged. |
+| Invalid resolver plan fields, external inputs, unsupported runner path, or missing/malformed/indirect source | `INVALID_EXPERIMENT_SPEC` before registration; regression preparation admits spec type/plan fields before dependent reads. Annual-window validation preserves native `CONTRACT_MISMATCH`; generic target-descriptor validation preserves `ValueError`. The IV wrapper admits both feature/target reference shapes before either table-contract read; malformed references retain native `SNAPSHOT_UNRESOLVED`. v1.8 requested reserve/read also reuse preparation's supported-spec rule (no external inputs, safe Python runner, nonblank hypothesis/experiment/arm) before reservation or requested admission; prior size/refusal ordering is unchanged. |
 | Current scope head cannot be resolved | `SNAPSHOT_UNRESOLVED`; no fallback. |
 | Invalid context or explicitly excluded/unknown event | Shared `HOLDOUT_ACCESS_DENIED`; no outcome read. |
 | Admission has no native registration | `INVALID_EXPERIMENT_SPEC`; no implicit registration. |
