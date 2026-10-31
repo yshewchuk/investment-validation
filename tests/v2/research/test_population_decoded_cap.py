@@ -137,3 +137,58 @@ def test_fixture_read_table_decoded_cap_bounds_the_same_scan(tmp_path):
         assert len(read_table(data.repository, data.snapshot, "earnings_events", _COLUMNS)) > 0
     finally:
         data.conn.close()
+
+
+class _NoWorkRepository:
+    """A snapshot surface that must stay untouched: no fragments, no scans."""
+
+    def __init__(self, snapshot):
+        self.snapshot = snapshot
+
+    def resolve(self, snapshot_id):
+        raise AssertionError("an invalid cap must refuse before snapshot resolution")
+
+    def table_contract(self, snapshot, table_name):
+        return _CONTRACT
+
+    def fragment_records(self, snapshot, table_name):
+        return []
+
+    def scan_population_bound(self, snapshot_id, **kwargs):
+        raise AssertionError("no bound may be planned")
+
+    def scan(self, query, *, table_name, max_object_bytes=None):
+        raise AssertionError("no scan may start")
+
+
+@pytest.mark.parametrize("cap", [0, True, -1, "x"])
+def test_read_table_refuses_invalid_cap_even_without_partitions(cap):
+    snapshot = _snapshot()
+    with pytest.raises(errors.DataError) as raised:
+        read_table(_NoWorkRepository(snapshot), snapshot, "earnings_events", _COLUMNS,
+                   max_object_bytes=cap)
+    assert raised.value.code == "QUERY_NOT_BOUNDED"
+
+
+@pytest.mark.parametrize("cap", [0, True, -1, "x"])
+def test_load_population_refuses_invalid_cap_before_any_work(cap):
+    snapshot = _snapshot()
+    with pytest.raises(errors.DataError) as raised:
+        load_population(_NoWorkRepository(snapshot), snapshot, as_of_month="2024-01",
+                        max_object_bytes=cap)
+    assert raised.value.code == "QUERY_NOT_BOUNDED"
+
+
+def test_valid_cap_passes_admission_on_a_partitionless_snapshot():
+    snapshot = _snapshot()
+    frame = read_table(_NoWorkRepository(snapshot), snapshot, "earnings_events", _COLUMNS,
+                       max_object_bytes=4096)
+    assert frame.empty and list(frame.columns) == list(_COLUMNS)
+
+
+def test_valid_cap_forwards_unchanged_to_every_partition_scan():
+    snapshot = _snapshot()
+    repository = _RecordingRepository(snapshot, _events_frame())
+    load_population(repository, snapshot, as_of_month="2024-01",
+                    max_object_bytes=2 * 10**9 + 7)
+    assert repository.caps == [2 * 10**9 + 7]

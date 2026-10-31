@@ -77,12 +77,15 @@ def derive_workspace_targets(workspace, scope, record, *, tickers, event_start, 
     excluded = {e["event_id"]: e["reasons"] for e in plan["exclusions"]}
     unavailable = set(plan["unavailable"])
     before_start = set(plan["before_start"])
+    dated_before_start = set(plan["dated_before_start"])
     retained = set(targets)
     dropped = []
     for event_id in universe:
         if event_id in retained:
             continue
-        if event_id in before_start:
+        if event_id in dated_before_start:
+            dropped.append({"event_id": event_id, "reasons": ["event_before_history_start"]})
+        elif event_id in before_start:
             dropped.append({"event_id": event_id, "reasons": ["forecast_before_history_start"]})
         elif event_id in excluded:
             dropped.append({"event_id": event_id, "reasons": excluded[event_id]})

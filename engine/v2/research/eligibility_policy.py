@@ -187,9 +187,13 @@ def _classify_groups(groups, indexed, labels, windows):
     return retained, exclusions
 
 
-def plan_eligibility(repository, snapshot, *, as_of_month, policy, metadata, evaluation_event_ids):
+def plan_eligibility(repository, snapshot, *, as_of_month, policy, metadata, evaluation_event_ids,
+                     max_object_bytes=None):
     """Recheck population membership; exclude evaluation IDs on ambiguous-random
     tickers and record those exclusions without granting reads.
+
+    ``max_object_bytes``, when given, bounds this planner's own canonical events
+    read's decoded row-group bytes; ``None`` keeps the decoder default unchanged.
 
     Producer-declared label/forecast bounds must already be established against
     the pinned source. They are validated structurally, NOT proven from payloads.
@@ -205,7 +209,8 @@ def plan_eligibility(repository, snapshot, *, as_of_month, policy, metadata, eva
         except (TypeError, ValueError):
             raise errors.fail("CONTRACT_MISMATCH", "explicit unique evaluation event IDs required") from None
     with progress.stage("eligibility plan", report_refusals=True):
-        events = canonical_events(repository, snapshot)
+        cap_kwargs = {} if max_object_bytes is None else {"max_object_bytes": max_object_bytes}
+        events = canonical_events(repository, snapshot, **cap_kwargs)
         try:
             _ids(events.event_id.tolist())
         except ValueError:

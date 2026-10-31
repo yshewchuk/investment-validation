@@ -2,17 +2,20 @@
 from __future__ import annotations
 
 from engine.v2.contracts.data import SnapshotRef
-from engine.v2.data import errors
+from engine.v2.data import errors, objects
 from engine.v2.research import progress
 from engine.v2.research._scan import read_table
 from engine.v2.research.experiment_trades import _exclude_holdouts, _holdout_context
 from engine.v2.research.snapshot_inputs import admit_snapshot
 
 
-def canonical_events(repository, snapshot):
-    """Read the six canonical metadata columns from a native snapshot reference."""
+def canonical_events(repository, snapshot, *, max_object_bytes=None):
+    """Read the six canonical metadata columns from a native snapshot reference.
+
+    ``max_object_bytes``, when given, bounds the read's decoded row-group bytes;
+    an invalid cap refuses eagerly; ``None`` changes nothing."""
     admit_snapshot(repository, snapshot)
-    return _canonical_events(repository, snapshot)
+    return _canonical_events(repository, snapshot, max_object_bytes=max_object_bytes)
 
 
 def _canonical_events(repository, snapshot, *, max_object_bytes=None):
@@ -31,7 +34,10 @@ def load_population(repository, snapshot, *, as_of_month, purpose="selection",
     Canonical scans log stage boundaries and bounded row progress for both modes.
     Full-universe reads also log outer completion when they take at least 5 s.
     ``max_object_bytes`` bounds the scan's decoded row-group bytes; ``None``
-    keeps the decoder default unchanged."""
+    keeps the decoder default unchanged. A given cap is validated eagerly,
+    before any snapshot or fragment work."""
+    if max_object_bytes is not None:
+        objects.validate_max_object_bytes(max_object_bytes)
     args = (repository, snapshot)
     kwargs = dict(as_of_month=as_of_month, purpose=purpose, event_ids=event_ids,
                   max_object_bytes=max_object_bytes)

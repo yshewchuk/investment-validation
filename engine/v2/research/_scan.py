@@ -17,7 +17,7 @@ from datetime import date, datetime, timedelta
 import pandas as pd
 
 from engine.v2.contracts.data import DataQuery, KeyPredicate, SnapshotRef, TimeInterval
-from engine.v2.data import errors, time_formats
+from engine.v2.data import errors, objects, time_formats
 from engine.v2.research import progress
 
 __all__ = ["DEFAULT_SCOPE", "next_representable", "read_table", "resolve_snapshot"]
@@ -59,14 +59,18 @@ def read_table(repository, snapshot_ref: SnapshotRef, table_name: str, columns,
     omitted ``batch_filter`` changes nothing. ``max_object_bytes``, when given,
     bounds each fragment's decoded (expanded row-group) bytes inside
     ``Repository.scan``'s bounded decoder; ``None`` or omitted changes nothing.
-    Every scan is bounded by its own pinned membership bound, so a complete
-    partition is read fully. A table absent from the snapshot refuses with
+    A given cap is validated eagerly, before any partition planning: even an
+    empty or no-partition snapshot refuses an invalid one. Every scan is
+    bounded by its own pinned membership bound, so a complete partition is
+    read fully. A table absent from the snapshot refuses with
     ``CONTRACT_MISMATCH``; selected partitions are scanned in full without an
     observation-time interval.
     """
     if table_name not in snapshot_ref.table_versions:
         raise errors.fail("CONTRACT_MISMATCH", "table is not part of this snapshot",
                           details={"table_name": table_name})
+    if max_object_bytes is not None:
+        objects.validate_max_object_bytes(max_object_bytes)
     contract = repository.table_contract(snapshot_ref, table_name)
     records = list(repository.fragment_records(snapshot_ref, table_name))
     if partition_keys is not None:

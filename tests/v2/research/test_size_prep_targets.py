@@ -27,7 +27,8 @@ _ROWS = [
 ]
 _UNIVERSE = ["ev-start", "ev-u", "ev-x"]
 _DEFAULT_PLAN = {"plan_id": "plan_1", "retained": ["ev-start"], "unavailable": ["ev-u"],
-                 "exclusions": [{"event_id": "ev-x", "reasons": ["embargo_ticker"]}], "before_start": []}
+                 "exclusions": [{"event_id": "ev-x", "reasons": ["embargo_ticker"]}],
+                 "before_start": [], "dated_before_start": []}
 
 
 def _bounds(bounds_ws, source_root):
@@ -193,7 +194,7 @@ def test_all_dropped_refuses_no_targets_without_a_pin(bounds_ws, source_root, mo
     ws, clock, record, _ = _prepared(bounds_ws, source_root, monkeypatch)
     calls = _fakes(monkeypatch, plan={"plan_id": "plan_1", "retained": [],
                                       "unavailable": list(_UNIVERSE), "exclusions": [],
-                                      "before_start": []})
+                                      "before_start": [], "dated_before_start": []})
     pins = _pin_names(ws)
     _refusal(lambda: tgt.derive_workspace_targets(ws, "shadow", record, **_args(clock)),
              "PUBLICATION_REFUSED", "no_targets")
@@ -204,7 +205,8 @@ def test_all_dropped_refuses_no_targets_without_a_pin(bounds_ws, source_root, mo
 def test_unaccounted_universe_event_refuses_plan_incomplete(bounds_ws, source_root, monkeypatch):
     ws, clock, record, _ = _prepared(bounds_ws, source_root, monkeypatch)
     _fakes(monkeypatch, plan={"plan_id": "plan_1", "retained": ["ev-start"],
-                              "unavailable": [], "exclusions": [], "before_start": []})
+                              "unavailable": [], "exclusions": [],
+                              "before_start": [], "dated_before_start": []})
     pins = _pin_names(ws)
     _refusal(lambda: tgt.derive_workspace_targets(ws, "shadow", record, **_args(clock)),
              "PUBLICATION_REFUSED", "plan_incomplete")
@@ -232,7 +234,7 @@ def test_before_start_universe_event_is_dropped_and_call_succeeds(bounds_ws, sou
     ws, clock, record, _ = _prepared(bounds_ws, source_root, monkeypatch)
     calls = _fakes(monkeypatch, plan={"plan_id": "plan_1", "retained": ["ev-start"],
                                       "unavailable": ["ev-u"], "exclusions": [],
-                                      "before_start": ["ev-x"]})
+                                      "before_start": ["ev-x"], "dated_before_start": []})
     doc = tgt.derive_workspace_targets(ws, "shadow", record, **_args(clock))
     assert doc["event_ids"] == ["ev-start"]
     assert doc["dropped"] == [{"event_id": "ev-u", "reasons": ["label_bounds_unavailable"]},
@@ -241,12 +243,28 @@ def test_before_start_universe_event_is_dropped_and_call_succeeds(bounds_ws, sou
     assert calls["plan"] and _pin_body(ws, "size-prep-targets:" + doc["targets_id"].split(":", 1)[1])
 
 
+def test_dated_early_event_gets_event_reason_and_ceiling_early_keeps_forecast_reason(
+        bounds_ws, source_root, monkeypatch):
+    ws, clock, record, _ = _prepared(bounds_ws, source_root, monkeypatch)
+    calls = _fakes(monkeypatch, rows=_ROWS + [("ev-late", "AAAA", "2024-01-25")],
+                   plan={"plan_id": "plan_1", "retained": ["ev-start"], "unavailable": ["ev-u"],
+                         "exclusions": [], "before_start": ["ev-x", "ev-late"],
+                         "dated_before_start": ["ev-x"]})
+    doc = tgt.derive_workspace_targets(ws, "shadow", record, **_args(clock))
+    assert doc["event_ids"] == ["ev-start"]
+    assert doc["dropped"] == [{"event_id": "ev-late", "reasons": ["forecast_before_history_start"]},
+                              {"event_id": "ev-u", "reasons": ["label_bounds_unavailable"]},
+                              {"event_id": "ev-x", "reasons": ["event_before_history_start"]}]
+    assert doc["dropped_count"] == 3 and doc["target_count"] == 1
+    assert calls["plan"] and _pin_body(ws, "size-prep-targets:" + doc["targets_id"].split(":", 1)[1])
+
+
 def test_before_start_id_also_excluded_drops_as_forecast_before_history_start(bounds_ws, source_root, monkeypatch):
     ws, clock, record, _ = _prepared(bounds_ws, source_root, monkeypatch)
     _fakes(monkeypatch, plan={"plan_id": "plan_1", "retained": ["ev-start"],
                               "unavailable": ["ev-u"],
                               "exclusions": [{"event_id": "ev-x", "reasons": ["embargo_ticker"]}],
-                              "before_start": ["ev-x"]})
+                              "before_start": ["ev-x"], "dated_before_start": []})
     doc = tgt.derive_workspace_targets(ws, "shadow", record, **_args(clock))
     assert doc["event_ids"] == ["ev-start"]
     assert doc["dropped"] == [{"event_id": "ev-u", "reasons": ["label_bounds_unavailable"]},
@@ -256,7 +274,8 @@ def test_before_start_id_also_excluded_drops_as_forecast_before_history_start(bo
 def test_all_early_plan_refuses_no_targets_without_a_pin(bounds_ws, source_root, monkeypatch):
     ws, clock, record, _ = _prepared(bounds_ws, source_root, monkeypatch)
     calls = _fakes(monkeypatch, plan={"plan_id": None, "retained": [], "unavailable": [],
-                                      "exclusions": [], "before_start": list(_UNIVERSE)})
+                                      "exclusions": [], "before_start": list(_UNIVERSE),
+                                      "dated_before_start": []})
     pins = _pin_names(ws)
     _refusal(lambda: tgt.derive_workspace_targets(ws, "shadow", record, **_args(clock)),
              "PUBLICATION_REFUSED", "no_targets")

@@ -39,9 +39,10 @@ def test_strict_groups_refuses_unavailable_target(monkeypatch):
 def _stub_plan(monkeypatch, population_rows, ceilings, *, retained, exclusions, unavailable=()):
     """Drive the real _plan with only its collaborators stubbed; never materialize."""
     population = pd.DataFrame(population_rows)
-    calls = {"groups": [], "eligibility": []}
+    calls = {"groups": [], "eligibility": [], "load": []}
 
     def load(repository, snapshot, **kwargs):
+        calls["load"].append(kwargs)
         event_ids = kwargs.get("event_ids")
         if event_ids is None:
             return population.copy()
@@ -71,10 +72,10 @@ def _stub_plan(monkeypatch, population_rows, ceilings, *, retained, exclusions, 
     return calls
 
 
-def _plan_targets(event_ids, history_start="2024-01-01"):
+def _plan_targets(event_ids, history_start="2024-01-01", limits=None):
     return backend.plan_targets(object(), {}, as_of_month="2024-01", policy={"policy_id": "pol"},
                                 event_ids=event_ids, horizons=[1, 3, 5],
-                                history_start=history_start, limits={})
+                                history_start=history_start, limits=limits if limits else {})
 
 
 def test_plan_targets_intersects_requests_without_materializing(monkeypatch):
@@ -91,7 +92,7 @@ def test_plan_targets_intersects_requests_without_materializing(monkeypatch):
     assert calls["groups"][0]["strict"] is False
     assert result == {"plan_id": "plan_1", "retained": ["ev-b"], "unavailable": ["ev-c"],
                       "exclusions": [{"event_id": "ev-a", "reasons": ["embargo_ticker"]}],
-                      "before_start": []}
+                      "before_start": [], "dated_before_start": []}
 
 
 def test_ceiling_before_history_start_goes_to_before_start_not_window_refusal(monkeypatch):
@@ -108,7 +109,7 @@ def test_ceiling_before_history_start_goes_to_before_start_not_window_refusal(mo
     result = _plan_targets(["ev-early", "ev-in", "ev-x"])
     assert result == {"plan_id": "plan_1", "retained": ["ev-in"], "unavailable": [],
                       "exclusions": [{"event_id": "ev-x", "reasons": ["embargo_ticker"]}],
-                      "before_start": ["ev-early"]}
+                      "before_start": ["ev-early"], "dated_before_start": ["ev-early"]}
     groups_call = calls["groups"][0]
     assert groups_call["event_ids"] == ["ev-in", "ev-x"]
     assert "ev-early" not in groups_call["event_ids"]
@@ -128,7 +129,8 @@ def test_event_date_before_history_start_goes_to_before_start_despite_later_ceil
                        exclusions=[])
     result = _plan_targets(["ev-before", "ev-in"])
     assert result == {"plan_id": "plan_1", "retained": ["ev-in"], "unavailable": [],
-                      "exclusions": [], "before_start": ["ev-before"]}
+                      "exclusions": [], "before_start": ["ev-before"],
+                      "dated_before_start": ["ev-before"]}
     groups_call = calls["groups"][0]
     assert groups_call["event_ids"] == ["ev-in"]
     assert "ev-before" not in groups_call["selected"]["event_id"].tolist()
@@ -145,7 +147,7 @@ def test_all_early_targets_return_empty_plan_without_eligibility(monkeypatch):
                        retained=[], exclusions=[])
     result = _plan_targets(["ev-early"])
     assert result == {"plan_id": None, "retained": [], "unavailable": [], "exclusions": [],
-                      "before_start": ["ev-early"]}
+                      "before_start": ["ev-early"], "dated_before_start": ["ev-early"]}
     assert calls["groups"] == [] and calls["eligibility"] == []
 
 
@@ -188,8 +190,47 @@ def test_dated_before_history_start_target_never_reaches_forecasts(monkeypatch):
     result = _plan_targets(["ev-old", "ev-in"])
     assert "ev-old" not in seen
     assert result == {"plan_id": "plan_1", "retained": ["ev-in"], "unavailable": [],
-                      "exclusions": [], "before_start": ["ev-old"]}
+                      "exclusions": [], "before_start": ["ev-old"],
+                      "dated_before_start": ["ev-old"]}
     assert calls["groups"][0]["event_ids"] == ["ev-in"]
+
+
+def test_ceiling_early_target_dated_in_window_is_not_dated_before_start(monkeypatch):
+    """A target inside the event window whose earliest ceiling precedes history_start is
+    before_start but never dated_before_start."""
+    calls = _stub_plan(monkeypatch,
+                       [{"event_id": "ev-ceil", "ticker": "AAAA",
+                         "event_date": pd.Timestamp("2024-01-05")},
+                        {"event_id": "ev-in", "ticker": "AAAA",
+                         "event_date": pd.Timestamp("2024-01-10")}],
+                       {"ev-ceil": "2023-12-20", "ev-in": "2024-01-20"},
+                       retained=["ev-ceil", "ev-in"], exclusions=[])
+    result = _plan_targets(["ev-ceil", "ev-in"])
+    assert result == {"plan_id": "plan_1", "retained": ["ev-in"], "unavailable": [],
+                      "exclusions": [], "before_start": ["ev-ceil"], "dated_before_start": []}
+    assert calls["groups"][0]["event_ids"] == ["ev-in"]
+
+
+def test_nonstrict_plan_forwards_decoded_cap_to_reads_and_eligibility(monkeypatch):
+    calls = _stub_plan(monkeypatch,
+                       [{"event_id": "ev-a", "ticker": "AAAA",
+                         "event_date": pd.Timestamp("2024-01-05")}],
+                       {"ev-a": "2024-01-12"}, retained=["ev-a"], exclusions=[])
+    _plan_targets(["ev-a"], limits={"max_object_bytes": 4096})
+    assert [kwargs["max_object_bytes"] for kwargs in calls["load"]] == [4096, 4096]
+    assert calls["eligibility"][0]["max_object_bytes"] == 4096
+
+
+def test_strict_plan_keeps_eligibility_cap_unset(monkeypatch):
+    calls = _stub_plan(monkeypatch,
+                       [{"event_id": "ev-a", "ticker": "AAAA",
+                         "event_date": pd.Timestamp("2024-01-05")}],
+                       {"ev-a": "2024-01-12"}, retained=["ev-a"], exclusions=[])
+    backend._plan(object(), {}, as_of_month="2024-01", policy={"policy_id": "pol"},
+                  event_ids=["ev-a"], horizons=[1, 3, 5], history_start="2024-01-01",
+                  limits={"max_object_bytes": 4096}, strict=True)
+    assert [kwargs.get("max_object_bytes", "absent") for kwargs in calls["load"]] == ["absent", "absent"]
+    assert calls["eligibility"][0]["max_object_bytes"] is None
 
 
 def test_all_targets_dated_before_history_start_forecast_nothing(monkeypatch):
@@ -207,7 +248,8 @@ def test_all_targets_dated_before_history_start_forecast_nothing(monkeypatch):
     monkeypatch.setattr(backend, "_forecasts", forbidden)
     result = _plan_targets(["ev-old-1", "ev-old-2"])
     assert result == {"plan_id": None, "retained": [], "unavailable": [], "exclusions": [],
-                      "before_start": ["ev-old-1", "ev-old-2"]}
+                      "before_start": ["ev-old-1", "ev-old-2"],
+                      "dated_before_start": ["ev-old-1", "ev-old-2"]}
     assert calls["groups"] == [] and calls["eligibility"] == []
 
 

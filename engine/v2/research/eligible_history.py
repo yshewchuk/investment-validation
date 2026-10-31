@@ -174,17 +174,19 @@ def _plan(repository, snapshot, *, as_of_month, policy, event_ids, horizons, his
     early."""
     _request(repository, snapshot, policy, event_ids, horizons, limits)
     decoded_cap = None if strict else limits.get("max_object_bytes")
+    cap_kwargs = {} if decoded_cap is None else {"max_object_bytes": decoded_cap}
     targets = load_population(repository, snapshot, as_of_month=as_of_month, event_ids=event_ids,
-                              max_object_bytes=decoded_cap)
-    population = load_population(repository, snapshot, as_of_month=as_of_month,
-                                 max_object_bytes=decoded_cap)
+                              **cap_kwargs)
+    population = load_population(repository, snapshot, as_of_month=as_of_month, **cap_kwargs)
     calendar, calendar_source = calendar_input(repository, snapshot)
     clocks = {}
-    early = set()
+    early, dated_early = set(), set()
     if not strict:
-        targets, event_ids, early = _drop_dated_early(targets, event_ids, history_start)
+        targets, event_ids, dated_early = _drop_dated_early(targets, event_ids, history_start)
+        early = set(dated_early)
         if targets.empty:
-            return {"early": sorted(early), "remaining": False}
+            return {"early": sorted(early), "dated_before_start": sorted(dated_early),
+                    "remaining": False}
     forecasts = {event.event_id: _forecasts(event, horizons, calendar, clocks)
         for event in targets.itertuples(index=False)}
     if not strict:
@@ -192,7 +194,8 @@ def _plan(repository, snapshot, *, as_of_month, policy, event_ids, horizons, his
             targets, forecasts, event_ids, history_start)
         early |= ceiling_early
         if targets.empty:
-            return {"early": sorted(early), "remaining": False}
+            return {"early": sorted(early), "dated_before_start": sorted(dated_early),
+                    "remaining": False}
     start, _ = event_history._window(history_start,
         min(c["source_session_ceiling"] for event_clocks in forecasts.values() for c in event_clocks))
     ceilings = {}
@@ -209,11 +212,12 @@ def _plan(repository, snapshot, *, as_of_month, policy, event_ids, horizons, his
         "groups": groups}
     metadata["metadata_id"] = content_hash(metadata)
     eligibility = eligibility_policy.plan_eligibility(repository, snapshot, as_of_month=as_of_month,
-        policy=policy, metadata=metadata, evaluation_event_ids=[])
+        policy=policy, metadata=metadata, evaluation_event_ids=[], max_object_bytes=decoded_cap)
     return {"targets": targets, "population": population, "calendar": calendar, "clocks": clocks,
         "forecasts": forecasts, "start": start, "ceilings": ceilings, "selected": selected,
         "qualified": qualified, "unavailable": unavailable, "eligibility": eligibility,
-        "calendar_source": calendar_source, "early": sorted(early), "remaining": True}
+        "calendar_source": calendar_source, "early": sorted(early),
+        "dated_before_start": sorted(dated_early), "remaining": True}
 
 
 def plan_targets(repository, snapshot, *, as_of_month, policy, event_ids, horizons, history_start, limits):
@@ -228,13 +232,14 @@ def plan_targets(repository, snapshot, *, as_of_month, policy, event_ids, horizo
         horizons=horizons, history_start=history_start, limits=limits, strict=False)
     if not plan["remaining"]:
         return {"plan_id": None, "retained": [], "unavailable": [], "exclusions": [],
-            "before_start": sorted(plan["early"])}
+            "before_start": sorted(plan["early"]),
+            "dated_before_start": sorted(plan["dated_before_start"])}
     eligibility, requested = plan["eligibility"], set(event_ids) - set(plan["early"])
     return {"plan_id": eligibility["plan_id"],
         "retained": sorted(requested & set(eligibility["retained_event_ids"])),
         "unavailable": sorted(requested & set(plan["unavailable"])),
         "exclusions": [e for e in eligibility["exclusions"] if e["event_id"] in requested],
-        "before_start": plan["early"]}
+        "before_start": plan["early"], "dated_before_start": plan["dated_before_start"]}
 
 
 def _prepare(repository, snapshot, *, as_of_month, policy, event_ids, horizons, history_start, limits,
