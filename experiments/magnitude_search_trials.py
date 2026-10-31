@@ -34,7 +34,14 @@ from experiments.magnitude_search_execution import (
     validate_execution_limits,
 )
 from experiments.magnitude_search_inputs import load_inputs, publish_inputs
-from experiments.magnitude_search_plan import read_search_plan
+from experiments.magnitude_search_plan import (
+    PLAN_V2,
+    PLAN_V3,
+    canonical_inner,
+    cohort_key,
+    read_search_plan,
+    trial_key,
+)
 from experiments.magnitude_search_records import MIGRATIONS, OWNER, append_record, read_record
 from experiments.size_fit_diagnostics import evidence as diagnostic_evidence
 from experiments.size_fit_diagnostics import keys as diagnostic_keys
@@ -78,6 +85,7 @@ def _completed_fit(marker, static):
 
 
 _NOT_ADMITTED = object()
+_FREEZE_CACHE_BYTES = 32 << 20
 
 
 class SearchTrials:
@@ -140,12 +148,14 @@ class SearchTrials:
     def _trial(plan, outer_year, inner_year, candidate_id):
         try:
             outer = next(fold for fold in plan["folds"] if fold["outer"]["year"] == outer_year)
-            inner = next(fold for fold in outer["inner"] if fold["year"] == inner_year)
+            requested = next(fold for fold in outer["inner"] if fold["year"] == inner_year)
             candidate = next(item for item in plan["candidates"] if item["candidate_id"] == candidate_id)
         except StopIteration:
             raise fail("INVALID_EXPERIMENT_SPEC", "trial is outside the sealed search plan") from None
-        key = content_hash([plan["plan_id"], outer_year, inner_year, candidate_id])
-        return key, inner, candidate
+        if plan.get("schema_version") == PLAN_V3:
+            owner_year, inner = canonical_inner(plan, outer_year, inner_year)
+            return trial_key(plan, owner_year, inner_year, candidate_id), inner, candidate
+        return trial_key(plan, outer_year, inner_year, candidate_id), requested, candidate
 
     def _inputs(self, inner):
         return admit_fold_inputs(self.repository, self.registration.document, inner,
@@ -182,13 +192,25 @@ class SearchTrials:
     def _start(self, outer_year, inner_year, candidate_id, execution=None, admitted=_NOT_ADMITTED):
         plan = self._admit() if admitted is _NOT_ADMITTED else admitted
         key, inner, candidate = self._trial(plan, outer_year, inner_year, candidate_id)
-        started = {"trial_id": key, "outer_year": outer_year, "inner_year": inner_year, "candidate": candidate}
+        owner_year, _ = canonical_inner(plan, outer_year, inner_year)
+        started = {"trial_id": key, "outer_year": owner_year, "inner_year": inner_year, "candidate": candidate}
         if execution is not None:
             started["execution"] = execution
-        self._append("start:" + key, started, replay=False)
+        cohort = cohort_key(plan, owner_year, inner_year)
+        existing_start = self._read("start:" + key)
+        if plan.get("schema_version") == PLAN_V3 and existing_start is not None:
+            if execution is not None:
+                raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search trial is unfinished")
+            if canonical_json(existing_start) != canonical_json(started):
+                raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search trial is unfinished")
+            admitted = self._read("inputs:" + key)
+            if (not isinstance(admitted, dict) or set(admitted) != {"cohort", "inputs_id"}
+                    or admitted["cohort"] != cohort or self._read("cohort:" + cohort) is None):
+                raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search trial is unfinished")
+        else:
+            self._append("start:" + key, started, replay=False)
         if execution is not None:
             self._append("execution-start:" + key, execution, replay=False)
-        cohort = content_hash([plan["plan_id"], outer_year, inner_year])
         inputs = self._cohort_inputs(cohort, inner)
         # Shards first (outside the catalog transaction); the manifest append is the commit point.
         if cohort not in self._published:
@@ -203,7 +225,8 @@ class SearchTrials:
         """Run one bounded native inner trial once, or verify its completed replay."""
         plan = self._admit()
         key, inner, candidate = self._trial(plan, outer_year, inner_year, candidate_id)
-        if plan.get("schema_version") == "magnitude_search_plan.v2" and limits != plan["request"]["limits"]["child"]:
+        size_plan = plan.get("schema_version") in (PLAN_V2, PLAN_V3)
+        if size_plan and limits != plan["request"]["limits"]["child"]:
             raise fail("INVALID_EXPERIMENT_SPEC", "v2 trial limits differ from sealed request")
         validate_execution_limits(limits)
         attempt = {"limits": dict(limits), "candidate_id": candidate_id, "trial_id": key}
@@ -212,7 +235,7 @@ class SearchTrials:
             return self._executed(plan, outer_year, inner_year, candidate_id, attempt)
         forbid_fitting("SearchTrials.execute")
         forbid_legacy_fitting("SearchTrials.execute")
-        resolved = resolved_limits(self.conn, self.store, self.registration, plan, limits) if plan.get("schema_version") == "magnitude_search_plan.v2" else execution_limits(limits)
+        resolved = resolved_limits(self.conn, self.store, self.registration, plan, limits) if size_plan else execution_limits(limits)
         started = self._start(outer_year, inner_year, candidate_id, attempt, plan)
         inputs = started["inputs"]
         execution = execution_for_candidate(self.registration.document, candidate)
@@ -238,7 +261,7 @@ class SearchTrials:
         admitted = self._read("inputs:" + key)
         source = {"manifest": self._read("cohort:" + admitted["cohort"]), "inputs_id": admitted["inputs_id"],
                   "store_root": str(self.store.root)}
-        if plan.get("schema_version") == "magnitude_search_plan.v2":
+        if size_plan:
             resolved = resolved_limits(self.conn, self.store, self.registration, plan, limits)
         result = run_fitted_trial(source, inner, plan, execution, resolved, progress)
         succeeded = isinstance(result, dict) and result.get("event") == "succeeded"
@@ -286,15 +309,16 @@ class SearchTrials:
     def _result_evidence(self, plan, outer_year, inner_year, candidate_id, attempt):
         """Independently verify durable result, admission, and exact progress prefix."""
         key, inner, candidate = self._trial(plan, outer_year, inner_year, candidate_id)
+        owner_year, _ = canonical_inner(plan, outer_year, inner_year)
+        cohort = cohort_key(plan, owner_year, inner_year)
         try:
-            started = {"trial_id": key, "outer_year": outer_year, "inner_year": inner_year,
+            started = {"trial_id": key, "outer_year": owner_year, "inner_year": inner_year,
                        "candidate": candidate, "execution": attempt}
             if (canonical_json(self._read("start:" + key)) != canonical_json(started)
                     or canonical_json(self._read("execution-start:" + key)) != canonical_json(attempt)):
                 raise ValueError
             admitted = self._read("inputs:" + key)
-            cohort_key = content_hash([plan["plan_id"], outer_year, inner_year])
-            if not isinstance(admitted, dict) or set(admitted) != {"cohort", "inputs_id"} or admitted["cohort"] != cohort_key:
+            if not isinstance(admitted, dict) or set(admitted) != {"cohort", "inputs_id"} or admitted["cohort"] != cohort:
                 raise ValueError
             inputs = self._cohort(admitted)
             durable = self._read("execution-result:" + key)
@@ -326,7 +350,7 @@ class SearchTrials:
             if submitted is not None and canonical_json(submitted) != canonical_json(forecasts):
                 raise ValueError
             if succeeded and submitted is not None:
-                validation = self._read("validation:" + cohort_key)
+                validation = self._read("validation:" + cohort)
                 if validation is not None:
                     self._validation(inner, admitted, inputs, validation)
             execution = execution_for_candidate(self.registration.document, candidate)
@@ -523,11 +547,13 @@ class SearchTrials:
     def _terminal_record(self, plan, outer_year, inner_year, candidate_id):
         """Verify terminal evidence; the caller also verifies any native receipt."""
         key, inner, candidate = self._trial(plan, outer_year, inner_year, candidate_id)
+        owner_year, _ = canonical_inner(plan, outer_year, inner_year)
+        cohort_id = cohort_key(plan, owner_year, inner_year)
         record = self._read("terminal:" + key)
         if record is None:
             raise fail("EXPERIMENT_VARIANT_FAILED", "search selection requires every terminal attempt")
         try:
-            expected = {"trial_id": key, "outer_year": outer_year, "inner_year": inner_year, "candidate": candidate}
+            expected = {"trial_id": key, "outer_year": owner_year, "inner_year": inner_year, "candidate": candidate}
             attempt = self._read("execution-start:" + key)
             native = attempt is not None
             timed = False
@@ -544,7 +570,7 @@ class SearchTrials:
             admitted = self._read("inputs:" + key)
             if admitted is None or set(admitted) != {"cohort", "inputs_id"}:
                 raise ValueError
-            if admitted["cohort"] != content_hash([plan["plan_id"], outer_year, inner_year]):
+            if admitted["cohort"] != cohort_id:
                 raise ValueError
             cohort = self._cohort(admitted)
             submitted = self._read("forecasts:" + key)
@@ -619,18 +645,46 @@ class SearchTrials:
     def freeze(self):
         """Freeze every outer choice from all terminal attempts; no evaluation authority."""
         plan = self._admit()
+        uses = {}
+        for outer in plan["folds"]:
+            for candidate in plan["candidates"]:
+                for inner in outer["inner"]:
+                    key = trial_key(plan, outer["outer"]["year"], inner["year"], candidate["candidate_id"])
+                    uses[key] = uses.get(key, 0) + 1
+        cache, cache_bytes = {}, 0
         selections, attempts = [], []
         for outer in plan["folds"]:
             scores = []
             for candidate in plan["candidates"]:
                 rows, failed = [], False
                 for inner in outer["inner"]:
-                    key, record = self._terminal(plan, outer["outer"]["year"], inner["year"], candidate["candidate_id"])
-                    attempts.append({"trial_id": key, "terminal_id": content_hash(record)})
+                    key = trial_key(plan, outer["outer"]["year"], inner["year"], candidate["candidate_id"])
+                    cached = cache.get(key)
+                    if cached is None:
+                        _, record = self._terminal(plan, outer["outer"]["year"], inner["year"],
+                                                   candidate["candidate_id"])
+                        terminal_id = content_hash(record)
+                        record_bytes = len(canonical_json(record).encode("utf-8")) if uses[key] > 1 else 0
+                    else:
+                        record, terminal_id, record_bytes = cached
+                    attempts.append({"trial_id": key, "terminal_id": terminal_id})
                     failed |= record["status"] != "succeeded"
                     if record["status"] == "succeeded":
                         rows.extend(record["predictions"])
-                scores.append({"candidate_id": candidate["candidate_id"], "metrics": None if failed else magnitude_metrics(rows)})
+                    uses[key] -= 1
+                    if uses[key] == 0:
+                        removed = cache.pop(key, None)
+                        if removed is not None:
+                            cache_bytes -= removed[2]
+                    elif key not in cache and 0 < record_bytes <= _FREEZE_CACHE_BYTES:
+                        while cache and cache_bytes + record_bytes > _FREEZE_CACHE_BYTES:
+                            oldest_key = next(iter(cache))
+                            _, _, removed_bytes = cache.pop(oldest_key)
+                            cache_bytes -= removed_bytes
+                        cache[key] = (record, terminal_id, record_bytes)
+                        cache_bytes += record_bytes
+                scores.append({"candidate_id": candidate["candidate_id"],
+                    "metrics": None if failed else magnitude_metrics(rows)})
             eligible = [score for score in scores if score["metrics"] is not None]
             if not eligible:
                 raise fail("EXPERIMENT_VARIANT_FAILED", "all candidates failed for an outer fold")

@@ -351,15 +351,13 @@ def test_collect_requires_all_folds_and_pools_errors_without_outer_selection(out
     expected_predictions = [{**row, "outer_year": year} for year, result in (("2024", first), ("2025", second))
                             for row in assert_fold_oracle(case, result, year)]
     trace = []
-    freeze, execute, replay = trials.SearchTrials.freeze, trials.SearchTrials.execute, outer._replay
+    freeze, replay = trials.SearchTrials.freeze, outer._replay
     def frozen(self):
         trace.append(("freeze",))
         return freeze(self)
     def executed(self, *args, **kwargs):
-        trace.append(("inner", *args))
-        assert kwargs == {"limits": LIMITS}
-        return execute(self, *args, **kwargs)
-    def replayed(read, store, started, fold, plan, execution, binding):
+        pytest.fail("outer collection launched an inner execution")
+    def replayed(read, store, started, fold, plan, execution):
         trace.append(("outer", fold["year"]))
         return replay(read, store, started, fold, plan, execution, binding)
     monkeypatch.setattr(trials.SearchTrials, "freeze", frozen)
@@ -374,12 +372,8 @@ def test_collect_requires_all_folds_and_pools_errors_without_outer_selection(out
     with no_fit_guard(), legacy_guard():
         report = collect(case)
         assert collect(case) == report
-    expected_inner = sorted(("inner", *args) for args in trial_cases(case))
-    boundary = len(expected_inner) + 3
-    for calls in (trace[:boundary], trace[boundary:]):
-        assert calls[:1] == [("freeze",)]
-        assert sorted(calls[1:-2]) == expected_inner
-        assert calls[-2:] == [("outer", "2024"), ("outer", "2025")]
+    per_collect = [("freeze",), ("outer", "2024"), ("outer", "2025")]
+    assert trace == per_collect * 2
     assert {name: spy.call_count for name, spy in spies.items()} == {
         "read_search_plan": 2, "_native_selection": 2, "source_closure": 4}
     expected = {"schema_version": "magnitude_search_outer_report.v1", "plan_id": case.plan["plan_id"],

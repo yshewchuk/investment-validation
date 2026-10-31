@@ -4,6 +4,7 @@ import time
 
 from engine.v2.foundation import content_hash
 from experiments.magnitude_search_outer import collect_outer_results
+from experiments.magnitude_search_plan import trial_key
 from experiments.magnitude_search_records import read_record
 from experiments.size_paired_report import paired_report
 from experiments.v2_magnitude_search_run import _admit_driver
@@ -60,9 +61,36 @@ def collect(conn, store, repository, registration, request, plan_ref):
     targets = {r["event_id"]: r["absolute_move_pct"] for r in result["predictions"]}
     ids = {event for group in plan["folds"] for event in group["outer"]["evaluation_event_ids"]}
     events = [e for e in registration.document["size_panel"]["context"]["target_events"] if e["event_id"] in ids]
-    inner_fits = _candidate_evidence(conn, store, registration.run_id, plan)
+    inner_uses = {}
     for group in plan["folds"]:
         year = group["outer"]["year"]
+        for fold in group["inner"]:
+            for candidate in plan["candidates"]:
+                key = trial_key(plan, year, fold["year"], candidate["candidate_id"])
+                inner_uses[key] = inner_uses.get(key, 0) + 1
+    inner_receipts = {}
+    for group in plan["folds"]:
+        year = group["outer"]["year"]
+        for fold in group["inner"]:
+            for candidate in plan["candidates"]:
+                key = trial_key(plan, year, fold["year"], candidate["candidate_id"])
+                if key in inner_receipts:
+                    receipt = inner_receipts[key]
+                else:
+                    complete = read_record(conn, store, registration.run_id, "execution:" + key)
+                    receipt = {"status": complete["status"],
+                        "fit_attempt_count": complete["fit_attempt_count"],
+                        "completed_fit_count": complete["completed_fit_count"],
+                        "diagnostics": complete["diagnostics"] if complete["status"] == "succeeded" else []}
+                    if inner_uses[key] > 1:
+                        inner_receipts[key] = receipt
+                    del complete
+                inner_fits.append({"outer_year": year, "inner_year": fold["year"],
+                    "candidate_id": candidate["candidate_id"], "execution_slot": "execution:" + key,
+                    **receipt})
+                inner_uses[key] -= 1
+                if inner_uses[key] == 0:
+                    inner_receipts.pop(key, None)
         key = content_hash([plan["plan_id"], year])
         forecasts.extend(read_record(conn, store, registration.run_id, "outer-forecasts:" + key))
         key = content_hash([plan["plan_id"], year, "comparison"])
