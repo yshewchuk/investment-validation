@@ -49,7 +49,10 @@ or an executable search plan. No training, sklearn or dictionary imports occur.
 add a distinct closed recipe identity with explicit `signed` or `nonnegative`
 target domain. Signed recipes bind no projection; nonnegative recipes bind
 zero clipping. The v2 magnitude grid and recipe/result identities remain unchanged;
-v3 may supply bounded alpha values declared by its request.
+v3 may supply bounded alpha values declared by its request. `ridge_hgb_recipe` with
+`learning_rate`, `min_samples_leaf` and `l2_regularization` yields the distinct
+`magnitude_ridge_hgb_recipe.v2` HGB identity (early stopping, `max_iter` 500);
+without them the v1 recipe is unchanged.
 
 `magnitude_elasticnet_recipe.regression_elasticnet_recipe` and its
 `validate_regression_elasticnet_recipe` bind a distinct closed policy with explicit

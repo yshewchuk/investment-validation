@@ -112,8 +112,14 @@ Its CLI also consumes `native_registration.read_native_registration`/`valid_regi
 validator and its closed H/HM/HMO 33-candidate grid.
 `magnitude_search_request_versions.compile_request` keeps v2 replay intact and
 dispatches `magnitude_search_request_v3.compile_request` requests with bounded
-request-declared Ridge/ElasticNet axes; HGB remains unchanged in v3. Qualified
-SIZE v1.6 keeps request v2 replay; v1.7 sealing and admission accept v2 and v3.
+request-declared Ridge/ElasticNet axes; HGB remains unchanged in v3. Request v4
+(same compiler) adds the HGB axes `learning_rate`, `max_leaf_nodes`,
+`min_samples_leaf` and `l2_regularization` with per-axis bounds, and its HGB
+candidates use `magnitude_ridge_hgb_recipe.v2` (early stopping, `max_iter` 500
+cap), so they get new candidate ids; the early-stopping holdout is a random 10%
+of training rows, not time-ordered, and only picks the tree count. The design
+grid (2x2x2x2 HGB, 99 candidates over H/HM/HMO) is in #1848 section 5. Qualified
+SIZE v1.6 keeps request v2 replay; v1.7 sealing and admission accept v2, v3 and v4.
 `size_search.preflight` publishes the receipt consumed by `register`; legacy
 previews retain their outputs/refusals. The documented v3 grid example is ElasticNet
 alpha `[0.001, 0.003, 0.01, 0.03, 0.1, 1]`, l1 ratio `[0.25, 0.75]`, and Ridge

@@ -117,6 +117,24 @@ def test_hgb_fixed_iteration_two_leaf_oracle(leaves):
     assert result["predictions"] == pytest.approx([2 + 3 * 0.9**100, 8 - 3 * 0.9**100], abs=1e-6)
 
 
+def test_early_stopping_v2_recipe_fits_deterministically():
+    rng = np.random.default_rng(20261030)
+    train = rng.normal(size=(200, 3))
+    labels = np.abs(rng.normal(size=200))
+    prediction = rng.normal(size=(25, 3))
+    recipe = ridge_hgb_recipe(model="history_hgb", columns=["x0", "x1", "x2"],
+        feature_dictionary_hash="sha256:" + "a" * 64, learning_rate=0.05, max_leaf_nodes=7,
+        min_samples_leaf=20, l2_regularization=0.0)
+    first = _fit(recipe, train, labels, prediction)
+    second = _fit(recipe, train, labels, prediction)
+    assert first == second
+    assert first["schema_version"] == "magnitude_ridge_hgb_fit.v1"
+    assert first["recipe_id"] == content_hash(recipe)
+    values = first["predictions"]
+    assert len(values) == len(prediction)
+    assert all(np.isfinite(values)) and all(value >= 0 for value in values)
+
+
 @pytest.mark.parametrize("kind", KINDS)
 def test_eleven_column_numeric_parity_with_unchanged_v1(kind):
     old = magnitude_fitted_execution_document("2026-01-01", kind)["fit_recipe"]
