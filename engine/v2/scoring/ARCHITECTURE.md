@@ -199,10 +199,12 @@ reference against the recorded producer binding and the request's canonical
 decision date; the served fold boundary may equal that date (for a first-day
 decision), but may not be later. It then writes the validated map to metadata field
 `chooser_fold_references` when a chooser trace has producer folds (`None`
-otherwise). Capture performs no catalog lookup and never infers missing
+otherwise). Production capture resolves the release catalog before scoring;
+`strict_trace_one` performs no catalog lookup and never infers missing
 provenance. A chooser trace with a producer fold but no matching verified
-reference refuses. Provenance stays outside chooser inputs and the receipt;
-orphan references, incomplete producer coverage and invalid dates also refuse.
+reference refuses. Orphan references, incomplete producer coverage and
+invalid dates also refuse with `StrictTraceCaptureError`. Provenance stays
+outside chooser inputs and the receipt.
 `SourceBundle.chooser_fold_reference` remains an optional API field and is
 not used by this legacy capture path.
 
@@ -703,10 +705,10 @@ the exclusive boundary of training data for that fold.
 for ordinary nightly scoring. Callers that need these references opt in with
 `include_chooser_fold_references=True`; resolution returns a complete map or a
 typed refusal. A carried fold whose authoring release lacks canonical cutoff
-data refuses instead of producing a partial map. This contract slice defines
-the verified reference map; scorer and capture consumption is in the
-follow-up slice. It does not infer provenance from legacy rows. Production capture and release preparation consume this contract in the
-follow-up wiring slice.
+data refuses instead of producing a partial map. Strict production capture
+opts into this verified reference map, passes it to the scorer, and records
+validated references in strict trace metadata. Ordinary nightly scoring does
+not load chooser estimators, and no path infers provenance from legacy rows.
 
 | Condition | Outcome |
 |---|---|

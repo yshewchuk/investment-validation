@@ -112,7 +112,8 @@ check defines missing-input and failure outcomes:
 | Budget decreases without root-test moves | Pass only when the new budget equals the current root-test count; increases remain refused |
 | A phase-one baseline test cannot be found | `phase1_suite()` raises `FileNotFoundError` |
 | Tier-0 support gets an invalid record/receipt | Existing copy, rounding or attribute errors propagate; no retry, cache, transaction or partial writes |
-| Strict production capture cannot resolve its opted-in chooser binding | CLI exits through `argparse` before constructing the Scorer |
+| The opted-in production resolver raises `ReleaseBindingError` for the chooser binding | CLI exits through `argparse` before constructing the Scorer |
+| A strict trace has missing/mismatched chooser-fold provenance, orphan references, incomplete producer coverage or invalid dates | `strict_trace_one` raises `StrictTraceCaptureError` before packaging the trace |
 
 ## Invariants
 

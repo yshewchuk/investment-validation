@@ -140,8 +140,10 @@ imports `native_entry_rule.ENTRY_RULE_STRATEGIES`, `NightlySourceBundleRefusal`,
 `no_fit_guard()` block. `engine.v2.serving.native_render` (layer 7) imports
 `analog_display_fields`, `DISPLAY_ANALOG_FIELDS` and `StageObservation` to
 carry the analog stage's display-only row ids onto a native serving row.
-The strict scorer and capture consumer for chooser-fold references is part of
-the follow-up wiring slice; this slice provides the verified resolver contract.
+Strict Tier-0 capture opts into verified chooser-fold references, passes them
+through the scorer, and records validated references in strict trace metadata.
+`tools/capture_tier0_corpus.py` is an external compatibility caller of the
+release binding resolver and scorer; it is not a package-layer consumer.
 
 <!-- consumers: engine.v2.models.training, engine.v2.ops, engine.v2.serving -->
 

@@ -840,6 +840,10 @@ class Phase4TraceCollector:
           fit, a champion's stored residual pool), ``_Predocumented`` and
           shared like the fold pools.
 
+        * ``chooser_references``: producer output -> verified chooser-fold
+          reference (including its fold month), recorded by strict capture
+          outside chooser inputs and receipts;
+
         Values are what legacy used for this request. Recording the same
         name twice is a no-op when equal. A different second value never
         raises inside legacy scoring (the row would be lost): the first value
