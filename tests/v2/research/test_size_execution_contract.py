@@ -249,6 +249,10 @@ def test_shared_inner_allows_cutoff_difference_when_membership_matches(monkeypat
     v3.update(max_candidates=1000, max_fits=10000)
     document["size_request"] = compile_request(v3)["request"]
     assert binding.prepare_plan(None, None, registration, v3)["schema_version"] == PLAN_V2
+    monkeypatch.setattr(binding, "verify_native_registration", lambda *a, **k: pytest.fail("registration read"))
+    with pytest.raises(OpsError) as error:
+        binding.prepare_plan(None, None, registration, v3, plan_schema=PLAN_V3)
+    assert error.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
 
 
 @pytest.mark.parametrize("plan_schema", ["magnitude_search_plan.v4", 0, []])

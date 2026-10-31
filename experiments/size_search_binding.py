@@ -228,9 +228,11 @@ def _shared_inner(folds):
 def prepare_plan(conn, store, registration, request, *, plan_schema=None):
     """Expand the fixed dictionary grid into fully bound executable recipes."""
     from experiments.magnitude_search_plan import PLAN_V2, PLAN_V3
+    request_version = request.get("schema_version") if isinstance(request, dict) else None
     if plan_schema is None:
-        request_version = request.get("schema_version") if isinstance(request, dict) else None
         plan_schema = PLAN_V2 if request_version == "magnitude_search_request.v3" else PLAN_V3
+    if request_version == "magnitude_search_request.v3" and plan_schema != PLAN_V2:
+        raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search plan schema does not match request version")
     if plan_schema not in (PLAN_V2, PLAN_V3):
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "unsupported SIZE search plan schema")
     verify_native_registration(conn, store, registration, max_evidence_bytes=MAX_NATIVE_EVIDENCE_BYTES)
