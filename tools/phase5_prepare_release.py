@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+from datetime import date
 import hashlib
 import json
 import re
@@ -591,6 +592,59 @@ def _staging_id_conflict(exc) -> bool:
     return False
 
 
+def with_chooser_retrain_cutoff(sources, chooser_validated):
+    if sources is not None and not isinstance(sources, Mapping):
+        raise PrepareRefused("release sources must be a mapping")
+    if (sources is not None and "retrain_cutoff" in sources
+            and sources.get("pool_cutoff") is None):
+        raise PrepareRefused(
+            "retrain_cutoff requires canonical pool_cutoff on/after retrain_cutoff")
+    if not chooser_validated:
+        if sources is None or "retrain_cutoff" not in sources:
+            return sources
+        try:
+            retrain_cutoff = sources["retrain_cutoff"]
+            pool_cutoff = sources["pool_cutoff"]
+            retrain_date = date.fromisoformat(retrain_cutoff)
+            pool_date = date.fromisoformat(pool_cutoff)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise PrepareRefused(
+                "retrain_cutoff requires canonical pool_cutoff on/after retrain_cutoff"
+            ) from exc
+        if (retrain_date.isoformat() != retrain_cutoff
+                or pool_date.isoformat() != pool_cutoff or retrain_date > pool_date):
+            raise PrepareRefused(
+                "retrain_cutoff requires canonical pool_cutoff on/after retrain_cutoff")
+        return sources
+    try:
+        fold_starts = [item.fold_start for item in chooser_validated.values()]
+        parsed_starts = [date.fromisoformat(value) for value in fold_starts]
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise PrepareRefused("chooser fold_start must be a canonical date") from exc
+    if any(parsed.isoformat() != value for parsed, value in zip(parsed_starts, fold_starts)):
+        raise PrepareRefused("chooser fold_start must be a canonical date")
+    retrain_cutoff = max(parsed_starts).isoformat()
+    if (sources is not None and "retrain_cutoff" in sources
+            and sources["retrain_cutoff"] != retrain_cutoff):
+        raise PrepareRefused("chooser retrain_cutoff must match latest fold_start")
+    pool_cutoff = (sources or {}).get("pool_cutoff")
+    if pool_cutoff is not None:
+        try:
+            parsed_pool_cutoff = date.fromisoformat(pool_cutoff)
+        except (TypeError, ValueError) as exc:
+            raise PrepareRefused(
+                "chooser pool_cutoff must be canonical and on/after retrain_cutoff") from exc
+        if parsed_pool_cutoff.isoformat() != pool_cutoff or parsed_pool_cutoff < date.fromisoformat(retrain_cutoff):
+            raise PrepareRefused(
+                "chooser pool_cutoff must be canonical and on/after retrain_cutoff")
+    result = {**dict(sources or {}), "retrain_cutoff": retrain_cutoff}
+    if pool_cutoff is None:
+        result.pop("pool_cutoff", None)
+    else:
+        result["pool_cutoff"] = pool_cutoff
+    return result
+
+
 def write_release(out: Path, release: ModelRelease, inventory: ModelReleaseInventory,
                   payloads: Mapping[str, bytes], states: list[StateBuild], *,
                   sources: Mapping[str, str] | None = None,
@@ -604,10 +658,13 @@ def write_release(out: Path, release: ModelRelease, inventory: ModelReleaseInven
     ``StagingRefused`` carrying ``RELEASE_ID_REUSED``/``MANIFEST_UNREADABLE``).
     Any other failure leaves the record withdrawn as before.
     """
+    if sources is not None and not isinstance(sources, Mapping):
+        raise PrepareRefused("release sources must be a mapping")
     if sources and any(str(key).startswith(COPY_PREFIX) for key in sources):
         raise PrepareRefused(f"{COPY_PREFIX}refused: caller-supplied pinned sources")
     release, states = _rebase_member_paths(release, states, pinned_panel)
     sources, validated, chooser_validated = _run_preflights(release, states, pinned_panel, sources)
+    sources = with_chooser_retrain_cutoff(sources, chooser_validated)
     out = Path(out)
     root = deployment_root(out)
     root.mkdir(parents=True, exist_ok=True)

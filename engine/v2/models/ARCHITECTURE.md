@@ -543,13 +543,12 @@ Snapshot ID, dataset version and panel byte hash remain distinct identities. Sel
 | Selected fold bytes are corrupt, oversized, escaped-path or fail the loader's header/descriptor checks | Per-row `MODEL_NOT_READY` before inference; redact filesystem details |
 | Old cache lacks held-out pool or declared interval policy | Refuse; never rebuild the pool during scoring |
 
-**Offline descriptor authoring.** Immutable `serving_folds.ServingFoldDescriptor`
-records parent release/model-manifest identity, model, ordered features, output/clock,
-exact month, full panel SHA-256, estimator member, embedded pool fields/count and
-explicit interval policy. The enclosing catalog hash binds catalog identity
-without a self-reference inside the descriptor.
-`tools.phase5_prepare_release` obtains the registered producer's `SizeFoldPolicy`;
-`serving_fold_preflight` (this package) validates cache bytes before catalog publication, without fitting/inference.
+**Offline descriptor authoring.** Immutable `serving_folds.ServingFoldDescriptor` records parent release/model-manifest identity, model, ordered features, output/clock, exact month, full panel SHA-256, estimator member, embedded pool fields/count, and explicit interval policy. The enclosing catalog hash binds catalog identity without a self-reference inside the descriptor.
+`tools.phase5_prepare_release` obtains the registered producer's `SizeFoldPolicy`; `serving_fold_preflight` validates cache bytes before catalog publication, without fitting/inference.
+When staging chooser serving folds, `phase5_prepare_release` writes `sources.retrain_cutoff` to the latest validated chooser `fold_start`, the canonical boundary for opted-in chooser-reference resolution. It preserves a supplied canonical `pool_cutoff`, but never derives pool readiness from chooser fold dates. A catalog may therefore contain `retrain_cutoff` without `pool_cutoff`; classification treats it as `NO_POOL_CATALOG`, so pool bootstrap remains available.
+Catalogs without chooser folds need neither cutoff. A caller-supplied `retrain_cutoff` always requires a canonical `pool_cutoff` on or after it; otherwise preparation refuses before staging. With chooser folds, noncanonical fold starts refuse with the fold-date cause, a supplied `retrain_cutoff` that differs from the latest validated fold start refuses with the retrain-cutoff cause, and a noncanonical/earlier supplied `pool_cutoff` refuses with the pool-cutoff cause. Each raises `PrepareRefused` before staging.
+Catalog validation applies the same distinction: a missing `pool_cutoff` is valid for a chooser-only catalog, while an explicitly present `pool_cutoff: null` alongside `retrain_cutoff` is invalid.
+Release preparation also refuses non-mapping `sources` with `PrepareRefused` before pinned-source checks or preflights.
 Serving-fold writers (`tier4.serving_model`, Phase-4 build/backfill) use binary handles and explicit `compress=0`; filename suffixes cannot enable compression.
 Release preparation (`--tier4-dir` and raw-byte APIs) requires trusted uncompressed inputs from supported writers; it does not refuse arbitrary compressed inputs before decoding.
 Hashes verify bytes, not provenance. The serialized byte cap is not a decoded-memory bound.

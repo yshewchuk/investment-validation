@@ -101,14 +101,14 @@ def test_size_search_contain_sets_no_address_space_limit(monkeypatch):
     calls = []
     monkeypatch.setattr(size_search.resource, "setrlimit", lambda *args: calls.append(args))
     monkeypatch.setattr("experiments.magnitude_search_request_versions.compile_request",
-        lambda request: limits(2 ** 33, 2 ** 32))
+        lambda request, horizons=None: limits(2 ** 33, 2 ** 32))
     try:
         assert size_search._contain({}) == 2 ** 33
         assert calls == []
     finally:
         signal.alarm(0)
     monkeypatch.setattr("experiments.magnitude_search_request_versions.compile_request",
-        lambda request: limits(2 ** 33, 2 ** 34))
+        lambda request, horizons=None: limits(2 ** 33, 2 ** 34))
     with pytest.raises(OpsError) as caught:
         size_search._contain({})
     assert caught.value.code == "INVALID_EXPERIMENT_SPEC"

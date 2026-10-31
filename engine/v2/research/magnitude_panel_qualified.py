@@ -22,6 +22,13 @@ def _policy(policy):
         raise fail("HOLDOUT_ACCESS_DENIED", "qualified SIZE panel requires frozen 30-day policy")
 
 
+def _horizons(horizons):
+    if (type(horizons) is not list or not horizons
+            or any(type(h) is not int or h not in (1, 3, 5) for h in horizons)
+            or horizons != sorted(set(horizons))):
+        raise fail("CONTRACT_MISMATCH", "ordered native horizons required")
+
+
 def _daily_start(records):
     dates = [canonical_day(r.time_min[:10]) for r in records
              if r.row_count and type(r.time_min) is str and r.time_min]
@@ -44,6 +51,7 @@ def _prepare(repository, source, *, history_snapshot, price_history_snapshot, as
              policy, event_ids, horizons, history_start, source_start, limits, metadata_limits, producer, history_admitted):
     _policy(policy)
     source_start = canonical_day(source_start)
+    _horizons(horizons)
     request = dict(as_of_month=as_of_month, policy=policy, event_ids=event_ids, horizons=horizons,
                    history_start=history_start, limits=limits)
     admitted = history_admitted
