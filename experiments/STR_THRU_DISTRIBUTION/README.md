@@ -1,11 +1,11 @@
 # STR-THRU distribution research
 
-[DESIGN.md](DESIGN.md) defines the four approved implementation bundles and scientific controls. [ARCHITECTURE.md](ARCHITECTURE.md) documents fitting/results, causal residuals, the fixed child and run metadata; public modules remain in the parent `experiments` package.
+[DESIGN.md](DESIGN.md) defines the four approved implementation bundles and scientific controls. [ARCHITECTURE.md](ARCHITECTURE.md) documents fitting/results, causal residuals, the fixed child and run metadata plus D4's source-free scoring/report contracts; public modules remain in the parent `experiments` package.
 
 - A supplies magnitude histogram math and frozen payoff controls.
 - B supplies separate native ownership, source/fold admission, raw-pair budgets and claims.
 - C adds admitted numeric fit receipts and earlier-OOF residual controls; raw probabilities remain explicitly uncalibrated.
-- D supplies separate policy/book/market helpers, a fixed child and metadata seals; the whole-experiment runner and complete attempts remain absent.
+- D1/D2/D3/D7 supply explicit economics, research books, paired reports and pinned quote/bridge adapters, alongside bounded fixed-child fits and metadata seals; D4 adds proper scores and forecast reporting. The complete bounded runner is not supplied here.
 
 Focused synthetic checks live in `tests/v2/research/test_distribution_*.py`. No real data, provider, final-holdout, deployment or automatic run authority follows from these APIs. Shared platform owners retain source eligibility, transport and holdout policy.
 
