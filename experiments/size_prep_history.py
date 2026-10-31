@@ -70,17 +70,9 @@ def _record_matches(workspace, record):
         return False
 
 
-def prepare_workspace_panel(workspace, scope, record, *, event_ids, as_of_month, history_start, source_start,
-                            metadata_limits, clock):
-    ids_ok = (type(event_ids) is list and bool(event_ids)
-              and all(type(key) is str and key for key in event_ids)
-              and len(set(event_ids)) == len(event_ids))
-    if (not ids_ok or type(scope) is not str or type(as_of_month) is not str
-            or type(history_start) is not str or type(source_start) is not str
-            or type(metadata_limits) is not dict):
-        raise fail("INVALID_REQUEST", "invalid workspace panel request")
+def checked_bounds(workspace, scope, record, metadata_limits):
+    """Shared leading checks: scope, provenance record, bounds head and the bounded catalog probe."""
     validate_size_scope_request(workspace, scope)
-    size_panel.validate_panel_inputs({"source_start": source_start, "metadata_limits": metadata_limits})
     if not _record_matches(workspace, record):
         raise _record_invalid()
     row = workspace.conn.execute(
@@ -97,9 +89,22 @@ def prepare_workspace_panel(workspace, scope, record, *, event_ids, as_of_month,
     finally:
         if workspace.conn.in_transaction:
             workspace.conn.rollback()
-    started = time.monotonic()
     repository = Repository(workspace.conn, workspace.store, pin_snapshots=True)
-    bounds = repository.resolve(record["bounds_snapshot_id"])
+    return repository, repository.resolve(record["bounds_snapshot_id"])
+
+
+def prepare_workspace_panel(workspace, scope, record, *, event_ids, as_of_month, history_start, source_start,
+                            metadata_limits, clock):
+    ids_ok = (type(event_ids) is list and bool(event_ids)
+              and all(type(key) is str and key for key in event_ids)
+              and len(set(event_ids)) == len(event_ids))
+    if (not ids_ok or type(scope) is not str or type(as_of_month) is not str
+            or type(history_start) is not str or type(source_start) is not str
+            or type(metadata_limits) is not dict):
+        raise fail("INVALID_REQUEST", "invalid workspace panel request")
+    size_panel.validate_panel_inputs({"source_start": source_start, "metadata_limits": metadata_limits})
+    started = time.monotonic()
+    repository, bounds = checked_bounds(workspace, scope, record, metadata_limits)
     limits = _derive_history_limits(repository, bounds, len(event_ids))
     _log("workspace panel start events=" + str(len(event_ids)) + " limits=" + canonical_json(limits), started)
     policy = eligibility_policy(version="grouped_ticker_embargo.v1", embargo_days=30)
