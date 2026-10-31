@@ -37,7 +37,7 @@ def candidate_evidence(conn, store, run_id, plan):
                                     if isinstance(fit, dict) and fit.get("fit_seconds") is not None],
                     "score_seconds": terminal.get("score_seconds"),
                     "rss_delta_kib": terminal.get("rss_delta_kib"),
-                    "inner_metrics": terminal.get("inner_metrics", []),
+                    "inner_metrics": terminal.get("inner_metrics"),
                     "diagnostics": execution.get("diagnostics", []) if status == "succeeded" else []})
     return rows
 

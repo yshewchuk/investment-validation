@@ -53,3 +53,25 @@ def test_mixed_failed_and_successful_trials_report_diagnostics(monkeypatch):
     assert succeeded["inner_metrics"] == [{"horizon_sessions": 1, "mean_absolute_move_pct": 0.4}]
     assert failed["inner_metrics"] == [{"horizon_sessions": 1, "mean_absolute_move_pct": 0.1}]
     assert observed["comparison_fits"][0]["component_fits"] == 2
+
+
+def test_candidate_evidence_distinguishes_missing_metrics_from_empty(monkeypatch):
+    plan = {"plan_id": "plan", "folds": [{"outer": {"year": "2024"},
+        "inner": [{"year": "2023"}]}], "candidates": [
+            {"candidate_id": "legacy"}, {"candidate_id": "empty"}]}
+    legacy_key = report.content_hash(["plan", "2024", "2023", "legacy"])
+    empty_key = report.content_hash(["plan", "2024", "2023", "empty"])
+
+    def read(conn, store, run_id, slot):
+        if slot.startswith("execution:"):
+            return {"status": "succeeded", "fits": []}
+        if slot == "terminal:" + legacy_key:
+            return {"status": "succeeded"}
+        if slot == "terminal:" + empty_key:
+            return {"status": "succeeded", "inner_metrics": []}
+        raise AssertionError(f"unexpected journal slot: {slot}")
+
+    monkeypatch.setattr(report, "read_record", read)
+    rows = report.candidate_evidence(None, None, "run", plan)
+
+    assert [row["inner_metrics"] for row in rows] == [None, []]
