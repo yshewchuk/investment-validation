@@ -1,4 +1,4 @@
-"""Pure v3 stage-2 request validation with bounded request-declared linear grids."""
+"""Pure v3/v4 stage-2 request validation with bounded request-declared linear grids."""
 import json
 import math
 
@@ -9,15 +9,25 @@ from experiments import magnitude_search_request as v2
 __all__ = ["compile_request"]
 
 _MAX_AXIS_LENGTH = 32
+_MAX_V4_CANDIDATES = 1000
 _BOUNDS = {
     ("ridge", "alpha"): (1e-6, 1000.0),
     ("elasticnet", "alpha"): (1e-6, 1000.0),
     ("elasticnet", "l1_ratio"): (1e-6, 1.0),
+    ("hgb", "learning_rate"): (1e-3, 1.0),
+    ("hgb", "max_leaf_nodes"): (2, 64),
+    ("hgb", "min_samples_leaf"): (1, 1000),
+    ("hgb", "l2_regularization"): (0, 1000),
 }
 _FAMILIES = {
     "ridge": {"alpha"},
     "elasticnet": {"alpha", "l1_ratio"},
     "hgb": {"max_leaf_nodes"},
+}
+_FAMILIES_V4 = {
+    "ridge": {"alpha"},
+    "elasticnet": {"alpha", "l1_ratio"},
+    "hgb": {"learning_rate", "max_leaf_nodes", "min_samples_leaf", "l2_regularization"},
 }
 
 
@@ -30,14 +40,25 @@ def _finite_positive(value):
         return False
 
 
+def _finite_nonnegative(value):
+    if type(value) not in (int, float) or value < 0:
+        return False
+    try:
+        return math.isfinite(float(value))
+    except (OverflowError, ValueError):
+        return False
+
+
 def _space(request):
     v2._require(request["feature_sets"] == v2._SETS,
                 "stage-2 requires exactly ordered H/HM/HMO feature sets")
     space = request["space"]
-    v2._require(v2._shape(space, _FAMILIES),
+    version = request["schema_version"]
+    families = _FAMILIES_V4 if version == "magnitude_search_request.v4" else _FAMILIES
+    v2._require(v2._shape(space, families),
                 "stage-2 requires the closed three-family grid")
     canonical = {}
-    for family, axes in _FAMILIES.items():
+    for family, axes in families.items():
         supplied = space[family]
         v2._require(v2._shape(supplied, axes),
                     "stage-2 grid axes differ from the closed policy")
@@ -46,19 +67,28 @@ def _space(request):
             values = supplied[axis]
             v2._require(type(values) is list and 1 <= len(values) <= _MAX_AXIS_LENGTH,
                         "stage-2 grid axis length must be between 1 and 32")
-            v2._require(all(_finite_positive(value) for value in values),
-                        "stage-2 grid values must be finite positive numbers")
-            v2._require(values == sorted(values) and len(set(values)) == len(values),
-                        "stage-2 grid axes must be strictly increasing")
-            if family == "hgb":
+            if family == "hgb" and version != "magnitude_search_request.v4":
                 v2._require(values == [7, 15],
                             "stage-2 HGB max_leaf_nodes grid remains fixed at [7, 15]")
                 canonical[family][axis] = [7, 15]
-            else:
-                lower, upper = _BOUNDS[(family, axis)]
-                v2._require(all(lower <= value <= upper for value in values),
-                            "stage-2 grid values exceed their allowed bounds")
+                continue
+            if family == "hgb" and axis in ("max_leaf_nodes", "min_samples_leaf"):
+                v2._require(all(type(value) is int for value in values),
+                            "stage-2 HGB integer grid values must be integers")
+                canonical[family][axis] = [int(value) for value in values]
+            elif family == "hgb" and axis == "l2_regularization":
+                v2._require(all(_finite_nonnegative(value) for value in values),
+                            "stage-2 grid values must be finite nonnegative numbers")
                 canonical[family][axis] = [float(value) for value in values]
+            else:
+                v2._require(all(_finite_positive(value) for value in values),
+                            "stage-2 grid values must be finite positive numbers")
+                canonical[family][axis] = [float(value) for value in values]
+            v2._require(values == sorted(values) and len(set(values)) == len(values),
+                        "stage-2 grid axes must be strictly increasing")
+            lower, upper = _BOUNDS[(family, axis)]
+            v2._require(all(lower <= value <= upper for value in values),
+                        "stage-2 grid values exceed their allowed bounds")
     request["space"] = canonical
 
 
@@ -70,6 +100,9 @@ def _counts(request):
                 "stage-2 inner years must be ordered and strictly earlier than their outer year")
     count = len(v2._SETS) * sum(math.prod(len(values) for values in axes.values())
                                 for axes in request["space"].values())
+    if request["schema_version"] == "magnitude_search_request.v4":
+        v2._require(count <= _MAX_V4_CANDIDATES,
+                    "stage-2 v4 grid exceeds the 1000-candidate ceiling")
     inners, outers = sum(map(len, inner.values())), len(outer)
     fits = 3 * (count * inners + outers)
     v2._require(v2._positive(request["max_candidates"]) and request["max_candidates"] >= count
@@ -90,8 +123,9 @@ def compile_request(request):
         raise fail("INVALID_EXPERIMENT_SPEC", "stage-2 request requires plain finite JSON") from None
     v2._require((v2._shape(request, v2._KEYS)
                  or v2._shape(request, v2._KEYS | {"workers"}))
-                and request["schema_version"] == "magnitude_search_request.v3",
-                "stage-2 request requires its closed v3 schema")
+                and request["schema_version"] in (
+                    "magnitude_search_request.v3", "magnitude_search_request.v4"),
+                "stage-2 request requires its closed v3 or v4 schema")
     v2.validate_workers(request)
     request.pop("workers", None)
     v2._references(request)
