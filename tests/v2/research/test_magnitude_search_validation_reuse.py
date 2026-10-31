@@ -88,6 +88,8 @@ def test_reused_terminal_matches_a_labels_reloading_trial(journal, monkeypatch):
     assert reused["predictions"] == loaded["predictions"] == reloaded["predictions"]
     assert reused["metrics"] == loaded["metrics"] == reloaded["metrics"]
     assert reused["inputs_id"] == loaded["inputs_id"] == reloaded["inputs_id"]
+    assert reused["predictions"]
+    assert reused["metrics"]["count"] == 3
 
 
 def test_corrupt_stored_validation_refuses_the_next_trial_without_reload(journal, monkeypatch):

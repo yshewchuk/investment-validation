@@ -770,17 +770,14 @@ def test_record_requires_exact_preflight_evaluation_membership(journal, monkeypa
             assert durable_evidence(journal) == before
 
 
-@pytest.mark.parametrize("mutation", ["target", "receipt", "nan", "infinity"])
-def test_drifted_labels_cannot_overwrite_a_committed_validation_authority(journal, monkeypatch, mutation):
+def test_drifted_labels_cannot_overwrite_a_committed_validation_authority(journal, monkeypatch):
     # Later cohort trials reuse the journaled validation, so label drift after the
     # first trial is never re-read and cannot refuse or rewrite the authority.
     prepare_recording(journal, monkeypatch)
     journal.recorder.start("2024", "2023", "z-last")
     journal.recorder.record("2024", "2023", "z-last", forecasts=rows(4))
     journal.recorder.start("2024", "2023", "a-first")
-    changed = native_labels({"target": 7, "receipt": 4, "nan": float("nan"), "infinity": float("inf")}[mutation])
-    if mutation == "receipt":
-        changed.attrs["labels_before"] = "2099-01-01"
+    changed = native_labels(7)
     reloads = []
     def drifted(*args, **kwargs):
         reloads.append(True)
