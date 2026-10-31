@@ -198,11 +198,14 @@ chooser producer output and fold month it served. The shared `pred_abs_move`
 size fold is recorded as a chooser-frame input and pool, but is not a chooser
 producer: its identity is validated by the ordinary frozen Tier-4 binding.
 `strict_trace_one` checks each chooser-producer reference against the recorded
-producer binding, including its feature order (tuple-normalized, with absent
-orders treated as empty), and the request's canonical decision date; the
-served fold boundary may equal that date (for a first-day decision), but may
-not be later. A chooser declaration with a non-string binding key is refused
-with `StrictTraceCaptureError` before binding lookup.
+producer binding, including the full recorded release-binding identity
+(`binding_id`, model, role, strategy, decision clock, adapter, ordered
+features, output names and artifact hash), the served output name and the
+request's canonical decision date. Feature orders are tuple-normalized, with
+absent orders treated as empty; the served fold boundary may equal that date
+(for a first-day decision), but may not be later. A chooser declaration with
+a non-string binding key is refused with `StrictTraceCaptureError` before
+binding lookup.
 It then writes the validated map to metadata field
 `chooser_fold_references` when a chooser trace has producer folds (`None`
 otherwise). Production capture resolves the release catalog before scoring;

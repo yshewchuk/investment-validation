@@ -593,7 +593,24 @@ def _staging_id_conflict(exc) -> bool:
 
 
 def with_chooser_retrain_cutoff(sources, chooser_validated):
+    if sources is not None and not isinstance(sources, Mapping):
+        raise PrepareRefused("release sources must be a mapping")
     if not chooser_validated:
+        if sources is None or "retrain_cutoff" not in sources:
+            return sources
+        try:
+            retrain_cutoff = sources["retrain_cutoff"]
+            pool_cutoff = sources["pool_cutoff"]
+            retrain_date = date.fromisoformat(retrain_cutoff)
+            pool_date = date.fromisoformat(pool_cutoff)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise PrepareRefused(
+                "retrain_cutoff requires canonical pool_cutoff on/after retrain_cutoff"
+            ) from exc
+        if (retrain_date.isoformat() != retrain_cutoff
+                or pool_date.isoformat() != pool_cutoff or retrain_date > pool_date):
+            raise PrepareRefused(
+                "retrain_cutoff requires canonical pool_cutoff on/after retrain_cutoff")
         return sources
     try:
         fold_starts = [item.fold_start for item in chooser_validated.values()]

@@ -3730,7 +3730,26 @@ def validated_chooser_fold_references(source, request):
             raise StrictTraceCaptureError("chooser ref has invalid dates") from exc
         digest = ref.get("estimator_sha256")
         descriptor = ref.get("descriptor_hash")
-        if (not isinstance(producer, Mapping) or not isinstance(identity, Mapping)
+        expected_identity = declaration.get("producer_identity")
+        identity_fields = (
+            "binding_id", "model_id", "role", "strategy_id", "decision_clock_id",
+            "adapter", "feature_order", "output_names", "artifact_hash",
+        )
+        try:
+            identity_matches = (
+                isinstance(identity, Mapping) and isinstance(expected_identity, Mapping)
+                and set(identity) == set(identity_fields)
+                and set(expected_identity) == set(identity_fields)
+                and all(
+                    tuple(identity[field] or ()) == tuple(expected_identity[field] or ())
+                    if field in ("feature_order", "output_names")
+                    else identity[field] == expected_identity[field]
+                    for field in identity_fields
+                )
+            )
+        except TypeError:
+            identity_matches = False
+        if (not isinstance(producer, Mapping) or not identity_matches
                 or fold.isoformat() != ref["fold_start"] or fold.day != 1 or cutoff != fold
                 or fold > decision or ref.get("producer_output") != output
                 or declaration.get("output") != output

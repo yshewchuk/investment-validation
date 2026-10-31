@@ -113,7 +113,7 @@ check defines missing-input and failure outcomes:
 | A phase-one baseline test cannot be found | `phase1_suite()` raises `FileNotFoundError` |
 | Tier-0 support gets an invalid record/receipt | Existing copy, rounding or attribute errors propagate; no retry, cache, transaction or partial writes |
 | The opted-in production resolver cannot resolve a chooser binding or required cutoff | Refuse with `ReleaseBindingError` |
-| A strict trace has missing/mismatched chooser-fold provenance, orphan references, incomplete producer coverage or invalid dates | `strict_trace_one` raises `StrictTraceCaptureError` before packaging the trace |
+| A strict trace has missing/mismatched chooser-fold provenance (including release-binding identity or output name), orphan references, incomplete producer coverage or invalid dates | `strict_trace_one` raises `StrictTraceCaptureError` before packaging the trace |
 
 ## Invariants
 

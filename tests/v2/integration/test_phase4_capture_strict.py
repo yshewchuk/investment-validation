@@ -1197,6 +1197,26 @@ def test_phase5_prepare_release_sets_canonical_chooser_cutoff():
         with_chooser_retrain_cutoff({**sources, "pool_cutoff": "20261001"}, folds)
 
 
+@pytest.mark.parametrize(
+    "sources",
+    [
+        {"retrain_cutoff": "2026-09-01"},
+        {"retrain_cutoff": "2026-10-01", "pool_cutoff": "2026-09-01"},
+    ],
+)
+def test_phase5_prepare_rejects_invalid_explicit_cutoffs_without_chooser_folds(sources):
+    with pytest.raises(
+        PrepareRefused,
+        match="retrain_cutoff requires canonical pool_cutoff",
+    ):
+        with_chooser_retrain_cutoff(sources, {})
+
+
+def test_phase5_prepare_rejects_non_mapping_sources():
+    with pytest.raises(PrepareRefused, match="release sources must be a mapping"):
+        with_chooser_retrain_cutoff([], {})
+
+
 def test_write_release_persists_chooser_cutoff(tmp_path, monkeypatch):
     from tools import phase5_prepare_release as phase5
 
@@ -1247,7 +1267,7 @@ def test_chooser_fold_reference_flows_through_real_scorer_checkpoint(tmp_path, m
         release_binding=SimpleNamespace(
             binding_id="implied_t1:STR-THRU", model_id=model_id, role="implied_t1",
             strategy_id="STR-THRU", decision_clock_id="entry-close", adapter="ridge.v1",
-            feature_order=("im",), output_names=("pred_im_t1_d14",),
+            feature_order=("im",), output_names=("driver_prediction",),
             artifact_hash="sha256:" + "b" * 64),
     )
     served = SimpleNamespace(
@@ -1373,6 +1393,23 @@ def test_chooser_fold_reference_flows_through_real_scorer_checkpoint(tmp_path, m
         "source_inputs"]["content_hash"] = content_hash(corrupted_identity_source)
     with pytest.raises(StrictTraceCaptureError, match="mismatches served producer"):
         strict_trace_one(corrupted_identity_candidate, "snapshot-1", tmp_path / "release")
+
+    for field, value in (
+        ("binding_id", "tampered:STR-THRU"),
+        ("strategy_id", "OTHER"),
+        ("adapter", "tampered.adapter"),
+        ("output_names", ["other_output"]),
+        ("feature_order", 17),
+    ):
+        corrupted_binding_candidate = copy.deepcopy(candidate)
+        corrupted_binding_source = corrupted_binding_candidate[
+            "legacy_trace"]["checkpoints"]["source_inputs"]["value"]
+        corrupted_binding_source["frozen"]["chooser_references"][
+            "pred_im_t1_d14"]["release_binding"][field] = value
+        corrupted_binding_candidate["legacy_trace"]["checkpoints"][
+            "source_inputs"]["content_hash"] = content_hash(corrupted_binding_source)
+        with pytest.raises(StrictTraceCaptureError, match="mismatches served producer"):
+            strict_trace_one(corrupted_binding_candidate, "snapshot-1", tmp_path / "release")
 
     malformed_binding_candidate = copy.deepcopy(candidate)
     malformed_binding_source = malformed_binding_candidate[

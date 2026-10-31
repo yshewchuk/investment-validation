@@ -4366,18 +4366,33 @@ class Scorer:
             return
         chooser_references = {}
         for produces, served in getattr(result, "_phase4_chooser_served", ()):
-            self._phase4_record_fold(
-                request, result, served, features, produces=produces, site="chooser",
-                declarations={f"chooser_fold:{produces}": (
-                    {"pool": produces} if produces == "pred_abs_move" else
-                    {"binding": f"fold:{self._PHASE4_FOLD_ROLES[produces]}",
-                     "output": produces, "pool": produces, "site": "chooser"}
-                )},
-            )
             fold_start = str(pd.Timestamp(served.fold_start).date())
             reference = getattr(self, "_chooser_fold_references", {}).get((produces, fold_start))
+            declaration = (
+                {"pool": produces} if produces == "pred_abs_move" else
+                {"binding": f"fold:{self._PHASE4_FOLD_ROLES[produces]}",
+                 "output": produces, "pool": produces, "site": "chooser"}
+            )
+            identity_document = None
             if reference is not None:
                 identity = reference.release_binding
+                identity_document = {
+                    "binding_id": identity.binding_id,
+                    "model_id": identity.model_id,
+                    "role": identity.role,
+                    "strategy_id": identity.strategy_id,
+                    "decision_clock_id": identity.decision_clock_id,
+                    "adapter": identity.adapter,
+                    "feature_order": tuple(identity.feature_order),
+                    "output_names": tuple(identity.output_names),
+                    "artifact_hash": identity.artifact_hash,
+                }
+                declaration["producer_identity"] = identity_document
+            self._phase4_record_fold(
+                request, result, served, features, produces=produces, site="chooser",
+                declarations={f"chooser_fold:{produces}": declaration},
+            )
+            if reference is not None:
                 chooser_references[produces] = {
                     "producer_output": reference.producer_output,
                     "descriptor_hash": reference.descriptor_hash,
@@ -4385,17 +4400,7 @@ class Scorer:
                     "training_cutoff": reference.training_cutoff,
                     "release_id": reference.release_id,
                     "fold_start": reference.fold_start,
-                    "release_binding": {
-                        "binding_id": identity.binding_id,
-                        "model_id": identity.model_id,
-                        "role": identity.role,
-                        "strategy_id": identity.strategy_id,
-                        "decision_clock_id": identity.decision_clock_id,
-                        "adapter": identity.adapter,
-                        "feature_order": tuple(identity.feature_order),
-                        "output_names": tuple(identity.output_names),
-                        "artifact_hash": identity.artifact_hash,
-                    },
+                    "release_binding": identity_document,
                 }
         declarations: dict[str, Any] = {
             "chooser_primitives": {
