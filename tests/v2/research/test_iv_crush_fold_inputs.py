@@ -137,6 +137,33 @@ def test_wrong_target_pin_refuses_before_any_shard(fold_case, monkeypatch, missi
     assert catalog_rows(data.conn) == before and artifact_object_bytes(data.store) == saved
 
 
+@pytest.mark.parametrize("target_pin", [
+    pytest.param("absent", id="missing-target"),
+    pytest.param({}, id="missing-column"),
+    pytest.param({"column": "absolute_move_pct"}, id="wrong-column"),
+    pytest.param({"column": None}, id="null-column"),
+    pytest.param(None, id="null-target"),
+    pytest.param("crush_pct_iv30", id="scalar-target"),
+    pytest.param([], id="list-target"),
+])
+def test_invalid_iv_target_pin_refuses_before_publication(fold_case, monkeypatch, target_pin):
+    data = fold_case
+    cohort = admit(data)
+    if target_pin == "absent":
+        del cohort["target"]
+    else:
+        cohort["target"] = target_pin
+    before, saved = catalog_rows(data.conn), artifact_object_bytes(data.store)
+    monkeypatch.setattr(data.store, "read_verified", lambda *a, **k: pytest.fail("CAS read"))
+    monkeypatch.setattr(data.store, "publish_bytes", lambda *a, **k: pytest.fail("CAS write"))
+    with pytest.raises(OpsError) as caught:
+        inputs.publish_inputs(data.store, cohort)
+    assert caught.value.problem == fail(
+        "EXPERIMENT_IDENTITY_CONFLICT", "search fit target differs from its cohort").problem
+    assert caught.value.problem.retryable is False
+    assert catalog_rows(data.conn) == before and artifact_object_bytes(data.store) == saved
+
+
 @pytest.mark.parametrize("drift", ["environment", "runner", "worker", "sealed_implementation"])
 def test_installed_plan_drift_refuses_before_any_input_read(fold_case, monkeypatch, drift):
     data = fold_case

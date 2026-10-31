@@ -153,9 +153,16 @@ def publish_inputs(store, inputs):
     The inverse of ``load_inputs``: list-valued members become sections (keyless ones as
     ``{position, row}`` rows), every other leaf is an inline scalar by dotted path. Shards
     are published here; the caller appends the manifest, which is the commit point.
+    IV cohorts require their explicit target-column pin before any shard publication.
     """
+    schema = inputs.get("preflight", {}).get("schema_version")
+    members = list_members(schema)
+    target = inputs.get("target")
+    if schema == "research_iv_crush_preflight.v1" and (
+            not isinstance(target, dict) or target.get("column") != "crush_pct_iv30"):
+        raise fail(_CONFLICT, "search fit target differs from its cohort")
     sections = {}
-    for member in list_members(inputs.get("preflight", {}).get("schema_version")):
+    for member in members:
         path = member["section"]
         rows = _path_value(inputs, path)
         key = member["key"]
