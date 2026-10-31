@@ -128,6 +128,31 @@ def test_single_lead_horizon_report_covers_only_horizon_one():
     assert set(report["per_horizon"]) == {"1"}
 
 
+def test_two_lead_horizon_subset_report_weights_and_metrics_independently():
+    events = [{"event_id": "e0", "ticker": "A", "event_date": "2023-01-20"}]
+    targets = {"e0": 2.0}
+    challenger = [
+        {"event_id": "e0", "horizon_sessions": 1, "predicted_absolute_move_pct": 2.1},
+        {"event_id": "e0", "horizon_sessions": 3, "predicted_absolute_move_pct": 2.6},
+    ]
+    incumbent = [
+        {"event_id": "e0", "horizon_sessions": 1, "predicted_absolute_move_pct": 1.0,
+         "abstention": None, "history_mean": 4.0, "quote_status": "present"},
+        {"event_id": "e0", "horizon_sessions": 3, "predicted_absolute_move_pct": 1.0,
+         "abstention": None, "history_mean": 4.0, "quote_status": "present"},
+    ]
+    report = paired_report(events, challenger, incumbent, targets, horizons=(1, 3))
+    rows = [r for r in report["paired_rows"] if r["event_id"] == "e0"]
+    expected_rmse = math.sqrt((0.1 ** 2 + 0.6 ** 2) / 2)
+    assert len(rows) == 2
+    assert report["horizon_weight"] == 0.5
+    assert set(report["per_horizon"]) == {"1", "3"}
+    assert report["metrics"]["challenger"]["rmse"] == pytest.approx(expected_rmse)
+    assert report["metrics"]["incumbent"]["rmse"] == pytest.approx(1.0)
+    assert report["difference"]["rmse"] == pytest.approx(expected_rmse - 1)
+    assert report["difference"]["mae"] == pytest.approx(-0.65)
+
+
 def test_legacy_horizon_order_accepted_and_per_horizon_emitted_ascending():
     args = fixture()
     report = paired_report(*args, horizons=(5, 3, 1))

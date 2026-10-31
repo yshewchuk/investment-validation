@@ -147,20 +147,13 @@ def test_small_plan_uses_native_schedule_not_size_grid_and_detaches(context):
 
 
 def test_native_size_plan_missing_anchor_horizon_refuses(context, monkeypatch):
-    original = planner.read_search_plan
-
-    def read_without_anchor_horizons(*args):
-        native = original(*args)
-        native["horizons"] = [1]
-        return native
-
-    monkeypatch.setattr(planner, "read_search_plan", read_without_anchor_horizons)
+    altered = {**deepcopy(context.native), "horizons": [1]}
+    ref = artifact_reference(canonical_json(altered).encode(), "magnitude_search_plan.v2")
+    monkeypatch.setattr(planner, "read_search_plan", lambda *args: deepcopy(altered))
     monkeypatch.setattr(planner, "validate_candidate_recipe",
                         lambda recipe: {**recipe, "horizons": [1]})
     args = list(context.args)
-    recipe = deepcopy(args[6])
-    recipe["horizons"] = [1]
-    args[6] = recipe
+    args[5] = ref
     error = _code("INVALID_EXPERIMENT_SPEC", lambda: planner.prepare_plan(*args))
     assert error.problem.message == "distribution SIZE plan must provide every native SIZE anchor horizon"
 

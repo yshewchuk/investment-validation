@@ -34,6 +34,7 @@ Pool provenance binds destination inputs/cutoff, plan/recipe/context, horizon an
 
 | Condition | Outcome |
 | --- | --- |
+| Unsupported request, including a SIZE anchor that omits any native recipe horizon `(5, 3, 1)` | `INVALID_EXPERIMENT_SPEC` during plan preparation, before a distribution receipt or fit claim is published. |
 | No-fit guard active | Original guard exception before fitting/admission work. |
 | Invalid recipe/order/numeric input or unsupported fit selector/horizon | Typed invalid-spec refusal; omitted arguments retain Python `TypeError`. OOF provenance/selector mismatch instead uses identity conflict. |
 | Degenerate support or malformed estimator output | Typed candidate failure; no partial successful fit receipt. |
