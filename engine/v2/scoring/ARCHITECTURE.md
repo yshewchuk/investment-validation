@@ -723,7 +723,8 @@ not load chooser estimators, and no path infers provenance from legacy rows.
 |---|---|
 | Chooser references not requested | Return an empty map without loading chooser estimators |
 | More than 34 staged chooser-fold objects when references are requested | ModelNotReady before any chooser fold is loaded |
-| Chooser-fold rows are present but the canonical retrain cutoff is missing or invalid when references are requested | ModelNotReady; no partial reference map |
+| No staged chooser-fold objects are available when references are requested | Return an empty map before checking the cutoff |
+| Staged chooser-fold objects are available but the canonical retrain cutoff is missing or invalid | ModelNotReady; no partial reference map |
 | Carried fold authoring release has no canonical cutoff | ModelNotReady; do not return a partial map |
 | Malformed, noncanonical or mismatched descriptor, estimator digest, parent binding, output or fold month | ModelNotReady; no partial reference map |
 | Reference resolution requested for a verified release | Re-verify each binding resolution; no cross-call reference cache |

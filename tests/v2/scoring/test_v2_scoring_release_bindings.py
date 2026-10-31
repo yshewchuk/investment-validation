@@ -929,7 +929,7 @@ def test_chooser_fold_reference_refuses_noncanonical_cutoff(tmp_path, monkeypatc
 @pytest.mark.parametrize("status", ["MISSING", "PENDING"])
 def test_chooser_fold_reference_skips_unavailable_rows(tmp_path, monkeypatch, status):
     rb, _descriptors, _identities, calls, body = _chooser_resolver_fixture(
-        tmp_path, monkeypatch)
+        tmp_path, monkeypatch, cutoff=None)
     body["members"] = [row for row in body["members"]
                        if row.get("member_id") not in {
                            "tier4_folds:implied_t1", "tier4_folds:runup_move"}]

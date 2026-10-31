@@ -872,6 +872,9 @@ def _resolve_chooser_fold_references(
             members[member_id] = row
     if not members:
         return {}
+    objects = _chooser_fold_objects(members, member_ids)
+    if not objects:
+        return {}
     sources = catalog.get("sources")
     cutoff = sources.get("retrain_cutoff") if isinstance(sources, Mapping) else None
     if cutoff is None:
@@ -882,9 +885,6 @@ def _resolve_chooser_fold_references(
             raise ValueError("non-canonical cutoff")
     except (TypeError, ValueError):
         raise ModelNotReady("tier4_folds:chooser", "canonical training cutoff is missing") from None
-    objects = _chooser_fold_objects(members, member_ids)
-    if not objects:
-        return {}
     return _load_chooser_fold_references(
         objects, "tier4_folds:chooser", parsed_cutoff, catalog, manifest,
         inference, model_identity, root, dep_root)
