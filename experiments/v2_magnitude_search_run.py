@@ -79,8 +79,8 @@ def _admit_driver(conn, store, registration, request, plan_ref):
     return plan
 
 
-def run_search(conn, store, repository, registration, request, plan_ref, *, limits):
-    """Validate every claimed inner result before any fresh serial fit; never retry."""
+def run_search(conn, store, repository, registration, request, plan_ref, *, limits, collect_results=True):
+    """Validate every claimed inner result before any fresh serial fit; never retry; collect_results=False returns None before the final collect."""
     validate_execution_limits(limits)
     plan = _admit_driver(conn, store, registration, request, plan_ref)
     trials = SearchTrials(conn, store, repository, registration, request, plan_ref)
@@ -127,6 +127,8 @@ def run_search(conn, store, repository, registration, request, plan_ref, *, limi
             continue
         execute_outer_fold(conn, store, repository, registration, request, plan_ref,
                            selection["outer_year"], limits=limits)
+    if not collect_results:
+        return None
     return collect_outer_results(conn, store, repository, registration, request, plan_ref)
 
 

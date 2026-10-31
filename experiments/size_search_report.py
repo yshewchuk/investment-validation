@@ -1,4 +1,7 @@
 """Collect verified selected-outer and comparator journals without new fitting."""
+import sys
+import time
+
 from engine.v2.foundation import content_hash
 from experiments.magnitude_search_outer import collect_outer_results
 from experiments.magnitude_search_records import read_record
@@ -7,6 +10,8 @@ from experiments.v2_magnitude_search_run import _admit_driver
 
 
 def collect(conn, store, repository, registration, request, plan_ref):
+    print("[stage] collect start", file=sys.stderr)
+    started = time.monotonic()
     plan = _admit_driver(conn, store, registration, request, plan_ref)
     result = collect_outer_results(conn, store, repository, registration, request, plan_ref)
     forecasts, comparisons, events, inner_fits, comparison_fits = [], [], [], [], []
@@ -29,13 +34,15 @@ def collect(conn, store, repository, registration, request, plan_ref):
         comparison = read_record(conn, store, registration.run_id, "comparison-terminal:" + key)["result"]
         comparisons.extend(comparison["forecasts"])
         comparison_fits.extend({"outer_year": year, **fit} for fit in comparison["fit_details"])
-    return {"plan_id": plan["plan_id"], "search": result, "paired": paired_report(events, forecasts, comparisons, targets,
+    report = {"plan_id": plan["plan_id"], "search": result, "paired": paired_report(events, forecasts, comparisons, targets,
                 label_reasons={o["event_id"]: o["reason"] for f in result["folds"]
                     for o in f["evaluation_inputs"].get("omitted_labels", [])}),
             "preflight": resource_report(plan), "inner_fits": inner_fits, "comparison_fits": comparison_fits,
             "frozen_eligibility": registration.document["size_panel"]["context"]["eligibility_plan"],
             "label_exclusions": [{"outer_year": f["outer_year"], **omission} for f in result["folds"]
                 for omission in f["evaluation_inputs"].get("omitted_labels", [])]}
+    print(f"[stage] collect done in {time.monotonic() - started:.1f}s", file=sys.stderr)
+    return report
 
 
 def resource_report(plan):

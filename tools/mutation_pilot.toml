@@ -318,6 +318,7 @@ why = "The shared native-vs-legacy per-dimension comparator and field groups: a 
 mutate = [
     "engine/v2/parity/__init__.py",
     "engine/v2/parity/dimensions.py",
+    "engine/v2/parity/financial_diagnostics.py",
 ]
 tests = [
     "tests/test_v2_ops_native*.py",
@@ -325,6 +326,7 @@ tests = [
     "tests/test_phase4_numeric_negative_control_states.py",
     "tests/test_phase4_acceptance_independence.py",
     "tests/v2/scoring/test_v2_scoring_native_entry_rule.py",
+    "tests/v2/ops/test_native_parity_entry_cost_pct.py",
 ]
 
 [modules.data_store]

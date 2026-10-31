@@ -71,7 +71,7 @@ def _run(context):
         seconds = remaining(conn, store, registration, plan)
         previous = signal.alarm(0)
         signal.alarm(min(previous or 1, seconds))
-        run_search(*context, limits=request["limits"]["child"])
+        run_search(*context, limits=request["limits"]["child"], collect_results=False)
     return collect(*context)
 
 

@@ -309,10 +309,35 @@ def _checked_write_root(write_root, production_roots):
     return literal
 
 
-def generate_bounds(write_root, *, source_root, manifest, scope, as_of, production_roots):
-    """Refresh the catalog in ``write_root`` (unrelated to every ``production_roots`` entry) with source bounds from pinned inputs; return the provenance record."""
+def _refresh_bounds(conn, root, objects_root, *, source_root, manifest, scope, as_of):
+    """Shared strict-pinned refresh: run ``computed_moves_command`` with source bounds and prove
+    the head (or the fresh candidate) carries ``computed_move_bounds``. Returns ``(source, bounds,
+    candidate, served)``; never opens or closes ``conn`` and never writes the provenance record."""
     from engine.v2.ops.cli import computed_moves_command
 
+    cache, fetch = pinned_history_fetcher(source_root, manifest, strict=True)
+    served = set()
+
+    def tracked(ticker):
+        result = fetch(ticker)
+        served.add(ticker)
+        return result
+
+    args = SimpleNamespace(source_root=Path(source_root), scope=scope, as_of=as_of, dry_run=False)
+    report = computed_moves_command(args, root, conn, SystemClock(), history=(cache, tracked),
+                                    include_source_bounds=True, objects_root=objects_root)
+    source = report["parent_snapshot_id"]
+    candidate = report["result"].get("candidate_snapshot_id")
+    bounds = candidate or source
+    if candidate is None:
+        parent = Repository(conn, ArtifactStore(objects_root), pin_snapshots=True).resolve_full(source)
+        if TABLE not in parent.table_manifests:
+            raise fail("PUBLICATION_REFUSED", "the refresh committed nothing and the head carries no source bounds")
+    return source, bounds, candidate, served
+
+
+def generate_bounds(write_root, *, source_root, manifest, scope, as_of, production_roots):
+    """Refresh the catalog in ``write_root`` (unrelated to every ``production_roots`` entry) with source bounds from pinned inputs; return the provenance record."""
     validate_manifest(manifest)
     if manifest["schema_version"] == EXCLUSION_MANIFEST_VERSION:
         raise fail("WORKSPACE_REFUSED", "exclusion manifests are admitted through workspace mode only",
@@ -326,28 +351,10 @@ def generate_bounds(write_root, *, source_root, manifest, scope, as_of, producti
     started = time.monotonic()
     _log("bounds start entries=" + str(len(manifest["entries"]))
          + " excluded=" + str(len(manifest.get(_EXCLUDED_KEY) or ())), started)
-    cache, fetch = pinned_history_fetcher(source_root, manifest, strict=True)
-    served = set()
-
-    def tracked(ticker):
-        result = fetch(ticker)
-        served.add(ticker)
-        return result
-
-    history = (cache, tracked)
     conn = open_catalog(catalog, clock=SystemClock())
     try:
-        args = SimpleNamespace(source_root=Path(source_root), scope=scope, as_of=as_of, dry_run=False)
-        report = computed_moves_command(args, root, conn, SystemClock(), history=history, include_source_bounds=True)
-        source = report["parent_snapshot_id"]
-        candidate = report["result"].get("candidate_snapshot_id")
-        bounds = candidate or source
-        if candidate is None:
-            parent = Repository(
-                conn, ArtifactStore(root), pin_snapshots=True
-            ).resolve_full(source)
-            if TABLE not in parent.table_manifests:
-                raise fail("PUBLICATION_REFUSED", "the refresh committed nothing and the head carries no source bounds")
+        source, bounds, candidate, served = _refresh_bounds(
+            conn, root, root, source_root=source_root, manifest=manifest, scope=scope, as_of=as_of)
     finally:
         conn.close()
     pinned = [e for e in manifest["entries"] if e["ticker"] in served]
@@ -419,3 +426,37 @@ def admit_manifest(workspace, scope, manifest, *, clock):
                                     fields, clock=clock)
     _log("admission end excluded=" + str(len(excluded)) + " manifest_object=" + ref.content_hash, started)
     return {**fields, "admission_id": content_hash(fields), "manifest_ref": ref, "read_pin_ref": pin}
+
+
+def generate_workspace_bounds(workspace, scope, manifest, *, source_root, as_of, clock):
+    """Publish source bounds through a prepared research workspace; return the provenance record.
+
+    The workspace's catalog rows, closure objects and scope head must already be in place. The
+    refresh runs against ``<workspace>/catalog.sqlite``, ``<workspace>/supervisor.lock`` and the
+    workspace store (whose closure objects 2c-i admitted), so raw receipts land only in the
+    workspace; the production catalog and store are never read as a fallback nor written.
+    """
+    validate_manifest(manifest)
+    if as_of != manifest["session_ceiling"]:
+        raise fail("INVALID_REQUEST", "as_of must equal the manifest session ceiling")
+    started = time.monotonic()
+    _log("workspace bounds start scope=" + str(scope) + " entries=" + str(len(manifest["entries"]))
+         + " excluded=" + str(len(manifest.get(_EXCLUDED_KEY) or ())), started)
+    admission = admit_manifest(workspace, scope, manifest, clock=clock)
+    head = workspace.conn.execute(
+        "SELECT snapshot_id FROM data_snapshot_heads WHERE scope = ?", (scope,)).fetchone()
+    if head is None or head["snapshot_id"] != workspace.snapshot_id:
+        raise fail("WORKSPACE_REFUSED", "the scope head is not the pinned snapshot",
+                   details={"reason": "head_not_pinned", "scope": scope})
+    source, bounds, candidate, served = _refresh_bounds(
+        workspace.conn, workspace.paths.root, workspace.paths.store,
+        source_root=source_root, manifest=manifest, scope=scope, as_of=as_of)
+    pinned = [e for e in manifest["entries"] if e["ticker"] in served]
+    record = _provenance(manifest, pinned, source, bounds, refresh_noop=candidate is None)
+    _write_record(workspace.paths.root, record)
+    workspace.record_read_pin(
+        "size-prep-bounds:" + record["record_id"].split(":", 1)[1],
+        {"record_id": record["record_id"], "admission_id": admission["admission_id"],
+         "bounds_snapshot_id": bounds, "source_snapshot_id": source}, clock=clock)
+    _log("workspace bounds end", started)
+    return record

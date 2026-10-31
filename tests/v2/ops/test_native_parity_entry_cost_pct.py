@@ -82,7 +82,10 @@ def test_row_mismatches_flag_a_wrong_native_entry_cost_pct(cost, spot, pct):
 def test_native_view_never_derives_entry_cost_pct():
     row = {"entry_cost": 3.0, "spot": 250.0}
     assert _dimension_view(row, "financial_diagnostics")["entry_cost_pct"] is None
-    assert _dimension_view(row, "financial_diagnostics", legacy=False)["entry_cost_pct"] is None
+    view = _dimension_view(row, "financial_diagnostics", legacy=False)
+    for field in ("entry_cost_pct", "model_vs_market", "fair_premium_pct",
+                  "premium_vs_fair", "cost_over_width"):
+        assert view[field] is None
 
 
 def test_row_mismatches_flags_a_native_row_missing_its_own_entry_cost_pct():
@@ -130,3 +133,157 @@ def test_unavailable_on_both_sides_agrees_but_one_sided_is_a_mismatch():
 def test_huge_integer_operand_gives_none(cost, spot):
     assert _dimension_view({"entry_cost": cost, "spot": spot},
                            "financial_diagnostics", legacy=True)["entry_cost_pct"] is None
+
+
+def test_legacy_financial_view_derives_all_five_diagnostics():
+    row = {
+        "spot": 100.0,
+        "entry_cost": 5.0,
+        "driver_name": "abs_move",
+        "driver_prediction": 0.5,
+        "implied_move": 2.0,
+        "structure_width": 10.0,
+        "payoff": {"intercept": 0.1, "slope": 0.2},
+    }
+
+    view = _dimension_view(row, "financial_diagnostics", legacy=True)
+
+    assert view == pytest.approx({
+        "entry_cost_pct": 5.0,
+        "model_vs_market": 0.3875968992248062,
+        "fair_premium_pct": 20.0,
+        "premium_vs_fair": 0.25,
+        "cost_over_width": 0.5,
+    })
+
+
+_RUNUP_NAMES = (
+    "intercept", "implied_move", "abs_moneyness",
+    "moneyness_sq_div10", "signed_moneyness",
+    "implied_x_abs_moneyness_div10",
+)
+
+
+def test_legacy_runup_fair_premium_has_independent_expected_value():
+    coefficients = dict(zip(_RUNUP_NAMES, (0.01, 0.02, 0.03, 0.04, 0.05, 0.06)))
+    row = {
+        "driver_prediction": 0.5,
+        "runup_move_prediction": 10.0,
+        "spot": 100.0,
+        "strike": 100.0,
+        "payoff": {"kind": "runup_payoff_surface", "coefficients": coefficients},
+    }
+
+    assert _dimension_view(row, "financial_diagnostics", legacy=True)[
+        "fair_premium_pct"
+    ] == pytest.approx(75.0)
+
+
+@pytest.mark.parametrize("row", [
+    {"driver_prediction": 0.5, "payoff": {"intercept": "bad", "slope": 0.2}},
+    {
+        "driver_prediction": 0.5,
+        "runup_move_prediction": 1.0,
+        "spot": 100.0,
+        "strike": 90.0,
+        "payoff": {
+            "kind": "runup_payoff_surface",
+            "coefficients": {name: ("bad" if name == "intercept" else 0.0)
+                             for name in _RUNUP_NAMES},
+        },
+    },
+    {
+        "driver_prediction": 0.5,
+        "runup_move_prediction": 1.0,
+        "spot": -100.0,
+        "strike": 90.0,
+        "payoff": {
+            "kind": "runup_payoff_surface",
+            "coefficients": {name: 0.0 for name in _RUNUP_NAMES},
+        },
+    },
+    {
+        "driver_prediction": 0.5,
+        "runup_move_prediction": 1.0,
+        "spot": -100.0,
+        "strike": -90.0,
+        "payoff": {
+            "kind": "runup_payoff_surface",
+            "coefficients": {name: 0.0 for name in _RUNUP_NAMES},
+        },
+    },
+    {
+        "driver_prediction": 0.5,
+        "runup_move_prediction": 1.0,
+        "spot": 100.0,
+        "strike": 90.0,
+        "payoff": {"kind": "runup_payoff_surface", "coefficients": [1.0]},
+    },
+    {
+        "driver_prediction": 0.5,
+        "runup_move_prediction": 100000.0,
+        "spot": 100.0,
+        "strike": 90.0,
+        "payoff": {
+            "kind": "runup_payoff_surface",
+            "coefficients": {
+                **{name: 0.0 for name in _RUNUP_NAMES},
+                "intercept": 1e308,
+            },
+        },
+    },
+])
+def test_invalid_fair_premium_inputs_are_unavailable_not_report_errors(row):
+    view = _dimension_view(row, "financial_diagnostics", legacy=True)
+
+    assert view["fair_premium_pct"] is None
+
+
+def test_negative_runup_oracle_is_clamped_to_zero():
+    coefficients = {name: 0.0 for name in _RUNUP_NAMES}
+    coefficients["intercept"] = -0.2
+    row = {
+        "driver_prediction": 0.5,
+        "runup_move_prediction": 1.0,
+        "spot": 100.0,
+        "strike": 90.0,
+        "payoff": {"kind": "runup_payoff_surface", "coefficients": coefficients},
+    }
+
+    assert _dimension_view(row, "financial_diagnostics", legacy=True)[
+        "fair_premium_pct"
+    ] == pytest.approx(0.0)
+
+
+def test_legacy_row_explicit_fair_premium_pct_is_preserved():
+    coefficients = {name: 0.0 for name in _RUNUP_NAMES}
+    coefficients["intercept"] = 0.2
+    row = {
+        "fair_premium_pct": 99.0,
+        "driver_prediction": 0.5,
+        "runup_move_prediction": 1.0,
+        "spot": 100.0,
+        "strike": 90.0,
+        "payoff": {"kind": "runup_payoff_surface", "coefficients": coefficients},
+    }
+
+    assert _dimension_view(row, "financial_diagnostics", legacy=True)[
+        "fair_premium_pct"
+    ] == pytest.approx(99.0)
+
+
+def test_malformed_implied_move_and_structure_width_give_none_diagnostics():
+    row = {
+        "spot": 100.0,
+        "entry_cost": 5.0,
+        "driver_name": "abs_move",
+        "driver_prediction": 0.5,
+        "implied_move": "bad",
+        "structure_width": "bad",
+        "payoff": {"intercept": 0.1, "slope": 0.2},
+    }
+
+    view = _dimension_view(row, "financial_diagnostics", legacy=True)
+
+    assert view["model_vs_market"] is None
+    assert view["cost_over_width"] is None

@@ -230,11 +230,24 @@ exact causal size fold for the earlier of event and decision months and attaches
 it as the gate forecast source. STR-THRU forward
 inputs use native market/history features from the pinned snapshot (cutover
 6c), plus the verified release. The full-refit `size:*` champion supplies
-`driver_prediction`; a separate causally selected size fold supplies only the
-gate's requested `pred_abs_move` family and `forecast_edge`. Both execute in
-the existing scoring stages, never in the raw-row producer. Gate-only forecasts
-must not create a top-level sizing forecast or change the selected structure.
-Outcomes are in the table below. RUNUP is unchanged.
+`driver_prediction`; a separate causally selected size fold supplies the
+gate's requested `pred_abs_move` family and `forecast_edge`, and its held-out
+pool supplies residual uncertainty for the STR-THRU forecast band. The fold's
+`pred_abs_move` remains gate-only: when `forecast_abs_move` is available, its
+pool also supplies bucketed uncertainty around that fold forecast; when it is
+absent, flat residual quantiles center on the full-refit champion's
+`driver_prediction` because fold-prediction buckets do not match the champion
+distribution. These fields are uncertainty only; they do not create a sizing
+point forecast or change the selected structure. These calculations run in
+existing scoring stages, never in the raw-row producer. The legacy scorer has
+corresponding `forecast_p10`,
+`forecast_p90`, and `forecast_sd` fields; this native STR-THRU uncertainty rule
+does not assume parity-identical values. Because its center is the full-refit
+champion while its pool predictions are from the selected size fold, STR-THRU
+uses flat residual quantiles instead of choosing fold-prediction decile buckets
+around the champion value when it falls back to `driver_prediction`. Outcomes
+are in the table below.
+RUNUP is unchanged.
 
 `SourceBundle.gate_forecast_source` (optional `GateForecastSource`) carries the
 selected fold's `binding_id` and verified estimator `artifact_hash`, its fold-view `ModelRelease`, the shared
@@ -244,6 +257,15 @@ inference (role `size`; the champion `model_release` is not consulted) and
 `gate.forecast_pool` from the pool. The champion release stays unchanged. The
 ordinary bundle path remains valid when the source is absent.
 
+The production STR-THRU path reuses the selected verified size fold's held-out
+pool as `forecast_pool`. When `forecast_abs_move` is absent, the champion's
+`driver_prediction` locates the `forecast_p10`/`forecast_p90`/`forecast_sd`
+uncertainty interval. The band emits only those uncertainty fields; the fold's
+`pred_abs_move` remains gate-only and does not create a sizing forecast or
+change structure selection. A missing or non-finite location, absent pool, or
+thin pool leaves the uncertainty fields unavailable. The band uses the same
+selected fold; it does not cause another release lookup or fold selection.
+
 | Condition | Outcome |
 | --- | --- |
 | Source plus `gate_recipe.forecast`, or plus a non-empty `gate_forecast_pool` | `ValueError` at bundle build (row refused `NATIVE_INPUT_BUILD_FAILED`); never resolved by precedence |
@@ -251,7 +273,8 @@ ordinary bundle path remains valid when the source is absent.
 | Non-finite value in any declared fold pool (`gate_forecast_pool`, `forecast_pool`, source pool, `interval_floor`) | `ValueError` at bundle build (`fold_pool` applies this to every pool) |
 | Gate names no forecast column | Executor and pool are built but the stage never calls them; no flag |
 | Source absent, gate names a forecast column | Bundle builds; the stage flags `MISSING_GATE_INPUT:forecast` |
-| Thin pool | Bundle builds; the stage leaves the band columns unavailable |
+| STR-THRU has a finite `driver_prediction` and at least 250 finite residuals in the selected pool | The stage emits `forecast_p10`/`forecast_p90`/`forecast_sd` around `driver_prediction` using flat residual quantiles; these are uncertainty fields only, with no sizing point forecast or structure change |
+| Missing/non-finite band location, absent pool, or thin pool | The bundle builds; the stage leaves the uncertainty fields unavailable |
 | Exact causal fold missing, or selected fold fails verification/load (`native_score_batch`) | Per-row `MODEL_NOT_READY`; no fallback |
 | Malformed release catalog or descriptor | Release resolution fails before row assembly; not a per-row fold refusal |
 
