@@ -54,7 +54,17 @@ from `engine/v2/diagnosis`) — this doc does not repeat it.
   (`simulation`, `verdicts`, `analogs`) the "a stage that never ran is
   agreement, not a numeric finding" rule (user decision, 2026-09-23)
   applies to.
-- `Tolerance(absolute=0.0, relative=0.0, reason="exact")`,
+- `expected_financial_diagnostics(record)` and `legacy_fair_premium(record)`
+  (`financial_diagnostics.py`) — the shared legacy financial oracle used by
+  the Phase 4 checker and native parity report to derive comparable values
+  from source fields, without importing native scoring code. Missing,
+  nonnumeric, non-finite and zero-denominator operands yield `None` for the
+  affected diagnostic; the runup formula also requires positive spot and
+  strike. The formulas impose no general sign restriction; the legacy linear
+  formula accepts signed numeric inputs and clamps a negative fair premium
+  to zero, preserving the frozen oracle's behavior.
+- `Tolerance(absolute=0.0, relative=0.0, reason="exact", scale_fields=None,
+  require_equal_fields=())`,
   `TolerancePolicy(policy_id, rules=())`, `EXACT`, `SCORE_RECORD_V1`
   (`tolerance.py`) — see "Cutover PR-4" below for what these are and the
   one config-policy design this package now exposes for a pluggable
@@ -111,9 +121,9 @@ compares (root doc §4.1) is structural here, not merely asserted.
 
 Callers, by real import (checked, not assumed): `checks/phase4_real.py`
 (the Phase 4 gate's own numeric comparison); `engine/v2/ops/native_parity_report.py`
-(the nightly `native_parity` stage's report, `engine/v2/ops/ARCHITECTURE.md`'s
-"Cutover PR-4" section); `engine/v2/diagnosis` (re-export only, never a
-second implementation). No other package imports this one.
+(the production `native_parity` worker's report); `engine/v2/diagnosis`
+(re-export only, never a second implementation). The checker and worker
+share the financial oracle; neither derives values for native rows.
 
 ## External systems and libraries
 
@@ -197,20 +207,36 @@ falling back to `EXACT` for anything undeclared (`tolerance.py`'s own
 and it declares `rules=()` — by design (its own docstring: a tier-0
 round trip that needs a tolerance has already lost information, which is
 the defect, not something to absorb) — so every field compares exact
-under it. Making `tolerance_policy` a parameter, rather than widening
-`SCORE_RECORD_V1` itself or hand-rolling a second policy object inside
-`engine/v2/ops`, is what keeps this a ONE-policy-type design: a future,
-user-ratified `TolerancePolicy` for the native-vs-legacy parity
-comparison specifically plugs into the SAME seam, is instantiated
-wherever that ratification lives, and is passed in by its caller — this
-package neither invents nor stores that object.
+under it. The native parity report supplies its own `NATIVE_PARITY_TOLERANCE`
+(`score_record.parity.v2`) through this same seam; it does not change the
+Phase 4/tier-0 policy. Contextual `Tolerance` rules can scale their allowance
+from named fields in the left record and require named fields to match on both
+sides before applying; rules without this context retain their ordinary
+absolute/relative behavior. The report policy is instantiated by its caller
+in `engine/v2/ops/native_parity_report.py`; this package neither invents nor
+stores that report-specific object. When a matched rule's required context is
+missing or unequal, it resolves to `EXACT`.
 
-**No per-field tolerance VALUE is added, chosen, or implied by this
-change, and none belongs in this doc** (`tolerance.py`'s own docstring
-names the failure mode this avoids: "chosen to make the first run pass").
-`engine/v2/ops/native_parity_report.py`'s own doc records that the
-default stays exact until a ratified policy is supplied there; this doc
-states only that the seam exists and how it is shaped, never a number.
+The report's approved per-field rules apply only to `ci_low` and `ci_high`:
+each endpoint may differ by at most 10% of the legacy CI width
+(`ci_high - ci_low`), and only when `n_analogs` is equal on both sides. A
+different analog pool size therefore keeps both endpoints exact. The report
+policy id is `score_record.parity.v2`; the shared `SCORE_RECORD_V1` remains
+exact with its original id.
+Missing or unequal required context resolves to `EXACT`; `n_analogs` enables
+the analog rule only when both values are nonnegative integers (booleans and
+integer-valued floats do not qualify). Matching context with finite ordered
+scale endpoints applies `absolute + relative * (high - low)`. Tolerance
+configuration is validated when a `Tolerance` is constructed: absolute and
+relative allowances must be finite nonnegative numbers, and scale/context
+field declarations must have the documented tuple shapes and nonempty names.
+Invalid configuration raises `ValueError` before comparison. Invalid scale
+values fall back to `EXACT`.
+Stage hashes retain each side's raw typed output fields. A tolerance can make
+the comparison verdict `agree` while the stage's output hashes differ; the
+native hash always describes the native record, and the legacy hash describes
+the legacy record. Findings and reported field values likewise retain the
+original values.
 
 ## Invariants
 
@@ -256,14 +282,9 @@ flowchart LR
 ```
 
 `compare_dimension` is the one entry point every caller in the diagram
-uses; `checks/phase4_real.py`, the Phase 4 gate's own
-verification/check tooling, calls it today, while
-`engine/v2/ops/native_parity_report.py` imports it too but today has
-only test callers of its own — a real production caller,
-`run_native_parity_worker` (a job kind's worker entrypoint, submitted by
-`supervisor.Service`'s own tick loop, never `run_shadow_nightly`), is
-designed in `engine/v2/ops/ARCHITECTURE.md`'s "Cutover PR-4 (redo)"
-section and lands with that PR's own Phase 2. `compare_records`
+uses; `checks/phase4_real.py` calls it from the Phase 4 gate, and
+`engine/v2/ops/native_parity_report.py` calls it from the production
+`run_native_parity_worker` path as well as tests. `compare_records`
 underneath it is the actual comparator, and
 `tolerance_policy` (the new pluggable seam) flows from the caller, through
 `compare_dimension`, into `compare_records`, never resolved or defaulted

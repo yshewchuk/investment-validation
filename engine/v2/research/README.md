@@ -80,8 +80,8 @@ is offline experiment fitting, not a production entrypoint.
 provide a source-free absolute-magnitude histogram format and numerical refusals.
 `histogram([1.0] + [0.0] * 80)` returns a detached document with an explicit unresolved tail;
 `tail_excesses=[0.0, 2.0]` declares conditional excesses relative to 20 (zero means exactly 20).
-No sample is fitted/admitted. Consumers are the source-free magnitude math/payoff helpers, `experiments.distribution_candidate_recipe` and `experiments.distribution_class_support`,
-and synthetic tests, including `tests/v2/research/test_magnitude_distribution.py`.
+No sample is fitted/admitted here. Consumers include the magnitude math/payoff helpers, `experiments.distribution_candidate_recipe`, `experiments.distribution_class_support`,
+`experiments/distribution_candidate_fit`, `distribution_fitted`, `distribution_oof` and synthetic tests, including `tests/v2/research/test_magnitude_distribution.py`.
 
 `magnitude_distribution_math` exposes `components`, `cdf`, `mean`, `crps`,
 `empirical_crps`, `bin_scores` and `brier`: pure magnitude-family scores and
@@ -92,8 +92,8 @@ only the admitted 1e-12 mass roundoff, without modifying the document.
 `mean_matched_control` supply frozen-bridge/mean-control diagnostics, preserving
 zero atoms and negative post-residual exit values. Fixed per-share spot/cost
 inputs are decision-quote proxies, not realized net-profit or execution claims.
-Only these helpers and their matching `tests/v2/research/test_magnitude_distribution*.py`
-tests consume the new interfaces; there is no data, fit or production wiring.
+`experiments/distribution_oof` consumes `mean` and `mean_matched_control`; matching synthetic tests cover these APIs.
+The numerical helpers own no source admission, fit orchestration or production wiring.
 
 `eligibility_policy.eligibility_policy` validates an explicit version/width;
 `eligibility_policy.plan_eligibility` returns the opt-in metadata-only plan described below.

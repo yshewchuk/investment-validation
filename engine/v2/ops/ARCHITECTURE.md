@@ -110,7 +110,7 @@ The `native_parity` job kind -- `stages.py::_native_parity_kind`,
 its tick-loop caller, `supervisor.Service._reconcile_native_parity`, are
 both real too: `Service.tick()` calls it every tick the way
 `_reconcile_native_score_batch_shadow` (`#88`) already does (both reconcile methods run every tick; the release check inside the shadow one runs only after an eligible snapshot-pinned identity is selected — see "Native batch input sourcing" below; its failures print `native_score_batch_reconcile_failed` with `error_type` and the typed problem's code and bounded details: short scalars and short string lists). For non-`Problem` failures, at most the first 256 characters of `str(exc)` are kept only in the in-memory dedup key; nonempty text emits the fixed `<redacted>` `details.exception_message`, while empty text emits no `exception_message` (the details mapping is empty). `_bounded_problem_details` omits string values longer than 120 characters; these size limits do not sanitize exception text or make raw text safe to publish. The
-`nightly.GRAPH` node width is doc-only (`run_shadow_nightly`'s test-only graph walk; no submission path reads it). Cutover PR-3 (`native_score_batch.py`, `#66`) and cutover PR-7a's design (`#88`) and shadow-submission code (`#126`) are all already merged; PR-7a's code (`#126`) implemented the tick-loop submission sidecar only, not the `v2.0` schema this redo's design always said was `native_parity`'s own PR to build (see "the row-key/join gap is not designed here" below) — `#185` is that build. One piece is untouched by this redo, real code already on `main`, independent of everything `#66`/`#88`/`#126` supply: `native_parity_report.py`'s tolerance policy is already pluggable — see "the tolerance policy is now pluggable" below, unchanged.**
+`nightly.GRAPH` node width is doc-only (`run_shadow_nightly`'s test-only graph walk; no submission path reads it). Cutover PR-3 (`native_score_batch.py`, `#66`) and cutover PR-7a's design (`#88`) and shadow-submission code (`#126`) are already merged; PR-7a's code implemented the tick-loop submission sidecar, while `#185` built the `native_parity` schema. This change adds the report-specific analog CI tolerance policy described below.**
 
 `native_parity` closes the gap the root doc §4 and this doc's own
 "Diagrams" section both name: `run_shadow_nightly` "has no production
@@ -252,7 +252,7 @@ submission path reads either edge (the rule Part 4 established for
   calling the SAME `compare_native_vs_legacy` (unchanged) and the new
   `apply_native_refusals` (below) — see "Outputs" for what it writes.
   This is the only production producer of `native_parity_report.json`; the one other producer of this format is the operator exporter `tools/captured_native_comparison.py`.
-- **`financial_diagnostics` view of a legacy row (#681).** Legacy score rows never carry `entry_cost_pct`; `_dimension_view` derives it as `entry_cost / spot * 100` (`None`, never an exception, when either is absent, non-numeric, non-finite or too large for `float()` (`OverflowError`, e.g. an integer beyond ~1e308), or `spot` is 0; the comparator reports `None` as a mismatch only when the other side has a value, and `None` against `None` agrees; `checks/phase4_real._expected_financial_diagnostics` arithmetic). A row that already carries the key keeps its value.
+- **`financial_diagnostics` view of a legacy row.** `_dimension_view` fills missing fields using `engine.v2.parity.financial_diagnostics.expected_financial_diagnostics`, the same oracle used by `checks/phase4_real`. Missing, nonnumeric, non-finite or zero-denominator operands yield `None` for the affected diagnostic; the runup formula also requires positive spot and strike. The legacy formulas impose no general sign restriction: the linear fair-premium formula accepts signed inputs and clamps a negative result to zero. Explicit legacy values are preserved; native rows are never derived here. If a derived value is unavailable on both sides, the numeric comparator agrees; if only the native value is present, it reports a mismatch.
 - **`native_parity_report._empty_native_report(legacy_rows, native_rows,
   dimensions, tolerance_policy) -> dict`** (new, private) — closes a real
   gap in `compare_native_vs_legacy`: its unchanged guards reject an empty
@@ -294,8 +294,9 @@ submission path reads either edge (the rule Part 4 established for
   Its current `UNSUPPORTED_STRATEGY` refusal belongs in `native_refused`
   when legacy emitted that row, otherwise `native_refused_unmatched`.
   DYN-SV uses the same keyed comparison/refusal classification, never a
-  wildcard exemption. Numeric comparisons continue to use the shared parity
-  comparator, with no special tolerance or legacy-derived native value.
+  wildcard exemption. Numeric comparisons use the shared parity comparator;
+  the report's `ci_low`/`ci_high` tolerance still requires matching
+  `n_analogs` and never fills a native value from legacy.
 - **`native_parity_report._population_key_from_board_request_key(key) ->
   str`** (new, private) — projects one `records.json`/`refusals.json` key
   (the 4-field canonical `BoardRequest` string `#88` specifies,
@@ -374,40 +375,38 @@ whenever a real classifier exists.
 PR is real code, already merged into this push, independent of `#66`.**
 `engine.v2.parity.dimensions.compare_dimension` gained a keyword-only
 `tolerance_policy` parameter (default `SCORE_RECORD_V1`, so the Phase 4
-checker and every existing test are unaffected — none of them pass this
-argument, so none of them can observe a behavior change);
-`native_parity_report.compare_native_vs_legacy`/`native_parity_handler`
-each gained the identical parameter, threaded straight down to
-`compare_dimension`, and the written report now records
+checker remains exact); `native_parity_report.compare_native_vs_legacy`/
+`native_parity_handler` use the report-specific `NATIVE_PARITY_TOLERANCE`
+by default and accept an explicit policy override, threaded straight down
+to `compare_dimension`. The default grants `ci_low` and `ci_high` a
+difference of at most 10% of the legacy CI width only when both records
+contain a non-null `n_analogs` value with the same type and value. The
+written report records
 `"tolerance_policy_id": tolerance_policy.policy_id` so a reader of
-`native_parity_report.json` can always see which policy compared it —
+`native_parity_report.json` can see which policy compared it —
 never an implicit, undiscoverable default. **Per-field tolerances come
 from ONE config policy, the `engine.v2.parity.tolerance.TolerancePolicy`
-type** (never a second ad hoc mechanism): the default that ships in this
-PR is still `SCORE_RECORD_V1`, which declares zero per-field rules
-(`rules=()`), so every one of the five dimensions' 30 fields —
-`FORECAST_FIELDS` (12), `SIMULATION_FIELDS` (7), `FINANCIAL_FIELDS` (5),
-`GATE_FIELDS` (3), `ANALOG_FIELDS` (3) — still compares under exact
-equality until a caller explicitly plugs in a different policy. **No
-per-field tolerance VALUE is added, chosen, or implied by this PR** —
-that is a user decision, taken to the user separately, and per instruction
-none of those values belong in this doc, the PR body, or an issue; only a
-`TolerancePolicy` built and ratified elsewhere is ever passed in here.
-`tolerance.py`'s own docstring names the risk this design avoids: "chosen to make the first run pass" is a named failure mode, so this PR adds the SEAM a ratified policy plugs into, not a guess at what it should contain.
+type** (never a second ad hoc mechanism). `NATIVE_PARITY_TOLERANCE` is
+`score_record.parity.v2`; every field outside those two analog CI endpoints
+remains exact under the default policy. `compare_dimension`'s shared
+default `SCORE_RECORD_V1` remains unchanged and exact for Phase 4.
+The allowance is limited to the two endpoints and is scaled from the legacy
+CI width; the native CI width does not set the threshold. It applies only
+when both records contain a non-null `n_analogs` value with the same type and
+value; missing, null, differently typed, or unequal counts keep the endpoints
+exact.
 
 **Legacy `n_analogs` placeholder.** Legacy `ScoreResult.n_analogs` defaults to `0` when the analog stage never ran. `_row_mismatches` reads such a legacy row's `n_analogs` as absent only when the row's own evidence shows it never ran: legacy `n_analogs == 0` with `ci_low` and `ci_high` both `None` and a `flags` list without `THIN_ANALOGS` (a matcher that ran and found no rows sets that flag), and native carrying none of the three analog fields. A legacy `0` with a CI value, or any `0` against a native value, still compares as `0`. The report also lists `analog_no_pool`: shared keys where legacy has `n_analogs > 0` and native has no analog field (native found no pool for the cutoff); their comparison is unchanged and they remain mismatches.
 
 **Out of scope for this redo** (each a real gap, named rather than
-silently left implicit): the stale-px/finality-drift classifier and the
+silently left implicit): additional stale-px/finality-drift classification
+criteria beyond the approved analog CI tolerance, and the
 "explained" bucket mechanism the original PR-4 design specified (above —
 still no reusable classifier exists; a future PR adds it once one does,
 against `compare_native_vs_legacy`'s unchanged signature); a
 dashboard-facing "latest report" pointer path (this design's only durable
 location is the catalog-addressed `job_<id>#report` binding — see
-"Outputs" below); and building the actual user-approved, per-field
-`TolerancePolicy` object itself (the pluggable seam already in place
-takes it as a parameter — this redo does not construct one, and no
-tolerance value appears in this doc, a PR body, or an issue).
+"Outputs" below).
 
 **Corrected, not merely superseded: the original PR-4 design's own
 out-of-scope line said flipping `native_parity` "onto a schedule, a job
@@ -554,7 +553,7 @@ Entry/exit/expiry, spot and calendar-observed-through are caller-staged; validat
 - `forward_calendar_store` derives trading calendars from pinned `daily_market` (weekday fallback if absent), then uses the `catalog_path`, `objects_root`, parent/plan IDs, `as_of`, ticker, horizon, scope and fences in "Primary contracts", plus injected Nasdaq date and yfinance pending-ticker fetchers.
 - `computed_moves_store.run_computed_moves_refresh(..., include_source_bounds=False)` optionally commits `computed_move_bounds.v1` through `computed_move_bounds_store` alongside unchanged outcome objects.
   Opt-in bounds participate in request identity; replay cannot reuse a production-only receipt. Rewritten tickers lose stale sidecars even with the option off; untouched bindings remain immutable.
-  Finalized skipped/below-bar/no-price labels get null bounds. Invalid option type refuses `INVALID_REQUEST`; source-date/availability or prior sidecar contract mismatch refuses `CONTRACT_MISMATCH`. Only `experiments/size_prep_inputs.generate_bounds` invokes it from research, through `cli.computed_moves_command(args, root, conn, clock, *, history=None, include_source_bounds=False)` (in `engine/v2/ops/cli.py`): `history` is an optional `(cache, fetch)` pair shaped like `tier1_yfinance_history_fetcher`'s (`None` selects the default newest-wins; any other value that is not a two-tuple of a mapping and a callable refuses `INVALID_REQUEST` before the supervisor lock; the default fetcher scans the source cache only after the lock is held), and the report adds `parent_snapshot_id` (the plan's parent, read under the supervisor lock) only when either option is used, so the default CLI output is unchanged. It runs only against a caller-supplied write root; historical metadata needs separately authorized regeneration, not a raw-receipt fallback.
+  Finalized skipped/below-bar/no-price labels get null bounds. Invalid option type refuses `INVALID_REQUEST`; source-date/availability or prior sidecar contract mismatch refuses `CONTRACT_MISMATCH`. Only `experiments/size_prep_inputs.generate_bounds` invokes it from research, through `cli.computed_moves_command(args, root, conn, clock, *, history=None, include_source_bounds=False)` (in `engine/v2/ops/cli.py`): `history` is an optional `(cache, fetch)` pair shaped like `tier1_yfinance_history_fetcher`'s (`None` selects the default newest-wins; any other value that is not a two-tuple of a mapping and a callable refuses `INVALID_REQUEST` before the supervisor lock; the default fetcher scans the source cache only after the lock is held), and the report adds `parent_snapshot_id` (the plan's parent, read under the supervisor lock) only when either option is used, so the default CLI output is unchanged. It runs only against a caller-supplied write root; historical metadata needs separately authorized regeneration, not a raw-receipt fallback. Optional keyword `objects_root` (path, default `root`) names the artifact store for the parent read and the refresh; the catalog, supervisor lock and input document stay under `root`. A workspace passes its `store` directory, whose closure objects 2c-i admitted. A non-path value refuses `INVALID_REQUEST` before the lock; a missing directory fails closed in the refresh's own input-document check.
 - Active refreshes never accumulate scan leases into history-sized frames (`daily_by_ticker` remains unused/unbounded). Computed moves retain summaries and one bounded ticker chunk.
   Forward calendars retain distinct daily session dates and existing earnings rows matching claim keys, not whole tables. Empty daily pins retain the weekday fallback.
   Pins, results, refusals and `MAX_SCAN_ROWS` remain unchanged; an oversized ticker refuses `RESOURCE_LIMIT_EXCEEDED`.
@@ -676,14 +675,12 @@ every value it needs is already a committed job output:
   each binding is checked against `spec.dependency_job_ids` independently,
   so a spec that named only one of the two jobs would fail to resolve the
   other's binding.
-- **`tolerance_policy`.** Unchanged pluggable seam from `#72`: defaults to
-  `SCORE_RECORD_V1` (exact for every field). `NativeParityParameters`
-  carries no tolerance data of its own — a future, user-ratified
-  `TolerancePolicy` is instantiated in code wherever that ratification
-  lives and passed to `compare_native_vs_legacy` directly, never
-  round-tripped through a job parameter (matching `#72`'s own stance that
-  no tolerance value belongs in a doc, a PR body, an issue, or — this
-  redo adds — a job's persisted parameters row).
+- **`tolerance_policy`.** `compare_dimension` defaults to
+  `SCORE_RECORD_V1` (exact for every field). The native parity report uses
+  `NATIVE_PARITY_TOLERANCE`, whose `score_record.parity.v2` policy allows
+  the approved `ci_low`/`ci_high` differences when `n_analogs` matches.
+  `NativeParityParameters` carries no tolerance data; the report policy is
+  selected in code and is recorded in the report's `tolerance_policy_id`.
 
 **`records.json`/`refusals.json`'s own key schema — designed HERE, not by
 `#88`.** `#88`'s final text (above, "Row keys") deliberately does NOT
@@ -1019,7 +1016,7 @@ excludes both disabled strategies (CAL-P, CND-P), so the enumerator adds the v2-
 That unlayered caller also imports research's `_pricing.STRUCTURES`, `experiment_population.load_population` and `magnitude_folds.magnitude_window`/`plan_magnitude_folds`; these are caller dependencies, not ops-to-research edges.
 The shared verifier accepts magnitude v1.2/v1.3/v1.4/v1.5 and SIZE v1.6/v1.7 only with closed request/plan envelopes, intact digests and matching snapshot/holdout/event/fold identities. The SIZE v1.7 path checks the compact placeholder envelope, descriptor shapes and aggregate shard-byte cap before any shard read, then verifies shard order and bytes. Afterward, `experiments.native_registration.load_registration_document` hydrates shards and checks logical artifact hashes; `experiments.size_search_binding` checks prepared-document equality and SIZE panel/fold cross-links. Invalid schema or expected-reference conflicts refuse `EXPERIMENT_IDENTITY_CONFLICT` before size admission; a registration over its explicit byte cap refuses `RESOURCE_LIMIT_EXCEEDED` before object access. Aggregate shard bytes over 1 GiB refuse `RESOURCE_LIMIT_EXCEEDED`; missing or corrupt objects remain identity conflicts. Raw storage exceptions during ops admission and typed `RESOURCE_UNAVAILABLE` from hydration propagate to the caller. Public experiment readers supply finite compact-registration caps, while registration checks its prepared bytes before publication and reservation rechecks. These guarantees apply to the public experiment paths, not every low-level helper or worker caller.
 `magnitude_execution_document`, `magnitude_history_execution_document`, `magnitude_fitted_execution_document` and `magnitude_history_request` construct closed policies from canonical explicit inputs, refusing `INVALID_EXPERIMENT_SPEC`. `validate_magnitude_execution` checks v1.3; `validate_magnitude_history_execution` checks v1.4 and `validate_magnitude_fitted_execution` v1.5, refusing `EXPERIMENT_IDENTITY_CONFLICT`. These pure checks neither grant reads nor reconstruct plans; registration owns the recipe data without importing research, training or sklearn. The experiment caller passes the admitted recipe to guarded fitting. Old wire policies remain unchanged; source fingerprints still track changed implementation.
-`experiments/record_export.py` consumes `errors.fail` / `errors.OpsError` for typed refusals and failure causes (`experiments/v2_gate.py` and `experiments/v2_prediction.py` call its `export_or_skip`); `experiments/native_outcomes.py` consumes `catalog.transaction`, `errors.OpsError`/`fail`, and `native_registration.read_native_evidence`/`native_evidence_json`; artifact/CSV effects stay outside SQL. Prediction reporting consumes `experiment_folds.TrainFoldRule`/`fit_walk_forward_fold`; its CLI uses `catalog.connect`/`experiments.experiment_spec_from_document`. Magnitude admission/reporters and search planning consume matching policy constructors/validators and `errors.fail`; search planning also consumes `errors.OpsError` and fingerprints installed sources/environment. The unlayered registrar consumes `magnitude_history_request` and both history/fitted execution constructors/validators. `experiments/magnitude_search_trials.py` consumes `migrations.migrate`/`require_current`, `fingerprints.source_closure` and typed failures; `magnitude_search_records.py` consumes `migrations.Migration`, catalog transactions and typed failures; `magnitude_search_errors.py` consumes `errors.OpsError`/`fail`; `magnitude_search_execution.py` consumes `executor.THREAD_VARIABLES` and `errors.fail`; `magnitude_search_worker.py` consumes `errors.OpsError` for estimator-local failure classification. `magnitude_fitted.py` consumes `errors.OpsError`/`fail` for strict propagation and legacy failure mapping. `experiments/magnitude_search_outer.py` consumes `migrations.require_current`, `fingerprints.source_closure` and typed failures. `experiments.v2_magnitude_search_run` consumes the same interfaces plus `catalog.connect` and `experiments.experiment_spec_from_document` for serial CLI admission. These unlayered callers own the immutable search journal; ops does not invoke them. Other modules stay internal.
+`experiments/record_export.py` consumes `errors.fail` / `errors.OpsError` for typed refusals and failure causes (`experiments/v2_gate.py` and `experiments/v2_prediction.py` call its `export_or_skip`); `experiments/native_outcomes.py` consumes `catalog.transaction`, `errors.OpsError`/`fail`, and `native_registration.read_native_evidence`/`native_evidence_json`; artifact/CSV effects stay outside SQL. Prediction reporting consumes `experiment_folds.TrainFoldRule`/`fit_walk_forward_fold`; its CLI uses `catalog.connect`/`experiments.experiment_spec_from_document`. Magnitude admission/reporters and search planning consume matching policy constructors/validators and `errors.fail`; search planning also consumes `errors.OpsError` and fingerprints installed sources/environment. The unlayered registrar consumes `magnitude_history_request` and both history/fitted execution constructors/validators. `experiments/magnitude_search_trials.py` consumes `migrations.migrate`/`require_current`, `fingerprints.source_closure` and typed failures; `magnitude_search_records.py` consumes `migrations.Migration`, catalog transactions and typed failures; `magnitude_search_errors.py` consumes `errors.OpsError`/`fail`; `magnitude_search_execution.py` consumes `executor.THREAD_VARIABLES` and `errors.fail`; `magnitude_search_worker.py` consumes `errors.OpsError` for estimator-local failure classification. `magnitude_fitted.py` consumes `errors.OpsError`/`fail` for strict propagation and legacy failure mapping. `experiments/magnitude_search_outer.py` consumes `migrations.require_current`, `fingerprints.source_closure` and typed failures. `experiments.v2_magnitude_search_run` consumes the same interfaces plus `catalog.connect` and `experiments.experiment_spec_from_document` for serial CLI admission. These unlayered callers own the immutable search journal; ops does not invoke them. Other modules stay internal. Distribution plan/trials consume native registration, fingerprints, migrations and errors; `distribution_fitted`/`distribution_oof` consume typed ops errors and reuse the experiment-owned journal, without new ops APIs.
 Native gate children consume public `stages.NativeGateParameters`, `executor.THREAD_VARIABLES` and runner constants for admission; their entrypoint consumes `worker.main(dispatcher=...)` with only fixed pricing/evaluation callbacks. Required strategy is independent of arm IDs. Resolver, registration and pricing share `NATIVE_GATE_RUNNERS`; each child admits its exact runner. `v2_gate_sweep` consumes `submission.submit_graph`/`NamespacePolicy`/`validate_receipt_read_policy`, `stages.registry`, `catalog.connect`/`transaction`, `migrations.require_current`, `schema.OWNER`/`MIGRATIONS`, `experiments.experiment_spec_from_document`, `errors.OpsError`/`fail`, artifact registration and fingerprints; immutable `native_gate_sweeps` rows seal rosters after existing-arm checks and before child submission, without scientific completion. `HOLDOUT_ACCESS_DENIED` preserves R5 through the supervisor pipe.
 
 ### Final-holdout authorization (#490)
@@ -1169,7 +1166,7 @@ A newly promoted release genuinely changing the output is by design.
 
 **Feature names.** At the assembly boundary a non-empty `feature_names` is used as given and any malformed shape (`0`, `False`, `{}`, `""`, non-str element) refuses `INVALID_FEATURE_NAMES`; only `None` or an empty list/tuple derive: per row, the sorted de-duplicated union of every driver and gate `feature_order`, minus the stage-derived gate columns (`GATE_FORECAST_COLUMNS`, `GATE_ANALOG_COLUMNS`: projecting them would suppress native derivation). A pure function of the recorded identities, so it changes with the model's inputs; the leakage denylist still applies (`LEAKED_FEATURE_NAME`).
 
-Release-backed STR-THRU retains its primary `driver` residual slot and empty simulation recipe. Its board analog pool is required at the exact `(strategy, fill alpha, min(as_of, entry_date))` key; a missing or duplicate match refuses the row. Its payoff line and recalibration map bind to the latest artifact whose DATA cutoff is at or before the row cutoff. The selected cutoffs are included in the payoff artifact recipe; ordering uses DATA cutoffs, never `computed_at`. No eligible artifact or duplicate at the latest cutoff refuses `MODEL_NOT_READY`; there is no fitting or other fallback. RUNUP's `native_runup_inputs` declaration requires both champion pools: outputs `driver_prediction` and `runup_move_prediction` bind slots `driver` and `runup_move`, independent of declaration order, using each resolved identity's actual role/model and fold `None`. It requires the latest `PayoffSurfaceArtifact` whose DATA cutoff is at or before `min(as_of, entry_date)`; an after-cutoff surface is ineligible and duplicate latest matches refuse `MODEL_NOT_READY`. The surface needs the kernel's finite coefficient vector and finite nonempty residuals. RUNUP may declare a matching board analog pool when present; an absent or nonmatching optional pool leaves analogs not-applicable, while multiple exact matches refuse with `MODEL_NOT_READY`. No rows, alternate model or fitting fills a required gap. RUNUP retains legacy's raw win-rate behavior and does not apply recalibration. It declares separate simulation `not_applicable`, matching its model gate rather than arithmetic entry-rule simulation; payoff Monte Carlo still runs. Existing source-stage refusals and release-wide corrupt-member `MODEL_NOT_READY` remain. Admission proves this frozen model/gate path, not analog parity or availability of a real promoted release.
+Release-backed STR-THRU retains its primary `driver` residual slot and empty simulation recipe. Its board analog pool is required at the exact `(strategy, fill alpha, min(as_of, entry_date))` key; a missing or duplicate match refuses the row. Its payoff line and recalibration map bind to the latest artifact whose DATA cutoff is at or before the row cutoff. The selected cutoffs are included in the payoff artifact recipe; ordering uses DATA cutoffs, never `computed_at`. The selected size fold's verified held-out pool is also attached as `forecast_pool` for native forecast uncertainty around STR-THRU's `driver_prediction`; it does not change sizing or structure selection. No eligible artifact or duplicate at the latest cutoff refuses `MODEL_NOT_READY`; there is no fitting or other fallback. RUNUP's `native_runup_inputs` declaration requires both champion pools: outputs `driver_prediction` and `runup_move_prediction` bind slots `driver` and `runup_move`, independent of declaration order, using each resolved identity's actual role/model and fold `None`. It requires the latest `PayoffSurfaceArtifact` whose DATA cutoff is at or before `min(as_of, entry_date)`; an after-cutoff surface is ineligible and duplicate latest matches refuse `MODEL_NOT_READY`. The surface needs the kernel's finite coefficient vector and finite nonempty residuals. RUNUP may declare a matching board analog pool when present; an absent or nonmatching optional pool leaves analogs not-applicable, while multiple exact matches refuse with `MODEL_NOT_READY`. No rows, alternate model or fitting fills a required gap. RUNUP retains legacy's raw win-rate behavior and does not apply recalibration. It declares separate simulation `not_applicable`, matching its model gate rather than arithmetic entry-rule simulation; payoff Monte Carlo still runs. Existing source-stage refusals and release-wide corrupt-member `MODEL_NOT_READY` remain. Admission proves this frozen model/gate path, not analog parity or availability of a real promoted release.
 
 ### Native parity (`run_native_parity_worker`, `native_parity_report.py`)
 

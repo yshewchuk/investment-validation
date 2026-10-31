@@ -123,6 +123,7 @@ def test_empty_native_report_disjoint_both_sides():
                                   SCORE_RECORD_V1)
     assert report["only_legacy"] == ["a"]
     assert report["only_native"] == ["z"]
+    assert report["tolerance_policy_id"] == SCORE_RECORD_V1.policy_id
 
 
 def test_apply_native_refusals_moves_matched_key():
