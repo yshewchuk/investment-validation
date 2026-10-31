@@ -97,6 +97,8 @@ def test_v3_qualified_request_seals_reconstructs_v2_plan(case):
     verify_native_registration(case.conn, case.store, registration)
     sealed = planner.seal_search_plan(case.conn, case.store, registration, v3)
     assert sealed["plan"]["schema_version"] == "magnitude_search_plan.v2"
+    assert sealed["plan"]["selection"] == {"metric": "inner_pooled_rmse", "ties": "candidate_id_ascending",
+        "retries": 0, "outer": "frozen_selected_only", "final_read_authority": "none"}
     ref = from_document(ArtifactRef, sealed["plan_ref"])
     assert planner.read_search_plan(case.conn, case.store, registration, v3, ref) == sealed["plan"]
 
@@ -124,6 +126,20 @@ def test_v4_qualified_request_seals_reconstructs_v3_plan(case):
     verify_native_registration(case.conn, case.store, registration)
     sealed = planner.seal_search_plan(case.conn, case.store, registration, v4)
     assert sealed["plan"]["schema_version"] == "magnitude_search_plan.v3"
+    assert sealed["plan"]["selection"] == {
+        "metric": "inner_pooled_history_mean_normalized_event_blend",
+        "metric_weights": {"rmse": 0.6, "mae": 0.3, "large_move_underprediction": 0.1},
+        "lead_weights": {"1": 1.0, "3": 0.0, "5": 0.0},
+        "large_move_threshold_pct": 10.0,
+        "pooling": "all_inner_year_rows",
+        "comparator": "history_mean_report_only",
+        "tie_band": "max_sample_se_of_best_pooled_candidate_yearly_blends_or_floor",
+        "tie_band_floor": 0.005,
+        "ties": "candidate_id_ascending",
+        "retries": 0,
+        "outer": "frozen_selected_only",
+        "final_read_authority": "none",
+    }
     assert sealed["plan"]["candidate_count"] == 99
     assert sum(candidate["recipe"]["schema_version"] == "magnitude_ridge_hgb_recipe.v2"
                for candidate in sealed["plan"]["candidates"]) == 48
