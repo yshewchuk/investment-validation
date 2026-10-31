@@ -687,40 +687,28 @@ and the release is not consulted for it.
 #### Chooser fold provenance reference
 
 A verified chooser-fold reference contains the descriptor hash, estimator
-digest, exact fold month, parent `release_id` and producer `ModelIdentity`,
-plus the parent's verified `sources.retrain_cutoff`. `engine.score.Scorer`
-selects references from the verified map for
-producer folds it actually served and records them in trace declarations.
-Strict capture validates those declarations against the map and stores the
-validated per-trace map in the `chooser_fold_reference` metadata field when a
-chooser trace exists; the field is `None` otherwise. If an older active
-catalog has no `sources.retrain_cutoff`, binding resolution returns an empty
-reference map so ordinary scoring can continue; strict capture refuses a
-chooser trace that needs a missing reference. This provenance is excluded
-from the chooser model block and stage receipt, so capture and replay hash the
-same chooser inputs. Capture checks each reference against the executed
-producer's estimator digest and binding; the verified fold month identifies
-the descriptor. Causality uses the release's exclusive data cutoff:
-`training_cutoff <= decision date`. `fold_start` identifies the verified
-descriptor; it is not compared with the release-wide cutoff. `computed_at` is
-never read for admission. It never searches a release catalog or derives
-provenance from legacy fold rows. The strict capture CLI requires a resolvable
-production release binding; legacy rows without the verified reference refuse.
-The release source builder raises `PrepareRefused` if the latest staged fold
-cutoff is later than every staged chooser-pool cutoff; it does not invent a
-later pool cutoff.
+digest, exact fold month, authoring parent release id and producer
+ModelIdentity. Its training_cutoff is the verified descriptor's fold_start,
+the exclusive boundary of training data for that fold.
+`resolve_release_binding` returns an empty
+`chooser_fold_references` map by default and does not load chooser estimators
+for ordinary nightly scoring. Callers that need these references opt in with
+`include_chooser_fold_references=True`; resolution returns a complete map or a
+typed refusal. A carried fold whose authoring release lacks canonical cutoff
+data refuses instead of producing a partial map. This contract slice defines
+the verified reference map; scorer and capture consumption is in the
+follow-up slice. It does not infer provenance from legacy rows. Production capture and release preparation consume this contract in the
+follow-up wiring slice.
 
 | Condition | Outcome |
-|---|---|
-| More than 34 staged chooser-fold objects in one release | `ModelNotReady` before any chooser fold is loaded |
-| Latest staged chooser-fold cutoff is later than every staged chooser-pool cutoff | `PrepareRefused`; no release catalog is written |
-| Legacy active catalog has chooser-fold rows but no `sources.retrain_cutoff` | Return no chooser reference map; strict capture refuses a chooser trace that needs a missing reference |
-| Noncanonical cutoff or malformed or mismatched descriptor, estimator digest, parent binding, output, fold month or cutoff | `ModelNotReady`; no chooser capture input is emitted |
-| Verified reference and matching producer binding/digest with canonical causal dates | Include descriptor hash, estimator digest, parent release/binding identity, training cutoff and fold month in capture provenance metadata |
-| Legacy capture row has no verified reference | Refuse; never infer from `model_id`, artifact bytes or timestamps |
-| Reference lookup/load repeated for the same release | Re-verify on each binding resolution; no cross-call reference cache |
-| Any reference refusal during binding resolution | Refuse the entire `ScoringReleaseBinding` before return; no partial reference map or chooser capture input |
-| Same verified release and producer binding | Produce equal reference values; each binding resolution reads the current release afresh |
+|---|---|---|
+| Chooser references not requested | Return an empty map without loading chooser estimators |
+| More than 34 staged chooser-fold objects when references are requested | ModelNotReady before any chooser fold is loaded |
+| Active legacy catalog has chooser-fold rows but no canonical retrain cutoff | Return an empty map |
+| Carried fold authoring release has no canonical cutoff | ModelNotReady; do not return a partial map |
+| Malformed, noncanonical or mismatched descriptor, estimator digest, parent binding, output or fold month | ModelNotReady; no partial reference map |
+| Reference resolution requested for a verified release | Re-verify each binding resolution; no cross-call reference cache |
+| Model member exceeds its byte cap or is not a regular file | ModelNotReady before chooser bytes are decoded |
 
 #### Chooser state members
 

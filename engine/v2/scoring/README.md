@@ -140,9 +140,8 @@ imports `native_entry_rule.ENTRY_RULE_STRATEGIES`, `NightlySourceBundleRefusal`,
 `no_fit_guard()` block. `engine.v2.serving.native_render` (layer 7) imports
 `analog_display_fields`, `DISPLAY_ANALOG_FIELDS` and `StageObservation` to
 carry the analog stage's display-only row ids onto a native serving row.
-The external `tools.capture_tier0_corpus` CLI calls
-`resolve_production_release_binding()` for `--strict-phase4-trace` and passes
-its chooser-fold reference map to the scorer and strict capture path.
+The strict scorer and capture consumer for chooser-fold references is part of
+the follow-up wiring slice; this slice provides the verified resolver contract.
 
 <!-- consumers: engine.v2.models.training, engine.v2.ops, engine.v2.serving -->
 
@@ -174,14 +173,10 @@ the keys of the frozen `chooser_analog_pool` and `chooser_admissible_table`;
 features (event history, market/regime block) come from `feature_vector`, which
 still wins for any derived column it declares; `dte_entry` is scorer-computed
 (from the priced legs and quote date) and no longer projected.
-For strict capture, `engine.score.Scorer` uses the verified
-`chooser_fold_references` map to add references for producer folds it actually
-served to trace declarations. `strict_trace_one` validates those declarations
-against the same map and stores the validated per-trace map in metadata when a
-chooser trace exists. This provenance is outside the chooser model block and
-stage receipt, so capture and replay hash the same chooser inputs.
-`SourceBundle.chooser_fold_reference` remains optional and is not populated on
-the current production capture path.
+The resolver exposes its verified `chooser_fold_references` map only when
+called with `include_chooser_fold_references=True`. Default resolution does not
+load chooser estimators. Scorer and strict-capture consumption of this map is
+part of the follow-up wiring slice.
 
 The current builder is deliberately bounded to its supported strategies
 (`SUPPORTED_STRATEGIES`) and their declared recipes. To add another strategy or recipe, extend `source_inputs.py` and add

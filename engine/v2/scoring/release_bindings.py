@@ -222,13 +222,16 @@ class ScoringReleaseBinding:
                            MappingProxyType(dict(self.chooser_fold_references)))
 
 
-def resolve_release_binding(release_root: Path | str) -> ScoringReleaseBinding:
+def resolve_release_binding(
+        release_root: Path | str, *, include_chooser_fold_references: bool = False
+) -> ScoringReleaseBinding:
     """Resolve the live release at ``release_root``. See
     ``engine/v2/scoring/ARCHITECTURE.md``'s ``release_bindings.py`` section
     (the "4c R1-R6 template") for the full failure-semantics contract.
-    Read-only: performs no writes, and constructs fresh artifact loaders and
-    a fresh ``FrozenInference`` on every call (no caching beyond this one
-    call's returned object).
+    Read-only: performs no writes and constructs fresh artifact loaders.
+    Chooser folds load only when ``include_chooser_fold_references`` is true;
+    ordinary nightly resolution leaves that map empty without loading chooser
+    estimators into the inference cache.
     """
     if not str(release_root).strip():
         raise ValueError("release_root must be a non-empty path")
@@ -255,8 +258,11 @@ def resolve_release_binding(release_root: Path | str) -> ScoringReleaseBinding:
     catalog = _read_state_catalog(root, pointer.release_id)
     size_folds = index_size_folds(catalog, manifest)
     frozen_inference = FrozenInference(dep_root)
-    chooser_fold_references = _resolve_chooser_fold_references(
-        catalog, manifest, frozen_inference, model_identity, root, dep_root)
+    if include_chooser_fold_references:
+        chooser_fold_references = _resolve_chooser_fold_references(
+            catalog, manifest, frozen_inference, model_identity, root, dep_root)
+    else:
+        chooser_fold_references = MappingProxyType({})
     payoff = _resolve_state_group(
         dep_root, catalog, lambda member_id: member_id.startswith(_PAYOFF_PREFIXES), _load_payoff)
     recalibration = _resolve_state_group(
@@ -716,6 +722,9 @@ def _verified_chooser_fold_reference(
             authoring = _load_chooser_authoring_release(
                 authoring_id, obj, root, dep_root)
             if authoring is None:
+                if authoring_id != manifest.release.release_id:
+                    raise ModelNotReady(
+                        member_id, "carried chooser authoring release has no canonical cutoff")
                 return None
             authoring_releases[authoring_id] = authoring
         elif authoring_id != manifest.release.release_id:
@@ -763,7 +772,11 @@ def _load_chooser_fold_references(
     authoring_releases = {
         manifest.release.release_id: (manifest, catalog, cutoff, model_identity)}
     carried_catalogs: dict[str, Mapping] = {}
-    print(f"[chooser-folds] start: 0/{total}, elapsed=0.0s, peak_rss={_rss_mib():.1f}MiB", file=sys.stderr)
+    print(
+        f"[chooser-folds] start: 0/{total}, elapsed=0.0s, "
+        f"peak_rss={_rss_mib():.1f}MiB",
+        file=sys.stderr,
+    )
     for done, obj in enumerate(objects, start=1):
         if not isinstance(obj, Mapping):
             raise ModelNotReady(member_id, "chooser fold could not be verified or loaded")
@@ -780,10 +793,19 @@ def _load_chooser_fold_references(
             elapsed = time.monotonic() - started
             rate = done / elapsed if elapsed > 0 else 0.0
             eta = (total - done) / rate if rate > 0 else 0.0
-            print(f"[chooser-folds] {done}/{total}, elapsed={elapsed:.1f}s, rate={rate:.2f}/s, ETA={eta:.1f}s, peak_rss={_rss_mib():.1f}MiB", file=sys.stderr)
+            print(
+                f"[chooser-folds] {done}/{total}, elapsed={elapsed:.1f}s, "
+                f"rate={rate:.2f}/s, ETA={eta:.1f}s, "
+                f"peak_rss={_rss_mib():.1f}MiB",
+                file=sys.stderr,
+            )
     elapsed = time.monotonic() - started
     rate = total / elapsed if elapsed > 0 else 0.0
-    print(f"[chooser-folds] end: {total}/{total}, elapsed={elapsed:.1f}s, rate={rate:.2f}/s, peak_rss={_rss_mib():.1f}MiB", file=sys.stderr)
+    print(
+        f"[chooser-folds] end: {total}/{total}, elapsed={elapsed:.1f}s, "
+        f"rate={rate:.2f}/s, peak_rss={_rss_mib():.1f}MiB",
+        file=sys.stderr,
+    )
     return references
 
 

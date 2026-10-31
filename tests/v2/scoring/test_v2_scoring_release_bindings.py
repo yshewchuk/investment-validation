@@ -758,11 +758,25 @@ def test_carried_chooser_reference_uses_verified_authoring_release(tmp_path, mon
         rb._verified_chooser_fold_reference(mismatched_object, *args[1:])
 
     authoring_catalog.pop("sources")
+    authoring_releases.clear()
     legacy_args = (descriptor_object, current_catalog, current_manifest, object(), tmp_path,
                    tmp_path / "deployment", {}, {})
-    assert rb._verified_chooser_fold_reference(*legacy_args) is None
+    with pytest.raises(rb.ModelNotReady) as error:
+        rb._verified_chooser_fold_reference(*legacy_args)
+    assert error.value.member_id == "tier4_folds:chooser"
+    assert error.value.detail == "carried chooser authoring release has no canonical cutoff"
     assert len(calls) == 2
     assert len(identity_reads) == 1
+
+
+def test_chooser_fold_references_are_not_loaded_by_default(tmp_path, monkeypatch):
+    _rb, _descriptors, _identities, calls, _body = _chooser_resolver_fixture(
+        tmp_path, monkeypatch)
+
+    binding = resolve_release_binding(tmp_path)
+
+    assert binding.chooser_fold_references == {}
+    assert calls == []
 
 
 @pytest.mark.parametrize("cutoff", ["2026-09-01", "2026-09-15"])
@@ -771,7 +785,7 @@ def test_chooser_fold_reference_uses_fold_month_cutoff(
     rb, descriptors, identities, calls, _body = _chooser_resolver_fixture(
         tmp_path, monkeypatch, cutoff=cutoff)
 
-    binding = resolve_release_binding(tmp_path)
+    binding = resolve_release_binding(tmp_path, include_chooser_fold_references=True)
 
     reference = binding.chooser_fold_references[("pred_im_t1_d14", "2026-09-01")]
     assert reference.producer_output == "pred_im_t1_d14"
@@ -808,7 +822,7 @@ def test_chooser_fold_references_use_each_fold_start_as_training_cutoff(
         two_objects=True,
         align_descriptor=True, identities=identities)
 
-    binding = resolve_release_binding(tmp_path)
+    binding = resolve_release_binding(tmp_path, include_chooser_fold_references=True)
 
     assert binding.chooser_fold_references[
         ("pred_im_t1_d14", "2026-09-01")].training_cutoff == "2026-09-01"
@@ -851,7 +865,7 @@ def test_chooser_fold_reference_refuses_aggregate_load_limit(tmp_path, monkeypat
     monkeypatch.setattr(rb, "_read_state_catalog", lambda *_args: body)
 
     with pytest.raises(ModelNotReady) as error:
-        resolve_release_binding(tmp_path)
+        resolve_release_binding(tmp_path, include_chooser_fold_references=True)
 
     assert error.value.member_id == "tier4_folds:chooser"
     assert error.value.detail == "chooser fold catalog exceeds load limit"
@@ -863,7 +877,7 @@ def test_legacy_chooser_fold_catalog_without_retrain_cutoff_keeps_binding_availa
     _rb, _descriptors, _identities, calls, _body = _chooser_resolver_fixture(
         tmp_path, monkeypatch, cutoff=None)
 
-    binding = resolve_release_binding(tmp_path)
+    binding = resolve_release_binding(tmp_path, include_chooser_fold_references=True)
 
     assert binding.chooser_fold_references == {}
     assert calls == []
@@ -875,7 +889,7 @@ def test_chooser_fold_reference_refuses_noncanonical_cutoff(tmp_path, monkeypatc
     monkeypatch.setattr(rb, "_read_state_catalog", lambda *_args: body)
 
     with pytest.raises(ModelNotReady) as error:
-        resolve_release_binding(tmp_path)
+        resolve_release_binding(tmp_path, include_chooser_fold_references=True)
 
     assert error.value.member_id == "tier4_folds:chooser"
     assert error.value.detail == "canonical training cutoff is missing"
@@ -895,7 +909,7 @@ def test_chooser_fold_reference_skips_unavailable_rows(tmp_path, monkeypatch, st
         {key: value for key, value in body.items() if key != "manifest_hash"})
     monkeypatch.setattr(rb, "_read_state_catalog", lambda *_args: body)
 
-    binding = resolve_release_binding(tmp_path)
+    binding = resolve_release_binding(tmp_path, include_chooser_fold_references=True)
 
     assert binding.chooser_fold_references == {}
     assert calls == []
@@ -913,7 +927,7 @@ def test_chooser_fold_reference_refuses_producer_mismatch(tmp_path, monkeypatch)
         tmp_path, monkeypatch, identities={"implied_t1:STR-THRU": wrong})
 
     with pytest.raises(ModelNotReady) as error:
-        resolve_release_binding(tmp_path)
+        resolve_release_binding(tmp_path, include_chooser_fold_references=True)
 
     assert error.value.member_id == "tier4_folds:chooser"
     assert error.value.detail == "chooser fold could not be verified or loaded"
@@ -926,7 +940,7 @@ def test_chooser_fold_reference_failure_does_not_return_partial_mapping(
         tmp_path, monkeypatch, two_objects=True)
 
     with pytest.raises(ModelNotReady) as error:
-        resolve_release_binding(tmp_path)
+        resolve_release_binding(tmp_path, include_chooser_fold_references=True)
 
     assert error.value.member_id == "tier4_folds:chooser"
     assert error.value.detail == "chooser fold could not be verified or loaded"
