@@ -139,6 +139,22 @@ def test_v4_design_grid_below_ceiling_still_compiles():
     assert result["counts"]["candidates"] == 99
 
 
+def test_v4_single_horizon_selector_scales_horizon_dependent_counts():
+    default = versions.compile_request(v4_request())
+    single = versions.compile_request(v4_request(), horizons=(1,))
+    assert single["horizons"] == [1]
+    assert single["counts"]["candidates"] == default["counts"]["candidates"] == 99
+    assert single["counts"]["search_fits"] * 3 == default["counts"]["search_fits"]
+    assert single["request_id"] == content_hash(single["request"])
+
+
+@pytest.mark.parametrize("horizons", [[], [1, 1], [2], [True]])
+def test_v4_invalid_horizons_refuse_through_versions(horizons):
+    with pytest.raises(OpsError) as caught:
+        versions.compile_request(v4_request(), horizons=horizons)
+    assert caught.value.problem.code == "INVALID_EXPERIMENT_SPEC"
+
+
 def test_v3_replay_and_v4_axis_refusal_through_versions(monkeypatch):
     document = v3_request()
     result = versions.compile_request(document)

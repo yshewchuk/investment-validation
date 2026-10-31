@@ -429,8 +429,9 @@ without durable result is not retry permission: preserve the journal and diagnos
 it; never reset claims or raise caps automatically. Changed bindings require new
 artifacts/experiment identity. Comparator masks can cause explicit abstention;
 no history-mean substitution conceals an unavailable incumbent. Main pairing
-requires all three horizons; broad coverage, exclusions and history-mean metrics
-remain visible. Bootstrap intervals do not erase prior adaptive design reuse.
+uses the selected horizon subset (all three horizons by default); broad coverage,
+exclusions and history-mean metrics remain visible. Bootstrap intervals do not
+erase prior adaptive design reuse.
 
 The first execution stores one immutable job deadline in the existing journal.
 The legacy search CLI rejects qualified requests; use the SIZE entry point above.

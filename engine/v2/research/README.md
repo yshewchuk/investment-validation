@@ -472,8 +472,8 @@ Use `experiments.eligible_history.materialize/read` for complete list results, o
 admission and coverage checks. The library-only `experiments.size_panel` wrapper
 uses `iter_read`; no production or nightly entrypoint invokes it without separate
 authorization. Supply an
-explicit source snapshot, holdout month, grouped policy, target IDs, horizons
-`[1, 3, 5]`, history start and limits (`max_source_rows`, `max_fragments`,
+explicit source snapshot, holdout month, grouped policy, target IDs, a nonempty
+ascending subset of horizons `[1, 3, 5]`, history start and limits (`max_source_rows`, `max_fragments`,
 `max_object_bytes`, `max_total_bytes`, `max_output_rows`). The separate
 `research_eligible_history` table requires native
 `computed_move_bounds`; missing/stale bindings refuse before outcomes.
@@ -505,7 +505,8 @@ Historical publication and schedule knowledge remain unverified reconstruction.
 `experiments.size_panel.materialize/read` is the installed-identity public boundary;
 `magnitude_panel_qualified` and `_magnitude_panel_*` helpers are internal only.
 Supply exact source/history/price snapshots, `as_of_month`, frozen 30-day `policy`,
-`event_ids`, `horizons=[1,3,5]`, `history_start`, `source_start`, eligible-history
+`event_ids`, a nonempty ascending subset of `horizons` from `[1,3,5]`
+(`horizons=[1]` for lead-1-only runs), `history_start`, `source_start`, eligible-history
 `limits` and confirmed-index `metadata_limits`; no defaults imply unbounded reads.
 Materialize returns a native feature_snapshot and context; read additionally takes
 that snapshot and explicit columns, returning metadata plus projected features.

@@ -5,7 +5,8 @@ import pytest
 from engine.v2.data.errors import DataError
 from engine.v2.research import _magnitude_panel_sources as sources
 
-REQUEST = {"history_start": "2018-01-01", "as_of_month": "2026-01", "policy": {"policy_id": "p"}}
+REQUEST = {"history_start": "2018-01-01", "as_of_month": "2026-01", "policy": {"policy_id": "p"},
+           "horizons": [1, 3, 5]}
 CONTEXT = {"targets": [{"ticker": "FOX", "forecasts": [{"source_session_ceiling": "2030-01-01"}]}]}
 
 
@@ -13,7 +14,7 @@ def _event(event_id, day, ordinal=10):
     return {"event_id": event_id, "ticker": "FOX", "event_date": day, "session": "BMO", "ordinal": ordinal}
 
 
-def _run(monkeypatch, days, events):
+def _run(monkeypatch, days, events, horizons=(1, 3, 5)):
     seen = {}
     monkeypatch.setattr(sources, "calendar_input", lambda repository, source: (None, None))
     monkeypatch.setattr(sources, "forecast_cutoff", lambda ts, session, h, cal: {
@@ -23,13 +24,25 @@ def _run(monkeypatch, days, events):
     index = {"sequences": [{"ticker": "FOX", "events": events}]}
     meta = {"FOX": np.array(days, dtype="datetime64[ns]"), "^GSPC": np.array([], dtype="datetime64[ns]")}
     before = repr(index)
-    plan, excluded = sources.quote_plan(None, {}, index, CONTEXT, REQUEST, meta)
+    request = {**REQUEST, "horizons": list(horizons)}
+    plan, excluded = sources.quote_plan(None, {}, index, CONTEXT, request, meta)
     assert plan == "plan"  # quote_plan returns the eligibility plan unchanged as its first element
     assert repr(index) == before  # the confirmed-metadata index is never mutated
     return plan, excluded, seen["metadata"]
 
 
 DAYS = ["2019-03-13", "2019-03-14", "2019-03-15", "2019-03-18", "2019-03-19"]
+
+
+def test_single_horizon_keeps_one_clock(monkeypatch):
+    _, excluded, metadata = _run(monkeypatch, DAYS, [_event("fox-ok", "2019-03-14")], horizons=(1,))
+    assert excluded == []
+    assert metadata["horizons"] == [1]
+    forecasts = metadata["groups"][0]["forecasts"]
+    assert len(forecasts) == 1
+    assert forecasts[0]["horizon_sessions"] == 1
+    assert forecasts[0]["decision_date"] == "2029-01-01"
+    assert forecasts[0]["source_session_ceiling"] == "2029-01-01"
 
 
 def test_pre_coverage_event_is_excluded_and_counted(monkeypatch, capsys):

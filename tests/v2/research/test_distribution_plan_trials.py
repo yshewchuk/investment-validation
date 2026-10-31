@@ -39,7 +39,8 @@ def context(monkeypatch):
     outer = {"year": "2024", "training_labels_before": "2024-01-01",
              "training_candidate_event_ids": ["train", "inner"], "evaluation_event_ids": ["outer"]}
     native = {"plan_id": content_hash("source-plan"), "candidate_count": 33,
-              "planned_fit_count": 102, "folds": [{"outer": outer, "inner": [inner]}]}
+              "planned_fit_count": 102, "horizons": [5, 3, 1],
+              "folds": [{"outer": outer, "inner": [inner]}]}
     ref = artifact_reference(canonical_json(native).encode(), "magnitude_search_plan.v2")
     events, records = [], {}
     monkeypatch.setattr(planner, "verify_native_registration", lambda *args, **kw: events.append(("verify", args[2].run_id, kw)))
@@ -143,6 +144,18 @@ def test_small_plan_uses_native_schedule_not_size_grid_and_detaches(context):
     plan["recipe"]["horizons"].clear()
     native["folds"].clear()
     assert planner.prepare_plan(*context.args)[0]["recipe"]["horizons"] == [5, 3, 1]
+
+
+def test_native_size_plan_missing_anchor_horizon_refuses(context, monkeypatch):
+    altered = {**deepcopy(context.native), "horizons": [1]}
+    ref = artifact_reference(canonical_json(altered).encode(), "magnitude_search_plan.v2")
+    monkeypatch.setattr(planner, "read_search_plan", lambda *args: deepcopy(altered))
+    monkeypatch.setattr(planner, "validate_candidate_recipe",
+                        lambda recipe: {**recipe, "horizons": [1]})
+    args = list(context.args)
+    args[5] = ref
+    error = _code("INVALID_EXPERIMENT_SPEC", lambda: planner.prepare_plan(*args))
+    assert error.problem.message == "distribution SIZE plan must provide every native SIZE anchor horizon"
 
 
 @pytest.mark.parametrize("field,value", [("schema_version", "native_experiment_registration.v1.3"),

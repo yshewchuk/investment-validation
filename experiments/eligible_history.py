@@ -30,7 +30,9 @@ def validate_request(request, *, allow_all_events=False):
             or any(type(key) is not str or not key or key != key.strip() for key in ids)
             or len(set(ids)) != len(ids))):
         raise fail("CONTRACT_MISMATCH", "explicit unique canonical targets required")
-    if type(horizons) is not list or any(type(h) is not int for h in horizons) or horizons != [1, 3, 5]:
+    if (type(horizons) is not list or not horizons
+            or any(type(h) is not int or h not in (1, 3, 5) for h in horizons)
+            or horizons != sorted(set(horizons))):
         raise fail("CONTRACT_MISMATCH", "ordered native horizons required")
     try:
         ExperimentHoldouts(request["as_of_month"])

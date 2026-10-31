@@ -88,13 +88,13 @@ def prepare(repository, spec, request, panel_request, *, scope, training_start, 
     from engine.v2.research.magnitude_panel_qualified_table import recipe
     sources = _sources()
     panel_request = validate_panel_request(panel_request)
-    schedule = compile_request(request)
+    schedule = compile_request(request, horizons=tuple(h for h in (5, 3, 1) if h in panel_request["horizons"]))
     if request["limits"]["child"]["memory_bytes"] > request["limits"]["parent"]["memory_bytes"]:
         raise fail("INVALID_EXPERIMENT_SPEC", "child memory must not exceed inherited parent limit")
     _require(request["feature_dictionary_hash"] == recipe("HMO")["dictionary_hash"])
     _require(panel_request["feature_snapshot_id"] == request["feature_snapshot_id"]
              and panel_request["history_snapshot"] == request["history_snapshot_id"]
-             and panel_request["horizons"] == [1, 3, 5])
+             and set(panel_request["horizons"]) == set(schedule["horizons"]))
     base, spec = prepare_native_registration(repository, spec, code_root=Path(__file__).resolve().parents[1],
         scope=scope, as_of_month=panel_request["as_of_month"], event_ids=panel_request["event_ids"],
         magnitude_training_start=training_start, magnitude_labels_before=labels_before, defer_serialization=True)
@@ -207,7 +207,15 @@ def prepare_plan(conn, store, registration, request, *, plan_schema=None):
     verify_native_registration(conn, store, registration, max_evidence_bytes=MAX_NATIVE_EVIDENCE_BYTES)
     binding = registration.document
     verify_installation(binding)
-    schedule = compile_request(request)
+    if binding["schema_version"] == "native_experiment_registration.v1.6":
+        horizons = (5, 3, 1)
+    else:
+        panel_request = binding.get("size_panel_request")
+        if not isinstance(panel_request, dict):
+            raise fail("EXPERIMENT_IDENTITY_CONFLICT", "qualified SIZE registration is missing its panel request")
+        validate_panel_request(panel_request)
+        horizons = tuple(h for h in (5, 3, 1) if h in panel_request["horizons"])
+    schedule = compile_request(request, horizons=horizons)
     _require(schedule["request"] == binding["size_request"])
     folds = _folds(binding, request)
     if plan_schema == PLAN_V3:
@@ -245,7 +253,7 @@ def prepare_plan(conn, store, registration, request, *, plan_schema=None):
         "anchor": {"run_id": registration.run_id, "variant_id": registration.variant_id},
         "implementation": {"source_closure": binding["source_closure"], "environment": binding["environment"]},
         "candidates": sorted(candidates, key=lambda c: c["candidate_id"]), "folds": folds,
-        "horizons": [5, 3, 1], "candidate_count": schedule["counts"]["candidates"],
+        "horizons": schedule["horizons"], "candidate_count": schedule["counts"]["candidates"],
         "planned_fit_count": schedule["counts"]["search_fits"], "counts": schedule["counts"],
         "selection": selection_contract}
     return {**identity, "plan_id": content_hash(identity)}

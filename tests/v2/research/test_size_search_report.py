@@ -5,7 +5,7 @@ from experiments import size_search_report as report
 
 
 def test_mixed_failed_and_successful_trials_report_diagnostics(monkeypatch):
-    plan = {"plan_id": "plan", "folds": [{"outer": {"year": "2024", "evaluation_event_ids": ["e"]},
+    plan = {"plan_id": "plan", "horizons": [5, 3, 1], "folds": [{"outer": {"year": "2024", "evaluation_event_ids": ["e"]},
         "inner": [{"year": "2023"}]}], "candidates": [{"candidate_id": "ok"}, {"candidate_id": "failed"}]}
     result = {"predictions": [{"event_id": "e", "absolute_move_pct": 2}], "folds": []}
     registration = SimpleNamespace(run_id="run", document={"size_panel": {"context": {
