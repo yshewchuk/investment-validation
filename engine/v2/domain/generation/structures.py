@@ -316,6 +316,8 @@ def _select_straddle_for_generate(
             raise GeometryRefusal("INVALID_CHAIN_SPOT")
         try:
             selection_spot = _finite_float(inputs["chain_spot"], "chain_spot")
+        except OverflowError as exc:
+            raise GeometryRefusal("INVALID_CHAIN_SPOT") from exc
         except GeometryRefusal as exc:
             raise GeometryRefusal("INVALID_CHAIN_SPOT") from exc
         if selection_spot <= 0:

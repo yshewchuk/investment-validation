@@ -58,8 +58,9 @@ computed by this package:
 - `spot`, `forecast_abs_move` (or `forecast`), `width` — sizing. For
   STR-THRU/STR-RUNUP, `spot` remains the calendar close recorded on the
   returned `Geometry`; listed-strike selection instead uses optional
-  `chain_spot` when supplied, matching the option-chain price anchor. If
-  `chain_spot` is absent, selection falls back to `spot`.
+  `chain_spot` when supplied, matching the option-chain price anchor. If the
+  `chain_spot` key is absent, selection falls back to `spot`; a present key
+  with value `None` is invalid and refuses as `INVALID_CHAIN_SPOT`.
 - `chain_spot` — optional finite positive option-chain spot used only to
   choose a listed STR-THRU/STR-RUNUP strike. When listed selection is needed,
   a supplied boolean or value that is not coercible to a finite positive float
@@ -168,6 +169,15 @@ are instead returned as data, never raised:
 
 Raised exceptions:
 
+- Listed STR-THRU/STR-RUNUP strike selection: when selection is needed and
+  the `chain_spot` key is absent, use calendar `spot` as the selection anchor;
+  when the key is present with value `None`, refuse as
+  `GeometryRefusal("INVALID_CHAIN_SPOT")`; when a
+  finite positive `chain_spot` is supplied, use it instead; when a supplied
+  value is boolean, cannot be converted to a finite float (including an
+  overflowing number), or is non-positive, raise
+  `GeometryRefusal("INVALID_CHAIN_SPOT")` without close fallback. A captured
+  strike and expiry bypass this selection and its validation.
 - `GeometryRefusal` codes raised by `generate`: `"<field> must be finite"`
   (a required numeric field, such as `spot`/`width`, is missing or not a
   finite number), `INVALID_CHAIN_SPOT` (when listed STR-THRU/STR-RUNUP
@@ -228,7 +238,8 @@ Raised exceptions:
 - For STR-THRU/STR-RUNUP, expiry resolution happens strictly before strike
   selection (`_select_listed_straddle`): choosing by strike distance first
   could silently pick a strike from the wrong expiry, whenever a later
-  expiry happened to list a strike nearer to spot.
+  expiry happened to list a strike nearer to the selection anchor
+  (`chain_spot`, or calendar `spot` when absent).
 - No date filter (event-date, session, or entry-date/DTE) is ever silently
   downgraded to a different answer than the one it was asked to find: a
   filter with no survivor refuses by name rather than substituting the

@@ -123,7 +123,7 @@ def test_listed_straddle_selection_falls_back_to_calendar_close(strategy):
 
 
 @pytest.mark.parametrize("strategy", STRADDLES)
-@pytest.mark.parametrize("chain_spot", [0.0, float("nan"), float("inf"), "bad", True, None, -1.0])
+@pytest.mark.parametrize("chain_spot", [0.0, float("nan"), float("inf"), "bad", True, None, -1.0, 10**400])
 def test_listed_straddle_selection_refuses_invalid_chain_spot(strategy, chain_spot):
     with pytest.raises(GeometryRefusal, match="INVALID_CHAIN_SPOT"):
         generate(strategy, {**_BWXT_INPUTS, "chain_spot": chain_spot})
