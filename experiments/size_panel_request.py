@@ -24,8 +24,9 @@ def validate_panel_request(value):
                 raise ValueError
         events, horizons = value["event_ids"], value["horizons"]
         if (type(events) is not list or not events or any(type(e) is not str or not e or e != e.strip() for e in events)
-                or len(set(events)) != len(events) or type(horizons) is not list or horizons != [1, 3, 5]
-                or any(type(h) is not int for h in horizons)
+                or len(set(events)) != len(events) or type(horizons) is not list or not horizons
+                or any(type(h) is not int or h not in (1, 3, 5) for h in horizons)
+                or horizons != sorted(set(horizons))
                 or type(value["policy"]) is not dict or type(value["policy"].get("embargo_days")) is not int
                 or value["policy"] != eligibility_policy(version="grouped_ticker_embargo.v1", embargo_days=30)):
             raise ValueError

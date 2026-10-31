@@ -92,7 +92,7 @@ def _space(request):
     request["space"] = canonical
 
 
-def _counts(request):
+def _counts(request, horizons):
     outer, inner = request["outer_years"], request["inner_years"]
     v2._require(v2._years(outer) and v2._shape(inner, outer),
                 "stage-2 requires ordered outer years and exact inner-year keys")
@@ -104,18 +104,23 @@ def _counts(request):
         v2._require(count <= _MAX_V4_CANDIDATES,
                     "stage-2 v4 grid exceeds the 1000-candidate ceiling")
     inners, outers = sum(map(len, inner.values())), len(outer)
-    fits = 3 * (count * inners + outers)
+    lead_count = len(horizons)
+    fits = lead_count * (count * inners + outers)
+    baseline_logical_fits = lead_count * outers
+    baseline_component_fits = 2 * lead_count * outers
     v2._require(v2._positive(request["max_candidates"]) and request["max_candidates"] >= count
                 and v2._positive(request["max_fits"]) and request["max_fits"] >= fits,
                 "stage-2 candidate or search-fit cap is insufficient")
     return {"candidates": count, "inner_folds": inners, "outer_folds": outers,
-        "search_fits": fits, "baseline_logical_fits": 3 * outers,
-        "baseline_component_fits": 6 * outers, "total_logical_fits": fits + 3 * outers,
-        "total_component_fits": fits + 6 * outers}
+        "search_fits": fits, "baseline_logical_fits": baseline_logical_fits,
+        "baseline_component_fits": baseline_component_fits,
+        "total_logical_fits": fits + baseline_logical_fits,
+        "total_component_fits": fits + baseline_component_fits}
 
 
-def compile_request(request):
+def compile_request(request, *, horizons=(5, 3, 1)):
     """Return canonical declarations/counts; no source/fold verification or I/O."""
+    horizons = v2.validate_horizons(horizons)
     try:
         v2._plain(request)
         request = json.loads(json.dumps(request, allow_nan=False))
@@ -127,12 +132,12 @@ def compile_request(request):
                 "stage-2 request requires its closed v3 or v4 schema")
     v2._references(request)
     _space(request)
-    counts = _counts(request)
+    counts = _counts(request, horizons)
     v2._comparison(request["comparison"], counts)
     v2._limits(request["limits"])
     request_id = content_hash(request)
     result = {"schema_version": "magnitude_search_schedule.v2", "request": request,
-        "request_id": request_id, "horizons": [5, 3, 1],
+        "request_id": request_id, "horizons": list(horizons),
         "candidate_specs": v2._specifications(request, request_id),
         "schedule": [{"outer_year": year, "inner_years": request["inner_years"][year]}
                      for year in request["outer_years"]], "counts": counts}

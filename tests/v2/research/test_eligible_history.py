@@ -297,9 +297,9 @@ def test_embargoed_development_target_refuses_even_when_annual_evaluation(data, 
             event_ids=[data.events[0]["event_id"], embargoed])
 
 
-def test_output_horizon_choice_cannot_weaken_frozen_group_admission(data, monkeypatch):
+def test_output_horizon_subset_must_be_canonical_before_source_reads(data, monkeypatch):
     poison_outcomes(monkeypatch, data.repository, data.snapshot, (), all_outcomes=True)
-    for horizons in ([1], [3], [5], [1, 3], [3, 5], [5, 3, 1]):
+    for horizons in ([], [0, 3, 5], [1, 4], [3, 1], [1, 1], [True], [1.0], [5, 3, 1]):
         with pytest.raises(DataError, match="ordered native horizons"):
             history.materialize(data.repository, data.snapshot, **{**data.request, "horizons": horizons})
 
@@ -376,7 +376,7 @@ def test_public_request_shape_matrix_refuses_before_fingerprints_or_sources(data
         "as_of_month": [None, [], 202601, "2026-13", "2026-1"],
         "history_start": [None, [], 2022, "2022-02-30", "20220101"],
         "event_ids": [None, {}, "event", [], [None], [""], [" x"], ["x", "x"]],
-        "horizons": [None, {}, "1", [1], [True, 3, 5]],
+        "horizons": [None, {}, "1", [True, 3, 5]],
         "limits": [None, [], {}, {**LIMITS, "extra": 1},
                    *[{**LIMITS, key: value} for key in LIMITS for value in (None, True, 0, "1")]],
         "policy": [None, [], {}, {**POLICY, "extra": 1},
