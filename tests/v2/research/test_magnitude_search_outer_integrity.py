@@ -649,6 +649,7 @@ def test_timed_shape_requires_both_child_timing_fields():
     result = {"event": "succeeded", "forecasts": [], "score_seconds": 0.25, "rss_delta_kib": 64}
     assert outer._timed_shape(result, keys)
     assert not outer._timed_shape({key: value for key, value in result.items() if key != "rss_delta_kib"}, keys)
+    assert not outer._timed_shape({key: value for key, value in result.items() if key != "score_seconds"}, keys)
 
 
 def test_timed_failure_preserves_fit_markers_and_failure_classification(outer_case, monkeypatch):
@@ -705,7 +706,14 @@ def test_outer_replay_uses_registered_diagnostic_keys(monkeypatch):
     assert result == terminal
 
 
-def test_timed_outer_replay_requires_timed_completed_fit_markers(monkeypatch):
+@pytest.mark.parametrize("worker_timed, marker_timed, refuses", [
+    (True, False, True),   # worker timed, fit marker untimed -> refuse
+    (False, True, True),   # worker untimed, fit marker timed -> refuse
+    (False, False, False), # fully untimed legacy pair -> replay
+    (True, True, False),   # fully timed pair -> replay
+])
+def test_outer_replay_requires_consistent_worker_and_fit_timing(
+        monkeypatch, worker_timed, marker_timed, refuses):
     binding = {}
     execution = {"schema_version": "size_candidate_execution.v1"}
     started = {"outer_id": "outer"}
@@ -714,19 +722,25 @@ def test_timed_outer_replay_requires_timed_completed_fit_markers(monkeypatch):
     forecasts = [{"event_id": "event", "horizon_sessions": 1,
         "predicted_absolute_move_pct": 2.0}]
     fit = {"horizon_sessions": 1}
-    worker = {"event": "succeeded", "forecasts": forecasts,
-        "score_seconds": 0.25, "rss_delta_kib": 64}
+    worker = {"event": "succeeded", "forecasts": forecasts}
+    if worker_timed:
+        worker = {**worker, "score_seconds": 0.25, "rss_delta_kib": 64}
     terminal = {"inputs_id": "inputs"}
     receipt = {"status": "succeeded", "fits": [fit], "fit_attempt_count": 1,
         "completed_fit_count": 1, "forecasts_id": content_hash(forecasts)}
+    completed = {**fit, "fit_seconds": 0.125} if marker_timed else fit
     journal = {"start": started, "inputs": {"manifest": "manifest"}, "terminal": terminal,
         "forecasts": forecasts, "worker-result": worker, "execution": receipt, "validation": {},
-        "fit-started:1": fit, "fit-completed:1": fit}
+        "fit-started:1": fit, "fit-completed:1": completed}
     monkeypatch.setattr(outer, "diagnostic_keys", lambda _binding: set())
     monkeypatch.setattr(outer, "diagnostic_evidence", lambda *a: {})
     monkeypatch.setattr(outer, "load_inputs", lambda *a: {})
     monkeypatch.setattr(outer, "fit_evidence", lambda *a: [fit])
     monkeypatch.setattr(outer, "_result", lambda *a: terminal)
 
-    with outer_problem("EXPERIMENT_IDENTITY_CONFLICT", CONFLICT):
-        outer._replay(lambda slot: journal[slot], None, started, fold, plan, execution, binding)
+    if refuses:
+        with outer_problem("EXPERIMENT_IDENTITY_CONFLICT", CONFLICT):
+            outer._replay(lambda slot: journal[slot], None, started, fold, plan, execution, binding)
+    else:
+        result = outer._replay(lambda slot: journal[slot], None, started, fold, plan, execution, binding)
+        assert result == terminal

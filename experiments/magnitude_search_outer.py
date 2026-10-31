@@ -171,8 +171,11 @@ def _replay(read, store, started, fold, plan, execution, binding):
         _equal(read("execution"), receipt)
         for fit in fits:
             _equal(read("fit-started:" + str(fit["horizon_sessions"])), fit)
-            _equal_completed_fit(read("fit-completed:" + str(fit["horizon_sessions"])), fit,
-                                 legacy=not timed_worker)
+            marker = read("fit-completed:" + str(fit["horizon_sessions"]))
+            marker_timed = isinstance(marker, dict) and "fit_seconds" in marker
+            if marker_timed != timed_worker:
+                raise _conflict()
+            _equal_completed_fit(marker, fit, legacy=not timed_worker)
         result = _result(started, inputs, inputs_id, receipt, forecasts, read("validation"), fold, plan["horizons"])
         _equal(read("terminal"), result)
         return result
