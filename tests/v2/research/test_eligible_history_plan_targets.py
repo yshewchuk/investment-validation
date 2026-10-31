@@ -180,6 +180,7 @@ def test_real_plan_targets_move_early_target_to_before_start(real):
 
 
 @pytest.mark.parametrize("changes", [{"history_start": "bad"}, {"history_start": 5},
+                                     {"history_start": date(2023, 1, 1)},
                                      {"as_of_month": "bad"}])
 def test_real_plan_targets_refuse_noncanonical_start_or_month_without_reads(real, monkeypatch, changes):
     def forbidden(*args, **kwargs):
