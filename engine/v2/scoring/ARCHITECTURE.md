@@ -196,7 +196,8 @@ verified chooser-fold references and passes the verified map to
 `engine.score.Scorer`. The scorer records only references matching the
 producer output and fold month it served. `strict_trace_one` checks each
 reference against the recorded producer binding and the request's canonical
-decision date, then writes the validated map to metadata field
+decision date; the served fold boundary may equal that date (for a first-day
+decision), but may not be later. It then writes the validated map to metadata field
 `chooser_fold_references` when a chooser trace has producer folds (`None`
 otherwise). Capture performs no catalog lookup and never infers missing
 provenance. A chooser trace with a producer fold but no matching verified

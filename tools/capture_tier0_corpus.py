@@ -3713,7 +3713,7 @@ def _validated_chooser_fold_references(source, request):
         descriptor = ref.get("descriptor_hash")
         if (not isinstance(producer, Mapping) or not isinstance(identity, Mapping)
                 or fold.isoformat() != ref["fold_start"] or fold.day != 1 or cutoff != fold
-                or fold >= decision or ref.get("producer_output") != output
+                or fold > decision or ref.get("producer_output") != output
                 or declaration.get("output") != output
                 or tuple(producer.get("output_names") or ()) != (output,)
                 or producer.get("fold_start") != ref["fold_start"]
@@ -4878,7 +4878,8 @@ def main(argv: Iterable[str] | None = None) -> int:
                     include_chooser_fold_references=True).chooser_fold_references
             except ReleaseBindingError as exc:
                 ap.error(f"production chooser references unavailable: {exc}")
-        scorer = score_mod.Scorer(chooser_fold_references=chooser_fold_references)
+        scorer = (score_mod.Scorer(chooser_fold_references=chooser_fold_references)
+                  if chooser_fold_references else score_mod.Scorer())
         print(f"[corpus] scorer ready in {time.time()-started:.0f}s", flush=True)
 
         # `_candidate()` spills every candidate's `legacy_trace` to disk the

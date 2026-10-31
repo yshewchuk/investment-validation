@@ -1132,6 +1132,9 @@ def test_phase5_prepare_release_sets_canonical_chooser_cutoff():
     assert _with_chooser_retrain_cutoff(sources, folds) == {
         **sources, "retrain_cutoff": "2026-09-01",
     }
+    assert _with_chooser_retrain_cutoff({}, folds) == {
+        "retrain_cutoff": "2026-09-01", "pool_cutoff": "2026-09-01",
+    }
     assert _with_chooser_retrain_cutoff(sources, {}) is sources
     with pytest.raises(PrepareRefused, match="canonical training cutoff"):
         _with_chooser_retrain_cutoff({**sources, "retrain_cutoff": "2026-08-01"}, folds)
@@ -1145,7 +1148,7 @@ def test_write_release_persists_chooser_cutoff(tmp_path, monkeypatch):
     from tools import phase5_prepare_release as phase5
 
     validated = {"fold": SimpleNamespace(fold_start="2026-09-01")}
-    sources = {"pool_cutoff": "2026-10-01"}
+    sources = None
     release = SimpleNamespace(release_id="release-1", deployment_id="deployment-1")
     written = {}
     monkeypatch.setattr(phase5, "_rebase_member_paths", lambda value, states, panel: (value, states))
@@ -1161,6 +1164,7 @@ def test_write_release_persists_chooser_cutoff(tmp_path, monkeypatch):
     out = phase5.write_release(tmp_path / "release", release, None, {}, [], sources=sources)
     assert out == tmp_path / "release"
     assert written["body"]["sources"]["retrain_cutoff"] == "2026-09-01"
+    assert written["body"]["sources"]["pool_cutoff"] == "2026-09-01"
 
 
 def test_scorer_constructor_copies_chooser_fold_reference_map(monkeypatch):
@@ -1215,6 +1219,8 @@ def test_chooser_fold_reference_flows_through_real_scorer_checkpoint(tmp_path, m
     source = _source_of(_candidate(collector))
     captured = _validated_chooser_fold_references(source, _request())
     assert captured["pred_im_t1_d14"]["descriptor_hash"] == reference.descriptor_hash
+    boundary_request = SimpleNamespace(requested_decision_at="2026-09-01")
+    assert _validated_chooser_fold_references(source, boundary_request)["pred_im_t1_d14"]["fold_start"] == "2026-09-01"
     with pytest.raises(StrictTraceCaptureError, match="chooser refs lack declarations"):
         _validated_chooser_fold_references(
             {"frozen": {"chooser_references": {"orphan": {}}}}, _request())

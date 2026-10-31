@@ -605,13 +605,19 @@ def _with_chooser_retrain_cutoff(sources, chooser_validated):
         if declared_cutoff is not None and declared_cutoff != retrain_cutoff:
             raise ValueError("mismatch")
         pool_cutoff = (sources or {}).get("pool_cutoff")
-        if pool_cutoff is not None:
+        if pool_cutoff is None:
+            pool_cutoff = retrain_cutoff
+        else:
             parsed_pool_cutoff = date.fromisoformat(pool_cutoff)
             if parsed_pool_cutoff.isoformat() != pool_cutoff or parsed_pool_cutoff < date.fromisoformat(retrain_cutoff):
                 raise ValueError("pool cutoff")
     except (AttributeError, TypeError, ValueError) as exc:
         raise PrepareRefused("chooser folds require a canonical training cutoff") from exc
-    return {**dict(sources or {}), "retrain_cutoff": retrain_cutoff}
+    return {
+        **dict(sources or {}),
+        "retrain_cutoff": retrain_cutoff,
+        "pool_cutoff": pool_cutoff,
+    }
 
 
 def write_release(out: Path, release: ModelRelease, inventory: ModelReleaseInventory,
