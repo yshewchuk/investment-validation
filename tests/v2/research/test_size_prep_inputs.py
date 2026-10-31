@@ -16,6 +16,9 @@ from engine.v2.foundation import ArtifactStore, canonical_json, content_hash
 from engine.v2.ops import computed_moves_store
 from engine.v2.ops.bootstrap import open_catalog
 from engine.v2.ops.errors import OpsError
+from engine.v2.ops.workspace.catalog_rows import copy_closure_rows
+from engine.v2.ops.workspace.head import commit_scope_head
+from engine.v2.ops.workspace.objects import admit_closure_objects
 from engine.v2.ops.workspace.overlay import create_workspace
 from engine.v2.ops.workspace.scope import SCOPE_HEAD_VERSION
 from experiments import size_prep_inputs as prep
@@ -688,3 +691,141 @@ def test_admission_needs_no_event_coverage_without_exclusions(no_events_ws, sour
     admission = prep.admit_manifest(workspace, "size-prep", manifest, clock=clock)
     assert admission["excluded_count"] == 0
     assert admission["manifest_ref"].schema_ref == prep.MANIFEST_VERSION
+
+
+@pytest.fixture
+def bounds_ws(tmp_path, monkeypatch):
+    """A prepared workspace: a production shadow snapshot with AAAA events whose closure rows and
+    objects are admitted and whose ``shadow`` scope head is committed, so bounds can publish into it."""
+    prod = tmp_path / "bprod"
+    prod.mkdir()
+    conn, clock, store = catalog_and_store(prod)
+    head = _build_parent(conn, clock, store, events_rows=[_event_row("AAAA", day) for day in _EVENT_DAYS])
+    manifest_hash = conn.execute(
+        "SELECT manifest_hash FROM data_snapshots WHERE snapshot_id = ?", (head["snapshot_id"],)).fetchone()[0]
+    conn.close()
+    ws = create_workspace(tmp_path / "bws", production_catalog=prod / "catalog.sqlite",
+                          production_store=prod / "store", snapshot_id=head["snapshot_id"],
+                          manifest_hash=manifest_hash, clock=clock)
+    copy_closure_rows(ws)
+    admit_closure_objects(ws)
+    commit_scope_head(ws, "shadow", clock=clock)
+    monkeypatch.setattr(computed_moves_store, "target_tickers_from_snapshot", lambda *a, **k: (["AAAA"], {}))
+    return ws, clock, prod
+
+
+def _heads(conn):
+    return {row["scope"]: row["snapshot_id"]
+            for row in conn.execute("SELECT scope, snapshot_id FROM data_snapshot_heads")}
+
+
+def _pin_names(workspace):
+    """Read-pin names present in the workspace store; fragment bytes are skipped, not refused."""
+    names = set()
+    for path in (workspace.paths.store / "objects").rglob("*"):
+        if not path.is_file():
+            continue
+        try:
+            document = json.loads(path.read_bytes())
+        except ValueError:
+            continue
+        if isinstance(document, dict) and "pin" in document and "name" in document:
+            names.add(document["name"])
+    return names
+
+
+def test_generate_workspace_bounds_publishes_into_the_workspace_only(bounds_ws, source_root):
+    ws, clock, prod = bounds_ws
+    manifest = prep.build_manifest(source_root, session_ceiling=_AS_OF, tickers=["AAAA"])
+    prod_before, heads_before = _digest_tree(prod), _heads(ws.conn)
+    _, artifacts_before = _ws_state(ws)
+    record = prep.generate_workspace_bounds(ws, "shadow", manifest, source_root=source_root,
+                                            as_of=_AS_OF, clock=clock)
+    assert record["label"] == "reconstructed" and record["refresh_noop"] is False
+    assert record["source_snapshot_id"] == ws.snapshot_id and record["bounds_snapshot_id"] != ws.snapshot_id
+    assert record["entry_count"] == 1 and record["manifest_entry_count"] == 1
+    suffix = record["record_id"].split(":", 1)[1]
+    stored = json.loads((ws.paths.root / "size_prep" / ("provenance-" + suffix + ".json")).read_text())
+    assert stored == record
+    assert _heads(ws.conn) == {**heads_before, "shadow": record["bounds_snapshot_id"]}
+    snapshot = Repository(ws.conn, ws.store, pin_snapshots=True).resolve_full(record["bounds_snapshot_id"])
+    assert TABLE in snapshot.table_manifests
+    rows = _bound_rows(Repository(ws.conn, ws.store), snapshot.snapshot)
+    assert {row["ticker"] for row in rows} == {"AAAA"}
+    assert ws.conn.execute("SELECT COUNT(*) FROM artifacts").fetchone()[0] > artifacts_before
+    assert "size-prep-bounds:" + suffix in _pin_names(ws)
+    assert "size-prep-manifest:" + manifest["manifest_id"].split(":", 1)[1] in _pin_names(ws)
+    assert _digest_tree(prod) == prod_before
+    assert (ws.paths.root / "supervisor.lock").is_file() and not (prod / "supervisor.lock").exists()
+
+
+def test_generate_workspace_bounds_refuses_a_moved_or_absent_head(bounds_ws, source_root):
+    ws, clock, prod = bounds_ws
+    manifest = prep.build_manifest(source_root, session_ceiling=_AS_OF, tickers=["AAAA"])
+    first = prep.generate_workspace_bounds(ws, "shadow", manifest, source_root=source_root,
+                                           as_of=_AS_OF, clock=clock)
+    record_name = "provenance-" + first["record_id"].split(":", 1)[1] + ".json"
+    state, heads, prod_before = _ws_state(ws), _heads(ws.conn), _digest_tree(prod)
+    with pytest.raises(OpsError) as raised:
+        prep.generate_workspace_bounds(ws, "shadow", manifest, source_root=source_root,
+                                       as_of=_AS_OF, clock=clock)
+    assert raised.value.code == "WORKSPACE_REFUSED"
+    assert raised.value.problem.details == {"reason": "head_not_pinned", "scope": "shadow"}
+    assert _ws_state(ws) == state and _heads(ws.conn) == heads
+    with pytest.raises(OpsError) as raised:
+        prep.generate_workspace_bounds(ws, "smoke", manifest, source_root=source_root,
+                                       as_of=_AS_OF, clock=clock)
+    assert raised.value.code == "WORKSPACE_REFUSED"
+    assert raised.value.problem.details == {"reason": "head_not_pinned", "scope": "smoke"}
+    assert _heads(ws.conn) == heads and "smoke" not in heads
+    assert sorted(p.name for p in (ws.paths.root / "size_prep").iterdir()) == [record_name]
+    assert _digest_tree(prod) == prod_before
+
+
+def test_generate_workspace_bounds_refuses_an_event_bearing_exclusion_before_refresh(pinned_ws, source_root):
+    ws, clock, prod = pinned_ws
+    state, prod_before = _ws_state(ws), _digest_tree(prod)
+    manifest = prep.build_manifest(source_root, session_ceiling=_AS_OF, tickers=["AAAA", "EEEE", "ZZZZ"],
+                                   allow_exclusions=True)
+    with pytest.raises(OpsError) as raised:
+        prep.generate_workspace_bounds(ws, "shadow", manifest, source_root=source_root,
+                                       as_of=_AS_OF, clock=clock)
+    assert raised.value.code == "PUBLICATION_REFUSED"
+    assert raised.value.problem.details["reason"] == "excluded_ticker_has_events"
+    assert _ws_state(ws) == state and _digest_tree(prod) == prod_before
+    assert _heads(ws.conn) == {} and not (ws.paths.root / "size_prep").exists()
+
+
+def test_generate_workspace_bounds_refuses_a_non_string_scope_as_a_typed_refusal(bounds_ws, source_root):
+    ws, clock, prod = bounds_ws
+    manifest = prep.build_manifest(source_root, session_ceiling=_AS_OF, tickers=["AAAA"])
+    state, prod_before = _ws_state(ws), _digest_tree(prod)
+    with pytest.raises(OpsError) as raised:
+        prep.generate_workspace_bounds(ws, 123, manifest, source_root=source_root, as_of=_AS_OF, clock=clock)
+    assert raised.value.code == "WORKSPACE_REFUSED"
+    assert raised.value.problem.details["reason"] == "scope_invalid"
+    assert _ws_state(ws) == state and _digest_tree(prod) == prod_before
+
+
+def test_generate_workspace_bounds_refuses_as_of_below_the_ceiling_without_writing(bounds_ws, source_root):
+    ws, clock, prod = bounds_ws
+    manifest = prep.build_manifest(source_root, session_ceiling=_AS_OF, tickers=["AAAA"])
+    state, prod_before = _ws_state(ws), _digest_tree(prod)
+    _refusal(lambda: prep.generate_workspace_bounds(ws, "shadow", manifest, source_root=source_root,
+                                                    as_of="2024-02-06", clock=clock), "INVALID_REQUEST")
+    assert _ws_state(ws) == state and _digest_tree(prod) == prod_before
+    assert _heads(ws.conn) == {"shadow": ws.snapshot_id}
+    assert not (ws.paths.root / "size_prep").exists()
+
+
+def test_objects_root_is_validated_at_the_cli_boundary(tmp_path):
+    from types import SimpleNamespace
+
+    from engine.v2.ops.cli import computed_moves_command
+
+    args = SimpleNamespace(source_root=tmp_path, scope="shadow", as_of=_AS_OF, dry_run=True)
+    for invalid in (123, 1.5, True, [], {}, b"objects"):
+        _refusal(lambda: computed_moves_command(args, tmp_path, None, None, objects_root=invalid),
+                 "INVALID_REQUEST")
+    assert not (tmp_path / computed_moves_store.INPUT_PATH).exists()
+    assert not (tmp_path / "supervisor.lock").exists()

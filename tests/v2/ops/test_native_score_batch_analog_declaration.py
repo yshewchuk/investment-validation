@@ -141,7 +141,7 @@ def _panel_event(**overrides):
     # query built from the wrong row gives a different bucket and ratio.
     return _event_inputs(
         panel_row={"date": "2026-01-15", "signal": 1.5, "mcap_log": math.log(5e9),
-                   "im": 0.09, "mean_prior_or_implied": 0.06},
+                   "entry_im": 0.09, "mean_prior_or_implied": 0.06},
         tier4_row={"pred_abs_move": 0.05, "pred_abs_move_fold_start": "2026-01-01",
                    "mcap_log": math.log(5e10), "im": 0.04, "mean_prior_or_implied": 0.08},
         **overrides)

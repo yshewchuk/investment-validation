@@ -112,6 +112,14 @@ class DistributionTrials:
 
     def read_admission(self, role, outer_year, inner_year=None):
         """Verify seal, unique claim and CAS inputs; return no labels or fit completion."""
+        return self.read_fit_context(role, outer_year, inner_year)["admission"]
+
+    def read_fit_context(self, role, outer_year, inner_year=None):
+        """Return freshly verified fold/recipe/admission and projected stored fit inputs.
+
+        This reads admitted training bytes, not new native outcomes, and grants
+        neither fitting nor protected-read authority. No cross-call cache.
+        """
         plan, native = self._admit()
         fold, selected = self._select(native, role, outer_year, inner_year)
         claim = {"plan_id": plan["plan_id"], **selected}
@@ -120,8 +128,8 @@ class DistributionTrials:
         _require(isinstance(record, dict) and {"manifest", "inputs_id"} <= set(record))
         inputs_id = record["inputs_id"]
         with stage("distribution stored admission verification"):
-            load_fit_inputs(self.store, record["manifest"], inputs_id, fold["evaluation_event_ids"],
-                            plan["recipe"]["horizons"], plan["recipe"]["point_recipe"]["features"])
+            inputs = load_fit_inputs(self.store, record["manifest"], inputs_id, fold["evaluation_event_ids"],
+                                     plan["recipe"]["horizons"], plan["recipe"]["point_recipe"]["features"])
         expected = self._receipt(plan, claim, record["manifest"], inputs_id)
         _require(canonical_json(record) == canonical_json(expected))
-        return expected
+        return {"plan": plan, "native_plan": native, "fold": fold, "admission": expected, "inputs": inputs}

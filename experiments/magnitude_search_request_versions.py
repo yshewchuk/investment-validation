@@ -6,6 +6,7 @@ from engine.v2.research.magnitude_panel_qualified_table import recipe as v3_reci
 from engine.v2.research.magnitude_panel_table import recipe as v1_recipe
 from engine.v2.research.magnitude_panel_v2_table import recipe as v2_recipe
 from experiments.magnitude_search_request import compile_request as compile_v1_request
+from experiments.magnitude_search_request_v3 import compile_request as compile_v3_request
 
 __all__ = ["compile_request"]
 
@@ -14,24 +15,20 @@ _V3_HASH = v3_recipe("HMO")["dictionary_hash"]
 
 
 def compile_request(request):
-    """Preserve SIZE v1 replay; regression uses the core qualified-v3 policy.
-
-    The surrogate is private validation state, never a source or fit identity.
-    Public v1 validation checks caps before expansion. No admission, I/O or fit
-    occurs; fixed metadata work is not an input-byte or resource-feasibility cap.
-    """
-    if type(request) is dict and request.get("schema_version") == "regression_search_request.v1":
+    """Dispatch bounded v3 grids while preserving existing dictionary replay."""
+    version = request.get("schema_version") if type(request) is dict else None
+    if version == "regression_search_request.v1":
         return compile_v1_request(request)
+    compiler = (compile_v3_request if version == "magnitude_search_request.v3"
+                else compile_v1_request)
     dictionary = request.get("feature_dictionary_hash") if type(request) is dict else None
-    selected = v3_recipe if dictionary == _V3_HASH else v2_recipe
-    if (type(request) is not dict
-            or type(request.get("feature_dictionary_hash")) is not str
-            or request["feature_dictionary_hash"] not in (_V2_HASH, _V3_HASH)):
-        return compile_v1_request(request)
+    if type(dictionary) is not str or dictionary not in (_V2_HASH, _V3_HASH):
+        return compiler(request)
 
+    selected = v3_recipe if dictionary == _V3_HASH else v2_recipe
     surrogate = dict(request)
     surrogate["feature_dictionary_hash"] = v1_recipe("HMO")["dictionary_hash"]
-    result = compile_v1_request(surrogate)
+    result = compiler(surrogate)
     result["request"]["feature_dictionary_hash"] = dictionary
     result["request_id"] = content_hash(result["request"])
     recipes = {subset: selected(subset) for subset in result["request"]["feature_sets"]}

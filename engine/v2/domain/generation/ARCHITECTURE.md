@@ -55,7 +55,18 @@ Exported from `engine/v2/domain/generation/__init__.py`
 store, catalog, calendar or network access. Every field is read as-is, never
 computed by this package:
 
-- `spot`, `forecast_abs_move` (or `forecast`), `width` — sizing.
+- `spot`, `forecast_abs_move` (or `forecast`), `width` — sizing. For
+  STR-THRU/STR-RUNUP, `spot` remains the calendar close recorded on the
+  returned `Geometry`; listed-strike selection instead uses optional
+  `chain_spot` when supplied, matching the option-chain price anchor. If the
+  `chain_spot` key is absent, selection falls back to `spot`; a present key
+  with value `None` is invalid and refuses as `INVALID_CHAIN_SPOT`.
+- `chain_spot` — optional finite positive option-chain spot used only to
+  choose a listed STR-THRU/STR-RUNUP strike. When listed selection is needed,
+  a supplied boolean or value that is not coercible to a finite positive float
+  refuses geometry with `GeometryRefusal("INVALID_CHAIN_SPOT")`; it does not
+  fall back to the calendar close. Scoring input validation may refuse earlier
+  with its existing `DocumentError(BAD_VALUE)` at `$.context.chain_spot`.
 - `strike`, `expiry` — a caller-already-resolved value, used exactly as
   given wherever it is checked (bypasses native selection for that field).
 - `post_event_expiry` — an alternate already-resolved expiry. One bypass rule
@@ -76,7 +87,11 @@ computed by this package:
   `observed_date` (exact ISO string; `price` copies it to
   `PricedLeg.quote_date`, the first leg's drives `dte_entry`; anything else is
   ignored). The contract domain native selects from whenever `strike`/`expiry`
-  is missing.
+  is missing. For STR-THRU/STR-RUNUP, the common listed strike nearest
+  `chain_spot` is selected when present; otherwise selection uses calendar
+  `spot`. Ties still choose the lower strike. This changes strike selection
+  only: `Geometry.spot` remains the calendar close and continues to drive
+  sizing and downstream uses of geometry spot.
 - `event_date`, `session` — the print date/session, read by the
   `first_post_event` expiry rule (STR-THRU and every put-ladder strategy).
 - `entry_date`, `quote_date` — both raw facts, not calculated answers (see
@@ -154,9 +169,20 @@ are instead returned as data, never raised:
 
 Raised exceptions:
 
+- Listed STR-THRU/STR-RUNUP strike selection: when selection is needed and
+  the `chain_spot` key is absent, use calendar `spot` as the selection anchor;
+  when the key is present with value `None`, refuse as
+  `GeometryRefusal("INVALID_CHAIN_SPOT")`; when a
+  finite positive `chain_spot` is supplied, use it instead; when a supplied
+  value is boolean, cannot be converted to a finite float (including an
+  overflowing number), or is non-positive, raise
+  `GeometryRefusal("INVALID_CHAIN_SPOT")` without close fallback. A captured
+  strike and expiry bypass this selection and its validation.
 - `GeometryRefusal` codes raised by `generate`: `"<field> must be finite"`
   (a required numeric field, such as `spot`/`width`, is missing or not a
-  finite number), `UNKNOWN_STRATEGY`,
+  finite number), `INVALID_CHAIN_SPOT` (when listed STR-THRU/STR-RUNUP
+  selection is needed and supplied `chain_spot` is boolean or not coercible
+  to a finite positive float; no close fallback), `UNKNOWN_STRATEGY`,
   `ZERO_WIDTH`, `MISSING_EXPIRY` (no captured expiry and nothing listed to
   select from), `EXPIRY_NOT_LISTED:<date>` (a captured `expiry`/`post_event_expiry` not
   present in `quotes`), `NO_EXPIRY_ON_OR_AFTER:<date>` (STR-THRU/put-ladder
@@ -212,7 +238,8 @@ Raised exceptions:
 - For STR-THRU/STR-RUNUP, expiry resolution happens strictly before strike
   selection (`_select_listed_straddle`): choosing by strike distance first
   could silently pick a strike from the wrong expiry, whenever a later
-  expiry happened to list a strike nearer to spot.
+  expiry happened to list a strike nearer to the selection anchor
+  (`chain_spot`, or calendar `spot` when absent).
 - No date filter (event-date, session, or entry-date/DTE) is ever silently
   downgraded to a different answer than the one it was asked to find: a
   filter with no survivor refuses by name rather than substituting the

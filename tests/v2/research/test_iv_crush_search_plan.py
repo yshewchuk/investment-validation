@@ -100,6 +100,9 @@ def test_changed_or_malformed_request_refuses_without_publication(prepared, chan
         plans.seal_search_plan(data.conn, data.store, data.registration, document)
     assert caught.value.code == ("INVALID_EXPERIMENT_SPEC" if change in {"comparison", "caps", "shape"}
                                  else "EXPERIMENT_IDENTITY_CONFLICT")
+    if change == "comparison":
+        assert caught.value.problem.message == "regression comparison requires iv_crush_causal_refit and training_mean references"
+        assert caught.value.problem.retryable is False
     assert catalog_rows(data.conn) == before and artifact_object_bytes(data.store) == objects
 
 
@@ -271,6 +274,33 @@ def test_both_regression_compilers_preserve_exact_qualified_preview(monkeypatch)
     for candidate in core["candidate_specs"]:
         assert candidate["feature_recipe"] == recipe(candidate["feature_recipe"]["subset"])
     core["request"]["panel_request"]["event_ids"].clear()
+    assert document == original
+
+
+@pytest.mark.parametrize("compile", [compiler.compile_request, compile_request], ids=["core", "versions"])
+@pytest.mark.parametrize("field,value", [("reference", "size_v1_4_causal_refit"),
+    ("sanity_reference", "history_mean"), ("reference", None), ("extra", True),
+    (None, None), ("max_logical_fits", 0), ("max_component_fits", 0)])
+def test_regression_comparison_refusal_names_its_policy(compile, field, value, monkeypatch):
+    document = _preview_request()
+    if field is None:
+        document["comparison"] = value
+    else:
+        document["comparison"][field] = value
+    original = deepcopy(document)
+    def no_expansion(*args, **kwargs):
+        pytest.fail("invalid comparison reached candidate expansion")
+    monkeypatch.setattr(compiler, "_specifications", no_expansion)
+    with monkeypatch.context() as guarded:
+        forbid_policy_io(guarded)
+        with no_fit_guard(), legacy_no_fit(), pytest.raises(OpsError) as caught:
+            compile(document)
+    assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
+    expected = ("stage-2 comparison fit cap is insufficient" if field in
+        ("max_logical_fits", "max_component_fits") else
+        "regression comparison requires iv_crush_causal_refit and training_mean references")
+    assert caught.value.problem.message == expected
+    assert caught.value.problem.retryable is False
     assert document == original
 
 

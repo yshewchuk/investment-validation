@@ -1685,3 +1685,116 @@ def test_50_regime_closes_validator_is_pure_and_exact():
     for bad in (0.0, -1.0, float("inf"), float("-inf"), float("nan")):
         with pytest.raises(ValueError, match="finite and positive"):
             regime.validated_regime_closes([1.0, bad])
+
+
+# --------------------------------------------------------------------------
+# entry_im: the decision-date implied read for the analog query (#681)
+# --------------------------------------------------------------------------
+
+
+def _entry_dm_rows():
+    """Rows dated 02-14 (3.0), 02-15 (7.0) and 02-16 (99.0): the event day's
+    own quote and one strictly after the event/decision ceiling."""
+    rows = _dm_rows("AAA", ["2024-02-14", "2024-02-15", "2024-02-16"])
+    for row, value in zip(rows, (3.0, 7.0, 99.0)):
+        row["implied_move"] = value
+    return rows
+
+
+def _entry_read(rows, *, decision, session="AMC"):
+    """One scan over ``rows`` for an event dated ``_EVENT`` decided at
+    ``decision`` under ``session``; returns the full result and its repo."""
+    snapshot = _snapshot()
+    batches = _default_batches()
+    batches[("daily_market", "AAA")] = rows
+    repo = _FakeRepository(snapshot, _contracts(), batches)
+    key = BoardRequest(ticker="AAA", strategy="STR-X", event_date=_EVENT, session=session)
+    result = scan_panel_row(repo, snapshot, key, history_start=_HISTORY_START,
+                            decision_session=decision)
+    return result, repo
+
+
+def _entry_scan(rows, *, decision):
+    result, repo = _entry_read(rows, decision=decision)
+    return result.panel_row, repo
+
+
+def test_51_amc_event_day_decision_reads_entry_im_at_the_decision_date():
+    """An AMC event decided on its own day reads ``entry_im`` at the event
+    day's quote while ``im``/``or_implied`` keep the strictly-before bound,
+    and the post-decision 99.0 row reaches neither read."""
+    panel, _ = _entry_scan(_entry_dm_rows(), decision=_EVENT)
+    assert panel["entry_im"] == pytest.approx(7.0)
+    assert panel["im"] == pytest.approx(3.0)
+    assert panel["or_implied"] == pytest.approx(3.0)
+    assert 99.0 not in panel.values()
+
+
+def test_52_bmo_decision_before_event_reuses_the_state_read_with_one_query():
+    """decision < event_day puts both caps on the decision: no second
+    ``daily_market`` read, and ``entry_im`` is the reused ``im``."""
+    panel, repo = _entry_scan(_entry_dm_rows(), decision=_DECISION)
+    assert panel["entry_im"] == panel["im"] == pytest.approx(3.0)
+    daily_market_queries = [query for query in repo.queries
+                            if query.table_contract_ref == _DM_REF]
+    assert len(daily_market_queries) == 1
+
+
+def test_53_nan_decision_date_quote_gives_no_entry_im_and_drops_the_ratio():
+    """ALHC shape: the event day's own quote is NaN, so there is no
+    ``entry_im`` key (never a fallback to the 3.0 session), and the analog
+    query drops ``implied_ratio`` even with a finite prior mean."""
+    from engine.v2.scoring.native_analog_query import analog_query_base
+
+    rows = _dm_rows("AAA", ["2024-02-14", "2024-02-15"])
+    rows[0]["implied_move"] = 3.0
+    rows[1]["implied_move"] = float("nan")
+    panel, _ = _entry_scan(rows, decision=_EVENT)
+    assert "entry_im" not in panel
+    assert panel["im"] == pytest.approx(3.0)
+    panel["mean_prior_or_implied"] = 0.05
+    assert analog_query_base(panel)["implied_ratio"] is None
+
+
+def test_54_near_zero_decision_date_quote_is_kept_as_entry_im():
+    """No near-zero filter on the entry read: a 0.005 quote is kept."""
+    rows = _dm_rows("AAA", ["2024-02-14", "2024-02-15"])
+    rows[0]["implied_move"] = 3.0
+    rows[1]["implied_move"] = 0.005
+    panel, _ = _entry_scan(rows, decision=_EVENT)
+    assert panel["entry_im"] == pytest.approx(0.005)
+
+
+def test_55_bmo_event_day_decision_never_reads_its_print_day_close():
+    """A BMO event decided on its own day keeps the strictly-before bound: no
+    second ``daily_market`` read, so ``entry_im`` is the reused 02-14 state and
+    the event-day 7.0 quote is never observed."""
+    result, repo = _entry_read(_entry_dm_rows(), decision=_EVENT, session="BMO")
+    panel = result.panel_row
+    assert panel["entry_im"] == pytest.approx(3.0)
+    assert panel["im"] == pytest.approx(3.0)
+    daily_market_queries = [query for query in repo.queries
+                            if query.table_contract_ref == _DM_REF]
+    assert len(daily_market_queries) == 1
+
+
+def test_56_amc_entry_source_advances_the_panel_anchor():
+    """The AMC entry read selects the event-day session, and that read's own
+    source session (2024-02-15, the freshest contributor) is what the panel
+    anchor reports -- not the earlier state read's 2024-02-14."""
+    result, _ = _entry_read(_entry_dm_rows(), decision=_EVENT)
+    assert result.panel_row["entry_im"] == pytest.approx(7.0)
+    assert result.panel_anchor == pd.Timestamp("2024-02-15")
+
+
+def test_57_missing_entry_date_session_selects_the_previous_eligible_one():
+    """The entry read follows the legacy on-or-before rule: with no row dated on
+    the event day (only 02-14 and 02-16 present), the AMC second read at the
+    event-day cap selects the previous eligible session's quote, never an absent
+    key and never the 02-16 row past the cap."""
+    rows = _dm_rows("AAA", ["2024-02-14", "2024-02-16"])
+    rows[0]["implied_move"] = 3.0
+    rows[1]["implied_move"] = 99.0
+    result, _ = _entry_read(rows, decision=_EVENT)
+    assert result.panel_row["entry_im"] == pytest.approx(3.0)
+    assert result.panel_anchor == pd.Timestamp("2024-02-14")

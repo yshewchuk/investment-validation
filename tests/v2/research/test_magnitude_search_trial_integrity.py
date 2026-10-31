@@ -770,32 +770,34 @@ def test_record_requires_exact_preflight_evaluation_membership(journal, monkeypa
             assert durable_evidence(journal) == before
 
 
-@pytest.mark.parametrize("mutation", ["target", "receipt", "nan", "infinity"])
-def test_native_validation_drift_retains_unfinished_attempt(journal, monkeypatch, mutation):
+def test_drifted_labels_cannot_overwrite_a_committed_validation_authority(journal, monkeypatch):
+    # Later cohort trials reuse the journaled validation, so label drift after the
+    # first trial is never re-read and cannot refuse or rewrite the authority.
     prepare_recording(journal, monkeypatch)
     journal.recorder.start("2024", "2023", "z-last")
     journal.recorder.record("2024", "2023", "z-last", forecasts=rows(4))
-    started = journal.recorder.start("2024", "2023", "a-first")
-    changed = native_labels({"target": 7, "receipt": 4, "nan": float("nan"), "infinity": float("inf")}[mutation])
-    if mutation == "receipt":
-        changed.attrs["labels_before"] = "2099-01-01"
-    monkeypatch.setattr(trials, "load_magnitude_targets", lambda *a, **k: changed)
-    with pytest.raises(OpsError) as caught:
-        journal.recorder.record("2024", "2023", "a-first", forecasts=rows(7))
-    message = "search journal slot is already committed" if mutation == "target" else "search validation evidence differs"
-    assert caught.value.problem == fail("EXPERIMENT_IDENTITY_CONFLICT", message).problem
-    assert journal.recorder._read("forecasts:" + started["trial_id"]) == rows(7)
-    assert journal.recorder._read("terminal:" + started["trial_id"]) is None
+    journal.recorder.start("2024", "2023", "a-first")
+    changed = native_labels(7)
+    reloads = []
+    def drifted(*args, **kwargs):
+        reloads.append(True)
+        return changed
+    monkeypatch.setattr(trials, "load_magnitude_targets", drifted)
+    result = journal.recorder.record("2024", "2023", "a-first", forecasts=rows(7))
+    assert reloads == []
+    assert result["status"] == "succeeded"
+    assert result["validation_id"] == content_hash(validation_evidence())
+    assert result["predictions"] == [{**row, "absolute_move_pct": 4.0} for row in rows(7)]
+    assert result["metrics"] == {"count": 3, "rmse": 3.0, "mae": 3.0}
     assert journal.recorder._read("validation:" + content_hash(["plan", "2024", "2023"])) == validation_evidence()
-    for operation in (lambda: journal.recorder.start("2024", "2023", "a-first"),
-                      lambda: journal.recorder.record("2024", "2023", "a-first", forecasts=rows(7))):
-        with pytest.raises(OpsError) as caught:
-            operation()
-        assert caught.value.problem == fail("EXPERIMENT_IDENTITY_CONFLICT", "search journal slot is already committed").problem
-    with pytest.raises(OpsError) as caught:
-        journal.recorder.freeze()
-    assert caught.value.problem == fail("EXPERIMENT_VARIANT_FAILED", "search selection requires every terminal attempt").problem
-    assert journal.recorder._read("selection") is None
+    frozen = journal.recorder.freeze()
+    assert frozen["prospective_candidate_id"] == "z-last"
+    before = durable_evidence(journal)
+    monkeypatch.setattr(journal.recorder, "_inputs", lambda *a: pytest.fail("native inputs reopened"))
+    monkeypatch.setattr(trials, "load_magnitude_targets", lambda *a, **k: pytest.fail("labels reopened"))
+    assert journal.recorder.record("2024", "2023", "a-first", forecasts=rows(7)) == result
+    assert journal.recorder.freeze() == frozen
+    assert durable_evidence(journal) == before
 
 
 @pytest.mark.parametrize("field", ["excluded_future_events", "holdout_exclusions"])

@@ -50,7 +50,9 @@ def prepare_plan(conn, store, own_registration, source_registration, source_requ
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "distribution source and owner bindings differ")
     sources = source_closure(Path(__file__).resolve().parents[1], [execution["runner"],
         "experiments/distribution_plan.py", "experiments/distribution_trials.py",
-        "experiments/distribution_class_support.py"])
+        "experiments/distribution_class_support.py", "experiments/distribution_fitted.py",
+        "experiments/distribution_worker.py",
+        "experiments/distribution_oof.py"])
     environment = environment_identity(1)
     if (execution["runner"] not in own["source_closure"] or own["environment"] != environment or any(sources.get(key) != digest
             for key, digest in own["source_closure"].items())):

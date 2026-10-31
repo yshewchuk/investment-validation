@@ -55,7 +55,7 @@ def _positive(value):
     return type(value) is int and value > 0
 
 
-def _references(request, recipe):
+def _references(request, recipe=panel_recipe):
     snapshots = [request["feature_snapshot_id"], request["history_snapshot_id"]]
     if request["schema_version"] == "regression_search_request.v1":
         snapshots.append(request["panel_request"]["price_history_snapshot"])
@@ -118,7 +118,8 @@ def _comparison(value, counts, *, regression=False):
                          else ("size_v1_4_causal_refit", "history_mean"))
     _require(_shape(value, {"reference", "sanity_reference", "max_logical_fits", "max_component_fits"})
              and value["reference"] == reference and value["sanity_reference"] == sanity,
-             "stage-2 comparison requires the fixed causal legacy and history-mean references")
+             "regression comparison requires iv_crush_causal_refit and training_mean references" if regression
+             else "stage-2 comparison requires the fixed causal legacy and history-mean references")
     _require(all(_positive(value[cap]) and value[cap] >= counts[count] for cap, count in (
         ("max_logical_fits", "baseline_logical_fits"), ("max_component_fits", "baseline_component_fits"))),
         "stage-2 comparison fit cap is insufficient")
@@ -136,7 +137,7 @@ def _limits(value):
                  "stage-2 parent/build/job limits require explicit bounded positive integers")
 
 
-def _specifications(request, request_id, recipe):
+def _specifications(request, request_id, recipe=panel_recipe):
     specs = []
     for subset in request["feature_sets"]:
         feature_recipe = recipe(subset)

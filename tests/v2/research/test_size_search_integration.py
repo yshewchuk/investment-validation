@@ -70,7 +70,7 @@ def test_native_v17_anchor_and_explicit_v2_fitted_identities(case):
     verify_native_registration(case.conn, case.store, case.registration)
     assert case.registration.document["schema_version"] == "native_experiment_registration.v1.7"
     plan = case.plan
-    assert plan["schema_version"] == "magnitude_search_plan.v2"
+    assert plan["schema_version"] == "magnitude_search_plan.v3"
     assert plan["candidate_count"] == 33 and plan["planned_fit_count"] == 102
     assert plan["counts"]["total_component_fits"] == 108
     assert plan["horizons"] == [5, 3, 1]
@@ -79,6 +79,26 @@ def test_native_v17_anchor_and_explicit_v2_fitted_identities(case):
     assert all(c["candidate_id"] == content_hash({k: v for k, v in c.items() if k != "candidate_id"})
                and c["source_binding_id"] == content_hash(json.loads(case.registration.binding_json)["size_panel"]) for c in plan["candidates"])
     assert {len(c["recipe"]["features"]) for c in plan["candidates"]} == {11, 28, 43}
+
+
+def test_v3_qualified_request_seals_reconstructs_v2_plan(case):
+    v3 = deepcopy(case.request)
+    v3["schema_version"] = "magnitude_search_request.v3"
+    v3["space"] = {
+        "ridge": {"alpha": [0.01, 0.1, 1.0, 10.0, 100.0]},
+        "elasticnet": {"alpha": [0.001, 0.003, 0.01, 0.03, 0.1, 1.0],
+                       "l1_ratio": [0.25, 0.75]},
+        "hgb": {"max_leaf_nodes": [7, 15]}}
+    v3.update(max_candidates=57, max_fits=174)
+    spec = prediction_spec(experiment_id="synthetic-qualified-size-v3", folds=("2024",),
+                           runner="experiments/size_search.py")
+    registration, spec = binding.prepare(case.repository, spec, v3, case.panel_request, **case.args)
+    reserve_native_registration(case.conn, case.store, registration, spec)
+    verify_native_registration(case.conn, case.store, registration)
+    sealed = planner.seal_search_plan(case.conn, case.store, registration, v3)
+    assert sealed["plan"]["schema_version"] == "magnitude_search_plan.v2"
+    ref = from_document(ArtifactRef, sealed["plan_ref"])
+    assert planner.read_search_plan(case.conn, case.store, registration, v3, ref) == sealed["plan"]
 
 
 def test_native_registration_detaches_caller_document(case):
@@ -250,7 +270,7 @@ def test_complete_synthetic_serial_search_child_diagnostics(case, monkeypatch):
     from experiments.magnitude_search_records import read_record
     diagnostics = []
     for candidate in case.plan["candidates"]:
-        key = content_hash([case.plan["plan_id"], "2024", "2023", candidate["candidate_id"]])
+        key = planner.trial_key(case.plan, "2024", "2023", candidate["candidate_id"])
         receipt = read_record(case.conn, case.store, case.registration.run_id, "execution:" + key)
         assert receipt["fit_attempt_count"] == 3
         if candidate["recipe"]["model"] == "elasticnet":
@@ -420,12 +440,14 @@ def test_report_native_absent_record_refuses_before_presentation(completed_case,
     from experiments import size_search_report as presentation
     case = completed_case
     group, candidate = case.plan["folds"][0], case.plan["candidates"][0]
-    identity = [case.plan["plan_id"], group["outer"]["year"]]
     if kind in ("execution", "terminal"):
-        identity += [group["inner"][0]["year"], candidate["candidate_id"]]
+        key = planner.trial_key(case.plan, group["outer"]["year"], group["inner"][0]["year"],
+                                candidate["candidate_id"])
     elif kind == "comparison-terminal":
-        identity += ["comparison"]
-    target = kind + ":" + content_hash(identity)
+        key = content_hash([case.plan["plan_id"], group["outer"]["year"], "comparison"])
+    else:
+        key = content_hash([case.plan["plan_id"], group["outer"]["year"]])
+    target = kind + ":" + key
     native_read, seen = records.read_record, []
     assert native_read(case.conn, case.store, case.registration.run_id, target) is not None
     assert native_read(case.conn, case.store, case.registration.run_id, "never-published") is None
@@ -675,3 +697,108 @@ def test_v16_inline_size_registration_still_round_trips(case):
     sealed = planner.seal_search_plan(case.conn, case.store, replayed, case.request)
     plan_ref = from_document(ArtifactRef, sealed["plan_ref"])
     assert planner.read_search_plan(case.conn, case.store, replayed, case.request, plan_ref) == sealed["plan"]
+
+
+def test_interrupted_v3_start_refuses_replay_before_native_read(case, monkeypatch):
+    """Interrupt a v3 start in a fresh journal namespace so replay refuses before native reads."""
+    from engine.v2.foundation import canonical_json
+    from experiments.magnitude_search_plan import trial_key
+    from experiments.magnitude_search_trials import SearchTrials
+    from experiments.native_registration import NativeRegistration
+
+    assert case.plan["schema_version"] == "magnitude_search_plan.v3"
+    # The module fixture's journal already owns other claims; a fresh registration
+    # run isolates this test's start/claim without deleting or mutating any row.
+    fresh_spec = prediction_spec(experiment_id="synthetic-interrupted-v3-start",
+                                 folds=("2024",), runner="experiments/size_search.py")
+    document = case.registration.document
+    document["schema_version"] = "native_experiment_registration.v1.6"
+    document["spec_hash"] = fresh_spec.spec_hash
+    registration_key = content_hash({"experiment_id": fresh_spec.experiment_id,
+                                     "arm": fresh_spec.primary_arm_id})
+    registration = NativeRegistration("native_" + registration_key.removeprefix("sha256:"),
+                                      canonical_json(document).encode())
+    reserve_native_registration(case.conn, case.store, registration, fresh_spec)
+    recorder = SearchTrials(case.conn, case.store, case.repository, registration, case.request, case.ref)
+    monkeypatch.setattr(recorder, "_admit", lambda: case.plan)
+    outer = case.plan["folds"][0]
+    inner = outer["inner"][0]
+    candidate_id = case.plan["candidates"][0]["candidate_id"]
+    args = (outer["outer"]["year"], inner["year"], candidate_id)
+    admissions = []
+
+    def interrupt(fold):
+        admissions.append(fold["year"])
+        raise RuntimeError("interrupted native admission")
+
+    monkeypatch.setattr(recorder, "_inputs", interrupt)
+    with pytest.raises(RuntimeError, match="interrupted native admission"):
+        recorder.start(*args)
+    key = trial_key(case.plan, *args)
+    assert recorder._read("start:" + key) is not None
+    assert recorder._read("inputs:" + key) is None
+
+    with pytest.raises(OpsError) as error:
+        recorder.start(*args)
+    assert error.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert admissions == [inner["year"]]
+    assert recorder._read("inputs:" + key) is None
+
+
+def test_report_reuses_shared_execution_receipt_read_and_keeps_outer_rows(monkeypatch):
+    from collections import Counter
+    import weakref
+
+    from experiments import size_search_report as report
+    from experiments.magnitude_search_plan import PLAN_V3
+
+    limits = {"child": {"memory_bytes": 2147483648, "cpu_seconds": 30, "wall_seconds": 60}}
+    plan = {"schema_version": PLAN_V3, "plan_id": "plan", "candidates": [{"candidate_id": "c"}],
+        "counts": {"candidates": 1, "inner_folds": 3, "outer_folds": 2},
+        "request": {"limits": limits},
+        "folds": [
+            {"outer": {"year": "2024", "evaluation_event_ids": ["evt"]},
+             "inner": [{"year": "2023"}]},
+            {"outer": {"year": "2025", "evaluation_event_ids": ["evt"]},
+             "inner": [{"year": "2023"}, {"year": "2024"}]},
+        ]}
+    result = {"predictions": [{"event_id": "evt", "absolute_move_pct": 1.0}],
+        "folds": [{"outer_year": year, "evaluation_inputs": {"omitted_labels": []}}
+                  for year in ("2024", "2025")]}
+    registration = SimpleNamespace(run_id="run", document={"size_panel": {"context": {
+        "target_events": [{"event_id": "evt"}], "eligibility_plan": {}}}})
+    monkeypatch.setattr(report, "_admit_driver", lambda *args: plan)
+    monkeypatch.setattr(report, "collect_outer_results", lambda *args: result)
+    monkeypatch.setattr(report, "paired_report", lambda *args, **kwargs: {})
+    reads = Counter()
+    payload_refs = []
+    alive_before_read = []
+
+    class ReceiptPayload:
+        def __init__(self):
+            self.training_rows = ["event-id"] * 10000
+
+    def read_record(conn, store, run_id, slot):
+        reads[slot] += 1
+        if slot.startswith("execution:"):
+            alive_before_read.append(sum(ref() is not None for ref in payload_refs))
+            payload = ReceiptPayload()
+            payload_refs.append(weakref.ref(payload))
+            return {"status": "succeeded", "fit_attempt_count": 1,
+                    "completed_fit_count": 1, "diagnostics": [], "fits": payload,
+                    "training_event_ids": payload, "evaluation_event_ids": payload}
+        if slot.startswith("outer-forecasts:"):
+            return []
+        if slot.startswith("comparison-terminal:"):
+            return {"result": {"forecasts": [], "fit_details": []}}
+        pytest.fail("unexpected journal slot " + slot)
+
+    monkeypatch.setattr(report, "read_record", read_record)
+    output = report.collect(None, None, None, registration, {}, None)
+    from experiments.magnitude_search_plan import trial_key
+    shared_key = trial_key(plan, "2024", "2023", "c")
+    assert reads["execution:" + shared_key] == 1
+    assert len(output["inner_fits"]) == 3
+    assert [row["outer_year"] for row in output["inner_fits"]] == ["2024", "2025", "2025"]
+    assert alive_before_read == [0, 0]
+    assert all(ref() is None for ref in payload_refs)
