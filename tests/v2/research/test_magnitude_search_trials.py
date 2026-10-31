@@ -147,16 +147,34 @@ def test_blended_freeze_uses_admitted_inner_history_and_one_lead1_row_per_event(
     for outer, selection in zip(plan["folds"], frozen["selections"]):
         expected_count = sum(len(inner["evaluation_event_ids"]) for inner in outer["inner"])
         assert selection["history_mean"]["metrics"]["count"] == expected_count
-        assert selection["history_mean"]["blend_score"] == pytest.approx(1.0)
         assert set(selection["history_mean"]["yearly"]) == {inner["year"] for inner in outer["inner"]}
         for score in selection["scores"]:
             assert score["metrics"]["count"] == expected_count
-            assert score["blend_score"] >= 0.0
             assert set(score["yearly"]) == {inner["year"] for inner in outer["inner"]}
             for inner in outer["inner"]:
                 assert score["yearly"][inner["year"]]["metrics"]["count"] == len(
                     inner["evaluation_event_ids"])
-        assert selection["tie_band"]["width"] >= 0.005
+
+
+def test_blended_freeze_refuses_nonzero_candidate_against_zero_history_mean(case, monkeypatch):
+    _all(case, values={args: 1_000_000.0 for args in trial_cases(case)})
+    plan = copy.deepcopy(case.plan)
+    plan["request"]["selection"] = {
+        "metric_weights": {"rmse": 0.6, "mae": 0.3, "large_move_underprediction": 0.1},
+        "lead_weights": {"1": 1.0, "3": 0.0, "5": 0.0},
+        "large_move_threshold_pct": 10.0, "tie_band_floor": 0.005,
+    }
+    monkeypatch.setattr(case.recorder, "_admit", lambda: plan)
+    monkeypatch.setattr(trials, "history_mean_rows", lambda cohort, validation: [
+        {"event_id": row["event_id"], "horizon_sessions": 1,
+         "absolute_move_pct": row["absolute_move_pct"],
+         "predicted_absolute_move_pct": row["absolute_move_pct"]}
+        for row in validation["targets"]])
+    with _assert_error("EXPERIMENT_VARIANT_FAILED",
+            "blended inner selection metrics are undefined: nonzero candidate error "
+            "has a zero-error history_mean comparator"):
+        with no_fit_guard():
+            case.recorder.freeze()
 
 
 def test_execute_admits_sealed_registration_once_before_start(case, monkeypatch):

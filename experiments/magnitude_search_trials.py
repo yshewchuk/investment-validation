@@ -68,6 +68,17 @@ def _candidate_failure(problem):
     return problem["code"] == "EXPERIMENT_VARIANT_FAILED"
 
 
+_ZERO_COMPARATOR_REASON = "cannot normalize a nonzero candidate error by zero history_mean error"
+
+
+def _blended_failure(error):
+    """Map expected blended-selection failures to fixed, recorder-owned diagnostics."""
+    if isinstance(error, ValueError) and str(error) == _ZERO_COMPARATOR_REASON:
+        return ("blended inner selection metrics are undefined: nonzero candidate error "
+                "has a zero-error history_mean comparator")
+    return "blended inner selection metrics are undefined: malformed or misaligned metric rows"
+
+
 _NOT_ADMITTED = object()
 _FREEZE_CACHE_BYTES = 32 << 20
 
@@ -644,8 +655,8 @@ class SearchTrials:
                         pooled = blended_event_score(rows, pooled_history,
                             metric_weights=policy["metric_weights"],
                             large_move_threshold_pct=policy["large_move_threshold_pct"])
-                    except (KeyError, TypeError, ValueError, OverflowError):
-                        raise fail("EXPERIMENT_VARIANT_FAILED", "blended inner selection metrics are undefined") from None
+                    except (KeyError, TypeError, ValueError, OverflowError) as error:
+                        raise fail("EXPERIMENT_VARIANT_FAILED", _blended_failure(error)) from None
                     scores.append({"candidate_id": candidate["candidate_id"], **pooled, "yearly": yearly})
             eligible = [score for score in scores if score["metrics"] is not None]
             if not eligible:
@@ -668,8 +679,8 @@ class SearchTrials:
                         metric_weights=policy["metric_weights"],
                         large_move_threshold_pct=policy["large_move_threshold_pct"])
                         for year in sorted(history_rows_by_year)}
-                except (KeyError, TypeError, ValueError, OverflowError):
-                    raise fail("EXPERIMENT_VARIANT_FAILED", "blended inner selection metrics are undefined") from None
+                except (KeyError, TypeError, ValueError, OverflowError) as error:
+                    raise fail("EXPERIMENT_VARIANT_FAILED", _blended_failure(error)) from None
                 selection = {"outer_year": outer["outer"]["year"], "scores": scores,
                     "history_mean": history_score, "tie_band": tie_band,
                     "selected_candidate_id": selected_id}

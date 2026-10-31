@@ -65,6 +65,22 @@ def test_zero_comparator_terms_have_defined_parity_or_refuse_undefined_ratio():
             large_move_threshold_pct=10.0)
 
 
+@pytest.mark.parametrize("candidate_rows,history_rows,weights,threshold", [
+    ([], [], WEIGHTS, 10.0),
+    ("not rows", _rows([(12, 9)]), WEIGHTS, 10.0),
+    ([{"event_id": "e0", "horizon_sessions": 1, "absolute_move_pct": 12.0}],
+     _rows([(12, 10)]), WEIGHTS, 10.0),
+    (_rows([(12, 9)]), _rows([(12, 10)]), "weights", 10.0),
+    (_rows([(12, 9)]), _rows([(12, 10)]), {"rmse": 0.6, "mae": 0.3}, 10.0),
+    (_rows([(12, 9)]), _rows([(12, 10)]), WEIGHTS, "10"),
+])
+def test_blended_event_score_refuses_malformed_inputs(candidate_rows, history_rows,
+        weights, threshold):
+    with pytest.raises(ValueError):
+        blended_event_score(candidate_rows, history_rows, metric_weights=weights,
+            large_move_threshold_pct=threshold)
+
+
 def test_history_mean_uses_inner_training_fallback_and_causal_feature():
     rows = history_mean_rows(
         {"training": [{"absolute_move_pct": 2.0}, {"absolute_move_pct": 4.0}],
@@ -82,6 +98,29 @@ def test_history_mean_uses_inner_training_fallback_and_causal_feature():
         {"event_id": "empty", "horizon_sessions": 1, "absolute_move_pct": 4.0,
          "predicted_absolute_move_pct": 3.0},
     ]
+
+
+def test_history_mean_rows_refuses_missing_requested_feature():
+    with pytest.raises(ValueError, match="missing requested feature"):
+        history_mean_rows(
+            {"training": [{"absolute_move_pct": 2.0}], "features": [{
+                "event_id": "different", "horizon_sessions": 1, "n_prior": 1,
+                "mean_prior_abs_move": 7.0}]},
+            {"targets": [{"event_id": "requested", "absolute_move_pct": 12.0}]})
+
+
+@pytest.mark.parametrize("inputs,validation", [
+    ([], {"targets": []}),
+    ({"training": [{}], "features": []}, {"targets": []}),
+    ({"training": [{"absolute_move_pct": 2.0}],
+      "features": [{"event_id": "e1", "horizon_sessions": 1, "n_prior": 1}]},
+     {"targets": [{"event_id": "e1", "absolute_move_pct": 12.0}]}),
+    ({"training": [{"absolute_move_pct": 2.0}], "features": []},
+     {"targets": [{}]}),
+])
+def test_history_mean_rows_refuses_malformed_inputs(inputs, validation):
+    with pytest.raises(ValueError):
+        history_mean_rows(inputs, validation)
 
 
 def test_tie_band_uses_max_sample_se_floor_then_candidate_id():
@@ -112,16 +151,43 @@ def test_tie_band_uses_max_sample_se_floor_then_candidate_id():
     assert selected == "a"
 
 
-def test_v3_policy_is_request_declared_validated_and_identity_bound():
+@pytest.mark.parametrize("scores,yearly,floor", [
+    ([], [], 0.005),
+    ([{"candidate_id": "a"}], [{"candidate_id": "a", "yearly": {}}], 0.005),
+    ([{"blend_score": 0.5}], [{"candidate_id": "a", "yearly": {}}], 0.005),
+    ([{"candidate_id": "a", "blend_score": 0.5}], [{"candidate_id": "a"}], 0.005),
+    ([{"candidate_id": "a", "blend_score": 0.5}],
+     [{"candidate_id": "a", "yearly": {"2024": {}}}], 0.005),
+    ([{"candidate_id": "a", "blend_score": 0.5}], "not rows", 0.005),
+    ([{"candidate_id": "a", "blend_score": 0.5}], [], 0.005),
+    ([{"candidate_id": "a", "blend_score": 0.5}],
+     [{"candidate_id": "a", "yearly": {"2024": {"blend_score": 0.5}}}], -0.1),
+])
+def test_selection_tie_band_refuses_malformed_inputs(scores, yearly, floor):
+    with pytest.raises(ValueError):
+        selection_tie_band(scores, yearly, floor=floor)
+
+
+@pytest.mark.parametrize("path,value", [
+    (("metric_weights", "mae"), 0.2),
+    (("lead_weights", "1"), 0.5),
+    (("large_move_threshold_pct",), 9.0),
+    (("tie_band_floor",), 0.01),
+])
+def test_v3_policy_is_request_declared_validated_and_identity_bound(path, value):
     legacy = compile_request(v3_request())
     request = v3_request()
     request["selection"] = copy.deepcopy(POLICY)
     blended = compile_request(request)
     assert blended["request"]["selection"] == POLICY
     assert blended["request_id"] != legacy["request_id"]
-    request["selection"]["lead_weights"]["1"] = 0.5
+    invalid = copy.deepcopy(request)
+    target = invalid["selection"]
+    for key in path[:-1]:
+        target = target[key]
+    target[path[-1]] = value
     with pytest.raises(OpsError) as caught:
-        compile_request(request)
+        compile_request(invalid)
     assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
 
 

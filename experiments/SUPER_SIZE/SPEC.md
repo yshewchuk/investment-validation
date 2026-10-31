@@ -86,7 +86,7 @@ inner RMSE and break exact ties by candidate ID. Requests with a blended
 declaration score one lead-1 row per event: candidate pooled RMSE, MAE and
 large-move underprediction are normalized by the matching `history_mean` metrics
 and weighted 0.6/0.3/0.1.
-Candidates within `max(sample SE of the pooled leader's yearly blends / sqrt(inner years), 0.005)`
+Candidates within `max(sample SE of the pooled leader's yearly blends, 0.005)`
 of the best pooled blend tie, with the lowest candidate ID selected. Outer
 evaluation is reserved for that candidate.
 Latest-outer selection defines the prospective frozen winner; no winner exists until recorded execution.
