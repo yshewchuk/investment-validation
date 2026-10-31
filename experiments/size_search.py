@@ -33,7 +33,6 @@ from experiments.native_registration import (
     read_native_registration,
     reserve_native_registration,
 )
-from experiments.size_job_budget import remaining
 from experiments.size_preflight_receipt import admit, input_bindings, issue
 from experiments.size_search_binding import prepare, validate_panel_request
 from experiments.size_search_report import collect, resource_report
@@ -68,10 +67,12 @@ def _run(context):
             ("outer-terminal:", [plan["plan_id"], group["outer"]["year"]]),
             ("comparison-terminal:", [plan["plan_id"], group["outer"]["year"], "comparison"])))
     if not complete:
-        seconds = remaining(conn, store, registration, plan)
-        previous = signal.alarm(0)
-        signal.alarm(min(previous or 1, seconds))
-        run_search(*context, limits=request["limits"]["child"], collect_results=False)
+        def commit_deadline(seconds):
+            previous = signal.alarm(0)
+            signal.alarm(min(previous or 1, seconds))
+
+        run_search(*context, limits=request["limits"]["child"], collect_results=False,
+                   before_dispatch=commit_deadline)
     return collect(*context)
 
 

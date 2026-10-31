@@ -51,6 +51,14 @@ from experiments.native_registration import (
 from experiments.memory_guard import start_rss_watchdog
 
 _PARALLEL = None
+_WORKER_WATCHDOG_STOP = None
+
+
+def _stop_worker_watchdog():
+    global _WORKER_WATCHDOG_STOP
+    stop, _WORKER_WATCHDOG_STOP = _WORKER_WATCHDOG_STOP, None
+    if stop is not None:
+        stop()
 
 
 class _WorkerTerminating(BaseException):
@@ -62,10 +70,11 @@ def _terminate_worker(signum, frame):
 
 
 def _init_trial_worker(conn_path, store_root, registration, request, plan_ref, memory_bytes):
-    global _PARALLEL
+    global _PARALLEL, _WORKER_WATCHDOG_STOP
+    _WORKER_WATCHDOG_STOP = None
     try:
         signal.signal(signal.SIGTERM, _terminate_worker)
-        start_rss_watchdog(memory_bytes)
+        _WORKER_WATCHDOG_STOP = start_rss_watchdog(memory_bytes)
         conn = connect(conn_path, must_exist=True)
         conn.execute("PRAGMA busy_timeout=30000")
         store = ArtifactStore(store_root)
@@ -75,6 +84,7 @@ def _init_trial_worker(conn_path, store_root, registration, request, plan_ref, m
     except (OpsError, DataError) as error:
         _PARALLEL = _worker_problem(error)
     except MemoryError:
+        _stop_worker_watchdog()
         _PARALLEL = _worker_problem(fail("RESOURCE_LIMIT_EXCEEDED", "search worker memory exhausted"))
     except (OSError, sqlite3.Error):
         _PARALLEL = _worker_problem(fail("RESOURCE_UNAVAILABLE", "search worker setup unavailable"))
@@ -119,6 +129,7 @@ def _parallel_trial_task(task):
     except (OpsError, DataError) as error:
         return _worker_problem(error)
     except MemoryError:
+        _stop_worker_watchdog()
         return _worker_problem(fail("RESOURCE_LIMIT_EXCEEDED", "search worker memory exhausted"))
     except (OSError, sqlite3.Error):
         return _worker_problem(fail("RESOURCE_UNAVAILABLE", "search worker storage unavailable"))
@@ -208,7 +219,7 @@ def _admit_driver(conn, store, registration, request, plan_ref):
     return plan
 
 
-def run_search(conn, store, repository, registration, request, plan_ref, *, limits, collect_results=True):
+def run_search(conn, store, repository, registration, request, plan_ref, *, limits, collect_results=True, before_dispatch=None):
     """Validate claimed inner results before fresh work; never retry; collect_results=False returns None before the final collect."""
     workers = validate_workers(request)
     request = {key: value for key, value in request.items() if key != "workers"}
@@ -235,11 +246,16 @@ def run_search(conn, store, repository, registration, request, plan_ref, *, limi
         if read("outer-start:" + key) is not None:
             completed_outer.append(fold["outer"]["year"])
     parallel = workers > 1 and bool(fresh)
+    deadline_seconds = None
     if parallel:
         cpus, conn_path = _parallel_preflight(conn, request, limits, workers)
         forbid_fitting("run_search")
         forbid_legacy_fitting("run_search")
-        remaining(conn, store, registration, plan)
+        deadline_seconds = remaining(conn, store, registration, plan)
+    elif before_dispatch is not None:
+        deadline_seconds = remaining(conn, store, registration, plan)
+    if before_dispatch is not None:
+        before_dispatch(deadline_seconds)
     meter = Progress("search trials", len(claimed) + len(fresh))
     decision("search trials", f"{len(claimed)} replay claims; {len(fresh)} fresh trials; zero retries")
     for args, key in claimed:

@@ -343,8 +343,10 @@ are verified and published. Both the worker and that fit child have independent
 `2 * workers * child.memory_bytes`, plus the driver's own RSS. The admission
 check requires `workers * child.memory_bytes <= parent.memory_bytes`; these
 per-process limits and admission check do not reserve or cap total host memory.
-Parent CPU-availability, memory and file-backed-catalog checks run before
-replay writes. Worker startup and per-task affinity checks return tagged
+The SIZE CLI runs parent CPU-availability, memory and file-backed-catalog
+checks before committing the shared job deadline and before replay writes.
+On memory refusal, a worker stops repeated RSS watchdog interrupts before it
+returns the tagged refusal. Worker startup and per-task affinity checks return tagged
 refusals; each dispatched trial applies the same unfinished-claim rule as the
 serial path. At most `workers` tasks and small status results are in flight at
 once, with each batch traversed in roster order. Pool errors cancel pending
