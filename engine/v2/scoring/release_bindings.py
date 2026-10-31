@@ -18,12 +18,15 @@ import json
 import math
 import os
 import stat
+import sys
+import time
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 from types import MappingProxyType
 from typing import Callable, Mapping, TypeVar
 
-from engine.v2.foundation import content_hash
+from engine.v2.foundation import content_hash, from_document
 from engine.v2.models import deployment
 from engine.v2.models.admissible_table import AdmissibleDepthTable
 from engine.v2.models.analog_artifact import BoardAnalogPoolArtifact
@@ -50,13 +53,21 @@ from engine.v2.models.residual_artifact import (
     ResidualArtifactError,
     residual_artifact_from_document,
 )
+from engine.v2.models.serving_fold_loader import ServingFoldError, load_chooser_serving_fold
+from engine.v2.models.serving_folds import ChooserServingFoldDescriptor
 from engine.v2.models.trailing_cutoff_artifact import TrailingCutoffArtifact
 from engine.v2.scoring.gate_fold_selection import SizeFoldCatalog, index_size_folds
+
+try:
+    import resource as _resource
+except ImportError:  # pragma: no cover - non-POSIX platforms
+    _resource = None
 
 __all__ = [
     "ModelIdentity",
     "ModelNotReady",
     "NoCurrentRelease",
+    "ChooserFoldReference",
     "ScoringReleaseBinding",
     "ReleaseBindingError",
     "resolve_gate_policy",
@@ -67,6 +78,7 @@ __all__ = [
 _DEPLOYMENT_DIR = "deployment"
 _STATE_CATALOG_NAME = "phase5_release.json"
 _MAX_CATALOG_BYTES = 64 * 1024 * 1024
+_MAX_MODEL_BINDING_MEMBER_BYTES = 256 * 1024 * 1024
 _PHASE5_RELEASE_SCHEMA = "phase5_staged_release.v1.0"
 _PAYOFF_PREFIXES = ("payoff_line:", "payoff_surface:")
 _RECALIBRATION_PREFIX = "recalibration_map:"
@@ -75,6 +87,8 @@ _DRIVER_RESIDUAL_PREFIX = "driver_residual_pool:"
 _CHOOSER_POOL_MEMBER_ID = "chooser_analog_pool"
 _CHOOSER_TABLE_MEMBER_ID = "admissible_table:dyn_sv"
 _CHOOSER_MAX_ARTIFACT_BYTES = 32 * 1024 * 1024
+#: Aggregate chooser-fold load cap, checked before loading; current staged sets contain 34.
+_CHOOSER_FOLD_MAX_OBJECTS = 34
 _PAIRED_POOL_MEMBER_ID = "paired_residual_pool"
 _TRAILING_CUTOFF_MEMBER_ID = "trailing_pnl_cutoff"
 _ChooserState = TypeVar(
@@ -118,6 +132,19 @@ class ModelIdentity:
     feature_order: tuple[str, ...]
     output_names: tuple[str, ...]
     artifact_hash: str
+
+
+@dataclass(frozen=True, kw_only=True)
+class ChooserFoldReference:
+    """The immutable capture reference for one verified chooser producer fold."""
+
+    producer_output: str
+    descriptor_hash: str
+    estimator_sha256: str
+    training_cutoff: str
+    release_id: str
+    release_binding: ModelIdentity
+    fold_start: str
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -168,6 +195,9 @@ class ScoringReleaseBinding:
     #: Indexed descriptors of the release's ``tier4_folds:size`` member; absent
     #: or not STAGED -> empty. See ARCHITECTURE.md ("Forward forecast assembly").
     size_folds: "SizeFoldCatalog | None" = None
+    #: Verified capture references keyed by (producer_output, fold_start).
+    chooser_fold_references: Mapping[tuple[str, str], ChooserFoldReference] = field(
+        default_factory=dict)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "model_identity", MappingProxyType(dict(self.model_identity)))
@@ -188,6 +218,8 @@ class ScoringReleaseBinding:
                            tuple(self.paired_residual_artifacts))
         object.__setattr__(self, "trailing_cutoff_artifacts",
                            tuple(self.trailing_cutoff_artifacts))
+        object.__setattr__(self, "chooser_fold_references",
+                           MappingProxyType(dict(self.chooser_fold_references)))
 
 
 def resolve_release_binding(release_root: Path | str) -> ScoringReleaseBinding:
@@ -222,6 +254,9 @@ def resolve_release_binding(release_root: Path | str) -> ScoringReleaseBinding:
     model_identity, model_artifact_refs = _resolve_model_bindings(dep_root, release)
     catalog = _read_state_catalog(root, pointer.release_id)
     size_folds = index_size_folds(catalog, manifest)
+    frozen_inference = FrozenInference(dep_root)
+    chooser_fold_references = _resolve_chooser_fold_references(
+        catalog, manifest, frozen_inference, model_identity, root, dep_root)
     payoff = _resolve_state_group(
         dep_root, catalog, lambda member_id: member_id.startswith(_PAYOFF_PREFIXES), _load_payoff)
     recalibration = _resolve_state_group(
@@ -244,13 +279,14 @@ def resolve_release_binding(release_root: Path | str) -> ScoringReleaseBinding:
     return ScoringReleaseBinding(
         release_id=release.release_id, model_identity=model_identity,
         model_artifact_refs=model_artifact_refs, model_release=release,
-        frozen_inference=FrozenInference(dep_root),
+        frozen_inference=frozen_inference,
         payoff_artifacts=payoff, recalibration_artifacts=recalibration, analog_artifacts=analog,
         driver_residual_artifacts=driver_residual,
         chooser_analog_artifacts=chooser_analog,
         chooser_admissible_artifacts=chooser_admissible,
         paired_residual_artifacts=paired_residual,
         trailing_cutoff_artifacts=trailing_cutoff, size_folds=size_folds,
+        chooser_fold_references=chooser_fold_references,
     )
 
 
@@ -377,12 +413,26 @@ def _read_verified_object(dep_root: Path, member_id: str, name: str, path: str,
         target.relative_to(base)
     except ValueError:
         raise ModelNotReady(member_id, f"{name}: object path escapes the deployment root")
-    if not target.is_file():
-        raise ModelNotReady(member_id, f"{name}: missing staged object")
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
     try:
-        payload = target.read_bytes()
+        fd = os.open(target, flags)
+    except FileNotFoundError:
+        raise ModelNotReady(member_id, f"{name}: missing staged object") from None
     except OSError as exc:
         raise ModelNotReady(member_id, f"{name}: cannot read the staged object") from exc
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise ModelNotReady(member_id, f"{name}: missing staged object")
+        with os.fdopen(fd, "rb") as handle:
+            fd = -1
+            payload = handle.read(_MAX_MODEL_BINDING_MEMBER_BYTES + 1)
+    except OSError as exc:
+        raise ModelNotReady(member_id, f"{name}: cannot read the staged object") from exc
+    finally:
+        if fd >= 0:
+            os.close(fd)
+    if len(payload) > _MAX_MODEL_BINDING_MEMBER_BYTES:
+        raise ModelNotReady(member_id, f"{name}: object exceeds byte limit")
     actual = "sha256:" + hashlib.sha256(payload).hexdigest()
     if actual != expected_hash:
         raise ModelNotReady(member_id, f"{name}: object hash disagrees with the pointer")
@@ -585,6 +635,212 @@ def _resolve_chooser_state_group(
     if len({artifact.key for artifact in artifacts}) != len(artifacts):
         raise ModelNotReady(member_id, f"ambiguous {label} key")
     return artifacts
+
+
+def _chooser_fold_producer_identity(
+    descriptor: ChooserServingFoldDescriptor, model_identity: Mapping[str, ModelIdentity],
+) -> ModelIdentity:
+    matches = [candidate for candidate in model_identity.values() if (
+        candidate.role == descriptor.policy.role
+        and candidate.model_id == descriptor.policy.model_id
+        and candidate.feature_order == descriptor.policy.feature_order
+        and candidate.decision_clock_id == descriptor.decision_clock_id
+        and candidate.output_names == (descriptor.output_name,))]
+    if len(matches) != 1:
+        raise ValueError("producer")
+    return matches[0]
+
+
+def _catalog_contains_chooser_object(catalog: Mapping, object_doc: Mapping) -> bool:
+    rows = catalog.get("members")
+    if not isinstance(rows, list):
+        return False
+    matches = []
+    for row in rows:
+        if not isinstance(row, Mapping):
+            return False
+        objects = row.get("objects", [])
+        if not isinstance(objects, list):
+            return False
+        matches.extend(obj for obj in objects
+                       if isinstance(obj, Mapping) and obj == object_doc)
+    return len(matches) == 1
+
+
+def _load_chooser_authoring_release(
+    authoring_id: str, object_doc: Mapping, root: Path, dep_root: Path,
+) -> tuple["deployment.StagedManifest", Mapping, date, Mapping[str, ModelIdentity]] | None:
+    authoring_manifest = _read_and_verify_manifest(dep_root, authoring_id)
+    authoring_catalog = _read_state_catalog(root, authoring_id)
+    if not _catalog_contains_chooser_object(authoring_catalog, object_doc):
+        raise ValueError("chooser authoring descriptor is missing")
+    authoring_sources = authoring_catalog.get("sources")
+    authoring_cutoff = (authoring_sources.get("retrain_cutoff")
+                        if isinstance(authoring_sources, Mapping) else None)
+    if authoring_cutoff is None:
+        return None
+    cutoff = date.fromisoformat(authoring_cutoff)
+    if cutoff.isoformat() != authoring_cutoff:
+        raise ValueError("non-canonical authoring cutoff")
+    authoring_identity, _artifact_refs = _resolve_model_bindings(
+        dep_root, authoring_manifest.release)
+    return authoring_manifest, authoring_catalog, cutoff, authoring_identity
+
+
+def _verified_chooser_fold_reference(
+    obj: Mapping, catalog: Mapping,
+    manifest: "deployment.StagedManifest", inference: FrozenInference,
+    root: Path, dep_root: Path,
+    authoring_releases: dict[str, tuple[
+        "deployment.StagedManifest", Mapping, date, Mapping[str, ModelIdentity]]],
+    carried_catalogs: dict[str, Mapping],
+) -> tuple[tuple[str, str], ChooserFoldReference] | None:
+    member_id = "tier4_folds:chooser"
+    try:
+        descriptor = from_document(ChooserServingFoldDescriptor, obj["serving_fold"])
+        authoring_id = descriptor.parent_release_id
+        authoring = authoring_releases.get(authoring_id)
+        if authoring_id != manifest.release.release_id:
+            sources = catalog.get("sources")
+            carried_from = sources.get("carried_from") if isinstance(sources, Mapping) else None
+            if (not isinstance(carried_from, str) or not carried_from
+                    or carried_from == manifest.release.release_id):
+                raise ValueError("not a carried chooser descriptor")
+            carried_catalog = carried_catalogs.get(carried_from)
+            if carried_catalog is None:
+                carried_catalog = _read_state_catalog(root, carried_from)
+                carried_catalogs[carried_from] = carried_catalog
+            if not _catalog_contains_chooser_object(carried_catalog, obj):
+                raise ValueError("carried chooser descriptor changed")
+        if authoring is None:
+            authoring = _load_chooser_authoring_release(
+                authoring_id, obj, root, dep_root)
+            if authoring is None:
+                return None
+            authoring_releases[authoring_id] = authoring
+        elif authoring_id != manifest.release.release_id:
+            if not _catalog_contains_chooser_object(authoring[1], obj):
+                raise ValueError("chooser authoring descriptor is missing")
+        authoring_manifest, authoring_catalog, _release_cutoff, authoring_identity = authoring
+        identity = _chooser_fold_producer_identity(descriptor, authoring_identity)
+        loaded = load_chooser_serving_fold(
+            inference, descriptor, verified_parent_manifest=authoring_manifest,
+            verified_catalog=dict(authoring_catalog))
+    except ModelNotReady:
+        raise
+    except (KeyError, TypeError, ValueError, AttributeError, OverflowError,
+            deployment.DeploymentError, ServingFoldError) as exc:
+        raise ModelNotReady(member_id, "chooser fold could not be verified or loaded") from exc
+    key = (loaded.descriptor.producer_output, loaded.descriptor.fold_start)
+    return key, ChooserFoldReference(
+        producer_output=key[0], descriptor_hash=loaded.descriptor.descriptor_hash,
+        estimator_sha256=loaded.descriptor.estimator.content_hash,
+        # A release cutoff summarizes the newest staged fold. The verified
+        # descriptor's fold_start is the exclusive training boundary for this fold.
+        training_cutoff=loaded.descriptor.fold_start,
+        release_id=authoring_manifest.release.release_id,
+        release_binding=identity, fold_start=key[1])
+
+
+def _rss_mib() -> float:
+    """Peak resident set size of this process in MiB, best effort."""
+    if _resource is None:
+        return 0.0
+    kib = float(_resource.getrusage(_resource.RUSAGE_SELF).ru_maxrss)
+    if sys.platform == "darwin":
+        kib /= 1024.0
+    return kib / 1024.0
+
+
+def _load_chooser_fold_references(
+    objects: list, member_id: str, cutoff: date, catalog: Mapping,
+    manifest: "deployment.StagedManifest", inference: FrozenInference,
+    model_identity: Mapping[str, ModelIdentity], root: Path, dep_root: Path,
+) -> dict[tuple[str, str], ChooserFoldReference]:
+    if len(objects) > _CHOOSER_FOLD_MAX_OBJECTS:
+        raise ModelNotReady(member_id, "chooser fold catalog exceeds load limit")
+    total, started, references = len(objects), time.monotonic(), {}
+    authoring_releases = {
+        manifest.release.release_id: (manifest, catalog, cutoff, model_identity)}
+    carried_catalogs: dict[str, Mapping] = {}
+    print(f"[chooser-folds] start: 0/{total}, elapsed=0.0s, peak_rss={_rss_mib():.1f}MiB", file=sys.stderr)
+    for done, obj in enumerate(objects, start=1):
+        if not isinstance(obj, Mapping):
+            raise ModelNotReady(member_id, "chooser fold could not be verified or loaded")
+        result = _verified_chooser_fold_reference(
+            obj, catalog, manifest, inference, root, dep_root,
+            authoring_releases, carried_catalogs)
+        if result is None:
+            continue
+        key, reference = result
+        if key in references:
+            raise ModelNotReady(member_id, "ambiguous chooser fold reference")
+        references[key] = reference
+        if done % 4 == 0 or done == total:
+            elapsed = time.monotonic() - started
+            rate = done / elapsed if elapsed > 0 else 0.0
+            eta = (total - done) / rate if rate > 0 else 0.0
+            print(f"[chooser-folds] {done}/{total}, elapsed={elapsed:.1f}s, rate={rate:.2f}/s, ETA={eta:.1f}s, peak_rss={_rss_mib():.1f}MiB", file=sys.stderr)
+    elapsed = time.monotonic() - started
+    rate = total / elapsed if elapsed > 0 else 0.0
+    print(f"[chooser-folds] end: {total}/{total}, elapsed={elapsed:.1f}s, rate={rate:.2f}/s, peak_rss={_rss_mib():.1f}MiB", file=sys.stderr)
+    return references
+
+
+def _chooser_fold_objects(members: Mapping, member_ids: tuple[str, ...]) -> list:
+    objects = []
+    for member_id in member_ids:
+        row = members.get(member_id)
+        if row is None:
+            continue
+        status = row.get("status")
+        if status in ("MISSING", "PENDING"):
+            continue
+        if status != "STAGED":
+            raise ModelNotReady(member_id, "status is not STAGED")
+        member_objects = row.get("objects")
+        if not isinstance(member_objects, list):
+            raise ModelNotReady(member_id, "chooser fold catalog is not valid")
+        objects.extend(member_objects)
+    return objects
+
+
+def _resolve_chooser_fold_references(
+    catalog: Mapping, manifest: "deployment.StagedManifest",
+    inference: FrozenInference, model_identity: Mapping[str, ModelIdentity],
+    root: Path, dep_root: Path,
+) -> dict[tuple[str, str], ChooserFoldReference]:
+    member_ids = ("tier4_folds:implied_t1", "tier4_folds:runup_move")
+    rows = catalog.get("members")
+    if not isinstance(rows, list) or any(not isinstance(row, Mapping) for row in rows):
+        raise ModelNotReady(_STATE_CATALOG_NAME, "chooser fold catalog is not valid")
+    members = {}
+    for row in rows:
+        member_id = row.get("member_id")
+        if member_id in member_ids:
+            if member_id in members:
+                raise ModelNotReady(member_id, "chooser fold catalog is not valid")
+            members[member_id] = row
+    if not members:
+        return {}
+    sources = catalog.get("sources")
+    cutoff = sources.get("retrain_cutoff") if isinstance(sources, Mapping) else None
+    # Older active releases can omit this optional field. Keep ordinary scoring
+    # available; strict chooser capture refuses if it needs an absent reference.
+    if cutoff is None:
+        return {}
+    try:
+        parsed_cutoff = date.fromisoformat(cutoff)
+        if parsed_cutoff.isoformat() != cutoff:
+            raise ValueError("non-canonical cutoff")
+    except (TypeError, ValueError):
+        raise ModelNotReady("tier4_folds:chooser", "canonical training cutoff is missing") from None
+    objects = _chooser_fold_objects(members, member_ids)
+    if not objects:
+        return {}
+    return _load_chooser_fold_references(
+        objects, "tier4_folds:chooser", parsed_cutoff, catalog, manifest,
+        inference, model_identity, root, dep_root)
 
 
 def _resolve_driver_residual_pools(

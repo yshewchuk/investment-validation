@@ -89,7 +89,8 @@ load-bearing entrypoints:
 - `release_bindings.py` — `resolve_release_binding(release_root) ->
   ScoringReleaseBinding`, the production reader of a live deployment's model
   identity, model artifact refs, analog/payoff/recalibration/residual/chooser
-  artifacts, and the staged size-fold descriptor index (`size_folds`);
+  artifacts including `chooser_fold_references`, and the staged size-fold
+  descriptor index (`size_folds`);
   `resolve_production_release_binding()` is the same resolution against the
   one configured production release root
   (`engine.v2.models.deployment.production_release_root()`, config key
@@ -102,6 +103,9 @@ load-bearing entrypoints:
   resolving to the same key is a release defect, refused as `ModelNotReady`
   naming that key, never a silently-overwritten entry); `model_artifact_refs:
   Mapping[str, str]` **keyed by `binding_id`** (unique by construction).
+  `chooser_fold_references: Mapping[tuple[str, str], ChooserFoldReference]`
+  is keyed by `(producer_output, fold_start)` and carries only verified
+  descriptors; at most 34 chooser-fold objects are loaded for one binding.
   `ModelIdentity` carries `role`, `strategy_id`, `decision_clock_id`,
   `model_id`, `binding_id`, `adapter`, `feature_order`, `output_names`, and
   `artifact_hash` (a content hash over the binding's own verified member
@@ -187,6 +191,12 @@ state keys; `chooser_fold_pools`, `chooser_analog_pool` and
 builds that block only for menu candidates; state without a recipe or a recipe
 for another strategy raises `ValueError`. The chooser k-NN pool is distinct
 from the board bucket-analog pool.
+On production capture, `engine.score.Scorer` receives the verified reference
+map and `_phase4_record_chooser` records references for served folds as
+`chooser_references`. `strict_trace_one` validates them and writes the
+per-trace map to metadata field `chooser_fold_reference` when a chooser trace
+exists (`None` otherwise). Provenance stays outside chooser inputs and receipt;
+the optional `SourceBundle.chooser_fold_reference` is not populated here.
 
 `native_chooser`/`native_chooser_features` derive candidate features after
 native pricing and simulation. Invalid declared frozen state flags
@@ -621,6 +631,8 @@ rather than its own. `native_score_batch` goes through `score_one`, never
 - **R2, cache.** None for any field but `frozen_inference`: every other
   field's loader is constructed fresh per call and discarded on return, so
   two calls against the same `release_root` fully re-read and re-verify.
+  Chooser references are also re-resolved on every call, with at most 34 fold
+  objects and no cross-call reference-map cache.
   `frozen_inference`'s referenced `FrozenInference` owns its own mutable,
   content-hash-keyed member cache, populated lazily by `.infer()`, living as
   long as the caller holds the returned binding — deliberately, so the
@@ -671,6 +683,44 @@ R6: the same release and bytes yield an equal result; a caller resolving once
 per worker therefore sees one policy for the whole batch. The worker uses this
 result only when its `gate_policy` parameter is empty; a supplied policy wins
 and the release is not consulted for it.
+
+#### Chooser fold provenance reference
+
+A verified chooser-fold reference contains the descriptor hash, estimator
+digest, exact fold month, parent `release_id` and producer `ModelIdentity`,
+plus the parent's verified `sources.retrain_cutoff`. `engine.score.Scorer`
+selects references from the verified map for
+producer folds it actually served and records them in trace declarations.
+Strict capture validates those declarations against the map and stores the
+validated per-trace map in the `chooser_fold_reference` metadata field when a
+chooser trace exists; the field is `None` otherwise. If an older active
+catalog has no `sources.retrain_cutoff`, binding resolution returns an empty
+reference map so ordinary scoring can continue; strict capture refuses a
+chooser trace that needs a missing reference. This provenance is excluded
+from the chooser model block and stage receipt, so capture and replay hash the
+same chooser inputs. Capture checks each reference against the executed
+producer's estimator digest and binding; the verified fold month identifies
+the descriptor. Causality uses the release's exclusive data cutoff:
+`training_cutoff <= decision date`. `fold_start` identifies the verified
+descriptor; it is not compared with the release-wide cutoff. `computed_at` is
+never read for admission. It never searches a release catalog or derives
+provenance from legacy fold rows. The strict capture CLI requires a resolvable
+production release binding; legacy rows without the verified reference refuse.
+The release source builder raises `PrepareRefused` if the latest staged fold
+cutoff is later than every staged chooser-pool cutoff; it does not invent a
+later pool cutoff.
+
+| Condition | Outcome |
+|---|---|
+| More than 34 staged chooser-fold objects in one release | `ModelNotReady` before any chooser fold is loaded |
+| Latest staged chooser-fold cutoff is later than every staged chooser-pool cutoff | `PrepareRefused`; no release catalog is written |
+| Legacy active catalog has chooser-fold rows but no `sources.retrain_cutoff` | Return no chooser reference map; strict capture refuses a chooser trace that needs a missing reference |
+| Noncanonical cutoff or malformed or mismatched descriptor, estimator digest, parent binding, output, fold month or cutoff | `ModelNotReady`; no chooser capture input is emitted |
+| Verified reference and matching producer binding/digest with canonical causal dates | Include descriptor hash, estimator digest, parent release/binding identity, training cutoff and fold month in capture provenance metadata |
+| Legacy capture row has no verified reference | Refuse; never infer from `model_id`, artifact bytes or timestamps |
+| Reference lookup/load repeated for the same release | Re-verify on each binding resolution; no cross-call reference cache |
+| Any reference refusal during binding resolution | Refuse the entire `ScoringReleaseBinding` before return; no partial reference map or chooser capture input |
+| Same verified release and producer binding | Produce equal reference values; each binding resolution reads the current release afresh |
 
 #### Chooser state members
 

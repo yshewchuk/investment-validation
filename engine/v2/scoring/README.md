@@ -57,6 +57,11 @@ member is staged) and `chooser_analog_artifacts`/`chooser_admissible_artifacts`
 tuples, plus the `size_folds` descriptor index (`None` only for a hand-built binding), `paired_residual_artifacts` and `trailing_cutoff_artifacts` tuples (each empty independently when its family is absent), into one immutable
 `ScoringReleaseBinding`. Chooser tuples retain all distinct artifact keys;
 each declared chooser object must be a regular file no larger than 32 MiB.
+`chooser_fold_references` is keyed by `(producer_output, fold_start)` and
+contains the immutable descriptor, estimator digest, parent binding and
+training-cutoff reference for each verified chooser fold. A binding loads at
+most 34 chooser-fold objects. The public `ChooserFoldReference` type names
+this capture contract.
 Request-specific selection and nightly chooser wiring are not performed here.
 The reader raises
 `NoCurrentRelease`/`ModelNotReady` (never a legacy or cached fallback) when
@@ -114,7 +119,7 @@ columns.
 is `DYNAMIC_MENU_REFUSAL_CODES`. These are pure preparatory accounting contracts,
 currently consumed only by focused tests. No runtime dispatcher uses them.
 
-<!-- public-interface: application, compatibility, dynamic_outcomes, DynamicMenuIdentity, DynamicCandidateOutcome, validate_dynamic_menu, DynamicMenuRefusal, DYNAMIC_MENU_REFUSAL_CODES, financial, frozen_batch, frozen_executor, frozen_inputs, identity, native_analog_query, release_bindings, source_inputs, gate_fold_selection, SizeFoldCatalog, index_size_folds, select_gate_forecast_source, gate_forecast_source, GateForecastSource, stages, FrozenInputsError, binding_feature_row, build_inference_requests, validate_answer_free, canonical_request, dependency_hash, financial_diagnostics, FrozenBatchPreflightError, FrozenBindingConflict, request_hash, replay, score_batch, score_event, score_frozen, score_frozen_batch, score_id, score_many, score_one, ModelIdentity, ModelNotReady, NoCurrentRelease, ReleaseBindingError, ScoringReleaseBinding, resolve_release_binding, resolve_gate_policy, NativeScoreInputs, SourceBundle, FrozenStageExecutor, FrozenStageRefusal, FrozenStageResult, STAGE_NAMES, StageReceipt, build_native_score_inputs, analog_display_fields, DISPLAY_ANALOG_FIELDS, StageObservation, quote_domain_map, assemble_nightly_source_bundle, validated_as_of, NightlySourceBundleRefusal -->
+<!-- public-interface: application, compatibility, dynamic_outcomes, DynamicMenuIdentity, DynamicCandidateOutcome, validate_dynamic_menu, DynamicMenuRefusal, DYNAMIC_MENU_REFUSAL_CODES, financial, frozen_batch, frozen_executor, frozen_inputs, identity, native_analog_query, release_bindings, source_inputs, gate_fold_selection, SizeFoldCatalog, index_size_folds, select_gate_forecast_source, gate_forecast_source, GateForecastSource, stages, FrozenInputsError, binding_feature_row, build_inference_requests, validate_answer_free, canonical_request, dependency_hash, financial_diagnostics, FrozenBatchPreflightError, FrozenBindingConflict, request_hash, replay, score_batch, score_event, score_frozen, score_frozen_batch, score_id, score_many, score_one, ModelIdentity, ModelNotReady, NoCurrentRelease, ReleaseBindingError, ScoringReleaseBinding, ChooserFoldReference, resolve_release_binding, resolve_gate_policy, NativeScoreInputs, SourceBundle, FrozenStageExecutor, FrozenStageRefusal, FrozenStageResult, STAGE_NAMES, StageReceipt, build_native_score_inputs, analog_display_fields, DISPLAY_ANALOG_FIELDS, StageObservation, quote_domain_map, assemble_nightly_source_bundle, validated_as_of, NightlySourceBundleRefusal -->
 
 ## Consumers
 
@@ -135,6 +140,9 @@ imports `native_entry_rule.ENTRY_RULE_STRATEGIES`, `NightlySourceBundleRefusal`,
 `no_fit_guard()` block. `engine.v2.serving.native_render` (layer 7) imports
 `analog_display_fields`, `DISPLAY_ANALOG_FIELDS` and `StageObservation` to
 carry the analog stage's display-only row ids onto a native serving row.
+The external `tools.capture_tier0_corpus` CLI calls
+`resolve_production_release_binding()` for `--strict-phase4-trace` and passes
+its chooser-fold reference map to the scorer and strict capture path.
 
 <!-- consumers: engine.v2.models.training, engine.v2.ops, engine.v2.serving -->
 
@@ -166,6 +174,14 @@ the keys of the frozen `chooser_analog_pool` and `chooser_admissible_table`;
 features (event history, market/regime block) come from `feature_vector`, which
 still wins for any derived column it declares; `dte_entry` is scorer-computed
 (from the priced legs and quote date) and no longer projected.
+For strict capture, `engine.score.Scorer` uses the verified
+`chooser_fold_references` map to add references for producer folds it actually
+served to trace declarations. `strict_trace_one` validates those declarations
+against the same map and stores the validated per-trace map in metadata when a
+chooser trace exists. This provenance is outside the chooser model block and
+stage receipt, so capture and replay hash the same chooser inputs.
+`SourceBundle.chooser_fold_reference` remains optional and is not populated on
+the current production capture path.
 
 The current builder is deliberately bounded to its supported strategies
 (`SUPPORTED_STRATEGIES`) and their declared recipes. To add another strategy or recipe, extend `source_inputs.py` and add
