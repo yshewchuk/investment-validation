@@ -114,9 +114,9 @@ def canonical_inner(plan, outer_year, inner_year):
     raise fail("INVALID_EXPERIMENT_SPEC", "trial is outside the sealed search plan")
 
 
-def _nested(binding, request):
+def _nested(binding, request, *, temporal=None):
     """Preserve annual event groups; inner scoring labels must predate outer fitting."""
-    temporal = binding["magnitude_plan"]
+    temporal = binding["magnitude_plan"] if temporal is None else temporal
     try:
         expected = [magnitude_folds.annual_fold(year, temporal["events"]) for year in temporal["evaluation_years"]]
         if expected != temporal["folds"]:
@@ -151,16 +151,18 @@ def _candidates(binding, request):
     return sorted(candidates, key=lambda candidate: candidate["candidate_id"])
 
 
-def _implementation(binding):
+def _implementation(binding, *, entrypoints=None):
     """Bind installed planning code and require the original execution sources/environment."""
     root = Path(__file__).resolve().parents[1]
     try:
-        sources = source_closure(root, ["experiments/v2_magnitude_search.py", "experiments/v2_prediction.py"])
+        sources = source_closure(root, entrypoints or ["experiments/v2_magnitude_search.py", "experiments/v2_prediction.py"])
+        anchor_matches = (source_closure(root, [binding["execution_plan"]["runner"]]) == binding["source_closure"]
+            if entrypoints is not None else all(sources.get(key) == digest
+                for key, digest in binding["source_closure"].items()))
     except (OpsError, ArtifactError, OSError, SyntaxError, ValueError):
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search implementation sources cannot be verified") from None
     environment = environment_identity(1)
-    if (environment != binding["environment"] or any(sources.get(key) != digest
-            for key, digest in binding["source_closure"].items())):
+    if environment != binding["environment"] or not anchor_matches:
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search anchor sources or environment differ from this installation")
     return {"source_closure": sources, "environment": environment}
 
@@ -168,6 +170,9 @@ def _implementation(binding):
 def _prepare(conn, store, registration, request, *, plan_schema=None):
     request_version = request.get("schema_version") if isinstance(request, dict) else None
     anchor_version = getattr(registration, "document", {}).get("schema_version")
+    if anchor_version == "native_experiment_registration.v1.8":
+        from experiments.iv_crush_search import prepare_plan
+        return prepare_plan(conn, store, registration, request)
     qualified = anchor_version in ("native_experiment_registration.v1.6", "native_experiment_registration.v1.7")
     expected = (("magnitude_search_request.v2", "magnitude_search_request.v3") if qualified
                 else ("magnitude_search_request.v1",))
@@ -218,6 +223,8 @@ def read_search_plan(conn, store, registration, request, ref):
         schemas = (PLAN_V2, PLAN_V3)
     elif version == "magnitude_search_request.v3":
         schemas = (PLAN_V2,)
+    elif version == "regression_search_request.v1":
+        schemas = ("regression_search_plan.v1",)
     elif version == "magnitude_search_request.v1":
         schemas = (SCHEMA,)
     else:
