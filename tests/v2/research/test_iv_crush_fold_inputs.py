@@ -10,11 +10,12 @@ from experiments import magnitude_search_evidence as evidence
 from experiments import magnitude_search_inputs as inputs
 from experiments import magnitude_search_plan as plans
 from experiments import native_registration as native
-from tests.v2.research.magnitude_trial_support import poison_outcomes
+from tests.v2.research.magnitude_trial_support import catalog_rows, poison_outcomes
 from tests.v2.research.test_iv_crush_inputs import poison, target
 from tests.v2.research.test_iv_crush_registration import prepared as prepare_fixture
 from tests.v2.research.test_iv_crush_search_plan import request as search_request
 from tests.v2.research.test_magnitude_panel_qualified import panel_data  # noqa: F401
+from tests.v2.research.test_native_registration import artifact_object_bytes
 
 
 @pytest.fixture
@@ -108,19 +109,27 @@ def test_changed_fold_or_binding_refuses_before_training(fold_case, monkeypatch,
     assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
 
 
-def test_wrong_projection_target_refuses_before_any_shard(fold_case, monkeypatch):
+@pytest.mark.parametrize("missing", [False, True])
+def test_wrong_projection_target_refuses_before_any_shard(fold_case, monkeypatch, missing):
     data = fold_case
     manifest, identity = inputs.publish_inputs(data.store, admit(data))
+    before, saved = catalog_rows(data.conn), artifact_object_bytes(data.store)
     monkeypatch.setattr(data.store, "read_verified", lambda *a: pytest.fail("shard opened"))
+    monkeypatch.setattr(data.store, "publish_bytes", lambda *a, **k: pytest.fail("CAS write"))
+    expected = fail("EXPERIMENT_IDENTITY_CONFLICT", "search fit target differs from its cohort").problem
     for column in ("absolute_move_pct", "other"):
         with pytest.raises(OpsError) as caught:
             inputs.load_fit_inputs(data.store, manifest, identity, [], [], [], target_column=column)
-        assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+        assert caught.value.problem == expected
     altered = deepcopy(manifest)
-    altered["inline"]["target.column"] = "absolute_move_pct"
+    if missing:
+        del altered["inline"]["target.column"]
+    else:
+        altered["inline"]["target.column"] = "absolute_move_pct"
     with pytest.raises(OpsError) as caught:
         inputs.load_fit_inputs(data.store, altered, content_hash(altered), [], [], [], target_column="crush_pct_iv30")
-    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert caught.value.problem == expected and caught.value.problem.retryable is False
+    assert catalog_rows(data.conn) == before and artifact_object_bytes(data.store) == saved
 
 
 @pytest.mark.parametrize("drift", ["environment", "runner", "worker", "sealed_implementation"])

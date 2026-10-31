@@ -342,7 +342,7 @@ Parent/child share transport; v1 records remain replay-only and new fits stream 
 planned-input/event-ID and population-sized training-receipt lists are ordered content-addressed sections.
 Legacy magnitude sections and bytes remain unchanged (absent/null preflight schema remains legacy). The closed IV preflight schema selects consumed inputs,
 excluded-future events and holdout-exclusion sections instead of invented magnitude qualification receipts.
-Only scalar leaves stay inline, including the IV target descriptor; projection target mismatch refuses before shard reads.
+Only scalar leaves stay inline, including the IV target descriptor; a missing IV target-column pin or projection target mismatch refuses before shard reads. Legacy absent pins retain the `absolute_move_pct` default.
 
 * A shard is canonical JSON `{schema_version: magnitude_search_shard.v1, section, rows}`
   published with `ArtifactStore.publish_bytes`; its `ArtifactRef` is its address and it

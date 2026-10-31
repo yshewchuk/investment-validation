@@ -111,7 +111,7 @@ def load_fit_inputs(store, manifest, expected_id, evaluation_event_ids, horizons
     sections = _admit_manifest(manifest, expected_id)
     schema = manifest["inline"].get("preflight.schema_version")
     expected_target = "crush_pct_iv30" if schema == "research_iv_crush_preflight.v1" else "absolute_move_pct"
-    if target_column != expected_target or manifest["inline"].get("target.column", expected_target) != target_column:
+    if target_column != expected_target or manifest["inline"].get("target.column", "absolute_move_pct") != target_column:
         raise fail(_CONFLICT, "search fit target differs from its cohort")
     members = {member["section"]: member for member in list_members(schema)}
     training = [{name: row[name] for name in ("event_id", target_column)}
