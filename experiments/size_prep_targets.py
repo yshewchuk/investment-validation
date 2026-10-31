@@ -14,6 +14,7 @@ from experiments.size_prep_inputs import _log
 TARGETS_VERSION = "size_prep_targets.v1"
 
 
+# The cap is on compressed fragment bytes, the same semantics as eligible_history.admit_source (which materialize applies); decoded-byte bounding of load_population is tracked in #1870.
 def _bound_events(repository, bounds, metadata_limits):
     """Refuse an over-limit earnings_events read on pinned metadata bytes before any load."""
     records = repository.fragment_records(bounds, "earnings_events")
