@@ -677,3 +677,78 @@ def test_v16_inline_size_registration_still_round_trips(case):
     sealed = planner.seal_search_plan(case.conn, case.store, replayed, case.request)
     plan_ref = from_document(ArtifactRef, sealed["plan_ref"])
     assert planner.read_search_plan(case.conn, case.store, replayed, case.request, plan_ref) == sealed["plan"]
+
+
+def test_interrupted_v3_start_refuses_replay_before_native_read(case, monkeypatch):
+    from experiments.magnitude_search_plan import trial_key
+    from experiments.magnitude_search_trials import SearchTrials
+
+    assert case.plan["schema_version"] == "magnitude_search_plan.v3"
+    recorder = SearchTrials(*case.context)
+    outer = case.plan["folds"][0]
+    inner = outer["inner"][0]
+    candidate_id = case.plan["candidates"][0]["candidate_id"]
+    args = (outer["outer"]["year"], inner["year"], candidate_id)
+    admissions = []
+
+    def interrupt(fold):
+        admissions.append(fold["year"])
+        raise RuntimeError("interrupted native admission")
+
+    monkeypatch.setattr(recorder, "_inputs", interrupt)
+    with pytest.raises(RuntimeError, match="interrupted native admission"):
+        recorder.start(*args)
+    key = trial_key(case.plan, *args)
+    assert recorder._read("start:" + key) is not None
+    assert recorder._read("inputs:" + key) is None
+
+    with pytest.raises(OpsError) as error:
+        recorder.start(*args)
+    assert error.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert admissions == [inner["year"]]
+    assert recorder._read("inputs:" + key) is None
+
+
+def test_report_reuses_shared_execution_receipt_read_and_keeps_outer_rows(monkeypatch):
+    from collections import Counter
+    from experiments import size_search_report as report
+    from experiments.magnitude_search_plan import PLAN_V3
+
+    limits = {"child": {"memory_bytes": 2147483648, "cpu_seconds": 30, "wall_seconds": 60}}
+    plan = {"schema_version": PLAN_V3, "plan_id": "plan", "candidates": [{"candidate_id": "c"}],
+        "counts": {"candidates": 1, "inner_folds": 3, "outer_folds": 2},
+        "request": {"limits": limits},
+        "folds": [
+            {"outer": {"year": "2024", "evaluation_event_ids": ["evt"]},
+             "inner": [{"year": "2023"}]},
+            {"outer": {"year": "2025", "evaluation_event_ids": ["evt"]},
+             "inner": [{"year": "2023"}, {"year": "2024"}]},
+        ]}
+    result = {"predictions": [{"event_id": "evt", "absolute_move_pct": 1.0}],
+        "folds": [{"outer_year": year, "evaluation_inputs": {"omitted_labels": []}}
+                  for year in ("2024", "2025")]}
+    registration = SimpleNamespace(run_id="run", document={"size_panel": {"context": {
+        "target_events": [{"event_id": "evt"}], "eligibility_plan": {}}}})
+    monkeypatch.setattr(report, "_admit_driver", lambda *args: plan)
+    monkeypatch.setattr(report, "collect_outer_results", lambda *args: result)
+    monkeypatch.setattr(report, "paired_report", lambda *args, **kwargs: {})
+    reads = Counter()
+
+    def read_record(conn, store, run_id, slot):
+        reads[slot] += 1
+        if slot.startswith("execution:"):
+            return {"status": "succeeded", "fit_attempt_count": 1,
+                    "completed_fit_count": 1, "diagnostics": []}
+        if slot.startswith("outer-forecasts:"):
+            return []
+        if slot.startswith("comparison-terminal:"):
+            return {"result": {"forecasts": [], "fit_details": []}}
+        pytest.fail("unexpected journal slot " + slot)
+
+    monkeypatch.setattr(report, "read_record", read_record)
+    output = report.collect(None, None, None, registration, {}, None)
+    from experiments.magnitude_search_plan import trial_key
+    shared_key = trial_key(plan, "2024", "2023", "c")
+    assert reads["execution:" + shared_key] == 1
+    assert len(output["inner_fits"]) == 3
+    assert [row["outer_year"] for row in output["inner_fits"]] == ["2024", "2025", "2025"]

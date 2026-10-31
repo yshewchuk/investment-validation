@@ -19,12 +19,15 @@ def collect(conn, store, repository, registration, request, plan_ref):
     targets = {r["event_id"]: r["absolute_move_pct"] for r in result["predictions"]}
     ids = {event for group in plan["folds"] for event in group["outer"]["evaluation_event_ids"]}
     events = [e for e in registration.document["size_panel"]["context"]["target_events"] if e["event_id"] in ids]
+    inner_receipts = {}
     for group in plan["folds"]:
         year = group["outer"]["year"]
         for fold in group["inner"]:
             for candidate in plan["candidates"]:
                 key = trial_key(plan, year, fold["year"], candidate["candidate_id"])
-                receipt = read_record(conn, store, registration.run_id, "execution:" + key)
+                if key not in inner_receipts:
+                    inner_receipts[key] = read_record(conn, store, registration.run_id, "execution:" + key)
+                receipt = inner_receipts[key]
                 inner_fits.append({"outer_year": year, "inner_year": fold["year"],
                     "candidate_id": candidate["candidate_id"], "execution_slot": "execution:" + key,
                     **{k: receipt[k] for k in ("status", "fit_attempt_count", "completed_fit_count")},

@@ -61,6 +61,7 @@ def _candidate_failure(problem):
 
 
 _NOT_ADMITTED = object()
+_FREEZE_CACHE_BYTES = 32 << 20
 
 
 class SearchTrials:
@@ -166,16 +167,20 @@ class SearchTrials:
         started = {"trial_id": key, "outer_year": owner_year, "inner_year": inner_year, "candidate": candidate}
         if execution is not None:
             started["execution"] = execution
+        cohort = cohort_key(plan, owner_year, inner_year)
         replay = plan.get("schema_version") == PLAN_V3
         if replay and self._read("start:" + key) is not None:
             if execution is not None:
                 raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search trial is unfinished")
             if canonical_json(self._read("start:" + key)) != canonical_json(started):
                 raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search trial is unfinished")
+            admitted = self._read("inputs:" + key)
+            if (not isinstance(admitted, dict) or set(admitted) != {"cohort", "inputs_id"}
+                    or admitted["cohort"] != cohort or self._read("cohort:" + cohort) is None):
+                raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search trial is unfinished")
         self._append("start:" + key, started, replay=replay)
         if execution is not None:
             self._append("execution-start:" + key, execution, replay=replay)
-        cohort = cohort_key(plan, owner_year, inner_year)
         inputs = self._cohort_inputs(cohort, inner)
         # Shards first (outside the catalog transaction); the manifest append is the commit point.
         if cohort not in self._published:
@@ -525,18 +530,46 @@ class SearchTrials:
     def freeze(self):
         """Freeze every outer choice from all terminal attempts; no evaluation authority."""
         plan = self._admit()
+        uses = {}
+        for outer in plan["folds"]:
+            for candidate in plan["candidates"]:
+                for inner in outer["inner"]:
+                    key = trial_key(plan, outer["outer"]["year"], inner["year"], candidate["candidate_id"])
+                    uses[key] = uses.get(key, 0) + 1
+        cache, cache_bytes = {}, 0
         selections, attempts = [], []
         for outer in plan["folds"]:
             scores = []
             for candidate in plan["candidates"]:
                 rows, failed = [], False
                 for inner in outer["inner"]:
-                    key, record = self._terminal(plan, outer["outer"]["year"], inner["year"], candidate["candidate_id"])
-                    attempts.append({"trial_id": key, "terminal_id": content_hash(record)})
+                    key = trial_key(plan, outer["outer"]["year"], inner["year"], candidate["candidate_id"])
+                    cached = cache.get(key)
+                    if cached is None:
+                        _, record = self._terminal(plan, outer["outer"]["year"], inner["year"],
+                                                   candidate["candidate_id"])
+                        terminal_id = content_hash(record)
+                        record_bytes = len(canonical_json(record).encode("utf-8")) if uses[key] > 1 else 0
+                    else:
+                        record, terminal_id, record_bytes = cached
+                    attempts.append({"trial_id": key, "terminal_id": terminal_id})
                     failed |= record["status"] != "succeeded"
                     if record["status"] == "succeeded":
                         rows.extend(record["predictions"])
-                scores.append({"candidate_id": candidate["candidate_id"], "metrics": None if failed else magnitude_metrics(rows)})
+                    uses[key] -= 1
+                    if uses[key] == 0:
+                        removed = cache.pop(key, None)
+                        if removed is not None:
+                            cache_bytes -= removed[2]
+                    elif key not in cache and 0 < record_bytes <= _FREEZE_CACHE_BYTES:
+                        while cache and cache_bytes + record_bytes > _FREEZE_CACHE_BYTES:
+                            oldest_key = next(iter(cache))
+                            _, _, removed_bytes = cache.pop(oldest_key)
+                            cache_bytes -= removed_bytes
+                        cache[key] = (record, terminal_id, record_bytes)
+                        cache_bytes += record_bytes
+                scores.append({"candidate_id": candidate["candidate_id"],
+                    "metrics": None if failed else magnitude_metrics(rows)})
             eligible = [score for score in scores if score["metrics"] is not None]
             if not eligible:
                 raise fail("EXPERIMENT_VARIANT_FAILED", "all candidates failed for an outer fold")

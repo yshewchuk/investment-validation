@@ -529,3 +529,101 @@ def test_cutoff_equal_validation_label_leaves_unfinished_claim_and_blocks_freeze
             recorder.start(*args)
     finally:
         source.conn.close()
+
+
+def test_freeze_reuses_shared_terminals_once_per_call_and_preserves_attempt_rows(monkeypatch):
+    from engine.v2.foundation import content_hash
+    from experiments.magnitude_search_plan import PLAN_V3, trial_key
+
+    candidate_id = content_hash({"candidate": "only"})
+    plan = {"schema_version": PLAN_V3, "plan_id": content_hash({"plan": "synthetic"}),
+            "candidates": [{"candidate_id": candidate_id}], "folds": [
+                {"outer": {"year": "2024"}, "inner": [{"year": "2021"}, {"year": "2022"}, {"year": "2023"}]},
+                {"outer": {"year": "2025"}, "inner": [{"year": "2022"}, {"year": "2023"}, {"year": "2024"}]},
+                {"outer": {"year": "2026"}, "inner": [{"year": "2023"}, {"year": "2024"}, {"year": "2025"}]}]}
+    records = {year: {"status": "succeeded", "predictions": [
+        {"event_id": year, "horizon_sessions": 1, "predicted_absolute_move_pct": 1.0,
+         "absolute_move_pct": 1.0}]} for year in ("2021", "2022", "2023", "2024", "2025")}
+    recorder = object.__new__(trials.SearchTrials)
+    calls = []
+
+    def terminal(plan_arg, outer_year, inner_year, trial_candidate_id):
+        key = trial_key(plan, outer_year, inner_year, trial_candidate_id)
+        calls.append(key)
+        return key, records[inner_year]
+
+    monkeypatch.setattr(recorder, "_admit", lambda: plan)
+    monkeypatch.setattr(recorder, "_terminal", terminal)
+    monkeypatch.setattr(recorder, "_append", lambda slot, body, **kwargs: body)
+    expected_attempts = []
+    for outer in plan["folds"]:
+        for candidate in plan["candidates"]:
+            for inner in outer["inner"]:
+                key = trial_key(plan, outer["outer"]["year"], inner["year"], candidate["candidate_id"])
+                expected_attempts.append({"trial_id": key, "terminal_id": content_hash(records[inner["year"]])})
+    unique = {trial_key(plan, outer["outer"]["year"], inner["year"], candidate_id)
+              for outer in plan["folds"] for inner in outer["inner"]}
+    assert len(unique) == 5
+    first = recorder.freeze()
+    assert len(calls) == len(unique)
+    assert first["attempts"] == expected_attempts
+    second = recorder.freeze()
+    assert first["selections"] == second["selections"]
+    assert len(calls) == 2 * len(unique) == 10
+
+    record_bytes = len(trials.canonical_json(records["2021"]).encode("utf-8"))
+    monkeypatch.setattr(trials, "_FREEZE_CACHE_BYTES", record_bytes + 1)
+    calls.clear()
+    third = recorder.freeze()
+    assert third["selections"] == first["selections"]
+    assert third["attempts"] == first["attempts"]
+    assert len(calls) > len(unique)
+    assert set(calls) == unique
+
+    monkeypatch.setattr(trials, "_FREEZE_CACHE_BYTES", 1)
+    calls.clear()
+    fourth = recorder.freeze()
+    assert fourth["selections"] == first["selections"]
+    assert fourth["attempts"] == first["attempts"]
+    assert len(calls) == 9
+
+
+def test_native_selection_checks_shared_trial_once_without_completed_reexecute():
+    from collections import Counter
+
+    from experiments.magnitude_search_outer import _native_selection
+    from experiments.magnitude_search_plan import PLAN_V3, trial_key
+
+    limits = {"memory_bytes": 2147483648, "cpu_seconds": 30, "wall_seconds": 60}
+    plan = {"schema_version": PLAN_V3, "plan_id": "plan", "request": {"limits": {"child": limits}},
+        "candidates": [{"candidate_id": "candidate"}],
+        "folds": [
+            {"outer": {"year": "2024"}, "inner": [{"year": "2023"}]},
+            {"outer": {"year": "2025"}, "inner": [{"year": "2023"}]},
+        ]}
+    selection = {"plan_id": "plan", "selections": []}
+    reads = Counter()
+
+    def read(slot):
+        reads[slot] += 1
+        if slot == "selection":
+            return selection
+        if slot.startswith("execution:") or slot.startswith("execution-start:"):
+            key = slot.split(":", 1)[1]
+            attempt = {"limits": limits, "candidate_id": "candidate", "trial_id": key}
+            return {"attempt": attempt} if slot.startswith("execution:") else attempt
+        if slot.startswith("terminal:"):
+            return {}
+        return None
+
+    class Recorder:
+        def freeze(self):
+            return selection
+
+        def execute(self, *args, **kwargs):
+            pytest.fail("freeze already verified completed trial evidence")
+
+    assert _native_selection(Recorder(), plan, read) == selection
+    key = trial_key(plan, "2024", "2023", "candidate")
+    assert reads["execution:" + key] == reads["execution-start:" + key] == reads["terminal:" + key] == 1
+    assert reads["selection"] == 1
