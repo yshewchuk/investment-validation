@@ -12,7 +12,7 @@ from contextlib import redirect_stdout
 from multiprocessing import get_context
 from pathlib import Path
 
-from engine.v2.contracts import ArtifactRef
+from engine.v2.contracts import ArtifactRef, Problem
 from engine.v2.data.documents import reject_duplicate_keys
 from engine.v2.data.errors import DataError
 from engine.v2.data.repository import Repository
@@ -35,6 +35,7 @@ from engine.v2.research.progress import Progress, decision, stage
 from experiments.magnitude_search_execution import validate_execution_limits
 from experiments.magnitude_search_outer import collect_outer_results, execute_outer_fold
 from experiments.magnitude_search_plan import read_search_plan, trial_key
+from experiments.magnitude_search_request import validate_workers
 from experiments.magnitude_search_records import MIGRATIONS, OWNER, append_record, read_record
 from experiments.magnitude_search_trials import SearchTrials, require_execution_enabled
 from experiments.native_gate_worker import read_native_staged_input
@@ -43,17 +44,21 @@ from experiments.native_registration import (
     read_native_registration,
     valid_registration_read_budget,
 )
+from experiments.memory_guard import start_rss_watchdog
 
 _PARALLEL = None
 
-def _init_trial_worker(conn_path, store_root, registration, request, plan_ref):
+
+def _init_trial_worker(conn_path, store_root, registration, request, plan_ref, memory_bytes):
     global _PARALLEL
+    start_rss_watchdog(memory_bytes)
     conn = connect(conn_path, must_exist=True)
     conn.execute("PRAGMA busy_timeout=30000")
     store = ArtifactStore(store_root)
     repository = Repository(conn, store, pin_snapshots=True)
     plan = read_search_plan(conn, store, registration, request, plan_ref)
     _PARALLEL = (conn, store, SearchTrials(conn, store, repository, registration, request, plan_ref), registration, plan)
+
 
 def _complete_trial(trials, action, args, key, *, limits, read):
     try:
@@ -65,6 +70,11 @@ def _complete_trial(trials, action, args, key, *, limits, read):
             raise
         return trials.reconcile(*args, limits=limits)
 
+
+def _worker_problem(error):
+    return {"worker_problem": to_document(error.problem)}
+
+
 def _parallel_trial_task(task):
     args, cpu_id, limits = task
     os.sched_setaffinity(0, {cpu_id})
@@ -72,12 +82,48 @@ def _parallel_trial_task(task):
     key = trial_key(plan, *args)
     try:
         return _complete_trial(
-            trials, trials.execute, args, key, limits=limits,
+            trials, trials._execute_borrowed, args, key, limits=limits,
             read=lambda slot: read_record(conn, store, registration.run_id, slot))
-    except OpsError:
-        raise
+    except OpsError as error:
+        return _worker_problem(error)
+    except MemoryError:
+        return _worker_problem(fail("RESOURCE_LIMIT_EXCEEDED", "search worker memory exhausted"))
     except (OSError, sqlite3.Error):
-        raise fail("RESOURCE_UNAVAILABLE", "search worker storage unavailable") from None
+        return _worker_problem(fail("RESOURCE_UNAVAILABLE", "search worker storage unavailable"))
+
+
+def _parallel_preflight(conn, request, limits, workers):
+    """Admit CPU, parent-memory and file-backed storage bounds before replay writes."""
+    try:
+        cpus = sorted(os.sched_getaffinity(0))
+    except (AttributeError, OSError, ValueError):
+        raise fail("RESOURCE_UNAVAILABLE", "search workers require Linux CPU affinity") from None
+    try:
+        parent_memory = request["limits"]["parent"]["memory_bytes"]
+    except (KeyError, TypeError):
+        raise fail("INVALID_EXPERIMENT_SPEC", "search worker memory bound is missing") from None
+    if type(parent_memory) is not int or parent_memory < 1:
+        raise fail("INVALID_EXPERIMENT_SPEC", "search worker memory bound is invalid")
+    if workers > min(8, len(cpus)) or workers * limits["memory_bytes"] > parent_memory:
+        decision("search workers", f"refusing workers={workers}; cpu_bound={min(8, len(cpus))}; worker_memory_bytes={limits['memory_bytes']}; parent_memory_bytes={parent_memory}")
+        raise fail("INVALID_EXPERIMENT_SPEC", "search worker count exceeds CPU or memory bounds")
+    database = conn.execute("PRAGMA database_list").fetchone()
+    if database is None or len(database) < 3 or not database[2]:
+        raise fail("INVALID_EXPERIMENT_SPEC", "parallel search requires a file-backed catalog")
+    decision("search workers", f"process pool workers={workers}; cpu_bound={min(8, len(cpus))}; worker_memory_bytes={limits['memory_bytes']}")
+    return cpus, database[2]
+
+
+def _abort_executor(executor):
+    """Cancel queued work and terminate running workers before the wait."""
+    terminate = getattr(executor, "terminate_workers", None)
+    if callable(terminate):
+        terminate()
+    else:
+        for process in list(getattr(executor, "_processes", {}).values()):
+            if process.is_alive():
+                process.terminate()
+    executor.shutdown(wait=True, cancel_futures=True)
 
 MAX_REPORT_BYTES = 64 * 1024 * 1024
 
@@ -129,9 +175,7 @@ def _admit_driver(conn, store, registration, request, plan_ref):
 
 def run_search(conn, store, repository, registration, request, plan_ref, *, limits, collect_results=True):
     """Validate every claimed inner result before any fresh serial fit; never retry; collect_results=False returns None before the final collect."""
-    workers = request.get("workers", 1)
-    if type(workers) is not int or not 1 <= workers <= 8:
-        raise fail("INVALID_EXPERIMENT_SPEC", "search workers requires an integer from 1 through 8")
+    workers = validate_workers(request)
     request = {key: value for key, value in request.items() if key != "workers"}
     validate_execution_limits(limits)
     plan = _admit_driver(conn, store, registration, request, plan_ref)
@@ -155,6 +199,9 @@ def run_search(conn, store, repository, registration, request, plan_ref, *, limi
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search contains an unfinished or orphan outer claim")
         if read("outer-start:" + key) is not None:
             completed_outer.append(fold["outer"]["year"])
+    parallel = workers > 1 and bool(fresh)
+    if parallel:
+        cpus, conn_path = _parallel_preflight(conn, request, limits, workers)
     meter = Progress("search trials", len(claimed) + len(fresh))
     decision("search trials", f"{len(claimed)} replay claims; {len(fresh)} fresh trials; zero retries")
     for args, key in claimed:
@@ -162,42 +209,33 @@ def run_search(conn, store, repository, registration, request, plan_ref, *, limi
         meter.tick()
     for year in completed_outer:
         execute_outer_fold(conn, store, repository, registration, request, plan_ref, year, limits=limits)
-    if workers == 1 or not fresh:
+    if not parallel:
         for args, key in fresh:
             _complete_trial(trials, trials.execute, args, key, limits=limits, read=read)
             meter.tick()
     else:
-        cpus = sorted(os.sched_getaffinity(0))
-        try:
-            parent_memory = request["limits"]["parent"]["memory_bytes"]
-        except (KeyError, TypeError):
-            raise fail("INVALID_EXPERIMENT_SPEC", "search worker memory bound is missing") from None
-        if type(parent_memory) is not int or parent_memory < 1:
-            raise fail("INVALID_EXPERIMENT_SPEC", "search worker memory bound is invalid")
-        if workers > min(8, len(cpus)) or workers * limits["memory_bytes"] > parent_memory:
-            decision("search workers", f"refusing workers={workers}; cpu_bound={min(8, len(cpus))}; worker_memory_bytes={limits['memory_bytes']}; parent_memory_bytes={parent_memory}")
-            raise fail("INVALID_EXPERIMENT_SPEC", "search worker count exceeds CPU or memory bounds")
-        decision("search workers", f"process pool workers={workers}; cpu_bound={min(8, len(cpus))}; worker_memory_bytes={limits['memory_bytes']}")
-        database = conn.execute("PRAGMA database_list").fetchone()
-        if database is None or len(database) < 3 or not database[2]:
-            raise fail("INVALID_EXPERIMENT_SPEC", "parallel search requires a file-backed catalog")
-        conn_path = database[2]
         executor = ProcessPoolExecutor(
             max_workers=workers,
             mp_context=get_context("spawn"),
             initializer=_init_trial_worker,
-            initargs=(conn_path, str(store.root), registration, request, plan_ref),
+            initargs=(conn_path, str(store.root), registration, request, plan_ref, limits["memory_bytes"]),
         )
         with stage("search fresh trials"):
             parallel_meter = Progress("search fresh trials", len(fresh))
             try:
                 tasks = [(args, cpus[index % len(cpus)], limits) for index, (args, key) in enumerate(fresh)]
-                for _receipt in executor.map(_parallel_trial_task, tasks):
+                for receipt in executor.map(_parallel_trial_task, tasks):
+                    if isinstance(receipt, dict) and set(receipt) == {"worker_problem"}:
+                        raise OpsError(from_document(Problem, receipt["worker_problem"]))
                     meter.tick()
                     parallel_meter.tick()
             except BrokenProcessPool:
+                _abort_executor(executor)
                 raise fail("RESOURCE_UNAVAILABLE", "search worker process exited unexpectedly") from None
-            finally:
+            except BaseException:
+                _abort_executor(executor)
+                raise
+            else:
                 executor.shutdown()
     selected = trials.freeze()
     for selection in selected["selections"]:

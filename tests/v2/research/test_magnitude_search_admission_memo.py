@@ -59,6 +59,17 @@ def test_start_returns_detached_inputs_copy(case):
     assert canonical_json(resumed["inputs"]) == canonical_json(case.recorder._memo[cohort])
 
 
+def test_internal_borrow_shares_memo_while_public_start_detaches(case):
+    args = trial_cases(case)[0]
+    second = (args[0], args[1], case.plan["candidates"][1]["candidate_id"])
+    cohort = content_hash([case.plan["plan_id"], args[0], args[1]])
+    borrowed = case.recorder._start(*args, detach=False)
+    assert borrowed["inputs"] is case.recorder._memo[cohort]
+    detached = case.recorder.start(*second)
+    assert detached["inputs"] is not case.recorder._memo[cohort]
+    assert canonical_json(detached["inputs"]) == canonical_json(case.recorder._memo[cohort])
+
+
 def test_failed_admission_is_not_memoised(case, monkeypatch):
     args = trial_cases(case)[0]
     inner = next(inner for outer in case.plan["folds"] if outer["outer"]["year"] == args[0]

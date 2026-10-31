@@ -23,7 +23,8 @@ _failure = fail
 
 
 def _append_same_slot(task):
-    conn_path, store_root = task
+    conn_path, store_root, barrier = task
+    barrier.wait()
     conn = driver.connect(conn_path, must_exist=True)
     conn.execute("PRAGMA busy_timeout=30000")
     store = driver.ArtifactStore(store_root)
@@ -33,7 +34,8 @@ def _append_same_slot(task):
         conn.close()
 
 
-def _run(monkeypatch, tmp_path, workers, *, fail=False, parent_memory=100):
+def _run(monkeypatch, tmp_path, workers, *, fail=False, crash=False, parent_memory=100,
+         schema="magnitude_search_request.v2", include_workers=True):
     with multiprocessing.Manager() as manager:
         records = manager.dict()
         pids = manager.list()
@@ -51,12 +53,14 @@ def _run(monkeypatch, tmp_path, workers, *, fail=False, parent_memory=100):
         conn = SimpleNamespace(execute=lambda sql: SimpleNamespace(
             fetchone=lambda: (0, "main", str(tmp_path / "catalog.sqlite"))))
         request = {
-            "workers": workers,
+            "schema_version": schema,
             "limits": {
                 "child": {"memory_bytes": 10, "cpu_seconds": 1, "wall_seconds": 1},
                 "parent": {"memory_bytes": parent_memory},
             },
         }
+        if include_workers:
+            request["workers"] = workers
 
         def key(*args):
             return ":".join(map(str, args))
@@ -65,11 +69,12 @@ def _run(monkeypatch, tmp_path, workers, *, fail=False, parent_memory=100):
             return key(*args)
 
         class Trials:
-            def __init__(self, records, captured_selection, should_fail, pids, initializers,
+            def __init__(self, records, captured_selection, should_fail, crash, pids, initializers,
                          parent_pid):
                 self.records = records
                 self.captured_selection = captured_selection
                 self.should_fail = should_fail
+                self.crash = crash
                 self.pids = pids
                 self.initializers = initializers
                 self.parent_pid = parent_pid
@@ -81,13 +86,16 @@ def _run(monkeypatch, tmp_path, workers, *, fail=False, parent_memory=100):
                 pid = os.getpid()
                 self.pids.append(pid)
                 if self.should_fail:
-                    if pid != self.parent_pid:
+                    if self.crash and pid != self.parent_pid:
                         os._exit(23)
                     raise _failure("RESOURCE_UNAVAILABLE", "synthetic worker failure")
                 self.records["execution-result:" + trial] = "execution-result:" + trial
                 self.records["execution:" + trial] = "execution:" + trial
                 self.records["terminal:" + trial] = "terminal:" + trial
                 return {"trial_id": trial, "status": "succeeded"}
+
+            def _execute_borrowed(self, *args, limits):
+                return self.execute(*args, limits=limits)
 
             def reconcile(self, *args, limits):
                 return self.execute(*args, limits=limits)
@@ -98,10 +106,11 @@ def _run(monkeypatch, tmp_path, workers, *, fail=False, parent_memory=100):
 
         def initializer(*args):
             assert "workers" not in args[3]
+            assert args[5] == 10
             initializers.append(os.getpid())
             driver._PARALLEL = (
                 conn, store,
-                Trials(records, captured_selection, fail, pids, initializers, parent_pid),
+                Trials(records, captured_selection, fail, crash, pids, initializers, parent_pid),
                 registration, plan)
 
         def admit_driver(*args):
@@ -121,9 +130,10 @@ def _run(monkeypatch, tmp_path, workers, *, fail=False, parent_memory=100):
         monkeypatch.setattr(driver.os, "sched_setaffinity", lambda pid, cpus: None)
         monkeypatch.setattr(driver, "get_context",
                             lambda *args, **kwargs: multiprocessing.get_context("fork"))
+
         def make_trials(*args, **kwargs):
             assert "workers" not in args[4]
-            return Trials(records, captured_selection, fail, pids, initializers,
+            return Trials(records, captured_selection, fail, crash, pids, initializers,
                           parent_pid)
 
         monkeypatch.setattr(driver, "SearchTrials", make_trials)
@@ -164,7 +174,7 @@ def test_scheduler_records_do_not_depend_on_worker_count(monkeypatch, tmp_path, 
 
 
 @pytest.mark.parametrize("workers", [1, 3])
-def test_worker_failure_semantics_match_serial(monkeypatch, tmp_path, workers):
+def test_worker_typed_error_semantics_match_serial(monkeypatch, tmp_path, workers):
     _, records, codes, pids, _, parent_pid = _run(monkeypatch, tmp_path, workers, fail=True)
     trial = "2024:2023:candidate"
     assert codes == ["RESOURCE_UNAVAILABLE", "EXPERIMENT_IDENTITY_CONFLICT"]
@@ -178,12 +188,59 @@ def test_worker_failure_semantics_match_serial(monkeypatch, tmp_path, workers):
         assert pids and pids[0] != parent_pid
 
 
+def test_broken_worker_process_refuses_resource_unavailable(monkeypatch, tmp_path):
+    _, records, codes, pids, _, parent_pid = _run(
+        monkeypatch, tmp_path, 3, fail=True, crash=True)
+    trial = "2024:2023:candidate"
+    assert codes == ["RESOURCE_UNAVAILABLE", "EXPERIMENT_IDENTITY_CONFLICT"]
+    assert records["start:" + trial] == "start:" + trial
+    assert pids and pids[0] != parent_pid
+
+
 @pytest.mark.parametrize("workers", [0, -1, 9, True, 1.5])
 def test_invalid_worker_counts_are_rejected(monkeypatch, tmp_path, workers):
     with pytest.raises(OpsError) as error:
         _run(monkeypatch, tmp_path, workers)
     assert error.value.code == "INVALID_EXPERIMENT_SPEC"
     assert error.value.problem.retryable is False
+
+
+@pytest.mark.parametrize("schema", [
+    "magnitude_search_request.v1", "regression_search_request.v1"])
+def test_legacy_declared_workers_refuse_before_admission(monkeypatch, tmp_path, schema):
+    with pytest.raises(OpsError) as error:
+        _run(monkeypatch, tmp_path, 3, schema=schema)
+    assert error.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert error.value.problem.retryable is False
+    assert error.value.problem.message == "stage-2 workers require a v2 or v3 search request"
+
+
+@pytest.mark.parametrize("schema", [
+    "magnitude_search_request.v1", "regression_search_request.v1"])
+def test_legacy_omitted_workers_default_to_one(monkeypatch, tmp_path, schema):
+    result, records, codes, pids, initializers, parent_pid = _run(
+        monkeypatch, tmp_path, 3, schema=schema, include_workers=False)
+    assert codes == []
+    assert initializers == []
+    assert pids == [parent_pid]
+    assert result["selection"] == SELECTION
+    assert "terminal:2024:2023:candidate" in records
+
+
+def test_worker_cpu_bound_refuses_before_pool_start(monkeypatch, tmp_path):
+    with pytest.raises(OpsError) as error:
+        _run(monkeypatch, tmp_path, 4)
+    assert error.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert error.value.problem.message == "search worker count exceeds CPU or memory bounds"
+
+
+def test_worker_memory_bound_equality_is_admitted(monkeypatch, tmp_path):
+    result, records, codes, _, initializers, _ = _run(
+        monkeypatch, tmp_path, 3, parent_memory=30)
+    assert codes == []
+    assert len(initializers) == 3
+    assert result["selection"] == SELECTION
+    assert "terminal:2024:2023:candidate" in records
 
 
 @pytest.mark.parametrize(("workers", "parent_memory"), [(3, 29), (3, 0)])
@@ -201,11 +258,14 @@ def test_worker_initializer_reopens_file_backed_inputs(tmp_path, monkeypatch):
     store_root.mkdir()
     original = driver.connect(str(catalog), must_exist=True)
     plan = {"plan_id": "plan"}
+    watchdogs = []
     monkeypatch.setattr(driver, "read_search_plan", lambda *args: plan)
+    monkeypatch.setattr(driver, "start_rss_watchdog", lambda value: watchdogs.append(value))
     registration = SimpleNamespace(run_id="run", document={})
-    driver._init_trial_worker(str(catalog), str(store_root), registration, {}, object())
+    driver._init_trial_worker(str(catalog), str(store_root), registration, {}, object(), 1024)
     worker_conn, worker_store, worker_trials, worker_registration, admitted_plan = driver._PARALLEL
     try:
+        assert watchdogs == [1024]
         assert worker_conn is not original
         assert worker_conn.execute("PRAGMA busy_timeout").fetchone()[0] == 30000
         assert worker_store.root == store_root
@@ -232,13 +292,14 @@ def test_append_same_slot_across_spawn_workers(tmp_path):
 
     store_root = tmp_path / "store"
     store_root.mkdir()
-    task = (str(catalog), str(store_root))
-    with ProcessPoolExecutor(
-        max_workers=2, mp_context=multiprocessing.get_context("spawn")
-    ) as executor:
-        first = executor.submit(_append_same_slot, task)
-        second = executor.submit(_append_same_slot, task)
-        bodies = [first.result(), second.result()]
+    with multiprocessing.Manager() as manager:
+        barrier = manager.Barrier(2)
+        with ProcessPoolExecutor(
+            max_workers=2, mp_context=multiprocessing.get_context("spawn")
+        ) as executor:
+            first = executor.submit(_append_same_slot, (str(catalog), str(store_root), barrier))
+            second = executor.submit(_append_same_slot, (str(catalog), str(store_root), barrier))
+            bodies = [first.result(), second.result()]
 
     assert bodies == [{"status": "committed"}, {"status": "committed"}]
     parent = driver.connect(str(catalog), must_exist=True)

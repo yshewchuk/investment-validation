@@ -13,7 +13,7 @@ from engine.v2.research.magnitude_panel_table import recipe as panel_recipe
 from experiments.magnitude_search_execution import validate_execution_limits
 from experiments.size_panel_request import validate_panel_request
 
-__all__ = ["compile_request"]
+__all__ = ["compile_request", "validate_workers"]
 
 _KEYS = {"schema_version", "feature_snapshot_id", "history_snapshot_id",
     "feature_dictionary_hash", "eligibility_policy_ref", "feature_sets", "space",
@@ -53,6 +53,17 @@ def _hash(value):
 
 def _positive(value):
     return type(value) is int and value > 0
+
+
+def validate_workers(request):
+    """Return the declared worker count (default 1); only v2/v3 requests may declare it."""
+    if type(request) is not dict or "workers" not in request:
+        return 1
+    _require(request.get("schema_version") in ("magnitude_search_request.v2", "magnitude_search_request.v3"),
+             "stage-2 workers require a v2 or v3 search request")
+    _require(type(request["workers"]) is int and 1 <= request["workers"] <= 8,
+             "stage-2 workers requires an integer from 1 through 8")
+    return request["workers"]
 
 
 def _references(request, recipe=panel_recipe):
@@ -161,14 +172,13 @@ def compile_request(request):
     if regression:
         _require(_shape(request, _KEYS | {"panel_request"}),
                  "stage-2 request requires its closed v2 schema")
+        validate_workers(request)
         validate_panel_request(request["panel_request"])
     else:
         _require((_shape(request, _KEYS) or _shape(request, _KEYS | {"workers"}))
                  and request["schema_version"] == "magnitude_search_request.v2",
                  "stage-2 request requires its closed v2 schema")
-        if "workers" in request:
-            _require(type(request["workers"]) is int and 1 <= request["workers"] <= 8,
-                     "stage-2 workers requires an integer from 1 through 8")
+        validate_workers(request)
         request.pop("workers", None)
     recipe = qualified_recipe if regression else panel_recipe
     _references(request, recipe)

@@ -280,6 +280,8 @@ forecast normalization and target-receipt validation. Inner wrappers retain subm
 Real/Integral support and their original refusal envelopes; outer wrappers enforce
 JSON-native numeric types. The static dependency is included in source seals.
 
+<a id="serial-magnitude-search-driver"></a>
+
 ## Magnitude search driver
 
 `python -m experiments.v2_magnitude_search_run` accepts `seal`, `run` or `collect`.
@@ -313,16 +315,31 @@ These three search actions accept `--max-registration-bytes` (default 16777216);
 
 `run_search(conn, store, repository, registration, request, plan_ref, *, limits,
 collect_results=True)`
-is the same orchestration API. The request may declare `workers` from 1 through
-8 (omission means 1); this execution setting is removed before request hashing
-and does not change candidate, plan or trial identities. It traverses outer
-folds, candidates and inner folds in sealed roster order. Fresh trials run
-serially with one worker or in a bounded process pool otherwise; claimed replay
-and completed outer replay stay serial. Results are collected in roster order,
-then the driver freezes selections, evaluates each selected outer winner, and
-collects every completed outer fold
+is the same orchestration API. Only `magnitude_search_request.v2` and `.v3`
+requests may declare `workers` from 1 through 8 (omission means 1); a declared
+field on a legacy or regression request refuses before admission. This execution
+setting is removed before request hashing and does not change candidate, plan or
+trial identities. It traverses outer folds, candidates and inner folds in sealed
+roster order. Fresh trials run serially with one worker or in a bounded process
+pool otherwise; claimed replay and completed outer replay stay serial. Results
+are collected in roster order, then the driver freezes selections, evaluates
+each selected outer winner, and collects every completed outer fold
 (`collect_results=False` skips that collect and returns None; `size_search` run
 collects once via `collect`).
+
+Each pool worker starts the same RSS watchdog for its own process, holds at most
+one decoded cohort and borrows that cohort read-only across its trials; serial
+and public callers still receive detached copies. Each worker launches at most
+one fit child at a time; both the worker and that fit child have independent
+`child.memory_bytes` RSS watchdogs. The process tree can therefore use about
+`2 * workers * child.memory_bytes`, plus the driver's own RSS. The admission
+check requires `workers * child.memory_bytes <= parent.memory_bytes`; these
+per-process limits and admission check do not reserve or cap total host memory.
+CPU, memory and file-backed-catalog checks run before any replay write. On an
+error from the pool map, queued tasks are
+cancelled and running workers terminated before the executor waits; normal
+completion uses ordinary shutdown, and the parent wall alarm stays active
+through cleanup.
 Valid candidate failures are excluded by the sealed policy; all-candidate failure
 refuses. It never chooses a winner from outer scores.
 

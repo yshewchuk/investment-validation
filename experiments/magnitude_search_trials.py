@@ -167,7 +167,8 @@ class SearchTrials:
         """Claim once, then bind native inputs; interrupted starts cannot be restarted."""
         return self._start(outer_year, inner_year, candidate_id)
 
-    def _start(self, outer_year, inner_year, candidate_id, execution=None, admitted=_NOT_ADMITTED):
+    def _start(self, outer_year, inner_year, candidate_id, execution=None, admitted=_NOT_ADMITTED,
+               *, detach=True):
         plan = self._admit() if admitted is _NOT_ADMITTED else admitted
         key, inner, candidate = self._trial(plan, outer_year, inner_year, candidate_id)
         owner_year, _ = canonical_inner(plan, outer_year, inner_year)
@@ -196,11 +197,18 @@ class SearchTrials:
         manifest, inputs_id = self._published[cohort]
         self._append("cohort:" + cohort, manifest)
         self._append("inputs:" + key, {"cohort": cohort, "inputs_id": inputs_id})
-        # Callers may mutate their copy; the memo stays private.
-        return {**started, "inputs": copy.deepcopy(inputs)}
+        # Serial/public callers may mutate their copy; the process worker borrows its memo read-only.
+        return {**started, "inputs": copy.deepcopy(inputs) if detach else inputs}
 
     def execute(self, outer_year, inner_year, candidate_id, *, limits):
         """Run one bounded native inner trial once, or verify its completed replay."""
+        return self._execute(outer_year, inner_year, candidate_id, limits=limits, detach=True)
+
+    def _execute_borrowed(self, outer_year, inner_year, candidate_id, *, limits):
+        """Internal process-pool path: borrow this worker's one-cohort memo without copying."""
+        return self._execute(outer_year, inner_year, candidate_id, limits=limits, detach=False)
+
+    def _execute(self, outer_year, inner_year, candidate_id, *, limits, detach):
         plan = self._admit()
         key, inner, candidate = self._trial(plan, outer_year, inner_year, candidate_id)
         size_plan = plan.get("schema_version") in (PLAN_V2, PLAN_V3)
@@ -214,7 +222,7 @@ class SearchTrials:
         forbid_fitting("SearchTrials.execute")
         forbid_legacy_fitting("SearchTrials.execute")
         resolved = resolved_limits(self.conn, self.store, self.registration, plan, limits) if size_plan else execution_limits(limits)
-        started = self._start(outer_year, inner_year, candidate_id, attempt, plan)
+        started = self._start(outer_year, inner_year, candidate_id, attempt, plan, detach=detach)
         inputs = started["inputs"]
         execution = execution_for_candidate(self.registration.document, candidate)
         fits, pending = [], []
