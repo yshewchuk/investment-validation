@@ -49,6 +49,26 @@ def main():
             emit(forecasts(indexed, pd.DataFrame(inputs["training"]), request["inner"], request["plan"],
                            request["execution"], progress=progress))
             return
+        if (request["execution"].get("schema_version") == "size_candidate_execution.v1"
+                and request["execution"]["fit_recipe"].get("schema_version") == "size_causal_comparator.v1"):
+            from engine.v2.foundation import content_hash
+            from experiments.size_comparator import forecasts
+            result = forecasts(indexed, pd.DataFrame(inputs["training"]), request["inner"], request["plan"],
+                               request["execution"], progress=progress)
+            recipe_id = content_hash(request["execution"]["fit_recipe"])
+            emit({"event": result["event"],
+                "forecasts": [{"event_id": row["event_id"], "horizon_sessions": row["horizon_sessions"],
+                    "predicted_absolute_move_pct": row["predicted_absolute_move_pct"]}
+                    for row in result["forecasts"]],
+                "diagnostics": [{"schema_version": "size_v1_4_fit.v1", "recipe_id": recipe_id,
+                    "horizon_sessions": detail["horizon_sessions"],
+                    "training_event_ids": detail["training_event_ids"],
+                    "logical_fits": detail["logical_fits"],
+                    "component_fits": detail["component_fits"],
+                    "abstention_counts": detail["abstention_counts"],
+                    "training_abstention_counts": detail["training_abstention_counts"]}
+                    for detail in result["fit_details"]]})
+            return
         diagnostics = []
         try:
             predictions, _ = fitted_forecasts(indexed, pd.DataFrame(inputs["training"]),

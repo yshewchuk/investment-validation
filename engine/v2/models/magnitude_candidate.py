@@ -6,8 +6,13 @@ def magnitude_candidate_family(recipe):
     message = "candidate requires a supported recipe schema/model pair"
     if type(recipe) is not dict:
         raise ValueError(message)
-    schema, model = recipe.get("schema_version"), recipe.get("model")
-    if type(schema) is not str or type(model) is not str:
+    schema = recipe.get("schema_version")
+    if type(schema) is not str:
+        raise ValueError(message)
+    if schema == "size_causal_comparator.v1":
+        return "size_v1_4"
+    model = recipe.get("model")
+    if type(model) is not str:
         raise ValueError(message)
     if schema == "magnitude_elasticnet_recipe.v1" and model == "elasticnet":
         return "elasticnet"

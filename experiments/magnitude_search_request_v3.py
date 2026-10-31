@@ -29,6 +29,7 @@ _FAMILIES_V4 = {
     "elasticnet": {"alpha", "l1_ratio"},
     "hgb": {"learning_rate", "max_leaf_nodes", "min_samples_leaf", "l2_regularization"},
 }
+_FAMILIES_V5 = {**_FAMILIES_V4, "size_v1_4": set()}
 
 
 def _finite_positive(value):
@@ -54,9 +55,10 @@ def _space(request):
                 "stage-2 requires exactly ordered H/HM/HMO feature sets")
     space = request["space"]
     version = request["schema_version"]
-    families = _FAMILIES_V4 if version == "magnitude_search_request.v4" else _FAMILIES
+    families = (_FAMILIES_V5 if version == "magnitude_search_request.v5"
+                else _FAMILIES_V4 if version == "magnitude_search_request.v4" else _FAMILIES)
     v2._require(v2._shape(space, families),
-                "stage-2 requires the closed three-family grid")
+                "stage-2 requires the closed family grid")
     canonical = {}
     for family, axes in families.items():
         supplied = space[family]
@@ -67,7 +69,8 @@ def _space(request):
             values = supplied[axis]
             v2._require(type(values) is list and 1 <= len(values) <= _MAX_AXIS_LENGTH,
                         "stage-2 grid axis length must be between 1 and 32")
-            if family == "hgb" and version != "magnitude_search_request.v4":
+            if family == "hgb" and version not in (
+                    "magnitude_search_request.v4", "magnitude_search_request.v5"):
                 v2._require(values == [7, 15],
                             "stage-2 HGB max_leaf_nodes grid remains fixed at [7, 15]")
                 canonical[family][axis] = [7, 15]
@@ -100,9 +103,10 @@ def _counts(request, horizons):
                 "stage-2 inner years must be ordered and strictly earlier than their outer year")
     count = len(v2._SETS) * sum(math.prod(len(values) for values in axes.values())
                                 for axes in request["space"].values())
-    if request["schema_version"] == "magnitude_search_request.v4":
+    if request["schema_version"] in (
+            "magnitude_search_request.v4", "magnitude_search_request.v5"):
         v2._require(count <= _MAX_V4_CANDIDATES,
-                    "stage-2 v4 grid exceeds the 1000-candidate ceiling")
+                    "stage-2 v4/v5 grid exceeds the 1000-candidate ceiling")
     inners, outers = sum(map(len, inner.values())), len(outer)
     lead_count = len(horizons)
     fits = lead_count * (count * inners + outers)
@@ -128,8 +132,9 @@ def compile_request(request, *, horizons=(5, 3, 1)):
         raise fail("INVALID_EXPERIMENT_SPEC", "stage-2 request requires plain finite JSON") from None
     v2._require(v2._shape(request, v2._KEYS)
                 and request["schema_version"] in (
-                    "magnitude_search_request.v3", "magnitude_search_request.v4"),
-                "stage-2 request requires its closed v3 or v4 schema")
+                    "magnitude_search_request.v3", "magnitude_search_request.v4",
+                    "magnitude_search_request.v5"),
+                "stage-2 request requires its closed v3, v4 or v5 schema")
     v2._references(request)
     _space(request)
     counts = _counts(request, horizons)

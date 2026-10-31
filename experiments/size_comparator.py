@@ -7,6 +7,7 @@ from threadpoolctl import threadpool_limits
 
 from engine.v2.foundation import content_hash
 from engine.v2.models.frozen_state_io import BoundedStateReadError
+from engine.v2.models.magnitude_size_v1_4_recipe import size_v1_4_recipe
 from engine.v2.models.training.estimators import fit_recipe_estimator
 from engine.v2.models.training.recipes import RecipeKey, current_recipes
 from engine.v2.ops.errors import fail
@@ -41,11 +42,7 @@ def recipe():
     complete = {"ols": LinearRegression().get_params(), "mlp": MLPRegressor(hidden_layer_sizes=(64, 32),
         max_iter=400, early_stopping=True, n_iter_no_change=15, random_state=20260829).get_params()}
     complete["mlp"]["hidden_layer_sizes"] = list(complete["mlp"]["hidden_layer_sizes"])
-    return {"schema_version": "size_causal_comparator.v1", "native": native_recipe().as_dict(),
-        "component_parameters": complete, "features": list(FEATURES), "minimum_prior": 4, "minimum_training_rows": 500,
-        "masks": {"or_implied": [0, 60], "or_rvol30": [0, 700], "training_target": [0, 200]},
-        "prediction_projection": "none", "missing": "abstain", "quote_value": "stored_without_reconstruction", "refit": "fresh_per_outer_horizon",
-        "history_mean": "stored_mean_else_qualified_training_mean", "production_reproduction": False}
+    return size_v1_4_recipe(native_recipe().as_dict(), complete)
 
 
 def _values(row):
@@ -84,6 +81,24 @@ def fit_evidence(inputs, fold, plan):
     return result
 
 
+def _candidate_fit_evidence(indexed, train, fold, plan):
+    """Bind ordered raw admitted candidate matrices without eligibility filtering."""
+    train_ids = train.event_id.tolist()
+    result = []
+    for horizon in plan["horizons"]:
+        documents = []
+        for events in (train_ids, fold["evaluation_event_ids"]):
+            rows = [indexed[event, horizon] for event in events]
+            documents.append({"columns": COLUMNS, "row_keys": [
+                [row[name] for name in ("event_id", "context_id", "horizon_sessions")] for row in rows],
+                "values": [[row[name] for name in COLUMNS] for row in rows]})
+        documents[0]["absolute_move_pct"] = train.absolute_move_pct.tolist()
+        result.append({"horizon_sessions": horizon, "training_event_ids": train_ids,
+            "evaluation_event_ids": fold["evaluation_event_ids"], "training_matrix_id": content_hash(documents[0]),
+            "prediction_matrix_id": content_hash(documents[1])})
+    return result
+
+
 def forecasts(indexed, train, fold, plan, execution, *, progress):
     """Preserve abstention and negative blends; never apply target masks to evaluation."""
     if execution["fit_recipe"] != recipe():
@@ -92,12 +107,25 @@ def forecasts(indexed, train, fold, plan, execution, *, progress):
     train_ids, test_ids = train.event_id.tolist(), fold["evaluation_event_ids"]
     labels = train.absolute_move_pct.to_numpy(dtype=float)
     fallback = mean(labels.tolist())
-    evidence = fit_evidence({"features": list(indexed.values()), "training": train.to_dict("records")}, fold, plan)
+    if execution.get("schema_version") == "size_candidate_execution.v1":
+        evidence = _candidate_fit_evidence(indexed, train, fold, plan)
+    else:
+        evidence = fit_evidence({"features": list(indexed.values()), "training": train.to_dict("records")}, fold, plan)
     for horizon, fit in zip(plan["horizons"], evidence):
         progress("started", fit)
-        training = [(event, _values(indexed[event, horizon])[0], label) for event, label in zip(train_ids, labels)]
-        training = [(event, values, label) for event, values, label in training if values is not None and 0 <= label <= 200]
+        training_rows = [(event, *_values(indexed[event, horizon]), label)
+                         for event, label in zip(train_ids, labels)]
+        training = [(event, values, label) for event, values, reason, label in training_rows
+                    if values is not None and 0 <= label <= 200]
+        training_abstention_counts = {}
+        for _, _, reason, label in training_rows:
+            if 0 <= label <= 200 and reason is not None:
+                training_abstention_counts[reason] = training_abstention_counts.get(reason, 0) + 1
         evaluated = [(event, *_values(indexed[event, horizon])) for event in test_ids]
+        abstention_counts = {}
+        for _, _, reason in evaluated:
+            if reason is not None:
+                abstention_counts[reason] = abstention_counts.get(reason, 0) + 1
         model = None
         if len(training) >= 500:
             with threadpool_limits(limits=1):
@@ -117,7 +145,9 @@ def forecasts(indexed, train, fold, plan, execution, *, progress):
                 "history_mean": row["mean_prior_abs_move"] if row["n_prior"] else fallback,
                 "quote_status": row["current_quote_status"]})
         details.append({"horizon_sessions": horizon, "training_event_ids": [e for e, _, _ in training],
-                        "logical_fits": int(model is not None), "component_fits": 2 * int(model is not None)})
+                        "logical_fits": int(model is not None), "component_fits": 2 * int(model is not None),
+                        "abstention_counts": dict(sorted(abstention_counts.items())),
+                        "training_abstention_counts": dict(sorted(training_abstention_counts.items()))})
         progress("completed", fit)
     return {"event": "succeeded", "forecasts": sorted(predictions, key=lambda r: (r["event_id"], r["horizon_sessions"])),
             "fit_details": details}

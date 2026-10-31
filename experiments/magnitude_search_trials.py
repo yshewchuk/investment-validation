@@ -60,6 +60,14 @@ def _candidate_failure(problem):
     return problem["code"] == "EXPERIMENT_VARIANT_FAILED"
 
 
+def _is_size_v1_4(candidate):
+    """Treat only a well-formed size_causal_comparator.v1 candidate recipe as the partial-forecast family."""
+    if not isinstance(candidate, dict):
+        return False
+    recipe = candidate.get("recipe")
+    return isinstance(recipe, dict) and recipe.get("schema_version") == "size_causal_comparator.v1"
+
+
 _NOT_ADMITTED = object()
 _FREEZE_CACHE_BYTES = 32 << 20
 
@@ -203,6 +211,7 @@ class SearchTrials:
         """Run one bounded native inner trial once, or verify its completed replay."""
         plan = self._admit()
         key, inner, candidate = self._trial(plan, outer_year, inner_year, candidate_id)
+        allow_incomplete = _is_size_v1_4(candidate)
         size_plan = plan.get("schema_version") in (PLAN_V2, PLAN_V3)
         if size_plan and limits != plan["request"]["limits"]["child"]:
             raise fail("INVALID_EXPERIMENT_SPEC", "v2 trial limits differ from sealed request")
@@ -247,9 +256,13 @@ class SearchTrials:
         # Bind the admitted id (a manifest hash for sharded cohorts), the id reconcile compares.
         self._append("execution-result:" + key, {"attempt": attempt,
                      "inputs_id": self._read("inputs:" + key)["inputs_id"], "result": result}, replay=False)
+        forecasts_id = None
+        if succeeded:
+            forecasts_id = content_hash(self._forecasts(result["forecasts"], inner, plan["horizons"],
+                                                       allow_incomplete))
         evidence = {"attempt": attempt, "fit_attempt_count": len(fits) + len(pending),
                     "completed_fit_count": len(fits), "fits": fits, "status": result["event"],
-                    "forecasts_id": content_hash(result["forecasts"]) if succeeded else None,
+                    "forecasts_id": forecasts_id,
                     **diagnostic_evidence(result, execution, plan["horizons"])}
         self._append("execution:" + key, evidence, replay=False)
         self._record(outer_year, inner_year, candidate_id, native=True, **({"forecasts": result["forecasts"]} if succeeded
@@ -306,11 +319,16 @@ class SearchTrials:
                 raise ValueError
             forecasts = None
             if succeeded:
+                size_v14 = _is_size_v1_4(candidate)
                 try:
-                    forecasts = self._forecasts(result["forecasts"], inner, plan["horizons"])
+                    forecasts = self._forecasts(result["forecasts"], inner, plan["horizons"],
+                                                size_v14)
                 except OpsError:
                     raise ValueError from None
-                if canonical_json(forecasts) != canonical_json(result["forecasts"]):
+                expected_forecasts = ([row for row in result["forecasts"]
+                                       if row.get("predicted_absolute_move_pct") is not None]
+                                      if size_v14 else result["forecasts"])
+                if canonical_json(forecasts) != canonical_json(expected_forecasts):
                     raise ValueError
             submitted = self._read("forecasts:" + key)
             if submitted is not None and canonical_json(submitted) != canonical_json(forecasts):
@@ -371,9 +389,10 @@ class SearchTrials:
         return {**receipt, "terminal": terminal, "evaluation_authority": "none"}
 
     @staticmethod
-    def _forecasts(forecasts, inner, horizons):
+    def _forecasts(forecasts, inner, horizons, allow_incomplete=False):
         try:
-            return json.loads(canonical_json(normalize_forecasts(forecasts, inner, horizons)))
+            normalized = normalize_forecasts(forecasts, inner, horizons, allow_incomplete=allow_incomplete)
+            return json.loads(canonical_json(normalized))
         except (ValueError, TypeError, OverflowError):
             raise fail("INVALID_EXPERIMENT_SPEC", "trial forecasts require complete finite event-horizon coverage") from None
 
@@ -384,7 +403,8 @@ class SearchTrials:
     def _record(self, outer_year, inner_year, candidate_id, *, forecasts=None, failure=None, native=False, reconcile=False):
         """Commit forecasts before labels; a journaled cohort validation is reused; native reconciliation can finish publication."""
         plan = self._admit()
-        key, inner, _ = self._trial(plan, outer_year, inner_year, candidate_id)
+        key, inner, candidate = self._trial(plan, outer_year, inner_year, candidate_id)
+        allow_incomplete = _is_size_v1_4(candidate)
         if self._read("start:" + key) is None:
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "trial must be started before recording")
         if (forecasts is None) == (failure is None):
@@ -398,7 +418,8 @@ class SearchTrials:
             if not isinstance(completed, dict) or completed.get("status") != ("failed" if failure is not None else "succeeded"):
                 raise fail("EXPERIMENT_IDENTITY_CONFLICT", "native completion differs from recording")
             if forecasts is not None:
-                submitted = self._forecasts(forecasts, inner, plan["horizons"])
+                submitted = self._forecasts(forecasts, inner, plan["horizons"],
+                                            allow_incomplete)
                 if content_hash(submitted) != completed.get("forecasts_id"):
                     raise fail("EXPERIMENT_IDENTITY_CONFLICT", "native completion differs from recording")
         if failure is not None:
@@ -411,7 +432,8 @@ class SearchTrials:
             # Native execute/reconcile verifies the receipt once at its return boundary.
             return terminal if native else self._terminal(plan, outer_year, inner_year, candidate_id)[1]
         if submitted is None:
-            submitted = self._forecasts(forecasts, inner, plan["horizons"])
+            submitted = self._forecasts(forecasts, inner, plan["horizons"],
+                allow_incomplete)
         terminal = self._read("terminal:" + key)
         if terminal is not None:
             if self._read("forecasts:" + key) != submitted:
@@ -491,9 +513,11 @@ class SearchTrials:
                 raise ValueError
             cohort = self._cohort(admitted)
             submitted = self._read("forecasts:" + key)
+            size_v14 = _is_size_v1_4(candidate)
             if submitted is not None:
                 try:
-                    submitted = self._forecasts(submitted, inner, plan["horizons"])
+                    submitted = ([] if size_v14 and submitted == []
+                                 else self._forecasts(submitted, inner, plan["horizons"], size_v14))
                 except OpsError:
                     raise ValueError from None
                 validation = self._read("validation:" + admitted["cohort"])

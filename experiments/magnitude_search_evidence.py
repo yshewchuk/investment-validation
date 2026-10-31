@@ -62,10 +62,51 @@ def fit_evidence(inputs, fold, plan, execution):
     return result
 
 
-def normalize_forecasts(rows, fold, horizons, *, strict_json=False):
-    """Require exact finite nonnegative coverage; preserve submitted Real/Integral admission."""
-    return normalize_regression_forecasts(rows, fold, horizons,
-        prediction_column="predicted_absolute_move_pct", target_domain="nonnegative", strict_json=strict_json)
+def normalize_forecasts(rows, fold, horizons, *, strict_json=False, allow_incomplete=False):
+    """Require exact coverage, or admit a nonempty in-fold subset discarding None abstentions."""
+    if not allow_incomplete:
+        return normalize_regression_forecasts(rows, fold, horizons,
+            prediction_column="predicted_absolute_move_pct", target_domain="nonnegative", strict_json=strict_json)
+    from numbers import Integral
+    if not isinstance(rows, list) or not rows:
+        raise ValueError
+    events = set(fold["evaluation_event_ids"])
+    admitted_horizons = set(horizons)
+    found = {}
+    seen = set()
+    for row in rows:
+        if (not isinstance(row, dict)
+                or set(row) != {"event_id", "horizon_sessions", "predicted_absolute_move_pct"}):
+            raise ValueError
+        event_id = row["event_id"]
+        horizon = row["horizon_sessions"]
+        value = row["predicted_absolute_move_pct"]
+        try:
+            in_fold = event_id in events
+        except TypeError:
+            raise ValueError from None
+        if (isinstance(horizon, bool) or not isinstance(horizon, Integral)
+                or not in_fold or horizon not in admitted_horizons
+                or (strict_json and type(horizon) is not int)):
+            raise ValueError
+        pair = (event_id, int(horizon))
+        if pair in seen:
+            raise ValueError
+        seen.add(pair)
+        if value is None:
+            continue
+        if (isinstance(value, bool) or not isinstance(value, Real) or value < 0
+                or (strict_json and type(value) not in (int, float))):
+            raise ValueError
+        try:
+            value = float(value)
+        except OverflowError:
+            raise ValueError from None
+        if not math.isfinite(value):
+            raise ValueError
+        found[pair] = {"event_id": event_id, "horizon_sessions": int(horizon),
+            "predicted_absolute_move_pct": value}
+    return [found[pair] for pair in sorted(found)]
 
 
 def validate_targets(preflight, fold, evaluation_inputs, targets, *, strict_json=False):

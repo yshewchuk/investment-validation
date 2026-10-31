@@ -28,7 +28,7 @@ from experiments.native_registration import (
     prepare_native_registration,
     verify_native_registration,
 )
-from experiments.size_comparator import recipe as comparison_recipe
+from experiments.size_comparator import COLUMNS, recipe as comparison_recipe
 from experiments.size_panel_request import validate_panel_request
 
 SCHEMA = "native_experiment_registration.v1.7"
@@ -102,8 +102,9 @@ def prepare(repository, spec, request, panel_request, *, scope, training_start, 
     _require(binding["execution_plan"]["runner"] == "experiments/size_search.py")
     binding["source_closure"] = sources
     _require(binding["magnitude_plan"]["evaluation_years"] == schedule["request"]["outer_years"])
+    panel_columns = COLUMNS if request["schema_version"] == "magnitude_search_request.v5" else recipe("HMO")["model_columns"]
     panel = read_panel(repository, from_document(SnapshotRef, binding["snapshot"]), panel_request,
-                        columns=recipe("HMO")["model_columns"])
+                        columns=panel_columns)
     context = panel["context"]
     _require(set(binding["event_ids"]) == {e["event_id"] for e in context["target_events"]})
     _require(request["eligibility_policy_ref"] == {"schema_ref": "group_eligibility_plan.v1",
@@ -244,8 +245,12 @@ def prepare_plan(conn, store, registration, request, *, plan_schema=None):
 def execution_for_candidate(binding, candidate):
     execution = {**binding["magnitude_execution"], "fit_recipe": candidate["recipe"]}
     if binding.get("schema_version") in ("native_experiment_registration.v1.6", SCHEMA):
-        execution.update(schema_version="size_candidate_execution.v1", features=candidate["recipe"]["features"],
-                         model=candidate["recipe"]["model"])
+        features = (COLUMNS if candidate["recipe"].get("schema_version") == "size_causal_comparator.v1"
+                    else candidate["recipe"]["features"])
+        model = ("size_v1_4" if candidate["recipe"].get("schema_version") == "size_causal_comparator.v1"
+                 else candidate["recipe"]["model"])
+        execution.update(schema_version="size_candidate_execution.v1", features=features,
+                         model=model)
     return execution
 
 
@@ -258,7 +263,8 @@ def fold_inputs(repository, binding, fold):
         for group in _folds(binding, binding["size_request"])))
     source = from_document(SnapshotRef, binding["snapshot"])
     started = time.monotonic()
-    panel = _stored_panel(repository, source, binding, recipe("HMO")["model_columns"])
+    panel_columns = COLUMNS if binding["size_request"]["schema_version"] == "magnitude_search_request.v5" else recipe("HMO")["model_columns"]
+    panel = _stored_panel(repository, source, binding, panel_columns)
     participants = set(fold["training_candidate_event_ids"] + fold["evaluation_event_ids"])
     events = {e["event_id"]: e for e in panel["context"]["target_events"]}
     _require(participants <= set(events) and all(events[e]["label_end"] < fold["training_labels_before"]

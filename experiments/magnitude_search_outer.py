@@ -85,9 +85,16 @@ def _inputs(repository, binding, fold):
     return admit_fold_inputs(repository, binding, fold, history_failure=_conflict(), strict_json=True)
 
 
-def _forecasts(rows, fold, horizons):
+def _allow_incomplete(execution):
+    if not isinstance(execution, dict):
+        return False
+    fit_recipe = execution.get("fit_recipe")
+    return isinstance(fit_recipe, dict) and fit_recipe.get("schema_version") == "size_causal_comparator.v1"
+
+
+def _forecasts(rows, fold, horizons, *, allow_incomplete=False):
     try:
-        return normalize_forecasts(rows, fold, horizons, strict_json=True)
+        return normalize_forecasts(rows, fold, horizons, strict_json=True, allow_incomplete=allow_incomplete)
     except (ValueError, TypeError, KeyError, OverflowError):
         raise _conflict() from None
 
@@ -134,12 +141,13 @@ def _replay(read, store, started, fold, plan, execution):
                 raise
             raise _conflict() from None
         fits = fit_evidence(inputs, fold, plan, execution)
-        forecasts = _forecasts(read("forecasts"), fold, plan["horizons"])
+        allow_incomplete = _allow_incomplete(execution)
+        forecasts = _forecasts(read("forecasts"), fold, plan["horizons"], allow_incomplete=allow_incomplete)
         receipt = {"status": "succeeded", "fits": fits, "fit_attempt_count": len(fits),
                    "completed_fit_count": len(fits), "forecasts_id": content_hash(forecasts)}
         if execution.get("schema_version") == "size_candidate_execution.v1":
             worker = read("worker-result")
-            _equal(worker["forecasts"], forecasts)
+            _equal(_forecasts(worker["forecasts"], fold, plan["horizons"], allow_incomplete=allow_incomplete), forecasts)
             receipt.update(diagnostic_evidence(worker, execution, plan["horizons"]))
         _equal(read("execution"), receipt)
         for fit in fits:
@@ -222,7 +230,7 @@ def _execute_admitted(conn, store, repository, registration, plan, fold, selecti
     if ((succeeded and (pending or len(fits) != len(expected) or set(result) != {"event", "forecasts"} | diagnostic_keys(binding)))
             or (not succeeded and (result != {"event": "failed"} or len(pending) != 1))):
         raise _conflict()
-    forecasts = _forecasts(result["forecasts"], fold, plan["horizons"]) if succeeded else None
+    forecasts = _forecasts(result["forecasts"], fold, plan["horizons"], allow_incomplete=_allow_incomplete(execution)) if succeeded else None
     receipt = {"status": result["event"], "fits": fits, "fit_attempt_count": len(fits) + len(pending),
                "completed_fit_count": len(fits), "forecasts_id": content_hash(forecasts) if succeeded else None,
                **diagnostic_evidence(result, execution, plan["horizons"])}
