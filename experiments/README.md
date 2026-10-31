@@ -103,10 +103,13 @@ Saved identity and later outcome/worker APIs' separate read policies do not chan
 `distribution_trials` and `distribution_fitted` also consume the shared immutable journal APIs. `v2_magnitude_search_run` consumes `magnitude_search_plan.read_search_plan`, `magnitude_search_records.MIGRATIONS`/`OWNER`/`append_record`/`read_record`, `magnitude_search_trials.SearchTrials`, `magnitude_search_execution.validate_execution_limits`, and `magnitude_search_outer.execute_outer_fold`/`collect_outer_results` for source-sealed serial orchestration.
 Its CLI also consumes `native_registration.read_native_registration`/`valid_registration_read_budget`/`MAX_NATIVE_EVIDENCE_BYTES` and `native_gate_worker.read_native_staged_input`; direct engine dependencies are contracts, data, foundation and ops. The [driver section](#serial-magnitude-search-driver) defines the public seal/run helpers and each CLI action's authority.
 
-`magnitude_search_request.compile_request` returns source-free stage-2 request
-specifications and year/count previews for the full-HMO v1 dictionary.
-`magnitude_search_request_versions.compile_request` dispatches versioned dictionaries via public validation/panel recipes; the qualified SIZE binding/CLI consume it while legacy previews retain their outputs/refusals.
-It preserves the closed H/HM/HMO 33-candidate grid; compilation alone grants no source or fit authority.
+`magnitude_search_request.compile_request` preserves the source-free v2 request
+validator and its closed H/HM/HMO 33-candidate grid.
+`magnitude_search_request_versions.compile_request` keeps v2 replay intact and
+dispatches v3 requests with bounded request-declared Ridge/ElasticNet axes; HGB
+remains unchanged in v3. The qualified SIZE binding/CLI consume it, while
+legacy previews retain their outputs/refusals. The specified v3 axes produce 57
+candidates; compilation alone grants no source or fit authority.
 `magnitude_candidate_recipe` and `magnitude_candidate_fit` are consumed by qualified plan construction and the bounded worker, as well as synthetic tests.
 They reuse public model recipe/fitter APIs; admitted stored inputs and the sealed execution route, not compiler specifications alone, authorize fitting.
 
