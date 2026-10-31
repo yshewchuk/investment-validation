@@ -1327,6 +1327,9 @@ def test_chooser_fold_reference_flows_through_real_scorer_checkpoint(tmp_path, m
     boundary_refs = validated_chooser_fold_references(source, boundary_request)
     assert boundary_refs["pred_im_t1_d14"]["fold_start"] == "2026-09-01"
     assert boundary_refs["pred_runup_abs_move_d14"]["fold_start"] == "2026-08-01"
+    with pytest.raises(StrictTraceCaptureError, match="mismatches served producer"):
+        validated_chooser_fold_references(
+            source, SimpleNamespace(requested_decision_at="2026-08-31"))
     with pytest.raises(StrictTraceCaptureError, match="chooser refs lack declarations"):
         validated_chooser_fold_references(
             {"frozen": {"chooser_references": {"orphan": {}}}}, _request())
