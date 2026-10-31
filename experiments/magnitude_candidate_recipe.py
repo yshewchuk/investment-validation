@@ -6,12 +6,15 @@ __all__ = ["candidate_recipe"]
 
 _KEYS = {"ridge": {"alpha"}, "elasticnet": {"alpha", "l1_ratio"},
          "hgb": {"max_leaf_nodes"}}
+_HGB_KEYS = ({"max_leaf_nodes"},
+             {"learning_rate", "max_leaf_nodes", "min_samples_leaf", "l2_regularization"})
 
 
 def candidate_recipe(family, parameters, *, columns, feature_dictionary_hash) -> dict:
     """Return a closed family recipe; columns and hashes prove no source admission."""
     if (type(family) is not str or family not in _KEYS or type(parameters) is not dict
-            or set(parameters) != _KEYS[family]):
+            or (set(parameters) not in _HGB_KEYS if family == "hgb"
+                else set(parameters) != _KEYS[family])):
         raise ValueError("candidate requires a supported family and exact parameter keys")
     if family == "elasticnet":
         return elasticnet_recipe(columns=columns, feature_dictionary_hash=feature_dictionary_hash,
