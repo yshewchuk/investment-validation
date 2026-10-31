@@ -191,14 +191,36 @@ def test_score_refuses_actual_residual_pool_from_another_scope_before_scoring(mo
     from tests.v2.research.test_distribution_oof import Fits
 
     control = residual_pool(Fits(), "outer", "2023", 1)
-    result = forecast()
+    result = forecast(scope=control["destination"])
     if empty:
         result["rows"] = []
     before = deepcopy((result, control))
-    monkeypatch.setattr(module, "arm_forecasts", lambda *args: pytest.fail("scope mismatch reached scoring"))
-    rows = score_forecasts(result, control, {"e": .125}, outer_year=outer_year, horizon=horizon)
+    monkeypatch.setattr(module, "arm_forecasts", lambda *args, **kwargs: pytest.fail("scope mismatch reached scoring"))
+    module._require_pool_binding(result["receipt"], control)  # Isolate the destination-scope guard.
+    rows = score_forecasts(result, control, None, outer_year=outer_year, horizon=horizon)
     with pytest.raises(OpsError) as caught:
         next(rows)
+    assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert caught.value.problem.retryable is False
+    assert (result, control) == before
+
+
+@pytest.mark.parametrize("role,inner_year", [("inner", None), ("outer", "2022"), ("inner", "2022")])
+@pytest.mark.parametrize("empty", [False, True])
+def test_score_refuses_matching_receipt_pool_outside_outer_role_before_targets(role, inner_year, empty):
+    from engine.v2.ops.errors import OpsError
+    from experiments import distribution_scores as module
+
+    control = pool()
+    control["destination"].update(role=role, inner_year=inner_year)
+    control["pool_id"] = content_hash({key: value for key, value in control.items() if key != "pool_id"})
+    result = forecast(scope=control["destination"])
+    if empty:
+        result["rows"] = []
+    before = deepcopy((result, control))
+    module._require_pool_binding(result["receipt"], control)  # The preceding guard must pass.
+    with pytest.raises(OpsError) as caught:
+        next(score_forecasts(result, control, None, outer_year="2026", horizon=1))
     assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
     assert caught.value.problem.retryable is False
     assert (result, control) == before

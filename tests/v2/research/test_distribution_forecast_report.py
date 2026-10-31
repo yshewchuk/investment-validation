@@ -61,6 +61,42 @@ def test_forecast_calendar_and_ticker_intervals_match_paired_cluster_oracle():
         assert result["conditional_intervals"][field]["interval"] == pytest.approx(np.quantile(samples, [.025, .975]))
 
 
+def test_forecast_interval_bootstrap_overflow_refuses_without_mutation():
+    rows, opportunities = score_rows((1,)), metadata()
+    for row in rows:
+        if row["arm"] in ("histogram", "same_mean"):
+            extreme = "2" if row["arm"] == "histogram" else "0"
+            row["crps"] = 1e308 if row["event_id"] == extreme else 0
+    before = deepcopy((rows, opportunities))
+    with pytest.raises(OpsError) as caught:
+        forecast_summary(rows, opportunities)
+    assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert caught.value.problem.retryable is False
+    assert (rows, opportunities) == before
+
+
+@pytest.mark.parametrize("field", ["calendar", "ticker"])
+@pytest.mark.parametrize("error", [FloatingPointError, OverflowError, ValueError])
+def test_forecast_interval_failure_uses_typed_refusal(monkeypatch, field, error):
+    from experiments import distribution_report as module
+
+    original, calls = module._interval, []
+    def failing_interval(rows, key, **kwargs):
+        calls.append(key)
+        if key == field:
+            raise error("invalid interval arithmetic")
+        return original(rows, key, **kwargs)
+    monkeypatch.setattr(module, "_interval", failing_interval)
+    rows, opportunities = score_rows((1,)), metadata()
+    before = deepcopy((rows, opportunities))
+    with pytest.raises(OpsError) as caught:
+        forecast_summary(rows, opportunities)
+    assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert caught.value.problem.retryable is False
+    assert calls == (["calendar"] if field == "calendar" else ["calendar", "ticker"])
+    assert (rows, opportunities) == before
+
+
 def test_forecast_common_usable_mask_preserves_all_exclusion_counts():
     rows = score_rows((1,))
     for row in rows:

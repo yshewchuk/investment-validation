@@ -374,9 +374,9 @@ The adapter has no fitting, target-join, CLI, provider, report, ledger or final-
 caller, and no retry, write or partial result; its only cache is the
 observed-session read (see its failure row); Repository failures propagate.
 
-`magnitude_folds.plan_magnitude_folds(repository, snapshot, *, as_of_month,
-evaluation_years, training_start, event_ids=None)` plans metadata-only expanding
-annual evaluation folds from one admitted snapshot and its pinned calendar.
+`magnitude_folds.plan_magnitude_folds(repository, snapshot, *, as_of_month, evaluation_years, training_start, event_ids=None)` plans metadata-only expanding annual evaluation folds from one admitted snapshot and its pinned calendar.
+`plan_regression_folds` shares that population/calendar implementation but binds a validated explicit target descriptor into `regression_temporal_plan.v1`; legacy magnitude plans remain byte-identical. IV metadata planning uses its annual candidate folds and 5/3/1 clocks, not label qualification, native registration or nested search.
+No outcomes, writes, caches, retries or target-snapshot identity are introduced; native admission failures propagate. Complexity and metadata scans are unchanged from magnitude planning.
 `magnitude_folds.magnitude_window(evaluation_years, training_start)` exposes the
 same pure request validation to native preregistration and returns a detached
 canonical window; invalid requests refuse `CONTRACT_MISMATCH` without reads.
@@ -687,7 +687,7 @@ chain index, the entry-selection seams above and exit walking for read-only comp
 `experiment_population.load_population` and `magnitude_folds`' window/planner.
 `experiments/magnitude_search_plan.py` consumes `magnitude_folds.annual_fold`.
 `experiments/magnitude_search_request.py` consumes `magnitude_panel_table.recipe` and `eligibility_policy.eligibility_policy` for declarations only.
-`experiments/magnitude_search_request_versions.py` consumes both v1/v2 panel `recipe` APIs for source-free dictionary dispatch, not admission.
+`experiments/magnitude_search_request_versions.py` consumes the v1/v2/v3 panel `recipe` APIs for source-free dictionary adaptation and request-version dispatch, not data admission.
 `experiments/magnitude_search_evidence.py` consumes `read_stored_for_events`, `preflight_magnitude_targets`,
 `qualify_magnitude_training_targets` and `magnitude_recipe` for shared inner/outer admission.
 `experiments/magnitude_search_trials.py` directly consumes `load_magnitude_targets`,
@@ -737,7 +737,7 @@ It does not authenticate arbitrary rehashed calendars as builder-derived.
 Missing/changed receipt/pin refuses `IDENTITY_CONFLICT`, bad contract `CONTRACT_MISMATCH`, unprovable isolation `HOLDOUT_ACCESS_DENIED`.
 Its unlayered caller owns context derivation/registration; `experiments/magnitude_history_report.py` uses stored reads and target qualification. Both v1 consumers remain unchanged.
 
-**Eligible history:** sole public build/read boundary `experiments.eligible_history` rejects producer overrides and fingerprints installed code/environment; backend `_materialize`/`_read`/`_iter_read` are trusted internal helpers, not admitted APIs or Python security. SIZE's library-only wrapper consumes the public `iter_read` stream for bounded panel composition and validates it on stored reads and receipt replay. No production/nightly entrypoint invokes that wrapper; production wiring and data runs require separate authorization.
+**Eligible history:** sole public build/read boundary `experiments.eligible_history` rejects producer overrides and fingerprints installed code/environment; backend `_materialize`/`_read`/`_iter_read` are trusted internal helpers, not admitted APIs or Python security. The backend `plan_targets` is a read-only planner (no materialization, no read capability) that SIZE target derivation calls to learn the retained set before `materialize`. SIZE's library-only wrapper consumes the public `iter_read` stream for bounded panel composition and validates it on stored reads and receipt replay. No production/nightly entrypoint invokes that wrapper; production wiring and data runs require separate authorization.
 The separate `research_eligible_history.v1` table binds exact source/bounds, policy/month/membership versions, history start, fixed 1/3/5 clocks, contributors and producer identity. Exact receipts replay; live/v1 aggregates never substitute.
 Full canonical metadata establishes protected windows. Once selected target/history population is known, missing required ticker/event bounds refuse `CONTRACT_MISMATCH` before outcomes; unrelated tickers need no bounds. Native bounds precede grouped eligibility/object preflight; null historical bounds are omissions, wrong object binding/isolation remains `HOLDOUT_ACCESS_DENIED`.
 All selection targets, including annual evaluation, require retained eligibility; protected confirmation is not this API. Read only eligible prior outcomes available by each ceiling; preserve native means/EMA/nulls.

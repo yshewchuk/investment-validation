@@ -30,7 +30,7 @@ from engine.v2.ops.migrations import require_current
 from engine.v2.research.progress import Progress, decision
 from experiments.magnitude_search_execution import validate_execution_limits
 from experiments.magnitude_search_outer import collect_outer_results, execute_outer_fold
-from experiments.magnitude_search_plan import read_search_plan
+from experiments.magnitude_search_plan import read_search_plan, trial_key
 from experiments.magnitude_search_records import MIGRATIONS, OWNER, append_record, read_record
 from experiments.magnitude_search_trials import SearchTrials
 from experiments.native_gate_worker import read_native_staged_input
@@ -53,8 +53,16 @@ def _binding(conn, store, registration, request, plan_ref):
 
 
 def _roster(plan):
-    return [(fold["outer"]["year"], inner["year"], candidate["candidate_id"])
-            for fold in plan["folds"] for candidate in plan["candidates"] for inner in fold["inner"]]
+    roster, seen = [], set()
+    for fold in plan["folds"]:
+        for candidate in plan["candidates"]:
+            for inner in fold["inner"]:
+                args = (fold["outer"]["year"], inner["year"], candidate["candidate_id"])
+                key = trial_key(plan, *args)
+                if key not in seen:
+                    seen.add(key)
+                    roster.append(args)
+    return roster
 
 
 def seal_search_run(conn, store, repository, registration, request, plan_ref, *, clock):
@@ -62,7 +70,7 @@ def seal_search_run(conn, store, repository, registration, request, plan_ref, *,
     plan, binding = _binding(conn, store, registration, request, plan_ref)
     SearchTrials(conn, store, repository, registration, request, plan_ref).seal(clock=clock)
     previous = read_record(conn, store, registration.run_id, "driver-seal")
-    absent = tuple(["start:" + content_hash([plan["plan_id"], *args]) for args in _roster(plan)]
+    absent = tuple(["start:" + trial_key(plan, *args) for args in _roster(plan)]
         + ["outer-start:" + content_hash([plan["plan_id"], fold["outer"]["year"]]) for fold in plan["folds"]]
         + ["selection"])
     if previous is None and any(read_record(conn, store, registration.run_id, slot) is not None for slot in absent):
@@ -88,7 +96,7 @@ def run_search(conn, store, repository, registration, request, plan_ref, *, limi
         return read_record(conn, store, registration.run_id, slot)
     claimed, fresh = [], []
     for args in _roster(plan):
-        key = content_hash([plan["plan_id"], *args])
+        key = trial_key(plan, *args)
         started, result = read("start:" + key), read("execution-result:" + key)
         if ((started is not None and result is None) or (started is None and any(
                 item is not None for item in (result, read("execution:" + key), read("terminal:" + key))))):
@@ -195,7 +203,7 @@ def main(argv=None):
                 spec = experiment_spec_from_document(_read_document(args.spec))
                 request = _read_document(args.request)
                 reference = from_document(ArtifactRef, _read_document(args.plan_ref))
-                if request.get("schema_version") == "magnitude_search_request.v2":
+                if request.get("schema_version") in ("magnitude_search_request.v2", "magnitude_search_request.v3"):
                     raise fail("INVALID_EXPERIMENT_SPEC", "qualified SIZE requires experiments.size_search CLI containment")
             except (DocumentError, TypeError):
                 raise fail("INVALID_EXPERIMENT_SPEC", "search metadata could not be admitted") from None

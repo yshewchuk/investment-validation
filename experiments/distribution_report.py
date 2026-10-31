@@ -205,11 +205,15 @@ def forecast_report(scores, opportunities, *, seed, resamples, block_days, block
             "observed_count": sum(row["tails"][index]["observed_ge"] for row in histograms),
             "mean_probability_ge": average([row["tails"][index]["probability_ge"] for row in histograms])}
             for index, threshold in enumerate((5, 10, 20))]
+        try:
+            intervals = {field: _interval(pairs, field, seed=seed, resamples=resamples, confidence=confidence)
+                for field in ("calendar", "ticker")}
+        except (FloatingPointError, OverflowError, ValueError):
+            _require(False)
         results[str(horizon)] = {"role": "primary" if horizon == 1 else "descriptive", "status": "available" if pairs else "unavailable",
             "opportunities": len(metadata), "scoreable_events": len(pairs), "excluded_events": len(metadata) - len(pairs),
             "mean_crps_improvement": average([row["delta"] for row in pairs]), "coverage": {arm: dict(count) for arm, count in counts.items()},
-            "histogram": absolute, "conditional_intervals": {field: _interval(pairs, field, seed=seed, resamples=resamples,
-                confidence=confidence) for field in ("calendar", "ticker")}}
+            "histogram": absolute, "conditional_intervals": intervals}
     return {"schema_version": "distribution_forecast_report.v1", "primary": "h1_same_mean_minus_histogram_crps",
         "horizons": results, "uncertainty": {**uncertainty, "interpretation": "conditional_on_frozen_fits_no_refitting"},
         "calibration_identity": "uncalibrated", "final_read_authority": "none"}

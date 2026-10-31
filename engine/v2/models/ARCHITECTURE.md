@@ -1,5 +1,6 @@
 # `engine/v2/models` — architecture
 
+`regression_target.target_descriptor` / `validate_target` are source-free closed metadata: explicit label/prediction columns, signed/nonnegative domain and definition hash bind a target ID. Temporal planning and generic ops wire validation consume them; malformed/stale identities raise `ValueError` before source access, without proving target availability or granting reads.
 See the root [`ARCHITECTURE.md`](../../../ARCHITECTURE.md) for the layer
 table and enforced import direction. This doc follows
 `docs/COMPONENT_ARCHITECTURE_TEMPLATE.md`'s section order.
@@ -55,7 +56,7 @@ Invalid shapes/nonfinite labels or predictions raise `ValueError`; the experimen
 caller translates fitting failures to `EXPERIMENT_VARIANT_FAILED`. The shared
 no-fit guard runs before work. Existing legacy-parity recipes are unchanged.
 
-`magnitude_elasticnet_recipe.elasticnet_recipe` binds ordered columns, dictionary hash, preprocessing and fixed sklearn parameters in closed JSON metadata.
+`magnitude_elasticnet_recipe.elasticnet_recipe` binds ordered columns, dictionary hash, preprocessing and closed sklearn parameters in JSON metadata. Request-v3 SIZE candidates admit finite positive alpha in `[1e-6, 1000]` and l1-ratio in `[1e-6, 1]`; the v2 compiler retains its original six alpha/l1 combinations.
 `magnitude_elasticnet_recipe.regression_elasticnet_recipe` adds the distinct
 `regression_elasticnet_recipe.v1` identity with explicit signed/nonnegative domain
 and corresponding none/clip_zero projection; its validator rejects policy drift.
@@ -77,7 +78,7 @@ No I/O, publication, release or production wiring; source closures need resealin
 | Same valid inputs and numerical environment | Deterministic fresh fit, not cached or journal replay |
 | Cache, transaction or partial-write concerns | No cache, I/O, persistence or publication; v1 recipes and results are unchanged |
 
-`magnitude_ridge_hgb_recipe` constructs/validates closed variable-width policies binding ordered columns, dictionary hash and fixed estimator parameters, not source admission or dictionary membership.
+`magnitude_ridge_hgb_recipe` constructs/validates closed variable-width policies binding ordered columns, dictionary hash and estimator parameters, not source admission or dictionary membership. Request-v3 SIZE Ridge candidates admit finite positive alpha in `[1e-6, 1000]`; the v2 compiler retains its existing grid.
 `regression_ridge_hgb_recipe.regression_recipe` adds a distinct
 `regression_ridge_hgb_recipe.v1` identity with explicit `signed`/`nonnegative`
 target domain and respectively `none`/`clip_zero` projection. Its validator
@@ -420,8 +421,8 @@ The pointer is re-read before each phase submit; if its class or id changed sinc
 **Assembly invariants** (after `classify_prior`: `DAMAGED` refuses `PRIOR_MISMATCH`, `USABLE` refuses `PRIOR_USABLE`, both before any write):
 
 - Binding equality (`NO_POOL_CATALOG` only): the candidate's bindings equal the incumbent's staged bindings (binding id, model id, role, strategy, clock, adapter, feature order, output names, member content hashes) and the inventory `deployment_id` equals the incumbent's; any difference refuses `BINDINGS_DIFFER` (a model change takes the §2.3 acceptance path). `NONE` has no incumbent to compare with.
-- Legacy-trained Tier-4 serving folds enter as `tier4_folds:*` members, read only, never retrained or relabeled native. Every catalog state must be `STAGED`; a `MISSING` or `PENDING` one refuses `EMPTY_MEMBER` with the member ids. Paired, board and chooser objects carry `cutoff` as the last name segment; a trailing month may not start after the month following it; calibration folds keep their own key cutoff.
-- The catalog is written under the candidate id only (`candidate_only`): no root `phase5_release.json` is written or preserved and the incumbent's directory is untouched. `sources` = `pool_cutoff` = `cutoff`, `carried_from` null (no prior catalog carried, not that the data is native), plus the pinned panel identity.
+- Legacy-trained Tier-4 serving folds enter as `tier4_folds:*` members, read only, never retrained or relabeled native. Bootstrap inputs require `STAGED` states; a `MISSING` or `PENDING` bootstrap input refuses `EMPTY_MEMBER` with the member ids. The active scoring resolver treats the two chooser producer rows as optional: absent, `MISSING` or `PENDING` rows yield no chooser references, and strict capture refuses if a chooser trace needs one. Paired, board and chooser objects carry `cutoff` as the last name segment; a trailing month may not start after the month following it; calibration folds keep their own key cutoff.
+- The catalog is written under the candidate id only (`candidate_only`): no root `phase5_release.json` is written or preserved and the incumbent's directory is untouched. `sources.pool_cutoff` = `cutoff`; when chooser folds are staged, `sources.retrain_cutoff` records their verified training boundary and the pool cutoff may not precede it. `carried_from` is null (no prior catalog carried, not that the data is native), plus the pinned panel identity.
 - The candidate must read back `USABLE` (`classify_prior`) and pass `light_checks` before `mark_staging_succeeded`. `DEPLOYED` is never touched.
 
 | Condition | Outcome (`VALIDATION_FAILED`, fixed message) |
@@ -746,6 +747,8 @@ per the root doc's layer table; `checks/import_layers.py` enforces this.
   `release_bindings.py`'s reads of `deployment.current_pointer`,
   `deployment._read_manifest`, `deployment.manifest_hash_matches`,
   `deployment.production_release_root`, and `deployment.MissingReleaseRoot`.
+  `release_bindings.py` also calls `serving_fold_loader.load_chooser_serving_fold`
+  to verify each staged chooser fold against its authoring release.
 - `engine.v2.models.training` — the same artifact types and no-fit guards, plus
   closed ElasticNet and Ridge/HGB recipe validation; never imported *by* this package (one-way).
 - `engine.v2.ops` — `engine/v2/ops/cli.py` (the no-fit guard for `ops
