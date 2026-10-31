@@ -178,7 +178,7 @@ def _plan(repository, snapshot, *, as_of_month, policy, event_ids, horizons, his
     targets = load_population(repository, snapshot, as_of_month=as_of_month, event_ids=event_ids,
                               **cap_kwargs)
     population = load_population(repository, snapshot, as_of_month=as_of_month, **cap_kwargs)
-    calendar, calendar_source = calendar_input(repository, snapshot)
+    calendar, calendar_source = calendar_input(repository, snapshot, **cap_kwargs)
     clocks = {}
     early, dated_early = set(), set()
     if not strict:

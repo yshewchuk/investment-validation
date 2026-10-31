@@ -12,6 +12,7 @@ from engine.v2.contracts.data import DatasetVersionRef, SnapshotRef, TableContra
 from engine.v2.data import errors
 from engine.v2.data.repository import Repository
 from engine.v2.foundation.experiment_holdouts import ExperimentHoldouts
+from engine.v2.research import magnitude_features
 from engine.v2.research._scan import read_table
 from engine.v2.research.experiment_population import load_population
 from tests.v2.research.test_eligible_history import source
@@ -72,7 +73,9 @@ class _RecordingRepository:
         return _CONTRACT
 
     def fragment_records(self, snapshot, table_name):
-        return [SimpleNamespace(partition_key="2020")]
+        return [SimpleNamespace(partition_key="2020", fragment_id="frag-2020",
+                                object_ref=SimpleNamespace(object_id="obj-2020",
+                                                           content_hash="sha256:" + "3" * 64))]
 
     def scan_population_bound(self, snapshot_id, **kwargs):
         return len(self.frame)
@@ -192,3 +195,44 @@ def test_valid_cap_forwards_unchanged_to_every_partition_scan():
     load_population(repository, snapshot, as_of_month="2024-01",
                     max_object_bytes=2 * 10**9 + 7)
     assert repository.caps == [2 * 10**9 + 7]
+
+
+def _calendar_snapshot():
+    version = DatasetVersionRef(dataset_version_id="dv-cal", table_contract_ref=_CONTRACT_REF,
+                                manifest_hash="sha256:" + "4" * 64)
+    return SnapshotRef(snapshot_id="snap_cal_test", manifest_hash="sha256:" + "5" * 64,
+                       table_versions={"daily_market": version},
+                       calendar_version="calendar_v1", source_priority_version="priority_v1",
+                       finality_receipt_refs=(),
+                       knowledge_mode_by_table={"daily_market": "reconstructed"})
+
+
+def _calendar_repository():
+    snapshot = _calendar_snapshot()
+    frame = pd.DataFrame({"date": [pd.Timestamp("2020-01-02"), pd.Timestamp("2020-01-03")]})
+    return snapshot, _RecordingRepository(snapshot, frame)
+
+
+def test_calendar_input_forwards_max_object_bytes_to_daily_market_scan():
+    snapshot, repository = _calendar_repository()
+    calendar, _ = magnitude_features.calendar_input(repository, snapshot, max_object_bytes=4096)
+    assert repository.caps == [4096]
+    assert calendar.days == ("2020-01-02", "2020-01-03")
+
+
+def test_calendar_input_without_cap_keeps_scan_kwarg_none():
+    snapshot, repository = _calendar_repository()
+    magnitude_features.calendar_input(repository, snapshot)
+    assert repository.caps == [None]
+
+
+def test_fixture_calendar_input_decoded_cap_refuses_and_default_reads(tmp_path):
+    data = source(tmp_path)
+    try:
+        with pytest.raises(errors.DataError) as raised:
+            magnitude_features.calendar_input(data.repository, data.snapshot, max_object_bytes=1)
+        assert raised.value.code == "RESULT_LIMIT_EXCEEDED"
+        calendar, _ = magnitude_features.calendar_input(data.repository, data.snapshot)
+        assert calendar.days
+    finally:
+        data.conn.close()

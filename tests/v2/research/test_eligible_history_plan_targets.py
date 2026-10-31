@@ -39,7 +39,7 @@ def test_strict_groups_refuses_unavailable_target(monkeypatch):
 def _stub_plan(monkeypatch, population_rows, ceilings, *, retained, exclusions, unavailable=()):
     """Drive the real _plan with only its collaborators stubbed; never materialize."""
     population = pd.DataFrame(population_rows)
-    calls = {"groups": [], "eligibility": [], "load": []}
+    calls = {"groups": [], "eligibility": [], "load": [], "calendar": []}
 
     def load(repository, snapshot, **kwargs):
         calls["load"].append(kwargs)
@@ -57,13 +57,17 @@ def _stub_plan(monkeypatch, population_rows, ceilings, *, retained, exclusions, 
         calls["groups"].append({"event_ids": list(event_ids), "selected": selected, "strict": strict})
         return [], list(unavailable), {}
 
+    def calendar(repository, snapshot, **kwargs):
+        calls["calendar"].append(kwargs)
+        return None, "calendar-source"
+
     def plan_eligibility(repository, snapshot, **kwargs):
         calls["eligibility"].append(kwargs)
         return {"plan_id": "plan_1", "retained_event_ids": list(retained), "exclusions": list(exclusions)}
 
     monkeypatch.setattr(backend, "_request", lambda *args, **kwargs: None)
     monkeypatch.setattr(backend, "load_population", load)
-    monkeypatch.setattr(backend, "calendar_input", lambda repository, snapshot: (None, "calendar-source"))
+    monkeypatch.setattr(backend, "calendar_input", calendar)
     monkeypatch.setattr(backend, "_forecasts", forecasts)
     monkeypatch.setattr(backend, "_groups", groups)
     monkeypatch.setattr(backend, "_materialize",
@@ -218,6 +222,7 @@ def test_nonstrict_plan_forwards_decoded_cap_to_reads_and_eligibility(monkeypatc
                        {"ev-a": "2024-01-12"}, retained=["ev-a"], exclusions=[])
     _plan_targets(["ev-a"], limits={"max_object_bytes": 4096})
     assert [kwargs["max_object_bytes"] for kwargs in calls["load"]] == [4096, 4096]
+    assert [kwargs["max_object_bytes"] for kwargs in calls["calendar"]] == [4096]
     assert calls["eligibility"][0]["max_object_bytes"] == 4096
 
 
@@ -230,6 +235,7 @@ def test_strict_plan_keeps_eligibility_cap_unset(monkeypatch):
                   event_ids=["ev-a"], horizons=[1, 3, 5], history_start="2024-01-01",
                   limits={"max_object_bytes": 4096}, strict=True)
     assert [kwargs.get("max_object_bytes", "absent") for kwargs in calls["load"]] == ["absent", "absent"]
+    assert [kwargs.get("max_object_bytes", "absent") for kwargs in calls["calendar"]] == ["absent"]
     assert calls["eligibility"][0]["max_object_bytes"] is None
 
 

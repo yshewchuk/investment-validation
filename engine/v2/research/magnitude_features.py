@@ -22,8 +22,11 @@ HISTORY_FEATURE_COLUMNS = ("n_prior", "mean_prior_move", "mean_prior_abs_move",
 _OBSERVED_DAYS = weakref.WeakKeyDictionary()
 
 
-def _observed_days(repository, snapshot):
-    """Sorted canonical daily_market dates; read once per pinned repository and snapshot."""
+def _observed_days(repository, snapshot, *, max_object_bytes=None):
+    """Sorted canonical daily_market dates; read once per pinned repository and snapshot.
+
+    ``max_object_bytes``, when given, bounds the daily_market read's decoded
+    row-group bytes; ``None`` keeps the decoder default unchanged."""
     cache = None
     if getattr(repository, "pins_snapshots", False) is True:
         try:
@@ -33,7 +36,8 @@ def _observed_days(repository, snapshot):
     if cache is not None and snapshot.snapshot_id in cache:
         return cache[snapshot.snapshot_id]
     frame = read_table(repository, snapshot, "daily_market", ("date",),
-                       batch_filter=lambda batch: batch.drop_duplicates())
+                       batch_filter=lambda batch: batch.drop_duplicates(),
+                       max_object_bytes=max_object_bytes)
     if frame.empty:
         raise errors.fail("CALENDAR_UNAVAILABLE", "magnitude history requires observed sessions")
     try:
@@ -45,9 +49,9 @@ def _observed_days(repository, snapshot):
     return days
 
 
-def _calendar_input(repository, snapshot):
+def _calendar_input(repository, snapshot, *, max_object_bytes=None):
     """The native observed date union, without normalization or projected days."""
-    days = _observed_days(repository, snapshot)
+    days = _observed_days(repository, snapshot, max_object_bytes=max_object_bytes)
     records = repository.fragment_records(snapshot, "daily_market")
     source = {"snapshot_id": snapshot.snapshot_id, "calendar_version": snapshot.calendar_version,
         "table": "daily_market", "columns": ["date"],
@@ -87,9 +91,12 @@ def load_magnitude_history(repository, snapshot, *, event_id, as_of_month,
     return {**identity, "inputs_id": content_hash(identity)}
 
 
-def calendar_input(repository, snapshot):
-    """Return observed session metadata only for an exact committed snapshot."""
+def calendar_input(repository, snapshot, *, max_object_bytes=None):
+    """Return observed session metadata only for an exact committed snapshot.
+
+    ``max_object_bytes``, when given, bounds the observed daily_market read's
+    decoded row-group bytes; ``None`` keeps the decoder default unchanged."""
     snapshot_reference(snapshot)
     if repository.resolve(snapshot.snapshot_id) != snapshot:
         raise errors.fail("SNAPSHOT_UNRESOLVED", "calendar snapshot differs from committed identity")
-    return _calendar_input(repository, snapshot)
+    return _calendar_input(repository, snapshot, max_object_bytes=max_object_bytes)
