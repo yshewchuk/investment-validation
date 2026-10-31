@@ -687,7 +687,7 @@ chain index, the entry-selection seams above and exit walking for read-only comp
 `experiment_population.load_population` and `magnitude_folds`' window/planner.
 `experiments/magnitude_search_plan.py` consumes `magnitude_folds.annual_fold`.
 `experiments/magnitude_search_request.py` consumes `magnitude_panel_table.recipe` and `eligibility_policy.eligibility_policy` for declarations only.
-`experiments/magnitude_search_request_versions.py` consumes the v1/v2 panel `recipe` APIs for source-free dictionary adaptation and request-version dispatch, not data admission.
+`experiments/magnitude_search_request_versions.py` consumes the v1/v2/v3 panel `recipe` APIs for source-free dictionary adaptation and request-version dispatch, not data admission.
 `experiments/magnitude_search_evidence.py` consumes `read_stored_for_events`, `preflight_magnitude_targets`,
 `qualify_magnitude_training_targets` and `magnitude_recipe` for shared inner/outer admission.
 `experiments/magnitude_search_trials.py` directly consumes `load_magnitude_targets`,
