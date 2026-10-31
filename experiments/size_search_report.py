@@ -4,6 +4,7 @@ import time
 
 from engine.v2.foundation import content_hash
 from experiments.magnitude_search_outer import collect_outer_results
+from experiments.magnitude_search_plan import trial_key
 from experiments.magnitude_search_records import read_record
 from experiments.size_paired_report import paired_report
 from experiments.v2_magnitude_search_run import _admit_driver
@@ -22,7 +23,7 @@ def collect(conn, store, repository, registration, request, plan_ref):
         year = group["outer"]["year"]
         for fold in group["inner"]:
             for candidate in plan["candidates"]:
-                key = content_hash([plan["plan_id"], year, fold["year"], candidate["candidate_id"]])
+                key = trial_key(plan, year, fold["year"], candidate["candidate_id"])
                 receipt = read_record(conn, store, registration.run_id, "execution:" + key)
                 inner_fits.append({"outer_year": year, "inner_year": fold["year"],
                     "candidate_id": candidate["candidate_id"], "execution_slot": "execution:" + key,

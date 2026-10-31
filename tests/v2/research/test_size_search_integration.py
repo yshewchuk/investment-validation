@@ -70,7 +70,7 @@ def test_native_v17_anchor_and_explicit_v2_fitted_identities(case):
     verify_native_registration(case.conn, case.store, case.registration)
     assert case.registration.document["schema_version"] == "native_experiment_registration.v1.7"
     plan = case.plan
-    assert plan["schema_version"] == "magnitude_search_plan.v2"
+    assert plan["schema_version"] == "magnitude_search_plan.v3"
     assert plan["candidate_count"] == 33 and plan["planned_fit_count"] == 102
     assert plan["counts"]["total_component_fits"] == 108
     assert plan["horizons"] == [5, 3, 1]
@@ -250,7 +250,7 @@ def test_complete_synthetic_serial_search_child_diagnostics(case, monkeypatch):
     from experiments.magnitude_search_records import read_record
     diagnostics = []
     for candidate in case.plan["candidates"]:
-        key = content_hash([case.plan["plan_id"], "2024", "2023", candidate["candidate_id"]])
+        key = planner.trial_key(case.plan, "2024", "2023", candidate["candidate_id"])
         receipt = read_record(case.conn, case.store, case.registration.run_id, "execution:" + key)
         assert receipt["fit_attempt_count"] == 3
         if candidate["recipe"]["model"] == "elasticnet":
@@ -420,12 +420,14 @@ def test_report_native_absent_record_refuses_before_presentation(completed_case,
     from experiments import size_search_report as presentation
     case = completed_case
     group, candidate = case.plan["folds"][0], case.plan["candidates"][0]
-    identity = [case.plan["plan_id"], group["outer"]["year"]]
     if kind in ("execution", "terminal"):
-        identity += [group["inner"][0]["year"], candidate["candidate_id"]]
+        key = planner.trial_key(case.plan, group["outer"]["year"], group["inner"][0]["year"],
+                                candidate["candidate_id"])
     elif kind == "comparison-terminal":
-        identity += ["comparison"]
-    target = kind + ":" + content_hash(identity)
+        key = content_hash([case.plan["plan_id"], group["outer"]["year"], "comparison"])
+    else:
+        key = content_hash([case.plan["plan_id"], group["outer"]["year"]])
+    target = kind + ":" + key
     native_read, seen = records.read_record, []
     assert native_read(case.conn, case.store, case.registration.run_id, target) is not None
     assert native_read(case.conn, case.store, case.registration.run_id, "never-published") is None

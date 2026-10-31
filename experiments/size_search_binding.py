@@ -213,14 +213,30 @@ def _folds(binding, request):
     return folds
 
 
-def prepare_plan(conn, store, registration, request):
+def _shared_inner(folds):
+    """Repeated v3 inner years must describe one immutable trial after eligibility."""
+    seen = {}
+    for owner in folds:
+        for inner in owner["inner"]:
+            prior = seen.setdefault(inner["year"], inner)
+            if (prior["training_candidate_event_ids"] != inner["training_candidate_event_ids"]
+                    or prior["evaluation_event_ids"] != inner["evaluation_event_ids"]):
+                raise fail("EXPERIMENT_IDENTITY_CONFLICT",
+                    "repeated inner-year folds differ after eligibility filtering")
+
+
+def prepare_plan(conn, store, registration, request, *, plan_schema=None):
     """Expand the fixed dictionary grid into fully bound executable recipes."""
+    from experiments.magnitude_search_plan import PLAN_V3
+    plan_schema = plan_schema or PLAN_V3
     verify_native_registration(conn, store, registration, max_evidence_bytes=MAX_NATIVE_EVIDENCE_BYTES)
     binding = registration.document
     verify_installation(binding)
     schedule = compile_request(request)
     _require(schedule["request"] == binding["size_request"])
     folds = _folds(binding, request)
+    if plan_schema == PLAN_V3:
+        _shared_inner(folds)
     candidates = []
     source_binding_id = (content_hash(json.loads(registration.binding_json)["size_panel"])
                          if binding["schema_version"] == "native_experiment_registration.v1.7"
@@ -231,7 +247,7 @@ def prepare_plan(conn, store, registration, request):
         identity = {"recipe": recipe, "feature_recipe": spec["feature_recipe"],
                     "source_binding_id": source_binding_id, "candidate_spec_id": spec["candidate_spec_id"]}
         candidates.append({**identity, "candidate_id": content_hash(identity)})
-    identity = {"schema_version": "magnitude_search_plan.v2", "request": schedule["request"],
+    identity = {"schema_version": plan_schema, "request": schedule["request"],
         "anchor": {"run_id": registration.run_id, "variant_id": registration.variant_id},
         "implementation": {"source_closure": binding["source_closure"], "environment": binding["environment"]},
         "candidates": sorted(candidates, key=lambda c: c["candidate_id"]), "folds": folds,

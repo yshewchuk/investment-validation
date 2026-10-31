@@ -24,7 +24,7 @@ from experiments.magnitude_search_execution import (
     validate_execution_limits,
 )
 from experiments.magnitude_search_inputs import load_inputs, publish_inputs
-from experiments.magnitude_search_plan import read_search_plan
+from experiments.magnitude_search_plan import read_search_plan, trial_key
 from experiments.magnitude_search_records import MIGRATIONS, OWNER, append_record, read_record
 from experiments.magnitude_search_trials import SearchTrials
 from experiments.size_fit_diagnostics import evidence as diagnostic_evidence
@@ -54,7 +54,7 @@ def _native_selection(trials, plan, read):
         for candidate in plan["candidates"]:
             for inner in outer["inner"]:
                 args = (outer["outer"]["year"], inner["year"], candidate["candidate_id"])
-                key = content_hash([plan["plan_id"], *args])
+                key = trial_key(plan, *args)
                 execution, terminal = read("execution:" + key), read("terminal:" + key)
                 if not isinstance(execution, dict) or not isinstance(terminal, dict):
                     raise fail("EXPERIMENT_IDENTITY_CONFLICT", "outer evaluation requires completed native inner trials")
