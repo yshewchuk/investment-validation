@@ -180,7 +180,6 @@ def test_real_plan_targets_move_early_target_to_before_start(real):
 
 
 @pytest.mark.parametrize("changes", [{"history_start": "bad"}, {"history_start": 5},
-                                     {"history_start": date(2023, 1, 1)},
                                      {"as_of_month": "bad"}])
 def test_real_plan_targets_refuse_noncanonical_start_or_month_without_reads(real, monkeypatch, changes):
     def forbidden(*args, **kwargs):
@@ -190,6 +189,13 @@ def test_real_plan_targets_refuse_noncanonical_start_or_month_without_reads(real
     with pytest.raises(data_errors.DataError) as raised:
         backend.plan_targets(real.repository, real.snapshot, **_request(real, (1, 5, -1), **changes))
     assert raised.value.code == "CONTRACT_MISMATCH"
+
+
+def test_real_plan_targets_date_object_matches_equal_iso_string(real):
+    iso = _request(real, (1, 5, -1))
+    as_date = {**iso, "history_start": date.fromisoformat(iso["history_start"])}
+    assert backend.plan_targets(real.repository, real.snapshot, **as_date) == \
+        backend.plan_targets(real.repository, real.snapshot, **iso)
 
 
 @pytest.mark.parametrize("changes", [{"event_ids": []}, {"event_ids": ["ev", "ev"]},

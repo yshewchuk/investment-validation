@@ -195,9 +195,7 @@ def plan_targets(repository, snapshot, *, as_of_month, policy, event_ids, horizo
     """Public non-strict grouped-embargo plan: materializes nothing and writes nothing."""
     try:
         ExperimentHoldouts(as_of_month)
-        if type(history_start) is not str:
-            raise TypeError
-        calendar_date(history_start)
+        history_start = calendar_date(history_start).isoformat()
     except (ValueError, TypeError, OverflowError):
         raise fail("CONTRACT_MISMATCH", "canonical history start and holdout month required") from None
     _shape(event_ids, horizons)
