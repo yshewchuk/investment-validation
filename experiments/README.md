@@ -34,6 +34,7 @@ The owning modules expose these helpers to native experiment callers; no compati
 | `size_registration_artifacts.pack_size_registration` / `hydrate_size_registration` / `size_registration_artifact_bytes` / `native_registration.load_registration_document` | Registration preparation writes bounded CAS sections for large ordered SIZE values and stores content-hash descriptors; hydration checks the aggregate 1 GiB reference-byte cap, verifies each shard and recomputes logical artifact hashes before restoring planner fields. Missing, altered or malformed objects refuse `EXPERIMENT_IDENTITY_CONFLICT`; aggregate overflow refuses `RESOURCE_LIMIT_EXCEEDED`. |
 | `size_search_binding.fold_inputs` / `execution_for_candidate` | Comparison/search evidence and `DistributionTrials.start` use the former to require an exact reconstructed inner/normalized outer fold before admitting the stored panel (fully once per process, then a memoised copy re-checked by content hash against the binding) and re-qualifying training targets; trials/outer use the latter to bind a candidate execution dict. No hidden materialization or fitting; admission failures propagate. |
 | `size_comparator.COLUMNS` / `native_recipe` / `recipe` / `fit_evidence` / `forecasts` | Binding/comparison/worker consume ordered input names, native/complete detached recipes and causal OLS+MLP forecasts from admitted arrays. Reads installed registry metadata, not market sources; fresh guarded fits or explicit abstention, unchanged raw predictions; invalid recipe/metadata raises `ValueError`, bounded registry refusal raises typed `OpsError`. `fit_evidence(inputs, fold, plan)` binds eligible ordered 14-column arrays, not estimator entry; the full admitted cohort remains in the input manifest. |
+| `iv_crush_comparator.COLUMNS` / `native_recipe` / `recipe` / `fit_evidence` / `forecasts` | Synthetic callers only: pinned native IV HGB causal refits use 41 ordered features from 38 forecast-cutoff columns, including explicit `has_implied_quote`. Both no-fit guards precede forecast input inspection; complete finite predictors and 500 eligible training rows govern incumbent abstention, while arithmetic training mean uses all admitted labels. Empty/nonfinite training refuses `INVALID_EXPERIMENT_SPEC`; recipe drift raises `ValueError`, bounded registry failures retain typed resource errors. No evaluation labels, source loader, journal/CLI integration, clipping or production-population reproduction. |
 | `size_comparison_run.execute` | Outer execution passes sealed plan/fold/limits; returns validated forecasts and persists create-only input/fit/terminal receipts. `replay_only=True` reads exact evidence or refuses, never fits/writes; identity/resource/native failures retain their policy. |
 | `size_fit_diagnostics.keys` / `evidence` | Trials/outer select versioned receipt keys and validate child diagnostics against execution recipe/horizons; pure set/dict results, no I/O; mismatches refuse `EXPERIMENT_IDENTITY_CONFLICT`. |
 | `size_job_budget.remaining` / `resolved_limits` | CLI/trials/outer/comparison supply an admitted plan; persist the first immutable deadline, then return seconds/clamped child limits. No reset/retry; mismatched evidence/limits or exhausted/backward time refuse. |
@@ -107,15 +108,22 @@ Saved identity and later outcome/worker APIs' separate read policies do not chan
 `distribution_trials` and `distribution_fitted` also consume the shared immutable journal APIs. `v2_magnitude_search_run` consumes `magnitude_search_plan.read_search_plan`, `magnitude_search_records.MIGRATIONS`/`OWNER`/`append_record`/`read_record`, `magnitude_search_trials.SearchTrials`, `magnitude_search_execution.validate_execution_limits`, and `magnitude_search_outer.execute_outer_fold`/`collect_outer_results` for source-sealed serial orchestration.
 Its CLI also consumes `native_registration.read_native_registration`/`valid_registration_read_budget`/`MAX_NATIVE_EVIDENCE_BYTES` and `native_gate_worker.read_native_staged_input`; direct engine dependencies are contracts, data, foundation and ops. The [driver section](#serial-magnitude-search-driver) defines the public seal/run helpers and each CLI action's authority.
 
-`magnitude_search_request.compile_request` returns source-free stage-2 request
-specifications and year/count previews for the full-HMO v1 dictionary.
-`magnitude_search_request_versions.compile_request` dispatches versioned dictionaries via public validation/panel recipes; the qualified SIZE binding/CLI consume it while legacy previews retain their outputs/refusals.
-It preserves the closed H/HM/HMO 33-candidate grid; compilation alone grants no source or fit authority.
+`magnitude_search_request.compile_request` preserves the source-free v2 request
+validator and its closed H/HM/HMO 33-candidate grid.
+`magnitude_search_request_versions.compile_request` keeps v2 replay intact and
+dispatches `magnitude_search_request_v3.compile_request` requests with bounded
+request-declared Ridge/ElasticNet axes; HGB remains unchanged in v3. Qualified
+SIZE v1.6 keeps request v2 replay; v1.7 sealing and admission accept v2 and v3.
+`size_search.preflight` publishes the receipt consumed by `register`; legacy
+previews retain their outputs/refusals. The documented v3 grid example is ElasticNet
+alpha `[0.001, 0.003, 0.01, 0.03, 0.1, 1]`, l1 ratio `[0.25, 0.75]`, and Ridge
+alpha `[0.01, 0.1, 1, 10, 100]`, producing 57 candidates. Compilation alone
+grants no source or fit authority.
 `magnitude_candidate_recipe` and `magnitude_candidate_fit` are consumed by qualified plan construction and the bounded worker, as well as synthetic tests.
 They reuse public model recipe/fitter APIs; admitted stored inputs and the sealed execution route, not compiler specifications alone, authorize fitting.
 
 `distribution_candidate_recipe` is consumed by the distribution plan/journal, numeric-fit adapters and fixed worker; `distribution_class_support` is consumed by the numeric fitter, with synthetic tests for both.
-Bundle B uses a separate distribution-owned native metadata run and references the qualified SIZE registration/plan for source and folds only. It neither runs SIZE's 33 candidates nor writes distribution claims under the SIZE run. Existing v1.7/CAS/native admission own transport and central holdout policy; no panel/context payload is embedded in the distribution plan.
+Bundle B uses a separate distribution-owned native metadata run and references the qualified SIZE registration/plan for source and folds only. It does not run SIZE candidates or write distribution claims under the SIZE run. Existing v1.7/CAS/native admission own transport and central holdout policy; no panel/context payload is embedded in the distribution plan.
 Their [contract](ARCHITECTURE.md#distribution-declarations) keeps raw uncalibrated policy, conservative tree counts and opaque-reference limitations explicit. Synthetic checks: `python -m pytest tests/v2/research/test_distribution_candidate_recipe.py tests/v2/research/test_distribution_class_support.py`.
 The [admission contract](ARCHITECTURE.md#distribution-native-admission) describes immutable input claims, not completed trials or a runnable experiment. Bundle C's [causal fit/control contract](STR_THRU_DISTRIBUTION/ARCHITECTURE.md) uses this admission; D's genuine runner/bounded distribution-output dispatch remains pending. Focused synthetic catalog tests: `python -m pytest tests/v2/research/test_distribution_plan_trials.py tests/v2/research/test_distribution_native_admission.py`.
 
@@ -518,7 +526,7 @@ results, both no-fit guards and errors remain unchanged.
 ### Distribution native admission
 
 `distribution_plan.prepare_plan(conn, store, own_registration, source_registration, source_request, source_plan_ref, recipe, budget_caps)` returns `(distribution_plan, verified_native_source_plan)`. It verifies a distinct native v1.0 distribution run and compact SIZE v1.7 source registration, matching snapshot/scope/holdout month/membership/event roster, seed-zero computed-move ownership and outer years. The registered runner must differ from SIZE's; its installed source closure/environment and the distribution implementation are bound. No placeholder runnable entrypoint is supplied: Bundle D owns genuine runner/activation checks.
-The public native search-plan reader reconstructs and verifies exact source/fold metadata; its 33 candidates, RMSE selection and execution budget are not distribution policy. No SIZE execution is required. Both registration byte strings retain the 16 MiB ceiling before decoding; native v1.0's flat event roster must fit that existing bound. Oversize refuses, without copying v1.7 packing, raising caps or duplicating panel/metadata payloads.
+The public native search-plan reader reconstructs and verifies exact source/fold metadata; its candidate schedule, RMSE selection and execution budget are not distribution policy. No SIZE execution is required. Both registration byte strings retain the 16 MiB ceiling before decoding; native v1.0's flat event roster must fit that existing bound. Oversize refuses, without copying v1.7 packing, raising caps or duplicating panel/metadata payloads.
 `distribution_plan.v1` binds both registration refs/run/variant IDs, source plan ref/ID, qualified context ID, recipe, installed sources/environment and derived raw-pair budget. The identity contains no event/feature rows; actual inner/outer schedule counts replace caller fold counts. The returned native plan is invocation-local metadata, not copied into distribution evidence. These are raw-pair limits only: calibration/control fits and whole-job feasibility remain excluded until explicitly budgeted.
 `DistributionTrials` takes the same arguments plus `repository`, with detached request/recipe/caps. `seal(clock=...)` revalidates dependencies and explicitly initializes the existing magnitude-search journal migrations, then appends the immutable plan in `distribution:seal` under the distribution run ID. Exact seal replay is idempotent; different plans refuse. No new store, catalog schema, registration version or holdout policy is introduced.
 `start(role, outer_year, inner_year=None)` internally selects an exact native inner or normalized outer fold. Its identity includes the full fold, enclosing outer year and role; all three horizons remain together. Before claiming, it requires a callable repository `resolve` entrypoint without invoking it; this shape check does not pre-read or certify source availability/integrity. A create-only `distribution:start:<fold_id>` claim precedes public `fold_inputs` and any fresh training outcome read. Central qualification owns protected/future exclusions and authentic label anchors; the adapter does not filter eligibility itself.
@@ -533,3 +541,23 @@ Only after full native admission are feature rows projected to the recipe's inst
 | Failure before a successful start claim (including missing/oversized implementation source, `INPUT_CHANGED`), nonretryable `OpsError`/`DataError`, untyped error, or failure during `read_admission` | Original failure and retryability propagate. Existing append transactions own atomic associations; an already committed claim stays consumed, and replay verifies stored evidence only. |
 
 Current consumers are the C adapters below and synthetic unit/native-catalog tests. Dependencies are native registration, public SIZE plan/fold admission, shared cohort publisher/loader and immutable journal/migrations, foundation hashing/CAS, installed fingerprints and bounded stderr stage logging. This admission boundary adds no estimator, provider, CLI, final read or production path. Native v1.7 hydration and cohort processing retain their existing bounds; this adapter does not establish memory feasibility or add a scheduler. C below supplies causal OOF/result contracts; D must supply a narrow bounded distribution-worker dispatch rather than coercing histogram output into scalar `SearchTrials` forecasts.
+
+### IV causal incumbent numeric policy
+
+`iv_crush_comparator` maps nine legacy `or_*` names to the qualified daily-state aliases;
+`pre_iv30`, `pre_iv10`, `pre_exern_iv30`, `pre_exern_iv10` read the supplied horizon
+row’s `iv30`, `iv10`, `exern_iv30`, `exern_iv10`, never future pre-print target fields.
+`abs_dist_high` is `abs(dist_high)`; the other 27 inputs retain their native names.
+No units are rescaled. This is a causal refit, not exact legacy population reproduction:
+no source-level `n_prior>=4` filter is invented beyond the explicit native recipe.
+`forecasts` accepts admitted indexed feature rows, a training-only DataFrame, fold/plan
+metadata, the exact recipe and a progress callback. Each eligible horizon constructs
+a fresh one-thread native HGB (learning rate 0.06, 300 iterations, seed 20260829).
+`fit_evidence` reuses shared ordered matrix hashes and marks eligibility, not actual
+estimator entry. Incomplete rows abstain; missing required projected fields refuse.
+Estimator errors propagate without retry or partial returned results. Registry metadata
+is the only file input; numeric fitting opens no repository, provider or target source.
+
+```bash
+python -m pytest tests/v2/research/test_iv_crush_comparator.py
+```

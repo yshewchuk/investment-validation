@@ -302,7 +302,7 @@ Magnitude search/report wrappers retain their existing nonnegative contracts.
 
 `experiments/magnitude_search_request.py` consumes `magnitude_panel_table.recipe`
 and `eligibility_policy.eligibility_policy` for source-free dictionary/policy declarations, not data admission.
-`experiments/magnitude_search_request_versions.py` consumes both v1/v2 panel `recipe` APIs for dictionary dispatch only.
+`experiments/magnitude_search_request_versions.py` consumes v1/v2/v3 panel `recipe` APIs for dictionary adaptation and request-version dispatch; it grants no source admission.
 `experiments/distribution_candidate_recipe.py` consumes the qualified v3 feature recipe and distribution format; `distribution_class_support.py` consumes histogram validation for explicit class mapping. `distribution_trials.py` consumes bounded progress/stage logging during admission and projection; these helpers grant no data or fitting authority.
 
 Which packages import this one, and for what. Checked against the import graph:
