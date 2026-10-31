@@ -3738,6 +3738,7 @@ def validated_chooser_fold_references(source, request):
                 or producer.get("artifact_sha256") != digest[7:]
                 or identity.get("model_id") != producer.get("model_id")
                 or identity.get("role") != producer.get("role")
+                or tuple(identity.get("feature_order") or ()) != tuple(producer.get("feature_order") or ())
                 or not ref.get("release_id") or not isinstance(descriptor, str)
                 or len(descriptor) != 71 or not descriptor.startswith("sha256:")):
             raise StrictTraceCaptureError("chooser ref mismatches served producer")

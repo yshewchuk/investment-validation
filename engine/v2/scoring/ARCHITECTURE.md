@@ -198,8 +198,10 @@ chooser producer output and fold month it served. The shared `pred_abs_move`
 size fold is recorded as a chooser-frame input and pool, but is not a chooser
 producer: its identity is validated by the ordinary frozen Tier-4 binding.
 `strict_trace_one` checks each chooser-producer reference against the recorded
-producer binding and the request's canonical decision date; the served fold
-boundary may equal that date (for a first-day decision), but may not be later.
+producer binding, including its feature order (tuple-normalized, with absent
+orders treated as empty), and the request's canonical decision date; the
+served fold boundary may equal that date (for a first-day decision), but may
+not be later.
 It then writes the validated map to metadata field
 `chooser_fold_references` when a chooser trace has producer folds (`None`
 otherwise). Production capture resolves the release catalog before scoring;
@@ -720,7 +722,7 @@ not load chooser estimators, and no path infers provenance from legacy rows.
 |---|---|
 | Chooser references not requested | Return an empty map without loading chooser estimators |
 | More than 34 staged chooser-fold objects when references are requested | ModelNotReady before any chooser fold is loaded |
-| Active legacy catalog has chooser-fold rows but no canonical retrain cutoff | Return an empty map |
+| Chooser-fold rows are present but the canonical retrain cutoff is missing or invalid when references are requested | ModelNotReady; no partial reference map |
 | Carried fold authoring release has no canonical cutoff | ModelNotReady; do not return a partial map |
 | Malformed, noncanonical or mismatched descriptor, estimator digest, parent binding, output or fold month | ModelNotReady; no partial reference map |
 | Reference resolution requested for a verified release | Re-verify each binding resolution; no cross-call reference cache |

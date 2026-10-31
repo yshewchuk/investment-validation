@@ -1273,6 +1273,16 @@ def test_chooser_fold_reference_flows_through_real_scorer_checkpoint(tmp_path, m
     with pytest.raises(StrictTraceCaptureError, match="mismatches served producer"):
         strict_trace_one(corrupted_candidate, "snapshot-1", tmp_path / "release")
 
+    corrupted_identity_candidate = copy.deepcopy(candidate)
+    corrupted_identity_source = corrupted_identity_candidate[
+        "legacy_trace"]["checkpoints"]["source_inputs"]["value"]
+    corrupted_identity_source["frozen"]["chooser_references"][
+        "pred_im_t1_d14"]["release_binding"]["feature_order"] = ["wrong_feature"]
+    corrupted_identity_candidate["legacy_trace"]["checkpoints"][
+        "source_inputs"]["content_hash"] = content_hash(corrupted_identity_source)
+    with pytest.raises(StrictTraceCaptureError, match="mismatches served producer"):
+        strict_trace_one(corrupted_identity_candidate, "snapshot-1", tmp_path / "release")
+
     empty_candidate = _candidate(_collector())
     empty_candidate.update({"event_id": "AAA_2026-09-17", "request": request_to_dict(request)})
     strict_trace_one(empty_candidate, "snapshot-1", tmp_path / "release")
