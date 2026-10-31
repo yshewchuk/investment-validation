@@ -7,7 +7,7 @@ import pytest
 from sklearn.ensemble import HistGradientBoostingRegressor
 from sklearn.linear_model import Ridge
 from sklearn.pipeline import Pipeline
-from threadpoolctl import threadpool_info
+from threadpoolctl import threadpool_info, threadpool_limits
 
 from engine.models import no_fit as legacy_no_fit
 from engine.v2.foundation import canonical_json, content_hash
@@ -133,6 +133,25 @@ def test_early_stopping_v2_recipe_fits_deterministically():
     values = first["predictions"]
     assert len(values) == len(prediction)
     assert all(np.isfinite(values)) and all(value >= 0 for value in values)
+
+
+def test_early_stopping_v2_matches_independent_estimator_and_recovers_signal():
+    rng = np.random.default_rng(20261031)
+    train = rng.normal(size=(400, 3))
+    labels = np.where(train[:, 0] < 0, 2.0, 8.0)
+    prediction = np.array([[-1.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
+    recipe = ridge_hgb_recipe(model="history_hgb", columns=["x0", "x1", "x2"],
+        feature_dictionary_hash="sha256:" + "a" * 64, learning_rate=0.1, max_leaf_nodes=7,
+        min_samples_leaf=20, l2_regularization=0.0)
+    result = _fit(recipe, train, labels, prediction)
+    expected = HistGradientBoostingRegressor(loss="squared_error", learning_rate=0.1, max_iter=500,
+        max_leaf_nodes=7, min_samples_leaf=20, l2_regularization=0.0, early_stopping=True,
+        n_iter_no_change=10, validation_fraction=0.1, tol=1e-7, random_state=0)
+    with threadpool_limits(limits=1):
+        expected.fit(train, labels)
+    assert result["predictions"] == pytest.approx(expected.predict(prediction).tolist(), abs=1e-9)
+    assert result["predictions"] == pytest.approx([2.0, 8.0], abs=0.3)
+    assert expected.n_iter_ < 500
 
 
 @pytest.mark.parametrize("kind", KINDS)
