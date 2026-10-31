@@ -12,10 +12,12 @@ from engine.v2.foundation import SystemClock, canonical_json, content_hash, to_d
 from engine.v2.models.no_fit import no_fit_guard
 from engine.v2.ops.errors import OpsError, fail
 from experiments import distribution_plan, distribution_trials
+from experiments import distribution_run_plan as run_metadata
 from experiments.distribution_candidate_recipe import candidate_recipe
 from experiments.magnitude_search_inputs import load_fit_inputs
 from experiments.native_registration import prepare_native_registration, reserve_native_registration
 from tests.v2.research.magnitude_trial_support import poison_outcomes, prediction_spec
+from tests.v2.research.test_distribution_run_request import request as run_request
 from tests.v2.research.test_size_search_integration import case as source_case
 
 pytestmark = pytest.mark.xdist_group("distribution_native_admission")
@@ -67,6 +69,35 @@ def test_native_plan_pins_fixed_worker_source_bytes(case, own):
         plan = adapter.seal(clock=SystemClock())
     worker = "experiments/distribution_worker.py"
     assert plan["implementation"]["source_closure"][worker] == "sha256:" + sha256((ROOT / worker).read_bytes()).hexdigest()
+
+
+def test_run_metadata_binds_distinct_source_request_through_native_plan(case, own, monkeypatch):
+    adapter = trials(case, own)
+    policy = run_request()
+    policy["bridges"] = [entry for entry in policy["bridges"] if entry["outer_year"] == "2024"]
+    policy["quote_snapshot_id"] = case.panel_source.snapshot_id
+    # Only the unrelated D bridge transport is doubled; B/source admission and
+    # its request/reference/hash chain use the real synthetic native catalog.
+    bridge_reads = []
+    monkeypatch.setattr(run_metadata, "read_bridge", lambda *args: bridge_reads.append(args))
+    run = run_metadata.DistributionRunPlan(adapter, policy)
+    before = case.conn.total_changes
+    with no_fit_guard(), legacy_no_fit():
+        b_plan, native = run.plans()
+        plan = run.preflight()
+        assert adapter.request["schema_version"] == "magnitude_search_request.v2"
+        assert plan["request"] == policy and policy["schema_version"] == "distribution_run_request.v1"
+        assert b_plan["source_plan_id"] == native["plan_id"] == case.plan["plan_id"]
+        assert native["request"] == adapter.request
+        assert plan["admission_plan_id"] == b_plan["plan_id"]
+        assert plan["run_plan_id"] == content_hash({k: v for k, v in plan.items() if k != "run_plan_id"})
+        reads = len(bridge_reads)
+        adapter.request["max_fits"] += 1
+        with pytest.raises(OpsError) as caught:
+            run.preflight()
+        assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+        assert len(bridge_reads) == reads
+    assert case.conn.total_changes == before
 
 
 def test_worker_only_source_drift_changes_plan_and_refuses_old_seal(case, own, monkeypatch):
