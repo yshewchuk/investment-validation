@@ -35,7 +35,7 @@ def test_register_with_matching_receipt_does_no_heavy_reads(case, monkeypatch):
     def forbidden(*args, **kwargs):
         pytest.fail("admit reached a heavy or repository read")
 
-    for module, name in ((binding, "prepare"), (binding, "_read_panel"), (binding, "fold_inputs"),
+    for module, name in ((binding, "prepare"), (binding, "read_panel"), (binding, "fold_inputs"),
                          (binding, "preflight_magnitude_targets"),
                          (binding, "qualify_magnitude_training_targets"),
                          (size_panel, "read"), (size_panel, "materialize"),

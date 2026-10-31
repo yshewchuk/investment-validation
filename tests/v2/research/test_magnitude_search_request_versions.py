@@ -39,7 +39,7 @@ def test_v2_lead_compiler_refuses_invalid_horizons(bad_horizons):
 
 @pytest.mark.parametrize("horizons,expected", [([1], [1]), ([1, 5], [5, 1]), ((5, 3, 1), [5, 3, 1])])
 def test_v2_lead_compiler_accepts_valid_horizons_in_order(horizons, expected):
-    actual = leads.compile_request(_request(), horizons=horizons)
+    actual = versions.compile_request(_request(), horizons=horizons)
     assert actual["horizons"] == expected
 
 
