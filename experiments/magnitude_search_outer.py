@@ -26,7 +26,7 @@ from experiments.magnitude_search_execution import (
 from experiments.magnitude_search_inputs import load_inputs, publish_inputs
 from experiments.magnitude_search_plan import PLAN_V2, PLAN_V3, read_search_plan, trial_key
 from experiments.magnitude_search_records import MIGRATIONS, OWNER, append_record, read_record
-from experiments.magnitude_search_trials import SearchTrials
+from experiments.magnitude_search_trials import SearchTrials, require_execution_enabled
 from experiments.size_fit_diagnostics import evidence as diagnostic_evidence
 from experiments.size_fit_diagnostics import keys as diagnostic_keys
 from experiments.size_job_budget import resolved_limits
@@ -246,6 +246,7 @@ def _execute_admitted(conn, store, repository, registration, plan, fold, selecti
 
 def collect_outer_results(conn, store, repository, registration, request, plan_ref):
     """Read every completed outer fold; pool event errors, never rank by outer loss."""
+    require_execution_enabled(registration)
     require_current(conn, OWNER, MIGRATIONS)
     plan = read_search_plan(conn, store, registration, request, plan_ref)
     pending = []
