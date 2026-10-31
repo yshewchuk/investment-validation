@@ -1,4 +1,4 @@
-"""IV registration entry API; search/CLI execution is not enabled by this slice."""
+"""Thin IV registration and sealed-plan policy; no search/CLI execution."""
 from pathlib import Path
 
 from engine.v2.data.iv_crush_table import IV_CRUSH_CONTRACT, IV_CRUSH_TABLE_NAME
@@ -29,3 +29,10 @@ def prepare(repository, spec, *, source, feature_snapshot, target_snapshot, scop
         source=source, feature_snapshot=feature_snapshot, target_snapshot=target_snapshot, target=target(),
         scope=scope, as_of_month=as_of_month, training_start=training_start, labels_before=labels_before,
         event_ids=event_ids)
+
+
+def prepare_plan(conn, store, registration, request):
+    """Supply IV target policy to the shared metadata-only search planner."""
+    validate_registration(registration.document)
+    from experiments.regression_search_binding import prepare_plan as prepare_regression_plan
+    return prepare_regression_plan(conn, store, registration, request, target=target())

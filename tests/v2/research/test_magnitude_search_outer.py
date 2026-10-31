@@ -320,6 +320,15 @@ def test_real_outer_selected_only_forecasts_precede_labels_and_replay(outer_case
         return original(*args, **kwargs)
     monkeypatch.setattr(outer, "load_magnitude_targets", labels)
     result = run(case)
+    worker = slot(case, "worker-result")
+    assert set(worker) == {"event", "forecasts", "score_seconds", "rss_delta_kib"}
+    assert worker["event"] == "succeeded"
+    assert isinstance(worker["score_seconds"], float) and math.isfinite(worker["score_seconds"])
+    assert worker["score_seconds"] >= 0
+    assert type(worker["rss_delta_kib"]) is int and worker["rss_delta_kib"] >= 0
+    for fit in expected_fits(case):
+        marker = slot(case, "fit-completed:" + str(fit["horizon_sessions"]))
+        assert math.isfinite(marker["fit_seconds"]) and marker["fit_seconds"] >= 0
     assert_source_seals(case)
     scores = case.selected["selections"][0]["scores"]
     assert scores[0]["metrics"] == scores[1]["metrics"]
@@ -357,7 +366,7 @@ def test_collect_requires_all_folds_and_pools_errors_without_outer_selection(out
         return freeze(self)
     def executed(self, *args, **kwargs):
         pytest.fail("outer collection launched an inner execution")
-    def replayed(read, store, started, fold, plan, execution):
+    def replayed(read, store, started, fold, plan, execution, binding):
         trace.append(("outer", fold["year"]))
         return replay(read, store, started, fold, plan, execution, binding)
     monkeypatch.setattr(trials.SearchTrials, "freeze", frozen)

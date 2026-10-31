@@ -28,6 +28,7 @@ from experiments.magnitude_search_plan import PLAN_V2, PLAN_V3, read_search_plan
 from experiments.magnitude_search_records import MIGRATIONS, OWNER, append_record, read_record
 from experiments.magnitude_search_trials import (
     SearchTrials,
+    require_execution_enabled,
     _completed_fit as _valid_completed_fit,
     _timing as _valid_timing,
 )
@@ -160,22 +161,26 @@ def _replay(read, store, started, fold, plan, execution, binding):
         forecasts = _forecasts(read("forecasts"), fold, plan["horizons"])
         receipt = {"status": "succeeded", "fits": fits, "fit_attempt_count": len(fits),
                    "completed_fit_count": len(fits), "forecasts_id": content_hash(forecasts)}
-        timed_worker = False
-        if execution.get("schema_version") == "size_candidate_execution.v1":
-            worker = read("worker-result")
+        worker = read("worker-result")
+        timed_worker = None
+        if worker is not None:
             if not _timed_shape(worker, {"event", "forecasts"} | diagnostic_keys(binding), legacy=True):
                 raise _conflict()
             timed_worker = "score_seconds" in worker
             _equal(worker["forecasts"], forecasts)
-            receipt.update(diagnostic_evidence(worker, execution, plan["horizons"]))
+            if diagnostic_keys(binding):
+                receipt.update(diagnostic_evidence(worker, execution, plan["horizons"]))
         _equal(read("execution"), receipt)
         for fit in fits:
             _equal(read("fit-started:" + str(fit["horizon_sessions"])), fit)
             marker = read("fit-completed:" + str(fit["horizon_sessions"]))
             marker_timed = isinstance(marker, dict) and "fit_seconds" in marker
-            if marker_timed != timed_worker:
+            if timed_worker is None:
+                if marker_timed:
+                    raise _conflict()
+            elif marker_timed != timed_worker:
                 raise _conflict()
-            _equal_completed_fit(marker, fit, legacy=not timed_worker)
+            _equal_completed_fit(marker, fit, legacy=not bool(timed_worker))
         result = _result(started, inputs, inputs_id, receipt, forecasts, read("validation"), fold, plan["horizons"])
         _equal(read("terminal"), result)
         return result
@@ -261,8 +266,7 @@ def _execute_admitted(conn, store, repository, registration, plan, fold, selecti
     receipt = {"status": result["event"], "fits": fits, "fit_attempt_count": len(fits) + len(pending),
                "completed_fit_count": len(fits), "forecasts_id": content_hash(forecasts) if succeeded else None,
                **diagnostic_evidence(result, execution, plan["horizons"])}
-    if diagnostic_keys(binding):
-        append("worker-result", result)
+    append("worker-result", result)
     append("execution", receipt)
     if not succeeded:
         raise fail("EXPERIMENT_VARIANT_FAILED", "selected outer candidate failed; replacement and retry are forbidden")
@@ -281,6 +285,7 @@ def _execute_admitted(conn, store, repository, registration, plan, fold, selecti
 
 def collect_outer_results(conn, store, repository, registration, request, plan_ref):
     """Read every completed outer fold; pool event errors, never rank by outer loss."""
+    require_execution_enabled(registration)
     require_current(conn, OWNER, MIGRATIONS)
     plan = read_search_plan(conn, store, registration, request, plan_ref)
     pending = []
