@@ -701,7 +701,7 @@ follow-up slice. It does not infer provenance from legacy rows. Production captu
 follow-up wiring slice.
 
 | Condition | Outcome |
-|---|---|---|
+|---|---|
 | Chooser references not requested | Return an empty map without loading chooser estimators |
 | More than 34 staged chooser-fold objects when references are requested | ModelNotReady before any chooser fold is loaded |
 | Active legacy catalog has chooser-fold rows but no canonical retrain cutoff | Return an empty map |
