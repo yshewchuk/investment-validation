@@ -296,7 +296,9 @@ def resolve_release_binding(
     )
 
 
-def resolve_production_release_binding() -> ScoringReleaseBinding:
+def resolve_production_release_binding(
+        *, include_chooser_fold_references: bool = False
+) -> ScoringReleaseBinding:
     """``resolve_release_binding`` against the ONE configured production
     release root (``engine.v2.models.deployment.production_release_root``).
 
@@ -310,7 +312,8 @@ def resolve_production_release_binding() -> ScoringReleaseBinding:
         root = deployment.production_release_root()
     except deployment.MissingReleaseRoot as exc:
         raise ModelNotReady("release_root", "no production release root is configured") from exc
-    return resolve_release_binding(root)
+    return resolve_release_binding(
+        root, include_chooser_fold_references=include_chooser_fold_references)
 
 
 def resolve_gate_policy(
@@ -869,21 +872,19 @@ def _resolve_chooser_fold_references(
             members[member_id] = row
     if not members:
         return {}
+    objects = _chooser_fold_objects(members, member_ids)
+    if not objects:
+        return {}
     sources = catalog.get("sources")
     cutoff = sources.get("retrain_cutoff") if isinstance(sources, Mapping) else None
-    # Older active releases can omit this optional field. Keep ordinary scoring
-    # available; strict chooser capture refuses if it needs an absent reference.
     if cutoff is None:
-        return {}
+        raise ModelNotReady("tier4_folds:chooser", "canonical training cutoff is missing")
     try:
         parsed_cutoff = date.fromisoformat(cutoff)
         if parsed_cutoff.isoformat() != cutoff:
             raise ValueError("non-canonical cutoff")
     except (TypeError, ValueError):
         raise ModelNotReady("tier4_folds:chooser", "canonical training cutoff is missing") from None
-    objects = _chooser_fold_objects(members, member_ids)
-    if not objects:
-        return {}
     return _load_chooser_fold_references(
         objects, "tier4_folds:chooser", parsed_cutoff, catalog, manifest,
         inference, model_identity, root, dep_root)
