@@ -15,9 +15,10 @@ _V3_HASH = v3_recipe("HMO")["dictionary_hash"]
 
 
 def compile_request(request):
-    """Dispatch bounded v3 grids while preserving existing dictionary replay."""
+    """Dispatch bounded v3/v4 grids while preserving existing dictionary replay."""
     version = request.get("schema_version") if type(request) is dict else None
-    compiler = (compile_v3_request if version == "magnitude_search_request.v3"
+    compiler = (compile_v3_request
+                if version in ("magnitude_search_request.v3", "magnitude_search_request.v4")
                 else compile_v1_request)
     dictionary = request.get("feature_dictionary_hash") if type(request) is dict else None
     if type(dictionary) is not str or dictionary not in (_V2_HASH, _V3_HASH):
