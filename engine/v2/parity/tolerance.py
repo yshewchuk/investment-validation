@@ -1,8 +1,9 @@
 """Per-field tolerance policies. There is no global tolerance, by construction.
 
 §3.2 and §7.3: exact comparison for IDs, selected contracts, integer
-quantities, gate verdicts, flags, null masks and frozen canonical records;
-declared **per-field** tolerances for independently recomputed floats; never a
+quantities, gate verdicts, flags, null masks and frozen canonical records,
+except where a field has an explicitly declared tolerance; declared
+**per-field** tolerances for independently recomputed numeric values; never a
 global tolerance, and never one widened to make a test pass.
 
 The default here is therefore *exact*, and a policy is a mapping of explicit
@@ -19,9 +20,75 @@ make the first run pass" is a listed failure mode.
 from __future__ import annotations
 
 import fnmatch
+import math
 from dataclasses import dataclass, field
+from typing import Any, Mapping
 
 __all__ = ["Tolerance", "TolerancePolicy", "EXACT", "SCORE_RECORD_V1"]
+
+
+def _finite_number(value: Any) -> bool:
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return False
+    try:
+        return math.isfinite(value)
+    except (OverflowError, TypeError):
+        return False
+
+
+def _nonnegative_number(value: Any) -> bool:
+    return _finite_number(value) and value >= 0
+
+
+def _nonempty_str_tuple(value: Any, length: int | None = None) -> bool:
+    return (
+        isinstance(value, tuple)
+        and (length is None or len(value) == length)
+        and all(isinstance(item, str) and item for item in value)
+    )
+
+
+def _n_analogs_matches(left_value: Any, right_value: Any) -> bool:
+    return (
+        type(left_value) is int
+        and type(right_value) is int
+        and left_value >= 0
+        and right_value >= 0
+        and left_value == right_value
+    )
+
+
+def _context_value_matches(name: str, left_value: Any, right_value: Any) -> bool:
+    if name == "n_analogs":
+        return _n_analogs_matches(left_value, right_value)
+    return (
+        left_value is not None
+        and right_value is not None
+        and type(left_value) is type(right_value)
+        and left_value == right_value
+    )
+
+
+def _resolve_scaled_absolute(
+    tolerance: "Tolerance", low: Any, high: Any
+) -> float | None:
+    if not (_finite_number(low) and _finite_number(high)):
+        return None
+    try:
+        width = high - low
+        if not math.isfinite(width):
+            return None
+    except (OverflowError, TypeError):
+        return None
+    if high < low:
+        return None
+    try:
+        resolved = tolerance.absolute + tolerance.relative * width
+    except (OverflowError, TypeError):
+        return None
+    if not math.isfinite(resolved):
+        return None
+    return resolved
 
 
 @dataclass(frozen=True)
@@ -35,6 +102,28 @@ class Tolerance:
     #: Why this number and not a smaller one. Required: a tolerance without a
     #: stated derivation is a tolerance nobody can argue with later.
     reason: str = "exact"
+    #: ``(low_field, high_field)`` in the LEFT/legacy record. If present,
+    #: ``relative`` is the allowed fraction of ``high - low`` rather than of
+    #: the maximum endpoint magnitude.
+    scale_fields: tuple[str, str] | None = None
+    #: Fields that must be equal across left and right for this rule to apply.
+    require_equal_fields: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        for name in ("absolute", "relative"):
+            value = getattr(self, name)
+            if not isinstance(value, (int, float)) or isinstance(value, bool):
+                raise ValueError(f"{name} must be an int or float")
+            if not _nonnegative_number(value):
+                raise ValueError(f"{name} must be finite and >= 0")
+        if not isinstance(self.reason, str) or not self.reason:
+            raise ValueError("reason must be a nonempty string")
+        if self.scale_fields is not None and not _nonempty_str_tuple(
+            self.scale_fields, 2
+        ):
+            raise ValueError("scale_fields must be a tuple of two nonempty strings")
+        if not _nonempty_str_tuple(self.require_equal_fields):
+            raise ValueError("require_equal_fields must be a tuple of nonempty strings")
 
     @property
     def is_exact(self) -> bool:
@@ -50,6 +139,46 @@ class Tolerance:
 EXACT = Tolerance()
 
 
+def _context_matches(
+    tolerance: Tolerance,
+    left_record: Mapping[str, Any] | None,
+    right_record: Mapping[str, Any] | None,
+) -> bool:
+    if not tolerance.require_equal_fields:
+        return True
+    if not isinstance(left_record, Mapping) or not isinstance(right_record, Mapping):
+        return False
+    for name in tolerance.require_equal_fields:
+        if name not in left_record or name not in right_record:
+            return False
+        if not _context_value_matches(name, left_record[name], right_record[name]):
+            return False
+    return True
+
+
+def _scaled_tolerance(
+    tolerance: Tolerance,
+    left_record: Mapping[str, Any] | None,
+) -> Tolerance | None:
+    if tolerance.scale_fields is None:
+        return None
+    if not isinstance(left_record, Mapping):
+        return EXACT
+    low_field, high_field = tolerance.scale_fields
+    if low_field not in left_record or high_field not in left_record:
+        return EXACT
+    resolved_absolute = _resolve_scaled_absolute(
+        tolerance, left_record[low_field], left_record[high_field]
+    )
+    if resolved_absolute is None:
+        return EXACT
+    return Tolerance(
+        absolute=resolved_absolute,
+        relative=0.0,
+        reason=tolerance.reason,
+    )
+
+
 @dataclass(frozen=True)
 class TolerancePolicy:
     """An ordered list of ``(field glob, tolerance)``. First match wins."""
@@ -57,10 +186,20 @@ class TolerancePolicy:
     policy_id: str
     rules: tuple[tuple[str, Tolerance], ...] = field(default_factory=tuple)
 
-    def for_field(self, field_path: str) -> Tolerance:
+    def for_field(
+        self,
+        field_path: str,
+        *,
+        left_record: Mapping[str, Any] | None = None,
+        right_record: Mapping[str, Any] | None = None,
+    ) -> Tolerance:
         for pattern, tol in self.rules:
-            if fnmatch.fnmatchcase(field_path, pattern):
-                return tol
+            if not fnmatch.fnmatchcase(field_path, pattern):
+                continue
+            if not _context_matches(tol, left_record, right_record):
+                return EXACT
+            scaled = _scaled_tolerance(tol, left_record)
+            return scaled if scaled is not None else tol
         return EXACT
 
     def declared_fields(self) -> tuple[str, ...]:

@@ -72,6 +72,9 @@ The projection tool exposes `run_projection(...)`; the CLI is a thin wrapper ove
 | Native plan without native inputs | `INVALID_REQUEST` |
 | Plan over 1 MiB, unreadable, invalid JSON, or not a JSON object | `INVALID_REQUEST` |
 | `bundle_format` not `flat`/`legacy`, or an input artifact over the 64 MiB read cap | `INVALID_REQUEST`; a legacy-bundle member over the cap is a `LegacyBundleError` from the loader |
+| Native shadow score has a non-null forecast uncertainty value | The corresponding `forecast_p10`, `forecast_p90`, or `forecast_sd` is included in the display row |
+| A forecast uncertainty value is unavailable | Its display-row field is omitted |
+| Native score has a non-null legacy driver band (`driver_p10` or `driver_p90`) | Rendering refuses the unsupported computed field with `ValueError` |
 
 The plan is read once, and that one parse picks both the rows and `row_sources`. On any of
 these the release and the serving pointer are unchanged.
@@ -84,7 +87,7 @@ detail projections from either producer:
 
 | Fields | Unit on the wire |
 |---|---|
-| `driver_forecast`, `market_implied_move`, `forecast_p10`, `forecast_p90`, `driver_p10`, `driver_p90` | Percentage points; `5.0` means `5.0%` of spot. |
+| `driver_forecast`, `market_implied_move`, `forecast_p10`, `forecast_p90`, `forecast_sd`, `driver_p10`, `driver_p90` | Percentage points; `5.0` means `5.0%` of spot. |
 | `entry_premium` | USD per position. |
 | `headline_expected_return` and `exp_pnl_model`, `exp_pnl_analog`, `exp_pnl_sim` | Fraction of entry cost; `0.05` means `5.0%`. |
 | `win_model`, `win_analog`, `win_sim` | Probability fraction in `[0, 1]`. |

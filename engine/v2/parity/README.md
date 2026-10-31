@@ -16,8 +16,10 @@ that used to live in `engine/v2/diagnosis`.
 
 ### Why the comparator core lives here, and why this layer is legal
 
-The nightly parity report (`engine/v2/ops/native_parity_report.py`) must run
-exactly the comparison the Phase 4 checker runs. Production may not import
+The nightly parity report (`engine/v2/ops/native_parity_report.py`) uses the
+shared comparator through `compare_dimension`. The report applies its
+report-specific analog CI tolerance; the Phase 4 checker keeps the exact
+`SCORE_RECORD_V1` default. Production may not import
 `checks/`, and `engine/v2/diagnosis` is a sink that no package may import, so
 the comparator had to move into a production package. It needs nothing but
 `engine.v2.foundation` (`content_hash`), so the layer map pins this package to
@@ -64,9 +66,10 @@ underscore convention, and an import of a name absent from this list fails
 | `compare_dimension` | The per-dimension comparator, moved verbatim from `checks/phase4_real.py`. |
 | `FORECAST_FIELDS`, `SIMULATION_FIELDS`, `FINANCIAL_FIELDS`, `GATE_FIELDS`, `ANALOG_FIELDS` | The checker's numeric field groups, by name. |
 | `NEVER_RAN_DIMENSIONS` | The dimensions the "never ran" rule applies to (`simulation`, `verdicts`, `analogs`). |
+| `financial_diagnostics` | The shared legacy oracle module: `expected_financial_diagnostics` and `legacy_fair_premium`. |
 | `dimensions`, `receipt`, `record_comparator`, `stage_plan`, `tolerance` | The modules; `engine.v2.diagnosis` re-exports the last four under its own names (see its README for the comparator API). |
 
-<!-- public-interface: dimensions, compare_dimension, FORECAST_FIELDS, SIMULATION_FIELDS, FINANCIAL_FIELDS, GATE_FIELDS, ANALOG_FIELDS, NEVER_RAN_DIMENSIONS, receipt, record_comparator, stage_plan, tolerance -->
+<!-- public-interface: dimensions, compare_dimension, FORECAST_FIELDS, SIMULATION_FIELDS, FINANCIAL_FIELDS, GATE_FIELDS, ANALOG_FIELDS, NEVER_RAN_DIMENSIONS, financial_diagnostics, expected_financial_diagnostics, legacy_fair_premium, receipt, record_comparator, stage_plan, tolerance -->
 
 ## Consumers
 
@@ -75,7 +78,10 @@ a claimed consumer that does not import, or an omitted one that does, is a
 failure rather than a stale sentence.
 
 - engine/v2/ops — `native_parity_report.py` builds the nightly parity report
-  from `compare_dimension` and `NEVER_RAN_DIMENSIONS`.
+  from `compare_dimension`, `NEVER_RAN_DIMENSIONS`, and the shared financial
+  oracle for missing legacy diagnostics.
+- checks — `phase4_real.py` uses the same financial oracle to build its
+  expected legacy diagnostic values.
 - engine/v2/diagnosis — re-exports the comparator core under its own module
   paths.
 - engine/v2/serving — projects stored mismatches using the shared field groups.
