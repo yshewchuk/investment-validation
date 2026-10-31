@@ -42,7 +42,8 @@ domain. It is source-free metadata, not selection, fitting or experiment admissi
 `magnitude_ridge_hgb_recipe.ridge_hgb_recipe` and
 `validate_ridge_hgb_recipe` construct/validate closed variable-width stage-2
 Ridge/HGB metadata from explicit ordered columns, a dictionary hash and one
-bounded family parameter. They return detached policy data, not source admission
+bounded family parameter (Ridge `alpha`, or HGB `max_leaf_nodes` for the v1 recipe; the v2 HGB
+recipe takes `max_leaf_nodes`, `learning_rate`, `min_samples_leaf` and `l2_regularization`). They return detached policy data, not source admission
 or an executable search plan. No training, sklearn or dictionary imports occur.
 
 `regression_ridge_hgb_recipe.regression_recipe` and `validate_regression_recipe`
