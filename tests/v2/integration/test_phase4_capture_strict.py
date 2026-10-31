@@ -1223,6 +1223,7 @@ def test_chooser_only_catalog_remains_pool_bootstrap_eligible(tmp_path, monkeypa
     [
         {"retrain_cutoff": "2026-09-01"},
         {"retrain_cutoff": "2026-10-01", "pool_cutoff": "2026-09-01"},
+        {"retrain_cutoff": "2026-10-01", "pool_cutoff": None},
     ],
 )
 def test_phase5_prepare_rejects_invalid_explicit_cutoffs_without_chooser_folds(sources):
@@ -1240,6 +1241,21 @@ def test_phase5_prepare_rejects_explicit_retrain_without_pool_with_chooser_folds
         match="retrain_cutoff requires canonical pool_cutoff",
     ):
         with_chooser_retrain_cutoff({"retrain_cutoff": "2026-10-01"}, folds)
+
+
+def test_phase5_catalog_rejects_explicit_null_pool_cutoff():
+    from engine.v2.models.release_layout import (
+        ReleaseLayoutError,
+        manifest_body,
+        validate_catalog,
+    )
+
+    body = manifest_body(
+        "chooser-only", "deployment-1", [],
+        {"retrain_cutoff": "2026-10-01", "pool_cutoff": None},
+    )
+    with pytest.raises(ReleaseLayoutError, match="invalid phase5 release sources cutoff"):
+        validate_catalog(body)
 
 
 def test_phase5_prepare_rejects_non_mapping_sources():

@@ -189,8 +189,8 @@ def _validate_catalog(body: Any, expected_id: str | None = None) -> dict:
             raise ReleaseLayoutError("invalid phase5 release sources cutoff") from None
         if retrain_date.isoformat() != retrain_cutoff:
             raise ReleaseLayoutError("invalid phase5 release sources cutoff")
-        pool_cutoff = sources.get("pool_cutoff")
-        if pool_cutoff is not None:
+        if "pool_cutoff" in sources:
+            pool_cutoff = sources["pool_cutoff"]
             try:
                 pool_date = date.fromisoformat(pool_cutoff)
             except (TypeError, ValueError):
