@@ -48,12 +48,14 @@ or an executable search plan. No training, sklearn or dictionary imports occur.
 `regression_ridge_hgb_recipe.regression_recipe` and `validate_regression_recipe`
 add a distinct closed recipe identity with explicit `signed` or `nonnegative`
 target domain. Signed recipes bind no projection; nonnegative recipes bind
-zero clipping. The existing magnitude recipe remains unchanged.
+zero clipping. The v2 magnitude grid and recipe/result identities remain unchanged;
+v3 may supply bounded alpha values declared by its request.
 
 `magnitude_elasticnet_recipe.regression_elasticnet_recipe` and its
 `validate_regression_elasticnet_recipe` bind a distinct closed policy with explicit
 `signed`/`nonnegative` target domain and corresponding none/zero-clipping projection.
-The existing magnitude recipe remains unchanged; metadata grants no source admission.
+The v2 magnitude grid and recipe/result identities remain unchanged; v3 may supply
+bounded alpha values declared by its request. Metadata grants no source admission.
 
 The names other packages may import are declared in the `public-interface`
 directive below, which `checks/package_readmes.py` enforces. Everything else

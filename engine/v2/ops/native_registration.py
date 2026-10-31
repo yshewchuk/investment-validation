@@ -363,6 +363,7 @@ def _size_plan_v17(document):
 
 
 _SIZE_PANEL_CONTEXTS = ("magnitude_panel_context.v3", "magnitude_panel_context.v4")
+_SIZE_REQUEST_SCHEMAS = ("magnitude_search_request.v2", "magnitude_search_request.v3")
 
 
 def _size_panel_v17(document):
@@ -381,7 +382,7 @@ def _size_panel_v17(document):
             or not _size_placeholder_v17(request.get("event_ids"))
             or not isinstance(feature.get("snapshot_id"), str)):
         return False
-    return (document["size_request"]["schema_version"] == "magnitude_search_request.v2"
+    return (document["size_request"]["schema_version"] in _SIZE_REQUEST_SCHEMAS
             and document["size_comparison"]["schema_version"] == "size_causal_comparator.v1"
             and isinstance(document["size_panel_request"], dict))
 
@@ -443,7 +444,7 @@ def _size_binding(document):
         and context["schema_version"] in _SIZE_PANEL_CONTEXTS
         and context["context_id"] == content_hash({k: v for k, v in context.items() if k != "context_id"})
         and context["source_snapshot"] == document["snapshot"]
-        and request["schema_version"] == "magnitude_search_request.v2"
+        and request["schema_version"] in _SIZE_REQUEST_SCHEMAS
         and request["feature_snapshot_id"] == panel["feature_snapshot"]["snapshot_id"]
         and request["history_snapshot_id"] == context["history_snapshot"]["snapshot_id"]
         and {e["event_id"] for e in context["target_events"]} == set(document["event_ids"]))

@@ -58,12 +58,28 @@ def test_invalid_dispatch_envelope_refuses_before_constructor(family, parameters
 
 @pytest.mark.parametrize("family,parameters,message", [
     ("ridge", {"alpha": True}, "Ridge requires declared alpha and no HGB parameter"),
-    ("elasticnet", {"alpha": 1, "l1_ratio": 0.5}, "ElasticNet parameters must belong to the declared six combinations"),
+    ("ridge", {"alpha": 1000.0001}, "Ridge requires declared alpha and no HGB parameter"),
+    ("elasticnet", {"alpha": 1, "l1_ratio": 1.0001},
+     "ElasticNet parameters must be finite numeric values within declared bounds"),
     ("hgb", {"max_leaf_nodes": 7.0}, "HGB requires declared integer leaf count and no Ridge parameter"),
 ])
 def test_family_owns_parameter_value_refusal(family, parameters, message):
     with pytest.raises(ValueError, match="^" + message + "$"):
         assembly.candidate_recipe(family, parameters, columns=["x"], feature_dictionary_hash=HASH)
+
+
+@pytest.mark.parametrize("family,parameters", [
+    ("ridge", {"alpha": 100.0}),
+    ("elasticnet", {"alpha": 0.003, "l1_ratio": 0.25}),
+    ("elasticnet", {"alpha": 0.03, "l1_ratio": 0.75}),
+])
+def test_v3_request_grid_values_reach_the_closed_family_recipe(family, parameters):
+    result = assembly.candidate_recipe(family, parameters, columns=["x"], feature_dictionary_hash=HASH)
+    expected = (elasticnet_recipe(columns=["x"], feature_dictionary_hash=HASH, **parameters)
+                if family == "elasticnet" else
+                ridge_hgb_recipe(model="history_ridge", columns=["x"],
+                                 feature_dictionary_hash=HASH, **parameters))
+    assert result == expected
 
 
 def test_import_and_invalid_fit_dispatch_never_load_training_or_sources():
