@@ -171,7 +171,9 @@ def _prepare(conn, store, registration, request, *, plan_schema=None):
     request_version = request.get("schema_version") if isinstance(request, dict) else None
     anchor_version = getattr(registration, "document", {}).get("schema_version")
     qualified = anchor_version in ("native_experiment_registration.v1.6", "native_experiment_registration.v1.7")
-    if request_version != ("magnitude_search_request.v2" if qualified else "magnitude_search_request.v1"):
+    expected = (("magnitude_search_request.v2", "magnitude_search_request.v3") if qualified
+                else ("magnitude_search_request.v1",))
+    if request_version not in expected:
         raise fail("INVALID_EXPERIMENT_SPEC", "search requires explicit valid axes, inner years and count caps")
     if qualified:
         from experiments.size_search_binding import prepare_plan
@@ -215,6 +217,8 @@ def read_search_plan(conn, store, registration, request, ref):
     version = request.get("schema_version") if isinstance(request, dict) else None
     if version == "magnitude_search_request.v2":
         schemas = (PLAN_V2, PLAN_V3)
+    elif version == "magnitude_search_request.v3":
+        schemas = (PLAN_V2,)
     elif version == "magnitude_search_request.v1":
         schemas = (SCHEMA,)
     else:
@@ -222,7 +226,8 @@ def read_search_plan(conn, store, registration, request, ref):
     if not isinstance(ref, ArtifactRef) or ref.schema_ref not in schemas:
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search plan reference has the wrong schema")
     expected = _prepare(conn, store, registration, request,
-                        plan_schema=ref.schema_ref if version == "magnitude_search_request.v2" else None)
+                        plan_schema=ref.schema_ref if version in ("magnitude_search_request.v2",
+                                                                   "magnitude_search_request.v3") else None)
     payload = canonical_json(expected).encode()
     if ref != artifact_reference(payload, ref.schema_ref):
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search plan reference differs from its complete binding")

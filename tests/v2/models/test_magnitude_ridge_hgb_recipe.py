@@ -51,6 +51,14 @@ def test_exact_closed_policy_and_detached_canonical_roundtrip(model, knobs):
     assert detached == expected
 
 
+@pytest.mark.parametrize("alpha", [1e-6, 0.001, 0.003, 0.03, 100.0, 1000.0])
+def test_v3_ridge_alpha_interval_is_accepted_and_validated(alpha):
+    policy = ridge_hgb_recipe(model="history_ridge", columns=["a", "b"],
+                              feature_dictionary_hash=HASH, alpha=alpha)
+    assert policy["estimator"]["params"]["alpha"] == float(alpha)
+    assert validate_ridge_hgb_recipe(json.loads(canonical_json(policy))) == policy
+
+
 @pytest.mark.parametrize("model,knobs", CASES)
 def test_identity_binds_parameters_dictionary_order_and_width(model, knobs):
     def recipe(columns, digest=HASH):
@@ -80,8 +88,10 @@ def test_bad_dictionary_hash_refuses(digest):
 
 @pytest.mark.parametrize("model,knobs", [
     ("ridge", {"alpha": 1}), (None, {}), ("history_ridge", {}), ("history_hgb", {}),
-    ("history_ridge", {"alpha": True}), ("history_ridge", {"alpha": 0.01}),
-    ("history_ridge", {"alpha": "1"}), ("history_ridge", {"alpha": float("nan")}),
+    ("history_ridge", {"alpha": True}), ("history_ridge", {"alpha": 1e-7}),
+    ("history_ridge", {"alpha": 1000.0001}), ("history_ridge", {"alpha": 0}),
+    ("history_ridge", {"alpha": -1}), ("history_ridge", {"alpha": "1"}),
+    ("history_ridge", {"alpha": float("nan")}), ("history_ridge", {"alpha": float("inf")}),
     ("history_ridge", {"alpha": 1, "max_leaf_nodes": 7}),
     ("history_hgb", {"max_leaf_nodes": 7, "alpha": 1}),
     ("history_hgb", {"max_leaf_nodes": 7.0}), ("history_hgb", {"max_leaf_nodes": True}),
