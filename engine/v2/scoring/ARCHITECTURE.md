@@ -89,7 +89,8 @@ load-bearing entrypoints:
 - `release_bindings.py` — `resolve_release_binding(release_root) ->
   ScoringReleaseBinding`, the production reader of a live deployment's model
   identity, model artifact refs, analog/payoff/recalibration/residual/chooser
-  artifacts, and the staged size-fold descriptor index (`size_folds`);
+  artifacts including `chooser_fold_references`, and the staged size-fold
+  descriptor index (`size_folds`);
   `resolve_production_release_binding()` is the same resolution against the
   one configured production release root
   (`engine.v2.models.deployment.production_release_root()`, config key
@@ -102,6 +103,9 @@ load-bearing entrypoints:
   resolving to the same key is a release defect, refused as `ModelNotReady`
   naming that key, never a silently-overwritten entry); `model_artifact_refs:
   Mapping[str, str]` **keyed by `binding_id`** (unique by construction).
+  `chooser_fold_references: Mapping[tuple[str, str], ChooserFoldReference]`
+  is keyed by `(producer_output, fold_start)` and carries only verified
+  descriptors; at most 34 chooser-fold objects are loaded for one binding.
   `ModelIdentity` carries `role`, `strategy_id`, `decision_clock_id`,
   `model_id`, `binding_id`, `adapter`, `feature_order`, `output_names`, and
   `artifact_hash` (a content hash over the binding's own verified member
@@ -187,6 +191,12 @@ state keys; `chooser_fold_pools`, `chooser_analog_pool` and
 builds that block only for menu candidates; state without a recipe or a recipe
 for another strategy raises `ValueError`. The chooser k-NN pool is distinct
 from the board bucket-analog pool.
+On production capture, `engine.score.Scorer` receives the verified reference
+map and `_phase4_record_chooser` records references for served folds as
+`chooser_references`. `strict_trace_one` validates them and writes the
+per-trace map to metadata field `chooser_fold_reference` when a chooser trace
+exists (`None` otherwise). Provenance stays outside chooser inputs and receipt;
+the optional `SourceBundle.chooser_fold_reference` is not populated here.
 
 `native_chooser`/`native_chooser_features` derive candidate features after
 native pricing and simulation. Invalid declared frozen state flags
@@ -621,6 +631,8 @@ rather than its own. `native_score_batch` goes through `score_one`, never
 - **R2, cache.** None for any field but `frozen_inference`: every other
   field's loader is constructed fresh per call and discarded on return, so
   two calls against the same `release_root` fully re-read and re-verify.
+  Chooser references are also re-resolved on every call, with at most 34 fold
+  objects and no cross-call reference-map cache.
   `frozen_inference`'s referenced `FrozenInference` owns its own mutable,
   content-hash-keyed member cache, populated lazily by `.infer()`, living as
   long as the caller holds the returned binding — deliberately, so the
@@ -671,6 +683,32 @@ R6: the same release and bytes yield an equal result; a caller resolving once
 per worker therefore sees one policy for the whole batch. The worker uses this
 result only when its `gate_policy` parameter is empty; a supplied policy wins
 and the release is not consulted for it.
+
+#### Chooser fold provenance reference
+
+A verified chooser-fold reference contains the descriptor hash, estimator
+digest, exact fold month, authoring parent release id and producer
+ModelIdentity. Its training_cutoff is the verified descriptor's fold_start,
+the exclusive boundary of training data for that fold.
+`resolve_release_binding` returns an empty
+`chooser_fold_references` map by default and does not load chooser estimators
+for ordinary nightly scoring. Callers that need these references opt in with
+`include_chooser_fold_references=True`; resolution returns a complete map or a
+typed refusal. A carried fold whose authoring release lacks canonical cutoff
+data refuses instead of producing a partial map. This contract slice defines
+the verified reference map; scorer and capture consumption is in the
+follow-up slice. It does not infer provenance from legacy rows. Production capture and release preparation consume this contract in the
+follow-up wiring slice.
+
+| Condition | Outcome |
+|---|---|
+| Chooser references not requested | Return an empty map without loading chooser estimators |
+| More than 34 staged chooser-fold objects when references are requested | ModelNotReady before any chooser fold is loaded |
+| Active legacy catalog has chooser-fold rows but no canonical retrain cutoff | Return an empty map |
+| Carried fold authoring release has no canonical cutoff | ModelNotReady; do not return a partial map |
+| Malformed, noncanonical or mismatched descriptor, estimator digest, parent binding, output or fold month | ModelNotReady; no partial reference map |
+| Reference resolution requested for a verified release | Re-verify each binding resolution; no cross-call reference cache |
+| Model member exceeds its byte cap or is not a regular file | ModelNotReady before chooser bytes are decoded |
 
 #### Chooser state members
 
