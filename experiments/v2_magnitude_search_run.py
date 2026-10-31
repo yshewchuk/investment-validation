@@ -32,7 +32,7 @@ from experiments.magnitude_search_execution import validate_execution_limits
 from experiments.magnitude_search_outer import collect_outer_results, execute_outer_fold
 from experiments.magnitude_search_plan import read_search_plan, trial_key
 from experiments.magnitude_search_records import MIGRATIONS, OWNER, append_record, read_record
-from experiments.magnitude_search_trials import SearchTrials
+from experiments.magnitude_search_trials import SearchTrials, require_execution_enabled
 from experiments.native_gate_worker import read_native_staged_input
 from experiments.native_registration import (
     MAX_NATIVE_EVIDENCE_BYTES,
@@ -80,6 +80,7 @@ def seal_search_run(conn, store, repository, registration, request, plan_ref, *,
 
 
 def _admit_driver(conn, store, registration, request, plan_ref):
+    require_execution_enabled(registration)
     require_current(conn, OWNER, MIGRATIONS)
     plan, binding = _binding(conn, store, registration, request, plan_ref)
     if read_record(conn, store, registration.run_id, "driver-seal") != binding:
