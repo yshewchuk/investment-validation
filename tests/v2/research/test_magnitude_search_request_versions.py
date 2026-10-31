@@ -105,6 +105,23 @@ class TestV2Refusals:
     test_cycles = staticmethod(legacy.test_container_subclasses_and_cycles_refuse)
 
 
+@pytest.mark.parametrize("schema", ["regression_search_request.v1", "magnitude_search_request.v1"])
+@pytest.mark.parametrize("horizons", [(1,), None])
+def test_legacy_schemas_refuse_external_horizon_selector(schema, horizons):
+    with pytest.raises(OpsError) as actual:
+        versions.compile_request({"schema_version": schema}, horizons=horizons)
+    assert actual.value.problem.code == "INVALID_EXPERIMENT_SPEC"
+    assert actual.value.problem.message == "stage-2 legacy requests do not accept a horizon selector"
+
+
+@pytest.mark.parametrize("schema", ["regression_search_request.v1", "magnitude_search_request.v1"])
+@pytest.mark.parametrize("horizons", [(5, 3, 1), [5, 3, 1]])
+def test_legacy_schemas_preserve_default_dispatch(schema, horizons, monkeypatch):
+    sentinel = object()
+    monkeypatch.setattr(versions, "compile_v1_request", lambda request: sentinel)
+    assert versions.compile_request({"schema_version": schema}, horizons=horizons) is sentinel
+
+
 def test_pinned_complete_v1_output_and_current_source_bytes(monkeypatch):
     def no_whole_file_read(*_, **__):
         pytest.fail("source digest must not materialize a whole file")
