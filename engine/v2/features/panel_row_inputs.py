@@ -15,7 +15,12 @@ never mutated; every helper downstream receives the validated event day.
 
 The four always-made pinned-snapshot dependencies:
 
-* ``scan_daily_state_inputs`` (``key.ticker``);
+* ``scan_daily_state_inputs`` (``key.ticker``); only an AMC event decided on its
+  own day needs a second ``scan_daily_state_inputs`` at the entry-dated cap
+  (``min(decision_session, event_day)``, later than the state read's cap) to
+  supply the analog query's ``entry_im``; a BMO/other event keeps the state
+  read, never reading its print-day close. Whichever read the entry value comes
+  from contributes its own source session to ``panel_anchor``;
 * a bounded ``computed_moves`` read (``key.ticker``, rows strictly before
   ``min(event_day, decision_session)`` -- the decision-session cutoff, not just
   the event-date one -- and whose outcome source was available on or before
@@ -483,6 +488,34 @@ def _legacy_named_inputs(daily_values: Mapping[str, float],
     return out
 
 
+def _entry_implied_move(repository: repository.Repository, snapshot: SnapshotRef,
+                        ticker: str, start: pd.Timestamp, decision: pd.Timestamp,
+                        event_day: pd.Timestamp, state_cap: pd.Timestamp,
+                        daily_state: daily_state_inputs.DailyStateInputs,
+                        session: str) -> tuple[float | None, str | None]:
+    """The entry-dated read (#681): the decision-date state the analog query
+    uses, as its ``(im, source_session)`` pair.
+
+    Only an AMC event decided on its own day needs a second scan -- there
+    ``entry_cap`` is ``min(decision, event_day)``; a BMO (or other) event never
+    reads its print-day close, so its cap stays ``state_cap``. When ``entry_cap``
+    is later than ``state_cap`` the second ``scan_daily_state_inputs`` is made and
+    its ``im`` and ``source_session`` are returned; otherwise the panel's state
+    read is reused. The same on-or-before lookup rule as legacy applies to the
+    chosen session: a missing entry-date session selects the previous eligible
+    one, and a NaN quote on the selected session is absent (``None``). Never a
+    near-zero filter.
+    """
+    entry_cap = min(decision, event_day) if str(session).upper() == "AMC" else state_cap
+    if entry_cap > state_cap:
+        entry_state = daily_state_inputs.scan_daily_state_inputs(
+            repository, snapshot, ticker=ticker,
+            history_start=start, decision_session=entry_cap,
+        )
+        return (entry_state.values.get("im"), entry_state.source_session)
+    return (daily_state.values.get("im"), daily_state.source_session)
+
+
 def scan_panel_row(
     repository: repository.Repository,
     snapshot: SnapshotRef,
@@ -512,6 +545,10 @@ def scan_panel_row(
         history_start=start, decision_session=state_cap,
     )
 
+    entry_im, entry_source = _entry_implied_move(repository, snapshot, key.ticker, start,
+                                                 decision, event_day, state_cap, daily_state,
+                                                 key.session)
+
     computed_rows = _read_computed_moves(repository, snapshot, key.ticker, start, decision, event_day)
     kept_moves = _kept_prior_moves(_available_rows(computed_rows, decision))
     history = _history_from_kept_moves(kept_moves)
@@ -539,7 +576,7 @@ def scan_panel_row(
         repository, snapshot, key.ticker, decision, event_day, history, kept_moves,
     )
 
-    panel_anchor = _anchor(daily_state.source_session, regime_asof, runup_asof,
+    panel_anchor = _anchor(daily_state.source_session, entry_source, regime_asof, runup_asof,
                            history_asof)
     panel_row: dict[str, Any] = {
         **daily_state.values,
@@ -550,4 +587,6 @@ def scan_panel_row(
         **_legacy_named_inputs(daily_state.values, runup_features),
         "date": event_day.date().isoformat(),
     }
+    if entry_im is not None:
+        panel_row["entry_im"] = entry_im
     return PanelRowInputs(panel_row=panel_row, panel_anchor=panel_anchor)

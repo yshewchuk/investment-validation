@@ -53,7 +53,7 @@ def test_unpriced_row_has_no_dte_band_and_keeps_the_whole_pool():
     assert values["n_analogs"] == 60
 
 
-_PANEL = {"mcap_log": math.log(5e10), "im": 0.09, "mean_prior_or_implied": 0.06}
+_PANEL = {"mcap_log": math.log(5e10), "entry_im": 0.09, "mean_prior_or_implied": 0.06}
 
 
 def _analogs_observation(spot, expiry=None):

@@ -1,5 +1,7 @@
 """Real native synthetic catalogs/panels, never SIZE fits or private inputs."""
 from copy import deepcopy
+from hashlib import sha256
+from io import BytesIO
 from pathlib import Path
 
 import pytest
@@ -10,10 +12,12 @@ from engine.v2.foundation import SystemClock, canonical_json, content_hash, to_d
 from engine.v2.models.no_fit import no_fit_guard
 from engine.v2.ops.errors import OpsError, fail
 from experiments import distribution_plan, distribution_trials
+from experiments import distribution_run_plan as run_metadata
 from experiments.distribution_candidate_recipe import candidate_recipe
 from experiments.magnitude_search_inputs import load_fit_inputs
 from experiments.native_registration import prepare_native_registration, reserve_native_registration
 from tests.v2.research.magnitude_trial_support import poison_outcomes, prediction_spec
+from tests.v2.research.test_distribution_run_request import request as run_request
 from tests.v2.research.test_size_search_integration import case as source_case
 
 pytestmark = pytest.mark.xdist_group("distribution_native_admission")
@@ -57,6 +61,77 @@ def source_records(case):
 
 def forbidden(*args, **kwargs):
     pytest.fail("metadata admission must not execute a SIZE or distribution estimator")
+
+
+def test_native_plan_pins_fixed_worker_source_bytes(case, own):
+    adapter = trials(case, own)
+    with no_fit_guard(), legacy_no_fit():
+        plan = adapter.seal(clock=SystemClock())
+    worker = "experiments/distribution_worker.py"
+    assert plan["implementation"]["source_closure"][worker] == "sha256:" + sha256((ROOT / worker).read_bytes()).hexdigest()
+
+
+def test_run_metadata_binds_distinct_source_request_through_native_plan(case, own, monkeypatch):
+    adapter = trials(case, own)
+    policy = run_request()
+    policy["bridges"] = [entry for entry in policy["bridges"] if entry["outer_year"] == "2024"]
+    policy["quote_snapshot_id"] = case.panel_source.snapshot_id
+    # Only the unrelated D bridge transport is doubled; B/source admission and
+    # its request/reference/hash chain use the real synthetic native catalog.
+    bridge_reads = []
+    monkeypatch.setattr(run_metadata, "read_bridge", lambda *args: bridge_reads.append(args))
+    run = run_metadata.DistributionRunPlan(adapter, policy)
+    before = case.conn.total_changes
+    with no_fit_guard(), legacy_no_fit():
+        b_plan, native = run.plans()
+        plan = run.preflight()
+        assert adapter.request["schema_version"] == "magnitude_search_request.v2"
+        assert plan["request"] == policy and policy["schema_version"] == "distribution_run_request.v1"
+        assert b_plan["source_plan_id"] == native["plan_id"] == case.plan["plan_id"]
+        assert native["request"] == adapter.request
+        assert plan["admission_plan_id"] == b_plan["plan_id"]
+        assert plan["run_plan_id"] == content_hash({k: v for k, v in plan.items() if k != "run_plan_id"})
+        reads = len(bridge_reads)
+        adapter.request["max_fits"] += 1
+        with pytest.raises(OpsError) as caught:
+            run.preflight()
+        assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+        assert len(bridge_reads) == reads
+    assert case.conn.total_changes == before
+
+
+def test_worker_only_source_drift_changes_plan_and_refuses_old_seal(case, own, monkeypatch):
+    adapter = trials(case, own)
+    sealed = adapter.seal(clock=SystemClock())
+    assert adapter.seal(clock=SystemClock()) == sealed
+    worker = ROOT / "experiments/distribution_worker.py"
+    original = worker.read_bytes()
+    changed = original + b"\n# synthetic worker-only source drift\n"
+    original_open = Path.open
+
+    def changed_worker_bytes(path, mode="r", *args, **kwargs):
+        if path == worker and mode == "rb":
+            return BytesIO(changed)
+        return original_open(path, mode, *args, **kwargs)
+
+    before = case.conn.total_changes
+    with monkeypatch.context() as patch, no_fit_guard(), legacy_no_fit():
+        patch.setattr(Path, "open", changed_worker_bytes)
+        patch.setattr(distribution_trials, "fold_inputs", forbidden)
+        updated, _ = distribution_plan.prepare_plan(adapter.conn, adapter.store, adapter.own,
+            adapter.source, adapter.request, adapter.source_plan_ref, adapter.recipe, adapter.caps)
+        assert updated["plan_id"] != sealed["plan_id"]
+        old_sources, new_sources = (plan["implementation"]["source_closure"] for plan in (sealed, updated))
+        assert old_sources.keys() == new_sources.keys()
+        assert [name for name in new_sources if new_sources[name] != old_sources[name]] == ["experiments/distribution_worker.py"]
+        assert new_sources["experiments/distribution_worker.py"] == "sha256:" + sha256(changed).hexdigest()
+        for action in (lambda: adapter.seal(clock=SystemClock()), lambda: adapter.start("inner", "2024", "2023")):
+            with pytest.raises(OpsError) as caught:
+                action()
+            assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+        assert case.conn.total_changes == before
+    assert worker.read_bytes() == original
+    assert adapter.seal(clock=SystemClock()) == sealed
 
 
 @pytest.mark.parametrize("feature_set", ["H", "HM", "HMO"])

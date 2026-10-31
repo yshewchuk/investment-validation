@@ -151,14 +151,25 @@ def test_unreadable_object_refuses_without_leaking_path(tmp_path):
     staged = _staged_object(tmp_path, payload, artifact.content_hash)
     _write_catalog(tmp_path, rows=[_row(_MEMBER, [staged])])
     object_path = _dep_root(tmp_path) / staged["path"]
-    real_read = Path.read_bytes
+    real_open, real_fdopen = os.open, os.fdopen
+    target_stat = object_path.stat()
+    target_identity = target_stat.st_dev, target_stat.st_ino
+    target_fds = set()
 
-    def failing_read(self):
-        if self == object_path:
+    def tracked_open(path, *args, **kwargs):
+        fd = real_open(path, *args, **kwargs)
+        stat = os.fstat(fd)
+        if (stat.st_dev, stat.st_ino) == target_identity:
+            target_fds.add(fd)
+        return fd
+
+    def failing_fdopen(fd, *args, **kwargs):
+        if fd in target_fds:
             raise OSError("simulated read failure")
-        return real_read(self)
+        return real_fdopen(fd, *args, **kwargs)
 
-    with unittest.mock.patch.object(Path, "read_bytes", failing_read):
+    with unittest.mock.patch.object(os, "open", tracked_open), \
+            unittest.mock.patch.object(os, "fdopen", failing_fdopen):
         with pytest.raises(ModelNotReady) as error:
             resolve_release_binding(tmp_path)
     assert error.value.member_id == _MEMBER
@@ -455,5 +466,4 @@ def test_state_catalog_read_stops_at_its_cap(tmp_path, monkeypatch):
     with pytest.raises(ModelNotReady) as error:
         resolve_release_binding(tmp_path)
     assert error.value.member_id == "phase5_release.json"
-    assert log and all(0 <= size <= cap + 1 for size, _ in log)
-    assert sum(got for _, got in log) <= cap + 1
+    assert log and log[-1] == (cap + 1, cap + 1)

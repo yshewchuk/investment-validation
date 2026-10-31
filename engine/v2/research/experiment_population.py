@@ -2,35 +2,48 @@
 from __future__ import annotations
 
 from engine.v2.contracts.data import SnapshotRef
-from engine.v2.data import errors
+from engine.v2.data import errors, objects
 from engine.v2.research import progress
 from engine.v2.research._scan import read_table
 from engine.v2.research.experiment_trades import _exclude_holdouts, _holdout_context
 from engine.v2.research.snapshot_inputs import admit_snapshot
 
 
-def canonical_events(repository, snapshot):
-    """Read the six canonical metadata columns from a native snapshot reference."""
+def canonical_events(repository, snapshot, *, max_object_bytes=None):
+    """Read the six canonical metadata columns from a native snapshot reference.
+
+    ``max_object_bytes``, when given, bounds the read's decoded row-group bytes;
+    an invalid cap refuses eagerly, before snapshot admission; ``None``
+    changes nothing."""
+    if max_object_bytes is not None:
+        objects.validate_max_object_bytes(max_object_bytes)
     admit_snapshot(repository, snapshot)
-    return _canonical_events(repository, snapshot)
+    return _canonical_events(repository, snapshot, max_object_bytes=max_object_bytes)
 
 
-def _canonical_events(repository, snapshot):
+def _canonical_events(repository, snapshot, *, max_object_bytes=None):
     """Canonical event metadata with same-ticker/date duplicates flagged; shared with the final reader."""
     events = read_table(repository, snapshot, "earnings_events", (
-        "event_id", "ticker", "event_date", "session", "date_conflict", "event_cluster_id"))
+        "event_id", "ticker", "event_date", "session", "date_conflict", "event_cluster_id"),
+        max_object_bytes=max_object_bytes)
     events.loc[events.duplicated(["ticker", "event_date"], keep=False), "date_conflict"] = True
     return events
 
 
 def load_population(repository, snapshot, *, as_of_month, purpose="selection",
-                    event_ids=None):
+                    event_ids=None, max_object_bytes=None):
     """Read canonical metadata only; explicit excluded IDs refuse the whole read.
 
     Canonical scans log stage boundaries and bounded row progress for both modes.
-    Full-universe reads also log outer completion when they take at least 5 s."""
+    Full-universe reads also log outer completion when they take at least 5 s.
+    ``max_object_bytes`` bounds the scan's decoded row-group bytes; ``None``
+    keeps the decoder default unchanged. A given cap is validated eagerly,
+    before any snapshot or fragment work."""
+    if max_object_bytes is not None:
+        objects.validate_max_object_bytes(max_object_bytes)
     args = (repository, snapshot)
-    kwargs = dict(as_of_month=as_of_month, purpose=purpose, event_ids=event_ids)
+    kwargs = dict(as_of_month=as_of_month, purpose=purpose, event_ids=event_ids,
+                  max_object_bytes=max_object_bytes)
     if event_ids is not None:
         return _load_population(*args, **kwargs)
     with progress.stage("load_population", quiet_under=5.0):
@@ -38,7 +51,7 @@ def load_population(repository, snapshot, *, as_of_month, purpose="selection",
 
 
 def _load_population(repository, snapshot, *, as_of_month, purpose="selection",
-                     event_ids=None):
+                     event_ids=None, max_object_bytes=None):
     """Read canonical metadata only; explicit excluded IDs refuse the whole read."""
     if (not isinstance(snapshot, SnapshotRef) or not isinstance(snapshot.snapshot_id, str)
             or not snapshot.snapshot_id.strip()):
@@ -50,7 +63,7 @@ def _load_population(repository, snapshot, *, as_of_month, purpose="selection",
     if resolved != snapshot:
         raise errors.fail("SNAPSHOT_UNRESOLVED", "snapshot differs from its committed identity")
     policy, context = _holdout_context(snapshot, as_of_month, purpose, event_ids)
-    events = _canonical_events(repository, snapshot)
+    events = _canonical_events(repository, snapshot, max_object_bytes=max_object_bytes)
     if event_ids is not None:
         if not event_ids or set(event_ids) - set(events["event_id"]):
             raise errors.fail("HOLDOUT_ACCESS_DENIED", "requested event membership cannot be resolved")
