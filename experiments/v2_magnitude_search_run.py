@@ -74,6 +74,8 @@ def _parallel_trial_task(task):
         return _complete_trial(
             trials, trials.execute, args, key, limits=limits,
             read=lambda slot: read_record(conn, store, registration.run_id, slot))
+    except OpsError:
+        raise
     except (OSError, sqlite3.Error):
         raise fail("RESOURCE_UNAVAILABLE", "search worker storage unavailable") from None
 
