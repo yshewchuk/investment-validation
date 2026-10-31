@@ -83,7 +83,8 @@ def test_parent_output_buffer_cap_counts_newline_inclusively(monkeypatch, extra)
     # One atomic write makes the boundary independent of pipe chunk scheduling.
     observed = observe_launch(monkeypatch, instrumentation=f"""
 def emit(value):
-    assert value == {SUCCESS!r}
+    assert value["event"] == {SUCCESS["event"]!r}
+    assert value["forecasts"] == {SUCCESS["forecasts"]!r}
     payload = {wire!r}
     descriptor = sys.stdout.fileno()
     assert len(payload) <= worker.os.fpathconf(descriptor, 'PC_PIPE_BUF')
@@ -196,9 +197,10 @@ def emit(value):
 worker.emit = emit
 """)
     result = run(limits=limits)
-    assert {key: result[key] for key in SUCCESS} == SUCCESS
+    assert result["event"] == SUCCESS["event"]
+    assert result["forecasts"] == SUCCESS["forecasts"]
     assert type(result["score_seconds"]) is float and math.isfinite(result["score_seconds"])
-    assert result["score_seconds"] >= 0
+    assert result["score_seconds"] > 0
     assert type(result["rss_delta_kib"]) is int and result["rss_delta_kib"] >= 0
     assert os.sched_getaffinity(0) == allowed
     assert_cleaned(observed)

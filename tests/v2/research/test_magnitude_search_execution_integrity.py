@@ -571,7 +571,7 @@ def expected_native_receipt(succeeded=True):
         prediction = {"columns": columns, "row_keys": [["event", "history", horizon]], "values": [[0.0] * 11]}
         fits.append({"horizon_sessions": horizon, "training_event_ids": ["train"],
             "evaluation_event_ids": ["event"], "training_matrix_id": content_hash(training),
-            "prediction_matrix_id": content_hash(prediction), "fit_seconds": 0.25})
+            "prediction_matrix_id": content_hash(prediction)})
     preflight, recipe = inputs["preflight"], magnitude_recipe()
     evaluation = {"schema_version": "research_magnitude_targets.v1",
         **{name: preflight[name] for name in ("snapshot_id", "holdout_as_of_month", "random_membership_version",

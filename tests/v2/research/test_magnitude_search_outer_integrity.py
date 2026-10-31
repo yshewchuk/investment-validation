@@ -677,15 +677,17 @@ def test_outer_replay_uses_registered_diagnostic_keys(monkeypatch):
     plan = {"horizons": [1]}
     forecasts = [{"event_id": "event", "horizon_sessions": 1,
         "predicted_absolute_move_pct": 2.0}]
-    worker = {"event": "succeeded", "forecasts": forecasts, "custom_diagnostic": "value",
-        "score_seconds": 0.0, "rss_delta_kib": 0}
+    worker = {"event": "succeeded", "forecasts": forecasts, "custom_diagnostic": "value"}
     terminal = {"inputs_id": "inputs"}
     receipt = {"status": "succeeded", "fits": [], "fit_attempt_count": 0,
         "completed_fit_count": 0, "forecasts_id": content_hash(forecasts),
-        "custom_diagnostic": "value", "score_seconds": 0.0, "rss_delta_kib": 0}
+        "custom_diagnostic": "value"}
     journal = {"start": started, "inputs": {"manifest": "manifest"}, "terminal": terminal,
-        "forecasts": forecasts, "worker-result": worker, "execution": receipt}
-    monkeypatch.setattr(outer, "diagnostic_keys", lambda _: {"custom_diagnostic"})
+        "forecasts": forecasts, "worker-result": worker, "execution": receipt, "validation": {}}
+    def registered_keys(dispatched_binding):
+        assert dispatched_binding is binding
+        return {"custom_diagnostic"}
+    monkeypatch.setattr(outer, "diagnostic_keys", registered_keys)
     monkeypatch.setattr(outer, "diagnostic_evidence", lambda *a: {"custom_diagnostic": "value"})
     monkeypatch.setattr(outer, "load_inputs", lambda *a: {})
     monkeypatch.setattr(outer, "fit_evidence", lambda *a: [])

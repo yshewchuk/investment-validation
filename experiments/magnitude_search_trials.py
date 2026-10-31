@@ -578,17 +578,19 @@ class SearchTrials:
                     metrics = magnitude_metrics(record["predictions"])
                 except (OpsError, OverflowError):
                     raise ValueError from None
-                if record["metrics"] != metrics:
+                if canonical_json(record["metrics"]) != canonical_json(metrics):
                     raise ValueError
                 if timed:
                     try:
                         inner_metrics = self._inner_metrics(record["predictions"], plan["horizons"])
                     except OpsError:
                         raise ValueError from None
-                    if (not _finite_nonnegative(record["score_seconds"])
+                    if (not _finite_nonnegative(record.get("score_seconds"))
+                            or not _nonnegative_int(record.get("rss_delta_kib"))
                             or record["score_seconds"] < execution["score_seconds"]
-                            or record["rss_delta_kib"] != execution["rss_delta_kib"]
-                            or record["inner_metrics"] != inner_metrics):
+                            or canonical_json(record["rss_delta_kib"])
+                            != canonical_json(execution["rss_delta_kib"])
+                            or canonical_json(record["inner_metrics"]) != canonical_json(inner_metrics)):
                         raise ValueError
             elif record["status"] not in ("failed", "refused"):
                 raise ValueError
@@ -603,8 +605,12 @@ class SearchTrials:
                         or (record["status"] == "failed") != (submitted is None)):
                     raise ValueError
                 if timed:
-                    if (record["score_seconds"] != execution["score_seconds"]
-                            or record["rss_delta_kib"] != execution["rss_delta_kib"]):
+                    if (not _finite_nonnegative(record.get("score_seconds"))
+                            or not _nonnegative_int(record.get("rss_delta_kib"))
+                            or canonical_json(record["score_seconds"])
+                            != canonical_json(execution["score_seconds"])
+                            or canonical_json(record["rss_delta_kib"])
+                            != canonical_json(execution["rss_delta_kib"])):
                         raise ValueError
         except (ValueError, TypeError, KeyError, OverflowError):
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search trial evidence chain differs") from None

@@ -37,8 +37,8 @@ def expected_fits():
 
 
 def completed_fits():
-    """Static fit-started evidence plus the one completed-marker timing field."""
-    return [{**fit, "fit_seconds": 0.25} for fit in expected_fits()]
+    """Static evidence expected in the completion markers before timing is checked."""
+    return expected_fits()
 
 
 def interrupt(monkeypatch, recorder, stage, after):
@@ -391,16 +391,15 @@ def test_real_fixed_child_is_reaped_before_result_becomes_recoverable(native, mo
     assert result["fits"] == expected_fits()
     for fit in completed_fits():
         marker = native.recorder._read("fit-completed:" + KEY + ":" + str(fit["horizon_sessions"]))
-        assert marker == fit
+        assert {key: value for key, value in marker.items() if key != "fit_seconds"} == fit
         seconds = marker["fit_seconds"]
-        assert isinstance(seconds, float) and not isinstance(seconds, bool)
-        assert math.isfinite(seconds) and seconds >= 0.0
+        assert type(seconds) is float and math.isfinite(seconds) and seconds > 0.0
     result_record = native.recorder._read("execution-result:" + KEY)["result"]
     assert result_record["event"] == "succeeded"
     assert result_record["forecasts"] == rows(2.0)
     score_seconds = result_record["score_seconds"]
     assert isinstance(score_seconds, float) and not isinstance(score_seconds, bool)
-    assert math.isfinite(score_seconds) and score_seconds >= 0.0
+    assert math.isfinite(score_seconds) and score_seconds > 0.0
     rss_delta_kib = result_record["rss_delta_kib"]
     assert isinstance(rss_delta_kib, int) and not isinstance(rss_delta_kib, bool)
     assert rss_delta_kib >= 0
