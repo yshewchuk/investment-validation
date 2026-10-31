@@ -2,16 +2,29 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 
 from engine.v2.foundation import canonical_json
 
 __all__ = ["ridge_hgb_recipe", "validate_ridge_hgb_recipe"]
 
+_RIDGE_ALPHA_BOUNDS = (1e-6, 1000.0)
+
+
+def _bounded_alpha(value) -> bool:
+    lower, upper = _RIDGE_ALPHA_BOUNDS
+    if type(value) not in (int, float) or not lower <= value <= upper:
+        return False
+    try:
+        return math.isfinite(float(value))
+    except (OverflowError, ValueError):
+        return False
+
 
 def _parameters(model, alpha, max_leaf_nodes):
     if model == "history_ridge":
-        if type(alpha) not in (int, float) or alpha not in (0.1, 1.0, 10.0) or max_leaf_nodes is not None:
+        if not _bounded_alpha(alpha) or max_leaf_nodes is not None:
             raise ValueError("Ridge requires declared alpha and no HGB parameter")
         return {"alpha": float(alpha), "fit_intercept": True, "copy_X": True,
                 "max_iter": None, "tol": 0.0001, "solver": "svd", "positive": False,

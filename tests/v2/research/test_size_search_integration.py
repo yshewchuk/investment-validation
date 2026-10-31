@@ -81,6 +81,26 @@ def test_native_v17_anchor_and_explicit_v2_fitted_identities(case):
     assert {len(c["recipe"]["features"]) for c in plan["candidates"]} == {11, 28, 43}
 
 
+def test_v3_qualified_request_seals_reconstructs_v2_plan(case):
+    v3 = deepcopy(case.request)
+    v3["schema_version"] = "magnitude_search_request.v3"
+    v3["space"] = {
+        "ridge": {"alpha": [0.01, 0.1, 1.0, 10.0, 100.0]},
+        "elasticnet": {"alpha": [0.001, 0.003, 0.01, 0.03, 0.1, 1.0],
+                       "l1_ratio": [0.25, 0.75]},
+        "hgb": {"max_leaf_nodes": [7, 15]}}
+    v3.update(max_candidates=57, max_fits=174)
+    spec = prediction_spec(experiment_id="synthetic-qualified-size-v3", folds=("2024",),
+                           runner="experiments/size_search.py")
+    registration, spec = binding.prepare(case.repository, spec, v3, case.panel_request, **case.args)
+    reserve_native_registration(case.conn, case.store, registration, spec)
+    verify_native_registration(case.conn, case.store, registration)
+    sealed = planner.seal_search_plan(case.conn, case.store, registration, v3)
+    assert sealed["plan"]["schema_version"] == "magnitude_search_plan.v2"
+    ref = from_document(ArtifactRef, sealed["plan_ref"])
+    assert planner.read_search_plan(case.conn, case.store, registration, v3, ref) == sealed["plan"]
+
+
 def test_native_registration_detaches_caller_document(case):
     from experiments.native_registration import NativeRegistration
 
