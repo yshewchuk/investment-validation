@@ -746,3 +746,36 @@ def test_outer_replay_requires_consistent_worker_and_fit_timing(
     else:
         result = outer._replay(lambda slot: journal[slot], None, started, fold, plan, execution, binding)
         assert result == terminal
+
+
+@pytest.mark.parametrize("schema_version, refuses", [
+    ("size_candidate_execution.v1", True),
+    ("magnitude_execution.v1", False),
+])
+def test_outer_replay_requires_worker_result_only_for_size_executions(monkeypatch, schema_version, refuses):
+    binding = {}
+    execution = {"schema_version": schema_version}
+    started = {"outer_id": "outer"}
+    fold = {"evaluation_event_ids": ["event"]}
+    plan = {"horizons": [1]}
+    forecasts = [{"event_id": "event", "horizon_sessions": 1,
+        "predicted_absolute_move_pct": 2.0}]
+    fit = {"horizon_sessions": 1}
+    terminal = {"inputs_id": "inputs"}
+    receipt = {"status": "succeeded", "fits": [fit], "fit_attempt_count": 1,
+        "completed_fit_count": 1, "forecasts_id": content_hash(forecasts)}
+    journal = {"start": started, "inputs": {"manifest": "manifest"}, "terminal": terminal,
+        "forecasts": forecasts, "execution": receipt, "validation": {},
+        "fit-started:1": fit, "fit-completed:1": fit}
+    monkeypatch.setattr(outer, "diagnostic_keys", lambda _binding: set())
+    monkeypatch.setattr(outer, "diagnostic_evidence", lambda *a: {})
+    monkeypatch.setattr(outer, "load_inputs", lambda *a: {})
+    monkeypatch.setattr(outer, "fit_evidence", lambda *a: [fit])
+    monkeypatch.setattr(outer, "_result", lambda *a: terminal)
+
+    if refuses:
+        with outer_problem("EXPERIMENT_IDENTITY_CONFLICT", CONFLICT):
+            outer._replay(lambda slot: journal.get(slot), None, started, fold, plan, execution, binding)
+    else:
+        result = outer._replay(lambda slot: journal.get(slot), None, started, fold, plan, execution, binding)
+        assert result == terminal

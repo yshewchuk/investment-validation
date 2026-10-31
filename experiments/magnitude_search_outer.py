@@ -162,6 +162,8 @@ def _replay(read, store, started, fold, plan, execution, binding):
         receipt = {"status": "succeeded", "fits": fits, "fit_attempt_count": len(fits),
                    "completed_fit_count": len(fits), "forecasts_id": content_hash(forecasts)}
         worker = read("worker-result")
+        if worker is None and execution.get("schema_version") == "size_candidate_execution.v1":
+            raise _conflict()
         timed_worker = None
         if worker is not None:
             if not _timed_shape(worker, {"event", "forecasts"} | diagnostic_keys(binding), legacy=True):
