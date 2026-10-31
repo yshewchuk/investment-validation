@@ -191,12 +191,19 @@ state keys; `chooser_fold_pools`, `chooser_analog_pool` and
 builds that block only for menu candidates; state without a recipe or a recipe
 for another strategy raises `ValueError`. The chooser k-NN pool is distinct
 from the board bucket-analog pool.
-On production capture, `engine.score.Scorer` receives the verified reference
-map and `_phase4_record_chooser` records references for served folds as
-`chooser_references`. `strict_trace_one` validates them and writes the
-per-trace map to metadata field `chooser_fold_reference` when a chooser trace
-exists (`None` otherwise). Provenance stays outside chooser inputs and receipt;
-the optional `SourceBundle.chooser_fold_reference` is not populated here.
+Strict Tier-0 capture opts into `resolve_production_release_binding`'s
+verified chooser-fold references and passes the verified map to
+`engine.score.Scorer`. The scorer records only references matching the
+producer output and fold month it served. `strict_trace_one` checks each
+reference against the recorded producer binding and the request's canonical
+decision date, then writes the validated map to metadata field
+`chooser_fold_references` when a chooser trace has producer folds (`None`
+otherwise). Capture performs no catalog lookup and never infers missing
+provenance. A chooser trace with a producer fold but no matching verified
+reference refuses. Provenance stays outside chooser inputs and the receipt;
+orphan references, incomplete producer coverage and invalid dates also refuse.
+`SourceBundle.chooser_fold_reference` remains an optional API field and is
+not used by this legacy capture path.
 
 `native_chooser`/`native_chooser_features` derive candidate features after
 native pricing and simulation. Invalid declared frozen state flags

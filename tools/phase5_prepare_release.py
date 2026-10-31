@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+from datetime import date
 import hashlib
 import json
 import re
@@ -591,6 +592,28 @@ def _staging_id_conflict(exc) -> bool:
     return False
 
 
+def _with_chooser_retrain_cutoff(sources, chooser_validated):
+    if not chooser_validated:
+        return sources
+    try:
+        fold_starts = [item.fold_start for item in chooser_validated.values()]
+        parsed_starts = [date.fromisoformat(value) for value in fold_starts]
+        if any(parsed.isoformat() != value for parsed, value in zip(parsed_starts, fold_starts)):
+            raise ValueError("noncanonical")
+        retrain_cutoff = max(parsed_starts).isoformat()
+        declared_cutoff = (sources or {}).get("retrain_cutoff")
+        if declared_cutoff is not None and declared_cutoff != retrain_cutoff:
+            raise ValueError("mismatch")
+        pool_cutoff = (sources or {}).get("pool_cutoff")
+        if pool_cutoff is not None:
+            parsed_pool_cutoff = date.fromisoformat(pool_cutoff)
+            if parsed_pool_cutoff.isoformat() != pool_cutoff or parsed_pool_cutoff < date.fromisoformat(retrain_cutoff):
+                raise ValueError("pool cutoff")
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise PrepareRefused("chooser folds require a canonical training cutoff") from exc
+    return {**dict(sources or {}), "retrain_cutoff": retrain_cutoff}
+
+
 def write_release(out: Path, release: ModelRelease, inventory: ModelReleaseInventory,
                   payloads: Mapping[str, bytes], states: list[StateBuild], *,
                   sources: Mapping[str, str] | None = None,
@@ -608,6 +631,7 @@ def write_release(out: Path, release: ModelRelease, inventory: ModelReleaseInven
         raise PrepareRefused(f"{COPY_PREFIX}refused: caller-supplied pinned sources")
     release, states = _rebase_member_paths(release, states, pinned_panel)
     sources, validated, chooser_validated = _run_preflights(release, states, pinned_panel, sources)
+    sources = _with_chooser_retrain_cutoff(sources, chooser_validated)
     out = Path(out)
     root = deployment_root(out)
     root.mkdir(parents=True, exist_ok=True)
