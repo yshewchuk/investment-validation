@@ -373,6 +373,8 @@ class SourceBundle:
     # population and n_admissible table, checked against the keys
     # ``chooser_recipe["analog_pool"]``/``["admissible_table"]`` declare.
     chooser_fold_pools: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
+    # Verified descriptor references selected for the chooser's served folds.
+    chooser_fold_reference: Any = None
     chooser_analog_pool: "ChooserAnalogPoolArtifact | None" = None
     chooser_admissible_table: "AdmissibleDepthTable | None" = None
     # R4-20 (c): a forecast legacy read from the STORED Tier-4 table instead

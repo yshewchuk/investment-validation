@@ -953,6 +953,14 @@ def test_real_cli_obtains_role_policy_without_fitting_or_data_reads(
     monkeypatch.setattr(inventory, "current_release_inventory", lambda: (inv, ()))
     monkeypatch.setattr(prep, "model_release", lambda *a, **k: (release, payloads))
     monkeypatch.setattr(prep, "modules_available", lambda *a: (False, "unused"))
+    collect_payloads = prep._collect_payloads
+
+    def collect_with_pool(*args, **kwargs):
+        found = collect_payloads(*args, **kwargs)
+        found["chooser_analog_pool"] = {"chooser_pool|2026-09-30": b"pool"}
+        return found
+
+    monkeypatch.setattr(prep, "_collect_payloads", collect_with_pool)
     monkeypatch.setattr(tier4, "size_feature_model", lambda: SimpleNamespace(
         model_id="unused-size", features=("size-x",), interval_floor=0.0, produces="pred_abs_move"))
     calls = []
