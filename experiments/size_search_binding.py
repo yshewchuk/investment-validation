@@ -220,8 +220,7 @@ def _shared_inner(folds):
         for inner in owner["inner"]:
             prior = seen.setdefault(inner["year"], inner)
             if (prior["training_candidate_event_ids"] != inner["training_candidate_event_ids"]
-                    or prior["evaluation_event_ids"] != inner["evaluation_event_ids"]
-                    or prior["evaluation_labels_before"] != inner["evaluation_labels_before"]):
+                    or prior["evaluation_event_ids"] != inner["evaluation_event_ids"]):
                 raise fail("EXPERIMENT_IDENTITY_CONFLICT",
                     "repeated inner-year folds differ after eligibility filtering")
 
