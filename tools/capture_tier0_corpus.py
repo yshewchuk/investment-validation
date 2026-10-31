@@ -60,7 +60,7 @@ import tempfile
 import time
 from dataclasses import fields as dataclass_fields
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -3678,6 +3678,56 @@ def _merged_resources(*groups: Sequence[Mapping[str, Any]]) -> list[dict[str, An
     return list(merged.values())
 
 
+def _validated_chooser_fold_references(source, request):
+    if source is None:
+        return None
+    frozen = source.get("frozen")
+    if not isinstance(frozen, Mapping):
+        return None
+    declarations = frozen.get("declarations") or {}
+    bindings = frozen.get("bindings") or {}
+    refs = frozen.get("chooser_references") or {}
+    producers = {key[13:]: value for key, value in declarations.items()
+                 if isinstance(key, str) and key.startswith("chooser_fold:")
+                 and isinstance(value, Mapping) and "binding" in value}
+    if not producers:
+        if refs:
+            raise StrictTraceCaptureError("chooser refs lack declarations")
+        return None
+    if not isinstance(refs, Mapping) or set(refs) != set(producers):
+        raise StrictTraceCaptureError("chooser refs do not cover producers")
+    try:
+        decision = date.fromisoformat(request.requested_decision_at[:10])
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise StrictTraceCaptureError("chooser ref has invalid dates") from exc
+    for output, declaration in producers.items():
+        ref = refs[output]
+        producer = bindings.get(declaration.get("binding")) if isinstance(declaration, Mapping) else None
+        identity = ref.get("release_binding") if isinstance(ref, Mapping) else None
+        try:
+            fold = date.fromisoformat(ref["fold_start"])
+            cutoff = date.fromisoformat(ref["training_cutoff"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise StrictTraceCaptureError("chooser ref has invalid dates") from exc
+        digest = ref.get("estimator_sha256")
+        descriptor = ref.get("descriptor_hash")
+        if (not isinstance(producer, Mapping) or not isinstance(identity, Mapping)
+                or fold.isoformat() != ref["fold_start"] or fold.day != 1 or cutoff != fold
+                or fold >= decision or ref.get("producer_output") != output
+                or declaration.get("output") != output
+                or tuple(producer.get("output_names") or ()) != (output,)
+                or producer.get("fold_start") != ref["fold_start"]
+                or not isinstance(digest, str) or len(digest) != 71
+                or not digest.startswith("sha256:")
+                or producer.get("artifact_sha256") != digest[7:]
+                or identity.get("model_id") != producer.get("model_id")
+                or identity.get("role") != producer.get("role")
+                or not ref.get("release_id") or not isinstance(descriptor, str)
+                or len(descriptor) != 71 or not descriptor.startswith("sha256:")):
+            raise StrictTraceCaptureError("chooser ref mismatches served producer")
+    return dict(refs)
+
+
 def strict_trace_one(
     candidate: Mapping[str, Any], snapshot: str, release_root: Path,
 ) -> tuple[dict[str, Any], Any]:
@@ -3713,6 +3763,7 @@ def strict_trace_one(
     chooser = (frozen_chooser_declaration(
         candidate, deployment_id=request.deployment_id, release_root=release_root)
         if source is not None else None)
+    chooser_fold_references = _validated_chooser_fold_references(source, request)
     refs = (*(package.request_refs if package else ()),
             *(chooser[1].request_refs if chooser else ()))
     if refs:
@@ -3774,6 +3825,7 @@ def strict_trace_one(
             "legacy_checkpoint_hash": content_hash(
                 candidate["legacy_trace"], fragments=_SHARED_TRACE_DOCUMENTS),
             "frozen_inference": package.trace_declaration if package else None,
+            "chooser_fold_references": chooser_fold_references,
         },
         frozen_runtime=runtime,
         execution_inputs=execution_inputs,
@@ -4816,7 +4868,17 @@ def main(argv: Iterable[str] | None = None) -> int:
         hb.begin_stage("gather")
         hb.phase("build-scorer")
         print("[corpus] building the scorer (panel + replayed trades)...", flush=True)
-        scorer = score_mod.Scorer()
+        chooser_fold_references = {}
+        if args.strict_phase4_trace:
+            from engine.v2.scoring.release_bindings import (
+                ReleaseBindingError, resolve_production_release_binding,
+            )
+            try:
+                chooser_fold_references = resolve_production_release_binding(
+                    include_chooser_fold_references=True).chooser_fold_references
+            except ReleaseBindingError as exc:
+                ap.error(f"production chooser references unavailable: {exc}")
+        scorer = score_mod.Scorer(chooser_fold_references=chooser_fold_references)
         print(f"[corpus] scorer ready in {time.time()-started:.0f}s", flush=True)
 
         # `_candidate()` spills every candidate's `legacy_trace` to disk the

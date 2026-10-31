@@ -1111,11 +1111,172 @@ from engine.v2.scoring.source_inputs import (  # noqa: E402
 )
 from tools.capture_tier0_corpus import (  # noqa: E402
     CHOOSER_PRIMITIVE_COLUMNS,
+    _validated_chooser_fold_references,
     frozen_source_declarations,
 )
-from tools.phase5_prepare_release import CHOOSER_POOL_ID  # noqa: E402
+from tools.phase5_prepare_release import (  # noqa: E402
+    CHOOSER_POOL_ID,
+    PrepareRefused,
+    _with_chooser_retrain_cutoff,
+)
 
 FOLD = pd.Timestamp("2026-09-01")
+
+
+def test_phase5_prepare_release_sets_canonical_chooser_cutoff():
+    folds = {
+        "early": SimpleNamespace(fold_start="2026-08-01"),
+        "late": SimpleNamespace(fold_start="2026-09-01"),
+    }
+    sources = {"pool_cutoff": "2026-10-01", "other": "preserved"}
+    assert _with_chooser_retrain_cutoff(sources, folds) == {
+        **sources, "retrain_cutoff": "2026-09-01",
+    }
+    assert _with_chooser_retrain_cutoff(sources, {}) is sources
+    with pytest.raises(PrepareRefused, match="canonical training cutoff"):
+        _with_chooser_retrain_cutoff({**sources, "retrain_cutoff": "2026-08-01"}, folds)
+    with pytest.raises(PrepareRefused, match="canonical training cutoff"):
+        _with_chooser_retrain_cutoff({**sources, "pool_cutoff": "2026-08-31"}, folds)
+    with pytest.raises(PrepareRefused, match="canonical training cutoff"):
+        _with_chooser_retrain_cutoff({**sources, "pool_cutoff": "20261001"}, folds)
+
+
+def test_write_release_persists_chooser_cutoff(tmp_path, monkeypatch):
+    from tools import phase5_prepare_release as phase5
+
+    validated = {"fold": SimpleNamespace(fold_start="2026-09-01")}
+    sources = {"pool_cutoff": "2026-10-01"}
+    release = SimpleNamespace(release_id="release-1", deployment_id="deployment-1")
+    written = {}
+    monkeypatch.setattr(phase5, "_rebase_member_paths", lambda value, states, panel: (value, states))
+    monkeypatch.setattr(phase5, "_run_preflights", lambda value, states, panel, src: (src, {}, validated))
+    monkeypatch.setattr(phase5, "deployment_root", lambda out: tmp_path / "deployment")
+    monkeypatch.setattr(phase5.deployment, "invalidate_staging_success", lambda *args: None)
+    monkeypatch.setattr(phase5.deployment, "stage_release", lambda *args: None)
+    monkeypatch.setattr(phase5, "manifest_body", lambda rid, did, rows, src: {"sources": src})
+    monkeypatch.setattr(
+        phase5, "write_manifest",
+        lambda out, body, **kwargs: written.update(body=body) or out,
+    )
+    out = phase5.write_release(tmp_path / "release", release, None, {}, [], sources=sources)
+    assert out == tmp_path / "release"
+    assert written["body"]["sources"]["retrain_cutoff"] == "2026-09-01"
+
+
+def test_scorer_constructor_copies_chooser_fold_reference_map(monkeypatch):
+    references = {("pred_im_t1_d14", "2026-09-01"): object()}
+    monkeypatch.setattr(Scorer, "_enrich", lambda self, rows: rows)
+    monkeypatch.setattr(score_mod, "AnalogMatcher", lambda *args, **kwargs: object())
+    scorer = Scorer(
+        registry=SimpleNamespace(),
+        trades=pd.DataFrame({"provenance": ["synthetic"]}),
+        context=SimpleNamespace(calendar=object()), snapshot="snapshot-1",
+        trade_provenance="synthetic", chooser_fold_references=references,
+    )
+    assert scorer._chooser_fold_references == references
+    assert scorer._chooser_fold_references is not references
+
+
+def test_chooser_fold_reference_flows_through_real_scorer_checkpoint(tmp_path, monkeypatch):
+    payload = b"synthetic served fold"
+    path = tmp_path / "fold.bin"
+    path.write_bytes(payload)
+    digest = hashlib.sha256(payload).hexdigest()
+    model_id = "implied_t1_synthetic"
+    reference = SimpleNamespace(
+        producer_output="pred_im_t1_d14", descriptor_hash="sha256:" + "a" * 64,
+        estimator_sha256="sha256:" + digest, training_cutoff="2026-09-01", release_id="release-1",
+        fold_start="2026-09-01",
+        release_binding=SimpleNamespace(
+            binding_id="implied_t1:STR-THRU", model_id=model_id, role="implied_t1",
+            strategy_id="STR-THRU", decision_clock_id="entry-close", adapter="ridge.v1",
+            feature_order=("im",), output_names=("driver_prediction",),
+            artifact_hash="sha256:" + "b" * 64),
+    )
+    served = SimpleNamespace(
+        model_id=model_id, fold_start=FOLD, tier3_snapshot="snapshot-1",
+        features=("im",), pool_pred=[1.0], pool_res=[0.1], interval_floor=0.0,
+        artifact_ref=lambda: (path, digest),
+    )
+    collector = _collector()
+    scorer = object.__new__(Scorer)
+    scorer._chooser_fold_references = {("pred_im_t1_d14", "2026-09-01"): reference}
+    request = ScoreRequest(ticker="AAA", strategy="STR-THRU",
+                           as_of=pd.Timestamp("2026-09-16"),
+                           event_date=pd.Timestamp("2026-09-17"))
+    result = SimpleNamespace(
+        _phase4_checkpoint_collector=collector,
+        _phase4_chooser_served=[("pred_im_t1_d14", served)],
+    )
+    scorer._phase4_record_chooser(
+        request, result, pd.DataFrame({"im": [0.5]}), SimpleNamespace(),
+        SimpleNamespace(), {},
+    )
+    source = _source_of(_candidate(collector))
+    captured = _validated_chooser_fold_references(source, _request())
+    assert captured["pred_im_t1_d14"]["descriptor_hash"] == reference.descriptor_hash
+    with pytest.raises(StrictTraceCaptureError, match="chooser refs lack declarations"):
+        _validated_chooser_fold_references(
+            {"frozen": {"chooser_references": {"orphan": {}}}}, _request())
+    with pytest.raises(StrictTraceCaptureError, match="chooser refs do not cover producers"):
+        _validated_chooser_fold_references({"frozen": {
+            "declarations": {"chooser_fold:pred_im_t1_d14": {
+                "binding": "fold:implied_t1", "output": "pred_im_t1_d14"}},
+            "bindings": {}, "chooser_references": {},
+        }}, _request())
+    from tools import capture_tier0_corpus as capture
+
+    observed = {}
+    monkeypatch.setattr(capture, "native_inputs_from_capture", lambda *args, **kwargs: ({}, {}))
+    monkeypatch.setattr(capture, "resolve_stored_forecasts", lambda base: None)
+    monkeypatch.setattr(
+        capture, "package_strict_trace",
+        lambda *args, **kwargs: observed.update(kwargs["metadata"]) or {},
+    )
+    candidate = _candidate(collector)
+    candidate.update({"event_id": "AAA_2026-09-17", "request": request_to_dict(request)})
+    strict_trace_one(candidate, "snapshot-1", tmp_path / "release")
+    assert observed["chooser_fold_references"] == captured
+    identity = reference.release_binding
+    assert observed["chooser_fold_references"] == {
+        "pred_im_t1_d14": {
+            "producer_output": reference.producer_output,
+            "descriptor_hash": reference.descriptor_hash,
+            "estimator_sha256": reference.estimator_sha256,
+            "training_cutoff": reference.training_cutoff,
+            "release_id": reference.release_id,
+            "fold_start": reference.fold_start,
+            "release_binding": {
+                "binding_id": identity.binding_id,
+                "model_id": identity.model_id,
+                "role": identity.role,
+                "strategy_id": identity.strategy_id,
+                "decision_clock_id": identity.decision_clock_id,
+                "adapter": identity.adapter,
+                "feature_order": list(identity.feature_order),
+                "output_names": list(identity.output_names),
+                "artifact_hash": identity.artifact_hash,
+            },
+        },
+    }
+
+    corrupted_candidate = copy.deepcopy(candidate)
+    corrupted_source = corrupted_candidate["legacy_trace"]["checkpoints"]["source_inputs"]["value"]
+    corrupted_source["frozen"]["chooser_references"]["pred_im_t1_d14"]["estimator_sha256"] = "sha256:" + "c" * 64
+    corrupted_candidate["legacy_trace"]["checkpoints"]["source_inputs"]["content_hash"] = content_hash(corrupted_source)
+    with pytest.raises(StrictTraceCaptureError, match="mismatches served producer"):
+        strict_trace_one(corrupted_candidate, "snapshot-1", tmp_path / "release")
+
+    empty_candidate = _candidate(_collector())
+    empty_candidate.update({"event_id": "AAA_2026-09-17", "request": request_to_dict(request)})
+    strict_trace_one(empty_candidate, "snapshot-1", tmp_path / "release")
+    assert observed["chooser_fold_references"] is None
+    corrupted = copy.deepcopy(source)
+    corrupted["frozen"]["chooser_references"]["pred_im_t1_d14"]["estimator_sha256"] = "sha256:" + "c" * 64
+    with pytest.raises(StrictTraceCaptureError, match="mismatches served producer"):
+        _validated_chooser_fold_references(corrupted, _request())
+    with pytest.raises(StrictTraceCaptureError, match="chooser ref has invalid dates"):
+        _validated_chooser_fold_references(source, SimpleNamespace(requested_decision_at=None))
 
 
 def _sha(path) -> str:

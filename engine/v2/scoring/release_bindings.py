@@ -296,7 +296,9 @@ def resolve_release_binding(
     )
 
 
-def resolve_production_release_binding() -> ScoringReleaseBinding:
+def resolve_production_release_binding(
+        *, include_chooser_fold_references: bool = False
+) -> ScoringReleaseBinding:
     """``resolve_release_binding`` against the ONE configured production
     release root (``engine.v2.models.deployment.production_release_root``).
 
@@ -310,7 +312,8 @@ def resolve_production_release_binding() -> ScoringReleaseBinding:
         root = deployment.production_release_root()
     except deployment.MissingReleaseRoot as exc:
         raise ModelNotReady("release_root", "no production release root is configured") from exc
-    return resolve_release_binding(root)
+    return resolve_release_binding(
+        root, include_chooser_fold_references=include_chooser_fold_references)
 
 
 def resolve_gate_policy(

@@ -816,7 +816,8 @@ class Phase4TraceCollector:
                        fold_pools: Mapping[str, Any] | None = None,
                        declarations: Mapping[str, Any] | None = None,
                        inputs: Mapping[str, Mapping[str, Any]] | None = None,
-                       states: Mapping[str, Any] | None = None) -> None:
+                       states: Mapping[str, Any] | None = None,
+                       chooser_references: Mapping[str, Mapping[str, Any]] | None = None) -> None:
         """Record what native scoring needs to run the frozen models (R4-18/R4-19).
 
         Kept apart from ``model_bindings``/``native_recipes`` (the strict
@@ -847,7 +848,7 @@ class Phase4TraceCollector:
         """
         frozen = self._source_bundle.setdefault("frozen", {
             "bindings": {}, "fold_pools": {}, "declarations": {}, "inputs": {},
-            "states": {}, "conflicts": [],
+            "states": {}, "chooser_references": {}, "conflicts": [],
         })
 
         def put(section: str, name: str, value: Any) -> None:
@@ -878,6 +879,8 @@ class Phase4TraceCollector:
             shared("states", str(name), value)
         for name, value in (declarations or {}).items():
             put("declarations", str(name), self._document(value))
+        for output, reference in (chooser_references or {}).items():
+            put("chooser_references", str(output), self._document(reference))
         for name, row in (inputs or {}).items():
             put("inputs", str(name), self._document(row))
         # Route through the shared refresh rather than patching just the
@@ -1442,6 +1445,7 @@ class Scorer:
         verify_artifacts: bool = True,
         analog_daily: pd.DataFrame | None = None,
         trade_provenance: str | None = None,
+        chooser_fold_references: Mapping[tuple[str, str], Any] | None = None,
     ):
         #: The daily rows the ANALOG population is bucketed against — a
         #: different question from `context.daily`, which is the live scoring
@@ -1449,6 +1453,7 @@ class Scorer:
         #: trades themselves need; injected only by tests, which have no store
         #: to read and whose synthetic tickers are not in one.
         self._analog_daily = analog_daily
+        self._chooser_fold_references = dict(chooser_fold_references or {})
         #: Share of analog trades that got a real entry-date implied move
         #: rather than the `or_implied` fallback. Set by :meth:`_enrich`.
         self.analog_entry_coverage: float | None = None
@@ -4355,6 +4360,7 @@ class Scorer:
         collector = getattr(result, "_phase4_checkpoint_collector", None)
         if collector is None:
             return
+        chooser_references = {}
         for produces, served in getattr(result, "_phase4_chooser_served", ()):
             self._phase4_record_fold(
                 request, result, served, features, produces=produces, site="chooser",
@@ -4364,6 +4370,29 @@ class Scorer:
                      "output": produces, "pool": produces, "site": "chooser"}
                 )},
             )
+            fold_start = str(pd.Timestamp(served.fold_start).date())
+            reference = getattr(self, "_chooser_fold_references", {}).get((produces, fold_start))
+            if reference is not None:
+                identity = reference.release_binding
+                chooser_references[produces] = {
+                    "producer_output": reference.producer_output,
+                    "descriptor_hash": reference.descriptor_hash,
+                    "estimator_sha256": reference.estimator_sha256,
+                    "training_cutoff": reference.training_cutoff,
+                    "release_id": reference.release_id,
+                    "fold_start": reference.fold_start,
+                    "release_binding": {
+                        "binding_id": identity.binding_id,
+                        "model_id": identity.model_id,
+                        "role": identity.role,
+                        "strategy_id": identity.strategy_id,
+                        "decision_clock_id": identity.decision_clock_id,
+                        "adapter": identity.adapter,
+                        "feature_order": tuple(identity.feature_order),
+                        "output_names": tuple(identity.output_names),
+                        "artifact_hash": identity.artifact_hash,
+                    },
+                }
         declarations: dict[str, Any] = {
             "chooser_primitives": {
                 name: frame.get(name) for name in self._CHOOSER_PRIMITIVES
@@ -4390,7 +4419,10 @@ class Scorer:
                 "decision_offset": entry.decision_offset,
             }
             declarations["chooser"] = {"binding": "chooser", "output": "chooser_score"}
-        collector.capture_frozen(bindings=bindings, declarations=declarations)
+        collector.capture_frozen(
+            bindings=bindings, declarations=declarations,
+            chooser_references=chooser_references,
+        )
 
     def _phase4_chooser_pool_identity(self) -> dict[str, Any] | None:
         """The k-NN pool file legacy loaded: path, sha256 and the causal
