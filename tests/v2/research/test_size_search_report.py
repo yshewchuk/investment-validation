@@ -19,18 +19,25 @@ def test_mixed_failed_and_successful_trials_report_diagnostics(monkeypatch):
             succeeded = slot.endswith(report.content_hash(["plan", "2024", "2023", "ok"]))
             if succeeded:
                 return {"status": "succeeded", "fit_attempt_count": 3, "completed_fit_count": 3,
-                    "fits": [{"horizon_sessions": 1, "fit_seconds": 1.25},
-                             {"horizon_sessions": 5, "fit_seconds": 2.75}],
+                    "fits": [{"horizon_sessions": 1}, {"horizon_sessions": 5}],
                     "diagnostics": [{"converged": True}]}
             return {"status": "failed", "fit_attempt_count": 3, "completed_fit_count": 2,
-                "fits": [{"horizon_sessions": 1, "fit_seconds": 0.5}],
+                "fits": [{"horizon_sessions": 1}],
                 "diagnostics": [{"converged": False}]}
+        if slot.startswith("fit-completed:"):
+            success_key = report.content_hash(["plan", "2024", "2023", "ok"])
+            if slot.startswith("fit-completed:" + success_key + ":"):
+                horizon = slot.rsplit(":", 1)[-1]
+                return {"horizon_sessions": int(horizon), "fit_seconds": 1.25 if horizon == "1" else 2.75}
+            return {"horizon_sessions": 1, "fit_seconds": 0.5}
         if slot.startswith("terminal:"):
             succeeded = slot.endswith(report.content_hash(["plan", "2024", "2023", "ok"]))
-            return {"status": "succeeded" if succeeded else "failed",
+            terminal = {"status": "succeeded" if succeeded else "failed",
                 "score_seconds": 0.7 if succeeded else 0.3,
-                "rss_delta_kib": 2048 if succeeded else 512,
-                "inner_metrics": [{"horizon_sessions": 1, "mean_absolute_move_pct": 0.4 if succeeded else 0.1}]}
+                "rss_delta_kib": 2048 if succeeded else 512}
+            if succeeded:
+                terminal["inner_metrics"] = [{"horizon_sessions": 1, "mean_absolute_move_pct": 0.4}]
+            return terminal
         if slot.startswith("outer-forecasts:"):
             return []
         return {"result": {"forecasts": [], "fit_details": [
@@ -51,7 +58,7 @@ def test_mixed_failed_and_successful_trials_report_diagnostics(monkeypatch):
     assert succeeded["rss_delta_kib"] == 2048
     assert failed["rss_delta_kib"] == 512
     assert succeeded["inner_metrics"] == [{"horizon_sessions": 1, "mean_absolute_move_pct": 0.4}]
-    assert failed["inner_metrics"] == [{"horizon_sessions": 1, "mean_absolute_move_pct": 0.1}]
+    assert failed["inner_metrics"] is None
     assert observed["comparison_fits"][0]["component_fits"] == 2
 
 
@@ -72,6 +79,6 @@ def test_candidate_evidence_distinguishes_missing_metrics_from_empty(monkeypatch
         raise AssertionError(f"unexpected journal slot: {slot}")
 
     monkeypatch.setattr(report, "read_record", read)
-    rows = report.candidate_evidence(None, None, "run", plan)
+    rows = report._candidate_evidence(None, None, "run", plan)
 
     assert [row["inner_metrics"] for row in rows] == [None, []]

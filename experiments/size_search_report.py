@@ -9,7 +9,7 @@ from experiments.size_paired_report import paired_report
 from experiments.v2_magnitude_search_run import _admit_driver
 
 
-def candidate_evidence(conn, store, run_id, plan):
+def _candidate_evidence(conn, store, run_id, plan):
     """Read-only per-run candidate listing bound to the sealed plan's exact trial keys."""
     rows = []
     for group in plan["folds"]:
@@ -25,6 +25,17 @@ def candidate_evidence(conn, store, run_id, plan):
                 terminal = terminal if isinstance(terminal, dict) else {}
                 status = execution.get("status", terminal.get("status"))
                 fits = execution.get("fits") or []
+                fit_seconds = []
+                for fit in fits:
+                    if not isinstance(fit, dict):
+                        continue
+                    slot = "fit-completed:" + key + ":" + str(fit.get("horizon_sessions"))
+                    completed = read_record(conn, store, run_id, slot)
+                    if isinstance(completed, dict) and completed.get("fit_seconds") is not None:
+                        fit_seconds.append({
+                            "horizon_sessions": fit.get("horizon_sessions"),
+                            "seconds": completed["fit_seconds"],
+                        })
                 rows.append({
                     "trial_id": key, "run_id": run_id, "outer_year": outer_year,
                     "inner_year": inner_year, "candidate_id": candidate_id,
@@ -32,9 +43,7 @@ def candidate_evidence(conn, store, run_id, plan):
                     "terminal_status": terminal.get("status"),
                     "fit_attempt_count": execution.get("fit_attempt_count"),
                     "completed_fit_count": execution.get("completed_fit_count"),
-                    "fit_seconds": [{"horizon_sessions": fit.get("horizon_sessions"),
-                                     "seconds": fit["fit_seconds"]} for fit in fits
-                                    if isinstance(fit, dict) and fit.get("fit_seconds") is not None],
+                    "fit_seconds": fit_seconds,
                     "score_seconds": terminal.get("score_seconds"),
                     "rss_delta_kib": terminal.get("rss_delta_kib"),
                     "inner_metrics": terminal.get("inner_metrics"),
@@ -51,7 +60,7 @@ def collect(conn, store, repository, registration, request, plan_ref):
     targets = {r["event_id"]: r["absolute_move_pct"] for r in result["predictions"]}
     ids = {event for group in plan["folds"] for event in group["outer"]["evaluation_event_ids"]}
     events = [e for e in registration.document["size_panel"]["context"]["target_events"] if e["event_id"] in ids]
-    inner_fits = candidate_evidence(conn, store, registration.run_id, plan)
+    inner_fits = _candidate_evidence(conn, store, registration.run_id, plan)
     for group in plan["folds"]:
         year = group["outer"]["year"]
         key = content_hash([plan["plan_id"], year])

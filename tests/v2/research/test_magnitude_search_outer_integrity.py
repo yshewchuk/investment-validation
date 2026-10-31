@@ -245,9 +245,9 @@ def test_collection_rechecks_later_fold_sources_and_evidence(outer_case, monkeyp
         run(case, "2025")
     assert all(slot(case, "terminal", year) is not None for year in ("2024", "2025"))
     replay, seen = outer._replay, []
-    def replayed(read, store, started, fold, plan, execution):
+    def replayed(read, store, started, fold, plan, execution, binding):
         seen.append(fold["year"])
-        return replay(read, store, started, fold, plan, execution)
+        return replay(read, store, started, fold, plan, execution, binding)
     monkeypatch.setattr(outer, "_replay", replayed)
     forbid_work(monkeypatch)
     forbidden = Mock(side_effect=AssertionError("corrupt collection published evidence"))
@@ -677,11 +677,12 @@ def test_outer_replay_uses_registered_diagnostic_keys(monkeypatch):
     plan = {"horizons": [1]}
     forecasts = [{"event_id": "event", "horizon_sessions": 1,
         "predicted_absolute_move_pct": 2.0}]
-    worker = {"event": "succeeded", "forecasts": forecasts, "custom_diagnostic": "value"}
+    worker = {"event": "succeeded", "forecasts": forecasts, "custom_diagnostic": "value",
+        "score_seconds": 0.0, "rss_delta_kib": 0}
     terminal = {"inputs_id": "inputs"}
     receipt = {"status": "succeeded", "fits": [], "fit_attempt_count": 0,
         "completed_fit_count": 0, "forecasts_id": content_hash(forecasts),
-        "custom_diagnostic": "value"}
+        "custom_diagnostic": "value", "score_seconds": 0.0, "rss_delta_kib": 0}
     journal = {"start": started, "inputs": {"manifest": "manifest"}, "terminal": terminal,
         "forecasts": forecasts, "worker-result": worker, "execution": receipt}
     monkeypatch.setattr(outer, "diagnostic_keys", lambda _: {"custom_diagnostic"})

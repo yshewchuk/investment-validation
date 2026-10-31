@@ -232,7 +232,7 @@ class SearchTrials:
             self._append("fit-" + state + ":" + key + ":" + str(fit["horizon_sessions"]), fit, replay=False)
             if state == "completed":
                 pending.pop()
-                fits.append(fit)
+                fits.append(expected[index])
 
         # The child streams the admitted manifest's shards itself; no inputs cross the pipe.
         admitted = self._read("inputs:" + key)
@@ -352,7 +352,7 @@ class SearchTrials:
         except (ValueError, TypeError, KeyError, OverflowError):
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search durable execution result differs") from None
         receipt = {"attempt": attempt, "fit_attempt_count": count, "completed_fit_count": completed,
-                   "fits": completed_fits[:completed], "status": result["event"],
+                   "fits": expected[:completed], "status": result["event"],
                    "forecasts_id": content_hash(forecasts) if succeeded else None,
                    **diagnostic_evidence(result, execution, plan["horizons"])}
         if timed:

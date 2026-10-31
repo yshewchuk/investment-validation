@@ -135,7 +135,7 @@ def test_publication_faults_reconcile_only_durable_results(native, monkeypatch, 
         result = recorder.reconcile(*ARGS, limits=LIMITS)
     assert result["status"] == result["terminal"]["status"] == "succeeded"
     assert result["fit_attempt_count"] == result["completed_fit_count"] == 3
-    assert result["fits"] == completed_fits()
+    assert result["fits"] == expected_fits()
     assert result["terminal"]["metrics"] == {"count": 3, "rmse": 2.0, "mae": 2.0}
     assert result["evaluation_authority"] == "none"
     assert recorder._read("execution-result:" + KEY) == durable
@@ -163,7 +163,7 @@ def test_candidate_failure_reconciliation_retains_exact_attempt_prefix(native, m
     assert result["status"] == result["terminal"]["status"] == "failed"
     assert result["fit_attempt_count"] == completed + 1
     assert result["completed_fit_count"] == completed
-    assert result["fits"] == completed_fits()[:completed]
+    assert result["fits"] == expected_fits()[:completed]
     assert native.recorder._read("forecasts:" + KEY) is None
     with pytest.raises(OpsError) as caught:
         native.recorder.freeze()
@@ -388,10 +388,11 @@ def test_real_fixed_child_is_reaped_before_result_becomes_recoverable(native, mo
     with no_fit_guard(), legacy_guard():
         result = native.recorder.reconcile(*ARGS, limits=LIMITS)
     assert result["completed_fit_count"] == 3
-    assert len(result["fits"]) == len(expected_fits())
-    for fit, expected in zip(result["fits"], expected_fits()):
-        assert {key: value for key, value in fit.items() if key != "fit_seconds"} == expected
-        seconds = fit["fit_seconds"]
+    assert result["fits"] == expected_fits()
+    for fit in completed_fits():
+        marker = native.recorder._read("fit-completed:" + KEY + ":" + str(fit["horizon_sessions"]))
+        assert marker == fit
+        seconds = marker["fit_seconds"]
         assert isinstance(seconds, float) and not isinstance(seconds, bool)
         assert math.isfinite(seconds) and seconds >= 0.0
     result_record = native.recorder._read("execution-result:" + KEY)["result"]
@@ -471,7 +472,7 @@ def test_failed_scoring_publication_reconciles_to_original_refusal(native, monke
     assert caught.value.problem == fail("EXPERIMENT_VARIANT_FAILED", "synthetic candidate scoring refusal").problem
     result = native.recorder.reconcile(*ARGS, limits=LIMITS)
     assert result["status"] == "succeeded" and result["terminal"]["status"] == "refused"
-    assert result["fits"] == completed_fits()
+    assert result["fits"] == expected_fits()
     assert native.recorder._read("forecasts:" + KEY) == rows(1e308)
 
 
@@ -526,7 +527,7 @@ def test_new_recorder_reconciles_catalog_durable_result_after_reopen(native, mon
             recovered = recorder.reconcile(*ARGS, limits=LIMITS)
             assert native.recorder.reconcile(*ARGS, limits=LIMITS) == recovered
         assert recovered["completed_fit_count"] == 3
-        assert recovered["fits"] == completed_fits()
+        assert recovered["fits"] == expected_fits()
         assert recovered["terminal"]["status"] == "succeeded"
     finally:
         peer.close()

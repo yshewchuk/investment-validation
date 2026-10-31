@@ -109,10 +109,17 @@ def test_real_child_projection_preserves_exact_forecasts_and_fit_evidence(model,
         progress=lambda state, fit: expected_progress.append((state, fit)), strict_failures=True)
     progress = []
     result = run(source, fold, plan, policy, lambda state, fit: progress.append((state, fit)))
-    assert result == {"event": "succeeded", "forecasts": [{"event_id": event, "horizon_sessions": horizon,
-        "predicted_absolute_move_pct": value} for (event, horizon), value in sorted(expected.items())]}
-    assert progress == expected_progress
-    assert [fit for state, fit in progress if state == "completed"] == evidence
+    assert result["event"] == "succeeded"
+    assert result["forecasts"] == [{"event_id": event, "horizon_sessions": horizon,
+        "predicted_absolute_move_pct": value} for (event, horizon), value in sorted(expected.items())]
+    assert isinstance(result["score_seconds"], float) and result["score_seconds"] >= 0.0
+    assert isinstance(result["rss_delta_kib"], int) and result["rss_delta_kib"] >= 0
+    assert [(state, {key: value for key, value in fit.items() if key != "fit_seconds"})
+            for state, fit in progress] == expected_progress
+    assert [{key: value for key, value in fit.items() if key != "fit_seconds"}
+            for state, fit in progress if state == "completed"] == evidence
+    assert all(isinstance(fit["fit_seconds"], float) and fit["fit_seconds"] >= 0.0
+               for state, fit in progress if state == "completed")
     assert [fit["horizon_sessions"] for fit in evidence] == [5, 1]
     assert all(fit["training_event_ids"] == ["train-b", "train-a"] for fit in evidence)
     assert all(fit["evaluation_event_ids"] == ["test-b", "test-a"] for fit in evidence)

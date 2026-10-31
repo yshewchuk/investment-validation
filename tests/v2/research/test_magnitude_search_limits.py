@@ -1,5 +1,6 @@
 """Inclusive byte limits and observed containment in the real fixed fit child."""
 import json
+import math
 import os
 import sys
 from pathlib import Path
@@ -17,7 +18,7 @@ from tests.v2.research.magnitude_search_fit_source import fit_source
 
 LIMITS = {"memory_bytes": 2 * 1024 ** 3, "cpu_seconds": 30, "wall_seconds": 60}
 SMALL_CAP = 512
-SUCCESS = {"event": "succeeded", "forecasts": []}
+SUCCESS = {"event": "succeeded", "forecasts": [], "score_seconds": 0.0, "rss_delta_kib": 0}
 STATE = {}
 
 
@@ -194,7 +195,11 @@ def emit(value):
     original_emit(value)
 worker.emit = emit
 """)
-    assert run(limits=limits) == SUCCESS
+    result = run(limits=limits)
+    assert {key: result[key] for key in SUCCESS} == SUCCESS
+    assert type(result["score_seconds"]) is float and math.isfinite(result["score_seconds"])
+    assert result["score_seconds"] >= 0
+    assert type(result["rss_delta_kib"]) is int and result["rss_delta_kib"] >= 0
     assert os.sched_getaffinity(0) == allowed
     assert_cleaned(observed)
     return json.loads(observation.read_text()), expected

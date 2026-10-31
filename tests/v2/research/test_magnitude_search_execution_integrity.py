@@ -173,7 +173,10 @@ def test_native_freeze_requires_every_valid_hash_execution_link(native, monkeypa
             {"horizon_sessions": horizon, "count": 1, "mae": 2.0, "rmse": 2.0,
              "large_move_underprediction_rate": 0.0, "large_move_mean_shortfall": 0.0}
             for horizon in (5, 3, 1)]
-        assert [fit["fit_seconds"] for fit in result["fits"]] == [0.25, 0.25, 0.25]
+        assert all("fit_seconds" not in fit for fit in result["fits"])
+        for fit in result["fits"]:
+            marker = native.recorder._read("fit-completed:" + result["attempt"]["trial_id"] + ":" + str(fit["horizon_sessions"]))
+            assert marker["fit_seconds"] == 0.25
         frozen = native.recorder.freeze()
         assert frozen["prospective_candidate_id"] == "a-first"
         assert native.recorder.freeze() == frozen
@@ -588,7 +591,7 @@ def expected_native_receipt(succeeded=True):
         "score_seconds": 1.5, "rss_delta_kib": 12, "inner_metrics": inner_metrics} if succeeded else
         {"status": "failed", "problem": to_document(fail("EXPERIMENT_VARIANT_FAILED",
             "search trial did not complete").problem),
-        "score_seconds": 1.5, "rss_delta_kib": 12, "inner_metrics": []})
+        "score_seconds": 1.5, "rss_delta_kib": 12})
     return {"attempt": {"limits": LIMITS, "candidate_id": "a-first",
             "trial_id": content_hash(["plan", "2024", "2023", "a-first"])},
         "fit_attempt_count": 3 if succeeded else 1, "completed_fit_count": 3 if succeeded else 0,
