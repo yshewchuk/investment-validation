@@ -52,6 +52,7 @@ from experiments.memory_guard import start_rss_watchdog
 
 _PARALLEL = None
 _WORKER_WATCHDOG_STOP = None
+_WORKER_TERMINATING = False
 
 
 def _stop_worker_watchdog():
@@ -66,12 +67,18 @@ class _WorkerTerminating(BaseException):
 
 
 def _terminate_worker(signum, frame):
+    """Raise once so fit-child cleanup unwinds; repeated termination must not interrupt it."""
+    global _WORKER_TERMINATING
+    if _WORKER_TERMINATING:
+        return
+    _WORKER_TERMINATING = True
     raise _WorkerTerminating
 
 
 def _init_trial_worker(conn_path, store_root, registration, request, plan_ref, memory_bytes):
-    global _PARALLEL, _WORKER_WATCHDOG_STOP
+    global _PARALLEL, _WORKER_WATCHDOG_STOP, _WORKER_TERMINATING
     _WORKER_WATCHDOG_STOP = None
+    _WORKER_TERMINATING = False
     try:
         signal.signal(signal.SIGTERM, _terminate_worker)
         _WORKER_WATCHDOG_STOP = start_rss_watchdog(memory_bytes)

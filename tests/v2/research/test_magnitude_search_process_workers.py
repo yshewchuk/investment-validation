@@ -423,6 +423,14 @@ def _cancellable_child_task(task):
         os._exit(128 + signal.SIGTERM)
 
 
+def test_worker_termination_handler_raises_only_first_signal(monkeypatch):
+    monkeypatch.setattr(driver, "_WORKER_TERMINATING", False)
+    with pytest.raises(driver._WorkerTerminating):
+        driver._terminate_worker(signal.SIGTERM, None)
+    assert driver._WORKER_TERMINATING is True
+    assert driver._terminate_worker(signal.SIGTERM, None) is None
+
+
 def test_pool_abort_waits_for_worker_to_reap_active_fit_child(tmp_path):
     pid_path = tmp_path / "fit-child.pid"
     status_path = tmp_path / "fit-child.status"
@@ -469,7 +477,9 @@ def test_worker_initializer_transports_data_problem(monkeypatch):
     monkeypatch.setattr(driver, "ArtifactStore", lambda root: SimpleNamespace(root=root))
     monkeypatch.setattr(driver, "Repository", lambda *args, **kwargs: object())
     monkeypatch.setattr(driver, "read_search_plan", reject_plan)
+    monkeypatch.setattr(driver, "_WORKER_TERMINATING", True)
     driver._init_trial_worker("catalog", "store", object(), {}, object(), 1024)
+    assert driver._WORKER_TERMINATING is False
     receipt = driver._parallel_trial_task(((2024, 2023, "candidate"), 0, {}))
     assert receipt["worker_error_type"] == "data"
     assert driver.from_document(driver.Problem, receipt["worker_problem"]) == problem
