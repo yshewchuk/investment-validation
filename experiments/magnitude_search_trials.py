@@ -30,6 +30,11 @@ from experiments.magnitude_search_execution import (
     run_fitted_trial,
     validate_execution_limits,
 )
+from experiments.magnitude_search_selection import (
+    blended_event_score,
+    history_mean_rows,
+    selection_tie_band,
+)
 from experiments.magnitude_search_inputs import load_inputs, publish_inputs
 from experiments.magnitude_search_plan import (
     PLAN_V2,
@@ -539,10 +544,13 @@ class SearchTrials:
                     uses[key] = uses.get(key, 0) + 1
         cache, cache_bytes = {}, 0
         selections, attempts = [], []
+        policy = plan.get("request", {}).get("selection")
+        history_rows_cache = {}
         for outer in plan["folds"]:
+            history_rows_by_year = {}
             scores = []
             for candidate in plan["candidates"]:
-                rows, failed = [], False
+                rows, yearly_rows, failed = [], {}, False
                 for inner in outer["inner"]:
                     key = trial_key(plan, outer["outer"]["year"], inner["year"], candidate["candidate_id"])
                     cached = cache.get(key)
@@ -557,6 +565,16 @@ class SearchTrials:
                     failed |= record["status"] != "succeeded"
                     if record["status"] == "succeeded":
                         rows.extend(record["predictions"])
+                        yearly_rows[inner["year"]] = record["predictions"]
+                        if policy is not None and inner["year"] not in history_rows_by_year:
+                            admitted = self._read("inputs:" + key)
+                            cohort_id = admitted["cohort"]
+                            if cohort_id not in history_rows_cache:
+                                cohort = self._cohort(admitted)
+                                validation = self._read("validation:" + cohort_id)
+                                self._validation(inner, admitted, cohort, validation)
+                                history_rows_cache[cohort_id] = history_mean_rows(cohort, validation)
+                            history_rows_by_year[inner["year"]] = history_rows_cache[cohort_id]
                     uses[key] -= 1
                     if uses[key] == 0:
                         removed = cache.pop(key, None)
@@ -569,14 +587,51 @@ class SearchTrials:
                             cache_bytes -= removed_bytes
                         cache[key] = (record, terminal_id, record_bytes)
                         cache_bytes += record_bytes
-                scores.append({"candidate_id": candidate["candidate_id"],
-                    "metrics": None if failed else magnitude_metrics(rows)})
+                if failed:
+                    scores.append({"candidate_id": candidate["candidate_id"], "metrics": None})
+                elif policy is None:
+                    scores.append({"candidate_id": candidate["candidate_id"], "metrics": magnitude_metrics(rows)})
+                else:
+                    try:
+                        yearly = {year: blended_event_score(yearly_rows[year],
+                            history_rows_by_year[year], metric_weights=policy["metric_weights"],
+                            large_move_threshold_pct=policy["large_move_threshold_pct"])
+                            for year in sorted(yearly_rows)}
+                        pooled_history = [row for year in sorted(outer["inner"], key=lambda item: item["year"])
+                            for row in history_rows_by_year[year["year"]]]
+                        pooled = blended_event_score(rows, pooled_history,
+                            metric_weights=policy["metric_weights"],
+                            large_move_threshold_pct=policy["large_move_threshold_pct"])
+                    except (KeyError, TypeError, ValueError, OverflowError):
+                        raise fail("EXPERIMENT_VARIANT_FAILED", "blended inner selection metrics are undefined") from None
+                    scores.append({"candidate_id": candidate["candidate_id"], **pooled, "yearly": yearly})
             eligible = [score for score in scores if score["metrics"] is not None]
             if not eligible:
                 raise fail("EXPERIMENT_VARIANT_FAILED", "all candidates failed for an outer fold")
-            selected = min(eligible, key=lambda score: (score["metrics"]["rmse"], score["candidate_id"]))
-            selections.append({"outer_year": outer["outer"]["year"], "scores": scores,
-                               "selected_candidate_id": selected["candidate_id"]})
+            if policy is None:
+                selected = min(eligible, key=lambda score: (score["metrics"]["rmse"], score["candidate_id"]))
+                selection = {"outer_year": outer["outer"]["year"], "scores": scores,
+                             "selected_candidate_id": selected["candidate_id"]}
+            else:
+                try:
+                    selected_id, tie_band = selection_tie_band(eligible, eligible,
+                        floor=policy["tie_band_floor"])
+                    pooled_history = [row for year in sorted(outer["inner"], key=lambda item: item["year"])
+                        for row in history_rows_by_year[year["year"]]]
+                    history_score = blended_event_score(pooled_history, pooled_history,
+                        metric_weights=policy["metric_weights"],
+                        large_move_threshold_pct=policy["large_move_threshold_pct"])
+                    history_score["yearly"] = {year: blended_event_score(
+                        history_rows_by_year[year], history_rows_by_year[year],
+                        metric_weights=policy["metric_weights"],
+                        large_move_threshold_pct=policy["large_move_threshold_pct"])
+                        for year in sorted(history_rows_by_year)}
+                except (KeyError, TypeError, ValueError, OverflowError):
+                    raise fail("EXPERIMENT_VARIANT_FAILED", "blended inner selection metrics are undefined") from None
+                selection = {"outer_year": outer["outer"]["year"], "scores": scores,
+                    "history_mean": history_score, "tie_band": tie_band,
+                    "selected_candidate_id": selected_id}
+            selections.append(selection)
         result = {"plan_id": plan["plan_id"], "attempts": attempts, "selections": selections,
                   "prospective_candidate_id": selections[-1]["selected_candidate_id"],
                   "estimator_execution": "unverified_submitted_forecasts", "evaluation_authority": "none"}
