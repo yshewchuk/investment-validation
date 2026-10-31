@@ -88,3 +88,53 @@ def test_empty_or_one_sided_chain_falls_back_to_captured_expiry_unvalidated(stra
 def test_empty_chain_without_captured_expiry_refuses_missing_expiry(strategy):
     with pytest.raises(GeometryRefusal, match="MISSING_EXPIRY"):
         generate(strategy, {**_BASE, "quotes": {}})
+
+
+_BWXT_QUOTES = {
+    (right, strike, expiry): _QUOTE
+    for right in "CP"
+    for strike in (135.0, 140.0)
+    for expiry in ("2026-11-20", "2026-12-18")
+}
+_BWXT_INPUTS = {
+    "spot": 137.93,
+    "chain_spot": 137.37,
+    "forecast_abs_move": 8.0,
+    "quotes": _BWXT_QUOTES,
+    "event_date": "2026-11-02",
+    "entry_date": "2026-10-01",
+}
+
+
+@pytest.mark.parametrize("strategy", STRADDLES)
+def test_listed_straddle_selection_uses_bwxt_chain_spot(strategy):
+    geometry = generate(strategy, _BWXT_INPUTS)
+    assert {leg.strike for leg in geometry.legs} == {135.0}
+    assert geometry.spot == 137.93
+
+
+@pytest.mark.parametrize("strategy", STRADDLES)
+def test_listed_straddle_selection_falls_back_to_calendar_close(strategy):
+    inputs = {key: value for key, value in _BWXT_INPUTS.items()
+              if key != "chain_spot"}
+    geometry = generate(strategy, inputs)
+    assert {leg.strike for leg in geometry.legs} == {140.0}
+    assert geometry.spot == 137.93
+
+
+@pytest.mark.parametrize("strategy", STRADDLES)
+@pytest.mark.parametrize("chain_spot", [0.0, float("nan"), float("inf"), "bad", True, None, -1.0, 10**400])
+def test_listed_straddle_selection_refuses_invalid_chain_spot(strategy, chain_spot):
+    with pytest.raises(GeometryRefusal, match="INVALID_CHAIN_SPOT"):
+        generate(strategy, {**_BWXT_INPUTS, "chain_spot": chain_spot})
+
+
+@pytest.mark.parametrize("strategy", STRADDLES)
+def test_captured_strike_and_expiry_bypass_chain_spot_selection(strategy):
+    geometry = generate(strategy, {
+        **_BWXT_INPUTS,
+        "strike": 135.0,
+        "expiry": "2026-11-20",
+        "chain_spot": "bad",
+    })
+    assert {leg.strike for leg in geometry.legs} == {135.0}
