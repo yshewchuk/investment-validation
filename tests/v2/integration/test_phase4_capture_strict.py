@@ -479,6 +479,56 @@ def test_strict_cli_requires_known_strategies_before_building_scorer(monkeypatch
         main(["--strict-phase4-trace", "--strategies", "NOT-A-STRATEGY"])
 
 
+def test_strict_cli_opts_into_production_chooser_refs_and_forwards_them(
+        monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    class _GatherStopped(Exception):
+        pass
+
+    class _Heartbeat:
+        def start(self):
+            pass
+
+        def begin_stage(self, stage):
+            pass
+
+        def phase(self, name):
+            pass
+
+        def stop(self):
+            pass
+
+    resolver_calls = []
+    sentinel_refs = {("pred_im_t1_d14", "2026-09-01"): object()}
+    scorer_calls = []
+
+    def resolve_production(**kwargs):
+        resolver_calls.append(kwargs)
+        return SimpleNamespace(chooser_fold_references=sentinel_refs)
+
+    def build_scorer(**kwargs):
+        scorer_calls.append(kwargs)
+        return object()
+
+    def stopped(*args, **kwargs):
+        raise _GatherStopped()
+
+    monkeypatch.setattr(
+        "engine.v2.scoring.release_bindings.resolve_production_release_binding",
+        resolve_production,
+    )
+    monkeypatch.setattr("tools.capture_tier0_corpus.score_mod.Scorer", build_scorer)
+    monkeypatch.setattr("tools.capture_tier0_corpus.heartbeat", lambda: _Heartbeat())
+    monkeypatch.setattr("tools.capture_tier0_corpus._gather_candidates", stopped)
+
+    with pytest.raises(_GatherStopped):
+        main(["--strict-phase4-trace", "--out", str(tmp_path / "capture")])
+
+    assert resolver_calls == [{"include_chooser_fold_references": True}]
+    assert scorer_calls == [{"chooser_fold_references": sentinel_refs}]
+
+
 # --------------------------------------------------------------------------
 # R4-1: frozen-inference row assembly must read each binding's OWN per-role
 # captured feature vector, not the cross-role merged dict. Reproduces the
@@ -1124,22 +1174,25 @@ FOLD = pd.Timestamp("2026-09-01")
 
 
 def test_phase5_prepare_release_sets_canonical_chooser_cutoff():
+    # The LATEST fold is inserted FIRST, before the earlier one: a "last
+    # mapping item wins" (or any constant) derivation would land on
+    # 2026-09-01 and fail every assertion below.
     folds = {
-        "early": SimpleNamespace(fold_start="2026-08-01"),
-        "late": SimpleNamespace(fold_start="2026-09-01"),
+        "latest": SimpleNamespace(fold_start="2026-10-01"),
+        "early": SimpleNamespace(fold_start="2026-09-01"),
     }
-    sources = {"pool_cutoff": "2026-10-01", "other": "preserved"}
+    sources = {"pool_cutoff": "2026-11-01", "other": "preserved"}
     assert with_chooser_retrain_cutoff(sources, folds) == {
-        **sources, "retrain_cutoff": "2026-09-01",
+        **sources, "retrain_cutoff": "2026-10-01",
     }
     assert with_chooser_retrain_cutoff({}, folds) == {
-        "retrain_cutoff": "2026-09-01", "pool_cutoff": "2026-09-01",
+        "retrain_cutoff": "2026-10-01", "pool_cutoff": "2026-10-01",
     }
     assert with_chooser_retrain_cutoff(sources, {}) is sources
     with pytest.raises(PrepareRefused, match="chooser retrain_cutoff must match latest fold_start"):
-        with_chooser_retrain_cutoff({**sources, "retrain_cutoff": "2026-08-01"}, folds)
+        with_chooser_retrain_cutoff({**sources, "retrain_cutoff": "2026-09-01"}, folds)
     with pytest.raises(PrepareRefused, match="chooser pool_cutoff must be canonical and on/after retrain_cutoff"):
-        with_chooser_retrain_cutoff({**sources, "pool_cutoff": "2026-08-31"}, folds)
+        with_chooser_retrain_cutoff({**sources, "pool_cutoff": "2026-09-30"}, folds)
     with pytest.raises(PrepareRefused, match="chooser pool_cutoff must be canonical and on/after retrain_cutoff"):
         with_chooser_retrain_cutoff({**sources, "pool_cutoff": "20261001"}, folds)
 
@@ -1194,7 +1247,7 @@ def test_chooser_fold_reference_flows_through_real_scorer_checkpoint(tmp_path, m
         release_binding=SimpleNamespace(
             binding_id="implied_t1:STR-THRU", model_id=model_id, role="implied_t1",
             strategy_id="STR-THRU", decision_clock_id="entry-close", adapter="ridge.v1",
-            feature_order=("im",), output_names=("driver_prediction",),
+            feature_order=("im",), output_names=("pred_im_t1_d14",),
             artifact_hash="sha256:" + "b" * 64),
     )
     served = SimpleNamespace(
@@ -1202,15 +1255,42 @@ def test_chooser_fold_reference_flows_through_real_scorer_checkpoint(tmp_path, m
         features=("im",), pool_pred=[1.0], pool_res=[0.1], interval_floor=0.0,
         artifact_ref=lambda: (path, digest),
     )
+    runup_payload = b"synthetic runup fold"
+    runup_path = tmp_path / "runup_fold.bin"
+    runup_path.write_bytes(runup_payload)
+    runup_digest = hashlib.sha256(runup_payload).hexdigest()
+    runup_model_id = "runup_move_synthetic"
+    runup_reference = SimpleNamespace(
+        producer_output="pred_runup_abs_move_d14",
+        descriptor_hash="sha256:" + "e" * 64,
+        estimator_sha256="sha256:" + runup_digest, training_cutoff="2026-08-01",
+        release_id="release-1", fold_start="2026-08-01",
+        release_binding=SimpleNamespace(
+            binding_id="runup_move:STR-THRU", model_id=runup_model_id,
+            role="runup_move", strategy_id="STR-THRU",
+            decision_clock_id="entry-close", adapter="ridge.v1",
+            feature_order=("im",), output_names=("pred_runup_abs_move_d14",),
+            artifact_hash="sha256:" + "f" * 64),
+    )
+    runup_served = SimpleNamespace(
+        model_id=runup_model_id, fold_start=pd.Timestamp("2026-08-01"),
+        tier3_snapshot="snapshot-1", features=("im",), pool_pred=[1.0],
+        pool_res=[0.1], interval_floor=0.0,
+        artifact_ref=lambda: (runup_path, runup_digest),
+    )
     collector = _collector()
     scorer = object.__new__(Scorer)
-    scorer._chooser_fold_references = {("pred_im_t1_d14", "2026-09-01"): reference}
+    scorer._chooser_fold_references = {
+        ("pred_im_t1_d14", "2026-09-01"): reference,
+        ("pred_runup_abs_move_d14", "2026-08-01"): runup_reference,
+    }
     request = ScoreRequest(ticker="AAA", strategy="STR-THRU",
                            as_of=pd.Timestamp("2026-09-16"),
                            event_date=pd.Timestamp("2026-09-17"))
     result = SimpleNamespace(
         _phase4_checkpoint_collector=collector,
-        _phase4_chooser_served=[("pred_im_t1_d14", served)],
+        _phase4_chooser_served=[("pred_im_t1_d14", served),
+                                ("pred_runup_abs_move_d14", runup_served)],
     )
     scorer._phase4_record_chooser(
         request, result, pd.DataFrame({"im": [0.5]}), SimpleNamespace(),
@@ -1218,9 +1298,15 @@ def test_chooser_fold_reference_flows_through_real_scorer_checkpoint(tmp_path, m
     )
     source = _source_of(_candidate(collector))
     captured = validated_chooser_fold_references(source, _request())
+    assert set(captured) == {"pred_im_t1_d14", "pred_runup_abs_move_d14"}
     assert captured["pred_im_t1_d14"]["descriptor_hash"] == reference.descriptor_hash
+    assert captured["pred_im_t1_d14"]["fold_start"] == "2026-09-01"
+    assert captured["pred_runup_abs_move_d14"]["descriptor_hash"] == runup_reference.descriptor_hash
+    assert captured["pred_runup_abs_move_d14"]["fold_start"] == "2026-08-01"
     boundary_request = SimpleNamespace(requested_decision_at="2026-09-01")
-    assert validated_chooser_fold_references(source, boundary_request)["pred_im_t1_d14"]["fold_start"] == "2026-09-01"
+    boundary_refs = validated_chooser_fold_references(source, boundary_request)
+    assert boundary_refs["pred_im_t1_d14"]["fold_start"] == "2026-09-01"
+    assert boundary_refs["pred_runup_abs_move_d14"]["fold_start"] == "2026-08-01"
     with pytest.raises(StrictTraceCaptureError, match="chooser refs lack declarations"):
         validated_chooser_fold_references(
             {"frozen": {"chooser_references": {"orphan": {}}}}, _request())
@@ -1243,15 +1329,16 @@ def test_chooser_fold_reference_flows_through_real_scorer_checkpoint(tmp_path, m
     candidate.update({"event_id": "AAA_2026-09-17", "request": request_to_dict(request)})
     strict_trace_one(candidate, "snapshot-1", tmp_path / "release")
     assert observed["chooser_fold_references"] == captured
-    identity = reference.release_binding
-    assert observed["chooser_fold_references"] == {
-        "pred_im_t1_d14": {
-            "producer_output": reference.producer_output,
-            "descriptor_hash": reference.descriptor_hash,
-            "estimator_sha256": reference.estimator_sha256,
-            "training_cutoff": reference.training_cutoff,
-            "release_id": reference.release_id,
-            "fold_start": reference.fold_start,
+
+    def _ref_doc(ref):
+        identity = ref.release_binding
+        return {
+            "producer_output": ref.producer_output,
+            "descriptor_hash": ref.descriptor_hash,
+            "estimator_sha256": ref.estimator_sha256,
+            "training_cutoff": ref.training_cutoff,
+            "release_id": ref.release_id,
+            "fold_start": ref.fold_start,
             "release_binding": {
                 "binding_id": identity.binding_id,
                 "model_id": identity.model_id,
@@ -1263,7 +1350,11 @@ def test_chooser_fold_reference_flows_through_real_scorer_checkpoint(tmp_path, m
                 "output_names": list(identity.output_names),
                 "artifact_hash": identity.artifact_hash,
             },
-        },
+        }
+
+    assert observed["chooser_fold_references"] == {
+        "pred_im_t1_d14": _ref_doc(reference),
+        "pred_runup_abs_move_d14": _ref_doc(runup_reference),
     }
 
     corrupted_candidate = copy.deepcopy(candidate)

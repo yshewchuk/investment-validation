@@ -1039,6 +1039,29 @@ def test_resolve_production_release_binding_reads_the_configured_root(monkeypatc
     assert binding.release_id == _RELEASE_ID
 
 
+def test_resolve_production_release_binding_forwards_the_chooser_opt_in(monkeypatch, tmp_path):
+    """The production wrapper must pass the configured root and the chooser
+    opt-in flag straight through to the low-level resolver."""
+    from engine.v2.scoring import release_bindings
+
+    sentinel = object()
+    calls = []
+
+    def stub(release_root, *, include_chooser_fold_references):
+        calls.append((release_root, include_chooser_fold_references))
+        return sentinel
+
+    monkeypatch.setattr(
+        release_bindings.deployment, "production_release_root", lambda: tmp_path)
+    monkeypatch.setattr(release_bindings, "resolve_release_binding", stub)
+
+    result = release_bindings.resolve_production_release_binding(
+        include_chooser_fold_references=True)
+
+    assert result is sentinel
+    assert calls == [(tmp_path, True)]
+
+
 def test_promote_plan_and_resolve_production_release_binding_agree_on_the_same_configured_root(monkeypatch, tmp_path):
     """The two named consumers of MODEL_RELEASE_ROOT must resolve the SAME
     on-disk deployment directory for the SAME configured value.
