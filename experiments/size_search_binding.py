@@ -50,7 +50,8 @@ def _preview_payload(binding):
     return canonical_json(compact).encode("utf-8")
 
 
-def _read_panel(repository, source, request, *, columns):
+def read_panel(repository, source, request, *, columns):
+    """Resolve the pinned request and delegate installed qualified-panel admission."""
     from experiments.size_panel import read
     args = dict(request)
     feature = repository.resolve(args.pop("feature_snapshot_id"))
@@ -73,7 +74,7 @@ def _stored_panel(repository, source, binding, columns):
         fingerprint = content_hash({"context": panel["context"], "feature_snapshot": panel["feature_snapshot"]})
         _require(fingerprint == content_hash(binding["size_panel"]))
     else:
-        panel = _read_panel(repository, source, binding["size_panel_request"], columns=columns)
+        panel = read_panel(repository, source, binding["size_panel_request"], columns=columns)
         _require({"context": panel["context"], "feature_snapshot": panel["feature_snapshot"]}
                  == binding["size_panel"])
         _PANEL_MEMO.clear()
@@ -101,7 +102,7 @@ def prepare(repository, spec, request, panel_request, *, scope, training_start, 
     _require(binding["execution_plan"]["runner"] == "experiments/size_search.py")
     binding["source_closure"] = sources
     _require(binding["magnitude_plan"]["evaluation_years"] == schedule["request"]["outer_years"])
-    panel = _read_panel(repository, from_document(SnapshotRef, binding["snapshot"]), panel_request,
+    panel = read_panel(repository, from_document(SnapshotRef, binding["snapshot"]), panel_request,
                         columns=recipe("HMO")["model_columns"])
     context = panel["context"]
     _require(set(binding["event_ids"]) == {e["event_id"] for e in context["target_events"]})
