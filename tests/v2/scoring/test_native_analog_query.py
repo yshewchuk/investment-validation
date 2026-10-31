@@ -32,7 +32,7 @@ from engine.v2.scoring.stages import _execute_frozen_analogs
 def test_query_base_buckets_and_ratio():
     panel_row = {
         "mcap_log": math.log(5e9),
-        "im": 0.06,
+        "entry_im": 0.06,
         "mean_prior_or_implied": 0.05,
     }
     query = analog_query_base(panel_row)
@@ -48,13 +48,17 @@ def test_query_base_buckets_and_ratio():
         ({"mcap_log": math.log(1.0001e10)}, ">=10B", None),
         ({}, None, None),
         ({"mcap_log": 1e9}, None, None),
-        ({"im": 0.06, "mean_prior_or_implied": 0.05}, None, pytest.approx(1.2)),
-        ({"mcap_log": math.log(5e9), "im": 0.06}, "1-10B", None),
-        ({"mcap_log": math.log(5e9), "im": 0.06, "mean_prior_or_implied": 0.0},
+        ({"entry_im": 0.06, "mean_prior_or_implied": 0.05}, None, pytest.approx(1.2)),
+        ({"mcap_log": math.log(5e9), "entry_im": 0.06}, "1-10B", None),
+        # The model feature "im" is never the ratio's numerator: only "im",
+        # no entry_im, gives no ratio.
+        ({"mcap_log": math.log(5e9), "im": 0.06, "mean_prior_or_implied": 0.05},
          "1-10B", None),
-        ({"mcap_log": math.log(5e9), "im": float("nan"),
+        ({"mcap_log": math.log(5e9), "entry_im": 0.06, "mean_prior_or_implied": 0.0},
+         "1-10B", None),
+        ({"mcap_log": math.log(5e9), "entry_im": float("nan"),
           "mean_prior_or_implied": 0.05}, "1-10B", None),
-        ({"mcap_log": math.log(5e9), "im": 0.06,
+        ({"mcap_log": math.log(5e9), "entry_im": 0.06,
           "mean_prior_or_implied": True}, "1-10B", None),
     ]:
         got = analog_query_base(panel)
@@ -115,7 +119,7 @@ def test_complete_query_moneyness_band(strike, band):
 )
 def test_query_base_implied_ratio_is_im_over_prior(im, prior, ratio):
     # Distinct ratios, none equal to 1.2 or its inverse: im/prior, not prior/im.
-    got = analog_query_base({"im": im, "mean_prior_or_implied": prior})
+    got = analog_query_base({"entry_im": im, "mean_prior_or_implied": prior})
     assert got["implied_ratio"] == pytest.approx(ratio)
 
 
@@ -152,7 +156,7 @@ _BAD_NUMBERS = [
 @pytest.mark.parametrize("bad", _BAD_NUMBERS)
 def test_query_base_drops_mcap_for_every_bad_mcap_log(bad):
     # Dropped (None), never bucketed: -inf would otherwise be exp(-inf)=0 -> "<1B".
-    got = analog_query_base({"mcap_log": bad, "im": 0.06, "mean_prior_or_implied": 0.05})
+    got = analog_query_base({"mcap_log": bad, "entry_im": 0.06, "mean_prior_or_implied": 0.05})
     assert got["mcap_bucket"] is None
     assert got["implied_ratio"] == pytest.approx(1.2)
 
@@ -160,20 +164,20 @@ def test_query_base_drops_mcap_for_every_bad_mcap_log(bad):
 @pytest.mark.parametrize("bad", _BAD_NUMBERS)
 def test_query_base_drops_ratio_for_every_bad_im_or_prior(bad):
     base = {"mcap_log": math.log(5e9)}
-    assert analog_query_base({**base, "im": bad, "mean_prior_or_implied": 0.05})[
+    assert analog_query_base({**base, "entry_im": bad, "mean_prior_or_implied": 0.05})[
         "implied_ratio"] is None
-    assert analog_query_base({**base, "im": 0.06, "mean_prior_or_implied": bad})[
+    assert analog_query_base({**base, "entry_im": 0.06, "mean_prior_or_implied": bad})[
         "implied_ratio"] is None
 
 
 def test_query_base_ratio_edge_cases():
     base = {"mcap_log": math.log(5e9)}
     # A non-finite quotient (overflow) is dropped; a negative divisor is a valid number.
-    assert analog_query_base({**base, "im": 1e308, "mean_prior_or_implied": 1e-308})[
+    assert analog_query_base({**base, "entry_im": 1e308, "mean_prior_or_implied": 1e-308})[
         "implied_ratio"] is None
-    assert analog_query_base({**base, "im": 0.06, "mean_prior_or_implied": -0.05})[
+    assert analog_query_base({**base, "entry_im": 0.06, "mean_prior_or_implied": -0.05})[
         "implied_ratio"] == pytest.approx(-1.2)
-    assert analog_query_base({**base, "im": 0.0, "mean_prior_or_implied": 0.05})[
+    assert analog_query_base({**base, "entry_im": 0.0, "mean_prior_or_implied": 0.05})[
         "implied_ratio"] == 0.0
 
 
@@ -275,7 +279,7 @@ def test_declarations_pick_matching_pool():
         _FakeArtifact(key=board_analog_pool_key("STR-THRU", 0.5, "2026-01-10"),
                       content_hash="sha256:later"),
     ]
-    panel_row = {"mcap_log": math.log(5e9), "im": 0.06, "mean_prior_or_implied": 0.05}
+    panel_row = {"mcap_log": math.log(5e9), "entry_im": 0.06, "mean_prior_or_implied": 0.05}
     declarations = analog_declarations(
         artifacts, "STR-THRU", 0.5, "2026-01-09", panel_row, "snap-1", "req-key")
     assert declarations["analog_artifact"] is artifacts[1]
@@ -328,8 +332,8 @@ def test_complete_query_passes_mcap_bucket_and_ratio_through(bucket, ratio):
 def test_declarations_carry_the_given_snapshot_request_key_and_row():
     key = board_analog_pool_key("STR-THRU", 0.5, "2026-01-09")
     pool = _FakeArtifact(key=key, content_hash="sha256:p")
-    small = {"mcap_log": math.log(5e8), "im": 0.09, "mean_prior_or_implied": 0.06}
-    large = {"mcap_log": math.log(5e10), "im": 0.04, "mean_prior_or_implied": 0.08}
+    small = {"mcap_log": math.log(5e8), "entry_im": 0.09, "mean_prior_or_implied": 0.06}
+    large = {"mcap_log": math.log(5e10), "entry_im": 0.04, "mean_prior_or_implied": 0.08}
     first = analog_declarations([pool], "STR-THRU", 0.5, "2026-01-09",
                                 small, "snap-A", "key-A")
     second = analog_declarations([pool], "STR-THRU", 0.5, "2026-01-09",

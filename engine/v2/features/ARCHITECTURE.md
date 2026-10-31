@@ -156,6 +156,7 @@ not. A missing or null contributor never advances the max; empty history
 contributes none, yet computed history contributes even when `runup_asof`
 cannot resolve.
 The daily state is read at the last session strictly before `key.event_date` and on-or-before `decision_session` (the legacy `engine/features.py` rule), so an event dated on the decision day never sees its own post-print state.
+`panel_row.entry_im` is the analog query's own implied-move read (#681, user 2026-10-30): the daily-state `im` on or before `min(decision_session, event_day)`, the legacy `entry_feature_frame` decision-date rule (the decision is made about 10 minutes after the close, so that close's quote is known). It is a second `scan_daily_state_inputs` read, made only when that bound is later than the strictly-before-event bound above (an AMC event decided on its own day); otherwise the first read is reused. It never exceeds the decision date, so a later-dated quote is never used. A missing or NaN quote on that date gives no `entry_im` key (no fallback to an earlier session, as legacy) and the analog query drops the implied tercile. No near-zero filter is applied (legacy has none). `or_implied`, `im` and every other consumer keep the strictly-before bound.
 `panel_row` also carries the legacy-named model inputs that the panel math
 does not produce, derived with legacy semantics: `or_implied` and `or_rvol30`
 are the daily-state `im` and `rvol30` (absent when those are absent;

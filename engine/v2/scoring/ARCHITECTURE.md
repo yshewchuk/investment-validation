@@ -161,7 +161,7 @@ load-bearing entrypoints:
     caller applies the strategy-specific required/optional policy. No strategy
     uses a latest-cutoff fallback.
   - *Query:* `mcap_bucket` and `implied_ratio` come from the panel row at
-    bundle time; `dte_band` and `moneyness_band` are completed in the analog
+    bundle time (`implied_ratio` is `entry_im / mean_prior_or_implied`, with `entry_im` the decision-date implied move, not the model feature `im`; absent or NaN `entry_im` gives `None`, #681); `dte_band` and `moneyness_band` are completed in the analog
     stage from the scorer-computed `dte_entry`, `strike` and `spot` with
     legacy's band edges. An absent, non-finite or (for strike and spot)
     non-positive input gives a `None` band, so the matcher drops that
