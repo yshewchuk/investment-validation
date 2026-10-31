@@ -92,7 +92,7 @@ only the admitted 1e-12 mass roundoff, without modifying the document.
 `mean_matched_control` supply frozen-bridge/mean-control diagnostics, preserving
 zero atoms and negative post-residual exit values. Fixed per-share spot/cost
 inputs are decision-quote proxies, not realized net-profit or execution claims.
-`experiments/distribution_oof` consumes `mean` and `mean_matched_control`; matching synthetic tests cover these APIs.
+`experiments/distribution_oof` consumes `mean` and `mean_matched_control`; `experiments/distribution_scores` composes the magnitude format, proper scores and bridge summaries; matching synthetic tests cover these APIs.
 The numerical helpers own no source admission, fit orchestration or production wiring.
 
 `eligibility_policy.eligibility_policy` validates an explicit version/width;
@@ -108,7 +108,7 @@ The pure classifier checks shape, not commitment of its caller-supplied context.
 Neither metadata helper grants payload access or accepts caller-provided membership labels.
 
 `progress.Progress`, `progress.stage` and `progress.decision` provide shared stderr telemetry:
-bounded-cadence ticks, stage timing/RSS, optional native refusal codes (no message text) and aggregate decisions.
+bounded-cadence ticks, stage timing/RSS, optional native refusal codes (no message text) and aggregate decisions. Distribution scoring/reporting also consume these helpers.
 
 `snapshot_rows.iter_snapshot_rows` streams native nullable/integer row projections
 with explicit pinned predicates and row/decoded-byte/object/batch caps (default1024).
