@@ -29,8 +29,8 @@ from engine.v2.ops.experiments import (
 )
 from engine.v2.ops.fingerprints import environment_identity, source_closure
 from engine.v2.ops.native_registration import (
-    _size_binding,
     MAX_NATIVE_EVIDENCE_BYTES,
+    _size_binding,
     magnitude_execution_document,
     magnitude_fitted_execution_document,
     magnitude_history_execution_document,
@@ -38,11 +38,17 @@ from engine.v2.ops.native_registration import (
     native_evidence_json,
     validate_magnitude_fitted_execution,
     validate_magnitude_history_execution,
+    validate_regression_registration,
     verified_registration_bytes,
 )
 from engine.v2.research._pricing import STRUCTURES
 from engine.v2.research.experiment_population import load_population
-from engine.v2.research.magnitude_folds import magnitude_window, plan_magnitude_folds
+from engine.v2.research.magnitude_folds import (
+    magnitude_window,
+    plan_magnitude_folds,
+    plan_regression_folds,
+)
+from engine.v2.research.snapshot_inputs import admit_snapshot
 from experiments.magnitude_history_inputs import history_binding
 from experiments.size_registration_artifacts import hydrate_size_registration
 
@@ -100,6 +106,18 @@ class NativeRegistration:
         return content_hash(self.document)
 
 
+def _validate_supported_spec(spec, plan):
+    """Reuse native preparation's supported-spec rule without reading files."""
+    try:
+        safe_relative_path(plan.runner)
+        if (spec.input_files != () or not plan.runner.endswith(".py")
+                or not isinstance(spec.hypothesis, str) or not spec.hypothesis.strip()
+                or not plan.arms[0].strip() or not plan.experiment_id.strip()):
+            raise ValueError
+    except (ArtifactError, ValueError):
+        raise fail("INVALID_EXPERIMENT_SPEC", "native registration requires a Python runner and no file inputs") from None
+
+
 def prepare_native_registration(repository, spec, *, code_root, as_of_month, scope, event_ids,
              final_read=None, expected=None, magnitude_training_start=None, magnitude_labels_before=None,
              admission=None, magnitude_feature_snapshot_id=None, magnitude_history_start=None, magnitude_fit_model=None,
@@ -142,14 +160,7 @@ def prepare_native_registration(repository, spec, *, code_root, as_of_month, sco
         declaration = None if final_read is None else declaration_from_document(to_document(final_read))
     except (ValueError, TypeError):
         raise fail("INVALID_EXPERIMENT_SPEC", "invalid final-read preregistration metadata") from None
-    try:
-        safe_relative_path(plan.runner)
-        if (spec.input_files != () or not plan.runner.endswith(".py")
-                or not isinstance(spec.hypothesis, str) or not spec.hypothesis.strip()
-                or not plan.arms[0].strip() or not plan.experiment_id.strip()):
-            raise ValueError
-    except (ArtifactError, ValueError):
-        raise fail("INVALID_EXPERIMENT_SPEC", "native registration requires a Python runner and no file inputs") from None
+    _validate_supported_spec(spec, plan)
     spec = replace(spec, economic_params=plan.as_document()["economic_params"], input_files=())
     try:
         root = Path(code_root).resolve()
@@ -305,6 +316,8 @@ def _require_sweep_binding(conn, registration, spec):
 
 def reserve_native_registration(conn, store, registration, spec, *, max_evidence_bytes=None):
     """Reserve prepared bytes; an optional bound covers new and stored evidence."""
+    if max_evidence_bytes is None and registration.document.get("schema_version") == "native_experiment_registration.v1.8":
+        max_evidence_bytes = MAX_NATIVE_EVIDENCE_BYTES
     if max_evidence_bytes is None:
         _require_sweep_binding(conn, registration, spec)
     else:
@@ -319,6 +332,14 @@ def reserve_native_registration(conn, store, registration, spec, *, max_evidence
                 "variant_id": registration.variant_id, "planned_variants": 1}
     payload = (json.dumps(evidence, sort_keys=True) if max_evidence_bytes is None else
                native_evidence_json(evidence, max_bytes=max_evidence_bytes))
+    if registration.document.get("schema_version") == "native_experiment_registration.v1.8":
+        validate_regression_registration(registration.document)
+        key = content_hash({"experiment_id": spec.experiment_id, "arm": spec.primary_arm_id})
+        if registration.run_id != "native_" + key.removeprefix("sha256:"):
+            raise fail("EXPERIMENT_IDENTITY_CONFLICT", "requested specification differs from registration")
+    if (registration.document.get("schema_version") == "native_experiment_registration.v1.8"
+            or getattr(spec, "runner", None) == "experiments/iv_crush_search.py"):
+        _validate_experiment_policy(registration.document, spec)
     if max_evidence_bytes is not None:
         _require_sweep_binding(conn, registration, spec)
     if native_registration_exists(conn, store, registration, max_evidence_bytes=max_evidence_bytes):
@@ -400,8 +421,47 @@ def read_native_registration(conn, store, spec, *, max_evidence_bytes=MAX_NATIVE
         document = load_registration_document(store, binding, verified_size_rows=verified_size_rows)
         registration = NativeRegistration(run_id, binding,
             document if document.get("schema_version") == "native_experiment_registration.v1.7" else None)
-        if registration.document["spec_hash"] != spec.spec_hash:
-            raise fail("EXPERIMENT_IDENTITY_CONFLICT", "requested specification differs from registration")
+        _validate_experiment_policy(registration.document, spec)
         return registration
     except (ArtifactError, ValueError, KeyError, TypeError):
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "native registration evidence is invalid") from None
+
+
+def _validate_experiment_policy(document, spec):
+    """Apply the requested fixed runner's policy; generic wire admission stays reusable."""
+    if document.get("spec_hash") != spec.spec_hash:
+        raise fail("EXPERIMENT_IDENTITY_CONFLICT", "requested specification differs from registration")
+    if document.get("schema_version") == "native_experiment_registration.v1.8":
+        plan = resolve_experiment_plan(spec)
+        _validate_supported_spec(spec, plan)
+        if canonical_json(document.get("execution_plan")) != canonical_json(plan.as_document()):
+            raise fail("EXPERIMENT_IDENTITY_CONFLICT", "requested specification differs from registration")
+    if getattr(spec, "runner", None) == "experiments/iv_crush_search.py":
+        from experiments.iv_crush_registration import validate_registration
+        validate_registration(document)
+
+
+def prepare_regression_registration(repository, spec, *, code_root, source, feature_snapshot,
+                                    target_snapshot, target, scope, as_of_month, training_start,
+                                    labels_before, event_ids=None):
+    """Prepare a target-aware binding through native base admission; never reserve or fit."""
+    if not isinstance(spec, ExperimentSpec):
+        raise fail("INVALID_EXPERIMENT_SPEC", "regression registration requires an experiment specification")
+    plan = resolve_experiment_plan(spec)
+    source = admit_snapshot(repository, source)
+    feature_snapshot = admit_snapshot(repository, feature_snapshot)
+    target_snapshot = admit_snapshot(repository, target_snapshot)
+    temporal = plan_regression_folds(repository, source, target=target, as_of_month=as_of_month,
+        evaluation_years=list(plan.folds), training_start=training_start, event_ids=event_ids)
+    base, spec = prepare_native_registration(repository, spec, code_root=code_root, snapshot=source,
+        scope=scope, as_of_month=as_of_month, event_ids=[event["event_id"] for event in temporal["events"]],
+        defer_serialization=True)
+    document = {**base.document, "schema_version": "native_experiment_registration.v1.8",
+        "regression_plan": temporal, "feature_snapshot": to_document(feature_snapshot),
+        "target_snapshot": to_document(target_snapshot), "regression_execution": {
+            "schema_version": "regression_execution.v1", "evaluation_labels_before": labels_before}}
+    validate_regression_registration(document)
+    payload = canonical_json(document).encode("utf-8")
+    if len(payload) > MAX_NATIVE_EVIDENCE_BYTES:
+        raise fail("RESOURCE_LIMIT_EXCEEDED", "regression registration exceeds native byte budget")
+    return NativeRegistration(base.run_id, payload), spec

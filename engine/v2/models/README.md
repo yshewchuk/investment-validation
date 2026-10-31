@@ -27,7 +27,7 @@ Replaces (§4.4): `models/registry.py`, `artifact loading and inference adapters
 `regression_target.target_descriptor` / `validate_target` bind explicit column,
 prediction column, signed/nonnegative domain and definition hash into a detached
 closed identity. Invalid/tampered documents raise `ValueError`; these are metadata,
-not evidence that labels exist or permission to read them. Used by temporal planning.
+not evidence that labels exist or permission to read them. Used by temporal planning and generic ops wire validation.
 
 
 

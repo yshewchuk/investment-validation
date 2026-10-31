@@ -13,6 +13,7 @@ from engine.v2.foundation import (
     safe_relative_path,
     to_document,
 )
+from engine.v2.models.regression_target import validate_target
 from engine.v2.ops.catalog import decode_bounded_text, sql_text_budget
 from engine.v2.ops.errors import OpsError, fail
 
@@ -79,13 +80,10 @@ def verified_registration_bytes(conn, store, run_id, *, expected_ref=None, max_e
                                   "native_experiment_registration.v1.2", "native_experiment_registration.v1.3",
                                   "native_experiment_registration.v1.4", "native_experiment_registration.v1.5",
                                   "native_experiment_registration.v1.6",
-                                  "native_experiment_registration.v1.7")
+                                  "native_experiment_registration.v1.7", "native_experiment_registration.v1.8")
                 or (expected_ref is not None and ref != expected_ref)):
             raise ValueError
-        if max_evidence_bytes is not None and ref.byte_size > max_evidence_bytes:
-            raise fail("RESOURCE_LIMIT_EXCEEDED", "native registration exceeds its UTF-8 byte budget",
-                       details={"registration_bytes": ref.byte_size, "max_registration_bytes": max_evidence_bytes})
-        binding = store.read_verified(ref)
+        binding = _read_registration_artifact(store, ref, max_evidence_bytes)
         document = json.loads(binding)
         _check_size_artifact_budget(document)
         verified_size_rows = _size_verification_cache(document, verified_size_rows)
@@ -99,6 +97,16 @@ def verified_registration_bytes(conn, store, run_id, *, expected_ref=None, max_e
     if not valid:
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "native registration differs from its immutable binding")
     return binding
+
+
+def _read_registration_artifact(store, ref, max_bytes):
+    """Apply the selected format's byte budget before opening its artifact."""
+    if max_bytes is None and ref.schema_ref == "native_experiment_registration.v1.8":
+        max_bytes = MAX_NATIVE_EVIDENCE_BYTES
+    if max_bytes is not None and ref.byte_size > max_bytes:
+        raise fail("RESOURCE_LIMIT_EXCEEDED", "native registration exceeds its UTF-8 byte budget",
+                   details={"registration_bytes": ref.byte_size, "max_registration_bytes": max_bytes})
+    return store.read_verified(ref)
 
 
 def _size_verification_cache(document, verified_size_rows):
@@ -239,9 +247,15 @@ def _size_artifact_verified(store, descriptor, verified_size_rows=None):
         return False
 
 
+def _registration_binding(document):
+    if isinstance(document, dict) and document.get("schema_version") == "native_experiment_registration.v1.8":
+        return _regression_binding(document)
+    return _magnitude_binding(document)
+
+
 def _matches(row, evidence, ref, binding, document, store, verified_size_rows=None):
     variant = content_hash(document)
-    return (_magnitude_binding(document) and _size_artifacts_verified(store, document, verified_size_rows)
+    return (_registration_binding(document) and _size_artifacts_verified(store, document, verified_size_rows)
             and (document["schema_version"] != "native_experiment_registration.v1.7"
                  or _magnitude_binding(document, verified_size_rows))
             and document["schema_version"] == ref.schema_ref
@@ -651,13 +665,18 @@ def _magnitude_metadata(plan):
         "target": "absolute_earnings_close_to_close_return", "price_basis": "split_neutral_non_dividend_adjusted",
         "estimand": "conditional_mean", "primary_loss": "pooled_rmse",
         "secondary_diagnostics": ["mae", "quantile_calibration"]}
+    return plan["target_recipe"] == recipe and _temporal_metadata(plan)
+
+
+def _temporal_metadata(plan):
+    """Shared closed metadata policy; target definition is checked separately."""
     policy = {"kind": "expanding_event_year", "group_key": "event_id",
         "fit_boundary": "min_year_start_and_evaluation_forecast_ceilings",
         "training_label_availability": "strictly_before_fit_boundary_required_later",
         "issuer_overlap": "allowed_across_time", "inner_search": "not_defined"}
     availability = {"basis": "reconstructed_date_bounds", "event_schedule_as_known": "unverified",
                     "source_publication": "unverified"}
-    return (plan["target_recipe"] == recipe and plan["fold_policy"] == policy
+    return (plan["fold_policy"] == policy
             and plan["availability"] == availability and _magnitude_window(plan)
             and plan["random_membership_version"] == "canonical-event-sha256.v1"
             and plan["rolling_membership_version"] == "calendar-months.v1"
@@ -788,3 +807,54 @@ def _magnitude_member_order(ids, events):
         return False
     members = set(ids)
     return ids == [key for key in events if key in members]
+
+
+def validate_regression_registration(document):
+    """Validate the v1.8 wire binding, not live sources or fitting authority."""
+    try:
+        if _regression_binding(document):
+            return
+    except (KeyError, TypeError, ValueError, OverflowError, AttributeError):
+        pass
+    raise fail("EXPERIMENT_IDENTITY_CONFLICT", "regression registration binding differs")
+
+
+def _regression_binding(document):
+    if (not isinstance(document, dict) or document.get("schema_version") != "native_experiment_registration.v1.8"
+            or set(document) != {"schema_version", "spec_hash", "execution_plan", "snapshot", "scope",
+                "source_closure", "environment", "event_ids", "holdouts", "regression_plan",
+                "regression_execution", "feature_snapshot", "target_snapshot"}):
+        return False
+    for name in ("snapshot", "feature_snapshot", "target_snapshot"):
+        if to_document(from_document(SnapshotRef, document[name])) != document[name]:
+            return False
+    plan, execution = document["regression_plan"], document["regression_execution"]
+    return _regression_plan(plan, execution) and _regression_context(document, plan, execution)
+
+
+def _regression_plan(plan, execution):
+    if (not isinstance(plan, dict) or set(plan) != {"schema_version", "snapshot_id", "holdout_as_of_month",
+            "random_membership_version", "rolling_membership_version", "training_start", "evaluation_years",
+            "horizons", "target_recipe", "fold_policy", "population_input", "calendar_input", "events",
+            "folds", "availability", "plan_id"}
+            or not isinstance(execution, dict) or set(execution) != {"schema_version", "evaluation_labels_before"}
+            or execution["schema_version"] != "regression_execution.v1"
+            or not _day(execution["evaluation_labels_before"])):
+        return False
+    validate_target(plan["target_recipe"])
+    return (plan["schema_version"] == "regression_temporal_plan.v1"
+        and plan["plan_id"] == content_hash({k: v for k, v in plan.items() if k != "plan_id"})
+        and _temporal_metadata(plan))
+
+
+def _regression_context(document, plan, execution):
+    declared = document["execution_plan"]
+    return (_magnitude_sources(plan, document["snapshot"])
+        and plan["evaluation_years"] == declared["folds"]
+        and type(declared["seed"]) is int and declared["seed"] == 0 and declared["economic_params"] == {}
+        and plan["snapshot_id"] == document["snapshot"]["snapshot_id"]
+        and document["holdouts"] == {name: plan[name] for name in (
+            "holdout_as_of_month", "random_membership_version", "rolling_membership_version")}
+        and _magnitude_events(plan["events"], document["event_ids"]) and _magnitude_folds(plan)
+        and all(event["event_date"] < execution["evaluation_labels_before"] for event in plan["events"]
+                if event["event_date"][:4] in plan["evaluation_years"]))
