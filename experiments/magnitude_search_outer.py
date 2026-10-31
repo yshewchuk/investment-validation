@@ -1,4 +1,5 @@
 """Bounded selected-candidate outer fits; immutable evidence, no final authority."""
+import math
 import sys
 import time
 from pathlib import Path
@@ -40,6 +41,35 @@ def _conflict():
 def _equal(left, right):
     if canonical_json(left) != canonical_json(right):
         raise _conflict()
+
+
+def _seconds(value):
+    return type(value) in (int, float) and math.isfinite(value) and value >= 0
+
+
+def _rss_kib(value):
+    return type(value) is int and value >= 0
+
+
+def _timed_shape(result, keys):
+    if not isinstance(result, dict):
+        return False
+    observed = set(result)
+    if observed == keys:
+        return True
+    return (observed == keys | {"score_seconds", "rss_delta_kib"}
+            and _seconds(result["score_seconds"]) and _rss_kib(result["rss_delta_kib"]))
+
+
+def _equal_completed_fit(fit, expected):
+    if not isinstance(fit, dict):
+        raise _conflict()
+    observed = fit
+    if "fit_seconds" in fit:
+        if not _seconds(fit["fit_seconds"]):
+            raise _conflict()
+        observed = {key: value for key, value in fit.items() if key != "fit_seconds"}
+    _equal(observed, expected)
 
 
 def _native_selection(trials, plan, read):
@@ -129,12 +159,14 @@ def _replay(read, store, started, fold, plan, execution):
                    "completed_fit_count": len(fits), "forecasts_id": content_hash(forecasts)}
         if execution.get("schema_version") == "size_candidate_execution.v1":
             worker = read("worker-result")
+            if not _timed_shape(worker, {"event", "forecasts", "diagnostics"}):
+                raise _conflict()
             _equal(worker["forecasts"], forecasts)
             receipt.update(diagnostic_evidence(worker, execution, plan["horizons"]))
         _equal(read("execution"), receipt)
         for fit in fits:
-            for state in ("started", "completed"):
-                _equal(read("fit-" + state + ":" + str(fit["horizon_sessions"])), fit)
+            _equal(read("fit-started:" + str(fit["horizon_sessions"])), fit)
+            _equal_completed_fit(read("fit-completed:" + str(fit["horizon_sessions"])), fit)
         result = _result(started, inputs, inputs_id, receipt, forecasts, read("validation"), fold, plan["horizons"])
         _equal(read("terminal"), result)
         return result
@@ -198,7 +230,10 @@ def _execute_admitted(conn, store, repository, registration, plan, fold, selecti
         if (state not in ("started", "completed") or index >= len(expected)
                 or (state == "started") == bool(pending)):
             raise _conflict()
-        _equal(fit, expected[index])
+        if state == "started":
+            _equal(fit, expected[index])
+        else:
+            _equal_completed_fit(fit, expected[index])
         append("fit-" + state + ":" + str(fit["horizon_sessions"]), fit)
         if state == "started":
             pending.append(fit)
@@ -209,8 +244,9 @@ def _execute_admitted(conn, store, repository, registration, plan, fold, selecti
         resolved = resolved_limits(conn, store, registration, plan, limits)
     result = run_fitted_trial(source, fold, plan, execution, resolved, progress)
     succeeded = result.get("event") == "succeeded"
-    if ((succeeded and (pending or len(fits) != len(expected) or set(result) != {"event", "forecasts"} | diagnostic_keys(binding)))
-            or (not succeeded and (result != {"event": "failed"} or len(pending) != 1))):
+    if ((succeeded and (pending or len(fits) != len(expected)
+                        or not _timed_shape(result, {"event", "forecasts"} | diagnostic_keys(binding))))
+            or (not succeeded and (not _timed_shape(result, {"event"}) or result.get("event") != "failed" or len(pending) != 1))):
         raise _conflict()
     forecasts = _forecasts(result["forecasts"], fold, plan["horizons"]) if succeeded else None
     receipt = {"status": result["event"], "fits": fits, "fit_attempt_count": len(fits) + len(pending),

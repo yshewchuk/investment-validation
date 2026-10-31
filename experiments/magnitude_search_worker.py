@@ -34,8 +34,9 @@ def main():
         rss_before_maxrss_kib = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
 
         def rss_delta_kib():
-            peak_kib = max(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss, rss_before_maxrss_kib)
-            return max(0, max(peak_kib, rss_bytes() // 1024) - rss_before_kib)
+            current_kib = rss_bytes() // 1024
+            current_ru_maxrss_kib = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+            return max(0, current_kib - rss_before_kib, current_ru_maxrss_kib - rss_before_maxrss_kib)
 
         # The header holds a manifest, which the journal caps at MAX_BYTES, so a larger file is not a header.
         with open(sys.argv[1], "rb") as stream:

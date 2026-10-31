@@ -1,6 +1,7 @@
 """No-launch prerequisites and valid-hash negatives for the outer evidence chain."""
 # ruff: noqa: F811
 import copy
+import math
 import sqlite3
 import sys
 from fractions import Fraction
@@ -296,7 +297,7 @@ def test_valid_native_candidate_failure_is_excluded_without_blocking_outer(case,
         inputs = load_inputs(ArtifactStore(source["store_root"]), source["manifest"], source["inputs_id"])
         first = trials.SearchTrials._fit_evidence(inputs, fold, plan, execution)[0]
         progress("started", first)
-        return {"event": "failed"}
+        return {"event": "failed", "score_seconds": 0.0, "rss_delta_kib": 0}
     cases = trial_cases(case)
     monkeypatch.setattr(trials, "run_fitted_trial", failed)
     case.recorder.execute(*cases[0], limits=LIMITS)
@@ -405,6 +406,11 @@ def test_stored_integer_valued_float_fit_horizon_is_canonical_identity(outer_cas
     assert len(changed) == 1
     marker = slot(case, "fit-" + state + ":1")
     assert type(marker["horizon_sessions"]) is int
+    if state == "completed":
+        fit_seconds = marker["fit_seconds"]
+        assert isinstance(fit_seconds, (int, float)) and not isinstance(fit_seconds, bool)
+        assert math.isfinite(fit_seconds) and fit_seconds >= 0
+        marker = {key: value for key, value in marker.items() if key != "fit_seconds"}
     assert marker == expected_fits(case)[-1]
     before = case.conn.total_changes, journal_slots(case)
     forbid_work(monkeypatch)
@@ -629,3 +635,35 @@ def test_actual_submitted_forecast_selection_has_no_outer_execution_authority(ca
         outer.execute_outer_fold(r.conn, r.store, r.repository, r.registration,
                                  r.request, r.plan_ref, "2024", limits=LIMITS)
     assert r.conn.total_changes == before
+
+
+def test_timed_shape_requires_both_child_timing_fields():
+    keys = {"event", "forecasts"}
+    result = {"event": "succeeded", "forecasts": [], "score_seconds": 0.25, "rss_delta_kib": 64}
+    assert outer._timed_shape(result, keys)
+    assert not outer._timed_shape({key: value for key, value in result.items() if key != "rss_delta_kib"}, keys)
+
+
+def test_timed_failure_preserves_fit_markers_and_failure_classification(outer_case, monkeypatch):
+    case = outer_case
+    captured = []
+    def fitted(inputs, fold, plan, execution, limits, progress):
+        fits = expected_fits(case)
+        captured.append(fits)
+        timed = [{**fit, "fit_seconds": 0.125} for fit in fits]
+        for fit, marker in zip(fits[:-1], timed[:-1]):
+            progress("started", fit)
+            progress("completed", marker)
+        progress("started", fits[-1])
+        return {"event": "failed", "score_seconds": 0.25, "rss_delta_kib": 64}
+    monkeypatch.setattr(outer, "run_fitted_trial", fitted)
+    monkeypatch.setattr(outer, "load_magnitude_targets", lambda *a, **kw: pytest.fail("timed failure opened labels"))
+    with outer_problem("EXPERIMENT_VARIANT_FAILED",
+                       "selected outer candidate failed; replacement and retry are forbidden",
+                       category="internal"):
+        run(case)
+    fits = captured[0]
+    timed = [{**fit, "fit_seconds": 0.125} for fit in fits]
+    for fit, marker in zip(fits[:-1], timed[:-1]):
+        assert slot(case, "fit-completed:" + str(fit["horizon_sessions"])) == marker
+    assert slot(case, "execution")["status"] == "failed"
