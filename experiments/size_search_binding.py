@@ -47,7 +47,8 @@ def _preview_payload(binding):
     return canonical_json(compact).encode("utf-8")
 
 
-def _read_panel(repository, source, request, *, columns):
+def read_panel(repository, source, request, *, columns):
+    """Resolve the pinned request and delegate installed qualified-panel admission."""
     from experiments.size_panel import read
     args = dict(request)
     feature = repository.resolve(args.pop("feature_snapshot_id"))
@@ -76,7 +77,7 @@ def prepare(repository, spec, request, panel_request, *, scope, training_start, 
     _require(binding["execution_plan"]["runner"] == "experiments/size_search.py")
     binding["source_closure"] = sources
     _require(binding["magnitude_plan"]["evaluation_years"] == schedule["request"]["outer_years"])
-    panel = _read_panel(repository, from_document(SnapshotRef, binding["snapshot"]), panel_request,
+    panel = read_panel(repository, from_document(SnapshotRef, binding["snapshot"]), panel_request,
                         columns=recipe("HMO")["model_columns"])
     context = panel["context"]
     _require(set(binding["event_ids"]) == {e["event_id"] for e in context["target_events"]})
@@ -201,7 +202,7 @@ def fold_inputs(repository, binding, fold):
         "evaluation_labels_before": binding["magnitude_execution"]["evaluation_labels_before"]}
         for group in _folds(binding, binding["size_request"])))
     source = from_document(SnapshotRef, binding["snapshot"])
-    panel = _read_panel(repository, source, binding["size_panel_request"], columns=recipe("HMO")["model_columns"])
+    panel = read_panel(repository, source, binding["size_panel_request"], columns=recipe("HMO")["model_columns"])
     _require({"context": panel["context"], "feature_snapshot": panel["feature_snapshot"]} == binding["size_panel"])
     participants = set(fold["training_candidate_event_ids"] + fold["evaluation_event_ids"])
     events = {e["event_id"]: e for e in panel["context"]["target_events"]}
