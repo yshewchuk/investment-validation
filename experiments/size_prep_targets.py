@@ -1,6 +1,7 @@
 """Workspace development-target derivation over a pinned bounds record. Library-only: no production caller until slice 4 (#1614 slice 3b)."""
 import time
 
+from engine.v2.data.errors import fail as data_fail
 from engine.v2.foundation import canonical_json, content_hash
 from engine.v2.foundation.experiment_holdouts import ExperimentHoldouts, calendar_date
 from engine.v2.ops.errors import fail
@@ -11,6 +12,15 @@ from experiments import size_panel, size_prep_history
 from experiments.size_prep_inputs import _log
 
 TARGETS_VERSION = "size_prep_targets.v1"
+
+
+def _bound_events(repository, bounds, metadata_limits):
+    """Refuse an over-limit earnings_events read on pinned metadata bytes before any load."""
+    records = repository.fragment_records(bounds, "earnings_events")
+    if (sum(r.object_ref.byte_size for r in records) > metadata_limits["max_total_object_bytes"]
+            or any(r.object_ref.byte_size > metadata_limits["max_object_bytes"] for r in records)):
+        raise data_fail("RESULT_LIMIT_EXCEEDED", "earnings_events exceeds the metadata object-byte limits",
+                   details={"table": "earnings_events"})
 
 
 def _no_targets():
@@ -46,6 +56,7 @@ def derive_workspace_targets(workspace, scope, record, *, tickers, event_start, 
     _log("workspace targets start tickers=" + str(len(tickers)) + " window=" + event_start + ".." + event_end,
          started)
     repository, bounds = size_prep_history.checked_bounds(workspace, scope, record, metadata_limits)
+    _bound_events(repository, bounds, metadata_limits)
     population = load_population(repository, bounds, as_of_month=as_of_month)
     days = population.event_date.dt.strftime("%Y-%m-%d")
     kept = population[population.ticker.isin(tickers) & (days >= event_start) & (days < event_end)]

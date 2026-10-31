@@ -271,3 +271,53 @@ def test_plan_producer_refusal_propagates_without_a_pin(bounds_ws, source_root, 
              "HOLDOUT_ACCESS_DENIED")
     assert len(calls["plan"]) == 1
     assert _pin_names(ws) == pins
+
+
+def _fixture_event_bytes(ws, record):
+    repository = Repository(ws.conn, ws.store, pin_snapshots=True)
+    snapshot = repository.resolve(record["bounds_snapshot_id"])
+    sizes = [r.object_ref.byte_size for r in repository.fragment_records(snapshot, "earnings_events")]
+    assert sizes
+    return sum(sizes), max(sizes)
+
+
+def test_events_total_over_byte_limit_refuses_before_load_and_pin(bounds_ws, source_root, monkeypatch):
+    ws, clock, record, _ = _prepared(bounds_ws, source_root, monkeypatch)
+    total, _ = _fixture_event_bytes(ws, record)
+    calls = _fakes(monkeypatch)
+    pins = _pin_names(ws)
+    _refusal(lambda: tgt.derive_workspace_targets(
+        ws, "shadow", record,
+        **_args(clock, metadata_limits={**{k: 10**6 for k in hist.size_panel._METADATA_LIMITS},
+                                        "max_total_object_bytes": total - 1})),
+        "RESULT_LIMIT_EXCEEDED")
+    assert calls["load"] == []
+    assert _pin_names(ws) == pins
+
+
+def test_events_single_object_over_byte_limit_refuses_before_load_and_pin(bounds_ws, source_root, monkeypatch):
+    ws, clock, record, _ = _prepared(bounds_ws, source_root, monkeypatch)
+    total, largest = _fixture_event_bytes(ws, record)
+    calls = _fakes(monkeypatch)
+    pins = _pin_names(ws)
+    _refusal(lambda: tgt.derive_workspace_targets(
+        ws, "shadow", record,
+        **_args(clock, metadata_limits={**{k: 10**6 for k in hist.size_panel._METADATA_LIMITS},
+                                        "max_total_object_bytes": total,
+                                        "max_object_bytes": largest - 1})),
+        "RESULT_LIMIT_EXCEEDED")
+    assert calls["load"] == []
+    assert _pin_names(ws) == pins
+
+
+def test_events_at_exact_byte_limits_pass_and_load_proceeds(bounds_ws, source_root, monkeypatch):
+    ws, clock, record, _ = _prepared(bounds_ws, source_root, monkeypatch)
+    total, largest = _fixture_event_bytes(ws, record)
+    calls = _fakes(monkeypatch)
+    doc = tgt.derive_workspace_targets(
+        ws, "shadow", record,
+        **_args(clock, metadata_limits={**{k: 10**6 for k in hist.size_panel._METADATA_LIMITS},
+                                        "max_total_object_bytes": total,
+                                        "max_object_bytes": largest}))
+    assert calls["load"] == [{"as_of_month": "2024-01"}]
+    assert doc["event_ids"] == ["ev-start"]
