@@ -1,4 +1,7 @@
-"""Matched three-horizon development reporting; no selection or holdout authority."""
+"""Matched development reporting over the selected event/horizon rows (default: all three horizons).
+
+Pairing uses those selected rows only and has no selection or holdout authority.
+"""
 import math
 from collections import Counter, defaultdict
 

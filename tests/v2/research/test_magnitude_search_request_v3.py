@@ -121,6 +121,8 @@ def test_v3_invalid_horizons_refuse(bad_horizons):
     with pytest.raises(OpsError) as caught:
         v3_compiler.compile_request(v3_request(), horizons=bad_horizons)
     assert caught.value.problem.code == "INVALID_EXPERIMENT_SPEC"
+    assert caught.value.problem.message == (
+        "stage-2 horizons must be a nonempty unique subset of integer leads 1, 3, 5")
 
 
 def test_v2_fixture_replays_identically_through_both_entrypoints():
