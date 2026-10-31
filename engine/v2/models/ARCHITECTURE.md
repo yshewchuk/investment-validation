@@ -48,7 +48,7 @@ The research-only `training.magnitude` boundary fits two original-unit candidate
 from ops-admitted recipe data for the native experiment CLI. Ridge's
 median imputation, full missing indicators and scaling learn from training rows
 only; HGB freezes training-all-null columns to zero and routes other nulls natively,
-without a random early-stopping split. Both use
+without a random early-stopping split in the v1 recipe (the v2 HGB recipe enables early stopping with a random 10% training-row validation split). Both use
 fresh per-fold/horizon estimators, one numerical thread and finite nonnegative
 predictions. The caller owns protected admission, label qualification and evidence;
 this module receives recipe data and numeric matrices, with no I/O or model release.
@@ -78,7 +78,7 @@ No I/O, publication, release or production wiring; source closures need resealin
 | Same valid inputs and numerical environment | Deterministic fresh fit, not cached or journal replay |
 | Cache, transaction or partial-write concerns | No cache, I/O, persistence or publication; v1 recipes and results are unchanged |
 
-`magnitude_ridge_hgb_recipe` constructs/validates closed variable-width policies binding ordered columns, dictionary hash and estimator parameters, not source admission or dictionary membership. Request-v3 SIZE Ridge candidates admit finite positive alpha in `[1e-6, 1000]`; the v2 compiler retains its existing grid.
+`magnitude_ridge_hgb_recipe` constructs/validates closed variable-width policies binding ordered columns, dictionary hash and estimator parameters, not source admission or dictionary membership. Request-v3 SIZE Ridge candidates admit finite positive alpha in `[1e-6, 1000]`; the v2 compiler retains its existing grid. `magnitude_ridge_hgb_recipe.v2` (HGB only) adds bounded `learning_rate`, `min_samples_leaf` and `l2_regularization` with `max_iter` 500 and early stopping; partial or out-of-bound values raise `ValueError`, and v1 recipes are unchanged.
 `regression_ridge_hgb_recipe.regression_recipe` adds a distinct
 `regression_ridge_hgb_recipe.v1` identity with explicit `signed`/`nonnegative`
 target domain and respectively `none`/`clip_zero` projection. Its validator
@@ -93,7 +93,7 @@ forecasts. No I/O, cache, retries, source/fold/holdout admission or release occu
 Existing magnitude numerics remain unchanged; source closures require resealing.
 `regression_candidate.regression_candidate_recipe` accepts only ridge/alpha, hgb/max_leaf_nodes or elasticnet/alpha+l1_ratio and delegates explicit signed/nonnegative policy construction; it imports no training or source admission.
 `training.regression_candidate.fit_regression_candidate` checks both no-fit guards before inspection, dispatches only matching regression schema/model pairs, then preserves the existing fitter result/validation/errors. Unsupported pairs refuse ValueError; no reads, selection, retries, writes or production caller.
-Existing experiment magnitude recipe dispatch is unchanged; its fit adapter lazily delegates to shared `training.magnitude_candidate.fit_candidate`, still refusing the new schemas before training imports via shared `magnitude_candidate.magnitude_candidate_family` metadata validation.
+Existing experiment magnitude recipe dispatch is unchanged except that it also accepts the v2 HGB recipe schema; its fit adapter lazily delegates to shared `training.magnitude_candidate.fit_candidate`, refusing unsupported schemas (Ridge v1, HGB v1 and v2, and ElasticNet v1 are accepted) before training imports via shared `magnitude_candidate.magnitude_candidate_family` metadata validation.
 `training.fit_routes.fit_execution` accepts only magnitude/magnitude_candidate/regression_candidate numeric routes, checks both guards first and original magnitude column order against its admitted recipe, and preserves delegated errors/results (original magnitude lists become predictions-only dictionaries). It grants no source/registration authority and has no production caller; legacy exception translation stays in experiment wrappers.
 
 | Ridge/HGB condition | Outcome |

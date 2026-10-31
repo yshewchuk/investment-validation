@@ -13,6 +13,8 @@ HASH = "sha256:" + "a" * 64
 CASES = [("ridge", {"alpha": a}) for a in (0.1, 1, 10)] + [
     ("elasticnet", {"alpha": a, "l1_ratio": r}) for a in (0.01, 0.1, 1)
     for r in (0.25, 0.75)] + [("hgb", {"max_leaf_nodes": n}) for n in (7, 15)]
+HGB_V2 = {"learning_rate": 0.05, "max_leaf_nodes": 7, "min_samples_leaf": 20,
+          "l2_regularization": 0.0}
 
 
 @pytest.mark.parametrize("family,parameters", CASES)
@@ -29,6 +31,33 @@ def test_all_choices_reuse_complete_family_recipe_and_detach(family, parameters,
     assert result == expected
     result["estimator"]["params"].clear()
     assert parameters == before_parameters
+
+
+def test_hgb_four_axis_parameters_return_v2_recipe():
+    result = assembly.candidate_recipe("hgb", HGB_V2, columns=["x"], feature_dictionary_hash=HASH)
+    expected = ridge_hgb_recipe(model="history_hgb", columns=["x"],
+                                feature_dictionary_hash=HASH, **HGB_V2)
+    assert result == expected
+    assert result["schema_version"] == "magnitude_ridge_hgb_recipe.v2"
+    assert result["estimator"]["params"]["early_stopping"] is True
+
+
+def test_hgb_legacy_leaf_only_parameters_still_return_v1_recipe():
+    result = assembly.candidate_recipe("hgb", {"max_leaf_nodes": 7}, columns=["x"],
+                                       feature_dictionary_hash=HASH)
+    assert result["schema_version"] == "magnitude_ridge_hgb_recipe.v1"
+    assert result["estimator"]["params"]["early_stopping"] is False
+
+
+@pytest.mark.parametrize("parameters", [
+    {"max_leaf_nodes": 7, "learning_rate": 0.05},
+    {"max_leaf_nodes": 7, "min_samples_leaf": 20, "l2_regularization": 0.0},
+    {**HGB_V2, "max_depth": 2},
+    {"max_leaf_nodes": 7, "extra": 1},
+])
+def test_hgb_mixed_key_sets_refuse(parameters):
+    with pytest.raises(ValueError, match="^candidate requires a supported family and exact parameter keys$"):
+        assembly.candidate_recipe("hgb", parameters, columns=["x"], feature_dictionary_hash=HASH)
 
 
 def test_order_dictionary_and_every_parameter_choice_bind_identity():
