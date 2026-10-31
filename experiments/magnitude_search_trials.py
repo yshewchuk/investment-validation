@@ -369,7 +369,7 @@ class SearchTrials:
         return self._record(outer_year, inner_year, candidate_id, forecasts=forecasts, failure=failure)
 
     def _record(self, outer_year, inner_year, candidate_id, *, forecasts=None, failure=None, native=False, reconcile=False):
-        """Commit forecasts before labels; native reconciliation can finish publication."""
+        """Commit forecasts before labels; a journaled cohort validation is reused; native reconciliation can finish publication."""
         plan = self._admit()
         key, inner, _ = self._trial(plan, outer_year, inner_year, candidate_id)
         if self._read("start:" + key) is None:
@@ -408,7 +408,7 @@ class SearchTrials:
         if admitted is None:
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "trial has no admitted native inputs")
         self._append("forecasts:" + key, submitted, replay=reconcile, absent=("terminal:" + key,))
-        validation = self._read("validation:" + admitted["cohort"]) if reconcile else None
+        validation = self._read("validation:" + admitted["cohort"])
         stored = None
         if validation is None:
             try:
