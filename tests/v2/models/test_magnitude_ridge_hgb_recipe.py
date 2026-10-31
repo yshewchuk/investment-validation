@@ -19,6 +19,9 @@ HGB = {"loss": "squared_error", "quantile": None, "learning_rate": 0.1,
        "interaction_cst": None, "warm_start": False, "early_stopping": False,
        "scoring": "loss", "validation_fraction": 0.1, "n_iter_no_change": 10,
        "tol": 1e-7, "verbose": 0, "random_state": 0}
+HGB_V2_KNOBS = {"learning_rate": 0.05, "max_leaf_nodes": 7,
+                "min_samples_leaf": 20, "l2_regularization": 0.0}
+HGB_V2 = {**HGB, **HGB_V2_KNOBS, "max_iter": 500, "early_stopping": True}
 CASES = [("history_ridge", {"alpha": value}) for value in (0.1, 1, 10)] + [
     ("history_hgb", {"max_leaf_nodes": value}) for value in (7, 15)]
 
@@ -57,6 +60,103 @@ def test_v3_ridge_alpha_interval_is_accepted_and_validated(alpha):
                               feature_dictionary_hash=HASH, alpha=alpha)
     assert policy["estimator"]["params"]["alpha"] == float(alpha)
     assert validate_ridge_hgb_recipe(json.loads(canonical_json(policy))) == policy
+
+
+def test_v1_hgb_recipe_keeps_fixed_iteration_policy():
+    recipe = ridge_hgb_recipe(model="history_hgb", columns=["a"], feature_dictionary_hash=HASH,
+                              max_leaf_nodes=7)
+    params = recipe["estimator"]["params"]
+    assert recipe["schema_version"] == "magnitude_ridge_hgb_recipe.v1"
+    assert params["early_stopping"] is False
+    assert params["max_iter"] == 100
+    assert params["learning_rate"] == 0.1
+    assert params["min_samples_leaf"] == 20
+    assert params["l2_regularization"] == 0.0
+
+
+def test_v2_hgb_recipe_declares_early_stopping_and_all_axes():
+    recipe = ridge_hgb_recipe(model="history_hgb", columns=["a", "b"],
+                              feature_dictionary_hash=HASH, **HGB_V2_KNOBS)
+    params = recipe["estimator"]["params"]
+    assert recipe["schema_version"] == "magnitude_ridge_hgb_recipe.v2"
+    assert params["early_stopping"] is True
+    assert params["max_iter"] == 500
+    assert params["n_iter_no_change"] == 10
+    assert params["validation_fraction"] == 0.1
+    assert params["scoring"] == "loss"
+    assert params["random_state"] == 0
+    assert params["tol"] == 1e-7
+    assert params["learning_rate"] == 0.05 and type(params["learning_rate"]) is float
+    assert params["min_samples_leaf"] == 20 and type(params["min_samples_leaf"]) is int
+    assert params["l2_regularization"] == 0.0 and type(params["l2_regularization"]) is float
+    assert recipe["numerical_threads"] == 1
+    assert params == HGB_V2
+    assert validate_ridge_hgb_recipe(json.loads(canonical_json(recipe))) == recipe
+
+
+def test_v1_and_v2_hgb_recipes_for_same_leaf_count_have_different_identity():
+    v1 = ridge_hgb_recipe(model="history_hgb", columns=["a"], feature_dictionary_hash=HASH,
+                          max_leaf_nodes=7)
+    v2 = ridge_hgb_recipe(model="history_hgb", columns=["a"], feature_dictionary_hash=HASH,
+                          **HGB_V2_KNOBS)
+    assert v1["estimator"]["params"]["max_leaf_nodes"] == v2["estimator"]["params"]["max_leaf_nodes"]
+    assert content_hash(v1) != content_hash(v2)
+
+
+def test_v2_validation_refuses_altered_fixed_early_stopping_policy():
+    original = ridge_hgb_recipe(model="history_hgb", columns=["a"], feature_dictionary_hash=HASH,
+                                **HGB_V2_KNOBS)
+    for key, value in (("early_stopping", False), ("max_iter", 99), ("n_iter_no_change", 1),
+                       ("validation_fraction", 0.2), ("learning_rate", 2.0)):
+        altered = copy.deepcopy(original)
+        altered["estimator"]["params"][key] = value
+        with pytest.raises(ValueError, match="closed"):
+            validate_ridge_hgb_recipe(altered)
+
+
+@pytest.mark.parametrize("knobs", [
+    {"learning_rate": 0.05},
+    {"min_samples_leaf": 20},
+    {"l2_regularization": 0.0},
+    {"learning_rate": 0.05, "min_samples_leaf": 20},
+    {"learning_rate": 0.05, "l2_regularization": 0.0},
+    {"min_samples_leaf": 20, "l2_regularization": 0.0},
+])
+def test_partial_new_hgb_arguments_refuse(knobs):
+    with pytest.raises(ValueError):
+        ridge_hgb_recipe(model="history_hgb", columns=["a"], feature_dictionary_hash=HASH,
+                         max_leaf_nodes=7, **knobs)
+
+
+@pytest.mark.parametrize("knobs", [
+    {**HGB_V2_KNOBS, "learning_rate": 0.0},
+    {**HGB_V2_KNOBS, "learning_rate": -0.1},
+    {**HGB_V2_KNOBS, "learning_rate": 1.0001},
+    {**HGB_V2_KNOBS, "learning_rate": float("nan")},
+    {**HGB_V2_KNOBS, "learning_rate": float("inf")},
+    {**HGB_V2_KNOBS, "learning_rate": True},
+    {**HGB_V2_KNOBS, "min_samples_leaf": 0},
+    {**HGB_V2_KNOBS, "min_samples_leaf": 1001},
+    {**HGB_V2_KNOBS, "min_samples_leaf": 20.0},
+    {**HGB_V2_KNOBS, "min_samples_leaf": True},
+    {**HGB_V2_KNOBS, "l2_regularization": -1.0},
+    {**HGB_V2_KNOBS, "l2_regularization": 1000.0001},
+    {**HGB_V2_KNOBS, "l2_regularization": float("nan")},
+    {**HGB_V2_KNOBS, "l2_regularization": True},
+    {**HGB_V2_KNOBS, "max_leaf_nodes": 1},
+    {**HGB_V2_KNOBS, "max_leaf_nodes": 65},
+    {**HGB_V2_KNOBS, "max_leaf_nodes": 7.0},
+    {**HGB_V2_KNOBS, "max_leaf_nodes": True},
+])
+def test_out_of_bounds_v2_hgb_arguments_refuse(knobs):
+    with pytest.raises(ValueError):
+        ridge_hgb_recipe(model="history_hgb", columns=["a"], feature_dictionary_hash=HASH, **knobs)
+
+
+def test_new_hgb_arguments_are_refused_for_ridge():
+    with pytest.raises(ValueError, match="Ridge requires"):
+        ridge_hgb_recipe(model="history_ridge", columns=["a"], feature_dictionary_hash=HASH,
+                         alpha=1.0, **HGB_V2_KNOBS)
 
 
 @pytest.mark.parametrize("model,knobs", CASES)

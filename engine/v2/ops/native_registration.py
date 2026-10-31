@@ -349,7 +349,8 @@ def _size_plan_v17(document):
 
 
 _SIZE_PANEL_CONTEXTS = ("magnitude_panel_context.v3", "magnitude_panel_context.v4")
-_SIZE_REQUEST_SCHEMAS = ("magnitude_search_request.v2", "magnitude_search_request.v3")
+_SIZE_REQUEST_SCHEMAS = ("magnitude_search_request.v2", "magnitude_search_request.v3",
+                         "magnitude_search_request.v4")
 
 
 def _size_panel_v17(document):

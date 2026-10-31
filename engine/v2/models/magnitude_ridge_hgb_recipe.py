@@ -10,11 +10,17 @@ from engine.v2.foundation import canonical_json
 __all__ = ["ridge_hgb_recipe", "validate_ridge_hgb_recipe"]
 
 _RIDGE_ALPHA_BOUNDS = (1e-6, 1000.0)
+_HGB_LEARNING_RATE_BOUNDS = (0.0, 1.0)
+_HGB_MAX_LEAF_NODES_V1_BOUNDS = (7, 15)
+_HGB_MAX_LEAF_NODES_V2_BOUNDS = (2, 64)
+_HGB_MIN_SAMPLES_LEAF_BOUNDS = (1, 1000)
+_HGB_L2_REGULARIZATION_BOUNDS = (0.0, 1000.0)
 
 
-def _bounded_alpha(value) -> bool:
-    lower, upper = _RIDGE_ALPHA_BOUNDS
-    if type(value) not in (int, float) or not lower <= value <= upper:
+def _bounded_number(value, bounds, *, integer=False) -> bool:
+    lower, upper = bounds
+    valid_type = type(value) is int if integer else type(value) in (int, float)
+    if not valid_type or not lower <= value <= upper:
         return False
     try:
         return math.isfinite(float(value))
@@ -22,16 +28,22 @@ def _bounded_alpha(value) -> bool:
         return False
 
 
-def _parameters(model, alpha, max_leaf_nodes):
-    if model == "history_ridge":
-        if not _bounded_alpha(alpha) or max_leaf_nodes is not None:
-            raise ValueError("Ridge requires declared alpha and no HGB parameter")
-        return {"alpha": float(alpha), "fit_intercept": True, "copy_X": True,
-                "max_iter": None, "tol": 0.0001, "solver": "svd", "positive": False,
-                "random_state": 0}
-    if model != "history_hgb":
-        raise ValueError("unknown variable-width magnitude model")
-    if type(max_leaf_nodes) is not int or max_leaf_nodes not in (7, 15) or alpha is not None:
+def _bounded_alpha(value) -> bool:
+    return _bounded_number(value, _RIDGE_ALPHA_BOUNDS)
+
+
+def _ridge_parameters(alpha, max_leaf_nodes, early):
+    if (not _bounded_alpha(alpha) or max_leaf_nodes is not None
+            or any(value is not None for value in early)):
+        raise ValueError("Ridge requires declared alpha and no HGB parameter")
+    return {"alpha": float(alpha), "fit_intercept": True, "copy_X": True,
+            "max_iter": None, "tol": 0.0001, "solver": "svd", "positive": False,
+            "random_state": 0}
+
+
+def _legacy_hgb_parameters(alpha, max_leaf_nodes):
+    if (type(max_leaf_nodes) is not int
+            or max_leaf_nodes not in _HGB_MAX_LEAF_NODES_V1_BOUNDS or alpha is not None):
         raise ValueError("HGB requires declared integer leaf count and no Ridge parameter")
     return {"loss": "squared_error", "quantile": None, "learning_rate": 0.1,
         "max_iter": 100, "max_leaf_nodes": max_leaf_nodes, "max_depth": None,
@@ -42,8 +54,53 @@ def _parameters(model, alpha, max_leaf_nodes):
         "tol": 1e-7, "verbose": 0, "random_state": 0}
 
 
-def ridge_hgb_recipe(*, model, columns, feature_dictionary_hash, alpha=None, max_leaf_nodes=None) -> dict:
-    """Bind a caller-admitted ordered subset; dictionary membership stays external."""
+def _check_early_parameters(alpha, max_leaf_nodes, early):
+    if not all(value is not None for value in early):
+        raise ValueError("HGB early-stopping parameters require all three declared values")
+    if alpha is not None or not _bounded_number(max_leaf_nodes, _HGB_MAX_LEAF_NODES_V2_BOUNDS,
+                                                 integer=True):
+        raise ValueError("HGB requires declared integer leaf count and no Ridge parameter")
+    if (not _bounded_number(early[0], _HGB_LEARNING_RATE_BOUNDS) or not early[0] > 0):
+        raise ValueError("HGB learning_rate must be finite and within declared bounds")
+    if not _bounded_number(early[1], _HGB_MIN_SAMPLES_LEAF_BOUNDS, integer=True):
+        raise ValueError("HGB min_samples_leaf must be an integer within declared bounds")
+    if not _bounded_number(early[2], _HGB_L2_REGULARIZATION_BOUNDS):
+        raise ValueError("HGB l2_regularization must be finite and within declared bounds")
+
+
+def _early_stopping_hgb_parameters(alpha, max_leaf_nodes, learning_rate, min_samples_leaf,
+                                   l2_regularization):
+    early = (learning_rate, min_samples_leaf, l2_regularization)
+    _check_early_parameters(alpha, max_leaf_nodes, early)
+    return {"loss": "squared_error", "quantile": None, "learning_rate": float(learning_rate),
+        "max_iter": 500, "max_leaf_nodes": max_leaf_nodes, "max_depth": None,
+        "min_samples_leaf": int(min_samples_leaf), "l2_regularization": float(l2_regularization),
+        "max_features": 1.0, "max_bins": 255, "categorical_features": None,
+        "monotonic_cst": None, "interaction_cst": None, "warm_start": False,
+        "early_stopping": True, "scoring": "loss", "validation_fraction": 0.1,
+        "n_iter_no_change": 10, "tol": 1e-7, "verbose": 0, "random_state": 0}
+
+
+def _parameters(model, alpha, max_leaf_nodes, learning_rate=None, min_samples_leaf=None,
+                l2_regularization=None):
+    early = (learning_rate, min_samples_leaf, l2_regularization)
+    if model == "history_ridge":
+        return _ridge_parameters(alpha, max_leaf_nodes, early)
+    if model != "history_hgb":
+        raise ValueError("unknown variable-width magnitude model")
+    if all(value is None for value in early):
+        return _legacy_hgb_parameters(alpha, max_leaf_nodes)
+    return _early_stopping_hgb_parameters(alpha, max_leaf_nodes, learning_rate,
+                                          min_samples_leaf, l2_regularization)
+
+
+def ridge_hgb_recipe(*, model, columns, feature_dictionary_hash, alpha=None, max_leaf_nodes=None,
+                     learning_rate=None, min_samples_leaf=None, l2_regularization=None) -> dict:
+    """Bind a caller-admitted ordered subset; dictionary membership stays external.
+
+    The v2 HGB early-stopping validation holdout is a random 10% of training rows,
+    not a time-ordered holdout; it only selects the tree count.
+    """
     if (not isinstance(columns, (list, tuple)) or not columns
             or any(not isinstance(name, str) or not re.fullmatch(r"[a-z][a-z0-9_]*", name)
                    for name in columns) or len(set(columns)) != len(columns)):
@@ -51,10 +108,15 @@ def ridge_hgb_recipe(*, model, columns, feature_dictionary_hash, alpha=None, max
     if (not isinstance(feature_dictionary_hash, str)
             or not re.fullmatch(r"sha256:[0-9a-f]{64}", feature_dictionary_hash)):
         raise ValueError("magnitude requires a canonical feature dictionary hash")
-    params = _parameters(model, alpha, max_leaf_nodes)
+    params = _parameters(model, alpha, max_leaf_nodes, learning_rate, min_samples_leaf,
+                         l2_regularization)
     ridge = model == "history_ridge"
+    version = ("magnitude_ridge_hgb_recipe.v2"
+               if model == "history_hgb" and all(value is not None for value in (
+                   learning_rate, min_samples_leaf, l2_regularization))
+               else "magnitude_ridge_hgb_recipe.v1")
     return {
-        "schema_version": "magnitude_ridge_hgb_recipe.v1", "model": model,
+        "schema_version": version, "model": model,
         "features": list(columns), "feature_dictionary_hash": feature_dictionary_hash,
         "estimator": {"class": "Ridge" if ridge else "HistGradientBoostingRegressor",
                       "params": params},
@@ -75,9 +137,13 @@ def validate_ridge_hgb_recipe(recipe) -> dict:
     try:
         json.dumps(recipe, allow_nan=False)  # canonical_json alone stringifies arbitrary objects.
         params = recipe["estimator"]["params"]
+        early = ({"learning_rate": params.get("learning_rate"),
+                  "min_samples_leaf": params.get("min_samples_leaf"),
+                  "l2_regularization": params.get("l2_regularization")}
+                 if recipe["schema_version"] == "magnitude_ridge_hgb_recipe.v2" else {})
         expected = ridge_hgb_recipe(model=recipe["model"], columns=recipe["features"],
             feature_dictionary_hash=recipe["feature_dictionary_hash"],
-            alpha=params.get("alpha"), max_leaf_nodes=params.get("max_leaf_nodes"))
+            alpha=params.get("alpha"), max_leaf_nodes=params.get("max_leaf_nodes"), **early)
         if canonical_json(recipe) == canonical_json(expected):
             return expected
     except (KeyError, TypeError, ValueError, AttributeError, OverflowError, RecursionError):

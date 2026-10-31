@@ -132,7 +132,8 @@ def _prepare(conn, store, registration, request):
     request_version = request.get("schema_version") if isinstance(request, dict) else None
     anchor_version = getattr(registration, "document", {}).get("schema_version")
     qualified = anchor_version in ("native_experiment_registration.v1.6", "native_experiment_registration.v1.7")
-    expected = (("magnitude_search_request.v2", "magnitude_search_request.v3") if qualified
+    expected = (("magnitude_search_request.v2", "magnitude_search_request.v3",
+                 "magnitude_search_request.v4") if qualified
                 else ("magnitude_search_request.v1",))
     if request_version not in expected:
         raise fail("INVALID_EXPERIMENT_SPEC", "search requires explicit valid axes, inner years and count caps")
@@ -176,7 +177,8 @@ def seal_search_plan(conn, store, registration, request):
 def read_search_plan(conn, store, registration, request, ref):
     """Verify exact reconstruction from the original reservation, without input payloads."""
     qualified = (isinstance(request, dict) and request.get("schema_version") in
-                 ("magnitude_search_request.v2", "magnitude_search_request.v3"))
+                 ("magnitude_search_request.v2", "magnitude_search_request.v3",
+                  "magnitude_search_request.v4"))
     schema = "magnitude_search_plan.v2" if qualified else SCHEMA
     if not isinstance(ref, ArtifactRef) or ref.schema_ref != schema:
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search plan reference has the wrong schema")
