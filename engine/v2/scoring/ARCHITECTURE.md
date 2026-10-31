@@ -201,7 +201,8 @@ producer: its identity is validated by the ordinary frozen Tier-4 binding.
 producer binding, including its feature order (tuple-normalized, with absent
 orders treated as empty), and the request's canonical decision date; the
 served fold boundary may equal that date (for a first-day decision), but may
-not be later.
+not be later. A chooser declaration with a non-string binding key is refused
+with `StrictTraceCaptureError` before binding lookup.
 It then writes the validated map to metadata field
 `chooser_fold_references` when a chooser trace has producer folds (`None`
 otherwise). Production capture resolves the release catalog before scoring;

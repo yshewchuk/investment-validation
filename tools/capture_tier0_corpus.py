@@ -3718,7 +3718,10 @@ def validated_chooser_fold_references(source, request):
         raise StrictTraceCaptureError("chooser ref has invalid dates") from exc
     for output, declaration in producers.items():
         ref = refs[output]
-        producer = bindings.get(declaration.get("binding"))
+        binding_key = declaration.get("binding")
+        if not isinstance(binding_key, str):
+            raise StrictTraceCaptureError("chooser producer binding key must be a string")
+        producer = bindings.get(binding_key)
         identity = ref.get("release_binding") if isinstance(ref, Mapping) else None
         try:
             fold = date.fromisoformat(ref["fold_start"])

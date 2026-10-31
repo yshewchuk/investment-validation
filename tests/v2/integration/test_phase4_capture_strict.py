@@ -1283,6 +1283,18 @@ def test_chooser_fold_reference_flows_through_real_scorer_checkpoint(tmp_path, m
     with pytest.raises(StrictTraceCaptureError, match="mismatches served producer"):
         strict_trace_one(corrupted_identity_candidate, "snapshot-1", tmp_path / "release")
 
+    malformed_binding_candidate = copy.deepcopy(candidate)
+    malformed_binding_source = malformed_binding_candidate[
+        "legacy_trace"]["checkpoints"]["source_inputs"]["value"]
+    malformed_binding_source["frozen"]["declarations"][
+        "chooser_fold:pred_im_t1_d14"]["binding"] = ["unhashable"]
+    malformed_binding_candidate["legacy_trace"]["checkpoints"][
+        "source_inputs"]["content_hash"] = content_hash(malformed_binding_source)
+    with pytest.raises(
+        StrictTraceCaptureError, match="chooser producer binding key must be a string"
+    ):
+        strict_trace_one(malformed_binding_candidate, "snapshot-1", tmp_path / "release")
+
     empty_candidate = _candidate(_collector())
     empty_candidate.update({"event_id": "AAA_2026-09-17", "request": request_to_dict(request)})
     strict_trace_one(empty_candidate, "snapshot-1", tmp_path / "release")
