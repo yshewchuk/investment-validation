@@ -170,9 +170,9 @@ Every fold/horizon uses a fresh estimator and only strictly qualified training
 events. Empty history is handled by the declared preprocessing, not mean fallback.
 
 The history reporter retains whole-run physical preflight and supported producer
-admission. `magnitude_candidate_fit` lazily delegates to shared training dispatch without changing SIZE errors/results; `magnitude_fitted` delegates matrices/input hashes to
-shared `research.horizon_fit_inputs` with fixed `absolute_move_pct` labels,
-and freezes detached forecasts before that fold's evaluation labels open.
+admission. `magnitude_candidate_fit` lazily delegates to shared training dispatch; `magnitude_fitted` delegates the horizon loop to shared `research.horizon_fitted` with fixed nonnegative `absolute_move_pct` labels.
+Its thin compatibility boundary preserves legacy guard exceptions and strict/non-strict estimator-failure policy; shared preparation/progress errors stay outside that mapping. Active guards now refuse before matrix preparation/progress (after the wrapper projects training labels), rather than first estimator entry.
+Ordered input hashes and detached forecasts still freeze before evaluation labels open; evidence/results remain unchanged.
 It never builds features. The result adds per-horizon fit evidence and a distinct
 schema; existing fixed-history result bytes/policy remain unchanged for identical inputs.
 Registration/replay never fit. Native smoke/recorded publication remains unchanged.

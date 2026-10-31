@@ -4,14 +4,19 @@ from engine.v2.models.no_fit import forbid_fitting
 from .legacy_adapter import forbid_fitting as forbid_legacy_fitting
 
 
+def check_fitting_allowed(path):
+    """Check both existing switches before an orchestrator inspects numeric inputs."""
+    forbid_legacy_fitting(path)
+    forbid_fitting(path)
+
+
 def fit_execution(route, recipe, train_features, train_labels, prediction_features, *, columns):
     """Delegate one closed route, preserving results/errors without retry or I/O.
 
     Route names are internal numeric choices, not new persisted execution schemas.
     Original magnitude returns predictions only, matching the candidate envelope.
     """
-    forbid_legacy_fitting("fit_execution")
-    forbid_fitting("fit_execution")
+    check_fitting_allowed("fit_execution")
     if type(route) is not str or route not in ("magnitude", "magnitude_candidate", "regression_candidate"):
         raise ValueError("unsupported numeric fit execution route")
     if route == "magnitude":
