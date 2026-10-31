@@ -302,6 +302,29 @@ def _select_listed_straddle(strategy: str, inputs: Mapping[str, Any], spot: floa
     return strike, expiry
 
 
+def _select_straddle_for_generate(
+    strategy: str, inputs: Mapping[str, Any], spot: float,
+) -> tuple[float, str] | None:
+    """Select listed straddle geometry, using chain spot when selection is needed."""
+    if (strategy not in {"STR-THRU", "STR-RUNUP"}
+            or (inputs.get("strike") is not None
+                and inputs.get("expiry") is not None)):
+        return None
+    selection_spot = spot
+    if "chain_spot" in inputs:
+        if isinstance(inputs["chain_spot"], bool):
+            raise GeometryRefusal("INVALID_CHAIN_SPOT")
+        try:
+            selection_spot = _finite_float(inputs["chain_spot"], "chain_spot")
+        except OverflowError as exc:
+            raise GeometryRefusal("INVALID_CHAIN_SPOT") from exc
+        except GeometryRefusal as exc:
+            raise GeometryRefusal("INVALID_CHAIN_SPOT") from exc
+        if selection_spot <= 0:
+            raise GeometryRefusal("INVALID_CHAIN_SPOT")
+    return _select_listed_straddle(strategy, inputs, selection_spot)
+
+
 def _listed_put_expiries(inputs: Mapping[str, Any]) -> list[str]:
     """Sorted distinct expiries with at least one listed put.
 
@@ -629,10 +652,7 @@ def generate(strategy: str, inputs: Mapping[str, Any]) -> Geometry:
     width = _finite_float(inputs.get("width", forecast / divisor / 100.0 * spot), "width")
     if width <= 0 and strategy not in {"STR-THRU", "STR-RUNUP"}:
         raise GeometryRefusal("ZERO_WIDTH")
-    selected = (_select_listed_straddle(strategy, inputs, spot)
-                if strategy in {"STR-THRU", "STR-RUNUP"}
-                and (inputs.get("strike") is None or inputs.get("expiry") is None)
-                else None)
+    selected = _select_straddle_for_generate(strategy, inputs, spot)
     expiry = (str(selected[1]) if selected is not None
               else _resolve_generate_expiry(strategy, inputs))
     resolved = inputs.get("resolved_legs")

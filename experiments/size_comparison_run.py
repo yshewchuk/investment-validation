@@ -55,7 +55,8 @@ def _validate(result, inputs, fold, plan):
 def execute(conn, store, repository, registration, plan, fold, *, limits, replay_only=False):
     """Freeze comparator/sanity forecasts before the selected outer target opens."""
     _equal(limits, plan["request"]["limits"]["child"])
-    _equal(plan, prepare_plan(conn, store, registration, plan["request"]))
+    _equal(plan, prepare_plan(conn, store, registration, plan["request"],
+                              plan_schema=plan.get("schema_version")))
     require_current(conn, OWNER, MIGRATIONS)
     seal = read_record(conn, store, registration.run_id, "seal")
     _equal(seal.get("plan_id") if isinstance(seal, dict) else None, plan["plan_id"])
