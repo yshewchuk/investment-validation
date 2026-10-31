@@ -35,7 +35,9 @@ def compile_request(request, *, horizons=(5, 3, 1)):
                 else compile_v3_request
                 if version in ("magnitude_search_request.v3", "magnitude_search_request.v4")
                 else compile_v1_request)
-    compile_kwargs = {"horizons": horizons} if version in ("magnitude_search_request.v2", "magnitude_search_request.v3") else {}
+    compile_kwargs = {"horizons": horizons} if version in (
+        "magnitude_search_request.v2", "magnitude_search_request.v3",
+        "magnitude_search_request.v4") else {}
     dictionary = request.get("feature_dictionary_hash") if type(request) is dict else None
     if type(dictionary) is not str or dictionary not in (_V2_HASH, _V3_HASH):
         return compiler(request, **compile_kwargs)
