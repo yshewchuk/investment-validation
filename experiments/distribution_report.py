@@ -3,7 +3,7 @@
 Calendar and ticker resampling keep whole events together. They do not refit,
 reallocate capital, authorize holdout reads or establish executable capacity.
 """
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import date
 
 import numpy as np
@@ -12,7 +12,7 @@ from engine.v2.ops.errors import fail
 from engine.v2.research.progress import Progress, stage
 from experiments.distribution_book import validate_book_config
 
-__all__ = ["paired_report"]
+__all__ = ["paired_report", "forecast_report"]
 
 
 def _require(condition):
@@ -146,3 +146,70 @@ def paired_report(opportunities, books, *, seed, resamples, block_days, block_or
         "uncertainty": {"seed": seed, "resamples": resamples, "block_days": block_days,
             "block_origin": block_origin, "confidence": confidence, "calendar_blocks": "occupied_fixed_nonoverlapping",
             "interpretation": "conditional_on_realized_policy_not_portfolio_replay"}, "final_read_authority": "none"}
+
+
+def forecast_report(scores, opportunities, *, seed, resamples, block_days, block_origin, confidence):
+    """Event-weighted paired CRPS improvement; h1 primary, other horizons descriptive.
+
+    Missing controls/targets and unresolved CRPS stay in the denominator/counts,
+    never become zero scores. Intervals condition on frozen fitted forecasts.
+    """
+    kwargs = dict(seed=seed, resamples=resamples, block_days=block_days, block_origin=block_origin, confidence=confidence)
+    uncertainty = paired_report(opportunities, {}, **kwargs)["uncertainty"]
+    metadata, grouped, results = {row["event_id"]: row for row in opportunities}, defaultdict(dict), {}
+    origin = _day(block_origin)
+    for row in scores:
+        try:
+            horizon, key = row["horizon"], (row["event_id"], row["arm"])
+            _require(type(horizon) is int and horizon in (1, 3, 5) and key[0] in metadata and key not in grouped[horizon])
+            _require(row["arm"] in ("histogram", "same_mean", "matched_point") and row["status"] in ("available", "unavailable", "missing_target"))
+            if row["status"] == "available":
+                observation = row["observation"]
+                _require(type(observation) in (int, float) and np.isfinite(observation) and observation >= 0)
+                for field in ("crps", "rps", "log_loss"):
+                    value = row[field]
+                    _require((field == "crps" and value is None) or (field == "log_loss" and value == "infinite")
+                        or (type(value) in (int, float) and np.isfinite(value) and value >= 0))
+                _require(type(row["tails"]) is list and len(row["tails"]) == 3)
+                for tail, threshold in zip(row["tails"], (5, 10, 20)):
+                    _require(tail["threshold"] == threshold and type(tail["observed_ge"]) is bool
+                        and tail["observed_ge"] == (observation >= threshold)
+                        and type(tail["probability_ge"]) in (int, float) and 0 <= tail["probability_ge"] <= 1)
+            grouped[horizon][key] = row
+        except (KeyError, TypeError, ValueError, OverflowError):
+            _require(False)
+    for horizon, entries in sorted(grouped.items()):
+        pairs, histograms, counts = [], [], {arm: Counter() for arm in ("histogram", "same_mean")}
+        for event, meta in sorted(metadata.items()):
+            a, b, point = [entries.get((event, arm)) for arm in ("histogram", "same_mean", "matched_point")]
+            _require(len({row["observation"] for row in (a, b, point) if row is not None and row["status"] == "available"}) <= 1)
+            for arm, row in zip(counts, (a, b)):
+                status = "missing_row" if row is None else row["status"]
+                counts[arm]["unresolved_crps" if status == "available" and row.get("crps") is None else status] += 1
+            if a is not None and a["status"] == "available":
+                histograms.append(a)
+            if all(row is not None and row["status"] == "available" and row.get("crps") is not None for row in (a, b)):
+                pairs.append({"delta": b["crps"] - a["crps"], "ticker": meta["ticker"],
+                    "calendar": (_day(meta["decision_date"]) - origin).days // block_days})
+        def average(values):
+            value = float(np.mean(values)) if values else None
+            _require(value is None or np.isfinite(value))
+            return value
+        absolute = {field + "_mean": average([row[field] for row in histograms if type(row.get(field)) in (int, float)])
+                    for field in ("crps", "rps", "log_loss")}
+        absolute["infinite_log_loss_count"] = sum(row["log_loss"] == "infinite" for row in histograms)
+        absolute["finite_log_loss_mean"] = absolute["log_loss_mean"]
+        if absolute["infinite_log_loss_count"]:
+            absolute["log_loss_mean"] = "infinite"
+        absolute["tails"] = [{"threshold": threshold, "count": len(histograms),
+            "observed_count": sum(row["tails"][index]["observed_ge"] for row in histograms),
+            "mean_probability_ge": average([row["tails"][index]["probability_ge"] for row in histograms])}
+            for index, threshold in enumerate((5, 10, 20))]
+        results[str(horizon)] = {"role": "primary" if horizon == 1 else "descriptive", "status": "available" if pairs else "unavailable",
+            "opportunities": len(metadata), "scoreable_events": len(pairs), "excluded_events": len(metadata) - len(pairs),
+            "mean_crps_improvement": average([row["delta"] for row in pairs]), "coverage": {arm: dict(count) for arm, count in counts.items()},
+            "histogram": absolute, "conditional_intervals": {field: _interval(pairs, field, seed=seed, resamples=resamples,
+                confidence=confidence) for field in ("calendar", "ticker")}}
+    return {"schema_version": "distribution_forecast_report.v1", "primary": "h1_same_mean_minus_histogram_crps",
+        "horizons": results, "uncertainty": {**uncertainty, "interpretation": "conditional_on_frozen_fits_no_refitting"},
+        "calibration_identity": "uncalibrated", "final_read_authority": "none"}
