@@ -130,7 +130,7 @@ def test_happy_path_filters_window_and_records_targets_pin(bounds_ws, source_roo
     assert doc["universe_count"] == 4 and doc["universe_sha"] == content_hash(universe)
     assert doc["target_count"] == 2 and doc["targets_sha"] == content_hash(["ev-onstart", "ev-start"])
     assert doc["dropped_count"] == 2 and doc["dropped_sha"] == content_hash(doc["dropped"])
-    assert doc["eligibility_plan_id"] == "plan_1"
+    assert doc["universe_plan_id"] == "plan_1"
     assert doc["targets_id"] == content_hash(
         {k: v for k, v in doc.items()
          if k not in ("targets_id", "event_ids", "dropped", "read_pin_ref")})

@@ -84,7 +84,8 @@ def derive_workspace_targets(workspace, scope, record, *, tickers, event_start, 
               "tickers_sha": content_hash(tickers), "universe_count": len(universe),
               "universe_sha": content_hash(universe), "target_count": len(targets),
               "targets_sha": content_hash(targets), "dropped_count": len(dropped),
-              "dropped_sha": content_hash(dropped), "eligibility_plan_id": plan["plan_id"],
+              # universe_plan_id: id of the plan computed over the whole universe, not the plan materialize recomputes over the retained targets
+              "dropped_sha": content_hash(dropped), "universe_plan_id": plan["plan_id"],
               "limits": limits}
     doc = {**fields, "targets_id": content_hash(fields)}
     ref = workspace.record_read_pin("size-prep-targets:" + doc["targets_id"].split(":", 1)[1], doc, clock=clock)
