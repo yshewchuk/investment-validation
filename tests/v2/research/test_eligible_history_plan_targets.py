@@ -338,8 +338,9 @@ def test_real_plan_targets_date_object_matches_equal_iso_string(real):
 
 @pytest.mark.parametrize("changes", [{"event_ids": []}, {"event_ids": ["ev", "ev"]},
                                      {"event_ids": ["ev", 1]}, {"event_ids": ("ev-1",)},
-                                     {"event_ids": ["", " a", "a "]},
-                                     {"horizons": [1, 3]}, {"horizons": [1, 3, 5, 1]}])
+                                      {"event_ids": ["", " a", "a "]},
+                                      {"horizons": []}, {"horizons": [5, 3, 1]},
+                                      {"horizons": [1, 3, 5, 1]}])
 def test_real_plan_targets_refuse_malformed_targets_or_horizons_before_reads(real, monkeypatch, changes):
     def forbidden(*args, **kwargs):
         raise AssertionError("malformed request reached the source")

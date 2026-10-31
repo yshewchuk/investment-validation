@@ -7,6 +7,8 @@ import pytest
 from engine.models import no_fit as legacy_no_fit
 from engine.v2.foundation import content_hash
 from engine.v2.models import no_fit
+from engine.v2.models.magnitude_candidate import magnitude_candidate_family
+from engine.v2.models.magnitude_ridge_hgb_recipe import ridge_hgb_recipe
 from engine.v2.models.training import magnitude_elasticnet, magnitude_ridge_hgb
 from experiments.magnitude_candidate_fit import fit_candidate
 from experiments.magnitude_candidate_recipe import candidate_recipe
@@ -180,3 +182,31 @@ def test_actual_family_conversion_policy_is_not_normalized(family, parameters, e
     else:
         assert type(caught.value.__cause__) is error
         assert str(caught.value.__cause__) == "native conversion sentinel"
+
+
+def test_v2_hgb_family_gate():
+    policy = ridge_hgb_recipe(model="history_hgb", columns=["x0", "x1", "x2"],
+                              feature_dictionary_hash="sha256:" + "a" * 64,
+                              learning_rate=0.1, max_leaf_nodes=7,
+                              min_samples_leaf=20, l2_regularization=0.0)
+    assert magnitude_candidate_family(policy) == "ridge_hgb"
+    for model in ("history_ridge", "elasticnet"):
+        with pytest.raises(ValueError, match="^candidate requires a supported recipe schema/model pair$"):
+            magnitude_candidate_family({**policy, "model": model})
+
+
+def test_v2_hgb_candidate_fit_routes_to_ridge_hgb_fitter():
+    rng = np.random.default_rng(20261031)
+    train = rng.normal(size=(120, 3))
+    labels = np.abs(train[:, 0]) + 1.0
+    prediction = rng.normal(size=(5, 3))
+    columns = ["x0", "x1", "x2"]
+    policy = ridge_hgb_recipe(model="history_hgb", columns=columns,
+                              feature_dictionary_hash="sha256:" + "a" * 64,
+                              learning_rate=0.1, max_leaf_nodes=7,
+                              min_samples_leaf=20, l2_regularization=0.0)
+    result = fit_candidate(policy, train, labels, prediction, columns=columns)
+    assert result == magnitude_ridge_hgb.fit_ridge_hgb_predictions(
+        policy, train, labels, prediction, columns=columns)
+    predictions = np.asarray(result["predictions"])
+    assert np.isfinite(predictions).all() and (predictions >= 0).all()

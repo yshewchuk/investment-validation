@@ -5,7 +5,7 @@ from experiments import size_search_report as report
 
 
 def test_mixed_failed_and_successful_trials_report_diagnostics(monkeypatch):
-    plan = {"plan_id": "plan", "horizons": [1, 5], "folds": [{"outer": {"year": "2024", "evaluation_event_ids": ["e"]},
+    plan = {"plan_id": "plan", "horizons": [5, 3, 1], "folds": [{"outer": {"year": "2024", "evaluation_event_ids": ["e"]},
         "inner": [{"year": "2023"}]}], "candidates": [{"candidate_id": "ok"}, {"candidate_id": "failed"}]}
     result = {"predictions": [{"event_id": "e", "absolute_move_pct": 2}], "folds": []}
     registration = SimpleNamespace(run_id="run", document={"size_panel": {"context": {
@@ -52,8 +52,11 @@ def test_mixed_failed_and_successful_trials_report_diagnostics(monkeypatch):
     assert [f["completed_fit_count"] for f in observed["inner_fits"]] == [3, 2]
     assert succeeded["diagnostics"] == [{"converged": True}]
     assert failed["diagnostics"] == []
-    assert succeeded["fit_seconds"] == [{"horizon_sessions": 1, "seconds": 1.25},
-                                        {"horizon_sessions": 5, "seconds": 2.75}]
+    assert succeeded["fit_seconds"] == [
+        {"horizon_sessions": 5, "seconds": 2.75},
+        {"horizon_sessions": 3, "seconds": 2.75},
+        {"horizon_sessions": 1, "seconds": 1.25},
+    ]
     assert failed["fit_seconds"] == [{"horizon_sessions": 1, "seconds": 0.5}]
     assert succeeded["score_seconds"] == 0.7
     assert failed["score_seconds"] == 0.3

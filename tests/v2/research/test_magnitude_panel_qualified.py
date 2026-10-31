@@ -685,7 +685,7 @@ def test_public_request_shape_refuses_before_fingerprinting(monkeypatch, route, 
 @pytest.mark.parametrize("route", ["materialize", "read"])
 @pytest.mark.parametrize("key,value", [
     ("unknown", 1), ("event_ids", [None]), ("event_ids", [[]]), ("event_ids", ["x", "x"]),
-    ("event_ids", [""]), ("event_ids", "x"), ("horizons", [True, 3, 5]), ("horizons", [1, 3]),
+    ("event_ids", [""]), ("event_ids", "x"), ("horizons", [True, 3, 5]),
     ("as_of_month", "2024-13"), ("history_start", "2024-02-30"), ("source_start", "2024-1-01"),
     ("limits", {"max_object_bytes": 1}), ("metadata_limits", {"max_object_bytes": 1}),
     ("policy", {"embargo_days": True})])
@@ -699,6 +699,19 @@ def test_public_request_semantics_refuse_before_fingerprinting(monkeypatch, rout
         else:
             size_panel.materialize(None, snapshot, **request)
     assert caught.value.code == "CONTRACT_MISMATCH"
+
+
+@pytest.mark.parametrize("route", ["materialize", "read"])
+def test_public_horizon_subset_is_accepted_to_fingerprinting(monkeypatch, route):
+    snapshot, request = _public_shape_request()
+    request["horizons"] = [1, 3]
+    monkeypatch.setattr(size_panel, "_fingerprint", lambda: {"accepted": True})
+    with pytest.raises(DataError) as caught:
+        if route == "read":
+            size_panel.read(None, snapshot, snapshot, columns=["n_prior"], **request)
+        else:
+            size_panel.materialize(None, snapshot, **request)
+    assert caught.value.code == "INPUT_CHANGED"
 
 
 @pytest.mark.parametrize("route", ["materialize", "read"])

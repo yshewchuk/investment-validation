@@ -52,6 +52,8 @@ The owning modules expose these helpers to native experiment callers; no compati
 | `size_search_report.collect` / `resource_report` | SIZE CLI uses verified read-only driver/outer/comparator replay for paired reports; `collect` includes per-trial timings, RSS and inner metrics by run id after plan and journal admission; the pure `resource_report` reports schedule-dependent maximum counts and configured bounds, not measured feasibility. No missing-work fallback; admission/receipt failures propagate. |
 | `distribution_run_request.validate_request` / `distribution_book.validate_book_config` | Validate explicit research request/book policies; detached request and book mappings, no data access or execution. [Contract and units](#distribution-explicit-policy). |
 | `distribution_book.funded_book(intents, quotes, *, config, report_end)` | Explicit research callers/tests supply immutable intents, total-USD quotes and a complete reporting horizon; returns detached event dispositions, settlement curve and summary without source/storage I/O. [Book contract](#distribution-premium-funded-book). |
+| `distribution_scores.arm_forecasts` / `economic_forecast` / `score_forecasts` / `profit_scores` | Explicit research callers/tests compose admitted C forecasts/pools, frozen bridge/economics and supplied outcomes into controls, distinct net EV/profit probability and proper scores; scorer year/horizon must match the pool destination before any output. Explicit scale/cost and supplied profit-scoring cash/probabilities are checked before availability exits. No reads, fits or writes. [D4 contract](STR_THRU_DISTRIBUTION/ARCHITECTURE.md#d4-source-free-scores-and-forecast-report). |
+| `distribution_report.forecast_report` | Supplied single-pass score rows and common opportunities yield h1-primary paired CRPS, coverage/tail diagnostics and conditional cluster intervals; available-arm targets must agree before the CRPS mask. No probability calibration, source access or final authority. [D4 contract](STR_THRU_DISTRIBUTION/ARCHITECTURE.md#d4-source-free-scores-and-forecast-report). |
 | `distribution_report.paired_report` | Supplied common opportunities and book documents yield paired USD/opportunity summaries and declared calendar/ticker uncertainty; no execution or data access. [Contract](#distribution-paired-report). |
 | `distribution_run_plan.DistributionRunPlan` / `contained` | Explicit local callers/tests verify and seal metadata/artifacts, publish or collect CAS sections, and optionally contain a dedicated process; no experiment runner or source eligibility authority. [Contract](STR_THRU_DISTRIBUTION/ARCHITECTURE.md#run-metadata-and-containment). |
 | `magnitude_candidate_recipe.candidate_recipe` | Exact family/parameter keys plus ordered columns and dictionary hash yield the existing closed family recipe; no training, source reads or admission proof. |
@@ -111,7 +113,7 @@ Saved identity and later outcome/worker APIs' separate read policies do not chan
 
 ## Consumers and authority
 
-`distribution_report.paired_report` is currently imported only by `tests/v2/research/test_distribution_report.py`; it is library-only and unreachable from a production entrypoint. D4 will compose its forecast report, with runner wiring in later D slices.
+`distribution_report.forecast_report` now consumes `paired_report` for shared cohort/uncertainty admission; matching `test_distribution_report.py` and `test_distribution_forecast_report.py` synthetic tests cover both. These helpers remain library-only and unreachable from a production entrypoint; runner wiring is not supplied here.
 
 `record_export` (run-record export) is consumed by `v2_gate` and `v2_prediction` `run`; it depends on `lib` (EXP numbering) and ops errors only.
 
@@ -122,8 +124,14 @@ Its CLI also consumes `native_registration.read_native_registration`/`valid_regi
 validator and its closed H/HM/HMO 33-candidate grid.
 `magnitude_search_request_versions.compile_request` keeps v2 replay intact and
 dispatches `magnitude_search_request_v3.compile_request` requests with bounded
-request-declared Ridge/ElasticNet axes; HGB remains unchanged in v3. Qualified
-SIZE v1.6 keeps request v2 replay; v1.7 sealing and admission accept v2 and v3.
+request-declared Ridge/ElasticNet axes; HGB remains unchanged in v3. Request v4
+(same compiler) adds the HGB axes `learning_rate`, `max_leaf_nodes`,
+`min_samples_leaf` and `l2_regularization` with per-axis bounds, and its HGB
+candidates use `magnitude_ridge_hgb_recipe.v2` (early stopping, `max_iter` 500
+cap), so they get new candidate ids; the early-stopping holdout is a random 10%
+of training rows, not time-ordered, and only picks the tree count. The design
+grid (2x2x2x2 HGB, 99 candidates over H/HM/HMO) is in #1848 section 5. Qualified
+SIZE v1.6 keeps request v2 replay; v1.7 sealing and admission accept v2, v3 and v4.
 `size_search.preflight` publishes the receipt consumed by `register`; legacy
 previews retain their outputs/refusals. The documented v3 grid example is ElasticNet
 alpha `[0.001, 0.003, 0.01, 0.03, 0.1, 1]`, l1 ratio `[0.25, 0.75]`, and Ridge
@@ -420,8 +428,9 @@ without durable result is not retry permission: preserve the journal and diagnos
 it; never reset claims or raise caps automatically. Changed bindings require new
 artifacts/experiment identity. Comparator masks can cause explicit abstention;
 no history-mean substitution conceals an unavailable incumbent. Main pairing
-requires all three horizons; broad coverage, exclusions and history-mean metrics
-remain visible. Bootstrap intervals do not erase prior adaptive design reuse.
+uses the selected horizon subset (all three horizons by default); broad coverage,
+exclusions and history-mean metrics remain visible. Bootstrap intervals do not
+erase prior adaptive design reuse.
 
 The first execution stores one immutable job deadline in the existing journal.
 The legacy search CLI rejects qualified requests; use the SIZE entry point above.

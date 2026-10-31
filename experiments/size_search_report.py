@@ -82,6 +82,7 @@ def collect(conn, store, repository, registration, request, plan_ref):
         comparisons.extend(comparison["forecasts"])
         comparison_fits.extend({"outer_year": year, **fit} for fit in comparison["fit_details"])
     report = {"plan_id": plan["plan_id"], "search": result, "paired": paired_report(events, forecasts, comparisons, targets,
+                horizons=plan["horizons"],
                 label_reasons={o["event_id"]: o["reason"] for f in result["folds"]
                     for o in f["evaluation_inputs"].get("omitted_labels", [])}),
             "preflight": resource_report(plan), "inner_fits": inner_fits, "comparison_fits": comparison_fits,

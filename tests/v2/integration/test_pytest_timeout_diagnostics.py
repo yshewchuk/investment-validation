@@ -46,6 +46,22 @@ def test_expired_budget_cannot_be_translated_to_a_domain_refusal(monkeypatch, er
     assert handlers[-1] == (signal.SIGALRM, previous)
 
 
+def test_alarm_restores_default_handler_when_previous_is_none(monkeypatch):
+    handlers = []
+    item = SimpleNamespace(nodeid="synthetic::alarm", fixturenames=[],
+        config=SimpleNamespace(pluginmanager=SimpleNamespace(hasplugin=lambda name: False),
+                               getoption=lambda name: 0.01),
+        get_closest_marker=lambda name: None)
+    with monkeypatch.context() as patch:
+        patch.setattr(signal, "signal", lambda sig, handler: handlers.append((sig, handler)))
+        patch.setattr(signal, "setitimer", lambda timer, value: None)
+        with contextmanager(harness.pytest_runtest_call)(item):
+            pass
+    assert len(handlers) == 2 and handlers[0][0] == signal.SIGALRM
+    assert callable(handlers[0][1])
+    assert handlers[-1] == (signal.SIGALRM, signal.SIG_DFL)
+
+
 def test_real_signal_under_capsys_reports_timeout_not_fileno_error(tmp_path):
     test = tmp_path / "test_captured_timeout.py"
     test.write_text('''

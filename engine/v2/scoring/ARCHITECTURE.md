@@ -191,12 +191,34 @@ state keys; `chooser_fold_pools`, `chooser_analog_pool` and
 builds that block only for menu candidates; state without a recipe or a recipe
 for another strategy raises `ValueError`. The chooser k-NN pool is distinct
 from the board bucket-analog pool.
-On production capture, `engine.score.Scorer` receives the verified reference
-map and `_phase4_record_chooser` records references for served folds as
-`chooser_references`. `strict_trace_one` validates them and writes the
-per-trace map to metadata field `chooser_fold_reference` when a chooser trace
-exists (`None` otherwise). Provenance stays outside chooser inputs and receipt;
-the optional `SourceBundle.chooser_fold_reference` is not populated here.
+Strict Tier-0 capture opts into `resolve_production_release_binding`'s
+verified chooser-fold references and passes the verified map to
+`engine.score.Scorer`. The scorer records only references matching a bound
+chooser producer output and fold month it served. The shared `pred_abs_move`
+size fold is recorded as a chooser-frame input and pool, but is not a chooser
+producer: its identity is validated by the ordinary frozen Tier-4 binding.
+`strict_trace_one` checks each chooser-producer reference against the recorded
+producer binding, including the full recorded release-binding identity
+(`binding_id`, model, role, strategy, decision clock, adapter, ordered
+features, output names and artifact hash), the served output name and the
+request's canonical decision date. Feature orders are tuple-normalized, with
+absent orders treated as empty; the served fold boundary may equal that date
+(for a first-day decision), but may not be later. A chooser declaration with
+a non-string binding key is refused with `StrictTraceCaptureError` before
+binding lookup.
+It then writes the validated map to metadata field
+`chooser_fold_references` when a chooser trace has producer folds (`None`
+otherwise). Production capture resolves the release catalog before scoring;
+`strict_trace_one` performs no catalog lookup and never infers missing
+provenance. When chooser folds are present without a catalog retrain cutoff,
+the opted-in resolver refuses with `ModelNotReady` identifying the missing
+canonical training cutoff; ordinary scoring does not opt into this resolver.
+A chooser trace with a bound producer fold but no matching verified
+reference refuses. Orphan references, incomplete producer coverage and
+invalid dates also refuse with `StrictTraceCaptureError`. Provenance stays
+outside chooser inputs and the receipt.
+`SourceBundle.chooser_fold_reference` remains an optional API field and is
+not used by this legacy capture path.
 
 `native_chooser`/`native_chooser_features` derive candidate features after
 native pricing and simulation. Invalid declared frozen state flags
@@ -695,16 +717,17 @@ the exclusive boundary of training data for that fold.
 for ordinary nightly scoring. Callers that need these references opt in with
 `include_chooser_fold_references=True`; resolution returns a complete map or a
 typed refusal. A carried fold whose authoring release lacks canonical cutoff
-data refuses instead of producing a partial map. This contract slice defines
-the verified reference map; scorer and capture consumption is in the
-follow-up slice. It does not infer provenance from legacy rows. Production capture and release preparation consume this contract in the
-follow-up wiring slice.
+data refuses instead of producing a partial map. Strict production capture
+opts into this verified reference map, passes it to the scorer, and records
+validated references in strict trace metadata. Ordinary nightly scoring does
+not load chooser estimators, and no path infers provenance from legacy rows.
 
 | Condition | Outcome |
 |---|---|
 | Chooser references not requested | Return an empty map without loading chooser estimators |
 | More than 34 staged chooser-fold objects when references are requested | ModelNotReady before any chooser fold is loaded |
-| Active legacy catalog has chooser-fold rows but no canonical retrain cutoff | Return an empty map |
+| No staged chooser-fold objects are available when references are requested | Return an empty map before checking the cutoff |
+| Staged chooser-fold objects are available but the canonical retrain cutoff is missing or invalid | ModelNotReady; no partial reference map |
 | Carried fold authoring release has no canonical cutoff | ModelNotReady; do not return a partial map |
 | Malformed, noncanonical or mismatched descriptor, estimator digest, parent binding, output or fold month | ModelNotReady; no partial reference map |
 | Reference resolution requested for a verified release | Re-verify each binding resolution; no cross-call reference cache |

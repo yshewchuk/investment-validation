@@ -118,8 +118,9 @@ def _shape(event_ids, horizons):
             or any(type(key) is not str or not key or key != key.strip() for key in event_ids)
             or len(set(event_ids)) != len(event_ids)
             or type(horizons) is not list or not horizons
-            or any(type(h) is not int or h not in (1, 3, 5) for h in horizons)
-            or horizons != [1, 3, 5]):
+            or any(type(h) is not int for h in horizons)
+            or any(h not in (1, 3, 5) for h in horizons)
+            or horizons != sorted(set(horizons))):
         raise fail("CONTRACT_MISMATCH", "explicit unique targets and ordered native horizons required")
 
 
