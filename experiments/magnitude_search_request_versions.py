@@ -18,6 +18,8 @@ _V3_HASH = v3_recipe("HMO")["dictionary_hash"]
 def compile_request(request, *, horizons=(5, 3, 1)):
     """Dispatch bounded v3 grids while preserving existing dictionary replay."""
     version = request.get("schema_version") if type(request) is dict else None
+    if version == "regression_search_request.v1":
+        return compile_v1_request(request)
     compiler = (compile_v3_request if version == "magnitude_search_request.v3"
                 else compile_v2_leads_request if version == "magnitude_search_request.v2"
                 else compile_v1_request)
