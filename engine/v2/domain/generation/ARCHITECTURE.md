@@ -55,7 +55,17 @@ Exported from `engine/v2/domain/generation/__init__.py`
 store, catalog, calendar or network access. Every field is read as-is, never
 computed by this package:
 
-- `spot`, `forecast_abs_move` (or `forecast`), `width` — sizing.
+- `spot`, `forecast_abs_move` (or `forecast`), `width` — sizing. For
+  STR-THRU/STR-RUNUP, `spot` remains the calendar close recorded on the
+  returned `Geometry`; listed-strike selection instead uses optional
+  `chain_spot` when supplied, matching the option-chain price anchor. If
+  `chain_spot` is absent, selection falls back to `spot`.
+- `chain_spot` — optional finite positive option-chain spot used only to
+  choose a listed STR-THRU/STR-RUNUP strike. When listed selection is needed,
+  a supplied boolean or value that is not coercible to a finite positive float
+  refuses geometry with `GeometryRefusal("INVALID_CHAIN_SPOT")`; it does not
+  fall back to the calendar close. Scoring input validation may refuse earlier
+  with its existing `DocumentError(BAD_VALUE)` at `$.context.chain_spot`.
 - `strike`, `expiry` — a caller-already-resolved value, used exactly as
   given wherever it is checked (bypasses native selection for that field).
 - `post_event_expiry` — an alternate already-resolved expiry. One bypass rule
@@ -76,7 +86,11 @@ computed by this package:
   `observed_date` (exact ISO string; `price` copies it to
   `PricedLeg.quote_date`, the first leg's drives `dte_entry`; anything else is
   ignored). The contract domain native selects from whenever `strike`/`expiry`
-  is missing.
+  is missing. For STR-THRU/STR-RUNUP, the common listed strike nearest
+  `chain_spot` is selected when present; otherwise selection uses calendar
+  `spot`. Ties still choose the lower strike. This changes strike selection
+  only: `Geometry.spot` remains the calendar close and continues to drive
+  sizing and downstream uses of geometry spot.
 - `event_date`, `session` — the print date/session, read by the
   `first_post_event` expiry rule (STR-THRU and every put-ladder strategy).
 - `entry_date`, `quote_date` — both raw facts, not calculated answers (see
@@ -156,7 +170,9 @@ Raised exceptions:
 
 - `GeometryRefusal` codes raised by `generate`: `"<field> must be finite"`
   (a required numeric field, such as `spot`/`width`, is missing or not a
-  finite number), `UNKNOWN_STRATEGY`,
+  finite number), `INVALID_CHAIN_SPOT` (when listed STR-THRU/STR-RUNUP
+  selection is needed and supplied `chain_spot` is boolean or not coercible
+  to a finite positive float; no close fallback), `UNKNOWN_STRATEGY`,
   `ZERO_WIDTH`, `MISSING_EXPIRY` (no captured expiry and nothing listed to
   select from), `EXPIRY_NOT_LISTED:<date>` (a captured `expiry`/`post_event_expiry` not
   present in `quotes`), `NO_EXPIRY_ON_OR_AFTER:<date>` (STR-THRU/put-ladder
