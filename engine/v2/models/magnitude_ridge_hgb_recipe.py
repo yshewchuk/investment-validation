@@ -57,9 +57,11 @@ def _legacy_hgb_parameters(alpha, max_leaf_nodes):
 def _check_early_parameters(alpha, max_leaf_nodes, early):
     if not all(value is not None for value in early):
         raise ValueError("HGB early-stopping parameters require all three declared values")
-    if alpha is not None or not _bounded_number(max_leaf_nodes, _HGB_MAX_LEAF_NODES_V2_BOUNDS,
-                                                 integer=True):
-        raise ValueError("HGB requires declared integer leaf count and no Ridge parameter")
+    if alpha is not None:
+        raise ValueError("HGB early-stopping recipe takes no Ridge alpha parameter")
+    lower, upper = _HGB_MAX_LEAF_NODES_V2_BOUNDS
+    if not _bounded_number(max_leaf_nodes, _HGB_MAX_LEAF_NODES_V2_BOUNDS, integer=True):
+        raise ValueError(f"HGB max_leaf_nodes must be an integer within [{lower}, {upper}]")
     if (not _bounded_number(early[0], _HGB_LEARNING_RATE_BOUNDS) or not early[0] > 0):
         raise ValueError("HGB learning_rate must be finite and within declared bounds")
     if not _bounded_number(early[1], _HGB_MIN_SAMPLES_LEAF_BOUNDS, integer=True):

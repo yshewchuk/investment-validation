@@ -153,6 +153,19 @@ def test_out_of_bounds_v2_hgb_arguments_refuse(knobs):
         ridge_hgb_recipe(model="history_hgb", columns=["a"], feature_dictionary_hash=HASH, **knobs)
 
 
+@pytest.mark.parametrize("max_leaf_nodes", [1, 65, 7.0, True])
+def test_v2_hgb_leaf_bounds_have_specific_refusal(max_leaf_nodes):
+    with pytest.raises(ValueError, match=r"within \[2, 64\]"):
+        ridge_hgb_recipe(model="history_hgb", columns=["a"], feature_dictionary_hash=HASH,
+                         **{**HGB_V2_KNOBS, "max_leaf_nodes": max_leaf_nodes})
+
+
+def test_v2_hgb_alpha_has_specific_refusal():
+    with pytest.raises(ValueError, match="no Ridge alpha"):
+        ridge_hgb_recipe(model="history_hgb", columns=["a"], feature_dictionary_hash=HASH,
+                         alpha=1.0, **HGB_V2_KNOBS)
+
+
 def test_new_hgb_arguments_are_refused_for_ridge():
     with pytest.raises(ValueError, match="Ridge requires"):
         ridge_hgb_recipe(model="history_ridge", columns=["a"], feature_dictionary_hash=HASH,
