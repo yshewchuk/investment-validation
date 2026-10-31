@@ -377,7 +377,7 @@ Only scalar leaves stay inline, including the IV target descriptor; a missing IV
   which is the commit point.
 * The manifest hash is a Merkle `inputs_id`, and every cohort is sharded, including empty and one-row cohorts.
 * `magnitude_search_shards` implements the cut rule, writer, manifest hash and verified reader
-  and lists the list-valued members (`LIST_MEMBERS`) as data. A member without a strictly
+  and lists the list-valued members (`LIST_MEMBERS`) as data. A legacy member without a strictly
   increasing sort key carries a `problem` note and no key function; the writer takes a
   caller-supplied key and does not consult the inventory; keyless members are written as
   `{position, row}` rows below.
@@ -763,11 +763,11 @@ immutable completion prevents a second terminal CSV row; prior reports stay unch
 
 ## Bounded inner-trial execution
 
-`SearchTrials.execute(outer_year, inner_year, candidate_id, limits=...)` is a public
-native caller of the existing recorder and `magnitude_fitted.fitted_forecasts`.
-It consumes one declared candidate and inner fold; it does not run outer evaluation,
-reclaim starts, change the selection policy, write a ledger or grant final-read authority.
-The source seal explicitly includes the fixed child and its transitive fitting sources.
+`SearchTrials.execute(outer_year, inner_year, candidate_id, limits=...)` remains recorder-owned native inner fitting, without outer evaluation, reclaimed starts, ledger or final authority.
+The same fixed child additionally accepts closed `regression_candidate_execution.v1`, bound to its target descriptor, recipe and ordered columns.
+Its internal `regression_forecasts` policy adapter calls shared `training.fit_routes.check_fitting_allowed` before inspection and reuses `horizon_fitted` without a floor; target-aware matrix evidence and family diagnostics preserve signed values.
+Only synthetic child callers use this route: native v1.8 trial construction, driver admission and outer collection share the stage refusal before execution-journal admission, fold reads or child launch; existing SIZE defaults remain unchanged.
+The installed source seal covers the fixed child and all transitive fitting sources; the ACK, limits and zero-retry protocol is shared.
 
 | Condition | Outcome |
 |---|---|
@@ -784,7 +784,7 @@ The source seal explicitly includes the fixed child and its transitive fitting s
 | Child reaches a horizon fit | Parent independently reconstructs its matrix/event evidence and commits a non-replayable fit admission before acknowledging. Completion is separately acknowledged only after its immutable evidence commits. Counts distinguish admitted fit attempts from completed fits; an interrupted admission does not prove the estimator was entered. |
 | Child returns a checked result after exit and reap | Commit immutable `execution-result:<trial_id>` with the exact native result, original attempt/limits and admitted input hash before execution/forecast/scoring publication. Successful fits publish complete forecasts before validation labels open; original scoring policy applies. Public `record` cannot finish an unfinished native attempt. |
 | Candidate scoring refuses after successful native fits | Preserve the successful execution receipt and durable `refused` terminal. Initial scoring propagates `EXPERIMENT_VARIANT_FAILED`; replay returns the intact receipt without refitting or rescoring, and freeze excludes that candidate while retaining successful peers. |
-| Estimator-local `EXPERIMENT_VARIANT_FAILED` | Record the attempted/completed prefix and candidate failure. Other candidates and folds remain required by `freeze`. |
+| Estimator-local `EXPERIMENT_VARIANT_FAILED`; signed route fit/forecast-validation `ValueError` or `ArithmeticError` | Record the attempted/completed prefix and candidate failure. The signed child emits only `failed`, never private diagnostics; memory/I/O/import/unexpected failures retain infrastructure/resource classification. Other candidates and folds remain required by `freeze`. |
 | Memory, CPU or elapsed-time limit; launch/import/pipe/protocol/abnormal-exit failure | Limits refuse `RESOURCE_LIMIT_EXCEEDED`; invalid JSON, missing events, messages after a result or evidence/completion mismatches refuse `EXPERIMENT_IDENTITY_CONFLICT`; unsupported events/progress envelopes, setup, I/O, missing results and other infrastructure failures refuse `RESOURCE_UNAVAILABLE`. Retain the unfinished claim and block freeze; never convert these failures into candidate exclusion or retry, even for retryable Problems. |
 | Resource enforcement | Child resident memory (VmRSS watchdog, see the memory ceiling contract) and `RLIMIT_CPU` bounds process CPU time; the parent bounds child elapsed lifetime, including waits for journal acknowledgements. Parent I/O is not preempted; an expired child deadline is checked when it returns and after child exit, before accepting completion. These are per-process fit caps, not shared-host reservations or a cap on parent admission/journal I/O. Only fixed single-threaded native estimators run. |
 | Native completion replay/freeze | Revalidate the durable child result, every admitted/completed horizon, matrix digest, complete forecast digest and ordinary terminal chain; launch nothing and reopen no native labels/features. Changed limits, missing/corrupt evidence and caller-submitted terminals refuse native replay. |

@@ -242,6 +242,10 @@ def prepare_plan(conn, store, registration, request, *, plan_schema=None):
 
 
 def execution_for_candidate(binding, candidate):
+    if binding.get("schema_version") == "native_experiment_registration.v1.8":
+        return {**binding["regression_execution"], "schema_version": "regression_candidate_execution.v1",
+            "target": binding["regression_plan"]["target_recipe"], "fit_recipe": candidate["recipe"],
+            "features": candidate["recipe"]["features"], "model": candidate["recipe"]["model"]}
     execution = {**binding["magnitude_execution"], "fit_recipe": candidate["recipe"]}
     if binding.get("schema_version") in ("native_experiment_registration.v1.6", SCHEMA):
         execution.update(schema_version="size_candidate_execution.v1", features=candidate["recipe"]["features"],
