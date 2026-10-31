@@ -17,8 +17,11 @@ OMISSION_REASONS = frozenset({"skipped", "not_orats", "no_session", "no_price_wi
     "no_price_history", "ticker_too_few_events"})
 
 
-def admit_fold_inputs(repository, binding, fold, *, history_failure, strict_json=False):
+def admit_fold_inputs(repository, binding, fold, *, history_failure, strict_json=False, plan=None):
     """Load preflighted native inputs; the caller supplies its history-conflict envelope."""
+    if binding.get("schema_version") == "native_experiment_registration.v1.8":
+        from experiments.regression_search_binding import fold_inputs
+        return fold_inputs(repository, binding, fold, plan=plan)
     if binding.get("schema_version") in ("native_experiment_registration.v1.6", "native_experiment_registration.v1.7"):
         from experiments.size_search_binding import fold_inputs
         return fold_inputs(repository, binding, fold)
