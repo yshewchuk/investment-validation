@@ -5,7 +5,7 @@ from experiments import size_search_report as report
 
 
 def test_mixed_failed_and_successful_trials_report_diagnostics(monkeypatch):
-    plan = {"plan_id": "plan", "folds": [{"outer": {"year": "2024", "evaluation_event_ids": ["e"]},
+    plan = {"plan_id": "plan", "horizons": [1, 5], "folds": [{"outer": {"year": "2024", "evaluation_event_ids": ["e"]},
         "inner": [{"year": "2023"}]}], "candidates": [{"candidate_id": "ok"}, {"candidate_id": "failed"}]}
     result = {"predictions": [{"event_id": "e", "absolute_move_pct": 2}], "folds": []}
     registration = SimpleNamespace(run_id="run", document={"size_panel": {"context": {
@@ -29,7 +29,9 @@ def test_mixed_failed_and_successful_trials_report_diagnostics(monkeypatch):
             if slot.startswith("fit-completed:" + success_key + ":"):
                 horizon = slot.rsplit(":", 1)[-1]
                 return {"horizon_sessions": int(horizon), "fit_seconds": 1.25 if horizon == "1" else 2.75}
-            return {"horizon_sessions": 1, "fit_seconds": 0.5}
+            if slot.endswith(":1"):
+                return {"horizon_sessions": 1, "fit_seconds": 0.5}
+            return None
         if slot.startswith("terminal:"):
             succeeded = slot.endswith(report.content_hash(["plan", "2024", "2023", "ok"]))
             terminal = {"status": "succeeded" if succeeded else "failed",
@@ -63,7 +65,7 @@ def test_mixed_failed_and_successful_trials_report_diagnostics(monkeypatch):
 
 
 def test_candidate_evidence_distinguishes_missing_metrics_from_empty(monkeypatch):
-    plan = {"plan_id": "plan", "folds": [{"outer": {"year": "2024"},
+    plan = {"plan_id": "plan", "horizons": [1], "folds": [{"outer": {"year": "2024"},
         "inner": [{"year": "2023"}]}], "candidates": [
             {"candidate_id": "legacy"}, {"candidate_id": "empty"}]}
     legacy_key = report.content_hash(["plan", "2024", "2023", "legacy"])
@@ -72,6 +74,8 @@ def test_candidate_evidence_distinguishes_missing_metrics_from_empty(monkeypatch
     def read(conn, store, run_id, slot):
         if slot.startswith("execution:"):
             return {"status": "succeeded", "fits": []}
+        if slot.startswith("fit-completed:"):
+            return None
         if slot == "terminal:" + legacy_key:
             return {"status": "succeeded"}
         if slot == "terminal:" + empty_key:

@@ -160,16 +160,19 @@ def _replay(read, store, started, fold, plan, execution, binding):
         forecasts = _forecasts(read("forecasts"), fold, plan["horizons"])
         receipt = {"status": "succeeded", "fits": fits, "fit_attempt_count": len(fits),
                    "completed_fit_count": len(fits), "forecasts_id": content_hash(forecasts)}
+        timed_worker = False
         if execution.get("schema_version") == "size_candidate_execution.v1":
             worker = read("worker-result")
             if not _timed_shape(worker, {"event", "forecasts"} | diagnostic_keys(binding), legacy=True):
                 raise _conflict()
+            timed_worker = "score_seconds" in worker
             _equal(worker["forecasts"], forecasts)
             receipt.update(diagnostic_evidence(worker, execution, plan["horizons"]))
         _equal(read("execution"), receipt)
         for fit in fits:
             _equal(read("fit-started:" + str(fit["horizon_sessions"])), fit)
-            _equal_completed_fit(read("fit-completed:" + str(fit["horizon_sessions"])), fit, legacy=True)
+            _equal_completed_fit(read("fit-completed:" + str(fit["horizon_sessions"])), fit,
+                                 legacy=not timed_worker)
         result = _result(started, inputs, inputs_id, receipt, forecasts, read("validation"), fold, plan["horizons"])
         _equal(read("terminal"), result)
         return result

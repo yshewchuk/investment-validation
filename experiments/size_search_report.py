@@ -12,43 +12,48 @@ from experiments.v2_magnitude_search_run import _admit_driver
 
 def _candidate_evidence(conn, store, run_id, plan):
     """Read-only per-run candidate listing bound to the sealed plan's exact trial keys."""
-    rows = []
+    rows, evidence_by_key = [], {}
     for group in plan["folds"]:
         outer_year = group["outer"]["year"]
         for fold in group["inner"]:
             inner_year = fold["year"]
             for candidate in plan["candidates"]:
                 candidate_id = candidate["candidate_id"]
-                key = content_hash([plan["plan_id"], outer_year, inner_year, candidate_id])
-                execution = read_record(conn, store, run_id, "execution:" + key)
-                terminal = read_record(conn, store, run_id, "terminal:" + key)
-                execution = execution if isinstance(execution, dict) else {}
-                terminal = terminal if isinstance(terminal, dict) else {}
-                status = execution.get("status", terminal.get("status"))
-                fits = execution.get("fits") or []
-                fit_seconds = []
-                for fit in fits:
-                    if not isinstance(fit, dict):
-                        continue
-                    slot = "fit-completed:" + key + ":" + str(fit.get("horizon_sessions"))
-                    completed = read_record(conn, store, run_id, slot)
-                    if isinstance(completed, dict) and completed.get("fit_seconds") is not None:
-                        fit_seconds.append({
-                            "horizon_sessions": fit.get("horizon_sessions"),
-                            "seconds": completed["fit_seconds"],
-                        })
+                key = trial_key(plan, outer_year, inner_year, candidate_id)
+                if key not in evidence_by_key:
+                    raw_execution = read_record(conn, store, run_id, "execution:" + key)
+                    terminal = read_record(conn, store, run_id, "terminal:" + key)
+                    execution = raw_execution if isinstance(raw_execution, dict) else {}
+                    terminal = terminal if isinstance(terminal, dict) else {}
+                    status = execution.get("status", terminal.get("status"))
+                    fit_attempt_count = execution.get("fit_attempt_count")
+                    completed_fit_count = execution.get("completed_fit_count")
+                    diagnostics = execution.get("diagnostics", []) if status == "succeeded" else []
+                    fit_seconds = []
+                    for horizon in plan["horizons"]:
+                        slot = "fit-completed:" + key + ":" + str(horizon)
+                        completed = read_record(conn, store, run_id, slot)
+                        if isinstance(completed, dict) and completed.get("fit_seconds") is not None:
+                            fit_seconds.append({
+                                "horizon_sessions": horizon,
+                                "seconds": completed["fit_seconds"],
+                            })
+                    evidence_by_key[key] = (
+                        terminal, status, fit_attempt_count, completed_fit_count, diagnostics, fit_seconds)
+                    del raw_execution, execution
+                terminal, status, fit_attempt_count, completed_fit_count, diagnostics, fit_seconds = evidence_by_key[key]
                 rows.append({
                     "trial_id": key, "run_id": run_id, "outer_year": outer_year,
                     "inner_year": inner_year, "candidate_id": candidate_id,
                     "execution_slot": "execution:" + key, "status": status,
                     "terminal_status": terminal.get("status"),
-                    "fit_attempt_count": execution.get("fit_attempt_count"),
-                    "completed_fit_count": execution.get("completed_fit_count"),
+                    "fit_attempt_count": fit_attempt_count,
+                    "completed_fit_count": completed_fit_count,
                     "fit_seconds": fit_seconds,
                     "score_seconds": terminal.get("score_seconds"),
                     "rss_delta_kib": terminal.get("rss_delta_kib"),
                     "inner_metrics": terminal.get("inner_metrics"),
-                    "diagnostics": execution.get("diagnostics", []) if status == "succeeded" else []})
+                    "diagnostics": diagnostics})
     return rows
 
 
@@ -61,36 +66,9 @@ def collect(conn, store, repository, registration, request, plan_ref):
     targets = {r["event_id"]: r["absolute_move_pct"] for r in result["predictions"]}
     ids = {event for group in plan["folds"] for event in group["outer"]["evaluation_event_ids"]}
     events = [e for e in registration.document["size_panel"]["context"]["target_events"] if e["event_id"] in ids]
-    inner_uses = {}
+    inner_fits = _candidate_evidence(conn, store, registration.run_id, plan)
     for group in plan["folds"]:
         year = group["outer"]["year"]
-        for fold in group["inner"]:
-            for candidate in plan["candidates"]:
-                key = trial_key(plan, year, fold["year"], candidate["candidate_id"])
-                inner_uses[key] = inner_uses.get(key, 0) + 1
-    inner_receipts = {}
-    for group in plan["folds"]:
-        year = group["outer"]["year"]
-        for fold in group["inner"]:
-            for candidate in plan["candidates"]:
-                key = trial_key(plan, year, fold["year"], candidate["candidate_id"])
-                if key in inner_receipts:
-                    receipt = inner_receipts[key]
-                else:
-                    complete = read_record(conn, store, registration.run_id, "execution:" + key)
-                    receipt = {"status": complete["status"],
-                        "fit_attempt_count": complete["fit_attempt_count"],
-                        "completed_fit_count": complete["completed_fit_count"],
-                        "diagnostics": complete["diagnostics"] if complete["status"] == "succeeded" else []}
-                    if inner_uses[key] > 1:
-                        inner_receipts[key] = receipt
-                    del complete
-                inner_fits.append({"outer_year": year, "inner_year": fold["year"],
-                    "candidate_id": candidate["candidate_id"], "execution_slot": "execution:" + key,
-                    **receipt})
-                inner_uses[key] -= 1
-                if inner_uses[key] == 0:
-                    inner_receipts.pop(key, None)
         key = content_hash([plan["plan_id"], year])
         forecasts.extend(read_record(conn, store, registration.run_id, "outer-forecasts:" + key))
         key = content_hash([plan["plan_id"], year, "comparison"])

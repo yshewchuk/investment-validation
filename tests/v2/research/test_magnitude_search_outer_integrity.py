@@ -520,7 +520,14 @@ def assert_live_child_refusal(case, started, completed):
     names = ["outer-start", "outer-inputs"]
     for index, fit in enumerate(expected_fits(case)):
         assert slot(case, "fit-started:" + str(fit["horizon_sessions"])) == (fit if index < started else None)
-        assert slot(case, "fit-completed:" + str(fit["horizon_sessions"])) == (fit if index < completed else None)
+        completed_marker = slot(case, "fit-completed:" + str(fit["horizon_sessions"]))
+        if index < completed:
+            assert {key: value for key, value in completed_marker.items() if key != "fit_seconds"} == fit
+            assert isinstance(completed_marker["fit_seconds"], (int, float))
+            assert not isinstance(completed_marker["fit_seconds"], bool)
+            assert math.isfinite(completed_marker["fit_seconds"]) and completed_marker["fit_seconds"] >= 0
+        else:
+            assert completed_marker is None
         for state, count in (("started", started), ("completed", completed)):
             if index < count:
                 names.append("outer-fit-" + state + ":" + str(fit["horizon_sessions"]))
@@ -539,7 +546,7 @@ def test_fresh_child_progress_refuses_before_bad_event_publication(outer_case, m
         fits = expected_fits(case)
         for fit in fits[:completed]:
             progress("started", fit)
-            progress("completed", fit)
+            progress("completed", {**fit, "fit_seconds": 0.125})
         if started > completed:
             progress("started", fits[completed])
         state, fit = "started", fits[0]
@@ -574,7 +581,7 @@ def test_fresh_child_completion_refuses_before_execution_publication(outer_case,
         fits = expected_fits(case)
         for fit in fits[:completed]:
             progress("started", fit)
-            progress("completed", fit)
+            progress("completed", {**fit, "fit_seconds": 0.125})
         if pending:
             progress("started", fits[completed])
         if kind.startswith("failure") or kind == "unknown_event":
@@ -696,3 +703,30 @@ def test_outer_replay_uses_registered_diagnostic_keys(monkeypatch):
     result = outer._replay(lambda slot: journal[slot], None, started, fold, plan, execution, binding)
 
     assert result == terminal
+
+
+def test_timed_outer_replay_requires_timed_completed_fit_markers(monkeypatch):
+    binding = {}
+    execution = {"schema_version": "size_candidate_execution.v1"}
+    started = {"outer_id": "outer"}
+    fold = {"evaluation_event_ids": ["event"]}
+    plan = {"horizons": [1]}
+    forecasts = [{"event_id": "event", "horizon_sessions": 1,
+        "predicted_absolute_move_pct": 2.0}]
+    fit = {"horizon_sessions": 1}
+    worker = {"event": "succeeded", "forecasts": forecasts,
+        "score_seconds": 0.25, "rss_delta_kib": 64}
+    terminal = {"inputs_id": "inputs"}
+    receipt = {"status": "succeeded", "fits": [fit], "fit_attempt_count": 1,
+        "completed_fit_count": 1, "forecasts_id": content_hash(forecasts)}
+    journal = {"start": started, "inputs": {"manifest": "manifest"}, "terminal": terminal,
+        "forecasts": forecasts, "worker-result": worker, "execution": receipt, "validation": {},
+        "fit-started:1": fit, "fit-completed:1": fit}
+    monkeypatch.setattr(outer, "diagnostic_keys", lambda _binding: set())
+    monkeypatch.setattr(outer, "diagnostic_evidence", lambda *a: {})
+    monkeypatch.setattr(outer, "load_inputs", lambda *a: {})
+    monkeypatch.setattr(outer, "fit_evidence", lambda *a: [fit])
+    monkeypatch.setattr(outer, "_result", lambda *a: terminal)
+
+    with outer_problem("EXPERIMENT_IDENTITY_CONFLICT", CONFLICT):
+        outer._replay(lambda slot: journal[slot], None, started, fold, plan, execution, binding)
