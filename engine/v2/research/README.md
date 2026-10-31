@@ -450,13 +450,13 @@ See [the frozen contract](../../../experiments/SUPER_SIZE/CONFIRMED_METADATA_DES
 
 ## Policy-qualified eligible history
 
-<!-- public-interface: eligible_history.admit_source, eligible_history.iter_read, eligible_history_table.CONTRACT, eligible_history_table.FEATURES, eligible_history_table.admit_fields, eligible_history_table.recipe -->
+<!-- public-interface: eligible_history.admit_source, eligible_history.iter_read, eligible_history.plan_targets, eligible_history_table.CONTRACT, eligible_history_table.FEATURES, eligible_history_table.admit_fields, eligible_history_table.recipe -->
 
 These are intentionally manual, research-only Python APIs, not production CLI,
 nightly or training entrypoints. A separately authorized research caller supplies
 the pinned source and explicit policy; this PR neither activates a data run nor
 wires production scoring. Synthetic tests are the only current invocations.
-The sole public build/read boundary is `experiments.eligible_history`; it rejects
+The sole public build/read boundary is `experiments.eligible_history` (plus the read-only, non-materializing `plan_targets` planner used by SIZE target derivation); it rejects
 caller producer identities before source access and derives the installed identity.
 An immutable import-time source/environment baseline refuses later disk drift with
 `INPUT_CHANGED`; restart from a fixed code tree. This is not bytecode attestation.

@@ -193,6 +193,7 @@ def test_real_plan_targets_refuse_noncanonical_start_or_month_without_reads(real
 
 @pytest.mark.parametrize("changes", [{"event_ids": []}, {"event_ids": ["ev", "ev"]},
                                      {"event_ids": ["ev", 1]}, {"event_ids": ("ev-1",)},
+                                     {"event_ids": ["", " a", "a "]},
                                      {"horizons": [1, 3]}, {"horizons": [1, 3, 5, 1]}])
 def test_real_plan_targets_refuse_malformed_targets_or_horizons_before_reads(real, monkeypatch, changes):
     def forbidden(*args, **kwargs):
