@@ -106,3 +106,26 @@ def test_empty_paired_population_is_reported_not_replaced():
     assert report["comparison_status"] == "unavailable_no_complete_matched_events"
     assert "difference" not in report and "quarter_bootstrap" not in report
     assert report["broad_coverage_metrics"]["history_mean"]["count"] == 12
+
+
+def test_single_lead_horizon_report_covers_only_horizon_one():
+    events = [{"event_id": "e0", "ticker": "A", "event_date": "2023-01-20"}]
+    targets = {"e0": 2.0}
+    challenger = [{"event_id": "e0", "horizon_sessions": 1,
+                   "predicted_absolute_move_pct": 2.1}]
+    incumbent = [{"event_id": "e0", "horizon_sessions": 1,
+                  "predicted_absolute_move_pct": 1.0, "abstention": None,
+                  "history_mean": 4.0, "quote_status": "present"}]
+    report = paired_report(events, challenger, incumbent, targets, horizons=(1,))
+    assert report["forecast_matched_events"] == 1
+    assert report["paired_events"] == 1
+    assert {row["horizon_sessions"] for row in report["paired_rows"]} == {1}
+    assert report["horizon_weight"] == 1
+    assert set(report["per_horizon"]) == {"1"}
+
+
+def test_legacy_horizon_order_accepted_and_per_horizon_emitted_ascending():
+    args = fixture()
+    report = paired_report(*args, horizons=(5, 3, 1))
+    assert list(report["per_horizon"]) == ["1", "3", "5"]
+    assert paired_report(*args) == report

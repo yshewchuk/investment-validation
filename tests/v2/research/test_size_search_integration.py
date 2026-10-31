@@ -85,7 +85,7 @@ def lead_one_case(tmp_path_factory):
     request = request_fixture()
     request.update(feature_dictionary_hash=recipe("HMO")["dictionary_hash"],
         feature_snapshot_id=panel["feature_snapshot"].snapshot_id, history_snapshot_id=history["feature_snapshot"].snapshot_id,
-        outer_years=["2024"], inner_years={"2024": ["2023"]}, max_fits=102)
+        outer_years=["2024"], inner_years={"2024": ["2023"]}, max_fits=34)
     request["eligibility_policy_ref"].update(plan_id=panel["context"]["eligibility_plan"]["plan_id"])
     request["limits"] = {"child": {"memory_bytes": 2 << 30, "cpu_seconds": 30, "wall_seconds": 60},
         "parent": {"memory_bytes": 3 << 30, "wall_seconds": 600},
@@ -124,6 +124,13 @@ def test_lead_one_seals_single_horizon_plan_and_preserves_v2_request_identity(ca
     assert multi["candidate_specs"] == lead["candidate_specs"]
     assert multi["counts"]["search_fits"] == 102
     assert lead["counts"]["search_fits"] == 34
+
+
+def test_contain_accepts_request_when_given_single_horizon(case, monkeypatch):
+    from experiments import size_search
+    monkeypatch.setattr(size_search.signal, "signal", lambda *args: None)
+    monkeypatch.setattr(size_search.signal, "alarm", lambda seconds: 0)
+    assert size_search._contain(case.request, (1,)) > 0
 
 
 def test_native_v17_anchor_and_explicit_v2_fitted_identities(case):
@@ -816,6 +823,7 @@ def test_report_reuses_shared_execution_receipt_read_and_keeps_outer_rows(monkey
     plan = {"schema_version": PLAN_V3, "plan_id": "plan", "candidates": [{"candidate_id": "c"}],
         "counts": {"candidates": 1, "inner_folds": 3, "outer_folds": 2},
         "request": {"limits": limits},
+        "horizons": [5, 3, 1],
         "folds": [
             {"outer": {"year": "2024", "evaluation_event_ids": ["evt"]},
              "inner": [{"year": "2023"}]},

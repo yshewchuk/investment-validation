@@ -239,7 +239,15 @@ def prepare_plan(conn, store, registration, request, *, plan_schema=None):
     verify_native_registration(conn, store, registration, max_evidence_bytes=MAX_NATIVE_EVIDENCE_BYTES)
     binding = registration.document
     verify_installation(binding)
-    schedule = compile_request(request, horizons=tuple(h for h in (5, 3, 1) if h in binding["size_panel_request"]["horizons"]))
+    if binding["schema_version"] == "native_experiment_registration.v1.6":
+        horizons = (5, 3, 1)
+    else:
+        panel_request = binding.get("size_panel_request")
+        if not isinstance(panel_request, dict):
+            raise fail("EXPERIMENT_IDENTITY_CONFLICT", "qualified SIZE registration is missing its panel request")
+        validate_panel_request(panel_request)
+        horizons = tuple(h for h in (5, 3, 1) if h in panel_request["horizons"])
+    schedule = compile_request(request, horizons=horizons)
     _require(schedule["request"] == binding["size_request"])
     folds = _folds(binding, request)
     if plan_schema == PLAN_V3:

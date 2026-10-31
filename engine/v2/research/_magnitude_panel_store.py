@@ -11,7 +11,7 @@ from engine.v2.foundation import SystemClock, content_hash
 from engine.v2.research import magnitude_panel_qualified_table as table
 from engine.v2.research._snapshot import artifact_store, catalog_connection
 
-_FRAGMENT_ROWS = 3  # one event's horizons per stored fragment
+_FRAGMENT_ROWS = 3  # maximum rows per stored fragment
 
 
 def _slot(context):

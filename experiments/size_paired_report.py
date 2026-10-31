@@ -41,8 +41,16 @@ def _bootstrap(rows, cluster):
         "percentile_95": {m: np.percentile(v, [2.5, 97.5]).tolist() for m, v in samples.items()}}
 
 
-def paired_report(events, challenger, incumbent, targets, *, label_reasons=None):
+def paired_report(events, challenger, incumbent, targets, *, label_reasons=None, horizons=(1, 3, 5)):
     """Match by forecast availability alone, then join targets; retain all exclusions."""
+    if (not isinstance(horizons, (tuple, list)) or not horizons
+            or any(type(h) is not int for h in horizons)
+            or len(set(horizons)) != len(horizons)
+            or not set(horizons) <= {1, 3, 5}
+            or (tuple(horizons) != tuple(sorted(horizons))
+                and tuple(horizons) != tuple(h for h in (5, 3, 1) if h in set(horizons)))):
+        raise ValueError("horizons must be a nonempty unique subset of integer leads 1, 3, 5 in ascending or legacy (5,3,1) order")
+    leads = tuple(sorted(horizons))
     def index(rows):
         result = {(r["event_id"], r["horizon_sessions"]): r for r in rows}
         if len(result) != len(rows):
@@ -55,7 +63,7 @@ def paired_report(events, challenger, incumbent, targets, *, label_reasons=None)
     label_reasons = label_reasons or {event: "unavailable" for event in set(metadata) - set(targets)}
     if set(label_reasons) != set(metadata) - set(targets):
         raise ValueError("label exclusion reasons differ from coverage")
-    expected = {(event, h) for event in metadata for h in (1, 3, 5)}
+    expected = {(event, h) for event in metadata for h in leads}
     if set(a) != expected or set(b) != expected or not set(targets) <= set(metadata):
         raise ValueError("paired coverage differs from frozen event population")
     for value in list(targets.values()) + [r["predicted_absolute_move_pct"] for r in challenger]:
@@ -68,7 +76,7 @@ def paired_report(events, challenger, incumbent, targets, *, label_reasons=None)
                 continue
             if type(value) not in (int, float) or not math.isfinite(value):
                 raise ValueError("invalid comparison value")
-    matched = {e for e in metadata if all(b[e, h]["predicted_absolute_move_pct"] is not None for h in (1, 3, 5))}
+    matched = {e for e in metadata if all(b[e, h]["predicted_absolute_move_pct"] is not None for h in leads)}
     coverage, rows = Counter(), []
     for event, h in sorted(expected):
         meta, baseline = metadata[event], b[event, h]
@@ -85,7 +93,8 @@ def paired_report(events, challenger, incumbent, targets, *, label_reasons=None)
                 "incumbent": baseline["predicted_absolute_move_pct"], "history_mean": baseline["history_mean"]})
     result = {"schema_version": "size_paired_report.v1", "eligible_events": len(metadata),
         "forecast_matched_events": len(matched), "label_unavailable_events": sorted(set(metadata) - set(targets)),
-        "paired_events": len({r["event_id"] for r in rows}), "event_total_weight": 1, "horizon_weight": 1 / 3,
+        "paired_events": len({r["event_id"] for r in rows}), "event_total_weight": 1,
+        "horizon_weight": 1 / len(leads),
         "coverage": [{"arm": arm, "year": y, "horizon_sessions": h, "quote_status": q, "forecast_status": s,
                       "label_status": label, "paired_forecasts": pairing, "count": n}
             for (arm, y, h, q, s, label, pairing), n in sorted(coverage.items())], "paired_rows": rows,
@@ -101,7 +110,7 @@ def paired_report(events, challenger, incumbent, targets, *, label_reasons=None)
             difference=_difference(rows), quarter_bootstrap=_bootstrap(rows, "quarter"),
             issuer_sensitivity=_bootstrap(rows, "ticker"),
             per_year={y: _breakdown([r for r in rows if r["year"] == y]) for y in sorted({r["year"] for r in rows})},
-            per_horizon={str(h): _breakdown([r for r in rows if r["horizon_sessions"] == h]) for h in (1, 3, 5)})
+            per_horizon={str(h): _breakdown([r for r in rows if r["horizon_sessions"] == h]) for h in leads})
     else:
         result["comparison_status"] = "unavailable_no_complete_matched_events"
     return {**result, "result_id": content_hash(result)}

@@ -19,7 +19,7 @@ def args(action="report"):
 
 
 def setup_cli(monkeypatch):
-    monkeypatch.setattr(cli, "_contain", lambda request: 2 ** 33)
+    monkeypatch.setattr(cli, "_contain", lambda *args, **kwargs: 2 ** 33)
     monkeypatch.setattr(cli, "_read_document", lambda path: {})
     monkeypatch.setattr(cli, "experiment_spec_from_document", lambda doc: object())
     monkeypatch.setattr(cli, "connect", lambda *a, **k: SimpleNamespace(close=lambda: None))
@@ -298,7 +298,7 @@ from pathlib import Path
 from experiments import size_search as cli
 cli._read_document = lambda path: {}
 cli.experiment_spec_from_document = lambda doc: object()
-def contain(request):
+def contain(request, *args, **kwargs):
     with open('/proc/self/status', encoding='ascii') as stream:
         for line in stream:
             if line.startswith('VmRSS:'):
