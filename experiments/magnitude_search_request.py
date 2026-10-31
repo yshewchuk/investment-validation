@@ -55,7 +55,7 @@ def _positive(value):
     return type(value) is int and value > 0
 
 
-def _references(request, recipe):
+def _references(request, recipe=panel_recipe):
     snapshots = [request["feature_snapshot_id"], request["history_snapshot_id"]]
     if request["schema_version"] == "regression_search_request.v1":
         snapshots.append(request["panel_request"]["price_history_snapshot"])
@@ -136,7 +136,7 @@ def _limits(value):
                  "stage-2 parent/build/job limits require explicit bounded positive integers")
 
 
-def _specifications(request, request_id, recipe):
+def _specifications(request, request_id, recipe=panel_recipe):
     specs = []
     for subset in request["feature_sets"]:
         feature_recipe = recipe(subset)

@@ -39,6 +39,17 @@ _METADATA_LIMITS = {"max_catalog_tables", "max_catalog_fragments", "max_catalog_
     "max_retained_metadata_bytes", "max_proof_bytes"}
 
 
+def validate_panel_inputs(request):
+    """Pure closed validation of the panel-only request fields; usable before any history is built."""
+    if type(request) is not dict or not {"source_start", "metadata_limits"} <= request.keys():
+        raise fail("CONTRACT_MISMATCH", "panel requires explicit source start and metadata limits")
+    canonical_day(request["source_start"])
+    limits = request["metadata_limits"]
+    if (type(limits) is not dict or limits.keys() != _METADATA_LIMITS
+            or any(type(v) is not int or not 0 < v < sys.maxsize for v in limits.values())):
+        raise fail("CONTRACT_MISMATCH", "panel requires exact positive metadata limits")
+
+
 def _request(source, request):
     if any(name in request for name in ("producer", "history_producer", "history_admitted")):
         raise fail("HOLDOUT_ACCESS_DENIED", "installed producer identity cannot be supplied by callers")
@@ -47,11 +58,7 @@ def _request(source, request):
     eligible_history.validate_request({k: request[k] for k in _HISTORY_KEYS})
     panel._policy(request["policy"])
     canonical_day(request["history_start"])
-    canonical_day(request["source_start"])
-    limits = request["metadata_limits"]
-    if (type(limits) is not dict or limits.keys() != _METADATA_LIMITS
-            or any(type(v) is not int or not 0 < v < sys.maxsize for v in limits.values())):
-        raise fail("CONTRACT_MISMATCH", "panel requires exact positive metadata limits")
+    validate_panel_inputs(request)
     for snapshot in (source, request["history_snapshot"], request["price_history_snapshot"]):
         snapshot_reference(snapshot)
 

@@ -45,8 +45,9 @@ def analog_query_base(panel_row: Mapping[str, Any]) -> dict[str, Any]:
     """The bundle-time part of the query: ``mcap_bucket`` and ``implied_ratio``.
 
     ``mcap_bucket`` buckets ``exp(mcap_log)``; ``implied_ratio`` is
-    ``im / mean_prior_or_implied`` when both are finite and the divisor is
-    non-zero, else ``None``.
+    ``entry_im / mean_prior_or_implied`` (``entry_im`` is the decision-date
+    implied move, not the model feature ``im``) when both are finite and the
+    divisor is non-zero, else ``None``.
     """
     log = _finite_or_none(panel_row.get("mcap_log"))
     mcap = None
@@ -55,7 +56,7 @@ def analog_query_base(panel_row: Mapping[str, Any]) -> dict[str, Any]:
             mcap = exp(log)
         except OverflowError:
             mcap = None
-    implied = _finite_or_none(panel_row.get("im"))
+    implied = _finite_or_none(panel_row.get("entry_im"))
     prior = _finite_or_none(panel_row.get("mean_prior_or_implied"))
     ratio = implied / prior if implied is not None and prior else None
     return {"mcap_bucket": _label(mcap, MCAP_EDGES, MCAP_LABELS),

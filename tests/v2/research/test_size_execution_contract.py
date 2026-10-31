@@ -2,6 +2,7 @@
 import json
 from copy import deepcopy
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -10,10 +11,17 @@ from engine.v2.ops.errors import OpsError
 from engine.v2.research.magnitude_folds import annual_fold
 from experiments.magnitude_candidate_fit import fit_candidate
 from experiments.magnitude_candidate_recipe import candidate_recipe
+from experiments.magnitude_search_plan import (
+    PLAN_V2,
+    PLAN_V3,
+    canonical_inner,
+    cohort_key,
+    trial_key,
+)
 from experiments.magnitude_search_request_versions import compile_request
 from experiments.size_fit_diagnostics import evidence
 from experiments.size_search import _contain
-from experiments.size_search_binding import _folds
+from experiments.size_search_binding import _folds, _shared_inner
 
 
 def temporal():
@@ -132,3 +140,125 @@ def test_post_import_source_drift_refuses_before_preparation_reads(monkeypatch):
 def test_stable_imported_source_identity_is_not_caller_selected():
     from experiments import size_search_binding as binding
     assert binding._sources() == binding._IMPORTED_SOURCES
+
+
+def multi_year_temporal():
+    years = ("2020", "2021", "2022", "2023", "2024", "2025")
+    events = [{"event_id": "e" + year, "event_date": year + "-06-01",
+               "forecasts": [{"source_session_ceiling": year + "-05-20"}]} for year in years]
+    targets = [{**event, "ticker": "T" + event["event_id"],
+                "label_end": event["event_date"][:8] + "10"} for event in events]
+    binding = {"magnitude_plan": {"events": events, "evaluation_years": ["2024", "2025"],
+                                  "folds": [annual_fold(year, events) for year in ("2024", "2025")]},
+        "magnitude_execution": {"evaluation_labels_before": "2026-01-01"},
+        "size_panel": {"context": {"target_events": targets}}}
+    request = {"inner_years": {"2024": ["2021", "2022", "2023"],
+                               "2025": ["2022", "2023", "2024"]}}
+    return binding, request
+
+
+def test_nested_multi_year_schedule_keeps_owner_specific_inner_folds():
+    binding, request = multi_year_temporal()
+    folds = _folds(binding, request)
+    assert [group["outer"]["year"] for group in folds] == ["2024", "2025"]
+    assert [[fold["year"] for fold in group["inner"]] for group in folds] == [
+        ["2021", "2022", "2023"], ["2022", "2023", "2024"]]
+    _shared_inner(folds)
+
+
+def synthetic_plan(schema, candidates=("c1", "c2")):
+    inner = {"training_candidate_event_ids": ["train"], "evaluation_event_ids": ["event"]}
+    folds = [{"outer": {"year": "2024"}, "inner": [{**inner, "year": year}
+              for year in ("2021", "2022", "2023")]},
+             {"outer": {"year": "2025"}, "inner": [{**inner, "year": year}
+              for year in ("2022", "2023", "2024")]}]
+    return {"schema_version": schema, "plan_id": content_hash({"synthetic": schema}),
+            "folds": folds, "candidates": [{"candidate_id": value} for value in candidates]}
+
+
+def test_v3_shared_owner_and_exact_trial_cohort_identities():
+    plan = synthetic_plan(PLAN_V3)
+    owner, fold = canonical_inner(plan, "2025", "2023")
+    assert owner == "2024" and fold is plan["folds"][0]["inner"][2]
+    assert canonical_inner(plan, "2024", "2023")[0] == owner
+    assert canonical_inner(plan, "2025", "2024")[0] == "2025"
+    assert trial_key(plan, "2025", "2023", "c1") == content_hash([plan["plan_id"], "2023", "c1"])
+    assert trial_key(plan, "2024", "2023", "c1") == trial_key(plan, "2025", "2023", "c1")
+    assert cohort_key(plan, "2025", "2023") == content_hash([plan["plan_id"], "2023"])
+    assert cohort_key(plan, "2024", "2023") == cohort_key(plan, "2025", "2023")
+    assert trial_key(plan, "2025", "2023", "c1") != trial_key(plan, "2025", "2023", "c2")
+    assert trial_key(plan, "2025", "2023", "c1") != trial_key(plan, "2025", "2024", "c1")
+    assert cohort_key(plan, "2025", "2023") != cohort_key(plan, "2025", "2024")
+
+
+def test_v2_trial_and_cohort_identities_remain_outer_scoped():
+    plan = synthetic_plan(PLAN_V2)
+    owner, fold = canonical_inner(plan, "2025", "2023")
+    assert owner == "2025" and fold is plan["folds"][1]["inner"][1]
+    assert trial_key(plan, "2024", "2023", "c1") == content_hash(
+        [plan["plan_id"], "2024", "2023", "c1"])
+    assert cohort_key(plan, "2024", "2023") == content_hash([plan["plan_id"], "2024", "2023"])
+    assert trial_key(plan, "2024", "2023", "c1") != trial_key(plan, "2025", "2023", "c1")
+    assert cohort_key(plan, "2024", "2023") != cohort_key(plan, "2025", "2023")
+
+
+def test_shared_inner_refuses_modified_shared_membership():
+    plan = synthetic_plan(PLAN_V3)
+    _shared_inner(plan["folds"])
+    plan["folds"][1]["inner"][1]["training_candidate_event_ids"] = ["unshared"]
+    with pytest.raises(OpsError, match="differ"):
+        _shared_inner(plan["folds"])
+
+
+def test_shared_inner_allows_cutoff_difference_when_membership_matches(monkeypatch):
+    from engine.v2.research.magnitude_panel_qualified_table import recipe
+    from experiments import size_search_binding as binding
+    from tests.v2.research.test_magnitude_search_request import request as search_request
+    document, _ = multi_year_temporal()
+    request = search_request()
+    request["feature_dictionary_hash"] = recipe("HMO")["dictionary_hash"]
+    request["outer_years"] = ["2024", "2025"]
+    request["inner_years"] = {"2024": ["2022", "2023"], "2025": ["2022", "2023"]}
+    document["size_request"] = compile_request(request)["request"]
+    document["schema_version"] = "native_experiment_registration.v1.6"
+    document["source_closure"] = {"synthetic": "source"}
+    document["environment"] = {"synthetic": "environment"}
+    folds = _folds(document, request)
+    owners = [group["inner"][0] for group in folds]
+    assert [fold["year"] for fold in owners] == ["2022", "2022"]
+    assert owners[0]["evaluation_labels_before"] != owners[1]["evaluation_labels_before"]
+    assert owners[0]["training_candidate_event_ids"] == owners[1]["training_candidate_event_ids"]
+    assert owners[0]["evaluation_event_ids"] == owners[1]["evaluation_event_ids"]
+    _shared_inner(folds)
+    monkeypatch.setattr(binding, "verify_native_registration", lambda *a, **k: None)
+    monkeypatch.setattr(binding, "verify_installation", lambda *a, **k: None)
+    registration = SimpleNamespace(run_id="synthetic-run", variant_id="synthetic-variant",
+                                   document=document)
+    plan = binding.prepare_plan(None, None, registration, request)
+    assert plan["schema_version"] == PLAN_V3
+    assert [[fold["year"] for fold in group["inner"]] for group in plan["folds"]] == [
+        ["2022", "2023"], ["2022", "2023"]]
+    v3 = deepcopy(request)
+    v3["schema_version"] = "magnitude_search_request.v3"
+    v3["space"] = {
+        "ridge": {"alpha": [0.01, 0.1, 1.0, 10.0, 100.0]},
+        "elasticnet": {"alpha": [0.001, 0.003, 0.01, 0.03, 0.1, 1.0],
+                      "l1_ratio": [0.25, 0.75]},
+        "hgb": {"max_leaf_nodes": [7, 15]},
+    }
+    v3.update(max_candidates=1000, max_fits=10000)
+    document["size_request"] = compile_request(v3)["request"]
+    assert binding.prepare_plan(None, None, registration, v3)["schema_version"] == PLAN_V2
+    monkeypatch.setattr(binding, "verify_native_registration", lambda *a, **k: pytest.fail("registration read"))
+    with pytest.raises(OpsError) as error:
+        binding.prepare_plan(None, None, registration, v3, plan_schema=PLAN_V3)
+    assert error.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+
+
+@pytest.mark.parametrize("plan_schema", ["magnitude_search_plan.v4", 0, []])
+def test_prepare_plan_refuses_unsupported_schema_before_registration_reads(monkeypatch, plan_schema):
+    from experiments import size_search_binding as binding
+    monkeypatch.setattr(binding, "verify_native_registration", lambda *a, **k: pytest.fail("registration read"))
+    with pytest.raises(OpsError) as error:
+        binding.prepare_plan(None, None, None, {}, plan_schema=plan_schema)
+    assert error.value.code == "EXPERIMENT_IDENTITY_CONFLICT"

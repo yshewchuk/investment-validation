@@ -5,7 +5,7 @@ from bisect import bisect_right
 from copy import deepcopy
 from datetime import date, timedelta
 
-from engine.v2.data import errors
+from engine.v2.data import errors, objects
 from engine.v2.foundation import content_hash, to_document
 from engine.v2.foundation.experiment_holdouts import calendar_date
 from engine.v2.research import progress
@@ -187,16 +187,24 @@ def _classify_groups(groups, indexed, labels, windows):
     return retained, exclusions
 
 
-def plan_eligibility(repository, snapshot, *, as_of_month, policy, metadata, evaluation_event_ids):
+def plan_eligibility(repository, snapshot, *, as_of_month, policy, metadata, evaluation_event_ids,
+                     max_object_bytes=None):
     """Recheck population membership; exclude evaluation IDs on ambiguous-random
     tickers and record those exclusions without granting reads.
+
+    ``max_object_bytes``, when given, bounds this planner's own canonical events
+    read's decoded row-group bytes; ``None`` keeps the decoder default unchanged.
 
     Producer-declared label/forecast bounds must already be established against
     the pinned source. They are validated structurally, NOT proven from payloads.
     Consumers must bind/apply this plan before preprocessing, selection and fits.
     Plans and policy identity are unchanged unless an ambiguous random event exists; the
     "preserve_membership" label keeps v1.5/v1.6 hashes. Neither a hash nor this plan authorizes IO.
+
+    An invalid ``max_object_bytes`` refuses eagerly, before snapshot admission.
     """
+    if max_object_bytes is not None:
+        objects.validate_max_object_bytes(max_object_bytes)
     with progress.stage("eligibility admission", report_refusals=True):
         admit_snapshot(repository, snapshot)
         policy, groups, metadata_id = _metadata(snapshot, as_of_month, policy, metadata)
@@ -205,7 +213,8 @@ def plan_eligibility(repository, snapshot, *, as_of_month, policy, metadata, eva
         except (TypeError, ValueError):
             raise errors.fail("CONTRACT_MISMATCH", "explicit unique evaluation event IDs required") from None
     with progress.stage("eligibility plan", report_refusals=True):
-        events = canonical_events(repository, snapshot)
+        cap_kwargs = {} if max_object_bytes is None else {"max_object_bytes": max_object_bytes}
+        events = canonical_events(repository, snapshot, **cap_kwargs)
         try:
             _ids(events.event_id.tolist())
         except ValueError:
