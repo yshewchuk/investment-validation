@@ -902,9 +902,14 @@ def test_legacy_chooser_fold_catalog_without_retrain_cutoff_keeps_binding_availa
     _rb, _descriptors, _identities, calls, _body = _chooser_resolver_fixture(
         tmp_path, monkeypatch, cutoff=None)
 
-    binding = resolve_release_binding(tmp_path, include_chooser_fold_references=True)
+    binding = resolve_release_binding(tmp_path)
 
+    assert binding.release_id == _RELEASE_ID
     assert binding.chooser_fold_references == {}
+    assert calls == []
+
+    with pytest.raises(ModelNotReady, match="canonical training cutoff is missing"):
+        resolve_release_binding(tmp_path, include_chooser_fold_references=True)
     assert calls == []
 
 

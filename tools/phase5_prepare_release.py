@@ -592,27 +592,32 @@ def _staging_id_conflict(exc) -> bool:
     return False
 
 
-def _with_chooser_retrain_cutoff(sources, chooser_validated):
+def with_chooser_retrain_cutoff(sources, chooser_validated):
     if not chooser_validated:
         return sources
     try:
         fold_starts = [item.fold_start for item in chooser_validated.values()]
         parsed_starts = [date.fromisoformat(value) for value in fold_starts]
-        if any(parsed.isoformat() != value for parsed, value in zip(parsed_starts, fold_starts)):
-            raise ValueError("noncanonical")
-        retrain_cutoff = max(parsed_starts).isoformat()
-        declared_cutoff = (sources or {}).get("retrain_cutoff")
-        if declared_cutoff is not None and declared_cutoff != retrain_cutoff:
-            raise ValueError("mismatch")
-        pool_cutoff = (sources or {}).get("pool_cutoff")
-        if pool_cutoff is None:
-            pool_cutoff = retrain_cutoff
-        else:
-            parsed_pool_cutoff = date.fromisoformat(pool_cutoff)
-            if parsed_pool_cutoff.isoformat() != pool_cutoff or parsed_pool_cutoff < date.fromisoformat(retrain_cutoff):
-                raise ValueError("pool cutoff")
     except (AttributeError, TypeError, ValueError) as exc:
-        raise PrepareRefused("chooser folds require a canonical training cutoff") from exc
+        raise PrepareRefused("chooser fold_start must be a canonical date") from exc
+    if any(parsed.isoformat() != value for parsed, value in zip(parsed_starts, fold_starts)):
+        raise PrepareRefused("chooser fold_start must be a canonical date")
+    retrain_cutoff = max(parsed_starts).isoformat()
+    declared_cutoff = (sources or {}).get("retrain_cutoff")
+    if declared_cutoff is not None and declared_cutoff != retrain_cutoff:
+        raise PrepareRefused("chooser retrain_cutoff must match latest fold_start")
+    pool_cutoff = (sources or {}).get("pool_cutoff")
+    if pool_cutoff is None:
+        pool_cutoff = retrain_cutoff
+    else:
+        try:
+            parsed_pool_cutoff = date.fromisoformat(pool_cutoff)
+        except (TypeError, ValueError) as exc:
+            raise PrepareRefused(
+                "chooser pool_cutoff must be canonical and on/after retrain_cutoff") from exc
+        if parsed_pool_cutoff.isoformat() != pool_cutoff or parsed_pool_cutoff < date.fromisoformat(retrain_cutoff):
+            raise PrepareRefused(
+                "chooser pool_cutoff must be canonical and on/after retrain_cutoff")
     return {
         **dict(sources or {}),
         "retrain_cutoff": retrain_cutoff,
@@ -637,7 +642,7 @@ def write_release(out: Path, release: ModelRelease, inventory: ModelReleaseInven
         raise PrepareRefused(f"{COPY_PREFIX}refused: caller-supplied pinned sources")
     release, states = _rebase_member_paths(release, states, pinned_panel)
     sources, validated, chooser_validated = _run_preflights(release, states, pinned_panel, sources)
-    sources = _with_chooser_retrain_cutoff(sources, chooser_validated)
+    sources = with_chooser_retrain_cutoff(sources, chooser_validated)
     out = Path(out)
     root = deployment_root(out)
     root.mkdir(parents=True, exist_ok=True)

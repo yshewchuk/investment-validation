@@ -224,7 +224,7 @@ def _choice(tmp_path, monkeypatch):
     # held), so the choice comparison is the only thing under test here.
     from tools import capture_tier0_corpus as capture
 
-    monkeypatch.setattr(capture, "_validated_chooser_fold_references", lambda source, request: None)
+    monkeypatch.setattr(capture, "validated_chooser_fold_references", lambda source, request: None)
     from tools.capture_tier0_corpus import strict_trace_one
 
     for member in members:
@@ -384,7 +384,7 @@ def _menu_row_with_frozen_chooser(chooser_root, tmp_path, monkeypatch):  # noqa:
 
     from tools import capture_tier0_corpus as capture
 
-    monkeypatch.setattr(capture, "_validated_chooser_fold_references", lambda source, request: None)
+    monkeypatch.setattr(capture, "validated_chooser_fold_references", lambda source, request: None)
     from tools.capture_tier0_corpus import strict_trace_one
 
     _case, chooser_candidate = _captured_chooser(chooser_root, tmp_path, monkeypatch)
@@ -610,7 +610,7 @@ def test_dyn_sv_choice_members_sharing_a_fold_pool_share_it_by_identity_and_hash
         chooser_root, tmp_path, monkeypatch):  # noqa: F811
     from tools import capture_tier0_corpus as capture
 
-    monkeypatch.setattr(capture, "_validated_chooser_fold_references", lambda source, request: None)
+    monkeypatch.setattr(capture, "validated_chooser_fold_references", lambda source, request: None)
     _case, chooser_candidate = _captured_chooser(chooser_root, tmp_path, monkeypatch)
     source = chooser_candidate["legacy_trace"]["checkpoints"]["source_inputs"]["value"]
     path, digest = _artifact(tmp_path)
@@ -660,7 +660,7 @@ def test_a_pair_over_a_shared_chooser_document_hashes_like_the_plain_digest(
         chooser_root, tmp_path, monkeypatch):  # noqa: F811
     from tools import capture_tier0_corpus as capture
 
-    monkeypatch.setattr(capture, "_validated_chooser_fold_references", lambda source, request: None)
+    monkeypatch.setattr(capture, "validated_chooser_fold_references", lambda source, request: None)
     _case, chooser_candidate = _captured_chooser(chooser_root, tmp_path, monkeypatch)
     source = chooser_candidate["legacy_trace"]["checkpoints"]["source_inputs"]["value"]
     path, digest = _artifact(tmp_path)

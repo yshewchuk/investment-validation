@@ -193,15 +193,21 @@ for another strategy raises `ValueError`. The chooser k-NN pool is distinct
 from the board bucket-analog pool.
 Strict Tier-0 capture opts into `resolve_production_release_binding`'s
 verified chooser-fold references and passes the verified map to
-`engine.score.Scorer`. The scorer records only references matching the
-producer output and fold month it served. `strict_trace_one` checks each
-reference against the recorded producer binding and the request's canonical
-decision date; the served fold boundary may equal that date (for a first-day
-decision), but may not be later. It then writes the validated map to metadata field
+`engine.score.Scorer`. The scorer records only references matching a bound
+chooser producer output and fold month it served. The shared `pred_abs_move`
+size fold is recorded as a chooser-frame input and pool, but is not a chooser
+producer: its identity is validated by the ordinary frozen Tier-4 binding.
+`strict_trace_one` checks each chooser-producer reference against the recorded
+producer binding and the request's canonical decision date; the served fold
+boundary may equal that date (for a first-day decision), but may not be later.
+It then writes the validated map to metadata field
 `chooser_fold_references` when a chooser trace has producer folds (`None`
 otherwise). Production capture resolves the release catalog before scoring;
 `strict_trace_one` performs no catalog lookup and never infers missing
-provenance. A chooser trace with a producer fold but no matching verified
+provenance. When chooser folds are present without a catalog retrain cutoff,
+the opted-in resolver refuses with `ModelNotReady` identifying the missing
+canonical training cutoff; ordinary scoring does not opt into this resolver.
+A chooser trace with a bound producer fold but no matching verified
 reference refuses. Orphan references, incomplete producer coverage and
 invalid dates also refuse with `StrictTraceCaptureError`. Provenance stays
 outside chooser inputs and the receipt.

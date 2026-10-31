@@ -874,10 +874,8 @@ def _resolve_chooser_fold_references(
         return {}
     sources = catalog.get("sources")
     cutoff = sources.get("retrain_cutoff") if isinstance(sources, Mapping) else None
-    # Older active releases can omit this optional field. Keep ordinary scoring
-    # available; strict chooser capture refuses if it needs an absent reference.
     if cutoff is None:
-        return {}
+        raise ModelNotReady("tier4_folds:chooser", "canonical training cutoff is missing")
     try:
         parsed_cutoff = date.fromisoformat(cutoff)
         if parsed_cutoff.isoformat() != cutoff:

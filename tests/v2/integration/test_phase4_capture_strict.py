@@ -1111,13 +1111,13 @@ from engine.v2.scoring.source_inputs import (  # noqa: E402
 )
 from tools.capture_tier0_corpus import (  # noqa: E402
     CHOOSER_PRIMITIVE_COLUMNS,
-    _validated_chooser_fold_references,
+    validated_chooser_fold_references,
     frozen_source_declarations,
 )
 from tools.phase5_prepare_release import (  # noqa: E402
     CHOOSER_POOL_ID,
     PrepareRefused,
-    _with_chooser_retrain_cutoff,
+    with_chooser_retrain_cutoff,
 )
 
 FOLD = pd.Timestamp("2026-09-01")
@@ -1129,19 +1129,19 @@ def test_phase5_prepare_release_sets_canonical_chooser_cutoff():
         "late": SimpleNamespace(fold_start="2026-09-01"),
     }
     sources = {"pool_cutoff": "2026-10-01", "other": "preserved"}
-    assert _with_chooser_retrain_cutoff(sources, folds) == {
+    assert with_chooser_retrain_cutoff(sources, folds) == {
         **sources, "retrain_cutoff": "2026-09-01",
     }
-    assert _with_chooser_retrain_cutoff({}, folds) == {
+    assert with_chooser_retrain_cutoff({}, folds) == {
         "retrain_cutoff": "2026-09-01", "pool_cutoff": "2026-09-01",
     }
-    assert _with_chooser_retrain_cutoff(sources, {}) is sources
-    with pytest.raises(PrepareRefused, match="canonical training cutoff"):
-        _with_chooser_retrain_cutoff({**sources, "retrain_cutoff": "2026-08-01"}, folds)
-    with pytest.raises(PrepareRefused, match="canonical training cutoff"):
-        _with_chooser_retrain_cutoff({**sources, "pool_cutoff": "2026-08-31"}, folds)
-    with pytest.raises(PrepareRefused, match="canonical training cutoff"):
-        _with_chooser_retrain_cutoff({**sources, "pool_cutoff": "20261001"}, folds)
+    assert with_chooser_retrain_cutoff(sources, {}) is sources
+    with pytest.raises(PrepareRefused, match="chooser retrain_cutoff must match latest fold_start"):
+        with_chooser_retrain_cutoff({**sources, "retrain_cutoff": "2026-08-01"}, folds)
+    with pytest.raises(PrepareRefused, match="chooser pool_cutoff must be canonical and on/after retrain_cutoff"):
+        with_chooser_retrain_cutoff({**sources, "pool_cutoff": "2026-08-31"}, folds)
+    with pytest.raises(PrepareRefused, match="chooser pool_cutoff must be canonical and on/after retrain_cutoff"):
+        with_chooser_retrain_cutoff({**sources, "pool_cutoff": "20261001"}, folds)
 
 
 def test_write_release_persists_chooser_cutoff(tmp_path, monkeypatch):
@@ -1217,15 +1217,15 @@ def test_chooser_fold_reference_flows_through_real_scorer_checkpoint(tmp_path, m
         SimpleNamespace(), {},
     )
     source = _source_of(_candidate(collector))
-    captured = _validated_chooser_fold_references(source, _request())
+    captured = validated_chooser_fold_references(source, _request())
     assert captured["pred_im_t1_d14"]["descriptor_hash"] == reference.descriptor_hash
     boundary_request = SimpleNamespace(requested_decision_at="2026-09-01")
-    assert _validated_chooser_fold_references(source, boundary_request)["pred_im_t1_d14"]["fold_start"] == "2026-09-01"
+    assert validated_chooser_fold_references(source, boundary_request)["pred_im_t1_d14"]["fold_start"] == "2026-09-01"
     with pytest.raises(StrictTraceCaptureError, match="chooser refs lack declarations"):
-        _validated_chooser_fold_references(
+        validated_chooser_fold_references(
             {"frozen": {"chooser_references": {"orphan": {}}}}, _request())
     with pytest.raises(StrictTraceCaptureError, match="chooser refs do not cover producers"):
-        _validated_chooser_fold_references({"frozen": {
+        validated_chooser_fold_references({"frozen": {
             "declarations": {"chooser_fold:pred_im_t1_d14": {
                 "binding": "fold:implied_t1", "output": "pred_im_t1_d14"}},
             "bindings": {}, "chooser_references": {},
@@ -1280,9 +1280,25 @@ def test_chooser_fold_reference_flows_through_real_scorer_checkpoint(tmp_path, m
     corrupted = copy.deepcopy(source)
     corrupted["frozen"]["chooser_references"]["pred_im_t1_d14"]["estimator_sha256"] = "sha256:" + "c" * 64
     with pytest.raises(StrictTraceCaptureError, match="mismatches served producer"):
-        _validated_chooser_fold_references(corrupted, _request())
+        validated_chooser_fold_references(corrupted, _request())
     with pytest.raises(StrictTraceCaptureError, match="chooser ref has invalid dates"):
-        _validated_chooser_fold_references(source, SimpleNamespace(requested_decision_at=None))
+        validated_chooser_fold_references(source, SimpleNamespace(requested_decision_at=None))
+
+
+@pytest.mark.parametrize("field", ["declarations", "bindings", "chooser_references"])
+def test_validated_chooser_fold_references_requires_mappings(field):
+    source = {"frozen": {field: []}}
+    with pytest.raises(
+        StrictTraceCaptureError, match=f"chooser {field} must be a mapping"
+    ):
+        validated_chooser_fold_references(source, _request())
+
+
+def test_validated_chooser_fold_references_ignores_size_only_declaration():
+    source = {"frozen": {
+        "declarations": {"chooser_fold:pred_abs_move": {"pool": "pred_abs_move"}},
+    }}
+    assert validated_chooser_fold_references(source, _request()) is None
 
 
 def _sha(path) -> str:

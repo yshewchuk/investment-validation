@@ -3678,23 +3678,39 @@ def _merged_resources(*groups: Sequence[Mapping[str, Any]]) -> list[dict[str, An
     return list(merged.values())
 
 
-def _validated_chooser_fold_references(source, request):
+def validated_chooser_fold_references(source, request):
     if source is None:
         return None
     frozen = source.get("frozen")
     if not isinstance(frozen, Mapping):
         return None
-    declarations = frozen.get("declarations") or {}
-    bindings = frozen.get("bindings") or {}
-    refs = frozen.get("chooser_references") or {}
-    producers = {key[13:]: value for key, value in declarations.items()
-                 if isinstance(key, str) and key.startswith("chooser_fold:")
-                 and isinstance(value, Mapping) and "binding" in value}
+    maps = {}
+    for name in ("declarations", "bindings", "chooser_references"):
+        value = frozen.get(name)
+        if value is None:
+            maps[name] = {}
+        elif not isinstance(value, Mapping):
+            raise StrictTraceCaptureError(f"chooser {name} must be a mapping")
+        else:
+            maps[name] = value
+    declarations = maps["declarations"]
+    bindings = maps["bindings"]
+    refs = maps["chooser_references"]
+    chooser_declarations = {
+        key: value for key, value in declarations.items()
+        if isinstance(key, str) and key.startswith("chooser_fold:")
+    }
+    if any(not isinstance(value, Mapping) for value in chooser_declarations.values()):
+        raise StrictTraceCaptureError("chooser producer declaration must be a mapping")
+    # pred_abs_move is a shared size-fold input, recorded with a pool but no
+    # chooser model binding; verified chooser references cover model producers.
+    producers = {key[13:]: value for key, value in chooser_declarations.items()
+                 if "binding" in value}
     if not producers:
         if refs:
             raise StrictTraceCaptureError("chooser refs lack declarations")
         return None
-    if not isinstance(refs, Mapping) or set(refs) != set(producers):
+    if set(refs) != set(producers):
         raise StrictTraceCaptureError("chooser refs do not cover producers")
     try:
         decision = date.fromisoformat(request.requested_decision_at[:10])
@@ -3702,7 +3718,7 @@ def _validated_chooser_fold_references(source, request):
         raise StrictTraceCaptureError("chooser ref has invalid dates") from exc
     for output, declaration in producers.items():
         ref = refs[output]
-        producer = bindings.get(declaration.get("binding")) if isinstance(declaration, Mapping) else None
+        producer = bindings.get(declaration.get("binding"))
         identity = ref.get("release_binding") if isinstance(ref, Mapping) else None
         try:
             fold = date.fromisoformat(ref["fold_start"])
@@ -3763,7 +3779,7 @@ def strict_trace_one(
     chooser = (frozen_chooser_declaration(
         candidate, deployment_id=request.deployment_id, release_root=release_root)
         if source is not None else None)
-    chooser_fold_references = _validated_chooser_fold_references(source, request)
+    chooser_fold_references = validated_chooser_fold_references(source, request)
     refs = (*(package.request_refs if package else ()),
             *(chooser[1].request_refs if chooser else ()))
     if refs:
