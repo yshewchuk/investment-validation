@@ -52,10 +52,12 @@ def input_bindings(repository, spec, request, panel_request, *, scope, training_
     except (DataError, ValueError, TypeError, KeyError):
         raise fail("SNAPSHOT_UNRESOLVED",
                    "native registration requires a current committed snapshot") from None
+    size_request = compile_request(request)["request"]
+    request_binding = {name: value for name, value in request.items() if name != "workers"}
     return {
         "spec_hash": spec.spec_hash,
-        "request": content_hash(request),
-        "size_request": content_hash(compile_request(request)["request"]),
+        "request": content_hash(request_binding),
+        "size_request": content_hash(size_request),
         "panel_request": content_hash(panel_request),
         "scope": scope,
         "training_start": training_start,

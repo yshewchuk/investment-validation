@@ -56,6 +56,22 @@ def test_issue_is_deterministic(case):
     assert first == second
 
 
+@pytest.mark.parametrize("base_workers", [None, 1])
+def test_worker_count_does_not_change_bindings_or_receipt_ref(case, base_workers):
+    if base_workers is None:
+        bindings = bindings_for(case)
+    else:
+        request = {**deepcopy(case.request), "workers": base_workers}
+        bindings = input_bindings(case.repository, case.spec, request, case.panel_request,
+                                  **case.args)
+    ref = issue(case.store, bindings, case.registration)
+    changed_request = {**deepcopy(case.request), "workers": 3}
+    changed = input_bindings(case.repository, case.spec, changed_request, case.panel_request,
+                             **case.args)
+    assert changed == bindings
+    assert issue(case.store, changed, case.registration) == ref
+
+
 def test_issue_refuses_when_scope_snapshot_moved(case, monkeypatch):
     bindings = deepcopy(bindings_for(case))
     bindings["scope_snapshot"]["snapshot_id"] = "moved"
