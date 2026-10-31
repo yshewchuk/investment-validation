@@ -113,6 +113,15 @@ def _bound_dates(row, event, key):
     return row
 
 
+def _shape(event_ids, horizons):
+    if (type(event_ids) is not list or not event_ids
+            or any(type(key) is not str for key in event_ids) or len(set(event_ids)) != len(event_ids)
+            or type(horizons) is not list or not horizons
+            or any(type(h) is not int or h not in (1, 3, 5) for h in horizons)
+            or horizons != [1, 3, 5]):
+        raise fail("CONTRACT_MISMATCH", "explicit unique targets and ordered native horizons required")
+
+
 def _request(repository, snapshot, policy, event_ids, horizons, limits):
     try:
         expected = eligibility_policy.eligibility_policy(
@@ -122,12 +131,7 @@ def _request(repository, snapshot, policy, event_ids, horizons, limits):
     except (KeyError, TypeError, ValueError):
         raise fail("CONTRACT_MISMATCH", "invalid history eligibility policy") from None
     admit_source(repository, snapshot, limits)
-    if (type(event_ids) is not list or not event_ids
-            or any(type(key) is not str for key in event_ids) or len(set(event_ids)) != len(event_ids)
-            or type(horizons) is not list or not horizons
-            or any(type(h) is not int or h not in (1, 3, 5) for h in horizons)
-            or horizons != [1, 3, 5]):
-        raise fail("CONTRACT_MISMATCH", "explicit unique targets and ordered native horizons required")
+    _shape(event_ids, horizons)
     if len(event_ids) * len(horizons) > limits["max_output_rows"]:
         raise fail("RESULT_LIMIT_EXCEEDED", "history output exceeds explicit bounds")
 
@@ -193,6 +197,7 @@ def plan_targets(repository, snapshot, *, as_of_month, policy, event_ids, horizo
         calendar_date(history_start)
     except (ValueError, TypeError, OverflowError):
         raise fail("CONTRACT_MISMATCH", "canonical history start and holdout month required") from None
+    _shape(event_ids, horizons)
     plan = _plan(repository, snapshot, as_of_month=as_of_month, policy=policy, event_ids=event_ids,
         horizons=horizons, history_start=history_start, limits=limits, strict=False)
     if not plan["remaining"]:

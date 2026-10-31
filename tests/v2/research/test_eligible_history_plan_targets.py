@@ -1,4 +1,5 @@
 """Non-strict target planning in the eligible-history backend."""
+from datetime import date, timedelta
 from types import SimpleNamespace
 
 import pandas as pd
@@ -188,3 +189,35 @@ def test_real_plan_targets_refuse_noncanonical_start_or_month_without_reads(real
     with pytest.raises(data_errors.DataError) as raised:
         backend.plan_targets(real.repository, real.snapshot, **_request(real, (1, 5, -1), **changes))
     assert raised.value.code == "CONTRACT_MISMATCH"
+
+
+@pytest.mark.parametrize("changes", [{"event_ids": []}, {"event_ids": ["ev", "ev"]},
+                                     {"event_ids": ["ev", 1]}, {"event_ids": ("ev-1",)},
+                                     {"horizons": [1, 3]}, {"horizons": [1, 3, 5, 1]}])
+def test_real_plan_targets_refuse_malformed_targets_or_horizons_before_reads(real, monkeypatch, changes):
+    def forbidden(*args, **kwargs):
+        raise AssertionError("malformed request reached the source")
+    monkeypatch.setattr(backend, "admit_source", forbidden)
+    monkeypatch.setattr(real.repository, "resolve", forbidden)
+    monkeypatch.setattr(real.repository, "scan", forbidden)
+    with pytest.raises(data_errors.DataError) as raised:
+        backend.plan_targets(real.repository, real.snapshot, **_request(real, (1, 5, -1), **changes))
+    assert raised.value.code == "CONTRACT_MISMATCH"
+    assert "explicit unique targets and ordered native horizons required" in str(raised.value)
+
+
+def test_real_early_rule_is_strictly_below_the_exact_ceiling(real):
+    """history_start equal to a target's earliest ceiling keeps it; one day later drops it."""
+    request = _request(real, (1, 5, -1))
+    artifact = public.materialize(real.repository, real.snapshot, **request)
+    earliest = request["event_ids"][0]
+    target = next(t for t in artifact["context"]["targets"] if t["event_id"] == earliest)
+    ceiling = min(c["source_session_ceiling"] for c in target["forecasts"])
+    exact = backend.plan_targets(real.repository, real.snapshot,
+                                 **{**request, "history_start": ceiling})
+    assert earliest not in exact["before_start"] and exact["plan_id"] is not None
+    later = (date.fromisoformat(ceiling) + timedelta(days=1)).isoformat()
+    after = backend.plan_targets(real.repository, real.snapshot,
+                                 **{**request, "history_start": later})
+    assert after["before_start"] == [earliest]
+    assert after["plan_id"] is not None
