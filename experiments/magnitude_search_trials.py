@@ -47,6 +47,7 @@ from experiments.magnitude_search_plan import (
 )
 from experiments.magnitude_search_records import MIGRATIONS, OWNER, append_record, read_record
 from experiments.magnitude_search_selection import (
+    ZeroComparatorError,
     blended_event_score,
     history_mean_rows,
     selection_tie_band,
@@ -71,12 +72,9 @@ def _candidate_failure(problem):
     return problem["code"] == "EXPERIMENT_VARIANT_FAILED"
 
 
-_ZERO_COMPARATOR_REASON = "cannot normalize a nonzero candidate error by zero history_mean error"
-
-
 def _blended_failure(error):
     """Map expected blended-selection failures to fixed, recorder-owned diagnostics."""
-    if isinstance(error, ValueError) and str(error) == _ZERO_COMPARATOR_REASON:
+    if isinstance(error, ZeroComparatorError):
         return ("blended inner selection metrics are undefined: nonzero candidate error "
                 "has a zero-error history_mean comparator")
     return "blended inner selection metrics are undefined: malformed or misaligned metric rows"
@@ -781,9 +779,7 @@ class SearchTrials:
                                     history_rows_by_year[year],
                                     metric_weights=policy["metric_weights"],
                                     large_move_threshold_pct=policy["large_move_threshold_pct"])
-                            except ValueError as error:
-                                if str(error) != _ZERO_COMPARATOR_REASON:
-                                    raise
+                            except ZeroComparatorError:
                                 yearly[year] = None
                     except (KeyError, TypeError, ValueError, OverflowError) as error:
                         raise fail("EXPERIMENT_VARIANT_FAILED", _blended_failure(error)) from None
@@ -800,7 +796,7 @@ class SearchTrials:
                     best = min(eligible,
                                key=lambda score: (score["blend_score"], score["candidate_id"]))
                     if any(value is None for value in best["yearly"].values()):
-                        raise ValueError(_ZERO_COMPARATOR_REASON)
+                        raise ZeroComparatorError("cannot normalize a nonzero candidate error by zero history_mean error")
                     yearly_scores = [score for score in eligible if all(
                         value is not None for value in score["yearly"].values())]
                     selected_id, tie_band = selection_tie_band(eligible, yearly_scores,

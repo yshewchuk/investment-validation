@@ -5,6 +5,11 @@ from statistics import stdev
 
 __all__ = ["blended_event_score", "history_mean_rows", "selection_tie_band"]
 
+
+class ZeroComparatorError(ValueError):
+    """Raised when a nonzero candidate error is normalized by a zero history_mean error."""
+
+
 _METRIC_NAMES = ("rmse", "mae", "large_move_underprediction")
 
 
@@ -173,7 +178,7 @@ def blended_event_score(candidate_rows, history_rows, *, metric_weights, large_m
         numerator = raw[name]
         if denominator == 0.0:
             if numerator != 0.0:
-                raise ValueError("cannot normalize a nonzero candidate error by zero history_mean error")
+                raise ZeroComparatorError("cannot normalize a nonzero candidate error by zero history_mean error")
             normalized[name] = 1.0
         else:
             normalized[name] = numerator / denominator
