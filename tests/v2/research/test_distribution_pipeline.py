@@ -148,12 +148,50 @@ def test_pipeline_missing_labels_and_exit_preserve_opportunity_and_unknown_loss(
         assert report["risk_checks"]["histogram"]["completeness_met"] is False
 
 
-def test_duplicate_outer_intents_refuse_before_reopening_evaluation_outcomes(pipeline_case):
+def test_duplicate_outer_intents_refuse_before_any_evaluation_effect(pipeline_case, monkeypatch):
     case = pipeline_case
     _evaluate(case, case.groups[0])
-    outcomes = [call for call in case.calls if call[0] in ("outcomes", "targets")]
+    _assert_no_effects(case, monkeypatch, lambda: _evaluate(case, case.groups[0]), "EXPERIMENT_IDENTITY_CONFLICT")
+
+
+@pytest.mark.parametrize("alpha", [0, .25, .5, "0.0"])
+def test_any_partial_alpha_intent_prevents_accumulator_and_cas_changes(pipeline_case, monkeypatch, alpha):
+    case = pipeline_case
+    if alpha == "0.0":
+        case.books = {float(key): value for key, value in case.books.items()}
+    # Occupancy, not truthiness, prevents re-entry even for an empty body.
+    case.run.record(f"intents:2023:{alpha}", {}, replay=False)
+    _assert_no_effects(case, monkeypatch, lambda: _evaluate(case, case.groups[0]), "EXPERIMENT_IDENTITY_CONFLICT")
+
+
+def test_float_alpha_book_keys_use_sealed_slot_names_and_refuse_partial_reentry(pipeline_case, monkeypatch):
+    case = pipeline_case
+    case.books = {float(key): value for key, value in case.books.items()}
+    original = case.run.record
+    failure = RuntimeError("synthetic interruption before second alpha commits")
+    def interrupted(slot, body=None, **kwargs):
+        if slot == "intents:2023:0.25" and body is not None:
+            raise failure
+        return original(slot, body, **kwargs)
+    monkeypatch.setattr(case.run, "record", interrupted)
+    with pytest.raises(RuntimeError, match="synthetic interruption"):
+        _evaluate(case, case.groups[0])
+    monkeypatch.setattr(case.run, "record", original)
+    assert original("intents:2023:0") is not None and original("intents:2023:0.0") is None
+    assert original("intents:2023:0.25") is None
+    _assert_no_effects(case, monkeypatch, lambda: _evaluate(case, case.groups[0]), "EXPERIMENT_IDENTITY_CONFLICT")
+
+
+@pytest.mark.parametrize("occupied", [None, 0, .25, .5])
+def test_duplicate_refusal_preserves_actual_accumulator_journal_and_cas_bytes(pipeline_case, occupied):
+    case = pipeline_case
+    if occupied is None:
+        _evaluate(case, case.groups[0])
+    else:
+        case.run.record(f"intents:2023:{occupied}", {}, replay=False)
+    before = _effect_snapshot(case)
     _error(lambda: _evaluate(case, case.groups[0]), "EXPERIMENT_IDENTITY_CONFLICT")
-    assert [call for call in case.calls if call[0] in ("outcomes", "targets")] == outcomes
+    assert _effect_snapshot(case) == before
 
 
 def test_pipeline_mismatched_receipt_pool_scope_refuses_before_intents_or_outcomes(pipeline_case):
@@ -164,16 +202,23 @@ def test_pipeline_mismatched_receipt_pool_scope_refuses_before_intents_or_outcom
     assert not any(call[0] in ("outcomes", "targets") for call in case.calls)
 
 
-def _assert_no_effects(case, monkeypatch, action):
-    before = deepcopy((case.books, case.quotes, case.opportunities, case.sections, case.slots(), case.calls))
+def _effect_snapshot(case):
+    journal = tuple(tuple(row) for row in case.conn.execute("SELECT * FROM magnitude_search_records ORDER BY run_id, slot"))
+    objects = {str(path.relative_to(case.store.root)): path.read_bytes()
+               for path in case.store.root.rglob("*") if path.is_file()}
+    return deepcopy((case.books, case.quotes, case.opportunities, case.sections, journal, objects, case.calls))
+
+
+def _assert_no_effects(case, monkeypatch, action, code="INVALID_EXPERIMENT_SPEC"):
+    before = _effect_snapshot(case)
     def forbidden(*args, **kwargs):
-        pytest.fail("unsealed policy reached evaluation/report effects")
+        pytest.fail("refused pipeline call reached evaluation/report effects")
     for name in ("residual_pool", "decision_quotes", "read_bridge", "read_benchmark", "outcome_quotes",
                  "load_magnitude_targets", "funded_book", "paired_report", "forecast_report"):
         monkeypatch.setattr(pipeline, name, forbidden)
     monkeypatch.setattr(case.run, "publish", forbidden)
-    _error(action)
-    assert (case.books, case.quotes, case.opportunities, case.sections, case.slots(), case.calls) == before
+    _error(action, code)
+    assert _effect_snapshot(case) == before
 
 
 @pytest.mark.parametrize("path,value", [

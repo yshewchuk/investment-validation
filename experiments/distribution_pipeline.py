@@ -3,6 +3,7 @@ import sys
 
 from engine.v2.contracts import SnapshotRef
 from engine.v2.foundation import canonical_json, from_document
+from engine.v2.ops.errors import fail
 from engine.v2.research.magnitude_inputs import load_magnitude_targets
 from engine.v2.research.progress import Progress, stage
 from experiments.distribution_book import funded_book
@@ -43,6 +44,9 @@ def evaluate_outer(run, group, fits, results, plan, books, quotes, opportunities
     require(matches)
     plan, request, fold = sealed, sealed["request"], group["outer"]
     year, ids = fold["year"], set(fold["evaluation_event_ids"])
+    slots = {f"intents:{year}:{alpha}" for alpha in (*request["alphas"], *books)}
+    if any(run.record(slot) is not None for slot in sorted(slots)):
+        raise fail("EXPERIMENT_IDENTITY_CONFLICT", "distribution outer group already has recorded intents")
     events = [event for event in run.trials.source.document["size_panel"]["context"]["target_events"] if event["event_id"] in ids]
     require(len(events) == len(ids))
     pool = {h: residual_pool(fits, "outer", year, h) for h in results}
@@ -50,7 +54,7 @@ def evaluate_outer(run, group, fits, results, plan, books, quotes, opportunities
     snapshot = from_document(SnapshotRef, plan["quote_snapshot"])
     all_decisions = decision_quotes(run.trials.repository, snapshot, events, request["alphas"], request["economics"], calendar=calendar)
     rows = {row["event_id"]: row for row in results[1]["rows"]}
-    for alpha in books:
+    for alpha in request["alphas"]:
         decisions = all_decisions[alpha]
         bridge = read_bridge(run.trials.store, next(item for item in request["bridges"] if item["outer_year"] == year and item["alpha"] == alpha), fold)
         contracts = request["book"]["contracts_per_trade"]
@@ -81,7 +85,7 @@ def evaluate_outer(run, group, fits, results, plan, books, quotes, opportunities
         section = run.publish(f"intents:{year}:{alpha}", [{"event_id": row["event_id"], "arms": {arm: local[arm][i] for arm in local}, **row} for i, row in enumerate(diagnostics)])
         run.record(f"intents:{year}:{alpha}", section, replay=False)
         sections.append(section)
-    for alpha in books:
+    for alpha in request["alphas"]:
         quotes[alpha].update(outcome_quotes(run.trials.repository, snapshot, all_decisions[alpha], alpha, request["economics"], contracts))
         frozen = run.record(f"intents:{year}:{alpha}")
         intents = iter_section(run.trials.store, frozen["name"], frozen["descriptor"], lambda row: (row["position"],))
