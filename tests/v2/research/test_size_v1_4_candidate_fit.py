@@ -70,12 +70,34 @@ def test_inner_fold_fit_uses_only_pre_cutoff_training_rows_and_counts_abstention
 def test_normalize_forecasts_allows_incomplete_nonempty_subset_but_strict_path_requires_complete():
     fold = {"evaluation_event_ids": ["a", "b"]}
     rows = [
-        {"event_id": "a", "horizon_sessions": 5, "predicted_absolute_move_pct": 2.5},
+        {"event_id": "a", "horizon_sessions": 5, "predicted_absolute_move_pct": -2.5},
         {"event_id": "b", "horizon_sessions": 5, "predicted_absolute_move_pct": None},
     ]
 
     assert normalize_forecasts(rows, fold, [5], allow_incomplete=True) == [
-        {"event_id": "a", "horizon_sessions": 5, "predicted_absolute_move_pct": 2.5}]
+        {"event_id": "a", "horizon_sessions": 5, "predicted_absolute_move_pct": -2.5}]
 
     with pytest.raises(ValueError):
         normalize_forecasts(rows, fold, [5])
+
+    with pytest.raises(ValueError):
+        normalize_forecasts(rows[:1], fold, [5], allow_incomplete=True)
+
+
+def test_insufficient_training_abstentions_are_counted():
+    training_ids = [f"train-{index}" for index in range(499)]
+    features = [_row(event_id) for event_id in training_ids + ["held-out"]]
+    train = pd.DataFrame({"event_id": training_ids, "absolute_move_pct": [10.0] * 499})
+    fold = {"evaluation_event_ids": ["held-out"],
+            "training_labels_before": "2025-01-01"}
+    plan = {"horizons": [5]}
+    execution = {"schema_version": "size_candidate_execution.v1", "features": comparator.COLUMNS,
+                 "model": "size_v1_4", "fit_recipe": comparator.recipe()}
+    result = comparator.forecasts(
+        {(row["event_id"], 5): row for row in features}, train, fold,
+        plan, execution, progress=lambda *pair: None)
+
+    assert result["fit_details"][0]["abstention_counts"] == {"insufficient_training": 1}
+    forecasts = {row["event_id"]: row for row in result["forecasts"]}
+    assert forecasts["held-out"]["predicted_absolute_move_pct"] is None
+    assert forecasts["held-out"]["abstention"] == "insufficient_training"

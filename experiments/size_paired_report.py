@@ -67,11 +67,15 @@ def paired_report(events, challenger, incumbent, targets, *, label_reasons=None,
     if set(label_reasons) != set(metadata) - set(targets):
         raise ValueError("label exclusion reasons differ from coverage")
     expected = {(event, h) for event in metadata for h in leads}
-    if set(a) != expected or set(b) != expected or not set(targets) <= set(metadata):
+    if not set(a) <= expected or set(b) != expected or not set(targets) <= set(metadata):
         raise ValueError("paired coverage differs from frozen event population")
-    for value in list(targets.values()) + [r["predicted_absolute_move_pct"] for r in challenger]:
+    for value in targets.values():
         if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
-            raise ValueError("invalid magnitude target/challenger")
+            raise ValueError("invalid magnitude target")
+    for row in challenger:
+        value = row["predicted_absolute_move_pct"]
+        if type(value) not in (int, float) or not math.isfinite(value):
+            raise ValueError("invalid magnitude challenger")
     for row in incumbent:
         for name in ("history_mean", "predicted_absolute_move_pct"):
             value = row[name]
@@ -79,12 +83,16 @@ def paired_report(events, challenger, incumbent, targets, *, label_reasons=None,
                 continue
             if type(value) not in (int, float) or not math.isfinite(value):
                 raise ValueError("invalid comparison value")
-    matched = {e for e in metadata if all(b[e, h]["predicted_absolute_move_pct"] is not None for h in leads)}
+    matched = {e for e in metadata if all(
+        (e, h) in a and (e, h) in b
+        and a[e, h]["predicted_absolute_move_pct"] is not None
+        and b[e, h]["predicted_absolute_move_pct"] is not None for h in leads)}
     coverage, rows = Counter(), []
     for event, h in sorted(expected):
         meta, baseline = metadata[event], b[event, h]
         reason = baseline["abstention"] or "predicted"
-        for arm, status in (("incumbent", reason), ("challenger", "predicted"), ("history_mean", "predicted")):
+        challenger_status = "predicted" if (event, h) in a else "abstained"
+        for arm, status in (("incumbent", reason), ("challenger", challenger_status), ("history_mean", "predicted")):
             coverage[(arm, meta["event_date"][:4], h, baseline["quote_status"], status,
                       "available" if event in targets else label_reasons[event],
                       "complete" if event in matched else "other_horizon_abstention")] += 1
@@ -103,11 +111,13 @@ def paired_report(events, challenger, incumbent, targets, *, label_reasons=None,
             for (arm, y, h, q, s, label, pairing), n in sorted(coverage.items())], "paired_rows": rows,
         "final_read_authority": "none", "claim": "frozen_dataset_development_only",
         "interval_caveat": "does_not_account_for_all_prior_adaptive_design_choices"}
-    broad = [{"absolute_move_pct": targets[e], "challenger": a[e, h]["predicted_absolute_move_pct"],
-              "history_mean": b[e, h]["history_mean"]} for e, h in sorted(expected) if e in targets]
-    result["broad_coverage_metrics"] = ({arm: _metrics(broad, arm) for arm in ("challenger", "history_mean")}
-                                         if broad else {})
-    result["challenger_abstentions"] = 0  # A failed selected arm refuses the entire report.
+    history_rows = [{"absolute_move_pct": targets[e], "history_mean": b[e, h]["history_mean"]}
+                    for e, h in sorted(expected) if e in targets]
+    challenger_rows = [{"absolute_move_pct": targets[e], "challenger": a[e, h]["predicted_absolute_move_pct"]}
+                       for e, h in sorted(set(a) & expected) if e in targets]
+    broad = {"challenger": challenger_rows, "history_mean": history_rows}
+    result["broad_coverage_metrics"] = {arm: _metrics(rows, arm) for arm, rows in broad.items() if rows}
+    result["challenger_abstentions"] = len(expected) - len(a)
     if rows:
         result.update(metrics={arm: _metrics(rows, arm) for arm in ("challenger", "incumbent", "history_mean")},
             difference=_difference(rows), quarter_bootstrap=_bootstrap(rows, "quarter"),

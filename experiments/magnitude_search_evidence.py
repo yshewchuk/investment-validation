@@ -63,7 +63,7 @@ def fit_evidence(inputs, fold, plan, execution):
 
 
 def normalize_forecasts(rows, fold, horizons, *, strict_json=False, allow_incomplete=False):
-    """Require exact coverage, or admit a nonempty in-fold subset discarding None abstentions."""
+    """Require complete explicit row coverage and discard explicit None abstentions."""
     if not allow_incomplete:
         return normalize_regression_forecasts(rows, fold, horizons,
             prediction_column="predicted_absolute_move_pct", target_domain="nonnegative", strict_json=strict_json)
@@ -95,7 +95,7 @@ def normalize_forecasts(rows, fold, horizons, *, strict_json=False, allow_incomp
         seen.add(pair)
         if value is None:
             continue
-        if (isinstance(value, bool) or not isinstance(value, Real) or value < 0
+        if (isinstance(value, bool) or not isinstance(value, Real)
                 or (strict_json and type(value) not in (int, float))):
             raise ValueError
         try:
@@ -106,6 +106,8 @@ def normalize_forecasts(rows, fold, horizons, *, strict_json=False, allow_incomp
             raise ValueError
         found[pair] = {"event_id": event_id, "horizon_sessions": int(horizon),
             "predicted_absolute_move_pct": value}
+    if seen != {(event, horizon) for event in events for horizon in admitted_horizons} or not found:
+        raise ValueError
     return [found[pair] for pair in sorted(found)]
 
 

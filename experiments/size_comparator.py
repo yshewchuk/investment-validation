@@ -135,7 +135,9 @@ def forecasts(indexed, train, fold, plan, execution, *, progress):
         estimates = {} if model is None or not complete else dict(zip([e for e, _ in complete],
             model.predict(np.array([v for _, v in complete], dtype=float))))
         for event, values, reason in evaluated:
-            reason = reason or ("insufficient_training" if model is None else None)
+            if reason is None and model is None:
+                reason = "insufficient_training"
+                abstention_counts[reason] = abstention_counts.get(reason, 0) + 1
             value = None if reason else float(estimates[event])
             if value is not None and not np.isfinite(value):
                 raise ValueError("nonfinite incumbent prediction")
