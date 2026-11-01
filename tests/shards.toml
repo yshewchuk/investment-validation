@@ -7,11 +7,11 @@
 # Shards are ORDERED and the first shard whose pattern matches a file owns it.
 # The last shard is the remainder: it owns every test file no earlier pattern
 # claims, so a new test file or package can never silently fall out of CI.
-# On 2026-10-17 main run 39038193408 the research JUnit summed 3725 CPU-s
-# (~16 min wall at ~3.8x); research-a / research-b / research are balanced by
-# per-file JUnit time (~1270 / ~1220 / ~1237 CPU-s, ~5.5 min wall each);
-# rebalance by moving a file between the explicit lists. Earlier, 2026-10-11,
-# before ops-sweep/integration existed (CPU seconds over 3475 total,
+# research-d owns tests/v2/research/test_size_*; research-h comes first to
+# isolate test_size_run_single_collect. research-e/f split IV tests, and
+# research-g holds distribution/heavy files. Rebalance by updating the patterns
+# or explicit lists below.
+# Earlier, 2026-10-11, before ops-sweep/integration existed (3475 CPU-s total,
 # ~3.8x parallel on a 4-core runner): ops ~1224, research ~902, checks ~474,
 # rest ~876. Rebalance by moving a pattern; keep every shard under ~15 minutes
 # of pytest wall time on CI.
@@ -59,6 +59,54 @@ patterns = [
   "tests/v2/research/test_magnitude_search_outer.py",
   "tests/v2/research/test_magnitude_search_outer_integrity.py",
   "tests/v2/research/test_magnitude_search_driver_native.py",
+]
+
+[[shard]]
+name = "research-h"
+patterns = ["tests/v2/research/test_size_run_single_collect.py"]
+
+[[shard]]
+name = "research-d"
+patterns = ["tests/v2/research/test_size_*"]
+
+[[shard]]
+name = "research-e"
+patterns = [
+  "tests/v2/research/test_iv_crush_search_execution.py",
+  "tests/v2/research/test_iv_admission_claims.py",
+  "tests/v2/research/test_iv_comparison_journal.py",
+  "tests/v2/research/test_iv_crush_fit_worker.py",
+  "tests/v2/research/test_iv_panel_reuse.py",
+  "tests/v2/research/test_iv_registration_budgets.py",
+  "tests/v2/research/test_iv_crush_prepare.py",
+  "tests/v2/research/test_iv_crush_inputs.py",
+  "tests/v2/research/test_iv_crush_cli_boundaries.py",
+  "tests/v2/research/test_iv_crush_plan.py",
+  "tests/v2/research/test_iv_crush_progress.py",
+  "tests/v2/research/test_iv_crush_search_receipts.py",
+  "tests/v2/research/test_iv_crush_paired_report.py",
+  "tests/v2/research/test_iv_crush_adapter_oracle.py",
+]
+
+[[shard]]
+name = "research-f"
+patterns = [
+  "tests/v2/research/test_iv_crush_cli.py",
+  "tests/v2/research/test_iv_submission_accounting.py",
+  "tests/v2/research/test_iv_crush_fold_inputs.py",
+  "tests/v2/research/test_iv_crush_registration.py",
+  "tests/v2/research/test_iv_crush_search_plan.py",
+  "tests/v2/research/test_iv_crush_comparator.py",
+]
+
+[[shard]]
+name = "research-g"
+patterns = [
+  "tests/v2/research/test_distribution_*.py",
+  "tests/v2/research/test_v2_prediction_cli.py",
+  "tests/v2/research/test_native_outcome_validation.py",
+  "tests/v2/research/test_magnitude_panel_contract.py",
+  "tests/v2/research/test_magnitude_registration.py",
 ]
 
 [[shard]]
