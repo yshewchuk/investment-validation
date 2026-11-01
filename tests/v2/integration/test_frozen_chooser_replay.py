@@ -24,13 +24,13 @@ from engine.v2.models.serving_folds import ChooserServingFoldDescriptor, Serving
                              "descriptor_hash": "descriptor-implied"},
          "pred_runup_abs_move_d14": {"training_cutoff": "2026-10-28", "fold_start": "2026-10-01",
                                       "descriptor_hash": "descriptor-runup"}},
-        {"pred_im_t1_d14": {"training_cutoff": "2026-10-01", "fold_start": "2026-10-01",
+        {"pred_im_t1_d14": {"training_cutoff": "2026-10-01", "fold_start": "2026-11-01",
                              "descriptor_hash": "descriptor-implied"},
-         "pred_runup_abs_move_d14": {"training_cutoff": "2026-10-01", "fold_start": "2026-10-01",
+         "pred_runup_abs_move_d14": {"training_cutoff": "2026-10-01", "fold_start": "2026-11-01",
                                       "descriptor_hash": "descriptor-runup"}},
-        {"pred_im_t1_d14": {"training_cutoff": "2026-10-26", "fold_start": "2026-11-01",
+        {"pred_im_t1_d14": {"training_cutoff": "2026-11-01", "fold_start": "2026-11-01",
                              "descriptor_hash": "descriptor-implied"},
-         "pred_runup_abs_move_d14": {"training_cutoff": "2026-10-26", "fold_start": "2026-11-01",
+         "pred_runup_abs_move_d14": {"training_cutoff": "2026-11-01", "fold_start": "2026-11-01",
                                       "descriptor_hash": "descriptor-runup"}},
     ],
 )
@@ -69,10 +69,10 @@ def test_frozen_replay_refuses_missing_or_noncausal_fold_provenance(monkeypatch,
 def test_frozen_replay_requires_provenance_bound_to_staged_descriptors():
     provenance = {
         "pred_im_t1_d14": {
-            "training_cutoff": "2026-08-31", "fold_start": "2026-09-01",
+            "training_cutoff": "2026-09-01", "fold_start": "2026-09-01",
             "descriptor_hash": "descriptor-implied"},
         "pred_runup_abs_move_d14": {
-            "training_cutoff": "2026-08-31", "fold_start": "2026-09-01",
+            "training_cutoff": "2026-09-01", "fold_start": "2026-09-01",
             "descriptor_hash": "descriptor-runup"},
     }
     recipe = {
@@ -92,14 +92,24 @@ def test_frozen_replay_requires_provenance_bound_to_staged_descriptors():
         recipe, request, staged, legacy_event_date)
     assert not phase5_phase4_replay._has_causal_chooser_fold_provenance(
         recipe, request, {}, legacy_event_date)
-    mismatched = dict(staged)
-    mismatched["__chooser_descriptor__:descriptor-implied"] = (
+    ignored_middle = dict(staged)
+    ignored_middle["__chooser_descriptor__:descriptor-implied"] = (
         "pred_im_t1_d14\x1f2026-08-01\x1f2026-09-01")
+    assert phase5_phase4_replay._has_causal_chooser_fold_provenance(
+        recipe, request, ignored_middle, legacy_event_date)
+    wrong_output = dict(staged)
+    wrong_output["__chooser_descriptor__:descriptor-implied"] = (
+        "pred_runup_abs_move_d14\x1f2026-08-31\x1f2026-09-01")
     assert not phase5_phase4_replay._has_causal_chooser_fold_provenance(
-        recipe, request, mismatched, legacy_event_date)
+        recipe, request, wrong_output, legacy_event_date)
+    wrong_fold = dict(staged)
+    wrong_fold["__chooser_descriptor__:descriptor-implied"] = (
+        "pred_im_t1_d14\x1f2026-08-31\x1f2026-10-01")
+    assert not phase5_phase4_replay._has_causal_chooser_fold_provenance(
+        recipe, request, wrong_fold, legacy_event_date)
 
     later_provenance = {
-        output: {**item, "fold_start": "2026-10-01"}
+        output: {**item, "training_cutoff": "2026-10-01", "fold_start": "2026-10-01"}
         for output, item in provenance.items()
     }
     later_recipe = {**recipe, "fold_provenance": later_provenance}
@@ -112,12 +122,11 @@ def test_frozen_replay_requires_provenance_bound_to_staged_descriptors():
         later_recipe, request, later_staged, legacy_event_date)
 
 
-def test_replay_pool_values_must_match_staged_fold_estimators(monkeypatch, tmp_path):
-    from engine.v2.scoring import release_bindings as rb
+def _install_chooser_replay_fixture(monkeypatch, tmp_path):
+    from engine.v2.scoring import gate_fold_selection, release_bindings as rb
 
     outputs = ("pred_im_t1_d14", "pred_runup_abs_move_d14")
-    descriptors, refs, provenance, rows = {}, {}, {}, []
-    pools = {}
+    descriptors, refs, provenance, rows, pools = {}, {}, {}, [], {}
     for index, output in enumerate(outputs):
         digest = f"hash:{output}"
         descriptors[digest] = SimpleNamespace(
@@ -129,7 +138,7 @@ def test_replay_pool_values_must_match_staged_fold_estimators(monkeypatch, tmp_p
             pool_pred=np.array([index + 1.0, index + 2.0]),
             pool_res=np.array([index + 3.0, index + 4.0]))
         provenance[output] = {
-            "training_cutoff": "2026-08-31", "fold_start": "2026-09-01",
+            "training_cutoff": "2026-09-01", "fold_start": "2026-09-01",
             "descriptor_hash": digest}
         rows.append({"member_id": f"tier4_folds:{'implied_t1' if index == 0 else 'runup_move'}",
                      "status": "STAGED",
@@ -143,6 +152,7 @@ def test_replay_pool_values_must_match_staged_fold_estimators(monkeypatch, tmp_p
     references = {
         (descriptor.producer_output, "2026-09-01"): SimpleNamespace(
             descriptor_hash=descriptor.descriptor_hash,
+            estimator_sha256=f"sha256:{descriptor.producer_output}",
             release_id="parent",
             carrying_release_id="carrying",
             training_cutoff="2026-09-01",
@@ -169,101 +179,132 @@ def test_replay_pool_values_must_match_staged_fold_estimators(monkeypatch, tmp_p
         refs[output].release = SimpleNamespace(bindings=(make_binding(output),))
         producers[output] = {"binding_id": f"binding:{output}", "output": output}
 
-    size_descriptor = SimpleNamespace(
-        descriptor_hash="size", parent_release_id="parent",
-        fold_start="2026-09-01",
-        estimator=SimpleNamespace(path="size.joblib", content_hash="hash:size"),
-        policy=SimpleNamespace(interval_floor=0.4))
     size_ref = SimpleNamespace(
-        pool_pred=np.array([10.0, 11.0]), pool_res=np.array([12.0, 13.0]))
-    descriptors["size"] = size_descriptor
-    rows.append({"member_id": "tier4_folds:size", "status": "STAGED", "objects": [
-        {"serving_fold": {"descriptor_hash": "size"},
-         "path": "size.joblib", "content_hash": "hash:size", "bytes": 123}]})
-    size_like = [size_descriptor]
+        artifact_hash="hash:size",
+        pool_pred=np.array([10.0, 11.0]), pool_res=np.array([12.0, 13.0]),
+        interval_floor=0.4)
     pools["pred_abs_move"] = {
         "predictions": size_ref.pool_pred.copy(),
         "residuals": size_ref.pool_res.copy(),
         "interval_floor": 0.4}
+    calls = {"contexts": 0, "loads": [], "inference": 0, "select": []}
 
-    def decode(kind, doc):
-        descriptor = descriptors[doc["descriptor_hash"]]
-        is_size = any(descriptor is candidate for candidate in size_like)
-        if kind is ChooserServingFoldDescriptor and is_size:
-            raise ValueError("size fold must not be parsed as chooser fold")
-        if kind is ServingFoldDescriptor and not is_size:
-            raise ValueError("chooser fold must not be parsed as size fold")
-        return descriptor
-
-    seen_expected_bytes = []
-
-    def fake_load_serving_fold(*_args, **kwargs):
-        seen_expected_bytes.append(kwargs.get("expected_bytes"))
-        return size_ref
+    def decode(_kind, doc):
+        return descriptors[doc["descriptor_hash"]]
 
     monkeypatch.setattr(foundation, "from_document", decode)
     monkeypatch.setattr(phase5_phase4_replay, "deployment_root", lambda root: root)
-    monkeypatch.setattr(deployment, "read_manifest", lambda _root, _release: object())
-    monkeypatch.setattr(loader, "FrozenInference", lambda _root: object())
-    monkeypatch.setattr(serving_fold_loader, "validate_serving_fold_descriptor",
-                        lambda *_args: None)
-    monkeypatch.setattr(serving_fold_loader, "validate_serving_fold_object", lambda *_args: None)
-    monkeypatch.setattr(serving_fold_loader, "load_serving_fold", fake_load_serving_fold)
+    carrying_manifest = SimpleNamespace(release=SimpleNamespace(release_id="carrying"))
+    monkeypatch.setattr(
+        deployment, "read_manifest", lambda _root, _release: carrying_manifest)
+    monkeypatch.setattr(deployment, "manifest_hash_matches", lambda _manifest: True)
+    monkeypatch.setattr(
+        loader, "FrozenInference",
+        lambda _root: calls.__setitem__("inference", calls["inference"] + 1) or object())
     monkeypatch.setattr(
         serving_fold_loader, "load_chooser_serving_fold",
-        lambda _inference, descriptor, **_kwargs: refs[descriptor.producer_output])
+        lambda _inference, descriptor, **_kwargs: (
+            calls["loads"].append(descriptor.descriptor_hash)
+            or refs[descriptor.producer_output]))
+    monkeypatch.setattr(
+        rb, "resolve_chooser_fold_authoring_contexts",
+        lambda *_args: (
+            calls.__setitem__("contexts", calls["contexts"] + 1)
+            or (references, contexts)))
+    size_folds = object()
+
+    def fake_index(catalog, parent):
+        assert catalog is manifest
+        assert parent is carrying_manifest
+        return size_folds
+
+    def fake_select(binding, event_date, as_of):
+        calls["select"].append((binding, event_date, as_of))
+        return size_ref
+
+    monkeypatch.setattr(gate_fold_selection, "index_size_folds", fake_index)
+    monkeypatch.setattr(gate_fold_selection, "select_gate_forecast_source", fake_select)
     chooser = SimpleNamespace(
         recipe={"fold_provenance": provenance, "producers": producers,
-                "artifact_refs": ["hash:size", *(f"hash:{output}" for output in outputs)]},
+                "artifact_refs": ["hash:size", *(
+                    ref for output in outputs
+                    for ref in (f"hash:{output}", f"sha256:{output}"))]},
         fold_pools=pools,
         release=SimpleNamespace(bindings=tuple(alias_bindings)))
     manifest = {"manifest_hash": "sha256:catalog", "release_id": "carrying",
                 "members": rows}
-
-    monkeypatch.setattr(
-        rb, "resolve_chooser_fold_authoring_contexts",
-        lambda *_args: (references, contexts))
-
     request = SimpleNamespace(requested_decision_at="2026-10-27")
-    legacy_event_date = "2026-09-15"
-    size_descriptor.fold_start = "2026-10-01"
-    assert phase5_phase4_replay._staged_chooser_pools(
-        chooser, request, tmp_path, manifest,
-        legacy_event_date=legacy_event_date) is None
-    size_descriptor.fold_start = "2026-09-01"
+    return SimpleNamespace(
+        chooser=chooser, manifest=manifest, request=request,
+        legacy_event_date="2026-09-15", outputs=outputs, descriptors=descriptors,
+        refs=refs, pools=pools, size_ref=size_ref, size_folds=size_folds, calls=calls)
 
-    unselected_descriptor = SimpleNamespace(
-        descriptor_hash="size-unselected", parent_release_id="parent",
-        fold_start="2026-10-01",
-        estimator=SimpleNamespace(path="unselected.joblib", content_hash="hash:unselected"),
-        policy=SimpleNamespace(interval_floor=0.4))
-    descriptors["size-unselected"] = unselected_descriptor
-    size_like.append(unselected_descriptor)
-    rows[-1]["objects"].append({
-        "serving_fold": {"descriptor_hash": "size-unselected"},
-        "path": "unselected.joblib", "content_hash": "hash:unselected",
-        "bytes": "not-an-int"})
-    assert phase5_phase4_replay._staged_chooser_pools(
-        chooser, request, tmp_path, manifest,
-        legacy_event_date=legacy_event_date) is None
-    rows[-1]["objects"].pop()
 
-    pools["pred_abs_move"]["predictions"] = np.array([99.0, 99.0])
-    assert phase5_phase4_replay._staged_chooser_pools(
-        chooser, request, tmp_path, manifest,
-        legacy_event_date=legacy_event_date) is None
+def test_replay_pool_values_must_match_shared_size_fold_selection(monkeypatch, tmp_path):
+    from engine.v2.scoring import gate_fold_selection
 
-    pools["pred_abs_move"]["predictions"] = size_ref.pool_pred.copy()
-    seen_expected_bytes.clear()
+    fixture = _install_chooser_replay_fixture(monkeypatch, tmp_path)
     verified = phase5_phase4_replay._staged_chooser_pools(
-        chooser, request, tmp_path, manifest,
-        legacy_event_date=legacy_event_date)
+        fixture.chooser, fixture.request, tmp_path, fixture.manifest,
+        legacy_event_date=fixture.legacy_event_date)
     assert verified is not None
-    for output, ref in refs.items():
+    for output, ref in fixture.refs.items():
         assert np.array_equal(verified[output]["predictions"], ref.pool_pred)
-    assert np.array_equal(verified["pred_abs_move"]["predictions"], size_ref.pool_pred)
-    assert np.array_equal(verified["pred_abs_move"]["residuals"], size_ref.pool_res)
-    assert seen_expected_bytes == [123]
+    assert np.array_equal(verified["pred_abs_move"]["predictions"],
+                          fixture.size_ref.pool_pred)
+    assert np.array_equal(verified["pred_abs_move"]["residuals"],
+                          fixture.size_ref.pool_res)
+    binding, event_date, as_of = fixture.calls["select"][0]
+    assert binding.size_folds is fixture.size_folds
+    assert event_date.isoformat() == "2026-09-15"
+    assert as_of.isoformat() == "2026-10-27"
+
+    fixture.pools["pred_abs_move"]["predictions"] = np.array([99.0, 99.0])
+    assert phase5_phase4_replay._staged_chooser_pools(
+        fixture.chooser, fixture.request, tmp_path, fixture.manifest,
+        legacy_event_date=fixture.legacy_event_date) is None
+    fixture.pools["pred_abs_move"]["predictions"] = fixture.size_ref.pool_pred.copy()
+
+    def refuse(*_args, **_kwargs):
+        raise ValueError("active release refused the size fold")
+
+    monkeypatch.setattr(gate_fold_selection, "select_gate_forecast_source", refuse)
+    assert phase5_phase4_replay._staged_chooser_pools(
+        fixture.chooser, fixture.request, tmp_path, fixture.manifest,
+        legacy_event_date=fixture.legacy_event_date) is None
+
+
+def test_chooser_menu_reuses_authoring_contexts_inference_and_descriptor(monkeypatch, tmp_path):
+    fixture = _install_chooser_replay_fixture(monkeypatch, tmp_path)
+    caches = []
+
+    def fake_replay(pair, corpus_root, release_root, staged, manifest=None,
+                    chooser_cache=None):
+        caches.append(chooser_cache)
+        pools = phase5_phase4_replay._staged_chooser_pools(
+            fixture.chooser, fixture.request, tmp_path, fixture.manifest,
+            legacy_event_date=fixture.legacy_event_date,
+            chooser_cache=chooser_cache)
+        assert pools is not None
+        return {"disposition": "replayed", "members": [], "stages": 0,
+                "runtime_stages": 0}
+
+    monkeypatch.setattr(phase5_phase4_replay, "_replay_pair", fake_replay)
+    monkeypatch.setattr(
+        phase4_real, "_chooser_members",
+        lambda _pair: [(None, None), (None, None)])
+    result = phase5_phase4_replay._replay_chooser_pair(
+        {"payload": {}}, corpus_root=None, release_root=tmp_path, staged={},
+        manifest=fixture.manifest)
+
+    assert result["disposition"] == "replayed"
+    assert len(caches) == 2
+    assert caches[0] is caches[1]
+    assert isinstance(caches[0], dict)
+    assert fixture.calls["contexts"] == 1
+    assert fixture.calls["inference"] == 1
+    assert sorted(fixture.calls["loads"]) == sorted(
+        descriptor.descriptor_hash for descriptor in fixture.descriptors.values())
 
 
 def test_replay_checkpoint_scope_invalidation(tmp_path, monkeypatch):

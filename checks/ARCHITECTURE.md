@@ -32,11 +32,12 @@ synthetic Phase-0 controls import the support module directly.
 `tools.capture_tier0_corpus.strict_trace_one` consumes chooser-fold
 references already verified by `engine.v2.scoring.release_bindings`; it does
 not resolve catalogs. It validates each reference against the legacy scorer's
-recorded producer binding and the canonical request decision date, then stores
-the map in trace metadata. A declared producer fold without its matching
-verified reference refuses strict capture. Orphan references, incomplete
-producer coverage and invalid fold or request dates also refuse with
-`StrictTraceCaptureError`.
+recorded producer binding and the canonical request decision date, stores the
+map in trace metadata, and copies its fold provenance and artifact hashes into
+the chooser recipe used by replay. A declared producer fold without its
+matching verified reference refuses strict capture. Orphan references,
+incomplete producer coverage and invalid fold or request dates also refuse
+with `StrictTraceCaptureError`.
 
 The test selector maps changed paths through `checks/layer_map.py`, then
 selects tests for those packages and their allowed importers. Unsafe or
@@ -116,8 +117,9 @@ check defines missing-input and failure outcomes:
 | A required chooser retrain cutoff is missing or invalid | Refuse with `ModelNotReady` |
 | A strict trace has missing/mismatched chooser-fold provenance (including release-binding identity, release ids or output name), orphan references, incomplete producer coverage or invalid dates | `strict_trace_one` raises `StrictTraceCaptureError` before packaging the trace |
 | Phase 4 replay checkpoint scope differs (corpus hash, full staged manifest or replay validation version), a row fails shape/hash validation, or the file exceeds its read cap | `_load_checkpoint` truncates the file and discards all rows; replay recomputes those pairs |
-| Malformed or duplicate staged size-fold catalog, including a descriptor in an unselected month | Chooser replay refuses that pair's replay; the full size catalog is validated before the requested month is selected and loaded with the catalog's byte bound |
+| Malformed or duplicate staged size-fold catalog, including a descriptor in an unselected month | Chooser replay refuses that pair; it indexes the exact staged release's size catalog and uses `select_gate_forecast_source` to apply live scoring's active-release admission and selected fold byte bound |
 | Chooser replay provenance does not match staged descriptors and their verified authoring contexts, or loaded chooser pools disagree with trace arrays or interval floors | The pair is `PHASE4_MEMBER_ABSENT` with a fixed `chooser:fold_provenance:unverifiable` or `chooser:fold_pools:unverifiable` detail; no score is replayed |
+| A chooser menu replays multiple member traces | Verified authoring contexts and loaded fold references are reused for that menu; no context is shared across menus or releases |
 
 ## Invariants
 

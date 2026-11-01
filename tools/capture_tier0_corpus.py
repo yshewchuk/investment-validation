@@ -3549,6 +3549,7 @@ def _chooser_pool_state(record: Mapping[str, Any]) -> tuple[bytes, str, str, str
 
 def frozen_chooser_declaration(
     candidate: Mapping[str, Any], *, deployment_id: str, release_root: Path,
+    chooser_fold_references: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, Any], FrozenResourcePackage, list[dict[str, Any]]] | None:
     """The trace's frozen chooser for a DYN-SV menu row whose legacy scorer
     ran the chooser champion (R4-18/R4-19 recording), or ``None``.
@@ -3579,6 +3580,37 @@ def frozen_chooser_declaration(
     missing = sorted(slot for slot in slots if slot not in bindings)
     if missing:
         raise StrictTraceCaptureError(f"chooser binding(s) {missing} were not recorded")
+    producer_outputs = {output for output, entry in folds.items() if "binding" in entry}
+    fold_provenance: dict[str, dict[str, str]] = {}
+    artifact_refs: list[str] = []
+    if producer_outputs:
+        if not isinstance(chooser_fold_references, Mapping):
+            raise StrictTraceCaptureError("chooser producer references were not verified")
+        for output in sorted(producer_outputs):
+            reference = chooser_fold_references.get(output)
+            if not isinstance(reference, Mapping):
+                raise StrictTraceCaptureError("chooser producer reference is missing")
+            values = tuple(reference.get(field) for field in (
+                "training_cutoff", "fold_start", "descriptor_hash", "estimator_sha256"))
+            if any(not isinstance(value, str) or not value for value in values):
+                raise StrictTraceCaptureError("chooser producer reference is incomplete")
+            cutoff, fold_start, descriptor_hash, estimator_sha256 = values
+            fold_provenance[output] = {
+                "training_cutoff": cutoff,
+                "fold_start": fold_start,
+                "descriptor_hash": descriptor_hash,
+            }
+            artifact_refs.extend((descriptor_hash, estimator_sha256))
+        size_binding = bindings.get("fold:size")
+        size_digest = (size_binding.get("artifact_sha256")
+                       if isinstance(size_binding, Mapping) else None)
+        size_hex = (size_digest.removeprefix("sha256:")
+                    if isinstance(size_digest, str) else "")
+        if (len(size_hex) != 64
+                or any(character not in "0123456789abcdef" for character in size_hex.lower())):
+            raise StrictTraceCaptureError(
+                "chooser size fold estimator identity is missing or invalid")
+        artifact_refs.append("sha256:" + size_hex.lower())
     package = package_frozen_resources(
         model_bindings=[bindings[slot] for slot in slots],
         deployment_id=deployment_id,
@@ -3596,6 +3628,8 @@ def frozen_chooser_declaration(
     producers = {output: ref(entry) for output, entry in folds.items() if "binding" in entry}
     if producers:
         recipe["producers"] = producers
+        recipe["fold_provenance"] = fold_provenance
+        recipe["artifact_refs"] = list(dict.fromkeys(artifact_refs))
     fold_pools = {}
     for output, entry in folds.items():
         if entry.get("pool") not in pools:
@@ -3813,10 +3847,11 @@ def strict_trace_one(
             source_root=_artifact_source_root(),
         )
     gate_recipe = _packaged_gate_recipe(packaging, package)
-    chooser = (frozen_chooser_declaration(
-        candidate, deployment_id=request.deployment_id, release_root=release_root)
-        if source is not None else None)
     chooser_fold_references = validated_chooser_fold_references(source, request)
+    chooser = (frozen_chooser_declaration(
+        candidate, deployment_id=request.deployment_id, release_root=release_root,
+        chooser_fold_references=chooser_fold_references)
+        if source is not None else None)
     refs = (*(package.request_refs if package else ()),
             *(chooser[1].request_refs if chooser else ()))
     if refs:

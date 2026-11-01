@@ -5,6 +5,7 @@ import copy
 import hashlib
 import json
 from dataclasses import replace
+from pathlib import Path
 
 import joblib
 import pandas as pd
@@ -1369,6 +1370,13 @@ def test_chooser_fold_reference_flows_through_real_scorer_checkpoint(tmp_path, m
         pool_res=[0.1], interval_floor=0.0,
         artifact_ref=lambda: (runup_path, runup_digest),
     )
+    chooser_payload = b"synthetic chooser"
+    chooser_path = tmp_path / "chooser.bin"
+    chooser_path.write_bytes(chooser_payload)
+    chooser_entry = SimpleNamespace(
+        id="chooser_synthetic", decision_offset=None, path=chooser_path,
+        artifact_sha256=hashlib.sha256(chooser_payload).hexdigest())
+    chooser_artifact = SimpleNamespace(features=("im",))
     collector = _collector()
     scorer = object.__new__(Scorer)
     scorer._chooser_fold_references = {
@@ -1384,10 +1392,14 @@ def test_chooser_fold_reference_flows_through_real_scorer_checkpoint(tmp_path, m
                                 ("pred_runup_abs_move_d14", runup_served)],
     )
     scorer._phase4_record_chooser(
-        request, result, pd.DataFrame({"im": [0.5]}), SimpleNamespace(),
-        SimpleNamespace(), {},
+        request, result, pd.DataFrame({"im": [0.5]}), chooser_entry,
+        chooser_artifact, {},
     )
-    source = _source_of(_candidate(collector))
+    candidate = _candidate(collector)
+    source = _source_of(candidate)
+    size_digest = "sha256:" + "D" * 64
+    source["frozen"]["bindings"]["fold:size"] = {"artifact_sha256": size_digest}
+    candidate["legacy_trace"]["checkpoints"]["source_inputs"]["content_hash"] = content_hash(source)
     captured = validated_chooser_fold_references(source, _request())
     assert set(captured) == {"pred_im_t1_d14", "pred_runup_abs_move_d14"}
     assert captured["pred_im_t1_d14"]["descriptor_hash"] == reference.descriptor_hash
@@ -1435,16 +1447,58 @@ def test_chooser_fold_reference_flows_through_real_scorer_checkpoint(tmp_path, m
     from tools import capture_tier0_corpus as capture
 
     observed = {}
+    declared = {}
+    real_declaration = capture.frozen_chooser_declaration
+
+    def capture_declaration(*args, **kwargs):
+        value = real_declaration(*args, **kwargs)
+        declared["value"] = value
+        return value
+
+    monkeypatch.setattr(capture, "frozen_chooser_declaration", capture_declaration)
+    monkeypatch.setattr(capture, "_artifact_source_root", lambda: Path("/"))
+    monkeypatch.setattr(capture, "prepare_frozen_chooser", lambda *args, **kwargs: None)
+    monkeypatch.setattr(capture, "with_frozen_chooser", lambda inputs, plan: inputs)
     monkeypatch.setattr(capture, "native_inputs_from_capture", lambda *args, **kwargs: ({}, {}))
     monkeypatch.setattr(capture, "resolve_stored_forecasts", lambda base: None)
     monkeypatch.setattr(
         capture, "package_strict_trace",
         lambda *args, **kwargs: observed.update(kwargs["metadata"]) or {},
     )
-    candidate = _candidate(collector)
     candidate.update({"event_id": "AAA_2026-09-17", "request": request_to_dict(request)})
     strict_trace_one(candidate, "snapshot-1", tmp_path / "release")
     assert observed["chooser_fold_references"] == captured
+    recipe = declared["value"][0]["recipe"]
+    assert recipe["fold_provenance"] == {
+        "pred_im_t1_d14": {
+            "training_cutoff": "2026-09-01", "fold_start": "2026-09-01",
+            "descriptor_hash": reference.descriptor_hash},
+        "pred_runup_abs_move_d14": {
+            "training_cutoff": "2026-08-01", "fold_start": "2026-08-01",
+            "descriptor_hash": runup_reference.descriptor_hash},
+    }
+    assert set(recipe["artifact_refs"]) == {
+        reference.descriptor_hash, reference.estimator_sha256,
+        runup_reference.descriptor_hash, runup_reference.estimator_sha256,
+        "sha256:" + "d" * 64,
+    }
+    assert recipe["artifact_refs"][-1] == "sha256:" + "d" * 64
+
+    for invalid_size in (None, "sha256:" + "g" * 64, "sha256:" + "a" * 63):
+        refused = copy.deepcopy(candidate)
+        refused_source = _source_of(refused)
+        if invalid_size is None:
+            refused_source["frozen"]["bindings"].pop("fold:size")
+        else:
+            refused_source["frozen"]["bindings"]["fold:size"] = {
+                "artifact_sha256": invalid_size}
+        refused["legacy_trace"]["checkpoints"]["source_inputs"]["content_hash"] = (
+            content_hash(refused_source))
+        with pytest.raises(
+            StrictTraceCaptureError,
+            match="chooser size fold estimator identity is missing or invalid",
+        ):
+            strict_trace_one(refused, "snapshot-1", tmp_path / "release")
 
     def _ref_doc(ref):
         identity = ref.release_binding

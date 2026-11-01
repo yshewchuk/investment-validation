@@ -219,8 +219,12 @@ def _has_causal_chooser_fold_provenance(recipe: Any, request: Any,
         if (not isinstance(cutoff_text, str) or not isinstance(fold_text, str)
                 or not isinstance(descriptor_hash, str) or descriptor_hash not in artifact_refs):
             return False
-        if staged.get(f"__chooser_descriptor__:{descriptor_hash}") != (
-                f"{producer_output}\x1f{cutoff_text}\x1f{fold_text}"):
+        staged_text = staged.get(f"__chooser_descriptor__:{descriptor_hash}")
+        if not isinstance(staged_text, str):
+            return False
+        staged_parts = staged_text.split("\x1f")
+        if (len(staged_parts) != 3 or staged_parts[0] != producer_output
+                or staged_parts[2] != fold_text):
             return False
         try:
             cutoff_day, fold_day = date.fromisoformat(cutoff_text), date.fromisoformat(fold_text)
@@ -228,22 +232,65 @@ def _has_causal_chooser_fold_provenance(recipe: Any, request: Any,
             return False
         if (cutoff_day.isoformat() != cutoff_text or fold_day.isoformat() != fold_text
                 or fold_day.day != 1 or fold_text != expected_fold_start
-                or cutoff_day >= decision_day or cutoff_day >= fold_day):
+                or cutoff_text != fold_text):
             return False
     return True
 
 
+def _chooser_fold_contexts(chooser_cache, release_root: Path, release_id: str):
+    from engine.v2.scoring.release_bindings import resolve_chooser_fold_authoring_contexts
+
+    if chooser_cache is None:
+        return resolve_chooser_fold_authoring_contexts(release_root, release_id)
+    key = ("contexts", release_id)
+    resolved = chooser_cache.get(key)
+    if resolved is None:
+        resolved = resolve_chooser_fold_authoring_contexts(release_root, release_id)
+        chooser_cache[key] = resolved
+    return resolved
+
+
+def _chooser_inference(chooser_cache, release_id: str, root: Path):
+    from engine.v2.models.loader import FrozenInference
+
+    if chooser_cache is None:
+        return FrozenInference(root)
+    key = ("inference", release_id)
+    inference = chooser_cache.get(key)
+    if inference is None:
+        inference = FrozenInference(root)
+        chooser_cache[key] = inference
+    return inference
+
+
+def _load_chooser_fold(inference, descriptor, *, verified_parent_manifest,
+                       verified_catalog, chooser_cache):
+    from engine.v2.models.serving_fold_loader import load_chooser_serving_fold
+
+    if chooser_cache is None:
+        return load_chooser_serving_fold(
+            inference, descriptor, verified_parent_manifest=verified_parent_manifest,
+            verified_catalog=verified_catalog)
+    key = ("descriptor", descriptor.descriptor_hash)
+    loaded = chooser_cache.get(key)
+    if loaded is None:
+        loaded = load_chooser_serving_fold(
+            inference, descriptor, verified_parent_manifest=verified_parent_manifest,
+            verified_catalog=verified_catalog)
+        chooser_cache[key] = loaded
+    return loaded
+
+
 def _staged_chooser_pools(chooser, request, release_root: Path, manifest,
-                          legacy_event_date: Any = None):
+                          legacy_event_date: Any = None, chooser_cache=None):
     if not isinstance(manifest, Mapping):
         return None
     release_id = manifest.get("release_id")
     if not isinstance(release_id, str) or not release_id:
         return None
-    from engine.v2.scoring.release_bindings import resolve_chooser_fold_authoring_contexts
     try:
-        fold_references, authoring_contexts = resolve_chooser_fold_authoring_contexts(
-            release_root, release_id)
+        fold_references, authoring_contexts = _chooser_fold_contexts(
+            chooser_cache, release_root, release_id)
     except (OSError, ValueError, TypeError, KeyError, AttributeError, OverflowError):
         return None
     replay_dates = _chooser_replay_dates(request, legacy_event_date)
@@ -251,26 +298,22 @@ def _staged_chooser_pools(chooser, request, release_root: Path, manifest,
         return None
     event_day, decision_day = replay_dates
     expected_fold_start = min(event_day.replace(day=1), decision_day.replace(day=1)).isoformat()
+    from datetime import date
     from numpy import array_equal, asarray
+    from types import SimpleNamespace
     from engine.v2.foundation import from_document
     from engine.v2.models import deployment
-    from engine.v2.models.serving_fold_loader import (
-        load_chooser_serving_fold, load_serving_fold, validate_serving_fold_descriptor,
-        validate_serving_fold_object,
+    from engine.v2.models.serving_folds import ChooserServingFoldDescriptor
+    from engine.v2.scoring.gate_fold_selection import (
+        index_size_folds, select_gate_forecast_source,
     )
-    from engine.v2.models.serving_folds import (
-        ChooserServingFoldDescriptor, ServingFoldDescriptor,
-    )
-    from engine.v2.models.loader import FrozenInference
 
     members = manifest.get("members")
     if not isinstance(members, list):
         return None
     docs = {}
-    size_docs = []
     seen_members = set()
     chooser_months = set()
-    size_months = set()
     try:
         for row in members:
             if not isinstance(row, Mapping):
@@ -278,7 +321,7 @@ def _staged_chooser_pools(chooser, request, release_root: Path, manifest,
             member_id = row.get("member_id", "")
             if not isinstance(member_id, str):
                 return None
-            if member_id not in {"tier4_folds:implied_t1", "tier4_folds:runup_move", "tier4_folds:size"}:
+            if member_id not in {"tier4_folds:implied_t1", "tier4_folds:runup_move"}:
                 continue
             if member_id in seen_members or row.get("status") != "STAGED":
                 return None
@@ -286,36 +329,16 @@ def _staged_chooser_pools(chooser, request, release_root: Path, manifest,
             objects = row.get("objects", ())
             if not isinstance(objects, list):
                 return None
-            if member_id in {"tier4_folds:implied_t1", "tier4_folds:runup_move"}:
-                for obj in objects:
-                    doc = obj.get("serving_fold") if isinstance(obj, Mapping) else None
-                    if not isinstance(doc, Mapping) or doc.get("fold_start") != expected_fold_start:
-                        continue
-                    descriptor = from_document(ChooserServingFoldDescriptor, doc)
-                    chooser_month = (member_id, descriptor.fold_start)
-                    if chooser_month in chooser_months or descriptor.descriptor_hash in docs:
-                        return None
-                    chooser_months.add(chooser_month)
-                    docs[descriptor.descriptor_hash] = descriptor
-            else:
-                for obj in objects:
-                    if not isinstance(obj, Mapping):
-                        return None
-                    doc = obj.get("serving_fold")
-                    if not isinstance(doc, Mapping):
-                        return None
-                    descriptor = from_document(ServingFoldDescriptor, doc)
-                    validate_serving_fold_descriptor(descriptor)
-                    if descriptor.fold_start in size_months:
-                        return None
-                    size_months.add(descriptor.fold_start)
-                    if type(obj.get("bytes")) is not int:
-                        return None
-                    if (obj.get("path") != descriptor.estimator.path
-                            or obj.get("content_hash") != descriptor.estimator.content_hash):
-                        return None
-                    validate_serving_fold_object(obj, descriptor)
-                    size_docs.append((obj, descriptor))
+            for obj in objects:
+                doc = obj.get("serving_fold") if isinstance(obj, Mapping) else None
+                if not isinstance(doc, Mapping) or doc.get("fold_start") != expected_fold_start:
+                    continue
+                descriptor = from_document(ChooserServingFoldDescriptor, doc)
+                chooser_month = (member_id, descriptor.fold_start)
+                if chooser_month in chooser_months or descriptor.descriptor_hash in docs:
+                    return None
+                chooser_months.add(chooser_month)
+                docs[descriptor.descriptor_hash] = descriptor
     except (OSError, ValueError, TypeError, KeyError, AttributeError, OverflowError):
         return None
 
@@ -324,39 +347,28 @@ def _staged_chooser_pools(chooser, request, release_root: Path, manifest,
     if (not isinstance(artifact_refs, (list, tuple))
             or any(not isinstance(ref, str) for ref in artifact_refs)):
         return None
-    size_matches = [(obj, descriptor) for obj, descriptor in size_docs
-                    if descriptor.estimator.content_hash in artifact_refs
-                    and descriptor.fold_start == expected_fold_start]
-    if len(size_matches) != 1:
-        return None
-    size_obj, size_descriptor = size_matches[0]
-    try:
-        validate_serving_fold_object(size_obj, size_descriptor)
-    except (OSError, ValueError, TypeError, KeyError, AttributeError, OverflowError):
-        return None
-
-    recipe_provenance = recipe.get("fold_provenance", {})
     fold_pools = getattr(chooser, "fold_pools", None)
     if not isinstance(fold_pools, Mapping):
         return None
-    catalog_hash = manifest.get("manifest_hash")
-    if not isinstance(catalog_hash, str):
-        return None
     root = deployment_root(release_root)
-    verified = dict(fold_pools)
     try:
-        parent = deployment.read_manifest(root, size_descriptor.parent_release_id)
-        if parent is None:
+        carrying_manifest = deployment.read_manifest(root, release_id)
+        if (carrying_manifest is None
+                or carrying_manifest.release.release_id != release_id
+                or not deployment.manifest_hash_matches(carrying_manifest)):
             return None
-        size_ref = load_serving_fold(
-            FrozenInference(root), size_descriptor,
-            verified_parent_manifest=parent, catalog_hash=catalog_hash,
-            expected_bytes=size_obj["bytes"])
+        size_folds = index_size_folds(manifest, carrying_manifest)
+        inference = _chooser_inference(chooser_cache, release_id, root)
+        selected = select_gate_forecast_source(
+            SimpleNamespace(size_folds=size_folds, frozen_inference=inference),
+            event_day, decision_day)
     except (OSError, ValueError, TypeError, KeyError, AttributeError, OverflowError):
         return None
+    if selected.artifact_hash not in artifact_refs:
+        return None
     expected_size = {
-        "predictions": size_ref.pool_pred, "residuals": size_ref.pool_res,
-        "interval_floor": size_descriptor.policy.interval_floor,
+        "predictions": selected.pool_pred, "residuals": selected.pool_res,
+        "interval_floor": selected.interval_floor,
     }
     actual_size = fold_pools.get("pred_abs_move")
     if (not isinstance(actual_size, Mapping) or set(actual_size) != set(expected_size)
@@ -368,13 +380,14 @@ def _staged_chooser_pools(chooser, request, release_root: Path, manifest,
             return None
     except (TypeError, ValueError, KeyError):
         return None
+    verified = dict(fold_pools)
     verified["pred_abs_move"] = expected_size
 
+    recipe_provenance = recipe.get("fold_provenance", {})
     for output in ("pred_im_t1_d14", "pred_runup_abs_move_d14"):
         item = recipe_provenance.get(output) if isinstance(recipe_provenance, Mapping) else None
         descriptor = docs.get(item.get("descriptor_hash")) if isinstance(item, Mapping) else None
         if (descriptor is None or descriptor.producer_output != output
-                or descriptor.training_cutoff != item.get("training_cutoff")
                 or descriptor.fold_start != item.get("fold_start")):
             return None
         reference = fold_references.get((output, descriptor.fold_start))
@@ -382,15 +395,26 @@ def _staged_chooser_pools(chooser, request, release_root: Path, manifest,
                 or reference.descriptor_hash != descriptor.descriptor_hash
                 or reference.release_id != descriptor.parent_release_id
                 or reference.carrying_release_id != release_id
-                or reference.training_cutoff != descriptor.fold_start):
+                or reference.training_cutoff != descriptor.fold_start
+                or item.get("training_cutoff") != reference.training_cutoff):
+            return None
+        try:
+            estimator_cutoff = date.fromisoformat(descriptor.training_cutoff)
+            descriptor_fold = date.fromisoformat(descriptor.fold_start)
+        except (TypeError, ValueError):
+            return None
+        if (estimator_cutoff.isoformat() != descriptor.training_cutoff
+                or estimator_cutoff >= decision_day
+                or estimator_cutoff >= descriptor_fold):
             return None
         context = authoring_contexts.get(descriptor.descriptor_hash)
         if context is None or context[0].release.release_id != descriptor.parent_release_id:
             return None
         try:
-            ref = load_chooser_serving_fold(
-                FrozenInference(root), descriptor,
-                verified_parent_manifest=context[0], verified_catalog=dict(context[1]))
+            ref = _load_chooser_fold(
+                inference, descriptor,
+                verified_parent_manifest=context[0], verified_catalog=dict(context[1]),
+                chooser_cache=chooser_cache)
         except (OSError, ValueError, TypeError, KeyError, AttributeError, OverflowError):
             return None
         producer_refs = recipe.get("producers")
@@ -433,7 +457,7 @@ def _staged_chooser_pools(chooser, request, release_root: Path, manifest,
 
 
 def rebind_chooser(chooser, request, release_root: Path, staged: Mapping[str, str],
-                   manifest=None, legacy_event_date: Any = None):
+                   manifest=None, legacy_event_date: Any = None, chooser_cache=None):
     """``(chooser block served from the staged release, absent, used)``.
 
     The frozen chooser's champion and Tier-4 producer folds are rebound by
@@ -451,7 +475,7 @@ def rebind_chooser(chooser, request, release_root: Path, staged: Mapping[str, st
             chooser.recipe, request, staged, legacy_event_date):
         return None, [("chooser:fold_provenance", "unverifiable")], set()
     fold_pools = _staged_chooser_pools(
-        chooser, request, release_root, manifest, legacy_event_date)
+        chooser, request, release_root, manifest, legacy_event_date, chooser_cache)
     if fold_pools is None:
         return None, [("chooser:fold_pools", "unverifiable")], set()
     release, absent, used = _rebind_release(chooser.release, staged)
@@ -467,16 +491,20 @@ def rebind_chooser(chooser, request, release_root: Path, staged: Mapping[str, st
             used.add(member_id)
     if absent:
         return None, absent, used
+    release_id = manifest.get("release_id") if isinstance(manifest, Mapping) else None
+    inference = (_chooser_inference(chooser_cache, release_id, deployment_root(release_root))
+                 if chooser_cache is not None and isinstance(release_id, str) and release_id
+                 else FrozenInference(deployment_root(release_root)))
     block = frozen_chooser_block(
         strategy=request.strategy_version, recipe=chooser.recipe,
         fold_pools=fold_pools, analog_pool=served["analog_pool"],
         admissible_table=served["admissible_table"],
-        inference=FrozenInference(deployment_root(release_root)), release=release)
+        inference=inference, release=release)
     return block, absent, used
 
 
 def _replay_pair(pair, corpus_root: Path, release_root: Path,
-                 staged: Mapping[str, str], manifest=None) -> dict:
+                 staged: Mapping[str, str], manifest=None, chooser_cache=None) -> dict:
     from checks import phase4_real
     from engine.v2.scoring import application
 
@@ -493,7 +521,8 @@ def _replay_pair(pair, corpus_root: Path, release_root: Path,
     if verified["frozen_replay"] is None and verified.get("frozen_chooser") is None:
         return {"disposition": "not_frozen"}
     try:
-        rebound, inputs, absent, used = _rebound_inputs(verified, release_root, staged, manifest)
+        rebound, inputs, absent, used = _rebound_inputs(
+            verified, release_root, staged, manifest, chooser_cache)
     except Exception as exc:  # noqa: BLE001 -- a staged chooser that cannot be built
         return {"disposition": "error", "code": PHASE4_ERROR,
                 "detail": f"rebind: {type(exc).__name__}", "members": []}
@@ -518,7 +547,8 @@ def _replay_pair(pair, corpus_root: Path, release_root: Path,
             "runtime_stages": len(receipts)}
 
 
-def _rebound_inputs(verified, release_root: Path, staged: Mapping[str, str], manifest=None):
+def _rebound_inputs(verified, release_root: Path, staged: Mapping[str, str], manifest=None,
+                    chooser_cache=None):
     """``(rebound frozen plan or None, native inputs, absent, used)``: every
     model, fold, cutoff and chooser state the pair reads, from the release."""
     plan, chooser = verified["frozen_replay"], verified.get("frozen_chooser")
@@ -529,7 +559,8 @@ def _rebound_inputs(verified, release_root: Path, staged: Mapping[str, str], man
     if chooser is not None:
         block, chooser_absent, chooser_used = rebind_chooser(
             chooser, verified["request"], release_root, staged, manifest,
-            legacy_event_date=verified.get("legacy_event_date"))
+            legacy_event_date=verified.get("legacy_event_date"),
+            chooser_cache=chooser_cache)
         absent.extend(chooser_absent)
         used.update(chooser_used)
         if block is not None:
@@ -572,8 +603,10 @@ def _replay_chooser_pair(pair, corpus_root: Path, release_root: Path,
         return {"disposition": "unverified", "code": PHASE4_UNVERIFIED,
                 "detail": f"{type(exc).__name__}: {exc}"}
     used, stages, runtime = set(), 0, 0
+    chooser_cache = {}
     for index, (member_pair, _record) in enumerate(members):
-        row = _replay_pair(member_pair, corpus_root, release_root, staged, manifest)
+        row = _replay_pair(member_pair, corpus_root, release_root, staged, manifest,
+                           chooser_cache=chooser_cache)
         used.update(row.get("members", ()))
         if row["disposition"] != "replayed":
             detail = row.get("detail")
