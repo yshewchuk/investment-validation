@@ -152,6 +152,8 @@ def forecasts(indexed, train, fold, plan, execution, *, progress, inputs=None):
                 row["mean_prior_abs_move"] if row["n_prior"] else fallback)
             value = (history if candidate else None) if reason else float(estimates[event])
             if value is not None and not np.isfinite(value):
+                if candidate:
+                    raise fail("EXPERIMENT_VARIANT_FAILED", "incumbent candidate prediction is nonfinite")
                 raise ValueError("nonfinite incumbent prediction")
             predictions.append({"event_id": event, "horizon_sessions": horizon,
                 "predicted_absolute_move_pct": value, "abstention": None if candidate else reason,

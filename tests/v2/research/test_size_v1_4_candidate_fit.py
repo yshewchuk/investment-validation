@@ -167,6 +167,26 @@ def test_estimator_failures_never_become_fallback(monkeypatch, candidate, phase,
             _run(inputs, fold, execution=execution)
 
 
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf")])
+@pytest.mark.parametrize("candidate", [False, True])
+def test_nonfinite_estimator_output_is_never_fallback_or_infrastructure(monkeypatch, value, candidate):
+    from types import SimpleNamespace
+
+    inputs, fold = _inputs()
+    monkeypatch.setattr(comparator, "fit_recipe_estimator",
+        lambda *args: SimpleNamespace(predict=lambda matrix: np.array([value])))
+    execution = _execution() if candidate else {"schema_version": "size_comparison_execution.v1",
+        "features": comparator.COLUMNS, "fit_recipe": comparator.recipe()}
+    if candidate:
+        with pytest.raises(OpsError) as caught:
+            _run(inputs, fold, execution=execution)
+        assert caught.value.code == "EXPERIMENT_VARIANT_FAILED"
+        assert caught.value.problem.retryable is False
+    else:
+        with pytest.raises(ValueError, match="^nonfinite incumbent prediction$"):
+            _run(inputs, fold, execution=execution)
+
+
 def test_complete_grid_policy_accepts_signed_size_but_never_partial_or_none():
     fold = {"evaluation_event_ids": ["a", "b"]}
     rows = [{"event_id": event, "horizon_sessions": 1, "predicted_absolute_move_pct": value}
