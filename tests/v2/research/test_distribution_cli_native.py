@@ -16,6 +16,8 @@ from hashlib import sha256
 from types import SimpleNamespace
 
 from engine.v2.foundation import to_document
+from engine.v2.ops.errors import fail
+from engine.v2.ops.experiments import experiment_spec_from_document
 from tests.v2.research.magnitude_trial_support import prediction_spec
 from tests.v2.research.test_distribution_pipeline_native import make_run, native_case
 
@@ -75,6 +77,21 @@ def rows():
 def objects_snapshot():
     return sorted((str(path.relative_to(case.store.root)), sha256(path.read_bytes()).hexdigest())
         for path in case.store.root.rglob("*") if path.is_file())
+def refuse_external_inputs(actions):
+    before, before_objects = rows(), objects_snapshot()
+    expected = to_document(fail("INVALID_EXPERIMENT_SPEC", "distribution lifecycle requires no file inputs").problem)
+    for name in ("spec", "source-spec"):
+        path = root / (name + ".json")
+        original = path.read_text()
+        document = json.loads(original)
+        before_hash = experiment_spec_from_document(document).spec_hash
+        document["input_files"] = ["SECRET-unbound-input.csv"]
+        assert experiment_spec_from_document(document).spec_hash == before_hash
+        path.write_text(json.dumps(document))
+        for action in actions:
+            assert invoke(action, expected_status=2) == {"refused": expected}
+            assert rows() == before and objects_snapshot() == before_objects
+        path.write_text(original)
 before, before_objects = rows(), objects_snapshot()
 prepared = invoke("prepare")
 assert prepared["registered"] is False and rows() == before and objects_snapshot() == before_objects
@@ -83,6 +100,7 @@ assert registered == {**prepared, "registered": True}
 preflight = invoke("preflight")
 sealed = invoke("seal")
 assert preflight == sealed and sealed["final_read_authority"] == "none"
+refuse_external_inputs(("run",))  # Registered/sealed, but not started: neither spec may add an unbound input.
 before, before_objects = rows(), objects_snapshot()
 request_file = root / "request.json"
 changed = json.loads(request_file.read_text())
@@ -103,6 +121,7 @@ assert [item["alpha"] for item in result["reports"]] == sealed["request"]["alpha
 before, before_objects = rows(), objects_snapshot()
 assert all(invoke(action, replay=True) == result for action in ("collect", "report", "run"))
 assert rows() == before and objects_snapshot() == before_objects
+refuse_external_inputs(("prepare", "register", "preflight", "seal", "run", "collect", "report"))
 for item in result["reports"]:
     assert item["report"]["arms"]["histogram"]["settled_net_profit"] == 100
     assert item["report"]["contrasts"]["same_mean"]["net_delta_per_opportunity"] == 0

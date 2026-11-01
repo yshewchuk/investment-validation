@@ -83,6 +83,8 @@ def _dispatch(args, conn, store, repository, request, began, *, probe=False):
         if error.code != "INVALID_REQUEST":
             raise
         raise fail("INVALID_EXPERIMENT_SPEC", "invalid distribution lifecycle metadata") from None
+    if spec.input_files or source_spec.input_files:
+        raise fail("INVALID_EXPERIMENT_SPEC", "distribution lifecycle requires no file inputs")
     source_request = _input_document(args.source_request)
     recipe = validate_candidate_recipe(_input_document(args.recipe))
     caps = _input_document(args.budget_caps)
