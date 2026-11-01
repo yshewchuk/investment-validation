@@ -74,14 +74,14 @@ def main():
                 raise
             timing = ({"score_seconds": max(0.0, time.monotonic() - started),
                        "rss_delta_kib": rss_delta_kib()}
-                      if request["execution"].get("schema_version") == "size_candidate_execution.v1" else {})
+                      if not regression else {})
             emit({"event": "failed", **timing})
             return
         column = target["prediction_column"] if regression else "predicted_absolute_move_pct"
         schema_version = request["execution"].get("schema_version")
         timing = ({"score_seconds": max(0.0, time.monotonic() - started),
                   "rss_delta_kib": rss_delta_kib()}
-                 if schema_version == "size_candidate_execution.v1" else {})
+                 if not regression else {})
         emit({"event": "succeeded", "forecasts": [{"event_id": event, "horizon_sessions": horizon,
             column: value} for (event, horizon), value in sorted(predictions.items())],
             **timing,
