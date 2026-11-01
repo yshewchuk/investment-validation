@@ -14,7 +14,7 @@ from experiments.v2_magnitude_search_run import _admit_driver
 def resource_report(plan):
     """Reuse fixed schedule/resource accounting, without asserting measured feasibility."""
     return {**shared_resource_report(plan), "target": target(),
-        "parent_and_job": "dedicated IV CLI must contain parent RSS/wall; library caller must contain",
+        "parent_and_job": "IV CLI enforces parent RSS/wall and job deadline; library caller must contain",
         "comparison": "causal signed IV HGB refit and all-admitted-label training mean",
         "timing": "IV fit evidence is untimed; configured ceilings are not observed cost"}
 

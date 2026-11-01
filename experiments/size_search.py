@@ -59,7 +59,7 @@ def _contain(request, horizons=(5, 3, 1)):
     return memory
 
 
-def _run(context):
+def _run(context, *, collector=None):
     """Completed markers select only verified read-only collection, never execution."""
     conn, store, _, registration, request, ref = context
     plan = _admit_driver(conn, store, registration, request, ref)
@@ -72,7 +72,7 @@ def _run(context):
         previous = signal.alarm(0)
         signal.alarm(min(previous or 1, seconds))
         run_search(*context, limits=request["limits"]["child"], collect_results=False)
-    return collect(*context)
+    return (collect if collector is None else collector)(*context)
 
 
 def main(argv=None):

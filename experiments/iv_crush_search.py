@@ -1,4 +1,4 @@
-"""Thin IV registration and sealed-plan policy; no search/CLI execution."""
+"""IV registration/plan policy and the dedicated contained local lifecycle entrypoint."""
 from pathlib import Path
 
 from engine.v2.data.iv_crush_table import IV_CRUSH_CONTRACT, IV_CRUSH_TABLE_NAME
@@ -37,3 +37,8 @@ def prepare_plan(conn, store, registration, request):
     from experiments.iv_crush_comparator import recipe
     from experiments.regression_search_binding import prepare_plan as prepare_regression_plan
     return prepare_regression_plan(conn, store, registration, request, target=target(), comparison=recipe())
+
+
+if __name__ == "__main__":
+    from experiments.iv_crush_run import main
+    raise SystemExit(main())
