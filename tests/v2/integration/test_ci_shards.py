@@ -60,6 +60,54 @@ def test_every_explicit_research_pattern_matches_a_file():
             )
 
 
+def test_new_research_shards_keep_full_intended_membership():
+    expected = {
+        "research-d": {
+            path for path in REAL_FILES
+            if path.startswith("tests/v2/research/test_size_")
+        },
+        "research-e": {
+            "tests/v2/research/test_iv_crush_search_execution.py",
+            "tests/v2/research/test_iv_admission_claims.py",
+            "tests/v2/research/test_iv_comparison_journal.py",
+            "tests/v2/research/test_iv_crush_fit_worker.py",
+            "tests/v2/research/test_iv_panel_reuse.py",
+            "tests/v2/research/test_iv_registration_budgets.py",
+            "tests/v2/research/test_iv_crush_prepare.py",
+            "tests/v2/research/test_iv_crush_inputs.py",
+            "tests/v2/research/test_iv_crush_cli_boundaries.py",
+            "tests/v2/research/test_iv_crush_plan.py",
+            "tests/v2/research/test_iv_crush_progress.py",
+            "tests/v2/research/test_iv_crush_search_receipts.py",
+            "tests/v2/research/test_iv_crush_paired_report.py",
+            "tests/v2/research/test_iv_crush_adapter_oracle.py",
+        },
+        "research-f": {
+            "tests/v2/research/test_iv_crush_cli.py",
+            "tests/v2/research/test_iv_submission_accounting.py",
+            "tests/v2/research/test_iv_crush_fold_inputs.py",
+            "tests/v2/research/test_iv_crush_registration.py",
+            "tests/v2/research/test_iv_crush_search_plan.py",
+            "tests/v2/research/test_iv_crush_comparator.py",
+        },
+        "research-g": {
+            *{
+                path for path in REAL_FILES
+                if path.startswith("tests/v2/research/test_distribution_")
+            },
+            "tests/v2/research/test_v2_prediction_cli.py",
+            "tests/v2/research/test_native_outcome_validation.py",
+            "tests/v2/research/test_magnitude_panel_contract.py",
+            "tests/v2/research/test_magnitude_registration.py",
+        },
+    }
+    for shard, paths in expected.items():
+        assert paths
+        for path in paths:
+            assert path in REAL_FILES, path
+            assert ci_shards.owner(path, REAL_SHARDS) == shard, path
+
+
 def _first_unclaimed_pattern(shards, files):
     """The first (shard, pattern) that claims no file an earlier pattern left over."""
     claimed: set[str] = set()

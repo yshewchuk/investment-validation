@@ -9,10 +9,9 @@
 # claims, so a new test file or package can never silently fall out of CI.
 # On 2026-11-01 main run 41305553745, research remainder totaled 6430 CPU-s.
 # Split its SIZE, IV, and distribution/heavy files into research-d through
-# research-g at about 1250 CPU-s per shard; keep cheap research files in the
+# research-g at about 1240-1400 CPU-s per shard; keep cheap research files in the
 # remainder. Rebalance by moving files between the explicit lists.
-# Earlier, 2026-10-11,
-# before ops-sweep/integration existed (CPU seconds over 3475 total,
+# Earlier, 2026-10-11, before ops-sweep/integration existed (3475 CPU-s total,
 # ~3.8x parallel on a 4-core runner): ops ~1224, research ~902, checks ~474,
 # rest ~876. Rebalance by moving a pattern; keep every shard under ~15 minutes
 # of pytest wall time on CI.
