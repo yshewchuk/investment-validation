@@ -173,7 +173,7 @@ def test_installed_plan_drift_refuses_before_any_input_read(fold_case, monkeypat
         pytest.fail("input read preceded installation validation")
     for name in ("preflight_iv_crush_targets", "load_iv_crush_targets"):
         monkeypatch.setattr(iv_crush_inputs, name, forbidden)
-    monkeypatch.setattr(regression_search_binding, "read_panel", forbidden)
+    monkeypatch.setattr(regression_search_binding, "read_stored_panel", forbidden)
     if drift == "environment":
         monkeypatch.setattr(plans, "environment_identity", lambda *a: {"changed": True})
         message = "search anchor sources or environment differ from this installation"

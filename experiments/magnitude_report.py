@@ -25,9 +25,10 @@ def validate_prediction_spec(spec):
     return plan
 
 
-def magnitude_metrics(predictions):
+def magnitude_metrics(predictions, *, target=None):
     """Equal event weights; scale before squaring to preserve finite large errors."""
-    errors = [abs(row["predicted_absolute_move_pct"] - row["absolute_move_pct"]) for row in predictions]
+    target = target or {"column": "absolute_move_pct", "prediction_column": "predicted_absolute_move_pct"}
+    errors = [abs(row[target["prediction_column"]] - row[target["column"]]) for row in predictions]
     try:
         return error_metrics(errors)
     except ValueError:

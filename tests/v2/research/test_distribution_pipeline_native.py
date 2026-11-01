@@ -12,6 +12,7 @@ from engine.v2.foundation import SystemClock, from_document, to_document
 from engine.v2.models.no_fit import no_fit_guard
 from engine.v2.models.payoff_artifact import make_payoff_line_artifact, serialize_payoff_artifact
 from engine.v2.research._pricing import trading_calendar_from_snapshot
+from engine.v2.research.event_history import MAX_OUTCOME_OBJECT_BYTES
 from engine.v2.research.magnitude_panel_qualified_table import recipe
 from experiments import distribution_market as market
 from experiments import distribution_pipeline as pipeline
@@ -25,7 +26,12 @@ from experiments.magnitude_search_plan import seal_search_plan
 from experiments.magnitude_search_shards import iter_section
 from experiments.native_registration import prepare_native_registration, reserve_native_registration
 from experiments.v2_magnitude_search_run import seal_search_run
-from tests.data_scan_support import commit_tables, contract_for, contract_ref_for, publish_and_inspect
+from tests.data_scan_support import (
+    commit_tables,
+    contract_for,
+    contract_ref_for,
+    publish_and_inspect,
+)
 from tests.v2.research.magnitude_trial_support import prediction_spec
 from tests.v2.research.test_distribution_run_request import request as run_request
 from tests.v2.research.test_magnitude_panel_qualified import panel_data
@@ -131,12 +137,18 @@ def test_native_fit_pool_quote_target_and_report_composition(native_case, monkey
     run.trials.start("outer", "2024")
     results = {horizon: fits.fit("outer", "2024", horizon) for horizon in (5, 3, 1)}
     assert all(result["tail"]["policy"] == "empirical_excess" for result in results.values())
-    original, opened = objects.verify_object_path, set()
+    original, opened = objects.read_verified_bytes, set()
+    original_path = objects.verify_object_path
     def verify(store, ref):
+        assert ref.object_id not in case.target_objects, "outer targets require a byte-bounded read"
+        return original_path(store, ref)
+    def read_bytes(store, ref, *, max_bytes):
         if ref.object_id in case.target_objects:
+            assert max_bytes == MAX_OUTCOME_OBJECT_BYTES
             assert all(run.record(f"intents:2024:{alpha}") is not None for alpha in run.request["alphas"])
             opened.add(ref.object_id)
-        return original(store, ref)
+        return original(store, ref, max_bytes=max_bytes)
+    monkeypatch.setattr(objects, "read_verified_bytes", read_bytes)
     monkeypatch.setattr(objects, "verify_object_path", verify)
     original_chains, requests = market.load_chain_index, []
     def chains(repository, snapshot, keys):
