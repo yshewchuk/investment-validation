@@ -7,7 +7,7 @@ from engine.v2.research.magnitude_panel_qualified_table import recipe as panel_r
 from experiments.magnitude_search_request_versions import compile_request
 from experiments.native_registration import MAX_NATIVE_EVIDENCE_BYTES, verify_native_registration
 from experiments.size_panel_request import validate_panel_request
-from experiments.size_search_binding import read_panel
+from experiments.size_search_binding import read_stored_panel
 
 
 def _require(condition):
@@ -76,7 +76,7 @@ def fold_inputs(repository, binding, fold, *, plan):
     month = binding["holdouts"]["holdout_as_of_month"]
     snapshot = from_document(SnapshotRef, binding["target_snapshot"])
     preflight = preflight_iv_crush_targets(repository, snapshot, as_of_month=month, event_ids=sorted(participants))
-    panel = read_panel(repository, from_document(SnapshotRef, binding["snapshot"]),
+    panel = read_stored_panel(repository, from_document(SnapshotRef, binding["snapshot"]),
         plan["request"]["panel_request"], columns=panel_recipe("HMO")["model_columns"])
     context = panel["context"]
     _require(panel["feature_snapshot"] == binding["feature_snapshot"]

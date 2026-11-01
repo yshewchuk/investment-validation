@@ -26,6 +26,7 @@ from engine.v2.research.magnitude_inputs import load_magnitude_targets
 from experiments.magnitude_report import magnitude_metrics
 from experiments.magnitude_search_evidence import (
     admit_fold_inputs,
+    evaluation_targets,
     fit_evidence,
     normalize_forecasts,
     validate_targets,
@@ -34,12 +35,6 @@ from experiments.magnitude_search_execution import (
     execution_limits,
     run_fitted_trial,
     validate_execution_limits,
-)
-from experiments.magnitude_search_selection import (
-    ZeroComparatorError,
-    blended_event_score,
-    history_mean_rows,
-    selection_tie_band,
 )
 from experiments.magnitude_search_inputs import load_inputs, publish_inputs
 from experiments.magnitude_search_plan import (
@@ -51,6 +46,12 @@ from experiments.magnitude_search_plan import (
     trial_key,
 )
 from experiments.magnitude_search_records import MIGRATIONS, OWNER, append_record, read_record
+from experiments.magnitude_search_selection import (
+    ZeroComparatorError,
+    blended_event_score,
+    history_mean_rows,
+    selection_tie_band,
+)
 from experiments.size_fit_diagnostics import evidence as diagnostic_evidence
 from experiments.size_fit_diagnostics import keys as diagnostic_keys
 from experiments.size_job_budget import resolved_limits
@@ -104,17 +105,10 @@ _NOT_ADMITTED = object()
 _FREEZE_CACHE_BYTES = 32 << 20
 
 
-def require_execution_enabled(registration):
-    """Refuse metadata-only IV before execution-journal admission; legacy checks stay caller-owned."""
-    if getattr(registration, "document", {}).get("schema_version") == "native_experiment_registration.v1.8":
-        raise fail("INVALID_EXPERIMENT_SPEC", "IV trial and outer orchestration is not enabled")
-
-
 class SearchTrials:
     """Native inner fits or submitted forecasts; no outer evaluation or final authority."""
 
     def __init__(self, conn, store, repository, registration, request, plan_ref):
-        require_execution_enabled(registration)
         self.conn, self.store, self.repository = conn, store, repository
         self.registration, self.plan_ref = registration, plan_ref
         self._memo = {}
@@ -181,8 +175,9 @@ class SearchTrials:
         return trial_key(plan, outer_year, inner_year, candidate_id), requested, candidate
 
     def _inputs(self, inner):
+        plan = self._admit() if self.registration.document.get("schema_version") == "native_experiment_registration.v1.8" else None
         return admit_fold_inputs(self.repository, self.registration.document, inner,
-            history_failure=fail("EXPERIMENT_IDENTITY_CONFLICT", "search native history binding changed"))
+            history_failure=fail("EXPERIMENT_IDENTITY_CONFLICT", "search native history binding changed"), plan=plan)
 
     def _cohort_inputs(self, cohort, inner):
         """Keep only the latest cohort resident; a revisit of a published cohort reloads its manifest; failures are never memoised."""
@@ -209,7 +204,7 @@ class SearchTrials:
             raise ValueError from None
 
     def start(self, outer_year, inner_year, candidate_id):
-        """Claim once, then bind native inputs; interrupted starts cannot be restarted."""
+        """Admit fresh IV inputs before claiming; claimed attempts cannot be restarted."""
         return self._start(outer_year, inner_year, candidate_id)
 
     def _start(self, outer_year, inner_year, candidate_id, execution=None, admitted=_NOT_ADMITTED):
@@ -221,6 +216,7 @@ class SearchTrials:
             started["execution"] = execution
         cohort = cohort_key(plan, owner_year, inner_year)
         existing_start = self._read("start:" + key)
+        inputs = self._cohort_inputs(cohort, inner) if "target" in plan and existing_start is None else None
         if plan.get("schema_version") == PLAN_V3 and existing_start is not None:
             if execution is not None:
                 raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search trial is unfinished")
@@ -234,7 +230,8 @@ class SearchTrials:
             self._append("start:" + key, started, replay=False)
         if execution is not None:
             self._append("execution-start:" + key, execution, replay=False)
-        inputs = self._cohort_inputs(cohort, inner)
+        if inputs is None:
+            inputs = self._cohort_inputs(cohort, inner)
         # Shards first (outside the catalog transaction); the manifest append is the commit point.
         if cohort not in self._published:
             self._published[cohort] = publish_inputs(self.store, inputs)
@@ -248,8 +245,8 @@ class SearchTrials:
         """Run one bounded native inner trial once, or verify its completed replay."""
         plan = self._admit()
         key, inner, candidate = self._trial(plan, outer_year, inner_year, candidate_id)
-        size_plan = plan.get("schema_version") in (PLAN_V2, PLAN_V3)
-        if size_plan and limits != plan["request"]["limits"]["child"]:
+        bounded_plan = plan.get("schema_version") in (PLAN_V2, PLAN_V3, "regression_search_plan.v1")
+        if bounded_plan and limits != plan["request"]["limits"]["child"]:
             raise fail("INVALID_EXPERIMENT_SPEC", "v2 trial limits differ from sealed request")
         validate_execution_limits(limits)
         attempt = {"limits": dict(limits), "candidate_id": candidate_id, "trial_id": key}
@@ -258,10 +255,11 @@ class SearchTrials:
             return self._executed(plan, outer_year, inner_year, candidate_id, attempt)
         forbid_fitting("SearchTrials.execute")
         forbid_legacy_fitting("SearchTrials.execute")
-        resolved = resolved_limits(self.conn, self.store, self.registration, plan, limits) if size_plan else execution_limits(limits)
+        resolved = resolved_limits(self.conn, self.store, self.registration, plan, limits) if bounded_plan else execution_limits(limits)
         started = self._start(outer_year, inner_year, candidate_id, attempt, plan)
         inputs = started["inputs"]
         execution = execution_for_candidate(self.registration.document, candidate)
+        regression = execution.get("schema_version") == "regression_candidate_execution.v1"
         fits, pending = [], []
         expected = self._fit_evidence(inputs, inner, plan, execution)
 
@@ -269,12 +267,13 @@ class SearchTrials:
             index = len(fits)
             if index >= len(expected) or (state == "started") == bool(pending):
                 raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search fit progress differs from admitted inputs")
-            if state == "started":
+            if state == "started" or regression:
                 if canonical_json(fit) != canonical_json(expected[index]):
                     raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search fit progress differs from admitted inputs")
-                pending.append(fit)
             elif not _completed_fit(fit, expected[index]):
                 raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search fit progress differs from admitted inputs")
+            if state == "started":
+                pending.append(fit)
             self._append("fit-" + state + ":" + key + ":" + str(fit["horizon_sessions"]), fit, replay=False)
             if state == "completed":
                 pending.pop()
@@ -284,12 +283,13 @@ class SearchTrials:
         admitted = self._read("inputs:" + key)
         source = {"manifest": self._read("cohort:" + admitted["cohort"]), "inputs_id": admitted["inputs_id"],
                   "store_root": str(self.store.root)}
-        if size_plan:
+        if bounded_plan:
             resolved = resolved_limits(self.conn, self.store, self.registration, plan, limits)
         result = run_fitted_trial(source, inner, plan, execution, resolved, progress)
         succeeded = isinstance(result, dict) and result.get("event") == "succeeded"
-        timing = {"score_seconds", "rss_delta_kib"}
-        if (not isinstance(result, dict) or result.get("event") not in ("succeeded", "failed") or not _timing(result)
+        timing = set() if regression else {"score_seconds", "rss_delta_kib"}
+        if (not isinstance(result, dict) or result.get("event") not in ("succeeded", "failed")
+                or (not regression and not _timing(result))
                 or (succeeded and (pending or len(fits) != len(plan["horizons"]) or set(result) != {"event", "forecasts"} | timing | diagnostic_keys(self.registration.document)))
                 or (not succeeded and (len(pending) != 1 or set(result) != {"event"} | timing))):
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search fit completion differs from admitted attempts")
@@ -300,7 +300,7 @@ class SearchTrials:
         evidence = {"attempt": attempt, "fit_attempt_count": len(fits) + len(pending),
                     "completed_fit_count": len(fits), "fits": fits, "status": result["event"],
                     "forecasts_id": content_hash(result["forecasts"]) if succeeded else None,
-                    "score_seconds": result["score_seconds"], "rss_delta_kib": result["rss_delta_kib"],
+                    **{name: result[name] for name in timing},
                     **diagnostic_evidence(result, execution, plan["horizons"])}
         self._append("execution:" + key, evidence, replay=False)
         self._record(outer_year, inner_year, candidate_id, native=True, **({"forecasts": result["forecasts"]} if succeeded
@@ -355,6 +355,8 @@ class SearchTrials:
             succeeded = result["event"] == "succeeded"
             timing = {"score_seconds", "rss_delta_kib"}
             timed = "score_seconds" in result or "rss_delta_kib" in result
+            if "target" in plan and timed:
+                raise ValueError
             if timed:
                 if (not _timing(result)
                         or set(result) != (({"event", "forecasts"} | timing | diagnostic_keys(self.registration.document)) if succeeded else {"event"} | timing)):
@@ -364,7 +366,7 @@ class SearchTrials:
             forecasts = None
             if succeeded:
                 try:
-                    forecasts = self._forecasts(result["forecasts"], inner, plan["horizons"])
+                    forecasts = self._forecasts(result["forecasts"], inner, plan["horizons"], plan.get("target"))
                 except OpsError:
                     raise ValueError from None
                 if canonical_json(forecasts) != canonical_json(result["forecasts"]):
@@ -437,11 +439,15 @@ class SearchTrials:
         return {**receipt, "terminal": terminal, "evaluation_authority": "none"}
 
     @staticmethod
-    def _forecasts(forecasts, inner, horizons):
+    def _forecasts(forecasts, inner, horizons, target=None):
         try:
-            return json.loads(canonical_json(normalize_forecasts(forecasts, inner, horizons)))
+            return json.loads(canonical_json(normalize_forecasts(forecasts, inner, horizons, target=target)))
         except (ValueError, TypeError, OverflowError):
             raise fail("INVALID_EXPERIMENT_SPEC", "trial forecasts require complete finite event-horizon coverage") from None
+
+    @staticmethod
+    def _metrics(rows, plan):
+        return magnitude_metrics(rows, target=plan["target"]) if "target" in plan else magnitude_metrics(rows)
 
     def record(self, outer_year, inner_year, candidate_id, *, forecasts=None, failure=None):
         """Submit forecasts/failure, or replay a completed trial; never recover native work."""
@@ -451,11 +457,14 @@ class SearchTrials:
         """Commit forecasts before labels; a journaled cohort validation is reused; native reconciliation can finish publication."""
         plan = self._admit()
         key, inner, _ = self._trial(plan, outer_year, inner_year, candidate_id)
+        column = plan.get("target", {}).get("column", "absolute_move_pct")
         if self._read("start:" + key) is None:
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "trial must be started before recording")
         if (forecasts is None) == (failure is None):
             raise fail("INVALID_EXPERIMENT_SPEC", "record exactly one forecast submission or failure")
         execution = self._read("execution-start:" + key)
+        if "target" in plan and execution is None:
+            raise fail("EXPERIMENT_IDENTITY_CONFLICT", "regression recording requires native execution accounting")
         submitted = None
         if execution is not None:
             if not native and self._read("terminal:" + key) is None:
@@ -464,7 +473,7 @@ class SearchTrials:
             if not isinstance(completed, dict) or completed.get("status") != ("failed" if failure is not None else "succeeded"):
                 raise fail("EXPERIMENT_IDENTITY_CONFLICT", "native completion differs from recording")
             if forecasts is not None:
-                submitted = self._forecasts(forecasts, inner, plan["horizons"])
+                submitted = self._forecasts(forecasts, inner, plan["horizons"], plan.get("target"))
                 if content_hash(submitted) != completed.get("forecasts_id"):
                     raise fail("EXPERIMENT_IDENTITY_CONFLICT", "native completion differs from recording")
         if failure is not None:
@@ -481,7 +490,7 @@ class SearchTrials:
             # Native execute/reconcile verifies the receipt once at its return boundary.
             return terminal if native else self._terminal(plan, outer_year, inner_year, candidate_id)[1]
         if submitted is None:
-            submitted = self._forecasts(forecasts, inner, plan["horizons"])
+            submitted = self._forecasts(forecasts, inner, plan["horizons"], plan.get("target"))
         terminal = self._read("terminal:" + key)
         if terminal is not None:
             if self._read("forecasts:" + key) != submitted:
@@ -501,23 +510,23 @@ class SearchTrials:
             if content_hash(self._cohort_inputs(admitted["cohort"], inner)) != content_hash(stored):
                 raise fail("EXPERIMENT_IDENTITY_CONFLICT", "trial native inputs changed after start")
             binding = self.registration.document
-            labels = load_magnitude_targets(self.repository, from_document(SnapshotRef, binding["snapshot"]),
+            labels = evaluation_targets(self.repository, binding, inner) if "target" in plan else load_magnitude_targets(self.repository, from_document(SnapshotRef, binding["snapshot"]),
                 as_of_month=binding["holdouts"]["holdout_as_of_month"], labels_before=inner["evaluation_labels_before"],
                 event_ids=inner["evaluation_event_ids"], omit_not_computed=True)
             validation = {"inputs_id": admitted["inputs_id"], "evaluation_inputs": dict(labels.attrs),
-                          "targets": labels[["event_id", "absolute_move_pct"]].to_dict("records")}
+                          "targets": labels[["event_id", column]].to_dict("records")}
         try:
             self._validation(inner, admitted, stored if stored is not None else self._cohort(admitted), validation)
         except (ValueError, TypeError, KeyError, OverflowError):
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search validation evidence differs") from None
         validation = self._append("validation:" + admitted["cohort"], validation)
-        targets = {row["event_id"]: row["absolute_move_pct"] for row in validation["targets"]}
-        scored = [{**row, "absolute_move_pct": targets[row["event_id"]]}
+        targets = {row["event_id"]: row[column] for row in validation["targets"]}
+        scored = [{**row, column: targets[row["event_id"]]}
                   for row in submitted if row["event_id"] in targets]
         try:
             if execution is not None and _timing(completed):
                 metric_start = time.monotonic()
-                metrics = magnitude_metrics(scored)
+                metrics = self._metrics(scored, plan)
                 metric_seconds = time.monotonic() - metric_start
                 terminal = {"status": "succeeded", "inputs_id": admitted["inputs_id"],
                             "validation_id": content_hash(validation), "evaluation_inputs": validation["evaluation_inputs"],
@@ -528,7 +537,7 @@ class SearchTrials:
             else:
                 terminal = {"status": "succeeded", "inputs_id": admitted["inputs_id"],
                             "validation_id": content_hash(validation), "evaluation_inputs": validation["evaluation_inputs"],
-                            "predictions": scored, "metrics": magnitude_metrics(scored)}
+                            "predictions": scored, "metrics": self._metrics(scored, plan)}
         except OpsError as error:
             if _candidate_failure(_problem(error.problem)):
                 self._refused(key, error)
@@ -573,6 +582,8 @@ class SearchTrials:
         owner_year, _ = canonical_inner(plan, outer_year, inner_year)
         cohort_id = cohort_key(plan, owner_year, inner_year)
         record = self._read("terminal:" + key)
+        column = plan.get("target", {}).get("column", "absolute_move_pct")
+        prediction = plan.get("target", {}).get("prediction_column", "predicted_absolute_move_pct")
         if record is None:
             raise fail("EXPERIMENT_VARIANT_FAILED", "search selection requires every terminal attempt")
         try:
@@ -586,7 +597,7 @@ class SearchTrials:
                 if not isinstance(execution, dict):
                     raise ValueError
                 timed = "score_seconds" in execution or "rss_delta_kib" in execution
-                if timed and not _timing(execution):
+                if timed and ("target" in plan or not _timing(execution)):
                     raise ValueError
             if canonical_json(self._read("start:" + key)) != canonical_json(expected):
                 raise ValueError
@@ -599,7 +610,7 @@ class SearchTrials:
             submitted = self._read("forecasts:" + key)
             if submitted is not None:
                 try:
-                    submitted = self._forecasts(submitted, inner, plan["horizons"])
+                    submitted = self._forecasts(submitted, inner, plan["horizons"], plan.get("target"))
                 except OpsError:
                     raise ValueError from None
                 validation = self._read("validation:" + admitted["cohort"])
@@ -610,9 +621,9 @@ class SearchTrials:
                     fields |= {"score_seconds", "rss_delta_kib", "inner_metrics"}
                 if set(record) != fields:
                     raise ValueError
-                forecasts = [{name: row[name] for name in ("event_id", "horizon_sessions", "predicted_absolute_move_pct")}
+                forecasts = [{name: row[name] for name in ("event_id", "horizon_sessions", prediction)}
                              for row in record["predictions"]]
-                targets = {row["event_id"]: row["absolute_move_pct"] for row in validation["targets"]}
+                targets = {row["event_id"]: row[column] for row in validation["targets"]}
                 scored_forecasts = ([row for row in submitted if row["event_id"] in targets]
                                     if submitted is not None else None)
                 if (submitted is None or record["inputs_id"] != admitted["inputs_id"]
@@ -620,11 +631,11 @@ class SearchTrials:
                         or record["validation_id"] != content_hash(validation)
                         or record["evaluation_inputs"] != validation["evaluation_inputs"]):
                     raise ValueError
-                expected_rows = [{**row, "absolute_move_pct": targets[row["event_id"]]} for row in scored_forecasts]
+                expected_rows = [{**row, column: targets[row["event_id"]]} for row in scored_forecasts]
                 if canonical_json(record["predictions"]) != canonical_json(expected_rows):
                     raise ValueError
                 try:
-                    metrics = magnitude_metrics(record["predictions"])
+                    metrics = self._metrics(record["predictions"], plan)
                 except (OpsError, OverflowError):
                     raise ValueError from None
                 if canonical_json(record["metrics"]) != canonical_json(metrics):
@@ -754,7 +765,7 @@ class SearchTrials:
                 if failed:
                     scores.append({"candidate_id": candidate["candidate_id"], "metrics": None})
                 elif policy is None:
-                    scores.append({"candidate_id": candidate["candidate_id"], "metrics": magnitude_metrics(rows)})
+                    scores.append({"candidate_id": candidate["candidate_id"], "metrics": self._metrics(rows, plan)})
                 else:
                     try:
                         pooled_history = [

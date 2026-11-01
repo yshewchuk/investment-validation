@@ -73,55 +73,55 @@ def counting_read(monkeypatch):
 def test_five_calls_with_same_key_read_once(counting_read):
     repo, source, binding = _Repo(), _snapshot("snap-1"), _binding()
     for _ in range(5):
-        _stored_panel(repo, source, binding, ["a", "b"])
+        _stored_panel(repo, source, binding, ["n_prior", "mean_prior_move"])
     assert counting_read["n"] == 1
 
 
 def test_tampered_binding_size_panel_refuses(counting_read):
     repo, source, binding = _Repo(), _snapshot("snap-2"), _binding()
-    _stored_panel(repo, source, binding, ["a", "b"])
+    _stored_panel(repo, source, binding, ["n_prior", "mean_prior_move"])
     binding["size_panel"]["feature_snapshot"] = {"feature_snapshot_id": "forged"}
     with pytest.raises(OpsError) as error:
-        _stored_panel(repo, source, binding, ["a", "b"])
+        _stored_panel(repo, source, binding, ["n_prior", "mean_prior_move"])
     assert error.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
     assert counting_read["n"] == 1
 
 
 def test_tampered_memoised_panel_refuses_without_reread(counting_read):
     repo, source, binding = _Repo(), _snapshot("snap-3"), _binding()
-    _stored_panel(repo, source, binding, ["a", "b"])
+    _stored_panel(repo, source, binding, ["n_prior", "mean_prior_move"])
     next(iter(binding_mod._PANEL_MEMO.values()))["panel"]["context"]["target_events"][0]["event_id"] = "poisoned"
     with pytest.raises(OpsError) as error:
-        _stored_panel(repo, source, binding, ["a", "b"])
+        _stored_panel(repo, source, binding, ["n_prior", "mean_prior_move"])
     assert error.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
     assert counting_read["n"] == 1
 
 
 def test_different_key_triggers_second_read(counting_read):
     repo, source, binding = _Repo(), _snapshot("snap-4"), _binding()
-    _stored_panel(repo, source, binding, ["a", "b"])
-    _stored_panel(repo, source, binding, ["a", "b", "c"])
+    _stored_panel(repo, source, binding, ["n_prior", "mean_prior_move"])
+    _stored_panel(repo, source, binding, ["n_prior", "mean_prior_move", "mean_prior_abs_move"])
     assert counting_read["n"] == 2
     assert len(binding_mod._PANEL_MEMO) == 1
 
 
 def test_warm_memo_still_type_validates_horizons(counting_read):
     repo, source, binding = _Repo(), _snapshot("snap-4b"), _binding()
-    _stored_panel(repo, source, binding, ["a", "b"])
+    _stored_panel(repo, source, binding, ["n_prior", "mean_prior_move"])
     binding["size_panel_request"]["horizons"] = [1.0, 3, 5]
     with pytest.raises(OpsError) as error:
-        _stored_panel(repo, source, binding, ["a", "b"])
+        _stored_panel(repo, source, binding, ["n_prior", "mean_prior_move"])
     assert error.value.code == "INVALID_EXPERIMENT_SPEC"
     assert counting_read["n"] == 1
 
 
 def test_returned_frame_is_a_private_copy(counting_read):
     repo, source, binding = _Repo(), _snapshot("snap-5"), _binding()
-    first = _stored_panel(repo, source, binding, ["a", "b"])
+    first = _stored_panel(repo, source, binding, ["n_prior", "mean_prior_move"])
     pristine = _panel()
     first["rows"].append({"event_id": "evil"})
     first["context"]["target_events"] = []
-    assert _stored_panel(repo, source, binding, ["a", "b"]) == pristine
+    assert _stored_panel(repo, source, binding, ["n_prior", "mean_prior_move"]) == pristine
     assert counting_read["n"] == 1
 
 
