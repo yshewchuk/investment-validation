@@ -2298,6 +2298,7 @@ def _verified_trace_bundle(pair: Mapping[str, Any], release_root: Path) -> dict:
             inputs, release_root=release_root, release=frozen_replay.release)
     return {
         "request": request,
+        "legacy_event_date": legacy_request["event_date"],
         "inputs": inputs,
         "input_hash": shared_hash,
         "native_input_hash": native_hash,

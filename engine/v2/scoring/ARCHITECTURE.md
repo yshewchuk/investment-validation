@@ -220,11 +220,11 @@ outside chooser inputs and the receipt.
 not used by this legacy capture path.
 
 `native_chooser`/`native_chooser_features` derive candidate features after
-native pricing and simulation. Invalid declared frozen state flags
-`MODEL_NOT_READY`; missing/nonfinite champion inputs flag the advisory
-`CHOOSER_MISSING_FEATURES` and withhold `chooser_score`.
-Feature math never fits; frozen executors own model inference. `release_bindings`
-exposes verified chooser pools/depth tables; nightly declares no chooser block.
+native pricing and simulation. Invalid declared state flags `MODEL_NOT_READY`;
+missing/nonfinite champion inputs flag advisory `CHOOSER_MISSING_FEATURES` and
+withhold `chooser_score`. Feature math never fits; frozen executors own
+inference. `release_bindings` exposes/selects request-bound chooser state;
+nightly refuses missing state for registered members as `MODEL_NOT_READY`.
 
 `application.score_event` requires the complete ordered `DYNAMIC_MENU`, scores
 its members and resolves DYN-SV over finite simulation-bearing candidates:
@@ -707,16 +707,14 @@ and the release is not consulted for it.
 
 #### Chooser fold provenance reference
 
-A verified chooser-fold reference carries the descriptor/estimator hashes,
-fold month, training cutoff, producer binding and authoring/carrying release ids;
-training_cutoff is fold_start, the exclusive training boundary.
-`resolve_release_binding` returns an empty
-`chooser_fold_references` map by default and does not load chooser estimators
-for ordinary nightly scoring. Callers that need these references opt in with
-`include_chooser_fold_references=True`; resolution returns a complete map or a
-typed refusal. Strict capture opts in, passes verified references to the
-scorer, and records both release ids in trace metadata. Ordinary nightly
-scoring loads no chooser estimators and infers no provenance from legacy rows.
+A verified chooser-fold reference binds descriptor/estimator hashes, fold
+month, producer binding and both release ids; `training_cutoff` is the
+descriptor's canonical, hash-verified estimator cutoff, distinct from
+`fold_start`.
+Default binding resolution leaves references empty and loads no chooser folds.
+Nightly opts in and receives verified authoring contexts; exact-release replay
+uses the same verifier without reading the live pointer. Strict capture also
+opts in and records both release ids. Neither path infers legacy provenance.
 
 | Condition | Outcome |
 |---|---|
@@ -727,7 +725,7 @@ scoring loads no chooser estimators and infers no provenance from legacy rows.
 | A carried fold's authoring release lacks canonical cutoff data | ModelNotReady; no partial reference map |
 | Carried descriptor's original release, catalog membership or parent/hash fails | ModelNotReady; no partial reference map |
 | Re-resolving an unchanged valid chain | Same reference, with separate authoring and carrying ids (equal for an uncarried fold) |
-| Malformed, noncanonical or mismatched descriptor, estimator digest, parent binding, output or fold month | ModelNotReady; no partial reference map |
+| Malformed, noncanonical or mismatched descriptor, estimator digest, parent binding, output, training cutoff or fold month | ModelNotReady; no partial reference map |
 | Strict capture reference has an absent or unsafe authoring/carrying release id | StrictTraceCaptureError; no trace metadata is emitted |
 | Reference resolution requested for a verified release | Re-verify each binding resolution; no cross-call reference cache |
 | Model member exceeds its byte cap or is not a regular file | ModelNotReady before chooser bytes are decoded |

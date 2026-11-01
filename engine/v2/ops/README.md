@@ -168,7 +168,8 @@ STR-THRU, STR-RUNUP, TWIN-P, TWIN-P5, BFLY-P, BFLY-P5, CTR5, RAMP7 and CND-PS ar
 residual pools and the unique payoff surface with greatest DATA cutoff at or
 before the row cutoff; its model gate does not
 request separate simulation. Missing/unusable model artifacts refuse its row.
-There is no runtime registration API or chooser execution contract.
+There is no runtime registration API; registered menu members now declare
+chooser state, while DYN-SV selection remains in slice 2.
 
 `carried_set.CarriedTickerExclusion`, `carried_set.CarriedSetResolution`,
 `carried_set.resolve_carried_set`, and

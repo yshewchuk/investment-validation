@@ -56,7 +56,8 @@ def _rehash(catalog):
 
 
 def _store(tmp_path, cache, parent, role):
-    raw = _raw(cache)
+    training_cutoff = "2026-01-31"
+    raw = _raw({**cache, "training_cutoff": training_cutoff})
     digest = "sha256:" + hashlib.sha256(raw).hexdigest()
     member = ArtifactMember(name="estimator", path=f"objects/{digest[7:]}", content_hash=digest)
     path = tmp_path / member.path
@@ -74,6 +75,7 @@ def _store(tmp_path, cache, parent, role):
             interval_floor=0.0,
         ),
         fold_start="2026-02-01",
+        training_cutoff=training_cutoff,
         decision_clock_id="entry-close",
         estimator=member,
         pool_count=len(cache["pool_pred"]),
@@ -488,7 +490,8 @@ def test_no_fit_network_write_or_source_ready_claim(setup, monkeypatch):
             "descriptor", "catalog_hash", "pool_pred", "pool_res", "inference", "release"
         }
         assert {field.name for field in fields(metadata)} == {
-            "model_id", "fold_start", "panel_sha256", "feature_order", "pool_pred", "pool_res"
+            "model_id", "fold_start", "panel_sha256", "feature_order", "pool_pred", "pool_res",
+            "training_cutoff"
         }
         assert not any(hasattr(metadata, key) for key in ("fit", "estimator", "header"))
         assert not any(hasattr(value, key) for value in (ref, metadata)

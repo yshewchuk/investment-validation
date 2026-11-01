@@ -579,13 +579,13 @@ pinned COPY verification and pinned-size byte mismatches use `panel_copy_refused
 | Partial write | No pointer changes; staging may leave unreferenced files; no automatic store repair |
 | Cache | Authoring validates each supplied object anew; no process-global descriptor cache |
 
-**Chooser producer fold authoring.** `ChooserFoldPolicy` and `ChooserServingFoldDescriptor` declare `implied_t1`/`runup_move` under exact `tier4_folds:<role>` members. The descriptor binds the parent release, full panel hash, ordered features, clock, whole-cache estimator object (not the champion member), pool count and decile/floor policy. It records both the champion binding output and raw D14 chooser column; runup output is never day-scaled here. Standard release preparation obtains each present role's policy from its registered producer and validates the cache against that role's unique wildcard champion. Size descriptors keep their existing schema.
-The descriptor hash covers its canonical typed document, including parent, role and estimator identity.
+**Chooser producer fold authoring.** `ChooserFoldPolicy` and `ChooserServingFoldDescriptor` declare `implied_t1`/`runup_move` under exact `tier4_folds:<role>` members. The descriptor binds the parent release, full panel hash, ordered features, clock, whole-cache estimator object (not the champion member), pool count and decile/floor policy. It records both the champion binding output and raw D14 chooser column; runup output is never day-scaled here. Standard release preparation obtains each present role's policy from its registered producer and validates the cache against that role's unique wildcard champion. Size descriptors keep their existing schema. `training_cutoff` is canonical and hash-bound, equals hash-verified estimator metadata, and precedes both decision session and held-out fold start. Missing, malformed, mismatched or noncausal values refuse; no cutoff is inferred. This does not prove source finality or training membership; legacy folds without the cutoff refuse preparation or selection as `MODEL_NOT_READY`.
+The descriptor hash covers its canonical typed document, including parent, role, estimator identity and `training_cutoff`.
 Without pinned COPY, the panel digest is caller-asserted; preparation does not verify panel bytes.
 
 | Chooser fold authoring condition | Outcome |
 |---|---|
-| Explicit coherent role policy and bounded cache | Catalog-hashed descriptor; no fitting or prediction |
+| Explicit coherent role policy and bounded cache; valid canonical `training_cutoff` | Catalog-hashed descriptor; no fitting or prediction |
 | Unsupported role/output, mismatched policy/header/binding, malformed pool or oversized cache | Refuse preparation; no substitution by size or another role |
 | Invalid chooser role/features/panel/interval policy/floor or descriptor month/count/parent hash/clock/output/object (constructor/semantic checks) | Typed `DocumentError`; decode preserves nested paths |
 | Unsupported policy-map role or wrong policy type | Fixed `PrepareRefused`; distinguish unsupported role, invalid type and role/member disagreement |
@@ -742,8 +742,8 @@ per the root doc's layer table; `checks/import_layers.py` enforces this.
 - `engine.v2.scoring` — `gate_fold_selection.py` calls `load_serving_fold`,
   `validate_serving_fold_object` and `validate_serving_fold_descriptor` from
   `serving_fold_loader`; the verified frozen inference contract/loader for
-  the model stage, the payoff-calibration artifact type, and
-  `release_bindings.py`'s reads of `deployment.current_pointer`,
+  the model stage, the payoff-calibration artifact type; `release_bindings.py`
+  calls `load_chooser_serving_fold` and reads `deployment.current_pointer`,
   `deployment._read_manifest`, `deployment.manifest_hash_matches`,
   `deployment.production_release_root`, and `deployment.MissingReleaseRoot`.
   `release_bindings.py` also calls `serving_fold_loader.load_chooser_serving_fold`

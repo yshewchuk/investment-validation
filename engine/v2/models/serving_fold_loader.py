@@ -102,6 +102,9 @@ def _pools(metadata, descriptor):
             or len(metadata.pool_pred) != descriptor.pool_count
             or len(metadata.pool_res) != descriptor.pool_count):
         raise ServingFoldError()
+    if (isinstance(descriptor, ChooserServingFoldDescriptor)
+            and metadata.training_cutoff != descriptor.training_cutoff):
+        raise ServingFoldError()
     return metadata.pool_pred, metadata.pool_res
 
 
@@ -177,11 +180,11 @@ def _chooser_catalog_hash(catalog, descriptor, parent):
 def load_chooser_serving_fold(inference: FrozenInference, descriptor: ChooserServingFoldDescriptor, *,
                              verified_parent_manifest: StagedManifest,
                              verified_catalog: dict) -> ChooserServingFoldRef:
-    """Verify the exact declared chooser artifact, never select/admit sources.
+    """Verify the declared chooser artifact without selecting or admitting sources.
 
     Caller supplies its verified catalog/parent; membership and semantic identity
-    are rechecked here. Source finality/publication and causal training bounds are
-    not in the descriptor and cannot be established by this artifact-only API.
+    are rechecked here. The descriptor carries the required training cutoff, but
+    this artifact-only API cannot establish source finality or training membership.
     """
     try:
         descriptor = from_document(ChooserServingFoldDescriptor, to_document(descriptor))

@@ -272,8 +272,8 @@ class NoInference:
 
 def _cache(role, panel="a" * 64):
     return {"model_id": f"synthetic-{role}", "features": ["x", "y"],
-            "tier3_snapshot": panel, "fold_start": "2026-02-01", "estimator": NoInference(),
-            "pool_pred": [1.0, 3.0], "pool_res": [-0.5, 0.25]}
+            "tier3_snapshot": panel, "fold_start": "2026-02-01", "training_cutoff": "2026-01-31",
+            "estimator": NoInference(), "pool_pred": [1.0, 3.0], "pool_res": [-0.5, 0.25]}
 
 
 def _retry_inputs(role, cache):
@@ -314,6 +314,7 @@ def _assert_published_descriptor(root, role, cache, *, release_id="r1", clock="e
         expected["policy"].update(schema_version="size_fold_policy.v1.0", interval_policy="size-heldout-deciles.v1")
         del expected["policy"]["role"]
     else:
+        expected["training_cutoff"] = cache["training_cutoff"]
         expected["producer_output"] = OUTPUTS[role][1]
     assert obj["serving_fold"] == expected
     descriptor = from_document(descriptor_type, obj["serving_fold"])
@@ -352,6 +353,7 @@ def test_carried_chooser_fold_loads_from_verified_original_release(tmp_path, mon
     origin_ref = original.chooser_fold_references[
         (OUTPUTS[role][1], cache["fold_start"])]
     assert origin_ref.release_id == origin_ref.carrying_release_id == "origin"
+    assert origin_ref.training_cutoff == cache["training_cutoff"]
 
     release, inventory, payloads = release_inputs(role, cache, release_id="carried")
     deployment.stage_release(store, release, inventory, payloads)
@@ -376,6 +378,23 @@ def test_carried_chooser_fold_loads_from_verified_original_release(tmp_path, mon
     assert carried_ref.release_id == "origin"
     assert carried_ref.carrying_release_id == "carried"
     assert carried_ref.descriptor_hash == content_hash(origin_obj["serving_fold"])
+    assert carried_ref.training_cutoff == cache["training_cutoff"]
+
+    from engine.v2.models import loader, serving_fold_loader
+
+    references, contexts = rb.resolve_chooser_fold_authoring_contexts(tmp_path, "carried")
+    replay_ref = references[(OUTPUTS[role][1], cache["fold_start"])]
+    assert replay_ref.release_id == "origin"
+    assert replay_ref.carrying_release_id == "carried"
+    authoring_manifest, authoring_catalog = contexts[carried_ref.descriptor_hash]
+    assert authoring_manifest.release.release_id == "origin"
+    assert authoring_catalog["release_id"] == "origin"
+    descriptor = from_document(ChooserServingFoldDescriptor, origin_obj["serving_fold"])
+    verified = serving_fold_loader.load_chooser_serving_fold(
+        loader.FrozenInference(store), descriptor,
+        verified_parent_manifest=authoring_manifest,
+        verified_catalog=dict(authoring_catalog))
+    assert verified.descriptor.descriptor_hash == carried_ref.descriptor_hash
 
     carried_body_without_link = copy.deepcopy(carried_body)
     del carried_body_without_link["sources"]["carried_from"]
@@ -410,16 +429,17 @@ def test_carried_chooser_fold_loads_from_verified_original_release(tmp_path, mon
 
 
 @pytest.mark.parametrize("role", OUTPUTS)
-@pytest.mark.parametrize("count,month,clock,features,floor,release_id", [
-    (2, "2026-02-01", "entry-close", ["x", "y"], 0.0, "r1"),
-    (0, "2026-05-01", "next-open", ["b", "c", "a"], None, "empty-release"),
-    (1, "2025-11-01", "next-open", ["y", "x"], 1.25, "thin-release"),
+@pytest.mark.parametrize("count,month,clock,features,floor,release_id,training_cutoff", [
+    (2, "2026-02-01", "entry-close", ["x", "y"], 0.0, "r1", "2026-01-31"),
+    (0, "2026-05-01", "next-open", ["b", "c", "a"], None, "empty-release", "2026-04-30"),
+    (1, "2025-11-01", "next-open", ["y", "x"], 1.25, "thin-release", "2025-10-31"),
 ])
 def test_real_authoring_preserves_exact_role_identity_and_metadata(
-        tmp_path, role, count, month, clock, features, floor, release_id):
+        tmp_path, role, count, month, clock, features, floor, release_id, training_cutoff):
     cache = _cache(role)
     cache.update(model_id=f"{release_id}-{role}", fold_start=month, features=features,
-                 pool_pred=[1.0] * count, pool_res=[-0.5] * count)
+                 training_cutoff=training_cutoff, pool_pred=[1.0] * count,
+                 pool_res=[-0.5] * count)
     args = release_inputs(role, cache, clock=clock, release_id=release_id)
     states = prep.build_states({f"tier4_folds:{role}": {fold_name(cache): fold_bytes(cache)}},
                                chooser_fold_policies={role: chooser_policy(role, cache, floor=floor)})
@@ -445,8 +465,8 @@ def test_real_authoring_preserves_exact_role_identity_and_metadata(
     assert deployment.current_pointer(tmp_path / "deployment") is None
 
 
-@pytest.mark.parametrize("identity", ["parent_release_id", "parent_release_hash", "role", "estimator"])
-def test_descriptor_hash_binds_parent_role_and_estimator_identity(tmp_path, identity):
+@pytest.mark.parametrize("identity", ["parent_release_id", "parent_release_hash", "role", "estimator", "training_cutoff"])
+def test_descriptor_hash_binds_parent_role_estimator_and_training_cutoff(tmp_path, identity):
     role, cache = "implied_t1", _cache("implied_t1")
     prep.write_release(tmp_path, *release_inputs(role, cache), fold_states(role, cache))
     _body, obj = _assert_published_descriptor(tmp_path, role, cache)
@@ -462,6 +482,10 @@ def test_descriptor_hash_binds_parent_role_and_estimator_identity(tmp_path, iden
         expected["estimator"]["path"] = "objects/" + "b" * 64
         changed = dataclasses.replace(original, estimator=dataclasses.replace(
             original.estimator, content_hash="sha256:" + "b" * 64, path="objects/" + "b" * 64))
+    elif identity == "training_cutoff":
+        value = "2026-01-30"
+        expected[identity] = value
+        changed = dataclasses.replace(original, training_cutoff=value)
     else:
         value = "other-release" if identity == "parent_release_id" else "sha256:" + "c" * 64
         expected[identity] = value
@@ -773,16 +797,28 @@ def test_retained_parent_guard_rejects_actual_identity_changes(tmp_path, role, i
     assert published_manifest(tmp_path / "deployment") == manifest
 
 
+def test_chooser_preflight_refuses_missing_training_cutoff():
+    cache = _cache("implied_t1")
+    cache.pop("training_cutoff")
+    data = fold_bytes(cache)
+    policy = chooser_policy("implied_t1", cache)
+    release = release_inputs("implied_t1", cache)[0]
+    with pytest.raises(ValueError, match="invalid chooser training cutoff"):
+        folds.preflight_chooser_fold(data, fold_name(cache), policy, release)
+
+
 @pytest.mark.parametrize("role", OUTPUTS)
 @pytest.mark.parametrize("count", [0, 1])
 def test_empty_and_thin_pools_keep_explicit_counts(role, count):
     cache = _cache(role)
     cache.update(pool_pred=[1.0] * count, pool_res=[-0.5] * count)
+    cache["training_cutoff"] = "2026-01-31"
     data, policy, release = fold_bytes(cache), chooser_policy(role, cache), release_inputs(role, cache)[0]
     validated = folds.preflight_chooser_fold(data, fold_name(cache), policy, release)
     expected = {"fold_start": "2026-02-01", "decision_clock_id": "entry-close",
                 "digest": hashlib.sha256(data).hexdigest(), "pool_count": count,
                 "policy": policy, "release": release}
+    expected["training_cutoff"] = "2026-01-31"
     assert vars(validated) == expected
     assert {field.name for field in dataclasses.fields(validated)} == set(expected)
     with pytest.raises(dataclasses.FrozenInstanceError):

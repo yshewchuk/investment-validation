@@ -231,6 +231,7 @@ def test_checkpoint_resumes_without_replaying_again(tmp_path, monkeypatch):
 
     assert summary2["dispositions"] == summary1["dispositions"]
     assert findings2 == findings1
+    assert summary2["rows"] == summary1["rows"]
     # no duplicate line was appended for the pair served from the checkpoint
     assert len(checkpoint.read_text().strip().splitlines()) == 1
 
@@ -276,15 +277,18 @@ def test_checkpoint_from_a_different_corpus_is_discarded(tmp_path, monkeypatch):
     summary_b, _ = replay.replay_corpus(corpus_b, root, model_release, manifest,
                                         checkpoint_path=checkpoint)
 
-    # corpus_b's pair WAS freshly replayed (not silently served from corpus_a's
-    # checkpoint row for the same fixture_id "pair-1"), and the checkpoint file
-    # now carries both corpora's rows, correctly identity-tagged
+    # The corpus-A row is discarded before corpus B is written, so the new
+    # scope can resume on a later invocation.
     assert len(calls) == 1
     assert summary_b["dispositions"]["replayed"] == 1
     lines = checkpoint.read_text().strip().splitlines()
-    assert len(lines) == 2
-    hashes = {json.loads(line)["corpus_hash"] for line in lines}
-    assert hashes == {row_a["corpus_hash"], index_b["corpus_hash"]}
+    assert len(lines) == 1
+    assert json.loads(lines[0])["corpus_hash"] == index_b["corpus_hash"]
+
+    summary_b_again, _ = replay.replay_corpus(
+        corpus_b, root, model_release, manifest, checkpoint_path=checkpoint)
+    assert len(calls) == 1
+    assert summary_b_again["rows"] == summary_b["rows"]
 
 
 def test_corpus_with_no_traced_pair_is_empty(tmp_path):

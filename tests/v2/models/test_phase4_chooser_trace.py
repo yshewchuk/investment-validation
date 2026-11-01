@@ -56,6 +56,7 @@ from tools.capture_tier0_corpus import (
     chooser_trace,
     frozen_chooser_declaration,
     make_pair,
+    validated_chooser_fold_references,
 )
 
 CLOCK = "legacy.decision_offset.0"
@@ -76,10 +77,50 @@ def _chooser_request(case):
     return replace(cf._request(case["strategy"]), decision_clock_id=CLOCK)
 
 
+def _add_synthetic_chooser_fold_references(candidate, request):
+    source = candidate["legacy_trace"]["checkpoints"]["source_inputs"]["value"]
+    frozen = source["frozen"]
+    bindings = frozen.get("bindings") or {}
+    chooser_references = {}
+    for key, declaration in (frozen.get("declarations") or {}).items():
+        if not (isinstance(key, str) and key.startswith("chooser_fold:")
+                and "binding" in declaration):
+            continue
+        output = key.split(":", 1)[1]
+        binding = bindings[declaration["binding"]]
+        declaration["producer_identity"] = {
+            "binding_id": "test-" + output,
+            "model_id": binding["model_id"],
+            "role": binding["role"],
+            "strategy_id": binding.get("strategy_id", "DYN-SV"),
+            "decision_clock_id": binding.get("decision_clock_id", CLOCK),
+            "adapter": binding.get("adapter", "tier4-serving-fold.v1"),
+            "feature_order": binding.get("feature_order", ()),
+            "output_names": binding["output_names"],
+            "artifact_hash": "sha256:" + binding["artifact_sha256"],
+        }
+        chooser_references[output] = {
+            "producer_output": output,
+            "release_id": "release-1",
+            "carrying_release_id": "release-1",
+            "fold_start": binding["fold_start"],
+            "training_cutoff": "2025-01-01",
+            "descriptor_hash": "sha256:" + "a" * 64,
+            "estimator_sha256": "sha256:" + binding["artifact_sha256"],
+            "release_binding": copy.deepcopy(declaration["producer_identity"]),
+        }
+    frozen["chooser_references"] = chooser_references
+    candidate["legacy_trace"]["checkpoints"]["source_inputs"]["content_hash"] = content_hash(source)
+    return source
+
+
 def _declared_plan(candidate, case, tmp_path, *, tamper=None):
     request = _chooser_request(case)
+    source = _add_synthetic_chooser_fold_references(candidate, request)
+    chooser_fold_references = validated_chooser_fold_references(source, request)
     declaration, package, extra = frozen_chooser_declaration(
-        candidate, deployment_id=request.deployment_id, release_root=tmp_path / "release")
+        candidate, deployment_id=request.deployment_id, release_root=tmp_path / "release",
+        chooser_fold_references=chooser_fold_references)
     if tamper is not None:
         declaration = tamper(copy.deepcopy(declaration))
     resources = _package_resources(package) + extra
@@ -183,14 +224,18 @@ def test_frozen_chooser_refuses_a_tampered_pool_file_and_stray_chooser_keys(
 def test_a_pool_file_changed_since_legacy_read_it_is_refused(
         chooser_root, tmp_path, monkeypatch):  # noqa: F811
     case, candidate = _captured_chooser(chooser_root, tmp_path, monkeypatch)
+    _add_synthetic_chooser_fold_references(candidate, _chooser_request(case))
     frame = cf.pool_frame()
     frame.iloc[::-1].to_parquet(tmp_path / score_mod.CHOOSER_ANALOG_POOL, index=False)
     import tools.capture_tier0_corpus as capture
 
     monkeypatch.setattr(capture, "_CHOOSER_POOL_STATES", {})
     with pytest.raises(StrictTraceCaptureError, match="differs from the one legacy loaded"):
-        frozen_chooser_declaration(candidate, deployment_id="dep-1",
-                                   release_root=tmp_path / "release")
+        frozen_chooser_declaration(
+            candidate, deployment_id="dep-1", release_root=tmp_path / "release",
+            chooser_fold_references=validated_chooser_fold_references(
+                candidate["legacy_trace"]["checkpoints"]["source_inputs"]["value"],
+                _chooser_request(case)))
 
 
 # -- the multi-member dyn_sv_choice trace ----------------------------------------------
@@ -382,12 +427,10 @@ def _menu_row_with_frozen_chooser(chooser_root, tmp_path, monkeypatch):  # noqa:
     trace carries the frozen chooser, published under ``tmp_path/published``."""
     import shutil
 
-    from tools import capture_tier0_corpus as capture
-
-    monkeypatch.setattr(capture, "validated_chooser_fold_references", lambda source, request: None)
     from tools.capture_tier0_corpus import strict_trace_one
 
     _case, chooser_candidate = _captured_chooser(chooser_root, tmp_path, monkeypatch)
+    _add_synthetic_chooser_fold_references(chooser_candidate, _chooser_request(_case))
     source = chooser_candidate["legacy_trace"]["checkpoints"]["source_inputs"]["value"]
     path, digest = _artifact(tmp_path)
     candidate = _full_strict_candidate(
@@ -447,13 +490,11 @@ def _stage_everything(verified, corpus_root, release_root):
     return staged
 
 
-def test_phase5_replay_serves_the_frozen_chooser_from_the_staged_release(
+def test_phase5_replay_refuses_unverified_staged_chooser_provenance(
         chooser_root, tmp_path, monkeypatch):  # noqa: F811
-    """The P5-6 replay rebinds the chooser champion, its producer folds, the
-    k-NN pool and the n_admissible table to the staged release by content
-    hash; the pair replays, and each missing piece is ``member_absent``."""
+    """The replay refuses trace-declared chooser provenance when it cannot bind
+    it to staged descriptors."""
     from checks import phase5_phase4_replay as replay
-    from engine.v2.models import release_layout as layout
 
     pair, _trace, _native = _menu_row_with_frozen_chooser(chooser_root, tmp_path, monkeypatch)
     corpus = tmp_path / "published"
@@ -462,35 +503,8 @@ def test_phase5_replay_serves_the_frozen_chooser_from_the_staged_release(
     staged = _stage_everything(verified, corpus, staged_root)
 
     row = replay._replay_pair(pair, corpus, staged_root, staged)
-    assert row["disposition"] == "replayed", row
-    assert {"chooser_analog_pool", "admissible_table:dyn_sv",
-            "tier4_folds:chooser:chooser"} <= set(row["members"])
-
-    chooser = verified["frozen_chooser"]
-    champion = next(b for b in chooser.release.bindings if b.role == "chooser")
-    for dropped, marker in ((champion.members[0].content_hash, champion.binding_id),
-                            (chooser.analog_pool.content_hash, "chooser:analog_pool")):
-        without = {h: m for h, m in staged.items() if h != dropped}
-        if marker == "chooser:analog_pool":
-            without = {h: m for h, m in staged.items() if m != "chooser_analog_pool"}
-        row = replay._replay_pair(pair, corpus, staged_root, without)
-        assert row["disposition"] == "member_absent", row
-        assert marker in row["detail"]
-
-    # The staged bytes are what the rebuilt champion executes (this synthetic
-    # menu row declines the ranking, so drive the executor directly): with the
-    # staged object removed it refuses, although the corpus copy is intact.
-    block, absent, _used = replay.rebind_chooser(chooser, verified["request"], staged_root,
-                                                 staged)
-    assert absent == [] and block["analog_pool"] is not None
-    facts = {name: 0.0 for name in champion.feature_order}
-    assert "chooser_score" in block["executors"]["chooser_score"].predict(facts)
-    (layout.deployment_root(staged_root)
-     / layout.object_relpath(champion.members[0].content_hash)).unlink()
-    block, _absent, _used = replay.rebind_chooser(chooser, verified["request"], staged_root,
-                                                  staged)
-    with pytest.raises(Exception):  # noqa: B017 -- any refusal: the bytes are gone
-        block["executors"]["chooser_score"].predict(facts)
+    assert row["disposition"] == "member_absent"
+    assert "chooser:fold_provenance:unverifiable" in row["detail"]
 
 
 # -- P6: chooser trace memory shape (fold pools shared, not copied per member) --------
@@ -608,10 +622,8 @@ def _shared_chooser_member(source, tmp_path, index, *, path, digest):
 
 def test_dyn_sv_choice_members_sharing_a_fold_pool_share_it_by_identity_and_hash_stays_byte_identical(
         chooser_root, tmp_path, monkeypatch):  # noqa: F811
-    from tools import capture_tier0_corpus as capture
-
-    monkeypatch.setattr(capture, "validated_chooser_fold_references", lambda source, request: None)
     _case, chooser_candidate = _captured_chooser(chooser_root, tmp_path, monkeypatch)
+    _add_synthetic_chooser_fold_references(chooser_candidate, _chooser_request(_case))
     source = chooser_candidate["legacy_trace"]["checkpoints"]["source_inputs"]["value"]
     path, digest = _artifact(tmp_path)
     members = [_shared_chooser_member(source, tmp_path, i, path=path, digest=digest)
@@ -658,10 +670,8 @@ def test_dyn_sv_choice_members_sharing_a_fold_pool_share_it_by_identity_and_hash
 
 def test_a_pair_over_a_shared_chooser_document_hashes_like_the_plain_digest(
         chooser_root, tmp_path, monkeypatch):  # noqa: F811
-    from tools import capture_tier0_corpus as capture
-
-    monkeypatch.setattr(capture, "validated_chooser_fold_references", lambda source, request: None)
     _case, chooser_candidate = _captured_chooser(chooser_root, tmp_path, monkeypatch)
+    _add_synthetic_chooser_fold_references(chooser_candidate, _chooser_request(_case))
     source = chooser_candidate["legacy_trace"]["checkpoints"]["source_inputs"]["value"]
     path, digest = _artifact(tmp_path)
     members = [_shared_chooser_member(source, tmp_path, i, path=path, digest=digest)

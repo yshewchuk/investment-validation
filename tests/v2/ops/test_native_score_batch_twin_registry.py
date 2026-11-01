@@ -126,10 +126,9 @@ def test_entry_rule_declarations_or_refusal(monkeypatch):
 @pytest.mark.parametrize("name", ["TWIN-P", "TWIN-P5", "BFLY-P", "BFLY-P5", "CTR5", "RAMP7", "CND-PS"])
 def test_twin_row_assembly_declares_entry_rule_and_planned_exit(tmp_path, monkeypatch, name):
     binding = _stage(tmp_path, [SIZE, IV_CRUSH])
-    event = _event_inputs(
-        strategy=name,
-        panel_row={"date": "2026-01-15", "signal": 1.5, "mcap_log": 25.0, "iv30": 45.0},
-    )
+    panel_row = {"date": "2026-01-15", "signal": 1.5, "mcap_log": 25.0, "iv30": 45.0}
+    panel_row.update({name: 1.0 for name in nsb._CHOOSER_PRIMITIVES if name not in panel_row})
+    event = _event_inputs(strategy=name, panel_row=panel_row)
 
     recorded = {}
     def fake_entry_rule(binding, **kw):
@@ -154,6 +153,13 @@ def test_twin_row_assembly_declares_entry_rule_and_planned_exit(tmp_path, monkey
         return object()
 
     monkeypatch.setattr(nsb, "build_native_score_inputs", fake_build)
+    monkeypatch.setattr(nsb, "_apply_declared_chooser",
+                        lambda bundle, *_args, **_kwargs: bundle)
+    monkeypatch.setattr(nsb, "select_chooser_state", lambda *_args, **_kwargs: SimpleNamespace(
+        producer_bindings={
+            "pred_im_t1_d14": SimpleNamespace(feature_order=("signal",)),
+            "pred_runup_abs_move_d14": SimpleNamespace(feature_order=("iv30",)),
+        }))
 
     assembled, refusals = _assemble(binding, [event])
     assert refusals == ()

@@ -630,6 +630,9 @@ def test_full_vector_and_chooser_score_equal_legacy(frozen, analog, tmp_path, mo
                           legacy_features(legacy_case))
     if complete:
         assert result.chooser_score is not None, result.flags
+        expected_score = float(artifact.model.predict(
+            np.asarray([[native_vector[name] for name in CHOOSER_FEATURES]], dtype=float))[0])
+        assert record.forecasts["chooser_score"] == pytest.approx(expected_score)
         assert record.forecasts["chooser_score"] == result.chooser_score
     else:
         assert result.chooser_score is None and "CHOOSER_MISSING_FEATURES" in result.flags

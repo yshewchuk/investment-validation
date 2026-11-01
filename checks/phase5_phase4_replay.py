@@ -52,6 +52,19 @@ REPLAY_CODES = (PHASE4_UNVERIFIED, PHASE4_MEMBER_ABSENT, PHASE4_MISMATCH,
 DISPOSITIONS = ("replayed", "mismatch", "member_absent", "unverified", "error",
                 "untraced", "not_frozen")
 
+REPLAY_VALIDATION_VERSION = 3
+MAX_CHECKPOINT_BYTES = 64 * 1024 * 1024
+
+
+def _checkpoint_scope(corpus_hash: str | None, manifest: Mapping[str, Any]) -> str:
+    """Return the content hash of the canonical checkpoint scope: corpus, full
+    staged manifest and validation version."""
+    from engine.v2.foundation import content_hash
+
+    scope = {"corpus_hash": corpus_hash, "manifest": manifest,
+             "validation_version": REPLAY_VALIDATION_VERSION}
+    return content_hash(scope)
+
 
 #: Staged state members a replayed pair may read by content hash: the Tier-4
 #: serving folds (frozen bindings, including the chooser's producer folds),
@@ -63,15 +76,36 @@ _STAGED_STATE_PREFIXES = ("tier4_folds:", "trailing_pnl_cutoff", "chooser_analog
 def staged_model_objects(model_release, manifest: Mapping[str, Any]) -> dict[str, str]:
     """``content_hash -> member id`` for every object a frozen binding, or an
     entry-rule gate's trailing cutoff, may read."""
+    from engine.v2.foundation import from_document
+    from engine.v2.models.serving_folds import ChooserServingFoldDescriptor
+
     staged: dict[str, str] = {}
     for binding in model_release.bindings:
         for member in binding.members:
             staged.setdefault(member.content_hash,
                               f"model:{binding.role}:{binding.strategy_id}")
     for row in manifest.get("members", ()):
-        if str(row.get("member_id", "")).startswith(_STAGED_STATE_PREFIXES):
-            for obj in row.get("objects", ()):
-                staged.setdefault(obj["content_hash"], row["member_id"])
+        if not isinstance(row, Mapping):
+            continue
+        member_id = row.get("member_id", "")
+        if not isinstance(member_id, str) or not member_id.startswith(_STAGED_STATE_PREFIXES):
+            continue
+        for obj in row.get("objects", ()):
+            if not isinstance(obj, Mapping):
+                continue
+            content_hash = obj.get("content_hash")
+            if not isinstance(content_hash, str):
+                continue
+            staged.setdefault(content_hash, member_id)
+            doc = obj.get("serving_fold")
+            if isinstance(doc, Mapping):
+                try:
+                    descriptor = from_document(ChooserServingFoldDescriptor, doc)
+                except Exception:  # noqa: BLE001 -- malformed descriptor never binds
+                    continue
+                staged[f"__chooser_descriptor__:{descriptor.descriptor_hash}"] = (
+                    f"{descriptor.producer_output}\x1f{descriptor.training_cutoff}"
+                    f"\x1f{descriptor.fold_start}")
     return staged
 
 
@@ -129,20 +163,331 @@ def _staged_state(release_root: Path, staged: Mapping[str, str], prefix: str, ar
     return None, None
 
 
-def rebind_chooser(chooser, request, release_root: Path, staged: Mapping[str, str]):
+def _chooser_replay_dates(request: Any, legacy_event_date: Any = None):
+    from datetime import date, datetime
+
+    def parse(value):
+        if not isinstance(value, str):
+            return None
+        try:
+            parsed = date.fromisoformat(value)
+        except ValueError:
+            try:
+                parsed_datetime = datetime.fromisoformat(value)
+            except ValueError:
+                return None
+            if parsed_datetime.tzinfo is not None or parsed_datetime.isoformat() != value:
+                return None
+            return parsed_datetime.date()
+        if parsed.isoformat() != value:
+            return None
+        return parsed
+
+    event_day = parse(legacy_event_date)
+    decision_day = parse(getattr(request, "requested_decision_at", None))
+    if event_day is None or decision_day is None:
+        return None
+    return event_day, decision_day
+
+
+def _has_causal_chooser_fold_provenance(recipe: Any, request: Any,
+                                        staged: Mapping[str, str],
+                                        legacy_event_date: Any = None) -> bool:
+    from datetime import date
+
+    if not isinstance(recipe, Mapping):
+        return False
+    provenance = recipe.get("fold_provenance")
+    expected = {"pred_im_t1_d14", "pred_runup_abs_move_d14"}
+    if not isinstance(provenance, Mapping) or set(provenance) != expected:
+        return False
+    artifact_refs = recipe.get("artifact_refs")
+    if (not isinstance(artifact_refs, (list, tuple))
+            or any(not isinstance(ref, str) for ref in artifact_refs)):
+        return False
+    replay_dates = _chooser_replay_dates(request, legacy_event_date)
+    if replay_dates is None:
+        return False
+    event_day, decision_day = replay_dates
+    expected_fold_start = min(event_day.replace(day=1), decision_day.replace(day=1)).isoformat()
+    for producer_output, item in provenance.items():
+        if not isinstance(item, Mapping) or set(item) != {
+                "training_cutoff", "fold_start", "descriptor_hash"}:
+            return False
+        cutoff_text, fold_text = item.get("training_cutoff"), item.get("fold_start")
+        descriptor_hash = item.get("descriptor_hash")
+        if (not isinstance(cutoff_text, str) or not isinstance(fold_text, str)
+                or not isinstance(descriptor_hash, str) or descriptor_hash not in artifact_refs):
+            return False
+        staged_text = staged.get(f"__chooser_descriptor__:{descriptor_hash}")
+        if not isinstance(staged_text, str):
+            return False
+        staged_parts = staged_text.split("\x1f")
+        if (len(staged_parts) != 3 or staged_parts[0] != producer_output
+                or staged_parts[1] != cutoff_text or staged_parts[2] != fold_text):
+            return False
+        try:
+            cutoff_day, fold_day = date.fromisoformat(cutoff_text), date.fromisoformat(fold_text)
+        except ValueError:
+            return False
+        if (cutoff_day.isoformat() != cutoff_text or fold_day.isoformat() != fold_text
+                or fold_day.day != 1 or fold_text != expected_fold_start
+                or cutoff_day >= decision_day or cutoff_day >= fold_day):
+            return False
+    return True
+
+
+def _chooser_fold_contexts(chooser_cache, release_root: Path, release_id: str):
+    from engine.v2.scoring.release_bindings import resolve_chooser_fold_authoring_contexts
+
+    if chooser_cache is None:
+        return resolve_chooser_fold_authoring_contexts(release_root, release_id)
+    key = ("contexts", release_id)
+    resolved = chooser_cache.get(key)
+    if resolved is None:
+        resolved = resolve_chooser_fold_authoring_contexts(release_root, release_id)
+        chooser_cache[key] = resolved
+    return resolved
+
+
+def _chooser_inference(chooser_cache, release_id: str, root: Path):
+    from engine.v2.models.loader import FrozenInference
+
+    if chooser_cache is None:
+        return FrozenInference(root)
+    key = ("inference", release_id)
+    inference = chooser_cache.get(key)
+    if inference is None:
+        inference = FrozenInference(root)
+        chooser_cache[key] = inference
+    return inference
+
+
+def _load_chooser_fold(inference, descriptor, *, verified_parent_manifest,
+                       verified_catalog, chooser_cache):
+    from engine.v2.models.serving_fold_loader import load_chooser_serving_fold
+
+    if chooser_cache is None:
+        return load_chooser_serving_fold(
+            inference, descriptor, verified_parent_manifest=verified_parent_manifest,
+            verified_catalog=verified_catalog)
+    key = ("descriptor", descriptor.descriptor_hash)
+    loaded = chooser_cache.get(key)
+    if loaded is None:
+        loaded = load_chooser_serving_fold(
+            inference, descriptor, verified_parent_manifest=verified_parent_manifest,
+            verified_catalog=verified_catalog)
+        chooser_cache[key] = loaded
+    return loaded
+
+
+def _staged_chooser_pools(chooser, request, release_root: Path, manifest,
+                          legacy_event_date: Any = None, chooser_cache=None):
+    if not isinstance(manifest, Mapping):
+        return None
+    release_id = manifest.get("release_id")
+    if not isinstance(release_id, str) or not release_id:
+        return None
+    try:
+        fold_references, authoring_contexts = _chooser_fold_contexts(
+            chooser_cache, release_root, release_id)
+    except (OSError, ValueError, TypeError, KeyError, AttributeError, OverflowError):
+        return None
+    replay_dates = _chooser_replay_dates(request, legacy_event_date)
+    if replay_dates is None:
+        return None
+    event_day, decision_day = replay_dates
+    expected_fold_start = min(event_day.replace(day=1), decision_day.replace(day=1)).isoformat()
+    from datetime import date
+    from numpy import array_equal, asarray
+    from types import SimpleNamespace
+    from engine.v2.foundation import from_document
+    from engine.v2.models import deployment
+    from engine.v2.models.serving_folds import ChooserServingFoldDescriptor
+    from engine.v2.scoring.gate_fold_selection import (
+        index_size_folds, select_gate_forecast_source,
+    )
+
+    members = manifest.get("members")
+    if not isinstance(members, list):
+        return None
+    docs = {}
+    seen_members = set()
+    chooser_months = set()
+    try:
+        for row in members:
+            if not isinstance(row, Mapping):
+                return None
+            member_id = row.get("member_id", "")
+            if not isinstance(member_id, str):
+                return None
+            if member_id not in {"tier4_folds:implied_t1", "tier4_folds:runup_move"}:
+                continue
+            if member_id in seen_members or row.get("status") != "STAGED":
+                return None
+            seen_members.add(member_id)
+            objects = row.get("objects", ())
+            if not isinstance(objects, list):
+                return None
+            for obj in objects:
+                doc = obj.get("serving_fold") if isinstance(obj, Mapping) else None
+                if not isinstance(doc, Mapping) or doc.get("fold_start") != expected_fold_start:
+                    continue
+                descriptor = from_document(ChooserServingFoldDescriptor, doc)
+                chooser_month = (member_id, descriptor.fold_start)
+                if chooser_month in chooser_months or descriptor.descriptor_hash in docs:
+                    return None
+                chooser_months.add(chooser_month)
+                docs[descriptor.descriptor_hash] = descriptor
+    except (OSError, ValueError, TypeError, KeyError, AttributeError, OverflowError):
+        return None
+
+    recipe = getattr(chooser, "recipe", None)
+    artifact_refs = recipe.get("artifact_refs") if isinstance(recipe, Mapping) else None
+    if (not isinstance(artifact_refs, (list, tuple))
+            or any(not isinstance(ref, str) for ref in artifact_refs)):
+        return None
+    fold_pools = getattr(chooser, "fold_pools", None)
+    if not isinstance(fold_pools, Mapping):
+        return None
+    root = deployment_root(release_root)
+    try:
+        carrying_manifest = deployment.read_manifest(root, release_id)
+        if (carrying_manifest is None
+                or carrying_manifest.release.release_id != release_id
+                or not deployment.manifest_hash_matches(carrying_manifest)):
+            return None
+        size_folds = index_size_folds(manifest, carrying_manifest)
+        inference = _chooser_inference(chooser_cache, release_id, root)
+        selected = select_gate_forecast_source(
+            SimpleNamespace(size_folds=size_folds, frozen_inference=inference),
+            event_day, decision_day)
+    except (OSError, ValueError, TypeError, KeyError, AttributeError, OverflowError):
+        return None
+    if selected.artifact_hash not in artifact_refs:
+        return None
+    expected_size = {
+        "predictions": selected.pool_pred, "residuals": selected.pool_res,
+        "interval_floor": selected.interval_floor,
+    }
+    actual_size = fold_pools.get("pred_abs_move")
+    if (not isinstance(actual_size, Mapping) or set(actual_size) != set(expected_size)
+            or actual_size.get("interval_floor") != expected_size["interval_floor"]):
+        return None
+    try:
+        if (not array_equal(asarray(actual_size["predictions"]), asarray(expected_size["predictions"]))
+                or not array_equal(asarray(actual_size["residuals"]), asarray(expected_size["residuals"]))):
+            return None
+    except (TypeError, ValueError, KeyError):
+        return None
+    verified = dict(fold_pools)
+    verified["pred_abs_move"] = expected_size
+
+    recipe_provenance = recipe.get("fold_provenance", {})
+    for output in ("pred_im_t1_d14", "pred_runup_abs_move_d14"):
+        item = recipe_provenance.get(output) if isinstance(recipe_provenance, Mapping) else None
+        descriptor = docs.get(item.get("descriptor_hash")) if isinstance(item, Mapping) else None
+        if (descriptor is None or descriptor.producer_output != output
+                or descriptor.fold_start != item.get("fold_start")):
+            return None
+        reference = fold_references.get((output, descriptor.fold_start))
+        if (reference is None
+                or reference.descriptor_hash != descriptor.descriptor_hash
+                or reference.release_id != descriptor.parent_release_id
+                or reference.carrying_release_id != release_id
+                or reference.training_cutoff != descriptor.training_cutoff
+                or item.get("training_cutoff") != descriptor.training_cutoff):
+            return None
+        try:
+            estimator_cutoff = date.fromisoformat(descriptor.training_cutoff)
+            descriptor_fold = date.fromisoformat(descriptor.fold_start)
+        except (TypeError, ValueError):
+            return None
+        if (estimator_cutoff.isoformat() != descriptor.training_cutoff
+                or estimator_cutoff >= decision_day
+                or estimator_cutoff >= descriptor_fold):
+            return None
+        context = authoring_contexts.get(descriptor.descriptor_hash)
+        if context is None or context[0].release.release_id != descriptor.parent_release_id:
+            return None
+        try:
+            ref = _load_chooser_fold(
+                inference, descriptor,
+                verified_parent_manifest=context[0], verified_catalog=dict(context[1]),
+                chooser_cache=chooser_cache)
+        except (OSError, ValueError, TypeError, KeyError, AttributeError, OverflowError):
+            return None
+        producer_refs = recipe.get("producers")
+        producer = producer_refs.get(output) if isinstance(producer_refs, Mapping) else None
+        binding_id = producer.get("binding_id") if isinstance(producer, Mapping) else None
+        if not isinstance(binding_id, str) or not binding_id or producer.get("output") != output:
+            return None
+        trace_bindings = [binding for binding in getattr(chooser.release, "bindings", ())
+                          if getattr(binding, "binding_id", None) == binding_id]
+        fold_bindings = getattr(ref.release, "bindings", ())
+        if len(trace_bindings) != 1 or len(fold_bindings) != 1:
+            return None
+        alias, verified_binding = trace_bindings[0], fold_bindings[0]
+        semantic_fields = ("role", "model_id", "feature_order",
+                           "decision_clock_id")
+        if any(getattr(alias, field, None) != getattr(verified_binding, field, None)
+               for field in semantic_fields):
+            return None
+        if (getattr(alias, "strategy_id", None) != request.strategy_version
+                or getattr(verified_binding, "strategy_id", None) != "*"):
+            return None
+        expected_fold_output = (
+            ("driver_prediction",) if output == "pred_im_t1_d14"
+            else ("pred_runup_abs_move_d14",))
+        alias_output = getattr(alias, "output_names", None)
+        binding_output = getattr(verified_binding, "output_names", None)
+        if alias_output != (output,) or binding_output != expected_fold_output:
+            return None
+        alias_members = getattr(alias, "members", ())
+        verified_members = getattr(verified_binding, "members", ())
+        alias_hashes = tuple(getattr(member, "content_hash", None) for member in alias_members)
+        verified_hashes = tuple(getattr(member, "content_hash", None) for member in verified_members)
+        if (not alias_hashes or any(not isinstance(value, str) or not value for value in alias_hashes)
+                or alias_hashes != verified_hashes):
+            return None
+        expected = {"predictions": ref.pool_pred, "residuals": ref.pool_res,
+                    "interval_floor": descriptor.policy.interval_floor}
+        actual = fold_pools.get(output)
+        if (not isinstance(actual, Mapping) or set(actual) != set(expected)
+                or actual.get("interval_floor") != expected["interval_floor"]):
+            return None
+        try:
+            if (not array_equal(asarray(actual["predictions"]), asarray(expected["predictions"]))
+                    or not array_equal(asarray(actual["residuals"]), asarray(expected["residuals"]))):
+                return None
+        except (TypeError, ValueError, KeyError):
+            return None
+        verified[output] = expected
+    return verified
+
+
+def rebind_chooser(chooser, request, release_root: Path, staged: Mapping[str, str],
+                   manifest=None, legacy_event_date: Any = None, chooser_cache=None):
     """``(chooser block served from the staged release, absent, used)``.
 
     The frozen chooser's champion and Tier-4 producer folds are rebound by
     content hash exactly like the scoring bindings; its k-NN analog pool and
     n_admissible table must be staged ``chooser_analog_pool`` /
     ``admissible_table:`` objects with the same content hash, and are served
-    from the staged store. The recipe and the fold pools are the trace's own
-    declaration (hash-bound by the trace; the fold pools' hashes enter the
-    chooser stage receipt, so a staged fold with other pools would mismatch).
+    from the staged store. The recipe remains trace-bound; producer descriptors
+    and pools come from the staged catalog and parent manifests. Replay refuses
+    unless trace arrays and interval floors match those loaded values exactly.
     """
     from engine.v2.models.loader import FrozenInference
     from engine.v2.scoring.chooser_inputs import frozen_chooser_block
 
+    if not _has_causal_chooser_fold_provenance(
+            chooser.recipe, request, staged, legacy_event_date):
+        return None, [("chooser:fold_provenance", "unverifiable")], set()
+    fold_pools = _staged_chooser_pools(
+        chooser, request, release_root, manifest, legacy_event_date, chooser_cache)
+    if fold_pools is None:
+        return None, [("chooser:fold_pools", "unverifiable")], set()
     release, absent, used = _rebind_release(chooser.release, staged)
     served = {}
     for name, prefix in (("analog_pool", "chooser_analog_pool"),
@@ -156,16 +501,20 @@ def rebind_chooser(chooser, request, release_root: Path, staged: Mapping[str, st
             used.add(member_id)
     if absent:
         return None, absent, used
+    release_id = manifest.get("release_id") if isinstance(manifest, Mapping) else None
+    inference = (_chooser_inference(chooser_cache, release_id, deployment_root(release_root))
+                 if chooser_cache is not None and isinstance(release_id, str) and release_id
+                 else FrozenInference(deployment_root(release_root)))
     block = frozen_chooser_block(
         strategy=request.strategy_version, recipe=chooser.recipe,
-        fold_pools=chooser.fold_pools, analog_pool=served["analog_pool"],
+        fold_pools=fold_pools, analog_pool=served["analog_pool"],
         admissible_table=served["admissible_table"],
-        inference=FrozenInference(deployment_root(release_root)), release=release)
+        inference=inference, release=release)
     return block, absent, used
 
 
 def _replay_pair(pair, corpus_root: Path, release_root: Path,
-                 staged: Mapping[str, str]) -> dict:
+                 staged: Mapping[str, str], manifest=None, chooser_cache=None) -> dict:
     from checks import phase4_real
     from engine.v2.scoring import application
 
@@ -173,7 +522,7 @@ def _replay_pair(pair, corpus_root: Path, release_root: Path,
     if not payload.get("input_trace"):
         return {"disposition": "untraced"}
     if payload.get("record_kind") == "dyn_sv_choice":
-        return _replay_chooser_pair(pair, corpus_root, release_root, staged)
+        return _replay_chooser_pair(pair, corpus_root, release_root, staged, manifest)
     try:
         verified = phase4_real._verified_trace_bundle(pair, corpus_root)
     except Exception as exc:  # noqa: BLE001 -- any refusal means "not verifiable"
@@ -182,7 +531,8 @@ def _replay_pair(pair, corpus_root: Path, release_root: Path,
     if verified["frozen_replay"] is None and verified.get("frozen_chooser") is None:
         return {"disposition": "not_frozen"}
     try:
-        rebound, inputs, absent, used = _rebound_inputs(verified, release_root, staged)
+        rebound, inputs, absent, used = _rebound_inputs(
+            verified, release_root, staged, manifest, chooser_cache)
     except Exception as exc:  # noqa: BLE001 -- a staged chooser that cannot be built
         return {"disposition": "error", "code": PHASE4_ERROR,
                 "detail": f"rebind: {type(exc).__name__}", "members": []}
@@ -207,7 +557,8 @@ def _replay_pair(pair, corpus_root: Path, release_root: Path,
             "runtime_stages": len(receipts)}
 
 
-def _rebound_inputs(verified, release_root: Path, staged: Mapping[str, str]):
+def _rebound_inputs(verified, release_root: Path, staged: Mapping[str, str], manifest=None,
+                    chooser_cache=None):
     """``(rebound frozen plan or None, native inputs, absent, used)``: every
     model, fold, cutoff and chooser state the pair reads, from the release."""
     plan, chooser = verified["frozen_replay"], verified.get("frozen_chooser")
@@ -217,7 +568,9 @@ def _rebound_inputs(verified, release_root: Path, staged: Mapping[str, str]):
         used.update(plan_used)
     if chooser is not None:
         block, chooser_absent, chooser_used = rebind_chooser(
-            chooser, verified["request"], release_root, staged)
+            chooser, verified["request"], release_root, staged, manifest,
+            legacy_event_date=verified.get("legacy_event_date"),
+            chooser_cache=chooser_cache)
         absent.extend(chooser_absent)
         used.update(chooser_used)
         if block is not None:
@@ -246,7 +599,7 @@ def _entry_rule_cutoff(inputs) -> str | None:
 
 
 def _replay_chooser_pair(pair, corpus_root: Path, release_root: Path,
-                         staged: Mapping[str, str]) -> dict:
+                         staged: Mapping[str, str], manifest=None) -> dict:
     """A ``dyn_sv_choice`` pair replays when every ranked member replays.
 
     Each member is its own strict trace (``phase4_real._chooser_members``);
@@ -260,8 +613,10 @@ def _replay_chooser_pair(pair, corpus_root: Path, release_root: Path,
         return {"disposition": "unverified", "code": PHASE4_UNVERIFIED,
                 "detail": f"{type(exc).__name__}: {exc}"}
     used, stages, runtime = set(), 0, 0
+    chooser_cache = {}
     for index, (member_pair, _record) in enumerate(members):
-        row = _replay_pair(member_pair, corpus_root, release_root, staged)
+        row = _replay_pair(member_pair, corpus_root, release_root, staged, manifest,
+                           chooser_cache=chooser_cache)
         used.update(row.get("members", ()))
         if row["disposition"] != "replayed":
             detail = row.get("detail")
@@ -284,30 +639,69 @@ def _log(tag: str, message: str, started: float) -> None:
           flush=True)
 
 
-def _load_checkpoint(checkpoint_path: Path, corpus_hash: str | None) -> dict[str, dict]:
-    """Rows already replayed by an earlier, killed run of the SAME corpus.
+def _checkpoint_row_hash(row: Mapping[str, Any], scope: str) -> str:
+    """Hash a checkpoint row, bound to the replay scope, for corruption detection."""
+    from engine.v2.foundation import content_hash
 
-    Keyed by ``fixture_id``. A checkpoint file from a different corpus (its
-    first line's ``corpus_hash`` disagrees, or the file is unreadable/corrupt)
-    is discarded, never silently reused -- resuming against the wrong corpus
-    would be a correctness defect, not a convenience."""
+    payload = {key: value for key, value in row.items()
+               if key != "checkpoint_row_hash"}
+    return content_hash({"checkpoint_scope": scope, "row": payload})
+
+
+def _load_checkpoint(checkpoint_path: Path, scope: str | None) -> dict[str, dict]:
+    """Rows already replayed by an earlier, killed run of the SAME scope.
+
+    Keyed by ``fixture_id``. Each row's ``checkpoint_row_hash`` is bound to the
+    replay scope so a modified row is rejected; a file larger than
+    ``MAX_CHECKPOINT_BYTES`` or whose bytes exceed the read cap is discarded
+    without being parsed. A checkpoint file from a different scope (any row's
+    ``checkpoint_scope`` disagrees, a scoped hash mismatches, or the file is
+    unreadable/corrupt) is discarded, never silently reused -- resuming against
+    the wrong corpus, manifest or validation version would be a correctness
+    defect, not a convenience."""
     if not checkpoint_path.is_file():
         return {}
     import json
 
-    done: dict[str, dict] = {}
-    try:
-        with checkpoint_path.open() as fh:
-            for line in fh:
-                line = line.strip()
-                if not line:
-                    continue
-                row = json.loads(line)
-                if row.get("corpus_hash") != corpus_hash:
-                    return {}
-                done[row["fixture_id"]] = row
-    except (OSError, ValueError):
+    def discard() -> dict:
+        checkpoint_path.write_bytes(b"")
         return {}
+
+    try:
+        if checkpoint_path.stat().st_size > MAX_CHECKPOINT_BYTES:
+            return discard()
+    except OSError:
+        return discard()
+
+    done: dict[str, dict] = {}
+    consumed = 0
+    try:
+        with checkpoint_path.open("rb") as fh:
+            while True:
+                line = fh.readline(MAX_CHECKPOINT_BYTES - consumed + 1)
+                if not line:
+                    break
+                consumed += len(line)
+                if consumed > MAX_CHECKPOINT_BYTES:
+                    return discard()
+                text = line.decode("utf-8").strip()
+                if not text:
+                    continue
+                row = json.loads(text)
+                if not isinstance(row, dict):
+                    return discard()
+                if row.get("checkpoint_scope") != scope:
+                    return discard()
+                fixture_id = row.get("fixture_id")
+                if not isinstance(fixture_id, str) or not fixture_id:
+                    return discard()
+                if row.get("disposition") not in DISPOSITIONS:
+                    return discard()
+                if row.get("checkpoint_row_hash") != _checkpoint_row_hash(row, scope):
+                    return discard()
+                done[fixture_id] = row
+    except (OSError, ValueError, UnicodeDecodeError, TypeError):
+        return discard()
     return done
 
 
@@ -319,7 +713,7 @@ def replay_corpus(corpus: Path, release_root: Path, model_release,
 
     ``checkpoint_path``, if given, makes the pair loop resumable: each pair's
     row is appended (one JSON line, flushed immediately -- survives SIGKILL)
-    as soon as it is computed, and a prior file for the SAME corpus is read
+    as soon as it is computed, and a prior file for the SAME scope is read
     back at the top so a killed or capped run picks up where it left off
     instead of re-paying every already-replayed pair. Added because a single
     pair has been measured at ~111s and the corpus can hold pairs up to
@@ -339,8 +733,9 @@ def replay_corpus(corpus: Path, release_root: Path, model_release,
 
     done: dict[str, dict] = {}
     checkpoint_fh = None
+    checkpoint_scope = _checkpoint_scope(corpus_hash, manifest)
     if checkpoint_path is not None:
-        done = _load_checkpoint(checkpoint_path, corpus_hash)
+        done = _load_checkpoint(checkpoint_path, checkpoint_scope)
         if done:
             _log("p5-phase4",
                  f"checkpoint: resuming, {len(done)}/{total} pairs already replayed", started)
@@ -354,21 +749,30 @@ def replay_corpus(corpus: Path, release_root: Path, model_release,
         for index, fixture_id in enumerate(loaded.ordered_ids):
             cached = done.get(fixture_id)
             if cached is not None:
-                row = {k: v for k, v in cached.items() if k != "corpus_hash"}
+                row = {k: v for k, v in cached.items()
+                       if k not in ("corpus_hash", "checkpoint_scope",
+                                    "checkpoint_row_hash")}
                 _log("p5-phase4",
                      f"pair {index + 1}/{total} {fixture_id}: {row['disposition']} "
                      "(from checkpoint)", started)
             else:
                 pair_started = time.perf_counter()
                 replay_row = _replay_pair(loaded.pairs[fixture_id], loaded.root, release_root,
-                                          staged)
+                                          staged, manifest)
                 pair_elapsed = time.perf_counter() - pair_started
                 row = {"fixture_id": fixture_id, **replay_row}
                 _log("p5-phase4",
                      f"pair {index + 1}/{total} {fixture_id}: {row['disposition']} "
                      f"(pair +{pair_elapsed:.1f}s)", started)
                 if checkpoint_fh is not None:
-                    checkpoint_fh.write(_json.dumps({**row, "corpus_hash": corpus_hash}) + "\n")
+                    checkpoint_row = {
+                        **row,
+                        "corpus_hash": corpus_hash,
+                        "checkpoint_scope": checkpoint_scope,
+                    }
+                    checkpoint_row["checkpoint_row_hash"] = _checkpoint_row_hash(
+                        checkpoint_row, checkpoint_scope)
+                    checkpoint_fh.write(_json.dumps(checkpoint_row) + "\n")
             counts[row["disposition"]] += 1
             rows.append(row)
             if "code" in row:
