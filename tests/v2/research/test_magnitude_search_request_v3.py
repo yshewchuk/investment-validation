@@ -130,6 +130,34 @@ def test_v2_fixture_replays_identically_through_both_entrypoints():
     assert versions.compile_request(document) == compiler.compile_request(document)
 
 
+@pytest.mark.parametrize("workers", [1, 3])
+def test_v3_worker_count_does_not_change_search_identity(workers):
+    baseline = versions.compile_request(v3_request())
+    document = {**v3_request(), "workers": workers}
+    result = versions.compile_request(document)
+    assert result["request"] == baseline["request"]
+    assert result["request_id"] == baseline["request_id"]
+    assert [spec["candidate_spec_id"] for spec in result["candidate_specs"]] == [
+        spec["candidate_spec_id"] for spec in baseline["candidate_specs"]]
+
+
+def test_v3_omitted_workers_preserves_request_identity():
+    document = v3_request()
+    result = versions.compile_request(document)
+    assert result["request"] == document and "workers" not in result["request"]
+    assert result["request_id"] == content_hash(document)
+
+
+@pytest.mark.parametrize("workers", [0, 9, True, 1.0, "3"])
+def test_v3_invalid_workers_refuse_nonretryably(workers):
+    document = v3_request()
+    document["workers"] = workers
+    with pytest.raises(OpsError) as caught:
+        versions.compile_request(document)
+    assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert caught.value.problem.retryable is False
+
+
 def test_v3_selection_requires_lead1_horizon():
     document = v3_request()
     document["selection"] = {

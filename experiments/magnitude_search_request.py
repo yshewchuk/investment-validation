@@ -13,7 +13,7 @@ from engine.v2.research.magnitude_panel_table import recipe as panel_recipe
 from experiments.magnitude_search_execution import validate_execution_limits
 from experiments.size_panel_request import validate_panel_request
 
-__all__ = ["compile_request", "validate_horizons"]
+__all__ = ["compile_request", "validate_horizons", "validate_workers"]
 
 _KEYS = {"schema_version", "feature_snapshot_id", "history_snapshot_id",
     "feature_dictionary_hash", "eligibility_policy_ref", "feature_sets", "space",
@@ -67,6 +67,19 @@ def validate_horizons(horizons):
     if values != tuple(sorted(values)) and values != legacy_order:
         raise fail("INVALID_EXPERIMENT_SPEC", message)
     return legacy_order
+
+
+def validate_workers(request):
+    """Validate an optional worker count without changing request identity."""
+    _require(type(request) is dict, "stage-2 request requires an object")
+    if "workers" not in request:
+        return 1
+    _require(request.get("schema_version") in ("magnitude_search_request.v2",
+                                                "magnitude_search_request.v3"),
+             "stage-2 workers require a v2 or v3 search request")
+    _require(type(request["workers"]) is int and 1 <= request["workers"] <= 8,
+             "stage-2 workers requires an integer from 1 through 8")
+    return request["workers"]
 
 
 def _references(request, recipe=panel_recipe):
@@ -172,11 +185,16 @@ def compile_request(request):
     except (ValueError, TypeError, OverflowError, RecursionError):
         raise fail("INVALID_EXPERIMENT_SPEC", "stage-2 request requires plain finite JSON") from None
     regression = type(request) is dict and request.get("schema_version") == "regression_search_request.v1"
-    _require(_shape(request, _KEYS | ({"panel_request"} if regression else set()))
-             and request["schema_version"] in ("magnitude_search_request.v2", "regression_search_request.v1"),
-             "stage-2 request requires its closed v2 schema")
     if regression:
+        _require(_shape(request, _KEYS | {"panel_request"}),
+                 "stage-2 request requires its closed v2 schema")
         validate_panel_request(request["panel_request"])
+    else:
+        _require((_shape(request, _KEYS) or _shape(request, _KEYS | {"workers"}))
+                 and request["schema_version"] == "magnitude_search_request.v2",
+                 "stage-2 request requires its closed v2 schema")
+        validate_workers(request)
+        request.pop("workers", None)
     horizons = ([h for h in (5, 3, 1) if h in request["panel_request"]["horizons"]] if regression else [5, 3, 1])
     recipe = qualified_recipe if regression else panel_recipe
     _references(request, recipe)

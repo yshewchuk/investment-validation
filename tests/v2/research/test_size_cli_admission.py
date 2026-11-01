@@ -125,6 +125,89 @@ def test_report_admits_driver_before_result_reads_or_work(monkeypatch, seal, act
     assert caught.value.problem.message == "search execution requires its exact driver seal"
 
 
+def test_worker_memory_refusal_stops_watchdog_before_mapping(monkeypatch):
+    order = []
+    monkeypatch.setattr(legacy, "_PARALLEL", (object(), object(),
+                                                SimpleNamespace(_execute_borrowed=lambda *args, **kwargs: None),
+                                                SimpleNamespace(run_id="run"), {}))
+    monkeypatch.setattr(legacy, "_WORKER_WATCHDOG_STOP", lambda: order.append("stopped"))
+    monkeypatch.setattr(legacy.os, "sched_setaffinity", lambda *args: None)
+    monkeypatch.setattr(legacy, "trial_key", lambda *args: "trial")
+
+    def memory_error(*args, **kwargs):
+        raise MemoryError()
+
+    def map_problem(error):
+        order.append(("mapped", error.code))
+        return "mapped refusal"
+
+    monkeypatch.setattr(legacy, "_complete_trial", memory_error)
+    monkeypatch.setattr(legacy, "_worker_problem", map_problem)
+    result = legacy._parallel_trial_task(((2024, 2023, "candidate"), 0,
+                                          {"memory_bytes": 1}))
+
+    assert result == "mapped refusal"
+    assert order == ["stopped", ("mapped", "RESOURCE_LIMIT_EXCEEDED")]
+
+
+def test_run_passes_deadline_callback_to_search_driver(monkeypatch):
+    order = []
+    plan = {"plan_id": "plan", "folds": [{"outer": {"year": 2024}}]}
+    monkeypatch.setattr(cli, "_admit_driver", lambda *args: plan)
+    monkeypatch.setattr(cli, "read_record", lambda *args: None)
+
+    def run(*args, **kwargs):
+        order.append("run-start")
+        assert callable(kwargs["before_dispatch"])
+        kwargs["before_dispatch"](30)
+        order.append("run-end")
+
+    def alarm(seconds):
+        order.append(("alarm", seconds))
+        return 60 if seconds == 0 else 0
+
+    monkeypatch.setattr(cli.signal, "alarm", alarm)
+    monkeypatch.setattr(cli, "run_search", run)
+    monkeypatch.setattr(cli, "collect", lambda *args: {"collected": True})
+    context = (object(), object(), object(), SimpleNamespace(run_id="run"),
+               {"workers": 3, "limits": {"child": {"memory_bytes": 1}}}, object())
+
+    assert cli._run(context) == {"collected": True}
+    assert order == ["run-start", ("alarm", 0), ("alarm", 30), "run-end"]
+
+
+def test_parallel_run_preflights_before_deadline_callback(monkeypatch):
+    order = []
+    plan = {"plan_id": "plan", "folds": [{"outer": {"year": 2024}}]}
+
+    class StopDispatch(Exception):
+        pass
+
+    monkeypatch.setattr(legacy, "validate_workers", lambda request: 3)
+    monkeypatch.setattr(legacy, "validate_execution_limits", lambda limits: None)
+    monkeypatch.setattr(legacy, "_admit_driver", lambda *args: plan)
+    monkeypatch.setattr(legacy, "SearchTrials", lambda *args: object())
+    monkeypatch.setattr(legacy, "_roster", lambda plan: [(2024, 2023, "candidate")])
+    monkeypatch.setattr(legacy, "trial_key", lambda *args: "trial")
+    monkeypatch.setattr(legacy, "read_record", lambda *args: None)
+    monkeypatch.setattr(legacy, "_parallel_preflight",
+                        lambda *args: (order.append("preflight") or ([0], "catalog.sqlite")))
+    monkeypatch.setattr(legacy, "forbid_fitting", lambda *args: None)
+    monkeypatch.setattr(legacy, "forbid_legacy_fitting", lambda *args: None)
+    monkeypatch.setattr(legacy, "remaining",
+                        lambda *args: (order.append("remaining") or 30))
+
+    def commit_deadline(seconds):
+        order.append(("deadline", seconds))
+        raise StopDispatch
+
+    with pytest.raises(StopDispatch):
+        legacy.run_search(object(), object(), object(), SimpleNamespace(run_id="run"),
+                          {"workers": 3}, object(), limits={},
+                          before_dispatch=commit_deadline)
+    assert order == ["preflight", "remaining", ("deadline", 30)]
+
+
 def test_size_register_refuses_oversized_binding_before_publication(monkeypatch, capsys):
     from engine.v2.contracts import ArtifactRef
     from engine.v2.foundation import to_document

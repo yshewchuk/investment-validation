@@ -1,14 +1,20 @@
-"""Explicitly seal, serially run or read-only collect a registered magnitude search."""
+"""Explicitly seal, run or read-only collect a registered magnitude search."""
 import argparse
 import io
 import json
+import os
+import signal
 import sqlite3
 import sys
 import tempfile
+from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 from contextlib import redirect_stdout
+from multiprocessing import get_context
 from pathlib import Path
 
-from engine.v2.contracts import ArtifactRef
+from engine.models.no_fit import forbid_fitting as forbid_legacy_fitting
+from engine.v2.contracts import ArtifactRef, Problem
 from engine.v2.data.documents import reject_duplicate_keys
 from engine.v2.data.errors import DataError
 from engine.v2.data.repository import Repository
@@ -22,23 +28,169 @@ from engine.v2.foundation import (
     iter_canonical_json,
     to_document,
 )
+from engine.v2.models.no_fit import forbid_fitting
 from engine.v2.ops.catalog import connect
 from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.experiments import experiment_spec_from_document
 from engine.v2.ops.fingerprints import source_closure
 from engine.v2.ops.migrations import require_current
-from engine.v2.research.progress import Progress, decision
+from engine.v2.research.progress import Progress, decision, stage
 from experiments.magnitude_search_execution import validate_execution_limits
 from experiments.magnitude_search_outer import collect_outer_results, execute_outer_fold
 from experiments.magnitude_search_plan import read_search_plan, trial_key
 from experiments.magnitude_search_records import MIGRATIONS, OWNER, append_record, read_record
+from experiments.magnitude_search_request import validate_workers
 from experiments.magnitude_search_trials import SearchTrials
+from experiments.memory_guard import start_rss_watchdog
 from experiments.native_gate_worker import read_native_staged_input
 from experiments.native_registration import (
     MAX_NATIVE_EVIDENCE_BYTES,
+    NativeRegistration,
+    load_registration_document,
     read_native_registration,
     valid_registration_read_budget,
+    verified_registration_bytes,
 )
+from experiments.size_job_budget import remaining
+
+_PARALLEL = None
+_WORKER_WATCHDOG_STOP = None
+_WORKER_TERMINATING = False
+
+
+def _stop_worker_watchdog():
+    global _WORKER_WATCHDOG_STOP
+    stop, _WORKER_WATCHDOG_STOP = _WORKER_WATCHDOG_STOP, None
+    if stop is not None:
+        stop()
+
+
+class _WorkerTerminating(BaseException):
+    """Pool termination arrives as SIGTERM; unwind the fit child's cleanup first."""
+
+
+def _terminate_worker(signum, frame):
+    """Raise once so fit-child cleanup unwinds; repeated termination must not interrupt it."""
+    global _WORKER_TERMINATING
+    if _WORKER_TERMINATING:
+        return
+    _WORKER_TERMINATING = True
+    raise _WorkerTerminating
+
+
+def _init_trial_worker(conn_path, store_root, run_id, request, plan_ref, memory_bytes):
+    global _PARALLEL, _WORKER_WATCHDOG_STOP, _WORKER_TERMINATING
+    _WORKER_WATCHDOG_STOP = None
+    _WORKER_TERMINATING = False
+    try:
+        signal.signal(signal.SIGTERM, _terminate_worker)
+        _WORKER_WATCHDOG_STOP = start_rss_watchdog(memory_bytes)
+        conn = connect(conn_path, must_exist=True)
+        conn.execute("PRAGMA busy_timeout=30000")
+        store = ArtifactStore(store_root)
+        verified_size_rows = {}
+        binding = verified_registration_bytes(conn, store, run_id, max_evidence_bytes=MAX_NATIVE_EVIDENCE_BYTES,
+                                              verified_size_rows=verified_size_rows)
+        if binding is None:
+            raise fail("INVALID_EXPERIMENT_SPEC", "native experiment has not been preregistered")
+        try:
+            document = load_registration_document(store, binding, verified_size_rows=verified_size_rows)
+            registration = NativeRegistration(run_id, binding,
+                document if document.get("schema_version") == "native_experiment_registration.v1.7" else None)
+        except (ArtifactError, ValueError, KeyError, TypeError):
+            raise fail("EXPERIMENT_IDENTITY_CONFLICT", "native registration evidence is invalid") from None
+        repository = Repository(conn, store, pin_snapshots=True)
+        plan = read_search_plan(conn, store, registration, request, plan_ref)
+        _PARALLEL = (conn, store, SearchTrials(conn, store, repository, registration, request, plan_ref), registration, plan)
+    except (OpsError, DataError) as error:
+        _PARALLEL = _worker_problem(error)
+    except MemoryError:
+        _stop_worker_watchdog()
+        _PARALLEL = _worker_problem(fail("RESOURCE_LIMIT_EXCEEDED", "search worker memory exhausted"))
+    except (OSError, sqlite3.Error):
+        _PARALLEL = _worker_problem(fail("RESOURCE_UNAVAILABLE", "search worker setup unavailable"))
+    except Exception:
+        _PARALLEL = _worker_problem(fail("RESOURCE_UNAVAILABLE", "search worker setup failed"))
+
+
+def _complete_trial(trials, action, args, key, *, limits, read):
+    try:
+        return action(*args, limits=limits)
+    except OpsError as error:
+        terminal = read("terminal:" + key)
+        if (error.code != "EXPERIMENT_VARIANT_FAILED" or error.__cause__ is not None
+                or not isinstance(terminal, dict) or terminal.get("status") != "refused"):
+            raise
+        return trials.reconcile(*args, limits=limits)
+
+
+def _worker_problem(error):
+    kind = "data" if isinstance(error, DataError) else "ops"
+    return {"worker_problem": to_document(error.problem), "worker_error_type": kind}
+
+
+def _parallel_trial_task(task):
+    args, cpu_id, limits = task
+    try:
+        if (isinstance(_PARALLEL, dict)
+                and set(_PARALLEL) == {"worker_problem", "worker_error_type"}):
+            return _PARALLEL
+        try:
+            os.sched_setaffinity(0, {cpu_id})
+        except (OSError, ValueError):
+            return _worker_problem(fail("RESOURCE_UNAVAILABLE", "search worker affinity unavailable"))
+        conn, store, trials, registration, plan = _PARALLEL
+        key = trial_key(plan, *args)
+        _complete_trial(
+            trials, trials._execute_borrowed, args, key, limits=limits,
+            read=lambda slot: read_record(conn, store, registration.run_id, slot))
+        return None
+    except _WorkerTerminating:
+        os._exit(128 + signal.SIGTERM)
+    except (OpsError, DataError) as error:
+        return _worker_problem(error)
+    except MemoryError:
+        _stop_worker_watchdog()
+        return _worker_problem(fail("RESOURCE_LIMIT_EXCEEDED", "search worker memory exhausted"))
+    except (OSError, sqlite3.Error):
+        return _worker_problem(fail("RESOURCE_UNAVAILABLE", "search worker storage unavailable"))
+
+
+def _parallel_preflight(conn, request, limits, workers):
+    """Admit CPU, parent-memory and file-backed storage bounds before replay writes."""
+    try:
+        cpus = sorted(os.sched_getaffinity(0))
+    except (AttributeError, OSError, ValueError):
+        raise fail("RESOURCE_UNAVAILABLE", "search workers require Linux CPU affinity") from None
+    try:
+        parent_memory = request["limits"]["parent"]["memory_bytes"]
+    except (KeyError, TypeError):
+        raise fail("INVALID_EXPERIMENT_SPEC", "search worker memory bound is missing") from None
+    if type(parent_memory) is not int or parent_memory < 1:
+        raise fail("INVALID_EXPERIMENT_SPEC", "search worker memory bound is invalid")
+    if workers > min(8, len(cpus)) or workers * limits["memory_bytes"] > parent_memory:
+        decision("search workers", f"refusing workers={workers}; cpu_bound={min(8, len(cpus))}; worker_memory_bytes={limits['memory_bytes']}; parent_memory_bytes={parent_memory}")
+        raise fail("INVALID_EXPERIMENT_SPEC", "search worker count exceeds CPU or memory bounds")
+    database = conn.execute("PRAGMA database_list").fetchone()
+    if database is None or len(database) < 3 or not database[2]:
+        raise fail("INVALID_EXPERIMENT_SPEC", "parallel search requires a file-backed catalog")
+    decision("search workers", f"process pool workers={workers}; cpu_bound={min(8, len(cpus))}; worker_memory_bytes={limits['memory_bytes']}")
+    return cpus, database[2]
+
+
+def _abort_executor(executor):
+    """Cancel queued work, terminate workers, and join them after child cleanup."""
+    processes = list(getattr(executor, "_processes", {}).values())
+    terminate = getattr(executor, "terminate_workers", None)
+    if callable(terminate):
+        terminate()
+    else:
+        for process in processes:
+            if process.is_alive():
+                process.terminate()
+    for process in processes:
+        process.join()
+    executor.shutdown(wait=True, cancel_futures=True)
 
 MAX_REPORT_BYTES = 64 * 1024 * 1024
 
@@ -90,8 +242,10 @@ def _admit_driver(conn, store, registration, request, plan_ref):
     return plan
 
 
-def run_search(conn, store, repository, registration, request, plan_ref, *, limits, collect_results=True):
-    """Validate every claimed inner result before any fresh serial fit; never retry; collect_results=False returns None before the final collect."""
+def run_search(conn, store, repository, registration, request, plan_ref, *, limits, collect_results=True, before_dispatch=None):
+    """Validate claimed inner results before fresh work; never retry; collect_results=False returns None before the final collect."""
+    workers = validate_workers(request)
+    request = {key: value for key, value in request.items() if key != "workers"}
     validate_execution_limits(limits)
     plan = _admit_driver(conn, store, registration, request, plan_ref)
     trials = SearchTrials(conn, store, repository, registration, request, plan_ref)
@@ -114,24 +268,59 @@ def run_search(conn, store, repository, registration, request, plan_ref, *, limi
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search contains an unfinished or orphan outer claim")
         if read("outer-start:" + key) is not None:
             completed_outer.append(fold["outer"]["year"])
+    parallel = workers > 1 and bool(fresh)
+    deadline_seconds = None
+    if parallel:
+        cpus, conn_path = _parallel_preflight(conn, request, limits, workers)
+        forbid_fitting("run_search")
+        forbid_legacy_fitting("run_search")
+        deadline_seconds = remaining(conn, store, registration, plan)
+    elif before_dispatch is not None:
+        deadline_seconds = remaining(conn, store, registration, plan)
+    if before_dispatch is not None:
+        before_dispatch(deadline_seconds)
     meter = Progress("search trials", len(claimed) + len(fresh))
     decision("search trials", f"{len(claimed)} replay claims; {len(fresh)} fresh trials; zero retries")
-    def complete(action, args, key):
-        try:
-            action(*args, limits=limits)
-        except OpsError as error:
-            terminal = read("terminal:" + key)
-            if (error.code != "EXPERIMENT_VARIANT_FAILED" or error.__cause__ is not None
-                    or not isinstance(terminal, dict) or terminal.get("status") != "refused"):
-                raise
-            trials.reconcile(*args, limits=limits)
-        meter.tick()
     for args, key in claimed:
-        complete(trials.reconcile, args, key)
+        _complete_trial(trials, trials.reconcile, args, key, limits=limits, read=read)
+        meter.tick()
     for year in completed_outer:
         execute_outer_fold(conn, store, repository, registration, request, plan_ref, year, limits=limits)
-    for args, key in fresh:
-        complete(trials.execute, args, key)
+    if not parallel:
+        for args, key in fresh:
+            _complete_trial(trials, trials.execute, args, key, limits=limits, read=read)
+            meter.tick()
+    else:
+        executor = ProcessPoolExecutor(
+            max_workers=workers,
+            mp_context=get_context("spawn"),
+            initializer=_init_trial_worker,
+            initargs=(conn_path, str(store.root), registration.run_id, request, plan_ref, limits["memory_bytes"]),
+        )
+        with stage("search fresh trials"):
+            parallel_meter = Progress("search fresh trials", len(fresh))
+            try:
+                for offset in range(0, len(fresh), workers):
+                    batch = [(fresh[offset + index][0], cpus[(offset + index) % len(cpus)], limits)
+                             for index in range(min(workers, len(fresh) - offset))]
+                    for receipt in executor.map(_parallel_trial_task, batch):
+                        if receipt is not None:
+                            if (isinstance(receipt, dict)
+                                    and set(receipt) == {"worker_problem", "worker_error_type"}
+                                    and receipt["worker_error_type"] in ("ops", "data")):
+                                problem = from_document(Problem, receipt["worker_problem"])
+                                raise DataError(problem) if receipt["worker_error_type"] == "data" else OpsError(problem)
+                            raise fail("RESOURCE_UNAVAILABLE", "search worker returned an invalid result")
+                        meter.tick()
+                        parallel_meter.tick()
+            except BrokenProcessPool:
+                _abort_executor(executor)
+                raise fail("RESOURCE_UNAVAILABLE", "search worker process exited unexpectedly") from None
+            except BaseException:
+                _abort_executor(executor)
+                raise
+            else:
+                executor.shutdown()
     selected = trials.freeze()
     for selection in selected["selections"]:
         if selection["outer_year"] in completed_outer:
