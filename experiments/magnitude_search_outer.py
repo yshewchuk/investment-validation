@@ -250,8 +250,10 @@ def _execute_admitted(conn, store, repository, registration, plan, fold, selecti
     forbid_fitting("execute_outer_fold")
     forbid_legacy_fitting("execute_outer_fold")
     resolved = resolved_limits(conn, store, registration, plan, limits) if diagnostic_keys(binding) else execution_limits(limits)
+    inputs = _inputs(repository, binding, fold, plan=plan) if "target" in plan and saved("start") is None else None
     append("start", started)
-    inputs = _inputs(repository, binding, fold, plan=plan) if "target" in plan else _inputs(repository, binding, fold)
+    if inputs is None:
+        inputs = _inputs(repository, binding, fold, plan=plan) if "target" in plan else _inputs(repository, binding, fold)
     manifest, inputs_id = publish_inputs(store, inputs)
     append("inputs", manifest)
     expected = fit_evidence(inputs, fold, plan, execution)

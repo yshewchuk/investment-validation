@@ -204,7 +204,7 @@ class SearchTrials:
             raise ValueError from None
 
     def start(self, outer_year, inner_year, candidate_id):
-        """Claim once, then bind native inputs; interrupted starts cannot be restarted."""
+        """Admit fresh IV inputs before claiming; claimed attempts cannot be restarted."""
         return self._start(outer_year, inner_year, candidate_id)
 
     def _start(self, outer_year, inner_year, candidate_id, execution=None, admitted=_NOT_ADMITTED):
@@ -216,6 +216,7 @@ class SearchTrials:
             started["execution"] = execution
         cohort = cohort_key(plan, owner_year, inner_year)
         existing_start = self._read("start:" + key)
+        inputs = self._cohort_inputs(cohort, inner) if "target" in plan and existing_start is None else None
         if plan.get("schema_version") == PLAN_V3 and existing_start is not None:
             if execution is not None:
                 raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search trial is unfinished")
@@ -229,7 +230,8 @@ class SearchTrials:
             self._append("start:" + key, started, replay=False)
         if execution is not None:
             self._append("execution-start:" + key, execution, replay=False)
-        inputs = self._cohort_inputs(cohort, inner)
+        if inputs is None:
+            inputs = self._cohort_inputs(cohort, inner)
         # Shards first (outside the catalog transaction); the manifest append is the commit point.
         if cohort not in self._published:
             self._published[cohort] = publish_inputs(self.store, inputs)
