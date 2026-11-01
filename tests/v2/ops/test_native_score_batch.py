@@ -4,6 +4,7 @@ import hashlib
 import json
 from dataclasses import replace
 from datetime import date, datetime, timezone
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -36,6 +37,7 @@ from engine.v2.ops.native_score_batch import (
     _decode_producer_refusals,
     _event_inputs_from_document,
     _native_score_batch_documents,
+    _project_member_features,
     assemble_score_batch_inputs,
     run_native_score_batch_worker,
 )
@@ -170,13 +172,32 @@ def _calendar_row(**overrides) -> dict:
     return row
 
 
+def _chooser_panel_values():
+    return {
+        "mean_prior_abs_move": 0.01, "ema12r_abs": 0.02,
+        "signed_streak": 2.0, "mean_prior_or_implied": 0.03,
+        "mcap_log": 20.0, "or_implied": 0.04, "or_rvol30": 1.2,
+        "spy_ret21": 0.01, "spy_ret63": 0.02, "spy_ret252": 0.03,
+        "spy_dd252": -0.04, "spy_vol20": 0.2, "spy_vol5": 0.05,
+        "spy_vol60": 0.06, "spy_vol252": 0.07,
+        "spy_vol20_rel252": 0.08, "iv10": 0.24, "im_d1": -0.03,
+    }
+
+
+def _with_chooser_producer_order(binding, feature_order):
+    reference = SimpleNamespace(
+        release_binding=SimpleNamespace(feature_order=tuple(feature_order)))
+    return replace(binding, chooser_fold_references={
+        ("pred_im_t1_d14", "2026-01-01"): reference})
+
+
 def _event_inputs(strategy="STR-THRU", ticker="TEST",
                   event_date=pd.Timestamp("2026-01-15"), **overrides) -> NightlyEventInputs:
     base = dict(
         key=BoardRequest(ticker=ticker, strategy=strategy,
                          event_date=event_date, session="am"),
         calendar_row=_calendar_row(),
-        panel_row={"date": str(event_date.date()), "signal": 1.5},
+        panel_row={"date": str(event_date.date()), "signal": 1.5, **_chooser_panel_values()},
         # A forward event's real anchor is FeatureVector.as_of (issue #53,
         # fixed by #67) -- calendar_observed_through is already staged
         # before as_of ("2026-01-10") in this fixture, so it doubles as a
@@ -209,7 +230,8 @@ def _assemble(binding, events, **overrides):
 
 
 def test_happy_path_assembles_score_request_and_native_inputs(tmp_path):
-    binding = _stage_release(tmp_path)
+    binding = _with_chooser_producer_order(
+        _stage_release(tmp_path), ("iv10", "im_d1"))
     event = _event_inputs()
     assembled, refusals = _assemble(binding, [event])
     assert refusals == ()
@@ -220,8 +242,59 @@ def test_happy_path_assembles_score_request_and_native_inputs(tmp_path):
     assert request.deployment_id == "d1"
     assert request.decision_clock_id == "entry-close"
     assert request.event_id == "evt-1"
+    model_inputs = native_inputs.features["model_inputs"]
+    assert model_inputs["spy_vol5"] == 0.05
+    assert model_inputs["iv10"] == 0.24
+    assert model_inputs["im_d1"] == -0.03
+    assert "dte_entry" not in model_inputs
+    assert tuple(model_inputs) == tuple(sorted(model_inputs))
+    repeated, repeated_refusals = _assemble(binding, [event])
+    assert repeated_refusals == ()
+    assert repeated[event.key][1].features["model_inputs"] == model_inputs
     record = score_one(request, native_inputs)
     assert isinstance(record, ScoreRecord)
+
+
+def test_empty_chooser_producer_order_refuses_one_member(tmp_path):
+    binding = _with_chooser_producer_order(_stage_release(tmp_path), ())
+    event = _event_inputs()
+    assembled, refusals = _assemble(binding, [event])
+    assert assembled == {}
+    assert len(refusals) == 1
+    assert refusals[0].code == "RELEASE_MISSING_FEATURE_ORDER"
+    assert refusals[0].detail == "chooser producer identity has no feature_order"
+
+
+def test_days_before_print_projection_is_calendar_owned(tmp_path):
+    binding = _stage_release(tmp_path)
+    event = _event_inputs(
+        calendar_row=_calendar_row(days_before_print=3))
+    projected = _project_member_features(
+        event.key, event, binding, ("days_before_print",))
+    assert "days_before_print" in projected
+
+    panel = copy.deepcopy(_event_inputs().panel_row)
+    panel["days_before_print"] = 3
+    panel_only = _event_inputs(panel_row=panel)
+    refusal = _project_member_features(
+        panel_only.key, panel_only, binding, ("days_before_print",))
+    assert isinstance(refusal, NativeScoreBatchRowRefusal)
+    assert refusal.code == "MISSING_STAGED_INPUT"
+
+
+def test_missing_required_member_feature_refuses(tmp_path):
+    event = _event_inputs()
+    panel = copy.deepcopy(event.panel_row)
+    panel.pop("spy_vol5")
+    missing = _event_inputs(panel_row=panel)
+    binding = _stage_release(tmp_path)
+    good = _event_inputs(
+        ticker="OTHER", calendar_row=_calendar_row(ticker="OTHER", event_id="evt-2"))
+    assembled, refusals = _assemble(binding, [missing, good])
+    assert list(assembled) == [good.key]
+    assert len(refusals) == 1
+    assert refusals[0].code == "MISSING_STAGED_INPUT"
+    assert refusals[0].detail == "required member feature is missing from staged rows"
 
 
 def test_unsupported_strategy_refuses_without_sinking_batch(tmp_path):
@@ -438,7 +511,7 @@ def _event_doc(strategy="STR-THRU", event_id="evt-1") -> dict:
         "key": {"ticker": "TEST", "strategy": strategy,
                 "event_date": "2026-01-15", "session": "am"},
         "calendar_row": calendar_row,
-        "panel_row": {"date": "2026-01-15", "signal": 1.5},
+        "panel_row": {"date": "2026-01-15", "signal": 1.5, **_chooser_panel_values()},
         "panel_anchor": "2026-01-09",
         "tier4_row": {"pred_abs_move": 0.05,
                       "pred_abs_move_fold_start": "2026-01-01"},
