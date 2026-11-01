@@ -50,11 +50,14 @@ def test_every_test_file_is_in_exactly_one_shard():
     assert REAL_FILES, "no test files discovered"
 
 
-def test_every_explicit_file_in_research_a_b_c_exists():
+def test_every_explicit_research_pattern_matches_a_file():
     by_name = {s.name: s for s in REAL_SHARDS}
-    for name in ("research-a", "research-b", "research-c"):
+    for name in ("research-a", "research-b", "research-c", "research-d",
+                 "research-e", "research-f", "research-g"):
         for pattern in by_name[name].patterns:
-            assert (ROOT / pattern).is_file(), f"{name}: {pattern}"
+            assert any(fnmatch.fnmatchcase(path, pattern) for path in REAL_FILES), (
+                f"{name}: {pattern}"
+            )
 
 
 def _first_unclaimed_pattern(shards, files):
@@ -206,6 +209,10 @@ def test_ownership_matches_an_independently_written_table(tmp_path):
     ("tests/v2/research/test_magnitude_search_outer.py", "research-c"),
     ("tests/v2/research/test_magnitude_search_outer_integrity.py", "research-c"),
     ("tests/v2/research/test_magnitude_search_driver_native.py", "research-c"),
+    ("tests/v2/research/test_size_search_integration.py", "research-d"),
+    ("tests/v2/research/test_iv_crush_search_execution.py", "research-e"),
+    ("tests/v2/research/test_iv_crush_cli.py", "research-f"),
+    ("tests/v2/research/test_distribution_native_admission.py", "research-g"),
     ("tests/v2/integration/test_a.py", "integration"),
     ("tests/test_v2_research_foo.py", "research"),
     ("tests/test_checks_phase2_gate.py", "checks"),
