@@ -125,12 +125,20 @@ def forecasts(indexed, train, fold, plan, execution, *, progress):
                 abstention_counts[reason] = abstention_counts.get(reason, 0) + 1
         model = None
         if len(training) >= 500:
-            with threadpool_limits(limits=1):
-                model = fit_recipe_estimator(native_recipe(), np.array([v for _, v, _ in training], dtype=float),
-                                            np.array([y for _, _, y in training]))
+            try:
+                with threadpool_limits(limits=1):
+                    model = fit_recipe_estimator(native_recipe(), np.array([v for _, v, _ in training], dtype=float),
+                                                np.array([y for _, _, y in training]))
+            except (ValueError, ArithmeticError):
+                raise fail("EXPERIMENT_VARIANT_FAILED", "incumbent candidate estimator fit failed") from None
         complete = [(event, values) for event, values, reason in evaluated if reason is None]
-        estimates = {} if model is None or not complete else dict(zip([e for e, _ in complete],
-            model.predict(np.array([v for _, v in complete], dtype=float))))
+        estimates = {}
+        if model is not None and complete:
+            try:
+                predictions_array = model.predict(np.array([v for _, v in complete], dtype=float))
+            except (ValueError, ArithmeticError):
+                raise fail("EXPERIMENT_VARIANT_FAILED", "incumbent candidate estimator prediction failed") from None
+            estimates = dict(zip([e for e, _ in complete], predictions_array))
         for event, values, reason in evaluated:
             if reason is None and model is None:
                 reason = "insufficient_training"

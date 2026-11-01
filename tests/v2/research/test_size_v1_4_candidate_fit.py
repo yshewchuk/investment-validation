@@ -2,6 +2,11 @@
 import numpy as np
 import pandas as pd
 import pytest
+from engine.v2.foundation import content_hash
+from engine.v2.ops.errors import OpsError
+from experiments.magnitude_search_trials import _verify_size_forecast_replay
+from experiments.size_fit_diagnostics import evidence as diagnostic_evidence
+from experiments.size_search_binding import _panel_columns
 
 from experiments import size_comparator as comparator
 from experiments.magnitude_search_evidence import fit_evidence as shared_fit_evidence
@@ -150,3 +155,71 @@ def test_size_candidate_worker_emits_timing_and_maps_fit_failure(tmp_path, monke
     assert type(result["rss_delta_kib"]) is int and result["rss_delta_kib"] == 10
     assert set(result) == ({"event", "score_seconds", "rss_delta_kib"} if fails else
         {"event", "forecasts", "diagnostics", "score_seconds", "rss_delta_kib"})
+
+
+def _size_execution():
+    return {"schema_version": "size_candidate_execution.v1", "features": comparator.COLUMNS,
+            "model": "size_v1_4", "fit_recipe": comparator.recipe()}
+
+
+def test_size_terminal_replay_validates_raw_grid_and_rejects_empty_storage():
+    from pytest import raises
+    fold, horizons = {"evaluation_event_ids": ["a", "b"]}, [5]
+    raw = [{"event_id": "a", "horizon_sessions": 5, "predicted_absolute_move_pct": -2.5},
+           {"event_id": "b", "horizon_sessions": 5, "predicted_absolute_move_pct": None}]
+    stored = [{"event_id": "a", "horizon_sessions": 5, "predicted_absolute_move_pct": -2.5}]
+    assert _verify_size_forecast_replay(raw, stored, fold, horizons) == stored
+    with raises(ValueError):
+        _verify_size_forecast_replay(raw, [], fold, horizons)
+    with raises(ValueError):
+        _verify_size_forecast_replay(raw[:1], stored, fold, horizons)
+    with raises(ValueError):
+        _verify_size_forecast_replay([{**row, "predicted_absolute_move_pct": None} for row in raw], [], fold, horizons)
+
+
+def test_size_diagnostics_are_reconstructed_from_admitted_rows():
+    training = pd.DataFrame([{"event_id": "train", "absolute_move_pct": 10.0}])
+    features, fold, plan = [_row("train"), _row("eval")], {"evaluation_event_ids": ["eval"]}, {"horizons": [5]}
+    execution = _size_execution()
+    indexed = {(row["event_id"], 5): row for row in features}
+    result = comparator.forecasts(indexed, training, fold, plan, execution, progress=lambda *args: None)
+    worker = {"event": "succeeded", "diagnostics": [{"schema_version": "size_v1_4_fit.v1",
+        "recipe_id": content_hash(execution["fit_recipe"]), **result["fit_details"][0]}]}
+    assert worker["diagnostics"][0]["abstention_counts"] == {"insufficient_training": 1}
+    inputs = {"features": features, "training": training.to_dict("records")}
+    assert diagnostic_evidence(worker, execution, [5], inputs=inputs, fold=fold) == {"diagnostics": worker["diagnostics"]}
+    for field, poisoned in (("training_event_ids", ["invented"]), ("abstention_counts", {})):
+        corrupted = {"event": "succeeded", "diagnostics": [dict(worker["diagnostics"][0])]}
+        corrupted["diagnostics"][0][field] = poisoned
+        with pytest.raises(OpsError):
+            diagnostic_evidence(corrupted, execution, [5], inputs=inputs, fold=fold)
+
+
+@pytest.mark.parametrize("stage,error_type", [("fit", ValueError), ("fit", ArithmeticError),
+                                                ("predict", ValueError), ("predict", ArithmeticError)])
+def test_size_candidate_estimator_errors_are_candidate_failures(monkeypatch, stage, error_type):
+    ids = [f"train-{i}" for i in range(500)]
+    training = pd.DataFrame({"event_id": ids, "absolute_move_pct": [10.0] * 500})
+    features = [_row(event) for event in ids + ["eval"]]
+    fold, plan, execution = {"evaluation_event_ids": ["eval"]}, {"horizons": [5]}, _size_execution()
+    if stage == "fit":
+        def failing_fit(*args, **kwargs):
+            raise error_type()
+        monkeypatch.setattr(comparator, "fit_recipe_estimator", failing_fit)
+    else:
+        class Predictor:
+            def predict(self, matrix):
+                raise error_type()
+        monkeypatch.setattr(comparator, "fit_recipe_estimator", lambda *args, **kwargs: Predictor())
+    with pytest.raises(OpsError) as error:
+        comparator.forecasts({(row["event_id"], 5): row for row in features}, training, fold, plan,
+                             execution, progress=lambda *args: None)
+    assert error.value.code == "EXPERIMENT_VARIANT_FAILED"
+
+
+def test_v5_panel_projection_includes_both_candidate_families():
+    model_columns = ["model_feature", comparator.COLUMNS[0], "model_feature"]
+    projected = _panel_columns("magnitude_search_request.v5", model_columns)
+    assert len(projected) == len(set(projected))
+    assert set(projected) == set(comparator.COLUMNS) | {"model_feature"}
+    assert _panel_columns("magnitude_search_request.v4", model_columns) is model_columns

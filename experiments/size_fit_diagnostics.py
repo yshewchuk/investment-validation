@@ -3,13 +3,14 @@ import math
 
 from engine.v2.foundation import content_hash
 from engine.v2.ops.errors import fail
+from experiments.size_comparator import _values
 
 
 def keys(binding):
     return {"diagnostics"} if binding.get("schema_version") in ("native_experiment_registration.v1.6", "native_experiment_registration.v1.7", "native_experiment_registration.v1.8") else set()
 
 
-def evidence(result, execution, horizons):
+def evidence(result, execution, horizons, *, inputs=None, fold=None):
     if execution.get("schema_version") not in ("size_candidate_execution.v1", "regression_candidate_execution.v1") or result.get("event") != "succeeded":
         return {}
     try:
@@ -43,14 +44,32 @@ def evidence(result, execution, horizons):
                 if item["selected_columns"] != [c for c in recipe["features"] if c in selected]:
                     raise ValueError
             elif size:
-                event_ids = item["training_event_ids"]
-                if (not isinstance(event_ids, list) or any(type(v) is not str for v in event_ids)
-                        or len(set(event_ids)) != len(event_ids)
-                        or type(item["logical_fits"]) is not int or item["logical_fits"] not in (0, 1)
-                        or type(item["component_fits"]) is not int or item["component_fits"] != 2 * item["logical_fits"]
-                        or any(not isinstance(counts, dict) or any(
-                            type(k) is not str or not k or type(v) is not int or v <= 0 for k, v in counts.items())
-                            for counts in (item["abstention_counts"], item["training_abstention_counts"]))):
+                if inputs is None or fold is None:
+                    raise ValueError
+                indexed = {(r["event_id"], r["horizon_sessions"]): r for r in inputs["features"]}
+                training_ids, training_abstention_counts = [], {}
+                for row in inputs["training"]:
+                    if 0 <= row["absolute_move_pct"] <= 200:
+                        _, reason = _values(indexed[row["event_id"], horizon])
+                        if reason is None:
+                            training_ids.append(row["event_id"])
+                        else:
+                            training_abstention_counts[reason] = training_abstention_counts.get(reason, 0) + 1
+                abstention_counts, eligible = {}, []
+                for event in fold["evaluation_event_ids"]:
+                    _, reason = _values(indexed[event, horizon])
+                    if reason is None:
+                        eligible.append(event)
+                    else:
+                        abstention_counts[reason] = abstention_counts.get(reason, 0) + 1
+                logical_fits = int(len(training_ids) >= 500)
+                if not logical_fits:
+                    for _ in eligible:
+                        abstention_counts["insufficient_training"] = abstention_counts.get("insufficient_training", 0) + 1
+                expected_size = {"training_event_ids": training_ids, "logical_fits": logical_fits,
+                                 "component_fits": 2 * logical_fits, "abstention_counts": abstention_counts,
+                                 "training_abstention_counts": training_abstention_counts}
+                if any(item[k] != expected_size[k] for k in expected_size):
                     raise ValueError
         return {"diagnostics": diagnostics}
     except (KeyError, TypeError, ValueError):

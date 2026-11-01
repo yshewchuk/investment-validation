@@ -183,7 +183,7 @@ def _replay(read, store, started, fold, plan, execution, binding):
         receipt = {"status": "succeeded", "fits": fits, "fit_attempt_count": len(fits),
                    "completed_fit_count": len(fits), "forecasts_id": content_hash(forecasts)}
         if worker is not None and diagnostic_keys(binding):
-            receipt.update(diagnostic_evidence(worker, execution, plan["horizons"]))
+            receipt.update(diagnostic_evidence(worker, execution, plan["horizons"], inputs=inputs, fold=fold))
         _equal(read("execution"), receipt)
         for fit in fits:
             _equal(read("fit-started:" + str(fit["horizon_sessions"])), fit)
@@ -279,7 +279,7 @@ def _execute_admitted(conn, store, repository, registration, plan, fold, selecti
     forecasts = _forecasts(result["forecasts"], fold, plan["horizons"], allow_incomplete=_allow_incomplete(execution)) if succeeded else None
     receipt = {"status": result["event"], "fits": fits, "fit_attempt_count": len(fits) + len(pending),
                "completed_fit_count": len(fits), "forecasts_id": content_hash(forecasts) if succeeded else None,
-               **diagnostic_evidence(result, execution, plan["horizons"])}
+               **diagnostic_evidence(result, execution, plan["horizons"], inputs=inputs, fold=fold)}
     append("worker-result", result)
     append("execution", receipt)
     if not succeeded:

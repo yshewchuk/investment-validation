@@ -39,6 +39,12 @@ def _require(condition):
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "qualified SIZE source/fold binding differs")
 
 
+def _panel_columns(schema_version, model_columns):
+    if schema_version == "magnitude_search_request.v5":
+        return list(dict.fromkeys(COLUMNS + list(model_columns)))
+    return model_columns
+
+
 class _PreviewStore:
     def publish_bytes(self, payload, schema_ref=None):
         return artifact_reference(payload, schema_ref)
@@ -102,7 +108,7 @@ def prepare(repository, spec, request, panel_request, *, scope, training_start, 
     _require(binding["execution_plan"]["runner"] == "experiments/size_search.py")
     binding["source_closure"] = sources
     _require(binding["magnitude_plan"]["evaluation_years"] == schedule["request"]["outer_years"])
-    panel_columns = COLUMNS if request["schema_version"] == "magnitude_search_request.v5" else recipe("HMO")["model_columns"]
+    panel_columns = _panel_columns(request["schema_version"], recipe("HMO")["model_columns"])
     panel = read_panel(repository, from_document(SnapshotRef, binding["snapshot"]), panel_request,
                         columns=panel_columns)
     context = panel["context"]
@@ -285,7 +291,7 @@ def fold_inputs(repository, binding, fold):
         for group in _folds(binding, binding["size_request"])))
     source = from_document(SnapshotRef, binding["snapshot"])
     started = time.monotonic()
-    panel_columns = COLUMNS if binding["size_request"].get("schema_version") == "magnitude_search_request.v5" else recipe("HMO")["model_columns"]
+    panel_columns = _panel_columns(binding["size_request"].get("schema_version"), recipe("HMO")["model_columns"])
     panel = _stored_panel(repository, source, binding, panel_columns)
     participants = set(fold["training_candidate_event_ids"] + fold["evaluation_event_ids"])
     events = {e["event_id"]: e for e in panel["context"]["target_events"]}

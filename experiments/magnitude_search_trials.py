@@ -71,7 +71,7 @@ def _candidate_failure(problem):
 
 
 def _is_size_v1_4(candidate):
-    """Treat only a well-formed size_causal_comparator.v1 candidate recipe as the partial-forecast family."""
+    """Recognize the SIZE v1.4 family from its recipe schema version."""
     if not isinstance(candidate, dict):
         return False
     recipe = candidate.get("recipe")
@@ -108,6 +108,17 @@ def _completed_fit(marker, static):
             and _finite_nonnegative(marker.get("fit_seconds"))
             and canonical_json({key: value for key, value in marker.items() if key != "fit_seconds"})
             == canonical_json(static))
+
+
+def _verify_size_forecast_replay(raw_forecasts, stored_forecasts, inner, horizons):
+    try:
+        normalized = normalize_forecasts(raw_forecasts, inner, horizons, allow_incomplete=True)
+        normalized = json.loads(canonical_json(normalized))
+    except (ValueError, TypeError, OverflowError):
+        raise ValueError from None
+    if canonical_json(normalized) != canonical_json(stored_forecasts):
+        raise ValueError
+    return normalized
 
 
 _NOT_ADMITTED = object()
@@ -316,7 +327,7 @@ class SearchTrials:
                     "completed_fit_count": len(fits), "fits": fits, "status": result["event"],
                     "forecasts_id": forecasts_id,
                     "score_seconds": result["score_seconds"], "rss_delta_kib": result["rss_delta_kib"],
-                    **diagnostic_evidence(result, execution, plan["horizons"])}
+                    **diagnostic_evidence(result, execution, plan["horizons"], inputs=inputs, fold=inner)}
         self._append("execution:" + key, evidence, replay=False)
         self._record(outer_year, inner_year, candidate_id, native=True, **({"forecasts": result["forecasts"]} if succeeded
             else {"failure": fail("EXPERIMENT_VARIANT_FAILED", "fitted magnitude estimator failed").problem}))
@@ -421,7 +432,7 @@ class SearchTrials:
         receipt = {"attempt": attempt, "fit_attempt_count": count, "completed_fit_count": completed,
                    "fits": expected[:completed], "status": result["event"],
                    "forecasts_id": content_hash(forecasts) if succeeded else None,
-                   **diagnostic_evidence(result, execution, plan["horizons"])}
+                   **diagnostic_evidence(result, execution, plan["horizons"], inputs=inputs, fold=inner)}
         if timed:
             receipt.update({"score_seconds": result["score_seconds"],
                             "rss_delta_kib": result["rss_delta_kib"]})
@@ -623,11 +634,20 @@ class SearchTrials:
             submitted = self._read("forecasts:" + key)
             size_v14 = _is_size_v1_4(candidate)
             if submitted is not None:
-                try:
-                    submitted = ([] if size_v14 and submitted == []
-                                 else self._forecasts(submitted, inner, plan["horizons"], size_v14))
-                except OpsError:
-                    raise ValueError from None
+                if size_v14 and native:
+                    execution_result = self._read("execution-result:" + key)
+                    if (not isinstance(execution_result, dict)
+                            or not isinstance(execution_result.get("result"), dict)
+                            or execution_result["result"].get("event") != "succeeded"
+                            or not isinstance(execution_result["result"].get("forecasts"), list)):
+                        raise ValueError
+                    submitted = _verify_size_forecast_replay(
+                        execution_result["result"]["forecasts"], submitted, inner, plan["horizons"])
+                else:
+                    try:
+                        submitted = self._forecasts(submitted, inner, plan["horizons"], False)
+                    except OpsError:
+                        raise ValueError from None
                 validation = self._read("validation:" + admitted["cohort"])
                 self._validation(inner, admitted, cohort, validation)
             if record["status"] == "succeeded":
