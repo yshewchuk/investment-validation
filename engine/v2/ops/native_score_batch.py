@@ -778,8 +778,8 @@ def _gate_policy_and_feature_names(
 
 
 def _valid_explicit_feature_names(feature_names: Sequence[str]) -> bool:
-    """Whether explicit names are a duplicate-free list/tuple of non-empty str."""
-    if not isinstance(feature_names, (list, tuple)):
+    """Whether names are a duplicate-free non-string sequence of non-empty str."""
+    if isinstance(feature_names, (str, bytes)) or not isinstance(feature_names, Sequence):
         return False
     if any(not isinstance(name, str) or not name.strip() for name in feature_names):
         return False

@@ -1,7 +1,9 @@
 """Batch assembly and worker semantics for ``engine/v2/ops/native_score_batch``."""
 import copy
 import hashlib
+import inspect
 import json
+from collections import UserList
 from dataclasses import replace
 from datetime import date, datetime, timezone
 from types import SimpleNamespace
@@ -283,6 +285,7 @@ def test_dyn_sv_empty_chooser_references_refuses(tmp_path):
     refusal = _project_member_features(
         event.key, event, binding, ("signal", "pred_abs_move"))
     assert isinstance(refusal, NativeScoreBatchRowRefusal)
+    assert refusal.key == event.key
     assert refusal.code == "RELEASE_MISSING_FEATURE_ORDER"
     assert refusal.detail == "chooser producer references are missing"
 
@@ -293,6 +296,7 @@ def test_dyn_sv_empty_chooser_producer_order_refuses(tmp_path):
     refusal = _project_member_features(
         event.key, event, binding, ("signal", "pred_abs_move"))
     assert isinstance(refusal, NativeScoreBatchRowRefusal)
+    assert refusal.key == event.key
     assert refusal.code == "RELEASE_MISSING_FEATURE_ORDER"
     assert refusal.detail == "chooser producer identity has no feature_order"
 
@@ -310,10 +314,20 @@ def test_dyn_sv_days_before_print_projects_from_member_rows(tmp_path):
 
     tier4 = copy.deepcopy(_event_inputs().tier4_row)
     tier4["days_before_print"] = 11
+    tier4["days_before_print_fold_start"] = "2026-01-01"
     tier4_event = _event_inputs(strategy="DYN-SV", tier4_row=tier4)
     projected = _project_member_features(
         tier4_event.key, tier4_event, binding, ("days_before_print",))
     assert "days_before_print" in projected
+    bundle = assemble_nightly_source_bundle(
+        source_ref="native-score-batch:TEST:2026-01-15:DYN-SV",
+        strategy="DYN-SV", as_of=_AS_OF,
+        calendar_row=tier4_event.calendar_row, panel_row=tier4_event.panel_row,
+        panel_anchor=tier4_event.panel_anchor, tier4_row=tier4_event.tier4_row,
+        quote_rows=tier4_event.quote_rows, quote_status=tier4_event.quote_status,
+        feature_names=projected,
+    )
+    assert bundle.feature_vector["days_before_print"] == 11
 
     calendar_only = _event_inputs(
         strategy="DYN-SV", calendar_row=_calendar_row(days_before_print=13))
@@ -332,6 +346,29 @@ def test_dyn_sv_projects_chooser_primitives_and_producer_order(tmp_path):
     assert tuple(projected) == tuple(sorted(expected))
     for name in _STAGE_OWNED_NAMES:
         assert name not in projected
+
+
+def test_dyn_sv_projection_accepts_non_string_sequence_names(tmp_path):
+    binding = _with_chooser_producer_order(
+        _stage_release(tmp_path), _CHOOSER_PRIMITIVE_NAMES + ("iv10",))
+    event = _event_inputs(strategy="DYN-SV")
+    projected = _project_member_features(
+        event.key, event, binding, UserList(("signal",)))
+    expected = set(_CHOOSER_PRIMITIVE_NAMES) | {"iv10", "signal"}
+    assert tuple(projected) == tuple(sorted(expected))
+
+
+def test_dyn_sv_chooser_references_union_producer_orders(tmp_path):
+    binding = _with_chooser_producer_order(_stage_release(tmp_path), ("iv10",))
+    second = SimpleNamespace(
+        release_binding=SimpleNamespace(feature_order=("im_d1",)))
+    binding = replace(binding, chooser_fold_references={
+        **binding.chooser_fold_references,
+        ("pred_im_t1_d14", "2026-01-02"): second})
+    event = _event_inputs(strategy="DYN-SV")
+    projected = _project_member_features(event.key, event, binding, ("signal",))
+    expected = set(_CHOOSER_PRIMITIVE_NAMES) | {"iv10", "im_d1", "signal"}
+    assert tuple(projected) == tuple(sorted(expected))
 
 
 def test_dyn_sv_projected_values_reach_the_member_bundle(tmp_path):
@@ -404,6 +441,7 @@ def test_dyn_sv_missing_staged_projection_input_refuses(tmp_path):
     refusal = _project_member_features(
         missing.key, missing, binding, ("signal", "pred_abs_move"))
     assert isinstance(refusal, NativeScoreBatchRowRefusal)
+    assert refusal.key == missing.key
     assert refusal.code == "MISSING_STAGED_INPUT"
     assert refusal.detail == "required member feature is missing from staged rows"
 
@@ -710,6 +748,8 @@ def test_run_native_score_batch_worker_writes_records_and_refusals(tmp_path, mon
 
     _stage_release(tmp_path)
     real_resolve = release_bindings_module.resolve_release_binding
+    assert inspect.signature(real_resolve).parameters[
+        "include_chooser_fold_references"].default is False
     calls: list[tuple[tuple, dict]] = []
 
     def spy(*args, **kwargs):
@@ -723,8 +763,9 @@ def test_run_native_score_batch_worker_writes_records_and_refusals(tmp_path, mon
         [_event_doc(), _event_doc(strategy="DYN-SV", event_id="evt-2")]))
     result = run_native_score_batch_worker(
         _worker_parameters(tmp_path, expected_ids=["native_score_batch"]), root)
-    assert len(calls[-1][0]) == 1
-    assert calls[-1][1].get("include_chooser_fold_references") is not True
+    assert len(calls) == 1
+    assert len(calls[0][0]) == 1
+    assert "include_chooser_fold_references" not in calls[0][1]
     assert result["completed_ids"] == ["native_score_batch"]
     assert result["no_work"] is False
     records_document = json.loads((root / "records.json").read_text())
