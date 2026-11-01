@@ -5,7 +5,7 @@
 - A supplies magnitude histogram math and frozen payoff controls.
 - B supplies separate native ownership, source/fold admission, raw-pair budgets and claims.
 - C adds admitted numeric fit receipts and earlier-OOF residual controls; raw probabilities remain explicitly uncalibrated.
-- D1/D2/D3/D7 supply explicit economics, research books, paired reports and pinned quote/bridge adapters, alongside bounded fixed-child fits and metadata seals; D4 adds proper scores and forecast reporting. The [explicit contained runner](ARCHITECTURE.md#explicit-contained-runner) adds one bounded attempt, not a public CLI or automatic real-run authorization.
+- D supplies explicit economics, research books, paired/forecast reports, pinned quote/bridge adapters, bounded fixed-child fits and metadata seals. The [contained runner](ARCHITECTURE.md#explicit-contained-runner) and operator below add one explicit bounded attempt, not automatic real-run authorization.
 
 Focused synthetic checks live in `tests/v2/research/test_distribution_*.py`. No real data, provider, final-holdout, deployment or automatic run authority follows from these APIs. Shared platform owners retain source eligibility, transport and holdout policy.
 
@@ -30,3 +30,39 @@ The parent requires successful exit, verified CAS output and exact expected reci
 ## Causal pipeline
 
 `distribution_pipeline.evaluate_outer` freezes every sealed alpha's D-1 intentions before D0/D+1 quotes or centrally admitted outer targets are read. `finish_reports` publishes conditional funded-book, profit and all-horizon forecast sections using the unchanged selector, costs and missingness rules. Both require a matching durable run seal before effects and consume its detached policy; changing the live request or supplied evaluation plan refuses before evaluation/report work. Any already-recorded group intent, including partial alpha prefixes, refuses before readers, publication or accumulator mutation; other failures still require discarding failed invocation state without retry. These library functions neither fit nor orchestrate a run; an executable runner remains separate. See the [causal pipeline contract](ARCHITECTURE.md#causal-outer-pipeline). Native synthetic integration covers actual catalog/panel admission, six raw-pair fits, earlier OOF pools, CAS quote fragments, the central target reader and final report; it does not qualify real-study resources or inputs.
+
+## Operator lifecycle
+
+Run `python -m experiments.distribution_run --help` in a dedicated Linux main-thread process; do not embed this lifecycle in a thread pool or reuse a failed process. Every action requires explicit inputs and `--no-ledger`; there are no resource, economics, source or strategy defaults. This reuses SUPER SIZE's native source preparation/registration and metadata I/O, **not** its 33-candidate SIZE search or target-specific budgets. Prepare the qualified, all-5/3/1-horizon SIZE source registration and sealed plan through its existing lifecycle first; no SIZE model run is required. Do not change a registered checkout's source files: closure drift requires fresh registration and seals, never migration.
+
+Inputs are existing JSON objects (bounded to 16 MiB each), an existing catalog and store:
+
+- `--spec`: a distinct native experiment spec with runner `experiments/distribution_run.py`, seed zero, `computed_moves`, empty economics/input files and outer folds matching the source. Distribution economics belong exclusively in the run request.
+- `--source-spec`, `--source-request`, `--source-plan-ref`: the registered SIZE spec with no external input files, exact source search request and the sealed plan's ArtifactRef, not copied panel rows or a distribution plan reference. Every action, including completed replay, refuses nonempty `input_files` in either spec before native registration reads; an unchanged spec hash does not admit those declarations.
+- `--recipe`: the unchanged document from `distribution_candidate_recipe.candidate_recipe` for the explicitly chosen H/HM/HMO feature set.
+- `--budget-caps`: exactly `max_fits`, `max_trees`, `child_limits`; the latter supplies positive integer `memory_bytes`, `cpu_seconds`, `wall_seconds`. Counts include all actual inner/outer raw pairs at 5/3/1; child memory cannot exceed the parent request ceiling.
+- `--request`: the complete closed `distribution_run_request.v1` [policy contract](../README.md#distribution-explicit-policy), including explicit economics/book/uncertainty/risk/resource limits, quote snapshot, frozen pre-cutoff payoff ArtifactRefs for every alpha/year, and optional causally frozen benchmark refs. Native standard contracts/reconstructed quote availability remain explicit limitations. Strict benchmark policy requires full coverage; absence otherwise means unavailable, not inferred superiority.
+
+For example, after independently qualifying the intended input documents and budgets:
+
+```bash
+args=(--spec distribution-spec.json --source-spec size-source-spec.json
+      --source-request size-source-request.json --source-plan-ref size-plan-ref.json
+      --recipe distribution-recipe.json --budget-caps distribution-fit-caps.json
+      --request distribution-request.json --catalog /path/to/catalog.sqlite
+      --store-root /path/to/store --no-ledger)
+python -m experiments.distribution_run prepare "${args[@]}"
+python -m experiments.distribution_run register "${args[@]}"
+python -m experiments.distribution_run preflight "${args[@]}"
+python -m experiments.distribution_run seal "${args[@]}"
+# Only after bounded-run authorization and resource/input qualification:
+python -m experiments.distribution_run run "${args[@]}"
+python -m experiments.distribution_run collect "${args[@]}"
+python -m experiments.distribution_run report "${args[@]}"
+```
+
+`prepare` returns recomputed own/source identities and conservative raw-pair counts without SQL/CAS writes. `register` repeats that native preparation and reserves the distribution owner; it does not certify bridge/benchmark coverage or resource feasibility. `preflight` verifies those actual run dependencies after registration, without SQL/CAS writes. `seal` explicitly writes immutable B/D metadata; a later refusal can leave a B seal. `run` alone starts fits/outcome work; failed or interrupted attempts stay claimed with no retries or repair. An exactly completed `run`, `collect` and `report` only verify/read the saved report. Run first probes completion read-only; only absence permits writable reopen/revalidation, without resetting its deadline. SQLite WAL read coordination may create/update sidecars; replay does not switch journal mode or ignore committed WAL. Missing/unreadable input documents and missing/null required spec fields refuse as invalid experiment input, storage outages remain resource failures, and raw CAS corruption retains integrity failure. See [failure/containment contract](ARCHITECTURE.md#distribution-operator).
+
+All actions validate/detach the request before indexing limits or opening storage, then apply its declared parent/job bounds before catalog or metadata traversal; request bootstrap time counts against the same deadline, and `run` does not reset it. These bootstrap limits are caller-declared, not authenticated against a saved seal until admission; a changed valid request refuses before started claims/fits but can already have governed pre-admission I/O. Progress, including inherited native logs, goes to stderr; stdout is one bounded JSON result or `{ "refused": <typed problem> }` with exit status 2. These synthetic tests prove wiring, not real-data/provider/final-holdout permission, capacity or measured RSS feasibility: `test_distribution_run_native.py` and `test_distribution_cli_native.py` exercise real bounded children and replay without a private dataset.
+
+Treat every nonzero process exit as terminal: never repair an attempt, reuse its in-memory state or retry its started identity. Failure records retain only typed `OpsError`/`DataError` refusal codes; all other exceptions record fixed `INTERRUPTED`, never raw exit arguments. Failure-journal I/O preserves the original execution error and emits only a fixed best-effort secondary diagnostic on stderr; a failure record may be absent, but its absence never releases a started claim. Containment setup/cleanup failure can retain a stricter CPU ceiling and likewise permits no continued execution. Complete `{1,3,5}` results and sealed alphas are checked before evaluation; zero-funded diagnostic flags are not risk sufficiency, capacity, promotion or superiority evidence.
