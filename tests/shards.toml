@@ -7,11 +7,10 @@
 # Shards are ORDERED and the first shard whose pattern matches a file owns it.
 # The last shard is the remainder: it owns every test file no earlier pattern
 # claims, so a new test file or package can never silently fall out of CI.
-# On 2026-11-01 main run 41305553745, research remainder totaled 6430 CPU-s.
-# Split SIZE, IV and distribution/heavy files into research-d..g (~1240-1400
-# CPU-s each). research-h isolates test_size_run_single_collect after PR CI
-# measured research-d at 11m14s; keep the cheap files in the research remainder.
-# Rebalance by moving files between the explicit lists.
+# research-d owns tests/v2/research/test_size_*; research-h comes first to
+# isolate test_size_run_single_collect. research-e/f split IV tests, and
+# research-g holds distribution/heavy files. Rebalance by updating the patterns
+# or explicit lists below.
 # Earlier, 2026-10-11, before ops-sweep/integration existed (3475 CPU-s total,
 # ~3.8x parallel on a 4-core runner): ops ~1224, research ~902, checks ~474,
 # rest ~876. Rebalance by moving a pattern; keep every shard under ~15 minutes
