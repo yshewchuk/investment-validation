@@ -78,6 +78,10 @@ _CHOOSER_PRIMITIVES = (
     "spy_vol5", "spy_vol60", "spy_vol252", "spy_vol20_rel252",
 )
 
+_SCORER_COMPUTED_FEATURES = frozenset({
+    "entry_cost_pct", "days_to_print", "dte_entry",
+})
+
 @dataclass(frozen=True, slots=True)
 class _DriverSpec:
     """One forecast output and its exact release role, then optional alias."""
@@ -773,28 +777,46 @@ def _gate_policy_and_feature_names(
     return feature_names, None
 
 
+def _valid_explicit_feature_names(feature_names: Sequence[str]) -> bool:
+    """Whether explicit names are a duplicate-free list/tuple of non-empty str."""
+    if not isinstance(feature_names, (list, tuple)):
+        return False
+    if any(not isinstance(name, str) or not name.strip() for name in feature_names):
+        return False
+    return len(set(feature_names)) == len(feature_names)
+
+
 def _project_member_features(
     key: BoardRequest,
     event: NightlyEventInputs,
     binding: ScoringReleaseBinding,
     feature_names: Sequence[str],
 ) -> Sequence[str] | NativeScoreBatchRowRefusal:
-    """Project required staged chooser/producer features for one member row."""
-    projected = set(_CHOOSER_PRIMITIVES)
+    """Project required staged chooser/producer features for one member row.
+
+    Malformed explicit names are returned unchanged so the bundle's own
+    ``INVALID_FEATURE_NAMES`` validation still refuses them before projection.
+    Scorer-computed names are never projected or required from staged rows.
+    """
+    if not _valid_explicit_feature_names(feature_names):
+        return feature_names
+    projected = set(_CHOOSER_PRIMITIVES) - _SCORER_COMPUTED_FEATURES
     for reference in binding.chooser_fold_references.values():
         if not reference.release_binding.feature_order:
             return NativeScoreBatchRowRefusal(
                 key, "RELEASE_MISSING_FEATURE_ORDER",
                 "chooser producer identity has no feature_order")
         projected.update(reference.release_binding.feature_order)
-    if not (isinstance(feature_names, (list, tuple))
-            and all(isinstance(name, str) for name in feature_names)):
-        return feature_names
+    projected -= _SCORER_COMPUTED_FEATURES
     ordered = tuple(sorted(projected.union(feature_names)))
     for name in ordered:
-        present = (name in event.calendar_row
-                   if name == "days_before_print"
-                   else name in event.tier4_row or name in event.panel_row)
+        if name in _SCORER_COMPUTED_FEATURES:
+            continue
+        if name == "days_before_print":
+            present = (name in event.calendar_row if key.strategy == "STR-RUNUP"
+                       else name in event.tier4_row or name in event.panel_row)
+        else:
+            present = name in event.tier4_row or name in event.panel_row
         if not present:
             return NativeScoreBatchRowRefusal(
                 key, "MISSING_STAGED_INPUT",

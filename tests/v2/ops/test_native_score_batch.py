@@ -267,19 +267,86 @@ def test_empty_chooser_producer_order_refuses_one_member(tmp_path):
 
 def test_days_before_print_projection_is_calendar_owned(tmp_path):
     binding = _stage_release(tmp_path)
-    event = _event_inputs(
+    runup = _event_inputs(
+        strategy="STR-RUNUP",
         calendar_row=_calendar_row(days_before_print=3))
     projected = _project_member_features(
-        event.key, event, binding, ("days_before_print",))
+        runup.key, runup, binding, ("days_before_print",))
     assert "days_before_print" in projected
 
     panel = copy.deepcopy(_event_inputs().panel_row)
-    panel["days_before_print"] = 3
-    panel_only = _event_inputs(panel_row=panel)
+    panel["days_before_print"] = 7
+    runup_panel_only = _event_inputs(strategy="STR-RUNUP", panel_row=panel)
     refusal = _project_member_features(
-        panel_only.key, panel_only, binding, ("days_before_print",))
+        runup_panel_only.key, runup_panel_only, binding, ("days_before_print",))
     assert isinstance(refusal, NativeScoreBatchRowRefusal)
     assert refusal.code == "MISSING_STAGED_INPUT"
+
+    thru_panel = _event_inputs(strategy="STR-THRU", panel_row=panel)
+    projected = _project_member_features(
+        thru_panel.key, thru_panel, binding, ("days_before_print",))
+    assert "days_before_print" in projected
+
+    tier4 = copy.deepcopy(_event_inputs().tier4_row)
+    tier4["days_before_print"] = 11
+    thru_tier4 = _event_inputs(strategy="STR-THRU", tier4_row=tier4)
+    projected = _project_member_features(
+        thru_tier4.key, thru_tier4, binding, ("days_before_print",))
+    assert "days_before_print" in projected
+
+    runup_tier4_only = _event_inputs(strategy="STR-RUNUP", tier4_row=tier4)
+    refusal = _project_member_features(
+        runup_tier4_only.key, runup_tier4_only, binding, ("days_before_print",))
+    assert isinstance(refusal, NativeScoreBatchRowRefusal)
+    assert refusal.code == "MISSING_STAGED_INPUT"
+
+    thru_calendar_only = _event_inputs(
+        strategy="STR-THRU",
+        calendar_row=_calendar_row(days_before_print=13))
+    refusal = _project_member_features(
+        thru_calendar_only.key, thru_calendar_only, binding, ("days_before_print",))
+    assert isinstance(refusal, NativeScoreBatchRowRefusal)
+    assert refusal.code == "MISSING_STAGED_INPUT"
+
+
+def test_assembly_projects_panel_days_before_print_without_scorer_computed(tmp_path):
+    binding = _with_chooser_producer_order(
+        _stage_release(tmp_path),
+        ("iv10", "im_d1", "days_before_print",
+         "entry_cost_pct", "days_to_print", "dte_entry"))
+    panel = copy.deepcopy(_event_inputs().panel_row)
+    panel["days_before_print"] = 7
+    event = _event_inputs(panel_row=panel)
+    projected = _project_member_features(
+        event.key, event, binding, ("signal", "pred_abs_move"))
+    assert "days_before_print" in projected
+    assert "iv10" in projected
+    for name in ("entry_cost_pct", "days_to_print", "dte_entry"):
+        assert name not in projected
+    assembled, refusals = _assemble(binding, [event])
+    assert refusals == ()
+    request, native_inputs = assembled[event.key]
+    model_inputs = native_inputs.features["model_inputs"]
+    assert model_inputs["days_before_print"] == 7
+    assert model_inputs["iv10"] == 0.24
+    assert "entry_cost_pct" not in model_inputs
+    assert "days_to_print" not in model_inputs
+    assert "dte_entry" not in model_inputs
+
+
+@pytest.mark.parametrize("feature_names", [
+    ("signal", "signal"),
+    ("signal", ""),
+])
+def test_invalid_explicit_feature_names_refuse_before_projection(
+        tmp_path, feature_names):
+    binding = _stage_release(tmp_path)
+    event = _event_inputs()
+    assembled, refusals = _assemble(
+        binding, [event], feature_names=feature_names)
+    assert assembled == {}
+    assert len(refusals) == 1
+    assert refusals[0].code == "INVALID_FEATURE_NAMES"
 
 
 def test_missing_required_member_feature_refuses(tmp_path):
