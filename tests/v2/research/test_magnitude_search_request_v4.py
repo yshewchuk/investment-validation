@@ -89,6 +89,18 @@ def test_v4_workers_accepted_without_changing_request_identity():
             == [spec["candidate_spec_id"] for spec in baseline["candidate_specs"]])
 
 
+@pytest.mark.parametrize("workers", [0, 9, True])
+def test_v4_invalid_workers_refuse_before_expansion(monkeypatch, workers):
+    monkeypatch.setattr(compiler, "_specifications", fail_if_called)
+    document = v4_request()
+    document["workers"] = workers
+    with pytest.raises(OpsError) as caught:
+        versions.compile_request(document)
+    assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert caught.value.problem.message == "stage-2 workers requires an integer from 1 through 8"
+    assert caught.value.problem.retryable is False
+
+
 @pytest.mark.parametrize("path,value", [
     (("space", "ridge", "alpha"), [0.1, 0.01]),
     (("space", "ridge", "alpha"), [0.1, 0.1]),

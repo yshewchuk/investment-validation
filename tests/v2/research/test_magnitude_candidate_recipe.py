@@ -96,7 +96,7 @@ def test_invalid_dispatch_envelope_refuses_before_constructor(family, parameters
 
 @pytest.mark.parametrize("family,parameters,message", [
     ("ridge", {"alpha": True}, "Ridge requires declared alpha and no HGB parameter"),
-    ("ridge", {"alpha": 1000.0001}, "Ridge requires declared alpha and no HGB parameter"),
+    ("ridge", {"alpha": 10000.0001}, "Ridge requires declared alpha and no HGB parameter"),
     ("elasticnet", {"alpha": 1, "l1_ratio": 1.0001},
      "ElasticNet parameters must be finite numeric values within declared bounds"),
     ("hgb", {"max_leaf_nodes": 7.0}, "HGB requires declared integer leaf count and no Ridge parameter"),
@@ -104,6 +104,12 @@ def test_invalid_dispatch_envelope_refuses_before_constructor(family, parameters
 def test_family_owns_parameter_value_refusal(family, parameters, message):
     with pytest.raises(ValueError, match="^" + message + "$"):
         assembly.candidate_recipe(family, parameters, columns=["x"], feature_dictionary_hash=HASH)
+
+
+def test_ridge_alpha_at_ceiling_is_permitted():
+    result = assembly.candidate_recipe("ridge", {"alpha": 10000.0}, columns=["x"],
+                                       feature_dictionary_hash=HASH)
+    assert result["estimator"]["params"]["alpha"] == 10000.0
 
 
 @pytest.mark.parametrize("family,parameters", [

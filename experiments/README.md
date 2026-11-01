@@ -327,7 +327,7 @@ These three search actions accept `--max-registration-bytes` (default 16777216);
 
 `run_search(conn, store, repository, registration, request, plan_ref, *, limits,
 collect_results=True, before_dispatch=None)`
-is the same orchestration API used by the contained SIZE runner. Only `magnitude_search_request.v2` and `.v3`
+is the same orchestration API used by the contained SIZE runner. Only `magnitude_search_request.v2` through `.v5`
 requests may declare `workers` from 1 through 8 (omission means 1); a declared
 field on a legacy or regression request refuses before admission. This execution
 setting is removed before request hashing and does not change candidate, plan or

@@ -163,6 +163,8 @@ def test_v3_invalid_workers_refuse_nonretryably(workers):
         versions.compile_request(document)
     assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
     assert caught.value.problem.retryable is False
+    assert caught.value.problem.message == (
+        "stage-2 workers requires an integer from 1 through 8")
 
 
 def test_v3_selection_requires_lead1_horizon():

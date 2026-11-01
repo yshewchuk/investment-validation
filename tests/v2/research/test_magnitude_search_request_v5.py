@@ -118,4 +118,6 @@ def test_v5_invalid_workers_refuse_before_expansion(monkeypatch, workers):
     with pytest.raises(OpsError) as caught:
         versions.compile_request(request)
     assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert caught.value.problem.retryable is False
+    assert caught.value.problem.message == "stage-2 workers requires an integer from 1 through 8"
     assert request["workers"] == workers
