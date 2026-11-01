@@ -408,12 +408,23 @@ def test_real_serial_and_parallel_trials_have_equal_journaled_fit_results(tmp_pa
                                         "execution:" + key)
                 terminal = read_record(context[0], context[1], registration.run_id,
                                        "terminal:" + key)
-                rows.append({"candidate_id": candidate["candidate_id"],
-                             "trial_id": key,
-                             "execution": without_operational_fields(execution),
-                             "terminal": without_operational_fields(terminal)})
+                rows.append({
+                    "candidate_id": candidate["candidate_id"], "trial_id": key,
+                    "attempt": execution["attempt"], "fits": execution["fits"],
+                    "diagnostics": without_operational_fields(execution["diagnostics"]),
+                    "forecasts_id": execution["forecasts_id"],
+                    "terminal": {name: terminal[name] for name in (
+                        "status", "inputs_id", "validation_id", "evaluation_inputs",
+                        "predictions", "metrics", "inner_metrics") if name in terminal},
+                })
             selection = read_record(context[0], context[1], registration.run_id, "selection")
-            return rows, without_operational_fields(selection)
+            # terminal_id hashes the whole receipt, including runtime telemetry; compare
+            # the trial identities and scored selection result it refers to instead.
+            selected = {name: selection[name] for name in (
+                "plan_id", "selections", "prospective_candidate_id",
+                "estimator_execution", "evaluation_authority")}
+            selected["attempts"] = [row["trial_id"] for row in selection["attempts"]]
+            return rows, selected
 
         assert journaled(serial, serial_plan) == journaled(parallel, parallel_plan)
     finally:
