@@ -498,7 +498,7 @@ def _load_chooser_fold_state(
                 or reference.descriptor_hash != descriptor.descriptor_hash
                 or reference.release_id != descriptor.parent_release_id
                 or reference.carrying_release_id != binding.release_id
-                or reference.training_cutoff != descriptor.fold_start):
+                or reference.training_cutoff != descriptor.training_cutoff):
             raise ValueError("chooser fold reference missing or mismatched")
         context = binding.chooser_authoring_fold_contexts.get(descriptor.descriptor_hash)
         if context is None or context[0].release.release_id != descriptor.parent_release_id:
@@ -1037,9 +1037,8 @@ def _verified_chooser_fold_reference(
     reference = ChooserFoldReference(
         producer_output=key[0], descriptor_hash=loaded.descriptor.descriptor_hash,
         estimator_sha256=loaded.descriptor.estimator.content_hash,
-        # A release cutoff summarizes the newest staged fold. The verified
-        # descriptor's fold_start is the exclusive training boundary for this fold.
-        training_cutoff=loaded.descriptor.fold_start,
+        # Preserve the descriptor's verified estimator cutoff; fold_start is separate.
+        training_cutoff=loaded.descriptor.training_cutoff,
         release_id=authoring_manifest.release.release_id,
         carrying_release_id=manifest.release.release_id,
         release_binding=identity, fold_start=key[1])

@@ -69,10 +69,10 @@ def test_frozen_replay_refuses_missing_or_noncausal_fold_provenance(monkeypatch,
 def test_frozen_replay_requires_provenance_bound_to_staged_descriptors():
     provenance = {
         "pred_im_t1_d14": {
-            "training_cutoff": "2026-09-01", "fold_start": "2026-09-01",
+            "training_cutoff": "2026-08-31", "fold_start": "2026-09-01",
             "descriptor_hash": "descriptor-implied"},
         "pred_runup_abs_move_d14": {
-            "training_cutoff": "2026-09-01", "fold_start": "2026-09-01",
+            "training_cutoff": "2026-08-31", "fold_start": "2026-09-01",
             "descriptor_hash": "descriptor-runup"},
     }
     recipe = {
@@ -92,11 +92,11 @@ def test_frozen_replay_requires_provenance_bound_to_staged_descriptors():
         recipe, request, staged, legacy_event_date)
     assert not phase5_phase4_replay._has_causal_chooser_fold_provenance(
         recipe, request, {}, legacy_event_date)
-    ignored_middle = dict(staged)
-    ignored_middle["__chooser_descriptor__:descriptor-implied"] = (
+    wrong_staged_cutoff = dict(staged)
+    wrong_staged_cutoff["__chooser_descriptor__:descriptor-implied"] = (
         "pred_im_t1_d14\x1f2026-08-01\x1f2026-09-01")
-    assert phase5_phase4_replay._has_causal_chooser_fold_provenance(
-        recipe, request, ignored_middle, legacy_event_date)
+    assert not phase5_phase4_replay._has_causal_chooser_fold_provenance(
+        recipe, request, wrong_staged_cutoff, legacy_event_date)
     wrong_output = dict(staged)
     wrong_output["__chooser_descriptor__:descriptor-implied"] = (
         "pred_runup_abs_move_d14\x1f2026-08-31\x1f2026-09-01")
@@ -138,7 +138,7 @@ def _install_chooser_replay_fixture(monkeypatch, tmp_path):
             pool_pred=np.array([index + 1.0, index + 2.0]),
             pool_res=np.array([index + 3.0, index + 4.0]))
         provenance[output] = {
-            "training_cutoff": "2026-09-01", "fold_start": "2026-09-01",
+            "training_cutoff": "2026-08-31", "fold_start": "2026-09-01",
             "descriptor_hash": digest}
         rows.append({"member_id": f"tier4_folds:{'implied_t1' if index == 0 else 'runup_move'}",
                      "status": "STAGED",
@@ -155,7 +155,7 @@ def _install_chooser_replay_fixture(monkeypatch, tmp_path):
             estimator_sha256=f"sha256:{descriptor.producer_output}",
             release_id="parent",
             carrying_release_id="carrying",
-            training_cutoff="2026-09-01",
+            training_cutoff="2026-08-31",
         )
         for descriptor in descriptors.values()
     }

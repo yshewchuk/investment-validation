@@ -224,7 +224,7 @@ def _has_causal_chooser_fold_provenance(recipe: Any, request: Any,
             return False
         staged_parts = staged_text.split("\x1f")
         if (len(staged_parts) != 3 or staged_parts[0] != producer_output
-                or staged_parts[2] != fold_text):
+                or staged_parts[1] != cutoff_text or staged_parts[2] != fold_text):
             return False
         try:
             cutoff_day, fold_day = date.fromisoformat(cutoff_text), date.fromisoformat(fold_text)
@@ -232,7 +232,7 @@ def _has_causal_chooser_fold_provenance(recipe: Any, request: Any,
             return False
         if (cutoff_day.isoformat() != cutoff_text or fold_day.isoformat() != fold_text
                 or fold_day.day != 1 or fold_text != expected_fold_start
-                or cutoff_text != fold_text):
+                or cutoff_day >= decision_day or cutoff_day >= fold_day):
             return False
     return True
 
@@ -395,8 +395,8 @@ def _staged_chooser_pools(chooser, request, release_root: Path, manifest,
                 or reference.descriptor_hash != descriptor.descriptor_hash
                 or reference.release_id != descriptor.parent_release_id
                 or reference.carrying_release_id != release_id
-                or reference.training_cutoff != descriptor.fold_start
-                or item.get("training_cutoff") != reference.training_cutoff):
+                or reference.training_cutoff != descriptor.training_cutoff
+                or item.get("training_cutoff") != descriptor.training_cutoff):
             return None
         try:
             estimator_cutoff = date.fromisoformat(descriptor.training_cutoff)

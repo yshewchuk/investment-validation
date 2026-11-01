@@ -1333,7 +1333,7 @@ def test_chooser_fold_reference_flows_through_real_scorer_checkpoint(tmp_path, m
     model_id = "implied_t1_synthetic"
     reference = SimpleNamespace(
         producer_output="pred_im_t1_d14", descriptor_hash="sha256:" + "a" * 64,
-        estimator_sha256="sha256:" + digest, training_cutoff="2026-09-01", release_id="release-1",
+        estimator_sha256="sha256:" + digest, training_cutoff="2026-08-31", release_id="release-1",
         carrying_release_id="release-2",
         fold_start="2026-09-01",
         release_binding=SimpleNamespace(
@@ -1355,7 +1355,7 @@ def test_chooser_fold_reference_flows_through_real_scorer_checkpoint(tmp_path, m
     runup_reference = SimpleNamespace(
         producer_output="pred_runup_abs_move_d14",
         descriptor_hash="sha256:" + "e" * 64,
-        estimator_sha256="sha256:" + runup_digest, training_cutoff="2026-08-01",
+        estimator_sha256="sha256:" + runup_digest, training_cutoff="2026-07-31",
         release_id="release-1", carrying_release_id="release-1", fold_start="2026-08-01",
         release_binding=SimpleNamespace(
             binding_id="runup_move:STR-THRU", model_id=runup_model_id,
@@ -1471,10 +1471,10 @@ def test_chooser_fold_reference_flows_through_real_scorer_checkpoint(tmp_path, m
     recipe = declared["value"][0]["recipe"]
     assert recipe["fold_provenance"] == {
         "pred_im_t1_d14": {
-            "training_cutoff": "2026-09-01", "fold_start": "2026-09-01",
+            "training_cutoff": "2026-08-31", "fold_start": "2026-09-01",
             "descriptor_hash": reference.descriptor_hash},
         "pred_runup_abs_move_d14": {
-            "training_cutoff": "2026-08-01", "fold_start": "2026-08-01",
+            "training_cutoff": "2026-07-31", "fold_start": "2026-08-01",
             "descriptor_hash": runup_reference.descriptor_hash},
     }
     assert set(recipe["artifact_refs"]) == {

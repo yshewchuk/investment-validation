@@ -353,6 +353,7 @@ def test_carried_chooser_fold_loads_from_verified_original_release(tmp_path, mon
     origin_ref = original.chooser_fold_references[
         (OUTPUTS[role][1], cache["fold_start"])]
     assert origin_ref.release_id == origin_ref.carrying_release_id == "origin"
+    assert origin_ref.training_cutoff == cache["training_cutoff"]
 
     release, inventory, payloads = release_inputs(role, cache, release_id="carried")
     deployment.stage_release(store, release, inventory, payloads)
@@ -377,6 +378,7 @@ def test_carried_chooser_fold_loads_from_verified_original_release(tmp_path, mon
     assert carried_ref.release_id == "origin"
     assert carried_ref.carrying_release_id == "carried"
     assert carried_ref.descriptor_hash == content_hash(origin_obj["serving_fold"])
+    assert carried_ref.training_cutoff == cache["training_cutoff"]
 
     from engine.v2.models import loader, serving_fold_loader
 

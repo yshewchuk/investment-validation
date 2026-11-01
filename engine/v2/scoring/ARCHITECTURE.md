@@ -708,7 +708,9 @@ and the release is not consulted for it.
 #### Chooser fold provenance reference
 
 A verified chooser-fold reference binds descriptor/estimator hashes, fold
-month, producer binding and both release ids; `training_cutoff` is `fold_start`.
+month, producer binding and both release ids; `training_cutoff` is the
+descriptor's canonical, hash-verified estimator cutoff, distinct from
+`fold_start`.
 Default binding resolution leaves references empty and loads no chooser folds.
 Nightly opts in and receives verified authoring contexts; exact-release replay
 uses the same verifier without reading the live pointer. Strict capture also
@@ -723,7 +725,7 @@ opts in and records both release ids. Neither path infers legacy provenance.
 | A carried fold's authoring release lacks canonical cutoff data | ModelNotReady; no partial reference map |
 | Carried descriptor's original release, catalog membership or parent/hash fails | ModelNotReady; no partial reference map |
 | Re-resolving an unchanged valid chain | Same reference, with separate authoring and carrying ids (equal for an uncarried fold) |
-| Malformed, noncanonical or mismatched descriptor, estimator digest, parent binding, output or fold month | ModelNotReady; no partial reference map |
+| Malformed, noncanonical or mismatched descriptor, estimator digest, parent binding, output, training cutoff or fold month | ModelNotReady; no partial reference map |
 | Strict capture reference has an absent or unsafe authoring/carrying release id | StrictTraceCaptureError; no trace metadata is emitted |
 | Reference resolution requested for a verified release | Re-verify each binding resolution; no cross-call reference cache |
 | Model member exceeds its byte cap or is not a regular file | ModelNotReady before chooser bytes are decoded |
