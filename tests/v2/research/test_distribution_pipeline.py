@@ -2,6 +2,7 @@
 import os
 import subprocess
 import sys
+from copy import deepcopy
 from types import SimpleNamespace
 
 import pandas as pd
@@ -161,3 +162,91 @@ def test_pipeline_mismatched_receipt_pool_scope_refuses_before_intents_or_outcom
     _error(lambda: _evaluate(case, case.groups[0]), "INVALID_EXPERIMENT_SPEC")
     assert not any("run-intents:" in slot for slot in case.slots())
     assert not any(call[0] in ("outcomes", "targets") for call in case.calls)
+
+
+def _assert_no_effects(case, monkeypatch, action):
+    before = deepcopy((case.books, case.quotes, case.opportunities, case.sections, case.slots(), case.calls))
+    def forbidden(*args, **kwargs):
+        pytest.fail("unsealed policy reached evaluation/report effects")
+    for name in ("residual_pool", "decision_quotes", "read_bridge", "read_benchmark", "outcome_quotes",
+                 "load_magnitude_targets", "funded_book", "paired_report", "forecast_report"):
+        monkeypatch.setattr(pipeline, name, forbidden)
+    monkeypatch.setattr(case.run, "publish", forbidden)
+    _error(action)
+    assert (case.books, case.quotes, case.opportunities, case.sections, case.slots(), case.calls) == before
+
+
+@pytest.mark.parametrize("path,value", [
+    (("minimum_net_ev_usd",), 2), (("quote_snapshot_id",), "changed-quotes"),
+    (("economics", "commission"), 1), (("book", "initial_cash"), 2000),
+    (("risk", "maximum_loss_usd"), 2000), (("uncertainty", "resamples"), 5),
+    (("report_end",), "2025-02-01"), (("primary_alpha",), 0),
+])
+@pytest.mark.parametrize("phase", ["evaluate", "finish"])
+def test_pipeline_refuses_mutated_policy_before_effects(pipeline_case, monkeypatch, path, value, phase):
+    case = pipeline_case
+    if phase == "finish":
+        for group in case.groups:
+            _evaluate(case, group)
+    target = case.run.request
+    for key in path[:-1]:
+        target = target[key]
+    target[path[-1]] = value
+    action = (lambda: _finish(case)) if phase == "finish" else (lambda: _evaluate(case, case.groups[0]))
+    _assert_no_effects(case, monkeypatch, action)
+
+
+@pytest.mark.parametrize("field,value", [("quote_snapshot", {"snapshot_id": "changed"}),
+    ("available_benchmarks", {"incumbent": True, "gate": True}), ("run_plan_id", "changed")])
+def test_pipeline_refuses_caller_plan_drift_before_effects(pipeline_case, monkeypatch, field, value):
+    case = pipeline_case
+    case.plan[field] = value
+    _assert_no_effects(case, monkeypatch, lambda: _evaluate(case, case.groups[0]))
+
+
+@pytest.mark.parametrize("phase", ["evaluate", "finish"])
+def test_pipeline_requires_existing_seal_before_effects(pipeline_case, monkeypatch, phase):
+    case = pipeline_case
+    original = case.run.record
+    monkeypatch.setattr(case.run, "record", lambda slot, *args, **kwargs:
+        None if slot == "seal" else original(slot, *args, **kwargs))
+    action = (lambda: _finish(case)) if phase == "finish" else (lambda: _evaluate(case, case.groups[0]))
+    _assert_no_effects(case, monkeypatch, action)
+
+
+@pytest.mark.parametrize("value", [None, object(), {"invalid": object()}])
+def test_pipeline_malformed_caller_plan_uses_typed_refusal(pipeline_case, monkeypatch, value):
+    case = pipeline_case
+    case.plan = value
+    _assert_no_effects(case, monkeypatch, lambda: _evaluate(case, case.groups[0]))
+
+
+def test_decisions_use_detached_seal_even_if_callback_mutates_live_inputs(pipeline_case, monkeypatch):
+    case = pipeline_case
+    original = pipeline.decision_quotes
+    def mutate(*args, **kwargs):
+        value = original(*args, **kwargs)
+        case.run.request["minimum_net_ev_usd"] = 100000
+        case.plan["available_benchmarks"] = {"incumbent": True, "gate": True}
+        return value
+    monkeypatch.setattr(pipeline, "decision_quotes", mutate)
+    _evaluate(case, case.groups[0])
+    for row in _rows(case, "intents:"):
+        assert set(row["arms"]) == set(PRIMARY_ARMS)
+        assert all(item["selected"] for item in row["arms"].values())
+
+
+def test_reports_use_detached_seal_even_if_callback_mutates_live_request(pipeline_case, monkeypatch):
+    case = pipeline_case
+    for group in case.groups:
+        _evaluate(case, group)
+    original = pipeline.paired_report
+    def mutate(*args, **kwargs):
+        value = original(*args, **kwargs)
+        case.run.request["primary_alpha"] = 0
+        case.run.request["risk"]["maximum_loss_usd"] = 0
+        return value
+    monkeypatch.setattr(pipeline, "paired_report", mutate)
+    result = _finish(case)
+    assert result["primary_alpha"] == case.plan["request"]["primary_alpha"]
+    assert result["risk_limits"] == case.plan["request"]["risk"]

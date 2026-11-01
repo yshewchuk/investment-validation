@@ -2,7 +2,7 @@
 import sys
 
 from engine.v2.contracts import SnapshotRef
-from engine.v2.foundation import from_document
+from engine.v2.foundation import canonical_json, from_document
 from engine.v2.research.magnitude_inputs import load_magnitude_targets
 from engine.v2.research.progress import Progress, stage
 from experiments.distribution_book import funded_book
@@ -15,7 +15,7 @@ from experiments.distribution_market import (
 )
 from experiments.distribution_oof import residual_pool
 from experiments.distribution_report import forecast_report, paired_report
-from experiments.distribution_run_request import PRIMARY_ARMS, require
+from experiments.distribution_run_request import PRIMARY_ARMS, require, validate_request
 from experiments.distribution_scores import (
     arm_forecasts,
     economic_forecast,
@@ -25,9 +25,23 @@ from experiments.distribution_scores import (
 from experiments.magnitude_search_shards import iter_section
 
 
+def _sealed_plan(run):
+    request = validate_request(run.request)
+    sealed = run.record("seal")
+    require(isinstance(sealed, dict) and isinstance(sealed.get("request"), dict)
+            and canonical_json(request) == canonical_json(sealed["request"]))
+    return sealed
+
+
 @stage("distribution outer evaluation")
 def evaluate_outer(run, group, fits, results, plan, books, quotes, opportunities, sections, calendar):
-    fold, request = group["outer"], run.request
+    sealed = _sealed_plan(run)
+    try:
+        matches = canonical_json(plan) == canonical_json(sealed)
+    except (TypeError, ValueError, RecursionError):
+        matches = False
+    require(matches)
+    plan, request, fold = sealed, sealed["request"], group["outer"]
     year, ids = fold["year"], set(fold["evaluation_event_ids"])
     events = [event for event in run.trials.source.document["size_panel"]["context"]["target_events"] if event["event_id"] in ids]
     require(len(events) == len(ids))
@@ -85,12 +99,13 @@ def evaluate_outer(run, group, fits, results, plan, books, quotes, opportunities
 
 @stage("distribution final reports")
 def finish_reports(run, books, quotes, opportunities, sections):
+    request = _sealed_plan(run)["request"]
     reports = []
     for alpha, intents in books.items():
-        funded = {arm: funded_book(rows, quotes[alpha], config=run.request["book"], report_end=run.request["report_end"])
+        funded = {arm: funded_book(rows, quotes[alpha], config=request["book"], report_end=request["report_end"])
             if rows else None for arm, rows in intents.items()}
-        report = paired_report(opportunities, funded, **run.request["uncertainty"])
-        risk, primary = run.request["risk"], report["contrasts"]["same_mean"]
+        report = paired_report(opportunities, funded, **request["uncertainty"])
+        risk, primary = request["risk"], report["contrasts"]["same_mean"]
         report["risk_checks"] = {arm: {"loss_limit_met": None if summary["unresolved"] else summary["settled_net_profit"] >= -risk["maximum_loss_usd"],
             "settled_drawdown_met": summary["settlement_drawdown"] <= risk["maximum_settled_drawdown_usd"],
             "completeness_met": (summary["funded"] - summary["unresolved"]) / summary["funded"] >= risk["completeness_floor"] if summary["funded"] else None}
@@ -104,8 +119,8 @@ def finish_reports(run, books, quotes, opportunities, sections):
     return {"schema_version": "distribution_run_report.v1", "reports": reports, "sections": sections,
         "forecast": forecast_report((row for section in sections if section["name"].startswith("scores:")
             for row in iter_section(run.trials.store, section["name"], section["descriptor"], lambda row: (row["position"],))),
-            opportunities, **run.request["uncertainty"]),
-        "primary_alpha": run.request["primary_alpha"], "risk_limits": run.request["risk"],
-        "selector_policy": run.request["selector_policy"], "calibration_identity": "uncalibrated",
+            opportunities, **request["uncertainty"]),
+        "primary_alpha": request["primary_alpha"], "risk_limits": request["risk"],
+        "selector_policy": request["selector_policy"], "calibration_identity": "uncalibrated",
         "current_strategy_superiority_claim": False, "capacity": "not_established_no_depth",
         "benchmark_qualification": "imported_fold_contract_origin_assumed", "promotion_authority": "none"}
