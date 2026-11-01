@@ -43,6 +43,15 @@ def test_v2_lead_compiler_accepts_valid_horizons_in_order(horizons, expected):
     assert actual["horizons"] == expected
 
 
+def test_v2_dispatch_accepts_workers_without_changing_compiled_identity():
+    request = {**_request(), "schema_version": "magnitude_search_request.v2"}
+    with_workers = {**request, "workers": 3}
+    expected = versions.compile_request(request)
+    actual = versions.compile_request(with_workers)
+    assert with_workers["workers"] == 3
+    assert actual == expected
+
+
 def _parity(document):
     # Only the reference validator sees the surrogate; compare the whole Problem.
     reference = ({**document, "feature_dictionary_hash": v1.recipe()["dictionary_hash"]}
@@ -131,7 +140,7 @@ def test_pinned_complete_v1_output_and_current_source_bytes(monkeypatch):
     assert _hash(versions.compile_request(V1_REQUEST())) == expected
     root = Path(__file__).resolve().parents[3]
     for path, digest in (
-        ("experiments/magnitude_search_request.py", "a04523ef9c53b3978b5306efd469031e148150da279b4a9420f46b12b60dd4be"),
+        ("experiments/magnitude_search_request.py", "5525b7511b2e0a28ba7a2393b37252bd5b45fc4ca7b77b53f37bbf7156d1f64b"),
         ("engine/v2/research/magnitude_panel_table.py", "687d4d5341dd4e43879aee9d122507b8289150d7e73f1ccc527299182fe5aad4"),
         ("engine/v2/research/magnitude_panel_v2_table.py", "c753255acba0af3872f6a7bf1cbbdc59eb3b1097a2a06d89f6517d4c34111ce4")):
         with (root / path).open("rb") as source:
