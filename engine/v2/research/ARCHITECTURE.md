@@ -298,7 +298,7 @@ MAE while quantile calibration remains unimplemented.
 Shared population admission precedes label access. Bulk reads exclude events
 on/after `labels_before`; explicit requests containing one refuse. All
 remaining objects pass `event_history`'s shared singleton preflight before
-any is opened; mixed inherited snapshots refuse. Decoded label availability
+any is opened; mixed inherited snapshots refuse. Each scan uses the existing `event_history.MAX_OUTCOME_OBJECT_BYTES` (1 MiB) ceiling: oversized stored bytes refuse before object access; oversized summed Parquet row-group bytes refuse before row decoding (`RESULT_LIMIT_EXCEEDED`). This is not a population/heap cap. Label availability
 must be strictly before `labels_before`; missing, skipped, malformed or
 non-finite labels refuse the whole call, with zero remaining a valid value.
 Exception, opt-in only: `omit_not_computed=True` (used by the magnitude search's inner and outer

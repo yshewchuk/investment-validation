@@ -223,7 +223,9 @@ consumed-object/cutoff provenance; mixed outcome fragments refuse before access.
 
 `magnitude_inputs.forecast_cutoff` defines full-session forecast ceilings;
 `magnitude_inputs.load_magnitude_targets` reads isolated magnitude labels under
-a separate strict label-availability cutoff. Neither is a runnable experiment.
+a separate strict label-availability cutoff and the shared 1 MiB stored/expanded
+outcome-object ceiling (`RESULT_LIMIT_EXCEEDED`); this is not a heap cap.
+Neither is a runnable experiment.
 `magnitude_inputs.preflight_magnitude_targets` proves an explicit population's
 physical isolation; `qualify_magnitude_training_targets` returns strictly
 fit-available training magnitudes with complete read/omission provenance.
@@ -341,6 +343,7 @@ to reconstruct outer metadata and plan nested folds with the same public rule.
 preflight, training qualification and `magnitude_inputs.magnitude_recipe` for shared inner/outer evidence admission.
 `experiments/magnitude_search_trials.py` and `experiments/magnitude_search_outer.py`
 directly consume `load_magnitude_targets` for recorded inner and selected outer trials respectively.
+`experiments/distribution_pipeline.py` consumes the same central target reader only after all outer-group alpha intents are recorded; omissions stay explicit and source eligibility/holdouts are unchanged.
 `experiments/magnitude_inputs.py` consumes `magnitude_inputs.preflight_magnitude_targets`.
 `experiments/magnitude_report.py` consumes that preflight, `load_magnitude_targets`
 and `qualify_magnitude_training_targets` for the admitted mean baseline.

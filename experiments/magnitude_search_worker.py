@@ -48,7 +48,8 @@ def main():
         if len(payload) > MAX_BYTES:
             raise MemoryError
         request = json.loads(payload)
-        regression = request["execution"].get("schema_version") == "regression_candidate_execution.v1"
+        schema = request["execution"].get("schema_version")
+        regression = schema in ("regression_candidate_execution.v1", "iv_crush_comparison_execution.v1")
         target = request["execution"]["target"] if regression else None
         inputs = load_fit_inputs(ArtifactStore(request["store_root"]), request["manifest"], request["inputs_id"],
                                  request["inner"]["evaluation_event_ids"], request["plan"]["horizons"],
@@ -93,6 +94,11 @@ def main():
                     for detail in result["fit_details"]],
                 **result_timing()})
             return
+        if schema == "iv_crush_comparison_execution.v1":
+            from experiments.iv_crush_comparator import forecasts
+            emit(forecasts(indexed, pd.DataFrame(inputs["training"]), request["inner"], request["plan"],
+                           request["execution"], progress=progress))
+            return
         diagnostics = []
         try:
             if regression:
@@ -125,8 +131,8 @@ def main():
 
 def regression_forecasts(indexed, training, request, progress, diagnostics):
     """Fit the closed explicit-target route; infrastructure failures are never candidate failures."""
-    from engine.v2.ops.errors import fail
     from engine.v2.models.training.fit_routes import check_fitting_allowed
+    from engine.v2.ops.errors import fail
     from engine.v2.research.horizon_fitted import HorizonFitFailure, fitted_forecasts
     check_fitting_allowed("regression_forecasts")
     execution = request["execution"]

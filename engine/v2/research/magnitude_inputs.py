@@ -7,7 +7,12 @@ from engine.v2.data import errors
 from engine.v2.data.computed_moves_table import COMPUTED_MOVES_CONTRACT, COMPUTED_MOVES_V5_CONTRACT
 from engine.v2.foundation import content_hash, market_calendar
 from engine.v2.foundation.experiment_holdouts import _calendar_date
-from engine.v2.research.event_history import _CONTEXT, _plans, skipped_reason
+from engine.v2.research.event_history import (
+    _CONTEXT,
+    MAX_OUTCOME_OBJECT_BYTES,
+    _plans,
+    skipped_reason,
+)
 from engine.v2.research.experiment_population import load_population
 from engine.v2.research.prediction_inputs import _parse_target
 
@@ -102,7 +107,8 @@ def load_magnitude_targets(repository, snapshot, *, as_of_month, labels_before,
         repository, snapshot, as_of_month, purpose, event_ids, cutoff)
     signed, available, consumed, omitted, positions = [], [], [], [], []
     for index, (event, request, record) in enumerate(plans):
-        decoded = [row for batch in repository.scan(request, table_name="computed_moves")
+        decoded = [row for batch in repository.scan(request, table_name="computed_moves",
+                   max_object_bytes=MAX_OUTCOME_OBJECT_BYTES)
                    for row in batch.to_pylist()]
         consumed.append(_object_input(event, record))
         if (omit_not_computed and len(decoded) == 1

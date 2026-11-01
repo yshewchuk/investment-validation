@@ -143,6 +143,7 @@ class ChooserFoldReference:
     estimator_sha256: str
     training_cutoff: str
     release_id: str
+    carrying_release_id: str
     release_binding: ModelIdentity
     fold_start: str
 
@@ -775,6 +776,7 @@ def _verified_chooser_fold_reference(
         # descriptor's fold_start is the exclusive training boundary for this fold.
         training_cutoff=loaded.descriptor.fold_start,
         release_id=authoring_manifest.release.release_id,
+        carrying_release_id=manifest.release.release_id,
         release_binding=identity, fold_start=key[1])
 
 

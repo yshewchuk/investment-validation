@@ -105,6 +105,12 @@ def test_all_candidates_selected_outer_and_read_only_replay(oracle_case, monkeyp
                 assert selection is not None and len(selection["attempts"]) == 33
                 assert read("outer-forecasts:" + outer_key) is not None
                 assert read("outer-execution:" + outer_key)["completed_fit_count"] == 3
+                comparison_key = content_hash([plan["plan_id"], "2024", "comparison"])
+                comparison = read("comparison-terminal:" + comparison_key)
+                assert comparison is not None
+                assert all(row["training_mean"] == -50. for row in comparison["result"]["forecasts"])
+                assert all(read("comparison-completed:" + str(h) + ":" + comparison_key) is not None
+                           for h in (5, 3, 1))
             elif event in group["inner"][0]["evaluation_event_ids"]:
                 assert any(read("forecasts:" + content_hash([plan["plan_id"], "2024", "2023", c["candidate_id"]]))
                            is not None for c in plan["candidates"]), "inner labels preceded durable forecasts"

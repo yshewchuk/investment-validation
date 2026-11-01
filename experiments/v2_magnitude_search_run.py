@@ -73,6 +73,9 @@ def seal_search_run(conn, store, repository, registration, request, plan_ref, *,
     absent = tuple(["start:" + trial_key(plan, *args) for args in _roster(plan)]
         + ["outer-start:" + content_hash([plan["plan_id"], fold["outer"]["year"]]) for fold in plan["folds"]]
         + ["selection"])
+    if "target" in plan:
+        absent += tuple("comparison-start:" + content_hash([plan["plan_id"], fold["outer"]["year"], "comparison"])
+                        for fold in plan["folds"])
     if previous is None and any(read_record(conn, store, registration.run_id, slot) is not None for slot in absent):
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search driver cannot bind an already started journal")
     append_record(conn, store, registration.run_id, "driver-seal", binding, absent=absent)

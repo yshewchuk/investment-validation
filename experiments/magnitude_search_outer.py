@@ -177,10 +177,6 @@ def _replay(read, store, started, fold, plan, execution, binding):
             raise _conflict() from None
         fits = fit_evidence(inputs, fold, plan, execution)
         allow_incomplete = _allow_incomplete(execution)
-        forecasts = _forecasts(read("forecasts"), fold, plan["horizons"], plan.get("target"),
-                               allow_incomplete=allow_incomplete)
-        receipt = {"status": "succeeded", "fits": fits, "fit_attempt_count": len(fits),
-                   "completed_fit_count": len(fits), "forecasts_id": content_hash(forecasts)}
         worker = read("worker-result")
         if worker is None and execution.get("schema_version") in ("size_candidate_execution.v1", "regression_candidate_execution.v1"):
             raise _conflict()
@@ -192,10 +188,11 @@ def _replay(read, store, started, fold, plan, execution, binding):
             if worker.get("event") != "succeeded":
                 raise _conflict()
             timed_worker = "score_seconds" in worker
-            forecasts = _forecasts(worker["forecasts"], fold, plan["horizons"], plan.get("target"), allow_incomplete=allow_incomplete)
+            forecasts = _forecasts(worker["forecasts"], fold, plan["horizons"], plan.get("target"),
+                                   allow_incomplete=allow_incomplete)
             _equal(read("forecasts"), forecasts)
         else:
-            forecasts = _forecasts(read("forecasts"), fold, plan["horizons"], plan.get("target"), allow_incomplete=allow_incomplete)
+            forecasts = _forecasts(read("forecasts"), fold, plan["horizons"], plan.get("target"))
         receipt = {"status": "succeeded", "fits": fits, "fit_attempt_count": len(fits),
                    "completed_fit_count": len(fits), "forecasts_id": content_hash(forecasts)}
         if worker is not None and diagnostic_keys(binding):
@@ -254,7 +251,9 @@ def _execute_admitted(conn, store, repository, registration, plan, fold, selecti
         return read_record(conn, store, registration.run_id, "outer-" + slot + ":" + key)
     def append(slot, body):
         return append_record(conn, store, registration.run_id, "outer-" + slot + ":" + key, body, replay=False)
-    if binding.get("schema_version") in ("native_experiment_registration.v1.6", "native_experiment_registration.v1.7"):
+    if "target" in plan and saved("start") is not None and saved("terminal") is None:
+        raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search journal slot is already committed")
+    if binding.get("schema_version") in ("native_experiment_registration.v1.6", "native_experiment_registration.v1.7", "native_experiment_registration.v1.8"):
         from experiments.size_comparison_run import execute as compare
         _equal(limits, plan["request"]["limits"]["child"])
         compare(conn, store, repository, registration, plan, fold, limits=limits, replay_only=replay_only)

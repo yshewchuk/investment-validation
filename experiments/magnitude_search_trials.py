@@ -321,7 +321,7 @@ class SearchTrials:
         forecasts_id = None
         if succeeded:
             forecasts_id = content_hash(self._forecasts(result["forecasts"], inner, plan["horizons"],
-                                                       allow_incomplete))
+                plan.get("target"), **({"allow_incomplete": True} if allow_incomplete else {})))
         self._append("execution-result:" + key, {"attempt": attempt,
                      "inputs_id": self._read("inputs:" + key)["inputs_id"], "result": result}, replay=False)
         evidence = {"attempt": attempt, "fit_attempt_count": len(fits) + len(pending),
@@ -395,7 +395,7 @@ class SearchTrials:
                 size_v14 = _is_size_v1_4(candidate)
                 try:
                     forecasts = self._forecasts(result["forecasts"], inner, plan["horizons"],
-                                                plan.get("target"), allow_incomplete=size_v14)
+                        plan.get("target"), **({"allow_incomplete": True} if size_v14 else {}))
                 except OpsError:
                     raise ValueError from None
                 expected_forecasts = ([row for row in result["forecasts"]
@@ -509,7 +509,7 @@ class SearchTrials:
                 raise fail("EXPERIMENT_IDENTITY_CONFLICT", "native completion differs from recording")
             if forecasts is not None:
                 submitted = self._forecasts(forecasts, inner, plan["horizons"], plan.get("target"),
-                                            allow_incomplete=allow_incomplete)
+                                            **({"allow_incomplete": True} if allow_incomplete else {}))
                 if content_hash(submitted) != completed.get("forecasts_id"):
                     raise fail("EXPERIMENT_IDENTITY_CONFLICT", "native completion differs from recording")
         if failure is not None:
@@ -527,7 +527,7 @@ class SearchTrials:
             return terminal if native else self._terminal(plan, outer_year, inner_year, candidate_id)[1]
         if submitted is None:
             submitted = self._forecasts(forecasts, inner, plan["horizons"], plan.get("target"),
-                                        allow_incomplete=allow_incomplete)
+                                        **({"allow_incomplete": True} if allow_incomplete else {}))
         terminal = self._read("terminal:" + key)
         if terminal is not None:
             if self._read("forecasts:" + key) != submitted:
@@ -536,6 +536,10 @@ class SearchTrials:
         admitted = self._read("inputs:" + key)
         if admitted is None:
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "trial has no admitted native inputs")
+        if allow_incomplete and not native:
+            raw_submission = json.loads(canonical_json(forecasts))
+            self._append("forecast-submission:" + key, raw_submission, replay=reconcile,
+                         absent=("terminal:" + key,))
         self._append("forecasts:" + key, submitted, replay=reconcile, absent=("terminal:" + key,))
         validation = self._read("validation:" + admitted["cohort"])
         stored = None
@@ -656,10 +660,21 @@ class SearchTrials:
                         raise ValueError
                     submitted = _verify_size_forecast_replay(
                         execution_result["result"]["forecasts"], submitted, inner, plan["horizons"])
+                elif size_v14:
+                    raw_submission = self._read("forecast-submission:" + key)
+                    if not isinstance(raw_submission, list):
+                        raise ValueError
+                    try:
+                        normalized = self._forecasts(raw_submission, inner, plan["horizons"],
+                                                     plan.get("target"), allow_incomplete=True)
+                    except OpsError:
+                        raise ValueError from None
+                    if canonical_json(normalized) != canonical_json(submitted):
+                        raise ValueError
+                    submitted = normalized
                 else:
                     try:
-                        submitted = self._forecasts(submitted, inner, plan["horizons"],
-                                                    plan.get("target"), allow_incomplete=size_v14)
+                        submitted = self._forecasts(submitted, inner, plan["horizons"], plan.get("target"))
                     except OpsError:
                         raise ValueError from None
                 validation = self._read("validation:" + admitted["cohort"])
