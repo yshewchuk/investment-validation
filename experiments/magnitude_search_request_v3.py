@@ -31,6 +31,35 @@ _FAMILIES_V4 = {
 }
 
 
+_SELECTION_METRICS = {"rmse": 0.6, "mae": 0.3, "large_move_underprediction": 0.1}
+_SELECTION_LEADS = {"1": 1.0, "3": 0.0, "5": 0.0}
+
+
+def _selection(request):
+    if "selection" not in request:
+        return
+    policy = request["selection"]
+    v2._require(v2._shape(policy, {"metric_weights", "lead_weights",
+        "large_move_threshold_pct", "tie_band_floor"}),
+        "stage-2 selection policy has an invalid shape")
+    metrics, leads = policy["metric_weights"], policy["lead_weights"]
+    v2._require(v2._shape(metrics, set(_SELECTION_METRICS))
+        and all(type(metrics[key]) in (int, float) and metrics[key] == expected
+                and math.isfinite(metrics[key]) for key, expected in _SELECTION_METRICS.items()),
+        "stage-2 selection metric weights differ from the registered policy")
+    v2._require(v2._shape(leads, set(_SELECTION_LEADS))
+        and all(type(leads[key]) in (int, float) and leads[key] == expected
+                and math.isfinite(leads[key]) for key, expected in _SELECTION_LEADS.items()),
+        "stage-2 selection lead weights differ from the registered policy")
+    threshold, floor = policy["large_move_threshold_pct"], policy["tie_band_floor"]
+    v2._require(type(threshold) in (int, float) and threshold == 10.0 and math.isfinite(threshold)
+        and type(floor) in (int, float) and floor == 0.005 and math.isfinite(floor),
+        "stage-2 selection threshold or tie-band floor differs from the registered policy")
+    request["selection"] = {"metric_weights": dict(_SELECTION_METRICS),
+        "lead_weights": dict(_SELECTION_LEADS), "large_move_threshold_pct": 10.0,
+        "tie_band_floor": 0.005}
+
+
 def _finite_positive(value):
     if type(value) not in (int, float) or value <= 0:
         return False
@@ -126,10 +155,14 @@ def compile_request(request, *, horizons=(5, 3, 1)):
         request = json.loads(json.dumps(request, allow_nan=False))
     except (ValueError, TypeError, OverflowError, RecursionError):
         raise fail("INVALID_EXPERIMENT_SPEC", "stage-2 request requires plain finite JSON") from None
-    v2._require(v2._shape(request, v2._KEYS)
-                and request["schema_version"] in (
-                    "magnitude_search_request.v3", "magnitude_search_request.v4"),
-                "stage-2 request requires its closed v3 or v4 schema")
+    version = request.get("schema_version") if type(request) is dict else None
+    request_keys = set(request) if type(request) is dict else set()
+    v2._require((version == "magnitude_search_request.v3"
+                 and request_keys in (v2._KEYS, v2._KEYS | {"selection"}))
+                or (version == "magnitude_search_request.v4"
+                    and request_keys == v2._KEYS | {"selection"}),
+                "stage-2 request requires its closed v3/v4 schema and v4 selection policy")
+    _selection(request)
     v2._references(request)
     _space(request)
     counts = _counts(request, horizons)
