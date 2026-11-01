@@ -124,6 +124,29 @@ def test_all_candidates_selected_outer_and_read_only_replay(search_case, monkeyp
         assert collect_outer_results(*args) == result
     assert len(label_calls) == 1
     assert catalog_rows(data.conn) == before and artifact_object_bytes(data.store) == saved
+    # New timed magnitude/SIZE replay must not relax the closed untimed IV protocol.
+    from experiments import magnitude_search_outer as outer_module
+    original_read = outer_module.read_record
+    for mutation in ("missing_worker", "timed_worker", "timed_fit", "wrong_event"):
+        def altered(conn, store, run_id, slot):
+            value = deepcopy(original_read(conn, store, run_id, slot))
+            if slot == "outer-worker-result:" + outer_key:
+                if mutation == "missing_worker":
+                    return None
+                if mutation == "timed_worker":
+                    value.update(score_seconds=0.1, rss_delta_kib=0)
+                if mutation == "wrong_event":
+                    value["event"] = "failed"
+            if (mutation == "timed_fit" and slot.startswith("outer-fit-completed:")
+                    and slot.endswith(":" + outer_key)):
+                value["fit_seconds"] = 0.1
+            return value
+        with monkeypatch.context() as patch:
+            patch.setattr(outer_module, "read_record", altered)
+            with no_fit_guard(), legacy_guard(), pytest.raises(OpsError) as caught:
+                collect_outer_results(*args)
+            assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert catalog_rows(data.conn) == before and artifact_object_bytes(data.store) == saved
 
 
 @pytest.mark.parametrize("action", ["seal", "run", "collect"])

@@ -1,4 +1,6 @@
 """Signed submissions cannot bypass durable native fit accounting."""
+from copy import deepcopy
+
 import pytest
 
 from engine.models.no_fit import no_fit_guard as legacy_guard
@@ -81,6 +83,8 @@ def test_completed_native_iv_submission_replays_without_labels_or_fits(search_ca
     trials, args, _ = context(data)
     result = trials.execute(*args, limits=data.plan["request"]["limits"]["child"])
     assert result["fit_attempt_count"] == result["completed_fit_count"] == 3
+    assert not {"score_seconds", "rss_delta_kib", "inner_metrics"} & result.keys()
+    assert not {"score_seconds", "rss_delta_kib", "inner_metrics"} & result["terminal"].keys()
     key = content_hash([data.plan["plan_id"], *args])
     forecasts = read_record(data.conn, data.store, data.registration.run_id, "forecasts:" + key)
     before, artifacts = catalog_rows(data.conn), artifact_object_bytes(data.store)
@@ -90,5 +94,72 @@ def test_completed_native_iv_submission_replays_without_labels_or_fits(search_ca
     monkeypatch.setattr(trials_module, "run_fitted_trial", forbidden)
     with no_fit_guard(), legacy_guard():
         assert trials.record(*args, forecasts=forecasts) == result["terminal"]
+        assert trials.reconcile(*args, limits=data.plan["request"]["limits"]["child"]) == result
+    original_read = trials._read
+    for prefix in ("execution-result:", "execution:", "fit-completed:"):
+        def altered(slot):
+            value = deepcopy(original_read(slot))
+            if value is not None and slot.startswith(prefix):
+                if prefix == "fit-completed:":
+                    value["fit_seconds"] = 0.1
+                else:
+                    target = value["result"] if prefix == "execution-result:" else value
+                    target.update(score_seconds=0.1, rss_delta_kib=0)
+            return value
+        with monkeypatch.context() as patch:
+            patch.setattr(trials, "_read", altered)
+            with no_fit_guard(), legacy_guard(), pytest.raises(OpsError) as caught:
+                trials.execute(*args, limits=data.plan["request"]["limits"]["child"])
+            assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
     assert catalog_rows(data.conn) == before
     assert artifact_object_bytes(data.store) == artifacts
+
+
+@pytest.mark.parametrize("kind", ["completed", "succeeded", "failed", "untimed_failure"])
+def test_iv_worker_timing_contract_precedes_evaluation(search_case, monkeypatch, kind):  # noqa: F811
+    from experiments.magnitude_search_evidence import fit_evidence
+    from experiments.magnitude_search_inputs import load_inputs
+    data = search_case
+    trials, args, forecasts = context(data)
+    def forbidden(*a, **k):
+        pytest.fail("refused or failed IV fit opened evaluation targets")
+    monkeypatch.setattr(trials_module, "evaluation_targets", forbidden)
+    def child(source, inner, plan, execution, limits, progress):
+        inputs = load_inputs(data.store, source["manifest"], source["inputs_id"])
+        for fit in fit_evidence(inputs, inner, plan, execution):
+            progress("started", fit)
+            if kind in ("failed", "untimed_failure"):
+                return {"event": "failed", **({} if kind == "untimed_failure" else
+                        {"score_seconds": 0.1, "rss_delta_kib": 0})}
+            progress("completed", {**fit, **({"fit_seconds": 0.1} if kind == "completed" else {})})
+        return {"event": "succeeded", "forecasts": forecasts, "diagnostics": [],
+                "score_seconds": 0.1, "rss_delta_kib": 0}
+    monkeypatch.setattr(trials_module, "run_fitted_trial", child)
+    limits = data.plan["request"]["limits"]["child"]
+    if kind == "untimed_failure":
+        result = trials.execute(*args, limits=limits)
+        assert result["status"] == result["terminal"]["status"] == "failed"
+        assert result["fit_attempt_count"] == 1 and result["completed_fit_count"] == 0
+        monkeypatch.setattr(trials_module, "run_fitted_trial", forbidden)
+        with no_fit_guard(), legacy_guard():
+            assert trials.execute(*args, limits=limits) == result
+            assert trials.reconcile(*args, limits=limits) == result
+        original_read = trials._read
+        def timed_failure(slot):
+            value = deepcopy(original_read(slot))
+            if value is not None and slot.startswith("execution-result:"):
+                value["result"].update(score_seconds=0.1, rss_delta_kib=0)
+            return value
+        monkeypatch.setattr(trials, "_read", timed_failure)
+        with no_fit_guard(), legacy_guard(), pytest.raises(OpsError) as caught:
+            trials.reconcile(*args, limits=limits)
+        assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    else:
+        with pytest.raises(OpsError) as caught:
+            trials.execute(*args, limits=limits)
+        assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+        assert caught.value.problem.message == ("search fit progress differs from admitted inputs"
+            if kind == "completed" else "search fit completion differs from admitted attempts")
+        key = content_hash([data.plan["plan_id"], *args])
+        for prefix in ("execution-result:", "execution:", "terminal:", "forecasts:"):
+            assert trials._read(prefix + key) is None

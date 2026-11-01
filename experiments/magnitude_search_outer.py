@@ -27,7 +27,15 @@ from experiments.magnitude_search_execution import (
 from experiments.magnitude_search_inputs import load_inputs, publish_inputs
 from experiments.magnitude_search_plan import PLAN_V2, PLAN_V3, read_search_plan, trial_key
 from experiments.magnitude_search_records import MIGRATIONS, OWNER, append_record, read_record
-from experiments.magnitude_search_trials import SearchTrials
+from experiments.magnitude_search_trials import (
+    SearchTrials,
+)
+from experiments.magnitude_search_trials import (
+    _completed_fit as _valid_completed_fit,
+)
+from experiments.magnitude_search_trials import (
+    _timing as _valid_timing,
+)
 from experiments.size_fit_diagnostics import evidence as diagnostic_evidence
 from experiments.size_fit_diagnostics import keys as diagnostic_keys
 from experiments.size_job_budget import resolved_limits
@@ -41,6 +49,27 @@ def _conflict():
 def _equal(left, right):
     if canonical_json(left) != canonical_json(right):
         raise _conflict()
+
+
+def _timed_shape(result, keys, *, legacy=False, untimed=False):
+    if not isinstance(result, dict):
+        return False
+    observed = set(result)
+    if untimed:
+        return observed == keys
+    if observed == keys:
+        return legacy
+    return observed == keys | {"score_seconds", "rss_delta_kib"} and _valid_timing(result)
+
+
+def _equal_completed_fit(fit, expected, *, legacy=False):
+    if not isinstance(fit, dict):
+        raise _conflict()
+    if not legacy or "fit_seconds" in fit:
+        if not _valid_completed_fit(fit, expected):
+            raise _conflict()
+        return
+    _equal(fit, expected)
 
 
 def _native_selection(trials, plan, read):
@@ -126,7 +155,8 @@ def _result(started, inputs, inputs_id, execution, forecasts, validation, fold, 
     return {**result, "result_id": content_hash(result)}
 
 
-def _replay(read, store, started, fold, plan, execution):
+def _replay(read, store, started, fold, plan, execution, binding):
+    regression = execution.get("schema_version") == "regression_candidate_execution.v1"
     try:
         _equal(read("start"), started)
         record = read("inputs")
@@ -141,14 +171,31 @@ def _replay(read, store, started, fold, plan, execution):
         forecasts = _forecasts(read("forecasts"), fold, plan["horizons"], plan.get("target"))
         receipt = {"status": "succeeded", "fits": fits, "fit_attempt_count": len(fits),
                    "completed_fit_count": len(fits), "forecasts_id": content_hash(forecasts)}
-        if execution.get("schema_version") in ("size_candidate_execution.v1", "regression_candidate_execution.v1"):
-            worker = read("worker-result")
+        worker = read("worker-result")
+        if worker is None and execution.get("schema_version") in ("size_candidate_execution.v1", "regression_candidate_execution.v1"):
+            raise _conflict()
+        timed_worker = None
+        if worker is not None:
+            if not _timed_shape(worker, {"event", "forecasts"} | diagnostic_keys(binding),
+                                legacy=True, untimed=regression):
+                raise _conflict()
+            if worker.get("event") != "succeeded":
+                raise _conflict()
+            timed_worker = "score_seconds" in worker
             _equal(worker["forecasts"], forecasts)
-            receipt.update(diagnostic_evidence(worker, execution, plan["horizons"]))
+            if diagnostic_keys(binding):
+                receipt.update(diagnostic_evidence(worker, execution, plan["horizons"]))
         _equal(read("execution"), receipt)
         for fit in fits:
-            for state in ("started", "completed"):
-                _equal(read("fit-" + state + ":" + str(fit["horizon_sessions"])), fit)
+            _equal(read("fit-started:" + str(fit["horizon_sessions"])), fit)
+            marker = read("fit-completed:" + str(fit["horizon_sessions"]))
+            marker_timed = isinstance(marker, dict) and "fit_seconds" in marker
+            if timed_worker is None:
+                if marker_timed:
+                    raise _conflict()
+            elif marker_timed != timed_worker:
+                raise _conflict()
+            _equal_completed_fit(marker, fit, legacy=not bool(timed_worker))
         result = _result(started, inputs, inputs_id, receipt, forecasts, read("validation"), fold, plan["horizons"], plan.get("target"))
         _equal(read("terminal"), result)
         return result
@@ -197,8 +244,9 @@ def _execute_admitted(conn, store, repository, registration, plan, fold, selecti
         _equal(limits, plan["request"]["limits"]["child"])
         compare(conn, store, repository, registration, plan, fold, limits=limits, replay_only=replay_only)
     execution = execution_for_candidate(binding, candidate)
+    regression = execution.get("schema_version") == "regression_candidate_execution.v1"
     if replay_only or saved("terminal") is not None:
-        return _replay(saved, store, started, fold, plan, execution)
+        return _replay(saved, store, started, fold, plan, execution, binding)
     forbid_fitting("execute_outer_fold")
     forbid_legacy_fitting("execute_outer_fold")
     resolved = resolved_limits(conn, store, registration, plan, limits) if diagnostic_keys(binding) else execution_limits(limits)
@@ -213,7 +261,10 @@ def _execute_admitted(conn, store, repository, registration, plan, fold, selecti
         if (state not in ("started", "completed") or index >= len(expected)
                 or (state == "started") == bool(pending)):
             raise _conflict()
-        _equal(fit, expected[index])
+        if state == "started" or regression:
+            _equal(fit, expected[index])
+        else:
+            _equal_completed_fit(fit, expected[index])
         append("fit-" + state + ":" + str(fit["horizon_sessions"]), fit)
         if state == "started":
             pending.append(fit)
@@ -224,15 +275,16 @@ def _execute_admitted(conn, store, repository, registration, plan, fold, selecti
         resolved = resolved_limits(conn, store, registration, plan, limits)
     result = run_fitted_trial(source, fold, plan, execution, resolved, progress)
     succeeded = result.get("event") == "succeeded"
-    if ((succeeded and (pending or len(fits) != len(expected) or set(result) != {"event", "forecasts"} | diagnostic_keys(binding)))
-            or (not succeeded and (result != {"event": "failed"} or len(pending) != 1))):
+    if ((succeeded and (pending or len(fits) != len(expected)
+                        or not _timed_shape(result, {"event", "forecasts"} | diagnostic_keys(binding), untimed=regression)))
+            or (not succeeded and (not _timed_shape(result, {"event"}, untimed=regression)
+                                   or result.get("event") != "failed" or len(pending) != 1))):
         raise _conflict()
     forecasts = _forecasts(result["forecasts"], fold, plan["horizons"], plan.get("target")) if succeeded else None
     receipt = {"status": result["event"], "fits": fits, "fit_attempt_count": len(fits) + len(pending),
                "completed_fit_count": len(fits), "forecasts_id": content_hash(forecasts) if succeeded else None,
                **diagnostic_evidence(result, execution, plan["horizons"])}
-    if diagnostic_keys(binding):
-        append("worker-result", result)
+    append("worker-result", result)
     append("execution", receipt)
     if not succeeded:
         raise fail("EXPERIMENT_VARIANT_FAILED", "selected outer candidate failed; replacement and retry are forbidden")
@@ -246,7 +298,7 @@ def _execute_admitted(conn, store, repository, registration, plan, fold, selecti
     _validate_targets(inputs, validation, fold)
     append("validation", validation)
     append("terminal", _result(started, inputs, inputs_id, receipt, forecasts, validation, fold, plan["horizons"], plan.get("target")))
-    return _replay(saved, store, started, fold, plan, execution)
+    return _replay(saved, store, started, fold, plan, execution, binding)
 
 
 def collect_outer_results(conn, store, repository, registration, request, plan_ref):

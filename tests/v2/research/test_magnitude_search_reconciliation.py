@@ -1,11 +1,13 @@
 """Durable post-fit publication repair: real journal, fault cuts, and no-fit oracles."""
 # ruff: noqa: F811
 import copy
+import math
 
 import pytest
 
 from engine.models.no_fit import no_fit_guard as legacy_guard
 from engine.v2.foundation import content_hash
+from engine.v2.research import horizon_fitted
 from engine.v2.models.no_fit import no_fit_guard
 from engine.v2.ops.errors import OpsError, fail
 from experiments import magnitude_search_trials as trials
@@ -32,6 +34,11 @@ def expected_fits():
                  "values": [[0.0] * 11], "absolute_move_pct": [2.0]}),
              "prediction_matrix_id": content_hash({"columns": columns, "row_keys": [["event", "history", horizon]],
                  "values": [[0.0] * 11]})} for horizon in (5, 3, 1)]
+
+
+def completed_fits():
+    """Static evidence expected in the completion markers before timing is checked."""
+    return expected_fits()
 
 
 def interrupt(monkeypatch, recorder, stage, after):
@@ -75,7 +82,7 @@ def failed_child(monkeypatch, completed):
         try:
             original(*args[:-1], progress)
         except StopIteration:
-            return {"event": "failed"}
+            return {"event": "failed", "score_seconds": 1.5, "rss_delta_kib": 12}
         raise AssertionError("missing fit admission")
     monkeypatch.setattr(trials, "run_fitted_trial", failed)
 
@@ -119,7 +126,8 @@ def test_publication_faults_reconcile_only_durable_results(native, monkeypatch, 
     durable = recorder._read("execution-result:" + KEY)
     assert durable == {"attempt": {"trial_id": KEY, "candidate_id": "a-first", "limits": LIMITS},
                        "inputs_id": content_hash(recorder._read("cohort:" + COHORT)),
-                       "result": {"event": "succeeded", "forecasts": rows(2.0)}}
+                       "result": {"event": "succeeded", "forecasts": rows(2.0),
+                                  "score_seconds": 1.5, "rss_delta_kib": 12}}
     if stage == "terminal" or (stage == "validation" and after):
         monkeypatch.setattr(recorder, "_inputs", lambda *a: pytest.fail("durable validation reopened inputs"))
         monkeypatch.setattr(trials, "load_magnitude_targets", lambda *a, **k: pytest.fail("durable validation reopened labels"))
@@ -182,9 +190,10 @@ def test_failed_result_corruption_cannot_publish_candidate_terminal(native, monk
     interrupt(monkeypatch, recorder, "execution-result", after=True)
     monkeypatch.setattr(recorder, "_append", append)
     if mutation in ("pending_completion", "beyond_completion"):
-        fit = expected_fits()[1 if mutation == "pending_completion" else 2]
+        fit = completed_fits()[1 if mutation == "pending_completion" else 2]
         append("fit-completed:" + KEY + ":" + str(fit["horizon_sessions"]), fit)
-    assert recorder._read("execution-result:" + KEY)["result"] == {"event": "failed"}
+    assert recorder._read("execution-result:" + KEY)["result"] == {
+        "event": "failed", "score_seconds": 1.5, "rss_delta_kib": 12}
     assert recorder._read("execution:" + KEY) is None
     before = durable_evidence(native)
     no_launch(monkeypatch)
@@ -380,7 +389,20 @@ def test_real_fixed_child_is_reaped_before_result_becomes_recoverable(native, mo
         result = native.recorder.reconcile(*ARGS, limits=LIMITS)
     assert result["completed_fit_count"] == 3
     assert result["fits"] == expected_fits()
-    assert native.recorder._read("execution-result:" + KEY)["result"] == {"event": "succeeded", "forecasts": rows(2.0)}
+    for fit in completed_fits():
+        marker = native.recorder._read("fit-completed:" + KEY + ":" + str(fit["horizon_sessions"]))
+        assert {key: value for key, value in marker.items() if key != "fit_seconds"} == fit
+        seconds = marker["fit_seconds"]
+        assert type(seconds) is float and math.isfinite(seconds) and seconds > 0.0
+    result_record = native.recorder._read("execution-result:" + KEY)["result"]
+    assert result_record["event"] == "succeeded"
+    assert result_record["forecasts"] == rows(2.0)
+    score_seconds = result_record["score_seconds"]
+    assert isinstance(score_seconds, float) and not isinstance(score_seconds, bool)
+    assert math.isfinite(score_seconds) and score_seconds > 0.0
+    rss_delta_kib = result_record["rss_delta_kib"]
+    assert isinstance(rss_delta_kib, int) and not isinstance(rss_delta_kib, bool)
+    assert rss_delta_kib >= 0
     assert native.recorder._read("forecasts:" + KEY) == rows(2.0)
     assert result["forecasts_id"] == content_hash(rows(2.0))
     assert result["terminal"]["predictions"] == [{**row, "absolute_move_pct": 4.0} for row in rows(2.0)]
@@ -508,3 +530,21 @@ def test_new_recorder_reconciles_catalog_durable_result_after_reopen(native, mon
         assert recovered["terminal"]["status"] == "succeeded"
     finally:
         peer.close()
+
+
+def test_measured_completed_callback_cannot_mutate_returned_fit_evidence(monkeypatch):
+    fit = {"horizon_sessions": 1, "nested": {"evidence": ["sealed"]}}
+    monkeypatch.setattr(horizon_fitted, "prepare_horizon_inputs", lambda *a, **k: (None, None, fit))
+    monkeypatch.setattr(horizon_fitted, "fit_execution", lambda *a, **k: {"predictions": [2.0]})
+
+    def progress(state, marker):
+        if state == "completed":
+            marker["nested"]["evidence"].append("callback")
+
+    predictions, evidence = horizon_fitted.fitted_forecasts(
+        indexed=None, training_ids=["train"], labels=[1.0], evaluation_ids=["event"],
+        horizons=[1], columns=["feature"], target_column="target", target_domain="nonnegative",
+        route="magnitude", recipe={}, progress=progress, measure_fit_seconds=True)
+
+    assert predictions == {("event", 1): 2.0}
+    assert evidence == [{"horizon_sessions": 1, "nested": {"evidence": ["sealed"]}}]

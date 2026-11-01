@@ -198,9 +198,24 @@ def test_public_native_execute_reuses_only_record_local_normalization(native, mo
         "evaluation_authority": "none"}
     receipt = recorder.execute("2024", "2023", "a-first", limits=LIMITS)
     assert calls == [forecasts]
-    assert receipt == expected
+    stable_receipt = {name: value for name, value in receipt.items()
+                      if name not in ("score_seconds", "rss_delta_kib")}
+    stable_receipt["terminal"] = {name: value for name, value in stable_receipt["terminal"].items()
+                                  if name not in ("score_seconds", "rss_delta_kib", "inner_metrics")}
+    assert stable_receipt == expected
+    assert type(receipt["score_seconds"]) is float and receipt["score_seconds"] >= 1.5
+    assert type(receipt["rss_delta_kib"]) is int and receipt["rss_delta_kib"] == 12
+    durable_result = recorder._read("execution-result:" + key)["result"]
+    assert receipt["score_seconds"] == durable_result["score_seconds"]
+    assert receipt["rss_delta_kib"] == durable_result["rss_delta_kib"]
+    assert receipt["terminal"]["score_seconds"] >= durable_result["score_seconds"]
+    assert receipt["terminal"]["rss_delta_kib"] == durable_result["rss_delta_kib"]
+    for fit in fits:
+        marker = recorder._read("fit-completed:" + key + ":" + str(fit["horizon_sessions"]))
+        assert {name: value for name, value in marker.items() if name != "fit_seconds"} == fit
+        assert type(marker["fit_seconds"]) is float and marker["fit_seconds"] >= 0.0
     before = durable_evidence(native)
-    assert recorder.execute("2024", "2023", "a-first", limits=LIMITS) == expected
+    assert recorder.execute("2024", "2023", "a-first", limits=LIMITS) == receipt
     assert durable_evidence(native) == before
 
     original_read, reads = recorder._read, []

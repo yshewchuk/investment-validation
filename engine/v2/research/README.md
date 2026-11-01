@@ -66,6 +66,7 @@ nested-search execution. Its only current experiment caller is `iv_crush_plan.pl
 
 `horizon_fitted.fitted_forecasts` shares guarded per-horizon fitting for closed
 numeric routes and explicit target column/domain, without evaluation labels.
+Its opt-in `measure_fit_seconds=True` adds a monotonic `fit_seconds` only to completed progress markers; the default marker shape and returned fit evidence remain unchanged.
 `HorizonFitFailure` retains the original fit exception as its cause so experiment
 boundaries own compatibility error policy. Progress/preparation errors propagate;
 Callbacks receive detached evidence copies; partial callbacks/diagnostics confer no completed result or experiment admission.
