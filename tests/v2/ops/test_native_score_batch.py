@@ -284,6 +284,7 @@ def test_dyn_sv_empty_chooser_references_refuses(tmp_path):
         event.key, event, binding, ("signal", "pred_abs_move"))
     assert isinstance(refusal, NativeScoreBatchRowRefusal)
     assert refusal.code == "RELEASE_MISSING_FEATURE_ORDER"
+    assert refusal.detail == "chooser producer references are missing"
 
 
 def test_dyn_sv_empty_chooser_producer_order_refuses(tmp_path):
@@ -709,10 +710,10 @@ def test_run_native_score_batch_worker_writes_records_and_refusals(tmp_path, mon
 
     _stage_release(tmp_path)
     real_resolve = release_bindings_module.resolve_release_binding
-    calls: list[dict] = []
+    calls: list[tuple[tuple, dict]] = []
 
     def spy(*args, **kwargs):
-        calls.append(dict(kwargs))
+        calls.append((args, dict(kwargs)))
         return real_resolve(*args, **kwargs)
 
     monkeypatch.setattr(release_bindings_module, "resolve_release_binding", spy)
@@ -722,7 +723,8 @@ def test_run_native_score_batch_worker_writes_records_and_refusals(tmp_path, mon
         [_event_doc(), _event_doc(strategy="DYN-SV", event_id="evt-2")]))
     result = run_native_score_batch_worker(
         _worker_parameters(tmp_path, expected_ids=["native_score_batch"]), root)
-    assert calls[-1].get("include_chooser_fold_references") is True
+    assert len(calls[-1][0]) == 1
+    assert calls[-1][1].get("include_chooser_fold_references") is not True
     assert result["completed_ids"] == ["native_score_batch"]
     assert result["no_work"] is False
     records_document = json.loads((root / "records.json").read_text())
