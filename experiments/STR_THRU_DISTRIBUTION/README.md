@@ -5,9 +5,11 @@
 - A supplies magnitude histogram math and frozen payoff controls.
 - B supplies separate native ownership, source/fold admission, raw-pair budgets and claims.
 - C adds admitted numeric fit receipts and earlier-OOF residual controls; raw probabilities remain explicitly uncalibrated.
-- D1/D2/D3/D7 supply explicit economics, research books, paired reports and pinned quote/bridge adapters, alongside bounded fixed-child fits and metadata seals; D4 adds proper scores and forecast reporting. The complete bounded runner is not supplied here.
+- D1/D2/D3/D7 supply explicit economics, research books, paired reports and pinned quote/bridge adapters, alongside bounded fixed-child fits and metadata seals; D4 adds proper scores and forecast reporting. The [explicit contained runner](ARCHITECTURE.md#explicit-contained-runner) adds one bounded attempt, not a public CLI or automatic real-run authorization.
 
 Focused synthetic checks live in `tests/v2/research/test_distribution_*.py`. No real data, provider, final-holdout, deployment or automatic run authority follows from these APIs. Shared platform owners retain source eligibility, transport and holdout policy.
+
+The runner requires the complete `{1,3,5}` outer result roster before evaluation, derives book/quote alpha keys from the sealed policy, and discards failed invocation state without retry. Zero funding is not risk sufficiency or promotion evidence.
 
 `DistributionRunPlan` is the metadata/section-journal interface, not an executable runner. Its [run metadata and containment contract](ARCHITECTURE.md#run-metadata-and-containment) specifies artifact reads, explicit writes, partial-seal behavior and dedicated-process prerequisites. Each preflight reuses the request validator before metadata/artifact access and returns a detached policy: editing returned metadata cannot mutate the instance's request, and an invalid owned request refuses `INVALID_EXPERIMENT_SPEC`. `contained` rejects malformed resource limits and nonpositive, nonfinite or nonnumeric remaining duration before process-state access or watchdog startup; positive fractional seconds are supported. Preflight/collection do not install containment automatically or certify resource feasibility.
 
