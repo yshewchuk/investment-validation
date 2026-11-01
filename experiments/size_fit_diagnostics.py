@@ -10,7 +10,7 @@ def keys(binding):
     return {"diagnostics"} if binding.get("schema_version") in ("native_experiment_registration.v1.6", "native_experiment_registration.v1.7", "native_experiment_registration.v1.8") else set()
 
 
-def evidence(result, execution, horizons, *, inputs=None, fold=None):
+def evidence(result, execution, horizons, inputs=None, fold=None):
     if execution.get("schema_version") not in ("size_candidate_execution.v1", "regression_candidate_execution.v1") or result.get("event") != "succeeded":
         return {}
     try:
