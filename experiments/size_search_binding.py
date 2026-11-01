@@ -8,7 +8,13 @@ from hashlib import sha256
 from pathlib import Path
 
 from engine.v2.contracts import SnapshotRef
-from engine.v2.foundation import artifact_reference, canonical_json, content_hash, from_document, to_document
+from engine.v2.foundation import (
+    artifact_reference,
+    canonical_json,
+    content_hash,
+    from_document,
+    to_document,
+)
 from engine.v2.models.frozen_state_io import BoundedStateReadError, read_bounded_state
 from engine.v2.ops.errors import fail
 from engine.v2.ops.fingerprints import environment_identity, source_closure
@@ -16,12 +22,9 @@ from engine.v2.research.magnitude_inputs import (
     preflight_magnitude_targets,
     qualify_magnitude_training_targets,
 )
+from engine.v2.research.magnitude_panel_qualified_table import admit_columns
 from experiments.magnitude_candidate_recipe import candidate_recipe
 from experiments.magnitude_search_request_versions import compile_request
-from experiments.size_registration_artifacts import (
-    pack_size_registration,
-    size_registration_artifact_bytes,
-)
 from experiments.native_registration import (
     MAX_NATIVE_EVIDENCE_BYTES,
     NativeRegistration,
@@ -30,6 +33,10 @@ from experiments.native_registration import (
 )
 from experiments.size_comparator import recipe as comparison_recipe
 from experiments.size_panel_request import validate_panel_request
+from experiments.size_registration_artifacts import (
+    pack_size_registration,
+    size_registration_artifact_bytes,
+)
 
 SCHEMA = "native_experiment_registration.v1.7"
 
@@ -66,6 +73,7 @@ _PANEL_MEMO = {}
 def read_stored_panel(repository, source, request, *, columns, expected_panel=None):
     """Share one admitted panel per process; validate each request and return detached copies."""
     validate_panel_request(request)
+    admit_columns(columns)
     key = (id(repository), content_hash(to_document(source)),
            content_hash(request), tuple(columns))
     entry = _PANEL_MEMO.get(key)

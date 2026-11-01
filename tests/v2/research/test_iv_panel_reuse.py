@@ -76,13 +76,13 @@ def test_warm_iv_binding_drift_refuses_before_training(fold_case, monkeypatch, d
 
 @pytest.mark.parametrize("change", ["repository", "source", "request", "columns"])
 def test_shared_panel_identity_evicts_and_returns_private_copies(monkeypatch, change):
-    from tests.v2.research.test_size_panel_memo import _Repo, _panel, _panel_request, _snapshot
+    from tests.v2.research.test_size_panel_memo import _panel, _panel_request, _Repo, _snapshot
     calls = []
     def read(*a, **k):
         calls.append(None)
         return _panel()
     monkeypatch.setattr(size_panel, "read", read)
-    repo, source, request, columns = _Repo(), _snapshot("one"), _panel_request(), ["x"]
+    repo, source, request, columns = _Repo(), _snapshot("one"), _panel_request(), ["n_prior"]
     first = size_search_binding.read_stored_panel(repo, source, request, columns=columns)
     first["rows"].clear()
     first["context"]["target_events"].clear()
@@ -95,17 +95,17 @@ def test_shared_panel_identity_evicts_and_returns_private_copies(monkeypatch, ch
     elif change == "request":
         request["limits"]["max_source_rows"] += 1
     else:
-        columns = ["x", "y"]
+        columns = ["n_prior", "mean_prior_move"]
     assert size_search_binding.read_stored_panel(repo, source, request, columns=columns) == _panel()
     assert len(calls) == 2 and len(size_search_binding._PANEL_MEMO) == 1
 
 
 @pytest.mark.parametrize("drift", ["context", "feature_snapshot", "request"])
 def test_shared_warm_panel_rechecks_metadata_and_request(monkeypatch, drift):
-    from tests.v2.research.test_size_panel_memo import _Repo, _panel, _panel_request, _snapshot
+    from tests.v2.research.test_size_panel_memo import _panel, _panel_request, _Repo, _snapshot
     monkeypatch.setattr(size_panel, "read", lambda *a, **k: _panel())
     repo, source, request = _Repo(), _snapshot("one"), _panel_request()
-    size_search_binding.read_stored_panel(repo, source, request, columns=["x"])
+    size_search_binding.read_stored_panel(repo, source, request, columns=["n_prior"])
     monkeypatch.setattr(size_panel, "read", lambda *a, **k: pytest.fail("warm reread"))
     if drift == "request":
         request["horizons"] = [1.0, 3, 5]
@@ -113,20 +113,20 @@ def test_shared_warm_panel_rechecks_metadata_and_request(monkeypatch, drift):
         panel = next(iter(size_search_binding._PANEL_MEMO.values()))["panel"]
         panel[drift]["unexpected"] = "changed"
     with pytest.raises(OpsError) as caught:
-        size_search_binding.read_stored_panel(repo, source, request, columns=["x"])
+        size_search_binding.read_stored_panel(repo, source, request, columns=["n_prior"])
     assert caught.value.code == ("INVALID_EXPERIMENT_SPEC" if drift == "request"
                                  else "EXPERIMENT_IDENTITY_CONFLICT")
     assert caught.value.problem.retryable is False
 
 
 def test_failed_panel_read_is_not_memoised(monkeypatch):
-    from tests.v2.research.test_size_panel_memo import _Repo, _panel, _panel_request, _snapshot
+    from tests.v2.research.test_size_panel_memo import _panel, _panel_request, _Repo, _snapshot
     repo, source, request = _Repo(), _snapshot("one"), _panel_request()
     def unavailable(*a, **k):
         raise fail("RESOURCE_UNAVAILABLE", "synthetic read failure")
     monkeypatch.setattr(size_panel, "read", unavailable)
     with pytest.raises(OpsError, match="synthetic read failure"):
-        size_search_binding.read_stored_panel(repo, source, request, columns=["x"])
+        size_search_binding.read_stored_panel(repo, source, request, columns=["n_prior"])
     assert not size_search_binding._PANEL_MEMO
     monkeypatch.setattr(size_panel, "read", lambda *a, **k: _panel())
-    assert size_search_binding.read_stored_panel(repo, source, request, columns=["x"]) == _panel()
+    assert size_search_binding.read_stored_panel(repo, source, request, columns=["n_prior"]) == _panel()
