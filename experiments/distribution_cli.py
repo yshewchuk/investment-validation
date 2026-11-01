@@ -36,6 +36,13 @@ from experiments.native_registration import (
 from experiments.v2_magnitude_search_run import _read_document, _render
 
 
+def _input_document(path):
+    try:
+        return _read_document(path)
+    except OSError:
+        raise fail("INVALID_EXPERIMENT_SPEC", "distribution input document is unavailable") from None
+
+
 def _prepare(conn, store, repository, spec, source, source_request, ref, recipe, caps):
     """Prepare only the distinct distribution registration, never rebuild or run SIZE."""
     require(spec.runner == "experiments/distribution_run.py" and spec.seed == 0
@@ -63,18 +70,18 @@ def _prepare(conn, store, repository, spec, source, source_request, ref, recipe,
     return registration, spec, result
 
 
-def _dispatch(args, conn, store, repository, request, began):
+def _dispatch(args, conn, store, repository, request, began, *, probe=False):
     from experiments.distribution_run import DistributionRun
 
     try:
-        spec = experiment_spec_from_document(_read_document(args.spec))
-        source_spec = experiment_spec_from_document(_read_document(args.source_spec))
-        ref = from_document(ArtifactRef, _read_document(args.source_plan_ref))
+        spec = experiment_spec_from_document(_input_document(args.spec))
+        source_spec = experiment_spec_from_document(_input_document(args.source_spec))
+        ref = from_document(ArtifactRef, _input_document(args.source_plan_ref))
     except (DocumentError, TypeError):
         raise fail("INVALID_EXPERIMENT_SPEC", "invalid distribution lifecycle metadata") from None
-    source_request = _read_document(args.source_request)
-    recipe = validate_candidate_recipe(_read_document(args.recipe))
-    caps = _read_document(args.budget_caps)
+    source_request = _input_document(args.source_request)
+    recipe = validate_candidate_recipe(_input_document(args.recipe))
+    caps = _input_document(args.budget_caps)
     source = read_native_registration(conn, store, source_spec, max_evidence_bytes=MAX_NATIVE_EVIDENCE_BYTES)
     if args.action in ("prepare", "register"):
         registration, spec, result = _prepare(conn, store, repository, spec, source, source_request, ref, recipe, caps)
@@ -89,6 +96,8 @@ def _dispatch(args, conn, store, repository, request, began):
     if args.action == "seal":
         return run.seal(clock=SystemClock())
     if args.action == "run":
+        if probe:
+            return None if run.record("completed") is None else run.collect()
         return run._run_contained(SystemClock(), began)
     return run.collect()
 
@@ -105,20 +114,26 @@ def main(argv=None):
         parser.error("distribution paths must not contain NUL characters")
     conn, status, began = None, 0, time.monotonic()
     try:
-        request = validate_request(_read_document(args.request))
+        request = validate_request(_input_document(args.request))
         seconds = request["limits"]["job_wall_seconds"] - (time.monotonic() - began)
         if seconds <= 0:
             raise fail("RESOURCE_LIMIT_EXCEEDED", "distribution request exhausted whole-job deadline")
         with contained(request["limits"]["parent"], seconds), stage("distribution " + args.action), redirect_stdout(sys.stderr):
             if not Path(args.store_root).is_dir():
                 raise fail("RESOURCE_UNAVAILABLE", "distribution requires an existing artifact store")
-            if args.action in ("prepare", "preflight", "collect", "report"):
+            if args.action not in ("register", "seal"):
                 conn = sqlite3.connect(Path(args.catalog).resolve().as_uri() + "?mode=ro", uri=True, isolation_level=None)
                 conn.row_factory = sqlite3.Row
             else:
                 conn = connect(args.catalog, must_exist=True)
             store = ArtifactStore(args.store_root)
-            result = _dispatch(args, conn, store, Repository(conn, store, pin_snapshots=True), request, began)
+            result = _dispatch(args, conn, store, Repository(conn, store, pin_snapshots=True), request, began,
+                probe=args.action == "run")
+            if args.action == "run" and result is None:
+                conn.close()
+                conn = None
+                conn = connect(args.catalog, must_exist=True)
+                result = _dispatch(args, conn, store, Repository(conn, store, pin_snapshots=True), request, began)
             output = _render(result)
     except (OpsError, DataError) as error:
         output, status = _render({"refused": to_document(error.problem)}, scratch=False), 2
@@ -128,7 +143,11 @@ def main(argv=None):
     except DocumentError:
         error = fail("INVALID_EXPERIMENT_SPEC", "invalid distribution metadata")
         output, status = _render({"refused": to_document(error.problem)}, scratch=False), 2
-    except (ArtifactError, OSError, sqlite3.Error):
+    except ArtifactError as error:
+        code = "INTEGRITY_FAILED" if error.code == "INTEGRITY_FAILED" else "RESOURCE_UNAVAILABLE"
+        problem = fail(code, "distribution artifact integrity failed" if code == "INTEGRITY_FAILED" else "distribution storage unavailable")
+        output, status = _render({"refused": to_document(problem.problem)}, scratch=False), 2
+    except (OSError, sqlite3.Error):
         error = fail("RESOURCE_UNAVAILABLE", "distribution storage unavailable")
         output, status = _render({"refused": to_document(error.problem)}, scratch=False), 2
     finally:

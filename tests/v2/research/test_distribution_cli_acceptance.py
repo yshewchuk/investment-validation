@@ -117,7 +117,7 @@ def test_cli_fresh_runner_shares_original_deadline_and_replays_real_cas(case, op
     for action in ("collect", "report", "run"):
         assert operator.invoke(action) == (0, result)
         assert durable(case) == before and case.calls == calls
-    assert len(operator.instances) == 5  # Every command constructed a fresh actual runner.
+    assert len(operator.instances) == 6  # Fresh execution reopens after its read-only completion probe.
 
 
 @pytest.mark.parametrize("changed", ["parent_limit", "job_limit", "alpha"])
@@ -179,7 +179,7 @@ def test_failure_journal_io_is_terminal_and_fresh_cli_retry_cannot_write_or_fit(
     assert status == 2 and result["refused"]["code"] == "EXPERIMENT_IDENTITY_CONFLICT"
     assert operator.invoke("report")[0] == 2
     assert durable(case) == before and case.calls == calls and failures == [True]
-    assert len(operator.instances) == 4 and not operator.finalized
+    assert len(operator.instances) == 6 and not operator.finalized
 
 
 def test_zero_funded_cli_reports_are_diagnostics_without_promotion_authority(case, operator):

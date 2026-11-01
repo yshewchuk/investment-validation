@@ -33,7 +33,7 @@ def setup(monkeypatch, tmp_path, action="preflight"):
         assert active
         calls.append(("connect", args, kwargs))
         return SimpleNamespace(close=lambda: calls.append(("close",)))
-    def dispatch(args, *values):
+    def dispatch(args, *values, **kwargs):
         assert active
         calls.append(("dispatch", args.action))
         return {"schema_version": "test.v1", "action": args.action}
@@ -53,7 +53,7 @@ def test_all_actions_are_contained_and_readonly_actions_use_existing_catalog(mon
     assert json.loads(capsys.readouterr().out) == {"schema_version": "test.v1", "action": action}
     assert len([call for call in calls if call[0] == "limits"]) == 1
     connection = next(call for call in calls if call[0] == "connect")
-    if action in ("prepare", "preflight", "collect", "report"):
+    if action not in ("register", "seal"):
         assert connection[1][0].endswith("?mode=ro") and connection[2]["uri"] is True
     else:
         assert connection[2] == {"must_exist": True}
@@ -71,13 +71,14 @@ def test_invalid_request_refuses_before_containment_or_catalog(monkeypatch, tmp_
 @pytest.mark.parametrize("error,code", [
     (MemoryError("private"), "RESOURCE_LIMIT_EXCEEDED"),
     (OSError("private"), "RESOURCE_UNAVAILABLE"),
-    (ArtifactError("IO_ERROR", "private"), "RESOURCE_UNAVAILABLE"),
+    (ArtifactError("MISSING", "private"), "RESOURCE_UNAVAILABLE"),
+    (ArtifactError("INTEGRITY_FAILED", "private"), "INTEGRITY_FAILED"),
     (DocumentError("TYPE_MISMATCH", "private", "private"), "INVALID_EXPERIMENT_SPEC"),
     (fail("HOLDOUT_ACCESS_DENIED", "protected input"), "HOLDOUT_ACCESS_DENIED"),
 ])
 def test_refusals_have_one_machine_readable_problem_and_cleanup(monkeypatch, tmp_path, capsys, error, code):
     calls, argv = setup(monkeypatch, tmp_path)
-    def broken(*args):
+    def broken(*args, **kwargs):
         raise error
     monkeypatch.setattr(cli, "_dispatch", broken)
     assert cli.main(argv) == 2
@@ -88,7 +89,7 @@ def test_refusals_have_one_machine_readable_problem_and_cleanup(monkeypatch, tmp
 
 def test_programming_failure_is_not_reclassified(monkeypatch, tmp_path):
     calls, argv = setup(monkeypatch, tmp_path)
-    monkeypatch.setattr(cli, "_dispatch", lambda *args: (_ for _ in ()).throw(TypeError("programming bug")))
+    monkeypatch.setattr(cli, "_dispatch", lambda *args, **kwargs: (_ for _ in ()).throw(TypeError("programming bug")))
     with pytest.raises(TypeError, match="programming bug"):
         cli.main(argv)
     assert calls[-1] == ("close",)
@@ -134,3 +135,31 @@ def test_expired_bootstrap_refuses_before_process_or_catalog_access(monkeypatch,
     assert cli.main(argv) == 2
     assert json.loads(capsys.readouterr().out)["refused"]["code"] == "RESOURCE_LIMIT_EXCEEDED"
     assert calls == []
+
+
+def test_fresh_run_reopens_after_readonly_probe_without_resetting_containment(monkeypatch, tmp_path, capsys):
+    calls, argv = setup(monkeypatch, tmp_path, "run")
+    ticks, seen = iter((100., 103.5)), []
+    monkeypatch.setattr(cli, "time", SimpleNamespace(monotonic=lambda: next(ticks)))
+    def dispatch(args, conn, store, repository, policy, began, *, probe=False):
+        seen.append((conn, policy, began, probe))
+        return None if probe else {"completed": True}
+    monkeypatch.setattr(cli, "_dispatch", dispatch)
+    assert cli.main(argv) == 0 and json.loads(capsys.readouterr().out) == {"completed": True}
+    assert [entry[0] for entry in calls] == ["limits", "connect", "close", "connect", "close"]
+    assert calls[0][2] == request()["limits"]["job_wall_seconds"] - 3.5
+    assert calls[1][1][0].endswith("?mode=ro") and calls[3][2] == {"must_exist": True}
+    assert len(seen) == 2 and seen[0][0] is not seen[1][0]
+    assert seen[0][1] is seen[1][1] and [entry[2:] for entry in seen] == [(100., True), (100., False)]
+
+
+def test_completion_probe_failure_never_falls_back_to_writable_execution(monkeypatch, tmp_path, capsys):
+    calls, argv = setup(monkeypatch, tmp_path, "run")
+    def dispatch(*args, **kwargs):
+        assert kwargs == {"probe": True}
+        raise fail("EXPERIMENT_IDENTITY_CONFLICT", "synthetic corrupt completion")
+    monkeypatch.setattr(cli, "_dispatch", dispatch)
+    assert cli.main(argv) == 2
+    assert json.loads(capsys.readouterr().out)["refused"]["code"] == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert [entry[0] for entry in calls] == ["limits", "connect", "close"]
+    assert calls[1][1][0].endswith("?mode=ro")

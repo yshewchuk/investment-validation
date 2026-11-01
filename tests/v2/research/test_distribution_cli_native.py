@@ -43,7 +43,11 @@ import json, runpy, sys, threading
 from engine.models.no_fit import no_fit_guard as legacy_guard
 from engine.v2.models.no_fit import no_fit_guard
 from engine.v2.data import objects
+from experiments import distribution_cli as cli
 assert threading.current_thread() is threading.main_thread()
+def no_writer(*args, **kwargs):
+    raise AssertionError("completed replay opened the writable catalog")
+cli.connect = no_writer
 targets = set(json.loads(sys.argv.pop(1)))
 original, original_bytes = objects.verify_object_path, objects.read_verified_bytes
 def verify(store, ref):
