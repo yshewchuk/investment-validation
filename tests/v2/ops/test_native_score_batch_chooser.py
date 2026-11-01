@@ -434,38 +434,63 @@ def test_score_artifact_refs_includes_chooser_artifacts():
     assert len(refs) == 10
 
 
+def _stub_producer_selector(monkeypatch):
+    monkeypatch.setattr(
+        native_score_batch, "select_chooser_state",
+        lambda *args, **kwargs: SimpleNamespace(producer_bindings={
+            "pred_im_t1_d14": SimpleNamespace(feature_order=("producer_im",)),
+            "pred_runup_abs_move_d14": SimpleNamespace(
+                feature_order=("producer_iv",)),
+        }),
+    )
+
+
 @pytest.mark.parametrize("strategy", _MENU)
-def test_member_projection_includes_chooser_primitives_and_producers(strategy):
+def test_member_projection_includes_chooser_primitives_and_producers(
+        monkeypatch, strategy):
+    _stub_producer_selector(monkeypatch)
     key = SimpleNamespace(strategy=strategy)
     event = SimpleNamespace(
         panel_row={name: 1.0 for name in _CHOOSER_PRIMITIVES}
         | {"producer_im": 2.0, "producer_iv": 3.0},
         tier4_row={},
+        calendar_row={'event_date': '2026-10-15'},
     )
     binding = SimpleNamespace(chooser_fold_references={
         "im": SimpleNamespace(release_binding=SimpleNamespace(
             feature_order=("producer_im",))),
         "iv": SimpleNamespace(release_binding=SimpleNamespace(
             feature_order=("producer_iv",))),
+        "retired": SimpleNamespace(release_binding=SimpleNamespace(
+            feature_order=("retired_unselected_feature",))),
     })
 
-    projected = _project_member_features(key, event, binding, ())
+    projected = _project_member_features(
+        key, event, binding, (),
+        as_of="2026-10-15", fold_cache={})
 
     assert isinstance(projected, tuple)
     assert set(_CHOOSER_PRIMITIVES).issubset(projected)
     assert "producer_im" in projected
     assert "producer_iv" in projected
+    assert "retired_unselected_feature" not in projected
 
 
-def test_member_projection_twin_p_with_empty_references_keeps_primitives():
+def test_member_projection_twin_p_with_empty_references_keeps_primitives(
+        monkeypatch):
+    _stub_producer_selector(monkeypatch)
     key = SimpleNamespace(strategy="TWIN-P")
     event = SimpleNamespace(
-        panel_row={name: 1.0 for name in _CHOOSER_PRIMITIVES},
+        panel_row={name: 1.0 for name in _CHOOSER_PRIMITIVES}
+        | {"producer_im": 2.0, "producer_iv": 3.0},
         tier4_row={},
+        calendar_row={'event_date': '2026-10-15'},
     )
     binding = SimpleNamespace(chooser_fold_references={})
 
-    projected = _project_member_features(key, event, binding, ())
+    projected = _project_member_features(
+        key, event, binding, (),
+        as_of="2026-10-15", fold_cache={})
 
     assert isinstance(projected, tuple)
     assert set(_CHOOSER_PRIMITIVES).issubset(projected)

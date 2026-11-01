@@ -1159,6 +1159,7 @@ def _resolve_chooser_fold_references(
     if not members:
         return ({}, {})
     objects = _chooser_fold_objects(members, member_ids)
+    objects = [obj for obj in objects if not _is_legacy_cutoffless_chooser_fold(obj)]
     if not objects:
         return ({}, {})
     sources = catalog.get("sources")

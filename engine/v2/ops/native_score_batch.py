@@ -912,6 +912,8 @@ def _project_member_features(
     event: NightlyEventInputs,
     binding: ScoringReleaseBinding,
     feature_names: Sequence[str],
+    as_of: Any,
+    fold_cache: dict[tuple[int, str], Any],
 ) -> Sequence[str] | NativeScoreBatchRowRefusal:
     """Project required staged chooser/producer features for one DYN-SV row.
 
@@ -926,14 +928,22 @@ def _project_member_features(
     spec = _STRATEGY_REGISTRY.get(key.strategy)
     if spec is None or not spec.chooser:
         return feature_names
-    references = binding.chooser_fold_references
+    try:
+        state = select_chooser_state(
+            binding, event.calendar_row.get("event_date"), as_of,
+            fold_cache=fold_cache)
+    except ModelNotReady as exc:
+        label = _CHOOSER_REFUSAL_CAUSE_LABELS.get(
+            exc.member_id, "chooser state missing or unusable")
+        return NativeScoreBatchRowRefusal(key, "MODEL_NOT_READY", "DYN-SV " + label)
     projected = set(_CHOOSER_PRIMITIVES) - _SCORER_COMPUTED_FEATURES
-    for reference in references.values():
-        if not reference.release_binding.feature_order:
+    for producer_output in ("pred_im_t1_d14", "pred_runup_abs_move_d14"):
+        producer = state.producer_bindings.get(producer_output)
+        if not producer or not getattr(producer, "feature_order", None):
             return NativeScoreBatchRowRefusal(
                 key, "RELEASE_MISSING_FEATURE_ORDER",
                 "chooser producer identity has no feature_order")
-        projected.update(reference.release_binding.feature_order)
+        projected.update(producer.feature_order)
     projected -= _SCORER_COMPUTED_FEATURES
     projected -= set(GATE_FORECAST_COLUMNS)
     projected -= set(GATE_ANALOG_COLUMNS)
@@ -970,9 +980,7 @@ def _assemble_one_event(
         return NativeScoreBatchRowRefusal(key, *problem)
     spec = _STRATEGY_REGISTRY.get(strategy)
     if spec is None:
-        return NativeScoreBatchRowRefusal(
-            key, "UNSUPPORTED_STRATEGY",
-            f"only {', '.join(_STRATEGY_REGISTRY)} is supported, got {strategy!r}")
+        return NativeScoreBatchRowRefusal(key, "UNSUPPORTED_STRATEGY", f"only {', '.join(_STRATEGY_REGISTRY)} is supported, got {strategy!r}")
     code, detail, pair = _matched_decision_clock(binding.model_identity, spec)
     if code is not None:
         return NativeScoreBatchRowRefusal(key, code, detail)
@@ -982,7 +990,7 @@ def _assemble_one_event(
         key, spec, gate_policy, feature_names, drivers, gate_identity)
     if refusal is not None:
         return refusal
-    feature_names = _project_member_features(key, event, binding, feature_names)
+    feature_names = _project_member_features(key, event, binding, feature_names, as_of, gate_source_cache)
     if isinstance(feature_names, NativeScoreBatchRowRefusal):
         return feature_names
     bundle = _bundle_or_refusal(

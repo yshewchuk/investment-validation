@@ -1106,6 +1106,7 @@ def test_cutoffless_legacy_chooser_fold_is_not_a_verified_reference(tmp_path, mo
     row["objects"][0]["serving_fold"]["fold_start"] = "2026-09-01"
     row["objects"][0]["serving_fold"]["producer_output"] = "pred_im_t1_d14"
     row["objects"][0]["serving_fold"].pop("training_cutoff", None)
+    body['sources'].pop('retrain_cutoff', None)
     body["manifest_hash"] = content_hash(
         {key: value for key, value in body.items() if key != "manifest_hash"})
     monkeypatch.setattr(rb, "_read_state_catalog", lambda *_args: body)
@@ -1113,4 +1114,5 @@ def test_cutoffless_legacy_chooser_fold_is_not_a_verified_reference(tmp_path, mo
     binding = resolve_release_binding(tmp_path, include_chooser_fold_references=True)
 
     assert binding.chooser_fold_references == {}
+    assert binding.chooser_authoring_fold_contexts == {}
     assert calls == []
