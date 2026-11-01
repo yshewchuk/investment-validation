@@ -10,6 +10,7 @@ from engine.v2.ops.errors import OpsError
 from experiments import magnitude_search_trials as trials
 from experiments.magnitude_search_plan import PLAN_V3, cohort_key, trial_key
 from experiments.magnitude_search_selection import (
+    ZeroComparatorError,
     blended_event_score,
     history_mean_rows,
     selection_tie_band,
@@ -60,7 +61,7 @@ def test_zero_comparator_terms_have_defined_parity_or_refuse_undefined_ratio():
     assert parity["normalized"] == {"rmse": 1.0, "mae": 1.0,
         "large_move_underprediction": 1.0}
     worse = _rows([(12.0, 11.0), (4.0, 4.0)])
-    with pytest.raises(ValueError, match="zero history_mean error"):
+    with pytest.raises(ZeroComparatorError, match="zero history_mean error"):
         blended_event_score(worse, perfect, metric_weights=WEIGHTS,
             large_move_threshold_pct=10.0)
 
