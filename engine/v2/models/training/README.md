@@ -1,5 +1,48 @@
 # `engine/v2/models/training`
 
+Component contract: [ARCHITECTURE.md](ARCHITECTURE.md).
+
+## Standalone neural magnitude primitive (opt-in foundation)
+
+`magnitude_mlp_recipe.mlp_recipe` / `validate_mlp_recipe` bind the new closed
+`magnitude_mlp_recipe.v1`: three profiles, ReLU `(32,)`/L2 0.01 and
+`(64,32)`/L2 0.01 or 0.1. This small capacity/regularization comparison uses the
+installed sklearn `MLPRegressor`, not a GPU framework or combinatorial sweep.
+`training.magnitude_mlp.fit_mlp_predictions` receives caller-admitted matrices;
+both no-fit guards precede inspection. Fresh sklearn median imputation (retaining
+empty columns), all-column missing indicators, input scaling and target scaling
+learn exclusively from supplied training rows. The union has fixed doubled width;
+sklearn `VarianceThreshold(0)` then drops training-constant values/indicators before
+scaling, preventing untrained neural responses when those inputs later change.
+Prediction rows cannot alter the learned input width, which the fit evidence records.
+An entirely constant union raises `ValueError` before neural fitting.
+The affine target standardization improves
+Adam's numerical conditioning without changing the squared-error estimand;
+`TransformedTargetRegressor` restores original target units before finite checks
+and zero projection. This differs intentionally from the untouched production blend.
+
+All profiles fix seed 20260829, one numerical thread, Adam and training-loss
+stopping (tolerance 0.0001, patience 15), with no internal random validation split.
+The declared 400-epoch estimator ceiling matches the incumbent's finite iteration
+policy, not a new wall-time allowance. No holdout or evaluation labels enter fit,
+preprocessing or stopping; the caller still owns causal folds, source admission,
+inner-only selection, resource budgets and progress reporting. One successful call
+is one component fit and returns detached `magnitude_mlp_fit.v1` predictions,
+recipe hash, iteration count and standardized-target optimizer loss (including L2,
+not a selection score). A convergence warning,
+nonfinite fitted weights/loss or nonfinite inverse-transformed prediction raises
+`ValueError`, with no partial result, fallback or retry; unrelated warning classes
+are not convergence failures. Sklearn's exact interrupted-training warning restores
+its original `KeyboardInterrupt`, even under ignored warnings; no success result returns.
+Invalid recipe/order/matrices/label domain refuse
+before fitting. Repeated inputs in the same numerical environment fit afresh
+deterministically; there is no cache, I/O, publication or journal replay here.
+
+This slice admits no search request and modifies no existing recipe, comparator,
+registration or source closure. Later slices must explicitly version search
+admission, bind preprocessing/seed evidence and retain declared worker budgets;
+new executable plans require fresh source seals, never mutation of running plans.
+
 ## Ownership
 
 Implements the **Model training — dataset and model recipes, folds, fitting, evidence, release candidates** row of the §4 owner table of
@@ -19,6 +62,12 @@ Replaces (§4.4): `models/training/, rewritten above scoring rather than moved`.
 - **Be imported by a feature or a scorer** — `engine/v2/models` does it instead.
 
 ## Public interface
+
+`magnitude_mlp.fit_mlp_predictions` fits one guarded standalone MLP component on
+caller-admitted matrices: training-only input/target scaling, deterministic fixed
+profiles, original-unit nonnegative forecasts and convergence evidence. Invalid
+inputs, convergence failure or nonfinite evidence raise `ValueError`; no retry,
+source admission, persistence or production/search activation occurs.
 
 `magnitude_candidate.fit_candidate` is the shared fixed-nonnegative three-family
 numeric dispatcher; `experiments.magnitude_candidate_fit` retains a guarded lazy compatibility wrapper.
@@ -164,7 +213,7 @@ both `tools/phase5_prepare_release.py` (which re-exports the names) and
 `tools/phase5_training_job.py`; it imports no `checks` module so the training
 job's worker path can read it.
 
-<!-- public-interface: check_fitting_allowed, fit_candidate, fit_execution, fit_regression_candidate, fit_regression_predictions, fit_ridge_hgb_predictions, fit_elasticnet_predictions, build_d14_dataset, calculate_frame, input_rows, input_frame, decision_rows, daily_features, validate_role, fit_magnitude_predictions, build_payoff_line_artifact, build_payoff_surface_artifact, build_recalibration_map_artifact, fit_recalibration_map, CLOCK_ID, EqualWeightBlend, EstimatorSpec, FoldOutcome, FoldPlan, FoldScheme, LABEL_RECEIPT_V1, LEGACY_SEED, LabelRule, LogTargetModel, MEMBERSHIP_RECEIPT_V1, OWNER_P5_4, OWNER_TRAINING_JOB, PreparedDataset, RECIPE_V1, ReceiptIssue, RecipeDataError, RecipeKey, ResidualRule, RowFilter, SeedMeanEnsemble, TRAINING_JOB_V1, TargetSpec, ThresholdRule, TrainingJobResult, TrainingRecipe, TrainingRefused, UnsupportedEstimator, UpstreamDependency, ValueMask, current_recipes, dataset_fingerprint, fit_recipe_estimator, fold_receipts, plan_folds, prepare_dataset, receipt_issues, recipe_fingerprint, run_training_job, build_driver_residual_pool_artifact, build_paired_residual_pool_artifact, freeze_stored_driver_residual_pool, CHOOSER_POOL_ID, CHOOSER_POOL_MAX_BYTES, require_chooser_pool_columns, read_chooser_pool_frame, fit_regression_elasticnet_predictions -->
+<!-- public-interface: fit_mlp_predictions, check_fitting_allowed, fit_candidate, fit_execution, fit_regression_candidate, fit_regression_predictions, fit_ridge_hgb_predictions, fit_elasticnet_predictions, build_d14_dataset, calculate_frame, input_rows, input_frame, decision_rows, daily_features, validate_role, fit_magnitude_predictions, build_payoff_line_artifact, build_payoff_surface_artifact, build_recalibration_map_artifact, fit_recalibration_map, CLOCK_ID, EqualWeightBlend, EstimatorSpec, FoldOutcome, FoldPlan, FoldScheme, LABEL_RECEIPT_V1, LEGACY_SEED, LabelRule, LogTargetModel, MEMBERSHIP_RECEIPT_V1, OWNER_P5_4, OWNER_TRAINING_JOB, PreparedDataset, RECIPE_V1, ReceiptIssue, RecipeDataError, RecipeKey, ResidualRule, RowFilter, SeedMeanEnsemble, TRAINING_JOB_V1, TargetSpec, ThresholdRule, TrainingJobResult, TrainingRecipe, TrainingRefused, UnsupportedEstimator, UpstreamDependency, ValueMask, current_recipes, dataset_fingerprint, fit_recipe_estimator, fold_receipts, plan_folds, prepare_dataset, receipt_issues, recipe_fingerprint, run_training_job, build_driver_residual_pool_artifact, build_paired_residual_pool_artifact, freeze_stored_driver_residual_pool, CHOOSER_POOL_ID, CHOOSER_POOL_MAX_BYTES, require_chooser_pool_columns, read_chooser_pool_frame, fit_regression_elasticnet_predictions -->
 
 ## Consumers
 

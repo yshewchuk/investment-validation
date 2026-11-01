@@ -63,7 +63,7 @@ request body and, if durable, in the operator guides instead — see
 | `engine/v2/scoring/` | [`engine/v2/scoring/ARCHITECTURE.md`](engine/v2/scoring/ARCHITECTURE.md) |
 | `engine/v2/evaluation/` | [`engine/v2/evaluation/ARCHITECTURE.md`](engine/v2/evaluation/ARCHITECTURE.md) |
 | `engine/v2/ledger/` | [`engine/v2/ledger/ARCHITECTURE.md`](engine/v2/ledger/ARCHITECTURE.md) |
-| `engine/v2/models/training/` | (pending) |
+| `engine/v2/models/training/` | [`engine/v2/models/training/ARCHITECTURE.md`](engine/v2/models/training/ARCHITECTURE.md) |
 | `engine/v2/research/` | [`engine/v2/research/ARCHITECTURE.md`](engine/v2/research/ARCHITECTURE.md) |
 | `engine/v2/parity/` | [`engine/v2/parity/ARCHITECTURE.md`](engine/v2/parity/ARCHITECTURE.md) |
 | `engine/v2/serving/` | [`engine/v2/serving/ARCHITECTURE.md`](engine/v2/serving/ARCHITECTURE.md) |
