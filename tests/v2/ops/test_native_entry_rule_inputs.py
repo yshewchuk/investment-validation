@@ -1,5 +1,6 @@
 """entry_rule_declarations: one entry-rule row's frozen inputs, synthetic only."""
 import dataclasses
+import engine.v2.ops.native_score_batch as nsb
 from types import SimpleNamespace
 
 import pytest
@@ -180,15 +181,31 @@ def _twin_cutoff(**overrides):
      "nightly_source_bundle refused: MODEL_NOT_READY: duplicate trailing cutoff artifact"),
 ], ids=["pool-missing", "pool-duplicate", "cutoff-missing", "cutoff-duplicate"])
 def test_row_assembly_publishes_each_missing_and_duplicate_label(
-        tmp_path, paired, trailing, expected_detail):
+        tmp_path, paired, trailing, expected_detail, monkeypatch):
     # End-to-end through native_score_batch row assembly on a real promoted
     # release: the families are replaced post-resolution because the release
     # resolver itself refuses duplicate semantic keys release-wide. The
     # published detail strings are typed here, never read from production.
+    # Seed a valid chooser state so projection/admission passes and the test
+    # reaches the targeted source-bundle refusals instead of the chooser refusal.
+    event = _event_inputs(strategy="TWIN-P")
+    event.panel_row.update({name: 1.0 for name in nsb._CHOOSER_PRIMITIVES})
+    event.panel_row["x"] = 1.0
+    state = SimpleNamespace(
+        producer_bindings={
+            "pred_im_t1_d14": SimpleNamespace(binding_id="chooser_implied", feature_order=("x",)),
+            "pred_runup_abs_move_d14": SimpleNamespace(binding_id="chooser_runup", feature_order=("x",)),
+        },
+        artifact_refs=(),
+        fold_provenance={},
+        analog_pool=SimpleNamespace(pool_id="p", cutoff="2026-01-15", content_hash="h"),
+        admissible_table=SimpleNamespace(table_id="t", version=1, content_hash="h"),
+        fold_pools={},
+    )
+    monkeypatch.setattr(nsb, "select_chooser_state", lambda *_a, **_k: state)
     binding = dataclasses.replace(
         _stage(tmp_path, [SIZE, IV_CRUSH]),
         paired_residual_artifacts=paired, trailing_cutoff_artifacts=trailing)
-    event = _event_inputs(strategy="TWIN-P")
     assembled, refusals = _assemble(binding, [event])
     assert assembled == {}
     assert [(item.key, item.code, item.detail) for item in refusals] == [
