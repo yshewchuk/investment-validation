@@ -32,6 +32,14 @@ from experiments.size_search import _contain, _run
 from experiments.v2_magnitude_search_run import _read_document, _render, seal_search_run
 
 
+def _input(path):
+    """Operator-supplied metadata IO is invalid input, not a storage outage."""
+    try:
+        return _read_document(path)
+    except OSError:
+        raise fail("INVALID_EXPERIMENT_SPEC", "IV metadata file is unavailable") from None
+
+
 def _prepare(repository, spec, request, args):
     """Cheap metadata preparation is repeated by register; no second receipt format."""
     panel = request["panel_request"]
@@ -65,7 +73,7 @@ def main(argv=None):
         parser.error("IV paths must not contain NUL characters")
     conn, started, stack = None, time.monotonic(), ExitStack()
     try:
-        request = _read_document(args.request)
+        request = _input(args.request)
         if request.get("schema_version") != "regression_search_request.v1":
             raise fail("INVALID_EXPERIMENT_SPEC", "IV requires its closed regression request")
         schedule = compile_request(request)
@@ -77,14 +85,14 @@ def main(argv=None):
         print(f"[iv] stage={args.action} start rss_kib={resource.getrusage(resource.RUSAGE_SELF).ru_maxrss}", file=sys.stderr)
         with redirect_stdout(sys.stderr):
             try:
-                spec = experiment_spec_from_document(_read_document(args.spec))
+                spec = experiment_spec_from_document(_input(args.spec))
             except TypeError:
                 raise fail("INVALID_EXPERIMENT_SPEC", "invalid IV specification metadata") from None
             if spec.runner != "experiments/iv_crush_search.py" or spec.price_source != "iv_crush_targets":
                 raise fail("INVALID_EXPERIMENT_SPEC", "IV requires its dedicated runner and target")
             if not Path(args.store_root).is_dir():
                 raise fail("RESOURCE_UNAVAILABLE", "existing IV artifact store required")
-            if args.action == "report":
+            if args.action in ("run", "report"):
                 conn = sqlite3.connect(Path(args.catalog).resolve().as_uri() + "?mode=ro", uri=True, isolation_level=None)
                 conn.row_factory = sqlite3.Row
             else:
@@ -102,12 +110,19 @@ def main(argv=None):
                     result = seal_search_plan(conn, store, registration, request)
             else:
                 registration = read_native_registration(conn, store, spec)
-                ref = from_document(ArtifactRef, _read_document(args.plan_ref))
+                ref = from_document(ArtifactRef, _input(args.plan_ref))
                 context = (conn, store, repository, registration, request, ref)
                 if args.action == "seal":
                     result = seal_search_run(*context, clock=SystemClock())
                 else:
-                    result = _run(context, collector=collect) if args.action == "run" else collect(*context)
+                    result = _run(context, collector=collect, read_only=True) if args.action == "run" else collect(*context)
+                    if args.action == "run" and result is None:
+                        conn.close()
+                        conn = connect(args.catalog, must_exist=True)
+                        repository = Repository(conn, store, pin_snapshots=True)
+                        registration = read_native_registration(conn, store, spec)
+                        context = (conn, store, repository, registration, request, ref)
+                        result = _run(context, collector=collect)
         with _render(result) as rendered:
             shutil.copyfileobj(rendered, sys.stdout)
     except (OpsError, DataError) as error:
@@ -120,7 +135,13 @@ def main(argv=None):
     except DocumentError:
         print('{"refused":"INVALID_EXPERIMENT_SPEC","message":"invalid IV metadata"}')
         return 2
-    except (ArtifactError, OSError, sqlite3.Error):
+    except ArtifactError as error:
+        code = {"MISSING": "RESOURCE_UNAVAILABLE", "SIZE_LIMIT": "RESOURCE_LIMIT_EXCEEDED"}.get(
+            error.code, "INTEGRITY_FAILED")
+        with _render({"refused": code, "message": "IV artifact read refused"}, scratch=False) as rendered:
+            shutil.copyfileobj(rendered, sys.stdout)
+        return 2
+    except (OSError, sqlite3.Error):
         print('{"refused":"RESOURCE_UNAVAILABLE","message":"IV storage unavailable"}')
         return 2
     finally:

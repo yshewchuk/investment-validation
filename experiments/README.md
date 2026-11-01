@@ -664,12 +664,17 @@ Seal creates the immutable driver before work. Run uses the existing native exec
 path, never public `start` followed by `execute`; selected-only outer work includes the
 causal comparison and collects once. Completed run/report verify stored evidence under
 no-fit semantics without reopening source labels or resetting an execution deadline.
-Report opens the catalog read-only; missing work refuses rather than executing.
+Both open the catalog read-only first; only an admitted incomplete run reopens writable,
+revalidates registration and executes. Failed probes never trigger writable fallback.
+Report missing work refuses rather than executing. Replay does not switch journal mode;
+SQLite may coordinate existing WAL sidecars, so live-WAL sidecar immutability is not promised.
 
 Request compilation precedes catalog access; shared SIZE parent alarm/RSS containment
 precedes native registration and immutable whole-job budgeting bounds child launch.
 Metadata files use the shared 1 MiB bounded reader; canonical JSON output is rendered
 within the shared 64 MiB cap before stdout, with bounded stage/progress/RSS on stderr.
+Unreadable input JSON files refuse as `INVALID_EXPERIMENT_SPEC`; corrupt/unsafe artifacts
+as `INTEGRITY_FAILED`, while actual missing storage remains `RESOURCE_UNAVAILABLE`.
 Typed failures exit 2, cancel the alarm and close resources; incomplete claims cannot
 retry, be removed or taken over. Library callers still own parent containment.
 Finite operands do not guarantee finite loss arithmetic: opposite values near

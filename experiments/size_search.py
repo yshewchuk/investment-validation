@@ -59,8 +59,8 @@ def _contain(request, horizons=(5, 3, 1)):
     return memory
 
 
-def _run(context, *, collector=None):
-    """Completed markers select only verified read-only collection, never execution."""
+def _run(context, *, collector=None, read_only=False):
+    """Verify completed collection; a read-only incomplete probe returns None."""
     conn, store, _, registration, request, ref = context
     plan = _admit_driver(conn, store, registration, request, ref)
     complete = all(read_record(conn, store, registration.run_id, prefix + content_hash(parts)) is not None
@@ -68,6 +68,8 @@ def _run(context, *, collector=None):
             ("outer-terminal:", [plan["plan_id"], group["outer"]["year"]]),
             ("comparison-terminal:", [plan["plan_id"], group["outer"]["year"], "comparison"])))
     if not complete:
+        if read_only:
+            return None
         seconds = remaining(conn, store, registration, plan)
         previous = signal.alarm(0)
         signal.alarm(min(previous or 1, seconds))

@@ -1,6 +1,7 @@
 """Real contained IV CLI lifecycle, synthetic native data and read-only replay."""
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -130,11 +131,13 @@ def test_real_cli_preflight_register_seal_run_and_guarded_replay(oracle_case, tm
 from engine.models.no_fit import no_fit_guard as legacy
 from engine.v2.models.no_fit import no_fit_guard
 from experiments import regression_search_binding, size_comparison_run, size_search
+from experiments import iv_crush_run
 from experiments.iv_crush_run import main
 def forbidden(*a, **kw): raise AssertionError('completed CLI reopened inputs or executed')
 regression_search_binding.fold_inputs = forbidden
 size_comparison_run.resolved_limits = forbidden
 size_search.remaining = forbidden
+iv_crush_run.connect = forbidden
 with legacy(), no_fit_guard(): result = main(sys.argv[1:])
 raise SystemExit(result)
 """
@@ -166,3 +169,15 @@ raise SystemExit(result)
     assert invoke("run", remaining, guarded=True) == report
     assert catalog_rows(data.conn) == before and artifact_object_bytes(data.store) == artifacts
     assert registered["plan"]["target"] == to_document(data.plan["target"])
+    # A real completed catalog copied into DELETE mode must remain physically unchanged.
+    replay_catalog = directory / "replay.sqlite"
+    with sqlite3.connect(replay_catalog) as destination:
+        data.conn.backup(destination)
+        assert destination.execute("PRAGMA journal_mode=DELETE").fetchone()[0] == "delete"
+    common[common.index("--catalog") + 1] = str(replay_catalog)
+    before_file = replay_catalog.read_bytes(), replay_catalog.stat().st_mtime_ns
+    assert invoke("report", remaining, guarded=True) == report
+    assert invoke("run", remaining, guarded=True) == report
+    assert (replay_catalog.read_bytes(), replay_catalog.stat().st_mtime_ns) == before_file
+    assert not Path(str(replay_catalog) + "-wal").exists()
+    assert not Path(str(replay_catalog) + "-shm").exists()
