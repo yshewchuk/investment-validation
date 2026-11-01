@@ -82,3 +82,8 @@ class DistributionRun(DistributionRunPlan):
             evaluate_outer(self, group, fits, results, plan, books, quotes, opportunities, sections, calendar)
             progress.tick()
         return finish_reports(self, books, quotes, opportunities, sections)
+
+
+if __name__ == "__main__":
+    from experiments.distribution_cli import main
+    raise SystemExit(main())
