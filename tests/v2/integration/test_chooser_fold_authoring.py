@@ -378,6 +378,22 @@ def test_carried_chooser_fold_loads_from_verified_original_release(tmp_path, mon
     assert carried_ref.carrying_release_id == "carried"
     assert carried_ref.descriptor_hash == content_hash(origin_obj["serving_fold"])
 
+    from engine.v2.models import loader, serving_fold_loader
+
+    references, contexts = rb.resolve_chooser_fold_authoring_contexts(tmp_path, "carried")
+    replay_ref = references[(OUTPUTS[role][1], cache["fold_start"])]
+    assert replay_ref.release_id == "origin"
+    assert replay_ref.carrying_release_id == "carried"
+    authoring_manifest, authoring_catalog = contexts[carried_ref.descriptor_hash]
+    assert authoring_manifest.release.release_id == "origin"
+    assert authoring_catalog["release_id"] == "origin"
+    descriptor = from_document(ChooserServingFoldDescriptor, origin_obj["serving_fold"])
+    verified = serving_fold_loader.load_chooser_serving_fold(
+        loader.FrozenInference(store), descriptor,
+        verified_parent_manifest=authoring_manifest,
+        verified_catalog=dict(authoring_catalog))
+    assert verified.descriptor.descriptor_hash == carried_ref.descriptor_hash
+
     carried_body_without_link = copy.deepcopy(carried_body)
     del carried_body_without_link["sources"]["carried_from"]
     write_catalog("carried", carried_body_without_link)

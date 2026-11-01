@@ -117,6 +117,7 @@ check defines missing-input and failure outcomes:
 | A strict trace has missing/mismatched chooser-fold provenance (including release-binding identity, release ids or output name), orphan references, incomplete producer coverage or invalid dates | `strict_trace_one` raises `StrictTraceCaptureError` before packaging the trace |
 | Phase 4 replay checkpoint scope differs (corpus hash, full staged manifest or replay validation version), a row fails shape/hash validation, or the file exceeds its read cap | `_load_checkpoint` truncates the file and discards all rows; replay recomputes those pairs |
 | Malformed or duplicate staged size-fold catalog, including a descriptor in an unselected month | Chooser replay refuses that pair's replay; the full size catalog is validated before the requested month is selected and loaded with the catalog's byte bound |
+| Chooser replay provenance does not match staged descriptors and their verified authoring contexts, or loaded chooser pools disagree with trace arrays or interval floors | The pair is `PHASE4_MEMBER_ABSENT` with a fixed `chooser:fold_provenance:unverifiable` or `chooser:fold_pools:unverifiable` detail; no score is replayed |
 
 ## Invariants
 

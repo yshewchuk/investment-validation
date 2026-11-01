@@ -1487,7 +1487,7 @@ def run_native_score_batch_worker(parameters: Mapping[str, Any], root: Path) -> 
 
     as_of = parameters["as_of"]
     snapshot_id = parameters["snapshot_id"]
-    binding = resolve_release_binding(parameters["release_root"])
+    binding = resolve_release_binding(parameters["release_root"], include_chooser_fold_references=True)
     events_doc, producer_doc, calendar_revision = _worker_event_documents(parameters, root)
     events = tuple(_event_inputs_from_document(item) for item in events_doc)
     raw_feature_names = parameters.get("feature_names")

@@ -190,9 +190,9 @@ still wins for any derived column it declares; `dte_entry` is scorer-computed
 (from the priced legs and quote date) and no longer projected.
 The resolver exposes its verified `chooser_fold_references` map only when
 called with `include_chooser_fold_references=True`. Default resolution does not
-load chooser estimators. Strict production capture opts in and passes the map
-through the legacy scorer; the capture trace records only the verified
-reference for each served chooser producer fold.
+load chooser estimators. Strict production capture and the native nightly
+worker opt in; the worker uses verified authoring contexts for carried folds,
+while capture records only the reference for each served producer fold.
 
 The current builder is deliberately bounded to its supported strategies
 (`SUPPORTED_STRATEGIES`) and their declared recipes. To add another strategy or recipe, extend `source_inputs.py` and add

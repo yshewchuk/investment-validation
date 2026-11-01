@@ -211,7 +211,25 @@ def test_chooser_selector_selects_folds_and_caches(monkeypatch):
              "training_cutoff": "2026-08-31"}}]}
         for role in roles
     ]}
+    references = {
+        (roles[role], "2026-09-01"): SimpleNamespace(
+            descriptor_hash=f"descriptor:{role}:2026-08-31",
+            release_id="parent",
+            carrying_release_id="carried",
+            training_cutoff="2026-09-01",
+        )
+        for role in roles
+    }
+    contexts = {
+        reference.descriptor_hash: (
+            SimpleNamespace(release=SimpleNamespace(release_id="parent")), {},
+        )
+        for reference in references.values()
+    }
     binding = SimpleNamespace(
+        release_id="carried",
+        chooser_fold_references=references,
+        chooser_authoring_fold_contexts=contexts,
         chooser_analog_artifacts=(
             SimpleNamespace(cutoff="2026-10-26", pool_id="stale", content_hash="h-old"),
             SimpleNamespace(cutoff="2026-10-27", pool_id="analog", content_hash="h-a"),
@@ -239,6 +257,7 @@ def test_chooser_selector_selects_folds_and_caches(monkeypatch):
         role = doc["policy"]["role"]
         return SimpleNamespace(
             policy=SimpleNamespace(role=role, interval_floor=0.2),
+            parent_release_id="parent",
             fold_start=doc["fold_start"], producer_output=roles[role],
             training_cutoff=doc.get("training_cutoff"),
             descriptor_hash=f"descriptor:{role}:{doc['training_cutoff']}")

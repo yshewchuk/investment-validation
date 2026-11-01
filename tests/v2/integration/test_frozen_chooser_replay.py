@@ -113,6 +113,8 @@ def test_frozen_replay_requires_provenance_bound_to_staged_descriptors():
 
 
 def test_replay_pool_values_must_match_staged_fold_estimators(monkeypatch, tmp_path):
+    from engine.v2.scoring import release_bindings as rb
+
     outputs = ("pred_im_t1_d14", "pred_runup_abs_move_d14")
     descriptors, refs, provenance, rows = {}, {}, {}, []
     pools = {}
@@ -137,6 +139,21 @@ def test_replay_pool_values_must_match_staged_fold_estimators(monkeypatch, tmp_p
             "predictions": refs[output].pool_pred.copy(),
             "residuals": refs[output].pool_res.copy(),
             "interval_floor": 0.25}
+
+    references = {
+        (descriptor.producer_output, "2026-09-01"): SimpleNamespace(
+            descriptor_hash=descriptor.descriptor_hash,
+            release_id="parent",
+            carrying_release_id="carrying",
+            training_cutoff="2026-09-01",
+        )
+        for descriptor in descriptors.values()
+    }
+    contexts = {
+        descriptor.descriptor_hash: (
+            SimpleNamespace(release=SimpleNamespace(release_id="parent")), {})
+        for descriptor in descriptors.values()
+    }
 
     def make_binding(output):
         return SimpleNamespace(
@@ -200,7 +217,12 @@ def test_replay_pool_values_must_match_staged_fold_estimators(monkeypatch, tmp_p
                 "artifact_refs": ["hash:size", *(f"hash:{output}" for output in outputs)]},
         fold_pools=pools,
         release=SimpleNamespace(bindings=tuple(alias_bindings)))
-    manifest = {"manifest_hash": "sha256:catalog", "members": rows}
+    manifest = {"manifest_hash": "sha256:catalog", "release_id": "carrying",
+                "members": rows}
+
+    monkeypatch.setattr(
+        rb, "resolve_chooser_fold_authoring_contexts",
+        lambda *_args: (references, contexts))
 
     request = SimpleNamespace(requested_decision_at="2026-10-27")
     legacy_event_date = "2026-09-15"

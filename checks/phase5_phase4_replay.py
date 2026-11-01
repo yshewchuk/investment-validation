@@ -237,6 +237,15 @@ def _staged_chooser_pools(chooser, request, release_root: Path, manifest,
                           legacy_event_date: Any = None):
     if not isinstance(manifest, Mapping):
         return None
+    release_id = manifest.get("release_id")
+    if not isinstance(release_id, str) or not release_id:
+        return None
+    from engine.v2.scoring.release_bindings import resolve_chooser_fold_authoring_contexts
+    try:
+        fold_references, authoring_contexts = resolve_chooser_fold_authoring_contexts(
+            release_root, release_id)
+    except (OSError, ValueError, TypeError, KeyError, AttributeError, OverflowError):
+        return None
     replay_dates = _chooser_replay_dates(request, legacy_event_date)
     if replay_dates is None:
         return None
@@ -368,13 +377,20 @@ def _staged_chooser_pools(chooser, request, release_root: Path, manifest,
                 or descriptor.training_cutoff != item.get("training_cutoff")
                 or descriptor.fold_start != item.get("fold_start")):
             return None
+        reference = fold_references.get((output, descriptor.fold_start))
+        if (reference is None
+                or reference.descriptor_hash != descriptor.descriptor_hash
+                or reference.release_id != descriptor.parent_release_id
+                or reference.carrying_release_id != release_id
+                or reference.training_cutoff != descriptor.fold_start):
+            return None
+        context = authoring_contexts.get(descriptor.descriptor_hash)
+        if context is None or context[0].release.release_id != descriptor.parent_release_id:
+            return None
         try:
-            parent = deployment.read_manifest(root, descriptor.parent_release_id)
-            if parent is None:
-                return None
             ref = load_chooser_serving_fold(
                 FrozenInference(root), descriptor,
-                verified_parent_manifest=parent, verified_catalog=dict(manifest))
+                verified_parent_manifest=context[0], verified_catalog=dict(context[1]))
         except (OSError, ValueError, TypeError, KeyError, AttributeError, OverflowError):
             return None
         producer_refs = recipe.get("producers")

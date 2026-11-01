@@ -707,16 +707,12 @@ and the release is not consulted for it.
 
 #### Chooser fold provenance reference
 
-A verified chooser-fold reference carries the descriptor/estimator hashes,
-fold month, training cutoff, producer binding and authoring/carrying release ids;
-training_cutoff is fold_start, the exclusive training boundary.
-`resolve_release_binding` returns an empty
-`chooser_fold_references` map by default and does not load chooser estimators
-for ordinary nightly scoring. Callers that need these references opt in with
-`include_chooser_fold_references=True`; resolution returns a complete map or a
-typed refusal. Strict capture opts in, passes verified references to the
-scorer, and records both release ids in trace metadata. Ordinary nightly
-scoring loads no chooser estimators and infers no provenance from legacy rows.
+A verified chooser-fold reference binds descriptor/estimator hashes, fold
+month, producer binding and both release ids; `training_cutoff` is `fold_start`.
+Default binding resolution leaves references empty and loads no chooser folds.
+Nightly opts in and receives verified authoring contexts; exact-release replay
+uses the same verifier without reading the live pointer. Strict capture also
+opts in and records both release ids. Neither path infers legacy provenance.
 
 | Condition | Outcome |
 |---|---|
