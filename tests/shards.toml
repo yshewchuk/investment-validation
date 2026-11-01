@@ -63,28 +63,12 @@ patterns = [
 ]
 
 [[shard]]
-name = "research-d"
-patterns = [
-  "tests/v2/research/test_size_search_integration.py",
-  "tests/v2/research/test_size_preflight_receipt.py",
-  "tests/v2/research/test_size_review_contract.py",
-  "tests/v2/research/test_size_cli_admission.py",
-  "tests/v2/research/test_size_comparator.py",
-  "tests/v2/research/test_size_prep_targets.py",
-  "tests/v2/research/test_size_prep_inputs.py",
-  "tests/v2/research/test_size_prep_history.py",
-  "tests/v2/research/test_size_execution_contract.py",
-  "tests/v2/research/test_size_paired_report.py",
-  "tests/v2/research/test_size_panel_memo.py",
-  "tests/v2/research/test_size_comparison_replay.py",
-  "tests/v2/research/test_size_job_budget.py",
-  "tests/v2/research/test_size_search_eval_embargo.py",
-  "tests/v2/research/test_size_search_report.py",
-]
-
-[[shard]]
 name = "research-h"
 patterns = ["tests/v2/research/test_size_run_single_collect.py"]
+
+[[shard]]
+name = "research-d"
+patterns = ["tests/v2/research/test_size_*"]
 
 [[shard]]
 name = "research-e"
