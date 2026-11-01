@@ -792,32 +792,36 @@ def _project_member_features(
     binding: ScoringReleaseBinding,
     feature_names: Sequence[str],
 ) -> Sequence[str] | NativeScoreBatchRowRefusal:
-    """Project required staged chooser/producer features for one member row.
+    """Project required staged chooser/producer features for one DYN-SV row.
 
-    Malformed explicit names are returned unchanged so the bundle's own
-    ``INVALID_FEATURE_NAMES`` validation still refuses them before projection.
-    Scorer-computed names are never projected or required from staged rows.
+    Every other supported strategy keeps its explicit/derived ``feature_names``
+    unchanged. Malformed explicit names are returned unchanged so the bundle's
+    own ``INVALID_FEATURE_NAMES`` validation still refuses them before
+    projection. Scorer-computed and stage-owned gate columns are never
+    projected or required from staged rows.
     """
     if not _valid_explicit_feature_names(feature_names):
         return feature_names
+    if key.strategy != "DYN-SV":
+        return feature_names
+    references = binding.chooser_fold_references
+    if not references:
+        return NativeScoreBatchRowRefusal(
+            key, "RELEASE_MISSING_FEATURE_ORDER",
+            "chooser producer identity has no feature_order")
     projected = set(_CHOOSER_PRIMITIVES) - _SCORER_COMPUTED_FEATURES
-    for reference in binding.chooser_fold_references.values():
+    for reference in references.values():
         if not reference.release_binding.feature_order:
             return NativeScoreBatchRowRefusal(
                 key, "RELEASE_MISSING_FEATURE_ORDER",
                 "chooser producer identity has no feature_order")
         projected.update(reference.release_binding.feature_order)
     projected -= _SCORER_COMPUTED_FEATURES
+    projected -= set(GATE_FORECAST_COLUMNS)
+    projected -= set(GATE_ANALOG_COLUMNS)
     ordered = tuple(sorted(projected.union(feature_names)))
-    for name in ordered:
-        if name in _SCORER_COMPUTED_FEATURES:
-            continue
-        if name == "days_before_print":
-            present = (name in event.calendar_row if key.strategy == "STR-RUNUP"
-                       else name in event.tier4_row or name in event.panel_row)
-        else:
-            present = name in event.tier4_row or name in event.panel_row
-        if not present:
+    for name in projected:
+        if name not in event.tier4_row and name not in event.panel_row:
             return NativeScoreBatchRowRefusal(
                 key, "MISSING_STAGED_INPUT",
                 "required member feature is missing from staged rows")

@@ -43,6 +43,7 @@ from engine.v2.ops.native_score_batch import (
 )
 from engine.v2.scoring.application import score_one
 from engine.v2.scoring.identity import bootstrap_seed, score_request_key
+from engine.v2.scoring.nightly_source_bundle import assemble_nightly_source_bundle
 from engine.v2.scoring.release_bindings import resolve_release_binding
 from engine.v2.scoring.stages import _model_seed
 
@@ -50,6 +51,27 @@ _AS_OF = "2026-01-10"
 _SNAPSHOT = "snap-1"
 _CALENDAR_REVISION = "cal-1"
 _GATE_POLICY = {"STR-THRU": {"threshold": 0.0}}
+_CHOOSER_PRIMITIVE_NAMES = (
+    "mean_prior_abs_move", "ema12r_abs", "signed_streak",
+    "mean_prior_or_implied", "mcap_log", "or_implied", "or_rvol30",
+    "spy_ret21", "spy_ret63", "spy_ret252", "spy_dd252", "spy_vol20",
+    "spy_vol5", "spy_vol60", "spy_vol252", "spy_vol20_rel252",
+)
+_CHOOSER_PRIMITIVE_VALUES = {
+    "mean_prior_abs_move": 0.01, "ema12r_abs": 0.02,
+    "signed_streak": 2.0, "mean_prior_or_implied": 0.03,
+    "mcap_log": 20.0, "or_implied": 0.04, "or_rvol30": 1.2,
+    "spy_ret21": 0.01, "spy_ret63": 0.02, "spy_ret252": 0.03,
+    "spy_dd252": -0.04, "spy_vol20": 0.2, "spy_vol5": 0.05,
+    "spy_vol60": 0.06, "spy_vol252": 0.07,
+    "spy_vol20_rel252": 0.08,
+}
+_STAGE_OWNED_NAMES = (
+    "entry_cost_pct", "days_to_print", "dte_entry",
+    "pred_abs_move", "pred_abs_move_p10", "pred_abs_move_p90",
+    "pred_abs_move_sd", "forecast_edge",
+    "analog_mean", "analog_win_rate", "analog_n",
+)
 
 
 def _sha(payload: bytes) -> str:
@@ -230,8 +252,7 @@ def _assemble(binding, events, **overrides):
 
 
 def test_happy_path_assembles_score_request_and_native_inputs(tmp_path):
-    binding = _with_chooser_producer_order(
-        _stage_release(tmp_path), ("iv10", "im_d1"))
+    binding = _stage_release(tmp_path)
     event = _event_inputs()
     assembled, refusals = _assemble(binding, [event])
     assert refusals == ()
@@ -243,10 +264,11 @@ def test_happy_path_assembles_score_request_and_native_inputs(tmp_path):
     assert request.decision_clock_id == "entry-close"
     assert request.event_id == "evt-1"
     model_inputs = native_inputs.features["model_inputs"]
-    assert model_inputs["spy_vol5"] == 0.05
-    assert model_inputs["iv10"] == 0.24
-    assert model_inputs["im_d1"] == -0.03
-    assert "dte_entry" not in model_inputs
+    assert set(model_inputs) == {"signal", "pred_abs_move"}
+    assert model_inputs["signal"] == 1.5
+    assert model_inputs["pred_abs_move"] == 0.05
+    for name in ("spy_vol5", "iv10", "im_d1", "dte_entry"):
+        assert name not in model_inputs
     assert tuple(model_inputs) == tuple(sorted(model_inputs))
     repeated, repeated_refusals = _assemble(binding, [event])
     assert repeated_refusals == ()
@@ -255,88 +277,110 @@ def test_happy_path_assembles_score_request_and_native_inputs(tmp_path):
     assert isinstance(record, ScoreRecord)
 
 
-def test_empty_chooser_producer_order_refuses_one_member(tmp_path):
-    binding = _with_chooser_producer_order(_stage_release(tmp_path), ())
-    event = _event_inputs()
-    assembled, refusals = _assemble(binding, [event])
-    assert assembled == {}
-    assert len(refusals) == 1
-    assert refusals[0].code == "RELEASE_MISSING_FEATURE_ORDER"
-    assert refusals[0].detail == "chooser producer identity has no feature_order"
-
-
-def test_days_before_print_projection_is_calendar_owned(tmp_path):
+def test_dyn_sv_empty_chooser_references_refuses(tmp_path):
     binding = _stage_release(tmp_path)
-    runup = _event_inputs(
-        strategy="STR-RUNUP",
-        calendar_row=_calendar_row(days_before_print=3))
-    projected = _project_member_features(
-        runup.key, runup, binding, ("days_before_print",))
-    assert "days_before_print" in projected
+    event = _event_inputs(strategy="DYN-SV")
+    refusal = _project_member_features(
+        event.key, event, binding, ("signal", "pred_abs_move"))
+    assert isinstance(refusal, NativeScoreBatchRowRefusal)
+    assert refusal.code == "RELEASE_MISSING_FEATURE_ORDER"
 
+
+def test_dyn_sv_empty_chooser_producer_order_refuses(tmp_path):
+    binding = _with_chooser_producer_order(_stage_release(tmp_path), ())
+    event = _event_inputs(strategy="DYN-SV")
+    refusal = _project_member_features(
+        event.key, event, binding, ("signal", "pred_abs_move"))
+    assert isinstance(refusal, NativeScoreBatchRowRefusal)
+    assert refusal.code == "RELEASE_MISSING_FEATURE_ORDER"
+    assert refusal.detail == "chooser producer identity has no feature_order"
+
+
+def test_dyn_sv_days_before_print_projects_from_member_rows(tmp_path):
+    binding = _with_chooser_producer_order(
+        _stage_release(tmp_path),
+        _CHOOSER_PRIMITIVE_NAMES + ("iv10", "im_d1", "days_before_print"))
     panel = copy.deepcopy(_event_inputs().panel_row)
     panel["days_before_print"] = 7
-    runup_panel_only = _event_inputs(strategy="STR-RUNUP", panel_row=panel)
-    refusal = _project_member_features(
-        runup_panel_only.key, runup_panel_only, binding, ("days_before_print",))
-    assert isinstance(refusal, NativeScoreBatchRowRefusal)
-    assert refusal.code == "MISSING_STAGED_INPUT"
-
-    thru_panel = _event_inputs(strategy="STR-THRU", panel_row=panel)
+    panel_event = _event_inputs(strategy="DYN-SV", panel_row=panel)
     projected = _project_member_features(
-        thru_panel.key, thru_panel, binding, ("days_before_print",))
+        panel_event.key, panel_event, binding, ("days_before_print",))
     assert "days_before_print" in projected
 
     tier4 = copy.deepcopy(_event_inputs().tier4_row)
     tier4["days_before_print"] = 11
-    thru_tier4 = _event_inputs(strategy="STR-THRU", tier4_row=tier4)
+    tier4_event = _event_inputs(strategy="DYN-SV", tier4_row=tier4)
     projected = _project_member_features(
-        thru_tier4.key, thru_tier4, binding, ("days_before_print",))
+        tier4_event.key, tier4_event, binding, ("days_before_print",))
     assert "days_before_print" in projected
 
-    runup_tier4_only = _event_inputs(strategy="STR-RUNUP", tier4_row=tier4)
+    calendar_only = _event_inputs(
+        strategy="DYN-SV", calendar_row=_calendar_row(days_before_print=13))
     refusal = _project_member_features(
-        runup_tier4_only.key, runup_tier4_only, binding, ("days_before_print",))
-    assert isinstance(refusal, NativeScoreBatchRowRefusal)
-    assert refusal.code == "MISSING_STAGED_INPUT"
-
-    thru_calendar_only = _event_inputs(
-        strategy="STR-THRU",
-        calendar_row=_calendar_row(days_before_print=13))
-    refusal = _project_member_features(
-        thru_calendar_only.key, thru_calendar_only, binding, ("days_before_print",))
+        calendar_only.key, calendar_only, binding, ("days_before_print",))
     assert isinstance(refusal, NativeScoreBatchRowRefusal)
     assert refusal.code == "MISSING_STAGED_INPUT"
 
 
-def test_assembly_projects_panel_days_before_print_without_scorer_computed(tmp_path):
-    binding = _with_chooser_producer_order(
-        _stage_release(tmp_path),
-        ("iv10", "im_d1", "days_before_print",
-         "entry_cost_pct", "days_to_print", "dte_entry"))
+def test_dyn_sv_projects_chooser_primitives_and_producer_order(tmp_path):
+    order = _CHOOSER_PRIMITIVE_NAMES + ("iv10", "im_d1") + _STAGE_OWNED_NAMES
+    binding = _with_chooser_producer_order(_stage_release(tmp_path), order)
+    event = _event_inputs(strategy="DYN-SV")
+    projected = _project_member_features(event.key, event, binding, ("signal",))
+    expected = set(_CHOOSER_PRIMITIVE_NAMES) | {"iv10", "im_d1", "signal"}
+    assert tuple(projected) == tuple(sorted(expected))
+    for name in _STAGE_OWNED_NAMES:
+        assert name not in projected
+
+
+def test_dyn_sv_projected_values_reach_the_member_bundle(tmp_path):
+    order = _CHOOSER_PRIMITIVE_NAMES + (
+        "iv10", "im_d1", "days_before_print") + _STAGE_OWNED_NAMES
+    binding = _with_chooser_producer_order(_stage_release(tmp_path), order)
     panel = copy.deepcopy(_event_inputs().panel_row)
     panel["days_before_print"] = 7
-    event = _event_inputs(panel_row=panel)
+    event = _event_inputs(strategy="DYN-SV", panel_row=panel)
+    projected = _project_member_features(event.key, event, binding, ("signal",))
+    assert not isinstance(projected, NativeScoreBatchRowRefusal)
+    bundle = assemble_nightly_source_bundle(
+        source_ref="native-score-batch:TEST:2026-01-15:DYN-SV",
+        strategy="DYN-SV", as_of=_AS_OF,
+        calendar_row=event.calendar_row, panel_row=event.panel_row,
+        panel_anchor=event.panel_anchor, tier4_row=event.tier4_row,
+        quote_rows=event.quote_rows, quote_status=event.quote_status,
+        feature_names=projected,
+    )
+    extras = set(projected) - {"signal"}
+    for name in _STAGE_OWNED_NAMES:
+        assert name not in extras
+        assert name not in bundle.feature_vector
+    assert set(_CHOOSER_PRIMITIVE_VALUES) == set(_CHOOSER_PRIMITIVE_NAMES)
+    for name, expected in _CHOOSER_PRIMITIVE_VALUES.items():
+        assert bundle.feature_vector[name] == expected
+    assert bundle.feature_vector["iv10"] == 0.24
+    assert bundle.feature_vector["im_d1"] == -0.03
+    assert bundle.feature_vector["days_before_print"] == 7
+    assert bundle.feature_vector["signal"] == 1.5
+    assert set(bundle.feature_vector) == set(projected)
+
+
+def test_str_thru_keeps_names_without_chooser_projection(tmp_path):
+    binding = _with_chooser_producer_order(
+        _stage_release(tmp_path), _CHOOSER_PRIMITIVE_NAMES)
+    event = _event_inputs()
     projected = _project_member_features(
         event.key, event, binding, ("signal", "pred_abs_move"))
-    assert "days_before_print" in projected
-    assert "iv10" in projected
-    for name in ("entry_cost_pct", "days_to_print", "dte_entry"):
-        assert name not in projected
+    assert tuple(projected) == ("signal", "pred_abs_move")
     assembled, refusals = _assemble(binding, [event])
     assert refusals == ()
-    request, native_inputs = assembled[event.key]
-    model_inputs = native_inputs.features["model_inputs"]
-    assert model_inputs["days_before_print"] == 7
-    assert model_inputs["iv10"] == 0.24
-    assert "entry_cost_pct" not in model_inputs
-    assert "days_to_print" not in model_inputs
-    assert "dte_entry" not in model_inputs
+    _, native_inputs = assembled[event.key]
+    assert set(native_inputs.features["model_inputs"]) == {"signal", "pred_abs_move"}
 
 
 @pytest.mark.parametrize("feature_names", [
     ("signal", "signal"),
     ("signal", ""),
+    ("signal", "   "),
 ])
 def test_invalid_explicit_feature_names_refuse_before_projection(
         tmp_path, feature_names):
@@ -349,19 +393,18 @@ def test_invalid_explicit_feature_names_refuse_before_projection(
     assert refusals[0].code == "INVALID_FEATURE_NAMES"
 
 
-def test_missing_required_member_feature_refuses(tmp_path):
-    event = _event_inputs()
+def test_dyn_sv_missing_staged_projection_input_refuses(tmp_path):
+    binding = _with_chooser_producer_order(
+        _stage_release(tmp_path), _CHOOSER_PRIMITIVE_NAMES)
+    event = _event_inputs(strategy="DYN-SV")
     panel = copy.deepcopy(event.panel_row)
     panel.pop("spy_vol5")
-    missing = _event_inputs(panel_row=panel)
-    binding = _stage_release(tmp_path)
-    good = _event_inputs(
-        ticker="OTHER", calendar_row=_calendar_row(ticker="OTHER", event_id="evt-2"))
-    assembled, refusals = _assemble(binding, [missing, good])
-    assert list(assembled) == [good.key]
-    assert len(refusals) == 1
-    assert refusals[0].code == "MISSING_STAGED_INPUT"
-    assert refusals[0].detail == "required member feature is missing from staged rows"
+    missing = _event_inputs(strategy="DYN-SV", panel_row=panel)
+    refusal = _project_member_features(
+        missing.key, missing, binding, ("signal", "pred_abs_move"))
+    assert isinstance(refusal, NativeScoreBatchRowRefusal)
+    assert refusal.code == "MISSING_STAGED_INPUT"
+    assert refusal.detail == "required member feature is missing from staged rows"
 
 
 def test_unsupported_strategy_refuses_without_sinking_batch(tmp_path):
@@ -661,14 +704,25 @@ def test_planted_refusal_timestamp_key_corruption_is_caught():
                              "INTRADAY_EVENT_NOT_ADMITTED")
 
 
-def test_run_native_score_batch_worker_writes_records_and_refusals(tmp_path):
+def test_run_native_score_batch_worker_writes_records_and_refusals(tmp_path, monkeypatch):
+    from engine.v2.scoring import release_bindings as release_bindings_module
+
     _stage_release(tmp_path)
+    real_resolve = release_bindings_module.resolve_release_binding
+    calls: list[dict] = []
+
+    def spy(*args, **kwargs):
+        calls.append(dict(kwargs))
+        return real_resolve(*args, **kwargs)
+
+    monkeypatch.setattr(release_bindings_module, "resolve_release_binding", spy)
     root = tmp_path / "staging"
     root.mkdir()
     (root / "events.json").write_text(json.dumps(
         [_event_doc(), _event_doc(strategy="DYN-SV", event_id="evt-2")]))
     result = run_native_score_batch_worker(
         _worker_parameters(tmp_path, expected_ids=["native_score_batch"]), root)
+    assert calls[-1].get("include_chooser_fold_references") is True
     assert result["completed_ids"] == ["native_score_batch"]
     assert result["no_work"] is False
     records_document = json.loads((root / "records.json").read_text())
