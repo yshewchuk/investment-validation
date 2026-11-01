@@ -56,6 +56,7 @@ from tools.capture_tier0_corpus import (
     chooser_trace,
     frozen_chooser_declaration,
     make_pair,
+    validated_chooser_fold_references,
 )
 
 CLOCK = "legacy.decision_offset.0"
@@ -76,10 +77,50 @@ def _chooser_request(case):
     return replace(cf._request(case["strategy"]), decision_clock_id=CLOCK)
 
 
+def _add_synthetic_chooser_fold_references(candidate, request):
+    source = candidate["legacy_trace"]["checkpoints"]["source_inputs"]["value"]
+    frozen = source["frozen"]
+    bindings = frozen.get("bindings") or {}
+    chooser_references = {}
+    for key, declaration in (frozen.get("declarations") or {}).items():
+        if not (isinstance(key, str) and key.startswith("chooser_fold:")
+                and "binding" in declaration):
+            continue
+        output = key.split(":", 1)[1]
+        binding = bindings[declaration["binding"]]
+        declaration["producer_identity"] = {
+            "binding_id": "test-" + output,
+            "model_id": binding["model_id"],
+            "role": binding["role"],
+            "strategy_id": binding.get("strategy_id", "DYN-SV"),
+            "decision_clock_id": binding.get("decision_clock_id", CLOCK),
+            "adapter": binding.get("adapter", "tier4-serving-fold.v1"),
+            "feature_order": binding.get("feature_order", ()),
+            "output_names": binding["output_names"],
+            "artifact_hash": "sha256:" + binding["artifact_sha256"],
+        }
+        chooser_references[output] = {
+            "producer_output": output,
+            "release_id": "release-1",
+            "carrying_release_id": "release-1",
+            "fold_start": binding["fold_start"],
+            "training_cutoff": "2025-01-01",
+            "descriptor_hash": "sha256:" + "a" * 64,
+            "estimator_sha256": "sha256:" + binding["artifact_sha256"],
+            "release_binding": copy.deepcopy(declaration["producer_identity"]),
+        }
+    frozen["chooser_references"] = chooser_references
+    candidate["legacy_trace"]["checkpoints"]["source_inputs"]["content_hash"] = content_hash(source)
+    return source
+
+
 def _declared_plan(candidate, case, tmp_path, *, tamper=None):
     request = _chooser_request(case)
+    source = _add_synthetic_chooser_fold_references(candidate, request)
+    chooser_fold_references = validated_chooser_fold_references(source, request)
     declaration, package, extra = frozen_chooser_declaration(
-        candidate, deployment_id=request.deployment_id, release_root=tmp_path / "release")
+        candidate, deployment_id=request.deployment_id, release_root=tmp_path / "release",
+        chooser_fold_references=chooser_fold_references)
     if tamper is not None:
         declaration = tamper(copy.deepcopy(declaration))
     resources = _package_resources(package) + extra
@@ -183,14 +224,18 @@ def test_frozen_chooser_refuses_a_tampered_pool_file_and_stray_chooser_keys(
 def test_a_pool_file_changed_since_legacy_read_it_is_refused(
         chooser_root, tmp_path, monkeypatch):  # noqa: F811
     case, candidate = _captured_chooser(chooser_root, tmp_path, monkeypatch)
+    _add_synthetic_chooser_fold_references(candidate, _chooser_request(case))
     frame = cf.pool_frame()
     frame.iloc[::-1].to_parquet(tmp_path / score_mod.CHOOSER_ANALOG_POOL, index=False)
     import tools.capture_tier0_corpus as capture
 
     monkeypatch.setattr(capture, "_CHOOSER_POOL_STATES", {})
     with pytest.raises(StrictTraceCaptureError, match="differs from the one legacy loaded"):
-        frozen_chooser_declaration(candidate, deployment_id="dep-1",
-                                   release_root=tmp_path / "release")
+        frozen_chooser_declaration(
+            candidate, deployment_id="dep-1", release_root=tmp_path / "release",
+            chooser_fold_references=validated_chooser_fold_references(
+                candidate["legacy_trace"]["checkpoints"]["source_inputs"]["value"],
+                _chooser_request(case)))
 
 
 # -- the multi-member dyn_sv_choice trace ----------------------------------------------
@@ -382,12 +427,10 @@ def _menu_row_with_frozen_chooser(chooser_root, tmp_path, monkeypatch):  # noqa:
     trace carries the frozen chooser, published under ``tmp_path/published``."""
     import shutil
 
-    from tools import capture_tier0_corpus as capture
-
-    monkeypatch.setattr(capture, "validated_chooser_fold_references", lambda source, request: None)
     from tools.capture_tier0_corpus import strict_trace_one
 
     _case, chooser_candidate = _captured_chooser(chooser_root, tmp_path, monkeypatch)
+    _add_synthetic_chooser_fold_references(chooser_candidate, _chooser_request(_case))
     source = chooser_candidate["legacy_trace"]["checkpoints"]["source_inputs"]["value"]
     path, digest = _artifact(tmp_path)
     candidate = _full_strict_candidate(
@@ -579,10 +622,8 @@ def _shared_chooser_member(source, tmp_path, index, *, path, digest):
 
 def test_dyn_sv_choice_members_sharing_a_fold_pool_share_it_by_identity_and_hash_stays_byte_identical(
         chooser_root, tmp_path, monkeypatch):  # noqa: F811
-    from tools import capture_tier0_corpus as capture
-
-    monkeypatch.setattr(capture, "validated_chooser_fold_references", lambda source, request: None)
     _case, chooser_candidate = _captured_chooser(chooser_root, tmp_path, monkeypatch)
+    _add_synthetic_chooser_fold_references(chooser_candidate, _chooser_request(_case))
     source = chooser_candidate["legacy_trace"]["checkpoints"]["source_inputs"]["value"]
     path, digest = _artifact(tmp_path)
     members = [_shared_chooser_member(source, tmp_path, i, path=path, digest=digest)
@@ -629,10 +670,8 @@ def test_dyn_sv_choice_members_sharing_a_fold_pool_share_it_by_identity_and_hash
 
 def test_a_pair_over_a_shared_chooser_document_hashes_like_the_plain_digest(
         chooser_root, tmp_path, monkeypatch):  # noqa: F811
-    from tools import capture_tier0_corpus as capture
-
-    monkeypatch.setattr(capture, "validated_chooser_fold_references", lambda source, request: None)
     _case, chooser_candidate = _captured_chooser(chooser_root, tmp_path, monkeypatch)
+    _add_synthetic_chooser_fold_references(chooser_candidate, _chooser_request(_case))
     source = chooser_candidate["legacy_trace"]["checkpoints"]["source_inputs"]["value"]
     path, digest = _artifact(tmp_path)
     members = [_shared_chooser_member(source, tmp_path, i, path=path, digest=digest)
