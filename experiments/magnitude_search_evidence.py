@@ -47,7 +47,7 @@ def fit_evidence(inputs, fold, plan, execution):
     """Bind ordered native matrices and training targets without fitting."""
     indexed = {(row["event_id"], row["horizon_sessions"]): row for row in inputs["features"]}
     train = [row["event_id"] for row in inputs["training"]]
-    result = []
+    result, target = [], inputs.get("target", {}).get("column", "absolute_move_pct")
     for horizon in plan["horizons"]:
         documents = []
         for events in (train, fold["evaluation_event_ids"]):
@@ -55,7 +55,7 @@ def fit_evidence(inputs, fold, plan, execution):
             documents.append({"columns": execution["features"], "row_keys": [
                 [row[name] for name in ("event_id", "context_id", "horizon_sessions")] for row in rows],
                 "values": [[row[name] for name in execution["features"]] for row in rows]})
-        documents[0]["absolute_move_pct"] = [row["absolute_move_pct"] for row in inputs["training"]]
+        documents[0][target] = [row[target] for row in inputs["training"]]
         result.append({"horizon_sessions": horizon, "training_event_ids": train,
             "evaluation_event_ids": fold["evaluation_event_ids"], "training_matrix_id": content_hash(documents[0]),
             "prediction_matrix_id": content_hash(documents[1])})
