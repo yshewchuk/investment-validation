@@ -1,7 +1,6 @@
 """Complete tiny native IV search with protected-byte ordering and no-refit replay."""
 import json
 from copy import deepcopy
-from statistics import mean
 
 import pytest
 
@@ -12,6 +11,8 @@ from engine.v2.data import objects
 from engine.v2.foundation import SystemClock, content_hash, from_document
 from engine.v2.models.no_fit import RuntimeFitForbidden, no_fit_guard
 from engine.v2.ops.errors import OpsError
+from engine.v2.research import magnitude_panel_qualified as panel
+from engine.v2.research.magnitude_panel_qualified_table import recipe as panel_recipe
 from experiments import magnitude_search_execution as execution
 from experiments import magnitude_search_plan as plans
 from experiments import v2_magnitude_search_run as driver
@@ -44,11 +45,39 @@ def search_case(panel_data, monkeypatch, request):  # noqa: F811
     return data
 
 
-def test_all_candidates_selected_outer_and_read_only_replay(search_case, monkeypatch):
+@pytest.fixture
+def oracle_case(panel_data, monkeypatch, request):  # noqa: F811
+    """Synthetic numeric inputs, not a producer-math oracle; native storage/admission stay real."""
+    original_rows = panel._rows
+    columns = panel_recipe("HMO")["model_columns"]
+    def constant_rows(*args, **kwargs):
+        for row in original_rows(*args, **kwargs):
+            # Constant, nonmissing columns make every closed-grid family an intercept-only fit.
+            row = {**row, **dict.fromkeys(columns, 1),
+                   "has_implied_quote": 1, "current_quote_status": "present", "implied_move": 1.}
+            row["row_id"] = content_hash({k: v for k, v in row.items() if k != "row_id"})
+            yield row
+    with monkeypatch.context() as setup:
+        setup.setattr(panel, "_rows", constant_rows)
+        return search_case.__wrapped__(panel_data, monkeypatch, request)
+
+
+def test_all_candidates_selected_outer_and_read_only_replay(oracle_case, monkeypatch):
     from experiments import magnitude_search_trials as trials_module
     from experiments.magnitude_search_outer import collect_outer_results
-    data = search_case
+    data = oracle_case
     plan, run_id = data.plan, data.registration.run_id
+    # Expectations depend only on sealed inputs, never returned selection scores or forecasts.
+    expected_candidate = deepcopy(min(plan["candidates"], key=lambda candidate: candidate["candidate_id"]))
+    expected_ids = {candidate["candidate_id"] for candidate in plan["candidates"]}
+    assert len(expected_ids) == 33
+    # All one-row inner fits predict -140. Two truths (-20, 10), each at three horizons:
+    # MAE=(120+150)/2=135; MSE=(120**2+150**2)/2=18450. The declared ID tie-break applies.
+    expected_inner_metrics = {"count": 6, "mae": 135., "rmse": 18450. ** .5}
+    expected_inner = [{"event_id": event, "horizon_sessions": horizon,
+        "predicted_crush_pct_iv30": -140., "crush_pct_iv30": actual}
+        for event, actual in (("SYNTH:2023-01-03:0", -20.), ("SYNTH:2023-06-02:0", 10.))
+        for horizon in (1, 3, 5)]
     args = (data.conn, data.store, data.repository, data.registration, plan["request"], data.ref)
     driver.seal_search_run(*args, clock=SystemClock())
     def read(slot):
@@ -96,20 +125,26 @@ def test_all_candidates_selected_outer_and_read_only_replay(search_case, monkeyp
         terminal, fitted = read("terminal:" + key), read("execution:" + key)
         assert fitted["completed_fit_count"] == fitted["fit_attempt_count"] == 3
         assert len(fitted["diagnostics"]) == 3
-        errors = []
-        for row in terminal["predictions"]:
-            day = next(day for day, event in by_day.items() if event == row["event_id"])
-            assert row["crush_pct_iv30"] == VALUES[day]
-            assert row["predicted_crush_pct_iv30"] == pytest.approx(-140.)
-            errors.append(-140. - VALUES[day])
-        assert terminal["metrics"]["rmse"] == pytest.approx(mean(e * e for e in errors) ** .5)
-        assert terminal["metrics"]["mae"] == pytest.approx(mean(abs(e) for e in errors))
-    chosen = min(selection["selections"][0]["scores"], key=lambda item: (item["metrics"]["rmse"], item["candidate_id"]))
-    assert result["folds"][0]["candidate"]["candidate_id"] == chosen["candidate_id"]
+        assert terminal["predictions"] == expected_inner
+        assert terminal["metrics"] == pytest.approx(expected_inner_metrics)
+    scores = selection["selections"][0]["scores"]
+    assert len(scores) == 33 and {row["candidate_id"] for row in scores} == expected_ids
+    assert all(row["metrics"] == pytest.approx(expected_inner_metrics) for row in scores)
+    assert selection["selections"][0]["selected_candidate_id"] == expected_candidate["candidate_id"]
+    assert selection["prospective_candidate_id"] == expected_candidate["candidate_id"]
+    assert result["prospective_candidate_id"] == expected_candidate["candidate_id"]
+    assert result["folds"][0]["candidate"] == expected_candidate
     assert result["forecast_count"] == 3 and result["event_count"] == 1
-    errors = [row["predicted_crush_pct_iv30"] + 60. for row in result["predictions"]]
-    assert all(row["crush_pct_iv30"] == -60. for row in result["predictions"])
-    assert result["metrics"]["rmse"] == pytest.approx(mean(e * e for e in errors) ** .5)
+    # The selected family must refit: constant columns imply mean(-140,-20,10)=-50,
+    # not the inner fit's -140. Outer truth is -60, hence MAE=RMSE=10 at every horizon.
+    expected_outer = [{"event_id": "SYNTH:2024-06-17:0", "horizon_sessions": horizon,
+        "predicted_crush_pct_iv30": -50., "crush_pct_iv30": -60.} for horizon in (1, 3, 5)]
+    assert result["folds"][0]["predictions"] == expected_outer
+    assert result["predictions"] == [{**row, "outer_year": "2024"} for row in expected_outer]
+    for report in (result, result["folds"][0]):
+        assert report["metrics"] == {"count": 3, "mae": 10., "rmse": 10.}
+        assert report["per_horizon"] == [{"horizon_sessions": horizon,
+            "count": 1, "mae": 10., "rmse": 10.} for horizon in (5, 3, 1)]
     assert set(group["outer"]["evaluation_event_ids"]) <= set(opened)
     before, saved = catalog_rows(data.conn), artifact_object_bytes(data.store)
     def forbidden(*args, **kwargs):
