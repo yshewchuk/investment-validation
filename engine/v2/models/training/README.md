@@ -1,5 +1,7 @@
 # `engine/v2/models/training`
 
+Component contract: [ARCHITECTURE.md](ARCHITECTURE.md).
+
 ## Standalone neural magnitude primitive (opt-in foundation)
 
 `magnitude_mlp_recipe.mlp_recipe` / `validate_mlp_recipe` bind the new closed
