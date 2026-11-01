@@ -89,7 +89,8 @@ load-bearing entrypoints:
 - `release_bindings.py` — `resolve_release_binding(release_root) ->
   ScoringReleaseBinding`, the production reader of a live deployment's model
   identity, model artifact refs, analog/payoff/recalibration/residual/chooser
-  artifacts, and the staged size-fold descriptor index (`size_folds`);
+  artifacts including `chooser_fold_references`, and the staged size-fold
+  descriptor index (`size_folds`);
   `resolve_production_release_binding()` is the same resolution against the
   one configured production release root
   (`engine.v2.models.deployment.production_release_root()`, config key
@@ -102,6 +103,9 @@ load-bearing entrypoints:
   resolving to the same key is a release defect, refused as `ModelNotReady`
   naming that key, never a silently-overwritten entry); `model_artifact_refs:
   Mapping[str, str]` **keyed by `binding_id`** (unique by construction).
+  `chooser_fold_references: Mapping[tuple[str, str], ChooserFoldReference]`
+  is keyed by `(producer_output, fold_start)` and carries only verified
+  descriptors; at most 34 chooser-fold objects are loaded for one binding.
   `ModelIdentity` carries `role`, `strategy_id`, `decision_clock_id`,
   `model_id`, `binding_id`, `adapter`, `feature_order`, `output_names`, and
   `artifact_hash` (a content hash over the binding's own verified member
@@ -161,7 +165,7 @@ load-bearing entrypoints:
     caller applies the strategy-specific required/optional policy. No strategy
     uses a latest-cutoff fallback.
   - *Query:* `mcap_bucket` and `implied_ratio` come from the panel row at
-    bundle time; `dte_band` and `moneyness_band` are completed in the analog
+    bundle time (`implied_ratio` is `entry_im / mean_prior_or_implied`, with `entry_im` the decision-date implied move, not the model feature `im`; absent or NaN `entry_im` gives `None`, #681); `dte_band` and `moneyness_band` are completed in the analog
     stage from the scorer-computed `dte_entry`, `strike` and `spot` with
     legacy's band edges. An absent, non-finite or (for strike and spot)
     non-positive input gives a `None` band, so the matcher drops that
@@ -187,6 +191,34 @@ state keys; `chooser_fold_pools`, `chooser_analog_pool` and
 builds that block only for menu candidates; state without a recipe or a recipe
 for another strategy raises `ValueError`. The chooser k-NN pool is distinct
 from the board bucket-analog pool.
+Strict Tier-0 capture opts into `resolve_production_release_binding`'s
+verified chooser-fold references and passes the verified map to
+`engine.score.Scorer`. The scorer records only references matching a bound
+chooser producer output and fold month it served. The shared `pred_abs_move`
+size fold is recorded as a chooser-frame input and pool, but is not a chooser
+producer: its identity is validated by the ordinary frozen Tier-4 binding.
+`strict_trace_one` checks each chooser-producer reference against the recorded
+producer binding, including the full recorded release-binding identity
+(`binding_id`, model, role, strategy, decision clock, adapter, ordered
+features, output names and artifact hash), the served output name and the
+request's canonical decision date. Feature orders are tuple-normalized, with
+absent orders treated as empty; the served fold boundary may equal that date
+(for a first-day decision), but may not be later. A chooser declaration with
+a non-string binding key is refused with `StrictTraceCaptureError` before
+binding lookup.
+It then writes the validated map to metadata field
+`chooser_fold_references` when a chooser trace has producer folds (`None`
+otherwise). Production capture resolves the release catalog before scoring;
+`strict_trace_one` performs no catalog lookup and never infers missing
+provenance. When chooser folds are present without a catalog retrain cutoff,
+the opted-in resolver refuses with `ModelNotReady` identifying the missing
+canonical training cutoff; ordinary scoring does not opt into this resolver.
+A chooser trace with a bound producer fold but no matching verified
+reference refuses. Orphan references, incomplete producer coverage and
+invalid dates also refuse with `StrictTraceCaptureError`. Provenance stays
+outside chooser inputs and the receipt.
+`SourceBundle.chooser_fold_reference` remains an optional API field and is
+not used by this legacy capture path.
 
 `native_chooser`/`native_chooser_features` derive candidate features after
 native pricing and simulation. Invalid declared frozen state flags
@@ -230,11 +262,24 @@ exact causal size fold for the earlier of event and decision months and attaches
 it as the gate forecast source. STR-THRU forward
 inputs use native market/history features from the pinned snapshot (cutover
 6c), plus the verified release. The full-refit `size:*` champion supplies
-`driver_prediction`; a separate causally selected size fold supplies only the
-gate's requested `pred_abs_move` family and `forecast_edge`. Both execute in
-the existing scoring stages, never in the raw-row producer. Gate-only forecasts
-must not create a top-level sizing forecast or change the selected structure.
-Outcomes are in the table below. RUNUP is unchanged.
+`driver_prediction`; a separate causally selected size fold supplies the
+gate's requested `pred_abs_move` family and `forecast_edge`, and its held-out
+pool supplies residual uncertainty for the STR-THRU forecast band. The fold's
+`pred_abs_move` remains gate-only: when `forecast_abs_move` is available, its
+pool also supplies bucketed uncertainty around that fold forecast; when it is
+absent, flat residual quantiles center on the full-refit champion's
+`driver_prediction` because fold-prediction buckets do not match the champion
+distribution. These fields are uncertainty only; they do not create a sizing
+point forecast or change the selected structure. These calculations run in
+existing scoring stages, never in the raw-row producer. The legacy scorer has
+corresponding `forecast_p10`,
+`forecast_p90`, and `forecast_sd` fields; this native STR-THRU uncertainty rule
+does not assume parity-identical values. Because its center is the full-refit
+champion while its pool predictions are from the selected size fold, STR-THRU
+uses flat residual quantiles instead of choosing fold-prediction decile buckets
+around the champion value when it falls back to `driver_prediction`. Outcomes
+are in the table below.
+RUNUP is unchanged.
 
 `SourceBundle.gate_forecast_source` (optional `GateForecastSource`) carries the
 selected fold's `binding_id` and verified estimator `artifact_hash`, its fold-view `ModelRelease`, the shared
@@ -244,6 +289,15 @@ inference (role `size`; the champion `model_release` is not consulted) and
 `gate.forecast_pool` from the pool. The champion release stays unchanged. The
 ordinary bundle path remains valid when the source is absent.
 
+The production STR-THRU path reuses the selected verified size fold's held-out
+pool as `forecast_pool`. When `forecast_abs_move` is absent, the champion's
+`driver_prediction` locates the `forecast_p10`/`forecast_p90`/`forecast_sd`
+uncertainty interval. The band emits only those uncertainty fields; the fold's
+`pred_abs_move` remains gate-only and does not create a sizing forecast or
+change structure selection. A missing or non-finite location, absent pool, or
+thin pool leaves the uncertainty fields unavailable. The band uses the same
+selected fold; it does not cause another release lookup or fold selection.
+
 | Condition | Outcome |
 | --- | --- |
 | Source plus `gate_recipe.forecast`, or plus a non-empty `gate_forecast_pool` | `ValueError` at bundle build (row refused `NATIVE_INPUT_BUILD_FAILED`); never resolved by precedence |
@@ -251,7 +305,8 @@ ordinary bundle path remains valid when the source is absent.
 | Non-finite value in any declared fold pool (`gate_forecast_pool`, `forecast_pool`, source pool, `interval_floor`) | `ValueError` at bundle build (`fold_pool` applies this to every pool) |
 | Gate names no forecast column | Executor and pool are built but the stage never calls them; no flag |
 | Source absent, gate names a forecast column | Bundle builds; the stage flags `MISSING_GATE_INPUT:forecast` |
-| Thin pool | Bundle builds; the stage leaves the band columns unavailable |
+| STR-THRU has a finite `driver_prediction` and at least 250 finite residuals in the selected pool | The stage emits `forecast_p10`/`forecast_p90`/`forecast_sd` around `driver_prediction` using flat residual quantiles; these are uncertainty fields only, with no sizing point forecast or structure change |
+| Missing/non-finite band location, absent pool, or thin pool | The bundle builds; the stage leaves the uncertainty fields unavailable |
 | Exact causal fold missing, or selected fold fails verification/load (`native_score_batch`) | Per-row `MODEL_NOT_READY`; no fallback |
 | Malformed release catalog or descriptor | Release resolution fails before row assembly; not a per-row fold refusal |
 
@@ -598,6 +653,8 @@ rather than its own. `native_score_batch` goes through `score_one`, never
 - **R2, cache.** None for any field but `frozen_inference`: every other
   field's loader is constructed fresh per call and discarded on return, so
   two calls against the same `release_root` fully re-read and re-verify.
+  Chooser references are also re-resolved on every call, with at most 34 fold
+  objects and no cross-call reference-map cache.
   `frozen_inference`'s referenced `FrozenInference` owns its own mutable,
   content-hash-keyed member cache, populated lazily by `.infer()`, living as
   long as the caller holds the returned binding — deliberately, so the
@@ -648,6 +705,33 @@ R6: the same release and bytes yield an equal result; a caller resolving once
 per worker therefore sees one policy for the whole batch. The worker uses this
 result only when its `gate_policy` parameter is empty; a supplied policy wins
 and the release is not consulted for it.
+
+#### Chooser fold provenance reference
+
+A verified chooser-fold reference contains the descriptor hash, estimator
+digest, exact fold month, authoring parent release id and producer
+ModelIdentity. Its training_cutoff is the verified descriptor's fold_start,
+the exclusive boundary of training data for that fold.
+`resolve_release_binding` returns an empty
+`chooser_fold_references` map by default and does not load chooser estimators
+for ordinary nightly scoring. Callers that need these references opt in with
+`include_chooser_fold_references=True`; resolution returns a complete map or a
+typed refusal. A carried fold whose authoring release lacks canonical cutoff
+data refuses instead of producing a partial map. Strict production capture
+opts into this verified reference map, passes it to the scorer, and records
+validated references in strict trace metadata. Ordinary nightly scoring does
+not load chooser estimators, and no path infers provenance from legacy rows.
+
+| Condition | Outcome |
+|---|---|
+| Chooser references not requested | Return an empty map without loading chooser estimators |
+| More than 34 staged chooser-fold objects when references are requested | ModelNotReady before any chooser fold is loaded |
+| No staged chooser-fold objects are available when references are requested | Return an empty map before checking the cutoff |
+| Staged chooser-fold objects are available but the canonical retrain cutoff is missing or invalid | ModelNotReady; no partial reference map |
+| Carried fold authoring release has no canonical cutoff | ModelNotReady; do not return a partial map |
+| Malformed, noncanonical or mismatched descriptor, estimator digest, parent binding, output or fold month | ModelNotReady; no partial reference map |
+| Reference resolution requested for a verified release | Re-verify each binding resolution; no cross-call reference cache |
+| Model member exceeds its byte cap or is not a regular file | ModelNotReady before chooser bytes are decoded |
 
 #### Chooser state members
 
@@ -809,12 +893,14 @@ returns no partial bundle. Other strategies retain their existing projection.
 | `as_of`, `calendar_row["calendar_observed_through"]`, `panel_anchor`, or a `quote_rows` entry's `observed_at` fails `validated_as_of` (rejects `None`/`NaT`/a bare number or bool/unparseable/timezone-aware), or any of them lands strictly after `as_of` | `POST_AS_OF_ROW` (or `NightlySourceBundleRefusal`: `MISSING_STAGED_INPUT` for `None`, `INVALID_DATE` otherwise) |
 | a feature resolved from `tier4_row`, non-null, whose own base metric's `fold_start` is missing, or missing-and-present-but-dated-after `as_of` (a null resolved value — legacy's own "no forecast" — skips this check entirely, whatever its `fold_start` holds) | `MISSING_STAGED_INPUT` / `POST_AS_OF_ROW` |
 | `calendar_row["spot"]` not coercible to `float`, non-finite, or `<= 0.0` | `INVALID_SPOT` |
-| supplied `context["chain_spot"]` is not coercible to a finite positive float (decoder, public builder, or direct scoring assembly) | `DocumentError(BAD_VALUE)` at `$.context.chain_spot` |
+| supplied `context["chain_spot"]` is `None`, boolean, cannot be coerced to a finite float (including an overflowing number), or is non-positive (decoder, public builder, or direct scoring assembly) | `DocumentError(BAD_VALUE)` at `$.context.chain_spot` |
+| `context` omits the `chain_spot` key | allowed; listed STR-THRU/STR-RUNUP selection uses calendar close, while `Geometry.spot` remains calendar close |
+| `chain_spot` is supplied and finite positive; listed STR-THRU/STR-RUNUP strike selection is needed | the value passes through scoring to generation as the strike-selection anchor; `Geometry.spot` remains calendar close |
 | some `quote_rows` carry `chain_spot` and others omit it, any staged `chain_spot` is unusable, or staged rows disagree on its finite positive value | `NightlySourceBundleRefusal`: `INVALID_QUOTE_DOMAIN` |
 | `feature_names` a bare `str`/`bytes`, not a `Sequence`, or containing a non-`str`, empty, or duplicate entry | `INVALID_FEATURE_NAMES` |
 | a quote row missing `right`/`strike`/`expiry`/`bid`/`ask`, an unrecognized `right`, non-finite/negative `bid`, a crossed `ask`, two rows disagreeing on the same contract key, or `quote_rows`/`quote_status` disagreeing on whether the domain is empty (`quote_domain_map`, the quote-map builder `tools/capture_tier0_corpus.py` shares; each quote also carries its row's `observed_date`) | `NightlySourceBundleRefusal` (that module's own call site wraps it back into its own exception type) |
 
-The gate feature, DYN-SV chooser feature and served `financial_diagnostics.entry_cost_pct` all use `entry_cost / chain_spot * 100`, using the ORATS option-chain spot staged on quote rows and carried in bundle `context`; they do not fall back to the calendar close. Strike selection continues to use the calendar close in `context["spot"]`. If a caller supplies no `chain_spot`, the shared `financial.entry_cost_pct` helper returns `None`, so no percentage value is emitted; in the nightly producer path a surviving quote row with an unavailable or invalid chain spot is already refused as `CHAIN_SPOT_UNAVAILABLE`, and a partial or inconsistent staged value is refused by this bundle as `INVALID_QUOTE_DOMAIN`. The `rescore` decoder and public `build_native_score_inputs` builder accept an absent optional `chain_spot`, normalize a supplied numeric value to float, and refuse an unusable supplied value with `DocumentError(BAD_VALUE)` at `$.context.chain_spot` before scoring. The `assemble_native_values` public scoring entry point allows absence, validates a supplied value by the same finite-positive rule, and refuses an unusable value with the same typed error before scoring.
+The gate feature, DYN-SV chooser feature and served `financial_diagnostics.entry_cost_pct` all use `entry_cost / chain_spot * 100`, using the ORATS option-chain spot staged on quote rows and carried in bundle `context`; they do not fall back to the calendar close. STR-THRU/STR-RUNUP listed-strike selection uses that same `chain_spot` when present, falling back to the calendar close only when it is absent; `Geometry.spot` remains the calendar close. If a caller supplies no `chain_spot`, the shared `financial.entry_cost_pct` helper returns `None`, so no percentage value is emitted; in the nightly producer path a surviving quote row with an unavailable or invalid chain spot is already refused as `CHAIN_SPOT_UNAVAILABLE`, and a partial or inconsistent staged value is refused by this bundle as `INVALID_QUOTE_DOMAIN`. The `rescore` decoder and public `build_native_score_inputs` builder accept an absent optional `chain_spot`, normalize a supplied numeric value to float, and refuse an unusable supplied value with `DocumentError(BAD_VALUE)` at `$.context.chain_spot` before scoring. The `assemble_native_values` public scoring entry point allows absence, validates a supplied value by the same finite-positive rule, and refuses an unusable value with the same typed error before scoring.
 
 - **Panel/Tier-4 values pass through unclassified.** A resolved feature value is
   projected into `feature_vector` exactly as staged (`None`, any NaN

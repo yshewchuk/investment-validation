@@ -1,11 +1,14 @@
 """Explicit v2 SIZE source/fold binding; installed panel admission, no hidden builds."""
+import copy
 import json
+import sys
+import time
 from datetime import date
 from hashlib import sha256
 from pathlib import Path
 
 from engine.v2.contracts import SnapshotRef
-from engine.v2.foundation import artifact_reference, canonical_json, content_hash, from_document
+from engine.v2.foundation import artifact_reference, canonical_json, content_hash, from_document, to_document
 from engine.v2.models.frozen_state_io import BoundedStateReadError, read_bounded_state
 from engine.v2.ops.errors import fail
 from engine.v2.ops.fingerprints import environment_identity, source_closure
@@ -57,19 +60,49 @@ def read_panel(repository, source, request, *, columns):
     return read(repository, source, feature, columns=columns, lineage=False, **args)
 
 
+_PANEL_MEMO = {}
+
+
+def read_stored_panel(repository, source, request, *, columns, expected_panel=None):
+    """Share one admitted panel per process; validate each request and return detached copies."""
+    validate_panel_request(request)
+    key = (id(repository), content_hash(to_document(source)),
+           content_hash(request), tuple(columns))
+    entry = _PANEL_MEMO.get(key)
+    if entry is not None and entry["repository"] is repository:
+        panel = entry["panel"]
+        fingerprint = content_hash({"context": panel["context"], "feature_snapshot": panel["feature_snapshot"]})
+        _require(fingerprint == entry["fingerprint"])
+        if expected_panel is not None:
+            _require(fingerprint == content_hash(expected_panel))
+    else:
+        panel = read_panel(repository, source, request, columns=columns)
+        metadata = {"context": panel["context"], "feature_snapshot": panel["feature_snapshot"]}
+        _require(expected_panel is None or metadata == expected_panel)
+        _PANEL_MEMO.clear()
+        _PANEL_MEMO[key] = {"repository": repository, "panel": panel, "fingerprint": content_hash(metadata)}
+    return copy.deepcopy(panel)
+
+
+def _stored_panel(repository, source, binding, columns):
+    """Preserve SIZE's expected metadata admission over the shared one-panel memo."""
+    return read_stored_panel(repository, source, binding["size_panel_request"],
+                             columns=columns, expected_panel=binding["size_panel"])
+
+
 def prepare(repository, spec, request, panel_request, *, scope, training_start, labels_before,
             publish_artifacts=True):
     """Prepare a new development anchor; caller explicitly reserves it separately."""
     from engine.v2.research.magnitude_panel_qualified_table import recipe
     sources = _sources()
     panel_request = validate_panel_request(panel_request)
-    schedule = compile_request(request)
+    schedule = compile_request(request, horizons=tuple(h for h in (5, 3, 1) if h in panel_request["horizons"]))
     if request["limits"]["child"]["memory_bytes"] > request["limits"]["parent"]["memory_bytes"]:
         raise fail("INVALID_EXPERIMENT_SPEC", "child memory must not exceed inherited parent limit")
     _require(request["feature_dictionary_hash"] == recipe("HMO")["dictionary_hash"])
     _require(panel_request["feature_snapshot_id"] == request["feature_snapshot_id"]
              and panel_request["history_snapshot"] == request["history_snapshot_id"]
-             and panel_request["horizons"] == [1, 3, 5])
+             and set(panel_request["horizons"]) == set(schedule["horizons"]))
     base, spec = prepare_native_registration(repository, spec, code_root=Path(__file__).resolve().parents[1],
         scope=scope, as_of_month=panel_request["as_of_month"], event_ids=panel_request["event_ids"],
         magnitude_training_start=training_start, magnitude_labels_before=labels_before, defer_serialization=True)
@@ -157,14 +190,44 @@ def _folds(binding, request):
     return folds
 
 
-def prepare_plan(conn, store, registration, request):
+def _shared_inner(folds):
+    """Repeated v3 inner years must describe one immutable trial after eligibility."""
+    seen = {}
+    for owner in folds:
+        for inner in owner["inner"]:
+            prior = seen.setdefault(inner["year"], inner)
+            if (prior["training_candidate_event_ids"] != inner["training_candidate_event_ids"]
+                    or prior["evaluation_event_ids"] != inner["evaluation_event_ids"]):
+                raise fail("EXPERIMENT_IDENTITY_CONFLICT",
+                    "repeated inner-year folds differ after eligibility filtering")
+
+
+def prepare_plan(conn, store, registration, request, *, plan_schema=None):
     """Expand the fixed dictionary grid into fully bound executable recipes."""
+    from experiments.magnitude_search_plan import PLAN_V2, PLAN_V3
+    request_version = request.get("schema_version") if isinstance(request, dict) else None
+    if plan_schema is None:
+        plan_schema = PLAN_V2 if request_version == "magnitude_search_request.v3" else PLAN_V3
+    if request_version == "magnitude_search_request.v3" and plan_schema != PLAN_V2:
+        raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search plan schema does not match request version")
+    if plan_schema not in (PLAN_V2, PLAN_V3):
+        raise fail("EXPERIMENT_IDENTITY_CONFLICT", "unsupported SIZE search plan schema")
     verify_native_registration(conn, store, registration, max_evidence_bytes=MAX_NATIVE_EVIDENCE_BYTES)
     binding = registration.document
     verify_installation(binding)
-    schedule = compile_request(request)
+    if binding["schema_version"] == "native_experiment_registration.v1.6":
+        horizons = (5, 3, 1)
+    else:
+        panel_request = binding.get("size_panel_request")
+        if not isinstance(panel_request, dict):
+            raise fail("EXPERIMENT_IDENTITY_CONFLICT", "qualified SIZE registration is missing its panel request")
+        validate_panel_request(panel_request)
+        horizons = tuple(h for h in (5, 3, 1) if h in panel_request["horizons"])
+    schedule = compile_request(request, horizons=horizons)
     _require(schedule["request"] == binding["size_request"])
     folds = _folds(binding, request)
+    if plan_schema == PLAN_V3:
+        _shared_inner(folds)
     candidates = []
     source_binding_id = (content_hash(json.loads(registration.binding_json)["size_panel"])
                          if binding["schema_version"] == "native_experiment_registration.v1.7"
@@ -175,11 +238,11 @@ def prepare_plan(conn, store, registration, request):
         identity = {"recipe": recipe, "feature_recipe": spec["feature_recipe"],
                     "source_binding_id": source_binding_id, "candidate_spec_id": spec["candidate_spec_id"]}
         candidates.append({**identity, "candidate_id": content_hash(identity)})
-    identity = {"schema_version": "magnitude_search_plan.v2", "request": schedule["request"],
+    identity = {"schema_version": plan_schema, "request": schedule["request"],
         "anchor": {"run_id": registration.run_id, "variant_id": registration.variant_id},
         "implementation": {"source_closure": binding["source_closure"], "environment": binding["environment"]},
         "candidates": sorted(candidates, key=lambda c: c["candidate_id"]), "folds": folds,
-        "horizons": [5, 3, 1], "candidate_count": schedule["counts"]["candidates"],
+        "horizons": schedule["horizons"], "candidate_count": schedule["counts"]["candidates"],
         "planned_fit_count": schedule["counts"]["search_fits"], "counts": schedule["counts"],
         "selection": {"metric": "inner_pooled_rmse", "ties": "candidate_id_ascending", "retries": 0,
                       "outer": "frozen_selected_only", "final_read_authority": "none"}}
@@ -206,19 +269,27 @@ def fold_inputs(repository, binding, fold):
         "evaluation_labels_before": binding["magnitude_execution"]["evaluation_labels_before"]}
         for group in _folds(binding, binding["size_request"])))
     source = from_document(SnapshotRef, binding["snapshot"])
-    panel = read_panel(repository, source, binding["size_panel_request"], columns=recipe("HMO")["model_columns"])
-    _require({"context": panel["context"], "feature_snapshot": panel["feature_snapshot"]} == binding["size_panel"])
+    started = time.monotonic()
+    panel = _stored_panel(repository, source, binding, recipe("HMO")["model_columns"])
     participants = set(fold["training_candidate_event_ids"] + fold["evaluation_event_ids"])
     events = {e["event_id"]: e for e in panel["context"]["target_events"]}
     _require(participants <= set(events) and all(events[e]["label_end"] < fold["training_labels_before"]
              for e in fold["training_candidate_event_ids"]))
+    print(f"[stage] read_panel done in {time.monotonic() - started:.1f}s", file=sys.stderr)
     month = binding["holdouts"]["holdout_as_of_month"]
+    started = time.monotonic()
     preflight = preflight_magnitude_targets(repository, source, as_of_month=month, event_ids=sorted(participants))
+    print(f"[stage] preflight done in {time.monotonic() - started:.1f}s", file=sys.stderr)
+    started = time.monotonic()
     train = qualify_magnitude_training_targets(repository, source, as_of_month=month,
         labels_before=fold["training_labels_before"], event_ids=fold["training_candidate_event_ids"])
-    return {"preflight": preflight, "stored_inputs_id": content_hash(binding["size_panel"]),
+    print(f"[stage] qualify done in {time.monotonic() - started:.1f}s", file=sys.stderr)
+    started = time.monotonic()
+    result = {"preflight": preflight, "stored_inputs_id": content_hash(binding["size_panel"]),
         "training_inputs": dict(train.attrs), "training": train[["event_id", "absolute_move_pct"]].to_dict("records"),
         "features": [r for r in panel["rows"] if r["event_id"] in participants]}
+    print(f"[stage] publish done in {time.monotonic() - started:.1f}s", file=sys.stderr)
+    return result
 
 
 def validator_identity():

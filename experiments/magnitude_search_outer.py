@@ -1,4 +1,6 @@
 """Bounded selected-candidate outer fits; immutable evidence, no final authority."""
+import sys
+import time
 from pathlib import Path
 
 from engine.models.no_fit import forbid_fitting as forbid_legacy_fitting
@@ -23,7 +25,7 @@ from experiments.magnitude_search_execution import (
     validate_execution_limits,
 )
 from experiments.magnitude_search_inputs import load_inputs, publish_inputs
-from experiments.magnitude_search_plan import read_search_plan
+from experiments.magnitude_search_plan import PLAN_V2, PLAN_V3, read_search_plan, trial_key
 from experiments.magnitude_search_records import MIGRATIONS, OWNER, append_record, read_record
 from experiments.magnitude_search_trials import SearchTrials
 from experiments.size_fit_diagnostics import evidence as diagnostic_evidence
@@ -42,28 +44,41 @@ def _equal(left, right):
 
 
 def _native_selection(trials, plan, read):
-    """Presence checks make public execution calls strictly completed replays."""
+    """Presence checks plus freeze verification make completed replays strict."""
+    print("[stage] native_selection start", file=sys.stderr)
+    started = time.monotonic()
     selection = read("selection")
     if selection is None:
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "outer evaluation requires an existing frozen selection")
-    attempts = []
+    seen = set()
     for outer in plan["folds"]:
         for candidate in plan["candidates"]:
             for inner in outer["inner"]:
                 args = (outer["outer"]["year"], inner["year"], candidate["candidate_id"])
-                key = content_hash([plan["plan_id"], *args])
+                key = trial_key(plan, *args)
+                if key in seen:
+                    continue
+                seen.add(key)
                 execution, terminal = read("execution:" + key), read("terminal:" + key)
                 if not isinstance(execution, dict) or not isinstance(terminal, dict):
                     raise fail("EXPERIMENT_IDENTITY_CONFLICT", "outer evaluation requires completed native inner trials")
                 try:
-                    limits = execution["attempt"]["limits"]
+                    attempt = execution["attempt"]
+                    limits = attempt["limits"]
+                    expected = {"limits": limits, "candidate_id": candidate["candidate_id"], "trial_id": key}
+                    execution_start = read("execution-start:" + key)
+                    if (not isinstance(attempt, dict) or set(attempt) != {"limits", "candidate_id", "trial_id"}
+                            or canonical_json(attempt) != canonical_json(expected)
+                            or not isinstance(execution_start, dict)
+                            or canonical_json(execution_start) != canonical_json(expected)):
+                        raise ValueError
                     validate_execution_limits(limits)
-                except (KeyError, TypeError, OpsError):
+                except (KeyError, TypeError, ValueError, OpsError):
                     raise _conflict() from None
-                attempts.append((args, limits))
+                if plan.get("schema_version") in (PLAN_V2, PLAN_V3, "regression_search_plan.v1") and limits != plan["request"]["limits"]["child"]:
+                    raise fail("INVALID_EXPERIMENT_SPEC", "native trial limits differ from sealed request")
     _equal(trials.freeze(), selection)
-    for args, limits in attempts:
-        trials.execute(*args, limits=limits)
+    print(f"[stage] native_selection done in {time.monotonic() - started:.1f}s", file=sys.stderr)
     return selection
 
 

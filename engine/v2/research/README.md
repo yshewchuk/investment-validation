@@ -80,8 +80,8 @@ is offline experiment fitting, not a production entrypoint.
 provide a source-free absolute-magnitude histogram format and numerical refusals.
 `histogram([1.0] + [0.0] * 80)` returns a detached document with an explicit unresolved tail;
 `tail_excesses=[0.0, 2.0]` declares conditional excesses relative to 20 (zero means exactly 20).
-No sample is fitted/admitted. Consumers are the source-free magnitude math/payoff helpers, `experiments.distribution_candidate_recipe` and `experiments.distribution_class_support`,
-and synthetic tests, including `tests/v2/research/test_magnitude_distribution.py`.
+No sample is fitted/admitted here. Consumers include the magnitude math/payoff helpers, `experiments.distribution_candidate_recipe`, `experiments.distribution_class_support`,
+`experiments/distribution_candidate_fit`, `distribution_fitted`, `distribution_oof` and synthetic tests, including `tests/v2/research/test_magnitude_distribution.py`.
 
 `magnitude_distribution_math` exposes `components`, `cdf`, `mean`, `crps`,
 `empirical_crps`, `bin_scores` and `brier`: pure magnitude-family scores and
@@ -92,8 +92,8 @@ only the admitted 1e-12 mass roundoff, without modifying the document.
 `mean_matched_control` supply frozen-bridge/mean-control diagnostics, preserving
 zero atoms and negative post-residual exit values. Fixed per-share spot/cost
 inputs are decision-quote proxies, not realized net-profit or execution claims.
-Only these helpers and their matching `tests/v2/research/test_magnitude_distribution*.py`
-tests consume the new interfaces; there is no data, fit or production wiring.
+`experiments/distribution_oof` consumes `mean` and `mean_matched_control`; `experiments/distribution_scores` composes the magnitude format, proper scores and bridge summaries; matching synthetic tests cover these APIs.
+The numerical helpers own no source admission, fit orchestration or production wiring.
 
 `eligibility_policy.eligibility_policy` validates an explicit version/width;
 `eligibility_policy.plan_eligibility` returns the opt-in metadata-only plan described below.
@@ -108,7 +108,7 @@ The pure classifier checks shape, not commitment of its caller-supplied context.
 Neither metadata helper grants payload access or accepts caller-provided membership labels.
 
 `progress.Progress`, `progress.stage` and `progress.decision` provide shared stderr telemetry:
-bounded-cadence ticks, stage timing/RSS, optional native refusal codes (no message text) and aggregate decisions.
+bounded-cadence ticks, stage timing/RSS, optional native refusal codes (no message text) and aggregate decisions. Distribution scoring/reporting also consume these helpers.
 
 `snapshot_rows.iter_snapshot_rows` streams native nullable/integer row projections
 with explicit pinned predicates and row/decoded-byte/object/batch caps (default1024).
@@ -301,7 +301,7 @@ Magnitude search/report wrappers retain their existing nonnegative contracts.
 
 `experiments/magnitude_search_request.py` consumes `magnitude_panel_table.recipe`
 and `eligibility_policy.eligibility_policy` for source-free dictionary/policy declarations, not data admission.
-`experiments/magnitude_search_request_versions.py` consumes both v1/v2 panel `recipe` APIs for dictionary dispatch only.
+`experiments/magnitude_search_request_versions.py` consumes v1/v2/v3 panel `recipe` APIs for dictionary adaptation and request-version dispatch; it grants no source admission.
 `experiments/distribution_candidate_recipe.py` consumes the qualified v3 feature recipe and distribution format; `distribution_class_support.py` consumes histogram validation for explicit class mapping. `distribution_trials.py` consumes bounded progress/stage logging during admission and projection; these helpers grant no data or fitting authority.
 
 Which packages import this one, and for what. Checked against the import graph:
@@ -450,13 +450,13 @@ See [the frozen contract](../../../experiments/SUPER_SIZE/CONFIRMED_METADATA_DES
 
 ## Policy-qualified eligible history
 
-<!-- public-interface: eligible_history.admit_source, eligible_history.iter_read, eligible_history_table.CONTRACT, eligible_history_table.FEATURES, eligible_history_table.admit_fields, eligible_history_table.recipe -->
+<!-- public-interface: eligible_history.admit_source, eligible_history.iter_read, eligible_history.plan_targets, eligible_history_table.CONTRACT, eligible_history_table.FEATURES, eligible_history_table.admit_fields, eligible_history_table.recipe -->
 
 These are intentionally manual, research-only Python APIs, not production CLI,
 nightly or training entrypoints. A separately authorized research caller supplies
 the pinned source and explicit policy; this PR neither activates a data run nor
-wires production scoring. Synthetic tests are the only current invocations.
-The sole public build/read boundary is `experiments.eligible_history`; it rejects
+wires production scoring. Synthetic tests and the library-only SIZE target derivation (`experiments.size_prep_targets`, itself uncalled until #1614 slice 4) are the only current invocations.
+The sole public build/read boundary is `experiments.eligible_history` (plus the read-only, non-materializing `plan_targets` planner used by SIZE target derivation); it rejects
 caller producer identities before source access and derives the installed identity.
 An immutable import-time source/environment baseline refuses later disk drift with
 `INPUT_CHANGED`; restart from a fixed code tree. This is not bytecode attestation.
@@ -472,8 +472,8 @@ Use `experiments.eligible_history.materialize/read` for complete list results, o
 admission and coverage checks. The library-only `experiments.size_panel` wrapper
 uses `iter_read`; no production or nightly entrypoint invokes it without separate
 authorization. Supply an
-explicit source snapshot, holdout month, grouped policy, target IDs, horizons
-`[1, 3, 5]`, history start and limits (`max_source_rows`, `max_fragments`,
+explicit source snapshot, holdout month, grouped policy, target IDs, a nonempty
+ascending subset of horizons `[1, 3, 5]`, history start and limits (`max_source_rows`, `max_fragments`,
 `max_object_bytes`, `max_total_bytes`, `max_output_rows`). The separate
 `research_eligible_history` table requires native
 `computed_move_bounds`; missing/stale bindings refuse before outcomes.
@@ -505,7 +505,8 @@ Historical publication and schedule knowledge remain unverified reconstruction.
 `experiments.size_panel.materialize/read` is the installed-identity public boundary;
 `magnitude_panel_qualified` and `_magnitude_panel_*` helpers are internal only.
 Supply exact source/history/price snapshots, `as_of_month`, frozen 30-day `policy`,
-`event_ids`, `horizons=[1,3,5]`, `history_start`, `source_start`, eligible-history
+`event_ids`, a nonempty ascending subset of `horizons` from `[1,3,5]`
+(`horizons=[1]` for lead-1-only runs), `history_start`, `source_start`, eligible-history
 `limits` and confirmed-index `metadata_limits`; no defaults imply unbounded reads.
 Materialize returns a native feature_snapshot and context; read additionally takes
 that snapshot and explicit columns, returning metadata plus projected features.

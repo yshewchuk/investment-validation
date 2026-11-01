@@ -187,7 +187,8 @@ def load_chooser_serving_fold(inference: FrozenInference, descriptor: ChooserSer
         descriptor = from_document(ChooserServingFoldDescriptor, to_document(descriptor))
         _validate_descriptor(descriptor)
         catalog_hash, expected_bytes = _chooser_catalog_hash(verified_catalog, descriptor, verified_parent_manifest)
-        release = _view(descriptor, verified_parent_manifest, catalog_hash, role=descriptor.policy.role)
+        release = _view(descriptor, verified_parent_manifest, catalog_hash,
+                        role=descriptor.policy.role)
         artifact = inference.prepare_serving_fold(release.bindings[0], max_member_bytes=MAX_FOLD_BYTES,
                                                   expected_bytes=expected_bytes)
         pred, res = _pools(artifact, descriptor)

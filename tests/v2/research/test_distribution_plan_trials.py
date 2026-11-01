@@ -7,6 +7,7 @@ import pytest
 from engine.v2.data.errors import DataError, fail as data_fail
 from engine.v2.foundation import artifact_reference, canonical_json, content_hash, to_document
 from engine.v2.ops.errors import OpsError, fail
+from engine.v2.ops.fingerprints import source_closure
 from experiments import distribution_plan as planner
 from experiments import distribution_trials as journal
 from experiments.distribution_candidate_recipe import candidate_recipe
@@ -38,7 +39,8 @@ def context(monkeypatch):
     outer = {"year": "2024", "training_labels_before": "2024-01-01",
              "training_candidate_event_ids": ["train", "inner"], "evaluation_event_ids": ["outer"]}
     native = {"plan_id": content_hash("source-plan"), "candidate_count": 33,
-              "planned_fit_count": 102, "folds": [{"outer": outer, "inner": [inner]}]}
+              "planned_fit_count": 102, "horizons": [5, 3, 1],
+              "folds": [{"outer": outer, "inner": [inner]}]}
     ref = artifact_reference(canonical_json(native).encode(), "magnitude_search_plan.v2")
     events, records = [], {}
     monkeypatch.setattr(planner, "verify_native_registration", lambda *args, **kw: events.append(("verify", args[2].run_id, kw)))
@@ -142,6 +144,18 @@ def test_small_plan_uses_native_schedule_not_size_grid_and_detaches(context):
     plan["recipe"]["horizons"].clear()
     native["folds"].clear()
     assert planner.prepare_plan(*context.args)[0]["recipe"]["horizons"] == [5, 3, 1]
+
+
+def test_native_size_plan_missing_anchor_horizon_refuses(context, monkeypatch):
+    altered = {**deepcopy(context.native), "horizons": [1]}
+    ref = artifact_reference(canonical_json(altered).encode(), "magnitude_search_plan.v2")
+    monkeypatch.setattr(planner, "read_search_plan", lambda *args: deepcopy(altered))
+    monkeypatch.setattr(planner, "validate_candidate_recipe",
+                        lambda recipe: {**recipe, "horizons": [1]})
+    args = list(context.args)
+    args[5] = ref
+    error = _code("INVALID_EXPERIMENT_SPEC", lambda: planner.prepare_plan(*args))
+    assert error.problem.message == "distribution SIZE plan must provide every native SIZE anchor horizon"
 
 
 @pytest.mark.parametrize("field,value", [("schema_version", "native_experiment_registration.v1.3"),
@@ -475,3 +489,36 @@ def test_projection_progress_is_bounded_native_primitive(context, monkeypatch):
     context.trials.seal(clock=1)
     context.trials.start("inner", "2024", "2023")
     assert calls == [("distribution feature projection", 9)] + ["tick"] * 9
+
+
+def test_worker_only_byte_drift_changes_plan_and_refuses_old_seal(context, monkeypatch, tmp_path):
+    # Resolve real static imports over tiny files; the child is reached only by
+    # a subprocess module-name string, so its root must be declared explicitly.
+    paths = ["distribution_plan", "distribution_trials", "distribution_class_support",
+             "distribution_fitted", "distribution_worker", "distribution_oof"]
+    (tmp_path / "experiments").mkdir()
+    for name in paths:
+        (tmp_path / "experiments" / (name + ".py")).write_text("# synthetic source\n")
+    worker = "experiments/distribution_worker.py"
+    runner = context.args[2].document["execution_plan"]["runner"]
+    document = context.args[2].document
+    document["source_closure"] = source_closure(tmp_path, [runner])
+    args = list(context.args)
+    args[2] = _registration("own", document)
+    monkeypatch.setattr(planner, "source_closure", lambda root, entries: source_closure(tmp_path, entries))
+    trials = journal.DistributionTrials(args[0], args[1], context.trials.repository, *args[2:])
+    sealed = trials.seal(clock=1)
+    assert worker in sealed["implementation"]["source_closure"]
+    trials.start("inner", "2024", "2023")
+    records = deepcopy(context.records)
+    (tmp_path / worker).write_text("# changed child bytes only\n")
+    changed, _ = planner.prepare_plan(*args)
+    before, after = (value["implementation"]["source_closure"] for value in (sealed, changed))
+    assert {key for key in before if before[key] != after[key]} == {worker}
+    assert changed["plan_id"] != sealed["plan_id"]
+    context.events.clear()
+    _code("EXPERIMENT_IDENTITY_CONFLICT", lambda: trials.read_admission("inner", "2024", "2023"))
+    _code("EXPERIMENT_IDENTITY_CONFLICT", lambda: trials.start("outer", "2024"))
+    assert context.records == records
+    assert not any(event[0] in {"fold_inputs", "load_fit_inputs", "publish_inputs", "append"}
+                   for event in context.events)

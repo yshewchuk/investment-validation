@@ -49,6 +49,33 @@ def test_manual_iv_submission_refuses_before_labels_or_publication(search_case, 
     assert artifact_object_bytes(data.store) == artifacts
 
 
+def test_native_iv_reuses_validation_and_refuses_corruption_without_reload(search_case, monkeypatch):  # noqa: F811
+    from experiments.magnitude_search_plan import cohort_key, trial_key
+    from tests.v2.research.test_magnitude_search_validation_reuse import corrupt_stored_record
+    data = search_case
+    trials, args, _ = context(data)
+    limits = data.plan["request"]["limits"]["child"]
+    first = trials.execute(*args, limits=limits)["terminal"]
+    def forbidden(*a, **k):
+        pytest.fail("signed validation reuse reopened target payloads")
+    monkeypatch.setattr(trials_module, "evaluation_targets", forbidden)
+    candidates = data.plan["candidates"]
+    second_args = (*args[:2], candidates[1]["candidate_id"])
+    second = trials.execute(*second_args, limits=limits)["terminal"]
+    for key in ("inputs_id", "validation_id", "evaluation_inputs", "predictions", "metrics"):
+        assert second[key] == first[key]
+    cohort = cohort_key(data.plan, *args[:2])
+    assert data.conn.execute(
+        "SELECT count(*) FROM magnitude_search_records WHERE slot LIKE 'validation:%'").fetchone()[0] == 1
+    corrupt_stored_record(data, "validation:" + cohort)
+    third_args = (*args[:2], candidates[2]["candidate_id"])
+    with pytest.raises(OpsError) as caught:
+        trials.execute(*third_args, limits=limits)
+    assert caught.value.problem == fail(
+        "EXPERIMENT_IDENTITY_CONFLICT", "search journal artifact could not be verified").problem
+    assert trials._read("terminal:" + trial_key(data.plan, *third_args)) is None
+
+
 def test_completed_native_iv_submission_replays_without_labels_or_fits(search_case, monkeypatch):  # noqa: F811
     data = search_case
     trials, args, _ = context(data)

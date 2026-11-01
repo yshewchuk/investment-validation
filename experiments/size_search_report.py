@@ -1,41 +1,70 @@
 """Collect verified selected-outer and comparator journals without new fitting."""
+import sys
+import time
+
 from engine.v2.foundation import content_hash
 from experiments.magnitude_search_outer import collect_outer_results
+from experiments.magnitude_search_plan import trial_key
 from experiments.magnitude_search_records import read_record
 from experiments.size_paired_report import paired_report
 from experiments.v2_magnitude_search_run import _admit_driver
 
 
 def collect(conn, store, repository, registration, request, plan_ref):
+    print("[stage] collect start", file=sys.stderr)
+    started = time.monotonic()
     plan = _admit_driver(conn, store, registration, request, plan_ref)
     result = collect_outer_results(conn, store, repository, registration, request, plan_ref)
     forecasts, comparisons, events, inner_fits, comparison_fits = [], [], [], [], []
     targets = {r["event_id"]: r["absolute_move_pct"] for r in result["predictions"]}
     ids = {event for group in plan["folds"] for event in group["outer"]["evaluation_event_ids"]}
     events = [e for e in registration.document["size_panel"]["context"]["target_events"] if e["event_id"] in ids]
+    inner_uses = {}
     for group in plan["folds"]:
         year = group["outer"]["year"]
         for fold in group["inner"]:
             for candidate in plan["candidates"]:
-                key = content_hash([plan["plan_id"], year, fold["year"], candidate["candidate_id"]])
-                receipt = read_record(conn, store, registration.run_id, "execution:" + key)
+                key = trial_key(plan, year, fold["year"], candidate["candidate_id"])
+                inner_uses[key] = inner_uses.get(key, 0) + 1
+    inner_receipts = {}
+    for group in plan["folds"]:
+        year = group["outer"]["year"]
+        for fold in group["inner"]:
+            for candidate in plan["candidates"]:
+                key = trial_key(plan, year, fold["year"], candidate["candidate_id"])
+                if key in inner_receipts:
+                    receipt = inner_receipts[key]
+                else:
+                    complete = read_record(conn, store, registration.run_id, "execution:" + key)
+                    receipt = {"status": complete["status"],
+                        "fit_attempt_count": complete["fit_attempt_count"],
+                        "completed_fit_count": complete["completed_fit_count"],
+                        "diagnostics": complete["diagnostics"] if complete["status"] == "succeeded" else []}
+                    if inner_uses[key] > 1:
+                        inner_receipts[key] = receipt
+                    del complete
                 inner_fits.append({"outer_year": year, "inner_year": fold["year"],
                     "candidate_id": candidate["candidate_id"], "execution_slot": "execution:" + key,
-                    **{k: receipt[k] for k in ("status", "fit_attempt_count", "completed_fit_count")},
-                    "diagnostics": receipt["diagnostics"] if receipt["status"] == "succeeded" else []})
+                    **receipt})
+                inner_uses[key] -= 1
+                if inner_uses[key] == 0:
+                    inner_receipts.pop(key, None)
         key = content_hash([plan["plan_id"], year])
         forecasts.extend(read_record(conn, store, registration.run_id, "outer-forecasts:" + key))
         key = content_hash([plan["plan_id"], year, "comparison"])
         comparison = read_record(conn, store, registration.run_id, "comparison-terminal:" + key)["result"]
         comparisons.extend(comparison["forecasts"])
         comparison_fits.extend({"outer_year": year, **fit} for fit in comparison["fit_details"])
-    return {"plan_id": plan["plan_id"], "search": result, "paired": paired_report(events, forecasts, comparisons, targets,
+    report = {"plan_id": plan["plan_id"], "search": result, "paired": paired_report(events, forecasts, comparisons, targets,
+                horizons=plan["horizons"],
                 label_reasons={o["event_id"]: o["reason"] for f in result["folds"]
                     for o in f["evaluation_inputs"].get("omitted_labels", [])}),
             "preflight": resource_report(plan), "inner_fits": inner_fits, "comparison_fits": comparison_fits,
             "frozen_eligibility": registration.document["size_panel"]["context"]["eligibility_plan"],
             "label_exclusions": [{"outer_year": f["outer_year"], **omission} for f in result["folds"]
                 for omission in f["evaluation_inputs"].get("omitted_labels", [])]}
+    print(f"[stage] collect done in {time.monotonic() - started:.1f}s", file=sys.stderr)
+    return report
 
 
 def resource_report(plan):

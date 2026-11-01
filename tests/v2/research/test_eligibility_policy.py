@@ -812,3 +812,26 @@ def test_unsorted_valid_forecasts_normalize_without_mutating_metadata(tmp_path, 
         assert metadata == saved
     finally:
         conn.close()
+
+
+def test_plan_eligibility_forwards_max_object_bytes_to_canonical_events(tmp_path, monkeypatch):
+    event = history_event("2024-06-14")
+    conn, repository, snapshot, _ = setup(tmp_path, monkeypatch, [event])
+    try:
+        base = eligibility.canonical_events(repository, snapshot)
+        seen = []
+
+        def recording(repo, snap, **kwargs):
+            seen.append(kwargs.get("max_object_bytes", "absent"))
+            return base.copy()
+
+        monkeypatch.setattr(eligibility, "canonical_events", recording)
+        result = plan(repository, snapshot, [group(event)], max_object_bytes=4096)
+        assert result["retained_event_ids"] == [event["event_id"]]
+        assert seen == [4096]
+        seen.clear()
+        result = plan(repository, snapshot, [group(event)])
+        assert result["retained_event_ids"] == [event["event_id"]]
+        assert seen == ["absent"]
+    finally:
+        conn.close()

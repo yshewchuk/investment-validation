@@ -13,7 +13,7 @@ from engine.v2.research.magnitude_panel_table import recipe as panel_recipe
 from experiments.magnitude_search_execution import validate_execution_limits
 from experiments.size_panel_request import validate_panel_request
 
-__all__ = ["compile_request"]
+__all__ = ["compile_request", "validate_horizons"]
 
 _KEYS = {"schema_version", "feature_snapshot_id", "history_snapshot_id",
     "feature_dictionary_hash", "eligibility_policy_ref", "feature_sets", "space",
@@ -55,7 +55,21 @@ def _positive(value):
     return type(value) is int and value > 0
 
 
-def _references(request, recipe):
+def validate_horizons(horizons):
+    """Validate accepted schedule-clock orders without changing request identity."""
+    message = "stage-2 horizons must be a nonempty unique subset of integer leads 1, 3, 5"
+    if type(horizons) not in (tuple, list) or not horizons:
+        raise fail("INVALID_EXPERIMENT_SPEC", message)
+    values = tuple(horizons)
+    if any(type(h) is not int or h not in (1, 3, 5) for h in values) or len(set(values)) != len(values):
+        raise fail("INVALID_EXPERIMENT_SPEC", message)
+    legacy_order = tuple(h for h in (5, 3, 1) if h in values)
+    if values != tuple(sorted(values)) and values != legacy_order:
+        raise fail("INVALID_EXPERIMENT_SPEC", message)
+    return legacy_order
+
+
+def _references(request, recipe=panel_recipe):
     snapshots = [request["feature_snapshot_id"], request["history_snapshot_id"]]
     if request["schema_version"] == "regression_search_request.v1":
         snapshots.append(request["panel_request"]["price_history_snapshot"])
@@ -94,7 +108,7 @@ def _years(values):
         and values == sorted(set(values)))
 
 
-def _counts(request):
+def _counts(request, *, horizon_count=3):
     outer, inner = request["outer_years"], request["inner_years"]
     _require(_years(outer) and _shape(inner, outer),
              "stage-2 requires ordered outer years and exact inner-year keys")
@@ -102,14 +116,14 @@ def _counts(request):
              "stage-2 inner years must be ordered and strictly earlier than their outer year")
     count = len(_SETS) * sum(math.prod(map(len, axes.values())) for axes in _SPACE.values())
     inners, outers = sum(map(len, inner.values())), len(outer)
-    fits = 3 * (count * inners + outers)
+    fits = horizon_count * (count * inners + outers)
     _require(_positive(request["max_candidates"]) and request["max_candidates"] >= count
              and _positive(request["max_fits"]) and request["max_fits"] >= fits,
              "stage-2 candidate or search-fit cap is insufficient")
-    components = (3 if request["schema_version"] == "regression_search_request.v1" else 6) * outers
+    components = (horizon_count if request["schema_version"] == "regression_search_request.v1" else 6) * outers
     return {"candidates": count, "inner_folds": inners, "outer_folds": outers,
-        "search_fits": fits, "baseline_logical_fits": 3 * outers,
-        "baseline_component_fits": components, "total_logical_fits": fits + 3 * outers,
+        "search_fits": fits, "baseline_logical_fits": horizon_count * outers,
+        "baseline_component_fits": components, "total_logical_fits": fits + horizon_count * outers,
         "total_component_fits": fits + components}
 
 
@@ -118,7 +132,8 @@ def _comparison(value, counts, *, regression=False):
                          else ("size_v1_4_causal_refit", "history_mean"))
     _require(_shape(value, {"reference", "sanity_reference", "max_logical_fits", "max_component_fits"})
              and value["reference"] == reference and value["sanity_reference"] == sanity,
-             "stage-2 comparison requires the fixed causal legacy and history-mean references")
+             "regression comparison requires iv_crush_causal_refit and training_mean references" if regression
+             else "stage-2 comparison requires the fixed causal legacy and history-mean references")
     _require(all(_positive(value[cap]) and value[cap] >= counts[count] for cap, count in (
         ("max_logical_fits", "baseline_logical_fits"), ("max_component_fits", "baseline_component_fits"))),
         "stage-2 comparison fit cap is insufficient")
@@ -136,7 +151,7 @@ def _limits(value):
                  "stage-2 parent/build/job limits require explicit bounded positive integers")
 
 
-def _specifications(request, request_id, recipe):
+def _specifications(request, request_id, recipe=panel_recipe):
     specs = []
     for subset in request["feature_sets"]:
         feature_recipe = recipe(subset)
@@ -162,10 +177,11 @@ def compile_request(request):
              "stage-2 request requires its closed v2 schema")
     if regression:
         validate_panel_request(request["panel_request"])
+    horizons = ([h for h in (5, 3, 1) if h in request["panel_request"]["horizons"]] if regression else [5, 3, 1])
     recipe = qualified_recipe if regression else panel_recipe
     _references(request, recipe)
     _space(request)
-    counts = _counts(request)
+    counts = _counts(request, horizon_count=len(horizons))
     _comparison(request["comparison"], counts, regression=regression)
     _limits(request["limits"])
     if regression:
@@ -177,7 +193,7 @@ def compile_request(request):
                  "child memory must not exceed inherited parent limit")
     request_id = content_hash(request)
     result = {"schema_version": "regression_search_schedule.v1" if regression else "magnitude_search_schedule.v2", "request": request,
-        "request_id": request_id, "horizons": [5, 3, 1],
+        "request_id": request_id, "horizons": horizons,
         "candidate_specs": _specifications(request, request_id, recipe),
         "schedule": [{"outer_year": year, "inner_years": request["inner_years"][year]}
                      for year in request["outer_years"]], "counts": counts}

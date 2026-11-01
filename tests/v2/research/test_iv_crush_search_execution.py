@@ -45,6 +45,8 @@ def search_case(panel_data, monkeypatch, request):  # noqa: F811
 
 
 def test_all_candidates_selected_outer_and_read_only_replay(search_case, monkeypatch):
+    from experiments import magnitude_search_trials as trials_module
+    from experiments.magnitude_search_outer import collect_outer_results
     data = search_case
     plan, run_id = data.plan, data.registration.run_id
     args = (data.conn, data.store, data.repository, data.registration, plan["request"], data.ref)
@@ -76,7 +78,14 @@ def test_all_candidates_selected_outer_and_read_only_replay(search_case, monkeyp
         return original(store, ref, max_bytes=max_bytes)
 
     monkeypatch.setattr(objects, "read_verified_bytes", guarded)
+    label_calls = []
+    original_labels = trials_module.evaluation_targets
+    def counted_labels(*args, **kwargs):
+        label_calls.append(None)
+        return original_labels(*args, **kwargs)
+    monkeypatch.setattr(trials_module, "evaluation_targets", counted_labels)
     result = driver.run_search(*args, limits=plan["request"]["limits"]["child"])
+    assert len(label_calls) == 1  # All 33 native candidates share one durable validation.
     assert result["schema_version"] == "regression_search_outer_report.v1"
     assert result["target"] == plan["target"] and result["final_read_authority"] == "none"
     assert len(plan["candidates"]) == 33
@@ -112,6 +121,8 @@ def test_all_candidates_selected_outer_and_read_only_replay(search_case, monkeyp
     monkeypatch.setattr(objects, "read_verified_bytes", replay_bytes)
     with no_fit_guard(), legacy_guard():
         assert driver.run_search(*args, limits=plan["request"]["limits"]["child"]) == result
+        assert collect_outer_results(*args) == result
+    assert len(label_calls) == 1
     assert catalog_rows(data.conn) == before and artifact_object_bytes(data.store) == saved
 
 

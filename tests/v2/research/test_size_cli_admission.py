@@ -19,7 +19,7 @@ def args(action="report"):
 
 
 def setup_cli(monkeypatch):
-    monkeypatch.setattr(cli, "_contain", lambda request: 2 ** 33)
+    monkeypatch.setattr(cli, "_contain", lambda *args, **kwargs: 2 ** 33)
     monkeypatch.setattr(cli, "_read_document", lambda path: {})
     monkeypatch.setattr(cli, "experiment_spec_from_document", lambda doc: object())
     monkeypatch.setattr(cli, "connect", lambda *a, **k: SimpleNamespace(close=lambda: None))
@@ -83,9 +83,11 @@ def test_programming_error_is_not_storage_refusal(monkeypatch):
         cli.main(args())
 
 
+@pytest.mark.parametrize("schema", ["magnitude_search_request.v2", "magnitude_search_request.v3",
+                                     "magnitude_search_request.v4"])
 @pytest.mark.parametrize("action", ["seal", "run", "collect"])
-def test_legacy_cli_refuses_qualified_route_before_catalog_or_worker(monkeypatch, capsys, action):
-    monkeypatch.setattr(legacy, "_read_document", lambda path: {"schema_version": "magnitude_search_request.v2"})
+def test_legacy_cli_refuses_qualified_route_before_catalog_or_worker(monkeypatch, capsys, action, schema):
+    monkeypatch.setattr(legacy, "_read_document", lambda path: {"schema_version": schema})
     monkeypatch.setattr(legacy, "experiment_spec_from_document", lambda doc: object())
     monkeypatch.setattr(legacy, "from_document", lambda *a: object())
     for name in ("connect", "read_native_registration", "run_search", "seal_search_run", "collect_outer_results"):
@@ -325,7 +327,7 @@ from pathlib import Path
 from experiments import size_search as cli
 cli._read_document = lambda path: {}
 cli.experiment_spec_from_document = lambda doc: object()
-def contain(request):
+def contain(request, *args, **kwargs):
     with open('/proc/self/status', encoding='ascii') as stream:
         for line in stream:
             if line.startswith('VmRSS:'):

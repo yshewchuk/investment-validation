@@ -223,14 +223,14 @@ def test_missing_model_binding_object_raises_model_not_ready(tmp_path):
 def test_unreadable_model_binding_object_raises_model_not_ready_without_leaking_path(tmp_path):
     release = _stage_and_promote(tmp_path)
     member_path = _dep_root(tmp_path) / release.bindings[0].members[0].path
-    real_read = Path.read_bytes
+    real_open = os.open
 
-    def failing_read(self):
-        if self == member_path:
+    def failing_open(path, flags, *args, **kwargs):
+        if Path(path).resolve() == member_path.resolve():
             raise OSError("simulated read failure")
-        return real_read(self)
+        return real_open(path, flags, *args, **kwargs)
 
-    with unittest.mock.patch.object(Path, "read_bytes", failing_read):
+    with unittest.mock.patch.object(os, "open", failing_open):
         with pytest.raises(ModelNotReady) as error:
             resolve_release_binding(tmp_path)
     assert error.value.member_id.startswith("model:")
@@ -530,6 +530,453 @@ def test_happy_path_resolves_every_field(tmp_path):
     assert independently == expected_payoff
 
 
+def _chooser_resolver_fixture(tmp_path, monkeypatch, *, cutoff="2026-08-31",
+                              pool_cutoff="2026-09-30", identities=None,
+                              two_objects=False, align_descriptor=False,
+                              align_second=False):
+    from types import SimpleNamespace
+
+    from engine.v2.scoring import release_bindings as rb
+
+    _stage_and_promote(tmp_path)
+    _happy_catalog(tmp_path)
+    hash_a = "sha256:" + "a" * 64
+    hash_b = "sha256:" + "b" * 64
+    descriptor_hash = "sha256:" + "c" * 64
+    descriptors = {
+        "first": SimpleNamespace(
+            policy=SimpleNamespace(role="implied_t1", model_id="producer-a",
+                                   feature_order=("x",)),
+            decision_clock_id="entry-close", output_name="driver_prediction",
+            producer_output="pred_im_t1_d14", fold_start="2026-09-01",
+            descriptor_hash=descriptor_hash, parent_release_id=_RELEASE_ID,
+            estimator=SimpleNamespace(content_hash=hash_a)),
+        "second": SimpleNamespace(
+            policy=SimpleNamespace(role="runup_move", model_id="producer-b",
+                                   feature_order=("y",)),
+            decision_clock_id="entry-close", output_name="pred_runup_abs_move_d14",
+            producer_output="pred_runup_abs_move_d14", fold_start="2026-10-01",
+            descriptor_hash=descriptor_hash, parent_release_id=_RELEASE_ID,
+            estimator=SimpleNamespace(content_hash=hash_b)),
+    }
+    identities = identities or {
+        "implied_t1:STR-THRU": rb.ModelIdentity(
+            binding_id="producer-a-binding", model_id="producer-a", role="implied_t1",
+            strategy_id="STR-THRU", decision_clock_id="entry-close",
+            adapter="tier4-serving-fold.v1", feature_order=("x",),
+            output_names=("driver_prediction",), artifact_hash=hash_a),
+    }
+    if align_descriptor:
+        first_identity = next(identity for identity in identities.values()
+                              if identity.role == "implied_t1")
+        descriptors["first"].policy = SimpleNamespace(
+            role=first_identity.role, model_id=first_identity.model_id,
+            feature_order=first_identity.feature_order)
+        descriptors["first"].decision_clock_id = first_identity.decision_clock_id
+        descriptors["first"].output_name = first_identity.output_names[0]
+    if align_second:
+        second_identity = next(identity for identity in identities.values()
+                               if identity.role == "runup_move")
+        descriptors["second"].policy = SimpleNamespace(
+            role=second_identity.role, model_id=second_identity.model_id,
+            feature_order=second_identity.feature_order)
+        descriptors["second"].decision_clock_id = second_identity.decision_clock_id
+        descriptors["second"].output_name = second_identity.output_names[0]
+        descriptors["second"].fold_start = "2026-09-01"
+    body_path = tmp_path / "phase5_release.json"
+    body = json.loads(body_path.read_text())
+    keys = ("first", "second") if two_objects else ("first",)
+    objects = []
+    for key in keys:
+        digest = hash_a if key == "first" else hash_b
+        obj = {**_obj(_object_path(digest), digest, name=key),
+               "serving_fold": {"test_key": key}}
+        objects.append(obj)
+    objects_by_member = {
+        "tier4_folds:implied_t1": [],
+        "tier4_folds:runup_move": [],
+    }
+    for obj in objects:
+        role = descriptors[obj["serving_fold"]["test_key"]].policy.role
+        objects_by_member[f"tier4_folds:{role}"].append(obj)
+    for member_id, member_objects in objects_by_member.items():
+        if member_objects:
+            body["members"].append(_row(member_id, member_objects))
+    body["sources"] = (
+        {} if cutoff is None
+        else {"retrain_cutoff": cutoff, "pool_cutoff": pool_cutoff}
+    )
+    body["manifest_hash"] = content_hash(
+        {key: value for key, value in body.items() if key != "manifest_hash"})
+    body_path.write_text(json.dumps(body, indent=2, sort_keys=True))
+
+    monkeypatch.setattr(
+        rb, "_resolve_model_bindings",
+        lambda _root, _release: (identities, {
+            identity.binding_id: identity.artifact_hash
+            for identity in identities.values()
+        }),
+    )
+    monkeypatch.setattr(
+        rb, "from_document",
+        lambda _type, document: descriptors[document["test_key"]],
+    )
+    calls = []
+
+    def load(inference, descriptor, *, verified_parent_manifest, verified_catalog):
+        calls.append((inference, descriptor, verified_parent_manifest, verified_catalog))
+        return SimpleNamespace(descriptor=descriptor)
+
+    monkeypatch.setattr(rb, "load_chooser_serving_fold", load)
+    return rb, descriptors, identities, calls, body
+
+
+def test_chooser_fold_reference_preserves_specific_model_not_ready(
+        tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from engine.v2.scoring import release_bindings as rb
+
+    rb, descriptors, _identities, _calls, _body = _chooser_resolver_fixture(
+        tmp_path, monkeypatch)
+    specific = ModelNotReady("release:manifest", "manifest hash mismatch")
+
+    def fail_authoring_load(*_args):
+        raise specific
+
+    monkeypatch.setattr(rb, "_load_chooser_authoring_release", fail_authoring_load)
+    descriptor = descriptors["first"]
+    manifest = SimpleNamespace(release=SimpleNamespace(
+        release_id=descriptor.parent_release_id))
+    args = (
+        {"serving_fold": {"test_key": "first"}}, {}, manifest, object(),
+        tmp_path, tmp_path / "deployment", {}, {},
+    )
+
+    with pytest.raises(ModelNotReady) as error:
+        rb._verified_chooser_fold_reference(*args)
+
+    assert error.value is specific
+    assert error.value.member_id == "release:manifest"
+    assert error.value.detail == "manifest hash mismatch"
+
+
+def test_verified_model_binding_member_read_is_bounded(tmp_path, monkeypatch):
+    from engine.v2.scoring import release_bindings as rb
+
+    (tmp_path / "member.bin").write_bytes(b"12345")
+    monkeypatch.setattr(rb, "_MAX_MODEL_BINDING_MEMBER_BYTES", 4)
+
+    with pytest.raises(ModelNotReady) as error:
+        rb._read_verified_object(
+            tmp_path, "model:implied_t1:STR-THRU", "member", "member.bin", _sha(b"12345"))
+
+    assert error.value.detail == "member: object exceeds byte limit"
+
+
+def test_carried_chooser_reference_uses_verified_authoring_release(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from engine.v2.scoring import release_bindings as rb
+
+    descriptor_doc = {"test_key": "first"}
+    descriptor = SimpleNamespace(
+        parent_release_id="origin", policy=SimpleNamespace(
+            role="implied_t1", model_id="producer-a", feature_order=("x",)),
+        decision_clock_id="entry-close", output_name="driver_prediction",
+        producer_output="pred_im_t1_d14", fold_start="2026-09-01",
+        descriptor_hash="sha256:" + "c" * 64,
+        estimator=SimpleNamespace(content_hash="sha256:" + "a" * 64))
+    identity = rb.ModelIdentity(
+        binding_id="authoring-binding", model_id="producer-a", role="implied_t1",
+        strategy_id="STR-THRU", decision_clock_id="entry-close",
+        adapter="tier4-serving-fold.v1", feature_order=("x",),
+        output_names=("driver_prediction",), artifact_hash="sha256:" + "a" * 64)
+    current_manifest = SimpleNamespace(release=SimpleNamespace(release_id="carried"))
+    origin_manifest = SimpleNamespace(release=SimpleNamespace(release_id="origin"))
+    descriptor_object = {"serving_fold": descriptor_doc}
+    carried_catalog = {"members": [{
+        "member_id": "tier4_folds:implied_t1", "status": "STAGED",
+        "objects": [descriptor_object],
+    }]}
+    authoring_catalog = {
+        "sources": {"retrain_cutoff": "2026-08-31"},
+        "members": [{
+            "member_id": "tier4_folds:implied_t1", "status": "STAGED",
+            "objects": [descriptor_object],
+        }],
+    }
+    catalogs = {"prior": carried_catalog, "origin": authoring_catalog}
+    manifests = {"origin": origin_manifest}
+    catalog_reads = []
+    manifest_reads = []
+    identity_reads = []
+
+    monkeypatch.setattr(rb, "from_document", lambda _type, _document: descriptor)
+
+    def read_catalog(_root, release_id):
+        catalog_reads.append(release_id)
+        return catalogs[release_id]
+
+    def read_manifest(_root, release_id):
+        manifest_reads.append(release_id)
+        return manifests[release_id]
+
+    def resolve_identity(_root, release):
+        identity_reads.append(release.release_id)
+        return {"implied_t1:STR-THRU": identity}, {}
+
+    monkeypatch.setattr(rb, "_read_state_catalog", read_catalog)
+    monkeypatch.setattr(rb, "_read_and_verify_manifest", read_manifest)
+    monkeypatch.setattr(rb, "_resolve_model_bindings", resolve_identity)
+    calls = []
+
+    def load(inference, loaded_descriptor, *, verified_parent_manifest, verified_catalog):
+        calls.append((inference, loaded_descriptor, verified_parent_manifest, verified_catalog))
+        return SimpleNamespace(descriptor=loaded_descriptor)
+
+    monkeypatch.setattr(rb, "load_chooser_serving_fold", load)
+    current_catalog = {
+        "sources": {"carried_from": "prior"},
+        "members": [{
+            "member_id": "tier4_folds:implied_t1", "status": "STAGED",
+            "objects": [descriptor_object],
+        }],
+    }
+    authoring_releases = {}
+    carried_catalogs = {}
+    args = (descriptor_object, current_catalog, current_manifest, object(), tmp_path,
+            tmp_path / "deployment", authoring_releases, carried_catalogs)
+    key, reference = rb._verified_chooser_fold_reference(*args)
+    _key_again, reference_again = rb._verified_chooser_fold_reference(*args)
+
+    assert key == ("pred_im_t1_d14", "2026-09-01")
+    assert reference.producer_output == "pred_im_t1_d14"
+    assert reference.descriptor_hash == descriptor.descriptor_hash
+    assert reference.estimator_sha256 == descriptor.estimator.content_hash
+    assert reference.release_id == "origin"
+    assert reference.training_cutoff == "2026-09-01"
+    assert reference.release_binding is identity
+    assert reference.fold_start == descriptor.fold_start
+    assert reference_again == reference
+    assert calls[0][2] is origin_manifest
+    assert calls[0][3] == authoring_catalog
+    assert catalog_reads == ["prior", "origin"]
+    assert manifest_reads == ["origin"]
+    assert identity_reads == ["origin"]
+
+    carried_row = carried_catalog["members"][0]
+    for member_id, status in (
+        ("tier4_folds:runup_move", "STAGED"),
+        ("tier4_folds:implied_t1", "PENDING"),
+    ):
+        carried_row["member_id"] = member_id
+        carried_row["status"] = status
+        with pytest.raises(rb.ModelNotReady) as error:
+            rb._verified_chooser_fold_reference(*args)
+        assert error.value.detail == "chooser fold could not be verified or loaded"
+    carried_row["member_id"] = "tier4_folds:implied_t1"
+    carried_row["status"] = "STAGED"
+
+    mismatched_object = {**descriptor_object, "name": "changed-object"}
+    with pytest.raises(rb.ModelNotReady):
+        rb._verified_chooser_fold_reference(mismatched_object, *args[1:])
+
+    authoring_catalog.pop("sources")
+    authoring_releases.clear()
+    legacy_args = (descriptor_object, current_catalog, current_manifest, object(), tmp_path,
+                   tmp_path / "deployment", {}, {})
+    with pytest.raises(rb.ModelNotReady) as error:
+        rb._verified_chooser_fold_reference(*legacy_args)
+    assert error.value.member_id == "tier4_folds:chooser"
+    assert error.value.detail == "carried chooser authoring release has no canonical cutoff"
+    assert len(calls) == 2
+    assert len(identity_reads) == 1
+
+
+def test_chooser_fold_references_are_not_loaded_by_default(tmp_path, monkeypatch):
+    _rb, _descriptors, _identities, calls, _body = _chooser_resolver_fixture(
+        tmp_path, monkeypatch)
+
+    binding = resolve_release_binding(tmp_path)
+
+    assert binding.chooser_fold_references == {}
+    assert calls == []
+
+
+@pytest.mark.parametrize("cutoff", ["2026-09-01", "2026-09-15"])
+def test_chooser_fold_reference_uses_fold_month_cutoff(
+        tmp_path, monkeypatch, cutoff):
+    rb, descriptors, identities, calls, _body = _chooser_resolver_fixture(
+        tmp_path, monkeypatch, cutoff=cutoff)
+
+    binding = resolve_release_binding(tmp_path, include_chooser_fold_references=True)
+
+    reference = binding.chooser_fold_references[("pred_im_t1_d14", "2026-09-01")]
+    assert reference.producer_output == "pred_im_t1_d14"
+    assert reference.descriptor_hash == descriptors["first"].descriptor_hash
+    assert reference.estimator_sha256 == descriptors["first"].estimator.content_hash
+    assert reference.training_cutoff == "2026-09-01"
+    assert reference.release_id == _RELEASE_ID
+    assert reference.fold_start == "2026-09-01"
+    assert reference.release_binding is identities["implied_t1:STR-THRU"]
+    assert len(calls) == 1
+    assert calls[0][1] is descriptors["first"]
+    assert calls[0][2].release.release_id == _RELEASE_ID
+    assert calls[0][3]["sources"]["retrain_cutoff"] == cutoff
+
+
+def test_chooser_fold_references_use_each_fold_start_as_training_cutoff(
+        tmp_path, monkeypatch):
+    from engine.v2.scoring import release_bindings as rb
+
+    identities = {
+        "implied_t1:STR-THRU": rb.ModelIdentity(
+            binding_id="producer-a-binding", model_id="producer-a", role="implied_t1",
+            strategy_id="STR-THRU", decision_clock_id="entry-close",
+            adapter="tier4-serving-fold.v1", feature_order=("x",),
+            output_names=("driver_prediction",), artifact_hash="sha256:" + "a" * 64),
+        "runup_move:STR-THRU": rb.ModelIdentity(
+            binding_id="producer-b-binding", model_id="producer-b", role="runup_move",
+            strategy_id="STR-THRU", decision_clock_id="entry-close",
+            adapter="tier4-serving-fold.v1", feature_order=("y",),
+            output_names=("pred_runup_abs_move_d14",), artifact_hash="sha256:" + "b" * 64),
+    }
+    _rb, _descriptors, _resolved, _calls, _body = _chooser_resolver_fixture(
+        tmp_path, monkeypatch, cutoff="2026-10-01", pool_cutoff="2026-10-01",
+        two_objects=True,
+        align_descriptor=True, identities=identities)
+
+    binding = resolve_release_binding(tmp_path, include_chooser_fold_references=True)
+
+    assert binding.chooser_fold_references[
+        ("pred_im_t1_d14", "2026-09-01")].training_cutoff == "2026-09-01"
+    assert binding.chooser_fold_references[
+        ("pred_runup_abs_move_d14", "2026-10-01")].training_cutoff == "2026-10-01"
+
+
+def test_chooser_fold_reference_loads_34_aggregate_objects(tmp_path, monkeypatch):
+    from datetime import date
+    from itertools import count
+    from types import SimpleNamespace
+
+    from engine.v2.scoring import release_bindings as rb
+
+    sequence = count()
+
+    def verified_reference(*_args):
+        index = next(sequence)
+        return (f"producer-{index}", f"fold-{index}"), object()
+
+    monkeypatch.setattr(rb, "_verified_chooser_fold_reference", verified_reference)
+    manifest = SimpleNamespace(release=SimpleNamespace(release_id="release"))
+    references = rb._load_chooser_fold_references(
+        [{} for _ in range(34)], "tier4_folds:chooser", date(2026, 9, 1), {}, manifest,
+        object(), {}, tmp_path, tmp_path)
+
+    assert len(references) == 34
+
+
+def test_chooser_fold_reference_refuses_aggregate_load_limit(tmp_path, monkeypatch):
+    from engine.v2.scoring import release_bindings as rb
+
+    _rb, _descriptors, _identities, calls, body = _chooser_resolver_fixture(
+        tmp_path, monkeypatch)
+    row = next(row for row in body["members"]
+               if row.get("member_id") == "tier4_folds:implied_t1")
+    row["objects"] *= rb._CHOOSER_FOLD_MAX_OBJECTS + 1
+    body["manifest_hash"] = content_hash(
+        {key: value for key, value in body.items() if key != "manifest_hash"})
+    monkeypatch.setattr(rb, "_read_state_catalog", lambda *_args: body)
+
+    with pytest.raises(ModelNotReady) as error:
+        resolve_release_binding(tmp_path, include_chooser_fold_references=True)
+
+    assert error.value.member_id == "tier4_folds:chooser"
+    assert error.value.detail == "chooser fold catalog exceeds load limit"
+    assert calls == []
+
+
+def test_legacy_chooser_fold_catalog_without_retrain_cutoff_keeps_binding_available(
+        tmp_path, monkeypatch):
+    _rb, _descriptors, _identities, calls, _body = _chooser_resolver_fixture(
+        tmp_path, monkeypatch, cutoff=None)
+
+    binding = resolve_release_binding(tmp_path)
+
+    assert binding.release_id == _RELEASE_ID
+    assert binding.chooser_fold_references == {}
+    assert calls == []
+
+    with pytest.raises(ModelNotReady, match="canonical training cutoff is missing"):
+        resolve_release_binding(tmp_path, include_chooser_fold_references=True)
+    assert calls == []
+
+
+def test_chooser_fold_reference_refuses_noncanonical_cutoff(tmp_path, monkeypatch):
+    rb, _descriptors, _identities, calls, body = _chooser_resolver_fixture(
+        tmp_path, monkeypatch, cutoff="20260831")
+    monkeypatch.setattr(rb, "_read_state_catalog", lambda *_args: body)
+
+    with pytest.raises(ModelNotReady) as error:
+        resolve_release_binding(tmp_path, include_chooser_fold_references=True)
+
+    assert error.value.member_id == "tier4_folds:chooser"
+    assert error.value.detail == "canonical training cutoff is missing"
+    assert calls == []
+
+
+@pytest.mark.parametrize("status", ["MISSING", "PENDING"])
+def test_chooser_fold_reference_skips_unavailable_rows(tmp_path, monkeypatch, status):
+    rb, _descriptors, _identities, calls, body = _chooser_resolver_fixture(
+        tmp_path, monkeypatch, cutoff=None)
+    body["members"] = [row for row in body["members"]
+                       if row.get("member_id") not in {
+                           "tier4_folds:implied_t1", "tier4_folds:runup_move"}]
+    body["members"].append(_row("tier4_folds:implied_t1", [], status=status))
+    body["members"].append(_row("tier4_folds:runup_move", [], status=status))
+    body["manifest_hash"] = content_hash(
+        {key: value for key, value in body.items() if key != "manifest_hash"})
+    monkeypatch.setattr(rb, "_read_state_catalog", lambda *_args: body)
+
+    binding = resolve_release_binding(tmp_path, include_chooser_fold_references=True)
+
+    assert binding.chooser_fold_references == {}
+    assert calls == []
+
+
+def test_chooser_fold_reference_refuses_producer_mismatch(tmp_path, monkeypatch):
+    from engine.v2.scoring import release_bindings as rb
+
+    wrong = rb.ModelIdentity(
+        binding_id="wrong", model_id="wrong-model", role="implied_t1",
+        strategy_id="STR-THRU", decision_clock_id="entry-close",
+        adapter="tier4-serving-fold.v1", feature_order=("x",),
+        output_names=("driver_prediction",), artifact_hash="sha256:" + "a" * 64)
+    _rb, _descriptors, _identities, calls, _body = _chooser_resolver_fixture(
+        tmp_path, monkeypatch, identities={"implied_t1:STR-THRU": wrong})
+
+    with pytest.raises(ModelNotReady) as error:
+        resolve_release_binding(tmp_path, include_chooser_fold_references=True)
+
+    assert error.value.member_id == "tier4_folds:chooser"
+    assert error.value.detail == "chooser fold could not be verified or loaded"
+    assert calls == []
+
+
+def test_chooser_fold_reference_failure_does_not_return_partial_mapping(
+        tmp_path, monkeypatch):
+    _rb, _descriptors, _identities, calls, _body = _chooser_resolver_fixture(
+        tmp_path, monkeypatch, two_objects=True)
+
+    with pytest.raises(ModelNotReady) as error:
+        resolve_release_binding(tmp_path, include_chooser_fold_references=True)
+
+    assert error.value.member_id == "tier4_folds:chooser"
+    assert error.value.detail == "chooser fold could not be verified or loaded"
+    assert len(calls) == 1
+
+
 def test_never_reads_data_directory_or_legacy_path(tmp_path):
     _stage_and_promote(tmp_path)
     _happy_catalog(tmp_path)
@@ -590,6 +1037,29 @@ def test_resolve_production_release_binding_reads_the_configured_root(monkeypatc
     monkeypatch.setenv("MODEL_RELEASE_ROOT", str(tmp_path))
     binding = resolve_production_release_binding()
     assert binding.release_id == _RELEASE_ID
+
+
+def test_resolve_production_release_binding_forwards_the_chooser_opt_in(monkeypatch, tmp_path):
+    """The production wrapper must pass the configured root and the chooser
+    opt-in flag straight through to the low-level resolver."""
+    from engine.v2.scoring import release_bindings
+
+    sentinel = object()
+    calls = []
+
+    def stub(release_root, *, include_chooser_fold_references):
+        calls.append((release_root, include_chooser_fold_references))
+        return sentinel
+
+    monkeypatch.setattr(
+        release_bindings.deployment, "production_release_root", lambda: tmp_path)
+    monkeypatch.setattr(release_bindings, "resolve_release_binding", stub)
+
+    result = release_bindings.resolve_production_release_binding(
+        include_chooser_fold_references=True)
+
+    assert result is sentinel
+    assert calls == [(tmp_path, True)]
 
 
 def test_promote_plan_and_resolve_production_release_binding_agree_on_the_same_configured_root(monkeypatch, tmp_path):
