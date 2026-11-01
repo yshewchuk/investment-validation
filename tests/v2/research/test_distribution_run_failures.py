@@ -2,17 +2,26 @@
 import json
 import sys
 import time
+from copy import deepcopy
 
 import pytest
 
+from engine.v2.contracts import ArtifactRef
 from engine.v2.data.errors import fail as data_fail
-from engine.v2.foundation import ArtifactError, to_document
+from engine.v2.foundation import ArtifactError, from_document, to_document
 from engine.v2.ops.errors import OpsError, fail
 from experiments import distribution_run as runner
 from tests.v2.research.test_distribution_run import case as case
 from tests.v2.research.test_distribution_run_acceptance import snapshot
 
 DIAGNOSTIC = "[distribution] failure journal unavailable; original failure retained; attempt remains consumed"
+TRUSTED_CODES = {"ops": "RESOURCE_LIMIT_EXCEEDED", "retryable": "RESOURCE_UNAVAILABLE", "data": "CONTRACT_MISMATCH"}
+
+
+class UnreadableCode(Exception):
+    @property
+    def code(self):
+        raise AssertionError("SECRET arbitrary code property must not be read")
 
 
 def primary_error(kind):
@@ -22,6 +31,16 @@ def primary_error(kind):
             retry_after_seconds=7, dependency_refs=("synthetic-input",))
     if kind == "data":
         return data_fail("CONTRACT_MISMATCH", "SECRET primary data", stage="synthetic_fit", details={"cause": "SECRET detail"})
+    if kind == "artifact":
+        return ArtifactError("INTEGRITY_FAILED", "SECRET primary artifact path")
+    if kind == "custom":
+        error = RuntimeError("SECRET primary custom")
+        error.code = {"SECRET": ["arbitrary", "code"]}
+        return error
+    if kind == "property":
+        return UnreadableCode("SECRET primary property")
+    if kind in ("exit_object", "exit_number"):
+        return SystemExit({"SECRET": ["private exit argument", 17]} if kind == "exit_object" else 23)
     return {"memory": MemoryError, "interrupt": KeyboardInterrupt, "exit": SystemExit}[kind]("SECRET primary " + kind)
 
 
@@ -72,9 +91,9 @@ def assert_original(caught, primary, before, tracebacks):
     assert not any(trace.tb_frame.f_code.co_name == "failed_publication" for trace in frames)
 
 
-def assert_consumed(case, run, writes):
+def assert_consumed(case, run, writes, *, failed=None):
     assert len(writes) == 1 and run.record("started") is not None
-    assert run.record("failed") is None and run.record("completed") is None
+    assert run.record("failed") == failed and run.record("completed") is None
     assert sum(call[0] == "fit" for call in case.calls) == 1
     before = snapshot(case)
     calls = [call for call in case.calls if call[0] != "contained"]
@@ -87,16 +106,22 @@ def assert_consumed(case, run, writes):
     assert [call for call in case.calls if call[0] != "contained"] == calls
 
 
+def assert_safe_record(record, primary_kind):
+    assert set(record["body"]) == {"run_plan_id", "code", "elapsed_seconds"}
+    assert record["body"]["code"] == TRUSTED_CODES.get(primary_kind, "INTERRUPTED")
+    assert "SECRET" not in json.dumps(record)  # Also applies before an unsuccessful CAS write.
+
+
 @pytest.mark.parametrize("primary_kind", ["ops", "retryable", "data", "memory", "interrupt", "exit"])
 @pytest.mark.parametrize("secondary_kind", ["typed", "os", "integrity", "memory", "interrupt", "exit"])
 def test_failure_journal_errors_preserve_primary_identity_traceback_and_consumed_attempt(case, monkeypatch, capsys, primary_kind, secondary_kind):
     primary = primary_error(primary_kind)
-    before = to_document(primary.problem) if hasattr(primary, "problem") else primary.args
+    before = to_document(primary.problem) if hasattr(primary, "problem") else deepcopy(primary.args)
     run, tracebacks, writes = install_failure(case, monkeypatch, primary, secondary_error(secondary_kind))
     with pytest.raises(BaseException) as caught:
         run.run(clock=case.clock)
     assert_original(caught, primary, before, tracebacks)
-    assert writes[0]["body"]["code"] == getattr(primary, "code", "INTERRUPTED")
+    assert_safe_record(writes[0], primary_kind)
     assert_consumed(case, run, writes)
     captured = capsys.readouterr()
     assert captured.out == "" and [line.strip() for line in captured.err.splitlines()].count(DIAGNOSTIC) == 1
@@ -124,13 +149,21 @@ def test_diagnostic_write_failure_cannot_replace_original_exception(case, monkey
     assert "SECRET" not in capsys.readouterr().err
 
 
-def test_successful_failure_journal_keeps_original_without_unavailable_diagnostic(case, monkeypatch, capsys):
-    primary = primary_error("ops")
+@pytest.mark.parametrize("primary_kind", ["ops", "retryable", "data", "memory", "interrupt", "exit",
+    "exit_object", "exit_number", "artifact", "custom", "property"])
+def test_successful_failure_journal_keeps_original_without_unavailable_diagnostic(case, monkeypatch, capsys, primary_kind):
+    primary = primary_error(primary_kind)
+    before = to_document(primary.problem) if hasattr(primary, "problem") else deepcopy(primary.args)
     run, tracebacks, writes = install_failure(case, monkeypatch, primary, None)
     with pytest.raises(BaseException) as caught:
         run.run(clock=case.clock)
-    assert_original(caught, primary, to_document(primary.problem), tracebacks)
-    assert len(writes) == 1 and run.record("failed")["code"] == primary.code
-    assert run.record("started") is not None and run.record("completed") is None
+    assert_original(caught, primary, before, tracebacks)
+    assert len(writes) == 1
+    assert_safe_record(writes[0], primary_kind)
+    ref_json = case.conn.execute("SELECT ref_json FROM magnitude_search_records WHERE slot='distribution:run-failed'").fetchone()[0]
+    payload = case.store.read_verified(from_document(ArtifactRef, json.loads(ref_json)))
+    assert json.loads(payload) == writes[0] and b"SECRET" not in payload
+    assert all(b"SECRET" not in path.read_bytes() for path in case.store.root.rglob("*") if path.is_file())
+    assert_consumed(case, run, writes, failed=writes[0]["body"])
     captured = capsys.readouterr()
     assert captured.out == "" and DIAGNOSTIC not in captured.err and "SECRET" not in captured.err
