@@ -1,7 +1,10 @@
 """Immutable search recording, bounded native inner fits and forecast-based selection."""
 import copy
 import json
+import math
 import sqlite3
+import time
+from numbers import Integral, Real
 from pathlib import Path
 
 from engine.models.no_fit import forbid_fitting as forbid_legacy_fitting
@@ -60,6 +63,27 @@ def _candidate_failure(problem):
     return problem["code"] == "EXPERIMENT_VARIANT_FAILED"
 
 
+def _finite_nonnegative(value):
+    return not isinstance(value, bool) and isinstance(value, Real) and math.isfinite(value) and value >= 0
+
+
+def _nonnegative_int(value):
+    return not isinstance(value, bool) and isinstance(value, Integral) and value >= 0
+
+
+def _timing(record):
+    return (isinstance(record, dict) and _finite_nonnegative(record.get("score_seconds"))
+            and _nonnegative_int(record.get("rss_delta_kib")))
+
+
+def _completed_fit(marker, static):
+    """An enriched completed marker equals its static evidence plus one valid fit_seconds."""
+    return (isinstance(marker, dict) and set(marker) == set(static) | {"fit_seconds"}
+            and _finite_nonnegative(marker.get("fit_seconds"))
+            and canonical_json({key: value for key, value in marker.items() if key != "fit_seconds"})
+            == canonical_json(static))
+
+
 _NOT_ADMITTED = object()
 _FREEZE_CACHE_BYTES = 32 << 20
 
@@ -95,7 +119,12 @@ class SearchTrials:
     def _refused(self, key, error):
         problem = _problem(error.problem)
         try:
-            self._append("terminal:" + key, {"status": "refused", "problem": problem})
+            body = {"status": "refused", "problem": problem}
+            completed = self._read("execution:" + key)
+            if _timing(completed):
+                body.update({"score_seconds": completed["score_seconds"],
+                             "rss_delta_kib": completed["rss_delta_kib"]})
+            self._append("terminal:" + key, body)
         except (OpsError, OSError, sqlite3.Error) as publication_error:
             raise error from publication_error
 
@@ -230,14 +259,18 @@ class SearchTrials:
 
         def progress(state, fit):
             index = len(fits)
-            if (index >= len(expected) or canonical_json(fit) != canonical_json(expected[index])
-                    or (state == "started") == bool(pending)):
+            if index >= len(expected) or (state == "started") == bool(pending):
+                raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search fit progress differs from admitted inputs")
+            if state == "started":
+                if canonical_json(fit) != canonical_json(expected[index]):
+                    raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search fit progress differs from admitted inputs")
+                pending.append(fit)
+            elif not _completed_fit(fit, expected[index]):
                 raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search fit progress differs from admitted inputs")
             self._append("fit-" + state + ":" + key + ":" + str(fit["horizon_sessions"]), fit, replay=False)
-            if state == "started":
-                pending.append(fit)
-            else:
-                fits.append(pending.pop())
+            if state == "completed":
+                pending.pop()
+                fits.append(expected[index])
 
         # The child streams the admitted manifest's shards itself; no inputs cross the pipe.
         admitted = self._read("inputs:" + key)
@@ -247,9 +280,10 @@ class SearchTrials:
             resolved = resolved_limits(self.conn, self.store, self.registration, plan, limits)
         result = run_fitted_trial(source, inner, plan, execution, resolved, progress)
         succeeded = isinstance(result, dict) and result.get("event") == "succeeded"
-        if (not isinstance(result, dict) or result.get("event") not in ("succeeded", "failed")
-                or (succeeded and (pending or len(fits) != len(plan["horizons"]) or set(result) != {"event", "forecasts"} | diagnostic_keys(self.registration.document)))
-                or (not succeeded and (len(pending) != 1 or set(result) != {"event"}))):
+        timing = {"score_seconds", "rss_delta_kib"}
+        if (not isinstance(result, dict) or result.get("event") not in ("succeeded", "failed") or not _timing(result)
+                or (succeeded and (pending or len(fits) != len(plan["horizons"]) or set(result) != {"event", "forecasts"} | timing | diagnostic_keys(self.registration.document)))
+                or (not succeeded and (len(pending) != 1 or set(result) != {"event"} | timing))):
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search fit completion differs from admitted attempts")
         # run_fitted_trial has returned only after checking exit and reaping the child.
         # Bind the admitted id (a manifest hash for sharded cohorts), the id reconcile compares.
@@ -258,6 +292,7 @@ class SearchTrials:
         evidence = {"attempt": attempt, "fit_attempt_count": len(fits) + len(pending),
                     "completed_fit_count": len(fits), "fits": fits, "status": result["event"],
                     "forecasts_id": content_hash(result["forecasts"]) if succeeded else None,
+                    "score_seconds": result["score_seconds"], "rss_delta_kib": result["rss_delta_kib"],
                     **diagnostic_evidence(result, execution, plan["horizons"])}
         self._append("execution:" + key, evidence, replay=False)
         self._record(outer_year, inner_year, candidate_id, native=True, **({"forecasts": result["forecasts"]} if succeeded
@@ -310,7 +345,13 @@ class SearchTrials:
             if not isinstance(result, dict) or result.get("event") not in ("succeeded", "failed"):
                 raise ValueError
             succeeded = result["event"] == "succeeded"
-            if set(result) != (({"event", "forecasts"} | diagnostic_keys(self.registration.document)) if succeeded else {"event"}):
+            timing = {"score_seconds", "rss_delta_kib"}
+            timed = "score_seconds" in result or "rss_delta_kib" in result
+            if timed:
+                if (not _timing(result)
+                        or set(result) != (({"event", "forecasts"} | timing | diagnostic_keys(self.registration.document)) if succeeded else {"event"} | timing)):
+                    raise ValueError
+            elif set(result) != (({"event", "forecasts"} | diagnostic_keys(self.registration.document)) if succeeded else {"event"}):
                 raise ValueError
             forecasts = None
             if succeeded:
@@ -339,15 +380,24 @@ class SearchTrials:
             if not 1 <= count <= len(expected) or (succeeded and count != len(expected)):
                 raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search execution accounting differs")
             for index, fit in enumerate(expected):
+                if index < completed:
+                    completed_ok = (_completed_fit(completed_fits[index], fit) if timed
+                                    else canonical_json(completed_fits[index]) == canonical_json(fit))
+                else:
+                    completed_ok = completed_fits[index] is None
                 if (canonical_json(started_fits[index]) != canonical_json(fit if index < count else None)
-                        or canonical_json(completed_fits[index]) != canonical_json(fit if index < completed else None)):
+                        or not completed_ok):
                     raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search execution accounting differs")
         except (ValueError, TypeError, KeyError, OverflowError):
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search durable execution result differs") from None
-        return result, {"attempt": attempt, "fit_attempt_count": count, "completed_fit_count": completed,
-                        "fits": expected[:completed], "status": result["event"],
-                        "forecasts_id": content_hash(forecasts) if succeeded else None,
-                        **diagnostic_evidence(result, execution, plan["horizons"])}
+        receipt = {"attempt": attempt, "fit_attempt_count": count, "completed_fit_count": completed,
+                   "fits": expected[:completed], "status": result["event"],
+                   "forecasts_id": content_hash(forecasts) if succeeded else None,
+                   **diagnostic_evidence(result, execution, plan["horizons"])}
+        if timed:
+            receipt.update({"score_seconds": result["score_seconds"],
+                            "rss_delta_kib": result["rss_delta_kib"]})
+        return result, receipt
 
     @staticmethod
     def _fit_evidence(inputs, inner, plan, execution):
@@ -415,7 +465,11 @@ class SearchTrials:
                 raise OpsError(from_document(Problem, problem))
             if self._read("inputs:" + key) is None:
                 raise fail("EXPERIMENT_IDENTITY_CONFLICT", "trial has no admitted native inputs")
-            terminal = self._append("terminal:" + key, {"status": "failed", "problem": problem}, absent=("forecasts:" + key,))
+            body = {"status": "failed", "problem": problem}
+            if execution is not None and _timing(completed):
+                body.update({"score_seconds": completed["score_seconds"],
+                             "rss_delta_kib": completed["rss_delta_kib"]})
+            terminal = self._append("terminal:" + key, body, absent=("forecasts:" + key,))
             # Native execute/reconcile verifies the receipt once at its return boundary.
             return terminal if native else self._terminal(plan, outer_year, inner_year, candidate_id)[1]
         if submitted is None:
@@ -453,9 +507,20 @@ class SearchTrials:
         scored = [{**row, "absolute_move_pct": targets[row["event_id"]]}
                   for row in submitted if row["event_id"] in targets]
         try:
-            terminal = {"status": "succeeded", "inputs_id": admitted["inputs_id"],
-                        "validation_id": content_hash(validation), "evaluation_inputs": validation["evaluation_inputs"],
-                        "predictions": scored, "metrics": magnitude_metrics(scored)}
+            if execution is not None and _timing(completed):
+                metric_start = time.monotonic()
+                metrics = magnitude_metrics(scored)
+                metric_seconds = time.monotonic() - metric_start
+                terminal = {"status": "succeeded", "inputs_id": admitted["inputs_id"],
+                            "validation_id": content_hash(validation), "evaluation_inputs": validation["evaluation_inputs"],
+                            "predictions": scored, "metrics": metrics,
+                            "score_seconds": completed["score_seconds"] + metric_seconds,
+                            "rss_delta_kib": completed["rss_delta_kib"],
+                            "inner_metrics": self._inner_metrics(scored, plan["horizons"])}
+            else:
+                terminal = {"status": "succeeded", "inputs_id": admitted["inputs_id"],
+                            "validation_id": content_hash(validation), "evaluation_inputs": validation["evaluation_inputs"],
+                            "predictions": scored, "metrics": magnitude_metrics(scored)}
         except OpsError as error:
             if _candidate_failure(_problem(error.problem)):
                 self._refused(key, error)
@@ -469,6 +534,23 @@ class SearchTrials:
                 or validation["inputs_id"] != admitted["inputs_id"]):
             raise ValueError
         validate_targets(inputs["preflight"], inner, validation["evaluation_inputs"], validation["targets"])
+
+    @staticmethod
+    def _inner_metrics(predictions, horizons):
+        """Large-move diagnostics on scored rows, one ordered object per plan horizon."""
+        result = []
+        for horizon in horizons:
+            rows = [row for row in predictions if row["horizon_sessions"] == horizon]
+            metrics = magnitude_metrics(rows)
+            large = [row for row in rows if row["absolute_move_pct"] >= 10.0]
+            under = (sum(1 for row in large if row["predicted_absolute_move_pct"] < row["absolute_move_pct"])
+                     / len(large)) if large else None
+            shortfall = (sum(max(row["absolute_move_pct"] - row["predicted_absolute_move_pct"], 0.0)
+                             for row in large) / len(large)) if large else None
+            result.append({"horizon_sessions": horizon, "count": metrics["count"], "mae": metrics["mae"],
+                           "rmse": metrics["rmse"], "large_move_underprediction_rate": under,
+                           "large_move_mean_shortfall": shortfall})
+        return result
 
     def _terminal(self, plan, outer_year, inner_year, candidate_id):
         key, record = self._terminal_record(plan, outer_year, inner_year, candidate_id)
@@ -488,8 +570,16 @@ class SearchTrials:
         try:
             expected = {"trial_id": key, "outer_year": owner_year, "inner_year": inner_year, "candidate": candidate}
             attempt = self._read("execution-start:" + key)
-            if attempt is not None:
+            native = attempt is not None
+            timed = False
+            if native:
                 expected["execution"] = attempt
+                execution = self._read("execution:" + key)
+                if not isinstance(execution, dict):
+                    raise ValueError
+                timed = "score_seconds" in execution or "rss_delta_kib" in execution
+                if timed and not _timing(execution):
+                    raise ValueError
             if canonical_json(self._read("start:" + key)) != canonical_json(expected):
                 raise ValueError
             admitted = self._read("inputs:" + key)
@@ -507,7 +597,10 @@ class SearchTrials:
                 validation = self._read("validation:" + admitted["cohort"])
                 self._validation(inner, admitted, cohort, validation)
             if record["status"] == "succeeded":
-                if set(record) != {"status", "inputs_id", "validation_id", "evaluation_inputs", "predictions", "metrics"}:
+                fields = {"status", "inputs_id", "validation_id", "evaluation_inputs", "predictions", "metrics"}
+                if timed:
+                    fields |= {"score_seconds", "rss_delta_kib", "inner_metrics"}
+                if set(record) != fields:
                     raise ValueError
                 forecasts = [{name: row[name] for name in ("event_id", "horizon_sessions", "predicted_absolute_move_pct")}
                              for row in record["predictions"]]
@@ -526,8 +619,20 @@ class SearchTrials:
                     metrics = magnitude_metrics(record["predictions"])
                 except (OpsError, OverflowError):
                     raise ValueError from None
-                if record["metrics"] != metrics:
+                if canonical_json(record["metrics"]) != canonical_json(metrics):
                     raise ValueError
+                if timed:
+                    try:
+                        inner_metrics = self._inner_metrics(record["predictions"], plan["horizons"])
+                    except OpsError:
+                        raise ValueError from None
+                    if (not _finite_nonnegative(record.get("score_seconds"))
+                            or not _nonnegative_int(record.get("rss_delta_kib"))
+                            or record["score_seconds"] < execution["score_seconds"]
+                            or canonical_json(record["rss_delta_kib"])
+                            != canonical_json(execution["rss_delta_kib"])
+                            or canonical_json(record["inner_metrics"]) != canonical_json(inner_metrics)):
+                        raise ValueError
             elif record["status"] not in ("failed", "refused"):
                 raise ValueError
             else:
@@ -535,10 +640,19 @@ class SearchTrials:
                     normalized = _problem(from_document(Problem, record["problem"]))
                 except OpsError:
                     raise ValueError from None
-                if (set(record) != {"status", "problem"} or normalized != record["problem"]
+                fields = {"status", "problem"} | ({"score_seconds", "rss_delta_kib"} if timed else set())
+                if (set(record) != fields or normalized != record["problem"]
                         or not _candidate_failure(normalized)
                         or (record["status"] == "failed") != (submitted is None)):
                     raise ValueError
+                if timed:
+                    if (not _finite_nonnegative(record.get("score_seconds"))
+                            or not _nonnegative_int(record.get("rss_delta_kib"))
+                            or canonical_json(record["score_seconds"])
+                            != canonical_json(execution["score_seconds"])
+                            or canonical_json(record["rss_delta_kib"])
+                            != canonical_json(execution["rss_delta_kib"])):
+                        raise ValueError
         except (ValueError, TypeError, KeyError, OverflowError):
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search trial evidence chain differs") from None
         return key, record
