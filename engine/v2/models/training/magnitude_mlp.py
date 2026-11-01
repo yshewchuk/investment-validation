@@ -25,7 +25,15 @@ def fit_mlp_predictions(recipe, train_features, train_labels, prediction_feature
     model = build_estimator(recipe)
     with threadpool_limits(limits=1), warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always", ConvergenceWarning)
-        model.fit(train, labels)
+        warnings.filterwarnings("error", message=r"^Training interrupted by user\.$",
+            category=UserWarning, module=r"^sklearn\.neural_network\._multilayer_perceptron$")
+        try:
+            model.fit(train, labels)
+        except UserWarning as error:
+            if (str(error) == "Training interrupted by user."
+                    and isinstance(error.__context__, KeyboardInterrupt)):
+                raise error.__context__ from None
+            raise
         if any(issubclass(item.category, ConvergenceWarning) for item in caught):
             raise ValueError("MLP convergence failed; no retry permitted")
         network = model.regressor_[-1]

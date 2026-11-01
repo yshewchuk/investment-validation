@@ -32,7 +32,9 @@ recipe hash, iteration count and standardized-target optimizer loss (including L
 not a selection score). A convergence warning,
 nonfinite fitted weights/loss or nonfinite inverse-transformed prediction raises
 `ValueError`, with no partial result, fallback or retry; unrelated warning classes
-are not convergence failures. Invalid recipe/order/matrices/label domain refuse
+are not convergence failures. Sklearn's exact interrupted-training warning restores
+its original `KeyboardInterrupt`, even under ignored warnings; no success result returns.
+Invalid recipe/order/matrices/label domain refuse
 before fitting. Repeated inputs in the same numerical environment fit afresh
 deterministically; there is no cache, I/O, publication or journal replay here.
 

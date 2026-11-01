@@ -204,13 +204,14 @@ def test_prediction_rows_cannot_influence_training_or_preprocessing(monkeypatch)
 
 
 @pytest.mark.parametrize("warning,refuses", [(ConvergenceWarning, True), (UserWarning, False)])
-def test_only_convergence_warnings_refuse_without_retry(monkeypatch, warning, refuses):
+@pytest.mark.parametrize("message", ["synthetic warning", "Training interrupted by user."])
+def test_only_convergence_warnings_refuse_without_retry(monkeypatch, warning, refuses, message):
     original = TransformedTargetRegressor.fit
     calls = []
     def warned(self, *args, **kwargs):
         calls.append(1)
         result = original(self, *args, **kwargs)
-        warnings.warn("synthetic warning", warning)
+        warnings.warn(message, warning)
         return result
     monkeypatch.setattr(TransformedTargetRegressor, "fit", warned)
     if refuses:
@@ -312,3 +313,23 @@ def test_variable_width_features_keep_the_informative_last_column(width):
     result = fit(recipe(columns=columns), (train, 10 + 2 * signal, prediction), columns=columns)
     assert result["input_features"] == 1
     assert result["predictions"][1] > result["predictions"][0] + 3
+
+
+@pytest.mark.parametrize("warning_filter", ["always", "ignore", "error"])
+def test_interrupted_sklearn_training_preserves_original_interrupt(monkeypatch, warning_filter):
+    original = MLPRegressor._backprop
+    interrupt, calls = KeyboardInterrupt("synthetic cancellation"), []
+    def interrupted(self, *args, **kwargs):
+        calls.append(self.n_iter_)
+        if len(calls) == 2:
+            raise interrupt
+        return original(self, *args, **kwargs)
+    monkeypatch.setattr(MLPRegressor, "_backprop", interrupted)
+    monkeypatch.setattr(TransformedTargetRegressor, "predict",
+                        lambda *a, **k: pytest.fail("interrupted fit reached prediction"))
+    with warnings.catch_warnings():
+        warnings.simplefilter(warning_filter, UserWarning)
+        with pytest.raises(KeyboardInterrupt) as caught:
+            fit()
+    assert caught.value is interrupt
+    assert calls == [0, 1]  # One complete epoch, then cancellation; no hidden retry.

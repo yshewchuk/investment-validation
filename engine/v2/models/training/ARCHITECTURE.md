@@ -29,7 +29,7 @@ NumPy/pandas, sklearn and threadpoolctl implement numeric fits; joblib/parquet a
 | Condition | Outcome |
 | --- | --- |
 | Missing/invalid input | Dataset errors use `RecipeDataError`; unsupported estimators use `UnsupportedEstimator`; D14 retains typed data refusals. Chooser missing files raise `FileNotFoundError`, invalid/oversized sources `ValueError`. MLP rejects invalid policy/order/matrices/labels before fitting. |
-| Guards/numeric failure | `RuntimeFitForbidden` from either guard precedes MLP inspection. Convergence warnings or nonfinite weights/loss/predictions raise `ValueError`, no partial result; unrelated warnings are not convergence failures. Other fitters retain their documented errors. |
+| Guards/numeric failure | `RuntimeFitForbidden` from either guard precedes MLP inspection. Convergence warnings or nonfinite weights/loss/predictions raise `ValueError`, no partial result; unrelated warnings are not convergence failures. Sklearn's interrupted-training warning re-raises its original `KeyboardInterrupt`, never successful evidence. Other fitters retain their documented errors. |
 | Cache/retry | Numeric fits are fresh, uncached and never retried. Job resume verifies identity, file hashes and rederived receipts before retaining a completed fold; mismatches raise `TrainingRefused`. |
 | Transaction/partial write | Numeric fitters have no I/O/transaction. Jobs publish each completed fold by rename, not an all-job transaction; prior folds survive failure and interrupted partial directories are removed on explicit resume. |
 | Idempotency | Same-environment MLP calls fit afresh deterministically; completed job folds are verified and not refit. A new dataset/recipe needs a new job identity, not silent replacement. |
