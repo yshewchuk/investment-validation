@@ -447,7 +447,7 @@ def test_collect_admits_every_stored_limit_before_any_replay(outer_case, monkeyp
     assert (case.conn.total_changes, journal_slots(case)) == before
 
 
-@pytest.mark.parametrize("kind", ["missing", "extra", "nonfinite", "boolean"])
+@pytest.mark.parametrize("kind", ["missing", "extra", "nonfinite", "boolean", "reversed"])
 def test_bad_child_forecasts_refuse_before_outer_labels(outer_case, monkeypatch, kind):
     original = outer.run_fitted_trial
     def fitted(*args):
@@ -457,6 +457,8 @@ def test_bad_child_forecasts_refuse_before_outer_labels(outer_case, monkeypatch,
             rows.pop()
         elif kind == "extra":
             rows.append(rows[0])
+        elif kind == "reversed":
+            rows.reverse()
         else:
             rows[0]["predicted_absolute_move_pct"] = float("nan") if kind == "nonfinite" else True
         return result
@@ -464,8 +466,14 @@ def test_bad_child_forecasts_refuse_before_outer_labels(outer_case, monkeypatch,
     monkeypatch.setattr(outer, "load_magnitude_targets", lambda *a, **kw: pytest.fail("invalid forecast opened labels"))
     with outer_problem("EXPERIMENT_IDENTITY_CONFLICT", CONFLICT):
         run(outer_case)
-    assert slot(outer_case, "forecasts") is None
-    assert slot(outer_case, "terminal") is None
+    for name in ("worker-result", "execution", "forecasts", "validation", "terminal"):
+        assert slot(outer_case, name) is None
+    assert slot(outer_case, "start") is not None
+    monkeypatch.setattr(outer, "run_fitted_trial", lambda *a: pytest.fail("unfinished outer claim retried fitting"))
+    before = outer_case.conn.total_changes
+    with outer_problem("EXPERIMENT_IDENTITY_CONFLICT", "search journal slot is already committed"):
+        run(outer_case)
+    assert outer_case.conn.total_changes == before
 
 
 def test_outer_child_receives_only_prior_training_labels(outer_case, monkeypatch):

@@ -286,6 +286,8 @@ def _execute_admitted(conn, store, repository, registration, plan, fold, selecti
                                    or result.get("event") != "failed" or len(pending) != 1))):
         raise _conflict()
     forecasts = _forecasts(result["forecasts"], fold, plan["horizons"], forecast_target(plan, execution.get("fit_recipe", {}))) if succeeded else None
+    if succeeded:
+        _equal(result["forecasts"], forecasts)
     receipt = {"status": result["event"], "fits": fits, "fit_attempt_count": len(fits) + len(pending),
                "completed_fit_count": len(fits), "forecasts_id": content_hash(forecasts) if succeeded else None,
                **diagnostic_evidence(result, execution, plan["horizons"], inputs, fold)}

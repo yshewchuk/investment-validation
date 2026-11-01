@@ -271,3 +271,18 @@ def test_worker_uses_shared_timing_failure_envelope_and_serializes_fallbacks(tmp
             "recipe_id": content_hash(execution["fit_recipe"]), **detail}]
     else:
         assert set(result) == {"event", "score_seconds", "rss_delta_kib"}
+
+
+@pytest.mark.parametrize("changes", [
+    {"current_quote_status": "invalid"}, {"has_implied_quote": 1},
+    {"n_prior": -1}, {"n_prior": True}, {"n_prior": 3.0},
+])
+@pytest.mark.parametrize("candidate", [False, True])
+def test_target_mask_does_not_skip_existing_metadata_refusal(candidate, changes):
+    inputs, fold = _inputs(1)
+    inputs["training"][0]["absolute_move_pct"] = 250.0
+    inputs["features"][0].update(changes)
+    execution = _execution() if candidate else {"schema_version": "size_comparison_execution.v1",
+        "features": comparator.COLUMNS, "fit_recipe": comparator.recipe()}
+    with pytest.raises(ValueError, match="^invalid admitted quote/history metadata$"):
+        _run(inputs, fold, execution=execution)

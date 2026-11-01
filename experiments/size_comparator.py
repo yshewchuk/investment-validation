@@ -98,8 +98,8 @@ def fit_evidence(inputs, fold, plan):
 
 def _fit_rows(indexed, training, evaluation_ids, horizon):
     training = [(r["event_id"], _values(indexed[r["event_id"], horizon])[0], r["absolute_move_pct"])
-                for r in training if 0 <= r["absolute_move_pct"] <= 200]
-    return ([row for row in training if row[1] is not None],
+                for r in training]
+    return ([row for row in training if row[1] is not None and 0 <= row[2] <= 200],
             [(event, *_values(indexed[event, horizon])) for event in evaluation_ids])
 
 
