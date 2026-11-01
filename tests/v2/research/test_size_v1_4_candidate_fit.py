@@ -89,6 +89,15 @@ def test_normalize_forecasts_allows_incomplete_nonempty_subset_but_strict_path_r
         normalize_forecasts(rows[:1], fold, [5], allow_incomplete=True)
 
 
+@pytest.mark.parametrize("allow_incomplete,prediction", [(1, -2.5), ("false", -2.5), (None, 2.5)])
+def test_normalize_forecasts_rejects_non_boolean_allow_incomplete(allow_incomplete, prediction):
+    fold = {"evaluation_event_ids": ["a"]}
+    rows = [{"event_id": "a", "horizon_sessions": 5, "predicted_absolute_move_pct": prediction}]
+
+    with pytest.raises(ValueError):
+        normalize_forecasts(rows, fold, [5], allow_incomplete=allow_incomplete)
+
+
 def test_insufficient_training_abstentions_are_counted():
     training_ids = [f"train-{index}" for index in range(499)]
     features = [_row(event_id) for event_id in training_ids + ["held-out"]]
@@ -179,16 +188,21 @@ def test_size_terminal_replay_validates_raw_grid_and_rejects_empty_storage():
 
 def test_size_diagnostics_are_reconstructed_from_admitted_rows():
     training = pd.DataFrame([{"event_id": "train", "absolute_move_pct": 10.0}])
-    features, fold, plan = [_row("train"), _row("eval")], {"evaluation_event_ids": ["eval"]}, {"horizons": [5]}
+    features, fold, plan = [_row("train", n_prior=3), _row("eval")], {"evaluation_event_ids": ["eval"]}, {"horizons": [5]}
     execution = _size_execution()
     indexed = {(row["event_id"], 5): row for row in features}
     result = comparator.forecasts(indexed, training, fold, plan, execution, progress=lambda *args: None)
     worker = {"event": "succeeded", "diagnostics": [{"schema_version": "size_v1_4_fit.v1",
         "recipe_id": content_hash(execution["fit_recipe"]), **result["fit_details"][0]}]}
     assert worker["diagnostics"][0]["abstention_counts"] == {"insufficient_training": 1}
+    assert worker["diagnostics"][0]["training_abstention_counts"] == {"insufficient_history": 1}
     inputs = {"features": features, "training": training.to_dict("records")}
     assert diagnostic_evidence(worker, execution, [5], inputs=inputs, fold=fold) == {"diagnostics": worker["diagnostics"]}
-    for field, poisoned in (("training_event_ids", ["invented"]), ("abstention_counts", {})):
+    for field, poisoned in (
+            ("training_event_ids", ["invented"]), ("abstention_counts", {}),
+            ("logical_fits", False), ("component_fits", False),
+            ("abstention_counts", {"insufficient_training": True}),
+            ("training_abstention_counts", {"insufficient_history": True})):
         corrupted = {"event": "succeeded", "diagnostics": [dict(worker["diagnostics"][0])]}
         corrupted["diagnostics"][0][field] = poisoned
         with pytest.raises(OpsError):

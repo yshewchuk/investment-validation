@@ -69,6 +69,12 @@ def evidence(result, execution, horizons, *, inputs=None, fold=None):
                 expected_size = {"training_event_ids": training_ids, "logical_fits": logical_fits,
                                  "component_fits": 2 * logical_fits, "abstention_counts": abstention_counts,
                                  "training_abstention_counts": training_abstention_counts}
+                if (type(item["logical_fits"]) is not int or type(item["component_fits"]) is not int
+                        or not isinstance(item["abstention_counts"], dict)
+                        or not isinstance(item["training_abstention_counts"], dict)
+                        or any(type(v) is not int for v in item["abstention_counts"].values())
+                        or any(type(v) is not int for v in item["training_abstention_counts"].values())):
+                    raise ValueError
                 if any(item[k] != expected_size[k] for k in expected_size):
                     raise ValueError
         return {"diagnostics": diagnostics}

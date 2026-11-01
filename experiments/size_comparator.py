@@ -7,11 +7,12 @@ from threadpoolctl import threadpool_limits
 
 from engine.v2.foundation import content_hash
 from engine.v2.models.frozen_state_io import BoundedStateReadError
-from engine.v2.models.magnitude_size_v1_4_recipe import FEATURES, size_v1_4_recipe
+from engine.v2.models.magnitude_size_v1_4_recipe import FEATURES as _SIZE_FEATURES, size_v1_4_recipe
 from engine.v2.models.training.estimators import fit_recipe_estimator
 from engine.v2.models.training.recipes import RecipeKey, current_recipes
 from engine.v2.ops.errors import fail
 
+FEATURES = list(_SIZE_FEATURES)
 COLUMNS = list(dict.fromkeys(["n_prior", *[{'or_implied': 'implied_move',
     'or_rvol30': 'rvol30'}.get(name, name) for name in FEATURES], "current_quote_status"]))
 

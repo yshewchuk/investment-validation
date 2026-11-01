@@ -64,6 +64,8 @@ def fit_evidence(inputs, fold, plan, execution):
 
 def normalize_forecasts(rows, fold, horizons, *, strict_json=False, allow_incomplete=False):
     """Require a complete raw row grid; explicit None values are dropped only in the opt-in path."""
+    if type(allow_incomplete) is not bool:
+        raise ValueError("allow_incomplete must be a bool")
     return normalize_regression_forecasts(rows, fold, horizons,
         prediction_column="predicted_absolute_move_pct",
         target_domain="signed" if allow_incomplete else "nonnegative",
