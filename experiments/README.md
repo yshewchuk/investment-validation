@@ -321,7 +321,7 @@ python -m experiments.v2_magnitude_search_run collect "${common[@]}"
 These three search actions accept `--max-registration-bytes` (default 16777216); use an explicit larger finite budget for a larger saved registration. The shared loader validator requires an integer from 1 through `2**62 - 1` before storage access; here the option affects initial registration loading, not saved identity or later read policies. Prediction/gate registration also applies it before reservation, as described above.
 
 `run_search(conn, store, repository, registration, request, plan_ref, *, limits,
-collect_results=True)`
+collect_results=True, before_dispatch=None)`
 is the same orchestration API used by the contained SIZE runner. Only `magnitude_search_request.v2` and `.v3`
 requests may declare `workers` from 1 through 8 (omission means 1); a declared
 field on a legacy or regression request refuses before admission. This execution

@@ -331,7 +331,7 @@ def test_no_fit_probe_does_not_claim_comparator(case):
     assert case.conn.execute("SELECT COUNT(*) FROM magnitude_search_records").fetchone()[0] == before
 
 
-def test_real_serial_and_parallel_trials_have_equal_journaled_fit_results(tmp_path):
+def test_real_serial_and_parallel_trials_have_equal_journaled_fit_results(tmp_path, monkeypatch):
     def build(root, workers):
         root.mkdir()
         generator = panel_data.__wrapped__(root, SimpleNamespace())
@@ -384,8 +384,23 @@ def test_real_serial_and_parallel_trials_have_equal_journaled_fit_results(tmp_pa
         assert [candidate["candidate_id"] for candidate in serial_plan["candidates"]] == [
             candidate["candidate_id"] for candidate in parallel_plan["candidates"]]
 
+        from experiments import v2_magnitude_search_run as search_run_module
+        original_executor = search_run_module.ProcessPoolExecutor
+        executor_calls = []
+
+        def spy_executor(*args, **kwargs):
+            executor_calls.append(kwargs.get("max_workers"))
+            return original_executor(*args, **kwargs)
+
+        monkeypatch.setattr(search_run_module, "ProcessPoolExecutor", spy_executor)
+
         run_search(*serial, limits=serial[4]["limits"]["child"])
+        serial_executor_calls = list(executor_calls)
         run_search(*parallel, limits=parallel[4]["limits"]["child"])
+        parallel_executor_calls = executor_calls[len(serial_executor_calls):]
+
+        assert serial_executor_calls == []
+        assert parallel_executor_calls == [2]
 
         from experiments.magnitude_search_plan import trial_key
         from experiments.magnitude_search_records import read_record
