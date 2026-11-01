@@ -79,6 +79,10 @@ def _dispatch(args, conn, store, repository, request, began, *, probe=False):
         ref = from_document(ArtifactRef, _input_document(args.source_plan_ref))
     except (DocumentError, TypeError):
         raise fail("INVALID_EXPERIMENT_SPEC", "invalid distribution lifecycle metadata") from None
+    except OpsError as error:
+        if error.code != "INVALID_REQUEST":
+            raise
+        raise fail("INVALID_EXPERIMENT_SPEC", "invalid distribution lifecycle metadata") from None
     source_request = _input_document(args.source_request)
     recipe = validate_candidate_recipe(_input_document(args.recipe))
     caps = _input_document(args.budget_caps)
