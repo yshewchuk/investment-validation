@@ -45,17 +45,13 @@ def evidence(result, execution, horizons):
             elif size:
                 event_ids = item["training_event_ids"]
                 if (not isinstance(event_ids, list) or any(type(v) is not str for v in event_ids)
-                        or len(set(event_ids)) != len(event_ids)):
+                        or len(set(event_ids)) != len(event_ids)
+                        or type(item["logical_fits"]) is not int or item["logical_fits"] not in (0, 1)
+                        or type(item["component_fits"]) is not int or item["component_fits"] != 2 * item["logical_fits"]
+                        or any(not isinstance(counts, dict) or any(
+                            type(k) is not str or not k or type(v) is not int or v <= 0 for k, v in counts.items())
+                            for counts in (item["abstention_counts"], item["training_abstention_counts"]))):
                     raise ValueError
-                logical_fits = item["logical_fits"]
-                if type(logical_fits) is not int or logical_fits not in (0, 1):
-                    raise ValueError
-                if type(item["component_fits"]) is not int or item["component_fits"] != 2 * logical_fits:
-                    raise ValueError
-                for counts in (item["abstention_counts"], item["training_abstention_counts"]):
-                    if not isinstance(counts, dict) or any(
-                            type(k) is not str or not k or type(v) is not int or v <= 0 for k, v in counts.items()):
-                        raise ValueError
         return {"diagnostics": diagnostics}
     except (KeyError, TypeError, ValueError):
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "v2 fit diagnostics differ from bound recipe") from None

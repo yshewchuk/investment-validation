@@ -986,10 +986,10 @@ an uncaught traceback instead.
 
 ## Source-free regression evidence
 
-`regression_evidence.normalize_forecasts` validates exact supplied event/horizon coverage, explicit prediction-column names and signed/nonnegative domains; complete finite Real/Integral rows normalize to detached ordered JSON floats/ints. Strict JSON mode rejects non-native numeric types; Booleans, duplicates, extra fields and nonfinite values refuse.
+`regression_evidence.normalize_forecasts` validates exact supplied event/horizon coverage, explicit prediction-column names and signed/nonnegative domains; complete finite Real/Integral rows normalize to detached ordered JSON floats/ints. Opt-in `allow_abstentions=True` still requires unique rows for the full event/horizon set, accepts `None` predictions, drops those abstentions from normalized output and refuses if no scored predictions remain. Strict JSON mode rejects non-native numeric types; Booleans, duplicates, extra fields and nonfinite values refuse.
 `error_metrics` pools finite residuals at equal row weight, scaling before squaring, and returns count/RMSE/MAE; empty, nonnumeric or nonfinite residuals refuse. Complete equal horizon coverage yields equal event weight; the caller owns that coverage and the subtraction producing residuals.
 Both helpers raise numeric/structural exceptions without partial results, I/O, fitting, cache, retries or publication. They use stdlib arithmetic/statistics. Membership/domain arguments are caller declarations, not sealed target identity, source admission or holdout authority.
-Existing experiment magnitude normalization delegates with fixed nonnegative domain/column; magnitude metrics preserve their typed failure envelope and numeric results. Signed use is an additive platform primitive, not a registered IV experiment.
+Experiment magnitude normalization delegates with the fixed prediction column: complete generic forecasts keep the nonnegative domain, while SIZE v1.4 opts into the signed domain and explicit abstentions. Magnitude metrics preserve their typed failure envelope and numeric results. Signed use is an additive platform primitive, not a registered IV experiment.
 
 ## Diagram
 

@@ -38,6 +38,10 @@ def main():
             current_ru_maxrss_kib = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
             return max(0, current_kib - rss_before_kib, current_ru_maxrss_kib - rss_before_maxrss_kib)
 
+        def result_timing():
+            return {"score_seconds": max(0.0, time.monotonic() - started),
+                    "rss_delta_kib": rss_delta_kib()}
+
         # The header holds a manifest, which the journal caps at MAX_BYTES, so a larger file is not a header.
         with open(sys.argv[1], "rb") as stream:
             payload = stream.read(MAX_BYTES + 1)
@@ -66,8 +70,14 @@ def main():
                 and request["execution"]["fit_recipe"].get("schema_version") == "size_causal_comparator.v1"):
             from engine.v2.foundation import content_hash
             from experiments.size_comparator import forecasts
-            result = forecasts(indexed, pd.DataFrame(inputs["training"]), request["inner"], request["plan"],
-                               request["execution"], progress=progress)
+            try:
+                result = forecasts(indexed, pd.DataFrame(inputs["training"]), request["inner"], request["plan"],
+                                   request["execution"], progress=progress)
+            except OpsError as error:
+                if error.code != "EXPERIMENT_VARIANT_FAILED":
+                    raise
+                emit({"event": "failed", **result_timing()})
+                return
             recipe_id = content_hash(request["execution"]["fit_recipe"])
             emit({"event": result["event"],
                 "forecasts": [{"event_id": row["event_id"], "horizon_sessions": row["horizon_sessions"],
@@ -80,7 +90,8 @@ def main():
                     "component_fits": detail["component_fits"],
                     "abstention_counts": detail["abstention_counts"],
                     "training_abstention_counts": detail["training_abstention_counts"]}
-                    for detail in result["fit_details"]]})
+                    for detail in result["fit_details"]],
+                **result_timing()})
             return
         diagnostics = []
         try:

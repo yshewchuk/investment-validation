@@ -101,3 +101,52 @@ def test_insufficient_training_abstentions_are_counted():
     forecasts = {row["event_id"]: row for row in result["forecasts"]}
     assert forecasts["held-out"]["predicted_absolute_move_pct"] is None
     assert forecasts["held-out"]["abstention"] == "insufficient_training"
+
+
+@pytest.mark.parametrize("fails", [False, True])
+def test_size_candidate_worker_emits_timing_and_maps_fit_failure(tmp_path, monkeypatch, capsys, fails):
+    import json
+    import math
+    import sys
+    from types import SimpleNamespace
+
+    from engine.v2.ops.errors import fail
+    from experiments import magnitude_search_worker as worker
+
+    request = {"store_root": "/synthetic", "manifest": {}, "inputs_id": "inputs",
+        "inner": {"evaluation_event_ids": ["event"]}, "plan": {"horizons": [1]},
+        "execution": {"schema_version": "size_candidate_execution.v1", "features": [],
+                      "fit_recipe": {"schema_version": "size_causal_comparator.v1"}}}
+    path = tmp_path / "worker-request.json"
+    path.write_text(json.dumps(request))
+    limits = {"memory_bytes": 1024 ** 2, "cpu_seconds": 30, "cpu_id": 0}
+    monkeypatch.setattr(sys, "argv", ["worker", str(path), json.dumps(limits)])
+    monkeypatch.setattr(worker.os, "sched_setaffinity", lambda *args: None)
+    monkeypatch.setattr(worker.resource, "setrlimit", lambda *args: None)
+    monkeypatch.setattr(worker, "start_rss_watchdog", lambda *args: None)
+    rss = iter((10240, 20480))
+    monkeypatch.setattr(worker, "rss_bytes", lambda: next(rss))
+    usage = iter((10, 15))
+    monkeypatch.setattr(worker.resource, "getrusage",
+                        lambda *args: SimpleNamespace(ru_maxrss=next(usage)))
+    monkeypatch.setattr("engine.v2.foundation.ArtifactStore", lambda *args: object())
+    monkeypatch.setattr("experiments.magnitude_search_inputs.load_fit_inputs",
+                        lambda *args: {"features": [], "training": []})
+
+    def forecasts(*args, **kwargs):
+        if fails:
+            raise fail("EXPERIMENT_VARIANT_FAILED", "synthetic candidate fit failure")
+        return {"event": "succeeded", "forecasts": [{"event_id": "event", "horizon_sessions": 1,
+            "predicted_absolute_move_pct": 1.0}], "fit_details": [{"horizon_sessions": 1,
+            "training_event_ids": [], "logical_fits": 0, "component_fits": 0,
+            "abstention_counts": {}, "training_abstention_counts": {}}]}
+
+    monkeypatch.setattr("experiments.size_comparator.forecasts", forecasts)
+    worker.main()
+    result = json.loads(capsys.readouterr().out)
+    assert result["event"] == ("failed" if fails else "succeeded")
+    assert type(result["score_seconds"]) is float and math.isfinite(result["score_seconds"])
+    assert result["score_seconds"] >= 0
+    assert type(result["rss_delta_kib"]) is int and result["rss_delta_kib"] == 10
+    assert set(result) == ({"event", "score_seconds", "rss_delta_kib"} if fails else
+        {"event", "forecasts", "diagnostics", "score_seconds", "rss_delta_kib"})

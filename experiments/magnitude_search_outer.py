@@ -166,9 +166,6 @@ def _replay(read, store, started, fold, plan, execution, binding):
             raise _conflict() from None
         fits = fit_evidence(inputs, fold, plan, execution)
         allow_incomplete = _allow_incomplete(execution)
-        forecasts = _forecasts(read("forecasts"), fold, plan["horizons"], allow_incomplete=allow_incomplete)
-        receipt = {"status": "succeeded", "fits": fits, "fit_attempt_count": len(fits),
-                   "completed_fit_count": len(fits), "forecasts_id": content_hash(forecasts)}
         worker = read("worker-result")
         if worker is None and execution.get("schema_version") == "size_candidate_execution.v1":
             raise _conflict()
@@ -179,9 +176,14 @@ def _replay(read, store, started, fold, plan, execution, binding):
             if worker.get("event") != "succeeded":
                 raise _conflict()
             timed_worker = "score_seconds" in worker
-            _equal(_forecasts(worker["forecasts"], fold, plan["horizons"], allow_incomplete=allow_incomplete), forecasts)
-            if diagnostic_keys(binding):
-                receipt.update(diagnostic_evidence(worker, execution, plan["horizons"]))
+            forecasts = _forecasts(worker["forecasts"], fold, plan["horizons"], allow_incomplete=allow_incomplete)
+            _equal(read("forecasts"), forecasts)
+        else:
+            forecasts = _forecasts(read("forecasts"), fold, plan["horizons"], allow_incomplete=allow_incomplete)
+        receipt = {"status": "succeeded", "fits": fits, "fit_attempt_count": len(fits),
+                   "completed_fit_count": len(fits), "forecasts_id": content_hash(forecasts)}
+        if worker is not None and diagnostic_keys(binding):
+            receipt.update(diagnostic_evidence(worker, execution, plan["horizons"]))
         _equal(read("execution"), receipt)
         for fit in fits:
             _equal(read("fit-started:" + str(fit["horizon_sessions"])), fit)

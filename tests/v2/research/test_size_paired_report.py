@@ -81,6 +81,8 @@ def test_challenger_abstention_is_counted_and_paired_metrics_keep_complete_event
     assert len(report["paired_rows"]) == 9
     assert report["challenger_abstentions"] == 1
     assert report["broad_coverage_metrics"]["challenger"]["count"] == 11
+    assert report["broad_coverage_metrics"]["challenger"]["mae"] == pytest.approx(3.5 / 11)
+    assert report["broad_coverage_metrics"]["challenger"]["rmse"] == pytest.approx(math.sqrt(1.39 / 11))
     assert report["metrics"]["challenger"]["count"] == 9
     assert sum(row["count"] for row in report["coverage"]
                if row["arm"] == "challenger" and row["forecast_status"] == "abstained") == 1
