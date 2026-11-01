@@ -41,14 +41,17 @@ def test_run_collects_outer_results_exactly_once(completed_case, monkeypatch):
 
     def fake_run_search(*context, **kwargs):
         seen.append(kwargs)
+        kwargs["before_dispatch"](1)
         return None
 
     monkeypatch.setattr(size_search, "read_record", fake_read)
     monkeypatch.setattr(size_search, "run_search", fake_run_search)
-    monkeypatch.setattr(size_search, "remaining", lambda *args: 1)
     monkeypatch.setattr(size_search.signal, "alarm", lambda seconds=0: 0)
     result = size_search._run(completed_case.context)
-    assert seen == [{"limits": completed_case.request["limits"]["child"], "collect_results": False}]
+    assert len(seen) == 1
+    assert seen[0]["limits"] == completed_case.request["limits"]["child"]
+    assert seen[0]["collect_results"] is False
+    assert callable(seen[0]["before_dispatch"])
     assert len(calls) == 1
     assert result == collect(*completed_case.context)
 

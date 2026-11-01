@@ -57,7 +57,7 @@ failure rather than a stale sentence.
 - `engine/v2/ledger` — `ArtifactRef` (P6-3: `calibration.py` round-trips the published health/report artifact reference through the `ledger_calibration_state` table).
 - `engine/v2/research` — research tools reading pinned snapshots (Phase 6 slice 6).
 - `engine/v2/models/training` — `DataQuery`, `KeyPredicate`, `TimeInterval` for bounded D14 dataset reads; `ArtifactRef` for verified original calendar bytes.
-- `experiments/v2_magnitude_search_run.py` — `ArtifactRef` for strict plan-reference admission.
+- `experiments/v2_magnitude_search_run.py` — `ArtifactRef` for strict plan-reference admission and `Problem` for typed worker-error transport.
 - `experiments/registered_runup.py` — `SnapshotRef` for explicit committed-pin admission.
 
 <!-- consumers: engine.v2.foundation, engine.v2.ops, engine.v2.data, engine.v2.serving, engine.v2.features, engine.v2.registry, engine.v2.scoring, engine.v2.models, engine.v2.ledger, engine.v2.research, engine.v2.models.training -->

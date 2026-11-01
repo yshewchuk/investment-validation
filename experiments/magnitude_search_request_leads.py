@@ -39,9 +39,12 @@ def compile_request(request, *, horizons=(5, 3, 1)):
         request = json.loads(json.dumps(request, allow_nan=False))
     except (ValueError, TypeError, OverflowError, RecursionError):
         raise fail("INVALID_EXPERIMENT_SPEC", "stage-2 request requires plain finite JSON") from None
-    base._require(base._shape(request, base._KEYS)
+    base._require((base._shape(request, base._KEYS)
+                   or base._shape(request, base._KEYS | {"workers"}))
                   and request["schema_version"] == "magnitude_search_request.v2",
                   "stage-2 request requires its closed v2 schema")
+    base.validate_workers(request)
+    request.pop("workers", None)
     base._references(request)
     base._space(request)
     counts = _counts(request, horizons)

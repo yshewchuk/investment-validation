@@ -70,10 +70,12 @@ def _run(context, *, collector=None, read_only=False):
     if not complete:
         if read_only:
             return None
-        seconds = remaining(conn, store, registration, plan)
-        previous = signal.alarm(0)
-        signal.alarm(min(previous or 1, seconds))
-        run_search(*context, limits=request["limits"]["child"], collect_results=False)
+        def before_dispatch(seconds):
+            previous = signal.alarm(0)
+            positive = [value for value in (previous, seconds) if value > 0]
+            signal.alarm(min(positive) if positive else 0)
+        run_search(*context, limits=request["limits"]["child"], collect_results=False,
+                   before_dispatch=before_dispatch)
     return (collect if collector is None else collector)(*context)
 
 
