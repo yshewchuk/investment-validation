@@ -5,8 +5,8 @@ from dataclasses import replace
 import pytest
 
 from engine.models.no_fit import no_fit_guard as legacy_no_fit
-from engine.v2.foundation import canonical_json, content_hash, from_document
 from engine.v2.contracts import ArtifactRef
+from engine.v2.foundation import canonical_json, content_hash, from_document
 from engine.v2.models.no_fit import no_fit_guard
 from engine.v2.ops.errors import OpsError
 from engine.v2.research.magnitude_panel_qualified_table import recipe
@@ -92,7 +92,7 @@ def test_compiled_horizon_subset_preserves_identity_and_scales_counts(prepared):
         "total_logical_fits": 35, "total_component_fits": 35}
 
 
-@pytest.mark.parametrize("change", ["features", "month", "events", "outer", "comparison", "caps", "shape"])
+@pytest.mark.parametrize("change", ["features", "month", "events", "outer", "comparison", "caps", "shape", "selection"])
 def test_changed_or_malformed_request_refuses_without_publication(prepared, change):  # noqa: F811
     data = prepared
     native.reserve_native_registration(data.conn, data.store, data.registration, data.spec)
@@ -110,13 +110,19 @@ def test_changed_or_malformed_request_refuses_without_publication(prepared, chan
         document["comparison"]["reference"] = "size_v1_4_causal_refit"
     elif change == "caps":
         document["max_fits"] = 101
+    elif change == "selection":
+        document["selection"] = {"metric_weights": {"rmse": 0.6, "mae": 0.3, "large_move_underprediction": 0.1},
+            "lead_weights": {"1": 1.0, "3": 0.0, "5": 0.0},
+            "large_move_threshold_pct": 10.0, "tie_band_floor": 0.005}
     else:
         document["panel_request"]["producer"] = {}
     before, objects = catalog_rows(data.conn), artifact_object_bytes(data.store)
     with pytest.raises(OpsError) as caught:
         plans.seal_search_plan(data.conn, data.store, data.registration, document)
-    assert caught.value.code == ("INVALID_EXPERIMENT_SPEC" if change in {"comparison", "caps", "shape"}
+    assert caught.value.code == ("INVALID_EXPERIMENT_SPEC" if change in {"comparison", "caps", "shape", "selection"}
                                  else "EXPERIMENT_IDENTITY_CONFLICT")
+    if change == "selection":
+        assert caught.value.problem.message == "stage-2 request requires its closed v2 schema"
     if change == "comparison":
         assert caught.value.problem.message == "regression comparison requires iv_crush_causal_refit and training_mean references"
         assert caught.value.problem.retryable is False

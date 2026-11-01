@@ -97,6 +97,8 @@ def main(argv=None):
     stack = ExitStack()
     try:
         request = _read_document(args.request)
+        if isinstance(request, dict) and request.get("schema_version") == "regression_search_request.v1":
+            raise fail("INVALID_EXPERIMENT_SPEC", "IV requires its dedicated CLI; use the admitted library path")
         panel_request = validate_panel_request(_read_document(args.panel_request)) if fresh else None
         # _contain only extracts resource ceilings here for every action; exact fit-count
         # feasibility is checked later by admitted plan validation, so non-fresh uses (1,).

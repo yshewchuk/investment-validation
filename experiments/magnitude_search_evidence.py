@@ -5,11 +5,14 @@ from numbers import Real
 from engine.v2.contracts import SnapshotRef
 from engine.v2.foundation import canonical_json, content_hash, from_document
 from engine.v2.research.magnitude_history_store import read_stored_for_events
-from engine.v2.research.regression_evidence import normalize_forecasts as normalize_regression_forecasts
 from engine.v2.research.magnitude_inputs import (
+    load_magnitude_targets,
     magnitude_recipe,
     preflight_magnitude_targets,
     qualify_magnitude_training_targets,
+)
+from engine.v2.research.regression_evidence import (
+    normalize_forecasts as normalize_regression_forecasts,
 )
 from experiments.magnitude_history_inputs import history_binding
 
@@ -62,14 +65,29 @@ def fit_evidence(inputs, fold, plan, execution):
     return result
 
 
-def normalize_forecasts(rows, fold, horizons, *, strict_json=False):
-    """Require exact finite nonnegative coverage; preserve submitted Real/Integral admission."""
+def normalize_forecasts(rows, fold, horizons, *, strict_json=False, target=None):
+    """Require exact finite target-domain coverage; preserve submitted Real/Integral admission."""
+    target = target or {"prediction_column": "predicted_absolute_move_pct", "domain": "nonnegative"}
     return normalize_regression_forecasts(rows, fold, horizons,
-        prediction_column="predicted_absolute_move_pct", target_domain="nonnegative", strict_json=strict_json)
+        prediction_column=target["prediction_column"], target_domain=target["domain"], strict_json=strict_json)
+
+
+def evaluation_targets(repository, binding, fold):
+    """Open only an admitted evaluation cohort; callers persist forecasts before invoking."""
+    loader, snapshot, options = load_magnitude_targets, binding["snapshot"], {"omit_not_computed": True}
+    if binding.get("schema_version") == "native_experiment_registration.v1.8":
+        from engine.v2.research.iv_crush_inputs import load_iv_crush_targets
+        loader, snapshot, options = load_iv_crush_targets, binding["target_snapshot"], {}
+    return loader(repository, from_document(SnapshotRef, snapshot),
+        as_of_month=binding["holdouts"]["holdout_as_of_month"], labels_before=fold["evaluation_labels_before"],
+        event_ids=fold["evaluation_event_ids"], **options)
 
 
 def validate_targets(preflight, fold, evaluation_inputs, targets, *, strict_json=False):
     """Reconstruct the protected receipt and exact ordered targets; malformed evidence raises ValueError."""
+    if preflight.get("schema_version") == "research_iv_crush_preflight.v1":
+        from engine.v2.research.iv_crush_inputs import validate_iv_crush_receipt
+        return validate_iv_crush_receipt(preflight, fold, evaluation_inputs, targets)
     events = set(fold["evaluation_event_ids"])
     consumed = [row for row in preflight["planned_inputs"] if row["event_id"] in events]
     ordered = [row["event_id"] for row in consumed]

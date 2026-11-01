@@ -6,7 +6,7 @@ from datetime import timedelta
 
 from engine.v2.data import errors
 from engine.v2.data.iv_crush_table import IV_CRUSH_CONTRACT, IV_CRUSH_TABLE_NAME
-from engine.v2.foundation import content_hash, to_document
+from engine.v2.foundation import canonical_json, content_hash, to_document
 from engine.v2.foundation.experiment_holdouts import calendar_date
 from engine.v2.research import event_history, experiment_population, progress
 
@@ -143,3 +143,36 @@ def load_iv_crush_targets(repository, snapshot, *, as_of_month, labels_before,
         "labels_before": cutoff.isoformat(), "consumed_inputs": consumed, "excluded_future_events": future}
     rows.attrs.update(identity, inputs_id=content_hash(identity))
     return rows
+
+
+def validate_iv_crush_receipt(preflight, fold, receipt, targets):
+    """Check stored evaluation evidence against admitted objects; never reopen labels."""
+    events = set(fold["evaluation_event_ids"])
+    planned = [row for row in preflight["planned_inputs"] if row["event_id"] in events]
+    consumed = receipt["consumed_inputs"]
+    if (len(planned) != len(events) or {row["event_id"] for row in planned} != events
+            or not isinstance(consumed, list) or not isinstance(targets, list)
+            or len(consumed) != len(planned) or len(targets) != len(planned)):
+        raise ValueError
+    for row, used, source in zip(targets, consumed, planned):
+        _receipt_target(row, used, source)
+    context = {key: value for key, value in preflight.items()
+               if key not in {"schema_version", "event_ids", "planned_inputs", "preflight_id"}}
+    identity = {**context, "schema_version": "research_iv_crush_targets.v1",
+        "labels_before": fold["evaluation_labels_before"], "consumed_inputs": consumed,
+        "excluded_future_events": []}
+    expected = {**identity, "inputs_id": content_hash(identity), "holdout_exclusions": []}
+    if canonical_json(receipt) != canonical_json(expected):
+        raise ValueError
+
+
+def _receipt_target(row, used, source):
+    """Require one finite signed label and syntactically valid caller provenance per object."""
+    if (set(row) != {"event_id", "crush_pct_iv30"} or row["event_id"] != source["event_id"]
+            or set(used) != set(source) | {"source_id", "input_hash"}
+            or {key: used[key] for key in source} != source):
+        raise ValueError
+    try:
+        _value({**used, **row})
+    except errors.DataError:
+        raise ValueError from None

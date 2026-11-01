@@ -356,7 +356,7 @@ def test_no_fit_probe_does_not_claim_comparator(case):
 def test_real_serial_and_parallel_trials_have_equal_journaled_fit_results(tmp_path, monkeypatch):
     def build(root, workers):
         root.mkdir()
-        generator = panel_data.__wrapped__(root, SimpleNamespace())
+        generator = panel_data.__wrapped__(root, SimpleNamespace(param={"values": [4.0] * 7}))
         data = next(generator)
         ids = [e["event_id"] for e in data.events if str(e["event_date"].date()) in
                ("2022-06-02", "2023-01-03", "2023-06-02", "2024-06-17")]
@@ -445,6 +445,10 @@ def test_real_serial_and_parallel_trials_have_equal_journaled_fit_results(tmp_pa
                                         "execution:" + key)
                 terminal = read_record(context[0], context[1], registration.run_id,
                                        "terminal:" + key)
+                expected_pairs = [(4.0, 4.0), (4.0, 4.0)]
+                assert [(row["absolute_move_pct"], row["predicted_absolute_move_pct"])
+                        for row in terminal["predictions"]] == expected_pairs
+                assert terminal["metrics"] == {"count": 2, "mae": 0.0, "rmse": 0.0}
                 errors = [abs(row["predicted_absolute_move_pct"] - row["absolute_move_pct"])
                           for row in terminal["predictions"]]
                 assert terminal["metrics"] == {

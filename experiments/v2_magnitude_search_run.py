@@ -41,7 +41,7 @@ from experiments.magnitude_search_plan import read_search_plan, trial_key
 from experiments.magnitude_search_request import validate_workers
 from experiments.size_job_budget import remaining
 from experiments.magnitude_search_records import MIGRATIONS, OWNER, append_record, read_record
-from experiments.magnitude_search_trials import SearchTrials, require_execution_enabled
+from experiments.magnitude_search_trials import SearchTrials
 from experiments.native_gate_worker import read_native_staged_input
 from experiments.native_registration import (
     MAX_NATIVE_EVIDENCE_BYTES,
@@ -232,7 +232,6 @@ def seal_search_run(conn, store, repository, registration, request, plan_ref, *,
 
 
 def _admit_driver(conn, store, registration, request, plan_ref):
-    require_execution_enabled(registration)
     require_current(conn, OWNER, MIGRATIONS)
     plan, binding = _binding(conn, store, registration, request, plan_ref)
     if read_record(conn, store, registration.run_id, "driver-seal") != binding:
@@ -393,6 +392,8 @@ def main(argv=None):
                 spec = experiment_spec_from_document(_read_document(args.spec))
                 request = _read_document(args.request)
                 reference = from_document(ArtifactRef, _read_document(args.plan_ref))
+                if request.get("schema_version") == "regression_search_request.v1":
+                    raise fail("INVALID_EXPERIMENT_SPEC", "IV requires dedicated CLI containment; use the admitted library path")
                 if request.get("schema_version") in ("magnitude_search_request.v2",
                         "magnitude_search_request.v3", "magnitude_search_request.v4"):
                     raise fail("INVALID_EXPERIMENT_SPEC", "qualified SIZE requires experiments.size_search CLI containment")
