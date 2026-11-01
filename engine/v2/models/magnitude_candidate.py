@@ -11,6 +11,8 @@ def magnitude_candidate_family(recipe):
         raise ValueError(message)
     if schema == "magnitude_elasticnet_recipe.v1" and model == "elasticnet":
         return "elasticnet"
+    if schema == "magnitude_mlp_recipe.v1" and model == "mlp":
+        return "mlp"
     if schema == "magnitude_ridge_hgb_recipe.v1" and model in ("history_ridge", "history_hgb"):
         return "ridge_hgb"
     if schema == "magnitude_ridge_hgb_recipe.v2" and model == "history_hgb":

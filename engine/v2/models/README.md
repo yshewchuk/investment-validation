@@ -36,7 +36,7 @@ not evidence that labels exist or permission to read them. Used by temporal plan
 
 
 `magnitude_candidate.magnitude_candidate_family` checks only the fixed
-nonnegative recipe schema/model pair, without importing training. Full closed
+nonnegative recipe schema/model pair (including standalone MLP v1), without importing training. Full closed
 recipe validation remains with the family fitter; this grants no fit authority.
 
 `regression_candidate.regression_candidate_recipe` selects the existing Ridge, HGB
