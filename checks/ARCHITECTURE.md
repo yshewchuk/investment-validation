@@ -114,7 +114,7 @@ check defines missing-input and failure outcomes:
 | Tier-0 support gets an invalid record/receipt | Existing copy, rounding or attribute errors propagate; no retry, cache, transaction or partial writes |
 | The opted-in production resolver cannot resolve a chooser binding | Refuse with `ReleaseBindingError` |
 | A required chooser retrain cutoff is missing or invalid | Refuse with `ModelNotReady` |
-| A strict trace has missing/mismatched chooser-fold provenance (including release-binding identity or output name), orphan references, incomplete producer coverage or invalid dates | `strict_trace_one` raises `StrictTraceCaptureError` before packaging the trace |
+| A strict trace has missing/mismatched chooser-fold provenance (including release-binding identity, release ids or output name), orphan references, incomplete producer coverage or invalid dates | `strict_trace_one` raises `StrictTraceCaptureError` before packaging the trace |
 
 ## Invariants
 

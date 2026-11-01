@@ -200,10 +200,9 @@ producer: its identity is validated by the ordinary frozen Tier-4 binding.
 `strict_trace_one` checks each chooser-producer reference against the recorded
 producer binding, including the full recorded release-binding identity
 (`binding_id`, model, role, strategy, decision clock, adapter, ordered
-features, output names and artifact hash), the served output name and the
-request's canonical decision date. Feature orders are tuple-normalized, with
-absent orders treated as empty; the served fold boundary may equal that date
-(for a first-day decision), but may not be later. A chooser declaration with
+features, output names and artifact hash), both release ids, served output and
+canonical decision date. Feature orders normalize to tuples (absent means
+empty); a fold may equal, but never follow, that date. A chooser declaration with
 a non-string binding key is refused with `StrictTraceCaptureError` before
 binding lookup.
 It then writes the validated map to metadata field
@@ -729,7 +728,7 @@ scoring loads no chooser estimators and infers no provenance from legacy rows.
 | Carried descriptor's original release, catalog membership or parent/hash fails | ModelNotReady; no partial reference map |
 | Re-resolving an unchanged valid chain | Same reference, with separate authoring and carrying ids (equal for an uncarried fold) |
 | Malformed, noncanonical or mismatched descriptor, estimator digest, parent binding, output or fold month | ModelNotReady; no partial reference map |
-| Strict capture reference has a missing or malformed authoring/carrying release id | StrictTraceCaptureError; no trace metadata is emitted |
+| Strict capture reference has an absent or unsafe authoring/carrying release id | StrictTraceCaptureError; no trace metadata is emitted |
 | Reference resolution requested for a verified release | Re-verify each binding resolution; no cross-call reference cache |
 | Model member exceeds its byte cap or is not a regular file | ModelNotReady before chooser bytes are decoded |
 

@@ -377,6 +377,25 @@ def test_carried_chooser_fold_loads_from_verified_original_release(tmp_path, mon
     assert carried_ref.carrying_release_id == "carried"
     assert carried_ref.descriptor_hash == content_hash(origin_obj["serving_fold"])
 
+    carried_body_without_link = copy.deepcopy(carried_body)
+    del carried_body_without_link["sources"]["carried_from"]
+    write_catalog("carried", carried_body_without_link)
+    with pytest.raises(ModelNotReady) as refusal:
+        resolve_release_binding(tmp_path, include_chooser_fold_references=True)
+    assert refusal.value.code == rb.MODEL_NOT_READY
+    write_catalog("carried", copy.deepcopy(carried_body))
+
+    carried_body_with_changed_membership = copy.deepcopy(carried_body)
+    changed_row = next(
+        row for row in carried_body_with_changed_membership["members"]
+        if row["member_id"] == f"tier4_folds:{role}")
+    changed_row["objects"][0]["serving_fold"]["parent_release_hash"] = "sha256:" + "1" * 64
+    write_catalog("carried", carried_body_with_changed_membership)
+    with pytest.raises(ModelNotReady) as refusal:
+        resolve_release_binding(tmp_path, include_chooser_fold_references=True)
+    assert refusal.value.code == rb.MODEL_NOT_READY
+    write_catalog("carried", copy.deepcopy(carried_body))
+
     tampered_origin = copy.deepcopy(origin_body)
     tampered_carried = copy.deepcopy(carried_body)
     for release_id, body in (("origin", tampered_origin), ("carried", tampered_carried)):

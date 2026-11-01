@@ -1398,27 +1398,28 @@ def test_chooser_fold_reference_flows_through_real_scorer_checkpoint(tmp_path, m
     boundary_refs = validated_chooser_fold_references(source, boundary_request)
     assert boundary_refs["pred_im_t1_d14"]["fold_start"] == "2026-09-01"
     assert boundary_refs["pred_runup_abs_move_d14"]["fold_start"] == "2026-08-01"
+    invalid_release_ids = (None, "", "/x", ".", "..", 123, "\x00")
     for output in ("pred_im_t1_d14", "pred_runup_abs_move_d14"):
-        for field, invalid_id in (
-            ("release_id", None),
-            ("release_id", ""),
-            ("release_id", "/x"),
-            ("release_id", "."),
-            ("release_id", 123),
-            ("release_id", r"a\\b"),
-            ("carrying_release_id", None),
-            ("carrying_release_id", ""),
-            ("carrying_release_id", "../release"),
-            ("carrying_release_id", r"a\\b"),
-        ):
-            malformed_source = copy.deepcopy(source)
-            malformed_source["frozen"]["chooser_references"][output][
-                field
-            ] = invalid_id
-            with pytest.raises(
-                StrictTraceCaptureError, match="mismatches served producer"
-            ):
-                validated_chooser_fold_references(malformed_source, _request())
+        for field in ("release_id", "carrying_release_id"):
+            for invalid_id in invalid_release_ids:
+                malformed_source = copy.deepcopy(source)
+                malformed_source["frozen"]["chooser_references"][output][
+                    field
+                ] = invalid_id
+                with pytest.raises(
+                    StrictTraceCaptureError,
+                    match="chooser ref has invalid release id",
+                ):
+                    validated_chooser_fold_references(malformed_source, _request())
+    backslash_source = copy.deepcopy(source)
+    backslash_reference = backslash_source["frozen"]["chooser_references"][
+        "pred_im_t1_d14"
+    ]
+    backslash_reference["release_id"] = r"a\b"
+    backslash_reference["carrying_release_id"] = r"a\b"
+    preserved = validated_chooser_fold_references(backslash_source, _request())
+    assert preserved["pred_im_t1_d14"]["release_id"] == r"a\b"
+    assert preserved["pred_im_t1_d14"]["carrying_release_id"] == r"a\b"
     with pytest.raises(StrictTraceCaptureError, match="mismatches served producer"):
         validated_chooser_fold_references(
             source, SimpleNamespace(requested_decision_at="2026-08-31"))
@@ -1472,6 +1473,13 @@ def test_chooser_fold_reference_flows_through_real_scorer_checkpoint(tmp_path, m
         "pred_im_t1_d14": _ref_doc(reference),
         "pred_runup_abs_move_d14": _ref_doc(runup_reference),
     }
+    observed_references = observed["chooser_fold_references"]
+    assert observed_references["pred_im_t1_d14"]["release_id"] == "release-1"
+    assert observed_references["pred_im_t1_d14"]["carrying_release_id"] == "release-2"
+    assert observed_references["pred_runup_abs_move_d14"]["release_id"] == "release-1"
+    assert observed_references["pred_runup_abs_move_d14"][
+        "carrying_release_id"
+    ] == "release-1"
 
     corrupted_candidate = copy.deepcopy(candidate)
     corrupted_source = corrupted_candidate["legacy_trace"]["checkpoints"]["source_inputs"]["value"]
