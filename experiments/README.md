@@ -57,7 +57,7 @@ The owning modules expose these helpers to native experiment callers; no compati
 | `distribution_report.forecast_report` | Supplied single-pass score rows and common opportunities yield h1-primary paired CRPS, coverage/tail diagnostics and conditional cluster intervals; available-arm targets must agree before the CRPS mask. No probability calibration, source access or final authority. [D4 contract](STR_THRU_DISTRIBUTION/ARCHITECTURE.md#d4-source-free-scores-and-forecast-report). |
 | `distribution_report.paired_report` | Supplied common opportunities and book documents yield paired USD/opportunity summaries and declared calendar/ticker uncertainty; no execution or data access. [Contract](#distribution-paired-report). |
 | `distribution_pipeline.evaluate_outer` / `finish_reports` | Explicit callers compose admitted C fits/pools, pinned D-1 decisions and immutable all-alpha intents before native outcomes, then conditional forecast/profit/book reports; no fitting, orchestration or production activation. [Contract](STR_THRU_DISTRIBUTION/ARCHITECTURE.md#causal-outer-pipeline). |
-| `distribution_run.DistributionRun` | Explicit dedicated-process callers execute one sealed, whole-job-contained attempt with fixed bounded children, chronological outer evaluation and verified read-only replay; no shell entrypoint, source preparation, retries or automatic execution authority. [Contract](STR_THRU_DISTRIBUTION/ARCHITECTURE.md#explicit-contained-runner). |
+| `distribution_run.DistributionRun` / `distribution_cli.main` | Explicit dedicated-process callers and `python -m experiments.distribution_run` prepare/register/preflight/seal/run/collect/report with native source admission, fixed bounded children and read-only replay; no hidden source preparation, retries or automatic execution authority. [Operator](STR_THRU_DISTRIBUTION/README.md#operator-lifecycle). |
 | `distribution_run_plan.DistributionRunPlan` / `contained` | Explicit local callers/tests verify and seal metadata/artifacts, publish or collect CAS sections, and optionally contain a dedicated process; no experiment runner or source eligibility authority. [Contract](STR_THRU_DISTRIBUTION/ARCHITECTURE.md#run-metadata-and-containment). |
 | `magnitude_candidate_recipe.candidate_recipe` | Exact family/parameter keys plus ordered columns and dictionary hash yield the existing closed family recipe; no training, source reads or admission proof. |
 | `distribution_candidate_recipe.candidate_recipe` / `validate_candidate_recipe` | One explicit qualified-dictionary H/HM/HMO descriptor yields a detached versioned raw histogram/matched-point recipe and ID; validation refuses altered semantics. Static descriptors are not qualified data, preregistration or fitting authority. |
@@ -117,12 +117,12 @@ Saved identity and later outcome/worker APIs' separate read policies do not chan
 
 ## Consumers and authority
 
-`distribution_report.forecast_report` now consumes `paired_report` for shared cohort/uncertainty admission; matching `test_distribution_report.py` and `test_distribution_forecast_report.py` synthetic tests cover both. These helpers remain library-only and unreachable from a production entrypoint; runner wiring is not supplied here.
+`distribution_report.forecast_report` now consumes `paired_report` for shared cohort/uncertainty admission; matching `test_distribution_report.py` and `test_distribution_forecast_report.py` synthetic tests cover both. These helpers remain library APIs without production activation; the explicit research runner/operator is documented under [STR-THRU distribution](STR_THRU_DISTRIBUTION/README.md#operator-lifecycle).
 
 `record_export` (run-record export) is consumed by `v2_gate` and `v2_prediction` `run`; it depends on `lib` (EXP numbering) and ops errors only.
 
-`distribution_trials` and `distribution_fitted` also consume the shared immutable journal APIs. `v2_magnitude_search_run` consumes `magnitude_search_plan.read_search_plan`, `magnitude_search_records.MIGRATIONS`/`OWNER`/`append_record`/`read_record`, `magnitude_search_trials.SearchTrials`, `magnitude_search_execution.validate_execution_limits`, and `magnitude_search_outer.execute_outer_fold`/`collect_outer_results` for source-sealed serial orchestration.
-Its CLI also consumes `native_registration.read_native_registration`/`valid_registration_read_budget`/`MAX_NATIVE_EVIDENCE_BYTES` and `native_gate_worker.read_native_staged_input`; direct engine dependencies are contracts, data, foundation and ops. The [driver section](#serial-magnitude-search-driver) defines the public seal/run helpers and each CLI action's authority.
+`distribution_trials` and `distribution_fitted` also consume the shared immutable journal APIs. `v2_magnitude_search_run` consumes `magnitude_search_plan.read_search_plan`, `magnitude_search_records.MIGRATIONS`/`OWNER`/`append_record`/`read_record`, `magnitude_search_trials.SearchTrials`, `magnitude_search_execution.validate_execution_limits`, and `magnitude_search_outer.execute_outer_fold`/`collect_outer_results` for source-sealed orchestration. Fresh inner trials may use bounded process execution; replay and selected outer evaluation remain serial.
+Its CLI also consumes `native_registration.read_native_registration`/`valid_registration_read_budget`/`MAX_NATIVE_EVIDENCE_BYTES` and `native_gate_worker.read_native_staged_input`. The runner uses `magnitude_search_request.validate_workers`, `size_job_budget.remaining`, `memory_guard.start_rss_watchdog`, and both no-fit guards; direct engine dependencies are contracts, data, foundation, models, ops and research (including legacy `engine.models.no_fit`). The [driver section](#serial-magnitude-search-driver) defines the public seal/run helpers and each CLI action's authority.
 
 `magnitude_search_request.compile_request` preserves the source-free v2 request
 validator and its closed H/HM/HMO 33-candidate grid.
@@ -149,7 +149,7 @@ They reuse public model recipe/fitter APIs; admitted stored inputs and the seale
 `distribution_candidate_recipe` is consumed by the distribution plan/journal, numeric-fit adapters and fixed worker; `distribution_class_support` is consumed by the numeric fitter, with synthetic tests for both.
 Bundle B uses a separate distribution-owned native metadata run and references the qualified SIZE registration/plan for source and folds only. It does not run SIZE candidates or write distribution claims under the SIZE run. Existing v1.7/CAS/native admission own transport and central holdout policy; no panel/context payload is embedded in the distribution plan.
 Their [contract](ARCHITECTURE.md#distribution-declarations) keeps raw uncalibrated policy, conservative tree counts and opaque-reference limitations explicit. Synthetic checks: `python -m pytest tests/v2/research/test_distribution_candidate_recipe.py tests/v2/research/test_distribution_class_support.py`.
-The [admission contract](ARCHITECTURE.md#distribution-native-admission) describes immutable input claims, not completed trials or a runnable experiment. Bundle C's [causal fit/control contract](STR_THRU_DISTRIBUTION/ARCHITECTURE.md) uses this admission; D's genuine runner/bounded distribution-output dispatch remains pending. Focused synthetic catalog tests: `python -m pytest tests/v2/research/test_distribution_plan_trials.py tests/v2/research/test_distribution_native_admission.py`.
+The [admission contract](ARCHITECTURE.md#distribution-native-admission) describes immutable input claims, not completed trials or a runnable experiment. Bundle C's [causal fit/control contract](STR_THRU_DISTRIBUTION/ARCHITECTURE.md) uses this admission; D's [contained runner/operator](STR_THRU_DISTRIBUTION/README.md#operator-lifecycle) uses its bounded distribution-output dispatch. Focused synthetic catalog tests: `python -m pytest tests/v2/research/test_distribution_plan_trials.py tests/v2/research/test_distribution_native_admission.py`.
 
 `v2_gate_sweep` uses registration preparation/lookup/reservation, the bounded reader and `gate_report.validate_gate_spec`.
 `native_sweep_collection` consumes `v2_gate_sweep.submit_sweep`, sealed registration, `native_outcomes`, `gate_report.render_gate_report`, ops transactions/bounded SQL-text helpers/registered artifacts/spec parsing/source closure/bounded native evidence readers and writers/job reads/`MAX_JOB_FAILURE_BYTES`/errors, contracts and foundation. `v2_gate_collect` consumes that collector, staged-input reading, ops catalog/job reads/errors, data `Repository`/errors and foundation artifacts.
@@ -284,7 +284,7 @@ it verifies the native inner inventory once per call, then independently replays
 No admission is cached across calls. It never launches missing work or chooses a
 winner using outer results: `prospective_candidate_id` is the latest fold's inner
 selection. Collection returns a dictionary only; it does not persist an aggregate
-artifact, export or ledger row. The serial CLI below composes these APIs.
+artifact, export or ledger row. The magnitude-search CLI below composes these APIs.
 No real-data execution, holdout/final access, ledger publication or release
 authority is implied.
 
@@ -293,13 +293,14 @@ forecast normalization and target-receipt validation. Inner wrappers retain subm
 Real/Integral support and their original refusal envelopes; outer wrappers enforce
 JSON-native numeric types. The static dependency is included in source seals.
 
-## Serial magnitude search driver
+<a id="serial-magnitude-search-driver"></a>
 
-`python -m experiments.v2_magnitude_search_run` accepts `seal`, `run` or `collect`.
+## Magnitude search driver
+
+`python -m experiments.v2_magnitude_search_run` accepts `seal`, `run` or `collect` for the low-level non-qualified request path. Qualified SIZE v2/v3 requests are refused by this CLI and must run through `python -m experiments.size_search` for job/parent containment.
 Every action requires `--spec SPEC.json --request REQUEST.json --plan-ref REF.json
 --catalog CATALOG --store-root STORE`. Supply the original registered v1.5 spec,
-the exact `magnitude_search_request.v1` request, and the `plan_ref` object returned
-by `v2_magnitude_search prepare` (not that command's entire output envelope).
+the supported non-qualified request, and its `plan_ref` object (not a command's entire output envelope).
 Inputs must be regular, nonsymlink-leaf JSON objects of at most 16 MiB; duplicate
 keys and nonfinite JSON constants refuse. The catalog and store must already exist.
 
@@ -322,15 +323,39 @@ python -m experiments.v2_magnitude_search_run run "${common[@]}" \
 python -m experiments.v2_magnitude_search_run collect "${common[@]}"
 ```
 
-These three serial-search actions accept `--max-registration-bytes` (default 16777216); use an explicit larger finite budget for a larger saved registration. The shared loader validator requires an integer from 1 through `2**62 - 1` before storage access; here the option affects initial registration loading, not saved identity or later read policies. Prediction/gate registration also applies it before reservation, as described above.
+These three search actions accept `--max-registration-bytes` (default 16777216); use an explicit larger finite budget for a larger saved registration. The shared loader validator requires an integer from 1 through `2**62 - 1` before storage access; here the option affects initial registration loading, not saved identity or later read policies. Prediction/gate registration also applies it before reservation, as described above.
 
 `run_search(conn, store, repository, registration, request, plan_ref, *, limits,
-collect_results=True)`
-is the same orchestration API. It traverses outer folds, candidates and inner
-folds in sealed plan order, one child at a time; then freezes all inner selections,
-evaluates each selected outer winner, and collects every completed outer fold
+collect_results=True, before_dispatch=None)`
+is the same orchestration API used by the contained SIZE runner. Only `magnitude_search_request.v2` and `.v3`
+requests may declare `workers` from 1 through 8 (omission means 1); a declared
+field on a legacy or regression request refuses before admission. This execution
+setting is removed before request hashing and does not change candidate, plan or
+trial identities. It traverses outer folds, candidates and inner folds in sealed
+roster order. Fresh trials run serially with one worker or in a bounded process
+pool otherwise; claimed replay and completed outer replay stay serial. Results
+are collected in roster order, then the driver freezes selections, evaluates
+each selected outer winner, and collects every completed outer fold
 (`collect_results=False` skips that collect and returns None; `size_search` run
 collects once via `collect`).
+
+Each pool worker starts the same RSS watchdog for its own process, holds at most
+one decoded cohort and borrows that cohort read-only across its trials; serial
+and public callers still receive detached copies. Each worker launches at most
+one fit child at a time; its decoded cohort remains resident while trial records
+are verified and published. Both the worker and that fit child have independent
+`child.memory_bytes` RSS watchdogs. The process tree can therefore use about
+`2 * workers * child.memory_bytes`, plus the driver's own RSS. The admission
+check requires `workers * child.memory_bytes <= parent.memory_bytes`; these
+per-process limits and admission check do not reserve or cap total host memory.
+The SIZE CLI runs parent CPU-availability, memory and file-backed-catalog
+checks before committing the shared job deadline and before replay writes.
+On memory refusal, a worker stops repeated RSS watchdog interrupts before it
+returns the tagged refusal. Worker startup and per-task affinity checks return tagged
+refusals; each dispatched trial applies the same unfinished-claim rule as the
+serial path. At most `workers` tasks and small status results are in flight at
+once, with each batch traversed in roster order. Pool errors cancel pending
+work; active fit children are stopped and reaped before workers exit.
 Valid candidate failures are excluded by the sealed policy; all-candidate failure
 refuses. It never chooses a winner from outer scores.
 
@@ -550,7 +575,7 @@ results, both no-fit guards and errors remain unchanged.
 
 ### Distribution native admission
 
-`distribution_plan.prepare_plan(conn, store, own_registration, source_registration, source_request, source_plan_ref, recipe, budget_caps)` returns `(distribution_plan, verified_native_source_plan)`. It verifies a distinct native v1.0 distribution run and compact SIZE v1.7 source registration, matching snapshot/scope/holdout month/membership/event roster, seed-zero computed-move ownership and outer years. The registered runner must differ from SIZE's; its installed source closure/environment and the distribution implementation are bound. No placeholder runnable entrypoint is supplied: Bundle D owns genuine runner/activation checks.
+`distribution_plan.prepare_plan(conn, store, own_registration, source_registration, source_request, source_plan_ref, recipe, budget_caps)` returns `(distribution_plan, verified_native_source_plan)`. It verifies a distinct native v1.0 distribution run and compact SIZE v1.7 source registration, matching snapshot/scope/holdout month/membership/event roster, seed-zero computed-move ownership and outer years. The registered runner must differ from SIZE's; its installed source closure/environment and the distribution implementation are bound. Bundle D owns the genuine `distribution_run.py` runner/activation checks; its operator prepares a matching owner without changing B source policy.
 The public native search-plan reader reconstructs and verifies exact source/fold metadata; its candidate schedule, request-bound selection and execution budget are not distribution policy. No SIZE execution is required. Both registration byte strings retain the 16 MiB ceiling before decoding; native v1.0's flat event roster must fit that existing bound. Oversize refuses, without copying v1.7 packing, raising caps or duplicating panel/metadata payloads.
 `distribution_plan.v1` binds both registration refs/run/variant IDs, source plan ref/ID, qualified context ID, recipe, installed sources/environment and derived raw-pair budget. The identity contains no event/feature rows; actual inner/outer schedule counts replace caller fold counts. The returned native plan is invocation-local metadata, not copied into distribution evidence. These are raw-pair limits only: calibration/control fits and whole-job feasibility remain excluded until explicitly budgeted.
 `DistributionTrials` takes the same arguments plus `repository`, with detached request/recipe/caps. `seal(clock=...)` revalidates dependencies and explicitly initializes the existing magnitude-search journal migrations, then appends the immutable plan in `distribution:seal` under the distribution run ID. Exact seal replay is idempotent; different plans refuse. No new store, catalog schema, registration version or holdout policy is introduced.

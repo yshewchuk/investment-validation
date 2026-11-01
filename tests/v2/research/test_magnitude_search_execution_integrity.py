@@ -714,3 +714,32 @@ def test_inner_metrics_large_move_diagnostics_are_unavailable_below_threshold():
     assert metrics["count"] == 2
     assert metrics["large_move_underprediction_rate"] is None
     assert metrics["large_move_mean_shortfall"] is None
+
+
+@pytest.mark.parametrize("mutation", ["reversed", "rotated"])
+def test_noncanonical_worker_grid_refuses_before_result_or_labels(native, monkeypatch, mutation):
+    recorder = native.recorder
+    worker = trials.run_fitted_trial
+    monkeypatch.setattr(execution.os, "sched_getaffinity", lambda pid: {0}, raising=False)
+    def altered(*args):
+        result = worker(*args)
+        forecasts = result["forecasts"]
+        result["forecasts"] = (list(reversed(forecasts)) if mutation == "reversed" else forecasts[1:] + forecasts[:1])
+        return result
+    monkeypatch.setattr(trials, "run_fitted_trial", altered)
+    monkeypatch.setattr(trials, "load_magnitude_targets", lambda *a, **k: pytest.fail("noncanonical worker opened labels"))
+    with pytest.raises(OpsError) as caught:
+        recorder.execute("2024", "2023", "a-first", limits=LIMITS)
+    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    key = content_hash(["plan", "2024", "2023", "a-first"])
+    for prefix in ("execution-result:", "execution:", "forecasts:", "terminal:"):
+        assert recorder._read(prefix + key) is None
+    admitted = recorder._read("inputs:" + key)
+    assert recorder._read("validation:" + admitted["cohort"]) is None
+    assert recorder._read("execution-start:" + key) is not None
+    monkeypatch.setattr(trials, "run_fitted_trial", lambda *a: pytest.fail("unfinished claim retried fitting"))
+    before = native.conn.total_changes
+    with pytest.raises(OpsError) as caught:
+        recorder.execute("2024", "2023", "a-first", limits=LIMITS)
+    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert native.conn.total_changes == before

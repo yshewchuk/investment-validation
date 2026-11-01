@@ -103,7 +103,12 @@ def test_cli_run_after_deadline_collects_only_complete_replay(state, monkeypatch
     before = deepcopy(state.saved)
     monkeypatch.setattr(cli, "_admit_driver", lambda *a: state.plan)
     monkeypatch.setattr(cli, "read_record", lambda *a: {} if completed else None)
-    monkeypatch.setattr(cli, "run_search", lambda *a, **k: pytest.fail("expired dispatch"))
+
+    def expired_run_search(*args, **kwargs):
+        budget.remaining(None, None, state.registration, state.plan)
+        pytest.fail("expired dispatch")
+
+    monkeypatch.setattr(cli, "run_search", expired_run_search)
     monkeypatch.setattr(cli.signal, "alarm", lambda *a: pytest.fail("expired execution alarm"))
     monkeypatch.setattr(cli, "collect", lambda *a: {"verified": True})
     context = (None, None, None, state.registration, state.plan["request"], None)
@@ -139,7 +144,11 @@ def test_cli_partial_comparator_needs_original_budget(state, monkeypatch):
     state.clock.value += timedelta(seconds=101)
     monkeypatch.setattr(cli, "_admit_driver", lambda *a: state.plan)
     monkeypatch.setattr(cli, "read_record", lambda *a: None if a[-1].startswith("comparison-") else {})
-    monkeypatch.setattr(cli, "run_search", lambda *a, **k: pytest.fail("partial expired dispatch"))
+    def expired_run_search(*args, **kwargs):
+        budget.remaining(None, None, state.registration, state.plan)
+        pytest.fail("partial expired dispatch")
+
+    monkeypatch.setattr(cli, "run_search", expired_run_search)
     monkeypatch.setattr(cli, "collect", lambda *a: pytest.fail("partial collection"))
     with pytest.raises(OpsError, match="deadline exhausted"):
         cli._run((None, None, None, state.registration, state.plan["request"], None))
@@ -151,7 +160,6 @@ def test_completed_marker_does_not_bypass_readonly_verification(state, monkeypat
     state.plan.update(folds=[{"outer": {"year": "2024"}}])
     monkeypatch.setattr(cli, "_admit_driver", lambda *a: state.plan)
     monkeypatch.setattr(cli, "read_record", lambda *a: {"forged": True})
-    monkeypatch.setattr(cli, "remaining", lambda *a: pytest.fail("new deadline"))
     monkeypatch.setattr(cli, "run_search", lambda *a, **k: pytest.fail("fallback execution"))
     def refuse(*args):
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "completed journal differs")

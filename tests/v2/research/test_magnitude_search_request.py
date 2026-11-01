@@ -300,6 +300,32 @@ def test_public_child_validator_receives_exact_original_scalar_types(monkeypatch
     assert type(seen[-1]["memory_bytes"]) is float
 
 
+@pytest.mark.parametrize("workers", [1, 8])
+def test_v2_workers_are_stripped_from_request_identity(workers):
+    document = request()
+    baseline = compiler.compile_request(document)
+    document["workers"] = workers
+    result = compiler.compile_request(document)
+    assert result["request"] == baseline["request"]
+    assert result["request_id"] == baseline["request_id"]
+    assert result["candidate_specs"] == baseline["candidate_specs"]
+
+
+@pytest.mark.parametrize("workers", [0, 9, True, 1.0, "3"])
+def test_v2_invalid_workers_refuse_nonretryably(workers):
+    document = request()
+    document["workers"] = workers
+    refuses(document, "stage-2 workers requires an integer from 1 through 8")
+
+
+@pytest.mark.parametrize("schema", ["magnitude_search_request.v1", "regression_search_request.v1"])
+def test_legacy_declared_workers_refuse_before_shape_admission(schema):
+    document = request()
+    document["schema_version"] = schema
+    document["workers"] = 3
+    refuses(document, "stage-2 request requires its closed v2 schema")
+
+
 def test_v1_planner_does_not_accept_the_new_request(monkeypatch):
     from experiments import magnitude_search_plan
     monkeypatch.setattr(magnitude_search_plan, "verify_native_registration", fail_if_called)

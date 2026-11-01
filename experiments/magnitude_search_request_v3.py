@@ -165,10 +165,15 @@ def compile_request(request, *, horizons=(5, 3, 1)):
     version = request.get("schema_version") if type(request) is dict else None
     request_keys = set(request) if type(request) is dict else set()
     v2._require((version == "magnitude_search_request.v3"
-                 and request_keys in (v2._KEYS, v2._KEYS | {"selection"}))
+                 and request_keys in (v2._KEYS, v2._KEYS | {"selection"},
+                                      v2._KEYS | {"workers"},
+                                      v2._KEYS | {"selection", "workers"}))
                 or (version in ("magnitude_search_request.v4", "magnitude_search_request.v5")
-                    and request_keys == v2._KEYS | {"selection"}),
+                    and request_keys in (v2._KEYS | {"selection"},
+                                         v2._KEYS | {"selection", "workers"})),
                 "stage-2 request requires its closed v3/v4/v5 schema and selection policy")
+    v2.validate_workers(request)
+    request.pop("workers", None)
     _selection(request, horizons)
     v2._references(request)
     _space(request)

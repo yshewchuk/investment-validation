@@ -94,3 +94,15 @@ def test_v5_candidate_ceiling_still_refuses_before_expansion(monkeypatch):
     with pytest.raises(OpsError) as caught:
         versions.compile_request(request)
     assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
+
+
+@pytest.mark.parametrize("workers", [1, 2, 8, True, 0, 9])
+def test_v5_does_not_implicitly_opt_into_v2_v3_parallel_execution(monkeypatch, workers):
+    request = v5_request()
+    request["workers"] = workers
+    monkeypatch.setattr(compiler, "_specifications", _fail_if_called)
+    with pytest.raises(OpsError) as caught:
+        versions.compile_request(request)
+    assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert "workers require a v2 or v3" in caught.value.problem.message
+    assert request["workers"] == workers
