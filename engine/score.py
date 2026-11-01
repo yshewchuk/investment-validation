@@ -4399,6 +4399,7 @@ class Scorer:
                     "estimator_sha256": reference.estimator_sha256,
                     "training_cutoff": reference.training_cutoff,
                     "release_id": reference.release_id,
+                    "carrying_release_id": reference.carrying_release_id,
                     "fold_start": reference.fold_start,
                     "release_binding": identity_document,
                 }
