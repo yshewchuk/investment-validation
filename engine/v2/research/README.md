@@ -85,15 +85,20 @@ No sample is fitted/admitted here. Consumers include the magnitude math/payoff h
 `experiments/distribution_candidate_fit`, `distribution_fitted`, `distribution_oof` and synthetic tests, including `tests/v2/research/test_magnitude_distribution.py`.
 
 `magnitude_distribution_math` exposes `components`, `cdf`, `mean`, `crps`,
-`empirical_crps`, `bin_scores` and `brier`: pure magnitude-family scores and
+`empirical_crps`, `prepare_empirical_crps`, `mean_matched_control`, `bin_scores` and `brier`: pure magnitude-family scores and
 uniform/lower/upper finite-bin sensitivity. Full-law calls require a declared
 empirical tail; bin scores alone allow unresolved tails. Arithmetic normalizes
 only the admitted 1e-12 mass roundoff, without modifying the document.
+`prepare_empirical_crps` validates/copies/sorts one empirical law once and returns
+an observation scorer using the same analytic core: O(n log n) preparation,
+O(n) per observation and retained space, no pairwise matrix or caller mutation.
+The pure nonnegative mean-shape control now belongs to this neutral math module;
+its original payoff-module export and refusal Problems remain compatible.
 `magnitude_distribution_payoff.bridge_summary`, `empirical_bridge_summary` and
 `mean_matched_control` supply frozen-bridge/mean-control diagnostics, preserving
 zero atoms and negative post-residual exit values. Fixed per-share spot/cost
 inputs are decision-quote proxies, not realized net-profit or execution claims.
-`experiments/distribution_oof` consumes `mean` and `mean_matched_control`; `experiments/distribution_scores` composes the magnitude format, proper scores and bridge summaries; matching synthetic tests cover these APIs.
+`experiments/distribution_oof` consumes neutral `mean` and `mean_matched_control` without importing payoff/book policy; `experiments/distribution_scores` remains the separate strategy consumer of scores and bridge summaries. [Prediction-first delivery](../../../experiments/DISTRIBUTION_PREDICTION/README.md) uses these numerical prerequisites; matching synthetic tests cover the interfaces, not empirical accuracy.
 The numerical helpers own no source admission, fit orchestration or production wiring.
 
 `eligibility_policy.eligibility_policy` validates an explicit version/width;

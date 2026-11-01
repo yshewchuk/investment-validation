@@ -9,10 +9,11 @@ from __future__ import annotations
 
 from math import fsum, isfinite, log
 
-from engine.v2.data.errors import fail
+from engine.v2.data.errors import DataError, fail
 from engine.v2.research.magnitude_distribution import bin_index, validate_distribution
 
-__all__ = ["components", "cdf", "mean", "crps", "empirical_crps", "bin_scores", "brier"]
+__all__ = ["components", "cdf", "mean", "crps", "empirical_crps", "prepare_empirical_crps",
+           "mean_matched_control", "bin_scores", "brier"]
 
 
 def _refuse(message="invalid magnitude distribution arithmetic"):
@@ -133,6 +134,52 @@ def empirical_crps(samples, observation) -> float:
     values = sorted(_scalar(value, nonnegative=True) for value in samples)
     weight = 1 / len(values)
     return _crps_components(((value, value, weight) for value in values), observation)
+
+
+def prepare_empirical_crps(samples):
+    """Freeze one empirical law for repeated scoring, without source authority.
+
+    Validate/detach/sort once in O(n log n) time and O(n) space; each returned
+    scorer call uses the existing O(n) analytic integral, with no sorting or
+    pairwise matrix. Mutating the caller's sample list cannot change the law.
+    """
+    if type(samples) is not list or not samples:
+        _refuse()
+    values = sorted(_scalar(value, nonnegative=True) for value in samples)
+    weight = 1 / len(values)
+    parts = tuple((value, value, weight) for value in values)
+    def score(observation):
+        return _crps_components(parts, _scalar(observation, nonnegative=True))
+    return score
+
+
+def mean_matched_control(target_mean, residuals) -> dict:
+    """Return detached nonnegative empirical draws anchored to a positive mean.
+
+    Preserve zero atoms and the legacy support-repair arithmetic/refusals;
+    no residual provenance, fitting, source access or retry authority. O(n)
+    time/space. The historical payoff error envelope remains a compatibility
+    contract even though this numerical operation has no payoff dependency.
+    """
+    try:
+        target = _scalar(target_mean)
+        if target <= 0 or type(residuals) is not list or not residuals:
+            _refuse()
+        values = [_scalar(value) for value in residuals]
+        repaired = [max(0.0, _scalar(target + value)) for value in values]
+        size = len(repaired)
+        raw_mean = _finite_sum(value / size for value in repaired)
+        if raw_mean <= 0:
+            _refuse()
+        scale = _scalar(target / raw_mean)
+        if scale <= 0:
+            _refuse()
+        draws = [_scalar(value * scale) for value in repaired]
+        return {"magnitudes": draws, "target_mean": target, "raw_mean": raw_mean,
+                "scale": scale, "zero_count": sum(value == 0 for value in draws),
+                "anchored_mean": _finite_sum(value / size for value in draws)}
+    except DataError:
+        raise fail("CONTRACT_MISMATCH", "invalid magnitude payoff inputs or arithmetic") from None
 
 
 def _crps_components(parts, observation):

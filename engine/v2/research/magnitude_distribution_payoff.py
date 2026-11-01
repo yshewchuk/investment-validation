@@ -11,6 +11,9 @@ from math import fsum, isfinite
 
 from engine.v2.data.errors import fail
 from engine.v2.research.magnitude_distribution_math import components
+from engine.v2.research.magnitude_distribution_math import (
+    mean_matched_control as mean_matched_control,
+)
 
 __all__ = ["bridge_summary", "empirical_bridge_summary", "mean_matched_control"]
 
@@ -139,31 +142,3 @@ def empirical_bridge_summary(magnitudes, *, spot, entry_cost, intercept, slope,
     parts = [(value, value, 1 / len(samples)) for value in samples]
     return _integrate(parts, spot=spot, entry_cost=entry_cost, intercept=intercept,
                       slope=slope, payoff_residuals=payoff_residuals)
-
-
-def mean_matched_control(target_mean, residuals) -> dict:
-    """Return equal-weight nonnegative empirical draws anchored to a mean.
-
-    Construct max(0, target_mean + residual), then multiply by target/raw mean.
-    This is the explicitly support-repaired control, not incumbent parity.
-    Zero draws are atoms, not histogram first-bin uniforms. The target must be
-    positive; an all-zero repaired pool or nonfinite arithmetic refuses rather
-    than inventing a distribution. Returned achieved mean exposes roundoff.
-    Residual origin/earlier-OOF eligibility is NOT authenticated here.
-    O(m) time/detached space; no input mutation, fitting, I/O or retry.
-    """
-    target = _finite(target_mean)
-    if target <= 0:
-        _refuse()
-    repaired = [max(0.0, _finite(target + value)) for value in _samples(residuals)]
-    size = len(repaired)
-    raw_mean = _sum(value / size for value in repaired)
-    if raw_mean <= 0:
-        _refuse()
-    scale = _finite(target / raw_mean)
-    if scale <= 0:
-        _refuse()
-    draws = [_finite(value * scale) for value in repaired]
-    return {"magnitudes": draws, "target_mean": target, "raw_mean": raw_mean,
-            "scale": scale, "zero_count": sum(value == 0 for value in draws),
-            "anchored_mean": _sum(value / size for value in draws)}
