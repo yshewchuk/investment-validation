@@ -62,26 +62,30 @@ mlp_recipe(columns=['a'], feature_dictionary_hash='sha256:' + '1' * 64, profile=
 
 
 @pytest.mark.parametrize("profile,layers,alpha", PROFILES)
-def test_closed_profiles_match_complete_sklearn_policy(profile, layers, alpha):
-    policy = recipe(profile=profile)
+@pytest.mark.parametrize("dictionary_hash", ["sha256:" + "1" * 64, "sha256:" + "ab" * 32])
+def test_closed_profiles_match_complete_sklearn_policy(profile, layers, alpha, dictionary_hash):
+    policy = recipe(profile=profile, feature_dictionary_hash=dictionary_hash)
     expected = MLPRegressor(hidden_layer_sizes=layers, alpha=alpha, max_iter=400,
         n_iter_no_change=15, early_stopping=False, random_state=20260829).get_params()
-    assert policy["estimator"] == {"class": "MLPRegressor", "params": expected}
-    assert policy["preprocessing"] == {
-        "variance_filter": {"threshold": 0.0},
-        "imputer": {"strategy": "median", "keep_empty_features": True},
-        "missing_indicator": {"features": "all", "sparse": False},
-        "scaler": {"with_mean": True, "with_std": True},
-        "union_features": 6, "output_features": "training_nonconstant"}
-    assert policy["target_transform"] == {
-        "class": "StandardScaler", "with_mean": True, "with_std": True}
+    assert policy == {
+        "schema_version": "magnitude_mlp_recipe.v1", "model": "mlp", "profile": profile,
+        "features": ["signal", "constant", "empty"], "feature_dictionary_hash": dictionary_hash,
+        "estimator": {"class": "MLPRegressor", "params": expected},
+        "preprocessing": {
+            "variance_filter": {"threshold": 0.0},
+            "imputer": {"strategy": "median", "keep_empty_features": True},
+            "missing_indicator": {"features": "all", "sparse": False},
+            "scaler": {"with_mean": True, "with_std": True},
+            "union_features": 6, "output_features": "training_nonconstant"},
+        "target_transform": {"class": "StandardScaler", "with_mean": True, "with_std": True},
+        "prediction_projection": "clip_zero", "fit_scope": "fold_and_horizon",
+        "numerical_threads": 1, "component_fits": 1,
+        "nonconvergence": "variant_failure_no_retry"}
     restored = validate_mlp_recipe(json.loads(canonical_json(policy)))
     assert restored == policy
-    assert restored["component_fits"] == restored["numerical_threads"] == 1
-    assert restored["prediction_projection"] == "clip_zero"
     restored["features"].clear()
     restored["estimator"]["params"]["hidden_layer_sizes"].clear()
-    assert recipe(profile=profile) == policy
+    assert recipe(profile=profile, feature_dictionary_hash=dictionary_hash) == policy
 
 
 @pytest.mark.parametrize("changes", [
@@ -91,8 +95,11 @@ def test_closed_profiles_match_complete_sklearn_policy(profile, layers, alpha):
     {"profile": []}, {"profile": True}, {"profile": "relu128"},
 ])
 def test_unknown_profile_or_bad_identity_refuses(changes):
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError) as caught:
         recipe(**changes)
+    assert str(caught.value) == (
+        "MLP columns must be ordered unique feature identifiers" if "columns" in changes
+        else "MLP requires a canonical dictionary hash and declared profile")
 
 
 class Untouchable:
@@ -124,10 +131,13 @@ def test_policy_drift_refuses_before_array_access(path, value):
         fit(policy, [Untouchable()] * 3)
 
 
-@pytest.mark.parametrize("guard", [legacy_no_fit.no_fit_guard, no_fit.no_fit_guard])
+@pytest.mark.parametrize("guard", [legacy_no_fit, no_fit])
 def test_both_guards_precede_recipe_and_array_inspection(guard):
-    with guard(), pytest.raises(RuntimeError):
+    with guard.no_fit_guard(), pytest.raises(guard.RuntimeFitForbidden) as caught:
         fitting.fit_mlp_predictions(Untouchable(), *([Untouchable()] * 3), columns=None)
+    assert type(caught.value) is guard.RuntimeFitForbidden
+    assert str(caught.value) == (
+        "no-fit guard active: engine.v2.models.training.magnitude_mlp.fit_mlp_predictions")
 
 
 @pytest.mark.parametrize("columns", [list(reversed(COLUMNS)), [], "signal"])
@@ -136,19 +146,24 @@ def test_column_order_refuses_before_array_access(columns):
         fit(values=[Untouchable()] * 3, columns=columns)
 
 
-@pytest.mark.parametrize("slot,replacement", [
-    (0, []), (0, [[1, 2]]), (0, [[float("inf"), 2, 3]]), (0, [[1, 2, object()]]),
-    (1, [0]), (1, np.full(80, -1)), (1, np.full(80, float("nan"))),
-    (1, np.full(80, float("inf"))), (2, []), (2, [[1, 2]]),
+@pytest.mark.parametrize("slot,replacement,reason", [
+    (0, [], "matrix"), (0, [[1, 2]], "matrix"), (0, [[float("inf"), 2, 3]], "matrix"),
+    (0, [[1, 2, object()]], "convert"), (1, [0], "labels"), (1, np.full(80, -1), "labels"),
+    (1, np.full(80, float("nan")), "labels"), (1, np.full(80, float("inf")), "labels"),
+    (2, [], "matrix"), (2, [[1, 2]], "matrix"),
 ])
-def test_invalid_matrices_fail_without_fitting(monkeypatch, slot, replacement):
+def test_invalid_matrices_fail_without_fitting(monkeypatch, slot, replacement, reason):
     def forbidden(*args, **kwargs):
         pytest.fail("invalid input entered sklearn fit")
     monkeypatch.setattr(TransformedTargetRegressor, "fit", forbidden)
     values = list(arrays())
     values[slot] = replacement
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError) as caught:
         fit(values=values)
+    assert str(caught.value) == {
+        "matrix": "magnitude requires nonempty selected-column matrices without infinity",
+        "labels": "magnitude labels require one finite nonnegative value per training row",
+        "convert": "magnitude inputs must be convertible to floating-point values"}[reason]
 
 
 def independent_oracle(train, labels, prediction, *, layers=(32,), alpha=0.01):
@@ -365,3 +380,24 @@ def test_learned_width_counts_multiple_values_and_varying_missing_indicators():
     result = fit(policy, (train, labels, prediction), columns=columns)
     assert result["input_features"] == oracle.regressor_[-1].n_features_in_ == 4
     assert result["predictions"] == expected
+
+
+def test_informative_missing_features_use_training_median_not_mean(monkeypatch):
+    train = np.tile([0., 0., 1., 2., 8., np.nan], 15).reshape(-1, 1)
+    labels = np.tile([2., 2., 3., 4., 10., 6.], 15)
+    prediction = np.array([[np.nan], [1.], [8.]])
+    _, expected = independent_oracle(train, labels, prediction)
+    models, original = [], TransformedTargetRegressor.fit
+    def capture(self, *args, **kwargs):
+        result = original(self, *args, **kwargs)
+        models.append(self)
+        return result
+    monkeypatch.setattr(TransformedTargetRegressor, "fit", capture)
+    result = fit(recipe(columns=["signal"]), (train, labels, prediction), columns=["signal"])
+    assert result["predictions"] == expected
+    assert len(result["predictions"]) == 3 and len(set(result["predictions"])) == 3
+    assert len(models) == 1
+    imputer = models[0].regressor_[0].transformer_list[0][1]
+    assert np.nanmean(train) == pytest.approx(2.2)  # Asymmetric: median is not the mean.
+    assert imputer.statistics_.tolist() == [1.0]
+    assert imputer.transform(prediction).ravel().tolist() == [1., 1., 8.]
