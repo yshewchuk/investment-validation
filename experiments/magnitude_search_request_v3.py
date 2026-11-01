@@ -36,9 +36,10 @@ _SELECTION_METRICS = {"rmse": 0.6, "mae": 0.3, "large_move_underprediction": 0.1
 _SELECTION_LEADS = {"1": 1.0, "3": 0.0, "5": 0.0}
 
 
-def _selection(request):
+def _selection(request, horizons):
     if "selection" not in request:
         return
+    v2._require(1 in horizons, "stage-2 blended selection requires lead-1 horizon")
     policy = request["selection"]
     v2._require(v2._shape(policy, {"metric_weights", "lead_weights",
         "large_move_threshold_pct", "tie_band_floor"}),
@@ -166,7 +167,7 @@ def compile_request(request, *, horizons=(5, 3, 1)):
                 or (version in ("magnitude_search_request.v4", "magnitude_search_request.v5")
                     and request_keys == v2._KEYS | {"selection"}),
                 "stage-2 request requires its closed v3/v4/v5 schema and selection policy")
-    _selection(request)
+    _selection(request, horizons)
     v2._references(request)
     _space(request)
     counts = _counts(request, horizons)
