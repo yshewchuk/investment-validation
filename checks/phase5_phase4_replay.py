@@ -56,13 +56,13 @@ REPLAY_VALIDATION_VERSION = 3
 
 
 def _checkpoint_scope(corpus_hash: str | None, manifest: Mapping[str, Any]) -> str:
-    """Canonical JSON checkpoint scope: corpus + full staged manifest + version."""
-    import json
-    return json.dumps(
-        {"corpus_hash": corpus_hash, "manifest": manifest,
-         "validation_version": REPLAY_VALIDATION_VERSION},
-        sort_keys=True, separators=(",", ":"),
-    )
+    """Return the content hash of the canonical checkpoint scope: corpus, full
+    staged manifest and validation version."""
+    from engine.v2.foundation import content_hash
+
+    scope = {"corpus_hash": corpus_hash, "manifest": manifest,
+             "validation_version": REPLAY_VALIDATION_VERSION}
+    return content_hash(scope)
 
 
 #: Staged state members a replayed pair may read by content hash: the Tier-4
@@ -599,7 +599,7 @@ def _load_checkpoint(checkpoint_path: Path, scope: str | None) -> dict[str, dict
                 if not line:
                     continue
                 row = json.loads(line)
-                if row.get("corpus_hash") != scope:
+                if row.get("checkpoint_scope") != scope:
                     return {}
                 done[row["fixture_id"]] = row
     except (OSError, ValueError):
@@ -651,7 +651,8 @@ def replay_corpus(corpus: Path, release_root: Path, model_release,
         for index, fixture_id in enumerate(loaded.ordered_ids):
             cached = done.get(fixture_id)
             if cached is not None:
-                row = {k: v for k, v in cached.items() if k != "corpus_hash"}
+                row = {k: v for k, v in cached.items()
+                       if k not in ("corpus_hash", "checkpoint_scope")}
                 _log("p5-phase4",
                      f"pair {index + 1}/{total} {fixture_id}: {row['disposition']} "
                      "(from checkpoint)", started)
@@ -665,7 +666,11 @@ def replay_corpus(corpus: Path, release_root: Path, model_release,
                      f"pair {index + 1}/{total} {fixture_id}: {row['disposition']} "
                      f"(pair +{pair_elapsed:.1f}s)", started)
                 if checkpoint_fh is not None:
-                    checkpoint_fh.write(_json.dumps({**row, "corpus_hash": checkpoint_scope}) + "\n")
+                    checkpoint_fh.write(_json.dumps({
+                        **row,
+                        "corpus_hash": corpus_hash,
+                        "checkpoint_scope": checkpoint_scope,
+                    }) + "\n")
             counts[row["disposition"]] += 1
             rows.append(row)
             if "code" in row:
