@@ -71,6 +71,17 @@ _SHADOW_FILL_ALPHA = 0.5  # engine.fills.MID.alpha; do not import engine.fills
                           # default, documented in ARCHITECTURE.md, not a
                           # legacy-derived fact.
 
+_CHOOSER_PRIMITIVES = (
+    "mean_prior_abs_move", "ema12r_abs", "signed_streak",
+    "mean_prior_or_implied", "mcap_log", "or_implied", "or_rvol30",
+    "spy_ret21", "spy_ret63", "spy_ret252", "spy_dd252", "spy_vol20",
+    "spy_vol5", "spy_vol60", "spy_vol252", "spy_vol20_rel252",
+)
+
+_SCORER_COMPUTED_FEATURES = frozenset({
+    "entry_cost_pct", "days_to_print", "dte_entry",
+})
+
 @dataclass(frozen=True, slots=True)
 class _DriverSpec:
     """One forecast output and its exact release role, then optional alias."""
@@ -766,6 +777,57 @@ def _gate_policy_and_feature_names(
     return feature_names, None
 
 
+def _valid_explicit_feature_names(feature_names: Sequence[str]) -> bool:
+    """Whether names are a duplicate-free non-string sequence of non-empty str."""
+    if isinstance(feature_names, (str, bytes)) or not isinstance(feature_names, Sequence):
+        return False
+    if any(not isinstance(name, str) or not name.strip() for name in feature_names):
+        return False
+    return len(set(feature_names)) == len(feature_names)
+
+
+def _project_member_features(
+    key: BoardRequest,
+    event: NightlyEventInputs,
+    binding: ScoringReleaseBinding,
+    feature_names: Sequence[str],
+) -> Sequence[str] | NativeScoreBatchRowRefusal:
+    """Project required staged chooser/producer features for one DYN-SV row.
+
+    Every other supported strategy keeps its explicit/derived ``feature_names``
+    unchanged. Malformed explicit names are returned unchanged so the bundle's
+    own ``INVALID_FEATURE_NAMES`` validation still refuses them before
+    projection. Scorer-computed and stage-owned gate columns are never
+    projected or required from staged rows.
+    """
+    if not _valid_explicit_feature_names(feature_names):
+        return feature_names
+    if key.strategy != "DYN-SV":
+        return feature_names
+    references = binding.chooser_fold_references
+    if not references:
+        return NativeScoreBatchRowRefusal(
+            key, "RELEASE_MISSING_FEATURE_ORDER",
+            "chooser producer references are missing")
+    projected = set(_CHOOSER_PRIMITIVES) - _SCORER_COMPUTED_FEATURES
+    for reference in references.values():
+        if not reference.release_binding.feature_order:
+            return NativeScoreBatchRowRefusal(
+                key, "RELEASE_MISSING_FEATURE_ORDER",
+                "chooser producer identity has no feature_order")
+        projected.update(reference.release_binding.feature_order)
+    projected -= _SCORER_COMPUTED_FEATURES
+    projected -= set(GATE_FORECAST_COLUMNS)
+    projected -= set(GATE_ANALOG_COLUMNS)
+    ordered = tuple(sorted(projected.union(feature_names)))
+    for name in projected:
+        if name not in event.tier4_row and name not in event.panel_row:
+            return NativeScoreBatchRowRefusal(
+                key, "MISSING_STAGED_INPUT",
+                "required member feature is missing from staged rows")
+    return ordered
+
+
 def _assemble_one_event(
     event: NightlyEventInputs,
     *,
@@ -807,6 +869,9 @@ def _assemble_one_event(
         key, spec, gate_policy, feature_names, drivers, gate_identity)
     if refusal is not None:
         return refusal
+    feature_names = _project_member_features(key, event, binding, feature_names)
+    if isinstance(feature_names, NativeScoreBatchRowRefusal):
+        return feature_names
     bundle = _bundle_or_refusal(
         key, event, binding=binding, spec=spec, drivers=drivers,
         gate_identity=gate_identity, gate_policy=gate_policy, as_of=as_of,
