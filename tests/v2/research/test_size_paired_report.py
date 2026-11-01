@@ -82,7 +82,7 @@ def test_large_evaluation_labels_never_use_training_mask_and_negative_incumbent_
     assert report["paired_events"] == 4
 
 
-@pytest.mark.parametrize("kind", ["duplicate", "missing", "foreign", "nan", "negative", "bool"])
+@pytest.mark.parametrize("kind", ["duplicate", "missing", "foreign", "nan", "bool"])
 def test_poisoned_challenger_or_population_refused(kind):
     args = fixture()
     if kind == "duplicate":
@@ -92,7 +92,7 @@ def test_poisoned_challenger_or_population_refused(kind):
     elif kind == "foreign":
         args[1][0]["event_id"] = "not-admitted"
     else:
-        args[1][0]["predicted_absolute_move_pct"] = {"nan": float("nan"), "negative": -1, "bool": True}[kind]
+        args[1][0]["predicted_absolute_move_pct"] = {"nan": float("nan"), "bool": True}[kind]
     with pytest.raises(ValueError):
         paired_report(*args)
 
@@ -158,3 +158,13 @@ def test_legacy_horizon_order_accepted_and_per_horizon_emitted_ascending():
     report = paired_report(*args, horizons=(5, 3, 1))
     assert list(report["per_horizon"]) == ["1", "3", "5"]
     assert paired_report(*args) == report
+
+
+def test_negative_challenger_is_preserved_but_negative_target_refuses():
+    args = fixture()
+    args[1][0]["predicted_absolute_move_pct"] = -2.0
+    result = paired_report(*args)
+    assert result["paired_rows"][0]["challenger"] == -2.0
+    args[3]["e0"] = -2.0
+    with pytest.raises(ValueError, match="invalid magnitude target"):
+        paired_report(*args)

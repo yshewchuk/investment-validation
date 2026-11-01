@@ -38,8 +38,9 @@ def journal(tmp_path, monkeypatch):
     conn.execute("CREATE TABLE experiment_runs(run_id TEXT PRIMARY KEY) STRICT")
     conn.execute("INSERT INTO experiment_runs VALUES ('run')")
     store = ArtifactStore(tmp_path / "store")
+    # Journal-only recipe metadata; native execution fixtures install the full recipe.
     plan = {"plan_id": "plan", "horizons": [5, 3, 1], "candidates": [
-        {"candidate_id": "z-last"}, {"candidate_id": "a-first"}], "folds": [{
+        {"candidate_id": key, "recipe": {}} for key in ("z-last", "a-first")], "folds": [{
         "outer": {"year": "2024"}, "inner": [{"year": "2023", "evaluation_event_ids": ["event"],
         "evaluation_labels_before": "2024-01-01"}]}]}
     recorder = trials.SearchTrials(conn, store, None, SimpleNamespace(run_id="run", document={}), {}, None)

@@ -89,6 +89,12 @@ def collect(conn, store, repository, registration, request, plan_ref):
             "frozen_eligibility": registration.document["size_panel"]["context"]["eligibility_plan"],
             "label_exclusions": [{"outer_year": f["outer_year"], **omission} for f in result["folds"]
                 for omission in f["evaluation_inputs"].get("omitted_labels", [])]}
+    fallbacks = [{"outer_year": f["outer_year"],
+        "horizon_sessions": d["horizon_sessions"], "fallback_counts": d["fallback_counts"]}
+        for f in result["folds"] for d in f.get("fit_diagnostics", []) if "fallback_counts" in d]
+    if fallbacks:
+        report["paired"]["v1_4_fallbacks"] = fallbacks
+        report["paired"]["result_id"] = content_hash({k: v for k, v in report["paired"].items() if k != "result_id"})
     print(f"[stage] collect done in {time.monotonic() - started:.1f}s", file=sys.stderr)
     return report
 

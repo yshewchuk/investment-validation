@@ -28,6 +28,7 @@ from experiments.magnitude_search_evidence import (
     admit_fold_inputs,
     evaluation_targets,
     fit_evidence,
+    forecast_target,
     normalize_forecasts,
     validate_targets,
 )
@@ -302,13 +303,18 @@ class SearchTrials:
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search fit completion differs from admitted attempts")
         # run_fitted_trial has returned only after checking exit and reaping the child.
         # Bind the admitted id (a manifest hash for sharded cohorts), the id reconcile compares.
+        forecasts = (self._forecasts(result["forecasts"], inner, plan["horizons"],
+            forecast_target(plan, candidate["recipe"])) if succeeded else None)
+        if succeeded and canonical_json(forecasts) != canonical_json(result["forecasts"]):
+            raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search worker forecasts are not canonical")
+        forecasts_id = content_hash(forecasts) if succeeded else None
         self._append("execution-result:" + key, {"attempt": attempt,
                      "inputs_id": self._read("inputs:" + key)["inputs_id"], "result": result}, replay=False)
         evidence = {"attempt": attempt, "fit_attempt_count": len(fits) + len(pending),
                     "completed_fit_count": len(fits), "fits": fits, "status": result["event"],
-                    "forecasts_id": content_hash(result["forecasts"]) if succeeded else None,
+                    "forecasts_id": forecasts_id,
                     **{name: result[name] for name in timing},
-                    **diagnostic_evidence(result, execution, plan["horizons"])}
+                    **diagnostic_evidence(result, execution, plan["horizons"], inputs, inner)}
         self._append("execution:" + key, evidence, replay=False)
         self._record(outer_year, inner_year, candidate_id, native=True, **({"forecasts": result["forecasts"]} if succeeded
             else {"failure": fail("EXPERIMENT_VARIANT_FAILED", "fitted magnitude estimator failed").problem}))
@@ -373,7 +379,7 @@ class SearchTrials:
             forecasts = None
             if succeeded:
                 try:
-                    forecasts = self._forecasts(result["forecasts"], inner, plan["horizons"], plan.get("target"))
+                    forecasts = self._forecasts(result["forecasts"], inner, plan["horizons"], forecast_target(plan, candidate["recipe"]))
                 except OpsError:
                     raise ValueError from None
                 if canonical_json(forecasts) != canonical_json(result["forecasts"]):
@@ -410,7 +416,7 @@ class SearchTrials:
         receipt = {"attempt": attempt, "fit_attempt_count": count, "completed_fit_count": completed,
                    "fits": expected[:completed], "status": result["event"],
                    "forecasts_id": content_hash(forecasts) if succeeded else None,
-                   **diagnostic_evidence(result, execution, plan["horizons"])}
+                   **diagnostic_evidence(result, execution, plan["horizons"], inputs, inner)}
         if timed:
             receipt.update({"score_seconds": result["score_seconds"],
                             "rss_delta_kib": result["rss_delta_kib"]})
@@ -463,7 +469,7 @@ class SearchTrials:
     def _record(self, outer_year, inner_year, candidate_id, *, forecasts=None, failure=None, native=False, reconcile=False):
         """Commit forecasts before labels; a journaled cohort validation is reused; native reconciliation can finish publication."""
         plan = self._admit()
-        key, inner, _ = self._trial(plan, outer_year, inner_year, candidate_id)
+        key, inner, candidate = self._trial(plan, outer_year, inner_year, candidate_id)
         column = plan.get("target", {}).get("column", "absolute_move_pct")
         if self._read("start:" + key) is None:
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "trial must be started before recording")
@@ -480,7 +486,7 @@ class SearchTrials:
             if not isinstance(completed, dict) or completed.get("status") != ("failed" if failure is not None else "succeeded"):
                 raise fail("EXPERIMENT_IDENTITY_CONFLICT", "native completion differs from recording")
             if forecasts is not None:
-                submitted = self._forecasts(forecasts, inner, plan["horizons"], plan.get("target"))
+                submitted = self._forecasts(forecasts, inner, plan["horizons"], forecast_target(plan, candidate["recipe"]))
                 if content_hash(submitted) != completed.get("forecasts_id"):
                     raise fail("EXPERIMENT_IDENTITY_CONFLICT", "native completion differs from recording")
         if failure is not None:
@@ -497,7 +503,7 @@ class SearchTrials:
             # Native execute/reconcile verifies the receipt once at its return boundary.
             return terminal if native else self._terminal(plan, outer_year, inner_year, candidate_id)[1]
         if submitted is None:
-            submitted = self._forecasts(forecasts, inner, plan["horizons"], plan.get("target"))
+            submitted = self._forecasts(forecasts, inner, plan["horizons"], forecast_target(plan, candidate["recipe"]))
         terminal = self._read("terminal:" + key)
         if terminal is not None:
             if self._read("forecasts:" + key) != submitted:
@@ -617,7 +623,7 @@ class SearchTrials:
             submitted = self._read("forecasts:" + key)
             if submitted is not None:
                 try:
-                    submitted = self._forecasts(submitted, inner, plan["horizons"], plan.get("target"))
+                    submitted = self._forecasts(submitted, inner, plan["horizons"], forecast_target(plan, candidate["recipe"]))
                 except OpsError:
                     raise ValueError from None
                 validation = self._read("validation:" + admitted["cohort"])

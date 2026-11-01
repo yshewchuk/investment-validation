@@ -64,7 +64,7 @@ def test_cohort_labels_load_once_across_all_candidate_trials(journal, monkeypatc
             validation_appends.append(body)
         return append(slot, body, **kwargs)
     monkeypatch.setattr(journal.recorder, "_append", counted_append)
-    journal.plan["candidates"].append({"candidate_id": "m-mid"})
+    journal.plan["candidates"].append({"candidate_id": "m-mid", "recipe": {}})
     for candidate in ("z-last", "m-mid", "a-first"):
         journal.recorder.start("2024", "2023", candidate)
         assert journal.recorder.record("2024", "2023", candidate, forecasts=rows(4))["status"] == "succeeded"
