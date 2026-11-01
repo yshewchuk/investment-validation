@@ -1,5 +1,6 @@
 """Source-free per-horizon fits with explicit numeric route and target domain."""
 import math
+import time
 from copy import deepcopy
 
 import numpy as np
@@ -13,7 +14,8 @@ class HorizonFitFailure(RuntimeError):
 
 
 def fitted_forecasts(indexed, training_ids, labels, evaluation_ids, horizons, columns, *,
-                     target_column, target_domain, route, recipe, progress=None, diagnostics=None):
+                     target_column, target_domain, route, recipe, progress=None, diagnostics=None,
+                     measure_fit_seconds=False):
     """Fit admitted training-only arrays; caller owns sealed source/target identity.
 
     Preparation/progress errors propagate directly. Fit failures are wrapped only
@@ -32,7 +34,9 @@ def fitted_forecasts(indexed, training_ids, labels, evaluation_ids, horizons, co
         if progress is not None:
             progress("started", deepcopy(fit))
         try:
+            fit_started = time.monotonic() if measure_fit_seconds else None
             result = fit_execution(route, recipe, matrix, labels.copy(), prediction_matrix, columns=columns)
+            fit_seconds = time.monotonic() - fit_started if measure_fit_seconds else None
             values = result["predictions"]
             if diagnostics is not None and route != "magnitude":
                 diagnostics.append({"horizon_sessions": horizon, **{k: v for k, v in result.items() if k != "predictions"}})
@@ -42,7 +46,9 @@ def fitted_forecasts(indexed, training_ids, labels, evaluation_ids, horizons, co
         predictions.update({(event, horizon): float(value) for event, value in zip(evaluation_ids, values)})
         evidence.append(fit)
         if progress is not None:
-            progress("completed", deepcopy(fit))
+            completed = ({**deepcopy(fit), "fit_seconds": fit_seconds} if measure_fit_seconds
+                         else deepcopy(fit))
+            progress("completed", completed)
     return predictions, evidence
 
 

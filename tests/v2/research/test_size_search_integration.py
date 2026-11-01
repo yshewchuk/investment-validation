@@ -865,6 +865,8 @@ def test_report_reuses_shared_execution_receipt_read_and_keeps_outer_rows(monkey
     reads = Counter()
     payload_refs = []
     alive_before_read = []
+    terminal_payload_refs = []
+    alive_before_terminal_read = []
 
     class ReceiptPayload:
         def __init__(self):
@@ -883,6 +885,14 @@ def test_report_reuses_shared_execution_receipt_read_and_keeps_outer_rows(monkey
             return []
         if slot.startswith("comparison-terminal:"):
             return {"result": {"forecasts": [], "fit_details": []}}
+        if slot.startswith("terminal:"):
+            alive_before_terminal_read.append(sum(ref() is not None for ref in terminal_payload_refs))
+            payload = ReceiptPayload()
+            terminal_payload_refs.append(weakref.ref(payload))
+            return {"status": "succeeded", "score_seconds": 0.25, "rss_delta_kib": 64,
+                    "inner_metrics": [], "predictions": payload, "evaluation_receipt": payload}
+        if slot.startswith("fit-completed:"):
+            return {"fit_seconds": 0.125}
         pytest.fail("unexpected journal slot " + slot)
 
     monkeypatch.setattr(report, "read_record", read_record)
@@ -891,6 +901,15 @@ def test_report_reuses_shared_execution_receipt_read_and_keeps_outer_rows(monkey
     shared_key = trial_key(plan, "2024", "2023", "c")
     assert reads["execution:" + shared_key] == 1
     assert len(output["inner_fits"]) == 3
+    assert all(row["fit_seconds"] == [
+        {"horizon_sessions": 5, "seconds": 0.125},
+        {"horizon_sessions": 3, "seconds": 0.125},
+        {"horizon_sessions": 1, "seconds": 0.125},
+    ] for row in output["inner_fits"])
+    assert all(row["score_seconds"] == 0.25 and row["rss_delta_kib"] == 64
+               and row["inner_metrics"] == [] for row in output["inner_fits"])
     assert [row["outer_year"] for row in output["inner_fits"]] == ["2024", "2025", "2025"]
     assert alive_before_read == [0, 0]
     assert all(ref() is None for ref in payload_refs)
+    assert alive_before_terminal_read == [0, 0]
+    assert all(ref() is None for ref in terminal_payload_refs)
