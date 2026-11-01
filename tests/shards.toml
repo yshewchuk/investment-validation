@@ -8,9 +8,10 @@
 # The last shard is the remainder: it owns every test file no earlier pattern
 # claims, so a new test file or package can never silently fall out of CI.
 # On 2026-11-01 main run 41305553745, research remainder totaled 6430 CPU-s.
-# Split its SIZE, IV, and distribution/heavy files into research-d through
-# research-g at about 1240-1400 CPU-s per shard; keep cheap research files in the
-# remainder. Rebalance by moving files between the explicit lists.
+# Split SIZE, IV and distribution/heavy files into research-d..g (~1240-1400
+# CPU-s each). research-h isolates test_size_run_single_collect after PR CI
+# measured research-d at 11m14s; keep the cheap files in the research remainder.
+# Rebalance by moving files between the explicit lists.
 # Earlier, 2026-10-11, before ops-sweep/integration existed (3475 CPU-s total,
 # ~3.8x parallel on a 4-core runner): ops ~1224, research ~902, checks ~474,
 # rest ~876. Rebalance by moving a pattern; keep every shard under ~15 minutes
@@ -63,7 +64,27 @@ patterns = [
 
 [[shard]]
 name = "research-d"
-patterns = ["tests/v2/research/test_size_*"]
+patterns = [
+  "tests/v2/research/test_size_search_integration.py",
+  "tests/v2/research/test_size_preflight_receipt.py",
+  "tests/v2/research/test_size_review_contract.py",
+  "tests/v2/research/test_size_cli_admission.py",
+  "tests/v2/research/test_size_comparator.py",
+  "tests/v2/research/test_size_prep_targets.py",
+  "tests/v2/research/test_size_prep_inputs.py",
+  "tests/v2/research/test_size_prep_history.py",
+  "tests/v2/research/test_size_execution_contract.py",
+  "tests/v2/research/test_size_paired_report.py",
+  "tests/v2/research/test_size_panel_memo.py",
+  "tests/v2/research/test_size_comparison_replay.py",
+  "tests/v2/research/test_size_job_budget.py",
+  "tests/v2/research/test_size_search_eval_embargo.py",
+  "tests/v2/research/test_size_search_report.py",
+]
+
+[[shard]]
+name = "research-h"
+patterns = ["tests/v2/research/test_size_run_single_collect.py"]
 
 [[shard]]
 name = "research-e"

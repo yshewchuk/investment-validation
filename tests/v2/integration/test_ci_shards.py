@@ -53,7 +53,7 @@ def test_every_test_file_is_in_exactly_one_shard():
 def test_every_explicit_research_pattern_matches_a_file():
     by_name = {s.name: s for s in REAL_SHARDS}
     for name in ("research-a", "research-b", "research-c", "research-d",
-                 "research-e", "research-f", "research-g"):
+                 "research-e", "research-f", "research-g", "research-h"):
         for pattern in by_name[name].patterns:
             assert any(fnmatch.fnmatchcase(path, pattern) for path in REAL_FILES), (
                 f"{name}: {pattern}"
@@ -65,6 +65,10 @@ def test_new_research_shards_keep_full_intended_membership():
         "research-d": {
             path for path in REAL_FILES
             if path.startswith("tests/v2/research/test_size_")
+            and path != "tests/v2/research/test_size_run_single_collect.py"
+        },
+        "research-h": {
+            "tests/v2/research/test_size_run_single_collect.py",
         },
         "research-e": {
             "tests/v2/research/test_iv_crush_search_execution.py",
@@ -101,11 +105,9 @@ def test_new_research_shards_keep_full_intended_membership():
             "tests/v2/research/test_magnitude_registration.py",
         },
     }
+    parts = ci_shards.assign(REAL_FILES, REAL_SHARDS)
     for shard, paths in expected.items():
-        assert paths
-        for path in paths:
-            assert path in REAL_FILES, path
-            assert ci_shards.owner(path, REAL_SHARDS) == shard, path
+        assert set(parts[shard]) == paths, shard
 
 
 def _first_unclaimed_pattern(shards, files):
