@@ -78,15 +78,24 @@ def test_v4_full_grid_counts_identities_and_canonical_types():
     assert all(type(value) is float for value in space["l2_regularization"])
 
 
-def test_v4_workers_accepted_without_changing_request_identity():
+@pytest.mark.parametrize("workers", [1, 8])
+def test_v4_workers_accepted_without_changing_request_identity(workers):
     baseline = versions.compile_request(v4_request())
     document = v4_request()
-    document["workers"] = 3
-    workers = versions.compile_request(document)
-    assert workers["request"] == baseline["request"]
-    assert workers["request_id"] == baseline["request_id"]
-    assert ([spec["candidate_spec_id"] for spec in workers["candidate_specs"]]
+    document["workers"] = workers
+    worker_result = versions.compile_request(document)
+    assert worker_result["request"] == baseline["request"]
+    assert worker_result["request_id"] == baseline["request_id"]
+    assert ([spec["candidate_spec_id"] for spec in worker_result["candidate_specs"]]
             == [spec["candidate_spec_id"] for spec in baseline["candidate_specs"]])
+    assert worker_result["request_id"] == content_hash(baseline["request"])
+    expected_ids = [
+        content_hash({"request_id": baseline["request_id"],
+                      "family": spec["family"],
+                      "feature_recipe": spec["feature_recipe"],
+                      "parameters": spec["parameters"]})
+        for spec in baseline["candidate_specs"]]
+    assert [spec["candidate_spec_id"] for spec in baseline["candidate_specs"]] == expected_ids
 
 
 @pytest.mark.parametrize("workers", [0, 9, True])

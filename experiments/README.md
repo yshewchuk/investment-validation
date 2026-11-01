@@ -297,7 +297,7 @@ JSON-native numeric types. The static dependency is included in source seals.
 
 ## Magnitude search driver
 
-`python -m experiments.v2_magnitude_search_run` accepts `seal`, `run` or `collect` for the low-level non-qualified request path. Qualified SIZE v2/v3 requests are refused by this CLI and must run through `python -m experiments.size_search` for job/parent containment.
+`python -m experiments.v2_magnitude_search_run` accepts `seal`, `run` or `collect` for the low-level non-qualified request path. Qualified SIZE v2-v5 requests are refused by this CLI and must run through `python -m experiments.size_search` for job/parent containment.
 Every action requires `--spec SPEC.json --request REQUEST.json --plan-ref REF.json
 --catalog CATALOG --store-root STORE`. Supply the original registered v1.5 spec,
 the supported non-qualified request, and its `plan_ref` object (not a command's entire output envelope).

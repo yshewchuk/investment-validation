@@ -5,6 +5,7 @@ import sys
 
 import pytest
 
+from engine.v2.foundation import content_hash
 from engine.v2.ops.errors import OpsError
 from experiments import magnitude_search_request as compiler
 from experiments import magnitude_search_request_versions as versions
@@ -96,18 +97,25 @@ def test_v5_candidate_ceiling_still_refuses_before_expansion(monkeypatch):
     assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
 
 
-def test_v5_workers_do_not_change_request_identity():
+@pytest.mark.parametrize("workers", [1, 8])
+def test_v5_workers_do_not_change_request_identity(workers):
     baseline = versions.compile_request(v5_request())
     request = v5_request()
-    request["workers"] = 3
-    workers = versions.compile_request(request)
-    assert workers["request"] == baseline["request"]
-    assert workers["request_id"] == baseline["request_id"]
-    assert ([spec["candidate_spec_id"] for spec in workers["candidate_specs"]]
+    request["workers"] = workers
+    worker_result = versions.compile_request(request)
+    assert worker_result["request"] == baseline["request"]
+    assert worker_result["request_id"] == baseline["request_id"]
+    assert ([spec["candidate_spec_id"] for spec in worker_result["candidate_specs"]]
             == [spec["candidate_spec_id"] for spec in baseline["candidate_specs"]])
-    size = [spec for spec in workers["candidate_specs"] if spec["family"] == "size_v1_4"]
+    size = [spec for spec in worker_result["candidate_specs"] if spec["family"] == "size_v1_4"]
     assert len(size) == 1
     assert size[0]["feature_recipe"]["subset"] == "HMO"
+    assert worker_result["request_id"] == content_hash(baseline["request"])
+    expected_candidate_ids = [
+        content_hash({"request_id": baseline["request_id"], "family": spec["family"],
+                      "feature_recipe": spec["feature_recipe"], "parameters": spec["parameters"]})
+        for spec in baseline["candidate_specs"]]
+    assert [spec["candidate_spec_id"] for spec in baseline["candidate_specs"]] == expected_candidate_ids
 
 
 @pytest.mark.parametrize("workers", [0, 9, True])
