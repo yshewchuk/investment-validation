@@ -708,10 +708,9 @@ and the release is not consulted for it.
 
 #### Chooser fold provenance reference
 
-A verified chooser-fold reference contains the descriptor hash, estimator
-digest, exact fold month, authoring parent release id and producer
-ModelIdentity. Its training_cutoff is the verified descriptor's fold_start,
-the exclusive boundary of training data for that fold.
+A verified chooser-fold reference carries the descriptor/estimator hashes,
+fold month, training cutoff, producer binding and authoring/carrying release ids;
+training_cutoff is fold_start, the exclusive training boundary.
 `resolve_release_binding` returns an empty
 `chooser_fold_references` map by default and does not load chooser estimators
 for ordinary nightly scoring. Callers that need these references opt in with
@@ -719,7 +718,7 @@ for ordinary nightly scoring. Callers that need these references opt in with
 typed refusal. A carried fold whose authoring release lacks canonical cutoff
 data refuses instead of producing a partial map. Strict production capture
 opts into this verified reference map, passes it to the scorer, and records
-validated references in strict trace metadata. Ordinary nightly scoring does
+validated references, including authoring/carrying release ids, in strict trace metadata. Ordinary nightly scoring does
 not load chooser estimators, and no path infers provenance from legacy rows.
 
 | Condition | Outcome |
@@ -728,7 +727,8 @@ not load chooser estimators, and no path infers provenance from legacy rows.
 | More than 34 staged chooser-fold objects when references are requested | ModelNotReady before any chooser fold is loaded |
 | No staged chooser-fold objects are available when references are requested | Return an empty map before checking the cutoff |
 | Staged chooser-fold objects are available but the canonical retrain cutoff is missing or invalid | ModelNotReady; no partial reference map |
-| Carried fold authoring release has no canonical cutoff | ModelNotReady; do not return a partial map |
+| Carried descriptor's original release, catalog membership or parent/hash fails | ModelNotReady; no partial reference map |
+| Re-resolving an unchanged valid chain | Same reference, with separate authoring and carrying ids (equal for an uncarried fold) |
 | Malformed, noncanonical or mismatched descriptor, estimator digest, parent binding, output or fold month | ModelNotReady; no partial reference map |
 | Reference resolution requested for a verified release | Re-verify each binding resolution; no cross-call reference cache |
 | Model member exceeds its byte cap or is not a regular file | ModelNotReady before chooser bytes are decoded |

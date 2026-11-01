@@ -1333,6 +1333,7 @@ def test_chooser_fold_reference_flows_through_real_scorer_checkpoint(tmp_path, m
     reference = SimpleNamespace(
         producer_output="pred_im_t1_d14", descriptor_hash="sha256:" + "a" * 64,
         estimator_sha256="sha256:" + digest, training_cutoff="2026-09-01", release_id="release-1",
+        carrying_release_id="release-2",
         fold_start="2026-09-01",
         release_binding=SimpleNamespace(
             binding_id="implied_t1:STR-THRU", model_id=model_id, role="implied_t1",
@@ -1354,7 +1355,7 @@ def test_chooser_fold_reference_flows_through_real_scorer_checkpoint(tmp_path, m
         producer_output="pred_runup_abs_move_d14",
         descriptor_hash="sha256:" + "e" * 64,
         estimator_sha256="sha256:" + runup_digest, training_cutoff="2026-08-01",
-        release_id="release-1", fold_start="2026-08-01",
+        release_id="release-1", carrying_release_id="release-1", fold_start="2026-08-01",
         release_binding=SimpleNamespace(
             binding_id="runup_move:STR-THRU", model_id=runup_model_id,
             role="runup_move", strategy_id="STR-THRU",
@@ -1431,6 +1432,7 @@ def test_chooser_fold_reference_flows_through_real_scorer_checkpoint(tmp_path, m
             "estimator_sha256": ref.estimator_sha256,
             "training_cutoff": ref.training_cutoff,
             "release_id": ref.release_id,
+            "carrying_release_id": ref.carrying_release_id,
             "fold_start": ref.fold_start,
             "release_binding": {
                 "binding_id": identity.binding_id,
