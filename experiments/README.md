@@ -297,7 +297,7 @@ JSON-native numeric types. The static dependency is included in source seals.
 
 ## Magnitude search driver
 
-`python -m experiments.v2_magnitude_search_run` accepts `seal`, `run` or `collect` for the low-level non-qualified request path. Qualified SIZE v2/v3 requests are refused by this CLI and must run through `python -m experiments.size_search` for job/parent containment.
+`python -m experiments.v2_magnitude_search_run` accepts `seal`, `run` or `collect` for the low-level non-qualified request path. Qualified SIZE v2-v5 requests are refused by this CLI and must run through `python -m experiments.size_search` for job/parent containment.
 Every action requires `--spec SPEC.json --request REQUEST.json --plan-ref REF.json
 --catalog CATALOG --store-root STORE`. Supply the original registered v1.5 spec,
 the supported non-qualified request, and its `plan_ref` object (not a command's entire output envelope).
@@ -327,7 +327,7 @@ These three search actions accept `--max-registration-bytes` (default 16777216);
 
 `run_search(conn, store, repository, registration, request, plan_ref, *, limits,
 collect_results=True, before_dispatch=None)`
-is the same orchestration API used by the contained SIZE runner. Only `magnitude_search_request.v2` and `.v3`
+is the same orchestration API used by the contained SIZE runner. Only `magnitude_search_request.v2` through `.v5`
 requests may declare `workers` from 1 through 8 (omission means 1); a declared
 field on a legacy or regression request refuses before admission. This execution
 setting is removed before request hashing and does not change candidate, plan or

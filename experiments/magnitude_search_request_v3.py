@@ -11,7 +11,7 @@ __all__ = ["compile_request"]
 _MAX_AXIS_LENGTH = 32
 _MAX_V4_CANDIDATES = 1000
 _BOUNDS = {
-    ("ridge", "alpha"): (1e-6, 1000.0),
+    ("ridge", "alpha"): (1e-6, 10000.0),
     ("elasticnet", "alpha"): (1e-6, 1000.0),
     ("elasticnet", "l1_ratio"): (1e-6, 1.0),
     ("hgb", "learning_rate"): (1e-3, 1.0),
