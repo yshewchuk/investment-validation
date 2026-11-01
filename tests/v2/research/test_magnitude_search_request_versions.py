@@ -43,6 +43,15 @@ def test_v2_lead_compiler_accepts_valid_horizons_in_order(horizons, expected):
     assert actual["horizons"] == expected
 
 
+def test_v2_dispatch_accepts_workers_without_changing_compiled_identity():
+    request = {**_request(), "schema_version": "magnitude_search_request.v2"}
+    with_workers = {**request, "workers": 3}
+    expected = versions.compile_request(request)
+    actual = versions.compile_request(with_workers)
+    assert with_workers["workers"] == 3
+    assert actual == expected
+
+
 def _parity(document):
     # Only the reference validator sees the surrogate; compare the whole Problem.
     reference = ({**document, "feature_dictionary_hash": v1.recipe()["dictionary_hash"]}

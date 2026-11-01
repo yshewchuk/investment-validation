@@ -17,6 +17,7 @@ from engine.v2.foundation import (
 )
 from engine.v2.ops.errors import fail
 from engine.v2.ops.experiments import ExperimentSpec, resolve_experiment_plan
+from experiments.magnitude_search_request import validate_workers
 from experiments.magnitude_search_request_versions import compile_request
 from experiments.native_registration import (
     MAX_NATIVE_EVIDENCE_BYTES,
@@ -52,6 +53,7 @@ def input_bindings(repository, spec, request, panel_request, *, scope, training_
     except (DataError, ValueError, TypeError, KeyError):
         raise fail("SNAPSHOT_UNRESOLVED",
                    "native registration requires a current committed snapshot") from None
+    validate_workers(request)
     request_binding = {name: value for name, value in request.items() if name != "workers"}
     return {
         "spec_hash": spec.spec_hash,

@@ -331,6 +331,101 @@ def test_no_fit_probe_does_not_claim_comparator(case):
     assert case.conn.execute("SELECT COUNT(*) FROM magnitude_search_records").fetchone()[0] == before
 
 
+def test_real_serial_and_parallel_trials_have_equal_journaled_fit_results(tmp_path):
+    def build(root, workers):
+        root.mkdir()
+        generator = panel_data.__wrapped__(root, SimpleNamespace())
+        data = next(generator)
+        ids = [e["event_id"] for e in data.events if str(e["event_date"].date()) in
+               ("2022-06-02", "2023-01-03", "2023-06-02", "2024-06-17")]
+        history_request = {**data.request, "limits": data.panel_request["limits"],
+                           "event_ids": ids, "horizons": [1]}
+        history = eligible_history.materialize(data.repository, data.panel_source, **history_request)
+        panel_request = {**data.panel_request, "event_ids": ids,
+                         "history_snapshot": history["feature_snapshot"], "horizons": [1]}
+        panel = size_panel.materialize(data.repository, data.panel_source, **panel_request)
+        panel_request.update(feature_snapshot_id=panel["feature_snapshot"].snapshot_id,
+            history_snapshot=history["feature_snapshot"].snapshot_id,
+            price_history_snapshot=data.prices.snapshot_id)
+        request = request_fixture()
+        request.update(feature_dictionary_hash=recipe("HMO")["dictionary_hash"],
+            feature_snapshot_id=panel["feature_snapshot"].snapshot_id,
+            history_snapshot_id=history["feature_snapshot"].snapshot_id,
+            outer_years=["2024"], inner_years={"2024": ["2023"]},
+            max_candidates=33, max_fits=34)
+        request["eligibility_policy_ref"].update(
+            plan_id=panel["context"]["eligibility_plan"]["plan_id"])
+        request["comparison"].update(max_logical_fits=1, max_component_fits=2)
+        request["limits"] = {
+            "child": {"memory_bytes": 1 << 30, "cpu_seconds": 30, "wall_seconds": 60},
+            "parent": {"memory_bytes": 2 << 30, "wall_seconds": 600},
+            "build": {"memory_bytes": 3 << 30, "wall_seconds": 60},
+            "job": {"wall_seconds": 600}}
+        spec = prediction_spec(experiment_id="synthetic-qualified-size-parity",
+                               folds=("2024",), runner="experiments/size_search.py")
+        args = dict(scope="panel-source", training_start="2022-01-01",
+                    labels_before="2025-01-01")
+        registration, spec = binding.prepare(data.repository, spec, request, panel_request, **args)
+        store = data.repository._store
+        reserve_native_registration(data.conn, store, registration, spec)
+        sealed = planner.seal_search_plan(data.conn, store, registration, request)
+        ref = from_document(ArtifactRef, sealed["plan_ref"])
+        context = (data.conn, store, data.repository, registration, request, ref)
+        seal_search_run(*context, clock=SystemClock())
+        request["workers"] = workers
+        return context, sealed["plan"], generator, data
+
+    serial, serial_plan, serial_generator, serial_data = build(tmp_path / "serial", 1)
+    parallel, parallel_plan, parallel_generator, parallel_data = build(tmp_path / "parallel", 2)
+    try:
+        # The closed production v2 grid has 33 candidates; one fold and horizon keep it bounded.
+        assert len(serial_plan["candidates"]) == len(parallel_plan["candidates"]) == 33
+        assert serial_plan["folds"] == parallel_plan["folds"]
+        assert [candidate["candidate_id"] for candidate in serial_plan["candidates"]] == [
+            candidate["candidate_id"] for candidate in parallel_plan["candidates"]]
+
+        run_search(*serial, limits=serial[4]["limits"]["child"])
+        run_search(*parallel, limits=parallel[4]["limits"]["child"])
+
+        from experiments.magnitude_search_plan import trial_key
+        from experiments.magnitude_search_records import read_record
+
+        def without_operational_fields(value):
+            if isinstance(value, dict):
+                return {key: without_operational_fields(item) for key, item in value.items()
+                        if not (key.startswith("worker_") or "elapsed" in key.lower()
+                                or "duration" in key.lower() or "timing" in key.lower())}
+            if isinstance(value, list):
+                return [without_operational_fields(item) for item in value]
+            return value
+
+        def journaled(context, plan):
+            _, _, _, registration, _, _ = context
+            rows = []
+            for candidate in plan["candidates"]:
+                key = trial_key(plan, "2024", "2023", candidate["candidate_id"])
+                execution = read_record(context[0], context[1], registration.run_id,
+                                        "execution:" + key)
+                terminal = read_record(context[0], context[1], registration.run_id,
+                                       "terminal:" + key)
+                rows.append({"candidate_id": candidate["candidate_id"],
+                             "trial_id": key,
+                             "execution": without_operational_fields(execution),
+                             "terminal": without_operational_fields(terminal)})
+            selection = read_record(context[0], context[1], registration.run_id, "selection")
+            return rows, without_operational_fields(selection)
+
+        assert journaled(serial, serial_plan) == journaled(parallel, parallel_plan)
+    finally:
+        serial_data.conn.close()
+        parallel_data.conn.close()
+        for generator in (serial_generator, parallel_generator):
+            try:
+                next(generator)
+            except StopIteration:
+                pass
+
+
 def test_complete_synthetic_serial_search_child_diagnostics(case, monkeypatch):
     poison_outcomes(monkeypatch, case.repository, case.panel_source, ["2023-03-20", "2023-04-03", "2023-05-15"])
     for producer in (size_panel, eligible_history):
