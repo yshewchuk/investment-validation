@@ -45,8 +45,11 @@ from experiments.magnitude_search_trials import SearchTrials, require_execution_
 from experiments.native_gate_worker import read_native_staged_input
 from experiments.native_registration import (
     MAX_NATIVE_EVIDENCE_BYTES,
+    NativeRegistration,
+    load_registration_document,
     read_native_registration,
     valid_registration_read_budget,
+    verified_registration_bytes,
 )
 from experiments.memory_guard import start_rss_watchdog
 
@@ -75,7 +78,7 @@ def _terminate_worker(signum, frame):
     raise _WorkerTerminating
 
 
-def _init_trial_worker(conn_path, store_root, registration, request, plan_ref, memory_bytes):
+def _init_trial_worker(conn_path, store_root, run_id, request, plan_ref, memory_bytes):
     global _PARALLEL, _WORKER_WATCHDOG_STOP, _WORKER_TERMINATING
     _WORKER_WATCHDOG_STOP = None
     _WORKER_TERMINATING = False
@@ -85,6 +88,17 @@ def _init_trial_worker(conn_path, store_root, registration, request, plan_ref, m
         conn = connect(conn_path, must_exist=True)
         conn.execute("PRAGMA busy_timeout=30000")
         store = ArtifactStore(store_root)
+        verified_size_rows = {}
+        binding = verified_registration_bytes(conn, store, run_id, max_evidence_bytes=MAX_NATIVE_EVIDENCE_BYTES,
+                                              verified_size_rows=verified_size_rows)
+        if binding is None:
+            raise fail("INVALID_EXPERIMENT_SPEC", "native experiment has not been preregistered")
+        try:
+            document = load_registration_document(store, binding, verified_size_rows=verified_size_rows)
+            registration = NativeRegistration(run_id, binding,
+                document if document.get("schema_version") == "native_experiment_registration.v1.7" else None)
+        except (ArtifactError, ValueError, KeyError, TypeError):
+            raise fail("EXPERIMENT_IDENTITY_CONFLICT", "native registration evidence is invalid") from None
         repository = Repository(conn, store, pin_snapshots=True)
         plan = read_search_plan(conn, store, registration, request, plan_ref)
         _PARALLEL = (conn, store, SearchTrials(conn, store, repository, registration, request, plan_ref), registration, plan)
@@ -279,7 +293,7 @@ def run_search(conn, store, repository, registration, request, plan_ref, *, limi
             max_workers=workers,
             mp_context=get_context("spawn"),
             initializer=_init_trial_worker,
-            initargs=(conn_path, str(store.root), registration, request, plan_ref, limits["memory_bytes"]),
+            initargs=(conn_path, str(store.root), registration.run_id, request, plan_ref, limits["memory_bytes"]),
         )
         with stage("search fresh trials"):
             parallel_meter = Progress("search fresh trials", len(fresh))

@@ -130,6 +130,7 @@ def _run(monkeypatch, tmp_path, workers, *, fail=False, crash=False, parent_memo
         def initializer(*args):
             assert "workers" not in args[3]
             assert args[5] == 10
+            assert args[2] == "run"
             initializers.append(os.getpid())
             driver._PARALLEL = (
                 conn, store,
@@ -325,19 +326,30 @@ def test_worker_initializer_reopens_file_backed_inputs(tmp_path, monkeypatch):
     store_root.mkdir()
     original = driver.connect(str(catalog), must_exist=True)
     plan = {"plan_id": "plan"}
-    watchdogs = []
+    events = []
     monkeypatch.setattr(driver, "read_search_plan", lambda *args: plan)
-    monkeypatch.setattr(driver, "start_rss_watchdog", lambda value: watchdogs.append(value))
-    registration = SimpleNamespace(run_id="run", document={})
+    def fake_verified_registration_bytes(conn, store, run_id, **kwargs):
+        events.append(("verify", run_id))
+        return b"binding"
+    def fake_load_registration_document(store, binding, **kwargs):
+        events.append(("hydrate", binding))
+        return {"schema_version": "native_experiment_registration.v1.7"}
+    monkeypatch.setattr(driver, "start_rss_watchdog", lambda value: events.append(("watchdog", value)))
+    monkeypatch.setattr(driver, "verified_registration_bytes", fake_verified_registration_bytes)
+    monkeypatch.setattr(driver, "load_registration_document", fake_load_registration_document)
     monkeypatch.setattr(driver.signal, "signal", lambda *args: signal.SIG_DFL)
-    driver._init_trial_worker(str(catalog), str(store_root), registration, {}, object(), 1024)
+    driver._init_trial_worker(str(catalog), str(store_root), "run", {}, object(), 1024)
     worker_conn, worker_store, worker_trials, worker_registration, admitted_plan = driver._PARALLEL
     try:
-        assert watchdogs == [1024]
+        assert events[0] == ("watchdog", 1024)
+        assert events[1] == ("verify", "run")
+        assert events[2] == ("hydrate", b"binding")
         assert worker_conn is not original
         assert worker_conn.execute("PRAGMA busy_timeout").fetchone()[0] == 30000
         assert worker_store.root == store_root
-        assert worker_registration is registration
+        assert worker_registration.run_id == "run"
+        assert worker_registration.binding_json == b"binding"
+        assert worker_registration.document_value == {"schema_version": "native_experiment_registration.v1.7"}
         assert admitted_plan == plan
         assert worker_trials.conn is worker_conn
         assert worker_trials.store is worker_store
@@ -476,9 +488,11 @@ def test_worker_initializer_transports_data_problem(monkeypatch):
     monkeypatch.setattr(driver, "connect", lambda *args, **kwargs: connection)
     monkeypatch.setattr(driver, "ArtifactStore", lambda root: SimpleNamespace(root=root))
     monkeypatch.setattr(driver, "Repository", lambda *args, **kwargs: object())
+    monkeypatch.setattr(driver, "verified_registration_bytes", lambda *args, **kwargs: b"binding")
+    monkeypatch.setattr(driver, "load_registration_document", lambda *args, **kwargs: {})
     monkeypatch.setattr(driver, "read_search_plan", reject_plan)
     monkeypatch.setattr(driver, "_WORKER_TERMINATING", True)
-    driver._init_trial_worker("catalog", "store", object(), {}, object(), 1024)
+    driver._init_trial_worker("catalog", "store", "run", {}, object(), 1024)
     assert driver._WORKER_TERMINATING is False
     receipt = driver._parallel_trial_task(((2024, 2023, "candidate"), 0, {}))
     assert receipt["worker_error_type"] == "data"
