@@ -476,6 +476,99 @@ def test_member_projection_includes_chooser_primitives_and_producers(
     assert "retired_unselected_feature" not in projected
 
 
+def test_numeric_chooser_score_through_wired_twin_member_row(tmp_path, tmp_path_factory, monkeypatch):
+    import hashlib
+    import importlib
+    import json
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    from engine.v2.models import ArtifactMember, FrozenInference, ModelBinding, ModelRelease
+    from engine.v2.models.admissible_table import legacy_n_admissible_table
+    from engine.v2.scoring import application
+    from engine.v2.scoring.source_inputs import build_native_score_inputs
+
+    scoring = importlib.import_module(
+        "tests.v2.scoring.test_v2_scoring_native_chooser_features")
+    root, _ = scoring.frozen._fixture_function(tmp_path_factory)
+    analog = scoring.analog_artifact(scoring.pool_frame(n=80))
+    table = legacy_n_admissible_table()
+    case = scoring.make_case(
+        9, strategy="TWIN-P", spot=100.0, quotes={
+            ("P", float(k), scoring.EXPIRY): {
+                "bid": max(100.0 - k, 0.0) + 0.4,
+                "ask": max(100.0 - k, 0.0) + 0.5,
+            }
+            for k in range(70, 131)
+        }, entry_date=scoring.EVENT)
+    case["features"]["or_implied"] = 2.0
+    original_source = scoring.bundle(
+        (root, ModelRelease(release_id="unused", deployment_id="dep-1", bindings=())),
+        case, analog=analog, table=table)
+
+    def linear_binding(binding_id, role, output, feature, intercept, coefficient):
+        document = {
+            "schema_version": "linear_estimator.v1.0",
+            "feature_order": [feature],
+            "outputs": [{
+                "name": output,
+                "intercept": intercept,
+                "coefficients": [coefficient],
+            }],
+        }
+        payload = json.dumps(document, sort_keys=True).encode("utf-8")
+        filename = f"{binding_id}.json"
+        (tmp_path / filename).write_bytes(payload)
+        binding = ModelBinding(
+            binding_id=binding_id, model_id=binding_id, role=role,
+            strategy_id="*", decision_clock_id="legacy.entry_close.v1",
+            adapter="json-linear.v1", feature_order=(feature,),
+            output_names=(output,), members=(ArtifactMember(
+                name="estimator", path=filename,
+                content_hash="sha256:" + hashlib.sha256(payload).hexdigest()),))
+        return binding
+
+    chooser = linear_binding(
+        "b-chooser", "chooser", "chooser_score", "pred_im_t1_d14", 4.0, 2.0)
+    implied = linear_binding(
+        "b-implied_t1", "implied_t1", "driver_prediction", "or_implied", 1.0, 3.0)
+    runup = linear_binding(
+        "b-runup_move", "runup_move", "pred_runup_abs_move_d14", "or_implied", 0.0, 1.0)
+    release = ModelRelease(
+        release_id="rel-numeric-oracle", deployment_id="dep-1",
+        bindings=(chooser, implied, runup))
+    source = replace(
+        original_source, frozen_inference=FrozenInference(tmp_path),
+        model_release=release)
+    binding = SimpleNamespace(model_identity={
+        "chooser:DYN-SV": SimpleNamespace(binding_id=chooser.binding_id)})
+    state = SimpleNamespace(
+        producer_bindings={"pred_im_t1_d14": implied,
+                           "pred_runup_abs_move_d14": runup},
+        analog_pool=analog, admissible_table=table,
+        fold_pools=source.chooser_fold_pools, fold_provenance={}, artifact_refs=())
+    monkeypatch.setattr(native_score_batch, "select_chooser_state", lambda *a, **k: state)
+    key = SimpleNamespace(strategy="TWIN-P")
+    event = SimpleNamespace(
+        calendar_row={"event_date": scoring.EVENT},
+        tier4_row={}, panel_row=case["features"])
+    projected = _project_member_features(
+        key, event, binding, (), as_of=scoring.EVENT, fold_cache={})
+    assert isinstance(projected, tuple)
+    source = replace(
+        source, feature_vector={name: case["features"][name] for name in projected},
+        feature_missing_mask={name: False for name in projected})
+    wired = native_score_batch._apply_declared_chooser(
+        source, key, _STRATEGY_REGISTRY["TWIN-P"], event,
+        binding=binding, as_of=scoring.EVENT, fold_cache={})
+    assert not isinstance(wired, NativeScoreBatchRowRefusal)
+
+    record = application.score_one(
+        scoring._request("TWIN-P"), build_native_score_inputs(wired))
+    # The producer gives 1 + 3*2 = 7; the chooser gives 4 + 2*7 = 18.
+    assert record.forecasts["chooser_score"] == 18.0
+
+
 def test_member_projection_twin_p_with_empty_references_keeps_primitives(
         monkeypatch):
     _stub_producer_selector(monkeypatch)
