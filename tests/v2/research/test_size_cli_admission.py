@@ -28,6 +28,34 @@ def setup_cli(monkeypatch):
     monkeypatch.setattr(cli, "collect", lambda *a: pytest.fail("collection after invalid metadata"))
 
 
+@pytest.mark.parametrize("action", ["preflight", "register", "seal", "run", "report"])
+def test_size_cli_refuses_iv_before_other_metadata_or_containment(monkeypatch, capsys, action):
+    from engine.v2.research.magnitude_panel_qualified_table import recipe
+    from experiments.magnitude_search_request_versions import compile_request
+    from tests.v2.research.test_magnitude_search_request import request
+    from tests.v2.research.test_size_review_contract import panel_request
+    document, panel = request(), panel_request()
+    panel.update(feature_snapshot_id=document["feature_snapshot_id"],
+        history_snapshot=document["history_snapshot_id"], price_history_snapshot="snap_" + "4" * 32)
+    document.update(schema_version="regression_search_request.v1", panel_request=panel,
+        feature_dictionary_hash=recipe("HMO")["dictionary_hash"])
+    document["comparison"].update(reference="iv_crush_causal_refit", sanity_reference="training_mean")
+    assert compile_request(document)["counts"]["candidates"] == 33
+    def forbidden(*args, **kwargs):
+        pytest.fail("SIZE CLI admitted an IV request")
+    def read(path):
+        assert path == "request", "read other metadata before route refusal"
+        return document
+    monkeypatch.setattr(cli, "_read_document", read)
+    for name in ("_contain", "connect", "Repository", "run_search", "collect", "prepare", "admit"):
+        monkeypatch.setattr(cli, name, forbidden)
+    argv = args(action) + ["--panel-request", "panel", "--scope", "scope",
+        "--training-start", "2020-01-01", "--labels-before", "2025-01-01", "--receipt-ref", "receipt"]
+    assert cli.main(argv) == 2
+    assert json.loads(capsys.readouterr().out) == {"refused": "INVALID_EXPERIMENT_SPEC",
+        "message": "INVALID_EXPERIMENT_SPEC: IV requires its dedicated CLI; use the admitted library path"}
+
+
 @pytest.mark.parametrize("document", [{}, {"schema_ref": "bad"}, {"digest": 1}])
 def test_invalid_plan_reference_has_json_refusal(monkeypatch, capsys, document):
     setup_cli(monkeypatch)

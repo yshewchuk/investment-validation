@@ -8,7 +8,13 @@ from hashlib import sha256
 from pathlib import Path
 
 from engine.v2.contracts import SnapshotRef
-from engine.v2.foundation import artifact_reference, canonical_json, content_hash, from_document, to_document
+from engine.v2.foundation import (
+    artifact_reference,
+    canonical_json,
+    content_hash,
+    from_document,
+    to_document,
+)
 from engine.v2.models.frozen_state_io import BoundedStateReadError, read_bounded_state
 from engine.v2.ops.errors import fail
 from engine.v2.ops.fingerprints import environment_identity, source_closure
@@ -16,12 +22,9 @@ from engine.v2.research.magnitude_inputs import (
     preflight_magnitude_targets,
     qualify_magnitude_training_targets,
 )
+from engine.v2.research.magnitude_panel_qualified_table import admit_columns
 from experiments.magnitude_candidate_recipe import candidate_recipe
 from experiments.magnitude_search_request_versions import compile_request
-from experiments.size_registration_artifacts import (
-    pack_size_registration,
-    size_registration_artifact_bytes,
-)
 from experiments.native_registration import (
     MAX_NATIVE_EVIDENCE_BYTES,
     NativeRegistration,
@@ -30,6 +33,10 @@ from experiments.native_registration import (
 )
 from experiments.size_comparator import COLUMNS, recipe as comparison_recipe
 from experiments.size_panel_request import validate_panel_request
+from experiments.size_registration_artifacts import (
+    pack_size_registration,
+    size_registration_artifact_bytes,
+)
 
 SCHEMA = "native_experiment_registration.v1.7"
 
@@ -69,23 +76,32 @@ def read_panel(repository, source, request, *, columns):
 _PANEL_MEMO = {}
 
 
-def _stored_panel(repository, source, binding, columns):
-    """Full admission on a process-fresh key; later calls reuse the memo after a hash check."""
-    validate_panel_request(binding["size_panel_request"])
+def read_stored_panel(repository, source, request, *, columns, expected_panel=None):
+    """Share one admitted panel per process; validate each request and return detached copies."""
+    validate_panel_request(request)
+    admit_columns(columns)
     key = (id(repository), content_hash(to_document(source)),
-           content_hash(binding["size_panel_request"]), tuple(columns))
+           content_hash(request), tuple(columns))
     entry = _PANEL_MEMO.get(key)
     if entry is not None and entry["repository"] is repository:
         panel = entry["panel"]
         fingerprint = content_hash({"context": panel["context"], "feature_snapshot": panel["feature_snapshot"]})
-        _require(fingerprint == content_hash(binding["size_panel"]))
+        _require(fingerprint == entry["fingerprint"])
+        if expected_panel is not None:
+            _require(fingerprint == content_hash(expected_panel))
     else:
-        panel = read_panel(repository, source, binding["size_panel_request"], columns=columns)
-        _require({"context": panel["context"], "feature_snapshot": panel["feature_snapshot"]}
-                 == binding["size_panel"])
+        panel = read_panel(repository, source, request, columns=columns)
+        metadata = {"context": panel["context"], "feature_snapshot": panel["feature_snapshot"]}
+        _require(expected_panel is None or metadata == expected_panel)
         _PANEL_MEMO.clear()
-        _PANEL_MEMO[key] = {"repository": repository, "panel": panel}
+        _PANEL_MEMO[key] = {"repository": repository, "panel": panel, "fingerprint": content_hash(metadata)}
     return copy.deepcopy(panel)
+
+
+def _stored_panel(repository, source, binding, columns):
+    """Preserve SIZE's expected metadata admission over the shared one-panel memo."""
+    return read_stored_panel(repository, source, binding["size_panel_request"],
+                             columns=columns, expected_panel=binding["size_panel"])
 
 
 def prepare(repository, spec, request, panel_request, *, scope, training_start, labels_before,
