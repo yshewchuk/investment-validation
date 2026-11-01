@@ -343,7 +343,7 @@ to reconstruct outer metadata and plan nested folds with the same public rule.
 preflight, training qualification and `magnitude_inputs.magnitude_recipe` for shared inner/outer evidence admission.
 `experiments/magnitude_search_trials.py` and `experiments/magnitude_search_outer.py`
 directly consume `load_magnitude_targets` for recorded inner and selected outer trials respectively.
-`experiments/distribution_pipeline.py` consumes the same central target reader only after all outer-group alpha intents are recorded; omissions stay explicit and source eligibility/holdouts are unchanged.
+`experiments/distribution_pipeline.py` consumes the same central target reader only after all outer-group alpha intents are recorded; omissions stay explicit and source eligibility/holdouts are unchanged. `distribution_run.py` constructs one native `trading_calendar_from_snapshot` per contained attempt and shares it through the pipeline, without a separate calendar policy.
 `experiments/magnitude_inputs.py` consumes `magnitude_inputs.preflight_magnitude_targets`.
 `experiments/magnitude_report.py` consumes that preflight, `load_magnitude_targets`
 and `qualify_magnitude_training_targets` for the admitted mean baseline.
