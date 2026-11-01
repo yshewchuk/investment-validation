@@ -169,7 +169,8 @@ def test_native_complete_proof_exact_shape_source_and_ordinal_history(source):
                            "counts", "index_id"}
     assert result["schema_version"] == "magnitude_confirmed_metadata.v1"
     assert result["policy"] == dict(confirmation="src_orats_and_session.v1", warmup_events=4,
-        conflicts="refuse_ticker_scoped_view.v1", coverage="complete_pinned_view_only.v1")
+        conflicts="unconfirm_date_and_cluster_conflicts.v2",
+        coverage="complete_pinned_view_only.v1")
     assert result["source"] == dict(snapshot=to_document(fixture.snapshot), table=TABLE,
         contract_ref=to_document(fixture.ref),
         dataset_manifest=to_document(fixture.oracle.table_manifests[TABLE]),
@@ -177,7 +178,8 @@ def test_native_complete_proof_exact_shape_source_and_ordinal_history(source):
         columns=list(COLUMNS))
     assert result["tickers"] == ["A", "B", "C", "Z"]
     assert result["counts"] == dict(partitions=3, fragments=3, candidate_rows=8,
-                                    selected_rows=7, confirmed_rows=6)
+        selected_rows=7, confirmed_rows=6, unconfirmed_date_conflict=0,
+        unconfirmed_cluster_ambiguous=0)
     assert result["index_id"] == content_hash({k: v for k, v in result.items() if k != "index_id"})
     assert json.loads(json.dumps(result)) == result
     a, b, c, z = result["sequences"]
@@ -305,7 +307,8 @@ def test_empty_snapshot_and_zero_population_partition(source, monkeypatch, capsy
     monkeypatch.setattr(bounded_snapshot.BoundedSnapshot, "scan", scan)
     result = build(fixture)
     assert result["counts"] == dict(partitions=len(groups), fragments=len(groups),
-                                    candidate_rows=0, selected_rows=0, confirmed_rows=0)
+        candidate_rows=0, selected_rows=0, confirmed_rows=0,
+        unconfirmed_date_conflict=0, unconfirmed_cluster_ambiguous=0)
     assert all(sequence["status"] == "absent_in_snapshot" for sequence in result["sequences"])
     assert len(requests) == len(groups)
     assert all(query.max_result_rows == 0 and query.max_batch_rows == 1 for query in requests)
@@ -384,16 +387,12 @@ def test_late_native_failure_preserves_full_envelope_and_closes_session(source, 
     assert primary.problem.message not in logged.err + logged.out
 
 
-@pytest.mark.parametrize("kind", ["id", "cluster", "date_conflict", "day"])
+@pytest.mark.parametrize("kind", ["id", "day"])
 @pytest.mark.parametrize("unconfirmed_first", [True, False])
 def test_unconfirmed_sibling_conflicts_across_batches_and_partitions(source, kind, unconfirmed_first):
     first, last = row("a-first", 1999), row("z-last", 2025)
     if kind == "id":
         last["event_id"] = first["event_id"]
-    elif kind == "cluster":
-        first["event_cluster_id"] = last["event_cluster_id"] = "opaque-sibling"
-    elif kind == "date_conflict":
-        last["date_conflict"] = True
     else:
         last["event_date"] = first["event_date"]
         last["year"] = first["year"]
@@ -401,6 +400,25 @@ def test_unconfirmed_sibling_conflicts_across_batches_and_partitions(source, kin
     groups = [("1999", [first, last])] if kind == "day" else [("1999", [first]), ("2025", [last])]
     fixture = source(groups, unrelated=False)
     refused("IDENTITY_CONFLICT", lambda: build(fixture, limits=dict(LIMITS, max_batch_rows=1)))
+
+
+@pytest.mark.parametrize("kind", ["cluster", "date_conflict"])
+def test_unconfirmed_sibling_ambiguity_is_reported_not_refused(source, kind):
+    first, last = row("a-first", 1999), row("z-last", 2025)
+    if kind == "cluster":
+        first["event_cluster_id"] = last["event_cluster_id"] = "opaque-sibling"
+    else:
+        first["date_conflict"] = last["date_conflict"] = True
+    fixture = source([("1999", [first]), ("2025", [last])], unrelated=False)
+    result = build(fixture, limits=dict(LIMITS, max_batch_rows=1))
+    expected = {"unconfirmed_date_conflict": 0, "unconfirmed_cluster_ambiguous": 0}
+    if kind == "cluster":
+        expected["unconfirmed_cluster_ambiguous"] = 2
+    else:
+        expected["unconfirmed_date_conflict"] = 2
+    assert {key: result["counts"][key] for key in expected} == expected
+    a = next(sequence for sequence in result["sequences"] if sequence["ticker"] == "A")
+    assert a["selected_rows"] == 2 and a["confirmed_rows"] == 0 and a["events"] == []
 
 
 def test_equal_opaque_clusters_across_tickers_are_not_siblings(source):

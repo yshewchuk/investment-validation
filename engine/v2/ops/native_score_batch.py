@@ -25,10 +25,14 @@ import pandas as pd
 
 from engine.v2.contracts import ScoreBatch, ScoreRequest
 from engine.v2.foundation import canonical_json, content_hash, to_document
-from engine.v2.models.payoff_artifact import payoff_artifact_key
+from engine.v2.models.payoff_artifact import PayoffLineArtifact
+from engine.v2.models.recalibration_artifact import RecalibrationMapArtifact
 from engine.v2.ops.native_board_universe import BoardRequest
 from engine.v2.ops.native_entry_rule_inputs import entry_rule_declarations
-from engine.v2.ops.native_runup_inputs import runup_model_declarations
+from engine.v2.ops.native_runup_inputs import (
+    latest_artifacts_at_or_before,
+    runup_model_declarations,
+)
 from engine.v2.ops.native_score_batch_types import (
     NativeScoreBatchRowRefusal,
     _event_date_identity,
@@ -67,6 +71,17 @@ _SHADOW_FILL_ALPHA = 0.5  # engine.fills.MID.alpha; do not import engine.fills
                           # (legacy) from this v2 module -- this is a shadow
                           # default, documented in ARCHITECTURE.md, not a
                           # legacy-derived fact.
+
+_CHOOSER_PRIMITIVES = (
+    "mean_prior_abs_move", "ema12r_abs", "signed_streak",
+    "mean_prior_or_implied", "mcap_log", "or_implied", "or_rvol30",
+    "spy_ret21", "spy_ret63", "spy_ret252", "spy_dd252", "spy_vol20",
+    "spy_vol5", "spy_vol60", "spy_vol252", "spy_vol20_rel252",
+)
+
+_SCORER_COMPUTED_FEATURES = frozenset({
+    "entry_cost_pct", "days_to_print", "dte_entry",
+})
 
 @dataclass(frozen=True, slots=True)
 class _DriverSpec:
@@ -418,6 +433,53 @@ def _entry_rule_declarations_or_refusal(
     return declarations
 
 
+def _release_payoff_declarations(
+    binding: ScoringReleaseBinding,
+    strategy: str,
+    artifacts: Sequence[Any],
+    as_of: Any,
+    calendar_row: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Select the latest causal payoff and recalibration inputs for one row."""
+    if not artifacts and strategy != "STR-THRU":
+        return {}
+    cutoff = _row_cutoff(as_of, calendar_row)
+    lines = tuple(artifact for artifact in artifacts
+                  if isinstance(artifact, PayoffLineArtifact))
+    matches = latest_artifacts_at_or_before(
+        lines, cutoff=cutoff, fill_alpha=_SHADOW_FILL_ALPHA)
+    if len(matches) > 1:
+        raise NightlySourceBundleRefusal(
+            "MODEL_NOT_READY", "release carries duplicate latest eligible payoff lines")
+    if not matches:
+        raise NightlySourceBundleRefusal(
+            "MODEL_NOT_READY", "release lacks an eligible payoff line")
+    payoff = matches[0]
+    declarations: dict[str, Any] = {
+        "payoff_artifact": payoff,
+        "payoff_artifact_recipe": {"before": cutoff, "bound_cutoff": payoff.cutoff},
+    }
+    if strategy != "STR-THRU":
+        return declarations
+    recalibration = tuple(
+        artifact for artifact in binding.recalibration_artifacts.get(strategy, ())
+        if isinstance(artifact, RecalibrationMapArtifact))
+    recalibration_matches = latest_artifacts_at_or_before(
+        recalibration, cutoff=cutoff, fill_alpha=_SHADOW_FILL_ALPHA)
+    if len(recalibration_matches) > 1:
+        raise NightlySourceBundleRefusal(
+            "MODEL_NOT_READY", "release carries duplicate latest eligible recalibration maps")
+    if not recalibration_matches:
+        raise NightlySourceBundleRefusal(
+            "MODEL_NOT_READY", "release lacks an eligible recalibration map")
+    recalibration_artifact = recalibration_matches[0]
+    declarations["recalibration_declared"] = True
+    declarations["recalibration_artifact"] = recalibration_artifact
+    declarations["payoff_artifact_recipe"]["recalibration_bound_cutoff"] = (
+        recalibration_artifact.cutoff)
+    return declarations
+
+
 def _release_artifact_declarations(
     binding: ScoringReleaseBinding,
     strategy: str,
@@ -425,22 +487,14 @@ def _release_artifact_declarations(
     as_of: Any,
     calendar_row: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """The release-backed P5-4 SourceBundle declarations for one row.
+    """Declare frozen driver, payoff and recalibration inputs for one row.
 
-    The release is the SOLE source: the driver role's verified residual pool
-    (slot ``driver``) with its causal recipe, and the strategy's payoff
-    artifact selected by the canonical ``(strategy, fill alpha, cutoff)`` key
-    (``payoff_artifact_key``) with its ``before`` recipe. A missing driver pool
-    leaves its declaration absent. If a payoff family is present, exactly one
-    artifact must match the row's key or assembly refuses the row; when no
-    payoff family is present, the optional payoff declaration stays absent.
-    No member is filled from request/event/panel/Tier-4 rows. Malformed members
-    never reach here: they already refused ``resolve_release_binding`` with
-    ``ModelNotReady``.
+    Artifact data cutoffs establish eligibility and ordering; computed_at is
+    never consulted. No request/event/panel rows or fitting provide fallback.
     """
     pool = binding.driver_residual_artifacts.get(driver_identity.role)
     artifacts = binding.payoff_artifacts.get(strategy) or ()
-    if pool is None and not artifacts:
+    if pool is None and not artifacts and strategy != "STR-THRU":
         return {}
     declarations: dict[str, Any] = {}
     if pool is not None:
@@ -452,18 +506,8 @@ def _release_artifact_declarations(
         declarations["model_residual_artifact_recipe"] = {"driver": {
             "role": pool.role, "model_id": pool.model_id, "fold": pool.fold,
             "content_hash": pool.content_hash}}
-    if artifacts:
-        cutoff = _row_cutoff(as_of, calendar_row)
-        key = payoff_artifact_key(strategy, _SHADOW_FILL_ALPHA, cutoff)
-        matches = [artifact for artifact in artifacts if artifact.key == key]
-        if len(matches) > 1:
-            raise NightlySourceBundleRefusal(
-                "MODEL_NOT_READY", "release carries duplicate exact-cutoff payoff artifacts")
-        if not matches:
-            raise NightlySourceBundleRefusal(
-                "MODEL_NOT_READY", "release lacks the exact-cutoff payoff artifact")
-        declarations["payoff_artifact"] = matches[0]
-        declarations["payoff_artifact_recipe"] = {"before": cutoff}
+    declarations.update(_release_payoff_declarations(
+        binding, strategy, artifacts, as_of, calendar_row))
     return declarations
 
 
@@ -568,6 +612,13 @@ def _with_release_artifacts(
                 raise NightlySourceBundleRefusal(
                     "MODEL_NOT_READY", "release lacks the exact-cutoff analog pool")
             declarations.update(analog_declaration)
+        for artifact_name, context_name in (
+            ("payoff_artifact", "payoff_artifact_cutoff"),
+            ("recalibration_artifact", "recalibration_artifact_cutoff"),
+        ):
+            artifact = declarations.get(artifact_name)
+            if artifact is not None:
+                context[context_name] = artifact.cutoff
     except NightlySourceBundleRefusal as exc:
         return NativeScoreBatchRowRefusal(
             key, exc.code, _nightly_source_bundle_refusal_detail(exc))
@@ -651,7 +702,14 @@ def _bundle_or_refusal(
             key, binding, key.event_date, as_of, gate_source_cache)
         if isinstance(source, NativeScoreBatchRowRefusal):
             return source
-        return replace(bundle, gate_forecast_source=source)
+        return replace(
+            bundle, gate_forecast_source=source,
+            forecast_pool={
+                "predictions": source.pool_pred,
+                "residuals": source.pool_res,
+                "interval_floor": source.interval_floor,
+            },
+        )
     return bundle
 
 
@@ -840,6 +898,55 @@ def _apply_declared_chooser(
         bundle, key, binding=binding,
         event_date=event.calendar_row.get("event_date"), as_of=as_of,
         fold_cache=fold_cache)
+def _valid_explicit_feature_names(feature_names: Sequence[str]) -> bool:
+    """Whether names are a duplicate-free non-string sequence of non-empty str."""
+    if isinstance(feature_names, (str, bytes)) or not isinstance(feature_names, Sequence):
+        return False
+    if any(not isinstance(name, str) or not name.strip() for name in feature_names):
+        return False
+    return len(set(feature_names)) == len(feature_names)
+
+
+def _project_member_features(
+    key: BoardRequest,
+    event: NightlyEventInputs,
+    binding: ScoringReleaseBinding,
+    feature_names: Sequence[str],
+) -> Sequence[str] | NativeScoreBatchRowRefusal:
+    """Project required staged chooser/producer features for one DYN-SV row.
+
+    Every other supported strategy keeps its explicit/derived ``feature_names``
+    unchanged. Malformed explicit names are returned unchanged so the bundle's
+    own ``INVALID_FEATURE_NAMES`` validation still refuses them before
+    projection. Scorer-computed and stage-owned gate columns are never
+    projected or required from staged rows.
+    """
+    if not _valid_explicit_feature_names(feature_names):
+        return feature_names
+    if key.strategy != "DYN-SV":
+        return feature_names
+    references = binding.chooser_fold_references
+    if not references:
+        return NativeScoreBatchRowRefusal(
+            key, "RELEASE_MISSING_FEATURE_ORDER",
+            "chooser producer references are missing")
+    projected = set(_CHOOSER_PRIMITIVES) - _SCORER_COMPUTED_FEATURES
+    for reference in references.values():
+        if not reference.release_binding.feature_order:
+            return NativeScoreBatchRowRefusal(
+                key, "RELEASE_MISSING_FEATURE_ORDER",
+                "chooser producer identity has no feature_order")
+        projected.update(reference.release_binding.feature_order)
+    projected -= _SCORER_COMPUTED_FEATURES
+    projected -= set(GATE_FORECAST_COLUMNS)
+    projected -= set(GATE_ANALOG_COLUMNS)
+    ordered = tuple(sorted(projected.union(feature_names)))
+    for name in projected:
+        if name not in event.tier4_row and name not in event.panel_row:
+            return NativeScoreBatchRowRefusal(
+                key, "MISSING_STAGED_INPUT",
+                "required member feature is missing from staged rows")
+    return ordered
 
 
 def _assemble_one_event(
@@ -878,6 +985,9 @@ def _assemble_one_event(
         key, spec, gate_policy, feature_names, drivers, gate_identity)
     if refusal is not None:
         return refusal
+    feature_names = _project_member_features(key, event, binding, feature_names)
+    if isinstance(feature_names, NativeScoreBatchRowRefusal):
+        return feature_names
     bundle = _bundle_or_refusal(
         key, event, binding=binding, spec=spec, drivers=drivers,
         gate_identity=gate_identity, gate_policy=gate_policy, as_of=as_of,

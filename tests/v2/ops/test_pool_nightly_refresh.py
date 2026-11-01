@@ -295,6 +295,17 @@ def test_pool_cycle_pending_false_when_the_promote_failed(tmp_path):
     assert pool_refresh.pool_cycle_pending(conn, tmp_path) is False
 
 
+def test_pool_cycle_pending_false_after_training_when_stage_and_promote_are_missing(
+        tmp_path):
+    conn = _db()
+    _add_score(conn)
+    _write_pointer(tmp_path, PRIOR)
+    for phase in pool_refresh.TRAINING_PHASES:
+        _add_training(conn, phase, state="succeeded")
+
+    assert pool_refresh.pool_cycle_pending(conn, tmp_path) is False
+
+
 def test_pool_cycle_pending_false_without_a_pointer(tmp_path):
     conn = _db()
     _add_score(conn)
@@ -335,7 +346,8 @@ def test_all_training_phases_missing_submit_three(monkeypatch, tmp_path):
         f"nightly:{SESSION}:pool:{phase}:{TAG}:{PRIOR}"
         for phase in pool_refresh.TRAINING_PHASES]
     for call in rec.training:
-        assert call["cutoffs"] == (SESSION,)
+        expected_cutoffs = (SESSION, "2026-02-01") if call["mode"] == "trailing_cutoff" else (SESSION,)
+        assert call["cutoffs"] == expected_cutoffs
         assert call["manifest_ref"] == MANIFEST
     modes = {call["mode"]: call for call in rec.training}
     assert modes["state"]["state"] == "paired_residual_pool"
@@ -775,6 +787,7 @@ def test_tick_calls_reconcile_pool_nightly_refresh(monkeypatch):
     fake_self = SimpleNamespace(
         _clock_check=lambda: None,
         _reclaim_terminal_staging=lambda: None,
+        _native_score_batch_claim_deferred=lambda row: False,
         reconcile=lambda: None,
         running={},
         conn=None,
@@ -930,7 +943,7 @@ def test_real_training_planners_build_the_three_phase_plans(monkeypatch, tmp_pat
     assert paired["state"] == "paired_residual_pool" and paired["cutoffs"] == (SESSION,)
     assert board["alpha"] == pool_refresh.FILL_ALPHA and board["cutoffs"] == (SESSION,)
     assert board["strategies"] == ()
-    assert trailing["cutoffs"] == (SESSION,)
+    assert trailing["cutoffs"] == (SESSION, "2026-02-01")
     for parameters in plans.values():
         assert parameters["input_bindings"] == {"legacy_manifest.json": MANIFEST}
     impl = content_hash(worker_source_manifest(REPO_ROOT))

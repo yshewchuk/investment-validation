@@ -177,6 +177,9 @@ DATA_FAILURE_CODES: dict[str, tuple[str, bool]] = {
     "INPUT_CHANGED": ("integrity", True),
     "OBJECT_CORRUPT": ("integrity", False),
     "MANIFEST_CORRUPT": ("integrity", False),
+    # Read-only snapshot closure verification (ops/workspace/closure.py): a required row, object,
+    # receipt or chain link of a pinned snapshot is missing or changed. `details["reason"]` names it.
+    "SNAPSHOT_CLOSURE_BROKEN": ("integrity", False),
     "IDENTITY_CONFLICT": ("validation", False),
     "UNSUPPORTED_CONTRACT": ("validation", False),
     # Task 2 review fix (P2-4): stable codes for three refusals that
@@ -310,8 +313,8 @@ class FragmentRecord:
     """Row metadata and provenance for one immutable object (phase-2 guide §5.2).
 
     ``primary_key_min``/``primary_key_max`` carry the canonical scalar tuple in
-    contract column order; no floats, matching ``KeyPredicate.values`` (exact
-    strikes and decimals are exact strings, never binary floats).
+    contract column order; a float64 key column (e.g. a fractional strike)
+    carries a finite float, as ``query.fragment_key_bounds`` admits.
     """
 
     fragment_id: str
@@ -322,8 +325,8 @@ class FragmentRecord:
     row_count: int
     byte_hash: str
     logical_content_hash: str
-    primary_key_min: tuple[str | int | bool, ...]
-    primary_key_max: tuple[str | int | bool, ...]
+    primary_key_min: tuple[str | int | bool | float, ...]
+    primary_key_max: tuple[str | int | bool | float, ...]
     time_min: str | None = None
     time_max: str | None = None
     input_receipt_refs: tuple[str, ...]

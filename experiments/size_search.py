@@ -6,7 +6,8 @@ import signal
 import sqlite3
 import sys
 import time
-from contextlib import redirect_stdout
+from contextlib import ExitStack, redirect_stdout
+from functools import partial
 from pathlib import Path
 
 from engine.v2.contracts import ArtifactRef
@@ -19,18 +20,21 @@ from engine.v2.foundation import (
     SystemClock,
     content_hash,
     from_document,
+    to_document,
 )
 from engine.v2.ops.catalog import connect
 from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.experiments import experiment_spec_from_document
 from experiments.magnitude_search_plan import seal_search_plan
 from experiments.magnitude_search_records import read_record
+from experiments.memory_guard import rss_watchdog
 from experiments.native_registration import (
     MAX_NATIVE_EVIDENCE_BYTES,
     read_native_registration,
     reserve_native_registration,
 )
 from experiments.size_job_budget import remaining
+from experiments.size_preflight_receipt import admit, input_bindings, issue
 from experiments.size_search_binding import prepare, validate_panel_request
 from experiments.size_search_report import collect, resource_report
 from experiments.v2_magnitude_search_run import (
@@ -41,21 +45,18 @@ from experiments.v2_magnitude_search_run import (
 )
 
 
-def _contain(request):
+def _contain(request, horizons=(5, 3, 1)):
     """Apply explicit parent/job ceilings in the CLI process, never silently increase."""
     from experiments.magnitude_search_request_versions import compile_request
-    limits = compile_request(request)["request"]["limits"]
+    limits = compile_request(request, horizons=tuple(h for h in (5, 3, 1) if h in horizons))["request"]["limits"]
     memory = limits["parent"]["memory_bytes"]
     if limits["child"]["memory_bytes"] > memory:
         raise fail("INVALID_EXPERIMENT_SPEC", "child memory must not exceed inherited parent limit")
-    current = resource.getrlimit(resource.RLIMIT_AS)
-    if current[1] != resource.RLIM_INFINITY and memory > current[1]:
-        raise fail("RESOURCE_LIMIT_EXCEEDED", "requested parent memory exceeds enclosing limit")
-    resource.setrlimit(resource.RLIMIT_AS, (memory, memory))
     def expired(signum, frame):
         raise fail("RESOURCE_LIMIT_EXCEEDED", "parent/job wall budget exhausted; no fit retry")
     signal.signal(signal.SIGALRM, expired)
     signal.alarm(min(limits["parent"]["wall_seconds"], limits["job"]["wall_seconds"]))
+    return memory
 
 
 def _run(context):
@@ -70,7 +71,7 @@ def _run(context):
         seconds = remaining(conn, store, registration, plan)
         previous = signal.alarm(0)
         signal.alarm(min(previous or 1, seconds))
-        run_search(*context, limits=request["limits"]["child"])
+        run_search(*context, limits=request["limits"]["child"], collect_results=False)
     return collect(*context)
 
 
@@ -79,20 +80,29 @@ def main(argv=None):
     parser.add_argument("action", choices=("preflight", "register", "seal", "run", "report"))
     for name in ("spec", "request", "catalog", "store-root"):
         parser.add_argument("--" + name, required=True)
-    for name in ("panel-request", "scope", "training-start", "labels-before", "plan-ref"):
+    for name in ("panel-request", "scope", "training-start", "labels-before", "plan-ref",
+                 "receipt-ref"):
         parser.add_argument("--" + name)
     parser.add_argument("--no-ledger", action="store_true", required=True)
     args = parser.parse_args(argv)
     fresh = args.action in ("preflight", "register")
     if fresh and not all((args.panel_request, args.scope, args.training_start, args.labels_before)):
         parser.error("preflight/register require panel-request, scope, training-start and labels-before")
+    if args.action == "register" and not args.receipt_ref:
+        parser.error("register requires receipt-ref")
     if not fresh and not args.plan_ref:
         parser.error("seal/run/report require plan-ref")
     conn, started = None, time.monotonic()
+    stack = ExitStack()
     try:
         request = _read_document(args.request)
+        if isinstance(request, dict) and request.get("schema_version") == "regression_search_request.v1":
+            raise fail("INVALID_EXPERIMENT_SPEC", "IV requires its dedicated CLI; use the admitted library path")
         panel_request = validate_panel_request(_read_document(args.panel_request)) if fresh else None
-        _contain(request)
+        # _contain only extracts resource ceilings here for every action; exact fit-count
+        # feasibility is checked later by admitted plan validation, so non-fresh uses (1,).
+        memory = _contain(request, panel_request["horizons"] if fresh else (1,))
+        stack.enter_context(rss_watchdog(memory))
         print("[size] stage=" + args.action + " start rss_kib=" + str(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss), file=sys.stderr)
         with redirect_stdout(sys.stderr):
             if not Path(args.store_root).is_dir():
@@ -105,14 +115,26 @@ def main(argv=None):
             store, clock = ArtifactStore(args.store_root), SystemClock()
             repository = Repository(conn, store, pin_snapshots=True)
             if fresh:
-                registration, spec = prepare(repository, spec, request, panel_request,
-                    scope=args.scope, training_start=args.training_start, labels_before=args.labels_before)
+                bind = partial(input_bindings, repository, spec, request, panel_request, scope=args.scope,
+                    training_start=args.training_start, labels_before=args.labels_before)
                 if args.action == "preflight":
+                    registration, spec = prepare(repository, spec, request, panel_request,
+                        scope=args.scope, training_start=args.training_start,
+                        labels_before=args.labels_before)
                     from experiments.magnitude_search_request_versions import compile_request
-                    result = resource_report({"counts": compile_request(request)["counts"], "request": request})
+                    counts = compile_request(request, horizons=tuple(h for h in (5, 3, 1)
+                        if h in panel_request["horizons"]))["counts"]
+                    result = resource_report({"counts": counts, "request": request})
+                    result["receipt_ref"] = to_document(issue(store, bind(), registration))
                 else:
+                    try:
+                        receipt_ref = from_document(ArtifactRef, _read_document(args.receipt_ref))
+                    except FileNotFoundError:
+                        raise fail("INVALID_EXPERIMENT_SPEC", "SIZE preflight receipt is missing", details={"reason": "receipt_missing"}) from None
+                    registration, spec = admit(store, receipt_ref, bind(), spec)
                     reserve_native_registration(conn, store, registration, spec, max_evidence_bytes=MAX_NATIVE_EVIDENCE_BYTES)
                     result = seal_search_plan(conn, store, registration, request)
+                print("[size] receipt " + ("issued" if args.action == "preflight" else "admitted"), file=sys.stderr)
             else:
                 registration = read_native_registration(conn, store, spec)
                 ref = from_document(ArtifactRef, _read_document(args.plan_ref))
@@ -135,6 +157,7 @@ def main(argv=None):
         print(json.dumps({"refused": "RESOURCE_UNAVAILABLE", "message": "SIZE storage unavailable"}))
         return 2
     finally:
+        stack.close()
         signal.alarm(0)
         if conn is not None:
             conn.close()

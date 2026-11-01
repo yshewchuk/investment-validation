@@ -98,6 +98,7 @@ from engine.v2.ops.store_barrier import (
     verified_write_in,
 )
 from engine.v2.ops.worker_progress import STEPS_FILENAME, _rss_bytes, read_new_records
+from engine.v2.ops.workspace.guard import refuse_workspace_execution
 
 #: Kinds whose coordinator effect does real, non-idempotent catalog/outbox/
 #: filesystem work every attempt — the generic checkpoint-reuse shortcut
@@ -488,6 +489,7 @@ class LeaseRenewer:
 class Service:
     def __init__(self, conn, root, registry, policy, *, clock, code_source, store_root=None,
                  materialization_base=None):
+        refuse_workspace_execution(root, code_source, store_root, materialization_base)
         self.conn, self.root, self.registry, self.policy = conn, Path(root), registry, policy
         self.clock, self.code_source = clock, Path(code_source)
         self.store_root = Path(store_root) if store_root is not None else self.code_source
@@ -623,15 +625,16 @@ class Service:
                 os.close(running.result_fd)
                 del self.running[attempt_id]
                 self.observed.pop(attempt_id, None)
+        pool_submitted = self._reconcile_pool_nightly_refresh()
         claim = claim_next(self.conn, policy=self.policy, sample=sample_capacity(self.root, clock=self.clock),
-                           supervisor=self.identity, clock=self.clock, registry=self.registry)
+                           supervisor=self.identity, clock=self.clock, registry=self.registry,
+                           defer_claim=self._native_score_batch_claim_deferred)
         if claim:
             self._launch(claim)
         self._reconcile_publication_status()
         self._reconcile_computed_moves_refresh()
         self._reconcile_native_score_batch_shadow()
         self._reconcile_native_parity()
-        pool_submitted = self._reconcile_pool_nightly_refresh()
         return bool(self.running or claim or pool_submitted)
 
     def record_nightly_completion(self, identity: SessionIdentity, generation: int,
@@ -872,6 +875,35 @@ class Service:
                   file=sys.stderr)
             return None
 
+    def _native_score_batch_claim_deferred(self, row):
+        """Fail closed for one ready native batch until its pool cycle is terminal.
+
+        The scheduler passes its current ready row, so this check performs no
+        second scan over the queued native-batch catalog rows.
+        """
+        if row["kind"] != "native_score_batch":
+            return False
+        from engine.v2.ops.nightly import scope_from_native_score_batch_key
+        from engine.v2.ops.pool_refresh import pool_cycle_outcome
+
+        idempotency_key = row["idempotency_key"]
+        if not idempotency_key.startswith("nightly:"):
+            return False
+        try:
+            parsed = scope_from_native_score_batch_key(idempotency_key)
+            if parsed is None:
+                raise ValueError(
+                    "unreadable nightly native_score_batch idempotency key")
+            occurrence, _scope_hash = parsed
+            outcome = pool_cycle_outcome(self.conn, occurrence)
+        except Exception as exc:  # noqa: BLE001 - fail closed for this ready row
+            print(json.dumps({"event": "native_score_batch_pool_gate_lookup_failed",
+                              "job_id": row["job_id"],
+                              "exception_type": type(exc).__name__}),
+                  file=sys.stderr)
+            return True
+        return outcome == "active"
+
     def _report_native_worker_release_problem(self, claim, problem):
         """A worker-side release refusal must leave the same durable row the
         sidecar writes. An existing native job does not skip release re-check
@@ -1003,6 +1035,14 @@ class Service:
         memo["not_before"] = now + self._COMPUTED_MOVES_BACKOFF_SECONDS[
             min(memo["attempts"] - 1, len(self._COMPUTED_MOVES_BACKOFF_SECONDS) - 1)]
         self._native_score_batch_memo = memo
+
+    def native_score_batch_submission_exhausted(self, session, scope_hash):
+        """Whether this score identity has spent its scheduled submit attempts."""
+        memo = self._native_score_batch_memo
+        return bool(
+            memo is not None
+            and memo["identity"][:2] == (session, scope_hash)
+            and memo["attempts"] >= self._COMPUTED_MOVES_MAX_ATTEMPTS)
 
     def _report_native_score_batch_problem(self, exc):
         """Dedup-by-(code, message, error-type) report, identical pattern to
@@ -1222,7 +1262,11 @@ class Service:
 
         identity lookup runs first and returns without a release check when no
         eligible identity exists or the identity is not snapshot-pinned
-        (`producer_parameters is None`); otherwise release binding is checked.
+        (`producer_parameters is None`); otherwise the pool outcome gate and
+        release binding are checked. An ``active`` pool cycle defers without
+        consuming the native submission memo; ``promoted``, ``failed``, and
+        ``skipped`` proceed to release resolution. A failed or skipped cycle
+        therefore uses whatever release is still deployed.
         An existing native job does not skip release re-check or reconciliation;
         the idempotent submit path handles the existing job. A
         release-unavailable result never consumes `_native_score_batch_memo`
@@ -1245,6 +1289,14 @@ class Service:
             return
         session, scope_hash, producer_parameters = identity
         if producer_parameters is None:
+            return
+        from engine.v2.ops.pool_refresh import pool_cycle_outcome
+        try:
+            pool_outcome = pool_cycle_outcome(self.conn, session)
+        except Exception as exc:
+            self._report_native_score_batch_problem(exc)
+            return
+        if pool_outcome == "active":
             return
         release_root = self._native_release_root_or_none(
             occurrence=session, scope_hash=scope_hash)
@@ -1702,10 +1754,20 @@ class Service:
             overlay_read_set(launch.root, destination)
 
     def _reuse_staged_checkpoint(self, claim, launch=None):
-        schema = "receipt.v1.0" if claim.spec.kind == "artifact_check" else "legacy_action.v1.0"
+        if claim.spec.kind == "artifact_check":
+            schema = "receipt.v1.0"
+        elif claim.spec.kind == "nightly_preview_inputs":
+            schema = "nightly_preview_input.v1.0"
+        else:
+            schema = "legacy_action.v1.0"
         # Resolve without materializing (B1a): a cache hit here never launches
         # the worker, so nothing is staged or recorded for this attempt.
-        resolved = resolve_bindings(self.conn, self.store, claim.spec)
+        max_artifact_bytes = None
+        if claim.spec.kind == "nightly_preview_inputs":
+            from engine.v2.ops.nightly_preview_inputs import MAX_INPUT_BYTES
+            max_artifact_bytes = MAX_INPUT_BYTES
+        resolved = resolve_bindings(self.conn, self.store, claim.spec,
+                                    max_artifact_bytes=max_artifact_bytes)
         cache_key = cache_identity(
             kind=claim.spec.kind,
             inputs=cache_inputs(resolved_inputs_hash(claim.spec, resolved), launch),

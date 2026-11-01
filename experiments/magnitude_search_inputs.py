@@ -5,10 +5,10 @@ Contract: experiments/ARCHITECTURE.md, "Sharded cohort inputs" (#991 fix 4).
 from engine.v2.foundation import content_hash
 from engine.v2.ops.errors import fail
 from experiments.magnitude_search_shards import (
-    LIST_MEMBERS,
     MANIFEST_SCHEMA,
     build_manifest,
     iter_section,
+    list_members,
     manifest_id,
     verify_manifest,
     write_section,
@@ -54,12 +54,16 @@ def _admit_manifest(record, expected_id):
     """Verify a manifest record against its id and its section/inline shape; return its sections."""
     verify_manifest(record, expected_id)
     sections = record["sections"]
-    if set(sections) != {member["section"] for member in LIST_MEMBERS}:
+    schema = record["inline"].get("preflight.schema_version")
+    members = list_members(schema)
+    if schema == "research_iv_crush_preflight.v1" and record["inline"].get("target.column") != "crush_pct_iv30":
+        raise fail(_CONFLICT, "search fit target differs from its cohort")
+    if set(sections) != {member["section"] for member in members}:
         raise fail(_CONFLICT, "search cohort manifest sections are invalid")
     shape = {}
     for path, value in record["inline"].items():
         _place(shape, path, value)
-    for member in LIST_MEMBERS:
+    for member in members:
         _place(shape, member["section"], None)
     return sections
 
@@ -82,22 +86,24 @@ def load_inputs(store, record, expected_id):
     inputs = {}
     for path, value in record["inline"].items():
         _place(inputs, path, value)
-    for member in LIST_MEMBERS:
+    for member in list_members(record["inline"].get("preflight.schema_version")):
         _place(inputs, member["section"], _section_rows(store, member, sections[member["section"]]))
     return inputs
 
 
-def load_fit_inputs(store, manifest, expected_id, evaluation_event_ids, horizons, feature_columns):
-    """Stream only the rows the fit child consumes from a sharded manifest.
+def load_fit_inputs(store, manifest, expected_id, evaluation_event_ids, horizons, feature_columns, *,
+                    target_column="absolute_move_pct"):
+    """Stream stored training/feature rows for fixed fitting or admission replay.
 
     Verifies the manifest against ``expected_id`` and reads only its ``training`` and
     ``features`` sections, shard by shard. Returns ``{"features", "training"}``: training rows
-    reduced to (event_id, absolute_move_pct); feature rows kept for training or evaluation
+    reduced to (event_id, target_column); feature rows kept for training or evaluation
     events at the selected horizons, reduced to (event_id, context_id, horizon_sessions,
     *feature_columns), in stored order. A manifest, hash, shard or inline-path mismatch is
     EXPERIMENT_IDENTITY_CONFLICT (retryable store errors propagate); a row missing a
-    requested column raises KeyError, and the fit child reports any loader failure as
-    unavailable. Both loaders share ``_admit_manifest``; projection arguments must be
+    requested column raises KeyError. The magnitude fit child reports MemoryError as
+    resource_limit and other loader failures as unavailable; library callers retain the error.
+    Both loaders share ``_admit_manifest``; projection arguments must be
     lists or tuples (INVALID_EXPERIMENT_SPEC otherwise).
     """
     if not isinstance(manifest, dict) or manifest.get("schema_version") != MANIFEST_SCHEMA:
@@ -106,8 +112,13 @@ def load_fit_inputs(store, manifest, expected_id, evaluation_event_ids, horizons
             or not isinstance(feature_columns, (list, tuple))):
         raise fail("INVALID_EXPERIMENT_SPEC", "search fit projection arguments are invalid")
     sections = _admit_manifest(manifest, expected_id)
-    members = {member["section"]: member for member in LIST_MEMBERS}
-    training = [{name: row[name] for name in ("event_id", "absolute_move_pct")}
+    schema = manifest["inline"].get("preflight.schema_version")
+    expected_target = "crush_pct_iv30" if schema == "research_iv_crush_preflight.v1" else "absolute_move_pct"
+    if target_column != expected_target or (expected_target == "absolute_move_pct"
+            and manifest["inline"].get("target.column", "absolute_move_pct") != target_column):
+        raise fail(_CONFLICT, "search fit target differs from its cohort")
+    members = {member["section"]: member for member in list_members(schema)}
+    training = [{name: row[name] for name in ("event_id", target_column)}
                 for row in _iter_rows(store, members["training"], sections["training"])]
     events = {row["event_id"] for row in training} | set(evaluation_event_ids)
     wanted = set(horizons)
@@ -142,9 +153,16 @@ def publish_inputs(store, inputs):
     The inverse of ``load_inputs``: list-valued members become sections (keyless ones as
     ``{position, row}`` rows), every other leaf is an inline scalar by dotted path. Shards
     are published here; the caller appends the manifest, which is the commit point.
+    IV cohorts require their explicit target-column pin before any shard publication.
     """
+    schema = inputs.get("preflight", {}).get("schema_version")
+    members = list_members(schema)
+    target = inputs.get("target")
+    if schema == "research_iv_crush_preflight.v1" and (
+            not isinstance(target, dict) or target.get("column") != "crush_pct_iv30"):
+        raise fail(_CONFLICT, "search fit target differs from its cohort")
     sections = {}
-    for member in LIST_MEMBERS:
+    for member in members:
         path = member["section"]
         rows = _path_value(inputs, path)
         key = member["key"]

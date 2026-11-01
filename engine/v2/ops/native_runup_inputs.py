@@ -2,9 +2,9 @@
 from __future__ import annotations
 
 from math import isfinite
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
-from engine.v2.models.payoff_artifact import PayoffSurfaceArtifact, payoff_artifact_key
+from engine.v2.models.payoff_artifact import PayoffSurfaceArtifact
 from engine.v2.models.residual_artifact import DriverResidualPoolArtifact
 from engine.v2.scoring.native_payoff import RUNUP_TERMS
 from engine.v2.scoring.nightly_source_bundle import NightlySourceBundleRefusal
@@ -34,18 +34,43 @@ def _champion_pool(binding: ScoringReleaseBinding, identity: ModelIdentity) -> D
     return pool
 
 
+def latest_artifacts_at_or_before(
+    artifacts: Sequence[Any], *, cutoff: str, fill_alpha: float,
+) -> tuple[Any, ...]:
+    """Return all artifacts at the newest DATA cutoff no later than cutoff.
+
+    Artifact ``computed_at`` is deliberately irrelevant: the embedded data
+    cutoff alone establishes causal eligibility and ordering.
+    """
+    eligible = tuple(
+        artifact for artifact in artifacts
+        if isinstance(getattr(artifact, "cutoff", None), str)
+        and artifact.cutoff <= cutoff
+        and isinstance(getattr(artifact, "alpha", None), (int, float))
+        and round(float(artifact.alpha), 4) == round(float(fill_alpha), 4)
+    )
+    if not eligible:
+        return ()
+    latest_cutoff = max(artifact.cutoff for artifact in eligible)
+    return tuple(artifact for artifact in eligible if artifact.cutoff == latest_cutoff)
+
+
 def _surface(binding: ScoringReleaseBinding, cutoff: str, fill_alpha: float) -> PayoffSurfaceArtifact:
-    key = payoff_artifact_key("STR-RUNUP", fill_alpha, cutoff)
-    matches = [artifact for artifact in binding.payoff_artifacts.get("STR-RUNUP", ())
-               if isinstance(artifact, PayoffSurfaceArtifact) and artifact.key == key]
+    candidates = tuple(
+        artifact for artifact in binding.payoff_artifacts.get("STR-RUNUP", ())
+        if isinstance(artifact, PayoffSurfaceArtifact)
+    )
+    matches = latest_artifacts_at_or_before(
+        candidates, cutoff=cutoff, fill_alpha=fill_alpha)
     if len(matches) == 0:
         raise NightlySourceBundleRefusal(
-            "MODEL_NOT_READY", "RUNUP requires one exact-key payoff surface")
+            "MODEL_NOT_READY", "RUNUP has no eligible payoff surface")
     if len(matches) > 1:
         raise NightlySourceBundleRefusal(
-            "MODEL_NOT_READY", "RUNUP has more than one exact-key payoff surface")
+            "MODEL_NOT_READY", "RUNUP has duplicate latest payoff surfaces")
     surface = matches[0]
-    if (len(surface.coefficients) != len(RUNUP_TERMS)
+    if (surface.strategy != "STR-RUNUP"
+            or len(surface.coefficients) != len(RUNUP_TERMS)
             or not all(map(isfinite, surface.coefficients))
             or not surface.residuals or not all(map(isfinite, surface.residuals))):
         raise NightlySourceBundleRefusal(
@@ -78,6 +103,6 @@ def runup_model_declarations(
             "role": pool.role, "model_id": pool.model_id, "fold": None,
             "content_hash": pool.content_hash} for slot, pool in pools.items()},
         "payoff_artifact": surface,
-        "payoff_artifact_recipe": {"before": cutoff},
+        "payoff_artifact_recipe": {"before": cutoff, "bound_cutoff": surface.cutoff},
         "residual_recipe": {"mode": "not_applicable"},
     }

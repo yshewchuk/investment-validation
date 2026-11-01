@@ -1,14 +1,18 @@
 """Shared native fold inputs and pure evidence checks for inner/outer search."""
 import math
-from numbers import Integral, Real
+from numbers import Real
 
 from engine.v2.contracts import SnapshotRef
 from engine.v2.foundation import canonical_json, content_hash, from_document
 from engine.v2.research.magnitude_history_store import read_stored_for_events
 from engine.v2.research.magnitude_inputs import (
+    load_magnitude_targets,
     magnitude_recipe,
     preflight_magnitude_targets,
     qualify_magnitude_training_targets,
+)
+from engine.v2.research.regression_evidence import (
+    normalize_forecasts as normalize_regression_forecasts,
 )
 from experiments.magnitude_history_inputs import history_binding
 
@@ -16,9 +20,12 @@ OMISSION_REASONS = frozenset({"skipped", "not_orats", "no_session", "no_price_wi
     "no_price_history", "ticker_too_few_events"})
 
 
-def admit_fold_inputs(repository, binding, fold, *, history_failure, strict_json=False):
+def admit_fold_inputs(repository, binding, fold, *, history_failure, strict_json=False, plan=None):
     """Load preflighted native inputs; the caller supplies its history-conflict envelope."""
-    if binding.get("schema_version") == "native_experiment_registration.v1.6":
+    if binding.get("schema_version") == "native_experiment_registration.v1.8":
+        from experiments.regression_search_binding import fold_inputs
+        return fold_inputs(repository, binding, fold, plan=plan)
+    if binding.get("schema_version") in ("native_experiment_registration.v1.6", "native_experiment_registration.v1.7"):
         from experiments.size_search_binding import fold_inputs
         return fold_inputs(repository, binding, fold)
     snapshot = from_document(SnapshotRef, binding["snapshot"])
@@ -43,7 +50,7 @@ def fit_evidence(inputs, fold, plan, execution):
     """Bind ordered native matrices and training targets without fitting."""
     indexed = {(row["event_id"], row["horizon_sessions"]): row for row in inputs["features"]}
     train = [row["event_id"] for row in inputs["training"]]
-    result = []
+    result, target = [], inputs.get("target", {}).get("column", "absolute_move_pct")
     for horizon in plan["horizons"]:
         documents = []
         for events in (train, fold["evaluation_event_ids"]):
@@ -51,36 +58,36 @@ def fit_evidence(inputs, fold, plan, execution):
             documents.append({"columns": execution["features"], "row_keys": [
                 [row[name] for name in ("event_id", "context_id", "horizon_sessions")] for row in rows],
                 "values": [[row[name] for name in execution["features"]] for row in rows]})
-        documents[0]["absolute_move_pct"] = [row["absolute_move_pct"] for row in inputs["training"]]
+        documents[0][target] = [row[target] for row in inputs["training"]]
         result.append({"horizon_sessions": horizon, "training_event_ids": train,
             "evaluation_event_ids": fold["evaluation_event_ids"], "training_matrix_id": content_hash(documents[0]),
             "prediction_matrix_id": content_hash(documents[1])})
     return result
 
 
-def normalize_forecasts(rows, fold, horizons, *, strict_json=False):
-    """Require exact finite nonnegative coverage; preserve submitted Real/Integral admission."""
-    expected = {(event, horizon) for event in fold["evaluation_event_ids"] for horizon in horizons}
-    if not isinstance(rows, list) or len(rows) != len(expected):
-        raise ValueError
-    found = {}
-    for row in rows:
-        if not isinstance(row, dict) or set(row) != {"event_id", "horizon_sessions", "predicted_absolute_move_pct"}:
-            raise ValueError
-        horizon, value = row["horizon_sessions"], row["predicted_absolute_move_pct"]
-        if (isinstance(horizon, bool) or not isinstance(horizon, Integral)
-                or isinstance(value, bool) or not isinstance(value, Real) or value < 0
-                or (strict_json and (type(horizon) is not int or type(value) not in (int, float)))):
-            raise ValueError
-        pair, value = (row["event_id"], int(horizon)), float(value)
-        if pair not in expected or pair in found or not math.isfinite(value):
-            raise ValueError
-        found[pair] = {"event_id": pair[0], "horizon_sessions": pair[1], "predicted_absolute_move_pct": value}
-    return [found[pair] for pair in sorted(expected)]
+def normalize_forecasts(rows, fold, horizons, *, strict_json=False, target=None):
+    """Require exact finite target-domain coverage; preserve submitted Real/Integral admission."""
+    target = target or {"prediction_column": "predicted_absolute_move_pct", "domain": "nonnegative"}
+    return normalize_regression_forecasts(rows, fold, horizons,
+        prediction_column=target["prediction_column"], target_domain=target["domain"], strict_json=strict_json)
+
+
+def evaluation_targets(repository, binding, fold):
+    """Open only an admitted evaluation cohort; callers persist forecasts before invoking."""
+    loader, snapshot, options = load_magnitude_targets, binding["snapshot"], {"omit_not_computed": True}
+    if binding.get("schema_version") == "native_experiment_registration.v1.8":
+        from engine.v2.research.iv_crush_inputs import load_iv_crush_targets
+        loader, snapshot, options = load_iv_crush_targets, binding["target_snapshot"], {}
+    return loader(repository, from_document(SnapshotRef, snapshot),
+        as_of_month=binding["holdouts"]["holdout_as_of_month"], labels_before=fold["evaluation_labels_before"],
+        event_ids=fold["evaluation_event_ids"], **options)
 
 
 def validate_targets(preflight, fold, evaluation_inputs, targets, *, strict_json=False):
     """Reconstruct the protected receipt and exact ordered targets; malformed evidence raises ValueError."""
+    if preflight.get("schema_version") == "research_iv_crush_preflight.v1":
+        from engine.v2.research.iv_crush_inputs import validate_iv_crush_receipt
+        return validate_iv_crush_receipt(preflight, fold, evaluation_inputs, targets)
     events = set(fold["evaluation_event_ids"])
     consumed = [row for row in preflight["planned_inputs"] if row["event_id"] in events]
     ordered = [row["event_id"] for row in consumed]

@@ -8,7 +8,7 @@ Offline analysis CLIs cover real-fill quality, cross-sectional screening, the re
 
 ## Source-free magnitude distributions
 
-`magnitude_distribution.recipe`, `histogram`, `validate_distribution` and `bin_index` are source-free numerical APIs, consumed only by the research math/payoff helpers below and synthetic tests; no runtime/source admission exists. The closed plain-JSON `research_magnitude_distribution.v1` represents absolute simple-return percentage points: quarter-point half-open bins through 20, then uncapped overflow; finite-bin interpolation is uniform, with no zero atom. `histogram(probabilities, tail_excesses=None)` and `validate_distribution(document)` return detached documents; 81 finite masses in [0, 1] must sum to one within absolute 1e-12, without repair/smoothing.
+`magnitude_distribution.recipe`, `histogram`, `validate_distribution` and `bin_index` are source-free numerical APIs, consumed by the math/payoff helpers, experiment distribution declarations/fitting/OOF adapters and synthetic tests; these numerical APIs own no source admission. The closed plain-JSON `research_magnitude_distribution.v1` represents absolute simple-return percentage points: quarter-point half-open bins through 20, then uncapped overflow; finite-bin interpolation is uniform, with no zero atom. `histogram(probabilities, tail_excesses=None)` and `validate_distribution(document)` return detached documents; 81 finite masses in [0, 1] must sum to one within absolute 1e-12, without repair/smoothing.
 Tail policy is `unresolved` (zero samples) or `empirical_excess` (nonempty equal-weight nonnegative excesses relative to 20); duplicates, order and explicit `sample_count` are retained. Zero excess means exactly 20; a supplied tail is retained even with zero forecast overflow mass. Samples are not authenticated training evidence.
 `bin_index(magnitude)` accepts plain `int`/`float` (not bool/subclasses), finite after float conversion and nonnegative; exact boundaries go right, including 20 to overflow. The same numeric rules apply to histogram masses/edges/excesses. No caller value is echoed in refusals.
 Stdlib numeric/list operations plus native errors suffice. Validation costs O(81 + n) time/detached space for n tail samples, with no hard sample cap, I/O, partial results, cache, retry, writes or transaction.
@@ -19,7 +19,7 @@ Arithmetic explicitly divides accepted masses by their `fsum` (only admitted 1e-
 `magnitude_distribution_payoff.bridge_summary` applies supplied `max(0, (intercept + slope*A)*spot) + residual*spot`; `empirical_bridge_summary` applies the identical bridge to equal-weight magnitude atoms. Supplied equal-weight payoff residuals are independent of magnitude in this frozen bridge, not fitted/admitted joint evidence.
 Both return `expected_profit`, `probability_profit` (strictly positive), `mean_exit_value` and `probability_negative_exit` under the supplied independent move/residual law. Spot is positive; entry cost is nonnegative; both are per-share dollar decision-quote proxies. Residuals are spot fractions, and slope maps percentage-point magnitude to spot fraction. Fees, fills, multipliers, IV repricing and capacity are absent: these are not realized net-profit forecasts. Residuals remain after clipping, preserving impossible negative exits as a diagnostic.
 `mean_matched_control(target_mean, residuals)` returns detached empirical `magnitudes`, target/raw/anchored means, scale and zero count: clip negative target-plus-residual draws to zero, then anchor their mean by positive rescaling. This is named support repair, not incumbent parity; target mean must be positive, and earlier-OOF provenance is the later caller's responsibility. Empirical scoring/bridge APIs preserve these zero atoms.
-Bridge integration costs O(n log n + m log n + 80m) time/O(n+m) space for n components/m residuals, not a tail×residual product. Mean matching is O(m). All helpers are opt-in/source-free, with no runtime caller, I/O, writes, cache, retries or transaction; no batch execution/resource policy is installed.
+Bridge integration costs O(n log n + m log n + 80m) time/O(n+m) space for n components/m residuals, not a tail×residual product. Mean matching is O(m). All helpers are opt-in/source-free; `experiments/distribution_oof` consumes mean reconstruction/control, with no I/O, writes, cache, retries or transaction in these numerical helpers; no batch execution/resource policy is installed.
 No source/fold/calibration envelope, fitting, holdout access or production wiring is provided; `earnings_magnitude.v1` is unchanged. The [experiment design PR](https://github.com/yshewchuk/investment-validation/pull/1425) is a scientific proposal, not a code dependency, preregistration or approval of results.
 
 | Condition | Outcome |
@@ -32,9 +32,9 @@ No source/fold/calibration envelope, fitting, holdout access or production wirin
 
 ## Stage-2 magnitude panel foundation
 
-`magnitude_confirmed_metadata.build_index(repository, snapshot, *, tickers, limits)` is synthetic-only complete pinned-view admission returning one detached, content-hashed proof. Contract: catalog admission uses one owned read transaction, released before the detached `bounded_snapshot` session is yielded (later scans hold no transaction); any failure returns no partial proof; repeated successful calls over the same pinned snapshot, canonical tickers and admissible limits return the same proof; `limits` gate admission and retention but do not enter the `index_id` hash; `index_id` is the content hash of the proof document with the `index_id` field omitted. All catalog/request/retention/proof limits are explicit, with no defaults, retries, cache, fallback SQL or durable writes. Admission authenticates exact `snapshot_inputs` and the frozen earnings contract allowlist and is complete or refused: inventory scan-row, total-object-byte and per-object-byte caps bind before any object read; retained-row and retained-byte caps bind as scan data is read. This is not an RSS guarantee. Native diagnostic envelopes propagate unchanged; malformed shapes/incomplete inventory refuse CONTRACT_MISMATCH, unknown contracts UNSUPPORTED_CONTRACT, caps RESULT_LIMIT_EXCEEDED and semantic conflicts IDENTITY_CONFLICT. Receipt references stay unopened. Complete pinned membership proves neither expected-population coverage, observed-PIT knowledge nor protected/numerical eligibility; no production caller exists. Work is bounded by admitted catalog/partition scans and retained-row reduction; progress emits aggregate stage/RSS/counts at bounded cadence without source diagnostics or secrets.
+`magnitude_confirmed_metadata.build_index(repository, snapshot, *, tickers, limits)` is complete pinned-view admission (consumed by `magnitude_panel_qualified` and, through it, `experiments.size_panel`) returning one detached, content-hashed proof. Contract: catalog admission uses one owned read transaction, released before the detached `bounded_snapshot` session is yielded (later scans hold no transaction); any failure returns no partial proof; repeated successful calls over the same pinned snapshot, canonical tickers and admissible limits return the same proof; `limits` gate admission and retention but do not enter the `index_id` hash; `index_id` is the content hash of the proof document with the `index_id` field omitted. All catalog/request/retention/proof limits are explicit, with no defaults, retries, cache, fallback SQL or durable writes. Admission authenticates exact `snapshot_inputs` and the frozen earnings contract allowlist and is complete or refused: inventory scan-row, total-object-byte and per-object-byte caps bind before any object read; retained-row and retained-byte caps bind as scan data is read. This is not an RSS guarantee. Native diagnostic envelopes propagate unchanged; malformed shapes/incomplete inventory refuse CONTRACT_MISMATCH, unknown contracts UNSUPPORTED_CONTRACT, caps RESULT_LIMIT_EXCEEDED and duplicate `event_id` or `(ticker, day)` IDENTITY_CONFLICT. The proof's `counts` also carry `unconfirmed_date_conflict` and `unconfirmed_cluster_ambiguous`, and `policy.conflicts` is `unconfirm_date_and_cluster_conflicts.v2`. Receipt references stay unopened. Complete pinned membership proves neither expected-population coverage, observed-PIT knowledge nor protected/numerical eligibility. Work is bounded by admitted catalog/partition scans and retained-row reduction; progress emits aggregate stage/RSS/counts at bounded cadence without source diagnostics or secrets.
 
-`confirmed_metadata.reduce_sequences` is public pure reduction: a pure seven-column DataFrame reducer of a complete caller-supplied view, not evidence of completeness. Strict naive `datetime64[ns]` types precede public `confirmed_event_metadata.classify_metadata`; public `event_sequence(warmup=4)` counts all supplied confirmed rows from zero; no date cutoff applies. All rows participate in duplicate ID, ticker/day, date-conflict and ticker/cluster refusal, including unconfirmed siblings; equal clusters across tickers are independent. Detached sequences retain exact empty states/counts/seven-field evidence. Work is O(n log n + t log t), state O(n + t) for n rows/t tickers; no hard cap or RSS bound exists here. No partial output, I/O, cache, retry, transaction, index identity, source admission, coverage, holdout/value eligibility or runtime integration exists.
+`confirmed_metadata.reduce_sequences` is public pure reduction: a pure seven-column DataFrame reducer of a complete caller-supplied view, not evidence of completeness. Strict naive `datetime64[ns]` types precede public `confirmed_event_metadata.classify_metadata`; public `event_sequence(warmup=4)` counts all supplied confirmed rows from zero; no date cutoff applies. All rows, including unconfirmed siblings, participate in duplicate ID and ticker/day refusal. Identity-conflict rule: a `date_conflict` row is unconfirmed with reason `date_conflict`, and every row of a duplicated `(ticker, event_cluster_id)` is unconfirmed with reason `cluster_ambiguous`; neither refuses the view. This is a deliberate modeling assumption (user decision 2026-10-30), not a deferred leak: whether a projected date was confirmed was knowable on that date (the company's investor-relations announcements show whether the release was scheduled), and a conflicting candidate date in the same cluster is evidence that at least one date was unconfirmed then. Since the true row cannot be told apart, both are disregarded for training and evaluation, matching live behaviour, which acts only on confirmed dates. A later-dated sibling therefore may unconfirm an earlier row by design, and the view applies no as-of cutoff. Such rows leave the confirmed sequence (ordinals, warm-up) but stay in `selected_rows`; a row already unconfirmed for another reason keeps that reason and is not counted. `reduce_with_counts` returns `(sequences, {unconfirmed_date_conflict, unconfirmed_cluster_ambiguous})`; `reduce_sequences` returns the sequences only. Failure semantics: R1 missing input, none; R2 malformed shape or types, CONTRACT_MISMATCH before any conflict check; R3 duplicate `event_id` or `(ticker, day)`, IDENTITY_CONFLICT with no partial output; R4 no retry, cache or fallback; R5 counts come from the same pass as the sequences, so a refusal records nothing; R6 equal input gives equal output. Equal clusters across tickers are independent. Detached sequences retain exact empty states/counts/seven-field evidence. Work is O(n log n + t log t), state O(n + t) for n rows/t tickers; no hard cap or RSS bound exists here. No partial output, I/O, cache, retry, transaction, index identity, source admission, coverage, holdout/value eligibility or runtime integration exists.
 
 `magnitude_panel_table` uses native `TableContract`/`ColumnContract`, JSON and canonical hashing. Its immutable v1 event/context/horizon key has ordered H/HM/HMO dictionaries, excluding learned Tier4 outputs/current-event outcomes. Rows require exact cohort coverage, finite typed values, missing/quote status and per-observation date, knowledge mode, row/fragment identity and canonical SHA-256 `content_hash`. Contexts are reconstructed-only, never relabeled observed; pure validation checks digest syntax/binding, not source membership or value equality.
 
@@ -52,7 +52,7 @@ Panel boundaries require plain JSON (nested history before normalization); detac
 | Index native catalog/query/object failure | Same exception/code/category/retryability/stage/message/details; no retry or partial index |
 | Index success after every partition exhausts | Detached plain-JSON proof; mutating it cannot alter admitted/caller state; membership is not numerical/PIT eligibility |
 | Malformed reducer request/frame/row, including unrequested ticker | `CONTRACT_MISMATCH`; no partial sequence |
-| Reducer duplicate ID, ticker/day, date-conflict or ticker/cluster conflict | `IDENTITY_CONFLICT`; no partial sequence |
+| Reducer duplicate ID or ticker/day | `IDENTITY_CONFLICT`; no partial sequence (date-conflict and duplicated ticker/cluster rows are unconfirmed, not refused) |
 | Reducer native failure | Existing `DataError` code/retryability unchanged; no partial sequence |
 | `policy_definitions()` | No arguments; detached metadata only, no I/O/fits/verification or retry/cache. Shared declaration exceptions propagate unchanged. |
 | Invalid v2 subset (not a plain H/HM/HMO string); omitted argument | `CONTRACT_MISMATCH`; omitted argument raises Python `TypeError`. Detached metadata only; no I/O/fits/admission or retry/cache. |
@@ -74,7 +74,7 @@ Panel boundaries require plain JSON (nested history before normalization); detac
 
 ## Partial daily-market blocks
 
-`magnitude_panel_daily.build_daily_blocks` is an opt-in library-only reader; only synthetic tests call it. Inputs are pinned source/history/price_history snapshots, the unchanged metadata-only v1 plan, plain-JSON producer metadata, grouped eligibility declarations and explicit source/event/byte bounds. Output has a distinct versioned context and detached daily-market/regime blocks, never stored-panel admission. The context binds the parent, bounds, policy, exclusions, snapshot fragment inventory and producer. Producer and label bounds are declarations, not installed-code attestation or verified outcome intervals. Protected evaluation membership confers no reads; grouped exclusions retain or remove all event horizons.
+`magnitude_panel_daily.build_daily_blocks` is an opt-in library-only reader; only synthetic tests call it. Inputs are pinned source/history/price_history snapshots, the metadata-only v1 plan (unchanged unless an ambiguous random event exists), plain-JSON producer metadata, grouped eligibility declarations and explicit source/event/byte bounds. Output has a distinct versioned context and detached daily-market/regime blocks, never stored-panel admission. The context binds the parent, bounds, policy, exclusions, snapshot fragment inventory and producer. Producer and label bounds are declarations, not installed-code attestation or verified outcome intervals. Protected evaluation membership confers no reads; grouped exclusions retain or remove all event horizons.
 
 The thirteen daily fields and nine historical `spy_*` values obey each forecast's source ceiling. Regime closes come from pinned `price_history` `REGIME_TICKER` (`^GSPC`) via `get_price_series`, never daily SPY spot; that snapshot binds the context. Reads are row-capped: one ticker/year scan per event ticker plus one regime-series read at the latest ceiling. Daily anchors require IV surfaces; regime uses admitted closes. Availability is reconstructed, not observed-PIT/fit-admissible; fragment inventory and regime source dates remain explicit.
 Row bounds apply across years per ticker; event bounds apply before exclusions. No cross-call cache/retry.
@@ -195,9 +195,7 @@ candidate still needs exactly one isolated fragment, and a candidate with no fra
 refuses `HOLDOUT_ACCESS_DENIED`. `prediction_inputs` does not use that guard: it refuses a
 table whose contract is neither native contract with `CONTRACT_MISMATCH` before any target
 scan, and a v5 skipped row with `EXPERIMENT_VARIANT_FAILED` naming the reason (the v5 contract
-requires one; a reason-less skipped row is malformed and gets the generic target message).
-It returns the signed move, binary `positive_move` target, and
-`target_available_on` date. The date is required and later than the event;
+requires one; a reason-less skipped row is malformed and gets the generic target message). It returns the signed move, binary `positive_move` target, and `target_available_on` date. The date is required and later than the event;
 fold consumers must admit training labels only when available before their
 decision cutoff. This input prerequisite performs no feature construction,
 model fitting, or report/ledger publication, and has no supervisor caller.
@@ -219,13 +217,12 @@ model fitting, or report/ledger publication, and has no supervisor caller.
 These readers preserve no economic variant identity and cannot authorize the
 separate user-only final holdout read.
 
-`event_history.load_event_history(repository, snapshot, *, event_id, as_of_month,
-decision_session, history_start, purpose="selection")` constructs prior-event
-features for one admitted canonical target. Both dates are explicit calendar
-days with `history_start <= decision_session <= target event day`. Shared
-`load_population` admits the target and excludes random, rolling and ambiguous
-history identities before any outcome access. Candidates are the same ticker's
-events in `[history_start, min(target day, decision_session))`.
+`horizon_fit_inputs.prepare_horizon_inputs` assembles ordered selected-column training/prediction float arrays and freezes original null-preserving input hashes under an explicit training-target column; reserved matrix keys refuse ValueError before event-ID/column iterables are materialized once for reuse.
+It reads no evaluation targets, preserves signed labels without a floor and returns detached arrays/evidence. Caller owns target/domain validation, source/membership admission and fitting; no I/O, cache, guards, policy inference or production entrypoint. Its current caller is offline `experiments.magnitude_fitted`, preserving legacy magnitude evidence bytes.
+`horizon_fitted.fitted_forecasts` shares the per-horizon fit loop using closed numeric routes and explicit target column/domain. Both guards run before input inspection; ID/horizon/column iterables materialize once; regression recipe/domain must match and magnitude routes require nonnegative outcomes. Caller still owns sealed source/target identity and admitted membership; no evaluation labels or repository are accepted. `measure_fit_seconds=True` measures only the fit route with a monotonic clock and adds `fit_seconds` to completed progress markers; callers that omit it retain the default progress shape and returned static fit evidence. `experiments.magnitude_fitted.fitted_forecasts` always opts in, so its completed callbacks include fit duration while returned fit evidence remains static.
+Started/completed progress surrounds each fit; original inputs are hashed first and labels copied per horizon. Signed predictions need only be finite (no floor); nonnegative routes reject negative forecasts. Candidate diagnostics preserve full nonprediction results.
+Only fit/forecast-validation exceptions become native `HorizonFitFailure` with original `__cause__`; preparation/progress errors propagate. Callbacks receive deep-copied evidence. No partial predictions/evidence return, but callbacks/diagnostics are provisional. No retries, writes or production entrypoint; offline magnitude wrapper retains its legacy exception/strict-failure policy.
+`event_history.load_event_history(repository, snapshot, *, event_id, as_of_month, decision_session, history_start, purpose="selection")` constructs prior-event features for one admitted target, with explicit calendar days satisfying `history_start <= decision_session <= target event day`; shared `load_population` excludes random, rolling and ambiguous history before outcome reads. Candidates are same-ticker events in `[history_start, min(target day, decision_session))`.
 
 Every candidate query is planned before any outcome scan, using the same
 fragment planner as Repository. Preflight indexes fragment metadata once by
@@ -250,23 +247,13 @@ Malformed availability or invalid eligible values refuse
 `EXPERIMENT_VARIANT_FAILED`; repository failures propagate. The date bound is reconstructed source availability, not a claim of
 intraday publication/finality evidence. Pure `panel_math.history_features` owns
 the arithmetic: empty history and undersized EMAs retain `None`, never zero fill.
-Results carry features, `available`/`empty` status, ordered consumed event/object
-identities and availability, omitted-history reasons, snapshot/dataset/month/
-membership-version/cutoff pins and their deterministic history digest.
-The `research_event_history.v2` identity also binds `read_inputs`: every decoded
-candidate object, including skipped/unavailable labels omitted from arithmetic.
-No cache, automatic retry, transaction, write or partial return occurs.
-The reader performs no supervisor dispatch, provider/market-price access or
-publication; `experiments.gate_report` consumes it for fold-local exploratory
-reporting. Production panel reads and final-read authority remain unchanged.
+Results carry features/status, ordered consumed event/object identities and availability, omitted-history reasons, snapshot/dataset/month/membership/cutoff pins and a deterministic digest.
+The `research_event_history.v2` identity also binds every decoded `read_inputs` object, including skipped/unavailable labels omitted from arithmetic.
+No cache, retry, write, transaction, partial return, supervisor dispatch or provider access. `experiments.gate_report` consumes fold-local exploratory reporting; production and final authority are unchanged.
 
-`iv_crush_inputs.load_iv_crush_targets(repository, snapshot, *, as_of_month,
-labels_before, purpose="selection", event_ids=None)` reads signed relative IV30
-change from the exact current `iv_crush_targets` contract, including its definition
-hash (`iv_crush_targets.v2`, semantic version `2.0.0`). `preflight_iv_crush_targets(..., as_of_month, event_ids)` requires explicit
-selection participants (`CONTRACT_MISMATCH` when absent) and returns metadata-only planned-object evidence; it is
-not a capability, and the loader repeats admission. These offline library APIs
-do not publish sources, register experiments or participate in production entrypoints.
+`iv_crush_inputs.load_iv_crush_targets(repository, snapshot, *, as_of_month, labels_before, purpose="selection", event_ids=None)` reads signed relative IV30 change from the exact `iv_crush_targets.v2` contract/hash (semantic version `2.0.0`).
+`preflight_iv_crush_targets(..., as_of_month, event_ids)` requires explicit selection participants (`CONTRACT_MISMATCH` when absent) and returns metadata-only planned-object evidence, not a capability; the loader repeats admission.
+These offline APIs do not publish sources, register experiments or participate in production entrypoints.
 
 | IV-crush boundary | Outcome |
 |---|---|
@@ -274,20 +261,26 @@ do not publish sources, register experiments or participate in production entryp
 | Public planner candidates | `plan_event_targets` requires ticker and naive midnight event_date columns. Only candidate shape/identity checks translate to `CONTRACT_MISMATCH` before repository access; every error raised while planning, including native `DataError` envelopes, propagates unchanged. |
 | Physical admission | Every candidate passes public `event_history.plan_event_targets` (metadata-only singleton admission for already admitted populations) before any target opens. Missing/mixed objects or unprovable exact ticker/date bounds refuse `HOLDOUT_ACCESS_DENIED`; nonmatching contract/hash refuses `CONTRACT_MISMATCH`. Every declared target object is capped at 1 MiB before any target opens (`RESULT_LIMIT_EXCEEDED`); bounded Repository scans also cap compressed and total uncompressed bytes. This resource ceiling accommodates singleton labels without authorizing arbitrary payloads. Computed-moves defaults remain unchanged. |
 | Stored label | Exactly one matching ticker/date/session, boolean false skip and null reason are required. Canonical anchors span 1–5 calendar days: AMC requires pre ≤ event < post; BMO requires pre < event ≤ post. Availability equals post plus one calendar day, follows the event and precedes the cutoff before numeric use. These checks do not prove source-row adjacency or exchange sessions. Skipped, late or malformed rows refuse the whole read with `EXPERIMENT_VARIANT_FAILED`; finite signed values, including zero and values below -100, remain unchanged. |
-| Provenance | Row identity includes target object; attributes bind full dataset/contract ref, cutoff, month/membership pins, purpose, future exclusions and ordered fragment/object/content hashes plus caller source_id/input_hash. Source marker/hash syntax is checked, not independently authenticated or recomputed from source quotes. Publication/finality remain unverified; availability is a modeled floor. |
+| Provenance | `validate_iv_crush_receipt(preflight, fold, receipt, targets)`, consumed by shared search evidence, checks exact evaluation membership/order, finite signed rows, cutoff/context/object identities and the full receipt/hash without I/O; malformed evidence raises structural/numeric exceptions. Row identity includes target object; attributes bind full dataset/contract ref, cutoff, month/membership pins, purpose, future exclusions and ordered fragment/object/content hashes plus caller source_id/input_hash. Source marker/hash syntax is checked, not independently authenticated or recomputed from source quotes. Publication/finality remain unverified; availability is a modeled floor. |
 | Progress | Admission, planning and read stages report start/end/failure, elapsed time and peak RSS to stderr. Completed-item ticks report count/rate/ETA at most every 30 seconds. Aggregate decisions include bulk/explicit selection, admitted/holdout/ambiguity/cutoff counts and planned batch/byte limits; IV refusals include the native refusal code only, never message text, event identities or error details. Logging cannot change results, identities, errors or read authority. |
 | Effects/failures | No source-quote reads, target rebuilding, retries, persistent cache, writes, partial returns or experiment authority. Earlier admitted objects may decode availability before a late-label refusal. Native repository integrity/resource refusals propagate unchanged. |
 
-This consumer accepts only the exact definition, without grandfathering earlier hashes.
-`event_history.POPULATION_CONTEXT_COLUMNS` names the shared snapshot/holdout context.
-No publisher, source-receipt validation, forecast recipe or model is supplied.
+The reader accepts only the exact definition (no grandfathering), uses `event_history.POPULATION_CONTEXT_COLUMNS`, and supplies no source-receipt validation, forecast recipe or model.
 
-`magnitude_inputs.forecast_cutoff(event_date, session, horizon, calendar)` is a
-pure contract over native `CalendarSessions`: horizons are five, three or one
-full intervening sessions, counted backward from the shared last-pre-print
-close. Wednesday AMC at one uses Tuesday close; Wednesday BMO uses Monday.
-Invalid dates/sessions/horizons/calendars, projected anchors, gaps in the
-required session window or insufficient history refuse `CONTRACT_MISMATCH`.
+`event_target_store.publish_event_targets` is a shared, source-free publisher of explicit complete earnings metadata rows and a selected ticker/date target set, each with its exact contract.
+It preserves supplied metadata aliases/conflicts and nullable fields; every target must match metadata, but metadata need not have a target. Missing/extra fields, null required values, duplicate/non-string keys, unsupported or structurally invalid native-decoder contracts, or invalid caps refuse `CONTRACT_MISMATCH` before publication.
+Inputs include an asserted native source snapshot, nonempty JSON provenance with recursively string-only keys, explicit positive per-table row/per-object/total-byte caps, and an explicit output Repository. Non-JSON values, non-string keys or cyclic provenance refuse `CONTRACT_MISMATCH` before hashing/writes; native typed-document decoding detaches accepted values. Source/provenance bind the request hash but are not independently authenticated; caller owns admission and output workspace isolation.
+Rows sort deterministically. Caps apply to canonical row bytes and serialized Parquet output; exceeded caps refuse `RESULT_LIMIT_EXCEEDED`. PyArrow/native conversion, inspection and catalog errors propagate; no row repair or dropped fields.
+The standard PyArrow writer emits singleton target objects and partition-local metadata batches capped at 256 rows (or the smaller contract batch limit); native inspection derives bounds, and `partition_logical_hash` spans same-partition fragments. A single native `commit_snapshot` transaction publishes only earnings metadata and the target table in reconstructed knowledge mode.
+Return resolves the committed immutable `SnapshotRef`, including native reconciliation of reused content; exact reordered replay reuses the successful receipt without catalog changes. Different source/provenance/caps bind distinct receipt requests, not necessarily distinct content snapshots.
+Stages emit bounded progress/rate/ETA and RSS. This opt-in primitive has no production caller and is not reachable from a production entrypoint; callers are explicit `experiments.iv_crush_prepare` workspace preparation and synthetic tests. No provider/source reads, target arithmetic, fitting, implicit full-closure copy, holdout policy, cache or retry. Failure may leave unreferenced immutable objects but never a partial committed snapshot.
+
+`snapshot_rows.iter_snapshot_rows` streams an exact committed snapshot/table projection with explicit key predicates as Arrow-native Python rows; `read_snapshot_rows` collects it without partial returns or pandas null/integer coercion.
+Positive candidate-row, cumulative decoded Arrow-byte, per-object and batch-row caps (default1024, bounded by contract/population) are required; invalid caps refuse `CONTRACT_MISMATCH`, exceeded row/decoded-byte caps refuse `RESULT_LIMIT_EXCEEDED`; native scan/integrity refusals propagate. Byte caps are not Python heap limits.
+Streaming rows remain provisional until exhaustion; abandoned streams must close. This layer releases each decoded batch before advancing; the collector retains its complete list. Bounded stage/progress telemetry, no retry/writes/outcome authority; callers own admission.
+
+`magnitude_inputs.forecast_cutoff(event_date, session, horizon, calendar)` uses native `CalendarSessions`: five, three or one full intervening sessions backward from the shared last-pre-print close; Wednesday AMC at one uses Tuesday close, BMO uses Monday.
+Invalid dates/sessions/horizons/calendars, projected anchors, required-session gaps or insufficient history refuse `CONTRACT_MISMATCH`.
 Its identity binds event/session/horizon, calendar contents, pre-print close
 and source-session ceiling. It does not assert an intraday issue time, source
 publication/finality or that the earnings schedule was known at that cutoff.
@@ -305,7 +298,7 @@ MAE while quantile calibration remains unimplemented.
 Shared population admission precedes label access. Bulk reads exclude events
 on/after `labels_before`; explicit requests containing one refuse. All
 remaining objects pass `event_history`'s shared singleton preflight before
-any is opened; mixed inherited snapshots refuse. Decoded label availability
+any is opened; mixed inherited snapshots refuse. Each scan uses the existing `event_history.MAX_OUTCOME_OBJECT_BYTES` (1 MiB) ceiling: oversized stored bytes refuse before object access; oversized summed Parquet row-group bytes refuse before row decoding (`RESULT_LIMIT_EXCEEDED`). This is not a population/heap cap. Label availability
 must be strictly before `labels_before`; missing, skipped, malformed or
 non-finite labels refuse the whole call, with zero remaining a valid value.
 Exception, opt-in only: `omit_not_computed=True` (used by the magnitude search's inner and outer
@@ -381,9 +374,9 @@ The adapter has no fitting, target-join, CLI, provider, report, ledger or final-
 caller, and no retry, write or partial result; its only cache is the
 observed-session read (see its failure row); Repository failures propagate.
 
-`magnitude_folds.plan_magnitude_folds(repository, snapshot, *, as_of_month,
-evaluation_years, training_start, event_ids=None)` plans metadata-only expanding
-annual evaluation folds from one admitted snapshot and its pinned calendar.
+`magnitude_folds.plan_magnitude_folds(repository, snapshot, *, as_of_month, evaluation_years, training_start, event_ids=None)` plans metadata-only expanding annual evaluation folds from one admitted snapshot and its pinned calendar.
+`plan_regression_folds` shares that population/calendar implementation but binds a validated explicit target descriptor into `regression_temporal_plan.v1`; legacy magnitude plans remain byte-identical. IV metadata planning uses its annual candidate folds and 5/3/1 clocks, not label qualification, native registration or nested search.
+No outcomes, writes, caches, retries or target-snapshot identity are introduced; native admission failures propagate. Complexity and metadata scans are unchanged from magnitude planning.
 `magnitude_folds.magnitude_window(evaluation_years, training_start)` exposes the
 same pure request validation to native preregistration and returns a detached
 canonical window; invalid requests refuse `CONTRACT_MISMATCH` without reads.
@@ -647,7 +640,7 @@ This bounds retained unmatched rows, not total process RSS.
 ## Dependencies
 
 `engine.v2.data` (`Repository`, `errors`, `generic_incremental`, `incremental_tables`,
-`bounded_snapshot`, `catalog`, `objects`, `manifests`, `query`, `time_formats`, `computed_moves_table`, `computed_move_bounds`, `confirmed_event_metadata`, `event_history`,
+`bounded_snapshot`, `catalog`, `documents`, `objects`, `manifests`, `query`, `time_formats`, `computed_moves_table`, `computed_move_bounds`, `confirmed_event_metadata`, `event_history`,
 `iv_crush_table`, `price_history_query`, `price_history_table`), `engine.v2.contracts` (`RevisionCandidate`, `CompletedCoverage`,
 `CoverageKey`, `CoverageOutcome`, `TimeInterval`), `engine.v2.contracts.data`
 (`DataQuery`, `KeyPredicate`, `SnapshotRef`, `TimeInterval`, `ObjectRef`,
@@ -694,7 +687,7 @@ chain index, the entry-selection seams above and exit walking for read-only comp
 `experiment_population.load_population` and `magnitude_folds`' window/planner.
 `experiments/magnitude_search_plan.py` consumes `magnitude_folds.annual_fold`.
 `experiments/magnitude_search_request.py` consumes `magnitude_panel_table.recipe` and `eligibility_policy.eligibility_policy` for declarations only.
-`experiments/magnitude_search_request_versions.py` consumes both v1/v2 panel `recipe` APIs for source-free dictionary dispatch, not admission.
+`experiments/magnitude_search_request_versions.py` consumes the v1/v2/v3 panel `recipe` APIs for source-free dictionary adaptation and request-version dispatch, not data admission.
 `experiments/magnitude_search_evidence.py` consumes `read_stored_for_events`, `preflight_magnitude_targets`,
 `qualify_magnitude_training_targets` and `magnitude_recipe` for shared inner/outer admission.
 `experiments/magnitude_search_trials.py` directly consumes `load_magnitude_targets`,
@@ -744,8 +737,8 @@ It does not authenticate arbitrary rehashed calendars as builder-derived.
 Missing/changed receipt/pin refuses `IDENTITY_CONFLICT`, bad contract `CONTRACT_MISMATCH`, unprovable isolation `HOLDOUT_ACCESS_DENIED`.
 Its unlayered caller owns context derivation/registration; `experiments/magnitude_history_report.py` uses stored reads and target qualification. Both v1 consumers remain unchanged.
 
-**Eligible history:** sole public build/read boundary `experiments.eligible_history` rejects producer overrides and fingerprints installed code/environment; backend `_materialize`/`_read` are trusted internal helpers, not admitted APIs or Python security. SIZE wraps this generic boundary; only tests invoke it today. Production wiring/data runs need separate authorization.
-The separate `research_eligible_history.v1` table binds exact source/bounds, policy/month/membership versions, history start, fixed 1/3/5 clocks, contributors and producer identity. Exact receipts replay; live/v1 aggregates never substitute.
+**Eligible history:** sole public build/read boundary `experiments.eligible_history` rejects producer overrides and fingerprints installed code/environment; backend `_materialize`/`_read`/`_iter_read` are trusted internal helpers, not admitted APIs or Python security. The backend `plan_targets` is a read-only planner (no materialization, no read capability) that SIZE target derivation calls to learn the retained set before `materialize`. SIZE's library-only wrapper consumes the public `iter_read` stream for bounded panel composition and validates it on stored reads and receipt replay. No production/nightly entrypoint invokes that wrapper; production wiring and data runs require separate authorization.
+The separate `research_eligible_history.v1` table binds exact source/bounds, policy/month/membership versions, history start, a nonempty ascending subset of the canonical 1/3/5 clocks, contributors and producer identity. Exact receipts replay; live/v1 aggregates never substitute.
 Full canonical metadata establishes protected windows. Once selected target/history population is known, missing required ticker/event bounds refuse `CONTRACT_MISMATCH` before outcomes; unrelated tickers need no bounds. Native bounds precede grouped eligibility/object preflight; null historical bounds are omissions, wrong object binding/isolation remains `HOLDOUT_ACCESS_DENIED`.
 All selection targets, including annual evaluation, require retained eligibility; protected confirmation is not this API. Read only eligible prior outcomes available by each ceiling; preserve native means/EMA/nulls.
 `eligible_history_table.admit_fields` accepts only the exact research contract/recipe/policy and known H11 fields; live/unknown provenance and unsupported aliases/derivations refuse before feature reads. Implied history remains separate.
@@ -767,7 +760,7 @@ The original full-row `read_stored` API and its returned envelope remain unchang
 
 `eligibility_policy.eligibility_policy` declares an explicit supported version and
 nonnegative integer calendar-day width. `plan_eligibility` is metadata-only and
-opt-in; existing consumers are unchanged. It uses `experiment_population.canonical_events`
+opt-in. The policy identity (including its `preserve_membership` label, kept for replay) and plans without an ambiguous random event are unchanged; with one, evaluation IDs on that ticker are filtered. Eligible-history planning passes no evaluation IDs and refuses development targets on such a ticker, so only the SIZE fold binder's defensive check filters fold IDs. It uses `experiment_population.canonical_events`
 for exact committed-snapshot admission and the six-column metadata projection and `experiment_trades.classify_events`
 for detached membership/structural ambiguity labels and caller-pinned context.
 Shared `snapshot_inputs` validates reference shape and exact committed identity;
@@ -779,14 +772,12 @@ Bounds contain the event, with source ceiling <= decision <= event. These are
 producer declarations, not proof of price-bracketing or publication times.
 No calendar guessing, outcome/feature decoding, write, registration or fit occurs.
 
-Random-held windows are merged per ticker. Inclusive event/label interval or
-forecast-point overlap excludes an entire development group; shared random,
-rolling and ambiguous labels also exclude it. Results bind sorted groups, policy,
-metadata identity, merged windows, retained IDs, reasons, coverage and a separately
-preserved evaluation manifest into `plan_id`. Supplied documents are detached.
-There are no retries, persistence, cache or partial results. Bounded membership,
-metadata, window and group progress plus stage timing/RSS go to stderr; admission
-and planning refusals report only the native error code, not row values.
+Random-held windows merge per ticker. Inclusive event/label or forecast-point overlap
+excludes a whole development group; shared random, rolling and ambiguous labels do too.
+The plan ID binds groups/policy/metadata, windows, retained IDs, development reasons,
+coverage, ambiguous IDs and filtered evaluation IDs/reasons. Inputs are detached.
+There are no retries, persistence, cache or partial results. Bounded progress and stage
+timing/RSS go to stderr; refusals report only native error codes, not row values.
 
 | Condition | Outcome |
 | --- | --- |
@@ -794,10 +785,12 @@ and planning refusals report only the native error code, not row values.
 | Repository integrity failure other than unknown snapshot | Original native error propagates |
 | Unsupported policy, stale digest/envelope, malformed bounds, duplicate declared group IDs or malformed/duplicate evaluation IDs | `CONTRACT_MISMATCH` |
 | Missing/duplicate classifier columns, malformed event IDs or metadata values that prevent classification | `CONTRACT_MISMATCH` |
-| Invalid scalar dates/sessions or structural collisions handled by membership classification | Successful classification with `ambiguous` membership; structural ambiguity IDs returned |
+| Invalid scalar dates/sessions or structural collisions handled by membership classification | Successful classification with `ambiguous` membership and IDs; a random member with a missing, blank, padded or non-string ticker, or without usable event/canonical dates, refuses with `HOLDOUT_ACCESS_DENIED` |
 | Invalid as-of month, unknown group/evaluation identity or colliding canonical population IDs | `HOLDOUT_ACCESS_DENIED` |
-| Ambiguous random-event identity or overflowing window bounds | `HOLDOUT_ACCESS_DENIED` |
-| Valid protected/overlapping development group | Excluded whole event with reasons; evaluation IDs preserved |
+| Structurally ambiguous random event with usable identity | Keep membership unchanged, record its ID and add an inclusive `date.min`–`date.max` ticker window; exclude matching development groups and evaluation IDs, with `embargo_ticker` as the evaluation reason |
+| Ordinary random-event window arithmetic exceeds the supported date range | `HOLDOUT_ACCESS_DENIED` |
+| Evaluation IDs matching an ambiguous-random ticker embargo | Excluded with `embargo_ticker`; all other IDs remain in `evaluation_event_ids` |
+| Valid protected/overlapping development group | Excluded whole event with development reasons |
 
 This is neither a physical-read capability nor a statistical isolation guarantee.
 Long-memory/cross-ticker effects remain; chronological and random holdouts are
@@ -989,14 +982,14 @@ an uncaught traceback instead.
 - A trade-table write always goes through
   `engine.v2.data.generic_incremental`'s fenced commit — never a
   read-modify-write of an existing table version.
-- Pricing/planning/chain-indexing cores that moved from legacy
-  (`replay.py`, `_plan.py`, `_chains.py`, `_trades_table.py`) stay
-  byte-identical to their legacy counterparts; only the store-reaching
-  edges were rewritten, so the v2 path and the legacy board cannot drift
-  on arithmetic. `tests/test_v2_research_tools.py` /
-  `test_v2_research_replay.py` / `test_v2_research_build_trades.py` /
-  `test_v2_research_reconcile_trades.py` enforce this by comparing against
-  the legacy function on the same synthetic frame.
+- Pure pricing/planning/chain cores (`replay.py`, `_plan.py`, `_chains.py`, `_trades_table.py`) retain legacy arithmetic; only store edges changed. Synthetic legacy parity remains covered by the research tools/replay/build-trades/reconcile-trades tests.
+
+## Source-free regression evidence
+
+`regression_evidence.normalize_forecasts` validates exact supplied event/horizon coverage, explicit prediction-column names and signed/nonnegative domains; complete finite Real/Integral rows normalize to detached ordered JSON floats/ints. Strict JSON mode rejects non-native numeric types; Booleans, duplicates, extra fields and nonfinite values refuse.
+`error_metrics` pools finite residuals at equal row weight, scaling before squaring, and returns count/RMSE/MAE; empty, nonnumeric or nonfinite residuals refuse. Complete equal horizon coverage yields equal event weight; the caller owns that coverage and the subtraction producing residuals.
+Both helpers raise numeric/structural exceptions without partial results, I/O, fitting, cache, retries or publication. They use stdlib arithmetic/statistics. Membership/domain arguments are caller declarations, not sealed target identity, source admission or holdout authority.
+Existing experiment magnitude normalization delegates with fixed nonnegative domain/column; magnitude metrics preserve their typed failure envelope and numeric results. Signed use is an additive platform primitive, not a registered IV experiment.
 
 ## Diagram
 
@@ -1014,10 +1007,11 @@ flowchart LR
 
 ### Qualified SIZE panel composition
 
-`experiments.size_panel` is the installed public boundary over internal composition/storage helpers. Its v3 dictionary binds eligible history without changing v1/v2 identities; complete metadata, independent quote groups and daily/runup/^GSPC inputs preserve projection-independent source admission. Native clocks/outcome guards, exact versioned anchors and ticker/year/date fragment membership bind lineage; date-only quote windows do not attest computed-outcome capture. Native immutable catalog/Parquet storage enforces physical/expanded limits and exact bounded receipt/context replay. Fitting authority belongs to the execution/fold consumer; see the stage-2 contract for reconstruction limits and synthetic-only verification.
+`experiments.size_panel` is the installed public boundary over internal composition/storage helpers. Its v3 dictionary binds eligible history without changing v1/v2 identities. Complete metadata, independent quote groups and daily/runup/^GSPC inputs preserve projection-independent source admission. Native clocks/outcome guards, exact versioned anchors and ticker/year/date fragment membership bind lineage; date-only quote windows do not attest computed-outcome capture. Native immutable catalog/Parquet storage enforces physical/expanded limits and exact bounded receipt/context replay. Fitting authority belongs to the execution/fold consumer; see the stage-2 contract for reconstruction limits and synthetic-only verification. Quote eligibility records forecast clocks only for the horizon subset selected in the panel request, while full canonical metadata still establishes protected windows.
 
 | Qualified panel admission condition | Outcome before dependent reads |
 | --- | --- |
-| Missing/extra/malformed request or empty required source inventory | `CONTRACT_MISMATCH` |
-| Caller producer override or incompatible frozen SIZE policy | `HOLDOUT_ACCESS_DENIED` |
+| Request/admission refusals | Malformed request or empty required inventory: `CONTRACT_MISMATCH`; caller producer override or incompatible frozen SIZE policy: `HOLDOUT_ACCESS_DENIED` |
+| Memory/bounds | Peak memory is bounded by explicit query/source limits plus selected targets, the unique contributor union and the active ticker's source window. Streaming adds one scanner batch, one decoded history row and up to three output rows; no fixed RSS cap is claimed. The eligible-history stored-read batch cap is the largest stored fragment's `row_count` (the total only when the snapshot has one fragment); fragments are already bounded by `max_object_bytes`, so batch memory does not grow with fragment count. Rows, order, coverage checks and refusals are unchanged, and the cap is not part of any identity. Stored reads and receipt replays validate complete history coverage before returning. Coverage mismatch refuses `CONTRACT_MISMATCH`; panel publication exposes no partial snapshot. Context `magnitude_panel_context.v4` carries `price_row_digests` (`{ticker: {rows, digest}}`, `content_hash` of that ticker's non-deleted date/retrieved_at/deleted/source_hash/capture_id rows) instead of v3's inline `price_row_metadata`; per-date rows are held one ticker at a time, so identity memory is independent of total price rows (only dates are kept for the quote plan). Value build (not stored read, which recomputes the digests and so the `context_id`) re-reads each active ticker (and `^GSPC`) and a count or digest mismatch refuses `IDENTITY_CONFLICT` (R3); no identity-row cache or retry (R5); equal pinned inputs give equal `context_id`, any changed price-version row changes it (R6). Existing v3 registrations stay valid (the registration validator accepts v3 and v4); v3 panels are not re-derived, v4 has a new context id and slot, so new panels rebuild. Value-build anchor caches are per active ticker: `anchor_lookup` exposes `clear()` and a test-only `size()`, the ticker-scoped price and daily lookups are cleared when the ticker changes, and `^GSPC` regime anchors use their own lookup holding only regime dates, so retained anchor memory does not grow with ticker count (R1 bound: active ticker plus regime dates; R2 a cleared entry is recomputed from the same pinned fragment records, so rows, `row_id`s and published bytes are unchanged; R3 no new refusal; R4 nothing persisted; R5 no retry; R6 equal inputs give equal output). The qualified stored-panel read streams: its scan batch cap is the largest stored fragment's `row_count` (one event, 3 rows; not the total), and each batch row is validated (cohort order, pins, `row_id` over every column including the multi-MB `lineage`) then projected to `METADATA` plus the requested columns and dropped. `read(..., lineage=True)` (default, also `size_panel.read`) returns `lineage` as before; `lineage=False` omits only that key, and the SIZE binding's `read_panel` (callers use `context` and feature columns, never `lineage`) passes it, so the cells are not retained into the fits (R1 bound: one scanner batch plus the projected output; with the default `lineage=True` retention still grows with row count). R2 with the default the returned list equals the former all-rows read, with `lineage=False` it equals it minus the `lineage` key; cap and flag are in no identity. R3 no new refusal: `CONTRACT_MISMATCH`, `HOLDOUT_ACCESS_DENIED` and `RESULT_LIMIT_EXCEEDED` are unchanged, but a corrupt row refuses when its batch is reached, with the same code and no rows returned. R4 nothing persisted. R5 no retry. R6 equal inputs give equal rows. |
 | Non-native snapshot reference shape | `SNAPSHOT_UNRESOLVED` |
+| Confirmed event dated strictly before its ticker's first non-deleted price date | No label bracket can exist, so `quote_plan` (returns `(plan, excluded)`) leaves it out of the quote groups with reason `before_price_coverage` instead of refusing. It is then absent from the retained quote ids, so implied-history marks it ineligible. The panel context carries `quote_precoverage_excluded` (`reason`, `count`, sorted `event_ids`) only when non-empty, so other context ids are unchanged; one stderr decision line is logged. The confirmed-metadata index is not mutated. Any other bracket miss (inside the coverage range, after the last price date, or a `BMO` event on the first date, which has no prior session) still refuses `CONTRACT_MISMATCH`; no substitute bracket or retry. |

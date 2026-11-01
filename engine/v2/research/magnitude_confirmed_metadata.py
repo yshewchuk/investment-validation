@@ -119,9 +119,10 @@ def _scan(session, plans, tickers, limits, counts):
     empty = pd.DataFrame(columns=_COLUMNS)
     empty["event_date"] = pd.Series(dtype="datetime64[ns]")
     events = pd.concat(frames, ignore_index=True) if frames else empty
-    sequences = reducer.reduce_sequences(events, tickers=tickers)
+    sequences, ambiguity = reducer.reduce_with_counts(events, tickers=tickers)
     counts.update(selected_rows=retained_rows,
                   confirmed_rows=sum(s["confirmed_rows"] for s in sequences))
+    counts.update(ambiguity)
     return sequences
 
 
@@ -143,7 +144,7 @@ def build_index(repository, snapshot, *, tickers, limits):
             sequences = _scan(session, plans, tickers, limits, counts)
         document = {"schema_version": "magnitude_confirmed_metadata.v1",
             "policy": {"confirmation": "src_orats_and_session.v1", "warmup_events": 4,
-                "conflicts": "refuse_ticker_scoped_view.v1",
+                "conflicts": "unconfirm_date_and_cluster_conflicts.v2",
                 "coverage": "complete_pinned_view_only.v1"},
             "source": source, "tickers": tickers, "sequences": sequences, "counts": counts}
         document["index_id"] = content_hash(document)

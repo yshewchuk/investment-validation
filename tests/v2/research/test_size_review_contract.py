@@ -93,13 +93,15 @@ def test_cli_panel_refusal_precedes_catalog_store_or_containment(monkeypatch, ca
         monkeypatch.setattr(size_search, name, lambda *a, **k: pytest.fail("source/write/containment"))
     status = size_search.main([action, "--spec", "spec", "--request", "request", "--catalog", "catalog",
         "--store-root", "store", "--no-ledger", "--panel-request", "panel", "--scope", "development",
-        "--training-start", "2010-01-01", "--labels-before", "2025-01-01"])
+        "--training-start", "2010-01-01", "--labels-before", "2025-01-01", "--receipt-ref", "receipt"])
     assert status == 2
     assert capsys.readouterr().out == '{"refused": "INVALID_EXPERIMENT_SPEC", "message": "INVALID_EXPERIMENT_SPEC: invalid closed SIZE panel request"}\n'
 
 
 IMPLEMENTATION = ["experiments/size_search_binding.py", "experiments/size_comparator.py",
-    "experiments/magnitude_fitted.py", "experiments/magnitude_candidate_fit.py",
+    "experiments/magnitude_fitted.py", "engine/v2/research/horizon_fitted.py",
+    "engine/v2/models/training/fit_routes.py", "engine/v2/models/training/magnitude_candidate.py",
+    "engine/v2/research/horizon_fit_inputs.py",
     "experiments/size_search_report.py", "experiments/size_paired_report.py",
     "experiments/magnitude_search_worker.py", "engine/models/registry.json"]
 

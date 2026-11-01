@@ -41,6 +41,7 @@ from tests.v2.ops.state_stage_support import (
     params as _params,
     spec as _spec,
     stage_prior as _stage_prior,
+    state_bytes,
 )
 
 
@@ -179,8 +180,8 @@ def _wire(tmp_path, monkeypatch, states=None, drift=(), prior_names=None, mode=N
     states = _STATES if states is None else states
     staging = tmp_path / "staging"
     staging.mkdir()
-    for name in states:
-        (staging / name).write_bytes(f"state-{name}".encode())
+    for name, (member, object_name) in states.items():
+        (staging / name).write_bytes(state_bytes(member, object_name, name))
 
     def fake_payloads(paths, max_bytes=None):
         from tools import phase5_state_stage_job
@@ -882,11 +883,11 @@ def test_a_resupplied_object_replaces_the_prior_object_of_the_same_name(tmp_path
 
 def test_a_trailing_month_after_the_cutoff_is_refused(tmp_path, monkeypatch):
     states = dict(_STATES)
-    states["trailing.json"] = ("trailing_pnl_cutoff", "hist|2026-11")
+    states["trailing.json"] = ("trailing_pnl_cutoff", "hist|2026-12")
     parameters, staging = _wire(tmp_path, monkeypatch, states=states)
     with pytest.raises(OpsError) as err:
         run_state_stage_worker(parameters, staging)
-    assert err.value.problem.details == {"months": ["hist|2026-11"]}
+    assert err.value.problem.details == {"months": ["hist|2026-12"]}
     assert str(err.value) == "VALIDATION_FAILED: a trailing object month starts after cutoff"
     assert not phase5_release.catalog_path(tmp_path, "cand1").exists()
 

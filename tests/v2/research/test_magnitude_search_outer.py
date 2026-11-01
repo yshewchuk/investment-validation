@@ -320,6 +320,15 @@ def test_real_outer_selected_only_forecasts_precede_labels_and_replay(outer_case
         return original(*args, **kwargs)
     monkeypatch.setattr(outer, "load_magnitude_targets", labels)
     result = run(case)
+    worker = slot(case, "worker-result")
+    assert set(worker) == {"event", "forecasts", "score_seconds", "rss_delta_kib"}
+    assert worker["event"] == "succeeded"
+    assert isinstance(worker["score_seconds"], float) and math.isfinite(worker["score_seconds"])
+    assert worker["score_seconds"] >= 0
+    assert type(worker["rss_delta_kib"]) is int and worker["rss_delta_kib"] >= 0
+    for fit in expected_fits(case):
+        marker = slot(case, "fit-completed:" + str(fit["horizon_sessions"]))
+        assert math.isfinite(marker["fit_seconds"]) and marker["fit_seconds"] >= 0
     assert_source_seals(case)
     scores = case.selected["selections"][0]["scores"]
     assert scores[0]["metrics"] == scores[1]["metrics"]
@@ -351,17 +360,15 @@ def test_collect_requires_all_folds_and_pools_errors_without_outer_selection(out
     expected_predictions = [{**row, "outer_year": year} for year, result in (("2024", first), ("2025", second))
                             for row in assert_fold_oracle(case, result, year)]
     trace = []
-    freeze, execute, replay = trials.SearchTrials.freeze, trials.SearchTrials.execute, outer._replay
+    freeze, replay = trials.SearchTrials.freeze, outer._replay
     def frozen(self):
         trace.append(("freeze",))
         return freeze(self)
     def executed(self, *args, **kwargs):
-        trace.append(("inner", *args))
-        assert kwargs == {"limits": LIMITS}
-        return execute(self, *args, **kwargs)
-    def replayed(read, store, started, fold, plan, execution):
+        pytest.fail("outer collection launched an inner execution")
+    def replayed(read, store, started, fold, plan, execution, binding):
         trace.append(("outer", fold["year"]))
-        return replay(read, store, started, fold, plan, execution)
+        return replay(read, store, started, fold, plan, execution, binding)
     monkeypatch.setattr(trials.SearchTrials, "freeze", frozen)
     monkeypatch.setattr(trials.SearchTrials, "execute", executed)
     monkeypatch.setattr(outer, "_replay", replayed)
@@ -374,12 +381,8 @@ def test_collect_requires_all_folds_and_pools_errors_without_outer_selection(out
     with no_fit_guard(), legacy_guard():
         report = collect(case)
         assert collect(case) == report
-    expected_inner = sorted(("inner", *args) for args in trial_cases(case))
-    boundary = len(expected_inner) + 3
-    for calls in (trace[:boundary], trace[boundary:]):
-        assert calls[:1] == [("freeze",)]
-        assert sorted(calls[1:-2]) == expected_inner
-        assert calls[-2:] == [("outer", "2024"), ("outer", "2025")]
+    per_collect = [("freeze",), ("outer", "2024"), ("outer", "2025")]
+    assert trace == per_collect * 2
     assert {name: spy.call_count for name, spy in spies.items()} == {
         "read_search_plan": 2, "_native_selection": 2, "source_closure": 4}
     expected = {"schema_version": "magnitude_search_outer_report.v1", "plan_id": case.plan["plan_id"],
@@ -455,7 +458,14 @@ def test_outer_fit_failure_retains_exact_prefix_without_replacement_or_retry(out
         "fit_attempt_count": number, "completed_fit_count": number - 1, "forecasts_id": None}
     for index, fit in enumerate(fits):
         assert slot(case, "fit-started:" + str(fit["horizon_sessions"])) == (fit if index < number else None)
-        assert slot(case, "fit-completed:" + str(fit["horizon_sessions"])) == (fit if index < number - 1 else None)
+        completed = slot(case, "fit-completed:" + str(fit["horizon_sessions"]))
+        if index >= number - 1:
+            assert completed is None
+        else:
+            fit_seconds = completed["fit_seconds"]
+            assert type(fit_seconds) is float
+            assert math.isfinite(fit_seconds) and fit_seconds >= 0
+            assert {key: value for key, value in completed.items() if key != "fit_seconds"} == fit
     assert all(slot(case, name) is None for name in ("forecasts", "validation", "terminal"))
     candidate = next(item for item in case.plan["candidates"]
                      if item["candidate_id"] == case.selected["selections"][0]["selected_candidate_id"])

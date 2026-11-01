@@ -14,7 +14,8 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from engine.v2.foundation import ArtifactStore, SystemClock, content_hash
+from engine.v2.contracts.data import SnapshotRef
+from engine.v2.foundation import ArtifactStore, SystemClock, content_hash, to_document
 from engine.v2.ops import cli, legacy_adapter
 from engine.v2.ops.bootstrap import open_catalog
 from engine.v2.ops.errors import OpsError
@@ -27,6 +28,23 @@ from engine.v2.ops.stages import registry
 from engine.v2.ops.submission import NamespacePolicy, submit
 
 REPO = Path(__file__).resolve().parents[3]
+
+
+def _stub_shadow_snapshot_head(monkeypatch):
+    def resolve(conn, store, scope, *, clock):
+        assert scope == "shadow"
+        document = to_document(SnapshotRef(
+            snapshot_id="test-shadow-snapshot",
+            manifest_hash="a" * 64,
+            table_versions={},
+            calendar_version="calendar-v1",
+            source_priority_version="source-priority-v1",
+            finality_receipt_refs=(),
+            knowledge_mode_by_table={}))
+        return store.publish_bytes(
+            json.dumps(document).encode(),
+            schema_ref="snapshot_ref.v1.0")
+    monkeypatch.setattr("engine.v2.ops.snapshot_planning.resolve_snapshot_head", resolve)
 
 
 # --------------------------------------------------------------------------
@@ -72,7 +90,7 @@ def _stub_features_current(monkeypatch, root, *, panel_sha256="panel-sha", tier4
     something else about ``_action_score`` — writes a receipt and stubs the
     "current on disk" hashes to match it, never touching real
     ``engine.paths``/panel/tier4 files. The check's own behaviour (all three
-    states) is covered directly in ``tests/test_v2_ops_legacy_features.py``."""
+    states) is covered directly in ``tests/v2/ops/test_v2_ops_legacy_features.py``."""
     (root / "features.json").write_text(json.dumps({
         "schema_version": "features.v1.0",
         "panel_sha256": panel_sha256, "tier4_sha256": tier4_sha256}))
@@ -144,7 +162,8 @@ def test_nightly_plan_population_is_required_before_submit_and_hashed():
     assert planned["plan_hash"] != other["plan_hash"]
 
 
-def test_cli_submit_refuses_a_nightly_plan_with_blocked_prerequisites(tmp_path, capsys):
+def test_cli_submit_refuses_a_nightly_plan_with_blocked_prerequisites(tmp_path, capsys, monkeypatch):
+    _stub_shadow_snapshot_head(monkeypatch)
     root = tmp_path / "ops"
     assert cli.main(["--root", str(root), "init"]) == 0
     capsys.readouterr()
@@ -157,7 +176,8 @@ def test_cli_submit_refuses_a_nightly_plan_with_blocked_prerequisites(tmp_path, 
     assert out["code"] == "INVALID_REQUEST"
 
 
-def test_cli_plan_nightly_accepts_expected_population_file(tmp_path, capsys):
+def test_cli_plan_nightly_accepts_expected_population_file(tmp_path, capsys, monkeypatch):
+    _stub_shadow_snapshot_head(monkeypatch)
     root = tmp_path / "ops"
     population_file = tmp_path / "population.json"
     population_file.write_text(json.dumps(["FAKE|TWIN-P|2026-09-12"]))

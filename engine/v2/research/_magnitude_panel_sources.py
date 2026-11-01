@@ -22,7 +22,7 @@ from engine.v2.research import magnitude_panel_daily as daily
 from engine.v2.research import magnitude_panel_qualified_table as table_contract
 from engine.v2.research.magnitude_features import calendar_input
 from engine.v2.research.magnitude_inputs import forecast_cutoff
-from engine.v2.research.progress import Progress
+from engine.v2.research.progress import Progress, decision
 
 
 def inventory(repository, snapshot, table, limits):
@@ -67,10 +67,10 @@ def price_dates(repository, snapshot, ticker, limits):
 def quote_plan(repository, source, index, history_context, request, price_metadata):
     """Independent quote population; missing realized labels never select quotes."""
     calendar, _ = calendar_input(repository, source)
-    groups = []
+    groups, excluded = [], []
     meter = Progress("qualified quote group metadata", len(index["sequences"]))
     for sequence in index["sequences"]:
-        sd = np.array([r["date"] for r in price_metadata[sequence["ticker"]]], dtype="datetime64[ns]")
+        sd = price_metadata[sequence["ticker"]]
         latest = max(c["source_session_ceiling"] for t in history_context["targets"]
                      if t["ticker"] == sequence["ticker"] for c in t["forecasts"])
         for event in sequence["events"]:
@@ -79,11 +79,14 @@ def quote_plan(repository, source, index, history_context, request, price_metada
                 continue
             if event["event_date"] >= latest:
                 continue
+            if sd.size and np.datetime64(event["event_date"], "ns") < sd.min():
+                excluded.append(event["event_id"])  # before price coverage: no bracket can ever exist
+                continue
             lo, hi = source_bounds(sd, event["event_date"], event["session"])
             if lo is None:
                 raise fail("CONTRACT_MISMATCH", "historical quote label bracket unavailable")
             clocks = [forecast_cutoff(pd.Timestamp(event["event_date"]), event["session"], h, calendar)
-                      for h in (1, 3, 5)]
+                      for h in request["horizons"]]
             groups.append({"event_id": event["event_id"], "ticker": event["ticker"],
                 "event_date": event["event_date"], "label_start": lo, "label_end": hi,
                 "forecasts": [{"horizon_sessions": c["horizon_sessions"],
@@ -92,16 +95,32 @@ def quote_plan(repository, source, index, history_context, request, price_metada
         meter.tick()
     metadata = {"schema_version": "event_group_bounds.v1", "source_snapshot": to_document(source),
         "holdout_as_of_month": request["as_of_month"], "policy_id": request["policy"]["policy_id"],
-        "horizons": [1, 3, 5], "groups": groups}
+        "horizons": list(request["horizons"]), "groups": groups}
     metadata["metadata_id"] = content_hash(metadata)
-    return eligibility_policy.plan_eligibility(repository, source, as_of_month=request["as_of_month"],
+    if excluded:
+        decision("quote plan", f"excluded {len(excluded)} events dated before price coverage (before_price_coverage)")
+    plan = eligibility_policy.plan_eligibility(repository, source, as_of_month=request["as_of_month"],
         policy=request["policy"], metadata=metadata, evaluation_event_ids=[])
+    return plan, sorted(excluded)
+
+
+def precoverage_document(excluded):
+    """Context entry for pre-coverage exclusions; empty when none, so existing context ids are unchanged."""
+    return {"quote_precoverage_excluded": {"reason": "before_price_coverage",
+        "count": len(excluded), "event_ids": list(excluded)}} if excluded else {}
 
 
 def signed_moves(repository, source, admitted, population):
     """One guarded read per qualified union contributor, not signs inferred from H11."""
-    histories = [json.loads(row["history_json"]) for row in admitted["rows"]]
-    expected = {entry["event_id"]: entry for h in histories for entry in h["history"]}
+    meter = Progress("eligible-history identity rows",
+        sum(len(target["forecasts"]) for target in admitted["context"]["targets"]))
+    expected = {}
+    for row in admitted["rows"]:
+        history = json.loads(row["history_json"])
+        for entry in history["history"]:
+            expected[entry["event_id"]] = {name: entry[name] for name in
+                ("fragment_id", "object_id", "content_hash")}
+        meter.tick()
     candidates = population[population.event_id.isin(expected)].sort_values(["event_date", "event_id"])
     plans, reader = event_history.plan_with_reader(repository, source, candidates,
         repository.table_contract(source, "computed_moves"))
@@ -166,6 +185,9 @@ def anchor_lookup(records, *, daily_contract=None):
 
     def lookup(ticker, day, version=None):
         return json.loads(encoded(ticker, day, canonical_json(version)))
+
+    lookup.clear = encoded.cache_clear
+    lookup.size = lambda: encoded.cache_info().currsize
     return lookup
 
 

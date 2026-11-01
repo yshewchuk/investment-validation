@@ -24,11 +24,42 @@ Replaces (§4.4): `models/registry.py`, `artifact loading and inference adapters
 
 ## Public interface
 
+`regression_target.target_descriptor` / `validate_target` bind explicit column,
+prediction column, signed/nonnegative domain and definition hash into a detached
+closed identity. Invalid/tampered documents raise `ValueError`; these are metadata,
+not evidence that labels exist or permission to read them. Used by temporal planning and generic ops wire validation.
+
+
+
+`magnitude_candidate.magnitude_candidate_family` checks only the fixed
+nonnegative recipe schema/model pair, without importing training. Full closed
+recipe validation remains with the family fitter; this grants no fit authority.
+
+`regression_candidate.regression_candidate_recipe` selects the existing Ridge, HGB
+or ElasticNet policy with exact family parameters and explicit signed/nonnegative
+domain. It is source-free metadata, not selection, fitting or experiment admission.
+
 `magnitude_ridge_hgb_recipe.ridge_hgb_recipe` and
 `validate_ridge_hgb_recipe` construct/validate closed variable-width stage-2
 Ridge/HGB metadata from explicit ordered columns, a dictionary hash and one
-bounded family parameter. They return detached policy data, not source admission
+bounded family parameter (Ridge `alpha`, or HGB `max_leaf_nodes` for the v1 recipe; the v2 HGB
+recipe takes `max_leaf_nodes`, `learning_rate`, `min_samples_leaf` and `l2_regularization`). They return detached policy data, not source admission
 or an executable search plan. No training, sklearn or dictionary imports occur.
+
+`regression_ridge_hgb_recipe.regression_recipe` and `validate_regression_recipe`
+add a distinct closed recipe identity with explicit `signed` or `nonnegative`
+target domain. Signed recipes bind no projection; nonnegative recipes bind
+zero clipping. The v2 magnitude grid and recipe/result identities remain unchanged;
+v3 may supply bounded alpha values declared by its request. `ridge_hgb_recipe` with
+`learning_rate`, `min_samples_leaf` and `l2_regularization` yields the distinct
+`magnitude_ridge_hgb_recipe.v2` HGB identity (early stopping, `max_iter` 500);
+without them the v1 recipe is unchanged.
+
+`magnitude_elasticnet_recipe.regression_elasticnet_recipe` and its
+`validate_regression_elasticnet_recipe` bind a distinct closed policy with explicit
+`signed`/`nonnegative` target domain and corresponding none/zero-clipping projection.
+The v2 magnitude grid and recipe/result identities remain unchanged; v3 may supply
+bounded alpha values declared by its request. Metadata grants no source admission.
 
 The names other packages may import are declared in the `public-interface`
 directive below, which `checks/package_readmes.py` enforces. Everything else
@@ -128,7 +159,7 @@ history replayed as a promote/rollback stack, so chained rollbacks undo
 chained promotions instead of flipping back to the release just left. See
 `ARCHITECTURE.md` §7.1–§7.2 and §8.
 
-<!-- public-interface: ridge_hgb_recipe, validate_ridge_hgb_recipe, elasticnet_recipe, validate_elasticnet_recipe, AdapterError, ArtifactInventoryMember, ArtifactMember, FrozenInference, InferenceAdapter, InferenceRequest, InferenceResult, JoblibEstimatorAdapter, JsonLinearAdapter, MODEL_ARTIFACT_INVENTORY_V1, MODEL_NOT_READY, MODEL_READY, MODEL_RELEASE_REFUSAL, MODEL_RELEASE_V1, ModelArtifactInventory, ModelBinding, ModelRelease, ModelReleaseInventory, ModelReleaseRefusal, PredictionFrame, RELEASE_BINDING_V1, RELEASE_REQUIREMENT_V1, ReleaseBinding, ReleaseIssue, ReleaseRequirement, RuntimeFitForbidden, default_adapters, release_issues, require_complete_release, ARTIFACT_INVENTORY_MEMBER_V1, DEPLOYMENT_ID, FEATURE_ROLES, FoldCoverageEntry, KNOWN_CLOCK_IDS, NON_MODEL_STATE_ITEMS, NonModelStateEntry, RELEASE_ID, current_release_inventory, non_model_state_inventory, registry_drift_issues, served_roles, tier4_fold_coverage, PAYOFF_LINE_ARTIFACT_V1, PAYOFF_SURFACE_ARTIFACT_V1, PayoffArtifactError, PayoffArtifactKey, PayoffArtifactLoader, PayoffArtifactRef, PayoffLineArtifact, PayoffSurfaceArtifact, fitting_forbidden, forbid_fitting, make_payoff_line_artifact, make_payoff_surface_artifact, no_fit_guard, payoff_artifact_key, serialize_payoff_artifact, RECALIBRATION_MAP_ARTIFACT_V1, RecalibrationArtifactError, RecalibrationArtifactLoader, RecalibrationArtifactRef, RecalibrationMapArtifact, make_recalibration_map_artifact, recalibration_artifact_key, serialize_recalibration_artifact, DEPLOYMENT_REFUSAL, MAX_MANIFEST_BYTES, POINTER_STATE_V1, STAGED_MANIFEST_V1, DeploymentError, ConcurrentPromote, NoPriorRelease, PointerState, ReleaseNotStaged, StagedManifest, StagingNotSuccessful, StagingRefused, current_pointer, current_release, invalidate_staging_success, mark_staging_succeeded, pointer_history, promote, resolve_release, rollback, rollback_target, semantic_release_hash, stage_release, manifest_path, atomic_write_bytes, manifest_hash_matches, read_manifest, ADMISSIBLE_DEPTH_TABLE_V1, N_ADMISSIBLE_BY_DEPTH_V1_HASH, AdmissibleDepthTable, AdmissibleTableError, admissible_table_from_document, legacy_n_admissible_table, CHOOSER_ANALOG_DIMS, CHOOSER_ANALOG_K, CHOOSER_ANALOG_POOL_ARTIFACT_V1, ChooserAnalogPoolArtifact, ChooserAnalogPoolError, chooser_analog_pool_from_document, chooser_analog_pool_key, make_chooser_analog_pool_artifact, make_admissible_depth_table, n_admissible_for, FrozenState, FrozenStateError, FrozenStateLoader, FrozenStateRef, serialize_frozen_state, inventory_member, member_kind, release_member, state_node, LINEAGE_V1, DataDependency, Invalidation, InvalidationReport, Lineage, LineageError, StateNode, lineage_from_document, propagate_corrections, rebuild_order, DRIVER_RESIDUAL_POOL_ARTIFACT_V1, PAIRED_COLUMNS, PAIRED_RESIDUAL_POOL_ARTIFACT_V1, DriverResidualPoolArtifact, DriverResidualPoolKey, PairedResidualPoolArtifact, PairedResidualPoolKey, ResidualArtifactError, driver_residual_pool_key, make_driver_residual_pool_artifact, make_paired_residual_pool_artifact, paired_residual_pool_key, residual_artifact_from_document, MissingReleaseRoot, StaleReleaseHash, production_deployment_root, production_release_root, restage_semantic_hash, CorruptManifest, SizeFoldPolicy, ServingFoldDescriptor, FOLD_PANEL_SHA256_PATTERN, BoundedStateReadError, read_bounded_state, ChooserFoldPolicy, ChooserServingFoldDescriptor, chooser_fold_outputs, ServingFoldMetadata, ServingFoldRef, ChooserServingFoldRef, ServingFoldError, load_serving_fold, load_chooser_serving_fold, validate_serving_fold_object, validate_serving_fold_descriptor -->
+<!-- public-interface: regression_target.target_descriptor, regression_target.validate_target, magnitude_candidate_family, regression_candidate_recipe, regression_recipe, validate_regression_recipe, ridge_hgb_recipe, validate_ridge_hgb_recipe, elasticnet_recipe, validate_elasticnet_recipe, AdapterError, ArtifactInventoryMember, ArtifactMember, FrozenInference, InferenceAdapter, InferenceRequest, InferenceResult, JoblibEstimatorAdapter, JsonLinearAdapter, MODEL_ARTIFACT_INVENTORY_V1, MODEL_NOT_READY, MODEL_READY, MODEL_RELEASE_REFUSAL, MODEL_RELEASE_V1, ModelArtifactInventory, ModelBinding, ModelRelease, ModelReleaseInventory, ModelReleaseRefusal, PredictionFrame, RELEASE_BINDING_V1, RELEASE_REQUIREMENT_V1, ReleaseBinding, ReleaseIssue, ReleaseRequirement, RuntimeFitForbidden, default_adapters, release_issues, require_complete_release, ARTIFACT_INVENTORY_MEMBER_V1, DEPLOYMENT_ID, FEATURE_ROLES, FoldCoverageEntry, KNOWN_CLOCK_IDS, NON_MODEL_STATE_ITEMS, NonModelStateEntry, RELEASE_ID, current_release_inventory, non_model_state_inventory, registry_drift_issues, served_roles, tier4_fold_coverage, PAYOFF_LINE_ARTIFACT_V1, PAYOFF_SURFACE_ARTIFACT_V1, PayoffArtifactError, PayoffArtifactKey, PayoffArtifactLoader, PayoffArtifactRef, PayoffLineArtifact, PayoffSurfaceArtifact, fitting_forbidden, forbid_fitting, make_payoff_line_artifact, make_payoff_surface_artifact, no_fit_guard, payoff_artifact_key, serialize_payoff_artifact, RECALIBRATION_MAP_ARTIFACT_V1, RecalibrationArtifactError, RecalibrationArtifactLoader, RecalibrationArtifactRef, RecalibrationMapArtifact, make_recalibration_map_artifact, recalibration_artifact_key, serialize_recalibration_artifact, DEPLOYMENT_REFUSAL, MAX_MANIFEST_BYTES, POINTER_STATE_V1, STAGED_MANIFEST_V1, DeploymentError, ConcurrentPromote, NoPriorRelease, PointerState, ReleaseNotStaged, StagedManifest, StagingNotSuccessful, StagingRefused, current_pointer, current_release, invalidate_staging_success, mark_staging_succeeded, pointer_history, promote, resolve_release, rollback, rollback_target, semantic_release_hash, stage_release, manifest_path, atomic_write_bytes, manifest_hash_matches, read_manifest, ADMISSIBLE_DEPTH_TABLE_V1, N_ADMISSIBLE_BY_DEPTH_V1_HASH, AdmissibleDepthTable, AdmissibleTableError, admissible_table_from_document, legacy_n_admissible_table, CHOOSER_ANALOG_DIMS, CHOOSER_ANALOG_K, CHOOSER_ANALOG_POOL_ARTIFACT_V1, ChooserAnalogPoolArtifact, ChooserAnalogPoolError, chooser_analog_pool_from_document, chooser_analog_pool_key, make_chooser_analog_pool_artifact, make_admissible_depth_table, n_admissible_for, FrozenState, FrozenStateError, FrozenStateLoader, FrozenStateRef, serialize_frozen_state, inventory_member, member_kind, release_member, state_node, LINEAGE_V1, DataDependency, Invalidation, InvalidationReport, Lineage, LineageError, StateNode, lineage_from_document, propagate_corrections, rebuild_order, DRIVER_RESIDUAL_POOL_ARTIFACT_V1, PAIRED_COLUMNS, PAIRED_RESIDUAL_POOL_ARTIFACT_V1, DriverResidualPoolArtifact, DriverResidualPoolKey, PairedResidualPoolArtifact, PairedResidualPoolKey, ResidualArtifactError, driver_residual_pool_key, make_driver_residual_pool_artifact, make_paired_residual_pool_artifact, paired_residual_pool_key, residual_artifact_from_document, MissingReleaseRoot, StaleReleaseHash, production_deployment_root, production_release_root, restage_semantic_hash, CorruptManifest, SizeFoldPolicy, ServingFoldDescriptor, FOLD_PANEL_SHA256_PATTERN, BoundedStateReadError, read_bounded_state, ChooserFoldPolicy, ChooserServingFoldDescriptor, chooser_fold_outputs, ServingFoldMetadata, ServingFoldRef, ChooserServingFoldRef, ServingFoldError, load_serving_fold, load_chooser_serving_fold, validate_serving_fold_object, validate_serving_fold_descriptor, regression_elasticnet_recipe, validate_regression_elasticnet_recipe -->
 
 `FrozenStateLoader` accepts optional `max_bytes`: a positive per-object byte
 ceiling enforced before hashing/decoding, with a bounded regular-file read.
@@ -180,6 +211,7 @@ before selected outer refit claims; completed evidence replay never fits.
 `experiments/magnitude_candidate_recipe.py` consumes the closed family recipe
 constructors; `magnitude_candidate_fit.py` checks both legacy/v2 no-fit guards
 before recipe, column or array inspection, then delegates to the public fitter.
+`experiments/distribution_candidate_recipe.py` consumes `magnitude_ridge_hgb_recipe.ridge_hgb_recipe` for its source-free matched-point declaration; it does not fit.
 `serving_fold_preflight.py` consumes the chooser policy/descriptor types
 and `semantic_release_hash`, plus `engine.v2.foundation` typed-document conversion,
 for offline fold metadata; its helper `serving_fold_checks.py` imports
@@ -206,7 +238,7 @@ to serve the deployed model release read-only at `/models/release.json` --
 never fits or promotes anything, only resolves the one pointer already on
 disk.
 
-<!-- consumers: engine.v2.scoring, engine.v2.models.training, engine.v2.ops, engine.v2.serving -->
+<!-- consumers: engine.v2.research, engine.v2.scoring, engine.v2.models.training, engine.v2.ops, engine.v2.serving -->
 
 ## Usage
 

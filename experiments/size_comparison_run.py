@@ -55,12 +55,25 @@ def _validate(result, inputs, fold, plan):
 def execute(conn, store, repository, registration, plan, fold, *, limits, replay_only=False):
     """Freeze comparator/sanity forecasts before the selected outer target opens."""
     _equal(limits, plan["request"]["limits"]["child"])
-    _equal(plan, prepare_plan(conn, store, registration, plan["request"]))
+    regression = plan.get("schema_version") == "regression_search_plan.v1"
+    validate, evidence, admit = _validate, fit_evidence, fold_inputs
+    if regression:
+        from experiments import iv_crush_comparison_run as iv
+        validate, evidence, admit = iv.validate_result, iv.fit_evidence, iv.fold_inputs
+        _equal(plan, iv.prepare_plan(conn, store, registration, plan["request"]))
+        execution = iv.execution(plan)
+    else:
+        _equal(plan, prepare_plan(conn, store, registration, plan["request"],
+                                  plan_schema=plan.get("schema_version")))
+        execution = {"schema_version": "size_comparison_execution.v1", "features": COLUMNS,
+                     "fit_recipe": registration.document["size_comparison"]}
+        _equal(execution["fit_recipe"], recipe())
     require_current(conn, OWNER, MIGRATIONS)
     seal = read_record(conn, store, registration.run_id, "seal")
     _equal(seal.get("plan_id") if isinstance(seal, dict) else None, plan["plan_id"])
+    execution_key = "regression_execution" if regression else "magnitude_execution"
     candidates = [{**group["outer"], "evaluation_labels_before":
-        registration.document["magnitude_execution"]["evaluation_labels_before"]} for group in plan["folds"]]
+        registration.document[execution_key]["evaluation_labels_before"]} for group in plan["folds"]]
     if fold not in candidates:
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "comparison requires an exact sealed outer fold")
     key = content_hash([plan["plan_id"], fold["year"], "comparison"])
@@ -68,23 +81,28 @@ def execute(conn, store, repository, registration, plan, fold, *, limits, replay
         return read_record(conn, store, registration.run_id, "comparison-" + slot + ":" + key)
     def append(slot, body, **kw):
         return append_record(conn, store, registration.run_id, "comparison-" + slot + ":" + key, body, **kw)
-    execution = {"schema_version": "size_comparison_execution.v1", "features": COLUMNS, "fit_recipe": registration.document["size_comparison"]}
-    _equal(execution["fit_recipe"], recipe())
     started = {"plan_id": plan["plan_id"], "fold": fold, "execution": execution, "limits": limits}
     terminal = read("terminal")
     if terminal is None:
-        if replay_only:
+        if replay_only or (regression and read("start") is not None):
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "comparison is not complete")
         forbid_fitting("size_comparison.execute")
         forbid_legacy_fitting("size_comparison.execute")
         resolved_limits(conn, store, registration, plan, limits)
-    inputs = fold_inputs(repository, registration.document, fold)
-    expected = fit_evidence(inputs, fold, plan)
     if terminal is not None:
         _equal(sorted(terminal) if isinstance(terminal, dict) else None, ["inputs_id", "result"])
         _equal(read("start"), started)
-        _equal(load_inputs(store, read("inputs"), terminal["inputs_id"]), inputs)
-        _validate(terminal["result"], inputs, fold, plan)
+        stored = load_inputs(store, read("inputs"), terminal["inputs_id"])
+    inputs = stored if regression and terminal is not None else admit(
+        repository, registration.document, fold, **({"plan": plan} if regression else {}))
+    if regression:
+        _equal(inputs.get("target"), plan["target"])
+    expected = evidence(inputs, fold, plan)
+    validation_options = {"fits": expected} if regression else {}
+    if terminal is not None:
+        if not regression:
+            _equal(stored, inputs)
+        validate(terminal["result"], inputs, fold, plan, **validation_options)
         for fit in expected:
             for state in ("started", "completed"):
                 _equal(read(state + ":" + str(fit["horizon_sessions"])), fit)
@@ -95,7 +113,7 @@ def execute(conn, store, repository, registration, plan, fold, *, limits, replay
     completed, pending = [], []
     def progress(state, fit):
         index = len(completed)
-        if index >= len(expected) or (state == "started") == bool(pending):
+        if state not in ("started", "completed") or index >= len(expected) or (state == "started") == bool(pending):
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "comparison fit sequence differs")
         _equal(fit, expected[index])
         append(state + ":" + str(fit["horizon_sessions"]), fit, replay=False)
@@ -108,6 +126,6 @@ def execute(conn, store, repository, registration, plan, fold, *, limits, replay
                               fold, plan, execution, resolved, progress)
     _equal(completed, expected)
     _equal(pending, [])
-    _validate(result, inputs, fold, plan)
+    validate(result, inputs, fold, plan, **validation_options)
     append("terminal", {"inputs_id": inputs_id, "result": result}, replay=False)
     return result

@@ -321,15 +321,24 @@ They cannot replace time holdouts. Report layers separately; preregister the joi
 
 Platform ownership: a reusable versioned eligibility policy in `engine/v2/research`,
 not a SUPER SIZE filter. New consumers bind sealed policy IDs/parameters and exclusion
-manifests into run identity/coverage. Existing v1 consumers remain unchanged; adoption
-requires explicit versioned migration, never retroactive filtering. Cross-consumer tests
-must prove identical grouped admission and refusal on missing/conflicting policy identities.
-SUPER SIZE preregisters 30 days (not a platform constant): an inclusive ±30-calendar-day window for
-each random-held event's ticker/date. Exclude a whole development event (all 1/3/5-session horizons) if its
-label interval, event date or any forecast decision/source-session ceiling overlaps
-any such window. Apply the same metadata-first exclusion before preprocessing,
-selection, calibration and fits, including the legacy baseline; preserve protected
-evaluation membership. Freeze the window/manifest before outcomes, with no tuning.
+manifests into run identity/coverage. Policy identity and dependent hashes are unchanged;
+the embargo lives in plan content only when an ambiguous random event exists. Cross-consumer
+tests must prove identical grouped admission and refusal on missing/conflicting policy identities.
+SUPER SIZE preregisters 30 days (not a platform constant): ordinary random-held events
+use an inclusive ±30-calendar-day ticker/date window; structurally ambiguous random-held
+events use a whole-ticker window. Exclude a whole development event (all 1/3/5-session
+horizons) when its label interval, event date or any forecast decision/source-session
+ceiling overlaps a window. Apply metadata-first exclusions before preprocessing,
+selection, calibration and fits, including the legacy baseline. On the SIZE path a
+requested development target on an ambiguous-random ticker is excluded, so panel
+preparation refuses `HOLDOUT_ACCESS_DENIED` before any binding exists; fold IDs are
+drawn from those targets, so valid bindings hold none. The fold binder repeats the
+check as defence in depth on the eligibility plan's ambiguous-random tickers: it removes
+matching IDs from outer and inner training and evaluation, records removed evaluation
+IDs in `evaluation_exclusions` with reason `embargo_ticker`, and preserves all other
+IDs; a fold left with no evaluation IDs refuses `INVALID_EXPERIMENT_SPEC`. This
+binder path is exercised by synthetic fold tests only. Freeze the
+window/manifest before outcomes, with no tuning.
 This excludes examples, not individual price bars; do not alter rolling formulas.
 
 Extend protected event-outcome preflight, not production `scan_panel_row`: classify
@@ -541,7 +550,7 @@ Re-estimate before each PR and split at repository limits; these estimates grant
 | --- | --- | --- | --- | --- |
 | 0 | Initial design + SPEC link (historical estimate) | Design reviewed before code | 0 / 0 / 280–300 | Initial PR |
 | 0C | Section 6 checkpoint | Publish before compiler code | 0 / 0 / 120–150 | This design refinement |
-| P | Shared versioned eligibility policy / 0 | Grouped ticker/time exclusions, stable eval membership, cross-consumer identity/admission tests; no v1 migration | 200–320 / 250–400 / 35–60 | 0.5 day |
+| P | Shared versioned eligibility policy / 0 | Grouped ticker/time exclusions, ambiguous-ticker evaluation filtering with unaffected IDs preserved, cross-consumer identity/admission tests | 200–320 / 250–400 / 35–60 | 0.5 day |
 | 1 | Versioned panel schema + metadata-only plan | Closed dictionary, protected fragment refusal, identity tests | 220–340 / 250–400 / 30–60 | 0.5 day |
 | 2 | Batched causal feature materializer / 1,P | Horizon/availability, poisoned future/protected rows, batch invariance, read-count tests | 300–400 / 350–550 / 40–70 | 1 day |
 | 3 | Stored reader + snapshot join / 2 | Missingness/coverage and mismatch refusal; no runtime build | 200–320 / 250–400 / 30–60 | 0.5 day |

@@ -12,6 +12,7 @@ from engine.v2.research.magnitude_inputs import (
     preflight_magnitude_targets,
     qualify_magnitude_training_targets,
 )
+from engine.v2.research.regression_evidence import error_metrics
 from experiments.prediction_report import _years
 from experiments.prediction_report import validate_prediction_spec as validate_base_spec
 
@@ -24,17 +25,15 @@ def validate_prediction_spec(spec):
     return plan
 
 
-def magnitude_metrics(predictions):
+def magnitude_metrics(predictions, *, target=None):
     """Equal event weights; scale before squaring to preserve finite large errors."""
-    errors = [abs(row["predicted_absolute_move_pct"] - row["absolute_move_pct"]) for row in predictions]
-    if not errors:
-        raise fail("EXPERIMENT_VARIANT_FAILED", "magnitude metrics require scored rows")
-    scale = max(errors)
-    rmse = scale * math.sqrt(mean((error / scale) ** 2 for error in errors)) if scale else 0.0
-    mae = mean(errors)
-    if not all(math.isfinite(value) for value in (rmse, mae)):
-        raise fail("EXPERIMENT_VARIANT_FAILED", "magnitude metrics must be finite")
-    return {"count": len(errors), "rmse": rmse, "mae": mae}
+    target = target or {"column": "absolute_move_pct", "prediction_column": "predicted_absolute_move_pct"}
+    errors = [abs(row[target["prediction_column"]] - row[target["column"]]) for row in predictions]
+    try:
+        return error_metrics(errors)
+    except ValueError:
+        message = "magnitude metrics require scored rows" if not errors else "magnitude metrics must be finite"
+        raise fail("EXPERIMENT_VARIANT_FAILED", message) from None
 
 
 def prediction_result(repository, registration):

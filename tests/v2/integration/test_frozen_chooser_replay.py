@@ -1,5 +1,6 @@
 # packages: engine.v2.scoring, engine.v2.models, engine.v2.foundation, engine.v2.ops
 """Frozen chooser replay refuses folds without causal producer provenance."""
+import json
 from types import SimpleNamespace
 
 import numpy as np
@@ -129,23 +130,40 @@ def test_replay_pool_values_must_match_staged_fold_estimators(monkeypatch, tmp_p
             "training_cutoff": "2026-08-31", "fold_start": "2026-09-01",
             "descriptor_hash": digest}
         rows.append({"member_id": f"tier4_folds:{'implied_t1' if index == 0 else 'runup_move'}",
-                     "objects": [{"serving_fold": {"descriptor_hash": digest}}]})
+                     "status": "STAGED",
+                     "objects": [{"serving_fold": {"descriptor_hash": digest,
+                                                    "fold_start": "2026-09-01"}}]})
         pools[output] = {
             "predictions": refs[output].pool_pred.copy(),
             "residuals": refs[output].pool_res.copy(),
             "interval_floor": 0.25}
 
+    def make_binding(output):
+        return SimpleNamespace(
+            binding_id=f"binding:{output}", role="size", model_id=f"model:{output}",
+            strategy_id="*", feature_order=("feature_a",), decision_clock_id="clock",
+            output_names=(output,),
+            members=(SimpleNamespace(content_hash=f"member:{output}"),))
+
+    alias_bindings = []
+    producers = {}
+    for output in outputs:
+        alias_bindings.append(make_binding(output))
+        refs[output].release = SimpleNamespace(bindings=(make_binding(output),))
+        producers[output] = {"binding_id": f"binding:{output}", "output": output}
+
     size_descriptor = SimpleNamespace(
         descriptor_hash="size", parent_release_id="parent",
         fold_start="2026-09-01",
-        estimator=SimpleNamespace(content_hash="hash:size"),
+        estimator=SimpleNamespace(path="size.joblib", content_hash="hash:size"),
         policy=SimpleNamespace(interval_floor=0.4))
     size_ref = SimpleNamespace(
         pool_pred=np.array([10.0, 11.0]), pool_res=np.array([12.0, 13.0]))
     descriptors["size"] = size_descriptor
-    rows.append({"member_id": "tier4_folds:size", "objects": [
+    rows.append({"member_id": "tier4_folds:size", "status": "STAGED", "objects": [
         {"serving_fold": {"descriptor_hash": "size"},
-         "content_hash": "hash:size"}]})
+         "path": "size.joblib", "content_hash": "hash:size", "bytes": 123}]})
+    size_like = [size_descriptor]
     pools["pred_abs_move"] = {
         "predictions": size_ref.pool_pred.copy(),
         "residuals": size_ref.pool_res.copy(),
@@ -153,26 +171,35 @@ def test_replay_pool_values_must_match_staged_fold_estimators(monkeypatch, tmp_p
 
     def decode(kind, doc):
         descriptor = descriptors[doc["descriptor_hash"]]
-        if kind is ChooserServingFoldDescriptor and descriptor is size_descriptor:
+        is_size = any(descriptor is candidate for candidate in size_like)
+        if kind is ChooserServingFoldDescriptor and is_size:
             raise ValueError("size fold must not be parsed as chooser fold")
-        if kind is ServingFoldDescriptor and descriptor is not size_descriptor:
+        if kind is ServingFoldDescriptor and not is_size:
             raise ValueError("chooser fold must not be parsed as size fold")
         return descriptor
+
+    seen_expected_bytes = []
+
+    def fake_load_serving_fold(*_args, **kwargs):
+        seen_expected_bytes.append(kwargs.get("expected_bytes"))
+        return size_ref
 
     monkeypatch.setattr(foundation, "from_document", decode)
     monkeypatch.setattr(phase5_phase4_replay, "deployment_root", lambda root: root)
     monkeypatch.setattr(deployment, "read_manifest", lambda _root, _release: object())
     monkeypatch.setattr(loader, "FrozenInference", lambda _root: object())
+    monkeypatch.setattr(serving_fold_loader, "validate_serving_fold_descriptor",
+                        lambda *_args: None)
     monkeypatch.setattr(serving_fold_loader, "validate_serving_fold_object", lambda *_args: None)
-    monkeypatch.setattr(serving_fold_loader, "load_serving_fold",
-                        lambda *_args, **_kwargs: size_ref)
+    monkeypatch.setattr(serving_fold_loader, "load_serving_fold", fake_load_serving_fold)
     monkeypatch.setattr(
         serving_fold_loader, "load_chooser_serving_fold",
         lambda _inference, descriptor, **_kwargs: refs[descriptor.producer_output])
     chooser = SimpleNamespace(
-        recipe={"fold_provenance": provenance,
+        recipe={"fold_provenance": provenance, "producers": producers,
                 "artifact_refs": ["hash:size", *(f"hash:{output}" for output in outputs)]},
-        fold_pools=pools)
+        fold_pools=pools,
+        release=SimpleNamespace(bindings=tuple(alias_bindings)))
     manifest = {"manifest_hash": "sha256:catalog", "members": rows}
 
     request = SimpleNamespace(requested_decision_at="2026-10-27")
@@ -183,12 +210,29 @@ def test_replay_pool_values_must_match_staged_fold_estimators(monkeypatch, tmp_p
         legacy_event_date=legacy_event_date) is None
     size_descriptor.fold_start = "2026-09-01"
 
+    unselected_descriptor = SimpleNamespace(
+        descriptor_hash="size-unselected", parent_release_id="parent",
+        fold_start="2026-10-01",
+        estimator=SimpleNamespace(path="unselected.joblib", content_hash="hash:unselected"),
+        policy=SimpleNamespace(interval_floor=0.4))
+    descriptors["size-unselected"] = unselected_descriptor
+    size_like.append(unselected_descriptor)
+    rows[-1]["objects"].append({
+        "serving_fold": {"descriptor_hash": "size-unselected"},
+        "path": "unselected.joblib", "content_hash": "hash:unselected",
+        "bytes": "not-an-int"})
+    assert phase5_phase4_replay._staged_chooser_pools(
+        chooser, request, tmp_path, manifest,
+        legacy_event_date=legacy_event_date) is None
+    rows[-1]["objects"].pop()
+
     pools["pred_abs_move"]["predictions"] = np.array([99.0, 99.0])
     assert phase5_phase4_replay._staged_chooser_pools(
         chooser, request, tmp_path, manifest,
         legacy_event_date=legacy_event_date) is None
 
     pools["pred_abs_move"]["predictions"] = size_ref.pool_pred.copy()
+    seen_expected_bytes.clear()
     verified = phase5_phase4_replay._staged_chooser_pools(
         chooser, request, tmp_path, manifest,
         legacy_event_date=legacy_event_date)
@@ -197,3 +241,38 @@ def test_replay_pool_values_must_match_staged_fold_estimators(monkeypatch, tmp_p
         assert np.array_equal(verified[output]["predictions"], ref.pool_pred)
     assert np.array_equal(verified["pred_abs_move"]["predictions"], size_ref.pool_pred)
     assert np.array_equal(verified["pred_abs_move"]["residuals"], size_ref.pool_res)
+    assert seen_expected_bytes == [123]
+
+
+def test_replay_checkpoint_scope_invalidation(tmp_path):
+    corpus_hash = "sha256:corpus"
+    manifest = {"manifest_hash": "sha256:catalog", "members": []}
+    other_manifest = {"manifest_hash": "sha256:other", "members": []}
+    scope = phase5_phase4_replay._checkpoint_scope(corpus_hash, manifest)
+    other_scope = phase5_phase4_replay._checkpoint_scope(corpus_hash, other_manifest)
+    assert phase5_phase4_replay.REPLAY_VALIDATION_VERSION == 3
+    assert scope != other_scope
+
+    checkpoint = tmp_path / "checkpoint.jsonl"
+    checkpoint.write_text(json.dumps({
+        "fixture_id": "fixture-1", "disposition": "replayed",
+        "corpus_hash": scope}) + "\n")
+    loaded = phase5_phase4_replay._load_checkpoint(checkpoint, scope)
+    assert set(loaded) == {"fixture-1"}
+    assert loaded["fixture-1"]["disposition"] == "replayed"
+
+    legacy = tmp_path / "legacy.jsonl"
+    legacy.write_text(json.dumps({
+        "fixture_id": "fixture-1", "disposition": "replayed",
+        "corpus_hash": corpus_hash}) + "\n")
+    assert phase5_phase4_replay._load_checkpoint(legacy, scope) == {}
+
+    other = tmp_path / "other.jsonl"
+    other.write_text(json.dumps({
+        "fixture_id": "fixture-1", "disposition": "replayed",
+        "corpus_hash": other_scope}) + "\n")
+    assert phase5_phase4_replay._load_checkpoint(other, scope) == {}
+
+    corrupt = tmp_path / "corrupt.jsonl"
+    corrupt.write_text("{not json}\n")
+    assert phase5_phase4_replay._load_checkpoint(corrupt, scope) == {}

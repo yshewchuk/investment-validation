@@ -149,6 +149,7 @@ DATA_TO_OPS = {
     "DEST_ROOT_NOT_EMPTY": "VALIDATION_FAILED", "DEST_ROOT_UNSAFE": "VALIDATION_FAILED",
     "EVIDENCE_SCOPE_INCOMPLETE": "VALIDATION_FAILED", "TIER4_CACHE_STALE": "VALIDATION_FAILED",
     "STALE_EXPECTATION": "STALE_EXPECTATION",
+    "SNAPSHOT_CLOSURE_BROKEN": "INTEGRITY_FAILED",
 }
 
 
@@ -1311,15 +1312,23 @@ def test_oversized_stored_roster_refuses_before_decode_or_effect(source, monkeyp
     with pytest.raises(AssertionError, match="unbounded stored roster reached Python"):
         source.conn.execute("SELECT document_json FROM native_gate_sweeps").fetchone()
     monkeypatch.setattr(native_registration, "MAX_GATE_SWEEP_BYTES", 1024)
-    monkeypatch.setattr(native_registration, "json", SimpleNamespace(loads=_forbid))
+    # Prepared registration metadata may decode; the oversized stored roster may not.
+    monkeypatch.setattr(native_registration, "decode_native_gate_sweep", _forbid)
+    monkeypatch.setattr(source.store, "read_verified", _forbid)
     monkeypatch.setattr(source.store, "publish_bytes", _forbid)
     monkeypatch.setattr(source.repository, "resolve_pinned", _forbid)
-    with pytest.raises(OpsError) as caught:
-        if action == "reserve":
-            native_registration.reserve_native_registration(source.conn, source.store, prepared, spec)
-        else:
-            _call(source, sweep.register_sweep if action == "register" else sweep.submit_sweep)
+    statements = []
+    source.conn.set_trace_callback(statements.append)
+    try:
+        with pytest.raises(OpsError) as caught:
+            if action == "reserve":
+                native_registration.reserve_native_registration(source.conn, source.store, prepared, spec)
+            else:
+                _call(source, sweep.register_sweep if action == "register" else sweep.submit_sweep)
+    finally:
+        source.conn.set_trace_callback(None)
     assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert statements and all(sql.lstrip().upper().startswith(("SELECT", "PRAGMA")) for sql in statements)
     assert list(source.conn.iterdump()) == before
 
 

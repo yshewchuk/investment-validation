@@ -89,6 +89,8 @@ failure rather than a stale sentence.
 - `experiments/magnitude_search_worker.py` — `ArtifactStore` to stream the fit child's cohort shards.
 - `experiments/size_prep_inputs.py` — `ArtifactStore`, `SystemClock`, `canonical_json` and `content_hash` for write-root source-bounds generation, manifest/provenance identities.
 - `experiments/magnitude_search_request.py` and `magnitude_search_request_versions.py` — `content_hash` for source-free request and candidate-specification identities.
+- `experiments/magnitude_search_request_v3.py` — `content_hash` for request-declared grid and candidate identities.
+- `experiments/distribution_candidate_recipe.py`, `distribution_plan.py` and `distribution_trials.py` — canonical identity hashing/comparison, with artifact references and typed-document conversion in the planner; no new storage protocol.
 - `experiments/v2_magnitude_search_run.py` — `ArtifactStore`/`ArtifactError`, `DocumentError`, `SystemClock`, `content_hash`, `from_document`/`to_document` and `iter_canonical_json` for driver binding, metadata admission and bounded output.
 
 <!-- consumers: engine.v2.diagnosis, engine.v2.data, engine.v2.ops, engine.v2.ledger, engine.v2.serving, engine.v2.features, engine.v2.registry, engine.v2.scoring, engine.v2.models, engine.v2.models.training, engine.v2.research, engine.v2.parity -->

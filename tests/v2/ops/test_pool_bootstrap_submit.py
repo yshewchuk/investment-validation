@@ -88,7 +88,7 @@ def test_none_prior_submits_the_twelve_training_jobs(monkeypatch, tmp_path, caps
                          "cutoffs": (SESSION,)},
         "train-board": {"mode": "board_analog", "alpha": pool_refresh.FILL_ALPHA,
                         "cutoffs": (SESSION,)},
-        "train-trailing": {"mode": "trailing_cutoff", "cutoffs": (SESSION,)},
+        "train-trailing": {"mode": "trailing_cutoff", "cutoffs": (SESSION, "2026-02-01")},
         "train-driver-size": {"mode": "state", "state": "driver_residual_pool:size"},
         "train-driver-implied_t1": {"mode": "state",
                                     "state": "driver_residual_pool:implied_t1"},
@@ -297,12 +297,20 @@ def test_pool_cycle_pending_false_without_a_pointer_and_without_bootstrap_jobs(t
     assert pool_refresh.pool_cycle_pending(conn, tmp_path) is False
 
 
-def test_pool_cycle_pending_true_between_phases_of_a_started_bootstrap(tmp_path):
+def test_pool_cycle_pending_false_for_bootstrap_refusal_gaps(tmp_path):
     conn = _db()
     _add_score(conn)
-    _bootstrap_training_succeeded(conn)  # missing pointer, 12 succeeded, no stage yet
-    assert pool_refresh.pool_cycle_pending(conn, tmp_path) is True
-    _add_training(conn, "stage", prior="none", state="succeeded")  # no promote yet
+    _bootstrap_training_succeeded(conn)  # no stage row after reconciliation
+    assert pool_refresh.pool_cycle_pending(conn, tmp_path) is False
+    _add_training(conn, "stage", prior="none", state="succeeded")  # no promote row after reconciliation
+    assert pool_refresh.pool_cycle_pending(conn, tmp_path) is False
+
+
+def test_pool_cycle_pending_true_while_a_bootstrap_stage_runs(tmp_path):
+    conn = _db()
+    _add_score(conn)
+    _bootstrap_training_succeeded(conn)
+    _add_training(conn, "stage", prior="none", state="running")
     assert pool_refresh.pool_cycle_pending(conn, tmp_path) is True
 
 

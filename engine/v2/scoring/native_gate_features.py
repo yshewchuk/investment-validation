@@ -83,13 +83,16 @@ def forecast_interval(
     pool_res: Sequence[float],
     *,
     floor: float | None = 0.0,
+    use_buckets: bool = True,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """engine/data/features/tier4.py ``interval_for``, verbatim math.
 
     ``(p10, p90, sd, n)`` for ``predictions`` from a fold's held-out pool:
     the flat pool's stats unless the prediction-decile buckets
     (``registry.bucket_residuals`` = ``native_payoff.bucket_residual_pool``)
-    exist, then the bucket's stats (flat when the bucket is thin).
+    exist, then the bucket's stats (flat when the bucket is thin). Flat
+    stats are used when ``use_buckets`` is false, as well as when bucket
+    construction fails or selected buckets are thin.
     """
     predictions = np.asarray(predictions, dtype=float)
     p10 = np.full(predictions.shape, np.nan)
@@ -102,7 +105,10 @@ def forecast_interval(
     if flat_stats[3] < MIN_RESIDUALS:
         return p10, p90, sd, n
 
-    buckets = bucket_residual_pool(pool_pred, pool_res, deciles=DECILES, min_pool=MIN_POOL)
+    buckets = (
+        bucket_residual_pool(pool_pred, pool_res, deciles=DECILES, min_pool=MIN_POOL)
+        if use_buckets else None
+    )
     if buckets is None:
         q10, q90, spread, count = flat_stats
         known = np.isfinite(predictions)

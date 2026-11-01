@@ -1,0 +1,153 @@
+# `engine/v2/ops/workspace` — architecture
+
+An isolated experiment write sandbox over one **read-only** pinned snapshot: an overlay. Catalog rows are copied by `catalog_rows.py`; objects are copied only by the explicit, bounded `objects.admit_closure_objects` below, never implicitly. Library only: no CLI, no production head writes (`head.py` writes a native head into the workspace catalog only), no supervisor. Modules: `closure.py` (read-only closure verification), `overlay.py` (create/open), `scope.py` (workspace-local scope binding), `catalog_rows.py` (bounded copy of the pinned snapshot's catalog rows), `head.py` (workspace-catalog scope head with reference inputs), `objects.py` (closure object admission), `guard.py` (execution refusal).
+
+## Closure (`closure.verify_snapshot_closure(conn, store, snapshot_id, manifest_hash, *, deep=False) -> SnapshotClosure`)
+
+Reads only: catalog queries on the caller's connection and one `lstat` per object (`deep` also re-hashes via `objects.verify_object_path`). The production catalog is trusted local data written by our own pipeline; every catalog read, including `resolve_full`'s, goes through one bounded cursor (over 2,000,000 rows or 256 MiB in one read refuses `closure_rows_over_cap` / `closure_bytes_over_cap`) that exists only to catch our own bugs, not hostile rows. The workspace's own `mode=ro` read connection also sets SQLite's `SQLITE_LIMIT_LENGTH` to 64 MiB, so a single value above it is refused (`closure_bytes_over_cap`) before it reaches Python. `Repository.resolve_full` re-derives dataset versions, fragments, objects and contracts; the module then checks the rest. Every defect is `SNAPSHOT_CLOSURE_BROKEN` (integrity, non-retryable) with `details.reason`; nothing is repaired.
+
+| Defect | `reason` |
+| --- | --- |
+| `resolve_full` fails (unknown id, missing contract/version/fragment row, identity mismatch); resolved manifest hash differs from the pin | `snapshot_unresolved` (`cause` = data code); `manifest_mismatch` |
+| a table's parent dataset-version row missing; an ancestor via `parent_snapshot_id` missing, cyclic or over 100,000 deep | `dataset_parent_missing`; `parent_missing`, `parent_chain_invalid` |
+| no committed import receipt for the snapshot, or `commit_receipt_ref` naming none of them (`commit_receipt_ref_mismatch`); a `data_receipt_lineage` base missing, uncommitted or cyclic; a coverage row naming an uncommitted receipt | `commit_receipt_missing`; `lineage_receipt_missing`, `lineage_cycle`; `coverage_receipt_missing` |
+| object file absent; not a regular file or wrong size; unreadable; (deep) bytes differ from `content_hash` | `object_missing`; `object_changed`; `object_unreadable`; `object_changed` |
+
+`identity_digest` hashes catalog facts (only the snapshot's own `commit_receipt_ref` receipt counts, so a later same-data import adding another committed receipt does not change it; ancestors, receipts, lineage, coverage and the snapshot's own capture rows, every object id, hash and size): stable across restarts. `stat_digest` adds each object's inode and mtime, so a same-size rewrite after open is caught at seal without `deep`. Raw receipts and normalizations behind `daily_market` revisions are outside the closure: snapshot readers scan fragments only. Cost: one `resolve_full` plus about 250,000 `lstat`s for the full closure; progress to stderr every 30 s.
+
+## Workspace (`overlay.create_workspace` / `open_workspace` -> `ResearchWorkspace`)
+
+| Item | Contract |
+| --- | --- |
+| Layout | `.research_workspace` marker, `workspace.json`, `catalog.sqlite` (`open_catalog`), `store/`, `scratch/`, `output/` (0700). `workspace.json` (`research_workspace.v1.0`): `snapshot_id`, `manifest_hash`, `identity_digest`, resolved production catalog and store paths, `pin_artifact_id`; written last by temp file and `os.replace`. |
+| Read pin | The resolved `SnapshotRef` published into the workspace store as `research_workspace_read_pin.v1.0` and registered in the workspace catalog; `open_workspace` requires it to equal a fresh production resolution byte for byte. |
+| Read path | `ResearchWorkspace.source`: `SnapshotOnlyRepository` over a `mode=ro` + `query_only` production connection and store. An allowlist of read methods (`resolve`, `resolve_full`, `scan`, `table_contract`, `fragment_records`, `get_event`, `get_chain`, `get_price_series`, `get_close`, `scan_population_bound`, `explain_dependencies`), each refusing `SNAPSHOT_NOT_FOUND` for any snapshot id or `SnapshotRef` other than the pinned one; every other public method (head lookups included) refuses `WORKSPACE_REFUSED` `source_method_refused`. `ResearchWorkspace.source_snapshot()` resolves the workspace pin and checks its snapshot identity and manifest. |
+| Read pins | `ResearchWorkspace.record_read_pin(name, document, *, clock)` is the hook PR 3's preflight calls: it publishes canonical JSON (`research_workspace_read_pin.v1.0`: name, pinned snapshot id and manifest hash, document) into the workspace store and registers it in the workspace catalog; never production. A bad name refuses `pin_name_invalid`. |
+| Write path | `conn` (workspace catalog) and `store` only. Derived snapshots go to this local catalog; reading source and derived snapshots through one handle is the consumer's concern. |
+| Seal | `verify_before_seal(deep=False)` re-runs the closure; `identity_digest` and `stat_digest` must equal open time. A same-size rewrite that restores mtime is detected only with `deep=True`; the seal path (PR 3 registration seal) must call `verify_before_seal(deep=True)`, while create/open and preflight use the default. |
+| Execution | `guard.refuse_workspace_execution(*paths)` runs first in `supervisor.Service.__init__` and `executor.launch`; a path at or under a marked directory (literal or resolved) is refused. |
+
+Create order: validate roots, open production read-only, verify the closure, then lay out; failure removes only what this call created. SQLite may create `-wal`/`-shm` beside the production catalog on a read-only open; the main file, store files and head rows are never written.
+
+| Refusal (`WORKSPACE_REFUSED`, validation, non-retryable) | `reason` |
+| --- | --- |
+| root equals, contains or lies under the production store or the catalog's directory; reopened catalog is the production file | `production_root` |
+| path crosses a symlink; parent missing; existing root not empty; production paths missing | `symlink_path`; `parent_missing`; `root_not_empty`; `production_missing` |
+| reopen: marker, `workspace.json`, catalog or a subdirectory missing, a symlink, or the catalog hard-linked | `layout_invalid` |
+| create/reopen: `root`, production paths, `snapshot_id` or `manifest_hash` of the wrong type | `argument_invalid` |
+| create, reopen or seal: any other storage or metadata failure (filesystem, schema admission, malformed documents), with `cause` the exception class | `storage_failure` |
+| reopen: `workspace.json` unreadable or incomplete; `schema_version` differs; recorded production paths differ | `identity_unreadable`; `schema_mismatch`; `production_mismatch` |
+| execution root at or under a workspace | `execution_in_workspace` |
+
+At open or seal the closure may also refuse `closure_changed` (digest differs), `pin_mismatch` or `manifest_mismatch`. Progress goes to stderr (`[workspace]`, `[closure]`); no stdout.
+
+## SIZE workspace scope head
+
+`validate_size_scope_request(workspace, scope)` performs the same local
+workspace-handle and scope checks as `size_scope_repository` without reading
+the pinned source or writing a read pin. `resolve_size_scope_snapshot(workspace,
+scope)` applies those checks before reading the pinned source and uses the
+shared typed storage-error mapping; it also writes no read pin. Admission uses
+this helper so invalid requests fail before source access and snapshot read
+failures retain the scope API's typed refusal.
+
+`size_scope_repository(workspace, scope, *, clock)` adapts the workspace's
+snapshot-only source to the existing research contract that resolves a scope
+head. It publishes a `research_workspace_scope_head.v1.0` read pin in the
+workspace catalog and store, binding the exact scope name to the workspace's
+`snapshot_id` and `manifest_hash`. The binding identity hashes the schema
+version, scope, snapshot id and manifest hash. The returned repository view delegates reads to `workspace.source`;
+`resolve_pinned(scope)` returns `workspace.source_snapshot()` only for the
+bound scope. It never reads a production head or accepts a different snapshot.
+
+This adapter is a workspace-local scope binding and writes no
+`data_snapshot_heads` row (`head.commit_scope_head`, below, does). The
+scope adapter itself copies nothing; `catalog_rows.copy_closure_rows` (below) copies the snapshot's catalog rows, never objects. A standard package or library does
+not provide this repository-specific pin contract; the adapter reuses the
+existing `ResearchWorkspace.record_read_pin`, `SnapshotOnlyRepository` and
+`SnapshotRef` behavior.
+
+| Failure | Outcome |
+|---|---|
+| Scope is empty, malformed, contains an unpaired surrogate or is over 100 characters | `WORKSPACE_REFUSED`, `scope_invalid`; no workspace access or read pin write. |
+| Workspace handle lacks its snapshot reader, source view, pin writer or snapshot identity | `WORKSPACE_REFUSED`, `workspace_invalid`; no read pin write. |
+| A different scope is resolved through the returned view | `WORKSPACE_REFUSED`, `scope_mismatch`. |
+| Captured binding differs from a subsequently resolved workspace snapshot ID | `SNAPSHOT_CLOSURE_BROKEN`, `pin_mismatch`. If `ResearchWorkspace.source_snapshot()` detects a workspace manifest that no longer matches its pin, it propagates `SNAPSHOT_CLOSURE_BROKEN`, `manifest_mismatch`. |
+| The pinned source snapshot is no longer resolvable | Existing `SNAPSHOT_NOT_FOUND` propagates; no fallback. A manifest mismatch propagates as `SNAPSHOT_CLOSURE_BROKEN`, `manifest_mismatch`. |
+| Read-pin publication or catalog storage fails | Existing `OpsError`/`DataError` propagates; unexpected exceptions become `WORKSPACE_REFUSED`, `storage_failure`. A complete unreferenced CAS object may remain. |
+
+R1–R6 follow the workspace failure contract: stable typed refusal; no partial
+result; no repair or retry; stale scope fails closed; production remains
+read-only and the read pin writes only inside the workspace; unknown states
+refuse. Existing workspaces and native catalog heads are unchanged.
+
+## SIZE workspace closure catalog rows (`catalog_rows.copy_closure_rows(workspace) -> dict`)
+
+Copies the pinned snapshot S's catalog rows, including its `parent_snapshot_id` chain, from the read-only source connection into `workspace.conn`. A native scope head needs them: `manifest_hash` covers the parent and `data_snapshots.parent_snapshot_id` is a foreign key. No object file, head, receipt, lineage, coverage, capture or reference input is copied or written. The 7 GB catalog rules out a whole-file copy (`VACUUM INTO`, sqlite backup), hence a bounded row copy.
+
+**Bound.** Exactly these rows; the workspace catalog must hold no other row in these tables:
+
+| Table | Rows |
+|---|---|
+| `data_snapshots` | S and every ancestor through `parent_snapshot_id` |
+| `data_snapshot_tables` | S's rows only |
+| `data_dataset_versions` | the versions S names plus their `parent_dataset_version_id` chains |
+| `data_version_fragments`, `data_fragments`, `data_objects` | those of the versions S names directly (not of ancestors or dataset-version parents) |
+| `data_contracts` | contracts of the copied versions and fragments |
+
+Reads are capped cumulatively, across the insert pass and both verification reads, at 8,000,000 rows and 3 GiB of rendered row text, and the foreign-key check reads at most one violation. For the call, the workspace connection's single-value limit is lowered to 64 MiB (as on the source) and restored afterwards, so an oversized conflicting workspace value refuses `storage_failure` before it is materialised. All inserts are `INSERT OR IGNORE` in one workspace transaction with deferred foreign keys; per table, the workspace row count and an ordered content digest of the closure rows must equal the source's (equal digests make the manifest hash the pinned one; `resolve_full` cannot run inside the transaction). The return value has `snapshot_id`, `manifest_hash`, `chain` (ancestor ids, direct parent first), and per-table `rows`, computed before commit. Progress per table goes to stderr (`[workspace]`).
+
+R1–R6, all `WORKSPACE_REFUSED` unless noted:
+
+| Rule | Behaviour |
+|---|---|
+| R1 typed reason | `workspace_invalid` (workspace handle already in a transaction), `source_row_missing` (the source has no `data_snapshots`, `data_snapshot_tables`, `data_dataset_versions` or `data_contracts` row for S; fragment and object tables may legitimately be empty), `schema_mismatch` (column lists differ), `copy_rows_over_cap`, `copy_bytes_over_cap`, `unexpected_rows` (workspace holds rows beyond the closure), `row_mismatch` (a digest differs, including a conflicting existing row), `foreign_key_violation`, `storage_failure` (other exceptions, with `cause`). An unknown S propagates the existing `SNAPSHOT_NOT_FOUND`. |
+| R2 no partial result | One transaction; any refusal rolls it back, so no row and no head remains. Nothing after commit can refuse. |
+| R3 no repair | No overwrite, delete or retry; a conflicting row refuses. |
+| R4 stale pin | `workspace.source_snapshot()` runs before the read and before commit; a changed pin propagates `SNAPSHOT_CLOSURE_BROKEN`. Production rows are immutable and the source is read inside one read transaction; a conflicting workspace row is caught by the digest comparison (`row_mismatch`). |
+| R5 read-only production | Only the existing read-only source connection is read; all writes go to `workspace.conn`. |
+| R6 unknown state | Malformed handle, unreadable rows or any unexpected exception refuses; nothing is guessed. |
+
+Idempotent: a re-run over a complete copy inserts nothing and returns the same result; a re-run after a failure converges because failure leaves no rows.
+
+## SIZE workspace scope head (`head.commit_scope_head(workspace, scope, *, clock) -> dict`)
+
+Creates the workspace catalog's native `data_snapshot_heads` row for `scope` at the pinned snapshot S, with S's committed import receipt and that receipt's reference inputs, in one commit. Without the inputs a refresh commit that copies its parent receipt's inputs refuses `SNAPSHOT_NOT_READY`. This is distinct from the read-pin binding above (`scope.size_scope_repository`), which is unchanged.
+
+Order: (1) `validate_size_scope_request`; (2) `catalog_rows.copy_closure_rows` (idempotent, its own transaction, so a failure later leaves rows but never a head); (3) the original receipt id is the `commit_receipt_ref` of S's copied `data_snapshots` row, and its reference inputs are read from the read-only source with `reference_catalog.reference_inputs_for_receipt` (an empty set propagates `SNAPSHOT_NOT_READY` before the head commit; the count and rendered size are capped at 10,000 rows and 16 MiB before the read); (4) `workspace.source.resolve_full(S)` supplies contracts, objects, records and manifests, and its snapshot id and manifest hash must equal the pin; (4b) the snapshot's own committed import receipt row (the `commit_receipt_ref` target) is copied unchanged into the workspace in its own transaction, so the pointer resolves there, and a differing existing row refuses `row_mismatch`; (5) the existing `catalog.commit_snapshot` compare-and-swap (`expected_head_snapshot_id=None`, generation 0, `audit_partitions=False`) inserts a new committed receipt, calls `insert_reference_inputs` for that receipt in the same transaction, and sets the head. The receipt, attempt and request ids are derived from the scope, snapshot id and manifest hash, so a repeat call is the existing receipt replay. No object file is copied; no production write.
+
+For the commit the workspace connection's single-value limit is lowered to 64 MiB and restored afterwards, so an oversized existing receipt value refuses `storage_failure` before it is materialised.
+
+No production caller yet, by design: this is the library half of #1614 slice 2b; the workspace bounds publication (slice 2c) is its first caller, and the `size_search` entry point (slice 4) follows.
+
+The return value has `scope`, `snapshot_id`, `manifest_hash`, `receipt_id`, `generation` and `reference_inputs` (count).
+
+R1–R6, `WORKSPACE_REFUSED` unless noted:
+
+| Rule | Behaviour |
+|---|---|
+| R1 typed reason | `scope_invalid`, `workspace_invalid` (from the scope validators), `receipt_missing` (S's copied row names no committed import receipt for S), `row_mismatch` (the workspace holds a different row for that receipt), `reference_inputs_over_cap` (the receipt pins more than 10,000 inputs or 16 MiB of UTF-8 bytes across all fetched columns, checked before they are read), `pin_mismatch` (`resolve_full` differs from the pin), `storage_failure` (other exceptions, with `cause`). `copy_closure_rows` refusals, `SNAPSHOT_NOT_READY` (no reference inputs), `SNAPSHOT_CONFLICT` (scope already has a different head) and `IDENTITY_CONFLICT` propagate unchanged. |
+| R2 no partial result | The receipt, reference inputs and head are one transaction inside `commit_snapshot`; any failure rolls all three back, so a failed call leaves no head. |
+| R3 no repair | An existing different head or receipt is never overwritten or repaired; there is no retry. |
+| R4 stale pin | `workspace.source_snapshot()` runs before the commit; a changed pin propagates `SNAPSHOT_CLOSURE_BROKEN`. A head moved by another writer refuses `SNAPSHOT_CONFLICT`: the compare-and-swap catches it on a fresh commit, and a check run first inside the commit transaction catches it on a receipt replay. |
+| R5 read-only production | Only the source connection is read; all writes go to `workspace.conn`. |
+| R6 unknown state | Malformed handle, missing receipt row or any unexpected exception refuses. |
+
+Idempotent: a repeat call with the same scope returns the same receipt id and writes nothing, even though the original compare-and-swap expectation (no head) no longer holds. A re-run after a failure converges because failure leaves no head.
+
+## SIZE workspace closure object admission (`objects.admit_closure_objects(workspace) -> dict`)
+
+A bounds refresh (slice 2c-ii) opens `ArtifactStore(<store>)` and reads fragment objects through `store.root/<storage_key>` paths, so the objects must exist in the workspace store; a read-through fallback cannot work. This copies, from the read-only production store into `workspace.store`, exactly the objects named by the pinned snapshot S: `data_objects` rows reached through S's `data_snapshot_tables`, `data_version_fragments` and `data_fragments` rows in the workspace catalog (copied earlier by `catalog_rows.copy_closure_rows`). Nothing else is admitted: no raw-receipt, normalization, ancestor-snapshot or other production object, and the workspace catalog must hold no `data_raw_receipts` row. (The live run's 2,972 hand-copied nightly unit-receipt objects were needed only because it copied the production receipt rows.) Each object is keyed `objects/<hh>/<hex>` from its `content_hash`, streamed to a `.part` file in the destination directory while hashing, fsynced and published by a no-clobber hard link (the `.part` is then removed). The row query is unsorted and limited to the object cap plus one. Caps: 1,000,000 objects and 16 GiB of closure bytes, counting objects already present and enforced while the rows are read. Source reads stop one byte past the recorded size. No production caller yet: the bounds publication (2c-ii) is its first. The return value has `snapshot_id`, `objects`, `copied`, `present` and `bytes` (copied). Progress goes to stderr (`[workspace]`) every 30 s.
+
+R1–R6, all `WORKSPACE_REFUSED`:
+
+| Rule | Behaviour |
+|---|---|
+| R1 typed reason | `workspace_invalid` (handle lacks its catalog, stores or snapshot id, or the catalog has no `data_snapshot_tables` row for S: run `copy_closure_rows` first), `receipts_present` (any `data_raw_receipts` row in the workspace catalog), `object_ref_invalid` (`content_hash` not `sha256:` plus 64 lowercase hex, or `storage_key` differs from the key derived from it), `object_missing` (absent from the source store), `object_changed` (the source is not a regular file or its size or sha256 differs from the row; an existing destination of the right size whose sha256 differs), `destination_conflict` (a destination exists that is not a regular file of the recorded size), `objects_over_cap`, `bytes_over_cap`, `storage_failure` (other exceptions, with `cause`). |
+| R2 no partial result | Each object is complete or absent (`.part` removed on failure). A refusal part-way leaves earlier admitted objects: complete, hash-verified, unreferenced by any head, and reused by a re-run. Nothing is returned. |
+| R3 no repair | An existing destination is never overwritten or deleted; it is size-checked and re-hashed, and a wrong one refuses. Publication is a no-clobber hard link, so a destination created after the check refuses `destination_conflict`. Catalog strings are read truncated to 201 characters and anything over 200 refuses `object_ref_invalid`. No retry. |
+| R4 stale pin | `workspace.source_snapshot()` runs before the first copy and after the last; a changed pin propagates `SNAPSHOT_CLOSURE_BROKEN`. |
+| R5 read-only production | The source store is only opened for reading (`O_NOFOLLOW`); every write is inside `workspace.store.root/objects`. |
+| R6 unknown state | A symlink, directory or other non-regular file, a malformed row or any unexpected exception refuses. |
+
+Idempotent: a re-run copies only absent objects and re-verifies the present ones. A `DataError` or `OpsError` from the pin check propagates unchanged; temporary `.part` names are unique per process.

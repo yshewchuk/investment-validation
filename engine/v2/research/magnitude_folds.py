@@ -4,6 +4,7 @@ from __future__ import annotations
 from engine.v2.data import errors
 from engine.v2.foundation import content_hash
 from engine.v2.foundation.experiment_holdouts import _calendar_date
+from engine.v2.models.regression_target import validate_target
 from engine.v2.research.experiment_population import load_population
 from engine.v2.research.magnitude_features import _calendar_input
 from engine.v2.research.magnitude_inputs import forecast_cutoff, magnitude_recipe
@@ -63,7 +64,23 @@ def annual_fold(year, events):
 
 def plan_magnitude_folds(repository, snapshot, *, as_of_month, evaluation_years,
                          training_start, event_ids=None):
-    """Plan annual groups from admitted metadata; never read/qualify actual labels."""
+    """Plan annual groups from admitted metadata; preserve the legacy target identity."""
+    return _plan_folds(repository, snapshot, as_of_month=as_of_month, evaluation_years=evaluation_years,
+        training_start=training_start, event_ids=event_ids, target=magnitude_recipe(),
+        schema="magnitude_temporal_plan.v1")
+
+
+def plan_regression_folds(repository, snapshot, *, target, as_of_month, evaluation_years,
+                          training_start, event_ids=None):
+    """Plan target-bound clocks, not target availability or sealed search admission."""
+    target = validate_target(target)
+    return _plan_folds(repository, snapshot, as_of_month=as_of_month, evaluation_years=evaluation_years,
+        training_start=training_start, event_ids=event_ids, target=target,
+        schema="regression_temporal_plan.v1")
+
+
+def _plan_folds(repository, snapshot, *, target, schema, as_of_month, evaluation_years,
+                training_start, event_ids):
     start, end = _window(evaluation_years, training_start)
     population = load_population(repository, snapshot, as_of_month=as_of_month,
                                  purpose="selection", event_ids=event_ids)
@@ -81,9 +98,9 @@ def plan_magnitude_folds(repository, snapshot, *, as_of_month, evaluation_years,
     records = repository.fragment_records(snapshot, "earnings_events")
     context = {name: selected.iloc[0][name] for name in (
         "snapshot_id", "holdout_as_of_month", "random_membership_version", "rolling_membership_version")}
-    identity = {"schema_version": "magnitude_temporal_plan.v1", **context,
+    identity = {"schema_version": schema, **context,
         "training_start": start, "evaluation_years": list(evaluation_years),
-        "horizons": list(_HORIZONS), "target_recipe": magnitude_recipe(),
+        "horizons": list(_HORIZONS), "target_recipe": target,
         "fold_policy": {"kind": "expanding_event_year", "group_key": "event_id",
             "fit_boundary": "min_year_start_and_evaluation_forecast_ceilings",
             "training_label_availability": "strictly_before_fit_boundary_required_later",

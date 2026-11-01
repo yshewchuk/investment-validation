@@ -72,6 +72,13 @@ class NativeParityParameters:
 
 
 @dataclass(frozen=True)
+class NightlyPreviewInputsParameters:
+    expected_ids: tuple[str, ...]
+    snapshot_id: str
+    input_bindings: dict[str, str] | None = None
+
+
+@dataclass(frozen=True)
 class ExperimentParameters:
     """A supervised smoke-mode experiment run (P6 slice 10). ``spec.json`` —
     the ExperimentSpec document — is resolved into staging via
@@ -361,6 +368,37 @@ def _native_parity_kind() -> JobKind:
         namespaces=frozenset({"shadow", "smoke"}))
 
 
+def _nightly_preview_inputs_problems(job, params):
+    """Validate the server-owned nightly preview input bindings."""
+    expected = {"score.json", "bundle.tar", "finality.json", "model_evidence.json"}
+    bindings = params.input_bindings
+    valid = (
+        isinstance(params.snapshot_id, str)
+        and params.snapshot_id.strip() != ""
+        and isinstance(bindings, dict)
+        and set(bindings) == expected
+        and all(
+            isinstance(binding, str)
+            and "#" in binding
+            and binding.partition("#")[0].startswith("job_")
+            and binding.partition("#")[2] != ""
+            for binding in bindings.values()
+        )
+    )
+    return [] if valid else ["nightly preview inputs require a snapshot and job-bound artifacts"]
+
+
+def _nightly_preview_inputs_kind() -> JobKind:
+    return JobKind(
+        name="nightly_preview_inputs", worker="nightly_preview_inputs",
+        parameters=NightlyPreviewInputsParameters,
+        resource_classes=frozenset({"validation"}), effects=("staged",),
+        retry=RetryPolicy("bounded", 2, (5, 30)),
+        checkpoint_contract="nightly_preview_inputs.v1.0",
+        namespaces=frozenset({"shadow"}),
+        validate=_nightly_preview_inputs_problems)
+
+
 def _retrain_check_kinds():
     from engine.v2.ops.retrain_check import retrain_check_job_kind
     return [retrain_check_job_kind()]
@@ -449,7 +487,9 @@ def _core_kinds():
 
 
 def registry():
-    kinds = [*_core_kinds(), state_stage_job_kind(), _native_gate_kind(),
+    kinds = [*_core_kinds(),
+             _nightly_preview_inputs_kind(),
+             state_stage_job_kind(), _native_gate_kind(),
              _native_gate_kind(evaluation=True), massive_acquisition_kind(),
              massive_history_kind(), massive_snapshot_kind()]
     # P2-5/Task5: the export/publication/backup outbox effects, wired into the

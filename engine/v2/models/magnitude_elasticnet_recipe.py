@@ -2,11 +2,26 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 
 from engine.v2.foundation import canonical_json
 
-__all__ = ["elasticnet_recipe", "validate_elasticnet_recipe"]
+__all__ = ["elasticnet_recipe", "validate_elasticnet_recipe",
+           "regression_elasticnet_recipe", "validate_regression_elasticnet_recipe"]
+
+_ALPHA_BOUNDS = (1e-6, 1000.0)
+_L1_RATIO_BOUNDS = (1e-6, 1.0)
+
+
+def _bounded_number(value, bounds) -> bool:
+    lower, upper = bounds
+    if type(value) not in (int, float) or not lower <= value <= upper:
+        return False
+    try:
+        return math.isfinite(float(value))
+    except (OverflowError, ValueError):
+        return False
 
 
 def elasticnet_recipe(*, columns, feature_dictionary_hash, alpha, l1_ratio) -> dict:
@@ -18,9 +33,10 @@ def elasticnet_recipe(*, columns, feature_dictionary_hash, alpha, l1_ratio) -> d
     if (not isinstance(feature_dictionary_hash, str)
             or not re.fullmatch(r"sha256:[0-9a-f]{64}", feature_dictionary_hash)):
         raise ValueError("ElasticNet requires a canonical feature dictionary hash")
-    if (type(alpha) not in (int, float) or alpha not in (0.01, 0.1, 1.0)
-            or type(l1_ratio) not in (int, float) or l1_ratio not in (0.25, 0.75)):
-        raise ValueError("ElasticNet parameters must belong to the declared six combinations")
+    if (not _bounded_number(alpha, _ALPHA_BOUNDS)
+            or not _bounded_number(l1_ratio, _L1_RATIO_BOUNDS)):
+        raise ValueError(
+            "ElasticNet parameters must be finite numeric values within declared bounds")
     return {
         "schema_version": "magnitude_elasticnet_recipe.v1", "model": "elasticnet",
         "features": list(columns), "feature_dictionary_hash": feature_dictionary_hash,
@@ -54,3 +70,29 @@ def validate_elasticnet_recipe(recipe) -> dict:
     except (KeyError, TypeError, ValueError, OverflowError, RecursionError):
         pass
     raise ValueError("invalid closed ElasticNet recipe")
+
+
+def regression_elasticnet_recipe(*, target_domain, columns, feature_dictionary_hash, alpha, l1_ratio):
+    """Bind signed/nonnegative outcomes while retaining the closed estimator policy."""
+    if type(target_domain) is not str or target_domain not in ("signed", "nonnegative"):
+        raise ValueError("regression requires a signed or nonnegative target domain")
+    recipe = elasticnet_recipe(columns=columns, feature_dictionary_hash=feature_dictionary_hash,
+                              alpha=alpha, l1_ratio=l1_ratio)
+    return {**recipe, "schema_version": "regression_elasticnet_recipe.v1",
+        "target_domain": target_domain,
+        "prediction_projection": "none" if target_domain == "signed" else "clip_zero"}
+
+
+def validate_regression_elasticnet_recipe(recipe):
+    """Return detached canonical policy; domain and projection cannot drift apart."""
+    try:
+        json.dumps(recipe, allow_nan=False)
+        params = recipe["estimator"]["params"]
+        expected = regression_elasticnet_recipe(target_domain=recipe["target_domain"],
+            columns=recipe["features"], feature_dictionary_hash=recipe["feature_dictionary_hash"],
+            alpha=params["alpha"], l1_ratio=params["l1_ratio"])
+        if canonical_json(recipe) == canonical_json(expected):
+            return expected
+    except (KeyError, TypeError, ValueError, OverflowError, RecursionError):
+        pass
+    raise ValueError("invalid closed domain-aware ElasticNet recipe")

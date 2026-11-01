@@ -62,10 +62,11 @@ def panel_data(tmp_path, request):
         partition_logical_hashes=hashes, scope="panel-source", receipt_id="panel-source", attempt_id="panel-source")
     price_records = []
     for ticker in ("SYNTH", "^GSPC"):
+        first = spec.get("price_start") if ticker == "SYNTH" else None  # SYNTH coverage may start late
         rows = [dict(ticker=ticker, date=day, close_adj=100. + i / 10,
             close_raw=200. + i / 10, high_raw=201. + i / 10, retrieved_at="2025-01-01T00:00:00Z",
             deleted=False, source_kind="massive", source_hash="sha256:" + "ab" * 32,
-            capture_id="synthetic-prices") for i, day in enumerate(days)]
+            capture_id="synthetic-prices") for i, day in enumerate(days) if not first or day >= first]
         price_records.append(publish_and_inspect(store, PRICE_HISTORY_CONTRACT,
             contract_ref_for(PRICE_HISTORY_CONTRACT), rows, ticker))
     prices = commit_tables(data.conn, SystemClock(), {"price_history": price_records},
@@ -94,12 +95,15 @@ def test_public_full_table_and_independent_missing_realized_quote(panel_data, mo
     artifact = size_panel.materialize(data.repository, data.panel_source, **data.panel_request)
     result = read(data, artifact)
     assert [r["horizon_sessions"] for r in result["rows"]] == [1, 3, 5]
-    assert artifact["context"]["schema_version"] == "magnitude_panel_context.v3"
+    assert artifact["context"]["schema_version"] == "magnitude_panel_context.v4"
+    assert "price_row_metadata" not in artifact["context"]
+    assert set(artifact["context"]["price_row_digests"]) >= {"^GSPC"}
     plan = artifact["context"]["eligibility_plan"]
     assert plan["plan_id"] == content_hash({k: v for k, v in plan.items() if k != "plan_id"})
     assert plan["policy"]["policy_id"] == data.panel_request["policy"]["policy_id"]
     assert artifact["context"]["target_events"][0]["label_end"] == "2024-06-18"
     assert artifact["context"]["quote_label_windows"] == "independent_pinned_price_dates_not_computed_outcome_capture"
+    assert "quote_precoverage_excluded" not in artifact["context"]  # no pre-coverage events: identity unchanged
     for row in result["rows"]:
         assert row["n_prior"] == 3
         assert row["mean_prior_move"] == 0.
@@ -120,6 +124,17 @@ def test_public_full_table_and_independent_missing_realized_quote(panel_data, mo
     poison_outcomes(monkeypatch, data.repository, data.panel_source, (), all_outcomes=True)
     assert size_panel.materialize(data.repository, data.panel_source, **data.panel_request) == artifact
     assert read(data, artifact) == result
+
+
+@pytest.mark.parametrize("panel_data", [{"price_start": "2023-05-20"}], indirect=True)
+def test_pre_coverage_event_is_recorded_in_the_panel_context(panel_data):
+    data = panel_data
+    artifact = size_panel.materialize(data.repository, data.panel_source, **data.panel_request)
+    excluded = artifact["context"]["quote_precoverage_excluded"]
+    assert excluded["reason"] == "before_price_coverage" and excluded["count"] == 1
+    assert len(excluded["event_ids"]) == 1
+    kept = {g["event_id"] for g in artifact["context"]["quote_eligibility_plan"]["groups"]}
+    assert excluded["event_ids"][0] not in kept
 
 
 def test_versioned_recipe_preserves_existing_hashes_and_dictionary_order():
@@ -258,12 +273,41 @@ def test_stored_rows_detect_identity_or_feature_corruption(panel_data):
                        ("current_quote_status", "present"), ("n_prior", float("inf"))):
         changed = [dict(r) for r in rows]
         changed[0][key] = value
-        with pytest.raises(DataError):
-            store._validate(changed, artifact["context"])
-    with pytest.raises(DataError):
-        store._validate(rows[:-1], artifact["context"])
-    with pytest.raises(DataError):
-        store._validate([*rows, rows[0]], artifact["context"])
+        with pytest.raises(DataError) as caught:
+            list(store._validate(changed, artifact["context"]))
+        assert caught.value.code == "CONTRACT_MISMATCH"
+    with pytest.raises(DataError) as caught:
+        list(store._validate(rows[:-1], artifact["context"]))
+    assert caught.value.code == "CONTRACT_MISMATCH"
+    with pytest.raises(DataError) as caught:
+        list(store._validate([*rows, rows[0]], artifact["context"]))
+    assert caught.value.code == "CONTRACT_MISMATCH"
+    with pytest.raises(DataError) as caught:
+        list(store._validate([rows[1], rows[0], *rows[2:]], artifact["context"]))
+    assert caught.value.code == "CONTRACT_MISMATCH"
+
+
+def test_size_panel_read_revalidates_history_coverage(panel_data, monkeypatch):
+    data = panel_data
+    artifact = size_panel.materialize(data.repository, data.panel_source, **data.panel_request)
+    original_scan = data.repository.scan
+
+    def shortened_history_scan(query, **kwargs):
+        batches = original_scan(query, **kwargs)
+        if kwargs.get("table_name") != "research_eligible_history":
+            return batches
+        batches = list(batches)
+        assert batches
+        batches[-1] = batches[-1].slice(0, batches[-1].num_rows - 1)
+        return iter(batches)
+
+    monkeypatch.setattr(data.repository, "scan", shortened_history_scan)
+    with pytest.raises(DataError) as caught:
+        read(data, artifact)
+    assert caught.value.code == "CONTRACT_MISMATCH"
+    with pytest.raises(DataError) as caught:
+        size_panel.materialize(data.repository, data.panel_source, **data.panel_request)
+    assert caught.value.code == "CONTRACT_MISMATCH"
 
 
 def test_daily_nonfinite_and_negative_quote_refused():
@@ -446,14 +490,14 @@ def test_panel_uses_public_history_admission_before_backend(panel_data, monkeypa
     def refused(*args, **kwargs):
         from engine.v2.data.errors import fail
         raise fail("INPUT_CHANGED", "synthetic imported history drift")
-    monkeypatch.setattr(eligible_history, "read", refused)
+    monkeypatch.setattr(eligible_history, "iter_read", refused)
     with pytest.raises(DataError, match="synthetic imported history drift"):
         size_panel.materialize(data.repository, data.panel_source, **data.panel_request)
 
 
 @pytest.mark.parametrize("columns", [["realized_move_pct"], ["or_implied"], [None]])
 def test_public_projection_refuses_before_history_access(monkeypatch, columns):
-    monkeypatch.setattr(eligible_history, "read", lambda *a, **k: pytest.fail("history was read"))
+    monkeypatch.setattr(eligible_history, "iter_read", lambda *a, **k: pytest.fail("history was read"))
     with pytest.raises(DataError) as refused:
         size_panel.read(None, None, None, columns=columns)
     assert refused.value.code == "HOLDOUT_ACCESS_DENIED"
@@ -641,7 +685,7 @@ def test_public_request_shape_refuses_before_fingerprinting(monkeypatch, route, 
 @pytest.mark.parametrize("route", ["materialize", "read"])
 @pytest.mark.parametrize("key,value", [
     ("unknown", 1), ("event_ids", [None]), ("event_ids", [[]]), ("event_ids", ["x", "x"]),
-    ("event_ids", [""]), ("event_ids", "x"), ("horizons", [True, 3, 5]), ("horizons", [1, 3]),
+    ("event_ids", [""]), ("event_ids", "x"), ("horizons", [True, 3, 5]),
     ("as_of_month", "2024-13"), ("history_start", "2024-02-30"), ("source_start", "2024-1-01"),
     ("limits", {"max_object_bytes": 1}), ("metadata_limits", {"max_object_bytes": 1}),
     ("policy", {"embargo_days": True})])
@@ -655,6 +699,19 @@ def test_public_request_semantics_refuse_before_fingerprinting(monkeypatch, rout
         else:
             size_panel.materialize(None, snapshot, **request)
     assert caught.value.code == "CONTRACT_MISMATCH"
+
+
+@pytest.mark.parametrize("route", ["materialize", "read"])
+def test_public_horizon_subset_is_accepted_to_fingerprinting(monkeypatch, route):
+    snapshot, request = _public_shape_request()
+    request["horizons"] = [1, 3]
+    monkeypatch.setattr(size_panel, "_fingerprint", lambda: {"accepted": True})
+    with pytest.raises(DataError) as caught:
+        if route == "read":
+            size_panel.read(None, snapshot, snapshot, columns=["n_prior"], **request)
+        else:
+            size_panel.materialize(None, snapshot, **request)
+    assert caught.value.code == "INPUT_CHANGED"
 
 
 @pytest.mark.parametrize("route", ["materialize", "read"])
@@ -736,3 +793,100 @@ def test_daily_lineage_matches_native_mixed_ticker_membership(panel_data, monkey
             assert anchor["fragments"] == identities
             assert {item["object_id"] for item in identities} <= seen
         assert row["n_prior"] == 3 and row["mean_prior_or_implied"] == 4.
+
+
+def test_streamed_history_panel_rows_match_materialized_history(panel_data):
+    from engine.v2.research import magnitude_panel_qualified as builder
+
+    data = panel_data
+    history_request = {key: data.panel_request[key] for key in data.request}
+    from engine.v2.research.eligible_history_table import FEATURES as HISTORY_FEATURES
+    columns = list(HISTORY_FEATURES)
+    materialized = eligible_history.read(data.repository, data.panel_source, data.panel_request["history_snapshot"],
+        columns=columns, **history_request)
+    streamed = eligible_history.iter_read(data.repository, data.panel_source, data.panel_request["history_snapshot"],
+        columns=columns, **history_request)
+    producer = size_panel._producer({})
+    materialized_prepared = builder._prepare(data.repository, data.panel_source,
+        producer=producer, history_admitted=materialized, **data.panel_request)
+    streamed_prepared = builder._prepare(data.repository, data.panel_source,
+        producer=producer, history_admitted=streamed, **data.panel_request)
+
+    streamed_rows = list(builder._rows(data.repository, data.panel_source, data.prices, streamed_prepared))
+    materialized_rows = list(builder._rows(data.repository, data.panel_source, data.prices, materialized_prepared))
+    assert len(streamed_rows) == 3
+    assert streamed_rows == materialized_rows
+
+
+class _StubLookup:
+    clear = staticmethod(lambda: None)
+
+    def __call__(self, *args):
+        return {}
+
+
+def test_panel_rows_consume_canonical_history_order_across_prefix_tickers(monkeypatch):
+    from engine.v2.research import magnitude_panel_qualified as builder
+    from engine.v2.research.eligible_history_table import FEATURES as HISTORY_FEATURES
+
+    targets = []
+    rows = []
+    for event_id, ticker in (("M_2024-01-02", "M"), ("MA_2024-01-02", "MA")):
+        forecasts = [{"horizon_sessions": horizon, "cutoff_id": f"{event_id}:{horizon}",
+            "source_session_ceiling": "2024-01-01"} for horizon in (1, 3, 5)]
+        targets.append({"event_id": event_id, "ticker": ticker, "event_date": "2024-01-02",
+            "forecasts": forecasts})
+        for cutoff in forecasts:
+            rows.append({**{name: None for name in HISTORY_FEATURES},
+                "event_id": event_id, "horizon_sessions": cutoff["horizon_sessions"],
+                "history_json": json.dumps({"history": []}), "n_prior": 0,
+                "ema12_prior_abs_move": None, "mean_prior_abs_move": None})
+    rows.sort(key=lambda row: (row["event_id"], row["horizon_sessions"]))
+    context = {"request": {"as_of_month": "2024-01", "source_start": "2023-01-01",
+            "history_start": "2023-01-01", "limits": {"max_source_rows": 20, "max_object_bytes": 100}},
+        "target_events": targets,
+        "confirmed_metadata": {"sequences": [{"ticker": "M"}, {"ticker": "MA"}]},
+        "price_row_digests": {t: {"rows": 1, "digest": content_hash([{"date": "2024-01-01"}])} for t in ("M", "MA", "^GSPC")},
+        "quote_eligibility_plan": {"retained_event_ids": []}, "daily_source_start": "2023-01-01",
+        "context_id": "panel-context"}
+    admitted = {"context": {"context_id": "history-context"}, "rows": rows}
+    prepared = (context, admitted, [], [])
+    monkeypatch.setattr(builder, "load_population", lambda *args, **kwargs: object())
+    monkeypatch.setattr(sources, "signed_moves", lambda *args: {})
+    monkeypatch.setattr(sources, "anchor_lookup", lambda *args, **kwargs: _StubLookup())
+    price_tickers = []
+
+    def prices_for(repository, price_snapshot, ticker, *args):
+        price_tickers.append(ticker)
+        return []
+
+    monkeypatch.setattr(sources, "prices_for", prices_for)
+    monkeypatch.setattr(sources, "runup", lambda selected, prices: {
+        (target["event_id"], cutoff["horizon_sessions"]): ({}, [])
+        for target in selected for cutoff in target["forecasts"]})
+    monkeypatch.setattr(sources, "daily_surface", lambda *args: [])
+    monkeypatch.setattr(sources, "streak", lambda *args: 0.)
+    implied_tickers = []
+
+    def implied_history(sequence, target, *args):
+        implied_tickers.append((sequence["ticker"], target["ticker"]))
+        return None, {}
+
+    monkeypatch.setattr(sources, "implied_history", implied_history)
+    monkeypatch.setattr(builder.daily, "_read_regime_series", lambda *args: [])
+    monkeypatch.setattr(builder.daily, "_spy_blocks", lambda selected, regime: {
+        (target["event_id"], cutoff["horizon_sessions"]): {"values": {}, "source_dates": []}
+        for target in selected for cutoff in target["forecasts"]})
+    monkeypatch.setattr(builder.daily, "_daily", lambda *args: {
+        "quote_status": "missing", "anchor": None,
+        "values": {name: None for name in builder.daily._DAILY}})
+    monkeypatch.setattr(builder, "_block", lambda values, anchors: {})
+    monkeypatch.setattr(sources, "price_dates", lambda *args: [{"date": "2024-01-01"}])
+
+    repository = SimpleNamespace(table_contract=lambda *args: object())
+    emitted = list(builder._rows(repository, object(), object(), prepared))
+    assert [row["event_id"] for row in emitted] == [row["event_id"] for row in rows]
+    assert [row["horizon_sessions"] for row in emitted] == [row["horizon_sessions"] for row in rows]
+    assert price_tickers == ["MA", "M"]
+    assert implied_tickers == [(row["ticker"], row["ticker"]) for row in
+        [target for target in targets for _ in target["forecasts"]][::-1]]

@@ -1,5 +1,6 @@
 """Observed-session read memo: one daily_market pass per pinned repository and snapshot."""
 import gc
+import weakref
 
 import pytest
 
@@ -58,13 +59,14 @@ def test_pinned_repository_reads_daily_market_once_with_identical_output(tmp_pat
 def test_cache_is_owned_weakly_by_the_repository(tmp_path):
     conn, tracked, snapshot = _inputs(tmp_path)
     try:
-        before = len(magnitude_features._OBSERVED_DAYS)
         pinned = Repository(conn, tracked._store, pin_snapshots=True)
+        owner = weakref.ref(pinned)
         magnitude_features._calendar_input(pinned, snapshot)
-        assert len(magnitude_features._OBSERVED_DAYS) == before + 1
+        assert snapshot.snapshot_id in magnitude_features._OBSERVED_DAYS[pinned]
         del pinned
         gc.collect()
-        assert len(magnitude_features._OBSERVED_DAYS) == before
+        assert owner() is None
+        assert owner not in magnitude_features._OBSERVED_DAYS.keyrefs()
     finally:
         conn.close()
 

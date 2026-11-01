@@ -5,9 +5,10 @@ This module is the reporting half of the native shadow-serving seam
 it compares the legacy rows the projection already carries with the native rows
 ``build_native_bundle_rows`` built, and writes the differences down.  It is
 deliberately NOT a second comparator: every per-dimension verdict comes from
-``engine.v2.parity.dimensions.compare_dimension`` -- the same tolerance policy,
-the same ``engine.v2.diagnosis`` machinery and the same field groups the Phase
-4 corpus comparison uses -- so the nightly report can never drift away from the
+``engine.v2.parity.dimensions.compare_dimension`` -- the same shared comparator
+machinery and field groups as the Phase 4 corpus comparison, under this report's
+own tolerance policy while Phase 4 keeps its exact policy -- so the nightly
+report can never drift away from the
 checker it reports on.  That module is where the checker's comparator moved
 (``spec_ns_c`` part c: production never imports ``checks/``, and "never
 duplicate the comparison logic here"); no comparison rule is re-implemented in
@@ -33,7 +34,6 @@ exactly the DAG-shape drift ``nightly.GRAPH`` exists to avoid).
 from __future__ import annotations
 
 import json
-import math
 from collections.abc import Callable, Mapping
 from datetime import date, datetime
 from pathlib import Path
@@ -53,9 +53,11 @@ from engine.v2.parity.dimensions import (
     SIMULATION_FIELDS,
     compare_dimension,
 )
-from engine.v2.parity.tolerance import SCORE_RECORD_V1, TolerancePolicy
+from engine.v2.parity.financial_diagnostics import expected_financial_diagnostics
+from engine.v2.parity.tolerance import Tolerance, TolerancePolicy
 
 __all__ = [
+    "NATIVE_PARITY_TOLERANCE",
     "PARITY_DIMENSIONS",
     "SCHEMA_VERSION",
     "apply_native_refusals",
@@ -93,6 +95,28 @@ _DIMENSION_FIELDS: dict[str, tuple[str, ...]] = {
     "analogs": ANALOG_FIELDS,
 }
 
+#: The native-vs-legacy parity report's own tolerance policy: the two analog
+#: CI rules compare within 10% of the legacy analog CI width when the analog
+#: counts match.  This is report-specific; the Phase 4 exact policy
+#: (``SCORE_RECORD_V1``) remains unchanged.
+NATIVE_PARITY_TOLERANCE = TolerancePolicy(
+    policy_id="score_record.parity.v2",
+    rules=(
+        ("ci_low", Tolerance(
+            relative=0.10,
+            reason="within 10% of legacy analog CI width when n_analogs match",
+            scale_fields=("ci_low", "ci_high"),
+            require_equal_fields=("n_analogs",),
+        )),
+        ("ci_high", Tolerance(
+            relative=0.10,
+            reason="within 10% of legacy analog CI width when n_analogs match",
+            scale_fields=("ci_low", "ci_high"),
+            require_equal_fields=("n_analogs",),
+        )),
+    ),
+)
+
 #: Every one of the checker's five numeric field groups.  ``forecasts`` and
 #: ``financial_diagnostics`` carry the served numbers, so they are compared
 #: too; the ``NEVER_RAN_DIMENSIONS`` groups (``analogs``, ``simulation``,
@@ -113,37 +137,50 @@ def _dimension_fields(dimension: str) -> tuple[str, ...]:
     return fields
 
 
-def _entry_cost_pct(row: Mapping[str, Any]) -> float | None:
-    """``entry_cost / spot * 100`` (checks/phase4_real._expected_financial_diagnostics).
-
-    Both operands are converted and validated first; a missing, non-numeric or
-    non-finite operand, or a ``spot`` that is zero after conversion, gives ``None``:
-    an unavailable value, never an exception. The comparator reports it as a
-    mismatch only when the other side has a value; ``None`` against ``None`` agrees.
-    """
-    try:
-        cost = float(row.get("entry_cost"))
-        spot = float(row.get("spot"))
-    except (TypeError, ValueError, OverflowError):
-        return None
-    if spot == 0.0 or not math.isfinite(cost) or not math.isfinite(spot):
-        return None
-    value = cost / spot * 100.0
-    return value if math.isfinite(value) else None
-
-
 def _dimension_view(row: Mapping[str, Any], dimension: str, *,
                     legacy: bool = False) -> dict[str, Any]:
     """One row's values for one dimension, read by the checker's field names.
 
-    Legacy score rows never carry ``entry_cost_pct`` (#681), so a LEGACY row
-    without the key has it derived from its own ``entry_cost`` and ``spot``. A
-    native row is never derived for: a missing native value stays missing.
+    Legacy diagnostic values absent from the row are derived by the shared
+    Phase 4 financial-diagnostics oracle; explicitly supplied legacy values are
+    preserved; native values are never derived.
     """
     view = {name: row.get(name) for name in _dimension_fields(dimension)}
-    if legacy and "entry_cost_pct" in view and "entry_cost_pct" not in row:
-        view["entry_cost_pct"] = _entry_cost_pct(row)
+    if (legacy and dimension == "financial_diagnostics"
+            and any(name not in row for name in view)):
+        expected = expected_financial_diagnostics(row)
+        for name, value in expected.items():
+            if name not in row:
+                view[name] = value
     return view
+
+
+def _native_has_no_analog_field(native: Mapping[str, Any]) -> bool:
+    """True when the native row carries none of the analog fields (absent or None)."""
+    return all(native.get(name) is None for name in ANALOG_FIELDS)
+
+
+def _legacy_analog_placeholder(legacy: Mapping[str, Any], native: Mapping[str, Any]) -> bool:
+    """Legacy ``n_analogs == 0`` is the dataclass default of a stage that never ran.
+
+    "Never ran" comes from the legacy row itself: a matcher that ran and found no
+    rows also yields ``n_analogs == 0`` with no CI, but ``engine/score.py`` then
+    flags ``THIN_ANALOGS``.  So the placeholder needs a ``flags`` list without that
+    flag, no legacy CI, and no native analog field.  A real 0-analog result or any
+    native value keeps the ``0`` comparable.
+    """
+    flags = legacy.get("flags")
+    return (legacy.get("n_analogs") == 0
+            and isinstance(flags, list) and "THIN_ANALOGS" not in flags
+            and legacy.get("ci_low") is None and legacy.get("ci_high") is None
+            and _native_has_no_analog_field(native))
+
+
+def _is_analog_no_pool(legacy: Mapping[str, Any], native: Mapping[str, Any]) -> bool:
+    """Legacy ran analogs (``n_analogs > 0``) but native has no analog field at all."""
+    n = legacy.get("n_analogs")
+    return isinstance(n, (int, float)) and not isinstance(n, bool) and n > 0 \
+        and _native_has_no_analog_field(native)
 
 
 def _row_mismatches(key: str, legacy: Mapping[str, Any], native: Mapping[str, Any],
@@ -151,9 +188,13 @@ def _row_mismatches(key: str, legacy: Mapping[str, Any], native: Mapping[str, An
                     ) -> list[dict[str, Any]]:
     """Every dimension of one shared key that does not agree, with its receipt."""
     mismatches = []
+    placeholder = _legacy_analog_placeholder(legacy, native)
     for dimension in dimensions:
+        legacy_view = _dimension_view(legacy, dimension, legacy=True)
+        if dimension == "analogs" and placeholder:
+            legacy_view["n_analogs"] = None
         result = compare_dimension(
-            _dimension_view(legacy, dimension, legacy=True), _dimension_view(native, dimension),
+            legacy_view, _dimension_view(native, dimension),
             dimension, tolerance_policy=tolerance_policy)
         if not result["agree"]:
             mismatches.append({
@@ -320,7 +361,7 @@ def compare_native_vs_legacy(
     native_rows: dict[str, dict],
     dimensions: tuple[str, ...],
     *,
-    tolerance_policy: TolerancePolicy = SCORE_RECORD_V1,
+    tolerance_policy: TolerancePolicy = NATIVE_PARITY_TOLERANCE,
 ) -> dict:
     """Classify every row key against the checker's per-dimension comparator.
 
@@ -334,14 +375,15 @@ def compare_native_vs_legacy(
 
     ``tolerance_policy`` is the ONE config policy every numeric dimension's
     comparison reads (never a per-dimension or per-field override threaded
-    in some other way): it defaults to ``engine.v2.parity.tolerance.SCORE_RECORD_V1``,
-    which declares zero rules, so the default is exact for every field and
-    this parameter's addition changes no existing caller's behavior. A
-    caller that has a user-approved, per-field ``TolerancePolicy`` for the
-    native-vs-legacy comparison specifically (never for the Phase 4
-    checker's own tier-0-style exact check, which does not pass this
-    argument) supplies it here; this module invents no field's tolerance
-    value itself.
+    in some other way): it defaults to this report-specific policy,
+    :data:`NATIVE_PARITY_TOLERANCE`, which carries the two analog CI rules
+    (``ci_low``/``ci_high`` within 10% of the legacy analog CI width when
+    ``n_analogs`` match). The Phase 4 exact policy,
+    ``engine.v2.parity.tolerance.SCORE_RECORD_V1``, remains unchanged for
+    the checker's own tier-0-style exact check, which does not pass this
+    argument. A caller that has a user-approved, per-field
+    ``TolerancePolicy`` for the native-vs-legacy comparison specifically
+    supplies it here; this module invents no field's tolerance value itself.
 
     G2: this function classifies and returns; it has no path that writes a
     native value into a legacy row or the reverse, and a mismatch never raises.
@@ -350,6 +392,7 @@ def compare_native_vs_legacy(
     compared: list[str] = []
     only_legacy: list[str] = []
     only_native: list[str] = []
+    analog_no_pool: list[str] = []
     mismatches: list[dict[str, Any]] = []
     for key in sorted(set(legacy_rows) | set(native_rows)):
         legacy = legacy_rows.get(key)
@@ -360,6 +403,8 @@ def compare_native_vs_legacy(
             only_legacy.append(key)
         else:
             compared.append(key)
+            if _is_analog_no_pool(legacy, native):
+                analog_no_pool.append(key)
             mismatches.extend(_row_mismatches(key, legacy, native, dimensions, tolerance_policy))
     if not compared:
         raise fail("VALIDATION_FAILED", "native parity report shares no row key",
@@ -370,6 +415,7 @@ def compare_native_vs_legacy(
         "compared": compared,
         "only_legacy": only_legacy,
         "only_native": only_native,
+        "analog_no_pool": analog_no_pool,
         "mismatches": mismatches,
     }
 
@@ -399,6 +445,7 @@ def _empty_native_report(
         "compared": [],
         "only_legacy": sorted(legacy_rows),
         "only_native": sorted(native_rows),
+        "analog_no_pool": [],
         "mismatches": [],
     }
 
@@ -632,11 +679,11 @@ def run_native_parity_worker(parameters: Mapping[str, Any], root: Path, *,
                 or not native_refusals and unkeyable_refusals)))
     if refusal_explains_absence:
         report = _empty_native_report(
-            legacy_rows, native_rows, PARITY_DIMENSIONS, SCORE_RECORD_V1)
+            legacy_rows, native_rows, PARITY_DIMENSIONS, NATIVE_PARITY_TOLERANCE)
     else:
         report = compare_native_vs_legacy(
             legacy_rows, native_rows, PARITY_DIMENSIONS,
-            tolerance_policy=SCORE_RECORD_V1)
+            tolerance_policy=NATIVE_PARITY_TOLERANCE)
     report = apply_native_refusals(report, native_refusals, unkeyable_refusals)
     report = _stamp_report_identity(report, as_of=as_of, clock=clock)
     (root / "native_parity_report.json").write_text(
@@ -658,7 +705,7 @@ def native_parity_handler(
     native_rows: dict[str, dict],
     report_path: Path | str,
     dimensions: tuple[str, ...] = PARITY_DIMENSIONS,
-    tolerance_policy: TolerancePolicy = SCORE_RECORD_V1,
+    tolerance_policy: TolerancePolicy = NATIVE_PARITY_TOLERANCE,
     clock: Clock = SystemClock(),
 ) -> Callable[[dict], dict]:
     """Build the ``nightly.GRAPH`` handler for the ``native_parity`` stage.
@@ -670,8 +717,9 @@ def native_parity_handler(
     ``write`` failures propagate: ``nightly._run_stage`` already degrades an
     OPTIONAL stage rather than blocking the board.
 
-    ``tolerance_policy`` defaults to ``SCORE_RECORD_V1`` (exact for every
-    field, unchanged from before this parameter existed) and is passed
+    ``tolerance_policy`` defaults to this report-specific policy,
+    :data:`NATIVE_PARITY_TOLERANCE` (the two analog CI rules; the Phase 4
+    exact policy ``SCORE_RECORD_V1`` remains unchanged), and is passed
     straight through to :func:`compare_native_vs_legacy` -- see that
     function's docstring for what a caller may plug in here.
 

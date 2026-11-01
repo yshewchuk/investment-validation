@@ -104,6 +104,17 @@ LIST_MEMBERS = (
 )
 
 
+def list_members(preflight_schema):
+    """Select one closed receipt layout; legacy magnitude sections remain byte-identical."""
+    if preflight_schema == "research_iv_crush_preflight.v1":
+        return (LIST_MEMBERS[0], {**LIST_MEMBERS[1], "rows": ("event_id", "crush_pct_iv30")},
+            *LIST_MEMBERS[2:4], *({"section": "training_inputs." + name, "key": None}
+                for name in ("consumed_inputs", "excluded_future_events", "holdout_exclusions")))
+    if preflight_schema not in (None, "research_magnitude_preflight.v1"):
+        raise fail(_CONFLICT, "search cohort preflight schema is unsupported")
+    return LIST_MEMBERS
+
+
 def _artifact_failure(error, action, *, unsafe_is_conflict=True):
     message = "search cohort shard could not be " + action
     if isinstance(error, OSError):
@@ -321,15 +332,27 @@ def _verified_keys(rows, key, first, last):
     return keys
 
 
-def iter_section(store, section, entry, key):
-    """Stream one section's verified rows in order, holding one shard at a time."""
+def iter_section(store, section, entry, key, *, verified_rows=None):
+    """Stream one section's verified rows in order, holding one shard at a time.
+
+    ``verified_rows`` is keyed by the complete artifact reference and section,
+    so a cached shard cannot be reused across a section or a different artifact
+    identity (schema, storage key, content hash or byte size).
+    """
     _, bindings = _bindings(entry)
     for ref, expected, first, last in bindings:
-        try:
-            payload = store.read_verified(ref)
-        except (ArtifactError, OSError) as error:
-            raise _artifact_failure(error, "read", unsafe_is_conflict=False) from None
-        rows = _payload_rows(payload, section, expected)
+        cache_key = (section, ref.schema_ref, ref.storage_key, ref.content_hash, ref.byte_size)
+        if verified_rows is not None and cache_key in verified_rows:
+            rows = verified_rows[cache_key]
+            if not isinstance(rows, list) or len(rows) != expected:
+                raise fail(_CONFLICT, "search cohort shard binding is invalid")
+            rows = untag_nonfinite(rows)
+        else:
+            try:
+                payload = store.read_verified(ref)
+            except (ArtifactError, OSError) as error:
+                raise _artifact_failure(error, "read", unsafe_is_conflict=False) from None
+            rows = _payload_rows(payload, section, expected)
         _verified_keys(rows, key, first, last)
         yield from rows
 

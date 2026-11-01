@@ -21,6 +21,7 @@ from engine.v2.models.payoff_artifact import (
 from engine.v2.models.recalibration_artifact import serialize_recalibration_artifact
 from engine.v2.models.training.recalibration import build_recalibration_map_artifact
 from engine.v2.ops.errors import OpsError
+from engine.v2.ops.pool_refresh import _training_plans
 from engine.v2.ops.state_stage import (
     StateStageParameters,
     run_state_stage_worker,
@@ -36,6 +37,8 @@ from tests.v2.ops.state_stage_support import (
     params as _params,
     spec as _spec,
     stage_prior as _stage_prior,
+    state_bytes,
+    trailing_payload,
 )
 
 _SNAPSHOT = "a" * 64
@@ -61,7 +64,8 @@ def _bootstrap_states(cutoff="2026-10-01"):
 
 def _expected_bootstrap_objects(states):
     """Member ids and object hashes the mocked bootstrap payloads must yield."""
-    hashes = {phase5_release.sha256_bytes(f"state-{name}".encode()) for name in states}
+    hashes = {phase5_release.sha256_bytes(state_bytes(member, object_name, file_name))
+              for file_name, (member, object_name) in states.items()}
     hashes.add(phase5_release.sha256_bytes(b"table"))
     members = {member for member, _name in states.values()}
     members.add("admissible_table:dyn_sv")
@@ -120,11 +124,11 @@ def _mock_bootstrap_inputs(monkeypatch, tmp_path, states=None, prior_names=None,
     states = _bootstrap_states() if states is None else states
     staging = tmp_path / "staging"
     staging.mkdir(exist_ok=True)
-    for name in states:
-        (staging / name).write_bytes(f"state-{name}".encode())
+    for name, (member, object_name) in states.items():
+        (staging / name).write_bytes(state_bytes(member, object_name, name))
 
     def fake_classify(root, names):
-        return ([ (Path(root) / name, f"state-{name}".encode()) for name in names ], [])
+        return ([ (Path(root) / name, (Path(root) / name).read_bytes()) for name in names ], [])
 
     def fake_frozen(paths, max_bytes=None):
         from tools import phase5_state_stage_job
@@ -413,15 +417,58 @@ def test_pool_object_cutoff_mismatch_refuses(tmp_path, monkeypatch, member):
     assert err.value.problem.details == {"members": [member]}
 
 
-def test_trailing_month_after_cutoff_refuses(tmp_path, monkeypatch):
+def test_trailing_next_month_is_admitted(tmp_path, monkeypatch):
     states = _bootstrap_states()
     states["trailing_pnl_cutoff.json"] = ("trailing_pnl_cutoff", "hist|2026-11")
+    parameters, staging = _mock_bootstrap_inputs(monkeypatch, tmp_path, states=states)
+    phase5_release.catalog_path(tmp_path, "prior1").unlink()
+    result = run_state_stage_worker(parameters, staging)
+    assert result["completed_ids"] == ["phase5_state_stage"]
+    assert ("trailing_pnl_cutoff", "hist|2026-11") in _catalog_pairs(tmp_path)
+
+
+def test_trailing_month_after_cutoff_refuses(tmp_path, monkeypatch):
+    states = _bootstrap_states()
+    states["trailing_pnl_cutoff.json"] = ("trailing_pnl_cutoff", "hist|2026-12")
     parameters, staging = _mock_bootstrap_inputs(monkeypatch, tmp_path, states=states)
     phase5_release.catalog_path(tmp_path, "prior1").unlink()
     with pytest.raises(OpsError) as err:
         run_state_stage_worker(parameters, staging)
     assert str(err.value) == "VALIDATION_FAILED: a trailing object month starts after cutoff"
-    assert err.value.problem.details == {"months": ["hist|2026-11"]}
+    assert err.value.problem.details == {"months": ["hist|2026-12"]}
+
+
+def test_trailing_lineage_mismatch_refuses(tmp_path, monkeypatch):
+    states = _bootstrap_states()
+    states["trailing_pnl_cutoff.json"] = ("trailing_pnl_cutoff", "hist|2026-10")
+    parameters, staging = _mock_bootstrap_inputs(monkeypatch, tmp_path, states=states)
+    phase5_release.catalog_path(tmp_path, "prior1").unlink()
+    document = json.loads(trailing_payload("hist|2026-10"))
+    document["lineage"]["data"][0]["end_exclusive"] = "2026-09-01"
+    (staging / "trailing_pnl_cutoff.json").write_bytes(json.dumps(document).encode())
+    with pytest.raises(OpsError) as err:
+        run_state_stage_worker(parameters, staging)
+    assert str(err.value) == (
+        "VALIDATION_FAILED: a trailing object lineage does not match its month")
+
+
+def test_trailing_non_json_refuses(tmp_path, monkeypatch):
+    states = _bootstrap_states()
+    states["trailing_pnl_cutoff.json"] = ("trailing_pnl_cutoff", "hist|2026-10")
+    parameters, staging = _mock_bootstrap_inputs(monkeypatch, tmp_path, states=states)
+    phase5_release.catalog_path(tmp_path, "prior1").unlink()
+    (staging / "trailing_pnl_cutoff.json").write_bytes(b"not json")
+    with pytest.raises(OpsError) as err:
+        run_state_stage_worker(parameters, staging)
+    assert str(err.value) == (
+        "VALIDATION_FAILED: a trailing object lineage does not match its month")
+
+
+def test_carry_trailing_plan_requests_session_and_next_month():
+    assert _training_plans("2026-10-27", "manifest", ["train-trailing"])[
+        "train-trailing"]["parameters"]["cutoffs"] == ("2026-10-27", "2026-11-01")
+    assert _training_plans("2026-12-29", "manifest", ["train-trailing"])[
+        "train-trailing"]["parameters"]["cutoffs"] == ("2026-12-29", "2027-01-01")
 
 
 def test_damaged_prior_still_refuses(tmp_path, monkeypatch):
@@ -1067,7 +1114,7 @@ def test_artifact_payload_bytes_match_bound_file(tmp_path, monkeypatch):
     def classify(root, names):
         frozen, artifacts = [], []
         for name in names:
-            item = (Path(root) / name, f"state-{name}".encode())
+            item = (Path(root) / name, (Path(root) / name).read_bytes())
             (artifacts if name == artifact_name else frozen).append(item)
         return frozen, artifacts
 

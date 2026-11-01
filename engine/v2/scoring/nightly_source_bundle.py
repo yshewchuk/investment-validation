@@ -619,8 +619,9 @@ def _staged_context(calendar_row: Mapping[str, Any], calendar_features: Mapping[
     ``chain_spot`` joins the context only when the staged quote rows carry it
     (``_staged_chain_spot`` decides presence, consistency and the refusal); the
     rows are Mappings by then, because ``_staged_observed_at`` ran first in
-    ``assemble_nightly_source_bundle``. Nothing here reads the value: geometry
-    and strike selection keep using ``calendar_row["spot"]``, the close.
+    ``assemble_nightly_source_bundle``. This assembler only carries the value;
+    STR-THRU/STR-RUNUP selection may use it as the strike anchor, while
+    ``Geometry.spot`` remains ``calendar_row["spot"]``, the close.
     """
     context = {k: calendar_row[k] for k in sorted(_CALENDAR_REQUIRED_FIELDS)}
     context.update(calendar_features)

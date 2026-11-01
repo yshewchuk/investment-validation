@@ -10,6 +10,7 @@ from engine.v2.foundation import canonical_json
 from engine.v2.ops.errors import OpsError, make_problem
 from engine.v2.research import magnitude_panel_table as v1
 from engine.v2.research import magnitude_panel_v2_table as v2
+from experiments import magnitude_search_request_leads as leads
 from experiments import magnitude_search_request_versions as versions
 from tests.v2.research import test_magnitude_search_request as legacy
 from tests.v2.research.magnitude_panel_policy_support import forbid_policy_io
@@ -26,6 +27,20 @@ def _hash(value):
 
 def _request():
     return {**V1_REQUEST(), "feature_dictionary_hash": V2_HASH}
+
+
+@pytest.mark.parametrize("bad_horizons", [[], None, [1, 1], [2], [True], [1.0], [3, 1, 5]])
+def test_v2_lead_compiler_refuses_invalid_horizons(bad_horizons):
+    with pytest.raises(OpsError) as actual:
+        leads.compile_request(_request(), horizons=bad_horizons)
+    assert actual.value.problem.code == "INVALID_EXPERIMENT_SPEC"
+    assert actual.value.problem.message == "stage-2 horizons must be a nonempty unique subset of integer leads 1, 3, 5"
+
+
+@pytest.mark.parametrize("horizons,expected", [([1], [1]), ([1, 5], [5, 1]), ((5, 3, 1), [5, 3, 1])])
+def test_v2_lead_compiler_accepts_valid_horizons_in_order(horizons, expected):
+    actual = versions.compile_request(_request(), horizons=horizons)
+    assert actual["horizons"] == expected
 
 
 def _parity(document):
@@ -90,7 +105,24 @@ class TestV2Refusals:
     test_cycles = staticmethod(legacy.test_container_subclasses_and_cycles_refuse)
 
 
-def test_pinned_complete_v1_output_and_unchanged_source_bytes(monkeypatch):
+@pytest.mark.parametrize("schema", ["regression_search_request.v1", "magnitude_search_request.v1"])
+@pytest.mark.parametrize("horizons", [(1,), None])
+def test_legacy_schemas_refuse_external_horizon_selector(schema, horizons):
+    with pytest.raises(OpsError) as actual:
+        versions.compile_request({"schema_version": schema}, horizons=horizons)
+    assert actual.value.problem.code == "INVALID_EXPERIMENT_SPEC"
+    assert actual.value.problem.message == "stage-2 legacy requests do not accept a horizon selector"
+
+
+@pytest.mark.parametrize("schema", ["regression_search_request.v1", "magnitude_search_request.v1"])
+@pytest.mark.parametrize("horizons", [(5, 3, 1), [5, 3, 1]])
+def test_legacy_schemas_preserve_default_dispatch(schema, horizons, monkeypatch):
+    sentinel = object()
+    monkeypatch.setattr(versions, "compile_v1_request", lambda request: sentinel)
+    assert versions.compile_request({"schema_version": schema}, horizons=horizons) is sentinel
+
+
+def test_pinned_complete_v1_output_and_current_source_bytes(monkeypatch):
     def no_whole_file_read(*_, **__):
         pytest.fail("source digest must not materialize a whole file")
     monkeypatch.setattr(Path, "read_bytes", no_whole_file_read)
@@ -99,7 +131,7 @@ def test_pinned_complete_v1_output_and_unchanged_source_bytes(monkeypatch):
     assert _hash(versions.compile_request(V1_REQUEST())) == expected
     root = Path(__file__).resolve().parents[3]
     for path, digest in (
-        ("experiments/magnitude_search_request.py", "ad845dea949b3de4200f005695c09ecf4a9b0bc84b5328fce106081556029117"),
+        ("experiments/magnitude_search_request.py", "a04523ef9c53b3978b5306efd469031e148150da279b4a9420f46b12b60dd4be"),
         ("engine/v2/research/magnitude_panel_table.py", "687d4d5341dd4e43879aee9d122507b8289150d7e73f1ccc527299182fe5aad4"),
         ("engine/v2/research/magnitude_panel_v2_table.py", "c753255acba0af3872f6a7bf1cbbdc59eb3b1097a2a06d89f6517d4c34111ce4")):
         with (root / path).open("rb") as source:

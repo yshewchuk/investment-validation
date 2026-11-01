@@ -144,7 +144,6 @@ def test_public_primitives_once_per_call_and_ticker(monkeypatch):
 @pytest.mark.parametrize("reverse", [False, True])
 @pytest.mark.parametrize("change", [
     {"event_id": "opaque/0"}, {"event_date": pd.Timestamp("2001-01-01")},
-    {"event_cluster_id": "cluster"}, {"date_conflict": True},
     {"event_id": "opaque/0", "ticker": "B"},
 ])
 def test_conflicts_include_unconfirmed_siblings_in_either_order(change, reverse):
@@ -162,6 +161,56 @@ def test_exact_repeats_refuse_and_cross_ticker_clusters_are_independent():
     events = frame().iloc[:2].copy()
     events["ticker"], events["event_cluster_id"] = ["A", "B"], ["opaque", "opaque"]
     assert [s["confirmed_rows"] for s in reducer.reduce_sequences(events, tickers=["B", "A"])] == [1, 1]
+
+
+def test_date_conflict_row_is_unconfirmed_and_counted():
+    events = frame().iloc[:2].copy()
+    events.loc[1, "date_conflict"] = True
+    sequences, counts = reducer.reduce_with_counts(events, tickers=["A"])
+    assert sequences == reducer.reduce_sequences(events, tickers=["A"])
+    assert sequences[0]["selected_rows"] == 2 and sequences[0]["confirmed_rows"] == 1
+    assert [event["event_id"] for event in sequences[0]["events"]] == ["opaque/0"]
+    assert counts == {"unconfirmed_date_conflict": 1, "unconfirmed_cluster_ambiguous": 0}
+
+
+def test_shared_cluster_rows_are_unconfirmed_and_counted():
+    events = frame().iloc[:6].copy()
+    events.loc[1:2, "event_cluster_id"] = "shared"
+    sequences, counts = reducer.reduce_with_counts(events, tickers=["A"])
+    assert sequences[0]["selected_rows"] == 6 and sequences[0]["confirmed_rows"] == 4
+    assert [event["event_id"] for event in sequences[0]["events"]] == [
+        "opaque/0", "opaque/3", "opaque/4", "opaque/5"]
+    assert [event["ordinal"] for event in sequences[0]["events"]] == list(range(4))
+    assert counts == {"unconfirmed_date_conflict": 0, "unconfirmed_cluster_ambiguous": 2}
+
+
+def test_shared_cluster_keeps_other_reasons_and_counts_unconfirmed_siblings():
+    events = frame().iloc[:6].copy()
+    events.loc[1:3, "event_cluster_id"] = "shared"
+    events.loc[1, "src_orats"] = False
+    events.loc[2, "date_conflict"] = True
+    sequences, counts = reducer.reduce_with_counts(events, tickers=["A"])
+    assert counts == {"unconfirmed_date_conflict": 1, "unconfirmed_cluster_ambiguous": 1}
+    assert [event["event_id"] for event in sequences[0]["events"]] == [
+        "opaque/0", "opaque/4", "opaque/5"]
+
+
+def test_duplicate_identity_or_day_still_refuses():
+    duplicate = frame().iloc[:2].copy()
+    duplicate.loc[1, "event_id"] = duplicate.loc[0, "event_id"]
+    refused(duplicate, "IDENTITY_CONFLICT")
+    duplicate = frame().iloc[:2].copy()
+    duplicate.loc[1, "event_date"] = duplicate.loc[0, "event_date"]
+    refused(duplicate, "IDENTITY_CONFLICT")
+
+
+def test_already_unconfirmed_date_conflict_row_is_not_counted():
+    events = frame().iloc[:2].copy()
+    events.loc[1, "src_orats"] = False
+    events.loc[1, "date_conflict"] = True
+    sequences, counts = reducer.reduce_with_counts(events, tickers=["A"])
+    assert sequences[0]["selected_rows"] == 2 and sequences[0]["confirmed_rows"] == 1
+    assert counts == {"unconfirmed_date_conflict": 0, "unconfirmed_cluster_ambiguous": 0}
 
 
 @pytest.mark.parametrize("tickers", [[], (), ("A",), "A", {"A"}, iter(["A"]), ["A", "A"],

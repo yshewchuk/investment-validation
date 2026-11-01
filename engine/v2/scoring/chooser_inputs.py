@@ -124,7 +124,8 @@ def frozen_chooser_block(*, strategy: str, recipe: Mapping[str, Any],
                          fold_pools: Mapping[str, Any],
                          analog_pool: ChooserAnalogPoolArtifact | None,
                          admissible_table: AdmissibleDepthTable | None,
-                         inference: Any, release: Any) -> dict[str, Any]:
+                         inference: Any, release: Any,
+                         chooser_fold_reference: Any | None = None) -> dict[str, Any]:
     """:func:`chooser_block` over declared parts instead of a whole bundle.
 
     A saved Phase 4 trace carries the chooser as a JSON declaration (recipe,
@@ -135,5 +136,6 @@ def frozen_chooser_block(*, strategy: str, recipe: Mapping[str, Any],
         chooser_recipe=dict(recipe), chooser_fold_pools=dict(fold_pools),
         chooser_analog_pool=analog_pool, chooser_admissible_table=admissible_table,
         frozen_inference=inference, model_release=release,
+        chooser_fold_reference=chooser_fold_reference,
     )
     return chooser_block(parts, strategy)  # type: ignore[arg-type]

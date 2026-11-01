@@ -1,4 +1,4 @@
-"""Pinned Tier-1 history manifest, write-root bound-source generation and reconstructed provenance."""
+"""Pinned Tier-1 history manifest, write-root bound-source generation, reconstructed provenance and workspace admission."""
 import hashlib
 import gzip
 import json
@@ -14,16 +14,26 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from engine.data.fetch import CachedEntry
+from engine.v2.contracts import DataQuery, KeyPredicate
 from engine.v2.data.repository import Repository
 from engine.v2.data.computed_move_bounds import TABLE
+from engine.v2.data.events import TABLE_NAME as EVENTS_TABLE
 from engine.v2.foundation import ArtifactStore, SystemClock, canonical_json, content_hash
 from engine.v2.ops.bootstrap import open_catalog
+from engine.v2.ops.catalog import register_artifact, transaction
 from engine.v2.ops.errors import fail
+from engine.v2.ops.workspace.scope import resolve_size_scope_snapshot, size_scope_repository
 
 MANIFEST_VERSION = "tier1_history_manifest.v1"
+EXCLUSION_MANIFEST_VERSION = "tier1_history_manifest.v2"
 PROVENANCE_VERSION = "size_prep_provenance.v1"
+ADMISSION_VERSION = "size_prep_manifest_admission.v1"
 _ENTRY_KEYS = {"ticker", "key", "fetched_at", "body_sha256"}
+_MANIFEST_KEYS = {"schema_version", "session_ceiling", "entries", "manifest_id"}
+_EXCLUDED_KEY = "excluded_tickers"
 MAX_BODY_BYTES = 64 * 1024 * 1024
+MAX_LOGGED_NAMES = 20
+MAX_EVENT_OBJECT_BYTES = 64 * 1024 * 1024
 
 
 def _read_regular(path, limit, *, gz=False):
@@ -119,9 +129,19 @@ def _identity(manifest):
     return content_hash({k: v for k, v in manifest.items() if k != "manifest_id"})
 
 
-def build_manifest(source_root, *, session_ceiling, tickers):
-    """Pin the entry the existing Tier-1 rule would pick for each explicit ticker."""
+def build_manifest(source_root, *, session_ceiling, tickers, allow_exclusions=False):
+    """Pin the entry the existing Tier-1 rule would pick for each explicit ticker.
+
+    ``allow_exclusions`` (workspace-mode admission, slice 2a of #1614): instead of
+    refusing, tickers with no eligible Tier-1 entry are retained in a canonical
+    ``excluded_tickers`` list and the manifest is published as
+    ``tier1_history_manifest.v2``; admission still refuses if an excluded ticker
+    has any event. ``allow_exclusions=False`` keeps ``tier1_history_manifest.v1``
+    byte-for-byte.
+    """
     _day(session_ceiling)
+    if type(allow_exclusions) is not bool:
+        raise fail("INVALID_REQUEST", "allow_exclusions must be a boolean")
     if (type(tickers) is not list or not tickers
             or any(type(t) is not str or not t or t != t.strip() for t in tickers)
             or len(set(tickers)) != len(tickers)):
@@ -136,26 +156,51 @@ def build_manifest(source_root, *, session_ceiling, tickers):
         order = (str(entry.meta.get("fetched_at") or ""), str(entry.path))
         if name and (str(name) not in cache or order > cache[str(name)][0]):
             cache[str(name)] = (order, entry)
-    entries = []
+    entries, excluded = [], []
     for ticker in sorted(tickers):
         entry = cache.get(ticker, (None, None))[1]
         if entry is None:
-            raise fail("SOURCE_NOT_FOUND", "a requested ticker has no eligible Tier-1 history entry")
+            if not allow_exclusions:
+                raise fail("SOURCE_NOT_FOUND", "a requested ticker has no eligible Tier-1 history entry")
+            excluded.append(ticker)
+            continue
         fetched_at = entry.meta.get("fetched_at")
         _retrieved(fetched_at)
         entries.append({"ticker": ticker, "key": entry.key, "fetched_at": fetched_at,
                         "body_sha256": hashlib.sha256(_body(entry)).hexdigest()})
-    _log("manifest end entries=" + str(len(entries)), started)
-    manifest = {"schema_version": MANIFEST_VERSION, "session_ceiling": session_ceiling, "entries": entries}
+    _log("manifest end entries=" + str(len(entries)) + " excluded=" + str(len(excluded)), started)
+    version = EXCLUSION_MANIFEST_VERSION if allow_exclusions else MANIFEST_VERSION
+    manifest = {"schema_version": version, "session_ceiling": session_ceiling, "entries": entries}
+    if allow_exclusions:
+        manifest[_EXCLUDED_KEY] = sorted(set(excluded))
     return {**manifest, "manifest_id": _identity(manifest)}
 
 
 def validate_manifest(manifest):
-    """Closed shape, canonical ordering and identity; no source access."""
-    if (type(manifest) is not dict or set(manifest) != {"schema_version", "session_ceiling", "entries", "manifest_id"}
-            or manifest["schema_version"] != MANIFEST_VERSION or type(manifest["entries"]) is not list
-            or not manifest["entries"]):
+    """Closed shape, canonical ordering and identity; no source access.
+
+    The shape and version are one exact pair: v1 carries no ``excluded_tickers``,
+    v2 requires the canonical list, and entries plus exclusions are never both empty.
+    """
+    if type(manifest) is not dict:
         raise fail("INVALID_REQUEST", "invalid Tier-1 history manifest")
+    version = manifest.get("schema_version")
+    if version == MANIFEST_VERSION:
+        expected_keys = _MANIFEST_KEYS
+    elif version == EXCLUSION_MANIFEST_VERSION:
+        expected_keys = _MANIFEST_KEYS | {_EXCLUDED_KEY}
+    else:
+        raise fail("INVALID_REQUEST", "invalid Tier-1 history manifest")
+    if set(manifest) != expected_keys or type(manifest["entries"]) is not list:
+        raise fail("INVALID_REQUEST", "invalid Tier-1 history manifest")
+    excluded = manifest.get(_EXCLUDED_KEY)
+    if version == EXCLUSION_MANIFEST_VERSION and type(excluded) is not list:
+        raise fail("INVALID_REQUEST", "invalid Tier-1 history manifest exclusion list")
+    if excluded is not None and (any(type(t) is not str or not t or t != t.strip() for t in excluded)
+            or excluded != sorted(set(excluded))):
+        raise fail("INVALID_REQUEST", "invalid Tier-1 history manifest exclusion list")
+    if not manifest["entries"] and not (excluded or []):
+        raise fail("INVALID_REQUEST", "empty manifest requires a nonempty v2 exclusion list")
     _day(manifest["session_ceiling"])
     for entry in manifest["entries"]:
         if (type(entry) is not dict or set(entry) != _ENTRY_KEYS
@@ -165,6 +210,8 @@ def validate_manifest(manifest):
     tickers = [e["ticker"] for e in manifest["entries"]]
     if any(t != t.strip() for t in tickers):
         raise fail("INVALID_REQUEST", "invalid Tier-1 history manifest entry")
+    if excluded is not None and set(excluded) & set(tickers):
+        raise fail("INVALID_REQUEST", "a ticker is both pinned and excluded")
     if tickers != sorted(set(tickers)) or manifest["manifest_id"] != _identity(manifest):
         raise fail("INVALID_REQUEST", "Tier-1 history manifest ordering or identity mismatch")
     return manifest
@@ -186,11 +233,13 @@ def pinned_history_fetcher(source_root, manifest, *, strict=False):
         cache[pinned["ticker"]] = entry
 
     digests = {p["ticker"]: p["body_sha256"] for p in manifest["entries"]}
+    excluded = (set(manifest[_EXCLUDED_KEY]) if manifest["schema_version"] == EXCLUSION_MANIFEST_VERSION
+                else set())
 
     def fetch(ticker):
         entry = cache.get(ticker)
         if entry is None:
-            if strict:
+            if strict and ticker not in excluded:
                 raise fail("SOURCE_NOT_FOUND", "a refresh target is not pinned in the Tier-1 manifest")
             return b"", "legitimate_empty", {}, []
         body = _body(entry)
@@ -260,19 +309,12 @@ def _checked_write_root(write_root, production_roots):
     return literal
 
 
-def generate_bounds(write_root, *, source_root, manifest, scope, as_of, production_roots):
-    """Refresh the catalog in ``write_root`` (unrelated to every ``production_roots`` entry) with source bounds from pinned inputs; return the provenance record."""
+def _refresh_bounds(conn, root, objects_root, *, source_root, manifest, scope, as_of):
+    """Shared strict-pinned refresh: run ``computed_moves_command`` with source bounds and prove
+    the head (or the fresh candidate) carries ``computed_move_bounds``. Returns ``(source, bounds,
+    candidate, served)``; never opens or closes ``conn`` and never writes the provenance record."""
     from engine.v2.ops.cli import computed_moves_command
 
-    validate_manifest(manifest)
-    if as_of != manifest["session_ceiling"]:
-        raise fail("INVALID_REQUEST", "as_of must equal the manifest session ceiling")
-    root = _checked_write_root(write_root, production_roots)
-    catalog = root / "catalog.sqlite"
-    if not catalog.is_file() or catalog.resolve().parent != root:
-        raise fail("INVALID_REQUEST", "catalog.sqlite must exist directly inside the write root")
-    started = time.monotonic()
-    _log("bounds start entries=" + str(len(manifest["entries"])), started)
     cache, fetch = pinned_history_fetcher(source_root, manifest, strict=True)
     served = set()
 
@@ -281,22 +323,140 @@ def generate_bounds(write_root, *, source_root, manifest, scope, as_of, producti
         served.add(ticker)
         return result
 
-    history = (cache, tracked)
+    args = SimpleNamespace(source_root=Path(source_root), scope=scope, as_of=as_of, dry_run=False)
+    report = computed_moves_command(args, root, conn, SystemClock(), history=(cache, tracked),
+                                    include_source_bounds=True, objects_root=objects_root)
+    source = report["parent_snapshot_id"]
+    candidate = report["result"].get("candidate_snapshot_id")
+    bounds = candidate or source
+    if candidate is None:
+        parent = Repository(conn, ArtifactStore(objects_root), pin_snapshots=True).resolve_full(source)
+        if TABLE not in parent.table_manifests:
+            raise fail("PUBLICATION_REFUSED", "the refresh committed nothing and the head carries no source bounds")
+    return source, bounds, candidate, served
+
+
+def generate_bounds(write_root, *, source_root, manifest, scope, as_of, production_roots):
+    """Refresh the catalog in ``write_root`` (unrelated to every ``production_roots`` entry) with source bounds from pinned inputs; return the provenance record."""
+    validate_manifest(manifest)
+    if manifest["schema_version"] == EXCLUSION_MANIFEST_VERSION:
+        raise fail("WORKSPACE_REFUSED", "exclusion manifests are admitted through workspace mode only",
+                   details={"reason": "workspace_admission_required"})
+    if as_of != manifest["session_ceiling"]:
+        raise fail("INVALID_REQUEST", "as_of must equal the manifest session ceiling")
+    root = _checked_write_root(write_root, production_roots)
+    catalog = root / "catalog.sqlite"
+    if not catalog.is_file() or catalog.resolve().parent != root:
+        raise fail("INVALID_REQUEST", "catalog.sqlite must exist directly inside the write root")
+    started = time.monotonic()
+    _log("bounds start entries=" + str(len(manifest["entries"]))
+         + " excluded=" + str(len(manifest.get(_EXCLUDED_KEY) or ())), started)
     conn = open_catalog(catalog, clock=SystemClock())
     try:
-        args = SimpleNamespace(source_root=Path(source_root), scope=scope, as_of=as_of, dry_run=False)
-        report = computed_moves_command(args, root, conn, SystemClock(), history=history, include_source_bounds=True)
-        source = report["parent_snapshot_id"]
-        candidate = report["result"].get("candidate_snapshot_id")
-        bounds = candidate or source
-        if candidate is None:
-            parent = Repository(conn, ArtifactStore(root)).resolve_full(source)
-            if TABLE not in parent.table_manifests:
-                raise fail("PUBLICATION_REFUSED", "the refresh committed nothing and the head carries no source bounds")
+        source, bounds, candidate, served = _refresh_bounds(
+            conn, root, root, source_root=source_root, manifest=manifest, scope=scope, as_of=as_of)
     finally:
         conn.close()
     pinned = [e for e in manifest["entries"] if e["ticker"] in served]
     record = _provenance(manifest, pinned, source, bounds, refresh_noop=candidate is None)
     _write_record(root, record)
     _log("bounds end", started)
+    return record
+
+
+def _names(values):
+    """A bounded rendering of ticker names for stderr logs: at most MAX_LOGGED_NAMES, then a remainder count."""
+    shown = ", ".join(values[:MAX_LOGGED_NAMES])
+    return shown + (" (+%d more)" % (len(values) - MAX_LOGGED_NAMES) if len(values) > MAX_LOGGED_NAMES else "")
+
+
+def _excluded_event_tickers(source, snapshot, excluded, started):
+    """Excluded tickers that carry at least one earnings event in the pinned snapshot; read-only.
+
+    A nonempty exclusion list over a snapshot without the events table cannot be verified and
+    refuses ``PUBLICATION_REFUSED`` (reason ``event_coverage_unavailable``); empty exclusions need no scan.
+    """
+    if not excluded:
+        return []
+    if EVENTS_TABLE not in snapshot.table_versions:
+        raise fail("PUBLICATION_REFUSED", "the pinned snapshot does not carry the earnings events table",
+                   details={"reason": "event_coverage_unavailable", "excluded_count": len(excluded)})
+    contract = source.table_contract(snapshot, EVENTS_TABLE)
+    ref = snapshot.table_versions[EVENTS_TABLE].table_contract_ref
+    predicate = KeyPredicate(column="ticker", operator="in", values=tuple(excluded))
+    bound = source.scan_population_bound(snapshot.snapshot_id, table_name=EVENTS_TABLE,
+                                         table_contract_ref=ref, key_filter=(predicate,))
+    _log("event check " + str(bound) + " candidate rows for " + str(len(excluded)) + " exclusions", started)
+    if bound < 1:
+        return []
+    query = DataQuery(snapshot_id=snapshot.snapshot_id, table_contract_ref=ref, columns=("ticker",),
+                      key_filter=(predicate,), order_by=tuple(contract.primary_key),
+                      max_batch_rows=min(bound, contract.maximum_batch_rows), max_result_rows=bound)
+    return sorted({row["ticker"] for batch in source.scan(query, table_name=EVENTS_TABLE,
+                                                          max_object_bytes=MAX_EVENT_OBJECT_BYTES)
+                   for row in batch.to_pylist()})
+
+
+def admit_manifest(workspace, scope, manifest, *, clock):
+    """Admit a manifest into a research workspace: bind it to the pinned snapshot, refuse
+    event-bearing exclusions over the read-only source, and record manifest CAS/read-pin
+    metadata in ``workspace.store``/``workspace.conn`` only — never a production path."""
+    validate_manifest(manifest)
+    started = time.monotonic()
+    excluded = sorted(set(manifest.get(_EXCLUDED_KEY) or ()))
+    snapshot = resolve_size_scope_snapshot(workspace, scope)
+    _log("admission start snapshot=" + snapshot.snapshot_id + " excluded=" + str(len(excluded))
+         + " names=" + (_names(excluded) if excluded else "none"), started)
+    offenders = _excluded_event_tickers(workspace.source, snapshot, excluded, started)
+    if offenders:
+        raise fail("PUBLICATION_REFUSED", "an excluded ticker has earnings events in the pinned snapshot",
+                   details={"reason": "excluded_ticker_has_events", "tickers": _names(offenders)})
+    view = size_scope_repository(workspace, scope, clock=clock)
+    view.resolve_pinned(scope)
+    ref = workspace.store.publish_bytes(canonical_json(manifest).encode("utf-8"),
+                                       schema_ref=manifest["schema_version"])
+    with transaction(workspace.conn):
+        register_artifact(workspace.conn, ref, None, clock)
+    fields = {"schema_version": ADMISSION_VERSION, "scope": scope, "scope_binding_id": view.binding_id,
+              "snapshot_id": snapshot.snapshot_id, "manifest_hash": snapshot.manifest_hash,
+              "manifest_id": manifest["manifest_id"], "manifest_object": ref.content_hash,
+              "session_ceiling": manifest["session_ceiling"], "entry_count": len(manifest["entries"]),
+              "excluded_count": len(excluded)}
+    pin = workspace.record_read_pin("size-prep-manifest:" + manifest["manifest_id"].split(":", 1)[1],
+                                    fields, clock=clock)
+    _log("admission end excluded=" + str(len(excluded)) + " manifest_object=" + ref.content_hash, started)
+    return {**fields, "admission_id": content_hash(fields), "manifest_ref": ref, "read_pin_ref": pin}
+
+
+def generate_workspace_bounds(workspace, scope, manifest, *, source_root, as_of, clock):
+    """Publish source bounds through a prepared research workspace; return the provenance record.
+
+    The workspace's catalog rows, closure objects and scope head must already be in place. The
+    refresh runs against ``<workspace>/catalog.sqlite``, ``<workspace>/supervisor.lock`` and the
+    workspace store (whose closure objects 2c-i admitted), so raw receipts land only in the
+    workspace; the production catalog and store are never read as a fallback nor written.
+    """
+    validate_manifest(manifest)
+    if as_of != manifest["session_ceiling"]:
+        raise fail("INVALID_REQUEST", "as_of must equal the manifest session ceiling")
+    started = time.monotonic()
+    _log("workspace bounds start scope=" + str(scope) + " entries=" + str(len(manifest["entries"]))
+         + " excluded=" + str(len(manifest.get(_EXCLUDED_KEY) or ())), started)
+    admission = admit_manifest(workspace, scope, manifest, clock=clock)
+    head = workspace.conn.execute(
+        "SELECT snapshot_id FROM data_snapshot_heads WHERE scope = ?", (scope,)).fetchone()
+    if head is None or head["snapshot_id"] != workspace.snapshot_id:
+        raise fail("WORKSPACE_REFUSED", "the scope head is not the pinned snapshot",
+                   details={"reason": "head_not_pinned", "scope": scope})
+    source, bounds, candidate, served = _refresh_bounds(
+        workspace.conn, workspace.paths.root, workspace.paths.store,
+        source_root=source_root, manifest=manifest, scope=scope, as_of=as_of)
+    pinned = [e for e in manifest["entries"] if e["ticker"] in served]
+    record = _provenance(manifest, pinned, source, bounds, refresh_noop=candidate is None)
+    _write_record(workspace.paths.root, record)
+    workspace.record_read_pin(
+        "size-prep-bounds:" + record["record_id"].split(":", 1)[1],
+        {"record_id": record["record_id"], "admission_id": admission["admission_id"],
+         "bounds_snapshot_id": bounds, "source_snapshot_id": source}, clock=clock)
+    _log("workspace bounds end", started)
     return record

@@ -30,7 +30,9 @@ def validate_request(request, *, allow_all_events=False):
             or any(type(key) is not str or not key or key != key.strip() for key in ids)
             or len(set(ids)) != len(ids))):
         raise fail("CONTRACT_MISMATCH", "explicit unique canonical targets required")
-    if type(horizons) is not list or any(type(h) is not int for h in horizons) or horizons != [1, 3, 5]:
+    if (type(horizons) is not list or not horizons
+            or any(type(h) is not int or h not in (1, 3, 5) for h in horizons)
+            or horizons != sorted(set(horizons))):
         raise fail("CONTRACT_MISMATCH", "ordered native horizons required")
     try:
         ExperimentHoldouts(request["as_of_month"])
@@ -64,13 +66,25 @@ def materialize(repository, snapshot, **request):
     return history._materialize(repository, snapshot, producer=_admitted_producer(request), **request)
 
 
-def read(repository, source, feature_snapshot, *, columns=None, **request):
-    """Re-derive producer/source/policy identity before admitting model inputs."""
+def _admit_read(source, feature_snapshot, columns, request):
     validate_request(request)
     snapshot_reference(source)
     snapshot_reference(feature_snapshot)
     if (type(columns) not in (list, tuple) or not columns
             or any(type(c) is not str or c not in FEATURES for c in columns) or len(set(columns)) != len(columns)):
         raise fail("HOLDOUT_ACCESS_DENIED", "experiment fields require exact eligible-history provenance")
+
+
+def read(repository, source, feature_snapshot, *, columns=None, **request):
+    """Re-derive producer/source/policy identity before admitting model inputs."""
+    _admit_read(source, feature_snapshot, columns, request)
     return history._read(repository, source, feature_snapshot, columns=columns,
                          producer=_admitted_producer(request), **request)
+
+
+def iter_read(repository, source, feature_snapshot, *, columns=None, **request):
+    """Admit history metadata once and yield committed rows lazily for bounded consumers."""
+    _admit_read(source, feature_snapshot, columns, request)
+    admitted = history._iter_read(repository, source, feature_snapshot, columns=columns,
+                                  producer=_admitted_producer(request), **request)
+    return admitted

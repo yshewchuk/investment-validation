@@ -4,11 +4,12 @@ from dataclasses import replace
 
 import pytest
 
+from engine.v2.contracts.data import FragmentRecord
 from engine.v2.data import _bounded_catalog_identity as identity
-from engine.v2.data import errors, manifests, objects
+from engine.v2.data import documents, errors, manifests, objects
 from engine.v2.data._bounded_catalog_transfer import _Times
 from engine.v2.data.repository import Repository
-from engine.v2.foundation import content_hash
+from engine.v2.foundation import content_hash, to_document
 from tests.v2.data.bounded_catalog_identity_support import manifest, record, valid_catalog
 
 
@@ -251,3 +252,20 @@ def test_expected_reference_must_not_change_during_native_roundtrip(fixture, kin
     assert (problem.code, problem.category, problem.retryable, problem.stage,
             problem.message, problem.details) == (
         "SNAPSHOT_UNRESOLVED", "dependency", False, None, "invalid expected snapshot", {})
+
+
+def test_fragment_record_with_float_key_bound_decodes():
+    from tests.v2.data.bounded_catalog_identity_support import contract, record
+    from dataclasses import replace
+    rec = record(contract("alpha"), "2020")
+    rec = replace(rec, primary_key_min=("FIX", 22.5), primary_key_max=("FIX", 23.0))
+    assert documents.decode_document(FragmentRecord, to_document(rec)) == rec
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf")])
+def test_fragment_record_nonfinite_key_bound_refuses(bad):
+    from tests.v2.data.bounded_catalog_identity_support import contract, record
+    from dataclasses import replace
+    rec = replace(record(contract("alpha"), "2020"), primary_key_min=("FIX", bad))
+    with pytest.raises(documents.DocumentError):
+        documents.decode_document(FragmentRecord, to_document(rec))

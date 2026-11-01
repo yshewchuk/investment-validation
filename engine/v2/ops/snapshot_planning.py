@@ -60,12 +60,13 @@ from engine.v2.registry.strategies import STRATEGY_IDS
 
 __all__ = ["GENERATED_HORIZON_DAYS", "REQUEST_SCHEMA_REF", "direct_scope_for",
            "generated_population", "pin_snapshot_inputs", "require_valid_population_keys",
-           "scratch_estimate", "snapshot_event_tickers"]
+           "resolve_legacy_plan_snapshot_id", "scratch_estimate", "snapshot_event_tickers"]
 
 REQUEST_SCHEMA_REF = "legacy_materialization_request.v1.0"
 #: Mirrors ``engine.dashboard.nightly.HORIZON_DAYS`` (as ``nightly_trigger._LEGACY_HORIZON_DAYS`` does);
 #: v2 may not import the legacy dashboard.
 GENERATED_HORIZON_DAYS = 35
+MAX_SNAPSHOT_REF_BYTES = 64 * 1024 * 1024
 
 
 def require_valid_population_keys(keys) -> None:
@@ -178,6 +179,9 @@ def _resolve_scope_snapshot(conn, store, scope, *, clock, expected_snapshot_id=N
 
 
 def _load_snapshot_ref(store, head):
+    if head.byte_size > MAX_SNAPSHOT_REF_BYTES:
+        raise fail("INPUT_CHANGED", "the shadow snapshot head artifact exceeds the size limit",
+                   details={"byte_size": head.byte_size, "max_bytes": MAX_SNAPSHOT_REF_BYTES})
     try:
         document = json.loads(store.read_verified(head))
         return from_document(SnapshotRef, document)
@@ -185,6 +189,19 @@ def _load_snapshot_ref(store, head):
         raise fail("INPUT_CHANGED", "the shadow snapshot head artifact cannot be read",
                    details={"artifact_error": type(exc).__name__,
                             "artifact_code": getattr(exc, "code", None)}) from None
+
+
+def resolve_legacy_plan_snapshot_id(conn, store, *, clock) -> str:
+    """Resolve the shadow head's ``SnapshotRef`` id for a legacy nightly plan."""
+    try:
+        snapshot_ref = resolve_snapshot_head(conn, store, "shadow", clock=clock)
+    except DataError as exc:
+        code = "SNAPSHOT_NOT_READY" if exc.code == "SNAPSHOT_NOT_READY" else "INPUT_CHANGED"
+        message = ("no shadow snapshot head is available for a legacy nightly plan"
+                   if code == "SNAPSHOT_NOT_READY"
+                   else "the shadow snapshot head could not be resolved for a legacy nightly plan")
+        raise fail(code, message, details={"data_code": exc.code}) from None
+    return _load_snapshot_ref(store, snapshot_ref).snapshot_id
 
 
 def snapshot_event_tickers(conn, store, scope, *, as_of, clock,

@@ -19,6 +19,7 @@ from engine.v2.ops import worker
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.native.parity_inputs import legacy_parity_rows
 from engine.v2.ops.native_parity_report import (
+    NATIVE_PARITY_TOLERANCE,
     PARITY_DIMENSIONS,
     SCHEMA_VERSION,
     _empty_native_report,
@@ -366,7 +367,7 @@ def test_run_native_parity_worker_bytes_match_the_comparator_path(tmp_path):
     }
     expected = compare_native_vs_legacy(
         legacy_rows, native_rows, PARITY_DIMENSIONS,
-        tolerance_policy=SCORE_RECORD_V1)
+        tolerance_policy=NATIVE_PARITY_TOLERANCE)
     expected = apply_native_refusals(expected, {}, ())
     expected = _stamp_report_identity(expected, as_of=None, clock=FakeClock())
 

@@ -52,6 +52,18 @@ REPLAY_CODES = (PHASE4_UNVERIFIED, PHASE4_MEMBER_ABSENT, PHASE4_MISMATCH,
 DISPOSITIONS = ("replayed", "mismatch", "member_absent", "unverified", "error",
                 "untraced", "not_frozen")
 
+REPLAY_VALIDATION_VERSION = 3
+
+
+def _checkpoint_scope(corpus_hash: str | None, manifest: Mapping[str, Any]) -> str:
+    """Canonical JSON checkpoint scope: corpus + full staged manifest + version."""
+    import json
+    return json.dumps(
+        {"corpus_hash": corpus_hash, "manifest": manifest,
+         "validation_version": REPLAY_VALIDATION_VERSION},
+        sort_keys=True, separators=(",", ":"),
+    )
+
 
 #: Staged state members a replayed pair may read by content hash: the Tier-4
 #: serving folds (frozen bindings, including the chooser's producer folds),
@@ -233,7 +245,8 @@ def _staged_chooser_pools(chooser, request, release_root: Path, manifest,
     from engine.v2.foundation import from_document
     from engine.v2.models import deployment
     from engine.v2.models.serving_fold_loader import (
-        load_chooser_serving_fold, load_serving_fold, validate_serving_fold_object,
+        load_chooser_serving_fold, load_serving_fold, validate_serving_fold_descriptor,
+        validate_serving_fold_object,
     )
     from engine.v2.models.serving_folds import (
         ChooserServingFoldDescriptor, ServingFoldDescriptor,
@@ -241,32 +254,58 @@ def _staged_chooser_pools(chooser, request, release_root: Path, manifest,
     from engine.v2.models.loader import FrozenInference
 
     members = manifest.get("members")
-    if not isinstance(members, (list, tuple)):
+    if not isinstance(members, list):
         return None
     docs = {}
     size_docs = []
+    seen_members = set()
+    chooser_months = set()
+    size_months = set()
     try:
         for row in members:
             if not isinstance(row, Mapping):
+                return None
+            member_id = row.get("member_id", "")
+            if not isinstance(member_id, str):
+                return None
+            if member_id not in {"tier4_folds:implied_t1", "tier4_folds:runup_move", "tier4_folds:size"}:
                 continue
-            member_id = row.get("member_id")
+            if member_id in seen_members or row.get("status") != "STAGED":
+                return None
+            seen_members.add(member_id)
             objects = row.get("objects", ())
-            if not isinstance(objects, (list, tuple)):
+            if not isinstance(objects, list):
                 return None
             if member_id in {"tier4_folds:implied_t1", "tier4_folds:runup_move"}:
                 for obj in objects:
                     doc = obj.get("serving_fold") if isinstance(obj, Mapping) else None
-                    if isinstance(doc, Mapping):
-                        descriptor = from_document(ChooserServingFoldDescriptor, doc)
-                        if descriptor.descriptor_hash in docs:
-                            return None
-                        docs[descriptor.descriptor_hash] = descriptor
-            elif member_id == "tier4_folds:size":
+                    if not isinstance(doc, Mapping) or doc.get("fold_start") != expected_fold_start:
+                        continue
+                    descriptor = from_document(ChooserServingFoldDescriptor, doc)
+                    chooser_month = (member_id, descriptor.fold_start)
+                    if chooser_month in chooser_months or descriptor.descriptor_hash in docs:
+                        return None
+                    chooser_months.add(chooser_month)
+                    docs[descriptor.descriptor_hash] = descriptor
+            else:
                 for obj in objects:
-                    doc = obj.get("serving_fold") if isinstance(obj, Mapping) else None
-                    if isinstance(doc, Mapping):
-                        descriptor = from_document(ServingFoldDescriptor, doc)
-                        size_docs.append((obj, descriptor))
+                    if not isinstance(obj, Mapping):
+                        return None
+                    doc = obj.get("serving_fold")
+                    if not isinstance(doc, Mapping):
+                        return None
+                    descriptor = from_document(ServingFoldDescriptor, doc)
+                    validate_serving_fold_descriptor(descriptor)
+                    if descriptor.fold_start in size_months:
+                        return None
+                    size_months.add(descriptor.fold_start)
+                    if type(obj.get("bytes")) is not int:
+                        return None
+                    if (obj.get("path") != descriptor.estimator.path
+                            or obj.get("content_hash") != descriptor.estimator.content_hash):
+                        return None
+                    validate_serving_fold_object(obj, descriptor)
+                    size_docs.append((obj, descriptor))
     except (OSError, ValueError, TypeError, KeyError, AttributeError, OverflowError):
         return None
 
@@ -301,7 +340,8 @@ def _staged_chooser_pools(chooser, request, release_root: Path, manifest,
             return None
         size_ref = load_serving_fold(
             FrozenInference(root), size_descriptor,
-            verified_parent_manifest=parent, catalog_hash=catalog_hash)
+            verified_parent_manifest=parent, catalog_hash=catalog_hash,
+            expected_bytes=size_obj["bytes"])
     except (OSError, ValueError, TypeError, KeyError, AttributeError, OverflowError):
         return None
     expected_size = {
@@ -335,6 +375,29 @@ def _staged_chooser_pools(chooser, request, release_root: Path, manifest,
                 FrozenInference(root), descriptor,
                 verified_parent_manifest=parent, verified_catalog=dict(manifest))
         except (OSError, ValueError, TypeError, KeyError, AttributeError, OverflowError):
+            return None
+        producer_refs = recipe.get("producers")
+        producer = producer_refs.get(output) if isinstance(producer_refs, Mapping) else None
+        binding_id = producer.get("binding_id") if isinstance(producer, Mapping) else None
+        if not isinstance(binding_id, str) or not binding_id or producer.get("output") != output:
+            return None
+        trace_bindings = [binding for binding in getattr(chooser.release, "bindings", ())
+                          if getattr(binding, "binding_id", None) == binding_id]
+        fold_bindings = getattr(ref.release, "bindings", ())
+        if len(trace_bindings) != 1 or len(fold_bindings) != 1:
+            return None
+        alias, verified_binding = trace_bindings[0], fold_bindings[0]
+        semantic_fields = ("role", "model_id", "strategy_id", "feature_order",
+                           "decision_clock_id", "output_names")
+        if any(getattr(alias, field, None) != getattr(verified_binding, field, None)
+               for field in semantic_fields):
+            return None
+        alias_members = getattr(alias, "members", ())
+        verified_members = getattr(verified_binding, "members", ())
+        alias_hashes = tuple(getattr(member, "content_hash", None) for member in alias_members)
+        verified_hashes = tuple(getattr(member, "content_hash", None) for member in verified_members)
+        if (not alias_hashes or any(not isinstance(value, str) or not value for value in alias_hashes)
+                or alias_hashes != verified_hashes):
             return None
         expected = {"predictions": ref.pool_pred, "residuals": ref.pool_res,
                     "interval_floor": descriptor.policy.interval_floor}
@@ -516,13 +579,14 @@ def _log(tag: str, message: str, started: float) -> None:
           flush=True)
 
 
-def _load_checkpoint(checkpoint_path: Path, corpus_hash: str | None) -> dict[str, dict]:
-    """Rows already replayed by an earlier, killed run of the SAME corpus.
+def _load_checkpoint(checkpoint_path: Path, scope: str | None) -> dict[str, dict]:
+    """Rows already replayed by an earlier, killed run of the SAME scope.
 
-    Keyed by ``fixture_id``. A checkpoint file from a different corpus (its
-    first line's ``corpus_hash`` disagrees, or the file is unreadable/corrupt)
-    is discarded, never silently reused -- resuming against the wrong corpus
-    would be a correctness defect, not a convenience."""
+    Keyed by ``fixture_id``. A checkpoint file from a different scope (any
+    row's ``corpus_hash`` scope disagrees, or the file is unreadable/corrupt)
+    is discarded, never silently reused -- resuming against the wrong corpus,
+    manifest or validation version would be a correctness defect, not a
+    convenience."""
     if not checkpoint_path.is_file():
         return {}
     import json
@@ -535,7 +599,7 @@ def _load_checkpoint(checkpoint_path: Path, corpus_hash: str | None) -> dict[str
                 if not line:
                     continue
                 row = json.loads(line)
-                if row.get("corpus_hash") != corpus_hash:
+                if row.get("corpus_hash") != scope:
                     return {}
                 done[row["fixture_id"]] = row
     except (OSError, ValueError):
@@ -551,7 +615,7 @@ def replay_corpus(corpus: Path, release_root: Path, model_release,
 
     ``checkpoint_path``, if given, makes the pair loop resumable: each pair's
     row is appended (one JSON line, flushed immediately -- survives SIGKILL)
-    as soon as it is computed, and a prior file for the SAME corpus is read
+    as soon as it is computed, and a prior file for the SAME scope is read
     back at the top so a killed or capped run picks up where it left off
     instead of re-paying every already-replayed pair. Added because a single
     pair has been measured at ~111s and the corpus can hold pairs up to
@@ -571,8 +635,9 @@ def replay_corpus(corpus: Path, release_root: Path, model_release,
 
     done: dict[str, dict] = {}
     checkpoint_fh = None
+    checkpoint_scope = _checkpoint_scope(corpus_hash, manifest)
     if checkpoint_path is not None:
-        done = _load_checkpoint(checkpoint_path, corpus_hash)
+        done = _load_checkpoint(checkpoint_path, checkpoint_scope)
         if done:
             _log("p5-phase4",
                  f"checkpoint: resuming, {len(done)}/{total} pairs already replayed", started)
@@ -600,7 +665,7 @@ def replay_corpus(corpus: Path, release_root: Path, model_release,
                      f"pair {index + 1}/{total} {fixture_id}: {row['disposition']} "
                      f"(pair +{pair_elapsed:.1f}s)", started)
                 if checkpoint_fh is not None:
-                    checkpoint_fh.write(_json.dumps({**row, "corpus_hash": corpus_hash}) + "\n")
+                    checkpoint_fh.write(_json.dumps({**row, "corpus_hash": checkpoint_scope}) + "\n")
             counts[row["disposition"]] += 1
             rows.append(row)
             if "code" in row:

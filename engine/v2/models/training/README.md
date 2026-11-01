@@ -20,6 +20,24 @@ Replaces (§4.4): `models/training/, rewritten above scoring rather than moved`.
 
 ## Public interface
 
+`magnitude_candidate.fit_candidate` is the shared fixed-nonnegative three-family
+numeric dispatcher; `experiments.magnitude_candidate_fit` retains a guarded lazy compatibility wrapper.
+`fit_routes.fit_execution` accepts only `magnitude`, `magnitude_candidate` or
+`regression_candidate` numeric routes. Both guards precede inspection; original
+magnitude predictions gain a predictions-only dictionary, while candidate results
+and all errors propagate unchanged. No retry, selection, source reads or writes.
+Original magnitude requires its own schema and ordered `columns` matching recipe
+features before fitting; caller retains its full recipe admission.
+Route names are not persisted schemas; offline `research.horizon_fitted` and synthetic tests
+consume this API, never production entrypoints. Legacy error translation stays at experiment boundaries.
+`fit_routes.check_fitting_allowed` exposes both existing switches for pre-inspection orchestration guards.
+
+`regression_candidate.fit_regression_candidate` dispatches the new domain-aware
+Ridge/HGB or ElasticNet recipe to its existing guarded fitter. Both no-fit guards
+precede recipe/array inspection; delegated validation, results and errors remain
+unchanged. No source reads, retries, selection or persistence occur. Existing
+experiment magnitude dispatch remains fixed to nonnegative recipe schemas (Ridge v1, HGB v1 and v2, ElasticNet v1).
+
 `magnitude.fit_magnitude_predictions` accepts an ops-admitted closed Ridge/HGB
 recipe as data and eleven-column numeric matrices
 (NaN features permitted), nonnegative finite labels and returns detached finite
@@ -39,12 +57,26 @@ The experiment dispatcher is a numeric caller, not a grid or production activati
 No validation-target selection, cache or persistence is added.
 Nonconvergence raises `ValueError` with no retry or partial result.
 
+`magnitude_elasticnet.fit_regression_elasticnet_predictions` accepts the distinct
+domain-aware ElasticNet policy through the same guarded, training-only fitter.
+Signed labels/forecasts are finite without a floor or transform; nonnegative
+labels still refuse negatives and forecasts clip at zero. The result uses
+`regression_elasticnet_fit.v1`, with bound recipe hash and unchanged coefficient
+and convergence evidence. No source admission, search or release is inferred.
+
 `magnitude_ridge_hgb.fit_ridge_hgb_predictions` separately accepts a closed
 variable-width recipe, caller-admitted numeric matrices and exact ordered
 `columns`. Both no-fit guards run before inspection; training-only preprocessing
 and fresh one-thread estimators return a recipe hash and detached nonnegative
 predictions. Invalid policy/order/values refuse; no source admission, selection,
 I/O, cache or retry occurs. Existing eleven-column behavior is unchanged.
+
+`magnitude_ridge_hgb.fit_regression_predictions` consumes the distinct
+domain-aware regression recipe with the same guarded, training-only machinery.
+Signed labels and forecasts remain finite and untransformed, with no lower bound;
+nonnegative labels still reject negatives and predictions clip at zero. Results
+use `regression_ridge_hgb_fit.v1` and bind the validated recipe hash. This is a
+numeric primitive, not IV target preparation, search, admission or release.
 
 The names other packages may import. Everything else is internal regardless of
 underscore convention, and an import of a name absent from this list fails
@@ -132,9 +164,11 @@ both `tools/phase5_prepare_release.py` (which re-exports the names) and
 `tools/phase5_training_job.py`; it imports no `checks` module so the training
 job's worker path can read it.
 
-<!-- public-interface: fit_ridge_hgb_predictions, fit_elasticnet_predictions, build_d14_dataset, calculate_frame, input_rows, input_frame, decision_rows, daily_features, validate_role, fit_magnitude_predictions, build_payoff_line_artifact, build_payoff_surface_artifact, build_recalibration_map_artifact, fit_recalibration_map, CLOCK_ID, EqualWeightBlend, EstimatorSpec, FoldOutcome, FoldPlan, FoldScheme, LABEL_RECEIPT_V1, LEGACY_SEED, LabelRule, LogTargetModel, MEMBERSHIP_RECEIPT_V1, OWNER_P5_4, OWNER_TRAINING_JOB, PreparedDataset, RECIPE_V1, ReceiptIssue, RecipeDataError, RecipeKey, ResidualRule, RowFilter, SeedMeanEnsemble, TRAINING_JOB_V1, TargetSpec, ThresholdRule, TrainingJobResult, TrainingRecipe, TrainingRefused, UnsupportedEstimator, UpstreamDependency, ValueMask, current_recipes, dataset_fingerprint, fit_recipe_estimator, fold_receipts, plan_folds, prepare_dataset, receipt_issues, recipe_fingerprint, run_training_job, build_driver_residual_pool_artifact, build_paired_residual_pool_artifact, freeze_stored_driver_residual_pool, CHOOSER_POOL_ID, CHOOSER_POOL_MAX_BYTES, require_chooser_pool_columns, read_chooser_pool_frame -->
+<!-- public-interface: check_fitting_allowed, fit_candidate, fit_execution, fit_regression_candidate, fit_regression_predictions, fit_ridge_hgb_predictions, fit_elasticnet_predictions, build_d14_dataset, calculate_frame, input_rows, input_frame, decision_rows, daily_features, validate_role, fit_magnitude_predictions, build_payoff_line_artifact, build_payoff_surface_artifact, build_recalibration_map_artifact, fit_recalibration_map, CLOCK_ID, EqualWeightBlend, EstimatorSpec, FoldOutcome, FoldPlan, FoldScheme, LABEL_RECEIPT_V1, LEGACY_SEED, LabelRule, LogTargetModel, MEMBERSHIP_RECEIPT_V1, OWNER_P5_4, OWNER_TRAINING_JOB, PreparedDataset, RECIPE_V1, ReceiptIssue, RecipeDataError, RecipeKey, ResidualRule, RowFilter, SeedMeanEnsemble, TRAINING_JOB_V1, TargetSpec, ThresholdRule, TrainingJobResult, TrainingRecipe, TrainingRefused, UnsupportedEstimator, UpstreamDependency, ValueMask, current_recipes, dataset_fingerprint, fit_recipe_estimator, fold_receipts, plan_folds, prepare_dataset, receipt_issues, recipe_fingerprint, run_training_job, build_driver_residual_pool_artifact, build_paired_residual_pool_artifact, freeze_stored_driver_residual_pool, CHOOSER_POOL_ID, CHOOSER_POOL_MAX_BYTES, require_chooser_pool_columns, read_chooser_pool_frame, fit_regression_elasticnet_predictions -->
 
 ## Consumers
+
+`engine.v2.research` uses closed numeric routes and pre-inspection guards for offline horizon fits.
 
 Which packages import this one, and for what. Checked against the import graph:
 a claimed consumer that does not import, or an omitted one that does, is a
@@ -142,15 +176,15 @@ failure rather than a stale sentence.
 
 `engine.v2.ops` imports `build_d14_dataset` to construct explicitly pinned native
 D14 datasets for supervised recipe jobs, and `TrainingRefused` to map refused
-training receipts to typed `OpsError`s. No other v2 package imports this one,
+training receipts to typed `OpsError`s. Only these two v2 packages import this one,
 and none below layer 6 may. Standalone real-data entry points are
 `tools/phase5_training_job.py` and `tools/phase5_d14_inputs.py`, outside v2 packages.
 
-`experiments/magnitude_fitted.py` consumes `fit_magnitude_predictions` after native admission.
-`experiments/magnitude_candidate_fit.py` dispatches one numeric call to the public
-ElasticNet/Ridge/HGB fitters; its synthetic-only callers grant no source admission.
+`experiments/magnitude_fitted.py` reaches numeric fitters through shared research orchestration after native admission.
+`experiments/magnitude_candidate_fit.py` lazily delegates to the shared candidate dispatcher;
+its offline callers grant no source admission.
 
-<!-- consumers: engine.v2.ops -->
+<!-- consumers: engine.v2.ops, engine.v2.research -->
 
 ## Usage
 

@@ -15,6 +15,7 @@ from engine.v2.data.computed_move_bounds import TABLE as BOUNDS_TABLE
 from engine.v2.data.computed_moves_table import COMPUTED_MOVES_CONTRACT, COMPUTED_MOVES_V5_CONTRACT
 from engine.v2.data.errors import fail
 from engine.v2.foundation import SystemClock, canonical_json, content_hash, to_document
+from engine.v2.foundation.experiment_holdouts import ExperimentHoldouts, calendar_date
 from engine.v2.research import eligibility_policy, event_history
 from engine.v2.research._snapshot import artifact_store, catalog_connection
 from engine.v2.research.eligible_history_table import (
@@ -112,6 +113,17 @@ def _bound_dates(row, event, key):
     return row
 
 
+def _shape(event_ids, horizons):
+    if (type(event_ids) is not list or not event_ids
+            or any(type(key) is not str or not key or key != key.strip() for key in event_ids)
+            or len(set(event_ids)) != len(event_ids)
+            or type(horizons) is not list or not horizons
+            or any(type(h) is not int for h in horizons)
+            or any(h not in (1, 3, 5) for h in horizons)
+            or horizons != sorted(set(horizons))):
+        raise fail("CONTRACT_MISMATCH", "explicit unique targets and ordered native horizons required")
+
+
 def _request(repository, snapshot, policy, event_ids, horizons, limits):
     try:
         expected = eligibility_policy.eligibility_policy(
@@ -121,12 +133,7 @@ def _request(repository, snapshot, policy, event_ids, horizons, limits):
     except (KeyError, TypeError, ValueError):
         raise fail("CONTRACT_MISMATCH", "invalid history eligibility policy") from None
     admit_source(repository, snapshot, limits)
-    if (type(event_ids) is not list or not event_ids
-            or any(type(key) is not str for key in event_ids) or len(set(event_ids)) != len(event_ids)
-            or type(horizons) is not list or not horizons
-            or any(type(h) is not int or h not in (1, 3, 5) for h in horizons)
-            or horizons != [1, 3, 5]):
-        raise fail("CONTRACT_MISMATCH", "explicit unique targets and ordered native horizons required")
+    _shape(event_ids, horizons)
     if len(event_ids) * len(horizons) > limits["max_output_rows"]:
         raise fail("RESULT_LIMIT_EXCEEDED", "history output exceeds explicit bounds")
 
@@ -142,15 +149,54 @@ def _forecasts(event, horizons, calendar, clocks):
     return forecasts
 
 
-def _prepare(repository, snapshot, *, as_of_month, policy, event_ids, horizons, history_start, limits,
-             producer):
+def _drop_dated_early(targets, event_ids, history_start):
+    # a target dated before history_start precedes the requested history outright: it can never enter the window or be retained, so it is removed before forecasts are derived (forecast_cutoff can raise CONTRACT_MISMATCH for old events outside the calendar) and reported as early rather than left unclassified.
+    dated_early = {target.event_id for target in targets.itertuples(index=False)
+        if target.event_date.strftime("%Y-%m-%d") < history_start}
+    targets = targets[~targets.event_id.isin(dated_early)]
+    event_ids = [key for key in event_ids if key not in dated_early]
+    return targets, event_ids, dated_early
+
+
+def _drop_ceiling_early(targets, forecasts, event_ids, history_start):
+    # events whose earliest forecast ceiling precedes history_start cannot be targets (the strict window would refuse them), even when the event date is inside the event window.
+    ceiling_early = {event_id for event_id, event_clocks in forecasts.items()
+        if min(c["source_session_ceiling"] for c in event_clocks) < history_start}
+    if ceiling_early:
+        targets = targets[~targets.event_id.isin(ceiling_early)]
+        forecasts = {key: value for key, value in forecasts.items() if key not in ceiling_early}
+        event_ids = [key for key in event_ids if key not in ceiling_early]
+    return targets, forecasts, event_ids, ceiling_early
+
+
+def _plan(repository, snapshot, *, as_of_month, policy, event_ids, horizons, history_start, limits, strict):
+    """Shared planning path; strict refuses unavailable targets, non-strict records them as unavailable.
+    Non-strict also drops targets dated before history_start, or whose earliest ceiling precedes it, as
+    early."""
     _request(repository, snapshot, policy, event_ids, horizons, limits)
-    targets = load_population(repository, snapshot, as_of_month=as_of_month, event_ids=event_ids)
-    population = load_population(repository, snapshot, as_of_month=as_of_month)
-    calendar, calendar_source = calendar_input(repository, snapshot)
+    decoded_cap = None if strict else limits.get("max_object_bytes")
+    cap_kwargs = {} if decoded_cap is None else {"max_object_bytes": decoded_cap}
+    targets = load_population(repository, snapshot, as_of_month=as_of_month, event_ids=event_ids,
+                              **cap_kwargs)
+    population = load_population(repository, snapshot, as_of_month=as_of_month, **cap_kwargs)
+    calendar, calendar_source = calendar_input(repository, snapshot, **cap_kwargs)
     clocks = {}
+    early, dated_early = set(), set()
+    if not strict:
+        targets, event_ids, dated_early = _drop_dated_early(targets, event_ids, history_start)
+        early = set(dated_early)
+        if targets.empty:
+            return {"early": sorted(early), "dated_before_start": sorted(dated_early),
+                    "remaining": False}
     forecasts = {event.event_id: _forecasts(event, horizons, calendar, clocks)
         for event in targets.itertuples(index=False)}
+    if not strict:
+        targets, forecasts, event_ids, ceiling_early = _drop_ceiling_early(
+            targets, forecasts, event_ids, history_start)
+        early |= ceiling_early
+        if targets.empty:
+            return {"early": sorted(early), "dated_before_start": sorted(dated_early),
+                    "remaining": False}
     start, _ = event_history._window(history_start,
         min(c["source_session_ceiling"] for event_clocks in forecasts.values() for c in event_clocks))
     ceilings = {}
@@ -161,13 +207,51 @@ def _prepare(repository, snapshot, *, as_of_month, policy, event_ids, horizons, 
     selected = population[(population.ticker.isin(targets.ticker)) & (days >= start.isoformat())
         & ((days < population.ticker.map(ceilings)) | population.event_id.isin(event_ids))]
     groups, unavailable, qualified = _groups(repository, snapshot, selected, forecasts,
-        event_ids, horizons, calendar, clocks, limits)
+        event_ids, horizons, calendar, clocks, limits, strict)
     metadata = {"schema_version": "event_group_bounds.v1", "source_snapshot": to_document(snapshot),
         "holdout_as_of_month": as_of_month, "policy_id": policy["policy_id"], "horizons": horizons,
         "groups": groups}
     metadata["metadata_id"] = content_hash(metadata)
     eligibility = eligibility_policy.plan_eligibility(repository, snapshot, as_of_month=as_of_month,
-        policy=policy, metadata=metadata, evaluation_event_ids=[])
+        policy=policy, metadata=metadata, evaluation_event_ids=[], max_object_bytes=decoded_cap)
+    return {"targets": targets, "population": population, "calendar": calendar, "clocks": clocks,
+        "forecasts": forecasts, "start": start, "ceilings": ceilings, "selected": selected,
+        "qualified": qualified, "unavailable": unavailable, "eligibility": eligibility,
+        "calendar_source": calendar_source, "early": sorted(early),
+        "dated_before_start": sorted(dated_early), "remaining": True}
+
+
+def plan_targets(repository, snapshot, *, as_of_month, policy, event_ids, horizons, history_start, limits):
+    """Public non-strict grouped-embargo plan: materializes nothing and writes nothing."""
+    try:
+        ExperimentHoldouts(as_of_month)
+        history_start = calendar_date(history_start).isoformat()
+    except (ValueError, TypeError, OverflowError):
+        raise fail("CONTRACT_MISMATCH", "canonical history start and holdout month required") from None
+    _shape(event_ids, horizons)
+    plan = _plan(repository, snapshot, as_of_month=as_of_month, policy=policy, event_ids=event_ids,
+        horizons=horizons, history_start=history_start, limits=limits, strict=False)
+    if not plan["remaining"]:
+        return {"plan_id": None, "retained": [], "unavailable": [], "exclusions": [],
+            "before_start": sorted(plan["early"]),
+            "dated_before_start": sorted(plan["dated_before_start"])}
+    eligibility, requested = plan["eligibility"], set(event_ids) - set(plan["early"])
+    return {"plan_id": eligibility["plan_id"],
+        "retained": sorted(requested & set(eligibility["retained_event_ids"])),
+        "unavailable": sorted(requested & set(plan["unavailable"])),
+        "exclusions": [e for e in eligibility["exclusions"] if e["event_id"] in requested],
+        "before_start": plan["early"], "dated_before_start": plan["dated_before_start"]}
+
+
+def _prepare(repository, snapshot, *, as_of_month, policy, event_ids, horizons, history_start, limits,
+             producer):
+    plan = _plan(repository, snapshot, as_of_month=as_of_month, policy=policy, event_ids=event_ids,
+        horizons=horizons, history_start=history_start, limits=limits, strict=True)
+    targets, population, forecasts = plan["targets"], plan["population"], plan["forecasts"]
+    start, ceilings, selected, qualified = (plan["start"], plan["ceilings"], plan["selected"],
+        plan["qualified"])
+    unavailable, eligibility, calendar_source = (plan["unavailable"], plan["eligibility"],
+        plan["calendar_source"])
     # Full canonical metadata is reread by plan_eligibility; unavailable contributors
     # above never remove a held event's window or confer a new read capability.
     retained = set(eligibility["retained_event_ids"])
@@ -196,7 +280,8 @@ def _prepare(repository, snapshot, *, as_of_month, policy, event_ids, horizons, 
     return context, targets.set_index("event_id", drop=False), population, plans, reader
 
 
-def _groups(repository, snapshot, selected, forecasts, event_ids, horizons, calendar, clocks, limits):
+def _groups(repository, snapshot, selected, forecasts, event_ids, horizons, calendar, clocks, limits,
+            strict=True):
     """Source-derived label windows; missing evidence differs from null labels."""
     anchors = _anchors(repository, snapshot, limits, required_tickers=selected.ticker.unique())
     records = {}
@@ -210,7 +295,7 @@ def _groups(repository, snapshot, selected, forecasts, event_ids, horizons, cale
         bound = _bound(event, anchors, records)
         if bound is None:
             unavailable.append(event.event_id)
-            if event.event_id in event_ids:
+            if strict and event.event_id in event_ids:
                 raise fail("CONTRACT_MISMATCH", "target label bounds are unavailable")
             continue
         qualified[event.event_id] = bound
@@ -327,7 +412,8 @@ def _materialize(repository, snapshot, **request):
 
 
 def _stored_query(repository, feature_snapshot, context, columns, limits):
-    """Bound the exact immutable feature read before opening any payload."""
+    """Bound the exact immutable feature read before opening any payload.
+    The batch cap is the largest fragment's row count, not the total: history_json cells are ~1 MB."""
     count = sum(len(t["forecasts"]) for t in context["targets"])
     records = repository.fragment_records(feature_snapshot, TABLE)
     if (sum(r.row_count for r in records) != count
@@ -338,22 +424,45 @@ def _stored_query(repository, feature_snapshot, context, columns, limits):
         table_contract_ref=feature_snapshot.table_versions[TABLE].table_contract_ref,
         columns=(*METADATA, *columns), order_by=CONTRACT.primary_key,
         key_filter=(KeyPredicate(column="context_id", operator="eq", values=(context["context_id"],)),),
-        max_batch_rows=min(count, CONTRACT.maximum_batch_rows), max_result_rows=count)
+        max_batch_rows=min(count, max((r.row_count for r in records), default=0),
+            CONTRACT.maximum_batch_rows), max_result_rows=count)
     return query_
 
 
-def _read(repository, source, feature_snapshot, *, columns, **request):
-    """Only this committed policy-qualified table may supply experiment fields."""
+def _iter_read(repository, source, feature_snapshot, *, columns, **request):
+    """Validate committed history rows incrementally for bounded consumers."""
     context = _prepare(repository, source, **request)[0]
     if (_existing(repository, context) != feature_snapshot or set(feature_snapshot.table_versions) != {TABLE}):
         raise fail("HOLDOUT_ACCESS_DENIED", "experiment input is not the exact eligible-history artifact")
     admit_fields(repository.table_contract(feature_snapshot, TABLE), context,
         policy_id=request["policy"]["policy_id"], columns=columns)
     query_ = _stored_query(repository, feature_snapshot, context, columns, request["limits"])
-    rows = [row for batch in repository.scan(query_, table_name=TABLE,
-        max_object_bytes=request["limits"]["max_object_bytes"]) for row in batch.to_pylist()]
     expected = [(t["event_id"], c["horizon_sessions"], c["cutoff_id"], c["source_session_ceiling"])
         for t in context["targets"] for c in t["forecasts"]]
-    if [(r["event_id"], r["horizon_sessions"], r["cutoff_id"], r["source_session_ceiling"]) for r in rows] != expected:
-        raise fail("CONTRACT_MISMATCH", "stored history target/cutoff coverage differs")
-    return {"context": context, "feature_snapshot": to_document(feature_snapshot), "rows": rows}
+    max_object_bytes = request["limits"]["max_object_bytes"]
+
+    def rows():
+        position = 0
+        for batch in repository.scan(query_, table_name=TABLE,
+                max_object_bytes=max_object_bytes):
+            for row in batch.to_pylist():
+                if (position >= len(expected)
+                        or (row["event_id"], row["horizon_sessions"], row["cutoff_id"],
+                            row["source_session_ceiling"]) != expected[position]):
+                    raise fail("CONTRACT_MISMATCH", "stored history target/cutoff coverage differs")
+                position += 1
+                yield row
+        if position != len(expected):
+            raise fail("CONTRACT_MISMATCH", "stored history target/cutoff coverage differs")
+
+    class RowStream:
+        def __iter__(self):
+            return rows()
+
+    return {"context": context, "feature_snapshot": to_document(feature_snapshot), "rows": RowStream()}
+
+
+def _read(repository, source, feature_snapshot, *, columns, **request):
+    """Preserve the detached list API for callers that require a complete result."""
+    result = _iter_read(repository, source, feature_snapshot, columns=columns, **request)
+    return {**result, "rows": list(result["rows"])}

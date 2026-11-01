@@ -57,6 +57,7 @@ from types import SimpleNamespace
 import pytest
 
 from engine.v2.contracts import JobSpec, SubmitRequest
+from engine.v2.contracts.data import SnapshotRef
 from engine.v2.foundation import ArtifactStore, SystemClock, content_hash, to_document
 from engine.v2.ops import cli
 from engine.v2.ops import effects_graph
@@ -83,6 +84,24 @@ from tests.ops_support import DEFAULT_POLICY, TEST_POLICY, sample
 REPO = Path(__file__).resolve().parents[3]
 POLICY = NamespacePolicy({"operator": frozenset({"shadow"})})
 SESSION = "2026-09-10"
+
+
+def _stub_shadow_snapshot_head(monkeypatch):
+    def resolve(conn, store, scope, *, clock):
+        assert scope == "shadow"
+        snapshot = SnapshotRef(
+            snapshot_id="test-shadow-snapshot",
+            manifest_hash="a" * 64,
+            table_versions={},
+            calendar_version="calendar-v1",
+            source_priority_version="source-priority-v1",
+            finality_receipt_refs=(),
+            knowledge_mode_by_table={},
+        )
+        return store.publish_bytes(
+            json.dumps(to_document(snapshot)).encode(),
+            schema_ref="snapshot_ref.v1.0")
+    monkeypatch.setattr("engine.v2.ops.snapshot_planning.resolve_snapshot_head", resolve)
 
 
 def _nightly_manifest_dict(note: str = "") -> dict:
@@ -144,6 +163,7 @@ def test_identical_resubmission_of_the_same_plan_returns_the_same_jobs(tmp_path)
 
 def test_operator_scenario_replan_after_manifest_change_gets_fresh_jobs_and_old_rows_survive(
         tmp_path, monkeypatch, capsys):
+    _stub_shadow_snapshot_head(monkeypatch)
     root = tmp_path / "ops"
     population_file = tmp_path / "population.json"
     population_file.write_text(json.dumps(["FAKE|TWIN-P|" + SESSION]))
@@ -166,7 +186,7 @@ def test_operator_scenario_replan_after_manifest_change_gets_fresh_jobs_and_old_
                      "--idempotency-key", "gen1"]) == 0
     submission_1 = json.loads(capsys.readouterr().out)
     gen1_job_ids = [job["job_id"] for job in submission_1["jobs"]]
-    assert len(gen1_job_ids) == 15  # the legacy-mode DAG (no snapshot materialize stage; P6-2 added "features"); + the planned restage job (#805)
+    assert len(gen1_job_ids) == 16  # the legacy-mode DAG (no snapshot materialize stage; P6-2 added "features"; + "nightly_preview_inputs"); + the planned restage job (#805)
 
     conn = open_catalog(root / "catalog.sqlite", clock=SystemClock())
     try:
@@ -196,7 +216,7 @@ def test_operator_scenario_replan_after_manifest_change_gets_fresh_jobs_and_old_
                      "--idempotency-key", "gen2"]) == 0
     submission_2 = json.loads(capsys.readouterr().out)
     gen2_job_ids = [job["job_id"] for job in submission_2["jobs"]]
-    assert len(gen2_job_ids) == 15
+    assert len(gen2_job_ids) == 16
     assert set(gen2_job_ids).isdisjoint(gen1_job_ids)
 
     conn = open_catalog(root / "catalog.sqlite", clock=SystemClock())
@@ -205,7 +225,7 @@ def test_operator_scenario_replan_after_manifest_change_gets_fresh_jobs_and_old_
             "SELECT job_id, state FROM jobs WHERE job_id IN (" +
             ",".join("?" * len(gen1_job_ids)) + ")", gen1_job_ids)}
         assert all(state in ("cancelled", "blocked") for state in rows.values())
-        assert conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 30
+        assert conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 32
     finally:
         conn.close()
 
@@ -216,6 +236,7 @@ def test_operator_scenario_replan_after_manifest_change_gets_fresh_jobs_and_old_
 
 
 def test_same_plan_different_cli_idempotency_key_is_still_a_retry(tmp_path, monkeypatch, capsys):
+    _stub_shadow_snapshot_head(monkeypatch)
     root = tmp_path / "ops"
     population_file = tmp_path / "population.json"
     population_file.write_text(json.dumps(["FAKE|TWIN-P|" + SESSION]))

@@ -479,6 +479,56 @@ def test_strict_cli_requires_known_strategies_before_building_scorer(monkeypatch
         main(["--strict-phase4-trace", "--strategies", "NOT-A-STRATEGY"])
 
 
+def test_strict_cli_opts_into_production_chooser_refs_and_forwards_them(
+        monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    class _GatherStopped(Exception):
+        pass
+
+    class _Heartbeat:
+        def start(self):
+            pass
+
+        def begin_stage(self, stage):
+            pass
+
+        def phase(self, name):
+            pass
+
+        def stop(self):
+            pass
+
+    resolver_calls = []
+    sentinel_refs = {("pred_im_t1_d14", "2026-09-01"): object()}
+    scorer_calls = []
+
+    def resolve_production(**kwargs):
+        resolver_calls.append(kwargs)
+        return SimpleNamespace(chooser_fold_references=sentinel_refs)
+
+    def build_scorer(**kwargs):
+        scorer_calls.append(kwargs)
+        return object()
+
+    def stopped(*args, **kwargs):
+        raise _GatherStopped()
+
+    monkeypatch.setattr(
+        "engine.v2.scoring.release_bindings.resolve_production_release_binding",
+        resolve_production,
+    )
+    monkeypatch.setattr("tools.capture_tier0_corpus.score_mod.Scorer", build_scorer)
+    monkeypatch.setattr("tools.capture_tier0_corpus.heartbeat", lambda: _Heartbeat())
+    monkeypatch.setattr("tools.capture_tier0_corpus._gather_candidates", stopped)
+
+    with pytest.raises(_GatherStopped):
+        main(["--strict-phase4-trace", "--out", str(tmp_path / "capture")])
+
+    assert resolver_calls == [{"include_chooser_fold_references": True}]
+    assert scorer_calls == [{"chooser_fold_references": sentinel_refs}]
+
+
 # --------------------------------------------------------------------------
 # R4-1: frozen-inference row assembly must read each binding's OWN per-role
 # captured feature vector, not the cross-role merged dict. Reproduces the
@@ -1111,11 +1161,398 @@ from engine.v2.scoring.source_inputs import (  # noqa: E402
 )
 from tools.capture_tier0_corpus import (  # noqa: E402
     CHOOSER_PRIMITIVE_COLUMNS,
+    validated_chooser_fold_references,
     frozen_source_declarations,
 )
-from tools.phase5_prepare_release import CHOOSER_POOL_ID  # noqa: E402
+from tools.phase5_prepare_release import (  # noqa: E402
+    CHOOSER_POOL_ID,
+    PrepareRefused,
+    with_chooser_retrain_cutoff,
+)
 
 FOLD = pd.Timestamp("2026-09-01")
+
+
+def test_phase5_prepare_release_sets_canonical_chooser_cutoff():
+    # The LATEST fold is inserted FIRST, before the earlier one: a "last
+    # mapping item wins" (or any constant) derivation would land on
+    # 2026-09-01 and fail every assertion below.
+    folds = {
+        "latest": SimpleNamespace(fold_start="2026-10-01"),
+        "early": SimpleNamespace(fold_start="2026-09-01"),
+    }
+    sources = {"pool_cutoff": "2026-11-01", "other": "preserved"}
+    assert with_chooser_retrain_cutoff(sources, folds) == {
+        **sources, "retrain_cutoff": "2026-10-01",
+    }
+    derived = with_chooser_retrain_cutoff({}, folds)
+    assert derived == {"retrain_cutoff": "2026-10-01"}
+    from engine.v2.models.release_layout import manifest_body, validate_catalog
+
+    catalog = manifest_body("chooser-only", "deployment-1", [], derived)
+    assert validate_catalog(catalog)["sources"] == derived
+    assert with_chooser_retrain_cutoff(sources, {}) is sources
+    with pytest.raises(PrepareRefused, match="chooser retrain_cutoff must match latest fold_start"):
+        with_chooser_retrain_cutoff({**sources, "retrain_cutoff": "2026-09-01"}, folds)
+    with pytest.raises(PrepareRefused, match="chooser pool_cutoff must be canonical and on/after retrain_cutoff"):
+        with_chooser_retrain_cutoff({**sources, "pool_cutoff": "2026-09-30"}, folds)
+    with pytest.raises(PrepareRefused, match="chooser pool_cutoff must be canonical and on/after retrain_cutoff"):
+        with_chooser_retrain_cutoff({**sources, "pool_cutoff": "20261001"}, folds)
+
+
+def test_chooser_only_catalog_remains_pool_bootstrap_eligible(tmp_path, monkeypatch):
+    from checks import phase5_release_assembly as assembly
+    from engine.v2.models.release_layout import manifest_body, validate_catalog
+
+    catalog = validate_catalog(manifest_body(
+        "chooser-only", "deployment-1", [], {"retrain_cutoff": "2026-10-01"}))
+    monkeypatch.setattr(assembly, "_load_catalog", lambda *args: catalog)
+    monkeypatch.setattr(assembly, "deployment_root", lambda root: tmp_path)
+    monkeypatch.setattr(assembly, "verify_staged", lambda *args: None)
+    monkeypatch.setattr(
+        assembly.deployment,
+        "resolve_release",
+        lambda *args: SimpleNamespace(deployment_id="deployment-1"),
+    )
+
+    assert assembly.classify_prior(tmp_path, "chooser-only").kind == assembly.PRIOR_NO_POOL_CATALOG
+
+
+@pytest.mark.parametrize(
+    "sources",
+    [
+        {"retrain_cutoff": "2026-09-01"},
+        {"retrain_cutoff": "2026-10-01", "pool_cutoff": "2026-09-01"},
+        {"retrain_cutoff": "2026-10-01", "pool_cutoff": None},
+    ],
+)
+def test_phase5_prepare_rejects_invalid_explicit_cutoffs_without_chooser_folds(sources):
+    with pytest.raises(
+        PrepareRefused,
+        match="retrain_cutoff requires canonical pool_cutoff",
+    ):
+        with_chooser_retrain_cutoff(sources, {})
+
+
+def test_phase5_prepare_rejects_explicit_retrain_without_pool_with_chooser_folds():
+    folds = {"fold": SimpleNamespace(fold_start="2026-10-01")}
+    with pytest.raises(
+        PrepareRefused,
+        match="retrain_cutoff requires canonical pool_cutoff",
+    ):
+        with_chooser_retrain_cutoff({"retrain_cutoff": "2026-10-01"}, folds)
+
+
+def test_phase5_catalog_rejects_explicit_null_pool_cutoff():
+    from engine.v2.models.release_layout import (
+        ReleaseLayoutError,
+        manifest_body,
+        validate_catalog,
+    )
+
+    body = manifest_body(
+        "chooser-only", "deployment-1", [],
+        {"retrain_cutoff": "2026-10-01", "pool_cutoff": None},
+    )
+    with pytest.raises(ReleaseLayoutError, match="invalid phase5 release sources cutoff"):
+        validate_catalog(body)
+
+
+def test_phase5_prepare_rejects_non_mapping_sources():
+    with pytest.raises(PrepareRefused, match="release sources must be a mapping"):
+        with_chooser_retrain_cutoff([], {})
+
+
+@pytest.mark.parametrize(
+    "sources",
+    [[], [("pool_cutoff", "2026-11-01")]],
+)
+def test_write_release_rejects_non_mapping_pinned_sources(tmp_path, monkeypatch, sources):
+    from tools import phase5_prepare_release as phase5
+
+    monkeypatch.setattr(
+        phase5,
+        "_rebase_member_paths",
+        lambda release, states, pinned_panel: (release, states),
+    )
+    with pytest.raises(PrepareRefused, match="release sources must be a mapping"):
+        phase5.write_release(
+            tmp_path / "release",
+            SimpleNamespace(),
+            None,
+            {},
+            [],
+            sources=sources,
+            pinned_panel=object(),
+        )
+
+
+def test_write_release_persists_chooser_cutoff(tmp_path, monkeypatch):
+    from tools import phase5_prepare_release as phase5
+
+    validated = {"fold": SimpleNamespace(fold_start="2026-09-01")}
+    sources = None
+    release = SimpleNamespace(release_id="release-1", deployment_id="deployment-1")
+    written = {}
+    monkeypatch.setattr(phase5, "_rebase_member_paths", lambda value, states, panel: (value, states))
+    monkeypatch.setattr(phase5, "_run_preflights", lambda value, states, panel, src: (src, {}, validated))
+    monkeypatch.setattr(phase5, "deployment_root", lambda out: tmp_path / "deployment")
+    monkeypatch.setattr(phase5.deployment, "invalidate_staging_success", lambda *args: None)
+    monkeypatch.setattr(phase5.deployment, "stage_release", lambda *args: None)
+    monkeypatch.setattr(phase5, "manifest_body", lambda rid, did, rows, src: {"sources": src})
+    monkeypatch.setattr(
+        phase5, "write_manifest",
+        lambda out, body, **kwargs: written.update(body=body) or out,
+    )
+    out = phase5.write_release(tmp_path / "release", release, None, {}, [], sources=sources)
+    assert out == tmp_path / "release"
+    assert written["body"]["sources"]["retrain_cutoff"] == "2026-09-01"
+    assert "pool_cutoff" not in written["body"]["sources"]
+
+
+def test_scorer_constructor_copies_chooser_fold_reference_map(monkeypatch):
+    references = {("pred_im_t1_d14", "2026-09-01"): object()}
+    monkeypatch.setattr(Scorer, "_enrich", lambda self, rows: rows)
+    monkeypatch.setattr(score_mod, "AnalogMatcher", lambda *args, **kwargs: object())
+    scorer = Scorer(
+        registry=SimpleNamespace(),
+        trades=pd.DataFrame({"provenance": ["synthetic"]}),
+        context=SimpleNamespace(calendar=object()), snapshot="snapshot-1",
+        trade_provenance="synthetic", chooser_fold_references=references,
+    )
+    assert scorer._chooser_fold_references == references
+    assert scorer._chooser_fold_references is not references
+
+
+def test_chooser_fold_reference_flows_through_real_scorer_checkpoint(tmp_path, monkeypatch):
+    payload = b"synthetic served fold"
+    path = tmp_path / "fold.bin"
+    path.write_bytes(payload)
+    digest = hashlib.sha256(payload).hexdigest()
+    model_id = "implied_t1_synthetic"
+    reference = SimpleNamespace(
+        producer_output="pred_im_t1_d14", descriptor_hash="sha256:" + "a" * 64,
+        estimator_sha256="sha256:" + digest, training_cutoff="2026-09-01", release_id="release-1",
+        carrying_release_id="release-2",
+        fold_start="2026-09-01",
+        release_binding=SimpleNamespace(
+            binding_id="implied_t1:STR-THRU", model_id=model_id, role="implied_t1",
+            strategy_id="STR-THRU", decision_clock_id="entry-close", adapter="ridge.v1",
+            feature_order=("im",), output_names=("driver_prediction",),
+            artifact_hash="sha256:" + "b" * 64),
+    )
+    served = SimpleNamespace(
+        model_id=model_id, fold_start=FOLD, tier3_snapshot="snapshot-1",
+        features=("im",), pool_pred=[1.0], pool_res=[0.1], interval_floor=0.0,
+        artifact_ref=lambda: (path, digest),
+    )
+    runup_payload = b"synthetic runup fold"
+    runup_path = tmp_path / "runup_fold.bin"
+    runup_path.write_bytes(runup_payload)
+    runup_digest = hashlib.sha256(runup_payload).hexdigest()
+    runup_model_id = "runup_move_synthetic"
+    runup_reference = SimpleNamespace(
+        producer_output="pred_runup_abs_move_d14",
+        descriptor_hash="sha256:" + "e" * 64,
+        estimator_sha256="sha256:" + runup_digest, training_cutoff="2026-08-01",
+        release_id="release-1", carrying_release_id="release-1", fold_start="2026-08-01",
+        release_binding=SimpleNamespace(
+            binding_id="runup_move:STR-THRU", model_id=runup_model_id,
+            role="runup_move", strategy_id="STR-THRU",
+            decision_clock_id="entry-close", adapter="ridge.v1",
+            feature_order=("im",), output_names=("pred_runup_abs_move_d14",),
+            artifact_hash="sha256:" + "f" * 64),
+    )
+    runup_served = SimpleNamespace(
+        model_id=runup_model_id, fold_start=pd.Timestamp("2026-08-01"),
+        tier3_snapshot="snapshot-1", features=("im",), pool_pred=[1.0],
+        pool_res=[0.1], interval_floor=0.0,
+        artifact_ref=lambda: (runup_path, runup_digest),
+    )
+    collector = _collector()
+    scorer = object.__new__(Scorer)
+    scorer._chooser_fold_references = {
+        ("pred_im_t1_d14", "2026-09-01"): reference,
+        ("pred_runup_abs_move_d14", "2026-08-01"): runup_reference,
+    }
+    request = ScoreRequest(ticker="AAA", strategy="STR-THRU",
+                           as_of=pd.Timestamp("2026-09-16"),
+                           event_date=pd.Timestamp("2026-09-17"))
+    result = SimpleNamespace(
+        _phase4_checkpoint_collector=collector,
+        _phase4_chooser_served=[("pred_im_t1_d14", served),
+                                ("pred_runup_abs_move_d14", runup_served)],
+    )
+    scorer._phase4_record_chooser(
+        request, result, pd.DataFrame({"im": [0.5]}), SimpleNamespace(),
+        SimpleNamespace(), {},
+    )
+    source = _source_of(_candidate(collector))
+    captured = validated_chooser_fold_references(source, _request())
+    assert set(captured) == {"pred_im_t1_d14", "pred_runup_abs_move_d14"}
+    assert captured["pred_im_t1_d14"]["descriptor_hash"] == reference.descriptor_hash
+    assert captured["pred_im_t1_d14"]["fold_start"] == "2026-09-01"
+    assert captured["pred_runup_abs_move_d14"]["descriptor_hash"] == runup_reference.descriptor_hash
+    assert captured["pred_runup_abs_move_d14"]["fold_start"] == "2026-08-01"
+    boundary_request = SimpleNamespace(requested_decision_at="2026-09-01")
+    boundary_refs = validated_chooser_fold_references(source, boundary_request)
+    assert boundary_refs["pred_im_t1_d14"]["fold_start"] == "2026-09-01"
+    assert boundary_refs["pred_runup_abs_move_d14"]["fold_start"] == "2026-08-01"
+    invalid_release_ids = (None, "", "/x", ".", "..", 123, "\x00")
+    for output in ("pred_im_t1_d14", "pred_runup_abs_move_d14"):
+        for field in ("release_id", "carrying_release_id"):
+            for invalid_id in invalid_release_ids:
+                malformed_source = copy.deepcopy(source)
+                malformed_source["frozen"]["chooser_references"][output][
+                    field
+                ] = invalid_id
+                with pytest.raises(
+                    StrictTraceCaptureError,
+                    match="chooser ref has invalid release id",
+                ):
+                    validated_chooser_fold_references(malformed_source, _request())
+    backslash_source = copy.deepcopy(source)
+    backslash_reference = backslash_source["frozen"]["chooser_references"][
+        "pred_im_t1_d14"
+    ]
+    backslash_reference["release_id"] = r"a\b"
+    backslash_reference["carrying_release_id"] = r"a\b"
+    preserved = validated_chooser_fold_references(backslash_source, _request())
+    assert preserved["pred_im_t1_d14"]["release_id"] == r"a\b"
+    assert preserved["pred_im_t1_d14"]["carrying_release_id"] == r"a\b"
+    with pytest.raises(StrictTraceCaptureError, match="mismatches served producer"):
+        validated_chooser_fold_references(
+            source, SimpleNamespace(requested_decision_at="2026-08-31"))
+    with pytest.raises(StrictTraceCaptureError, match="chooser refs lack declarations"):
+        validated_chooser_fold_references(
+            {"frozen": {"chooser_references": {"orphan": {}}}}, _request())
+    with pytest.raises(StrictTraceCaptureError, match="chooser refs do not cover producers"):
+        validated_chooser_fold_references({"frozen": {
+            "declarations": {"chooser_fold:pred_im_t1_d14": {
+                "binding": "fold:implied_t1", "output": "pred_im_t1_d14"}},
+            "bindings": {}, "chooser_references": {},
+        }}, _request())
+    from tools import capture_tier0_corpus as capture
+
+    observed = {}
+    monkeypatch.setattr(capture, "native_inputs_from_capture", lambda *args, **kwargs: ({}, {}))
+    monkeypatch.setattr(capture, "resolve_stored_forecasts", lambda base: None)
+    monkeypatch.setattr(
+        capture, "package_strict_trace",
+        lambda *args, **kwargs: observed.update(kwargs["metadata"]) or {},
+    )
+    candidate = _candidate(collector)
+    candidate.update({"event_id": "AAA_2026-09-17", "request": request_to_dict(request)})
+    strict_trace_one(candidate, "snapshot-1", tmp_path / "release")
+    assert observed["chooser_fold_references"] == captured
+
+    def _ref_doc(ref):
+        identity = ref.release_binding
+        return {
+            "producer_output": ref.producer_output,
+            "descriptor_hash": ref.descriptor_hash,
+            "estimator_sha256": ref.estimator_sha256,
+            "training_cutoff": ref.training_cutoff,
+            "release_id": ref.release_id,
+            "carrying_release_id": ref.carrying_release_id,
+            "fold_start": ref.fold_start,
+            "release_binding": {
+                "binding_id": identity.binding_id,
+                "model_id": identity.model_id,
+                "role": identity.role,
+                "strategy_id": identity.strategy_id,
+                "decision_clock_id": identity.decision_clock_id,
+                "adapter": identity.adapter,
+                "feature_order": list(identity.feature_order),
+                "output_names": list(identity.output_names),
+                "artifact_hash": identity.artifact_hash,
+            },
+        }
+
+    assert observed["chooser_fold_references"] == {
+        "pred_im_t1_d14": _ref_doc(reference),
+        "pred_runup_abs_move_d14": _ref_doc(runup_reference),
+    }
+    observed_references = observed["chooser_fold_references"]
+    assert observed_references["pred_im_t1_d14"]["release_id"] == "release-1"
+    assert observed_references["pred_im_t1_d14"]["carrying_release_id"] == "release-2"
+    assert observed_references["pred_runup_abs_move_d14"]["release_id"] == "release-1"
+    assert observed_references["pred_runup_abs_move_d14"][
+        "carrying_release_id"
+    ] == "release-1"
+
+    corrupted_candidate = copy.deepcopy(candidate)
+    corrupted_source = corrupted_candidate["legacy_trace"]["checkpoints"]["source_inputs"]["value"]
+    corrupted_source["frozen"]["chooser_references"]["pred_im_t1_d14"]["estimator_sha256"] = "sha256:" + "c" * 64
+    corrupted_candidate["legacy_trace"]["checkpoints"]["source_inputs"]["content_hash"] = content_hash(corrupted_source)
+    with pytest.raises(StrictTraceCaptureError, match="mismatches served producer"):
+        strict_trace_one(corrupted_candidate, "snapshot-1", tmp_path / "release")
+
+    corrupted_identity_candidate = copy.deepcopy(candidate)
+    corrupted_identity_source = corrupted_identity_candidate[
+        "legacy_trace"]["checkpoints"]["source_inputs"]["value"]
+    corrupted_identity_source["frozen"]["chooser_references"][
+        "pred_im_t1_d14"]["release_binding"]["feature_order"] = ["wrong_feature"]
+    corrupted_identity_candidate["legacy_trace"]["checkpoints"][
+        "source_inputs"]["content_hash"] = content_hash(corrupted_identity_source)
+    with pytest.raises(StrictTraceCaptureError, match="mismatches served producer"):
+        strict_trace_one(corrupted_identity_candidate, "snapshot-1", tmp_path / "release")
+
+    for field, value in (
+        ("binding_id", "tampered:STR-THRU"),
+        ("strategy_id", "OTHER"),
+        ("adapter", "tampered.adapter"),
+        ("output_names", ["other_output"]),
+        ("feature_order", 17),
+    ):
+        corrupted_binding_candidate = copy.deepcopy(candidate)
+        corrupted_binding_source = corrupted_binding_candidate[
+            "legacy_trace"]["checkpoints"]["source_inputs"]["value"]
+        corrupted_binding_source["frozen"]["chooser_references"][
+            "pred_im_t1_d14"]["release_binding"][field] = value
+        corrupted_binding_candidate["legacy_trace"]["checkpoints"][
+            "source_inputs"]["content_hash"] = content_hash(corrupted_binding_source)
+        with pytest.raises(StrictTraceCaptureError, match="mismatches served producer"):
+            strict_trace_one(corrupted_binding_candidate, "snapshot-1", tmp_path / "release")
+
+    malformed_binding_candidate = copy.deepcopy(candidate)
+    malformed_binding_source = malformed_binding_candidate[
+        "legacy_trace"]["checkpoints"]["source_inputs"]["value"]
+    malformed_binding_source["frozen"]["declarations"][
+        "chooser_fold:pred_im_t1_d14"]["binding"] = ["unhashable"]
+    malformed_binding_candidate["legacy_trace"]["checkpoints"][
+        "source_inputs"]["content_hash"] = content_hash(malformed_binding_source)
+    with pytest.raises(
+        StrictTraceCaptureError, match="chooser producer binding key must be a string"
+    ):
+        strict_trace_one(malformed_binding_candidate, "snapshot-1", tmp_path / "release")
+
+    empty_candidate = _candidate(_collector())
+    empty_candidate.update({"event_id": "AAA_2026-09-17", "request": request_to_dict(request)})
+    strict_trace_one(empty_candidate, "snapshot-1", tmp_path / "release")
+    assert observed["chooser_fold_references"] is None
+    corrupted = copy.deepcopy(source)
+    corrupted["frozen"]["chooser_references"]["pred_im_t1_d14"]["estimator_sha256"] = "sha256:" + "c" * 64
+    with pytest.raises(StrictTraceCaptureError, match="mismatches served producer"):
+        validated_chooser_fold_references(corrupted, _request())
+    with pytest.raises(StrictTraceCaptureError, match="chooser ref has invalid dates"):
+        validated_chooser_fold_references(source, SimpleNamespace(requested_decision_at=None))
+
+
+@pytest.mark.parametrize("field", ["declarations", "bindings", "chooser_references"])
+def test_validated_chooser_fold_references_requires_mappings(field):
+    source = {"frozen": {field: []}}
+    with pytest.raises(
+        StrictTraceCaptureError, match=f"chooser {field} must be a mapping"
+    ):
+        validated_chooser_fold_references(source, _request())
+
+
+def test_validated_chooser_fold_references_ignores_size_only_declaration():
+    source = {"frozen": {
+        "declarations": {"chooser_fold:pred_abs_move": {"pool": "pred_abs_move"}},
+    }}
+    assert validated_chooser_fold_references(source, _request()) is None
 
 
 def _sha(path) -> str:

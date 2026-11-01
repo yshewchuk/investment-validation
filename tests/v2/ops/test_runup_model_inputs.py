@@ -6,7 +6,9 @@ import pytest
 from engine.v2.models.no_fit import no_fit_guard
 from engine.v2.models.payoff_artifact import make_payoff_line_artifact
 from engine.v2.ops import native_score_batch as batch
+from engine.v2.ops.native_runup_inputs import _surface
 from engine.v2.scoring.native_residuals import driver_pool_from_artifact
+from engine.v2.scoring.nightly_source_bundle import NightlySourceBundleRefusal
 from engine.v2.scoring.release_bindings import ModelNotReady, resolve_release_binding
 from tests.v2.ops.runup_helpers import pool, state_row, surface
 from tests.v2.ops.test_native_driver_declarations import (
@@ -44,19 +46,25 @@ def _build(binding, event=None, **kwargs):
     return rows, refusals, event
 
 
-_SURFACE_MISSING_DETAIL = (
-    "nightly_source_bundle refused: MODEL_NOT_READY: RUNUP payoff surface missing")
+_SURFACE_MISSING_DETAIL = "RUNUP has no eligible payoff surface"
 _SURFACE_UNUSABLE_DETAIL = (
     "nightly_source_bundle refused: MODEL_NOT_READY: RUNUP payoff surface unusable")
-_SURFACE_DUPLICATE_DETAIL = (
-    "nightly_source_bundle refused: MODEL_NOT_READY: duplicate RUNUP payoff surface")
+_SURFACE_DUPLICATE_DETAIL = "RUNUP has duplicate latest payoff surfaces"
 
 
 def _assert_model_refusal(binding, detail="nightly_source_bundle refused: MODEL_NOT_READY: RUNUP champion pool missing or unusable"):
     rows, refusals, event = _build(binding)
     assert rows == {}
+    batch_detail = detail
+    if detail in (_SURFACE_MISSING_DETAIL, _SURFACE_DUPLICATE_DETAIL):
+        batch_detail = "nightly_source_bundle refused: MODEL_NOT_READY"
     assert [(item.key, item.code, item.detail) for item in refusals] == [(
-        event.key, "MODEL_NOT_READY", detail)]
+        event.key, "MODEL_NOT_READY", batch_detail)]
+    if detail in (_SURFACE_MISSING_DETAIL, _SURFACE_DUPLICATE_DETAIL):
+        with pytest.raises(NightlySourceBundleRefusal) as error:
+            _surface(binding, cutoff="2026-01-09", fill_alpha=0.5)
+        assert error.value.code == "MODEL_NOT_READY"
+        assert error.value.detail == detail
 
 
 @pytest.mark.parametrize("reverse", [False, True])
@@ -72,7 +80,7 @@ def test_both_verified_pools_surface_and_simulation_contract_survive(tmp_path, r
         slot: {"role": item.role, "model_id": item.model_id, "fold": None,
                "content_hash": item.content_hash} for slot, item in expected_pools.items()}
     assert inputs.model["payoff_artifact"] == surface()
-    assert inputs.model["payoff_recipe"] == {"before": "2026-01-09"}
+    assert inputs.model["payoff_recipe"] == {"before": "2026-01-09", "bound_cutoff": "2026-01-09"}
     assert inputs.simulation == {"mode": "not_applicable"}
     assert "recalibration_artifact" not in inputs.model
     assert inputs.analogs == {"recipe": None}
@@ -171,7 +179,6 @@ def test_surface_selection_ignores_line_and_other_keys_regardless_of_order(tmp_p
 @pytest.mark.parametrize("candidates,expected_detail", [
     ([_line()], _SURFACE_MISSING_DETAIL),
     ([surface(alpha=0.6)], _SURFACE_MISSING_DETAIL),
-    ([surface(cutoff="2026-01-08")], _SURFACE_MISSING_DETAIL),
     ([surface(cutoff="2026-01-10")], _SURFACE_MISSING_DETAIL),
     ([surface(cutoff=None)], _SURFACE_MISSING_DETAIL),
     ([surface(strategy="STR-THRU")], _SURFACE_MISSING_DETAIL),
@@ -197,7 +204,7 @@ def test_surface_cutoff_is_minimum_of_validated_decision_and_entry(tmp_path, as_
     binding = _binding(tmp_path, surfaces=[surface(cutoff=expected)])
     rows, refused, _ = _build(binding, event, as_of=as_of)
     assert refused == ()
-    assert rows[event.key][1].model["payoff_recipe"] == {"before": expected}
+    assert rows[event.key][1].model["payoff_recipe"] == {"before": expected, "bound_cutoff": expected}
 
 
 def test_exact_driver_pool_is_required_even_with_a_healthy_alias_pool(tmp_path):

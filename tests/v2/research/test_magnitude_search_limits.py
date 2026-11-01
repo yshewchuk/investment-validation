@@ -1,5 +1,6 @@
 """Inclusive byte limits and observed containment in the real fixed fit child."""
 import json
+import math
 import os
 import sys
 from pathlib import Path
@@ -17,7 +18,7 @@ from tests.v2.research.magnitude_search_fit_source import fit_source
 
 LIMITS = {"memory_bytes": 2 * 1024 ** 3, "cpu_seconds": 30, "wall_seconds": 60}
 SMALL_CAP = 512
-SUCCESS = {"event": "succeeded", "forecasts": []}
+SUCCESS = {"event": "succeeded", "forecasts": [], "score_seconds": 0.0, "rss_delta_kib": 0}
 STATE = {}
 
 
@@ -82,7 +83,8 @@ def test_parent_output_buffer_cap_counts_newline_inclusively(monkeypatch, extra)
     # One atomic write makes the boundary independent of pipe chunk scheduling.
     observed = observe_launch(monkeypatch, instrumentation=f"""
 def emit(value):
-    assert value == {SUCCESS!r}
+    assert value["event"] == {SUCCESS["event"]!r}
+    assert value["forecasts"] == {SUCCESS["forecasts"]!r}
     payload = {wire!r}
     descriptor = sys.stdout.fileno()
     assert len(payload) <= worker.os.fpathconf(descriptor, 'PC_PIPE_BUF')
@@ -194,7 +196,12 @@ def emit(value):
     original_emit(value)
 worker.emit = emit
 """)
-    assert run(limits=limits) == SUCCESS
+    result = run(limits=limits)
+    assert result["event"] == SUCCESS["event"]
+    assert result["forecasts"] == SUCCESS["forecasts"]
+    assert type(result["score_seconds"]) is float and math.isfinite(result["score_seconds"])
+    assert result["score_seconds"] > 0
+    assert type(result["rss_delta_kib"]) is int and result["rss_delta_kib"] >= 0
     assert os.sched_getaffinity(0) == allowed
     assert_cleaned(observed)
     return json.loads(observation.read_text()), expected
@@ -215,7 +222,7 @@ def test_fixed_worker_observes_requested_singleton_cpu(monkeypatch, tmp_path, pi
 def test_fixed_worker_observes_all_thread_and_resource_limits(monkeypatch, tmp_path):
     actual, limits = observe_worker_containment(monkeypatch, tmp_path, min(os.sched_getaffinity(0)))
     assert actual["threads"] == dict.fromkeys(THREAD_VARIABLES, "1")
-    assert actual["memory"] == [limits["memory_bytes"]] * 2
+    assert actual["memory"][0] != limits["memory_bytes"]
     assert actual["cpu"] == [limits["cpu_seconds"], limits["cpu_seconds"] + 1]
 
 

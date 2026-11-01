@@ -4,8 +4,10 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import sqlite3
 import time
+from collections.abc import Mapping
 from pathlib import Path
 
 from engine.v2.foundation import (
@@ -861,13 +863,51 @@ def _computed_moves_capture_report(dry_run, targets, cache):
     }
 
 
-def computed_moves_command(args, root, conn, clock, *, history=None, include_source_bounds=False):
+def _check_history_pair(history):
+    if history is not None and (not isinstance(history, tuple) or len(history) != 2
+                                or not isinstance(history[0], Mapping) or not callable(history[1])):
+        raise fail("INVALID_REQUEST", "history must be a (cache, fetch) pair")
+
+
+def _objects_path(root, objects_root):
+    if objects_root is not None and not isinstance(objects_root, (str, os.PathLike)):
+        raise fail("INVALID_REQUEST", "objects_root must be a path")
+    return Path(root if objects_root is None else objects_root)
+
+
+def _resolve_history(history, source_root):
+    from engine.v2.ops import computed_moves_store
+
+    if history is not None:
+        return history
+    return computed_moves_store.tier1_yfinance_history_fetcher(source_root)
+
+
+def _stage_refresh_input(root, args, plan, parent_receipt_id, as_of, objects_root):
+    from engine.v2.ops import computed_moves_store
+
+    document = {
+        "catalog_path": str(root / "catalog.sqlite"),
+        "objects_root": str(objects_root),
+        "scope": args.scope,
+        "expected_head_generation": plan.expected_head_generation,
+        "expected_head_snapshot_id": plan.parent_snapshot_id,
+        "parent_receipt_id": parent_receipt_id,
+        "as_of": as_of,
+    }
+    (root / computed_moves_store.INPUT_PATH).write_text(canonical_json(document))
+
+
+def computed_moves_command(args, root, conn, clock, *, history=None, include_source_bounds=False,
+                           objects_root=None):
     """Tier-1 computed_moves.v5 generation; ``history`` is an optional ``(cache, fetch)`` pair (default newest-wins).
 
     ``include_source_bounds`` (bool) goes to the refresh; with either option the report adds ``parent_snapshot_id``.
+    ``objects_root`` (path, default ``root``) names the artifact store; a non-path refuses ``INVALID_REQUEST``.
     """
     if type(include_source_bounds) is not bool:
         raise fail("INVALID_REQUEST", "include_source_bounds must be boolean")
+    objects_root = _objects_path(root, objects_root)
     from engine.v2.data.repository import Repository
     from engine.v2.ops import computed_moves_store
     from engine.v2.ops.calendar_moves_jobs import CalendarMovesParameters
@@ -878,18 +918,19 @@ def computed_moves_command(args, root, conn, clock, *, history=None, include_sou
         raise fail("INVALID_REQUEST", "--source-root must be an existing directory",
                    details={"source_root": str(args.source_root)})
     as_of = computed_moves_store._as_of_day(args.as_of)
+    _check_history_pair(history)
     lock = SupervisorLock(root / "supervisor.lock")
     if not lock.acquire():
         raise fail("RESOURCE_UNAVAILABLE", "a running supervisor holds this catalog")
     try:
-        cache, fetcher = history or computed_moves_store.tier1_yfinance_history_fetcher(args.source_root)
+        cache, fetcher = _resolve_history(history, args.source_root)
         head = conn.execute(
             "SELECT snapshot_id, generation FROM data_snapshot_heads WHERE scope = ?",
             (args.scope,)).fetchone()
         if head is None:
             raise fail("SNAPSHOT_NOT_READY", "scope has no existing snapshot head",
                        details={"scope": args.scope})
-        store = ArtifactStore(root)
+        store = ArtifactStore(objects_root)
         repository = Repository(conn, store, pin_snapshots=True)
         parent = repository.resolve(head["snapshot_id"])
         parent_receipt_id = computed_moves_store.parent_receipt_id_for_snapshot(
@@ -908,26 +949,15 @@ def computed_moves_command(args, root, conn, clock, *, history=None, include_sou
         if args.dry_run:
             return report
 
-        catalog_path = str(root / "catalog.sqlite")
-        objects_root = str(root)
-        document = {
-            "catalog_path": catalog_path,
-            "objects_root": objects_root,
-            "scope": args.scope,
-            "expected_head_generation": plan.expected_head_generation,
-            "expected_head_snapshot_id": plan.parent_snapshot_id,
-            "parent_receipt_id": parent_receipt_id,
-            "as_of": as_of,
-        }
-        (root / computed_moves_store.INPUT_PATH).write_text(canonical_json(document))
+        _stage_refresh_input(root, args, plan, parent_receipt_id, as_of, objects_root)
         parameters = CalendarMovesParameters(
             expected_ids=tuple(sorted(targets)),
             parent_snapshot_id=plan.parent_snapshot_id,
             parent_receipt_id=parent_receipt_id,
             refresh_plan_hash=plan.plan_hash,
             provider_calls=plan.provider_calls,
-            catalog_path=catalog_path,
-            objects_root=objects_root,
+            catalog_path=str(root / "catalog.sqlite"),
+            objects_root=str(objects_root),
             scope=args.scope,
             expected_head_generation=plan.expected_head_generation,
             expected_head_snapshot_id=plan.parent_snapshot_id,

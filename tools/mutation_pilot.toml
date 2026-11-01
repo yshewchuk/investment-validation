@@ -318,6 +318,7 @@ why = "The shared native-vs-legacy per-dimension comparator and field groups: a 
 mutate = [
     "engine/v2/parity/__init__.py",
     "engine/v2/parity/dimensions.py",
+    "engine/v2/parity/financial_diagnostics.py",
 ]
 tests = [
     "tests/test_v2_ops_native*.py",
@@ -325,6 +326,7 @@ tests = [
     "tests/test_phase4_numeric_negative_control_states.py",
     "tests/test_phase4_acceptance_independence.py",
     "tests/v2/scoring/test_v2_scoring_native_entry_rule.py",
+    "tests/v2/ops/test_native_parity_entry_cost_pct.py",
 ]
 
 [modules.data_store]
@@ -493,7 +495,7 @@ tests = [
     "tests/test_v2_models_recalibration_artifact.py",
     "tests/test_v2_models_residual_artifact.py",
     "tests/test_v2_models_training_payoff.py",
-    "tests/test_v2_models_training_recipes.py",
+    "tests/v2/models/training/test_v2_models_training_recipes.py",
     "tests/v2/models/training/test_v2_models_training_recipe_fields.py",
     "tests/v2/scoring/test_v2_scoring_frozen_residuals.py",
     "tests/v2/scoring/test_driver_residual_array_cache.py",
@@ -1118,6 +1120,7 @@ mutate = [
     "engine/v2/ops/native/*.py",
     "engine/v2/ops/core/*.py",
     "engine/v2/ops/stores/*.py",
+    "engine/v2/ops/workspace/*.py",
     "engine/v2/ops/carried_set.py",
     "engine/v2/ops/stages.py",
     "engine/v2/ops/plans.py",

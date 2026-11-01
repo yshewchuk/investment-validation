@@ -204,7 +204,7 @@ def test_assembler_retains_frozen_pool_surface_and_executor_recipes(stage_releas
     assert refusals == ()
     request, inputs = assembled[event.key]
     assert inputs.model == {
-        "payoff_recipe": {"before": AS_OF}, "payoff_artifact": payoff,
+        "payoff_recipe": {"before": AS_OF, "bound_cutoff": AS_OF}, "payoff_artifact": payoff,
         "model_residual_artifacts": pools,
         "model_residual_artifact_recipe": {
             slot: {"role": artifact.role, "model_id": artifact.model_id,

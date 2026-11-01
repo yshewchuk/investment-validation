@@ -37,7 +37,7 @@ def inject_child(monkeypatch, body):
     """Inject only a synthetic estimator failure into an otherwise real fixed child."""
     original = subprocess.Popen
     children = []
-    script = ("import sys; sys.argv = sys.argv[1:]; from experiments import magnitude_fitted as fitted; "
+    script = ("import sys; sys.argv = sys.argv[1:]; from engine.v2.models.training import magnitude as fitted; "
               + "exec(" + repr(body) + "); fitted.fit_magnitude_predictions = injected; "
               "from experiments.magnitude_search_worker import main; main()")
     def launch(args, **kwargs):

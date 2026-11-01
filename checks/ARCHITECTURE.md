@@ -29,6 +29,15 @@ receipt order and returns fresh dictionaries with the same three fields.
 progress and subprocess orchestration remain there; Phase-2 evidence and the
 synthetic Phase-0 controls import the support module directly.
 
+`tools.capture_tier0_corpus.strict_trace_one` consumes chooser-fold
+references already verified by `engine.v2.scoring.release_bindings`; it does
+not resolve catalogs. It validates each reference against the legacy scorer's
+recorded producer binding and the canonical request decision date, then stores
+the map in trace metadata. A declared producer fold without its matching
+verified reference refuses strict capture. Orphan references, incomplete
+producer coverage and invalid fold or request dates also refuse with
+`StrictTraceCaptureError`.
+
 The test selector maps changed paths through `checks/layer_map.py`, then
 selects tests for those packages and their allowed importers. Unsafe or
 unmapped input selects the full suite.
@@ -103,6 +112,11 @@ check defines missing-input and failure outcomes:
 | Budget decreases without root-test moves | Pass only when the new budget equals the current root-test count; increases remain refused |
 | A phase-one baseline test cannot be found | `phase1_suite()` raises `FileNotFoundError` |
 | Tier-0 support gets an invalid record/receipt | Existing copy, rounding or attribute errors propagate; no retry, cache, transaction or partial writes |
+| The opted-in production resolver cannot resolve a chooser binding | Refuse with `ReleaseBindingError` |
+| A required chooser retrain cutoff is missing or invalid | Refuse with `ModelNotReady` |
+| A strict trace has missing/mismatched chooser-fold provenance (including release-binding identity, release ids or output name), orphan references, incomplete producer coverage or invalid dates | `strict_trace_one` raises `StrictTraceCaptureError` before packaging the trace |
+| Phase 4 replay checkpoint scope differs (corpus hash, full staged manifest or replay validation version) | `_load_checkpoint` discards all rows; replay recomputes those pairs |
+| Malformed or duplicate staged size-fold catalog, including a descriptor in an unselected month | Chooser replay refuses that pair's replay; the full size catalog is validated before the requested month is selected and loaded with the catalog's byte bound |
 
 ## Invariants
 

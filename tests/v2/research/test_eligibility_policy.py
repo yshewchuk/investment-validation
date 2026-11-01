@@ -127,9 +127,7 @@ def test_policy_literal_identity_and_no_default():
         "group_key": "event_id", "window_key": "ticker", "applies_to": "development",
         "evaluation": "preserve_membership", "policy_id": "sha256:dff629fde866872115a22f90305909b9f7176451439a3cc8f27e3e884c22376c"}
     assert policy == expected
-    corrupted = {**policy, "embargo_days": 31}
-    with pytest.raises(AssertionError):
-        assert corrupted == expected
+    assert eligibility.eligibility_policy(version=VERSION, embargo_days=31)["policy_id"] != expected["policy_id"]
     with pytest.raises(TypeError):
         eligibility.eligibility_policy(version=VERSION)
 
@@ -264,22 +262,120 @@ def test_canonical_population_not_caller_claim(tmp_path, monkeypatch, field, val
         conn.close()
 
 
-@pytest.mark.parametrize("case", ["ambiguous", "evaluation", "overflow"])
+@pytest.mark.parametrize("case", ["evaluation", "overflow"])
 def test_independent_window_and_evaluation_refusals(tmp_path, monkeypatch, case):
     event = history_event("2024-06-14", protected=True)
     conn, repository, snapshot, _ = setup(tmp_path, monkeypatch, [event])
     try:
         assert plan(repository, snapshot, [], evaluation=[event["event_id"]])["evaluation_event_ids"] == [event["event_id"]]
-        if case == "ambiguous":
-            original = eligibility.canonical_events
-            def ambiguous(repository, snapshot):
-                rows = original(repository, snapshot)
-                rows.loc[0, "date_conflict"] = True
-                return rows
-            monkeypatch.setattr(eligibility, "canonical_events", ambiguous)
         with refuses("HOLDOUT_ACCESS_DENIED", ("evaluation membership cannot be resolved" if case == "evaluation" else "random holdout window bounds cannot be established")):
             plan(repository, snapshot, [], evaluation=["missing"] if case == "evaluation" else [],
                  days=10**20 if case == "overflow" else 30)
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("field,value", [("date_conflict", True), ("session", float("nan"))])
+def test_ambiguous_random_metadata_keeps_membership_and_excludes_same_ticker(tmp_path, monkeypatch, field, value):
+    held = history_event("2024-06-14", protected=True)
+    dev = history_event("2024-11-01")
+    other = history_event("2024-06-14", ticker="OTHER")
+    events = [held, dev, other]
+    conn, repository, snapshot, _ = setup(tmp_path, monkeypatch, events)
+    try:
+        original = eligibility.canonical_events
+        def ambiguous(repository, snapshot):
+            rows = original(repository, snapshot)
+            rows.loc[rows["event_id"] == held["event_id"], field] = value
+            return rows
+        monkeypatch.setattr(eligibility, "canonical_events", ambiguous)
+        groups = [group(e) for e in events]
+        result = plan(repository, snapshot, groups, evaluation=[held["event_id"], dev["event_id"], other["event_id"]])
+        assert "ambiguous_random_events" in result
+        assert result["ambiguous_random_events"] == [held["event_id"]]
+        assert result["random_windows"] == [{"ticker": "SYNTH", "start": "0001-01-01", "end": "9999-12-31"}]
+        exclusions = {ex["event_id"]: ex["reasons"] for ex in result["exclusions"]}
+        assert held["event_id"] in exclusions
+        assert dev["event_id"] in exclusions
+        for eid in (held["event_id"], dev["event_id"]):
+            assert any(r.startswith("embargo_") for r in exclusions[eid])
+        assert "random" in exclusions[held["event_id"]]
+        assert "ambiguous" in exclusions[held["event_id"]]
+        assert sum(1 for ex in result["exclusions"] if "random" in ex["reasons"]) == 1
+        assert result["exclusions"] == [
+            {"event_id": held["event_id"], "reasons": ["ambiguous", "random", "embargo_decision_date",
+                "embargo_event_window", "embargo_label_window", "embargo_source_session_ceiling"]},
+            {"event_id": dev["event_id"], "reasons": ["embargo_decision_date", "embargo_event_window",
+                "embargo_label_window", "embargo_source_session_ceiling"]}]
+        assert held["event_id"] not in result["retained_event_ids"]
+        assert dev["event_id"] not in result["retained_event_ids"]
+        assert result["retained_event_ids"] == [other["event_id"]]
+        assert result["evaluation_event_ids"] == [other["event_id"]]
+        assert result["evaluation_exclusions"] == [
+            {"event_id": held["event_id"], "reasons": ["embargo_ticker"]},
+            {"event_id": dev["event_id"], "reasons": ["embargo_ticker"]}]
+        assert result["coverage"] == {"development_groups": 3, "retained_groups": 1,
+            "excluded_groups": 2, "evaluation_groups": 1}
+        assert result["plan_id"] == content_hash({key: value for key, value in result.items() if key != "plan_id"})
+    finally:
+        conn.close()
+
+
+def test_public_path_negative_control(tmp_path, monkeypatch):
+    """A structurally ambiguous event with non-random membership creates no random window."""
+    from engine.v2.foundation.experiment_holdouts import ExperimentHoldouts
+
+    held = history_event("2024-06-14", protected=True)
+    dev = history_event("2024-11-01")
+    held["date_conflict"] = True
+    for prefix, event in (("AMBIGUOUS", held), ("DEVELOPMENT", dev)):
+        for i in range(100):
+            candidate = f"{prefix}:{i}"
+            if not ExperimentHoldouts.random_membership(candidate):
+                event["event_id"] = candidate
+                break
+    conn, repository, snapshot, _ = setup(tmp_path, monkeypatch, [held, dev])
+    try:
+        result = plan(repository, snapshot, [group(dev), group(held)],
+                      evaluation=[held["event_id"], dev["event_id"]])
+        assert "ambiguous_random_events" not in result  # plans without an ambiguous random event keep their pre-embargo identity
+        assert result["exclusions"] == [{"event_id": held["event_id"], "reasons": ["ambiguous"]}]
+        assert result["random_windows"] == []
+        assert result["retained_event_ids"] == [dev["event_id"]]
+        assert result["evaluation_event_ids"] == sorted([held["event_id"], dev["event_id"]])
+        assert "evaluation_exclusions" not in result
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("kind", ["missing_ticker", "blank_ticker", "padded_ticker",
+    "unusable_event_date", "unusable_canonical_date"])
+def test_ambiguous_random_event_refuses(tmp_path, monkeypatch, kind):
+    event = history_event("2024-06-14", protected=True)
+    conn, repository, snapshot, _ = setup(tmp_path, monkeypatch, [event])
+    try:
+        original = eligibility.canonical_events
+        def ambiguous(repository, snapshot):
+            rows = original(repository, snapshot)
+            if kind in {"missing_ticker", "blank_ticker", "padded_ticker"}:
+                rows.loc[0, "ticker"] = {"missing_ticker": None, "blank_ticker": "",
+                    "padded_ticker": " SYNTH"}[kind]
+            elif kind == "unusable_event_date":
+                import pandas as pd
+                rows.loc[0, "event_date"] = pd.NaT
+            return rows
+        monkeypatch.setattr(eligibility, "canonical_events", ambiguous)
+        if kind == "unusable_canonical_date":
+            import pandas as pd
+            original_classify = eligibility.classify_events
+            def classify(rows, snapshot, **kwargs):
+                canonical, labels, ambiguous_ids, context = original_classify(rows, snapshot, **kwargs)
+                canonical.loc[canonical["event_id"] == event["event_id"], "canonical_date"] = pd.NaT
+                ambiguous_ids.add(event["event_id"])
+                return canonical, labels, ambiguous_ids, context
+            monkeypatch.setattr(eligibility, "classify_events", classify)
+        with refuses("HOLDOUT_ACCESS_DENIED", "random holdout window bounds cannot be established"):
+            plan(repository, snapshot, [], evaluation=[])
     finally:
         conn.close()
 
@@ -714,5 +810,28 @@ def test_unsorted_valid_forecasts_normalize_without_mutating_metadata(tmp_path, 
         assert result["groups"] == [expected]
         assert [f["horizon_sessions"] for f in result["groups"][0]["forecasts"]] == [1, 3, 5]
         assert metadata == saved
+    finally:
+        conn.close()
+
+
+def test_plan_eligibility_forwards_max_object_bytes_to_canonical_events(tmp_path, monkeypatch):
+    event = history_event("2024-06-14")
+    conn, repository, snapshot, _ = setup(tmp_path, monkeypatch, [event])
+    try:
+        base = eligibility.canonical_events(repository, snapshot)
+        seen = []
+
+        def recording(repo, snap, **kwargs):
+            seen.append(kwargs.get("max_object_bytes", "absent"))
+            return base.copy()
+
+        monkeypatch.setattr(eligibility, "canonical_events", recording)
+        result = plan(repository, snapshot, [group(event)], max_object_bytes=4096)
+        assert result["retained_event_ids"] == [event["event_id"]]
+        assert seen == [4096]
+        seen.clear()
+        result = plan(repository, snapshot, [group(event)])
+        assert result["retained_event_ids"] == [event["event_id"]]
+        assert seen == ["absent"]
     finally:
         conn.close()

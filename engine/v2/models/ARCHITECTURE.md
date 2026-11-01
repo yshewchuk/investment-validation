@@ -1,5 +1,6 @@
 # `engine/v2/models` — architecture
 
+`regression_target.target_descriptor` / `validate_target` are source-free closed metadata: explicit label/prediction columns, signed/nonnegative domain and definition hash bind a target ID. Temporal planning and generic ops wire validation consume them; malformed/stale identities raise `ValueError` before source access, without proving target availability or granting reads.
 See the root [`ARCHITECTURE.md`](../../../ARCHITECTURE.md) for the layer
 table and enforced import direction. This doc follows
 `docs/COMPONENT_ARCHITECTURE_TEMPLATE.md`'s section order.
@@ -47,7 +48,7 @@ The research-only `training.magnitude` boundary fits two original-unit candidate
 from ops-admitted recipe data for the native experiment CLI. Ridge's
 median imputation, full missing indicators and scaling learn from training rows
 only; HGB freezes training-all-null columns to zero and routes other nulls natively,
-without a random early-stopping split. Both use
+without a random early-stopping split in the v1 recipe (the v2 HGB recipe enables early stopping with a random 10% training-row validation split). Both use
 fresh per-fold/horizon estimators, one numerical thread and finite nonnegative
 predictions. The caller owns protected admission, label qualification and evidence;
 this module receives recipe data and numeric matrices, with no I/O or model release.
@@ -55,19 +56,19 @@ Invalid shapes/nonfinite labels or predictions raise `ValueError`; the experimen
 caller translates fitting failures to `EXPERIMENT_VARIANT_FAILED`. The shared
 no-fit guard runs before work. Existing legacy-parity recipes are unchanged.
 
-`magnitude_elasticnet_recipe.elasticnet_recipe` builds closed JSON-only research
-metadata without importing training or sklearn. Ordered selected columns and a
-caller-supplied dictionary hash bind preprocessing, fixed estimator parameters,
-seed and projection; a recipe hash is not a source/fold/candidate seal or proof
-of dictionary membership. `training.magnitude_elasticnet.fit_elasticnet_predictions`
-consumes this recipe and matching named numeric matrices. It learns imputation,
-missing indicators and scaling from training rows only, returning finite nonnegative
-forecasts, the full standardized coefficient vector (values and missing indicators),
-selected source columns in recipe order, iterations and dual gap.
-The experiment dispatcher calls this adapter; production entrypoints remain unwired.
-Causal membership, source identities,
-inner-only subset/parameter choice, resource/attempt caps and failure recording
-are caller responsibilities, not guarantees derived from these arrays.
+`magnitude_elasticnet_recipe.elasticnet_recipe` binds ordered columns, dictionary hash, preprocessing and closed sklearn parameters in JSON metadata. Request-v3 SIZE candidates admit finite positive alpha in `[1e-6, 1000]` and l1-ratio in `[1e-6, 1]`; the v2 compiler retains its original six alpha/l1 combinations.
+`magnitude_elasticnet_recipe.regression_elasticnet_recipe` adds the distinct
+`regression_elasticnet_recipe.v1` identity with explicit signed/nonnegative domain
+and corresponding none/clip_zero projection; its validator rejects policy drift.
+Neither metadata API imports training/sklearn or proves source/dictionary admission.
+`training.magnitude_elasticnet.fit_regression_elasticnet_predictions` consumes the
+new policy; `fit_elasticnet_predictions` keeps the original recipe/result identity.
+Both guarded APIs share fresh one-thread training-only imputation/indicators/scaling,
+coefficient/selection/convergence evidence and no-retry failure semantics. Signed
+labels and forecasts are finite, untransformed and unfloored; the old API still
+rejects negative labels and clips forecasts. New results use `regression_elasticnet_fit.v1`.
+Caller owns causal membership, source identities, inner-only selection and resource caps.
+No I/O, publication, release or production wiring; source closures need resealing.
 
 | ElasticNet condition | Outcome |
 |---|---|
@@ -77,30 +78,28 @@ are caller responsibilities, not guarantees derived from these arrays.
 | Same valid inputs and numerical environment | Deterministic fresh fit, not cached or journal replay |
 | Cache, transaction or partial-write concerns | No cache, I/O, persistence or publication; v1 recipes and results are unchanged |
 
-The separate `magnitude_ridge_hgb_recipe` API constructs/validates source-free
-`magnitude_ridge_hgb_recipe.v1` metadata for the bounded stage-2 Ridge/HGB grid.
-It binds explicit ordered unique columns, a canonical dictionary hash, fixed
-preprocessing/estimator policy and derived width; no dictionary or source is read.
-The `history_ridge`/`history_hgb` family names reuse the training-layer private
-estimator constructor (`training/_magnitude_estimators.build_estimator`,
-imported by the training fitters) unchanged; each numeric adapter owns its
-guards and fitting, not the constructor. This is not the fixed eleven-column
-v1 execution envelope. Dictionary membership and truthful matrix order remain caller-owned; a hash alone grants no admission.
-`training.magnitude_ridge_hgb.fit_ridge_hgb_predictions(..., columns=...)`
-checks both no-fit guards before inspecting metadata or numeric inputs, validates
-the closed recipe and exact declared column order, then copies numeric matrices.
-A fresh one-thread fit learns only training rows: Ridge keeps every selected column
-through median imputation, full missing flags and scaling; HGB freezes training-all-null columns to
-zero at training/prediction while routing partial nulls natively. It returns
-`magnitude_ridge_hgb_fit.v1` with the validated recipe hash and detached finite
-nonnegative predictions. This is a production-unwired numeric boundary: no source/holdout/fold
-admission, CLI, selection or registration; existing eleven-column recipes, fitters
-and source closures remain unchanged.
+`magnitude_ridge_hgb_recipe` constructs/validates closed variable-width policies binding ordered columns, dictionary hash and estimator parameters, not source admission or dictionary membership. Request-v3 SIZE Ridge candidates admit finite positive alpha in `[1e-6, 1000]`; the v2 compiler retains its existing grid. `magnitude_ridge_hgb_recipe.v2` (HGB only) adds bounded `learning_rate`, `min_samples_leaf` and `l2_regularization` with `max_iter` 500 and early stopping; partial or out-of-bound values raise `ValueError`, and v1 recipes are unchanged.
+`regression_ridge_hgb_recipe.regression_recipe` adds a distinct
+`regression_ridge_hgb_recipe.v1` identity with explicit `signed`/`nonnegative`
+target domain and respectively `none`/`clip_zero` projection. Its validator
+refuses unknown fields or inconsistent domain/projection pairs; no training imports.
+`training.magnitude_ridge_hgb.fit_regression_predictions` uses that new policy;
+`fit_ridge_hgb_predictions` retains its existing magnitude recipe/result schema.
+Both guards precede inspection; the shared private fitter copies arrays, learns Ridge imputation/indicators/scaling only on training rows and freezes HGB's
+training-all-null columns to zero. Fresh sklearn estimators use one thread.
+Signed labels/predictions need only be finite (no floor, absolute value or log); nonnegative labels still reject negatives and predictions clip at zero.
+The new result is `regression_ridge_hgb_fit.v1` with recipe hash and detached
+forecasts. No I/O, cache, retries, source/fold/holdout admission or release occurs.
+Existing magnitude numerics remain unchanged; source closures require resealing.
+`regression_candidate.regression_candidate_recipe` accepts only ridge/alpha, hgb/max_leaf_nodes or elasticnet/alpha+l1_ratio and delegates explicit signed/nonnegative policy construction; it imports no training or source admission.
+`training.regression_candidate.fit_regression_candidate` checks both no-fit guards before inspection, dispatches only matching regression schema/model pairs, then preserves the existing fitter result/validation/errors. Unsupported pairs refuse ValueError; no reads, selection, retries, writes or production caller.
+Existing experiment magnitude recipe dispatch is unchanged except that it also accepts the v2 HGB recipe schema; its fit adapter lazily delegates to shared `training.magnitude_candidate.fit_candidate`, refusing unsupported schemas (Ridge v1, HGB v1 and v2, and ElasticNet v1 are accepted) before training imports via shared `magnitude_candidate.magnitude_candidate_family` metadata validation.
+`training.fit_routes.fit_execution` accepts only magnitude/magnitude_candidate/regression_candidate numeric routes, checks both guards first and original magnitude column order against its admitted recipe, and preserves delegated errors/results (original magnitude lists become predictions-only dictionaries). It grants no source/registration authority and has no production caller; legacy exception translation stays in experiment wrappers.
 
 | Ridge/HGB condition | Outcome |
 |---|---|
 | Either no-fit guard active | Its `RuntimeFitForbidden` precedes recipe, column or array inspection |
-| Invalid closed policy/order, unconvertible inputs, matrix shape, infinite features or nonfinite/negative labels | `ValueError` before fit; no partial result |
+| Invalid closed policy/order, unconvertible inputs, matrix shape, infinite features or labels outside the recipe domain | `ValueError` before fit; no partial result |
 | Wrong prediction shape or nonfinite predictions | `ValueError` after fit, before projection; no partial result |
 | Same valid inputs and numerical environment | Deterministic fresh fit, not cached or journal replay |
 | Cache, retry, transaction or partial-write concerns | No cache, retry, persistence or publication |
@@ -110,8 +109,8 @@ release assembly is §2.1, staging §2.2, and the three-phase tick sidecar is §
 
 ## 2. Primary contracts and public interfaces
 
-The full list is `README.md`'s `<!-- public-interface: ... -->` directive
-(machine-checked by `checks/package_readmes.py`); the deployment surface:
+`README.md` declares the checked public interface; `deployment.manifest_path`
+rejects empty, `/`, `.`/`..` and NUL release IDs.
 
 - `deployment.stage_release(root, release, inventory, payloads, *, clock) -> StagedManifest`
   — validate, then durably stage. Never touches `DEPLOYED`.
@@ -172,6 +171,21 @@ size check. Existing callers omitting the ceiling retain their read contract.
 | Cache, retry, transaction, partial write | Existing per-loader content-hash cache; no retries or writes; failure returns no partial state |
 
 `PayoffArtifactLoader` and `RecalibrationArtifactLoader` read artifact files through `read_artifact_bytes` (regular file, at most `MAX_ARTIFACT_BYTES` = 512 MiB, else the loader's "missing artifact" error) and expose `load_bytes(raw, content_hash)`, which verifies `raw` against `content_hash` (hash mismatch refuses, also on a cache hit) and then applies the same parse and validation as `load`.
+
+**Scoring cutoff binding.** A scoring row may bind the latest payoff line,
+payoff surface, or (where scoring applies it) recalibration map for its
+strategy and alpha whose artifact `cutoff` is at or before that row's causal
+cutoff. Eligibility and ordering use the artifact's DATA cutoff, never
+`computed_at`; an artifact after the row cutoff is ineligible. The selected
+cutoffs are recorded in the payoff artifact recipe. When a recalibration
+cutoff is bound, scoring also requires a string requested row cutoff and refuses
+if the bound cutoff is later, even if the recipe omits `before`. When no
+eligible artifact exists, scoring retains its typed
+`MODEL_NOT_READY` refusal; it does not fit or fall back to another source.
+Callers without a recorded bound cutoff retain exact-key matching through the
+normalized payoff key, including date-like `before` values.
+STR-RUNUP retains legacy's raw win-rate behavior and does not apply
+recalibration.
 
 ### Snapshot-pinned D14 monthly datasets
 
@@ -341,7 +355,7 @@ stages a candidate release; it never touches `DEPLOYED` (`models_promote` is sep
   inventory comes from the legacy champion registry under the new id; drift refuses before any write.
 - Refusals map to `VALIDATION_FAILED` with fixed messages and `details` (`code` of a
   `ReleaseAssemblyRefusal`, or `PRIOR_USABLE`, `BINDINGS_DIFFER`, `EMPTY_MEMBER` in `bootstrap` mode (§2.2.2), `members`, `member`, `issues`, `months`; plan-time `INVALID_REQUEST`
-  carries `problems`). A trailing object's month may not start after `cutoff`. An unreadable prior
+  carries `problems`). A trailing object's month may not start after the first day of the next calendar month, and its lineage must end exclusively at its own month start. An unreadable prior
   refuses "prior release could not be read"; an inventory artifact or registry that is a symlink,
   not a regular file, or over its size cap refuses "release inventory could not be built". One attempt only.
 
@@ -358,25 +372,25 @@ stages a candidate release; it never touches `DEPLOYED` (`models_promote` is sep
 
 Called from `Service.tick()` beside the other sidecars (`engine/v2/ops/pool_refresh.py`); never a `GRAPH` node, and a
 failure never blocks required job dispatch. It advances only the three members `phase5_state_stage` stages
-(`paired_residual_pool`, `board_analog_matcher`, `trailing_pnl_cutoff`); driver pools and the chooser stay carried (§2.3). It trains at one cutoff per night: the session of the latest succeeded legacy `finality` or `features` job (the stages that keep the plan's `legacy_manifest.json` binding in snapshot mode, which the scheduled nightly uses; `score` does not). Alpha is
+(`paired_residual_pool`, `board_analog_matcher`, `trailing_pnl_cutoff`); driver pools and the chooser stay carried (§2.3). It trains at one session cutoff per night (the trailing member also trains the next calendar month's bar, whose lineage ends at that month start): the session of the latest succeeded legacy `finality` or `features` job (the stages that keep the plan's `legacy_manifest.json` binding in snapshot mode, which the scheduled nightly uses; `score` does not). Alpha is
 the shadow fill alpha 0.5 (`engine.fills.MID`, as `native_score_batch._SHADOW_FILL_ALPHA`); strategies are the default of
 the `board_analog` mode (`strategies=()`: those present in the replay trades). Selection stays exact-key with no latest fallback: a
 row whose cutoff is not the session cutoff still needs a release carrying it, which this does not provide.
 
 Phases, each only after the previous succeeded: three `training` jobs (one per advancing member) bound to the session's
 scoring manifest; one `phase5_state_stage` job staging a candidate release from their outputs; one `models_promote` job
-guarded by `expected_previous_release_id` = the prior release. The scan for the latest scoring session covers a bounded window
-of the newest nightly jobs, so a score older than that window is not found.
+guarded by `expected_previous_release_id` = the prior release. The `train-trailing` job requests the session and next-month dates; it uses only data dates before each month's first day, never `computed_at`, and staging checks that exclusive lineage boundary. Staging admits only the current or next month; later months or mismatched lineage refuse.
+The scan for the latest scoring session covers a bounded window of the newest nightly jobs, so a score older than that window is not found.
 
 | Rule | Behaviour |
 |---|---|
-| R1 verified input | session and manifest id from the latest succeeded `finality`/`features` job (its `legacy_manifest.json` binding); prior release from the live pointer, classified with `classify_prior`: `USABLE` runs this carry cycle, `NONE`/`NO_POOL_CATALOG` start the bootstrap cycle (§2.2.2), `DAMAGED` submits nothing and reports `VALIDATION_FAILED` `PRIOR_MISMATCH` (deduped) |
+| R1 verified input | session and manifest id from the latest succeeded `finality`/`features` job (its `legacy_manifest.json` binding); prior release from the live pointer, classified with `classify_prior`: `USABLE` runs this carry cycle, `NONE`/`NO_POOL_CATALOG` start the bootstrap cycle (§2.2.2), `DAMAGED` submits nothing and reports `VALIDATION_FAILED` `PRIOR_MISMATCH` (deduped). The trailing job binds artifacts for the session month and next calendar month; each artifact's data lineage ends at that artifact month's first day, exclusive. |
 | R7 serve lifetime | the scheduled serve (not the snapshot-import serve) also stays up while the latest session's pool cycle is pending: a candidate release for it is not yet deployed, or a phase job (including the promote) is still running, and no phase job has failed; a missing release root or a failed phase ends the wait, and the serve deadline still bounds it |
 | R2 cache | durable job and pointer state is re-read each tick; no memo (reads are cheap indexed selects) |
 | R3 retry | an existing phase key in any state is never resubmitted; a failed phase or stale-champion refusal stalls that cycle for operator recovery (#154); an incumbent changed before staging starts a new cycle under new keys; once a candidate is staged, the staged id or the guarded promote refuses and the cycle stalls |
-| R4 transaction | phase N+1 is submitted only once every phase-N job has succeeded; a sidecar failure is caught and reported (deduped), never raised |
-| R5 partial failure | succeeded jobs and staged objects may remain; no later phase or pointer change occurs until prerequisites succeed; before the pointer swap the prior release stays deployed, and a failure after the swap follows the §7.2 history rules |
-| R6 idempotency | phase keys are stable per session, scoring manifest and prior release, so a rerun scored from a new manifest retrains; the candidate release id is `pools-{session}-{tag}` and does not include the prior release (the stage refusal carries `ID_CONFLICT` in `details` when the same candidate id is reused with different content; promotion separately checks `expected_previous_release_id`, R3); a deployed release already named so ends the cycle |
+| R4 transaction | phase N+1 is submitted only once every phase-N job has succeeded; the current- and next-month trailing artifacts are produced together by the one trailing training job; a sidecar failure is caught and reported (deduped), never raised |
+| R5 partial failure | succeeded jobs and staged objects may remain; no later phase or pointer change occurs until prerequisites succeed; before the pointer swap the prior release stays deployed, and a failure after the swap follows the §7.2 history rules. A failed trailing job therefore cannot publish either cutoff or hold native scoring indefinitely; the existing failed-cycle rules apply. |
+| R6 idempotency | phase keys are stable per session, scoring manifest and prior release, so a rerun scored from a new manifest retrains; the candidate release id is `pools-{session}-{tag}` and does not include the prior release (the stage refusal carries `ID_CONFLICT` in `details` when the same candidate id is reused with different content; promotion separately checks `expected_previous_release_id`, R3); a deployed release already named so ends the cycle. Both requested trailing months are part of the same deterministic phase output. |
 
 ### 2.2.2 Bootstrap cycle (#1102; stage job, sidecar submission and promote guard built)
 
@@ -384,7 +398,7 @@ When the prior is `NONE` or `NO_POOL_CATALOG` (§2.2), the sidecar (§2.2.1) run
 
 **Sidecar submission (slice C).** `submit_pool_nightly_refresh_if_ready` classifies the pointer's release with `classify_prior` only on the tick that would start a cycle (no `train-chooser` or `train-paired` job exists yet for the session, prior and manifest). Once a cycle's keys exist they fix its family, and the stage job re-derives the class itself, so the full prior is not re-verified every tick (a missing pointer is `NONE`; the prior id in phase keys is `none`). Phases, each only after every job of the previous one succeeded, keys `phase_key(session, phase, prior, tag)`:
 
-1. `train-*` jobs, all bound to the session's scoring manifest, cutoff = session: `paired`, `board`, `trailing` (as §2.2.1); `driver-size`, `driver-implied_t1`, `driver-runup_move` (`driver_residual_pool:<role>` states; they take no cutoff); `chooser` (`chooser_analog_pool`); `payoff_line:STR-THRU` and `recalibration_map:STR-THRU` (the `:calibration` recipes, alpha `FILL_ALPHA`); `payoff_surface:STR-RUNUP`, `payoff_line:STR-RUNUP` and `recalibration_map:STR-RUNUP` also at the session: the native nightly enters every row at the session date, so its scored cutoff `min(as_of, entry_date)` is the session for STR-RUNUP too. Only the calibration artifacts (`payoff_artifact`, `recalibration_artifact`) are bound to the stage; a recipe job's bookkeeping files (`job.json`, `summary.json`, `COMPLETE.json`, the membership and label receipts) are not.
+1. `train-*` jobs, all bound to the session's scoring manifest, cutoff = session: `paired`, `board`, `trailing` (as §2.2.1; trailing also trains the next calendar month); `driver-size`, `driver-implied_t1`, `driver-runup_move` (`driver_residual_pool:<role>` states; they take no cutoff); `chooser` (`chooser_analog_pool`); `payoff_line:STR-THRU` and `recalibration_map:STR-THRU` (the `:calibration` recipes, alpha `FILL_ALPHA`); `payoff_surface:STR-RUNUP`, `payoff_line:STR-RUNUP` and `recalibration_map:STR-RUNUP` also at the session: the native nightly enters every row at the session date, so its scored cutoff `min(as_of, entry_date)` is the session for STR-RUNUP too. Only the calibration artifacts (`payoff_artifact`, `recalibration_artifact`) are bound to the stage; a recipe job's bookkeeping files (`job.json`, `summary.json`, `COMPLETE.json`, the membership and label receipts) are not.
 2. One `phase5_state_stage` with `mode: "bootstrap"`, `prior_release_id` the pointer id (`None` for `NONE`), `state_files` = every training output of phase 1 (plain `training/*.json`, none duplicated), and `bootstrap` = `{tier4_dir, panel_catalog, panel_snapshot_id, panel_artifact_root}` read from the environment variables `BOOTSTRAP_TIER4_DIR`, `BOOTSTRAP_PANEL_CATALOG`, `BOOTSTRAP_PANEL_SNAPSHOT_ID` and `BOOTSTRAP_PANEL_ARTIFACT_ROOT`. If any is unset or blank the cycle submits nothing and reports `VALIDATION_FAILED` ("bootstrap panel/tier4 inputs are not configured"), deduped, before phase 1 (no training is spent on a cycle that cannot stage).
 3. One `models_promote`: `expected_previous_release_id` = the pointer id for `NO_POOL_CATALOG`; for `NONE` the plan sets `require_empty_store` true (new `PromoteParameters` field, default false; `deployment.promote(..., require_empty_store=False)`), and `ConcurrentPromote` is raised when the pointer exists, unless it already names the release (the same no-op rule as the expected-incumbent guard). The guard is rejected in a plan that also sets `expected_previous_release_id`.
 
@@ -407,8 +421,8 @@ The pointer is re-read before each phase submit; if its class or id changed sinc
 **Assembly invariants** (after `classify_prior`: `DAMAGED` refuses `PRIOR_MISMATCH`, `USABLE` refuses `PRIOR_USABLE`, both before any write):
 
 - Binding equality (`NO_POOL_CATALOG` only): the candidate's bindings equal the incumbent's staged bindings (binding id, model id, role, strategy, clock, adapter, feature order, output names, member content hashes) and the inventory `deployment_id` equals the incumbent's; any difference refuses `BINDINGS_DIFFER` (a model change takes the §2.3 acceptance path). `NONE` has no incumbent to compare with.
-- Legacy-trained Tier-4 serving folds enter as `tier4_folds:*` members, read only, never retrained or relabeled native. Every catalog state must be `STAGED`; a `MISSING` or `PENDING` one refuses `EMPTY_MEMBER` with the member ids. Paired, board and chooser objects carry `cutoff` as the last name segment and no trailing month starts after it; calibration folds keep their own key cutoff.
-- The catalog is written under the candidate id only (`candidate_only`): no root `phase5_release.json` is written or preserved and the incumbent's directory is untouched. `sources` = `pool_cutoff` = `cutoff`, `carried_from` null (no prior catalog carried, not that the data is native), plus the pinned panel identity.
+- Legacy-trained Tier-4 serving folds enter as `tier4_folds:*` members, read only, never retrained or relabeled native. Bootstrap inputs require `STAGED` states; a `MISSING` or `PENDING` bootstrap input refuses `EMPTY_MEMBER` with the member ids. The active scoring resolver treats the two chooser producer rows as optional: absent, `MISSING` or `PENDING` rows yield no chooser references, and strict capture refuses if a chooser trace needs one. Paired, board and chooser objects carry `cutoff` as the last name segment; a trailing month may not start after the month following it; calibration folds keep their own key cutoff.
+- The catalog is written under the candidate id only (`candidate_only`): no root `phase5_release.json` is written or preserved and the incumbent's directory is untouched. `sources.pool_cutoff` = `cutoff`; when chooser folds are staged, `sources.retrain_cutoff` records their verified training boundary and the pool cutoff may not precede it. `carried_from` is null (no prior catalog carried, not that the data is native), plus the pinned panel identity.
 - The candidate must read back `USABLE` (`classify_prior`) and pass `light_checks` before `mark_staging_succeeded`. `DEPLOYED` is never touched.
 
 | Condition | Outcome (`VALIDATION_FAILED`, fixed message) |
@@ -417,7 +431,7 @@ The pointer is re-read before each phase submit; if its class or id changed sinc
 | Registry drift, inventory unreadable; every other refusal below marked "message only" | fixed message, `details` as §2.2 (`issues` for drift, `members`, `member`); nothing written unless stated |
 | Bindings differ from the incumbent's | `BINDINGS_DIFFER`; nothing written |
 | A catalog state not `STAGED` | `EMPTY_MEMBER`, `details.members`; nothing written |
-| A bound file or model artifact unreadable, oversize, unclassifiable, duplicating an object, or naming a member outside the catalog's states; a pool object cutoff, or a trailing object month after the session cutoff | message only; nothing written |
+| A bound file or model artifact unreadable, oversize, unclassifiable, duplicating an object, or naming a member outside the catalog's states; a pool object cutoff, a trailing object month later than the next calendar month, or a trailing lineage that does not end at its month start | message only; nothing written |
 | Champion registry or Tier-4 producer recipe unreadable or disagreeing with the registered recipe (`RegistryError`, `Tier4Error`) | message only; nothing written |
 | The staging-success record cannot be written after a successful read-back | "staging success could not be recorded"; the candidate stays staged and unpromotable until a rerun |
 | The staging-success record cannot be restored after an id conflict | "candidate release could not be published" (no `ID_CONFLICT` code) |
@@ -520,7 +534,7 @@ Binding user decisions D1-D10 (2026-10-25, recorded in #805). Once per calendar 
 Its held-out prediction/residual arrays belong to that same object. Offline release preparation records this metadata in the hashed state catalog; a read-only loader verifies it against bounded, hash-checked bytes. Existing catalogs without this declaration require offline restaging, not a nightly fit or a guessed interval policy. Verified loading covers size folds and the chooser producer artifacts below; this alone admits neither training sources nor a nightly chooser declaration.
 
 Selection uses the exact earlier of the event month and decision month, and the registered size model and feature order. It never chooses the newest available fold or substitutes a full-refit model. The panel hash comes from the already-pinned snapshot's single original `feature_panel` object; an unsupported multi-fragment layout is refused. The scoring selector (`gate_fold_selection.py`) applies the month rule and the release-staged descriptor checks only; comparing the descriptor's panel hash with the pinned snapshot is not done by the selector.
-Snapshot ID, dataset version and panel byte hash remain distinct identities. Selection returns a separate content-addressed, single-binding inference view linked to its parent release and descriptor; it does not mutate or promote the champion `ModelRelease`. The existing `tier4-serving-fold.v1` adapter executes that binding through `FrozenInference`; no second prediction engine is added.
+Snapshot ID, dataset version and panel byte hash remain distinct identities. Selection returns a separate content-addressed, single-binding inference view linked to its active containing release and descriptor; the descriptor's parent ID/hash retain authoring provenance and may identify an earlier release after carry-forward. `serving_fold_loader` checks active binding compatibility rather than parent equality, then verifies the bounded estimator bytes and held-out pools. It does not mutate or promote the champion `ModelRelease`. The existing `tier4-serving-fold.v1` adapter executes that binding through `FrozenInference`; no second prediction engine is added.
 
 | Forward fold condition | Outcome |
 |---|---|
@@ -529,18 +543,17 @@ Snapshot ID, dataset version and panel byte hash remain distinct identities. Sel
 | Selected fold bytes are corrupt, oversized, escaped-path or fail the loader's header/descriptor checks | Per-row `MODEL_NOT_READY` before inference; redact filesystem details |
 | Old cache lacks held-out pool or declared interval policy | Refuse; never rebuild the pool during scoring |
 
-**Offline descriptor authoring.** Immutable `serving_folds.ServingFoldDescriptor`
-records parent release/model-manifest identity, model, ordered features, output/clock,
-exact month, full panel SHA-256, estimator member, embedded pool fields/count and
-explicit interval policy. The enclosing catalog hash binds catalog identity
-without a self-reference inside the descriptor.
-`tools.phase5_prepare_release` obtains the registered producer's `SizeFoldPolicy`;
-`serving_fold_preflight` (this package) validates cache bytes before catalog publication, without fitting/inference.
+**Offline descriptor authoring.** Immutable `serving_folds.ServingFoldDescriptor` records parent release/model-manifest identity, model, ordered features, output/clock, exact month, full panel SHA-256, estimator member, embedded pool fields/count, and explicit interval policy. The enclosing catalog hash binds catalog identity without a self-reference inside the descriptor.
+`tools.phase5_prepare_release` obtains the registered producer's `SizeFoldPolicy`; `serving_fold_preflight` validates cache bytes before catalog publication, without fitting/inference.
+When staging chooser serving folds, `phase5_prepare_release` writes `sources.retrain_cutoff` to the latest validated chooser `fold_start`, the canonical boundary for opted-in chooser-reference resolution. It preserves a supplied canonical `pool_cutoff`, but never derives pool readiness from chooser fold dates. A catalog may therefore contain `retrain_cutoff` without `pool_cutoff`; classification treats it as `NO_POOL_CATALOG`, so pool bootstrap remains available.
+Catalogs without chooser folds need neither cutoff. A caller-supplied `retrain_cutoff` always requires a canonical `pool_cutoff` on or after it; otherwise preparation refuses before staging. With chooser folds, noncanonical fold starts refuse with the fold-date cause, a supplied `retrain_cutoff` that differs from the latest validated fold start refuses with the retrain-cutoff cause, and a noncanonical/earlier supplied `pool_cutoff` refuses with the pool-cutoff cause. Each raises `PrepareRefused` before staging.
+Catalog validation applies the same distinction: a missing `pool_cutoff` is valid for a chooser-only catalog, while an explicitly present `pool_cutoff: null` alongside `retrain_cutoff` is invalid.
+Release preparation also refuses non-mapping `sources` with `PrepareRefused` before pinned-source checks or preflights.
 Serving-fold writers (`tier4.serving_model`, Phase-4 build/backfill) use binary handles and explicit `compress=0`; filename suffixes cannot enable compression.
 Release preparation (`--tier4-dir` and raw-byte APIs) requires trusted uncompressed inputs from supported writers; it does not refuse arbitrary compressed inputs before decoding.
 Hashes verify bytes, not provenance. The serialized byte cap is not a decoded-memory bound.
 Champion registry artifacts retain their separate `compress=3` format.
-Retained fold-parent checks reuse deployment's semantic release identity:
+At authoring, retained fold-parent checks reuse deployment's semantic release identity:
 binding/member collection order and storage paths may differ on retry;
 feature and output order, and every other identity field, remain significant.
 All Tier-4 collector roles and chooser/pinned-size destination reads admit
@@ -566,17 +579,13 @@ pinned COPY verification and pinned-size byte mismatches use `panel_copy_refused
 | Partial write | No pointer changes; staging may leave unreferenced files; no automatic store repair |
 | Cache | Authoring validates each supplied object anew; no process-global descriptor cache |
 
-**Chooser producer fold authoring.** `ChooserFoldPolicy` and `ChooserServingFoldDescriptor` declare `implied_t1`/`runup_move` under exact `tier4_folds:<role>` members. The descriptor binds the parent release, full panel hash, ordered features, clock, whole-cache estimator object (not the champion member), pool count and decile/floor policy. It records both the champion binding output and raw D14 chooser column; runup output is never day-scaled here. Standard release preparation obtains each present role's policy from its registered producer and validates the cache against that role's unique wildcard champion. Size descriptors keep their existing schema.
-The chooser descriptor requires a canonical `training_cutoff` day as part of the fold contract. The scoring consumer requires it to be strictly before both the decision session and selected held-out fold start, and equal to the cutoff embedded in hash-verified estimator metadata. Missing, malformed, mismatched, same-day or later values refuse before fold state is used. The catalog and object hashes bind the declaration but do not themselves prove source finality or training membership.
-The descriptor hash covers its canonical typed document, including parent, role, estimator identity and required `training_cutoff`.
+**Chooser producer fold authoring.** `ChooserFoldPolicy` and `ChooserServingFoldDescriptor` declare `implied_t1`/`runup_move` under exact `tier4_folds:<role>` members. The descriptor binds the parent release, full panel hash, ordered features, clock, whole-cache estimator object (not the champion member), pool count and decile/floor policy. It records both the champion binding output and raw D14 chooser column; runup output is never day-scaled here. Standard release preparation obtains each present role's policy from its registered producer and validates the cache against that role's unique wildcard champion. Size descriptors keep their existing schema. `training_cutoff` is canonical and hash-bound, equals hash-verified estimator metadata, and precedes both decision session and held-out fold start. Missing, malformed, mismatched or noncausal values refuse; no cutoff is inferred. This does not prove source finality or training membership; legacy folds without the cutoff refuse preparation or selection as `MODEL_NOT_READY`.
+The descriptor hash covers its canonical typed document, including parent, role, estimator identity and `training_cutoff`.
 Without pinned COPY, the panel digest is caller-asserted; preparation does not verify panel bytes.
-
-**Compatibility.** Existing chooser folds without this producer-declared cutoff are rejected during release preparation; if missing state reaches per-row chooser selection, the member row is refused as `MODEL_NOT_READY`. No cutoff is inferred from fold dates or runtime time. Menu-member rows remain unavailable until a provenance-bearing fold is produced and released.
 
 | Chooser fold authoring condition | Outcome |
 |---|---|
-| Explicit coherent role policy and bounded cache | Catalog-hashed descriptor; no fitting or prediction |
-| Missing or invalid `training_cutoff` provenance | Refuse preparation; no default or inferred cutoff |
+| Explicit coherent role policy and bounded cache; valid canonical `training_cutoff` | Catalog-hashed descriptor; no fitting or prediction |
 | Unsupported role/output, mismatched policy/header/binding, malformed pool or oversized cache | Refuse preparation; no substitution by size or another role |
 | Invalid chooser role/features/panel/interval policy/floor or descriptor month/count/parent hash/clock/output/object (constructor/semantic checks) | Typed `DocumentError`; decode preserves nested paths |
 | Unsupported policy-map role or wrong policy type | Fixed `PrepareRefused`; distinguish unsupported role, invalid type and role/member disagreement |
@@ -631,10 +640,10 @@ metadata and descriptor. Identical verified inputs produce identical references.
 
 `load_chooser_serving_fold` prepares the separately typed implied-t1/runup-move
 artifact from its exact `tier4_folds:<role>` catalog member. It rechecks catalog
-schema/self-hash/release/deployment, unique membership, descriptor/object identity,
-and the matching wildcard parent binding before decoding. The returned immutable
-`ChooserServingFoldRef` preserves the raw D14 producer output and paired held-out
-interval arrays; these are not the chooser k-NN population or driver residual state.
+schema/self-hash/release/deployment, unique membership, descriptor/object
+identity, exact parent ID/hash and matching wildcard parent binding before decoding.
+`ChooserServingFoldRef` keeps raw D14 output and paired held-out intervals, not the
+chooser k-NN population or driver residual state.
 It makes no event-month selection or source-ready declaration. Genuine
 training-source completion/finality, coordinator publication and per-request causal
 bounds are required for admission. Artifact headers/descriptors alone do not
@@ -735,8 +744,10 @@ per the root doc's layer table; `checks/import_layers.py` enforces this.
   `serving_fold_loader`; the verified frozen inference contract/loader for
   the model stage, the payoff-calibration artifact type; `release_bindings.py`
   calls `load_chooser_serving_fold` and reads `deployment.current_pointer`,
-  `deployment._read_manifest`, `deployment._manifest_hash_matches`,
+  `deployment._read_manifest`, `deployment.manifest_hash_matches`,
   `deployment.production_release_root`, and `deployment.MissingReleaseRoot`.
+  `release_bindings.py` also calls `serving_fold_loader.load_chooser_serving_fold`
+  to verify each staged chooser fold against its authoring release.
 - `engine.v2.models.training` — the same artifact types and no-fit guards, plus
   closed ElasticNet and Ridge/HGB recipe validation; never imported *by* this package (one-way).
 - `engine.v2.ops` — `engine/v2/ops/cli.py` (the no-fit guard for `ops

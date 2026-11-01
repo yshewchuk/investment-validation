@@ -7,7 +7,7 @@ from datetime import date
 from engine.v2.foundation import content_hash, from_document, to_document
 
 from .contracts import MODEL_NOT_READY, ModelRelease
-from .deployment import StagedManifest, _manifest_hash_matches
+from .deployment import StagedManifest, manifest_hash_matches
 from .loader import FrozenInference
 from .serving_folds import ChooserServingFoldDescriptor, ServingFoldDescriptor
 
@@ -74,9 +74,12 @@ def validate_serving_fold_descriptor(descriptor):
 
 def _view(descriptor, parent, catalog_hash, *, role="size"):
     policy = descriptor.policy
-    if (not _hash_valid(catalog_hash) or not _manifest_hash_matches(parent)
-            or descriptor.parent_release_id != parent.release.release_id
-            or descriptor.parent_release_hash != parent.release_hash):
+    # Size folds may carry their authoring provenance into a later release;
+    # chooser folds retain the exact parent check below.
+    if not _hash_valid(catalog_hash) or not manifest_hash_matches(parent):
+        raise ServingFoldError()
+    if role != "size" and (descriptor.parent_release_id != parent.release.release_id
+                           or descriptor.parent_release_hash != parent.release_hash):
         raise ServingFoldError()
     bindings = [b for b in parent.release.bindings if b.role == role and b.strategy_id == "*"]
     if (len(bindings) != 1 or bindings[0].model_id != policy.model_id
@@ -187,7 +190,8 @@ def load_chooser_serving_fold(inference: FrozenInference, descriptor: ChooserSer
         descriptor = from_document(ChooserServingFoldDescriptor, to_document(descriptor))
         _validate_descriptor(descriptor)
         catalog_hash, expected_bytes = _chooser_catalog_hash(verified_catalog, descriptor, verified_parent_manifest)
-        release = _view(descriptor, verified_parent_manifest, catalog_hash, role=descriptor.policy.role)
+        release = _view(descriptor, verified_parent_manifest, catalog_hash,
+                        role=descriptor.policy.role)
         artifact = inference.prepare_serving_fold(release.bindings[0], max_member_bytes=MAX_FOLD_BYTES,
                                                   expected_bytes=expected_bytes)
         pred, res = _pools(artifact, descriptor)

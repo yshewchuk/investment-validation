@@ -19,13 +19,41 @@ def args(action="report"):
 
 
 def setup_cli(monkeypatch):
-    monkeypatch.setattr(cli, "_contain", lambda request: None)
+    monkeypatch.setattr(cli, "_contain", lambda *args, **kwargs: 2 ** 33)
     monkeypatch.setattr(cli, "_read_document", lambda path: {})
     monkeypatch.setattr(cli, "experiment_spec_from_document", lambda doc: object())
     monkeypatch.setattr(cli, "connect", lambda *a, **k: SimpleNamespace(close=lambda: None))
     monkeypatch.setattr(cli, "Repository", lambda *a, **k: None)
     monkeypatch.setattr(cli, "read_native_registration", lambda *a, **k: object())
     monkeypatch.setattr(cli, "collect", lambda *a: pytest.fail("collection after invalid metadata"))
+
+
+@pytest.mark.parametrize("action", ["preflight", "register", "seal", "run", "report"])
+def test_size_cli_refuses_iv_before_other_metadata_or_containment(monkeypatch, capsys, action):
+    from engine.v2.research.magnitude_panel_qualified_table import recipe
+    from experiments.magnitude_search_request_versions import compile_request
+    from tests.v2.research.test_magnitude_search_request import request
+    from tests.v2.research.test_size_review_contract import panel_request
+    document, panel = request(), panel_request()
+    panel.update(feature_snapshot_id=document["feature_snapshot_id"],
+        history_snapshot=document["history_snapshot_id"], price_history_snapshot="snap_" + "4" * 32)
+    document.update(schema_version="regression_search_request.v1", panel_request=panel,
+        feature_dictionary_hash=recipe("HMO")["dictionary_hash"])
+    document["comparison"].update(reference="iv_crush_causal_refit", sanity_reference="training_mean")
+    assert compile_request(document)["counts"]["candidates"] == 33
+    def forbidden(*args, **kwargs):
+        pytest.fail("SIZE CLI admitted an IV request")
+    def read(path):
+        assert path == "request", "read other metadata before route refusal"
+        return document
+    monkeypatch.setattr(cli, "_read_document", read)
+    for name in ("_contain", "connect", "Repository", "run_search", "collect", "prepare", "admit"):
+        monkeypatch.setattr(cli, name, forbidden)
+    argv = args(action) + ["--panel-request", "panel", "--scope", "scope",
+        "--training-start", "2020-01-01", "--labels-before", "2025-01-01", "--receipt-ref", "receipt"]
+    assert cli.main(argv) == 2
+    assert json.loads(capsys.readouterr().out) == {"refused": "INVALID_EXPERIMENT_SPEC",
+        "message": "INVALID_EXPERIMENT_SPEC: IV requires its dedicated CLI; use the admitted library path"}
 
 
 @pytest.mark.parametrize("document", [{}, {"schema_ref": "bad"}, {"digest": 1}])
@@ -55,9 +83,11 @@ def test_programming_error_is_not_storage_refusal(monkeypatch):
         cli.main(args())
 
 
+@pytest.mark.parametrize("schema", ["magnitude_search_request.v2", "magnitude_search_request.v3",
+                                     "magnitude_search_request.v4"])
 @pytest.mark.parametrize("action", ["seal", "run", "collect"])
-def test_legacy_cli_refuses_qualified_route_before_catalog_or_worker(monkeypatch, capsys, action):
-    monkeypatch.setattr(legacy, "_read_document", lambda path: {"schema_version": "magnitude_search_request.v2"})
+def test_legacy_cli_refuses_qualified_route_before_catalog_or_worker(monkeypatch, capsys, action, schema):
+    monkeypatch.setattr(legacy, "_read_document", lambda path: {"schema_version": schema})
     monkeypatch.setattr(legacy, "experiment_spec_from_document", lambda doc: object())
     monkeypatch.setattr(legacy, "from_document", lambda *a: object())
     for name in ("connect", "read_native_registration", "run_search", "seal_search_run", "collect_outer_results"):
@@ -96,16 +126,23 @@ def test_report_admits_driver_before_result_reads_or_work(monkeypatch, seal, act
 
 
 def test_size_register_refuses_oversized_binding_before_publication(monkeypatch, capsys):
+    from engine.v2.contracts import ArtifactRef
+    from engine.v2.foundation import to_document
     from tests.v2.research.test_size_review_contract import panel_request
+
+    RECEIPT_REF = to_document(ArtifactRef(artifact_id="a", content_hash="sha256:" + "0" * 64,
+        schema_ref="size_preflight_receipt.v1", byte_size=1, storage_key="objects/00/" + "0" * 64))
     setup_cli(monkeypatch)
-    monkeypatch.setattr(cli, "_read_document", lambda path: panel_request() if path == "panel" else {})
+    monkeypatch.setattr(cli, "_read_document", lambda path: panel_request() if path == "panel" else RECEIPT_REF if path == "receipt" else {})
     registration = SimpleNamespace(binding_json=b"x" * (cli.MAX_NATIVE_EVIDENCE_BYTES + 1))
-    monkeypatch.setattr(cli, "prepare", lambda *a, **k: (registration, object()))
+    monkeypatch.setattr(cli, "input_bindings", lambda *a, **k: {})
+    monkeypatch.setattr(cli, "admit", lambda *a, **k: (registration, object()))
     monkeypatch.setattr(cli, "seal_search_plan", lambda *a: pytest.fail("sealed oversized registration"))
     monkeypatch.setattr(cli, "ArtifactStore", lambda *a: SimpleNamespace(
         publish_bytes=lambda *a, **k: pytest.fail("published oversized registration")))
     argv = args("register") + ["--panel-request", "panel", "--scope", "development",
-        "--training-start", "2010-01-01", "--labels-before", "2025-01-01"]
+        "--training-start", "2010-01-01", "--labels-before", "2025-01-01",
+        "--receipt-ref", "receipt"]
     assert cli.main(argv) == 2
     assert json.loads(capsys.readouterr().out) == {"refused": "RESOURCE_LIMIT_EXCEEDED",
         "message": "RESOURCE_LIMIT_EXCEEDED: native registration exceeds its UTF-8 byte budget"}
@@ -282,21 +319,26 @@ def test_parent_memory_error_has_static_refusal_and_closes_catalog(monkeypatch, 
     assert "Traceback" not in output.err and "private allocation detail" not in output.out
 
 
-def test_recoverable_real_parent_address_space_failure_is_json_exit_two():
+def test_recoverable_real_parent_rss_failure_is_json_exit_two():
     import subprocess
     import sys
-    code = '''import resource
+    code = '''import time
 from pathlib import Path
 from experiments import size_search as cli
 cli._read_document = lambda path: {}
 cli.experiment_spec_from_document = lambda doc: object()
-def contain(request):
-    current = int(Path('/proc/self/statm').read_text().split()[0]) * resource.getpagesize()
-    ceiling = current + (16 << 20)
-    resource.setrlimit(resource.RLIMIT_AS, (ceiling, ceiling))
+def contain(request, *args, **kwargs):
+    with open('/proc/self/status', encoding='ascii') as stream:
+        for line in stream:
+            if line.startswith('VmRSS:'):
+                current = int(line.split()[1]) * 1024
+                break
+    return current + (32 << 20)
 cli._contain = contain
 def allocate(*args, **kwargs):
-    return bytearray(64 << 20)
+    block = bytearray(128 << 20)
+    block[::4096] = b"\\1" * len(range(0, len(block), 4096))
+    time.sleep(5)
 cli.connect = allocate
 raise SystemExit(cli.main(['report','--spec','spec','--request','request','--plan-ref','ref',
     '--catalog','catalog','--store-root','/tmp','--no-ledger']))

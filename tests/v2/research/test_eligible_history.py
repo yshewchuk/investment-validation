@@ -297,9 +297,9 @@ def test_embargoed_development_target_refuses_even_when_annual_evaluation(data, 
             event_ids=[data.events[0]["event_id"], embargoed])
 
 
-def test_output_horizon_choice_cannot_weaken_frozen_group_admission(data, monkeypatch):
+def test_output_horizon_subset_must_be_canonical_before_source_reads(data, monkeypatch):
     poison_outcomes(monkeypatch, data.repository, data.snapshot, (), all_outcomes=True)
-    for horizons in ([1], [3], [5], [1, 3], [3, 5], [5, 3, 1]):
+    for horizons in ([], [0, 3, 5], [1, 4], [3, 1], [1, 1], [True], [1.0], [5, 3, 1]):
         with pytest.raises(DataError, match="ordered native horizons"):
             history.materialize(data.repository, data.snapshot, **{**data.request, "horizons": horizons})
 
@@ -376,7 +376,7 @@ def test_public_request_shape_matrix_refuses_before_fingerprints_or_sources(data
         "as_of_month": [None, [], 202601, "2026-13", "2026-1"],
         "history_start": [None, [], 2022, "2022-02-30", "20220101"],
         "event_ids": [None, {}, "event", [], [None], [""], [" x"], ["x", "x"]],
-        "horizons": [None, {}, "1", [1], [True, 3, 5]],
+        "horizons": [None, {}, "1", [True, 3, 5]],
         "limits": [None, [], {}, {**LIMITS, "extra": 1},
                    *[{**LIMITS, key: value} for key in LIMITS for value in (None, True, 0, "1")]],
         "policy": [None, [], {}, {**POLICY, "extra": 1},
@@ -681,3 +681,35 @@ def test_compressible_output_obeys_native_expanded_read_cap_before_publish(data,
             columns=list(FEATURES), **request)
         assert len(result["rows"]) == 3
         assert all((r["n_prior"], r["mean_prior_abs_move"]) == (3, 4) for r in result["rows"])
+
+
+def test_iter_read_matches_list_read_and_scans_rows_lazily(data, monkeypatch):
+    artifact = history.materialize(data.repository, data.snapshot, **data.request)
+    columns = list(FEATURES)
+    expected = history.read(data.repository, data.snapshot, artifact["feature_snapshot"],
+        columns=columns, **data.request)
+    from engine.v2.research.eligible_history_table import TABLE as HISTORY_TABLE
+    scanned = []
+    scanned_limits = []
+    original_scan = data.repository.scan
+
+    def track_history_scan(query, **kwargs):
+        if kwargs.get("table_name") == HISTORY_TABLE:
+            scanned.append(True)
+            scanned_limits.append(kwargs["max_object_bytes"])
+        return original_scan(query, **kwargs)
+
+    monkeypatch.setattr(data.repository, "scan", track_history_scan)
+    stream_request = {**data.request, "limits": dict(data.request["limits"])}
+    admitted_max_object_bytes = stream_request["limits"]["max_object_bytes"]
+    streamed = history.iter_read(data.repository, data.snapshot, artifact["feature_snapshot"],
+        columns=columns, **stream_request)
+    assert streamed["context"] == expected["context"]
+    assert scanned == []
+    stream_request["limits"]["max_object_bytes"] = admitted_max_object_bytes + 1
+
+    rows = iter(streamed["rows"])
+    first = next(rows)
+    assert scanned
+    assert scanned_limits and set(scanned_limits) == {admitted_max_object_bytes}
+    assert [first, *rows] == expected["rows"]

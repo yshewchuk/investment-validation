@@ -59,7 +59,23 @@ tuples, plus the `size_folds` descriptor index (`None` only for a hand-built bin
 each declared chooser object must be a regular file no larger than 32 MiB.
 `select_chooser_state` selects the exact-session chooser analog/table state and
 the causal producer folds for a request. The nightly member assembler declares
-that state for registered menu rows; DYN-SV selection remains a later slice.
+that state for registered menu rows; DYN-SV selection remains gated on valid
+staged state.
+`chooser_fold_references` is keyed by `(producer_output, fold_start)` and
+contains `descriptor_hash`, `estimator_sha256`, `training_cutoff`, the original
+authoring `release_id`, `carrying_release_id`, `release_binding` and
+`fold_start` for each verified fold. Resolution leaves the map empty by
+default; an opted-in binding verifies at most 34 chooser-fold objects. The
+public `ChooserFoldReference` type names this resolver contract.
+Request-specific selection and nightly chooser wiring are not performed here.
+`select_chooser_state(binding, event_date, as_of)` selects exact-session state
+and the fold for the earlier event/decision month. It refuses noncanonical or
+timezone-aware dates, missing/ambiguous staged state, and producer cutoffs
+that are missing, noncanonical or not earlier than both decision and fold; it
+does not fall back to older state. Cache keys include fold month and decision
+day, and only validated entries are reusable. Request artifact refs bind the
+selected size estimator and interval floor plus chooser descriptor and policy
+hashes. These identities do not prove source finality or training membership.
 The reader raises
 `NoCurrentRelease`/`ModelNotReady` (never a legacy or cached fallback) when
 the pointer, catalog or a named member is not ready.
@@ -116,7 +132,7 @@ columns.
 is `DYNAMIC_MENU_REFUSAL_CODES`. These are pure preparatory accounting contracts,
 currently consumed only by focused tests. No runtime dispatcher uses them.
 
-<!-- public-interface: application, compatibility, dynamic_outcomes, DynamicMenuIdentity, DynamicCandidateOutcome, validate_dynamic_menu, DynamicMenuRefusal, DYNAMIC_MENU_REFUSAL_CODES, financial, frozen_batch, frozen_executor, frozen_inputs, identity, native_analog_query, release_bindings, source_inputs, gate_fold_selection, SizeFoldCatalog, index_size_folds, select_gate_forecast_source, gate_forecast_source, GateForecastSource, stages, FrozenInputsError, binding_feature_row, build_inference_requests, validate_answer_free, canonical_request, dependency_hash, financial_diagnostics, FrozenBatchPreflightError, FrozenBindingConflict, request_hash, replay, score_batch, score_event, score_frozen, score_frozen_batch, score_id, score_many, score_one, ModelIdentity, ModelNotReady, NoCurrentRelease, ReleaseBindingError, ScoringReleaseBinding, ChooserState, select_chooser_state, resolve_release_binding, resolve_gate_policy, NativeScoreInputs, SourceBundle, FrozenStageExecutor, FrozenStageRefusal, FrozenStageResult, STAGE_NAMES, StageReceipt, build_native_score_inputs, analog_display_fields, DISPLAY_ANALOG_FIELDS, StageObservation, quote_domain_map, assemble_nightly_source_bundle, validated_as_of, NightlySourceBundleRefusal -->
+<!-- public-interface: application, compatibility, dynamic_outcomes, DynamicMenuIdentity, DynamicCandidateOutcome, validate_dynamic_menu, DynamicMenuRefusal, DYNAMIC_MENU_REFUSAL_CODES, financial, frozen_batch, frozen_executor, frozen_inputs, identity, native_analog_query, release_bindings, source_inputs, gate_fold_selection, SizeFoldCatalog, index_size_folds, select_gate_forecast_source, gate_forecast_source, GateForecastSource, stages, FrozenInputsError, binding_feature_row, build_inference_requests, validate_answer_free, canonical_request, dependency_hash, financial_diagnostics, FrozenBatchPreflightError, FrozenBindingConflict, request_hash, replay, score_batch, score_event, score_frozen, score_frozen_batch, score_id, score_many, score_one, ModelIdentity, ModelNotReady, NoCurrentRelease, ReleaseBindingError, ScoringReleaseBinding, ChooserState, select_chooser_state, ChooserFoldReference, resolve_release_binding, resolve_gate_policy, NativeScoreInputs, SourceBundle, FrozenStageExecutor, FrozenStageRefusal, FrozenStageResult, STAGE_NAMES, StageReceipt, build_native_score_inputs, analog_display_fields, DISPLAY_ANALOG_FIELDS, StageObservation, quote_domain_map, assemble_nightly_source_bundle, validated_as_of, NightlySourceBundleRefusal -->
 
 ## Consumers
 
@@ -137,6 +153,10 @@ imports `native_entry_rule.ENTRY_RULE_STRATEGIES`, `NightlySourceBundleRefusal`,
 `no_fit_guard()` block. `engine.v2.serving.native_render` (layer 7) imports
 `analog_display_fields`, `DISPLAY_ANALOG_FIELDS` and `StageObservation` to
 carry the analog stage's display-only row ids onto a native serving row.
+Strict Tier-0 capture opts into verified chooser-fold references, passes them
+through the scorer, and records validated references in strict trace metadata.
+`tools/capture_tier0_corpus.py` is an external compatibility caller of the
+release binding resolver and scorer; it is not a package-layer consumer.
 
 <!-- consumers: engine.v2.models.training, engine.v2.ops, engine.v2.serving -->
 
@@ -168,6 +188,11 @@ the keys of the frozen `chooser_analog_pool` and `chooser_admissible_table`;
 features (event history, market/regime block) come from `feature_vector`, which
 still wins for any derived column it declares; `dte_entry` is scorer-computed
 (from the priced legs and quote date) and no longer projected.
+The resolver exposes its verified `chooser_fold_references` map only when
+called with `include_chooser_fold_references=True`. Default resolution does not
+load chooser estimators. Strict production capture opts in and passes the map
+through the legacy scorer; the capture trace records only the verified
+reference for each served chooser producer fold.
 
 The current builder is deliberately bounded to its supported strategies
 (`SUPPORTED_STRATEGIES`) and their declared recipes. To add another strategy or recipe, extend `source_inputs.py` and add

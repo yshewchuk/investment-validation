@@ -15,11 +15,17 @@ def _warn(*args, **kwargs):
 
 
 def _fake_refresh_half(monkeypatch, tmp_path, rebuild=None,
-                       final_date="2026-10-22"):
+                       final_date="2026-10-22", empty_calendar=False,
+                       refuse_sessions=()):
     rebuild_calls = []
     finalize_calls = []
 
     def events_table(*args, **kwargs):
+        if empty_calendar:
+            return pd.DataFrame(columns=[
+                "event_id", "ticker", "event_date", "session",
+                "date_conflict",
+            ])
         return pd.DataFrame({
             "event_id": [1],
             "ticker": ["AAA"],
@@ -51,7 +57,13 @@ def _fake_refresh_half(monkeypatch, tmp_path, rebuild=None,
 
     def refresh_gspc_daily(*args, **kwargs):
         refresh_calls.append((args, kwargs))
-        return {"ok": True, "last_date": "2026-10-22", "rows": 1}
+        session = str(pd.Timestamp(kwargs["session"]).date())
+        if session in refuse_sessions or (
+                empty_calendar and session == "2026-10-22"):
+            return {"ok": False, "reason": "session_not_final"}
+        return {"ok": True,
+                "last_date": session,
+                "rows": 1}
 
     monkeypatch.setattr(gspc_refresh, "refresh_gspc_daily",
                         refresh_gspc_daily)
@@ -161,29 +173,99 @@ def test_run_nightly_rejects_fetch_only_conflicts(kwargs):
         nightly.run_nightly(**kwargs)
 
 
-def test_fetch_only_happy_path_skips_scoring_half(tmp_path, monkeypatch):
-    fake = _fake_refresh_half(monkeypatch, tmp_path, final_date="2026-10-21")
+@pytest.mark.parametrize(
+    "requested_date, final_date, previous_session", [
+        ("2026-10-22", "2026-10-21", "2026-10-20"),
+        ("2026-10-23", "2026-10-22", "2026-10-21"),
+    ])
+def test_fetch_only_happy_path_skips_scoring_half(
+        tmp_path, monkeypatch, requested_date, final_date, previous_session):
+    fake = _fake_refresh_half(monkeypatch, tmp_path, final_date=final_date)
     report = nightly.run_nightly(
-        "2026-10-22", fetch_only=True,
+        requested_date, fetch_only=True,
         bundle_dir=tmp_path / "b", target=tmp_path / "t",
         chain_sessions=1,
     )
-    assert report.as_of == "2026-10-21"
+    assert report.as_of == final_date
     assert report.steps["tiers"]["degraded"] is False
     _assert_scoring_steps_skipped(report)
     assert len(fake.flags) == 1
     assert len(fake.warm) == 1
-    assert fake.warm[0][1] == pd.Timestamp("2026-10-21")
+    assert fake.warm[0][1] == pd.Timestamp(final_date)
     assert report.steps["warm_serving"] == {"folds": 0, "fitted": 0}
     assert len(fake.rebuild) == 1
     assert len(fake.gspc) == 1
     _, gspc_kwargs = fake.gspc[0]
     assert gspc_kwargs["refetch_token"].startswith("legacy-nightly-")
-    assert gspc_kwargs["minimum_last_date"] == pd.Timestamp("2026-10-20")
-    assert gspc_kwargs["session"] == gspc_kwargs["minimum_last_date"]
+    assert gspc_kwargs["minimum_last_date"] == pd.Timestamp(previous_session)
+    assert gspc_kwargs["session"] == report.as_of
     assert report.steps["gspc_refresh"] == {
-        "ok": True, "last_date": "2026-10-22", "rows": 1
+        "ok": True, "last_date": final_date, "rows": 1
     }
+
+
+def test_empty_calendar_falls_back_to_previous_session_ceiling(
+        tmp_path, monkeypatch, capsys):
+    """An unfinished as-of date uses the completed prior session if no universe can resolve it."""
+    fake = _fake_refresh_half(monkeypatch, tmp_path, empty_calendar=True)
+    report = nightly.run_nightly(
+        "2026-10-22", fetch_only=True,
+        bundle_dir=tmp_path / "b", target=tmp_path / "t",
+        chain_sessions=1,
+    )
+
+    assert report.as_of == "2026-10-22"
+    assert len(fake.gspc) == 2
+    assert fake.gspc[0][1]["session"] == "2026-10-22"
+    assert fake.gspc[0][1]["minimum_last_date"] == pd.Timestamp("2026-10-21")
+    assert fake.gspc[1][1]["session"] == pd.Timestamp("2026-10-21")
+    assert fake.gspc[1][1]["minimum_last_date"] == pd.Timestamp("2026-10-21")
+    assert report.steps["gspc_refresh"] == {
+        "ok": True, "last_date": "2026-10-21", "rows": 1
+    }
+    assert (fake.gspc[0][1]["refetch_token"]
+            == fake.gspc[1][1]["refetch_token"])
+    stderr = capsys.readouterr().err
+    assert "[nightly] as-of ceiling refused" in stderr
+    assert "calendar universe is empty" in stderr
+
+
+def test_nonempty_calendar_session_not_final_stops_without_fallback(
+        tmp_path, monkeypatch):
+    fake = _fake_refresh_half(
+        monkeypatch, tmp_path, refuse_sessions=("2026-10-22",))
+    with pytest.raises(nightly.NightlyStop) as exc:
+        nightly.run_nightly(
+            "2026-10-22", fetch_only=True,
+            bundle_dir=tmp_path / "b", target=tmp_path / "t",
+            chain_sessions=1,
+        )
+
+    assert exc.value.step == "gspc_refresh"
+    assert "GSPC_REFRESH_FAILED: session_not_final" in exc.value.detail
+    assert len(fake.gspc) == 1
+    assert fake.gspc[0][1]["session"] == "2026-10-22"
+
+
+def test_empty_calendar_fallback_refusal_stops_after_one_retry(
+        tmp_path, monkeypatch):
+    fake = _fake_refresh_half(
+        monkeypatch, tmp_path, empty_calendar=True,
+        refuse_sessions=("2026-10-22", "2026-10-21"))
+    with pytest.raises(nightly.NightlyStop) as exc:
+        nightly.run_nightly(
+            "2026-10-22", fetch_only=True,
+            bundle_dir=tmp_path / "b", target=tmp_path / "t",
+            chain_sessions=1,
+        )
+
+    assert exc.value.step == "gspc_refresh"
+    assert "GSPC_REFRESH_FAILED: session_not_final" in exc.value.detail
+    assert len(fake.gspc) == 2
+    assert fake.gspc[0][1]["session"] == "2026-10-22"
+    assert fake.gspc[1][1]["session"] == pd.Timestamp("2026-10-21")
+    assert (fake.gspc[0][1]["refetch_token"]
+            == fake.gspc[1][1]["refetch_token"])
 
 
 def test_fetch_only_degrades_when_rebuild_fails(tmp_path, monkeypatch):

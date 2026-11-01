@@ -47,7 +47,9 @@ request body and, if durable, in the operator guides instead — see
 |---|---|
 | `checks/` | [`checks/ARCHITECTURE.md`](checks/ARCHITECTURE.md) |
 | `tools/` | [`tools/ARCHITECTURE.md`](tools/ARCHITECTURE.md) |
+| Distribution research policy, premium-funded book and paired reports | [`experiments/ARCHITECTURE.md#distribution-explicit-policy`](experiments/ARCHITECTURE.md#distribution-explicit-policy) |
 | `experiments/` | [`experiments/ARCHITECTURE.md`](experiments/ARCHITECTURE.md) |
+| Distribution experiment fits, controls and bounded child | [`experiments/STR_THRU_DISTRIBUTION/ARCHITECTURE.md`](experiments/STR_THRU_DISTRIBUTION/ARCHITECTURE.md) |
 | `engine/v2/contracts/` | (pending) |
 | `engine/v2/foundation/` | [`engine/v2/foundation/ARCHITECTURE.md`](engine/v2/foundation/ARCHITECTURE.md) |
 | `engine/v2/data/` | [`engine/v2/data/ARCHITECTURE.md`](engine/v2/data/ARCHITECTURE.md) |
@@ -59,7 +61,7 @@ request body and, if durable, in the operator guides instead — see
 | `engine/v2/domain/valuation/` | (pending) |
 | `engine/v2/domain/simulation/` | (pending) |
 | `engine/v2/scoring/` | [`engine/v2/scoring/ARCHITECTURE.md`](engine/v2/scoring/ARCHITECTURE.md) |
-| `engine/v2/evaluation/` | (pending) |
+| `engine/v2/evaluation/` | [`engine/v2/evaluation/ARCHITECTURE.md`](engine/v2/evaluation/ARCHITECTURE.md) |
 | `engine/v2/ledger/` | [`engine/v2/ledger/ARCHITECTURE.md`](engine/v2/ledger/ARCHITECTURE.md) |
 | `engine/v2/models/training/` | (pending) |
 | `engine/v2/research/` | [`engine/v2/research/ARCHITECTURE.md`](engine/v2/research/ARCHITECTURE.md) |
@@ -67,6 +69,7 @@ request body and, if durable, in the operator guides instead — see
 | `engine/v2/serving/` | [`engine/v2/serving/ARCHITECTURE.md`](engine/v2/serving/ARCHITECTURE.md) |
 | `engine/v2/ops/` | [`engine/v2/ops/ARCHITECTURE.md`](engine/v2/ops/ARCHITECTURE.md) |
 | `engine/v2/ops/stores/massive/` | [`engine/v2/ops/stores/massive/ARCHITECTURE.md`](engine/v2/ops/stores/massive/ARCHITECTURE.md) |
+| `engine/v2/ops/workspace/` | [`engine/v2/ops/workspace/ARCHITECTURE.md`](engine/v2/ops/workspace/ARCHITECTURE.md) |
 | `engine/v2/diagnosis/` | (pending) |
 | `engine/v2/dashboard/` | [`engine/v2/dashboard/ARCHITECTURE.md`](engine/v2/dashboard/ARCHITECTURE.md) |
 | `ui/` | [`ui/ARCHITECTURE.md`](ui/ARCHITECTURE.md) |
@@ -591,7 +594,7 @@ Only a tracked path absent from the worktree reads as empty.
   `trailing_cutoff`/`ResidualPool`). One more `Service.tick()` sidecar,
   `Service._reconcile_pool_nightly_refresh` — never a `nightly.py`
   `GRAPH`/`_DAG_STAGES` node — trains the board-analog and paired residual
-  pools and the trailing cutoff at the session cutoff, stages a candidate
+  pools at the session cutoff and the trailing cutoff for the session and next month, stages a candidate
   release and promotes it behind an expected-incumbent guard; driver pools
   and the chooser stay carried. Contract: `engine/v2/models/ARCHITECTURE.md`
   §2.2.1; monthly retraining contract: §2.3.
@@ -780,9 +783,9 @@ change their arithmetic or imply that source receipt production is available.
   pattern to avoid, not to copy, when adding a sibling tool.
   Exceptions: `experiments.registered_runup` (installed root only for its
   registration source closure; caller data paths stay explicit),
-  `experiments.native_sweep_collection`, `experiments.v2_prediction`,
+  `experiments.native_sweep_collection`, `experiments.v2_prediction`, `experiments.iv_crush_search`,
   `experiments.magnitude_history_store`, `experiments.size_panel` and the search source seals in
-  `experiments.magnitude_search_plan`, `experiments.magnitude_search_trials`,
+  `experiments.magnitude_search_plan`, `experiments.distribution_plan`, `experiments.magnitude_search_trials`,
   `experiments.magnitude_search_outer`, `experiments.v2_magnitude_search_run`
   and `experiments.record_export` (installed checkout's git commit id only)
   derive installed roots from `__file__`

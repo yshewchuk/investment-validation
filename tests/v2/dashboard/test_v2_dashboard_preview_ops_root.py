@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -28,7 +29,7 @@ from tests.ops_support import TEST_POLICY
 REPO = Path(__file__).resolve().parents[3]
 TOKEN = "refresh-launcher-secret"
 SESSION = "2026-09-10"
-_NIGHTLY_JOB_COUNT = 15  # the 14 legacy-mode DAG stages + the planned restage job (#805)
+_NIGHTLY_JOB_COUNT = 16  # the 15 legacy-mode DAG stages + the planned restage job (#805)
 
 
 # --------------------------------------------------------------------------
@@ -65,7 +66,7 @@ def _nightly_manifest_dict() -> dict:
             "capture_implementation_ref": NIGHTLY_CAPTURE_IMPLEMENTATION_REF}
 
 
-def _published_nightly_plan(tmp_path: Path, capsys) -> tuple[Path, str]:
+def _published_nightly_plan(tmp_path: Path, capsys, monkeypatch) -> tuple[Path, str]:
     """An ops root holding one already-published, unblocked nightly plan.
 
     Uses the real ``ops plan nightly`` CLI -- the same path the desk's CLI
@@ -79,6 +80,12 @@ def _published_nightly_plan(tmp_path: Path, capsys) -> tuple[Path, str]:
     manifest.write_text(json.dumps(_nightly_manifest_dict()))
     assert cli.main(["--root", str(ops_root), "init"]) == 0
     capsys.readouterr()
+    monkeypatch.setattr(
+        "engine.v2.ops.snapshot_planning.resolve_snapshot_head",
+        lambda *args, **kwargs: SimpleNamespace(artifact_id="snapshot-ref", byte_size=32),
+    )
+    monkeypatch.setattr("engine.v2.ops.snapshot_planning._load_snapshot_ref",
+                        lambda *args, **kwargs: SimpleNamespace(snapshot_id="test-shadow-snapshot"))
     assert cli.main(["--root", str(ops_root), "plan", "nightly", "--as-of", SESSION,
                      "--tickers", "FAKE", "--input-manifest", str(manifest),
                      "--expected-population", str(population)]) == 0
@@ -139,7 +146,7 @@ def _stop(server, thread) -> None:
 
 
 def test_ops_root_refresh_returns_202_jobs_and_repeat_is_idempotent(tmp_path, monkeypatch, capsys):
-    ops_root, plan_ref = _published_nightly_plan(tmp_path, capsys)
+    ops_root, plan_ref = _published_nightly_plan(tmp_path, capsys, monkeypatch)
     assert _job_count(ops_root) == 0  # planning publishes no jobs
     monkeypatch.setattr(cli, "DEFAULT_POLICY", TEST_POLICY)
     server, thread, release_id = _run_launcher(tmp_path, monkeypatch, ops_root=ops_root)
@@ -150,6 +157,7 @@ def test_ops_root_refresh_returns_202_jobs_and_repeat_is_idempotent(tmp_path, mo
         body = json.loads(first.read())
         job_ids = [job["job_id"] for job in body["jobs"]]
         assert len(job_ids) == _NIGHTLY_JOB_COUNT
+        assert "nightly_preview_inputs" in {job["kind"] for job in body["jobs"]}
         assert TOKEN not in json.dumps(body)
 
         second = _post_refresh(server, {"plan_ref": plan_ref})
@@ -162,7 +170,7 @@ def test_ops_root_refresh_returns_202_jobs_and_repeat_is_idempotent(tmp_path, mo
 
 
 def test_missing_or_wrong_token_is_401_and_creates_no_job(tmp_path, monkeypatch, capsys):
-    ops_root, plan_ref = _published_nightly_plan(tmp_path, capsys)
+    ops_root, plan_ref = _published_nightly_plan(tmp_path, capsys, monkeypatch)
     server, thread, _ = _run_launcher(tmp_path, monkeypatch, ops_root=ops_root)
     try:
         for bad in (None, "wrong-token"):
@@ -175,7 +183,7 @@ def test_missing_or_wrong_token_is_401_and_creates_no_job(tmp_path, monkeypatch,
 
 
 def test_malformed_plan_ref_is_a_safe_400_and_creates_no_job(tmp_path, monkeypatch, capsys):
-    ops_root, _ = _published_nightly_plan(tmp_path, capsys)
+    ops_root, _ = _published_nightly_plan(tmp_path, capsys, monkeypatch)
     server, thread, _ = _run_launcher(tmp_path, monkeypatch, ops_root=ops_root)
     try:
         for payload in ({"plan_ref": 123}, {}, {"plan_ref": ""}):
@@ -191,7 +199,7 @@ def test_without_ops_root_valid_plan_ref_still_503_and_is_not_guessed(tmp_path, 
     # An ops root holding a publishable plan, but launched WITHOUT --ops-root:
     # the route must keep its read-only 503 and must never guess a root from
     # --release-root (the bundle store is a different tree entirely).
-    ops_root, plan_ref = _published_nightly_plan(tmp_path, capsys)
+    ops_root, plan_ref = _published_nightly_plan(tmp_path, capsys, monkeypatch)
     server, thread, release_id = _run_launcher(tmp_path, monkeypatch)  # no ops root
     try:
         assert release_id == "r1"

@@ -97,6 +97,9 @@ from engine.v2.parity.dimensions import (  # noqa: E402
     SIMULATION_FIELDS,
     compare_dimension,
 )
+from engine.v2.parity.financial_diagnostics import (  # noqa: E402
+    expected_financial_diagnostics as _expected_financial_diagnostics,
+)
 from engine.v2.registry import DYNAMIC_MENU, STRATEGY_IDS, default_registry  # noqa: E402
 from engine.v2.scoring import application  # noqa: E402
 from engine.v2.scoring.identity import request_hash, score_id, with_score_id  # noqa: E402
@@ -1293,85 +1296,6 @@ def _numeric_corruption_candidate(values: dict) -> tuple[str, Any] | None:
         if value is not None and isinstance(value, (int, float)):
             return field, value
     return None
-
-
-def _legacy_fair_premium(record: dict) -> float | None:
-    """Independently reproduce the frozen renderer financial oracle."""
-    payoff = record.get("payoff") or {}
-    driver = record.get("driver_prediction")
-    if payoff.get("kind") == "runup_payoff_surface":
-        coefficients = payoff.get("coefficients") or {}
-        move = record.get("runup_move_prediction")
-        spot = record.get("spot")
-        strike = record.get("strike")
-        names = (
-            "intercept", "implied_move", "abs_moneyness",
-            "moneyness_sq_div10", "signed_moneyness",
-            "implied_x_abs_moneyness_div10",
-        )
-        if (driver is None or move is None or spot in (None, 0, 0.0)
-                or strike in (None, 0, 0.0)
-                or any(name not in coefficients for name in names)):
-            return None
-        values = []
-        for direction in (-1.0, 1.0):
-            exit_spot = float(spot) * math.exp(direction * float(move) / 100.0)
-            money = 100.0 * math.log(exit_spot / float(strike))
-            absolute = abs(money)
-            terms = (
-                1.0, float(driver), absolute, money * money / 10.0,
-                money, float(driver) * absolute / 10.0,
-            )
-            values.append(sum(
-                float(coefficients[name]) * term
-                for name, term in zip(names, terms)
-            ))
-        return max(0.0, sum(values) / len(values) * 100.0)
-    intercept = payoff.get("intercept")
-    slope = payoff.get("slope")
-    if driver is None or intercept is None or slope is None:
-        return None
-    return max(0.0, (
-        float(intercept) + float(slope) * float(driver)
-    ) * 100.0)
-
-
-def _expected_financial_diagnostics(record: dict) -> dict:
-    """Compute expected diagnostics without importing native scoring code."""
-    spot = record.get("spot")
-    cost = record.get("entry_cost")
-    entry_cost_pct = (
-        float(cost) / float(spot) * 100.0
-        if cost is not None and spot not in (None, 0, 0.0)
-        else None
-    )
-    driver = record.get("driver_prediction")
-    implied = record.get("implied_move")
-    model_vs_market = (
-        float(driver) / (float(implied) * 0.645)
-        if record.get("driver_name") == "abs_move"
-        and driver is not None and implied not in (None, 0, 0.0)
-        else None
-    )
-    fair = _legacy_fair_premium(record)
-    premium_vs_fair = (
-        entry_cost_pct / fair
-        if entry_cost_pct is not None and fair not in (None, 0, 0.0)
-        else None
-    )
-    width = record.get("structure_width")
-    cost_over_width = (
-        float(cost) / float(width)
-        if cost is not None and width not in (None, 0, 0.0)
-        else None
-    )
-    return {
-        "entry_cost_pct": entry_cost_pct,
-        "model_vs_market": model_vs_market,
-        "fair_premium_pct": fair,
-        "premium_vs_fair": premium_vs_fair,
-        "cost_over_width": cost_over_width,
-    }
 
 
 def _numeric_views(record: dict, native) -> tuple[dict, dict]:

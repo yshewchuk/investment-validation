@@ -79,12 +79,24 @@ elasticnet_recipe(columns=['a'], feature_dictionary_hash='sha256:' + '1' * 64, a
     {"columns": []}, {"columns": "signal"}, {"columns": ["a", "a"]},
     {"columns": ["bad/name"]}, {"columns": [True]}, {"columns": ["a", []]},
     {"feature_dictionary_hash": "sha256:abc"}, {"feature_dictionary_hash": None},
-    {"alpha": True}, {"alpha": float("nan")}, {"alpha": 0}, {"alpha": 10},
-    {"l1_ratio": False}, {"l1_ratio": .5},
+    {"alpha": True}, {"alpha": False}, {"alpha": float("nan")}, {"alpha": float("inf")},
+    {"alpha": 0}, {"alpha": -1}, {"alpha": 1e-7}, {"alpha": 1000.0001},
+    {"alpha": "1"}, {"l1_ratio": False}, {"l1_ratio": 0}, {"l1_ratio": -1},
+    {"l1_ratio": 1e-7}, {"l1_ratio": 1.0001}, {"l1_ratio": float("nan")},
+    {"l1_ratio": float("inf")}, {"l1_ratio": "0.5"},
 ])
 def test_recipe_rejects_undeclared_parameters_or_malformed_identity(overrides):
     with pytest.raises(ValueError):
         recipe(**overrides)
+
+
+@pytest.mark.parametrize("alpha", [1e-6, 0.001, 0.003, 0.03, 100.0, 1000.0])
+@pytest.mark.parametrize("l1_ratio", [1e-6, 0.25, 0.75, 1.0])
+def test_v3_alpha_and_l1_ratio_intervals_are_accepted_and_validated(alpha, l1_ratio):
+    policy = recipe(alpha=alpha, l1_ratio=l1_ratio)
+    assert policy["estimator"]["params"]["alpha"] == float(alpha)
+    assert policy["estimator"]["params"]["l1_ratio"] == float(l1_ratio)
+    assert validate_elasticnet_recipe(json.loads(canonical_json(policy))) == policy
 
 
 @pytest.mark.parametrize("path,value", [

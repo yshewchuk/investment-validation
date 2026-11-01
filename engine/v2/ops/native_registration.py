@@ -10,12 +10,15 @@ from engine.v2.foundation import (
     canonical_json,
     content_hash,
     from_document,
+    safe_relative_path,
     to_document,
 )
+from engine.v2.models.regression_target import validate_target
 from engine.v2.ops.catalog import decode_bounded_text, sql_text_budget
 from engine.v2.ops.errors import OpsError, fail
 
 MAX_NATIVE_EVIDENCE_BYTES = 16 * 1024 * 1024
+MAX_NATIVE_SIZE_ARTIFACT_BYTES = 1024 * 1024 * 1024
 
 
 def read_native_evidence(conn, run_id, *, max_bytes=MAX_NATIVE_EVIDENCE_BYTES):
@@ -55,7 +58,8 @@ def native_evidence_json(document, *, max_bytes=MAX_NATIVE_EVIDENCE_BYTES):
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "native evidence exceeds its canonical object contract") from None
 
 
-def verified_registration_bytes(conn, store, run_id, *, expected_ref=None, max_evidence_bytes=None):
+def verified_registration_bytes(conn, store, run_id, *, expected_ref=None, max_evidence_bytes=None,
+                                 verified_size_rows=None):
     """Return exact verified registration bytes, or None for an absent reservation."""
     if max_evidence_bytes is None:
         row = conn.execute(
@@ -75,15 +79,15 @@ def verified_registration_bytes(conn, store, run_id, *, expected_ref=None, max_e
         if (ref.schema_ref not in ("native_experiment_registration.v1.0", "native_experiment_registration.v1.1",
                                   "native_experiment_registration.v1.2", "native_experiment_registration.v1.3",
                                   "native_experiment_registration.v1.4", "native_experiment_registration.v1.5",
-                                  "native_experiment_registration.v1.6")
+                                  "native_experiment_registration.v1.6",
+                                  "native_experiment_registration.v1.7", "native_experiment_registration.v1.8")
                 or (expected_ref is not None and ref != expected_ref)):
             raise ValueError
-        if max_evidence_bytes is not None and ref.byte_size > max_evidence_bytes:
-            raise fail("RESOURCE_LIMIT_EXCEEDED", "native registration exceeds its UTF-8 byte budget",
-                       details={"registration_bytes": ref.byte_size, "max_registration_bytes": max_evidence_bytes})
-        binding = store.read_verified(ref)
+        binding = _read_registration_artifact(store, ref, max_evidence_bytes)
         document = json.loads(binding)
-        valid = _matches(row, evidence, ref, binding, document)
+        _check_size_artifact_budget(document)
+        verified_size_rows = _size_verification_cache(document, verified_size_rows)
+        valid = _matches(row, evidence, ref, binding, document, store, verified_size_rows)
     except (ArtifactError, ValueError, TypeError, KeyError):
         valid = False
     except RecursionError:
@@ -95,9 +99,166 @@ def verified_registration_bytes(conn, store, run_id, *, expected_ref=None, max_e
     return binding
 
 
-def _matches(row, evidence, ref, binding, document):
+def _read_registration_artifact(store, ref, max_bytes):
+    """Apply the selected format's byte budget before opening its artifact."""
+    if max_bytes is None and ref.schema_ref == "native_experiment_registration.v1.8":
+        max_bytes = MAX_NATIVE_EVIDENCE_BYTES
+    if max_bytes is not None and ref.byte_size > max_bytes:
+        raise fail("RESOURCE_LIMIT_EXCEEDED", "native registration exceeds its UTF-8 byte budget",
+                   details={"registration_bytes": ref.byte_size, "max_registration_bytes": max_bytes})
+    return store.read_verified(ref)
+
+
+def _size_verification_cache(document, verified_size_rows):
+    if (verified_size_rows is None and isinstance(document, dict)
+            and document.get("schema_version") == "native_experiment_registration.v1.7"):
+        return {}
+    return verified_size_rows
+
+
+def _size_artifact_byte_total(document):
+    """Sum v1.7 shard bytes; malformed shapes surface as identity conflicts."""
+    try:
+        return sum(
+            from_document(ArtifactRef, shard["ref"]).byte_size
+            for descriptor in document["size_artifacts"].values()
+            for shard in descriptor["entry"]["shards"])
+    except (ArtifactError, ValueError, TypeError, KeyError, AttributeError):
+        raise ValueError("malformed size artifact descriptor") from None
+
+
+def _check_size_artifact_budget(document):
+    """Enforce the v1.7 aggregate size artifact byte cap."""
+    if not isinstance(document, dict) or document.get("schema_version") != "native_experiment_registration.v1.7":
+        return
+    size_artifact_bytes = _size_artifact_byte_total(document)
+    if size_artifact_bytes > MAX_NATIVE_SIZE_ARTIFACT_BYTES:
+        raise fail("RESOURCE_LIMIT_EXCEEDED", "native registration size artifacts exceed their byte budget",
+                   details={"size_artifact_bytes": size_artifact_bytes,
+                            "max_size_artifact_bytes": MAX_NATIVE_SIZE_ARTIFACT_BYTES})
+
+
+def _size_artifacts_verified(store, document, verified_size_rows=None):
+    """Hash-check each v1.7 shard independently without assembling section JSON."""
+    if document.get("schema_version") != "native_experiment_registration.v1.7":
+        return True
+    try:
+        artifacts = document["size_artifacts"]
+        for artifact_id, descriptor in artifacts.items():
+            if not _size_artifact_verified(store, descriptor, verified_size_rows):
+                return False
+        return True
+    except (ArtifactError, ValueError, TypeError, KeyError, AttributeError, RecursionError):
+        return False
+
+
+def _size_artifact_descriptor_parts(descriptor):
+    if (not isinstance(descriptor, dict)
+            or set(descriptor) != {"kind", "section", "entry"}
+            or descriptor["kind"] not in ("list", "map", "object")
+            or not isinstance(descriptor["section"], str)):
+        return None
+    entry = descriptor["entry"]
+    if (not isinstance(entry, dict) or set(entry) != {"row_count", "shards"}
+            or type(entry["row_count"]) is not int or entry["row_count"] < 0
+            or not isinstance(entry["shards"], list)):
+        return None
+    return descriptor["kind"], descriptor["section"], entry
+
+
+def _size_artifact_boundaries_valid(shard, position):
+    first_key, last_key = shard["first_key"], shard["last_key"]
+    if (not isinstance(first_key, list) or len(first_key) != 1
+            or type(first_key[0]) is not int):
+        return False
+    if (not isinstance(last_key, list) or len(last_key) != 1
+            or type(last_key[0]) is not int):
+        return False
+    return first_key == [position] and last_key == [position + shard["rows"] - 1]
+
+
+def _size_artifact_shard_ref(shard, section, position):
+    if (not isinstance(shard, dict)
+            or set(shard) != {"ref", "rows", "first_key", "last_key"}
+            or type(shard["rows"]) is not int or shard["rows"] <= 0):
+        return None
+    ref = from_document(ArtifactRef, shard["ref"])
+    if (ref.schema_ref != "magnitude_search_shard.v1"
+            or type(ref.byte_size) is not int or not 0 < ref.byte_size <= 8 * 1024 * 1024):
+        return None
+    safe_relative_path(ref.storage_key)
+    if not _size_artifact_boundaries_valid(shard, position):
+        return None
+    return ref
+
+
+def _size_artifact_rows_valid(rows, position, kind, map_names):
+    for offset, row in enumerate(rows):
+        if (not isinstance(row, dict) or set(row) != {"position", "row"}
+                or type(row["position"]) is not int
+                or row["position"] != position + offset):
+            return False
+        if kind == "map":
+            value = row["row"]
+            if (not isinstance(value, list) or len(value) != 2
+                    or not isinstance(value[0], str) or value[0] in map_names):
+                return False
+            map_names.add(value[0])
+    return True
+
+
+def _size_artifact_total_valid(kind, entry, position):
+    if position != entry["row_count"]:
+        return False
+    return kind != "object" or position == 1
+
+
+def _size_artifact_verified(store, descriptor, verified_size_rows=None):
+    """Verify one artifact descriptor's shards, row totals, and object cardinality."""
+    try:
+        parts = _size_artifact_descriptor_parts(descriptor)
+        if parts is None:
+            return False
+        kind, section, entry = parts
+        position = 0
+        map_names = set()
+        for shard in entry["shards"]:
+            ref = _size_artifact_shard_ref(shard, section, position)
+            if ref is None:
+                return False
+            stored = json.loads(store.read_verified(ref))
+            if (not isinstance(stored, dict)
+                    or set(stored) != {"schema_version", "section", "rows"}
+                    or stored["schema_version"] != "magnitude_search_shard.v1"
+                    or stored["section"] != section):
+                return False
+            rows = stored["rows"]
+            if (not isinstance(rows, list) or len(rows) != shard["rows"]
+                    or not _size_artifact_rows_valid(rows, position, kind, map_names)):
+                return False
+            if verified_size_rows is not None:
+                verified_size_rows[(section, ref.schema_ref, ref.storage_key, ref.content_hash,
+                                    ref.byte_size)] = rows
+            position += shard["rows"]
+        if not _size_artifact_total_valid(kind, entry, position):
+            return False
+        return True
+    except (ArtifactError, ValueError, TypeError, KeyError, AttributeError, RecursionError):
+        return False
+
+
+def _registration_binding(document):
+    if isinstance(document, dict) and document.get("schema_version") == "native_experiment_registration.v1.8":
+        return _regression_binding(document)
+    return _magnitude_binding(document)
+
+
+def _matches(row, evidence, ref, binding, document, store, verified_size_rows=None):
     variant = content_hash(document)
-    return (_magnitude_binding(document) and document["schema_version"] == ref.schema_ref
+    return (_registration_binding(document) and _size_artifacts_verified(store, document, verified_size_rows)
+            and (document["schema_version"] != "native_experiment_registration.v1.7"
+                 or _magnitude_binding(document, verified_size_rows))
+            and document["schema_version"] == ref.schema_ref
             and canonical_json(document).encode() == binding
             and artifact_reference(binding, ref.schema_ref) == ref
             and row["spec_hash"] == document["spec_hash"] and row["mode"] == "primary"
@@ -117,8 +278,10 @@ def validate_magnitude_execution(document):
     raise fail("EXPERIMENT_IDENTITY_CONFLICT", "magnitude execution requires a sealed v1.3 plan")
 
 
-def _magnitude_binding(document):
+def _magnitude_binding(document, verified_size_rows=None):
     """Check stored plan integrity and cross-links, never reconstruct or authorize."""
+    if document["schema_version"] == "native_experiment_registration.v1.7":
+        return _size_binding_v17(document, verified_size_rows)
     if document["schema_version"] == "native_experiment_registration.v1.6":
         return _size_binding(document)
     if document["schema_version"] == "native_experiment_registration.v1.5":
@@ -147,6 +310,127 @@ def _magnitude_binding(document):
             and (not executable or _magnitude_execution(document, plan)))
 
 
+def _size_binding_v17(document, verified_size_rows=None):
+    """Structural v1.7 placeholder envelope; full SIZE validation follows hydration."""
+    try:
+        if set(document) != {"schema_version", "spec_hash", "execution_plan", "snapshot", "scope",
+                             "source_closure", "environment", "event_ids", "holdouts",
+                             "magnitude_request", "magnitude_plan", "magnitude_execution",
+                             "size_request", "size_panel_request", "size_panel",
+                             "size_comparison", "size_artifacts"}:
+            return False
+        return (_size_artifact_map_v17(document, verified_size_rows)
+                and _size_plan_v17(document)
+                and _size_panel_v17(document))
+    except (KeyError, TypeError, ValueError, AttributeError, ArtifactError, RecursionError):
+        return False
+
+
+def _size_artifact_map_v17(document, verified_size_rows=None):
+    artifacts = document["size_artifacts"]
+    if not isinstance(artifacts, dict):
+        return False
+    found = []
+    for key, value in document.items():
+        if key != "size_artifacts" and not _size_placeholders_v17(value, found):
+            return False
+    if verified_size_rows is not None:
+        for rows in verified_size_rows.values():
+            if not _size_placeholders_v17(rows, found):
+                return False
+        if set(found) != set(artifacts):
+            return False
+    elif not set(found) <= set(artifacts):
+        return False
+    shard_total = 0
+    for artifact_id, descriptor in artifacts.items():
+        if not _size_descriptor_v17(descriptor, artifact_id):
+            return False
+        shard_total += len(descriptor["entry"]["shards"])
+    return shard_total <= 8192
+
+
+def _size_plan_v17(document):
+    plan = document["magnitude_plan"]
+    return (isinstance(plan, dict)
+            and set(plan) == {"schema_version", "snapshot_id", "holdout_as_of_month",
+                              "random_membership_version", "rolling_membership_version",
+                              "training_start", "evaluation_years", "horizons",
+                              "target_recipe", "fold_policy", "population_input",
+                              "calendar_input", "events", "folds", "availability", "plan_id"}
+            and _size_placeholder_v17(plan["events"])
+            and _size_placeholder_v17(document["event_ids"]))
+
+
+_SIZE_PANEL_CONTEXTS = ("magnitude_panel_context.v3", "magnitude_panel_context.v4")
+_SIZE_REQUEST_SCHEMAS = ("magnitude_search_request.v2", "magnitude_search_request.v3",
+                         "magnitude_search_request.v4")
+
+
+def _size_panel_v17(document):
+    panel = document["size_panel"]
+    if not isinstance(panel, dict) or set(panel) != {"context", "feature_snapshot"}:
+        return False
+    context, feature = panel["context"], panel["feature_snapshot"]
+    if not isinstance(context, dict) or not isinstance(feature, dict):
+        return False
+    request = context.get("request")
+    if (context.get("schema_version") not in _SIZE_PANEL_CONTEXTS
+            or not isinstance(context.get("context_id"), str)
+            or context.get("source_snapshot") != document["snapshot"]
+            or not _size_placeholder_v17(context.get("target_events"))
+            or not isinstance(request, dict)
+            or not _size_placeholder_v17(request.get("event_ids"))
+            or not isinstance(feature.get("snapshot_id"), str)):
+        return False
+    return (document["size_request"]["schema_version"] in _SIZE_REQUEST_SCHEMAS
+            and document["size_comparison"]["schema_version"] == "size_causal_comparator.v1"
+            and isinstance(document["size_panel_request"], dict))
+
+
+def _size_placeholders_v17(node, found):
+    """Gather exact compact placeholders, rejecting mixed $size_artifact nodes."""
+    if isinstance(node, dict):
+        if "$size_artifact" in node:
+            if set(node) != {"$size_artifact"} or not isinstance(node["$size_artifact"], str):
+                return False
+            found.append(node["$size_artifact"])
+            return True
+        return all(_size_placeholders_v17(value, found) for value in node.values())
+    if isinstance(node, list):
+        return all(_size_placeholders_v17(item, found) for item in node)
+    return True
+
+
+def _size_placeholder_v17(value):
+    return (isinstance(value, dict) and set(value) == {"$size_artifact"}
+            and isinstance(value["$size_artifact"], str))
+
+
+def _size_descriptor_v17(descriptor, artifact_id):
+    if (not isinstance(descriptor, dict) or set(descriptor) != {"kind", "section", "entry"}
+            or descriptor["kind"] not in ("list", "object", "map")
+            or descriptor["section"] != f"size_registration.v1.7:{artifact_id}"):
+        return False
+    entry = descriptor["entry"]
+    if (not isinstance(entry, dict) or set(entry) != {"row_count", "shards"}
+            or type(entry["row_count"]) is not int or entry["row_count"] < 0
+            or not isinstance(entry["shards"], list)):
+        return False
+    return all(_size_shard_v17(shard) for shard in entry["shards"])
+
+
+def _size_shard_v17(shard):
+    if not isinstance(shard, dict) or set(shard) != {"ref", "rows", "first_key", "last_key"}:
+        return False
+    ref = from_document(ArtifactRef, shard["ref"])
+    return (ref.schema_ref == "magnitude_search_shard.v1"
+            and 1 <= ref.byte_size <= 8 * 1024 * 1024
+            and type(shard["rows"]) is int and shard["rows"] > 0
+            and isinstance(shard["first_key"], list)
+            and isinstance(shard["last_key"], list))
+
+
 def _size_binding(document):
     """Integrity-only additive panel envelope; research owns current source admission."""
     additions = ("size_request", "size_panel_request", "size_panel", "size_comparison")
@@ -158,10 +442,10 @@ def _size_binding(document):
     context = panel["context"]
     return (_size_panel_request(document) and document["size_comparison"]["schema_version"] == "size_causal_comparator.v1"
         and _magnitude_binding(baseline)
-        and context["schema_version"] == "magnitude_panel_context.v3"
+        and context["schema_version"] in _SIZE_PANEL_CONTEXTS
         and context["context_id"] == content_hash({k: v for k, v in context.items() if k != "context_id"})
         and context["source_snapshot"] == document["snapshot"]
-        and request["schema_version"] == "magnitude_search_request.v2"
+        and request["schema_version"] in _SIZE_REQUEST_SCHEMAS
         and request["feature_snapshot_id"] == panel["feature_snapshot"]["snapshot_id"]
         and request["history_snapshot_id"] == context["history_snapshot"]["snapshot_id"]
         and {e["event_id"] for e in context["target_events"]} == set(document["event_ids"]))
@@ -381,13 +665,18 @@ def _magnitude_metadata(plan):
         "target": "absolute_earnings_close_to_close_return", "price_basis": "split_neutral_non_dividend_adjusted",
         "estimand": "conditional_mean", "primary_loss": "pooled_rmse",
         "secondary_diagnostics": ["mae", "quantile_calibration"]}
+    return plan["target_recipe"] == recipe and _temporal_metadata(plan)
+
+
+def _temporal_metadata(plan):
+    """Shared closed metadata policy; target definition is checked separately."""
     policy = {"kind": "expanding_event_year", "group_key": "event_id",
         "fit_boundary": "min_year_start_and_evaluation_forecast_ceilings",
         "training_label_availability": "strictly_before_fit_boundary_required_later",
         "issuer_overlap": "allowed_across_time", "inner_search": "not_defined"}
     availability = {"basis": "reconstructed_date_bounds", "event_schedule_as_known": "unverified",
                     "source_publication": "unverified"}
-    return (plan["target_recipe"] == recipe and plan["fold_policy"] == policy
+    return (plan["fold_policy"] == policy
             and plan["availability"] == availability and _magnitude_window(plan)
             and plan["random_membership_version"] == "canonical-event-sha256.v1"
             and plan["rolling_membership_version"] == "calendar-months.v1"
@@ -518,3 +807,54 @@ def _magnitude_member_order(ids, events):
         return False
     members = set(ids)
     return ids == [key for key in events if key in members]
+
+
+def validate_regression_registration(document):
+    """Validate the v1.8 wire binding, not live sources or fitting authority."""
+    try:
+        if _regression_binding(document):
+            return
+    except (KeyError, TypeError, ValueError, OverflowError, AttributeError):
+        pass
+    raise fail("EXPERIMENT_IDENTITY_CONFLICT", "regression registration binding differs")
+
+
+def _regression_binding(document):
+    if (not isinstance(document, dict) or document.get("schema_version") != "native_experiment_registration.v1.8"
+            or set(document) != {"schema_version", "spec_hash", "execution_plan", "snapshot", "scope",
+                "source_closure", "environment", "event_ids", "holdouts", "regression_plan",
+                "regression_execution", "feature_snapshot", "target_snapshot"}):
+        return False
+    for name in ("snapshot", "feature_snapshot", "target_snapshot"):
+        if to_document(from_document(SnapshotRef, document[name])) != document[name]:
+            return False
+    plan, execution = document["regression_plan"], document["regression_execution"]
+    return _regression_plan(plan, execution) and _regression_context(document, plan, execution)
+
+
+def _regression_plan(plan, execution):
+    if (not isinstance(plan, dict) or set(plan) != {"schema_version", "snapshot_id", "holdout_as_of_month",
+            "random_membership_version", "rolling_membership_version", "training_start", "evaluation_years",
+            "horizons", "target_recipe", "fold_policy", "population_input", "calendar_input", "events",
+            "folds", "availability", "plan_id"}
+            or not isinstance(execution, dict) or set(execution) != {"schema_version", "evaluation_labels_before"}
+            or execution["schema_version"] != "regression_execution.v1"
+            or not _day(execution["evaluation_labels_before"])):
+        return False
+    validate_target(plan["target_recipe"])
+    return (plan["schema_version"] == "regression_temporal_plan.v1"
+        and plan["plan_id"] == content_hash({k: v for k, v in plan.items() if k != "plan_id"})
+        and _temporal_metadata(plan))
+
+
+def _regression_context(document, plan, execution):
+    declared = document["execution_plan"]
+    return (_magnitude_sources(plan, document["snapshot"])
+        and plan["evaluation_years"] == declared["folds"]
+        and type(declared["seed"]) is int and declared["seed"] == 0 and declared["economic_params"] == {}
+        and plan["snapshot_id"] == document["snapshot"]["snapshot_id"]
+        and document["holdouts"] == {name: plan[name] for name in (
+            "holdout_as_of_month", "random_membership_version", "rolling_membership_version")}
+        and _magnitude_events(plan["events"], document["event_ids"]) and _magnitude_folds(plan)
+        and all(event["event_date"] < execution["evaluation_labels_before"] for event in plan["events"]
+                if event["event_date"][:4] in plan["evaluation_years"]))
