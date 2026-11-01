@@ -38,7 +38,7 @@ def operator(case, monkeypatch, tmp_path, capsys):
         path.write_text(json.dumps(document), encoding="utf-8")
         arguments.extend(("--" + name, str(path)))
     arguments.extend(("--catalog", str(tmp_path / "catalog.sqlite"), "--store-root", str(case.store.root), "--no-ledger"))
-    active, calls, instances, connections, published, evaluations, finalized = [], [], [], [], [], [], []
+    active, calls, instances, connections, published, evaluations, finalized, stderr = [], [], [], [], [], [], [], []
     @contextmanager
     def contained(limits, seconds):
         assert not active
@@ -91,6 +91,7 @@ def operator(case, monkeypatch, tmp_path, capsys):
         before = len(calls)
         status = cli.main([action, *arguments])
         captured = capsys.readouterr()
+        stderr.append(captured.err)
         assert len(calls) == before + 1 and not active
         with pytest.raises(sqlite3.ProgrammingError, match="closed"):
             connections[-1].execute("SELECT 1")
@@ -98,7 +99,7 @@ def operator(case, monkeypatch, tmp_path, capsys):
     def record(slot):
         return read_record(case.conn, case.store, "distribution-own", "distribution:run-" + slot)
     return SimpleNamespace(invoke=invoke, record=record, calls=calls, instances=instances,
-        published=published, evaluations=evaluations, finalized=finalized,
+        published=published, evaluations=evaluations, finalized=finalized, stderr=stderr,
         request_path=tmp_path / "request.json")
 
 
@@ -165,9 +166,12 @@ def test_failure_journal_io_is_terminal_and_fresh_cli_retry_cannot_write_or_fit(
             raise OSError("synthetic failure-journal storage outage")
         return original(store, payload, **kwargs)
     monkeypatch.setattr(ArtifactStore, "publish_bytes", publish)
-    case.state.update(failure=fail("RESOURCE_LIMIT_EXCEEDED", "synthetic fit exhaustion"), fail_on=8)
+    primary = fail("RESOURCE_LIMIT_EXCEEDED", "synthetic fit exhaustion")
+    case.state.update(failure=primary, fail_on=8)
     status, result = operator.invoke("run")
-    assert status == 2 and result["refused"]["code"] == "RESOURCE_UNAVAILABLE"  # S2 masks the primary error.
+    assert status == 2 and result["refused"] == to_document(primary.problem)
+    assert operator.stderr[-1].count("[distribution] failure journal unavailable; original failure retained; attempt remains consumed") == 1
+    assert "synthetic failure-journal storage outage" not in operator.stderr[-1]
     assert failures == [True] and operator.evaluations == ["2023"] and not operator.finalized
     assert len(operator.published) == 9 and all(rows(case, section) for section in operator.published)
     assert sum(call[0] == "fit" for call in case.calls) == 8

@@ -8,7 +8,7 @@ from engine.v2.foundation import SystemClock, format_timestamp, from_document
 from engine.v2.models.no_fit import forbid_fitting
 from engine.v2.ops.errors import fail
 from engine.v2.research._pricing import trading_calendar_from_snapshot
-from engine.v2.research.progress import Progress, stage
+from engine.v2.research.progress import Progress, decision, stage
 from experiments.distribution_fitted import DistributionFits
 from experiments.distribution_pipeline import evaluate_outer, finish_reports
 from experiments.distribution_run_plan import DistributionRunPlan, contained
@@ -56,8 +56,14 @@ class DistributionRun(DistributionRunPlan):
             return self.record("completed", {**result, "run_plan_id": plan["run_plan_id"],
                 "elapsed_seconds": time.monotonic() - began, "final_read_authority": "none"}, replay=False)
         except BaseException as error:
-            self.record("failed", {"run_plan_id": plan["run_plan_id"], "code": getattr(error, "code", "INTERRUPTED"),
-                "elapsed_seconds": time.monotonic() - began}, replay=False)
+            try:
+                self.record("failed", {"run_plan_id": plan["run_plan_id"], "code": getattr(error, "code", "INTERRUPTED"),
+                    "elapsed_seconds": time.monotonic() - began}, replay=False)
+            except BaseException:
+                try:
+                    decision("distribution", "failure journal unavailable; original failure retained; attempt remains consumed")
+                except BaseException:
+                    pass  # Failure telemetry must not replace the original exception either.
             raise
 
     def _execute(self, plan):
