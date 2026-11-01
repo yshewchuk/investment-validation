@@ -58,10 +58,11 @@ tuples, plus the `size_folds` descriptor index (`None` only for a hand-built bin
 `ScoringReleaseBinding`. Chooser tuples retain all distinct artifact keys;
 each declared chooser object must be a regular file no larger than 32 MiB.
 `chooser_fold_references` is keyed by `(producer_output, fold_start)` and
-contains `descriptor_hash`, `estimator_sha256`, `training_cutoff`, `release_id`,
-`release_binding` and `fold_start` for each verified fold. Resolution leaves
-the map empty by default; an opted-in binding verifies at most 34 chooser-fold
-objects. The public `ChooserFoldReference` type names this resolver contract.
+contains `descriptor_hash`, `estimator_sha256`, `training_cutoff`, the original
+authoring `release_id`, `carrying_release_id`, `release_binding` and
+`fold_start` for each verified fold. Resolution leaves the map empty by
+default; an opted-in binding verifies at most 34 chooser-fold objects. The
+public `ChooserFoldReference` type names this resolver contract.
 Request-specific selection and nightly chooser wiring are not performed here.
 The reader raises
 `NoCurrentRelease`/`ModelNotReady` (never a legacy or cached fallback) when

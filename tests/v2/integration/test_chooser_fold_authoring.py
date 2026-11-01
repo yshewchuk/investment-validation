@@ -1,6 +1,7 @@
 """Offline chooser fold declarations using only synthetic temporary artifacts."""
 # packages: engine.v2.models, engine.v2.data, engine.v2.foundation
 import builtins
+import copy
 import dataclasses
 import errno
 import hashlib
@@ -323,6 +324,89 @@ def _assert_published_descriptor(root, role, cache, *, release_id="r1", clock="e
     assert obj["name"] == fold_name(cache)
     assert obj["bytes"] == len(data)
     return body, obj
+
+
+def test_carried_chooser_fold_loads_from_verified_original_release(tmp_path, monkeypatch):
+    from engine.v2.scoring import release_bindings as rb
+
+    ModelNotReady = rb.ModelNotReady
+    resolve_release_binding = rb.resolve_release_binding
+    monkeypatch.setattr(rb, "_resolve_state_group", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(rb, "_resolve_driver_residual_pools", lambda *_args: {})
+    monkeypatch.setattr(rb, "_resolve_chooser_state_group", lambda *_args, **_kwargs: ())
+
+    role = "implied_t1"
+    cache = _cache(role)
+    states = prep.build_states(
+        {f"tier4_folds:{role}": {fold_name(cache): fold_bytes(cache)}},
+        chooser_fold_policies={role: chooser_policy(role, cache)})
+    prep.write_release(tmp_path, *release_inputs(role, cache, release_id="origin"), states)
+    origin_body, origin_obj = _assert_published_descriptor(
+        tmp_path, role, cache, release_id="origin")
+    store = tmp_path / "deployment"
+    deployment.mark_staging_succeeded(store, "origin")
+    deployment.promote(store, "origin")
+
+    original = resolve_release_binding(
+        tmp_path, include_chooser_fold_references=True)
+    origin_ref = original.chooser_fold_references[
+        (OUTPUTS[role][1], cache["fold_start"])]
+    assert origin_ref.release_id == origin_ref.carrying_release_id == "origin"
+
+    release, inventory, payloads = release_inputs(role, cache, release_id="carried")
+    deployment.stage_release(store, release, inventory, payloads)
+    deployment.mark_staging_succeeded(store, "carried")
+    deployment.promote(store, "carried")
+
+    carried_body = copy.deepcopy(origin_body)
+    carried_body["release_id"] = "carried"
+    carried_body["sources"]["carried_from"] = "origin"
+
+    def write_catalog(release_id, body):
+        body["manifest_hash"] = content_hash(
+            {key: value for key, value in body.items() if key != "manifest_hash"})
+        path = deployment.manifest_path(store, release_id).with_name("phase5_release.json")
+        path.write_text(json.dumps(body, sort_keys=True))
+
+    write_catalog("carried", carried_body)
+    carried = resolve_release_binding(
+        tmp_path, include_chooser_fold_references=True)
+    carried_ref = carried.chooser_fold_references[
+        (OUTPUTS[role][1], cache["fold_start"])]
+    assert carried_ref.release_id == "origin"
+    assert carried_ref.carrying_release_id == "carried"
+    assert carried_ref.descriptor_hash == content_hash(origin_obj["serving_fold"])
+
+    carried_body_without_link = copy.deepcopy(carried_body)
+    del carried_body_without_link["sources"]["carried_from"]
+    write_catalog("carried", carried_body_without_link)
+    with pytest.raises(ModelNotReady) as refusal:
+        resolve_release_binding(tmp_path, include_chooser_fold_references=True)
+    assert refusal.value.code == rb.MODEL_NOT_READY
+    write_catalog("carried", copy.deepcopy(carried_body))
+
+    carried_body_with_changed_membership = copy.deepcopy(carried_body)
+    changed_row = next(
+        row for row in carried_body_with_changed_membership["members"]
+        if row["member_id"] == f"tier4_folds:{role}")
+    changed_row["objects"][0]["serving_fold"]["parent_release_hash"] = "sha256:" + "1" * 64
+    write_catalog("carried", carried_body_with_changed_membership)
+    with pytest.raises(ModelNotReady) as refusal:
+        resolve_release_binding(tmp_path, include_chooser_fold_references=True)
+    assert refusal.value.code == rb.MODEL_NOT_READY
+    write_catalog("carried", copy.deepcopy(carried_body))
+
+    tampered_origin = copy.deepcopy(origin_body)
+    tampered_carried = copy.deepcopy(carried_body)
+    for release_id, body in (("origin", tampered_origin), ("carried", tampered_carried)):
+        row = next(row for row in body["members"]
+                   if row["member_id"] == f"tier4_folds:{role}")
+        row["objects"][0]["serving_fold"]["parent_release_hash"] = "sha256:" + "0" * 64
+        write_catalog(release_id, body)
+
+    with pytest.raises(ModelNotReady) as refusal:
+        resolve_release_binding(tmp_path, include_chooser_fold_references=True)
+    assert refusal.value.code == rb.MODEL_NOT_READY
 
 
 @pytest.mark.parametrize("role", OUTPUTS)
