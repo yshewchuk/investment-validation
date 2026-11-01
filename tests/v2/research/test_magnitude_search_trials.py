@@ -133,6 +133,83 @@ def test_native_complete_journal_pools_metrics_freezes_latest_and_replays(case, 
     assert trial_slots(case) == before
 
 
+def test_blended_freeze_uses_admitted_inner_history_and_one_lead1_row_per_event(case, monkeypatch):
+    _all(case, values={args: 4.0 + index for index, args in enumerate(trial_cases(case))})
+    plan = copy.deepcopy(case.plan)
+    plan["request"]["selection"] = {
+        "metric_weights": {"rmse": 0.6, "mae": 0.3, "large_move_underprediction": 0.1},
+        "lead_weights": {"1": 1.0, "3": 0.0, "5": 0.0},
+        "large_move_threshold_pct": 10.0, "tie_band_floor": 0.005,
+    }
+    monkeypatch.setattr(case.recorder, "_admit", lambda: plan)
+    with no_fit_guard():
+        frozen = case.recorder.freeze()
+    for outer, selection in zip(plan["folds"], frozen["selections"]):
+        expected_count = sum(len(inner["evaluation_event_ids"]) for inner in outer["inner"])
+        assert selection["history_mean"]["metrics"]["count"] == expected_count
+        assert set(selection["history_mean"]["yearly"]) == {inner["year"] for inner in outer["inner"]}
+        for score in selection["scores"]:
+            assert score["metrics"]["count"] == expected_count
+            assert set(score["yearly"]) == {inner["year"] for inner in outer["inner"]}
+            for inner in outer["inner"]:
+                assert score["yearly"][inner["year"]]["metrics"]["count"] == len(
+                    inner["evaluation_event_ids"])
+
+
+def test_blended_freeze_refuses_nonzero_candidate_against_zero_history_mean(case, monkeypatch):
+    _all(case, values={args: 1_000_000.0 for args in trial_cases(case)})
+    plan = copy.deepcopy(case.plan)
+    plan["request"]["selection"] = {
+        "metric_weights": {"rmse": 0.6, "mae": 0.3, "large_move_underprediction": 0.1},
+        "lead_weights": {"1": 1.0, "3": 0.0, "5": 0.0},
+        "large_move_threshold_pct": 10.0, "tie_band_floor": 0.005,
+    }
+    monkeypatch.setattr(case.recorder, "_admit", lambda: plan)
+    monkeypatch.setattr(trials, "history_mean_rows", lambda cohort, validation: [
+        {"event_id": row["event_id"], "horizon_sessions": 1,
+         "absolute_move_pct": row["absolute_move_pct"],
+         "predicted_absolute_move_pct": row["absolute_move_pct"]}
+        for row in validation["targets"]])
+    with _assert_error("EXPERIMENT_VARIANT_FAILED",
+            "blended inner selection metrics are undefined: nonzero candidate error "
+            "has a zero-error history_mean comparator"):
+        with no_fit_guard():
+            case.recorder.freeze()
+
+
+def test_blended_freeze_keeps_nonleading_undefined_yearly_ratio_null(case, monkeypatch):
+    first, second = [item["candidate_id"] for item in case.plan["candidates"]]
+    _all(case, values={args: 7.0 if args[2] == first else 1000.0
+                       for args in trial_cases(case)})
+    inner_2024 = next(inner["evaluation_event_ids"] for outer in case.plan["folds"]
+                      if outer["outer"]["year"] == "2025" for inner in outer["inner"]
+                      if inner["year"] == "2024")
+    plan = copy.deepcopy(case.plan)
+    plan["request"]["selection"] = {
+        "metric_weights": {"rmse": 0.6, "mae": 0.3, "large_move_underprediction": 0.1},
+        "lead_weights": {"1": 1.0, "3": 0.0, "5": 0.0},
+        "large_move_threshold_pct": 10.0, "tie_band_floor": 0.005,
+    }
+    monkeypatch.setattr(case.recorder, "_admit", lambda: plan)
+    original = trials.blended_event_score
+
+    def blended(candidate_rows, history_rows, **kwargs):
+        if ({row["event_id"] for row in candidate_rows} == set(inner_2024)
+                and all(row["predicted_absolute_move_pct"] == 1000.0
+                        for row in candidate_rows)):
+            raise ValueError(trials._ZERO_COMPARATOR_REASON)
+        return original(candidate_rows, history_rows, **kwargs)
+
+    monkeypatch.setattr(trials, "blended_event_score", blended)
+    with no_fit_guard():
+        frozen = case.recorder.freeze()
+    selection = next(item for item in frozen["selections"] if item["outer_year"] == "2025")
+    score = next(item for item in selection["scores"] if item["candidate_id"] == second)
+    assert math.isfinite(score["blend_score"])
+    assert score["yearly"]["2024"] is None
+    assert selection["selected_candidate_id"] == first
+
+
 def test_execute_admits_sealed_registration_once_before_start(case, monkeypatch):
     args = trial_cases(case)[0]
     original = case.recorder._admit

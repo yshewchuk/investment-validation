@@ -67,6 +67,11 @@ def test_all_candidates_selected_outer_and_read_only_replay(oracle_case, monkeyp
     from experiments.magnitude_search_outer import collect_outer_results
     data = oracle_case
     plan, run_id = data.plan, data.registration.run_id
+    assert "selection" not in plan["request"]
+    def no_size_blending(*args, **kwargs):
+        pytest.fail("IV execution reached SIZE blended-selection policy")
+    for name in ("blended_event_score", "history_mean_rows", "selection_tie_band"):
+        monkeypatch.setattr(trials_module, name, no_size_blending)
     # Expectations depend only on sealed inputs, never returned selection scores or forecasts.
     expected_candidate = deepcopy(min(plan["candidates"], key=lambda candidate: candidate["candidate_id"]))
     expected_ids = {candidate["candidate_id"] for candidate in plan["candidates"]}
