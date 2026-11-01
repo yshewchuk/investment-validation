@@ -31,6 +31,7 @@ from experiments import magnitude_search_trials as trials
 from experiments import native_registration as native
 from experiments.magnitude_search_inputs import load_inputs, publish_inputs
 from experiments.magnitude_search_plan import seal_search_plan
+from experiments.magnitude_search_selection import ZeroComparatorError
 from tests.v2.research.magnitude_trial_support import (
     CUTOFF,
     HISTORY,
@@ -197,7 +198,7 @@ def test_blended_freeze_keeps_nonleading_undefined_yearly_ratio_null(case, monke
         if ({row["event_id"] for row in candidate_rows} == set(inner_2024)
                 and all(row["predicted_absolute_move_pct"] == 1000.0
                         for row in candidate_rows)):
-            raise ValueError(trials._ZERO_COMPARATOR_REASON)
+            raise ZeroComparatorError("zero comparator")
         return original(candidate_rows, history_rows, **kwargs)
 
     monkeypatch.setattr(trials, "blended_event_score", blended)

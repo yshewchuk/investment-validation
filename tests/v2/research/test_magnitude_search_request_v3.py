@@ -156,3 +156,22 @@ def test_v3_invalid_workers_refuse_nonretryably(workers):
         versions.compile_request(document)
     assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
     assert caught.value.problem.retryable is False
+
+
+def test_v3_selection_requires_lead1_horizon():
+    document = v3_request()
+    document["selection"] = {
+        "metric_weights": {"rmse": 0.6, "mae": 0.3, "large_move_underprediction": 0.1},
+        "lead_weights": {"1": 1.0, "3": 0.0, "5": 0.0},
+        "large_move_threshold_pct": 10.0,
+        "tie_band_floor": 0.005,
+    }
+    with pytest.raises(OpsError) as caught:
+        v3_compiler.compile_request(document, horizons=(5, 3))
+    assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert caught.value.problem.message == (
+        "stage-2 blended selection requires lead-1 horizon")
+    assert caught.value.problem.retryable is False
+    result = v3_compiler.compile_request(document, horizons=(3, 1))
+    assert result["horizons"] == [3, 1]
+    assert result["request"]["selection"] == document["selection"]

@@ -445,6 +445,13 @@ def test_real_serial_and_parallel_trials_have_equal_journaled_fit_results(tmp_pa
                                         "execution:" + key)
                 terminal = read_record(context[0], context[1], registration.run_id,
                                        "terminal:" + key)
+                errors = [abs(row["predicted_absolute_move_pct"] - row["absolute_move_pct"])
+                          for row in terminal["predictions"]]
+                assert terminal["metrics"] == {
+                    "count": len(errors),
+                    "mae": pytest.approx(sum(errors) / len(errors)),
+                    "rmse": pytest.approx((sum(error * error for error in errors) / len(errors)) ** 0.5),
+                }
                 rows.append({
                     "candidate_id": candidate["candidate_id"], "trial_id": key,
                     "attempt": execution["attempt"], "fits": execution["fits"],
