@@ -267,7 +267,7 @@ def fold_inputs(repository, binding, fold):
         for group in _folds(binding, binding["size_request"])))
     source = from_document(SnapshotRef, binding["snapshot"])
     started = time.monotonic()
-    panel_columns = COLUMNS if binding["size_request"]["schema_version"] == "magnitude_search_request.v5" else recipe("HMO")["model_columns"]
+    panel_columns = COLUMNS if binding["size_request"].get("schema_version") == "magnitude_search_request.v5" else recipe("HMO")["model_columns"]
     panel = _stored_panel(repository, source, binding, panel_columns)
     participants = set(fold["training_candidate_event_ids"] + fold["evaluation_event_ids"])
     events = {e["event_id"]: e for e in panel["context"]["target_events"]}

@@ -135,7 +135,7 @@ def test_fold_inputs_reuses_panel_once_per_process(counting_read, monkeypatch):
     train.attrs.update({"inputs_id": "train"})
     monkeypatch.setattr(binding_mod, "qualify_magnitude_training_targets", lambda *a, **k: train)
     panel = _panel()
-    binding = {"size_request": {"schema_version": "magnitude_search_request.v4", "inner_years": {}}, "snapshot": to_document(_snapshot("snap-6")),
+    binding = {"size_request": {"inner_years": {}}, "snapshot": to_document(_snapshot("snap-6")),
                "size_panel_request": _panel_request(),
                "size_panel": {"context": panel["context"], "feature_snapshot": panel["feature_snapshot"]},
                "magnitude_execution": {"evaluation_labels_before": "2024-01-01"},
