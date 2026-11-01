@@ -1,7 +1,7 @@
 # Native experiment interfaces
 
-`iv_crush_search.prepare` / `validate_registration` are registration APIs (no CLI/search execution or
-production caller), using shared `native_registration.prepare_regression_registration`.
+`iv_crush_search.prepare` / `validate_registration` are registration APIs, using shared
+`native_registration.prepare_regression_registration`; the dedicated IV CLI below composes them.
 It pins committed source, qualified-panel and IV-target snapshots plus explicit
 signed target/clocks; only metadata is read. Both preparation APIs admit specification type/plan fields through the existing resolver before dependent reads; the IV wrapper validates both snapshot-reference shapes before either table-contract lookup. Resolver field/type errors retain `INVALID_EXPERIMENT_SPEC`; annual-window errors retain native `CONTRACT_MISMATCH`, generic target-descriptor errors retain `ValueError`, and malformed references retain native `SNAPSHOT_UNRESOLVED`. The ordinary native reserve/read/verify
 APIs persist/replay it; reserve/read apply registration-only `iv_crush_registration` policy by requested
@@ -140,7 +140,7 @@ previews retain their outputs/refusals. The documented v3 grid example is Elasti
 alpha `[0.001, 0.003, 0.01, 0.03, 0.1, 1]`, l1 ratio `[0.25, 0.75]`, and Ridge
 alpha `[0.01, 0.1, 1, 10, 100]`, producing 57 candidates. Compilation alone
 grants no source or fit authority.
-`regression_search_request.v1` adds a closed qualified-panel request and causal IV incumbent/training-mean comparison counts. Rejected IV comparison shapes/references name `iv_crush_causal_refit` and `training_mean` in the nonretryable `INVALID_EXPERIMENT_SPEC` diagnostic; SIZE wording and shared cap refusals are unchanged. Compilation and both plan bindings reuse pure `size_panel_request.validate_panel_request` (also re-exported by `size_search_binding`); malformed panels refuse `INVALID_EXPERIMENT_SPEC` before candidate expansion, without I/O or caller mutation; regression previews also require native price snapshot syntax, matching panel/request feature/history IDs and child memory within the parent cap. `magnitude_search_plan.seal_search_plan` / `read_search_plan` dispatch v1.8 anchors through IV-policy-checking `iv_crush_search.prepare_plan` to shared `regression_search_binding.prepare_plan`. The sealed target-aware nested plan requires the complete installed runner source closure (not worker-only additions), and verifies feature and target identity without reading their payloads; native signed trials and selected-only outer fits use the same journal, inner-only freeze, bounded child and durable budget. Evaluation targets open only after forecasts/fit receipts persist; complete replay never refits or reopens labels. The library driver is supported; the magnitude and SIZE CLIs refuse regression before catalog access until its dedicated entrypoint is supplied. The IV-owned comparator recipe is sealed into the plan. Every selected outer fold first persists the causal incumbent/training-mean comparison and exact fit markers through the shared comparison journal; `iv_crush_search_report.collect` composes the verified search with descriptive paired/broad metrics and accounting. Native catalog/artifact and source-fingerprint errors retain their existing policy.
+`regression_search_request.v1` adds a closed qualified-panel request and causal IV incumbent/training-mean comparison counts. Rejected IV comparison shapes/references name `iv_crush_causal_refit` and `training_mean` in the nonretryable `INVALID_EXPERIMENT_SPEC` diagnostic; SIZE wording and shared cap refusals are unchanged. Compilation and both plan bindings reuse pure `size_panel_request.validate_panel_request` (also re-exported by `size_search_binding`); malformed panels refuse `INVALID_EXPERIMENT_SPEC` before candidate expansion, without I/O or caller mutation; regression previews also require native price snapshot syntax, matching panel/request feature/history IDs and child memory within the parent cap. `magnitude_search_plan.seal_search_plan` / `read_search_plan` dispatch v1.8 anchors through IV-policy-checking `iv_crush_search.prepare_plan` to shared `regression_search_binding.prepare_plan`. The sealed target-aware nested plan requires the complete installed runner source closure (not worker-only additions), and verifies feature and target identity without reading their payloads; native signed trials and selected-only outer fits use the same journal, inner-only freeze, bounded child and durable budget. Evaluation targets open only after forecasts/fit receipts persist; complete replay never refits or reopens labels. The library driver and dedicated IV CLI below are supported; magnitude and SIZE CLIs still refuse regression before catalog access. The IV-owned comparator recipe is sealed into the plan. Every selected outer fold first persists the causal incumbent/training-mean comparison and exact fit markers through the shared comparison journal; `iv_crush_search_report.collect` composes the verified search with descriptive paired/broad metrics and accounting. Native catalog/artifact and source-fingerprint errors retain their existing policy.
 `magnitude_candidate_recipe` and `magnitude_candidate_fit` are consumed by qualified plan construction and the bounded worker, as well as synthetic tests.
 They reuse public model recipe/fitter APIs; admitted stored inputs and the sealed execution route, not compiler specifications alone, authorize fitting.
 
@@ -598,8 +598,8 @@ Each child rechecks the unchanged whole-job deadline. Completed IV comparison
 replay reads stored cohort evidence only, under both no-fit guards, without reopening
 source labels or starting a deadline. Missing/changed recipe, fold, limits, target,
 result shape or fit evidence refuses `EXPERIMENT_IDENTITY_CONFLICT`. The driver seal
-also refuses already-started IV comparison work. Dedicated CLI execution
-remains separate delivery; this adds no actual study, feasibility or release claim.
+also refuses already-started IV comparison work. The dedicated CLI below uses this
+path; no actual study, feasibility or release claim follows from its availability.
 
 ### IV development report
 
@@ -616,3 +616,69 @@ no matched events is an explicit unavailable comparison, not a success or zero l
 The existing shared regression loss/forecast helpers own finite signed arithmetic
 and exact challenger coverage. Neither helper adds promotion/significance thresholds,
 SIZE large-move rules, bootstrap policy, provider access, a new winner or final authority.
+
+### Contained IV lifecycle
+
+Run the bounded synthetic lifecycle without supplying data or metadata files:
+
+```bash
+python -m pytest -q tests/v2/research/test_iv_crush_cli.py::test_real_cli_preflight_register_seal_run_and_guarded_replay
+```
+
+It constructs temporary native inputs, invokes the actual five-action CLI and checks
+guarded replay. The fixture seals 2 GiB/30 CPU-second/60 wall-second child ceilings,
+3 GiB parent memory and 1,800-second parent/job ceilings; no private inputs or providers.
+Use the installed Linux test environment and pinned dependencies, not a live catalog.
+
+`python -m experiments.iv_crush_search` delegates to `iv_crush_run.main` for
+`preflight`, `register`, `seal`, `run` and `report`; every action requires `--no-ledger`.
+Inputs are an existing native catalog/store, a spec with runner
+`experiments/iv_crush_search.py` and price source `iv_crush_targets`, and the closed
+`regression_search_request.v1` JSON. The request pins the qualified panel, history,
+dictionary, development windows, all 33 candidates, causal comparison and explicit
+child/parent/build/job limits. Use IV policy, not a renamed SIZE request or selection rule.
+For the commands below, set each variable to its explicit input path, native scope/ID
+or date, and use a separate output directory. The source scope must resolve committed
+population/calendar metadata; the request must pin an existing qualified HMO panel and
+history, and the target ID an existing signed IV target snapshot. Those inputs and
+matching fold windows are prerequisites, not artifacts this lifecycle creates.
+
+```bash
+common=(--spec "$IV_SPEC" --request "$IV_REQUEST" --catalog "$CATALOG" --store-root "$STORE" --no-ledger)
+fresh=(--scope "$SOURCE_SCOPE" --target-snapshot-id "$IV_TARGET_SNAPSHOT" --training-start "$TRAINING_START" --labels-before "$LABELS_BEFORE")
+python -m experiments.iv_crush_search preflight "${common[@]}" "${fresh[@]}"
+python -m experiments.iv_crush_search register "${common[@]}" "${fresh[@]}" > registration.json
+python -c 'import json; print(json.dumps(json.load(open("registration.json"))["plan_ref"]))' > plan-ref.json
+python -m experiments.iv_crush_search seal "${common[@]}" --plan-ref plan-ref.json
+python -m experiments.iv_crush_search run "${common[@]}" --plan-ref plan-ref.json > report.json
+python -m experiments.iv_crush_search report "${common[@]}" --plan-ref plan-ref.json > replay.json
+```
+
+Preflight is explicitly metadata-only: it checks native contracts/population/clocks and
+prints configured caps/counts, not measured fit/memory feasibility. It publishes nothing;
+register repeats that preparation, reserves the native registration and seals its plan.
+There is no redundant preflight receipt: unlike SIZE's heavier qualification, payload
+admission remains in the IV fold path. Targets must already exist (the preparation API
+above is separate); this command never builds datasets or calls providers.
+Seal creates the immutable driver before work. Run uses the existing native execute
+path, never public `start` followed by `execute`; selected-only outer work includes the
+causal comparison and collects once. Completed run/report verify stored evidence under
+no-fit semantics without reopening source labels or resetting an execution deadline.
+Both open the catalog read-only first; only an admitted incomplete run reopens writable,
+revalidates registration and executes. Failed probes never trigger writable fallback.
+Report missing work refuses rather than executing. Replay does not switch journal mode;
+SQLite may coordinate existing WAL sidecars, so live-WAL sidecar immutability is not promised.
+
+Request compilation precedes catalog access; shared SIZE parent alarm/RSS containment
+precedes native registration and immutable whole-job budgeting bounds child launch.
+Metadata files use the shared 1 MiB bounded reader; canonical JSON output is rendered
+within the shared 64 MiB cap before stdout, with bounded stage/progress/RSS on stderr.
+Unreadable input JSON files refuse as `INVALID_EXPERIMENT_SPEC`; corrupt/unsafe artifacts
+as `INTEGRITY_FAILED`, while actual missing storage remains `RESOURCE_UNAVAILABLE`.
+Typed failures exit 2, cancel the alarm and close resources; incomplete claims cannot
+retry, be removed or taken over. Library callers still own parent containment.
+Finite operands do not guarantee finite loss arithmetic: opposite values near
+`±1e308` still raise the shared `OpsError(EXPERIMENT_VARIANT_FAILED)`, not `ValueError`.
+The CLI preserves that code and exits 2; it adds no clipping, coercion or repair.
+The synthetic subprocess regression runs all five actions and guarded replay over real
+native storage/children; it does not establish private-data readiness or authorize a study.
