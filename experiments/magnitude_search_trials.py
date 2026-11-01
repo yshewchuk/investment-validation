@@ -646,15 +646,23 @@ class SearchTrials:
                     scores.append({"candidate_id": candidate["candidate_id"], "metrics": magnitude_metrics(rows)})
                 else:
                     try:
-                        yearly = {year: blended_event_score(yearly_rows[year],
-                            history_rows_by_year[year], metric_weights=policy["metric_weights"],
-                            large_move_threshold_pct=policy["large_move_threshold_pct"])
-                            for year in sorted(yearly_rows)}
-                        pooled_history = [row for year in sorted(outer["inner"], key=lambda item: item["year"])
+                        pooled_history = [
+                            row for year in sorted(outer["inner"], key=lambda item: item["year"])
                             for row in history_rows_by_year[year["year"]]]
                         pooled = blended_event_score(rows, pooled_history,
                             metric_weights=policy["metric_weights"],
                             large_move_threshold_pct=policy["large_move_threshold_pct"])
+                        yearly = {}
+                        for year in sorted(yearly_rows):
+                            try:
+                                yearly[year] = blended_event_score(yearly_rows[year],
+                                    history_rows_by_year[year],
+                                    metric_weights=policy["metric_weights"],
+                                    large_move_threshold_pct=policy["large_move_threshold_pct"])
+                            except ValueError as error:
+                                if str(error) != _ZERO_COMPARATOR_REASON:
+                                    raise
+                                yearly[year] = None
                     except (KeyError, TypeError, ValueError, OverflowError) as error:
                         raise fail("EXPERIMENT_VARIANT_FAILED", _blended_failure(error)) from None
                     scores.append({"candidate_id": candidate["candidate_id"], **pooled, "yearly": yearly})
@@ -667,7 +675,13 @@ class SearchTrials:
                              "selected_candidate_id": selected["candidate_id"]}
             else:
                 try:
-                    selected_id, tie_band = selection_tie_band(eligible, eligible,
+                    best = min(eligible,
+                               key=lambda score: (score["blend_score"], score["candidate_id"]))
+                    if any(value is None for value in best["yearly"].values()):
+                        raise ValueError(_ZERO_COMPARATOR_REASON)
+                    yearly_scores = [score for score in eligible if all(
+                        value is not None for value in score["yearly"].values())]
+                    selected_id, tie_band = selection_tie_band(eligible, yearly_scores,
                         floor=policy["tie_band_floor"])
                     pooled_history = [row for year in sorted(outer["inner"], key=lambda item: item["year"])
                         for row in history_rows_by_year[year["year"]]]
