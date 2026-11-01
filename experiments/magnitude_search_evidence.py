@@ -65,15 +65,17 @@ def fit_evidence(inputs, fold, plan, execution):
     return result
 
 
-def normalize_forecasts(rows, fold, horizons, *, strict_json=False, target=None, allow_incomplete=False):
-    """Require exact finite target-domain coverage; drop explicit None only in the opt-in abstention path."""
-    if type(allow_incomplete) is not bool:
-        raise ValueError("allow_incomplete must be a bool")
+def forecast_target(plan, recipe):
+    """Complete-grid prediction policy; label domain and admission stay unchanged."""
+    return plan.get("target") or {"prediction_column": "predicted_absolute_move_pct",
+                                 "domain": recipe.get("prediction_domain", "nonnegative")}
+
+
+def normalize_forecasts(rows, fold, horizons, *, strict_json=False, target=None):
+    """Require exact finite target-domain coverage; preserve submitted Real/Integral admission."""
     target = target or {"prediction_column": "predicted_absolute_move_pct", "domain": "nonnegative"}
-    target_domain = "signed" if allow_incomplete else target["domain"]
     return normalize_regression_forecasts(rows, fold, horizons,
-        prediction_column=target["prediction_column"], target_domain=target_domain,
-        strict_json=strict_json, allow_abstentions=bool(allow_incomplete))
+        prediction_column=target["prediction_column"], target_domain=target["domain"], strict_json=strict_json)
 
 
 def evaluation_targets(repository, binding, fold):

@@ -65,27 +65,6 @@ def test_strict_json_refuses_non_json_numeric_types(value):
         normalize(rows(value=value), strict_json=True)
 
 
-def test_allow_abstentions_true_allows_partial_but_refuses_bad_shape_or_empty():
-    supplied = rows()
-    supplied[0][COLUMN] = None
-    result = normalize(supplied, allow_abstentions=True)
-    assert [(r["event_id"], r["horizon_sessions"]) for r in result] == [
-        ("a", 1), ("a", 3), ("a", 5), ("b", 1), ("b", 3)]
-
-    missing = rows()
-    missing.pop()
-    with pytest.raises(ValueError):
-        normalize(missing, allow_abstentions=True)
-
-    duplicate = rows()
-    duplicate[-1] = duplicate[0].copy()
-    with pytest.raises(ValueError):
-        normalize(duplicate, allow_abstentions=True)
-
-    with pytest.raises(ValueError):
-        normalize(rows(value=None), allow_abstentions=True)
-
-
 @pytest.mark.parametrize("policy", [dict(target_domain="magnitude"), dict(target_domain=True),
     dict(prediction_column=""), dict(prediction_column="event_id"), dict(prediction_column="horizon_sessions")])
 def test_invalid_explicit_policy_refuses(policy):

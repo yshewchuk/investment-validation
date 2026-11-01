@@ -296,7 +296,8 @@ Resolved source snapshots must be bound separately by later native admission.
 for an explicit prediction column and signed/nonnegative domain; `error_metrics`
 returns pooled equal-row-weight count/RMSE/MAE from finite residuals. Both are
 source-free numeric helpers, not target identity, fold or holdout admission.
-Magnitude search/report wrappers retain their existing nonnegative contracts.
+Magnitude labels remain nonnegative. Generic magnitude candidates retain nonnegative
+forecasts; the distinct SIZE history-mean candidate explicitly permits signed forecasts.
 
 ## Consumers
 

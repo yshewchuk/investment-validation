@@ -38,10 +38,6 @@ def main():
             current_ru_maxrss_kib = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
             return max(0, current_kib - rss_before_kib, current_ru_maxrss_kib - rss_before_maxrss_kib)
 
-        def result_timing():
-            return {"score_seconds": max(0.0, time.monotonic() - started),
-                    "rss_delta_kib": rss_delta_kib()}
-
         # The header holds a manifest, which the journal caps at MAX_BYTES, so a larger file is not a header.
         with open(sys.argv[1], "rb") as stream:
             payload = stream.read(MAX_BYTES + 1)
@@ -67,33 +63,6 @@ def main():
             emit(forecasts(indexed, pd.DataFrame(inputs["training"]), request["inner"], request["plan"],
                            request["execution"], progress=progress))
             return
-        if (request["execution"].get("schema_version") == "size_candidate_execution.v1"
-                and request["execution"]["fit_recipe"].get("schema_version") == "size_causal_comparator.v1"):
-            from engine.v2.foundation import content_hash
-            from experiments.size_comparator import forecasts
-            try:
-                result = forecasts(indexed, pd.DataFrame(inputs["training"]), request["inner"], request["plan"],
-                                   request["execution"], progress=progress)
-            except OpsError as error:
-                if error.code != "EXPERIMENT_VARIANT_FAILED":
-                    raise
-                emit({"event": "failed", **result_timing()})
-                return
-            recipe_id = content_hash(request["execution"]["fit_recipe"])
-            emit({"event": result["event"],
-                "forecasts": [{"event_id": row["event_id"], "horizon_sessions": row["horizon_sessions"],
-                    "predicted_absolute_move_pct": row["predicted_absolute_move_pct"]}
-                    for row in result["forecasts"]],
-                "diagnostics": [{"schema_version": "size_v1_4_fit.v1", "recipe_id": recipe_id,
-                    "horizon_sessions": detail["horizon_sessions"],
-                    "training_event_ids": detail["training_event_ids"],
-                    "logical_fits": detail["logical_fits"],
-                    "component_fits": detail["component_fits"],
-                    "abstention_counts": detail["abstention_counts"],
-                    "training_abstention_counts": detail["training_abstention_counts"]}
-                    for detail in result["fit_details"]],
-                **result_timing()})
-            return
         if schema == "iv_crush_comparison_execution.v1":
             from experiments.iv_crush_comparator import forecasts
             emit(forecasts(indexed, pd.DataFrame(inputs["training"]), request["inner"], request["plan"],
@@ -103,6 +72,16 @@ def main():
         try:
             if regression:
                 predictions = regression_forecasts(indexed, inputs["training"], request, progress, diagnostics)
+            elif schema == "size_candidate_execution.v1" and request["execution"].get("model") == "size_v1_4":
+                from engine.v2.foundation import content_hash
+                from experiments.size_comparator import forecasts
+                result = forecasts(indexed, pd.DataFrame(inputs["training"]), request["inner"], request["plan"],
+                                   request["execution"], progress=progress, inputs=inputs)
+                predictions = {(r["event_id"], r["horizon_sessions"]): r["predicted_absolute_move_pct"]
+                               for r in result["forecasts"]}
+                diagnostics = [{"schema_version": "size_v1_4_fit.v1",
+                    "recipe_id": content_hash(request["execution"]["fit_recipe"]), **detail}
+                    for detail in result["fit_details"]]
             else:
                 predictions, _ = fitted_forecasts(indexed, pd.DataFrame(inputs["training"]),
                     request["inner"], request["plan"], request["execution"], progress=progress, strict_failures=True, diagnostics=diagnostics)

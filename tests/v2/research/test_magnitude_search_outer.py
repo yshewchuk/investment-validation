@@ -508,33 +508,3 @@ def test_invalid_request_never_claims(outer_case, year, limits):
     with outer_problem("INVALID_EXPERIMENT_SPEC", message):
         run(outer_case, year, limits=limits)
     assert outer_case.conn.total_changes == before
-
-
-def test_outer_replay_with_size_causal_comparator(monkeypatch):
-    started = {}
-    fold = {"evaluation_event_ids": ["a", "b"], "year": "2024"}
-    plan = {"horizons": [1]}
-    execution = {"schema_version": "size_candidate_execution.v1",
-                 "fit_recipe": {"schema_version": "size_causal_comparator.v1"}}
-    worker = {"event": "succeeded", "forecasts": [
-        {"event_id": "a", "horizon_sessions": 1, "predicted_absolute_move_pct": 1.25},
-        {"event_id": "b", "horizon_sessions": 1, "predicted_absolute_move_pct": None},
-    ]}
-    forecasts = [{"event_id": "a", "horizon_sessions": 1, "predicted_absolute_move_pct": 1.25}]
-    receipt = {"status": "succeeded", "fits": [], "fit_attempt_count": 0,
-               "completed_fit_count": 0, "forecasts_id": content_hash(forecasts)}
-    terminal = {"inputs_id": "input-id", "result": "replayed"}
-    records = {"start": started, "terminal": terminal, "inputs": {}, "forecasts": forecasts,
-               "worker-result": worker, "execution": receipt, "validation": {}}
-    read = lambda slot: records.get(slot)
-    monkeypatch.setattr(outer, "load_inputs", lambda *a: {})
-    monkeypatch.setattr(outer, "fit_evidence", lambda *a: [])
-    monkeypatch.setattr(outer, "_result", lambda *a: terminal)
-    assert outer._replay(read, object(), started, fold, plan, execution, {}) == terminal
-    records["forecasts"] = []
-    with outer_problem("EXPERIMENT_IDENTITY_CONFLICT", CONFLICT):
-        outer._replay(read, object(), started, fold, plan, execution, {})
-    records["forecasts"] = forecasts
-    worker["forecasts"] = [{"event_id": "a", "horizon_sessions": 1, "predicted_absolute_move_pct": 1.25}]
-    with outer_problem("EXPERIMENT_IDENTITY_CONFLICT", CONFLICT):
-        outer._replay(read, object(), started, fold, plan, execution, {})

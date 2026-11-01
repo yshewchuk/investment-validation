@@ -69,7 +69,7 @@ def collect(conn, store, repository, registration, request, plan_ref):
     plan = _admit_driver(conn, store, registration, request, plan_ref)
     result = collect_outer_results(conn, store, repository, registration, request, plan_ref)
     forecasts, comparisons, events, comparison_fits = [], [], [], []
-    targets = {}
+    targets = {r["event_id"]: r["absolute_move_pct"] for r in result["predictions"]}
     ids = {event for group in plan["folds"] for event in group["outer"]["evaluation_event_ids"]}
     events = [e for e in registration.document["size_panel"]["context"]["target_events"] if e["event_id"] in ids]
     inner_fits = _candidate_evidence(conn, store, registration.run_id, plan)
@@ -77,8 +77,6 @@ def collect(conn, store, repository, registration, request, plan_ref):
         year = group["outer"]["year"]
         key = content_hash([plan["plan_id"], year])
         forecasts.extend(read_record(conn, store, registration.run_id, "outer-forecasts:" + key))
-        validation = read_record(conn, store, registration.run_id, "outer-validation:" + key)
-        targets.update({row["event_id"]: row["absolute_move_pct"] for row in validation["targets"]})
         key = content_hash([plan["plan_id"], year, "comparison"])
         comparison = read_record(conn, store, registration.run_id, "comparison-terminal:" + key)["result"]
         comparisons.extend(comparison["forecasts"])
@@ -91,6 +89,12 @@ def collect(conn, store, repository, registration, request, plan_ref):
             "frozen_eligibility": registration.document["size_panel"]["context"]["eligibility_plan"],
             "label_exclusions": [{"outer_year": f["outer_year"], **omission} for f in result["folds"]
                 for omission in f["evaluation_inputs"].get("omitted_labels", [])]}
+    fallbacks = [{"outer_year": f["outer_year"],
+        "horizon_sessions": d["horizon_sessions"], "fallback_counts": d["fallback_counts"]}
+        for f in result["folds"] for d in f.get("fit_diagnostics", []) if "fallback_counts" in d]
+    if fallbacks:
+        report["paired"]["v1_4_fallbacks"] = fallbacks
+        report["paired"]["result_id"] = content_hash({k: v for k, v in report["paired"].items() if k != "result_id"})
     print(f"[stage] collect done in {time.monotonic() - started:.1f}s", file=sys.stderr)
     return report
 

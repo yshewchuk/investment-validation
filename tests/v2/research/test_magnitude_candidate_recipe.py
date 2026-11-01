@@ -8,9 +8,7 @@ from engine.v2.foundation import content_hash
 from engine.v2.models.magnitude_candidate import magnitude_candidate_family
 from engine.v2.models.magnitude_elasticnet_recipe import elasticnet_recipe
 from engine.v2.models.magnitude_ridge_hgb_recipe import ridge_hgb_recipe
-from engine.v2.models.magnitude_size_v1_4_recipe import size_v1_4_recipe
 from experiments import magnitude_candidate_recipe as assembly
-from experiments.size_comparator import recipe as comparator_recipe
 
 HASH = "sha256:" + "a" * 64
 CASES = [("ridge", {"alpha": a}) for a in (0.1, 1, 10)] + [
@@ -18,53 +16,14 @@ CASES = [("ridge", {"alpha": a}) for a in (0.1, 1, 10)] + [
     for r in (0.25, 0.75)] + [("hgb", {"max_leaf_nodes": n}) for n in (7, 15)]
 HGB_V2 = {"learning_rate": 0.05, "max_leaf_nodes": 7, "min_samples_leaf": 20,
           "l2_regularization": 0.0}
-SIZE_V1_4_FEATURES = [
-    "has_implied_quote", "mean_prior_abs_move", "abs_dist_ema", "ema12r_abs",
-    "mean_prior_move", "signed_streak", "dist_high", "dist_ema", "spy_vol20",
-    "spy_dd252", "mean_prior_or_implied", "or_implied", "or_rvol30", "mcap_log",
-]
 
 
-def test_size_v1_4_family_returns_fixed_comparator_recipe():
-    result = assembly.candidate_recipe("size_v1_4", {}, columns=["ignored"],
-                                       feature_dictionary_hash=HASH)
-    assert result == comparator_recipe()
-    assert magnitude_candidate_family(result) == "size_v1_4"
-    assert result["schema_version"] == "size_causal_comparator.v1"
-    assert result["features"] == SIZE_V1_4_FEATURES
-    assert result["minimum_prior"] == 4
-    assert result["missing"] == "abstain"
-    assert result["production_reproduction"] is False
-
-
-def test_size_v1_4_result_is_detached_from_later_calls():
-    expected = comparator_recipe()
-    result = assembly.candidate_recipe("size_v1_4", {}, columns=["ignored"],
-                                       feature_dictionary_hash=HASH)
-    result["features"][0] = "tampered"
-    result["features"].append("extra")
-    fresh = assembly.candidate_recipe("size_v1_4", {}, columns=["ignored"],
-                                      feature_dictionary_hash=HASH)
-    assert fresh == expected
-    assert fresh["features"] == SIZE_V1_4_FEATURES
-
-
-@pytest.mark.parametrize("parameters", [
-    {"alpha": 1}, {"features": []}, {"size": "v1_4"},
-])
-def test_size_v1_4_nonempty_parameters_refuse(parameters):
+def test_size_policy_is_not_advertised_by_generic_recipe_or_numeric_dispatch():
     with pytest.raises(ValueError, match="^candidate requires a supported family and exact parameter keys$"):
-        assembly.candidate_recipe("size_v1_4", parameters, columns=["ignored"],
-                                  feature_dictionary_hash=HASH)
-
-
-def test_size_v1_4_recipe_rejects_changed_feature_list():
-    base = comparator_recipe()
-    for features in (list(reversed(base["features"])),
-                     [*base["features"][:-1], "tampered"]):
-        with pytest.raises(ValueError, match="^invalid closed SIZE v1.4 recipe$"):
-            size_v1_4_recipe({**base["native"], "features": features},
-                             base["component_parameters"])
+        assembly.candidate_recipe("size_v1_4", {}, columns=object(), feature_dictionary_hash=object())
+    for schema in ("size_causal_comparator.v1", "size_history_mean_candidate.v1"):
+        with pytest.raises(ValueError, match="^candidate requires a supported recipe schema/model pair$"):
+            magnitude_candidate_family({"schema_version": schema})
 
 
 @pytest.mark.parametrize("family,parameters", CASES)

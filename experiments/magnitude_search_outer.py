@@ -16,6 +16,7 @@ from experiments.magnitude_search_evidence import (
     admit_fold_inputs,
     evaluation_targets,
     fit_evidence,
+    forecast_target,
     normalize_forecasts,
     validate_targets,
 )
@@ -115,17 +116,9 @@ def _inputs(repository, binding, fold, *, plan=None):
     return admit_fold_inputs(repository, binding, fold, history_failure=_conflict(), strict_json=True, plan=plan)
 
 
-def _allow_incomplete(execution):
-    if not isinstance(execution, dict):
-        return False
-    fit_recipe = execution.get("fit_recipe")
-    return isinstance(fit_recipe, dict) and fit_recipe.get("schema_version") == "size_causal_comparator.v1"
-
-
-def _forecasts(rows, fold, horizons, target=None, *, allow_incomplete=False):
+def _forecasts(rows, fold, horizons, target=None):
     try:
-        return normalize_forecasts(rows, fold, horizons, strict_json=True,
-                                   target=target, allow_incomplete=allow_incomplete)
+        return normalize_forecasts(rows, fold, horizons, strict_json=True, target=target)
     except (ValueError, TypeError, KeyError, OverflowError):
         raise _conflict() from None
 
@@ -176,7 +169,9 @@ def _replay(read, store, started, fold, plan, execution, binding):
                 raise
             raise _conflict() from None
         fits = fit_evidence(inputs, fold, plan, execution)
-        allow_incomplete = _allow_incomplete(execution)
+        forecasts = _forecasts(read("forecasts"), fold, plan["horizons"], forecast_target(plan, execution.get("fit_recipe", {})))
+        receipt = {"status": "succeeded", "fits": fits, "fit_attempt_count": len(fits),
+                   "completed_fit_count": len(fits), "forecasts_id": content_hash(forecasts)}
         worker = read("worker-result")
         if worker is None and execution.get("schema_version") in ("size_candidate_execution.v1", "regression_candidate_execution.v1"):
             raise _conflict()
@@ -188,15 +183,9 @@ def _replay(read, store, started, fold, plan, execution, binding):
             if worker.get("event") != "succeeded":
                 raise _conflict()
             timed_worker = "score_seconds" in worker
-            forecasts = _forecasts(worker["forecasts"], fold, plan["horizons"], plan.get("target"),
-                                   allow_incomplete=allow_incomplete)
-            _equal(read("forecasts"), forecasts)
-        else:
-            forecasts = _forecasts(read("forecasts"), fold, plan["horizons"], plan.get("target"))
-        receipt = {"status": "succeeded", "fits": fits, "fit_attempt_count": len(fits),
-                   "completed_fit_count": len(fits), "forecasts_id": content_hash(forecasts)}
-        if worker is not None and diagnostic_keys(binding):
-            receipt.update(diagnostic_evidence(worker, execution, plan["horizons"], inputs, fold))
+            _equal(worker["forecasts"], forecasts)
+            if diagnostic_keys(binding):
+                receipt.update(diagnostic_evidence(worker, execution, plan["horizons"], inputs, fold))
         _equal(read("execution"), receipt)
         for fit in fits:
             _equal(read("fit-started:" + str(fit["horizon_sessions"])), fit)
@@ -296,8 +285,7 @@ def _execute_admitted(conn, store, repository, registration, plan, fold, selecti
             or (not succeeded and (not _timed_shape(result, {"event"}, untimed=regression)
                                    or result.get("event") != "failed" or len(pending) != 1))):
         raise _conflict()
-    forecasts = _forecasts(result["forecasts"], fold, plan["horizons"], plan.get("target"),
-                           allow_incomplete=_allow_incomplete(execution)) if succeeded else None
+    forecasts = _forecasts(result["forecasts"], fold, plan["horizons"], forecast_target(plan, execution.get("fit_recipe", {}))) if succeeded else None
     receipt = {"status": result["event"], "fits": fits, "fit_attempt_count": len(fits) + len(pending),
                "completed_fit_count": len(fits), "forecasts_id": content_hash(forecasts) if succeeded else None,
                **diagnostic_evidence(result, execution, plan["horizons"], inputs, fold)}

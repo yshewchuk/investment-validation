@@ -72,39 +72,23 @@ def test_one_missing_horizon_excludes_whole_event_not_broad_sanity_reference():
     assert report["final_read_authority"] == "none"
 
 
-def test_challenger_abstention_is_counted_and_paired_metrics_keep_complete_events():
-    args = fixture()
-    args[1].pop(0)
-    report = paired_report(*args)
-    assert report["forecast_matched_events"] == 3
-    assert report["paired_events"] == 3
-    assert len(report["paired_rows"]) == 9
-    assert report["challenger_abstentions"] == 1
-    assert report["broad_coverage_metrics"]["challenger"]["count"] == 11
-    assert report["broad_coverage_metrics"]["challenger"]["mae"] == pytest.approx(3.5 / 11)
-    assert report["broad_coverage_metrics"]["challenger"]["rmse"] == pytest.approx(math.sqrt(1.39 / 11))
-    assert report["metrics"]["challenger"]["count"] == 9
-    assert sum(row["count"] for row in report["coverage"]
-               if row["arm"] == "challenger" and row["forecast_status"] == "abstained") == 1
-
-
 def test_large_evaluation_labels_never_use_training_mask_and_negative_incumbent_stays_raw():
     args = fixture()
     args[3]["e0"] = 250
     args[2][0]["predicted_absolute_move_pct"] = -10
-    args[1][0]["predicted_absolute_move_pct"] = -2.0
     report = paired_report(*args)
     first = next(r for r in report["paired_rows"] if r["event_id"] == "e0" and r["horizon_sessions"] == 1)
     assert first["absolute_move_pct"] == 250 and first["incumbent"] == -10
-    assert first["challenger"] == -2.0
     assert report["paired_events"] == 4
 
 
-@pytest.mark.parametrize("kind", ["duplicate", "foreign", "nan", "bool"])
+@pytest.mark.parametrize("kind", ["duplicate", "missing", "foreign", "nan", "bool"])
 def test_poisoned_challenger_or_population_refused(kind):
     args = fixture()
     if kind == "duplicate":
         args[1].append(deepcopy(args[1][0]))
+    elif kind == "missing":
+        args[1].pop()
     elif kind == "foreign":
         args[1][0]["event_id"] = "not-admitted"
     else:
@@ -174,3 +158,13 @@ def test_legacy_horizon_order_accepted_and_per_horizon_emitted_ascending():
     report = paired_report(*args, horizons=(5, 3, 1))
     assert list(report["per_horizon"]) == ["1", "3", "5"]
     assert paired_report(*args) == report
+
+
+def test_negative_challenger_is_preserved_but_negative_target_refuses():
+    args = fixture()
+    args[1][0]["predicted_absolute_move_pct"] = -2.0
+    result = paired_report(*args)
+    assert result["paired_rows"][0]["challenger"] == -2.0
+    args[3]["e0"] = -2.0
+    with pytest.raises(ValueError, match="invalid magnitude target"):
+        paired_report(*args)

@@ -28,6 +28,7 @@ from experiments.magnitude_search_evidence import (
     admit_fold_inputs,
     evaluation_targets,
     fit_evidence,
+    forecast_target,
     normalize_forecasts,
     validate_targets,
 )
@@ -72,17 +73,6 @@ def _candidate_failure(problem):
     return problem["code"] == "EXPERIMENT_VARIANT_FAILED"
 
 
-def _is_size_v1_4(candidate):
-    """Recognize the SIZE v1.4 family from its recipe schema version."""
-    if not isinstance(candidate, dict):
-        return False
-    recipe = candidate.get("recipe")
-    return isinstance(recipe, dict) and recipe.get("schema_version") == "size_causal_comparator.v1"
-
-
-_ZERO_COMPARATOR_REASON = "cannot normalize a nonzero candidate error by zero history_mean error"
-
-
 def _blended_failure(error):
     """Map expected blended-selection failures to fixed, recorder-owned diagnostics."""
     if isinstance(error, ZeroComparatorError):
@@ -110,17 +100,6 @@ def _completed_fit(marker, static):
             and _finite_nonnegative(marker.get("fit_seconds"))
             and canonical_json({key: value for key, value in marker.items() if key != "fit_seconds"})
             == canonical_json(static))
-
-
-def _verify_size_forecast_replay(raw_forecasts, stored_forecasts, inner, horizons):
-    try:
-        normalized = normalize_forecasts(raw_forecasts, inner, horizons, allow_incomplete=True)
-        normalized = json.loads(canonical_json(normalized))
-    except (ValueError, TypeError, OverflowError):
-        raise ValueError from None
-    if canonical_json(normalized) != canonical_json(stored_forecasts):
-        raise ValueError
-    return normalized
 
 
 _NOT_ADMITTED = object()
@@ -267,7 +246,6 @@ class SearchTrials:
         """Run one bounded native inner trial once, or verify its completed replay."""
         plan = self._admit()
         key, inner, candidate = self._trial(plan, outer_year, inner_year, candidate_id)
-        allow_incomplete = _is_size_v1_4(candidate)
         bounded_plan = plan.get("schema_version") in (PLAN_V2, PLAN_V3, "regression_search_plan.v1")
         if bounded_plan and limits != plan["request"]["limits"]["child"]:
             raise fail("INVALID_EXPERIMENT_SPEC", "v2 trial limits differ from sealed request")
@@ -318,17 +296,15 @@ class SearchTrials:
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search fit completion differs from admitted attempts")
         # run_fitted_trial has returned only after checking exit and reaping the child.
         # Bind the admitted id (a manifest hash for sharded cohorts), the id reconcile compares.
-        forecasts_id = None
-        if succeeded:
-            forecasts_id = content_hash(self._forecasts(result["forecasts"], inner, plan["horizons"],
-                plan.get("target"), **({"allow_incomplete": True} if allow_incomplete else {})))
+        forecasts_id = (content_hash(self._forecasts(result["forecasts"], inner, plan["horizons"],
+            forecast_target(plan, candidate["recipe"]))) if succeeded else None)
         self._append("execution-result:" + key, {"attempt": attempt,
                      "inputs_id": self._read("inputs:" + key)["inputs_id"], "result": result}, replay=False)
         evidence = {"attempt": attempt, "fit_attempt_count": len(fits) + len(pending),
                     "completed_fit_count": len(fits), "fits": fits, "status": result["event"],
                     "forecasts_id": forecasts_id,
                     **{name: result[name] for name in timing},
-                    **diagnostic_evidence(result, execution, plan["horizons"], inputs=inputs, fold=inner)}
+                    **diagnostic_evidence(result, execution, plan["horizons"], inputs, inner)}
         self._append("execution:" + key, evidence, replay=False)
         self._record(outer_year, inner_year, candidate_id, native=True, **({"forecasts": result["forecasts"]} if succeeded
             else {"failure": fail("EXPERIMENT_VARIANT_FAILED", "fitted magnitude estimator failed").problem}))
@@ -392,16 +368,11 @@ class SearchTrials:
                 raise ValueError
             forecasts = None
             if succeeded:
-                size_v14 = _is_size_v1_4(candidate)
                 try:
-                    forecasts = self._forecasts(result["forecasts"], inner, plan["horizons"],
-                        plan.get("target"), **({"allow_incomplete": True} if size_v14 else {}))
+                    forecasts = self._forecasts(result["forecasts"], inner, plan["horizons"], forecast_target(plan, candidate["recipe"]))
                 except OpsError:
                     raise ValueError from None
-                expected_forecasts = ([row for row in result["forecasts"]
-                                       if row.get("predicted_absolute_move_pct") is not None]
-                                      if size_v14 else result["forecasts"])
-                if canonical_json(forecasts) != canonical_json(expected_forecasts):
+                if canonical_json(forecasts) != canonical_json(result["forecasts"]):
                     raise ValueError
             submitted = self._read("forecasts:" + key)
             if submitted is not None and canonical_json(submitted) != canonical_json(forecasts):
@@ -435,7 +406,7 @@ class SearchTrials:
         receipt = {"attempt": attempt, "fit_attempt_count": count, "completed_fit_count": completed,
                    "fits": expected[:completed], "status": result["event"],
                    "forecasts_id": content_hash(forecasts) if succeeded else None,
-                   **diagnostic_evidence(result, execution, plan["horizons"], inputs=inputs, fold=inner)}
+                   **diagnostic_evidence(result, execution, plan["horizons"], inputs, inner)}
         if timed:
             receipt.update({"score_seconds": result["score_seconds"],
                             "rss_delta_kib": result["rss_delta_kib"]})
@@ -471,11 +442,9 @@ class SearchTrials:
         return {**receipt, "terminal": terminal, "evaluation_authority": "none"}
 
     @staticmethod
-    def _forecasts(forecasts, inner, horizons, target=None, *, allow_incomplete=False):
+    def _forecasts(forecasts, inner, horizons, target=None):
         try:
-            normalized = normalize_forecasts(forecasts, inner, horizons, target=target,
-                                            allow_incomplete=allow_incomplete)
-            return json.loads(canonical_json(normalized))
+            return json.loads(canonical_json(normalize_forecasts(forecasts, inner, horizons, target=target)))
         except (ValueError, TypeError, OverflowError):
             raise fail("INVALID_EXPERIMENT_SPEC", "trial forecasts require complete finite event-horizon coverage") from None
 
@@ -491,7 +460,6 @@ class SearchTrials:
         """Commit forecasts before labels; a journaled cohort validation is reused; native reconciliation can finish publication."""
         plan = self._admit()
         key, inner, candidate = self._trial(plan, outer_year, inner_year, candidate_id)
-        allow_incomplete = _is_size_v1_4(candidate)
         column = plan.get("target", {}).get("column", "absolute_move_pct")
         if self._read("start:" + key) is None:
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "trial must be started before recording")
@@ -508,8 +476,7 @@ class SearchTrials:
             if not isinstance(completed, dict) or completed.get("status") != ("failed" if failure is not None else "succeeded"):
                 raise fail("EXPERIMENT_IDENTITY_CONFLICT", "native completion differs from recording")
             if forecasts is not None:
-                submitted = self._forecasts(forecasts, inner, plan["horizons"], plan.get("target"),
-                                            **({"allow_incomplete": True} if allow_incomplete else {}))
+                submitted = self._forecasts(forecasts, inner, plan["horizons"], forecast_target(plan, candidate["recipe"]))
                 if content_hash(submitted) != completed.get("forecasts_id"):
                     raise fail("EXPERIMENT_IDENTITY_CONFLICT", "native completion differs from recording")
         if failure is not None:
@@ -526,8 +493,7 @@ class SearchTrials:
             # Native execute/reconcile verifies the receipt once at its return boundary.
             return terminal if native else self._terminal(plan, outer_year, inner_year, candidate_id)[1]
         if submitted is None:
-            submitted = self._forecasts(forecasts, inner, plan["horizons"], plan.get("target"),
-                                        **({"allow_incomplete": True} if allow_incomplete else {}))
+            submitted = self._forecasts(forecasts, inner, plan["horizons"], forecast_target(plan, candidate["recipe"]))
         terminal = self._read("terminal:" + key)
         if terminal is not None:
             if self._read("forecasts:" + key) != submitted:
@@ -536,10 +502,6 @@ class SearchTrials:
         admitted = self._read("inputs:" + key)
         if admitted is None:
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "trial has no admitted native inputs")
-        if allow_incomplete and not native:
-            raw_submission = json.loads(canonical_json(forecasts))
-            self._append("forecast-submission:" + key, raw_submission, replay=reconcile,
-                         absent=("terminal:" + key,))
         self._append("forecasts:" + key, submitted, replay=reconcile, absent=("terminal:" + key,))
         validation = self._read("validation:" + admitted["cohort"])
         stored = None
@@ -649,34 +611,11 @@ class SearchTrials:
                 raise ValueError
             cohort = self._cohort(admitted)
             submitted = self._read("forecasts:" + key)
-            size_v14 = _is_size_v1_4(candidate)
             if submitted is not None:
-                if size_v14 and native:
-                    execution_result = self._read("execution-result:" + key)
-                    if (not isinstance(execution_result, dict)
-                            or not isinstance(execution_result.get("result"), dict)
-                            or execution_result["result"].get("event") != "succeeded"
-                            or not isinstance(execution_result["result"].get("forecasts"), list)):
-                        raise ValueError
-                    submitted = _verify_size_forecast_replay(
-                        execution_result["result"]["forecasts"], submitted, inner, plan["horizons"])
-                elif size_v14:
-                    raw_submission = self._read("forecast-submission:" + key)
-                    if not isinstance(raw_submission, list):
-                        raise ValueError
-                    try:
-                        normalized = self._forecasts(raw_submission, inner, plan["horizons"],
-                                                     plan.get("target"), allow_incomplete=True)
-                    except OpsError:
-                        raise ValueError from None
-                    if canonical_json(normalized) != canonical_json(submitted):
-                        raise ValueError
-                    submitted = normalized
-                else:
-                    try:
-                        submitted = self._forecasts(submitted, inner, plan["horizons"], plan.get("target"))
-                    except OpsError:
-                        raise ValueError from None
+                try:
+                    submitted = self._forecasts(submitted, inner, plan["horizons"], forecast_target(plan, candidate["recipe"]))
+                except OpsError:
+                    raise ValueError from None
                 validation = self._read("validation:" + admitted["cohort"])
                 self._validation(inner, admitted, cohort, validation)
             if record["status"] == "succeeded":
@@ -835,18 +774,6 @@ class SearchTrials:
                         pooled_history = [
                             row for year in sorted(outer["inner"], key=lambda item: item["year"])
                             for row in history_rows_by_year[year["year"]]]
-                        if _is_size_v1_4(candidate):
-                            candidate_lead1 = {
-                                (row["event_id"], row["horizon_sessions"])
-                                for row in rows if row["horizon_sessions"] == 1
-                            }
-                            history_lead1 = {
-                                (row["event_id"], row["horizon_sessions"])
-                                for row in pooled_history if row["horizon_sessions"] == 1
-                            }
-                            if candidate_lead1 != history_lead1:
-                                scores.append({"candidate_id": candidate["candidate_id"], "metrics": None})
-                                continue
                         pooled = blended_event_score(rows, pooled_history,
                             metric_weights=policy["metric_weights"],
                             large_move_threshold_pct=policy["large_move_threshold_pct"])
