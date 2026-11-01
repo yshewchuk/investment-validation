@@ -231,6 +231,7 @@ def test_checkpoint_resumes_without_replaying_again(tmp_path, monkeypatch):
 
     assert summary2["dispositions"] == summary1["dispositions"]
     assert findings2 == findings1
+    assert summary2["rows"] == summary1["rows"]
     # no duplicate line was appended for the pair served from the checkpoint
     assert len(checkpoint.read_text().strip().splitlines()) == 1
 

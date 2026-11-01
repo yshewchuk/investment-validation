@@ -864,8 +864,8 @@ def _chooser_bundle_or_refusal(
             "artifact_refs": list(state.artifact_refs),
             "fold_provenance": state.fold_provenance,
             "producers": {
-                "pred_im_t1_d14": {"binding_id": implied.binding_id},
-                "pred_runup_abs_move_d14": {"binding_id": runup.binding_id},
+                "pred_im_t1_d14": {"binding_id": implied.binding_id, "output": "pred_im_t1_d14"},
+                "pred_runup_abs_move_d14": {"binding_id": runup.binding_id, "output": "pred_runup_abs_move_d14"},
             },
             "analog_pool": {
                 "pool_id": state.analog_pool.pool_id,

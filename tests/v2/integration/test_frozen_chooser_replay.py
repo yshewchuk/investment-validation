@@ -244,7 +244,7 @@ def test_replay_pool_values_must_match_staged_fold_estimators(monkeypatch, tmp_p
     assert seen_expected_bytes == [123]
 
 
-def test_replay_checkpoint_scope_invalidation(tmp_path):
+def test_replay_checkpoint_scope_invalidation(tmp_path, monkeypatch):
     corpus_hash = "sha256:corpus"
     manifest = {"manifest_hash": "sha256:catalog", "members": []}
     other_manifest = {"manifest_hash": "sha256:other", "members": []}
@@ -253,13 +253,24 @@ def test_replay_checkpoint_scope_invalidation(tmp_path):
     assert phase5_phase4_replay.REPLAY_VALIDATION_VERSION == 3
     assert scope != other_scope
 
+    def scoped_row(row_scope):
+        row = {"fixture_id": "fixture-1", "disposition": "replayed",
+               "corpus_hash": corpus_hash, "checkpoint_scope": row_scope}
+        row["checkpoint_row_hash"] = phase5_phase4_replay._checkpoint_row_hash(
+            row, row_scope)
+        return row
+
     checkpoint = tmp_path / "checkpoint.jsonl"
-    checkpoint.write_text(json.dumps({
-        "fixture_id": "fixture-1", "disposition": "replayed",
-        "corpus_hash": scope}) + "\n")
+    valid = scoped_row(scope)
+    checkpoint.write_text(json.dumps(valid) + "\n")
     loaded = phase5_phase4_replay._load_checkpoint(checkpoint, scope)
     assert set(loaded) == {"fixture-1"}
+    assert loaded["fixture-1"]["corpus_hash"] == corpus_hash
     assert loaded["fixture-1"]["disposition"] == "replayed"
+
+    tampered = {**valid, "disposition": "member_absent"}
+    checkpoint.write_text(json.dumps(tampered) + "\n")
+    assert phase5_phase4_replay._load_checkpoint(checkpoint, scope) == {}
 
     legacy = tmp_path / "legacy.jsonl"
     legacy.write_text(json.dumps({
@@ -268,11 +279,14 @@ def test_replay_checkpoint_scope_invalidation(tmp_path):
     assert phase5_phase4_replay._load_checkpoint(legacy, scope) == {}
 
     other = tmp_path / "other.jsonl"
-    other.write_text(json.dumps({
-        "fixture_id": "fixture-1", "disposition": "replayed",
-        "corpus_hash": other_scope}) + "\n")
+    other.write_text(json.dumps(scoped_row(other_scope)) + "\n")
     assert phase5_phase4_replay._load_checkpoint(other, scope) == {}
 
     corrupt = tmp_path / "corrupt.jsonl"
     corrupt.write_text("{not json}\n")
     assert phase5_phase4_replay._load_checkpoint(corrupt, scope) == {}
+
+    oversized = tmp_path / "oversized.jsonl"
+    oversized.write_bytes(b"x" * 33)
+    monkeypatch.setattr(phase5_phase4_replay, "MAX_CHECKPOINT_BYTES", 32)
+    assert phase5_phase4_replay._load_checkpoint(oversized, scope) == {}

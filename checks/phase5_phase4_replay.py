@@ -53,6 +53,7 @@ DISPOSITIONS = ("replayed", "mismatch", "member_absent", "unverified", "error",
                 "untraced", "not_frozen")
 
 REPLAY_VALIDATION_VERSION = 3
+MAX_CHECKPOINT_BYTES = 64 * 1024 * 1024
 
 
 def _checkpoint_scope(corpus_hash: str | None, manifest: Mapping[str, Any]) -> str:
@@ -579,30 +580,64 @@ def _log(tag: str, message: str, started: float) -> None:
           flush=True)
 
 
+def _checkpoint_row_hash(row: Mapping[str, Any], scope: str) -> str:
+    """Hash a checkpoint row, bound to the replay scope, for corruption detection."""
+    from engine.v2.foundation import content_hash
+
+    payload = {key: value for key, value in row.items()
+               if key != "checkpoint_row_hash"}
+    return content_hash({"checkpoint_scope": scope, "row": payload})
+
+
 def _load_checkpoint(checkpoint_path: Path, scope: str | None) -> dict[str, dict]:
     """Rows already replayed by an earlier, killed run of the SAME scope.
 
-    Keyed by ``fixture_id``. A checkpoint file from a different scope (any
-    row's ``corpus_hash`` scope disagrees, or the file is unreadable/corrupt)
-    is discarded, never silently reused -- resuming against the wrong corpus,
-    manifest or validation version would be a correctness defect, not a
-    convenience."""
+    Keyed by ``fixture_id``. Each row's ``checkpoint_row_hash`` is bound to the
+    replay scope so a modified row is rejected; a file larger than
+    ``MAX_CHECKPOINT_BYTES`` or whose bytes exceed the read cap is discarded
+    without being parsed. A checkpoint file from a different scope (any row's
+    ``checkpoint_scope`` disagrees, a scoped hash mismatches, or the file is
+    unreadable/corrupt) is discarded, never silently reused -- resuming against
+    the wrong corpus, manifest or validation version would be a correctness
+    defect, not a convenience."""
     if not checkpoint_path.is_file():
         return {}
     import json
 
-    done: dict[str, dict] = {}
     try:
-        with checkpoint_path.open() as fh:
-            for line in fh:
-                line = line.strip()
+        if checkpoint_path.stat().st_size > MAX_CHECKPOINT_BYTES:
+            return {}
+    except OSError:
+        return {}
+
+    done: dict[str, dict] = {}
+    consumed = 0
+    try:
+        with checkpoint_path.open("rb") as fh:
+            while True:
+                line = fh.readline(MAX_CHECKPOINT_BYTES - consumed + 1)
                 if not line:
+                    break
+                consumed += len(line)
+                if consumed > MAX_CHECKPOINT_BYTES:
+                    return {}
+                text = line.decode("utf-8").strip()
+                if not text:
                     continue
-                row = json.loads(line)
+                row = json.loads(text)
+                if not isinstance(row, dict):
+                    return {}
                 if row.get("checkpoint_scope") != scope:
                     return {}
-                done[row["fixture_id"]] = row
-    except (OSError, ValueError):
+                fixture_id = row.get("fixture_id")
+                if not isinstance(fixture_id, str) or not fixture_id:
+                    return {}
+                if row.get("disposition") not in DISPOSITIONS:
+                    return {}
+                if row.get("checkpoint_row_hash") != _checkpoint_row_hash(row, scope):
+                    return {}
+                done[fixture_id] = row
+    except (OSError, ValueError, UnicodeDecodeError, TypeError):
         return {}
     return done
 
@@ -652,7 +687,8 @@ def replay_corpus(corpus: Path, release_root: Path, model_release,
             cached = done.get(fixture_id)
             if cached is not None:
                 row = {k: v for k, v in cached.items()
-                       if k not in ("corpus_hash", "checkpoint_scope")}
+                       if k not in ("corpus_hash", "checkpoint_scope",
+                                    "checkpoint_row_hash")}
                 _log("p5-phase4",
                      f"pair {index + 1}/{total} {fixture_id}: {row['disposition']} "
                      "(from checkpoint)", started)
@@ -666,11 +702,14 @@ def replay_corpus(corpus: Path, release_root: Path, model_release,
                      f"pair {index + 1}/{total} {fixture_id}: {row['disposition']} "
                      f"(pair +{pair_elapsed:.1f}s)", started)
                 if checkpoint_fh is not None:
-                    checkpoint_fh.write(_json.dumps({
+                    checkpoint_row = {
                         **row,
                         "corpus_hash": corpus_hash,
                         "checkpoint_scope": checkpoint_scope,
-                    }) + "\n")
+                    }
+                    checkpoint_row["checkpoint_row_hash"] = _checkpoint_row_hash(
+                        checkpoint_row, checkpoint_scope)
+                    checkpoint_fh.write(_json.dumps(checkpoint_row) + "\n")
             counts[row["disposition"]] += 1
             rows.append(row)
             if "code" in row:

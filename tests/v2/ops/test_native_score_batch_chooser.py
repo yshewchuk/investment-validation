@@ -361,6 +361,8 @@ def test_chooser_bundle_wires_producer_bindings_and_pools(monkeypatch):
     assert result.chooser_recipe["fold_provenance"] == state.fold_provenance
     assert result.chooser_recipe["producers"]["pred_im_t1_d14"]["binding_id"] == "fold:implied_t1"
     assert result.chooser_recipe["producers"]["pred_runup_abs_move_d14"]["binding_id"] == "fold:runup_move"
+    assert result.chooser_recipe["producers"]["pred_im_t1_d14"]["output"] == "pred_im_t1_d14"
+    assert result.chooser_recipe["producers"]["pred_runup_abs_move_d14"]["output"] == "pred_runup_abs_move_d14"
     assert result.chooser_recipe["analog_pool"] == {
         "pool_id": "analog", "cutoff": "2026-10-27", "content_hash": "h-a"}
     assert result.chooser_recipe["admissible_table"] == {
