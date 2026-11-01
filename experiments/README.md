@@ -139,7 +139,7 @@ previews retain their outputs/refusals. The documented v3 grid example is Elasti
 alpha `[0.001, 0.003, 0.01, 0.03, 0.1, 1]`, l1 ratio `[0.25, 0.75]`, and Ridge
 alpha `[0.01, 0.1, 1, 10, 100]`, producing 57 candidates. Compilation alone
 grants no source or fit authority.
-`regression_search_request.v1` adds a closed qualified-panel request and causal IV incumbent/training-mean comparison counts. Rejected IV comparison shapes/references name `iv_crush_causal_refit` and `training_mean` in the nonretryable `INVALID_EXPERIMENT_SPEC` diagnostic; SIZE wording and shared cap refusals are unchanged. Compilation and both plan bindings reuse pure `size_panel_request.validate_panel_request` (also re-exported by `size_search_binding`); malformed panels refuse `INVALID_EXPERIMENT_SPEC` before candidate expansion, without I/O or caller mutation; regression previews also require native price snapshot syntax, matching panel/request feature/history IDs and child memory within the parent cap. `magnitude_search_plan.seal_search_plan` / `read_search_plan` dispatch v1.8 anchors through IV-policy-checking `iv_crush_search.prepare_plan` to shared `regression_search_binding.prepare_plan`. The sealed target-aware nested plan requires the complete installed runner source closure (not worker-only additions), and verifies feature and target identity without reading their payloads; native signed trials and selected-only outer fits use the same journal, inner-only freeze, bounded child and durable budget. Evaluation targets open only after forecasts/fit receipts persist; complete replay never refits or reopens labels. The library driver is supported; the magnitude and SIZE CLIs refuse regression before catalog access until its dedicated entrypoint is supplied. The IV-owned comparator recipe is sealed into the plan. Every selected outer fold first persists the causal incumbent/training-mean comparison and exact fit markers through the shared comparison journal; the outer report remains search-only until the separate paired-report adapter. Native catalog/artifact and source-fingerprint errors retain their existing policy.
+`regression_search_request.v1` adds a closed qualified-panel request and causal IV incumbent/training-mean comparison counts. Rejected IV comparison shapes/references name `iv_crush_causal_refit` and `training_mean` in the nonretryable `INVALID_EXPERIMENT_SPEC` diagnostic; SIZE wording and shared cap refusals are unchanged. Compilation and both plan bindings reuse pure `size_panel_request.validate_panel_request` (also re-exported by `size_search_binding`); malformed panels refuse `INVALID_EXPERIMENT_SPEC` before candidate expansion, without I/O or caller mutation; regression previews also require native price snapshot syntax, matching panel/request feature/history IDs and child memory within the parent cap. `magnitude_search_plan.seal_search_plan` / `read_search_plan` dispatch v1.8 anchors through IV-policy-checking `iv_crush_search.prepare_plan` to shared `regression_search_binding.prepare_plan`. The sealed target-aware nested plan requires the complete installed runner source closure (not worker-only additions), and verifies feature and target identity without reading their payloads; native signed trials and selected-only outer fits use the same journal, inner-only freeze, bounded child and durable budget. Evaluation targets open only after forecasts/fit receipts persist; complete replay never refits or reopens labels. The library driver is supported; the magnitude and SIZE CLIs refuse regression before catalog access until its dedicated entrypoint is supplied. The IV-owned comparator recipe is sealed into the plan. Every selected outer fold first persists the causal incumbent/training-mean comparison and exact fit markers through the shared comparison journal; `iv_crush_search_report.collect` composes the verified search with descriptive paired/broad metrics and accounting. Native catalog/artifact and source-fingerprint errors retain their existing policy.
 `magnitude_candidate_recipe` and `magnitude_candidate_fit` are consumed by qualified plan construction and the bounded worker, as well as synthetic tests.
 They reuse public model recipe/fitter APIs; admitted stored inputs and the sealed execution route, not compiler specifications alone, authorize fitting.
 
@@ -597,5 +597,21 @@ Each child rechecks the unchanged whole-job deadline. Completed IV comparison
 replay reads stored cohort evidence only, under both no-fit guards, without reopening
 source labels or starting a deadline. Missing/changed recipe, fold, limits, target,
 result shape or fit evidence refuses `EXPERIMENT_IDENTITY_CONFLICT`. The driver seal
-also refuses already-started IV comparison work. Dedicated CLI/paired reporting
-remain separate delivery; this adds no actual study, feasibility or release claim.
+also refuses already-started IV comparison work. Dedicated CLI execution
+remains separate delivery; this adds no actual study, feasibility or release claim.
+
+### IV development report
+
+`iv_crush_search_report.collect` admits the exact IV driver and collects completed
+outer/comparison evidence once; missing work refuses, never falls back to execution.
+It returns the selected-only search, candidate diagnostics/accounting, actual
+comparator fits and configured resource counts. IV timing stays explicitly unknown.
+`iv_crush_paired_report.paired_report` pairs complete forecast events across every
+selected horizon, then joins the complete admitted IV labels. It reports signed
+RMSE/MAE/bias, challenger-minus-incumbent loss differences and year/horizon breakdowns;
+whole-event pairing gives equal event weight. Broad challenger/training-mean losses
+retain events omitted by incumbent abstention. Coverage records every arm/status;
+no matched events is an explicit unavailable comparison, not a success or zero loss.
+The existing shared regression loss/forecast helpers own finite signed arithmetic
+and exact challenger coverage. Neither helper adds promotion/significance thresholds,
+SIZE large-move rules, bootstrap policy, provider access, a new winner or final authority.

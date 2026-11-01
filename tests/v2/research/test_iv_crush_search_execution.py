@@ -168,6 +168,19 @@ def test_all_candidates_selected_outer_and_read_only_replay(oracle_case, monkeyp
     with no_fit_guard(), legacy_guard():
         assert driver.run_search(*args, limits=plan["request"]["limits"]["child"]) == result
         assert collect_outer_results(*args) == result
+        from experiments.iv_crush_search_report import collect
+        report = collect(*args)
+        assert report["search"] == result
+        assert report["paired"]["paired_events"] == 0
+        assert report["paired"]["broad_coverage_metrics"] == {
+            arm: {"count": 3, "rmse": 10., "mae": 10., "bias": 10.}
+            for arm in ("challenger", "training_mean")}
+        assert report["preflight"]["maximum_child_invocations"] == 35
+        assert report["preflight"]["counts"]["total_component_fits"] == 105
+        assert sum(row["completed_fit_count"] for row in report["inner_fits"]) == 99
+        assert sum(row["component_fits"] for row in report["comparison_fits"]) == 0
+        assert all(row["fit_seconds"] == [] and row["score_seconds"] is None for row in report["inner_fits"])
+        assert report["result_id"] == content_hash({key: value for key, value in report.items() if key != "result_id"})
     assert len(label_calls) == 1
     assert catalog_rows(data.conn) == before and artifact_object_bytes(data.store) == saved
     # New timed magnitude/SIZE replay must not relax the closed untimed IV protocol.
