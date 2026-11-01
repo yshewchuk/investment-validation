@@ -13,7 +13,7 @@ Research-only Bundles C/D extend the [experiment design](DESIGN.md) and the [B a
 | `distribution_oof.residual_pool(fits, role, outer_year, horizon, inner_year=None)` | C/tests obtain exact earlier-inner residuals joined to destination training labels, with identity/provenance and explicit unavailable states. |
 | `distribution_oof.control_for_prediction(pool, histogram_document, point_prediction)` | Numerical consumer applies the declared shared residual pool to one forecast; returns mean-anchored histogram and nonnegative point controls, not calibrated probabilities. |
 
-Dependencies are existing public native admission, fit evidence, immutable journal and CAS shard primitives, foundation hashing, fixed HGB model APIs, magnitude distribution arithmetic/payoff helpers and bounded stderr progress. NumPy/sklearn/threadpoolctl provide numerical work; no new library, store, transport, scheduler or generic estimator framework is introduced. Current consumers are C adapters, the fixed distribution worker and synthetic tests; the worker shares fit_evidence/load_fit_inputs and the numeric fit/publication APIs.
+Dependencies are existing public native admission, fit evidence, immutable journal and CAS shard primitives, foundation hashing, fixed HGB model APIs, magnitude distribution arithmetic/payoff helpers and bounded stderr progress. NumPy/sklearn/threadpoolctl provide numerical work; no new library, store, transport, scheduler or generic estimator framework is introduced. Current consumers are C adapters, the fixed distribution worker, the distribution operator and synthetic tests; the worker shares fit_evidence/load_fit_inputs and the numeric fit/publication APIs.
 
 ## Numeric and fit contract
 
@@ -52,7 +52,7 @@ C and the installed `distribution_worker` share `distribution_fitted.validate_fi
 
 ## Run metadata and containment
 
-`distribution_run_plan.DistributionRunPlan(trials, request)` is consumed by explicit local callers and synthetic tests. It detaches the existing closed D request and composes B `prepare_plan`, D7 bridge/benchmark readers, native snapshot resolution, source fingerprints, immutable journal and CAS sections. The native SIZE anchor must provide every horizon in the distribution recipe `(5, 3, 1)`; a subset anchor refuses during plan preparation before a distribution receipt or claim is published. Stdlib resource/signal and the shared VmRSS watchdog provide containment; no new dependency, framework, source reader, eligibility filter or holdout policy. Population remains centrally admitted eligible events within the frozen selected dataset, not source-wide completeness.
+`distribution_run_plan.DistributionRunPlan(trials, request)` is consumed by explicit local callers, the distribution operator through `DistributionRun`, and synthetic tests. It detaches the existing closed D request and composes B `prepare_plan`, D7 bridge/benchmark readers, native snapshot resolution, source fingerprints, immutable journal and CAS sections. The native SIZE anchor must provide every horizon in the distribution recipe `(5, 3, 1)`; a subset anchor refuses during plan preparation before a distribution receipt or claim is published. Stdlib resource/signal and the shared VmRSS watchdog provide containment; no new dependency, framework, source reader, eligibility filter or holdout policy. Population remains centrally admitted eligible events within the frozen selected dataset, not source-wide completeness.
 
 | API | Effects and contract |
 | --- | --- |
@@ -98,7 +98,7 @@ Scoring streams one event at a time with bounded progress; it materializes that 
 
 ## Causal outer pipeline
 
-`distribution_pipeline` composes existing native target/quote readers, C verified fit receipts and earlier-inner pools, D4 scoring, D3 books/reports and D8 immutable CAS/journal publication. Stdlib and the installed platform cover this integration; no new reader, schema framework, fitting, eligibility rule or holdout policy. Consumers are explicit local callers and synthetic integration tests, not production activation.
+`distribution_pipeline` composes existing native target/quote readers, C verified fit receipts and earlier-inner pools, D4 scoring, D3 books/reports and D8 immutable CAS/journal publication. Stdlib and the installed platform cover this integration; no new reader, schema framework, fitting, eligibility rule or holdout policy. Consumers are explicit local callers including `DistributionRun` through the distribution operator, and synthetic integration tests, not production activation.
 
 Both calls require the existing CAS-verified D run seal. The live request must canonically match its sealed request, and `evaluate_outer` also requires the entire supplied plan to match that seal. Missing seals or changed/malformed policy/plan refuse `INVALID_EXPERIMENT_SPEC` before downstream readers, accumulator changes or publication. Each invocation consumes the detached sealed request/plan, so later caller mutation cannot change its decisions or report semantics. This small journal check does not repeat native eligibility/source admission; those remain the caller's existing prerequisite.
 
@@ -143,13 +143,16 @@ One dedicated main-thread containment scope covers bootstrap-adjusted metadata/c
 
 | Condition | Outcome |
 | --- | --- |
-| Missing artifact-store directory | Sanitized `RESOURCE_UNAVAILABLE` (other storage I/O errors are not mapped to it) |
+| Missing artifact-store directory, non-integrity `ArtifactError`, or artifact-store/catalog `OSError` or `sqlite3.Error` | Sanitized `RESOURCE_UNAVAILABLE` |
 | Missing/unreadable input file, malformed document | `INVALID_EXPERIMENT_SPEC` |
-| Required spec field missing/null | Normalized only at explicit metadata parsing; other parser refusals and downstream semantic errors keep their original Problems |
+| Required field missing/null while parsing spec, source spec, or source-plan ref | `INVALID_EXPERIMENT_SPEC` from explicit metadata parsing |
+| Other parser refusals except `INVALID_REQUEST` | Keep their original Problems |
+| Downstream semantic errors | Keep their original Problems |
+| `DocumentError` or `TypeError` while parsing spec, source spec, or source-plan ref; `INVALID_REQUEST` from that parsing | `INVALID_EXPERIMENT_SPEC` |
 | Raw CAS integrity failure | `INTEGRITY_FAILED` |
 | Typed resource/holdout/identity failure | Passed through |
 | Unexpected programming error | Propagates |
 
- Normal unwind closes streams/catalog and restores limits. Signal setup/restoration failure can retain a stricter CPU soft ceiling; treat any failed process as terminal, never reusable. Bootstrap limits come from validated caller JSON, not an authenticated durable seal: later changed-policy refusal before started/fits does not retroactively impose sealed limits over pre-admission I/O.
+Normal unwind closes streams/catalog and restores limits. Signal setup/restoration failure can retain a stricter CPU soft ceiling; treat any failed process as terminal, never reusable. Bootstrap limits come from validated caller JSON, not an authenticated durable seal: later changed-policy refusal before started/fits does not retroactively impose sealed limits over pre-admission I/O.
 
 There is no cross-action transaction or automatic repair: failed reservation can leave an unreferenced immutable CAS object, failed seal can leave its B prefix, and started runs retain claims and partial sections. Failure-journal I/O preserves the original execution exception and refusal classification; its fixed secondary diagnostic contains no raw storage detail. No completion or retry authority follows, even when the failure record is absent. Identical registration/seals replay normally; changed identities refuse. Collection never creates a catalog, trains, prices, reads evaluation targets or changes journals. JSON serialization is fully admitted against the existing 64 MiB output budget before stdout; inherited progress is redirected to stderr. Bounded source and report transport does not prove decoded memory or aggregate child/parent feasibility.
