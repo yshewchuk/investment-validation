@@ -755,6 +755,7 @@ def test_carried_chooser_reference_uses_verified_authoring_release(tmp_path, mon
     assert reference.descriptor_hash == descriptor.descriptor_hash
     assert reference.estimator_sha256 == descriptor.estimator.content_hash
     assert reference.release_id == "origin"
+    assert reference.carrying_release_id == "carried"
     assert reference.training_cutoff == "2026-09-01"
     assert reference.release_binding is identity
     assert reference.fold_start == descriptor.fold_start
@@ -818,9 +819,14 @@ def test_chooser_fold_reference_uses_fold_month_cutoff(
     assert reference.estimator_sha256 == descriptors["first"].estimator.content_hash
     assert reference.training_cutoff == "2026-09-01"
     assert reference.release_id == _RELEASE_ID
+    assert reference.carrying_release_id == _RELEASE_ID
     assert reference.fold_start == "2026-09-01"
     assert reference.release_binding is identities["implied_t1:STR-THRU"]
-    assert len(calls) == 1
+    binding_again = resolve_release_binding(
+        tmp_path, include_chooser_fold_references=True)
+    assert binding_again.chooser_fold_references[
+        ("pred_im_t1_d14", "2026-09-01")] == reference
+    assert len(calls) == 2
     assert calls[0][1] is descriptors["first"]
     assert calls[0][2].release.release_id == _RELEASE_ID
     assert calls[0][3]["sources"]["retrain_cutoff"] == cutoff

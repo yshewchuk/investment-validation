@@ -1,6 +1,6 @@
 # Distribution fitting and causal controls
 
-Research-only Bundle C extends the [experiment design](DESIGN.md) and the [B admission contract](../ARCHITECTURE.md#distribution-native-admission). There is no public CLI, production path, provider read, final-holdout authority or whole-experiment runner. C's default is in-process; the internal fixed child supplies only its stated process limits.
+Research-only Bundles C/D extend the [experiment design](DESIGN.md) and the [B admission contract](../ARCHITECTURE.md#distribution-native-admission). The explicit local runner grants no public CLI, production path, provider read or final-holdout authority. C's default remains in-process; the runner selects bounded children and dedicated-process containment. Real execution needs separate user authorization.
 
 ## Public boundary and dependencies
 
@@ -68,11 +68,11 @@ C and the installed `distribution_worker` share `distribution_fitted.validate_fi
 | Containment wall deadline / resident-memory ceiling exceeded | `RESOURCE_LIMIT_EXCEEDED` / `MemoryError`; context cleanup restores CPU/alarm state and stops the shared watchdog when execution can unwind. Hard termination cannot promise cleanup. |
 | Native artifact, journal, OS/signal or unexpected programming failure | Original failure propagates; existing records/objects are not erased, repaired or retried. |
 
-No `run()` method or production activation exists in this slice. Tiny synthetic tests cover read-only preflight, required benchmark coverage, identity drift, real CAS verification, refusal propagation, standalone import/source closure and actual timeout/restoration in an isolated child process.
+The metadata class has no `run()` method or production activation. Tiny synthetic tests cover read-only preflight, required benchmark coverage, identity drift, real CAS verification, refusal propagation, standalone import/source closure and actual timeout/restoration in an isolated child process.
 
 ## D4 source-free scores and forecast report
 
-This additive slice composes A's proper-scoring/payoff helpers, C's `control_for_prediction` and D3's existing cohort/cluster reporting. Current consumers are synthetic tests; the later causal pipeline/runner is not supplied here. Stdlib/NumPy and existing research progress cover the work; no new reader, transport, fit, calibrator, ledger or admission policy.
+This additive slice composes A's proper-scoring/payoff helpers, C's `control_for_prediction` and D3's existing cohort/cluster reporting. Current consumers are `distribution_pipeline` and synthetic tests; executable orchestration remains separate. Stdlib/NumPy and existing research progress cover the work; no new reader, transport, fit, calibrator, ledger or admission policy.
 
 | API | Supplied inputs, output and effects |
 | --- | --- |
@@ -95,3 +95,40 @@ Economics uses the identical bridge/costs for every arm; fees are converted once
 | Fewer than two scoreable calendar/ticker clusters | Unavailable conditional interval; point estimate may still exist. |
 
 Scoring streams one event at a time with bounded progress; it materializes that event's empirical controls, not a persisted event×residual matrix. Report groups O(score rows) in memory and reuses bounded resampling progress; work is O(events log events + resamples×clusters) per horizon after scoring. This is not whole-job containment or a real-data feasibility claim. Synthetic oracles cover analytic CRPS, exact tail boundaries/atoms, missingness, linear-EV invariance with differing profit probability, after-cost truth and hand-aggregated cluster intervals.
+
+## Causal outer pipeline
+
+`distribution_pipeline` composes existing native target/quote readers, C verified fit receipts and earlier-inner pools, D4 scoring, D3 books/reports and D8 immutable CAS/journal publication. Stdlib and the installed platform cover this integration; no new reader, schema framework, fitting, eligibility rule or holdout policy. Consumers are explicit local callers and synthetic integration tests, not production activation.
+
+Both calls require the existing CAS-verified D run seal. The live request must canonically match its sealed request, and `evaluate_outer` also requires the entire supplied plan to match that seal. Missing seals or changed/malformed policy/plan refuse `INVALID_EXPERIMENT_SPEC` before downstream readers, accumulator changes or publication. Each invocation consumes the detached sealed request/plan, so later caller mutation cannot change its decisions or report semantics. This small journal check does not repeat native eligibility/source admission; those remain the caller's existing prerequisite.
+
+| API | Inputs, output and effects |
+| --- | --- |
+| `evaluate_outer(run, group, fits, results, plan, books, quotes, opportunities, sections, calendar)` | Caller-admitted outer group and all-horizon C results are bound to their causal pools by completed receipts. Reads shared D-1 quotes and frozen bridges, builds common-primary-arm strict-positive-net-EV h1 selections, then records every alpha's intents before reading D0/D+1 quotes or central evaluation targets. Appends profit scores and all-horizon proper scores to CAS; caller-owned accumulators retain the unchanged opportunity universe. Frozen gate selections are an optional imported benchmark, not an EV fallback. |
+| `finish_reports(run, books, quotes, opportunities, sections)` | Builds chronological funded books and paired conditional summaries, publishes per-event book/curve sections and aggregates forecast sections into `distribution_run_report.v1`. Risk diagnostics remain unknown where unresolved trades or empty funding prevent a claim. Returns summaries and section descriptors; does not publish a completed-run record or authorize promotion. |
+
+Only h1 drives selection; h3/5 remain diagnostic. Quote separation is by requested/returned keys: the existing native reader may scan wider pinned fragments before filtering, so this is not physical quote-byte isolation. The central target reader uses the source registration's frozen snapshot, holdout month and evaluation-label cutoff; exact target-or-omission coverage is required, never zero imputation. Missing decision quotes/control/tails abstain through the common primary mask. Missing outcomes preserve opportunities and unresolved book exposure, not survivor filtering. Shared alpha/bridge/cost semantics remain unchanged.
+
+Malformed target coverage uses `INVALID_EXPERIMENT_SPEC`; receipt/pool mismatches and native data, CAS, journal or numeric failures propagate their owning refusals. Each central target scan enforces the shared 1 MiB stored/expanded outcome-object ceiling (`RESULT_LIMIT_EXCEEDED`), not a population/heap cap. Any existing intent slot for the group, including a partial alpha prefix, refuses `EXPERIMENT_IDENTITY_CONFLICT` before readers, publication or caller accumulator mutation. Intent/outcome iteration uses sealed alphas, giving canonical slot names even when caller numeric book keys use `0.0`; the precheck also recognizes the current caller's existing key spellings. This is not historical-seal migration or concurrent-writer coordination. Other later failures may leave intent/score artifacts and changed accumulators; discard failed invocation state, with no rollback, repair, retry or fitting fallback. Caller owns a single-use attempt, chronological admission, source closure and whole-job containment.
+
+Per-call reuse keeps one calendar, all-alpha decision quotes and one event-indexed h1 result map. C pools and shared reports retain their documented memory bounds; accumulators scale with admitted opportunities/alphas/arms, not a persisted event-by-residual matrix. Stage boundaries include elapsed time/RSS, event loops have bounded progress and each alpha logs aggregate common/selected counts. This is not measured real-data feasibility. Native synthetic integration verifies future quote requests and physical target reads follow all-alpha durable intents and independently checks settled USD profit; seam tests cover missingness, abstention and duplicate-group refusal.
+
+## Explicit contained runner
+
+`distribution_run.DistributionRun(trials, request)` extends D8 for explicit local library callers and synthetic tests. After inherited verification, its preflight requires the verified own registration's runner to equal `experiments/distribution_run.py`; a metadata or unrelated entrypoint refuses `EXPERIMENT_IDENTITY_CONFLICT` before a D seal or run claim. Preflight/seal binds the actual runner plus fixed worker closure, not the metadata-only class's roots; those seals are intentionally incompatible. `run(clock=None)` requires a dedicated Linux main-thread process and the explicit parent/job ceilings, installs D8 containment before admission, then runs one fresh attempt. Existing SystemClock, no-fit guards, native calendar, C/D6 bounded fit APIs, D9 pipeline and immutable journal/CAS helpers cover the need; no new framework, registration, source preparation, provider, ledger or eligibility policy.
+
+Both fit guards precede fresh admission/fitting. A create-only start records the timestamp and remaining whole-job deadline, including bootstrap time; every group admits its earlier-inner folds before its outer fold and calls `DistributionFits.fit(..., bounded=True)` for each declared horizon. Each verified fit gets a compact run receipt. One run-local native calendar is shared, and D9 completes that group's frozen intents/outcomes/diagnostics before the next group's training admission. The runner returns a completed compact report only after all groups and sections succeed; no partial attempt is promoted or skipped.
+
+| Condition | Outcome |
+| --- | --- |
+| Exact completion already present | Contained, verified read-only collection; no new fit, pricing, target read, CAS write or attempt deadline. Collection still has its own containment timer. |
+| Changed seal/source or already-started unfinished attempt | Existing invalid-spec/identity refusal before new work; no automatic retry, deadline reset or reuse as a new bounded run. |
+| Outer results lack any of the admitted `{1,3,5}` horizons or contain another horizon | `INVALID_EXPERIMENT_SPEC` before group evaluation or report publication; prior fit records remain, with no partial finalization. Native fitted receipts still own exact event-row validation. |
+| Handled exception or interruption after start | Append a compact failure with the original code or `INTERRUPTED`, preserve the committed prefix and re-raise. Storage failure or hard termination may prevent the failure record; unfinished claims remain reserved. |
+| Parent/child resource exhaustion | Existing contained failure semantics; no successful completion or raised budget. Per-process bounds are not a measured aggregate-RSS guarantee. |
+
+Standalone preflight/seal/collect retain D8's caller-owned containment and artifact-read boundaries. `collect` verifies completed report sections, not every historical fit recursively. The runner does not provide a shell/production entrypoint or certify statistical success, executable capacity, qualified real inputs or permission to read protected outcomes. Synthetic acceptance covers chronological all-alpha ordering, real journals/CAS/books, failure prefixes, forbidden retry, bounded-fit selection, source-seal separation and read-only replay under both no-fit guards.
+
+The internal `_run_contained` shares an already-active caller deadline without resetting limits; callers otherwise use public `run`.
+
+Books and quote accumulators use the detached sealed alpha roster and exist only inside the fresh invocation. A failed invocation discards that local state; the reserved attempt prevents reuse even through a new runner instance. Zero-funded reports retain unknown completeness and explicitly grant no risk sufficiency, promotion or strategy-superiority authority; diagnostic loss/drawdown flags alone are not successful-study evidence.

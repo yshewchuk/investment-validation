@@ -239,7 +239,9 @@ def _execute_admitted(conn, store, repository, registration, plan, fold, selecti
         return read_record(conn, store, registration.run_id, "outer-" + slot + ":" + key)
     def append(slot, body):
         return append_record(conn, store, registration.run_id, "outer-" + slot + ":" + key, body, replay=False)
-    if binding.get("schema_version") in ("native_experiment_registration.v1.6", "native_experiment_registration.v1.7"):
+    if "target" in plan and saved("start") is not None and saved("terminal") is None:
+        raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search journal slot is already committed")
+    if binding.get("schema_version") in ("native_experiment_registration.v1.6", "native_experiment_registration.v1.7", "native_experiment_registration.v1.8"):
         from experiments.size_comparison_run import execute as compare
         _equal(limits, plan["request"]["limits"]["child"])
         compare(conn, store, repository, registration, plan, fold, limits=limits, replay_only=replay_only)

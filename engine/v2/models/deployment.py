@@ -308,7 +308,8 @@ class PointerState:
 
 
 def _release_dir(root: Path, release_id: str) -> Path:
-    if not release_id or "/" in release_id or release_id in (".", ".."):
+    if (not release_id or "/" in release_id or release_id in (".", "..")
+            or "\x00" in release_id):
         raise DeploymentError(f"unsafe release id: {release_id!r}")
     return root / "releases" / release_id
 

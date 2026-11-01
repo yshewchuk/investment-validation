@@ -109,8 +109,8 @@ release assembly is §2.1, staging §2.2, and the three-phase tick sidecar is §
 
 ## 2. Primary contracts and public interfaces
 
-The full list is `README.md`'s `<!-- public-interface: ... -->` directive
-(machine-checked by `checks/package_readmes.py`); the deployment surface:
+`README.md` declares the checked public interface; `deployment.manifest_path`
+rejects empty, `/`, `.`/`..` and NUL release IDs.
 
 - `deployment.stage_release(root, release, inventory, payloads, *, clock) -> StagedManifest`
   — validate, then durably stage. Never touches `DEPLOYED`.

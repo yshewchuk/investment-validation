@@ -255,12 +255,12 @@ def test_wrong_snapshot_and_late_repository_failure_never_return_partial_or_retr
         with pytest.raises(DataError, match="SNAPSHOT_UNRESOLVED"):
             _load(repository, replace(snapshot, calendar_version="wrong-calendar"))
         original, calls = repository.scan, []
-        def scan(query, *, table_name):
+        def scan(query, *, table_name, **kwargs):
             if table_name == "computed_moves":
                 calls.append(query.time_interval.start_inclusive)
                 if len(calls) == 2:
                     raise fail("OBJECT_CORRUPT", "synthetic late failure")
-            yield from original(query, table_name=table_name)
+            yield from original(query, table_name=table_name, **kwargs)
         monkeypatch.setattr(repository, "scan", scan)
         with pytest.raises(DataError, match="OBJECT_CORRUPT"):
             _load(repository, snapshot)
