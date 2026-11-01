@@ -1,4 +1,8 @@
 """Causal fourteen-input incumbent refits on admitted arrays, never production rows."""
+import math
+import time
+from collections import Counter
+from copy import deepcopy
 from dataclasses import replace
 from statistics import mean
 
@@ -10,6 +14,8 @@ from engine.v2.models.frozen_state_io import BoundedStateReadError
 from engine.v2.models.training.estimators import fit_recipe_estimator
 from engine.v2.models.training.recipes import RecipeKey, current_recipes
 from engine.v2.ops.errors import fail
+from experiments.magnitude_search_evidence import fit_evidence as candidate_evidence
+from experiments.magnitude_search_selection import history_mean_prediction
 
 FEATURES = ["has_implied_quote", "mean_prior_abs_move", "abs_dist_ema", "ema12r_abs",
     "mean_prior_move", "signed_streak", "dist_high", "dist_ema", "spy_vol20", "spy_dd252",
@@ -48,6 +54,12 @@ def recipe():
         "history_mean": "stored_mean_else_qualified_training_mean", "production_reproduction": False}
 
 
+def candidate_recipe(comparison):
+    """Derive the fixed fallback candidate from an already-verified comparator."""
+    return {**deepcopy(comparison), "schema_version": "size_history_mean_candidate.v1",
+            "missing": "history_mean", "refit": "fresh_per_fold_horizon", "prediction_domain": "signed"}
+
+
 def _values(row):
     if (row["current_quote_status"] not in ("present", "zero", "absent", "unavailable")
             or row["has_implied_quote"] != int(row["current_quote_status"] == "present")
@@ -84,40 +96,72 @@ def fit_evidence(inputs, fold, plan):
     return result
 
 
-def forecasts(indexed, train, fold, plan, execution, *, progress):
-    """Preserve abstention and negative blends; never apply target masks to evaluation."""
-    if execution["fit_recipe"] != recipe():
+def _fit_rows(indexed, training, evaluation_ids, horizon):
+    training = [(r["event_id"], _values(indexed[r["event_id"], horizon])[0], r["absolute_move_pct"])
+                for r in training]
+    return ([row for row in training if row[1] is not None and 0 <= row[2] <= 200],
+            [(event, *_values(indexed[event, horizon])) for event in evaluation_ids])
+
+
+def _details(training, evaluated):
+    fitted = int(len(training) >= 500)
+    reasons = [reason or "insufficient_training" for _, _, reason in evaluated if reason or not fitted]
+    return {"training_event_ids": [e for e, _, _ in training], "logical_fits": fitted,
+            "component_fits": 2 * fitted, "fallback_counts": dict(sorted(Counter(reasons).items()))}
+
+
+def candidate_fit_details(inputs, fold, horizons):
+    """Reconstruct candidate accounting from admitted features/training, never outcomes."""
+    indexed = {(r["event_id"], r["horizon_sessions"]): r for r in inputs["features"]}
+    return [{"horizon_sessions": h, **_details(*_fit_rows(indexed, inputs["training"],
+                fold["evaluation_event_ids"], h))} for h in horizons]
+
+
+def forecasts(indexed, train, fold, plan, execution, *, progress, inputs=None):
+    """Causal candidate fallback; the standalone comparator still abstains."""
+    candidate = execution.get("model") == "size_v1_4"
+    if execution["fit_recipe"] != (candidate_recipe(recipe()) if candidate else recipe()):
         raise ValueError("comparator recipe differs")
+    inputs = inputs or {"features": list(indexed.values()), "training": train.to_dict("records")}
     predictions, details = [], []
-    train_ids, test_ids = train.event_id.tolist(), fold["evaluation_event_ids"]
-    labels = train.absolute_move_pct.to_numpy(dtype=float)
-    fallback = mean(labels.tolist())
-    evidence = fit_evidence({"features": list(indexed.values()), "training": train.to_dict("records")}, fold, plan)
+    fallback = (math.fsum(r["absolute_move_pct"] for r in inputs["training"]) / len(inputs["training"])
+                if candidate else mean(r["absolute_move_pct"] for r in inputs["training"]))
+    evidence = candidate_evidence(inputs, fold, plan, execution) if candidate else fit_evidence(inputs, fold, plan)
     for horizon, fit in zip(plan["horizons"], evidence):
         progress("started", fit)
-        training = [(event, _values(indexed[event, horizon])[0], label) for event, label in zip(train_ids, labels)]
-        training = [(event, values, label) for event, values, label in training if values is not None and 0 <= label <= 200]
-        evaluated = [(event, *_values(indexed[event, horizon])) for event in test_ids]
+        training, evaluated = _fit_rows(indexed, inputs["training"], fold["evaluation_event_ids"], horizon)
         model = None
-        if len(training) >= 500:
-            with threadpool_limits(limits=1):
-                model = fit_recipe_estimator(native_recipe(), np.array([v for _, v, _ in training], dtype=float),
-                                            np.array([y for _, _, y in training]))
-        complete = [(event, values) for event, values, reason in evaluated if reason is None]
-        estimates = {} if model is None or not complete else dict(zip([e for e, _ in complete],
-            model.predict(np.array([v for _, v in complete], dtype=float))))
-        for event, values, reason in evaluated:
+        started = time.monotonic()
+        try:
+            if len(training) >= 500:
+                with threadpool_limits(limits=1):
+                    model = fit_recipe_estimator(native_recipe(), np.array([v for _, v, _ in training], dtype=float),
+                                                np.array([y for _, _, y in training]))
+            complete = [(event, values) for event, values, reason in evaluated if reason is None]
+            estimates = {} if model is None or not complete else dict(zip([e for e, _ in complete],
+                model.predict(np.array([v for _, v in complete], dtype=float))))
+        except (ValueError, ArithmeticError):
+            if not candidate:
+                raise
+            raise fail("EXPERIMENT_VARIANT_FAILED", "incumbent candidate estimator failed") from None
+        elapsed = max(0.0, time.monotonic() - started)
+        for event, _, reason in evaluated:
             reason = reason or ("insufficient_training" if model is None else None)
-            value = None if reason else float(estimates[event])
-            if value is not None and not np.isfinite(value):
-                raise ValueError("nonfinite incumbent prediction")
             row = indexed[event, horizon]
+            history = history_mean_prediction(row, fallback) if candidate else (
+                row["mean_prior_abs_move"] if row["n_prior"] else fallback)
+            value = (history if candidate else None) if reason else float(estimates[event])
+            if value is not None and not np.isfinite(value):
+                if candidate:
+                    raise fail("EXPERIMENT_VARIANT_FAILED", "incumbent candidate prediction is nonfinite")
+                raise ValueError("nonfinite incumbent prediction")
             predictions.append({"event_id": event, "horizon_sessions": horizon,
-                "predicted_absolute_move_pct": value, "abstention": reason,
-                "history_mean": row["mean_prior_abs_move"] if row["n_prior"] else fallback,
-                "quote_status": row["current_quote_status"]})
-        details.append({"horizon_sessions": horizon, "training_event_ids": [e for e, _, _ in training],
-                        "logical_fits": int(model is not None), "component_fits": 2 * int(model is not None)})
-        progress("completed", fit)
+                "predicted_absolute_move_pct": value, "abstention": None if candidate else reason,
+                "history_mean": history, "quote_status": row["current_quote_status"]})
+        detail = _details(training, evaluated)
+        if not candidate:
+            detail.pop("fallback_counts")
+        details.append({"horizon_sessions": horizon, **detail})
+        progress("completed", {**fit, "fit_seconds": elapsed} if candidate else fit)
     return {"event": "succeeded", "forecasts": sorted(predictions, key=lambda r: (r["event_id"], r["horizon_sessions"])),
             "fit_details": details}

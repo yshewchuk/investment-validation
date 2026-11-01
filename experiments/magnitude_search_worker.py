@@ -72,6 +72,16 @@ def main():
         try:
             if regression:
                 predictions = regression_forecasts(indexed, inputs["training"], request, progress, diagnostics)
+            elif schema == "size_candidate_execution.v1" and request["execution"].get("model") == "size_v1_4":
+                from engine.v2.foundation import content_hash
+                from experiments.size_comparator import forecasts
+                result = forecasts(indexed, pd.DataFrame(inputs["training"]), request["inner"], request["plan"],
+                                   request["execution"], progress=progress, inputs=inputs)
+                predictions = {(r["event_id"], r["horizon_sessions"]): r["predicted_absolute_move_pct"]
+                               for r in result["forecasts"]}
+                diagnostics = [{"schema_version": "size_v1_4_fit.v1",
+                    "recipe_id": content_hash(request["execution"]["fit_recipe"]), **detail}
+                    for detail in result["fit_details"]]
             else:
                 predictions, _ = fitted_forecasts(indexed, pd.DataFrame(inputs["training"]),
                     request["inner"], request["plan"], request["execution"], progress=progress, strict_failures=True, diagnostics=diagnostics)

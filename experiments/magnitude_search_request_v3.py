@@ -1,4 +1,4 @@
-"""Pure v3/v4 stage-2 request validation with bounded request-declared linear grids."""
+"""Pure v3/v4/v5 request validation with bounded grids and one fixed SIZE candidate."""
 import json
 import math
 
@@ -29,6 +29,7 @@ _FAMILIES_V4 = {
     "elasticnet": {"alpha", "l1_ratio"},
     "hgb": {"learning_rate", "max_leaf_nodes", "min_samples_leaf", "l2_regularization"},
 }
+_FAMILIES_V5 = {**_FAMILIES_V4, "size_v1_4": set()}
 
 
 _SELECTION_METRICS = {"rmse": 0.6, "mae": 0.3, "large_move_underprediction": 0.1}
@@ -84,9 +85,10 @@ def _space(request):
                 "stage-2 requires exactly ordered H/HM/HMO feature sets")
     space = request["space"]
     version = request["schema_version"]
-    families = _FAMILIES_V4 if version == "magnitude_search_request.v4" else _FAMILIES
+    families = (_FAMILIES_V5 if version == "magnitude_search_request.v5"
+                else _FAMILIES_V4 if version == "magnitude_search_request.v4" else _FAMILIES)
     v2._require(v2._shape(space, families),
-                "stage-2 requires the closed three-family grid")
+                "stage-2 requires the closed family grid")
     canonical = {}
     for family, axes in families.items():
         supplied = space[family]
@@ -97,7 +99,8 @@ def _space(request):
             values = supplied[axis]
             v2._require(type(values) is list and 1 <= len(values) <= _MAX_AXIS_LENGTH,
                         "stage-2 grid axis length must be between 1 and 32")
-            if family == "hgb" and version != "magnitude_search_request.v4":
+            if family == "hgb" and version not in (
+                    "magnitude_search_request.v4", "magnitude_search_request.v5"):
                 v2._require(values == [7, 15],
                             "stage-2 HGB max_leaf_nodes grid remains fixed at [7, 15]")
                 canonical[family][axis] = [7, 15]
@@ -128,16 +131,19 @@ def _counts(request, horizons):
                 "stage-2 requires ordered outer years and exact inner-year keys")
     v2._require(all(v2._years(inner[year]) and inner[year][-1] < year for year in outer),
                 "stage-2 inner years must be ordered and strictly earlier than their outer year")
-    count = len(v2._SETS) * sum(math.prod(len(values) for values in axes.values())
-                                for axes in request["space"].values())
-    if request["schema_version"] == "magnitude_search_request.v4":
+    size = request["schema_version"] == "magnitude_search_request.v5"
+    count = int(size) + len(v2._SETS) * sum(math.prod(len(values) for values in axes.values())
+        for family, axes in request["space"].items() if family != "size_v1_4")
+    if request["schema_version"] in (
+            "magnitude_search_request.v4", "magnitude_search_request.v5"):
         v2._require(count <= _MAX_V4_CANDIDATES,
-                    "stage-2 v4 grid exceeds the 1000-candidate ceiling")
+                    "stage-2 v4/v5 grid exceeds the 1000-candidate ceiling")
     inners, outers = sum(map(len, inner.values())), len(outer)
     lead_count = len(horizons)
     fits = lead_count * (count * inners + outers)
     baseline_logical_fits = lead_count * outers
     baseline_component_fits = 2 * lead_count * outers
+    extra_components = lead_count * (inners + outers) if size else 0
     v2._require(v2._positive(request["max_candidates"]) and request["max_candidates"] >= count
                 and v2._positive(request["max_fits"]) and request["max_fits"] >= fits,
                 "stage-2 candidate or search-fit cap is insufficient")
@@ -145,7 +151,7 @@ def _counts(request, horizons):
         "search_fits": fits, "baseline_logical_fits": baseline_logical_fits,
         "baseline_component_fits": baseline_component_fits,
         "total_logical_fits": fits + baseline_logical_fits,
-        "total_component_fits": fits + baseline_component_fits}
+        "total_component_fits": fits + extra_components + baseline_component_fits}
 
 
 def compile_request(request, *, horizons=(5, 3, 1)):
@@ -162,10 +168,10 @@ def compile_request(request, *, horizons=(5, 3, 1)):
                  and request_keys in (v2._KEYS, v2._KEYS | {"selection"},
                                       v2._KEYS | {"workers"},
                                       v2._KEYS | {"selection", "workers"}))
-                or (version == "magnitude_search_request.v4"
+                or (version in ("magnitude_search_request.v4", "magnitude_search_request.v5")
                     and request_keys in (v2._KEYS | {"selection"},
                                          v2._KEYS | {"selection", "workers"})),
-                "stage-2 request requires its closed v3/v4 schema and v4 selection policy")
+                "stage-2 request requires its closed v3/v4/v5 schema and selection policy")
     v2.validate_workers(request)
     request.pop("workers", None)
     _selection(request, horizons)
@@ -177,7 +183,8 @@ def compile_request(request, *, horizons=(5, 3, 1)):
     request_id = content_hash(request)
     result = {"schema_version": "magnitude_search_schedule.v2", "request": request,
         "request_id": request_id, "horizons": list(horizons),
-        "candidate_specs": v2._specifications(request, request_id),
+        "candidate_specs": [s for s in v2._specifications(request, request_id)
+            if s["family"] != "size_v1_4" or s["feature_recipe"]["subset"] == "HMO"],
         "schedule": [{"outer_year": year, "inner_years": request["inner_years"][year]}
                      for year in request["outer_years"]], "counts": counts}
     return json.loads(json.dumps(result, sort_keys=True, allow_nan=False))

@@ -65,6 +65,12 @@ def fit_evidence(inputs, fold, plan, execution):
     return result
 
 
+def forecast_target(plan, recipe):
+    """Complete-grid prediction policy; label domain and admission stay unchanged."""
+    return plan.get("target") or {"prediction_column": "predicted_absolute_move_pct",
+                                 "domain": recipe.get("prediction_domain", "nonnegative")}
+
+
 def normalize_forecasts(rows, fold, horizons, *, strict_json=False, target=None):
     """Require exact finite target-domain coverage; preserve submitted Real/Integral admission."""
     target = target or {"prediction_column": "predicted_absolute_move_pct", "domain": "nonnegative"}

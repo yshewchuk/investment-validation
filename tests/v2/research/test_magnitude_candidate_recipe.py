@@ -5,6 +5,7 @@ import sys
 import pytest
 
 from engine.v2.foundation import content_hash
+from engine.v2.models.magnitude_candidate import magnitude_candidate_family
 from engine.v2.models.magnitude_elasticnet_recipe import elasticnet_recipe
 from engine.v2.models.magnitude_ridge_hgb_recipe import ridge_hgb_recipe
 from experiments import magnitude_candidate_recipe as assembly
@@ -15,6 +16,14 @@ CASES = [("ridge", {"alpha": a}) for a in (0.1, 1, 10)] + [
     for r in (0.25, 0.75)] + [("hgb", {"max_leaf_nodes": n}) for n in (7, 15)]
 HGB_V2 = {"learning_rate": 0.05, "max_leaf_nodes": 7, "min_samples_leaf": 20,
           "l2_regularization": 0.0}
+
+
+def test_size_policy_is_not_advertised_by_generic_recipe_or_numeric_dispatch():
+    with pytest.raises(ValueError, match="^candidate requires a supported family and exact parameter keys$"):
+        assembly.candidate_recipe("size_v1_4", {}, columns=object(), feature_dictionary_hash=object())
+    for schema in ("size_causal_comparator.v1", "size_history_mean_candidate.v1"):
+        with pytest.raises(ValueError, match="^candidate requires a supported recipe schema/model pair$"):
+            magnitude_candidate_family({"schema_version": schema})
 
 
 @pytest.mark.parametrize("family,parameters", CASES)

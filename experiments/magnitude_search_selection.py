@@ -3,7 +3,7 @@ import math
 from collections.abc import Mapping
 from statistics import stdev
 
-__all__ = ["blended_event_score", "history_mean_rows", "selection_tie_band"]
+__all__ = ["blended_event_score", "history_mean_rows", "history_mean_prediction", "selection_tie_band"]
 
 
 class ZeroComparatorError(ValueError):
@@ -114,6 +114,17 @@ def _metrics(events, threshold):
     }
 
 
+def history_mean_prediction(feature, training_mean):
+    """Causal numeric fallback only: no target lookup or cross-horizon selection."""
+    n_prior = _nonnegative_int(_field(feature, "n_prior", "history_mean feature"), "history_mean n_prior")
+    prior = _field(feature, "mean_prior_abs_move", "history_mean feature")
+    if prior is not None:
+        _finite_number(prior, "history_mean feature mean_prior_abs_move")
+    elif n_prior:
+        raise ValueError("history_mean prior features require a finite mean prior")
+    return prior if n_prior else _finite_number(training_mean, "history_mean training mean")
+
+
 def history_mean_rows(inputs, validation, *, horizon_sessions=1):
     """Build the comparator from an admitted fold cohort and its journaled targets."""
     _positive_int(horizon_sessions, "horizon_sessions")
@@ -154,7 +165,7 @@ def history_mean_rows(inputs, validation, *, horizon_sessions=1):
         if key not in features:
             raise ValueError("history_mean missing requested feature")
         feature = features[key]
-        predicted = feature["mean_prior_abs_move"] if feature["n_prior"] else fallback
+        predicted = history_mean_prediction(feature, fallback)
         result.append({"event_id": event_id, "horizon_sessions": horizon_sessions,
             "absolute_move_pct": label, "predicted_absolute_move_pct": predicted})
     return result
