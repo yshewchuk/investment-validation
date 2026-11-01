@@ -96,13 +96,26 @@ def test_v5_candidate_ceiling_still_refuses_before_expansion(monkeypatch):
     assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
 
 
-@pytest.mark.parametrize("workers", [1, 2, 8, True, 0, 9])
-def test_v5_does_not_implicitly_opt_into_v2_v3_parallel_execution(monkeypatch, workers):
+def test_v5_workers_do_not_change_request_identity():
+    baseline = versions.compile_request(v5_request())
+    request = v5_request()
+    request["workers"] = 3
+    workers = versions.compile_request(request)
+    assert workers["request"] == baseline["request"]
+    assert workers["request_id"] == baseline["request_id"]
+    assert ([spec["candidate_spec_id"] for spec in workers["candidate_specs"]]
+            == [spec["candidate_spec_id"] for spec in baseline["candidate_specs"]])
+    size = [spec for spec in workers["candidate_specs"] if spec["family"] == "size_v1_4"]
+    assert len(size) == 1
+    assert size[0]["feature_recipe"]["subset"] == "HMO"
+
+
+@pytest.mark.parametrize("workers", [0, 9, True])
+def test_v5_invalid_workers_refuse_before_expansion(monkeypatch, workers):
     request = v5_request()
     request["workers"] = workers
     monkeypatch.setattr(compiler, "_specifications", _fail_if_called)
     with pytest.raises(OpsError) as caught:
         versions.compile_request(request)
     assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
-    assert "workers require a v2 or v3" in caught.value.problem.message
     assert request["workers"] == workers

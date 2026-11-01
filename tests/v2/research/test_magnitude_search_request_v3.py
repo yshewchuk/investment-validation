@@ -96,7 +96,7 @@ def test_v3_narrower_in_bounds_grid_changes_every_identity():
     (("space", "ridge", "alpha"), [0.0, 1.0]),
     (("space", "ridge", "alpha"), [-1.0, 1.0]),
     (("space", "ridge", "alpha"), [1e-9, 1.0]),
-    (("space", "ridge", "alpha"), [1.0, 1001.0]),
+    (("space", "ridge", "alpha"), [1.0, 10001.0]),
     (("space", "ridge", "alpha"), [10.0, 1.0]),
     (("space", "ridge", "alpha"), [1.0, 1.0]),
     (("space", "ridge", "alpha"), [True, 1]),
@@ -113,6 +113,13 @@ def test_v3_invalid_grids_refuse_before_expansion(monkeypatch, path, value):
         versions.compile_request(document)
     assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
     assert caught.value.problem.retryable is False
+
+
+def test_v3_ridge_alpha_at_upper_bound_compiles_and_preserves_value():
+    document = v3_request()
+    document["space"]["ridge"]["alpha"] = [10000.0]
+    result = versions.compile_request(document)
+    assert result["request"]["space"]["ridge"]["alpha"] == [10000.0]
 
 
 @pytest.mark.parametrize("bad_horizons", [

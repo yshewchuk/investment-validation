@@ -78,6 +78,17 @@ def test_v4_full_grid_counts_identities_and_canonical_types():
     assert all(type(value) is float for value in space["l2_regularization"])
 
 
+def test_v4_workers_accepted_without_changing_request_identity():
+    baseline = versions.compile_request(v4_request())
+    document = v4_request()
+    document["workers"] = 3
+    workers = versions.compile_request(document)
+    assert workers["request"] == baseline["request"]
+    assert workers["request_id"] == baseline["request_id"]
+    assert ([spec["candidate_spec_id"] for spec in workers["candidate_specs"]]
+            == [spec["candidate_spec_id"] for spec in baseline["candidate_specs"]])
+
+
 @pytest.mark.parametrize("path,value", [
     (("space", "ridge", "alpha"), [0.1, 0.01]),
     (("space", "ridge", "alpha"), [0.1, 0.1]),
