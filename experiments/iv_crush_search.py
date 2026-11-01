@@ -34,5 +34,6 @@ def prepare(repository, spec, *, source, feature_snapshot, target_snapshot, scop
 def prepare_plan(conn, store, registration, request):
     """Supply IV target policy to the shared metadata-only search planner."""
     validate_registration(registration.document)
+    from experiments.iv_crush_comparator import recipe
     from experiments.regression_search_binding import prepare_plan as prepare_regression_plan
-    return prepare_regression_plan(conn, store, registration, request, target=target())
+    return prepare_regression_plan(conn, store, registration, request, target=target(), comparison=recipe())

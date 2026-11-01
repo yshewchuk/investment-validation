@@ -15,7 +15,7 @@ def _require(condition):
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "regression search differs from its native binding")
 
 
-def prepare_plan(conn, store, registration, request, *, target):
+def prepare_plan(conn, store, registration, request, *, target, comparison):
     """Bind metadata only; installed fold readers later qualify causal payloads."""
     from experiments.magnitude_search_plan import _implementation, _nested
     if type(request) is not dict or request.get("schema_version") != "regression_search_request.v1":
@@ -49,7 +49,7 @@ def prepare_plan(conn, store, registration, request, *, target):
             "source_binding_id": registration.variant_id, "target_id": target["target_id"],
             "candidate_spec_id": spec["candidate_spec_id"]}
         candidates.append({**identity, "candidate_id": content_hash(identity)})
-    identity = {"schema_version": "regression_search_plan.v1", "request": request,
+    identity = {"schema_version": "regression_search_plan.v1", "comparison": comparison, "request": request,
         "anchor": {"run_id": registration.run_id, "variant_id": registration.variant_id},
         "implementation": implementation, "target": target, "folds": folds,
         "candidates": sorted(candidates, key=lambda candidate: candidate["candidate_id"]),
