@@ -341,7 +341,7 @@ def test_carried_chooser_fold_loads_from_verified_original_release(tmp_path, mon
         {f"tier4_folds:{role}": {fold_name(cache): fold_bytes(cache)}},
         chooser_fold_policies={role: chooser_policy(role, cache)})
     prep.write_release(tmp_path, *release_inputs(role, cache, release_id="origin"), states)
-    origin_body, _obj = _assert_published_descriptor(
+    origin_body, origin_obj = _assert_published_descriptor(
         tmp_path, role, cache, release_id="origin")
     store = tmp_path / "deployment"
     deployment.mark_staging_succeeded(store, "origin")
@@ -375,7 +375,7 @@ def test_carried_chooser_fold_loads_from_verified_original_release(tmp_path, mon
         (OUTPUTS[role][1], cache["fold_start"])]
     assert carried_ref.release_id == "origin"
     assert carried_ref.carrying_release_id == "carried"
-    assert carried_ref.descriptor_hash == origin_ref.descriptor_hash
+    assert carried_ref.descriptor_hash == content_hash(origin_obj["serving_fold"])
 
     tampered_origin = copy.deepcopy(origin_body)
     tampered_carried = copy.deepcopy(carried_body)
@@ -385,8 +385,9 @@ def test_carried_chooser_fold_loads_from_verified_original_release(tmp_path, mon
         row["objects"][0]["serving_fold"]["parent_release_hash"] = "sha256:" + "0" * 64
         write_catalog(release_id, body)
 
-    with pytest.raises(ModelNotReady):
+    with pytest.raises(ModelNotReady) as refusal:
         resolve_release_binding(tmp_path, include_chooser_fold_references=True)
+    assert refusal.value.code == rb.MODEL_NOT_READY
 
 
 @pytest.mark.parametrize("role", OUTPUTS)

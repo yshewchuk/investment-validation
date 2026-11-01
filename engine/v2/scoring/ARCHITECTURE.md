@@ -715,11 +715,9 @@ training_cutoff is fold_start, the exclusive training boundary.
 `chooser_fold_references` map by default and does not load chooser estimators
 for ordinary nightly scoring. Callers that need these references opt in with
 `include_chooser_fold_references=True`; resolution returns a complete map or a
-typed refusal. A carried fold whose authoring release lacks canonical cutoff
-data refuses instead of producing a partial map. Strict production capture
-opts into this verified reference map, passes it to the scorer, and records
-validated references, including authoring/carrying release ids, in strict trace metadata. Ordinary nightly scoring does
-not load chooser estimators, and no path infers provenance from legacy rows.
+typed refusal. Strict capture opts in, passes verified references to the
+scorer, and records both release ids in trace metadata. Ordinary nightly
+scoring loads no chooser estimators and infers no provenance from legacy rows.
 
 | Condition | Outcome |
 |---|---|
@@ -727,9 +725,11 @@ not load chooser estimators, and no path infers provenance from legacy rows.
 | More than 34 staged chooser-fold objects when references are requested | ModelNotReady before any chooser fold is loaded |
 | No staged chooser-fold objects are available when references are requested | Return an empty map before checking the cutoff |
 | Staged chooser-fold objects are available but the canonical retrain cutoff is missing or invalid | ModelNotReady; no partial reference map |
+| A carried fold's authoring release lacks canonical cutoff data | ModelNotReady; no partial reference map |
 | Carried descriptor's original release, catalog membership or parent/hash fails | ModelNotReady; no partial reference map |
 | Re-resolving an unchanged valid chain | Same reference, with separate authoring and carrying ids (equal for an uncarried fold) |
 | Malformed, noncanonical or mismatched descriptor, estimator digest, parent binding, output or fold month | ModelNotReady; no partial reference map |
+| Strict capture reference has a missing or malformed authoring/carrying release id | StrictTraceCaptureError; no trace metadata is emitted |
 | Reference resolution requested for a verified release | Re-verify each binding resolution; no cross-call reference cache |
 | Model member exceeds its byte cap or is not a regular file | ModelNotReady before chooser bytes are decoded |
 

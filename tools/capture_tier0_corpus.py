@@ -3716,6 +3716,12 @@ def validated_chooser_fold_references(source, request):
         decision = date.fromisoformat(request.requested_decision_at[:10])
     except (AttributeError, TypeError, ValueError) as exc:
         raise StrictTraceCaptureError("chooser ref has invalid dates") from exc
+
+    def safe_release_id(value):
+        return (
+            isinstance(value, str) and bool(value) and value not in (".", "..")
+            and "/" not in value and "\\" not in value
+        )
     for output, declaration in producers.items():
         ref = refs[output]
         binding_key = declaration.get("binding")
@@ -3761,7 +3767,9 @@ def validated_chooser_fold_references(source, request):
                 or identity.get("model_id") != producer.get("model_id")
                 or identity.get("role") != producer.get("role")
                 or tuple(identity.get("feature_order") or ()) != tuple(producer.get("feature_order") or ())
-                or not ref.get("release_id") or not isinstance(descriptor, str)
+                or not all(safe_release_id(ref.get(field)) for field in (
+                    "release_id", "carrying_release_id"))
+                or not isinstance(descriptor, str)
                 or len(descriptor) != 71 or not descriptor.startswith("sha256:")):
             raise StrictTraceCaptureError("chooser ref mismatches served producer")
     return dict(refs)

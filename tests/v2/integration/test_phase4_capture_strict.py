@@ -1398,6 +1398,27 @@ def test_chooser_fold_reference_flows_through_real_scorer_checkpoint(tmp_path, m
     boundary_refs = validated_chooser_fold_references(source, boundary_request)
     assert boundary_refs["pred_im_t1_d14"]["fold_start"] == "2026-09-01"
     assert boundary_refs["pred_runup_abs_move_d14"]["fold_start"] == "2026-08-01"
+    for output in ("pred_im_t1_d14", "pred_runup_abs_move_d14"):
+        for field, invalid_id in (
+            ("release_id", None),
+            ("release_id", ""),
+            ("release_id", "/x"),
+            ("release_id", "."),
+            ("release_id", 123),
+            ("release_id", r"a\\b"),
+            ("carrying_release_id", None),
+            ("carrying_release_id", ""),
+            ("carrying_release_id", "../release"),
+            ("carrying_release_id", r"a\\b"),
+        ):
+            malformed_source = copy.deepcopy(source)
+            malformed_source["frozen"]["chooser_references"][output][
+                field
+            ] = invalid_id
+            with pytest.raises(
+                StrictTraceCaptureError, match="mismatches served producer"
+            ):
+                validated_chooser_fold_references(malformed_source, _request())
     with pytest.raises(StrictTraceCaptureError, match="mismatches served producer"):
         validated_chooser_fold_references(
             source, SimpleNamespace(requested_decision_at="2026-08-31"))
