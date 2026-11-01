@@ -428,10 +428,20 @@ def _staged_chooser_pools(chooser, request, release_root: Path, manifest,
         if len(trace_bindings) != 1 or len(fold_bindings) != 1:
             return None
         alias, verified_binding = trace_bindings[0], fold_bindings[0]
-        semantic_fields = ("role", "model_id", "strategy_id", "feature_order",
-                           "decision_clock_id", "output_names")
+        semantic_fields = ("role", "model_id", "feature_order",
+                           "decision_clock_id")
         if any(getattr(alias, field, None) != getattr(verified_binding, field, None)
                for field in semantic_fields):
+            return None
+        if (getattr(alias, "strategy_id", None) != request.strategy_version
+                or getattr(verified_binding, "strategy_id", None) != "*"):
+            return None
+        expected_fold_output = (
+            ("driver_prediction",) if output == "pred_im_t1_d14"
+            else ("pred_runup_abs_move_d14",))
+        alias_output = getattr(alias, "output_names", None)
+        binding_output = getattr(verified_binding, "output_names", None)
+        if alias_output != (output,) or binding_output != expected_fold_output:
             return None
         alias_members = getattr(alias, "members", ())
         verified_members = getattr(verified_binding, "members", ())

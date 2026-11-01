@@ -864,7 +864,7 @@ def _chooser_bundle_or_refusal(
             "artifact_refs": list(state.artifact_refs),
             "fold_provenance": state.fold_provenance,
             "producers": {
-                "pred_im_t1_d14": {"binding_id": implied.binding_id, "output": "pred_im_t1_d14"},
+                "pred_im_t1_d14": {"binding_id": implied.binding_id, "output": "driver_prediction"},
                 "pred_runup_abs_move_d14": {"binding_id": runup.binding_id, "output": "pred_runup_abs_move_d14"},
             },
             "analog_pool": {
@@ -923,13 +923,10 @@ def _project_member_features(
     """
     if not _valid_explicit_feature_names(feature_names):
         return feature_names
-    if key.strategy != "DYN-SV":
+    spec = _STRATEGY_REGISTRY.get(key.strategy)
+    if spec is None or not spec.chooser:
         return feature_names
     references = binding.chooser_fold_references
-    if not references:
-        return NativeScoreBatchRowRefusal(
-            key, "RELEASE_MISSING_FEATURE_ORDER",
-            "chooser producer references are missing")
     projected = set(_CHOOSER_PRIMITIVES) - _SCORER_COMPUTED_FEATURES
     for reference in references.values():
         if not reference.release_binding.feature_order:

@@ -549,6 +549,7 @@ def _chooser_resolver_fixture(tmp_path, monkeypatch, *, cutoff="2026-08-31",
                                    feature_order=("x",)),
             decision_clock_id="entry-close", output_name="driver_prediction",
             producer_output="pred_im_t1_d14", fold_start="2026-09-01",
+            training_cutoff="2026-08-31",
             descriptor_hash=descriptor_hash, parent_release_id=_RELEASE_ID,
             estimator=SimpleNamespace(content_hash=hash_a)),
         "second": SimpleNamespace(
@@ -556,6 +557,7 @@ def _chooser_resolver_fixture(tmp_path, monkeypatch, *, cutoff="2026-08-31",
                                    feature_order=("y",)),
             decision_clock_id="entry-close", output_name="pred_runup_abs_move_d14",
             producer_output="pred_runup_abs_move_d14", fold_start="2026-10-01",
+            training_cutoff="2026-09-15",
             descriptor_hash=descriptor_hash, parent_release_id=_RELEASE_ID,
             estimator=SimpleNamespace(content_hash=hash_b)),
     }
@@ -685,6 +687,7 @@ def test_carried_chooser_reference_uses_verified_authoring_release(tmp_path, mon
             role="implied_t1", model_id="producer-a", feature_order=("x",)),
         decision_clock_id="entry-close", output_name="driver_prediction",
         producer_output="pred_im_t1_d14", fold_start="2026-09-01",
+        training_cutoff="2026-08-31",
         descriptor_hash="sha256:" + "c" * 64,
         estimator=SimpleNamespace(content_hash="sha256:" + "a" * 64))
     identity = rb.ModelIdentity(
@@ -747,8 +750,8 @@ def test_carried_chooser_reference_uses_verified_authoring_release(tmp_path, mon
     carried_catalogs = {}
     args = (descriptor_object, current_catalog, current_manifest, object(), tmp_path,
             tmp_path / "deployment", authoring_releases, carried_catalogs)
-    key, reference = rb._verified_chooser_fold_reference(*args)
-    _key_again, reference_again = rb._verified_chooser_fold_reference(*args)
+    key, reference, _authoring_manifest, _authoring_catalog = rb._verified_chooser_fold_reference(*args)
+    _key_again, reference_again, _manifest_again, _catalog_again = rb._verified_chooser_fold_reference(*args)
 
     assert key == ("pred_im_t1_d14", "2026-09-01")
     assert reference.producer_output == "pred_im_t1_d14"
@@ -756,7 +759,7 @@ def test_carried_chooser_reference_uses_verified_authoring_release(tmp_path, mon
     assert reference.estimator_sha256 == descriptor.estimator.content_hash
     assert reference.release_id == "origin"
     assert reference.carrying_release_id == "carried"
-    assert reference.training_cutoff == "2026-09-01"
+    assert reference.training_cutoff == "2026-08-31"
     assert reference.release_binding is identity
     assert reference.fold_start == descriptor.fold_start
     assert reference_again == reference
@@ -806,7 +809,7 @@ def test_chooser_fold_references_are_not_loaded_by_default(tmp_path, monkeypatch
 
 
 @pytest.mark.parametrize("cutoff", ["2026-09-01", "2026-09-15"])
-def test_chooser_fold_reference_uses_fold_month_cutoff(
+def test_chooser_fold_reference_preserves_descriptor_training_cutoff(
         tmp_path, monkeypatch, cutoff):
     rb, descriptors, identities, calls, _body = _chooser_resolver_fixture(
         tmp_path, monkeypatch, cutoff=cutoff)
@@ -817,7 +820,7 @@ def test_chooser_fold_reference_uses_fold_month_cutoff(
     assert reference.producer_output == "pred_im_t1_d14"
     assert reference.descriptor_hash == descriptors["first"].descriptor_hash
     assert reference.estimator_sha256 == descriptors["first"].estimator.content_hash
-    assert reference.training_cutoff == "2026-09-01"
+    assert reference.training_cutoff == "2026-08-31"
     assert reference.release_id == _RELEASE_ID
     assert reference.carrying_release_id == _RELEASE_ID
     assert reference.fold_start == "2026-09-01"
@@ -832,7 +835,7 @@ def test_chooser_fold_reference_uses_fold_month_cutoff(
     assert calls[0][3]["sources"]["retrain_cutoff"] == cutoff
 
 
-def test_chooser_fold_references_use_each_fold_start_as_training_cutoff(
+def test_chooser_fold_references_preserve_each_descriptor_training_cutoff(
         tmp_path, monkeypatch):
     from engine.v2.scoring import release_bindings as rb
 
@@ -856,9 +859,9 @@ def test_chooser_fold_references_use_each_fold_start_as_training_cutoff(
     binding = resolve_release_binding(tmp_path, include_chooser_fold_references=True)
 
     assert binding.chooser_fold_references[
-        ("pred_im_t1_d14", "2026-09-01")].training_cutoff == "2026-09-01"
+        ("pred_im_t1_d14", "2026-09-01")].training_cutoff == "2026-08-31"
     assert binding.chooser_fold_references[
-        ("pred_runup_abs_move_d14", "2026-10-01")].training_cutoff == "2026-10-01"
+        ("pred_runup_abs_move_d14", "2026-10-01")].training_cutoff == "2026-09-15"
 
 
 def test_chooser_fold_reference_loads_34_aggregate_objects(tmp_path, monkeypatch):
@@ -872,15 +875,21 @@ def test_chooser_fold_reference_loads_34_aggregate_objects(tmp_path, monkeypatch
 
     def verified_reference(*_args):
         index = next(sequence)
-        return (f"producer-{index}", f"fold-{index}"), object()
+        return (
+            (f"producer-{index}", f"fold-{index}"),
+            SimpleNamespace(descriptor_hash=f"descriptor-{index}"),
+            object(),
+            {},
+        )
 
     monkeypatch.setattr(rb, "_verified_chooser_fold_reference", verified_reference)
     manifest = SimpleNamespace(release=SimpleNamespace(release_id="release"))
-    references = rb._load_chooser_fold_references(
+    references, contexts = rb._load_chooser_fold_references(
         [{} for _ in range(34)], "tier4_folds:chooser", date(2026, 9, 1), {}, manifest,
         object(), {}, tmp_path, tmp_path)
 
     assert len(references) == 34
+    assert len(contexts) == 34
 
 
 def test_chooser_fold_reference_refuses_aggregate_load_limit(tmp_path, monkeypatch):
@@ -1086,3 +1095,22 @@ def test_promote_plan_and_resolve_production_release_binding_agree_on_the_same_c
     assert plan["parameters"]["release_root"] == str(deployment.production_deployment_root())
     binding = resolve_production_release_binding()
     assert binding.release_id == _RELEASE_ID
+
+
+def test_cutoffless_legacy_chooser_fold_is_not_a_verified_reference(tmp_path, monkeypatch):
+    rb, _descriptors, _identities, calls, body = _chooser_resolver_fixture(
+        tmp_path, monkeypatch)
+    row = next(row for row in body["members"]
+               if row.get("member_id") == "tier4_folds:implied_t1")
+    row["objects"][0]["serving_fold"]["policy"] = {}
+    row["objects"][0]["serving_fold"]["fold_start"] = "2026-09-01"
+    row["objects"][0]["serving_fold"]["producer_output"] = "pred_im_t1_d14"
+    row["objects"][0]["serving_fold"].pop("training_cutoff", None)
+    body["manifest_hash"] = content_hash(
+        {key: value for key, value in body.items() if key != "manifest_hash"})
+    monkeypatch.setattr(rb, "_read_state_catalog", lambda *_args: body)
+
+    binding = resolve_release_binding(tmp_path, include_chooser_fold_references=True)
+
+    assert binding.chooser_fold_references == {}
+    assert calls == []

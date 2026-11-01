@@ -1055,6 +1055,20 @@ def _rss_mib() -> float:
     return kib / 1024.0
 
 
+def _is_legacy_cutoffless_chooser_fold(obj: Any) -> bool:
+    if not isinstance(obj, Mapping):
+        return False
+    descriptor = obj.get("serving_fold")
+    return (
+        isinstance(descriptor, Mapping)
+        and isinstance(descriptor.get("policy"), Mapping)
+        and isinstance(descriptor.get("fold_start"), str)
+        and descriptor.get("producer_output") in {
+            "pred_im_t1_d14", "pred_runup_abs_move_d14"}
+        and descriptor.get("training_cutoff") is None
+    )
+
+
 def _load_chooser_fold_references(
     objects: list, member_id: str, cutoff: date, catalog: Mapping,
     manifest: "deployment.StagedManifest", inference: FrozenInference,
@@ -1063,6 +1077,7 @@ def _load_chooser_fold_references(
            dict[str, tuple["deployment.StagedManifest", Mapping]]]:
     if len(objects) > _CHOOSER_FOLD_MAX_OBJECTS:
         raise ModelNotReady(member_id, "chooser fold catalog exceeds load limit")
+    objects = [obj for obj in objects if not _is_legacy_cutoffless_chooser_fold(obj)]
     total, started, references = len(objects), time.monotonic(), {}
     authoring_contexts = {}
     authoring_releases = {

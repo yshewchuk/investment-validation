@@ -165,18 +165,21 @@ def _install_chooser_replay_fixture(monkeypatch, tmp_path):
         for descriptor in descriptors.values()
     }
 
-    def make_binding(output):
+    def make_binding(output, strategy_id="*"):
         return SimpleNamespace(
             binding_id=f"binding:{output}", role="size", model_id=f"model:{output}",
-            strategy_id="*", feature_order=("feature_a",), decision_clock_id="clock",
+            strategy_id=strategy_id, feature_order=("feature_a",), decision_clock_id="clock",
             output_names=(output,),
             members=(SimpleNamespace(content_hash=f"member:{output}"),))
 
     alias_bindings = []
     producers = {}
     for output in outputs:
-        alias_bindings.append(make_binding(output))
-        refs[output].release = SimpleNamespace(bindings=(make_binding(output),))
+        alias_bindings.append(make_binding(output, strategy_id="TWIN-P"))
+        verified_binding = make_binding(output, strategy_id="*")
+        verified_binding.output_names = (
+            "driver_prediction" if output == "pred_im_t1_d14" else output,)
+        refs[output].release = SimpleNamespace(bindings=(verified_binding,))
         producers[output] = {"binding_id": f"binding:{output}", "output": output}
 
     size_ref = SimpleNamespace(
@@ -233,7 +236,7 @@ def _install_chooser_replay_fixture(monkeypatch, tmp_path):
         release=SimpleNamespace(bindings=tuple(alias_bindings)))
     manifest = {"manifest_hash": "sha256:catalog", "release_id": "carrying",
                 "members": rows}
-    request = SimpleNamespace(requested_decision_at="2026-10-27")
+    request = SimpleNamespace(requested_decision_at="2026-10-27", strategy_version="TWIN-P")
     return SimpleNamespace(
         chooser=chooser, manifest=manifest, request=request,
         legacy_event_date="2026-09-15", outputs=outputs, descriptors=descriptors,

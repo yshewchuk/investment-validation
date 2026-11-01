@@ -10,8 +10,10 @@ import engine.v2.scoring.release_bindings as release_bindings
 from engine.v2.models.admissible_table import N_ADMISSIBLE_TABLE_ID
 from engine.v2.ops.native_score_batch import (
     NativeScoreBatchRowRefusal,
+    _CHOOSER_PRIMITIVES,
     _STRATEGY_REGISTRY,
     _chooser_bundle_or_refusal,
+    _project_member_features,
 )
 from engine.v2.scoring.release_bindings import ModelNotReady, select_chooser_state
 
@@ -216,7 +218,7 @@ def test_chooser_selector_selects_folds_and_caches(monkeypatch):
             descriptor_hash=f"descriptor:{role}:2026-08-31",
             release_id="parent",
             carrying_release_id="carried",
-            training_cutoff="2026-09-01",
+            training_cutoff="2026-08-31",
         )
         for role in roles
     }
@@ -380,7 +382,7 @@ def test_chooser_bundle_wires_producer_bindings_and_pools(monkeypatch):
     assert result.chooser_recipe["fold_provenance"] == state.fold_provenance
     assert result.chooser_recipe["producers"]["pred_im_t1_d14"]["binding_id"] == "fold:implied_t1"
     assert result.chooser_recipe["producers"]["pred_runup_abs_move_d14"]["binding_id"] == "fold:runup_move"
-    assert result.chooser_recipe["producers"]["pred_im_t1_d14"]["output"] == "pred_im_t1_d14"
+    assert result.chooser_recipe["producers"]["pred_im_t1_d14"]["output"] == "driver_prediction"
     assert result.chooser_recipe["producers"]["pred_runup_abs_move_d14"]["output"] == "pred_runup_abs_move_d14"
     assert result.chooser_recipe["analog_pool"] == {
         "pool_id": "analog", "cutoff": "2026-10-27", "content_hash": "h-a"}
@@ -430,3 +432,40 @@ def test_score_artifact_refs_includes_chooser_artifacts():
         "table-hash", "size-hash", "implied-descriptor-hash",
         "implied-policy-hash", "runup-descriptor-hash", "runup-policy-hash"}
     assert len(refs) == 10
+
+
+@pytest.mark.parametrize("strategy", _MENU)
+def test_member_projection_includes_chooser_primitives_and_producers(strategy):
+    key = SimpleNamespace(strategy=strategy)
+    event = SimpleNamespace(
+        panel_row={name: 1.0 for name in _CHOOSER_PRIMITIVES}
+        | {"producer_im": 2.0, "producer_iv": 3.0},
+        tier4_row={},
+    )
+    binding = SimpleNamespace(chooser_fold_references={
+        "im": SimpleNamespace(release_binding=SimpleNamespace(
+            feature_order=("producer_im",))),
+        "iv": SimpleNamespace(release_binding=SimpleNamespace(
+            feature_order=("producer_iv",))),
+    })
+
+    projected = _project_member_features(key, event, binding, ())
+
+    assert isinstance(projected, tuple)
+    assert set(_CHOOSER_PRIMITIVES).issubset(projected)
+    assert "producer_im" in projected
+    assert "producer_iv" in projected
+
+
+def test_member_projection_twin_p_with_empty_references_keeps_primitives():
+    key = SimpleNamespace(strategy="TWIN-P")
+    event = SimpleNamespace(
+        panel_row={name: 1.0 for name in _CHOOSER_PRIMITIVES},
+        tier4_row={},
+    )
+    binding = SimpleNamespace(chooser_fold_references={})
+
+    projected = _project_member_features(key, event, binding, ())
+
+    assert isinstance(projected, tuple)
+    assert set(_CHOOSER_PRIMITIVES).issubset(projected)
