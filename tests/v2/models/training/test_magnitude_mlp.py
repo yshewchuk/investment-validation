@@ -151,10 +151,8 @@ def test_invalid_matrices_fail_without_fitting(monkeypatch, slot, replacement):
         fit(values=values)
 
 
-@pytest.mark.parametrize("profile,layers,alpha", PROFILES)
-def test_real_fit_matches_independent_oracle_and_is_repeatable(profile, layers, alpha):
-    train, labels, prediction = arrays()
-    before = copy.deepcopy((train, labels, prediction))
+def independent_oracle(train, labels, prediction, *, layers=(32,), alpha=0.01):
+    """Construct sklearn independently of the production recipe builder/fitter."""
     union = FeatureUnion([("imputer", SimpleImputer(strategy="median", keep_empty_features=True)),
         ("missing_indicator", MissingIndicator(features="all", sparse=False))], n_jobs=1)
     oracle = TransformedTargetRegressor(transformer=StandardScaler(),
@@ -164,6 +162,14 @@ def test_real_fit_matches_independent_oracle_and_is_repeatable(profile, layers, 
     with threadpool_limits(limits=1):
         oracle.fit(train, labels)
         expected = np.maximum(oracle.predict(prediction), 0.).tolist()
+    return oracle, expected
+
+
+@pytest.mark.parametrize("profile,layers,alpha", PROFILES)
+def test_real_fit_matches_independent_oracle_and_is_repeatable(profile, layers, alpha):
+    train, labels, prediction = arrays()
+    before = copy.deepcopy((train, labels, prediction))
+    oracle, expected = independent_oracle(train, labels, prediction, layers=layers, alpha=alpha)
     result = fit(recipe(profile=profile))
     assert result == fit(recipe(profile=profile))
     assert result["predictions"] == expected
@@ -186,12 +192,14 @@ def test_prediction_rows_cannot_influence_training_or_preprocessing(monkeypatch)
         value = original(self, *args, **kwargs)
         models.append(self)
         return value
-    monkeypatch.setattr(TransformedTargetRegressor, "fit", capture)
     train, labels, prediction = arrays()
-    result = fit(values=(train, labels, prediction))
     poisoned = np.vstack([prediction, [1e10, np.nan, 1e10]])
+    _, expected = independent_oracle(train, labels, poisoned)
+    monkeypatch.setattr(TransformedTargetRegressor, "fit", capture)
+    result = fit(values=(train, labels, prediction))
     changed = fit(values=(train, labels, poisoned))
-    assert changed["predictions"][:2] == result["predictions"]
+    assert result["predictions"] == expected[:2]
+    assert changed["predictions"] == expected
     assert changed["loss"] == result["loss"] and changed["n_iter"] == result["n_iter"]
     for model in models:
         union, selector, scaler, network = model.regressor_
@@ -254,6 +262,8 @@ def test_affine_target_scaling_restores_original_units():
     train, labels, prediction = arrays()
     result = fit(values=(train, labels, prediction))
     scaled = fit(values=(train, labels * 100 + 1000, prediction))
+    assert result["predictions"] == independent_oracle(train, labels, prediction)[1]
+    assert scaled["predictions"] == independent_oracle(train, labels * 100 + 1000, prediction)[1]
     np.testing.assert_allclose(scaled["predictions"],
         np.asarray(result["predictions"]) * 100 + 1000, rtol=1e-12)
     assert scaled["n_iter"] == result["n_iter"]
@@ -271,7 +281,10 @@ def test_all_constant_union_refuses_before_neural_fit(monkeypatch, train):
 
 def test_zero_targets_are_valid():
     train, _, prediction = arrays()
-    result = fit(values=(train, np.zeros(len(train)), prediction))
+    labels = np.zeros(len(train))
+    result = fit(values=(train, labels, prediction))
+    assert len(result["predictions"]) == len(prediction)
+    assert result["predictions"] == independent_oracle(train, labels, prediction)[1]
     assert np.isfinite(result["predictions"]).all() and result["converged"] is True
 
 
@@ -280,7 +293,8 @@ def test_training_all_empty_columns_ignore_new_prediction_values_and_missingness
     prediction = np.array([[1., 7., value] for value in (np.nan, 0., 3., 100., 1e100)])
     before = prediction.copy()
     result = fit(values=(train, labels, prediction))
-    assert len(set(result["predictions"])) == 1
+    assert result["predictions"] == independent_oracle(train, labels, prediction)[1]
+    assert len(result["predictions"]) == len(prediction) and len(set(result["predictions"])) == 1
     np.testing.assert_array_equal(prediction, before)
 
 
@@ -288,7 +302,8 @@ def test_training_constant_values_and_indicators_ignore_prediction_only_changes(
     train, labels, _ = arrays()
     prediction = np.array([[1., value, np.nan] for value in (np.nan, 7., 0., 1e100)])
     result = fit(values=(train, labels, prediction))
-    assert len(set(result["predictions"])) == 1
+    assert result["predictions"] == independent_oracle(train, labels, prediction)[1]
+    assert len(result["predictions"]) == len(prediction) and len(set(result["predictions"])) == 1
 
 
 def test_real_iteration_exhaustion_is_not_success(monkeypatch):
@@ -310,7 +325,9 @@ def test_variable_width_features_keep_the_informative_last_column(width):
     train[:, -1] = signal
     prediction = np.full((2, width), 7.)
     prediction[:, -1] = [-1., 1.]
-    result = fit(recipe(columns=columns), (train, 10 + 2 * signal, prediction), columns=columns)
+    policy = recipe(columns=columns)
+    assert policy["preprocessing"]["union_features"] == 2 * width
+    result = fit(policy, (train, 10 + 2 * signal, prediction), columns=columns)
     assert result["input_features"] == 1
     assert result["predictions"][1] > result["predictions"][0] + 3
 
@@ -333,3 +350,18 @@ def test_interrupted_sklearn_training_preserves_original_interrupt(monkeypatch, 
             fit()
     assert caught.value is interrupt
     assert calls == [0, 1]  # One complete epoch, then cancellation; no hidden retry.
+
+
+
+def test_learned_width_counts_multiple_values_and_varying_missing_indicators():
+    columns = ["left", "right"]
+    signal = np.linspace(-2, 2, 80)
+    train = np.column_stack([signal, -signal])
+    train[::5, 0], train[::7, 1] = np.nan, np.nan
+    labels, prediction = np.full(80, 3.), np.array([[-1., 1.], [1., -1.]])
+    policy = recipe(columns=columns)
+    assert policy["preprocessing"]["union_features"] == 4
+    oracle, expected = independent_oracle(train, labels, prediction)
+    result = fit(policy, (train, labels, prediction), columns=columns)
+    assert result["input_features"] == oracle.regressor_[-1].n_features_in_ == 4
+    assert result["predictions"] == expected
