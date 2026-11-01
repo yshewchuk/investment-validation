@@ -79,10 +79,6 @@ def _event_rows(rows, threshold):
                                "blended event row event_id")
         horizon = _positive_int(_field(row, "horizon_sessions", "blended event row"),
                                 "blended event row horizon_sessions")
-        if horizon != 1:
-            continue
-        if event_id in selected:
-            raise ValueError("lead-1 selection requires one row per event")
         actual = _finite_number(_field(row, "absolute_move_pct", "blended event row"),
                                 "blended event row absolute_move_pct",
                                 "selection metrics require finite numeric rows")
@@ -90,6 +86,10 @@ def _event_rows(rows, threshold):
             _field(row, "predicted_absolute_move_pct", "blended event row"),
             "blended event row predicted_absolute_move_pct",
             "selection metrics require finite numeric rows")
+        if horizon != 1:
+            continue
+        if event_id in selected:
+            raise ValueError("lead-1 selection requires one row per event")
         selected[event_id] = (float(actual), float(predicted))
     if not selected:
         raise ValueError("blended selection requires lead-1 event rows")

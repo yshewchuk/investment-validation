@@ -81,6 +81,24 @@ def test_blended_event_score_refuses_malformed_inputs(candidate_rows, history_ro
             large_move_threshold_pct=threshold)
 
 
+@pytest.mark.parametrize("bad_fields, message", [
+    ({"absolute_move_pct": math.nan, "predicted_absolute_move_pct": 1.0},
+     "selection metrics require finite numeric rows"),
+    ({"absolute_move_pct": 1.0, "predicted_absolute_move_pct": math.nan},
+     "selection metrics require finite numeric rows"),
+    ({"absolute_move_pct": 1.0}, "missing predicted_absolute_move_pct"),
+    ({"predicted_absolute_move_pct": 1.0}, "missing absolute_move_pct"),
+])
+def test_blended_event_score_validates_numeric_fields_on_nonlead_rows(bad_fields, message):
+    candidate = _rows([(12.0, 9.0)]) + [{
+        "event_id": "e3", "horizon_sessions": 3, **bad_fields,
+    }]
+    history = _rows([(12.0, 10.0)])
+    with pytest.raises(ValueError, match=message):
+        blended_event_score(candidate, history, metric_weights=WEIGHTS,
+            large_move_threshold_pct=10.0)
+
+
 def test_history_mean_uses_inner_training_fallback_and_causal_feature():
     rows = history_mean_rows(
         {"training": [{"absolute_move_pct": 2.0}, {"absolute_move_pct": 4.0}],
