@@ -30,6 +30,12 @@ def v4_request():
             "l2_regularization": list(HGB_L2_REGULARIZATION)}}
     document["max_candidates"] = 99
     document["max_fits"] = 1791
+    document["selection"] = {
+        "metric_weights": {"rmse": 0.6, "mae": 0.3, "large_move_underprediction": 0.1},
+        "lead_weights": {"1": 1.0, "3": 0.0, "5": 0.0},
+        "large_move_threshold_pct": 10.0,
+        "tie_band_floor": 0.005,
+    }
     return document
 
 

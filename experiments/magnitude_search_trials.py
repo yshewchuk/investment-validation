@@ -2,7 +2,9 @@
 import copy
 import json
 import math
+import resource
 import sqlite3
+import sys
 import time
 from numbers import Integral, Real
 from pathlib import Path
@@ -33,6 +35,11 @@ from experiments.magnitude_search_execution import (
     run_fitted_trial,
     validate_execution_limits,
 )
+from experiments.magnitude_search_selection import (
+    blended_event_score,
+    history_mean_rows,
+    selection_tie_band,
+)
 from experiments.magnitude_search_inputs import load_inputs, publish_inputs
 from experiments.magnitude_search_plan import (
     PLAN_V2,
@@ -61,6 +68,17 @@ def _problem(problem):
 
 def _candidate_failure(problem):
     return problem["code"] == "EXPERIMENT_VARIANT_FAILED"
+
+
+_ZERO_COMPARATOR_REASON = "cannot normalize a nonzero candidate error by zero history_mean error"
+
+
+def _blended_failure(error):
+    """Map expected blended-selection failures to fixed, recorder-owned diagnostics."""
+    if isinstance(error, ValueError) and str(error) == _ZERO_COMPARATOR_REASON:
+        return ("blended inner selection metrics are undefined: nonzero candidate error "
+                "has a zero-error history_mean comparator")
+    return "blended inner selection metrics are undefined: malformed or misaligned metric rows"
 
 
 def _finite_nonnegative(value):
@@ -659,6 +677,18 @@ class SearchTrials:
 
     def freeze(self):
         """Freeze every outer choice from all terminal attempts; no evaluation authority."""
+        started = time.monotonic()
+        print(f"[selection] freeze start rss_kib={resource.getrusage(resource.RUSAGE_SELF).ru_maxrss}",
+              file=sys.stderr)
+        try:
+            return self._freeze()
+        finally:
+            elapsed = time.monotonic() - started
+            print(f"[selection] freeze done elapsed={elapsed:.3f}s "
+                  f"rss_kib={resource.getrusage(resource.RUSAGE_SELF).ru_maxrss}", file=sys.stderr)
+
+    def _freeze(self):
+        """Freeze every outer choice from all terminal attempts; no evaluation authority."""
         plan = self._admit()
         uses = {}
         for outer in plan["folds"]:
@@ -668,10 +698,24 @@ class SearchTrials:
                     uses[key] = uses.get(key, 0) + 1
         cache, cache_bytes = {}, 0
         selections, attempts = [], []
+        total_trials = sum(uses.values())
+        processed_trials = 0
+        last_progress = time.monotonic()
+        progress_started = last_progress
+        print(f"[selection] planned trials={total_trials}", file=sys.stderr)
+        policy = plan.get("request", {}).get("selection")
+        history_cohort_uses = {}
+        for planned_outer in plan["folds"]:
+            for planned_inner in planned_outer["inner"]:
+                owner_year, _ = canonical_inner(plan, planned_outer["outer"]["year"], planned_inner["year"])
+                cohort_id = cohort_key(plan, owner_year, planned_inner["year"])
+                history_cohort_uses[cohort_id] = history_cohort_uses.get(cohort_id, 0) + 1
+        history_rows_cache = {}
         for outer in plan["folds"]:
+            history_rows_by_year = {}
             scores = []
             for candidate in plan["candidates"]:
-                rows, failed = [], False
+                rows, yearly_rows, failed = [], {}, False
                 for inner in outer["inner"]:
                     key = trial_key(plan, outer["outer"]["year"], inner["year"], candidate["candidate_id"])
                     cached = cache.get(key)
@@ -683,9 +727,28 @@ class SearchTrials:
                     else:
                         record, terminal_id, record_bytes = cached
                     attempts.append({"trial_id": key, "terminal_id": terminal_id})
+                    processed_trials += 1
+                    if time.monotonic() - last_progress >= 60:
+                        elapsed = time.monotonic() - progress_started
+                        rate = processed_trials / elapsed if elapsed > 0 else 0.0
+                        eta = (total_trials - processed_trials) / rate if rate > 0 else 0.0
+                        print(f"[selection] {processed_trials}/{total_trials} trials, "
+                              f"{rate:.3f} trials/s, ETA {eta:.0f}s", file=sys.stderr)
+                        last_progress = time.monotonic()
                     failed |= record["status"] != "succeeded"
                     if record["status"] == "succeeded":
                         rows.extend(record["predictions"])
+                        yearly_rows[inner["year"]] = record["predictions"]
+                        if policy is not None and inner["year"] not in history_rows_by_year:
+                            admitted = self._read("inputs:" + key)
+                            cohort_id = admitted["cohort"]
+                            if cohort_id not in history_rows_cache:
+                                cohort = self._cohort(admitted)
+                                validation = self._read("validation:" + cohort_id)
+                                self._validation(inner, admitted, cohort, validation)
+                                history_rows_cache[cohort_id] = history_mean_rows(cohort, validation)
+                                del cohort, validation
+                            history_rows_by_year[inner["year"]] = history_rows_cache[cohort_id]
                     uses[key] -= 1
                     if uses[key] == 0:
                         removed = cache.pop(key, None)
@@ -698,14 +761,76 @@ class SearchTrials:
                             cache_bytes -= removed_bytes
                         cache[key] = (record, terminal_id, record_bytes)
                         cache_bytes += record_bytes
-                scores.append({"candidate_id": candidate["candidate_id"],
-                    "metrics": None if failed else magnitude_metrics(rows)})
+                if failed:
+                    scores.append({"candidate_id": candidate["candidate_id"], "metrics": None})
+                elif policy is None:
+                    scores.append({"candidate_id": candidate["candidate_id"], "metrics": magnitude_metrics(rows)})
+                else:
+                    try:
+                        pooled_history = [
+                            row for year in sorted(outer["inner"], key=lambda item: item["year"])
+                            for row in history_rows_by_year[year["year"]]]
+                        pooled = blended_event_score(rows, pooled_history,
+                            metric_weights=policy["metric_weights"],
+                            large_move_threshold_pct=policy["large_move_threshold_pct"])
+                        yearly = {}
+                        for year in sorted(yearly_rows):
+                            try:
+                                yearly[year] = blended_event_score(yearly_rows[year],
+                                    history_rows_by_year[year],
+                                    metric_weights=policy["metric_weights"],
+                                    large_move_threshold_pct=policy["large_move_threshold_pct"])
+                            except ValueError as error:
+                                if str(error) != _ZERO_COMPARATOR_REASON:
+                                    raise
+                                yearly[year] = None
+                    except (KeyError, TypeError, ValueError, OverflowError) as error:
+                        raise fail("EXPERIMENT_VARIANT_FAILED", _blended_failure(error)) from None
+                    scores.append({"candidate_id": candidate["candidate_id"], **pooled, "yearly": yearly})
             eligible = [score for score in scores if score["metrics"] is not None]
             if not eligible:
                 raise fail("EXPERIMENT_VARIANT_FAILED", "all candidates failed for an outer fold")
-            selected = min(eligible, key=lambda score: (score["metrics"]["rmse"], score["candidate_id"]))
-            selections.append({"outer_year": outer["outer"]["year"], "scores": scores,
-                               "selected_candidate_id": selected["candidate_id"]})
+            if policy is None:
+                selected = min(eligible, key=lambda score: (score["metrics"]["rmse"], score["candidate_id"]))
+                selection = {"outer_year": outer["outer"]["year"], "scores": scores,
+                             "selected_candidate_id": selected["candidate_id"]}
+            else:
+                try:
+                    best = min(eligible,
+                               key=lambda score: (score["blend_score"], score["candidate_id"]))
+                    if any(value is None for value in best["yearly"].values()):
+                        raise ValueError(_ZERO_COMPARATOR_REASON)
+                    yearly_scores = [score for score in eligible if all(
+                        value is not None for value in score["yearly"].values())]
+                    selected_id, tie_band = selection_tie_band(eligible, yearly_scores,
+                        floor=policy["tie_band_floor"])
+                    pooled_history = [row for year in sorted(outer["inner"], key=lambda item: item["year"])
+                        for row in history_rows_by_year[year["year"]]]
+                    history_score = blended_event_score(pooled_history, pooled_history,
+                        metric_weights=policy["metric_weights"],
+                        large_move_threshold_pct=policy["large_move_threshold_pct"])
+                    history_score["yearly"] = {year: blended_event_score(
+                        history_rows_by_year[year], history_rows_by_year[year],
+                        metric_weights=policy["metric_weights"],
+                        large_move_threshold_pct=policy["large_move_threshold_pct"])
+                        for year in sorted(history_rows_by_year)}
+                except (KeyError, TypeError, ValueError, OverflowError) as error:
+                    raise fail("EXPERIMENT_VARIANT_FAILED", _blended_failure(error)) from None
+                selection = {"outer_year": outer["outer"]["year"], "scores": scores,
+                    "history_mean": history_score, "tie_band": tie_band,
+                    "selected_candidate_id": selected_id}
+            selections.append(selection)
+            failed_candidates = sum(score["metrics"] is None for score in scores)
+            print(f"[selection] outer={selection['outer_year']} "
+                  f"selected={selection['selected_candidate_id']} "
+                  f"failed_candidates={failed_candidates}", file=sys.stderr)
+            for inner in outer["inner"]:
+                owner_year, _ = canonical_inner(plan, outer["outer"]["year"], inner["year"])
+                cohort_id = cohort_key(plan, owner_year, inner["year"])
+                history_cohort_uses[cohort_id] -= 1
+                if history_cohort_uses[cohort_id] == 0:
+                    history_rows_cache.pop(cohort_id, None)
+                history_rows_by_year.pop(inner["year"], None)
         result = {"plan_id": plan["plan_id"], "attempts": attempts, "selections": selections,
                   "prospective_candidate_id": selections[-1]["selected_candidate_id"],
                   "estimator_execution": "unverified_submitted_forecasts", "evaluation_authority": "none"}

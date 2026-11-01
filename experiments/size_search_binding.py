@@ -230,14 +230,32 @@ def prepare_plan(conn, store, registration, request, *, plan_schema=None):
         identity = {"recipe": recipe, "feature_recipe": spec["feature_recipe"],
                     "source_binding_id": source_binding_id, "candidate_spec_id": spec["candidate_spec_id"]}
         candidates.append({**identity, "candidate_id": content_hash(identity)})
+    requested_selection = schedule["request"].get("selection")
+    if requested_selection is None:
+        selection_contract = {"metric": "inner_pooled_rmse", "ties": "candidate_id_ascending", "retries": 0,
+                              "outer": "frozen_selected_only", "final_read_authority": "none"}
+    else:
+        selection_contract = {
+            "metric": "inner_pooled_history_mean_normalized_event_blend",
+            "metric_weights": requested_selection["metric_weights"],
+            "lead_weights": requested_selection["lead_weights"],
+            "large_move_threshold_pct": requested_selection["large_move_threshold_pct"],
+            "pooling": "all_inner_year_rows",
+            "comparator": "history_mean_report_only",
+            "tie_band": "max_sample_se_of_best_pooled_candidate_yearly_blends_or_floor",
+            "tie_band_floor": requested_selection["tie_band_floor"],
+            "ties": "candidate_id_ascending",
+            "retries": 0,
+            "outer": "frozen_selected_only",
+            "final_read_authority": "none",
+        }
     identity = {"schema_version": plan_schema, "request": schedule["request"],
         "anchor": {"run_id": registration.run_id, "variant_id": registration.variant_id},
         "implementation": {"source_closure": binding["source_closure"], "environment": binding["environment"]},
         "candidates": sorted(candidates, key=lambda c: c["candidate_id"]), "folds": folds,
         "horizons": schedule["horizons"], "candidate_count": schedule["counts"]["candidates"],
         "planned_fit_count": schedule["counts"]["search_fits"], "counts": schedule["counts"],
-        "selection": {"metric": "inner_pooled_rmse", "ties": "candidate_id_ascending", "retries": 0,
-                      "outer": "frozen_selected_only", "final_read_authority": "none"}}
+        "selection": selection_contract}
     return {**identity, "plan_id": content_hash(identity)}
 
 
