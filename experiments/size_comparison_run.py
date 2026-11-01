@@ -27,16 +27,27 @@ def _validate(result, inputs, fold, plan):
     for h in plan["horizons"]:
         training = [r["event_id"] for r in inputs["training"] if 0 <= r["absolute_move_pct"] <= 200
                     and _values(indexed[r["event_id"], h])[0] is not None]
+        training_abstention_counts = {}
+        for r in inputs["training"]:
+            if 0 <= r["absolute_move_pct"] <= 200:
+                reason = _values(indexed[r["event_id"], h])[1]
+                if reason is not None:
+                    training_abstention_counts[reason] = training_abstention_counts.get(reason, 0) + 1
         fitted = len(training) >= 500
-        details.append({"horizon_sessions": h, "training_event_ids": training,
-                        "logical_fits": int(fitted), "component_fits": 2 * int(fitted)})
+        abstention_counts = {}
         fallback = mean(r["absolute_move_pct"] for r in inputs["training"])
         for event in fold["evaluation_event_ids"]:
             row = indexed[event, h]
             reason = _values(row)[1] or ("insufficient_training" if not fitted else None)
+            if reason is not None:
+                abstention_counts[reason] = abstention_counts.get(reason, 0) + 1
             expected.append({"event_id": event, "horizon_sessions": h, "abstention": reason,
                 "history_mean": row["mean_prior_abs_move"] if row["n_prior"] else fallback,
                 "quote_status": row["current_quote_status"]})
+        details.append({"horizon_sessions": h, "training_event_ids": training,
+                        "logical_fits": int(fitted), "component_fits": 2 * int(fitted),
+                        "abstention_counts": dict(sorted(abstention_counts.items())),
+                        "training_abstention_counts": dict(sorted(training_abstention_counts.items()))})
     _equal(sorted(result) if isinstance(result, dict) else None, sorted(["event", "forecasts", "fit_details"]))
     _equal(result["event"], "succeeded")
     _equal(result["fit_details"], details)
