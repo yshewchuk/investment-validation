@@ -98,6 +98,16 @@ def test_normalize_forecasts_rejects_non_boolean_allow_incomplete(allow_incomple
         normalize_forecasts(rows, fold, [5], allow_incomplete=allow_incomplete)
 
 
+@pytest.mark.parametrize("allow_incomplete,prediction", [(False, 2.5), (True, None)])
+def test_normalize_forecasts_rejects_unhashable_event_id(allow_incomplete, prediction):
+    event_id = ["not", "hashable"]
+    fold = {"evaluation_event_ids": ["a"]}
+    rows = [{"event_id": event_id, "horizon_sessions": 5, "predicted_absolute_move_pct": prediction}]
+
+    with pytest.raises(ValueError):
+        normalize_forecasts(rows, fold, [5], allow_incomplete=allow_incomplete)
+
+
 def test_insufficient_training_abstentions_are_counted():
     training_ids = [f"train-{index}" for index in range(499)]
     features = [_row(event_id) for event_id in training_ids + ["held-out"]]

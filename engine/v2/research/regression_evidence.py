@@ -49,12 +49,14 @@ def _normalize_abstentions(rows, fold, horizons, column, domain, strict_json):
 def _forecast_or_abstention(row, column, domain, strict_json):
     if not isinstance(row, dict) or set(row) != {"event_id", "horizon_sessions", column}:
         raise ValueError
-    horizon = row["horizon_sessions"]
+    horizon, event_id = row["horizon_sessions"], row["event_id"]
+    if type(event_id) is not str or not event_id:
+        raise ValueError
     if row[column] is None:
         if (isinstance(horizon, bool) or not isinstance(horizon, Integral)
                 or (strict_json and type(horizon) is not int)):
             raise ValueError
-        return (row["event_id"], int(horizon)), None
+        return (event_id, int(horizon)), None
     return _forecast(row, column, domain, strict_json)
 
 
@@ -62,6 +64,9 @@ def _forecast(row, column, domain, strict_json):
     if not isinstance(row, dict) or set(row) != {"event_id", "horizon_sessions", column}:
         raise ValueError
     horizon, value = row["horizon_sessions"], row[column]
+    event_id = row["event_id"]
+    if type(event_id) is not str or not event_id:
+        raise ValueError
     if (isinstance(horizon, bool) or not isinstance(horizon, Integral)
             or isinstance(value, bool) or not isinstance(value, Real)
             or (domain == "nonnegative" and value < 0)
@@ -70,7 +75,7 @@ def _forecast(row, column, domain, strict_json):
     value = float(value)
     if not math.isfinite(value):
         raise ValueError
-    return (row["event_id"], int(horizon)), value
+    return (event_id, int(horizon)), value
 
 
 def error_metrics(errors):
