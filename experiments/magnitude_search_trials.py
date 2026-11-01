@@ -646,7 +646,8 @@ class SearchTrials:
                         execution_result["result"]["forecasts"], submitted, inner, plan["horizons"])
                 else:
                     try:
-                        submitted = self._forecasts(submitted, inner, plan["horizons"], False)
+                        submitted = self._forecasts(submitted, inner, plan["horizons"],
+                                                    allow_incomplete=size_v14)
                     except OpsError:
                         raise ValueError from None
                 validation = self._read("validation:" + admitted["cohort"])
@@ -807,6 +808,18 @@ class SearchTrials:
                         pooled_history = [
                             row for year in sorted(outer["inner"], key=lambda item: item["year"])
                             for row in history_rows_by_year[year["year"]]]
+                        if _is_size_v1_4(candidate):
+                            candidate_lead1 = {
+                                (row["event_id"], row["horizon_sessions"])
+                                for row in rows if row["horizon_sessions"] == 1
+                            }
+                            history_lead1 = {
+                                (row["event_id"], row["horizon_sessions"])
+                                for row in pooled_history if row["horizon_sessions"] == 1
+                            }
+                            if candidate_lead1 != history_lead1:
+                                scores.append({"candidate_id": candidate["candidate_id"], "metrics": None})
+                                continue
                         pooled = blended_event_score(rows, pooled_history,
                             metric_weights=policy["metric_weights"],
                             large_move_threshold_pct=policy["large_move_threshold_pct"])
