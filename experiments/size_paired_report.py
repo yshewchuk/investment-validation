@@ -69,9 +69,13 @@ def paired_report(events, challenger, incumbent, targets, *, label_reasons=None,
     expected = {(event, h) for event in metadata for h in leads}
     if set(a) != expected or set(b) != expected or not set(targets) <= set(metadata):
         raise ValueError("paired coverage differs from frozen event population")
-    for value in list(targets.values()) + [r["predicted_absolute_move_pct"] for r in challenger]:
+    for value in targets.values():
         if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
-            raise ValueError("invalid magnitude target/challenger")
+            raise ValueError("invalid magnitude target")
+    for row in challenger:
+        value = row["predicted_absolute_move_pct"]
+        if type(value) not in (int, float) or not math.isfinite(value):
+            raise ValueError("invalid magnitude challenger")
     for row in incumbent:
         for name in ("history_mean", "predicted_absolute_move_pct"):
             value = row[name]
