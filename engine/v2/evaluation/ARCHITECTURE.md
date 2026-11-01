@@ -12,7 +12,7 @@ An absent entry date means an unselected abstention with no cash/settlement. A p
 
 ## Outputs
 
-Returns detached `per_opportunity` rows (`id`, `status`, `net_profit`, funded `debit`, `capital_days`), daily `curve`, summary and explicit equity/capacity policy labels. No writes, persistent schema or implicit experiment wrapper. Statuses distinguish abstention/no-trade, missing entry, trade/bucket/concurrency/cash refusal, unresolved funding and settlement.
+Returns detached `per_opportunity` rows (`id`, `status`, `net_profit`, funded `debit`, `capital_days`), sparse `curve`, summary and explicit equity/capacity policy labels. The curve contains scheduled-action dates plus `report_end`, not every calendar day. No writes, persistent schema or implicit experiment wrapper. Statuses distinguish abstention/no-trade, missing entry, trade/bucket/concurrency/cash refusal, unresolved funding and settlement.
 Summary includes all opportunities, funded/unresolved counts, funded coverage, settled net profit, cash, settlement equity, capital-days, settlement drawdown and full-cohort net profit per opportunity. Empty-cohort ratios and unresolved full-cohort profit are None. Missing outcomes are not zero losses. Negative settlement proceeds may overdraw cash; fees are not separately reserved.
 
 ## Dependencies and callers
@@ -31,6 +31,8 @@ None in the core. A supplied callback may have its own effects; the caller owns 
 | Missing required keyword | Python `TypeError`; no economic defaults. |
 | Callback failure or resource/programming exception outside numeric guards | Propagates unchanged; callbacks already invoked cannot be rolled back. No cache, journal, retry or transaction. |
 
+For equal valid inputs, callback-free calls return equal detached results without persisting state. Callbacks run again on repeated calls; retry safety depends on callback idempotency, not a core guarantee.
+
 ## Invariants
 
 The core derives actions from records, ordered by day, explicit settlement-before-entry or entry-before-settlement phase, then ID. Refusal precedence is missing-entry, trade cap, bucket cap, concurrency cap, cash. Debit, bucket capacity and concurrency stay reserved until settlement; missing credit remains unresolved through report end. No-op scheduled actions remain in curves and callback counts.
@@ -42,6 +44,6 @@ Cash comparisons use `Fraction(str(value))` without epsilon. Per-row capital-day
 flowchart LR
     A[Normalized opportunities and explicit policy] --> B[Validate and derive actions]
     B --> C[Chronological funding and settlement]
-    C --> D[Detached states, daily curve and summary]
+    C --> D[Detached states, sparse curve and summary]
     C --> E[Optional caller progress tick]
 ```
