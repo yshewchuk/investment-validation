@@ -34,9 +34,12 @@ def main():
         if len(payload) > MAX_BYTES:
             raise MemoryError
         request = json.loads(payload)
+        regression = request["execution"].get("schema_version") == "regression_candidate_execution.v1"
+        target = request["execution"]["target"] if regression else None
         inputs = load_fit_inputs(ArtifactStore(request["store_root"]), request["manifest"], request["inputs_id"],
                                  request["inner"]["evaluation_event_ids"], request["plan"]["horizons"],
-                                 request["execution"]["features"])
+                                 request["execution"]["features"],
+                                 **({"target_column": target["column"]} if regression else {}))
         indexed = {(row["event_id"], row["horizon_sessions"]): row for row in inputs["features"]}
 
         def progress(state, fit):
@@ -71,20 +74,46 @@ def main():
             return
         diagnostics = []
         try:
-            predictions, _ = fitted_forecasts(indexed, pd.DataFrame(inputs["training"]),
-                request["inner"], request["plan"], request["execution"], progress=progress, strict_failures=True, diagnostics=diagnostics)
+            if regression:
+                predictions = regression_forecasts(indexed, inputs["training"], request, progress, diagnostics)
+            else:
+                predictions, _ = fitted_forecasts(indexed, pd.DataFrame(inputs["training"]),
+                    request["inner"], request["plan"], request["execution"], progress=progress, strict_failures=True, diagnostics=diagnostics)
         except OpsError as error:
             if error.code != "EXPERIMENT_VARIANT_FAILED":
                 raise
             emit({"event": "failed"})
             return
+        column = target["prediction_column"] if regression else "predicted_absolute_move_pct"
         emit({"event": "succeeded", "forecasts": [{"event_id": event, "horizon_sessions": horizon,
-            "predicted_absolute_move_pct": value} for (event, horizon), value in sorted(predictions.items())],
-            **({"diagnostics": diagnostics} if request["execution"].get("schema_version") == "size_candidate_execution.v1" else {})})
+            column: value} for (event, horizon), value in sorted(predictions.items())],
+            **({"diagnostics": diagnostics} if regression or request["execution"].get("schema_version") == "size_candidate_execution.v1" else {})})
     except MemoryError:
         emit({"event": "resource_limit"})
     except Exception:
         emit({"event": "unavailable"})
+
+
+def regression_forecasts(indexed, training, request, progress, diagnostics):
+    """Fit the closed explicit-target route; infrastructure failures are never candidate failures."""
+    from engine.v2.ops.errors import fail
+    from engine.v2.models.training.fit_routes import check_fitting_allowed
+    from engine.v2.research.horizon_fitted import HorizonFitFailure, fitted_forecasts
+    check_fitting_allowed("regression_forecasts")
+    execution = request["execution"]
+    target = execution["target"]
+    try:
+        predictions, _ = fitted_forecasts(indexed, [row["event_id"] for row in training],
+            [row[target["column"]] for row in training], request["inner"]["evaluation_event_ids"],
+            request["plan"]["horizons"], execution["features"], target_column=target["column"],
+            target_domain=target["domain"], route="regression_candidate", recipe=execution["fit_recipe"],
+            progress=progress, diagnostics=diagnostics)
+    except HorizonFitFailure as failure:
+        error = failure.__cause__
+        if isinstance(error, (ValueError, ArithmeticError)):
+            raise fail("EXPERIMENT_VARIANT_FAILED", "fitted regression estimator failed") from None
+        raise error
+    return predictions
 
 
 if __name__ == "__main__":

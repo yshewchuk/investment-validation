@@ -6,11 +6,11 @@ from engine.v2.ops.errors import fail
 
 
 def keys(binding):
-    return {"diagnostics"} if binding.get("schema_version") in ("native_experiment_registration.v1.6", "native_experiment_registration.v1.7") else set()
+    return {"diagnostics"} if binding.get("schema_version") in ("native_experiment_registration.v1.6", "native_experiment_registration.v1.7", "native_experiment_registration.v1.8") else set()
 
 
 def evidence(result, execution, horizons):
-    if execution.get("schema_version") != "size_candidate_execution.v1" or result.get("event") != "succeeded":
+    if execution.get("schema_version") not in ("size_candidate_execution.v1", "regression_candidate_execution.v1") or result.get("event") != "succeeded":
         return {}
     try:
         diagnostics, recipe = result["diagnostics"], execution["fit_recipe"]
@@ -24,12 +24,8 @@ def evidence(result, execution, horizons):
                 expected |= {"coefficients", "coefficient_scale", "selected_columns", "intercept", "converged", "n_iter", "dual_gap"}
             elif size:
                 expected |= {"training_event_ids", "logical_fits", "component_fits", "abstention_counts", "training_abstention_counts"}
-            if elastic:
-                schema = "magnitude_elasticnet_fit.v1"
-            elif size:
-                schema = "size_v1_4_fit.v1"
-            else:
-                schema = "magnitude_ridge_hgb_fit.v1"
+            prefix = "regression" if execution["schema_version"] == "regression_candidate_execution.v1" else "magnitude"
+            schema = "size_v1_4_fit.v1" if size else prefix + ("_elasticnet_fit.v1" if elastic else "_ridge_hgb_fit.v1")
             if (set(item) != expected or item["horizon_sessions"] != horizon or item["schema_version"] != schema
                     or item["recipe_id"] != content_hash(recipe)):
                 raise ValueError
