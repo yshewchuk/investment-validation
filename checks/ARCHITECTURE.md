@@ -119,7 +119,7 @@ check defines missing-input and failure outcomes:
 | Phase 4 replay checkpoint scope differs (corpus hash, full staged manifest or replay validation version), a row fails shape/hash validation, or the file exceeds its read cap | `_load_checkpoint` truncates the file and discards all rows; replay recomputes those pairs |
 | Malformed or duplicate staged size-fold catalog, including a descriptor in an unselected month | Chooser replay refuses that pair; it indexes the exact staged release's size catalog and uses `select_gate_forecast_source` to apply live scoring's active-release admission and selected fold byte bound |
 | Chooser replay provenance does not match staged descriptors and their verified authoring contexts, or loaded chooser pools disagree with trace arrays or interval floors | The pair is `PHASE4_MEMBER_ABSENT` with a fixed `chooser:fold_provenance:unverifiable` or `chooser:fold_pools:unverifiable` detail; no score is replayed |
-| A chooser menu replays multiple member traces | Verified authoring contexts and loaded fold references are reused for that menu; no context is shared across menus or releases |
+| A chooser menu replays multiple member traces | Verified authoring contexts and loaded fold references are reused for that menu |
 
 ## Invariants
 
