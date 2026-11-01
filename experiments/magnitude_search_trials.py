@@ -207,7 +207,7 @@ class SearchTrials:
         """Admit fresh IV inputs before claiming; claimed attempts cannot be restarted."""
         return self._start(outer_year, inner_year, candidate_id)
 
-    def _start(self, outer_year, inner_year, candidate_id, execution=None, admitted=_NOT_ADMITTED):
+    def _start(self, outer_year, inner_year, candidate_id, execution=None, admitted=_NOT_ADMITTED, *, detach=True):
         plan = self._admit() if admitted is _NOT_ADMITTED else admitted
         key, inner, candidate = self._trial(plan, outer_year, inner_year, candidate_id)
         owner_year, _ = canonical_inner(plan, outer_year, inner_year)
@@ -239,7 +239,7 @@ class SearchTrials:
         self._append("cohort:" + cohort, manifest)
         self._append("inputs:" + key, {"cohort": cohort, "inputs_id": inputs_id})
         # Serial/public callers may mutate their copy; the process worker borrows its memo read-only.
-        return {**started, "inputs": copy.deepcopy(inputs)}
+        return {**started, "inputs": copy.deepcopy(inputs) if detach else inputs}
 
     def execute(self, outer_year, inner_year, candidate_id, *, limits):
         """Run one bounded native inner trial once, or verify its completed replay."""
@@ -263,7 +263,7 @@ class SearchTrials:
         forbid_fitting("SearchTrials.execute")
         forbid_legacy_fitting("SearchTrials.execute")
         resolved = resolved_limits(self.conn, self.store, self.registration, plan, limits) if bounded_plan else execution_limits(limits)
-        started = self._start(outer_year, inner_year, candidate_id, attempt, plan)
+        started = self._start(outer_year, inner_year, candidate_id, attempt, plan, detach=detach)
         inputs = started["inputs"]
         execution = execution_for_candidate(self.registration.document, candidate)
         regression = execution.get("schema_version") == "regression_candidate_execution.v1"

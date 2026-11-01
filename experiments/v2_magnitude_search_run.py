@@ -13,11 +13,10 @@ from contextlib import redirect_stdout
 from multiprocessing import get_context
 from pathlib import Path
 
+from engine.models.no_fit import forbid_fitting as forbid_legacy_fitting
 from engine.v2.contracts import ArtifactRef, Problem
 from engine.v2.data.documents import reject_duplicate_keys
 from engine.v2.data.errors import DataError
-from engine.models.no_fit import forbid_fitting as forbid_legacy_fitting
-from engine.v2.models.no_fit import forbid_fitting
 from engine.v2.data.repository import Repository
 from engine.v2.foundation import (
     ArtifactError,
@@ -29,6 +28,7 @@ from engine.v2.foundation import (
     iter_canonical_json,
     to_document,
 )
+from engine.v2.models.no_fit import forbid_fitting
 from engine.v2.ops.catalog import connect
 from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.experiments import experiment_spec_from_document
@@ -38,10 +38,10 @@ from engine.v2.research.progress import Progress, decision, stage
 from experiments.magnitude_search_execution import validate_execution_limits
 from experiments.magnitude_search_outer import collect_outer_results, execute_outer_fold
 from experiments.magnitude_search_plan import read_search_plan, trial_key
-from experiments.magnitude_search_request import validate_workers
-from experiments.size_job_budget import remaining
 from experiments.magnitude_search_records import MIGRATIONS, OWNER, append_record, read_record
+from experiments.magnitude_search_request import validate_workers
 from experiments.magnitude_search_trials import SearchTrials
+from experiments.memory_guard import start_rss_watchdog
 from experiments.native_gate_worker import read_native_staged_input
 from experiments.native_registration import (
     MAX_NATIVE_EVIDENCE_BYTES,
@@ -51,7 +51,7 @@ from experiments.native_registration import (
     valid_registration_read_budget,
     verified_registration_bytes,
 )
-from experiments.memory_guard import start_rss_watchdog
+from experiments.size_job_budget import remaining
 
 _PARALLEL = None
 _WORKER_WATCHDOG_STOP = None
