@@ -604,11 +604,15 @@ def _load_checkpoint(checkpoint_path: Path, scope: str | None) -> dict[str, dict
         return {}
     import json
 
+    def discard() -> dict:
+        checkpoint_path.write_bytes(b"")
+        return {}
+
     try:
         if checkpoint_path.stat().st_size > MAX_CHECKPOINT_BYTES:
-            return {}
+            return discard()
     except OSError:
-        return {}
+        return discard()
 
     done: dict[str, dict] = {}
     consumed = 0
@@ -620,25 +624,25 @@ def _load_checkpoint(checkpoint_path: Path, scope: str | None) -> dict[str, dict
                     break
                 consumed += len(line)
                 if consumed > MAX_CHECKPOINT_BYTES:
-                    return {}
+                    return discard()
                 text = line.decode("utf-8").strip()
                 if not text:
                     continue
                 row = json.loads(text)
                 if not isinstance(row, dict):
-                    return {}
+                    return discard()
                 if row.get("checkpoint_scope") != scope:
-                    return {}
+                    return discard()
                 fixture_id = row.get("fixture_id")
                 if not isinstance(fixture_id, str) or not fixture_id:
-                    return {}
+                    return discard()
                 if row.get("disposition") not in DISPOSITIONS:
-                    return {}
+                    return discard()
                 if row.get("checkpoint_row_hash") != _checkpoint_row_hash(row, scope):
-                    return {}
+                    return discard()
                 done[fixture_id] = row
     except (OSError, ValueError, UnicodeDecodeError, TypeError):
-        return {}
+        return discard()
     return done
 
 
