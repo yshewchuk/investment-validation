@@ -96,7 +96,7 @@ def test_v3_narrower_in_bounds_grid_changes_every_identity():
     (("space", "ridge", "alpha"), [0.0, 1.0]),
     (("space", "ridge", "alpha"), [-1.0, 1.0]),
     (("space", "ridge", "alpha"), [1e-9, 1.0]),
-    (("space", "ridge", "alpha"), [1.0, 1001.0]),
+    (("space", "ridge", "alpha"), [1.0, 10001.0]),
     (("space", "ridge", "alpha"), [10.0, 1.0]),
     (("space", "ridge", "alpha"), [1.0, 1.0]),
     (("space", "ridge", "alpha"), [True, 1]),
@@ -113,6 +113,20 @@ def test_v3_invalid_grids_refuse_before_expansion(monkeypatch, path, value):
         versions.compile_request(document)
     assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
     assert caught.value.problem.retryable is False
+    if path == ("space", "ridge", "alpha") and value == [1.0, 10001.0]:
+        assert caught.value.problem.message == (
+            "stage-2 grid values exceed their allowed bounds")
+
+
+def test_v3_ridge_alpha_at_upper_bound_compiles_and_preserves_value():
+    document = v3_request()
+    document["space"]["ridge"]["alpha"] = [10000.0]
+    result = versions.compile_request(document)
+    assert result["request"]["space"]["ridge"]["alpha"] == [10000.0]
+    ridge_specs = [spec for spec in result["candidate_specs"]
+                   if spec["family"] == "ridge"]
+    assert len(ridge_specs) == 3
+    assert all(spec["parameters"]["alpha"] == 10000.0 for spec in ridge_specs)
 
 
 @pytest.mark.parametrize("bad_horizons", [
@@ -156,6 +170,8 @@ def test_v3_invalid_workers_refuse_nonretryably(workers):
         versions.compile_request(document)
     assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
     assert caught.value.problem.retryable is False
+    assert caught.value.problem.message == (
+        "stage-2 workers requires an integer from 1 through 8")
 
 
 def test_v3_selection_requires_lead1_horizon():

@@ -9,7 +9,7 @@ from engine.v2.foundation import canonical_json
 
 __all__ = ["ridge_hgb_recipe", "validate_ridge_hgb_recipe"]
 
-_RIDGE_ALPHA_BOUNDS = (1e-6, 1000.0)
+_RIDGE_ALPHA_BOUNDS = (1e-6, 10000.0)
 _HGB_LEARNING_RATE_BOUNDS = (0.0, 1.0)
 _HGB_MAX_LEAF_NODES_V1_BOUNDS = (7, 15)
 _HGB_MAX_LEAF_NODES_V2_BOUNDS = (2, 64)

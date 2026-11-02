@@ -44,17 +44,17 @@ gets fit — see its own package doc reference in the root index. Nothing in
 `engine/v2/models` reads a live panel, calls `.fit()`, or writes
 `registry.json`.
 
-The research-only `training.magnitude` boundary fits two original-unit candidates
-from ops-admitted recipe data for the native experiment CLI. Ridge's
-median imputation, full missing indicators and scaling learn from training rows
-only; HGB freezes training-all-null columns to zero and routes other nulls natively,
-without a random early-stopping split in the v1 recipe (the v2 HGB recipe enables early stopping with a random 10% training-row validation split). Both use
-fresh per-fold/horizon estimators, one numerical thread and finite nonnegative
-predictions. The caller owns protected admission, label qualification and evidence;
-this module receives recipe data and numeric matrices, with no I/O or model release.
-Invalid shapes/nonfinite labels or predictions raise `ValueError`; the experiment
-caller translates fitting failures to `EXPERIMENT_VARIANT_FAILED`. The shared
-no-fit guard runs before work. Existing legacy-parity recipes are unchanged.
+Research-only `training.magnitude` consumes ops-admitted recipes and numeric matrices, without I/O or release.
+Ridge learns median imputation, full missing indicators and scaling on training only;
+HGB freezes training-all-null columns to zero, routing other nulls natively. HGB v1 has
+no random early-stopping split; v2 uses a random 10% training-row validation split.
+Both fit fresh per fold/horizon, single-threaded, with finite nonnegative predictions.
+Caller owns protected admission, label qualification and evidence. The no-fit guard runs first;
+invalid shapes/nonfinite labels or predictions raise `ValueError`, translated by the experiment
+caller to `EXPERIMENT_VARIANT_FAILED`. Existing legacy-parity recipes are unchanged.
+`magnitude_mlp_recipe` and `training.magnitude_mlp` add three closed, guarded standalone
+neural primitives, not search admission. Training-only input/target scaling, one-component
+accounting and no-retry failure semantics are detailed in [the training contract](training/README.md#standalone-neural-magnitude-primitive-opt-in-foundation).
 
 `magnitude_elasticnet_recipe.elasticnet_recipe` binds ordered columns, dictionary hash, preprocessing and closed sklearn parameters in JSON metadata. Request-v3 SIZE candidates admit finite positive alpha in `[1e-6, 1000]` and l1-ratio in `[1e-6, 1]`; the v2 compiler retains its original six alpha/l1 combinations.
 `magnitude_elasticnet_recipe.regression_elasticnet_recipe` adds the distinct
@@ -78,7 +78,7 @@ No I/O, publication, release or production wiring; source closures need resealin
 | Same valid inputs and numerical environment | Deterministic fresh fit, not cached or journal replay |
 | Cache, transaction or partial-write concerns | No cache, I/O, persistence or publication; v1 recipes and results are unchanged |
 
-`magnitude_ridge_hgb_recipe` constructs/validates closed variable-width policies binding ordered columns, dictionary hash and estimator parameters, not source admission or dictionary membership. Request-v3 SIZE Ridge candidates admit finite positive alpha in `[1e-6, 1000]`; the v2 compiler retains its existing grid. `magnitude_ridge_hgb_recipe.v2` (HGB only) adds bounded `learning_rate`, `min_samples_leaf` and `l2_regularization` with `max_iter` 500 and early stopping; partial or out-of-bound values raise `ValueError`, and v1 recipes are unchanged.
+`magnitude_ridge_hgb_recipe` constructs/validates closed variable-width policies binding ordered columns, dictionary hash and estimator parameters, not source admission or dictionary membership. Qualified SIZE v3-v5 Ridge candidates admit finite positive alpha in `[1e-6, 10000]`; the v2 compiler retains its existing grid. `magnitude_ridge_hgb_recipe.v2` (HGB only) adds bounded `learning_rate`, `min_samples_leaf` and `l2_regularization` with `max_iter` 500 and early stopping; partial or out-of-bound values raise `ValueError`, and v1 recipes are unchanged.
 `regression_ridge_hgb_recipe.regression_recipe` adds a distinct
 `regression_ridge_hgb_recipe.v1` identity with explicit `signed`/`nonnegative`
 target domain and respectively `none`/`clip_zero` projection. Its validator

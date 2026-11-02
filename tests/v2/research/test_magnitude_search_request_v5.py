@@ -5,6 +5,7 @@ import sys
 
 import pytest
 
+from engine.v2.foundation import content_hash
 from engine.v2.ops.errors import OpsError
 from experiments import magnitude_search_request as compiler
 from experiments import magnitude_search_request_versions as versions
@@ -96,13 +97,35 @@ def test_v5_candidate_ceiling_still_refuses_before_expansion(monkeypatch):
     assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
 
 
-@pytest.mark.parametrize("workers", [1, 2, 8, True, 0, 9])
-def test_v5_does_not_implicitly_opt_into_v2_v3_parallel_execution(monkeypatch, workers):
+@pytest.mark.parametrize("workers", [1, 8])
+def test_v5_workers_do_not_change_request_identity(workers):
+    baseline = versions.compile_request(v5_request())
+    request = v5_request()
+    request["workers"] = workers
+    worker_result = versions.compile_request(request)
+    assert worker_result["request"] == baseline["request"]
+    assert worker_result["request_id"] == baseline["request_id"]
+    assert ([spec["candidate_spec_id"] for spec in worker_result["candidate_specs"]]
+            == [spec["candidate_spec_id"] for spec in baseline["candidate_specs"]])
+    size = [spec for spec in worker_result["candidate_specs"] if spec["family"] == "size_v1_4"]
+    assert len(size) == 1
+    assert size[0]["feature_recipe"]["subset"] == "HMO"
+    assert worker_result["request_id"] == content_hash(baseline["request"])
+    expected_candidate_ids = [
+        content_hash({"request_id": baseline["request_id"], "family": spec["family"],
+                      "feature_recipe": spec["feature_recipe"], "parameters": spec["parameters"]})
+        for spec in baseline["candidate_specs"]]
+    assert [spec["candidate_spec_id"] for spec in baseline["candidate_specs"]] == expected_candidate_ids
+
+
+@pytest.mark.parametrize("workers", [0, 9, True])
+def test_v5_invalid_workers_refuse_before_expansion(monkeypatch, workers):
     request = v5_request()
     request["workers"] = workers
     monkeypatch.setattr(compiler, "_specifications", _fail_if_called)
     with pytest.raises(OpsError) as caught:
         versions.compile_request(request)
     assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
-    assert "workers require a v2 or v3" in caught.value.problem.message
+    assert caught.value.problem.retryable is False
+    assert caught.value.problem.message == "stage-2 workers requires an integer from 1 through 8"
     assert request["workers"] == workers
