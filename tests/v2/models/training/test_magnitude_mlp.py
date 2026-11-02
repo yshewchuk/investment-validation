@@ -205,16 +205,19 @@ def test_invalid_matrices_fail_without_fitting(monkeypatch, slot, replacement, r
         "convert": "magnitude inputs must be convertible to floating-point values"}[reason]
 
 
-def independent_oracle(train, labels, prediction, *, layers=(32,), alpha=0.01):
+def independent_oracle(train, labels, prediction, *, layers=(32,), alpha=0.01,
+                       early_stopping=False, max_iter=400, n_iter_no_change=15):
     """Construct sklearn independently of the production recipe builder/fitter."""
     union = FeatureUnion([("imputer", SimpleImputer(strategy="median", keep_empty_features=True)),
         ("missing_indicator", MissingIndicator(features="all", sparse=False))], n_jobs=1)
     oracle = TransformedTargetRegressor(transformer=StandardScaler(),
         regressor=make_pipeline(union, VarianceThreshold(threshold=0.), StandardScaler(), MLPRegressor(
-            hidden_layer_sizes=layers, alpha=alpha, max_iter=400, n_iter_no_change=15,
-            early_stopping=False, random_state=20260829)))
+            hidden_layer_sizes=layers, alpha=alpha, max_iter=max_iter, n_iter_no_change=n_iter_no_change,
+            early_stopping=early_stopping, random_state=20260829)))
     with threadpool_limits(limits=1):
-        oracle.fit(train, labels)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", ConvergenceWarning)
+            oracle.fit(train, labels)
         expected = np.maximum(oracle.predict(prediction), 0.).tolist()
     return oracle, expected
 
@@ -238,11 +241,22 @@ def test_real_fit_matches_independent_oracle_and_is_repeatable(profile, layers, 
         np.testing.assert_array_equal(actual, original)
 
 
-def test_early_stopping_fit_reports_recipe_id_and_bounded_iterations():
-    policy = recipe(profile="es_relu32_l2_1")
+@pytest.mark.parametrize("profile,layers,alpha,early_stopping,max_iter,patience", [
+    ("es_relu32_l2_1", [32], 1, True, 400, 10),
+    ("fixed200_relu64x32_l2_1", [64, 32], 1, False, 200, 201),
+])
+def test_stopping_policy_matches_independent_oracle(profile, layers, alpha, early_stopping, max_iter, patience):
+    train, labels, prediction = arrays()
+    policy = recipe(profile=profile)
+    oracle, expected = independent_oracle(
+        train, labels, prediction, layers=layers, alpha=alpha,
+        early_stopping=early_stopping, max_iter=max_iter, n_iter_no_change=patience)
     result = fit(policy)
+    assert result["predictions"] == expected
+    assert result["n_iter"] == oracle.regressor_[-1].n_iter_
     assert result["recipe_id"] == content_hash(policy)
-    assert 1 <= result["n_iter"] <= 400
+    if profile == "fixed200_relu64x32_l2_1":
+        assert result["n_iter"] == 200
 
 
 def test_fixed_budget_fit_accepts_convergence_warning_at_epoch_200(monkeypatch):

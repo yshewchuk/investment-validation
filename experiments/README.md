@@ -137,18 +137,9 @@ of training rows, not time-ordered, and only picks the tree count. The design
 grid (2x2x2x2 HGB, 99 candidates over H/HM/HMO) is in #1848 section 5. Qualified
 SIZE v1.6 keeps request v2 replay; v1.7 sealing and admission accept v2 through v7. V5 adds one fixed HMO-attributed
 SIZE v1.4 plus causal history-mean fallback candidate, not three duplicate variants.
-V6 is an explicit opt-in: retain v5's four family grids and admit the original three
-closed MLP profiles. V7 retains those grids and admits seven additional profiles:
-`es_relu32_l2_0p01`, `es_relu32_l2_1`, `es_relu64x32_l2_0p01`,
-`es_relu64x32_l2_1`, `fixed200_relu64x32_l2_1`,
-`fixed200_relu64x32_l2_10`, and `fixed200_relu64x32_l2_100`.
-Choose one or more unique profiles in lexicographic order; each adds H/HM/HMO
-candidates, not independent optimizer axes. The [fixed neural recipes](../engine/v2/models/training/README.md#standalone-neural-magnitude-primitive-opt-in-foundation)
-use train-only preprocessing/target scaling, seed 20260829 and one CPU thread. The four
-`es_` profiles stop on sklearn early stopping (`max_iter=400`, patience 10), using a
-seeded random 10% of training rows as validation. The three `fixed200_` profiles disable
-early stopping and stop at the 200-epoch budget; budget exhaustion is allowed for these
-profiles only. Original profiles retain training-loss stopping at up to 400 epochs.
+V6 is an explicit opt-in: retain v5's four family grids and admit the original three closed MLP profiles. V7 retains those grids and admits seven more: `es_relu32_l2_0p01`, `es_relu32_l2_1`, `es_relu64x32_l2_0p01`, `es_relu64x32_l2_1`, `fixed200_relu64x32_l2_1`, `fixed200_relu64x32_l2_10`, and `fixed200_relu64x32_l2_100`.
+Choose one or more unique profiles in lexicographic order; each adds H/HM/HMO candidates, not independent optimizer axes. The [fixed neural recipes](../engine/v2/models/training/README.md#standalone-neural-magnitude-primitive-opt-in-foundation) use train-only preprocessing/target scaling, seed 20260829 and one CPU thread.
+The four `es_` profiles stop on sklearn early stopping (`max_iter=400`, patience 10), using a seeded random 10% of training rows as validation. The three `fixed200_` profiles disable early stopping and stop at the 200-epoch budget; budget exhaustion is allowed for these profiles only. Original profiles retain training-loss stopping at up to 400 epochs.
 The 1000-candidate ceiling and explicit logical-fit, child/parent/build/job budgets
 still apply; MLP costs one component per horizon, while the fixed SIZE candidate
 retains its two-component worst-case allowance. V6 and v7 accept the optional `workers` contract: an integer 1 through 8 (omission means 1), removed before request identity hashing; fresh inner trials may run in the bounded process pool, while worker CPU/memory admission remains in force. Neural fits remain one-thread-per-child.
