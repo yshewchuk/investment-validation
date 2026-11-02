@@ -959,10 +959,10 @@ ops migrations/fingerprints/errors, both no-fit guards, `engine.v2.research.magn
 for outer label reads and `magnitude_report.magnitude_metrics` for fold/aggregate scoring.
 The evidence helper separately consumes native history admission and research stored-history/target APIs; no new scheduler, parser, estimator implementation or third-party dependency is needed.
 
-## Serial search orchestration
+## Magnitude search orchestration
 
 `v2_magnitude_search_run` composes public plan, journal, trial and outer APIs. Separate `seal`, `run` and read-only `collect` commands retain explicit ownership; run never migrates or seals implicitly. A distinct driver seal binds plan/ref and full driver source closure; atomic absence guards prevent blessing started library journals. Run and CLI collection
-require that exact binding, without changing the scientific report hash. The complete roster is checked for unfinished claims and premature selections before new work, including v6's optional bounded workers; each fit child remains single-threaded (including MLP) while preserving request identity and the parent/child memory contract. Durable inner results reconcile first; completed outer results replay next, before any fresh fitting. Scientific scoring refusals continue only after public reconciliation verifies the
+require that exact binding, without changing the scientific report hash. The same pre-work roster check gates serial and bounded-worker execution, checking for unfinished claims and premature selections; each fit child remains single-threaded (including MLP) while preserving request identity and the parent/child memory contract. Durable inner results reconcile first; completed outer results replay next, before any fresh fitting. Scientific scoring refusals continue only after public reconciliation verifies the
 durable refused terminal; shared/resource failures stop. Freeze precedes all selected outer evaluation, with zero fit retries and unchanged winner policy.
 
 The CLI reuses the bounded staged-input reader, strict duplicate-key decoder, typed spec/reference admission and shared canonical JSON stream. Output is limited by a configured UTF-8 byte budget; an oversized report is discarded without truncation and only the refusal document is written to stdout. Collection preserves the existing outer report identity and uses a read-only

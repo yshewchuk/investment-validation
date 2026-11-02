@@ -132,25 +132,17 @@ def test_v6_workers_one_and_two_match_candidates_results_and_metrics(case, tmp_p
     if first is not None:
         print(f"first result difference: {first[0]}: serial={first[1]!r}; parallel={first[2]!r}")
 
-    from engine.v2.foundation import content_hash
-
-    def without_selection_identity(value):
-        if isinstance(value, dict):
-            normalized = {
-                key: without_selection_identity(item)
-                for key, item in value.items()
-                if key not in {"selection_id", "result_id"}
-            }
-            if "result_id" in value:
-                normalized["result_id"] = content_hash(normalized)
-            return normalized
-        if isinstance(value, list):
-            return [without_selection_identity(item) for item in value]
-        return value
-
-    # selection_id hashes terminal IDs whose records include runtime score/RSS metadata.
-    # Recompute dependent result IDs so every remaining candidate/result field stays compared.
-    assert without_selection_identity(serial_result) == without_selection_identity(parallel_result)
+    # The sole ignored field is folds[*].selection_id; it depends on terminal IDs whose
+    # records include runtime score_seconds and rss_delta_kib.
+    normalized_serial = {**serial_result}
+    normalized_serial["folds"] = [{**fold} for fold in serial_result["folds"]]
+    for fold in normalized_serial["folds"]:
+        del fold["selection_id"]
+    normalized_parallel = {**parallel_result}
+    normalized_parallel["folds"] = [{**fold} for fold in parallel_result["folds"]]
+    for fold in normalized_parallel["folds"]:
+        del fold["selection_id"]
+    assert normalized_serial == normalized_parallel
     assert serial_result["folds"][0]["candidate"] == parallel_result["folds"][0]["candidate"]
     assert serial_result["folds"][0]["predictions"] == parallel_result["folds"][0]["predictions"]
     assert serial_result["metrics"] == parallel_result["metrics"]
