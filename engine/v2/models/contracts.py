@@ -75,17 +75,24 @@ class PredictionFrame:
     schema_version: str = "prediction_frame.v1.0"
 
 
-def validated_training_cutoff(value: object) -> str | None:
+def validated_training_cutoff(value: object, fold_start: str | None = None) -> str | None:
     """Legacy absence stays ``None``; anything else must be one canonical day.
 
     Parsing is delegated to :func:`chooser_cutoff.canonical_day`, and the value
     is then required to already be exactly the immutable string it validated to,
     so a date, a datetime, a timestamp-like string or any mutable value is
-    refused rather than silently rewritten.
+    refused rather than silently rewritten. When ``fold_start`` is supplied it
+    must also be one canonical day and the cutoff must fall strictly before it.
     """
     if value is None:
         return None
     day = canonical_day(value)
     if not isinstance(value, str) or day != value:
         raise ValueError("invalid serving fold training cutoff")
+    if fold_start is not None:
+        fold = canonical_day(fold_start)
+        if not isinstance(fold_start, str) or fold != fold_start:
+            raise ValueError("invalid serving fold start")
+        if day >= fold:
+            raise ValueError("serving fold training cutoff is not before its fold")
     return day

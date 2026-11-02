@@ -176,7 +176,9 @@ class _ServingFold:
     @staticmethod
     def _validated_cutoff(header):
         try:
-            return validated_training_cutoff(header.get("training_cutoff"))
+            return validated_training_cutoff(
+                header.get("training_cutoff"), header.get("fold_start")
+            )
         except (TypeError, ValueError, OverflowError):
             raise AdapterError("invalid serving fold training cutoff") from None
 

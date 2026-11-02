@@ -405,3 +405,73 @@ def test_upgrade_one_keeps_only_a_cutoff_the_original_declared(
         pool_builder=lambda *_args: (served.pool_pred, served.pool_res),
     )
     assert "training_cutoff" not in joblib.load(legacy)
+
+
+@pytest.mark.parametrize("training_cutoff", [str(FOLD.date()), "2026-09-02"])
+def test_direct_adapter_metadata_refuses_cutoff_at_or_after_fold(
+    model, served, training_cutoff
+):
+    binding = ModelBinding(
+        binding_id="direct-cutoff",
+        model_id=model.model_id,
+        role="size",
+        strategy_id="*",
+        decision_clock_id="entry-close",
+        adapter="tier4-serving-fold.v1",
+        feature_order=tuple(model.features),
+        output_names=(model.produces,),
+        members=(),
+    )
+    header = {
+        "estimator": served.estimator,
+        "model_id": model.model_id,
+        "fold_start": str(FOLD.date()),
+        "tier3_snapshot": SNAPSHOT,
+        "features": list(model.features),
+        "pool_pred": served.pool_pred,
+        "pool_res": served.pool_res,
+        "training_cutoff": training_cutoff,
+    }
+    stream = io.BytesIO()
+    joblib.dump(header, stream, compress=0)
+    artifact = Tier4ServingFoldAdapter().load({"estimator": stream.getvalue()}, binding)
+    with pytest.raises(AdapterError, match="^invalid serving fold training cutoff$"):
+        artifact.metadata()
+
+
+@pytest.mark.parametrize(
+    "training_cutoff", [["2026-08-20"], str(FOLD.date()), "2026-09-02"]
+)
+def test_upgrade_one_refuses_an_invalid_existing_cutoff_before_doing_work(
+    tmp_path, monkeypatch, model, served, training_cutoff
+):
+    metadata = _metadata(model)
+    filename = tier4._serving_path(model.model_id, FOLD, SNAPSHOT).name
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    monkeypatch.setattr(tier4, "SERVING_DIR", cache_dir)
+    path = cache_dir / filename
+    joblib.dump(
+        {**metadata, "estimator": served.estimator, "training_cutoff": training_cutoff},
+        path,
+    )
+    original_bytes = path.read_bytes()
+
+    panel_loader = Mock()
+    pool_builder = Mock(return_value=(served.pool_pred, served.pool_res))
+
+    with pytest.raises(
+        prepare.CachePreparationError,
+        match="^cache has an invalid training cutoff$",
+    ):
+        prepare.upgrade_one(
+            prepare.CacheTarget(path, FOLD, prepare._sha256(path)),
+            model=model,
+            snapshot=SNAPSHOT,
+            panel_loader=panel_loader,
+            pool_builder=pool_builder,
+        )
+
+    panel_loader.assert_not_called()
+    pool_builder.assert_not_called()
+    assert path.read_bytes() == original_bytes
