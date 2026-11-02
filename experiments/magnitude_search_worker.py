@@ -47,12 +47,12 @@ def main():
         schema = request["execution"].get("schema_version")
         regression = schema in ("regression_candidate_execution.v1", "iv_crush_comparison_execution.v1")
         target = request["execution"]["target"] if regression else None
+        fit_input_options = {"target_column": target["column"]} if regression else {}
+        if request["execution"].get("fit_recipe", {}).get("requires_event_dates") is True:
+            fit_input_options["requires_event_dates"] = True
         inputs = load_fit_inputs(ArtifactStore(request["store_root"]), request["manifest"], request["inputs_id"],
                                  request["inner"]["evaluation_event_ids"], request["plan"]["horizons"],
-                                 request["execution"]["features"],
-                                 **({"target_column": target["column"]} if regression else {}),
-                                 requires_event_dates=request["execution"].get("fit_recipe", {}).get(
-                                     "requires_event_dates") is True)
+                                 request["execution"]["features"], **fit_input_options)
         indexed = {(row["event_id"], row["horizon_sessions"]): row for row in inputs["features"]}
 
         def progress(state, fit):

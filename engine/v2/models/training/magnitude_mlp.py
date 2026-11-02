@@ -14,7 +14,8 @@ from .magnitude_ridge_hgb import _matrices
 __all__ = ["fit_mlp_predictions"]
 
 
-def fit_mlp_predictions(recipe, train_features, train_labels, prediction_features, *, columns):
+def fit_mlp_predictions(recipe, train_features, train_labels, prediction_features, *, columns,
+                        event_dates=None):
     """Caller owns causal folds/budgets; preprocessing and stopping use training only."""
     check_fitting_allowed("engine.v2.models.training.magnitude_mlp.fit_mlp_predictions")
     recipe = validate_mlp_recipe(recipe)

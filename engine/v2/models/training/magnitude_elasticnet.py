@@ -49,7 +49,8 @@ def _coefficient_evidence(model, columns):
         "n_iter": int(model.n_iter_), "dual_gap": float(model.dual_gap_)}
 
 
-def fit_elasticnet_predictions(recipe, train_features, train_labels, prediction_features, *, columns) -> dict:
+def fit_elasticnet_predictions(recipe, train_features, train_labels, prediction_features, *, columns,
+                               event_dates=None) -> dict:
     """No fold selection here: the caller supplies qualified training and a fixed recipe."""
     forbid_fitting("engine.v2.models.training.magnitude_elasticnet.fit_elasticnet_predictions")
     forbid_v2_fitting("engine.v2.models.training.magnitude_elasticnet.fit_elasticnet_predictions")

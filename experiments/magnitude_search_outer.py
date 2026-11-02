@@ -255,12 +255,17 @@ def _execute_admitted(conn, store, repository, registration, plan, fold, selecti
     forbid_legacy_fitting("execute_outer_fold")
     resolved = resolved_limits(conn, store, registration, plan, limits) if diagnostic_keys(binding) else execution_limits(limits)
     requires_event_dates = execution.get("fit_recipe", {}).get("requires_event_dates") is True
-    inputs = (_inputs(repository, binding, fold, plan=plan, requires_event_dates=requires_event_dates)
+    inputs = ((_inputs(repository, binding, fold, plan=plan, requires_event_dates=True)
+               if requires_event_dates else _inputs(repository, binding, fold, plan=plan))
               if "target" in plan and saved("start") is None else None)
     append("start", started)
     if inputs is None:
-        inputs = (_inputs(repository, binding, fold, plan=plan, requires_event_dates=requires_event_dates)
-                  if "target" in plan else _inputs(repository, binding, fold))
+        if "target" in plan:
+            inputs = (_inputs(repository, binding, fold, plan=plan, requires_event_dates=True)
+                      if requires_event_dates else _inputs(repository, binding, fold, plan=plan))
+        else:
+            inputs = (_inputs(repository, binding, fold, requires_event_dates=True)
+                      if requires_event_dates else _inputs(repository, binding, fold))
     manifest, inputs_id = publish_inputs(store, inputs)
     append("inputs", manifest)
     expected = fit_evidence(inputs, fold, plan, execution)

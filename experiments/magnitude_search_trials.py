@@ -59,6 +59,13 @@ from experiments.size_job_budget import resolved_limits
 from experiments.size_search_binding import execution_for_candidate
 
 
+def _cohort_id(plan, owner_year, inner_year, candidate):
+    cohort = cohort_key(plan, owner_year, inner_year)
+    if candidate["recipe"].get("requires_event_dates") is True:
+        return content_hash({"cohort": cohort, "requires_event_dates": True})
+    return cohort
+
+
 def _problem(problem):
     """Persist only registered policy and recorder-owned text, never caller diagnostics."""
     registry = {**DATA_FAILURE_CODES, **FAILURE_CODES}
@@ -218,9 +225,7 @@ class SearchTrials:
         if execution is not None:
             started["execution"] = execution
         requires_event_dates = candidate["recipe"].get("requires_event_dates") is True
-        cohort = cohort_key(plan, owner_year, inner_year)
-        if requires_event_dates:
-            cohort = content_hash({"cohort": cohort, "requires_event_dates": True})
+        cohort = _cohort_id(plan, owner_year, inner_year, candidate)
         existing_start = self._read("start:" + key)
         inputs = ((self._cohort_inputs(cohort, inner, True) if requires_event_dates
                    else self._cohort_inputs(cohort, inner))
@@ -354,7 +359,7 @@ class SearchTrials:
         """Independently verify durable result, admission, and exact progress prefix."""
         key, inner, candidate = self._trial(plan, outer_year, inner_year, candidate_id)
         owner_year, _ = canonical_inner(plan, outer_year, inner_year)
-        cohort = cohort_key(plan, owner_year, inner_year)
+        cohort = _cohort_id(plan, owner_year, inner_year, candidate)
         try:
             started = {"trial_id": key, "outer_year": owner_year, "inner_year": inner_year,
                        "candidate": candidate, "execution": attempt}
@@ -604,7 +609,7 @@ class SearchTrials:
         """Verify terminal evidence; the caller also verifies any native receipt."""
         key, inner, candidate = self._trial(plan, outer_year, inner_year, candidate_id)
         owner_year, _ = canonical_inner(plan, outer_year, inner_year)
-        cohort_id = cohort_key(plan, owner_year, inner_year)
+        cohort_id = _cohort_id(plan, owner_year, inner_year, candidate)
         record = self._read("terminal:" + key)
         column = plan.get("target", {}).get("column", "absolute_move_pct")
         prediction = plan.get("target", {}).get("prediction_column", "predicted_absolute_move_pct")
@@ -733,8 +738,9 @@ class SearchTrials:
         for planned_outer in plan["folds"]:
             for planned_inner in planned_outer["inner"]:
                 owner_year, _ = canonical_inner(plan, planned_outer["outer"]["year"], planned_inner["year"])
-                cohort_id = cohort_key(plan, owner_year, planned_inner["year"])
-                history_cohort_uses[cohort_id] = history_cohort_uses.get(cohort_id, 0) + 1
+                for candidate in plan["candidates"]:
+                    cohort_id = _cohort_id(plan, owner_year, planned_inner["year"], candidate)
+                    history_cohort_uses[cohort_id] = history_cohort_uses.get(cohort_id, 0) + 1
         history_rows_cache = {}
         for outer in plan["folds"]:
             history_rows_by_year = {}
@@ -849,10 +855,11 @@ class SearchTrials:
                   f"failed_candidates={failed_candidates}", file=sys.stderr)
             for inner in outer["inner"]:
                 owner_year, _ = canonical_inner(plan, outer["outer"]["year"], inner["year"])
-                cohort_id = cohort_key(plan, owner_year, inner["year"])
-                history_cohort_uses[cohort_id] -= 1
-                if history_cohort_uses[cohort_id] == 0:
-                    history_rows_cache.pop(cohort_id, None)
+                for candidate in plan["candidates"]:
+                    cohort_id = _cohort_id(plan, owner_year, inner["year"], candidate)
+                    history_cohort_uses[cohort_id] -= 1
+                    if history_cohort_uses[cohort_id] == 0:
+                        history_rows_cache.pop(cohort_id, None)
                 history_rows_by_year.pop(inner["year"], None)
         result = {"plan_id": plan["plan_id"], "attempts": attempts, "selections": selections,
                   "prospective_candidate_id": selections[-1]["selected_candidate_id"],

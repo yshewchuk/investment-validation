@@ -32,7 +32,8 @@ def _matrices(train_features, train_labels, prediction_features, width, *, nonne
     return train, labels, prediction
 
 
-def fit_ridge_hgb_predictions(recipe, train_features, train_labels, prediction_features, *, columns) -> dict:
+def fit_ridge_hgb_predictions(recipe, train_features, train_labels, prediction_features, *, columns,
+                               event_dates=None) -> dict:
     """Caller owns source/fold admission and truthful columns; no selection or I/O."""
     forbid_fitting("engine.v2.models.training.magnitude_ridge_hgb.fit_ridge_hgb_predictions")
     forbid_v2_fitting("engine.v2.models.training.magnitude_ridge_hgb.fit_ridge_hgb_predictions")

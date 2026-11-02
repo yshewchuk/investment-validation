@@ -280,3 +280,19 @@ def test_callback_mutation_cannot_change_returned_evidence(phase, deferred):
     assert observed == [s for _ in (5, 3, 1) for s in ("started", "completed")]
     assert predictions == {("evaluation", h): -140. for h in (5, 3, 1)}
     assert evidence == expected
+
+
+def test_candidate_dispatch_forwards_opt_in_dates_to_selected_estimator(monkeypatch):
+    from engine.v2.models.training import magnitude_candidate
+
+    received = {}
+    monkeypatch.setattr(magnitude_candidate, "magnitude_candidate_family", lambda recipe: "mlp")
+
+    def estimator(recipe, train_features, train_labels, prediction_features, *, columns, event_dates=None):
+        received.update(columns=columns, event_dates=event_dates)
+        return {"predictions": [1.]}
+
+    monkeypatch.setattr("engine.v2.models.training.magnitude_mlp.fit_mlp_predictions", estimator)
+    magnitude_candidate.fit_candidate({}, [[0.]], [1.], [[0.]], columns=["x"],
+                                     event_dates=["2024-01-01"])
+    assert received == {"columns": ["x"], "event_dates": ["2024-01-01"]}

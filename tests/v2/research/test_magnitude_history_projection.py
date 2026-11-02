@@ -103,6 +103,17 @@ def test_projected_rows_keep_full_snapshot_identity_and_raw_numeric_values(sourc
     assert dated["inputs_id"] == expected
 
 
+def test_date_cohort_identity_is_opt_in_and_preserves_existing_key(monkeypatch):
+    from engine.v2.foundation import content_hash
+    from experiments.magnitude_search_trials import _cohort_id
+
+    monkeypatch.setattr("experiments.magnitude_search_trials.cohort_key", lambda *args: "base-cohort")
+    existing = _cohort_id({}, "2024", "2023", {"recipe": {}})
+    dated = _cohort_id({}, "2024", "2023", {"recipe": {"requires_event_dates": True}})
+    assert existing == "base-cohort"
+    assert dated == content_hash({"cohort": "base-cohort", "requires_event_dates": True})
+
+
 def test_projection_globally_admits_metadata_before_numbers_in_bounded_batches(source, monkeypatch):  # noqa: F811
     build, snapshot = build_history(source)
     original, requests = Repository.scan, []

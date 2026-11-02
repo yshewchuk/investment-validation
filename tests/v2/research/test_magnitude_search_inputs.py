@@ -200,11 +200,13 @@ def test_load_fit_inputs_preserves_existing_projection_unless_recipe_requires_da
     assert [row["event_date"] for row in dated["features"]] == [
         row["event_date"] for row in cohort["features"]]
 
-    cohort_without_dates, _ = _fit_cohort(4)
+    cohort_without_dates, events_without_dates = _fit_cohort(4)
     store_without_dates = ArtifactStore(tmp_path / "without_dates")
     manifest_without_dates, id_without_dates = publish_inputs(store_without_dates, cohort_without_dates)
     loaded_without_dates = load_fit_inputs(store_without_dates, manifest_without_dates, id_without_dates,
-        [], [1, 3, 5], ("x",), requires_event_dates=True)
+        events_without_dates, [1, 3, 5], ("x",), requires_event_dates=True)
+    expected_without_dates = [{name: row[name] for name in columns} for row in cohort_without_dates["features"]]
+    assert loaded_without_dates["features"] == expected_without_dates
     assert all("event_date" not in row for row in loaded_without_dates["features"])
 
 
