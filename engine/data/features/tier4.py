@@ -1712,9 +1712,27 @@ def serving_model(
         }
         if served.training_cutoff is not None:
             header["training_cutoff"] = served.training_cutoff
-        # A file handle prevents filename suffixes from enabling compression.
-        with path.open("wb") as handle:
-            joblib.dump(header, handle, compress=0)
+        import os
+        import uuid
+
+        # Write to a same-directory temporary sibling, flush/fsync it, then
+        # atomically replace the destination. A file handle prevents filename
+        # suffixes from enabling compression.
+        temporary = path.parent / ("." + path.name + "." + uuid.uuid4().hex + ".tmp")
+        try:
+            with temporary.open("wb") as handle:
+                joblib.dump(header, handle, compress=0)
+                handle.flush()
+                os.fsync(handle.fileno())
+            try:
+                mode = path.stat().st_mode & 0o7777
+            except FileNotFoundError:
+                pass
+            else:
+                os.chmod(temporary, mode)
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
     return served
 
 

@@ -189,6 +189,26 @@ def test_fresh_serving_model_cache_declares_the_last_training_date(
     assert stored["training_cutoff"] < str(FOLD.date())
 
 
+def test_serving_model_cache_write_failure_leaves_no_partial_artifact(
+    tmp_path, monkeypatch, model, served
+):
+    _wire_serving_model(tmp_path, monkeypatch, model, served)
+    panel = pd.DataFrame()
+    monkeypatch.setattr(tier4, "training_frames", lambda *_args: (panel, panel))
+
+    def failing_dump(_header, handle, **_kwargs):
+        handle.write(b"partial")
+        raise OSError("simulated write failure")
+
+    monkeypatch.setattr(joblib, "dump", failing_dump)
+    with pytest.raises(OSError, match="simulated write failure"):
+        tier4.serving_model(FOLD, panel=panel, model=model, cache=True)
+
+    path = tier4._serving_path(model.model_id, FOLD, SNAPSHOT)
+    assert not path.exists(), "failure must not publish the partial bytes"
+    assert list(tmp_path.iterdir()) == [], "no temporary sibling remains"
+
+
 def test_serving_model_cache_hit_carries_the_cutoff_and_a_legacy_header_serves_none(
     tmp_path, monkeypatch, model, served
 ):
