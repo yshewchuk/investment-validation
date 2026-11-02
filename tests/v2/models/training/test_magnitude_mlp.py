@@ -273,6 +273,29 @@ def test_fixed_budget_fit_accepts_convergence_warning_at_epoch_200(monkeypatch):
     assert result["recipe_id"] == content_hash(policy)
 
 
+@pytest.mark.parametrize("profile,at_cap,accepted", [
+    ("es_relu32_l2_1", False, False),
+    ("fixed200_relu64x32_l2_1", True, True),
+    ("fixed200_relu64x32_l2_1", False, False),
+])
+def test_convergence_warning_requires_fixed_budget_at_cap(monkeypatch, profile, at_cap, accepted):
+    original = TransformedTargetRegressor.fit
+    def warned(self, *args, **kwargs):
+        result = original(self, *args, **kwargs)
+        if profile.startswith("fixed200_") and not at_cap:
+            self.regressor_[-1].n_iter_ = 199
+        warnings.warn("synthetic convergence warning", ConvergenceWarning)
+        return result
+    monkeypatch.setattr(TransformedTargetRegressor, "fit", warned)
+    policy = recipe(profile=profile)
+    if accepted:
+        result = fit(policy)
+        assert result["n_iter"] == 200
+    else:
+        with pytest.raises(ValueError, match="convergence failed; no retry"):
+            fit(policy)
+
+
 def test_prediction_rows_cannot_influence_training_or_preprocessing(monkeypatch):
     models = []
     original = TransformedTargetRegressor.fit

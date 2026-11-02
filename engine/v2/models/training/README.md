@@ -5,8 +5,8 @@ Component contract: [ARCHITECTURE.md](ARCHITECTURE.md).
 ## Standalone neural magnitude primitive (opt-in foundation)
 
 `magnitude_mlp_recipe.mlp_recipe` / `validate_mlp_recipe` bind the new closed
-`magnitude_mlp_recipe.v1`: three profiles, ReLU `(32,)`/L2 0.01 and
-`(64,32)`/L2 0.01 or 0.1. This small capacity/regularization comparison uses the
+`magnitude_mlp_recipe.v1`: ten closed profiles, including the original three
+and seven stopping variants. This small capacity/regularization comparison uses the
 installed sklearn `MLPRegressor`, not a GPU framework or combinatorial sweep.
 `training.magnitude_mlp.fit_mlp_predictions` receives caller-admitted matrices;
 both no-fit guards precede inspection. Fresh sklearn median imputation (retaining
@@ -32,7 +32,7 @@ the iteration cap. No evaluation labels enter fit or preprocessing; the caller s
 causal folds, source admission, inner-only selection, resource budgets and progress reporting. One successful call
 is one component fit and returns detached `magnitude_mlp_fit.v1` predictions,
 recipe hash, iteration count and standardized-target optimizer loss (including L2,
-not a selection score). A convergence warning,
+not a selection score). A disallowed convergence warning,
 nonfinite fitted weights/loss or nonfinite inverse-transformed prediction raises
 `ValueError`, with no partial result, fallback or retry; unrelated warning classes
 are not convergence failures. Sklearn's exact interrupted-training warning restores

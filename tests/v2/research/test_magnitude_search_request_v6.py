@@ -112,10 +112,20 @@ def _no_expansion(*args, **kwargs):
 
 
 @pytest.mark.parametrize("profiles", [[], ["unknown"], [1], [True], [None], [{}],
-    [PROFILES[0], PROFILES[0]], list(reversed(PROFILES)), PROFILES * 11, "relu32_l2_0p01"])
+    [PROFILES[0], PROFILES[0]], list(reversed(PROFILES)), PROFILES * 11, "relu32_l2_0p01",
+    [V7_ADDITIONS[0]]])
 def test_invalid_profiles_refuse_before_expansion(monkeypatch, profiles):
     request = v6_request()
     request["space"]["mlp"]["profile"] = profiles
+    monkeypatch.setattr(compiler, "_specifications", _no_expansion)
+    with pytest.raises(OpsError) as caught:
+        compile_request(request)
+    assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
+
+
+def test_invalid_v7_profiles_refuse_before_expansion(monkeypatch):
+    request = v7_request()
+    request["space"]["mlp"]["profile"] = ["unknown"]
     monkeypatch.setattr(compiler, "_specifications", _no_expansion)
     with pytest.raises(OpsError) as caught:
         compile_request(request)
