@@ -181,21 +181,30 @@ def test_load_fit_inputs_streams_many_shards_and_projects_only_fit_rows(tmp_path
                                   for event in events if event in wanted for horizon in (1, 5)]
 
 
-def test_load_fit_inputs_includes_event_date_only_when_source_has_it(tmp_path):
+def test_load_fit_inputs_preserves_existing_projection_unless_recipe_requires_dates(tmp_path):
     cohort, events = _fit_cohort(4)
     for position, row in enumerate(cohort["features"]):
         row["event_date"] = f"2024-01-{position + 1:02d}"
     store = ArtifactStore(tmp_path / "with_dates")
     manifest, inputs_id = publish_inputs(store, cohort)
-    loaded = load_fit_inputs(store, manifest, inputs_id, events, [1, 3, 5], ("x",))
-    assert [row["event_date"] for row in loaded["features"]] == [
+    existing_recipe = {}
+    existing = load_fit_inputs(store, manifest, inputs_id, events, [1, 3, 5], ("x",),
+                               requires_event_dates=existing_recipe.get("requires_event_dates", False))
+    columns = ("event_id", "context_id", "horizon_sessions", "x")
+    assert existing["features"] == [{name: row[name] for name in columns} for row in cohort["features"]]
+    assert load_fit_inputs(store, manifest, inputs_id, events, [1, 3, 5], ("x",)) == existing
+
+    recipe = {"requires_event_dates": True}
+    dated = load_fit_inputs(store, manifest, inputs_id, events, [1, 3, 5], ("x",),
+                            requires_event_dates=recipe["requires_event_dates"])
+    assert [row["event_date"] for row in dated["features"]] == [
         row["event_date"] for row in cohort["features"]]
 
     cohort_without_dates, _ = _fit_cohort(4)
     store_without_dates = ArtifactStore(tmp_path / "without_dates")
     manifest_without_dates, id_without_dates = publish_inputs(store_without_dates, cohort_without_dates)
     loaded_without_dates = load_fit_inputs(store_without_dates, manifest_without_dates, id_without_dates,
-                                           [], [1, 3, 5], ("x",))
+        [], [1, 3, 5], ("x",), requires_event_dates=True)
     assert all("event_date" not in row for row in loaded_without_dates["features"])
 
 

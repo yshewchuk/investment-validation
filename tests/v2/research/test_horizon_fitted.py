@@ -134,7 +134,7 @@ def test_bad_forecasts_fail_without_partial_return(monkeypatch, values):
     assert isinstance(caught.value.__cause__, ValueError)
 
 
-def test_candidate_fitter_receives_training_dates_in_row_order_and_none_when_absent(monkeypatch):
+def test_candidate_fitter_receives_recipe_requested_dates_in_order_and_preserves_matrix_hashes(monkeypatch):
     received = []
 
     def fit_candidate(*args, **kwargs):
@@ -145,16 +145,16 @@ def test_candidate_fitter_receives_training_dates_in_row_order_and_none_when_abs
     source = indexed()
     source["b", 5]["event_date"] = "2024-01-02"
     source["a", 5]["event_date"] = "2024-01-01"
-    horizon_fitted.fitted_forecasts(source, ["b", "a"], [1., 2.], ["evaluation"], [5], ["x"],
-        target_column="absolute_move_pct", target_domain="nonnegative", route="magnitude_candidate", recipe={})
+    _, evidence = horizon_fitted.fitted_forecasts(source, ["b", "a"], [1., 2.], ["evaluation"], [5], ["x"],
+        target_column="absolute_move_pct", target_domain="nonnegative", route="magnitude_candidate",
+        recipe={"requires_event_dates": True})
     assert received[0]["event_dates"] == ["2024-01-02", "2024-01-01"]
+    expected = prepare_horizon_inputs(source, ["b", "a"], ["evaluation"], 5, ["x"], [1., 2.],
+                                     target_column="absolute_move_pct")[2]
+    assert evidence[0] == expected
 
-    horizon_fitted.fitted_forecasts(indexed(), ["b", "a"], [1., 2.], ["evaluation"], [5], ["x"],
-        target_column="absolute_move_pct", target_domain="nonnegative", route="magnitude_candidate", recipe={})
-    assert received[1]["event_dates"] is None
 
-
-def test_candidate_fitter_receives_training_dates_in_row_order_and_none_when_absent(monkeypatch):
+def test_candidate_fitter_omits_dates_when_recipe_does_not_need_them_or_rows_are_mixed(monkeypatch):
     received = []
 
     def fit_candidate(*args, **kwargs):
@@ -162,16 +162,19 @@ def test_candidate_fitter_receives_training_dates_in_row_order_and_none_when_abs
         return {"predictions": [1.]}
 
     monkeypatch.setattr("engine.v2.models.training.magnitude_candidate.fit_candidate", fit_candidate)
-    source = indexed()
-    source["b", 5]["event_date"] = "2024-01-02"
-    source["a", 5]["event_date"] = "2024-01-01"
-    horizon_fitted.fitted_forecasts(source, ["b", "a"], [1., 2.], ["evaluation"], [5], ["x"],
+    source_without_requirement = indexed()
+    for event in ("a", "b"):
+        source_without_requirement[event, 5]["event_date"] = f"2024-01-{1 if event == 'a' else 2:02d}"
+    horizon_fitted.fitted_forecasts(source_without_requirement, ["b", "a"], [1., 2.], ["evaluation"], [5], ["x"],
         target_column="absolute_move_pct", target_domain="nonnegative", route="magnitude_candidate", recipe={})
-    assert received[0]["event_dates"] == ["2024-01-02", "2024-01-01"]
+    assert "event_dates" not in received[0]
 
-    horizon_fitted.fitted_forecasts(indexed(), ["b", "a"], [1., 2.], ["evaluation"], [5], ["x"],
-        target_column="absolute_move_pct", target_domain="nonnegative", route="magnitude_candidate", recipe={})
-    assert received[1]["event_dates"] is None
+    source_mixed = indexed()
+    source_mixed["b", 5]["event_date"] = "2024-01-02"
+    horizon_fitted.fitted_forecasts(source_mixed, ["b", "a"], [1., 2.], ["evaluation"], [5], ["x"],
+        target_column="absolute_move_pct", target_domain="nonnegative", route="magnitude_candidate",
+        recipe={"requires_event_dates": True})
+    assert "event_dates" not in received[1]
 
 
 def test_one_shot_ids_columns_and_horizons_are_materialized_once():

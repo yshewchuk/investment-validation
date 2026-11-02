@@ -18,9 +18,10 @@ from tests.v2.research.magnitude_trial_support import build_history, poison_outc
 from tests.v2.research.test_magnitude_history_store import source  # noqa: F401
 
 
-def _projection(value, snapshot, context, *, columns=("n_prior", "mean_prior_abs_move")):
+def _projection(value, snapshot, context, *, columns=("n_prior", "mean_prior_abs_move"), requires_event_dates=False):
     return stored.read_stored_for_events(value.repository, snapshot, context,
-        event_ids=[context["temporal_plan"]["events"][0]["event_id"]], columns=columns)
+        event_ids=[context["temporal_plan"]["events"][0]["event_id"]], columns=columns,
+        requires_event_dates=requires_event_dates)
 
 
 def _assert_fresh_bounded_scans(value, columns):
@@ -86,13 +87,20 @@ def test_projected_rows_keep_full_snapshot_identity_and_raw_numeric_values(sourc
     columns = ("mean_prior_move", "n_prior", "ema12_prior_abs_move", "mean_prior_abs_move")
     projected = _projection(source, snapshot, context, columns=columns)
     event = context["temporal_plan"]["events"][0]["event_id"]
-    keys = ("event_id", "context_id", "horizon_sessions", "event_date", *columns)
+    keys = ("event_id", "context_id", "horizon_sessions", *columns)
     assert projected == {"context": context, "feature_snapshot": to_document(snapshot),
         "rows": [{key: row[key] for key in keys} for row in rows if row["event_id"] == event],
         "inputs_id": expected}
     assert full["inputs_id"] == expected
     assert _projection(source, snapshot, context, columns=columns) == projected
     assert all("history_json" not in row for row in projected["rows"])
+    recipe = {"requires_event_dates": True}
+    dated = _projection(source, snapshot, context, columns=columns,
+                        requires_event_dates=recipe["requires_event_dates"])
+    dated_keys = ("event_id", "context_id", "horizon_sessions", "event_date", *columns)
+    assert dated["rows"] == [{key: row[key] for key in dated_keys}
+                              for row in rows if row["event_id"] == event]
+    assert dated["inputs_id"] == expected
 
 
 def test_projection_globally_admits_metadata_before_numbers_in_bounded_batches(source, monkeypatch):  # noqa: F811

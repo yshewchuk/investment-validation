@@ -92,16 +92,16 @@ def load_inputs(store, record, expected_id):
 
 
 def load_fit_inputs(store, manifest, expected_id, evaluation_event_ids, horizons, feature_columns, *,
-                    target_column="absolute_move_pct"):
+                    target_column="absolute_move_pct", requires_event_dates=False):
     """Stream stored training/feature rows for fixed fitting or admission replay.
 
     Verifies the manifest against ``expected_id`` and reads only its ``training`` and
     ``features`` sections, shard by shard. Returns ``{"features", "training"}``: training rows
     reduced to (event_id, target_column); feature rows kept for training or evaluation
     events at the selected horizons, reduced to the required projection (event_id,
-    context_id, horizon_sessions, *feature_columns) plus event_date when present; a
-    missing event_date is omitted so non-SIZE publishers remain loadable. A manifest,
-    hash, shard or inline-path mismatch is
+    context_id, horizon_sessions, *feature_columns), plus event_date only when the fit
+    recipe requests it and a source row provides it. A manifest, hash, shard or inline-path
+    mismatch is
     EXPERIMENT_IDENTITY_CONFLICT (retryable store errors propagate); a row missing a
     requested column raises KeyError. The magnitude fit child reports MemoryError as
     resource_limit and other loader failures as unavailable; library callers retain the error.
@@ -110,7 +110,8 @@ def load_fit_inputs(store, manifest, expected_id, evaluation_event_ids, horizons
     """
     if not isinstance(manifest, dict) or manifest.get("schema_version") != MANIFEST_SCHEMA:
         raise fail(_CONFLICT, "search cohort record is invalid")
-    if (not isinstance(evaluation_event_ids, (list, tuple)) or not isinstance(horizons, (list, tuple))
+    if (type(requires_event_dates) is not bool
+            or not isinstance(evaluation_event_ids, (list, tuple)) or not isinstance(horizons, (list, tuple))
             or not isinstance(feature_columns, (list, tuple))):
         raise fail("INVALID_EXPERIMENT_SPEC", "search fit projection arguments are invalid")
     sections = _admit_manifest(manifest, expected_id)
@@ -126,7 +127,7 @@ def load_fit_inputs(store, manifest, expected_id, evaluation_event_ids, horizons
     wanted = set(horizons)
     columns = ("event_id", "context_id", "horizon_sessions", *feature_columns)
     features = [{**{name: row[name] for name in columns},
-                 **({"event_date": row["event_date"]} if "event_date" in row else {})}
+                 **({"event_date": row["event_date"]} if requires_event_dates and "event_date" in row else {})}
                 for row in _iter_rows(store, members["features"], sections["features"])
                 if row["event_id"] in events and row["horizon_sessions"] in wanted]
     return {"features": features, "training": training}

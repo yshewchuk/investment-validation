@@ -36,7 +36,7 @@ def fitted_forecasts(indexed, training_ids, labels, evaluation_ids, horizons, co
         try:
             fit_started = time.monotonic() if measure_fit_seconds else None
             result = fit_execution(route, recipe, matrix, labels.copy(), prediction_matrix,
-                                  **_fit_options(indexed, training_ids, horizon, columns))
+                                  **_fit_options(indexed, training_ids, horizon, columns, recipe))
             fit_seconds = time.monotonic() - fit_started if measure_fit_seconds else None
             values = result["predictions"]
             if diagnostics is not None and route != "magnitude":
@@ -71,8 +71,10 @@ def _validate_forecasts(values, count, target_domain):
         raise ValueError
 
 
-def _fit_options(indexed, training_ids, horizon, columns):
+def _fit_options(indexed, training_ids, horizon, columns, recipe):
     options = {"columns": columns}
-    if indexed is not None and all("event_date" in indexed[event, horizon] for event in training_ids):
+    if (isinstance(recipe, dict) and recipe.get("requires_event_dates") is True
+            and indexed is not None and training_ids
+            and all("event_date" in indexed[event, horizon] for event in training_ids)):
         options["event_dates"] = [indexed[event, horizon]["event_date"] for event in training_ids]
     return options

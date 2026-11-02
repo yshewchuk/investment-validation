@@ -112,8 +112,9 @@ def _native_selection(trials, plan, read):
     return selection
 
 
-def _inputs(repository, binding, fold, *, plan=None):
-    return admit_fold_inputs(repository, binding, fold, history_failure=_conflict(), strict_json=True, plan=plan)
+def _inputs(repository, binding, fold, *, plan=None, requires_event_dates=False):
+    return admit_fold_inputs(repository, binding, fold, history_failure=_conflict(), strict_json=True, plan=plan,
+                             requires_event_dates=requires_event_dates)
 
 
 def _forecasts(rows, fold, horizons, target=None):
@@ -253,10 +254,13 @@ def _execute_admitted(conn, store, repository, registration, plan, fold, selecti
     forbid_fitting("execute_outer_fold")
     forbid_legacy_fitting("execute_outer_fold")
     resolved = resolved_limits(conn, store, registration, plan, limits) if diagnostic_keys(binding) else execution_limits(limits)
-    inputs = _inputs(repository, binding, fold, plan=plan) if "target" in plan and saved("start") is None else None
+    requires_event_dates = execution.get("fit_recipe", {}).get("requires_event_dates") is True
+    inputs = (_inputs(repository, binding, fold, plan=plan, requires_event_dates=requires_event_dates)
+              if "target" in plan and saved("start") is None else None)
     append("start", started)
     if inputs is None:
-        inputs = _inputs(repository, binding, fold, plan=plan) if "target" in plan else _inputs(repository, binding, fold)
+        inputs = (_inputs(repository, binding, fold, plan=plan, requires_event_dates=requires_event_dates)
+                  if "target" in plan else _inputs(repository, binding, fold))
     manifest, inputs_id = publish_inputs(store, inputs)
     append("inputs", manifest)
     expected = fit_evidence(inputs, fold, plan, execution)

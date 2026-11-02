@@ -50,7 +50,9 @@ def main():
         inputs = load_fit_inputs(ArtifactStore(request["store_root"]), request["manifest"], request["inputs_id"],
                                  request["inner"]["evaluation_event_ids"], request["plan"]["horizons"],
                                  request["execution"]["features"],
-                                 **({"target_column": target["column"]} if regression else {}))
+                                 **({"target_column": target["column"]} if regression else {}),
+                                 requires_event_dates=request["execution"].get("fit_recipe", {}).get(
+                                     "requires_event_dates") is True)
         indexed = {(row["event_id"], row["horizon_sessions"]): row for row in inputs["features"]}
 
         def progress(state, fit):

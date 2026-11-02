@@ -29,7 +29,9 @@ def fit_execution(route, recipe, train_features, train_labels, prediction_featur
         return {"predictions": fit_magnitude_predictions(recipe, train_features, train_labels, prediction_features)}
     if route == "magnitude_candidate":
         from .magnitude_candidate import fit_candidate as fit
-        return fit(recipe, train_features, train_labels, prediction_features, columns=columns,
-                   event_dates=event_dates)
+        options = {"columns": columns}
+        if event_dates is not None:
+            options["event_dates"] = event_dates
+        return fit(recipe, train_features, train_labels, prediction_features, **options)
     from .regression_candidate import fit_regression_candidate as fit
     return fit(recipe, train_features, train_labels, prediction_features, columns=columns)

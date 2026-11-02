@@ -336,7 +336,12 @@ def _stream_identity(context, snapshot, rows):
     return "sha256:" + digest.hexdigest()
 
 
-def read_stored_for_events(repository, snapshot, context, *, event_ids, columns):
+def _valid_projection_groups(event_ids, columns):
+    return all(isinstance(group, (list, tuple, set, frozenset))
+               and all(isinstance(value, str) for value in group) for group in (event_ids, columns))
+
+
+def read_stored_for_events(repository, snapshot, context, *, event_ids, columns, requires_event_dates=False):
     """Validate/hash every full row; retain only requested identity/numeric columns.
 
     The returned inputs_id identifies the complete original read_stored envelope,
@@ -345,8 +350,7 @@ def read_stored_for_events(repository, snapshot, context, *, event_ids, columns)
     Every call repeats both scans; no cross-call validation or outcome cache.
     """
     expected = preflight_stored(repository, snapshot, context)
-    if any(not isinstance(group, (list, tuple, set, frozenset))
-           or any(not isinstance(value, str) for value in group) for group in (event_ids, columns)):
+    if type(requires_event_dates) is not bool or not _valid_projection_groups(event_ids, columns):
         raise errors.fail("CONTRACT_MISMATCH", "stored history projection differs from its context")
     selected = set(event_ids)
     if (not selected <= {event["event_id"] for event, _ in expected}
@@ -360,7 +364,7 @@ def read_stored_for_events(repository, snapshot, context, *, event_ids, columns)
             count = _metadata(row, context, *pair)
             admitted.append((content_hash(row), count))
     retained = []
-    keys = (*CONTRACT.primary_key, "event_date", *columns)
+    keys = (*CONTRACT.primary_key, *( ("event_date",) if requires_event_dates else ()), *columns)
 
     def validated():
         stream = _stream_rows(repository, snapshot, context, (*METADATA, *FEATURES), len(expected))

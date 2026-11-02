@@ -175,12 +175,13 @@ class SearchTrials:
             return trial_key(plan, owner_year, inner_year, candidate_id), inner, candidate
         return trial_key(plan, outer_year, inner_year, candidate_id), requested, candidate
 
-    def _inputs(self, inner):
+    def _inputs(self, inner, requires_event_dates=False):
         plan = self._admit() if self.registration.document.get("schema_version") == "native_experiment_registration.v1.8" else None
         return admit_fold_inputs(self.repository, self.registration.document, inner,
-            history_failure=fail("EXPERIMENT_IDENTITY_CONFLICT", "search native history binding changed"), plan=plan)
+            history_failure=fail("EXPERIMENT_IDENTITY_CONFLICT", "search native history binding changed"), plan=plan,
+            requires_event_dates=requires_event_dates)
 
-    def _cohort_inputs(self, cohort, inner):
+    def _cohort_inputs(self, cohort, inner, requires_event_dates=False):
         """Keep only the latest cohort resident; a revisit of a published cohort reloads its manifest; failures are never memoised."""
         if cohort not in self._memo:
             self._memo.clear()  # at most one cohort resident: release the previous one before loading
@@ -188,7 +189,8 @@ class SearchTrials:
                 manifest, inputs_id = self._published[cohort]
                 self._memo[cohort] = load_inputs(self.store, manifest, inputs_id)
             else:
-                self._memo[cohort] = self._inputs(inner)
+                self._memo[cohort] = (self._inputs(inner, True) if requires_event_dates
+                                      else self._inputs(inner))
         return self._memo[cohort]
 
     def _cohort(self, admitted):
@@ -215,9 +217,14 @@ class SearchTrials:
         started = {"trial_id": key, "outer_year": owner_year, "inner_year": inner_year, "candidate": candidate}
         if execution is not None:
             started["execution"] = execution
+        requires_event_dates = candidate["recipe"].get("requires_event_dates") is True
         cohort = cohort_key(plan, owner_year, inner_year)
+        if requires_event_dates:
+            cohort = content_hash({"cohort": cohort, "requires_event_dates": True})
         existing_start = self._read("start:" + key)
-        inputs = self._cohort_inputs(cohort, inner) if "target" in plan and existing_start is None else None
+        inputs = ((self._cohort_inputs(cohort, inner, True) if requires_event_dates
+                   else self._cohort_inputs(cohort, inner))
+                  if "target" in plan and existing_start is None else None)
         if plan.get("schema_version") == PLAN_V3 and existing_start is not None:
             if execution is not None:
                 raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search trial is unfinished")
@@ -232,7 +239,8 @@ class SearchTrials:
         if execution is not None:
             self._append("execution-start:" + key, execution, replay=False)
         if inputs is None:
-            inputs = self._cohort_inputs(cohort, inner)
+            inputs = (self._cohort_inputs(cohort, inner, True) if requires_event_dates
+                      else self._cohort_inputs(cohort, inner))
         # Shards first (outside the catalog transaction); the manifest append is the commit point.
         if cohort not in self._published:
             self._published[cohort] = publish_inputs(self.store, inputs)
@@ -520,7 +528,10 @@ class SearchTrials:
                 stored = self._cohort(admitted)
             except ValueError:
                 raise fail("EXPERIMENT_IDENTITY_CONFLICT", "trial native inputs changed after start") from None
-            if content_hash(self._cohort_inputs(admitted["cohort"], inner)) != content_hash(stored):
+            requires_event_dates = candidate["recipe"].get("requires_event_dates") is True
+            cohort_inputs = (self._cohort_inputs(admitted["cohort"], inner, True) if requires_event_dates
+                             else self._cohort_inputs(admitted["cohort"], inner))
+            if content_hash(cohort_inputs) != content_hash(stored):
                 raise fail("EXPERIMENT_IDENTITY_CONFLICT", "trial native inputs changed after start")
             binding = self.registration.document
             labels = evaluation_targets(self.repository, binding, inner) if "target" in plan else load_magnitude_targets(self.repository, from_document(SnapshotRef, binding["snapshot"]),

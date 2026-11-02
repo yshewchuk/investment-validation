@@ -20,7 +20,8 @@ OMISSION_REASONS = frozenset({"skipped", "not_orats", "no_session", "no_price_wi
     "no_price_history", "ticker_too_few_events"})
 
 
-def admit_fold_inputs(repository, binding, fold, *, history_failure, strict_json=False, plan=None):
+def admit_fold_inputs(repository, binding, fold, *, history_failure, strict_json=False, plan=None,
+                      requires_event_dates=False):
     """Load preflighted native inputs; the caller supplies its history-conflict envelope."""
     if binding.get("schema_version") == "native_experiment_registration.v1.8":
         from experiments.regression_search_binding import fold_inputs
@@ -38,7 +39,8 @@ def admit_fold_inputs(repository, binding, fold, *, history_failure, strict_json
     participants = set(fold["training_candidate_event_ids"] + fold["evaluation_event_ids"])
     preflight = preflight_magnitude_targets(repository, snapshot, as_of_month=month, event_ids=sorted(participants))
     stored = read_stored_for_events(repository, from_document(SnapshotRef, history["feature_snapshot"]),
-        history["context"], event_ids=participants, columns=binding["magnitude_execution"]["features"])
+        history["context"], event_ids=participants, columns=binding["magnitude_execution"]["features"],
+        requires_event_dates=requires_event_dates)
     train = qualify_magnitude_training_targets(repository, snapshot, as_of_month=month,
         labels_before=fold["training_labels_before"], event_ids=fold["training_candidate_event_ids"])
     return {"preflight": preflight, "stored_inputs_id": stored["inputs_id"], "training_inputs": dict(train.attrs),
