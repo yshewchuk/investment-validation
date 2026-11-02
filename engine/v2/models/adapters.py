@@ -183,7 +183,9 @@ class _ServingFold:
             return validated_training_cutoff(cutoff, fold_start)
         except AdapterError:
             raise
-        except (TypeError, ValueError, OverflowError):
+        except (TypeError, ValueError, OverflowError) as exc:
+            if str(exc) == "invalid serving fold start":
+                raise AdapterError("invalid serving fold fold_start") from None
             raise AdapterError("invalid serving fold training cutoff") from None
 
     def metadata(self) -> ServingFoldMetadata:

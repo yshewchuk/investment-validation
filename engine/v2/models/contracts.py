@@ -90,7 +90,10 @@ def validated_training_cutoff(value: object, fold_start: str | None = None) -> s
     if not isinstance(value, str) or day != value:
         raise ValueError("invalid serving fold training cutoff")
     if fold_start is not None:
-        fold = canonical_day(fold_start)
+        try:
+            fold = canonical_day(fold_start)
+        except (TypeError, ValueError, OverflowError):
+            raise ValueError("invalid serving fold start") from None
         if not isinstance(fold_start, str) or fold != fold_start:
             raise ValueError("invalid serving fold start")
         if day >= fold:

@@ -811,7 +811,7 @@ def test_public_metadata_rejects_header_types_after_adapter_decode(setup, key, v
     monkeypatch.setattr(joblib, "load", lambda *a, **k: (loads.append(1), original(*a, **k))[1])
     # fold_start=123 trips the early cutoff validation inside adapter load; the
     # other malformed header fields survive load and fail only at metadata().
-    expected = ("^invalid serving fold training cutoff$" if key == "fold_start"
+    expected = ("^invalid serving fold fold_start$" if key == "fold_start"
                 else "^invalid serving fold metadata$")
     for _ in range(2):
         with pytest.raises(AdapterError, match=expected) as caught:
