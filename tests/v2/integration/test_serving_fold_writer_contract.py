@@ -260,12 +260,12 @@ def test_serving_model_cache_hit_carries_a_malformed_training_cutoff_without_rej
         },
         path,
     )
-    result = tier4.serving_model(FOLD, panel=pd.DataFrame(), model=model, cache=True)
-    assert result.training_cutoff == ["2026-08-20"]
+    with pytest.raises(tier4.Tier4Error, match="^invalid serving fold training cutoff$"):
+        tier4.serving_model(FOLD, panel=pd.DataFrame(), model=model, cache=True)
 
 
 @pytest.mark.parametrize("training_cutoff", [str(FOLD.date()), "2026-09-02"])
-def test_serving_model_cache_hit_carries_cutoff_at_or_after_fold_without_rejecting(
+def test_serving_model_cache_hit_refuses_cutoff_at_or_after_fold(
     tmp_path, monkeypatch, model, served, training_cutoff
 ):
     _wire_serving_model(tmp_path, monkeypatch, model, served)
@@ -283,8 +283,8 @@ def test_serving_model_cache_hit_carries_cutoff_at_or_after_fold_without_rejecti
         },
         path,
     )
-    result = tier4.serving_model(FOLD, panel=pd.DataFrame(), model=model, cache=True)
-    assert result.training_cutoff == training_cutoff
+    with pytest.raises(tier4.Tier4Error, match="^invalid serving fold training cutoff$"):
+        tier4.serving_model(FOLD, panel=pd.DataFrame(), model=model, cache=True)
 
 
 @pytest.mark.parametrize(
