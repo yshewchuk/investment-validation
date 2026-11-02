@@ -3,11 +3,12 @@ from __future__ import annotations
 
 import math
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from typing import Literal
 
 from engine.v2.foundation import DocumentError, content_hash, to_document
+from engine.v2.models.chooser_cutoff import canonical_day
 from engine.v2.models.contracts import ArtifactMember
 
 FOLD_PANEL_SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
@@ -92,6 +93,19 @@ class ChooserFoldPolicy:
             raise DocumentError("BAD_INTERVAL_FLOOR", "$.interval_floor", "expected a finite number or null")
 
 
+def _validate_training_cutoff(value: str | None, fold_start: str) -> None:
+    """Accept legacy ``None``; otherwise require a canonical day before ``fold_start``."""
+    if value is None:
+        return
+    try:
+        canonical = canonical_day(value)
+    except ValueError:
+        canonical = None
+    if canonical != value or canonical >= fold_start:
+        raise DocumentError("BAD_TRAINING_CUTOFF", "$.training_cutoff",
+                            "expected canonical ISO day strictly before fold_start")
+
+
 @dataclass(frozen=True, kw_only=True)
 class ChooserServingFoldDescriptor:
     """Role-specific declaration; loaded only by the chooser artifact loader."""
@@ -108,6 +122,7 @@ class ChooserServingFoldDescriptor:
     pool_pred_field: Literal["pool_pred"] = "pool_pred"
     pool_res_field: Literal["pool_res"] = "pool_res"
     schema_version: str = "chooser_serving_fold_descriptor.v1.0"
+    training_cutoff: str | None = field(default=None, metadata={"omit_if_none": True})
 
     def __post_init__(self) -> None:
         if (self.output_name, self.producer_output) != chooser_fold_outputs(self.policy.role):
@@ -130,6 +145,8 @@ class ChooserServingFoldDescriptor:
             raise DocumentError("BAD_PARENT_HASH", "$.parent_release_hash", "expected canonical SHA-256 content hash")
         if not isinstance(self.decision_clock_id, str) or not self.decision_clock_id:
             raise DocumentError("BAD_FOLD_CLOCK", "$.decision_clock_id", "expected a nonempty clock identity")
+        if self.training_cutoff is not None:
+            _validate_training_cutoff(self.training_cutoff, self.fold_start)
 
     @property
     def descriptor_hash(self) -> str:

@@ -141,6 +141,7 @@ class ServingFoldMetadata:
     feature_order: tuple[str, ...]
     pool_pred: tuple[float, ...]
     pool_res: tuple[float, ...]
+    training_cutoff: str | None = None
 
 
 @dataclass(frozen=True)
@@ -169,7 +170,8 @@ class _ServingFold:
         return ServingFoldMetadata(model_id=str(header["model_id"]), fold_start=str(header["fold_start"]),
                                    panel_sha256=str(header["tier3_snapshot"]),
                                    feature_order=tuple(str(key) for key in header["features"]),
-                                   pool_pred=pred, pool_res=res)
+                                   pool_pred=pred, pool_res=res,
+                                   training_cutoff=header.get("training_cutoff"))
 
 
 class Tier4ServingFoldAdapter:

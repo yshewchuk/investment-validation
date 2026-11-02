@@ -271,9 +271,12 @@ class NoInference:
 
 
 def _cache(role, panel="a" * 64):
-    return {"model_id": f"synthetic-{role}", "features": ["x", "y"],
-            "tier3_snapshot": panel, "fold_start": "2026-02-01", "estimator": NoInference(),
-            "pool_pred": [1.0, 3.0], "pool_res": [-0.5, 0.25]}
+    cache = {"model_id": f"synthetic-{role}", "features": ["x", "y"],
+             "tier3_snapshot": panel, "fold_start": "2026-02-01", "estimator": NoInference(),
+             "pool_pred": [1.0, 3.0], "pool_res": [-0.5, 0.25]}
+    if role != "size":
+        cache["training_cutoff"] = "2026-01-15"
+    return cache
 
 
 def _retry_inputs(role, cache):
@@ -315,6 +318,8 @@ def _assert_published_descriptor(root, role, cache, *, release_id="r1", clock="e
         del expected["policy"]["role"]
     else:
         expected["producer_output"] = OUTPUTS[role][1]
+    if "training_cutoff" in cache:
+        expected["training_cutoff"] = cache["training_cutoff"]
     assert obj["serving_fold"] == expected
     descriptor = from_document(descriptor_type, obj["serving_fold"])
     assert to_document(descriptor) == expected
@@ -782,11 +787,29 @@ def test_empty_and_thin_pools_keep_explicit_counts(role, count):
     validated = folds.preflight_chooser_fold(data, fold_name(cache), policy, release)
     expected = {"fold_start": "2026-02-01", "decision_clock_id": "entry-close",
                 "digest": hashlib.sha256(data).hexdigest(), "pool_count": count,
-                "policy": policy, "release": release}
+                "policy": policy, "release": release,
+                "training_cutoff": cache["training_cutoff"]}
     assert vars(validated) == expected
     assert {field.name for field in dataclasses.fields(validated)} == set(expected)
     with pytest.raises(dataclasses.FrozenInstanceError):
         validated.pool_count = 100
+
+
+@pytest.mark.parametrize("role", OUTPUTS)
+@pytest.mark.parametrize("training_cutoff", [None, "2026-1-15"], ids=["absent", "noncanonical"])
+def test_direct_preflight_rejects_absent_or_noncanonical_training_cutoff(role, training_cutoff):
+    cache = _cache(role)
+    if training_cutoff is None:
+        del cache["training_cutoff"]
+    else:
+        cache["training_cutoff"] = training_cutoff
+    data, policy = fold_bytes(cache), chooser_policy(role, cache)
+    release = release_inputs(role, cache)[0]
+    with pytest.raises(DocumentError) as caught:
+        folds.preflight_chooser_fold(data, fold_name(cache), policy, release)
+    expected_message = "required for new authoring" if training_cutoff is None else "expected canonical ISO day"
+    assert (caught.value.code, caught.value.path, caught.value.message) == (
+        "BAD_TRAINING_CUTOFF", "$.training_cutoff", expected_message)
 
 
 @pytest.mark.parametrize("role", OUTPUTS)
