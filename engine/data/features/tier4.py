@@ -58,6 +58,7 @@ import json
 import sys
 import time
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
@@ -104,6 +105,21 @@ __all__ = [
 
 class Tier4Error(RuntimeError):
     """The forecast table, or a request to build it, failed a causality check."""
+
+
+def _validated_training_cutoff(value: object) -> str | None:
+    """A stored serving-fold training cutoff, validated as a canonical date string."""
+    if value is None:
+        return None
+    if not isinstance(value, str) or len(value) != 10:
+        raise Tier4Error("invalid serving fold training cutoff")
+    try:
+        parsed = date.fromisoformat(value)
+    except ValueError:
+        raise Tier4Error("invalid serving fold training cutoff") from None
+    if parsed.isoformat() != value:
+        raise Tier4Error("invalid serving fold training cutoff")
+    return value
 
 
 #: The retrain period. A registered parameter rather than a constant, so
@@ -1640,6 +1656,7 @@ def serving_model(
                 pool_pred, pool_res = _pool_before(
                     fold, model, load_panel() if panel is None else panel
                 )
+            training_cutoff = _validated_training_cutoff(stored.get("training_cutoff"))
             return ServingModel(
                 estimator=stored["estimator"],
                 model_id=model.model_id,
@@ -1649,7 +1666,7 @@ def serving_model(
                 interval_floor=model.interval_floor,
                 pool_pred=pool_pred,
                 pool_res=pool_res,
-                training_cutoff=stored.get("training_cutoff"),
+                training_cutoff=training_cutoff,
             )
 
     forbid_fitting("engine.data.features.tier4.serving_model:miss")

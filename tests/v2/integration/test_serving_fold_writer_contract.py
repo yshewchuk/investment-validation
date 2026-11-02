@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import warnings
 from dataclasses import replace
+from datetime import date, datetime
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -217,7 +218,35 @@ def test_serving_model_cache_hit_carries_the_cutoff_and_a_legacy_header_serves_n
     assert legacy.training_cutoff is None
 
 
-def test_direct_adapter_metadata_refuses_a_mutable_training_cutoff(model, served):
+def test_serving_model_cache_hit_refuses_a_malformed_training_cutoff(
+    tmp_path, monkeypatch, model, served
+):
+    _wire_serving_model(tmp_path, monkeypatch, model, served)
+    path = tier4._serving_path(model.model_id, FOLD, SNAPSHOT)
+    joblib.dump(
+        {
+            "estimator": served.estimator,
+            "model_id": served.model_id,
+            "fold_start": str(FOLD.date()),
+            "tier3_snapshot": SNAPSHOT,
+            "features": list(served.features),
+            "pool_pred": served.pool_pred,
+            "pool_res": served.pool_res,
+            "training_cutoff": ["2026-08-20"],
+        },
+        path,
+    )
+    with pytest.raises(tier4.Tier4Error, match="^invalid serving fold training cutoff$"):
+        tier4.serving_model(FOLD, panel=pd.DataFrame(), model=model, cache=True)
+
+
+@pytest.mark.parametrize(
+    "training_cutoff",
+    [["2026-08-20"], date(2026, 8, 20), datetime(2026, 8, 20)],
+)
+def test_direct_adapter_metadata_refuses_a_mutable_training_cutoff(
+    model, served, training_cutoff
+):
     binding = ModelBinding(
         binding_id="direct-cutoff",
         model_id=model.model_id,
@@ -237,7 +266,7 @@ def test_direct_adapter_metadata_refuses_a_mutable_training_cutoff(model, served
         "features": list(model.features),
         "pool_pred": served.pool_pred,
         "pool_res": served.pool_res,
-        "training_cutoff": ["2026-08-20"],
+        "training_cutoff": training_cutoff,
     }
     stream = io.BytesIO()
     joblib.dump(header, stream, compress=0)
@@ -275,6 +304,27 @@ def test_build_one_emits_the_declared_cutoff_and_omits_when_none(
         fit_builder=lambda *_args: served,
     )
     assert "training_cutoff" not in joblib.load(omitted_dir / filename)
+
+
+def test_build_one_refuses_a_malformed_builder_cutoff(
+    tmp_path, monkeypatch, model, served
+):
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    panel = pd.DataFrame({"x": [1.0], "z": [2.0], "y": [-0.5]})
+    with pytest.raises(
+        prepare.CachePreparationError,
+        match="^fit builder returned an invalid training cutoff$",
+    ):
+        prepare.build_one(
+            FOLD,
+            model=model,
+            snapshot=SNAPSHOT,
+            cache_dir=cache_dir,
+            panel_loader=lambda: panel,
+            fit_builder=lambda *_args: replace(served, training_cutoff=["2026-08-20"]),
+        )
+    assert list(cache_dir.iterdir()) == []
 
 
 def test_upgrade_one_keeps_only_a_cutoff_the_original_declared(

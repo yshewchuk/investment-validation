@@ -598,6 +598,10 @@ def build_one(
         or tuple(served.features) != tuple(selected_model.features)
     ):
         raise CachePreparationError(f"freshly fit model identity mismatch for {path}")
+    try:
+        training_cutoff = tier4._validated_training_cutoff(served.training_cutoff)
+    except tier4.Tier4Error:
+        raise CachePreparationError("fit builder returned an invalid training cutoff") from None
     pool_pred = np.asarray(served.pool_pred, dtype=float)
     pool_res = np.asarray(served.pool_res, dtype=float)
     candidate = {
@@ -609,8 +613,8 @@ def build_one(
         "pool_pred": pool_pred,
         "pool_res": pool_res,
     }
-    if served.training_cutoff is not None:
-        candidate["training_cutoff"] = served.training_cutoff
+    if training_cutoff is not None:
+        candidate["training_cutoff"] = training_cutoff
     _validated_pools(candidate, path)
 
     directory.mkdir(parents=True, exist_ok=True)

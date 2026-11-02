@@ -14,7 +14,7 @@ This package owns four things:
 - **Contracts** (`contracts.py`) — the immutable shapes a frozen release is
   made of (`ModelBinding`, `ModelRelease`, `ArtifactMember`) and the
   inference call/response pair (`InferenceRequest`, `InferenceResult`,
-  `PredictionFrame`). Schemas only: no logic, no I/O.
+  `PredictionFrame`). Schemas and pure metadata validators such as `validated_training_cutoff`; no I/O.
 - **Verified loading and inference** (`adapters.py`, `loader.py`) — the
   adapters that turn a hash-verified member's bytes into a read-only
   predictor, and `FrozenInference`, the one class that runs a request
@@ -579,9 +579,9 @@ pinned COPY verification and pinned-size byte mismatches use `panel_copy_refused
 | Partial write | No pointer changes; staging may leave unreferenced files; no automatic store repair |
 | Cache | Authoring validates each supplied object anew; no process-global descriptor cache |
 
-**Chooser producer fold authoring.** `ChooserFoldPolicy` and `ChooserServingFoldDescriptor` declare `implied_t1`/`runup_move` under exact `tier4_folds:<role>` members. The descriptor binds the parent release, full panel hash, ordered features, clock, whole-cache estimator object (not the champion member), pool count and decile/floor policy. It records both the champion binding output and raw D14 chooser column; runup output is never day-scaled here. Standard release preparation obtains each present role's policy from its registered producer and validates the cache against that role's unique wildcard champion. Size descriptors keep their existing schema.
-The descriptor hash covers its canonical typed document, including parent, role and estimator identity. `training_cutoff` is the producer-declared last training date as a canonical ISO day. New authoring and preflight require a present string equal to its canonical day and strictly before `fold_start`; invalid authoring refuses with descriptor validation code `BAD_TRAINING_CUTOFF`. A missing cutoff on a legacy descriptor is unavailable for later slices and is not a load-time error.
-Without pinned COPY, the panel digest is caller-asserted; preparation does not verify panel bytes.
+### Chooser producer fold authoring
+
+`ChooserFoldPolicy` and `ChooserServingFoldDescriptor` declare `implied_t1`/`runup_move` under exact `tier4_folds:<role>` members. The descriptor binds the parent release, full panel hash, ordered features, clock, whole-cache estimator object (not the champion member), pool count and decile/floor policy. It records both the champion binding output and raw D14 chooser column; runup output is never day-scaled here. Standard release preparation obtains each present role's policy from its registered producer and validates the cache against that role's unique wildcard champion. Size descriptors keep their existing schema. The descriptor hash covers its canonical typed document, including parent, role and estimator identity. `training_cutoff` is the producer-declared last training date as a canonical ISO day. New authoring and preflight require a present string equal to its canonical day and strictly before `fold_start`; invalid authoring refuses with descriptor validation code `BAD_TRAINING_CUTOFF`. A legacy descriptor without a cutoff loads successfully; a later consumer that requires it treats it as unavailable. Without pinned COPY, the panel digest is caller-asserted; preparation does not verify panel bytes.
 
 | Chooser fold authoring condition | Outcome |
 |---|---|
