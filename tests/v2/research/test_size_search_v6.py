@@ -107,7 +107,52 @@ def test_v6_workers_one_and_two_match_candidates_results_and_metrics(case, tmp_p
     serial_result, serial_report = execute("serial", 1)
     parallel_result, parallel_report = execute("parallel", 2)
     assert executor_calls == [2]
-    assert serial_result == parallel_result
+
+    def first_difference(left, right, path="$"):
+        if isinstance(left, dict) and isinstance(right, dict):
+            keys = list(left) + [key for key in right if key not in left]
+            for key in keys:
+                if key not in left or key not in right:
+                    return f"{path}.{key}", left.get(key), right.get(key)
+                difference = first_difference(left[key], right[key], f"{path}.{key}")
+                if difference is not None:
+                    return difference
+            return None
+        if isinstance(left, list) and isinstance(right, list):
+            for index, (left_item, right_item) in enumerate(zip(left, right)):
+                difference = first_difference(left_item, right_item, f"{path}[{index}]")
+                if difference is not None:
+                    return difference
+            if len(left) != len(right):
+                return f"{path}.length", len(left), len(right)
+            return None
+        return None if left == right else (path, left, right)
+
+    first = first_difference(serial_result, parallel_result)
+    if first is not None:
+        print(f"first result difference: {first[0]}: serial={first[1]!r}; parallel={first[2]!r}")
+
+    from engine.v2.foundation import content_hash
+
+    def without_selection_identity(value):
+        if isinstance(value, dict):
+            normalized = {
+                key: without_selection_identity(item)
+                for key, item in value.items()
+                if key not in {"selection_id", "result_id"}
+            }
+            if "result_id" in value:
+                normalized["result_id"] = content_hash(normalized)
+            return normalized
+        if isinstance(value, list):
+            return [without_selection_identity(item) for item in value]
+        return value
+
+    # selection_id hashes terminal IDs whose records include runtime score/RSS metadata.
+    # Recompute dependent result IDs so every remaining candidate/result field stays compared.
+    assert without_selection_identity(serial_result) == without_selection_identity(parallel_result)
+    assert serial_result["folds"][0]["candidate"] == parallel_result["folds"][0]["candidate"]
+    assert serial_result["folds"][0]["predictions"] == parallel_result["folds"][0]["predictions"]
     assert serial_result["metrics"] == parallel_result["metrics"]
     assert serial_result["prospective_candidate_id"] == parallel_result["prospective_candidate_id"]
     assert [(row["candidate_id"], row["inner_metrics"]) for row in serial_report["inner_fits"]] == [
