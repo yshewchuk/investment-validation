@@ -93,7 +93,7 @@ forecasts. No I/O, cache, retries, source/fold/holdout admission or release occu
 Existing magnitude numerics remain unchanged; source closures require resealing.
 `regression_candidate.regression_candidate_recipe` accepts only ridge/alpha, hgb/max_leaf_nodes or elasticnet/alpha+l1_ratio and delegates explicit signed/nonnegative policy construction; it imports no training or source admission.
 `training.regression_candidate.fit_regression_candidate` checks both no-fit guards before inspection, dispatches only matching regression schema/model pairs, then preserves the existing fitter result/validation/errors. Unsupported pairs refuse ValueError; no reads, selection, retries, writes or production caller.
-Existing experiment magnitude recipe dispatch is unchanged except that it also accepts the v2 HGB recipe schema; its fit adapter lazily delegates to shared `training.magnitude_candidate.fit_candidate`, refusing unsupported schemas (Ridge v1, HGB v1 and v2, and ElasticNet v1 are accepted) before training imports via shared `magnitude_candidate.magnitude_candidate_family` metadata validation.
+Experiment magnitude recipe dispatch accepts the additive v2 HGB and standalone MLP v1 schemas; its fit adapter lazily delegates to shared `training.magnitude_candidate.fit_candidate`, refusing unsupported schemas (Ridge v1, HGB v1 and v2, ElasticNet v1 and standalone MLP v1 are accepted) before training imports via shared `magnitude_candidate.magnitude_candidate_family` metadata validation.
 `training.fit_routes.fit_execution` accepts only magnitude/magnitude_candidate/regression_candidate numeric routes, checks both guards first and original magnitude column order against its admitted recipe, and preserves delegated errors/results (original magnitude lists become predictions-only dictionaries). It grants no source/registration authority and has no production caller; legacy exception translation stays in experiment wrappers.
 
 | Ridge/HGB condition | Outcome |
@@ -774,7 +774,7 @@ per the root doc's layer table; `checks/import_layers.py` enforces this.
   its policy/header checks) and `pinned_panel` (the pinned panel check), which live in this package.
 - `experiments/magnitude_search_trials.py`, `experiments/magnitude_search_execution.py`,
   and `experiments/v2_magnitude_search_run.py` use the no-fit guards before claims/fits.
-- `experiments/magnitude_candidate_recipe.py` consumes the closed ElasticNet/Ridge/HGB
+- `experiments/magnitude_candidate_recipe.py` consumes the closed ElasticNet/Ridge/HGB/MLP
   recipe constructors; `magnitude_candidate_fit.py` checks both legacy/v2 no-fit
   guards before recipe, column or array inspection, then delegates to the public fitter.
 

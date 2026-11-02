@@ -9,8 +9,11 @@ def fit_candidate(recipe, train_features, train_labels, prediction_features, *, 
     """Preserve delegated results and native errors; never retry."""
     forbid_legacy_fitting("fit_candidate")
     forbid_fitting("fit_candidate")
-    if magnitude_candidate_family(recipe) == "elasticnet":
+    family = magnitude_candidate_family(recipe)
+    if family == "elasticnet":
         from .magnitude_elasticnet import fit_elasticnet_predictions as fit
+    elif family == "mlp":
+        from .magnitude_mlp import fit_mlp_predictions as fit
     else:
         from .magnitude_ridge_hgb import fit_ridge_hgb_predictions as fit
     return fit(recipe, train_features, train_labels, prediction_features, columns=columns)
