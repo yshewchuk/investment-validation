@@ -1461,6 +1461,11 @@ class ServingModel:
     #: the correct answer rather than a fabricated one.
     pool_pred: np.ndarray = field(default_factory=lambda: np.empty(0))
     pool_res: np.ndarray = field(default_factory=lambda: np.empty(0))
+    #: The producer-declared last training day actually fit for this fold
+    #: (canonical ISO day), read back from the cache header on a hit and set
+    #: from the fit's own trainable rows on a fresh fit. ``None`` when a
+    #: legacy header never carried one.
+    training_cutoff: str | None = None
 
     def predict(self, frame: pd.DataFrame) -> np.ndarray:
         """Forecasts for ``frame``, NaN wherever a feature is missing.
@@ -1644,6 +1649,7 @@ def serving_model(
                 interval_floor=model.interval_floor,
                 pool_pred=pool_pred,
                 pool_res=pool_res,
+                training_cutoff=stored.get("training_cutoff"),
             )
 
     forbid_fitting("engine.data.features.tier4.serving_model:miss")
@@ -1653,6 +1659,11 @@ def serving_model(
     # rebuild its own -- see that function's docstring for the redundant
     # second `training_frames`/`.copy()` this removes on a fresh fit.
     pool_pred, pool_res = _pool_before(fold, model, panel, trainable=trainable)
+    training_cutoff = None
+    if "date" in trainable.columns:
+        trained = trainable.loc[trainable["date"] < fold, "date"]
+        if not trained.empty:
+            training_cutoff = str(pd.Timestamp(trained.max()).date())
     served = ServingModel(
         estimator=fit_fold(trainable, model, fold),
         model_id=model.model_id,
@@ -1662,29 +1673,29 @@ def serving_model(
         interval_floor=model.interval_floor,
         pool_pred=pool_pred,
         pool_res=pool_res,
+        training_cutoff=training_cutoff,
     )
     if cache:
         import joblib
 
         paths.assert_writable(SERVING_DIR).mkdir(parents=True, exist_ok=True)
+        header = {
+            "estimator": served.estimator,
+            "model_id": served.model_id,
+            "fold_start": str(fold.date()),
+            "tier3_snapshot": snapshot,
+            "features": list(served.features),
+            # Embedded so a future cache HIT (this process or another)
+            # never has to recompute _pool_before's model.prepare(panel)
+            # pass -- see the cache-hit branch above.
+            "pool_pred": served.pool_pred,
+            "pool_res": served.pool_res,
+        }
+        if served.training_cutoff is not None:
+            header["training_cutoff"] = served.training_cutoff
         # A file handle prevents filename suffixes from enabling compression.
         with path.open("wb") as handle:
-            joblib.dump(
-                {
-                    "estimator": served.estimator,
-                    "model_id": served.model_id,
-                    "fold_start": str(fold.date()),
-                    "tier3_snapshot": snapshot,
-                    "features": list(served.features),
-                    # Embedded so a future cache HIT (this process or another)
-                    # never has to recompute _pool_before's model.prepare(panel)
-                    # pass -- see the cache-hit branch above.
-                    "pool_pred": served.pool_pred,
-                    "pool_res": served.pool_res,
-                },
-                handle,
-                compress=0,
-            )
+            joblib.dump(header, handle, compress=0)
     return served
 
 

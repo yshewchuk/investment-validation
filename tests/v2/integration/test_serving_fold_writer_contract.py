@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import warnings
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -150,3 +151,130 @@ def test_serving_fold_writers_are_explicitly_uncompressed_and_mappable(
     assert destination.closed
     _assert_mappable_roundtrip(path, served, metadata)
     assert list(tmp_path.iterdir()) == [path], "temporary siblings must be removed"
+
+
+def _wire_serving_model(tmp_path, monkeypatch, model, served):
+    monkeypatch.setattr(tier4, "SERVING_DIR", tmp_path)
+    monkeypatch.setattr(tier4.store, "file_sha256", lambda _path: SNAPSHOT)
+    monkeypatch.setattr(tier4, "training_frames", lambda *_args: (None, None))
+    monkeypatch.setattr(tier4, "fit_fold", lambda *_args: served.estimator)
+    monkeypatch.setattr(
+        tier4, "_pool_before", lambda *_args, **_kwargs: (served.pool_pred, served.pool_res)
+    )
+
+
+def test_fresh_serving_model_cache_declares_the_last_training_date(
+    tmp_path, monkeypatch, model, served
+):
+    panel = pd.DataFrame(
+        {
+            "x": [1.0, 2.0, 3.0],
+            "z": [0.5, -1.5, 2.5],
+            "y": [0.25, -0.75, 1.25],
+            "date": pd.to_datetime(["2026-07-15", "2026-08-20", "2026-10-01"]),
+        }
+    )
+    _wire_serving_model(tmp_path, monkeypatch, model, served)
+    # The trainable rows actually fit for this fold: every dated row before it.
+    monkeypatch.setattr(tier4, "training_frames", lambda *_args: (panel, panel))
+
+    tier4.serving_model(FOLD, panel=panel, model=model, cache=True)
+
+    stored = joblib.load(tmp_path / tier4._serving_path(model.model_id, FOLD, SNAPSHOT).name)
+    assert stored["training_cutoff"] == "2026-08-20"
+    assert stored["training_cutoff"] < str(FOLD.date())
+
+
+def test_serving_model_cache_hit_carries_the_cutoff_and_a_legacy_header_serves_none(
+    tmp_path, monkeypatch, model, served
+):
+    panel = pd.DataFrame(
+        {
+            "x": [1.0, 2.0, 3.0],
+            "z": [0.5, -1.5, 2.5],
+            "y": [0.25, -0.75, 1.25],
+            "date": pd.to_datetime(["2026-07-15", "2026-08-20", "2026-10-01"]),
+        }
+    )
+    _wire_serving_model(tmp_path, monkeypatch, model, served)
+    monkeypatch.setattr(tier4, "training_frames", lambda *_args: (panel, panel))
+
+    fresh = tier4.serving_model(FOLD, panel=panel, model=model, cache=True)
+    path = tmp_path / tier4._serving_path(model.model_id, FOLD, SNAPSHOT).name
+
+    hit = tier4.serving_model(FOLD, panel=panel, model=model, cache=True)
+    assert fresh.training_cutoff == hit.training_cutoff == "2026-08-20"
+    assert hit.training_cutoff == joblib.load(path)["training_cutoff"]
+
+    # A legacy header with no declared cutoff serves None, never a guess.
+    stored = joblib.load(path)
+    stored.pop("training_cutoff", None)
+    joblib.dump(stored, path)
+    legacy = tier4.serving_model(FOLD, panel=pd.DataFrame(), model=model, cache=True)
+    assert legacy.training_cutoff is None
+
+
+def test_build_one_emits_the_declared_cutoff_and_omits_when_none(
+    tmp_path, monkeypatch, model, served
+):
+    panel = pd.DataFrame({"x": [1.0], "z": [2.0], "y": [-0.5]})
+    filename = tier4._serving_path(model.model_id, FOLD, SNAPSHOT).name
+
+    declared_dir = tmp_path / "declared"
+    monkeypatch.setattr(tier4, "SERVING_DIR", declared_dir)
+    prepare.build_one(
+        FOLD,
+        model=model,
+        snapshot=SNAPSHOT,
+        cache_dir=declared_dir,
+        panel_loader=lambda: panel,
+        fit_builder=lambda *_args: replace(served, training_cutoff="2026-08-15"),
+    )
+    assert joblib.load(declared_dir / filename)["training_cutoff"] == "2026-08-15"
+
+    omitted_dir = tmp_path / "omitted"
+    monkeypatch.setattr(tier4, "SERVING_DIR", omitted_dir)
+    prepare.build_one(
+        FOLD,
+        model=model,
+        snapshot=SNAPSHOT,
+        cache_dir=omitted_dir,
+        panel_loader=lambda: panel,
+        fit_builder=lambda *_args: served,
+    )
+    assert "training_cutoff" not in joblib.load(omitted_dir / filename)
+
+
+def test_upgrade_one_keeps_only_a_cutoff_the_original_declared(
+    tmp_path, monkeypatch, model, served
+):
+    metadata = _metadata(model)
+    filename = tier4._serving_path(model.model_id, FOLD, SNAPSHOT).name
+
+    declared_dir = tmp_path / "declared"
+    monkeypatch.setattr(tier4, "SERVING_DIR", declared_dir)
+    declared = declared_dir / filename
+    declared_dir.mkdir()
+    joblib.dump({**metadata, "estimator": served.estimator, "training_cutoff": "2026-08-01"}, declared)
+    prepare.upgrade_one(
+        prepare.CacheTarget(declared, FOLD, prepare._sha256(declared)),
+        model=model,
+        snapshot=SNAPSHOT,
+        panel_loader=lambda: pd.DataFrame(),
+        pool_builder=lambda *_args: (served.pool_pred, served.pool_res),
+    )
+    assert joblib.load(declared)["training_cutoff"] == "2026-08-01"
+
+    legacy_dir = tmp_path / "legacy"
+    monkeypatch.setattr(tier4, "SERVING_DIR", legacy_dir)
+    legacy = legacy_dir / filename
+    legacy_dir.mkdir()
+    joblib.dump({**metadata, "estimator": served.estimator}, legacy)
+    prepare.upgrade_one(
+        prepare.CacheTarget(legacy, FOLD, prepare._sha256(legacy)),
+        model=model,
+        snapshot=SNAPSHOT,
+        panel_loader=lambda: pd.DataFrame(),
+        pool_builder=lambda *_args: (served.pool_pred, served.pool_res),
+    )
+    assert "training_cutoff" not in joblib.load(legacy)

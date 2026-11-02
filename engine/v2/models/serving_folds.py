@@ -145,8 +145,7 @@ class ChooserServingFoldDescriptor:
             raise DocumentError("BAD_PARENT_HASH", "$.parent_release_hash", "expected canonical SHA-256 content hash")
         if not isinstance(self.decision_clock_id, str) or not self.decision_clock_id:
             raise DocumentError("BAD_FOLD_CLOCK", "$.decision_clock_id", "expected a nonempty clock identity")
-        if self.training_cutoff is not None:
-            _validate_training_cutoff(self.training_cutoff, self.fold_start)
+        _validate_training_cutoff(self.training_cutoff, self.fold_start)
 
     @property
     def descriptor_hash(self) -> str:

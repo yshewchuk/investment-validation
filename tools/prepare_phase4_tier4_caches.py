@@ -609,6 +609,8 @@ def build_one(
         "pool_pred": pool_pred,
         "pool_res": pool_res,
     }
+    if served.training_cutoff is not None:
+        candidate["training_cutoff"] = served.training_cutoff
     _validated_pools(candidate, path)
 
     directory.mkdir(parents=True, exist_ok=True)
