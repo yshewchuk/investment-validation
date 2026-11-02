@@ -272,10 +272,10 @@ Results concern the frozen dataset's development population, not source-wide com
 
 | Condition | Outcome |
 | --- | --- |
-| Unknown family, non-dict parameters or missing/extra parameter keys | `ValueError` before recipe construction; family constructors own value refusals. |
+| Unknown family, non-dict parameters or missing/extra parameter keys; non-dict recipe or unsupported schema/model pair | `ValueError` before recipe construction for the former, before delegation or numeric inspection for the latter; family constructors own value refusals. |
 | Either no-fit guard active | Its `RuntimeFitForbidden` precedes recipe, columns and numeric inspection. |
-| Non-dict recipe or unsupported schema/model pair | `ValueError` before delegation or numeric inspection. |
 | Valid dispatch envelope with invalid policy/order/numeric inputs | Existing family refusal; no retry or partial result. |
+| Malformed MLP diagnostics against the bound recipe or ordered horizons | `EXPERIMENT_IDENTITY_CONFLICT` on fresh evidence and replay; no fitting, retry or migration. |
 | Valid numeric call | Unmodified family result/schema/recipe ID; no new candidate seal or evidence of source qualification. |
 
 Qualified SIZE plan construction and its bounded worker now consume these helpers alongside synthetic tests; v1 execution remains explicit and unchanged. Columns/digests/arrays alone prove no source qualification or fit permission: the v1.6/v1.7 binding, admitted stored inputs and v2 journal route supply those checks.
