@@ -1,4 +1,5 @@
 """Synthetic v6 source admission, sealed neural execution and read-only replay."""
+import shutil
 from types import SimpleNamespace
 
 import numpy as np
@@ -6,8 +7,10 @@ import pytest
 
 from engine.models.no_fit import no_fit_guard as legacy_no_fit_guard
 from engine.v2.contracts import ArtifactRef
-from engine.v2.foundation import SystemClock, from_document
+from engine.v2.data.repository import Repository
+from engine.v2.foundation import ArtifactStore, SystemClock, from_document
 from engine.v2.models.no_fit import no_fit_guard
+from engine.v2.ops.catalog import connect
 from engine.v2.research.magnitude_panel_qualified_table import recipe
 from experiments import eligible_history, size_panel
 from experiments import magnitude_search_plan as planner
@@ -46,7 +49,7 @@ def case(tmp_path):
     request["eligibility_policy_ref"].update(plan_id=panel["context"]["eligibility_plan"]["plan_id"])
     # Existing bounded synthetic integration policy, not new estimator/runtime limits.
     request["limits"] = {"child": {"memory_bytes": 2 << 30, "cpu_seconds": 30, "wall_seconds": 60},
-        "parent": {"memory_bytes": 3 << 30, "wall_seconds": 600},
+        "parent": {"memory_bytes": 4 << 30, "wall_seconds": 600},
         "build": {"memory_bytes": 3 << 30, "wall_seconds": 60}, "job": {"wall_seconds": 600}}
     spec = prediction_spec(experiment_id="synthetic-qualified-size-v6", folds=("2024",),
                            runner="experiments/size_search.py")
@@ -65,6 +68,111 @@ def case(tmp_path):
         next(generator)
     except StopIteration:
         pass
+
+
+def _clone_case(case, path):
+    conn = connect(path / "catalog.sqlite")
+    case.conn.backup(conn)
+    shutil.copytree(case.store.root, path / "store")
+    store = ArtifactStore(path / "store")
+    return (conn, store, Repository(conn, store, pin_snapshots=True),
+            case.registration, case.request, case.ref)
+
+
+def test_v6_workers_one_and_two_match_candidates_results_and_metrics(case, tmp_path, monkeypatch):
+    from experiments import v2_magnitude_search_run as search_run
+    from experiments.size_search_report import collect
+    assert any(candidate["recipe"].get("model") == "mlp" for candidate in case.plan["candidates"])
+    original_executor, executor_calls = search_run.ProcessPoolExecutor, []
+
+    def spy_executor(*args, **kwargs):
+        executor_calls.append(kwargs.get("max_workers"))
+        return original_executor(*args, **kwargs)
+
+    monkeypatch.setattr(search_run, "ProcessPoolExecutor", spy_executor)
+
+    def execute(name, workers):
+        path = tmp_path / name
+        path.mkdir()
+        conn, store, repository, registration, _, plan_ref = _clone_case(case, path)
+        request = {**case.request, "workers": workers}
+        context = (conn, store, repository, registration, request, plan_ref)
+        try:
+            result = search_run.run_search(*context, limits=request["limits"]["child"])
+            report = collect(*context)
+        finally:
+            conn.close()
+        return result, report
+
+    serial_result, serial_report = execute("serial", 1)
+    parallel_result, parallel_report = execute("parallel", 2)
+    assert executor_calls == [2]
+
+    def first_difference(left, right, path="$"):
+        if isinstance(left, dict) and isinstance(right, dict):
+            keys = list(left) + [key for key in right if key not in left]
+            for key in keys:
+                if key not in left or key not in right:
+                    return f"{path}.{key}", left.get(key), right.get(key)
+                difference = first_difference(left[key], right[key], f"{path}.{key}")
+                if difference is not None:
+                    return difference
+            return None
+        if isinstance(left, list) and isinstance(right, list):
+            for index, (left_item, right_item) in enumerate(zip(left, right)):
+                difference = first_difference(left_item, right_item, f"{path}[{index}]")
+                if difference is not None:
+                    return difference
+            if len(left) != len(right):
+                return f"{path}.length", len(left), len(right)
+            return None
+        return None if left == right else (path, left, right)
+
+    first = first_difference(serial_result, parallel_result)
+    if first is not None:
+        print(f"first result difference: {first[0]}: serial={first[1]!r}; parallel={first[2]!r}")
+
+    # The timing/execution identities differ between serial and worker runs: folds[*].selection_id,
+    # folds[*].result_id, and the top-level result_id. They depend on terminal IDs whose records
+    # include runtime score_seconds and rss_delta_kib. Remove only these known paths from shallow
+    # copies; do not recurse or recompute hashes, and keep all remaining fields exact.
+    def shallow_normalize(result):
+        normalized = {key: value for key, value in result.items() if key != "result_id"}
+        normalized["folds"] = [
+            {key: value for key, value in fold.items()
+             if key not in ("selection_id", "result_id")}
+            for fold in result["folds"]]
+        return normalized
+
+    normalized_serial = shallow_normalize(serial_result)
+    normalized_parallel = shallow_normalize(parallel_result)
+    assert normalized_serial == normalized_parallel
+    assert serial_result["folds"][0]["candidate"] == parallel_result["folds"][0]["candidate"]
+    assert serial_result["folds"][0]["predictions"] == parallel_result["folds"][0]["predictions"]
+    assert serial_result["metrics"] == parallel_result["metrics"]
+    assert serial_result["prospective_candidate_id"] == parallel_result["prospective_candidate_id"]
+    assert [(row["candidate_id"], row["inner_metrics"]) for row in serial_report["inner_fits"]] == [
+        (row["candidate_id"], row["inner_metrics"]) for row in parallel_report["inner_fits"]]
+
+    # Known-fixture scored-output oracle for the actual synthetic winner: history_ridge.
+    # Expectations are pinned to the sealed fixture, not derived from the serial run or the
+    # production scorer.
+    candidate = parallel_result["folds"][0]["candidate"]
+    assert candidate["candidate_id"] == "sha256:8178644685de984c0d232599dcc327288714c23b07538ff83036222d0c3048c6"
+    assert candidate["recipe"]["model"] == "history_ridge"
+    assert parallel_result["prospective_candidate_id"] == "sha256:8178644685de984c0d232599dcc327288714c23b07538ff83036222d0c3048c6"
+    metrics = parallel_result["metrics"]
+    assert metrics["count"] == 1
+    assert metrics["mae"] == pytest.approx(0.9342579737821772, abs=1e-12)
+    assert metrics["rmse"] == pytest.approx(0.9342579737821772, abs=1e-12)
+    predictions = parallel_result["predictions"]
+    assert len(predictions) == 1
+    row = predictions[0]
+    assert row["event_id"] == "SYNTH:2024-06-17:0"
+    assert row["horizon_sessions"] == 1
+    assert row["absolute_move_pct"] == 7.0
+    assert row["predicted_absolute_move_pct"] == pytest.approx(7.934257973782177, abs=1e-12)
+    assert row["outer_year"] == "2024"
 
 
 def test_v6_native_seal_neural_trial_and_no_fit_no_label_replay(case, monkeypatch):

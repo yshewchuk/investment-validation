@@ -77,8 +77,9 @@ def validate_workers(request):
     _require(request.get("schema_version") in ("magnitude_search_request.v2",
                                                 "magnitude_search_request.v3",
                                                 "magnitude_search_request.v4",
-                                                "magnitude_search_request.v5"),
-             "stage-2 workers require a v2 through v5 search request")
+                                                "magnitude_search_request.v5",
+                                                "magnitude_search_request.v6"),
+             "stage-2 workers require a v2 through v6 search request")
     _require(type(request["workers"]) is int and 1 <= request["workers"] <= 8,
              "stage-2 workers requires an integer from 1 through 8")
     return request["workers"]

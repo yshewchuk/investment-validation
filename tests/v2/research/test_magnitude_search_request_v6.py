@@ -76,7 +76,6 @@ def test_invalid_profiles_refuse_before_expansion(monkeypatch, profiles):
     lambda r: r["space"].pop("mlp"), lambda r: r["space"].pop("size_v1_4"),
     lambda r: r["space"]["mlp"].update(alpha=[0.1]), lambda r: r.pop("selection"),
     lambda r: r.update(max_candidates=108), lambda r: r.update(max_fits=1970),
-    lambda r: r.update(workers=1), lambda r: r.update(workers=2),
     lambda r: r["limits"]["child"].update(cpu_seconds=0),
     lambda r: r["limits"]["parent"].update(memory_bytes=0),
 ])
@@ -87,6 +86,31 @@ def test_v6_closed_shape_existing_caps_and_serial_policy(monkeypatch, change):
     with pytest.raises(OpsError) as caught:
         compile_request(request)
     assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
+
+
+def test_v6_workers_are_optional_and_preserve_compiled_identity():
+    absent = compile_request(v6_request())
+    assert "workers" not in absent["request"]
+    for workers in (1, 2):
+        request = v6_request()
+        request["workers"] = workers
+        actual = compile_request(request)
+        assert request["workers"] == workers
+        assert actual == absent
+        assert actual["request_id"] == absent["request_id"]
+        assert [spec["candidate_spec_id"] for spec in actual["candidate_specs"]] == [
+            spec["candidate_spec_id"] for spec in absent["candidate_specs"]]
+
+
+@pytest.mark.parametrize("workers", [0, 9])
+def test_v6_invalid_workers_refuse_nonretryably(workers):
+    request = v6_request()
+    request["workers"] = workers
+    with pytest.raises(OpsError) as caught:
+        compile_request(request)
+    assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert caught.value.problem.retryable is False
+    assert caught.value.problem.message == "stage-2 workers requires an integer from 1 through 8"
 
 
 def test_v6_total_grid_ceiling_precedes_expansion(monkeypatch):

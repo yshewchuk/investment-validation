@@ -330,7 +330,7 @@ def test_worker_schema_refusal_diagnostic():
     with pytest.raises(OpsError) as caught:
         compiler.validate_workers({"schema_version": "magnitude_search_request.v1", "workers": 3})
     assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
-    assert caught.value.problem.message == "stage-2 workers require a v2 through v5 search request"
+    assert caught.value.problem.message == "stage-2 workers require a v2 through v6 search request"
 
 
 def test_v1_planner_does_not_accept_the_new_request(monkeypatch):
