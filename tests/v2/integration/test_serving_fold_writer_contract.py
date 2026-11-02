@@ -240,6 +240,29 @@ def test_serving_model_cache_hit_refuses_a_malformed_training_cutoff(
         tier4.serving_model(FOLD, panel=pd.DataFrame(), model=model, cache=True)
 
 
+@pytest.mark.parametrize("training_cutoff", [str(FOLD.date()), "2026-09-02"])
+def test_serving_model_cache_hit_refuses_cutoff_at_or_after_fold(
+    tmp_path, monkeypatch, model, served, training_cutoff
+):
+    _wire_serving_model(tmp_path, monkeypatch, model, served)
+    path = tier4._serving_path(model.model_id, FOLD, SNAPSHOT)
+    joblib.dump(
+        {
+            "estimator": served.estimator,
+            "model_id": served.model_id,
+            "fold_start": str(FOLD.date()),
+            "tier3_snapshot": SNAPSHOT,
+            "features": list(served.features),
+            "pool_pred": served.pool_pred,
+            "pool_res": served.pool_res,
+            "training_cutoff": training_cutoff,
+        },
+        path,
+    )
+    with pytest.raises(tier4.Tier4Error, match="^invalid serving fold training cutoff$"):
+        tier4.serving_model(FOLD, panel=pd.DataFrame(), model=model, cache=True)
+
+
 @pytest.mark.parametrize(
     "training_cutoff",
     [["2026-08-20"], date(2026, 8, 20), datetime(2026, 8, 20)],
@@ -323,6 +346,28 @@ def test_build_one_refuses_a_malformed_builder_cutoff(
             cache_dir=cache_dir,
             panel_loader=lambda: panel,
             fit_builder=lambda *_args: replace(served, training_cutoff=["2026-08-20"]),
+        )
+    assert list(cache_dir.iterdir()) == []
+
+
+@pytest.mark.parametrize("training_cutoff", [str(FOLD.date()), "2026-09-02"])
+def test_build_one_refuses_cutoff_at_or_after_fold(
+    tmp_path, monkeypatch, model, served, training_cutoff
+):
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    panel = pd.DataFrame({"x": [1.0], "z": [2.0], "y": [-0.5]})
+    with pytest.raises(
+        prepare.CachePreparationError,
+        match="^fit builder returned an invalid training cutoff$",
+    ):
+        prepare.build_one(
+            FOLD,
+            model=model,
+            snapshot=SNAPSHOT,
+            cache_dir=cache_dir,
+            panel_loader=lambda: panel,
+            fit_builder=lambda *_args: replace(served, training_cutoff=training_cutoff),
         )
     assert list(cache_dir.iterdir()) == []
 

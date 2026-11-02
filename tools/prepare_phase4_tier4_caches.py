@@ -599,7 +599,7 @@ def build_one(
     ):
         raise CachePreparationError(f"freshly fit model identity mismatch for {path}")
     try:
-        training_cutoff = tier4._validated_training_cutoff(served.training_cutoff)
+        training_cutoff = tier4._validated_training_cutoff(served.training_cutoff, fold)
     except tier4.Tier4Error:
         raise CachePreparationError("fit builder returned an invalid training cutoff") from None
     pool_pred = np.asarray(served.pool_pred, dtype=float)

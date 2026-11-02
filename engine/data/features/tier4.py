@@ -107,7 +107,7 @@ class Tier4Error(RuntimeError):
     """The forecast table, or a request to build it, failed a causality check."""
 
 
-def _validated_training_cutoff(value: object) -> str | None:
+def _validated_training_cutoff(value: object, fold_start: pd.Timestamp) -> str | None:
     """A stored serving-fold training cutoff, validated as a canonical date string."""
     if value is None:
         return None
@@ -118,6 +118,8 @@ def _validated_training_cutoff(value: object) -> str | None:
     except ValueError:
         raise Tier4Error("invalid serving fold training cutoff") from None
     if parsed.isoformat() != value:
+        raise Tier4Error("invalid serving fold training cutoff")
+    if value >= str(fold_start.date()):
         raise Tier4Error("invalid serving fold training cutoff")
     return value
 
@@ -1656,7 +1658,7 @@ def serving_model(
                 pool_pred, pool_res = _pool_before(
                     fold, model, load_panel() if panel is None else panel
                 )
-            training_cutoff = _validated_training_cutoff(stored.get("training_cutoff"))
+            training_cutoff = _validated_training_cutoff(stored.get("training_cutoff"), fold)
             return ServingModel(
                 estimator=stored["estimator"],
                 model_id=model.model_id,
