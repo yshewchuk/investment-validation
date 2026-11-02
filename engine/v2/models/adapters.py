@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Mapping, Protocol, Sequence
 
-from .contracts import ModelBinding
+from .contracts import ModelBinding, validated_training_cutoff
 
 
 class AdapterError(ValueError):
@@ -152,9 +152,7 @@ class _ServingFold:
     def predict(self, rows):
         return self.estimator.predict(rows)
 
-    def metadata(self) -> ServingFoldMetadata:
-        import numpy as np
-
+    def _require_header(self) -> Mapping[str, Any]:
         header = self.header
         if (not callable(getattr(self.estimator, "predict", None))
                 or any(not isinstance(header.get(key), str)
@@ -162,16 +160,35 @@ class _ServingFold:
                 or not isinstance(header.get("features"), (tuple, list))
                 or any(not isinstance(key, str) for key in header["features"])):
             raise AdapterError("invalid serving fold header")
+        return header
+
+    @staticmethod
+    def _validated_pools(header):
+        import numpy as np
+
         pools = [np.asarray(header[key]) for key in ("pool_pred", "pool_res")]
         if any(pool.ndim != 1 or pool.dtype.kind not in "fiu"
                or not np.isfinite(np.asarray(pool, dtype=float)).all() for pool in pools):
             raise AdapterError("invalid serving fold pool")
         pred, res = (tuple(float(value) for value in pool) for pool in pools)
+        return pred, res
+
+    @staticmethod
+    def _validated_cutoff(header):
+        try:
+            return validated_training_cutoff(header.get("training_cutoff"))
+        except (TypeError, ValueError, OverflowError):
+            raise AdapterError("invalid serving fold training cutoff") from None
+
+    def metadata(self) -> ServingFoldMetadata:
+        header = self._require_header()
+        pred, res = self._validated_pools(header)
+        cutoff = self._validated_cutoff(header)
         return ServingFoldMetadata(model_id=str(header["model_id"]), fold_start=str(header["fold_start"]),
                                    panel_sha256=str(header["tier3_snapshot"]),
                                    feature_order=tuple(str(key) for key in header["features"]),
                                    pool_pred=pred, pool_res=res,
-                                   training_cutoff=header.get("training_cutoff"))
+                                   training_cutoff=cutoff)
 
 
 class Tier4ServingFoldAdapter:

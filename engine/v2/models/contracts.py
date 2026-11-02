@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .chooser_cutoff import canonical_day
+
 MODEL_READY = "READY"
 MODEL_NOT_READY = "MODEL_NOT_READY"
 
@@ -71,3 +73,19 @@ class PredictionFrame:
     rows: tuple[tuple[float, ...], ...]
     artifact_hashes: tuple[str, ...]
     schema_version: str = "prediction_frame.v1.0"
+
+
+def validated_training_cutoff(value: object) -> str | None:
+    """Legacy absence stays ``None``; anything else must be one canonical day.
+
+    Parsing is delegated to :func:`chooser_cutoff.canonical_day`, and the value
+    is then required to already be exactly the immutable string it validated to,
+    so a date, a datetime, a timestamp-like string or any mutable value is
+    refused rather than silently rewritten.
+    """
+    if value is None:
+        return None
+    day = canonical_day(value)
+    if not isinstance(value, str) or day != value:
+        raise ValueError("invalid serving fold training cutoff")
+    return day

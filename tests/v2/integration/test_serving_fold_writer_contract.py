@@ -2,6 +2,7 @@
 # packages: engine.v2.features, engine.v2.models
 from __future__ import annotations
 
+import io
 import warnings
 from dataclasses import replace
 from pathlib import Path
@@ -14,6 +15,8 @@ import pytest
 from sklearn.linear_model import LinearRegression
 
 from engine.data.features import tier4
+from engine.v2.models import AdapterError, ModelBinding
+from engine.v2.models.adapters import Tier4ServingFoldAdapter
 from tools import prepare_phase4_tier4_caches as prepare
 
 FOLD = pd.Timestamp("2026-09-01")
@@ -212,6 +215,35 @@ def test_serving_model_cache_hit_carries_the_cutoff_and_a_legacy_header_serves_n
     joblib.dump(stored, path)
     legacy = tier4.serving_model(FOLD, panel=pd.DataFrame(), model=model, cache=True)
     assert legacy.training_cutoff is None
+
+
+def test_direct_adapter_metadata_refuses_a_mutable_training_cutoff(model, served):
+    binding = ModelBinding(
+        binding_id="direct-cutoff",
+        model_id=model.model_id,
+        role="size",
+        strategy_id="*",
+        decision_clock_id="entry-close",
+        adapter="tier4-serving-fold.v1",
+        feature_order=tuple(model.features),
+        output_names=(model.produces,),
+        members=(),
+    )
+    header = {
+        "estimator": served.estimator,
+        "model_id": model.model_id,
+        "fold_start": str(FOLD.date()),
+        "tier3_snapshot": SNAPSHOT,
+        "features": list(model.features),
+        "pool_pred": served.pool_pred,
+        "pool_res": served.pool_res,
+        "training_cutoff": ["2026-08-20"],
+    }
+    stream = io.BytesIO()
+    joblib.dump(header, stream, compress=0)
+    artifact = Tier4ServingFoldAdapter().load({"estimator": stream.getvalue()}, binding)
+    with pytest.raises(AdapterError, match="^invalid serving fold training cutoff$"):
+        artifact.metadata()
 
 
 def test_build_one_emits_the_declared_cutoff_and_omits_when_none(

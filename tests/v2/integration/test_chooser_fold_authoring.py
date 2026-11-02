@@ -11,6 +11,7 @@ import os
 import stat
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from datetime import date, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -425,6 +426,7 @@ def test_real_authoring_preserves_exact_role_identity_and_metadata(
     cache = _cache(role)
     cache.update(model_id=f"{release_id}-{role}", fold_start=month, features=features,
                  pool_pred=[1.0] * count, pool_res=[-0.5] * count)
+    cache["training_cutoff"] = (date.fromisoformat(month) - timedelta(days=17)).isoformat()
     args = release_inputs(role, cache, clock=clock, release_id=release_id)
     states = prep.build_states({f"tier4_folds:{role}": {fold_name(cache): fold_bytes(cache)}},
                                chooser_fold_policies={role: chooser_policy(role, cache, floor=floor)})
