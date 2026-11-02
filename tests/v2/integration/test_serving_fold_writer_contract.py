@@ -242,7 +242,7 @@ def test_serving_model_cache_hit_carries_the_cutoff_and_a_legacy_header_serves_n
     assert legacy.training_cutoff is None
 
 
-def test_serving_model_cache_hit_carries_a_malformed_training_cutoff_without_rejecting(
+def test_serving_model_cache_hit_refuses_a_malformed_training_cutoff(
     tmp_path, monkeypatch, model, served
 ):
     _wire_serving_model(tmp_path, monkeypatch, model, served)
@@ -624,6 +624,7 @@ def test_read_serving_header_equal_cutoff_and_legacy(
     assert header["fold_start"] == metadata["fold_start"]
     assert header["tier3_snapshot"] == metadata["tier3_snapshot"]
     assert header["features"] == tuple(metadata["features"])
+    assert "training_cutoff" not in header
     legacy = tmp_path / "legacy" / path.name
     legacy.parent.mkdir()
     joblib.dump(

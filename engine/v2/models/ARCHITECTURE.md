@@ -549,7 +549,7 @@ When staging chooser serving folds, `phase5_prepare_release` writes `sources.ret
 Catalogs without chooser folds need neither cutoff. A caller-supplied `retrain_cutoff` always requires a canonical `pool_cutoff` on or after it; otherwise preparation refuses before staging. With chooser folds, noncanonical fold starts refuse with the fold-date cause, a supplied `retrain_cutoff` that differs from the latest validated fold start refuses with the retrain-cutoff cause, and a noncanonical/earlier supplied `pool_cutoff` refuses with the pool-cutoff cause. Each raises `PrepareRefused` before staging.
 Catalog validation applies the same distinction: a missing `pool_cutoff` is valid for a chooser-only catalog, while an explicitly present `pool_cutoff: null` alongside `retrain_cutoff` is invalid.
 Release preparation also refuses non-mapping `sources` with `PrepareRefused` before pinned-source checks or preflights.
-Serving-fold writers (`tier4.serving_model`, Phase-4 build/backfill) use binary handles and explicit `compress=0`; filename suffixes cannot enable compression.
+Serving-fold writers (`tier4.serving_model`, Phase-4 build/backfill) use binary handles and explicit `compress=0`; filename suffixes cannot enable compression. Publication uses same-directory temporary files, file fsync, and atomic replace.
 Release preparation (`--tier4-dir` and raw-byte APIs) requires trusted uncompressed inputs from supported writers; it does not refuse arbitrary compressed inputs before decoding.
 Hashes verify bytes, not provenance. The serialized byte cap is not a decoded-memory bound.
 Champion registry artifacts retain their separate `compress=3` format.
@@ -587,7 +587,7 @@ pinned COPY verification and pinned-size byte mismatches use `panel_copy_refused
 |---|---|
 | Explicit coherent role policy and bounded cache | Catalog-hashed descriptor; no fitting or prediction |
 | Unsupported role/output, mismatched policy/header/binding, malformed pool or oversized cache | Refuse preparation; no substitution by size or another role |
-| Invalid chooser role/features/panel/interval policy/floor or descriptor month/count/parent hash/clock/output/object (constructor/semantic checks) | Typed `DocumentError`; decode preserves nested paths |
+| Invalid chooser role/features/panel/interval policy/floor or descriptor month/count/parent hash/clock/output/object (constructor/semantic checks); absent/noncanonical/equal-or-after cutoff; adapter/loader metadata cutoff mismatch | Absent/noncanonical/equal-or-after cutoff: `DocumentError` code `BAD_TRAINING_CUTOFF`; other constructor/semantic validation: `DocumentError` with nested paths (decode preserves them); adapter/loader metadata cutoff mismatch: `AdapterError`/`ServingFoldError` |
 | Unsupported policy-map role or wrong policy type | Fixed `PrepareRefused`; distinguish unsupported role, invalid type and role/member disagreement |
 | Registered chooser producer rejects recipe features/target | Fixed `PrepareRefused` with original cause; CLI exits 2 without a traceback |
 | Pinned COPY context | Full panel hash must match; preflight precedes output effects and destination bytes must retain the validated hash |

@@ -175,11 +175,11 @@ class _ServingFold:
 
     @staticmethod
     def _validated_cutoff(header):
+        cutoff = header.get("training_cutoff")
+        fold_start = header.get("fold_start")
+        if cutoff is not None and fold_start is None:
+            raise AdapterError("invalid serving fold fold_start")
         try:
-            cutoff = header.get("training_cutoff")
-            fold_start = header.get("fold_start")
-            if cutoff is not None and fold_start is None:
-                raise AdapterError("invalid serving fold fold_start")
             return validated_training_cutoff(cutoff, fold_start)
         except AdapterError:
             raise
