@@ -129,11 +129,15 @@ def empirical_crps(samples, observation) -> float:
     The source-free caller is responsible for causal residual provenance.
     """
     observation = _scalar(observation, nonnegative=True)
+    return _crps_components(_empirical_parts(samples), observation)
+
+
+def _empirical_parts(samples):
     if type(samples) is not list or not samples:
         _refuse()
     values = sorted(_scalar(value, nonnegative=True) for value in samples)
     weight = 1 / len(values)
-    return _crps_components(((value, value, weight) for value in values), observation)
+    return ((value, value, weight) for value in values)
 
 
 def prepare_empirical_crps(samples):
@@ -143,11 +147,7 @@ def prepare_empirical_crps(samples):
     scorer call uses the existing O(n) analytic integral, with no sorting or
     pairwise matrix. Mutating the caller's sample list cannot change the law.
     """
-    if type(samples) is not list or not samples:
-        _refuse()
-    values = sorted(_scalar(value, nonnegative=True) for value in samples)
-    weight = 1 / len(values)
-    parts = tuple((value, value, weight) for value in values)
+    parts = tuple(_empirical_parts(samples))
     def score(observation):
         return _crps_components(parts, _scalar(observation, nonnegative=True))
     return score

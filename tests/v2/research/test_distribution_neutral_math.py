@@ -3,6 +3,7 @@ import builtins
 import subprocess
 import sys
 from copy import deepcopy
+from pathlib import Path
 
 import pytest
 
@@ -61,10 +62,31 @@ def test_samples_validate_sort_and_detach_once_then_reuse_immutable_atoms(monkey
 
 @pytest.mark.parametrize("samples", [None, (), [], [True], ["1"], [-1], [None],
     [float("nan")], [float("inf")], [float("-inf")], [10 ** 1000]])
-def test_preparation_refuses_invalid_empirical_samples_with_existing_problem(samples):
-    with pytest.raises(DataError) as caught:
-        math.prepare_empirical_crps(samples)
-    assert caught.value.problem == fail("CONTRACT_MISMATCH", "invalid magnitude distribution arithmetic").problem
+def test_both_empirical_paths_refuse_invalid_samples_with_existing_problem(samples):
+    for operation in (math.prepare_empirical_crps, lambda values: math.empirical_crps(values, 0)):
+        with pytest.raises(DataError) as caught:
+            operation(samples)
+        assert caught.value.problem == fail("CONTRACT_MISMATCH", "invalid magnitude distribution arithmetic").problem
+
+
+def test_one_shot_still_refuses_observation_before_reading_samples(monkeypatch):
+    calls, scalar = [], math._scalar
+    def validated(value, **kwargs):
+        calls.append(value)
+        return scalar(value, **kwargs)
+    monkeypatch.setattr(math, "_scalar", validated)
+    for observation, expected_calls in ((-1, [-1]), (0, [-1, 0, None])):
+        with pytest.raises(DataError) as caught:
+            math.empirical_crps([None], observation)
+        assert caught.value.problem == fail("CONTRACT_MISMATCH", "invalid magnitude distribution arithmetic").problem
+        assert calls == expected_calls
+
+
+def test_research_readme_declares_new_public_math_names():
+    from checks.package_readmes import directive
+    names = directive(Path(math.__file__).with_name("README.md").read_text(), "public-interface")
+    assert {"magnitude_distribution_math.mean_matched_control",
+            "magnitude_distribution_math.prepare_empirical_crps"} <= names
 
 
 @pytest.mark.parametrize("observation", [None, True, "1", -1, float("nan"), float("inf"), 10 ** 1000])
