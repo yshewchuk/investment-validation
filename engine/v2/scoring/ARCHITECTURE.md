@@ -211,7 +211,7 @@ otherwise). Production capture resolves the release catalog before scoring;
 `strict_trace_one` performs no catalog lookup and never infers missing
 provenance. When chooser folds are present without a catalog retrain cutoff,
 the opted-in resolver refuses with `ModelNotReady` identifying the missing
-canonical training cutoff; ordinary scoring does not opt into this resolver.
+[canonical training cutoff](../models/ARCHITECTURE.md#chooser-producer-fold-authoring); ordinary scoring does not opt into this resolver.
 A chooser trace with a bound producer fold but no matching verified
 reference refuses. Orphan references, incomplete producer coverage and
 invalid dates also refuse with `StrictTraceCaptureError`. Provenance stays
@@ -708,8 +708,8 @@ and the release is not consulted for it.
 #### Chooser fold provenance reference
 
 A verified chooser-fold reference carries the descriptor/estimator hashes,
-fold month, training cutoff, producer binding and authoring/carrying release ids;
-training_cutoff follows [the chooser producer fold authoring definition](../models/ARCHITECTURE.md#chooser-producer-fold-authoring).
+fold month and producer binding, plus the authoring/carrying release ids and the
+[training cutoff](../models/ARCHITECTURE.md#chooser-producer-fold-authoring) defined only in the models architecture.
 `resolve_release_binding` returns an empty
 `chooser_fold_references` map by default and does not load chooser estimators
 for ordinary nightly scoring. Callers that need these references opt in with

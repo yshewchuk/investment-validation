@@ -176,9 +176,11 @@ class _ServingFold:
     @staticmethod
     def _validated_cutoff(header):
         try:
-            return validated_training_cutoff(
-                header.get("training_cutoff"), header.get("fold_start")
-            )
+            cutoff = header.get("training_cutoff")
+            fold_start = header.get("fold_start")
+            if cutoff is not None and fold_start is None:
+                raise ValueError("declared training cutoff requires a fold_start")
+            return validated_training_cutoff(cutoff, fold_start)
         except (TypeError, ValueError, OverflowError):
             raise AdapterError("invalid serving fold training cutoff") from None
 
@@ -233,6 +235,8 @@ class Tier4ServingFoldAdapter:
             raise AdapterError("a tier4 serving fold has exactly one output")
         import numpy as np
 
+        if isinstance(artifact, _ServingFold):
+            _ServingFold._validated_cutoff(artifact.header)
         try:
             values = np.asarray(
                 artifact.predict(np.asarray(rows, dtype=float)), dtype=float,

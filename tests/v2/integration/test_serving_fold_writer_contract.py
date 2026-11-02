@@ -17,7 +17,11 @@ from sklearn.linear_model import LinearRegression
 
 from engine.data.features import tier4
 from engine.v2.models import AdapterError, ModelBinding
-from engine.v2.models.adapters import Tier4ServingFoldAdapter
+from engine.v2.models.adapters import (
+    ReadOnlyArtifact,
+    Tier4ServingFoldAdapter,
+    _ServingFold,
+)
 from tools import prepare_phase4_tier4_caches as prepare
 
 FOLD = pd.Timestamp("2026-09-01")
@@ -315,6 +319,91 @@ def test_direct_adapter_metadata_refuses_a_mutable_training_cutoff(
     joblib.dump(header, stream, compress=0)
     with pytest.raises(AdapterError, match="^invalid serving fold training cutoff$"):
         Tier4ServingFoldAdapter().load({"estimator": stream.getvalue()}, binding)
+
+
+def _direct_binding(model, binding_id):
+    return ModelBinding(
+        binding_id=binding_id,
+        model_id=model.model_id,
+        role="size",
+        strategy_id="*",
+        decision_clock_id="entry-close",
+        adapter="tier4-serving-fold.v1",
+        feature_order=tuple(model.features),
+        output_names=(model.produces,),
+        members=(),
+    )
+
+
+_OMIT = object()
+
+
+def _direct_header(model, served, *, fold_start=_OMIT, training_cutoff=None):
+    header = {
+        "model_id": model.model_id,
+        "tier3_snapshot": SNAPSHOT,
+        "features": list(model.features),
+        "pool_pred": served.pool_pred,
+        "pool_res": served.pool_res,
+    }
+    if fold_start is not _OMIT:
+        header["fold_start"] = fold_start
+    if training_cutoff is not None:
+        header["training_cutoff"] = training_cutoff
+    return header
+
+
+@pytest.mark.parametrize("fold_start", [pytest.param(_OMIT, id="missing"), None])
+def test_direct_adapter_load_refuses_declared_cutoff_without_fold_start(
+    model, served, fold_start
+):
+    binding = _direct_binding(model, "direct-cutoff-missing-fold")
+    header = {
+        "estimator": served.estimator,
+        **_direct_header(
+            model, served, fold_start=fold_start, training_cutoff="2026-08-20"
+        ),
+    }
+    stream = io.BytesIO()
+    joblib.dump(header, stream, compress=0)
+    with pytest.raises(AdapterError, match="^invalid serving fold training cutoff$"):
+        Tier4ServingFoldAdapter().load({"estimator": stream.getvalue()}, binding)
+
+
+@pytest.mark.parametrize("fold_start", [pytest.param(_OMIT, id="missing"), None])
+def test_direct_adapter_predict_refuses_declared_cutoff_without_fold_start(
+    model, served, fold_start
+):
+    binding = _direct_binding(model, "direct-predict-cutoff-missing-fold")
+    header = _direct_header(
+        model, served, fold_start=fold_start, training_cutoff="2026-08-20"
+    )
+    artifact = _ServingFold(ReadOnlyArtifact(served.estimator), header)
+    with pytest.raises(AdapterError, match="^invalid serving fold training cutoff$"):
+        Tier4ServingFoldAdapter().predict(artifact, [[0.0, 0.0]], binding)
+
+
+def test_direct_adapter_predict_refuses_cutoff_at_or_after_fold(model, served):
+    binding = _direct_binding(model, "direct-predict-cutoff-after-fold")
+    header = _direct_header(
+        model, served, fold_start=str(FOLD.date()), training_cutoff=str(FOLD.date())
+    )
+    artifact = _ServingFold(ReadOnlyArtifact(served.estimator), header)
+    with pytest.raises(AdapterError, match="^invalid serving fold training cutoff$"):
+        Tier4ServingFoldAdapter().predict(artifact, [[0.0, 0.0]], binding)
+
+
+def test_direct_adapter_accepts_legacy_cutoffless_header(model, served):
+    binding = _direct_binding(model, "direct-legacy")
+    header = {
+        "estimator": served.estimator,
+        **_direct_header(model, served, fold_start=str(FOLD.date())),
+    }
+    stream = io.BytesIO()
+    joblib.dump(header, stream, compress=0)
+    artifact = Tier4ServingFoldAdapter().load({"estimator": stream.getvalue()}, binding)
+    result = Tier4ServingFoldAdapter().predict(artifact, [[0.0, 0.0]], binding)
+    assert len(result) == 1
 
 
 def test_build_one_emits_the_declared_cutoff_and_omits_when_none(
