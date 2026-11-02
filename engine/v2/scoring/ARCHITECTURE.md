@@ -721,7 +721,7 @@ Chooser references are keyed by `(producer_output, fold_start)` and authoring co
 | `resolve_release_binding` with chooser references not requested | Return an empty map without loading chooser estimators |
 | More than 34 total staged chooser-fold objects (counted before cutoffless filtering) when references are requested | ModelNotReady before any chooser fold is loaded |
 | No chooser-fold objects staged | Return an empty map without requiring a carrying-catalog cutoff |
-| Every staged object is a valid cutoffless legacy descriptor — each first verified, then omitted | Return an empty map without requiring a carrying-catalog cutoff |
+| Every staged object is a valid cutoffless legacy descriptor — each first verified, then omitted | Return an empty map without requiring a carrying-catalog cutoff; a carried one still needs a canonical authoring cutoff (next rows) |
 | Cutoff-bearing chooser-fold objects are staged but the canonical retrain cutoff is missing or invalid | ModelNotReady; no partial reference map |
 | A carried fold's authoring release lacks canonical cutoff data | ModelNotReady; no partial reference map |
 | Carried descriptor's original release, catalog membership or parent/hash fails | ModelNotReady; no partial reference map |
