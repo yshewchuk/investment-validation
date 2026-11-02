@@ -21,12 +21,15 @@ Adam's numerical conditioning without changing the squared-error estimand;
 `TransformedTargetRegressor` restores original target units before finite checks
 and zero projection. This differs intentionally from the untouched production blend.
 
-All profiles fix seed 20260829, one numerical thread, Adam and training-loss
-stopping (tolerance 0.0001, patience 15), with no internal random validation split.
-The declared 400-epoch estimator ceiling matches the incumbent's finite iteration
-policy, not a new wall-time allowance. No holdout or evaluation labels enter fit,
-preprocessing or stopping; the caller still owns causal folds, source admission,
-inner-only selection, resource budgets and progress reporting. One successful call
+All profiles fix seed 20260829, one numerical thread and Adam. The original three use
+training-loss stopping (tolerance 0.0001, patience 15), with no random validation split.
+The four `es_` profiles set `early_stopping=True`, `validation_fraction=0.1`,
+`n_iter_no_change=10` and `max_iter=400`; sklearn uses the fixed seed for a random 10%
+split of training rows, not a chronological holdout. The three `fixed200_` profiles set
+`early_stopping=False` and `max_iter=200`; reaching this fixed epoch budget is successful
+stopping, not a convergence failure. Only these profiles allow a convergence warning at
+the iteration cap. No evaluation labels enter fit or preprocessing; the caller still owns
+causal folds, source admission, inner-only selection, resource budgets and progress reporting. One successful call
 is one component fit and returns detached `magnitude_mlp_fit.v1` predictions,
 recipe hash, iteration count and standardized-target optimizer loss (including L2,
 not a selection score). A convergence warning,
@@ -41,7 +44,9 @@ deterministically; there is no cache, I/O, publication or journal replay here.
 The generic magnitude dispatcher now accepts this closed recipe and preserves the
 complete result; `size_fit_diagnostics` validates its per-horizon evidence for fresh
 execution and replay. Existing recipe values and the comparator remain unchanged.
-Only opt-in `magnitude_search_request.v6` admits these profiles; v1-v5 still refuse MLP.
+Only opt-in `magnitude_search_request.v6` admits the original three profiles; v1-v5
+still refuse MLP. Request v7 admits all ten profiles and accepts the same optional
+bounded-worker declaration as v6.
 New execution sources need fresh source seals; old reservations remain bound to
 original installed sources, with no resealing or mutation of running plans.
 
