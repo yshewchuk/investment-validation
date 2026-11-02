@@ -1,6 +1,7 @@
 """Synthetic v6 source admission, sealed neural execution and read-only replay."""
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 from engine.models.no_fit import no_fit_guard as legacy_no_fit_guard
@@ -14,6 +15,7 @@ from experiments import magnitude_search_trials as trials
 from experiments import size_search_binding as binding
 from experiments.native_registration import reserve_native_registration, verify_native_registration
 from experiments.v2_magnitude_search_run import seal_search_run
+from tests.v2.models.training.test_magnitude_mlp import independent_oracle
 from tests.v2.research.magnitude_trial_support import poison_outcomes, prediction_spec
 from tests.v2.research.test_magnitude_panel_qualified import panel_data
 from tests.v2.research.test_magnitude_search_request_v6 import PROFILES, v6_request
@@ -107,6 +109,7 @@ def test_v6_neural_selection_outer_and_report_replay(case, monkeypatch):
     from tests.v2.research.test_size_candidate_lifecycle import _generic_result
 
     native = trials.run_fitted_trial
+    outer_inputs = []
     jobs = {"mlp": 0, "size_v1_4": 0, "comparator": 0, "numeric_rivals": 0}
 
     def worker(source, fold, plan, execution, resolved, progress):
@@ -118,6 +121,8 @@ def test_v6_neural_selection_outer_and_report_replay(case, monkeypatch):
         family = execution.get("model")
         if family in ("mlp", "size_v1_4"):
             jobs[family] += 1
+            if family == "mlp" and fold["year"] == "2024":
+                outer_inputs.append((inputs, fold, execution))
             return native(source, fold, plan, execution, resolved, progress)
         if execution["schema_version"] == "size_comparison_execution.v1":
             jobs["comparator"] += 1
@@ -136,7 +141,19 @@ def test_v6_neural_selection_outer_and_report_replay(case, monkeypatch):
     assert candidate["recipe"].get("model") == "mlp"
     result = outer.execute_outer_fold(*case.context, "2024", limits=case.request["limits"]["child"])
     assert len(result["predictions"]) == 1
-    assert result["predictions"][0]["predicted_absolute_move_pct"] >= 0
+    assert candidate["recipe"]["profile"] == PROFILES[0]
+    (inputs, fold, execution), = outer_inputs
+    indexed = {row["event_id"]: row for row in inputs["features"] if row["horizon_sessions"] == 1}
+    train = inputs["training"]
+    matrices = [[[indexed[event][column] for column in execution["features"]] for event in events]
+                for events in ([row["event_id"] for row in train], fold["evaluation_event_ids"])]
+    # Convert JSON nulls to NaN at the numeric boundary, before missing indicators.
+    matrices = [np.asarray(matrix, dtype=float) for matrix in matrices]
+    _, expected = independent_oracle(matrices[0], [row["absolute_move_pct"] for row in train], matrices[1])
+    assert all(value > 0 for value in expected)
+    assert [(row["event_id"], row["horizon_sessions"], row["predicted_absolute_move_pct"])
+            for row in result["predictions"]] == [
+                (event, 1, value) for event, value in zip(fold["evaluation_event_ids"], expected)]
     report = collect(*case.context)
     assert report["paired"]["challenger_abstentions"] == 0
     assert report["paired"]["broad_coverage_metrics"]["challenger"]["count"] == 1
