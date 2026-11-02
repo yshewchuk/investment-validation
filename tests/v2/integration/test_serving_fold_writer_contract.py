@@ -602,18 +602,28 @@ def test_classifier_refuses_invalid_optional_cutoff(
         prepare._classify_fold(FOLD, directory=tmp_path, model=model, snapshot=SNAPSHOT)
 
 
-def test_read_serving_header_equal_cutoff_and_legacy(tmp_path, monkeypatch, model, served):
+@pytest.mark.parametrize(
+    "training_cutoff", [str(FOLD.date()), ["2026-08-20"]]
+)
+def test_read_serving_header_equal_cutoff_and_legacy(
+    tmp_path, monkeypatch, model, served, training_cutoff
+):
     monkeypatch.setattr(tier4, "SERVING_DIR", tmp_path)
     metadata = _metadata(model)
     path = tmp_path / tier4._serving_path(model.model_id, FOLD, SNAPSHOT).name
     joblib.dump(
         {**metadata, "estimator": served.estimator, "pool_pred": served.pool_pred,
-         "pool_res": served.pool_res, "training_cutoff": str(FOLD.date())},
+         "pool_res": served.pool_res, "training_cutoff": training_cutoff},
         path,
     )
-    assert tier4.read_serving_header(
+    header = tier4.read_serving_header(
         path, expected_sha256_hex=prepare._sha256(path), max_bytes=1_000_000
-    ) is None
+    )
+    assert header is not None
+    assert header["model_id"] == metadata["model_id"]
+    assert header["fold_start"] == metadata["fold_start"]
+    assert header["tier3_snapshot"] == metadata["tier3_snapshot"]
+    assert header["features"] == tuple(metadata["features"])
     legacy = tmp_path / "legacy" / path.name
     legacy.parent.mkdir()
     joblib.dump(
@@ -621,7 +631,7 @@ def test_read_serving_header_equal_cutoff_and_legacy(tmp_path, monkeypatch, mode
          "pool_res": served.pool_res},
         legacy,
     )
-    header = tier4.read_serving_header(
+    legacy_header = tier4.read_serving_header(
         legacy, expected_sha256_hex=prepare._sha256(legacy), max_bytes=1_000_000
     )
-    assert header is not None and "training_cutoff" not in header
+    assert legacy_header is not None and "training_cutoff" not in legacy_header

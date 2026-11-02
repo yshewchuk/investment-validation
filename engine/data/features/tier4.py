@@ -1770,20 +1770,6 @@ def read_serving_header(path, *, expected_sha256_hex: str, max_bytes: int) -> di
         return None
     stored = joblib.load(io.BytesIO(data))
     raw_fold = stored.get("fold_start")
-    cutoff = stored.get("training_cutoff")
-    if cutoff is not None:
-        if raw_fold is None:
-            return None
-        try:
-            fold_start = pd.Timestamp(raw_fold)
-        except Exception:
-            return None
-        if pd.isna(fold_start):
-            return None
-        try:
-            _validated_training_cutoff(cutoff, fold_start)
-        except Tier4Error:
-            return None
     return {
         "model_id": stored.get("model_id"),
         "fold_start": str(raw_fold) if raw_fold is not None else None,
