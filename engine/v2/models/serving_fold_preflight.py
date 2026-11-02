@@ -110,6 +110,17 @@ def _preflight_fold(data, name, policy, release, *, role, output, interval_polic
             raise DocumentError("BAD_TRAINING_CUTOFF", "$.training_cutoff",
                                 "expected canonical ISO day strictly before fold_start")
         extra["training_cutoff"] = training_cutoff
+    else:
+        training_cutoff = stored.get("training_cutoff")
+        if training_cutoff is not None:
+            try:
+                canonical = canonical_day(training_cutoff)
+            except ValueError:
+                raise DocumentError("BAD_TRAINING_CUTOFF", "$.training_cutoff",
+                                    "expected canonical ISO day strictly before fold_start") from None
+            if canonical != training_cutoff or canonical >= fold.isoformat():
+                raise DocumentError("BAD_TRAINING_CUTOFF", "$.training_cutoff",
+                                    "expected canonical ISO day strictly before fold_start")
     return result_type(fold_start=fold.isoformat(),
                        decision_clock_id=binding.decision_clock_id,
                        digest=hashlib.sha256(data).hexdigest(), pool_count=len(pools[0]),

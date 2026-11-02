@@ -239,6 +239,10 @@ def _validate_identity(
         raise CachePreparationError(
             f"cache identity mismatch for {path}: expected {expected}, got {actual}"
         )
+    try:
+        tier4._validated_training_cutoff(stored.get("training_cutoff"), fold)
+    except tier4.Tier4Error:
+        raise CachePreparationError("cache has an invalid training cutoff") from None
     if "estimator" not in stored:
         raise CachePreparationError(f"cache has no estimator: {path}")
 
@@ -467,10 +471,6 @@ def upgrade_one(
         snapshot=selected_snapshot,
         fold=target.fold,
     )
-    try:
-        tier4._validated_training_cutoff(original.get("training_cutoff"), target.fold)
-    except tier4.Tier4Error:
-        raise CachePreparationError("cache has an invalid training cutoff") from None
     if _validated_pools(original, target.path) is not None:
         return int(np.asarray(original["pool_pred"]).size)
 

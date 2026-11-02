@@ -475,3 +475,46 @@ def test_upgrade_one_refuses_an_invalid_existing_cutoff_before_doing_work(
     panel_loader.assert_not_called()
     pool_builder.assert_not_called()
     assert path.read_bytes() == original_bytes
+
+
+@pytest.mark.parametrize("training_cutoff", [str(FOLD.date()), "2026-09-02"])
+def test_classifier_refuses_invalid_optional_cutoff(
+    tmp_path, monkeypatch, model, served, training_cutoff
+):
+    monkeypatch.setattr(tier4, "SERVING_DIR", tmp_path)
+    path = tmp_path / tier4._serving_path(model.model_id, FOLD, SNAPSHOT).name
+    joblib.dump(
+        {**_metadata(model), "estimator": served.estimator,
+         "pool_pred": served.pool_pred, "pool_res": served.pool_res,
+         "training_cutoff": training_cutoff},
+        path,
+    )
+    with pytest.raises(
+        prepare.CachePreparationError, match="^cache has an invalid training cutoff$"
+    ):
+        prepare._classify_fold(FOLD, directory=tmp_path, model=model, snapshot=SNAPSHOT)
+
+
+def test_read_serving_header_equal_cutoff_and_legacy(tmp_path, monkeypatch, model, served):
+    monkeypatch.setattr(tier4, "SERVING_DIR", tmp_path)
+    metadata = _metadata(model)
+    path = tmp_path / tier4._serving_path(model.model_id, FOLD, SNAPSHOT).name
+    joblib.dump(
+        {**metadata, "estimator": served.estimator, "pool_pred": served.pool_pred,
+         "pool_res": served.pool_res, "training_cutoff": str(FOLD.date())},
+        path,
+    )
+    assert tier4.read_serving_header(
+        path, expected_sha256_hex=prepare._sha256(path), max_bytes=1_000_000
+    ) is None
+    legacy = tmp_path / "legacy" / path.name
+    legacy.parent.mkdir()
+    joblib.dump(
+        {**metadata, "estimator": served.estimator, "pool_pred": served.pool_pred,
+         "pool_res": served.pool_res},
+        legacy,
+    )
+    header = tier4.read_serving_header(
+        legacy, expected_sha256_hex=prepare._sha256(legacy), max_bytes=1_000_000
+    )
+    assert header is not None and "training_cutoff" not in header
