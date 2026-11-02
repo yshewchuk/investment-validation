@@ -14,11 +14,30 @@ from experiments.magnitude_search_request_versions import compile_request
 from tests.v2.research.test_magnitude_search_request_v5 import v5_request
 
 PROFILES = ["relu32_l2_0p01", "relu64x32_l2_0p01", "relu64x32_l2_0p1"]
+V7_ADDITIONS = [
+    "es_relu32_l2_0p01",
+    "es_relu32_l2_1",
+    "es_relu64x32_l2_0p01",
+    "es_relu64x32_l2_1",
+    "fixed200_relu64x32_l2_1",
+    "fixed200_relu64x32_l2_10",
+    "fixed200_relu64x32_l2_100",
+]
+V7_PROFILES = sorted(PROFILES + V7_ADDITIONS)
 
 
 def v6_request(profiles=PROFILES):
     request = v5_request()
     request["schema_version"] = "magnitude_search_request.v6"
+    request["space"]["mlp"] = {"profile": list(profiles)}
+    request["max_candidates"] = 100 + 3 * len(profiles)
+    request["max_fits"] = 3 * (request["max_candidates"] * 6 + 3)
+    return request
+
+
+def v7_request(profiles=V7_PROFILES):
+    request = v5_request()
+    request["schema_version"] = "magnitude_search_request.v7"
     request["space"]["mlp"] = {"profile": list(profiles)}
     request["max_candidates"] = 100 + 3 * len(profiles)
     request["max_fits"] = 3 * (request["max_candidates"] * 6 + 3)
@@ -57,12 +76,45 @@ def test_closed_profiles_counts_recipes_and_detached_identity(n, horizons):
     assert request == original
 
 
+def test_v7_profiles_counts_recipes_and_workers():
+    request = v7_request()
+    result = compile_request(request)
+    assert result["request_id"] == content_hash(result["request"])
+    assert result["counts"]["candidates"] == 130
+    specs = result["candidate_specs"]
+    assert len(specs) == result["counts"]["candidates"]
+    ids = [s["candidate_spec_id"] for s in specs]
+    assert len(ids) == len(set(ids))
+    neural = [s for s in specs if s["family"] == "mlp"]
+    assert len(neural) == 30
+    assert {(s["feature_recipe"]["subset"], s["parameters"]["profile"]) for s in neural} == {
+        (subset, profile) for subset in ("H", "HM", "HMO") for profile in V7_PROFILES}
+    for spec in neural:
+        recipe = candidate_recipe("mlp", spec["parameters"], columns=["signal"],
+                                  feature_dictionary_hash=request["feature_dictionary_hash"])
+        assert recipe["component_fits"] == 1
+        params = recipe["estimator"]["params"]
+        profile = spec["parameters"]["profile"]
+        if profile.startswith("fixed200_"):
+            assert params["max_iter"] == 200
+        elif profile.startswith("es_"):
+            assert params["max_iter"] == 400
+            assert params["early_stopping"] is True
+        else:
+            assert params["max_iter"] == 400
+            assert params["early_stopping"] is False
+    request["workers"] = 8
+    assert compile_request(request) == result
+    assert request["workers"] == 8
+
+
 def _no_expansion(*args, **kwargs):
     pytest.fail("invalid request expanded specifications")
 
 
 @pytest.mark.parametrize("profiles", [[], ["unknown"], [1], [True], [None], [{}],
-    [PROFILES[0], PROFILES[0]], list(reversed(PROFILES)), PROFILES * 11, "relu32_l2_0p01"])
+    [PROFILES[0], PROFILES[0]], list(reversed(PROFILES)), PROFILES * 11, "relu32_l2_0p01",
+    [V7_ADDITIONS[0]]])
 def test_invalid_profiles_refuse_before_expansion(monkeypatch, profiles):
     request = v6_request()
     request["space"]["mlp"]["profile"] = profiles
@@ -70,6 +122,16 @@ def test_invalid_profiles_refuse_before_expansion(monkeypatch, profiles):
     with pytest.raises(OpsError) as caught:
         compile_request(request)
     assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
+
+
+def test_invalid_v7_profiles_refuse_before_expansion(monkeypatch):
+    request = v7_request()
+    request["space"]["mlp"]["profile"] = ["unknown"]
+    monkeypatch.setattr(compiler, "_specifications", _no_expansion)
+    with pytest.raises(OpsError) as caught:
+        compile_request(request)
+    assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert caught.value.problem.retryable is False
 
 
 @pytest.mark.parametrize("change", [

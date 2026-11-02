@@ -52,9 +52,9 @@ Both fit fresh per fold/horizon, single-threaded, with finite nonnegative predic
 Caller owns protected admission, label qualification and evidence. The no-fit guard runs first;
 invalid shapes/nonfinite labels or predictions raise `ValueError`, translated by the experiment
 caller to `EXPERIMENT_VARIANT_FAILED`. Existing legacy-parity recipes are unchanged.
-`magnitude_mlp_recipe` and `training.magnitude_mlp` add three closed, guarded standalone
-neural primitives, not search admission. Training-only input/target scaling, one-component
-accounting and no-retry failure semantics are detailed in [the training contract](training/README.md#standalone-neural-magnitude-primitive-opt-in-foundation).
+`magnitude_mlp_recipe` and `training.magnitude_mlp` expose ten closed standalone neural profiles, not search admission; the original three hashes remain unchanged.
+Seven new stopping variants include four with seeded random 10% training-row validation; only the three `max_iter=200` budget profiles accept a convergence warning.
+See [the training contract](training/README.md#standalone-neural-magnitude-primitive-opt-in-foundation).
 
 `magnitude_elasticnet_recipe.elasticnet_recipe` binds ordered columns, dictionary hash, preprocessing and closed sklearn parameters in JSON metadata. Request-v3 SIZE candidates admit finite positive alpha in `[1e-6, 1000]` and l1-ratio in `[1e-6, 1]`; the v2 compiler retains its original six alpha/l1 combinations.
 `magnitude_elasticnet_recipe.regression_elasticnet_recipe` adds the distinct
@@ -78,7 +78,7 @@ No I/O, publication, release or production wiring; source closures need resealin
 | Same valid inputs and numerical environment | Deterministic fresh fit, not cached or journal replay |
 | Cache, transaction or partial-write concerns | No cache, I/O, persistence or publication; v1 recipes and results are unchanged |
 
-`magnitude_ridge_hgb_recipe` constructs/validates closed variable-width policies binding ordered columns, dictionary hash and estimator parameters, not source admission or dictionary membership. Qualified SIZE v3-v6 Ridge candidates admit finite positive alpha in `[1e-6, 10000]`; the v2 compiler retains its existing grid. `magnitude_ridge_hgb_recipe.v2` (HGB only) adds bounded `learning_rate`, `min_samples_leaf` and `l2_regularization` with `max_iter` 500 and early stopping; partial or out-of-bound values raise `ValueError`, and v1 recipes are unchanged.
+`magnitude_ridge_hgb_recipe` constructs/validates closed variable-width policies binding ordered columns, dictionary hash and estimator parameters, not source admission or dictionary membership. Qualified SIZE v3-v7 Ridge candidates admit finite positive alpha in `[1e-6, 10000]`; the v2 compiler retains its existing grid. `magnitude_ridge_hgb_recipe.v2` (HGB only) adds bounded `learning_rate`, `min_samples_leaf` and `l2_regularization` with `max_iter` 500 and early stopping; partial or out-of-bound values raise `ValueError`, and v1 recipes are unchanged.
 `regression_ridge_hgb_recipe.regression_recipe` adds a distinct
 `regression_ridge_hgb_recipe.v1` identity with explicit `signed`/`nonnegative`
 target domain and respectively `none`/`clip_zero` projection. Its validator

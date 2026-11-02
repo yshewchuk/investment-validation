@@ -34,7 +34,12 @@ def fit_mlp_predictions(recipe, train_features, train_labels, prediction_feature
                     and isinstance(error.__context__, KeyboardInterrupt)):
                 raise error.__context__ from None
             raise
-        if any(issubclass(item.category, ConvergenceWarning) for item in caught):
+        budget_complete = (
+            recipe["nonconvergence"], model.regressor_[-1].n_iter_
+        ) == ("epoch_budget_success_no_retry", recipe["estimator"]["params"]["max_iter"])
+        convergence_warning = any(
+            issubclass(item.category, ConvergenceWarning) for item in caught)
+        if (convergence_warning, budget_complete) == (True, False):
             raise ValueError("MLP convergence failed; no retry permitted")
         network = model.regressor_[-1]
         if (not np.isfinite(network.loss_)
@@ -46,6 +51,6 @@ def fit_mlp_predictions(recipe, train_features, train_labels, prediction_feature
         raise ValueError("MLP predictions require one finite value per prediction row")
     return {"schema_version": "magnitude_mlp_fit.v1", "recipe_id": content_hash(recipe),
         "predictions": np.maximum(predictions, 0.0).tolist(), "component_fits": 1,
-        "converged": True, "n_iter": int(network.n_iter_),
+        "converged": not convergence_warning, "n_iter": int(network.n_iter_),
         "input_features": int(network.n_features_in_),
         "loss": float(network.loss_), "loss_scale": "standardized_target"}

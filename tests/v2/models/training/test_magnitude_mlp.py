@@ -27,6 +27,15 @@ COLUMNS = ["signal", "constant", "empty"]
 PROFILES = [("relu32_l2_0p01", [32], 0.01),
             ("relu64x32_l2_0p01", [64, 32], 0.01),
             ("relu64x32_l2_0p1", [64, 32], 0.1)]
+STOPPING_PROFILES = [
+    ("es_relu32_l2_0p01", [32], 0.01, True, 400, 10, "variant_failure_no_retry"),
+    ("es_relu32_l2_1", [32], 1, True, 400, 10, "variant_failure_no_retry"),
+    ("es_relu64x32_l2_0p01", [64, 32], 0.01, True, 400, 10, "variant_failure_no_retry"),
+    ("es_relu64x32_l2_1", [64, 32], 1, True, 400, 10, "variant_failure_no_retry"),
+    ("fixed200_relu64x32_l2_1", [64, 32], 1, False, 200, 201, "epoch_budget_success_no_retry"),
+    ("fixed200_relu64x32_l2_10", [64, 32], 10, False, 200, 201, "epoch_budget_success_no_retry"),
+    ("fixed200_relu64x32_l2_100", [64, 32], 100, False, 200, 201, "epoch_budget_success_no_retry"),
+]
 
 
 def recipe(**changes):
@@ -86,6 +95,36 @@ def test_closed_profiles_match_complete_sklearn_policy(profile, layers, alpha, d
     restored["features"].clear()
     restored["estimator"]["params"]["hidden_layer_sizes"].clear()
     assert recipe(profile=profile, feature_dictionary_hash=dictionary_hash) == policy
+
+
+@pytest.mark.parametrize("profile,layers,alpha,early_stopping,max_iter,n_iter_no_change,"
+                         "nonconvergence", STOPPING_PROFILES)
+def test_stopping_profiles_match_complete_sklearn_policy(profile, layers, alpha, early_stopping,
+        max_iter, n_iter_no_change, nonconvergence):
+    policy = recipe(profile=profile)
+    assert validate_mlp_recipe(policy) == policy
+    expected = MLPRegressor(hidden_layer_sizes=layers, alpha=alpha, max_iter=max_iter,
+        n_iter_no_change=n_iter_no_change, early_stopping=early_stopping,
+        random_state=20260829).get_params()
+    assert policy["estimator"]["params"] == expected
+    assert policy["nonconvergence"] == nonconvergence
+
+
+def test_new_profile_hashes_are_unique_and_original_hashes_stable():
+    def profile_hash(profile):
+        return content_hash(recipe(profile=profile, columns=["signal"]))
+    new_hashes = [profile_hash(profile) for profile, *_ in STOPPING_PROFILES]
+    original_hashes = {profile: profile_hash(profile) for profile, *_ in PROFILES}
+    assert len(new_hashes) == len(set(new_hashes)) == 7
+    assert original_hashes == {
+        "relu32_l2_0p01":
+            "sha256:cd676a001058e34a6b059a049f664475b2ec7aa5a6ce6e1ecbc9d6bac1c1f0d2",
+        "relu64x32_l2_0p01":
+            "sha256:0b429f5120eab9cead2a04a306b8d8ccebe14bb57c89e714daf9f5fa71d6e3db",
+        "relu64x32_l2_0p1":
+            "sha256:cc0e9f7a71101908ddacee9aacb6585a0eb16f3913d5e97327aec3a207d97212",
+    }
+    assert set(original_hashes.values()).isdisjoint(new_hashes)
 
 
 @pytest.mark.parametrize("changes", [
@@ -166,16 +205,19 @@ def test_invalid_matrices_fail_without_fitting(monkeypatch, slot, replacement, r
         "convert": "magnitude inputs must be convertible to floating-point values"}[reason]
 
 
-def independent_oracle(train, labels, prediction, *, layers=(32,), alpha=0.01):
+def independent_oracle(train, labels, prediction, *, layers=(32,), alpha=0.01,
+                       early_stopping=False, max_iter=400, n_iter_no_change=15):
     """Construct sklearn independently of the production recipe builder/fitter."""
     union = FeatureUnion([("imputer", SimpleImputer(strategy="median", keep_empty_features=True)),
         ("missing_indicator", MissingIndicator(features="all", sparse=False))], n_jobs=1)
     oracle = TransformedTargetRegressor(transformer=StandardScaler(),
         regressor=make_pipeline(union, VarianceThreshold(threshold=0.), StandardScaler(), MLPRegressor(
-            hidden_layer_sizes=layers, alpha=alpha, max_iter=400, n_iter_no_change=15,
-            early_stopping=False, random_state=20260829)))
+            hidden_layer_sizes=layers, alpha=alpha, max_iter=max_iter, n_iter_no_change=n_iter_no_change,
+            early_stopping=early_stopping, random_state=20260829)))
     with threadpool_limits(limits=1):
-        oracle.fit(train, labels)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", ConvergenceWarning)
+            oracle.fit(train, labels)
         expected = np.maximum(oracle.predict(prediction), 0.).tolist()
     return oracle, expected
 
@@ -197,6 +239,65 @@ def test_real_fit_matches_independent_oracle_and_is_repeatable(profile, layers, 
     assert result["loss_scale"] == "standardized_target"
     for actual, original in zip((train, labels, prediction), before):
         np.testing.assert_array_equal(actual, original)
+
+
+@pytest.mark.parametrize("profile,layers,alpha,early_stopping,max_iter,patience", [
+    ("es_relu32_l2_1", [32], 1, True, 400, 10),
+    ("fixed200_relu64x32_l2_1", [64, 32], 1, False, 200, 201),
+])
+def test_stopping_policy_matches_independent_oracle(profile, layers, alpha, early_stopping, max_iter, patience):
+    train, labels, prediction = arrays()
+    policy = recipe(profile=profile)
+    oracle, expected = independent_oracle(
+        train, labels, prediction, layers=layers, alpha=alpha,
+        early_stopping=early_stopping, max_iter=max_iter, n_iter_no_change=patience)
+    result = fit(policy)
+    assert result["predictions"] == expected
+    assert result["n_iter"] == oracle.regressor_[-1].n_iter_
+    assert result["recipe_id"] == content_hash(policy)
+    if profile == "fixed200_relu64x32_l2_1":
+        assert result["n_iter"] == 200
+
+
+def test_fixed_budget_fit_accepts_convergence_warning_at_epoch_200(monkeypatch):
+    original = TransformedTargetRegressor.fit
+    def warned(self, *args, **kwargs):
+        result = original(self, *args, **kwargs)
+        warnings.warn("forced epoch-budget warning", ConvergenceWarning)
+        return result
+    monkeypatch.setattr(TransformedTargetRegressor, "fit", warned)
+    policy = recipe(profile="fixed200_relu64x32_l2_1")
+    result = fit(policy)
+    assert result["converged"] is False
+    assert result["n_iter"] == 200
+    assert result["recipe_id"] == content_hash(policy)
+
+
+@pytest.mark.parametrize("profile,at_cap,accepted", [
+    ("es_relu32_l2_1", False, False),
+    ("relu32_l2_0p01", True, False),
+    ("fixed200_relu64x32_l2_1", True, True),
+    ("fixed200_relu64x32_l2_1", False, False),
+])
+def test_convergence_warning_requires_fixed_budget_at_cap(monkeypatch, profile, at_cap, accepted):
+    original = TransformedTargetRegressor.fit
+    def warned(self, *args, **kwargs):
+        result = original(self, *args, **kwargs)
+        if at_cap:
+            self.regressor_[-1].n_iter_ = 200 if profile.startswith("fixed200_") else 400
+        elif profile.startswith("fixed200_"):
+            self.regressor_[-1].n_iter_ = 199
+        warnings.warn("synthetic convergence warning", ConvergenceWarning)
+        return result
+    monkeypatch.setattr(TransformedTargetRegressor, "fit", warned)
+    policy = recipe(profile=profile)
+    if accepted:
+        result = fit(policy)
+        assert result["converged"] is False
+        assert result["n_iter"] == 200
+    else:
+        with pytest.raises(ValueError, match="convergence failed; no retry"):
+            fit(policy)
 
 
 def test_prediction_rows_cannot_influence_training_or_preprocessing(monkeypatch):

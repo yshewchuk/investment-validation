@@ -6,9 +6,18 @@ from engine.v2.foundation import canonical_json
 
 __all__ = ["mlp_recipe", "validate_mlp_recipe"]
 
-_PROFILES = {"relu32_l2_0p01": ([32], 0.01),
-             "relu64x32_l2_0p01": ([64, 32], 0.01),
-             "relu64x32_l2_0p1": ([64, 32], 0.1)}
+_PROFILES = {
+    "relu32_l2_0p01": ([32], 0.01, "training", "variant_failure_no_retry"),
+    "relu64x32_l2_0p01": ([64, 32], 0.01, "training", "variant_failure_no_retry"),
+    "relu64x32_l2_0p1": ([64, 32], 0.1, "training", "variant_failure_no_retry"),
+    "es_relu32_l2_0p01": ([32], 0.01, "early", "variant_failure_no_retry"),
+    "es_relu32_l2_1": ([32], 1, "early", "variant_failure_no_retry"),
+    "es_relu64x32_l2_0p01": ([64, 32], 0.01, "early", "variant_failure_no_retry"),
+    "es_relu64x32_l2_1": ([64, 32], 1, "early", "variant_failure_no_retry"),
+    "fixed200_relu64x32_l2_1": ([64, 32], 1, "budget", "epoch_budget_success_no_retry"),
+    "fixed200_relu64x32_l2_10": ([64, 32], 10, "budget", "epoch_budget_success_no_retry"),
+    "fixed200_relu64x32_l2_100": ([64, 32], 100, "budget", "epoch_budget_success_no_retry"),
+}
 
 
 def mlp_recipe(*, columns, feature_dictionary_hash, profile):
@@ -21,7 +30,9 @@ def mlp_recipe(*, columns, feature_dictionary_hash, profile):
             or not re.fullmatch(r"sha256:[0-9a-f]{64}", feature_dictionary_hash)
             or type(profile) is not str or profile not in _PROFILES):
         raise ValueError("MLP requires a canonical dictionary hash and declared profile")
-    layers, alpha = _PROFILES[profile]
+    layers, alpha, stopping, convergence = _PROFILES[profile]
+    max_iter, n_iter_no_change = {
+        "training": (400, 15), "early": (400, 10), "budget": (200, 201)}[stopping]
     return {
         "schema_version": "magnitude_mlp_recipe.v1", "model": "mlp", "profile": profile,
         "features": list(columns), "feature_dictionary_hash": feature_dictionary_hash,
@@ -29,11 +40,11 @@ def mlp_recipe(*, columns, feature_dictionary_hash, profile):
             "hidden_layer_sizes": list(layers), "activation": "relu", "solver": "adam",
             "loss": "squared_error", "alpha": alpha, "batch_size": "auto",
             "learning_rate": "constant", "learning_rate_init": 0.001, "power_t": 0.5,
-            "max_iter": 400, "shuffle": True, "random_state": 20260829, "tol": 0.0001,
+            "max_iter": max_iter, "shuffle": True, "random_state": 20260829, "tol": 0.0001,
             "verbose": False, "warm_start": False, "momentum": 0.9,
-            "nesterovs_momentum": True, "early_stopping": False, "validation_fraction": 0.1,
+            "nesterovs_momentum": True, "early_stopping": stopping == "early", "validation_fraction": 0.1,
             "beta_1": 0.9, "beta_2": 0.999, "epsilon": 1e-8,
-            "n_iter_no_change": 15, "max_fun": 15000}},
+            "n_iter_no_change": n_iter_no_change, "max_fun": 15000}},
         "preprocessing": {
             "variance_filter": {"threshold": 0.0},
             "imputer": {"strategy": "median", "keep_empty_features": True},
@@ -43,7 +54,7 @@ def mlp_recipe(*, columns, feature_dictionary_hash, profile):
         "target_transform": {"class": "StandardScaler", "with_mean": True, "with_std": True},
         "prediction_projection": "clip_zero", "fit_scope": "fold_and_horizon",
         "numerical_threads": 1, "component_fits": 1,
-        "nonconvergence": "variant_failure_no_retry"}
+        "nonconvergence": convergence}
 
 
 def validate_mlp_recipe(recipe):

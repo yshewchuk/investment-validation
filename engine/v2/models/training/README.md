@@ -5,8 +5,8 @@ Component contract: [ARCHITECTURE.md](ARCHITECTURE.md).
 ## Standalone neural magnitude primitive (opt-in foundation)
 
 `magnitude_mlp_recipe.mlp_recipe` / `validate_mlp_recipe` bind the new closed
-`magnitude_mlp_recipe.v1`: three profiles, ReLU `(32,)`/L2 0.01 and
-`(64,32)`/L2 0.01 or 0.1. This small capacity/regularization comparison uses the
+`magnitude_mlp_recipe.v1`: ten closed profiles, including the original three
+and seven stopping variants. This small capacity/regularization comparison uses the
 installed sklearn `MLPRegressor`, not a GPU framework or combinatorial sweep.
 `training.magnitude_mlp.fit_mlp_predictions` receives caller-admitted matrices;
 both no-fit guards precede inspection. Fresh sklearn median imputation (retaining
@@ -21,15 +21,18 @@ Adam's numerical conditioning without changing the squared-error estimand;
 `TransformedTargetRegressor` restores original target units before finite checks
 and zero projection. This differs intentionally from the untouched production blend.
 
-All profiles fix seed 20260829, one numerical thread, Adam and training-loss
-stopping (tolerance 0.0001, patience 15), with no internal random validation split.
-The declared 400-epoch estimator ceiling matches the incumbent's finite iteration
-policy, not a new wall-time allowance. No holdout or evaluation labels enter fit,
-preprocessing or stopping; the caller still owns causal folds, source admission,
-inner-only selection, resource budgets and progress reporting. One successful call
+All profiles fix seed 20260829, one numerical thread and Adam. The original three use
+training-loss stopping (tolerance 0.0001, patience 15), with no random validation split.
+The four `es_` profiles set `early_stopping=True`, `validation_fraction=0.1`,
+`n_iter_no_change=10` and `max_iter=400`; sklearn uses the fixed seed for a random 10%
+split of training rows, not a chronological holdout. The three `fixed200_` profiles set
+`early_stopping=False` and `max_iter=200`; reaching this fixed epoch budget is successful
+stopping, not a convergence failure. Only these profiles allow a convergence warning at
+the iteration cap. No evaluation labels enter fit or preprocessing; the caller still owns
+causal folds, source admission, inner-only selection, resource budgets and progress reporting. One successful call
 is one component fit and returns detached `magnitude_mlp_fit.v1` predictions,
 recipe hash, iteration count and standardized-target optimizer loss (including L2,
-not a selection score). A convergence warning,
+not a selection score). A disallowed convergence warning,
 nonfinite fitted weights/loss or nonfinite inverse-transformed prediction raises
 `ValueError`, with no partial result, fallback or retry; unrelated warning classes
 are not convergence failures. Sklearn's exact interrupted-training warning restores
@@ -41,7 +44,9 @@ deterministically; there is no cache, I/O, publication or journal replay here.
 The generic magnitude dispatcher now accepts this closed recipe and preserves the
 complete result; `size_fit_diagnostics` validates its per-horizon evidence for fresh
 execution and replay. Existing recipe values and the comparator remain unchanged.
-Only opt-in `magnitude_search_request.v6` admits these profiles; v1-v5 still refuse MLP.
+Request v6 admits the original three profiles; v1-v5 still refuse MLP. Request v7
+admits all ten profiles and accepts the same optional
+bounded-worker declaration as v6.
 New execution sources need fresh source seals; old reservations remain bound to
 original installed sources, with no resealing or mutation of running plans.
 
@@ -68,7 +73,7 @@ Replaces (§4.4): `models/training/, rewritten above scoring rather than moved`.
 `magnitude_mlp.fit_mlp_predictions` fits one guarded standalone MLP component on
 caller-admitted matrices: training-only input/target scaling, deterministic fixed
 profiles, original-unit nonnegative forecasts and convergence evidence. Invalid
-inputs, convergence failure or nonfinite evidence raise `ValueError`; no retry,
+inputs, disallowed convergence warnings or nonfinite evidence raise `ValueError`; no retry,
 source admission, persistence or production/search activation occurs.
 
 `magnitude_candidate.fit_candidate` is the shared fixed-nonnegative Ridge/HGB/ElasticNet/MLP
