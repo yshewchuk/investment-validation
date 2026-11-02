@@ -78,7 +78,10 @@ def test_real_fold_roundtrip_and_target_projection(fold_case, monkeypatch):
     projected = inputs.load_fit_inputs(data.store, manifest, identity, data.fold["evaluation_event_ids"],
         [5, 3, 1], ["n_prior"], target_column="crush_pct_iv30")
     assert projected["training"] == cohort["training"]
-    assert all(set(row) == {"event_id", "context_id", "horizon_sessions", "n_prior"} for row in projected["features"])
+    expected_features = [{name: row[name] for name in
+        ("event_id", "event_date", "context_id", "horizon_sessions", "n_prior")}
+        for row in cohort["features"]]
+    assert projected["features"] == expected_features
 
 
 @pytest.mark.parametrize("fold_case", ["outer"], indirect=True)

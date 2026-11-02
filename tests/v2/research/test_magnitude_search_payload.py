@@ -54,8 +54,8 @@ def expected_inputs():
         ("train-b", 1, 5, (10, 15, None, 25, 30, 35, 40, 45, 50, 55)),
         ("train-b", 5, 5, (30, 35, None, 45, 50, 55, 60, 65, 70, 75)),
     ]
-    return {"features": [{"event_id": event, "context_id": "sha256:" + "c" * 64,
-        "horizon_sessions": horizon, "n_prior": count,
+    return {"features": [{"event_id": event, "event_date": "2024-01-01",
+        "context_id": "sha256:" + "c" * 64, "horizon_sessions": horizon, "n_prior": count,
         **{name: None if value is None else value / 11
            for name, value in zip(columns, numerators, strict=True)}}
         for event, horizon, count, numerators in rows],

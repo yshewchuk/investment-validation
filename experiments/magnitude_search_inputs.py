@@ -98,9 +98,10 @@ def load_fit_inputs(store, manifest, expected_id, evaluation_event_ids, horizons
     Verifies the manifest against ``expected_id`` and reads only its ``training`` and
     ``features`` sections, shard by shard. Returns ``{"features", "training"}``: training rows
     reduced to (event_id, target_column); feature rows kept for training or evaluation
-    events at the selected horizons, reduced to (event_id, event_date, context_id,
-    horizon_sessions, *feature_columns), in stored order. A manifest, hash, shard or
-    inline-path mismatch is
+    events at the selected horizons, reduced to the required projection (event_id,
+    context_id, horizon_sessions, *feature_columns) plus event_date when present; a
+    missing event_date is omitted so non-SIZE publishers remain loadable. A manifest,
+    hash, shard or inline-path mismatch is
     EXPERIMENT_IDENTITY_CONFLICT (retryable store errors propagate); a row missing a
     requested column raises KeyError. The magnitude fit child reports MemoryError as
     resource_limit and other loader failures as unavailable; library callers retain the error.
@@ -123,8 +124,9 @@ def load_fit_inputs(store, manifest, expected_id, evaluation_event_ids, horizons
                 for row in _iter_rows(store, members["training"], sections["training"])]
     events = {row["event_id"] for row in training} | set(evaluation_event_ids)
     wanted = set(horizons)
-    columns = ("event_id", "event_date", "context_id", "horizon_sessions", *feature_columns)
-    features = [{name: row[name] for name in columns}
+    columns = ("event_id", "context_id", "horizon_sessions", *feature_columns)
+    features = [{**{name: row[name] for name in columns},
+                 **({"event_date": row["event_date"]} if "event_date" in row else {})}
                 for row in _iter_rows(store, members["features"], sections["features"])
                 if row["event_id"] in events and row["horizon_sessions"] in wanted]
     return {"features": features, "training": training}
