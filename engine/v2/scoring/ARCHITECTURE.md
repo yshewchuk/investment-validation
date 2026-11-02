@@ -707,16 +707,14 @@ and the release is not consulted for it.
 
 #### Chooser fold provenance reference
 
-A verified chooser-fold reference carries the descriptor/estimator hashes,
-fold month and producer binding, plus the authoring/carrying release ids and the
-[training cutoff](../models/ARCHITECTURE.md#chooser-producer-fold-authoring) defined only in the models architecture. For a new descriptor the reference preserves its producer-declared cutoff; a cutoffless legacy descriptor retains the legacy fold-start reference value.
-`resolve_release_binding` returns an empty
-`chooser_fold_references` map by default and does not load chooser estimators
-for ordinary nightly scoring. Callers that need these references opt in with
-`include_chooser_fold_references=True`; resolution returns a complete map or a
-typed refusal. Strict capture opts in, passes verified references to the
-scorer, and records both release ids in trace metadata. Ordinary nightly
-scoring loads no chooser estimators and infers no provenance from legacy rows.
+A verified chooser-fold reference carries descriptor/estimator hashes, fold month, producer binding, authoring/carrying release ids and the canonical [training cutoff](../models/ARCHITECTURE.md#chooser-producer-fold-authoring) defined only in the models architecture.
+New references preserve the producer-declared cutoff; cutoffless legacy references retain the legacy `fold_start` value and are skipped by this reference path while remaining loadable and hash-stable through the normal serving-fold loader.
+By default `resolve_release_binding` returns empty `chooser_fold_references` and authoring-context maps and does no chooser-fold loading for ordinary nightly scoring; it still exposes the canonical current catalog JSON and verified parent manifest.
+Callers that need the references and contexts opt in with `include_chooser_fold_references=True`; resolution returns complete maps or a typed refusal.
+References and contexts are keyed by descriptor hash and hold the exact authoring release's verified manifest and catalog.
+`resolve_chooser_fold_authoring_contexts(release_root, release_id)` resolves that same pair for an explicitly named release: it verifies the exact manifest and catalog for that id, resolves its model bindings, and never reads the live `DEPLOYED` pointer.
+Strict capture opts in, passes verified references to the scorer, and records both release ids in trace metadata.
+Ordinary nightly scoring loads no chooser estimators and infers no provenance from legacy rows.
 
 | Condition | Outcome |
 |---|---|

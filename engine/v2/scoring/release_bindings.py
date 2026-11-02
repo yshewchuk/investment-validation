@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 from types import MappingProxyType
-from typing import Callable, Mapping, TypeVar
+from typing import Any, Callable, Mapping, TypeVar
 
 from engine.v2.foundation import content_hash, from_document
 from engine.v2.models import deployment
@@ -71,6 +71,7 @@ __all__ = [
     "ScoringReleaseBinding",
     "ReleaseBindingError",
     "resolve_gate_policy",
+    "resolve_chooser_fold_authoring_contexts",
     "resolve_production_release_binding",
     "resolve_release_binding",
 ]
@@ -199,6 +200,14 @@ class ScoringReleaseBinding:
     #: Verified capture references keyed by (producer_output, fold_start).
     chooser_fold_references: Mapping[tuple[str, str], ChooserFoldReference] = field(
         default_factory=dict)
+    #: Canonical compact JSON of the current release's state catalog.
+    chooser_fold_catalog_json: str = field(default="", repr=False, compare=False)
+    #: The current release's verified staged manifest.
+    chooser_parent_manifest: Any = field(default=None, repr=False, compare=False)
+    #: Exact authoring manifest/catalog keyed by descriptor hash.
+    chooser_authoring_fold_contexts: Mapping[
+        str, tuple[deployment.StagedManifest, Mapping]] = field(
+            default_factory=dict, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "model_identity", MappingProxyType(dict(self.model_identity)))
@@ -221,6 +230,10 @@ class ScoringReleaseBinding:
                            tuple(self.trailing_cutoff_artifacts))
         object.__setattr__(self, "chooser_fold_references",
                            MappingProxyType(dict(self.chooser_fold_references)))
+        object.__setattr__(self, "chooser_authoring_fold_contexts", MappingProxyType({
+            descriptor_hash: (manifest, dict(catalog))
+            for descriptor_hash, (manifest, catalog)
+            in self.chooser_authoring_fold_contexts.items()}))
 
 
 def resolve_release_binding(
@@ -260,10 +273,12 @@ def resolve_release_binding(
     size_folds = index_size_folds(catalog, manifest)
     frozen_inference = FrozenInference(dep_root)
     if include_chooser_fold_references:
-        chooser_fold_references = _resolve_chooser_fold_references(
-            catalog, manifest, frozen_inference, model_identity, root, dep_root)
+        chooser_fold_references, chooser_authoring_fold_contexts = (
+            _resolve_chooser_fold_references(
+                catalog, manifest, frozen_inference, model_identity, root, dep_root))
     else:
         chooser_fold_references = MappingProxyType({})
+        chooser_authoring_fold_contexts = MappingProxyType({})
     payoff = _resolve_state_group(
         dep_root, catalog, lambda member_id: member_id.startswith(_PAYOFF_PREFIXES), _load_payoff)
     recalibration = _resolve_state_group(
@@ -294,7 +309,36 @@ def resolve_release_binding(
         paired_residual_artifacts=paired_residual,
         trailing_cutoff_artifacts=trailing_cutoff, size_folds=size_folds,
         chooser_fold_references=chooser_fold_references,
+        chooser_fold_catalog_json=json.dumps(
+            catalog, sort_keys=True, separators=(",", ":")),
+        chooser_parent_manifest=manifest,
+        chooser_authoring_fold_contexts=chooser_authoring_fold_contexts,
     )
+
+
+def resolve_chooser_fold_authoring_contexts(
+    release_root: Path | str, release_id: str,
+) -> tuple[Mapping[tuple[str, str], ChooserFoldReference],
+           Mapping[str, tuple[deployment.StagedManifest, Mapping]]]:
+    """Resolve chooser references and exact authoring contexts for one release.
+
+    Reads only the named release's verified manifest and catalog; the live
+    ``DEPLOYED`` pointer is never consulted. Returns the same reference map
+    :func:`resolve_release_binding` exposes when chooser folds are requested,
+    plus each reference's exact authoring manifest and catalog keyed by
+    descriptor hash.
+    """
+    if not str(release_root).strip():
+        raise ValueError("release_root must be a non-empty path")
+    if not str(release_id).strip():
+        raise ValueError("release_id must be a non-empty value")
+    root = Path(release_root)
+    dep_root = root / _DEPLOYMENT_DIR
+    manifest = _read_and_verify_manifest(dep_root, release_id)
+    catalog = _read_state_catalog(root, release_id)
+    model_identity, _artifact_refs = _resolve_model_bindings(dep_root, manifest.release)
+    return _resolve_chooser_fold_references(
+        catalog, manifest, FrozenInference(dep_root), model_identity, root, dep_root)
 
 
 def resolve_production_release_binding(
@@ -722,7 +766,8 @@ def _verified_chooser_fold_reference(
     authoring_releases: dict[str, tuple[
         "deployment.StagedManifest", Mapping, date, Mapping[str, ModelIdentity]]],
     carried_catalogs: dict[str, Mapping],
-) -> tuple[tuple[str, str], ChooserFoldReference] | None:
+) -> tuple[tuple[str, str], ChooserFoldReference,
+           "deployment.StagedManifest", Mapping] | None:
     member_id = "tier4_folds:chooser"
     try:
         descriptor = from_document(ChooserServingFoldDescriptor, obj["serving_fold"])
@@ -769,7 +814,7 @@ def _verified_chooser_fold_reference(
             deployment.DeploymentError, ServingFoldError) as exc:
         raise ModelNotReady(member_id, "chooser fold could not be verified or loaded") from exc
     key = (loaded.descriptor.producer_output, loaded.descriptor.fold_start)
-    return key, ChooserFoldReference(
+    reference = ChooserFoldReference(
         producer_output=key[0], descriptor_hash=loaded.descriptor.descriptor_hash,
         estimator_sha256=loaded.descriptor.estimator.content_hash,
         # Legacy cutoffless descriptors retain the prior fold-start reference value.
@@ -778,6 +823,7 @@ def _verified_chooser_fold_reference(
         release_id=authoring_manifest.release.release_id,
         carrying_release_id=manifest.release.release_id,
         release_binding=identity, fold_start=key[1])
+    return key, reference, authoring_manifest, authoring_catalog
 
 
 def _rss_mib() -> float:
@@ -790,14 +836,38 @@ def _rss_mib() -> float:
     return kib / 1024.0
 
 
+def _is_legacy_cutoffless_chooser_fold(obj: object) -> bool:
+    """Whether ``obj`` is a legacy chooser descriptor without a training cutoff.
+
+    Such descriptors remain loadable and hash-stable through the normal
+    serving-fold loader, but the reference path skips them.
+    """
+    if not isinstance(obj, Mapping):
+        return False
+    descriptor = obj.get("serving_fold")
+    if not isinstance(descriptor, Mapping):
+        return False
+    if not isinstance(descriptor.get("policy"), Mapping):
+        return False
+    if not isinstance(descriptor.get("fold_start"), str):
+        return False
+    if descriptor.get("producer_output") not in (
+            "pred_im_t1_d14", "pred_runup_abs_move_d14"):
+        return False
+    return descriptor.get("training_cutoff") is None
+
+
 def _load_chooser_fold_references(
     objects: list, member_id: str, cutoff: date, catalog: Mapping,
     manifest: "deployment.StagedManifest", inference: FrozenInference,
     model_identity: Mapping[str, ModelIdentity], root: Path, dep_root: Path,
-) -> dict[tuple[str, str], ChooserFoldReference]:
+) -> tuple[dict[tuple[str, str], ChooserFoldReference],
+           dict[str, tuple["deployment.StagedManifest", Mapping]]]:
     if len(objects) > _CHOOSER_FOLD_MAX_OBJECTS:
         raise ModelNotReady(member_id, "chooser fold catalog exceeds load limit")
+    objects = [obj for obj in objects if not _is_legacy_cutoffless_chooser_fold(obj)]
     total, started, references = len(objects), time.monotonic(), {}
+    authoring_contexts: dict[str, tuple["deployment.StagedManifest", Mapping]] = {}
     authoring_releases = {
         manifest.release.release_id: (manifest, catalog, cutoff, model_identity)}
     carried_catalogs: dict[str, Mapping] = {}
@@ -814,10 +884,13 @@ def _load_chooser_fold_references(
             authoring_releases, carried_catalogs)
         if result is None:
             continue
-        key, reference = result
+        key, reference, authoring_manifest, authoring_catalog = result
         if key in references:
             raise ModelNotReady(member_id, "ambiguous chooser fold reference")
         references[key] = reference
+        if authoring_manifest is not None:
+            authoring_contexts[reference.descriptor_hash] = (
+                authoring_manifest, authoring_catalog)
         if done % 4 == 0 or done == total:
             elapsed = time.monotonic() - started
             rate = done / elapsed if elapsed > 0 else 0.0
@@ -835,7 +908,7 @@ def _load_chooser_fold_references(
         f"rate={rate:.2f}/s, peak_rss={_rss_mib():.1f}MiB",
         file=sys.stderr,
     )
-    return references
+    return references, authoring_contexts
 
 
 def _chooser_fold_objects(members: Mapping, member_ids: tuple[str, ...]) -> list:
@@ -860,7 +933,8 @@ def _resolve_chooser_fold_references(
     catalog: Mapping, manifest: "deployment.StagedManifest",
     inference: FrozenInference, model_identity: Mapping[str, ModelIdentity],
     root: Path, dep_root: Path,
-) -> dict[tuple[str, str], ChooserFoldReference]:
+) -> tuple[dict[tuple[str, str], ChooserFoldReference],
+           dict[str, tuple["deployment.StagedManifest", Mapping]]]:
     member_ids = ("tier4_folds:implied_t1", "tier4_folds:runup_move")
     rows = catalog.get("members")
     if not isinstance(rows, list) or any(not isinstance(row, Mapping) for row in rows):
@@ -873,10 +947,11 @@ def _resolve_chooser_fold_references(
                 raise ModelNotReady(member_id, "chooser fold catalog is not valid")
             members[member_id] = row
     if not members:
-        return {}
+        return {}, {}
     objects = _chooser_fold_objects(members, member_ids)
+    objects = [obj for obj in objects if not _is_legacy_cutoffless_chooser_fold(obj)]
     if not objects:
-        return {}
+        return {}, {}
     sources = catalog.get("sources")
     cutoff = sources.get("retrain_cutoff") if isinstance(sources, Mapping) else None
     if cutoff is None:

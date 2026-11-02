@@ -30,6 +30,7 @@ from engine.v2.models import (
     release_objects,
 )
 from engine.v2.models import serving_fold_preflight as folds
+from engine.v2.models.serving_fold_loader import load_chooser_serving_fold
 from engine.v2.models.serving_folds import (
     ChooserFoldPolicy,
     ChooserServingFoldDescriptor,
@@ -353,11 +354,19 @@ def test_carried_chooser_fold_loads_from_verified_original_release(tmp_path, mon
     deployment.mark_staging_succeeded(store, "origin")
     deployment.promote(store, "origin")
 
+    default = resolve_release_binding(tmp_path)
+    assert default.chooser_authoring_fold_contexts == {}
+
     original = resolve_release_binding(
         tmp_path, include_chooser_fold_references=True)
     origin_ref = original.chooser_fold_references[
         (OUTPUTS[role][1], cache["fold_start"])]
     assert origin_ref.release_id == origin_ref.carrying_release_id == "origin"
+    assert original.chooser_fold_catalog_json == json.dumps(
+        origin_body, sort_keys=True, separators=(",", ":"))
+    assert original.chooser_parent_manifest == published_manifest(store, "origin")
+    assert original.chooser_authoring_fold_contexts[origin_ref.descriptor_hash] == (
+        original.chooser_parent_manifest, origin_body)
 
     release, inventory, payloads = release_inputs(role, cache, release_id="carried")
     deployment.stage_release(store, release, inventory, payloads)
@@ -382,6 +391,20 @@ def test_carried_chooser_fold_loads_from_verified_original_release(tmp_path, mon
     assert carried_ref.release_id == "origin"
     assert carried_ref.carrying_release_id == "carried"
     assert carried_ref.descriptor_hash == content_hash(origin_obj["serving_fold"])
+
+    context_references, authoring_contexts = rb.resolve_chooser_fold_authoring_contexts(
+        tmp_path, "carried")
+    context_ref = context_references[(OUTPUTS[role][1], cache["fold_start"])]
+    assert context_ref.release_id == "origin"
+    assert context_ref.carrying_release_id == "carried"
+    assert context_ref.descriptor_hash == carried_ref.descriptor_hash
+    authoring_manifest, authoring_catalog = authoring_contexts[context_ref.descriptor_hash]
+    descriptor = from_document(ChooserServingFoldDescriptor, origin_obj["serving_fold"])
+    loaded = load_chooser_serving_fold(
+        FrozenInference(store), descriptor,
+        verified_parent_manifest=authoring_manifest,
+        verified_catalog=dict(authoring_catalog))
+    assert loaded.descriptor.descriptor_hash == context_ref.descriptor_hash
 
     carried_body_without_link = copy.deepcopy(carried_body)
     del carried_body_without_link["sources"]["carried_from"]

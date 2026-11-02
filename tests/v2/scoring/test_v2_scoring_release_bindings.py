@@ -747,8 +747,8 @@ def test_carried_chooser_reference_uses_verified_authoring_release(tmp_path, mon
     carried_catalogs = {}
     args = (descriptor_object, current_catalog, current_manifest, object(), tmp_path,
             tmp_path / "deployment", authoring_releases, carried_catalogs)
-    key, reference = rb._verified_chooser_fold_reference(*args)
-    _key_again, reference_again = rb._verified_chooser_fold_reference(*args)
+    key, reference, returned_manifest, returned_catalog = rb._verified_chooser_fold_reference(*args)
+    _key_again, reference_again, _manifest_again, _catalog_again = rb._verified_chooser_fold_reference(*args)
 
     assert key == ("pred_im_t1_d14", "2026-09-01")
     assert reference.producer_output == "pred_im_t1_d14"
@@ -760,6 +760,8 @@ def test_carried_chooser_reference_uses_verified_authoring_release(tmp_path, mon
     assert reference.release_binding is identity
     assert reference.fold_start == descriptor.fold_start
     assert reference_again == reference
+    assert returned_manifest is origin_manifest
+    assert returned_catalog == authoring_catalog
     assert calls[0][2] is origin_manifest
     assert calls[0][3] == authoring_catalog
     assert catalog_reads == ["prior", "origin"]
@@ -874,15 +876,16 @@ def test_chooser_fold_reference_loads_34_aggregate_objects(tmp_path, monkeypatch
 
     def verified_reference(*_args):
         index = next(sequence)
-        return (f"producer-{index}", f"fold-{index}"), object()
+        return (f"producer-{index}", f"fold-{index}"), object(), None, None
 
     monkeypatch.setattr(rb, "_verified_chooser_fold_reference", verified_reference)
     manifest = SimpleNamespace(release=SimpleNamespace(release_id="release"))
-    references = rb._load_chooser_fold_references(
+    references, contexts = rb._load_chooser_fold_references(
         [{} for _ in range(34)], "tier4_folds:chooser", date(2026, 9, 1), {}, manifest,
         object(), {}, tmp_path, tmp_path)
 
     assert len(references) == 34
+    assert contexts == {}
 
 
 def test_chooser_fold_reference_refuses_aggregate_load_limit(tmp_path, monkeypatch):
