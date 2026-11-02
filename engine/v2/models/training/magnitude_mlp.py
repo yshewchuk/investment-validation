@@ -51,6 +51,6 @@ def fit_mlp_predictions(recipe, train_features, train_labels, prediction_feature
         raise ValueError("MLP predictions require one finite value per prediction row")
     return {"schema_version": "magnitude_mlp_fit.v1", "recipe_id": content_hash(recipe),
         "predictions": np.maximum(predictions, 0.0).tolist(), "component_fits": 1,
-        "converged": True, "n_iter": int(network.n_iter_),
+        "converged": not convergence_warning, "n_iter": int(network.n_iter_),
         "input_features": int(network.n_features_in_),
         "loss": float(network.loss_), "loss_scale": "standardized_target"}

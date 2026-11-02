@@ -268,7 +268,7 @@ def test_fixed_budget_fit_accepts_convergence_warning_at_epoch_200(monkeypatch):
     monkeypatch.setattr(TransformedTargetRegressor, "fit", warned)
     policy = recipe(profile="fixed200_relu64x32_l2_1")
     result = fit(policy)
-    assert result["converged"] is True
+    assert result["converged"] is False
     assert result["n_iter"] == 200
     assert result["recipe_id"] == content_hash(policy)
 
@@ -293,6 +293,7 @@ def test_convergence_warning_requires_fixed_budget_at_cap(monkeypatch, profile, 
     policy = recipe(profile=profile)
     if accepted:
         result = fit(policy)
+        assert result["converged"] is False
         assert result["n_iter"] == 200
     else:
         with pytest.raises(ValueError, match="convergence failed; no retry"):

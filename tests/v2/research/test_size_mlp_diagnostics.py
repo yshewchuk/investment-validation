@@ -58,6 +58,18 @@ def test_tampered_worker_claims_refuse(field, value):
     refuses(document)
 
 
+def test_fixed_budget_false_convergence_is_accepted_only_at_the_epoch_cap():
+    policy = execution()
+    policy["fit_recipe"] = recipe("fixed200_relu64x32_l2_1")
+    document = result()
+    for row in document["diagnostics"]:
+        row.update(recipe_id=content_hash(policy["fit_recipe"]), converged=False, n_iter=200)
+    assert evidence(document, policy, [5, 1]) == {"diagnostics": document["diagnostics"]}
+    for row in document["diagnostics"]:
+        row["n_iter"] = 199
+    refuses(document, policy)
+
+
 @pytest.mark.parametrize("kind", ["extra", "missing", "duplicate", "reverse", "short", "long", "tuple", "null", "row"])
 def test_closed_keys_and_exact_ordered_horizon_grid(kind):
     document = result()
