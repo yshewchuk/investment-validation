@@ -406,11 +406,6 @@ def test_carried_chooser_fold_loads_from_verified_original_release(tmp_path, mon
     with pytest.raises(TypeError):
         held_catalog["injected"] = "mutated"
 
-    cutoffless_object = copy.deepcopy(origin_obj)
-    cutoffless_object["serving_fold"].pop("training_cutoff", None)
-    cutoffless_before = content_hash(cutoffless_object)
-    assert content_hash(cutoffless_object) == cutoffless_before
-
     legacy_cache = copy.deepcopy(cache)
     legacy_cache.pop("training_cutoff", None)
     legacy_bytes = fold_bytes(legacy_cache)
@@ -428,14 +423,28 @@ def test_carried_chooser_fold_loads_from_verified_original_release(tmp_path, mon
     legacy_obj["serving_fold"].pop("training_cutoff", None)
     legacy_obj["serving_fold"]["estimator"]["path"] = f"objects/{legacy_digest}"
     legacy_obj["serving_fold"]["estimator"]["content_hash"] = f"sha256:{legacy_digest}"
+    legacy_descriptor_hash = content_hash(legacy_obj["serving_fold"])
     legacy_body["sources"].pop("retrain_cutoff", None)
     legacy_body["sources"].pop("pool_cutoff", None)
     write_catalog("origin", legacy_body)
+
+    recorded_hashes = []
+    original_load_chooser_serving_fold = rb.load_chooser_serving_fold
+
+    def recording_load_chooser_serving_fold(*args, **kwargs):
+        loaded = original_load_chooser_serving_fold(*args, **kwargs)
+        if loaded.descriptor.training_cutoff is None:
+            recorded_hashes.append(content_hash(to_document(loaded.descriptor)))
+        return loaded
+
+    monkeypatch.setattr(
+        rb, "load_chooser_serving_fold", recording_load_chooser_serving_fold)
 
     omitted_refs, omitted_contexts = rb.resolve_chooser_fold_authoring_contexts(
         tmp_path, "origin")
     assert omitted_refs == {}
     assert omitted_contexts == {}
+    assert recorded_hashes == [legacy_descriptor_hash]
 
     wrong_parent = copy.deepcopy(legacy_body)
     wrong_parent_row = next(

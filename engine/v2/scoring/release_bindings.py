@@ -566,7 +566,7 @@ def _read_catalog_bytes(local: Path, root_copy: Path) -> bytes:
 
 def _read_state_catalog(release_root: Path, expected_release_id: str) -> Mapping:
     """The ``phase5_release.json`` catalog: parsed, schema-checked,
-    self-hash-verified, and checked against the live pointer's release_id --
+    self-hash-verified, and checked against the requested release_id --
     all before any of its rows are trusted."""
     path = deployment.manifest_path(
         release_root / _DEPLOYMENT_DIR, expected_release_id).with_name(_STATE_CATALOG_NAME)
@@ -820,10 +820,8 @@ def _verified_chooser_fold_reference(
             authoring = _load_chooser_authoring_release(
                 authoring_id, obj, expected_member_id, root, dep_root)
             if authoring is None:
-                if authoring_id != manifest.release.release_id:
-                    raise ModelNotReady(
-                        member_id, "carried chooser authoring release has no canonical cutoff")
-                return None
+                raise ModelNotReady(
+                    member_id, "carried chooser authoring release has no canonical cutoff")
             authoring_releases[authoring_id] = authoring
         elif authoring_id != manifest.release.release_id:
             if not _catalog_contains_chooser_object(
@@ -908,6 +906,7 @@ def _load_chooser_fold_references(
     authoring_releases = {
         manifest.release.release_id: (manifest, catalog, cutoff, model_identity)}
     carried_catalogs: dict[str, Mapping] = {}
+    omitted_legacy = 0
     print(
         f"[chooser-folds] start: 0/{total}, elapsed=0.0s, "
         f"peak_rss={_rss_mib():.1f}MiB",
@@ -928,6 +927,8 @@ def _load_chooser_fold_references(
                 references[key] = reference
                 authoring_contexts[reference.descriptor_hash] = (
                     authoring_manifest, authoring_catalog)
+            else:
+                omitted_legacy += 1
         if done % 4 == 0 or done == total:
             elapsed = time.monotonic() - started
             rate = done / elapsed if elapsed > 0 else 0.0
@@ -942,7 +943,8 @@ def _load_chooser_fold_references(
     rate = total / elapsed if elapsed > 0 else 0.0
     print(
         f"[chooser-folds] end: {total}/{total}, elapsed={elapsed:.1f}s, "
-        f"rate={rate:.2f}/s, peak_rss={_rss_mib():.1f}MiB",
+        f"rate={rate:.2f}/s, peak_rss={_rss_mib():.1f}MiB, "
+        f"legacy_cutoffless_omitted={omitted_legacy}",
         file=sys.stderr,
     )
     return references, authoring_contexts

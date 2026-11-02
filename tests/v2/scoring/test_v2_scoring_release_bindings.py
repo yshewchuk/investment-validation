@@ -418,6 +418,8 @@ def test_state_catalog_release_id_mismatch_raises_model_not_ready(tmp_path):
     with pytest.raises(ModelNotReady) as error:
         resolve_release_binding(tmp_path)
     assert error.value.member_id == "phase5_release.json"
+    assert error.value.code == "MODEL_NOT_READY"
+    assert error.value.detail == "release_id disagrees with the requested release"
     _assert_no_leak(tmp_path, error.value)
 
 
@@ -1006,7 +1008,7 @@ def test_legacy_chooser_fold_catalog_without_retrain_cutoff_keeps_binding_availa
         tmp_path, monkeypatch):
     _rb, _descriptors, _identities, calls, _body = _chooser_resolver_fixture(
         tmp_path, monkeypatch, cutoff=None)
-    _descriptors["first"].training_cutoff = "2026-08-31"
+    _descriptors["first"].training_cutoff = None
 
     binding = resolve_release_binding(tmp_path)
 
@@ -1014,9 +1016,11 @@ def test_legacy_chooser_fold_catalog_without_retrain_cutoff_keeps_binding_availa
     assert binding.chooser_fold_references == {}
     assert calls == []
 
-    with pytest.raises(ModelNotReady, match="canonical training cutoff is missing"):
-        resolve_release_binding(tmp_path, include_chooser_fold_references=True)
-    assert calls == []
+    opted = resolve_release_binding(tmp_path, include_chooser_fold_references=True)
+
+    assert opted.chooser_fold_references == {}
+    assert opted.chooser_authoring_fold_contexts == {}
+    assert len(calls) == 1
 
 
 def test_legacy_chooser_fold_is_verified_then_omitted(tmp_path, monkeypatch, capsys):
@@ -1032,6 +1036,7 @@ def test_legacy_chooser_fold_is_verified_then_omitted(tmp_path, monkeypatch, cap
     captured = capsys.readouterr()
     assert "[chooser-folds] 1/1" in captured.err
     assert "end: 1/1" in captured.err
+    assert "legacy_cutoffless_omitted=1" in captured.err
 
 
 def test_legacy_chooser_fold_with_missing_parent_refuses(tmp_path, monkeypatch):
