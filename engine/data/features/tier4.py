@@ -58,6 +58,7 @@ import json
 import sys
 import time
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
@@ -104,6 +105,23 @@ __all__ = [
 
 class Tier4Error(RuntimeError):
     """The forecast table, or a request to build it, failed a causality check."""
+
+
+def _validated_training_cutoff(value: object, fold_start: pd.Timestamp) -> str | None:
+    """A stored serving-fold training cutoff, validated as a canonical date string."""
+    if value is None:
+        return None
+    if not isinstance(value, str) or len(value) != 10:
+        raise Tier4Error("invalid serving fold training cutoff")
+    try:
+        parsed = date.fromisoformat(value)
+    except ValueError:
+        raise Tier4Error("invalid serving fold training cutoff") from None
+    if parsed.isoformat() != value:
+        raise Tier4Error("invalid serving fold training cutoff")
+    if value >= str(fold_start.date()):
+        raise Tier4Error("invalid serving fold training cutoff")
+    return value
 
 
 #: The retrain period. A registered parameter rather than a constant, so
@@ -1461,6 +1479,11 @@ class ServingModel:
     #: the correct answer rather than a fabricated one.
     pool_pred: np.ndarray = field(default_factory=lambda: np.empty(0))
     pool_res: np.ndarray = field(default_factory=lambda: np.empty(0))
+    #: The producer-declared last training day actually fit for this fold
+    #: (canonical ISO day), read back from the cache header on a hit and set
+    #: from the fit's own trainable rows on a fresh fit. ``None`` when a
+    #: legacy header never carried one.
+    training_cutoff: str | None = None
 
     def predict(self, frame: pd.DataFrame) -> np.ndarray:
         """Forecasts for ``frame``, NaN wherever a feature is missing.
@@ -1635,6 +1658,7 @@ def serving_model(
                 pool_pred, pool_res = _pool_before(
                     fold, model, load_panel() if panel is None else panel
                 )
+            training_cutoff = _validated_training_cutoff(stored.get("training_cutoff"), fold)
             return ServingModel(
                 estimator=stored["estimator"],
                 model_id=model.model_id,
@@ -1644,6 +1668,7 @@ def serving_model(
                 interval_floor=model.interval_floor,
                 pool_pred=pool_pred,
                 pool_res=pool_res,
+                training_cutoff=training_cutoff,
             )
 
     forbid_fitting("engine.data.features.tier4.serving_model:miss")
@@ -1653,6 +1678,11 @@ def serving_model(
     # rebuild its own -- see that function's docstring for the redundant
     # second `training_frames`/`.copy()` this removes on a fresh fit.
     pool_pred, pool_res = _pool_before(fold, model, panel, trainable=trainable)
+    training_cutoff = None
+    if "date" in trainable.columns:
+        trained = trainable.loc[trainable["date"] < fold, "date"]
+        if not trained.empty:
+            training_cutoff = str(pd.Timestamp(trained.max()).date())
     served = ServingModel(
         estimator=fit_fold(trainable, model, fold),
         model_id=model.model_id,
@@ -1662,29 +1692,47 @@ def serving_model(
         interval_floor=model.interval_floor,
         pool_pred=pool_pred,
         pool_res=pool_res,
+        training_cutoff=training_cutoff,
     )
     if cache:
         import joblib
 
         paths.assert_writable(SERVING_DIR).mkdir(parents=True, exist_ok=True)
-        # A file handle prevents filename suffixes from enabling compression.
-        with path.open("wb") as handle:
-            joblib.dump(
-                {
-                    "estimator": served.estimator,
-                    "model_id": served.model_id,
-                    "fold_start": str(fold.date()),
-                    "tier3_snapshot": snapshot,
-                    "features": list(served.features),
-                    # Embedded so a future cache HIT (this process or another)
-                    # never has to recompute _pool_before's model.prepare(panel)
-                    # pass -- see the cache-hit branch above.
-                    "pool_pred": served.pool_pred,
-                    "pool_res": served.pool_res,
-                },
-                handle,
-                compress=0,
-            )
+        header = {
+            "estimator": served.estimator,
+            "model_id": served.model_id,
+            "fold_start": str(fold.date()),
+            "tier3_snapshot": snapshot,
+            "features": list(served.features),
+            # Embedded so a future cache HIT (this process or another)
+            # never has to recompute _pool_before's model.prepare(panel)
+            # pass -- see the cache-hit branch above.
+            "pool_pred": served.pool_pred,
+            "pool_res": served.pool_res,
+        }
+        if served.training_cutoff is not None:
+            header["training_cutoff"] = served.training_cutoff
+        import os
+        import uuid
+
+        # Write to a same-directory temporary sibling, flush/fsync it, then
+        # atomically replace the destination. A file handle prevents filename
+        # suffixes from enabling compression.
+        temporary = path.parent / ("." + path.name + "." + uuid.uuid4().hex + ".tmp")
+        try:
+            with temporary.open("wb") as handle:
+                joblib.dump(header, handle, compress=0)
+                handle.flush()
+                os.fsync(handle.fileno())
+            try:
+                mode = path.stat().st_mode & 0o7777
+            except FileNotFoundError:
+                pass
+            else:
+                os.chmod(temporary, mode)
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
     return served
 
 
@@ -1721,10 +1769,10 @@ def read_serving_header(path, *, expected_sha256_hex: str, max_bytes: int) -> di
     if hashlib.sha256(data).hexdigest() != expected_sha256_hex:
         return None
     stored = joblib.load(io.BytesIO(data))
-    fold_start = stored.get("fold_start")
+    raw_fold = stored.get("fold_start")
     return {
         "model_id": stored.get("model_id"),
-        "fold_start": str(fold_start) if fold_start is not None else None,
+        "fold_start": str(raw_fold) if raw_fold is not None else None,
         "tier3_snapshot": stored.get("tier3_snapshot"),
         "features": tuple(stored.get("features", ())),
     }

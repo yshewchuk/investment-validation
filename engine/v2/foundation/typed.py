@@ -69,7 +69,8 @@ def to_document(value: Any) -> Any:
     """A dataclass tree as plain JSON-shaped values; tuples become lists."""
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
         return {f.name: to_document(getattr(value, f.name))
-                for f in dataclasses.fields(value)}
+                for f in dataclasses.fields(value)
+                if not (f.metadata.get("omit_if_none") and getattr(value, f.name) is None)}
     if isinstance(value, (list, tuple)):
         return [to_document(v) for v in value]
     if isinstance(value, dict):

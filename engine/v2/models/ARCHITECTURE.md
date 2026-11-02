@@ -14,7 +14,7 @@ This package owns four things:
 - **Contracts** (`contracts.py`) — the immutable shapes a frozen release is
   made of (`ModelBinding`, `ModelRelease`, `ArtifactMember`) and the
   inference call/response pair (`InferenceRequest`, `InferenceResult`,
-  `PredictionFrame`). Schemas only: no logic, no I/O.
+  `PredictionFrame`). Schemas and pure metadata validators such as `validated_training_cutoff`; no I/O.
 - **Verified loading and inference** (`adapters.py`, `loader.py`) — the
   adapters that turn a hash-verified member's bytes into a read-only
   predictor, and `FrozenInference`, the one class that runs a request
@@ -549,7 +549,7 @@ When staging chooser serving folds, `phase5_prepare_release` writes `sources.ret
 Catalogs without chooser folds need neither cutoff. A caller-supplied `retrain_cutoff` always requires a canonical `pool_cutoff` on or after it; otherwise preparation refuses before staging. With chooser folds, noncanonical fold starts refuse with the fold-date cause, a supplied `retrain_cutoff` that differs from the latest validated fold start refuses with the retrain-cutoff cause, and a noncanonical/earlier supplied `pool_cutoff` refuses with the pool-cutoff cause. Each raises `PrepareRefused` before staging.
 Catalog validation applies the same distinction: a missing `pool_cutoff` is valid for a chooser-only catalog, while an explicitly present `pool_cutoff: null` alongside `retrain_cutoff` is invalid.
 Release preparation also refuses non-mapping `sources` with `PrepareRefused` before pinned-source checks or preflights.
-Serving-fold writers (`tier4.serving_model`, Phase-4 build/backfill) use binary handles and explicit `compress=0`; filename suffixes cannot enable compression.
+Serving-fold writers (`tier4.serving_model`, Phase-4 build/backfill) use binary handles and explicit `compress=0`; filename suffixes cannot enable compression. Publication uses same-directory temporary files, file fsync, and atomic replace.
 Release preparation (`--tier4-dir` and raw-byte APIs) requires trusted uncompressed inputs from supported writers; it does not refuse arbitrary compressed inputs before decoding.
 Hashes verify bytes, not provenance. The serialized byte cap is not a decoded-memory bound.
 Champion registry artifacts retain their separate `compress=3` format.
@@ -579,15 +579,15 @@ pinned COPY verification and pinned-size byte mismatches use `panel_copy_refused
 | Partial write | No pointer changes; staging may leave unreferenced files; no automatic store repair |
 | Cache | Authoring validates each supplied object anew; no process-global descriptor cache |
 
-**Chooser producer fold authoring.** `ChooserFoldPolicy` and `ChooserServingFoldDescriptor` declare `implied_t1`/`runup_move` under exact `tier4_folds:<role>` members. The descriptor binds the parent release, full panel hash, ordered features, clock, whole-cache estimator object (not the champion member), pool count and decile/floor policy. It records both the champion binding output and raw D14 chooser column; runup output is never day-scaled here. Standard release preparation obtains each present role's policy from its registered producer and validates the cache against that role's unique wildcard champion. Size descriptors keep their existing schema.
-The descriptor hash covers its canonical typed document, including parent, role and estimator identity.
-Without pinned COPY, the panel digest is caller-asserted; preparation does not verify panel bytes.
+### Chooser producer fold authoring
+
+`ChooserFoldPolicy` and `ChooserServingFoldDescriptor` declare `implied_t1`/`runup_move` under exact `tier4_folds:<role>` members. The descriptor binds the parent release, full panel hash, ordered features, clock, whole-cache estimator object (not the champion member), pool count and decile/floor policy. It records both the champion binding output and raw D14 chooser column; runup output is never day-scaled here. Standard release preparation obtains each present role's policy from its registered producer and validates the cache against that role's unique wildcard champion. Size descriptors keep their existing schema. The descriptor hash covers its canonical typed document, including parent, role and estimator identity. `training_cutoff` is the single definition of the chooser cutoff: the producer-declared last training day as a canonical ISO day. New authoring and preflight require a present string equal to its canonical day and strictly before `fold_start`; absent or invalid/noncanonical cutoff refuses with descriptor validation code `BAD_TRAINING_CUTOFF`. A legacy descriptor missing cutoff loads without a declared cutoff and keeps its legacy scoring-reference behavior; it is not a load-time error. Without pinned COPY, the panel digest is caller-asserted; preparation does not verify panel bytes.
 
 | Chooser fold authoring condition | Outcome |
 |---|---|
 | Explicit coherent role policy and bounded cache | Catalog-hashed descriptor; no fitting or prediction |
 | Unsupported role/output, mismatched policy/header/binding, malformed pool or oversized cache | Refuse preparation; no substitution by size or another role |
-| Invalid chooser role/features/panel/interval policy/floor or descriptor month/count/parent hash/clock/output/object (constructor/semantic checks) | Typed `DocumentError`; decode preserves nested paths |
+| Invalid chooser role/features/panel/interval policy/floor or descriptor month/count/parent hash/clock/output/object (constructor/semantic checks); absent/noncanonical/equal-or-after cutoff; adapter/loader metadata cutoff mismatch | Absent/noncanonical/equal-or-after cutoff: `DocumentError` code `BAD_TRAINING_CUTOFF`; other constructor/semantic validation: `DocumentError` with nested paths (decode preserves them); adapter/loader metadata cutoff mismatch: `AdapterError`/`ServingFoldError` |
 | Unsupported policy-map role or wrong policy type | Fixed `PrepareRefused`; distinguish unsupported role, invalid type and role/member disagreement |
 | Registered chooser producer rejects recipe features/target | Fixed `PrepareRefused` with original cause; CLI exits 2 without a traceback |
 | Pinned COPY context | Full panel hash must match; preflight precedes output effects and destination bytes must retain the validated hash |

@@ -832,7 +832,7 @@ def test_chooser_fold_reference_uses_fold_month_cutoff(
     assert calls[0][3]["sources"]["retrain_cutoff"] == cutoff
 
 
-def test_chooser_fold_references_use_each_fold_start_as_training_cutoff(
+def test_chooser_fold_references_preserve_declared_training_cutoffs(
         tmp_path, monkeypatch):
     from engine.v2.scoring import release_bindings as rb
 
@@ -852,13 +852,15 @@ def test_chooser_fold_references_use_each_fold_start_as_training_cutoff(
         tmp_path, monkeypatch, cutoff="2026-10-01", pool_cutoff="2026-10-01",
         two_objects=True,
         align_descriptor=True, identities=identities)
+    _descriptors["first"].training_cutoff = "2026-08-15"
+    _descriptors["second"].training_cutoff = "2026-09-15"
 
     binding = resolve_release_binding(tmp_path, include_chooser_fold_references=True)
 
     assert binding.chooser_fold_references[
-        ("pred_im_t1_d14", "2026-09-01")].training_cutoff == "2026-09-01"
+        ("pred_im_t1_d14", "2026-09-01")].training_cutoff == "2026-08-15"
     assert binding.chooser_fold_references[
-        ("pred_runup_abs_move_d14", "2026-10-01")].training_cutoff == "2026-10-01"
+        ("pred_runup_abs_move_d14", "2026-10-01")].training_cutoff == "2026-09-15"
 
 
 def test_chooser_fold_reference_loads_34_aggregate_objects(tmp_path, monkeypatch):

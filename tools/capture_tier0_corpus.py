@@ -3764,7 +3764,9 @@ def validated_chooser_fold_references(source, request):
         except TypeError:
             identity_matches = False
         if (not isinstance(producer, Mapping) or not identity_matches
-                or fold.isoformat() != ref["fold_start"] or fold.day != 1 or cutoff != fold
+                or fold.isoformat() != ref["fold_start"]
+                or cutoff.isoformat() != ref["training_cutoff"]
+                or fold.day != 1 or cutoff > fold
                 or fold > decision or ref.get("producer_output") != output
                 or declaration.get("output") != output
                 or tuple(producer.get("output_names") or ()) != (output,)

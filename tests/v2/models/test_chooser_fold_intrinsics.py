@@ -61,6 +61,34 @@ def _assert_error(error, code, path, message, *, cause_path=None):
 
 
 @pytest.mark.parametrize("role", OUTPUTS)
+def test_legacy_descriptor_without_training_cutoff_round_trips(role):
+    document = _descriptor_document(role)
+    descriptor = from_document(ChooserServingFoldDescriptor, document)
+    assert "training_cutoff" not in to_document(descriptor)
+    assert to_document(descriptor) == document
+    assert descriptor.descriptor_hash == content_hash(document)
+
+
+@pytest.mark.parametrize("role", OUTPUTS)
+def test_canonical_training_cutoff_serializes_and_changes_hash(role):
+    legacy = _descriptor_document(role)
+    document = {**legacy, "training_cutoff": "2026-01-15"}
+    descriptor = from_document(ChooserServingFoldDescriptor, document)
+    assert to_document(descriptor) == document
+    assert descriptor.descriptor_hash == content_hash(document)
+    assert descriptor.descriptor_hash != content_hash(legacy)
+
+
+@pytest.mark.parametrize("role", OUTPUTS)
+def test_constructor_rejects_noncanonical_training_cutoff(role):
+    document = {**_descriptor_document(role), "training_cutoff": "2026-1-15"}
+    with pytest.raises(DocumentError) as caught:
+        _construct_descriptor(document)
+    _assert_error(caught.value, "BAD_TRAINING_CUTOFF", "$.training_cutoff",
+                  "expected canonical ISO day strictly before fold_start")
+
+
+@pytest.mark.parametrize("role", OUTPUTS)
 @pytest.mark.parametrize("route", ["constructor", "document", "nested"])
 @pytest.mark.parametrize("field,value,code,message", [
     ("feature_order", [], "BAD_FEATURE_ORDER", "expected nonempty unique feature names"),
