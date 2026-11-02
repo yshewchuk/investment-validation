@@ -1,5 +1,6 @@
 """Synthetic v6 source admission, sealed neural execution and read-only replay."""
 import shutil
+from copy import deepcopy
 from types import SimpleNamespace
 
 import numpy as np
@@ -205,6 +206,31 @@ def test_v6_native_seal_neural_trial_and_no_fit_no_label_replay(case, monkeypatc
         assert replay.execute("2024", "2023", selected["candidate_id"],
                               limits=case.request["limits"]["child"]) == receipt
     assert case.conn.total_changes == before
+
+
+def test_v8_chrono_plan_admission_and_fit_on_synthetic_rows(case):
+    request = deepcopy(case.request)
+    request["schema_version"] = "magnitude_search_request.v8"
+    request["space"]["mlp"]["profile"] = ["chrono15_relu32_l2_0p01"]
+    spec = prediction_spec(experiment_id="synthetic-qualified-size-v8-chrono", folds=("2024",),
+                           runner="experiments/size_search.py")
+    registration, spec = binding.prepare(case.repository, spec, request,
+        case.registration.document["size_panel_request"], scope="panel-source",
+        training_start="2022-01-01", labels_before="2025-01-01")
+    reserve_native_registration(case.conn, case.store, registration, spec)
+    verify_native_registration(case.conn, case.store, registration)
+    sealed = planner.seal_search_plan(case.conn, case.store, registration, request)
+    ref = from_document(ArtifactRef, sealed["plan_ref"])
+    context = (case.conn, case.store, case.repository, registration, request, ref)
+    seal_search_run(*context, clock=SystemClock())
+    assert planner.read_search_plan(case.conn, case.store, registration, request, ref) == sealed["plan"]
+    candidate = next(c for c in sealed["plan"]["candidates"]
+                     if c["recipe"].get("profile") == "chrono15_relu32_l2_0p01")
+    receipt = trials.SearchTrials(*context).execute("2024", "2023", candidate["candidate_id"],
+        limits=request["limits"]["child"])
+    assert receipt["status"] == receipt["terminal"]["status"] == "succeeded"
+    assert receipt["fit_attempt_count"] == receipt["completed_fit_count"] == 1
+    assert receipt["diagnostics"][0]["schema_version"] == "magnitude_mlp_fit.v1"
 
 
 def test_v6_neural_selection_outer_and_report_replay(case, monkeypatch):

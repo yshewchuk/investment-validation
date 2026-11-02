@@ -579,6 +579,7 @@ def test_identical_chrono_fits_return_identical_predictions():
     assert first["recipe_id"] == content_hash(policy)
     assert first["loss_scale"] == "standardized_target"
     assert len(first["predictions"]) == 2 and np.isfinite(first["predictions"]).all()
+    assert first["predictions"] == pytest.approx([10.178450250010249, 11.95869554911693], abs=1e-12)
 
 
 def test_chrono_restored_loss_equals_minimum_seen_holdout_loss(monkeypatch):

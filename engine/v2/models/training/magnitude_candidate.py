@@ -18,6 +18,6 @@ def fit_candidate(recipe, train_features, train_labels, prediction_features, *, 
     else:
         from .magnitude_ridge_hgb import fit_ridge_hgb_predictions as fit
     options = {"columns": columns}
-    if family == "mlp":
+    if family == "mlp" and event_dates is not None:
         options["event_dates"] = event_dates
     return fit(recipe, train_features, train_labels, prediction_features, **options)
