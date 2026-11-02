@@ -313,9 +313,8 @@ def test_direct_adapter_metadata_refuses_a_mutable_training_cutoff(
     }
     stream = io.BytesIO()
     joblib.dump(header, stream, compress=0)
-    artifact = Tier4ServingFoldAdapter().load({"estimator": stream.getvalue()}, binding)
     with pytest.raises(AdapterError, match="^invalid serving fold training cutoff$"):
-        artifact.metadata()
+        Tier4ServingFoldAdapter().load({"estimator": stream.getvalue()}, binding)
 
 
 def test_build_one_emits_the_declared_cutoff_and_omits_when_none(
@@ -454,9 +453,8 @@ def test_direct_adapter_metadata_refuses_cutoff_at_or_after_fold(
     }
     stream = io.BytesIO()
     joblib.dump(header, stream, compress=0)
-    artifact = Tier4ServingFoldAdapter().load({"estimator": stream.getvalue()}, binding)
     with pytest.raises(AdapterError, match="^invalid serving fold training cutoff$"):
-        artifact.metadata()
+        Tier4ServingFoldAdapter().load({"estimator": stream.getvalue()}, binding)
 
 
 @pytest.mark.parametrize(

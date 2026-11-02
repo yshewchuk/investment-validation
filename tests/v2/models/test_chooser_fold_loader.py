@@ -809,10 +809,18 @@ def test_public_metadata_rejects_header_types_after_adapter_decode(setup, key, v
         binding = replace(binding, feature_order=tuple(value))
     original, loads = joblib.load, []
     monkeypatch.setattr(joblib, "load", lambda *a, **k: (loads.append(1), original(*a, **k))[1])
+    # fold_start=123 trips the early cutoff validation inside adapter load; the
+    # other malformed header fields survive load and fail only at metadata().
+    expected = ("^invalid serving fold training cutoff$" if key == "fold_start"
+                else "^invalid serving fold metadata$")
     for _ in range(2):
-        with pytest.raises(AdapterError, match="^invalid serving fold metadata$") as caught:
+        with pytest.raises(AdapterError, match=expected) as caught:
             owner.prepare_serving_fold(binding, max_member_bytes=loader.MAX_FOLD_BYTES,
                                        expected_bytes=len(raw))
         assert type(caught.value) is AdapterError
         assert caught.value.__cause__ is None
-    assert loads == [1] and owner.cache_size == 1  # Reached metadata on cold and warm calls.
+    if key == "fold_start":
+        # Load refused before cache insertion, so each retry decodes again.
+        assert loads == [1, 1] and owner.cache_size == 0
+    else:
+        assert loads == [1] and owner.cache_size == 1  # Metadata failed cold and warm.
