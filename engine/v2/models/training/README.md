@@ -41,7 +41,7 @@ deterministically; there is no cache, I/O, publication or journal replay here.
 The generic magnitude dispatcher now accepts this closed recipe and preserves the
 complete result; `size_fit_diagnostics` validates its per-horizon evidence for fresh
 execution and replay. Existing recipe values and the comparator remain unchanged.
-No existing search request admits MLP: later admission must be explicitly versioned.
+Only opt-in `magnitude_search_request.v6` admits these profiles; v1-v5 still refuse MLP.
 New execution sources need fresh source seals; old reservations remain bound to
 original installed sources, with no resealing or mutation of running plans.
 
