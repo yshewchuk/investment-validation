@@ -215,13 +215,12 @@ provenance. Valid legacy cutoffless chooser folds are skipped from the opted-in
 verified reference map while preserving their legacy descriptor hashes; the
 opted-in resolver refuses with `ModelNotReady` identifying the missing
 [canonical training cutoff](../models/ARCHITECTURE.md#chooser-producer-fold-authoring)
-only when cutoff-bearing chooser folds are present without one; ordinary
-scoring does not opt into this resolver. Strict capture still refuses a bound
-producer fold that has no matching verified reference. Orphan references, incomplete producer coverage and
-invalid dates also refuse with `StrictTraceCaptureError`. Provenance stays
-outside chooser inputs and the receipt.
-`SourceBundle.chooser_fold_reference` remains an optional API field and is
-not used by this legacy capture path.
+for cutoff-bearing folds without one, or a carried fold whose authoring release lacks one;
+ordinary scoring does not opt into this resolver. Strict capture still refuses a
+bound producer fold with no matching verified reference. Orphan references,
+incomplete producer coverage and invalid dates also refuse with
+`StrictTraceCaptureError`. Provenance stays outside chooser inputs and the
+receipt. Optional `SourceBundle.chooser_fold_reference` is unused here.
 
 `native_chooser`/`native_chooser_features` derive candidate features after
 native pricing and simulation. Invalid declared frozen state flags
@@ -722,14 +721,15 @@ Chooser references are keyed by `(producer_output, fold_start)` and authoring co
 | `resolve_release_binding` with chooser references not requested | Return an empty map without loading chooser estimators |
 | More than 34 total staged chooser-fold objects (counted before cutoffless filtering) when references are requested | ModelNotReady before any chooser fold is loaded |
 | No chooser-fold objects staged | Return an empty map without requiring a carrying-catalog cutoff |
-| Every staged object is a valid cutoffless legacy descriptor — each first verified, then omitted | Return an empty map without requiring a carrying-catalog cutoff; a carried descriptor still needs a verifiable authoring release and canonical authoring cutoff (as the following row states) |
+| Every staged object is a valid cutoffless legacy descriptor — each first verified, then omitted | Return an empty map without requiring a carrying-catalog cutoff |
 | Cutoff-bearing chooser-fold objects are staged but the canonical retrain cutoff is missing or invalid | ModelNotReady; no partial reference map |
 | A carried fold's authoring release lacks canonical cutoff data | ModelNotReady; no partial reference map |
 | Carried descriptor's original release, catalog membership or parent/hash fails | ModelNotReady; no partial reference map |
 | Re-resolving an unchanged valid chain | Same reference, with separate authoring and carrying ids (equal for an uncarried fold) |
 | Malformed, noncanonical or mismatched descriptor, estimator digest, parent binding, output or fold month | ModelNotReady; no partial reference map |
 | Strict capture reference has an absent or unsafe authoring/carrying release id | StrictTraceCaptureError; no trace metadata is emitted |
-| Reference resolution requested for a verified release, including exact-release `resolve_chooser_fold_authoring_contexts(release_root, release_id)` (that id's manifest, catalog and model bindings, never the live `DEPLOYED` pointer), or blank or wrong-type `release_root`/exact `release_id` | invalid argument: `ValueError` before any I/O; requested resolution: re-verify each binding, no cross-call reference cache |
+| Blank or wrong-type `release_root` or exact `release_id` for reference resolution | `ValueError` before any I/O |
+| Exact-release `resolve_chooser_fold_authoring_contexts(release_root, release_id)` | Uses that id's manifest, catalog and model bindings, never the live `DEPLOYED` pointer; re-verifies each binding, no cross-call reference cache |
 | Model member exceeds its byte cap or is not a regular file | ModelNotReady before chooser bytes are decoded |
 
 #### Chooser state members
