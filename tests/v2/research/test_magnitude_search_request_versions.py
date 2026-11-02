@@ -140,7 +140,7 @@ def test_pinned_complete_v1_output_and_current_source_bytes(monkeypatch):
     assert _hash(versions.compile_request(V1_REQUEST())) == expected
     root = Path(__file__).resolve().parents[3]
     for path, digest in (
-        ("experiments/magnitude_search_request.py", "acfc61eccf79ae8d0bfe7962bb71850ea1b3765c332570c08b9e5ce4dc9979e7"),
+        ("experiments/magnitude_search_request.py", "fe74a0cf438096ccf55e06ac0545b52b4dd9406acbd9db95d578a4928de828bb"),
         ("engine/v2/research/magnitude_panel_table.py", "687d4d5341dd4e43879aee9d122507b8289150d7e73f1ccc527299182fe5aad4"),
         ("engine/v2/research/magnitude_panel_v2_table.py", "c753255acba0af3872f6a7bf1cbbdc59eb3b1097a2a06d89f6517d4c34111ce4")):
         with (root / path).open("rb") as source:

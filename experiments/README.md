@@ -146,7 +146,7 @@ use train-only preprocessing/target scaling, seed 20260829, at most 400 epochs,
 training-loss stopping without a random evaluation split, one CPU thread and no retry.
 The 1000-candidate ceiling and explicit logical-fit, child/parent/build/job budgets
 still apply; MLP costs one component per horizon, while the fixed SIZE candidate
-retains its two-component worst-case allowance. V6 remains serial (no `workers`).
+retains its two-component worst-case allowance. V6 accepts the optional `workers` contract: an integer 1 through 8 (omission means 1), removed before request identity hashing; fresh inner trials may run in the bounded process pool, while worker CPU/memory admission remains in force. Neural fits remain one-thread-per-child.
 Only inner folds select; outer results never tune profiles. Use `experiments.size_search`
 with fresh source seals; v1-v5 declarations, current runs and the production comparator
 are unchanged. Invalid/unknown profiles refuse before expansion; convergence or
@@ -341,7 +341,7 @@ These three search actions accept `--max-registration-bytes` (default 16777216);
 
 `run_search(conn, store, repository, registration, request, plan_ref, *, limits,
 collect_results=True, before_dispatch=None)`
-is the same orchestration API used by the contained SIZE runner. Only `magnitude_search_request.v2` through `.v5`
+is the same orchestration API used by the contained SIZE runner. Only `magnitude_search_request.v2` through `.v6`
 requests may declare `workers` from 1 through 8 (omission means 1); a declared
 field on a legacy or regression request refuses before admission. This execution
 setting is removed before request hashing and does not change candidate, plan or
