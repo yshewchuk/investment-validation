@@ -404,6 +404,56 @@ def test_carried_chooser_fold_loads_from_verified_original_release(tmp_path, mon
     assert rb._is_legacy_cutoffless_chooser_fold(cutoffless_object) is True
     assert content_hash(cutoffless_object) == cutoffless_before
 
+    legacy_cache = copy.deepcopy(cache)
+    legacy_cache.pop("training_cutoff", None)
+    legacy_bytes = fold_bytes(legacy_cache)
+    legacy_digest = hashlib.sha256(legacy_bytes).hexdigest()
+    (store / "objects" / legacy_digest).write_bytes(legacy_bytes)
+
+    legacy_body = copy.deepcopy(origin_body)
+    legacy_row = next(
+        row for row in legacy_body["members"]
+        if row["member_id"] == f"tier4_folds:{role}")
+    legacy_obj = legacy_row["objects"][0]
+    legacy_obj["path"] = f"objects/{legacy_digest}"
+    legacy_obj["content_hash"] = f"sha256:{legacy_digest}"
+    legacy_obj["bytes"] = len(legacy_bytes)
+    legacy_obj["serving_fold"].pop("training_cutoff", None)
+    legacy_obj["serving_fold"]["estimator"]["path"] = f"objects/{legacy_digest}"
+    legacy_obj["serving_fold"]["estimator"]["content_hash"] = f"sha256:{legacy_digest}"
+    legacy_body["sources"].pop("retrain_cutoff", None)
+    legacy_body["sources"].pop("pool_cutoff", None)
+    write_catalog("origin", legacy_body)
+
+    omitted_refs, omitted_contexts = rb.resolve_chooser_fold_authoring_contexts(
+        tmp_path, "origin")
+    assert omitted_refs == {}
+    assert omitted_contexts == {}
+
+    wrong_parent = copy.deepcopy(legacy_body)
+    wrong_parent_row = next(
+        row for row in wrong_parent["members"]
+        if row["member_id"] == f"tier4_folds:{role}")
+    wrong_parent_row["objects"][0]["serving_fold"]["parent_release_hash"] = "sha256:" + "1" * 64
+    write_catalog("origin", wrong_parent)
+    with pytest.raises(ModelNotReady) as refusal:
+        rb.resolve_chooser_fold_authoring_contexts(tmp_path, "origin")
+    assert refusal.value.member_id == "tier4_folds:chooser"
+
+    wrong_estimator = copy.deepcopy(legacy_body)
+    wrong_estimator_row = next(
+        row for row in wrong_estimator["members"]
+        if row["member_id"] == f"tier4_folds:{role}")
+    wrong_estimator_fold = wrong_estimator_row["objects"][0]["serving_fold"]
+    wrong_estimator_fold["estimator"]["content_hash"] = "sha256:" + "e" * 64
+    wrong_estimator_fold["estimator"]["path"] = "objects/" + "e" * 64
+    write_catalog("origin", wrong_estimator)
+    with pytest.raises(ModelNotReady) as refusal:
+        rb.resolve_chooser_fold_authoring_contexts(tmp_path, "origin")
+    assert refusal.value.member_id == "tier4_folds:chooser"
+
+    write_catalog("origin", copy.deepcopy(origin_body))
+
     def forbidden_pointer(*_args, **_kwargs):
         raise AssertionError("exact resolver must not read the live pointer")
 

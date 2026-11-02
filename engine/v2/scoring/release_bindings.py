@@ -247,8 +247,8 @@ def resolve_release_binding(
     ordinary nightly resolution leaves that map empty without loading chooser
     estimators into the inference cache.
     """
-    if not str(release_root).strip():
-        raise ValueError("release_root must be a non-empty path")
+    if not isinstance(release_root, (str, Path)) or not str(release_root).strip():
+        raise ValueError("release_root must be a non-empty str or Path")
     root = Path(release_root)
     dep_root = root / _DEPLOYMENT_DIR
 
@@ -322,11 +322,12 @@ def resolve_chooser_fold_authoring_contexts(
            Mapping[str, tuple[deployment.StagedManifest, Mapping]]]:
     """Resolve chooser references and exact authoring contexts for one release.
 
-    Reads only the named release's verified manifest and catalog; the live
-    ``DEPLOYED`` pointer is never consulted. Returns the same reference map
-    :func:`resolve_release_binding` exposes when chooser folds are requested,
-    plus each reference's exact authoring manifest and catalog keyed by
-    descriptor hash.
+    Reads the named release's verified manifest, catalog and model bindings;
+    for carried folds it also reads that release's exact authoring manifest
+    and catalog. The live ``DEPLOYED`` pointer is never consulted. Returns
+    the same reference map :func:`resolve_release_binding` exposes when
+    chooser folds are requested, plus each reference's exact authoring
+    manifest and catalog keyed by descriptor hash.
 
     Raises ``ValueError`` before any I/O when ``release_root`` is not a
     nonblank ``str``/``Path`` or ``release_id`` is not a nonblank ``str``.
@@ -581,7 +582,7 @@ def _read_state_catalog(release_root: Path, expected_release_id: str) -> Mapping
     if claimed != content_hash(unhashed):
         raise ModelNotReady(_STATE_CATALOG_NAME, "manifest_hash does not match its own body")
     if body.get("release_id") != expected_release_id:
-        raise ModelNotReady(_STATE_CATALOG_NAME, "release_id disagrees with the deployed pointer")
+        raise ModelNotReady(_STATE_CATALOG_NAME, "release_id disagrees with the requested release")
     from engine.v2.models.release_layout import ReleaseLayoutError, validate_catalog
 
     try:
@@ -769,7 +770,7 @@ def _verified_chooser_fold_reference(
     manifest: "deployment.StagedManifest", inference: FrozenInference,
     root: Path, dep_root: Path,
     authoring_releases: dict[str, tuple[
-        "deployment.StagedManifest", Mapping, date, Mapping[str, ModelIdentity]]],
+        "deployment.StagedManifest", Mapping, date | None, Mapping[str, ModelIdentity]]],
     carried_catalogs: dict[str, Mapping],
 ) -> tuple[tuple[str, str], ChooserFoldReference,
            "deployment.StagedManifest", Mapping] | None:
@@ -822,7 +823,9 @@ def _verified_chooser_fold_reference(
     reference = ChooserFoldReference(
         producer_output=key[0], descriptor_hash=loaded.descriptor.descriptor_hash,
         estimator_sha256=loaded.descriptor.estimator.content_hash,
-        # Legacy cutoffless descriptors retain the prior fold-start reference value.
+        # Internal temporary reference value discarded after verification
+        # (cutoffless descriptors are omitted from the returned maps), never
+        # a returned legacy reference.
         training_cutoff=(getattr(loaded.descriptor, "training_cutoff", None)
                          or loaded.descriptor.fold_start),
         release_id=authoring_manifest.release.release_id,
@@ -852,23 +855,30 @@ def _is_legacy_cutoffless_chooser_fold(obj: object) -> bool:
     if not isinstance(obj, Mapping):
         return False
     try:
-        descriptor = from_document(ChooserServingFoldDescriptor, obj["serving_fold"])
-    except (KeyError, TypeError, ValueError, AttributeError, RecursionError) as exc:
+        raw_fold = obj["serving_fold"]
+        descriptor = from_document(ChooserServingFoldDescriptor, raw_fold)
+    except (KeyError, TypeError, ValueError, AttributeError, RecursionError,
+            OverflowError) as exc:
         raise ModelNotReady(
             "tier4_folds:chooser",
             "chooser fold could not be verified or loaded") from exc
-    return descriptor.training_cutoff is None
+    if descriptor.training_cutoff is not None:
+        return False
+    if isinstance(raw_fold, Mapping) and "training_cutoff" in raw_fold:
+        raise ModelNotReady(
+            "tier4_folds:chooser",
+            "chooser fold could not be verified or loaded")
+    return True
 
 
 def _load_chooser_fold_references(
-    objects: list, member_id: str, cutoff: date, catalog: Mapping,
+    objects: list, member_id: str, cutoff: date | None, catalog: Mapping,
     manifest: "deployment.StagedManifest", inference: FrozenInference,
     model_identity: Mapping[str, ModelIdentity], root: Path, dep_root: Path,
 ) -> tuple[dict[tuple[str, str], ChooserFoldReference],
            dict[str, tuple["deployment.StagedManifest", Mapping]]]:
     if len(objects) > _CHOOSER_FOLD_MAX_OBJECTS:
         raise ModelNotReady(member_id, "chooser fold catalog exceeds load limit")
-    objects = [obj for obj in objects if not _is_legacy_cutoffless_chooser_fold(obj)]
     total, started, references = len(objects), time.monotonic(), {}
     authoring_contexts: dict[str, tuple["deployment.StagedManifest", Mapping]] = {}
     authoring_releases = {
@@ -886,6 +896,8 @@ def _load_chooser_fold_references(
             obj, catalog, manifest, inference, root, dep_root,
             authoring_releases, carried_catalogs)
         if result is None:
+            continue
+        if _is_legacy_cutoffless_chooser_fold(obj):
             continue
         key, reference, authoring_manifest, authoring_catalog = result
         if key in references:
@@ -931,6 +943,23 @@ def _chooser_fold_objects(members: Mapping, member_ids: tuple[str, ...]) -> list
     return objects
 
 
+def _chooser_fold_catalog_cutoff(catalog: Mapping, objects: list) -> date | None:
+    if all(_is_legacy_cutoffless_chooser_fold(obj) for obj in objects):
+        return None
+    sources = catalog.get("sources")
+    raw_cutoff = sources.get("retrain_cutoff") if isinstance(sources, Mapping) else None
+    if raw_cutoff is None:
+        raise ModelNotReady("tier4_folds:chooser", "canonical training cutoff is missing")
+    try:
+        parsed_cutoff = date.fromisoformat(raw_cutoff)
+        if parsed_cutoff.isoformat() != raw_cutoff:
+            raise ValueError("non-canonical cutoff")
+    except (TypeError, ValueError):
+        raise ModelNotReady(
+            "tier4_folds:chooser", "canonical training cutoff is missing") from None
+    return parsed_cutoff
+
+
 def _resolve_chooser_fold_references(
     catalog: Mapping, manifest: "deployment.StagedManifest",
     inference: FrozenInference, model_identity: Mapping[str, ModelIdentity],
@@ -951,21 +980,13 @@ def _resolve_chooser_fold_references(
     if not members:
         return {}, {}
     objects = _chooser_fold_objects(members, member_ids)
-    objects = [obj for obj in objects if not _is_legacy_cutoffless_chooser_fold(obj)]
+    if len(objects) > _CHOOSER_FOLD_MAX_OBJECTS:
+        raise ModelNotReady("tier4_folds:chooser", "chooser fold catalog exceeds load limit")
     if not objects:
         return {}, {}
-    sources = catalog.get("sources")
-    cutoff = sources.get("retrain_cutoff") if isinstance(sources, Mapping) else None
-    if cutoff is None:
-        raise ModelNotReady("tier4_folds:chooser", "canonical training cutoff is missing")
-    try:
-        parsed_cutoff = date.fromisoformat(cutoff)
-        if parsed_cutoff.isoformat() != cutoff:
-            raise ValueError("non-canonical cutoff")
-    except (TypeError, ValueError):
-        raise ModelNotReady("tier4_folds:chooser", "canonical training cutoff is missing") from None
+    cutoff = _chooser_fold_catalog_cutoff(catalog, objects)
     return _load_chooser_fold_references(
-        objects, "tier4_folds:chooser", parsed_cutoff, catalog, manifest,
+        objects, "tier4_folds:chooser", cutoff, catalog, manifest,
         inference, model_identity, root, dep_root)
 
 

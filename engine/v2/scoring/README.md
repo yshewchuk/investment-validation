@@ -176,9 +176,13 @@ the keys of the frozen `chooser_analog_pool` and `chooser_admissible_table`;
 features (event history, market/regime block) come from `feature_vector`, which
 still wins for any derived column it declares; `dte_entry` is scorer-computed
 (from the priced legs and quote date) and no longer projected.
-The resolver exposes its verified `chooser_fold_references` map only when
-called with `include_chooser_fold_references=True`. Default resolution does not
-load chooser estimators. Strict production capture opts in and passes the map
+`resolve_release_binding` exposes its verified `chooser_fold_references` map
+only when called with `include_chooser_fold_references=True`; default
+resolution does not load chooser estimators. The named-release
+`resolve_chooser_fold_authoring_contexts(release_root, release_id)` always
+returns the requested release's verified references and contexts, with no
+current runtime caller (planned 1f Phase 4 replay-alignment consumer).
+Strict production capture opts in and passes the map
 through the legacy scorer; the capture trace records only the verified
 reference for each served chooser producer fold.
 

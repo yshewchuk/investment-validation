@@ -209,6 +209,18 @@ def test_exact_resolver_rejects_invalid_arguments(release_root, release_id):
     with pytest.raises(ValueError) as error:
         resolve_chooser_fold_authoring_contexts(release_root, release_id)
     assert type(error.value) is ValueError
+    if not isinstance(release_root, (str, Path)) or not str(release_root).strip():
+        assert str(error.value) == "release_root must be a non-empty str or Path"
+    else:
+        assert str(error.value) == "release_id must be a non-empty string"
+
+
+@pytest.mark.parametrize("release_root", [None, 123, b"root"])
+def test_exact_resolve_release_binding_rejects_invalid_release_root(release_root):
+    with pytest.raises(ValueError) as error:
+        resolve_release_binding(release_root)
+    assert type(error.value) is ValueError
+    assert str(error.value) == "release_root must be a non-empty str or Path"
 
 
 def test_corrupt_deployed_pointer_invalid_utf8_raises_model_not_ready(tmp_path):
@@ -973,6 +985,23 @@ def test_legacy_chooser_fold_predicate_refuses_malformed_descriptor():
     assert error.value.detail == "chooser fold could not be verified or loaded"
 
 
+def test_legacy_chooser_fold_predicate_refuses_explicit_null_training_cutoff(monkeypatch):
+    from types import SimpleNamespace
+
+    from engine.v2.scoring import release_bindings as rb
+
+    monkeypatch.setattr(
+        rb, "from_document",
+        lambda _type, _raw: SimpleNamespace(training_cutoff=None))
+
+    with pytest.raises(ModelNotReady) as error:
+        rb._is_legacy_cutoffless_chooser_fold(
+            {"serving_fold": {"training_cutoff": None}})
+
+    assert error.value.member_id == "tier4_folds:chooser"
+    assert error.value.detail == "chooser fold could not be verified or loaded"
+
+
 def test_legacy_chooser_fold_catalog_without_retrain_cutoff_keeps_binding_available(
         tmp_path, monkeypatch):
     _rb, _descriptors, _identities, calls, _body = _chooser_resolver_fixture(
@@ -987,6 +1016,51 @@ def test_legacy_chooser_fold_catalog_without_retrain_cutoff_keeps_binding_availa
 
     with pytest.raises(ModelNotReady, match="canonical training cutoff is missing"):
         resolve_release_binding(tmp_path, include_chooser_fold_references=True)
+    assert calls == []
+
+
+def test_legacy_chooser_fold_is_verified_then_omitted(tmp_path, monkeypatch):
+    rb, descriptors, _identities, calls, _body = _chooser_resolver_fixture(
+        tmp_path, monkeypatch, cutoff=None)
+    descriptors["first"].training_cutoff = None
+
+    binding = resolve_release_binding(tmp_path, include_chooser_fold_references=True)
+
+    assert binding.chooser_fold_references == {}
+    assert binding.chooser_authoring_fold_contexts == {}
+    assert len(calls) == 1
+
+
+def test_legacy_chooser_fold_with_missing_parent_refuses(tmp_path, monkeypatch):
+    _rb, descriptors, _identities, calls, _body = _chooser_resolver_fixture(
+        tmp_path, monkeypatch, cutoff=None)
+    descriptors["first"].training_cutoff = None
+    descriptors["first"].parent_release_id = "never-staged"
+
+    with pytest.raises(ModelNotReady):
+        resolve_release_binding(tmp_path, include_chooser_fold_references=True)
+
+    assert calls == []
+
+
+def test_cutoffless_chooser_objects_still_obey_aggregate_limit(tmp_path, monkeypatch):
+    from engine.v2.scoring import release_bindings as rb
+
+    _rb, descriptors, _identities, calls, body = _chooser_resolver_fixture(
+        tmp_path, monkeypatch, cutoff=None)
+    descriptors["first"].training_cutoff = None
+    row = next(row for row in body["members"]
+               if row.get("member_id") == "tier4_folds:implied_t1")
+    row["objects"] *= rb._CHOOSER_FOLD_MAX_OBJECTS + 1
+    body["manifest_hash"] = content_hash(
+        {key: value for key, value in body.items() if key != "manifest_hash"})
+    monkeypatch.setattr(rb, "_read_state_catalog", lambda *_args: body)
+
+    with pytest.raises(ModelNotReady) as error:
+        resolve_release_binding(tmp_path, include_chooser_fold_references=True)
+
+    assert error.value.member_id == "tier4_folds:chooser"
+    assert error.value.detail == "chooser fold catalog exceeds load limit"
     assert calls == []
 
 
