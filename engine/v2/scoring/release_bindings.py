@@ -772,9 +772,9 @@ def _verified_chooser_fold_reference(
     return key, ChooserFoldReference(
         producer_output=key[0], descriptor_hash=loaded.descriptor.descriptor_hash,
         estimator_sha256=loaded.descriptor.estimator.content_hash,
-        # A release cutoff summarizes the newest staged fold. The verified
-        # descriptor's fold_start is the exclusive training boundary for this fold.
-        training_cutoff=loaded.descriptor.fold_start,
+        # Legacy cutoffless descriptors retain the prior fold-start reference value.
+        training_cutoff=(getattr(loaded.descriptor, "training_cutoff", None)
+                         or loaded.descriptor.fold_start),
         release_id=authoring_manifest.release.release_id,
         carrying_release_id=manifest.release.release_id,
         release_binding=identity, fold_start=key[1])

@@ -1332,7 +1332,7 @@ def test_chooser_fold_reference_flows_through_real_scorer_checkpoint(tmp_path, m
     model_id = "implied_t1_synthetic"
     reference = SimpleNamespace(
         producer_output="pred_im_t1_d14", descriptor_hash="sha256:" + "a" * 64,
-        estimator_sha256="sha256:" + digest, training_cutoff="2026-09-01", release_id="release-1",
+        estimator_sha256="sha256:" + digest, training_cutoff="2026-08-15", release_id="release-1",
         carrying_release_id="release-2",
         fold_start="2026-09-01",
         release_binding=SimpleNamespace(
@@ -1392,6 +1392,7 @@ def test_chooser_fold_reference_flows_through_real_scorer_checkpoint(tmp_path, m
     assert set(captured) == {"pred_im_t1_d14", "pred_runup_abs_move_d14"}
     assert captured["pred_im_t1_d14"]["descriptor_hash"] == reference.descriptor_hash
     assert captured["pred_im_t1_d14"]["fold_start"] == "2026-09-01"
+    assert captured["pred_im_t1_d14"]["training_cutoff"] == "2026-08-15"
     assert captured["pred_runup_abs_move_d14"]["descriptor_hash"] == runup_reference.descriptor_hash
     assert captured["pred_runup_abs_move_d14"]["fold_start"] == "2026-08-01"
     boundary_request = SimpleNamespace(requested_decision_at="2026-09-01")
@@ -1423,6 +1424,12 @@ def test_chooser_fold_reference_flows_through_real_scorer_checkpoint(tmp_path, m
     with pytest.raises(StrictTraceCaptureError, match="mismatches served producer"):
         validated_chooser_fold_references(
             source, SimpleNamespace(requested_decision_at="2026-08-31"))
+    late_cutoff_source = copy.deepcopy(source)
+    late_cutoff_source["frozen"]["chooser_references"]["pred_im_t1_d14"][
+        "training_cutoff"
+    ] = "2026-09-02"
+    with pytest.raises(StrictTraceCaptureError, match="mismatches served producer"):
+        validated_chooser_fold_references(late_cutoff_source, _request())
     with pytest.raises(StrictTraceCaptureError, match="chooser refs lack declarations"):
         validated_chooser_fold_references(
             {"frozen": {"chooser_references": {"orphan": {}}}}, _request())

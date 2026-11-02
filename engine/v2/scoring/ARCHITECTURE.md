@@ -709,7 +709,7 @@ and the release is not consulted for it.
 
 A verified chooser-fold reference carries the descriptor/estimator hashes,
 fold month and producer binding, plus the authoring/carrying release ids and the
-[training cutoff](../models/ARCHITECTURE.md#chooser-producer-fold-authoring) defined only in the models architecture.
+[training cutoff](../models/ARCHITECTURE.md#chooser-producer-fold-authoring) defined only in the models architecture. For a new descriptor the reference preserves its producer-declared cutoff; a cutoffless legacy descriptor retains the legacy fold-start reference value.
 `resolve_release_binding` returns an empty
 `chooser_fold_references` map by default and does not load chooser estimators
 for ordinary nightly scoring. Callers that need these references opt in with
