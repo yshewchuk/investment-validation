@@ -1,4 +1,5 @@
 """Synthetic v6 source admission, sealed neural execution and read-only replay."""
+import shutil
 from types import SimpleNamespace
 
 import numpy as np
@@ -6,8 +7,10 @@ import pytest
 
 from engine.models.no_fit import no_fit_guard as legacy_no_fit_guard
 from engine.v2.contracts import ArtifactRef
-from engine.v2.foundation import SystemClock, from_document
+from engine.v2.data.repository import Repository
+from engine.v2.foundation import ArtifactStore, SystemClock, from_document
 from engine.v2.models.no_fit import no_fit_guard
+from engine.v2.ops.catalog import connect
 from engine.v2.research.magnitude_panel_qualified_table import recipe
 from experiments import eligible_history, size_panel
 from experiments import magnitude_search_plan as planner
@@ -46,7 +49,7 @@ def case(tmp_path):
     request["eligibility_policy_ref"].update(plan_id=panel["context"]["eligibility_plan"]["plan_id"])
     # Existing bounded synthetic integration policy, not new estimator/runtime limits.
     request["limits"] = {"child": {"memory_bytes": 2 << 30, "cpu_seconds": 30, "wall_seconds": 60},
-        "parent": {"memory_bytes": 3 << 30, "wall_seconds": 600},
+        "parent": {"memory_bytes": 4 << 30, "wall_seconds": 600},
         "build": {"memory_bytes": 3 << 30, "wall_seconds": 60}, "job": {"wall_seconds": 600}}
     spec = prediction_spec(experiment_id="synthetic-qualified-size-v6", folds=("2024",),
                            runner="experiments/size_search.py")
@@ -65,6 +68,50 @@ def case(tmp_path):
         next(generator)
     except StopIteration:
         pass
+
+
+def _clone_case(case, path):
+    conn = connect(path / "catalog.sqlite")
+    case.conn.backup(conn)
+    shutil.copytree(case.store.root, path / "store")
+    store = ArtifactStore(path / "store")
+    return (conn, store, Repository(conn, store, pin_snapshots=True),
+            case.registration, case.request, case.ref)
+
+
+def test_v6_workers_one_and_two_match_candidates_results_and_metrics(case, tmp_path, monkeypatch):
+    from experiments import v2_magnitude_search_run as search_run
+    from experiments.size_search_report import collect
+    assert any(candidate["recipe"].get("model") == "mlp" for candidate in case.plan["candidates"])
+    original_executor, executor_calls = search_run.ProcessPoolExecutor, []
+
+    def spy_executor(*args, **kwargs):
+        executor_calls.append(kwargs.get("max_workers"))
+        return original_executor(*args, **kwargs)
+
+    monkeypatch.setattr(search_run, "ProcessPoolExecutor", spy_executor)
+
+    def execute(name, workers):
+        path = tmp_path / name
+        path.mkdir()
+        conn, store, repository, registration, _, plan_ref = _clone_case(case, path)
+        request = {**case.request, "workers": workers}
+        context = (conn, store, repository, registration, request, plan_ref)
+        try:
+            result = search_run.run_search(*context, limits=request["limits"]["child"])
+            report = collect(*context)
+        finally:
+            conn.close()
+        return result, report
+
+    serial_result, serial_report = execute("serial", 1)
+    parallel_result, parallel_report = execute("parallel", 2)
+    assert executor_calls == [2]
+    assert serial_result == parallel_result
+    assert serial_result["metrics"] == parallel_result["metrics"]
+    assert serial_result["prospective_candidate_id"] == parallel_result["prospective_candidate_id"]
+    assert [(row["candidate_id"], row["inner_metrics"]) for row in serial_report["inner_fits"]] == [
+        (row["candidate_id"], row["inner_metrics"]) for row in parallel_report["inner_fits"]]
 
 
 def test_v6_native_seal_neural_trial_and_no_fit_no_label_replay(case, monkeypatch):
