@@ -96,7 +96,7 @@ load-bearing entrypoints:
   (`engine.v2.models.deployment.production_release_root()`, config key
   `MODEL_RELEASE_ROOT` — see `engine/v2/models/ARCHITECTURE.md` §7.4).
    The binding also carries `chooser_fold_catalog_json`, `chooser_parent_manifest` and `chooser_authoring_fold_contexts`; named-release
-   `resolve_chooser_fold_authoring_contexts(release_root, release_id)` reads that release's exact manifest/catalog/model bindings plus authoring manifest/catalog, never `DEPLOYED` — no current production caller in 1c by design, planned for 1f Phase 4 replay.
+   `resolve_chooser_fold_authoring_contexts(release_root, release_id)` reads that release's exact manifest/catalog/model bindings plus authoring manifest/catalog, never `DEPLOYED` — no current production caller in 1c by design.
   `ScoringReleaseBinding` (frozen dataclass, every mapping field a read-only
   `MappingProxyType`) fields (plus `size_folds: SizeFoldCatalog | None`, the
   indexed `tier4_folds:size` descriptors, see "Forward forecast assembly"): `release_id: str`; `model_identity: Mapping[str,
@@ -720,9 +720,9 @@ Strict capture opts in, passes verified references to the scorer, and records bo
 
 | Condition | Outcome |
 |---|---|
-| Chooser references not requested | Return an empty map without loading chooser estimators |
+| `resolve_release_binding` with chooser references not requested | Return an empty map without loading chooser estimators |
 | More than 34 total staged chooser-fold objects (counted before cutoffless filtering) when references are requested | ModelNotReady before any chooser fold is loaded |
-| No chooser-fold objects are reference-eligible (none staged, or every staged object is a valid cutoffless legacy descriptor — each first verified, then omitted) | Return an empty map without requiring a catalog retrain cutoff |
+| No chooser-fold objects are reference-eligible (none staged, or every staged object is a valid cutoffless legacy descriptor — each first verified, then omitted) | Return an empty map without requiring a carrying-catalog cutoff; a carried descriptor still needs a verifiable authoring release and canonical authoring cutoff (as the following row states) |
 | Cutoff-bearing chooser-fold objects are staged but the canonical retrain cutoff is missing or invalid | ModelNotReady; no partial reference map |
 | A carried fold's authoring release lacks canonical cutoff data | ModelNotReady; no partial reference map |
 | Carried descriptor's original release, catalog membership or parent/hash fails | ModelNotReady; no partial reference map |

@@ -1019,7 +1019,7 @@ def test_legacy_chooser_fold_catalog_without_retrain_cutoff_keeps_binding_availa
     assert calls == []
 
 
-def test_legacy_chooser_fold_is_verified_then_omitted(tmp_path, monkeypatch):
+def test_legacy_chooser_fold_is_verified_then_omitted(tmp_path, monkeypatch, capsys):
     rb, descriptors, _identities, calls, _body = _chooser_resolver_fixture(
         tmp_path, monkeypatch, cutoff=None)
     descriptors["first"].training_cutoff = None
@@ -1029,17 +1029,36 @@ def test_legacy_chooser_fold_is_verified_then_omitted(tmp_path, monkeypatch):
     assert binding.chooser_fold_references == {}
     assert binding.chooser_authoring_fold_contexts == {}
     assert len(calls) == 1
+    captured = capsys.readouterr()
+    assert "[chooser-folds] 1/1" in captured.err
+    assert "end: 1/1" in captured.err
 
 
 def test_legacy_chooser_fold_with_missing_parent_refuses(tmp_path, monkeypatch):
-    _rb, descriptors, _identities, calls, _body = _chooser_resolver_fixture(
+    rb, descriptors, _identities, calls, body = _chooser_resolver_fixture(
         tmp_path, monkeypatch, cutoff=None)
     descriptors["first"].training_cutoff = None
     descriptors["first"].parent_release_id = "never-staged"
+    body["sources"] = {"carried_from": "never-staged"}
+    body["manifest_hash"] = content_hash(
+        {key: value for key, value in body.items() if key != "manifest_hash"})
+    monkeypatch.setattr(rb, "_read_state_catalog", lambda *_args: body)
+    manifest_reads = []
+    original_read_manifest = rb._read_and_verify_manifest
 
-    with pytest.raises(ModelNotReady):
+    def recording_read_manifest(dep_root, release_id):
+        manifest_reads.append(release_id)
+        return original_read_manifest(dep_root, release_id)
+
+    monkeypatch.setattr(rb, "_read_and_verify_manifest", recording_read_manifest)
+
+    with pytest.raises(ModelNotReady) as error:
         resolve_release_binding(tmp_path, include_chooser_fold_references=True)
 
+    assert error.value.code == rb.MODEL_NOT_READY
+    assert error.value.member_id == "model_release"
+    assert error.value.detail == "release not staged"
+    assert "never-staged" in manifest_reads
     assert calls == []
 
 
@@ -1055,13 +1074,58 @@ def test_cutoffless_chooser_objects_still_obey_aggregate_limit(tmp_path, monkeyp
     body["manifest_hash"] = content_hash(
         {key: value for key, value in body.items() if key != "manifest_hash"})
     monkeypatch.setattr(rb, "_read_state_catalog", lambda *_args: body)
+    monkeypatch.setattr(
+        rb, "_is_legacy_cutoffless_chooser_fold",
+        lambda _obj: pytest.fail(
+            "the aggregate limit must precede cutoff classification"))
 
     with pytest.raises(ModelNotReady) as error:
         resolve_release_binding(tmp_path, include_chooser_fold_references=True)
 
+    assert error.value.code == rb.MODEL_NOT_READY
     assert error.value.member_id == "tier4_folds:chooser"
     assert error.value.detail == "chooser fold catalog exceeds load limit"
     assert calls == []
+
+
+def test_chooser_fold_catalog_cutoff_classifies_mixed_objects(monkeypatch):
+    from datetime import date
+
+    from engine.v2.scoring import release_bindings as rb
+
+    legacy_object, cutoff_object = object(), object()
+    monkeypatch.setattr(
+        rb, "_is_legacy_cutoffless_chooser_fold",
+        lambda obj: obj is legacy_object)
+
+    cutoff, legacy_flags = rb._chooser_fold_catalog_cutoff(
+        {"sources": {"retrain_cutoff": "2026-08-31"}},
+        [legacy_object, cutoff_object])
+
+    assert cutoff == date(2026, 8, 31)
+    assert legacy_flags == [True, False]
+
+
+def test_duplicate_chooser_fold_keys_refuse_even_when_omitted_as_legacy(
+        tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from engine.v2.scoring import release_bindings as rb
+
+    manifest = SimpleNamespace(release=SimpleNamespace(release_id="origin"))
+    key = ("pred_im_t1_d14", "2026-09-01")
+    reference = SimpleNamespace(descriptor_hash="sha256:" + "c" * 64)
+    monkeypatch.setattr(
+        rb, "_verified_chooser_fold_reference",
+        lambda *_args: (key, reference, manifest, {}))
+
+    with pytest.raises(ModelNotReady) as error:
+        rb._load_chooser_fold_references(
+            [{}, {}], "tier4_folds:chooser", None, {}, manifest,
+            object(), {}, tmp_path, tmp_path, legacy_flags=[True, True])
+
+    assert error.value.member_id == "tier4_folds:chooser"
+    assert error.value.detail == "ambiguous chooser fold reference"
 
 
 def test_chooser_fold_reference_refuses_noncanonical_cutoff(tmp_path, monkeypatch):

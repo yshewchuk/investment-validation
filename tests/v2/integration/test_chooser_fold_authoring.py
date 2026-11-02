@@ -18,7 +18,13 @@ from types import SimpleNamespace
 import joblib
 import pytest
 
-from engine.v2.foundation import DocumentError, content_hash, from_document, to_document
+from engine.v2.foundation import (
+    DocumentError,
+    canonical_json,
+    content_hash,
+    from_document,
+    to_document,
+)
 from engine.v2.models import (
     ArtifactMember,
     FrozenInference,
@@ -355,15 +361,17 @@ def test_carried_chooser_fold_loads_from_verified_original_release(tmp_path, mon
     deployment.promote(store, "origin")
 
     default = resolve_release_binding(tmp_path)
+    assert default.chooser_fold_references == {}
     assert default.chooser_authoring_fold_contexts == {}
+    assert default.chooser_fold_catalog_json == canonical_json(origin_body)
+    assert default.chooser_parent_manifest == published_manifest(store, "origin")
 
     original = resolve_release_binding(
         tmp_path, include_chooser_fold_references=True)
     origin_ref = original.chooser_fold_references[
         (OUTPUTS[role][1], cache["fold_start"])]
     assert origin_ref.release_id == origin_ref.carrying_release_id == "origin"
-    assert original.chooser_fold_catalog_json == json.dumps(
-        origin_body, sort_keys=True, separators=(",", ":"))
+    assert original.chooser_fold_catalog_json == canonical_json(origin_body)
     assert original.chooser_parent_manifest == published_manifest(store, "origin")
     assert original.chooser_authoring_fold_contexts[origin_ref.descriptor_hash] == (
         original.chooser_parent_manifest, origin_body)
@@ -401,7 +409,6 @@ def test_carried_chooser_fold_loads_from_verified_original_release(tmp_path, mon
     cutoffless_object = copy.deepcopy(origin_obj)
     cutoffless_object["serving_fold"].pop("training_cutoff", None)
     cutoffless_before = content_hash(cutoffless_object)
-    assert rb._is_legacy_cutoffless_chooser_fold(cutoffless_object) is True
     assert content_hash(cutoffless_object) == cutoffless_before
 
     legacy_cache = copy.deepcopy(cache)
@@ -438,7 +445,9 @@ def test_carried_chooser_fold_loads_from_verified_original_release(tmp_path, mon
     write_catalog("origin", wrong_parent)
     with pytest.raises(ModelNotReady) as refusal:
         rb.resolve_chooser_fold_authoring_contexts(tmp_path, "origin")
+    assert refusal.value.code == rb.MODEL_NOT_READY
     assert refusal.value.member_id == "tier4_folds:chooser"
+    assert refusal.value.detail == "chooser fold could not be verified or loaded"
 
     wrong_estimator = copy.deepcopy(legacy_body)
     wrong_estimator_row = next(
@@ -450,7 +459,9 @@ def test_carried_chooser_fold_loads_from_verified_original_release(tmp_path, mon
     write_catalog("origin", wrong_estimator)
     with pytest.raises(ModelNotReady) as refusal:
         rb.resolve_chooser_fold_authoring_contexts(tmp_path, "origin")
+    assert refusal.value.code == rb.MODEL_NOT_READY
     assert refusal.value.member_id == "tier4_folds:chooser"
+    assert refusal.value.detail == "chooser fold could not be verified or loaded"
 
     write_catalog("origin", copy.deepcopy(origin_body))
 

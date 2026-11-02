@@ -54,14 +54,17 @@ deployment pointer's model identity/artifact refs and the release's frozen
 payoff/recalibration/board-analog-matcher artifacts, plus the
 role-keyed `driver_residual_artifacts` mapping (empty when no driver pool
 member is staged) and `chooser_analog_artifacts`/`chooser_admissible_artifacts`
-tuples, plus the `size_folds` descriptor index (`None` only for a hand-built binding), `paired_residual_artifacts` and `trailing_cutoff_artifacts` tuples (each empty independently when its family is absent), into one immutable
-`ScoringReleaseBinding`. Chooser tuples retain all distinct artifact keys;
+tuples, plus the `size_folds` descriptor index (`None` only for a hand-built binding), `paired_residual_artifacts` and `trailing_cutoff_artifacts` tuples (each empty independently when its family is absent), into one
+`ScoringReleaseBinding` whose top-level mapping fields are read-only while
+nested catalog values remain decoded JSON values. Chooser tuples retain all distinct artifact keys;
 each declared chooser object must be a regular file no larger than 32 MiB.
 `chooser_fold_references` is keyed by `(producer_output, fold_start)` and
 contains `descriptor_hash`, `estimator_sha256`, `training_cutoff`, the original
 authoring `release_id`, `carrying_release_id`, `release_binding` and
-`fold_start` for each verified fold. Resolution leaves the map empty by
-default; an opted-in binding verifies at most 34 chooser-fold objects. The
+`fold_start` for each verified, reference-eligible (cutoff-bearing) fold;
+valid cutoffless legacy descriptors are verified then omitted. Resolution
+leaves the map empty by default; an opted-in binding verifies at most 34
+chooser-fold objects. The
 public `ChooserFoldReference` type names this resolver contract.
 Request-specific selection and nightly chooser wiring are not performed here.
 The reader raises
@@ -181,7 +184,7 @@ only when called with `include_chooser_fold_references=True`; default
 resolution does not load chooser estimators. The named-release
 `resolve_chooser_fold_authoring_contexts(release_root, release_id)` always
 returns the requested release's verified references and contexts, with no
-current runtime caller (planned 1f Phase 4 replay-alignment consumer).
+current runtime caller.
 Strict production capture opts in and passes the map
 through the legacy scorer; the capture trace records only the verified
 reference for each served chooser producer fold.

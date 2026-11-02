@@ -26,7 +26,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Callable, Mapping, TypeVar
 
-from engine.v2.foundation import content_hash, from_document
+from engine.v2.foundation import canonical_json, content_hash, from_document
 from engine.v2.models import deployment
 from engine.v2.models.admissible_table import AdmissibleDepthTable
 from engine.v2.models.analog_artifact import BoardAnalogPoolArtifact
@@ -236,6 +236,13 @@ class ScoringReleaseBinding:
             in self.chooser_authoring_fold_contexts.items()}))
 
 
+def _validated_release_root(release_root: Path | str) -> Path:
+    """The shared ``release_root`` contract: a nonblank ``str``/``Path``."""
+    if not isinstance(release_root, (str, Path)) or not str(release_root).strip():
+        raise ValueError("release_root must be a non-empty str or Path")
+    return Path(release_root)
+
+
 def resolve_release_binding(
         release_root: Path | str, *, include_chooser_fold_references: bool = False
 ) -> ScoringReleaseBinding:
@@ -247,9 +254,7 @@ def resolve_release_binding(
     ordinary nightly resolution leaves that map empty without loading chooser
     estimators into the inference cache.
     """
-    if not isinstance(release_root, (str, Path)) or not str(release_root).strip():
-        raise ValueError("release_root must be a non-empty str or Path")
-    root = Path(release_root)
+    root = _validated_release_root(release_root)
     dep_root = root / _DEPLOYMENT_DIR
 
     try:
@@ -309,8 +314,7 @@ def resolve_release_binding(
         paired_residual_artifacts=paired_residual,
         trailing_cutoff_artifacts=trailing_cutoff, size_folds=size_folds,
         chooser_fold_references=chooser_fold_references,
-        chooser_fold_catalog_json=json.dumps(
-            catalog, sort_keys=True, separators=(",", ":")),
+        chooser_fold_catalog_json=canonical_json(catalog),
         chooser_parent_manifest=manifest,
         chooser_authoring_fold_contexts=chooser_authoring_fold_contexts,
     )
@@ -332,11 +336,9 @@ def resolve_chooser_fold_authoring_contexts(
     Raises ``ValueError`` before any I/O when ``release_root`` is not a
     nonblank ``str``/``Path`` or ``release_id`` is not a nonblank ``str``.
     """
-    if not isinstance(release_root, (str, Path)) or not str(release_root).strip():
-        raise ValueError("release_root must be a non-empty str or Path")
+    root = _validated_release_root(release_root)
     if not isinstance(release_id, str) or not release_id.strip():
         raise ValueError("release_id must be a non-empty string")
-    root = Path(release_root)
     dep_root = root / _DEPLOYMENT_DIR
     manifest = _read_and_verify_manifest(dep_root, release_id)
     catalog = _read_state_catalog(root, release_id)
@@ -744,6 +746,26 @@ def _require_chooser_catalog_member(
         raise ValueError(detail)
 
 
+def _catalog_retrain_cutoff(catalog: Mapping) -> date | None:
+    """Parse and canonically validate ``sources.retrain_cutoff``.
+
+    Returns ``None`` when the key is absent or null; raises ``ValueError``
+    for a present value that is not a canonical ISO date. Callers translate
+    both outcomes into their own missing-cutoff refusal shape.
+    """
+    sources = catalog.get("sources")
+    raw_cutoff = sources.get("retrain_cutoff") if isinstance(sources, Mapping) else None
+    if raw_cutoff is None:
+        return None
+    try:
+        cutoff = date.fromisoformat(raw_cutoff)
+    except (TypeError, ValueError):
+        raise ValueError("retrain_cutoff is not a valid date") from None
+    if cutoff.isoformat() != raw_cutoff:
+        raise ValueError("retrain_cutoff is not canonical")
+    return cutoff
+
+
 def _load_chooser_authoring_release(
     authoring_id: str, object_doc: Mapping, member_id: str,
     root: Path, dep_root: Path,
@@ -752,14 +774,12 @@ def _load_chooser_authoring_release(
     authoring_catalog = _read_state_catalog(root, authoring_id)
     if not _catalog_contains_chooser_object(authoring_catalog, object_doc, member_id):
         raise ValueError("chooser authoring descriptor is missing")
-    authoring_sources = authoring_catalog.get("sources")
-    authoring_cutoff = (authoring_sources.get("retrain_cutoff")
-                        if isinstance(authoring_sources, Mapping) else None)
-    if authoring_cutoff is None:
+    try:
+        cutoff = _catalog_retrain_cutoff(authoring_catalog)
+    except ValueError as exc:
+        raise ValueError("non-canonical authoring cutoff") from exc
+    if cutoff is None:
         return None
-    cutoff = date.fromisoformat(authoring_cutoff)
-    if cutoff.isoformat() != authoring_cutoff:
-        raise ValueError("non-canonical authoring cutoff")
     authoring_identity, _artifact_refs = _resolve_model_bindings(
         dep_root, authoring_manifest.release)
     return authoring_manifest, authoring_catalog, cutoff, authoring_identity
@@ -875,11 +895,15 @@ def _load_chooser_fold_references(
     objects: list, member_id: str, cutoff: date | None, catalog: Mapping,
     manifest: "deployment.StagedManifest", inference: FrozenInference,
     model_identity: Mapping[str, ModelIdentity], root: Path, dep_root: Path,
+    *, legacy_flags: list[bool] | None = None,
 ) -> tuple[dict[tuple[str, str], ChooserFoldReference],
            dict[str, tuple["deployment.StagedManifest", Mapping]]]:
     if len(objects) > _CHOOSER_FOLD_MAX_OBJECTS:
         raise ModelNotReady(member_id, "chooser fold catalog exceeds load limit")
+    if legacy_flags is None:
+        legacy_flags = [_is_legacy_cutoffless_chooser_fold(obj) for obj in objects]
     total, started, references = len(objects), time.monotonic(), {}
+    seen_keys: set[tuple[str, str]] = set()
     authoring_contexts: dict[str, tuple["deployment.StagedManifest", Mapping]] = {}
     authoring_releases = {
         manifest.release.release_id: (manifest, catalog, cutoff, model_identity)}
@@ -895,16 +919,15 @@ def _load_chooser_fold_references(
         result = _verified_chooser_fold_reference(
             obj, catalog, manifest, inference, root, dep_root,
             authoring_releases, carried_catalogs)
-        if result is None:
-            continue
-        if _is_legacy_cutoffless_chooser_fold(obj):
-            continue
-        key, reference, authoring_manifest, authoring_catalog = result
-        if key in references:
-            raise ModelNotReady(member_id, "ambiguous chooser fold reference")
-        references[key] = reference
-        authoring_contexts[reference.descriptor_hash] = (
-            authoring_manifest, authoring_catalog)
+        if result is not None:
+            key, reference, authoring_manifest, authoring_catalog = result
+            if key in seen_keys:
+                raise ModelNotReady(member_id, "ambiguous chooser fold reference")
+            seen_keys.add(key)
+            if not legacy_flags[done - 1]:
+                references[key] = reference
+                authoring_contexts[reference.descriptor_hash] = (
+                    authoring_manifest, authoring_catalog)
         if done % 4 == 0 or done == total:
             elapsed = time.monotonic() - started
             rate = done / elapsed if elapsed > 0 else 0.0
@@ -943,21 +966,20 @@ def _chooser_fold_objects(members: Mapping, member_ids: tuple[str, ...]) -> list
     return objects
 
 
-def _chooser_fold_catalog_cutoff(catalog: Mapping, objects: list) -> date | None:
-    if all(_is_legacy_cutoffless_chooser_fold(obj) for obj in objects):
-        return None
-    sources = catalog.get("sources")
-    raw_cutoff = sources.get("retrain_cutoff") if isinstance(sources, Mapping) else None
-    if raw_cutoff is None:
-        raise ModelNotReady("tier4_folds:chooser", "canonical training cutoff is missing")
+def _chooser_fold_catalog_cutoff(
+    catalog: Mapping, objects: list,
+) -> tuple[date | None, list[bool]]:
+    legacy_flags = [_is_legacy_cutoffless_chooser_fold(obj) for obj in objects]
+    if all(legacy_flags):
+        return None, legacy_flags
     try:
-        parsed_cutoff = date.fromisoformat(raw_cutoff)
-        if parsed_cutoff.isoformat() != raw_cutoff:
-            raise ValueError("non-canonical cutoff")
-    except (TypeError, ValueError):
+        cutoff = _catalog_retrain_cutoff(catalog)
+    except ValueError:
         raise ModelNotReady(
             "tier4_folds:chooser", "canonical training cutoff is missing") from None
-    return parsed_cutoff
+    if cutoff is None:
+        raise ModelNotReady("tier4_folds:chooser", "canonical training cutoff is missing")
+    return cutoff, legacy_flags
 
 
 def _resolve_chooser_fold_references(
@@ -984,10 +1006,10 @@ def _resolve_chooser_fold_references(
         raise ModelNotReady("tier4_folds:chooser", "chooser fold catalog exceeds load limit")
     if not objects:
         return {}, {}
-    cutoff = _chooser_fold_catalog_cutoff(catalog, objects)
+    cutoff, legacy_flags = _chooser_fold_catalog_cutoff(catalog, objects)
     return _load_chooser_fold_references(
         objects, "tier4_folds:chooser", cutoff, catalog, manifest,
-        inference, model_identity, root, dep_root)
+        inference, model_identity, root, dep_root, legacy_flags=legacy_flags)
 
 
 def _resolve_driver_residual_pools(
