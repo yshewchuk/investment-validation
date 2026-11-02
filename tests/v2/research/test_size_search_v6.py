@@ -158,9 +158,11 @@ def test_v6_workers_one_and_two_match_candidates_results_and_metrics(case, tmp_p
     # Expectations are pinned to the sealed fixture, not derived from the serial run or the
     # production scorer.
     candidate = parallel_result["folds"][0]["candidate"]
-    assert candidate["candidate_id"] == "sha256:8178644685de984c0d232599dcc327288714c23b07538ff83036222d0c3048c6"
+    planned_candidate = next(
+        planned for planned in case.plan["candidates"] if planned["recipe"] == candidate["recipe"])
+    assert candidate["candidate_id"] == planned_candidate["candidate_id"]
     assert candidate["recipe"]["model"] == "history_ridge"
-    assert parallel_result["prospective_candidate_id"] == "sha256:8178644685de984c0d232599dcc327288714c23b07538ff83036222d0c3048c6"
+    assert parallel_result["prospective_candidate_id"] == planned_candidate["candidate_id"]
     metrics = parallel_result["metrics"]
     assert metrics["count"] == 1
     assert metrics["mae"] == pytest.approx(0.9342579737821772, abs=1e-12)

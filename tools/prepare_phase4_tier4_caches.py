@@ -239,6 +239,10 @@ def _validate_identity(
         raise CachePreparationError(
             f"cache identity mismatch for {path}: expected {expected}, got {actual}"
         )
+    try:
+        tier4._validated_training_cutoff(stored.get("training_cutoff"), fold)
+    except tier4.Tier4Error:
+        raise CachePreparationError("cache has an invalid training cutoff") from None
     if "estimator" not in stored:
         raise CachePreparationError(f"cache has no estimator: {path}")
 
@@ -598,6 +602,10 @@ def build_one(
         or tuple(served.features) != tuple(selected_model.features)
     ):
         raise CachePreparationError(f"freshly fit model identity mismatch for {path}")
+    try:
+        training_cutoff = tier4._validated_training_cutoff(served.training_cutoff, fold)
+    except tier4.Tier4Error:
+        raise CachePreparationError("fit builder returned an invalid training cutoff") from None
     pool_pred = np.asarray(served.pool_pred, dtype=float)
     pool_res = np.asarray(served.pool_res, dtype=float)
     candidate = {
@@ -609,6 +617,8 @@ def build_one(
         "pool_pred": pool_pred,
         "pool_res": pool_res,
     }
+    if training_cutoff is not None:
+        candidate["training_cutoff"] = training_cutoff
     _validated_pools(candidate, path)
 
     directory.mkdir(parents=True, exist_ok=True)

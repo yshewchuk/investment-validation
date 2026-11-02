@@ -652,3 +652,26 @@ def test_resolve_release_binding_refuses_malformed_size_fold_row(tmp_path):
     with pytest.raises(ModelNotReady) as caught:
         resolve_release_binding(tmp_path)
     _assert_model_not_ready(caught, "size fold catalog is not valid")
+
+
+@pytest.mark.parametrize("training_cutoff", ["2026-10-01", "2026-10-02"])
+def test_preflight_size_fold_rejects_invalid_cutoff_and_accepts_absence(
+    tmp_path, training_cutoff
+):
+    from engine.v2.foundation import DocumentError
+    from engine.v2.models.serving_fold_preflight import preflight_size_fold
+
+    cache = _cache()
+    cache["training_cutoff"] = training_cutoff
+    parent = _staged(tmp_path, cache)
+    with pytest.raises(DocumentError) as caught:
+        preflight_size_fold(
+            fold_bytes(cache), fold_name(cache), _policy(cache), parent.release
+        )
+    assert (caught.value.code, caught.value.path, caught.value.message) == (
+        "BAD_TRAINING_CUTOFF", "$.training_cutoff",
+        "expected canonical ISO day strictly before fold_start")
+    cache.pop("training_cutoff", None)
+    preflight_size_fold(
+        fold_bytes(cache), fold_name(cache), _policy(cache), parent.release
+    )
