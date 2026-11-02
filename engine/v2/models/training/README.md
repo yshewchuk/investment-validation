@@ -44,8 +44,8 @@ deterministically; there is no cache, I/O, publication or journal replay here.
 The generic magnitude dispatcher now accepts this closed recipe and preserves the
 complete result; `size_fit_diagnostics` validates its per-horizon evidence for fresh
 execution and replay. Existing recipe values and the comparator remain unchanged.
-Only opt-in `magnitude_search_request.v6` admits the original three profiles; v1-v5
-still refuse MLP. Request v7 admits all ten profiles and accepts the same optional
+Request v6 admits the original three profiles; v1-v5 still refuse MLP. Request v7
+admits all ten profiles and accepts the same optional
 bounded-worker declaration as v6.
 New execution sources need fresh source seals; old reservations remain bound to
 original installed sources, with no resealing or mutation of running plans.
@@ -73,7 +73,7 @@ Replaces (§4.4): `models/training/, rewritten above scoring rather than moved`.
 `magnitude_mlp.fit_mlp_predictions` fits one guarded standalone MLP component on
 caller-admitted matrices: training-only input/target scaling, deterministic fixed
 profiles, original-unit nonnegative forecasts and convergence evidence. Invalid
-inputs, convergence failure or nonfinite evidence raise `ValueError`; no retry,
+inputs, disallowed convergence warnings or nonfinite evidence raise `ValueError`; no retry,
 source admission, persistence or production/search activation occurs.
 
 `magnitude_candidate.fit_candidate` is the shared fixed-nonnegative Ridge/HGB/ElasticNet/MLP

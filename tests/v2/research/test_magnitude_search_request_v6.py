@@ -82,6 +82,7 @@ def test_v7_profiles_counts_recipes_and_workers():
     assert result["request_id"] == content_hash(result["request"])
     assert result["counts"]["candidates"] == 130
     specs = result["candidate_specs"]
+    assert len(specs) == result["counts"]["candidates"]
     ids = [s["candidate_spec_id"] for s in specs]
     assert len(ids) == len(set(ids))
     neural = [s for s in specs if s["family"] == "mlp"]
@@ -130,6 +131,7 @@ def test_invalid_v7_profiles_refuse_before_expansion(monkeypatch):
     with pytest.raises(OpsError) as caught:
         compile_request(request)
     assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert caught.value.problem.retryable is False
 
 
 @pytest.mark.parametrize("change", [

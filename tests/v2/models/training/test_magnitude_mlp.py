@@ -275,6 +275,7 @@ def test_fixed_budget_fit_accepts_convergence_warning_at_epoch_200(monkeypatch):
 
 @pytest.mark.parametrize("profile,at_cap,accepted", [
     ("es_relu32_l2_1", False, False),
+    ("relu32_l2_0p01", True, False),
     ("fixed200_relu64x32_l2_1", True, True),
     ("fixed200_relu64x32_l2_1", False, False),
 ])
@@ -282,7 +283,9 @@ def test_convergence_warning_requires_fixed_budget_at_cap(monkeypatch, profile, 
     original = TransformedTargetRegressor.fit
     def warned(self, *args, **kwargs):
         result = original(self, *args, **kwargs)
-        if profile.startswith("fixed200_") and not at_cap:
+        if at_cap:
+            self.regressor_[-1].n_iter_ = 200 if profile.startswith("fixed200_") else 400
+        elif profile.startswith("fixed200_"):
             self.regressor_[-1].n_iter_ = 199
         warnings.warn("synthetic convergence warning", ConvergenceWarning)
         return result
