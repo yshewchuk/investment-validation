@@ -35,7 +35,8 @@ def fitted_forecasts(indexed, training_ids, labels, evaluation_ids, horizons, co
             progress("started", deepcopy(fit))
         try:
             fit_started = time.monotonic() if measure_fit_seconds else None
-            result = fit_execution(route, recipe, matrix, labels.copy(), prediction_matrix, columns=columns)
+            result = fit_execution(route, recipe, matrix, labels.copy(), prediction_matrix,
+                                  **_fit_options(indexed, training_ids, horizon, columns))
             fit_seconds = time.monotonic() - fit_started if measure_fit_seconds else None
             values = result["predictions"]
             if diagnostics is not None and route != "magnitude":
@@ -68,3 +69,10 @@ def _validate_forecasts(values, count, target_domain):
             or not isinstance(value, (int, float)) or not math.isfinite(value)
             or (target_domain == "nonnegative" and value < 0) for value in values)):
         raise ValueError
+
+
+def _fit_options(indexed, training_ids, horizon, columns):
+    options = {"columns": columns}
+    if indexed is not None and all("event_date" in indexed[event, horizon] for event in training_ids):
+        options["event_dates"] = [indexed[event, horizon]["event_date"] for event in training_ids]
+    return options

@@ -181,6 +181,24 @@ def test_load_fit_inputs_streams_many_shards_and_projects_only_fit_rows(tmp_path
                                   for event in events if event in wanted for horizon in (1, 5)]
 
 
+def test_load_fit_inputs_includes_event_date_only_when_source_has_it(tmp_path):
+    cohort, events = _fit_cohort(4)
+    for position, row in enumerate(cohort["features"]):
+        row["event_date"] = f"2024-01-{position + 1:02d}"
+    store = ArtifactStore(tmp_path / "with_dates")
+    manifest, inputs_id = publish_inputs(store, cohort)
+    loaded = load_fit_inputs(store, manifest, inputs_id, events, [1, 3, 5], ("x",))
+    assert [row["event_date"] for row in loaded["features"]] == [
+        row["event_date"] for row in cohort["features"]]
+
+    cohort_without_dates, _ = _fit_cohort(4)
+    store_without_dates = ArtifactStore(tmp_path / "without_dates")
+    manifest_without_dates, id_without_dates = publish_inputs(store_without_dates, cohort_without_dates)
+    loaded_without_dates = load_fit_inputs(store_without_dates, manifest_without_dates, id_without_dates,
+                                           [], [1, 3, 5], ("x",))
+    assert all("event_date" not in row for row in loaded_without_dates["features"])
+
+
 def test_load_fit_inputs_refuses_a_wrong_id_a_v1_record_and_a_corrupt_shard(tmp_path):
     cohort, events = _fit_cohort(4)
     store = ArtifactStore(tmp_path)

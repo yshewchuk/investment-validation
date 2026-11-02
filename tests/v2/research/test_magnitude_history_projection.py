@@ -86,7 +86,7 @@ def test_projected_rows_keep_full_snapshot_identity_and_raw_numeric_values(sourc
     columns = ("mean_prior_move", "n_prior", "ema12_prior_abs_move", "mean_prior_abs_move")
     projected = _projection(source, snapshot, context, columns=columns)
     event = context["temporal_plan"]["events"][0]["event_id"]
-    keys = ("event_id", "context_id", "horizon_sessions", *columns)
+    keys = ("event_id", "context_id", "horizon_sessions", "event_date", *columns)
     assert projected == {"context": context, "feature_snapshot": to_document(snapshot),
         "rows": [{key: row[key] for key in keys} for row in rows if row["event_id"] == event],
         "inputs_id": expected}

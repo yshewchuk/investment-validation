@@ -134,6 +134,46 @@ def test_bad_forecasts_fail_without_partial_return(monkeypatch, values):
     assert isinstance(caught.value.__cause__, ValueError)
 
 
+def test_candidate_fitter_receives_training_dates_in_row_order_and_none_when_absent(monkeypatch):
+    received = []
+
+    def fit_candidate(*args, **kwargs):
+        received.append(kwargs)
+        return {"predictions": [1.]}
+
+    monkeypatch.setattr("engine.v2.models.training.magnitude_candidate.fit_candidate", fit_candidate)
+    source = indexed()
+    source["b", 5]["event_date"] = "2024-01-02"
+    source["a", 5]["event_date"] = "2024-01-01"
+    horizon_fitted.fitted_forecasts(source, ["b", "a"], [1., 2.], ["evaluation"], [5], ["x"],
+        target_column="absolute_move_pct", target_domain="nonnegative", route="magnitude_candidate", recipe={})
+    assert received[0]["event_dates"] == ["2024-01-02", "2024-01-01"]
+
+    horizon_fitted.fitted_forecasts(indexed(), ["b", "a"], [1., 2.], ["evaluation"], [5], ["x"],
+        target_column="absolute_move_pct", target_domain="nonnegative", route="magnitude_candidate", recipe={})
+    assert received[1]["event_dates"] is None
+
+
+def test_candidate_fitter_receives_training_dates_in_row_order_and_none_when_absent(monkeypatch):
+    received = []
+
+    def fit_candidate(*args, **kwargs):
+        received.append(kwargs)
+        return {"predictions": [1.]}
+
+    monkeypatch.setattr("engine.v2.models.training.magnitude_candidate.fit_candidate", fit_candidate)
+    source = indexed()
+    source["b", 5]["event_date"] = "2024-01-02"
+    source["a", 5]["event_date"] = "2024-01-01"
+    horizon_fitted.fitted_forecasts(source, ["b", "a"], [1., 2.], ["evaluation"], [5], ["x"],
+        target_column="absolute_move_pct", target_domain="nonnegative", route="magnitude_candidate", recipe={})
+    assert received[0]["event_dates"] == ["2024-01-02", "2024-01-01"]
+
+    horizon_fitted.fitted_forecasts(indexed(), ["b", "a"], [1., 2.], ["evaluation"], [5], ["x"],
+        target_column="absolute_move_pct", target_domain="nonnegative", route="magnitude_candidate", recipe={})
+    assert received[1]["event_dates"] is None
+
+
 def test_one_shot_ids_columns_and_horizons_are_materialized_once():
     source = indexed()
     recipe = regression_candidate_recipe(*FAMILIES[0], target_domain="signed", **FEATURES)

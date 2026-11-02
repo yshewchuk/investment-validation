@@ -5,7 +5,8 @@ from engine.v2.models.no_fit import forbid_fitting
 from .legacy_adapter import forbid_fitting as forbid_legacy_fitting
 
 
-def fit_candidate(recipe, train_features, train_labels, prediction_features, *, columns) -> dict:
+def fit_candidate(recipe, train_features, train_labels, prediction_features, *, columns,
+                  event_dates=None) -> dict:
     """Preserve delegated results and native errors; never retry."""
     forbid_legacy_fitting("fit_candidate")
     forbid_fitting("fit_candidate")
