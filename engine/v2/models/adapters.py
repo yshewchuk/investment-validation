@@ -179,8 +179,10 @@ class _ServingFold:
             cutoff = header.get("training_cutoff")
             fold_start = header.get("fold_start")
             if cutoff is not None and fold_start is None:
-                raise ValueError("declared training cutoff requires a fold_start")
+                raise AdapterError("invalid serving fold fold_start")
             return validated_training_cutoff(cutoff, fold_start)
+        except AdapterError:
+            raise
         except (TypeError, ValueError, OverflowError):
             raise AdapterError("invalid serving fold training cutoff") from None
 

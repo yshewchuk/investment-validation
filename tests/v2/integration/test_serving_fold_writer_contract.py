@@ -242,7 +242,7 @@ def test_serving_model_cache_hit_carries_the_cutoff_and_a_legacy_header_serves_n
     assert legacy.training_cutoff is None
 
 
-def test_serving_model_cache_hit_refuses_a_malformed_training_cutoff(
+def test_serving_model_cache_hit_carries_a_malformed_training_cutoff_without_rejecting(
     tmp_path, monkeypatch, model, served
 ):
     _wire_serving_model(tmp_path, monkeypatch, model, served)
@@ -260,12 +260,12 @@ def test_serving_model_cache_hit_refuses_a_malformed_training_cutoff(
         },
         path,
     )
-    with pytest.raises(tier4.Tier4Error, match="^invalid serving fold training cutoff$"):
-        tier4.serving_model(FOLD, panel=pd.DataFrame(), model=model, cache=True)
+    result = tier4.serving_model(FOLD, panel=pd.DataFrame(), model=model, cache=True)
+    assert result.training_cutoff == ["2026-08-20"]
 
 
 @pytest.mark.parametrize("training_cutoff", [str(FOLD.date()), "2026-09-02"])
-def test_serving_model_cache_hit_refuses_cutoff_at_or_after_fold(
+def test_serving_model_cache_hit_carries_cutoff_at_or_after_fold_without_rejecting(
     tmp_path, monkeypatch, model, served, training_cutoff
 ):
     _wire_serving_model(tmp_path, monkeypatch, model, served)
@@ -283,8 +283,8 @@ def test_serving_model_cache_hit_refuses_cutoff_at_or_after_fold(
         },
         path,
     )
-    with pytest.raises(tier4.Tier4Error, match="^invalid serving fold training cutoff$"):
-        tier4.serving_model(FOLD, panel=pd.DataFrame(), model=model, cache=True)
+    result = tier4.serving_model(FOLD, panel=pd.DataFrame(), model=model, cache=True)
+    assert result.training_cutoff == training_cutoff
 
 
 @pytest.mark.parametrize(
@@ -366,7 +366,7 @@ def test_direct_adapter_load_refuses_declared_cutoff_without_fold_start(
     }
     stream = io.BytesIO()
     joblib.dump(header, stream, compress=0)
-    with pytest.raises(AdapterError, match="^invalid serving fold training cutoff$"):
+    with pytest.raises(AdapterError, match="^invalid serving fold fold_start$"):
         Tier4ServingFoldAdapter().load({"estimator": stream.getvalue()}, binding)
 
 
@@ -379,7 +379,7 @@ def test_direct_adapter_predict_refuses_declared_cutoff_without_fold_start(
         model, served, fold_start=fold_start, training_cutoff="2026-08-20"
     )
     artifact = _ServingFold(ReadOnlyArtifact(served.estimator), header)
-    with pytest.raises(AdapterError, match="^invalid serving fold training cutoff$"):
+    with pytest.raises(AdapterError, match="^invalid serving fold fold_start$"):
         Tier4ServingFoldAdapter().predict(artifact, [[0.0, 0.0]], binding)
 
 

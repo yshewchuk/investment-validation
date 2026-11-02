@@ -1658,7 +1658,7 @@ def serving_model(
                 pool_pred, pool_res = _pool_before(
                     fold, model, load_panel() if panel is None else panel
                 )
-            training_cutoff = _validated_training_cutoff(stored.get("training_cutoff"), fold)
+            training_cutoff = stored.get("training_cutoff")
             return ServingModel(
                 estimator=stored["estimator"],
                 model_id=model.model_id,
