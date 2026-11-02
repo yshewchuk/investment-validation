@@ -109,8 +109,7 @@ release assembly is §2.1, staging §2.2, and the three-phase tick sidecar is §
 
 ## 2. Primary contracts and public interfaces
 
-`README.md` declares the checked public interface; `deployment.manifest_path`
-rejects empty, `/`, `.`/`..` and NUL release IDs.
+`README.md` declares the checked public interface; `deployment.manifest_path` rejects empty, `/`, `.`/`..` and NUL release IDs. `chooser_cutoff.canonical_day` accepts dates, naive datetimes and canonical date/datetime strings; `require_causal_cutoff` requires canonical ISO dates with strict training-before-fold and training-before-decision ordering; `chooser_fold_start` returns the earlier event/decision month start. Noncanonical ISO forms are refused. These pure, uncached helpers return the same result for the same input and raise a fixed path/value-free `ValueError`; callers added in later slices must map that error to `MODEL_NOT_READY`.
 
 - `deployment.stage_release(root, release, inventory, payloads, *, clock) -> StagedManifest`
   — validate, then durably stage. Never touches `DEPLOYED`.
