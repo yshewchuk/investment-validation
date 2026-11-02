@@ -3713,7 +3713,7 @@ def _merged_resources(*groups: Sequence[Mapping[str, Any]]) -> list[dict[str, An
     return list(merged.values())
 
 
-def validated_chooser_fold_references(source, request):
+def validated_chooser_fold_references(source, request, legacy_event_date=None):
     if source is None:
         return None
     frozen = source.get("frozen")
@@ -3749,6 +3749,15 @@ def validated_chooser_fold_references(source, request):
         raise StrictTraceCaptureError("chooser refs do not cover producers")
     try:
         decision = date.fromisoformat(request.requested_decision_at[:10])
+        if legacy_event_date is None:
+            expected_fold_start = None
+        else:
+            event_day = date.fromisoformat(legacy_event_date)
+            if event_day.isoformat() != legacy_event_date:
+                raise ValueError("non-canonical event date")
+            expected_fold_start = min(
+                event_day.replace(day=1), decision.replace(day=1),
+            ).isoformat()
     except (AttributeError, TypeError, ValueError) as exc:
         raise StrictTraceCaptureError("chooser ref has invalid dates") from exc
 
@@ -3800,7 +3809,8 @@ def validated_chooser_fold_references(source, request):
         if (not isinstance(producer, Mapping) or not identity_matches
                 or fold.isoformat() != ref["fold_start"] or fold.day != 1
                 or cutoff.isoformat() != ref["training_cutoff"]
-                or cutoff >= decision or cutoff >= fold or fold > decision
+                or cutoff >= decision or cutoff >= fold
+                or (expected_fold_start is not None and fold.isoformat() != expected_fold_start)
                 or ref.get("producer_output") != output
                 or declaration.get("output") != output
                 or tuple(producer.get("output_names") or ()) != (output,)
@@ -3849,7 +3859,10 @@ def strict_trace_one(
             source_root=_artifact_source_root(),
         )
     gate_recipe = _packaged_gate_recipe(packaging, package)
-    chooser_fold_references = validated_chooser_fold_references(source, request)
+    event_id = candidate.get("event_id")
+    legacy_event_date = event_id.rsplit("_", 1)[-1] if isinstance(event_id, str) else None
+    chooser_fold_references = validated_chooser_fold_references(
+        source, request, legacy_event_date)
     chooser = (frozen_chooser_declaration(
         candidate, deployment_id=request.deployment_id, release_root=release_root,
         chooser_fold_references=chooser_fold_references)

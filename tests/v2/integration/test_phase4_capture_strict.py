@@ -1356,7 +1356,7 @@ def test_chooser_fold_reference_flows_through_real_scorer_checkpoint(tmp_path, m
         producer_output="pred_runup_abs_move_d14",
         descriptor_hash="sha256:" + "e" * 64,
         estimator_sha256="sha256:" + runup_digest, training_cutoff="2026-07-31",
-        release_id="release-1", carrying_release_id="release-1", fold_start="2026-08-01",
+        release_id="release-1", carrying_release_id="release-1", fold_start="2026-09-01",
         release_binding=SimpleNamespace(
             binding_id="runup_move:STR-THRU", model_id=runup_model_id,
             role="runup_move", strategy_id="STR-THRU",
@@ -1365,7 +1365,7 @@ def test_chooser_fold_reference_flows_through_real_scorer_checkpoint(tmp_path, m
             artifact_hash="sha256:" + "f" * 64),
     )
     runup_served = SimpleNamespace(
-        model_id=runup_model_id, fold_start=pd.Timestamp("2026-08-01"),
+        model_id=runup_model_id, fold_start=pd.Timestamp("2026-09-01"),
         tier3_snapshot="snapshot-1", features=("im",), pool_pred=[1.0],
         pool_res=[0.1], interval_floor=0.0,
         artifact_ref=lambda: (runup_path, runup_digest),
@@ -1381,7 +1381,7 @@ def test_chooser_fold_reference_flows_through_real_scorer_checkpoint(tmp_path, m
     scorer = object.__new__(Scorer)
     scorer._chooser_fold_references = {
         ("pred_im_t1_d14", "2026-09-01"): reference,
-        ("pred_runup_abs_move_d14", "2026-08-01"): runup_reference,
+        ("pred_runup_abs_move_d14", "2026-09-01"): runup_reference,
     }
     request = ScoreRequest(ticker="AAA", strategy="STR-THRU",
                            as_of=pd.Timestamp("2026-09-16"),
@@ -1400,16 +1400,19 @@ def test_chooser_fold_reference_flows_through_real_scorer_checkpoint(tmp_path, m
     size_digest = "sha256:" + "D" * 64
     source["frozen"]["bindings"]["fold:size"] = {"artifact_sha256": size_digest}
     candidate["legacy_trace"]["checkpoints"]["source_inputs"]["content_hash"] = content_hash(source)
-    captured = validated_chooser_fold_references(source, _request())
+    captured = validated_chooser_fold_references(source, _request(), "2026-09-17")
+    with pytest.raises(StrictTraceCaptureError, match="mismatches served producer"):
+        validated_chooser_fold_references(source, _request(), "2026-08-17")
     assert set(captured) == {"pred_im_t1_d14", "pred_runup_abs_move_d14"}
     assert captured["pred_im_t1_d14"]["descriptor_hash"] == reference.descriptor_hash
     assert captured["pred_im_t1_d14"]["fold_start"] == "2026-09-01"
     assert captured["pred_runup_abs_move_d14"]["descriptor_hash"] == runup_reference.descriptor_hash
-    assert captured["pred_runup_abs_move_d14"]["fold_start"] == "2026-08-01"
+    assert captured["pred_runup_abs_move_d14"]["fold_start"] == "2026-09-01"
     boundary_request = SimpleNamespace(requested_decision_at="2026-09-01")
-    boundary_refs = validated_chooser_fold_references(source, boundary_request)
+    boundary_refs = validated_chooser_fold_references(
+        source, boundary_request, "2026-09-17")
     assert boundary_refs["pred_im_t1_d14"]["fold_start"] == "2026-09-01"
-    assert boundary_refs["pred_runup_abs_move_d14"]["fold_start"] == "2026-08-01"
+    assert boundary_refs["pred_runup_abs_move_d14"]["fold_start"] == "2026-09-01"
     invalid_release_ids = (None, "", "/x", ".", "..", 123, "\x00")
     for output in ("pred_im_t1_d14", "pred_runup_abs_move_d14"):
         for field in ("release_id", "carrying_release_id"):
@@ -1474,7 +1477,7 @@ def test_chooser_fold_reference_flows_through_real_scorer_checkpoint(tmp_path, m
             "training_cutoff": "2026-08-31", "fold_start": "2026-09-01",
             "descriptor_hash": reference.descriptor_hash},
         "pred_runup_abs_move_d14": {
-            "training_cutoff": "2026-07-31", "fold_start": "2026-08-01",
+            "training_cutoff": "2026-07-31", "fold_start": "2026-09-01",
             "descriptor_hash": runup_reference.descriptor_hash},
     }
     assert set(recipe["artifact_refs"]) == {
