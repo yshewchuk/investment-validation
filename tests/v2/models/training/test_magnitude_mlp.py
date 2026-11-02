@@ -4,6 +4,7 @@ import json
 import subprocess
 import sys
 import warnings
+from datetime import date
 
 import numpy as np
 import pytest
@@ -36,6 +37,14 @@ STOPPING_PROFILES = [
     ("fixed200_relu64x32_l2_10", [64, 32], 10, False, 200, 201, "epoch_budget_success_no_retry"),
     ("fixed200_relu64x32_l2_100", [64, 32], 100, False, 200, 201, "epoch_budget_success_no_retry"),
 ]
+CHRONO_PROFILES = [
+    ("chrono15_relu32_l2_0p01", [32], 0.01, 0.15),
+    ("chrono15_relu32_l2_1", [32], 1, 0.15),
+    ("chrono15_relu64x32_l2_0p01", [64, 32], 0.01, 0.15),
+    ("chrono15_relu64x32_l2_1", [64, 32], 1, 0.15),
+    ("chrono10_relu64x32_l2_0p01", [64, 32], 0.01, 0.1),
+    ("chrono10_relu64x32_l2_1", [64, 32], 1, 0.1),
+]
 
 
 def recipe(**changes):
@@ -52,6 +61,11 @@ def arrays():
 def fit(policy=None, values=None, columns=COLUMNS):
     return fitting.fit_mlp_predictions(recipe() if policy is None else policy,
         *(arrays() if values is None else values), columns=columns)
+
+
+def chrono_dates(rows=80):
+    base = date(2026, 1, 1).toordinal()
+    return [date.fromordinal(base + index) for index in range(rows)]
 
 
 def test_metadata_imports_neither_training_nor_sklearn():
@@ -108,6 +122,28 @@ def test_stopping_profiles_match_complete_sklearn_policy(profile, layers, alpha,
         random_state=20260829).get_params()
     assert policy["estimator"]["params"] == expected
     assert policy["nonconvergence"] == nonconvergence
+
+
+@pytest.mark.parametrize("profile,layers,alpha,fraction", CHRONO_PROFILES)
+def test_chrono_profiles_match_complete_sklearn_policy(profile, layers, alpha, fraction):
+    policy = recipe(profile=profile)
+    assert validate_mlp_recipe(policy) == policy
+    expected = MLPRegressor(hidden_layer_sizes=layers, alpha=alpha, max_iter=400,
+        n_iter_no_change=20, early_stopping=False, validation_fraction=fraction,
+        random_state=20260829).get_params()
+    assert policy["estimator"]["params"] == expected
+    assert policy["nonconvergence"] == "epoch_budget_success_no_retry"
+    assert policy["numerical_threads"] == 1 and policy["component_fits"] == 1
+
+
+def test_six_chrono_hashes_unique_and_prior_profile_hashes_stay_disjoint():
+    def profile_hash(profile):
+        return content_hash(recipe(profile=profile, columns=["signal"]))
+    chrono_hashes = [profile_hash(profile) for profile, *_ in CHRONO_PROFILES]
+    prior_hashes = [profile_hash(profile) for profile, *_ in PROFILES + STOPPING_PROFILES]
+    assert len(chrono_hashes) == len(set(chrono_hashes)) == 6
+    assert len(prior_hashes) == len(set(prior_hashes)) == 10
+    assert set(chrono_hashes).isdisjoint(prior_hashes)
 
 
 def test_new_profile_hashes_are_unique_and_original_hashes_stable():
@@ -502,3 +538,77 @@ def test_informative_missing_features_use_training_median_not_mean(monkeypatch):
     assert np.nanmean(train) == pytest.approx(2.2)  # Asymmetric: median is not the mean.
     assert imputer.statistics_.tolist() == [1.0]
     assert imputer.transform(prediction).ravel().tolist() == [1., 1., 8.]
+
+
+def test_chrono_split_selects_latest_rows_by_date_then_position():
+    base = date(2026, 1, 1).toordinal()
+    days = [base + 100] + [base + index for index in range(1, 20)]
+    fit_idx, val_idx = fitting._chrono_split(days, 0.15)
+    assert val_idx == [0, 18, 19]
+    assert fit_idx == list(range(1, 18))
+    tied = [base + 7, base + 9, base + 9, base + 2]
+    fit_tied, val_tied = fitting._chrono_split(tied, 0.25)
+    assert val_tied == [2] and fit_tied == [0, 1, 3]
+
+
+def test_chrono_split_requires_nonempty_fit_and_holdout():
+    with pytest.raises(ValueError, match="nonempty fit and holdout"):
+        fitting._chrono_split([date(2026, 1, 1).toordinal()], 0.15)
+
+
+@pytest.mark.parametrize("event_dates,reason", [
+    (None, "one event date per training row"),
+    ([], "one event date per training row"),
+    (["2026-01-01"] * 79, "one event date per training row"),
+    ([None] * 80, "valid event dates"),
+    (["not-a-date"] * 80, "valid event dates"),
+])
+def test_chrono_missing_invalid_or_misaligned_dates_refuse(event_dates, reason):
+    with pytest.raises(ValueError, match=reason):
+        fitting.fit_mlp_predictions(recipe(profile="chrono15_relu32_l2_0p01"),
+            *arrays(), columns=COLUMNS, event_dates=event_dates)
+
+
+def test_identical_chrono_fits_return_identical_predictions():
+    policy = recipe(profile="chrono15_relu32_l2_0p01")
+    dates = chrono_dates()
+    first = fitting.fit_mlp_predictions(policy, *arrays(), columns=COLUMNS, event_dates=dates)
+    second = fitting.fit_mlp_predictions(policy, *arrays(), columns=COLUMNS, event_dates=dates)
+    assert first == second
+    assert first["schema_version"] == "magnitude_mlp_fit.v1"
+    assert first["recipe_id"] == content_hash(policy)
+    assert first["loss_scale"] == "standardized_target"
+    assert len(first["predictions"]) == 2 and np.isfinite(first["predictions"]).all()
+
+
+def test_chrono_restored_loss_equals_minimum_seen_holdout_loss(monkeypatch):
+    policy = recipe(profile="chrono15_relu32_l2_0p01")
+    train, labels, prediction = arrays()
+    dates = chrono_dates()
+    fit_idx, val_idx = fitting._chrono_split([value.toordinal() for value in dates], 0.15)
+    target = StandardScaler().fit(np.asarray(labels, dtype=float)[fit_idx].reshape(-1, 1))
+    y_val = target.transform(np.asarray(labels, dtype=float)[val_idx].reshape(-1, 1)).ravel()
+    observed = []
+    original_predict = estimators.MLPRegressor.predict
+
+    def spy(self, values):
+        predicted = original_predict(self, values)
+        if len(values) == len(val_idx):
+            observed.append(float(np.mean((predicted - y_val) ** 2)))
+        return predicted
+
+    monkeypatch.setattr(estimators.MLPRegressor, "predict", spy)
+    result = fitting.fit_mlp_predictions(policy, train, labels, prediction,
+        columns=COLUMNS, event_dates=dates)
+    assert len(observed) == result["n_iter"] + 1
+    assert observed[-1] == min(observed)
+    assert result["loss"] == observed[-1]
+
+
+def test_existing_profiles_fit_path_ignores_event_dates():
+    policy = recipe()
+    base = fitting.fit_mlp_predictions(policy, *arrays(), columns=COLUMNS)
+    with_dates = fitting.fit_mlp_predictions(policy, *arrays(), columns=COLUMNS,
+        event_dates=[None] * 80)
+    assert with_dates == base
+    assert with_dates["recipe_id"] == content_hash(policy)

@@ -17,6 +17,12 @@ _PROFILES = {
     "fixed200_relu64x32_l2_1": ([64, 32], 1, "budget", "epoch_budget_success_no_retry"),
     "fixed200_relu64x32_l2_10": ([64, 32], 10, "budget", "epoch_budget_success_no_retry"),
     "fixed200_relu64x32_l2_100": ([64, 32], 100, "budget", "epoch_budget_success_no_retry"),
+    "chrono15_relu32_l2_0p01": ([32], 0.01, "chrono15", "epoch_budget_success_no_retry"),
+    "chrono15_relu32_l2_1": ([32], 1, "chrono15", "epoch_budget_success_no_retry"),
+    "chrono15_relu64x32_l2_0p01": ([64, 32], 0.01, "chrono15", "epoch_budget_success_no_retry"),
+    "chrono15_relu64x32_l2_1": ([64, 32], 1, "chrono15", "epoch_budget_success_no_retry"),
+    "chrono10_relu64x32_l2_0p01": ([64, 32], 0.01, "chrono10", "epoch_budget_success_no_retry"),
+    "chrono10_relu64x32_l2_1": ([64, 32], 1, "chrono10", "epoch_budget_success_no_retry"),
 }
 
 
@@ -32,7 +38,9 @@ def mlp_recipe(*, columns, feature_dictionary_hash, profile):
         raise ValueError("MLP requires a canonical dictionary hash and declared profile")
     layers, alpha, stopping, convergence = _PROFILES[profile]
     max_iter, n_iter_no_change = {
-        "training": (400, 15), "early": (400, 10), "budget": (200, 201)}[stopping]
+        "training": (400, 15), "early": (400, 10), "budget": (200, 201),
+        "chrono15": (400, 20), "chrono10": (400, 20)}[stopping]
+    validation_fraction = 0.15 if stopping == "chrono15" else 0.1
     return {
         "schema_version": "magnitude_mlp_recipe.v1", "model": "mlp", "profile": profile,
         "features": list(columns), "feature_dictionary_hash": feature_dictionary_hash,
@@ -42,7 +50,7 @@ def mlp_recipe(*, columns, feature_dictionary_hash, profile):
             "learning_rate": "constant", "learning_rate_init": 0.001, "power_t": 0.5,
             "max_iter": max_iter, "shuffle": True, "random_state": 20260829, "tol": 0.0001,
             "verbose": False, "warm_start": False, "momentum": 0.9,
-            "nesterovs_momentum": True, "early_stopping": stopping == "early", "validation_fraction": 0.1,
+            "nesterovs_momentum": True,             "early_stopping": stopping == "early", "validation_fraction": validation_fraction,
             "beta_1": 0.9, "beta_2": 0.999, "epsilon": 1e-8,
             "n_iter_no_change": n_iter_no_change, "max_fun": 15000}},
         "preprocessing": {

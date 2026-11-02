@@ -24,6 +24,15 @@ V7_ADDITIONS = [
     "fixed200_relu64x32_l2_100",
 ]
 V7_PROFILES = sorted(PROFILES + V7_ADDITIONS)
+V8_ADDITIONS = [
+    "chrono10_relu64x32_l2_0p01",
+    "chrono10_relu64x32_l2_1",
+    "chrono15_relu32_l2_0p01",
+    "chrono15_relu32_l2_1",
+    "chrono15_relu64x32_l2_0p01",
+    "chrono15_relu64x32_l2_1",
+]
+V8_PROFILES = sorted(PROFILES + V7_ADDITIONS + V8_ADDITIONS)
 
 
 def v6_request(profiles=PROFILES):
@@ -38,6 +47,15 @@ def v6_request(profiles=PROFILES):
 def v7_request(profiles=V7_PROFILES):
     request = v5_request()
     request["schema_version"] = "magnitude_search_request.v7"
+    request["space"]["mlp"] = {"profile": list(profiles)}
+    request["max_candidates"] = 100 + 3 * len(profiles)
+    request["max_fits"] = 3 * (request["max_candidates"] * 6 + 3)
+    return request
+
+
+def v8_request(profiles=V8_PROFILES):
+    request = v5_request()
+    request["schema_version"] = "magnitude_search_request.v8"
     request["space"]["mlp"] = {"profile": list(profiles)}
     request["max_candidates"] = 100 + 3 * len(profiles)
     request["max_fits"] = 3 * (request["max_candidates"] * 6 + 3)
@@ -132,6 +150,66 @@ def test_invalid_v7_profiles_refuse_before_expansion(monkeypatch):
         compile_request(request)
     assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
     assert caught.value.problem.retryable is False
+
+
+def test_v8_profiles_counts_recipes_and_workers():
+    request = v8_request()
+    result = compile_request(request)
+    assert result["request_id"] == content_hash(result["request"])
+    assert result["counts"]["candidates"] == 148
+    specs = result["candidate_specs"]
+    assert len(specs) == result["counts"]["candidates"]
+    ids = [s["candidate_spec_id"] for s in specs]
+    assert len(ids) == len(set(ids))
+    neural = [s for s in specs if s["family"] == "mlp"]
+    assert len(neural) == 48
+    assert {(s["feature_recipe"]["subset"], s["parameters"]["profile"]) for s in neural} == {
+        (subset, profile) for subset in ("H", "HM", "HMO") for profile in V8_PROFILES}
+    for spec in neural:
+        recipe = candidate_recipe("mlp", spec["parameters"], columns=["signal"],
+                                  feature_dictionary_hash=request["feature_dictionary_hash"])
+        assert recipe["component_fits"] == 1
+        params = recipe["estimator"]["params"]
+        profile = spec["parameters"]["profile"]
+        if profile.startswith("chrono"):
+            assert params["max_iter"] == 400
+            assert params["n_iter_no_change"] == 20
+            assert params["early_stopping"] is False
+            assert params["validation_fraction"] == (
+                0.15 if profile.startswith("chrono15") else 0.1)
+            assert recipe["numerical_threads"] == 1
+        else:
+            assert params["max_iter"] in (200, 400)
+    request["workers"] = 8
+    assert compile_request(request) == result
+    assert request["workers"] == 8
+
+
+@pytest.mark.parametrize("builder", [v6_request, v7_request])
+def test_v6_and_v7_still_refuse_chrono_profiles(monkeypatch, builder):
+    monkeypatch.setattr(compiler, "_specifications", _no_expansion)
+    with pytest.raises(OpsError) as caught:
+        compile_request(builder(["chrono15_relu32_l2_1"]))
+    assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert caught.value.problem.retryable is False
+
+
+def test_invalid_v8_profiles_refuse_before_expansion(monkeypatch):
+    monkeypatch.setattr(compiler, "_specifications", _no_expansion)
+    with pytest.raises(OpsError) as caught:
+        compile_request(v8_request(["unknown"]))
+    assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert caught.value.problem.retryable is False
+
+
+def test_v8_total_grid_ceiling_precedes_expansion(monkeypatch):
+    request = v8_request()
+    request["space"]["elasticnet"] = {"alpha": list(range(1, 33)),
+                                      "l1_ratio": [i / 16 for i in range(1, 17)]}
+    request.update(max_candidates=10000, max_fits=1000000)
+    monkeypatch.setattr(compiler, "_specifications", _no_expansion)
+    with pytest.raises(OpsError, match="1000-candidate"):
+        compile_request(request)
 
 
 @pytest.mark.parametrize("change", [

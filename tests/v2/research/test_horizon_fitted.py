@@ -17,11 +17,13 @@ from experiments.magnitude_fitted import fitted_forecasts as magnitude_forecasts
 FEATURES = dict(columns=["x"], feature_dictionary_hash="sha256:" + "a" * 64)
 FAMILIES = [("ridge", {"alpha": 1.}), ("hgb", {"max_leaf_nodes": 7}),
             ("elasticnet", {"alpha": .1, "l1_ratio": .75})]
+DATES = {"a": "2026-01-05", "b": "2026-01-03", "evaluation": "2026-01-08"}
 
 
 def indexed():
     return {(event, horizon): dict(event_id=event, context_id="synthetic", horizon_sessions=horizon,
-        x=value, forbidden_evaluation_label=object()) for horizon in (5, 3, 1)
+        x=value, event_date=DATES[event], forbidden_evaluation_label=object())
+        for horizon in (5, 3, 1)
         for event, value in (("a", 0.), ("b", 1.), ("evaluation", 0.))}
 
 
@@ -58,8 +60,9 @@ def test_estimator_mutation_cannot_change_future_inputs_or_original_hashes(monke
     source = indexed()
     original = {key: {k: v for k, v in row.items() if k != "forbidden_evaluation_label"} for key, row in source.items()}
     labels = np.array([-140., -140.])
-    def mutate(route, recipe, train, y, prediction, *, columns):
+    def mutate(route, recipe, train, y, prediction, *, columns, event_dates=None):
         assert y.tolist() == [-140., -140.]
+        assert event_dates == [DATES["a"], DATES["b"]]
         train[:] = 999.
         y[:] = 999.
         prediction[:] = 999.

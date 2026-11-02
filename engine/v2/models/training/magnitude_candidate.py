@@ -5,7 +5,8 @@ from engine.v2.models.no_fit import forbid_fitting
 from .legacy_adapter import forbid_fitting as forbid_legacy_fitting
 
 
-def fit_candidate(recipe, train_features, train_labels, prediction_features, *, columns) -> dict:
+def fit_candidate(recipe, train_features, train_labels, prediction_features, *, columns,
+                  event_dates=None) -> dict:
     """Preserve delegated results and native errors; never retry."""
     forbid_legacy_fitting("fit_candidate")
     forbid_fitting("fit_candidate")
@@ -16,4 +17,7 @@ def fit_candidate(recipe, train_features, train_labels, prediction_features, *, 
         from .magnitude_mlp import fit_mlp_predictions as fit
     else:
         from .magnitude_ridge_hgb import fit_ridge_hgb_predictions as fit
-    return fit(recipe, train_features, train_labels, prediction_features, columns=columns)
+    options = {"columns": columns}
+    if family == "mlp":
+        options["event_dates"] = event_dates
+    return fit(recipe, train_features, train_labels, prediction_features, **options)

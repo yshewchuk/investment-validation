@@ -52,8 +52,8 @@ Both fit fresh per fold/horizon, single-threaded, with finite nonnegative predic
 Caller owns protected admission, label qualification and evidence. The no-fit guard runs first;
 invalid shapes/nonfinite labels or predictions raise `ValueError`, translated by the experiment
 caller to `EXPERIMENT_VARIANT_FAILED`. Existing legacy-parity recipes are unchanged.
-`magnitude_mlp_recipe` and `training.magnitude_mlp` expose ten closed standalone neural profiles, not search admission; the original three hashes remain unchanged.
-Seven new stopping variants include four with seeded random 10% training-row validation; only the three `max_iter=200` budget profiles accept a convergence warning.
+`magnitude_mlp_recipe` and `training.magnitude_mlp` expose sixteen closed standalone neural profiles, not search admission; the original three hashes remain unchanged. Seven prior stopping variants include four with seeded random 10% training-row validation; only the three `max_iter=200` budget profiles and the six chrono profiles accept a convergence warning at the epoch cap.
+Six `chrono15_*`/`chrono10_*` profiles (patience 20, `max_iter` 400, seed 20260829, one thread) take one valid `event_date` per training row from `horizon_fitted`, split the latest 15%/10% rows by `(date, original position)` with `ceil(n * fraction)` and nonempty sides, fit preprocessing and target scaling on earlier rows only, train with sklearn `MLPRegressor.partial_fit` once per epoch, stop after 20 non-improving holdout mean-squared-loss epochs, restore the best network weights and loss and return without full-window refit; missing, invalid or misaligned dates raise `ValueError` with no random-split fallback, and nonfinite weights/loss/predictions still fail.
 See [the training contract](training/README.md#standalone-neural-magnitude-primitive-opt-in-foundation).
 
 `magnitude_elasticnet_recipe.elasticnet_recipe` binds ordered columns, dictionary hash, preprocessing and closed sklearn parameters in JSON metadata. Request-v3 SIZE candidates admit finite positive alpha in `[1e-6, 1000]` and l1-ratio in `[1e-6, 1]`; the v2 compiler retains its original six alpha/l1 combinations.

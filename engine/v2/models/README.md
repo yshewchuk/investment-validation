@@ -25,7 +25,7 @@ Replaces (§4.4): `models/registry.py`, `artifact loading and inference adapters
 ## Public interface
 
 `magnitude_mlp_recipe.mlp_recipe` / `validate_mlp_recipe` provide closed, source-free
-`magnitude_mlp_recipe.v1` metadata for ten fixed standalone neural profiles.
+`magnitude_mlp_recipe.v1` metadata for sixteen fixed standalone neural profiles.
 No sklearn import, search admission or production comparator change occurs.
 
 `regression_target.target_descriptor` / `validate_target` bind explicit column,

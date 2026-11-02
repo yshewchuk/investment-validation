@@ -35,7 +35,9 @@ def fitted_forecasts(indexed, training_ids, labels, evaluation_ids, horizons, co
             progress("started", deepcopy(fit))
         try:
             fit_started = time.monotonic() if measure_fit_seconds else None
-            result = fit_execution(route, recipe, matrix, labels.copy(), prediction_matrix, columns=columns)
+            result = fit_execution(route, recipe, matrix, labels.copy(), prediction_matrix,
+                columns=columns,
+                event_dates=[indexed[event, horizon].get("event_date") for event in training_ids])
             fit_seconds = time.monotonic() - fit_started if measure_fit_seconds else None
             values = result["predictions"]
             if diagnostics is not None and route != "magnitude":

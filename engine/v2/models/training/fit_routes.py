@@ -10,11 +10,13 @@ def check_fitting_allowed(path):
     forbid_fitting(path)
 
 
-def fit_execution(route, recipe, train_features, train_labels, prediction_features, *, columns):
+def fit_execution(route, recipe, train_features, train_labels, prediction_features, *, columns,
+                  event_dates=None):
     """Delegate one closed route, preserving results/errors without retry or I/O.
 
     Route names are internal numeric choices, not new persisted execution schemas.
     Original magnitude returns predictions only, matching the candidate envelope.
+    Chronological MLP rows pass one training-row event date per row; other routes ignore it.
     """
     check_fitting_allowed("fit_execution")
     if type(route) is not str or route not in ("magnitude", "magnitude_candidate", "regression_candidate"):
@@ -28,6 +30,7 @@ def fit_execution(route, recipe, train_features, train_labels, prediction_featur
         return {"predictions": fit_magnitude_predictions(recipe, train_features, train_labels, prediction_features)}
     if route == "magnitude_candidate":
         from .magnitude_candidate import fit_candidate as fit
-    else:
-        from .regression_candidate import fit_regression_candidate as fit
+        return fit(recipe, train_features, train_labels, prediction_features, columns=columns,
+                   event_dates=event_dates)
+    from .regression_candidate import fit_regression_candidate as fit
     return fit(recipe, train_features, train_labels, prediction_features, columns=columns)

@@ -16,6 +16,7 @@ def _mlp_diagnostics(diagnostics, recipe, horizons):
     recipe_id = content_hash(recipe)
     max_iter = recipe["estimator"]["params"]["max_iter"]
     fixed_budget = recipe["nonconvergence"] == "epoch_budget_success_no_retry"
+    at_cap = (max_iter, recipe["profile"].startswith("chrono"))
     expected = {"schema_version", "recipe_id", "horizon_sessions", "component_fits",
                 "converged", "n_iter", "input_features", "loss", "loss_scale"}
     if type(diagnostics) is not list or len(diagnostics) != len(horizons):
@@ -28,7 +29,7 @@ def _mlp_diagnostics(diagnostics, recipe, horizons):
                 or type(item["component_fits"]) is not int or item["component_fits"] != 1
                 or type(item["converged"]) is not bool
                 or (item["converged"] is False
-                    and (not fixed_budget or item["n_iter"] != max_iter))
+                    and not ((fixed_budget or at_cap[1]) and item["n_iter"] == max_iter))
                 or item["loss_scale"] != "standardized_target"
                 or type(item["n_iter"]) is not int
                 or not 1 <= item["n_iter"] <= max_iter
