@@ -8,7 +8,7 @@ from engine.v2.foundation import content_hash
 from engine.v2.models.magnitude_mlp_recipe import validate_mlp_recipe
 
 from ._magnitude_mlp_estimator import ConvergenceWarning, build_estimator
-from .fit_routes import check_fitting_allowed
+from .fit_routes import _event_date_metadata, check_fitting_allowed
 from .magnitude_ridge_hgb import _matrices
 
 __all__ = ["fit_mlp_predictions"]
@@ -19,6 +19,7 @@ def fit_mlp_predictions(recipe, train_features, train_labels, prediction_feature
     """Caller owns causal folds/budgets; preprocessing and stopping use training only."""
     check_fitting_allowed("engine.v2.models.training.magnitude_mlp.fit_mlp_predictions")
     recipe = validate_mlp_recipe(recipe)
+    date_metadata = _event_date_metadata(recipe, event_dates, len(train_features))
     if not isinstance(columns, (list, tuple)) or list(columns) != recipe["features"]:
         raise ValueError("MLP matrix columns must exactly match the ordered recipe subset")
     train, labels, prediction = _matrices(train_features, train_labels, prediction_features,
@@ -54,4 +55,5 @@ def fit_mlp_predictions(recipe, train_features, train_labels, prediction_feature
         "predictions": np.maximum(predictions, 0.0).tolist(), "component_fits": 1,
         "converged": not convergence_warning, "n_iter": int(network.n_iter_),
         "input_features": int(network.n_features_in_),
-        "loss": float(network.loss_), "loss_scale": "standardized_target"}
+        "loss": float(network.loss_), "loss_scale": "standardized_target",
+        **date_metadata}

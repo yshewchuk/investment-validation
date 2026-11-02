@@ -73,8 +73,8 @@ def _validate_forecasts(values, count, target_domain):
 
 def _fit_options(indexed, training_ids, horizon, columns, recipe):
     options = {"columns": columns}
-    if (isinstance(recipe, dict) and recipe.get("requires_event_dates") is True
-            and indexed is not None and training_ids
-            and all("event_date" in indexed[event, horizon] for event in training_ids)):
+    if isinstance(recipe, dict) and recipe.get("requires_event_dates") is True:
+        if indexed is None or not all("event_date" in indexed[event, horizon] for event in training_ids):
+            raise ValueError("recipe requires event dates for every training row")
         options["event_dates"] = [indexed[event, horizon]["event_date"] for event in training_ids]
     return options

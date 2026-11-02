@@ -20,8 +20,10 @@ _PROFILES = {
 }
 
 
-def mlp_recipe(*, columns, feature_dictionary_hash, profile):
+def mlp_recipe(*, columns, feature_dictionary_hash, profile, requires_event_dates=False):
     """Bind one fixed profile and ordered caller-admitted feature subset."""
+    if type(requires_event_dates) is not bool:
+        raise ValueError("MLP event-date requirement must be boolean")
     if (not isinstance(columns, (list, tuple)) or not columns
             or any(type(name) is not str or not re.fullmatch(r"[a-z][a-z0-9_]*", name)
                    for name in columns) or len(set(columns)) != len(columns)):
@@ -33,7 +35,7 @@ def mlp_recipe(*, columns, feature_dictionary_hash, profile):
     layers, alpha, stopping, convergence = _PROFILES[profile]
     max_iter, n_iter_no_change = {
         "training": (400, 15), "early": (400, 10), "budget": (200, 201)}[stopping]
-    return {
+    recipe = {
         "schema_version": "magnitude_mlp_recipe.v1", "model": "mlp", "profile": profile,
         "features": list(columns), "feature_dictionary_hash": feature_dictionary_hash,
         "estimator": {"class": "MLPRegressor", "params": {
@@ -55,6 +57,9 @@ def mlp_recipe(*, columns, feature_dictionary_hash, profile):
         "prediction_projection": "clip_zero", "fit_scope": "fold_and_horizon",
         "numerical_threads": 1, "component_fits": 1,
         "nonconvergence": convergence}
+    if requires_event_dates:
+        recipe["requires_event_dates"] = True
+    return recipe
 
 
 def validate_mlp_recipe(recipe):
@@ -62,7 +67,8 @@ def validate_mlp_recipe(recipe):
     try:
         json.dumps(recipe, allow_nan=False)
         expected = mlp_recipe(columns=recipe["features"],
-            feature_dictionary_hash=recipe["feature_dictionary_hash"], profile=recipe["profile"])
+            feature_dictionary_hash=recipe["feature_dictionary_hash"], profile=recipe["profile"],
+            requires_event_dates=recipe.get("requires_event_dates", False))
         if canonical_json(recipe) == canonical_json(expected):
             return expected
     except (KeyError, TypeError, ValueError, OverflowError, RecursionError):
