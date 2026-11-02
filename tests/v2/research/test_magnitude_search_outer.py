@@ -145,7 +145,7 @@ def expected_input_receipts(case, year):
         "stored_inputs_id": case.native_inputs["inputs_id"], "training_inputs": training,
         "training": [{"event_id": event, "absolute_move_pct": known_targets()[event]}
                      for event in training["qualified_event_ids"]],
-        "features": [{name: row[name] for name in ("event_id", "context_id", "horizon_sessions", *FEATURES)}
+        "features": [{name: row[name] for name in ("event_id", "context_id", "horizon_sessions", "event_date", *FEATURES)}
                      for row in case.native_inputs["rows"] if row["event_id"] in participants]}
     validation = {"evaluation_inputs": {**labels, "inputs_id": content_hash(labels), "holdout_exclusions": []},
         "targets": [{"event_id": event, "absolute_move_pct": known_targets()[event]} for event in evaluation]}

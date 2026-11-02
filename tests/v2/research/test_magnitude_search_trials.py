@@ -251,8 +251,8 @@ def test_shared_training_cohort_and_forecasts_committed_before_validation(case, 
     assert one["inputs"]["training"] == [
         {"event_id": event_id, "absolute_move_pct": 2.0} for event_id in training_ids]
     stored = read_stored(case.source.repository, case.source.feature_snapshot, case.source.build["context"])
-    columns = ("event_id", "context_id", "horizon_sessions",
-               *case.source.registration.document["magnitude_execution"]["features"])
+    columns = ("event_id", "context_id", "horizon_sessions", "event_date",
+                *case.source.registration.document["magnitude_execution"]["features"])
     expected_features = [{name: row[name] for name in columns}
                          for row in stored["rows"] if row["event_id"] in participant_ids]
     assert len(expected_features) == 18 < len(stored["rows"])

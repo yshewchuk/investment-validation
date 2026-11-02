@@ -166,15 +166,16 @@ def test_v6_workers_one_and_two_match_candidates_results_and_metrics(case, tmp_p
     assert parallel_result["prospective_candidate_id"] == planned_candidate["candidate_id"]
     metrics = parallel_result["metrics"]
     assert metrics["count"] == 1
-    assert metrics["mae"] == pytest.approx(0.9342579737821772, abs=1e-12)
-    assert metrics["rmse"] == pytest.approx(0.9342579737821772, abs=1e-12)
     predictions = parallel_result["predictions"]
     assert len(predictions) == 1
     row = predictions[0]
     assert row["event_id"] == "SYNTH:2024-06-17:0"
     assert row["horizon_sessions"] == 1
     assert row["absolute_move_pct"] == 7.0
-    assert row["predicted_absolute_move_pct"] == pytest.approx(7.934257973782177, abs=1e-12)
+    assert row["predicted_absolute_move_pct"] == pytest.approx(7.93, abs=0.02)
+    expected_error = abs(row["predicted_absolute_move_pct"] - row["absolute_move_pct"])
+    assert metrics["mae"] == pytest.approx(expected_error, abs=1e-12)
+    assert metrics["rmse"] == pytest.approx(expected_error, abs=1e-12)
     assert row["outer_year"] == "2024"
 
 

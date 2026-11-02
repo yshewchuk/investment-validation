@@ -96,6 +96,19 @@ def _chrono_split(days, fraction):
             sorted(order[len(days) - holdout:]))
 
 
+def _partial_fit_preserving_interrupt(net, x_fit, y_fit):
+    with warnings.catch_warnings():
+        warnings.filterwarnings("error", message=r"^Training interrupted by user\.$",
+            category=UserWarning, module=r"^sklearn\.neural_network\._multilayer_perceptron$")
+        try:
+            net.partial_fit(x_fit, y_fit)
+        except UserWarning as error:
+            if (str(error) == "Training interrupted by user."
+                    and isinstance(error.__context__, KeyboardInterrupt)):
+                raise error.__context__ from None
+            raise
+
+
 def _fit_chrono(recipe, train, labels, prediction, event_dates):
     """Epoch-wise partial_fit with a date split; restore best holdout weights."""
     params = recipe["estimator"]["params"]
@@ -112,7 +125,7 @@ def _fit_chrono(recipe, train, labels, prediction, event_dates):
     patience, budget = int(params["n_iter_no_change"]), int(params["max_iter"])
     best_loss, best_weights, stale = np.inf, None, 0
     for epoch in range(1, budget + 1):
-        net.partial_fit(x_fit, y_fit)
+        _partial_fit_preserving_interrupt(net, x_fit, y_fit)
         loss = float(np.mean((net.predict(x_val) - y_val) ** 2))
         if not np.isfinite(loss):
             raise ValueError("MLP produced nonfinite fit evidence")

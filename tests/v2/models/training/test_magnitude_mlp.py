@@ -655,3 +655,17 @@ def test_existing_profiles_fit_path_ignores_event_dates():
         event_dates=[None] * 80)
     assert with_dates == base
     assert with_dates["recipe_id"] == content_hash(policy)
+
+
+def test_chrono_propagates_sklearn_training_interrupt(monkeypatch):
+    policy = recipe(profile="chrono15_relu32_l2_0p01")
+    train, labels, prediction = arrays()
+    dates = chrono_dates()
+
+    def interrupt(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(estimators.MLPRegressor, "_fit_stochastic", interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        fitting.fit_mlp_predictions(policy, train, labels, prediction,
+            columns=COLUMNS, event_dates=dates)
