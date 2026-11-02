@@ -132,16 +132,20 @@ def test_v6_workers_one_and_two_match_candidates_results_and_metrics(case, tmp_p
     if first is not None:
         print(f"first result difference: {first[0]}: serial={first[1]!r}; parallel={first[2]!r}")
 
-    # The sole ignored field is folds[*].selection_id; it depends on terminal IDs whose
-    # records include runtime score_seconds and rss_delta_kib.
-    normalized_serial = {**serial_result}
-    normalized_serial["folds"] = [{**fold} for fold in serial_result["folds"]]
-    for fold in normalized_serial["folds"]:
-        del fold["selection_id"]
-    normalized_parallel = {**parallel_result}
-    normalized_parallel["folds"] = [{**fold} for fold in parallel_result["folds"]]
-    for fold in normalized_parallel["folds"]:
-        del fold["selection_id"]
+    # The timing/execution identities differ between serial and worker runs: folds[*].selection_id,
+    # folds[*].result_id, and the top-level result_id. They depend on terminal IDs whose records
+    # include runtime score_seconds and rss_delta_kib. Remove only these known paths from shallow
+    # copies; do not recurse or recompute hashes, and keep all remaining fields exact.
+    def shallow_normalize(result):
+        normalized = {key: value for key, value in result.items() if key != "result_id"}
+        normalized["folds"] = [
+            {key: value for key, value in fold.items()
+             if key not in ("selection_id", "result_id")}
+            for fold in result["folds"]]
+        return normalized
+
+    normalized_serial = shallow_normalize(serial_result)
+    normalized_parallel = shallow_normalize(parallel_result)
     assert normalized_serial == normalized_parallel
     assert serial_result["folds"][0]["candidate"] == parallel_result["folds"][0]["candidate"]
     assert serial_result["folds"][0]["predictions"] == parallel_result["folds"][0]["predictions"]
@@ -149,6 +153,26 @@ def test_v6_workers_one_and_two_match_candidates_results_and_metrics(case, tmp_p
     assert serial_result["prospective_candidate_id"] == parallel_result["prospective_candidate_id"]
     assert [(row["candidate_id"], row["inner_metrics"]) for row in serial_report["inner_fits"]] == [
         (row["candidate_id"], row["inner_metrics"]) for row in parallel_report["inner_fits"]]
+
+    # Known-fixture scored-output oracle for the actual synthetic winner: history_ridge.
+    # Expectations are pinned to the sealed fixture, not derived from the serial run or the
+    # production scorer.
+    candidate = parallel_result["folds"][0]["candidate"]
+    assert candidate["candidate_id"] == "sha256:8178644685de984c0d232599dcc327288714c23b07538ff83036222d0c3048c6"
+    assert candidate["recipe"]["model"] == "history_ridge"
+    assert parallel_result["prospective_candidate_id"] == "sha256:8178644685de984c0d232599dcc327288714c23b07538ff83036222d0c3048c6"
+    metrics = parallel_result["metrics"]
+    assert metrics["count"] == 1
+    assert metrics["mae"] == pytest.approx(0.9342579737821772, abs=1e-12)
+    assert metrics["rmse"] == pytest.approx(0.9342579737821772, abs=1e-12)
+    predictions = parallel_result["predictions"]
+    assert len(predictions) == 1
+    row = predictions[0]
+    assert row["event_id"] == "SYNTH:2024-06-17:0"
+    assert row["horizon_sessions"] == 1
+    assert row["absolute_move_pct"] == 7.0
+    assert row["predicted_absolute_move_pct"] == pytest.approx(7.934257973782177, abs=1e-12)
+    assert row["outer_year"] == "2024"
 
 
 def test_v6_native_seal_neural_trial_and_no_fit_no_label_replay(case, monkeypatch):
