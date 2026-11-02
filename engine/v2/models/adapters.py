@@ -224,8 +224,9 @@ class Tier4ServingFoldAdapter:
             raise AdapterError("tier4 serving fold carries no estimator")
         if tuple(stored.get("features", ())) != binding.feature_order:
             raise AdapterError("artifact feature order disagrees with binding")
-        return _ServingFold(ReadOnlyArtifact(stored["estimator"]),
-                            MappingProxyType({k: v for k, v in stored.items() if k != "estimator"}))
+        header = MappingProxyType({k: v for k, v in stored.items() if k != "estimator"})
+        _ServingFold._validated_cutoff(header)
+        return _ServingFold(ReadOnlyArtifact(stored["estimator"]), header)
 
     def predict(self, artifact, rows, binding):
         if len(binding.output_names) != 1:

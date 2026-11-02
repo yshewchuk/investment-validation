@@ -305,3 +305,33 @@ def test_bounded_read_uses_shared_no_follow_reader(setup, monkeypatch):
     ref = _load(setup)
     _infer(ref)
     assert reads == [(setup[3], loader.MAX_FOLD_BYTES, True)] * 2
+
+
+@pytest.mark.parametrize("training_cutoff", ["2026-10-01", "2026-10-02"])
+def test_direct_inference_refuses_invalid_cutoff_but_legacy_loads(setup, training_cutoff):
+    import hashlib
+
+    inference, descriptor, parent, path, stored = setup
+
+    stored["training_cutoff"] = training_cutoff
+    raw = fold_bytes(stored)
+    path.write_bytes(raw)
+    member = replace(descriptor.estimator, content_hash="sha256:" + hashlib.sha256(raw).hexdigest())
+    binding = replace(parent.release.bindings[0], adapter="tier4-serving-fold.v1", members=(member,))
+    release = replace(parent.release, bindings=(binding,))
+    request = InferenceRequest(release_id=release.release_id, binding_id=binding.binding_id,
+                               feature_order=binding.feature_order, rows=((1.0,) * len(binding.feature_order),))
+    result = inference.infer(release, request)
+    assert result.status == MODEL_NOT_READY
+    assert "ARTIFACT_INVALID" in result.reason_codes
+
+    stored.pop("training_cutoff", None)
+    raw = fold_bytes(stored)
+    path.write_bytes(raw)
+    member = replace(descriptor.estimator, content_hash="sha256:" + hashlib.sha256(raw).hexdigest())
+    binding = replace(parent.release.bindings[0], adapter="tier4-serving-fold.v1", members=(member,))
+    release = replace(parent.release, bindings=(binding,))
+    request = InferenceRequest(release_id=release.release_id, binding_id=binding.binding_id,
+                               feature_order=binding.feature_order, rows=((1.0,) * len(binding.feature_order),))
+    result = inference.infer(release, request)
+    assert result.status == "READY"
