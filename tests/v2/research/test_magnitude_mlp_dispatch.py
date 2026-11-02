@@ -21,6 +21,7 @@ from experiments.magnitude_candidate_fit import fit_candidate
 from experiments.magnitude_fitted import fitted_forecasts
 from experiments.magnitude_search_request_versions import compile_request
 from experiments.size_fit_diagnostics import evidence
+from tests.v2.models.training.test_magnitude_mlp import independent_oracle
 from tests.v2.research.magnitude_search_fit_source import fit_source
 from tests.v2.research.test_magnitude_search_execution import LIMITS
 from tests.v2.research.test_magnitude_search_request import request as v2_request
@@ -196,12 +197,14 @@ def test_real_contained_child_preserves_forecasts_diagnostics_and_component_coun
         indexed = {r["event_id"]: r for r in inputs["features"] if r["horizon_sessions"] == horizon}
         matrices = [[[indexed[e][column] for column in COLUMNS] for e in events]
                     for events in (fold["training_candidate_event_ids"], fold["evaluation_event_ids"])]
+        labels = [r["absolute_move_pct"] for r in inputs["training"]]
         direct = magnitude_mlp.fit_mlp_predictions(policy["fit_recipe"], matrices[0],
-            [r["absolute_move_pct"] for r in inputs["training"]], matrices[1], columns=COLUMNS)
+            labels, matrices[1], columns=COLUMNS)
         assert item == {"horizon_sessions": horizon, **{k: v for k, v in direct.items() if k != "predictions"}}
+        _, independent = independent_oracle(matrices[0], labels, matrices[1])
         expected += [{"event_id": event, "horizon_sessions": horizon,
                       "predicted_absolute_move_pct": value}
-                     for event, value in zip(fold["evaluation_event_ids"], direct["predictions"])]
+                     for event, value in zip(fold["evaluation_event_ids"], independent)]
     assert result["forecasts"] == sorted(expected, key=lambda row: (row["event_id"], row["horizon_sessions"]))
     assert np.isfinite([row["predicted_absolute_move_pct"] for row in result["forecasts"]]).all()
     assert all(fit["training_event_ids"] == fold["training_candidate_event_ids"] for _, fit in progress)
