@@ -1594,6 +1594,12 @@ def test_chooser_fold_reference_flows_through_real_scorer_checkpoint(tmp_path, m
         validated_chooser_fold_references(corrupted, _request())
     with pytest.raises(StrictTraceCaptureError, match="chooser ref has invalid dates"):
         validated_chooser_fold_references(source, SimpleNamespace(requested_decision_at=None))
+    with pytest.raises(StrictTraceCaptureError, match="chooser ref has invalid dates"):
+        validated_chooser_fold_references(
+            source,
+            SimpleNamespace(requested_decision_at="2026-09-17T00:00:00+00:00"),
+            "2026-09-17",
+        )
 
 
 @pytest.mark.parametrize("field", ["declarations", "bindings", "chooser_references"])

@@ -3748,7 +3748,19 @@ def validated_chooser_fold_references(source, request, legacy_event_date=None):
     if set(refs) != set(producers):
         raise StrictTraceCaptureError("chooser refs do not cover producers")
     try:
-        decision = date.fromisoformat(request.requested_decision_at[:10])
+        from datetime import datetime
+
+        decision_text = request.requested_decision_at
+        try:
+            decision = date.fromisoformat(decision_text)
+        except ValueError:
+            decision_at = datetime.fromisoformat(decision_text)
+            if decision_at.tzinfo is not None or decision_at.isoformat() != decision_text:
+                raise ValueError("non-canonical decision date")
+            decision = decision_at.date()
+        else:
+            if decision.isoformat() != decision_text:
+                raise ValueError("non-canonical decision date")
         if legacy_event_date is None:
             expected_fold_start = None
         else:
