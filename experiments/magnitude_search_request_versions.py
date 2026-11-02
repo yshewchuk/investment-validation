@@ -8,6 +8,8 @@ from engine.v2.research.magnitude_panel_table import recipe as v1_recipe
 from engine.v2.research.magnitude_panel_v2_table import recipe as v2_recipe
 from experiments.magnitude_search_request import compile_request as compile_v1_request
 from experiments.magnitude_search_request_leads import compile_request as compile_v2_leads_request
+from experiments.magnitude_search_request_schema import (
+    allows_lead_selector, request_version, uses_v3_compiler)
 from experiments.magnitude_search_request_v3 import compile_request as compile_v3_request
 
 __all__ = ["compile_request"]
@@ -26,21 +28,18 @@ def _is_default_selector(selector):
 def compile_request(request, *, horizons=(5, 3, 1)):
     """Dispatch bounded v3-v7 grids while preserving existing dictionary replay."""
     version = request.get("schema_version") if type(request) is dict else None
-    if version in ("regression_search_request.v1", "magnitude_search_request.v1") and not _is_default_selector(horizons):
+    if (version == "regression_search_request.v1"
+            or request_version(version) == 1) and not _is_default_selector(horizons):
         raise fail("INVALID_EXPERIMENT_SPEC",
                    "stage-2 legacy requests do not accept a horizon selector")
     if version == "regression_search_request.v1":
         return compile_v1_request(request)
     compiler = (compile_v2_leads_request if version == "magnitude_search_request.v2"
                 else compile_v3_request
-                if version in ("magnitude_search_request.v3", "magnitude_search_request.v4",
-                               "magnitude_search_request.v5", "magnitude_search_request.v6",
-                               "magnitude_search_request.v7")
+                if uses_v3_compiler(request_version(version))
                 else compile_v1_request)
-    compile_kwargs = {"horizons": horizons} if version in (
-        "magnitude_search_request.v2", "magnitude_search_request.v3",
-        "magnitude_search_request.v4", "magnitude_search_request.v5", "magnitude_search_request.v6",
-        "magnitude_search_request.v7") else {}
+    compile_kwargs = ({"horizons": horizons}
+                      if allows_lead_selector(request_version(version)) else {})
     dictionary = request.get("feature_dictionary_hash") if type(request) is dict else None
     if type(dictionary) is not str or dictionary not in (_V2_HASH, _V3_HASH):
         return compiler(request, **compile_kwargs)

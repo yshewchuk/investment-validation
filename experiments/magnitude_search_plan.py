@@ -21,6 +21,10 @@ from engine.v2.ops.native_registration import (
 )
 from engine.v2.research import magnitude_folds
 from experiments.magnitude_search_errors import artifact_failure
+from experiments.magnitude_search_request_schema import (
+    qualified as is_qualified_request,
+    request_version as parse_request_version,
+)
 from experiments.native_registration import verify_native_registration
 
 SCHEMA = "magnitude_search_plan.v1"
@@ -174,10 +178,9 @@ def _prepare(conn, store, registration, request, *, plan_schema=None):
         from experiments.iv_crush_search import prepare_plan
         return prepare_plan(conn, store, registration, request)
     qualified = anchor_version in ("native_experiment_registration.v1.6", "native_experiment_registration.v1.7")
-    expected = (("magnitude_search_request.v2", "magnitude_search_request.v3",
-                 "magnitude_search_request.v4", "magnitude_search_request.v5", "magnitude_search_request.v6", "magnitude_search_request.v7") if qualified
-                else ("magnitude_search_request.v1",))
-    if request_version not in expected:
+    expected = (is_qualified_request(parse_request_version(request_version)) if qualified
+                else parse_request_version(request_version) == 1)
+    if not expected:
         raise fail("INVALID_EXPERIMENT_SPEC", "search requires explicit valid axes, inner years and count caps")
     if qualified:
         from experiments.size_search_binding import prepare_plan
@@ -220,8 +223,8 @@ def seal_search_plan(conn, store, registration, request):
 def read_search_plan(conn, store, registration, request, ref):
     """Verify exact reconstruction from the original reservation, without input payloads."""
     version = request.get("schema_version") if isinstance(request, dict) else None
-    if version in ("magnitude_search_request.v2", "magnitude_search_request.v4",
-                   "magnitude_search_request.v5", "magnitude_search_request.v6", "magnitude_search_request.v7"):
+    parsed_version = parse_request_version(version)
+    if is_qualified_request(parsed_version) and parsed_version != 3:
         schemas = (PLAN_V2, PLAN_V3)
     elif version == "magnitude_search_request.v3":
         schemas = (PLAN_V2,)
@@ -234,10 +237,7 @@ def read_search_plan(conn, store, registration, request, ref):
     if not isinstance(ref, ArtifactRef) or ref.schema_ref not in schemas:
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search plan reference has the wrong schema")
     expected = _prepare(conn, store, registration, request,
-                        plan_schema=ref.schema_ref if version in ("magnitude_search_request.v2",
-                                                                   "magnitude_search_request.v3",
-                                                                   "magnitude_search_request.v4",
-                                                                   "magnitude_search_request.v5", "magnitude_search_request.v6", "magnitude_search_request.v7") else None)
+                        plan_schema=ref.schema_ref if is_qualified_request(parsed_version) else None)
     payload = canonical_json(expected).encode()
     if ref != artifact_reference(payload, ref.schema_ref):
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search plan reference differs from its complete binding")
