@@ -29,14 +29,10 @@ def canonical_day(value: object) -> str:
         elif isinstance(value, date):
             day = value
         elif isinstance(value, str) and len(value) == 10:
-            day = date.fromisoformat(value)
-            if day.isoformat() != value:
-                raise ValueError(_ERROR)
+            day = _iso_date(value)
         elif (isinstance(value, str) and len(value) == 19
               and value[10] in ("T", " ")):
             parsed = datetime.fromisoformat(value)
-            if parsed.utcoffset() is not None:
-                raise ValueError(_ERROR)
             canonical = (parsed.isoformat(timespec="seconds") if value[10] == "T"
                          else parsed.isoformat(sep=" ", timespec="seconds"))
             if canonical != value:
