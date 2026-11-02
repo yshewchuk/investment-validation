@@ -49,7 +49,7 @@ def _require(condition):
 
 
 def _panel_columns(schema_version, model_columns):
-    if schema_version == "magnitude_search_request.v5":
+    if schema_version in ("magnitude_search_request.v5", "magnitude_search_request.v6"):
         return list(dict.fromkeys(c for c in COLUMNS + list(model_columns) if c not in METADATA))
     return model_columns
 

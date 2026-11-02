@@ -399,7 +399,7 @@ def main(argv=None):
                     raise fail("INVALID_EXPERIMENT_SPEC", "IV requires dedicated CLI containment; use the admitted library path")
                 if request.get("schema_version") in ("magnitude_search_request.v2",
                         "magnitude_search_request.v3", "magnitude_search_request.v4",
-                        "magnitude_search_request.v5"):
+                        "magnitude_search_request.v5", "magnitude_search_request.v6"):
                     raise fail("INVALID_EXPERIMENT_SPEC", "qualified SIZE requires experiments.size_search CLI containment")
             except (DocumentError, TypeError):
                 raise fail("INVALID_EXPERIMENT_SPEC", "search metadata could not be admitted") from None
