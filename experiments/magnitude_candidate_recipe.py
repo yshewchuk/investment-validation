@@ -1,11 +1,12 @@
 """Source-free family recipe assembly, not candidate admission or a search plan."""
 from engine.v2.models.magnitude_elasticnet_recipe import elasticnet_recipe
+from engine.v2.models.magnitude_mlp_recipe import mlp_recipe
 from engine.v2.models.magnitude_ridge_hgb_recipe import ridge_hgb_recipe
 
 __all__ = ["candidate_recipe"]
 
 _KEYS = {"ridge": {"alpha"}, "elasticnet": {"alpha", "l1_ratio"},
-         "hgb": {"max_leaf_nodes"}}
+         "hgb": {"max_leaf_nodes"}, "mlp": {"profile"}}
 _HGB_KEYS = ({"max_leaf_nodes"},
              {"learning_rate", "max_leaf_nodes", "min_samples_leaf", "l2_regularization"})
 
@@ -19,6 +20,9 @@ def candidate_recipe(family, parameters, *, columns, feature_dictionary_hash) ->
     if family == "elasticnet":
         return elasticnet_recipe(columns=columns, feature_dictionary_hash=feature_dictionary_hash,
                                  **parameters)
+    if family == "mlp":
+        return mlp_recipe(columns=columns, feature_dictionary_hash=feature_dictionary_hash,
+                          **parameters)
     return ridge_hgb_recipe(model="history_ridge" if family == "ridge" else "history_hgb",
                            columns=columns, feature_dictionary_hash=feature_dictionary_hash,
                            **parameters)

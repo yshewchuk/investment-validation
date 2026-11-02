@@ -38,10 +38,12 @@ Invalid recipe/order/matrices/label domain refuse
 before fitting. Repeated inputs in the same numerical environment fit afresh
 deterministically; there is no cache, I/O, publication or journal replay here.
 
-This slice admits no search request and modifies no existing recipe, comparator,
-registration or source closure. Later slices must explicitly version search
-admission, bind preprocessing/seed evidence and retain declared worker budgets;
-new executable plans require fresh source seals, never mutation of running plans.
+The generic magnitude dispatcher now accepts this closed recipe and preserves the
+complete result; `size_fit_diagnostics` validates its per-horizon evidence for fresh
+execution and replay. Existing recipe values and the comparator remain unchanged.
+No existing search request admits MLP: later admission must be explicitly versioned.
+New execution sources need fresh source seals; old reservations remain bound to
+original installed sources, with no resealing or mutation of running plans.
 
 ## Ownership
 
@@ -69,7 +71,7 @@ profiles, original-unit nonnegative forecasts and convergence evidence. Invalid
 inputs, convergence failure or nonfinite evidence raise `ValueError`; no retry,
 source admission, persistence or production/search activation occurs.
 
-`magnitude_candidate.fit_candidate` is the shared fixed-nonnegative three-family
+`magnitude_candidate.fit_candidate` is the shared fixed-nonnegative Ridge/HGB/ElasticNet/MLP
 numeric dispatcher; `experiments.magnitude_candidate_fit` retains a guarded lazy compatibility wrapper.
 `fit_routes.fit_execution` accepts only `magnitude`, `magnitude_candidate` or
 `regression_candidate` numeric routes. Both guards precede inspection; original
@@ -85,7 +87,7 @@ consume this API, never production entrypoints. Legacy error translation stays a
 Ridge/HGB or ElasticNet recipe to its existing guarded fitter. Both no-fit guards
 precede recipe/array inspection; delegated validation, results and errors remain
 unchanged. No source reads, retries, selection or persistence occur. Existing
-experiment magnitude dispatch remains fixed to nonnegative recipe schemas (Ridge v1, HGB v1 and v2, ElasticNet v1).
+experiment magnitude dispatch remains fixed to nonnegative recipe schemas (Ridge v1, HGB v1 and v2, ElasticNet v1 and MLP v1).
 
 `magnitude.fit_magnitude_predictions` accepts an ops-admitted closed Ridge/HGB
 recipe as data and eleven-column numeric matrices
