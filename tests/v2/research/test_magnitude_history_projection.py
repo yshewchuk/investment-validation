@@ -4,8 +4,13 @@ import json
 from dataclasses import replace
 from types import SimpleNamespace
 
+import numpy as np
 import pyarrow.parquet as pq
 import pytest
+
+from engine.v2.models.magnitude_mlp_recipe import mlp_recipe
+from engine.v2.models.training.magnitude_mlp import fit_mlp_predictions
+from engine.v2.research.magnitude_inputs import qualify_magnitude_training_targets
 
 from engine.v2.data import errors, objects
 from engine.v2.data.errors import DataError
@@ -15,7 +20,14 @@ from engine.v2.research import magnitude_history_store as stored
 from engine.v2.research.magnitude_history_inputs import admit_stored
 from engine.v2.research.magnitude_history_table import FEATURES, METADATA, TABLE
 from tests.v2.research.magnitude_trial_support import build_history, poison_outcomes
-from tests.v2.research.test_magnitude_history_store import source  # noqa: F401
+from tests.v2.research.test_magnitude_history_store import _long_source, source  # noqa: F401
+
+
+@pytest.fixture
+def long_source(tmp_path):
+    value = _long_source(tmp_path, 12)
+    yield value
+    value.conn.close()
 
 
 def _projection(value, snapshot, context, *, columns=("n_prior", "mean_prior_abs_move")):
@@ -86,7 +98,7 @@ def test_projected_rows_keep_full_snapshot_identity_and_raw_numeric_values(sourc
     columns = ("mean_prior_move", "n_prior", "ema12_prior_abs_move", "mean_prior_abs_move")
     projected = _projection(source, snapshot, context, columns=columns)
     event = context["temporal_plan"]["events"][0]["event_id"]
-    keys = ("event_id", "context_id", "horizon_sessions", *columns)
+    keys = ("event_id", "context_id", "horizon_sessions", "event_date", *columns)
     assert projected == {"context": context, "feature_snapshot": to_document(snapshot),
         "rows": [{key: row[key] for key in keys} for row in rows if row["event_id"] == event],
         "inputs_id": expected}
@@ -261,6 +273,30 @@ def test_empty_projection_still_hashes_and_validates_every_row(source):  # noqa:
     result = stored.read_stored_for_events(source.repository, snapshot, build["context"],
                                           event_ids=[], columns=[])
     assert result["rows"] == [] and result["inputs_id"] == full["inputs_id"]
+
+
+def test_real_stored_projection_carries_dates_into_chrono_fit(long_source):  # noqa: F811
+    build, snapshot = build_history(long_source, training_start="2022-01-01",
+                                    evaluation_years=["2023", "2024"])
+    event_ids = [event["event_id"] for event in long_source.events if event["year"] == 2023]
+    columns = ["n_prior", "mean_prior_abs_move"]
+    admitted = stored.read_stored_for_events(long_source.repository, snapshot, build["context"],
+        event_ids=event_ids, columns=columns)
+    rows = sorted((row for row in admitted["rows"] if row["horizon_sessions"] == 1),
+                  key=lambda row: (row["event_date"], row["event_id"]))
+    assert len(rows) == len(event_ids) and all("event_date" in row for row in rows)
+
+    targets = qualify_magnitude_training_targets(long_source.repository, long_source.snapshot,
+        as_of_month="2026-01", labels_before="2025-01-01", event_ids=event_ids)
+    labels = dict(zip(targets["event_id"], targets["absolute_move_pct"]))
+    x = np.asarray([[row[column] for column in columns] for row in rows], dtype=float)
+    y = np.asarray([labels[row["event_id"]] for row in rows], dtype=float)
+    policy = mlp_recipe(columns=columns, feature_dictionary_hash="sha256:" + "1" * 64,
+                        profile="chrono15_relu32_l2_0p01")
+    result = fit_mlp_predictions(policy, x, y, x[:2], columns=columns,
+                                 event_dates=[row["event_date"] for row in rows])
+    assert result["n_iter"] > 0 and len(result["predictions"]) == 2
+    assert np.isfinite(result["predictions"]).all()
 
 
 @pytest.mark.parametrize("prior_success", [False, True])

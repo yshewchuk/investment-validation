@@ -360,7 +360,7 @@ def read_stored_for_events(repository, snapshot, context, *, event_ids, columns)
             count = _metadata(row, context, *pair)
             admitted.append((content_hash(row), count))
     retained = []
-    keys = (*CONTRACT.primary_key, *columns)
+    keys = (*CONTRACT.primary_key, "event_date", *columns)
 
     def validated():
         stream = _stream_rows(repository, snapshot, context, (*METADATA, *FEATURES), len(expected))

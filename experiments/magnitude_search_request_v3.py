@@ -204,7 +204,7 @@ def compile_request(request, *, horizons=(5, 3, 1)):
                                 "magnitude_search_request.v8")
                     and request_keys in (v2._KEYS | {"selection"},
                                          v2._KEYS | {"selection", "workers"})),
-                "stage-2 request requires its closed v6/v7 schema and selection policy"
+                "stage-2 request requires its closed v6/v7/v8 schema and selection policy"
                 if version in ("magnitude_search_request.v6", "magnitude_search_request.v7",
                                "magnitude_search_request.v8")
                 else "stage-2 request requires its closed v3/v4/v5 schema and selection policy")

@@ -606,6 +606,48 @@ def test_chrono_restored_loss_equals_minimum_seen_holdout_loss(monkeypatch):
     assert result["loss"] == observed[-1]
 
 
+def test_chrono_stops_after_patience_without_improvement(monkeypatch):
+    policy = recipe(profile="chrono15_relu32_l2_0p01")
+    train, labels, prediction = arrays()
+    dates = chrono_dates()
+    fit_idx, val_idx = fitting._chrono_split([value.toordinal() for value in dates], 0.15)
+    calls = []
+    original_predict = estimators.MLPRegressor.predict
+
+    def worsening_predict(self, values):
+        if len(values) == len(val_idx):
+            calls.append(None)
+            return np.full(len(values), 1_000_000.0 + len(calls))
+        return original_predict(self, values)
+
+    monkeypatch.setattr(estimators.MLPRegressor, "predict", worsening_predict)
+    result = fitting.fit_mlp_predictions(policy, train, labels, prediction,
+        columns=COLUMNS, event_dates=dates)
+    assert result["n_iter"] == 21  # first best epoch plus the declared 20 stale epochs
+    assert len(calls) == result["n_iter"] + 1  # includes the post-restore loss check
+
+
+def test_chrono_epoch_cap_is_success_without_convergence_warning(monkeypatch):
+    policy = recipe(profile="chrono15_relu32_l2_0p01")
+    train, labels, prediction = arrays()
+    dates = chrono_dates()
+    fit_idx, val_idx = fitting._chrono_split([value.toordinal() for value in dates], 0.15)
+    calls = []
+    original_predict = estimators.MLPRegressor.predict
+
+    def improving_predict(self, values):
+        if len(values) == len(val_idx):
+            calls.append(None)
+            return np.full(len(values), 1_000_000.0 - len(calls))
+        return original_predict(self, values)
+
+    monkeypatch.setattr(estimators.MLPRegressor, "predict", improving_predict)
+    result = fitting.fit_mlp_predictions(policy, train, labels, prediction,
+        columns=COLUMNS, event_dates=dates)
+    assert result["n_iter"] == 400 and result["converged"] is False
+    assert len(calls) == result["n_iter"] + 1
+
+
 def test_existing_profiles_fit_path_ignores_event_dates():
     policy = recipe()
     base = fitting.fit_mlp_predictions(policy, *arrays(), columns=COLUMNS)

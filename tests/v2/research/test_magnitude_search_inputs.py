@@ -179,6 +179,7 @@ def test_load_fit_inputs_streams_many_shards_and_projects_only_fit_rows(tmp_path
                                   for row in cohort["training"]]
     assert loaded["features"] == [{"event_id": event, "context_id": "c", "horizon_sessions": horizon, "x": 0.5}
                                   for event in events if event in wanted for horizon in (1, 5)]
+    assert all("event_date" not in row for row in loaded["features"])
 
 
 def test_load_fit_inputs_refuses_a_wrong_id_a_v1_record_and_a_corrupt_shard(tmp_path):

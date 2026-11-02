@@ -202,6 +202,16 @@ def test_invalid_v8_profiles_refuse_before_expansion(monkeypatch):
     assert caught.value.problem.retryable is False
 
 
+def test_invalid_v8_shape_names_v8_schema():
+    request = v8_request()
+    request.pop("selection")
+    with pytest.raises(OpsError) as caught:
+        compile_request(request)
+    assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert caught.value.problem.message == (
+        "stage-2 request requires its closed v6/v7/v8 schema and selection policy")
+
+
 def test_v8_total_grid_ceiling_precedes_expansion(monkeypatch):
     request = v8_request()
     request["space"]["elasticnet"] = {"alpha": list(range(1, 33)),

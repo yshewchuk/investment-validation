@@ -135,14 +135,14 @@ candidates use `magnitude_ridge_hgb_recipe.v2` (early stopping, `max_iter` 500
 cap), so they get new candidate ids; the early-stopping holdout is a random 10%
 of training rows, not time-ordered, and only picks the tree count. The design
 grid (2x2x2x2 HGB, 99 candidates over H/HM/HMO) is in #1848 section 5. Qualified
-SIZE v1.6 keeps request v2 replay; v1.7 sealing and admission accept v2 through v7. V5 adds one fixed HMO-attributed
+SIZE v1.6 keeps request v2 replay; v1.7 sealing and admission accept v2 through v8. V5 adds one fixed HMO-attributed
 SIZE v1.4 plus causal history-mean fallback candidate, not three duplicate variants.
-V6 is an explicit opt-in: retain v5's four family grids and admit the original three closed MLP profiles. V7 retains those grids and admits seven more: `es_relu32_l2_0p01`, `es_relu32_l2_1`, `es_relu64x32_l2_0p01`, `es_relu64x32_l2_1`, `fixed200_relu64x32_l2_1`, `fixed200_relu64x32_l2_10`, and `fixed200_relu64x32_l2_100`.
+V6 is an explicit opt-in: retain v5's four family grids and admit the original three closed MLP profiles. V7 retains those grids and admits seven more: `es_relu32_l2_0p01`, `es_relu32_l2_1`, `es_relu64x32_l2_0p01`, `es_relu64x32_l2_1`, `fixed200_relu64x32_l2_1`, `fixed200_relu64x32_l2_10`, and `fixed200_relu64x32_l2_100`. V8 retains those grids and admits six chronological stopping profiles.
 Choose one or more unique profiles in lexicographic order; each adds H/HM/HMO candidates, not independent optimizer axes. The [fixed neural recipes](../engine/v2/models/training/README.md#standalone-neural-magnitude-primitive-opt-in-foundation) use train-only preprocessing/target scaling, seed 20260829 and one CPU thread.
 The four `es_` profiles stop on sklearn early stopping (`max_iter=400`, patience 10), using a seeded random 10% of training rows as validation. The three `fixed200_` profiles disable early stopping and stop at the 200-epoch budget; budget exhaustion is allowed for these profiles only. Original profiles retain training-loss stopping at up to 400 epochs.
 The 1000-candidate ceiling and explicit logical-fit, child/parent/build/job budgets
 still apply; MLP costs one component per horizon, while the fixed SIZE candidate
-retains its two-component worst-case allowance. V6 and v7 accept the optional `workers` contract: an integer 1 through 8 (omission means 1), removed before request identity hashing; fresh inner trials may run in the bounded process pool, while worker CPU/memory admission remains in force. Neural fits remain one-thread-per-child.
+retains its two-component worst-case allowance. V6, v7 and v8 accept the optional `workers` contract: an integer 1 through 8 (omission means 1), removed before request identity hashing; fresh inner trials may run in the bounded process pool, while worker CPU/memory admission remains in force. Neural fits remain one-thread-per-child.
 Only inner folds select; outer results never tune profiles. Use `experiments.size_search`
 with fresh source seals; v1-v5 declarations, current runs and the production comparator
 are unchanged. Invalid/unknown profiles refuse before expansion; convergence or
@@ -307,7 +307,7 @@ JSON-native numeric types. The static dependency is included in source seals.
 
 ## Magnitude search driver
 
-`python -m experiments.v2_magnitude_search_run` accepts `seal`, `run` or `collect` for the low-level non-qualified request path. Qualified SIZE v2-v7 requests are refused by this CLI and must run through `python -m experiments.size_search` for job/parent containment.
+`python -m experiments.v2_magnitude_search_run` accepts `seal`, `run` or `collect` for the low-level non-qualified request path. Qualified SIZE v2-v8 requests are refused by this CLI and must run through `python -m experiments.size_search` for job/parent containment.
 Every action requires `--spec SPEC.json --request REQUEST.json --plan-ref REF.json
 --catalog CATALOG --store-root STORE`. Supply the original registered v1.5 spec,
 the supported non-qualified request, and its `plan_ref` object (not a command's entire output envelope).
@@ -337,7 +337,7 @@ These three search actions accept `--max-registration-bytes` (default 16777216);
 
 `run_search(conn, store, repository, registration, request, plan_ref, *, limits,
 collect_results=True, before_dispatch=None)`
-is the same orchestration API used by the contained SIZE runner. Only `magnitude_search_request.v2` through `.v7`
+is the same orchestration API used by the contained SIZE runner. Only `magnitude_search_request.v2` through `.v8`
 requests may declare `workers` from 1 through 8 (omission means 1); a declared
 field on a legacy or regression request refuses before admission. This execution
 setting is removed before request hashing and does not change candidate, plan or

@@ -750,8 +750,8 @@ Every call revalidates the complete receipt, isolation, metadata and feature con
 including events and columns not retained. Complete metadata admission precedes
 numeric validation; corruption or inconsistent source content refuses the read.
 Returned `inputs_id` names the exact original `read_stored` full-source envelope,
-not the projection. Selected rows contain only primary-key identity and requested
-numeric features, without lineage strings. Full-snapshot lineage is not retained;
+not the projection. Selected rows contain primary-key identity, `event_date` and
+requested numeric features, without lineage strings. Full-snapshot lineage is not retained;
 memory still scales with metadata and selected rows, with no fixed overall byte cap.
 A prior successful read never substitutes for fresh validation.
 The original full-row `read_stored` API and its returned envelope remain unchanged.

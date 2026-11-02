@@ -33,8 +33,8 @@ per training row: the latest `ceil(n * fraction)` rows by `(date, original posit
 form the nonempty holdout, preprocessing and target scaling fit on earlier rows only,
 each epoch is one `MLPRegressor.partial_fit`, and the best holdout loss/weights are
 restored without full-window refit; missing, invalid or misaligned dates raise
-`ValueError` with no random-split fallback. Only the `fixed200_` and chrono profiles
-accept a convergence warning at the iteration cap. No evaluation labels enter fit or preprocessing; the caller still owns
+`ValueError` with no random-split fallback. Only the `fixed200_` profiles accept a
+convergence warning at the iteration cap. Chrono profiles use `partial_fit`, so reaching their declared epoch cap succeeds without a convergence warning and reports `converged=False` when patience did not stop earlier. No evaluation labels enter fit or preprocessing; the caller still owns
 causal folds, source admission, inner-only selection, resource budgets and progress reporting. One successful call
 is one component fit and returns detached `magnitude_mlp_fit.v1` predictions,
 recipe hash, iteration count and standardized-target optimizer loss (including L2,
