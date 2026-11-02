@@ -41,6 +41,7 @@ from engine.v2.models.recalibration_artifact import (
 from engine.v2.scoring.release_bindings import (
     ModelNotReady,
     NoCurrentRelease,
+    resolve_chooser_fold_authoring_contexts,
     resolve_production_release_binding,
     resolve_release_binding,
 )
@@ -189,6 +190,25 @@ def test_no_current_release_raises_typed_refusal(tmp_path):
     with pytest.raises(NoCurrentRelease) as error:
         resolve_release_binding(tmp_path)
     _assert_no_leak(tmp_path, error.value)
+
+
+@pytest.mark.parametrize("release_root,release_id", [
+    ("", "r1"),
+    ("   ", "r1"),
+    (Path("  "), "r1"),
+    (None, "r1"),
+    (123, "r1"),
+    (b"root", "r1"),
+    ("root", ""),
+    ("root", "  "),
+    ("root", None),
+    ("root", 123),
+    ("root", b"r1"),
+])
+def test_exact_resolver_rejects_invalid_arguments(release_root, release_id):
+    with pytest.raises(ValueError) as error:
+        resolve_chooser_fold_authoring_contexts(release_root, release_id)
+    assert type(error.value) is ValueError
 
 
 def test_corrupt_deployed_pointer_invalid_utf8_raises_model_not_ready(tmp_path):
@@ -347,6 +367,28 @@ def test_staged_manifest_release_hash_mismatch_raises_model_not_ready(tmp_path):
         resolve_release_binding(tmp_path)
     assert error.value.member_id == "model_release"
     assert error.value.detail == "release_hash disagrees with manifest"
+    _assert_no_leak(tmp_path, error.value)
+
+
+def test_manifest_release_id_mismatch_raises_model_not_ready(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from engine.v2.scoring import release_bindings as rb
+
+    manifest = SimpleNamespace(
+        release=SimpleNamespace(release_id="some-other-release"),
+        release_hash="sha256:" + "0" * 64,
+    )
+    monkeypatch.setattr(
+        rb.deployment, "_read_manifest", lambda _root, _release_id: manifest)
+    monkeypatch.setattr(
+        rb.deployment, "_manifest_hash_matches", lambda _manifest: True)
+
+    with pytest.raises(ModelNotReady) as error:
+        rb._read_and_verify_manifest(tmp_path, _RELEASE_ID)
+
+    assert error.value.member_id == "model_release"
+    assert error.value.detail == "release_id disagrees with manifest path"
     _assert_no_leak(tmp_path, error.value)
 
 
@@ -550,6 +592,7 @@ def _chooser_resolver_fixture(tmp_path, monkeypatch, *, cutoff="2026-08-31",
             decision_clock_id="entry-close", output_name="driver_prediction",
             producer_output="pred_im_t1_d14", fold_start="2026-09-01",
             descriptor_hash=descriptor_hash, parent_release_id=_RELEASE_ID,
+            training_cutoff="2026-09-01",
             estimator=SimpleNamespace(content_hash=hash_a)),
         "second": SimpleNamespace(
             policy=SimpleNamespace(role="runup_move", model_id="producer-b",
@@ -557,6 +600,7 @@ def _chooser_resolver_fixture(tmp_path, monkeypatch, *, cutoff="2026-08-31",
             decision_clock_id="entry-close", output_name="pred_runup_abs_move_d14",
             producer_output="pred_runup_abs_move_d14", fold_start="2026-10-01",
             descriptor_hash=descriptor_hash, parent_release_id=_RELEASE_ID,
+            training_cutoff="2026-10-01",
             estimator=SimpleNamespace(content_hash=hash_b)),
     }
     identities = identities or {
@@ -782,8 +826,10 @@ def test_carried_chooser_reference_uses_verified_authoring_release(tmp_path, mon
     carried_row["status"] = "STAGED"
 
     mismatched_object = {**descriptor_object, "name": "changed-object"}
-    with pytest.raises(rb.ModelNotReady):
+    with pytest.raises(rb.ModelNotReady) as error:
         rb._verified_chooser_fold_reference(mismatched_object, *args[1:])
+    assert error.value.member_id == "tier4_folds:chooser"
+    assert error.value.detail == "chooser fold could not be verified or loaded"
 
     authoring_catalog.pop("sources")
     authoring_releases.clear()
@@ -873,19 +919,25 @@ def test_chooser_fold_reference_loads_34_aggregate_objects(tmp_path, monkeypatch
     from engine.v2.scoring import release_bindings as rb
 
     sequence = count()
+    manifest = SimpleNamespace(release=SimpleNamespace(release_id="release"))
 
     def verified_reference(*_args):
         index = next(sequence)
-        return (f"producer-{index}", f"fold-{index}"), object(), None, None
+        descriptor_hash = "sha256:" + f"{index:064d}"
+        return ((f"producer-{index}", f"fold-{index}"),
+                SimpleNamespace(descriptor_hash=descriptor_hash),
+                manifest, {"member": index})
 
     monkeypatch.setattr(rb, "_verified_chooser_fold_reference", verified_reference)
-    manifest = SimpleNamespace(release=SimpleNamespace(release_id="release"))
+    monkeypatch.setattr(rb, "_is_legacy_cutoffless_chooser_fold", lambda _obj: False)
     references, contexts = rb._load_chooser_fold_references(
         [{} for _ in range(34)], "tier4_folds:chooser", date(2026, 9, 1), {}, manifest,
         object(), {}, tmp_path, tmp_path)
 
     assert len(references) == 34
-    assert contexts == {}
+    assert len(contexts) == 34
+    for index in range(34):
+        assert contexts["sha256:" + f"{index:064d}"] == (manifest, {"member": index})
 
 
 def test_chooser_fold_reference_refuses_aggregate_load_limit(tmp_path, monkeypatch):
@@ -908,10 +960,24 @@ def test_chooser_fold_reference_refuses_aggregate_load_limit(tmp_path, monkeypat
     assert calls == []
 
 
+def test_legacy_chooser_fold_predicate_refuses_malformed_descriptor():
+    from engine.v2.scoring import release_bindings as rb
+
+    malformed = {"serving_fold": {"policy": {}, "fold_start": "invalid",
+                                  "producer_output": "pred_im_t1_d14"}}
+
+    with pytest.raises(ModelNotReady) as error:
+        rb._is_legacy_cutoffless_chooser_fold(malformed)
+
+    assert error.value.member_id == "tier4_folds:chooser"
+    assert error.value.detail == "chooser fold could not be verified or loaded"
+
+
 def test_legacy_chooser_fold_catalog_without_retrain_cutoff_keeps_binding_available(
         tmp_path, monkeypatch):
     _rb, _descriptors, _identities, calls, _body = _chooser_resolver_fixture(
         tmp_path, monkeypatch, cutoff=None)
+    _descriptors["first"].training_cutoff = "2026-08-31"
 
     binding = resolve_release_binding(tmp_path)
 

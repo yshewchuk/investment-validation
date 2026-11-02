@@ -231,7 +231,7 @@ class ScoringReleaseBinding:
         object.__setattr__(self, "chooser_fold_references",
                            MappingProxyType(dict(self.chooser_fold_references)))
         object.__setattr__(self, "chooser_authoring_fold_contexts", MappingProxyType({
-            descriptor_hash: (manifest, dict(catalog))
+            descriptor_hash: (manifest, MappingProxyType(dict(catalog)))
             for descriptor_hash, (manifest, catalog)
             in self.chooser_authoring_fold_contexts.items()}))
 
@@ -327,11 +327,14 @@ def resolve_chooser_fold_authoring_contexts(
     :func:`resolve_release_binding` exposes when chooser folds are requested,
     plus each reference's exact authoring manifest and catalog keyed by
     descriptor hash.
+
+    Raises ``ValueError`` before any I/O when ``release_root`` is not a
+    nonblank ``str``/``Path`` or ``release_id`` is not a nonblank ``str``.
     """
-    if not str(release_root).strip():
-        raise ValueError("release_root must be a non-empty path")
-    if not str(release_id).strip():
-        raise ValueError("release_id must be a non-empty value")
+    if not isinstance(release_root, (str, Path)) or not str(release_root).strip():
+        raise ValueError("release_root must be a non-empty str or Path")
+    if not isinstance(release_id, str) or not release_id.strip():
+        raise ValueError("release_id must be a non-empty string")
     root = Path(release_root)
     dep_root = root / _DEPLOYMENT_DIR
     manifest = _read_and_verify_manifest(dep_root, release_id)
@@ -444,6 +447,8 @@ def _read_and_verify_manifest(dep_root: Path, release_id: str) -> "deployment.St
     if not deployment._manifest_hash_matches(manifest):
         # R1(f): the staged manifest's own release_hash disagrees.
         raise ModelNotReady("model_release", "release_hash disagrees with manifest")
+    if manifest.release.release_id != release_id:
+        raise ModelNotReady("model_release", "release_id disagrees with manifest path")
     return manifest
 
 
@@ -840,21 +845,19 @@ def _is_legacy_cutoffless_chooser_fold(obj: object) -> bool:
     """Whether ``obj`` is a legacy chooser descriptor without a training cutoff.
 
     Such descriptors remain loadable and hash-stable through the normal
-    serving-fold loader, but the reference path skips them.
+    serving-fold loader, but the reference path skips them. The descriptor
+    document is decoded first so a malformed one refuses instead of being
+    silently classified away.
     """
     if not isinstance(obj, Mapping):
         return False
-    descriptor = obj.get("serving_fold")
-    if not isinstance(descriptor, Mapping):
-        return False
-    if not isinstance(descriptor.get("policy"), Mapping):
-        return False
-    if not isinstance(descriptor.get("fold_start"), str):
-        return False
-    if descriptor.get("producer_output") not in (
-            "pred_im_t1_d14", "pred_runup_abs_move_d14"):
-        return False
-    return descriptor.get("training_cutoff") is None
+    try:
+        descriptor = from_document(ChooserServingFoldDescriptor, obj["serving_fold"])
+    except (KeyError, TypeError, ValueError, AttributeError, RecursionError) as exc:
+        raise ModelNotReady(
+            "tier4_folds:chooser",
+            "chooser fold could not be verified or loaded") from exc
+    return descriptor.training_cutoff is None
 
 
 def _load_chooser_fold_references(
@@ -888,9 +891,8 @@ def _load_chooser_fold_references(
         if key in references:
             raise ModelNotReady(member_id, "ambiguous chooser fold reference")
         references[key] = reference
-        if authoring_manifest is not None:
-            authoring_contexts[reference.descriptor_hash] = (
-                authoring_manifest, authoring_catalog)
+        authoring_contexts[reference.descriptor_hash] = (
+            authoring_manifest, authoring_catalog)
         if done % 4 == 0 or done == total:
             elapsed = time.monotonic() - started
             rate = done / elapsed if elapsed > 0 else 0.0
