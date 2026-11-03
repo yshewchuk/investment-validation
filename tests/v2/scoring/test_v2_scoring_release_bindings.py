@@ -1244,6 +1244,40 @@ def test_deferred_chooser_fold_skips_malformed_unrelated_descriptor(
         ("pred_im_t1_d14", "2026-09-01")}
 
 
+def test_chooser_fold_descriptor_refuses_matching_malformed_descriptor(
+        tmp_path, monkeypatch):
+    from engine.v2.scoring import release_bindings as rb
+
+    _rb, descriptors, _identities, _calls, body = _chooser_resolver_fixture(
+        tmp_path, monkeypatch)
+    descriptors["first"].training_cutoff = "2026-08-31"
+    bad_hash = "sha256:" + "d" * 64
+    bad = {**_obj(_object_path(bad_hash), bad_hash, name="bad"),
+           "serving_fold": {
+               "test_key": "bad", "policy": {"role": "implied_t1"},
+               "fold_start": "2026-09-01"}}
+    next(row for row in body["members"]
+         if row.get("member_id") == "tier4_folds:implied_t1")["objects"].append(bad)
+    body["manifest_hash"] = content_hash(
+        {key: value for key, value in body.items() if key != "manifest_hash"})
+    monkeypatch.setattr(rb, "_read_state_catalog", lambda *_args: body)
+    original = rb.from_document
+
+    def decode(type_, document):
+        if document["test_key"] == "bad":
+            raise ValueError("malformed descriptor")
+        return original(type_, document)
+
+    monkeypatch.setattr(rb, "from_document", decode)
+
+    with pytest.raises(ModelNotReady) as error:
+        rb._chooser_fold_descriptor(
+            None, body, "implied_t1", "2026-09-01", "2026-09-15")
+
+    assert error.value.member_id == "tier4_folds:implied_t1"
+    assert error.value.detail == "chooser fold descriptor is missing or unusable"
+
+
 def test_deferred_chooser_fold_failures_require_the_chooser_opt_in(tmp_path):
     with pytest.raises(ValueError):
         resolve_release_binding(tmp_path, defer_chooser_fold_failures=True)

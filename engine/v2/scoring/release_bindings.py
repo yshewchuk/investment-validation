@@ -374,6 +374,29 @@ class ChooserState:
     artifact_refs: tuple[str, ...]
 
 
+def _chooser_fold_raw_identity_matches(
+    doc: object, role: str, fold_start: str,
+) -> bool:
+    """Whether a raw descriptor is the requested ``(role, fold_start)`` identity."""
+    if not isinstance(doc, Mapping):
+        return False
+    raw_policy = doc.get("policy")
+    if not isinstance(raw_policy, Mapping):
+        return False
+    return raw_policy.get("role") == role and doc.get("fold_start") == fold_start
+
+
+def _chooser_fold_descriptor_matches(
+    desc: ChooserServingFoldDescriptor, role: str, fold_start: str,
+) -> bool:
+    """Whether ``desc`` is the requested ``(role, fold_start)`` with a cutoff."""
+    return (
+        desc.training_cutoff is not None
+        and desc.policy.role == role
+        and desc.fold_start == fold_start
+    )
+
+
 def _chooser_fold_descriptor(
     binding: ScoringReleaseBinding, catalog: Mapping, role: str,
     fold_start: str, decision_cutoff: str,
@@ -400,10 +423,10 @@ def _chooser_fold_descriptor(
             except Exception:
                 # An unrelated malformed object must not hide a valid
                 # descriptor for the row's own (role, fold_start).
+                if _chooser_fold_raw_identity_matches(doc, role, fold_start):
+                    raise
                 continue
-            if desc.training_cutoff is None:
-                continue
-            if desc.policy.role == role and desc.fold_start == fold_start:
+            if _chooser_fold_descriptor_matches(desc, role, fold_start):
                 matches.append(desc)
         if len(matches) != 1:
             raise ValueError("not exactly one matching descriptor")
