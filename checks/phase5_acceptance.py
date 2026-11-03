@@ -349,7 +349,7 @@ def _lineage_subject(loaded: Mapping[str, dict], findings: _Findings) -> dict:
     try:
         report = propagate_corrections([state_node(i, a) for i, a in nodes], ())
     except LineageError as exc:
-        findings.add(LINEAGE_INVALID, "lineage", str(exc))
+        findings.add(LINEAGE_INVALID, "lineage", "release lineage graph is invalid")
         return {"status": LINEAGE_INVALID, "states": len(nodes), "code": exc.code}
     return {"status": "ok", "states": len(nodes), "valid": len(report.valid)}
 
@@ -712,15 +712,15 @@ def build_evidence(release_root: Path, *, report_dir: Path | None = None,
     release_root = Path(release_root)
     findings = _Findings()
     evidence: dict[str, Any] = {"schema_version": PHASE5_EVIDENCE_SCHEMA,
-                                "release_root": str(release_root), "members": [],
-                                "consumers": [], "scoring_pass": {}, "promote": {},
-                                "lineage": {"status": "NOT_RUN"},
+                                "members": [], "consumers": [], "scoring_pass": {},
+                                "promote": {}, "lineage": {"status": "NOT_RUN"},
                                 "phase4": {"status": "NOT_RUN"}}
     _progress("p5-accept", f"start release_root={release_root}", started)
     try:
         manifest = _selected_manifest(release_root, candidate_release_id)
-    except (ReleaseLayoutError, OSError, ValueError) as exc:
-        findings.add(RELEASE_LAYOUT, "phase5_release.json", str(exc))
+    except (ReleaseLayoutError, OSError, ValueError):
+        findings.add(RELEASE_LAYOUT, "phase5_release.json",
+                     "release catalog is missing or malformed")
         return _finish(evidence, findings, report_dir, started)
     release_id = manifest["release_id"]
     evidence.update({"release_id": release_id, "manifest_hash": manifest["manifest_hash"]})

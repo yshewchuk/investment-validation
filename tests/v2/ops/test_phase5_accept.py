@@ -5,7 +5,7 @@ import pytest
 
 from checks import phase5_acceptance as acceptance_gate
 from engine.v2.foundation import content_hash
-from engine.v2.models import frozen_state
+from engine.v2.models import frozen_state, lineage
 from engine.v2.models.release_layout import PHASE5_RELEASE_SCHEMA, StateSpec, catalog_path
 from engine.v2.ops import retrain_check as phase5_accept
 from engine.v2.ops.errors import OpsError
@@ -126,6 +126,69 @@ def test_build_evidence_refuses_mismatched_candidate_catalog(tmp_path):
     assert "release_id" not in evidence
     assert any(row["code"] == acceptance_gate.RELEASE_LAYOUT
                for row in evidence["findings"])
+
+
+def _assert_evidence_hash(evidence):
+    unhashed = {key: value for key, value in evidence.items()
+                if key not in ("runtime_ms", "report", "evidence_hash")}
+    assert evidence["evidence_hash"] == content_hash(unhashed)
+
+
+def test_layout_failure_evidence_omits_release_root_and_raw_exception(
+        tmp_path, monkeypatch):
+    release_root = tmp_path / "store"
+    raw_detail = f"cannot read {release_root}/deployment/catalog.json"
+
+    def broken_selector(*_args):
+        raise acceptance_gate.ReleaseLayoutError(raw_detail)
+
+    monkeypatch.setattr(acceptance_gate, "_selected_manifest", broken_selector)
+
+    evidence = acceptance_gate.build_evidence(
+        release_root, state_specs=(), consumers={}, watch_dirs=[])
+
+    assert "release_root" not in evidence
+    assert raw_detail not in json.dumps(evidence)
+    assert str(release_root) not in json.dumps(evidence)
+    finding = next(row for row in evidence["findings"]
+                   if row["code"] == acceptance_gate.RELEASE_LAYOUT)
+    assert finding["subject"] == "phase5_release.json"
+    assert finding["detail"] == "release catalog is missing or malformed"
+    _assert_evidence_hash(evidence)
+
+
+def test_lineage_failure_evidence_omits_release_root_and_raw_exception(
+        tmp_path, monkeypatch):
+    release_root = tmp_path / "store"
+    _catalog(release_root, "candidate")
+    raw_detail = f"cycle under {release_root}/deployment/objects"
+    loaded = {"state:node": {"row": {"objects": [{"name": "state"}]},
+                             "artifacts": [SimpleNamespace(lineage=("upstream",))]}}
+
+    monkeypatch.setattr(acceptance_gate, "_load_model_release", lambda *_args: None)
+    monkeypatch.setattr(acceptance_gate, "_model_member_rows", lambda *_args: [])
+    monkeypatch.setattr(acceptance_gate, "_state_member_rows",
+                        lambda *_args: ([], loaded))
+    monkeypatch.setattr(lineage, "state_node", lambda state_id, _state: state_id)
+
+    def broken_graph(_nodes, _changes):
+        raise lineage.LineageError("cycle", raw_detail)
+
+    monkeypatch.setattr(lineage, "propagate_corrections", broken_graph)
+
+    evidence = acceptance_gate.build_evidence(
+        release_root, candidate_release_id="candidate", state_specs=(),
+        consumers={}, watch_dirs=[])
+
+    assert "release_root" not in evidence
+    assert str(release_root) not in json.dumps(evidence)
+    assert raw_detail not in json.dumps(evidence)
+    finding = next(row for row in evidence["findings"]
+                   if row["code"] == acceptance_gate.LINEAGE_INVALID)
+    assert finding["subject"] == "lineage"
+    assert finding["detail"] == "release lineage graph is invalid"
+    assert evidence["lineage"]["code"] == "cycle"
+    _assert_evidence_hash(evidence)
 
 
 def test_worker_threads_candidate_id_to_acceptance_job(tmp_path, monkeypatch):
