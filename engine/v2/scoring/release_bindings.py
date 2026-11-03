@@ -5,7 +5,8 @@ constructed ``FrozenInference``, and the frozen scoring state artifacts
 from a live ``deployment.current_pointer()`` -- the failure-semantics contract
 is ``engine/v2/scoring/ARCHITECTURE.md``'s ``release_bindings.py`` section (the
 "4c R1-R6 template"). Native batch and the supervisor's release-readiness
-check consume this reader; chooser state selection is not wired into nightly.
+check consume this reader; native batch scoring now selects chooser state for
+registered member rows.
 
 Every refusal below is path-free by construction: a fixed message plus the
 exact ``member_id``/field name (and, where useful, a type name), never a raw
