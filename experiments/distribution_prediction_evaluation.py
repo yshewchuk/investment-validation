@@ -78,6 +78,8 @@ def _rows(value, targets, year, horizon):
 
 @stage("prediction admitted outer evaluation")
 def evaluate_outer(run, fits, year):
+    if type(year) is not str:
+        raise fail("INVALID_EXPERIMENT_SPEC", "invalid distribution fold selection")
     plan = run.admit()
     run.record("evaluation-start:" + year, {"run_plan_id": plan["run_plan_id"]})
     frozen, values, fold, preflight = _context(run, fits, year)

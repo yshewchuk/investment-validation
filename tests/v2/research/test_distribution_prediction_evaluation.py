@@ -159,3 +159,22 @@ def test_evaluation_target_receipt_persists_full_native_physical_identity(evalua
     assert receipt['labels_before'] == '2025-01-01'
     assert receipt['holdout_exclusions'] == []
     assert receipt['omitted_labels'] == [{'event_id': 'A', 'reason': 'no_price_window'}]
+
+
+@pytest.mark.parametrize('year', [None, 2024, True, 2024.0, b'2024', [], {}])
+def test_non_string_year_refuses_before_admission_or_evidence_effects(evaluated, monkeypatch, tmp_path, year):
+    conn = evaluated.case.conn
+    changes, records = conn.total_changes, list(conn.execute('SELECT * FROM magnitude_search_records'))
+    before = {path.relative_to(tmp_path): path.read_bytes() for path in (tmp_path / 'store').rglob('*') if path.is_file()}
+    def refused_effect(*args, **kwargs):
+        pytest.fail('invalid year reached admission, journal, stored evidence or targets')
+    monkeypatch.setattr(evaluated.run, 'admit', refused_effect)
+    monkeypatch.setattr(evaluated.run, 'record', refused_effect)
+    monkeypatch.setattr(evaluation, '_context', refused_effect)
+    monkeypatch.setattr(evaluation, 'evaluation_targets', refused_effect)
+    with pytest.raises(OpsError) as caught:
+        evaluation.evaluate_outer(evaluated.run, evaluated.fits, year)
+    assert caught.value.code == 'INVALID_EXPERIMENT_SPEC' and not caught.value.problem.retryable
+    assert conn.total_changes == changes and list(conn.execute('SELECT * FROM magnitude_search_records')) == records
+    assert {path.relative_to(tmp_path): path.read_bytes() for path in (tmp_path / 'store').rglob('*') if path.is_file()} == before
+    assert evaluated.calls == []

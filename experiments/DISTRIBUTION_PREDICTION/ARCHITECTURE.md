@@ -19,6 +19,7 @@ Native registration, dataset/feature qualification, training-label availability,
 | `score_training_baseline(baseline, targets, receipt=...)` | Require unchanged baseline hash, matching completed fit claim and exact evaluation event/status roster; snapshot the validated event/claim/target values before yielding, so between-row caller mutation cannot change consumed identity or outcomes. Prepare CRPS/bin/tail reference once per cohort; retain missing targets and impossible-bin infinite log loss. The saved hash detects mutation, not forged admission; collection must reverify native provenance. |
 | Malformed saved baseline/receipt, changed identity or incomplete/invalid target-status map | Nonretryable `EXPERIMENT_IDENTITY_CONFLICT` before score preparation or row emission; omissions must have exactly one `omitted` key with a native reason. Invalid empirical numeric labels retain the numerical helper’s typed `CONTRACT_MISMATCH`; no source read or partial result. |
 | Source-free numerical result | No I/O, fitting, native admission, publication or final-read authority. |
+| Non-string `evaluate_outer` year | Nonretryable `INVALID_EXPERIMENT_SPEC` before admission, journal slots, stored-evidence or target reads; string fold membership remains owned by native admission. |
 
 ## Incremental delivery
 
