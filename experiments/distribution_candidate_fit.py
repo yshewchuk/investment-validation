@@ -58,7 +58,7 @@ def _outputs(value, shape):
     return array
 
 
-def _classifier_diagnostics(model, support, max_iter):
+def _classifier_diagnostics(model, support, max_iter, early_stopping_used):
     classes = np.asarray(model.classes_)
     if classes.ndim != 1 or classes.dtype.kind not in "iu":
         _failed()
@@ -69,7 +69,12 @@ def _classifier_diagnostics(model, support, max_iter):
     for value in (iterations, trees):
         if not isinstance(value, (int, np.integer)) or isinstance(value, (bool, np.bool_)):
             _failed()
-    if iterations != max_iter or trees != support["trees_per_iteration"]:
+    if trees != support["trees_per_iteration"]:
+        _failed()
+    if early_stopping_used:
+        if not 1 <= iterations <= max_iter:
+            _failed()
+    elif iterations != max_iter:
         _failed()
     return {"class_labels": labels, "iterations": int(iterations),
             "trees_per_iteration": int(trees), "total_trees": int(iterations * trees)}
@@ -99,6 +104,8 @@ def fit_candidate(recipe, train_features, train_labels, prediction_features, *, 
         train_features, train_labels, prediction_features, len(expected_columns))
     bins = np.array([bin_index(float(value)) for value in labels], dtype=int)
     support = training_support(np.bincount(bins, minlength=81).tolist())
+    regularised = recipe.get("classifier_variant") == "regularised_v1"
+    singleton = regularised and any(count == 1 for count in support["bin_counts"])
     empty = np.isnan(train).all(axis=0)
     train[:, empty] = 0.0
     prediction[:, empty] = 0.0
@@ -108,11 +115,20 @@ def fit_candidate(recipe, train_features, train_labels, prediction_features, *, 
     from engine.v2.models.training.magnitude_ridge_hgb import fit_ridge_hgb_predictions
 
     params = recipe["classifier"]["params"]
+    requested = params["early_stopping"]
+    used = requested and not singleton
+    estimator_params = {**params, "max_features": float(params["max_features"])}
+    if regularised:
+        estimator_params["early_stopping"] = used
     try:
-        model = HistGradientBoostingClassifier(**{**params, "max_features": float(params["max_features"])})
+        model = HistGradientBoostingClassifier(**estimator_params)
         with stage("distribution classifier fit/predict"), threadpool_limits(limits=1):
             model.fit(train, bins)
-            classifier = _classifier_diagnostics(model, support, params["max_iter"])
+            classifier = _classifier_diagnostics(model, support, params["max_iter"], used)
+            if regularised:
+                classifier.update(early_stopping_requested=bool(requested),
+                    early_stopping_used=bool(used), fallback_reason=
+                    "class_count_below_2" if singleton else None)
             probabilities = _outputs(model.predict_proba(prediction),
                 (len(prediction), len(classifier["class_labels"])))
         with stage("distribution matched point fit"):

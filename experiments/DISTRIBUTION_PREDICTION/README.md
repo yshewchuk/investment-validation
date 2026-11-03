@@ -10,6 +10,12 @@ The predictive population is the admitted frozen event cohort, not all provider/
 
 Removing trading-evaluation inputs does not assert that predictor features are option-free: a qualified HMO panel can contain historically option-derived features. Feature availability and the chosen H/HM/HMO recipe still need their existing causal admission; no trading quote or payoff is needed to define a proper prediction score.
 
+## Candidate classifier variants
+
+`candidate_recipe(feature_set, classifier_variant="raw")` emits the unchanged raw recipe by default. Selecting `classifier_variant="regularised_v1"` in the recipe JSON selects that variant: it adds the variant marker to the document and changes only `l2_regularization` to `1.0` and `early_stopping` to `true`; the point recipe stays identical. The marker is part of the hashed recipe identity, so a plain recipe JSON selects raw and a marked JSON selects the regularised variant; unknown markers are refused.
+
+The regularised fit enables early stopping, so sklearn may stop before `max_iter`. If training support contains any observed class with fewer than two rows (a singleton histogram bin), the fit keeps every row and class but sets the estimator's effective `early_stopping=False` for that fit only; L2 stays `1.0`. Its diagnostics record `early_stopping_requested=True`, `early_stopping_used=False` and `fallback_reason="class_count_below_2"`, and replay validates those fields, the singleton support and `iterations=max_iter`. Without a singleton, replay requires requested/used true, no fallback reason and an actual iteration count in `[1, max_iter]`. Raw diagnostics are unchanged.
+
 ## Comparisons and interpretation
 
 - Fixed raw histogram classifier, with its current training-only tail rule and explicit unresolved-tail status.

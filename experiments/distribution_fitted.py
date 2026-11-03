@@ -113,9 +113,21 @@ class DistributionFits:
         classes = diagnostics["classifier"].get("class_labels")
         _require(type(classes) is list and all(type(value) is int for value in classes)
                  and sorted(classes) == support["observed_class_labels"])
-        iterations, trees = recipe["classifier"]["params"]["max_iter"], support["trees_per_iteration"]
-        expected = {"training_support": support, "classifier": {"class_labels": classes,
-            "iterations": iterations, "trees_per_iteration": trees, "total_trees": iterations * trees},
+        max_iter, trees = recipe["classifier"]["params"]["max_iter"], support["trees_per_iteration"]
+        iterations = diagnostics["classifier"].get("iterations")
+        _require(type(iterations) is int)
+        classifier = {"class_labels": classes, "iterations": iterations,
+                      "trees_per_iteration": trees, "total_trees": iterations * trees}
+        if recipe.get("classifier_variant") == "regularised_v1":
+            singleton = any(count == 1 for count in support["bin_counts"])
+            requested = recipe["classifier"]["params"]["early_stopping"]
+            used = requested and not singleton
+            _require(iterations == max_iter if not used else 1 <= iterations <= max_iter)
+            classifier.update(early_stopping_requested=requested, early_stopping_used=used,
+                fallback_reason="class_count_below_2" if singleton else None)
+        else:
+            _require(iterations == max_iter)
+        expected = {"training_support": support, "classifier": classifier,
             "point": {"iterations_declared": recipe["point_recipe"]["estimator"]["params"]["max_iter"],
                       "trees_per_iteration_declared": 1}, "training_rows": len(labels), "prediction_rows": len(events),
             "all_null_training_columns": [name for index, name in enumerate(recipe["point_recipe"]["features"])

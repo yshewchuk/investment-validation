@@ -17,8 +17,8 @@ from experiments import distribution_candidate_fit as fitting
 from experiments.distribution_candidate_recipe import candidate_recipe
 
 
-def _inputs(labels=(0, 0.5, 0, 0.5), *, feature_set="H"):
-    recipe = candidate_recipe(feature_set)
+def _inputs(labels=(0, 0.5, 0, 0.5), *, feature_set="H", variant="raw"):
+    recipe = candidate_recipe(feature_set, variant)
     columns = recipe["point_recipe"]["features"]
     return recipe, np.zeros((len(labels), len(columns))), np.array(labels), np.ones((2, len(columns))), columns
 
@@ -129,6 +129,54 @@ def test_declared_parameters_shared_preprocessing_and_actual_diagnostics(observe
     for index in (1, 2, 3):
         np.testing.assert_array_equal(inputs[index], before[index])
     json.dumps(result, allow_nan=False)
+
+
+def test_sklearn_early_stopping_refuses_a_singleton_training_class():
+    labels = np.array([0] * 5 + [1] * 5 + [2])
+    with pytest.raises(ValueError):
+        sklearn.ensemble.HistGradientBoostingClassifier(early_stopping=True).fit(
+            np.zeros((len(labels), 1)), labels)
+
+
+def test_regularised_singleton_class_keeps_rows_and_disables_only_early_stopping(observed):
+    inputs = list(_inputs((0,) * 5 + (0.25,) * 5 + (20,), variant="regularised_v1"))
+    result = _fit(inputs)
+    params = observed["constructed"][0]
+    assert params["early_stopping"] is False
+    assert params["l2_regularization"] == 1.0
+    assert observed["fit"][0][1].tolist() == [0] * 5 + [1] * 5 + [80]
+    support = result["diagnostics"]["training_support"]
+    assert support["bin_counts"][0] == 5 and support["bin_counts"][1] == 5
+    assert support["bin_counts"][80] == 1 and support["observed_class_labels"] == [0, 1, 80]
+    classifier = result["diagnostics"]["classifier"]
+    assert classifier["iterations"] == 100
+    assert classifier["early_stopping_requested"] is True
+    assert classifier["early_stopping_used"] is False
+    assert classifier["fallback_reason"] == "class_count_below_2"
+
+
+def test_regularised_used_early_stopping_accepts_actual_short_iterations(observed):
+    observed["behavior"].update(classes=[0, 1], iterations=7, trees=1)
+    result = _fit(list(_inputs((0, 0.25, 0, 0.25), variant="regularised_v1")))
+    classifier = result["diagnostics"]["classifier"]
+    assert observed["constructed"][0]["early_stopping"] is True
+    assert classifier["iterations"] == 7
+    assert classifier["early_stopping_requested"] is True
+    assert classifier["early_stopping_used"] is True
+    assert classifier["fallback_reason"] is None
+
+
+@pytest.mark.parametrize("iterations", [0, 101, True])
+def test_regularised_early_stopping_rejects_invalid_iteration_counts(iterations, observed):
+    inputs = list(_inputs((0, 0.25, 0, 0.25), variant="regularised_v1"))
+    observed["behavior"].update(classes=[0, 1], iterations=iterations, trees=1)
+    _refuses(inputs, "EXPERIMENT_VARIANT_FAILED")
+
+
+def test_regularised_fallback_requires_max_iter(observed):
+    inputs = list(_inputs((0,) * 5 + (0.25,) * 5 + (20,), variant="regularised_v1"))
+    observed["behavior"].update(iterations=99)
+    _refuses(inputs, "EXPERIMENT_VARIANT_FAILED")
 
 
 def test_train_only_tail_is_shared_once_and_detached(observed, monkeypatch):
