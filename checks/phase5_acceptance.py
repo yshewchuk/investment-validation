@@ -63,18 +63,23 @@ from engine.v2.models import deployment  # noqa: E402
 from engine.v2.models.contracts import ModelRelease  # noqa: E402
 from engine.v2.models.release_layout import (  # noqa: E402
     EXPECTED_MODEL_BINDINGS,
+    MANIFEST_NAME,
     MISSING,
     PENDING,
     STAGED,
     STATE_SPECS,
     ReleaseLayoutError,
     StateSpec,
+    catalog_path,
     deployment_root,
+    read_catalog,
     read_manifest,
+    read_regular_file,
     sha256_bytes,
 )
 
 PHASE5_EVIDENCE_SCHEMA = "phase5_acceptance.v1.0"
+MAX_MEMBER_BYTES = 512 * 1024 * 1024
 
 # Finding codes. Every one is a gate failure.
 RELEASE_LAYOUT = "P5_RELEASE_LAYOUT"
@@ -131,9 +136,13 @@ def _progress(tag: str, message: str, started: float) -> None:
     boundary calls this -- the same ``[tag] message`` idiom
     ``tools/capture_tier0_corpus.py``'s ``[corpus] ...`` lines use, extended
     with a wall-clock timestamp so a supervisor tailing the log with `date`
-    can tell how far along a run is, not just that it is still alive."""
+    can tell how far along a run is, not just that it is still alive.
+
+    Writes to stderr, the channel the worker executor already captures as
+    ``diagnostics/worker.stderr``; stdout stays the machine-readable result."""
     print(f"[{tag} {time.strftime('%H:%M:%S')}] {message} "
-          f"(+{time.perf_counter() - started:.1f}s, rss {_rss_gb():.2f}G)", flush=True)
+          f"(+{time.perf_counter() - started:.1f}s, rss {_rss_gb():.2f}G)",
+          file=sys.stderr, flush=True)
 
 
 class ReportPathError(ValueError):
@@ -164,9 +173,13 @@ def _verify_object(release_root: Path, path: str, expected: str) -> str | None:
         target.relative_to(base)
     except ValueError:
         return MEMBER_OBJECT_ABSENT
-    if not target.is_file():
+    try:
+        data = read_regular_file(target, MAX_MEMBER_BYTES)
+    except (OSError, ValueError):
         return MEMBER_OBJECT_ABSENT
-    return None if sha256_bytes(target.read_bytes()) == expected else MEMBER_HASH_MISMATCH
+    if data is None:
+        return MEMBER_OBJECT_ABSENT
+    return None if sha256_bytes(data) == expected else MEMBER_HASH_MISMATCH
 
 
 def _load_model_release(release_root: Path, release_id: str, findings: _Findings):
@@ -231,7 +244,7 @@ def _typed_load(spec: StateSpec, release_root: Path, obj: Mapping[str, Any]):
     if "engine.v2.models.frozen_state" in spec.modules:
         from engine.v2.models.frozen_state import FrozenStateLoader, FrozenStateRef
 
-        return FrozenStateLoader(root).load(
+        return FrozenStateLoader(root, max_bytes=MAX_MEMBER_BYTES).load(
             FrozenStateRef(path=obj["path"], content_hash=obj["content_hash"]))
     return None  # raw members (Tier-4 folds, parquet pools): hash-verified only
 
@@ -340,7 +353,7 @@ def _lineage_subject(loaded: Mapping[str, dict], findings: _Findings) -> dict:
     try:
         report = propagate_corrections([state_node(i, a) for i, a in nodes], ())
     except LineageError as exc:
-        findings.add(LINEAGE_INVALID, "lineage", str(exc))
+        findings.add(LINEAGE_INVALID, "lineage", "release lineage graph is invalid")
         return {"status": LINEAGE_INVALID, "states": len(nodes), "code": exc.code}
     return {"status": "ok", "states": len(nodes), "valid": len(report.valid)}
 
@@ -670,28 +683,48 @@ def _default_watch_dirs(release_root: Path) -> list[Path]:
     return [paths.DATA / "models", deployment_root(release_root)]
 
 
+def _selected_manifest(release_root: Path, candidate_release_id: str | None) -> dict:
+    """The explicit candidate's release-local catalog, or the root selector.
+
+    An explicit id never falls back to the root ``phase5_release.json``: a
+    missing or mismatched candidate catalog is a layout refusal.
+    """
+    if candidate_release_id is None:
+        return read_manifest(release_root)
+    body = read_catalog(catalog_path(release_root, candidate_release_id),
+                        candidate_release_id)
+    if body is None:
+        raise ReleaseLayoutError(
+            f"no {MANIFEST_NAME} for candidate {candidate_release_id}")
+    return body
+
+
 def build_evidence(release_root: Path, *, report_dir: Path | None = None,
                    phase4_corpus: Path | None = None,
                    phase4_checkpoint: Path | None = None,
                    watch_dirs: Iterable[Path] | None = None,
                    consumers: Mapping[str, Any] | None = None,
-                   state_specs: tuple[StateSpec, ...] = STATE_SPECS) -> dict:
+                   state_specs: tuple[StateSpec, ...] = STATE_SPECS,
+                   candidate_release_id: str | None = None) -> dict:
     """Run every subject; ``consumers``/``state_specs``/``watch_dirs`` are test
     seams. Production passes none of them: the full catalog and the real
-    consumer table, where a probe that does not exist yet is PENDING."""
+    consumer table, where a probe that does not exist yet is PENDING.
+
+    ``candidate_release_id`` selects that release's local catalog; without it
+    the root selector is used, as the CLI always has."""
     started = time.perf_counter()
     release_root = Path(release_root)
     findings = _Findings()
     evidence: dict[str, Any] = {"schema_version": PHASE5_EVIDENCE_SCHEMA,
-                                "release_root": str(release_root), "members": [],
-                                "consumers": [], "scoring_pass": {}, "promote": {},
-                                "lineage": {"status": "NOT_RUN"},
+                                "members": [], "consumers": [], "scoring_pass": {},
+                                "promote": {}, "lineage": {"status": "NOT_RUN"},
                                 "phase4": {"status": "NOT_RUN"}}
     _progress("p5-accept", f"start release_root={release_root}", started)
     try:
-        manifest = read_manifest(release_root)
-    except (ReleaseLayoutError, OSError, ValueError) as exc:
-        findings.add(RELEASE_LAYOUT, "phase5_release.json", str(exc))
+        manifest = _selected_manifest(release_root, candidate_release_id)
+    except (ReleaseLayoutError, OSError, ValueError):
+        findings.add(RELEASE_LAYOUT, "phase5_release.json",
+                     "release catalog is missing or malformed")
         return _finish(evidence, findings, report_dir, started)
     release_id = manifest["release_id"]
     evidence.update({"release_id": release_id, "manifest_hash": manifest["manifest_hash"]})

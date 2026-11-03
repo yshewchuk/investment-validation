@@ -1,9 +1,11 @@
 """Release acceptance and pool-only retrain check job.
 
 The acceptance evidence is produced by the existing release acceptance gate
-and arrives as a job-bound input. This worker verifies that evidence is for the
-exact candidate catalog, then permits only a pool-only candidate whose model
-binding metadata and actual model object bytes match the incumbent.
+and arrives as a job-bound input. The release-scope ``phase5_accept`` producer
+writes that evidence as ``acceptance.json`` (schema
+``phase5_acceptance.v1.0``), and this worker verifies it is for the exact
+candidate catalog, then permits only a pool-only candidate whose model binding
+metadata and actual model object bytes match the incumbent.
 """
 from __future__ import annotations
 
@@ -214,3 +216,96 @@ def run_retrain_check_worker(parameters, root: Path) -> dict:
     return {"outputs": [{"name": "retrain_check_receipt", "path": output.name,
                           "schema": RECEIPT_SCHEMA}],
             "completed_ids": values["expected_ids"], "receipt": receipt}
+
+
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class Phase5AcceptParameters:
+    expected_ids: tuple[str, ...]
+    release_root: str
+    candidate_release_id: str
+
+
+def _safe_id(value) -> bool:
+    return (isinstance(value, str) and bool(value) and not value.startswith(".")
+            and not any(char in value for char in ("/", "\\", "\0")))
+
+
+def phase5_accept_parameter_problems(_job, params) -> list[str]:
+    problems = []
+    expected_ids = getattr(params, "expected_ids", None)
+    if (not isinstance(expected_ids, (tuple, list))
+            or tuple(expected_ids) != ("phase5_accept",)):
+        problems.append("expected_ids must be exactly ('phase5_accept',)")
+    release_root = getattr(params, "release_root", None)
+    if not isinstance(release_root, str) or not release_root.strip():
+        problems.append("release_root must be a nonblank string")
+    if not _safe_id(getattr(params, "candidate_release_id", None)):
+        problems.append("candidate_release_id must be a safe non-empty id")
+    return problems
+
+
+def phase5_accept_job_kind() -> JobKind:
+    return JobKind(
+        name="phase5_accept", worker="phase5_accept", parameters=Phase5AcceptParameters,
+        resource_classes=frozenset({"validation"}), effects=("staged",),
+        retry=RetryPolicy("none", 1), checkpoint_contract=ACCEPTANCE_SCHEMA,
+        namespaces=frozenset({"shadow", "smoke"}),
+        validate=phase5_accept_parameter_problems,
+    )
+
+
+def _staged_manifest(release_root: Path, candidate_release_id: str):
+    try:
+        manifest = deployment.read_manifest(
+            deployment_root(release_root), candidate_release_id)
+    except (OSError, ValueError, deployment.DeploymentError) as exc:
+        raise fail("VALIDATION_FAILED", "candidate release is not staged",
+                   details={"code": "RELEASE_NOT_STAGED"}) from exc
+    if manifest is None or manifest.release.release_id != candidate_release_id:
+        raise fail("VALIDATION_FAILED", "candidate release is not staged",
+                   details={"code": "RELEASE_NOT_STAGED"})
+    if not deployment.manifest_hash_matches(manifest):
+        raise fail("VALIDATION_FAILED", "staged release manifest hash does not match",
+                   details={"code": "STAGED_MANIFEST_HASH_MISMATCH"})
+    return manifest
+
+
+def run_phase5_accept_worker(parameters, root) -> dict:
+    if isinstance(parameters, Phase5AcceptParameters):
+        params = parameters
+    else:
+        try:
+            params = from_document(Phase5AcceptParameters, parameters)
+        except DocumentError as exc:
+            raise fail("INVALID_REQUEST", "phase5_accept parameters are invalid",
+                       details={"code": "PHASE5_ACCEPT_PARAMETERS_INVALID"}) from exc
+    problems = phase5_accept_parameter_problems(None, params)
+    if problems:
+        raise fail("INVALID_REQUEST", "phase5_accept parameters are invalid",
+                   details={"code": "PHASE5_ACCEPT_PARAMETERS_INVALID",
+                            "problems": problems})
+    values = dataclasses.asdict(params)
+    candidate_id = values["candidate_release_id"]
+    release_root = Path(values["release_root"])
+    _staged_manifest(release_root, candidate_id)
+    from tools import phase5_acceptance_job as job
+
+    evidence, _output = job.run_acceptance(release_root, Path(root), candidate_id)
+    findings = evidence.get("findings") if isinstance(evidence, dict) else None
+    if isinstance(findings, list) and any(
+            isinstance(row, dict) and row.get("code") == "P5_RELEASE_LAYOUT"
+            for row in findings):
+        raise fail("VALIDATION_FAILED", "candidate release layout is invalid",
+                   details={"code": "P5_RELEASE_LAYOUT"})
+    if not isinstance(evidence, dict) or evidence.get("release_id") != candidate_id:
+        raise fail("INPUT_CHANGED", "release acceptance evidence does not match candidate",
+                   details={"code": "PHASE5_ACCEPTANCE_MISMATCH"})
+    if (evidence.get("release_ok") is not True
+            or evidence.get("status") not in ("RELEASE_PASS", "PASS")
+            or evidence.get("findings") != []):
+        raise fail("VALIDATION_FAILED", "candidate release acceptance failed",
+                   details={"code": "PHASE5_ACCEPTANCE_FAILED"})
+    _acceptance_evidence(Path(root), release_root, candidate_id)
+    return {"outputs": [{"name": "acceptance", "path": ACCEPTANCE_FILE,
+                         "schema": ACCEPTANCE_SCHEMA}],
+            "completed_ids": values["expected_ids"]}
