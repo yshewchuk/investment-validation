@@ -119,6 +119,21 @@ def test_fit_inputs_rejects_malformed_training_event_dates(value):
         FitInputs([[1.]], [0.], [[3.]], COLUMNS, (value,))
 
 
+@pytest.mark.parametrize("dates, message", [
+    (("2024-02-30", "2024-01-01"), "canonical ISO dates"),
+    (("2024-1-2", "2024-01-01"), "canonical ISO dates"),
+    ((20240102, "2024-01-01"), "ISO date strings"),
+    (("2024-01-02",), "length does not match"),
+])
+def test_fit_evidence_rejects_invalid_training_event_dates(dates, message):
+    training_keys = [["train-b", "synthetic-context", 3], ["train-a", "synthetic-context", 3]]
+    prediction_keys = [["test", "synthetic-context", 3]]
+    with pytest.raises(ValueError, match="training event dates.*" + message):
+        fit_evidence(COLUMNS, [[2, None], [1, None]], [[9, None]], 3,
+            ["train-b", "train-a"], ["test"], training_keys, prediction_keys,
+            target_column="crush_pct_iv30", labels=[-140, 25], train_event_dates=dates)
+
+
 def test_fit_evidence_adds_ordered_dates_only_when_provided():
     _, _, prepared = prepare()
     training_keys = [["train-b", "synthetic-context", 3], ["train-a", "synthetic-context", 3]]

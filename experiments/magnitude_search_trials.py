@@ -526,7 +526,8 @@ class SearchTrials:
                 stored = self._cohort(admitted)
             except ValueError:
                 raise fail("EXPERIMENT_IDENTITY_CONFLICT", "trial native inputs changed after start") from None
-            if content_hash(self._cohort_inputs(admitted["cohort"], inner)) != content_hash(stored):
+            if (content_hash(self._cohort_inputs(admitted["cohort"], inner, plan=plan))
+                    != content_hash(stored)):
                 raise fail("EXPERIMENT_IDENTITY_CONFLICT", "trial native inputs changed after start")
             binding = self.registration.document
             labels = evaluation_targets(self.repository, binding, inner) if "target" in plan else load_magnitude_targets(self.repository, from_document(SnapshotRef, binding["snapshot"]),

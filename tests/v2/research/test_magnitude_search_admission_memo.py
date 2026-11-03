@@ -84,6 +84,27 @@ def _dated_plan(case):
     return plan
 
 
+def test_fresh_recorder_reentry_keeps_dated_cohort(case, monkeypatch):
+    args = trial_cases(case)[0]
+    plan = _dated_plan(case)
+    monkeypatch.setattr(case.recorder, "_admit", lambda: plan)
+    started = case.recorder.start(*args)
+    dates = [row["event_date"] for row in started["inputs"]["features"]]
+    assert dates
+    key, _, _ = case.recorder._trial(plan, *args)
+    cohort = case.recorder._read("inputs:" + key)["cohort"]
+
+    fresh = trials.SearchTrials(case.source.conn, case.source.store, case.source.repository,
+        case.source.registration, case.request, case.recorder.plan_ref)
+    monkeypatch.setattr(fresh, "_admit", lambda: plan)
+    recorded = fresh.record(*args, forecasts=trial_forecasts(case, args, 7))
+
+    assert recorded["status"] == "succeeded"
+    reloaded = load_inputs(fresh.store, fresh._read("cohort:" + cohort),
+        fresh._read("inputs:" + key)["inputs_id"])
+    assert [row["event_date"] for row in reloaded["features"]] == dates
+
+
 def test_opted_in_admission_retains_verified_event_dates(case, monkeypatch):
     args = trial_cases(case)[0]
     inner = _inner(case, args)

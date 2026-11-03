@@ -2,6 +2,7 @@
 import numpy as np
 
 from engine.v2.foundation import content_hash
+from engine.v2.models.training.fit_inputs import validate_train_event_dates
 
 
 def _matrix(indexed, event_ids, horizon, columns):
@@ -32,6 +33,7 @@ def fit_evidence(columns, train_features, prediction_features, horizon_sessions,
     if labels is not None:
         training[target_column] = labels
     if train_event_dates is not None:
+        validate_train_event_dates(train_event_dates, train_features)
         training["event_dates"] = list(train_event_dates)
     return {"horizon_sessions": horizon_sessions,
             "training_event_ids": list(training_event_ids),

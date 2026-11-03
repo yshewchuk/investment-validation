@@ -16,6 +16,29 @@ def check_fitting_allowed(path: str) -> None:
     forbid_v2_fitting(path)
 
 
+def validate_train_event_dates(dates, train_features) -> None:
+    """Validate optional ordered training event dates against sized training rows."""
+    if dates is None:
+        return
+    if not isinstance(dates, (list, tuple)):
+        raise ValueError("training event dates must be a list or tuple")
+    try:
+        rows = len(train_features)
+    except TypeError:
+        raise ValueError("training event dates require sized training rows") from None
+    if len(dates) != rows:
+        raise ValueError("training event dates length does not match training rows")
+    for value in dates:
+        if not isinstance(value, str):
+            raise ValueError("training event dates must be ISO date strings")
+        try:
+            canonical = date.fromisoformat(value).isoformat() == value
+        except ValueError:
+            raise ValueError("training event dates must be canonical ISO dates") from None
+        if not canonical:
+            raise ValueError("training event dates must be canonical ISO dates")
+
+
 @dataclass(frozen=True)
 class FitInputs:
     """Transport that stores fields as given; use from_recipe for guard and column checks."""
@@ -27,26 +50,7 @@ class FitInputs:
     train_event_dates: list[str] | tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
-        dates = self.train_event_dates
-        if dates is None:
-            return
-        if not isinstance(dates, (list, tuple)):
-            raise ValueError("training event dates must be a list or tuple")
-        try:
-            rows = len(self.train_features)
-        except TypeError:
-            raise ValueError("training event dates require sized training rows") from None
-        if len(dates) != rows:
-            raise ValueError("training event dates length does not match training rows")
-        for value in dates:
-            if not isinstance(value, str):
-                raise ValueError("training event dates must be ISO date strings")
-            try:
-                canonical = date.fromisoformat(value).isoformat() == value
-            except ValueError:
-                raise ValueError("training event dates must be canonical ISO dates") from None
-            if not canonical:
-                raise ValueError("training event dates must be canonical ISO dates")
+        validate_train_event_dates(self.train_event_dates, self.train_features)
 
     @classmethod
     def from_recipe(cls, recipe, train_features, train_labels, prediction_features, columns,
