@@ -2,6 +2,8 @@
 from contextlib import contextmanager
 from pathlib import Path
 import sqlite3
+import subprocess
+import sys
 
 
 def request():
@@ -10,6 +12,17 @@ def request():
             "job_wall_seconds": 60},
         "uncertainty": {"seed": 0, "resamples": 4, "block_days": 7,
             "block_origin": "2023-01-01", "confidence": .95}}
+
+
+def catalog_bytes(path):
+    """Inspect bytes outside the process that owns SQLite's POSIX locks.
+
+    Even a raw read/close before the pin can drop an existing connection's
+    locks without updating SQLite's bookkeeping on older SQLite versions.
+    """
+    return subprocess.run([sys.executable, "-c",
+        "import pathlib, sys; sys.stdout.buffer.write(pathlib.Path(sys.argv[1]).read_bytes())",
+        str(path)], stdout=subprocess.PIPE, check=True, timeout=10).stdout
 
 
 @contextmanager

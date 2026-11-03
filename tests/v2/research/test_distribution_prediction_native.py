@@ -160,7 +160,7 @@ from experiments.magnitude_search_records import read_record
 from experiments.magnitude_search_shards import iter_section
 from experiments.native_registration import reserve_native_registration
 from experiments.v2_magnitude_search_run import seal_search_run
-from tests.v2.research.distribution_prediction_operator_support import pinned_wal_snapshot
+from tests.v2.research.distribution_prediction_operator_support import catalog_bytes, pinned_wal_snapshot
 from tests.v2.research.magnitude_trial_support import prediction_spec
 from tests.v2.research.test_magnitude_panel_qualified import panel_data
 from tests.v2.research.test_magnitude_search_request import request as search_request
@@ -245,7 +245,7 @@ def objects_snapshot():
         for path in store.root.rglob("*") if path.is_file())
 def database_snapshot():
     # Read-only WAL replay may change SHM reader marks, not durable main/WAL bytes.
-    return {path.name: path.read_bytes() for path in catalog.parent.glob(catalog.name + "*")
+    return {path.name: catalog_bytes(path) for path in catalog.parent.glob(catalog.name + "*")
         if path.is_file() and not path.name.endswith("-shm")}
 def record(slot):
     return read_record(data.conn, store, prepared["run_id"], "distribution:prediction-" + slot)
@@ -263,7 +263,7 @@ assert preflight == sealed and sealed["final_read_authority"] == "none" and seal
 assert set(sealed["arms"]) == {"histogram", "same_mean", "matched_point", "training_empirical"}
 assert data.conn.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
 assert data.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0] == 0
-checkpointed = catalog.read_bytes()
+checkpointed = catalog_bytes(catalog)
 with pinned_wal_snapshot(catalog) as pinned:
     result = invoke("run", mode="fresh")
     assert result["schema_version"] == "distribution_prediction_run.v1" and result["run_plan_id"] == sealed["run_plan_id"]
@@ -331,9 +331,11 @@ with pinned_wal_snapshot(catalog) as pinned:
     no_trading_outputs(result)
 
     # The pinned old reader cannot see completion; a fresh reader must use live WAL.
+    assert pinned.execute("PRAGMA integrity_check").fetchall() == [("ok",)]
+    assert [row[0] for row in data.conn.execute("PRAGMA integrity_check")] == ["ok"]
     assert pinned.execute("SELECT 1 FROM magnitude_search_records WHERE run_id=? AND slot=?",
         (prepared["run_id"], "distribution:prediction-completed")).fetchone() is None
-    assert catalog.read_bytes() == checkpointed
+    assert catalog_bytes(catalog) == checkpointed
     assert catalog.with_name(catalog.name + "-wal").stat().st_size > 0
     before, before_objects, durable = rows(), objects_snapshot(), database_snapshot()
     for action in ("collect", "report", "run"):
@@ -343,7 +345,7 @@ assert data.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0] == 0
 assert data.conn.execute("PRAGMA journal_mode=DELETE").fetchone()[0] == "delete"
 data.conn.close()
 durable = database_snapshot()
-assert set(durable) == {catalog.name} and catalog.read_bytes()[18:20] == b"\x01\x01"
+assert set(durable) == {catalog.name} and catalog_bytes(catalog)[18:20] == b"\x01\x01"
 for action in ("collect", "report", "run"):
     assert invoke(action, mode="replay") == result
     assert database_snapshot() == durable and objects_snapshot() == before_objects
@@ -355,11 +357,11 @@ with tempfile.TemporaryDirectory(prefix="prediction-native-substitution-") as sc
     original.backup(copied)
     original.close()
     copied.close()
-    copied_bytes = copied_catalog.read_bytes()
+    copied_bytes = catalog_bytes(copied_catalog)
     refused = invoke("collect", mode="substitution", expected_status=2,
         catalog_path=copied_catalog, store_path=copied_store)
     assert refused["refused"]["code"] == "EXPERIMENT_IDENTITY_CONFLICT"
-    assert copied_catalog.read_bytes() == copied_bytes
+    assert catalog_bytes(copied_catalog) == copied_bytes
     assert database_snapshot() == durable and objects_snapshot() == before_objects
 try:
     next(generator)
