@@ -9,6 +9,7 @@ from engine.v2.ops.executor import THREAD_VARIABLES
 
 SCRIPT = r'''
 import json
+import signal
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,6 +20,7 @@ from engine.v2.foundation import SystemClock, canonical_json
 from engine.v2.models.no_fit import no_fit_guard
 from engine.v2.research.event_history import MAX_OUTCOME_OBJECT_BYTES
 from experiments import distribution_run as runner
+from experiments.distribution_containment import contained
 from experiments.distribution_fitted import DistributionFits
 from experiments.distribution_run import DistributionRun
 from tests.v2.research.test_distribution_pipeline_native import make_run, native_case
@@ -27,8 +29,11 @@ root = Path(sys.argv[1])
 generator = native_case.__wrapped__(SimpleNamespace(mktemp=lambda _: root))
 case = next(generator)
 run = make_run(case, run_type=DistributionRun, runner="experiments/distribution_run.py",
-               experiment_id="synthetic-distribution-bounded-run")
+               experiment_id="synthetic-distribution-bounded-run", deadline_seconds=180,
+               parent_wall_seconds=210)
 run.seal(clock=SystemClock())
+assert run.request["limits"]["job_wall_seconds"] == 180
+assert run.request["limits"]["parent"]["wall_seconds"] == 210
 original, original_bytes, opened = objects.verify_object_path, objects.read_verified_bytes, set()
 def verify(store, ref):
     assert ref.object_id not in case.target_objects, "outer targets require a byte-bounded read"
@@ -50,7 +55,22 @@ def complete_outer(run, group, fits, results, plan, books, quotes, *rest):
     evaluations.append(group["outer"]["year"])
     return evaluate(run, group, fits, results, plan, books, quotes, *rest)
 runner.evaluate_outer = complete_outer
-result = run.run()
+original_setitimer, timer_seconds = signal.setitimer, []
+def record_setitimer(which, seconds, interval=0.0):
+    if which == signal.ITIMER_REAL and seconds > 0:
+        timer_seconds.append(seconds)
+    return original_setitimer(which, seconds, interval)
+signal.setitimer = record_setitimer
+try:
+    with contained(run.request["limits"]["parent"], run.request["limits"]["job_wall_seconds"]):
+        pass
+    with contained({**run.request["limits"]["parent"], "wall_seconds": run.request["limits"]["job_wall_seconds"]},
+                   run.request["limits"]["parent"]["wall_seconds"]):
+        pass
+    result = run.run()
+finally:
+    signal.setitimer = original_setitimer
+assert timer_seconds == [180, 180, 180]
 assert evaluations == ["2024"]
 assert opened == case.target_objects and len(opened) == 1
 assert result["final_read_authority"] == "none" and result["promotion_authority"] == "none"
@@ -101,7 +121,7 @@ except StopIteration:
 
 def test_real_native_bounded_run_and_read_only_collection(tmp_path):
     result = subprocess.run([sys.executable, "-c", SCRIPT, str(tmp_path / "native")],
-        cwd=Path(__file__).resolve().parents[3], capture_output=True, text=True, timeout=180,
+        cwd=Path(__file__).resolve().parents[3], capture_output=True, text=True, timeout=240,
         env={**os.environ, **dict.fromkeys(THREAD_VARIABLES, "1"), "PYTHONDONTWRITEBYTECODE": "1"})
     assert result.returncode == 0, result.stdout + result.stderr
     payload = json.loads(result.stdout.splitlines()[-1])
