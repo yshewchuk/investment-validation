@@ -58,8 +58,93 @@ def _patch_manifest(monkeypatch, manifest, *, hash_matches=True):
 
 
 def _patch_evidence(monkeypatch, evidence):
-    monkeypatch.setattr(phase5_acceptance_job, "build_evidence",
-                        lambda _release_root: evidence)
+    def build(_release_root, *, candidate_release_id=None):
+        return evidence
+
+    monkeypatch.setattr(phase5_acceptance_job, "build_evidence", build)
+
+
+def _write_root_selector(release_root, body):
+    (release_root / "phase5_release.json").write_text(json.dumps(body), encoding="utf-8")
+
+
+def _build_for_candidate(release_root, candidate_release_id):
+    return acceptance_gate.build_evidence(
+        release_root, candidate_release_id=candidate_release_id, state_specs=(),
+        consumers={}, watch_dirs=[])
+
+
+def test_build_evidence_selects_explicit_candidate_over_root_selector(tmp_path):
+    release_root = tmp_path / "store"
+    candidate = _catalog(release_root, "candidate")
+    other = _catalog(release_root, "other")
+    _write_root_selector(release_root, other)
+
+    evidence = _build_for_candidate(release_root, "candidate")
+    default = acceptance_gate.build_evidence(
+        release_root, state_specs=(), consumers={}, watch_dirs=[])
+
+    assert evidence["release_id"] == "candidate"
+    assert evidence["manifest_hash"] == candidate["manifest_hash"]
+    assert default["release_id"] == other["release_id"]
+
+
+def test_build_evidence_selects_explicit_candidate_when_root_selector_absent(tmp_path):
+    release_root = tmp_path / "store"
+    candidate = _catalog(release_root, "candidate")
+
+    evidence = _build_for_candidate(release_root, "candidate")
+
+    assert evidence["release_id"] == "candidate"
+    assert evidence["manifest_hash"] == candidate["manifest_hash"]
+
+
+def test_build_evidence_refuses_missing_candidate_without_root_fallback(tmp_path):
+    release_root = tmp_path / "store"
+    other = _catalog(release_root, "other")
+    _write_root_selector(release_root, other)
+
+    evidence = _build_for_candidate(release_root, "missing")
+
+    assert evidence["status"] == "FAIL"
+    assert "release_id" not in evidence
+    assert any(row["code"] == acceptance_gate.RELEASE_LAYOUT
+               for row in evidence["findings"])
+
+
+def test_build_evidence_refuses_mismatched_candidate_catalog(tmp_path):
+    release_root = tmp_path / "store"
+    other = _catalog(release_root, "other")
+    path = catalog_path(release_root, "candidate")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(other), encoding="utf-8")
+
+    evidence = _build_for_candidate(release_root, "candidate")
+
+    assert evidence["status"] == "FAIL"
+    assert "release_id" not in evidence
+    assert any(row["code"] == acceptance_gate.RELEASE_LAYOUT
+               for row in evidence["findings"])
+
+
+def test_worker_threads_candidate_id_to_acceptance_job(tmp_path, monkeypatch):
+    release_root = tmp_path / "store"
+    attempt = tmp_path / "attempt"
+    attempt.mkdir()
+    catalog = _catalog(release_root, "candidate")
+    evidence = _evidence("candidate", catalog)
+    _patch_manifest(monkeypatch, _manifest("candidate"))
+    seen = []
+
+    def build(_release_root, *, candidate_release_id=None):
+        seen.append(candidate_release_id)
+        return evidence
+
+    monkeypatch.setattr(phase5_acceptance_job, "build_evidence", build)
+
+    phase5_accept.run_phase5_accept_worker(_params(release_root), attempt)
+
+    assert seen == ["candidate"]
 
 
 def test_verify_object_uses_bounded_reader(tmp_path, monkeypatch):
@@ -248,7 +333,7 @@ def test_catalog_drift_after_evidence_production_is_input_changed(tmp_path, monk
     evidence = _evidence("candidate", catalog)
     _patch_manifest(monkeypatch, _manifest("candidate"))
 
-    def build_then_drift(_release_root):
+    def build_then_drift(_release_root, *, candidate_release_id=None):
         drifted = {"schema_version": PHASE5_RELEASE_SCHEMA, "release_id": "candidate",
                    "deployment_id": "deployment-drifted", "members": [], "sources": {}}
         drifted["manifest_hash"] = content_hash(drifted)

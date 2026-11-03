@@ -20,9 +20,14 @@ from checks.phase5_acceptance import build_evidence
 ACCEPTANCE_FILE = "acceptance.json"
 
 
-def run_acceptance(release_root: Path, output_dir: Path) -> tuple[dict, Path]:
-    """Build release-scope evidence and write it as ``acceptance.json``."""
-    evidence = build_evidence(Path(release_root))
+def run_acceptance(release_root: Path, output_dir: Path,
+                   candidate_release_id: str | None = None) -> tuple[dict, Path]:
+    """Build release-scope evidence and write it as ``acceptance.json``.
+
+    An explicit candidate id selects that release's local catalog; without one
+    the gate keeps its root-selector default."""
+    evidence = build_evidence(Path(release_root),
+                              candidate_release_id=candidate_release_id)
     output = Path(output_dir) / ACCEPTANCE_FILE
     output.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n",
                       encoding="utf-8")

@@ -63,13 +63,16 @@ from engine.v2.models import deployment  # noqa: E402
 from engine.v2.models.contracts import ModelRelease  # noqa: E402
 from engine.v2.models.release_layout import (  # noqa: E402
     EXPECTED_MODEL_BINDINGS,
+    MANIFEST_NAME,
     MISSING,
     PENDING,
     STAGED,
     STATE_SPECS,
     ReleaseLayoutError,
     StateSpec,
+    catalog_path,
     deployment_root,
+    read_catalog,
     read_manifest,
     read_regular_file,
     sha256_bytes,
@@ -676,15 +679,35 @@ def _default_watch_dirs(release_root: Path) -> list[Path]:
     return [paths.DATA / "models", deployment_root(release_root)]
 
 
+def _selected_manifest(release_root: Path, candidate_release_id: str | None) -> dict:
+    """The explicit candidate's release-local catalog, or the root selector.
+
+    An explicit id never falls back to the root ``phase5_release.json``: a
+    missing or mismatched candidate catalog is a layout refusal.
+    """
+    if candidate_release_id is None:
+        return read_manifest(release_root)
+    body = read_catalog(catalog_path(release_root, candidate_release_id),
+                        candidate_release_id)
+    if body is None:
+        raise ReleaseLayoutError(
+            f"no {MANIFEST_NAME} for candidate {candidate_release_id}")
+    return body
+
+
 def build_evidence(release_root: Path, *, report_dir: Path | None = None,
                    phase4_corpus: Path | None = None,
                    phase4_checkpoint: Path | None = None,
                    watch_dirs: Iterable[Path] | None = None,
                    consumers: Mapping[str, Any] | None = None,
-                   state_specs: tuple[StateSpec, ...] = STATE_SPECS) -> dict:
+                   state_specs: tuple[StateSpec, ...] = STATE_SPECS,
+                   candidate_release_id: str | None = None) -> dict:
     """Run every subject; ``consumers``/``state_specs``/``watch_dirs`` are test
     seams. Production passes none of them: the full catalog and the real
-    consumer table, where a probe that does not exist yet is PENDING."""
+    consumer table, where a probe that does not exist yet is PENDING.
+
+    ``candidate_release_id`` selects that release's local catalog; without it
+    the root selector is used, as the CLI always has."""
     started = time.perf_counter()
     release_root = Path(release_root)
     findings = _Findings()
@@ -695,7 +718,7 @@ def build_evidence(release_root: Path, *, report_dir: Path | None = None,
                                 "phase4": {"status": "NOT_RUN"}}
     _progress("p5-accept", f"start release_root={release_root}", started)
     try:
-        manifest = read_manifest(release_root)
+        manifest = _selected_manifest(release_root, candidate_release_id)
     except (ReleaseLayoutError, OSError, ValueError) as exc:
         findings.add(RELEASE_LAYOUT, "phase5_release.json", str(exc))
         return _finish(evidence, findings, report_dir, started)
