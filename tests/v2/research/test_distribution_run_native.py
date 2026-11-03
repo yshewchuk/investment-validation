@@ -9,6 +9,7 @@ from engine.v2.ops.executor import THREAD_VARIABLES
 
 SCRIPT = r'''
 import json
+import signal
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -27,8 +28,10 @@ root = Path(sys.argv[1])
 generator = native_case.__wrapped__(SimpleNamespace(mktemp=lambda _: root))
 case = next(generator)
 run = make_run(case, run_type=DistributionRun, runner="experiments/distribution_run.py",
-               experiment_id="synthetic-distribution-bounded-run")
+               experiment_id="synthetic-distribution-bounded-run", deadline_seconds=180)
 run.seal(clock=SystemClock())
+assert run.request["limits"]["job_wall_seconds"] == 180
+assert run.request["limits"]["parent"]["wall_seconds"] == 180
 original, original_bytes, opened = objects.verify_object_path, objects.read_verified_bytes, set()
 def verify(store, ref):
     assert ref.object_id not in case.target_objects, "outer targets require a byte-bounded read"
@@ -50,7 +53,17 @@ def complete_outer(run, group, fits, results, plan, books, quotes, *rest):
     evaluations.append(group["outer"]["year"])
     return evaluate(run, group, fits, results, plan, books, quotes, *rest)
 runner.evaluate_outer = complete_outer
-result = run.run()
+original_setitimer, timer_seconds = signal.setitimer, []
+def record_setitimer(which, seconds, interval=0.0):
+    if which == signal.ITIMER_REAL and seconds > 0:
+        timer_seconds.append(seconds)
+    return original_setitimer(which, seconds, interval)
+signal.setitimer = record_setitimer
+try:
+    result = run.run()
+finally:
+    signal.setitimer = original_setitimer
+assert timer_seconds == [180]
 assert evaluations == ["2024"]
 assert opened == case.target_objects and len(opened) == 1
 assert result["final_read_authority"] == "none" and result["promotion_authority"] == "none"
@@ -101,7 +114,7 @@ except StopIteration:
 
 def test_real_native_bounded_run_and_read_only_collection(tmp_path):
     result = subprocess.run([sys.executable, "-c", SCRIPT, str(tmp_path / "native")],
-        cwd=Path(__file__).resolve().parents[3], capture_output=True, text=True, timeout=180,
+        cwd=Path(__file__).resolve().parents[3], capture_output=True, text=True, timeout=240,
         env={**os.environ, **dict.fromkeys(THREAD_VARIABLES, "1"), "PYTHONDONTWRITEBYTECODE": "1"})
     assert result.returncode == 0, result.stdout + result.stderr
     payload = json.loads(result.stdout.splitlines()[-1])

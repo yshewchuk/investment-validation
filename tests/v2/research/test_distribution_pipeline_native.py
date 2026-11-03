@@ -105,7 +105,7 @@ def quote_snapshot(case):
 
 
 def make_run(case, *, run_type=DistributionRunPlan, experiment_id="synthetic-distribution-pipeline",
-             runner="experiments/distribution_trials.py"):
+             runner="experiments/distribution_trials.py", deadline_seconds=None):
     source = case.registration.document
     spec = prediction_spec(experiment_id=experiment_id, folds=("2024",), runner=runner,
         hypothesis="Compare a raw magnitude histogram with its matched point model.", primary_arm_id="raw_pair", arms=("raw_pair",))
@@ -119,6 +119,9 @@ def make_run(case, *, run_type=DistributionRunPlan, experiment_id="synthetic-dis
             "max_trees": 49200, "child_limits": dict(case.request["limits"]["child"])})
     policy = run_request()
     policy.update(quote_snapshot_id=case.quotes.snapshot_id, bridges=[], max_opportunities=1)
+    if deadline_seconds is not None:
+        policy["limits"] = {**policy["limits"], "job_wall_seconds": deadline_seconds,
+            "parent": {**policy["limits"]["parent"], "wall_seconds": deadline_seconds}}
     for alpha in policy["alphas"]:
         artifact = make_payoff_line_artifact(dict(n=3, resid_sd=0., residuals=[0.], intercept=1., slope=1.),
             strategy="STR-THRU", driver="abs_move", alpha=alpha, cutoff="2023-12-31", window=("2022-01-01", "2023-12-30"))
