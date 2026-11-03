@@ -362,6 +362,7 @@ def training_plan(*, mode, recipe="", state="", month="", alpha=None, cutoffs=()
     read or staged. Source bytes are verified by the worker on every attempt.
     """
     from engine.v2.foundation import content_hash
+    from engine.v2.ops.experiments import default_checkout_root
     from engine.v2.ops.fingerprints import environment_identity, worker_source_manifest
 
     profile = profile_named(DEFAULT_POLICY, "experiment_heavy")
@@ -376,7 +377,7 @@ def training_plan(*, mode, recipe="", state="", month="", alpha=None, cutoffs=()
     if problems:
         raise fail("INVALID_REQUEST", "training plan is invalid",
                    details={"problems": list(problems)})
-    root3 = Path(__file__).resolve().parents[3]
+    root3 = default_checkout_root()
     parameters = dict(vars(params))
     if mode != "monthly_pools":
         del parameters["month"]
@@ -408,6 +409,7 @@ def promote_plan(*, release_root, release_id,
     are unchanged."""
     from engine.v2.foundation import content_hash
     from engine.v2.models import deployment
+    from engine.v2.ops.experiments import default_checkout_root
     from engine.v2.ops.fingerprints import environment_identity, worker_source_manifest
 
     if not release_id:
@@ -434,7 +436,7 @@ def promote_plan(*, release_root, release_id,
     parameters = vars(params)
     if not require_empty_store:
         del parameters["require_empty_store"]
-    root3 = Path(__file__).resolve().parents[3]
+    root3 = default_checkout_root()
     return {"schema_version": "operations_plan.v1.0", "kind": "promote", "mode": "shadow",
             "effects": ["staged"], "parameters": parameters, "input_refs": [],
             "blocked_prerequisites": [], "spec_hash": content_hash(parameters),

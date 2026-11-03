@@ -170,6 +170,7 @@ def pool_frame(seed: int = 3, n: int = 1400, ties: bool = False) -> pd.DataFrame
     entry = pd.Timestamp("2024-01-02") + pd.to_timedelta(rng.integers(0, 980, n), unit="D")
     frame = pd.DataFrame({
         "strategy": rng.choice(DYNAMIC_MENU, n),
+        "event_date": entry,
         "entry_date": entry,
         "exit_date": entry + pd.to_timedelta(rng.integers(1, 20, n), unit="D"),
         "pnl": rng.normal(0.0, 150.0, n),

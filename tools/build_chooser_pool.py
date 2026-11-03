@@ -70,7 +70,7 @@ def build(source: Path) -> pd.DataFrame:
     # it the realized P&L is not the one the neighbourhood averaged.
     raw = e161.conditional_exit(raw)
     raw["pnl"] = raw["exit_value"] - raw["entry_cost"]
-    keep = ["strategy", "event_id", "ticker", "entry_date", "exit_date", "pnl",
+    keep = ["strategy", "event_id", "ticker", "event_date", "entry_date", "exit_date", "pnl",
             *Scorer._CHOOSER_ANALOG_DIMS]
     out = raw[keep].dropna(subset=["exit_date", "pnl"])
     return out.sort_values(["strategy", "entry_date"]).reset_index(drop=True)

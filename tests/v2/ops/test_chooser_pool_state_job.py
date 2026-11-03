@@ -273,11 +273,21 @@ def test_source_missing_required_column_refuses(tmp_path, monkeypatch, column):
     assert not (out / "chooser_analog_pool.json").exists()
 
 
-def test_source_malformed_event_date_refuses(tmp_path, monkeypatch):
+@pytest.mark.parametrize("field", ["event_date", "exit_date"])
+def test_source_malformed_date_refuses(tmp_path, monkeypatch, field):
     rows = [_row("CTR5", "2026-02-10", 1.0)]
-    rows[0]["event_date"] = "not-a-date"
+    rows[0][field] = "not-a-date"
     monkeypatch.setattr(paths, "FEATURES", _write_source(tmp_path, _pool_frame(rows)))
-    with pytest.raises(ValueError, match="unparsable chooser pool event_date"):
+    with pytest.raises(SystemExit, match=f"unparsable chooser pool {field}"):
+        job.run_state_job("chooser_analog_pool", tmp_path / "out", cutoff=CUTOFF)
+
+
+def test_source_corrupt_parquet_refuses(tmp_path, monkeypatch):
+    source = tmp_path / "features"
+    source.mkdir()
+    (source / "chooser_analog_pool.parquet").write_bytes(b"not a parquet file")
+    monkeypatch.setattr(paths, "FEATURES", source)
+    with pytest.raises(SystemExit):
         job.run_state_job("chooser_analog_pool", tmp_path / "out", cutoff=CUTOFF)
 
 
@@ -289,6 +299,9 @@ def test_source_missing_event_date_value_drops_the_row(tmp_path, monkeypatch):
     summary = job.run_state_job("chooser_analog_pool", tmp_path / "out", cutoff=CUTOFF)
 
     assert summary["n_rows"] == 1
+    pool = FrozenStateLoader(tmp_path / "out").load(
+        FrozenStateRef(path=summary["file"], content_hash=summary["content_hash"]))
+    assert pool.rows_for("CTR5") == (_pool_row("2026-02-11", 2.0),)
 
 
 def test_size_cap_boundary(tmp_path, monkeypatch):

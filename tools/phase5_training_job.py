@@ -244,7 +244,13 @@ def build_state(member: str, *, cutoff=None, ticker_chunk: int = 1000, registry=
         raise SystemExit(f"{member} writes one artifact per causal key: use its own job")
     if member.startswith("driver_residual_pool:"):
         role = member.split(":", 1)[1]
-        pool = data.champion_driver_pool(role, registry=registry)
+        from engine.models.registry import RegistryError
+
+        try:
+            pool = data.champion_driver_pool(role, registry=registry)
+        except RegistryError as exc:
+            raise SystemExit(
+                f"driver_residual_pool:{role} champion source is invalid") from exc
         lineage = Lineage(data=(DataDependency(
             table=f"model_artifact:{pool['model_id']}",
             keys=(str(pool["artifact_sha256"]),)),))
@@ -252,7 +258,7 @@ def build_state(member: str, *, cutoff=None, ticker_chunk: int = 1000, registry=
             pool["residuals"], pool["buckets"], role=role, model_id=pool["model_id"],
             lineage=lineage)
         summary = {"model_id": pool["model_id"], "artifact_sha256": pool["artifact_sha256"],
-                   "champion_data_date_cutoff": pool.get("data_date_cutoff"),
+                   "champion_data_date_cutoff": None,
                    "n_residuals": int(np.isfinite(pool["residuals"]).sum()),
                    "n_buckets": 0 if not pool["buckets"] else len(pool["buckets"]["pools"]),
                    "source_identity": {"model_id": pool["model_id"],
@@ -303,8 +309,11 @@ def build_state(member: str, *, cutoff=None, ticker_chunk: int = 1000, registry=
         except ValueError as exc:
             raise SystemExit(str(exc)) from exc
         lineage = Lineage(data=(DataDependency(table=CHOOSER_POOL_ID, end_exclusive=bound),))
-        artifact = build_chooser_analog_pool_artifact(
-            frame.to_dict("records"), pool_id=CHOOSER_POOL_ID, cutoff=bound, lineage=lineage)
+        try:
+            artifact = build_chooser_analog_pool_artifact(
+                frame.to_dict("records"), pool_id=CHOOSER_POOL_ID, cutoff=bound, lineage=lineage)
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
         n_rows = sum(len(rows) for _, rows in artifact.strategies)
         print(f"[p5-3] chooser_analog_pool: built {n_rows} rows in "
               f"{time.perf_counter() - started:.1f}s", file=sys.stderr, flush=True)
@@ -405,33 +414,14 @@ MONTHLY_DRIVER_MEMBERS = (
 MONTHLY_POOL_MEMBERS = (*MONTHLY_DRIVER_MEMBERS, CHOOSER_POOL_STATE)
 
 
-def _champion_data_date_cutoff(summary: dict, retrain_cutoff: str) -> str | None:
-    """The champion's canonical data-date cutoff, refused when after the retrain cutoff.
-
-    Only a source-supplied data date is accepted; ``created``/``trained_at``
-    and other computed or wall-clock times are never substitutes.
-    """
-    value = summary.get("champion_data_date_cutoff", summary.get("data_date_cutoff"))
-    if value is None:
-        return None
-    try:
-        bound = _iso_cutoff(value)
-    except (TypeError, ValueError):
-        raise SystemExit(
-            "monthly_pools driver data-date cutoff must be an ISO date (YYYY-MM-DD)") from None
-    if bound > retrain_cutoff:
-        raise SystemExit("monthly_pools driver data-date cutoff is after retrain_cutoff")
-    return bound
-
-
 def run_monthly_pools_job(out: Path, *, month: str, cutoff: str,
                           ticker_chunk: int = 1000) -> dict:
     """Build the fixed four S1 monthly-retrain pools into ``out``.
 
-    The three driver pools are D1 carried/refrozen champion pools with
-    unchanged content and no newly admitted rows; their receipts record the
-    champion identity and inherited admission, and take no cutoff. Only the
-    chooser takes the exclusive ``cutoff`` (the day after ``month``'s end).
+    The three driver pools are D1 re-freezes of the stored champion pools,
+    unchanged in this slice; their receipts record the champion identity and
+    inherited admission, and take no cutoff. Only the chooser takes the
+    exclusive ``cutoff`` (the day after ``month``'s end).
     Reuses ``run_state_job``.
     """
     try:
@@ -469,7 +459,7 @@ def run_monthly_pools_job(out: Path, *, month: str, cutoff: str,
                 "status": "carried_refrozen",
                 "model_id": identity["model_id"],
                 "artifact_sha256": identity["artifact_sha256"],
-                "champion_data_date_cutoff": _champion_data_date_cutoff(summary, bound),
+                "champion_data_date_cutoff": None,
                 "admission": {"mode": "inherited_from_champion",
                               "artifact_id": identity["model_id"]},
             })
