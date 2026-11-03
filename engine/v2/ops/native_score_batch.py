@@ -722,9 +722,7 @@ def _chooser_bundle_or_refusal(
 ) -> SourceBundle | NativeScoreBatchRowRefusal:
     """Declare the selected DYN-SV chooser state on ``bundle``, or refuse the row.
 
-    ``ModelNotReady`` from selection or validation becomes the fixed
-    ``MODEL_NOT_READY`` row refusal; its detail is never published.
-    """
+    ``ModelNotReady`` becomes a fixed ``MODEL_NOT_READY`` refusal; detail never published."""
     try:
         state = select_chooser_state(binding, event_date, as_of)
         chooser = binding.model_identity.get("chooser:DYN-SV")
@@ -889,32 +887,31 @@ def _project_member_features(
     key: BoardRequest,
     event: NightlyEventInputs,
     binding: ScoringReleaseBinding,
-    feature_names: Sequence[str],
+    feature_names: Sequence[str], as_of: Any = None,
 ) -> Sequence[str] | NativeScoreBatchRowRefusal:
-    """Project required staged chooser/producer features for one DYN-SV row.
+    """Project required staged chooser/producer features for one chooser row.
 
-    Every other supported strategy keeps its explicit/derived ``feature_names``
-    unchanged. Malformed explicit names are returned unchanged so the bundle's
-    own ``INVALID_FEATURE_NAMES`` validation still refuses them before
-    projection. Scorer-computed and stage-owned gate columns are never
-    projected or required from staged rows.
-    """
+    Chooser-enabled members add the selected state's producer feature orders
+    plus chooser primitives; others keep ``feature_names`` unchanged. Malformed
+    names pass through for the bundle's ``INVALID_FEATURE_NAMES`` refusal;
+    scorer-computed and stage-owned gate columns are never projected."""
     if not _valid_explicit_feature_names(feature_names):
         return feature_names
-    if key.strategy != "DYN-SV":
+    spec = _STRATEGY_REGISTRY.get(key.strategy)
+    if spec is None or not spec.chooser:
         return feature_names
-    references = binding.chooser_fold_references
-    if not references:
+    try:
+        state = select_chooser_state(binding, event.calendar_row.get("event_date"), as_of)
+    except ModelNotReady:
         return NativeScoreBatchRowRefusal(
-            key, "RELEASE_MISSING_FEATURE_ORDER",
-            "chooser producer references are missing")
-    projected = set(_CHOOSER_PRIMITIVES) - _SCORER_COMPUTED_FEATURES
-    for reference in references.values():
-        if not reference.release_binding.feature_order:
+            key, "MODEL_NOT_READY", "DYN-SV chooser state missing or unusable")
+    projected = set(_CHOOSER_PRIMITIVES)
+    for producer in state.producer_bindings.values():
+        if not producer.feature_order:
             return NativeScoreBatchRowRefusal(
                 key, "RELEASE_MISSING_FEATURE_ORDER",
                 "chooser producer identity has no feature_order")
-        projected.update(reference.release_binding.feature_order)
+        projected.update(producer.feature_order)
     projected -= _SCORER_COMPUTED_FEATURES
     projected -= set(GATE_FORECAST_COLUMNS)
     projected -= set(GATE_ANALOG_COLUMNS)
@@ -994,7 +991,7 @@ def _assemble_one_event(
         key, spec, gate_policy, feature_names, drivers, gate_identity)
     if refusal is not None:
         return refusal
-    feature_names = _project_member_features(key, event, binding, feature_names)
+    feature_names = _project_member_features(key, event, binding, feature_names, as_of)
     if isinstance(feature_names, NativeScoreBatchRowRefusal):
         return feature_names
     bundle = _bundle_or_refusal(

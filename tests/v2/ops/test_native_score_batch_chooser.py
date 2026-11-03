@@ -10,7 +10,10 @@ import pytest
 
 from engine.v2.ops import native_score_batch as nsb
 from engine.v2.ops.native_board_universe import BoardRequest
-from engine.v2.ops.native_score_batch import NativeScoreBatchRowRefusal
+from engine.v2.ops.native_score_batch import (
+    NativeScoreBatchRowRefusal,
+    NightlyEventInputs,
+)
 from engine.v2.scoring.release_bindings import ModelNotReady
 
 Bundle = make_dataclass(
@@ -67,6 +70,16 @@ def _state():
 def _binding():
     return SimpleNamespace(
         model_identity={"chooser:DYN-SV": Binding("chooser", _CHOOSER_MEMBER)})
+
+
+def _projection_event(strategy: str) -> NightlyEventInputs:
+    panel = {name: 0.1 for name in nsb._CHOOSER_PRIMITIVES}
+    panel["zeta_distinct"] = 0.5
+    return NightlyEventInputs(
+        key=BoardRequest("AAA", strategy, pd.Timestamp("2026-01-12"), "close"),
+        calendar_row={"event_date": "2026-01-12", "entry_date": "2026-01-12"},
+        panel_row=panel, panel_anchor="2026-01-10",
+        tier4_row={}, quote_rows=())
 
 
 def test_only_the_seven_menu_specs_choose():
@@ -168,3 +181,41 @@ def test_non_chooser_spec_returns_the_same_bundle(monkeypatch, name):
 
     assert result is bundle
     assert pickle.dumps(result) == before
+
+
+def test_project_member_features_projects_selected_state_order(monkeypatch):
+    distinctive = ("zeta_distinct", "entry_cost_pct", "days_to_print",
+                   "dte_entry", "pred_abs_move", "analog_mean")
+    state = SimpleNamespace(producer_bindings={
+        "pred_im_t1_d14": SimpleNamespace(feature_order=distinctive),
+    })
+    captured = {}
+
+    def fake(binding, event_date, as_of):
+        captured.update(binding=binding, event_date=event_date, as_of=as_of)
+        return state
+
+    monkeypatch.setattr(nsb, "select_chooser_state", fake)
+    event = _projection_event("TWIN-P")
+    binding = _binding()
+    projected = nsb._project_member_features(
+        event.key, event, binding, ("signal",), as_of="2026-01-10")
+
+    assert captured == {"binding": binding, "event_date": "2026-01-12",
+                        "as_of": "2026-01-10"}
+    expected = set(nsb._CHOOSER_PRIMITIVES) | {"zeta_distinct", "signal"}
+    assert set(projected) == expected
+    assert tuple(projected) == tuple(sorted(projected))
+    for excluded in ("entry_cost_pct", "days_to_print", "dte_entry",
+                     "pred_abs_move", "analog_mean"):
+        assert excluded not in projected
+
+    def unexpected(*_args, **_kwargs):
+        raise AssertionError("non-chooser strategy must not select chooser state")
+
+    monkeypatch.setattr(nsb, "select_chooser_state", unexpected)
+    kept = ("signal", "pred_abs_move")
+    thru = _projection_event("STR-THRU")
+    unchanged = nsb._project_member_features(
+        thru.key, thru, binding, kept, as_of="2026-01-10")
+    assert unchanged is kept
