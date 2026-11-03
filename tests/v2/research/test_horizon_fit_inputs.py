@@ -112,6 +112,17 @@ def test_prebuilt_inputs_refuse_opted_in_recipe_without_event_dates():
             route="magnitude", recipe={"requires_event_dates": True})
 
 
+def test_prebuilt_inputs_revalidate_dates_mutated_after_construction():
+    dates = ["2024-01-02"]
+    inputs = FitInputs([[1.]], [0.], [[2.]], COLUMNS, dates)
+    dates[0] = "2024-1-2"
+    evidence = {3: {"evaluation_event_ids": ["test"]}}
+    prebuilt = HorizonInputs({3: inputs}, evidence, "crush_pct_iv30")
+    with pytest.raises(ValueError, match="canonical ISO dates"):
+        fitted_forecasts(prebuilt, ["test"], [3], target_domain="nonnegative",
+            route="magnitude", recipe={"requires_event_dates": True})
+
+
 def test_fit_inputs_accepts_ordered_training_event_dates():
     dates = ("2024-01-02", "2024-01-01")
     inputs = FitInputs([[1.], [2.]], [0., 1.], [[3.]], COLUMNS, dates)

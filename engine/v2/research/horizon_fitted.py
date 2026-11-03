@@ -5,6 +5,7 @@ from copy import deepcopy
 
 import numpy as np
 
+from engine.v2.foundation.iso_dates import validate_train_event_dates
 from engine.v2.models.training.fit_inputs import FitInputs
 from engine.v2.models.training.fit_routes import check_fitting_allowed, fit_execution
 from engine.v2.research.horizon_fit_inputs import (
@@ -60,6 +61,9 @@ def _prepare_inputs(horizon, horizon_inputs, indexed, training_ids, evaluation_i
         requires_event_dates = isinstance(recipe, dict) and recipe.get("requires_event_dates") is True
         if requires_event_dates and horizon_inputs[horizon].train_event_dates is None:
             raise ValueError("prebuilt horizon inputs require training event dates")
+        if requires_event_dates:
+            prebuilt = horizon_inputs[horizon]
+            validate_train_event_dates(prebuilt.train_event_dates, prebuilt.train_features)
         return deepcopy(horizon_inputs.evidence[horizon]), horizon_inputs[horizon]
     requires_event_dates = isinstance(recipe, dict) and recipe.get("requires_event_dates") is True
     train_event_dates = ([indexed[event, horizon].get("event_date") for event in training_ids]
