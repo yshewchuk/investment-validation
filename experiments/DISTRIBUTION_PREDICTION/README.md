@@ -25,4 +25,6 @@ See [architecture](ARCHITECTURE.md) for the boundary between supplied numeric ev
 
 ## Supplied-score reporting
 
+This is a source-free library API currently called only by synthetic tests. Its intended future consumer is the separate neutral prediction lifecycle; no production or existing strategy caller is wired in this slice, and it provides no runnable prediction-only CLI or execution authority.
+
 `distribution_prediction_report.prediction_report(scores, events)` summarizes supplied four-arm forecast rows against the complete frozen event metadata, with no trade decision date or economic inputs. Every horizon and arm retains available, unavailable, missing-target and missing-row counts. Means are scoreable-only with metric-specific counts; unresolved CRPS and infinite log loss remain explicit. Tail checks show predicted probability, observed frequency and sample count. Paired same-mean, matched-point and training-empirical CRPS improvements use the common scoreable subset and retain excluded event IDs; the full-population improvement is unavailable if any pair is missing. Positive improvement favors the histogram, and horizon-one same-mean stays the sole primary contrast. Raw supplied rows/metadata are retained, not authenticated by this helper; native admission and later operator wiring remain required.

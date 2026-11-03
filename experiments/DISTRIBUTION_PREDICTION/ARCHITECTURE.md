@@ -22,6 +22,8 @@ The report will distinguish data availability from predictive interval coverage,
 
 ## Reporting supplied forecast evidence
 
+This source-free library API is currently exercised only by synthetic tests. The intended future consumer is the separate neutral prediction lifecycle; this slice has no wired production or existing strategy caller, runnable prediction-only CLI, or execution authority.
+
 `distribution_prediction_report.prediction_report(scores, events)` consumes one pass of supplied score rows and the frozen event list (`event_id`, `ticker`, canonical `event_date`); it has no strategy, book, market or payoff dependency. Native callers still authenticate source/request/fit identity and bound input/output bytes. The helper checks unique events/row identities, consistent outer-year membership and observations across arms, and finite score/tail contracts. Missing rows remain explicit counts against the entire frozen population for every arm and horizon, including wholly absent horizons.
 
 All four arms report scoreable-only CRPS/RPS/common-bin log-loss means and their sample counts; infinite log loss is never dropped from the overall mean. Fixed tail summaries pair predicted probability with realized frequency and count. Paired control-minus-histogram CRPS is positive for histogram improvement; only horizon-one same-mean is primary. Full-population deltas remain unavailable when any pair is missing; scoreable-only deltas retain exact paired and excluded event IDs. Detached, canonically ordered input rows and event metadata preserve supplied provenance and missingness for downstream diagnostics without granting provenance authority.
