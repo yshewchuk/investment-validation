@@ -252,7 +252,8 @@ def prepare_plan(conn, store, registration, request, *, plan_schema=None):
     for spec in schedule["candidate_specs"]:
         recipe = (size_candidate_recipe(binding["size_comparison"]) if spec["family"] == "size_v1_4" else
             candidate_recipe(spec["family"], spec["parameters"], columns=spec["feature_recipe"]["model_columns"],
-                             feature_dictionary_hash=spec["feature_recipe"]["dictionary_hash"]))
+                             feature_dictionary_hash=spec["feature_recipe"]["dictionary_hash"],
+                             requires_event_dates=spec.get("requires_event_dates", False)))
         identity = {"recipe": recipe, "feature_recipe": spec["feature_recipe"],
                     "source_binding_id": source_binding_id, "candidate_spec_id": spec["candidate_spec_id"]}
         candidates.append({**identity, "candidate_id": content_hash(identity)})

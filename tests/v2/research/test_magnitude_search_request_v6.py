@@ -206,3 +206,27 @@ assert compile_request(json.loads(sys.argv[1]))["counts"]["candidates"] == 109
     result = subprocess.run([sys.executable, "-c", probe, json.dumps(v6_request())],
                             capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("factory", [v6_request, v7_request])
+def test_event_date_opt_in_is_explicit_and_preserves_default_identity(factory):
+    request = factory(PROFILES[:1])
+    default = compile_request(request)
+    explicit_false = copy.deepcopy(request)
+    explicit_false["requires_event_dates"] = False
+    assert compile_request(explicit_false) == default
+
+    opted_in = copy.deepcopy(request)
+    opted_in["requires_event_dates"] = True
+    dated = compile_request(opted_in)
+    assert dated["request_id"] != default["request_id"]
+    for spec in dated["candidate_specs"]:
+        if spec["family"] == "mlp":
+            assert spec["requires_event_dates"] is True
+            recipe = candidate_recipe(spec["family"], spec["parameters"],
+                columns=["signal"],
+                feature_dictionary_hash=spec["feature_recipe"]["dictionary_hash"],
+                requires_event_dates=spec.get("requires_event_dates", False))
+            assert recipe["requires_event_dates"] is True
+        else:
+            assert "requires_event_dates" not in spec

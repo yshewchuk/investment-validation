@@ -185,12 +185,22 @@ def compile_request(request, *, horizons=(5, 3, 1)):
                  and request_keys in (v2._KEYS, v2._KEYS | {"selection"},
                                       v2._KEYS | {"workers"},
                                       v2._KEYS | {"selection", "workers"}))
-                or (version in ("magnitude_search_request.v4", "magnitude_search_request.v5", "magnitude_search_request.v6", "magnitude_search_request.v7")
+                or (version in ("magnitude_search_request.v4", "magnitude_search_request.v5")
                     and request_keys in (v2._KEYS | {"selection"},
-                                         v2._KEYS | {"selection", "workers"})),
+                                         v2._KEYS | {"selection", "workers"}))
+                or (version in ("magnitude_search_request.v6", "magnitude_search_request.v7")
+                    and request_keys in (v2._KEYS | {"selection"},
+                                         v2._KEYS | {"selection", "workers"},
+                                         v2._KEYS | {"selection", "requires_event_dates"},
+                                         v2._KEYS | {"selection", "workers", "requires_event_dates"})),
                 "stage-2 request requires its closed v6/v7 schema and selection policy"
                 if version in ("magnitude_search_request.v6", "magnitude_search_request.v7")
                 else "stage-2 request requires its closed v3/v4/v5 schema and selection policy")
+    if "requires_event_dates" in request:
+        v2._require(type(request["requires_event_dates"]) is bool,
+                    "stage-2 requires_event_dates must be a boolean")
+        if request["requires_event_dates"] is False:
+            request.pop("requires_event_dates")
     v2.validate_workers(request)
     request.pop("workers", None)
     _selection(request, horizons)

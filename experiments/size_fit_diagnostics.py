@@ -10,7 +10,38 @@ def keys(binding):
     return {"diagnostics"} if binding.get("schema_version") in ("native_experiment_registration.v1.6", "native_experiment_registration.v1.7", "native_experiment_registration.v1.8") else set()
 
 
-def _mlp_diagnostics(diagnostics, recipe, horizons):
+def _training_event_date_ids(inputs, horizons):
+    if (type(inputs) is not dict or type(inputs.get("training")) is not list
+            or type(inputs.get("features")) is not list):
+        raise ValueError
+    training_ids = []
+    for item in inputs["training"]:
+        if type(item) is not dict or type(item.get("event_id")) is not str:
+            raise ValueError
+        training_ids.append(item["event_id"])
+    training_set, requested = set(training_ids), set(horizons)
+    indexed = {}
+    for row in inputs["features"]:
+        if type(row) is not dict:
+            raise ValueError
+        key = (row.get("event_id"), row.get("horizon_sessions"))
+        if key[0] in training_set and key[1] in requested:
+            if key in indexed:
+                raise ValueError
+            indexed[key] = row
+    result = {}
+    for horizon in horizons:
+        dates = []
+        for event_id in training_ids:
+            row = indexed.get((event_id, horizon))
+            if row is None or type(row.get("event_date")) is not str:
+                raise ValueError
+            dates.append(row["event_date"])
+        result[horizon] = content_hash(dates)
+    return result
+
+
+def _mlp_diagnostics(diagnostics, recipe, horizons, training_event_dates_ids=None):
     """Validate worker claims, not convergence by refitting or reading source data."""
     recipe = validate_mlp_recipe(recipe)
     recipe_id = content_hash(recipe)
@@ -20,6 +51,8 @@ def _mlp_diagnostics(diagnostics, recipe, horizons):
                 "converged", "n_iter", "input_features", "loss", "loss_scale"}
     requires_event_dates = recipe.get("requires_event_dates") is True
     if requires_event_dates:
+        if type(training_event_dates_ids) is not dict:
+            raise ValueError
         expected.add("training_event_dates_id")
     if type(diagnostics) is not list or len(diagnostics) != len(horizons):
         raise ValueError
@@ -42,7 +75,8 @@ def _mlp_diagnostics(diagnostics, recipe, horizons):
                     type(item.get("training_event_dates_id")) is not str
                     or len(item["training_event_dates_id"]) != 71
                     or not item["training_event_dates_id"].startswith("sha256:")
-                    or any(c not in "0123456789abcdef" for c in item["training_event_dates_id"][7:])))):
+                    or any(c not in "0123456789abcdef" for c in item["training_event_dates_id"][7:])
+                    or item["training_event_dates_id"] != training_event_dates_ids.get(horizon)))):
             raise ValueError
         try:
             if not math.isfinite(item["loss"]):
@@ -60,7 +94,9 @@ def evidence(result, execution, horizons, inputs=None, fold=None):
         if recipe.get("model") == "mlp" or recipe.get("schema_version") == "magnitude_mlp_recipe.v1":
             if execution["schema_version"] != "size_candidate_execution.v1":
                 raise ValueError
-            return _mlp_diagnostics(diagnostics, recipe, horizons)
+            training_event_dates_ids = (_training_event_date_ids(inputs, horizons)
+                if recipe.get("requires_event_dates") is True else None)
+            return _mlp_diagnostics(diagnostics, recipe, horizons, training_event_dates_ids)
         if recipe.get("schema_version") == "size_history_mean_candidate.v1":
             from experiments.size_comparator import candidate_fit_details
             expected = [{"schema_version": "size_v1_4_fit.v1", "recipe_id": content_hash(recipe), **item}

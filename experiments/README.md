@@ -143,6 +143,7 @@ The four `es_` profiles stop on sklearn early stopping (`max_iter=400`, patience
 The 1000-candidate ceiling and explicit logical-fit, child/parent/build/job budgets
 still apply; MLP costs one component per horizon, while the fixed SIZE candidate
 retains its two-component worst-case allowance. V6 and v7 accept the optional `workers` contract: an integer 1 through 8 (omission means 1), removed before request identity hashing; fresh inner trials may run in the bounded process pool, while worker CPU/memory admission remains in force. Neural fits remain one-thread-per-child.
+V6/v7 requests may also include the optional boolean `requires_event_dates`; when true, only MLP candidates receive event dates and bind them into fit diagnostics, while omission/false preserves prior request, candidate, and cohort identities.
 Only inner folds select; outer results never tune profiles. Use `experiments.size_search`
 with fresh source seals; v1-v5 declarations, current runs and the production comparator
 are unchanged. Invalid/unknown profiles refuse before expansion; convergence or

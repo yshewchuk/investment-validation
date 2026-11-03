@@ -54,8 +54,11 @@ def compile_request(request, *, horizons=(5, 3, 1)):
     recipes = {subset: selected(subset) for subset in result["request"]["feature_sets"]}
     for spec in result["candidate_specs"]:
         spec["feature_recipe"] = recipes[spec["feature_recipe"]["subset"]]
-        spec["candidate_spec_id"] = content_hash({
+        identity = {
             "request_id": result["request_id"], "family": spec["family"],
-            "feature_recipe": spec["feature_recipe"], "parameters": spec["parameters"]})
+            "feature_recipe": spec["feature_recipe"], "parameters": spec["parameters"]}
+        if "requires_event_dates" in spec:
+            identity["requires_event_dates"] = spec["requires_event_dates"]
+        spec["candidate_spec_id"] = content_hash(identity)
     result["candidate_specs"].sort(key=lambda spec: spec["candidate_spec_id"])
     return json.loads(json.dumps(result, sort_keys=True, allow_nan=False))

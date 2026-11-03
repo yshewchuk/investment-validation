@@ -177,6 +177,8 @@ def _specifications(request, request_id, recipe=panel_recipe):
             for values in itertools.product(*(axes[name] for name in names)):
                 spec = {"family": family, "feature_recipe": feature_recipe,
                         "parameters": dict(zip(names, values))}
+                if family == "mlp" and request.get("requires_event_dates") is True:
+                    spec["requires_event_dates"] = True
                 specs.append({**spec, "candidate_spec_id": content_hash({"request_id": request_id, **spec})})
     return sorted(specs, key=lambda spec: spec["candidate_spec_id"])
 
