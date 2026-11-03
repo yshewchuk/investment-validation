@@ -80,6 +80,8 @@ def _clone_case(case, path):
 
 
 def test_v6_workers_one_and_two_match_candidates_results_and_metrics(case, tmp_path, monkeypatch):
+    import math
+
     from experiments import v2_magnitude_search_run as search_run
     from experiments.size_search_report import collect
     assert any(candidate["recipe"].get("model") == "mlp" for candidate in case.plan["candidates"])
@@ -151,11 +153,38 @@ def test_v6_workers_one_and_two_match_candidates_results_and_metrics(case, tmp_p
     assert serial_result["folds"][0]["predictions"] == parallel_result["folds"][0]["predictions"]
     assert serial_result["metrics"] == parallel_result["metrics"]
     assert serial_result["prospective_candidate_id"] == parallel_result["prospective_candidate_id"]
+
+    # Recompute count, MAE and RMSE from each result's own predictions; this catches pooled
+    # metric fields replaced with unrelated constants without pinning any selected value.
+    def consistency_oracle(result):
+        predictions = result["predictions"]
+        errors = [abs(row["absolute_move_pct"] - row["predicted_absolute_move_pct"])
+                  for row in predictions]
+        scale = max(errors)
+        expected = {
+            "count": len(errors),
+            "mae": math.fsum(errors) / len(errors),
+            "rmse": scale * math.sqrt(math.fsum((error / scale) ** 2 for error in errors) / len(errors))
+                    if scale else 0.0,
+        }
+        metrics = result["metrics"]
+        assert metrics["count"] == expected["count"]
+        assert metrics["mae"] == pytest.approx(expected["mae"], rel=1e-12, abs=1e-12)
+        assert metrics["rmse"] == pytest.approx(expected["rmse"], rel=1e-12, abs=1e-12)
+
+    consistency_oracle(serial_result)
+    consistency_oracle(parallel_result)
+
+    planned_ids = {candidate["candidate_id"] for candidate in case.plan["candidates"]}
+    for report in (serial_report, parallel_report):
+        report_ids = [row["candidate_id"] for row in report["inner_fits"]]
+        assert len(report_ids) == len(set(report_ids)) == len(planned_ids)
+        assert set(report_ids) == planned_ids
     serial_inner = {row["candidate_id"]: row["inner_metrics"] for row in serial_report["inner_fits"]}
     parallel_inner = {row["candidate_id"]: row["inner_metrics"] for row in parallel_report["inner_fits"]}
-    assert serial_inner.keys() == parallel_inner.keys()
-    for candidate_id, inner_metrics in serial_inner.items():
-        assert inner_metrics == parallel_inner[candidate_id]
+    assert serial_inner.keys() == parallel_inner.keys() == planned_ids
+    for candidate_id in planned_ids:
+        assert serial_inner[candidate_id] == parallel_inner[candidate_id]
 
 
 def test_v6_native_seal_neural_trial_and_no_fit_no_label_replay(case, monkeypatch):
