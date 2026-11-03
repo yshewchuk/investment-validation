@@ -27,8 +27,9 @@ root = Path(sys.argv[1])
 generator = native_case.__wrapped__(SimpleNamespace(mktemp=lambda _: root))
 case = next(generator)
 run = make_run(case, run_type=DistributionRun, runner="experiments/distribution_run.py",
-               experiment_id="synthetic-distribution-bounded-run")
+               experiment_id="synthetic-distribution-bounded-run", job_wall_seconds=180)
 run.seal(clock=SystemClock())
+assert run.request["limits"]["job_wall_seconds"] == 180
 original, original_bytes, opened = objects.verify_object_path, objects.read_verified_bytes, set()
 def verify(store, ref):
     assert ref.object_id not in case.target_objects, "outer targets require a byte-bounded read"
@@ -101,7 +102,7 @@ except StopIteration:
 
 def test_real_native_bounded_run_and_read_only_collection(tmp_path):
     result = subprocess.run([sys.executable, "-c", SCRIPT, str(tmp_path / "native")],
-        cwd=Path(__file__).resolve().parents[3], capture_output=True, text=True, timeout=180,
+        cwd=Path(__file__).resolve().parents[3], capture_output=True, text=True, timeout=240,
         env={**os.environ, **dict.fromkeys(THREAD_VARIABLES, "1"), "PYTHONDONTWRITEBYTECODE": "1"})
     assert result.returncode == 0, result.stdout + result.stderr
     payload = json.loads(result.stdout.splitlines()[-1])
