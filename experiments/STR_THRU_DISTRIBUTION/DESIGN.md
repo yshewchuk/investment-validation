@@ -1,8 +1,20 @@
-# Distribution forecasts for STR-THRU profitability
+# Distribution prediction first; STR-THRU utility deferred
 
-Design-only proposal, 26 October 2026. No experiment is preregistered or activated.
+Original design, 26 October 2026; first-experiment scope amended 1 November 2026. No real experiment is preregistered or activated by this document.
 
-## Recommendation
+## Current first experiment: prediction only
+
+The user approved evaluating the distribution itself before any STR-THRU evaluation. This amendment supersedes the coupled first-experiment recommendation below: **do not require option quotes, payoff bridges, EV thresholds, trade selection or portfolio books to evaluate prediction quality.** Delivered strategy integration remains separate and unused by the prediction-only workflow. Its historical contracts and the downstream economic sections below are retained, not treated as prerequisites or authorization for this first experiment.
+
+The question is whether the fixed learned distribution of absolute earnings-move magnitude predicts held-out development outcomes better than causal reference distributions. Reuse the admitted event cohort, 5/3/1 horizons, expanding annual outer folds and strictly earlier inner-OOF controls. Score every admitted outer event, not a trade-selected or quote-available subset; preserve explicit missing-label/control/tail exclusions. Keep the existing random/rolling holdout union, embargo and final-read authorization unchanged. Synthetic tests establish implementation correctness, not empirical forecast accuracy.
+
+Compare the raw histogram with a **training-only empirical magnitude CDF**, the same-feature point forecast plus earlier-OOF residuals, and the same-histogram-mean residual shape control. The empirical baseline uses the same outer-training cohort as the fitted pair, never evaluation outcomes. Retain h1-primary CRPS and the existing shape contrast; report all prespecified baseline comparisons and h3/h5 robustness, rather than selecting the best outer result. RPS, common-bin log loss and fixed-threshold tail calibration supplement CRPS; no single coverage or accuracy number is sufficient.
+
+Add predictive interval coverage **and width**, and PIT/reliability diagnostics with explicit discrete-atom/tail semantics, before calling the forecast-validation report complete. These are diagnostic measurements, not a fitted calibrator or new probability-smoothing policy. The first candidate remains fixed and explicitly uncalibrated; any later model search, calibration fit or changed bins must use earlier inner data and its own sealed recipe/budget. No new success cutoff, promotion rule or claim of validated calibration is introduced.
+
+Implementation is incremental: first remove numerical strategy dependencies, then isolate forecast scores and the training empirical baseline, followed by a prediction-only report/diagnostic layer and separate contained lifecycle/CLI. Reuse native admission, bounded fitting, immutable forecast/target evidence and replay rather than making a new data or holdout platform. [Prediction implementation status](../DISTRIBUTION_PREDICTION/README.md) distinguishes delivered interfaces from remaining wiring. No private/provider study or protected-label access is authorized by this amendment. STR-THRU utility, if later requested, consumes frozen forecasts as a separate experiment; profitability is not required to learn whether the forecasts are useful.
+
+## Original downstream recommendation (not the current first experiment)
 
 Run this as a **conditional distribution experiment**, not as a replacement of a supposedly deterministic trading system. Start by changing only the forecast distribution, keeping the causal features, trade definition, payoff bridge and evaluation policy fixed. Test whether the new distribution improves calibrated probabilities and realized net results; do not assume it will.
 

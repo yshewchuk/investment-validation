@@ -1,5 +1,7 @@
 # Native experiment interfaces
 
+The first distribution experiment is now [prediction-only evaluation](DISTRIBUTION_PREDICTION/README.md): proper scores, causal baselines and calibration diagnostics before any STR-THRU study. Its incremental numerical delivery is not yet a standalone CLI; the existing strategy operator below remains separate and unchanged.
+
 `iv_crush_search.prepare` / `validate_registration` are registration APIs, using shared
 `native_registration.prepare_regression_registration`; the dedicated IV CLI below composes them.
 It pins committed source, qualified-panel and IV-target snapshots plus explicit
