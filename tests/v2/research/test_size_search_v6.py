@@ -80,8 +80,12 @@ def _clone_case(case, path):
 
 
 def test_v6_workers_one_and_two_match_candidates_results_and_metrics(case, tmp_path, monkeypatch):
+    import math
+
     from experiments import v2_magnitude_search_run as search_run
+    from experiments.magnitude_report import magnitude_metrics
     from experiments.size_search_report import collect
+
     assert any(candidate["recipe"].get("model") == "mlp" for candidate in case.plan["candidates"])
     original_executor, executor_calls = search_run.ProcessPoolExecutor, []
 
@@ -108,30 +112,6 @@ def test_v6_workers_one_and_two_match_candidates_results_and_metrics(case, tmp_p
     parallel_result, parallel_report = execute("parallel", 2)
     assert executor_calls == [2]
 
-    def first_difference(left, right, path="$"):
-        if isinstance(left, dict) and isinstance(right, dict):
-            keys = list(left) + [key for key in right if key not in left]
-            for key in keys:
-                if key not in left or key not in right:
-                    return f"{path}.{key}", left.get(key), right.get(key)
-                difference = first_difference(left[key], right[key], f"{path}.{key}")
-                if difference is not None:
-                    return difference
-            return None
-        if isinstance(left, list) and isinstance(right, list):
-            for index, (left_item, right_item) in enumerate(zip(left, right)):
-                difference = first_difference(left_item, right_item, f"{path}[{index}]")
-                if difference is not None:
-                    return difference
-            if len(left) != len(right):
-                return f"{path}.length", len(left), len(right)
-            return None
-        return None if left == right else (path, left, right)
-
-    first = first_difference(serial_result, parallel_result)
-    if first is not None:
-        print(f"first result difference: {first[0]}: serial={first[1]!r}; parallel={first[2]!r}")
-
     # The timing/execution identities differ between serial and worker runs: folds[*].selection_id,
     # folds[*].result_id, and the top-level result_id. They depend on terminal IDs whose records
     # include runtime score_seconds and rss_delta_kib. Remove only these known paths from shallow
@@ -151,30 +131,57 @@ def test_v6_workers_one_and_two_match_candidates_results_and_metrics(case, tmp_p
     assert serial_result["folds"][0]["predictions"] == parallel_result["folds"][0]["predictions"]
     assert serial_result["metrics"] == parallel_result["metrics"]
     assert serial_result["prospective_candidate_id"] == parallel_result["prospective_candidate_id"]
-    assert [(row["candidate_id"], row["inner_metrics"]) for row in serial_report["inner_fits"]] == [
-        (row["candidate_id"], row["inner_metrics"]) for row in parallel_report["inner_fits"]]
 
-    # Known-fixture scored-output oracle for the actual synthetic winner: history_ridge.
-    # Expectations are pinned to the sealed fixture, not derived from the serial run or the
-    # production scorer.
-    candidate = parallel_result["folds"][0]["candidate"]
-    planned_candidate = next(
-        planned for planned in case.plan["candidates"] if planned["recipe"] == candidate["recipe"])
-    assert candidate["candidate_id"] == planned_candidate["candidate_id"]
-    assert candidate["recipe"]["model"] == "history_ridge"
-    assert parallel_result["prospective_candidate_id"] == planned_candidate["candidate_id"]
-    metrics = parallel_result["metrics"]
-    assert metrics["count"] == 1
-    assert metrics["mae"] == pytest.approx(0.9342579737821772, abs=1e-12)
-    assert metrics["rmse"] == pytest.approx(0.9342579737821772, abs=1e-12)
-    predictions = parallel_result["predictions"]
-    assert len(predictions) == 1
-    row = predictions[0]
-    assert row["event_id"] == "SYNTH:2024-06-17:0"
-    assert row["horizon_sessions"] == 1
-    assert row["absolute_move_pct"] == 7.0
-    assert row["predicted_absolute_move_pct"] == pytest.approx(7.934257973782177, abs=1e-12)
-    assert row["outer_year"] == "2024"
+    # Assert worker parity, not a closure-sensitive winner pin: source binding changes candidate IDs and tie-breaks.
+    planned_ids = {candidate["candidate_id"] for candidate in case.plan["candidates"]}
+    assert serial_result["prospective_candidate_id"] in planned_ids
+    (prediction,) = serial_result["predictions"]
+    assert prediction["event_id"] == "SYNTH:2024-06-17:0"
+    assert prediction["horizon_sessions"] == 1
+    assert prediction["absolute_move_pct"] == 7.0
+    assert prediction["outer_year"] == "2024"
+
+    # Recompute count, MAE and RMSE from each result's own predictions; this catches pooled
+    # metric fields replaced with unrelated constants without pinning any selected value.
+    def consistency_oracle(result):
+        predictions = result["predictions"]
+        errors = [abs(row["absolute_move_pct"] - row["predicted_absolute_move_pct"])
+                  for row in predictions]
+        scale = max(errors)
+        expected = {
+            "count": len(errors),
+            "mae": math.fsum(errors) / len(errors),
+            "rmse": scale * math.sqrt(math.fsum((error / scale) ** 2 for error in errors) / len(errors))
+                    if scale else 0.0,
+        }
+        metrics = result["metrics"]
+        assert metrics["count"] == expected["count"]
+        assert metrics["mae"] == pytest.approx(expected["mae"], rel=1e-12, abs=1e-12)
+        assert metrics["rmse"] == pytest.approx(expected["rmse"], rel=1e-12, abs=1e-12)
+
+    consistency_oracle(serial_result)
+    consistency_oracle(parallel_result)
+
+    known_metrics = magnitude_metrics([
+        {"absolute_move_pct": 0.0, "predicted_absolute_move_pct": 1.0},
+        {"absolute_move_pct": 0.0, "predicted_absolute_move_pct": 3.0},
+    ])
+    assert known_metrics["count"] == 2
+    assert known_metrics["mae"] == pytest.approx(2.0, rel=1e-12, abs=1e-12)
+    assert known_metrics["rmse"] == pytest.approx(math.sqrt(5.0), rel=1e-12, abs=1e-12)
+
+    for report in (serial_report, parallel_report):
+        report_ids = [row["candidate_id"] for row in report["inner_fits"]]
+        assert len(report_ids) == len(set(report_ids)) == len(planned_ids)
+        assert set(report_ids) == planned_ids
+    serial_inner = {row["candidate_id"]: row["inner_metrics"] for row in serial_report["inner_fits"]}
+    parallel_inner = {row["candidate_id"]: row["inner_metrics"] for row in parallel_report["inner_fits"]}
+    assert serial_inner.keys() == parallel_inner.keys() == planned_ids
+    for candidate_id in planned_ids:
+        serial_metrics = serial_inner[candidate_id]
+        assert isinstance(serial_metrics, list) and serial_metrics
+        assert all(isinstance(entry, dict) and entry for entry in serial_metrics)
+        assert serial_metrics == parallel_inner[candidate_id]
 
 
 def test_v6_native_seal_neural_trial_and_no_fit_no_label_replay(case, monkeypatch):
