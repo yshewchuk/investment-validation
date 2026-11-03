@@ -132,6 +132,7 @@ def test_v6_workers_one_and_two_match_candidates_results_and_metrics(case, tmp_p
     assert serial_result["metrics"] == parallel_result["metrics"]
     assert serial_result["prospective_candidate_id"] == parallel_result["prospective_candidate_id"]
 
+    # Assert worker parity, not a closure-sensitive winner pin: source binding changes candidate IDs and tie-breaks.
     planned_ids = {candidate["candidate_id"] for candidate in case.plan["candidates"]}
     assert serial_result["prospective_candidate_id"] in planned_ids
     (prediction,) = serial_result["predictions"]
