@@ -4,6 +4,8 @@ from numbers import Real
 
 from engine.v2.contracts import SnapshotRef
 from engine.v2.foundation import canonical_json, content_hash, from_document
+from engine.v2.models.training.fit_inputs import FitInputs
+from engine.v2.research.horizon_fit_inputs import fit_evidence as build_fit_evidence
 from engine.v2.research.magnitude_history_store import read_stored_for_events
 from engine.v2.research.magnitude_inputs import (
     load_magnitude_targets,
@@ -51,17 +53,20 @@ def fit_evidence(inputs, fold, plan, execution):
     indexed = {(row["event_id"], row["horizon_sessions"]): row for row in inputs["features"]}
     train = [row["event_id"] for row in inputs["training"]]
     result, target = [], inputs.get("target", {}).get("column", "absolute_move_pct")
+    labels = [row[target] for row in inputs["training"]]
     for horizon in plan["horizons"]:
-        documents = []
-        for events in (train, fold["evaluation_event_ids"]):
-            rows = [indexed[event, horizon] for event in events]
-            documents.append({"columns": execution["features"], "row_keys": [
-                [row[name] for name in ("event_id", "context_id", "horizon_sessions")] for row in rows],
-                "values": [[row[name] for name in execution["features"]] for row in rows]})
-        documents[0][target] = [row[target] for row in inputs["training"]]
-        result.append({"horizon_sessions": horizon, "training_event_ids": train,
-            "evaluation_event_ids": fold["evaluation_event_ids"], "training_matrix_id": content_hash(documents[0]),
-            "prediction_matrix_id": content_hash(documents[1])})
+        training_rows = [indexed[event, horizon] for event in train]
+        evaluation_rows = [indexed[event, horizon] for event in fold["evaluation_event_ids"]]
+        fit_inputs = FitInputs(
+            [[row[name] for name in execution["features"]] for row in training_rows], labels,
+            [[row[name] for name in execution["features"]] for row in evaluation_rows],
+            execution["features"])
+        training_keys = [[row[name] for name in ("event_id", "context_id", "horizon_sessions")]
+                         for row in training_rows]
+        evaluation_keys = [[row[name] for name in ("event_id", "context_id", "horizon_sessions")]
+                           for row in evaluation_rows]
+        result.append(build_fit_evidence(fit_inputs, horizon, train, fold["evaluation_event_ids"],
+            training_keys, evaluation_keys, target_column=target, labels=labels))
     return result
 
 
