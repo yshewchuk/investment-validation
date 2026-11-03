@@ -27,9 +27,10 @@ root = Path(sys.argv[1])
 generator = native_case.__wrapped__(SimpleNamespace(mktemp=lambda _: root))
 case = next(generator)
 run = make_run(case, run_type=DistributionRun, runner="experiments/distribution_run.py",
-               experiment_id="synthetic-distribution-bounded-run", job_wall_seconds=180)
+               experiment_id="synthetic-distribution-bounded-run", deadline_seconds=180)
 run.seal(clock=SystemClock())
 assert run.request["limits"]["job_wall_seconds"] == 180
+assert run.request["limits"]["parent"]["wall_seconds"] == 180
 original, original_bytes, opened = objects.verify_object_path, objects.read_verified_bytes, set()
 def verify(store, ref):
     assert ref.object_id not in case.target_objects, "outer targets require a byte-bounded read"
