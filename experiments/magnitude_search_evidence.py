@@ -4,8 +4,7 @@ from numbers import Real
 
 from engine.v2.contracts import SnapshotRef
 from engine.v2.foundation import canonical_json, content_hash, from_document
-from engine.v2.models.training.fit_inputs import FitInputs
-from engine.v2.research.horizon_fit_inputs import fit_evidence as build_fit_evidence
+from engine.v2.research.horizon_fitted import build_fit_inputs
 from engine.v2.research.magnitude_history_store import read_stored_for_events
 from engine.v2.research.magnitude_inputs import (
     load_magnitude_targets,
@@ -50,24 +49,16 @@ def admit_fold_inputs(repository, binding, fold, *, history_failure, strict_json
 
 def fit_evidence(inputs, fold, plan, execution):
     """Bind ordered native matrices and training targets without fitting."""
-    indexed = {(row["event_id"], row["horizon_sessions"]): row for row in inputs["features"]}
-    train = [row["event_id"] for row in inputs["training"]]
-    result, target = [], inputs.get("target", {}).get("column", "absolute_move_pct")
-    labels = [row[target] for row in inputs["training"]]
-    for horizon in plan["horizons"]:
-        training_rows = [indexed[event, horizon] for event in train]
-        evaluation_rows = [indexed[event, horizon] for event in fold["evaluation_event_ids"]]
-        fit_inputs = FitInputs(
-            [[row[name] for name in execution["features"]] for row in training_rows], labels,
-            [[row[name] for name in execution["features"]] for row in evaluation_rows],
-            execution["features"])
-        training_keys = [[row[name] for name in ("event_id", "context_id", "horizon_sessions")]
-                         for row in training_rows]
-        evaluation_keys = [[row[name] for name in ("event_id", "context_id", "horizon_sessions")]
-                           for row in evaluation_rows]
-        result.append(build_fit_evidence(fit_inputs, horizon, train, fold["evaluation_event_ids"],
-            training_keys, evaluation_keys, target_column=target, labels=labels))
-    return result
+    fit_inputs = getattr(inputs, "fit_inputs", None)
+    target = (fit_inputs.target_column if fit_inputs is not None
+              else inputs.get("target", {}).get("column", "absolute_move_pct"))
+    if fit_inputs is None or fit_inputs.target_column != target:
+        indexed = {(row["event_id"], row["horizon_sessions"]): row for row in inputs["features"]}
+        train = [row["event_id"] for row in inputs["training"]]
+        labels = [row[target] for row in inputs["training"]]
+        fit_inputs = build_fit_inputs(indexed, train, fold["evaluation_event_ids"],
+            plan["horizons"], execution["features"], labels, target_column=target)
+    return [fit_inputs.evidence[horizon] for horizon in plan["horizons"]]
 
 
 def forecast_target(plan, recipe):

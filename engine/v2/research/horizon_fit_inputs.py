@@ -2,7 +2,6 @@
 import numpy as np
 
 from engine.v2.foundation import content_hash
-from engine.v2.models.training.fit_inputs import FitInputs
 
 
 def _matrix(indexed, event_ids, horizon, columns):
@@ -13,14 +12,21 @@ def _matrix(indexed, event_ids, horizon, columns):
     return row_keys, values, np.asarray(values, dtype=float)
 
 
-def fit_evidence(fit_inputs, horizon_sessions, training_event_ids, evaluation_event_ids,
-                 training_row_keys, evaluation_row_keys, *, target_column, labels=None):
+def _require_target(target_column):
+    if (type(target_column) is not str or not target_column.strip()
+            or target_column in ("columns", "row_keys", "values")):
+        raise ValueError("horizon inputs require a nonempty nonreserved target column")
+
+
+def fit_evidence(columns, train_features, prediction_features, horizon_sessions,
+                 training_event_ids, evaluation_event_ids, training_row_keys,
+                 evaluation_row_keys, *, target_column, labels=None):
     """Hash ordered fit values and row keys into the shared evidence shape."""
-    columns = list(fit_inputs.columns)
+    columns = list(columns)
     training = {"columns": columns, "row_keys": training_row_keys,
-                "values": fit_inputs.train_features}
+                "values": train_features}
     prediction = {"columns": columns, "row_keys": evaluation_row_keys,
-                  "values": fit_inputs.prediction_features}
+                  "values": prediction_features}
     if labels is not None:
         training[target_column] = labels
     return {"horizon_sessions": horizon_sessions,
@@ -38,14 +44,11 @@ def prepare_horizon_inputs(indexed, training_ids, evaluation_ids, horizon, colum
     Event-ID and column iterables are materialized once after target validation.
     This performs no fitting, prediction validation, I/O or experiment admission.
     """
-    if (type(target_column) is not str or not target_column.strip()
-            or target_column in ("columns", "row_keys", "values")):
-        raise ValueError("horizon inputs require a nonempty nonreserved target column")
+    _require_target(target_column)
     training_ids, evaluation_ids, columns = list(training_ids), list(evaluation_ids), list(columns)
     training_keys, training_values, matrix = _matrix(indexed, training_ids, horizon, columns)
     prediction_keys, prediction_values, test_matrix = _matrix(indexed, evaluation_ids, horizon, columns)
-    fit_inputs = FitInputs(training_values, labels, prediction_values, columns)
-    evidence = fit_evidence(fit_inputs, horizon, training_ids, evaluation_ids,
-        training_keys, prediction_keys, target_column=target_column,
-        labels=np.asarray(labels, dtype=float).tolist())
+    evidence = fit_evidence(columns, training_values, prediction_values, horizon,
+        training_ids, evaluation_ids, training_keys, prediction_keys,
+        target_column=target_column, labels=np.asarray(labels, dtype=float).tolist())
     return matrix, test_matrix, evidence

@@ -7,15 +7,65 @@ import numpy as np
 
 from engine.v2.models.training.fit_inputs import FitInputs
 from engine.v2.models.training.fit_routes import check_fitting_allowed, fit_execution
-from engine.v2.research.horizon_fit_inputs import prepare_horizon_inputs
+from engine.v2.research.horizon_fit_inputs import (
+    _matrix,
+    _require_target,
+    fit_evidence,
+    prepare_horizon_inputs,
+)
+
+
+class HorizonInputs(dict):
+    """Ordered horizon -> FitInputs mapping with evidence built from the same rows."""
+
+    def __init__(self, inputs, evidence, target_column):
+        super().__init__(inputs)
+        self.evidence = evidence
+        self.target_column = target_column
 
 
 class HorizonFitFailure(RuntimeError):
     """Fit/forecast-validation failure; original exception is retained as __cause__."""
 
 
-def fitted_forecasts(indexed, training_ids, labels, evaluation_ids, horizons, columns, *,
-                     target_column, target_domain, route, recipe, progress=None, diagnostics=None,
+def build_fit_inputs(indexed, training_ids, evaluation_ids, horizons, columns, labels, *, target_column):
+    """Build one FitInputs per horizon and its frozen evidence from the same ordered rows."""
+    _require_target(target_column)
+    training_ids, evaluation_ids = list(training_ids), list(evaluation_ids)
+    horizons, columns = list(horizons), list(columns)
+    labels = np.array(labels, dtype=float)
+    inputs, evidence = {}, {}
+    for horizon in horizons:
+        training_keys, training_values, training_matrix = _matrix(indexed, training_ids, horizon, columns)
+        prediction_keys, prediction_values, prediction_matrix = _matrix(indexed, evaluation_ids, horizon, columns)
+        inputs[horizon] = FitInputs(training_matrix, labels.copy(), prediction_matrix, columns)
+        evidence[horizon] = fit_evidence(columns, training_values, prediction_values, horizon,
+            training_ids, evaluation_ids, training_keys, prediction_keys,
+            target_column=target_column, labels=labels.tolist())
+    return HorizonInputs(inputs, evidence, target_column)
+
+
+def _prepare_inputs(horizon, horizon_inputs, indexed, training_ids, evaluation_ids, columns, labels, target_column):
+    if horizon_inputs is not None:
+        return deepcopy(horizon_inputs.evidence[horizon]), horizon_inputs[horizon]
+    matrix, prediction_matrix, fit = prepare_horizon_inputs(indexed, training_ids, evaluation_ids,
+        horizon, columns, labels, target_column=target_column)
+    return fit, FitInputs(matrix, labels.copy(), prediction_matrix, columns)
+
+
+def _run_fit(route, recipe, inputs, count, target_domain, measure_fit_seconds):
+    fit_started = time.monotonic() if measure_fit_seconds else None
+    try:
+        result = fit_execution(route, recipe, inputs)
+        fit_seconds = time.monotonic() - fit_started if measure_fit_seconds else None
+        _validate_forecasts(result["predictions"], count, target_domain)
+    except Exception as error:
+        raise HorizonFitFailure("horizon estimator failed") from error
+    return result, fit_seconds
+
+
+def fitted_forecasts(indexed, training_ids=None, labels=None, evaluation_ids=None, horizons=None, columns=None, *,
+                     target_column=None, target_domain, route, recipe, progress=None, diagnostics=None,
                      measure_fit_seconds=False):
     """Fit admitted training-only arrays; caller owns sealed source/target identity.
 
@@ -25,26 +75,25 @@ def fitted_forecasts(indexed, training_ids, labels, evaluation_ids, horizons, co
     """
     check_fitting_allowed("fitted_forecasts")
     _validate_domain(route, recipe, target_domain)
-    training_ids, evaluation_ids = list(training_ids), list(evaluation_ids)
-    horizons, columns = list(horizons), list(columns)
-    labels = np.asarray(labels, dtype=float)
+    horizon_inputs = indexed if isinstance(indexed, HorizonInputs) else None
+    if horizon_inputs is not None:
+        evaluation_ids, horizons = training_ids, labels
+        target_column = horizon_inputs.target_column
+    else:
+        training_ids, evaluation_ids = list(training_ids), list(evaluation_ids)
+        horizons, columns = list(horizons), list(columns)
+        labels = np.asarray(labels, dtype=float)
+    evaluation_ids, horizons = list(evaluation_ids), list(horizons)
     predictions, evidence = {}, []
     for horizon in horizons:
-        matrix, prediction_matrix, fit = prepare_horizon_inputs(indexed, training_ids, evaluation_ids,
-            horizon, columns, labels, target_column=target_column)
+        fit, inputs = _prepare_inputs(horizon, horizon_inputs, indexed, training_ids, evaluation_ids,
+            columns, labels, target_column)
         if progress is not None:
             progress("started", deepcopy(fit))
-        try:
-            fit_started = time.monotonic() if measure_fit_seconds else None
-            inputs = FitInputs(matrix, labels.copy(), prediction_matrix, columns)
-            result = fit_execution(route, recipe, inputs)
-            fit_seconds = time.monotonic() - fit_started if measure_fit_seconds else None
-            values = result["predictions"]
-            if diagnostics is not None and route != "magnitude":
-                diagnostics.append({"horizon_sessions": horizon, **{k: v for k, v in result.items() if k != "predictions"}})
-            _validate_forecasts(values, len(evaluation_ids), target_domain)
-        except Exception as error:
-            raise HorizonFitFailure("horizon estimator failed") from error
+        result, fit_seconds = _run_fit(route, recipe, inputs, len(evaluation_ids), target_domain, measure_fit_seconds)
+        values = result["predictions"]
+        if diagnostics is not None and route != "magnitude":
+            diagnostics.append({"horizon_sessions": horizon, **{k: v for k, v in result.items() if k != "predictions"}})
         predictions.update({(event, horizon): float(value) for event, value in zip(evaluation_ids, values)})
         evidence.append(fit)
         if progress is not None:
