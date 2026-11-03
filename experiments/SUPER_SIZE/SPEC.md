@@ -134,6 +134,11 @@ or release is established by this development implementation.
 
 ## Stage 2 proposal
 
+The [expectations and encoding direction](../ARCHITECTURE.md#size-expectations-and-encoding-direction-proposed)
+adds proposed source-qualified feature and model ablations plus an incremental
+implementation split. It preserves this target/forecast contract and the existing
+comparator; it adds no executable request, data acquisition or run authority.
+
 See [the stage-2 design](STAGE2_DESIGN.md) for causal panel features, bounded
 inner-only selection and a proposed matched legacy comparison; it is not implemented.
 Stage-2 scope, acceptance criteria and the PR split (design section 5) live in that
