@@ -78,20 +78,20 @@ source admission, persistence or production/search activation occurs.
 
 `magnitude_candidate.fit_candidate` is the shared fixed-nonnegative Ridge/HGB/ElasticNet/MLP
 numeric dispatcher; `experiments.magnitude_candidate_fit` retains a guarded lazy compatibility wrapper.
-`fit_routes.fit_execution` accepts only `magnitude`, `magnitude_candidate` or
-`regression_candidate` numeric routes. Both guards precede inspection; original
-magnitude predictions gain a predictions-only dictionary, while candidate results
-and all errors propagate unchanged. No retry, selection, source reads or writes.
-Original magnitude requires its own schema and ordered `columns` matching recipe
-features before fitting; caller retains its full recipe admission.
+`fit_routes.fit_execution(route, recipe, inputs)` accepts only `magnitude`,
+`magnitude_candidate` or `regression_candidate`; callers construct `FitInputs`.
+Both guards precede inspection. Original magnitude unpacks the transport at its
+estimator boundary; candidate results and errors propagate unchanged. No retry,
+selection, source reads or writes. Original magnitude checks its schema and ordered
+columns against recipe features before fitting.
 Route names are not persisted schemas; offline `research.horizon_fitted` and synthetic tests
 consume this API, never production entrypoints. Legacy error translation stays at experiment boundaries.
 `fit_routes.check_fitting_allowed` exposes both existing switches for pre-inspection orchestration guards.
 
-`regression_candidate.fit_regression_candidate` dispatches the new domain-aware
-Ridge/HGB or ElasticNet recipe to its existing guarded fitter. Both no-fit guards
-precede recipe/array inspection; delegated validation, results and errors remain
-unchanged. No source reads, retries, selection or persistence occur. Existing
+`regression_candidate.fit_regression_candidate(recipe, inputs)` dispatches the new
+domain-aware Ridge/HGB or ElasticNet recipe to its existing guarded fitter. Both
+no-fit guards precede recipe/input inspection; delegated validation, results and
+errors remain unchanged. No source reads, retries, selection or persistence occur. Existing
 experiment magnitude dispatch remains fixed to nonnegative recipe schemas (Ridge v1, HGB v1 and v2, ElasticNet v1 and MLP v1).
 
 `magnitude.fit_magnitude_predictions` accepts an ops-admitted closed Ridge/HGB

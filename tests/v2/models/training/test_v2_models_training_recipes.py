@@ -653,9 +653,10 @@ def test_no_scoring_or_legacy_module_imports_the_training_package():
     run_board_analog_job, run_trailing_cutoff_job) to dispatch a training
     job's mode, and catching ``TrainingRefused`` to map it onto a typed
     OpsError is the same orchestration relationship, not a scoring-time
-    dependency. The offline ``research.horizon_fitted`` orchestrator may use
-    only the closed ``training.fit_routes`` dispatcher, not other training
-    internals. Its shared loop checks both no-fit guards before input access.
+    dependency. The offline ``research.horizon_fitted`` orchestrator may import
+    the closed ``training.fit_routes`` API and the ``FitInputs`` transport, but
+    no other training internals. Its shared loop checks both no-fit guards
+    before input access.
     """
     from checks.import_layers import build_graph
 
@@ -664,11 +665,14 @@ def test_no_scoring_or_legacy_module_imports_the_training_package():
     training_edges = [e for e in edges if e.imported.startswith("engine.v2.models.training")]
     allowed_routes = {"engine.v2.models.training.fit_routes",
         "engine.v2.models.training.fit_routes.check_fitting_allowed",
-        "engine.v2.models.training.fit_routes.fit_execution"}
-    assert training_edges and all(
-        e.importer.startswith("engine.v2.models.training") or e.importer == "engine.v2.ops.training"
-        or (e.importer == "engine.v2.research.horizon_fitted" and e.imported in allowed_routes)
-        for e in training_edges)
+        "engine.v2.models.training.fit_routes.fit_execution",
+        "engine.v2.models.training.fit_inputs",
+        "engine.v2.models.training.fit_inputs.FitInputs"}
+    unexpected = [
+        e for e in training_edges
+        if not (e.importer.startswith("engine.v2.models.training") or e.importer == "engine.v2.ops.training"
+                or (e.importer == "engine.v2.research.horizon_fitted" and e.imported in allowed_routes))]
+    assert training_edges and not unexpected, unexpected
 
 
 def test_training_job_tool_lists_every_recipe_and_bounds_label_dates(capsys):

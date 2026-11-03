@@ -5,6 +5,7 @@ from copy import deepcopy
 
 import numpy as np
 
+from engine.v2.models.training.fit_inputs import FitInputs
 from engine.v2.models.training.fit_routes import check_fitting_allowed, fit_execution
 from engine.v2.research.horizon_fit_inputs import prepare_horizon_inputs
 
@@ -35,7 +36,8 @@ def fitted_forecasts(indexed, training_ids, labels, evaluation_ids, horizons, co
             progress("started", deepcopy(fit))
         try:
             fit_started = time.monotonic() if measure_fit_seconds else None
-            result = fit_execution(route, recipe, matrix, labels.copy(), prediction_matrix, columns=columns)
+            inputs = FitInputs(matrix, labels.copy(), prediction_matrix, columns)
+            result = fit_execution(route, recipe, inputs)
             fit_seconds = time.monotonic() - fit_started if measure_fit_seconds else None
             values = result["predictions"]
             if diagnostics is not None and route != "magnitude":

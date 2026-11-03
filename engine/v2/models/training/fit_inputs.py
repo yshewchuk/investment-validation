@@ -17,7 +17,7 @@ def check_fitting_allowed(path: str) -> None:
 
 @dataclass(frozen=True)
 class FitInputs:
-    """Caller-admitted arrays stored as given; columns checked before array access."""
+    """Transport that stores fields as given; use from_recipe for guard and column checks."""
 
     train_features: Any
     train_labels: Any

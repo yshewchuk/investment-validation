@@ -9,6 +9,7 @@ from engine.v2.models.training import (
     magnitude_candidate,
     regression_candidate,
 )
+from engine.v2.models.training.fit_inputs import FitInputs
 from engine.v2.models.training.fit_routes import fit_execution
 from engine.v2.ops.native_registration import magnitude_fitted_execution_document
 from experiments.magnitude_candidate_fit import fit_candidate
@@ -20,6 +21,10 @@ FAMILIES = [("ridge", {"alpha": 1.}), ("hgb", {"max_leaf_nodes": 7}),
             ("elasticnet", {"alpha": .1, "l1_ratio": .75})]
 
 
+def pack(*arrays, columns=COLUMNS):
+    return FitInputs(*arrays, columns)
+
+
 def test_legacy_wrapper_delegates_result_unchanged(monkeypatch):
     result = {"predictions": [2.], "synthetic_diagnostic": "preserved"}
     calls = []
@@ -28,8 +33,17 @@ def test_legacy_wrapper_delegates_result_unchanged(monkeypatch):
         return result
     monkeypatch.setattr(magnitude_candidate, "fit_candidate", fitted)
     recipe = candidate_recipe("ridge", {"alpha": 1.}, **FEATURES)
-    assert fit_candidate(recipe, [[0.]], [2.], [[0.]], columns=COLUMNS) is result
-    assert len(calls) == 1 and calls[0][0][0] is recipe
+    train_features, train_labels, prediction_features = [[0.]], [2.], [[3.]]
+    assert fit_candidate(
+        recipe, train_features, train_labels, prediction_features, columns=COLUMNS) is result
+    assert len(calls) == 1
+    args, kwargs = calls[0]
+    assert args[0] is recipe
+    assert isinstance(args[1], FitInputs)
+    assert args[1].train_features is train_features
+    assert args[1].train_labels is train_labels
+    assert args[1].prediction_features is prediction_features
+    assert args[1].columns is COLUMNS
 
 
 @pytest.mark.parametrize("family,parameters", FAMILIES)
@@ -38,8 +52,10 @@ def test_regression_route_preserves_complete_result(family, parameters, domain):
     recipe = regression_candidate_recipe(family, parameters, target_domain=domain, **FEATURES)
     train, prediction = [[0.]] * 20 + [[1.]] * 20, [[0.], [1.]]
     labels = [-140.] * 20 + [25.] * 20 if domain == "signed" else [0.] * 20 + [25.] * 20
-    expected = regression_candidate.fit_regression_candidate(recipe, train, labels, prediction, columns=COLUMNS)
-    assert fit_execution("regression_candidate", recipe, train, labels, prediction, columns=COLUMNS) == expected
+    expected = regression_candidate.fit_regression_candidate(
+        recipe, pack(train, labels, prediction, columns=COLUMNS))
+    assert fit_execution(
+        "regression_candidate", recipe, pack(train, labels, prediction, columns=COLUMNS)) == expected
     if domain == "signed":
         assert expected["predictions"][0] < -100.
 
@@ -48,9 +64,9 @@ def test_regression_route_preserves_complete_result(family, parameters, domain):
 def test_magnitude_candidate_route_preserves_complete_result(family, parameters):
     recipe = candidate_recipe(family, parameters, **FEATURES)
     args = ([[0.]] * 20 + [[1.]] * 20, [0.] * 20 + [25.] * 20, [[0.], [1.]])
-    assert fit_execution("magnitude_candidate", recipe, *args, columns=COLUMNS) == fit_candidate(recipe, *args, columns=COLUMNS)
+    assert fit_execution("magnitude_candidate", recipe, pack(*args, columns=COLUMNS)) == fit_candidate(recipe, *args, columns=COLUMNS)
     with pytest.raises(ValueError, match="nonnegative"):
-        fit_execution("magnitude_candidate", recipe, [[0.]], [-1.], [[0.]], columns=COLUMNS)
+        fit_execution("magnitude_candidate", recipe, pack([[0.]], [-1.], [[0.]], columns=COLUMNS))
 
 
 @pytest.mark.parametrize("model", ["history_ridge", "history_hgb"])
@@ -60,7 +76,9 @@ def test_original_magnitude_route_wraps_only_predictions(model, container):
     matrix = [[0.] * 11] * 3
     args = (execution["fit_recipe"], matrix, [1., 1., 1.], matrix)
     expected = magnitude.fit_magnitude_predictions(*args)
-    assert fit_execution("magnitude", *args, columns=container(execution["features"])) == {"predictions": expected}
+    assert fit_execution(
+        "magnitude", execution["fit_recipe"],
+        pack(matrix, [1., 1., 1.], matrix, columns=container(execution["features"]))) == {"predictions": expected}
 
 
 class Poison:
@@ -74,14 +92,25 @@ class Poison:
 
 @pytest.mark.parametrize("guard", [legacy_guard, no_fit])
 def test_both_guards_precede_route_and_input_inspection(guard):
+    inputs = FitInputs(Poison(), Poison(), Poison(), Poison())
     with guard.no_fit_guard(), pytest.raises(guard.RuntimeFitForbidden):
-        fit_execution(Poison(), Poison(), Poison(), Poison(), Poison(), columns=Poison())
+        fit_execution(Poison(), Poison(), inputs)
+
+
+@pytest.mark.parametrize("fit", [
+    magnitude_candidate.fit_candidate,
+    regression_candidate.fit_regression_candidate])
+@pytest.mark.parametrize("guard", [legacy_guard, no_fit])
+def test_candidate_fits_refuse_before_recipe_or_input_inspection(fit, guard):
+    with guard.no_fit_guard(), pytest.raises(guard.RuntimeFitForbidden):
+        fit(Poison(), Poison())
 
 
 @pytest.mark.parametrize("route", [None, [], {}, Poison(), "other", "regression_candidate_execution.v1"])
 def test_unknown_routes_refuse_before_inputs(route):
+    inputs = FitInputs(Poison(), Poison(), Poison(), Poison())
     with pytest.raises(ValueError, match="unsupported numeric"):
-        fit_execution(route, Poison(), Poison(), Poison(), Poison(), columns=Poison())
+        fit_execution(route, Poison(), inputs)
 
 
 @pytest.mark.parametrize("route,module,name", [
@@ -96,14 +125,15 @@ def test_original_errors_propagate_without_retry(route, module, name, monkeypatc
     monkeypatch.setattr(module, name, refuse)
     execution = magnitude_fitted_execution_document("2025-01-01", "history_ridge")
     with pytest.raises(RuntimeError) as caught:
-        fit_execution(route, execution["fit_recipe"], [], [], [], columns=execution["features"])
+        fit_execution(route, execution["fit_recipe"], pack([], [], [], columns=execution["features"]))
     assert caught.value is failure and calls == [1]
 
 
 @pytest.mark.parametrize("recipe", [None, {}, {"schema_version": "regression_ridge_hgb_recipe.v1"}])
 def test_original_route_cannot_silently_consume_signed_or_unknown_recipe(recipe):
+    inputs = FitInputs(Poison(), Poison(), Poison(), Poison())
     with pytest.raises(ValueError, match="admitted recipe schema"):
-        fit_execution("magnitude", recipe, Poison(), Poison(), Poison(), columns=Poison())
+        fit_execution("magnitude", recipe, inputs)
 
 
 @pytest.mark.parametrize("model", ["history_ridge", "history_hgb"])
@@ -124,5 +154,6 @@ def test_original_magnitude_rejects_column_mismatch_before_fit(model, mutation, 
     def unexpected_fit(*args, **kwargs):
         pytest.fail("fitter entered before column admission")
     monkeypatch.setattr(magnitude, "fit_magnitude_predictions", unexpected_fit)
+    inputs = FitInputs(Poison(), Poison(), Poison(), columns)
     with pytest.raises(ValueError, match="columns must exactly match"):
-        fit_execution("magnitude", execution["fit_recipe"], Poison(), Poison(), Poison(), columns=columns)
+        fit_execution("magnitude", execution["fit_recipe"], inputs)

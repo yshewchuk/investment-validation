@@ -647,7 +647,7 @@ This bounds retained unmatched rows, not total process RSS.
 `TableContractRef`, `ColumnContract`, `TableContract`),
 `engine.v2.contracts.final_holdout` (`FinalHoldoutRequest`, for `_final_population`),
 `engine.v2.features.panel_math` (`history_features`, `DAILY_STATE_FIELDS`) and
-`engine.v2.features.regime` (`add_regime_features`, `validated_regime_closes`),
+`engine.v2.features.regime` (`add_regime_features`, `validated_regime_closes`), `engine.v2.models.training` (`FitInputs`, `fit_routes` for offline horizon fitting),
 `engine.v2.foundation` (`ArtifactStore`, `SystemClock`, `canonical_json`, `iter_canonical_json`,
 `content_hash`, `from_document`, `to_document`, `format_timestamp`, `market_calendar`,
 `experiment_exits.valid_exit_recipe`,
