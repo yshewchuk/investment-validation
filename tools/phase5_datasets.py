@@ -341,18 +341,23 @@ def board_analog_trades(*, trades: pd.DataFrame | None = None, panel: pd.DataFra
 # --------------------------------------------------------------------------
 
 
-def champion_driver_pool(role: str, registry=None) -> dict:
+def champion_driver_pool(role: str, registry=None, *,
+                         max_artifact_bytes: int | None = None) -> dict:
     """``{"model_id", "artifact_sha256", "residuals", "buckets"}`` for a champion.
 
     ``Registry.load_champion(role, "*", verify=True)``: the hash-verified
-    pickle ``Scorer.model(role)`` serves, read-only.
+    pickle ``Scorer.model(role)`` serves, read-only. ``max_artifact_bytes``
+    (the monthly retrain's bound) caps the artifact's regular-file size
+    before any read or deserialize; ``None`` is the unbounded default every
+    other caller keeps.
     """
     from engine.models.registry import load_registry
 
     if role not in DRIVER_ROLES:
         raise SystemExit(f"{role}: not a driver residual pool role ({', '.join(DRIVER_ROLES)})")
     registry = load_registry() if registry is None else registry
-    entry, artifact = registry.load_champion(role, "*", verify=True)
+    entry, artifact = registry.load_champion(
+        role, "*", verify=True, max_bytes=max_artifact_bytes)
     return {
         "model_id": entry.id,
         "artifact_sha256": entry.artifact_sha256,

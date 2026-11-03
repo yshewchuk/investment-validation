@@ -27,7 +27,10 @@ training time, through :func:`register`.
 from __future__ import annotations
 
 import hashlib
+import io
 import json
+import os
+import stat
 from dataclasses import dataclass, field, asdict
 from datetime import date
 from pathlib import Path
@@ -294,10 +297,15 @@ def artifact_sha256(path: Path, chunk: int = 1 << 20) -> str:
     return h.hexdigest()
 
 
-def load_artifact(path: Path) -> ModelArtifact:
+def _artifact_fd(path: Path) -> int:
+    return os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+
+
+def load_artifact(path: Path, *, handle=None) -> ModelArtifact:
+    """Deserialize ``path`` — or the already-open ``handle`` over it — as an artifact."""
     import joblib
 
-    obj = joblib.load(path)
+    obj = joblib.load(path if handle is None else handle)
     if not isinstance(obj, ModelArtifact):
         raise RegistryError(f"{path} does not hold a ModelArtifact ({type(obj).__name__})")
     return obj
@@ -507,26 +515,45 @@ class Registry:
 
     # -- artifact loading --------------------------------------------------
 
-    def load(self, entry: RegistryEntry | str, *, verify: bool = True) -> ModelArtifact:
-        """Load an entry's artifact, refusing anything the manifest misdescribes."""
+    def load(self, entry: RegistryEntry | str, *, verify: bool = True,
+             max_bytes: int | None = None) -> ModelArtifact:
+        """Load an entry's artifact, refusing anything the manifest misdescribes.
+
+        ``max_bytes`` bounds the regular-file size on the bounded path; ``None``
+        — every other caller — leaves the unbounded path unchanged.
+        """
         if isinstance(entry, str):
             entry = self.get(entry)
         path = entry.path
-        if not path.exists():
-            raise RegistryError(
-                f"{entry.id}: artifact {path} is missing. Artifacts are not "
-                f"committed; rebuild with `python3 -m engine.models.training.train_all`"
-            )
-        if verify:
-            actual = artifact_sha256(path)
-            if actual != entry.artifact_sha256:
+        if max_bytes is None:
+            if not path.exists():
                 raise RegistryError(
-                    f"{entry.id}: artifact hash mismatch — the file at {path} is not "
-                    f"the model the registry describes (recorded {entry.artifact_sha256[:12]}…, "
-                    f"found {actual[:12]}…). Its recorded metrics {entry.eval} do not "
-                    f"describe it. Retrain and re-register rather than editing the hash."
+                    f"{entry.id}: artifact {path} is missing. Artifacts are not "
+                    f"committed; rebuild with `python3 -m engine.models.training.train_all`"
                 )
-        artifact = load_artifact(path)
+            actual = artifact_sha256(path) if verify else None
+            artifact = load_artifact(path)
+        else:
+            try:
+                fd = _artifact_fd(path)
+            except FileNotFoundError:
+                raise RegistryError(f"{entry.id}: artifact {path} is missing") from None
+            with os.fdopen(fd, "rb") as fh:
+                info = os.fstat(fd)
+                if not stat.S_ISREG(info.st_mode) or info.st_size > max_bytes:
+                    raise RegistryError(f"artifact {path} is not a bounded regular file")
+                payload = fh.read(max_bytes + 1)
+            if len(payload) != info.st_size:
+                raise RegistryError(f"{entry.id}: artifact {path} changed while reading")
+            actual = hashlib.sha256(payload).hexdigest() if verify else None
+            artifact = load_artifact(path, handle=io.BytesIO(payload))
+        if verify and actual != entry.artifact_sha256:
+            raise RegistryError(
+                f"{entry.id}: artifact hash mismatch — the file at {path} is not "
+                f"the model the registry describes (recorded {entry.artifact_sha256[:12]}…, "
+                f"found {actual[:12]}…). Its recorded metrics {entry.eval} do not "
+                f"describe it. Retrain and re-register rather than editing the hash."
+            )
         if verify and list(artifact.features) != list(entry.features):
             raise RegistryError(
                 f"{entry.id}: feature list disagrees with the artifact.\n"
@@ -547,9 +574,10 @@ class Registry:
         *,
         decision_offset: int | None = None,
         verify: bool = True,
+        max_bytes: int | None = None,
     ) -> tuple[RegistryEntry, ModelArtifact]:
         entry = self.champion(role, strategy, decision_offset=decision_offset)
-        return entry, self.load(entry, verify=verify)
+        return entry, self.load(entry, verify=verify, max_bytes=max_bytes)
 
     # -- validation --------------------------------------------------------
 

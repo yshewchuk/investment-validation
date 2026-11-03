@@ -58,6 +58,7 @@ import argparse
 import datetime
 import json
 import os
+import pickle
 import resource
 import sys
 import time
@@ -213,9 +214,6 @@ def monthly_retrain_cutoff(month: str) -> str:
     return end.isoformat()
 
 
-month_cutoff = monthly_retrain_cutoff
-
-
 def _guard(where: str) -> None:
     """Both no-fit switches, before any row is read (as ``run_training_job``)."""
     from engine.models.no_fit import forbid_fitting as legacy_forbid
@@ -226,11 +224,13 @@ def _guard(where: str) -> None:
 
 
 def build_state(member: str, *, cutoff=None, ticker_chunk: int = 1000, registry=None,
-                paired_inputs=None):
+                paired_inputs=None, monthly: bool = False):
     """``(artifact | None, summary)`` for one frozen-state catalog member.
 
     ``registry``/``paired_inputs`` are injectable for tests; by default the
     real registry and :func:`tools.phase5_datasets.paired_pool_inputs`.
+    ``monthly`` bounds a driver's champion artifact and requires the chooser's
+    event date (the monthly retrain passes it; every other caller does not).
     """
     from engine.v2.models.lineage import DataDependency, Lineage
     from engine.v2.models.training.residuals import (
@@ -247,10 +247,18 @@ def build_state(member: str, *, cutoff=None, ticker_chunk: int = 1000, registry=
         from engine.models.registry import RegistryError
 
         try:
-            pool = data.champion_driver_pool(role, registry=registry)
+            pool = data.champion_driver_pool(
+                role, registry=registry,
+                max_artifact_bytes=MONTHLY_CHAMPION_ARTIFACT_MAX_BYTES if monthly else None)
         except RegistryError as exc:
             raise SystemExit(
                 f"driver_residual_pool:{role} champion source is invalid") from exc
+        except OSError as exc:
+            raise SystemExit(
+                f"driver_residual_pool:{role} champion source is unreadable") from exc
+        except (pickle.UnpicklingError, EOFError) as exc:
+            raise SystemExit(
+                f"driver_residual_pool:{role} champion artifact is corrupt") from exc
         lineage = Lineage(data=(DataDependency(
             table=f"model_artifact:{pool['model_id']}",
             keys=(str(pool["artifact_sha256"]),)),))
@@ -291,7 +299,7 @@ def build_state(member: str, *, cutoff=None, ticker_chunk: int = 1000, registry=
         source = paths.FEATURES / _CHOOSER_POOL_FILE
         started = time.perf_counter()
         try:
-            frame = read_chooser_pool_frame(source)
+            frame = read_chooser_pool_frame(source, require_event_date=monthly)
         except FileNotFoundError:
             raise SystemExit("chooser analog pool source is missing") from None
         except OSError:
@@ -305,13 +313,14 @@ def build_state(member: str, *, cutoff=None, ticker_chunk: int = 1000, registry=
         # ``row.get``), freezing an empty pool; refuse instead. The shared
         # check raises ``ValueError``; a tool refusal is ``SystemExit``.
         try:
-            require_chooser_pool_columns(frame.columns)
+            require_chooser_pool_columns(frame.columns, require_event_date=monthly)
         except ValueError as exc:
             raise SystemExit(str(exc)) from exc
         lineage = Lineage(data=(DataDependency(table=CHOOSER_POOL_ID, end_exclusive=bound),))
         try:
             artifact = build_chooser_analog_pool_artifact(
-                frame.to_dict("records"), pool_id=CHOOSER_POOL_ID, cutoff=bound, lineage=lineage)
+                frame.to_dict("records"), pool_id=CHOOSER_POOL_ID, cutoff=bound, lineage=lineage,
+                require_event_date=monthly)
         except ValueError as exc:
             raise SystemExit(str(exc)) from exc
         n_rows = sum(len(rows) for _, rows in artifact.strategies)
@@ -344,7 +353,8 @@ def state_file_name(member: str) -> str:
     return member.replace(":", "__") + ".json"
 
 
-def run_state_job(member: str, out: Path, *, plan_only: bool = False, **kwargs) -> dict:
+def run_state_job(member: str, out: Path, *, plan_only: bool = False,
+                  monthly: bool = False, **kwargs) -> dict:
     """Build one frozen state into ``out``.
 
     A rerun keeps an identical existing file and refuses a different one.
@@ -361,7 +371,7 @@ def run_state_job(member: str, out: Path, *, plan_only: bool = False, **kwargs) 
         raise SystemExit(f"{member}: --plan-only unsupported for --state jobs "
                          "(would build the full artifact only to discard it); run without "
                          f"--plan-only, or use --state {BOARD_ANALOG_STATE}/{TRAILING_CUTOFF_STATE}")
-    artifact, summary = build_state(member, **kwargs)
+    artifact, summary = build_state(member, monthly=monthly, **kwargs)
     summary = {"state": member, "plan_only": bool(plan_only), **summary}
     if member == "paired_residual_pool" and kwargs.get("paired_inputs") is None:
         from engine import paths
@@ -406,6 +416,11 @@ def run_state_job(member: str, out: Path, *, plan_only: bool = False, **kwargs) 
     return summary
 
 
+#: Monthly-only bound on a champion artifact's regular-file size (256 MiB):
+#: the driver members deserialize it, and nothing above this cap is read or
+#: unpickled. Wired only by ``run_monthly_pools_job``; every other caller of
+#: the Registry stays unbounded.
+MONTHLY_CHAMPION_ARTIFACT_MAX_BYTES = 256 << 20
 MONTHLY_DRIVER_MEMBERS = (
     "driver_residual_pool:size",
     "driver_residual_pool:implied_t1",
@@ -421,7 +436,9 @@ def run_monthly_pools_job(out: Path, *, month: str, cutoff: str,
     The three driver pools are D1 re-freezes of the stored champion pools,
     unchanged in this slice; their receipts record the champion identity and
     inherited admission, and take no cutoff. Only the chooser takes the
-    exclusive ``cutoff`` (the day after ``month``'s end).
+    exclusive ``cutoff`` (the day after ``month``'s end). Each driver's
+    champion artifact is bounded at ``MONTHLY_CHAMPION_ARTIFACT_MAX_BYTES``
+    before any read or deserialize.
     Reuses ``run_state_job``.
     """
     try:
@@ -445,7 +462,8 @@ def run_monthly_pools_job(out: Path, *, month: str, cutoff: str,
         member_started = time.perf_counter()
         member_cutoff = bound if member == CHOOSER_POOL_STATE else None
         summary = run_state_job(
-            member, out, plan_only=False, cutoff=member_cutoff, ticker_chunk=ticker_chunk)
+            member, out, plan_only=False, cutoff=member_cutoff,
+            ticker_chunk=ticker_chunk, monthly=True)
         if (summary.get("status") == "empty" or not summary.get("file")
                 or not summary.get("content_hash") or summary.get("bytes") is None):
             raise SystemExit(f"monthly_pools {member} produced no output")

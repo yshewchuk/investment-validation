@@ -340,7 +340,7 @@ def test_unreadable_source_is_validation_failed(tmp_path, monkeypatch):
     source = tmp_path / "features"
     source.mkdir()
 
-    def unreadable(_path):
+    def unreadable(_path, **_kwargs):
         raise PermissionError("denied")
 
     monkeypatch.setattr(chooser_pool_source, "read_chooser_pool_frame", unreadable)
@@ -374,6 +374,55 @@ def test_invalid_driver_champion_source_is_validation_failed(tmp_path, monkeypat
     assert excinfo.value.code == "VALIDATION_FAILED"
 
 
+def _champion_registry(tmp_path, monkeypatch):
+    """A one-champion registry whose artifact is a small file under ``tmp_path``."""
+    from engine.models import registry as registry_mod
+
+    payload = b"x" * 64
+    artifact = tmp_path / "size-champion.joblib"
+    artifact.write_bytes(payload)
+    entry = registry_mod.RegistryEntry(
+        id="size-champion", role="size", strategy="*", artifact=str(artifact),
+        artifact_sha256=hashlib.sha256(payload).hexdigest(),
+        features=["abs_move"], target="abs_move", train_window="2015-2025",
+        champion=True)
+    registry = registry_mod.Registry(entries=[entry])
+    monkeypatch.setattr(registry_mod, "load_registry", lambda *args, **kwargs: registry)
+    return registry
+
+
+def test_oversized_champion_is_rejected_before_the_deserializer_runs(tmp_path, monkeypatch):
+    from engine.models import registry as registry_mod
+
+    _champion_registry(tmp_path, monkeypatch)
+    calls = []
+
+    def deserializer(*_args, **_kwargs):
+        calls.append("deserialized")
+        raise AssertionError("the deserializer must not run for an oversized artifact")
+
+    monkeypatch.setattr(registry_mod, "load_artifact", deserializer)
+    monkeypatch.setattr(job, "MONTHLY_CHAMPION_ARTIFACT_MAX_BYTES", 8)
+    with pytest.raises(OpsError) as excinfo:
+        training.run_training_worker(_worker_params(), tmp_path / "attempt")
+    assert excinfo.value.code == "VALIDATION_FAILED"
+    assert calls == []
+
+
+def test_unreadable_champion_source_is_validation_failed(tmp_path, monkeypatch):
+    from engine.models import registry as registry_mod
+
+    _champion_registry(tmp_path, monkeypatch)
+
+    def unreadable(_path):
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(registry_mod, "_artifact_fd", unreadable)
+    with pytest.raises(OpsError) as excinfo:
+        training.run_training_worker(_worker_params(), tmp_path / "attempt")
+    assert excinfo.value.code == "VALIDATION_FAILED"
+
+
 def test_empty_required_member_is_validation_failed(tmp_path, monkeypatch):
     def empty(member, out, *, plan_only=False, **kwargs):
         out.mkdir(parents=True, exist_ok=True)
@@ -390,10 +439,27 @@ def test_monthly_retrain_cutoff_rolls_over_the_year_end():
     assert job.monthly_retrain_cutoff("2024-02") == "2024-03-01"
 
 
-def test_month_cutoff_alias_matches_monthly_retrain_cutoff():
-    for month in ("2026-12", "2024-02", "2026-01"):
-        assert job.month_cutoff(month) == job.monthly_retrain_cutoff(month)
-    assert job.month_cutoff("2026-12") == "2027-01-01"
+def test_legacy_chooser_state_accepts_a_source_without_event_date(tmp_path, monkeypatch):
+    rows = [{"strategy": "CTR5", "exit_date": pd.Timestamp(day), "pnl": float(pnl), **_DIMS}
+            for day, pnl in (("2026-02-27", 1.0), ("2026-03-01", 3.0))]
+    source = _write_source(tmp_path, rows)
+    monkeypatch.setattr(paths, "FEATURES", source)
+    out = tmp_path / "out"
+
+    summary = job.run_state_job("chooser_analog_pool", out, cutoff=CUTOFF)
+
+    assert summary["n_rows"] == 1
+    pool = FrozenStateLoader(out).load(
+        FrozenStateRef(path=summary["file"], content_hash=summary["content_hash"]))
+    dims = [_DIMS[name] for name in CHOOSER_ANALOG_DIMS]
+    assert pool.rows_for("CTR5") == (("2026-02-27", 1.0, *dims),)
+
+
+def test_monthly_chooser_refuses_a_source_without_event_date(tmp_path, monkeypatch):
+    rows = [{"strategy": "CTR5", "exit_date": pd.Timestamp("2026-02-27"), "pnl": 1.0,
+             **_DIMS}]
+    source = _write_source(tmp_path, rows)
+    assert _run_with_real_chooser(tmp_path, monkeypatch, source).code == "VALIDATION_FAILED"
 
 
 def test_tool_refuses_a_cutoff_that_is_not_the_day_after_the_month_end(tmp_path):

@@ -17,9 +17,10 @@ frame, in its stored order):
 One rule is added, and it is the causal key: a row whose event date or
 settled exit date is on/after ``cutoff`` never enters. Legacy has no cutoff
 (its file is whatever was last built); declaring one is what lets a request
-check which pool it reads. The source admission requires ``event_date``; a
-direct builder caller whose rows omit the key keeps the legacy exit-only
-filter.
+check which pool it reads. The source admission requires ``event_date`` only
+when ``require_event_date=True`` (the monthly retrain); a caller whose rows
+omit the key, including legacy sources and release consumers, keeps the
+exit-only filter.
 
 The artifact stores exit DAYS. Legacy compares full timestamps, and its pool
 builder normalizes every exit date to midnight, so the two agree; an exit or
@@ -71,12 +72,15 @@ def _as_float(value: Any) -> float:
         return float("nan")
 
 
-def _kept(row: Mapping[str, Any], bound: str | None) -> tuple[str, tuple] | None:
+def _kept(row: Mapping[str, Any], bound: str | None,
+          require_event_date: bool) -> tuple[str, tuple] | None:
     strategy = row.get("strategy")
     if strategy is None or strategy != strategy:
         return None
     event_value = row.get("event_date", _MISSING)
     if event_value is _MISSING:
+        if require_event_date:
+            raise ValueError("chooser analog pool source lacks required columns")
         event_day = None
     else:
         event_day = _day(event_value, "event_date")
@@ -100,6 +104,7 @@ def build_chooser_analog_pool_artifact(
     pool_id: str,
     cutoff: Any,
     lineage: Lineage,
+    require_event_date: bool = False,
 ) -> ChooserAnalogPoolArtifact:
     """Freeze the chooser analog population from ``rows`` in their order.
 
@@ -122,7 +127,7 @@ def build_chooser_analog_pool_artifact(
             raise ValueError("chooser analog pool cutoff must be YYYY-MM-DD")
     grouped: dict[str, list[tuple]] = {}
     for row in rows:
-        kept = _kept(row, bound)
+        kept = _kept(row, bound, require_event_date)
         if kept is not None:
             grouped.setdefault(kept[0], []).append(kept[1])
     return make_chooser_analog_pool_artifact(
