@@ -383,7 +383,9 @@ def test_projection_refusal_preserves_earlier_bundle_refusal(monkeypatch):
     key = BoardRequest("AAA", "TWIN-P", pd.Timestamp("2026-01-12"), "close")
     event = NightlyEventInputs(
         key=key,
-        calendar_row={"event_date": "2026-01-12", "entry_date": "2026-01-12"},
+        calendar_row={
+            "ticker": "AAA", "strategy": "TWIN-P", "session": "close",
+            "event_date": "2026-01-12", "entry_date": "2026-01-12"},
         panel_row={}, panel_anchor="2026-01-10", tier4_row={}, quote_rows=())
     identity = SimpleNamespace(
         decision_clock_id="clock", artifact_hash="hash", binding_id="binding",

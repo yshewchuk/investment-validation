@@ -16,12 +16,20 @@ from __future__ import annotations
 
 import json
 import math
+import sys
+import time
+from collections import Counter
 from dataclasses import dataclass, replace
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Mapping, Sequence
 
 import pandas as pd
+
+try:
+    import resource as _resource
+except ImportError:  # pragma: no cover - non-POSIX platforms
+    _resource = None
 
 from engine.v2.contracts import ScoreBatch, ScoreRequest
 from engine.v2.foundation import canonical_json, content_hash, to_document
@@ -83,6 +91,16 @@ _CHOOSER_PRIMITIVES = (
 _SCORER_COMPUTED_FEATURES = frozenset({
     "entry_cost_pct", "days_to_print", "dte_entry",
 })
+
+_ASSEMBLY_PROGRESS_ROWS = 100
+_ASSEMBLY_PROGRESS_SECONDS = 15.0
+
+
+def _rss_mib() -> float:
+    """Best-effort peak RSS in MiB; 0.0 where ``resource`` is unavailable."""
+    if _resource is None:
+        return 0.0
+    return _resource.getrusage(_resource.RUSAGE_SELF).ru_maxrss / 1024.0
 
 @dataclass(frozen=True, slots=True)
 class _DriverSpec:
@@ -1191,7 +1209,15 @@ def _assemble_validated_events(
     refusals: list[NativeScoreBatchRowRefusal] = []
     seen_hashes: dict[str, BoardRequest] = {}
     gate_source_cache: dict[tuple[int, str], Any] = {}
-    for event in events:
+    total, started = len(events), time.monotonic()
+    last_progress = started
+    refusal_codes: Counter[str] = Counter()
+    print(
+        f"[native-score] assemble start: 0/{total} rows, elapsed=0.0s, "
+        f"peak_rss={_rss_mib():.1f}MiB",
+        file=sys.stderr,
+    )
+    for done, event in enumerate(events, start=1):
         outcome = _assemble_one_event(
             event, binding=binding, gate_policy=gate_policy, as_of=as_of,
             snapshot_id=snapshot_id, calendar_revision=calendar_revision,
@@ -1200,15 +1226,46 @@ def _assemble_validated_events(
         )
         if isinstance(outcome, NativeScoreBatchRowRefusal):
             refusals.append(outcome)
-            continue
-        request, _ = outcome
-        row_hash = request_hash(request)
-        if row_hash in seen_hashes:
-            raise ValueError(
-                f"duplicate request_hash {row_hash} for {event.key!r} and "
-                f"{seen_hashes[row_hash]!r}")
-        seen_hashes[row_hash] = event.key
-        results[event.key] = outcome
+            refusal_codes[outcome.code] += 1
+        else:
+            request, _ = outcome
+            row_hash = request_hash(request)
+            if row_hash in seen_hashes:
+                raise ValueError(
+                    f"duplicate request_hash {row_hash} for {event.key!r} and "
+                    f"{seen_hashes[row_hash]!r}")
+            seen_hashes[row_hash] = event.key
+            results[event.key] = outcome
+        now = time.monotonic()
+        if done < total and (
+                done % _ASSEMBLY_PROGRESS_ROWS == 0
+                or now - last_progress >= _ASSEMBLY_PROGRESS_SECONDS):
+            elapsed = now - started
+            rate = done / elapsed if elapsed > 0 else 0.0
+            eta = (total - done) / rate if rate > 0 else 0.0
+            codes = ",".join(
+                f"{code}:{count}" for code, count in sorted(refusal_codes.items()))
+            print(
+                f"[native-score] assemble {done}/{total}, elapsed={elapsed:.1f}s, "
+                f"rate={rate:.2f}/s, ETA={eta:.1f}s, "
+                f"peak_rss={_rss_mib():.1f}MiB, assembled={len(results)}, "
+                f"refused={len(refusals)}, refusal_codes={codes or 'none'}, "
+                f"batch_rows={total}",
+                file=sys.stderr,
+            )
+            last_progress = now
+    elapsed = time.monotonic() - started
+    rate = total / elapsed if elapsed > 0 else 0.0
+    codes = ",".join(
+        f"{code}:{count}" for code, count in sorted(refusal_codes.items()))
+    print(
+        f"[native-score] assemble end: {total}/{total} rows, "
+        f"elapsed={elapsed:.1f}s, rate={rate:.2f}/s, "
+        f"peak_rss={_rss_mib():.1f}MiB, assembled={len(results)}, "
+        f"refused={len(refusals)}, refusal_codes={codes or 'none'}, "
+        f"batch_rows={total}",
+        file=sys.stderr,
+    )
     return results, tuple(refusals)
 
 
@@ -1576,7 +1633,8 @@ def run_native_score_batch_worker(parameters: Mapping[str, Any], root: Path) -> 
     as_of = parameters["as_of"]
     snapshot_id = parameters["snapshot_id"]
     binding = resolve_release_binding(
-        parameters["release_root"], include_chooser_fold_references=True)
+        parameters["release_root"], include_chooser_fold_references=True,
+        defer_chooser_fold_failures=True)
     events_doc, producer_doc, calendar_revision = _worker_event_documents(parameters, root)
     events = tuple(_event_inputs_from_document(item) for item in events_doc)
     raw_feature_names = parameters.get("feature_names")
