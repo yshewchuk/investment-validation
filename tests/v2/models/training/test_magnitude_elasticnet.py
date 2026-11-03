@@ -275,7 +275,7 @@ def test_malformed_matrices_or_labels_refuse(inputs):
 
 @pytest.mark.parametrize("damage, expected_error, match", [
     ("infinity", ValueError, "ElasticNet requires nonempty selected-column matrices without infinity"),
-    ("object_cell", TypeError, None),
+    ("object_cell", TypeError, r"float\(\) argument"),
 ])
 def test_matrix_and_conversion_failures_precede_label_row_count_mismatch(
         damage, expected_error, match):
@@ -289,6 +289,15 @@ def test_matrix_and_conversion_failures_precede_label_row_count_mismatch(
         train[0, 0] = object()
     with pytest.raises(expected_error, match=match):
         fit_elasticnet_predictions(recipe(), train, labels, prediction, columns=COLUMNS)
+
+
+def test_public_adapter_reports_label_row_count_mismatch_from_matrix_validator():
+    train = np.array([[0.0, 7.0, 1.0], [2.0, 7.0, 1.0], [4.0, 7.0, 1.0]])
+    prediction = np.array([[1.0, 7.0, 1.0]])
+    with pytest.raises(
+            ValueError,
+            match="ElasticNet labels require one finite nonnegative value per training row"):
+        fit_elasticnet_predictions(recipe(), train, [1, 5], prediction, columns=COLUMNS)
 
 
 def test_convergence_warning_refuses_without_predict_retry_or_partial_result(monkeypatch):

@@ -1,4 +1,4 @@
-"""Frozen in-memory fit transport guarded once at construction."""
+"""Frozen in-memory fit transport; from_recipe applies the guards, and public adapters also guard before recipe validation."""
 from __future__ import annotations
 
 from dataclasses import dataclass
