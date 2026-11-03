@@ -11,6 +11,7 @@ from engine.v2.ops import retrain_check as phase5_accept
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.stages import registry
 from engine.v2.ops.submission import RetryPolicy
+from engine.v2.ops.supervisor import Service
 from tools import phase5_acceptance_job
 
 
@@ -364,6 +365,19 @@ def test_job_kind_is_registered_non_retrying_with_shadow_and_smoke_namespaces():
     assert kind.checkpoint_contract == "phase5_acceptance.v1.0"
     assert kind.namespaces == frozenset({"shadow", "smoke"})
     assert kind.validate(None, params) == []
+
+
+def test_job_kind_does_not_request_deterministic_checkpointing():
+    kind = registry().get("phase5_accept")
+    service = object.__new__(Service)
+    service.registry = registry()
+    claim = SimpleNamespace(spec=SimpleNamespace(kind="phase5_accept", parameters={}))
+    retrain_claim = SimpleNamespace(spec=SimpleNamespace(kind="retrain_check", parameters={}))
+
+    assert service._cache_allowed(claim) is False
+    assert service._cache_allowed(retrain_claim) is True
+    assert kind.checkpoint_contract == phase5_accept.ACCEPTANCE_SCHEMA
+    assert kind.checkpoint_contract == "phase5_acceptance.v1.0"
 
 
 def test_worker_leaves_deployed_pointer_unchanged(tmp_path, monkeypatch):
