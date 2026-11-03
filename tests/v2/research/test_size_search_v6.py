@@ -154,6 +154,14 @@ def test_v6_workers_one_and_two_match_candidates_results_and_metrics(case, tmp_p
     assert serial_result["metrics"] == parallel_result["metrics"]
     assert serial_result["prospective_candidate_id"] == parallel_result["prospective_candidate_id"]
 
+    planned_ids = {candidate["candidate_id"] for candidate in case.plan["candidates"]}
+    assert serial_result["prospective_candidate_id"] in planned_ids
+    (prediction,) = serial_result["predictions"]
+    assert prediction["event_id"] == "SYNTH:2024-06-17:0"
+    assert prediction["horizon_sessions"] == 1
+    assert prediction["absolute_move_pct"] == 7.0
+    assert prediction["outer_year"] == "2024"
+
     # Recompute count, MAE and RMSE from each result's own predictions; this catches pooled
     # metric fields replaced with unrelated constants without pinning any selected value.
     def consistency_oracle(result):
@@ -175,7 +183,6 @@ def test_v6_workers_one_and_two_match_candidates_results_and_metrics(case, tmp_p
     consistency_oracle(serial_result)
     consistency_oracle(parallel_result)
 
-    planned_ids = {candidate["candidate_id"] for candidate in case.plan["candidates"]}
     for report in (serial_report, parallel_report):
         report_ids = [row["candidate_id"] for row in report["inner_fits"]]
         assert len(report_ids) == len(set(report_ids)) == len(planned_ids)
