@@ -60,7 +60,7 @@ def test_existing_size_dispatch_remains_nonnegative_and_rejects_new_schema(famil
         fit_candidate(old, [[0.]], [-1.], [[0.]], columns=["x"])
     with pytest.raises(ValueError, match="schema/model"):
         fit_candidate(policy(family, parameters), [[0.]], [-1.], [[0.]], columns=["x"])
-    with pytest.raises(ValueError, match="schema/model"):
+    with pytest.raises(ValueError, match="supported recipe schema/model pair"):
         fit_regression_candidate(old, pack([[0.]], [1.], [[0.]]))
 
 

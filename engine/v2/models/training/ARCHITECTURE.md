@@ -10,7 +10,7 @@ The [README public interface](README.md#public-interface) inventories exported t
 
 ### FitInputs contract
 
-`FitInputs` is the frozen in-memory transport for candidate and route APIs; callers construct it at the call site. It stores caller objects without changing recipe, result, experiment or replay identity. Estimator validation retains its refusal order and messages: guard and recipe/column admission, matrix conversion and preflight, row count, then label validation.
+`FitInputs` is a frozen in-memory transport: its field bindings cannot be reassigned, but supplied array-like objects may remain mutable. Callers construct it at the call site; direct construction stores objects as given, while `from_recipe` applies guards and ordered-column admission. Candidate and route APIs pass the transport to existing fitters without changing recipe, result, experiment or replay identity. Estimator validation retains its refusal order and messages: guard and recipe/column admission, matrix conversion and preflight, row count, then label validation.
 
 ## 3. Inputs
 

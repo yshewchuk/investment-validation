@@ -653,9 +653,10 @@ def test_no_scoring_or_legacy_module_imports_the_training_package():
     run_board_analog_job, run_trailing_cutoff_job) to dispatch a training
     job's mode, and catching ``TrainingRefused`` to map it onto a typed
     OpsError is the same orchestration relationship, not a scoring-time
-    dependency. The offline ``research.horizon_fitted`` orchestrator may use
-    only the closed ``training.fit_routes`` dispatcher, not other training
-    internals. Its shared loop checks both no-fit guards before input access.
+    dependency. The offline ``research.horizon_fitted`` orchestrator may import
+    the closed ``training.fit_routes`` API and the ``FitInputs`` transport, but
+    no other training internals. Its shared loop checks both no-fit guards
+    before input access.
     """
     from checks.import_layers import build_graph
 

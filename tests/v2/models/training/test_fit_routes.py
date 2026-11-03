@@ -33,17 +33,17 @@ def test_legacy_wrapper_delegates_result_unchanged(monkeypatch):
         return result
     monkeypatch.setattr(magnitude_candidate, "fit_candidate", fitted)
     recipe = candidate_recipe("ridge", {"alpha": 1.}, **FEATURES)
-    train_features, train_labels, prediction_features = [[0.]], [2.], [[0.]]
+    train_features, train_labels, prediction_features = [[0.]], [2.], [[3.]]
     assert fit_candidate(
         recipe, train_features, train_labels, prediction_features, columns=COLUMNS) is result
     assert len(calls) == 1
     args, kwargs = calls[0]
     assert args[0] is recipe
     assert isinstance(args[1], FitInputs)
-    assert args[1].train_features == train_features
-    assert args[1].train_labels == train_labels
-    assert args[1].prediction_features == prediction_features
-    assert args[1].columns == COLUMNS
+    assert args[1].train_features is train_features
+    assert args[1].train_labels is train_labels
+    assert args[1].prediction_features is prediction_features
+    assert args[1].columns is COLUMNS
 
 
 @pytest.mark.parametrize("family,parameters", FAMILIES)
@@ -95,6 +95,15 @@ def test_both_guards_precede_route_and_input_inspection(guard):
     inputs = FitInputs(Poison(), Poison(), Poison(), Poison())
     with guard.no_fit_guard(), pytest.raises(guard.RuntimeFitForbidden):
         fit_execution(Poison(), Poison(), inputs)
+
+
+@pytest.mark.parametrize("fit", [
+    magnitude_candidate.fit_candidate,
+    regression_candidate.fit_regression_candidate])
+@pytest.mark.parametrize("guard", [legacy_guard, no_fit])
+def test_candidate_fits_refuse_before_recipe_or_input_inspection(fit, guard):
+    with guard.no_fit_guard(), pytest.raises(guard.RuntimeFitForbidden):
+        fit(Poison(), Poison())
 
 
 @pytest.mark.parametrize("route", [None, [], {}, Poison(), "other", "regression_candidate_execution.v1"])
