@@ -6,9 +6,9 @@ Layer 6 in the [root architecture](../../../../ARCHITECTURE.md): offline dataset
 
 ## 2. Primary contracts and public interfaces
 
-The [README public interface](README.md#public-interface) inventories exported types/builders. `current_recipes`, `prepare_dataset`, `plan_folds`, `fold_receipts` and `receipt_issues` feed `run_training_job`; `build_d14_dataset` admits pinned native inputs. `fit_recipe_estimator` fits release recipes. Standalone magnitude/Ridge/HGB/ElasticNet/regression estimators accept arrays; candidate and route APIs accept `FitInputs`, constructed by their callers. `magnitude_mlp.fit_mlp_predictions` participates in shared magnitude dispatch, while v1–v5 search requests do not admit MLP. Payoff, recalibration, residual, analog and trailing-cutoff builders return frozen model-state artifacts.
+The [README public interface](README.md#public-interface) inventories exported types/builders. `current_recipes`, `prepare_dataset`, `plan_folds`, `fold_receipts` and `receipt_issues` feed `run_training_job`; `build_d14_dataset` admits pinned native inputs. `fit_recipe_estimator` fits release recipes. Standalone magnitude/Ridge/HGB/ElasticNet/regression estimators accept arrays; engine candidate and route APIs accept caller-constructed `FitInputs`. The `experiments.magnitude_candidate_fit.fit_candidate` compatibility boundary keeps its raw-array signature and constructs `FitInputs` after guards and family validation. `magnitude_mlp.fit_mlp_predictions` participates in shared magnitude dispatch, while v1–v5 search requests do not admit MLP. Payoff, recalibration, residual, analog and trailing-cutoff builders return frozen model-state artifacts.
 
-### FitInputs contract (A1a/A1b)
+### FitInputs contract
 
 `FitInputs` is the frozen in-memory transport for candidate and route APIs; callers construct it at the call site. It stores caller objects without changing recipe, result, experiment or replay identity. Estimator validation retains its refusal order and messages: guard and recipe/column admission, matrix conversion and preflight, row count, then label validation.
 
