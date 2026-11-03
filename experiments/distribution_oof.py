@@ -8,8 +8,7 @@ from math import fsum, isfinite
 from engine.v2.foundation import content_hash
 from engine.v2.ops.errors import fail
 from engine.v2.research.magnitude_distribution import recipe, validate_distribution
-from engine.v2.research.magnitude_distribution_math import mean
-from engine.v2.research.magnitude_distribution_payoff import mean_matched_control
+from engine.v2.research.magnitude_distribution_math import mean, mean_matched_control
 from engine.v2.research.progress import Progress, stage
 
 __all__ = ["residual_pool", "control_for_prediction"]
