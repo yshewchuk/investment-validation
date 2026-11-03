@@ -5,7 +5,8 @@ import pytest
 
 from checks import phase5_acceptance as acceptance_gate
 from engine.v2.foundation import content_hash
-from engine.v2.models.release_layout import PHASE5_RELEASE_SCHEMA, catalog_path
+from engine.v2.models import frozen_state
+from engine.v2.models.release_layout import PHASE5_RELEASE_SCHEMA, StateSpec, catalog_path
 from engine.v2.ops import retrain_check as phase5_accept
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.stages import registry
@@ -30,6 +31,13 @@ def _evidence(release_id, catalog, *, release_ok=True):
                 "status": "RELEASE_PASS" if release_ok else "FAIL",
                 "findings": [] if release_ok else [{"code": "P5_MEMBER_MISSING"}]}
     evidence["evidence_hash"] = content_hash(evidence)
+    return evidence
+
+
+def _rehash(evidence):
+    unhashed = {key: value for key, value in evidence.items()
+                if key not in ("runtime_ms", "report", "evidence_hash")}
+    evidence["evidence_hash"] = content_hash(unhashed)
     return evidence
 
 
@@ -74,6 +82,32 @@ def test_verify_object_uses_bounded_reader(tmp_path, monkeypatch):
     assert calls == [(target.resolve(), acceptance_gate.MAX_MEMBER_BYTES)]
 
 
+def test_typed_load_caps_frozen_state_loader(tmp_path, monkeypatch):
+    release_root = tmp_path / "store"
+    spec = StateSpec(member_id="driver_residual_pool:size", kind="driver_residual_pool",
+                     strategies=(), modules=("engine.v2.models.frozen_state",),
+                     consumer=None, source="")
+    obj = {"path": "objects/member", "content_hash": "sha256:abc"}
+    calls = []
+
+    class SpyLoader:
+        def __init__(self, root, max_bytes=None):
+            calls.append(("init", root, max_bytes))
+
+        def load(self, ref):
+            calls.append(("load", ref))
+            return "artifact"
+
+    monkeypatch.setattr(frozen_state, "FrozenStateLoader", SpyLoader)
+
+    assert acceptance_gate._typed_load(spec, release_root, obj) == "artifact"
+    assert calls[0] == ("init", acceptance_gate.deployment_root(release_root),
+                        acceptance_gate.MAX_MEMBER_BYTES)
+    assert calls[1][0] == "load"
+    assert calls[1][1].path == obj["path"]
+    assert calls[1][1].content_hash == obj["content_hash"]
+
+
 def test_success_writes_acceptance_and_returns_output(tmp_path, monkeypatch):
     release_root = tmp_path / "store"
     attempt = tmp_path / "attempt"
@@ -92,12 +126,22 @@ def test_success_writes_acceptance_and_returns_output(tmp_path, monkeypatch):
     assert phase5_accept._acceptance_evidence(attempt, release_root, "candidate") == evidence
 
 
-def test_failed_evidence_is_written_then_refused(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda evidence: evidence.update(release_ok=False),
+        lambda evidence: evidence.update(status="FAIL"),
+        lambda evidence: evidence.update(findings=[{"code": "P5_MEMBER_MISSING"}]),
+    ],
+)
+def test_failed_evidence_is_written_then_refused(tmp_path, monkeypatch, mutate):
     release_root = tmp_path / "store"
     attempt = tmp_path / "attempt"
     attempt.mkdir()
     catalog = _catalog(release_root, "candidate")
-    evidence = _evidence("candidate", catalog, release_ok=False)
+    evidence = _evidence("candidate", catalog)
+    mutate(evidence)
+    _rehash(evidence)
     _patch_manifest(monkeypatch, _manifest("candidate"))
     _patch_evidence(monkeypatch, evidence)
 
@@ -196,30 +240,6 @@ def test_changed_evidence_identity_fails_closed(tmp_path, monkeypatch):
     assert (attempt / "acceptance.json").exists()
 
 
-@pytest.mark.parametrize(
-    "mutate",
-    [
-        lambda evidence: evidence.update(status="FAIL"),
-        lambda evidence: evidence.update(findings=[{"code": "P5_MEMBER_MISSING"}]),
-    ],
-)
-def test_invalid_evidence_status_or_findings_refused(tmp_path, monkeypatch, mutate):
-    release_root = tmp_path / "store"
-    attempt = tmp_path / "attempt"
-    attempt.mkdir()
-    catalog = _catalog(release_root, "candidate")
-    evidence = _evidence("candidate", catalog)
-    mutate(evidence)
-    _patch_manifest(monkeypatch, _manifest("candidate"))
-    _patch_evidence(monkeypatch, evidence)
-
-    with pytest.raises(OpsError) as excinfo:
-        phase5_accept.run_phase5_accept_worker(_params(release_root), attempt)
-
-    assert excinfo.value.code == "VALIDATION_FAILED"
-    assert excinfo.value.problem.details["code"] == "PHASE5_ACCEPTANCE_FAILED"
-
-
 def test_catalog_drift_after_evidence_production_is_input_changed(tmp_path, monkeypatch):
     release_root = tmp_path / "store"
     attempt = tmp_path / "attempt"
@@ -286,6 +306,14 @@ def test_promote_rehearsal_uses_scratch_copy(tmp_path, monkeypatch):
     pointer = store / "DEPLOYED"
     pointer.write_bytes(b"sentinel-pointer\n")
     roots = []
+    copies = []
+    real_copy = acceptance_gate._copy_pointer_state
+
+    def copy_spy(source, dest):
+        real_copy(source, dest)
+        copies.append((source, dest, (dest / "DEPLOYED").read_bytes()))
+
+    monkeypatch.setattr(acceptance_gate, "_copy_pointer_state", copy_spy)
     monkeypatch.setattr(acceptance_gate.deployment, "current_pointer", lambda _root: None)
 
     def mark(root, _candidate):
@@ -293,14 +321,20 @@ def test_promote_rehearsal_uses_scratch_copy(tmp_path, monkeypatch):
 
     def promote(root, candidate):
         roots.append(("promote", root))
+        (root / "DEPLOYED").write_bytes(candidate.encode())
         return SimpleNamespace(release_id=candidate)
+
+    observed = []
+
+    def current_release(root):
+        observed.append((root, (root / "DEPLOYED").read_bytes()))
+        return {"release_id": (root / "DEPLOYED").read_text()}
 
     monkeypatch.setattr(acceptance_gate.deployment, "mark_staging_succeeded", mark)
     monkeypatch.setattr(acceptance_gate.deployment, "promote", promote)
-    monkeypatch.setattr(acceptance_gate.deployment, "current_release",
-                        lambda _root: {"release_id": "candidate"})
+    monkeypatch.setattr(acceptance_gate.deployment, "current_release", current_release)
     monkeypatch.setattr(acceptance_gate.deployment, "resolve_release",
-                        lambda _root, _candidate: {"release_id": "candidate"})
+                        lambda _root, candidate: {"release_id": candidate})
     findings = acceptance_gate._Findings()
 
     result = acceptance_gate._promote_rehearsal(release_root, "candidate", findings)
@@ -309,6 +343,13 @@ def test_promote_rehearsal_uses_scratch_copy(tmp_path, monkeypatch):
     assert findings.rows == []
     assert pointer.read_bytes() == b"sentinel-pointer\n"
     assert [name for name, _root in roots] == ["mark", "promote"]
-    scratch_roots = {root for _name, root in roots}
-    assert len(scratch_roots) == 1
-    assert scratch_roots.pop() != store
+    assert len(copies) == 1
+    source, scratch, copied_pointer = copies[0]
+    assert source == store
+    assert scratch != store
+    assert copied_pointer == b"sentinel-pointer\n"
+    assert len(observed) == 1
+    observed_root, observed_pointer = observed[0]
+    assert observed_root == scratch
+    assert observed_root != store
+    assert observed_pointer == b"candidate"

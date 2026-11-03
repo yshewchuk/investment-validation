@@ -110,7 +110,11 @@ evidence. See the models and data component contracts.
   Known exception: `engine.v2.ops.state_stage` and `engine.v2.ops.pool_refresh` reach
   `checks/phase5_release_assembly.py` through `tools/phase5_state_stage_job.py` (no direct
   import); the catalog layout already lives in `engine/v2/models`, and the exception ends
-  when the assembly helpers move there too (#807).
+  when the assembly helpers move there too (#807). A second sanctioned exception:
+  `engine.v2.ops.retrain_check.run_phase5_accept_worker` reaches
+  `checks.phase5_acceptance.build_evidence` only through the lazy
+  `tools.phase5_acceptance_job` shim, release-scope, with no direct `checks` import; it is
+  unwired until S3b.
 - **Operator CLIs and experiments.** These operator and research entrypoints
   may call into the legacy and v2 engines. They are not uniformly leaf-only:
   `engine.v2.ops.training` imports the `phase5_training_job` module while

@@ -237,7 +237,7 @@ def _typed_load(spec: StateSpec, release_root: Path, obj: Mapping[str, Any]):
     if "engine.v2.models.frozen_state" in spec.modules:
         from engine.v2.models.frozen_state import FrozenStateLoader, FrozenStateRef
 
-        return FrozenStateLoader(root).load(
+        return FrozenStateLoader(root, max_bytes=MAX_MEMBER_BYTES).load(
             FrozenStateRef(path=obj["path"], content_hash=obj["content_hash"]))
     return None  # raw members (Tier-4 folds, parquet pools): hash-verified only
 
