@@ -58,7 +58,7 @@ def test_mlp_replay_refuses_malformed_dates_when_digest_matches():
     execution = {"schema_version": "size_candidate_execution.v1", "fit_recipe": recipe}
     inputs = {"training": [{"event_id": "b"}, {"event_id": "a"}], "features": [
         {"event_id": "b", "horizon_sessions": 5, "event_date": "2024-01-02"},
-        {"event_id": "a", "horizon_sessions": 5, "event_date": "2024-01-01"}, evaluation]}
+        {"event_id": "a", "horizon_sessions": 5, "event_date": "wrong-date"}]}
     result = {"event": "succeeded", "diagnostics": [diagnostic]}
     with pytest.raises(OpsError) as caught:
         size_fit_diagnostics.evidence(result, execution, [5], inputs, {})

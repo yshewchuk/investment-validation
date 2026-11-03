@@ -147,7 +147,7 @@ def test_candidate_fitter_receives_recipe_requested_dates_in_order_and_preserves
     source["a", 5]["event_date"] = "2024-01-01"
     _, evidence = horizon_fitted.fitted_forecasts(source, ["b", "a"], [1., 2.], ["evaluation"], [5], ["x"],
         target_column="absolute_move_pct", target_domain="nonnegative", route="magnitude_candidate",
-        recipe={"requires_event_dates": True})
+        recipe={"model": "mlp", "requires_event_dates": True})
     assert received[0]["event_dates"] == ["2024-01-02", "2024-01-01"]
     expected = prepare_horizon_inputs(source, ["b", "a"], ["evaluation"], 5, ["x"], [1., 2.],
                                      target_column="absolute_move_pct")[2]
