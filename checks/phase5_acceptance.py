@@ -80,6 +80,10 @@ from engine.v2.models.release_layout import (  # noqa: E402
 
 PHASE5_EVIDENCE_SCHEMA = "phase5_acceptance.v1.0"
 MAX_MEMBER_BYTES = 512 * 1024 * 1024
+# Consumers between bounded progress lines during the scoring scan. Small
+# enough to prove liveness on a long pass, large enough that a normal catalog
+# never logs per consumer/member.
+CONSUMER_PROGRESS_EVERY = 50
 
 # Finding codes. Every one is a gate failure.
 RELEASE_LAYOUT = "P5_RELEASE_LAYOUT"
@@ -143,6 +147,18 @@ def _progress(tag: str, message: str, started: float) -> None:
     print(f"[{tag} {time.strftime('%H:%M:%S')}] {message} "
           f"(+{time.perf_counter() - started:.1f}s, rss {_rss_gb():.2f}G)",
           file=sys.stderr, flush=True)
+
+
+def _scan_progress(tag: str, started: float, done: int, total: int,
+                   events: int) -> None:
+    """One bounded periodic line for the scoring scan: done/total, event count,
+    rate and ETA, never a per-consumer or per-event line."""
+    elapsed = max(time.perf_counter() - started, 1e-9)
+    rate = done / elapsed
+    remaining = max(total - done, 0)
+    eta = remaining / rate if rate > 0 else 0.0
+    _progress(tag, f"consumers: scanned {done}/{total} (events {events}), "
+                   f"{rate:.2f}/s, ETA {eta:.1f}s", started)
 
 
 class ReportPathError(ValueError):
@@ -369,22 +385,49 @@ def _consumer_members(consumer: str) -> list[str]:
 
 
 def _run_consumers(ctx: ReleaseContext, consumers: Mapping[str, Any],
-                   findings: _Findings) -> list[dict]:
-    rows = []
+                   findings: _Findings, *, started: float | None = None,
+                   tag: str = "p5-accept") -> list[dict]:
+    started = time.perf_counter() if started is None else started
+    total = len(consumers)
+    rows: list[dict] = []
+    skips: dict[str, int] = {}
+    refusals: dict[str, int] = {}
+    events = 0
+    done = 0
+    _progress(tag, f"consumers: scan start over {total} consumers", started)
     for consumer, probe in consumers.items():
+        done += 1
         if probe is None:
             members = ",".join(_consumer_members(consumer)) or "-"
             findings.add(CONSUMER_PENDING, consumer, f"no probe yet; members {members}")
             rows.append({"consumer": consumer, "member_id": members, "status": "PENDING"})
-            continue
-        try:
-            results = probe(ctx)
-        except Exception as exc:  # the probe itself broke: report, never skip
-            findings.add(CONSUMER_ERROR, consumer, type(exc).__name__)
-            rows.append({"consumer": consumer, "member_id": "-", "status": CONSUMER_ERROR})
-            continue
-        for result in results:
-            rows.append(_consumer_verdict(result, findings))
+            skips["pending"] = skips.get("pending", 0) + 1
+        else:
+            try:
+                results = probe(ctx)
+            except Exception as exc:  # the probe itself broke: report, never skip
+                findings.add(CONSUMER_ERROR, consumer, type(exc).__name__)
+                rows.append({"consumer": consumer, "member_id": "-", "status": CONSUMER_ERROR})
+                skips["error"] = skips.get("error", 0) + 1
+            else:
+                for result in results:
+                    verdict = _consumer_verdict(result, findings)
+                    rows.append(verdict)
+                    events += 1
+                    if verdict["status"] != "ok":
+                        refusals[verdict["status"]] = refusals.get(verdict["status"], 0) + 1
+                    if (CONSUMER_PROGRESS_EVERY
+                            and events % CONSUMER_PROGRESS_EVERY == 0):
+                        _scan_progress(tag, started, done, total, events)
+        if done == total or (CONSUMER_PROGRESS_EVERY
+                             and done % CONSUMER_PROGRESS_EVERY == 0):
+            _scan_progress(tag, started, done, total, events)
+    skips_text = ", ".join(f"{reason}={count}" for reason, count
+                           in skips.items() if count) or "none"
+    refusals_text = ", ".join(f"{reason}={count}" for reason, count
+                              in refusals.items() if count) or "none"
+    _progress(tag, f"consumers: scan end, {done}/{total} consumers, {events} events, "
+                   f"skips {skips_text}, refusals {refusals_text}", started)
     return rows
 
 
@@ -497,9 +540,10 @@ def _guard_controls(scratch: Path) -> dict[str, bool]:
     return controls
 
 
-def _scoring_pass(ctx, consumers, watch_dirs, findings) -> tuple[list[dict], dict]:
+def _scoring_pass(ctx, consumers, watch_dirs, findings, *,
+                  started: float | None = None) -> tuple[list[dict], dict]:
     with guarded_scoring(watch_dirs) as watch:
-        rows = _run_consumers(ctx, consumers, findings)
+        rows = _run_consumers(ctx, consumers, findings, started=started)
     for path in sorted(set(watch.fit_paths)):
         findings.add(RUNTIME_FIT, "scoring_pass", path)
     if watch.dump_calls:
@@ -749,7 +793,7 @@ def build_evidence(release_root: Path, *, report_dir: Path | None = None,
         _progress("p5-accept",
                   f"consumers: scoring pass over {len(active_consumers)} consumers", started)
         evidence["consumers"], evidence["scoring_pass"] = _scoring_pass(
-            ctx, active_consumers, dirs, findings)
+            ctx, active_consumers, dirs, findings, started=started)
         _progress("p5-accept", f"consumers: {len(evidence['consumers'])} scored", started)
 
         # The rehearsal consults no incumbent record: it binds only the

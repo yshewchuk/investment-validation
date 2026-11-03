@@ -143,6 +143,42 @@ def test_build_evidence_stage_progress_reaches_stderr_not_stdout(tmp_path, capsy
     assert "phase4:" in captured.err
 
 
+def _consumer_probe(consumer, *, resolved=True, refused=True, blocked=False):
+    def probe(_ctx):
+        return [{"consumer": consumer, "member_id": "member", "blocked": blocked,
+                 "resolved": resolved, "refused_when_missing": refused}]
+
+    return probe
+
+
+def test_consumer_scan_emits_periodic_progress_without_sleeping(capsys, monkeypatch):
+    monkeypatch.setattr(acceptance_gate, "CONSUMER_PROGRESS_EVERY", 2)
+
+    def broken(_ctx):
+        raise RuntimeError("probe broke")
+
+    findings = acceptance_gate._Findings()
+    consumers = {
+        "pending": None,
+        "broken": broken,
+        "unresolved": _consumer_probe("unresolved", resolved=False),
+        "ok": _consumer_probe("ok"),
+    }
+
+    rows = acceptance_gate._run_consumers(None, consumers, findings)
+
+    err = capsys.readouterr().err
+    assert [row["status"] for row in rows] == [
+        "PENDING", acceptance_gate.CONSUMER_ERROR,
+        acceptance_gate.CONSUMER_UNRESOLVED, "ok"]
+    assert "consumers: scan start over 4 consumers" in err
+    assert "consumers: scanned 2/4 (events 0)" in err
+    assert "consumers: scanned 4/4 (events 2)" in err
+    assert "ETA" in err
+    assert "skips pending=1, error=1" in err
+    assert "refusals P5_CONSUMER_UNRESOLVED=1" in err
+
+
 def _assert_evidence_hash(evidence):
     unhashed = {key: value for key, value in evidence.items()
                 if key not in ("runtime_ms", "report", "evidence_hash")}
