@@ -16,9 +16,18 @@ from engine.v2.research.regression_evidence import (
     normalize_forecasts as normalize_regression_forecasts,
 )
 from experiments.magnitude_history_inputs import history_binding
+from experiments.magnitude_search_inputs import _required_event_date
 
 OMISSION_REASONS = frozenset({"skipped", "not_orats", "no_session", "no_price_window",
     "no_price_history", "ticker_too_few_events"})
+
+
+def _requires_event_dates(plan):
+    """A shared cohort opts into dates when any sealed candidate recipe requires them."""
+    return isinstance(plan, dict) and any(
+        isinstance(candidate, dict) and isinstance(candidate.get("recipe"), dict)
+        and candidate["recipe"].get("requires_event_dates") is True
+        for candidate in plan.get("candidates", ()))
 
 
 def admit_fold_inputs(repository, binding, fold, *, history_failure, strict_json=False, plan=None):
@@ -38,8 +47,13 @@ def admit_fold_inputs(repository, binding, fold, *, history_failure, strict_json
         raise history_failure
     participants = set(fold["training_candidate_event_ids"] + fold["evaluation_event_ids"])
     preflight = preflight_magnitude_targets(repository, snapshot, as_of_month=month, event_ids=sorted(participants))
+    requires_dates = _requires_event_dates(plan)
     stored = read_stored_for_events(repository, from_document(SnapshotRef, history["feature_snapshot"]),
-        history["context"], event_ids=participants, columns=binding["magnitude_execution"]["features"])
+        history["context"], event_ids=participants, columns=binding["magnitude_execution"]["features"],
+        include_event_dates=requires_dates)
+    if requires_dates:
+        for row in stored["rows"]:
+            row["event_date"] = _required_event_date(row)
     train = qualify_magnitude_training_targets(repository, snapshot, as_of_month=month,
         labels_before=fold["training_labels_before"], event_ids=fold["training_candidate_event_ids"])
     return {"preflight": preflight, "stored_inputs_id": stored["inputs_id"], "training_inputs": dict(train.attrs),
@@ -52,13 +66,16 @@ def fit_evidence(inputs, fold, plan, execution):
     target = inputs.get("target", {}).get("column", "absolute_move_pct")
     indexed = {(row["event_id"], row["horizon_sessions"]): row for row in inputs["features"]}
     train = [row["event_id"] for row in inputs["training"]]
+    recipe = execution.get("fit_recipe")
     return [shared_fit_evidence(execution["features"],
         [[indexed[event, horizon][name] for name in execution["features"]] for event in train],
         [[indexed[event, horizon][name] for name in execution["features"]] for event in fold["evaluation_event_ids"]],
         horizon, train, fold["evaluation_event_ids"],
         [[indexed[event, horizon][name] for name in ("event_id", "context_id", "horizon_sessions")] for event in train],
         [[indexed[event, horizon][name] for name in ("event_id", "context_id", "horizon_sessions")] for event in fold["evaluation_event_ids"]],
-        target_column=target, labels=[float(row[target]) for row in inputs["training"]])
+        target_column=target, labels=[float(row[target]) for row in inputs["training"]],
+        train_event_dates=([_required_event_date(indexed.get((event, horizon), {})) for event in train]
+            if isinstance(recipe, dict) and recipe.get("requires_event_dates") is True else None))
         for horizon in plan["horizons"]]
 
 

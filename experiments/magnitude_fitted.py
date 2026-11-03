@@ -16,7 +16,7 @@ def fitted_forecasts(indexed, train, fold, plan, execution, *, progress=None, st
         if fit_inputs is None:
             fit_inputs = build_fit_inputs(indexed, train.event_id.tolist(), fold["evaluation_event_ids"],
                 plan["horizons"], execution["features"], train.absolute_move_pct.to_numpy(dtype=float),
-                target_column="absolute_move_pct")
+                target_column="absolute_move_pct", recipe=execution["fit_recipe"] if plan["horizons"] else None)
         return fit_horizons(fit_inputs, fold["evaluation_event_ids"], plan["horizons"],
             target_domain="nonnegative", route=route, recipe=execution["fit_recipe"] if plan["horizons"] else None,
             progress=progress, diagnostics=diagnostics, measure_fit_seconds=True)

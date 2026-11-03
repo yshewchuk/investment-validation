@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from engine.v2.foundation.iso_dates import validate_train_event_dates
 from engine.v2.models.no_fit import forbid_fitting as forbid_v2_fitting
 
 from .legacy_adapter import forbid_fitting as forbid_legacy_fitting
@@ -23,6 +24,12 @@ class FitInputs:
     train_labels: Any
     prediction_features: Any
     columns: list[str] | tuple[str, ...]
+    train_event_dates: list[str] | tuple[str, ...] | None = None
+
+    def __post_init__(self) -> None:
+        validate_train_event_dates(self.train_event_dates, self.train_features)
+        if self.train_event_dates is not None and not isinstance(self.train_event_dates, tuple):
+            object.__setattr__(self, "train_event_dates", tuple(self.train_event_dates))
 
     @classmethod
     def from_recipe(cls, recipe, train_features, train_labels, prediction_features, columns,

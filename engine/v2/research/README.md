@@ -372,6 +372,9 @@ and `read_stored` from `magnitude_history_store` for explicit stored-feature bui
 every full stored row while retaining only requested events and numeric columns.
 Its `inputs_id` remains the full-envelope identity; projected rows are not that envelope.
 Metadata precedes all numeric decoding, including unselected rows; no outcomes open.
+`include_event_dates=True` is opt-in for recipes that require dates: it adds the
+verified canonical `event_date` to each projected row without changing `inputs_id`,
+and a missing or noncanonical date refuses with `EXPERIMENT_IDENTITY_CONFLICT`.
 `experiments/magnitude_history_inputs.py` consumes `magnitude_history_inputs.admit_stored`;
 `experiments/magnitude_history_report.py` consumes `magnitude_history_store.read_stored`
 and the same magnitude target APIs as the baseline.

@@ -365,9 +365,9 @@ Only scalar leaves stay inline, including the IV target descriptor; a missing IV
   order. The child transport supplies a header with the inner fold, horizons, execution spec,
   manifest, expected `inputs_id` and store root; limits remain a separate argument and no
   input rows are sent. The child (`load_fit_inputs`) verifies the manifest against the
-  expected id, reads only the `training` and `features` sections through the reader above,
-  and returns projected training rows and feature rows limited to training or evaluation
-  events at the selected horizons. It opens no repository, catalog or validation target.
+  expected id, reads only `training`/`features`, and projects rows for selected training/evaluation events and horizons; it opens no repository, catalog or validation target.
+  Only recipes declaring `requires_event_dates` project feature dates; missing or noncanonical ISO dates refuse `EXPERIMENT_IDENTITY_CONFLICT`.
+  Training dates enter `FitInputs` and identity only on opt-in, preserving existing projections and identities otherwise.
   Manifest, hash, shape and shard failures in the child are infrastructure failures
   (`RESOURCE_UNAVAILABLE`); a header above the 16 MiB record cap ends as `resource_limit`.
   Transport memory is the projected fit rows plus one shard, bounded by the child's
@@ -908,16 +908,15 @@ outer targets open. Training is strictly prior to the outer fit boundary.
 
 `magnitude_search_evidence` shares native input admission, matrix identities,
 forecast coverage and target-receipt validation across inner and outer callers.
+Stored-panel admission includes verified event dates only for opted-in recipes; missing or noncanonical dates refuse `EXPERIMENT_IDENTITY_CONFLICT`, while non-opted rows and `inputs_id` stay unchanged.
 SearchTrials wrappers preserve their existing error boundaries and Real/Integral
 submission semantics; outer wrappers require JSON-native numeric types. Target
 validation reconstructs the protected receipt from admitted physical preflight.
 Static imports include these helpers in recorder and outer source bindings.
-Completed replay verifies the complete evidence chain without native payloads or fitting.
-Native execution and reconciliation responses require valid terminal and durable
-execution evidence bound to the caller's exact attempt/limits. Completed replay
-is read-only and launch-free; each separate call observes current journal integrity.
-Freeze and submitted recording also require valid native evidence when present.
-No journal verification is cached across calls.
+Completed replay verifies the full chain without payloads/fitting; native responses
+require valid terminal/durable evidence bound to exact attempts and limits.
+Replay is read-only and launch-free; every call checks current journal integrity.
+Freeze and submitted recording require valid evidence; journal checks are not cached.
 
 Fresh inner/outer admission streams complete validation, retaining only fold participants'
 primary keys and registered numeric features. Full stored `inputs_id`, matrices and fits are preserved.

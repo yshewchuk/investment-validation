@@ -2,6 +2,8 @@
 
 Contract: experiments/ARCHITECTURE.md, "Sharded cohort inputs" (#991 fix 4).
 """
+from datetime import date
+
 from engine.v2.foundation import content_hash
 from engine.v2.ops.errors import fail
 from engine.v2.research.horizon_fitted import build_fit_inputs
@@ -28,6 +30,20 @@ class _FitRows(dict):
 
 def _position_key(row):
     return (row["position"],)
+
+
+def _required_event_date(row):
+    """Return a feature row's canonical ISO event_date or refuse with a conflict."""
+    value = row.get("event_date")
+    if not isinstance(value, str):
+        raise fail(_CONFLICT, "search feature event_date is missing or not a string")
+    try:
+        parsed = date.fromisoformat(value)
+    except ValueError:
+        raise fail(_CONFLICT, "search feature event_date is malformed") from None
+    if parsed.isoformat() != value:
+        raise fail(_CONFLICT, "search feature event_date is not canonical ISO")
+    return value
 
 
 def _iter_rows(store, member, entry):
@@ -101,15 +117,20 @@ def load_inputs(store, record, expected_id):
 
 
 def load_fit_inputs(store, manifest, expected_id, evaluation_event_ids, horizons, feature_columns, *,
-                    target_column="absolute_move_pct", numeric_fit_inputs=False):
+                    target_column="absolute_move_pct", numeric_fit_inputs=False, recipe=None):
     """Stream stored training/feature rows for fixed fitting or admission replay.
 
     Verifies the manifest against ``expected_id`` and reads only its ``training`` and
-    ``features`` sections, shard by shard. Returns ``{"features", "training"}``: training rows
-    reduced to (event_id, target_column); feature rows kept for training or evaluation
-    events at the selected horizons, reduced to (event_id, context_id, horizon_sessions,
-    *feature_columns), in stored order. A manifest, hash, shard or inline-path mismatch is
-    EXPERIMENT_IDENTITY_CONFLICT (retryable store errors propagate); a row missing a
+    ``features`` sections, shard by shard. Returns a mapping-compatible ``_FitRows`` with
+    ``features`` and ``training`` projections plus ``.fit_inputs``: the per-horizon
+    ``FitInputs`` mapping when ``numeric_fit_inputs=True``, and ``None`` otherwise. Its
+    evidence is built from those rows: training rows reduced to (event_id, target_column);
+    feature rows kept for training or evaluation events at the selected horizons, reduced
+    to (event_id, context_id, horizon_sessions, *feature_columns), in stored order. When
+    ``recipe`` declares ``requires_event_dates``,
+    selected feature rows also require a canonical ISO ``event_date`` and date mismatches
+    refuse with EXPERIMENT_IDENTITY_CONFLICT. A manifest, hash, shard or inline-path mismatch
+    is EXPERIMENT_IDENTITY_CONFLICT (retryable store errors propagate); a row missing a
     requested column raises KeyError. The magnitude fit child reports MemoryError as
     resource_limit and other loader failures as unavailable; library callers retain the error.
     Both loaders share ``_admit_manifest``; projection arguments must be
@@ -132,13 +153,19 @@ def load_fit_inputs(store, manifest, expected_id, evaluation_event_ids, horizons
     events = {row["event_id"] for row in training} | set(evaluation_event_ids)
     wanted = set(horizons)
     columns = ("event_id", "context_id", "horizon_sessions", *feature_columns)
-    features = [{name: row[name] for name in columns}
-                for row in _iter_rows(store, members["features"], sections["features"])
-                if row["event_id"] in events and row["horizon_sessions"] in wanted]
+    requires_dates = isinstance(recipe, dict) and recipe.get("requires_event_dates") is True
+    features = []
+    for row in _iter_rows(store, members["features"], sections["features"]):
+        if row["event_id"] not in events or row["horizon_sessions"] not in wanted:
+            continue
+        feature = {name: row[name] for name in columns}
+        if requires_dates:
+            feature["event_date"] = _required_event_date(row)
+        features.append(feature)
     indexed = {(row["event_id"], row["horizon_sessions"]): row for row in features}
     fit_inputs = None if not numeric_fit_inputs else build_fit_inputs(indexed, [row["event_id"] for row in training],
         evaluation_event_ids, horizons, feature_columns,
-        [row[target_column] for row in training], target_column=target_column)
+        [row[target_column] for row in training], target_column=target_column, recipe=recipe)
     return _FitRows({"features": features, "training": training}, fit_inputs)
 
 

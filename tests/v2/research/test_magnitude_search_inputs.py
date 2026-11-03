@@ -1,5 +1,6 @@
 """The one cohort loader: v2 manifests equal v1 records, and every disagreement refuses."""
 import copy
+from datetime import date, timedelta
 
 import pytest
 
@@ -179,6 +180,69 @@ def test_load_fit_inputs_streams_many_shards_and_projects_only_fit_rows(tmp_path
                                   for row in cohort["training"]]
     assert loaded["features"] == [{"event_id": event, "context_id": "c", "horizon_sessions": horizon, "x": 0.5}
                                   for event in events if event in wanted for horizon in (1, 5)]
+
+
+def test_load_fit_inputs_projects_event_dates_only_when_the_recipe_declares_them(tmp_path):
+    cohort, events = _fit_cohort(12)
+    dates = {event: (date(2024, 1, 1) + timedelta(days=index)).isoformat()
+             for index, event in enumerate(events)}
+    for row in cohort["features"]:
+        row["event_date"] = dates[row["event_id"]]
+    store = ArtifactStore(tmp_path)
+    manifest, inputs_id = publish_inputs(store, cohort)
+    evaluation = [events[7], events[9]]
+    recipe = {"requires_event_dates": True}
+    dated = load_fit_inputs(store, manifest, inputs_id, evaluation, [1], ("x",), numeric_fit_inputs=True,
+                            recipe=recipe)
+    assert all(row["event_date"] == dates[row["event_id"]] for row in dated["features"])
+    assert dated.fit_inputs[1].train_event_dates == tuple(
+        dates[row["event_id"]] for row in cohort["training"])
+    undated = load_fit_inputs(store, manifest, inputs_id, evaluation, [1], ("x",), numeric_fit_inputs=True)
+    assert all("event_date" not in row for row in undated["features"])
+    assert undated.fit_inputs[1].train_event_dates is None
+    ordinary_cohort = copy.deepcopy(cohort)
+    for row in ordinary_cohort["features"]:
+        row.pop("event_date")
+    ordinary_manifest, ordinary_id = publish_inputs(store, ordinary_cohort)
+    ordinary = load_fit_inputs(store, ordinary_manifest, ordinary_id, evaluation, [1], ("x",),
+                               numeric_fit_inputs=True)
+    dated_evidence = dated.fit_inputs.evidence[1]
+    undated_evidence = undated.fit_inputs.evidence[1]
+    ordinary_evidence = ordinary.fit_inputs.evidence[1]
+    assert undated_evidence["training_matrix_id"] == ordinary_evidence["training_matrix_id"]
+    assert dated_evidence["training_matrix_id"] != undated_evidence["training_matrix_id"]
+    assert dated_evidence["prediction_matrix_id"] == undated_evidence["prediction_matrix_id"]
+    assert dated_evidence["training_matrix_id"] == content_hash({
+        "columns": ["x"],
+        "row_keys": [[event, "c", 1] for event in events[:3]],
+        "values": [[0.5], [0.5], [0.5]],
+        "absolute_move_pct": [1.0, 2.0, 3.0],
+        "event_dates": [dates[event] for event in events[:3]],
+    })
+
+
+@pytest.mark.parametrize("bad_date", ["2024-02-30", "2024-1-2"])
+def test_load_fit_inputs_refuses_malformed_or_noncanonical_event_dates(tmp_path, bad_date):
+    cohort, events = _fit_cohort(2)
+    dates = {event: (date(2024, 1, 1) + timedelta(days=index)).isoformat()
+             for index, event in enumerate(events)}
+    for row in cohort["features"]:
+        row["event_date"] = dates[row["event_id"]]
+    for row in cohort["features"]:
+        if row["event_id"] == events[0] and row["horizon_sessions"] == 1:
+            row["event_date"] = bad_date
+    store = ArtifactStore(tmp_path)
+    manifest, inputs_id = publish_inputs(store, cohort)
+    _conflict(lambda: load_fit_inputs(store, manifest, inputs_id, [], [1], ("x",),
+                                      recipe={"requires_event_dates": True}))
+
+
+def test_load_fit_inputs_declaring_recipe_refuses_an_ordinary_cohort(tmp_path):
+    cohort, _ = _fit_cohort(2)
+    store = ArtifactStore(tmp_path)
+    manifest, inputs_id = publish_inputs(store, cohort)
+    _conflict(lambda: load_fit_inputs(store, manifest, inputs_id, [], [1], ("x",),
+                                      recipe={"requires_event_dates": True}))
 
 
 def test_load_fit_inputs_refuses_a_wrong_id_a_v1_record_and_a_corrupt_shard(tmp_path):
