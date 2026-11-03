@@ -9,6 +9,7 @@ from engine.v2.ops.executor import THREAD_VARIABLES
 
 SCRIPT = r'''
 import json
+import signal
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -52,7 +53,17 @@ def complete_outer(run, group, fits, results, plan, books, quotes, *rest):
     evaluations.append(group["outer"]["year"])
     return evaluate(run, group, fits, results, plan, books, quotes, *rest)
 runner.evaluate_outer = complete_outer
-result = run.run()
+original_setitimer, timer_seconds = signal.setitimer, []
+def record_setitimer(which, seconds, interval=0.0):
+    if which == signal.ITIMER_REAL and seconds > 0:
+        timer_seconds.append(seconds)
+    return original_setitimer(which, seconds, interval)
+signal.setitimer = record_setitimer
+try:
+    result = run.run()
+finally:
+    signal.setitimer = original_setitimer
+assert timer_seconds == [180]
 assert evaluations == ["2024"]
 assert opened == case.target_objects and len(opened) == 1
 assert result["final_read_authority"] == "none" and result["promotion_authority"] == "none"
