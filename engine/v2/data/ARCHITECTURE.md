@@ -581,7 +581,7 @@ pinned snapshots and calls `generic_incremental.commit_generic_table_candidate`
 (no `fence_check`) and `incremental_tables.revision_hash`/`GenericRevision`.
 `engine.v2.models.training` uses `errors`, `Repository`, `reference_catalog` and
 `computed_moves` for snapshot/receipt-pinned D14 datasets and calendar sessions.
-`engine.v2.models.pinned_panel` uses `errors`, `objects` and `Repository` to verify the pinned panel copy against its catalog.
+`engine.v2.models.pinned_panel` uses `errors`, `objects` and `Repository` to verify the pinned panel copy against its catalog. `engine.v2.evaluation` uses `errors.fail` for pure premium-settlement refusals without reading data.
 `experiments.v2_magnitude_search_run` consumes `repository.Repository`,
 `errors.DataError` and `documents.reject_duplicate_keys` for serial CLI admission, as does `experiments.v2_runup_study`; `experiments.registered_runup` consumes `errors.DataError` for typed comparison refusals.
 `tools/*`, `checks/*`, `tests/test_v2_data_*.py` exercise this package
