@@ -52,7 +52,8 @@ class PredictionPlan:
     collection. This class never opens outcomes, fits, prices or grants a run.
     """
 
-    source_roots = ("experiments/distribution_prediction_plan.py", "experiments/distribution_worker.py")
+    source_roots = ("experiments/distribution_prediction_plan.py", "experiments/distribution_worker.py",
+        "experiments/distribution_prediction_evidence.py", "experiments/distribution_prediction_baseline.py")
 
     def __init__(self, trials, request):
         self.trials, self.request = trials, validate_request(request)

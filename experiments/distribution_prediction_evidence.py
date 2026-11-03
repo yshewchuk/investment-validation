@@ -1,4 +1,6 @@
 """Freeze/reverify all-horizon prediction evidence before any evaluation targets."""
+from itertools import zip_longest
+
 from engine.v2.foundation import canonical_json, content_hash
 from engine.v2.ops.errors import fail
 from engine.v2.research.progress import Progress, stage
@@ -6,6 +8,7 @@ from experiments.distribution_oof import residual_pool
 from experiments.distribution_prediction_baseline import training_baseline
 
 __all__ = ["freeze_outer", "read_frozen_outer"]
+_REFERENCE_CHARS = 64 * 1024
 
 
 def _require(condition):
@@ -21,7 +24,8 @@ def _evidence(run, fits, year):
              and set(context["plan"]["recipe"]["horizons"]) == {1, 3, 5})
     events = fold["evaluation_event_ids"]
     _require(bool(events) and len(events) == len(set(events)) and set(events) <= set(plan["evaluation_event_ids"]))
-    header = {"schema_version": "distribution_prediction_frozen.v1", "run_plan_id": plan["run_plan_id"],
+    header = {"schema_version": "distribution_prediction_frozen.v2", "run_plan_id": plan["run_plan_id"],
+        "reference_encoding": "canonical_json_fragments.v1", "reference_chunk_chars": _REFERENCE_CHARS,
         "outer_year": year, "fold": fold, "admission_id": content_hash(context["admission"]),
         "final_read_authority": "none"}
     values = {}
@@ -43,6 +47,11 @@ def _reference(horizon, value):
             "pool": value["pool"], "baseline": value["baseline"]}
 
 
+def _reference_rows(text):
+    for start in range(0, len(text), _REFERENCE_CHARS):
+        yield {"canonical_json": text[start:start + _REFERENCE_CHARS]}
+
+
 @stage("prediction all-horizon freeze")
 def freeze_outer(run, fits, year):
     """Single-use freeze of raw fitted laws and deterministic shared controls.
@@ -51,6 +60,8 @@ def freeze_outer(run, fits, year):
     every forecast. Shared references are stored once per horizon, not expanded
     into an events-times-residuals matrix. This operation never opens targets.
     """
+    if type(year) is not str:
+        raise fail("INVALID_EXPERIMENT_SPEC", "prediction outer year must be a string")
     plan = run.admit()
     run.record("freeze-start:" + year, {"run_plan_id": plan["run_plan_id"]})
     header, values = _evidence(run, fits, year)
@@ -58,7 +69,9 @@ def freeze_outer(run, fits, year):
     for horizon, value in values.items():
         prefix = "distribution_prediction_" + year + "_" + str(horizon)
         forecasts = run.publish(prefix + "_forecasts", value["result"]["rows"], count=len(header["fold"]["evaluation_event_ids"]))
-        reference = run.publish(prefix + "_reference", [_reference(horizon, value)], count=1)
+        text = canonical_json(_reference(horizon, value))
+        reference = run.publish(prefix + "_reference", _reference_rows(text),
+            count=(len(text) + _REFERENCE_CHARS - 1) // _REFERENCE_CHARS)
         sections.append({"horizon": horizon, "forecasts": forecasts, "reference": reference})
         progress.tick()
     return run.record("frozen:" + year, {**header, "horizons": sections})
@@ -71,18 +84,23 @@ def read_frozen_outer(run, fits, year):
     A self-consistent content hash alone cannot authenticate caller-supplied
     controls. Rebuild admitted references and compare the stored bytes each time.
     """
+    if type(year) is not str:
+        raise fail("INVALID_EXPERIMENT_SPEC", "prediction outer year must be a string")
     header, values = _evidence(run, fits, year)
     record = run.record("frozen:" + year)
     _require(type(record) is dict and set(record) == set(header) | {"horizons"}
              and canonical_json({key: record[key] for key in header}) == canonical_json(header)
              and canonical_json(run.record("freeze-start:" + year)) == canonical_json({"run_plan_id": header["run_plan_id"]}))
     sections = record["horizons"]
-    _require(type(sections) is list and [entry["horizon"] for entry in sections] == [1, 3, 5])
+    _require(type(sections) is list and len(sections) == 3
+        and all(type(entry) is dict and set(entry) == {"horizon", "forecasts", "reference"}
+                and type(entry["horizon"]) is int for entry in sections)
+        and [entry["horizon"] for entry in sections] == [1, 3, 5])
     progress = Progress("prediction horizon verification", 3)
     for entry in sections:
-        _require(set(entry) == {"horizon", "forecasts", "reference"})
         value = values[entry["horizon"]]
+        expected = _reference_rows(canonical_json(_reference(entry["horizon"], value)))
         _require(canonical_json(list(run.read_section(entry["forecasts"]))) == canonical_json(value["result"]["rows"])
-            and canonical_json(list(run.read_section(entry["reference"]))) == canonical_json([_reference(entry["horizon"], value)]))
+            and all(actual == wanted for actual, wanted in zip_longest(run.read_section(entry["reference"]), expected)))
         progress.tick()
     return record, values
