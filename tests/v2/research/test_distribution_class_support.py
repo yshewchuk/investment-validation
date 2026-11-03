@@ -163,6 +163,33 @@ def test_early_stopping_decision_oracles(variant, entries, expected):
     assert support.early_stopping_decision(recipe, support.training_support(_counts(entries))) == expected
 
 
+def _decision_support(entries=None):
+    return support.training_support(_counts(entries or {0: 2, 80: 2}))
+
+
+@pytest.mark.parametrize("recipe", [
+    None, {}, [], "recipe",
+    {**candidate_recipe("H"), "retries": 1},
+    {**candidate_recipe("H"), "classifier_variant": "other"},
+])
+def test_malformed_recipe_refuses_invalid_spec(recipe):
+    assert _refuses(support.early_stopping_decision, recipe, _decision_support())
+
+
+@pytest.mark.parametrize("document", [
+    None, {}, [], "support",
+    {**_decision_support(), "sample_count": 5},
+    {**_decision_support(), "observed_class_labels": [0]},
+    {**_decision_support(), "trees_per_iteration": 2},
+    {**_decision_support(), "extra": True},
+    {**_decision_support(), "bin_counts": [0] * 81},
+    {**_decision_support(), "bin_counts": [1] * 80},
+])
+def test_malformed_or_inconsistent_support_refuses_invalid_spec(document):
+    recipe = candidate_recipe("H", "regularised_v1")
+    assert _refuses(support.early_stopping_decision, recipe, document) == "invalid distribution class support"
+
+
 def test_public_arity_and_source_free_operations(monkeypatch):
     assert support.__all__ == ["training_support", "early_stopping_decision", "class_histogram"]
     for function in (support.training_support, support.class_histogram):

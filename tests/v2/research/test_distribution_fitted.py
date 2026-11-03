@@ -235,6 +235,19 @@ def test_regularised_singleton_fallback_replays_with_recorded_evidence(case):
     assert case.fits.read("inner", "2024", 1, "2023") == result
 
 
+def test_regularised_real_fit_replays_without_refitting_and_keeps_fallback(case, monkeypatch):
+    _regularised(case, [0.0, 0.0, 0.25, 20.0])
+    monkeypatch.setattr(fitted, "fit_candidate", numeric_fit)
+    result = case.fits.fit("inner", "2024", 1, "2023")
+    classifier = result["receipt"]["diagnostics"]["classifier"]
+    assert classifier["early_stopping_requested"] is True
+    assert classifier["early_stopping_used"] is False
+    assert classifier["fallback_reason"] == "class_count_below_2"
+    assert classifier["iterations"] == 100
+    monkeypatch.setattr(fitted, "fit_candidate", lambda *args, **kwargs: pytest.fail("replay fitted"))
+    assert case.fits.read("inner", "2024", 1, "2023") == result
+
+
 def test_regularised_small_validation_split_fallback_replays(case):
     _regularised(case, [0.0, 0.0, 0.25, 0.25])
     result = case.fits.fit("inner", "2024", 1, "2023")
