@@ -8,7 +8,7 @@ from engine.v2.foundation import content_hash
 from engine.v2.models.magnitude_mlp_recipe import validate_mlp_recipe
 
 from ._magnitude_mlp_estimator import ConvergenceWarning, build_estimator
-from .fit_routes import check_fitting_allowed
+from .fit_inputs import FitInputs, check_fitting_allowed
 from .magnitude_ridge_hgb import _matrices
 
 __all__ = ["fit_mlp_predictions"]
@@ -18,10 +18,17 @@ def fit_mlp_predictions(recipe, train_features, train_labels, prediction_feature
     """Caller owns causal folds/budgets; preprocessing and stopping use training only."""
     check_fitting_allowed("engine.v2.models.training.magnitude_mlp.fit_mlp_predictions")
     recipe = validate_mlp_recipe(recipe)
-    if not isinstance(columns, (list, tuple)) or list(columns) != recipe["features"]:
-        raise ValueError("MLP matrix columns must exactly match the ordered recipe subset")
-    train, labels, prediction = _matrices(train_features, train_labels, prediction_features,
-                                         len(columns))
+    inputs = FitInputs.from_recipe(
+        recipe, train_features, train_labels, prediction_features, columns,
+        column_error="MLP matrix columns must exactly match the ordered recipe subset",
+        guard_path="engine.v2.models.training.magnitude_mlp.fit_mlp_predictions")
+    return _fit(recipe, inputs)
+
+
+def _fit(recipe, inputs):
+    train, labels, prediction = _matrices(
+        inputs, len(inputs.columns),
+        "magnitude labels require one finite nonnegative value per training row")
     model = build_estimator(recipe)
     with threadpool_limits(limits=1), warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always", ConvergenceWarning)

@@ -8,6 +8,10 @@ Layer 6 in the [root architecture](../../../../ARCHITECTURE.md): offline dataset
 
 The [README public interface](README.md#public-interface) inventories exported types/builders. `current_recipes`, `prepare_dataset`, `plan_folds`, `fold_receipts` and `receipt_issues` feed `run_training_job`; `build_d14_dataset` admits pinned native inputs. `fit_recipe_estimator` fits release recipes. Separate magnitude/Ridge/HGB/ElasticNet/regression APIs and `fit_routes.fit_execution` consume caller-admitted arrays; `magnitude_mlp.fit_mlp_predictions` participates in shared magnitude dispatch, while v1–v5 search requests do not admit MLP. Payoff, recalibration, residual, analog and trailing-cutoff builders return frozen model-state artifacts.
 
+### FitInputs contract (A1a)
+
+`FitInputs` is the frozen in-memory transport used by the estimator APIs above. It stores caller objects without changing recipe, result, experiment or replay identity, and preserves the refusal order and messages: guard and recipe/column admission, matrix conversion and preflight, row count, then label validation.
+
 ## 3. Inputs
 
 Jobs receive `TrainingRecipe`, frames and explicit output paths; source identity may be bound through `input_identity`. D14 reads explicit catalog/snapshot/receipt/calendar pins; recipe and chooser-source readers bound registry JSON or local parquet. Numeric fitters take closed recipes, ordered columns, training features/labels and prediction features; callers own causal membership, source admission and resource budgets.
@@ -30,6 +34,8 @@ NumPy/pandas, sklearn and threadpoolctl implement numeric fits; joblib/parquet a
 | --- | --- |
 | Missing/invalid input | Dataset errors use `RecipeDataError`; unsupported estimators use `UnsupportedEstimator`; D14 retains typed data refusals. Chooser missing files raise `FileNotFoundError`, invalid/oversized sources `ValueError`. MLP rejects invalid policy/order/matrices/labels before fitting. |
 | Guards/numeric failure | `RuntimeFitForbidden` from either guard precedes MLP inspection. Convergence warnings raise `ValueError` without a partial result except for a fixed-budget recipe warning at its `max_iter`; nonfinite weights/loss/predictions still raise `ValueError`, and unrelated warnings are not convergence failures. Sklearn's interrupted-training warning re-raises its original `KeyboardInterrupt`, never successful evidence. Other fitters retain their documented errors. |
+| FitInputs factory refusal | Guards precede column access; an ordered-column mismatch raises `ValueError`. |
+| Numeric fit validation | Matrix conversion/shape/infinity checks precede row-count checks, then label checks; existing messages are preserved. |
 | Cache/retry | Numeric fits are fresh, uncached and never retried. Job resume verifies identity, file hashes and rederived receipts before retaining a completed fold; mismatches raise `TrainingRefused`. |
 | Transaction/partial write | Numeric fitters have no I/O/transaction. Jobs publish each completed fold by rename, not an all-job transaction; prior folds survive failure and interrupted partial directories are removed on explicit resume. |
 | Idempotency | Same-environment MLP calls fit afresh deterministically; completed job folds are verified and not refit. A new dataset/recipe needs a new job identity, not silent replacement. |

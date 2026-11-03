@@ -36,8 +36,12 @@ def matrix(values):
 
 
 def fit(train=None, labels=None, prediction=None, **kwargs):
-    return fit_elasticnet_predictions(recipe(), matrix([0, 2, 4]) if train is None else train,
-        [1, 5, 9] if labels is None else labels, matrix([1]) if prediction is None else prediction,
+    policy = recipe()
+    return fit_elasticnet_predictions(
+        policy,
+        matrix([0, 2, 4]) if train is None else train,
+        [1, 5, 9] if labels is None else labels,
+        matrix([1]) if prediction is None else prediction,
         columns=COLUMNS, **kwargs)
 
 
@@ -143,8 +147,9 @@ def test_both_no_fit_guards_precede_every_input(guard):
 
 @pytest.mark.parametrize("columns", [["unknown"], COLUMNS[::-1], COLUMNS + ["extra"], ["signal"] * 3])
 def test_unknown_duplicate_or_reordered_matrix_columns_refuse_before_conversion(columns):
+    policy = recipe()
     with pytest.raises(ValueError, match="columns"):
-        fit_elasticnet_predictions(recipe(), Poison(), Poison(), Poison(), columns=columns)
+        fit_elasticnet_predictions(policy, Poison(), Poison(), Poison(), columns=columns)
 
 
 def test_identity_binds_subset_order_dictionary_and_all_six_parameter_pairs():
@@ -167,8 +172,9 @@ def test_independent_soft_threshold_oracle_sparse_evidence_and_nonnegative_proje
     # For one standardized signal, c=mean(z*y); beta=(c-alpha*l1)/(1+alpha*(1-l1)).
     scale = np.sqrt(8 / 3)
     beta = (2 * scale - alpha * l1_ratio) / (1 + alpha * (1 - l1_ratio))
-    result = fit_elasticnet_predictions(recipe(alpha=alpha, l1_ratio=l1_ratio),
-        matrix([0, 2, 4]), [1, 5, 9], matrix([-100, 0, 1, 2, 4]), columns=COLUMNS)
+    policy = recipe(alpha=alpha, l1_ratio=l1_ratio)
+    result = fit_elasticnet_predictions(
+        policy, matrix([0, 2, 4]), [1, 5, 9], matrix([-100, 0, 1, 2, 4]), columns=COLUMNS)
     assert result["predictions"] == pytest.approx(
         [0, 5 - 2 * beta / scale, 5 - beta / scale, 5, 5 + 2 * beta / scale])
     assert result["intercept"] == pytest.approx(5)
@@ -265,6 +271,33 @@ def test_replay_is_deterministic_fresh_and_does_not_mutate_inputs():
 def test_malformed_matrices_or_labels_refuse(inputs):
     with pytest.raises(ValueError, match="ElasticNet"):
         fit(**inputs)
+
+
+@pytest.mark.parametrize("damage, expected_error, match", [
+    ("infinity", ValueError, "ElasticNet requires nonempty selected-column matrices without infinity"),
+    ("object_cell", TypeError, r"float\(\) argument"),
+])
+def test_matrix_and_conversion_failures_precede_label_row_count_mismatch(
+        damage, expected_error, match):
+    train = np.array([[0.0, 7.0, 1.0], [2.0, 7.0, 1.0], [4.0, 7.0, 1.0]])
+    prediction = np.array([[1.0, 7.0, 1.0]])
+    labels = [1, 5]
+    if damage == "infinity":
+        train[0, 0] = np.inf
+    else:
+        train = train.astype(object)
+        train[0, 0] = object()
+    with pytest.raises(expected_error, match=match):
+        fit_elasticnet_predictions(recipe(), train, labels, prediction, columns=COLUMNS)
+
+
+def test_public_adapter_reports_label_row_count_mismatch_from_matrix_validator():
+    train = np.array([[0.0, 7.0, 1.0], [2.0, 7.0, 1.0], [4.0, 7.0, 1.0]])
+    prediction = np.array([[1.0, 7.0, 1.0]])
+    with pytest.raises(
+            ValueError,
+            match="ElasticNet labels require one finite nonnegative value per training row"):
+        fit_elasticnet_predictions(recipe(), train, [1, 5], prediction, columns=COLUMNS)
 
 
 def test_convergence_warning_refuses_without_predict_retry_or_partial_result(monkeypatch):
