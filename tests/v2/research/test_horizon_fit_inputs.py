@@ -8,6 +8,7 @@ import pytest
 
 from engine.v2.models.training.fit_inputs import FitInputs
 from engine.v2.research.horizon_fit_inputs import fit_evidence, prepare_horizon_inputs
+from engine.v2.research.horizon_fitted import HorizonInputs, fitted_forecasts
 
 COLUMNS = ["signal", "missing"]
 
@@ -100,6 +101,15 @@ def test_invalid_target_refuses_before_consuming_iterables():
         yield
     with pytest.raises(ValueError, match="target column"):
         prepare_horizon_inputs({}, forbidden(), forbidden(), 3, forbidden(), [], target_column="values")
+
+
+def test_prebuilt_inputs_refuse_opted_in_recipe_without_event_dates():
+    inputs = FitInputs([[1.]], [0.], [[2.]], COLUMNS)
+    evidence = {3: {"evaluation_event_ids": ["test"]}}
+    prebuilt = HorizonInputs({3: inputs}, evidence, "crush_pct_iv30")
+    with pytest.raises(ValueError, match="training event dates"):
+        fitted_forecasts(prebuilt, ["test"], [3], target_domain="nonnegative",
+            route="magnitude", recipe={"requires_event_dates": True})
 
 
 def test_fit_inputs_accepts_ordered_training_event_dates():

@@ -2,9 +2,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
 from typing import Any
 
+from engine.v2.foundation.iso_dates import validate_train_event_dates
 from engine.v2.models.no_fit import forbid_fitting as forbid_v2_fitting
 
 from .legacy_adapter import forbid_fitting as forbid_legacy_fitting
@@ -14,29 +14,6 @@ def check_fitting_allowed(path: str) -> None:
     """Apply both legacy and v2 fitting guards in fixed order for the given path."""
     forbid_legacy_fitting(path)
     forbid_v2_fitting(path)
-
-
-def validate_train_event_dates(dates, train_features) -> None:
-    """Validate optional ordered training event dates against sized training rows."""
-    if dates is None:
-        return
-    if not isinstance(dates, (list, tuple)):
-        raise ValueError("training event dates must be a list or tuple")
-    try:
-        rows = len(train_features)
-    except TypeError:
-        raise ValueError("training event dates require sized training rows") from None
-    if len(dates) != rows:
-        raise ValueError("training event dates length does not match training rows")
-    for value in dates:
-        if not isinstance(value, str):
-            raise ValueError("training event dates must be ISO date strings")
-        try:
-            canonical = date.fromisoformat(value).isoformat() == value
-        except ValueError:
-            raise ValueError("training event dates must be canonical ISO dates") from None
-        if not canonical:
-            raise ValueError("training event dates must be canonical ISO dates")
 
 
 @dataclass(frozen=True)

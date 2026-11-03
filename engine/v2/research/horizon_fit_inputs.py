@@ -2,7 +2,7 @@
 import numpy as np
 
 from engine.v2.foundation import content_hash
-from engine.v2.models.training.fit_inputs import validate_train_event_dates
+from engine.v2.foundation.iso_dates import validate_train_event_dates
 
 
 def _matrix(indexed, event_ids, horizon, columns):

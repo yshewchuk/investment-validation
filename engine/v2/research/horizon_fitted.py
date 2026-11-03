@@ -57,6 +57,9 @@ def build_fit_inputs(indexed, training_ids, evaluation_ids, horizons, columns, l
 
 def _prepare_inputs(horizon, horizon_inputs, indexed, training_ids, evaluation_ids, columns, labels, target_column, recipe):
     if horizon_inputs is not None:
+        requires_event_dates = isinstance(recipe, dict) and recipe.get("requires_event_dates") is True
+        if requires_event_dates and horizon_inputs[horizon].train_event_dates is None:
+            raise ValueError("prebuilt horizon inputs require training event dates")
         return deepcopy(horizon_inputs.evidence[horizon]), horizon_inputs[horizon]
     requires_event_dates = isinstance(recipe, dict) and recipe.get("requires_event_dates") is True
     train_event_dates = ([indexed[event, horizon].get("event_date") for event in training_ids]
