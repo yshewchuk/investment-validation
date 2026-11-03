@@ -173,7 +173,7 @@ def _decision_support(entries=None):
     {**candidate_recipe("H"), "classifier_variant": "other"},
 ])
 def test_malformed_recipe_refuses_invalid_spec(recipe):
-    assert _refuses(support.early_stopping_decision, recipe, _decision_support())
+    assert _refuses(support.early_stopping_decision, recipe, _decision_support()) == "invalid distribution candidate recipe"
 
 
 @pytest.mark.parametrize("document", [

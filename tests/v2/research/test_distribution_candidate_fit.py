@@ -331,7 +331,7 @@ def test_tiny_real_fixed_estimators_match_constant_feature_oracles(labels, class
     assert result["diagnostics"]["classifier"]["total_trees"] == 100 * trees
 
 
-def test_regularised_real_fit_matches_independent_estimator_and_varies():
+def test_regularised_real_fit_matches_independent_estimator_and_varies(capsys):
     recipe = candidate_recipe("H", "regularised_v1")
     columns = recipe["point_recipe"]["features"]
     labels = np.array([0.0] * 40 + [5.0] * 40 + [10.0] * 40)
@@ -347,9 +347,11 @@ def test_regularised_real_fit_matches_independent_estimator_and_varies():
         reference.fit(train, bins)
         expected = reference.predict_proba(prediction)
     result = fitting.fit_candidate(recipe, train, labels, prediction, columns=columns)
+    assert capsys.readouterr().out == ""
     assert reference.classes_.tolist() == [0, 20, 40]
     classifier = result["diagnostics"]["classifier"]
     assert classifier["class_labels"] == [0, 20, 40]
+    assert classifier["iterations"] == reference.n_iter_
     assert classifier["early_stopping_used"] is True and classifier["fallback_reason"] is None
     assert classifier["total_trees"] == classifier["iterations"] * classifier["trees_per_iteration"]
     for row, probabilities in zip(result["probabilities"], expected):
