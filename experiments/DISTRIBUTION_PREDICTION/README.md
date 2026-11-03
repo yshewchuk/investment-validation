@@ -25,6 +25,8 @@ See [architecture](ARCHITECTURE.md) for the boundary between supplied numeric ev
 
 ## Frozen forecast evidence
 
+The intentionally unwired `distribution_prediction_evaluation.evaluate_outer` / `read_evaluated_outer` library admits outer targets only after frozen evidence verification, and replays stored targets/scores without new outcome reads. Default metadata seals bind the evaluation implementation and its scorer/diagnostic dependencies as well as the freeze/baseline implementation. Source drift refuses before effects; a fresh final operator/source registration is still required for execution.
+
 The intentionally unwired `distribution_prediction_evidence.freeze_outer` / `read_frozen_outer` library verifies all three admitted horizons before publishing and rechecks native provenance on replay. Shared controls and training references use versioned bounded canonical-text fragments rather than a single cohort-sized row; the shard caps are unchanged. Default metadata seals include this verifier and baseline implementation. Old single-row frozen evidence is refused, not silently migrated; an interrupted freeze remains consumed and cannot be retried. This is a synthetic-tested prerequisite, not a runnable prediction operator or empirical validation.
 
 ## Supplied-score reporting

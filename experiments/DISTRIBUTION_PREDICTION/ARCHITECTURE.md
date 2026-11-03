@@ -20,6 +20,7 @@ Native registration, dataset/feature qualification, training-label availability,
 | Malformed saved baseline/receipt, changed identity or incomplete/invalid target-status map | Nonretryable `EXPERIMENT_IDENTITY_CONFLICT` before score preparation or row emission; omissions must have exactly one `omitted` key with a native reason. Invalid empirical numeric labels retain the numerical helper’s typed `CONTRACT_MISMATCH`; no source read or partial result. |
 | Malformed supplied interval/PIT fields on any row status | Nonretryable `INVALID_EXPERIMENT_SPEC` before aggregation; no mutation, partial result or stripping of retained evidence. |
 | Source-free numerical result | No I/O, fitting, native admission, publication or final-read authority. |
+| Non-string evaluation or replay year | Nonretryable `INVALID_EXPERIMENT_SPEC` before admission, journal slots, stored-evidence or target reads; replay inherits the frozen-evidence guard and string fold membership remains owned by native admission. |
 
 ## Incremental delivery
 
@@ -35,13 +36,23 @@ Prediction journal slots are create-only in a separate namespace, including iden
 
 ## Frozen forecast evidence
 
-This is an intentionally unwired library with synthetic test callers; the intended production consumer is the separate prediction-only runner, not the strategy lifecycle or an independent CLI.
+The frozen-evidence reader is consumed by the admitted evaluation library; the freeze writer remains intended for the separate prediction-only runner. Neither helper supplies a standalone CLI or a strategy lifecycle caller.
 
 `freeze_outer` claims a create-only freeze slot, verifies the admitted complete 1/3/5 horizon roster and bounded completed fits before publishing any section, then records all forecast rows plus one logically shared control/baseline reference per horizon. Raw fitted laws, sealed numerical implementation and shared references fully specify the four prediction arms without storing an events-times-residuals matrix. No target reader is invoked. An interrupted or repeated freeze consumes its slot; later execution must abort rather than reuse partial state.
 
 `read_frozen_outer` rebuilds native admission, completed fit, causal OOF and training-reference provenance, then checks every stored forecast/reference section and final all-horizon marker. Both entrypoints refuse non-string years with `INVALID_EXPERIMENT_SPEC` before admission or journaling. Malformed saved horizon entries and identity/layout changes refuse `EXPERIMENT_IDENTITY_CONFLICT` before section reads. Rehashing substituted control contents is insufficient. Replay performs no fits, writes or new outcome reads; source/target admission and the eventual scoring/collection sequence remain separately owned by the prediction lifecycle.
 
 Frozen schema `distribution_prediction_frozen.v2` binds `canonical_json_fragments.v1` and a fixed 65,536-character chunk size. The existing canonical serializer includes the entire nested reference, and existing position-indexed CAS sections store its lazy string fragments under unchanged shard caps. Replay compares each stored fragment directly to freshly reconstructed canonical text, without parsing/joining untrusted fragments; missing, extra, reordered or altered fragments refuse. Prior v1 single-row evidence is unsupported, not migrated or reused. Canonicalization retains O(total reference) text alongside native values; bounded persistence is not constant-memory execution. Each valid-Unicode fragment needs at most 384 KiB plus its small JSON wrapper, with actual shard bytes still checked by the existing writer.
+
+## Admitted targets and evaluation
+
+This evaluation library is currently exercised only by synthetic tests. Its intended production consumer is the separate prediction-only runner and collection path; this slice supplies no standalone CLI, registration or execution grant.
+
+`evaluate_outer` consumes a create-only evaluation claim, freshly verifies frozen all-horizon evidence, then invokes the existing native bounded outer-target reader with the admitted normalized fold and source binding. The full native receipt, including physical inputs, cutoff, holdout identity and omissions, is validated and persisted alongside target rows. Exact event membership and explicit omission union are required; no quote, economic gate or trade choice filters the population. Every event/horizon receives all four proper-score and diagnostic status rows. Unresolved histogram tails retain valid bin scores but unavailable full-law interval/PIT diagnostics; missing targets and unavailable controls never become zero scores.
+
+`read_evaluated_outer` revalidates native stored admission, forecasts, shared controls, target receipt/rows and final all-horizon markers, regenerates scores and diagnostics, and compares their stored CAS sections without fitting, writes or new source outcome reads. It prepares each shared empirical diagnostic reference once per horizon. Interval widths remain percentage points; PIT brackets are preserved unrandomized, not claimed uniform or fitted-calibrated. A failed evaluation is consumed and must be discarded, never retried in place.
+
+Default `PredictionPlan` roots also include the evaluation module and its transitive scorer/diagnostic dependencies. Source-only evaluation changes invalidate the saved seal before either evaluation-start effects or replay's frozen-evidence reads. Explicit subclass root overrides remain responsible for their complete implementation closure; this library grants no execution or target-read authority by itself.
 
 ## Reporting supplied forecast evidence
 
