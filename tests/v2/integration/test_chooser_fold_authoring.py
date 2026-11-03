@@ -18,7 +18,13 @@ from types import SimpleNamespace
 import joblib
 import pytest
 
-from engine.v2.foundation import DocumentError, content_hash, from_document, to_document
+from engine.v2.foundation import (
+    DocumentError,
+    canonical_json,
+    content_hash,
+    from_document,
+    to_document,
+)
 from engine.v2.models import (
     ArtifactMember,
     FrozenInference,
@@ -30,6 +36,7 @@ from engine.v2.models import (
     release_objects,
 )
 from engine.v2.models import serving_fold_preflight as folds
+from engine.v2.models.serving_fold_loader import load_chooser_serving_fold
 from engine.v2.models.serving_folds import (
     ChooserFoldPolicy,
     ChooserServingFoldDescriptor,
@@ -353,11 +360,21 @@ def test_carried_chooser_fold_loads_from_verified_original_release(tmp_path, mon
     deployment.mark_staging_succeeded(store, "origin")
     deployment.promote(store, "origin")
 
+    default = resolve_release_binding(tmp_path)
+    assert default.chooser_fold_references == {}
+    assert default.chooser_authoring_fold_contexts == {}
+    assert default.chooser_fold_catalog_json == canonical_json(origin_body)
+    assert default.chooser_parent_manifest == published_manifest(store, "origin")
+
     original = resolve_release_binding(
         tmp_path, include_chooser_fold_references=True)
     origin_ref = original.chooser_fold_references[
         (OUTPUTS[role][1], cache["fold_start"])]
     assert origin_ref.release_id == origin_ref.carrying_release_id == "origin"
+    assert original.chooser_fold_catalog_json == canonical_json(origin_body)
+    assert original.chooser_parent_manifest == published_manifest(store, "origin")
+    assert original.chooser_authoring_fold_contexts[origin_ref.descriptor_hash] == (
+        original.chooser_parent_manifest, origin_body)
 
     release, inventory, payloads = release_inputs(role, cache, release_id="carried")
     deployment.stage_release(store, release, inventory, payloads)
@@ -383,12 +400,115 @@ def test_carried_chooser_fold_loads_from_verified_original_release(tmp_path, mon
     assert carried_ref.carrying_release_id == "carried"
     assert carried_ref.descriptor_hash == content_hash(origin_obj["serving_fold"])
 
+    held_manifest, held_catalog = carried.chooser_authoring_fold_contexts[
+        carried_ref.descriptor_hash]
+    assert held_manifest == published_manifest(store, "origin")
+    with pytest.raises(TypeError):
+        held_catalog["injected"] = "mutated"
+
+    legacy_cache = copy.deepcopy(cache)
+    legacy_cache.pop("training_cutoff", None)
+    legacy_bytes = fold_bytes(legacy_cache)
+    legacy_digest = hashlib.sha256(legacy_bytes).hexdigest()
+    (store / "objects" / legacy_digest).write_bytes(legacy_bytes)
+
+    legacy_body = copy.deepcopy(origin_body)
+    legacy_row = next(
+        row for row in legacy_body["members"]
+        if row["member_id"] == f"tier4_folds:{role}")
+    legacy_obj = legacy_row["objects"][0]
+    legacy_obj["path"] = f"objects/{legacy_digest}"
+    legacy_obj["content_hash"] = f"sha256:{legacy_digest}"
+    legacy_obj["bytes"] = len(legacy_bytes)
+    legacy_obj["serving_fold"].pop("training_cutoff", None)
+    legacy_obj["serving_fold"]["estimator"]["path"] = f"objects/{legacy_digest}"
+    legacy_obj["serving_fold"]["estimator"]["content_hash"] = f"sha256:{legacy_digest}"
+    legacy_descriptor_hash = content_hash(legacy_obj["serving_fold"])
+    legacy_body["sources"].pop("retrain_cutoff", None)
+    legacy_body["sources"].pop("pool_cutoff", None)
+    write_catalog("origin", legacy_body)
+
+    recorded_hashes = []
+    original_load_chooser_serving_fold = rb.load_chooser_serving_fold
+
+    def recording_load_chooser_serving_fold(*args, **kwargs):
+        loaded = original_load_chooser_serving_fold(*args, **kwargs)
+        if loaded.descriptor.training_cutoff is None:
+            recorded_hashes.append(content_hash(to_document(loaded.descriptor)))
+        return loaded
+
+    monkeypatch.setattr(
+        rb, "load_chooser_serving_fold", recording_load_chooser_serving_fold)
+
+    omitted_refs, omitted_contexts = rb.resolve_chooser_fold_authoring_contexts(
+        tmp_path, "origin")
+    assert omitted_refs == {}
+    assert omitted_contexts == {}
+    assert recorded_hashes == [legacy_descriptor_hash]
+
+    wrong_parent = copy.deepcopy(legacy_body)
+    wrong_parent_row = next(
+        row for row in wrong_parent["members"]
+        if row["member_id"] == f"tier4_folds:{role}")
+    wrong_parent_row["objects"][0]["serving_fold"]["parent_release_hash"] = "sha256:" + "1" * 64
+    write_catalog("origin", wrong_parent)
+    with pytest.raises(ModelNotReady) as refusal:
+        rb.resolve_chooser_fold_authoring_contexts(tmp_path, "origin")
+    assert refusal.value.code == rb.MODEL_NOT_READY
+    assert refusal.value.member_id == "tier4_folds:chooser"
+    assert refusal.value.detail == "chooser fold could not be verified or loaded"
+
+    wrong_estimator = copy.deepcopy(legacy_body)
+    wrong_estimator_row = next(
+        row for row in wrong_estimator["members"]
+        if row["member_id"] == f"tier4_folds:{role}")
+    wrong_estimator_fold = wrong_estimator_row["objects"][0]["serving_fold"]
+    wrong_estimator_fold["estimator"]["content_hash"] = "sha256:" + "e" * 64
+    wrong_estimator_fold["estimator"]["path"] = "objects/" + "e" * 64
+    write_catalog("origin", wrong_estimator)
+    with pytest.raises(ModelNotReady) as refusal:
+        rb.resolve_chooser_fold_authoring_contexts(tmp_path, "origin")
+    assert refusal.value.code == rb.MODEL_NOT_READY
+    assert refusal.value.member_id == "tier4_folds:chooser"
+    assert refusal.value.detail == "chooser fold could not be verified or loaded"
+
+    write_catalog("origin", copy.deepcopy(origin_body))
+
+    def forbidden_pointer(*_args, **_kwargs):
+        raise AssertionError("exact resolver must not read the live pointer")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(deployment, "current_pointer", forbidden_pointer)
+        origin_refs, origin_contexts = rb.resolve_chooser_fold_authoring_contexts(
+            tmp_path, "origin")
+    origin_only = origin_refs[(OUTPUTS[role][1], cache["fold_start"])]
+    assert origin_only.release_id == origin_only.carrying_release_id == "origin"
+    assert origin_only.descriptor_hash == carried_ref.descriptor_hash
+    assert origin_contexts[origin_only.descriptor_hash] == (
+        published_manifest(store, "origin"), origin_body)
+
+    context_references, authoring_contexts = rb.resolve_chooser_fold_authoring_contexts(
+        tmp_path, "carried")
+    context_ref = context_references[(OUTPUTS[role][1], cache["fold_start"])]
+    assert context_ref.release_id == "origin"
+    assert context_ref.carrying_release_id == "carried"
+    assert context_ref.descriptor_hash == carried_ref.descriptor_hash
+    authoring_manifest, authoring_catalog = authoring_contexts[context_ref.descriptor_hash]
+    descriptor = from_document(ChooserServingFoldDescriptor, origin_obj["serving_fold"])
+    loaded = load_chooser_serving_fold(
+        FrozenInference(store), descriptor,
+        verified_parent_manifest=authoring_manifest,
+        verified_catalog=dict(authoring_catalog))
+    assert loaded.descriptor.descriptor_hash == context_ref.descriptor_hash
+
     carried_body_without_link = copy.deepcopy(carried_body)
     del carried_body_without_link["sources"]["carried_from"]
     write_catalog("carried", carried_body_without_link)
     with pytest.raises(ModelNotReady) as refusal:
         resolve_release_binding(tmp_path, include_chooser_fold_references=True)
     assert refusal.value.code == rb.MODEL_NOT_READY
+    assert refusal.value.member_id == "tier4_folds:chooser"
+    assert refusal.value.detail == "chooser fold could not be verified or loaded"
     write_catalog("carried", copy.deepcopy(carried_body))
 
     carried_body_with_changed_membership = copy.deepcopy(carried_body)
@@ -400,6 +520,8 @@ def test_carried_chooser_fold_loads_from_verified_original_release(tmp_path, mon
     with pytest.raises(ModelNotReady) as refusal:
         resolve_release_binding(tmp_path, include_chooser_fold_references=True)
     assert refusal.value.code == rb.MODEL_NOT_READY
+    assert refusal.value.member_id == "tier4_folds:chooser"
+    assert refusal.value.detail == "chooser fold could not be verified or loaded"
     write_catalog("carried", copy.deepcopy(carried_body))
 
     tampered_origin = copy.deepcopy(origin_body)
@@ -413,6 +535,8 @@ def test_carried_chooser_fold_loads_from_verified_original_release(tmp_path, mon
     with pytest.raises(ModelNotReady) as refusal:
         resolve_release_binding(tmp_path, include_chooser_fold_references=True)
     assert refusal.value.code == rb.MODEL_NOT_READY
+    assert refusal.value.member_id == "tier4_folds:chooser"
+    assert refusal.value.detail == "chooser fold could not be verified or loaded"
 
 
 @pytest.mark.parametrize("role", OUTPUTS)

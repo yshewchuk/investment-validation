@@ -54,14 +54,17 @@ deployment pointer's model identity/artifact refs and the release's frozen
 payoff/recalibration/board-analog-matcher artifacts, plus the
 role-keyed `driver_residual_artifacts` mapping (empty when no driver pool
 member is staged) and `chooser_analog_artifacts`/`chooser_admissible_artifacts`
-tuples, plus the `size_folds` descriptor index (`None` only for a hand-built binding), `paired_residual_artifacts` and `trailing_cutoff_artifacts` tuples (each empty independently when its family is absent), into one immutable
-`ScoringReleaseBinding`. Chooser tuples retain all distinct artifact keys;
+tuples, plus the `size_folds` descriptor index (`None` only for a hand-built binding), `paired_residual_artifacts` and `trailing_cutoff_artifacts` tuples (each empty independently when its family is absent), into one
+`ScoringReleaseBinding` whose top-level mapping fields are read-only while
+nested catalog values remain decoded JSON values. Chooser tuples retain all distinct artifact keys;
 each declared chooser object must be a regular file no larger than 32 MiB.
 `chooser_fold_references` is keyed by `(producer_output, fold_start)` and
 contains `descriptor_hash`, `estimator_sha256`, `training_cutoff`, the original
 authoring `release_id`, `carrying_release_id`, `release_binding` and
-`fold_start` for each verified fold. Resolution leaves the map empty by
-default; an opted-in binding verifies at most 34 chooser-fold objects. The
+`fold_start` for each verified, reference-eligible (cutoff-bearing) fold;
+valid cutoffless legacy descriptors are verified then omitted. Resolution
+leaves the map empty by default; an opted-in binding verifies at most 34
+chooser-fold objects. The
 public `ChooserFoldReference` type names this resolver contract.
 Request-specific selection and nightly chooser wiring are not performed here.
 The reader raises
@@ -120,7 +123,7 @@ columns.
 is `DYNAMIC_MENU_REFUSAL_CODES`. These are pure preparatory accounting contracts,
 currently consumed only by focused tests. No runtime dispatcher uses them.
 
-<!-- public-interface: application, compatibility, dynamic_outcomes, DynamicMenuIdentity, DynamicCandidateOutcome, validate_dynamic_menu, DynamicMenuRefusal, DYNAMIC_MENU_REFUSAL_CODES, financial, frozen_batch, frozen_executor, frozen_inputs, identity, native_analog_query, release_bindings, source_inputs, gate_fold_selection, SizeFoldCatalog, index_size_folds, select_gate_forecast_source, gate_forecast_source, GateForecastSource, stages, FrozenInputsError, binding_feature_row, build_inference_requests, validate_answer_free, canonical_request, dependency_hash, financial_diagnostics, FrozenBatchPreflightError, FrozenBindingConflict, request_hash, replay, score_batch, score_event, score_frozen, score_frozen_batch, score_id, score_many, score_one, ModelIdentity, ModelNotReady, NoCurrentRelease, ReleaseBindingError, ScoringReleaseBinding, ChooserFoldReference, resolve_release_binding, resolve_gate_policy, NativeScoreInputs, SourceBundle, FrozenStageExecutor, FrozenStageRefusal, FrozenStageResult, STAGE_NAMES, StageReceipt, build_native_score_inputs, analog_display_fields, DISPLAY_ANALOG_FIELDS, StageObservation, quote_domain_map, assemble_nightly_source_bundle, validated_as_of, NightlySourceBundleRefusal -->
+<!-- public-interface: application, compatibility, dynamic_outcomes, DynamicMenuIdentity, DynamicCandidateOutcome, validate_dynamic_menu, DynamicMenuRefusal, DYNAMIC_MENU_REFUSAL_CODES, financial, frozen_batch, frozen_executor, frozen_inputs, identity, native_analog_query, release_bindings, source_inputs, gate_fold_selection, SizeFoldCatalog, index_size_folds, select_gate_forecast_source, gate_forecast_source, GateForecastSource, stages, FrozenInputsError, binding_feature_row, build_inference_requests, validate_answer_free, canonical_request, dependency_hash, financial_diagnostics, FrozenBatchPreflightError, FrozenBindingConflict, request_hash, replay, score_batch, score_event, score_frozen, score_frozen_batch, score_id, score_many, score_one, ModelIdentity, ModelNotReady, NoCurrentRelease, ReleaseBindingError, ScoringReleaseBinding, ChooserFoldReference, resolve_release_binding, resolve_gate_policy, resolve_chooser_fold_authoring_contexts, NativeScoreInputs, SourceBundle, FrozenStageExecutor, FrozenStageRefusal, FrozenStageResult, STAGE_NAMES, StageReceipt, build_native_score_inputs, analog_display_fields, DISPLAY_ANALOG_FIELDS, StageObservation, quote_domain_map, assemble_nightly_source_bundle, validated_as_of, NightlySourceBundleRefusal -->
 
 ## Consumers
 
@@ -176,9 +179,13 @@ the keys of the frozen `chooser_analog_pool` and `chooser_admissible_table`;
 features (event history, market/regime block) come from `feature_vector`, which
 still wins for any derived column it declares; `dte_entry` is scorer-computed
 (from the priced legs and quote date) and no longer projected.
-The resolver exposes its verified `chooser_fold_references` map only when
-called with `include_chooser_fold_references=True`. Default resolution does not
-load chooser estimators. Strict production capture opts in and passes the map
+`resolve_release_binding` exposes its verified `chooser_fold_references` map
+only when called with `include_chooser_fold_references=True`; default
+resolution does not load chooser estimators. The named-release
+`resolve_chooser_fold_authoring_contexts(release_root, release_id)` always
+returns the requested release's verified references and contexts, with no
+current runtime caller.
+Strict production capture opts in and passes the map
 through the legacy scorer; the capture trace records only the verified
 reference for each served chooser producer fold.
 

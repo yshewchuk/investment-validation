@@ -19,6 +19,54 @@ from engine.v2.ops.errors import OpsError, fail
 
 MAX_NATIVE_EVIDENCE_BYTES = 16 * 1024 * 1024
 MAX_NATIVE_SIZE_ARTIFACT_BYTES = 1024 * 1024 * 1024
+LATEST = 7
+
+
+def request_version(schema_version):
+    """Return the version encoded in a schema name, or None."""
+    if type(schema_version) is not str:
+        return None
+    match = re.fullmatch(r"magnitude_search_request\.v([1-9][0-9]*)", schema_version)
+    try:
+        return int(match.group(1)) if match else None
+    except ValueError:
+        return None
+
+
+def _request_version_in_range(value, low):
+    return type(value) is int and low <= value <= LATEST
+
+
+def allows_workers(value):
+    return _request_version_in_range(value, 2)
+
+
+def qualified(value):
+    return _request_version_in_range(value, 2)
+
+
+def uses_v3_compiler(value):
+    return _request_version_in_range(value, 3)
+
+
+def allows_lead_selector(value):
+    return _request_version_in_range(value, 2)
+
+
+def allows_hgb_axes(value):
+    return _request_version_in_range(value, 4)
+
+
+def allows_size_family(value):
+    return _request_version_in_range(value, 5)
+
+
+def allows_neural(value):
+    return _request_version_in_range(value, 6)
+
+
+def uses_extended_neural_profiles(value):
+    return type(value) is int and value == LATEST
 
 
 def read_native_evidence(conn, run_id, *, max_bytes=MAX_NATIVE_EVIDENCE_BYTES):
@@ -363,9 +411,6 @@ def _size_plan_v17(document):
 
 
 _SIZE_PANEL_CONTEXTS = ("magnitude_panel_context.v3", "magnitude_panel_context.v4")
-_SIZE_REQUEST_SCHEMAS = ("magnitude_search_request.v2", "magnitude_search_request.v3",
-                         "magnitude_search_request.v4", "magnitude_search_request.v5", "magnitude_search_request.v6",
-                         "magnitude_search_request.v7")
 
 
 def _size_panel_v17(document):
@@ -384,7 +429,7 @@ def _size_panel_v17(document):
             or not _size_placeholder_v17(request.get("event_ids"))
             or not isinstance(feature.get("snapshot_id"), str)):
         return False
-    return (document["size_request"]["schema_version"] in _SIZE_REQUEST_SCHEMAS
+    return (qualified(request_version(document["size_request"]["schema_version"]))
             and document["size_comparison"]["schema_version"] == "size_causal_comparator.v1"
             and isinstance(document["size_panel_request"], dict))
 
@@ -446,7 +491,7 @@ def _size_binding(document):
         and context["schema_version"] in _SIZE_PANEL_CONTEXTS
         and context["context_id"] == content_hash({k: v for k, v in context.items() if k != "context_id"})
         and context["source_snapshot"] == document["snapshot"]
-        and request["schema_version"] in _SIZE_REQUEST_SCHEMAS
+        and qualified(request_version(request["schema_version"]))
         and request["feature_snapshot_id"] == panel["feature_snapshot"]["snapshot_id"]
         and request["history_snapshot_id"] == context["history_snapshot"]["snapshot_id"]
         and {e["event_id"] for e in context["target_events"]} == set(document["event_ids"]))

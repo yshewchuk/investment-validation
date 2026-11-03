@@ -95,6 +95,8 @@ load-bearing entrypoints:
   one configured production release root
   (`engine.v2.models.deployment.production_release_root()`, config key
   `MODEL_RELEASE_ROOT` — see `engine/v2/models/ARCHITECTURE.md` §7.4).
+   The binding also carries `chooser_fold_catalog_json`, `chooser_parent_manifest` and `chooser_authoring_fold_contexts`; named-release
+   `resolve_chooser_fold_authoring_contexts(release_root, release_id)` reads that release's exact manifest/catalog/model bindings plus authoring manifest/catalog, never `DEPLOYED`. `resolve_chooser_fold_authoring_contexts` has no production caller today.
   `ScoringReleaseBinding` (frozen dataclass, every mapping field a read-only
   `MappingProxyType`) fields (plus `size_folds: SizeFoldCatalog | None`, the
   indexed `tier4_folds:size` descriptors, see "Forward forecast assembly"): `release_id: str`; `model_identity: Mapping[str,
@@ -209,11 +211,13 @@ It then writes the validated map to metadata field
 `chooser_fold_references` when a chooser trace has producer folds (`None`
 otherwise). Production capture resolves the release catalog before scoring;
 `strict_trace_one` performs no catalog lookup and never infers missing
-provenance. When chooser folds are present without a catalog retrain cutoff,
-the opted-in resolver refuses with `ModelNotReady` identifying the missing
-[canonical training cutoff](../models/ARCHITECTURE.md#chooser-producer-fold-authoring); ordinary scoring does not opt into this resolver.
-A chooser trace with a bound producer fold but no matching verified
-reference refuses. Orphan references, incomplete producer coverage and
+provenance. Valid legacy cutoffless chooser folds are skipped from the opted-in
+verified reference map while preserving their legacy descriptor hashes; the
+opted-in resolver refuses with `ModelNotReady` identifying the missing
+[canonical training cutoff](../models/ARCHITECTURE.md#chooser-producer-fold-authoring)
+only when cutoff-bearing chooser folds are present without one; ordinary
+scoring does not opt into this resolver. Strict capture still refuses a bound
+producer fold that has no matching verified reference. Orphan references, incomplete producer coverage and
 invalid dates also refuse with `StrictTraceCaptureError`. Provenance stays
 outside chooser inputs and the receipt.
 `SourceBundle.chooser_fold_reference` remains an optional API field and is
@@ -631,7 +635,7 @@ rather than its own. `native_score_batch` goes through `score_one`, never
   |---|---|
   | no `DEPLOYED` pointer ever written (or `release_root`/`deployment/` missing) | `NoCurrentRelease` |
   | `DEPLOYED` pointer file corrupt/unparseable | `ModelNotReady("DEPLOYED", ...)` |
-  | unsafe `release_id` (contains `/`, or is `.`/`..`) | `ModelNotReady("model_release", ...)` |
+  | unsafe `release_id` (contains `/`, or is `.`/`..`), or staged manifest's `release_id` disagrees with the requested release id (manifest path) | `ModelNotReady("model_release", ...)`; mismatch: `ModelNotReady("model_release", "release_id disagrees with manifest path")` |
   | no staged manifest for that `release_id` | `ModelNotReady("model_release", "release not staged")` |
   | `manifest.json` exists but will not parse, is a symlink or non-regular file, or exceeds 64 MiB | `ModelNotReady("manifest.json", ...)` |
   | staged manifest's own hash disagrees (`_manifest_hash_matches`, checked before trusting `manifest.release`) | `ModelNotReady("model_release", "release_hash disagrees with manifest")` — accepts either hash version, since replay of an older-hashed release must keep resolving; `deployment.promote`/`rollback` enforce a stricter write-side rule this read path never applies |
@@ -707,29 +711,25 @@ and the release is not consulted for it.
 
 #### Chooser fold provenance reference
 
-A verified chooser-fold reference carries the descriptor/estimator hashes,
-fold month and producer binding, plus the authoring/carrying release ids and the
-[training cutoff](../models/ARCHITECTURE.md#chooser-producer-fold-authoring) defined only in the models architecture. For a new descriptor the reference preserves its producer-declared cutoff; a cutoffless legacy descriptor retains the legacy fold-start reference value.
-`resolve_release_binding` returns an empty
-`chooser_fold_references` map by default and does not load chooser estimators
-for ordinary nightly scoring. Callers that need these references opt in with
-`include_chooser_fold_references=True`; resolution returns a complete map or a
-typed refusal. Strict capture opts in, passes verified references to the
-scorer, and records both release ids in trace metadata. Ordinary nightly
-scoring loads no chooser estimators and infers no provenance from legacy rows.
+A verified chooser-fold reference carries descriptor/estimator hashes, fold month, producer binding, authoring/carrying release ids and the canonical [training cutoff](../models/ARCHITECTURE.md#chooser-producer-fold-authoring) defined only in the models architecture.
+New references preserve the producer-declared cutoff; cutoffless legacy descriptors remain loadable and hash-stable through the normal serving-fold loader but are omitted from the reference maps.
+By default `resolve_release_binding` returns empty `chooser_fold_references` and authoring-context maps and does no chooser-fold loading for ordinary nightly scoring; it still exposes the canonical current catalog JSON and verified parent manifest.
+Callers that need the references and contexts opt in with `include_chooser_fold_references=True`; resolution returns complete maps or a typed refusal.
+Chooser references are keyed by `(producer_output, fold_start)` and authoring contexts by descriptor hash; contexts hold the exact authoring release's verified manifest and catalog. Strict capture opts in, passes verified references to the scorer, and records both release ids in trace metadata.
 
 | Condition | Outcome |
 |---|---|
-| Chooser references not requested | Return an empty map without loading chooser estimators |
-| More than 34 staged chooser-fold objects when references are requested | ModelNotReady before any chooser fold is loaded |
-| No staged chooser-fold objects are available when references are requested | Return an empty map before checking the cutoff |
-| Staged chooser-fold objects are available but the canonical retrain cutoff is missing or invalid | ModelNotReady; no partial reference map |
+| `resolve_release_binding` with chooser references not requested | Return an empty map without loading chooser estimators |
+| More than 34 total staged chooser-fold objects (counted before cutoffless filtering) when references are requested | ModelNotReady before any chooser fold is loaded |
+| No chooser-fold objects staged | Return an empty map without requiring a carrying-catalog cutoff |
+| Every staged object is a valid cutoffless legacy descriptor — each first verified, then omitted | Return an empty map without requiring a carrying-catalog cutoff; a carried descriptor still needs a verifiable authoring release and canonical authoring cutoff (as the following row states) |
+| Cutoff-bearing chooser-fold objects are staged but the canonical retrain cutoff is missing or invalid | ModelNotReady; no partial reference map |
 | A carried fold's authoring release lacks canonical cutoff data | ModelNotReady; no partial reference map |
 | Carried descriptor's original release, catalog membership or parent/hash fails | ModelNotReady; no partial reference map |
 | Re-resolving an unchanged valid chain | Same reference, with separate authoring and carrying ids (equal for an uncarried fold) |
 | Malformed, noncanonical or mismatched descriptor, estimator digest, parent binding, output or fold month | ModelNotReady; no partial reference map |
 | Strict capture reference has an absent or unsafe authoring/carrying release id | StrictTraceCaptureError; no trace metadata is emitted |
-| Reference resolution requested for a verified release | Re-verify each binding resolution; no cross-call reference cache |
+| Reference resolution requested for a verified release, including exact-release `resolve_chooser_fold_authoring_contexts(release_root, release_id)` (that id's manifest, catalog and model bindings, never the live `DEPLOYED` pointer), or blank or wrong-type `release_root`/exact `release_id` | invalid argument: `ValueError` before any I/O; requested resolution: re-verify each binding, no cross-call reference cache |
 | Model member exceeds its byte cap or is not a regular file | ModelNotReady before chooser bytes are decoded |
 
 #### Chooser state members

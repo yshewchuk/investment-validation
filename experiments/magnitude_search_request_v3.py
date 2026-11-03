@@ -5,6 +5,9 @@ import math
 from engine.v2.foundation import content_hash
 from engine.v2.ops.errors import fail
 from experiments import magnitude_search_request as v2
+from experiments.magnitude_search_request_schema import (
+    allows_hgb_axes, allows_neural, allows_size_family, request_version,
+    uses_extended_neural_profiles)
 
 __all__ = ["compile_request"]
 
@@ -91,9 +94,9 @@ def _space(request):
                 "stage-2 requires exactly ordered H/HM/HMO feature sets")
     space = request["space"]
     version = request["schema_version"]
-    families = (_FAMILIES_V6 if version in ("magnitude_search_request.v6", "magnitude_search_request.v7")
-                else _FAMILIES_V5 if version == "magnitude_search_request.v5"
-                else _FAMILIES_V4 if version == "magnitude_search_request.v4" else _FAMILIES)
+    families = (_FAMILIES_V6 if allows_neural(request_version(version))
+                else _FAMILIES_V5 if allows_size_family(request_version(version))
+                else _FAMILIES_V4 if allows_hgb_axes(request_version(version)) else _FAMILIES)
     v2._require(v2._shape(space, families),
                 "stage-2 requires the closed family grid")
     canonical = {}
@@ -108,14 +111,13 @@ def _space(request):
                         "stage-2 grid axis length must be between 1 and 32")
             if family == "mlp":
                 v2._require(all(type(value) is str and value in (
-                    _MLP_PROFILES_V7 if version == "magnitude_search_request.v7" else _MLP_PROFILES)
+                    _MLP_PROFILES_V7 if uses_extended_neural_profiles(request_version(version)) else _MLP_PROFILES)
                     for value in values)
                     and values == sorted(set(values)),
                     "stage-2 MLP profiles must be known, unique and lexicographically ordered")
                 canonical[family][axis] = list(values)
                 continue
-            if family == "hgb" and version not in (
-                    "magnitude_search_request.v4", "magnitude_search_request.v5", "magnitude_search_request.v6", "magnitude_search_request.v7"):
+            if family == "hgb" and not allows_hgb_axes(request_version(version)):
                 v2._require(values == [7, 15],
                             "stage-2 HGB max_leaf_nodes grid remains fixed at [7, 15]")
                 canonical[family][axis] = [7, 15]
@@ -146,14 +148,13 @@ def _counts(request, horizons):
                 "stage-2 requires ordered outer years and exact inner-year keys")
     v2._require(all(v2._years(inner[year]) and inner[year][-1] < year for year in outer),
                 "stage-2 inner years must be ordered and strictly earlier than their outer year")
-    size = request["schema_version"] in ("magnitude_search_request.v5", "magnitude_search_request.v6", "magnitude_search_request.v7")
+    size = allows_size_family(request_version(request["schema_version"]))
     count = int(size) + len(v2._SETS) * sum(math.prod(len(values) for values in axes.values())
         for family, axes in request["space"].items() if family != "size_v1_4")
-    if request["schema_version"] in (
-            "magnitude_search_request.v4", "magnitude_search_request.v5", "magnitude_search_request.v6", "magnitude_search_request.v7"):
+    if allows_hgb_axes(request_version(request["schema_version"])):
         v2._require(count <= _MAX_V4_CANDIDATES,
                     "stage-2 v6/v7 grid exceeds the 1000-candidate ceiling"
-                    if request["schema_version"] in ("magnitude_search_request.v6", "magnitude_search_request.v7")
+                    if allows_neural(request_version(request["schema_version"]))
                     else "stage-2 v4/v5 grid exceeds the 1000-candidate ceiling")
     inners, outers = sum(map(len, inner.values())), len(outer)
     lead_count = len(horizons)
@@ -185,7 +186,7 @@ def compile_request(request, *, horizons=(5, 3, 1)):
                  and request_keys in (v2._KEYS, v2._KEYS | {"selection"},
                                       v2._KEYS | {"workers"},
                                       v2._KEYS | {"selection", "workers"}))
-                or (version in ("magnitude_search_request.v4", "magnitude_search_request.v5")
+                or (allows_hgb_axes(request_version(version))
                     and request_keys in (v2._KEYS | {"selection"},
                                          v2._KEYS | {"selection", "workers"}))
                 or (version in ("magnitude_search_request.v6", "magnitude_search_request.v7")
@@ -194,7 +195,7 @@ def compile_request(request, *, horizons=(5, 3, 1)):
                                          v2._KEYS | {"selection", "requires_event_dates"},
                                          v2._KEYS | {"selection", "workers", "requires_event_dates"})),
                 "stage-2 request requires its closed v6/v7 schema and selection policy"
-                if version in ("magnitude_search_request.v6", "magnitude_search_request.v7")
+                if allows_neural(request_version(version))
                 else "stage-2 request requires its closed v3/v4/v5 schema and selection policy")
     if "requires_event_dates" in request:
         v2._require(type(request["requires_event_dates"]) is bool,

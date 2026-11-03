@@ -24,6 +24,7 @@ from engine.v2.research.magnitude_inputs import (
 )
 from engine.v2.research.magnitude_panel_qualified_table import METADATA, admit_columns
 from experiments.magnitude_candidate_recipe import candidate_recipe
+from experiments.magnitude_search_request_schema import allows_size_family, request_version
 from experiments.magnitude_search_request_versions import compile_request
 from experiments.native_registration import (
     MAX_NATIVE_EVIDENCE_BYTES,
@@ -49,7 +50,7 @@ def _require(condition):
 
 
 def _panel_columns(schema_version, model_columns):
-    if schema_version in ("magnitude_search_request.v5", "magnitude_search_request.v6", "magnitude_search_request.v7"):
+    if allows_size_family(request_version(schema_version)):
         return list(dict.fromkeys(c for c in COLUMNS + list(model_columns) if c not in METADATA))
     return model_columns
 
