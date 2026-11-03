@@ -1037,30 +1037,26 @@ def _projected_bundle_or_refusal(
     driver_name: str,
     gate_source_cache: dict[tuple[int, str], Any],
     selection: _ChooserSelection,
-) -> SourceBundle | NativeScoreBatchRowRefusal:
+) -> tuple[SourceBundle, NativeScoreBatchRowRefusal | None] | NativeScoreBatchRowRefusal:
     """Project member features, then assemble the bundle, or refuse the row.
 
-    A projection refusal still assembles the bundle with the original feature
-    names first, so a bundle refusal takes precedence; otherwise the saved
-    projection refusal is returned. A successful projection assembles with the
-    projected names.
+    Returns ``(bundle, None)`` on a successful projection, or
+    ``(bundle, pending)`` when projection refuses but the bundle still builds:
+    ``pending`` is returned only after the later event-id and release checks,
+    so an earlier refusal always wins. A bundle refusal returns directly. A
+    projection refusal still assembles with the original feature names.
     """
     projected = _project_member_features(
         key, event, binding, feature_names, as_of, selection)
-    if isinstance(projected, NativeScoreBatchRowRefusal):
-        bundle = _bundle_or_refusal(
-            key, event, binding=binding, spec=spec, drivers=drivers,
-            gate_identity=gate_identity, gate_policy=gate_policy, as_of=as_of,
-            feature_names=feature_names, driver_name=driver_name,
-            gate_source_cache=gate_source_cache)
-        if isinstance(bundle, NativeScoreBatchRowRefusal):
-            return bundle
-        return projected
-    return _bundle_or_refusal(
+    pending = projected if isinstance(projected, NativeScoreBatchRowRefusal) else None
+    bundle = _bundle_or_refusal(
         key, event, binding=binding, spec=spec, drivers=drivers,
         gate_identity=gate_identity, gate_policy=gate_policy, as_of=as_of,
-        feature_names=projected, driver_name=driver_name,
-        gate_source_cache=gate_source_cache)
+        feature_names=feature_names if pending is not None else projected,
+        driver_name=driver_name, gate_source_cache=gate_source_cache)
+    if isinstance(bundle, NativeScoreBatchRowRefusal):
+        return bundle
+    return bundle, pending
 
 
 def _assemble_one_event(
@@ -1105,13 +1101,14 @@ def _assemble_one_event(
     if refusal is not None:
         return refusal
     selection = _ChooserSelection()
-    bundle = _projected_bundle_or_refusal(
+    assembled = _projected_bundle_or_refusal(
         key, event, binding=binding, spec=spec, drivers=drivers,
         gate_identity=gate_identity, gate_policy=gate_policy, as_of=as_of,
         feature_names=feature_names, driver_name=driver_name,
         gate_source_cache=gate_source_cache, selection=selection)
-    if isinstance(bundle, NativeScoreBatchRowRefusal):
-        return bundle
+    if isinstance(assembled, NativeScoreBatchRowRefusal):
+        return assembled
+    bundle, pending_projection_refusal = assembled
     event_id = event.calendar_row.get("event_id")
     if not isinstance(event_id, str) or not event_id:
         return NativeScoreBatchRowRefusal(
@@ -1120,6 +1117,8 @@ def _assemble_one_event(
         bundle, key, event, binding, spec, drivers, as_of, snapshot_id, selection)
     if isinstance(bundle, NativeScoreBatchRowRefusal):
         return bundle
+    if pending_projection_refusal is not None:
+        return pending_projection_refusal
     try:
         native_inputs = build_native_score_inputs(bundle)
     except ValueError as exc:

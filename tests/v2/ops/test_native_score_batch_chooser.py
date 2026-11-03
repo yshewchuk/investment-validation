@@ -418,6 +418,66 @@ def test_projection_refusal_preserves_earlier_bundle_refusal(monkeypatch):
     assert captured["feature_names"] == original
 
 
+def _ordering_binding():
+    size = SimpleNamespace(
+        decision_clock_id="clock", artifact_hash="hash-size",
+        binding_id="size-binding", role="size:*", model_id="size-model")
+    crush = SimpleNamespace(
+        decision_clock_id="clock", artifact_hash="hash-crush",
+        binding_id="crush-binding", role="iv_crush:*", model_id="crush-model")
+    return SimpleNamespace(
+        model_identity={"size:*": size, "iv_crush:*": crush},
+        paired_residual_artifacts=(), trailing_cutoff_artifacts=())
+
+
+def _ordering_event(*, event_id):
+    calendar_row = {
+        "ticker": "AAA", "event_date": "2026-01-12", "entry_date": "2026-01-12",
+        "expiry": "2026-01-16"}
+    if event_id is not None:
+        calendar_row["event_id"] = event_id
+    return NightlyEventInputs(
+        key=BoardRequest("AAA", "TWIN-P", pd.Timestamp("2026-01-12"), "close"),
+        calendar_row=calendar_row, panel_row={}, panel_anchor="2026-01-10",
+        tier4_row={}, quote_rows=())
+
+
+def _patch_projection_failure(monkeypatch):
+    state = SimpleNamespace(producer_bindings={
+        "pred_im_t1_d14": SimpleNamespace(feature_order=("missing_feature",))})
+    monkeypatch.setattr(nsb, "select_chooser_state", lambda *a, **k: state)
+    monkeypatch.setattr(
+        nsb, "assemble_nightly_source_bundle",
+        lambda *_args, **_kwargs: SimpleNamespace(context={}))
+
+
+def test_missing_event_id_wins_over_projection_refusal(monkeypatch):
+    _patch_projection_failure(monkeypatch)
+
+    result = nsb._assemble_one_event(
+        _ordering_event(event_id=None), binding=_ordering_binding(), gate_policy={},
+        as_of="2026-01-10", snapshot_id="snap", calendar_revision="rev",
+        feature_names=("signal",), driver_name="im_t1", gate_source_cache={})
+
+    assert isinstance(result, NativeScoreBatchRowRefusal)
+    assert (result.code, result.detail) == (
+        "MISSING_STAGED_INPUT", "calendar_row missing event_id")
+
+
+def test_release_refusal_wins_over_projection_refusal(monkeypatch):
+    _patch_projection_failure(monkeypatch)
+
+    result = nsb._assemble_one_event(
+        _ordering_event(event_id="event-1"), binding=_ordering_binding(), gate_policy={},
+        as_of="2026-01-10", snapshot_id="snap", calendar_revision="rev",
+        feature_names=("signal",), driver_name="im_t1", gate_source_cache={})
+
+    assert isinstance(result, NativeScoreBatchRowRefusal)
+    assert (result.code, result.detail) == (
+        "MODEL_NOT_READY",
+        "nightly_source_bundle refused: MODEL_NOT_READY: paired residual pool missing")
+
+
 @pytest.mark.parametrize("name", ["spy_ret21", "zeta_distinct"])
 def test_tier4_none_does_not_fall_back_to_panel(monkeypatch, name):
     if name == "spy_ret21":

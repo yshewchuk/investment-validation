@@ -384,6 +384,71 @@ def test_shared_panel_reads_with_per_request_calendar_and_quotes(tmp_path, monke
     assert json.dumps(events_document)
 
 
+def test_entry_rule_panel_row_stages_horizon_without_changing_other_rows(
+        tmp_path, monkeypatch):
+    from dataclasses import replace
+
+    from engine.v2.ops.native_board_universe import BoardRequest
+
+    repository, snapshot = _snapshot(tmp_path, [
+        _event_row("AAA", _MIDNIGHT, "BMO", event_id="aaa-midnight")])
+    rig = _ReaderRig(monkeypatch)
+    entry_key = BoardRequest("AAA", "TWIN-P", _MIDNIGHT, "BMO")
+    runup_key = BoardRequest("AAA", "STR-RUNUP", _MIDNIGHT, "BMO")
+    other_key = BoardRequest("AAA", "STR-THRU", _MIDNIGHT, "BMO")
+
+    def enumerate_keys(repo, snap, *, as_of, horizon_days, tickers=None):
+        return [entry_key, runup_key, other_key]
+
+    _patch_reader(monkeypatch, nightly_raw_rows, "scan_forward_board_requests",
+                  enumerate_keys)
+
+    def calendar_row(key):
+        inputs = _calendar_inputs(key)
+        return replace(inputs, calendar_row={
+            **inputs.calendar_row, "days_before_print": 5})
+
+    rig.calendar_row_hook = calendar_row
+
+    events_document, refusals_document = nrp.build_native_score_batch_events(
+        repository, snapshot, as_of=_AS_OF, horizon_days=_HORIZON_DAYS)
+
+    assert refusals_document["refusals"] == []
+    by_strategy = {event["key"]["strategy"]: event for event in events_document}
+    assert by_strategy["TWIN-P"]["panel_row"] == {
+        **_panel_inputs(entry_key).panel_row, "days_before_print": 5}
+    assert by_strategy["STR-RUNUP"]["panel_row"] == _panel_inputs(runup_key).panel_row
+    assert by_strategy["STR-THRU"]["panel_row"] == _panel_inputs(other_key).panel_row
+    assert "days_before_print" not in by_strategy["STR-RUNUP"]["panel_row"]
+    assert "days_before_print" not in by_strategy["STR-THRU"]["panel_row"]
+    assert all(event["calendar_row"]["days_before_print"] == 5
+               for event in events_document)
+
+
+def test_entry_rule_panel_row_stays_unstaged_when_horizon_is_unavailable(
+        tmp_path, monkeypatch):
+    from engine.v2.ops.native_board_universe import BoardRequest
+
+    repository, snapshot = _snapshot(tmp_path, [
+        _event_row("AAA", _MIDNIGHT, "BMO", event_id="aaa-midnight")])
+    rig = _ReaderRig(monkeypatch)
+    entry_key = BoardRequest("AAA", "TWIN-P", _MIDNIGHT, "BMO")
+
+    def enumerate_keys(repo, snap, *, as_of, horizon_days, tickers=None):
+        return [entry_key]
+
+    _patch_reader(monkeypatch, nightly_raw_rows, "scan_forward_board_requests",
+                  enumerate_keys)
+    rig.calendar_row_hook = _calendar_inputs
+
+    events_document, refusals_document = nrp.build_native_score_batch_events(
+        repository, snapshot, as_of=_AS_OF, horizon_days=_HORIZON_DAYS)
+
+    assert refusals_document["refusals"] == []
+    assert "days_before_print" not in events_document[0]["calendar_row"]
+    assert "days_before_print" not in events_document[0]["panel_row"]
+
+
 def test_panel_reader_called_once_per_ticker(
         tmp_path, monkeypatch):
     from collections import Counter
