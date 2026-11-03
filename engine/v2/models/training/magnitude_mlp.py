@@ -86,7 +86,7 @@ def _fit_chrono(model, recipe, train, labels, prediction, event_dates):
     validation_features = preprocessing.transform(train[validation_rows])
     validation_labels = transformer.transform(
         labels[validation_rows].reshape(-1, 1)).ravel()
-    best_loss, best_predictions, best_coefs, best_intercepts, stale = (
+    best_loss, best_coefs, best_intercepts, best_optimizer_loss, stale = (
         np.inf, None, None, None, 0)
     max_iter = recipe["estimator"]["params"]["max_iter"]
     patience = recipe["estimator"]["params"]["n_iter_no_change"]
@@ -96,9 +96,9 @@ def _fit_chrono(model, recipe, train, labels, prediction, event_dates):
         loss = float(np.mean((predicted - validation_labels) ** 2))
         if loss < best_loss:
             best_loss = loss
-            best_predictions = predicted.copy()
             best_coefs = [coef.copy() for coef in network.coefs_]
             best_intercepts = [intercept.copy() for intercept in network.intercepts_]
+            best_optimizer_loss = float(network.loss_)
             stale = 0
         else:
             stale += 1
@@ -107,15 +107,14 @@ def _fit_chrono(model, recipe, train, labels, prediction, event_dates):
     if best_coefs is None:
         raise ValueError("MLP produced nonfinite fit evidence")
     network.coefs_, network.intercepts_ = best_coefs, best_intercepts
-    restored_loss = float(np.mean((best_predictions - validation_labels) ** 2))
-    network.loss_ = restored_loss
+    network.loss_ = best_optimizer_loss
     scaled = network.predict(preprocessing.transform(prediction))
     predictions = transformer.inverse_transform(scaled.reshape(-1, 1)).ravel()
-    if (not np.isfinite(restored_loss)
+    if (not np.isfinite(best_optimizer_loss)
             or any(not np.isfinite(array).all()
                    for array in (*network.coefs_, *network.intercepts_))):
         raise ValueError("MLP produced nonfinite fit evidence")
-    return (predictions, epoch < max_iter, int(epoch), restored_loss,
+    return (predictions, epoch < max_iter, int(epoch), best_optimizer_loss,
             int(network.n_features_in_))
 
 

@@ -562,18 +562,19 @@ def independent_chrono_oracle(train, labels, prediction, event_dates, *, layers,
             predicted = network.predict(validation_features)
             loss = float(np.mean((predicted - validation_labels) ** 2))
             if loss < best[0]:
-                best = (loss, predicted.copy(), [coef.copy() for coef in network.coefs_],
-                        [intercept.copy() for intercept in network.intercepts_])
+                best = (loss, [coef.copy() for coef in network.coefs_],
+                        [intercept.copy() for intercept in network.intercepts_],
+                        float(network.loss_))
                 stale = 0
             else:
                 stale += 1
                 if stale >= 20:
                     break
-        network.coefs_, network.intercepts_ = best[2], best[3]
-        restored = float(np.mean((best[1] - validation_labels) ** 2))
+        network.coefs_, network.intercepts_ = best[1], best[2]
+        network.loss_ = best[3]
         expected = np.maximum(transformer.inverse_transform(
             network.predict(preprocessing.transform(prediction)).reshape(-1, 1)).ravel(), 0.)
-    return restored, expected, epoch, network.n_features_in_
+    return best[3], expected, epoch, network.n_features_in_
 
 
 @pytest.mark.parametrize("profile,layers,alpha,fraction", CHRONO_PROFILES)
