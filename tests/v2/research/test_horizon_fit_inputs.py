@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 
 from engine.v2.models.training.fit_inputs import FitInputs
+from engine.v2.research import horizon_fitted
 from engine.v2.research.horizon_fit_inputs import fit_evidence, prepare_horizon_inputs
 from engine.v2.research.horizon_fitted import HorizonInputs, fitted_forecasts
 
@@ -112,15 +113,21 @@ def test_prebuilt_inputs_refuse_opted_in_recipe_without_event_dates():
             route="magnitude", recipe={"requires_event_dates": True})
 
 
-def test_prebuilt_inputs_revalidate_dates_mutated_after_construction():
+def test_prebuilt_inputs_keep_snapshot_dates_when_caller_mutates_list(monkeypatch):
     dates = ["2024-01-02"]
     inputs = FitInputs([[1.]], [0.], [[2.]], COLUMNS, dates)
-    dates[0] = "2024-1-2"
+    dates[0] = "2024-01-03"
+    assert inputs.train_event_dates == ("2024-01-02",)
+    received = []
+    def capture(route, recipe, fit_inputs):
+        received.append(fit_inputs)
+        return {"predictions": [1.0]}
+    monkeypatch.setattr(horizon_fitted, "fit_execution", capture)
     evidence = {3: {"evaluation_event_ids": ["test"]}}
     prebuilt = HorizonInputs({3: inputs}, evidence, "crush_pct_iv30")
-    with pytest.raises(ValueError, match="canonical ISO dates"):
-        fitted_forecasts(prebuilt, ["test"], [3], target_domain="nonnegative",
-            route="magnitude", recipe={"requires_event_dates": True})
+    fitted_forecasts(prebuilt, ["test"], [3], target_domain="nonnegative",
+        route="magnitude", recipe={"requires_event_dates": True})
+    assert received[0].train_event_dates == ("2024-01-02",)
 
 
 def test_fit_inputs_accepts_ordered_training_event_dates():

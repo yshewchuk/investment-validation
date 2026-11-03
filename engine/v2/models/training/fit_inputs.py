@@ -28,6 +28,8 @@ class FitInputs:
 
     def __post_init__(self) -> None:
         validate_train_event_dates(self.train_event_dates, self.train_features)
+        if self.train_event_dates is not None and not isinstance(self.train_event_dates, tuple):
+            object.__setattr__(self, "train_event_dates", tuple(self.train_event_dates))
 
     @classmethod
     def from_recipe(cls, recipe, train_features, train_labels, prediction_features, columns,

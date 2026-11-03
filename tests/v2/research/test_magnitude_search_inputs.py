@@ -195,8 +195,8 @@ def test_load_fit_inputs_projects_event_dates_only_when_the_recipe_declares_them
     dated = load_fit_inputs(store, manifest, inputs_id, evaluation, [1], ("x",), numeric_fit_inputs=True,
                             recipe=recipe)
     assert all(row["event_date"] == dates[row["event_id"]] for row in dated["features"])
-    assert dated.fit_inputs[1].train_event_dates == [
-        dates[row["event_id"]] for row in cohort["training"]]
+    assert dated.fit_inputs[1].train_event_dates == tuple(
+        dates[row["event_id"]] for row in cohort["training"])
     undated = load_fit_inputs(store, manifest, inputs_id, evaluation, [1], ("x",), numeric_fit_inputs=True)
     assert all("event_date" not in row for row in undated["features"])
     assert undated.fit_inputs[1].train_event_dates is None
