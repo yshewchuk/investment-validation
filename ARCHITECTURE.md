@@ -114,7 +114,7 @@ evidence. See the models and data component contracts.
 - **Operator CLIs and experiments.** These operator and research entrypoints
   may call into the legacy and v2 engines. They are not uniformly leaf-only:
   `engine.v2.ops.training` imports the `phase5_training_job` module while
-  validating recipe and state parameters for `ops plan --kind training`.
+  validating recipe, state and monthly-pool parameters for `ops plan --kind training`.
   Describe dependencies at the module level because some modules serve shared
   runtime paths.
   The smoke-only `native_gate_pricing` and `native_gate_evaluation` kinds launch the fixed child

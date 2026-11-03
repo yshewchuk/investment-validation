@@ -78,39 +78,61 @@ def test_plan_rejects_month_for_a_non_monthly_mode():
     assert excinfo.value.problem.details["problems"] == ["month applies to monthly_pools only"]
 
 
-@pytest.mark.parametrize("cutoff", ["2026-02-28", "2026-03-02", "20260301",
-                                    "2026-03-01T00:00:00", ""])
-def test_cutoff_must_be_the_day_after_the_month_end(cutoff):
-    assert _problems(cutoffs=(cutoff,))
+@pytest.mark.parametrize("cutoff, problems", [
+    ("2026-02-28", ["cutoff must be the day after the month's end"]),
+    ("2026-03-02", ["cutoff must be the day after the month's end"]),
+    ("20260301", ["cutoffs must be valid ISO dates (YYYY-MM-DD)",
+                  "cutoff must be the day after the month's end"]),
+    ("2026-03-01T00:00:00", ["cutoffs must be valid ISO dates (YYYY-MM-DD)",
+                             "cutoff must be the day after the month's end"]),
+    ("", ["cutoffs must be valid ISO dates (YYYY-MM-DD)",
+          "cutoff must be the day after the month's end"]),
+])
+def test_cutoff_must_be_the_day_after_the_month_end(cutoff, problems):
+    assert _problems(cutoffs=(cutoff,)) == problems
 
 
 def test_exactly_one_cutoff_is_required():
-    assert any("exactly one cutoff" in problem for problem in _problems(cutoffs=()))
-    assert any("exactly one cutoff" in problem
-               for problem in _problems(cutoffs=(CUTOFF, "2026-03-02")))
+    assert _problems(cutoffs=()) == ["mode=monthly_pools needs exactly one cutoff"]
+    assert _problems(cutoffs=(CUTOFF, "2026-03-02")) == [
+        "mode=monthly_pools needs exactly one cutoff"]
 
 
-@pytest.mark.parametrize("changes", [
-    {"recipe": "size:*:champion"},
-    {"state": "paired_residual_pool"},
-    {"alpha": 0.5},
-    {"strategies": ("STR-THRU",)},
-    {"pairs_path": "data/pairs.parquet"},
-    {"catalog_path": "/tmp/catalog"},
-    {"objects_root": "/tmp/objects"},
-    {"snapshot_id": "snap"},
-    {"receipt_id": "receipt"},
-    {"input_mode": "native_d14"},
+@pytest.mark.parametrize("changes, problems", [
+    ({"recipe": "size:*:champion"}, ["mode=monthly_pools must not name a recipe"]),
+    ({"state": "paired_residual_pool"}, ["mode=monthly_pools must not name a state"]),
+    ({"alpha": 0.5}, ["mode=monthly_pools does not take alpha"]),
+    ({"strategies": ("STR-THRU",)}, ["mode=monthly_pools does not take strategies"]),
+    ({"pairs_path": "data/pairs.parquet"},
+     ["mode=monthly_pools does not take pairs_path"]),
+    ({"catalog_path": "/tmp/catalog"}, ["native pins require input_mode=native_d14"]),
+    ({"objects_root": "/tmp/objects"}, ["native pins require input_mode=native_d14"]),
+    ({"snapshot_id": "snap"}, ["native pins require input_mode=native_d14"]),
+    ({"receipt_id": "receipt"}, ["native pins require input_mode=native_d14"]),
+    ({"input_mode": "native_d14"},
+     ["native_d14 requires an implied_t1/runup_move monthly recipe",
+      "native_d14 requires catalog_path, objects_root, snapshot_id and receipt_id"]),
 ])
-def test_forbidden_mode_fields_are_refused(changes):
-    assert _problems(**changes)
+def test_forbidden_mode_fields_are_refused(changes, problems):
+    assert _problems(**changes) == problems
+
+
+@pytest.mark.parametrize("changes, problems", [
+    ({"month": "2026-13"}, ["month must be a canonical YYYY-MM calendar month"]),
+    ({"cutoffs": ["2026-03-02"]}, ["cutoff must be the day after the month's end"]),
+])
+def test_worker_rejects_invalid_month_or_cutoff(tmp_path, changes, problems):
+    with pytest.raises(OpsError) as excinfo:
+        training.run_training_worker(_worker_params(**changes), tmp_path / "attempt")
+    assert excinfo.value.code == "INVALID_REQUEST"
+    assert excinfo.value.problem.details["problems"] == problems
 
 
 def test_worker_builds_four_members_and_deterministic_receipt(tmp_path, monkeypatch):
     calls = []
 
     def fake(member, out, *, plan_only=False, **kwargs):
-        calls.append((member, kwargs.get("cutoff")))
+        calls.append((member, kwargs.get("cutoff"), plan_only))
         out.mkdir(parents=True, exist_ok=True)
         name = member.replace(":", "__") + ".json"
         (out / name).write_text(member)
@@ -122,10 +144,10 @@ def test_worker_builds_four_members_and_deterministic_receipt(tmp_path, monkeypa
     training.run_training_worker(_worker_params(), root)
 
     assert calls == [
-        ("driver_residual_pool:size", None),
-        ("driver_residual_pool:implied_t1", None),
-        ("driver_residual_pool:runup_move", None),
-        ("chooser_analog_pool", CUTOFF),
+        ("driver_residual_pool:size", None, False),
+        ("driver_residual_pool:implied_t1", None, False),
+        ("driver_residual_pool:runup_move", None, False),
+        ("chooser_analog_pool", CUTOFF, False),
     ]
     receipt = json.loads((root / "training_result.json").read_text())
     assert receipt["mode"] == "monthly_pools"

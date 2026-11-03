@@ -1,8 +1,9 @@
 """Supervised training jobs (P6 slice 5, training half).
 
 ``tools/phase5_training_job.py`` is the audited training entry point; this
-module gives its four job functions the ``training`` kind's parameter schema,
-pure validator, plan builder and worker. The promote half builds on the same
+module gives its job functions (recipe, state, board analog, trailing cutoff
+and monthly pools) the ``training`` kind's parameter schema, pure validator,
+plan builder and worker. The promote half builds on the same
 wiring: an operator-submitted ``models_promote`` pointer swap, never part of
 the nightly DAG. No bespoke CLI verb: ``ops plan`` and ``ops submit`` are the
 existing generic subcommands.
