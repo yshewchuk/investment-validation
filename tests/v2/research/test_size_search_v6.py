@@ -184,7 +184,10 @@ def test_v6_workers_one_and_two_match_candidates_results_and_metrics(case, tmp_p
     parallel_inner = {row["candidate_id"]: row["inner_metrics"] for row in parallel_report["inner_fits"]}
     assert serial_inner.keys() == parallel_inner.keys() == planned_ids
     for candidate_id in planned_ids:
-        assert serial_inner[candidate_id] == parallel_inner[candidate_id]
+        serial_metrics = serial_inner[candidate_id]
+        assert isinstance(serial_metrics, list) and serial_metrics
+        assert all(isinstance(entry, dict) and entry for entry in serial_metrics)
+        assert serial_metrics == parallel_inner[candidate_id]
 
 
 def test_v6_native_seal_neural_trial_and_no_fit_no_label_replay(case, monkeypatch):
