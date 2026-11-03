@@ -18,13 +18,15 @@ from .fit_inputs import FitInputs, check_fitting_allowed
 __all__ = ["fit_elasticnet_predictions", "fit_regression_elasticnet_predictions"]
 
 
-def _matrices(train_features, train_labels, prediction_features, width, *, nonnegative=True):
+def _matrices(inputs, width, row_error, *, nonnegative=True):
     train, labels, prediction = (np.array(value, dtype=float, copy=True)
-        for value in (train_features, train_labels, prediction_features))
+        for value in (inputs.train_features, inputs.train_labels, inputs.prediction_features))
     for matrix in (train, prediction):
         if (matrix.ndim != 2 or matrix.shape[0] == 0 or matrix.shape[1] != width
                 or np.isinf(matrix).any()):
             raise ValueError("ElasticNet requires nonempty selected-column matrices without infinity")
+    if labels.ndim > 0:
+        inputs.validate_row_count(len(train), len(labels), row_error)
     if (labels.shape != (len(train),) or not np.isfinite(labels).all()
             or (nonnegative and (labels < 0).any())):
         domain = "nonnegative " if nonnegative else ""
@@ -56,9 +58,9 @@ def fit_elasticnet_predictions(recipe, train_features, train_labels, prediction_
     inputs = FitInputs.from_recipe(
         recipe, train_features, train_labels, prediction_features, columns,
         column_error="ElasticNet matrix columns must exactly match the ordered recipe subset",
-        row_error="ElasticNet labels require one finite nonnegative value per training row",
         guard_path="engine.v2.models.training.magnitude_elasticnet.fit_elasticnet_predictions")
-    return _fit(recipe, inputs, nonnegative=True, result_schema="magnitude_elasticnet_fit.v1")
+    return _fit(recipe, inputs, nonnegative=True, result_schema="magnitude_elasticnet_fit.v1",
+                row_error="ElasticNet labels require one finite nonnegative value per training row")
 
 
 def fit_regression_elasticnet_predictions(recipe, train_features, train_labels,
@@ -70,16 +72,15 @@ def fit_regression_elasticnet_predictions(recipe, train_features, train_labels,
     inputs = FitInputs.from_recipe(
         recipe, train_features, train_labels, prediction_features, columns,
         column_error="ElasticNet matrix columns must exactly match the ordered recipe subset",
-        row_error=f"ElasticNet labels require one finite {domain}value per training row",
         guard_path="engine.v2.models.training.magnitude_elasticnet.fit_regression_elasticnet_predictions")
     return _fit(recipe, inputs,
                 nonnegative=recipe["target_domain"] == "nonnegative",
-                result_schema="regression_elasticnet_fit.v1")
+                result_schema="regression_elasticnet_fit.v1",
+                row_error=f"ElasticNet labels require one finite {domain}value per training row")
 
 
-def _fit(recipe, inputs, *, nonnegative, result_schema):
-    train, labels, prediction = _matrices(inputs.train_features, inputs.train_labels,
-                                        inputs.prediction_features, len(inputs.columns),
+def _fit(recipe, inputs, *, nonnegative, result_schema, row_error):
+    train, labels, prediction = _matrices(inputs, len(inputs.columns), row_error,
                                         nonnegative=nonnegative)
     model = build_estimator(recipe)
     with threadpool_limits(limits=1), warnings.catch_warnings(record=True) as caught:

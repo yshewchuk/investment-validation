@@ -79,10 +79,10 @@ def test_nonnegative_result_and_evidence_match_legacy():
     for key in old_result.keys() - {"schema_version", "recipe_id"}:
         assert result[key] == old_result[key]
     assert result["predictions"][0] == 0
-    with pytest.raises(ValueError, match="nonnegative"):
+    with pytest.raises(ValueError, match="ElasticNet labels require one finite nonnegative value per training row"):
         fit_regression_elasticnet_predictions(
             policy, matrix([0]), [-1], matrix([0]), columns=policy["features"])
-    with pytest.raises(ValueError, match="nonnegative"):
+    with pytest.raises(ValueError, match="ElasticNet labels require one finite nonnegative value per training row"):
         fit_elasticnet_predictions(old, matrix([0]), [-1], matrix([0]), columns=old["features"])
 
 
@@ -112,7 +112,6 @@ def test_closed_domain_projection_schema_and_detached_metadata():
                        ("target_transform", "log"), ("nonconvergence", "retry")):
         altered = {**policy, key: value}
         with pytest.raises(ValueError, match="recipe"):
-            validate_regression_elasticnet_recipe(altered)
             fit_regression_elasticnet_predictions(
                 altered, Poison(), Poison(), Poison(), columns=policy["features"])
     for key in policy:

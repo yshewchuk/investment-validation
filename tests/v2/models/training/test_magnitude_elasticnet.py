@@ -120,7 +120,6 @@ def test_changed_or_extra_policy_refuses_before_array_access(path, value):
         node = node[key]
     node[path[-1]] = value
     with pytest.raises(ValueError, match="recipe"):
-        validate_elasticnet_recipe(damaged)
         fit_elasticnet_predictions(damaged, Poison(), Poison(), Poison(), columns=COLUMNS)
 
 
@@ -272,6 +271,24 @@ def test_replay_is_deterministic_fresh_and_does_not_mutate_inputs():
 def test_malformed_matrices_or_labels_refuse(inputs):
     with pytest.raises(ValueError, match="ElasticNet"):
         fit(**inputs)
+
+
+@pytest.mark.parametrize("damage, expected_error, match", [
+    ("infinity", ValueError, "ElasticNet requires nonempty selected-column matrices without infinity"),
+    ("object_cell", TypeError, None),
+])
+def test_matrix_and_conversion_failures_precede_label_row_count_mismatch(
+        damage, expected_error, match):
+    train = np.array([[0.0, 7.0, 1.0], [2.0, 7.0, 1.0], [4.0, 7.0, 1.0]])
+    prediction = np.array([[1.0, 7.0, 1.0]])
+    labels = [1, 5]
+    if damage == "infinity":
+        train[0, 0] = np.inf
+    else:
+        train = train.astype(object)
+        train[0, 0] = object()
+    with pytest.raises(expected_error, match=match):
+        fit_elasticnet_predictions(recipe(), train, labels, prediction, columns=COLUMNS)
 
 
 def test_convergence_warning_refuses_without_predict_retry_or_partial_result(monkeypatch):

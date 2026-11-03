@@ -1,4 +1,4 @@
-"""Frozen FitInputs transport: guards first, then ordered columns and row counts."""
+"""FitInputs transport and deferred row-count validation."""
 import dataclasses
 
 import pytest
@@ -29,22 +29,21 @@ class LabelsByLength:
 
 
 def test_stores_caller_objects_by_identity_and_stays_frozen():
-    train, labels, prediction = [[1.0, 2.0], [3.0, 4.0]], [1.0, 2.0], [[5.0, 6.0]]
+    train, labels, prediction, columns = [[1., 2.]], [1.], [[3., 4.]], ["signal", "constant"]
     inputs = FitInputs.from_recipe(
-        RECIPE, train, labels, prediction, ["signal", "constant"],
-        column_error="columns refused", row_error="rows refused")
+        RECIPE, train, labels, prediction, columns, column_error="columns refused")
     assert inputs.train_features is train
     assert inputs.train_labels is labels
     assert inputs.prediction_features is prediction
-    assert inputs.columns == ["signal", "constant"]
+    assert inputs.columns is columns
     with pytest.raises(dataclasses.FrozenInstanceError):
         inputs.columns = []
 
 
 def test_accepts_tuple_columns_in_exact_recipe_order():
     inputs = FitInputs.from_recipe(
-        RECIPE, [[1.0, 2.0]], [1.0], [[3.0, 4.0]], ("signal", "constant"),
-        column_error="columns refused", row_error="rows refused")
+        RECIPE, [[1., 2.]], [1.], [[3., 4.]], ("signal", "constant"),
+        column_error="columns refused")
     assert inputs.columns == ("signal", "constant")
 
 
@@ -54,16 +53,19 @@ def test_accepts_tuple_columns_in_exact_recipe_order():
 def test_column_mismatch_or_wrong_type_refuses_before_value_access(columns):
     with pytest.raises(ValueError, match="columns refused"):
         FitInputs.from_recipe(
-            RECIPE, Poison(), Poison(), Poison(), columns,
-            column_error="columns refused", row_error="rows refused")
+            RECIPE, Poison(), Poison(), Poison(), columns, column_error="columns refused")
 
 
-def test_row_count_mismatch_refuses_without_conversion():
+@pytest.mark.parametrize("train_rows,label_rows", [(2, 5), (5, 2)])
+def test_row_count_validation_is_callable_after_matrix_preflight(train_rows, label_rows):
+    train = [[1., 2.] for _ in range(train_rows)]
+    labels = LabelsByLength(label_rows)
+    prediction = [[3., 4.]]
+    inputs = FitInputs.from_recipe(
+        RECIPE, train, labels, prediction, ["signal", "constant"],
+        column_error="columns refused")
     with pytest.raises(ValueError, match="rows refused"):
-        FitInputs.from_recipe(
-            RECIPE, [[1.0, 2.0], [3.0, 4.0]], LabelsByLength(5), [[7.0, 8.0]],
-            ["signal", "constant"],
-            column_error="columns refused", row_error="rows refused")
+        inputs.validate_row_count(train_rows, len(labels), "rows refused")
 
 
 @pytest.mark.parametrize("guard", [legacy_no_fit, no_fit])
@@ -71,6 +73,6 @@ def test_both_no_fit_guards_precede_recipe_and_array_access(guard):
     with guard.no_fit_guard(), pytest.raises(guard.RuntimeFitForbidden) as caught:
         FitInputs.from_recipe(
             InspectedRecipe(), Poison(), Poison(), Poison(), ["signal", "constant"],
-            column_error="columns refused", row_error="rows refused")
+            column_error="columns refused")
     assert type(caught.value) is guard.RuntimeFitForbidden
     assert str(caught.value) == "no-fit guard active: FitInputs.from_recipe"

@@ -21,14 +21,14 @@ def fit_mlp_predictions(recipe, train_features, train_labels, prediction_feature
     inputs = FitInputs.from_recipe(
         recipe, train_features, train_labels, prediction_features, columns,
         column_error="MLP matrix columns must exactly match the ordered recipe subset",
-        row_error="magnitude labels require one finite nonnegative value per training row",
         guard_path="engine.v2.models.training.magnitude_mlp.fit_mlp_predictions")
     return _fit(recipe, inputs)
 
 
 def _fit(recipe, inputs):
-    train, labels, prediction = _matrices(inputs.train_features, inputs.train_labels,
-                                         inputs.prediction_features, len(inputs.columns))
+    train, labels, prediction = _matrices(
+        inputs, len(inputs.columns),
+        "magnitude labels require one finite nonnegative value per training row")
     model = build_estimator(recipe)
     with threadpool_limits(limits=1), warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always", ConvergenceWarning)

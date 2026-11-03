@@ -10,7 +10,7 @@ The [README public interface](README.md#public-interface) inventories exported t
 
 ### FitInputs contract (A1a)
 
-`FitInputs` is a frozen in-memory transport object whose fields are `train_features`, `train_labels`, `prediction_features` and `columns`. Public estimator entry points keep their existing signatures and act as thin adapters: after guards and recipe validation, they validate ordered columns and compatible training row counts once, then construct `FitInputs`. No array conversion or value inspection may occur before guards, and recipe-specific refusal checks retain their current order and error messages. The object does not alter recipe, result, experiment or replay identity. Candidate/route API migration is deferred to A1b.
+`FitInputs` is a frozen in-memory transport object whose fields are `train_features`, `train_labels`, `prediction_features` and `columns`. Public estimator entry points keep their existing signatures and act as thin adapters: after guards and recipe validation, they validate ordered columns once, then construct `FitInputs` from the caller objects without inspecting row counts. No array conversion or value inspection may occur before guards. Row counts are validated afterward by the numeric matrix validators, after their conversions and matrix shape/infinity checks and before the existing label shape/finiteness/domain checks, so recipe-specific refusal checks retain their current order and error messages. The object does not alter recipe, result, experiment or replay identity.
 
 ## 3. Inputs
 

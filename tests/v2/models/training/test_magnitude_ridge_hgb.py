@@ -58,7 +58,7 @@ def test_both_no_fit_guards_precede_all_inspection(guard):
 @pytest.mark.parametrize("kind", KINDS)
 def test_order_and_policy_refusal_precedes_numeric_conversion(kind):
     recipe = _recipe(kind)
-    for columns in (["x1", "x0", "x2"], ["x0"], "x0", None):
+    for columns in (["x1", "x0", "x2"], ["x0"], "x0", None, []):
         with pytest.raises(ValueError, match="columns"):
             fit_ridge_hgb_predictions(recipe, Poison(), Poison(), Poison(), columns=columns)
     recipe["numerical_threads"] = 2

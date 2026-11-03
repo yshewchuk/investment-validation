@@ -15,23 +15,9 @@ def check_fitting_allowed(path: str) -> None:
     forbid_v2_fitting(path)
 
 
-def _is_selected_matrix(matrix, width: int) -> bool:
-    """Check structural nonempty 2D width without reading numeric values."""
-    shape = getattr(matrix, "shape", None)
-    if shape is not None:
-        try:
-            rows, columns = shape
-            return rows > 0 and columns == width
-        except (TypeError, ValueError):
-            return False
-    if not isinstance(matrix, (list, tuple)) or not matrix:
-        return False
-    return all(isinstance(row, (list, tuple)) and len(row) == width for row in matrix)
-
-
 @dataclass(frozen=True)
 class FitInputs:
-    """Caller-admitted arrays stored as given; no recipe, errors or conversions."""
+    """Caller-admitted arrays stored as given; columns checked before array access."""
 
     train_features: Any
     train_labels: Any
@@ -40,20 +26,15 @@ class FitInputs:
 
     @classmethod
     def from_recipe(cls, recipe, train_features, train_labels, prediction_features, columns,
-                    *, column_error, row_error,
+                    *, column_error,
                     guard_path="FitInputs.from_recipe") -> FitInputs:
-        """Validate ordered recipe columns and train row counts, then store as given."""
+        """Check guards and ordered columns, then store the caller objects as given."""
         check_fitting_allowed(guard_path)
         if not isinstance(columns, (list, tuple)) or list(columns) != recipe["features"]:
             raise ValueError(column_error)
-        if (_is_selected_matrix(train_features, len(columns))
-                and _is_selected_matrix(prediction_features, len(columns))):
-            try:
-                rows_features = len(train_features)
-                rows_labels = len(train_labels)
-            except (TypeError, AttributeError):
-                pass
-            else:
-                if rows_features != rows_labels:
-                    raise ValueError(row_error)
         return cls(train_features, train_labels, prediction_features, columns)
+
+    def validate_row_count(self, train_rows, label_rows, row_error) -> None:
+        """Validate rows after matrix conversion and matrix-shape/infinity checks."""
+        if train_rows != label_rows:
+            raise ValueError(row_error)
