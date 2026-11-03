@@ -58,11 +58,11 @@ def test_estimator_mutation_cannot_change_future_inputs_or_original_hashes(monke
     source = indexed()
     original = {key: {k: v for k, v in row.items() if k != "forbidden_evaluation_label"} for key, row in source.items()}
     labels = np.array([-140., -140.])
-    def mutate(route, recipe, train, y, prediction, *, columns):
-        assert y.tolist() == [-140., -140.]
-        train[:] = 999.
-        y[:] = 999.
-        prediction[:] = 999.
+    def mutate(route, recipe, inputs):
+        assert inputs.train_labels.tolist() == [-140., -140.]
+        inputs.train_features[:] = 999.
+        inputs.train_labels[:] = 999.
+        inputs.prediction_features[:] = 999.
         return {"predictions": [-140.]}
     monkeypatch.setattr(horizon_fitted, "fit_execution", mutate)
     _, evidence = run(source=source, labels=labels)

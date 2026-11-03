@@ -1,10 +1,11 @@
 """Guarded numeric regression dispatch; no source reads, selection or persistence."""
 from engine.v2.models.no_fit import forbid_fitting as forbid_v2_fitting
 
+from .fit_inputs import FitInputs
 from .legacy_adapter import forbid_fitting
 
 
-def fit_regression_candidate(recipe, train_features, train_labels, prediction_features, *, columns):
+def fit_regression_candidate(recipe, inputs: FitInputs):
     """Delegate one fit unchanged; the closed family validator owns policy checks."""
     forbid_fitting("fit_regression_candidate")
     forbid_v2_fitting("fit_regression_candidate")
@@ -19,4 +20,5 @@ def fit_regression_candidate(recipe, train_features, train_labels, prediction_fe
         from .magnitude_ridge_hgb import fit_regression_predictions as fit
     else:
         raise ValueError("regression candidate requires a supported recipe schema/model pair")
-    return fit(recipe, train_features, train_labels, prediction_features, columns=columns)
+    return fit(recipe, inputs.train_features, inputs.train_labels,
+               inputs.prediction_features, columns=inputs.columns)

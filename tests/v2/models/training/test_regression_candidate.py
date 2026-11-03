@@ -11,6 +11,7 @@ from engine.v2.models.magnitude_elasticnet_recipe import regression_elasticnet_r
 from engine.v2.models.regression_candidate import regression_candidate_recipe
 from engine.v2.models.regression_ridge_hgb_recipe import regression_recipe
 from engine.v2.models.training.magnitude_elasticnet import fit_regression_elasticnet_predictions
+from engine.v2.models.training.fit_inputs import FitInputs
 from engine.v2.models.training.magnitude_ridge_hgb import fit_regression_predictions
 from engine.v2.models.training.regression_candidate import fit_regression_candidate
 from experiments.magnitude_candidate_fit import fit_candidate
@@ -23,6 +24,10 @@ FEATURES = dict(columns=["x"], feature_dictionary_hash="sha256:" + "a" * 64)
 
 def policy(family, parameters, domain="signed"):
     return regression_candidate_recipe(family, parameters, target_domain=domain, **FEATURES)
+
+
+def pack(train, labels, prediction, columns=("x",)):
+    return FitInputs(train, labels, prediction, columns)
 
 
 @pytest.mark.parametrize("family,parameters", FAMILIES)
@@ -40,7 +45,7 @@ def test_recipes_and_full_results_equal_direct_family_calls(family, parameters, 
     assert recipe == expected and parameters == original
     labels = [-200.] * 20 + [20.] * 20 if domain == "signed" else [0.] * 20 + [20.] * 20
     args = ([[0.]] * 20 + [[1.]] * 20, labels, [[0.], [1.]])
-    result = fit_regression_candidate(recipe, *args, columns=["x"])
+    result = fit_regression_candidate(recipe, pack(*args))
     assert result == direct(expected, *args, columns=["x"])
     assert result["predictions"][1] > 0
     assert result["predictions"][0] < -100 if domain == "signed" else result["predictions"][0] >= 0
@@ -56,7 +61,7 @@ def test_existing_size_dispatch_remains_nonnegative_and_rejects_new_schema(famil
     with pytest.raises(ValueError, match="schema/model"):
         fit_candidate(policy(family, parameters), [[0.]], [-1.], [[0.]], columns=["x"])
     with pytest.raises(ValueError, match="schema/model"):
-        fit_regression_candidate(old, [[0.]], [1.], [[0.]], columns=["x"])
+        fit_regression_candidate(old, pack([[0.]], [1.], [[0.]]))
 
 
 @pytest.mark.parametrize("family,parameters", [("unknown", {}), ([], {}), ("ridge", []),
@@ -83,7 +88,7 @@ def test_guards_precede_recipe_inspection_and_arrays(guard):
         def __array__(self, *args, **kwargs):
             pytest.fail("inspected matrix")
     with guard.no_fit_guard(), pytest.raises(guard.RuntimeFitForbidden):
-        fit_regression_candidate(Poison(), Poison(), Poison(), Poison(), columns=Poison())
+        fit_regression_candidate(Poison(), FitInputs(Poison(), Poison(), Poison(), Poison()))
 
 
 @pytest.mark.parametrize("changes", [{"extra": 1}, {"target_domain": "other"},
@@ -91,7 +96,7 @@ def test_guards_precede_recipe_inspection_and_arrays(guard):
 def test_dispatch_does_not_bypass_closed_recipe_validation(changes):
     recipe = {**policy(*FAMILIES[0]), **changes}
     with pytest.raises(ValueError):
-        fit_regression_candidate(recipe, [[0.]], [-1.], [[0.]], columns=["x"])
+        fit_regression_candidate(recipe, pack([[0.]], [-1.], [[0.]]))
 
 
 def test_metadata_avoids_training_and_guarded_dispatch_avoids_family_imports():
@@ -105,6 +110,7 @@ sys.meta_path.insert(0, Deny())
 from engine.v2.models.regression_candidate import regression_candidate_recipe
 sys.meta_path.pop(0)
 from engine.v2.models.training.regression_candidate import fit_regression_candidate
+from engine.v2.models.training.fit_inputs import FitInputs
 from engine.v2.models.no_fit import no_fit_guard, RuntimeFitForbidden
 assert "engine.v2.models.training.magnitude_elasticnet" not in sys.modules
 assert "engine.v2.models.training.magnitude_ridge_hgb" not in sys.modules
@@ -112,7 +118,7 @@ sys.meta_path.insert(0, Deny())
 recipe = regression_candidate_recipe("ridge", {"alpha": 1.}, target_domain="signed", columns=["x"], feature_dictionary_hash="sha256:" + "a" * 64)
 with no_fit_guard():
     try:
-        fit_regression_candidate(recipe, None, None, None, columns=["x"])
+        fit_regression_candidate(recipe, FitInputs(None, None, None, ["x"]))
     except RuntimeFitForbidden:
         pass
     else:
@@ -132,6 +138,6 @@ def test_delegated_failure_is_preserved_without_retry(monkeypatch):
     monkeypatch.setattr(magnitude_ridge_hgb, "fit_regression_predictions", refuse)
     recipe = policy(*FAMILIES[0])
     with pytest.raises(ValueError) as caught:
-        fit_regression_candidate(recipe, [[0.]], [-1.], [[0.]], columns=["x"])
+        fit_regression_candidate(recipe, pack([[0.]], [-1.], [[0.]]))
     assert caught.value is failure and len(calls) == 1
     assert calls[0][0][0] is recipe
