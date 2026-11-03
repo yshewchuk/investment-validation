@@ -16,10 +16,18 @@ def test_fit_evidence_pins_matrix_identity_hashes():
 
     evidence = fit_evidence(inputs, fold, plan, execution)
 
-    assert len(evidence) == 1
-    assert evidence[0]["training_matrix_id"] == (
-        "sha256:bfd4b7d466045c69589d99da95da03320a7e34c1c4f0f904e8f887a5c41590c8"
-    )
-    assert evidence[0]["prediction_matrix_id"] == (
-        "sha256:0125b449b8bfce98cb25585176d9704b3eda2d13c83f290658a55720c535b36a"
-    )
+    assert evidence == [{
+        "horizon_sessions": 5,
+        "training_event_ids": ["train"],
+        "evaluation_event_ids": ["eval"],
+        "training_matrix_id": (
+            "sha256:bfd4b7d466045c69589d99da95da03320a7e34c1c4f0f904e8f887a5c41590c8"
+        ),
+        "prediction_matrix_id": (
+            "sha256:0125b449b8bfce98cb25585176d9704b3eda2d13c83f290658a55720c535b36a"
+        ),
+    }]
+
+    inputs["features"][1]["x"] = 3.5
+    changed = fit_evidence(inputs, fold, plan, execution)
+    assert changed[0]["prediction_matrix_id"] != evidence[0]["prediction_matrix_id"]

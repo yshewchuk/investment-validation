@@ -22,6 +22,7 @@ def fit_evidence(columns, train_features, prediction_features, horizon_sessions,
                  training_event_ids, evaluation_event_ids, training_row_keys,
                  evaluation_row_keys, *, target_column, labels=None):
     """Hash ordered fit values and row keys into the shared evidence shape."""
+    _require_target(target_column)
     columns = list(columns)
     training = {"columns": columns, "row_keys": training_row_keys,
                 "values": train_features}

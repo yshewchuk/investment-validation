@@ -4,7 +4,7 @@ from numbers import Real
 
 from engine.v2.contracts import SnapshotRef
 from engine.v2.foundation import canonical_json, content_hash, from_document
-from engine.v2.research.horizon_fitted import build_fit_inputs
+from engine.v2.research.horizon_fit_inputs import fit_evidence as shared_fit_evidence
 from engine.v2.research.magnitude_history_store import read_stored_for_events
 from engine.v2.research.magnitude_inputs import (
     load_magnitude_targets,
@@ -49,16 +49,17 @@ def admit_fold_inputs(repository, binding, fold, *, history_failure, strict_json
 
 def fit_evidence(inputs, fold, plan, execution):
     """Bind ordered native matrices and training targets without fitting."""
-    fit_inputs = getattr(inputs, "fit_inputs", None)
-    target = (fit_inputs.target_column if fit_inputs is not None
-              else inputs.get("target", {}).get("column", "absolute_move_pct"))
-    if fit_inputs is None or fit_inputs.target_column != target:
-        indexed = {(row["event_id"], row["horizon_sessions"]): row for row in inputs["features"]}
-        train = [row["event_id"] for row in inputs["training"]]
-        labels = [row[target] for row in inputs["training"]]
-        fit_inputs = build_fit_inputs(indexed, train, fold["evaluation_event_ids"],
-            plan["horizons"], execution["features"], labels, target_column=target)
-    return [fit_inputs.evidence[horizon] for horizon in plan["horizons"]]
+    target = inputs.get("target", {}).get("column", "absolute_move_pct")
+    indexed = {(row["event_id"], row["horizon_sessions"]): row for row in inputs["features"]}
+    train = [row["event_id"] for row in inputs["training"]]
+    return [shared_fit_evidence(execution["features"],
+        [[indexed[event, horizon][name] for name in execution["features"]] for event in train],
+        [[indexed[event, horizon][name] for name in execution["features"]] for event in fold["evaluation_event_ids"]],
+        horizon, train, fold["evaluation_event_ids"],
+        [[indexed[event, horizon][name] for name in ("event_id", "context_id", "horizon_sessions")] for event in train],
+        [[indexed[event, horizon][name] for name in ("event_id", "context_id", "horizon_sessions")] for event in fold["evaluation_event_ids"]],
+        target_column=target, labels=[float(row[target]) for row in inputs["training"]])
+        for horizon in plan["horizons"]]
 
 
 def forecast_target(plan, recipe):

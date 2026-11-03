@@ -2,6 +2,7 @@
 import pytest
 
 from engine.v2.models.regression_candidate import regression_candidate_recipe
+from engine.v2.research.horizon_fitted import build_fit_inputs
 from experiments import magnitude_search_worker as worker
 
 
@@ -23,7 +24,10 @@ def test_signed_adapter_preserves_ridge_values_event_order_and_horizons(alpha):
         "features": ["x"], "fit_recipe": recipe}, "inner": {"evaluation_event_ids": ["eval-z", "eval-a"]},
         "plan": {"horizons": horizons}}
     progress, diagnostics = [], []
-    predictions = worker.regression_forecasts(indexed, training, request,
+    fit_inputs = build_fit_inputs(indexed, [row["event_id"] for row in training],
+        request["inner"]["evaluation_event_ids"], horizons, ["x"],
+        [row["crush_pct_iv30"] for row in training], target_column="crush_pct_iv30")
+    predictions = worker.regression_forecasts(fit_inputs, request,
         lambda state, fit: progress.append((state, fit)), diagnostics)
     # Training standardizes to [+1, -1], y mean=-60, X'y=160, X'X=2.
     # Ridge slope=160/(2+alpha); evaluation centers differ across horizons.

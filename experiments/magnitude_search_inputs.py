@@ -101,7 +101,7 @@ def load_inputs(store, record, expected_id):
 
 
 def load_fit_inputs(store, manifest, expected_id, evaluation_event_ids, horizons, feature_columns, *,
-                    target_column="absolute_move_pct"):
+                    target_column="absolute_move_pct", numeric_fit_inputs=False):
     """Stream stored training/feature rows for fixed fitting or admission replay.
 
     Verifies the manifest against ``expected_id`` and reads only its ``training`` and
@@ -136,7 +136,7 @@ def load_fit_inputs(store, manifest, expected_id, evaluation_event_ids, horizons
                 for row in _iter_rows(store, members["features"], sections["features"])
                 if row["event_id"] in events and row["horizon_sessions"] in wanted]
     indexed = {(row["event_id"], row["horizon_sessions"]): row for row in features}
-    fit_inputs = build_fit_inputs(indexed, [row["event_id"] for row in training],
+    fit_inputs = None if not numeric_fit_inputs else build_fit_inputs(indexed, [row["event_id"] for row in training],
         evaluation_event_ids, horizons, feature_columns,
         [row[target_column] for row in training], target_column=target_column)
     return _FitRows({"features": features, "training": training}, fit_inputs)
