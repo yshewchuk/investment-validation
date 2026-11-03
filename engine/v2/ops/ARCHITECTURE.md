@@ -82,13 +82,10 @@ before writing that attempt's event/refusal or score outputs; reused-root files
 may remain as untrusted residue. The worker job has five bounded attempts, with delays of 30s, 2m, 10m and 30m. Worker production cannot stall supervisor ticks or renewals, and native failure leaves legacy jobs unaffected.
 Snapshot parameters raise `VALIDATION_FAILED` for an unsupported `producer_mode` or, in snapshot mode, a missing or incomplete `catalog_path`/`objects_root` pair.
 
-**DYN-SV batch boundary.** `board_requests` emits one DYN-SV key last per
-event, but the batch assembler refuses it with `UNSUPPORTED_STRATEGY` after
-key/calendar validation; earlier source refusals retain their own codes.
-The worker calls `score_batch`, not the separate menu resolver described in
-[scoring](../scoring/ARCHITECTURE.md#native-nightly-dyn-sv-boundary).
-Enumeration order does not establish a scoring dependency. Encodable meta
-refusals use the keyed output; invalid keys use `unkeyable_refusals`.
+**DYN-SV batch boundary.** `board_requests` emits one DYN-SV key last per event; the batch assembler refuses it with `UNSUPPORTED_STRATEGY` after key/calendar validation (earlier source refusals keep their codes).
+During native assembly, the seven menu member strategies (TWIN-P, TWIN-P5, BFLY-P, BFLY-P5, CTR5, RAMP7, CND-PS) select cutoff-matched chooser state; missing or unusable state refuses only that row as `MODEL_NOT_READY`
+with fixed detail `DYN-SV chooser state missing or unusable`. Non-menu rows are unchanged; the worker still calls `score_batch`, not the separate menu resolver in [scoring](../scoring/ARCHITECTURE.md#native-nightly-dyn-sv-boundary).
+Enumeration order does not establish a scoring dependency. Encodable meta refusals use the keyed output; invalid keys use `unkeyable_refusals`.
 
 **Cutover PR-4 (redo — 2026-09-27, user decision option (c). This section
 REPLACES the original PR-4 design, which proposed `tools/native_parity_run.py`,
