@@ -22,3 +22,11 @@ CRPS is the primary proper score at horizon1; horizons3/5 are robustness outputs
 The current candidate has no parameter search, probability smoothing or fitted calibrator. Do not mistake an earlier-OOF residual control for calibrated classifier probabilities. No empirical performance, resource feasibility, promotion or real-run authority follows from synthetic tests or these interfaces.
 
 See [architecture](ARCHITECTURE.md) for the boundary between supplied numeric evidence and native causal admission. The strategy integration remains in [STR_THRU_DISTRIBUTION](../STR_THRU_DISTRIBUTION/README.md), unchanged and separate.
+
+## Supplied-score reporting
+
+This is a source-free library API currently called only by synthetic tests. Its intended future consumer is the separate neutral prediction lifecycle; no production or existing strategy caller is wired in this slice, and it provides no runnable prediction-only CLI or execution authority.
+
+`distribution_prediction_report.prediction_report(scores, events)` summarizes supplied four-arm forecast rows against the complete frozen event metadata, with no trade decision date or economic inputs. Every horizon and arm retains available, unavailable, missing-target and missing-row counts. Means are scoreable-only with metric-specific counts; unresolved CRPS and infinite log loss remain explicit. Tail checks show predicted probability, observed frequency and sample count. Paired same-mean, matched-point and training-empirical CRPS improvements each use that contrast's paired scoreable subset and retain excluded event IDs; the full-population improvement is unavailable if any pair is missing. Positive improvement favors the histogram, and horizon-one same-mean stays the sole primary contrast. Raw supplied rows/metadata are retained, not authenticated by this helper; native admission and later operator wiring remain required.
+
+All retained rows and event metadata must be finite-JSON serializable, including opaque nested provenance. Any present score/tail fields are validated even on unavailable or missing-target rows; those rows may omit the fields, and a missing target does not invent tail truth. Invalid retained payloads refuse rather than being silently stripped. Valid optional provenance and existing score/status semantics are preserved.
