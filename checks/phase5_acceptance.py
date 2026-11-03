@@ -71,10 +71,12 @@ from engine.v2.models.release_layout import (  # noqa: E402
     StateSpec,
     deployment_root,
     read_manifest,
+    read_regular_file,
     sha256_bytes,
 )
 
 PHASE5_EVIDENCE_SCHEMA = "phase5_acceptance.v1.0"
+MAX_MEMBER_BYTES = 512 * 1024 * 1024
 
 # Finding codes. Every one is a gate failure.
 RELEASE_LAYOUT = "P5_RELEASE_LAYOUT"
@@ -164,9 +166,13 @@ def _verify_object(release_root: Path, path: str, expected: str) -> str | None:
         target.relative_to(base)
     except ValueError:
         return MEMBER_OBJECT_ABSENT
-    if not target.is_file():
+    try:
+        data = read_regular_file(target, MAX_MEMBER_BYTES)
+    except (OSError, ValueError):
         return MEMBER_OBJECT_ABSENT
-    return None if sha256_bytes(target.read_bytes()) == expected else MEMBER_HASH_MISMATCH
+    if data is None:
+        return MEMBER_OBJECT_ABSENT
+    return None if sha256_bytes(data) == expected else MEMBER_HASH_MISMATCH
 
 
 def _load_model_release(release_root: Path, release_id: str, findings: _Findings):

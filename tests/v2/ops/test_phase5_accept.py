@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from checks import phase5_acceptance as acceptance_gate
 from engine.v2.foundation import content_hash
 from engine.v2.models.release_layout import PHASE5_RELEASE_SCHEMA, catalog_path
 from engine.v2.ops import retrain_check as phase5_accept
@@ -41,14 +42,36 @@ def _params(release_root, candidate="candidate"):
             "candidate_release_id": candidate}
 
 
-def _patch_manifest(monkeypatch, manifest):
+def _patch_manifest(monkeypatch, manifest, *, hash_matches=True):
     monkeypatch.setattr(phase5_accept.deployment, "read_manifest",
                         lambda _root, _release_id: manifest)
+    monkeypatch.setattr(phase5_accept.deployment, "manifest_hash_matches",
+                        lambda _manifest: hash_matches)
 
 
 def _patch_evidence(monkeypatch, evidence):
     monkeypatch.setattr(phase5_acceptance_job, "build_evidence",
                         lambda _release_root: evidence)
+
+
+def test_verify_object_uses_bounded_reader(tmp_path, monkeypatch):
+    release_root = tmp_path / "store"
+    target = release_root / "deployment" / "objects" / "member"
+    target.parent.mkdir(parents=True)
+    payload = b"member-bytes"
+    target.write_bytes(payload)
+    calls = []
+    real = acceptance_gate.read_regular_file
+
+    def spy(path, limit):
+        calls.append((path, limit))
+        return real(path, limit)
+
+    monkeypatch.setattr(acceptance_gate, "read_regular_file", spy)
+
+    assert acceptance_gate._verify_object(
+        release_root, "objects/member", acceptance_gate.sha256_bytes(payload)) is None
+    assert calls == [(target.resolve(), acceptance_gate.MAX_MEMBER_BYTES)]
 
 
 def test_success_writes_acceptance_and_returns_output(tmp_path, monkeypatch):
@@ -105,6 +128,24 @@ def test_missing_or_mismatched_manifest_refuses_before_shim(tmp_path, monkeypatc
     assert not (attempt / "acceptance.json").exists()
 
 
+def test_staged_manifest_hash_mismatch_refuses_before_shim(tmp_path, monkeypatch):
+    release_root = tmp_path / "store"
+    attempt = tmp_path / "attempt"
+    attempt.mkdir()
+    _patch_manifest(monkeypatch, _manifest("candidate"), hash_matches=False)
+    called = []
+    monkeypatch.setattr(phase5_acceptance_job, "run_acceptance",
+                        lambda *_args: called.append(True))
+
+    with pytest.raises(OpsError) as excinfo:
+        phase5_accept.run_phase5_accept_worker(_params(release_root), attempt)
+
+    assert excinfo.value.code == "VALIDATION_FAILED"
+    assert excinfo.value.problem.details["code"] == "STAGED_MANIFEST_HASH_MISMATCH"
+    assert called == []
+    assert not (attempt / "acceptance.json").exists()
+
+
 @pytest.mark.parametrize(
     "parameters",
     [
@@ -117,6 +158,10 @@ def test_missing_or_mismatched_manifest_refuses_before_shim(tmp_path, monkeypatc
          "candidate_release_id": "candidate"},
         {"expected_ids": ("phase5_accept",), "release_root": "/release",
          "candidate_release_id": "../escape"},
+        {"expected_ids": ("phase5_accept",), "release_root": "/release",
+         "candidate_release_id": ".hidden"},
+        {"expected_ids": ("phase5_accept",), "release_root": "/release",
+         "candidate_release_id": "a\\b"},
         phase5_accept.Phase5AcceptParameters(
             expected_ids=("phase5_accept",), release_root="/release",
             candidate_release_id=""),
@@ -151,7 +196,57 @@ def test_changed_evidence_identity_fails_closed(tmp_path, monkeypatch):
     assert (attempt / "acceptance.json").exists()
 
 
-def test_job_kind_is_registered_non_retrying_and_primary():
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda evidence: evidence.update(status="FAIL"),
+        lambda evidence: evidence.update(findings=[{"code": "P5_MEMBER_MISSING"}]),
+    ],
+)
+def test_invalid_evidence_status_or_findings_refused(tmp_path, monkeypatch, mutate):
+    release_root = tmp_path / "store"
+    attempt = tmp_path / "attempt"
+    attempt.mkdir()
+    catalog = _catalog(release_root, "candidate")
+    evidence = _evidence("candidate", catalog)
+    mutate(evidence)
+    _patch_manifest(monkeypatch, _manifest("candidate"))
+    _patch_evidence(monkeypatch, evidence)
+
+    with pytest.raises(OpsError) as excinfo:
+        phase5_accept.run_phase5_accept_worker(_params(release_root), attempt)
+
+    assert excinfo.value.code == "VALIDATION_FAILED"
+    assert excinfo.value.problem.details["code"] == "PHASE5_ACCEPTANCE_FAILED"
+
+
+def test_catalog_drift_after_evidence_production_is_input_changed(tmp_path, monkeypatch):
+    release_root = tmp_path / "store"
+    attempt = tmp_path / "attempt"
+    attempt.mkdir()
+    catalog = _catalog(release_root, "candidate")
+    evidence = _evidence("candidate", catalog)
+    _patch_manifest(monkeypatch, _manifest("candidate"))
+
+    def build_then_drift(_release_root):
+        drifted = {"schema_version": PHASE5_RELEASE_SCHEMA, "release_id": "candidate",
+                   "deployment_id": "deployment-drifted", "members": [], "sources": {}}
+        drifted["manifest_hash"] = content_hash(drifted)
+        catalog_path(release_root, "candidate").write_text(
+            json.dumps(drifted), encoding="utf-8")
+        return evidence
+
+    monkeypatch.setattr(phase5_acceptance_job, "build_evidence", build_then_drift)
+
+    with pytest.raises(OpsError) as excinfo:
+        phase5_accept.run_phase5_accept_worker(_params(release_root), attempt)
+
+    assert excinfo.value.code == "INPUT_CHANGED"
+    assert excinfo.value.problem.details["code"] == "POOL_ACCEPTANCE_MISMATCH"
+    assert (attempt / "acceptance.json").exists()
+
+
+def test_job_kind_is_registered_non_retrying_with_shadow_and_smoke_namespaces():
     kind = registry().get("phase5_accept")
     params = phase5_accept.Phase5AcceptParameters(
         expected_ids=("phase5_accept",), release_root="/release-store",
@@ -159,7 +254,10 @@ def test_job_kind_is_registered_non_retrying_and_primary():
 
     assert kind.worker == "phase5_accept"
     assert kind.retry == RetryPolicy("none", 1)
-    assert "primary" in kind.namespaces
+    assert kind.effects == ("staged",)
+    assert kind.resource_classes == frozenset({"validation"})
+    assert kind.checkpoint_contract == "phase5_acceptance.v1.0"
+    assert kind.namespaces == frozenset({"shadow", "smoke"})
     assert kind.validate(None, params) == []
 
 
@@ -178,3 +276,39 @@ def test_worker_leaves_deployed_pointer_unchanged(tmp_path, monkeypatch):
     phase5_accept.run_phase5_accept_worker(_params(release_root), attempt)
 
     assert pointer.read_bytes() == b"sentinel-pointer\n"
+
+
+def test_promote_rehearsal_uses_scratch_copy(tmp_path, monkeypatch):
+    release_root = tmp_path / "store"
+    store = release_root / "deployment"
+    (store / "releases" / "candidate").mkdir(parents=True)
+    (store / "history").mkdir()
+    pointer = store / "DEPLOYED"
+    pointer.write_bytes(b"sentinel-pointer\n")
+    roots = []
+    monkeypatch.setattr(acceptance_gate.deployment, "current_pointer", lambda _root: None)
+
+    def mark(root, _candidate):
+        roots.append(("mark", root))
+
+    def promote(root, candidate):
+        roots.append(("promote", root))
+        return SimpleNamespace(release_id=candidate)
+
+    monkeypatch.setattr(acceptance_gate.deployment, "mark_staging_succeeded", mark)
+    monkeypatch.setattr(acceptance_gate.deployment, "promote", promote)
+    monkeypatch.setattr(acceptance_gate.deployment, "current_release",
+                        lambda _root: {"release_id": "candidate"})
+    monkeypatch.setattr(acceptance_gate.deployment, "resolve_release",
+                        lambda _root, _candidate: {"release_id": "candidate"})
+    findings = acceptance_gate._Findings()
+
+    result = acceptance_gate._promote_rehearsal(release_root, "candidate", findings)
+
+    assert result["status"] == "ok"
+    assert findings.rows == []
+    assert pointer.read_bytes() == b"sentinel-pointer\n"
+    assert [name for name, _root in roots] == ["mark", "promote"]
+    scratch_roots = {root for _name, root in roots}
+    assert len(scratch_roots) == 1
+    assert scratch_roots.pop() != store

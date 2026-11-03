@@ -5,7 +5,9 @@ The worker logic of the ``phase5_accept`` ops job
 ``engine/v2/ops/state_stage.py`` wraps ``tools/phase5_state_stage_job.py``).
 Calls the existing acceptance gate with no Phase 4 corpus/checkpoint and writes
 its evidence as ``acceptance.json`` in the attempt output directory. Never marks
-staging succeeded, writes a deployment pointer, or replays Phase 4.
+staging succeeded, never writes the live deployment pointer, and never replays
+Phase 4; the existing acceptance rehearsal writes only on its scratch
+pointer-state copy.
 Contract: ``engine/v2/models/ARCHITECTURE.md`` section 2.3 (S2).
 """
 from __future__ import annotations

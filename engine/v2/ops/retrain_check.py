@@ -1,9 +1,11 @@
 """Release acceptance and pool-only retrain check job.
 
 The acceptance evidence is produced by the existing release acceptance gate
-and arrives as a job-bound input. This worker verifies that evidence is for the
-exact candidate catalog, then permits only a pool-only candidate whose model
-binding metadata and actual model object bytes match the incumbent.
+and arrives as a job-bound input. The release-scope ``phase5_accept`` producer
+writes that evidence as ``acceptance.json`` (schema
+``phase5_acceptance.v1.0``), and this worker verifies it is for the exact
+candidate catalog, then permits only a pool-only candidate whose model binding
+metadata and actual model object bytes match the incumbent.
 """
 from __future__ import annotations
 
@@ -247,7 +249,7 @@ def phase5_accept_job_kind() -> JobKind:
         name="phase5_accept", worker="phase5_accept", parameters=Phase5AcceptParameters,
         resource_classes=frozenset({"validation"}), effects=("staged",),
         retry=RetryPolicy("none", 1), checkpoint_contract=ACCEPTANCE_SCHEMA,
-        namespaces=frozenset({"shadow", "smoke", "primary"}),
+        namespaces=frozenset({"shadow", "smoke"}),
         validate=phase5_accept_parameter_problems,
     )
 
@@ -262,6 +264,9 @@ def _staged_manifest(release_root: Path, candidate_release_id: str):
     if manifest is None or manifest.release.release_id != candidate_release_id:
         raise fail("VALIDATION_FAILED", "candidate release is not staged",
                    details={"code": "RELEASE_NOT_STAGED"})
+    if not deployment.manifest_hash_matches(manifest):
+        raise fail("VALIDATION_FAILED", "staged release manifest hash does not match",
+                   details={"code": "STAGED_MANIFEST_HASH_MISMATCH"})
     return manifest
 
 
@@ -294,6 +299,7 @@ def run_phase5_accept_worker(parameters, root) -> dict:
             or evidence.get("findings") != []):
         raise fail("VALIDATION_FAILED", "candidate release acceptance failed",
                    details={"code": "PHASE5_ACCEPTANCE_FAILED"})
+    _acceptance_evidence(Path(root), release_root, candidate_id)
     return {"outputs": [{"name": "acceptance", "path": ACCEPTANCE_FILE,
                          "schema": ACCEPTANCE_SCHEMA}],
             "completed_ids": values["expected_ids"]}
