@@ -12,6 +12,8 @@ Native registration, dataset/feature qualification, training-label availability,
 | Existing `magnitude_distribution_payoff.mean_matched_control` call | Public re-export of that neutral implementation; existing strategy results and failures remain compatible. `distribution_oof` consumes the neutral import directly. |
 | `prepare_empirical_crps(samples)` | Validate/copy/sort a nonempty empirical law once and return an observation scorer over immutable parts. Preserve duplicate/zero atoms; use the existing analytic CRPS core, no pairwise matrix or new formula. Preparation is O(n log n), each observation O(n), retained storage O(n). |
 | Invalid sample or observation | Existing typed `CONTRACT_MISMATCH`, not silent clipping, smoothing or a manufactured distribution. Caller mutation after preparation cannot alter the retained law. |
+| `distribution_prediction_scores.arm_forecasts` / `score_forecasts` | Source-free forecast controls and CRPS/RPS/log-loss/tail rows; verify supplied receipt/pool identity and outer horizon before reading targets. Preserve missing targets, unavailable controls and unresolved-tail CRPS. Caller owns admission, complete event axes and target-access order. |
+| Legacy `distribution_scores` forecast exports | Re-export the identical neutral functions; economic/profit scoring stays separate. No numerical, refusal, row-order or progress-cadence change. |
 | Source-free numerical result | No I/O, fitting, native admission, publication or final-read authority. |
 
 ## Incremental delivery
@@ -19,6 +21,12 @@ Native registration, dataset/feature qualification, training-label availability,
 This first slice removes numerical strategy dependencies; it does not yet bind a training baseline or supply a standalone forecast-only lifecycle. Subsequent slices will bind the baseline to the matching admitted training cohort and disjoint evaluation roster, publish complete all-horizon forecasts before admitted evaluation-target reads, aggregate proper-score/baseline comparisons and calibration/interval diagnostics, and expose a dedicated contained operator. They must retain every admitted event with explicit missingness, immutable source/request identity, native byte/resource bounds, consumed attempts and verified no-fit replay. They must not inherit the strategy request's quote/bridge/economics/book prerequisites.
 
 The report will distinguish data availability from predictive interval coverage, and calibration diagnostics from fitted calibration. A frozen fit's paired uncertainty is not a refitted model-search experiment. Development results do not authorize protected holdout opening, empirical accuracy claims, production activation or a downstream strategy test.
+
+## Prediction metadata lifecycle
+
+`distribution_prediction_plan.PredictionPlan` validates and detaches a closed prediction-only request containing parent/whole-job limits, maximum admitted event count and explicit uncertainty settings. Preflight reuses native plan/source verification, requires all three horizons and unique outer event axes, and binds request, fit budget and installed source closure into a deterministic plan. Seal persists that identity; admission rejects any later policy, resource, source or native-plan drift. It adds no quote, bridge, book or economic policy.
+
+Prediction journal slots are create-only in a separate namespace, including identical retries. Bounded CAS sections preserve ordered positions and reverify bytes on reading. These primitives do not execute, open targets, authenticate arbitrary section contents or provide completed-run collection; the subsequent runner must publish all forecasts before targets, retain complete native receipts, consume failures and reverify stored evidence during collection. Limits are declarations until a dedicated contained process enforces them; the metadata interface is not an operator.
 
 ## Reporting supplied forecast evidence
 

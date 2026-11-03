@@ -98,7 +98,7 @@ its original payoff-module export and refusal Problems remain compatible.
 `mean_matched_control` supply frozen-bridge/mean-control diagnostics, preserving
 zero atoms and negative post-residual exit values. Fixed per-share spot/cost
 inputs are decision-quote proxies, not realized net-profit or execution claims.
-`experiments/distribution_oof` consumes neutral `mean` and `mean_matched_control` without importing payoff/book policy; `experiments/distribution_scores` remains the separate strategy consumer of scores and bridge summaries. [Prediction-first delivery](../../../experiments/DISTRIBUTION_PREDICTION/README.md) uses these numerical prerequisites; matching synthetic tests cover the interfaces, not empirical accuracy.
+`experiments/distribution_oof` consumes neutral `mean` and `mean_matched_control` without importing payoff/book policy; `experiments/distribution_prediction_scores` consumes neutral proper scores; `experiments/distribution_scores` retains the separate strategy bridge/profit consumer and compatible forecast exports. [Prediction-first delivery](../../../experiments/DISTRIBUTION_PREDICTION/README.md) uses these numerical prerequisites; matching synthetic tests cover the interfaces, not empirical accuracy.
 The numerical helpers own no source admission, fit orchestration or production wiring.
 
 `eligibility_policy.eligibility_policy` validates an explicit version/width;
