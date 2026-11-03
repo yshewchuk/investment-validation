@@ -27,11 +27,9 @@ The four `es_` profiles set `early_stopping=True`, `validation_fraction=0.1`,
 `n_iter_no_change=10` and `max_iter=400`; sklearn uses the fixed seed for a random 10%
 split of training rows, not a chronological holdout. The three `fixed200_` profiles set
 `early_stopping=False` and `max_iter=200`; reaching this fixed epoch budget is successful
-stopping, not a convergence failure. The six `chrono15_`/`chrono10_` profiles require aligned
-ISO event dates, hold out the latest 15%/10% rows chronologically, fit earlier rows with
-`partial_fit` and patience 20, and restore the best holdout weights; their 400-epoch cap is
-successful and reports `converged=False` only at the cap. Both the fixed-budget and
-chronological-holdout families allow the expected convergence warning at the iteration cap. No evaluation labels enter fit or preprocessing; the caller still owns
+stopping, not a convergence failure. The six `chrono15_`/`chrono10_` profiles require aligned ISO event dates, hold out the latest 15%/10% rows chronologically, fit earlier rows with `partial_fit` one epoch at a time and patience 20, and restore the best holdout weights; their 400-epoch cap is successful, and `converged` is true when patience stops before the cap and false when it reaches the cap; it does not report sklearn warning state.
+`n_iter` is the last attempted/stop epoch, while the receipt's weights and optimizer loss are restored from the best holdout epoch. Only the fixed-budget estimator path may complete with its convergence warning at the declared cap.
+No evaluation labels enter fit or preprocessing; the caller still owns
 causal folds, source admission, inner-only selection, resource budgets and progress reporting. One successful call
 is one component fit and returns detached `magnitude_mlp_fit.v1` predictions,
 recipe hash, iteration count and standardized-target optimizer loss (including L2,

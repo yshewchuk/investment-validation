@@ -51,7 +51,7 @@ Caller owns protected admission, label qualification and evidence. The no-fit gu
 invalid shapes/nonfinite labels or predictions raise `ValueError`, translated by the experiment
 caller to `EXPERIMENT_VARIANT_FAILED`. Existing legacy-parity recipes are unchanged.
 `magnitude_mlp_recipe` and `training.magnitude_mlp` expose sixteen closed standalone neural profiles, not search admission; the original three hashes remain unchanged.
-Thirteen new variants include four with seeded random 10% training-row validation, three fixed 200-epoch budgets and six chronological-holdout profiles over 15%/10%; only the fixed-budget and chrono `max_iter` caps accept a convergence warning.
+Thirteen new variants include four with seeded random 10% training-row validation, three fixed 200-epoch budgets and six chronological-holdout profiles over 15%/10%; only the fixed-budget `max_iter` cap accepts a convergence warning. Chrono `converged` is true when patience stops before the cap and false at the cap; it does not report sklearn warning state.
 See [the training contract](training/README.md#standalone-neural-magnitude-primitive-opt-in-foundation).
 
 `magnitude_elasticnet_recipe.elasticnet_recipe` binds ordered columns, dictionary hash, preprocessing and closed sklearn parameters in JSON metadata. Request-v3 SIZE candidates admit finite positive alpha in `[1e-6, 1000]` and l1-ratio in `[1e-6, 1]`; the v2 compiler retains its original six alpha/l1 combinations.
