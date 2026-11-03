@@ -14,7 +14,7 @@ _LEVELS = ((0.5, 0.25, 0.75), (0.8, 0.1, 0.9),
            (0.9, 0.05, 0.95), (0.95, 0.025, 0.975))
 
 
-def _number(value, *, probability=False):
+def _diagnostic_number(value, *, probability=False):
     if type(value) not in (int, float):
         raise fail("CONTRACT_MISMATCH", "invalid magnitude diagnostic input")
     try:
@@ -29,7 +29,7 @@ def _number(value, *, probability=False):
 def _samples(samples):
     if type(samples) is not list or not samples:
         raise fail("CONTRACT_MISMATCH", "invalid magnitude diagnostic samples")
-    return tuple(sorted(_number(value) for value in samples))
+    return tuple(sorted(_diagnostic_number(value) for value in samples))
 
 
 def _quantile(parts, probability):
@@ -55,7 +55,7 @@ def quantile(document, probability) -> float:
     Uniform finite bins and empirical tail atoms use the existing components;
     empty bins have no support. Unresolved tails refuse even at zero overflow.
     """
-    probability = _number(probability, probability=True)
+    probability = _diagnostic_number(probability, probability=True)
     return _quantile(components(document), probability)
 
 
@@ -68,7 +68,7 @@ def _empirical_quantile(values, probability):
 
 def empirical_quantile(samples, probability) -> float:
     """Equal-weight empirical inverse; retain zero/duplicate atoms and endpoints."""
-    probability = _number(probability, probability=True)
+    probability = _diagnostic_number(probability, probability=True)
     return _empirical_quantile(_samples(samples), probability)
 
 
@@ -77,7 +77,7 @@ def pit_bracket(document, observation) -> tuple[float, float]:
 
     A later caller must seal its reproducible PIT randomization policy.
     """
-    observation = _number(observation)
+    observation = _diagnostic_number(observation)
     return cdf(document, observation, strict=True), cdf(document, observation)
 
 
@@ -97,7 +97,7 @@ def interval_diagnostics(document, observation) -> list[dict]:
 
     Reconstruct once per call; no empirical interpolation, fitting or tuning.
     """
-    observation = _number(observation)
+    observation = _diagnostic_number(observation)
     parts = components(document)
     return _coverage(_intervals(lambda probability: _quantile(parts, probability)), observation)
 
@@ -114,7 +114,7 @@ def prepare_empirical_diagnostics(samples):
     intervals = _intervals(lambda probability: _empirical_quantile(values, probability))
 
     def diagnose(observation):
-        observation = _number(observation)
+        observation = _diagnostic_number(observation)
         return {"intervals": _coverage(intervals, observation),
                 "pit_lower": bisect_left(values, observation) / len(values),
                 "pit_upper": bisect_right(values, observation) / len(values)}

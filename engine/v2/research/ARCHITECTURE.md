@@ -26,7 +26,7 @@ No source/fold/calibration envelope, fitting, holdout access or production wirin
 | --- | --- |
 | Malformed histogram schema/types/support/masses/tail policy/counts | Non-retryable `CONTRACT_MISMATCH`; no partial result |
 | Invalid `bin_index` numeric type, negative/nonfinite or unrepresentable magnitude | Non-retryable `CONTRACT_MISMATCH`; no index |
-| Invalid math/payoff arguments, unresolved full-law tail, nonfinite/unrepresentable arithmetic, nonpositive target mean or zero repaired mean/scale | Non-retryable `CONTRACT_MISMATCH`; no partial result |
+| Invalid math/payoff/diagnostic arguments (including nonfinite/negative magnitudes, probabilities outside [0,1] or empty/non-list empirical samples), unresolved full-law tail, nonfinite/unrepresentable arithmetic, nonpositive target mean or zero repaired mean/scale | Non-retryable `CONTRACT_MISMATCH`; no partial result |
 | Zero observed-bin probability | `bin_scores.log_loss` is positive infinity; no smoothing |
 | Omitted required argument to any numerical helper | Python `TypeError` |
 
