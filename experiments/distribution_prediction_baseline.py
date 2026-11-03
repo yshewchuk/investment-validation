@@ -81,6 +81,8 @@ def score_training_baseline(baseline, targets, *, receipt):
                 _require(set(value) == {"omitted"} and type(value["omitted"]) is str and value["omitted"] in OMISSION_REASONS)
             else:
                 _require(type(value) in (int, float) and isfinite(value) and value >= 0)
+        events, year, horizon = tuple(events), claim["outer_year"], claim["trial"]["horizon"]
+        targets = {event: value.copy() if type(value) is dict else value for event, value in targets.items()}
     except (KeyError, TypeError, ValueError, OverflowError, RecursionError):
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "distribution training baseline differs") from None
     score = prepare_empirical_crps(samples)
@@ -94,7 +96,7 @@ def score_training_baseline(baseline, targets, *, receipt):
     with stage("distribution empirical baseline scores"):
         for event in events:
             observation = targets[event]
-            row = {"event_id": event, "outer_year": claim["outer_year"], "horizon": claim["trial"]["horizon"],
+            row = {"event_id": event, "outer_year": year, "horizon": horizon,
                 "arm": "training_empirical", "observation": observation, "status": "available"}
             if isinstance(observation, dict):
                 row.update(status="missing_target", observation=None, reason=observation["omitted"])

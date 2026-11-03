@@ -214,3 +214,41 @@ def test_each_native_omission_reason_is_retained_exactly(case, reason):
     assert rows[0] == dict(event_id='Z', outer_year='2024', horizon=1, arm='training_empirical',
         observation=None, status='missing_target', reason=reason)
     assert rows[1]['crps'] == 333 / 64
+
+
+@pytest.mark.parametrize('mutation', ['append', 'remove', 'reorder', 'claim', 'target', 'status', 'training', 'clear'])
+def test_between_yield_mutation_cannot_change_validated_roster_identity_or_targets(case, mutation):
+    document, result = prepared(case)
+    targets = {'Z': 0, 'A': {'omitted': 'no_price_window'} if mutation == 'status' else 22}
+    expected = list(baseline.score_training_baseline(document, targets, receipt=result['receipt']))
+    stream = baseline.score_training_baseline(document, targets, receipt=result['receipt'])
+    first = next(stream)
+    assert first['event_id'] == 'Z' and first['outer_year'] == '2024' and first['horizon'] == 1
+    if mutation == 'append':
+        document['evaluation_event_ids'].append('OUTSIDE')
+        targets['OUTSIDE'] = 0
+    elif mutation == 'remove':
+        document['evaluation_event_ids'].remove('A')
+        targets.pop('A')
+    elif mutation == 'reorder':
+        document['evaluation_event_ids'].reverse()
+    elif mutation == 'claim':
+        document['fit_claim']['outer_year'] = '2099'
+        document['fit_claim']['trial']['horizon'] = 5
+    elif mutation == 'target':
+        targets['A'] = 999
+    elif mutation == 'status':
+        targets['A']['omitted'] = 'unvalidated replacement'
+    elif mutation == 'training':
+        document['training'][0]['absolute_move_pct'] = 999
+    else:
+        document.clear()
+        result['receipt'].clear()
+        targets.clear()
+    rows = [first, *stream]
+    assert rows == expected
+    assert [(row['event_id'], row['outer_year'], row['horizon']) for row in rows] == [('Z', '2024', 1), ('A', '2024', 1)]
+    if mutation == 'status':
+        assert rows[1]['reason'] == 'no_price_window' and rows[1]['observation'] is None
+    else:
+        assert rows[1]['observation'] == 22
