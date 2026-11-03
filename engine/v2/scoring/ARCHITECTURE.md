@@ -188,11 +188,11 @@ load-bearing entrypoints:
 `source_inputs.SUPPORTED_STRATEGIES` contains the seven `DYNAMIC_MENU`
 structures, but not DYN-SV, which has no independent forecast-output recipe.
 `SourceBundle.chooser_recipe` names a frozen champion, optional producers and
-state keys; `chooser_fold_pools`, `chooser_analog_pool` and
-`chooser_admissible_table` carry their declared inputs. `chooser_inputs`
-builds that block only for menu candidates; state without a recipe or a recipe
-for another strategy raises `ValueError`. The chooser k-NN pool is distinct
-from the board bucket-analog pool.
+state keys, `artifact_refs` and `fold_provenance`; `chooser_fold_pools`,
+`chooser_analog_pool` and `chooser_admissible_table` carry their declared
+inputs. `chooser_inputs` builds that block only for menu candidates; state
+without a recipe or a recipe for another strategy raises `ValueError`. The
+chooser k-NN pool is distinct from the board bucket-analog pool.
 Strict Tier-0 capture opts into `resolve_production_release_binding`'s
 verified chooser-fold references and passes the verified map to
 `engine.score.Scorer`. The scorer records only references matching a bound

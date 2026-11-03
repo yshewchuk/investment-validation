@@ -178,7 +178,8 @@ The DYN-SV chooser's vector is derived the same way (`chooser_inputs.py`
 builds the block, `native_chooser.py` assembles it, `native_chooser_features.py`
 holds the ported `Scorer._chooser_frame` arithmetic): `chooser_recipe` names the
 champion binding, its `producers` (the implied_t1/runup_move Tier-4 folds) and
-the keys of the frozen `chooser_analog_pool` and `chooser_admissible_table`;
+the keys of the frozen `chooser_analog_pool` and `chooser_admissible_table`,
+and may also include `artifact_refs` and `fold_provenance`;
 `chooser_fold_pools` carries the served folds' pools. Only the primitive
 features (event history, market/regime block) come from `feature_vector`, which
 still wins for any derived column it declares; `dte_entry` is scorer-computed

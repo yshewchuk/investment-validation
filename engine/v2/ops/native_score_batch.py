@@ -900,6 +900,9 @@ def _project_member_features(
     spec = _STRATEGY_REGISTRY.get(key.strategy)
     if spec is None or not spec.chooser:
         return feature_names
+    if not isinstance(event.panel_row, Mapping) or not isinstance(event.tier4_row, Mapping):
+        return NativeScoreBatchRowRefusal(
+            key, "MISSING_STAGED_INPUT", "required member feature is missing from staged rows")
     try:
         state = select_chooser_state(binding, event.calendar_row.get("event_date"), as_of)
     except ModelNotReady:
@@ -933,7 +936,6 @@ def _released_member_bundle_or_refusal(
     drivers: tuple[_ResolvedDriver, ...],
     as_of: Any,
     snapshot_id: str,
-    gate_source_cache: dict[tuple[int, str], Any],
 ) -> SourceBundle | NativeScoreBatchRowRefusal:
     """Declare release artifacts, then apply the chooser, for one row."""
     bundle = _with_release_artifacts(
@@ -1006,8 +1008,7 @@ def _assemble_one_event(
         return NativeScoreBatchRowRefusal(
             key, "MISSING_STAGED_INPUT", "calendar_row missing event_id")
     bundle = _released_member_bundle_or_refusal(
-        bundle, key, event, binding, spec, drivers, as_of, snapshot_id,
-        gate_source_cache)
+        bundle, key, event, binding, spec, drivers, as_of, snapshot_id)
     if isinstance(bundle, NativeScoreBatchRowRefusal):
         return bundle
     try:

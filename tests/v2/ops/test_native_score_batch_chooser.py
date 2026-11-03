@@ -219,3 +219,22 @@ def test_project_member_features_projects_selected_state_order(monkeypatch):
     unchanged = nsb._project_member_features(
         thru.key, thru, binding, kept, as_of="2026-01-10")
     assert unchanged is kept
+
+
+def test_null_panel_row_refuses_before_chooser_state_selection(monkeypatch):
+    def unexpected(*_args, **_kwargs):
+        raise AssertionError("malformed staged row must not select chooser state")
+
+    monkeypatch.setattr(nsb, "select_chooser_state", unexpected)
+    event = NightlyEventInputs(
+        key=_KEY,
+        calendar_row={"event_date": "2026-01-12", "entry_date": "2026-01-12"},
+        panel_row=None, panel_anchor="2026-01-10",
+        tier4_row={}, quote_rows=())
+    refusal = nsb._project_member_features(
+        event.key, event, _binding(), ("signal",), as_of="2026-01-10")
+
+    assert isinstance(refusal, NativeScoreBatchRowRefusal)
+    assert (refusal.code, refusal.detail) == (
+        "MISSING_STAGED_INPUT",
+        "required member feature is missing from staged rows")

@@ -84,7 +84,7 @@ Snapshot parameters raise `VALIDATION_FAILED` for an unsupported `producer_mode`
 
 **DYN-SV batch boundary.** `board_requests` emits one DYN-SV key last per event; the batch assembler refuses it with `UNSUPPORTED_STRATEGY` after key/calendar validation (earlier source refusals keep their codes).
 During native assembly, the seven menu member strategies (TWIN-P, TWIN-P5, BFLY-P, BFLY-P5, CTR5, RAMP7, CND-PS) select cutoff-matched chooser state; missing or unusable state refuses only that row as `MODEL_NOT_READY`
-with fixed detail `DYN-SV chooser state missing or unusable`. Non-menu rows are unchanged; the worker still calls `score_batch`, not the separate menu resolver in [scoring](../scoring/ARCHITECTURE.md#native-nightly-dyn-sv-boundary).
+with fixed detail `DYN-SV chooser state missing or unusable`. The worker resolves its release binding (with chooser fold references) before row assembly, so malformed fold references fail worker binding resolution first rather than any row; successfully loaded but unusable selected state keeps the row-level refusal above. Non-menu rows are unchanged; the worker still calls `score_batch`, not the separate menu resolver in [scoring](../scoring/ARCHITECTURE.md#native-nightly-dyn-sv-boundary).
 Enumeration order does not establish a scoring dependency. Encodable meta refusals use the keyed output; invalid keys use `unkeyable_refusals`.
 
 **Cutover PR-4 (redo — 2026-09-27, user decision option (c). This section
@@ -1150,7 +1150,7 @@ Per row (collected as a refusal, never sinks the batch):
 | `RELEASE_MISSING_FEATURE_ORDER` | `feature_names` is empty and any driver or gate identity has an empty `feature_order`; after DYN-SV admission, chooser references are absent or any referenced producer has an empty `feature_order` |
 | `AMBIGUOUS_DECISION_CLOCK` | any resolved driver identity disagrees with the gate on decision clock; every required role resolves before clock comparison |
 | `GATE_POLICY_NOT_STAGED` | the selected policy lacks the registered `gate_policy_key`: a non-empty supplied policy is used as is (the release is not consulted); otherwise the release's gate `threshold` members, which may omit it |
-| `MODEL_NOT_READY` | STR-THRU has no exact causal size fold for the earlier event/decision month or unique exact-cutoff board analog pool, no unique latest payoff line or recalibration map at or before the row cutoff, or a driver pool identity disagrees with its resolved driver; STR-RUNUP has no unique latest payoff surface at or before the row cutoff; duplicate exact-cutoff analog matches also refuse, including for optional RUNUP pools; no month, champion or legacy fallback; absent or nonmatching optional RUNUP analogs leave the block not-applicable |
+| `MODEL_NOT_READY` | STR-THRU has no exact causal size fold for the earlier event/decision month or unique exact-cutoff board analog pool, no unique latest payoff line or recalibration map at or before the row cutoff, or a driver pool identity disagrees with its resolved driver; STR-RUNUP has no unique latest payoff surface at or before the row cutoff; duplicate exact-cutoff analog matches also refuse, including for optional RUNUP pools; a menu member strategy selects chooser state that is missing or unusable; no month, champion or legacy fallback; absent or nonmatching optional RUNUP analogs leave the block not-applicable |
 | `POST_AS_OF_ROW` | the row's panel anchor is dated after `as_of` |
 | re-wrapped | any other source-bundle refusal, or an input-assembly `ValueError` |
 

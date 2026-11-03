@@ -57,21 +57,6 @@ _CHOOSER_PRIMITIVE_NAMES = (
     "spy_ret21", "spy_ret63", "spy_ret252", "spy_dd252", "spy_vol20",
     "spy_vol5", "spy_vol60", "spy_vol252", "spy_vol20_rel252",
 )
-_CHOOSER_PRIMITIVE_VALUES = {
-    "mean_prior_abs_move": 0.01, "ema12r_abs": 0.02,
-    "signed_streak": 2.0, "mean_prior_or_implied": 0.03,
-    "mcap_log": 20.0, "or_implied": 0.04, "or_rvol30": 1.2,
-    "spy_ret21": 0.01, "spy_ret63": 0.02, "spy_ret252": 0.03,
-    "spy_dd252": -0.04, "spy_vol20": 0.2, "spy_vol5": 0.05,
-    "spy_vol60": 0.06, "spy_vol252": 0.07,
-    "spy_vol20_rel252": 0.08,
-}
-_STAGE_OWNED_NAMES = (
-    "entry_cost_pct", "days_to_print", "dte_entry",
-    "pred_abs_move", "pred_abs_move_p10", "pred_abs_move_p90",
-    "pred_abs_move_sd", "forecast_edge",
-    "analog_mean", "analog_win_rate", "analog_n",
-)
 
 
 def _sha(payload: bytes) -> str:
