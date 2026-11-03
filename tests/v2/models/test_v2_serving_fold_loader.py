@@ -227,7 +227,7 @@ def test_legacy_minimal_fold_keeps_prediction_acceptance(setup, monkeypatch):
     assert inference.infer(release, request).status == "READY"
     with pytest.raises(loader.ServingFoldError):
         _load(setup, descriptor=replace(descriptor, estimator=member))
-    assert next(iter(inference._cache.values())).member_byte_limit is None
+    assert next(iter(inference._cache.values())).member_byte_limit == 256 * 1024 * 1024
     monkeypatch.setattr(loader, "MAX_FOLD_BYTES", len(raw))
     with pytest.raises(loader.ServingFoldError):
         _load(setup, descriptor=replace(descriptor, estimator=member))

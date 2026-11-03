@@ -22,6 +22,8 @@ from .contracts import (
 )
 from .frozen_state_io import BoundedStateReadError, read_bounded_state, valid_byte_limit
 
+_INFER_MAX_MEMBER_BYTES = 256 * 1024 * 1024
+
 
 class _CachedArtifact(ReadOnlyArtifact):
     __slots__ = ("member_byte_limit",)
@@ -56,7 +58,8 @@ class FrozenInference:
         if adapter is None:
             return self._refuse(request, "UNKNOWN_ADAPTER", binding)
         try:
-            artifact = self._load_artifact(binding)
+            artifact = self._load_artifact(
+                binding, max_member_bytes=_INFER_MAX_MEMBER_BYTES)
             predictions = tuple(
                 tuple(float(value) for value in row)
                 for row in adapter.predict(artifact, request.rows, binding)

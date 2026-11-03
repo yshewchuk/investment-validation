@@ -1197,6 +1197,112 @@ def test_chooser_fold_reference_failure_does_not_return_partial_mapping(
     assert len(calls) == 1
 
 
+def test_deferred_chooser_fold_failures_keep_valid_references(
+        tmp_path, monkeypatch, capsys):
+    _rb, _descriptors, _identities, calls, _body = _chooser_resolver_fixture(
+        tmp_path, monkeypatch, two_objects=True)
+
+    binding = resolve_release_binding(
+        tmp_path, include_chooser_fold_references=True,
+        defer_chooser_fold_failures=True)
+
+    assert set(binding.chooser_fold_references) == {
+        ("pred_im_t1_d14", "2026-09-01")}
+    assert len(calls) == 1
+    assert "failed=1" in capsys.readouterr().err
+
+
+def test_deferred_chooser_fold_skips_malformed_unrelated_descriptor(
+        tmp_path, monkeypatch):
+    from engine.v2.scoring import release_bindings as rb
+
+    _rb, _descriptors, _identities, _calls, body = _chooser_resolver_fixture(
+        tmp_path, monkeypatch)
+    bad_hash = "sha256:" + "d" * 64
+    bad = {**_obj(_object_path(bad_hash), bad_hash, name="bad"),
+           "serving_fold": {"test_key": "bad"}}
+    next(row for row in body["members"]
+         if row.get("member_id") == "tier4_folds:implied_t1")["objects"].append(bad)
+    body["manifest_hash"] = content_hash(
+        {key: value for key, value in body.items() if key != "manifest_hash"})
+    monkeypatch.setattr(rb, "_read_state_catalog", lambda *_args: body)
+    monkeypatch.setattr(rb, "_is_legacy_cutoffless_chooser_fold", lambda _obj: False)
+    original = rb.from_document
+
+    def decode(type_, document):
+        if document["test_key"] == "bad":
+            raise ValueError("malformed descriptor")
+        return original(type_, document)
+
+    monkeypatch.setattr(rb, "from_document", decode)
+
+    binding = resolve_release_binding(
+        tmp_path, include_chooser_fold_references=True,
+        defer_chooser_fold_failures=True)
+
+    assert set(binding.chooser_fold_references) == {
+        ("pred_im_t1_d14", "2026-09-01")}
+
+
+def test_chooser_fold_descriptor_refuses_matching_malformed_descriptor(
+        tmp_path, monkeypatch):
+    from engine.v2.scoring import release_bindings as rb
+
+    _rb, descriptors, _identities, _calls, body = _chooser_resolver_fixture(
+        tmp_path, monkeypatch)
+    descriptors["first"].training_cutoff = "2026-08-31"
+    bad_hash = "sha256:" + "d" * 64
+    bad = {**_obj(_object_path(bad_hash), bad_hash, name="bad"),
+           "serving_fold": {
+               "test_key": "bad", "policy": {"role": "implied_t1"},
+               "fold_start": "2026-09-01"}}
+    next(row for row in body["members"]
+         if row.get("member_id") == "tier4_folds:implied_t1")["objects"].append(bad)
+    body["manifest_hash"] = content_hash(
+        {key: value for key, value in body.items() if key != "manifest_hash"})
+    monkeypatch.setattr(rb, "_read_state_catalog", lambda *_args: body)
+    original = rb.from_document
+
+    def decode(type_, document):
+        if document["test_key"] == "bad":
+            raise ValueError("malformed descriptor")
+        return original(type_, document)
+
+    monkeypatch.setattr(rb, "from_document", decode)
+
+    with pytest.raises(ModelNotReady) as error:
+        rb._chooser_fold_descriptor(
+            None, body, "implied_t1", "2026-09-01", "2026-09-15")
+
+    assert error.value.member_id == "tier4_folds:implied_t1"
+    assert error.value.detail == "chooser fold descriptor is missing or unusable"
+
+
+def test_deferred_chooser_fold_failures_require_the_chooser_opt_in(tmp_path):
+    with pytest.raises(ValueError):
+        resolve_release_binding(tmp_path, defer_chooser_fold_failures=True)
+
+
+def test_deferred_structural_chooser_failure_returns_empty_maps(
+        tmp_path, monkeypatch, capsys):
+    from engine.v2.scoring import release_bindings as rb
+
+    _rb, _descriptors, _identities, _calls, _body = _chooser_resolver_fixture(
+        tmp_path, monkeypatch)
+
+    def fail(*_args, **_kwargs):
+        raise ModelNotReady("tier4_folds:chooser", "chooser fold catalog is not valid")
+
+    monkeypatch.setattr(rb, "_chooser_fold_objects", fail)
+
+    binding = resolve_release_binding(
+        tmp_path, include_chooser_fold_references=True,
+        defer_chooser_fold_failures=True)
+
+    assert binding.chooser_fold_references == {}
+    assert "deferred structural failure" in capsys.readouterr().err
+
+
 def test_never_reads_data_directory_or_legacy_path(tmp_path):
     _stage_and_promote(tmp_path)
     _happy_catalog(tmp_path)
@@ -1267,8 +1373,10 @@ def test_resolve_production_release_binding_forwards_the_chooser_opt_in(monkeypa
     sentinel = object()
     calls = []
 
-    def stub(release_root, *, include_chooser_fold_references):
-        calls.append((release_root, include_chooser_fold_references))
+    def stub(release_root, *, include_chooser_fold_references,
+             defer_chooser_fold_failures):
+        calls.append((release_root, include_chooser_fold_references,
+                      defer_chooser_fold_failures))
         return sentinel
 
     monkeypatch.setattr(
@@ -1276,10 +1384,10 @@ def test_resolve_production_release_binding_forwards_the_chooser_opt_in(monkeypa
     monkeypatch.setattr(release_bindings, "resolve_release_binding", stub)
 
     result = release_bindings.resolve_production_release_binding(
-        include_chooser_fold_references=True)
+        include_chooser_fold_references=True, defer_chooser_fold_failures=True)
 
     assert result is sentinel
-    assert calls == [(tmp_path, True)]
+    assert calls == [(tmp_path, True, True)]
 
 
 def test_promote_plan_and_resolve_production_release_binding_agree_on_the_same_configured_root(monkeypatch, tmp_path):
