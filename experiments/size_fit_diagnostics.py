@@ -18,6 +18,9 @@ def _mlp_diagnostics(diagnostics, recipe, horizons):
     fixed_budget = recipe["nonconvergence"] == "epoch_budget_success_no_retry"
     expected = {"schema_version", "recipe_id", "horizon_sessions", "component_fits",
                 "converged", "n_iter", "input_features", "loss", "loss_scale"}
+    requires_event_dates = recipe.get("requires_event_dates") is True
+    if requires_event_dates:
+        expected.add("training_event_dates_id")
     if type(diagnostics) is not list or len(diagnostics) != len(horizons):
         raise ValueError
     for item, horizon in zip(diagnostics, horizons):
@@ -34,7 +37,12 @@ def _mlp_diagnostics(diagnostics, recipe, horizons):
                 or not 1 <= item["n_iter"] <= max_iter
                 or type(item["input_features"]) is not int
                 or not 1 <= item["input_features"] <= recipe["preprocessing"]["union_features"]
-                or type(item["loss"]) not in (int, float) or item["loss"] < 0):
+                or type(item["loss"]) not in (int, float) or item["loss"] < 0
+                or (requires_event_dates and (
+                    type(item.get("training_event_dates_id")) is not str
+                    or len(item["training_event_dates_id"]) != 71
+                    or not item["training_event_dates_id"].startswith("sha256:")
+                    or any(c not in "0123456789abcdef" for c in item["training_event_dates_id"][7:])))):
             raise ValueError
         try:
             if not math.isfinite(item["loss"]):

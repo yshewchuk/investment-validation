@@ -61,7 +61,8 @@ from experiments.size_search_binding import execution_for_candidate
 
 def _cohort_id(plan, owner_year, inner_year, candidate):
     cohort = cohort_key(plan, owner_year, inner_year)
-    if candidate["recipe"].get("requires_event_dates") is True:
+    recipe = candidate.get("recipe")
+    if isinstance(recipe, dict) and recipe.get("requires_event_dates") is True:
         return content_hash({"cohort": cohort, "requires_event_dates": True})
     return cohort
 

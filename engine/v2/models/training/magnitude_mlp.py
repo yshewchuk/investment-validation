@@ -19,9 +19,9 @@ def fit_mlp_predictions(recipe, train_features, train_labels, prediction_feature
     """Caller owns causal folds/budgets; preprocessing and stopping use training only."""
     check_fitting_allowed("engine.v2.models.training.magnitude_mlp.fit_mlp_predictions")
     recipe = validate_mlp_recipe(recipe)
-    date_metadata = _event_date_metadata(recipe, event_dates, len(train_features))
     if not isinstance(columns, (list, tuple)) or list(columns) != recipe["features"]:
         raise ValueError("MLP matrix columns must exactly match the ordered recipe subset")
+    date_metadata = _event_date_metadata(recipe, event_dates, len(train_features))
     train, labels, prediction = _matrices(train_features, train_labels, prediction_features,
                                          len(columns))
     model = build_estimator(recipe)

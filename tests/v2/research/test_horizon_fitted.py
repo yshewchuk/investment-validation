@@ -171,10 +171,12 @@ def test_candidate_fitter_omits_dates_when_recipe_does_not_need_them_or_rows_are
 
     source_mixed = indexed()
     source_mixed["b", 5]["event_date"] = "2024-01-02"
-    horizon_fitted.fitted_forecasts(source_mixed, ["b", "a"], [1., 2.], ["evaluation"], [5], ["x"],
-        target_column="absolute_move_pct", target_domain="nonnegative", route="magnitude_candidate",
-        recipe={"requires_event_dates": True})
-    assert "event_dates" not in received[1]
+    with pytest.raises(horizon_fitted.HorizonFitFailure) as caught:
+        horizon_fitted.fitted_forecasts(source_mixed, ["b", "a"], [1., 2.], ["evaluation"], [5], ["x"],
+            target_column="absolute_move_pct", target_domain="nonnegative", route="magnitude_candidate",
+            recipe={"requires_event_dates": True})
+    assert isinstance(caught.value.__cause__, ValueError)
+    assert len(received) == 1
 
 
 def test_one_shot_ids_columns_and_horizons_are_materialized_once():

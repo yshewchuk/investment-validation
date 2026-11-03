@@ -300,7 +300,7 @@ def execution_for_candidate(binding, candidate):
     return execution
 
 
-def fold_inputs(repository, binding, fold):
+def fold_inputs(repository, binding, fold, *, requires_event_dates=False):
     """Revalidate installed producer before opening any training outcome."""
     from engine.v2.research.magnitude_panel_qualified_table import recipe
     verify_installation(binding)
@@ -325,9 +325,13 @@ def fold_inputs(repository, binding, fold):
         labels_before=fold["training_labels_before"], event_ids=fold["training_candidate_event_ids"])
     print(f"[stage] qualify done in {time.monotonic() - started:.1f}s", file=sys.stderr)
     started = time.monotonic()
+    features = [r for r in panel["rows"] if r["event_id"] in participants]
+    if requires_event_dates:
+        _require(all(isinstance(events[e].get("event_date"), str) for e in participants))
+        features = [{**r, "event_date": events[r["event_id"]]["event_date"]} for r in features]
     result = {"preflight": preflight, "stored_inputs_id": content_hash(binding["size_panel"]),
         "training_inputs": dict(train.attrs), "training": train[["event_id", "absolute_move_pct"]].to_dict("records"),
-        "features": [r for r in panel["rows"] if r["event_id"] in participants]}
+        "features": features}
     print(f"[stage] publish done in {time.monotonic() - started:.1f}s", file=sys.stderr)
     return result
 
