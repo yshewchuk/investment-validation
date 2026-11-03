@@ -101,6 +101,18 @@ inputs are decision-quote proxies, not realized net-profit or execution claims.
 `experiments/distribution_oof` consumes neutral `mean` and `mean_matched_control` without importing payoff/book policy; `experiments/distribution_scores` remains the separate strategy consumer of scores and bridge summaries. [Prediction-first delivery](../../../experiments/DISTRIBUTION_PREDICTION/README.md) uses these numerical prerequisites; matching synthetic tests cover the interfaces, not empirical accuracy.
 The numerical helpers own no source admission, fit orchestration or production wiring.
 
+`magnitude_distribution_diagnostics.quantile(document, probability)` and
+`empirical_quantile(samples, probability)` expose generalized inverses, with
+finite support endpoints at 0/1. `interval_diagnostics(document, observation)`
+returns fixed 50/80/90/95% equal-tail intervals with inclusive coverage and width
+in percentage points. `pit_bracket` returns strict/nonstrict CDF endpoints,
+retaining atoms instead of inventing a midpoint or randomized PIT value.
+`prepare_empirical_diagnostics(samples)` freezes the equal-weight law once;
+its callable returns detached `intervals`, `pit_lower` and `pit_upper` per target
+without repeated sorting. Histogram full-law diagnostics refuse unresolved tails,
+even at zero overflow. Only synthetic tests currently consume these helpers;
+source admission and sealed reproducible randomization belong to later callers.
+
 `eligibility_policy.eligibility_policy` validates an explicit version/width;
 `eligibility_policy.plan_eligibility` returns the opt-in metadata-only plan described below.
 `experiment_population.canonical_events` reads the six canonical metadata columns
