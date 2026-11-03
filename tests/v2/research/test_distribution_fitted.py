@@ -13,7 +13,7 @@ from engine.v2.research.magnitude_distribution import histogram
 from experiments import distribution_fitted as fitted
 from experiments.distribution_candidate_fit import fit_candidate as numeric_fit
 from experiments.distribution_candidate_recipe import candidate_recipe, trial_identity
-from experiments.distribution_class_support import early_stopping_fallback, training_support
+from experiments.distribution_class_support import early_stopping_decision, training_support
 
 
 def _case(tmp_path, monkeypatch, *, train, labels, events):
@@ -62,11 +62,9 @@ def _case(tmp_path, monkeypatch, *, train, labels, events):
         classifier = {"class_labels": support["observed_class_labels"], "iterations": iterations,
             "trees_per_iteration": trees, "total_trees": trees * iterations}
         if recipe.get("classifier_variant") == "regularised_v1":
-            requested = recipe["classifier"]["params"]["early_stopping"]
-            reason = early_stopping_fallback(recipe, support) if requested else None
-            used = requested and reason is None
-            classifier.update(early_stopping_requested=requested, early_stopping_used=used,
-                fallback_reason=reason)
+            decision = early_stopping_decision(recipe, support)
+            classifier.update(early_stopping_requested=decision["requested"],
+                early_stopping_used=decision["used"], fallback_reason=decision["fallback_reason"])
         return {"schema_version": "distribution_candidate_fit.v1", "recipe_id": recipe["recipe_id"],
             "probabilities": [masses.copy() for _ in prediction], "point_predictions": [sum(y) / len(y)] * len(prediction),
             "tail": histogram(masses, tail_excesses=[value - 20 for value in y if value >= 20] or None)["tail"],
@@ -315,7 +313,8 @@ def test_regularised_used_early_stopping_rejects_non_integer_replay(tmp_path, mo
     classifier["iterations"] = iterations
     classifier["total_trees"] = classifier["trees_per_iteration"] * 7
     _rehash(record)
-    _error("EXPERIMENT_IDENTITY_CONFLICT", lambda: case.fits.read("inner", "2024", 1, "2023"))
+    error = _error("EXPERIMENT_IDENTITY_CONFLICT", lambda: case.fits.read("inner", "2024", 1, "2023"))
+    assert error.problem.message == "distribution fitted evidence differs"
 
 
 def test_tail_sample_values_and_order_are_training_only(case):

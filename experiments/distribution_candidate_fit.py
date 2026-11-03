@@ -17,7 +17,7 @@ from engine.v2.research.magnitude_distribution import bin_index
 from engine.v2.research.progress import Progress, stage
 from experiments.distribution_candidate_recipe import validate_candidate_recipe
 from experiments.distribution_class_support import (
-    class_histogram, early_stopping_fallback, training_support)
+    class_histogram, early_stopping_decision, training_support)
 
 __all__ = ["fit_candidate"]
 
@@ -89,9 +89,10 @@ def fit_candidate(recipe, train_features, train_labels, prediction_features, *, 
     labels require one finite nonnegative magnitude per training row. All-null
     training columns become zero in BOTH matrices before either estimator.
 
-    The fixed classifier uses the declared recipe parameters, except that a
-    requested regularised early-stopping split that cannot be stratified is
-    recorded as unused with its fallback reason. Its observed classes, tree
+    The fixed classifier uses the declared recipe parameters. The shared
+    early-stopping decision records requested/used/fallback reason; a requested
+    regularised split that cannot be stratified is recorded as unused and a
+    taken fallback is logged before fitting. Its observed classes, tree
     multiplicity and iterations are checked; the public point fitter exposes
     predictions only, so its iteration count is labelled declared.
     Numeric ValueError/FloatingPointError failures become typed candidate
@@ -117,15 +118,17 @@ def fit_candidate(recipe, train_features, train_labels, prediction_features, *, 
     from engine.v2.models.training.magnitude_ridge_hgb import fit_ridge_hgb_predictions
 
     params = recipe["classifier"]["params"]
-    requested = params["early_stopping"]
-    fallback = early_stopping_fallback(recipe, support) if requested else None
-    used = requested and fallback is None
+    decision = early_stopping_decision(recipe, support)
+    requested, used, fallback = (decision[key] for key in ("requested", "used", "fallback_reason"))
     estimator_params = {**params, "max_features": float(params["max_features"])}
     if regularised:
         estimator_params["early_stopping"] = used
+    fit_stage = "distribution classifier fit/predict"
+    if fallback is not None:
+        fit_stage += " fallback " + fallback
     try:
         model = HistGradientBoostingClassifier(**estimator_params)
-        with stage("distribution classifier fit/predict"), threadpool_limits(limits=1):
+        with stage(fit_stage), threadpool_limits(limits=1):
             model.fit(train, bins)
             classifier = _classifier_diagnostics(model, support, params["max_iter"], used)
             if regularised:

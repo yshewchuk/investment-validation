@@ -187,6 +187,7 @@ def test_regularised_used_early_stopping_accepts_actual_short_iterations(observe
     assert observed["constructed"][0]["early_stopping"] is True
     assert classifier["class_labels"] == [0, 1]
     assert classifier["iterations"] == 7
+    assert classifier["total_trees"] == 7
     assert classifier["early_stopping_requested"] is True
     assert classifier["early_stopping_used"] is True
     assert classifier["fallback_reason"] is None
@@ -327,6 +328,7 @@ def test_tiny_real_fixed_estimators_match_constant_feature_oracles(labels, class
     assert result["point_predictions"] == pytest.approx([sum(labels) / len(labels)] * 2)
     assert result["diagnostics"]["classifier"]["iterations"] == 100
     assert result["diagnostics"]["classifier"]["trees_per_iteration"] == trees
+    assert result["diagnostics"]["classifier"]["total_trees"] == 100 * trees
 
 
 def test_regularised_real_fit_matches_independent_estimator_and_varies():
@@ -349,12 +351,45 @@ def test_regularised_real_fit_matches_independent_estimator_and_varies():
     classifier = result["diagnostics"]["classifier"]
     assert classifier["class_labels"] == [0, 20, 40]
     assert classifier["early_stopping_used"] is True and classifier["fallback_reason"] is None
+    assert classifier["total_trees"] == classifier["iterations"] * classifier["trees_per_iteration"]
     for row, probabilities in zip(result["probabilities"], expected):
         expanded = [0.0] * 81
         for label, probability in zip(reference.classes_, probabilities):
             expanded[int(label)] = probability
         assert row == pytest.approx(expanded, abs=1e-12)
     assert len({tuple(row) for row in result["probabilities"]}) == 3
+
+
+def test_regularised_real_2_2_2_split_fallback_matches_independent_estimator():
+    recipe = candidate_recipe("H", "regularised_v1")
+    columns = recipe["point_recipe"]["features"]
+    labels = np.array([0.0, 0.0, 0.25, 0.25, 20.0, 20.0])
+    bins = np.array([bin_index(float(value)) for value in labels], dtype=int)
+    train = np.zeros((len(labels), len(columns)))
+    train[:, 0] = np.arange(len(labels), dtype=float)
+    prediction = np.zeros((3, len(columns)))
+    prediction[:, 0] = [0.5, 2.5, 4.5]
+    params = {**recipe["classifier"]["params"],
+              "max_features": float(recipe["classifier"]["params"]["max_features"])}
+    reference = sklearn.ensemble.HistGradientBoostingClassifier(**{**params, "early_stopping": False})
+    with threadpool_limits(limits=1):
+        reference.fit(train, bins)
+        expected = reference.predict_proba(prediction)
+    result = fitting.fit_candidate(recipe, train, labels, prediction, columns=columns)
+    assert reference.classes_.tolist() == [0, 1, 80]
+    classifier = result["diagnostics"]["classifier"]
+    assert classifier["class_labels"] == [0, 1, 80]
+    assert classifier["early_stopping_requested"] is True
+    assert classifier["early_stopping_used"] is False
+    assert classifier["fallback_reason"] == "validation_split_too_small"
+    assert classifier["iterations"] == recipe["classifier"]["params"]["max_iter"]
+    assert classifier["total_trees"] == classifier["iterations"] * classifier["trees_per_iteration"]
+    assert recipe["classifier"]["params"]["l2_regularization"] == 1.0
+    for row, probabilities in zip(result["probabilities"], expected):
+        expanded = [0.0] * 81
+        for label, probability in zip(reference.classes_, probabilities):
+            expanded[int(label)] = probability
+        assert row == pytest.approx(expanded, abs=1e-12)
 
 
 def test_tiny_real_all_null_case_is_deterministic_and_no_tail_is_unresolved():

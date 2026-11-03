@@ -8,7 +8,7 @@ from math import ceil
 from engine.v2.ops.errors import fail
 from engine.v2.research.magnitude_distribution import histogram
 
-__all__ = ["training_support", "class_histogram"]
+__all__ = ["training_support", "early_stopping_decision", "class_histogram"]
 
 
 def training_support(bin_counts) -> dict:
@@ -28,24 +28,25 @@ def training_support(bin_counts) -> dict:
             "trees_per_iteration": 1 if len(observed) == 2 else len(observed)}
 
 
-def early_stopping_fallback(recipe, support):
-    """Return why sklearn's internal validation split cannot be used, else None.
+def early_stopping_decision(recipe, support):
+    """Return the shared requested/used/fallback decision for fit and replay.
 
-    A recipe that does not request early stopping always returns None. A class
-    below two rows cannot be stratified; otherwise the rounded-up validation
-    count and the remaining training rows must each be at least the observed
-    class count.
+    A recipe that does not request early stopping is never used and has no
+    fallback. A class below two rows cannot be stratified; otherwise the
+    rounded-up validation count must be at least the observed class count.
+    Absent zero-count bins are not observed classes and never trigger a
+    singleton fallback.
     """
     if not recipe["classifier"]["params"]["early_stopping"]:
-        return None
+        return {"requested": False, "used": False, "fallback_reason": None}
     if any(support["bin_counts"][label] < 2 for label in support["observed_class_labels"]):
-        return "class_count_below_2"
+        return {"requested": True, "used": False, "fallback_reason": "class_count_below_2"}
     observed = len(support["observed_class_labels"])
     fraction = recipe["classifier"]["params"]["validation_fraction"]
     validation = ceil(support["sample_count"] * fraction)
-    if validation < observed or support["sample_count"] - validation < observed:
-        return "validation_split_too_small"
-    return None
+    if validation < observed:
+        return {"requested": True, "used": False, "fallback_reason": "validation_split_too_small"}
+    return {"requested": True, "used": True, "fallback_reason": None}
 
 
 def class_histogram(class_labels, probabilities, *, tail_excesses=None) -> dict:
