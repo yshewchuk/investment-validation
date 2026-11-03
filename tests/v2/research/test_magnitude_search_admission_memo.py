@@ -110,7 +110,7 @@ def test_opted_in_admission_retains_verified_event_dates(case, monkeypatch):
 @pytest.mark.parametrize("event_date, message", [
     (None, "search feature event_date is missing or not a string"),
     ("2024-02-30", "search feature event_date is malformed"),
-    ("2024-1-2", "search feature event_date is not canonical ISO"),
+    ("20240102", "search feature event_date is not canonical ISO"),
 ])
 def test_opted_in_admission_refuses_bad_event_dates(case, monkeypatch, event_date, message):
     args = trial_cases(case)[0]

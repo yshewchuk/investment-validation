@@ -65,7 +65,7 @@ def test_fit_evidence_dict_inputs_include_event_dates():
 @pytest.mark.parametrize("event_date, message", [
     (None, "search feature event_date is missing or not a string"),
     ("2024-02-30", "search feature event_date is malformed"),
-    ("2024-1-2", "search feature event_date is not canonical ISO"),
+    ("20240102", "search feature event_date is not canonical ISO"),
 ])
 def test_fit_evidence_refuses_missing_or_malformed_opted_in_dates(event_date, message):
     feature = {"event_id": "train", "context_id": "ctx-t", "horizon_sessions": 5, "x": 1.25}
