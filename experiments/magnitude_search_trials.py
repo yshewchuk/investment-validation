@@ -59,10 +59,14 @@ from experiments.size_job_budget import resolved_limits
 from experiments.size_search_binding import execution_for_candidate
 
 
+def _requires_event_dates(candidate):
+    recipe = candidate.get("recipe")
+    return isinstance(recipe, dict) and recipe.get("requires_event_dates") is True
+
+
 def _cohort_id(plan, owner_year, inner_year, candidate):
     cohort = cohort_key(plan, owner_year, inner_year)
-    recipe = candidate.get("recipe")
-    if isinstance(recipe, dict) and recipe.get("requires_event_dates") is True:
+    if _requires_event_dates(candidate):
         return content_hash({"cohort": cohort, "requires_event_dates": True})
     return cohort
 
@@ -225,7 +229,7 @@ class SearchTrials:
         started = {"trial_id": key, "outer_year": owner_year, "inner_year": inner_year, "candidate": candidate}
         if execution is not None:
             started["execution"] = execution
-        requires_event_dates = candidate["recipe"].get("requires_event_dates") is True
+        requires_event_dates = _requires_event_dates(candidate)
         cohort = _cohort_id(plan, owner_year, inner_year, candidate)
         existing_start = self._read("start:" + key)
         inputs = ((self._cohort_inputs(cohort, inner, True) if requires_event_dates
@@ -534,7 +538,7 @@ class SearchTrials:
                 stored = self._cohort(admitted)
             except ValueError:
                 raise fail("EXPERIMENT_IDENTITY_CONFLICT", "trial native inputs changed after start") from None
-            requires_event_dates = candidate["recipe"].get("requires_event_dates") is True
+            requires_event_dates = _requires_event_dates(candidate)
             cohort_inputs = (self._cohort_inputs(admitted["cohort"], inner, True) if requires_event_dates
                              else self._cohort_inputs(admitted["cohort"], inner))
             if content_hash(cohort_inputs) != content_hash(stored):
