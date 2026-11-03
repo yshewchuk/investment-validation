@@ -19,7 +19,7 @@ from engine.v2.ops.errors import OpsError, fail
 
 MAX_NATIVE_EVIDENCE_BYTES = 16 * 1024 * 1024
 MAX_NATIVE_SIZE_ARTIFACT_BYTES = 1024 * 1024 * 1024
-LATEST = 7
+LATEST = 8
 
 
 def request_version(schema_version):
@@ -66,6 +66,10 @@ def allows_neural(value):
 
 
 def uses_extended_neural_profiles(value):
+    return _request_version_in_range(value, 7)
+
+
+def uses_chrono_neural_profiles(value):
     return type(value) is int and value == LATEST
 
 

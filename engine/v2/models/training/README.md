@@ -5,8 +5,8 @@ Component contract: [ARCHITECTURE.md](ARCHITECTURE.md).
 ## Standalone neural magnitude primitive (opt-in foundation)
 
 `magnitude_mlp_recipe.mlp_recipe` / `validate_mlp_recipe` bind the new closed
-`magnitude_mlp_recipe.v1`: ten closed profiles, including the original three
-and seven stopping variants. This small capacity/regularization comparison uses the
+`magnitude_mlp_recipe.v1`: sixteen closed profiles, including the original three,
+seven stopping variants and six chronological-holdout profiles. This small capacity/regularization comparison uses the
 installed sklearn `MLPRegressor`, not a GPU framework or combinatorial sweep.
 `training.magnitude_mlp.fit_mlp_predictions` receives caller-admitted matrices;
 both no-fit guards precede inspection. Fresh sklearn median imputation (retaining
@@ -27,8 +27,11 @@ The four `es_` profiles set `early_stopping=True`, `validation_fraction=0.1`,
 `n_iter_no_change=10` and `max_iter=400`; sklearn uses the fixed seed for a random 10%
 split of training rows, not a chronological holdout. The three `fixed200_` profiles set
 `early_stopping=False` and `max_iter=200`; reaching this fixed epoch budget is successful
-stopping, not a convergence failure. Only these profiles allow a convergence warning at
-the iteration cap. No evaluation labels enter fit or preprocessing; the caller still owns
+stopping, not a convergence failure. The six `chrono15_`/`chrono10_` profiles require aligned
+ISO event dates, hold out the latest 15%/10% rows chronologically, fit earlier rows with
+`partial_fit` and patience 20, and restore the best holdout weights; their 400-epoch cap is
+successful and reports `converged=False` only at the cap. Both the fixed-budget and
+chronological-holdout families allow the expected convergence warning at the iteration cap. No evaluation labels enter fit or preprocessing; the caller still owns
 causal folds, source admission, inner-only selection, resource budgets and progress reporting. One successful call
 is one component fit and returns detached `magnitude_mlp_fit.v1` predictions,
 recipe hash, iteration count and standardized-target optimizer loss (including L2,
@@ -45,8 +48,9 @@ The generic magnitude dispatcher now accepts this closed recipe and preserves th
 complete result; `size_fit_diagnostics` validates its per-horizon evidence for fresh
 execution and replay. Existing recipe values and the comparator remain unchanged.
 Request v6 admits the original three profiles; v1-v5 still refuse MLP. Request v7
-admits all ten profiles and accepts the same optional
-bounded-worker declaration as v6.
+admits all ten stopping profiles and accepts the same optional
+bounded-worker declaration as v6. Request v8 adds the six chronological-holdout
+profiles and keeps the same worker contract.
 New execution sources need fresh source seals; old reservations remain bound to
 original installed sources, with no resealing or mutation of running plans.
 

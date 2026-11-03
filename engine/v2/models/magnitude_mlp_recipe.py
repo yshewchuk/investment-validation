@@ -17,6 +17,12 @@ _PROFILES = {
     "fixed200_relu64x32_l2_1": ([64, 32], 1, "budget", "epoch_budget_success_no_retry"),
     "fixed200_relu64x32_l2_10": ([64, 32], 10, "budget", "epoch_budget_success_no_retry"),
     "fixed200_relu64x32_l2_100": ([64, 32], 100, "budget", "epoch_budget_success_no_retry"),
+    "chrono15_relu32_l2_0p01": ([32], 0.01, "chrono15", "epoch_budget_success_no_retry"),
+    "chrono15_relu32_l2_1": ([32], 1, "chrono15", "epoch_budget_success_no_retry"),
+    "chrono15_relu64x32_l2_0p01": ([64, 32], 0.01, "chrono15", "epoch_budget_success_no_retry"),
+    "chrono15_relu64x32_l2_1": ([64, 32], 1, "chrono15", "epoch_budget_success_no_retry"),
+    "chrono10_relu64x32_l2_0p01": ([64, 32], 0.01, "chrono10", "epoch_budget_success_no_retry"),
+    "chrono10_relu64x32_l2_1": ([64, 32], 1, "chrono10", "epoch_budget_success_no_retry"),
 }
 
 
@@ -32,8 +38,9 @@ def mlp_recipe(*, columns, feature_dictionary_hash, profile):
         raise ValueError("MLP requires a canonical dictionary hash and declared profile")
     layers, alpha, stopping, convergence = _PROFILES[profile]
     max_iter, n_iter_no_change = {
-        "training": (400, 15), "early": (400, 10), "budget": (200, 201)}[stopping]
-    return {
+        "training": (400, 15), "early": (400, 10), "budget": (200, 201),
+        "chrono15": (400, 20), "chrono10": (400, 20)}[stopping]
+    recipe = {
         "schema_version": "magnitude_mlp_recipe.v1", "model": "mlp", "profile": profile,
         "features": list(columns), "feature_dictionary_hash": feature_dictionary_hash,
         "estimator": {"class": "MLPRegressor", "params": {
@@ -55,6 +62,9 @@ def mlp_recipe(*, columns, feature_dictionary_hash, profile):
         "prediction_projection": "clip_zero", "fit_scope": "fold_and_horizon",
         "numerical_threads": 1, "component_fits": 1,
         "nonconvergence": convergence}
+    if stopping.startswith("chrono"):
+        recipe["requires_event_dates"] = True
+    return recipe
 
 
 def validate_mlp_recipe(recipe):
