@@ -151,7 +151,8 @@ One dedicated main-thread containment scope covers bootstrap-adjusted metadata/c
 | `DocumentError` or `TypeError` while parsing spec, source spec, or source-plan ref; `INVALID_REQUEST` from that parsing | `INVALID_EXPERIMENT_SPEC` |
 | Raw CAS integrity failure | `INTEGRITY_FAILED` |
 | Typed resource/holdout/identity failure | Passed through |
-| Unexpected programming error | Propagates |
+| Parent `MemoryError` | `RESOURCE_LIMIT_EXCEEDED` |
+| Other unexpected programming error | Propagates |
 
 Normal unwind closes streams/catalog and restores limits. Signal setup/restoration failure can retain a stricter CPU soft ceiling; treat any failed process as terminal, never reusable. Bootstrap limits come from validated caller JSON, not an authenticated durable seal: later changed-policy refusal before started/fits does not retroactively impose sealed limits over pre-admission I/O.
 
