@@ -24,7 +24,7 @@ Native registration, dataset/feature qualification, training-label availability,
 
 ## Incremental delivery
 
-Delivered helpers remove numerical strategy dependencies and bind the training baseline; they do not yet supply a standalone forecast-only lifecycle. Subsequent slices will publish complete all-horizon forecasts before admitted evaluation-target reads, aggregate proper-score/baseline comparisons and calibration/interval diagnostics, and expose a dedicated contained operator. They must retain every admitted event with explicit missingness, immutable source/request identity, native byte/resource bounds, consumed attempts and verified no-fit replay. They must not inherit the strategy request's quote/bridge/economics/book prerequisites.
+Delivered helpers remove numerical strategy dependencies, bind the training baseline, freeze all-horizon forecasts before admitted evaluation-target reads, and collect verified proper-score/baseline comparisons and calibration/interval diagnostics. A separate contained operator remains unwired. It must retain every admitted event with explicit missingness, immutable source/request identity, native byte/resource bounds, consumed attempts and verified no-fit replay, without inheriting the strategy request's quote/bridge/economics/book prerequisites.
 
 The report will distinguish data availability from predictive interval coverage, and calibration diagnostics from fitted calibration. A frozen fit's paired uncertainty is not a refitted model-search experiment. Development results do not authorize protected holdout opening, empirical accuracy claims, production activation or a downstream strategy test.
 
@@ -46,7 +46,7 @@ Frozen schema `distribution_prediction_frozen.v2` binds `canonical_json_fragment
 
 ## Admitted targets and evaluation
 
-This evaluation library is currently exercised only by synthetic tests. Its intended production consumer is the separate prediction-only runner and collection path; this slice supplies no standalone CLI, registration or execution grant.
+`distribution_prediction_collection.report_evidence` consumes `read_evaluated_outer` to reconstruct verified stored prediction evidence. The evaluation writer remains intended for a separate contained prediction-only runner; neither library supplies a standalone CLI, registration or execution grant.
 
 `evaluate_outer` consumes a create-only evaluation claim, freshly verifies frozen all-horizon evidence, then invokes the existing native bounded outer-target reader with the admitted normalized fold and source binding. The full native receipt, including physical inputs, cutoff, holdout identity and omissions, is validated and persisted alongside target rows. Exact event membership and explicit omission union are required; no quote, economic gate or trade choice filters the population. Every event/horizon receives all four proper-score and diagnostic status rows. Unresolved histogram tails retain valid bin scores but unavailable full-law interval/PIT diagnostics; missing targets and unavailable controls never become zero scores.
 
@@ -56,7 +56,7 @@ Default `PredictionPlan` roots also include the evaluation module and its transi
 
 ## Reporting supplied forecast evidence
 
-This source-free library API is currently exercised only by synthetic tests. The intended future consumer is the separate neutral prediction lifecycle; this slice has no wired production or existing strategy caller, runnable prediction-only CLI, or execution authority.
+`distribution_prediction_collection.report_evidence` calls `prediction_uncertainty`, which consumes this score report on regenerated native-admitted rows. The report helper remains source-free, with no standalone CLI or execution authority; collection owns provenance checks, and a future contained operator owns lifecycle execution.
 
 `distribution_prediction_report.prediction_report(scores, events)` consumes one pass of supplied score rows and the frozen event list (`event_id`, `ticker`, canonical `event_date`); it has no strategy, book, market or payoff dependency. Native callers still authenticate source/request/fit identity and bound input/output bytes. The helper checks unique events/row identities, consistent outer-year membership and observations across arms, and finite score/tail contracts. Missing rows remain explicit counts against the entire frozen population for every arm and horizon, including wholly absent horizons.
 
@@ -68,7 +68,7 @@ Malformed input/arithmetic refuses `INVALID_EXPERIMENT_SPEC` without mutation or
 
 ### Interval and PIT summaries
 
-This source-free diagnostic-report library is currently exercised only by synthetic tests. Native prediction collection is its intended consumer but is not wired in this slice; the helper supplies no standalone CLI or execution authority.
+`distribution_prediction_collection.report_evidence` calls this source-free helper on regenerated diagnostics that match verified forecast/target evidence. Collection owns provenance checks; the helper supplies no standalone CLI or execution authority.
 
 `distribution_prediction_diagnostic_report.prediction_diagnostic_report(diagnostics, events)` uses the same neutral row/metadata admission as the score report. Available rows require four fixed equal-tail interval levels, inclusive coverage, width and both PIT bounds. Any present intervals on any status require the complete ordered levels, finite nonnegative geometry, exact width, nesting and boolean coverage; coverage agrees with the observation when one exists. Any present PIT bound must be numeric in [0, 1], and paired bounds must be ordered. Unavailable/missing-target rows may omit fields or retain valid partial fields. Each arm/horizon reports interval coverage **and width**, their count, and complete available/unavailable/missing-target/missing-row counts against frozen population. Unavailable diagnostics never become zero-width or uncovered observations.
 
@@ -76,8 +76,18 @@ Detached original rows retain exact PIT brackets, status reasons and supplied pr
 
 ### Conditional cluster uncertainty
 
-This source-free uncertainty-report library is currently exercised only by synthetic tests. Native prediction collection is its intended consumer but is not wired in this slice; the helper supplies no standalone CLI or execution authority.
+`distribution_prediction_collection.report_evidence` calls this source-free helper with the admitted prediction request’s uncertainty policy and regenerated score rows. Collection owns provenance checks; the helper supplies no standalone CLI or execution authority.
 
 `distribution_prediction_uncertainty.prediction_uncertainty(scores, events, *, seed, resamples, block_days, block_origin, confidence)` validates and augments the score report once. Native callers must seal and bound the explicit policy before target reads; this pure helper cannot authenticate that seal. All CRPS contrasts and fixed probability-minus-observed tail calibration gaps receive ticker and occupied fixed-calendar-block percentile intervals. Calendar blocks use frozen `event_date`, never a trade decision clock. One draw from the full frozen cluster roster is reused across every arm/horizon/measurement, keeping whole events together despite differing scoreability.
 
 Each interval uses an event-weighted ratio of sums, reports full/scoreable cluster counts and used/empty replicate counts, and is conditional on frozen fits and nonempty scoreable replicates. Fewer than two scoreable clusters is explicitly unavailable. Empty scoreable replicates never become zeros; percentiles use NumPy's explicit linear method, with no significance cutoff or fitted calibration. Interval-coverage/width uncertainty is not supplied by this slice. The fixed measurement family has O(events + resamples) workspace and O(resamples × occupied clusters) work per clustering, with bounded progress and no replicate-by-event matrix. Invalid policy/arithmetic refuses `INVALID_EXPERIMENT_SPEC` with no partial return, mutation, fit, read, retry or write; native containment remains the resource authority.
+
+## Compact report evidence collection
+
+`distribution_prediction_collection.report_evidence(run, fits)` freshly admits the prediction seal and native plan, takes event metadata from the verified source registration's `size_panel.context.target_events`, rejects duplicate metadata before filtering, and requires the entire sealed outer roster. Every outer year's `read_evaluated_outer` regenerates and compares bounded forecast/control/baseline/target/score/diagnostic evidence; collection independently requires exact four-arm/all-horizon row identities and matching observed targets. It reads stored admitted evidence, never new source outcomes, and performs no fitting or writes.
+
+The returned `(groups, summaries)` binds each ordered outer year to its evaluation-record content hash. `forecast` and `diagnostics` summaries use explicit compact schemas, preserve numeric/count/conditional-uncertainty outputs and excluded-event counts, and omit duplicated raw rows/events and paired/excluded event-ID lists. Original verified sections and the native registration retain the full evidence; no whole-population row is manufactured for publication. A future contained operator owns bounded summary publication and comparison with stored completion. This collection library is intentionally unwired from any operator; it has no standalone CLI or independent execution authority.
+
+Population/identity or malformed stored shape refuses `EXPERIMENT_IDENTITY_CONFLICT`; native/CAS/report/resource refusals propagate with no partial result, retry or repair. One source-metadata scan plus one evaluated replay per outer year precedes the existing bounded report calculations, retaining O(events + score rows + resamples) working storage. There is no cross-call cache; progress is bounded by outer years and the underlying replay/report stages.
+
+Default `PredictionPlan` roots include the collection module and its transitive score, diagnostic-report and uncertainty implementations. Source-only changes invalidate the saved seal before evidence reconstruction or reporting; explicit subclass overrides remain responsible for their complete closure. The adapter reuses native admission/CAS readers and existing report APIs rather than adding another execution or storage framework.
