@@ -66,8 +66,12 @@ valid cutoffless legacy descriptors are verified then omitted. Resolution
 leaves the map empty by default; an opted-in binding verifies at most 34
 chooser-fold objects. The
 public `ChooserFoldReference` type names this resolver contract.
-Request-specific selection and nightly chooser wiring are not performed here.
-The reader raises
+`resolve_release_binding` does not select per-request state;
+`select_chooser_state(binding, event_date, as_of) -> ChooserState` derives the
+fold start from the event/as-of dates (the earlier event/decision month),
+selects the unique exact-cutoff analog pool, the unique v1 admissible table and
+the causal producer pools for that fold start, and is currently unused and not
+wired into nightly scoring. The reader raises
 `NoCurrentRelease`/`ModelNotReady` (never a legacy or cached fallback) when
 the pointer, catalog or a named member is not ready.
 `engine.v2.ops.native_score_batch.py`'s `native_score_batch` job
@@ -123,7 +127,7 @@ columns.
 is `DYNAMIC_MENU_REFUSAL_CODES`. These are pure preparatory accounting contracts,
 currently consumed only by focused tests. No runtime dispatcher uses them.
 
-<!-- public-interface: application, compatibility, dynamic_outcomes, DynamicMenuIdentity, DynamicCandidateOutcome, validate_dynamic_menu, DynamicMenuRefusal, DYNAMIC_MENU_REFUSAL_CODES, financial, frozen_batch, frozen_executor, frozen_inputs, identity, native_analog_query, release_bindings, source_inputs, gate_fold_selection, SizeFoldCatalog, index_size_folds, select_gate_forecast_source, gate_forecast_source, GateForecastSource, stages, FrozenInputsError, binding_feature_row, build_inference_requests, validate_answer_free, canonical_request, dependency_hash, financial_diagnostics, FrozenBatchPreflightError, FrozenBindingConflict, request_hash, replay, score_batch, score_event, score_frozen, score_frozen_batch, score_id, score_many, score_one, ModelIdentity, ModelNotReady, NoCurrentRelease, ReleaseBindingError, ScoringReleaseBinding, ChooserFoldReference, resolve_release_binding, resolve_gate_policy, resolve_chooser_fold_authoring_contexts, NativeScoreInputs, SourceBundle, FrozenStageExecutor, FrozenStageRefusal, FrozenStageResult, STAGE_NAMES, StageReceipt, build_native_score_inputs, analog_display_fields, DISPLAY_ANALOG_FIELDS, StageObservation, quote_domain_map, assemble_nightly_source_bundle, validated_as_of, NightlySourceBundleRefusal -->
+<!-- public-interface: application, compatibility, dynamic_outcomes, DynamicMenuIdentity, DynamicCandidateOutcome, validate_dynamic_menu, DynamicMenuRefusal, DYNAMIC_MENU_REFUSAL_CODES, financial, frozen_batch, frozen_executor, frozen_inputs, identity, native_analog_query, release_bindings, source_inputs, gate_fold_selection, SizeFoldCatalog, index_size_folds, select_gate_forecast_source, gate_forecast_source, GateForecastSource, stages, FrozenInputsError, binding_feature_row, build_inference_requests, validate_answer_free, canonical_request, dependency_hash, financial_diagnostics, FrozenBatchPreflightError, FrozenBindingConflict, request_hash, replay, score_batch, score_event, score_frozen, score_frozen_batch, score_id, score_many, score_one, ModelIdentity, ModelNotReady, NoCurrentRelease, ReleaseBindingError, ScoringReleaseBinding, ChooserFoldReference, ChooserState, select_chooser_state, resolve_release_binding, resolve_gate_policy, resolve_chooser_fold_authoring_contexts, NativeScoreInputs, SourceBundle, FrozenStageExecutor, FrozenStageRefusal, FrozenStageResult, STAGE_NAMES, StageReceipt, build_native_score_inputs, analog_display_fields, DISPLAY_ANALOG_FIELDS, StageObservation, quote_domain_map, assemble_nightly_source_bundle, validated_as_of, NightlySourceBundleRefusal -->
 
 ## Consumers
 
