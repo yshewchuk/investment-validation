@@ -172,7 +172,7 @@ def test_missing_binding_refuses_before_row_or_target_access(mutation):
 
 def test_economic_controls_refuse_foreign_receipt_before_numeric_work(monkeypatch):
     from engine.v2.ops.errors import OpsError
-    from experiments import distribution_scores as module
+    from experiments import distribution_prediction_scores as module
 
     result, control = forecast(), pool()
     result["receipt"]["claim"]["plan_id"] = "foreign"
@@ -186,7 +186,7 @@ def test_economic_controls_refuse_foreign_receipt_before_numeric_work(monkeypatc
 @pytest.mark.parametrize("empty", [False, True])
 def test_score_refuses_actual_residual_pool_from_another_scope_before_scoring(monkeypatch, outer_year, horizon, empty):
     from engine.v2.ops.errors import OpsError
-    from experiments import distribution_scores as module
+    from experiments import distribution_prediction_scores as module
     from experiments.distribution_oof import residual_pool
     from tests.v2.research.test_distribution_oof import Fits
 
@@ -209,7 +209,7 @@ def test_score_refuses_actual_residual_pool_from_another_scope_before_scoring(mo
 @pytest.mark.parametrize("empty", [False, True])
 def test_score_refuses_matching_receipt_pool_outside_outer_role_before_targets(role, inner_year, empty):
     from engine.v2.ops.errors import OpsError
-    from experiments import distribution_scores as module
+    from experiments import distribution_prediction_scores as module
 
     control = pool()
     control["destination"].update(role=role, inner_year=inner_year)
@@ -378,7 +378,7 @@ def test_valid_explicit_economics_keep_availability_and_usd_results(availability
 def test_score_progress_brackets_iteration_and_ticks_once_per_event(monkeypatch):
     from contextlib import contextmanager
 
-    import experiments.distribution_scores as module
+    import experiments.distribution_prediction_scores as module
 
     events = []
     @contextmanager
