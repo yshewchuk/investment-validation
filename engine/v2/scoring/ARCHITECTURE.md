@@ -734,10 +734,8 @@ Chooser references are keyed by `(producer_output, fold_start)` and authoring co
 
 #### Chooser state members
 
-The chooser families, `paired_residual_pool` and `trailing_pnl_cutoff` (four families in all; the table below applies to all four; the final two keys are `(models, cutoff)` and `(history_id, month)`) use `FrozenStateLoader` with a 32 MiB per-object cap to verify bytes and decoded hashes; only regular files are admitted.
-Oversized objects, including growth during the bounded read, are refused before hashing or decoding; this per-object cap is an admission limit, not a total release-memory bound.
-Loading establishes release membership and typed integrity; selecting the exact pool cutoff/table version and causal lineage remains the caller's request-time responsibility.
-No pool rows are filtered, sorted, fitted or substituted during resolution.
+The chooser families, `paired_residual_pool` and `trailing_pnl_cutoff` (four families in all; the table below applies to all four; the final two keys are `(models, cutoff)` and `(history_id, month)`) use `FrozenStateLoader` with a 32 MiB per-object cap — an admission limit, not a total release-memory bound — to verify bytes and decoded hashes; only regular files are admitted, and oversized objects, including growth during the bounded read, are refused before hashing or decoding.
+Loading establishes release membership and typed integrity; selecting the exact pool cutoff/table version and causal lineage remains the caller's request-time responsibility, and no pool rows are filtered, sorted, fitted or substituted during resolution.
 
 | Condition | Outcome |
 |---|---|
@@ -748,14 +746,16 @@ No pool rows are filtered, sorted, fitted or substituted during resolution.
 | Valid pool declares `cutoff=None` | Preserve the existing artifact identity; loading does not authorize use for a request |
 | Cache, retry, transaction, partial write, idempotency | Existing release-reader R2–R6 apply: fresh verification per call, no internal retry or writes, and equal unchanged bindings |
 
-These members are optional independently. A declared-invalid chooser member refuses the whole release resolution even when a caller scores another strategy.
-
 #### `select_chooser_state(binding, event_date, as_of) -> ChooserState`
 
-Inputs are a verified `ScoringReleaseBinding`, the event date, the canonical as-of date, and the earlier event/decision month fold start; this API is currently unused until 1e.
-Selection takes the unique exact-cutoff analog pool, the unique v1 admissible-depth table, the shared size pool, and the causal implied-T1/runup pools for that fold start; `ChooserState` returns those pools with fold provenance, producer bindings, and artifact refs.
-Malformed dates or missing, ambiguous, or unusable state raise path-free `ModelNotReady` naming the relevant member id; no fallback is selected.
-Cutoffless legacy descriptors remain verified and omitted from selectable references.
+Inputs are a verified `ScoringReleaseBinding`, the event date and the canonical as-of date; the fold start is derived from those dates (the earlier event/decision month), never a function argument, and the returned `ChooserState` carries the selected pools with fold provenance, producer bindings and artifact refs. The selector is currently unused and not called by nightly scoring; selection adds no fold cache or retry, and cutoffless legacy descriptors remain verified then omitted.
+
+| Condition | Outcome |
+|---|---|
+| malformed dates, malformed catalog, or a serving-fold load error | `ModelNotReady("chooser state", ...)` |
+| no unique exact-cutoff analog pool | `ModelNotReady("chooser_analog_pool", ...)` |
+| no unique v1 admissible-depth table | `ModelNotReady("admissible_table:dyn_sv", ...)` |
+| missing, malformed or noncausal producer descriptor/reference | `ModelNotReady("tier4_folds:<role>", ...)` |
 
 #### Driver residual pool member (issue #479, release-loader slice)
 

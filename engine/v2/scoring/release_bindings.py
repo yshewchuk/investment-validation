@@ -26,7 +26,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Callable, Mapping, TypeVar
 
-from engine.v2.foundation import canonical_json, content_hash, from_document
+from engine.v2.foundation import canonical_json, content_hash, from_document, to_document
 from engine.v2.models import deployment
 from engine.v2.models.admissible_table import N_ADMISSIBLE_TABLE_ID, AdmissibleDepthTable
 from engine.v2.models.analog_artifact import BoardAnalogPoolArtifact
@@ -400,8 +400,6 @@ def _chooser_fold_descriptor(
         descriptor = matches[0]
         require_causal_cutoff(descriptor.training_cutoff, descriptor.fold_start, decision_cutoff)
         return descriptor
-    except ModelNotReady:
-        raise
     except Exception:
         raise ModelNotReady(member_id, "chooser fold descriptor is missing or unusable") from None
 
@@ -419,10 +417,7 @@ def _load_chooser_fold_state(
                           "interval_floor": source.interval_floor}}
     producer_bindings: dict[str, Any] = {}
     provenance: dict[str, Mapping[str, str]] = {}
-    size_hash = getattr(source, "artifact_hash", None)
-    if not isinstance(size_hash, str) or not size_hash:
-        raise ValueError("size artifact hash missing")
-    artifact_refs: list[str] = [size_hash,
+    artifact_refs: list[str] = [source.artifact_hash,
                                 content_hash({"interval_floor": source.interval_floor})]
     for role in ("implied_t1", "runup_move"):
         descriptor = _chooser_fold_descriptor(binding, catalog, role, fold_start, decision_cutoff)
@@ -455,7 +450,7 @@ def _load_chooser_fold_state(
         provenance[descriptor.producer_output] = {
             "training_cutoff": ref.training_cutoff, "fold_start": ref.fold_start,
             "descriptor_hash": ref.descriptor_hash}
-        artifact_refs.extend([ref.descriptor_hash, content_hash(descriptor.policy)])
+        artifact_refs.extend([ref.descriptor_hash, content_hash(to_document(descriptor.policy))])
     return pools, producer_bindings, provenance, tuple(artifact_refs)
 
 
