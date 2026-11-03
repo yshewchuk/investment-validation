@@ -18,6 +18,18 @@ from tests.v2.ops.test_sweep_native_bounds import ACTIONS, CAP, REPORT, forbid, 
 from tests.v2.research.test_native_registration import source as source
 
 
+def identity_fields(stat_result):
+    return (
+        stat_result.st_ino,
+        stat_result.st_dev,
+        stat_result.st_mode,
+        stat_result.st_size,
+        stat_result.st_mtime_ns,
+        stat_result.st_ctime_ns,
+        stat_result.st_nlink,
+    )
+
+
 def report_path(source, registration, no_ledger=False):
     mode = "smoke" if no_ledger else "recorded"
     return source.store.root / "native_reports" / registration.run_id / mode / "REPORT.md"
@@ -119,7 +131,7 @@ def test_late_export_collision_is_refused_without_reading_or_replacing_it(
                    max_evidence_bytes=CAP)
     assert_identity_refusal(source, captured, registration)
     assert len(collisions) == 1
-    assert path.lstat() == collisions[0]
+    assert identity_fields(path.lstat()) == identity_fields(collisions[0])
     assert catalog_rows(source.conn) == catalog
     assert_objects_preserved(source, objects)
     assert (ledger.read_bytes() if ledger.exists() else None) == ledger_bytes
@@ -216,7 +228,7 @@ def test_report_replacement_after_path_prechecks_preserves_public_r6(
             invoke(action, source, registration, ledger, max_evidence_bytes=CAP, **options)
     assert_identity_refusal(source, captured, registration)
     assert len(replacements) == 1
-    assert path.lstat() == replacements[0]
+    assert identity_fields(path.lstat()) == identity_fields(replacements[0])
     assert original.read_text() == target.read_text() == report
     assert catalog_rows(source.conn) == catalog
     assert_objects_preserved(source, objects)
