@@ -48,6 +48,7 @@ from engine.v2.scoring.nightly_source_bundle import (
     validated_as_of,
 )
 from engine.v2.scoring.release_bindings import (
+    ChooserState,
     ModelIdentity,
     ModelNotReady,
     ScoringReleaseBinding,
@@ -136,6 +137,30 @@ class _ResolvedDriver:
     output: str
     identity_key: str
     identity: ModelIdentity
+
+
+@dataclass(slots=True)
+class _ChooserSelection:
+    """One row's memoized chooser selection, shared by projection and declaration."""
+
+    resolved: bool = False
+    state: ChooserState | None = None
+
+
+def _selected_chooser_state(
+    selection: _ChooserSelection,
+    binding: ScoringReleaseBinding,
+    event_date: Any,
+    as_of: Any,
+) -> ChooserState | None:
+    """Select the chooser state at most once per row; ``None`` means not ready."""
+    if not selection.resolved:
+        selection.resolved = True
+        try:
+            selection.state = select_chooser_state(binding, event_date, as_of)
+        except ModelNotReady:
+            selection.state = None
+    return selection.state
 
 
 # RUNUP's forecast declarations; frozen model-state requirements are separate.
@@ -719,12 +744,17 @@ def _chooser_bundle_or_refusal(
     binding: ScoringReleaseBinding,
     event_date: Any,
     as_of: Any,
+    selection: _ChooserSelection | None = None,
 ) -> SourceBundle | NativeScoreBatchRowRefusal:
     """Declare the selected DYN-SV chooser state on ``bundle``, or refuse the row.
 
     ``ModelNotReady`` becomes a fixed ``MODEL_NOT_READY`` refusal; detail never published."""
     try:
-        state = select_chooser_state(binding, event_date, as_of)
+        if selection is None:
+            selection = _ChooserSelection()
+        state = _selected_chooser_state(selection, binding, event_date, as_of)
+        if state is None:
+            raise ModelNotReady("chooser state", "chooser state is missing or unusable")
         chooser = binding.model_identity.get("chooser:DYN-SV")
         implied = state.producer_bindings.get("pred_im_t1_d14")
         runup = state.producer_bindings.get("pred_runup_abs_move_d14")
@@ -778,6 +808,7 @@ def _apply_declared_chooser(
     *,
     binding: ScoringReleaseBinding,
     as_of: Any,
+    selection: _ChooserSelection | None = None,
 ) -> SourceBundle | NativeScoreBatchRowRefusal:
     """Apply the chooser block for a chooser-enabled spec, else keep ``bundle``."""
     if not spec.chooser:
@@ -785,7 +816,7 @@ def _apply_declared_chooser(
     return _chooser_bundle_or_refusal(
         bundle, key, binding=binding,
         event_date=event.calendar_row.get("event_date"),
-        as_of=as_of)
+        as_of=as_of, selection=selection)
 
 
 def _gate_source_or_refusal(
@@ -888,6 +919,7 @@ def _project_member_features(
     event: NightlyEventInputs,
     binding: ScoringReleaseBinding,
     feature_names: Sequence[str], as_of: Any = None,
+    selection: _ChooserSelection | None = None,
 ) -> Sequence[str] | NativeScoreBatchRowRefusal:
     """Project required staged chooser/producer features for one chooser row.
 
@@ -903,9 +935,11 @@ def _project_member_features(
     if not isinstance(event.panel_row, Mapping) or not isinstance(event.tier4_row, Mapping):
         return NativeScoreBatchRowRefusal(
             key, "MISSING_STAGED_INPUT", "required member feature is missing from staged rows")
-    try:
-        state = select_chooser_state(binding, event.calendar_row.get("event_date"), as_of)
-    except ModelNotReady:
+    if selection is None:
+        selection = _ChooserSelection()
+    state = _selected_chooser_state(
+        selection, binding, event.calendar_row.get("event_date"), as_of)
+    if state is None:
         return feature_names
     projected = set(_CHOOSER_PRIMITIVES)
     for producer in state.producer_bindings.values():
@@ -935,6 +969,7 @@ def _released_member_bundle_or_refusal(
     drivers: tuple[_ResolvedDriver, ...],
     as_of: Any,
     snapshot_id: str,
+    selection: _ChooserSelection | None = None,
 ) -> SourceBundle | NativeScoreBatchRowRefusal:
     """Declare release artifacts, then apply the chooser, for one row."""
     bundle = _with_release_artifacts(
@@ -948,7 +983,8 @@ def _released_member_bundle_or_refusal(
     if isinstance(bundle, NativeScoreBatchRowRefusal):
         return bundle
     return _apply_declared_chooser(
-        bundle, key, spec, event, binding=binding, as_of=as_of)
+        bundle, key, spec, event, binding=binding, as_of=as_of,
+        selection=selection)
 
 
 def _assemble_one_event(
@@ -992,7 +1028,9 @@ def _assemble_one_event(
         key, spec, gate_policy, feature_names, drivers, gate_identity)
     if refusal is not None:
         return refusal
-    feature_names = _project_member_features(key, event, binding, feature_names, as_of)
+    selection = _ChooserSelection()
+    feature_names = _project_member_features(
+        key, event, binding, feature_names, as_of, selection)
     if isinstance(feature_names, NativeScoreBatchRowRefusal):
         return feature_names
     bundle = _bundle_or_refusal(
@@ -1007,7 +1045,7 @@ def _assemble_one_event(
         return NativeScoreBatchRowRefusal(
             key, "MISSING_STAGED_INPUT", "calendar_row missing event_id")
     bundle = _released_member_bundle_or_refusal(
-        bundle, key, event, binding, spec, drivers, as_of, snapshot_id)
+        bundle, key, event, binding, spec, drivers, as_of, snapshot_id, selection)
     if isinstance(bundle, NativeScoreBatchRowRefusal):
         return bundle
     try:

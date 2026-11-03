@@ -291,6 +291,79 @@ def test_chooser_binding_guard_refuses_missing_producer_binding_id(
         "MODEL_NOT_READY", "DYN-SV chooser state missing or unusable")
 
 
+def _state_with_producer_features():
+    state = _state()
+    state.producer_bindings = {
+        "pred_im_t1_d14": SimpleNamespace(
+            binding_id="producer-im", feature_order=("zeta_distinct",)),
+        "pred_runup_abs_move_d14": SimpleNamespace(
+            binding_id="producer-ru", feature_order=("eta_distinct",)),
+    }
+    return state
+
+
+def test_one_selection_shared_by_projection_and_declaration(monkeypatch):
+    state = _state_with_producer_features()
+    calls = []
+
+    def fake(binding, event_date, as_of):
+        calls.append((binding, event_date, as_of))
+        return state
+
+    monkeypatch.setattr(nsb, "select_chooser_state", fake)
+    event = _projection_event("TWIN-P")
+    binding = _binding()
+    selection = nsb._ChooserSelection()
+
+    projected = nsb._project_member_features(
+        event.key, event, binding, ("signal",), as_of="2026-01-10",
+        selection=selection)
+    assert not isinstance(projected, NativeScoreBatchRowRefusal)
+    assert {"zeta_distinct", "eta_distinct", "signal"} <= set(projected)
+
+    result = nsb._chooser_bundle_or_refusal(
+        _bundle(), event.key, binding=binding,
+        event_date=event.calendar_row.get("event_date"),
+        as_of="2026-01-10", selection=selection)
+
+    assert not isinstance(result, NativeScoreBatchRowRefusal)
+    assert len(calls) == 1
+    assert result.chooser_recipe["binding_id"] == "chooser"
+    assert result.chooser_recipe["producers"] == {
+        "pred_im_t1_d14": {"binding_id": "producer-im"},
+        "pred_runup_abs_move_d14": {"binding_id": "producer-ru"},
+    }
+
+
+def test_one_selection_shared_when_selector_not_ready(monkeypatch):
+    calls = []
+
+    def refuse(*_args, **_kwargs):
+        calls.append(1)
+        raise ModelNotReady("chooser_analog_pool", "no unique analog pool for cutoff")
+
+    monkeypatch.setattr(nsb, "select_chooser_state", refuse)
+    event = _projection_event("TWIN-P")
+    binding = _binding()
+    selection = nsb._ChooserSelection()
+    kept = ("signal", "pred_abs_move")
+
+    projected = nsb._project_member_features(
+        event.key, event, binding, kept, as_of="2026-01-10",
+        selection=selection)
+    assert projected is kept
+
+    result = nsb._chooser_bundle_or_refusal(
+        _bundle(), event.key, binding=binding,
+        event_date=event.calendar_row.get("event_date"),
+        as_of="2026-01-10", selection=selection)
+
+    assert isinstance(result, NativeScoreBatchRowRefusal)
+    assert (result.code, result.detail) == (
+        "MODEL_NOT_READY", "DYN-SV chooser state missing or unusable")
+    assert len(calls) == 1
+
+
 def test_null_panel_row_refuses_before_chooser_state_selection(monkeypatch):
     def unexpected(*_args, **_kwargs):
         raise AssertionError("malformed staged row must not select chooser state")
