@@ -12,7 +12,7 @@ from engine.v2.ops.errors import fail
 from engine.v2.research.magnitude_distribution import bin_index, histogram
 from engine.v2.research.progress import Progress, stage
 from experiments.distribution_candidate_fit import fit_candidate
-from experiments.distribution_class_support import training_support
+from experiments.distribution_class_support import early_stopping_decision, training_support
 from experiments.magnitude_search_evidence import fit_evidence
 from experiments.magnitude_search_records import append_record, read_record
 from experiments.magnitude_search_shards import iter_section, write_section
@@ -113,9 +113,17 @@ class DistributionFits:
         classes = diagnostics["classifier"].get("class_labels")
         _require(type(classes) is list and all(type(value) is int for value in classes)
                  and sorted(classes) == support["observed_class_labels"])
-        iterations, trees = recipe["classifier"]["params"]["max_iter"], support["trees_per_iteration"]
-        expected = {"training_support": support, "classifier": {"class_labels": classes,
-            "iterations": iterations, "trees_per_iteration": trees, "total_trees": iterations * trees},
+        max_iter, trees = recipe["classifier"]["params"]["max_iter"], support["trees_per_iteration"]
+        iterations = diagnostics["classifier"].get("iterations")
+        _require(type(iterations) is int)
+        classifier = {"class_labels": classes, "iterations": iterations,
+                      "trees_per_iteration": trees, "total_trees": iterations * trees}
+        decision = early_stopping_decision(recipe, support)
+        _require(iterations == max_iter if not decision["used"] else 1 <= iterations <= max_iter)
+        if recipe.get("classifier_variant") == "regularised_v1":
+            classifier.update(early_stopping_requested=decision["requested"],
+                early_stopping_used=decision["used"], fallback_reason=decision["fallback_reason"])
+        expected = {"training_support": support, "classifier": classifier,
             "point": {"iterations_declared": recipe["point_recipe"]["estimator"]["params"]["max_iter"],
                       "trees_per_iteration_declared": 1}, "training_rows": len(labels), "prediction_rows": len(events),
             "all_null_training_columns": [name for index, name in enumerate(recipe["point_recipe"]["features"])

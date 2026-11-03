@@ -13,28 +13,25 @@ from engine.v2.research.magnitude_distribution import histogram
 from experiments import distribution_fitted as fitted
 from experiments.distribution_candidate_fit import fit_candidate as numeric_fit
 from experiments.distribution_candidate_recipe import candidate_recipe, trial_identity
-from experiments.distribution_class_support import training_support
+from experiments.distribution_class_support import early_stopping_decision, training_support
 
 
-@pytest.fixture
-def case(tmp_path, monkeypatch):
+def _case(tmp_path, monkeypatch, *, train, labels, events):
     recipe = candidate_recipe("H")
     columns = recipe["point_recipe"]["features"]
-    train, events = ["Tz", "Ta", "Tm", "Tb"], ["Z", "A"]
-    labels = [0.0, 0.25, 20.0, 22.0]
     features = [{"event_id": event, "context_id": content_hash("context"), "horizon_sessions": horizon,
                  **{name: (None if index == 1 and event in train else 0.0) for index, name in enumerate(columns)}}
                 for event in train + events for horizon in (5, 3, 1)]
     inputs = {"features": features, "training": [{"event_id": event, "absolute_move_pct": y} for event, y in zip(train, labels)]}
     calls, records = [], {("source-run", "seal"): {"untouched": True}}
-    state = {"plan_id": content_hash("plan"), "inputs": inputs}
+    state = {"plan_id": content_hash("plan"), "inputs": inputs, "recipe": recipe}
 
     def context(role, outer, inner):
         calls.append(("context", role, outer, inner))
         fold = {"training_candidate_event_ids": train, "evaluation_event_ids": events,
                 "year": inner if role == "inner" else outer, "training_labels_before": "2023-01-01"}
-        plan = {"plan_id": state["plan_id"], "recipe": recipe, "context_id": content_hash("context")}
-        trials = [trial_identity(recipe, context_id=plan["context_id"], fold_id=content_hash([role, outer, inner, fold]),
+        plan = {"plan_id": state["plan_id"], "recipe": state["recipe"], "context_id": content_hash("context")}
+        trials = [trial_identity(state["recipe"], context_id=plan["context_id"], fold_id=content_hash([role, outer, inner, fold]),
             inputs_id=content_hash("inputs"), budget_id=content_hash("budget"), horizon=horizon, role=role) for horizon in (5, 3, 1)]
         admission = {"trials": trials, "plan_id": plan["plan_id"], "manifest": {"actual": "manifest"}}
         return deepcopy({"plan": plan, "native_plan": {"folds": []}, "fold": fold, "admission": admission, "inputs": state["inputs"]})
@@ -61,17 +58,29 @@ def case(tmp_path, monkeypatch):
         support = training_support(counts)
         masses = [count / len(y) for count in counts]
         trees = support["trees_per_iteration"]
+        iterations = state.get("iterations", 100)
+        classifier = {"class_labels": support["observed_class_labels"], "iterations": iterations,
+            "trees_per_iteration": trees, "total_trees": trees * iterations}
+        if recipe.get("classifier_variant") == "regularised_v1":
+            decision = early_stopping_decision(recipe, support)
+            classifier.update(early_stopping_requested=decision["requested"],
+                early_stopping_used=decision["used"], fallback_reason=decision["fallback_reason"])
         return {"schema_version": "distribution_candidate_fit.v1", "recipe_id": recipe["recipe_id"],
             "probabilities": [masses.copy() for _ in prediction], "point_predictions": [sum(y) / len(y)] * len(prediction),
             "tail": histogram(masses, tail_excesses=[value - 20 for value in y if value >= 20] or None)["tail"],
-            "diagnostics": {"training_support": support, "classifier": {"class_labels": support["observed_class_labels"],
-                "iterations": 100, "trees_per_iteration": trees, "total_trees": trees * 100},
+            "diagnostics": {"training_support": support, "classifier": classifier,
                 "point": {"iterations_declared": 100, "trees_per_iteration_declared": 1},
                 "all_null_training_columns": [columns[1]], "training_rows": len(y), "prediction_rows": len(prediction)}}
 
     monkeypatch.setattr(fitted, "fit_candidate", fit)
     return SimpleNamespace(fits=fitted.DistributionFits(trials), trials=trials, recipe=recipe, columns=columns,
         state=state, records=records, calls=calls, context=context, events=events, inputs=inputs)
+
+
+@pytest.fixture
+def case(tmp_path, monkeypatch):
+    return _case(tmp_path, monkeypatch, train=["Tz", "Ta", "Tm", "Tb"],
+                 labels=[0.0, 0.25, 20.0, 22.0], events=["Z", "A"])
 
 
 def _error(code, action):
@@ -197,6 +206,128 @@ def test_diagnostics_checked_against_admitted_training_not_only_hash(case, membe
     record["diagnostics"][member] = None
     _rehash(record)
     _error("EXPERIMENT_IDENTITY_CONFLICT", lambda: case.fits.read("inner", "2024", 1, "2023"))
+
+
+def _regularised(case, labels, iterations=None):
+    case.state["recipe"] = candidate_recipe("H", "regularised_v1")
+    for row, label in zip(case.inputs["training"], labels):
+        row["absolute_move_pct"] = label
+    if iterations is not None:
+        case.state["iterations"] = iterations
+
+
+def _large_regularised(tmp_path, monkeypatch, iterations=None):
+    labels = [0.0] * 6 + [0.25] * 6
+    case = _case(tmp_path, monkeypatch, train=[f"T{index}" for index in range(12)],
+                 labels=labels, events=["Z", "A"])
+    _regularised(case, labels, iterations=iterations)
+    return case
+
+
+def test_regularised_singleton_fallback_replays_with_recorded_evidence(case):
+    _regularised(case, [0.0, 0.0, 0.25, 20.0])
+    result = case.fits.fit("inner", "2024", 1, "2023")
+    classifier = result["receipt"]["diagnostics"]["classifier"]
+    assert classifier["early_stopping_requested"] is True
+    assert classifier["early_stopping_used"] is False
+    assert classifier["fallback_reason"] == "class_count_below_2"
+    assert classifier["iterations"] == 100
+    assert case.fits.read("inner", "2024", 1, "2023") == result
+
+
+def test_regularised_real_fit_replays_without_refitting_and_keeps_fallback(case, monkeypatch):
+    _regularised(case, [0.0, 0.0, 0.25, 20.0])
+    monkeypatch.setattr(fitted, "fit_candidate", numeric_fit)
+    result = case.fits.fit("inner", "2024", 1, "2023")
+    classifier = result["receipt"]["diagnostics"]["classifier"]
+    assert classifier["early_stopping_requested"] is True
+    assert classifier["early_stopping_used"] is False
+    assert classifier["fallback_reason"] == "class_count_below_2"
+    assert classifier["iterations"] == 100
+    monkeypatch.setattr(fitted, "fit_candidate", lambda *args, **kwargs: pytest.fail("replay fitted"))
+    assert case.fits.read("inner", "2024", 1, "2023") == result
+
+
+def test_regularised_small_validation_split_fallback_replays(case):
+    _regularised(case, [0.0, 0.0, 0.25, 0.25])
+    result = case.fits.fit("inner", "2024", 1, "2023")
+    classifier = result["receipt"]["diagnostics"]["classifier"]
+    assert classifier["early_stopping_requested"] is True
+    assert classifier["early_stopping_used"] is False
+    assert classifier["fallback_reason"] == "validation_split_too_small"
+    assert classifier["iterations"] == 100
+    assert case.fits.read("inner", "2024", 1, "2023") == result
+
+
+def test_regularised_small_validation_split_fallback_tamper_refuses(case):
+    _regularised(case, [0.0, 0.0, 0.25, 0.25])
+    case.fits.fit("inner", "2024", 1, "2023")
+    record = _receipt(case)
+    record["diagnostics"]["classifier"]["fallback_reason"] = None
+    _rehash(record)
+    _error("EXPERIMENT_IDENTITY_CONFLICT", lambda: case.fits.read("inner", "2024", 1, "2023"))
+
+
+def test_regularised_early_stopping_replays_actual_iterations(tmp_path, monkeypatch):
+    case = _large_regularised(tmp_path, monkeypatch, iterations=7)
+    result = case.fits.fit("inner", "2024", 1, "2023")
+    classifier = result["receipt"]["diagnostics"]["classifier"]
+    assert classifier["iterations"] == 7
+    assert classifier["early_stopping_requested"] is True
+    assert classifier["early_stopping_used"] is True
+    assert classifier["fallback_reason"] is None
+    assert case.fits.read("inner", "2024", 1, "2023") == result
+
+
+@pytest.mark.parametrize("change", ["missing_requested", "missing_used", "missing_reason",
+    "used_true", "requested_false", "reason_null", "iterations_short"])
+def test_regularised_fabricated_fallback_evidence_refuses(case, change):
+    _regularised(case, [0.0, 0.0, 0.25, 20.0])
+    case.fits.fit("inner", "2024", 1, "2023")
+    record = _receipt(case)
+    classifier = record["diagnostics"]["classifier"]
+    if change == "missing_requested":
+        del classifier["early_stopping_requested"]
+    elif change == "missing_used":
+        del classifier["early_stopping_used"]
+    elif change == "missing_reason":
+        del classifier["fallback_reason"]
+    elif change == "used_true":
+        classifier["early_stopping_used"] = True
+    elif change == "requested_false":
+        classifier["early_stopping_requested"] = False
+    elif change == "reason_null":
+        classifier["fallback_reason"] = None
+    else:
+        classifier["iterations"] = 99
+        classifier["total_trees"] = classifier["trees_per_iteration"] * 99
+    _rehash(record)
+    _error("EXPERIMENT_IDENTITY_CONFLICT", lambda: case.fits.read("inner", "2024", 1, "2023"))
+
+
+@pytest.mark.parametrize("iterations", [0, 101])
+def test_regularised_used_early_stopping_rejects_out_of_range_replay(tmp_path, monkeypatch, iterations):
+    case = _large_regularised(tmp_path, monkeypatch, iterations=7)
+    case.fits.fit("inner", "2024", 1, "2023")
+    record = _receipt(case)
+    classifier = record["diagnostics"]["classifier"]
+    classifier["iterations"] = iterations
+    classifier["total_trees"] = classifier["trees_per_iteration"] * iterations
+    _rehash(record)
+    _error("EXPERIMENT_IDENTITY_CONFLICT", lambda: case.fits.read("inner", "2024", 1, "2023"))
+
+
+@pytest.mark.parametrize("iterations", [True, 7.0, "7"])
+def test_regularised_used_early_stopping_rejects_non_integer_replay(tmp_path, monkeypatch, iterations):
+    case = _large_regularised(tmp_path, monkeypatch, iterations=7)
+    case.fits.fit("inner", "2024", 1, "2023")
+    record = _receipt(case)
+    classifier = record["diagnostics"]["classifier"]
+    classifier["iterations"] = iterations
+    classifier["total_trees"] = classifier["trees_per_iteration"] * 7
+    _rehash(record)
+    error = _error("EXPERIMENT_IDENTITY_CONFLICT", lambda: case.fits.read("inner", "2024", 1, "2023"))
+    assert error.problem.message == "distribution fitted evidence differs"
 
 
 def test_tail_sample_values_and_order_are_training_only(case):

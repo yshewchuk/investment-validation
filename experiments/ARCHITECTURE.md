@@ -292,7 +292,7 @@ Qualified SIZE plan construction and its bounded worker now consume these helper
 
 ### Distribution declarations
 
-`distribution_candidate_recipe` declares and validates one raw histogram/matched-point H/HM/HMO recipe, conservative raw-pair fit/tree budget and opaque trial identities; `distribution_class_support` maps explicit observed classes to the unchanged 81-bin numerical histogram without smoothing. Public feature/model recipes, numerical histograms, foundation hashing, native errors and executor-limit validation own their contracts. These source-free declarations grant no admission, fitting, holdout or resource-reservation authority; [full policies and refusals](README.md#distribution-declarations-bundle-b-prerequisite) apply.
+`distribution_candidate_recipe` declares and validates one histogram/matched-point H/HM/HMO recipe with a marker-free `raw` default and an optional `regularised_v1` classifier variant, conservative raw-pair fit/tree budget and opaque trial identities; `distribution_class_support` depends on `distribution_candidate_recipe.validate_candidate_recipe`, maps explicit observed classes to the unchanged 81-bin numerical histogram without smoothing, and its shared class-support decision is consumed by both fresh fitting and admitted fit replay. Public feature/model recipes, numerical histograms, foundation hashing, native errors and executor-limit validation own their contracts. These source-free declarations grant no admission, fitting, holdout or resource-reservation authority; [full policies and refusals](README.md#distribution-declarations-bundle-b-prerequisite) apply.
 
 ### Distribution native admission
 

@@ -1,12 +1,18 @@
-"""Source-free initial raw 81-bin class policy; no fitting or support provenance.
+"""Research-only 81-bin class support; no production entrypoint.
 
-Caller-supplied counts/class labels prove neither eligibility nor causal source
-admission. Absent classes retain zero mass: no smoothing, clipping or repair.
+Used by the distribution numeric fit and admitted-result replay paths, reachable
+through research experiment runners. Caller-supplied counts/class labels prove
+neither eligibility nor causal source admission. Absent classes retain zero
+mass: no smoothing, clipping or repair.
 """
-from engine.v2.ops.errors import fail
-from engine.v2.research.magnitude_distribution import histogram
+from math import ceil
 
-__all__ = ["training_support", "class_histogram"]
+from engine.v2.foundation import canonical_json
+from engine.v2.ops.errors import OpsError, fail
+from engine.v2.research.magnitude_distribution import histogram
+from experiments.distribution_candidate_recipe import validate_candidate_recipe
+
+__all__ = ["training_support", "early_stopping_decision", "class_histogram"]
 
 
 def training_support(bin_counts) -> dict:
@@ -24,6 +30,50 @@ def training_support(bin_counts) -> dict:
     return {"bin_counts": bin_counts.copy(), "observed_class_labels": observed,
             "sample_count": sum(bin_counts),
             "trees_per_iteration": 1 if len(observed) == 2 else len(observed)}
+
+
+_SUPPORT_KEYS = {"bin_counts", "observed_class_labels", "sample_count", "trees_per_iteration"}
+
+
+def _validated_inputs(recipe, support):
+    recipe = validate_candidate_recipe(recipe)
+    if type(support) is not dict or set(support) != _SUPPORT_KEYS:
+        raise fail("INVALID_EXPERIMENT_SPEC", "invalid distribution class support")
+    try:
+        rebuilt = training_support(support["bin_counts"])
+    except OpsError:
+        raise fail("INVALID_EXPERIMENT_SPEC", "invalid distribution class support") from None
+    try:
+        matched = canonical_json(rebuilt) == canonical_json(support)
+    except (TypeError, ValueError, OverflowError, RecursionError):
+        matched = False
+    if not matched:
+        raise fail("INVALID_EXPERIMENT_SPEC", "invalid distribution class support")
+    return recipe, rebuilt
+
+
+def early_stopping_decision(recipe, support):
+    """Return the shared requested/used/fallback decision for fit and replay.
+
+    The recipe is validated with the installed candidate-recipe API and support
+    is rebuilt from its 81 counts before use; either mismatch refuses the typed
+    invalid-spec error. A recipe that does not request early stopping is never
+    used and has no fallback. A class below two rows cannot be stratified;
+    otherwise the rounded-up validation count must be at least the observed
+    class count. Absent zero-count bins are not observed classes and never
+    trigger a singleton fallback.
+    """
+    recipe, support = _validated_inputs(recipe, support)
+    if not recipe["classifier"]["params"]["early_stopping"]:
+        return {"requested": False, "used": False, "fallback_reason": None}
+    if any(support["bin_counts"][label] < 2 for label in support["observed_class_labels"]):
+        return {"requested": True, "used": False, "fallback_reason": "class_count_below_2"}
+    observed = len(support["observed_class_labels"])
+    fraction = recipe["classifier"]["params"]["validation_fraction"]
+    validation = ceil(support["sample_count"] * fraction)
+    if validation < observed:
+        return {"requested": True, "used": False, "fallback_reason": "validation_split_too_small"}
+    return {"requested": True, "used": True, "fallback_reason": None}
 
 
 def class_histogram(class_labels, probabilities, *, tail_excesses=None) -> dict:
