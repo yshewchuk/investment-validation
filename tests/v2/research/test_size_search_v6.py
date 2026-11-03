@@ -83,7 +83,9 @@ def test_v6_workers_one_and_two_match_candidates_results_and_metrics(case, tmp_p
     import math
 
     from experiments import v2_magnitude_search_run as search_run
+    from experiments.magnitude_report import magnitude_metrics
     from experiments.size_search_report import collect
+
     assert any(candidate["recipe"].get("model") == "mlp" for candidate in case.plan["candidates"])
     original_executor, executor_calls = search_run.ProcessPoolExecutor, []
 
@@ -158,6 +160,14 @@ def test_v6_workers_one_and_two_match_candidates_results_and_metrics(case, tmp_p
 
     consistency_oracle(serial_result)
     consistency_oracle(parallel_result)
+
+    known_metrics = magnitude_metrics([
+        {"absolute_move_pct": 0.0, "predicted_absolute_move_pct": 1.0},
+        {"absolute_move_pct": 0.0, "predicted_absolute_move_pct": 3.0},
+    ])
+    assert known_metrics["count"] == 2
+    assert known_metrics["mae"] == pytest.approx(2.0, rel=1e-12, abs=1e-12)
+    assert known_metrics["rmse"] == pytest.approx(math.sqrt(5.0), rel=1e-12, abs=1e-12)
 
     for report in (serial_report, parallel_report):
         report_ids = [row["candidate_id"] for row in report["inner_fits"]]
