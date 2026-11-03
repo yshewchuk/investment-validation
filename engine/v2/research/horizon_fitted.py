@@ -28,7 +28,7 @@ class HorizonFitFailure(RuntimeError):
     """Fit/forecast-validation failure; original exception is retained as __cause__."""
 
 
-def build_fit_inputs(indexed, training_ids, evaluation_ids, horizons, columns, labels, *, target_column):
+def build_fit_inputs(indexed, training_ids, evaluation_ids, horizons, columns, labels, *, target_column, recipe=None):
     """Build one FitInputs per horizon and its frozen evidence from the same ordered rows.
 
     Assembles per-horizon matrices for bounded offline research fitting after cohort
@@ -39,23 +39,32 @@ def build_fit_inputs(indexed, training_ids, evaluation_ids, horizons, columns, l
     training_ids, evaluation_ids = list(training_ids), list(evaluation_ids)
     horizons, columns = list(horizons), list(columns)
     labels = np.array(labels, dtype=float)
+    requires_event_dates = isinstance(recipe, dict) and recipe.get("requires_event_dates") is True
     inputs, evidence = {}, {}
     for horizon in horizons:
         training_keys, training_values, training_matrix = _matrix(indexed, training_ids, horizon, columns)
         prediction_keys, prediction_values, prediction_matrix = _matrix(indexed, evaluation_ids, horizon, columns)
-        inputs[horizon] = FitInputs(training_matrix, labels.copy(), prediction_matrix, columns)
+        train_event_dates = ([indexed[event, horizon].get("event_date") for event in training_ids]
+                             if requires_event_dates else None)
+        inputs[horizon] = FitInputs(training_matrix, labels.copy(), prediction_matrix, columns,
+            train_event_dates=train_event_dates)
         evidence[horizon] = fit_evidence(columns, training_values, prediction_values, horizon,
             training_ids, evaluation_ids, training_keys, prediction_keys,
-            target_column=target_column, labels=labels.tolist())
+            target_column=target_column, labels=labels.tolist(),
+            train_event_dates=train_event_dates)
     return HorizonInputs(inputs, evidence, target_column)
 
 
-def _prepare_inputs(horizon, horizon_inputs, indexed, training_ids, evaluation_ids, columns, labels, target_column):
+def _prepare_inputs(horizon, horizon_inputs, indexed, training_ids, evaluation_ids, columns, labels, target_column, recipe):
     if horizon_inputs is not None:
         return deepcopy(horizon_inputs.evidence[horizon]), horizon_inputs[horizon]
+    requires_event_dates = isinstance(recipe, dict) and recipe.get("requires_event_dates") is True
+    train_event_dates = ([indexed[event, horizon].get("event_date") for event in training_ids]
+                         if requires_event_dates else None)
     matrix, prediction_matrix, fit = prepare_horizon_inputs(indexed, training_ids, evaluation_ids,
-        horizon, columns, labels, target_column=target_column)
-    return fit, FitInputs(matrix, labels.copy(), prediction_matrix, columns)
+        horizon, columns, labels, target_column=target_column, train_event_dates=train_event_dates)
+    return fit, FitInputs(matrix, labels.copy(), prediction_matrix, columns,
+        train_event_dates=train_event_dates)
 
 
 def _run_fit(route, recipe, inputs, count, target_domain, measure_fit_seconds):
@@ -94,7 +103,7 @@ def fitted_forecasts(indexed, training_ids=None, labels=None, evaluation_ids=Non
     predictions, evidence = {}, []
     for horizon in horizons:
         fit, inputs = _prepare_inputs(horizon, horizon_inputs, indexed, training_ids, evaluation_ids,
-            columns, labels, target_column)
+            columns, labels, target_column, recipe)
         if progress is not None:
             progress("started", deepcopy(fit))
         result, fit_seconds = _run_fit(route, recipe, inputs, len(evaluation_ids), target_domain, measure_fit_seconds)

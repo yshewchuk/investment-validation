@@ -53,6 +53,7 @@ def main():
                                  request["inner"]["evaluation_event_ids"], request["plan"]["horizons"],
                                  request["execution"]["features"],
                                  **({"numeric_fit_inputs": True} if numeric else {}),
+                                 recipe=request["execution"].get("fit_recipe"),
                                  **({"target_column": target["column"]} if regression else {}))
         indexed = {(row["event_id"], row["horizon_sessions"]): row for row in inputs["features"]}
 

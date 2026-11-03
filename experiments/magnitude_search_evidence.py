@@ -52,13 +52,16 @@ def fit_evidence(inputs, fold, plan, execution):
     target = inputs.get("target", {}).get("column", "absolute_move_pct")
     indexed = {(row["event_id"], row["horizon_sessions"]): row for row in inputs["features"]}
     train = [row["event_id"] for row in inputs["training"]]
+    recipe = execution.get("fit_recipe")
     return [shared_fit_evidence(execution["features"],
         [[indexed[event, horizon][name] for name in execution["features"]] for event in train],
         [[indexed[event, horizon][name] for name in execution["features"]] for event in fold["evaluation_event_ids"]],
         horizon, train, fold["evaluation_event_ids"],
         [[indexed[event, horizon][name] for name in ("event_id", "context_id", "horizon_sessions")] for event in train],
         [[indexed[event, horizon][name] for name in ("event_id", "context_id", "horizon_sessions")] for event in fold["evaluation_event_ids"]],
-        target_column=target, labels=[float(row[target]) for row in inputs["training"]])
+        target_column=target, labels=[float(row[target]) for row in inputs["training"]],
+        train_event_dates=([indexed[event, horizon]["event_date"] for event in train]
+            if isinstance(recipe, dict) and recipe.get("requires_event_dates") is True else None))
         for horizon in plan["horizons"]]
 
 

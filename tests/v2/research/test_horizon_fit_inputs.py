@@ -6,7 +6,8 @@ import json
 import numpy as np
 import pytest
 
-from engine.v2.research.horizon_fit_inputs import prepare_horizon_inputs
+from engine.v2.models.training.fit_inputs import FitInputs
+from engine.v2.research.horizon_fit_inputs import fit_evidence, prepare_horizon_inputs
 
 COLUMNS = ["signal", "missing"]
 
@@ -77,7 +78,7 @@ def test_evaluation_target_and_unselected_features_are_never_inspected():
     assert prepare(source)[2] == prepare()[2]
 
 
-@pytest.mark.parametrize("target", [None, True, [], "", " ", "columns", "row_keys", "values"])
+@pytest.mark.parametrize("target", [None, True, [], "", " ", "columns", "row_keys", "values", "event_dates"])
 def test_unsupported_target_column_refuses_before_index_access(target):
     class Trap(dict):
         def __getitem__(self, key):
@@ -99,3 +100,41 @@ def test_invalid_target_refuses_before_consuming_iterables():
         yield
     with pytest.raises(ValueError, match="target column"):
         prepare_horizon_inputs({}, forbidden(), forbidden(), 3, forbidden(), [], target_column="values")
+
+
+def test_fit_inputs_accepts_ordered_training_event_dates():
+    dates = ("2024-01-02", "2024-01-01")
+    inputs = FitInputs([[1.], [2.]], [0., 1.], [[3.]], COLUMNS, dates)
+    assert inputs.train_event_dates is dates
+
+
+def test_fit_inputs_rejects_date_count_mismatch():
+    with pytest.raises(ValueError, match="training event dates.*does not match"):
+        FitInputs([[1.], [2.]], [0., 1.], [[3.]], COLUMNS, ("2024-01-02",))
+
+
+@pytest.mark.parametrize("value", [20240102, "2024-02-30", "2024-1-2", "20240102"])
+def test_fit_inputs_rejects_malformed_training_event_dates(value):
+    with pytest.raises(ValueError, match="training event dates.*ISO"):
+        FitInputs([[1.]], [0.], [[3.]], COLUMNS, (value,))
+
+
+def test_fit_evidence_adds_ordered_dates_only_when_provided():
+    _, _, prepared = prepare()
+    training_keys = [["train-b", "synthetic-context", 3], ["train-a", "synthetic-context", 3]]
+    prediction_keys = [["test", "synthetic-context", 3]]
+    training_values = [[2, None], [1, None]]
+    prediction_values = [[9, None]]
+    labels = [-140, 25]
+    dates = ["2024-01-02", "2024-01-01"]
+    dated = fit_evidence(COLUMNS, training_values, prediction_values, 3,
+        ["train-b", "train-a"], ["test"], training_keys, prediction_keys,
+        target_column="crush_pct_iv30", labels=labels, train_event_dates=dates)
+    oracle = dict(columns=COLUMNS, row_keys=training_keys, values=training_values,
+        crush_pct_iv30=labels, event_dates=dates)
+    assert dated["training_matrix_id"] == digest(oracle)
+    assert dated["prediction_matrix_id"] == prepared["prediction_matrix_id"]
+    undated = fit_evidence(COLUMNS, training_values, prediction_values, 3,
+        ["train-b", "train-a"], ["test"], training_keys, prediction_keys,
+        target_column="crush_pct_iv30", labels=labels)
+    assert undated == prepared

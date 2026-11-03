@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date
 from typing import Any
 
 from engine.v2.models.no_fit import forbid_fitting as forbid_v2_fitting
@@ -23,6 +24,29 @@ class FitInputs:
     train_labels: Any
     prediction_features: Any
     columns: list[str] | tuple[str, ...]
+    train_event_dates: list[str] | tuple[str, ...] | None = None
+
+    def __post_init__(self) -> None:
+        dates = self.train_event_dates
+        if dates is None:
+            return
+        if not isinstance(dates, (list, tuple)):
+            raise ValueError("training event dates must be a list or tuple")
+        try:
+            rows = len(self.train_features)
+        except TypeError:
+            raise ValueError("training event dates require sized training rows") from None
+        if len(dates) != rows:
+            raise ValueError("training event dates length does not match training rows")
+        for value in dates:
+            if not isinstance(value, str):
+                raise ValueError("training event dates must be ISO date strings")
+            try:
+                canonical = date.fromisoformat(value).isoformat() == value
+            except ValueError:
+                raise ValueError("training event dates must be canonical ISO dates") from None
+            if not canonical:
+                raise ValueError("training event dates must be canonical ISO dates")
 
     @classmethod
     def from_recipe(cls, recipe, train_features, train_labels, prediction_features, columns,
