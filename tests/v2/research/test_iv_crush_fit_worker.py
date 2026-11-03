@@ -76,7 +76,9 @@ def test_signed_worker_adapter_preserves_failure_classification(monkeypatch, err
     if isinstance(error, (ValueError, ArithmeticError)):
         with pytest.raises(OpsError) as caught:
             worker.regression_forecasts({}, request, None, [])
-        assert caught.value.code == "EXPERIMENT_VARIANT_FAILED" and "private" not in str(caught.value)
+        assert caught.value.code == "EXPERIMENT_VARIANT_FAILED"
+        assert str(caught.value) == "EXPERIMENT_VARIANT_FAILED: fitted regression estimator failed"
+        assert "private" not in str(caught.value)
     else:
         with pytest.raises(type(error)) as caught:
             worker.regression_forecasts({}, request, None, [])
