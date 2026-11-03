@@ -226,6 +226,12 @@ def _assemble(binding, events, feature_names=(), **overrides):
     return assemble_score_batch_inputs(**kwargs)
 
 
+#: Stable public fixture names for sibling test modules.
+stage_release = _stage
+event_inputs = _event_inputs
+assemble = _assemble
+
+
 def _event_doc(strategy="STR-THRU", event_id="evt-1") -> dict:
     calendar_row = _calendar_row(event_id=event_id)
     return {

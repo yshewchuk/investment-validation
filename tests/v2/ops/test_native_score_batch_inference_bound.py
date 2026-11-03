@@ -54,7 +54,7 @@ def _must_not_run(*args, **kwargs):
 
 
 def test_oversized_member_is_refused_before_adapter_and_cache(tmp_path, monkeypatch):
-    assert 0 < loader_module._INFER_MAX_MEMBER_BYTES <= 256 * 1024 * 1024
+    assert loader_module._INFER_MAX_MEMBER_BYTES == 256 * 1024 * 1024
     release = _release(tmp_path)
     request = InferenceRequest(
         release_id="r1", binding_id="b1", feature_order=("x",), rows=((3.0,),)

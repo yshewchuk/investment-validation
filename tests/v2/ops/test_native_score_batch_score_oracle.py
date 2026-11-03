@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import date
-from types import SimpleNamespace
 
 import pandas as pd
 
@@ -15,9 +14,9 @@ from engine.v2.ops import native_score_batch as nsb
 from engine.v2.scoring import application, release_bindings
 from tests.v2.ops.test_native_score_batch_driver_alias import (
     SIZE,
-    _assemble,
-    _event_inputs,
-    _stage,
+    assemble,
+    event_inputs,
+    stage_release,
 )
 
 _AS_OF = "2026-01-10"
@@ -72,7 +71,7 @@ def _event(ticker: str, event_id: str, signal: float):
          "observed_at": "2026-01-09"}
         for strike in range(70, 131)
     ]
-    return _event_inputs(
+    return event_inputs(
         strategy="TWIN-P", ticker=ticker,
         event_date=pd.Timestamp(_EVENT_DATE),
         calendar_row=calendar, panel_row=panel, panel_anchor="2026-01-09",
@@ -93,7 +92,7 @@ def test_native_score_batch_matches_hand_computed_fold_and_score(
         ("implied_t1", "fold-2026-02", ("future_signal",)),
         ("runup_move", "DYN-SV", ("signal",)),
     ]
-    binding = _stage(tmp_path, specs)
+    binding = stage_release(tmp_path, specs)
     by_id = {item.binding_id: item for item in binding.model_release.bindings}
     fold_bindings = {
         fold_start: by_id[f"b-implied_t1-{strategy_id}"]
@@ -161,7 +160,7 @@ def test_native_score_batch_matches_hand_computed_fold_and_score(
 
     monkeypatch.setattr(nsb, "entry_rule_declarations", entry_rule_declarations)
     events = (_event("AAA", "evt-a", 2.0), _event("BBB", "evt-b", 3.0))
-    assembled, refusals = _assemble(binding, events, as_of=_AS_OF)
+    assembled, refusals = assemble(binding, events, as_of=_AS_OF)
     assert refusals == ()
     assert set(assembled) == {event.key for event in events}
     assert observed_folds

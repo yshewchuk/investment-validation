@@ -37,6 +37,12 @@ _KEY = BoardRequest("AAA", "TWIN-P", pd.Timestamp("2026-01-12"), "close")
 _CHOOSER_NAMES = {
     "TWIN-P", "TWIN-P5", "BFLY-P", "BFLY-P5", "CTR5", "RAMP7", "CND-PS",
 }
+_CHOOSER_PRIMITIVES = (
+    "mean_prior_abs_move", "ema12r_abs", "signed_streak",
+    "mean_prior_or_implied", "mcap_log", "or_implied", "or_rvol30",
+    "spy_ret21", "spy_ret63", "spy_ret252", "spy_dd252", "spy_vol20",
+    "spy_vol5", "spy_vol60", "spy_vol252", "spy_vol20_rel252",
+)
 
 
 def _bundle():
@@ -73,8 +79,9 @@ def _binding():
 
 
 def _projection_event(strategy: str) -> NightlyEventInputs:
-    panel = {name: 0.1 for name in nsb._CHOOSER_PRIMITIVES}
+    panel = {name: 0.1 for name in _CHOOSER_PRIMITIVES}
     panel["zeta_distinct"] = 0.5
+    panel["eta_distinct"] = 0.5
     return NightlyEventInputs(
         key=BoardRequest("AAA", strategy, pd.Timestamp("2026-01-12"), "close"),
         calendar_row={"event_date": "2026-01-12", "entry_date": "2026-01-12"},
@@ -184,10 +191,12 @@ def test_non_chooser_spec_returns_the_same_bundle(monkeypatch, name):
 
 
 def test_project_member_features_projects_selected_state_order(monkeypatch):
-    distinctive = ("zeta_distinct", "entry_cost_pct", "days_to_print",
-                   "dte_entry", "pred_abs_move", "analog_mean")
     state = SimpleNamespace(producer_bindings={
-        "pred_im_t1_d14": SimpleNamespace(feature_order=distinctive),
+        "pred_im_t1_d14": SimpleNamespace(
+            feature_order=("zeta_distinct", "entry_cost_pct", "days_to_print",
+                           "dte_entry")),
+        "pred_runup_abs_move_d14": SimpleNamespace(
+            feature_order=("eta_distinct", "pred_abs_move", "analog_mean")),
     })
     captured = {}
 
@@ -203,7 +212,8 @@ def test_project_member_features_projects_selected_state_order(monkeypatch):
 
     assert captured == {"binding": binding, "event_date": "2026-01-12",
                         "as_of": "2026-01-10"}
-    expected = set(nsb._CHOOSER_PRIMITIVES) | {"zeta_distinct", "signal"}
+    expected = set(_CHOOSER_PRIMITIVES) | {
+        "zeta_distinct", "eta_distinct", "signal"}
     assert set(projected) == expected
     assert tuple(projected) == tuple(sorted(projected))
     for excluded in ("entry_cost_pct", "days_to_print", "dte_entry",
@@ -219,6 +229,66 @@ def test_project_member_features_projects_selected_state_order(monkeypatch):
     unchanged = nsb._project_member_features(
         thru.key, thru, binding, kept, as_of="2026-01-10")
     assert unchanged is kept
+
+
+@pytest.mark.parametrize(
+    ("producer_feature_order", "code", "detail"),
+    [
+        (
+            (),
+            "RELEASE_MISSING_FEATURE_ORDER",
+            "chooser producer identity has no feature_order",
+        ),
+        (
+            ("missing_producer_feature",),
+            "MISSING_STAGED_INPUT",
+            "required member feature is missing from staged rows",
+        ),
+    ],
+)
+def test_project_member_features_refuses_bad_producer_contract(
+        monkeypatch, producer_feature_order, code, detail):
+    state = SimpleNamespace(producer_bindings={
+        "pred_im_t1_d14": SimpleNamespace(feature_order=producer_feature_order),
+    })
+    monkeypatch.setattr(nsb, "select_chooser_state", lambda *a, **k: state)
+    event = _projection_event("TWIN-P")
+
+    refusal = nsb._project_member_features(
+        event.key, event, _binding(), ("signal",), as_of="2026-01-10")
+
+    assert isinstance(refusal, NativeScoreBatchRowRefusal)
+    assert (refusal.code, refusal.detail) == (code, detail)
+
+
+@pytest.mark.parametrize(
+    ("binding_kind", "binding_id"),
+    [
+        ("chooser", None),
+        ("chooser", ""),
+        ("producer", None),
+        ("producer", ""),
+    ],
+)
+def test_chooser_binding_guard_refuses_missing_producer_binding_id(
+        monkeypatch, binding_kind, binding_id):
+    state = _state()
+    binding = _binding()
+    if binding_kind == "chooser":
+        binding = SimpleNamespace(model_identity={
+            "chooser:DYN-SV": Binding(binding_id, _CHOOSER_MEMBER)})
+    else:
+        state.producer_bindings["pred_im_t1_d14"] = SimpleNamespace(
+            binding_id=binding_id)
+    monkeypatch.setattr(nsb, "select_chooser_state", lambda *a, **k: state)
+
+    result = nsb._chooser_bundle_or_refusal(
+        _bundle(), _KEY, binding=binding, event_date="2026-01-12",
+        as_of="2026-01-10")
+
+    assert isinstance(result, NativeScoreBatchRowRefusal)
+    assert (result.code, result.detail) == (
+        "MODEL_NOT_READY", "DYN-SV chooser state missing or unusable")
 
 
 def test_null_panel_row_refuses_before_chooser_state_selection(monkeypatch):

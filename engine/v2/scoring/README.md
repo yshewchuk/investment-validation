@@ -70,8 +70,10 @@ public `ChooserFoldReference` type names this resolver contract.
 `select_chooser_state(binding, event_date, as_of) -> ChooserState` derives the
 fold start from the event/as-of dates (the earlier event/decision month),
 selects the unique exact-cutoff analog pool, the unique v1 admissible table and
-the causal producer pools for that fold start, and is currently unused and not
-wired into nightly scoring. The reader raises
+the causal producer pools for that fold start. `native_score_batch` calls it
+for the seven menu-member strategies and scores those member rows with the
+chooser; full portfolio-level DYN-SV menu selection remains outside that
+worker. The reader raises
 `NoCurrentRelease`/`ModelNotReady` (never a legacy or cached fallback) when
 the pointer, catalog or a named member is not ready.
 `engine.v2.ops.native_score_batch.py`'s `native_score_batch` job
@@ -186,7 +188,10 @@ still wins for any derived column it declares; `dte_entry` is scorer-computed
 (from the priced legs and quote date) and no longer projected.
 `resolve_release_binding` exposes its verified `chooser_fold_references` map
 only when called with `include_chooser_fold_references=True`; default
-resolution does not load chooser estimators. The named-release
+resolution does not load chooser estimators. `native_score_batch` explicitly
+sets `include_chooser_fold_references=True` for its seven menu-member
+strategies and then calls `select_chooser_state`; strict Tier-0 capture is a
+separate opt-in caller. The named-release
 `resolve_chooser_fold_authoring_contexts(release_root, release_id)` always
 returns the requested release's verified references and contexts, with no
 current runtime caller.
@@ -228,7 +233,8 @@ All-refused and mixed menus are valid accounting; statuses and causes
 are retained without eligibility or ranking decisions. These summaries do not
 verify their original records or establish source admission, finality or causal
 training. No I/O, scoring, fitting, retries or partial publication occurs here.
-Existing direct selection and nightly DYN-SV refusal remain unchanged.
+Existing direct selection and the separate full DYN-SV menu resolver remain
+unchanged; nightly member rows select chooser state as described above.
 
 ## Feature-change contract
 
