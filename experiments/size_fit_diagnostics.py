@@ -25,7 +25,18 @@ def _training_event_date_ids(inputs, horizons):
     for row in inputs["features"]:
         if type(row) is not dict:
             raise ValueError
-        key = (row.get("event_id"), row.get("horizon_sessions"))
+        horizon = row.get("horizon_sessions")
+        if horizon in requested:
+            value = row.get("event_date")
+            if type(value) is not str:
+                raise ValueError
+            try:
+                canonical = date.fromisoformat(value).isoformat() == value
+            except ValueError:
+                raise ValueError from None
+            if not canonical:
+                raise ValueError
+        key = (row.get("event_id"), horizon)
         if key[0] in training_set and key[1] in requested:
             if key in indexed:
                 raise ValueError

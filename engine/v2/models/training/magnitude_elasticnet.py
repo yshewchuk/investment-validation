@@ -54,6 +54,8 @@ def fit_elasticnet_predictions(recipe, train_features, train_labels, prediction_
     """No fold selection here: the caller supplies qualified training and a fixed recipe."""
     forbid_fitting("engine.v2.models.training.magnitude_elasticnet.fit_elasticnet_predictions")
     forbid_v2_fitting("engine.v2.models.training.magnitude_elasticnet.fit_elasticnet_predictions")
+    if event_dates is not None:
+        raise ValueError("ElasticNet does not accept event dates")
     recipe = validate_elasticnet_recipe(recipe)
     return _fit(recipe, train_features, train_labels, prediction_features, columns=columns,
                 nonnegative=True, result_schema="magnitude_elasticnet_fit.v1")

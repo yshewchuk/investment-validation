@@ -34,6 +34,22 @@ def _event_date_metadata(recipe, event_dates, row_count):
     return {"training_event_dates_id": content_hash(list(event_dates))}
 
 
+def _validate_event_date_options(route, recipe, event_dates):
+    if type(recipe) is dict and "requires_event_dates" in recipe:
+        if type(recipe["requires_event_dates"]) is not bool:
+            raise ValueError("requires_event_dates must be a bool")
+    supports_event_dates = (
+        route == "magnitude_candidate"
+        and type(recipe) is dict
+        and recipe.get("model") == "mlp"
+        and recipe.get("requires_event_dates") is True
+    )
+    if event_dates is not None and not supports_event_dates:
+        raise ValueError("event dates require the opt-in MLP magnitude candidate route")
+    if type(recipe) is dict and recipe.get("requires_event_dates") is True and not supports_event_dates:
+        raise ValueError("requires_event_dates=True requires the opt-in MLP magnitude candidate route")
+
+
 def fit_execution(route, recipe, train_features, train_labels, prediction_features, *, columns,
                   event_dates=None):
     """Delegate one closed route, preserving results/errors without retry or I/O.
@@ -44,6 +60,7 @@ def fit_execution(route, recipe, train_features, train_labels, prediction_featur
     check_fitting_allowed("fit_execution")
     if type(route) is not str or route not in ("magnitude", "magnitude_candidate", "regression_candidate"):
         raise ValueError("unsupported numeric fit execution route")
+    _validate_event_date_options(route, recipe, event_dates)
     if route == "magnitude":
         if type(recipe) is not dict or recipe.get("schema_version") != "magnitude_fitted_recipe.v1":
             raise ValueError("original magnitude route requires its admitted recipe schema")

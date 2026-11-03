@@ -37,6 +37,8 @@ def fit_ridge_hgb_predictions(recipe, train_features, train_labels, prediction_f
     """Caller owns source/fold admission and truthful columns; no selection or I/O."""
     forbid_fitting("engine.v2.models.training.magnitude_ridge_hgb.fit_ridge_hgb_predictions")
     forbid_v2_fitting("engine.v2.models.training.magnitude_ridge_hgb.fit_ridge_hgb_predictions")
+    if event_dates is not None:
+        raise ValueError("Ridge/HGB does not accept event dates")
     recipe = validate_ridge_hgb_recipe(recipe)
     return _fit(recipe, train_features, train_labels, prediction_features, columns=columns,
                 nonnegative=True, result_schema="magnitude_ridge_hgb_fit.v1")

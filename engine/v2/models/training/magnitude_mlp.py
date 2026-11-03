@@ -21,9 +21,9 @@ def fit_mlp_predictions(recipe, train_features, train_labels, prediction_feature
     recipe = validate_mlp_recipe(recipe)
     if not isinstance(columns, (list, tuple)) or list(columns) != recipe["features"]:
         raise ValueError("MLP matrix columns must exactly match the ordered recipe subset")
-    date_metadata = _event_date_metadata(recipe, event_dates, len(train_features))
     train, labels, prediction = _matrices(train_features, train_labels, prediction_features,
                                          len(columns))
+    date_metadata = _event_date_metadata(recipe, event_dates, len(train))
     model = build_estimator(recipe)
     with threadpool_limits(limits=1), warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always", ConvergenceWarning)
