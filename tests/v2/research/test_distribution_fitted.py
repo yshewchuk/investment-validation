@@ -13,15 +13,12 @@ from engine.v2.research.magnitude_distribution import histogram
 from experiments import distribution_fitted as fitted
 from experiments.distribution_candidate_fit import fit_candidate as numeric_fit
 from experiments.distribution_candidate_recipe import candidate_recipe, trial_identity
-from experiments.distribution_class_support import training_support
+from experiments.distribution_class_support import early_stopping_fallback, training_support
 
 
-@pytest.fixture
-def case(tmp_path, monkeypatch):
+def _case(tmp_path, monkeypatch, *, train, labels, events):
     recipe = candidate_recipe("H")
     columns = recipe["point_recipe"]["features"]
-    train, events = ["Tz", "Ta", "Tm", "Tb"], ["Z", "A"]
-    labels = [0.0, 0.25, 20.0, 22.0]
     features = [{"event_id": event, "context_id": content_hash("context"), "horizon_sessions": horizon,
                  **{name: (None if index == 1 and event in train else 0.0) for index, name in enumerate(columns)}}
                 for event in train + events for horizon in (5, 3, 1)]
@@ -65,11 +62,11 @@ def case(tmp_path, monkeypatch):
         classifier = {"class_labels": support["observed_class_labels"], "iterations": iterations,
             "trees_per_iteration": trees, "total_trees": trees * iterations}
         if recipe.get("classifier_variant") == "regularised_v1":
-            singleton = any(count == 1 for count in counts)
             requested = recipe["classifier"]["params"]["early_stopping"]
-            used = requested and not singleton
+            reason = early_stopping_fallback(recipe, support) if requested else None
+            used = requested and reason is None
             classifier.update(early_stopping_requested=requested, early_stopping_used=used,
-                fallback_reason="class_count_below_2" if singleton else None)
+                fallback_reason=reason)
         return {"schema_version": "distribution_candidate_fit.v1", "recipe_id": recipe["recipe_id"],
             "probabilities": [masses.copy() for _ in prediction], "point_predictions": [sum(y) / len(y)] * len(prediction),
             "tail": histogram(masses, tail_excesses=[value - 20 for value in y if value >= 20] or None)["tail"],
@@ -80,6 +77,12 @@ def case(tmp_path, monkeypatch):
     monkeypatch.setattr(fitted, "fit_candidate", fit)
     return SimpleNamespace(fits=fitted.DistributionFits(trials), trials=trials, recipe=recipe, columns=columns,
         state=state, records=records, calls=calls, context=context, events=events, inputs=inputs)
+
+
+@pytest.fixture
+def case(tmp_path, monkeypatch):
+    return _case(tmp_path, monkeypatch, train=["Tz", "Ta", "Tm", "Tb"],
+                 labels=[0.0, 0.25, 20.0, 22.0], events=["Z", "A"])
 
 
 def _error(code, action):
@@ -215,6 +218,14 @@ def _regularised(case, labels, iterations=None):
         case.state["iterations"] = iterations
 
 
+def _large_regularised(tmp_path, monkeypatch, iterations=None):
+    labels = [0.0] * 6 + [0.25] * 6
+    case = _case(tmp_path, monkeypatch, train=[f"T{index}" for index in range(12)],
+                 labels=labels, events=["Z", "A"])
+    _regularised(case, labels, iterations=iterations)
+    return case
+
+
 def test_regularised_singleton_fallback_replays_with_recorded_evidence(case):
     _regularised(case, [0.0, 0.0, 0.25, 20.0])
     result = case.fits.fit("inner", "2024", 1, "2023")
@@ -226,8 +237,28 @@ def test_regularised_singleton_fallback_replays_with_recorded_evidence(case):
     assert case.fits.read("inner", "2024", 1, "2023") == result
 
 
-def test_regularised_early_stopping_replays_actual_iterations(case):
-    _regularised(case, [0.0, 0.0, 0.25, 0.25], iterations=7)
+def test_regularised_small_validation_split_fallback_replays(case):
+    _regularised(case, [0.0, 0.0, 0.25, 0.25])
+    result = case.fits.fit("inner", "2024", 1, "2023")
+    classifier = result["receipt"]["diagnostics"]["classifier"]
+    assert classifier["early_stopping_requested"] is True
+    assert classifier["early_stopping_used"] is False
+    assert classifier["fallback_reason"] == "validation_split_too_small"
+    assert classifier["iterations"] == 100
+    assert case.fits.read("inner", "2024", 1, "2023") == result
+
+
+def test_regularised_small_validation_split_fallback_tamper_refuses(case):
+    _regularised(case, [0.0, 0.0, 0.25, 0.25])
+    case.fits.fit("inner", "2024", 1, "2023")
+    record = _receipt(case)
+    record["diagnostics"]["classifier"]["fallback_reason"] = None
+    _rehash(record)
+    _error("EXPERIMENT_IDENTITY_CONFLICT", lambda: case.fits.read("inner", "2024", 1, "2023"))
+
+
+def test_regularised_early_stopping_replays_actual_iterations(tmp_path, monkeypatch):
+    case = _large_regularised(tmp_path, monkeypatch, iterations=7)
     result = case.fits.fit("inner", "2024", 1, "2023")
     classifier = result["receipt"]["diagnostics"]["classifier"]
     assert classifier["iterations"] == 7
@@ -264,13 +295,25 @@ def test_regularised_fabricated_fallback_evidence_refuses(case, change):
 
 
 @pytest.mark.parametrize("iterations", [0, 101])
-def test_regularised_used_early_stopping_rejects_out_of_range_replay(case, iterations):
-    _regularised(case, [0.0, 0.0, 0.25, 0.25], iterations=7)
+def test_regularised_used_early_stopping_rejects_out_of_range_replay(tmp_path, monkeypatch, iterations):
+    case = _large_regularised(tmp_path, monkeypatch, iterations=7)
     case.fits.fit("inner", "2024", 1, "2023")
     record = _receipt(case)
     classifier = record["diagnostics"]["classifier"]
     classifier["iterations"] = iterations
     classifier["total_trees"] = classifier["trees_per_iteration"] * iterations
+    _rehash(record)
+    _error("EXPERIMENT_IDENTITY_CONFLICT", lambda: case.fits.read("inner", "2024", 1, "2023"))
+
+
+@pytest.mark.parametrize("iterations", [True, 7.0, "7"])
+def test_regularised_used_early_stopping_rejects_non_integer_replay(tmp_path, monkeypatch, iterations):
+    case = _large_regularised(tmp_path, monkeypatch, iterations=7)
+    case.fits.fit("inner", "2024", 1, "2023")
+    record = _receipt(case)
+    classifier = record["diagnostics"]["classifier"]
+    classifier["iterations"] = iterations
+    classifier["total_trees"] = classifier["trees_per_iteration"] * 7
     _rehash(record)
     _error("EXPERIMENT_IDENTITY_CONFLICT", lambda: case.fits.read("inner", "2024", 1, "2023"))
 

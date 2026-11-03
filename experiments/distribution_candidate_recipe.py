@@ -18,6 +18,7 @@ from experiments.magnitude_search_execution import validate_execution_limits
 __all__ = ["candidate_recipe", "validate_candidate_recipe", "fit_budget", "trial_identity"]
 
 _HORIZONS = [5, 3, 1]
+_VARIANTS = ("raw", "regularised_v1")
 
 
 def _require(condition):
@@ -48,7 +49,7 @@ def candidate_recipe(feature_set, classifier_variant="raw"):
     stopping, marking the document so validation can rebuild its semantics.
     """
     _require(type(feature_set) is str and feature_set in ("H", "HM", "HMO"))
-    _require(type(classifier_variant) is str and classifier_variant in ("raw", "regularised_v1"))
+    _require(type(classifier_variant) is str and classifier_variant in _VARIANTS)
     features = feature_recipe(feature_set)
     point = ridge_hgb_recipe(model="history_hgb", columns=features["model_columns"],
         feature_dictionary_hash=features["dictionary_hash"], max_leaf_nodes=7)
@@ -81,7 +82,7 @@ def validate_candidate_recipe(recipe):
     try:
         json.dumps(recipe, allow_nan=False)
         variant = recipe.get("classifier_variant", "raw")
-        _require(variant in ("raw", "regularised_v1"))
+        _require(variant in _VARIANTS)
         expected = candidate_recipe(recipe["feature_set"], variant)
         if canonical_json(recipe) == canonical_json(expected):
             return expected

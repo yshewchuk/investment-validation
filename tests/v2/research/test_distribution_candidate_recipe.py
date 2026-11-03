@@ -118,6 +118,14 @@ def test_validator_refuses_unknown_marker_even_if_rehashed():
              message="invalid distribution candidate recipe")
 
 
+def test_validator_refuses_explicit_raw_marker_even_if_rehashed():
+    recipe = declaration.candidate_recipe("H")
+    recipe["classifier_variant"] = "raw"
+    recipe["recipe_id"] = content_hash({k: v for k, v in recipe.items() if k != "recipe_id"})
+    _refuses(declaration.validate_candidate_recipe, recipe,
+             message="invalid distribution candidate recipe")
+
+
 def test_initial_raw_policy_and_detached_results_are_explicit():
     result = declaration.candidate_recipe("H")
     assert result["output_recipe"] == output_recipe()

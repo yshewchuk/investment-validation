@@ -3,6 +3,8 @@
 Caller-supplied counts/class labels prove neither eligibility nor causal source
 admission. Absent classes retain zero mass: no smoothing, clipping or repair.
 """
+from math import ceil
+
 from engine.v2.ops.errors import fail
 from engine.v2.research.magnitude_distribution import histogram
 
@@ -24,6 +26,26 @@ def training_support(bin_counts) -> dict:
     return {"bin_counts": bin_counts.copy(), "observed_class_labels": observed,
             "sample_count": sum(bin_counts),
             "trees_per_iteration": 1 if len(observed) == 2 else len(observed)}
+
+
+def early_stopping_fallback(recipe, support):
+    """Return why sklearn's internal validation split cannot be used, else None.
+
+    A recipe that does not request early stopping always returns None. A class
+    below two rows cannot be stratified; otherwise the rounded-up validation
+    count and the remaining training rows must each be at least the observed
+    class count.
+    """
+    if not recipe["classifier"]["params"]["early_stopping"]:
+        return None
+    if any(support["bin_counts"][label] < 2 for label in support["observed_class_labels"]):
+        return "class_count_below_2"
+    observed = len(support["observed_class_labels"])
+    fraction = recipe["classifier"]["params"]["validation_fraction"]
+    validation = ceil(support["sample_count"] * fraction)
+    if validation < observed or support["sample_count"] - validation < observed:
+        return "validation_split_too_small"
+    return None
 
 
 def class_histogram(class_labels, probabilities, *, tail_excesses=None) -> dict:

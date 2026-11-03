@@ -12,7 +12,7 @@ from engine.v2.ops.errors import fail
 from engine.v2.research.magnitude_distribution import bin_index, histogram
 from engine.v2.research.progress import Progress, stage
 from experiments.distribution_candidate_fit import fit_candidate
-from experiments.distribution_class_support import training_support
+from experiments.distribution_class_support import early_stopping_fallback, training_support
 from experiments.magnitude_search_evidence import fit_evidence
 from experiments.magnitude_search_records import append_record, read_record
 from experiments.magnitude_search_shards import iter_section, write_section
@@ -119,12 +119,12 @@ class DistributionFits:
         classifier = {"class_labels": classes, "iterations": iterations,
                       "trees_per_iteration": trees, "total_trees": iterations * trees}
         if recipe.get("classifier_variant") == "regularised_v1":
-            singleton = any(count == 1 for count in support["bin_counts"])
             requested = recipe["classifier"]["params"]["early_stopping"]
-            used = requested and not singleton
+            reason = early_stopping_fallback(recipe, support) if requested else None
+            used = requested and reason is None
             _require(iterations == max_iter if not used else 1 <= iterations <= max_iter)
             classifier.update(early_stopping_requested=requested, early_stopping_used=used,
-                fallback_reason="class_count_below_2" if singleton else None)
+                fallback_reason=reason)
         else:
             _require(iterations == max_iter)
         expected = {"training_support": support, "classifier": classifier,

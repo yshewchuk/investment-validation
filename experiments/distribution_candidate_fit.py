@@ -16,7 +16,8 @@ from engine.v2.ops.errors import fail
 from engine.v2.research.magnitude_distribution import bin_index
 from engine.v2.research.progress import Progress, stage
 from experiments.distribution_candidate_recipe import validate_candidate_recipe
-from experiments.distribution_class_support import class_histogram, training_support
+from experiments.distribution_class_support import (
+    class_histogram, early_stopping_fallback, training_support)
 
 __all__ = ["fit_candidate"]
 
@@ -88,9 +89,11 @@ def fit_candidate(recipe, train_features, train_labels, prediction_features, *, 
     labels require one finite nonnegative magnitude per training row. All-null
     training columns become zero in BOTH matrices before either estimator.
 
-    The fixed classifier uses exactly the declared parameters. Its observed
-    classes, tree multiplicity and iterations are checked; the public point
-    fitter exposes predictions only, so its iteration count is labelled declared.
+    The fixed classifier uses the declared recipe parameters, except that a
+    requested regularised early-stopping split that cannot be stratified is
+    recorded as unused with its fallback reason. Its observed classes, tree
+    multiplicity and iterations are checked; the public point fitter exposes
+    predictions only, so its iteration count is labelled declared.
     Numeric ValueError/FloatingPointError failures become typed candidate
     failures; resources, native no-fit guards and programming exceptions escape.
     """
@@ -105,7 +108,6 @@ def fit_candidate(recipe, train_features, train_labels, prediction_features, *, 
     bins = np.array([bin_index(float(value)) for value in labels], dtype=int)
     support = training_support(np.bincount(bins, minlength=81).tolist())
     regularised = recipe.get("classifier_variant") == "regularised_v1"
-    singleton = regularised and any(count == 1 for count in support["bin_counts"])
     empty = np.isnan(train).all(axis=0)
     train[:, empty] = 0.0
     prediction[:, empty] = 0.0
@@ -116,7 +118,8 @@ def fit_candidate(recipe, train_features, train_labels, prediction_features, *, 
 
     params = recipe["classifier"]["params"]
     requested = params["early_stopping"]
-    used = requested and not singleton
+    fallback = early_stopping_fallback(recipe, support) if requested else None
+    used = requested and fallback is None
     estimator_params = {**params, "max_features": float(params["max_features"])}
     if regularised:
         estimator_params["early_stopping"] = used
@@ -127,8 +130,7 @@ def fit_candidate(recipe, train_features, train_labels, prediction_features, *, 
             classifier = _classifier_diagnostics(model, support, params["max_iter"], used)
             if regularised:
                 classifier.update(early_stopping_requested=bool(requested),
-                    early_stopping_used=bool(used), fallback_reason=
-                    "class_count_below_2" if singleton else None)
+                    early_stopping_used=bool(used), fallback_reason=fallback)
             probabilities = _outputs(model.predict_proba(prediction),
                 (len(prediction), len(classifier["class_labels"])))
         with stage("distribution matched point fit"):
