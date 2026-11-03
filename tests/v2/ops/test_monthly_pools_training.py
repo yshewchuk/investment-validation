@@ -56,9 +56,26 @@ def test_valid_month_and_cutoff_combinations():
 
 
 @pytest.mark.parametrize("month", ["", "2026-2", "2026-13", "2026-00", "2026-02-01",
-                                   "not-a-month"])
+                                   "not-a-month", "9999-12"])
 def test_invalid_month_is_refused(month):
-    assert any("month" in problem for problem in _problems(month=month))
+    assert _problems(month=month) == ["month must be a canonical YYYY-MM calendar month"]
+
+
+@pytest.mark.parametrize("changes", [
+    {"mode": "recipe", "recipe": "size:*:champion", "cutoffs": ()},
+    {"mode": "state", "state": "paired_residual_pool", "cutoffs": ()},
+    {"mode": "board_analog", "alpha": 0.5, "cutoffs": (CUTOFF,)},
+    {"mode": "trailing_cutoff", "cutoffs": (CUTOFF,)},
+])
+def test_month_is_refused_for_every_non_monthly_mode(changes):
+    assert _problems(**changes) == ["month applies to monthly_pools only"]
+
+
+def test_plan_rejects_month_for_a_non_monthly_mode():
+    with pytest.raises(OpsError) as excinfo:
+        training.training_plan(mode="state", state="paired_residual_pool", month=MONTH)
+    assert excinfo.value.code == "INVALID_REQUEST"
+    assert excinfo.value.problem.details["problems"] == ["month applies to monthly_pools only"]
 
 
 @pytest.mark.parametrize("cutoff", ["2026-02-28", "2026-03-02", "20260301",
@@ -115,12 +132,25 @@ def test_worker_builds_four_members_and_deterministic_receipt(tmp_path, monkeypa
     assert receipt["month"] == MONTH
     assert receipt["retrain_cutoff"] == CUTOFF
     assert receipt["experiment_inputs"] == "none"
-    assert set(receipt["members"]) == set(job.MONTHLY_POOL_MEMBERS)
-    assert all(member["content_hash"] for member in receipt["members"].values())
+    assert sorted(receipt["members"]) == sorted(job.MONTHLY_POOL_MEMBERS)
+    assert receipt["members"] == {
+        member: {"file": member.replace(":", "__") + ".json",
+                 "content_hash": "sha256:" + member, "bytes": len(member),
+                 "cutoff": CUTOFF if member == job.CHOOSER_POOL_STATE else None}
+        for member in job.MONTHLY_POOL_MEMBERS}
 
     first = (root / "training_result.json").read_bytes()
     training.run_training_worker(_worker_params(), root)
     assert (root / "training_result.json").read_bytes() == first
+
+    other_root = tmp_path / "other"
+    training.run_training_worker(
+        _worker_params(month="2026-03", cutoffs=["2026-04-01"]), other_root)
+    other = json.loads((other_root / "training_result.json").read_text())
+    assert other["month"] == "2026-03"
+    assert other["retrain_cutoff"] == "2026-04-01"
+    assert other["members"][job.CHOOSER_POOL_STATE]["cutoff"] == "2026-04-01"
+    assert other != receipt
 
 
 def test_chooser_boundary_includes_m_end_and_excludes_next_day(tmp_path, monkeypatch):
@@ -137,7 +167,11 @@ def test_chooser_boundary_includes_m_end_and_excludes_next_day(tmp_path, monkeyp
     assert summary["n_rows"] == 2
     pool = FrozenStateLoader(out).load(
         FrozenStateRef(path=summary["file"], content_hash=summary["content_hash"]))
-    assert [row[0] for row in pool.rows_for("CTR5")] == ["2026-02-27", "2026-02-28"]
+    dims = [_DIMS[name] for name in CHOOSER_ANALOG_DIMS]
+    assert pool.rows_for("CTR5") == (
+        ("2026-02-27", 1.0, *dims),
+        ("2026-02-28", 2.0, *dims),
+    )
 
 
 def _run_with_real_chooser(tmp_path, monkeypatch, source):
@@ -173,3 +207,50 @@ def test_oversized_source_is_validation_failed(tmp_path, monkeypatch):
 def test_empty_chooser_pool_is_validation_failed(tmp_path, monkeypatch):
     source = _write_source(tmp_path, [_row("CTR5", "2026-03-01", 1.0)])
     assert _run_with_real_chooser(tmp_path, monkeypatch, source).code == "VALIDATION_FAILED"
+
+
+def test_unreadable_source_is_validation_failed(tmp_path, monkeypatch):
+    source = tmp_path / "features"
+    source.mkdir()
+
+    def unreadable(_path):
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(chooser_pool_source, "read_chooser_pool_frame", unreadable)
+    assert _run_with_real_chooser(tmp_path, monkeypatch, source).code == "VALIDATION_FAILED"
+
+
+def test_empty_required_member_is_validation_failed(tmp_path, monkeypatch):
+    def empty(member, out, *, plan_only=False, **kwargs):
+        out.mkdir(parents=True, exist_ok=True)
+        return {"state": member, "status": "empty"}
+
+    monkeypatch.setattr(job, "run_state_job", empty)
+    with pytest.raises(OpsError) as excinfo:
+        training.run_training_worker(_worker_params(), tmp_path / "attempt")
+    assert excinfo.value.code == "VALIDATION_FAILED"
+
+
+def test_monthly_retrain_cutoff_rolls_over_the_year_end():
+    assert job.monthly_retrain_cutoff("2026-12") == "2027-01-01"
+    assert job.monthly_retrain_cutoff("2024-02") == "2024-03-01"
+
+
+def test_tool_refuses_a_cutoff_that_is_not_the_day_after_the_month_end(tmp_path):
+    with pytest.raises(SystemExit, match="day after the month's end"):
+        job.run_monthly_pools_job(tmp_path, month=MONTH, cutoff="2026-03-02")
+
+
+def test_monthly_plan_pins_the_manifest_and_non_monthly_plans_omit_month():
+    manifest = "sha256:" + "a" * 64
+    plan = training.training_plan(
+        mode="monthly_pools", month=MONTH, cutoffs=(CUTOFF,), manifest_ref=manifest)
+    assert plan["parameters"]["month"] == MONTH
+    assert plan["parameters"]["input_bindings"] == {"legacy_manifest.json": manifest}
+    assert plan["input_refs"] == [manifest]
+    assert plan["blocked_prerequisites"] == []
+
+    other = training.training_plan(
+        mode="state", state="paired_residual_pool", manifest_ref=manifest)
+    assert "month" not in other["parameters"]
+    assert other["input_refs"] == [manifest]

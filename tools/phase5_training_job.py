@@ -58,7 +58,9 @@ import argparse
 import datetime
 import json
 import os
+import resource
 import sys
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -203,8 +205,11 @@ def monthly_retrain_cutoff(month: str) -> str:
         raise ValueError(f"not a YYYY-MM month: {month!r}") from None
     if start.isoformat()[:7] != month:
         raise ValueError(f"not a canonical YYYY-MM month: {month!r}")
-    end = (datetime.date(start.year + 1, 1, 1) if start.month == 12
-           else datetime.date(start.year, start.month + 1, 1))
+    try:
+        end = (datetime.date(start.year + 1, 1, 1) if start.month == 12
+               else datetime.date(start.year, start.month + 1, 1))
+    except (OverflowError, ValueError):
+        raise ValueError(f"month is out of range: {month!r}") from None
     return end.isoformat()
 
 
@@ -259,8 +264,6 @@ def build_state(member: str, *, cutoff=None, ticker_chunk: int = 1000, registry=
         # with different bytes is the existing RESUME_MISMATCH; the atomic
         # write leaves no partial output; a rerun on identical inputs is
         # byte-idempotent.
-        import time
-
         from engine import paths
         from engine.v2.models.training.chooser_pool import build_chooser_analog_pool_artifact
         from engine.v2.models.training.chooser_pool_source import (
@@ -281,6 +284,8 @@ def build_state(member: str, *, cutoff=None, ticker_chunk: int = 1000, registry=
             frame = read_chooser_pool_frame(source)
         except FileNotFoundError:
             raise SystemExit("chooser analog pool source is missing") from None
+        except OSError:
+            raise SystemExit("chooser analog pool source is unreadable") from None
         except ValueError as exc:
             raise SystemExit(str(exc)) from exc
         read_s = time.perf_counter() - started
@@ -413,17 +418,33 @@ def run_monthly_pools_job(out: Path, *, month: str, cutoff: str,
     if bound != expected:
         raise SystemExit("monthly_pools cutoff must be the day after the month's end")
     out.mkdir(parents=True, exist_ok=True)
+    total = len(MONTHLY_POOL_MEMBERS)
+    started = time.perf_counter()
+    print(f"[p5-3] monthly_pools: start month={month} cutoff={bound} members={total} "
+          f"rss_kib={resource.getrusage(resource.RUSAGE_SELF).ru_maxrss}",
+          file=sys.stderr, flush=True)
     members = {}
-    for member in MONTHLY_POOL_MEMBERS:
+    for done, member in enumerate(MONTHLY_POOL_MEMBERS, 1):
+        member_started = time.perf_counter()
+        member_cutoff = bound if member == CHOOSER_POOL_STATE else None
         summary = run_state_job(
-            member, out, plan_only=False,
-            cutoff=bound if member == CHOOSER_POOL_STATE else None,
-            ticker_chunk=ticker_chunk)
-        if member == CHOOSER_POOL_STATE and summary.get("status") == "empty":
-            raise SystemExit("monthly_pools chooser_analog_pool is empty")
-        members[member] = {"file": summary.get("file"),
-                           "content_hash": summary.get("content_hash"),
-                           "bytes": summary.get("bytes")}
+            member, out, plan_only=False, cutoff=member_cutoff, ticker_chunk=ticker_chunk)
+        if (summary.get("status") == "empty" or not summary.get("file")
+                or not summary.get("content_hash") or summary.get("bytes") is None):
+            raise SystemExit(f"monthly_pools {member} produced no output")
+        members[member] = {"file": summary["file"],
+                           "content_hash": summary["content_hash"],
+                           "bytes": summary["bytes"], "cutoff": member_cutoff}
+        elapsed = time.perf_counter() - started
+        rate = done / elapsed if elapsed else 0.0
+        eta = (total - done) / rate if rate else 0.0
+        print(f"[p5-3] monthly_pools: {done}/{total} {member} done in "
+              f"{time.perf_counter() - member_started:.1f}s, {rate:.2f} members/s, "
+              f"ETA {eta:.0f}s rss_kib={resource.getrusage(resource.RUSAGE_SELF).ru_maxrss}",
+              file=sys.stderr, flush=True)
+    print(f"[p5-3] monthly_pools: end elapsed={time.perf_counter() - started:.1f}s "
+          f"members={total} rss_kib={resource.getrusage(resource.RUSAGE_SELF).ru_maxrss}",
+          file=sys.stderr, flush=True)
     return {"mode": "monthly_pools", "month": month, "retrain_cutoff": bound,
             "experiment_inputs": "none", "members": members}
 

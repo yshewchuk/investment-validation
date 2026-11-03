@@ -9,11 +9,10 @@ existing generic subcommands.
 """
 from __future__ import annotations
 
-import calendar
 import json
 import math
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date
 from pathlib import Path
 
 from engine.v2.foundation import ArtifactError, safe_relative_path
@@ -169,6 +168,8 @@ def _trailing_cutoff_problems(params) -> list[str]:
 
 
 def _monthly_pools_problems(params) -> list[str]:
+    from tools import phase5_training_job as job
+
     problems = []
     if params.recipe:
         problems.append("mode=monthly_pools must not name a recipe")
@@ -188,13 +189,8 @@ def _monthly_pools_problems(params) -> list[str]:
         problems.append("mode=monthly_pools needs exactly one cutoff")
     expected = None
     try:
-        if len(params.month) != 7 or date.fromisoformat(
-                params.month + "-01").isoformat()[:7] != params.month:
-            raise ValueError(params.month)
-        year, month = int(params.month[:4]), int(params.month[5:])
-        last = calendar.monthrange(year, month)[1]
-        expected = (date(year, month, last) + timedelta(days=1)).isoformat()
-    except (TypeError, ValueError):
+        expected = job.monthly_retrain_cutoff(params.month)
+    except (TypeError, ValueError, OverflowError):
         problems.append("month must be a canonical YYYY-MM calendar month")
     if expected is not None and len(params.cutoffs) == 1 and params.cutoffs[0] != expected:
         problems.append("cutoff must be the day after the month's end")
@@ -275,6 +271,8 @@ def training_parameter_problems(job, params) -> list[str]:
     if params.mode not in MODES:
         problems.append("mode must be one of " + ", ".join(MODES))
         return problems
+    if params.mode != "monthly_pools" and params.month:
+        problems.append("month applies to monthly_pools only")
     if params.mode == "recipe":
         problems.extend(_recipe_problems(params))
     elif params.mode == "state":
@@ -378,12 +376,15 @@ def training_plan(*, mode, recipe="", state="", month="", alpha=None, cutoffs=()
         raise fail("INVALID_REQUEST", "training plan is invalid",
                    details={"problems": list(problems)})
     root3 = Path(__file__).resolve().parents[3]
+    parameters = dict(vars(params))
+    if mode != "monthly_pools":
+        del parameters["month"]
     return {"schema_version": "operations_plan.v1.0", "kind": "training", "mode": "shadow",
-            "effects": ["staged"], "parameters": vars(params),
+            "effects": ["staged"], "parameters": parameters,
             "input_refs": [manifest_ref] if manifest_ref else [],
             "blocked_prerequisites": [] if manifest_ref or input_mode == "native_d14" else [
                 "frozen_legacy_input_manifest", "adapter_parity_receipt"],
-            "spec_hash": content_hash(vars(params)),
+            "spec_hash": content_hash(parameters),
             "implementation_ref": content_hash(worker_source_manifest(root3)),
             "environment_ref": content_hash(
                 environment_identity(profile.thread_count or profile.cpu_count)),
