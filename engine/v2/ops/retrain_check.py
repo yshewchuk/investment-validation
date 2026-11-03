@@ -254,16 +254,30 @@ def phase5_accept_job_kind() -> JobKind:
     )
 
 
-def _staged_manifest(release_root: Path, candidate_release_id: str):
+def _read_staged_manifest(release_root: Path, release_id: str):
     try:
-        manifest = deployment.read_manifest(
-            deployment_root(release_root), candidate_release_id)
-    except (OSError, ValueError, deployment.DeploymentError) as exc:
-        raise fail("VALIDATION_FAILED", "candidate release is not staged",
-                   details={"code": "RELEASE_NOT_STAGED"}) from exc
-    if manifest is None or manifest.release.release_id != candidate_release_id:
-        raise fail("VALIDATION_FAILED", "candidate release is not staged",
+        manifest = deployment.read_manifest(deployment_root(release_root), release_id)
+    except FileNotFoundError:
+        raise fail("VALIDATION_FAILED", "staged release is absent",
+                   details={"code": "RELEASE_NOT_STAGED"}) from None
+    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError, DocumentError,
+            deployment.DeploymentError, TypeError, KeyError):
+        raise fail("VALIDATION_FAILED", "staged manifest is invalid",
+                   details={"code": "STAGED_MANIFEST_INVALID"}) from None
+    except (OSError, ValueError):
+        raise fail("VALIDATION_FAILED", "staged manifest could not be read",
+                   details={"code": "STAGED_MANIFEST_READ_FAILED"}) from None
+    if manifest is None:
+        raise fail("VALIDATION_FAILED", "staged release is absent",
                    details={"code": "RELEASE_NOT_STAGED"})
+    return manifest
+
+
+def _staged_manifest(release_root: Path, candidate_release_id: str):
+    manifest = _read_staged_manifest(release_root, candidate_release_id)
+    if manifest.release.release_id != candidate_release_id:
+        raise fail("VALIDATION_FAILED", "staged manifest release id does not match",
+                   details={"code": "STAGED_RELEASE_ID_MISMATCH"})
     if not deployment.manifest_hash_matches(manifest):
         raise fail("VALIDATION_FAILED", "staged release manifest hash does not match",
                    details={"code": "STAGED_MANIFEST_HASH_MISMATCH"})

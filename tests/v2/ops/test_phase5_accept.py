@@ -293,16 +293,38 @@ def test_verify_object_rejects_wrong_expected_hash(tmp_path):
     ) == acceptance_gate.MEMBER_HASH_MISMATCH
 
 
-def test_verify_object_bounded_read_refusal_is_not_success(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    "error",
+    [OSError("symlink or unreadable member"), ValueError("over the bounded read limit")],
+)
+def test_verify_object_read_failure_is_distinct_from_absent(tmp_path, monkeypatch, error):
     release_root = tmp_path / "store"
     target = release_root / "deployment" / "objects" / "member"
     target.parent.mkdir(parents=True)
     target.write_bytes(b"member-bytes")
 
     def refuse(_path, _limit):
-        raise ValueError("over the bounded read limit")
+        raise error
 
     monkeypatch.setattr(acceptance_gate, "read_regular_file", refuse)
+
+    assert acceptance_gate._verify_object(
+        release_root, "objects/member", acceptance_gate.sha256_bytes(b"member-bytes")
+    ) == acceptance_gate.MEMBER_OBJECT_READ_FAILED
+
+
+@pytest.mark.parametrize("missing", [None, FileNotFoundError("absent")])
+def test_verify_object_absent_is_not_a_read_failure(tmp_path, monkeypatch, missing):
+    release_root = tmp_path / "store"
+    target = release_root / "deployment" / "objects" / "member"
+    target.parent.mkdir(parents=True)
+
+    def read(_path, _limit):
+        if missing is None:
+            return None
+        raise missing
+
+    monkeypatch.setattr(acceptance_gate, "read_regular_file", read)
 
     assert acceptance_gate._verify_object(
         release_root, "objects/member", acceptance_gate.sha256_bytes(b"member-bytes")
@@ -380,12 +402,11 @@ def test_failed_evidence_is_written_then_refused(tmp_path, monkeypatch, mutate):
     assert json.loads((attempt / "acceptance.json").read_text()) == evidence
 
 
-@pytest.mark.parametrize("manifest", [None, _manifest("other")])
-def test_missing_or_mismatched_manifest_refuses_before_shim(tmp_path, monkeypatch, manifest):
+def test_absent_manifest_refuses_before_shim(tmp_path, monkeypatch):
     release_root = tmp_path / "store"
     attempt = tmp_path / "attempt"
     attempt.mkdir()
-    _patch_manifest(monkeypatch, manifest)
+    _patch_manifest(monkeypatch, None)
     called = []
     monkeypatch.setattr(phase5_acceptance_job, "run_acceptance",
                         lambda *_args: called.append(True))
@@ -397,6 +418,62 @@ def test_missing_or_mismatched_manifest_refuses_before_shim(tmp_path, monkeypatc
     assert excinfo.value.problem.details["code"] == "RELEASE_NOT_STAGED"
     assert called == []
     assert not (attempt / "acceptance.json").exists()
+    assert not (release_root / "deployment" / "DEPLOYED").exists()
+
+
+def test_mismatched_manifest_refuses_before_shim(tmp_path, monkeypatch):
+    release_root = tmp_path / "store"
+    attempt = tmp_path / "attempt"
+    attempt.mkdir()
+    _patch_manifest(monkeypatch, _manifest("other"))
+    called = []
+    monkeypatch.setattr(phase5_acceptance_job, "run_acceptance",
+                        lambda *_args: called.append(True))
+
+    with pytest.raises(OpsError) as excinfo:
+        phase5_accept.run_phase5_accept_worker(_params(release_root), attempt)
+
+    assert excinfo.value.code == "VALIDATION_FAILED"
+    assert excinfo.value.problem.details["code"] == "STAGED_RELEASE_ID_MISMATCH"
+    assert called == []
+    assert not (attempt / "acceptance.json").exists()
+    assert not (release_root / "deployment" / "DEPLOYED").exists()
+
+
+@pytest.mark.parametrize(
+    ("error", "detail"),
+    [
+        (OSError("permission denied at /secret/path"), "STAGED_MANIFEST_READ_FAILED"),
+        (ValueError("not a bounded regular file"), "STAGED_MANIFEST_READ_FAILED"),
+        (json.JSONDecodeError("bad manifest", "", 0), "STAGED_MANIFEST_INVALID"),
+    ],
+)
+def test_unreadable_or_malformed_manifest_refuses_before_shim(
+        tmp_path, monkeypatch, error, detail):
+    release_root = tmp_path / "store"
+    attempt = tmp_path / "attempt"
+    attempt.mkdir()
+
+    def read_manifest(_root, _release_id):
+        raise error
+
+    monkeypatch.setattr(phase5_accept.deployment, "read_manifest", read_manifest)
+    called = []
+    monkeypatch.setattr(phase5_acceptance_job, "run_acceptance",
+                        lambda *_args: called.append(True))
+
+    with pytest.raises(OpsError) as excinfo:
+        phase5_accept.run_phase5_accept_worker(_params(release_root), attempt)
+
+    assert excinfo.value.code == "VALIDATION_FAILED"
+    assert excinfo.value.problem.details["code"] == detail
+    assert str(error) not in str(excinfo.value)
+    assert str(error) not in str(excinfo.value.problem.details)
+    assert excinfo.value.__cause__ is None
+    assert excinfo.value.__suppress_context__
+    assert called == []
+    assert not (attempt / "acceptance.json").exists()
+    assert not (release_root / "deployment" / "DEPLOYED").exists()
 
 
 def test_staged_manifest_hash_mismatch_refuses_before_shim(tmp_path, monkeypatch):
