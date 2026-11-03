@@ -681,6 +681,58 @@ def test_calendar_row_inputs_keeps_expiry_beyond_horizon_with_independent_exit(t
     assert result.calendar_row["exit_date"] < result.calendar_row["expiry"]
 
 
+def test_calendar_row_inputs_stages_horizon_for_runup_and_entry_rule_members(tmp_path):
+    repository, snapshot = _snapshot(
+        tmp_path,
+        price={"AAA": [_price_row("AAA", _SESSION, close_raw=12.5)]},
+        chains=(_common_pair("AAA", datetime(2024, 1, 5), datetime(2024, 1, 16), 100.0)
+                + _common_pair("AAA", datetime(2024, 1, 5), datetime(2024, 2, 16), 100.0)),
+        events=[_event_row("AAA", _EVENT, "BMO")])
+    entry_rule_key = replace(_STRADDLE_KEY, strategy="TWIN-P")
+
+    entry_rule = scan_calendar_row_inputs(repository, snapshot, entry_rule_key,
+                                          decision_session=_SESSION, calendar=_CALENDAR)
+    runup = scan_calendar_row_inputs(repository, snapshot, _RUNUP_KEY,
+                                     decision_session=_SESSION, calendar=_CALENDAR)
+
+    assert entry_rule.calendar_row["days_before_print"] == 5
+    assert runup.calendar_row["days_before_print"] == 5
+
+
+def test_calendar_row_inputs_leaves_entry_rule_horizon_unstaged_but_refuses_runup(
+        tmp_path):
+    early_session = "2024-01-02"
+    repository, snapshot = _snapshot(
+        tmp_path,
+        price={"AAA": [_price_row("AAA", early_session, close_raw=12.5)]},
+        chains=(_common_pair("AAA", datetime(2024, 1, 2), datetime(2024, 1, 16), 100.0)
+                + _common_pair("AAA", datetime(2024, 1, 2), datetime(2024, 2, 16), 100.0)),
+        events=[_event_row("AAA", _EVENT, "BMO")])
+    entry_rule_key = replace(_STRADDLE_KEY, strategy="TWIN-P")
+
+    entry_rule = scan_calendar_row_inputs(repository, snapshot, entry_rule_key,
+                                          decision_session=early_session, calendar=_CALENDAR)
+    assert "days_before_print" not in entry_rule.calendar_row
+
+    with pytest.raises(NativeScoreBatchRowRefusal) as exc:
+        scan_calendar_row_inputs(repository, snapshot, _RUNUP_KEY,
+                                 decision_session=early_session, calendar=_CALENDAR)
+    assert exc.value.code == "RUNUP_HORIZON_NOT_AVAILABLE"
+
+
+def test_calendar_row_inputs_does_not_stage_horizon_for_other_strategies(tmp_path):
+    repository, snapshot = _snapshot(
+        tmp_path,
+        price={"AAA": [_price_row("AAA", _SESSION, close_raw=12.5)]},
+        chains=_common_pair("AAA", datetime(2024, 1, 5), datetime(2024, 1, 16), 100.0),
+        events=[_event_row("AAA", _EVENT, "BMO")])
+
+    result = scan_calendar_row_inputs(repository, snapshot, _STRADDLE_KEY,
+                                      decision_session=_SESSION, calendar=_CALENDAR)
+
+    assert "days_before_print" not in result.calendar_row
+
+
 def test_decision_calendar_rejects_bad_days_before_reading(monkeypatch):
     def forbidden(*args, **kwargs):
         raise AssertionError("source read before validation")
@@ -988,10 +1040,18 @@ def _spot_fixture_documents(close_raw):
                 "session": "BMO", "entry_date": "2024-01-05",
                 "exit_date": "2024-01-12" if strategy == "STR-RUNUP" else "2024-01-16",
                 "expiry": "2024-02-16", "spot": 10.0, "calendar_observed_through": "2024-01-05"}
-            if strategy == "STR-RUNUP":
+            stages_horizon = (
+                strategy == "STR-RUNUP"
+                or strategy in {"BFLY-P", "BFLY-P5", "CND-PS", "CTR5", "RAMP7",
+                                "TWIN-P", "TWIN-P5"})
+            if stages_horizon:
                 calendar_row["days_before_print"] = 5
+            panel_row = {"spy_ret252": 0.0}
+            if strategy in {"BFLY-P", "BFLY-P5", "CND-PS", "CTR5", "RAMP7",
+                            "TWIN-P", "TWIN-P5"}:
+                panel_row["days_before_print"] = 5
             events.append({
-                "key": key, "calendar_row": calendar_row, "panel_row": {"spy_ret252": 0.0},
+                "key": key, "calendar_row": calendar_row, "panel_row": panel_row,
                 "panel_anchor": "2024-01-05", "tier4_row": {}, "quote_status": "recorded",
                 "quote_rows": [
                     {"ticker": ticker, "right": right, "strike": 10.0, "expiry": "2024-02-16",

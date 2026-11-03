@@ -10,6 +10,7 @@
   the frozen ``SourceBundle.chooser_analog_pool`` must carry;
 * ``admissible_table``: ``{"table_id", "version"[, "content_hash"]}`` -- the
   key ``SourceBundle.chooser_admissible_table`` must carry.
+Chooser recipes may also carry ``artifact_refs`` and ``fold_provenance``.
 
 ``SourceBundle.chooser_fold_pools`` declares each served fold's pool. Nothing
 here computes a feature: the block carries recipes, frozen state and source
@@ -39,6 +40,7 @@ __all__ = ["chooser_block", "frozen_chooser_block"]
 
 _CHOOSER_RECIPE_FIELDS = _FROZEN_RECIPE_FIELDS | frozenset({
     "producers", "analog_pool", "admissible_table",
+    "artifact_refs", "fold_provenance",
 })
 _ANALOG_KEY_FIELDS = frozenset({"pool_id", "cutoff", "content_hash"})
 _TABLE_KEY_FIELDS = frozenset({"table_id", "version", "content_hash"})

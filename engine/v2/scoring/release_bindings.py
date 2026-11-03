@@ -255,7 +255,8 @@ def _validated_release_root(release_root: Path | str) -> Path:
 
 
 def resolve_release_binding(
-        release_root: Path | str, *, include_chooser_fold_references: bool = False
+        release_root: Path | str, *, include_chooser_fold_references: bool = False,
+        defer_chooser_fold_failures: bool = False,
 ) -> ScoringReleaseBinding:
     """Resolve the live release at ``release_root``. See
     ``engine/v2/scoring/ARCHITECTURE.md``'s ``release_bindings.py`` section
@@ -263,8 +264,11 @@ def resolve_release_binding(
     Read-only: performs no writes and constructs fresh artifact loaders.
     Chooser folds load only when ``include_chooser_fold_references`` is true;
     ordinary nightly resolution leaves that map empty without loading chooser
-    estimators into the inference cache.
+    estimators into the inference cache. ``defer_chooser_fold_failures`` is
+    valid only with that opt-in.
     """
+    if defer_chooser_fold_failures and not include_chooser_fold_references:
+        raise ValueError("defer_chooser_fold_failures requires the chooser opt-in")
     root = _validated_release_root(release_root)
     dep_root = root / _DEPLOYMENT_DIR
 
@@ -291,7 +295,8 @@ def resolve_release_binding(
     if include_chooser_fold_references:
         chooser_fold_references, chooser_authoring_fold_contexts = (
             _resolve_chooser_fold_references(
-                catalog, manifest, frozen_inference, model_identity, root, dep_root))
+                catalog, manifest, frozen_inference, model_identity, root, dep_root,
+                defer_chooser_fold_failures=defer_chooser_fold_failures))
     else:
         chooser_fold_references = MappingProxyType({})
         chooser_authoring_fold_contexts = MappingProxyType({})
@@ -369,6 +374,29 @@ class ChooserState:
     artifact_refs: tuple[str, ...]
 
 
+def _chooser_fold_raw_identity_matches(
+    doc: object, role: str, fold_start: str,
+) -> bool:
+    """Whether a raw descriptor is the requested ``(role, fold_start)`` identity."""
+    if not isinstance(doc, Mapping):
+        return False
+    raw_policy = doc.get("policy")
+    if not isinstance(raw_policy, Mapping):
+        return False
+    return raw_policy.get("role") == role and doc.get("fold_start") == fold_start
+
+
+def _chooser_fold_descriptor_matches(
+    desc: ChooserServingFoldDescriptor, role: str, fold_start: str,
+) -> bool:
+    """Whether ``desc`` is the requested ``(role, fold_start)`` with a cutoff."""
+    return (
+        desc.training_cutoff is not None
+        and desc.policy.role == role
+        and desc.fold_start == fold_start
+    )
+
+
 def _chooser_fold_descriptor(
     binding: ScoringReleaseBinding, catalog: Mapping, role: str,
     fold_start: str, decision_cutoff: str,
@@ -390,10 +418,15 @@ def _chooser_fold_descriptor(
             doc = obj.get("serving_fold")
             if not isinstance(doc, Mapping):
                 continue
-            desc = from_document(ChooserServingFoldDescriptor, doc)
-            if desc.training_cutoff is None:
+            try:
+                desc = from_document(ChooserServingFoldDescriptor, doc)
+            except Exception:
+                # An unrelated malformed object must not hide a valid
+                # descriptor for the row's own (role, fold_start).
+                if _chooser_fold_raw_identity_matches(doc, role, fold_start):
+                    raise
                 continue
-            if desc.policy.role == role and desc.fold_start == fold_start:
+            if _chooser_fold_descriptor_matches(desc, role, fold_start):
                 matches.append(desc)
         if len(matches) != 1:
             raise ValueError("not exactly one matching descriptor")
@@ -485,7 +518,8 @@ def select_chooser_state(
 
 
 def resolve_production_release_binding(
-        *, include_chooser_fold_references: bool = False
+        *, include_chooser_fold_references: bool = False,
+        defer_chooser_fold_failures: bool = False,
 ) -> ScoringReleaseBinding:
     """``resolve_release_binding`` against the ONE configured production
     release root (``engine.v2.models.deployment.production_release_root``).
@@ -501,7 +535,8 @@ def resolve_production_release_binding(
     except deployment.MissingReleaseRoot as exc:
         raise ModelNotReady("release_root", "no production release root is configured") from exc
     return resolve_release_binding(
-        root, include_chooser_fold_references=include_chooser_fold_references)
+        root, include_chooser_fold_references=include_chooser_fold_references,
+        defer_chooser_fold_failures=defer_chooser_fold_failures)
 
 
 def resolve_gate_policy(
@@ -1026,11 +1061,75 @@ def _is_legacy_cutoffless_chooser_fold(obj: object) -> bool:
     return True
 
 
+def _load_one_chooser_fold_reference(
+    obj: object, legacy_flag: bool | None, member_id: str, catalog: Mapping,
+    manifest: "deployment.StagedManifest", inference: FrozenInference,
+    root: Path, dep_root: Path, authoring_releases: Mapping,
+    carried_catalogs: dict[str, Mapping], defer: bool,
+) -> tuple | None:
+    # ``None`` marks an object deferred at cutoff classification.
+    if legacy_flag is None:
+        return None
+    if not isinstance(obj, Mapping):
+        if not defer:
+            raise ModelNotReady(member_id, "chooser fold could not be verified or loaded")
+        return None
+    try:
+        return _verified_chooser_fold_reference(
+            obj, catalog, manifest, inference, root, dep_root,
+            authoring_releases, carried_catalogs)
+    except Exception:
+        if not defer:
+            raise
+        return None
+
+
+def _add_chooser_fold_reference(
+    result: tuple, legacy_flag: bool, member_id: str, references: dict,
+    authoring_contexts: dict, seen_keys: set, conflicted_keys: set,
+    defer: bool,
+) -> str:
+    key, reference, authoring_manifest, authoring_catalog = result
+    if key in seen_keys or key in conflicted_keys:
+        if not defer:
+            raise ModelNotReady(member_id, "ambiguous chooser fold reference")
+        if key in conflicted_keys:
+            return "ambiguous"
+        conflicted_keys.add(key)
+        omitted = references.pop(key, None)
+        if omitted is not None:
+            authoring_contexts.pop(omitted.descriptor_hash, None)
+        return "ambiguous"
+    seen_keys.add(key)
+    if legacy_flag:
+        return "legacy"
+    references[key] = reference
+    authoring_contexts[reference.descriptor_hash] = (
+        authoring_manifest, authoring_catalog)
+    return "added"
+
+
+def _print_chooser_fold_progress(
+    done: int, total: int, started: float, failed: int, ambiguous: int,
+) -> None:
+    elapsed = time.monotonic() - started
+    rate = done / elapsed if elapsed > 0 else 0.0
+    eta = (total - done) / rate if rate > 0 else 0.0
+    print(
+        f"[chooser-folds] {done}/{total}, elapsed={elapsed:.1f}s, "
+        f"rate={rate:.2f}/s, ETA={eta:.1f}s, "
+        f"peak_rss={_rss_mib():.1f}MiB, failed={failed}, "
+        f"ambiguous={ambiguous}",
+        file=sys.stderr,
+    )
+
+
 def _load_chooser_fold_references(
     objects: list, member_id: str, cutoff: date | None, catalog: Mapping,
     manifest: "deployment.StagedManifest", inference: FrozenInference,
     model_identity: Mapping[str, ModelIdentity], root: Path, dep_root: Path,
-    *, legacy_flags: list[bool] | None = None,
+    *, legacy_flags: list[bool | None] | None = None,
+    defer_chooser_fold_failures: bool = False,
 ) -> tuple[dict[tuple[str, str], ChooserFoldReference],
            dict[str, tuple["deployment.StagedManifest", Mapping]]]:
     if len(objects) > _CHOOSER_FOLD_MAX_OBJECTS:
@@ -1039,49 +1138,42 @@ def _load_chooser_fold_references(
         legacy_flags = [_is_legacy_cutoffless_chooser_fold(obj) for obj in objects]
     total, started, references = len(objects), time.monotonic(), {}
     seen_keys: set[tuple[str, str]] = set()
+    conflicted_keys: set[tuple[str, str]] = set()
     authoring_contexts: dict[str, tuple["deployment.StagedManifest", Mapping]] = {}
     authoring_releases = {
         manifest.release.release_id: (manifest, catalog, cutoff, model_identity)}
     carried_catalogs: dict[str, Mapping] = {}
-    omitted_legacy = 0
+    omitted_legacy = failed = ambiguous = 0
     print(
         f"[chooser-folds] start: 0/{total}, elapsed=0.0s, "
         f"peak_rss={_rss_mib():.1f}MiB",
         file=sys.stderr,
     )
     for done, obj in enumerate(objects, start=1):
-        if not isinstance(obj, Mapping):
-            raise ModelNotReady(member_id, "chooser fold could not be verified or loaded")
-        result = _verified_chooser_fold_reference(
-            obj, catalog, manifest, inference, root, dep_root,
-            authoring_releases, carried_catalogs)
-        if result is not None:
-            key, reference, authoring_manifest, authoring_catalog = result
-            if key in seen_keys:
-                raise ModelNotReady(member_id, "ambiguous chooser fold reference")
-            seen_keys.add(key)
-            if not legacy_flags[done - 1]:
-                references[key] = reference
-                authoring_contexts[reference.descriptor_hash] = (
-                    authoring_manifest, authoring_catalog)
-            else:
+        result = _load_one_chooser_fold_reference(
+            obj, legacy_flags[done - 1], member_id, catalog, manifest,
+            inference, root, dep_root, authoring_releases, carried_catalogs,
+            defer_chooser_fold_failures)
+        if result is None:
+            failed += 1
+        else:
+            status = _add_chooser_fold_reference(
+                result, legacy_flags[done - 1], member_id, references,
+                authoring_contexts, seen_keys, conflicted_keys,
+                defer_chooser_fold_failures)
+            if status == "legacy":
                 omitted_legacy += 1
+            elif status == "ambiguous":
+                ambiguous += 1
         if done % 4 == 0 or done == total:
-            elapsed = time.monotonic() - started
-            rate = done / elapsed if elapsed > 0 else 0.0
-            eta = (total - done) / rate if rate > 0 else 0.0
-            print(
-                f"[chooser-folds] {done}/{total}, elapsed={elapsed:.1f}s, "
-                f"rate={rate:.2f}/s, ETA={eta:.1f}s, "
-                f"peak_rss={_rss_mib():.1f}MiB",
-                file=sys.stderr,
-            )
+            _print_chooser_fold_progress(done, total, started, failed, ambiguous)
     elapsed = time.monotonic() - started
     rate = total / elapsed if elapsed > 0 else 0.0
     print(
         f"[chooser-folds] end: {total}/{total}, elapsed={elapsed:.1f}s, "
         f"rate={rate:.2f}/s, peak_rss={_rss_mib():.1f}MiB, "
-        f"legacy_cutoffless_omitted={omitted_legacy}",
+        f"legacy_cutoffless_omitted={omitted_legacy}, failed={failed}, "
+        f"ambiguous={ambiguous}",
         file=sys.stderr,
     )
     return references, authoring_contexts
@@ -1106,10 +1198,19 @@ def _chooser_fold_objects(members: Mapping, member_ids: tuple[str, ...]) -> list
 
 
 def _chooser_fold_catalog_cutoff(
-    catalog: Mapping, objects: list,
-) -> tuple[date | None, list[bool]]:
-    legacy_flags = [_is_legacy_cutoffless_chooser_fold(obj) for obj in objects]
-    if all(legacy_flags):
+    catalog: Mapping, objects: list, *, defer_chooser_fold_failures: bool = False,
+) -> tuple[date | None, list[bool | None]]:
+    legacy_flags: list[bool | None] = []
+    for obj in objects:
+        try:
+            legacy_flags.append(_is_legacy_cutoffless_chooser_fold(obj))
+        except ModelNotReady:
+            if not defer_chooser_fold_failures:
+                raise
+            # Unparseable objects are omitted individually in deferred mode.
+            legacy_flags.append(None)
+    classified = [flag for flag in legacy_flags if flag is not None]
+    if not classified or all(classified):
         return None, legacy_flags
     try:
         cutoff = _catalog_retrain_cutoff(catalog)
@@ -1124,7 +1225,27 @@ def _chooser_fold_catalog_cutoff(
 def _resolve_chooser_fold_references(
     catalog: Mapping, manifest: "deployment.StagedManifest",
     inference: FrozenInference, model_identity: Mapping[str, ModelIdentity],
-    root: Path, dep_root: Path,
+    root: Path, dep_root: Path, *, defer_chooser_fold_failures: bool = False,
+) -> tuple[dict[tuple[str, str], ChooserFoldReference],
+           dict[str, tuple["deployment.StagedManifest", Mapping]]]:
+    try:
+        return _resolve_chooser_fold_references_checked(
+            catalog, manifest, inference, model_identity, root, dep_root,
+            defer_chooser_fold_failures=defer_chooser_fold_failures)
+    except (ModelNotReady, KeyError, TypeError, ValueError):
+        if not defer_chooser_fold_failures:
+            raise
+        print(
+            "[chooser-folds] deferred structural failure: chooser references omitted",
+            file=sys.stderr,
+        )
+        return {}, {}
+
+
+def _resolve_chooser_fold_references_checked(
+    catalog: Mapping, manifest: "deployment.StagedManifest",
+    inference: FrozenInference, model_identity: Mapping[str, ModelIdentity],
+    root: Path, dep_root: Path, *, defer_chooser_fold_failures: bool = False,
 ) -> tuple[dict[tuple[str, str], ChooserFoldReference],
            dict[str, tuple["deployment.StagedManifest", Mapping]]]:
     member_ids = ("tier4_folds:implied_t1", "tier4_folds:runup_move")
@@ -1145,10 +1266,13 @@ def _resolve_chooser_fold_references(
         raise ModelNotReady("tier4_folds:chooser", "chooser fold catalog exceeds load limit")
     if not objects:
         return {}, {}
-    cutoff, legacy_flags = _chooser_fold_catalog_cutoff(catalog, objects)
+    cutoff, legacy_flags = _chooser_fold_catalog_cutoff(
+        catalog, objects,
+        defer_chooser_fold_failures=defer_chooser_fold_failures)
     return _load_chooser_fold_references(
         objects, "tier4_folds:chooser", cutoff, catalog, manifest,
-        inference, model_identity, root, dep_root, legacy_flags=legacy_flags)
+        inference, model_identity, root, dep_root, legacy_flags=legacy_flags,
+        defer_chooser_fold_failures=defer_chooser_fold_failures)
 
 
 def _resolve_driver_residual_pools(

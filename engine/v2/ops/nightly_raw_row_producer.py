@@ -52,6 +52,7 @@ from engine.v2.ops.nightly_chain_batch import scan_chain_slices
 from engine.v2.ops.nightly_quote_rows import scan_quote_rows
 from engine.v2.ops.nightly_raw_rows import scan_forward_board_requests
 from engine.v2.ops.nightly_read_summary import ReadTracker
+from engine.v2.scoring.native_entry_rule import ENTRY_RULE_STRATEGIES
 from engine.v2.scoring.nightly_source_bundle import validated_as_of
 
 __all__ = ["build_native_score_batch_events"]
@@ -225,10 +226,13 @@ def _compose_event(
         if error.code not in _EVENT_ERROR_CODES:
             raise
         return None, _refusal(key, error.code, _ROW_REFUSAL_DETAILS[error.code])
+    panel_row = panel.panel_row
+    if key.strategy in ENTRY_RULE_STRATEGIES and "days_before_print" in calendar_row:
+        panel_row = {**panel_row, "days_before_print": calendar_row["days_before_print"]}
     event = _document({
         "key": {"ticker": key.ticker, "strategy": key.strategy,
                 "event_date": _event_day(key.event_date), "session": key.session},
-        "calendar_row": calendar_row, "panel_row": panel.panel_row,
+        "calendar_row": calendar_row, "panel_row": panel_row,
         "panel_anchor": panel.panel_anchor, "tier4_row": {},
         "quote_rows": quotes.quote_rows, "quote_status": quotes.quote_status,
     })
