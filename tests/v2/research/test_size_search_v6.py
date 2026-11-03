@@ -110,30 +110,6 @@ def test_v6_workers_one_and_two_match_candidates_results_and_metrics(case, tmp_p
     parallel_result, parallel_report = execute("parallel", 2)
     assert executor_calls == [2]
 
-    def first_difference(left, right, path="$"):
-        if isinstance(left, dict) and isinstance(right, dict):
-            keys = list(left) + [key for key in right if key not in left]
-            for key in keys:
-                if key not in left or key not in right:
-                    return f"{path}.{key}", left.get(key), right.get(key)
-                difference = first_difference(left[key], right[key], f"{path}.{key}")
-                if difference is not None:
-                    return difference
-            return None
-        if isinstance(left, list) and isinstance(right, list):
-            for index, (left_item, right_item) in enumerate(zip(left, right)):
-                difference = first_difference(left_item, right_item, f"{path}[{index}]")
-                if difference is not None:
-                    return difference
-            if len(left) != len(right):
-                return f"{path}.length", len(left), len(right)
-            return None
-        return None if left == right else (path, left, right)
-
-    first = first_difference(serial_result, parallel_result)
-    if first is not None:
-        print(f"first result difference: {first[0]}: serial={first[1]!r}; parallel={first[2]!r}")
-
     # The timing/execution identities differ between serial and worker runs: folds[*].selection_id,
     # folds[*].result_id, and the top-level result_id. They depend on terminal IDs whose records
     # include runtime score_seconds and rss_delta_kib. Remove only these known paths from shallow
