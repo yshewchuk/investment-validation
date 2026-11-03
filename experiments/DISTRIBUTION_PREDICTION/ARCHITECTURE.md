@@ -16,6 +16,7 @@ Native registration, dataset/feature qualification, training-label availability,
 | Legacy `distribution_scores` forecast exports | Re-export the identical neutral functions; economic/profit scoring stays separate. No numerical, refusal, row-order or progress-cadence change. |
 | `training_baseline(fits, outer_year, horizon)` | Reverify admitted stored training and completed fit; bind plan/admission/trial/matrix/event identity and label cutoff, then copy the identical equal-weight training label rows. No evaluation outcome read, fitting or publication; caller must persist this evidence before target access. |
 | `score_training_baseline(baseline, targets, receipt=...)` | Require unchanged baseline hash, matching completed fit claim and exact evaluation event/status roster. Prepare CRPS/bin/tail reference once per cohort; retain missing targets and impossible-bin infinite log loss. The saved hash detects mutation, not forged admission; collection must reverify native provenance. |
+| Malformed saved baseline/receipt, changed identity or incomplete/invalid target-status map | Nonretryable `EXPERIMENT_IDENTITY_CONFLICT` before score preparation or row emission; omissions must have exactly one `omitted` key with a native reason. Invalid empirical numeric labels retain the numerical helper’s typed `CONTRACT_MISMATCH`; no source read or partial result. |
 | Source-free numerical result | No I/O, fitting, native admission, publication or final-read authority. |
 
 ## Incremental delivery

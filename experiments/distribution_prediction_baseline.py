@@ -7,7 +7,7 @@ from engine.v2.ops.errors import fail
 from engine.v2.research.magnitude_distribution import bin_index, histogram
 from engine.v2.research.magnitude_distribution_math import bin_scores, prepare_empirical_crps
 from engine.v2.research.progress import Progress, stage
-from experiments.magnitude_search_evidence import fit_evidence
+from experiments.magnitude_search_evidence import OMISSION_REASONS, fit_evidence
 
 __all__ = ["training_baseline", "score_training_baseline"]
 _SCHEMA = "distribution_training_baseline.v1"
@@ -60,14 +60,29 @@ def score_training_baseline(baseline, targets, *, receipt):
     Bind the matching fit before target access; sort/bin the shared reference
     once, not per event. This numeric replay grants no source-read authority.
     """
-    _require(type(baseline) is dict and baseline.get("schema_version") == _SCHEMA
-             and baseline.get("policy") == "same_admitted_training_equal_weight.v1"
-             and baseline["baseline_id"] == content_hash({key: value for key, value in baseline.items() if key != "baseline_id"}))
-    _require(receipt["status"] == "completed" and receipt["result_id"] == baseline["result_id"]
-             and canonical_json(receipt["claim"]) == canonical_json(baseline["fit_claim"]))
-    events, claim = baseline["evaluation_event_ids"], baseline["fit_claim"]
-    _require(type(targets) is dict and set(targets) == set(events))
-    samples = [row["absolute_move_pct"] for row in baseline["training"]]
+    try:
+        _require(type(baseline) is dict and baseline.get("schema_version") == _SCHEMA
+                 and baseline.get("policy") == "same_admitted_training_equal_weight.v1"
+                 and baseline["baseline_id"] == content_hash({key: value for key, value in baseline.items() if key != "baseline_id"}))
+        _require(type(receipt) is dict and receipt["status"] == "completed"
+                 and receipt["result_id"] == baseline["result_id"]
+                 and canonical_json(receipt["claim"]) == canonical_json(baseline["fit_claim"]))
+        events, claim, training = baseline["evaluation_event_ids"], baseline["fit_claim"], baseline["training"]
+        _require(type(events) is list and bool(events) and all(type(event) is str and event for event in events)
+                 and len(events) == len(set(events)) and type(claim) is dict and type(claim["trial"]) is dict
+                 and type(claim["outer_year"]) is str and bool(claim["outer_year"])
+                 and type(claim["trial"]["horizon"]) is int and claim["trial"]["horizon"] in (1, 3, 5))
+        _require(type(training) is list and bool(training)
+                 and all(type(row) is dict and set(row) == {"event_id", "absolute_move_pct"} for row in training))
+        samples = [row["absolute_move_pct"] for row in training]
+        _require(type(targets) is dict and set(targets) == set(events))
+        for value in targets.values():
+            if type(value) is dict:
+                _require(set(value) == {"omitted"} and type(value["omitted"]) is str and value["omitted"] in OMISSION_REASONS)
+            else:
+                _require(type(value) in (int, float) and isfinite(value) and value >= 0)
+    except (KeyError, TypeError, ValueError, OverflowError, RecursionError):
+        raise fail("EXPERIMENT_IDENTITY_CONFLICT", "distribution training baseline differs") from None
     score = prepare_empirical_crps(samples)
     counts = [0] * 81
     for value in samples:

@@ -34,7 +34,7 @@ def test_baseline_uses_exact_admitted_training_and_fit_claim(case, horizon):
 def test_empirical_reference_has_hand_derived_scores_for_all_admitted_events(case):
     document, result = prepared(case)
     rows = list(baseline.score_training_baseline(document, {"Z": 5, "A": 0}, receipt=result["receipt"]))
-    # Sum unordered distances for [0,1/4,20,22] is343/4. CRPS subtracts343/64.
+    # Sum unordered distances for [0,1/4,20,22] is 343/4. CRPS subtracts 343/64.
     assert [row["event_id"] for row in rows] == ["Z", "A"]
     assert all(row["arm"] == "training_empirical" and row["horizon"] == 1 for row in rows)
     assert rows[0]["crps"] == 325 / 64 and rows[1]["crps"] == 333 / 64
@@ -161,3 +161,56 @@ def test_rebuild_and_numeric_replay_need_no_fitting_or_new_record(case, monkeypa
             {"Z": 0, "A": 22}, receipt=result["receipt"]))) == 2
     assert case.records == before
     assert sum(call[0] == "fit" for call in case.calls) == 1
+
+
+@pytest.mark.parametrize('mutation', [
+    lambda doc, receipt: doc.pop('baseline_id'),
+    lambda doc, receipt: doc.pop('evaluation_event_ids'),
+    lambda doc, receipt: doc.update(evaluation_event_ids=None),
+    lambda doc, receipt: doc.update(evaluation_event_ids=['Z', 'Z']),
+    lambda doc, receipt: doc.update(training=None),
+    lambda doc, receipt: doc.update(training=[{}]),
+    lambda doc, receipt: receipt.clear(),
+    lambda doc, receipt: receipt.update(claim=None),
+])
+def test_malformed_saved_evidence_has_exact_typed_refusal_before_preparation(case, monkeypatch, mutation):
+    document, result = prepared(case)
+    mutation(document, result['receipt'])
+    if 'baseline_id' in document:
+        document['baseline_id'] = content_hash({k: v for k, v in document.items() if k != 'baseline_id'})
+    monkeypatch.setattr(baseline, 'prepare_empirical_crps', lambda *args: pytest.fail('score preparation'))
+    with pytest.raises(OpsError) as error:
+        next(baseline.score_training_baseline(document, {'Z': 0, 'A': 22}, receipt=result['receipt']))
+    assert error.value.code == 'EXPERIMENT_IDENTITY_CONFLICT'
+    assert error.value.problem.message == 'distribution training baseline differs'
+    assert error.value.problem.retryable is False
+
+
+@pytest.mark.parametrize('receipt', [None, {}, [], 'receipt'])
+def test_malformed_receipt_is_typed_before_any_target_iteration(case, receipt):
+    document, _ = prepared(case)
+    with pytest.raises(OpsError) as error:
+        next(baseline.score_training_baseline(document, None, receipt=receipt))
+    assert error.value.code == 'EXPERIMENT_IDENTITY_CONFLICT'
+
+
+@pytest.mark.parametrize('bad', [{}, {'omitted': None}, {'omitted': ''}, {'omitted': 'foreign'},
+    {'omitted': 'no_price_window', 'value': 0}, [], None, True, float('nan'), float('inf'), -1, 10**1000])
+def test_all_target_statuses_checked_before_first_row_or_score_preparation(case, monkeypatch, bad):
+    document, result = prepared(case)
+    monkeypatch.setattr(baseline, 'prepare_empirical_crps', lambda *args: pytest.fail('score preparation'))
+    # Z is valid and ordered first: invalid A must still prevent any first yield.
+    with pytest.raises(OpsError) as error:
+        next(baseline.score_training_baseline(document, {'Z': 0, 'A': bad}, receipt=result['receipt']))
+    assert error.value.code == 'EXPERIMENT_IDENTITY_CONFLICT'
+    assert error.value.problem.retryable is False
+
+
+@pytest.mark.parametrize('reason', sorted(baseline.OMISSION_REASONS))
+def test_each_native_omission_reason_is_retained_exactly(case, reason):
+    document, result = prepared(case)
+    rows = list(baseline.score_training_baseline(document,
+        {'Z': {'omitted': reason}, 'A': 0}, receipt=result['receipt']))
+    assert rows[0] == dict(event_id='Z', outer_year='2024', horizon=1, arm='training_empirical',
+        observation=None, status='missing_target', reason=reason)
+    assert rows[1]['crps'] == 333 / 64
