@@ -40,6 +40,7 @@ from engine.v2.ops.native_score_batch_types import (
 )
 from engine.v2.ops.nightly_chain_batch import CHAIN_TABLE, require_chain_rows, require_usable_fields
 from engine.v2.ops.nightly_raw_rows import CalendarRowInputs, scan_calendar_row
+from engine.v2.scoring.native_entry_rule import ENTRY_RULE_STRATEGIES
 from engine.v2.scoring.nightly_source_bundle import (
     NightlySourceBundleRefusal,
     validated_as_of,
@@ -264,8 +265,11 @@ def scan_calendar_row_inputs(repository: Repository, snapshot: SnapshotRef, key:
     expiry domain or native no-expiry geometry refusal becomes per-key
     ``NO_RESOLVABLE_EXPIRY``. Missing RUNUP pre-print coverage becomes per-key
     ``RUNUP_HORIZON_NOT_AVAILABLE``; a negative distance becomes per-key
-    ``INVALID_RUNUP_HORIZON``. Malformed calendar input and other unhandled
-    geometry/input errors propagate."""
+    ``INVALID_RUNUP_HORIZON``. An entry-rule chooser member stages the same
+    nonnegative horizon when available and leaves it unstaged otherwise, so
+    projection refuses with ``MISSING_STAGED_INPUT`` instead of a RUNUP
+    refusal. Malformed calendar input and other unhandled geometry/input
+    errors propagate."""
     from engine.v2.domain.generation import GeometryRefusal, resolve_expiry
 
     _require_key(key)
@@ -304,17 +308,26 @@ def scan_calendar_row_inputs(repository: Repository, snapshot: SnapshotRef, key:
 
 def _runup_timing(key: BoardRequest, calendar: CalendarSessions,
                   entry_date: str) -> dict[str, int]:
-    """Stage only RUNUP's calendar-owned horizon, retaining per-key refusals."""
-    if key.strategy != "STR-RUNUP":
+    """Stage RUNUP's and entry-rule chooser members' calendar-owned horizon.
+
+    RUNUP keeps its per-key refusals; an entry-rule member with no valid
+    nonnegative horizon stages nothing so native projection owns the
+    ``MISSING_STAGED_INPUT`` refusal."""
+    is_runup = key.strategy == "STR-RUNUP"
+    if not is_runup and key.strategy not in ENTRY_RULE_STRATEGIES:
         return {}
     try:
         days = trading_days_before_print(
             calendar, entry_date=entry_date, event_date=key.event_date, session=key.session)
     except CalendarCoverageError as exc:
+        if not is_runup:
+            return {}
         raise NativeScoreBatchRowRefusal(
             key, "RUNUP_HORIZON_NOT_AVAILABLE",
             "the pinned calendar does not cover the RUNUP horizon") from exc
     if days < 0:
+        if not is_runup:
+            return {}
         raise NativeScoreBatchRowRefusal(
             key, "INVALID_RUNUP_HORIZON", "RUNUP entry is after the pre-print close")
     return {"days_before_print": days}

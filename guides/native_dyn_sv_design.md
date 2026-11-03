@@ -50,13 +50,13 @@ over seven independently scored member rows.
 
 ## 3. What is missing
 
-1. **Chooser declaration on member rows.** `release_bindings.py` states "chooser
-   state selection is not wired into nightly". `native_score_batch._assemble_one_event`
-   declares no `chooser_recipe` and no chooser state, so member records carry no
-   `chooser_score`. Needs: selecting the analog pool / admissible table (and the
-   Tier-4 fold pools the chooser producers read) for the event's cutoff, and a
-   chooser field on the batch `_StrategySpec` (the registry `StrategySpec` already
-   names the `chooser` role).
+1. **Chooser declaration on member rows — implemented in slice 1e.**
+   `native_score_batch._assemble_one_event` now declares `chooser_recipe` and
+   chooser state, so member records carry chooser state and `chooser_score`.
+   Cutoff-matched state selection is implemented in slice 1e: the analog pool /
+   admissible table (and the Tier-4 fold pools the chooser producers read) are
+   selected for the event's cutoff, and the batch `_StrategySpec` has a chooser
+   field (the registry `StrategySpec` already names the `chooser` role).
 2. **A selection post-pass.** `score_batch` pairs request to record one to one by
    position (`_native_score_batch_documents`). DYN-SV is a fan-in over seven other
    rows of the same event, so it cannot be a registry entry or a per-row pair.
