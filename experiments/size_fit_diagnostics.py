@@ -1,5 +1,6 @@
 """Closed numeric-fit diagnostics retained in immutable v2 worker receipts."""
 import math
+from datetime import date
 
 from engine.v2.foundation import canonical_json, content_hash
 from engine.v2.models.magnitude_mlp_recipe import validate_mlp_recipe
@@ -36,7 +37,14 @@ def _training_event_date_ids(inputs, horizons):
             row = indexed.get((event_id, horizon))
             if row is None or type(row.get("event_date")) is not str:
                 raise ValueError
-            dates.append(row["event_date"])
+            value = row["event_date"]
+            try:
+                canonical = date.fromisoformat(value).isoformat() == value
+            except ValueError:
+                canonical = False
+            if not canonical:
+                raise ValueError
+            dates.append(value)
         result[horizon] = content_hash(dates)
     return result
 

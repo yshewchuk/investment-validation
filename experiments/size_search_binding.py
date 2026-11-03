@@ -49,6 +49,15 @@ def _require(condition):
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "qualified SIZE source/fold binding differs")
 
 
+def _is_canonical_date(value):
+    if not isinstance(value, str):
+        return False
+    try:
+        return date.fromisoformat(value).isoformat() == value
+    except ValueError:
+        return False
+
+
 def _panel_columns(schema_version, model_columns):
     if allows_size_family(request_version(schema_version)):
         return list(dict.fromkeys(c for c in COLUMNS + list(model_columns) if c not in METADATA))
@@ -330,7 +339,7 @@ def fold_inputs(repository, binding, fold, *, requires_event_dates=False):
     started = time.monotonic()
     features = [r for r in panel["rows"] if r["event_id"] in participants]
     if requires_event_dates is True:
-        _require(all(isinstance(events[e].get("event_date"), str) for e in participants))
+        _require(all(_is_canonical_date(events[e].get("event_date")) for e in participants))
         features = [{**r, "event_date": events[r["event_id"]]["event_date"]} for r in features]
     result = {"preflight": preflight, "stored_inputs_id": content_hash(binding["size_panel"]),
         "training_inputs": dict(train.attrs), "training": train[["event_id", "absolute_move_pct"]].to_dict("records"),

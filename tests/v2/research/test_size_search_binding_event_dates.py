@@ -44,3 +44,32 @@ def test_mlp_replay_requires_digest_of_admitted_training_dates():
     with pytest.raises(OpsError) as caught:
         size_fit_diagnostics.evidence(tampered, execution, [5], inputs, {})
     assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+
+
+def test_mlp_replay_refuses_malformed_dates_when_digest_matches():
+    recipe = candidate_recipe("mlp", {"profile": "relu32_l2_0p01"}, columns=["x"],
+        feature_dictionary_hash="sha256:" + "1" * 64, requires_event_dates=True)
+    dates_id = content_hash(["2024-01-02", "wrong-date"])
+    diagnostic = {"schema_version": "magnitude_mlp_fit.v1", "recipe_id": content_hash(recipe),
+        "horizon_sessions": 5, "component_fits": 1, "converged": True, "n_iter": 1,
+        "input_features": 1, "loss": 0.1, "loss_scale": "standardized_target",
+        "training_event_dates_id": dates_id}
+    execution = {"schema_version": "size_candidate_execution.v1", "fit_recipe": recipe}
+    inputs = {"training": [{"event_id": "b"}, {"event_id": "a"}], "features": [
+        {"event_id": "a", "horizon_sessions": 5, "event_date": "wrong-date"},
+        {"event_id": "b", "horizon_sessions": 5, "event_date": "2024-01-02"}]}
+    result = {"event": "succeeded", "diagnostics": [diagnostic]}
+    with pytest.raises(OpsError) as caught:
+        size_fit_diagnostics.evidence(result, execution, [5], inputs, {})
+    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+
+
+@pytest.mark.parametrize("value, expected", [
+    (20240101, False),
+    ("2024-02-30", False),
+    ("20240101", False),
+    ("2024-01-01T00:00:00", False),
+    ("2024-01-01", True),
+])
+def test_is_canonical_date(value, expected):
+    assert size_search_binding._is_canonical_date(value) is expected

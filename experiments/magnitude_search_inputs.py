@@ -2,6 +2,8 @@
 
 Contract: experiments/ARCHITECTURE.md, "Sharded cohort inputs" (#991 fix 4).
 """
+import datetime
+
 from engine.v2.foundation import content_hash
 from engine.v2.ops.errors import fail
 from experiments.magnitude_search_shards import (
@@ -91,6 +93,20 @@ def load_inputs(store, record, expected_id):
     return inputs
 
 
+def _required_event_date(row):
+    """Return ``row``'s canonical ISO event date or refuse the whole fit."""
+    value = row.get("event_date")
+    if not isinstance(value, str):
+        raise fail(_CONFLICT, "search feature event_date is missing or not a string")
+    try:
+        parsed = datetime.date.fromisoformat(value)
+    except ValueError:
+        raise fail(_CONFLICT, "search feature event_date is not an ISO date") from None
+    if parsed.isoformat() != value:
+        raise fail(_CONFLICT, "search feature event_date is not canonical")
+    return value
+
+
 def load_fit_inputs(store, manifest, expected_id, evaluation_event_ids, horizons, feature_columns, *,
                     target_column="absolute_move_pct", requires_event_dates=False):
     """Stream stored training/feature rows for fixed fitting or admission replay.
@@ -99,11 +115,12 @@ def load_fit_inputs(store, manifest, expected_id, evaluation_event_ids, horizons
     ``features`` sections, shard by shard. Returns ``{"features", "training"}``: training rows
     reduced to (event_id, target_column); feature rows kept for training or evaluation
     events at the selected horizons, reduced to the required projection (event_id,
-    context_id, horizon_sessions, *feature_columns), plus event_date only when the fit
-    recipe requests it and a source row provides it. A manifest, hash, shard or inline-path
-    mismatch is
-    EXPERIMENT_IDENTITY_CONFLICT (retryable store errors propagate); a row missing a
-    requested column raises KeyError. The magnitude fit child reports MemoryError as
+    context_id, horizon_sessions, *feature_columns). When the fit recipe requests event
+    dates, every selected feature row must also provide event_date as a canonical ISO
+    date string (``datetime.date.fromisoformat(value).isoformat() == value``); a missing,
+    non-string or noncanonical date is EXPERIMENT_IDENTITY_CONFLICT, as is a manifest,
+    hash, shard or inline-path mismatch (retryable store errors propagate); a row missing
+    a requested column raises KeyError. The magnitude fit child reports MemoryError as
     resource_limit and other loader failures as unavailable; library callers retain the error.
     Both loaders share ``_admit_manifest``; projection arguments must be
     lists or tuples (INVALID_EXPERIMENT_SPEC otherwise).
@@ -126,10 +143,13 @@ def load_fit_inputs(store, manifest, expected_id, evaluation_event_ids, horizons
     events = {row["event_id"] for row in training} | set(evaluation_event_ids)
     wanted = set(horizons)
     columns = ("event_id", "context_id", "horizon_sessions", *feature_columns)
-    features = [{**{name: row[name] for name in columns},
-                 **({"event_date": row["event_date"]} if requires_event_dates and "event_date" in row else {})}
-                for row in _iter_rows(store, members["features"], sections["features"])
-                if row["event_id"] in events and row["horizon_sessions"] in wanted]
+    features = []
+    for row in _iter_rows(store, members["features"], sections["features"]):
+        if row["event_id"] in events and row["horizon_sessions"] in wanted:
+            feature = {name: row[name] for name in columns}
+            if requires_event_dates:
+                feature["event_date"] = _required_event_date(row)
+            features.append(feature)
     return {"features": features, "training": training}
 
 
