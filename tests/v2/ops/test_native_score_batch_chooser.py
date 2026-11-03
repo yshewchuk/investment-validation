@@ -379,6 +379,65 @@ def test_project_member_features_refuses_none_chooser_primitive(monkeypatch):
         "required member feature is missing from staged rows")
 
 
+def test_projection_refusal_preserves_earlier_bundle_refusal(monkeypatch):
+    key = BoardRequest("AAA", "TWIN-P", pd.Timestamp("2026-01-12"), "close")
+    event = NightlyEventInputs(
+        key=key,
+        calendar_row={"event_date": "2026-01-12", "entry_date": "2026-01-12"},
+        panel_row={}, panel_anchor="2026-01-10", tier4_row={}, quote_rows=())
+    identity = SimpleNamespace(
+        decision_clock_id="clock", artifact_hash="hash", binding_id="binding",
+        role="size:*", model_id="model")
+    binding = SimpleNamespace(model_identity={
+        "size:*": identity, "iv_crush:*": identity})
+    original = ("signal", "pred_abs_move")
+    projection_refusal = NativeScoreBatchRowRefusal(
+        key, "MISSING_STAGED_INPUT",
+        "required member feature is missing from staged rows")
+    bundle_refusal = NativeScoreBatchRowRefusal(
+        key, "MISSING_STAGED_INPUT", "calendar_row missing event_id")
+    captured = {}
+
+    monkeypatch.setattr(
+        nsb, "_project_member_features", lambda *a, **k: projection_refusal)
+
+    def fake_bundle(*_args, **kwargs):
+        captured["feature_names"] = kwargs["feature_names"]
+        return bundle_refusal
+
+    monkeypatch.setattr(nsb, "_bundle_or_refusal", fake_bundle)
+
+    result = nsb._assemble_one_event(
+        event, binding=binding, gate_policy={}, as_of="2026-01-10",
+        snapshot_id="snap", calendar_revision="rev",
+        feature_names=original, driver_name="im_t1", gate_source_cache={})
+
+    assert result is bundle_refusal
+    assert captured["feature_names"] == original
+
+
+@pytest.mark.parametrize("name", ["spy_ret21", "zeta_distinct"])
+def test_tier4_none_does_not_fall_back_to_panel(monkeypatch, name):
+    if name == "spy_ret21":
+        state = SimpleNamespace(producer_bindings={})
+    else:
+        state = SimpleNamespace(producer_bindings={
+            "pred_im_t1_d14": SimpleNamespace(
+                feature_order=("zeta_distinct",))})
+    monkeypatch.setattr(nsb, "select_chooser_state", lambda *a, **k: state)
+    event = _projection_event("TWIN-P")
+    event.panel_row[name] = 0.5
+    event.tier4_row[name] = None
+
+    refusal = nsb._project_member_features(
+        event.key, event, _binding(), ("signal",), as_of="2026-01-10")
+
+    assert isinstance(refusal, NativeScoreBatchRowRefusal)
+    assert (refusal.code, refusal.detail) == (
+        "MISSING_STAGED_INPUT",
+        "required member feature is missing from staged rows")
+
+
 def test_null_panel_row_refuses_before_chooser_state_selection(monkeypatch):
     def unexpected(*_args, **_kwargs):
         raise AssertionError("malformed staged row must not select chooser state")

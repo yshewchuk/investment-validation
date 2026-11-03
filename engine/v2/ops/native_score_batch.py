@@ -917,13 +917,18 @@ def _valid_explicit_feature_names(feature_names: Sequence[str]) -> bool:
 def _member_features_available(
     projected: Sequence[str], event: NightlyEventInputs,
 ) -> bool:
-    """Whether every projected name has its required staged value available."""
+    """Whether every projected name has its required staged value available.
+
+    Follows the bundle's exact source precedence: a name present in
+    ``tier4_row`` is available only when that value is non-None; ``panel_row``
+    is consulted only when the name is absent from ``tier4_row``, and then its
+    value must also be non-None. A Tier-4 ``None`` never falls back to panel.
+    """
     for name in projected:
-        if name in _CHOOSER_PRIMITIVES:
-            if (event.panel_row.get(name) is None
-                    and event.tier4_row.get(name) is None):
+        if name in event.tier4_row:
+            if event.tier4_row.get(name) is None:
                 return False
-        elif name not in event.tier4_row and name not in event.panel_row:
+        elif name not in event.panel_row or event.panel_row.get(name) is None:
             return False
     return True
 
@@ -1000,6 +1005,46 @@ def _released_member_bundle_or_refusal(
         selection=selection)
 
 
+def _projected_bundle_or_refusal(
+    key: BoardRequest,
+    event: NightlyEventInputs,
+    *,
+    binding: ScoringReleaseBinding,
+    spec: _StrategySpec,
+    drivers: tuple[_ResolvedDriver, ...],
+    gate_identity: ModelIdentity | None,
+    gate_policy: Mapping[str, Mapping[str, Any]],
+    as_of: Any,
+    feature_names: Sequence[str],
+    driver_name: str,
+    gate_source_cache: dict[tuple[int, str], Any],
+    selection: _ChooserSelection,
+) -> SourceBundle | NativeScoreBatchRowRefusal:
+    """Project member features, then assemble the bundle, or refuse the row.
+
+    A projection refusal still assembles the bundle with the original feature
+    names first, so a bundle refusal takes precedence; otherwise the saved
+    projection refusal is returned. A successful projection assembles with the
+    projected names.
+    """
+    projected = _project_member_features(
+        key, event, binding, feature_names, as_of, selection)
+    if isinstance(projected, NativeScoreBatchRowRefusal):
+        bundle = _bundle_or_refusal(
+            key, event, binding=binding, spec=spec, drivers=drivers,
+            gate_identity=gate_identity, gate_policy=gate_policy, as_of=as_of,
+            feature_names=feature_names, driver_name=driver_name,
+            gate_source_cache=gate_source_cache)
+        if isinstance(bundle, NativeScoreBatchRowRefusal):
+            return bundle
+        return projected
+    return _bundle_or_refusal(
+        key, event, binding=binding, spec=spec, drivers=drivers,
+        gate_identity=gate_identity, gate_policy=gate_policy, as_of=as_of,
+        feature_names=projected, driver_name=driver_name,
+        gate_source_cache=gate_source_cache)
+
+
 def _assemble_one_event(
     event: NightlyEventInputs,
     *,
@@ -1042,15 +1087,11 @@ def _assemble_one_event(
     if refusal is not None:
         return refusal
     selection = _ChooserSelection()
-    feature_names = _project_member_features(
-        key, event, binding, feature_names, as_of, selection)
-    if isinstance(feature_names, NativeScoreBatchRowRefusal):
-        return feature_names
-    bundle = _bundle_or_refusal(
+    bundle = _projected_bundle_or_refusal(
         key, event, binding=binding, spec=spec, drivers=drivers,
         gate_identity=gate_identity, gate_policy=gate_policy, as_of=as_of,
         feature_names=feature_names, driver_name=driver_name,
-        gate_source_cache=gate_source_cache)
+        gate_source_cache=gate_source_cache, selection=selection)
     if isinstance(bundle, NativeScoreBatchRowRefusal):
         return bundle
     event_id = event.calendar_row.get("event_id")
