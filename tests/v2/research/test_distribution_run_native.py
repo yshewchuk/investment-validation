@@ -20,6 +20,7 @@ from engine.v2.foundation import SystemClock, canonical_json
 from engine.v2.models.no_fit import no_fit_guard
 from engine.v2.research.event_history import MAX_OUTCOME_OBJECT_BYTES
 from experiments import distribution_run as runner
+from experiments.distribution_containment import contained
 from experiments.distribution_fitted import DistributionFits
 from experiments.distribution_run import DistributionRun
 from tests.v2.research.test_distribution_pipeline_native import make_run, native_case
@@ -28,10 +29,11 @@ root = Path(sys.argv[1])
 generator = native_case.__wrapped__(SimpleNamespace(mktemp=lambda _: root))
 case = next(generator)
 run = make_run(case, run_type=DistributionRun, runner="experiments/distribution_run.py",
-               experiment_id="synthetic-distribution-bounded-run", deadline_seconds=180)
+               experiment_id="synthetic-distribution-bounded-run", deadline_seconds=180,
+               parent_wall_seconds=210)
 run.seal(clock=SystemClock())
 assert run.request["limits"]["job_wall_seconds"] == 180
-assert run.request["limits"]["parent"]["wall_seconds"] == 180
+assert run.request["limits"]["parent"]["wall_seconds"] == 210
 original, original_bytes, opened = objects.verify_object_path, objects.read_verified_bytes, set()
 def verify(store, ref):
     assert ref.object_id not in case.target_objects, "outer targets require a byte-bounded read"
@@ -60,10 +62,15 @@ def record_setitimer(which, seconds, interval=0.0):
     return original_setitimer(which, seconds, interval)
 signal.setitimer = record_setitimer
 try:
+    with contained(run.request["limits"]["parent"], run.request["limits"]["job_wall_seconds"]):
+        pass
+    with contained({**run.request["limits"]["parent"], "wall_seconds": run.request["limits"]["job_wall_seconds"]},
+                   run.request["limits"]["parent"]["wall_seconds"]):
+        pass
     result = run.run()
 finally:
     signal.setitimer = original_setitimer
-assert timer_seconds == [180]
+assert timer_seconds == [180, 180, 180]
 assert evaluations == ["2024"]
 assert opened == case.target_objects and len(opened) == 1
 assert result["final_read_authority"] == "none" and result["promotion_authority"] == "none"
