@@ -137,6 +137,112 @@ def test_available_rows_require_diagnostics(field):
         prediction_diagnostic_report(rows, events())
 
 
+@pytest.mark.parametrize("status", ["unavailable", "missing_target"])
+@pytest.mark.parametrize("change", [dict(intervals=None), dict(intervals=[]), dict(intervals=[{}] * 4),
+    dict(pit_lower=-.1), dict(pit_lower=1.1), dict(pit_lower=True), dict(pit_lower="0"),
+    dict(pit_upper=-.1), dict(pit_upper=1.1), dict(pit_upper=False), dict(pit_upper=None),
+    dict(pit_lower=.8, pit_upper=.2)])
+def test_nonavailable_retained_row_fields_refuse_finite_malformed_values(status, change):
+    row, metadata = diagnostics((1,))[0], events()[:1]
+    row.update(status=status, observation=None if status == "missing_target" else 0, **change)
+    before = deepcopy(([row], metadata))
+    with pytest.raises(OpsError) as caught:
+        prediction_diagnostic_report([row], metadata)
+    assert caught.value.code == "INVALID_EXPERIMENT_SPEC" and not caught.value.problem.retryable
+    assert ([row], metadata) == before
+
+
+@pytest.mark.parametrize("status", ["unavailable", "missing_target"])
+@pytest.mark.parametrize("field", ["pit_lower", "pit_upper"])
+@pytest.mark.parametrize("value", [-.1, 1.1, "0", True])
+def test_nonavailable_single_retained_pit_bound_refuses_invalid_values(status, field, value):
+    row, metadata = diagnostics((1,))[0], events()[:1]
+    row.update(status=status, observation=None if status == "missing_target" else 0)
+    del row["pit_upper" if field == "pit_lower" else "pit_lower"]
+    row[field] = value
+    before = deepcopy(([row], metadata))
+    with pytest.raises(OpsError) as caught:
+        prediction_diagnostic_report([row], metadata)
+    assert caught.value.code == "INVALID_EXPERIMENT_SPEC" and not caught.value.problem.retryable
+    assert ([row], metadata) == before
+
+
+@pytest.mark.parametrize("status", ["unavailable", "missing_target"])
+@pytest.mark.parametrize("change", [dict(level=.6), dict(lower=-1), dict(lower=True), dict(lower="0"),
+    dict(upper=9), dict(upper=None), dict(width=11), dict(width=True), dict(width="10"),
+    dict(covered=1), dict(covered=None), dict(lower=20, upper=10, width=0)])
+def test_nonavailable_retained_interval_fields_refuse(status, change):
+    row, metadata = diagnostics((1,))[0], events()[:1]
+    row.update(status=status, observation=None if status == "missing_target" else 0)
+    row["intervals"][0].update(change)
+    before = deepcopy(([row], metadata))
+    with pytest.raises(OpsError) as caught:
+        prediction_diagnostic_report([row], metadata)
+    assert caught.value.code == "INVALID_EXPERIMENT_SPEC" and not caught.value.problem.retryable
+    assert ([row], metadata) == before
+
+
+@pytest.mark.parametrize("status", ["unavailable", "missing_target"])
+@pytest.mark.parametrize("change", ["short", "long", "reverse", "lower_nesting", "upper_nesting"])
+def test_nonavailable_retained_intervals_require_exact_nested_levels(status, change):
+    row, metadata = diagnostics((1,))[0], events()[:1]
+    row.update(status=status, observation=None if status == "missing_target" else 0)
+    if change == "short":
+        row["intervals"].pop()
+    elif change == "long":
+        row["intervals"].append(deepcopy(row["intervals"][-1]))
+    elif change == "reverse":
+        row["intervals"].reverse()
+    elif change == "lower_nesting":
+        row["intervals"][1].update(lower=1, width=19, covered=False)
+    else:
+        row["intervals"][1].update(upper=9, width=9)
+    before = deepcopy(([row], metadata))
+    with pytest.raises(OpsError) as caught:
+        prediction_diagnostic_report([row], metadata)
+    assert caught.value.code == "INVALID_EXPERIMENT_SPEC" and not caught.value.problem.retryable
+    assert ([row], metadata) == before
+
+
+@pytest.mark.parametrize("status", ["unavailable", "missing_target"])
+@pytest.mark.parametrize("mask", range(8))
+def test_nonavailable_absent_or_valid_partial_fields_preserve_raw_evidence_and_counts(status, mask):
+    row, metadata = diagnostics((1,))[0], events()[:1]
+    row.update(status=status, observation=None if status == "missing_target" else 0)
+    if status == "missing_target":
+        # Both boolean coverage values are legal when no observation exists.
+        for index, interval in enumerate(row["intervals"]):
+            interval["covered"] = bool(index % 2)
+    for index, field in enumerate(("intervals", "pit_lower", "pit_upper")):
+        if not mask & (1 << index):
+            del row[field]
+    before = deepcopy(([row], metadata))
+    result = prediction_diagnostic_report([row], metadata)
+    assert ([row], metadata) == before and result["rows"] == [row]
+    bare = {key: value for key, value in row.items() if key not in ("intervals", "pit_lower", "pit_upper")}
+    expected = prediction_diagnostic_report([bare], metadata)
+    assert {key: value for key, value in result.items() if key != "rows"} == {
+        key: value for key, value in expected.items() if key != "rows"}
+    summary = result["horizons"]["1"]["arms"]["histogram"]
+    assert summary["counts"][status] == 1 and summary["pit_count"] == 0
+    assert all(item["count"] == 0 and item["mean_width"] is None for item in summary["intervals"])
+    json.dumps(result, allow_nan=False)
+    if "intervals" in row:
+        row["intervals"][0]["width"] = 999
+        assert result["rows"] == before[0]
+
+
+def test_unavailable_retained_coverage_still_matches_present_observation():
+    row, metadata = diagnostics((1,))[0], events()[:1]
+    row["status"] = "unavailable"
+    row["intervals"][0]["covered"] = False
+    before = deepcopy(([row], metadata))
+    with pytest.raises(OpsError) as caught:
+        prediction_diagnostic_report([row], metadata)
+    assert caught.value.code == "INVALID_EXPERIMENT_SPEC" and not caught.value.problem.retryable
+    assert ([row], metadata) == before
+
+
 def test_duplicates_and_unknown_metadata_refuse_empty_cohort_is_explicit():
     rows = diagnostics((1,))
     for supplied, metadata in ((rows + [rows[0]], events()), (rows, events()[:-1]), ([], events() + [events()[0]])):

@@ -15,20 +15,23 @@ LEVELS = (.5, .8, .9, .95)
 
 def _validate(indexed):
     for row in indexed.values():
-        if row["status"] != "available":
-            continue
-        _require(type(row["intervals"]) is list and len(row["intervals"]) == len(LEVELS))
-        previous = None
-        for interval, level in zip(row["intervals"], LEVELS):
-            _require(type(interval) is dict and interval["level"] == level)
-            lower, upper, width = (interval[key] for key in ("lower", "upper", "width"))
-            _require(all(_number(value) for value in (lower, upper, width)) and lower <= upper)
-            _require(width == upper - lower and type(interval["covered"]) is bool)
-            _require(interval["covered"] == (lower <= row["observation"] <= upper))
-            _require(previous is None or (lower <= previous[0] and upper >= previous[1]))
-            previous = lower, upper
-        lower, upper = row["pit_lower"], row["pit_upper"]
-        _require(_number(lower) and _number(upper) and lower <= upper <= 1)
+        available = row["status"] == "available"
+        if available or "intervals" in row:
+            _require(type(row["intervals"]) is list and len(row["intervals"]) == len(LEVELS))
+            previous = None
+            for interval, level in zip(row["intervals"], LEVELS):
+                _require(type(interval) is dict and interval["level"] == level)
+                lower, upper, width = (interval[key] for key in ("lower", "upper", "width"))
+                _require(all(_number(value) for value in (lower, upper, width)) and lower <= upper)
+                _require(width == upper - lower and type(interval["covered"]) is bool)
+                _require(row["observation"] is None or interval["covered"] == (lower <= row["observation"] <= upper))
+                _require(previous is None or (lower <= previous[0] and upper >= previous[1]))
+                previous = lower, upper
+        for field in ("pit_lower", "pit_upper"):
+            if available or field in row:
+                _require(_number(row[field]) and row[field] <= 1)
+        if "pit_lower" in row and "pit_upper" in row:
+            _require(row["pit_lower"] <= row["pit_upper"])
 
 
 def prediction_diagnostic_report(diagnostics, events):
