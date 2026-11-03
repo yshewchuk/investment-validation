@@ -102,7 +102,7 @@ def test_declared_parameters_shared_preprocessing_and_actual_diagnostics(observe
     assert set(result) == {"schema_version", "recipe_id", "probabilities", "tail", "point_predictions", "diagnostics"}
     assert result["schema_version"] == "distribution_candidate_fit.v1"
     assert result["recipe_id"] == recipe["recipe_id"]
-    assert observed["constructed"] == [recipe["classifier"]["params"]]
+    assert observed["constructed"] == [{**recipe["classifier"]["params"], "verbose": 2}]
     assert type(observed["constructed"][0]["max_features"]) is float
     fitted, binned, threads = observed["fit"][0]
     assert binned.tolist() == [0, 1, 80, 80]
@@ -424,6 +424,25 @@ def test_no_data_or_network_io_and_progress_is_stderr_only(observed, monkeypatch
     assert "distribution matched point fit" in captured.err
     assert "distribution probability mapping" in captured.err
     assert result["point_predictions"] == [3, 3]
+
+
+def test_iteration_progress_parser_ticks_completed_deltas_and_ignores_noise():
+    ticks = []
+
+    class Recorder:
+        def tick(self, count=1):
+            ticks.append(count)
+
+    stream = fitting._FitProgress(Recorder(), 10)
+    stream.write("[1/10] first\nnoise [8/10]\ntext\n[3/10")
+    stream.write("] third\n[2/10] stale\n[4/10] next\n[5/9] wrong total\n[0/10] zero\n[11/10] beyond\n")
+    assert ticks == [1, 2, 1]
+
+
+def test_fallback_fit_stage_names_reason(observed, capsys):
+    _fit(list(_inputs((0,) * 5 + (0.25,) * 5 + (20,), variant="regularised_v1")))
+    error = capsys.readouterr().err
+    assert "distribution classifier fit/predict fallback class_count_below_2" in error
 
 
 def test_public_export_and_required_arguments():

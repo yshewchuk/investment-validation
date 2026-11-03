@@ -6,6 +6,9 @@ per prediction. Bounded parent execution owns resource limits and heartbeats.
 """
 from __future__ import annotations
 
+import re
+from contextlib import redirect_stdout
+
 import numpy as np
 from threadpoolctl import threadpool_limits
 
@@ -20,6 +23,31 @@ from experiments.distribution_class_support import (
     class_histogram, early_stopping_decision, training_support)
 
 __all__ = ["fit_candidate"]
+
+_ITERATION_LINE = re.compile(r"\s*\[(\d+)/(\d+)\]")
+
+
+class _FitProgress:
+    """Tick a Progress by the completed delta from sklearn verbose iteration lines."""
+
+    def __init__(self, progress, max_iter):
+        self.progress, self.max_iter = progress, max_iter
+        self._buffer, self._seen = "", 0
+
+    def write(self, text):
+        self._buffer += text
+        while "\n" in self._buffer:
+            line, self._buffer = self._buffer.split("\n", 1)
+            match = _ITERATION_LINE.match(line)
+            if match is not None:
+                done, total = (int(match.group(index)) for index in (1, 2))
+                if total == self.max_iter and 1 <= done <= self.max_iter and done > self._seen:
+                    self.progress.tick(done - self._seen)
+                    self._seen = done
+        return len(text)
+
+    def flush(self):
+        pass
 
 
 def _invalid():
@@ -120,16 +148,18 @@ def fit_candidate(recipe, train_features, train_labels, prediction_features, *, 
     params = recipe["classifier"]["params"]
     decision = early_stopping_decision(recipe, support)
     requested, used, fallback = (decision[key] for key in ("requested", "used", "fallback_reason"))
-    estimator_params = {**params, "max_features": float(params["max_features"])}
+    estimator_params = {**params, "max_features": float(params["max_features"]), "verbose": 2}
     if regularised:
         estimator_params["early_stopping"] = used
     fit_stage = "distribution classifier fit/predict"
     if fallback is not None:
         fit_stage += " fallback " + fallback
+    fit_progress = Progress(fit_stage, params["max_iter"])
     try:
         model = HistGradientBoostingClassifier(**estimator_params)
         with stage(fit_stage), threadpool_limits(limits=1):
-            model.fit(train, bins)
+            with redirect_stdout(_FitProgress(fit_progress, params["max_iter"])):
+                model.fit(train, bins)
             classifier = _classifier_diagnostics(model, support, params["max_iter"], used)
             if regularised:
                 classifier.update(early_stopping_requested=bool(requested),
