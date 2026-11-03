@@ -908,16 +908,15 @@ outer targets open. Training is strictly prior to the outer fit boundary.
 
 `magnitude_search_evidence` shares native input admission, matrix identities,
 forecast coverage and target-receipt validation across inner and outer callers.
+Stored-panel admission includes verified event dates only for opted-in recipes; missing or noncanonical dates refuse `EXPERIMENT_IDENTITY_CONFLICT`, while non-opted rows and `inputs_id` stay unchanged.
 SearchTrials wrappers preserve their existing error boundaries and Real/Integral
 submission semantics; outer wrappers require JSON-native numeric types. Target
 validation reconstructs the protected receipt from admitted physical preflight.
 Static imports include these helpers in recorder and outer source bindings.
-Completed replay verifies the complete evidence chain without native payloads or fitting.
-Native execution and reconciliation responses require valid terminal and durable
-execution evidence bound to the caller's exact attempt/limits. Completed replay
-is read-only and launch-free; each separate call observes current journal integrity.
-Freeze and submitted recording also require valid native evidence when present.
-No journal verification is cached across calls.
+Completed replay verifies the full chain without payloads/fitting; native responses
+require valid terminal/durable evidence bound to exact attempts and limits.
+Replay is read-only and launch-free; every call checks current journal integrity.
+Freeze and submitted recording require valid evidence; journal checks are not cached.
 
 Fresh inner/outer admission streams complete validation, retaining only fold participants'
 primary keys and registered numeric features. Full stored `inputs_id`, matrices and fits are preserved.

@@ -176,7 +176,7 @@ class SearchTrials:
         return trial_key(plan, outer_year, inner_year, candidate_id), requested, candidate
 
     def _inputs(self, inner):
-        plan = self._admit() if self.registration.document.get("schema_version") == "native_experiment_registration.v1.8" else None
+        plan = self._admit()
         return admit_fold_inputs(self.repository, self.registration.document, inner,
             history_failure=fail("EXPERIMENT_IDENTITY_CONFLICT", "search native history binding changed"), plan=plan)
 

@@ -93,6 +93,22 @@ def test_projected_rows_keep_full_snapshot_identity_and_raw_numeric_values(sourc
     assert full["inputs_id"] == expected
     assert _projection(source, snapshot, context, columns=columns) == projected
     assert all("history_json" not in row for row in projected["rows"])
+    assert all("event_date" not in row for row in projected["rows"])
+
+
+def test_projection_can_retain_verified_event_dates_without_changing_identity(source):  # noqa: F811
+    build, snapshot = build_history(source)
+    context = build["context"]
+    event = context["temporal_plan"]["events"][0]
+    columns = ("n_prior",)
+    plain = _projection(source, snapshot, context, columns=columns)
+    dated = stored.read_stored_for_events(source.repository, snapshot, context,
+        event_ids=[event["event_id"]], columns=columns, include_event_dates=True)
+    assert all("event_date" not in row for row in plain["rows"])
+    assert all(set(row) == {"event_id", "context_id", "horizon_sessions", "n_prior", "event_date"}
+               for row in dated["rows"])
+    assert [row["event_date"] for row in dated["rows"]] == [event["event_date"]] * 3
+    assert dated["inputs_id"] == plain["inputs_id"]
 
 
 def test_projection_globally_admits_metadata_before_numbers_in_bounded_batches(source, monkeypatch):  # noqa: F811

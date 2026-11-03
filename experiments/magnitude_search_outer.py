@@ -256,7 +256,7 @@ def _execute_admitted(conn, store, repository, registration, plan, fold, selecti
     inputs = _inputs(repository, binding, fold, plan=plan) if "target" in plan and saved("start") is None else None
     append("start", started)
     if inputs is None:
-        inputs = _inputs(repository, binding, fold, plan=plan) if "target" in plan else _inputs(repository, binding, fold)
+        inputs = _inputs(repository, binding, fold, plan=plan)
     manifest, inputs_id = publish_inputs(store, inputs)
     append("inputs", manifest)
     expected = fit_evidence(inputs, fold, plan, execution)

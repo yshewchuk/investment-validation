@@ -1,9 +1,12 @@
 """Per-instance cohort admission memoisation: one native read per cohort, never failures."""
 # ruff: noqa: F811
+import copy
+
 import pytest
 
 from engine.v2.foundation import canonical_json, content_hash
 from engine.v2.ops.errors import OpsError, fail
+from experiments import magnitude_search_evidence as evidence
 from experiments import magnitude_search_trials as trials
 from experiments.magnitude_search_inputs import load_inputs, publish_inputs
 from tests.v2.research.magnitude_trial_support import trial_cases, trial_forecasts
@@ -68,6 +71,62 @@ def test_internal_borrow_shares_memo_while_public_start_detaches(case):
     detached = case.recorder.start(*second)
     assert detached["inputs"] is not case.recorder._memo[cohort]
     assert canonical_json(detached["inputs"]) == canonical_json(case.recorder._memo[cohort])
+
+
+def _inner(case, args):
+    return next(inner for outer in case.plan["folds"] if outer["outer"]["year"] == args[0]
+                for inner in outer["inner"] if inner["year"] == args[1])
+
+
+def _dated_plan(case):
+    plan = copy.deepcopy(case.plan)
+    plan["candidates"][0]["recipe"]["requires_event_dates"] = True
+    return plan
+
+
+def test_opted_in_admission_retains_verified_event_dates(case, monkeypatch):
+    args = trial_cases(case)[0]
+    inner = _inner(case, args)
+    first, second = inner["training_candidate_event_ids"][:2]
+    events = (first, second)
+    dates = ("2024-01-02", "2024-01-03")
+    seen = {}
+
+    def fake(repository, snapshot, context, **kwargs):
+        seen.update(kwargs)
+        return {"inputs_id": "sha256:" + "0" * 64,
+                "rows": [{"event_id": event, "context_id": "ctx", "horizon_sessions": 5,
+                          "event_date": date} for event, date in zip(events, dates)]}
+
+    monkeypatch.setattr(evidence, "read_stored_for_events", fake)
+    admitted = evidence.admit_fold_inputs(case.source.repository, case.source.registration.document,
+        inner, history_failure=fail("EXPERIMENT_IDENTITY_CONFLICT", "x"), plan=_dated_plan(case))
+
+    assert seen["include_event_dates"] is True
+    assert [row["event_id"] for row in admitted["features"]] == list(events)
+    assert [row["event_date"] for row in admitted["features"]] == list(dates)
+
+
+@pytest.mark.parametrize("event_date, message", [
+    (None, "search feature event_date is missing or not a string"),
+    ("2024-02-30", "search feature event_date is malformed"),
+    ("2024-1-2", "search feature event_date is not canonical ISO"),
+])
+def test_opted_in_admission_refuses_bad_event_dates(case, monkeypatch, event_date, message):
+    args = trial_cases(case)[0]
+    inner = _inner(case, args)
+    row = {"event_id": inner["training_candidate_event_ids"][0], "context_id": "ctx",
+           "horizon_sessions": 5}
+    if event_date is not None:
+        row["event_date"] = event_date
+    monkeypatch.setattr(evidence, "read_stored_for_events",
+        lambda *args, **kwargs: {"inputs_id": "sha256:" + "0" * 64, "rows": [row]})
+
+    with pytest.raises(OpsError) as caught:
+        evidence.admit_fold_inputs(case.source.repository, case.source.registration.document,
+            inner, history_failure=fail("EXPERIMENT_IDENTITY_CONFLICT", "x"), plan=_dated_plan(case))
+
+    assert caught.value.problem == fail("EXPERIMENT_IDENTITY_CONFLICT", message).problem
 
 
 def test_failed_admission_is_not_memoised(case, monkeypatch):

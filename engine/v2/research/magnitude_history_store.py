@@ -336,18 +336,25 @@ def _stream_identity(context, snapshot, rows):
     return "sha256:" + digest.hexdigest()
 
 
-def read_stored_for_events(repository, snapshot, context, *, event_ids, columns):
+def _validate_projection_arguments(event_ids, columns, include_event_dates):
+    if (type(include_event_dates) is not bool
+            or any(not isinstance(group, (list, tuple, set, frozenset))
+                   or any(not isinstance(value, str) for value in group) for group in (event_ids, columns))):
+        raise errors.fail("CONTRACT_MISMATCH", "stored history projection differs from its context")
+
+
+def read_stored_for_events(repository, snapshot, context, *, event_ids, columns, include_event_dates=False):
     """Validate/hash every full row; retain only requested identity/numeric columns.
 
     The returned inputs_id identifies the complete original read_stored envelope,
     not its projected rows. Memory retains context/manifest and one digest/count
     per source row, selected slim rows, and a constant number of event-sized batches.
     Every call repeats both scans; no cross-call validation or outcome cache.
+    ``include_event_dates`` opts selected rows into the already-verified stored
+    ``event_date`` metadata; it never changes the full-envelope identity.
     """
     expected = preflight_stored(repository, snapshot, context)
-    if any(not isinstance(group, (list, tuple, set, frozenset))
-           or any(not isinstance(value, str) for value in group) for group in (event_ids, columns)):
-        raise errors.fail("CONTRACT_MISMATCH", "stored history projection differs from its context")
+    _validate_projection_arguments(event_ids, columns, include_event_dates)
     selected = set(event_ids)
     if (not selected <= {event["event_id"] for event, _ in expected}
             or not set(columns) <= set(FEATURES) or len(set(columns)) != len(columns)):
@@ -360,7 +367,7 @@ def read_stored_for_events(repository, snapshot, context, *, event_ids, columns)
             count = _metadata(row, context, *pair)
             admitted.append((content_hash(row), count))
     retained = []
-    keys = (*CONTRACT.primary_key, *columns)
+    keys = (*CONTRACT.primary_key, *columns, *(("event_date",) if include_event_dates else ()))
 
     def validated():
         stream = _stream_rows(repository, snapshot, context, (*METADATA, *FEATURES), len(expected))
