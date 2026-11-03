@@ -64,7 +64,7 @@ def test_regression_route_preserves_complete_result(family, parameters, domain):
 def test_magnitude_candidate_route_preserves_complete_result(family, parameters):
     recipe = candidate_recipe(family, parameters, **FEATURES)
     args = ([[0.]] * 20 + [[1.]] * 20, [0.] * 20 + [25.] * 20, [[0.], [1.]])
-    assert fit_execution("magnitude_candidate", recipe, pack(*args, columns=COLUMNS)) == fit_candidate(recipe, pack(*args, columns=COLUMNS))
+    assert fit_execution("magnitude_candidate", recipe, pack(*args, columns=COLUMNS)) == fit_candidate(recipe, *args, columns=COLUMNS)
     with pytest.raises(ValueError, match="nonnegative"):
         fit_execution("magnitude_candidate", recipe, pack([[0.]], [-1.], [[0.]], columns=COLUMNS))
 

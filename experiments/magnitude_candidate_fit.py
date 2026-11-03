@@ -11,7 +11,6 @@ def fit_candidate(recipe, train_features, train_labels, prediction_features, *, 
     forbid_legacy_fitting("fit_candidate")
     forbid_fitting("fit_candidate")
     magnitude_candidate_family(recipe)
-    from engine.v2.models.training.magnitude_candidate import fit_candidate as fit
-    from engine.v2.models.training.fit_inputs import FitInputs
+    from engine.v2.models.training.magnitude_candidate import FitInputs, fit_candidate as fit
     inputs = FitInputs(train_features, train_labels, prediction_features, columns)
     return fit(recipe, inputs)
