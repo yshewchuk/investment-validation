@@ -29,7 +29,12 @@ class HorizonFitFailure(RuntimeError):
 
 
 def build_fit_inputs(indexed, training_ids, evaluation_ids, horizons, columns, labels, *, target_column):
-    """Build one FitInputs per horizon and its frozen evidence from the same ordered rows."""
+    """Build one FitInputs per horizon and its frozen evidence from the same ordered rows.
+
+    Assembles per-horizon matrices for bounded offline research fitting after cohort
+    admission. This is intentionally not a production inference entrypoint; production
+    prediction uses its own model serving path.
+    """
     _require_target(target_column)
     training_ids, evaluation_ids = list(training_ids), list(evaluation_ids)
     horizons, columns = list(horizons), list(columns)
