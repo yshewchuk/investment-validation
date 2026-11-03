@@ -12,6 +12,7 @@ Native registration, dataset/feature qualification, training-label availability,
 | Existing `magnitude_distribution_payoff.mean_matched_control` call | Public re-export of that neutral implementation; existing strategy results and failures remain compatible. `distribution_oof` consumes the neutral import directly. |
 | `prepare_empirical_crps(samples)` | Validate/copy/sort a nonempty empirical law once and return an observation scorer over immutable parts. Preserve duplicate/zero atoms; use the existing analytic CRPS core, no pairwise matrix or new formula. Preparation is O(n log n), each observation O(n), retained storage O(n). |
 | Invalid sample or observation | Existing typed `CONTRACT_MISMATCH`, not silent clipping, smoothing or a manufactured distribution. Caller mutation after preparation cannot alter the retained law. |
+| `distribution_containment.contained` | Existing dedicated-process CPU/RSS/wall bounds, separated from economic policy with a compatible legacy export. The future prediction operator must use a dedicated Linux main-thread process and the original whole-job deadline; this helper grants no run/admission authority. |
 | Source-free numerical result | No I/O, fitting, native admission, publication or final-read authority. |
 
 ## Incremental delivery

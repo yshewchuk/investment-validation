@@ -408,8 +408,9 @@ def test_containment_refuses_invalid_remaining_duration_before_process_access(se
 def _refuse_containment_without_process_access(limits, seconds, monkeypatch):
     def forbidden(*args):
         pytest.fail("invalid containment request reached process state or watchdog")
-    monkeypatch.setattr(metadata.signal, "getitimer", forbidden)
-    monkeypatch.setattr(metadata, "rss_watchdog", forbidden)
+    from experiments import distribution_containment
+    monkeypatch.setattr(distribution_containment.signal, "getitimer", forbidden)
+    monkeypatch.setattr(distribution_containment, "rss_watchdog", forbidden)
     with pytest.raises(OpsError) as caught:
         with metadata.contained(limits, seconds):
             pytest.fail("invalid containment request entered its body")
