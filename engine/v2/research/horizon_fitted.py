@@ -84,6 +84,8 @@ def fitted_forecasts(indexed, training_ids=None, labels=None, evaluation_ids=Non
         horizons, columns = list(horizons), list(columns)
         labels = np.asarray(labels, dtype=float)
     evaluation_ids, horizons = list(evaluation_ids), list(horizons)
+    if horizon_inputs is not None:
+        _validate_prebuilt_identity(horizon_inputs, evaluation_ids, horizons)
     predictions, evidence = {}, []
     for horizon in horizons:
         fit, inputs = _prepare_inputs(horizon, horizon_inputs, indexed, training_ids, evaluation_ids,
@@ -101,6 +103,14 @@ def fitted_forecasts(indexed, training_ids=None, labels=None, evaluation_ids=Non
                          else deepcopy(fit))
             progress("completed", completed)
     return predictions, evidence
+
+
+def _validate_prebuilt_identity(horizon_inputs, evaluation_ids, horizons):
+    if horizons != list(horizon_inputs):
+        raise ValueError("requested horizons do not match prebuilt fit inputs")
+    for horizon in horizons:
+        if horizon_inputs.evidence[horizon]["evaluation_event_ids"] != evaluation_ids:
+            raise ValueError("requested evaluation IDs do not match prebuilt fit evidence")
 
 
 def _validate_domain(route, recipe, target_domain):
