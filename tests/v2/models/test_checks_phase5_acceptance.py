@@ -202,7 +202,8 @@ def _trailing_cutoffs():
 def _chooser_pool():
     from engine.v2.models.training.chooser_pool import build_chooser_analog_pool_artifact
 
-    rows = [{"strategy": "TWIN-P", "exit_date": f"2026-0{1 + i % 8}-1{i % 9}", "pnl": i - 20.0,
+    rows = [{"strategy": "TWIN-P", "event_date": f"2026-0{1 + i % 8}-1{i % 9}",
+             "exit_date": f"2026-0{1 + i % 8}-1{i % 9}", "pnl": i - 20.0,
              "exp_pnl_sim": 0.1 * i, "width_over_forecast": 1.0, "n_legs": 7.0,
              "anchor_over_spot": 1.0, "rel_spread": 0.1} for i in range(40)]
     return build_chooser_analog_pool_artifact(
@@ -691,7 +692,8 @@ def test_preparer_builds_the_chooser_pool_from_its_parquet(tmp_path):
 
     from engine.v2.models.frozen_state import FrozenStateLoader, FrozenStateRef
 
-    frame = pd.DataFrame([{"strategy": "CTR5", "entry_date": pd.Timestamp("2026-01-02"),
+    frame = pd.DataFrame([{"strategy": "CTR5", "event_date": pd.Timestamp(f"2026-02-{1 + i:02d}"),
+                           "entry_date": pd.Timestamp("2026-01-02"),
                            "exit_date": pd.Timestamp(f"2026-02-{1 + i:02d}"), "pnl": float(i),
                            "exp_pnl_sim": 0.5, "width_over_forecast": 1.0, "n_legs": 5.0,
                            "anchor_over_spot": 1.0, "rel_spread": 0.2} for i in range(12)])

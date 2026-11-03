@@ -58,7 +58,11 @@ import argparse
 import datetime
 import json
 import os
+import pickle
+import resource
 import sys
+import time
+import zlib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -73,6 +77,7 @@ from engine.v2.models.training import (  # noqa: E402
     current_recipes,
     run_training_job,
 )
+from engine.v2.models.training.recipes import REGISTRY_MAX_BYTES  # noqa: E402
 
 
 def _key(text: str) -> RecipeKey:
@@ -193,6 +198,24 @@ def _iso_cutoff(value: str) -> str:
     return bound
 
 
+def monthly_retrain_cutoff(month: str) -> str:
+    """The exclusive retrain cutoff: the day after ``month``'s actual end."""
+    if not isinstance(month, str) or len(month) != 7:
+        raise ValueError(f"not a YYYY-MM month: {month!r}")
+    try:
+        start = datetime.date.fromisoformat(month + "-01")
+    except (TypeError, ValueError):
+        raise ValueError(f"not a YYYY-MM month: {month!r}") from None
+    if start.isoformat()[:7] != month:
+        raise ValueError(f"not a canonical YYYY-MM month: {month!r}")
+    try:
+        end = (datetime.date(start.year + 1, 1, 1) if start.month == 12
+               else datetime.date(start.year, start.month + 1, 1))
+    except (OverflowError, ValueError):
+        raise ValueError(f"month is out of range: {month!r}") from None
+    return end.isoformat()
+
+
 def _guard(where: str) -> None:
     """Both no-fit switches, before any row is read (as ``run_training_job``)."""
     from engine.models.no_fit import forbid_fitting as legacy_forbid
@@ -203,11 +226,13 @@ def _guard(where: str) -> None:
 
 
 def build_state(member: str, *, cutoff=None, ticker_chunk: int = 1000, registry=None,
-                paired_inputs=None):
+                paired_inputs=None, monthly: bool = False):
     """``(artifact | None, summary)`` for one frozen-state catalog member.
 
     ``registry``/``paired_inputs`` are injectable for tests; by default the
     real registry and :func:`tools.phase5_datasets.paired_pool_inputs`.
+    ``monthly`` bounds a driver's champion artifact and requires the chooser's
+    event date (the monthly retrain passes it; every other caller does not).
     """
     from engine.v2.models.lineage import DataDependency, Lineage
     from engine.v2.models.training.residuals import (
@@ -221,7 +246,27 @@ def build_state(member: str, *, cutoff=None, ticker_chunk: int = 1000, registry=
         raise SystemExit(f"{member} writes one artifact per causal key: use its own job")
     if member.startswith("driver_residual_pool:"):
         role = member.split(":", 1)[1]
-        pool = data.champion_driver_pool(role, registry=registry)
+        from engine.models.registry import RegistryError
+        from engine.v2.models.frozen_state_io import BoundedStateReadError
+
+        try:
+            pool = data.champion_driver_pool(
+                role, registry=registry,
+                max_artifact_bytes=MONTHLY_CHAMPION_ARTIFACT_MAX_BYTES if monthly else None,
+                max_registry_bytes=MONTHLY_REGISTRY_MAX_BYTES if monthly else None)
+        except BoundedStateReadError as exc:
+            raise SystemExit(
+                f"driver_residual_pool:{role} champion registry is invalid") from exc
+        except RegistryError as exc:
+            raise SystemExit(
+                f"driver_residual_pool:{role} champion source is invalid") from exc
+        except OSError as exc:
+            raise SystemExit(
+                f"driver_residual_pool:{role} champion source is unreadable") from exc
+        except (pickle.UnpicklingError, EOFError, ValueError, TypeError,
+                AttributeError, ImportError, IndexError, KeyError, zlib.error) as exc:
+            raise SystemExit(
+                f"driver_residual_pool:{role} champion artifact is corrupt") from exc
         lineage = Lineage(data=(DataDependency(
             table=f"model_artifact:{pool['model_id']}",
             keys=(str(pool["artifact_sha256"]),)),))
@@ -229,26 +274,27 @@ def build_state(member: str, *, cutoff=None, ticker_chunk: int = 1000, registry=
             pool["residuals"], pool["buckets"], role=role, model_id=pool["model_id"],
             lineage=lineage)
         summary = {"model_id": pool["model_id"], "artifact_sha256": pool["artifact_sha256"],
+                   "champion_data_date_cutoff": None,
                    "n_residuals": int(np.isfinite(pool["residuals"]).sum()),
-                   "n_buckets": 0 if not pool["buckets"] else len(pool["buckets"]["pools"])}
+                   "n_buckets": 0 if not pool["buckets"] else len(pool["buckets"]["pools"]),
+                   "source_identity": {"model_id": pool["model_id"],
+                                       "artifact_sha256": pool["artifact_sha256"]}}
         return artifact, summary
     if member == CHOOSER_POOL_STATE:
-        # ``build_chooser_analog_pool_artifact`` drops rows closed on/after
-        # ``cutoff``; the parquet is read in stored order so the pool keeps
-        # legacy's tie-break. A missing cutoff or a missing source parquet
+        # ``build_chooser_analog_pool_artifact`` drops rows whose event date or
+        # settled exit date is on/after ``cutoff``; the parquet is read in
+        # stored order so the pool keeps legacy's tie-break. A missing cutoff
+        # or a missing source parquet
         # refuses (SystemExit -> VALIDATION_FAILED via ``_tool_failure``), as
         # does a non-regular or oversized source; an existing output file
         # with different bytes is the existing RESUME_MISMATCH; the atomic
         # write leaves no partial output; a rerun on identical inputs is
         # byte-idempotent.
-        import time
-
         from engine import paths
         from engine.v2.models.training.chooser_pool import build_chooser_analog_pool_artifact
         from engine.v2.models.training.chooser_pool_source import (
             CHOOSER_POOL_ID,
             read_chooser_pool_frame,
-            require_chooser_pool_columns,
         )
 
         if cutoff is None:
@@ -260,29 +306,31 @@ def build_state(member: str, *, cutoff=None, ticker_chunk: int = 1000, registry=
         source = paths.FEATURES / _CHOOSER_POOL_FILE
         started = time.perf_counter()
         try:
-            frame = read_chooser_pool_frame(source)
+            frame = read_chooser_pool_frame(source, require_event_date=monthly)
         except FileNotFoundError:
             raise SystemExit("chooser analog pool source is missing") from None
+        except OSError:
+            raise SystemExit("chooser analog pool source is unreadable") from None
         except ValueError as exc:
             raise SystemExit(str(exc)) from exc
         read_s = time.perf_counter() - started
         print(f"[p5-3] chooser_analog_pool: read {len(frame)} rows in {read_s:.1f}s",
               file=sys.stderr, flush=True)
-        # Missing columns would silently drop EVERY row (``_kept`` reads via
-        # ``row.get``), freezing an empty pool; refuse instead. The shared
-        # check raises ``ValueError``; a tool refusal is ``SystemExit``.
+        lineage = Lineage(data=(DataDependency(table=CHOOSER_POOL_ID, end_exclusive=bound),))
         try:
-            require_chooser_pool_columns(frame.columns)
+            artifact = build_chooser_analog_pool_artifact(
+                frame.to_dict("records"), pool_id=CHOOSER_POOL_ID, cutoff=bound, lineage=lineage,
+                require_event_date=monthly)
         except ValueError as exc:
             raise SystemExit(str(exc)) from exc
-        lineage = Lineage(data=(DataDependency(table=CHOOSER_POOL_ID, end_exclusive=bound),))
-        artifact = build_chooser_analog_pool_artifact(
-            frame.to_dict("records"), pool_id=CHOOSER_POOL_ID, cutoff=bound, lineage=lineage)
         n_rows = sum(len(rows) for _, rows in artifact.strategies)
         print(f"[p5-3] chooser_analog_pool: built {n_rows} rows in "
               f"{time.perf_counter() - started:.1f}s", file=sys.stderr, flush=True)
         summary = {"cutoff": bound, "source_rows": int(len(frame)), "n_rows": n_rows,
-                   "n_strategies": len(artifact.strategies)}
+                   "n_strategies": len(artifact.strategies),
+                   "source_identity": {"source": f"features/{_CHOOSER_POOL_FILE}",
+                                       "pool_id": CHOOSER_POOL_ID,
+                                       "sha256": frame.attrs.get("source_sha256")}}
         return (None, summary) if n_rows == 0 else (artifact, summary)
     if member != "paired_residual_pool":
         raise SystemExit(f"unknown state {member!r}; known: {', '.join(STATES)}")
@@ -306,7 +354,8 @@ def state_file_name(member: str) -> str:
     return member.replace(":", "__") + ".json"
 
 
-def run_state_job(member: str, out: Path, *, plan_only: bool = False, **kwargs) -> dict:
+def run_state_job(member: str, out: Path, *, plan_only: bool = False,
+                  monthly: bool = False, **kwargs) -> dict:
     """Build one frozen state into ``out``.
 
     A rerun keeps an identical existing file and refuses a different one.
@@ -323,7 +372,7 @@ def run_state_job(member: str, out: Path, *, plan_only: bool = False, **kwargs) 
         raise SystemExit(f"{member}: --plan-only unsupported for --state jobs "
                          "(would build the full artifact only to discard it); run without "
                          f"--plan-only, or use --state {BOARD_ANALOG_STATE}/{TRAILING_CUTOFF_STATE}")
-    artifact, summary = build_state(member, **kwargs)
+    artifact, summary = build_state(member, monthly=monthly, **kwargs)
     summary = {"state": member, "plan_only": bool(plan_only), **summary}
     if member == "paired_residual_pool" and kwargs.get("paired_inputs") is None:
         from engine import paths
@@ -366,6 +415,90 @@ def run_state_job(member: str, out: Path, *, plan_only: bool = False, **kwargs) 
         out / (state_file_name(member)[:-5] + ".summary.json"),
         (json.dumps(summary, indent=1, sort_keys=True) + "\n").encode())
     return summary
+
+
+#: Monthly-only bound on a champion artifact's regular-file size (256 MiB):
+#: the driver members deserialize it, and nothing above this cap is read or
+#: unpickled. Wired only by ``run_monthly_pools_job``; every other caller of
+#: the Registry stays unbounded.
+MONTHLY_CHAMPION_ARTIFACT_MAX_BYTES = 256 << 20
+#: Monthly-only bound on the registry JSON read before UTF-8 decode and parse
+#: (the same ceiling ``current_recipes`` applies). Every other caller of
+#: ``load_registry`` stays unbounded.
+MONTHLY_REGISTRY_MAX_BYTES = REGISTRY_MAX_BYTES
+MONTHLY_DRIVER_MEMBERS = (
+    "driver_residual_pool:size",
+    "driver_residual_pool:implied_t1",
+    "driver_residual_pool:runup_move",
+)
+MONTHLY_POOL_MEMBERS = (*MONTHLY_DRIVER_MEMBERS, CHOOSER_POOL_STATE)
+
+
+def run_monthly_pools_job(out: Path, *, month: str, cutoff: str,
+                          ticker_chunk: int = 1000) -> dict:
+    """Build the fixed four S1 monthly-retrain pools into ``out``.
+
+    The three driver pools are D1 re-freezes of the stored champion pools,
+    unchanged in this slice; their receipts record the champion identity and
+    inherited admission, and take no cutoff. Only the chooser takes the
+    exclusive ``cutoff`` (the day after ``month``'s end). Each driver's
+    champion artifact is bounded at ``MONTHLY_CHAMPION_ARTIFACT_MAX_BYTES``
+    before any read or deserialize.
+    Reuses ``run_state_job``.
+    """
+    try:
+        bound = _iso_cutoff(cutoff)
+    except (TypeError, ValueError):
+        raise SystemExit("monthly_pools cutoff must be an ISO date (YYYY-MM-DD)") from None
+    try:
+        expected = monthly_retrain_cutoff(month)
+    except (TypeError, ValueError):
+        raise SystemExit("monthly_pools month must be a canonical calendar month (YYYY-MM)") from None
+    if bound != expected:
+        raise SystemExit("monthly_pools cutoff must be the day after the month's end")
+    out.mkdir(parents=True, exist_ok=True)
+    total = len(MONTHLY_POOL_MEMBERS)
+    started = time.perf_counter()
+    print(f"[p5-3] monthly_pools: start month={month} cutoff={bound} members={total} "
+          f"rss_kib={resource.getrusage(resource.RUSAGE_SELF).ru_maxrss}",
+          file=sys.stderr, flush=True)
+    members = {}
+    for done, member in enumerate(MONTHLY_POOL_MEMBERS, 1):
+        member_started = time.perf_counter()
+        member_cutoff = bound if member == CHOOSER_POOL_STATE else None
+        summary = run_state_job(
+            member, out, plan_only=False, cutoff=member_cutoff,
+            ticker_chunk=ticker_chunk, monthly=True)
+        if (summary.get("status") == "empty" or not summary.get("file")
+                or not summary.get("content_hash") or summary.get("bytes") is None):
+            raise SystemExit(f"monthly_pools {member} produced no output")
+        member_receipt = {"file": summary["file"],
+                          "content_hash": summary["content_hash"],
+                          "bytes": summary["bytes"], "cutoff": member_cutoff,
+                          "source_identity": summary["source_identity"]}
+        if member in MONTHLY_DRIVER_MEMBERS:
+            identity = summary["source_identity"]
+            member_receipt.update({
+                "status": "carried_refrozen",
+                "model_id": identity["model_id"],
+                "artifact_sha256": identity["artifact_sha256"],
+                "champion_data_date_cutoff": None,
+                "admission": {"mode": "inherited_from_champion",
+                              "artifact_id": identity["model_id"]},
+            })
+        members[member] = member_receipt
+        elapsed = time.perf_counter() - started
+        rate = done / elapsed if elapsed else 0.0
+        eta = (total - done) / rate if rate else 0.0
+        print(f"[p5-3] monthly_pools: {done}/{total} {member} done in "
+              f"{time.perf_counter() - member_started:.1f}s, {rate:.2f} members/s, "
+              f"ETA {eta:.0f}s rss_kib={resource.getrusage(resource.RUSAGE_SELF).ru_maxrss}",
+              file=sys.stderr, flush=True)
+    print(f"[p5-3] monthly_pools: end elapsed={time.perf_counter() - started:.1f}s "
+          f"members={total} rss_kib={resource.getrusage(resource.RUSAGE_SELF).ru_maxrss}",
+          file=sys.stderr, flush=True)
+    return {"mode": "monthly_pools", "month": month, "retrain_cutoff": bound,
+            "experiment_inputs": "none", "members": members}
 
 
 # --------------------------------------------------------------------------

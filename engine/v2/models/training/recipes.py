@@ -67,7 +67,9 @@ OWNER_TRAINING_JOB = "engine.v2.models.training.job"
 OWNER_P5_4 = "P5-4 frozen payoff/recalibration artifact"
 
 _REGISTRY_JSON = Path(__file__).resolve().parents[3] / "models" / "registry.json"
-_REGISTRY_MAX_BYTES = 16 * 1024 * 1024
+#: The registry manifest ceiling shared with ops-layer bounded readers.
+REGISTRY_MAX_BYTES = 16 * 1024 * 1024
+_REGISTRY_MAX_BYTES = REGISTRY_MAX_BYTES
 
 
 # --------------------------------------------------------------------------

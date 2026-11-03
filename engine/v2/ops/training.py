@@ -1,8 +1,9 @@
 """Supervised training jobs (P6 slice 5, training half).
 
 ``tools/phase5_training_job.py`` is the audited training entry point; this
-module gives its four job functions the ``training`` kind's parameter schema,
-pure validator, plan builder and worker. The promote half builds on the same
+module gives its job functions (recipe, state, board analog, trailing cutoff
+and monthly pools) the ``training`` kind's parameter schema, pure validator,
+plan builder and worker. The promote half builds on the same
 wiring: an operator-submitted ``models_promote`` pointer swap, never part of
 the nightly DAG. No bespoke CLI verb: ``ops plan`` and ``ops submit`` are the
 existing generic subcommands.
@@ -20,7 +21,7 @@ from engine.v2.ops.errors import fail
 from engine.v2.ops.profiles import DEFAULT_POLICY, profile_named
 from engine.v2.ops.submission import JobKind, RetryPolicy
 
-MODES = ("recipe", "state", "board_analog", "trailing_cutoff")
+MODES = ("recipe", "state", "board_analog", "trailing_cutoff", "monthly_pools")
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -29,6 +30,7 @@ class TrainingParameters:
     mode: str
     recipe: str = ""
     state: str = ""
+    month: str = ""
     alpha: float | None = None
     cutoffs: tuple[str, ...] = ()
     strategies: tuple[str, ...] = ()
@@ -166,6 +168,36 @@ def _trailing_cutoff_problems(params) -> list[str]:
     return problems
 
 
+def _monthly_pools_problems(params) -> list[str]:
+    from tools import phase5_training_job as job
+
+    problems = []
+    if params.recipe:
+        problems.append("mode=monthly_pools must not name a recipe")
+    if params.state:
+        problems.append("mode=monthly_pools must not name a state")
+    if params.alpha is not None:
+        problems.append("mode=monthly_pools does not take alpha")
+    if params.strategies:
+        problems.append("mode=monthly_pools does not take strategies")
+    if params.pairs_path:
+        problems.append("mode=monthly_pools does not take pairs_path")
+    if params.input_mode != "legacy":
+        problems.append("mode=monthly_pools requires input_mode=legacy")
+    if any((params.catalog_path, params.objects_root, params.snapshot_id, params.receipt_id)):
+        problems.append("mode=monthly_pools does not take native input pins")
+    if len(params.cutoffs) != 1:
+        problems.append("mode=monthly_pools needs exactly one cutoff")
+    expected = None
+    try:
+        expected = job.monthly_retrain_cutoff(params.month)
+    except (TypeError, ValueError, OverflowError):
+        problems.append("month must be a canonical YYYY-MM calendar month")
+    if expected is not None and len(params.cutoffs) == 1 and params.cutoffs[0] != expected:
+        problems.append("cutoff must be the day after the month's end")
+    return problems
+
+
 def _iso_cutoff_problems(params) -> list[str]:
     problems = []
     for cutoff in params.cutoffs:
@@ -240,14 +272,18 @@ def training_parameter_problems(job, params) -> list[str]:
     if params.mode not in MODES:
         problems.append("mode must be one of " + ", ".join(MODES))
         return problems
+    if params.mode != "monthly_pools" and params.month:
+        problems.append("month applies to monthly_pools only")
     if params.mode == "recipe":
         problems.extend(_recipe_problems(params))
     elif params.mode == "state":
         problems.extend(_state_problems(params))
     elif params.mode == "board_analog":
         problems.extend(_board_analog_problems(params))
-    else:
+    elif params.mode == "trailing_cutoff":
         problems.extend(_trailing_cutoff_problems(params))
+    else:
+        problems.extend(_monthly_pools_problems(params))
     return problems
 
 
@@ -311,7 +347,7 @@ def rollback_job_kind() -> JobKind:
                    store_domains=(("deployment_pointer", "write"),))
 
 
-def training_plan(*, mode, recipe="", state="", alpha=None, cutoffs=(), strategies=(),
+def training_plan(*, mode, recipe="", state="", month="", alpha=None, cutoffs=(), strategies=(),
                   pairs_path="", ticker_chunk=1000, manifest_ref=None, input_mode="legacy",
                   catalog_path="", objects_root="", snapshot_id="", receipt_id="") -> dict:
     """Build an operator-submitted ``training`` plan.
@@ -326,11 +362,12 @@ def training_plan(*, mode, recipe="", state="", alpha=None, cutoffs=(), strategi
     read or staged. Source bytes are verified by the worker on every attempt.
     """
     from engine.v2.foundation import content_hash
+    from engine.v2.ops.experiments import default_checkout_root
     from engine.v2.ops.fingerprints import environment_identity, worker_source_manifest
 
     profile = profile_named(DEFAULT_POLICY, "experiment_heavy")
     params = TrainingParameters(
-        expected_ids=("training",), mode=mode, recipe=recipe, state=state,
+        expected_ids=("training",), mode=mode, recipe=recipe, state=state, month=month,
         alpha=alpha, cutoffs=tuple(cutoffs), strategies=tuple(strategies),
         pairs_path=pairs_path, ticker_chunk=ticker_chunk, input_mode=input_mode,
         catalog_path=catalog_path, objects_root=objects_root,
@@ -340,13 +377,16 @@ def training_plan(*, mode, recipe="", state="", alpha=None, cutoffs=(), strategi
     if problems:
         raise fail("INVALID_REQUEST", "training plan is invalid",
                    details={"problems": list(problems)})
-    root3 = Path(__file__).resolve().parents[3]
+    root3 = default_checkout_root()
+    parameters = dict(vars(params))
+    if mode != "monthly_pools":
+        del parameters["month"]
     return {"schema_version": "operations_plan.v1.0", "kind": "training", "mode": "shadow",
-            "effects": ["staged"], "parameters": vars(params),
+            "effects": ["staged"], "parameters": parameters,
             "input_refs": [manifest_ref] if manifest_ref else [],
             "blocked_prerequisites": [] if manifest_ref or input_mode == "native_d14" else [
                 "frozen_legacy_input_manifest", "adapter_parity_receipt"],
-            "spec_hash": content_hash(vars(params)),
+            "spec_hash": content_hash(parameters),
             "implementation_ref": content_hash(worker_source_manifest(root3)),
             "environment_ref": content_hash(
                 environment_identity(profile.thread_count or profile.cpu_count)),
@@ -369,6 +409,7 @@ def promote_plan(*, release_root, release_id,
     are unchanged."""
     from engine.v2.foundation import content_hash
     from engine.v2.models import deployment
+    from engine.v2.ops.experiments import default_checkout_root
     from engine.v2.ops.fingerprints import environment_identity, worker_source_manifest
 
     if not release_id:
@@ -395,7 +436,7 @@ def promote_plan(*, release_root, release_id,
     parameters = vars(params)
     if not require_empty_store:
         del parameters["require_empty_store"]
-    root3 = Path(__file__).resolve().parents[3]
+    root3 = default_checkout_root()
     return {"schema_version": "operations_plan.v1.0", "kind": "promote", "mode": "shadow",
             "effects": ["staged"], "parameters": parameters, "input_refs": [],
             "blocked_prerequisites": [], "spec_hash": content_hash(parameters),
@@ -557,9 +598,19 @@ def _tool_failure(error: SystemExit):
     return fail("VALIDATION_FAILED", "training tool refused the job")
 
 
+def _run_monthly_pools(parameters, out_dir) -> dict:
+    from tools import phase5_training_job as job
+
+    return job.run_monthly_pools_job(
+        out_dir, month=parameters["month"], cutoff=parameters["cutoffs"][0],
+        ticker_chunk=parameters["ticker_chunk"])
+
+
 def _dispatch_mode(job, mode, parameters, out_dir, root) -> dict:
     if mode == "recipe":
         return _run_recipe(parameters, out_dir, root)
+    if mode == "monthly_pools":
+        return _run_monthly_pools(parameters, out_dir)
     if mode == "state":
         return job.run_state_job(
             parameters["state"], out_dir, plan_only=False,

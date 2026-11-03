@@ -44,8 +44,9 @@ def _exact(message):
     return "^" + re.escape(message) + "$"
 
 
-def _row(strategy, day, pnl, **dims):
-    return {"strategy": strategy, "exit_date": pd.Timestamp(day), "pnl": float(pnl),
+def _row(strategy, day, pnl, event_date=None, **dims):
+    return {"strategy": strategy, "event_date": pd.Timestamp(event_date or day),
+            "exit_date": pd.Timestamp(day), "pnl": float(pnl),
             **{**_DIMS, **dims}}
 
 
@@ -261,7 +262,8 @@ def test_too_large_source_refuses(tmp_path, monkeypatch):
         job.run_state_job("chooser_analog_pool", tmp_path / "out", cutoff=CUTOFF)
 
 
-@pytest.mark.parametrize("column", ["strategy", "exit_date", "pnl", *CHOOSER_ANALOG_DIMS])
+@pytest.mark.parametrize("column", ["strategy", "exit_date", "pnl",
+                                    *CHOOSER_ANALOG_DIMS])
 def test_source_missing_required_column_refuses(tmp_path, monkeypatch, column):
     frame = _mixed_frame().drop(columns=[column])
     monkeypatch.setattr(paths, "FEATURES", _write_source(tmp_path, frame))
@@ -269,6 +271,37 @@ def test_source_missing_required_column_refuses(tmp_path, monkeypatch, column):
     with pytest.raises(SystemExit, match=_exact(_LACKS_COLUMNS)):
         job.run_state_job("chooser_analog_pool", out, cutoff=CUTOFF)
     assert not (out / "chooser_analog_pool.json").exists()
+
+
+def test_source_malformed_exit_date_refuses(tmp_path, monkeypatch):
+    rows = [_row("CTR5", "2026-02-10", 1.0)]
+    rows[0]["exit_date"] = "not-a-date"
+    monkeypatch.setattr(paths, "FEATURES", _write_source(tmp_path, _pool_frame(rows)))
+    with pytest.raises(SystemExit, match="unparsable chooser pool exit_date"):
+        job.run_state_job("chooser_analog_pool", tmp_path / "out", cutoff=CUTOFF)
+
+
+def test_source_corrupt_parquet_refuses(tmp_path, monkeypatch):
+    source = tmp_path / "features"
+    source.mkdir()
+    (source / "chooser_analog_pool.parquet").write_bytes(b"not a parquet file")
+    monkeypatch.setattr(paths, "FEATURES", source)
+    with pytest.raises(SystemExit):
+        job.run_state_job("chooser_analog_pool", tmp_path / "out", cutoff=CUTOFF)
+
+
+def test_source_missing_event_date_value_is_ignored_by_legacy(tmp_path, monkeypatch):
+    rows = [_row("CTR5", "2026-02-10", 1.0), _row("CTR5", "2026-02-11", 2.0)]
+    rows[0]["event_date"] = pd.NaT
+    monkeypatch.setattr(paths, "FEATURES", _write_source(tmp_path, _pool_frame(rows)))
+
+    summary = job.run_state_job("chooser_analog_pool", tmp_path / "out", cutoff=CUTOFF)
+
+    assert summary["n_rows"] == 2
+    pool = FrozenStateLoader(tmp_path / "out").load(
+        FrozenStateRef(path=summary["file"], content_hash=summary["content_hash"]))
+    assert pool.rows_for("CTR5") == (_pool_row("2026-02-10", 1.0),
+                                     _pool_row("2026-02-11", 2.0))
 
 
 def test_size_cap_boundary(tmp_path, monkeypatch):

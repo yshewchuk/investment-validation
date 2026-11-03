@@ -11,11 +11,11 @@ and is read at call time by :func:`read_chooser_pool_frame`.
 from __future__ import annotations
 
 import errno
+import hashlib
 import io
 import os
 import stat
 from pathlib import Path
-from typing import Iterable
 
 import pandas as pd
 
@@ -29,19 +29,23 @@ CHOOSER_POOL_ID = "features.chooser_analog_pool"
 CHOOSER_POOL_MAX_BYTES = 256 * 1024 * 1024
 
 
-def require_chooser_pool_columns(columns: Iterable[str]) -> None:
+def require_chooser_pool_columns(columns, *, require_event_date: bool = False) -> None:
     """Refuse a pool source missing any column the artifact builder reads.
 
     ``build_chooser_analog_pool_artifact`` filters via ``row.get``, so a
     missing column would silently drop EVERY row and freeze an empty pool.
+    ``event_date`` is required only in monthly mode; legacy sources predate it.
     """
     names = set(columns)
-    if not all(name in names for name in ("strategy", "exit_date", "pnl",
-                                          *CHOOSER_ANALOG_DIMS)):
+    required = ("strategy", "exit_date", "pnl", *CHOOSER_ANALOG_DIMS)
+    if require_event_date:
+        required = ("strategy", "event_date", "exit_date", "pnl", *CHOOSER_ANALOG_DIMS)
+    if not all(name in names for name in required):
         raise ValueError("chooser analog pool source lacks required columns")
 
 
-def read_chooser_pool_frame(path: Path) -> pd.DataFrame:
+def read_chooser_pool_frame(path: Path, *,
+                            require_event_date: bool = False) -> pd.DataFrame:
     """Bounded single-handle read of the chooser analog pool parquet source.
 
     Opens the fd once (``O_NOFOLLOW``: a symlinked source is refused, never
@@ -77,4 +81,10 @@ def read_chooser_pool_frame(path: Path) -> pd.DataFrame:
         os.close(fd)
     if read > info.st_size:
         raise ValueError("chooser analog pool source is too large")
-    return pd.read_parquet(io.BytesIO(b"".join(chunks)))
+    payload = b"".join(chunks)
+    frame = pd.read_parquet(io.BytesIO(payload))
+    require_chooser_pool_columns(frame.columns, require_event_date=require_event_date)
+    # The digest is of the exact bounded bytes parsed, so a receipt can name
+    # the source without a second, separately-opened read.
+    frame.attrs["source_sha256"] = "sha256:" + hashlib.sha256(payload).hexdigest()
+    return frame

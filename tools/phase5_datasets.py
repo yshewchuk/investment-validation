@@ -341,18 +341,37 @@ def board_analog_trades(*, trades: pd.DataFrame | None = None, panel: pd.DataFra
 # --------------------------------------------------------------------------
 
 
-def champion_driver_pool(role: str, registry=None) -> dict:
+def _load_registry_bounded(max_bytes: int):
+    """Parse the registry from a bounded read, before UTF-8 decode and JSON."""
+    from engine.models import registry as registry_mod
+    from engine.v2.models.frozen_state_io import read_bounded_state
+
+    path = registry_mod.REGISTRY_PATH
+    return registry_mod.registry_from_text(
+        read_bounded_state(path, max_bytes).decode("utf-8"), path=path)
+
+
+def champion_driver_pool(role: str, registry=None, *,
+                         max_artifact_bytes: int | None = None,
+                         max_registry_bytes: int | None = None) -> dict:
     """``{"model_id", "artifact_sha256", "residuals", "buckets"}`` for a champion.
 
     ``Registry.load_champion(role, "*", verify=True)``: the hash-verified
-    pickle ``Scorer.model(role)`` serves, read-only.
+    pickle ``Scorer.model(role)`` serves, read-only. ``max_artifact_bytes``
+    (the monthly retrain's bound) caps the artifact's regular-file size
+    before any read or deserialize; ``max_registry_bytes`` likewise caps the
+    registry JSON before decode or parse. ``None`` is the unbounded default
+    every other caller keeps.
     """
     from engine.models.registry import load_registry
 
     if role not in DRIVER_ROLES:
         raise SystemExit(f"{role}: not a driver residual pool role ({', '.join(DRIVER_ROLES)})")
-    registry = load_registry() if registry is None else registry
-    entry, artifact = registry.load_champion(role, "*", verify=True)
+    if registry is None:
+        registry = (load_registry() if max_registry_bytes is None
+                    else _load_registry_bounded(max_registry_bytes))
+    entry, artifact = registry.load_champion(
+        role, "*", verify=True, max_bytes=max_artifact_bytes)
     return {
         "model_id": entry.id,
         "artifact_sha256": entry.artifact_sha256,

@@ -237,8 +237,10 @@ def _add_operator_plan_arguments(plan):
     """``ops plan training``/``promote``'s arguments (P6 slice 5). ``--mode``
     is already nightly's, hence ``--training-mode``."""
     plan.add_argument("--training-mode",
-                      choices=("recipe", "state", "board_analog", "trailing_cutoff"))
+                      choices=("recipe", "state", "board_analog", "trailing_cutoff",
+                               "monthly_pools"))
     plan.add_argument("--recipe", default="")
+    plan.add_argument("--month", default=argparse.SUPPRESS)
     plan.add_argument("--training-input-mode", choices=("legacy", "native_d14"), default=argparse.SUPPRESS)
     for name in ("catalog", "artifact-root", "snapshot-id", "receipt-id"):
         plan.add_argument("--training-" + name, default=argparse.SUPPRESS)
