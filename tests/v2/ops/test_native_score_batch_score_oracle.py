@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pandas as pd
 
 from engine.v2.models.admissible_table import legacy_n_admissible_table
+from engine.v2.models.chooser_cutoff import canonical_day
 from engine.v2.models.lineage import DataDependency, Lineage
 from engine.v2.models.training.chooser_pool import build_chooser_analog_pool_artifact
 from engine.v2.ops import native_score_batch as nsb
@@ -20,7 +21,7 @@ from tests.v2.ops.test_native_score_batch_driver_alias import (
 )
 
 _AS_OF = "2026-01-10"
-_EVENT_DATE = "2026-01-15"
+_EVENT_DATE = "2026-02-15"
 _IV_CRUSH = ("iv_crush", "*", ("x", "iv"))
 _CHOOSER_PRIMITIVES = (
     "mean_prior_abs_move", "ema12r_abs", "signed_streak",
@@ -60,12 +61,12 @@ def _event(ticker: str, event_id: str, signal: float):
     })
     calendar = {
         "event_id": event_id, "ticker": ticker, "event_date": _EVENT_DATE,
-        "entry_date": _EVENT_DATE, "exit_date": "2026-01-16",
-        "expiry": "2026-01-16", "spot": 100.0,
+        "entry_date": _EVENT_DATE, "exit_date": "2026-02-16",
+        "expiry": "2026-02-16", "spot": 100.0,
         "calendar_observed_through": "2026-01-09",
     }
     quotes = [
-        {"right": "P", "strike": float(strike), "expiry": "2026-01-16",
+        {"right": "P", "strike": float(strike), "expiry": "2026-02-16",
          "bid": max(100.0 - strike, 0.0) + 0.4,
          "ask": max(100.0 - strike, 0.0) + 0.5,
          "observed_at": "2026-01-09"}
@@ -117,8 +118,9 @@ def test_native_score_batch_matches_hand_computed_fold_and_score(
     observed_folds = []
 
     def load_selected_fold(_binding, event_date, as_of, fold_start, decision_cutoff):
-        assert event_date == _EVENT_DATE
-        assert as_of == _AS_OF
+        assert canonical_day(event_date) == _EVENT_DATE
+        assert canonical_day(as_of) == _AS_OF
+        assert canonical_day(decision_cutoff) == _AS_OF
         observed_folds.append((fold_start, decision_cutoff))
         producer = fold_bindings[fold_start]
         pools = {
