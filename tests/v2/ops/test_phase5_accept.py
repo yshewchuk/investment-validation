@@ -128,6 +128,21 @@ def test_build_evidence_refuses_mismatched_candidate_catalog(tmp_path):
                for row in evidence["findings"])
 
 
+def test_build_evidence_stage_progress_reaches_stderr_not_stdout(tmp_path, capsys):
+    release_root = tmp_path / "store"
+    _catalog(release_root, "candidate")
+
+    acceptance_gate.build_evidence(
+        release_root, candidate_release_id="candidate", state_specs=(),
+        consumers={}, watch_dirs=[])
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "[p5-accept" in captured.err
+    assert "members:" in captured.err
+    assert "phase4:" in captured.err
+
+
 def _assert_evidence_hash(evidence):
     unhashed = {key: value for key, value in evidence.items()
                 if key not in ("runtime_ms", "report", "evidence_hash")}
@@ -228,7 +243,34 @@ def test_verify_object_uses_bounded_reader(tmp_path, monkeypatch):
 
     assert acceptance_gate._verify_object(
         release_root, "objects/member", acceptance_gate.sha256_bytes(payload)) is None
-    assert calls == [(target.resolve(), acceptance_gate.MAX_MEMBER_BYTES)]
+    assert calls == [(target.resolve(), 512 * 1024 * 1024)]
+
+
+def test_verify_object_rejects_wrong_expected_hash(tmp_path):
+    release_root = tmp_path / "store"
+    target = release_root / "deployment" / "objects" / "member"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"member-bytes")
+
+    assert acceptance_gate._verify_object(
+        release_root, "objects/member", "sha256:" + "0" * 64
+    ) == acceptance_gate.MEMBER_HASH_MISMATCH
+
+
+def test_verify_object_bounded_read_refusal_is_not_success(tmp_path, monkeypatch):
+    release_root = tmp_path / "store"
+    target = release_root / "deployment" / "objects" / "member"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"member-bytes")
+
+    def refuse(_path, _limit):
+        raise ValueError("over the bounded read limit")
+
+    monkeypatch.setattr(acceptance_gate, "read_regular_file", refuse)
+
+    assert acceptance_gate._verify_object(
+        release_root, "objects/member", acceptance_gate.sha256_bytes(b"member-bytes")
+    ) == acceptance_gate.MEMBER_OBJECT_ABSENT
 
 
 def test_typed_load_caps_frozen_state_loader(tmp_path, monkeypatch):
@@ -340,27 +382,36 @@ def test_staged_manifest_hash_mismatch_refuses_before_shim(tmp_path, monkeypatch
 
 
 @pytest.mark.parametrize(
-    "parameters",
+    ("parameters", "problems"),
     [
-        None,
-        {"expected_ids": None, "release_root": "/release",
-         "candidate_release_id": "candidate"},
-        {"expected_ids": ("retrain_check",), "release_root": "/release",
-         "candidate_release_id": "candidate"},
-        {"expected_ids": ("phase5_accept",), "release_root": "  ",
-         "candidate_release_id": "candidate"},
-        {"expected_ids": ("phase5_accept",), "release_root": "/release",
-         "candidate_release_id": "../escape"},
-        {"expected_ids": ("phase5_accept",), "release_root": "/release",
-         "candidate_release_id": ".hidden"},
-        {"expected_ids": ("phase5_accept",), "release_root": "/release",
-         "candidate_release_id": "a\\b"},
-        phase5_accept.Phase5AcceptParameters(
+        ({"expected_ids": ("retrain_check",), "release_root": "/release",
+          "candidate_release_id": "candidate"},
+         ["expected_ids must be exactly ('phase5_accept',)"]),
+        ({"expected_ids": ("phase5_accept",), "release_root": "  ",
+          "candidate_release_id": "candidate"},
+         ["release_root must be a nonblank string"]),
+        ({"expected_ids": ("phase5_accept",), "release_root": "/release",
+          "candidate_release_id": "../escape"},
+         ["candidate_release_id must be a safe non-empty id"]),
+        ({"expected_ids": ("phase5_accept",), "release_root": "/release",
+          "candidate_release_id": ".hidden"},
+         ["candidate_release_id must be a safe non-empty id"]),
+        ({"expected_ids": ("phase5_accept",), "release_root": "/release",
+          "candidate_release_id": "a\\b"},
+         ["candidate_release_id must be a safe non-empty id"]),
+        (phase5_accept.Phase5AcceptParameters(
             expected_ids=("phase5_accept",), release_root="/release",
             candidate_release_id=""),
+         ["candidate_release_id must be a safe non-empty id"]),
+        (phase5_accept.Phase5AcceptParameters(
+            expected_ids=("retrain_check",), release_root=" ",
+            candidate_release_id="../escape"),
+         ["expected_ids must be exactly ('phase5_accept',)",
+          "release_root must be a nonblank string",
+          "candidate_release_id must be a safe non-empty id"]),
     ],
 )
-def test_invalid_parameters_refuse_before_reads(tmp_path, parameters):
+def test_invalid_parameters_refuse_before_reads(tmp_path, parameters, problems):
     attempt = tmp_path / "attempt"
     attempt.mkdir()
 
@@ -368,7 +419,29 @@ def test_invalid_parameters_refuse_before_reads(tmp_path, parameters):
         phase5_accept.run_phase5_accept_worker(parameters, attempt)
 
     assert excinfo.value.code == "INVALID_REQUEST"
-    assert excinfo.value.problem.details["code"] == "PHASE5_ACCEPT_PARAMETERS_INVALID"
+    assert excinfo.value.problem.details == {
+        "code": "PHASE5_ACCEPT_PARAMETERS_INVALID", "problems": problems}
+    assert not (attempt / "acceptance.json").exists()
+
+
+@pytest.mark.parametrize(
+    "parameters",
+    [
+        None,
+        {"expected_ids": None, "release_root": "/release",
+         "candidate_release_id": "candidate"},
+    ],
+)
+def test_malformed_parameter_documents_refuse_before_reads(tmp_path, parameters):
+    attempt = tmp_path / "attempt"
+    attempt.mkdir()
+
+    with pytest.raises(OpsError) as excinfo:
+        phase5_accept.run_phase5_accept_worker(parameters, attempt)
+
+    assert excinfo.value.code == "INVALID_REQUEST"
+    assert excinfo.value.problem.details == {
+        "code": "PHASE5_ACCEPT_PARAMETERS_INVALID"}
     assert not (attempt / "acceptance.json").exists()
 
 
@@ -386,6 +459,29 @@ def test_changed_evidence_identity_fails_closed(tmp_path, monkeypatch):
 
     assert excinfo.value.code == "INPUT_CHANGED"
     assert excinfo.value.problem.details["code"] == "PHASE5_ACCEPTANCE_MISMATCH"
+    assert (attempt / "acceptance.json").exists()
+
+
+def test_layout_finding_refuses_validation_failed_before_identity(tmp_path, monkeypatch):
+    release_root = tmp_path / "store"
+    attempt = tmp_path / "attempt"
+    attempt.mkdir()
+    catalog = _catalog(release_root, "candidate")
+    evidence = _evidence("candidate", catalog)
+    evidence.update(
+        release_ok=False, status="FAIL",
+        findings=[{"code": "P5_RELEASE_LAYOUT", "subject": "phase5_release.json",
+                   "detail": "release catalog is missing or malformed"}])
+    _rehash(evidence)
+    _patch_manifest(monkeypatch, _manifest("candidate"))
+    _patch_evidence(monkeypatch, evidence)
+
+    with pytest.raises(OpsError) as excinfo:
+        phase5_accept.run_phase5_accept_worker(_params(release_root), attempt)
+
+    assert excinfo.value.code == "VALIDATION_FAILED"
+    assert excinfo.value.problem.details == {"code": "P5_RELEASE_LAYOUT"}
+    assert "release_root" not in excinfo.value.problem.message
     assert (attempt / "acceptance.json").exists()
 
 
@@ -428,6 +524,16 @@ def test_job_kind_is_registered_non_retrying_with_shadow_and_smoke_namespaces():
     assert kind.checkpoint_contract == "phase5_acceptance.v1.0"
     assert kind.namespaces == frozenset({"shadow", "smoke"})
     assert kind.validate(None, params) == []
+
+
+def test_job_kind_validate_rejects_invalid_parameters():
+    kind = registry().get("phase5_accept")
+    params = phase5_accept.Phase5AcceptParameters(
+        expected_ids=("phase5_accept",), release_root="/release-store",
+        candidate_release_id="../escape")
+
+    assert kind.validate(None, params) == [
+        "candidate_release_id must be a safe non-empty id"]
 
 
 def test_job_kind_does_not_request_deterministic_checkpointing():

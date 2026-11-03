@@ -291,6 +291,12 @@ def run_phase5_accept_worker(parameters, root) -> dict:
     from tools import phase5_acceptance_job as job
 
     evidence, _output = job.run_acceptance(release_root, Path(root), candidate_id)
+    findings = evidence.get("findings") if isinstance(evidence, dict) else None
+    if isinstance(findings, list) and any(
+            isinstance(row, dict) and row.get("code") == "P5_RELEASE_LAYOUT"
+            for row in findings):
+        raise fail("VALIDATION_FAILED", "candidate release layout is invalid",
+                   details={"code": "P5_RELEASE_LAYOUT"})
     if not isinstance(evidence, dict) or evidence.get("release_id") != candidate_id:
         raise fail("INPUT_CHANGED", "release acceptance evidence does not match candidate",
                    details={"code": "PHASE5_ACCEPTANCE_MISMATCH"})

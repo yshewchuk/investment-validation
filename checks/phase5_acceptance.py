@@ -136,9 +136,13 @@ def _progress(tag: str, message: str, started: float) -> None:
     boundary calls this -- the same ``[tag] message`` idiom
     ``tools/capture_tier0_corpus.py``'s ``[corpus] ...`` lines use, extended
     with a wall-clock timestamp so a supervisor tailing the log with `date`
-    can tell how far along a run is, not just that it is still alive."""
+    can tell how far along a run is, not just that it is still alive.
+
+    Writes to stderr, the channel the worker executor already captures as
+    ``diagnostics/worker.stderr``; stdout stays the machine-readable result."""
     print(f"[{tag} {time.strftime('%H:%M:%S')}] {message} "
-          f"(+{time.perf_counter() - started:.1f}s, rss {_rss_gb():.2f}G)", flush=True)
+          f"(+{time.perf_counter() - started:.1f}s, rss {_rss_gb():.2f}G)",
+          file=sys.stderr, flush=True)
 
 
 class ReportPathError(ValueError):
