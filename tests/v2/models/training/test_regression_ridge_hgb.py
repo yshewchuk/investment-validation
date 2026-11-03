@@ -28,7 +28,8 @@ def matrix(values):
 
 
 def fit(policy, train, labels, prediction):
-    return fit_regression_predictions(policy, train, labels, prediction, columns=policy["features"])
+    return fit_regression_predictions(policy, train, labels, prediction,
+                                      columns=policy["features"])
 
 
 @pytest.mark.parametrize("model", ["history_ridge", "history_hgb"])
@@ -71,9 +72,11 @@ def test_nonnegative_numerics_match_legacy_and_both_reject_signed_labels(model):
     args = (matrix([0, 2, 4]), [1, 5, 9], matrix([-100, 1, 100]))
     expected = fit_ridge_hgb_predictions(old, *args, columns=old["features"])
     assert fit(policy, *args)["predictions"] == expected["predictions"]
-    for function, metadata in ((fit_regression_predictions, policy), (fit_ridge_hgb_predictions, old)):
-        with pytest.raises(ValueError, match="nonnegative"):
-            function(metadata, matrix([0]), [-1], matrix([0]), columns=metadata["features"])
+    with pytest.raises(ValueError, match="nonnegative"):
+        fit_regression_predictions(policy, matrix([0]), [-1], matrix([0]),
+                                   columns=policy["features"])
+    with pytest.raises(ValueError, match="nonnegative"):
+        fit_ridge_hgb_predictions(old, matrix([0]), [-1], matrix([0]), columns=old["features"])
 
 
 @pytest.mark.parametrize("guard", [no_fit, legacy_no_fit])

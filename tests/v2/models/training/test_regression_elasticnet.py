@@ -35,7 +35,8 @@ def matrix(values):
 
 
 def fit(policy, labels=(-4, 0, 4), prediction=None):
-    return fit_regression_elasticnet_predictions(policy, matrix([0, 2, 4]), labels,
+    return fit_regression_elasticnet_predictions(
+        policy, matrix([0, 2, 4]), labels,
         matrix([-100, 0, 2, 4, 100]) if prediction is None else prediction,
         columns=policy["features"])
 
@@ -78,9 +79,11 @@ def test_nonnegative_result_and_evidence_match_legacy():
     for key in old_result.keys() - {"schema_version", "recipe_id"}:
         assert result[key] == old_result[key]
     assert result["predictions"][0] == 0
-    for function, metadata in ((fit_regression_elasticnet_predictions, policy), (fit_elasticnet_predictions, old)):
-        with pytest.raises(ValueError, match="nonnegative"):
-            function(metadata, matrix([0]), [-1], matrix([0]), columns=metadata["features"])
+    with pytest.raises(ValueError, match="nonnegative"):
+        fit_regression_elasticnet_predictions(
+            policy, matrix([0]), [-1], matrix([0]), columns=policy["features"])
+    with pytest.raises(ValueError, match="nonnegative"):
+        fit_elasticnet_predictions(old, matrix([0]), [-1], matrix([0]), columns=old["features"])
 
 
 class Poison:
@@ -94,7 +97,8 @@ class Poison:
 @pytest.mark.parametrize("guard", [legacy_no_fit, no_fit])
 def test_both_guards_precede_inspection(guard):
     with guard.no_fit_guard(), pytest.raises(guard.RuntimeFitForbidden):
-        fit_regression_elasticnet_predictions(Poison(), Poison(), Poison(), Poison(), columns=Poison())
+        fit_regression_elasticnet_predictions(
+            Poison(), Poison(), Poison(), Poison(), columns=Poison())
 
 
 def test_closed_domain_projection_schema_and_detached_metadata():
@@ -106,9 +110,11 @@ def test_closed_domain_projection_schema_and_detached_metadata():
     for key, value in (("target_domain", "nonnegative"), ("prediction_projection", "clip_zero"),
                        ("schema_version", "magnitude_elasticnet_recipe.v1"), ("extra", 1),
                        ("target_transform", "log"), ("nonconvergence", "retry")):
+        altered = {**policy, key: value}
         with pytest.raises(ValueError, match="recipe"):
-            fit_regression_elasticnet_predictions({**policy, key: value}, Poison(), Poison(), Poison(),
-                                                 columns=policy["features"])
+            validate_regression_elasticnet_recipe(altered)
+            fit_regression_elasticnet_predictions(
+                altered, Poison(), Poison(), Poison(), columns=policy["features"])
     for key in policy:
         with pytest.raises(ValueError, match="recipe"):
             validate_regression_elasticnet_recipe({k: v for k, v in policy.items() if k != key})
@@ -163,10 +169,12 @@ def test_fresh_single_thread_training_only_and_detached_inputs(monkeypatch):
     monkeypatch.setattr(ElasticNet, "fit", observe)
     policy, train, labels, prediction = recipe(), matrix([0, 2, np.nan]), [-4, 0, 4], matrix([1])
     before = copy.deepcopy((policy, train, labels, prediction))
-    first = fit_regression_elasticnet_predictions(policy, train, labels, prediction, columns=policy["features"])
+    first = fit_regression_elasticnet_predictions(
+        policy, train, labels, prediction, columns=policy["features"])
     polluted = matrix([1, 1e12, np.nan])
     polluted[:, 1] = 1e12
-    second = fit_regression_elasticnet_predictions(policy, train, labels, polluted, columns=policy["features"])
+    second = fit_regression_elasticnet_predictions(
+        policy, train, labels, polluted, columns=policy["features"])
     for key in first.keys() - {"predictions"}:
         assert first[key] == second[key]
     assert first["predictions"][0] == second["predictions"][0]

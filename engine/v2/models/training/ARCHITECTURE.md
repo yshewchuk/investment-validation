@@ -8,6 +8,10 @@ Layer 6 in the [root architecture](../../../../ARCHITECTURE.md): offline dataset
 
 The [README public interface](README.md#public-interface) inventories exported types/builders. `current_recipes`, `prepare_dataset`, `plan_folds`, `fold_receipts` and `receipt_issues` feed `run_training_job`; `build_d14_dataset` admits pinned native inputs. `fit_recipe_estimator` fits release recipes. Separate magnitude/Ridge/HGB/ElasticNet/regression APIs and `fit_routes.fit_execution` consume caller-admitted arrays; `magnitude_mlp.fit_mlp_predictions` participates in shared magnitude dispatch, while v1–v5 search requests do not admit MLP. Payoff, recalibration, residual, analog and trailing-cutoff builders return frozen model-state artifacts.
 
+### FitInputs contract (A1a)
+
+`FitInputs` is a frozen in-memory transport object whose fields are `train_features`, `train_labels`, `prediction_features` and `columns`. Public estimator entry points keep their existing signatures and act as thin adapters: after guards and recipe validation, they validate ordered columns and compatible training row counts once, then construct `FitInputs`. No array conversion or value inspection may occur before guards, and recipe-specific refusal checks retain their current order and error messages. The object does not alter recipe, result, experiment or replay identity. Candidate/route API migration is deferred to A1b.
+
 ## 3. Inputs
 
 Jobs receive `TrainingRecipe`, frames and explicit output paths; source identity may be bound through `input_identity`. D14 reads explicit catalog/snapshot/receipt/calendar pins; recipe and chooser-source readers bound registry JSON or local parquet. Numeric fitters take closed recipes, ordered columns, training features/labels and prediction features; callers own causal membership, source admission and resource budgets.

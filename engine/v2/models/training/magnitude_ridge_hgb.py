@@ -6,11 +6,10 @@ from threadpoolctl import threadpool_limits
 
 from engine.v2.foundation import content_hash
 from engine.v2.models.magnitude_ridge_hgb_recipe import validate_ridge_hgb_recipe
-from engine.v2.models.no_fit import forbid_fitting as forbid_v2_fitting
 from engine.v2.models.regression_ridge_hgb_recipe import validate_regression_recipe
 
 from ._magnitude_estimators import build_estimator
-from .legacy_adapter import forbid_fitting
+from .fit_inputs import FitInputs, check_fitting_allowed
 
 __all__ = ["fit_ridge_hgb_predictions", "fit_regression_predictions"]
 
@@ -34,27 +33,34 @@ def _matrices(train_features, train_labels, prediction_features, width, *, nonne
 
 def fit_ridge_hgb_predictions(recipe, train_features, train_labels, prediction_features, *, columns) -> dict:
     """Caller owns source/fold admission and truthful columns; no selection or I/O."""
-    forbid_fitting("engine.v2.models.training.magnitude_ridge_hgb.fit_ridge_hgb_predictions")
-    forbid_v2_fitting("engine.v2.models.training.magnitude_ridge_hgb.fit_ridge_hgb_predictions")
+    check_fitting_allowed("engine.v2.models.training.magnitude_ridge_hgb.fit_ridge_hgb_predictions")
     recipe = validate_ridge_hgb_recipe(recipe)
-    return _fit(recipe, train_features, train_labels, prediction_features, columns=columns,
-                nonnegative=True, result_schema="magnitude_ridge_hgb_fit.v1")
+    inputs = FitInputs.from_recipe(
+        recipe, train_features, train_labels, prediction_features, columns,
+        column_error="magnitude matrix columns must exactly match the ordered recipe subset",
+        row_error="magnitude labels require one finite nonnegative value per training row",
+        guard_path="engine.v2.models.training.magnitude_ridge_hgb.fit_ridge_hgb_predictions")
+    return _fit(recipe, inputs, nonnegative=True, result_schema="magnitude_ridge_hgb_fit.v1")
 
 
 def fit_regression_predictions(recipe, train_features, train_labels, prediction_features, *, columns):
     """Fit an explicit domain-aware recipe; no target identity or admission is inferred."""
-    forbid_fitting("engine.v2.models.training.magnitude_ridge_hgb.fit_regression_predictions")
-    forbid_v2_fitting("engine.v2.models.training.magnitude_ridge_hgb.fit_regression_predictions")
+    check_fitting_allowed("engine.v2.models.training.magnitude_ridge_hgb.fit_regression_predictions")
     recipe = validate_regression_recipe(recipe)
-    return _fit(recipe, train_features, train_labels, prediction_features, columns=columns,
+    domain = "nonnegative " if recipe["target_domain"] == "nonnegative" else ""
+    inputs = FitInputs.from_recipe(
+        recipe, train_features, train_labels, prediction_features, columns,
+        column_error="magnitude matrix columns must exactly match the ordered recipe subset",
+        row_error=f"magnitude labels require one finite {domain}value per training row",
+        guard_path="engine.v2.models.training.magnitude_ridge_hgb.fit_regression_predictions")
+    return _fit(recipe, inputs,
                 nonnegative=recipe["target_domain"] == "nonnegative",
                 result_schema="regression_ridge_hgb_fit.v1")
 
 
-def _fit(recipe, train_features, train_labels, prediction_features, *, columns, nonnegative, result_schema):
-    if not isinstance(columns, (list, tuple)) or list(columns) != recipe["features"]:
-        raise ValueError("magnitude matrix columns must exactly match the ordered recipe subset")
-    train, labels, prediction = _matrices(train_features, train_labels, prediction_features, len(columns),
+def _fit(recipe, inputs, *, nonnegative, result_schema):
+    train, labels, prediction = _matrices(inputs.train_features, inputs.train_labels,
+                                        inputs.prediction_features, len(inputs.columns),
                                         nonnegative=nonnegative)
     if recipe["model"] == "history_hgb":
         # Freeze only training-all-null columns; partial NaNs retain native routing.

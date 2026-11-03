@@ -11,10 +11,9 @@ from engine.v2.models.magnitude_elasticnet_recipe import (
     validate_elasticnet_recipe,
     validate_regression_elasticnet_recipe,
 )
-from engine.v2.models.no_fit import forbid_fitting as forbid_v2_fitting
 
 from ._magnitude_elasticnet_estimator import ConvergenceWarning, build_estimator
-from .legacy_adapter import forbid_fitting
+from .fit_inputs import FitInputs, check_fitting_allowed
 
 __all__ = ["fit_elasticnet_predictions", "fit_regression_elasticnet_predictions"]
 
@@ -49,29 +48,38 @@ def _coefficient_evidence(model, columns):
         "n_iter": int(model.n_iter_), "dual_gap": float(model.dual_gap_)}
 
 
-def fit_elasticnet_predictions(recipe, train_features, train_labels, prediction_features, *, columns) -> dict:
+def fit_elasticnet_predictions(recipe, train_features, train_labels, prediction_features,
+                               *, columns) -> dict:
     """No fold selection here: the caller supplies qualified training and a fixed recipe."""
-    forbid_fitting("engine.v2.models.training.magnitude_elasticnet.fit_elasticnet_predictions")
-    forbid_v2_fitting("engine.v2.models.training.magnitude_elasticnet.fit_elasticnet_predictions")
+    check_fitting_allowed("engine.v2.models.training.magnitude_elasticnet.fit_elasticnet_predictions")
     recipe = validate_elasticnet_recipe(recipe)
-    return _fit(recipe, train_features, train_labels, prediction_features, columns=columns,
-                nonnegative=True, result_schema="magnitude_elasticnet_fit.v1")
+    inputs = FitInputs.from_recipe(
+        recipe, train_features, train_labels, prediction_features, columns,
+        column_error="ElasticNet matrix columns must exactly match the ordered recipe subset",
+        row_error="ElasticNet labels require one finite nonnegative value per training row",
+        guard_path="engine.v2.models.training.magnitude_elasticnet.fit_elasticnet_predictions")
+    return _fit(recipe, inputs, nonnegative=True, result_schema="magnitude_elasticnet_fit.v1")
 
 
-def fit_regression_elasticnet_predictions(recipe, train_features, train_labels, prediction_features, *, columns):
+def fit_regression_elasticnet_predictions(recipe, train_features, train_labels,
+                                          prediction_features, *, columns):
     """Fit an explicit domain-aware recipe without inferring source or target admission."""
-    forbid_fitting("engine.v2.models.training.magnitude_elasticnet.fit_regression_elasticnet_predictions")
-    forbid_v2_fitting("engine.v2.models.training.magnitude_elasticnet.fit_regression_elasticnet_predictions")
+    check_fitting_allowed("engine.v2.models.training.magnitude_elasticnet.fit_regression_elasticnet_predictions")
     recipe = validate_regression_elasticnet_recipe(recipe)
-    return _fit(recipe, train_features, train_labels, prediction_features, columns=columns,
+    domain = "nonnegative " if recipe["target_domain"] == "nonnegative" else ""
+    inputs = FitInputs.from_recipe(
+        recipe, train_features, train_labels, prediction_features, columns,
+        column_error="ElasticNet matrix columns must exactly match the ordered recipe subset",
+        row_error=f"ElasticNet labels require one finite {domain}value per training row",
+        guard_path="engine.v2.models.training.magnitude_elasticnet.fit_regression_elasticnet_predictions")
+    return _fit(recipe, inputs,
                 nonnegative=recipe["target_domain"] == "nonnegative",
                 result_schema="regression_elasticnet_fit.v1")
 
 
-def _fit(recipe, train_features, train_labels, prediction_features, *, columns, nonnegative, result_schema):
-    if not isinstance(columns, (list, tuple)) or list(columns) != recipe["features"]:
-        raise ValueError("ElasticNet matrix columns must exactly match the ordered recipe subset")
-    train, labels, prediction = _matrices(train_features, train_labels, prediction_features, len(columns),
+def _fit(recipe, inputs, *, nonnegative, result_schema):
+    train, labels, prediction = _matrices(inputs.train_features, inputs.train_labels,
+                                        inputs.prediction_features, len(inputs.columns),
                                         nonnegative=nonnegative)
     model = build_estimator(recipe)
     with threadpool_limits(limits=1), warnings.catch_warnings(record=True) as caught:
@@ -79,7 +87,7 @@ def _fit(recipe, train_features, train_labels, prediction_features, *, columns, 
         model.fit(train, labels)
         if any(issubclass(item.category, ConvergenceWarning) for item in caught):
             raise ValueError("ElasticNet convergence failed; no retry permitted")
-        evidence = _coefficient_evidence(model[-1], columns)
+        evidence = _coefficient_evidence(model[-1], inputs.columns)
         predictions = np.asarray(model.predict(prediction), dtype=float)
     if predictions.shape != (len(prediction),) or not np.isfinite(predictions).all():
         raise ValueError("ElasticNet predictions require one finite value per prediction row")

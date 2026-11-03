@@ -65,7 +65,8 @@ def test_order_and_policy_refusal_precedes_numeric_conversion(kind):
     with pytest.raises(ValueError, match="recipe"):
         _fit(recipe, Poison(), Poison(), Poison())
     with pytest.raises(ValueError, match="recipe"):
-        fit_ridge_hgb_predictions(magnitude_fitted_execution_document("2026-01-01", kind)["fit_recipe"], Poison(), Poison(), Poison(), columns=[])
+        _fit(magnitude_fitted_execution_document("2026-01-01", kind)["fit_recipe"],
+             Poison(), Poison(), Poison())
 
 
 @pytest.mark.parametrize("kind", KINDS)
