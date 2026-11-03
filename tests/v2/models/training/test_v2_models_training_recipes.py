@@ -664,11 +664,14 @@ def test_no_scoring_or_legacy_module_imports_the_training_package():
     training_edges = [e for e in edges if e.imported.startswith("engine.v2.models.training")]
     allowed_routes = {"engine.v2.models.training.fit_routes",
         "engine.v2.models.training.fit_routes.check_fitting_allowed",
-        "engine.v2.models.training.fit_routes.fit_execution"}
-    assert training_edges and all(
-        e.importer.startswith("engine.v2.models.training") or e.importer == "engine.v2.ops.training"
-        or (e.importer == "engine.v2.research.horizon_fitted" and e.imported in allowed_routes)
-        for e in training_edges)
+        "engine.v2.models.training.fit_routes.fit_execution",
+        "engine.v2.models.training.fit_inputs",
+        "engine.v2.models.training.fit_inputs.FitInputs"}
+    unexpected = [
+        e for e in training_edges
+        if not (e.importer.startswith("engine.v2.models.training") or e.importer == "engine.v2.ops.training"
+                or (e.importer == "engine.v2.research.horizon_fitted" and e.imported in allowed_routes))]
+    assert training_edges and not unexpected, unexpected
 
 
 def test_training_job_tool_lists_every_recipe_and_bounds_label_dates(capsys):
