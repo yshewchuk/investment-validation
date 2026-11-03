@@ -172,6 +172,16 @@ def _counts(request, horizons):
         "total_component_fits": fits + extra_components + baseline_component_fits}
 
 
+def _candidate_specs(request, request_id):
+    specs = [spec for spec in v2._specifications(request, request_id)
+        if spec["family"] != "size_v1_4" or spec["feature_recipe"]["subset"] == "HMO"]
+    if request.get("requires_event_dates") is True:
+        for spec in specs:
+            if spec["family"] == "mlp":
+                spec["requires_event_dates"] = True
+    return specs
+
+
 def compile_request(request, *, horizons=(5, 3, 1)):
     """Return canonical declarations/counts; no source/fold verification or I/O."""
     horizons = v2.validate_horizons(horizons)
@@ -213,8 +223,7 @@ def compile_request(request, *, horizons=(5, 3, 1)):
     request_id = content_hash(request)
     result = {"schema_version": "magnitude_search_schedule.v2", "request": request,
         "request_id": request_id, "horizons": list(horizons),
-        "candidate_specs": [s for s in v2._specifications(request, request_id)
-            if s["family"] != "size_v1_4" or s["feature_recipe"]["subset"] == "HMO"],
+        "candidate_specs": _candidate_specs(request, request_id),
         "schedule": [{"outer_year": year, "inner_years": request["inner_years"][year]}
                      for year in request["outer_years"]], "counts": counts}
     return json.loads(json.dumps(result, sort_keys=True, allow_nan=False))
