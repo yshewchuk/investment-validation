@@ -12,6 +12,8 @@ Native registration, dataset/feature qualification, training-label availability,
 | Existing `magnitude_distribution_payoff.mean_matched_control` call | Public re-export of that neutral implementation; existing strategy results and failures remain compatible. `distribution_oof` consumes the neutral import directly. |
 | `prepare_empirical_crps(samples)` | Validate/copy/sort a nonempty empirical law once and return an observation scorer over immutable parts. Preserve duplicate/zero atoms; use the existing analytic CRPS core, no pairwise matrix or new formula. Preparation is O(n log n), each observation O(n), retained storage O(n). |
 | Invalid sample or observation | Existing typed `CONTRACT_MISMATCH`, not silent clipping, smoothing or a manufactured distribution. Caller mutation after preparation cannot alter the retained law. |
+| `distribution_prediction_scores.arm_forecasts` / `score_forecasts` | Source-free forecast controls and CRPS/RPS/log-loss/tail rows; verify supplied receipt/pool identity and outer horizon before reading targets. Preserve missing targets, unavailable controls and unresolved-tail CRPS. Caller owns admission, complete event axes and target-access order. |
+| Legacy `distribution_scores` forecast exports | Re-export the identical neutral functions; economic/profit scoring stays separate. No numerical, refusal, row-order or progress-cadence change. |
 | Source-free numerical result | No I/O, fitting, native admission, publication or final-read authority. |
 
 ## Incremental delivery
