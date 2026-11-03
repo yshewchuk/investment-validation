@@ -413,6 +413,73 @@ def _champion_registry(tmp_path, monkeypatch):
     return registry
 
 
+def _bounded_champion_registry(tmp_path, monkeypatch):
+    """A valid registry file plus the artifact its one champion points at."""
+    import joblib
+    import numpy as np
+
+    from engine.models import registry as registry_mod
+
+    artifact = registry_mod.ModelArtifact(
+        model=None, role="size", features=("abs_move",),
+        residuals=np.array([1.0, -1.0]), target="abs_move")
+    artifact_path = tmp_path / "size-champion.joblib"
+    joblib.dump(artifact, artifact_path, compress=3)
+    entry = registry_mod.RegistryEntry(
+        id="size-champion", role="size", strategy="*", artifact=str(artifact_path),
+        artifact_sha256=registry_mod.artifact_sha256(artifact_path),
+        features=["abs_move"], target="abs_move", train_window="2015-2025",
+        champion=True)
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(registry_mod.Registry(entries=[entry]).to_json())
+    monkeypatch.setattr(registry_mod, "REGISTRY_PATH", registry_path)
+    return registry_path
+
+
+def _oversized_registry(tmp_path, monkeypatch):
+    from engine.models import registry as registry_mod
+
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text("{" + " " * 64 + "}")
+    monkeypatch.setattr(registry_mod, "REGISTRY_PATH", registry_path)
+    parsed = []
+    monkeypatch.setattr(registry_mod, "registry_from_text",
+                        lambda *args, **kwargs: parsed.append(args))
+    return parsed
+
+
+def test_bounded_registry_loads_a_normal_champion(tmp_path, monkeypatch):
+    from tools import phase5_datasets as data
+
+    _bounded_champion_registry(tmp_path, monkeypatch)
+    pool = data.champion_driver_pool(
+        "size", max_artifact_bytes=1 << 20, max_registry_bytes=1 << 20)
+    assert pool["model_id"] == "size-champion"
+    assert list(pool["residuals"]) == [1.0, -1.0]
+
+
+def test_oversized_bounded_registry_refuses_before_json_decode(tmp_path, monkeypatch):
+    from engine.v2.models.frozen_state_io import BoundedStateReadError
+    from tools import phase5_datasets as data
+
+    parsed = _oversized_registry(tmp_path, monkeypatch)
+    with pytest.raises(BoundedStateReadError) as excinfo:
+        data.champion_driver_pool("size", max_registry_bytes=8)
+    assert excinfo.value.code == "SIZE_LIMIT"
+    assert parsed == []
+
+
+def test_oversized_monthly_registry_is_nonretryable_validation_failed(
+        tmp_path, monkeypatch):
+    parsed = _oversized_registry(tmp_path, monkeypatch)
+    monkeypatch.setattr(job, "MONTHLY_REGISTRY_MAX_BYTES", 8)
+    with pytest.raises(OpsError) as excinfo:
+        training.run_training_worker(_worker_params(), tmp_path / "attempt")
+    assert excinfo.value.code == "VALIDATION_FAILED"
+    assert excinfo.value.problem.retryable is False
+    assert parsed == []
+
+
 @pytest.mark.parametrize("max_bytes", [None, 1024])
 def test_champion_digest_mismatch_refuses_before_deserialization(
         tmp_path, monkeypatch, max_bytes):

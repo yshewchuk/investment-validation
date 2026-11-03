@@ -51,6 +51,7 @@ __all__ = [
     "RegistryEntry",
     "Registry",
     "load_registry",
+    "registry_from_text",
     "champion",
     "register",
     "REGISTRY_PATH",
@@ -663,15 +664,20 @@ class Registry:
         return path
 
 
+def registry_from_text(text: str, *, path: Path | None = None) -> Registry:
+    """Parse a registry document the caller has already read under its own bound."""
+    doc = json.loads(text)
+    entries = [RegistryEntry(**row) for row in doc.get("models", [])]
+    return Registry(entries=entries, path=Path(path or REGISTRY_PATH))
+
+
 def load_registry(path: Path | None = None, *, missing_ok: bool = True) -> Registry:
     path = Path(path or REGISTRY_PATH)
     if not path.exists():
         if missing_ok:
             return Registry(entries=[], path=path)
         raise RegistryError(f"no registry at {path}")
-    doc = json.loads(path.read_text())
-    entries = [RegistryEntry(**row) for row in doc.get("models", [])]
-    return Registry(entries=entries, path=path)
+    return registry_from_text(path.read_text(), path=path)
 
 
 def champion(

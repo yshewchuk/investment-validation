@@ -77,6 +77,7 @@ from engine.v2.models.training import (  # noqa: E402
     current_recipes,
     run_training_job,
 )
+from engine.v2.models.training.recipes import REGISTRY_MAX_BYTES  # noqa: E402
 
 
 def _key(text: str) -> RecipeKey:
@@ -246,11 +247,16 @@ def build_state(member: str, *, cutoff=None, ticker_chunk: int = 1000, registry=
     if member.startswith("driver_residual_pool:"):
         role = member.split(":", 1)[1]
         from engine.models.registry import RegistryError
+        from engine.v2.models.frozen_state_io import BoundedStateReadError
 
         try:
             pool = data.champion_driver_pool(
                 role, registry=registry,
-                max_artifact_bytes=MONTHLY_CHAMPION_ARTIFACT_MAX_BYTES if monthly else None)
+                max_artifact_bytes=MONTHLY_CHAMPION_ARTIFACT_MAX_BYTES if monthly else None,
+                max_registry_bytes=MONTHLY_REGISTRY_MAX_BYTES if monthly else None)
+        except BoundedStateReadError as exc:
+            raise SystemExit(
+                f"driver_residual_pool:{role} champion registry is invalid") from exc
         except RegistryError as exc:
             raise SystemExit(
                 f"driver_residual_pool:{role} champion source is invalid") from exc
@@ -416,6 +422,10 @@ def run_state_job(member: str, out: Path, *, plan_only: bool = False,
 #: unpickled. Wired only by ``run_monthly_pools_job``; every other caller of
 #: the Registry stays unbounded.
 MONTHLY_CHAMPION_ARTIFACT_MAX_BYTES = 256 << 20
+#: Monthly-only bound on the registry JSON read before UTF-8 decode and parse
+#: (the same ceiling ``current_recipes`` applies). Every other caller of
+#: ``load_registry`` stays unbounded.
+MONTHLY_REGISTRY_MAX_BYTES = REGISTRY_MAX_BYTES
 MONTHLY_DRIVER_MEMBERS = (
     "driver_residual_pool:size",
     "driver_residual_pool:implied_t1",
