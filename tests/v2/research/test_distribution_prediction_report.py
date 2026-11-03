@@ -197,3 +197,123 @@ assert not any(name in sys.modules for name in (
 prediction_report([], [])
 """
     subprocess.run([sys.executable, "-c", code], check=True, capture_output=True, text=True)
+
+
+def retained_rows(status):
+    rows = scores((1,))
+    for row in rows:
+        row["status"] = status
+        if status == "missing_target":
+            row["observation"] = None
+    return rows
+
+
+@pytest.mark.parametrize("status", ["available", "unavailable", "missing_target"])
+@pytest.mark.parametrize("location", ["row_value", "row_key", "event_value", "event_key"])
+@pytest.mark.parametrize("invalid", [float("nan"), float("inf"), -float("inf")])
+def test_retained_payload_requires_finite_json_for_all_statuses(status, location, invalid):
+    rows, metadata = retained_rows(status), events()
+    target = rows[0] if location.startswith("row") else metadata[0]
+    target["provenance"] = {invalid: "value"} if location.endswith("key") else {"nested": [{"value": invalid}]}
+    with pytest.raises(OpsError) as caught:
+        prediction_report(rows, metadata)
+    assert caught.value.code == "INVALID_EXPERIMENT_SPEC" and not caught.value.problem.retryable
+
+
+@pytest.mark.parametrize("status", ["available", "unavailable", "missing_target"])
+@pytest.mark.parametrize("location", ["row", "event"])
+@pytest.mark.parametrize("invalid", [b"bytes", {1, 2}, {(1, 2): "tuple-key"}])
+def test_non_json_retained_values_and_keys_have_typed_refusals(status, location, invalid):
+    rows, metadata = retained_rows(status), events()
+    target = rows[0] if location == "row" else metadata[0]
+    target["provenance"] = {"nested": [invalid]}
+    with pytest.raises(OpsError) as caught:
+        prediction_report(rows, metadata)
+    assert caught.value.code == "INVALID_EXPERIMENT_SPEC" and not caught.value.problem.retryable
+
+
+@pytest.mark.parametrize("status", ["available", "unavailable", "missing_target"])
+@pytest.mark.parametrize("change", [dict(crps="bad"), dict(crps=-1), dict(crps=True),
+    dict(rps="bad"), dict(rps=None), dict(rps=-1), dict(log_loss="bad"), dict(log_loss=None),
+    dict(log_loss=True), dict(tails="bad"), dict(tails=[]), dict(crps=float("nan")), dict(rps=float("inf"))])
+def test_present_score_fields_are_validated_even_when_not_aggregated(status, change):
+    rows = retained_rows(status)
+    rows[0].update(change)
+    with pytest.raises(OpsError) as caught:
+        prediction_report(rows, events())
+    assert caught.value.code == "INVALID_EXPERIMENT_SPEC" and not caught.value.problem.retryable
+
+
+@pytest.mark.parametrize("status", ["available", "unavailable", "missing_target"])
+@pytest.mark.parametrize("field,value", [("threshold", 6), ("observed_ge", 1),
+    ("probability_ge", "bad"), ("probability_ge", 2), ("probability_ge", float("nan"))])
+def test_present_tails_are_validated_even_without_an_observed_target(status, field, value):
+    rows = retained_rows(status)
+    rows[0]["tails"][0][field] = value
+    with pytest.raises(OpsError) as caught:
+        prediction_report(rows, events())
+    assert caught.value.code == "INVALID_EXPERIMENT_SPEC" and not caught.value.problem.retryable
+
+
+@pytest.mark.parametrize("location", ["row", "event"])
+@pytest.mark.parametrize("shape", ["cycle", "too_deep"])
+def test_recursive_retained_payload_has_typed_refusal(location, shape):
+    rows, metadata = retained_rows("unavailable"), events()
+    payload = []
+    if shape == "cycle":
+        payload.append(payload)
+    else:
+        for _ in range(sys.getrecursionlimit() + 10):
+            payload = [payload]
+    (rows[0] if location == "row" else metadata[0])["provenance"] = payload
+    with pytest.raises(OpsError) as caught:
+        prediction_report(rows, metadata)
+    assert caught.value.code == "INVALID_EXPERIMENT_SPEC" and not caught.value.problem.retryable
+
+
+@pytest.mark.parametrize("status", ["available", "unavailable", "missing_target"])
+def test_valid_retained_fields_and_unknown_provenance_are_preserved_json_safe(status):
+    rows, metadata = retained_rows(status), events()
+    rows[0]["provenance"] = {"nested": [{"value": .5, "note": "opaque", "optional": None}]}
+    if status == "missing_target":
+        rows[0]["tails"][0]["observed_ge"] = True  # No target exists against which to compare it.
+    before = deepcopy((rows, metadata))
+    result = prediction_report(rows, metadata)
+    assert result["rows"] == sorted(rows, key=lambda row: (row["event_id"], row["horizon"], row["arm"]))
+    assert result["events"] == metadata and (rows, metadata) == before
+    json.dumps(result, allow_nan=False)
+    histogram = result["horizons"]["1"]["arms"]["histogram"]
+    assert histogram["counts"][status] == 4
+    assert histogram["scores"]["crps"] == dict(mean=2.5 if status == "available" else None,
+                                               count=4 if status == "available" else 0)
+
+
+@pytest.mark.parametrize("status", ["unavailable", "missing_target"])
+@pytest.mark.parametrize("keep", [(), ("crps",), ("rps",), ("log_loss",), ("tails",)])
+def test_nonavailable_rows_may_omit_any_unapplicable_score_fields(status, keep):
+    rows = retained_rows(status)
+    for row in rows:
+        for field in ("crps", "rps", "log_loss", "tails"):
+            if field not in keep:
+                del row[field]
+    result = prediction_report(rows, events())
+    assert result["horizons"]["1"]["arms"]["histogram"]["counts"][status] == 4
+    json.dumps(result, allow_nan=False)
+
+
+@pytest.mark.parametrize("missing_target", [False, True])
+def test_real_scorer_omits_unavailable_metrics_and_retains_numerical_status_parity(missing_target):
+    from experiments.distribution_prediction_scores import score_forecasts
+    from tests.v2.research.test_distribution_scores import forecast, pool
+
+    targets = {"e": {"omitted": "no_price_window"} if missing_target else .125}
+    rows = list(score_forecasts(forecast(), pool(status="no_earlier_inner"), targets, outer_year="2026", horizon=1))
+    for row in rows:
+        if row["status"] != "available":
+            assert not {"crps", "rps", "log_loss", "tails"}.intersection(row)
+    result = prediction_report(rows, [dict(event_id="e", ticker="SYN", event_date="2026-01-01")])
+    histogram = result["horizons"]["1"]["arms"]["histogram"]
+    assert histogram["scores"]["crps"] == dict(mean=None if missing_target else pytest.approx(1 / 48),
+                                               count=0 if missing_target else 1)
+    assert result["horizons"]["1"]["arms"]["same_mean"]["counts"]["missing_target" if missing_target else "unavailable"] == 1
+    json.dumps(result, allow_nan=False)

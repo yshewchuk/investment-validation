@@ -1,4 +1,5 @@
 """Source-free, event-weighted forecast summaries; callers own native admission."""
+import json
 from collections import Counter
 from copy import deepcopy
 from datetime import date
@@ -32,12 +33,14 @@ def _inputs(rows, events):
         metadata, indexed, observations, years = {}, {}, {}, {}
         for event in events:
             _require(type(event) is dict)
+            json.dumps(event, allow_nan=False)
             _require(all(type(event[k]) is str and event[k] for k in ("event_id", "ticker", "event_date")))
             _require(date.fromisoformat(event["event_date"]).isoformat() == event["event_date"])
             _require(event["event_id"] not in metadata)
             metadata[event["event_id"]] = deepcopy(event)
         for row in rows:
             _require(type(row) is dict)
+            json.dumps(row, allow_nan=False)
             event, horizon, arm = row["event_id"], row["horizon"], row["arm"]
             _require(type(event) is str and event in metadata and type(horizon) is int and horizon in HORIZONS)
             _require(arm in ARMS and (event, horizon, arm) not in indexed)
@@ -49,20 +52,25 @@ def _inputs(rows, events):
             _require(observations.setdefault((event, horizon), observation) == observation)
             indexed[event, horizon, arm] = deepcopy(row)
         return dict(sorted(metadata.items())), dict(sorted(indexed.items()))
-    except (KeyError, TypeError, ValueError, OverflowError):
+    except (KeyError, TypeError, ValueError, OverflowError, RecursionError):
         _require(False)
 
 
 def _validate_scores(indexed):
     for row in indexed.values():
-        if row["status"] != "available":
+        available = row["status"] == "available"
+        for field in ("crps", "rps", "log_loss"):
+            if available or field in row:
+                value = row[field]
+                _require((field == "crps" and value is None) or (field == "log_loss" and value == "infinite")
+                         or _number(value))
+        if not available and "tails" not in row:
             continue
-        _require(row["crps"] is None or _number(row["crps"]))
-        _require(_number(row["rps"]) and (row["log_loss"] == "infinite" or _number(row["log_loss"])))
         _require(type(row["tails"]) is list and len(row["tails"]) == 3)
         for tail, threshold in zip(row["tails"], (5, 10, 20)):
             _require(type(tail) is dict and tail["threshold"] == threshold)
-            _require(type(tail["observed_ge"]) is bool and tail["observed_ge"] == (row["observation"] >= threshold))
+            _require(type(tail["observed_ge"]) is bool and (row["observation"] is None
+                     or tail["observed_ge"] == (row["observation"] >= threshold)))
             _require(_number(tail["probability_ge"]) and tail["probability_ge"] <= 1)
 
 
