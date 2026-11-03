@@ -160,6 +160,7 @@ from experiments.magnitude_search_records import read_record
 from experiments.magnitude_search_shards import iter_section
 from experiments.native_registration import reserve_native_registration
 from experiments.v2_magnitude_search_run import seal_search_run
+from tests.v2.research.distribution_prediction_operator_support import pinned_wal_snapshot
 from tests.v2.research.magnitude_trial_support import prediction_spec
 from tests.v2.research.test_magnitude_panel_qualified import panel_data
 from tests.v2.research.test_magnitude_search_request import request as search_request
@@ -263,78 +264,81 @@ assert set(sealed["arms"]) == {"histogram", "same_mean", "matched_point", "train
 assert data.conn.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
 assert data.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0] == 0
 checkpointed = catalog.read_bytes()
-result = invoke("run", mode="fresh")
-assert result["schema_version"] == "distribution_prediction_run.v1" and result["run_plan_id"] == sealed["run_plan_id"]
-assert result["promotion_authority"] == result["final_read_authority"] == "none"
-assert {key: value for key, value in result.items() if key != "summary"} == record("completed")
-assert len(result["groups"]) == 1 and set(result["reports"]) == set(result["summary"])
-assert rows(source.run_id) == source_records
-slots = [row[0] for row in data.conn.execute("SELECT slot FROM magnitude_search_records WHERE run_id=?", (prepared["run_id"],))]
-assert sum(slot.startswith("distribution:fit-bound:") for slot in slots) == 6
-assert sum(slot.startswith("distribution:fit-result:") for slot in slots) == 6
-assert record("failed") is None
-frozen, evaluated = record("frozen:2024"), record("evaluated:2024")
-assert frozen["schema_version"] == "distribution_prediction_frozen.v2"
-assert frozen["reference_encoding"] == "canonical_json_fragments.v1" and frozen["reference_chunk_chars"] == 65536
-assert [entry["horizon"] for entry in frozen["horizons"]] == [1, 3, 5]
-assert [entry["horizon"] for entry in evaluated["horizons"]] == [1, 3, 5]
-scores, diagnostics = [], []
-for frozen_horizon, evaluated_horizon in zip(frozen["horizons"], evaluated["horizons"]):
-    forecasts = section_rows(frozen_horizon["forecasts"])
-    fragments = section_rows(frozen_horizon["reference"])
-    assert len(forecasts) == 1 and len(fragments) == frozen_horizon["reference"]["descriptor"]["row_count"]
-    assert fragments and all(set(row) == {"canonical_json"} and 0 < len(row["canonical_json"]) <= frozen["reference_chunk_chars"]
-        for row in fragments)
-    reference = json.loads("".join(row["canonical_json"] for row in fragments))
-    assert reference["receipt"]["status"] == "completed" and reference["tail"]["policy"] == "empirical_excess"
-    assert {row["absolute_move_pct"] for row in reference["baseline"]["training"]} == {2., 22., 6.}
-    scores.extend(section_rows(evaluated_horizon["scores"]))
-    diagnostics.extend(section_rows(evaluated_horizon["diagnostics"]))
-assert len(scores) == len(diagnostics) == 12
-assert {(row["horizon"], row["arm"]) for row in scores} == {
-    (horizon, arm) for horizon in (1, 3, 5) for arm in sealed["arms"]}
-assert all(row["status"] == "available" and row["observation"] == 8. for row in scores + diagnostics)
-assert all(math.isfinite(row["crps"]) and row["crps"] >= 0 for row in scores)
-assert all(math.isclose(row["crps"], 26 / 9) for row in scores if row["arm"] == "training_empirical")
-assert all(len(row["intervals"]) == 4 and 0 <= row["pit_lower"] <= row["pit_upper"] <= 1 for row in diagnostics)
-assert set(result["summary"]) == {"forecast", "diagnostics"}
-proper, coverage = result["summary"]["forecast"], result["summary"]["diagnostics"]
-assert proper["schema_version"] == "distribution_prediction_score_summary.v1"
-assert coverage["schema_version"] == "distribution_prediction_diagnostic_summary.v1"
-assert all("rows" not in report and "events" not in report for report in (proper, coverage))
-assert proper["primary"] == "h1_same_mean_minus_histogram_crps" and proper["uncertainty"]["resamples"] == 4
-assert proper["population"] == coverage["population"] == 1
-assert proper["calibration_identity"] == coverage["calibration_identity"] == "uncalibrated"
-assert proper["final_read_authority"] == coverage["final_read_authority"] == "none"
-assert coverage["pit_policy"] == "brackets_only_unrandomized"
-assert proper["horizons"]["1"]["contrasts"]["same_mean"]["role"] == "primary"
-for horizon in ("1", "3", "5"):
-    assert set(proper["horizons"][horizon]["arms"]) == set(coverage["horizons"][horizon]["arms"]) == set(sealed["arms"])
-    for arm in sealed["arms"]:
-        summary = proper["horizons"][horizon]["arms"][arm]
-        assert summary["population"] == 1 and summary["counts"]["available"] == 1
-        assert all(tail["count"] == 1 and "mean_calibration_gap" in tail for tail in summary["tails"])
-        intervals = coverage["horizons"][horizon]["arms"][arm]["intervals"]
-        assert all(row["count"] == 1 and row["mean_width"] >= 0 and row["observed_coverage"] in (0, 1) for row in intervals)
-for name, section in result["reports"].items():
-    assert section_rows(section) == [result["summary"][name]]
-def no_trading_outputs(value):
-    if isinstance(value, dict):
-        assert set(value).isdisjoint({"quote_snapshot_id", "bridges", "book", "books", "settled_net_profit", "net_delta_per_opportunity"})
-        for child in value.values():
-            no_trading_outputs(child)
-    elif isinstance(value, list):
-        for child in value:
-            no_trading_outputs(child)
-no_trading_outputs(result)
+with pinned_wal_snapshot(catalog) as pinned:
+    result = invoke("run", mode="fresh")
+    assert result["schema_version"] == "distribution_prediction_run.v1" and result["run_plan_id"] == sealed["run_plan_id"]
+    assert result["promotion_authority"] == result["final_read_authority"] == "none"
+    assert {key: value for key, value in result.items() if key != "summary"} == record("completed")
+    assert len(result["groups"]) == 1 and set(result["reports"]) == set(result["summary"])
+    assert rows(source.run_id) == source_records
+    slots = [row[0] for row in data.conn.execute("SELECT slot FROM magnitude_search_records WHERE run_id=?", (prepared["run_id"],))]
+    assert sum(slot.startswith("distribution:fit-bound:") for slot in slots) == 6
+    assert sum(slot.startswith("distribution:fit-result:") for slot in slots) == 6
+    assert record("failed") is None
+    frozen, evaluated = record("frozen:2024"), record("evaluated:2024")
+    assert frozen["schema_version"] == "distribution_prediction_frozen.v2"
+    assert frozen["reference_encoding"] == "canonical_json_fragments.v1" and frozen["reference_chunk_chars"] == 65536
+    assert [entry["horizon"] for entry in frozen["horizons"]] == [1, 3, 5]
+    assert [entry["horizon"] for entry in evaluated["horizons"]] == [1, 3, 5]
+    scores, diagnostics = [], []
+    for frozen_horizon, evaluated_horizon in zip(frozen["horizons"], evaluated["horizons"]):
+        forecasts = section_rows(frozen_horizon["forecasts"])
+        fragments = section_rows(frozen_horizon["reference"])
+        assert len(forecasts) == 1 and len(fragments) == frozen_horizon["reference"]["descriptor"]["row_count"]
+        assert fragments and all(set(row) == {"canonical_json"} and 0 < len(row["canonical_json"]) <= frozen["reference_chunk_chars"]
+            for row in fragments)
+        reference = json.loads("".join(row["canonical_json"] for row in fragments))
+        assert reference["receipt"]["status"] == "completed" and reference["tail"]["policy"] == "empirical_excess"
+        assert {row["absolute_move_pct"] for row in reference["baseline"]["training"]} == {2., 22., 6.}
+        scores.extend(section_rows(evaluated_horizon["scores"]))
+        diagnostics.extend(section_rows(evaluated_horizon["diagnostics"]))
+    assert len(scores) == len(diagnostics) == 12
+    assert {(row["horizon"], row["arm"]) for row in scores} == {
+        (horizon, arm) for horizon in (1, 3, 5) for arm in sealed["arms"]}
+    assert all(row["status"] == "available" and row["observation"] == 8. for row in scores + diagnostics)
+    assert all(math.isfinite(row["crps"]) and row["crps"] >= 0 for row in scores)
+    assert all(math.isclose(row["crps"], 26 / 9) for row in scores if row["arm"] == "training_empirical")
+    assert all(len(row["intervals"]) == 4 and 0 <= row["pit_lower"] <= row["pit_upper"] <= 1 for row in diagnostics)
+    assert set(result["summary"]) == {"forecast", "diagnostics"}
+    proper, coverage = result["summary"]["forecast"], result["summary"]["diagnostics"]
+    assert proper["schema_version"] == "distribution_prediction_score_summary.v1"
+    assert coverage["schema_version"] == "distribution_prediction_diagnostic_summary.v1"
+    assert all("rows" not in report and "events" not in report for report in (proper, coverage))
+    assert proper["primary"] == "h1_same_mean_minus_histogram_crps" and proper["uncertainty"]["resamples"] == 4
+    assert proper["population"] == coverage["population"] == 1
+    assert proper["calibration_identity"] == coverage["calibration_identity"] == "uncalibrated"
+    assert proper["final_read_authority"] == coverage["final_read_authority"] == "none"
+    assert coverage["pit_policy"] == "brackets_only_unrandomized"
+    assert proper["horizons"]["1"]["contrasts"]["same_mean"]["role"] == "primary"
+    for horizon in ("1", "3", "5"):
+        assert set(proper["horizons"][horizon]["arms"]) == set(coverage["horizons"][horizon]["arms"]) == set(sealed["arms"])
+        for arm in sealed["arms"]:
+            summary = proper["horizons"][horizon]["arms"][arm]
+            assert summary["population"] == 1 and summary["counts"]["available"] == 1
+            assert all(tail["count"] == 1 and "mean_calibration_gap" in tail for tail in summary["tails"])
+            intervals = coverage["horizons"][horizon]["arms"][arm]["intervals"]
+            assert all(row["count"] == 1 and row["mean_width"] >= 0 and row["observed_coverage"] in (0, 1) for row in intervals)
+    for name, section in result["reports"].items():
+        assert section_rows(section) == [result["summary"][name]]
+    def no_trading_outputs(value):
+        if isinstance(value, dict):
+            assert set(value).isdisjoint({"quote_snapshot_id", "bridges", "book", "books", "settled_net_profit", "net_delta_per_opportunity"})
+            for child in value.values():
+                no_trading_outputs(child)
+        elif isinstance(value, list):
+            for child in value:
+                no_trading_outputs(child)
+    no_trading_outputs(result)
 
-# The completion is committed in a live WAL while the fixture writer remains open.
-assert catalog.read_bytes() == checkpointed
-assert catalog.with_name(catalog.name + "-wal").stat().st_size > 0
-before, before_objects, durable = rows(), objects_snapshot(), database_snapshot()
-for action in ("collect", "report", "run"):
-    assert invoke(action, mode="replay") == result
-    assert rows() == before and objects_snapshot() == before_objects and database_snapshot() == durable
+    # The pinned old reader cannot see completion; a fresh reader must use live WAL.
+    assert pinned.execute("SELECT 1 FROM magnitude_search_records WHERE run_id=? AND slot=?",
+        (prepared["run_id"], "distribution:prediction-completed")).fetchone() is None
+    assert catalog.read_bytes() == checkpointed
+    assert catalog.with_name(catalog.name + "-wal").stat().st_size > 0
+    before, before_objects, durable = rows(), objects_snapshot(), database_snapshot()
+    for action in ("collect", "report", "run"):
+        assert invoke(action, mode="replay") == result
+        assert rows() == before and objects_snapshot() == before_objects and database_snapshot() == durable
 assert data.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0] == 0
 assert data.conn.execute("PRAGMA journal_mode=DELETE").fetchone()[0] == "delete"
 data.conn.close()
