@@ -260,6 +260,7 @@ def _training_plan(args, root, conn, clock):
             raise fail("INVALID_REQUEST", "training plan is invalid", details={"problems": problems})
     return training_plan(
         mode=args.training_mode, recipe=args.recipe or "", state=args.state or "",
+        month=getattr(args, "month", ""),
         alpha=args.alpha, cutoffs=tuple(args.cutoff), strategies=tuple(args.strategy),
         pairs_path=args.pairs or "", ticker_chunk=args.ticker_chunk,
         input_mode=input_mode,

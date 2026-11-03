@@ -193,6 +193,24 @@ def _iso_cutoff(value: str) -> str:
     return bound
 
 
+def monthly_retrain_cutoff(month: str) -> str:
+    """The exclusive retrain cutoff: the day after ``month``'s actual end."""
+    if not isinstance(month, str) or len(month) != 7:
+        raise ValueError(f"not a YYYY-MM month: {month!r}")
+    try:
+        start = datetime.date.fromisoformat(month + "-01")
+    except (TypeError, ValueError):
+        raise ValueError(f"not a YYYY-MM month: {month!r}") from None
+    if start.isoformat()[:7] != month:
+        raise ValueError(f"not a canonical YYYY-MM month: {month!r}")
+    end = (datetime.date(start.year + 1, 1, 1) if start.month == 12
+           else datetime.date(start.year, start.month + 1, 1))
+    return end.isoformat()
+
+
+month_cutoff = monthly_retrain_cutoff
+
+
 def _guard(where: str) -> None:
     """Both no-fit switches, before any row is read (as ``run_training_job``)."""
     from engine.models.no_fit import forbid_fitting as legacy_forbid
@@ -366,6 +384,48 @@ def run_state_job(member: str, out: Path, *, plan_only: bool = False, **kwargs) 
         out / (state_file_name(member)[:-5] + ".summary.json"),
         (json.dumps(summary, indent=1, sort_keys=True) + "\n").encode())
     return summary
+
+
+MONTHLY_POOL_MEMBERS = (
+    "driver_residual_pool:size",
+    "driver_residual_pool:implied_t1",
+    "driver_residual_pool:runup_move",
+    CHOOSER_POOL_STATE,
+)
+
+
+def run_monthly_pools_job(out: Path, *, month: str, cutoff: str,
+                          ticker_chunk: int = 1000) -> dict:
+    """Build the fixed four S1 monthly-retrain pools into ``out``.
+
+    The three driver pools are D1 re-freezes of the stored champion pool
+    artifacts and take no cutoff; only the chooser takes the exclusive
+    ``cutoff`` (the day after ``month``'s end). Reuses ``run_state_job``.
+    """
+    try:
+        bound = _iso_cutoff(cutoff)
+    except (TypeError, ValueError):
+        raise SystemExit("monthly_pools cutoff must be an ISO date (YYYY-MM-DD)") from None
+    try:
+        expected = monthly_retrain_cutoff(month)
+    except (TypeError, ValueError):
+        raise SystemExit("monthly_pools month must be a canonical calendar month (YYYY-MM)") from None
+    if bound != expected:
+        raise SystemExit("monthly_pools cutoff must be the day after the month's end")
+    out.mkdir(parents=True, exist_ok=True)
+    members = {}
+    for member in MONTHLY_POOL_MEMBERS:
+        summary = run_state_job(
+            member, out, plan_only=False,
+            cutoff=bound if member == CHOOSER_POOL_STATE else None,
+            ticker_chunk=ticker_chunk)
+        if member == CHOOSER_POOL_STATE and summary.get("status") == "empty":
+            raise SystemExit("monthly_pools chooser_analog_pool is empty")
+        members[member] = {"file": summary.get("file"),
+                           "content_hash": summary.get("content_hash"),
+                           "bytes": summary.get("bytes")}
+    return {"mode": "monthly_pools", "month": month, "retrain_cutoff": bound,
+            "experiment_inputs": "none", "members": members}
 
 
 # --------------------------------------------------------------------------
