@@ -914,6 +914,20 @@ def _valid_explicit_feature_names(feature_names: Sequence[str]) -> bool:
     return len(set(feature_names)) == len(feature_names)
 
 
+def _member_features_available(
+    projected: Sequence[str], event: NightlyEventInputs,
+) -> bool:
+    """Whether every projected name has its required staged value available."""
+    for name in projected:
+        if name in _CHOOSER_PRIMITIVES:
+            if (event.panel_row.get(name) is None
+                    and event.tier4_row.get(name) is None):
+                return False
+        elif name not in event.tier4_row and name not in event.panel_row:
+            return False
+    return True
+
+
 def _project_member_features(
     key: BoardRequest,
     event: NightlyEventInputs,
@@ -952,11 +966,10 @@ def _project_member_features(
     projected -= set(GATE_FORECAST_COLUMNS)
     projected -= set(GATE_ANALOG_COLUMNS)
     ordered = tuple(sorted(projected.union(feature_names)))
-    for name in projected:
-        if name not in event.tier4_row and name not in event.panel_row:
-            return NativeScoreBatchRowRefusal(
-                key, "MISSING_STAGED_INPUT",
-                "required member feature is missing from staged rows")
+    if not _member_features_available(projected, event):
+        return NativeScoreBatchRowRefusal(
+            key, "MISSING_STAGED_INPUT",
+            "required member feature is missing from staged rows")
     return ordered
 
 

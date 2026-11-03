@@ -364,6 +364,21 @@ def test_one_selection_shared_when_selector_not_ready(monkeypatch):
     assert len(calls) == 1
 
 
+def test_project_member_features_refuses_none_chooser_primitive(monkeypatch):
+    state = SimpleNamespace(producer_bindings={})
+    monkeypatch.setattr(nsb, "select_chooser_state", lambda *a, **k: state)
+    event = _projection_event("TWIN-P")
+    event.panel_row["spy_ret21"] = None
+
+    refusal = nsb._project_member_features(
+        event.key, event, _binding(), ("signal",), as_of="2026-01-10")
+
+    assert isinstance(refusal, NativeScoreBatchRowRefusal)
+    assert (refusal.code, refusal.detail) == (
+        "MISSING_STAGED_INPUT",
+        "required member feature is missing from staged rows")
+
+
 def test_null_panel_row_refuses_before_chooser_state_selection(monkeypatch):
     def unexpected(*_args, **_kwargs):
         raise AssertionError("malformed staged row must not select chooser state")
