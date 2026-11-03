@@ -18,6 +18,7 @@ from experiments.magnitude_search_execution import validate_execution_limits
 __all__ = ["candidate_recipe", "validate_candidate_recipe", "fit_budget", "trial_identity"]
 
 _HORIZONS = [5, 3, 1]
+_VARIANTS = ("raw", "regularised_v1")
 
 
 def _require(condition):
@@ -37,21 +38,26 @@ def _count(value):
     return type(value) is int and 0 < value < sys.maxsize
 
 
-def candidate_recipe(feature_set):
+def candidate_recipe(feature_set, classifier_variant="raw"):
     """Declare one explicit H/HM/HMO pair; no feature or parameter search.
 
     Reuse native HGB knobs with seven leaves, changing only the classifier's
     estimator/loss and removing the regressor-only quantile parameter. Both
     arms use identical ordered v3 features and preprocessing. Missing classes
     get zero mass; no smoothing, class weighting or calibration is claimed.
+    The raw default is unchanged; regularised_v1 only enables L2 and early
+    stopping, marking the document so validation can rebuild its semantics.
     """
     _require(type(feature_set) is str and feature_set in ("H", "HM", "HMO"))
+    _require(type(classifier_variant) is str and classifier_variant in _VARIANTS)
     features = feature_recipe(feature_set)
     point = ridge_hgb_recipe(model="history_hgb", columns=features["model_columns"],
         feature_dictionary_hash=features["dictionary_hash"], max_leaf_nodes=7)
     classifier = {key: value for key, value in point["estimator"]["params"].items()
                   if key != "quantile"}
     classifier.update(loss="log_loss", class_weight=None)
+    if classifier_variant == "regularised_v1":
+        classifier.update(l2_regularization=1.0, early_stopping=True)
     document = {"schema_version": "distribution_candidate_recipe.v1", "feature_set": feature_set,
         "feature_schema": features["schema_version"], "point_recipe": point,
         "classifier": {"class": "HistGradientBoostingClassifier", "params": classifier,
@@ -62,6 +68,8 @@ def candidate_recipe(feature_set):
         "calibration": {"identity": "uncalibrated", "fit_count": 0},
         "tail": {"policy": "training_only_empirical_excess", "no_samples": "unresolved"},
         "comparison": "raw_histogram_and_same_feature_point", "retries": 0}
+    if classifier_variant == "regularised_v1":
+        document["classifier_variant"] = classifier_variant
     return _identified(document, "recipe_id")
 
 
@@ -73,7 +81,9 @@ def validate_candidate_recipe(recipe):
     """
     try:
         json.dumps(recipe, allow_nan=False)
-        expected = candidate_recipe(recipe["feature_set"])
+        variant = recipe.get("classifier_variant", "raw")
+        _require(variant in _VARIANTS)
+        expected = candidate_recipe(recipe["feature_set"], variant)
         if canonical_json(recipe) == canonical_json(expected):
             return expected
     except (KeyError, TypeError, ValueError, AttributeError, OverflowError, RecursionError, OpsError):

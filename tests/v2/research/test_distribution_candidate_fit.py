@@ -7,18 +7,19 @@ import subprocess
 import numpy as np
 import pytest
 import sklearn.ensemble
-from threadpoolctl import threadpool_info
+from threadpoolctl import threadpool_info, threadpool_limits
 
 from engine.models import no_fit as legacy_guard
 from engine.v2.models import no_fit as native_guard
 from engine.v2.models.training import magnitude_ridge_hgb as point_owner
 from engine.v2.ops.errors import OpsError, fail
+from engine.v2.research.magnitude_distribution import bin_index
 from experiments import distribution_candidate_fit as fitting
 from experiments.distribution_candidate_recipe import candidate_recipe
 
 
-def _inputs(labels=(0, 0.5, 0, 0.5), *, feature_set="H"):
-    recipe = candidate_recipe(feature_set)
+def _inputs(labels=(0, 0.5, 0, 0.5), *, feature_set="H", variant="raw"):
+    recipe = candidate_recipe(feature_set, variant)
     columns = recipe["point_recipe"]["features"]
     return recipe, np.zeros((len(labels), len(columns))), np.array(labels), np.ones((2, len(columns))), columns
 
@@ -101,7 +102,7 @@ def test_declared_parameters_shared_preprocessing_and_actual_diagnostics(observe
     assert set(result) == {"schema_version", "recipe_id", "probabilities", "tail", "point_predictions", "diagnostics"}
     assert result["schema_version"] == "distribution_candidate_fit.v1"
     assert result["recipe_id"] == recipe["recipe_id"]
-    assert observed["constructed"] == [recipe["classifier"]["params"]]
+    assert observed["constructed"] == [{**recipe["classifier"]["params"], "verbose": 2}]
     assert type(observed["constructed"][0]["max_features"]) is float
     fitted, binned, threads = observed["fit"][0]
     assert binned.tolist() == [0, 1, 80, 80]
@@ -129,6 +130,80 @@ def test_declared_parameters_shared_preprocessing_and_actual_diagnostics(observe
     for index in (1, 2, 3):
         np.testing.assert_array_equal(inputs[index], before[index])
     json.dumps(result, allow_nan=False)
+
+
+def test_sklearn_early_stopping_refuses_a_singleton_training_class():
+    labels = np.array([0] * 10 + [1] * 10 + [2])
+    with pytest.raises(ValueError, match=r"least populated class.*only 1 member"):
+        sklearn.ensemble.HistGradientBoostingClassifier(early_stopping=True).fit(
+            np.zeros((len(labels), 1)), labels)
+
+
+def test_sklearn_early_stopping_refuses_a_too_small_stratified_validation_split():
+    labels = np.array([0, 0, 1, 1, 2, 2])
+    with pytest.raises(ValueError, match=r"test_size\s*=\s*1\b.*number of classes\s*=\s*3"):
+        sklearn.ensemble.HistGradientBoostingClassifier(early_stopping=True).fit(
+            np.zeros((len(labels), 1)), labels)
+
+
+def test_regularised_singleton_class_keeps_rows_and_disables_only_early_stopping(observed):
+    inputs = list(_inputs((0,) * 5 + (0.25,) * 5 + (20,), variant="regularised_v1"))
+    result = _fit(inputs)
+    params = observed["constructed"][0]
+    assert params["early_stopping"] is False
+    assert params["l2_regularization"] == 1.0
+    assert observed["fit"][0][1].tolist() == [0] * 5 + [1] * 5 + [80]
+    support = result["diagnostics"]["training_support"]
+    assert support["bin_counts"][0] == 5 and support["bin_counts"][1] == 5
+    assert support["bin_counts"][80] == 1 and support["observed_class_labels"] == [0, 1, 80]
+    classifier = result["diagnostics"]["classifier"]
+    assert classifier["iterations"] == 100
+    assert classifier["early_stopping_requested"] is True
+    assert classifier["early_stopping_used"] is False
+    assert classifier["fallback_reason"] == "class_count_below_2"
+
+
+def test_regularised_small_non_singleton_support_disables_only_early_stopping(observed):
+    inputs = list(_inputs((0.0, 0.0, 0.25, 0.25, 20.0, 20.0), variant="regularised_v1"))
+    result = _fit(inputs)
+    params = observed["constructed"][0]
+    assert params["early_stopping"] is False
+    assert params["l2_regularization"] == 1.0
+    assert observed["fit"][0][1].tolist() == [0, 0, 1, 1, 80, 80]
+    support = result["diagnostics"]["training_support"]
+    assert support["bin_counts"][0] == 2 and support["bin_counts"][1] == 2
+    assert support["bin_counts"][80] == 2 and support["observed_class_labels"] == [0, 1, 80]
+    classifier = result["diagnostics"]["classifier"]
+    assert classifier["iterations"] == 100
+    assert classifier["early_stopping_requested"] is True
+    assert classifier["early_stopping_used"] is False
+    assert classifier["fallback_reason"] == "validation_split_too_small"
+
+
+def test_regularised_used_early_stopping_accepts_actual_short_iterations(observed):
+    observed["behavior"].update(classes=[0, 1], iterations=7, trees=1)
+    result = _fit(list(_inputs((0.0,) * 6 + (0.25,) * 6, variant="regularised_v1")))
+    classifier = result["diagnostics"]["classifier"]
+    assert observed["constructed"][0]["early_stopping"] is True
+    assert classifier["class_labels"] == [0, 1]
+    assert classifier["iterations"] == 7
+    assert classifier["total_trees"] == 7
+    assert classifier["early_stopping_requested"] is True
+    assert classifier["early_stopping_used"] is True
+    assert classifier["fallback_reason"] is None
+
+
+@pytest.mark.parametrize("iterations", [0, 101, True])
+def test_regularised_early_stopping_rejects_invalid_iteration_counts(iterations, observed):
+    inputs = list(_inputs((0.0,) * 6 + (0.25,) * 6, variant="regularised_v1"))
+    observed["behavior"].update(classes=[0, 1], iterations=iterations, trees=1)
+    _refuses(inputs, "EXPERIMENT_VARIANT_FAILED")
+
+
+def test_regularised_fallback_requires_max_iter(observed):
+    inputs = list(_inputs((0,) * 5 + (0.25,) * 5 + (20,), variant="regularised_v1"))
+    observed["behavior"].update(iterations=99)
+    _refuses(inputs, "EXPERIMENT_VARIANT_FAILED")
 
 
 def test_train_only_tail_is_shared_once_and_detached(observed, monkeypatch):
@@ -253,6 +328,70 @@ def test_tiny_real_fixed_estimators_match_constant_feature_oracles(labels, class
     assert result["point_predictions"] == pytest.approx([sum(labels) / len(labels)] * 2)
     assert result["diagnostics"]["classifier"]["iterations"] == 100
     assert result["diagnostics"]["classifier"]["trees_per_iteration"] == trees
+    assert result["diagnostics"]["classifier"]["total_trees"] == 100 * trees
+
+
+def test_regularised_real_fit_matches_independent_estimator_and_varies(capsys):
+    recipe = candidate_recipe("H", "regularised_v1")
+    columns = recipe["point_recipe"]["features"]
+    labels = np.array([0.0] * 40 + [5.0] * 40 + [10.0] * 40)
+    bins = np.array([bin_index(float(value)) for value in labels], dtype=int)
+    train = np.zeros((len(labels), len(columns)))
+    train[:, 0] = np.arange(len(labels), dtype=float)
+    prediction = np.zeros((3, len(columns)))
+    prediction[:, 0] = [10.0, 60.0, 110.0]
+    params = {**recipe["classifier"]["params"],
+              "max_features": float(recipe["classifier"]["params"]["max_features"])}
+    reference = sklearn.ensemble.HistGradientBoostingClassifier(**params)
+    with threadpool_limits(limits=1):
+        reference.fit(train, bins)
+        expected = reference.predict_proba(prediction)
+    result = fitting.fit_candidate(recipe, train, labels, prediction, columns=columns)
+    assert capsys.readouterr().out == ""
+    assert reference.classes_.tolist() == [0, 20, 40]
+    classifier = result["diagnostics"]["classifier"]
+    assert classifier["class_labels"] == [0, 20, 40]
+    assert classifier["iterations"] == reference.n_iter_
+    assert classifier["early_stopping_used"] is True and classifier["fallback_reason"] is None
+    assert classifier["total_trees"] == classifier["iterations"] * classifier["trees_per_iteration"]
+    for row, probabilities in zip(result["probabilities"], expected):
+        expanded = [0.0] * 81
+        for label, probability in zip(reference.classes_, probabilities):
+            expanded[int(label)] = probability
+        assert row == pytest.approx(expanded, abs=1e-12)
+    assert len({tuple(row) for row in result["probabilities"]}) == 3
+
+
+def test_regularised_real_2_2_2_split_fallback_matches_independent_estimator():
+    recipe = candidate_recipe("H", "regularised_v1")
+    columns = recipe["point_recipe"]["features"]
+    labels = np.array([0.0, 0.0, 0.25, 0.25, 20.0, 20.0])
+    bins = np.array([bin_index(float(value)) for value in labels], dtype=int)
+    train = np.zeros((len(labels), len(columns)))
+    train[:, 0] = np.arange(len(labels), dtype=float)
+    prediction = np.zeros((3, len(columns)))
+    prediction[:, 0] = [0.5, 2.5, 4.5]
+    params = {**recipe["classifier"]["params"],
+              "max_features": float(recipe["classifier"]["params"]["max_features"])}
+    reference = sklearn.ensemble.HistGradientBoostingClassifier(**{**params, "early_stopping": False})
+    with threadpool_limits(limits=1):
+        reference.fit(train, bins)
+        expected = reference.predict_proba(prediction)
+    result = fitting.fit_candidate(recipe, train, labels, prediction, columns=columns)
+    assert reference.classes_.tolist() == [0, 1, 80]
+    classifier = result["diagnostics"]["classifier"]
+    assert classifier["class_labels"] == [0, 1, 80]
+    assert classifier["early_stopping_requested"] is True
+    assert classifier["early_stopping_used"] is False
+    assert classifier["fallback_reason"] == "validation_split_too_small"
+    assert classifier["iterations"] == recipe["classifier"]["params"]["max_iter"]
+    assert classifier["total_trees"] == classifier["iterations"] * classifier["trees_per_iteration"]
+    assert recipe["classifier"]["params"]["l2_regularization"] == 1.0
+    for row, probabilities in zip(result["probabilities"], expected):
+        expanded = [0.0] * 81
+        for label, probability in zip(reference.classes_, probabilities):
+            expanded[int(label)] = probability
+        assert row == pytest.approx(expanded, abs=1e-12)
 
 
 def test_tiny_real_all_null_case_is_deterministic_and_no_tail_is_unresolved():
@@ -287,6 +426,25 @@ def test_no_data_or_network_io_and_progress_is_stderr_only(observed, monkeypatch
     assert "distribution matched point fit" in captured.err
     assert "distribution probability mapping" in captured.err
     assert result["point_predictions"] == [3, 3]
+
+
+def test_iteration_progress_parser_ticks_completed_deltas_and_ignores_noise():
+    ticks = []
+
+    class Recorder:
+        def tick(self, count=1):
+            ticks.append(count)
+
+    stream = fitting._FitProgress(Recorder(), 10)
+    stream.write("[1/10] first\nnoise [8/10]\ntext\n[3/10")
+    stream.write("] third\n[2/10] stale\n[4/10] next\n[5/9] wrong total\n[0/10] zero\n[11/10] beyond\n")
+    assert ticks == [1, 2, 1]
+
+
+def test_fallback_fit_stage_names_reason(observed, capsys):
+    _fit(list(_inputs((0,) * 5 + (0.25,) * 5 + (20,), variant="regularised_v1")))
+    error = capsys.readouterr().err
+    assert "distribution classifier fit/predict fallback class_count_below_2" in error
 
 
 def test_public_export_and_required_arguments():
