@@ -1,4 +1,5 @@
 """S1 monthly retrain training mode: four pool members, receipt and boundary."""
+import hashlib
 import json
 
 import pandas as pd
@@ -37,9 +38,9 @@ def _worker_params(**changes):
     return fields
 
 
-def _row(strategy, day, pnl):
-    return {"strategy": strategy, "exit_date": pd.Timestamp(day), "pnl": float(pnl),
-            **_DIMS}
+def _row(strategy, day, pnl, event_date=None):
+    return {"strategy": strategy, "event_date": pd.Timestamp(event_date or day),
+            "exit_date": pd.Timestamp(day), "pnl": float(pnl), **_DIMS}
 
 
 def _write_source(tmp_path, rows):
@@ -47,6 +48,47 @@ def _write_source(tmp_path, rows):
     source.mkdir(exist_ok=True)
     pd.DataFrame(rows).to_parquet(source / "chooser_analog_pool.parquet", index=False)
     return source
+
+
+def _identity(member):
+    if member.startswith("driver_residual_pool:"):
+        return {"model_id": "model-" + member, "artifact_sha256": "sha256:" + member}
+    return {"source": "features/chooser_analog_pool.parquet",
+            "pool_id": "features.chooser_analog_pool", "sha256": "sha256:" + member}
+
+
+def _expected_member(member):
+    entry = {"file": member.replace(":", "__") + ".json",
+             "content_hash": "sha256:" + member, "bytes": len(member),
+             "cutoff": CUTOFF if member == job.CHOOSER_POOL_STATE else None,
+             "source_identity": _identity(member)}
+    if member in job.MONTHLY_DRIVER_MEMBERS:
+        entry.update({
+            "status": "carried_refrozen",
+            "model_id": "model-" + member,
+            "artifact_sha256": "sha256:" + member,
+            "champion_data_date_cutoff": None,
+            "admission": {"mode": "inherited_from_champion",
+                          "artifact_id": "model-" + member},
+        })
+    return entry
+
+
+def _fake_state_job(data_date_cutoffs=None):
+    data_date_cutoffs = data_date_cutoffs or {}
+
+    def fake(member, out, *, plan_only=False, **kwargs):
+        out.mkdir(parents=True, exist_ok=True)
+        name = member.replace(":", "__") + ".json"
+        (out / name).write_text(member)
+        summary = {"state": member, "content_hash": "sha256:" + member, "file": name,
+                   "bytes": len(member), "status": "written",
+                   "source_identity": _identity(member)}
+        if member in data_date_cutoffs:
+            summary["champion_data_date_cutoff"] = data_date_cutoffs[member]
+        return summary
+
+    return fake
 
 
 def test_valid_month_and_cutoff_combinations():
@@ -136,8 +178,12 @@ def test_worker_builds_four_members_and_deterministic_receipt(tmp_path, monkeypa
         out.mkdir(parents=True, exist_ok=True)
         name = member.replace(":", "__") + ".json"
         (out / name).write_text(member)
+        identity = ({"model_id": "model-" + member, "artifact_sha256": "sha256:" + member}
+                    if member.startswith("driver_residual_pool:") else
+                    {"source": "features/chooser_analog_pool.parquet",
+                     "pool_id": "features.chooser_analog_pool", "sha256": "sha256:" + member})
         return {"state": member, "content_hash": "sha256:" + member, "file": name,
-                "bytes": len(member), "status": "written"}
+                "bytes": len(member), "status": "written", "source_identity": identity}
 
     monkeypatch.setattr(job, "run_state_job", fake)
     root = tmp_path / "attempt"
@@ -156,10 +202,7 @@ def test_worker_builds_four_members_and_deterministic_receipt(tmp_path, monkeypa
     assert receipt["experiment_inputs"] == "none"
     assert sorted(receipt["members"]) == sorted(job.MONTHLY_POOL_MEMBERS)
     assert receipt["members"] == {
-        member: {"file": member.replace(":", "__") + ".json",
-                 "content_hash": "sha256:" + member, "bytes": len(member),
-                 "cutoff": CUTOFF if member == job.CHOOSER_POOL_STATE else None}
-        for member in job.MONTHLY_POOL_MEMBERS}
+        member: _expected_member(member) for member in job.MONTHLY_POOL_MEMBERS}
 
     first = (root / "training_result.json").read_bytes()
     training.run_training_worker(_worker_params(), root)
@@ -173,6 +216,43 @@ def test_worker_builds_four_members_and_deterministic_receipt(tmp_path, monkeypa
     assert other["retrain_cutoff"] == "2026-04-01"
     assert other["members"][job.CHOOSER_POOL_STATE]["cutoff"] == "2026-04-01"
     assert other != receipt
+
+
+def test_driver_receipts_record_inherited_champion_admission(tmp_path, monkeypatch):
+    monkeypatch.setattr(job, "run_state_job", _fake_state_job())
+    root = tmp_path / "attempt"
+    training.run_training_worker(_worker_params(), root)
+
+    receipt = json.loads((root / "training_result.json").read_text())
+    for member in job.MONTHLY_DRIVER_MEMBERS:
+        entry = receipt["members"][member]
+        assert entry["status"] == "carried_refrozen"
+        assert entry["source_identity"] == _identity(member)
+        assert entry["champion_data_date_cutoff"] is None
+        assert entry["admission"] == {
+            "mode": "inherited_from_champion", "artifact_id": "model-" + member}
+        assert entry["model_id"] == "model-" + member
+        assert entry["artifact_sha256"] == "sha256:" + member
+
+
+def test_driver_data_date_cutoff_after_retrain_cutoff_is_refused(tmp_path, monkeypatch):
+    late = {member: "2026-03-02" for member in job.MONTHLY_DRIVER_MEMBERS}
+    monkeypatch.setattr(job, "run_state_job", _fake_state_job(late))
+
+    with pytest.raises(SystemExit, match="data-date cutoff is after retrain_cutoff"):
+        job.run_monthly_pools_job(tmp_path / "attempt", month=MONTH, cutoff=CUTOFF)
+
+
+@pytest.mark.parametrize("data_date_cutoff", [CUTOFF, "2026-02-28"])
+def test_driver_data_date_cutoff_at_or_before_retrain_cutoff_is_recorded(
+        tmp_path, monkeypatch, data_date_cutoff):
+    values = {member: data_date_cutoff for member in job.MONTHLY_DRIVER_MEMBERS}
+    monkeypatch.setattr(job, "run_state_job", _fake_state_job(values))
+
+    summary = job.run_monthly_pools_job(tmp_path / "attempt", month=MONTH, cutoff=CUTOFF)
+
+    for member in job.MONTHLY_DRIVER_MEMBERS:
+        assert summary["members"][member]["champion_data_date_cutoff"] == data_date_cutoff
 
 
 def test_chooser_boundary_includes_m_end_and_excludes_next_day(tmp_path, monkeypatch):
@@ -196,6 +276,36 @@ def test_chooser_boundary_includes_m_end_and_excludes_next_day(tmp_path, monkeyp
     )
 
 
+def test_chooser_boundary_filters_event_date_too(tmp_path, monkeypatch):
+    source = _write_source(tmp_path, [
+        _row("CTR5", "2026-02-27", 1.0, event_date="2026-02-20"),
+        _row("CTR5", "2026-02-27", 2.0, event_date="2026-03-02"),
+    ])
+    monkeypatch.setattr(paths, "FEATURES", source)
+    out = tmp_path / "out"
+
+    summary = job.run_state_job("chooser_analog_pool", out, cutoff=CUTOFF)
+
+    assert summary["n_rows"] == 1
+    pool = FrozenStateLoader(out).load(
+        FrozenStateRef(path=summary["file"], content_hash=summary["content_hash"]))
+    dims = [_DIMS[name] for name in CHOOSER_ANALOG_DIMS]
+    assert pool.rows_for("CTR5") == (("2026-02-27", 1.0, *dims),)
+
+
+def test_chooser_source_identity_hashes_the_exact_bounded_bytes(tmp_path, monkeypatch):
+    source = _write_source(tmp_path, [_row("CTR5", "2026-02-27", 1.0)])
+    monkeypatch.setattr(paths, "FEATURES", source)
+    out = tmp_path / "out"
+
+    summary = job.run_state_job("chooser_analog_pool", out, cutoff=CUTOFF)
+
+    path = source / "chooser_analog_pool.parquet"
+    assert summary["source_identity"] == {
+        "source": str(path), "pool_id": "features.chooser_analog_pool",
+        "sha256": "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()}
+
+
 def _run_with_real_chooser(tmp_path, monkeypatch, source):
     real = job.run_state_job
 
@@ -205,7 +315,9 @@ def _run_with_real_chooser(tmp_path, monkeypatch, source):
         out.mkdir(parents=True, exist_ok=True)
         return {"state": member, "content_hash": "sha256:" + member,
                 "file": member.replace(":", "__") + ".json", "bytes": 1,
-                "status": "written"}
+                "status": "written",
+                "source_identity": {"model_id": "model-" + member,
+                                    "artifact_sha256": "sha256:" + member}}
 
     monkeypatch.setattr(job, "run_state_job", dispatch)
     monkeypatch.setattr(paths, "FEATURES", source)
@@ -256,6 +368,12 @@ def test_empty_required_member_is_validation_failed(tmp_path, monkeypatch):
 def test_monthly_retrain_cutoff_rolls_over_the_year_end():
     assert job.monthly_retrain_cutoff("2026-12") == "2027-01-01"
     assert job.monthly_retrain_cutoff("2024-02") == "2024-03-01"
+
+
+def test_month_cutoff_alias_matches_monthly_retrain_cutoff():
+    for month in ("2026-12", "2024-02", "2026-01"):
+        assert job.month_cutoff(month) == job.monthly_retrain_cutoff(month)
+    assert job.month_cutoff("2026-12") == "2027-01-01"
 
 
 def test_tool_refuses_a_cutoff_that_is_not_the_day_after_the_month_end(tmp_path):

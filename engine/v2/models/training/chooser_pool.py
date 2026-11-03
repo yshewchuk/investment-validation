@@ -8,19 +8,23 @@ The filter is legacy ``Scorer._chooser_analog_pool`` (``engine/score.py``),
 row for row, over rows the CALLER supplies (``tools/build_chooser_pool.py``'s
 frame, in its stored order):
 
-* a row with a missing ``exit_date`` or ``pnl`` is dropped (``dropna``: a
-  NaN P&L is missing, an infinite one is kept);
+* a row with a missing ``exit_date``, ``event_date`` or ``pnl`` is dropped
+  (``dropna``: a NaN P&L is missing, an infinite one is kept);
 * a row without a structure name is dropped (``groupby`` drops NaN keys);
 * per structure, a row whose five dimensions are not all finite is dropped;
 * the remaining rows keep their given order within the structure.
 
-One rule is added, and it is the causal key: a row that closed on/after
-``cutoff`` never enters. Legacy has no cutoff (its file is whatever was last
-built); declaring one is what lets a request check which pool it reads.
+One rule is added, and it is the causal key: a row whose event date or
+settled exit date is on/after ``cutoff`` never enters. Legacy has no cutoff
+(its file is whatever was last built); declaring one is what lets a request
+check which pool it reads. The source admission requires ``event_date``; a
+direct builder caller whose rows omit the key keeps the legacy exit-only
+filter.
 
 The artifact stores exit DAYS. Legacy compares full timestamps, and its pool
-builder normalizes every exit date to midnight, so the two agree; an exit
-timestamp with a time of day is refused here rather than silently truncated.
+builder normalizes every exit date to midnight, so the two agree; an exit or
+event timestamp with a time of day is refused here rather than silently
+truncated.
 """
 from __future__ import annotations
 
@@ -41,19 +45,22 @@ from engine.v2.models.no_fit import forbid_fitting
 __all__ = ["build_chooser_analog_pool_artifact"]
 
 
-def _exit_day(value: Any) -> str | None:
-    """The exit day, ``None`` when missing; refuses a time of day."""
+_MISSING = object()
+
+
+def _day(value: Any, field: str) -> str | None:
+    """The day, ``None`` when missing; refuses a time of day."""
     if value is None or value != value:  # None, NaN or NaT
         return None
     try:
         stamp = np.datetime64(value, "ns")
     except (TypeError, ValueError) as exc:
-        raise ValueError(f"unparsable chooser pool exit_date: {value!r}") from exc
+        raise ValueError(f"unparsable chooser pool {field}: {value!r}") from exc
     if np.isnat(stamp):
         return None
     day = stamp.astype("datetime64[D]")
     if stamp != day.astype("datetime64[ns]"):
-        raise ValueError(f"chooser pool exit_date carries a time of day: {value!r}")
+        raise ValueError(f"chooser pool {field} carries a time of day: {value!r}")
     return str(day)
 
 
@@ -68,14 +75,21 @@ def _kept(row: Mapping[str, Any], bound: str | None) -> tuple[str, tuple] | None
     strategy = row.get("strategy")
     if strategy is None or strategy != strategy:
         return None
-    day = _exit_day(row.get("exit_date"))
+    event_value = row.get("event_date", _MISSING)
+    if event_value is _MISSING:
+        event_day = None
+    else:
+        event_day = _day(event_value, "event_date")
+        if event_day is None:
+            return None
+    day = _day(row.get("exit_date"), "exit_date")
     pnl = _as_float(row.get("pnl"))
     if day is None or pnl != pnl:
         return None
     dims = tuple(_as_float(row.get(name)) for name in CHOOSER_ANALOG_DIMS)
     if not all(isfinite(value) for value in dims):
         return None
-    if bound is not None and day >= bound:
+    if bound is not None and (day >= bound or (event_day is not None and event_day >= bound)):
         return None
     return str(strategy), (day, pnl, *dims)
 

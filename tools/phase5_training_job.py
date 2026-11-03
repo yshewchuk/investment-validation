@@ -252,13 +252,17 @@ def build_state(member: str, *, cutoff=None, ticker_chunk: int = 1000, registry=
             pool["residuals"], pool["buckets"], role=role, model_id=pool["model_id"],
             lineage=lineage)
         summary = {"model_id": pool["model_id"], "artifact_sha256": pool["artifact_sha256"],
+                   "champion_data_date_cutoff": pool.get("data_date_cutoff"),
                    "n_residuals": int(np.isfinite(pool["residuals"]).sum()),
-                   "n_buckets": 0 if not pool["buckets"] else len(pool["buckets"]["pools"])}
+                   "n_buckets": 0 if not pool["buckets"] else len(pool["buckets"]["pools"]),
+                   "source_identity": {"model_id": pool["model_id"],
+                                       "artifact_sha256": pool["artifact_sha256"]}}
         return artifact, summary
     if member == CHOOSER_POOL_STATE:
-        # ``build_chooser_analog_pool_artifact`` drops rows closed on/after
-        # ``cutoff``; the parquet is read in stored order so the pool keeps
-        # legacy's tie-break. A missing cutoff or a missing source parquet
+        # ``build_chooser_analog_pool_artifact`` drops rows whose event date or
+        # settled exit date is on/after ``cutoff``; the parquet is read in
+        # stored order so the pool keeps legacy's tie-break. A missing cutoff
+        # or a missing source parquet
         # refuses (SystemExit -> VALIDATION_FAILED via ``_tool_failure``), as
         # does a non-regular or oversized source; an existing output file
         # with different bytes is the existing RESUME_MISMATCH; the atomic
@@ -305,7 +309,9 @@ def build_state(member: str, *, cutoff=None, ticker_chunk: int = 1000, registry=
         print(f"[p5-3] chooser_analog_pool: built {n_rows} rows in "
               f"{time.perf_counter() - started:.1f}s", file=sys.stderr, flush=True)
         summary = {"cutoff": bound, "source_rows": int(len(frame)), "n_rows": n_rows,
-                   "n_strategies": len(artifact.strategies)}
+                   "n_strategies": len(artifact.strategies),
+                   "source_identity": {"source": str(source), "pool_id": CHOOSER_POOL_ID,
+                                       "sha256": frame.attrs.get("source_sha256")}}
         return (None, summary) if n_rows == 0 else (artifact, summary)
     if member != "paired_residual_pool":
         raise SystemExit(f"unknown state {member!r}; known: {', '.join(STATES)}")
@@ -391,21 +397,42 @@ def run_state_job(member: str, out: Path, *, plan_only: bool = False, **kwargs) 
     return summary
 
 
-MONTHLY_POOL_MEMBERS = (
+MONTHLY_DRIVER_MEMBERS = (
     "driver_residual_pool:size",
     "driver_residual_pool:implied_t1",
     "driver_residual_pool:runup_move",
-    CHOOSER_POOL_STATE,
 )
+MONTHLY_POOL_MEMBERS = (*MONTHLY_DRIVER_MEMBERS, CHOOSER_POOL_STATE)
+
+
+def _champion_data_date_cutoff(summary: dict, retrain_cutoff: str) -> str | None:
+    """The champion's canonical data-date cutoff, refused when after the retrain cutoff.
+
+    Only a source-supplied data date is accepted; ``created``/``trained_at``
+    and other computed or wall-clock times are never substitutes.
+    """
+    value = summary.get("champion_data_date_cutoff", summary.get("data_date_cutoff"))
+    if value is None:
+        return None
+    try:
+        bound = _iso_cutoff(value)
+    except (TypeError, ValueError):
+        raise SystemExit(
+            "monthly_pools driver data-date cutoff must be an ISO date (YYYY-MM-DD)") from None
+    if bound > retrain_cutoff:
+        raise SystemExit("monthly_pools driver data-date cutoff is after retrain_cutoff")
+    return bound
 
 
 def run_monthly_pools_job(out: Path, *, month: str, cutoff: str,
                           ticker_chunk: int = 1000) -> dict:
     """Build the fixed four S1 monthly-retrain pools into ``out``.
 
-    The three driver pools are D1 re-freezes of the stored champion pool
-    artifacts and take no cutoff; only the chooser takes the exclusive
-    ``cutoff`` (the day after ``month``'s end). Reuses ``run_state_job``.
+    The three driver pools are D1 carried/refrozen champion pools with
+    unchanged content and no newly admitted rows; their receipts record the
+    champion identity and inherited admission, and take no cutoff. Only the
+    chooser takes the exclusive ``cutoff`` (the day after ``month``'s end).
+    Reuses ``run_state_job``.
     """
     try:
         bound = _iso_cutoff(cutoff)
@@ -432,9 +459,21 @@ def run_monthly_pools_job(out: Path, *, month: str, cutoff: str,
         if (summary.get("status") == "empty" or not summary.get("file")
                 or not summary.get("content_hash") or summary.get("bytes") is None):
             raise SystemExit(f"monthly_pools {member} produced no output")
-        members[member] = {"file": summary["file"],
-                           "content_hash": summary["content_hash"],
-                           "bytes": summary["bytes"], "cutoff": member_cutoff}
+        member_receipt = {"file": summary["file"],
+                          "content_hash": summary["content_hash"],
+                          "bytes": summary["bytes"], "cutoff": member_cutoff,
+                          "source_identity": summary["source_identity"]}
+        if member in MONTHLY_DRIVER_MEMBERS:
+            identity = summary["source_identity"]
+            member_receipt.update({
+                "status": "carried_refrozen",
+                "model_id": identity["model_id"],
+                "artifact_sha256": identity["artifact_sha256"],
+                "champion_data_date_cutoff": _champion_data_date_cutoff(summary, bound),
+                "admission": {"mode": "inherited_from_champion",
+                              "artifact_id": identity["model_id"]},
+            })
+        members[member] = member_receipt
         elapsed = time.perf_counter() - started
         rate = done / elapsed if elapsed else 0.0
         eta = (total - done) / rate if rate else 0.0
