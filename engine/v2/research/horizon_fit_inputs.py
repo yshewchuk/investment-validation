@@ -6,10 +6,35 @@ from engine.v2.foundation import content_hash
 
 def _matrix(indexed, event_ids, horizon, columns):
     rows = [indexed[event, horizon] for event in event_ids]
-    document = {"columns": columns, "row_keys": [
-        [row[key] for key in ("event_id", "context_id", "horizon_sessions")] for row in rows],
-        "values": [[row[column] for column in columns] for row in rows]}
-    return document, np.asarray(document["values"], dtype=float)
+    row_keys = [[row[key] for key in ("event_id", "context_id", "horizon_sessions")]
+                for row in rows]
+    values = [[row[column] for column in columns] for row in rows]
+    return row_keys, values, np.asarray(values, dtype=float)
+
+
+def _require_target(target_column):
+    if (type(target_column) is not str or not target_column.strip()
+            or target_column in ("columns", "row_keys", "values")):
+        raise ValueError("horizon inputs require a nonempty nonreserved target column")
+
+
+def fit_evidence(columns, train_features, prediction_features, horizon_sessions,
+                 training_event_ids, evaluation_event_ids, training_row_keys,
+                 evaluation_row_keys, *, target_column, labels=None):
+    """Hash ordered fit values and row keys into the shared evidence shape."""
+    _require_target(target_column)
+    columns = list(columns)
+    training = {"columns": columns, "row_keys": training_row_keys,
+                "values": train_features}
+    prediction = {"columns": columns, "row_keys": evaluation_row_keys,
+                  "values": prediction_features}
+    if labels is not None:
+        training[target_column] = labels
+    return {"horizon_sessions": horizon_sessions,
+            "training_event_ids": list(training_event_ids),
+            "evaluation_event_ids": list(evaluation_event_ids),
+            "training_matrix_id": content_hash(training),
+            "prediction_matrix_id": content_hash(prediction)}
 
 
 def prepare_horizon_inputs(indexed, training_ids, evaluation_ids, horizon, columns, labels, *, target_column):
@@ -20,14 +45,11 @@ def prepare_horizon_inputs(indexed, training_ids, evaluation_ids, horizon, colum
     Event-ID and column iterables are materialized once after target validation.
     This performs no fitting, prediction validation, I/O or experiment admission.
     """
-    if (type(target_column) is not str or not target_column.strip()
-            or target_column in ("columns", "row_keys", "values")):
-        raise ValueError("horizon inputs require a nonempty nonreserved target column")
+    _require_target(target_column)
     training_ids, evaluation_ids, columns = list(training_ids), list(evaluation_ids), list(columns)
-    training, matrix = _matrix(indexed, training_ids, horizon, columns)
-    prediction, test_matrix = _matrix(indexed, evaluation_ids, horizon, columns)
-    training[target_column] = np.asarray(labels, dtype=float).tolist()
-    evidence = {"horizon_sessions": horizon, "training_event_ids": list(training_ids),
-        "evaluation_event_ids": list(evaluation_ids), "training_matrix_id": content_hash(training),
-        "prediction_matrix_id": content_hash(prediction)}
+    training_keys, training_values, matrix = _matrix(indexed, training_ids, horizon, columns)
+    prediction_keys, prediction_values, test_matrix = _matrix(indexed, evaluation_ids, horizon, columns)
+    evidence = fit_evidence(columns, training_values, prediction_values, horizon,
+        training_ids, evaluation_ids, training_keys, prediction_keys,
+        target_column=target_column, labels=np.asarray(labels, dtype=float).tolist())
     return matrix, test_matrix, evidence

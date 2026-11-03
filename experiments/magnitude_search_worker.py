@@ -47,9 +47,12 @@ def main():
         schema = request["execution"].get("schema_version")
         regression = schema in ("regression_candidate_execution.v1", "iv_crush_comparison_execution.v1")
         target = request["execution"]["target"] if regression else None
+        numeric = not (schema in ("size_comparison_execution.v1", "iv_crush_comparison_execution.v1")
+                       or (schema == "size_candidate_execution.v1" and request["execution"].get("model") == "size_v1_4"))
         inputs = load_fit_inputs(ArtifactStore(request["store_root"]), request["manifest"], request["inputs_id"],
                                  request["inner"]["evaluation_event_ids"], request["plan"]["horizons"],
                                  request["execution"]["features"],
+                                 **({"numeric_fit_inputs": True} if numeric else {}),
                                  **({"target_column": target["column"]} if regression else {}))
         indexed = {(row["event_id"], row["horizon_sessions"]): row for row in inputs["features"]}
 
@@ -71,7 +74,7 @@ def main():
         diagnostics = []
         try:
             if regression:
-                predictions = regression_forecasts(indexed, inputs["training"], request, progress, diagnostics)
+                predictions = regression_forecasts(inputs.fit_inputs, request, progress, diagnostics)
             elif schema == "size_candidate_execution.v1" and request["execution"].get("model") == "size_v1_4":
                 from engine.v2.foundation import content_hash
                 from experiments.size_comparator import forecasts
@@ -83,8 +86,9 @@ def main():
                     "recipe_id": content_hash(request["execution"]["fit_recipe"]), **detail}
                     for detail in result["fit_details"]]
             else:
-                predictions, _ = fitted_forecasts(indexed, pd.DataFrame(inputs["training"]),
-                    request["inner"], request["plan"], request["execution"], progress=progress, strict_failures=True, diagnostics=diagnostics)
+                predictions, _ = fitted_forecasts(None, None,
+                    request["inner"], request["plan"], request["execution"], fit_inputs=inputs.fit_inputs,
+                    progress=progress, strict_failures=True, diagnostics=diagnostics)
         except OpsError as error:
             if error.code != "EXPERIMENT_VARIANT_FAILED":
                 raise
@@ -108,7 +112,7 @@ def main():
         emit({"event": "unavailable"})
 
 
-def regression_forecasts(indexed, training, request, progress, diagnostics):
+def regression_forecasts(fit_inputs, request, progress, diagnostics):
     """Fit the closed explicit-target route; infrastructure failures are never candidate failures."""
     from engine.v2.models.training.fit_routes import check_fitting_allowed
     from engine.v2.ops.errors import fail
@@ -117,11 +121,9 @@ def regression_forecasts(indexed, training, request, progress, diagnostics):
     execution = request["execution"]
     target = execution["target"]
     try:
-        predictions, _ = fitted_forecasts(indexed, [row["event_id"] for row in training],
-            [row[target["column"]] for row in training], request["inner"]["evaluation_event_ids"],
-            request["plan"]["horizons"], execution["features"], target_column=target["column"],
-            target_domain=target["domain"], route="regression_candidate", recipe=execution["fit_recipe"],
-            progress=progress, diagnostics=diagnostics)
+        predictions, _ = fitted_forecasts(fit_inputs, request["inner"]["evaluation_event_ids"],
+            request["plan"]["horizons"], target_domain=target["domain"], route="regression_candidate",
+            recipe=execution["fit_recipe"], progress=progress, diagnostics=diagnostics)
     except HorizonFitFailure as failure:
         error = failure.__cause__
         if isinstance(error, (ValueError, ArithmeticError)):

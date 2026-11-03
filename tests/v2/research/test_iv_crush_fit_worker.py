@@ -61,7 +61,7 @@ class Poison:
 @pytest.mark.parametrize("guard,error", [(legacy_guard, LegacyFitForbidden), (no_fit_guard, RuntimeFitForbidden)])
 def test_both_guards_precede_signed_input_inspection(guard, error):
     with guard(), pytest.raises(error):
-        worker.regression_forecasts(Poison(), Poison(), Poison(), None, [])
+        worker.regression_forecasts(Poison(), Poison(), None, [])
 
 
 @pytest.mark.parametrize("error", [ValueError("private"), ArithmeticError("private"),
@@ -75,11 +75,13 @@ def test_signed_worker_adapter_preserves_failure_classification(monkeypatch, err
         "features": ["x"], "fit_recipe": {}}, "inner": {"evaluation_event_ids": ["test"]}, "plan": {"horizons": [5, 3, 1]}}
     if isinstance(error, (ValueError, ArithmeticError)):
         with pytest.raises(OpsError) as caught:
-            worker.regression_forecasts({}, [{"event_id": "train", "crush_pct_iv30": -140.}], request, None, [])
-        assert caught.value.code == "EXPERIMENT_VARIANT_FAILED" and "private" not in str(caught.value)
+            worker.regression_forecasts({}, request, None, [])
+        assert caught.value.code == "EXPERIMENT_VARIANT_FAILED"
+        assert str(caught.value) == "EXPERIMENT_VARIANT_FAILED: fitted regression estimator failed"
+        assert "private" not in str(caught.value)
     else:
         with pytest.raises(type(error)) as caught:
-            worker.regression_forecasts({}, [{"event_id": "train", "crush_pct_iv30": -140.}], request, None, [])
+            worker.regression_forecasts({}, request, None, [])
         assert caught.value is error
 
 
