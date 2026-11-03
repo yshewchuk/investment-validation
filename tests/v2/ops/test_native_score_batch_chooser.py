@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import pickle
-from dataclasses import make_dataclass
+from dataclasses import field, make_dataclass
 from types import SimpleNamespace
 
 import pandas as pd
@@ -16,11 +16,19 @@ from engine.v2.scoring.release_bindings import ModelNotReady
 Bundle = make_dataclass(
     "Bundle",
     ["model_release", "chooser_recipe", "chooser_fold_pools",
-     "chooser_analog_pool", "chooser_admissible_table"],
+     "chooser_analog_pool", "chooser_admissible_table",
+     ("gate_forecast_source", object, field(default=None))],
     frozen=True,
 )
 Release = make_dataclass("Release", ["bindings"], frozen=True)
-Binding = make_dataclass("Binding", ["binding_id"], frozen=True)
+Member = make_dataclass("Member", ["name", "content_hash"], frozen=True)
+Binding = make_dataclass(
+    "Binding", ["binding_id", ("members", tuple, field(default=()))],
+    frozen=True)
+
+_CHOOSER_MEMBER = (Member("estimator", "hash-est-chooser"),)
+_IM_MEMBER = (Member("estimator", "hash-est-im"),)
+_RU_MEMBER = (Member("estimator", "hash-est-ru"),)
 
 _KEY = BoardRequest("AAA", "TWIN-P", pd.Timestamp("2026-01-12"), "close")
 _CHOOSER_NAMES = {
@@ -35,8 +43,8 @@ def _bundle():
 def _state():
     return SimpleNamespace(
         producer_bindings={
-            "pred_im_t1_d14": Binding("producer-im"),
-            "pred_runup_abs_move_d14": Binding("producer-ru"),
+            "pred_im_t1_d14": Binding("producer-im", _IM_MEMBER),
+            "pred_runup_abs_move_d14": Binding("producer-ru", _RU_MEMBER),
         },
         fold_pools={"pred_abs_move": {
             "predictions": (1.0,), "residuals": (0.0,), "interval_floor": 0.1}},
@@ -44,15 +52,25 @@ def _state():
             pool_id="pool", cutoff="2026-01-10", content_hash="hash-pool"),
         admissible_table=SimpleNamespace(
             table_id="table", version="v1", content_hash="hash-table"),
+        artifact_refs=("hash-state-1", "hash-pool"),
+        fold_provenance={
+            "pred_im_t1_d14": {
+                "training_cutoff": "2025-12-01", "fold_start": "2025-12-15",
+                "descriptor_hash": "hash-desc-im"},
+            "pred_runup_abs_move_d14": {
+                "training_cutoff": "2025-12-01", "fold_start": "2025-12-15",
+                "descriptor_hash": "hash-desc-ru"},
+        },
     )
 
 
 def _binding():
     return SimpleNamespace(
-        model_identity={"chooser:DYN-SV": Binding("chooser")})
+        model_identity={"chooser:DYN-SV": Binding("chooser", _CHOOSER_MEMBER)})
 
 
 def test_only_the_seven_menu_specs_choose():
+    assert _CHOOSER_NAMES <= set(nsb._STRATEGY_REGISTRY)
     for name, spec in nsb._STRATEGY_REGISTRY.items():
         assert spec.chooser is (name in _CHOOSER_NAMES)
     assert nsb._STRATEGY_REGISTRY["STR-THRU"].chooser is False
@@ -61,28 +79,32 @@ def test_only_the_seven_menu_specs_choose():
 
 def test_selected_state_declares_recipe_and_adds_missing_producers(monkeypatch):
     state = _state()
-    state.producer_bindings["pred_im_t1_d14"] = Binding("producer-im")
+    binding = _binding()
     bundle = Bundle(
-        Release((Binding("existing"), Binding("producer-im"))), {}, {}, None, None)
+        Release((Binding("chooser", _CHOOSER_MEMBER), Binding("existing"),
+                 Binding("producer-im", _IM_MEMBER))),
+        {}, {}, None, None)
     captured = {}
 
-    def fake(binding, event_date, as_of, *, fold_cache):
+    def fake(binding, event_date, as_of):
         captured.update(
-            binding=binding, event_date=event_date, as_of=as_of, fold_cache=fold_cache)
+            binding=binding, event_date=event_date, as_of=as_of)
         return state
 
     monkeypatch.setattr(nsb, "select_chooser_state", fake)
-    cache = {}
     result = nsb._chooser_bundle_or_refusal(
-        bundle, _KEY, binding=_binding(), event_date="2026-01-12",
-        as_of="2026-01-10", fold_cache=cache)
+        bundle, _KEY, binding=binding, event_date="2026-01-12",
+        as_of="2026-01-10")
 
     assert not isinstance(result, NativeScoreBatchRowRefusal)
-    assert captured["fold_cache"] is cache
+    assert captured == {
+        "binding": binding, "event_date": "2026-01-12", "as_of": "2026-01-10"}
     assert result.model_release.bindings == (
-        Binding("existing"), Binding("producer-im"), Binding("producer-ru"))
+        Binding("chooser", _CHOOSER_MEMBER), Binding("existing"),
+        Binding("producer-im", _IM_MEMBER), Binding("producer-ru", _RU_MEMBER))
     assert bundle.model_release.bindings == (
-        Binding("existing"), Binding("producer-im"))
+        Binding("chooser", _CHOOSER_MEMBER), Binding("existing"),
+        Binding("producer-im", _IM_MEMBER))
     assert result.chooser_recipe == {
         "binding_id": "chooser",
         "producers": {
@@ -93,10 +115,28 @@ def test_selected_state_declares_recipe_and_adds_missing_producers(monkeypatch):
             "pool_id": "pool", "cutoff": "2026-01-10", "content_hash": "hash-pool"},
         "admissible_table": {
             "table_id": "table", "version": "v1", "content_hash": "hash-table"},
+        "artifact_refs": ["hash-state-1", "hash-pool"],
+        "fold_provenance": {
+            "pred_im_t1_d14": {
+                "training_cutoff": "2025-12-01", "fold_start": "2025-12-15",
+                "descriptor_hash": "hash-desc-im"},
+            "pred_runup_abs_move_d14": {
+                "training_cutoff": "2025-12-01", "fold_start": "2025-12-15",
+                "descriptor_hash": "hash-desc-ru"},
+        },
     }
     assert result.chooser_fold_pools is state.fold_pools
     assert result.chooser_analog_pool is state.analog_pool
     assert result.chooser_admissible_table is state.admissible_table
+
+    drivers = (SimpleNamespace(identity=SimpleNamespace(artifact_hash="hash-driver")),)
+    refs = nsb._score_artifact_refs(drivers, None, result)
+    assert refs == (
+        "hash-driver",
+        "hash-est-chooser", "hash-est-im", "hash-est-ru",
+        "hash-pool", "hash-table", "hash-state-1",
+    )
+    assert len(refs) == len(set(refs))
 
 
 def test_model_not_ready_becomes_the_fixed_row_refusal(monkeypatch):
@@ -106,7 +146,7 @@ def test_model_not_ready_becomes_the_fixed_row_refusal(monkeypatch):
     monkeypatch.setattr(nsb, "select_chooser_state", refuse)
     result = nsb._chooser_bundle_or_refusal(
         _bundle(), _KEY, binding=_binding(), event_date="2026-01-12",
-        as_of="2026-01-10", fold_cache={})
+        as_of="2026-01-10")
 
     assert isinstance(result, NativeScoreBatchRowRefusal)
     assert (result.code, result.detail) == (
@@ -124,7 +164,7 @@ def test_non_chooser_spec_returns_the_same_bundle(monkeypatch, name):
     result = nsb._apply_declared_chooser(
         bundle, _KEY, nsb._STRATEGY_REGISTRY[name],
         SimpleNamespace(calendar_row={"event_date": "2026-01-12"}),
-        binding=object(), as_of="2026-01-10", fold_cache={})
+        binding=object(), as_of="2026-01-10")
 
     assert result is bundle
     assert pickle.dumps(result) == before

@@ -126,10 +126,40 @@ def test_entry_rule_declarations_or_refusal(monkeypatch):
 @pytest.mark.parametrize("name", ["TWIN-P", "TWIN-P5", "BFLY-P", "BFLY-P5", "CTR5", "RAMP7", "CND-PS"])
 def test_twin_row_assembly_declares_entry_rule_and_planned_exit(tmp_path, monkeypatch, name):
     binding = _stage(tmp_path, [SIZE, IV_CRUSH])
+    binding = replace(
+        binding,
+        model_identity={
+            **binding.model_identity,
+            "chooser:DYN-SV": SimpleNamespace(binding_id="chooser-twin-fixture"),
+        },
+    )
     event = _event_inputs(
         strategy=name,
         panel_row={"date": "2026-01-15", "signal": 1.5, "mcap_log": 25.0, "iv30": 45.0},
     )
+
+    chooser_seen = {}
+    def fake_chooser_state(binding, event_date, as_of):
+        chooser_seen.update(
+            binding=binding, event_date=event_date, as_of=as_of)
+        return SimpleNamespace(
+            producer_bindings={
+                "pred_im_t1_d14": SimpleNamespace(
+                    binding_id="producer-im", members=()),
+                "pred_runup_abs_move_d14": SimpleNamespace(
+                    binding_id="producer-ru", members=()),
+            },
+            fold_pools={"pred_abs_move": {
+                "predictions": (1.0,), "residuals": (0.0,), "interval_floor": 0.1}},
+            analog_pool=SimpleNamespace(
+                pool_id="pool", cutoff="2026-01-10", content_hash="hash-pool"),
+            admissible_table=SimpleNamespace(
+                table_id="table", version="v1", content_hash="hash-table"),
+            artifact_refs=(),
+            fold_provenance={},
+        )
+
+    monkeypatch.setattr(nsb, "select_chooser_state", fake_chooser_state)
 
     recorded = {}
     def fake_entry_rule(binding, **kw):
@@ -157,6 +187,9 @@ def test_twin_row_assembly_declares_entry_rule_and_planned_exit(tmp_path, monkey
 
     assembled, refusals = _assemble(binding, [event])
     assert refusals == ()
+    assert chooser_seen["binding"] is binding
+    assert chooser_seen["event_date"] == "2026-01-15"
+    assert str(chooser_seen["as_of"].date()) == "2026-01-10"
     assert list(assembled) == [event.key]
     bundle = bundles[0]
     assert bundle.strategy == name

@@ -39,6 +39,7 @@ __all__ = ["chooser_block", "frozen_chooser_block"]
 
 _CHOOSER_RECIPE_FIELDS = _FROZEN_RECIPE_FIELDS | frozenset({
     "producers", "analog_pool", "admissible_table",
+    "artifact_refs", "fold_provenance",
 })
 _ANALOG_KEY_FIELDS = frozenset({"pool_id", "cutoff", "content_hash"})
 _TABLE_KEY_FIELDS = frozenset({"table_id", "version", "content_hash"})

@@ -719,7 +719,6 @@ def _chooser_bundle_or_refusal(
     binding: ScoringReleaseBinding,
     event_date: Any,
     as_of: Any,
-    fold_cache: dict[tuple[int, str], Any],
 ) -> SourceBundle | NativeScoreBatchRowRefusal:
     """Declare the selected DYN-SV chooser state on ``bundle``, or refuse the row.
 
@@ -727,8 +726,7 @@ def _chooser_bundle_or_refusal(
     ``MODEL_NOT_READY`` row refusal; its detail is never published.
     """
     try:
-        state = select_chooser_state(
-            binding, event_date, as_of, fold_cache=fold_cache)
+        state = select_chooser_state(binding, event_date, as_of)
         chooser = binding.model_identity.get("chooser:DYN-SV")
         implied = state.producer_bindings.get("pred_im_t1_d14")
         runup = state.producer_bindings.get("pred_runup_abs_move_d14")
@@ -758,6 +756,8 @@ def _chooser_bundle_or_refusal(
                 "version": state.admissible_table.version,
                 "content_hash": state.admissible_table.content_hash,
             },
+            "artifact_refs": list(state.artifact_refs),
+            "fold_provenance": state.fold_provenance,
         }
     except ModelNotReady:
         return NativeScoreBatchRowRefusal(
@@ -780,7 +780,6 @@ def _apply_declared_chooser(
     *,
     binding: ScoringReleaseBinding,
     as_of: Any,
-    fold_cache: dict[tuple[int, str], Any],
 ) -> SourceBundle | NativeScoreBatchRowRefusal:
     """Apply the chooser block for a chooser-enabled spec, else keep ``bundle``."""
     if not spec.chooser:
@@ -788,7 +787,7 @@ def _apply_declared_chooser(
     return _chooser_bundle_or_refusal(
         bundle, key, binding=binding,
         event_date=event.calendar_row.get("event_date"),
-        as_of=as_of, fold_cache=fold_cache)
+        as_of=as_of)
 
 
 def _gate_source_or_refusal(
@@ -821,6 +820,24 @@ def _gate_source_or_refusal(
     return source
 
 
+def _chooser_artifact_refs(bundle: Any) -> list[str]:
+    """Estimator hashes, pool/table hashes and state refs from one chooser recipe."""
+    recipe = bundle.chooser_recipe
+    if not recipe:
+        return []
+    wanted = {recipe["binding_id"]}
+    wanted.update(producer["binding_id"] for producer in recipe["producers"].values())
+    refs = [member.content_hash
+            for bound in bundle.model_release.bindings
+            if bound.binding_id in wanted
+            for member in bound.members
+            if member.name == "estimator"]
+    refs.append(recipe["analog_pool"]["content_hash"])
+    refs.append(recipe["admissible_table"]["content_hash"])
+    refs.extend(recipe["artifact_refs"])
+    return refs
+
+
 def _score_artifact_refs(drivers, gate_identity: ModelIdentity | None, bundle) -> tuple[str, ...]:
     refs = [driver.identity.artifact_hash for driver in drivers]
     if gate_identity is not None:
@@ -828,6 +845,7 @@ def _score_artifact_refs(drivers, gate_identity: ModelIdentity | None, bundle) -
     gate_source = bundle.gate_forecast_source
     if gate_source is not None:
         refs.append(gate_source.artifact_hash)
+    refs.extend(_chooser_artifact_refs(bundle))
     return tuple(dict.fromkeys(refs))
 
 
@@ -932,8 +950,7 @@ def _released_member_bundle_or_refusal(
     if isinstance(bundle, NativeScoreBatchRowRefusal):
         return bundle
     return _apply_declared_chooser(
-        bundle, key, spec, event, binding=binding, as_of=as_of,
-        fold_cache=gate_source_cache)
+        bundle, key, spec, event, binding=binding, as_of=as_of)
 
 
 def _assemble_one_event(
@@ -1469,7 +1486,8 @@ def run_native_score_batch_worker(parameters: Mapping[str, Any], root: Path) -> 
 
     as_of = parameters["as_of"]
     snapshot_id = parameters["snapshot_id"]
-    binding = resolve_release_binding(parameters["release_root"])
+    binding = resolve_release_binding(
+        parameters["release_root"], include_chooser_fold_references=True)
     events_doc, producer_doc, calendar_revision = _worker_event_documents(parameters, root)
     events = tuple(_event_inputs_from_document(item) for item in events_doc)
     raw_feature_names = parameters.get("feature_names")

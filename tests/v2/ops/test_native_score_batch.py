@@ -765,7 +765,7 @@ def test_run_native_score_batch_worker_writes_records_and_refusals(tmp_path, mon
         _worker_parameters(tmp_path, expected_ids=["native_score_batch"]), root)
     assert len(calls) == 1
     assert len(calls[0][0]) == 1
-    assert "include_chooser_fold_references" not in calls[0][1]
+    assert calls[0][1].get("include_chooser_fold_references") is True
     assert result["completed_ids"] == ["native_score_batch"]
     assert result["no_work"] is False
     records_document = json.loads((root / "records.json").read_text())
