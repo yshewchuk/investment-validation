@@ -50,8 +50,10 @@ def arrays():
 
 
 def fit(policy=None, values=None, columns=COLUMNS):
-    return fitting.fit_mlp_predictions(recipe() if policy is None else policy,
-        *(arrays() if values is None else values), columns=columns)
+    policy = recipe() if policy is None else policy
+    train_features, train_labels, prediction_features = (arrays() if values is None else values)
+    return fitting.fit_mlp_predictions(
+        policy, train_features, train_labels, prediction_features, columns=columns)
 
 
 def test_metadata_imports_neither_training_nor_sklearn():
@@ -173,7 +175,7 @@ def test_policy_drift_refuses_before_array_access(path, value):
 @pytest.mark.parametrize("guard", [legacy_no_fit, no_fit])
 def test_both_guards_precede_recipe_and_array_inspection(guard):
     with guard.no_fit_guard(), pytest.raises(guard.RuntimeFitForbidden) as caught:
-        fitting.fit_mlp_predictions(Untouchable(), *([Untouchable()] * 3), columns=None)
+        fitting.fit_mlp_predictions(Untouchable(), Untouchable(), Untouchable(), Untouchable(), columns=None)
     assert type(caught.value) is guard.RuntimeFitForbidden
     assert str(caught.value) == (
         "no-fit guard active: engine.v2.models.training.magnitude_mlp.fit_mlp_predictions")
@@ -186,9 +188,11 @@ def test_column_order_refuses_before_array_access(columns):
 
 
 @pytest.mark.parametrize("slot,replacement,reason", [
-    (0, [], "matrix"), (0, [[1, 2]], "matrix"), (0, [[float("inf"), 2, 3]], "matrix"),
-    (0, [[1, 2, object()]], "convert"), (1, [0], "labels"), (1, np.full(80, -1), "labels"),
-    (1, np.full(80, float("nan")), "labels"), (1, np.full(80, float("inf")), "labels"),
+    (0, [], "matrix"), (0, [[1, 2]], "matrix"),
+    (0, [[float("inf"), 2, 3]], "matrix"), (0, [[1, 2, object()]], "convert"),
+    (1, [0], "labels"), (1, np.full(79, 1.), "labels"),
+    (1, np.full(80, -1), "labels"), (1, np.full(80, float("nan")), "labels"),
+    (1, np.full(80, float("inf")), "labels"),
     (2, [], "matrix"), (2, [[1, 2]], "matrix"),
 ])
 def test_invalid_matrices_fail_without_fitting(monkeypatch, slot, replacement, reason):
@@ -197,12 +201,29 @@ def test_invalid_matrices_fail_without_fitting(monkeypatch, slot, replacement, r
     monkeypatch.setattr(TransformedTargetRegressor, "fit", forbidden)
     values = list(arrays())
     values[slot] = replacement
-    with pytest.raises(ValueError) as caught:
-        fit(values=values)
-    assert str(caught.value) == {
+    expected = {
         "matrix": "magnitude requires nonempty selected-column matrices without infinity",
         "labels": "magnitude labels require one finite nonnegative value per training row",
         "convert": "magnitude inputs must be convertible to floating-point values"}[reason]
+    with pytest.raises(ValueError) as caught:
+        fit(values=values)
+    assert str(caught.value) == expected
+
+
+@pytest.mark.parametrize("bad_value,expected", [
+    (float("inf"), "magnitude requires nonempty selected-column matrices without infinity"),
+    (object(), "magnitude inputs must be convertible to floating-point values"),
+])
+def test_matrix_preflight_refusals_precede_row_count_and_sklearn_fit(
+        monkeypatch, bad_value, expected):
+    def forbidden(*args, **kwargs):
+        pytest.fail("invalid input entered sklearn fit")
+    monkeypatch.setattr(TransformedTargetRegressor, "fit", forbidden)
+    train = [[bad_value, 7.0, np.nan] for _ in range(80)]
+    values = [train, np.full(79, 3.), arrays()[2]]
+    with pytest.raises(ValueError) as caught:
+        fit(values=values)
+    assert str(caught.value) == expected
 
 
 def independent_oracle(train, labels, prediction, *, layers=(32,), alpha=0.01,
