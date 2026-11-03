@@ -135,7 +135,10 @@ def test_twin_row_assembly_declares_entry_rule_and_planned_exit(tmp_path, monkey
     )
     event = _event_inputs(
         strategy=name,
-        panel_row={"date": "2026-01-15", "signal": 1.5, "mcap_log": 25.0, "iv30": 45.0},
+        panel_row={
+            **{primitive: 0.1 for primitive in nsb._CHOOSER_PRIMITIVES},
+            "date": "2026-01-15", "signal": 1.5, "mcap_log": 25.0, "iv30": 45.0,
+        },
     )
 
     chooser_seen = {}
@@ -145,9 +148,11 @@ def test_twin_row_assembly_declares_entry_rule_and_planned_exit(tmp_path, monkey
         return SimpleNamespace(
             producer_bindings={
                 "pred_im_t1_d14": SimpleNamespace(
-                    binding_id="producer-im", members=()),
+                    binding_id="producer-im", members=(),
+                    feature_order=("signal",)),
                 "pred_runup_abs_move_d14": SimpleNamespace(
-                    binding_id="producer-ru", members=()),
+                    binding_id="producer-ru", members=(),
+                    feature_order=("signal",)),
             },
             fold_pools={"pred_abs_move": {
                 "predictions": (1.0,), "residuals": (0.0,), "interval_floor": 0.1}},

@@ -906,8 +906,7 @@ def _project_member_features(
     try:
         state = select_chooser_state(binding, event.calendar_row.get("event_date"), as_of)
     except ModelNotReady:
-        return NativeScoreBatchRowRefusal(
-            key, "MODEL_NOT_READY", "DYN-SV chooser state missing or unusable")
+        return feature_names
     projected = set(_CHOOSER_PRIMITIVES)
     for producer in state.producer_bindings.values():
         if not producer.feature_order:
