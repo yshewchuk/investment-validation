@@ -134,6 +134,10 @@ class RegistryError(RuntimeError):
     """The registry, or an artifact it points at, failed an integrity check."""
 
 
+class _InvalidMaxBytes(RegistryError, ValueError):
+    """An invalid ``Registry.load(max_bytes=...)`` limit."""
+
+
 # --------------------------------------------------------------------------
 # artifacts
 # --------------------------------------------------------------------------
@@ -524,7 +528,10 @@ class Registry:
         """
         if isinstance(entry, str):
             entry = self.get(entry)
+        if max_bytes is not None and (type(max_bytes) is not int or max_bytes < 0):
+            raise _InvalidMaxBytes("max_bytes must be a nonnegative integer or None")
         path = entry.path
+        handle = None
         if max_bytes is None:
             if not path.exists():
                 raise RegistryError(
@@ -532,7 +539,6 @@ class Registry:
                     f"committed; rebuild with `python3 -m engine.models.training.train_all`"
                 )
             actual = artifact_sha256(path) if verify else None
-            artifact = load_artifact(path)
         else:
             try:
                 fd = _artifact_fd(path)
@@ -546,7 +552,7 @@ class Registry:
             if len(payload) != info.st_size:
                 raise RegistryError(f"{entry.id}: artifact {path} changed while reading")
             actual = hashlib.sha256(payload).hexdigest() if verify else None
-            artifact = load_artifact(path, handle=io.BytesIO(payload))
+            handle = io.BytesIO(payload)
         if verify and actual != entry.artifact_sha256:
             raise RegistryError(
                 f"{entry.id}: artifact hash mismatch — the file at {path} is not "
@@ -554,6 +560,7 @@ class Registry:
                 f"found {actual[:12]}…). Its recorded metrics {entry.eval} do not "
                 f"describe it. Retrain and re-register rather than editing the hash."
             )
+        artifact = load_artifact(path) if handle is None else load_artifact(path, handle=handle)
         if verify and list(artifact.features) != list(entry.features):
             raise RegistryError(
                 f"{entry.id}: feature list disagrees with the artifact.\n"

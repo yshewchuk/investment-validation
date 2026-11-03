@@ -262,7 +262,7 @@ def test_too_large_source_refuses(tmp_path, monkeypatch):
         job.run_state_job("chooser_analog_pool", tmp_path / "out", cutoff=CUTOFF)
 
 
-@pytest.mark.parametrize("column", ["strategy", "event_date", "exit_date", "pnl",
+@pytest.mark.parametrize("column", ["strategy", "exit_date", "pnl",
                                     *CHOOSER_ANALOG_DIMS])
 def test_source_missing_required_column_refuses(tmp_path, monkeypatch, column):
     frame = _mixed_frame().drop(columns=[column])
@@ -273,12 +273,11 @@ def test_source_missing_required_column_refuses(tmp_path, monkeypatch, column):
     assert not (out / "chooser_analog_pool.json").exists()
 
 
-@pytest.mark.parametrize("field", ["event_date", "exit_date"])
-def test_source_malformed_date_refuses(tmp_path, monkeypatch, field):
+def test_source_malformed_exit_date_refuses(tmp_path, monkeypatch):
     rows = [_row("CTR5", "2026-02-10", 1.0)]
-    rows[0][field] = "not-a-date"
+    rows[0]["exit_date"] = "not-a-date"
     monkeypatch.setattr(paths, "FEATURES", _write_source(tmp_path, _pool_frame(rows)))
-    with pytest.raises(SystemExit, match=f"unparsable chooser pool {field}"):
+    with pytest.raises(SystemExit, match="unparsable chooser pool exit_date"):
         job.run_state_job("chooser_analog_pool", tmp_path / "out", cutoff=CUTOFF)
 
 
@@ -291,17 +290,18 @@ def test_source_corrupt_parquet_refuses(tmp_path, monkeypatch):
         job.run_state_job("chooser_analog_pool", tmp_path / "out", cutoff=CUTOFF)
 
 
-def test_source_missing_event_date_value_drops_the_row(tmp_path, monkeypatch):
+def test_source_missing_event_date_value_is_ignored_by_legacy(tmp_path, monkeypatch):
     rows = [_row("CTR5", "2026-02-10", 1.0), _row("CTR5", "2026-02-11", 2.0)]
     rows[0]["event_date"] = pd.NaT
     monkeypatch.setattr(paths, "FEATURES", _write_source(tmp_path, _pool_frame(rows)))
 
     summary = job.run_state_job("chooser_analog_pool", tmp_path / "out", cutoff=CUTOFF)
 
-    assert summary["n_rows"] == 1
+    assert summary["n_rows"] == 2
     pool = FrozenStateLoader(tmp_path / "out").load(
         FrozenStateRef(path=summary["file"], content_hash=summary["content_hash"]))
-    assert pool.rows_for("CTR5") == (_pool_row("2026-02-11", 2.0),)
+    assert pool.rows_for("CTR5") == (_pool_row("2026-02-10", 1.0),
+                                     _pool_row("2026-02-11", 2.0))
 
 
 def test_size_cap_boundary(tmp_path, monkeypatch):

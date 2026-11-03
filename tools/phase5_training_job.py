@@ -62,6 +62,7 @@ import pickle
 import resource
 import sys
 import time
+import zlib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -256,7 +257,8 @@ def build_state(member: str, *, cutoff=None, ticker_chunk: int = 1000, registry=
         except OSError as exc:
             raise SystemExit(
                 f"driver_residual_pool:{role} champion source is unreadable") from exc
-        except (pickle.UnpicklingError, EOFError) as exc:
+        except (pickle.UnpicklingError, EOFError, ValueError, TypeError,
+                AttributeError, ImportError, IndexError, KeyError, zlib.error) as exc:
             raise SystemExit(
                 f"driver_residual_pool:{role} champion artifact is corrupt") from exc
         lineage = Lineage(data=(DataDependency(
@@ -287,7 +289,6 @@ def build_state(member: str, *, cutoff=None, ticker_chunk: int = 1000, registry=
         from engine.v2.models.training.chooser_pool_source import (
             CHOOSER_POOL_ID,
             read_chooser_pool_frame,
-            require_chooser_pool_columns,
         )
 
         if cutoff is None:
@@ -309,13 +310,6 @@ def build_state(member: str, *, cutoff=None, ticker_chunk: int = 1000, registry=
         read_s = time.perf_counter() - started
         print(f"[p5-3] chooser_analog_pool: read {len(frame)} rows in {read_s:.1f}s",
               file=sys.stderr, flush=True)
-        # Missing columns would silently drop EVERY row (``_kept`` reads via
-        # ``row.get``), freezing an empty pool; refuse instead. The shared
-        # check raises ``ValueError``; a tool refusal is ``SystemExit``.
-        try:
-            require_chooser_pool_columns(frame.columns, require_event_date=monthly)
-        except ValueError as exc:
-            raise SystemExit(str(exc)) from exc
         lineage = Lineage(data=(DataDependency(table=CHOOSER_POOL_ID, end_exclusive=bound),))
         try:
             artifact = build_chooser_analog_pool_artifact(
@@ -328,7 +322,8 @@ def build_state(member: str, *, cutoff=None, ticker_chunk: int = 1000, registry=
               f"{time.perf_counter() - started:.1f}s", file=sys.stderr, flush=True)
         summary = {"cutoff": bound, "source_rows": int(len(frame)), "n_rows": n_rows,
                    "n_strategies": len(artifact.strategies),
-                   "source_identity": {"source": str(source), "pool_id": CHOOSER_POOL_ID,
+                   "source_identity": {"source": f"features/{_CHOOSER_POOL_FILE}",
+                                       "pool_id": CHOOSER_POOL_ID,
                                        "sha256": frame.attrs.get("source_sha256")}}
         return (None, summary) if n_rows == 0 else (artifact, summary)
     if member != "paired_residual_pool":

@@ -1,6 +1,7 @@
 """S1 monthly retrain training mode: four pool members, receipt and boundary."""
 import hashlib
 import json
+import pickle
 
 import pandas as pd
 import pytest
@@ -239,7 +240,7 @@ def test_chooser_event_date_boundary_keeps_m_end_and_drops_m_end_plus_one(
     monkeypatch.setattr(paths, "FEATURES", source)
     out = tmp_path / "out"
 
-    summary = job.run_state_job("chooser_analog_pool", out, cutoff=CUTOFF)
+    summary = job.run_state_job("chooser_analog_pool", out, cutoff=CUTOFF, monthly=True)
 
     assert summary["n_rows"] == 1
     pool = FrozenStateLoader(out).load(
@@ -257,7 +258,7 @@ def test_chooser_boundary_includes_m_end_and_excludes_next_day(tmp_path, monkeyp
     monkeypatch.setattr(paths, "FEATURES", source)
     out = tmp_path / "out"
 
-    summary = job.run_state_job("chooser_analog_pool", out, cutoff=CUTOFF)
+    summary = job.run_state_job("chooser_analog_pool", out, cutoff=CUTOFF, monthly=True)
 
     assert summary["n_rows"] == 2
     pool = FrozenStateLoader(out).load(
@@ -277,7 +278,7 @@ def test_chooser_boundary_filters_event_date_too(tmp_path, monkeypatch):
     monkeypatch.setattr(paths, "FEATURES", source)
     out = tmp_path / "out"
 
-    summary = job.run_state_job("chooser_analog_pool", out, cutoff=CUTOFF)
+    summary = job.run_state_job("chooser_analog_pool", out, cutoff=CUTOFF, monthly=True)
 
     assert summary["n_rows"] == 1
     pool = FrozenStateLoader(out).load(
@@ -295,8 +296,29 @@ def test_chooser_source_identity_hashes_the_exact_bounded_bytes(tmp_path, monkey
 
     path = source / "chooser_analog_pool.parquet"
     assert summary["source_identity"] == {
-        "source": str(path), "pool_id": "features.chooser_analog_pool",
+        "source": "features/chooser_analog_pool.parquet",
+        "pool_id": "features.chooser_analog_pool",
         "sha256": "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()}
+
+
+def test_chooser_identity_ignores_the_staged_feature_root(tmp_path, monkeypatch):
+    rows = [_row("CTR5", "2026-02-27", 1.0)]
+    (tmp_path / "attempt-a").mkdir()
+    (tmp_path / "attempt-b").mkdir()
+    first = _write_source(tmp_path / "attempt-a", rows)
+    second = _write_source(tmp_path / "attempt-b", rows)
+    payload = (first / "chooser_analog_pool.parquet").read_bytes()
+    assert payload == (second / "chooser_analog_pool.parquet").read_bytes()
+
+    monkeypatch.setattr(paths, "FEATURES", first)
+    one = job.run_state_job("chooser_analog_pool", tmp_path / "out-a", cutoff=CUTOFF)
+    monkeypatch.setattr(paths, "FEATURES", second)
+    two = job.run_state_job("chooser_analog_pool", tmp_path / "out-b", cutoff=CUTOFF)
+
+    expected = {"source": "features/chooser_analog_pool.parquet",
+                "pool_id": "features.chooser_analog_pool",
+                "sha256": "sha256:" + hashlib.sha256(payload).hexdigest()}
+    assert one["source_identity"] == two["source_identity"] == expected
 
 
 def _run_with_real_chooser(tmp_path, monkeypatch, source):
@@ -389,6 +411,56 @@ def _champion_registry(tmp_path, monkeypatch):
     registry = registry_mod.Registry(entries=[entry])
     monkeypatch.setattr(registry_mod, "load_registry", lambda *args, **kwargs: registry)
     return registry
+
+
+@pytest.mark.parametrize("max_bytes", [None, 1024])
+def test_champion_digest_mismatch_refuses_before_deserialization(
+        tmp_path, monkeypatch, max_bytes):
+    from engine.models import registry as registry_mod
+
+    registry = _champion_registry(tmp_path, monkeypatch)
+    registry.entries[0].artifact_sha256 = "0" * 64
+    calls = []
+
+    def deserializer(*_args, **_kwargs):
+        calls.append("deserialized")
+        raise AssertionError("the deserializer must not run for a digest mismatch")
+
+    monkeypatch.setattr(registry_mod, "load_artifact", deserializer)
+    with pytest.raises(registry_mod.RegistryError, match="hash mismatch"):
+        registry.load(registry.entries[0], max_bytes=max_bytes)
+    assert calls == []
+
+
+@pytest.mark.parametrize("max_bytes", [-1, 1.5, "8", True])
+def test_champion_load_refuses_an_invalid_size_bound(tmp_path, monkeypatch, max_bytes):
+    from engine.models import registry as registry_mod
+
+    registry = _champion_registry(tmp_path, monkeypatch)
+    with pytest.raises(ValueError, match="nonnegative integer"):
+        registry.load(registry.entries[0], max_bytes=max_bytes)
+
+
+@pytest.mark.parametrize("error", [
+    ValueError("private detail"),
+    pickle.UnpicklingError("private detail"),
+    ImportError("private detail"),
+])
+def test_corrupt_champion_artifact_is_validation_failed_without_exception_text(
+        tmp_path, monkeypatch, error):
+    from engine.models import registry as registry_mod
+
+    _champion_registry(tmp_path, monkeypatch)
+
+    def corrupt(*_args, **_kwargs):
+        raise error
+
+    monkeypatch.setattr(registry_mod, "load_artifact", corrupt)
+    with pytest.raises(OpsError) as excinfo:
+        training.run_training_worker(_worker_params(), tmp_path / "attempt")
+    assert excinfo.value.code == "VALIDATION_FAILED"
+    assert excinfo.value.problem.message == "training tool refused the job"
+    assert "private detail" not in str(excinfo.value)
 
 
 def test_oversized_champion_is_rejected_before_the_deserializer_runs(tmp_path, monkeypatch):

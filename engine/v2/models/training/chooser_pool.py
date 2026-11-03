@@ -8,8 +8,9 @@ The filter is legacy ``Scorer._chooser_analog_pool`` (``engine/score.py``),
 row for row, over rows the CALLER supplies (``tools/build_chooser_pool.py``'s
 frame, in its stored order):
 
-* a row with a missing ``exit_date``, ``event_date`` or ``pnl`` is dropped
-  (``dropna``: a NaN P&L is missing, an infinite one is kept);
+* a row with a missing ``exit_date`` or ``pnl`` is dropped (``dropna``: a
+  NaN P&L is missing, an infinite one is kept); in monthly mode a missing
+  ``event_date`` also drops the row;
 * a row without a structure name is dropped (``groupby`` drops NaN keys);
 * per structure, a row whose five dimensions are not all finite is dropped;
 * the remaining rows keep their given order within the structure.
@@ -17,10 +18,10 @@ frame, in its stored order):
 One rule is added, and it is the causal key: a row whose event date or
 settled exit date is on/after ``cutoff`` never enters. Legacy has no cutoff
 (its file is whatever was last built); declaring one is what lets a request
-check which pool it reads. The source admission requires ``event_date`` only
-when ``require_event_date=True`` (the monthly retrain); a caller whose rows
-omit the key, including legacy sources and release consumers, keeps the
-exit-only filter.
+check which pool it reads. The source admission parses and filters
+``event_date`` only when ``require_event_date=True`` (the monthly retrain);
+legacy callers and release consumers keep the exit-only filter even when the
+column or value is present.
 
 The artifact stores exit DAYS. Legacy compares full timestamps, and its pool
 builder normalizes every exit date to midnight, so the two agree; an exit or
@@ -77,12 +78,11 @@ def _kept(row: Mapping[str, Any], bound: str | None,
     strategy = row.get("strategy")
     if strategy is None or strategy != strategy:
         return None
-    event_value = row.get("event_date", _MISSING)
-    if event_value is _MISSING:
-        if require_event_date:
+    event_day = None
+    if require_event_date:
+        event_value = row.get("event_date", _MISSING)
+        if event_value is _MISSING:
             raise ValueError("chooser analog pool source lacks required columns")
-        event_day = None
-    else:
         event_day = _day(event_value, "event_date")
         if event_day is None:
             return None
