@@ -34,8 +34,16 @@ Prediction journal slots are create-only in a separate namespace, including iden
 
 ## Frozen forecast evidence
 
-This is an intentionally unwired library with synthetic test callers; the intended production consumer is the separate prediction-only runner, not the strategy lifecycle or an independent CLI.
+The frozen-evidence reader is consumed by the admitted evaluation library; the freeze writer remains intended for the separate prediction-only runner. Neither helper supplies a standalone CLI or a strategy lifecycle caller.
 
 `freeze_outer` claims a create-only freeze slot, verifies the admitted complete 1/3/5 horizon roster and bounded completed fits before publishing any section, then records all forecast rows plus one shared control/baseline reference per horizon. Raw fitted laws, sealed numerical implementation and shared references fully specify the four prediction arms without storing an events-times-residuals matrix. No target reader is invoked. An interrupted or repeated freeze consumes its slot; later execution must abort rather than reuse partial state.
 
 `read_frozen_outer` rebuilds native admission, completed fit, causal OOF and training-reference provenance, then checks every stored forecast/reference section and final all-horizon marker. Rehashing substituted control contents is insufficient. Replay performs no fits, writes or new outcome reads; source/target admission and the eventual scoring/collection sequence remain separately owned by the prediction lifecycle.
+
+## Admitted targets and evaluation
+
+This evaluation library is currently exercised only by synthetic tests. Its intended production consumer is the separate prediction-only runner and collection path; this slice supplies no standalone CLI, registration or execution grant.
+
+`evaluate_outer` consumes a create-only evaluation claim, freshly verifies frozen all-horizon evidence, then invokes the existing native bounded outer-target reader with the admitted normalized fold and source binding. The full native receipt, including physical inputs, cutoff, holdout identity and omissions, is validated and persisted alongside target rows. Exact event membership and explicit omission union are required; no quote, economic gate or trade choice filters the population. Every event/horizon receives all four proper-score and diagnostic status rows. Unresolved histogram tails retain valid bin scores but unavailable full-law interval/PIT diagnostics; missing targets and unavailable controls never become zero scores.
+
+`read_evaluated_outer` revalidates native stored admission, forecasts, shared controls, target receipt/rows and final all-horizon markers, regenerates scores and diagnostics, and compares their stored CAS sections without fitting, writes or new source outcome reads. It prepares each shared empirical diagnostic reference once per horizon. Interval widths remain percentage points; PIT brackets are preserved unrandomized, not claimed uniform or fitted-calibrated. A failed evaluation is consumed and must be discarded, never retried in place.
