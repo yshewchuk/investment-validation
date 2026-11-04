@@ -68,7 +68,7 @@ def _typed_retrain_request(kind_name, key, parameters, parents, implementation_r
 
 
 def _due_retrain_requests(session, month, base, ph, keys, restage_key,
-                          implementation_ref):
+                          implementation_ref, requests):
     from engine.v2.foundation import content_hash, to_document
     from engine.v2.ops.experiments import default_checkout_root
     from engine.v2.ops.fingerprints import environment_identity
@@ -80,7 +80,10 @@ def _due_retrain_requests(session, month, base, ph, keys, restage_key,
     from tools.phase5_training_job import state_file_name
     cutoff, candidate = retrain_cutoff(month), candidate_id(month, session)
     features_id = keys["features"]
-    manifest_ref = f"{features_id}#legacy_manifest"
+    features_request = next(
+        request for request in requests
+        if job_id_for("shadow", request.idempotency_key) == features_id)
+    manifest_ref = features_request.job.parameters["input_bindings"]["legacy_manifest.json"]
     train_plan = training_plan(mode="monthly_pools", month=month, cutoffs=(cutoff,),
                                manifest_ref=manifest_ref)
     train_key = step_key("train", session, month, base, ph)
@@ -147,7 +150,7 @@ def attach_retrain_chain(plan, requests, keys, implementation_ref, runtime, cont
     if section.get("state") == "due":
         month, base = section["month"], section["base"]
         chain.extend(_due_retrain_requests(session, month, base, ph, keys,
-                                           restage_key, implementation_ref))
+                                           restage_key, implementation_ref, requests))
         last_key = step_key("promote", session, month, base, ph)
     out, inserted = [], False
     for request in requests:

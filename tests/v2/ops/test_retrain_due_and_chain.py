@@ -299,7 +299,8 @@ def _plan(session="2026-09-18"):
 
 
 def _requests(plan):
-    return build_legacy_job_requests(plan, tickers=("FAKE",), year_start=2025, year_end=2026)
+    return build_legacy_job_requests(plan, tickers=("FAKE",), year_start=2025, year_end=2026,
+                                     input_refs=("manifest_artifact",))
 
 
 def _retrain_requests(requests):
@@ -379,7 +380,8 @@ def test_due_plan_has_six_retrain_steps(monkeypatch, tmp_path):
                for name in states)
     assert stage["mode"] == "monthly" and stage["cutoff"] == "2026-11-01"
     assert stage["release_id"] == "pools-retrain-2026-10-2026-09-18"
-    assert stage["input_bindings"]["legacy_manifest.json"] == training["input_bindings"]["legacy_manifest.json"]
+    assert training["input_bindings"]["legacy_manifest.json"] == "manifest_artifact"
+    assert stage["input_bindings"]["legacy_manifest.json"] == "manifest_artifact"
     assert retrain[4].job.parameters["input_bindings"]["acceptance.json"] == f"{accept_id}#acceptance"
     assert retrain[5].job.parameters["expected_previous_release_id"] == "rel1"
     conn = _conn()
@@ -496,7 +498,8 @@ def test_chain_submits_through_the_real_registry_and_gates_the_sidecar(monkeypat
         "state": "due", "month": "2026-10", "m_end": "2026-10-31",
         "superseded": [], "base": "rel1",
     }
-    requests = build_legacy_job_requests(plan, tickers=("FAKE",), year_start=2025, year_end=2026)
+    requests = build_legacy_job_requests(plan, tickers=("FAKE",), year_start=2025, year_end=2026,
+                                         input_refs=("manifest_artifact",))
     policy = NamespacePolicy({"operator": frozenset({"shadow"})})
     submit_graph(conn, registry(), policy, requests, clock=SystemClock())
     assert chain_blocks_pool_sidecar(conn, "2026-09-18") is True
