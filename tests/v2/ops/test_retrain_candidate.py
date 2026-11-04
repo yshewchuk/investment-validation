@@ -153,6 +153,8 @@ def test_invalid_inputs_are_rejected():
 
 def test_step_key_is_canonical():
     plan = _train_plan()
+    _invalid("plan", lambda: step_key("train", {**plan, "dependency_job_ids": "parent"}))
+    _invalid("parents", lambda: step_key("train", plan, parents="parent"))
     key = step_key("train", plan)
     assert key.startswith("retrain-train:")
     assert len(key) == len("retrain-train:") + 24
@@ -335,6 +337,8 @@ def test_train_and_stage_requests_chain_and_bind_artifacts():
         assert len(request.idempotency_key) <= 128
         assert request.principal == "operator"
         assert plan["spec_hash"] == content_hash(plan["parameters"])
+        assert request.job.parameters == plan["parameters"]
+        assert request.job.spec_hash == content_hash(request.job.parameters)
         for ref in request.job.input_refs:
             assert not ref.startswith("job_")
             assert "#" not in ref
@@ -424,6 +428,12 @@ def test_request_rejects_unsubmittable_plans():
     del_plan = {**plan}
     del del_plan["input_refs"]
     _invalid("input_refs", lambda: train_request(plan=del_plan))
+
+
+def test_request_rejects_job_output_refs_without_dependency():
+    plan = _train_plan()
+    bad = {**plan, "input_refs": [*plan["input_refs"], "job_missing#output"]}
+    _invalid("input_refs", lambda: train_request(plan=bad))
 
 
 def test_manifest_ref_rejects_job_output_ref():

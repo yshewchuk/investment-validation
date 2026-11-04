@@ -54,9 +54,7 @@ def _date_ok(value: object, pattern: re.Pattern[str], suffix: str = "") -> bool:
 def candidate_id(month: str, session: str) -> str:
     _need(_date_ok(month, _MONTH, "-01"), "month")
     _need(_date_ok(session, _SESSION), "session")
-    result = f"pools-retrain-{month}-{session}"
-    _need(_safe_id(result), "candidate_id")
-    return result
+    return f"pools-retrain-{month}-{session}"
 
 
 def retrain_cutoff(month: str) -> str:
@@ -84,9 +82,14 @@ def step_key(step: str, plan, parents=()) -> str:
     _need(all(field in plan for field in _PLAN_FIELDS), "plan")
     spec_hash = plan["spec_hash"]
     _need(isinstance(spec_hash, str) and _HASH.fullmatch(spec_hash), "spec_hash")
+    dependencies = plan["dependency_job_ids"]
+    _need(isinstance(dependencies, (list, tuple))
+          and all(isinstance(dep, str) and dep for dep in dependencies), "plan")
+    _need(isinstance(parents, (list, tuple))
+          and all(isinstance(parent, str) and parent for parent in parents), "parents")
     try:
         _need(spec_hash == content_hash(plan["parameters"]), "spec_hash")
-        deps = tuple(dict.fromkeys((*plan["dependency_job_ids"], *parents)))
+        deps = tuple(dict.fromkeys((*dependencies, *parents)))
         fingerprint = {
             "kind": plan["kind"],
             "spec_hash": spec_hash,
@@ -186,7 +189,6 @@ def _request(step, plan, parents=()):
     _need(isinstance(plan, dict), "plan")
     kind = _REQUEST_KINDS[step]()
     _need(plan.get("kind") == _EXPECTED_PLAN_KINDS[step], "plan")
-    _need(plan["kind"] == kind.name, "plan")
     _need(plan.get("schema_version") == "operations_plan.v1.0", "plan")
     _need(plan.get("mode") == "shadow", "plan")
     _need(plan.get("blocked_prerequisites") == [], "plan")
@@ -208,6 +210,9 @@ def _request(step, plan, parents=()):
                        for parent in parents)
     key = step_key(step, plan, parent_ids)
     deps = tuple(dict.fromkeys((*plan["dependency_job_ids"], *parent_ids)))
+    job_refs = (ref.split("#", 1) for ref in plan_refs if ref.startswith("job_"))
+    _need(all(len(parts) == 2 and parts[1] and parts[0] in deps
+              for parts in job_refs), "input_refs")
     refs = tuple(ref for ref in plan_refs if not ref.startswith("job_"))
     job = JobSpec(kind=kind.name, implementation_ref=plan["implementation_ref"],
         spec_hash=plan["spec_hash"], parameters=to_document(plan["parameters"]),
