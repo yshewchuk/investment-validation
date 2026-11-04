@@ -243,6 +243,8 @@ def test_stage_plan_binds_train_outputs_and_legacy_manifest():
     )
     train = train_request(plan=train_plan_value, parents=(restage,))
     train_id = job_id_for(train.namespace, train.idempotency_key)
+    feature_id = job_id_for(features.namespace, features.idempotency_key)
+    assert feature_id in train.job.dependency_job_ids
     assert train_id != job_id_for("shadow", step_key("train", train_plan_value))
     plan = stage_plan(
         month=MONTH, session=SESSION, base=BASE, release_root=ROOT,
@@ -250,7 +252,7 @@ def test_stage_plan_binds_train_outputs_and_legacy_manifest():
         implementation_ref=IMPL, environment_ref=ENV,
     )
     params = plan["parameters"]
-    refs = {name: f"job_{train_id}#training/{name}" for name in STATE_FILES}
+    refs = {name: f"{train_id}#training/{name}" for name in STATE_FILES}
     assert plan["kind"] == "phase5_state_stage"
     assert plan["spec_hash"] == content_hash(params)
     assert tuple(params["expected_ids"]) == ("phase5_state_stage",)
@@ -397,6 +399,18 @@ def test_stage_plan_rejects_equal_base_and_mismatched_training_bindings():
         features_request=features, training_request=wrong_output,
         implementation_ref=IMPL, environment_ref=ENV,
     ))
+    feature_id = job_id_for(features.namespace, features.idempotency_key)
+    wrong_deps = replace(train, job=replace(
+        train.job,
+        dependency_job_ids=tuple(
+            dep for dep in train.job.dependency_job_ids if dep != feature_id
+        ),
+    ))
+    _invalid("training_request", lambda: stage_plan(
+        month=MONTH, session=SESSION, base=BASE, release_root=ROOT,
+        features_request=features, training_request=wrong_deps,
+        implementation_ref=IMPL, environment_ref=ENV,
+    ))
 
 
 def test_stage_request_mismatches_are_rejected_in_check_and_promote():
@@ -492,6 +506,14 @@ def test_all_five_requests_chain_and_bind_artifacts():
         step_key("check", plans[3]),
         step_key("promote", plans[4]),
     ]
+    assert [plan["mode"] for plan in plans] == ["shadow"] * len(plans)
+    assert [tuple(plan["parameters"]["expected_ids"]) for plan in plans] == [
+        ("training",),
+        ("phase5_state_stage",),
+        ("phase5_accept",),
+        ("retrain_check",),
+        ("models_promote",),
+    ]
     for request, plan in zip(requests, plans):
         assert len(request.idempotency_key) <= 128
         assert request.principal == "operator"
@@ -527,11 +549,11 @@ def test_all_five_requests_chain_and_bind_artifacts():
     assert any(ref.startswith("job_") for ref in plans[1]["input_refs"])
     assert any(ref.startswith("job_") for ref in plans[3]["input_refs"])
     assert stage.job.parameters["input_bindings"] == {
-        **{name: f"job_{train_id}#training/{name}" for name in STATE_FILES},
+        **{name: f"{train_id}#training/{name}" for name in STATE_FILES},
         "legacy_manifest.json": manifest,
     }
     assert check.job.parameters["input_bindings"] == {
-        ACCEPTANCE_FILE: f"job_{accept_id}#acceptance"
+        ACCEPTANCE_FILE: f"{accept_id}#acceptance"
     }
     assert promote.job.parameters["expected_previous_release_id"] == BASE
     assert promote.job.parameters["release_id"] == candidate_id(MONTH, SESSION)
@@ -560,13 +582,13 @@ def test_request_parameters_are_detached_from_plan():
     original = train.job.parameters["month"]
     plans[0]["parameters"]["month"] = "1999-01"
     assert train.job.parameters["month"] == original
-    original_cutoffs = train.job.parameters["cutoffs"]
+    original_cutoffs = tuple(train.job.parameters["cutoffs"])
     cutoffs = plans[0]["parameters"]["cutoffs"]
     if isinstance(cutoffs, list):
         cutoffs[0] = "1999-01"
     else:
         plans[0]["parameters"]["cutoffs"] = ("1999-01",)
-    assert train.job.parameters["cutoffs"] == original_cutoffs
+    assert tuple(train.job.parameters["cutoffs"]) == original_cutoffs
 
 
 def test_request_parents_are_merged_and_deduplicated():
@@ -592,6 +614,7 @@ def test_request_rejects_unsubmittable_plans():
     plan = _train_plan()
     for field, value in (
         ("schema_version", "operations_plan.v2.0"),
+        ("mode", "apply"),
         ("blocked_prerequisites", ["missing"]),
         ("effects", ["applied"]),
     ):
@@ -676,7 +699,7 @@ def test_d1_pool_only_semantics():
         implementation_ref=IMPL, environment_ref=ENV,
     )
     bindings = stage_plan_value["parameters"]["input_bindings"]
-    expected = {name: f"job_{train_id}#training/{name}" for name in STATE_FILES}
+    expected = {name: f"{train_id}#training/{name}" for name in STATE_FILES}
     expected["legacy_manifest.json"] = manifest
     assert bindings == expected
     assert tuple(stage_plan_value["parameters"]["state_files"]) == tuple(sorted(STATE_FILES))

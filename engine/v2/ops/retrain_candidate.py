@@ -178,7 +178,7 @@ def stage_plan(*, month, session, base, release_root, features_request, training
     _need(_safe_root(release_root), "release_root")
     candidate = candidate_id(month, session)
     _need(base != candidate, "base")
-    manifest, _ = _manifest_ref(features_request)
+    manifest, feature_id = _manifest_ref(features_request)
     train_id = _request_job_id(training_request, "training_request", "training")
     _need(training_request.namespace == "shadow", "training_request")
     _need(training_request.job.output_namespace == "shadow", "training_request")
@@ -192,7 +192,8 @@ def stage_plan(*, month, session, base, release_root, features_request, training
     _need(train_params.get("input_bindings") == {"legacy_manifest.json": manifest},
           "training_request")
     _need(tuple(training_request.job.input_refs) == (manifest,), "training_request")
-    refs = {name: f"job_{train_id}#training/{name}" for name in STATE_FILES}
+    _need(feature_id in training_request.job.dependency_job_ids, "training_request")
+    refs = {name: f"{train_id}#training/{name}" for name in STATE_FILES}
     bindings = {**refs, "legacy_manifest.json": manifest}
     params = StateStageParameters(expected_ids=("phase5_state_stage",), release_root=release_root,
         prior_release_id=base, release_id=candidate, cutoff=retrain_cutoff(month),
@@ -229,7 +230,7 @@ def check_plan(*, month, session, base, release_root, stage_request, accept_requ
         stage_request, candidate=candidate, release_root=release_root, base=base)
     accept_id, _ = _accept_request_parts(
         accept_request, candidate=candidate, release_root=release_root, stage_id=stage_id)
-    ref = f"job_{accept_id}#acceptance"
+    ref = f"{accept_id}#acceptance"
     params = RetrainCheckParameters(expected_ids=("retrain_check",), release_root=release_root,
         candidate_release_id=candidate, incumbent_release_id=base,
         input_bindings={ACCEPTANCE_FILE: ref})
@@ -256,7 +257,7 @@ def promote_plan(*, month, session, base, release_root, stage_request, accept_re
     _need(check_params.get("release_root") == release_root, "check_request")
     _need(check_params.get("incumbent_release_id") == base, "check_request")
     _need(check_params.get("input_bindings") == {
-        ACCEPTANCE_FILE: f"job_{accept_id}#acceptance"}, "check_request")
+        ACCEPTANCE_FILE: f"{accept_id}#acceptance"}, "check_request")
     _need(tuple(check_request.job.dependency_job_ids) == (accept_id,), "check_request")
     params = PromoteParameters(expected_ids=("models_promote",), release_root=release_root,
         release_id=candidate, expected_previous_release_id=base)
@@ -278,6 +279,7 @@ def _request(step, plan, parents=()):
     _need(plan.get("kind") == _EXPECTED_PLAN_KINDS[step], "plan")
     _need(plan["kind"] == kind.name, "plan")
     _need(plan.get("schema_version") == "operations_plan.v1.0", "plan")
+    _need(plan.get("mode") == "shadow", "plan")
     _need(plan.get("blocked_prerequisites") == [], "plan")
     _need(plan.get("effects") == ["staged"], "plan")
     plan_refs = plan.get("input_refs")
