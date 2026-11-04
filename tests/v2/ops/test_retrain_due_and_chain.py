@@ -312,6 +312,7 @@ def test_due_retrain_requires_manifest_but_not_due_does_not(tmp_path, monkeypatc
     with pytest.raises(OpsError) as exc_info:
         _requests(plan, input_refs=())
     assert exc_info.value.code == "INVALID_REQUEST"
+    assert "due retrain requires a pinned legacy manifest" in str(exc_info.value)
 
     plan["retrain"] = {"state": "not_due", "reason": "month_already_recorded", "base": "rel1"}
     requests = _requests(plan, input_refs=())
@@ -395,6 +396,7 @@ def test_due_plan_has_six_retrain_steps(monkeypatch, tmp_path):
                for name in states)
     assert stage["mode"] == "monthly" and stage["cutoff"] == "2026-11-01"
     assert stage["release_id"] == "pools-retrain-2026-10-2026-09-18"
+    assert retrain[3].job.parameters["candidate_release_id"] == stage["release_id"]
     assert training["input_bindings"]["legacy_manifest.json"] == "manifest_artifact"
     assert stage["input_bindings"]["legacy_manifest.json"] == "manifest_artifact"
     assert retrain[1].job.input_refs == ("manifest_artifact",)
@@ -456,6 +458,7 @@ def test_worker_chain_steps_are_not_retrain_step_requests(step, tmp_path):
         _dispatch_retrain_step({"step": step, "session": "s", "month": "m",
                                 "expected_ids": ["k"]}, tmp_path)
     assert excinfo.value.problem.code == "INVALID_REQUEST"
+    assert "retrain_step is reserved for restage" in str(excinfo.value)
 
 
 def test_sidecar_gate(monkeypatch, tmp_path):
