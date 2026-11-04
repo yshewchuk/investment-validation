@@ -1134,6 +1134,7 @@ mutate = [
     "engine/v2/ops/training.py",
     "engine/v2/ops/state_stage.py",
     "engine/v2/ops/pool_refresh.py",
+    "engine/v2/ops/retrain_candidate.py",
     "engine/v2/ops/retrain_due.py",
     "engine/v2/ops/retrain_plan.py",
     "engine/v2/ops/unit_receipts.py",
