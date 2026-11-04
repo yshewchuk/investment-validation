@@ -9,6 +9,7 @@ from engine.v2.ops.native_registration import (
     allows_workers as allows_workers,
     qualified as qualified,
     request_version as request_version,
+    uses_chrono_neural_profiles as uses_chrono_neural_profiles,
     uses_extended_neural_profiles as uses_extended_neural_profiles,
     uses_v3_compiler as uses_v3_compiler,
 )

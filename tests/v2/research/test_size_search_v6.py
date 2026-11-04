@@ -21,11 +21,11 @@ from experiments.v2_magnitude_search_run import seal_search_run
 from tests.v2.models.training.test_magnitude_mlp import independent_oracle
 from tests.v2.research.magnitude_trial_support import poison_outcomes, prediction_spec
 from tests.v2.research.test_magnitude_panel_qualified import panel_data
-from tests.v2.research.test_magnitude_search_request_v6 import PROFILES, v6_request
+from tests.v2.research.test_magnitude_search_request_v6 import (
+    PROFILES, V8_ADDITIONS, v6_request, v8_request)
 
 
-@pytest.fixture
-def case(tmp_path):
+def _case(tmp_path, request, experiment_id):
     days = ["2022-06-02", "2022-09-06", "2022-11-01", "2023-01-03", "2023-06-02", "2024-06-17"]
     generator = panel_data.__wrapped__(tmp_path, SimpleNamespace(param={
         "days": days, "values": [2., 3., 4., 5., 6., 7.]}))
@@ -39,7 +39,6 @@ def case(tmp_path):
     panel = size_panel.materialize(data.repository, data.panel_source, **panel_request)
     panel_request.update(feature_snapshot_id=panel["feature_snapshot"].snapshot_id,
         history_snapshot=history["feature_snapshot"].snapshot_id, price_history_snapshot=data.prices.snapshot_id)
-    request = v6_request(PROFILES[:1])
     request["space"] = {family: {axis: values[:1] for axis, values in axes.items()}
                         for family, axes in request["space"].items()}
     request.update(feature_dictionary_hash=recipe("HMO")["dictionary_hash"],
@@ -51,7 +50,7 @@ def case(tmp_path):
     request["limits"] = {"child": {"memory_bytes": 2 << 30, "cpu_seconds": 30, "wall_seconds": 60},
         "parent": {"memory_bytes": 4 << 30, "wall_seconds": 600},
         "build": {"memory_bytes": 3 << 30, "wall_seconds": 60}, "job": {"wall_seconds": 600}}
-    spec = prediction_spec(experiment_id="synthetic-qualified-size-v6", folds=("2024",),
+    spec = prediction_spec(experiment_id=experiment_id, folds=("2024",),
                            runner="experiments/size_search.py")
     registration, spec = binding.prepare(data.repository, spec, request, panel_request,
         scope="panel-source", training_start="2022-01-01", labels_before="2025-01-01")
@@ -68,6 +67,54 @@ def case(tmp_path):
         next(generator)
     except StopIteration:
         pass
+
+
+@pytest.fixture
+def case(tmp_path):
+    yield from _case(tmp_path, v6_request(PROFILES[:1]), "synthetic-qualified-size-v6")
+
+
+@pytest.fixture
+def v8_case(tmp_path):
+    yield from _case(tmp_path, v8_request(V8_ADDITIONS[:1]), "synthetic-qualified-size-v8")
+
+
+
+def test_v8_chrono_native_fit_date_evidence_and_replay(v8_case, monkeypatch):
+    plan = v8_case.plan
+    assert v8_case.request["schema_version"] == "magnitude_search_request.v8"
+    assert plan["schema_version"] == "magnitude_search_plan.v3"
+    neural = [candidate for candidate in plan["candidates"] if candidate["recipe"].get("model") == "mlp"]
+    assert len(neural) == 3
+    assert {candidate["recipe"]["profile"] for candidate in neural} == {V8_ADDITIONS[0]}
+    assert {len(candidate["recipe"]["features"]) for candidate in neural} == {11, 28, 43}
+    assert all(candidate["recipe"]["requires_event_dates"] is True for candidate in neural)
+    assert planner.read_search_plan(
+        v8_case.conn, v8_case.store, v8_case.registration, v8_case.request, v8_case.ref) == plan
+
+    selected = min(neural, key=lambda candidate: len(candidate["recipe"]["features"]))
+    recorder = trials.SearchTrials(*v8_case.context)
+    receipt = recorder.execute("2024", "2023", selected["candidate_id"],
+                               limits=v8_case.request["limits"]["child"])
+    assert receipt["status"] == receipt["terminal"]["status"] == "succeeded"
+    assert receipt["fit_attempt_count"] == receipt["completed_fit_count"] == 1
+    diagnostics = receipt["diagnostics"][0]
+    assert diagnostics["component_fits"] == 1
+    assert diagnostics["loss_scale"] == "standardized_target"
+    assert np.isfinite(diagnostics["loss"])
+    assert 0 < diagnostics["n_iter"] <= 400
+    assert diagnostics["converged"] is (diagnostics["n_iter"] < 400)
+
+    replay = trials.SearchTrials(*v8_case.context)
+    before = v8_case.conn.total_changes
+    poison_outcomes(monkeypatch, v8_case.repository, v8_case.panel_source, (), all_outcomes=True)
+    monkeypatch.setattr(trials, "run_fitted_trial", lambda *args: pytest.fail("replay launched a child"))
+    monkeypatch.setattr(trials, "evaluation_targets", lambda *args: pytest.fail("replay opened labels"))
+    monkeypatch.setattr(v8_case.store, "publish_bytes", lambda *args, **kwargs: pytest.fail("replay wrote an artifact"))
+    with no_fit_guard(), legacy_no_fit_guard():
+        assert replay.execute("2024", "2023", selected["candidate_id"],
+                              limits=v8_case.request["limits"]["child"]) == receipt
+    assert v8_case.conn.total_changes == before
 
 
 def _clone_case(case, path):

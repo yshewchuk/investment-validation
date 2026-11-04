@@ -24,6 +24,15 @@ V7_ADDITIONS = [
     "fixed200_relu64x32_l2_100",
 ]
 V7_PROFILES = sorted(PROFILES + V7_ADDITIONS)
+V8_ADDITIONS = [
+    "chrono15_relu32_l2_0p01",
+    "chrono15_relu32_l2_1",
+    "chrono15_relu64x32_l2_0p01",
+    "chrono15_relu64x32_l2_1",
+    "chrono10_relu64x32_l2_0p01",
+    "chrono10_relu64x32_l2_1",
+]
+V8_PROFILES = sorted(V7_PROFILES + V8_ADDITIONS)
 
 
 def v6_request(profiles=PROFILES):
@@ -38,6 +47,15 @@ def v6_request(profiles=PROFILES):
 def v7_request(profiles=V7_PROFILES):
     request = v5_request()
     request["schema_version"] = "magnitude_search_request.v7"
+    request["space"]["mlp"] = {"profile": list(profiles)}
+    request["max_candidates"] = 100 + 3 * len(profiles)
+    request["max_fits"] = 3 * (request["max_candidates"] * 6 + 3)
+    return request
+
+
+def v8_request(profiles=V8_PROFILES):
+    request = v5_request()
+    request["schema_version"] = "magnitude_search_request.v8"
     request["space"]["mlp"] = {"profile": list(profiles)}
     request["max_candidates"] = 100 + 3 * len(profiles)
     request["max_fits"] = 3 * (request["max_candidates"] * 6 + 3)
@@ -108,13 +126,44 @@ def test_v7_profiles_counts_recipes_and_workers():
     assert request["workers"] == 8
 
 
+def test_v8_chrono_profiles_counts_recipes_and_workers():
+    request = v8_request()
+    result = compile_request(request)
+    assert result["request_id"] == content_hash(result["request"])
+    assert result["counts"]["candidates"] == 148
+    neural = [s for s in result["candidate_specs"] if s["family"] == "mlp"]
+    assert len(neural) == 48
+    assert {(s["feature_recipe"]["subset"], s["parameters"]["profile"]) for s in neural} == {
+        (subset, profile) for subset in ("H", "HM", "HMO") for profile in V8_PROFILES}
+    for spec in neural:
+        recipe = candidate_recipe("mlp", spec["parameters"], columns=["signal"],
+                                  feature_dictionary_hash=request["feature_dictionary_hash"])
+        params = recipe["estimator"]["params"]
+        profile = spec["parameters"]["profile"]
+        if profile.startswith("fixed200_"):
+            assert params["max_iter"] == 200 and params["n_iter_no_change"] == 201
+        elif profile.startswith("es_"):
+            assert params["max_iter"] == 400 and params["early_stopping"] is True
+        elif profile.startswith("chrono"):
+            assert params["max_iter"] == 400 and params["n_iter_no_change"] == 20
+            assert params["early_stopping"] is False
+            assert recipe["requires_event_dates"] is True
+        else:
+            assert params["max_iter"] == 400 and params["early_stopping"] is False
+    for workers in (1, 8):
+        request = v8_request()
+        request["workers"] = workers
+        actual = compile_request(request)
+        assert actual == result and request["workers"] == workers
+
+
 def _no_expansion(*args, **kwargs):
     pytest.fail("invalid request expanded specifications")
 
 
 @pytest.mark.parametrize("profiles", [[], ["unknown"], [1], [True], [None], [{}],
     [PROFILES[0], PROFILES[0]], list(reversed(PROFILES)), PROFILES * 11, "relu32_l2_0p01",
-    [V7_ADDITIONS[0]]])
+    [V7_ADDITIONS[0]], [V8_ADDITIONS[0]]])
 def test_invalid_profiles_refuse_before_expansion(monkeypatch, profiles):
     request = v6_request()
     request["space"]["mlp"]["profile"] = profiles
@@ -125,13 +174,13 @@ def test_invalid_profiles_refuse_before_expansion(monkeypatch, profiles):
 
 
 def test_invalid_v7_profiles_refuse_before_expansion(monkeypatch):
-    request = v7_request()
-    request["space"]["mlp"]["profile"] = ["unknown"]
-    monkeypatch.setattr(compiler, "_specifications", _no_expansion)
-    with pytest.raises(OpsError) as caught:
-        compile_request(request)
-    assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
-    assert caught.value.problem.retryable is False
+    for profiles in (["unknown"], [V8_ADDITIONS[0]]):
+        request = v7_request(profiles)
+        monkeypatch.setattr(compiler, "_specifications", _no_expansion)
+        with pytest.raises(OpsError) as caught:
+            compile_request(request)
+        assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
+        assert caught.value.problem.retryable is False
 
 
 @pytest.mark.parametrize("change", [

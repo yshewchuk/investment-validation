@@ -33,13 +33,14 @@ class FitInputs:
 
     @classmethod
     def from_recipe(cls, recipe, train_features, train_labels, prediction_features, columns,
-                    *, column_error,
+                    *, column_error, train_event_dates=None,
                     guard_path="FitInputs.from_recipe") -> FitInputs:
         """Check guards and ordered columns, then store the caller objects as given."""
         check_fitting_allowed(guard_path)
         if not isinstance(columns, (list, tuple)) or list(columns) != recipe["features"]:
             raise ValueError(column_error)
-        return cls(train_features, train_labels, prediction_features, columns)
+        return cls(train_features, train_labels, prediction_features, columns,
+                   train_event_dates=train_event_dates)
 
     def validate_row_count(self, train_rows, label_rows, row_error) -> None:
         """Validate rows after matrix conversion and matrix-shape/infinity checks."""

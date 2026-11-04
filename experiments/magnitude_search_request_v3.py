@@ -1,4 +1,4 @@
-"""Pure v3-v7 validation with bounded grids, fixed SIZE and named neural profiles."""
+"""Pure v3-v8 validation with bounded grids, fixed SIZE and named neural profiles."""
 import json
 import math
 
@@ -7,7 +7,7 @@ from engine.v2.ops.errors import fail
 from experiments import magnitude_search_request as v2
 from experiments.magnitude_search_request_schema import (
     allows_hgb_axes, allows_neural, allows_size_family, request_version,
-    uses_extended_neural_profiles)
+    uses_chrono_neural_profiles, uses_extended_neural_profiles)
 
 __all__ = ["compile_request"]
 
@@ -39,6 +39,10 @@ _MLP_PROFILES_V7 = _MLP_PROFILES | {
     "es_relu32_l2_0p01", "es_relu32_l2_1", "es_relu64x32_l2_0p01",
     "es_relu64x32_l2_1", "fixed200_relu64x32_l2_1", "fixed200_relu64x32_l2_10",
     "fixed200_relu64x32_l2_100"}
+_MLP_PROFILES_V8 = _MLP_PROFILES_V7 | {
+    "chrono15_relu32_l2_0p01", "chrono15_relu32_l2_1",
+    "chrono15_relu64x32_l2_0p01", "chrono15_relu64x32_l2_1",
+    "chrono10_relu64x32_l2_0p01", "chrono10_relu64x32_l2_1"}
 
 
 _SELECTION_METRICS = {"rmse": 0.6, "mae": 0.3, "large_move_underprediction": 0.1}
@@ -110,8 +114,11 @@ def _space(request):
             v2._require(type(values) is list and 1 <= len(values) <= _MAX_AXIS_LENGTH,
                         "stage-2 grid axis length must be between 1 and 32")
             if family == "mlp":
-                v2._require(all(type(value) is str and value in (
-                    _MLP_PROFILES_V7 if uses_extended_neural_profiles(request_version(version)) else _MLP_PROFILES)
+                parsed_version = request_version(version)
+                allowed = (_MLP_PROFILES_V8 if uses_chrono_neural_profiles(parsed_version)
+                           else _MLP_PROFILES_V7 if uses_extended_neural_profiles(parsed_version)
+                           else _MLP_PROFILES)
+                v2._require(all(type(value) is str and value in allowed
                     for value in values)
                     and values == sorted(set(values)),
                     "stage-2 MLP profiles must be known, unique and lexicographically ordered")
@@ -153,7 +160,7 @@ def _counts(request, horizons):
         for family, axes in request["space"].items() if family != "size_v1_4")
     if allows_hgb_axes(request_version(request["schema_version"])):
         v2._require(count <= _MAX_V4_CANDIDATES,
-                    "stage-2 v6/v7 grid exceeds the 1000-candidate ceiling"
+                    "stage-2 v6/v7/v8 grid exceeds the 1000-candidate ceiling"
                     if allows_neural(request_version(request["schema_version"]))
                     else "stage-2 v4/v5 grid exceeds the 1000-candidate ceiling")
     inners, outers = sum(map(len, inner.values())), len(outer)
@@ -189,7 +196,7 @@ def compile_request(request, *, horizons=(5, 3, 1)):
                 or (allows_hgb_axes(request_version(version))
                     and request_keys in (v2._KEYS | {"selection"},
                                          v2._KEYS | {"selection", "workers"})),
-                "stage-2 request requires its closed v6/v7 schema and selection policy"
+                "stage-2 request requires its closed v6/v7/v8 schema and selection policy"
                 if allows_neural(request_version(version))
                 else "stage-2 request requires its closed v3/v4/v5 schema and selection policy")
     v2.validate_workers(request)

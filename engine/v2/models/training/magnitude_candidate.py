@@ -15,6 +15,9 @@ def fit_candidate(recipe, inputs: FitInputs) -> dict:
         from .magnitude_elasticnet import fit_elasticnet_predictions as fit
     elif family == "mlp":
         from .magnitude_mlp import fit_mlp_predictions as fit
+        return fit(recipe, inputs.train_features, inputs.train_labels,
+                   inputs.prediction_features, columns=inputs.columns,
+                   train_event_dates=inputs.train_event_dates)
     else:
         from .magnitude_ridge_hgb import fit_ridge_hgb_predictions as fit
     return fit(recipe, inputs.train_features, inputs.train_labels,
