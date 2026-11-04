@@ -382,8 +382,11 @@ def test_due_plan_has_six_retrain_steps(monkeypatch, tmp_path):
     assert stage["release_id"] == "pools-retrain-2026-10-2026-09-18"
     assert training["input_bindings"]["legacy_manifest.json"] == "manifest_artifact"
     assert stage["input_bindings"]["legacy_manifest.json"] == "manifest_artifact"
+    assert retrain[1].job.input_refs == ("manifest_artifact",)
+    assert retrain[2].job.input_refs == ("manifest_artifact",)
     assert retrain[4].job.parameters["input_bindings"]["acceptance.json"] == f"{accept_id}#acceptance"
     assert retrain[5].job.parameters["expected_previous_release_id"] == "rel1"
+    assert retrain[5].job.parameters["release_root"] == str(tmp_path / "deployment")
     conn = _conn()
     conn.execute("INSERT INTO jobs VALUES ('shadow', ?, 'succeeded', '2026-09-18T00:00:00Z')",
                  (keys[0],))

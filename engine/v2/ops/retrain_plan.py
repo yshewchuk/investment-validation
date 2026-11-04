@@ -58,7 +58,8 @@ def _typed_retrain_request(kind_name, key, parameters, parents, implementation_r
     job = JobSpec(
         kind=kind_name, implementation_ref=source.get("implementation_ref", implementation_ref),
         spec_hash=source.get("spec_hash", content_hash(params)), parameters=params,
-        input_refs=(),
+        input_refs=tuple(ref for ref in (input_refs or source.get("input_refs", ()))
+                         if "#" not in ref),
         dependency_job_ids=tuple(parents), output_namespace="shadow",
         retry_policy_ref=retry_ref, checkpoint_contract_ref=kind.checkpoint_contract,
         resource_class=source.get("resource_class", "validation"),
@@ -70,6 +71,7 @@ def _typed_retrain_request(kind_name, key, parameters, parents, implementation_r
 def _due_retrain_requests(session, month, base, ph, keys, restage_key,
                           implementation_ref, requests):
     from engine.v2.foundation import content_hash, to_document
+    from engine.v2.models import deployment
     from engine.v2.ops.experiments import default_checkout_root
     from engine.v2.ops.fingerprints import environment_identity
     from engine.v2.ops.profiles import DEFAULT_POLICY, profile_named
@@ -97,6 +99,7 @@ def _due_retrain_requests(session, month, base, ph, keys, restage_key,
         state_refs=state_refs, manifest_ref=manifest_ref,
         source_root=default_checkout_root(), mode="monthly")
     release_root = stage_plan["parameters"]["release_root"]
+    deployment_root = str(deployment.production_deployment_root())
     validation = profile_named(DEFAULT_POLICY, "validation")
     validation_env = content_hash(environment_identity(
         validation.thread_count or validation.cpu_count))
@@ -112,7 +115,7 @@ def _due_retrain_requests(session, month, base, ph, keys, restage_key,
         candidate_release_id=candidate, incumbent_release_id=base,
         input_bindings={"acceptance.json": acceptance_ref}))
     promote_key = step_key("promote", session, month, base, ph)
-    promote = promote_plan(release_root=release_root, release_id=candidate,
+    promote = promote_plan(release_root=deployment_root, release_id=candidate,
                            expected_previous_release_id=base)
     stage_key = step_key("stage", session, month, base, ph)
     stage_id = job_id_for("shadow", stage_key)
