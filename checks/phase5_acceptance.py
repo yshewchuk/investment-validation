@@ -63,18 +63,27 @@ from engine.v2.models import deployment  # noqa: E402
 from engine.v2.models.contracts import ModelRelease  # noqa: E402
 from engine.v2.models.release_layout import (  # noqa: E402
     EXPECTED_MODEL_BINDINGS,
+    MANIFEST_NAME,
     MISSING,
     PENDING,
     STAGED,
     STATE_SPECS,
     ReleaseLayoutError,
     StateSpec,
+    catalog_path,
     deployment_root,
+    read_catalog,
     read_manifest,
+    read_regular_file,
     sha256_bytes,
 )
 
 PHASE5_EVIDENCE_SCHEMA = "phase5_acceptance.v1.0"
+MAX_MEMBER_BYTES = 512 * 1024 * 1024
+# Consumers between bounded progress lines during the scoring scan. Small
+# enough to prove liveness on a long pass, large enough that a normal catalog
+# never logs per consumer/member.
+CONSUMER_PROGRESS_EVERY = 50
 
 # Finding codes. Every one is a gate failure.
 RELEASE_LAYOUT = "P5_RELEASE_LAYOUT"
@@ -83,6 +92,7 @@ MEMBER_MISSING = "P5_MEMBER_MISSING"
 MEMBER_PENDING = "P5_MEMBER_PENDING"
 MEMBER_UNKNOWN = "P5_MEMBER_UNKNOWN"
 MEMBER_OBJECT_ABSENT = "P5_MEMBER_OBJECT_ABSENT"
+MEMBER_OBJECT_READ_FAILED = "P5_MEMBER_OBJECT_READ_FAILED"
 MEMBER_HASH_MISMATCH = "P5_MEMBER_HASH_MISMATCH"
 MEMBER_UNLOADABLE = "P5_MEMBER_UNLOADABLE"
 MEMBER_IDENTITY = "P5_MEMBER_IDENTITY"
@@ -101,7 +111,8 @@ REPORT_INCOMPLETE = "P5_REPORT_INCOMPLETE"
 
 FINDING_CODES = (
     RELEASE_LAYOUT, MODEL_RELEASE_INVALID, MEMBER_MISSING, MEMBER_PENDING,
-    MEMBER_UNKNOWN, MEMBER_OBJECT_ABSENT, MEMBER_HASH_MISMATCH, MEMBER_UNLOADABLE,
+    MEMBER_UNKNOWN, MEMBER_OBJECT_ABSENT, MEMBER_OBJECT_READ_FAILED,
+    MEMBER_HASH_MISMATCH, MEMBER_UNLOADABLE,
     MEMBER_IDENTITY, LINEAGE_INVALID,
     CONSUMER_UNRESOLVED, CONSUMER_NO_REFUSAL, CONSUMER_ERROR, CONSUMER_PENDING,
     CONSUMER_BLOCKED, RUNTIME_FIT, MODEL_CACHE_WRITE, GUARD_CONTROL_FAILED,
@@ -131,9 +142,25 @@ def _progress(tag: str, message: str, started: float) -> None:
     boundary calls this -- the same ``[tag] message`` idiom
     ``tools/capture_tier0_corpus.py``'s ``[corpus] ...`` lines use, extended
     with a wall-clock timestamp so a supervisor tailing the log with `date`
-    can tell how far along a run is, not just that it is still alive."""
+    can tell how far along a run is, not just that it is still alive.
+
+    Writes to stderr, the channel the worker executor already captures as
+    ``diagnostics/worker.stderr``; stdout stays the machine-readable result."""
     print(f"[{tag} {time.strftime('%H:%M:%S')}] {message} "
-          f"(+{time.perf_counter() - started:.1f}s, rss {_rss_gb():.2f}G)", flush=True)
+          f"(+{time.perf_counter() - started:.1f}s, rss {_rss_gb():.2f}G)",
+          file=sys.stderr, flush=True)
+
+
+def _scan_progress(tag: str, started: float, done: int, total: int,
+                   events: int) -> None:
+    """One bounded periodic line for the scoring scan: done/total, event count,
+    rate and ETA, never a per-consumer or per-event line."""
+    elapsed = max(time.perf_counter() - started, 1e-9)
+    rate = done / elapsed
+    remaining = max(total - done, 0)
+    eta = remaining / rate if rate > 0 else 0.0
+    _progress(tag, f"consumers: scanned {done}/{total} (events {events}), "
+                   f"{rate:.2f}/s, ETA {eta:.1f}s", started)
 
 
 class ReportPathError(ValueError):
@@ -163,10 +190,16 @@ def _verify_object(release_root: Path, path: str, expected: str) -> str | None:
     try:
         target.relative_to(base)
     except ValueError:
+        return MEMBER_OBJECT_READ_FAILED
+    try:
+        data = read_regular_file(target, MAX_MEMBER_BYTES)
+    except FileNotFoundError:
         return MEMBER_OBJECT_ABSENT
-    if not target.is_file():
+    except (OSError, ValueError):
+        return MEMBER_OBJECT_READ_FAILED
+    if data is None:
         return MEMBER_OBJECT_ABSENT
-    return None if sha256_bytes(target.read_bytes()) == expected else MEMBER_HASH_MISMATCH
+    return None if sha256_bytes(data) == expected else MEMBER_HASH_MISMATCH
 
 
 def _load_model_release(release_root: Path, release_id: str, findings: _Findings):
@@ -231,7 +264,7 @@ def _typed_load(spec: StateSpec, release_root: Path, obj: Mapping[str, Any]):
     if "engine.v2.models.frozen_state" in spec.modules:
         from engine.v2.models.frozen_state import FrozenStateLoader, FrozenStateRef
 
-        return FrozenStateLoader(root).load(
+        return FrozenStateLoader(root, max_bytes=MAX_MEMBER_BYTES).load(
             FrozenStateRef(path=obj["path"], content_hash=obj["content_hash"]))
     return None  # raw members (Tier-4 folds, parquet pools): hash-verified only
 
@@ -340,7 +373,7 @@ def _lineage_subject(loaded: Mapping[str, dict], findings: _Findings) -> dict:
     try:
         report = propagate_corrections([state_node(i, a) for i, a in nodes], ())
     except LineageError as exc:
-        findings.add(LINEAGE_INVALID, "lineage", str(exc))
+        findings.add(LINEAGE_INVALID, "lineage", "release lineage graph is invalid")
         return {"status": LINEAGE_INVALID, "states": len(nodes), "code": exc.code}
     return {"status": "ok", "states": len(nodes), "valid": len(report.valid)}
 
@@ -356,22 +389,49 @@ def _consumer_members(consumer: str) -> list[str]:
 
 
 def _run_consumers(ctx: ReleaseContext, consumers: Mapping[str, Any],
-                   findings: _Findings) -> list[dict]:
-    rows = []
+                   findings: _Findings, *, started: float | None = None,
+                   tag: str = "p5-accept") -> list[dict]:
+    started = time.perf_counter() if started is None else started
+    total = len(consumers)
+    rows: list[dict] = []
+    skips: dict[str, int] = {}
+    refusals: dict[str, int] = {}
+    events = 0
+    done = 0
+    _progress(tag, f"consumers: scan start over {total} consumers", started)
     for consumer, probe in consumers.items():
+        done += 1
         if probe is None:
             members = ",".join(_consumer_members(consumer)) or "-"
             findings.add(CONSUMER_PENDING, consumer, f"no probe yet; members {members}")
             rows.append({"consumer": consumer, "member_id": members, "status": "PENDING"})
-            continue
-        try:
-            results = probe(ctx)
-        except Exception as exc:  # the probe itself broke: report, never skip
-            findings.add(CONSUMER_ERROR, consumer, type(exc).__name__)
-            rows.append({"consumer": consumer, "member_id": "-", "status": CONSUMER_ERROR})
-            continue
-        for result in results:
-            rows.append(_consumer_verdict(result, findings))
+            skips["pending"] = skips.get("pending", 0) + 1
+        else:
+            try:
+                results = probe(ctx)
+            except Exception as exc:  # the probe itself broke: report, never skip
+                findings.add(CONSUMER_ERROR, consumer, type(exc).__name__)
+                rows.append({"consumer": consumer, "member_id": "-", "status": CONSUMER_ERROR})
+                skips["error"] = skips.get("error", 0) + 1
+            else:
+                for result in results:
+                    verdict = _consumer_verdict(result, findings)
+                    rows.append(verdict)
+                    events += 1
+                    if verdict["status"] != "ok":
+                        refusals[verdict["status"]] = refusals.get(verdict["status"], 0) + 1
+                    if (CONSUMER_PROGRESS_EVERY
+                            and events % CONSUMER_PROGRESS_EVERY == 0):
+                        _scan_progress(tag, started, done, total, events)
+        if done == total or (CONSUMER_PROGRESS_EVERY
+                             and done % CONSUMER_PROGRESS_EVERY == 0):
+            _scan_progress(tag, started, done, total, events)
+    skips_text = ", ".join(f"{reason}={count}" for reason, count
+                           in skips.items() if count) or "none"
+    refusals_text = ", ".join(f"{reason}={count}" for reason, count
+                              in refusals.items() if count) or "none"
+    _progress(tag, f"consumers: scan end, {done}/{total} consumers, {events} events, "
+                   f"skips {skips_text}, refusals {refusals_text}", started)
     return rows
 
 
@@ -484,9 +544,10 @@ def _guard_controls(scratch: Path) -> dict[str, bool]:
     return controls
 
 
-def _scoring_pass(ctx, consumers, watch_dirs, findings) -> tuple[list[dict], dict]:
+def _scoring_pass(ctx, consumers, watch_dirs, findings, *,
+                  started: float | None = None) -> tuple[list[dict], dict]:
     with guarded_scoring(watch_dirs) as watch:
-        rows = _run_consumers(ctx, consumers, findings)
+        rows = _run_consumers(ctx, consumers, findings, started=started)
     for path in sorted(set(watch.fit_paths)):
         findings.add(RUNTIME_FIT, "scoring_pass", path)
     if watch.dump_calls:
@@ -670,28 +731,48 @@ def _default_watch_dirs(release_root: Path) -> list[Path]:
     return [paths.DATA / "models", deployment_root(release_root)]
 
 
+def _selected_manifest(release_root: Path, candidate_release_id: str | None) -> dict:
+    """The explicit candidate's release-local catalog, or the root selector.
+
+    An explicit id never falls back to the root ``phase5_release.json``: a
+    missing or mismatched candidate catalog is a layout refusal.
+    """
+    if candidate_release_id is None:
+        return read_manifest(release_root)
+    body = read_catalog(catalog_path(release_root, candidate_release_id),
+                        candidate_release_id)
+    if body is None:
+        raise ReleaseLayoutError(
+            f"no {MANIFEST_NAME} for candidate {candidate_release_id}")
+    return body
+
+
 def build_evidence(release_root: Path, *, report_dir: Path | None = None,
                    phase4_corpus: Path | None = None,
                    phase4_checkpoint: Path | None = None,
                    watch_dirs: Iterable[Path] | None = None,
                    consumers: Mapping[str, Any] | None = None,
-                   state_specs: tuple[StateSpec, ...] = STATE_SPECS) -> dict:
+                   state_specs: tuple[StateSpec, ...] = STATE_SPECS,
+                   candidate_release_id: str | None = None) -> dict:
     """Run every subject; ``consumers``/``state_specs``/``watch_dirs`` are test
     seams. Production passes none of them: the full catalog and the real
-    consumer table, where a probe that does not exist yet is PENDING."""
+    consumer table, where a probe that does not exist yet is PENDING.
+
+    ``candidate_release_id`` selects that release's local catalog; without it
+    the root selector is used, as the CLI always has."""
     started = time.perf_counter()
     release_root = Path(release_root)
     findings = _Findings()
     evidence: dict[str, Any] = {"schema_version": PHASE5_EVIDENCE_SCHEMA,
-                                "release_root": str(release_root), "members": [],
-                                "consumers": [], "scoring_pass": {}, "promote": {},
-                                "lineage": {"status": "NOT_RUN"},
+                                "members": [], "consumers": [], "scoring_pass": {},
+                                "promote": {}, "lineage": {"status": "NOT_RUN"},
                                 "phase4": {"status": "NOT_RUN"}}
     _progress("p5-accept", f"start release_root={release_root}", started)
     try:
-        manifest = read_manifest(release_root)
-    except (ReleaseLayoutError, OSError, ValueError) as exc:
-        findings.add(RELEASE_LAYOUT, "phase5_release.json", str(exc))
+        manifest = _selected_manifest(release_root, candidate_release_id)
+    except (ReleaseLayoutError, OSError, ValueError):
+        findings.add(RELEASE_LAYOUT, "phase5_release.json",
+                     "release catalog is missing or malformed")
         return _finish(evidence, findings, report_dir, started)
     release_id = manifest["release_id"]
     evidence.update({"release_id": release_id, "manifest_hash": manifest["manifest_hash"]})
@@ -716,7 +797,7 @@ def build_evidence(release_root: Path, *, report_dir: Path | None = None,
         _progress("p5-accept",
                   f"consumers: scoring pass over {len(active_consumers)} consumers", started)
         evidence["consumers"], evidence["scoring_pass"] = _scoring_pass(
-            ctx, active_consumers, dirs, findings)
+            ctx, active_consumers, dirs, findings, started=started)
         _progress("p5-accept", f"consumers: {len(evidence['consumers'])} scored", started)
 
         # The rehearsal consults no incumbent record: it binds only the
