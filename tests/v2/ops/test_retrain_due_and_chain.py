@@ -312,7 +312,7 @@ def test_due_retrain_requires_manifest_but_not_due_does_not(tmp_path, monkeypatc
     with pytest.raises(OpsError) as exc_info:
         _requests(plan, input_refs=())
     assert exc_info.value.code == "INVALID_REQUEST"
-    assert "due retrain requires a pinned legacy manifest" in str(exc_info.value)
+    assert str(exc_info.value) == "INVALID_REQUEST: due retrain requires a pinned legacy manifest"
 
     plan["retrain"] = {"state": "not_due", "reason": "month_already_recorded", "base": "rel1"}
     requests = _requests(plan, input_refs=())
@@ -458,7 +458,24 @@ def test_worker_chain_steps_are_not_retrain_step_requests(step, tmp_path):
         _dispatch_retrain_step({"step": step, "session": "s", "month": "m",
                                 "expected_ids": ["k"]}, tmp_path)
     assert excinfo.value.problem.code == "INVALID_REQUEST"
-    assert "retrain_step is reserved for restage" in str(excinfo.value)
+    assert str(excinfo.value) == "INVALID_REQUEST: retrain_step is reserved for restage"
+
+
+def test_retrain_step_admission_rejects_non_restage_requests():
+    from dataclasses import replace
+    from engine.v2.ops.stages import registry
+    from engine.v2.ops.submission import NamespacePolicy, validate_request
+
+    plan = _plan()
+    plan["retrain"] = {"state": "not_due", "reason": "month_already_recorded", "base": "rel1"}
+    request = next(r for r in _retrain_requests(_requests(plan))
+                   if r.job.kind == "retrain_step")
+    parameters = {**request.job.parameters, "step": "train"}
+    invalid = replace(request, job=replace(request.job, parameters=parameters))
+    policy = NamespacePolicy({"operator": frozenset({"shadow"})})
+    with pytest.raises(OpsError) as exc_info:
+        validate_request(registry(), policy, invalid)
+    assert exc_info.value.code == "INVALID_REQUEST"
 
 
 def test_sidecar_gate(monkeypatch, tmp_path):

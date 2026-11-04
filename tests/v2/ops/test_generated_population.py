@@ -382,6 +382,9 @@ def test_filtered_full_run_uses_subset_effect_scope(env, monkeypatch):
         plan, tickers=tuple(plan["tickers"]), context_tickers=tuple(plan["context_tickers"]),
         year_start=plan["year_start"], year_end=plan["year_end"],
         full_universe=tuple(plan["context_tickers"]), input_mode="legacy")
+    retrain = [request for request in requests
+               if request.idempotency_key.startswith("retrain-")]
+    assert len(retrain) == 1 and retrain[0].job.parameters["step"] == "restage"
     score_request = next(request for request in requests
                          if request.job.parameters["expected_ids"] == ("legacy_score",))
 

@@ -172,6 +172,10 @@ class RetrainStepParameters:
     base: str = ""
 
 
+def _retrain_step_admission_problems(job, params):
+    return [] if params.step == "restage" else ["retrain_step is reserved for restage"]
+
+
 @dataclass(frozen=True)
 class LegacyParameters:
     expected_ids: tuple[str, ...]
@@ -513,7 +517,8 @@ def registry():
         resource_classes=frozenset({"delivery"}), effects=("staged",),
         retry=RetryPolicy("bounded", 3, (5, 30)),
         checkpoint_contract="effect_receipt.v1.0",
-        namespaces=frozenset({"shadow", "smoke"})))
+        namespaces=frozenset({"shadow", "smoke"}),
+        validate=_retrain_step_admission_problems))
     profiles = {"legacy_score": "legacy_score", "legacy_score_requests": "legacy_score",
                 "legacy_decision_replay": "legacy_score",
                 "legacy_finality": "validation",
