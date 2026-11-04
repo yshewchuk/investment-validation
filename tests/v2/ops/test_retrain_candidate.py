@@ -12,13 +12,7 @@ from engine.v2.ops.errors import OpsError
 from engine.v2.ops.nightly import build_legacy_job_requests, build_nightly_plan
 from engine.v2.ops.retrain_candidate import (
     STATE_FILES,
-    accept_plan,
-    accept_request,
     candidate_id,
-    check_plan,
-    check_request,
-    promote_plan,
-    promote_request,
     retrain_cutoff,
     stage_plan,
     stage_request,
@@ -26,14 +20,9 @@ from engine.v2.ops.retrain_candidate import (
     train_plan,
     train_request,
 )
-from engine.v2.ops.retrain_check import (
-    ACCEPTANCE_FILE,
-    phase5_accept_job_kind,
-    retrain_check_job_kind,
-)
 from engine.v2.ops.state_stage import state_stage_job_kind
 from engine.v2.ops.submission import job_id_for
-from engine.v2.ops.training import promote_job_kind, training_job_kind
+from engine.v2.ops.training import training_job_kind
 
 MONTH = "2026-10"
 SESSION = "2026-11-02"
@@ -92,26 +81,8 @@ def _chain():
         implementation_ref=IMPL, environment_ref=ENV,
     )
     stage = stage_request(plan=stage_plan_value)
-    accept_plan_value = accept_plan(
-        month=MONTH, session=SESSION, release_root=ROOT, stage_request=stage,
-        implementation_ref=IMPL, environment_ref=ENV,
-    )
-    accept = accept_request(plan=accept_plan_value)
-    check_plan_value = check_plan(
-        month=MONTH, session=SESSION, base=BASE, release_root=ROOT,
-        stage_request=stage, accept_request=accept,
-        implementation_ref=IMPL, environment_ref=ENV,
-    )
-    check = check_request(plan=check_plan_value)
-    promote_plan_value = promote_plan(
-        month=MONTH, session=SESSION, base=BASE, release_root=ROOT,
-        stage_request=stage, accept_request=accept, check_request=check,
-        implementation_ref=IMPL, environment_ref=ENV,
-    )
-    promote = promote_request(plan=promote_plan_value)
-    plans = (train_plan_value, stage_plan_value, accept_plan_value,
-             check_plan_value, promote_plan_value)
-    return features, plans, (train, stage, accept, check, promote)
+    plans = (train_plan_value, stage_plan_value)
+    return features, plans, (train, stage)
 
 
 def _invalid(field, call):
@@ -267,8 +238,7 @@ def test_stage_plan_binds_train_outputs_and_legacy_manifest():
 
 
 def test_wrong_upstream_kinds_are_rejected():
-    features, _plans, requests = _chain()
-    _train, stage, accept, check, _promote = requests
+    features, _plans, _requests = _chain()
     wrong_features = replace(features, job=replace(features.job, kind="training"))
     _invalid("features_request", lambda: train_plan(
         month=MONTH, features_request=wrong_features,
@@ -280,77 +250,6 @@ def test_wrong_upstream_kinds_are_rejected():
     _invalid("training_request", lambda: stage_plan(
         month=MONTH, session=SESSION, base=BASE, release_root=ROOT,
         features_request=features, training_request=wrong_train,
-        implementation_ref=IMPL, environment_ref=ENV,
-    ))
-    wrong_stage = replace(stage, job=replace(stage.job, kind="training"))
-    _invalid("stage_request", lambda: accept_plan(
-        month=MONTH, session=SESSION, release_root=ROOT, stage_request=wrong_stage,
-        implementation_ref=IMPL, environment_ref=ENV,
-    ))
-    wrong_accept = replace(accept, job=replace(accept.job, kind="training"))
-    _invalid("accept_request", lambda: check_plan(
-        month=MONTH, session=SESSION, base=BASE, release_root=ROOT,
-        stage_request=stage, accept_request=wrong_accept,
-        implementation_ref=IMPL, environment_ref=ENV,
-    ))
-    wrong_check = replace(check, job=replace(check.job, kind="training"))
-    _invalid("check_request", lambda: promote_plan(
-        month=MONTH, session=SESSION, base=BASE, release_root=ROOT,
-        stage_request=stage, accept_request=accept, check_request=wrong_check,
-        implementation_ref=IMPL, environment_ref=ENV,
-    ))
-
-
-def test_wrong_candidates_and_equal_base_are_rejected():
-    _features_, _plans, requests = _chain()
-    _train, stage, accept, check, _promote = requests
-    candidate = candidate_id(MONTH, SESSION)
-    wrong_stage = replace(stage, job=replace(
-        stage.job, parameters={**stage.job.parameters, "release_id": "other"},
-    ))
-    _invalid("stage_request", lambda: accept_plan(
-        month=MONTH, session=SESSION, release_root=ROOT, stage_request=wrong_stage,
-        implementation_ref=IMPL, environment_ref=ENV,
-    ))
-    wrong_mode = replace(stage, job=replace(
-        stage.job, parameters={**stage.job.parameters, "mode": "daily"},
-    ))
-    _invalid("stage_request", lambda: accept_plan(
-        month=MONTH, session=SESSION, release_root=ROOT, stage_request=wrong_mode,
-        implementation_ref=IMPL, environment_ref=ENV,
-    ))
-    wrong_accept = replace(accept, job=replace(
-        accept.job, parameters={**accept.job.parameters, "candidate_release_id": "other"},
-    ))
-    _invalid("accept_request", lambda: check_plan(
-        month=MONTH, session=SESSION, base=BASE, release_root=ROOT,
-        stage_request=stage, accept_request=wrong_accept,
-        implementation_ref=IMPL, environment_ref=ENV,
-    ))
-    wrong_check = replace(check, job=replace(
-        check.job, parameters={**check.job.parameters, "candidate_release_id": "other"},
-    ))
-    _invalid("check_request", lambda: promote_plan(
-        month=MONTH, session=SESSION, base=BASE, release_root=ROOT,
-        stage_request=stage, accept_request=accept, check_request=wrong_check,
-        implementation_ref=IMPL, environment_ref=ENV,
-    ))
-    wrong_incumbent = replace(check, job=replace(
-        check.job, parameters={**check.job.parameters, "incumbent_release_id": "other"},
-    ))
-    _invalid("check_request", lambda: promote_plan(
-        month=MONTH, session=SESSION, base=BASE, release_root=ROOT,
-        stage_request=stage, accept_request=accept, check_request=wrong_incumbent,
-        implementation_ref=IMPL, environment_ref=ENV,
-    ))
-    _invalid("base", lambda: check_plan(
-        month=MONTH, session=SESSION, base=candidate, release_root=ROOT,
-        stage_request=stage, accept_request=accept,
-        implementation_ref=IMPL, environment_ref=ENV,
-    ))
-    _invalid("base", lambda: promote_plan(
-        month=MONTH, session=SESSION, base=candidate, release_root=ROOT,
-        stage_request=stage, accept_request=accept, check_request=check,
         implementation_ref=IMPL, environment_ref=ENV,
     ))
 
@@ -413,106 +312,24 @@ def test_stage_plan_rejects_equal_base_and_mismatched_training_bindings():
     ))
 
 
-def test_stage_request_mismatches_are_rejected_in_check_and_promote():
-    _features_, _plans, requests = _chain()
-    _train, stage, accept, check, _promote = requests
-    wrong_prior = replace(stage, job=replace(
-        stage.job, parameters={**stage.job.parameters, "prior_release_id": "other"},
-    ))
-    wrong_root = replace(stage, job=replace(
-        stage.job, parameters={**stage.job.parameters, "release_root": "/other"},
-    ))
-    wrong_namespace = replace(stage, namespace="other")
-    wrong_mode = replace(stage, job=replace(
-        stage.job, parameters={**stage.job.parameters, "mode": "daily"},
-    ))
-    for wrong in (wrong_prior, wrong_root, wrong_namespace, wrong_mode):
-        _invalid("stage_request", lambda wrong=wrong: check_plan(
-            month=MONTH, session=SESSION, base=BASE, release_root=ROOT,
-            stage_request=wrong, accept_request=accept,
-            implementation_ref=IMPL, environment_ref=ENV,
-        ))
-        _invalid("stage_request", lambda wrong=wrong: promote_plan(
-            month=MONTH, session=SESSION, base=BASE, release_root=ROOT,
-            stage_request=wrong, accept_request=accept, check_request=check,
-            implementation_ref=IMPL, environment_ref=ENV,
-        ))
-
-
-def test_upstream_request_root_namespace_and_dependency_mismatches_are_rejected():
-    _features_, _plans, requests = _chain()
-    _train, stage, accept, check, _promote = requests
-    wrong_accept_root = replace(accept, job=replace(
-        accept.job, parameters={**accept.job.parameters, "release_root": "/other"},
-    ))
-    wrong_accept_namespace = replace(accept, namespace="other")
-    wrong_accept_deps = replace(accept, job=replace(
-        accept.job, dependency_job_ids=(),
-    ))
-    wrong_accept_output = replace(accept, job=replace(
-        accept.job, output_namespace="other",
-    ))
-    for wrong in (wrong_accept_root, wrong_accept_namespace, wrong_accept_deps,
-                  wrong_accept_output):
-        _invalid("accept_request", lambda wrong=wrong: check_plan(
-            month=MONTH, session=SESSION, base=BASE, release_root=ROOT,
-            stage_request=stage, accept_request=wrong,
-            implementation_ref=IMPL, environment_ref=ENV,
-        ))
-    for wrong in (wrong_accept_deps, wrong_accept_namespace, wrong_accept_output):
-        _invalid("accept_request", lambda wrong=wrong: promote_plan(
-            month=MONTH, session=SESSION, base=BASE, release_root=ROOT,
-            stage_request=stage, accept_request=wrong, check_request=check,
-            implementation_ref=IMPL, environment_ref=ENV,
-        ))
-    wrong_check_root = replace(check, job=replace(
-        check.job, parameters={**check.job.parameters, "release_root": "/other"},
-    ))
-    wrong_check_namespace = replace(check, namespace="other")
-    wrong_check_output = replace(check, job=replace(
-        check.job, output_namespace="other",
-    ))
-    wrong_check_deps = replace(check, job=replace(
-        check.job, dependency_job_ids=("other",),
-    ))
-    for wrong in (wrong_check_root, wrong_check_namespace, wrong_check_output,
-                  wrong_check_deps):
-        _invalid("check_request", lambda wrong=wrong: promote_plan(
-            month=MONTH, session=SESSION, base=BASE, release_root=ROOT,
-            stage_request=stage, accept_request=accept, check_request=wrong,
-            implementation_ref=IMPL, environment_ref=ENV,
-        ))
-
-
-def test_all_five_requests_chain_and_bind_artifacts():
+def test_train_and_stage_requests_chain_and_bind_artifacts():
     features, plans, requests = _chain()
-    train, stage, accept, check, promote = requests
+    train, stage = requests
     restage = _restage()
     manifest = features.job.input_refs[0]
     feature_id = job_id_for(features.namespace, features.idempotency_key)
     restage_id = job_id_for(restage.namespace, restage.idempotency_key)
     train_id = job_id_for("shadow", train.idempotency_key)
-    stage_id = job_id_for("shadow", stage.idempotency_key)
-    accept_id = job_id_for("shadow", accept.idempotency_key)
-    check_id = job_id_for("shadow", check.idempotency_key)
 
-    assert [r.job.kind for r in requests] == [
-        "training", "phase5_state_stage", "phase5_accept", "retrain_check", "models_promote",
-    ]
+    assert [r.job.kind for r in requests] == ["training", "phase5_state_stage"]
     assert [r.idempotency_key for r in requests] == [
         step_key("train", plans[0], (restage_id,)),
         step_key("stage", plans[1]),
-        step_key("accept", plans[2]),
-        step_key("check", plans[3]),
-        step_key("promote", plans[4]),
     ]
     assert [plan["mode"] for plan in plans] == ["shadow"] * len(plans)
     assert [tuple(plan["parameters"]["expected_ids"]) for plan in plans] == [
         ("training",),
         ("phase5_state_stage",),
-        ("phase5_accept",),
-        ("retrain_check",),
-        ("models_promote",),
     ]
     for request, plan in zip(requests, plans):
         assert len(request.idempotency_key) <= 128
@@ -524,45 +341,22 @@ def test_all_five_requests_chain_and_bind_artifacts():
             assert "/" not in ref
     assert train.job.dependency_job_ids == (feature_id, restage_id)
     assert stage.job.dependency_job_ids == (train_id,)
-    assert accept.job.dependency_job_ids == (stage_id,)
-    assert check.job.dependency_job_ids == (accept_id,)
-    assert promote.job.dependency_job_ids == (check_id,)
     stage_params = stage.job.parameters
     assert stage.namespace == "shadow"
     assert stage_params["release_id"] == candidate_id(MONTH, SESSION)
     assert stage_params["prior_release_id"] == BASE
     assert stage_params["release_root"] == ROOT
     assert stage_params["mode"] == "monthly"
-    for request in (accept, check, promote):
-        assert request.namespace == "shadow"
-        assert request.job.parameters["release_root"] == ROOT
-    assert accept.job.parameters["candidate_release_id"] == stage_params["release_id"]
-    assert check.job.parameters["candidate_release_id"] == stage_params["release_id"]
-    assert check.job.parameters["incumbent_release_id"] == stage_params["prior_release_id"]
-    assert promote.job.parameters["release_id"] == stage_params["release_id"]
-    assert promote.job.parameters["expected_previous_release_id"] == (
-        stage_params["prior_release_id"]
-    )
     assert tuple(train.job.input_refs) == (manifest,)
     assert tuple(stage.job.input_refs) == (manifest,)
-    assert tuple(check.job.input_refs) == ()
     assert any(ref.startswith("job_") for ref in plans[1]["input_refs"])
-    assert any(ref.startswith("job_") for ref in plans[3]["input_refs"])
     assert stage.job.parameters["input_bindings"] == {
         **{name: f"{train_id}#training/{name}" for name in STATE_FILES},
         "legacy_manifest.json": manifest,
     }
-    assert check.job.parameters["input_bindings"] == {
-        ACCEPTANCE_FILE: f"{accept_id}#acceptance"
-    }
-    assert promote.job.parameters["expected_previous_release_id"] == BASE
-    assert promote.job.parameters["release_id"] == candidate_id(MONTH, SESSION)
-    assert plans[4]["kind"] == "models_promote"
-    assert promote.job.kind == promote_job_kind().name == plans[4]["kind"]
     assert retrain_candidate._safe_id(candidate_id(MONTH, SESSION))
 
-    kinds = (training_job_kind, state_stage_job_kind, phase5_accept_job_kind,
-             retrain_check_job_kind, promote_job_kind)
+    kinds = (training_job_kind, state_stage_job_kind)
     for request, plan, kind_fn in zip(requests, plans, kinds):
         kind = kind_fn()
         assert request.job.kind == kind.name
@@ -654,22 +448,6 @@ def test_request_parents_generator_matches_tuple():
     assert from_generator.job.dependency_job_ids == from_tuple.job.dependency_job_ids
     assert from_generator.idempotency_key == from_tuple.idempotency_key
     _invalid("parents", lambda: train_request(plan=plan, parents=None))
-
-
-def test_promote_rejects_check_with_wrong_acceptance_binding():
-    _features_, _plans, requests = _chain()
-    _train, stage, accept, check, _promote = requests
-    wrong_binding = replace(check, job=replace(
-        check.job, parameters={
-            **check.job.parameters,
-            "input_bindings": {ACCEPTANCE_FILE: "job_other#acceptance"},
-        },
-    ))
-    _invalid("check_request", lambda: promote_plan(
-        month=MONTH, session=SESSION, base=BASE, release_root=ROOT,
-        stage_request=stage, accept_request=accept, check_request=wrong_binding,
-        implementation_ref=IMPL, environment_ref=ENV,
-    ))
 
 
 def test_d1_pool_only_semantics():
