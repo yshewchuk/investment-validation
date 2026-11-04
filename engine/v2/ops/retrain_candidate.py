@@ -117,6 +117,33 @@ def _request_job_id(request, field, expected_kind):
     return job_id_for(request.namespace, request.idempotency_key)
 
 
+def _stage_request_parts(request, *, candidate, release_root, base=None,
+                         field="stage_request"):
+    stage_id = _request_job_id(request, field, "phase5_state_stage")
+    _need(request.namespace == "shadow", field)
+    _need(request.job.output_namespace == "shadow", field)
+    params = request.job.parameters
+    _need(isinstance(params, dict), field)
+    _need(params.get("release_id") == candidate, field)
+    _need(params.get("release_root") == release_root, field)
+    if base is not None:
+        _need(params.get("prior_release_id") == base, field)
+    return stage_id, params
+
+
+def _accept_request_parts(request, *, candidate, release_root, stage_id,
+                          field="accept_request"):
+    accept_id = _request_job_id(request, field, "phase5_accept")
+    _need(request.namespace == "shadow", field)
+    _need(request.job.output_namespace == "shadow", field)
+    params = request.job.parameters
+    _need(isinstance(params, dict), field)
+    _need(params.get("candidate_release_id") == candidate, field)
+    _need(params.get("release_root") == release_root, field)
+    _need(tuple(request.job.dependency_job_ids) == (stage_id,), field)
+    return accept_id, params
+
+
 def _manifest_ref(features_request):
     _need(isinstance(features_request, SubmitRequest), "features_request")
     _need(features_request.job.kind == "legacy_features", "features_request")
@@ -148,13 +175,21 @@ def stage_plan(*, month, session, base, release_root, features_request, training
     _need(_safe_id(base), "base")
     _need(_safe_root(release_root), "release_root")
     candidate = candidate_id(month, session)
+    _need(base != candidate, "base")
     manifest, _ = _manifest_ref(features_request)
     train_id = _request_job_id(training_request, "training_request", "training")
     _need(training_request.namespace == "shadow", "training_request")
+    _need(training_request.job.output_namespace == "shadow", "training_request")
     train_params = training_request.job.parameters
     _need(isinstance(train_params, dict), "training_request")
     _need(train_params.get("mode") == "monthly_pools", "training_request")
     _need(train_params.get("month") == month, "training_request")
+    cutoffs = train_params.get("cutoffs")
+    _need(isinstance(cutoffs, (list, tuple))
+          and tuple(cutoffs) == (retrain_cutoff(month),), "training_request")
+    _need(train_params.get("input_bindings") == {"legacy_manifest.json": manifest},
+          "training_request")
+    _need(tuple(training_request.job.input_refs) == (manifest,), "training_request")
     refs = {name: f"job_{train_id}#training/{name}" for name in STATE_FILES}
     bindings = {**refs, "legacy_manifest.json": manifest}
     params = StateStageParameters(expected_ids=("phase5_state_stage",), release_root=release_root,
@@ -172,27 +207,26 @@ def accept_plan(*, month, session, release_root, stage_request,
                 implementation_ref, environment_ref):
     _need(_safe_root(release_root), "release_root")
     candidate = candidate_id(month, session)
-    stage_id = _request_job_id(stage_request, "stage_request", "phase5_state_stage")
-    stage_params = stage_request.job.parameters
-    _need(isinstance(stage_params, dict), "stage_request")
-    _need(stage_params.get("release_id") == candidate, "stage_request")
+    stage_id, stage_params = _stage_request_parts(
+        stage_request, candidate=candidate, release_root=release_root)
     _need(stage_params.get("mode") == "monthly", "stage_request")
+    _need(_safe_id(stage_params.get("prior_release_id")), "stage_request")
     params = Phase5AcceptParameters(expected_ids=("phase5_accept",), release_root=release_root,
                                     candidate_release_id=candidate)
     return _plan("phase5_accept", params, (), "validation", implementation_ref, environment_ref,
                  (stage_id,))
 
 
-def check_plan(*, month, session, base, release_root, accept_request,
+def check_plan(*, month, session, base, release_root, stage_request, accept_request,
                implementation_ref, environment_ref):
     _need(_safe_id(base), "base")
     _need(_safe_root(release_root), "release_root")
     candidate = candidate_id(month, session)
     _need(base != candidate, "base")
-    accept_id = _request_job_id(accept_request, "accept_request", "phase5_accept")
-    accept_params = accept_request.job.parameters
-    _need(isinstance(accept_params, dict), "accept_request")
-    _need(accept_params.get("candidate_release_id") == candidate, "accept_request")
+    stage_id, _ = _stage_request_parts(
+        stage_request, candidate=candidate, release_root=release_root, base=base)
+    accept_id, _ = _accept_request_parts(
+        accept_request, candidate=candidate, release_root=release_root, stage_id=stage_id)
     ref = f"job_{accept_id}#acceptance"
     params = RetrainCheckParameters(expected_ids=("retrain_check",), release_root=release_root,
         candidate_release_id=candidate, incumbent_release_id=base,
@@ -201,17 +235,25 @@ def check_plan(*, month, session, base, release_root, accept_request,
                  environment_ref, (accept_id,))
 
 
-def promote_plan(*, month, session, base, release_root, check_request,
-                 implementation_ref, environment_ref):
+def promote_plan(*, month, session, base, release_root, stage_request, accept_request,
+                 check_request, implementation_ref, environment_ref):
     _need(_safe_id(base), "base")
     _need(_safe_root(release_root), "release_root")
     candidate = candidate_id(month, session)
     _need(base != candidate, "base")
+    stage_id, _ = _stage_request_parts(
+        stage_request, candidate=candidate, release_root=release_root, base=base)
+    accept_id, _ = _accept_request_parts(
+        accept_request, candidate=candidate, release_root=release_root, stage_id=stage_id)
     check_id = _request_job_id(check_request, "check_request", "retrain_check")
+    _need(check_request.namespace == "shadow", "check_request")
+    _need(check_request.job.output_namespace == "shadow", "check_request")
     check_params = check_request.job.parameters
     _need(isinstance(check_params, dict), "check_request")
     _need(check_params.get("candidate_release_id") == candidate, "check_request")
+    _need(check_params.get("release_root") == release_root, "check_request")
     _need(check_params.get("incumbent_release_id") == base, "check_request")
+    _need(tuple(check_request.job.dependency_job_ids) == (accept_id,), "check_request")
     params = PromoteParameters(expected_ids=("models_promote",), release_root=release_root,
         release_id=candidate, expected_previous_release_id=base)
     return _plan("models_promote", params, (), "delivery", implementation_ref, environment_ref,
