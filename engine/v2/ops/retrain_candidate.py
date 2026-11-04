@@ -185,6 +185,19 @@ _REQUEST_KINDS = {"train": training_job_kind, "stage": state_stage_job_kind}
 _EXPECTED_PLAN_KINDS = {"train": "training", "stage": "phase5_state_stage"}
 
 
+def _request_input_refs(plan):
+    plan_refs = plan.get("input_refs")
+    _need(isinstance(plan_refs, (list, tuple))
+          and all(isinstance(ref, str) for ref in plan_refs), "input_refs")
+    parameters = plan.get("parameters")
+    _need(isinstance(parameters, dict), "plan")
+    bindings = parameters.get("input_bindings")
+    _need(isinstance(bindings, dict)
+          and all(isinstance(ref, str) and ref for ref in bindings.values()), "input_refs")
+    _need(all(ref in plan_refs for ref in bindings.values()), "input_refs")
+    return plan_refs
+
+
 def _request(step, plan, parents=()):
     _need(isinstance(plan, dict), "plan")
     kind = _REQUEST_KINDS[step]()
@@ -193,9 +206,7 @@ def _request(step, plan, parents=()):
     _need(plan.get("mode") == "shadow", "plan")
     _need(plan.get("blocked_prerequisites") == [], "plan")
     _need(plan.get("effects") == ["staged"], "plan")
-    plan_refs = plan.get("input_refs")
-    _need(isinstance(plan_refs, (list, tuple))
-          and all(isinstance(ref, str) for ref in plan_refs), "input_refs")
+    plan_refs = _request_input_refs(plan)
     try:
         parents = tuple(parents)
     except TypeError:

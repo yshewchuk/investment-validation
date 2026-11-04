@@ -436,6 +436,24 @@ def test_request_rejects_job_output_refs_without_dependency():
     _invalid("input_refs", lambda: train_request(plan=bad))
 
 
+def test_request_rejects_bindings_not_declared_in_input_refs():
+    plan = _train_plan()
+    _invalid("input_refs", lambda: train_request(
+        plan={**plan, "input_refs": []},
+    ))
+    _features_, plans, _requests = _chain()
+    stage_plan_value = plans[1]
+    undeclared = {
+        **stage_plan_value,
+        "input_refs": [
+            ref for ref in stage_plan_value["input_refs"]
+            if not ref.startswith("job_")
+        ],
+        "dependency_job_ids": [],
+    }
+    _invalid("input_refs", lambda: stage_request(plan=undeclared))
+
+
 def test_manifest_ref_rejects_job_output_ref():
     features = _features()
     wrong = replace(features, job=replace(features.job, input_refs=("job_abc",)))
