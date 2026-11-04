@@ -2,15 +2,16 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
 import engine.v2.ops.retrain_candidate as retrain_candidate
 from engine.v2.ops.errors import OpsError
+from engine.v2.ops.nightly import build_legacy_job_requests, build_nightly_plan
 from engine.v2.ops.retrain_check import ACCEPTANCE_FILE
 from engine.v2.ops.retrain_candidate import (
     STATE_FILES,
-    _safe_id,
     accept_plan,
     accept_request,
     candidate_id,
@@ -26,19 +27,21 @@ from engine.v2.ops.retrain_candidate import (
     train_request,
 )
 from engine.v2.ops.submission import job_id_for
-from tests.v2.ops.test_retrain_due_and_chain import _plan, _requests
 
 MONTH = "2026-10"
 SESSION = "2026-11-02"
 BASE = "rel1"
-HASH = "a" * 16
+HASH = "sha256:" + "a" * 64
 IMPL = "impl"
 ENV = "env"
 ROOT = "/release"
 
 
 def _features():
-    for request in _requests(_plan()):
+    plan = build_nightly_plan(Path(__file__).resolve().parents[3], "2026-09-18")
+    for request in build_legacy_job_requests(
+        plan, tickers=("FAKE",), year_start=2025, year_end=2026,
+    ):
         if request.job.kind == "legacy_features":
             job = replace(request.job, input_refs=("artifact://legacy-manifest",))
             return replace(request, job=job)
@@ -56,29 +59,32 @@ def test_candidate_id_and_cutoff_are_canonical():
     assert candidate_id(MONTH, SESSION) == "pools-retrain-2026-10-2026-11-02"
     assert retrain_cutoff(MONTH) == "2026-11-01"
     assert retrain_cutoff("2026-12") == "2027-01-01"
-    assert _safe_id(candidate_id(MONTH, SESSION))
+    assert retrain_candidate._safe_id(candidate_id(MONTH, SESSION))
 
 
 def test_invalid_inputs_are_rejected():
     _invalid("month", lambda: candidate_id("2026-13", SESSION))
     _invalid("session", lambda: candidate_id(MONTH, "2026-02-30"))
+    _invalid("month", lambda: retrain_cutoff("2026-1"))
+    _invalid("month", lambda: retrain_cutoff("2026-13"))
+    _invalid("month", lambda: retrain_cutoff("9999-12"))
     _invalid("step", lambda: step_key("bogus", SESSION, MONTH, BASE, HASH))
     _invalid("session", lambda: step_key("train", "2026-13-01", MONTH, BASE, HASH))
     _invalid("month", lambda: step_key("train", SESSION, "2026-13", BASE, HASH))
     _invalid("base", lambda: step_key("train", SESSION, MONTH, ".hidden", HASH))
     _invalid("base", lambda: step_key("train", SESSION, MONTH, "a/b", HASH))
-    _invalid("plan_hash", lambda: step_key("train", SESSION, MONTH, BASE, "A" * 16))
-    _invalid("plan_hash", lambda: step_key("train", SESSION, MONTH, BASE, "a" * 15))
-    assert not _safe_id("")
-    assert not _safe_id(".hidden")
-    assert not _safe_id("a/b")
-    assert not _safe_id("a\\b")
-    assert not _safe_id("a\0b")
+    _invalid("spec_hash", lambda: step_key("train", SESSION, MONTH, BASE, "sha256:" + "A" * 64))
+    _invalid("spec_hash", lambda: step_key("train", SESSION, MONTH, BASE, "sha256:" + "a" * 63))
+    assert not retrain_candidate._safe_id("")
+    assert not retrain_candidate._safe_id(".hidden")
+    assert not retrain_candidate._safe_id("a/b")
+    assert not retrain_candidate._safe_id("a\\b")
+    assert not retrain_candidate._safe_id("a\0b")
 
 
 def test_step_key_is_canonical():
     assert step_key("train", SESSION, MONTH, BASE, HASH) == (
-        "retrain-train:2026-11-02:2026-10:rel1:aaaaaaaaaaaaaaaa"
+        "retrain-train:2026-11-02:2026-10:rel1:" + HASH
     )
 
 
@@ -105,9 +111,15 @@ def test_train_plan_uses_monthly_pools_and_legacy_manifest():
 def test_stage_plan_binds_train_outputs_and_legacy_manifest():
     features = _features()
     manifest = features.job.input_refs[0]
-    train_id = job_id_for("shadow", step_key("train", SESSION, MONTH, BASE, HASH))
+    train_plan_value = train_plan(
+        month=MONTH, features_request=features,
+        implementation_ref=IMPL, environment_ref=ENV,
+    )
+    train_id = job_id_for(
+        "shadow", step_key("train", SESSION, MONTH, BASE, train_plan_value["spec_hash"]),
+    )
     plan = stage_plan(
-        month=MONTH, session=SESSION, base=BASE, plan_hash=HASH, release_root=ROOT,
+        month=MONTH, session=SESSION, base=BASE, release_root=ROOT,
         features_request=features, implementation_ref=IMPL, environment_ref=ENV,
     )
     params = plan["parameters"]
@@ -127,48 +139,47 @@ def test_stage_plan_binds_train_outputs_and_legacy_manifest():
 def test_all_five_requests_chain_and_bind_artifacts():
     features = _features()
     feature_id = job_id_for(features.namespace, features.idempotency_key)
-    accept_key = step_key("accept", SESSION, MONTH, BASE, HASH)
-    check_key = step_key("check", SESSION, MONTH, BASE, HASH)
-    accept_id = job_id_for("shadow", accept_key)
-    check_id = job_id_for("shadow", check_key)
 
     train = train_request(
         plan=train_plan(month=MONTH, features_request=features,
                         implementation_ref=IMPL, environment_ref=ENV),
-        session=SESSION, month=MONTH, base=BASE, plan_hash=HASH,
+        session=SESSION, month=MONTH, base=BASE,
     )
     stage = stage_request(
-        plan=stage_plan(month=MONTH, session=SESSION, base=BASE, plan_hash=HASH,
+        plan=stage_plan(month=MONTH, session=SESSION, base=BASE,
                         release_root=ROOT, features_request=features,
                         implementation_ref=IMPL, environment_ref=ENV),
-        session=SESSION, month=MONTH, base=BASE, plan_hash=HASH,
+        session=SESSION, month=MONTH, base=BASE,
     )
     stage_id = job_id_for("shadow", stage.idempotency_key)
     accept = accept_request(
         plan=accept_plan(month=MONTH, session=SESSION, release_root=ROOT,
-                         implementation_ref=IMPL, environment_ref=ENV),
-        session=SESSION, month=MONTH, base=BASE, plan_hash=HASH,
-        parents=(stage_id,),
+                         stage_request=stage, implementation_ref=IMPL,
+                         environment_ref=ENV),
+        session=SESSION, month=MONTH, base=BASE,
     )
+    accept_id = job_id_for("shadow", accept.idempotency_key)
     check = check_request(
         plan=check_plan(month=MONTH, session=SESSION, base=BASE, release_root=ROOT,
-                        accept_key=accept_key, implementation_ref=IMPL,
+                        accept_request=accept, implementation_ref=IMPL,
                         environment_ref=ENV),
-        session=SESSION, month=MONTH, base=BASE, plan_hash=HASH,
+        session=SESSION, month=MONTH, base=BASE,
     )
+    check_id = job_id_for("shadow", check.idempotency_key)
     promote = promote_request(
         plan=promote_plan(month=MONTH, session=SESSION, base=BASE, release_root=ROOT,
-                          check_key=check_key, implementation_ref=IMPL,
+                          check_request=check, implementation_ref=IMPL,
                           environment_ref=ENV),
-        session=SESSION, month=MONTH, base=BASE, plan_hash=HASH,
+        session=SESSION, month=MONTH, base=BASE,
     )
 
-    assert [r.job.kind for r in (train, stage, accept, check, promote)] == [
+    requests = (train, stage, accept, check, promote)
+    assert [r.job.kind for r in requests] == [
         "training", "phase5_state_stage", "phase5_accept", "retrain_check", "models_promote",
     ]
-    assert [r.idempotency_key for r in (train, stage, accept, check, promote)] == [
-        step_key(step, SESSION, MONTH, BASE, HASH)
-        for step in ("train", "stage", "accept", "check", "promote")
+    assert [r.idempotency_key for r in requests] == [
+        step_key(step, SESSION, MONTH, BASE, r.job.spec_hash)
+        for step, r in zip(("train", "stage", "accept", "check", "promote"), requests)
     ]
     assert train.job.dependency_job_ids == (feature_id,)
     assert job_id_for("shadow", train.idempotency_key) in stage.job.dependency_job_ids
@@ -180,7 +191,7 @@ def test_all_five_requests_chain_and_bind_artifacts():
     }
     assert promote.job.parameters["expected_previous_release_id"] == BASE
     assert promote.job.parameters["release_id"] == candidate_id(MONTH, SESSION)
-    assert _safe_id(candidate_id(MONTH, SESSION))
+    assert retrain_candidate._safe_id(candidate_id(MONTH, SESSION))
 
 
 def test_request_parents_are_merged_and_deduplicated():
@@ -189,16 +200,19 @@ def test_request_parents_are_merged_and_deduplicated():
                       implementation_ref=IMPL, environment_ref=ENV)
     feature_id = job_id_for(features.namespace, features.idempotency_key)
     request = train_request(
-        plan=plan, session=SESSION, month=MONTH, base=BASE, plan_hash=HASH,
+        plan=plan, session=SESSION, month=MONTH, base=BASE,
         parents=(feature_id, "parent-2"),
     )
     assert request.job.dependency_job_ids == (feature_id, "parent-2")
 
 
 def test_d1_pool_only_semantics():
-    assert len(STATE_FILES) == 4
-    assert sum("driver_residual_pool" in name for name in STATE_FILES) == 3
-    assert "chooser_analog_pool.json" in STATE_FILES
+    assert STATE_FILES == (
+        "driver_residual_pool__size.json",
+        "driver_residual_pool__implied_t1.json",
+        "driver_residual_pool__runup_move.json",
+        "chooser_analog_pool.json",
+    )
     doc = retrain_candidate.__doc__
     assert "re-frozen" in doc
     assert "champion-carried" in doc
