@@ -298,9 +298,24 @@ def _plan(session="2026-09-18"):
     return build_nightly_plan(str(root), session)
 
 
-def _requests(plan):
+def _requests(plan, input_refs=("manifest_artifact",)):
     return build_legacy_job_requests(plan, tickers=("FAKE",), year_start=2025, year_end=2026,
-                                     input_refs=("manifest_artifact",))
+                                     input_refs=input_refs)
+
+
+def test_due_retrain_requires_manifest_but_not_due_does_not(tmp_path, monkeypatch):
+    monkeypatch.setenv("MODEL_RELEASE_ROOT", str(tmp_path))
+    plan = _plan()
+    plan["plan_hash"] = "a" * 64
+    plan["retrain"] = {"state": "due", "month": "2026-10", "m_end": "2026-10-31",
+                       "superseded": [], "base": "rel1"}
+    with pytest.raises(OpsError) as exc_info:
+        _requests(plan, input_refs=())
+    assert exc_info.value.code == "INVALID_REQUEST"
+
+    plan["retrain"] = {"state": "not_due", "reason": "month_already_recorded", "base": "rel1"}
+    requests = _requests(plan, input_refs=())
+    assert len(_retrain_requests(requests)) == 1
 
 
 def _retrain_requests(requests):

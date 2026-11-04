@@ -377,6 +377,7 @@ def test_filtered_full_run_uses_subset_effect_scope(env, monkeypatch):
     assert plan["full_run"] is True
     eligible_tickers = tuple(sorted({key.split("|")[0] for key in plan["expected_population"]}))
 
+    plan["retrain"] = {"state": "not_due", "reason": "month_already_recorded", "base": "rel1"}
     requests = nightly.build_legacy_job_requests(
         plan, tickers=tuple(plan["tickers"]), context_tickers=tuple(plan["context_tickers"]),
         year_start=plan["year_start"], year_end=plan["year_end"],

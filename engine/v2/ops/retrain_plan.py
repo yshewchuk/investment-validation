@@ -85,7 +85,11 @@ def _due_retrain_requests(session, month, base, ph, keys, restage_key,
     features_request = next(
         request for request in requests
         if job_id_for("shadow", request.idempotency_key) == features_id)
-    manifest_ref = features_request.job.parameters["input_bindings"]["legacy_manifest.json"]
+    manifest_ref = features_request.job.parameters.get("input_bindings", {}).get(
+        "legacy_manifest.json")
+    if not manifest_ref:
+        from engine.v2.ops.errors import fail
+        raise fail("INVALID_REQUEST", "due retrain requires a pinned legacy manifest")
     train_plan = training_plan(mode="monthly_pools", month=month, cutoffs=(cutoff,),
                                manifest_ref=manifest_ref)
     train_key = step_key("train", session, month, base, ph)
