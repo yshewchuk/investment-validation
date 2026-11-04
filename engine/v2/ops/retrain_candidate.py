@@ -8,7 +8,7 @@ from datetime import date, timedelta
 from pathlib import Path
 
 from engine.v2.contracts import JobSpec, SubmitRequest
-from engine.v2.foundation import content_hash, to_document
+from engine.v2.foundation import content_hash, from_document, to_document
 from engine.v2.ops.errors import fail
 from engine.v2.ops.state_stage import (
     StateStageParameters,
@@ -16,7 +16,11 @@ from engine.v2.ops.state_stage import (
     state_stage_parameter_problems,
 )
 from engine.v2.ops.submission import job_id_for
-from engine.v2.ops.training import TrainingParameters, training_job_kind
+from engine.v2.ops.training import (
+    TrainingParameters,
+    training_job_kind,
+    training_parameter_problems,
+)
 
 _MONTH = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 _SESSION = re.compile(r"^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$")
@@ -109,7 +113,8 @@ def _manifest_ref(features_request):
     _need(isinstance(features_request, SubmitRequest), "features_request")
     _need(features_request.job.kind == "legacy_features", "features_request")
     refs = features_request.job.input_refs
-    _need(len(refs) == 1 and isinstance(refs[0], str) and refs[0], "features_request")
+    _need(isinstance(refs, (list, tuple)) and len(refs) == 1
+          and isinstance(refs[0], str) and refs[0], "features_request")
     _need(not refs[0].startswith("job_"), "features_request")
     return refs[0], job_id_for(features_request.namespace, features_request.idempotency_key)
 
@@ -144,15 +149,22 @@ def stage_plan(*, month, session, base, release_root, features_request, training
     _need(training_request.job.output_namespace == "shadow", "training_request")
     train_params = training_request.job.parameters
     _need(isinstance(train_params, dict), "training_request")
-    _need(train_params.get("mode") == "monthly_pools", "training_request")
-    _need(train_params.get("month") == month, "training_request")
-    cutoffs = train_params.get("cutoffs")
-    _need(isinstance(cutoffs, (list, tuple))
-          and tuple(cutoffs) == (retrain_cutoff(month),), "training_request")
-    _need(train_params.get("input_bindings") == {"legacy_manifest.json": manifest},
+    train_refs = training_request.job.input_refs
+    train_deps = training_request.job.dependency_job_ids
+    _need(isinstance(train_refs, (list, tuple)), "training_request")
+    _need(isinstance(train_deps, (list, tuple)), "training_request")
+    try:
+        train_params = from_document(TrainingParameters, train_params)
+    except (KeyError, TypeError, ValueError):
+        _need(False, "training_request")
+    _need(not training_parameter_problems(None, train_params), "training_request")
+    _need(train_params.mode == "monthly_pools", "training_request")
+    _need(train_params.month == month, "training_request")
+    _need(train_params.cutoffs == (retrain_cutoff(month),), "training_request")
+    _need(train_params.input_bindings == {"legacy_manifest.json": manifest},
           "training_request")
-    _need(tuple(training_request.job.input_refs) == (manifest,), "training_request")
-    _need(feature_id in training_request.job.dependency_job_ids, "training_request")
+    _need(tuple(train_refs) == (manifest,), "training_request")
+    _need(feature_id in train_deps, "training_request")
     refs = {name: f"{train_id}#training/{name}" for name in STATE_FILES}
     bindings = {**refs, "legacy_manifest.json": manifest}
     params = StateStageParameters(expected_ids=("phase5_state_stage",), release_root=release_root,

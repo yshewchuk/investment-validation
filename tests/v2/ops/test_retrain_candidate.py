@@ -435,6 +435,37 @@ def test_manifest_ref_rejects_job_output_ref():
     ))
 
 
+def test_builders_refuse_malformed_upstream_requests():
+    features = _features()
+    no_feature_refs = replace(features, job=replace(features.job, input_refs=None))
+    _invalid("features_request", lambda: train_plan(
+        month=MONTH, features_request=no_feature_refs,
+        implementation_ref=IMPL, environment_ref=ENV,
+    ))
+    train = _train_request()
+    no_train_refs = replace(train, job=replace(train.job, input_refs=None))
+    _invalid("training_request", lambda: stage_plan(
+        month=MONTH, session=SESSION, base=BASE, release_root=ROOT,
+        features_request=features, training_request=no_train_refs,
+        implementation_ref=IMPL, environment_ref=ENV,
+    ))
+    no_train_deps = replace(train, job=replace(train.job, dependency_job_ids=None))
+    _invalid("training_request", lambda: stage_plan(
+        month=MONTH, session=SESSION, base=BASE, release_root=ROOT,
+        features_request=features, training_request=no_train_deps,
+        implementation_ref=IMPL, environment_ref=ENV,
+    ))
+    wrong_input_mode = replace(train, job=replace(
+        train.job,
+        parameters={**train.job.parameters, "input_mode": "native_d14"},
+    ))
+    _invalid("training_request", lambda: stage_plan(
+        month=MONTH, session=SESSION, base=BASE, release_root=ROOT,
+        features_request=features, training_request=wrong_input_mode,
+        implementation_ref=IMPL, environment_ref=ENV,
+    ))
+
+
 def test_request_parents_generator_matches_tuple():
     features = _features()
     plan = train_plan(month=MONTH, features_request=features,
