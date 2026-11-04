@@ -163,7 +163,7 @@ class SupersedeParameters:
 
 @dataclass(frozen=True)
 class RetrainStepParameters:
-    """#805 slice 2 ``retrain_step`` (``restage`` or a monthly retrain chain step)."""
+    """Successful placeholder for ``restage``; monthly steps use typed job kinds."""
 
     expected_ids: tuple[str, ...]
     session: str = ""
