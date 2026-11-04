@@ -401,6 +401,7 @@ def _nightly_preview_inputs_kind() -> JobKind:
 
 def _retrain_check_kinds():
     from engine.v2.ops.retrain_check import retrain_check_job_kind
+
     return [retrain_check_job_kind()]
 
 
@@ -487,7 +488,9 @@ def _core_kinds():
 
 
 def registry():
-    kinds = [*_core_kinds(),
+    from engine.v2.ops.retrain_check import phase5_accept_job_kind
+
+    kinds = [*_core_kinds(), phase5_accept_job_kind(),
              _nightly_preview_inputs_kind(),
              state_stage_job_kind(), _native_gate_kind(),
              _native_gate_kind(evaluation=True), massive_acquisition_kind(),
