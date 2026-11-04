@@ -55,6 +55,18 @@ def _features():
     raise AssertionError("no legacy_features request")
 
 
+def _restage():
+    base = _features()
+    job = replace(
+        base.job,
+        kind="retrain_step",
+        parameters={"step": "restage"},
+        input_refs=(),
+        dependency_job_ids=(),
+    )
+    return replace(base, namespace="shadow", idempotency_key="restage-key", job=job)
+
+
 def _train_plan():
     return train_plan(
         month=MONTH, features_request=_features(),
@@ -62,16 +74,22 @@ def _train_plan():
     )
 
 
+def _train_request():
+    return train_request(plan=_train_plan())
+
+
 def _chain():
     features = _features()
+    restage = _restage()
     train_plan_value = train_plan(
         month=MONTH, features_request=features,
         implementation_ref=IMPL, environment_ref=ENV,
     )
-    train = train_request(plan=train_plan_value)
+    train = train_request(plan=train_plan_value, parents=(restage,))
     stage_plan_value = stage_plan(
         month=MONTH, session=SESSION, base=BASE, release_root=ROOT,
-        features_request=features, implementation_ref=IMPL, environment_ref=ENV,
+        features_request=features, training_request=train,
+        implementation_ref=IMPL, environment_ref=ENV,
     )
     stage = stage_request(plan=stage_plan_value)
     accept_plan_value = accept_plan(
@@ -124,23 +142,38 @@ def test_invalid_inputs_are_rejected():
     _invalid("spec_hash", lambda: step_key(
         "train", {**plan, "spec_hash": "sha256:" + "A" * 64},
     ))
+    _invalid("spec_hash", lambda: step_key(
+        "train", {**plan, "parameters": {"bad": object()}},
+    ))
     _invalid("base", lambda: stage_plan(
         month=MONTH, session=SESSION, base=".hidden", release_root=ROOT,
-        features_request=_features(), implementation_ref=IMPL, environment_ref=ENV,
+        features_request=_features(), training_request=_train_request(),
+        implementation_ref=IMPL, environment_ref=ENV,
     ))
     _invalid("base", lambda: stage_plan(
         month=MONTH, session=SESSION, base="a/b", release_root=ROOT,
-        features_request=_features(), implementation_ref=IMPL, environment_ref=ENV,
+        features_request=_features(), training_request=_train_request(),
+        implementation_ref=IMPL, environment_ref=ENV,
     ))
     _invalid("release_root", lambda: stage_plan(
         month=MONTH, session=SESSION, base=BASE, release_root="  ",
-        features_request=_features(), implementation_ref=IMPL, environment_ref=ENV,
+        features_request=_features(), training_request=_train_request(),
+        implementation_ref=IMPL, environment_ref=ENV,
+    ))
+    _invalid("release_root", lambda: stage_plan(
+        month=MONTH, session=SESSION, base=BASE, release_root="release",
+        features_request=_features(), training_request=_train_request(),
+        implementation_ref=IMPL, environment_ref=ENV,
     ))
     assert not retrain_candidate._safe_id("")
     assert not retrain_candidate._safe_id(".hidden")
     assert not retrain_candidate._safe_id("a/b")
     assert not retrain_candidate._safe_id("a\\b")
     assert not retrain_candidate._safe_id("a\0b")
+    assert not retrain_candidate._safe_root("release")
+    assert not retrain_candidate._safe_root("  ")
+    assert not retrain_candidate._safe_root("/release\0")
+    assert retrain_candidate._safe_root(ROOT)
 
 
 def test_step_key_is_canonical():
@@ -149,10 +182,30 @@ def test_step_key_is_canonical():
     assert key.startswith("retrain-train:")
     assert len(key) == len("retrain-train:") + 24
     assert key == step_key("train", plan)
-    assert key != step_key("train", plan, parents=("parent-1",))
+    fingerprint = {
+        "kind": plan["kind"],
+        "spec_hash": plan["spec_hash"],
+        "parameters": plan["parameters"],
+        "implementation_ref": plan["implementation_ref"],
+        "environment_ref": plan["environment_ref"],
+        "resource_class": plan["resource_class"],
+        "input_refs": list(plan["input_refs"]),
+        "dependency_job_ids": list(plan["dependency_job_ids"]),
+    }
+    expected = "retrain-train:" + content_hash(fingerprint).split(":", 1)[1][:24]
+    assert key == expected
     changed = {**plan, "parameters": {**plan["parameters"], "month": "2026-11"}}
     changed["spec_hash"] = content_hash(changed["parameters"])
     assert step_key("train", changed) != key
+    for field, value in (
+        ("implementation_ref", "impl2"),
+        ("environment_ref", "env2"),
+        ("resource_class", "other"),
+        ("input_refs", ["other"]),
+        ("dependency_job_ids", ["other"]),
+    ):
+        assert step_key("train", {**plan, field: value}) != key
+    assert step_key("train", plan, parents=("parent-1",)) != key
 
 
 def test_train_plan_uses_monthly_pools_and_legacy_manifest():
@@ -179,14 +232,18 @@ def test_train_plan_uses_monthly_pools_and_legacy_manifest():
 def test_stage_plan_binds_train_outputs_and_legacy_manifest():
     features = _features()
     manifest = features.job.input_refs[0]
+    restage = _restage()
     train_plan_value = train_plan(
         month=MONTH, features_request=features,
         implementation_ref=IMPL, environment_ref=ENV,
     )
-    train_id = job_id_for("shadow", step_key("train", train_plan_value))
+    train = train_request(plan=train_plan_value, parents=(restage,))
+    train_id = job_id_for(train.namespace, train.idempotency_key)
+    assert train_id != job_id_for("shadow", step_key("train", train_plan_value))
     plan = stage_plan(
         month=MONTH, session=SESSION, base=BASE, release_root=ROOT,
-        features_request=features, implementation_ref=IMPL, environment_ref=ENV,
+        features_request=features, training_request=train,
+        implementation_ref=IMPL, environment_ref=ENV,
     )
     params = plan["parameters"]
     refs = {name: f"job_{train_id}#training/{name}" for name in STATE_FILES}
@@ -211,6 +268,14 @@ def test_wrong_upstream_kinds_are_rejected():
         month=MONTH, features_request=wrong_features,
         implementation_ref=IMPL, environment_ref=ENV,
     ))
+    wrong_train = replace(
+        _train_request(), job=replace(_train_request().job, kind="phase5_state_stage"),
+    )
+    _invalid("training_request", lambda: stage_plan(
+        month=MONTH, session=SESSION, base=BASE, release_root=ROOT,
+        features_request=features, training_request=wrong_train,
+        implementation_ref=IMPL, environment_ref=ENV,
+    ))
     wrong_stage = replace(stage, job=replace(stage.job, kind="training"))
     _invalid("stage_request", lambda: accept_plan(
         month=MONTH, session=SESSION, release_root=ROOT, stage_request=wrong_stage,
@@ -228,10 +293,63 @@ def test_wrong_upstream_kinds_are_rejected():
     ))
 
 
+def test_wrong_candidates_and_equal_base_are_rejected():
+    _features_, _plans, requests = _chain()
+    _train, stage, accept, check, _promote = requests
+    candidate = candidate_id(MONTH, SESSION)
+    wrong_stage = replace(stage, job=replace(
+        stage.job, parameters={**stage.job.parameters, "release_id": "other"},
+    ))
+    _invalid("stage_request", lambda: accept_plan(
+        month=MONTH, session=SESSION, release_root=ROOT, stage_request=wrong_stage,
+        implementation_ref=IMPL, environment_ref=ENV,
+    ))
+    wrong_mode = replace(stage, job=replace(
+        stage.job, parameters={**stage.job.parameters, "mode": "daily"},
+    ))
+    _invalid("stage_request", lambda: accept_plan(
+        month=MONTH, session=SESSION, release_root=ROOT, stage_request=wrong_mode,
+        implementation_ref=IMPL, environment_ref=ENV,
+    ))
+    wrong_accept = replace(accept, job=replace(
+        accept.job, parameters={**accept.job.parameters, "candidate_release_id": "other"},
+    ))
+    _invalid("accept_request", lambda: check_plan(
+        month=MONTH, session=SESSION, base=BASE, release_root=ROOT,
+        accept_request=wrong_accept, implementation_ref=IMPL, environment_ref=ENV,
+    ))
+    wrong_check = replace(check, job=replace(
+        check.job, parameters={**check.job.parameters, "candidate_release_id": "other"},
+    ))
+    _invalid("check_request", lambda: promote_plan(
+        month=MONTH, session=SESSION, base=BASE, release_root=ROOT,
+        check_request=wrong_check, implementation_ref=IMPL, environment_ref=ENV,
+    ))
+    wrong_incumbent = replace(check, job=replace(
+        check.job, parameters={**check.job.parameters, "incumbent_release_id": "other"},
+    ))
+    _invalid("check_request", lambda: promote_plan(
+        month=MONTH, session=SESSION, base=BASE, release_root=ROOT,
+        check_request=wrong_incumbent, implementation_ref=IMPL, environment_ref=ENV,
+    ))
+    _invalid("base", lambda: check_plan(
+        month=MONTH, session=SESSION, base=candidate, release_root=ROOT,
+        accept_request=accept, implementation_ref=IMPL, environment_ref=ENV,
+    ))
+    _invalid("base", lambda: promote_plan(
+        month=MONTH, session=SESSION, base=candidate, release_root=ROOT,
+        check_request=check, implementation_ref=IMPL, environment_ref=ENV,
+    ))
+
+
 def test_all_five_requests_chain_and_bind_artifacts():
     features, plans, requests = _chain()
     train, stage, accept, check, promote = requests
+    restage = _restage()
+    manifest = features.job.input_refs[0]
     feature_id = job_id_for(features.namespace, features.idempotency_key)
+    restage_id = job_id_for(restage.namespace, restage.idempotency_key)
+    train_id = job_id_for("shadow", train.idempotency_key)
     stage_id = job_id_for("shadow", stage.idempotency_key)
     accept_id = job_id_for("shadow", accept.idempotency_key)
     check_id = job_id_for("shadow", check.idempotency_key)
@@ -240,8 +358,11 @@ def test_all_five_requests_chain_and_bind_artifacts():
         "training", "phase5_state_stage", "phase5_accept", "retrain_check", "models_promote",
     ]
     assert [r.idempotency_key for r in requests] == [
-        step_key(step, plan)
-        for step, plan in zip(("train", "stage", "accept", "check", "promote"), plans)
+        step_key("train", plans[0], (restage_id,)),
+        step_key("stage", plans[1]),
+        step_key("accept", plans[2]),
+        step_key("check", plans[3]),
+        step_key("promote", plans[4]),
     ]
     for request, plan in zip(requests, plans):
         assert len(request.idempotency_key) <= 128
@@ -250,18 +371,27 @@ def test_all_five_requests_chain_and_bind_artifacts():
             assert not ref.startswith("job_")
             assert "#" not in ref
             assert "/" not in ref
+    assert train.job.dependency_job_ids == (feature_id, restage_id)
+    assert stage.job.dependency_job_ids == (train_id,)
+    assert accept.job.dependency_job_ids == (stage_id,)
+    assert check.job.dependency_job_ids == (accept_id,)
+    assert promote.job.dependency_job_ids == (check_id,)
+    assert tuple(train.job.input_refs) == (manifest,)
+    assert tuple(stage.job.input_refs) == (manifest,)
+    assert tuple(check.job.input_refs) == ()
     assert any(ref.startswith("job_") for ref in plans[1]["input_refs"])
     assert any(ref.startswith("job_") for ref in plans[3]["input_refs"])
-    assert train.job.dependency_job_ids == (feature_id,)
-    assert job_id_for("shadow", train.idempotency_key) in stage.job.dependency_job_ids
-    assert stage_id in accept.job.dependency_job_ids
-    assert accept_id in check.job.dependency_job_ids
-    assert check_id in promote.job.dependency_job_ids
+    assert stage.job.parameters["input_bindings"] == {
+        **{name: f"job_{train_id}#training/{name}" for name in STATE_FILES},
+        "legacy_manifest.json": manifest,
+    }
     assert check.job.parameters["input_bindings"] == {
         ACCEPTANCE_FILE: f"job_{accept_id}#acceptance"
     }
     assert promote.job.parameters["expected_previous_release_id"] == BASE
     assert promote.job.parameters["release_id"] == candidate_id(MONTH, SESSION)
+    assert plans[4]["kind"] == "models_promote"
+    assert promote.job.kind == promote_job_kind().name == plans[4]["kind"]
     assert retrain_candidate._safe_id(candidate_id(MONTH, SESSION))
 
     kinds = (training_job_kind, state_stage_job_kind, phase5_accept_job_kind,
@@ -279,16 +409,31 @@ def test_all_five_requests_chain_and_bind_artifacts():
         assert request.job.checkpoint_contract_ref == kind.checkpoint_contract
 
 
+def test_request_parameters_are_detached_from_plan():
+    _features_, plans, requests = _chain()
+    train = requests[0]
+    original = train.job.parameters["month"]
+    plans[0]["parameters"]["month"] = "1999-01"
+    assert train.job.parameters["month"] == original
+
+
 def test_request_parents_are_merged_and_deduplicated():
     features = _features()
     plan = train_plan(month=MONTH, features_request=features,
                       implementation_ref=IMPL, environment_ref=ENV)
     feature_id = job_id_for(features.namespace, features.idempotency_key)
-    request = train_request(
-        plan=plan, parents=(feature_id, "parent-2"),
-    )
-    assert request.job.dependency_job_ids == (feature_id, "parent-2")
+    restage = _restage()
+    restage_id = job_id_for(restage.namespace, restage.idempotency_key)
+    request = train_request(plan=plan, parents=(restage, restage))
+    assert request.job.dependency_job_ids == (feature_id, restage_id)
     assert request.idempotency_key != train_request(plan=plan).idempotency_key
+    assert request.idempotency_key == train_request(
+        plan=plan, parents=(restage,),
+    ).idempotency_key
+    _invalid("parents", lambda: train_request(plan=plan, parents=("parent-2",)))
+    wrong_restage = replace(restage, job=replace(restage.job, kind="training"))
+    _invalid("parents", lambda: train_request(plan=plan, parents=(wrong_restage,)))
+    _invalid("parents", lambda: stage_request(plan=_chain()[1][1], parents=(restage,)))
 
 
 def test_d1_pool_only_semantics():
@@ -299,6 +444,7 @@ def test_d1_pool_only_semantics():
         "chooser_analog_pool.json",
     )
     features = _features()
+    manifest = features.job.input_refs[0]
     train_plan_value = train_plan(
         month=MONTH, features_request=features,
         implementation_ref=IMPL, environment_ref=ENV,
@@ -307,15 +453,19 @@ def test_d1_pool_only_semantics():
     assert train_params["mode"] == "monthly_pools"
     assert train_params["month"] == MONTH
     assert tuple(train_params["cutoffs"]) == (retrain_cutoff(MONTH),)
+    assert train_params["input_bindings"] == {"legacy_manifest.json": manifest}
+    restage = _restage()
+    train = train_request(plan=train_plan_value, parents=(restage,))
+    train_id = job_id_for(train.namespace, train.idempotency_key)
     stage_plan_value = stage_plan(
         month=MONTH, session=SESSION, base=BASE, release_root=ROOT,
-        features_request=features, implementation_ref=IMPL, environment_ref=ENV,
+        features_request=features, training_request=train,
+        implementation_ref=IMPL, environment_ref=ENV,
     )
     bindings = stage_plan_value["parameters"]["input_bindings"]
-    assert set(bindings) == set(STATE_FILES) | {"legacy_manifest.json"}
-    assert all(bindings[name].endswith(f"#training/{name}") for name in STATE_FILES)
-    doc = retrain_candidate.__doc__
-    assert "re-frozen" in doc
-    assert "champion-carried" in doc
-    assert "dated" in doc
+    expected = {name: f"job_{train_id}#training/{name}" for name in STATE_FILES}
+    expected["legacy_manifest.json"] = manifest
+    assert bindings == expected
+    assert tuple(stage_plan_value["parameters"]["state_files"]) == tuple(sorted(STATE_FILES))
+    assert stage_plan_value["parameters"]["cutoff"] == retrain_cutoff(MONTH)
     assert retrain_candidate._safe_id(candidate_id(MONTH, SESSION))

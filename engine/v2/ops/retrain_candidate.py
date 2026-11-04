@@ -1,10 +1,11 @@
-"""Pure candidate identity, cutoff, and typed step plan/request builders for the monthly retrain chain (S3a).
+"""Pure candidate identity, cutoff, and typed step plan/request builders for the monthly retrain chain.
 
 The three driver pools are S1 re-frozen and champion-carried; the chooser pool is dated.
 Candidate identity and cutoff derive deterministically, never inspecting state.
 """
 import re
 from datetime import date, timedelta
+from pathlib import Path
 
 from engine.v2.contracts import JobSpec, SubmitRequest
 from engine.v2.foundation import content_hash, to_document
@@ -39,7 +40,8 @@ def _safe_id(value: object) -> bool:
 
 
 def _safe_root(value: object) -> bool:
-    return isinstance(value, str) and bool(value.strip()) and "\0" not in value
+    return (isinstance(value, str) and bool(value.strip()) and "\0" not in value
+            and Path(value).is_absolute())
 
 
 def _need(condition, field):
@@ -90,20 +92,22 @@ def step_key(step: str, plan, parents=()) -> str:
     _need(all(field in plan for field in _PLAN_FIELDS), "plan")
     spec_hash = plan["spec_hash"]
     _need(isinstance(spec_hash, str) and _HASH.fullmatch(spec_hash), "spec_hash")
-    _need(spec_hash == content_hash(plan["parameters"]), "spec_hash")
-    deps = tuple(dict.fromkeys((*plan["dependency_job_ids"], *parents)))
-    fingerprint = {
-        "kind": plan["kind"],
-        "spec_hash": spec_hash,
-        "parameters": plan["parameters"],
-        "implementation_ref": plan["implementation_ref"],
-        "environment_ref": plan["environment_ref"],
-        "resource_class": plan["resource_class"],
-        "input_refs": list(plan["input_refs"]),
-        "dependency_job_ids": list(deps),
-    }
-    digest = content_hash(fingerprint)
-    _need(isinstance(digest, str) and _HASH.fullmatch(digest), "spec_hash")
+    try:
+        _need(spec_hash == content_hash(plan["parameters"]), "spec_hash")
+        deps = tuple(dict.fromkeys((*plan["dependency_job_ids"], *parents)))
+        fingerprint = {
+            "kind": plan["kind"],
+            "spec_hash": spec_hash,
+            "parameters": plan["parameters"],
+            "implementation_ref": plan["implementation_ref"],
+            "environment_ref": plan["environment_ref"],
+            "resource_class": plan["resource_class"],
+            "input_refs": list(plan["input_refs"]),
+            "dependency_job_ids": list(deps),
+        }
+        digest = content_hash(fingerprint)
+    except TypeError:
+        _need(False, "plan")
     return f"retrain-{step}:{digest.split(':', 1)[1][:24]}"
 
 
@@ -139,16 +143,18 @@ def train_plan(*, month, features_request, implementation_ref, environment_ref):
                  environment_ref, (feature_id,))
 
 
-def stage_plan(*, month, session, base, release_root, features_request,
+def stage_plan(*, month, session, base, release_root, features_request, training_request,
                implementation_ref, environment_ref):
     _need(_safe_id(base), "base")
     _need(_safe_root(release_root), "release_root")
     candidate = candidate_id(month, session)
     manifest, _ = _manifest_ref(features_request)
-    train_plan_value = train_plan(month=month, features_request=features_request,
-                                  implementation_ref=implementation_ref,
-                                  environment_ref=environment_ref)
-    train_id = job_id_for("shadow", step_key("train", train_plan_value))
+    train_id = _request_job_id(training_request, "training_request", "training")
+    _need(training_request.namespace == "shadow", "training_request")
+    train_params = training_request.job.parameters
+    _need(isinstance(train_params, dict), "training_request")
+    _need(train_params.get("mode") == "monthly_pools", "training_request")
+    _need(train_params.get("month") == month, "training_request")
     refs = {name: f"job_{train_id}#training/{name}" for name in STATE_FILES}
     bindings = {**refs, "legacy_manifest.json": manifest}
     params = StateStageParameters(expected_ids=("phase5_state_stage",), release_root=release_root,
@@ -165,20 +171,31 @@ def stage_plan(*, month, session, base, release_root, features_request,
 def accept_plan(*, month, session, release_root, stage_request,
                 implementation_ref, environment_ref):
     _need(_safe_root(release_root), "release_root")
+    candidate = candidate_id(month, session)
+    stage_id = _request_job_id(stage_request, "stage_request", "phase5_state_stage")
+    stage_params = stage_request.job.parameters
+    _need(isinstance(stage_params, dict), "stage_request")
+    _need(stage_params.get("release_id") == candidate, "stage_request")
+    _need(stage_params.get("mode") == "monthly", "stage_request")
     params = Phase5AcceptParameters(expected_ids=("phase5_accept",), release_root=release_root,
-                                    candidate_release_id=candidate_id(month, session))
+                                    candidate_release_id=candidate)
     return _plan("phase5_accept", params, (), "validation", implementation_ref, environment_ref,
-                 (_request_job_id(stage_request, "stage_request", "phase5_state_stage"),))
+                 (stage_id,))
 
 
 def check_plan(*, month, session, base, release_root, accept_request,
                implementation_ref, environment_ref):
     _need(_safe_id(base), "base")
     _need(_safe_root(release_root), "release_root")
+    candidate = candidate_id(month, session)
+    _need(base != candidate, "base")
     accept_id = _request_job_id(accept_request, "accept_request", "phase5_accept")
+    accept_params = accept_request.job.parameters
+    _need(isinstance(accept_params, dict), "accept_request")
+    _need(accept_params.get("candidate_release_id") == candidate, "accept_request")
     ref = f"job_{accept_id}#acceptance"
     params = RetrainCheckParameters(expected_ids=("retrain_check",), release_root=release_root,
-        candidate_release_id=candidate_id(month, session), incumbent_release_id=base,
+        candidate_release_id=candidate, incumbent_release_id=base,
         input_bindings={ACCEPTANCE_FILE: ref})
     return _plan("retrain_check", params, (ref,), "validation", implementation_ref,
                  environment_ref, (accept_id,))
@@ -188,24 +205,45 @@ def promote_plan(*, month, session, base, release_root, check_request,
                  implementation_ref, environment_ref):
     _need(_safe_id(base), "base")
     _need(_safe_root(release_root), "release_root")
+    candidate = candidate_id(month, session)
+    _need(base != candidate, "base")
+    check_id = _request_job_id(check_request, "check_request", "retrain_check")
+    check_params = check_request.job.parameters
+    _need(isinstance(check_params, dict), "check_request")
+    _need(check_params.get("candidate_release_id") == candidate, "check_request")
+    _need(check_params.get("incumbent_release_id") == base, "check_request")
     params = PromoteParameters(expected_ids=("models_promote",), release_root=release_root,
-        release_id=candidate_id(month, session), expected_previous_release_id=base)
-    return _plan("promote", params, (), "delivery", implementation_ref, environment_ref,
-                 (_request_job_id(check_request, "check_request", "retrain_check"),))
+        release_id=candidate, expected_previous_release_id=base)
+    return _plan("models_promote", params, (), "delivery", implementation_ref, environment_ref,
+                 (check_id,))
 
 
 _REQUEST_KINDS = {"train": training_job_kind, "stage": state_stage_job_kind,
                   "accept": phase5_accept_job_kind, "check": retrain_check_job_kind,
                   "promote": promote_job_kind}
+_EXPECTED_PLAN_KINDS = {"train": "training", "stage": "phase5_state_stage",
+                        "accept": "phase5_accept", "check": "retrain_check",
+                        "promote": "models_promote"}
 
 
 def _request(step, plan, parents=()):
+    _need(isinstance(plan, dict), "plan")
     kind = _REQUEST_KINDS[step]()
-    key = step_key(step, plan, parents)
-    deps = tuple(dict.fromkeys((*plan["dependency_job_ids"], *parents)))
+    _need(plan.get("kind") == _EXPECTED_PLAN_KINDS[step], "plan")
+    _need(plan["kind"] == kind.name, "plan")
+    _need(all(isinstance(parent, SubmitRequest) for parent in parents), "parents")
+    if step == "train":
+        _need(all(parent.namespace == "shadow" and parent.job.kind == "retrain_step"
+                  for parent in parents), "parents")
+    else:
+        _need(not parents, "parents")
+    parent_ids = tuple(job_id_for(parent.namespace, parent.idempotency_key)
+                       for parent in parents)
+    key = step_key(step, plan, parent_ids)
+    deps = tuple(dict.fromkeys((*plan["dependency_job_ids"], *parent_ids)))
     refs = tuple(ref for ref in plan["input_refs"] if not ref.startswith("job_"))
     job = JobSpec(kind=kind.name, implementation_ref=plan["implementation_ref"],
-        spec_hash=plan["spec_hash"], parameters=plan["parameters"],
+        spec_hash=plan["spec_hash"], parameters=to_document(plan["parameters"]),
         input_refs=refs, dependency_job_ids=deps,
         output_namespace="shadow", resource_class=plan["resource_class"],
         retry_policy_ref=kind.retry.name, checkpoint_contract_ref=kind.checkpoint_contract,
