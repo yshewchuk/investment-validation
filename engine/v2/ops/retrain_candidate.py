@@ -6,7 +6,24 @@ Candidate identity and cutoff derive deterministically, never inspecting state.
 import re
 from datetime import date, timedelta
 
+from engine.v2.contracts import JobSpec, SubmitRequest
+from engine.v2.foundation import content_hash, to_document
 from engine.v2.ops.errors import fail
+from engine.v2.ops.retrain_check import (
+    ACCEPTANCE_FILE,
+    Phase5AcceptParameters,
+    RetrainCheckParameters,
+    phase5_accept_job_kind,
+    retrain_check_job_kind,
+)
+from engine.v2.ops.state_stage import StateStageParameters, state_stage_job_kind
+from engine.v2.ops.submission import job_id_for
+from engine.v2.ops.training import (
+    PromoteParameters,
+    TrainingParameters,
+    promote_job_kind,
+    training_job_kind,
+)
 
 _MONTH = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 _SESSION = re.compile(r"^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$")
@@ -47,4 +64,120 @@ def retrain_cutoff(month: str) -> str:
         return (start + timedelta(days=32)).replace(day=1).isoformat()
     except (ValueError, OverflowError):
         _need(False, "month")
+
+
+STEPS = ("train", "stage", "accept", "check", "promote")
+STATE_FILES = ("driver_residual_pool__size.json", "driver_residual_pool__implied_t1.json",
+               "driver_residual_pool__runup_move.json", "chooser_analog_pool.json")
+_HASH = re.compile(r"^[0-9a-f]{16}$")
+
+
+def step_key(step: str, session: str, month: str, base: str, plan_hash: str) -> str:
+    _need(step in STEPS, "step")
+    _need(_date_ok(session, _SESSION), "session")
+    _need(_date_ok(month, _MONTH, "-01"), "month")
+    _need(_safe_id(base), "base")
+    _need(isinstance(plan_hash, str) and _HASH.fullmatch(plan_hash), "plan_hash")
+    return f"retrain-{step}:{session}:{month}:{base}:{plan_hash}"
+
+
+def _manifest_ref(features_request):
+    refs = features_request.job.input_refs
+    _need(len(refs) == 1 and isinstance(refs[0], str) and refs[0], "features_request")
+    return refs[0], job_id_for(features_request.namespace, features_request.idempotency_key)
+
+
+def _plan(kind, params, refs, resource, implementation_ref, environment_ref, deps=()):
+    parameters = to_document(params)
+    return {"schema_version": "operations_plan.v1.0", "kind": kind, "mode": "shadow",
+            "effects": ["staged"], "parameters": parameters, "input_refs": list(refs),
+            "blocked_prerequisites": [], "spec_hash": content_hash(parameters),
+            "implementation_ref": implementation_ref, "environment_ref": environment_ref,
+            "resource_class": resource, "dependency_job_ids": list(deps)}
+
+
+def train_plan(*, month, features_request, implementation_ref, environment_ref):
+    manifest, feature_id = _manifest_ref(features_request)
+    params = TrainingParameters(expected_ids=("training",), mode="monthly_pools", month=month,
+                                cutoffs=(retrain_cutoff(month),), input_mode="legacy",
+                                input_bindings={"legacy_manifest.json": manifest})
+    return _plan("training", params, (manifest,), "experiment_heavy", implementation_ref,
+                 environment_ref, (feature_id,))
+
+
+def stage_plan(*, month, session, base, plan_hash, release_root, features_request,
+               implementation_ref, environment_ref):
+    candidate = candidate_id(month, session)
+    manifest, _ = _manifest_ref(features_request)
+    train_id = job_id_for("shadow", step_key("train", session, month, base, plan_hash))
+    refs = {name: f"job_{train_id}#training/{name}" for name in STATE_FILES}
+    bindings = {**refs, "legacy_manifest.json": manifest}
+    params = StateStageParameters(expected_ids=("phase5_state_stage",), release_root=release_root,
+        prior_release_id=base, release_id=candidate, cutoff=retrain_cutoff(month),
+        state_files=tuple(sorted(STATE_FILES)), input_bindings=bindings, mode="monthly")
+    return _plan("phase5_state_stage", params, (*[refs[n] for n in sorted(refs)], manifest),
+                 "projection", implementation_ref, environment_ref, (train_id,))
+
+
+def accept_plan(*, month, session, release_root, implementation_ref, environment_ref):
+    params = Phase5AcceptParameters(expected_ids=("phase5_accept",), release_root=release_root,
+                                    candidate_release_id=candidate_id(month, session))
+    return _plan("phase5_accept", params, (), "validation", implementation_ref, environment_ref)
+
+
+def check_plan(*, month, session, base, release_root, accept_key,
+               implementation_ref, environment_ref):
+    accept_id = job_id_for("shadow", accept_key)
+    ref = f"job_{accept_id}#{ACCEPTANCE_FILE}"
+    params = RetrainCheckParameters(expected_ids=("retrain_check",), release_root=release_root,
+        candidate_release_id=candidate_id(month, session), incumbent_release_id=base,
+        input_bindings={ACCEPTANCE_FILE: ref})
+    return _plan("retrain_check", params, (ref,), "validation", implementation_ref,
+                 environment_ref, (accept_id,))
+
+
+def promote_plan(*, month, session, base, release_root, check_key,
+                 implementation_ref, environment_ref):
+    params = PromoteParameters(expected_ids=("models_promote",), release_root=release_root,
+        release_id=candidate_id(month, session), expected_previous_release_id=base)
+    return _plan("promote", params, (), "delivery", implementation_ref, environment_ref,
+                 (job_id_for("shadow", check_key),))
+
+
+_REQUEST_KINDS = {"train": training_job_kind, "stage": state_stage_job_kind,
+                  "accept": phase5_accept_job_kind, "check": retrain_check_job_kind,
+                  "promote": promote_job_kind}
+
+
+def _request(step, plan, session, month, base, plan_hash, parents):
+    kind = _REQUEST_KINDS[step]()
+    key = step_key(step, session, month, base, plan_hash)
+    deps = tuple(dict.fromkeys((*plan["dependency_job_ids"], *parents)))
+    job = JobSpec(kind=kind.name, implementation_ref=plan["implementation_ref"],
+        spec_hash=plan["spec_hash"], parameters=plan["parameters"],
+        input_refs=tuple(plan["input_refs"]), dependency_job_ids=deps,
+        output_namespace="shadow", resource_class=plan["resource_class"],
+        retry_policy_ref=kind.retry.name, checkpoint_contract_ref=kind.checkpoint_contract,
+        environment_ref=plan["environment_ref"])
+    return SubmitRequest(namespace="shadow", idempotency_key=key, principal="operator", job=job)
+
+
+def train_request(*, plan, session, month, base, plan_hash, parents=()):
+    return _request("train", plan, session, month, base, plan_hash, parents)
+
+
+def stage_request(*, plan, session, month, base, plan_hash, parents=()):
+    return _request("stage", plan, session, month, base, plan_hash, parents)
+
+
+def accept_request(*, plan, session, month, base, plan_hash, parents=()):
+    return _request("accept", plan, session, month, base, plan_hash, parents)
+
+
+def check_request(*, plan, session, month, base, plan_hash, parents=()):
+    return _request("check", plan, session, month, base, plan_hash, parents)
+
+
+def promote_request(*, plan, session, month, base, plan_hash, parents=()):
+    return _request("promote", plan, session, month, base, plan_hash, parents)
 
