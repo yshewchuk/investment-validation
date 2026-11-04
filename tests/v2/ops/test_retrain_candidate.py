@@ -409,7 +409,10 @@ def test_stage_request_mismatches_are_rejected_in_check_and_promote():
         stage.job, parameters={**stage.job.parameters, "release_root": "/other"},
     ))
     wrong_namespace = replace(stage, namespace="other")
-    for wrong in (wrong_prior, wrong_root, wrong_namespace):
+    wrong_mode = replace(stage, job=replace(
+        stage.job, parameters={**stage.job.parameters, "mode": "daily"},
+    ))
+    for wrong in (wrong_prior, wrong_root, wrong_namespace, wrong_mode):
         _invalid("stage_request", lambda wrong=wrong: check_plan(
             month=MONTH, session=SESSION, base=BASE, release_root=ROOT,
             stage_request=wrong, accept_request=accept,
@@ -491,6 +494,7 @@ def test_all_five_requests_chain_and_bind_artifacts():
     ]
     for request, plan in zip(requests, plans):
         assert len(request.idempotency_key) <= 128
+        assert request.principal == "operator"
         assert plan["spec_hash"] == content_hash(plan["parameters"])
         for ref in request.job.input_refs:
             assert not ref.startswith("job_")
@@ -556,6 +560,13 @@ def test_request_parameters_are_detached_from_plan():
     original = train.job.parameters["month"]
     plans[0]["parameters"]["month"] = "1999-01"
     assert train.job.parameters["month"] == original
+    original_cutoffs = train.job.parameters["cutoffs"]
+    cutoffs = plans[0]["parameters"]["cutoffs"]
+    if isinstance(cutoffs, list):
+        cutoffs[0] = "1999-01"
+    else:
+        plans[0]["parameters"]["cutoffs"] = ("1999-01",)
+    assert train.job.parameters["cutoffs"] == original_cutoffs
 
 
 def test_request_parents_are_merged_and_deduplicated():
@@ -575,6 +586,67 @@ def test_request_parents_are_merged_and_deduplicated():
     wrong_restage = replace(restage, job=replace(restage.job, kind="training"))
     _invalid("parents", lambda: train_request(plan=plan, parents=(wrong_restage,)))
     _invalid("parents", lambda: stage_request(plan=_chain()[1][1], parents=(restage,)))
+
+
+def test_request_rejects_unsubmittable_plans():
+    plan = _train_plan()
+    for field, value in (
+        ("schema_version", "operations_plan.v2.0"),
+        ("blocked_prerequisites", ["missing"]),
+        ("effects", ["applied"]),
+    ):
+        _invalid("plan", lambda field=field, value=value: train_request(
+            plan={**plan, field: value},
+        ))
+    _invalid("plan", lambda: train_request(
+        plan={**plan, "kind": "phase5_state_stage"},
+    ))
+    _invalid("input_refs", lambda: train_request(
+        plan={**plan, "input_refs": [1]},
+    ))
+    del_plan = {**plan}
+    del del_plan["input_refs"]
+    _invalid("input_refs", lambda: train_request(plan=del_plan))
+
+
+def test_manifest_ref_rejects_job_output_ref():
+    features = _features()
+    wrong = replace(features, job=replace(features.job, input_refs=("job_abc",)))
+    _invalid("features_request", lambda: train_plan(
+        month=MONTH, features_request=wrong,
+        implementation_ref=IMPL, environment_ref=ENV,
+    ))
+
+
+def test_request_parents_generator_matches_tuple():
+    features = _features()
+    plan = train_plan(month=MONTH, features_request=features,
+                      implementation_ref=IMPL, environment_ref=ENV)
+    feature_id = job_id_for(features.namespace, features.idempotency_key)
+    restage = _restage()
+    restage_id = job_id_for(restage.namespace, restage.idempotency_key)
+    from_generator = train_request(plan=plan, parents=(p for p in (restage,)))
+    from_tuple = train_request(plan=plan, parents=(restage,))
+    assert from_generator.job.dependency_job_ids == (feature_id, restage_id)
+    assert from_generator.job.dependency_job_ids == from_tuple.job.dependency_job_ids
+    assert from_generator.idempotency_key == from_tuple.idempotency_key
+    _invalid("parents", lambda: train_request(plan=plan, parents=None))
+
+
+def test_promote_rejects_check_with_wrong_acceptance_binding():
+    _features_, _plans, requests = _chain()
+    _train, stage, accept, check, _promote = requests
+    wrong_binding = replace(check, job=replace(
+        check.job, parameters={
+            **check.job.parameters,
+            "input_bindings": {ACCEPTANCE_FILE: "job_other#acceptance"},
+        },
+    ))
+    _invalid("check_request", lambda: promote_plan(
+        month=MONTH, session=SESSION, base=BASE, release_root=ROOT,
+        stage_request=stage, accept_request=accept, check_request=wrong_binding,
+        implementation_ref=IMPL, environment_ref=ENV,
+    ))
 
 
 def test_d1_pool_only_semantics():

@@ -124,6 +124,7 @@ def _stage_request_parts(request, *, candidate, release_root, base=None,
     _need(request.job.output_namespace == "shadow", field)
     params = request.job.parameters
     _need(isinstance(params, dict), field)
+    _need(params.get("mode") == "monthly", field)
     _need(params.get("release_id") == candidate, field)
     _need(params.get("release_root") == release_root, field)
     if base is not None:
@@ -149,6 +150,7 @@ def _manifest_ref(features_request):
     _need(features_request.job.kind == "legacy_features", "features_request")
     refs = features_request.job.input_refs
     _need(len(refs) == 1 and isinstance(refs[0], str) and refs[0], "features_request")
+    _need(not refs[0].startswith("job_"), "features_request")
     return refs[0], job_id_for(features_request.namespace, features_request.idempotency_key)
 
 
@@ -253,6 +255,8 @@ def promote_plan(*, month, session, base, release_root, stage_request, accept_re
     _need(check_params.get("candidate_release_id") == candidate, "check_request")
     _need(check_params.get("release_root") == release_root, "check_request")
     _need(check_params.get("incumbent_release_id") == base, "check_request")
+    _need(check_params.get("input_bindings") == {
+        ACCEPTANCE_FILE: f"job_{accept_id}#acceptance"}, "check_request")
     _need(tuple(check_request.job.dependency_job_ids) == (accept_id,), "check_request")
     params = PromoteParameters(expected_ids=("models_promote",), release_root=release_root,
         release_id=candidate, expected_previous_release_id=base)
@@ -273,6 +277,16 @@ def _request(step, plan, parents=()):
     kind = _REQUEST_KINDS[step]()
     _need(plan.get("kind") == _EXPECTED_PLAN_KINDS[step], "plan")
     _need(plan["kind"] == kind.name, "plan")
+    _need(plan.get("schema_version") == "operations_plan.v1.0", "plan")
+    _need(plan.get("blocked_prerequisites") == [], "plan")
+    _need(plan.get("effects") == ["staged"], "plan")
+    plan_refs = plan.get("input_refs")
+    _need(isinstance(plan_refs, (list, tuple))
+          and all(isinstance(ref, str) for ref in plan_refs), "input_refs")
+    try:
+        parents = tuple(parents)
+    except TypeError:
+        _need(False, "parents")
     _need(all(isinstance(parent, SubmitRequest) for parent in parents), "parents")
     if step == "train":
         _need(all(parent.namespace == "shadow" and parent.job.kind == "retrain_step"
@@ -283,7 +297,7 @@ def _request(step, plan, parents=()):
                        for parent in parents)
     key = step_key(step, plan, parent_ids)
     deps = tuple(dict.fromkeys((*plan["dependency_job_ids"], *parent_ids)))
-    refs = tuple(ref for ref in plan["input_refs"] if not ref.startswith("job_"))
+    refs = tuple(ref for ref in plan_refs if not ref.startswith("job_"))
     job = JobSpec(kind=kind.name, implementation_ref=plan["implementation_ref"],
         spec_hash=plan["spec_hash"], parameters=to_document(plan["parameters"]),
         input_refs=refs, dependency_job_ids=deps,
