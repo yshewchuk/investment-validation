@@ -39,12 +39,12 @@ def test_noncanonical_month_is_typed_refusal(month):
     assert error.value.issues[0].code == "INVALID_EXIT_MONTH"
 
 
-def test_effective_exit_repair_updates_value_pnl_and_return_by_no_arb_only():
+def test_effective_exit_repair_updates_value_pnl_and_return_by_no_arb_or_negative_value():
     trades = pd.DataFrame([
         {"event_id": "held-oct", "exit_date": "2026-09-30", "expiry": "2026-10-31",
          "exit_arb_ok": False, "exit_value": -2.0, "exit_value_expiry": 5.0,
          "entry_cost": 2.0, "pnl": -4.0, "ret": -2.0},
-        {"event_id": "quoted-negative", "exit_date": "2026-10-10", "expiry": "2026-11-30",
+        {"event_id": "negative-exit", "exit_date": "2026-10-10", "expiry": "2026-10-31",
          "exit_arb_ok": True, "exit_value": -0.5, "exit_value_expiry": 8.0,
          "entry_cost": 1.0, "pnl": -1.5, "ret": -1.5},
         {"event_id": "held-nov", "exit_date": "2026-10-25", "expiry": "2026-11-15",
@@ -56,11 +56,11 @@ def test_effective_exit_repair_updates_value_pnl_and_return_by_no_arb_only():
     ])
 
     result = builder._effective_exit_trades(trades, "2026-10").set_index("event_id")
-    assert set(result.index) == {"held-oct", "quoted-negative", "low-cost"}
+    assert set(result.index) == {"held-oct", "negative-exit", "low-cost"}
     assert result.loc["held-oct", "exit_date"] == pd.Timestamp("2026-10-31")
     assert result.loc["held-oct", ["exit_value", "pnl", "ret"]].tolist() == [5.0, 3.0, 1.5]
-    assert result.loc["quoted-negative", ["exit_value", "pnl", "ret"]].tolist() == [
-        -0.5, -1.5, -1.5]
+    assert result.loc["negative-exit", "exit_date"] == pd.Timestamp("2026-10-31")
+    assert result.loc["negative-exit", ["exit_value", "pnl", "ret"]].tolist() == [8.0, 7.0, 7.0]
     assert pd.isna(result.loc["low-cost", "ret"])
 
 

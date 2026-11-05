@@ -151,7 +151,7 @@ def _refuse_monthly_event_skip(exc: Exception, event_id: str) -> None:
 
 def _effective_exit_trades(trades: pd.DataFrame, month: str) -> pd.DataFrame:
     out = trades.copy()
-    repaired = ~out["exit_arb_ok"].fillna(True).astype(bool)
+    repaired = ~out["exit_arb_ok"].fillna(True).astype(bool) | out.exit_value.lt(0)
     effective_exit = pd.to_datetime(out["exit_date"], errors="coerce")
     expiry = pd.to_datetime(out["expiry"], errors="coerce")
     effective_exit.loc[repaired] = expiry.loc[repaired]
