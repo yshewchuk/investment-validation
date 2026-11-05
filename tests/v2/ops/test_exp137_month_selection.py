@@ -264,10 +264,10 @@ def test_monthly_build_filters_coverage_and_slices_output_to_scored_month(monkey
     assert quoted_result["trades"]["exit_value_expiry"].isna().all()
     assert list(tmp_path.iterdir()) == []
 
-    def fail_residual_load(_history):
-        raise OSError("residual source unavailable")
+    def fail_event_universe():
+        raise OSError("event source unavailable")
 
-    monkeypatch.setattr(builder.pnl_sim, "ResidualPool", fail_residual_load)
+    monkeypatch.setattr(builder.e133, "event_universe", fail_event_universe)
     with pytest.raises(TrainingRefused) as error:
         builder.build_all(limit_exit_month="2026-10")
     assert error.value.issues[0].code == "MONTHLY_SOURCE_LOAD_FAILED"
