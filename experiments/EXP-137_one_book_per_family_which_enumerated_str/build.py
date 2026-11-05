@@ -75,6 +75,9 @@ FAMILY_MASK = {k: (GRID.family_key == k) for k in FAMILIES}
 
 def build_all(*, force: bool = False, limit_years=None,
               limit_exit_month: str | None = None) -> dict:
+    if limit_exit_month is not None:
+        from tools.refresh_chooser_pool_candidates import require_month
+        limit_exit_month = require_month(limit_exit_month)
     out = RESULTS / "candidates.parquet"
     if limit_exit_month is None and out.exists() and not force:
         print("[e137] cached", flush=True)
@@ -86,17 +89,27 @@ def build_all(*, force: bool = False, limit_years=None,
     started = time.time()
     events = e133.event_universe()
     events["event_date"] = pd.to_datetime(events["event_date"])
-    events = events.merge(e133.forecasts(), on=["ticker", "event_date"], how="inner")
-    plan = replay_mod.filter_plan_by_availability(
-        replay_mod.plan_events(twin_peak_5(wing_multiple=3, width_moneyness=0.05), events))
-    keyframe = plan.frame.set_index("event_id")
-    events = events[events["event_id"].isin(set(plan.frame["event_id"]))].copy()
+    structure = twin_peak_5(wing_multiple=3, width_moneyness=0.05)
     if limit_exit_month is not None:
-        month_ids = plan.frame.loc[
-            pd.to_datetime(plan.frame["exit_date"]).dt.strftime("%Y-%m").eq(limit_exit_month),
-            "event_id",
-        ]
-        events = events[events["event_id"].isin(set(month_ids))].copy()
+        planned = replay_mod.plan_events(structure, events)
+        period = pd.Period(limit_exit_month, freq="M")
+        start, end = (period - 1).start_time, (period + 1).start_time
+        month_plan = planned.frame[
+            pd.to_datetime(planned.frame["exit_date"]).ge(start)
+            & pd.to_datetime(planned.frame["exit_date"]).lt(end)
+        ].copy()
+        month_ids = set(month_plan["event_id"])
+        month_universe = events[events["event_id"].isin(month_ids)].copy()
+        forecasts = e133.forecasts()
+        events = month_universe.merge(forecasts, on=["ticker", "event_date"], how="inner")
+        if len(events) != len(month_universe):
+            raise RuntimeError("required forecast missing for the requested exit month")
+        plan = replay_mod.ReplayPlan(frame=month_plan.reset_index(drop=True), skipped={})
+    else:
+        events = events.merge(e133.forecasts(), on=["ticker", "event_date"], how="inner")
+        plan = replay_mod.filter_plan_by_availability(replay_mod.plan_events(structure, events))
+        events = events[events["event_id"].isin(set(plan.frame["event_id"]))].copy()
+    keyframe = plan.frame.set_index("event_id")
     events["_year"] = events["event_date"].dt.year
     if limit_years is not None:
         events = events[events["_year"].isin(set(limit_years))]
@@ -143,10 +156,9 @@ def build_all(*, force: bool = False, limit_years=None,
             try:
                 ev = e133.price_event(row, er, xr, pool, rng_pick=rng)
             except e133.EventSkip as exc:
-                if limit_exit_month is not None and str(exc) in {
-                        "bad_quote", "expiry_gone_at_exit", "exit_structure_unresolved"}:
+                if limit_exit_month is not None:
                     raise RuntimeError(
-                        f"required exit input failed for {row['event_id']}: {exc}") from exc
+                        f"required monthly candidate input failed for {row['event_id']}: {exc}") from exc
                 skips[str(exc)] = skips.get(str(exc), 0) + 1
                 continue
             except Exception as exc:                               # noqa: BLE001
@@ -214,6 +226,15 @@ def build_all(*, force: bool = False, limit_years=None,
               f"{time.time() - started:.0f}s", flush=True)
 
     trades = pd.DataFrame(parts)
+    if limit_exit_month is not None and not trades.empty:
+        repaired = ((~trades["exit_arb_ok"].fillna(True).astype(bool))
+                    | (trades["exit_value"] < 0))
+        effective_exit = pd.to_datetime(trades["exit_date"], errors="coerce")
+        expiry = pd.to_datetime(trades["expiry"], errors="coerce")
+        if effective_exit.isna().any() or expiry.loc[repaired].isna().any():
+            raise RuntimeError("monthly candidate has no effective exit availability date")
+        effective_exit.loc[repaired] = expiry.loc[repaired]
+        trades = trades.loc[effective_exit.dt.strftime("%Y-%m").eq(limit_exit_month)].copy()
     tallies = e133._pattern_frame()
     for k, v in tally.items():
         tallies[k] = v
@@ -240,7 +261,4 @@ if __name__ == "__main__":
     ap.add_argument("--years", type=int, nargs="*", default=None)
     ap.add_argument("--exit-month", default=None)
     a = ap.parse_args()
-    if a.exit_month is not None:
-        from tools.refresh_chooser_pool_candidates import require_month
-        a.exit_month = require_month(a.exit_month)
     build_all(force=a.force, limit_years=a.years, limit_exit_month=a.exit_month)

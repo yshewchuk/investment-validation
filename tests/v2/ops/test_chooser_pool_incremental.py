@@ -86,3 +86,50 @@ def test_refresh_wraps_builder_failure_as_typed_refusal(tmp_path, monkeypatch):
 
     with pytest.raises(TrainingRefused, match="candidate_build_failed"):
         refresh.refresh("2026-10", path)
+
+
+def test_emit_scores_candidate_values_against_midpoint_oracle():
+    import importlib.util
+    import json
+    import sys
+
+    import numpy as np
+
+    root = refresh.ROOT
+    path = root / "experiments/EXP-137_one_book_per_family_which_enumerated_str/build.py"
+    spec = importlib.util.spec_from_file_location("chooser_oracle_exp137", path)
+    builder = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = builder
+    spec.loader.exec_module(builder)
+    ev = {
+        "strikes": np.array([100.0, 95.0]),
+        "bid_e": np.array([4.0, 2.0]), "ask_e": np.array([6.0, 4.0]),
+        "bid_x": np.array([1.0, 3.0]), "ask_x": np.array([3.0, 5.0]),
+        "expiry": pd.Timestamp("2026-10-16"), "dte_entry": 30, "dte_exit": 20,
+        "spot_entry": 100.0, "spot_exit": 102.0, "pool_n": 12,
+        "tradeable": np.array([True, True]),
+    }
+    row = {
+        "event_id": "oracle", "ticker": "XYZ", "event_date": pd.Timestamp("2026-09-01"),
+        "session": "AMC", "entry_date": pd.Timestamp("2026-09-01"),
+        "exit_date": pd.Timestamp("2026-10-15"),
+        "pred_abs_move": 5.0, "pred_abs_move_sd": 1.0,
+    }
+    got = builder.e133._emit(
+        ev, row, "arm", np.array([0, 1, 0, 0, 0, 0, 0]),
+        np.array([1.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        0, 0.1, 0.2, "pattern",
+    )
+    mid = next(candidate for candidate in got if candidate["fill_alpha"] == 0.5)
+    legs = json.loads(mid["legs"])
+    assert mid["entry_cost"] == pytest.approx(5.0 - 3.0)
+    assert mid["exit_value"] == pytest.approx(2.0 - 4.0)
+    assert mid["pnl"] == pytest.approx(-4.0)
+    assert mid["strike"] == pytest.approx(100.0)
+    assert [(leg["side"], leg["strike"], leg["price"]) for leg in legs["entry"]] == [
+        ("buy", 100.0, 5.0), ("sell", 95.0, 3.0),
+    ]
+    assert [(leg["side"], leg["strike"], leg["price"]) for leg in legs["exit"]] == [
+        ("sell", 100.0, 2.0), ("buy", 95.0, 4.0),
+    ]
+

@@ -411,7 +411,7 @@ def price_event(row, entry_rows, exit_rows, pool, *, rng_pick,
 
     # The exit prices the SAME contracts, so it is looked up on the entry
     # ladder rather than rebuilt: a strike the exit chain does not quote is a
-    # strike no candidate may use, which is `structure_unresolved` under
+    # strike no candidate may use, which is `exit_structure_unresolved` under
     # pinning and not a silently different structure.
     ex = exit_at_expiry.drop_duplicates("strike").set_index("strike")
     bid_x = ex["bid"].reindex(strikes).to_numpy(dtype=float)
@@ -432,7 +432,7 @@ def price_event(row, entry_rows, exit_rows, pool, *, rng_pick,
     a0, a_idx, up, dn = _lookup_tables(strikes, spot_entry, quoted)
     idx, resolves = _leg_indices(a_idx, up, dn, strikes.size)
     if not resolves.any():
-        raise EventSkip("structure_unresolved")
+        raise EventSkip("exit_structure_unresolved")
 
     # --- the two width rules, on the OUTER strikes, in dollars --------------
     anchor_px = strikes[idx[:, 0]]
