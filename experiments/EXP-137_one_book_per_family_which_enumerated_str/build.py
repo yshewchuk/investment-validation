@@ -93,7 +93,7 @@ def build_all(*, force: bool = False, limit_years=None,
     if limit_exit_month is not None:
         planned = replay_mod.plan_events(structure, events)
         period = pd.Period(limit_exit_month, freq="M")
-        start, end = (period - 1).start_time, (period + 1).start_time
+        start, end = period.start_time, (period + 1).start_time
         month_plan = planned.frame[
             pd.to_datetime(planned.frame["exit_date"]).ge(start)
             & pd.to_datetime(planned.frame["exit_date"]).lt(end)
@@ -156,7 +156,7 @@ def build_all(*, force: bool = False, limit_years=None,
             try:
                 ev = e133.price_event(row, er, xr, pool, rng_pick=rng)
             except e133.EventSkip as exc:
-                if limit_exit_month is not None:
+                if limit_exit_month is not None and str(exc) != "structure_unresolved":
                     raise RuntimeError(
                         f"required monthly candidate input failed for {row['event_id']}: {exc}") from exc
                 skips[str(exc)] = skips.get(str(exc), 0) + 1
@@ -234,7 +234,7 @@ def build_all(*, force: bool = False, limit_years=None,
         if effective_exit.isna().any() or expiry.loc[repaired].isna().any():
             raise RuntimeError("monthly candidate has no effective exit availability date")
         effective_exit.loc[repaired] = expiry.loc[repaired]
-        trades = trades.loc[effective_exit.dt.strftime("%Y-%m").eq(limit_exit_month)].copy()
+        trades["exit_date"] = effective_exit
     tallies = e133._pattern_frame()
     for k, v in tally.items():
         tallies[k] = v

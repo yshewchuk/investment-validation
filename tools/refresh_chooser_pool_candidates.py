@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import os
 import resource
+import tempfile
 import sys
 import time
 from datetime import date
@@ -53,16 +55,27 @@ def append_candidates(path: Path, fresh: pd.DataFrame) -> int:
         refuse("candidate_build_invalid", "fresh candidates lack identity or dates")
     event_dates = pd.to_datetime(fresh["event_date"], errors="coerce")
     entry_dates = pd.to_datetime(fresh["entry_date"], errors="coerce")
-    if event_dates.isna().any() or entry_dates.isna().any() or (event_dates > entry_dates).any():
-        refuse("candidate_causality_failed", "forecast/residual event date must be <= entry date")
+    sessions = fresh.get("session", pd.Series("", index=fresh.index)).astype(str).str.upper()
+    future_non_bmo = (event_dates > entry_dates) & ~sessions.eq("BMO")
+    if event_dates.isna().any() or entry_dates.isna().any() or future_non_bmo.any():
+        refuse("candidate_causality_failed", "non-BMO event date must be <= entry date")
     fresh = fresh.drop_duplicates(list(KEY), keep="first")
     old_keys = pd.MultiIndex.from_frame(old[list(KEY)])
     new_keys = pd.MultiIndex.from_frame(fresh[list(KEY)])
     unseen = fresh.loc[~new_keys.isin(old_keys)]
     if len(unseen):
+        temp_path = None
         try:
-            pd.concat([old, unseen], ignore_index=True).to_parquet(path, index=False)
+            fd, temp_name = tempfile.mkstemp(
+                prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+            temp_path = Path(temp_name)
+            os.close(fd)
+            pd.concat([old, unseen], ignore_index=True).to_parquet(temp_path, index=False)
+            os.chmod(temp_path, path.stat().st_mode)
+            os.replace(temp_path, path)
         except Exception as exc:
+            if temp_path is not None:
+                temp_path.unlink(missing_ok=True)
             refuse("candidate_table_write_failed", f"{type(exc).__name__}: {exc}")
     return len(unseen)
 

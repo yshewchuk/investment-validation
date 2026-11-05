@@ -6,12 +6,12 @@ from engine.v2.models.training.fold_store import TrainingRefused
 from tools import refresh_chooser_pool_candidates as refresh
 
 
-def _row(event_id, value, event_date="2026-09-01", entry_date="2026-09-01"):
+def _row(event_id, value, event_date="2026-09-01", entry_date="2026-09-01", session="AMC"):
     return {
         "event_id": event_id, "arm": "N7q2_-1_-1_1", "variant": 0,
         "fill_alpha": 0.5, "event_date": pd.Timestamp(event_date),
         "entry_date": pd.Timestamp(entry_date), "exit_date": pd.Timestamp("2026-10-15"),
-        "marker": value,
+        "session": session, "marker": value,
     }
 
 
@@ -44,6 +44,32 @@ def test_append_refuses_future_feature_date_without_changing_table(tmp_path):
         )
 
     pd.testing.assert_frame_equal(pd.read_parquet(path), original)
+
+
+def test_append_accepts_bmo_event_date_after_entry_date(tmp_path):
+    path = tmp_path / "candidates.parquet"
+    pd.DataFrame([_row("existing", 1)]).to_parquet(path, index=False)
+
+    fresh = pd.DataFrame([_row(
+        "bmo", 2, event_date="2026-10-02", entry_date="2026-10-01", session="BMO")])
+    assert refresh.append_candidates(path, fresh) == 1
+    assert "bmo" in set(pd.read_parquet(path)["event_id"])
+
+
+def test_atomic_append_failure_preserves_table_and_cleans_temp(tmp_path, monkeypatch):
+    path = tmp_path / "candidates.parquet"
+    original = pd.DataFrame([_row("existing", 1)])
+    original.to_parquet(path, index=False)
+
+    def fail_write(self, *_args, **_kwargs):
+        raise OSError("simulated parquet write failure")
+
+    monkeypatch.setattr(pd.DataFrame, "to_parquet", fail_write)
+    with pytest.raises(TrainingRefused, match="candidate_table_write_failed"):
+        refresh.append_candidates(path, pd.DataFrame([_row("new", 2)]))
+
+    pd.testing.assert_frame_equal(pd.read_parquet(path), original)
+    assert not list(tmp_path.glob(".candidates.parquet.*.tmp"))
 
 
 def test_missing_candidate_table_is_typed_refusal(tmp_path):
