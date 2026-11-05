@@ -121,6 +121,8 @@ def _effective_month_plan(frame, month: str, replay, e133):
                 "PRIOR_MONTH_ENTRY_CHAIN_MISSING",
                 f"required_prior_month_entry_chain_missing: {row['event_id']}")
         entry = replay_mod._clean(entry)
+        if entry.empty:
+            continue
         try:
             expiry = pd.Timestamp(e133.ExpirySelector(kind="first_post_event").select(
                 entry, row["event_date"], row["session"]))
@@ -336,9 +338,8 @@ def build_all(*, force: bool = False, limit_years=None,
             for r in emitted:
                 r["exit_arb_ok"] = e134.legs_no_arb_ok(r["legs"])
                 s = spot_at.get((row["ticker"], pd.Timestamp(r["expiry"])), np.nan)
-                in_month = (limit_exit_month is not None
-                            and pd.Timestamp(r["expiry"]).strftime("%Y-%m") == limit_exit_month)
-                if not r["exit_arb_ok"] and in_month and not np.isfinite(s):
+                if (limit_exit_month and limit_exit_month == pd.Timestamp(r["expiry"]).strftime("%Y-%m")
+                        and not r["exit_arb_ok"] and not np.isfinite(s)):
                     raise _monthly_refusal(
                         "MONTHLY_SETTLEMENT_SPOT_MISSING",
                         f"required_monthly_settlement_spot_missing: {row['event_id']} {r['expiry']}")
