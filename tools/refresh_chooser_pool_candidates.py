@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import io
 import os
 import resource
+import stat
 import tempfile
 import sys
 import time
@@ -38,15 +40,40 @@ def require_month(value: str) -> str:
     return value
 
 
-def append_candidates(path: Path, fresh: pd.DataFrame) -> int:
-    if not path.is_file():
-        refuse("candidate_table_missing", "stored EXP-137 candidate table is required")
-    if path.stat().st_size > CHOOSER_POOL_MAX_BYTES:
-        refuse("candidate_table_too_large", "stored candidate table exceeds the bounded read limit")
+def _read_candidate_table(path: Path) -> pd.DataFrame:
+    if not hasattr(os, "O_NOFOLLOW"):
+        refuse("candidate_table_read_failed", "safe no-follow reads are unsupported")
+    flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0)
     try:
-        old = pd.read_parquet(path)
+        fd = os.open(path, flags)
+    except FileNotFoundError:
+        refuse("candidate_table_missing", "stored EXP-137 candidate table is required")
+    except OSError as exc:
+        refuse("candidate_table_read_failed", f"{type(exc).__name__}: {exc}")
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            refuse("candidate_table_invalid", "stored candidate path is not a regular file")
+        if info.st_size > CHOOSER_POOL_MAX_BYTES:
+            refuse("candidate_table_too_large", "stored candidate table exceeds the bounded read limit")
+        source = os.fdopen(fd, "rb")
+        fd = None
+        with source:
+            payload = source.read(CHOOSER_POOL_MAX_BYTES + 1)
+        if len(payload) > CHOOSER_POOL_MAX_BYTES:
+            refuse("candidate_table_too_large", "stored candidate table exceeds the bounded read limit")
+        return pd.read_parquet(io.BytesIO(payload))
+    except TrainingRefused:
+        raise
     except Exception as exc:
         refuse("candidate_table_read_failed", f"{type(exc).__name__}: {exc}")
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
+def append_candidates(path: Path, fresh: pd.DataFrame) -> int:
+    old = _read_candidate_table(path)
     if any(column not in old for column in (*KEY, "event_date", "entry_date")):
         refuse("candidate_table_invalid", "stored table lacks candidate identity or dates")
     if fresh.empty:

@@ -72,6 +72,41 @@ def test_atomic_append_failure_preserves_table_and_cleans_temp(tmp_path, monkeyp
     assert not list(tmp_path.glob(".candidates.parquet.*.tmp"))
 
 
+def test_candidate_table_reads_and_build_schema_refusals_are_typed(tmp_path):
+    corrupt = tmp_path / "corrupt.parquet"
+    corrupt.write_bytes(b"not parquet")
+    with pytest.raises(TrainingRefused, match="candidate_table_read_failed"):
+        refresh.append_candidates(corrupt, pd.DataFrame())
+
+    invalid = tmp_path / "invalid.parquet"
+    pd.DataFrame({"wrong": [1]}).to_parquet(invalid, index=False)
+    with pytest.raises(TrainingRefused, match="candidate_table_invalid"):
+        refresh.append_candidates(invalid, pd.DataFrame())
+
+    stored = tmp_path / "stored.parquet"
+    pd.DataFrame([_row("existing", 1)]).to_parquet(stored, index=False)
+    malformed = pd.DataFrame([_row("new", 2)]).drop(columns="entry_date")
+    with pytest.raises(TrainingRefused, match="candidate_build_invalid"):
+        refresh.append_candidates(stored, malformed)
+
+
+def test_successful_append_uses_atomic_replace(tmp_path, monkeypatch):
+    path = tmp_path / "candidates.parquet"
+    pd.DataFrame([_row("existing", 1)]).to_parquet(path, index=False)
+    calls = []
+    original_replace = refresh.os.replace
+
+    def record_replace(source, destination):
+        calls.append((source, destination))
+        return original_replace(source, destination)
+
+    monkeypatch.setattr(refresh.os, "replace", record_replace)
+    assert refresh.append_candidates(path, pd.DataFrame([_row("new", 2)])) == 1
+    assert len(calls) == 1
+    assert calls[0][1] == path
+    assert "new" in set(pd.read_parquet(path)["event_id"])
+
+
 def test_missing_candidate_table_is_typed_refusal(tmp_path):
     with pytest.raises(TrainingRefused, match="candidate_table_missing"):
         refresh.append_candidates(tmp_path / "missing.parquet", pd.DataFrame())
@@ -158,4 +193,42 @@ def test_emit_scores_candidate_values_against_midpoint_oracle():
     assert [(leg["side"], leg["strike"], leg["price"]) for leg in legs["exit"]] == [
         ("sell", 100.0, 2.0), ("buy", 95.0, 4.0),
     ]
+
+
+def _load_exp137_builder():
+    import importlib.util
+    import sys
+
+    path = refresh.ROOT / "experiments/EXP-137_one_book_per_family_which_enumerated_str/build.py"
+    spec = importlib.util.spec_from_file_location("chooser_helper_exp137", path)
+    builder = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = builder
+    spec.loader.exec_module(builder)
+    return builder
+
+
+def test_month_window_is_half_open_and_effective_exit_uses_expiry():
+    builder = _load_exp137_builder()
+    planned = pd.DataFrame({
+        "event_id": ["prior", "first", "last", "next"],
+        "exit_date": pd.to_datetime(["2026-09-30", "2026-10-01", "2026-10-31", "2026-11-01"]),
+    })
+    assert builder._month_window(planned, "2026-10")["event_id"].tolist() == ["first", "last"]
+
+    trades = pd.DataFrame({
+        "exit_arb_ok": [False, True], "exit_value": [-1.0, 2.0],
+        "exit_date": pd.to_datetime(["2026-10-30", "2026-10-30"]),
+        "expiry": pd.to_datetime(["2026-11-06", "2026-11-13"]),
+    })
+    settled = builder._effective_exit_trades(trades)
+    assert settled["exit_date"].tolist() == list(pd.to_datetime(["2026-11-06", "2026-10-30"]))
+    assert trades["exit_date"].tolist() == list(pd.to_datetime(["2026-10-30", "2026-10-30"]))
+
+
+def test_monthly_skip_refuses_failed_inputs_but_counts_benign_structure_skips():
+    builder = _load_exp137_builder()
+    for code in ("structure_unresolved", "exit_structure_unresolved"):
+        assert builder._refuse_monthly_event_skip(builder.e133.EventSkip(code), "event") is None
+    with pytest.raises(RuntimeError, match="event: bad_quote"):
+        builder._refuse_monthly_event_skip(builder.e133.EventSkip("bad_quote"), "event")
 

@@ -73,6 +73,35 @@ FAMILIES = tuple(f.key for f in _f.FAMILIES)
 FAMILY_MASK = {k: (GRID.family_key == k) for k in FAMILIES}
 
 
+_MONTHLY_BENIGN_SKIPS = {"structure_unresolved", "exit_structure_unresolved"}
+
+
+def _month_window(frame: pd.DataFrame, month: str) -> pd.DataFrame:
+    period = pd.Period(month, freq="M")
+    start, end = period.start_time, (period + 1).start_time
+    dates = pd.to_datetime(frame["exit_date"])
+    return frame.loc[dates.ge(start) & dates.lt(end)].copy()
+
+
+def _refuse_monthly_event_skip(exc: Exception, event_id: str) -> None:
+    if str(exc) not in _MONTHLY_BENIGN_SKIPS:
+        raise RuntimeError(
+            f"required monthly candidate input failed for {event_id}: {exc}") from exc
+
+
+def _effective_exit_trades(trades: pd.DataFrame) -> pd.DataFrame:
+    out = trades.copy()
+    repaired = ((~out["exit_arb_ok"].fillna(True).astype(bool))
+                | (out["exit_value"] < 0))
+    effective_exit = pd.to_datetime(out["exit_date"], errors="coerce")
+    expiry = pd.to_datetime(out["expiry"], errors="coerce")
+    if effective_exit.isna().any() or expiry.loc[repaired].isna().any():
+        raise RuntimeError("monthly candidate has no effective exit availability date")
+    effective_exit.loc[repaired] = expiry.loc[repaired]
+    out["exit_date"] = effective_exit
+    return out
+
+
 def build_all(*, force: bool = False, limit_years=None,
               limit_exit_month: str | None = None) -> dict:
     if limit_exit_month is not None:
@@ -92,12 +121,7 @@ def build_all(*, force: bool = False, limit_years=None,
     structure = twin_peak_5(wing_multiple=3, width_moneyness=0.05)
     if limit_exit_month is not None:
         planned = replay_mod.plan_events(structure, events)
-        period = pd.Period(limit_exit_month, freq="M")
-        start, end = period.start_time, (period + 1).start_time
-        month_plan = planned.frame[
-            pd.to_datetime(planned.frame["exit_date"]).ge(start)
-            & pd.to_datetime(planned.frame["exit_date"]).lt(end)
-        ].copy()
+        month_plan = _month_window(planned.frame, limit_exit_month)
         month_ids = set(month_plan["event_id"])
         month_universe = events[events["event_id"].isin(month_ids)].copy()
         forecasts = e133.forecasts()
@@ -156,9 +180,8 @@ def build_all(*, force: bool = False, limit_years=None,
             try:
                 ev = e133.price_event(row, er, xr, pool, rng_pick=rng)
             except e133.EventSkip as exc:
-                if limit_exit_month is not None and str(exc) != "structure_unresolved":
-                    raise RuntimeError(
-                        f"required monthly candidate input failed for {row['event_id']}: {exc}") from exc
+                if limit_exit_month is not None:
+                    _refuse_monthly_event_skip(exc, row["event_id"])
                 skips[str(exc)] = skips.get(str(exc), 0) + 1
                 continue
             except Exception as exc:                               # noqa: BLE001
@@ -227,14 +250,7 @@ def build_all(*, force: bool = False, limit_years=None,
 
     trades = pd.DataFrame(parts)
     if limit_exit_month is not None and not trades.empty:
-        repaired = ((~trades["exit_arb_ok"].fillna(True).astype(bool))
-                    | (trades["exit_value"] < 0))
-        effective_exit = pd.to_datetime(trades["exit_date"], errors="coerce")
-        expiry = pd.to_datetime(trades["expiry"], errors="coerce")
-        if effective_exit.isna().any() or expiry.loc[repaired].isna().any():
-            raise RuntimeError("monthly candidate has no effective exit availability date")
-        effective_exit.loc[repaired] = expiry.loc[repaired]
-        trades["exit_date"] = effective_exit
+        trades = _effective_exit_trades(trades)
     tallies = e133._pattern_frame()
     for k, v in tally.items():
         tallies[k] = v
