@@ -745,12 +745,12 @@ Loading establishes release membership and typed integrity; selecting the exact 
 
 #### `select_chooser_state(binding, event_date, as_of) -> ChooserState`
 
-Inputs are a verified `ScoringReleaseBinding`, the event date and the canonical as-of date; the fold start is derived from those dates (the earlier event/decision month), never a function argument, and the returned `ChooserState` carries the selected pools with fold provenance, producer bindings and artifact refs. `native_score_batch` calls the selector for the seven menu-member strategies; full portfolio-level DYN-SV menu selection remains outside that worker. Selection adds no fold cache or retry, and cutoffless legacy descriptors remain verified then omitted.
+Inputs are a verified `ScoringReleaseBinding`, the event date and the canonical as-of date; the fold start is derived from those dates (the earlier event/decision month), never a function argument, and the returned `ChooserState` carries the selected pools with fold provenance, producer bindings and artifact refs. The selector chooses the unique chooser analog pool with the greatest cutoff less than or equal to `as_of`: an exact-date pool wins, older pools have no age limit, and future-dated pools are never eligible. `native_score_batch` calls the selector for the seven menu-member strategies; full portfolio-level DYN-SV menu selection remains outside that worker. Selection adds no fold cache or retry, and cutoffless legacy descriptors remain verified then omitted.
 
 | Condition | Outcome |
 |---|---|
 | malformed dates, malformed catalog, or a serving-fold load error | `ModelNotReady("chooser state", ...)` |
-| no unique exact-cutoff analog pool | `ModelNotReady("chooser_analog_pool", ...)` |
+| no analog pool with cutoff at or before `as_of`, or multiple pools at the newest eligible cutoff | `ModelNotReady("chooser_analog_pool", ...)` |
 | no unique v1 admissible-depth table | `ModelNotReady("admissible_table:dyn_sv", ...)` |
 | missing, malformed or noncausal producer descriptor/reference | `ModelNotReady("tier4_folds:<role>", ...)` |
 

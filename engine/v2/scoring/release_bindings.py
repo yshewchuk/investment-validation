@@ -488,15 +488,26 @@ def _load_chooser_fold_state(
     return pools, producer_bindings, provenance, tuple(artifact_refs)
 
 
+def _select_latest_chooser_pool(artifacts, as_of):
+    cutoff = canonical_day(as_of)
+    eligible = [artifact for artifact in artifacts
+                if artifact.cutoff is not None and artifact.cutoff <= cutoff]
+    if not eligible:
+        raise ModelNotReady(_CHOOSER_POOL_MEMBER_ID, "no analog pool at or before cutoff")
+    newest = max(artifact.cutoff for artifact in eligible)
+    latest = [artifact for artifact in eligible if artifact.cutoff == newest]
+    if len(latest) != 1:
+        raise ModelNotReady(_CHOOSER_POOL_MEMBER_ID, "no unique analog pool for cutoff")
+    return latest[0]
+
+
 def select_chooser_state(
     binding: ScoringReleaseBinding, event_date: str, as_of: str,
 ) -> ChooserState:
-    """Select the exact chooser state for one event date and as-of."""
+    """Select the newest eligible chooser state for one event date and as-of."""
     try:
         cutoff = canonical_day(as_of)
-        analogs = [a for a in binding.chooser_analog_artifacts if a.cutoff == cutoff]
-        if len(analogs) != 1:
-            raise ModelNotReady(_CHOOSER_POOL_MEMBER_ID, "no unique analog pool for cutoff")
+        analogs = [_select_latest_chooser_pool(binding.chooser_analog_artifacts, as_of)]
         tables = [t for t in binding.chooser_admissible_artifacts if t.key == (N_ADMISSIBLE_TABLE_ID, "v1")]
         if len(tables) != 1:
             raise ModelNotReady(_CHOOSER_TABLE_MEMBER_ID, "no unique table for key")
