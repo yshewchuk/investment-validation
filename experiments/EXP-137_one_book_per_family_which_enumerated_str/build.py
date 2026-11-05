@@ -23,9 +23,7 @@ gate and negative with it has a gate problem, not a structure problem, and
 nothing but the unselected population tells the two apart. The gate is applied
 downstream in ``run.py``, so both readings come out of one build.
 
-A monthly caller can pass ``limit_exit_month="YYYY-MM"`` to select by planned
-exit date and repaired expiry availability. The monthly result is in memory;
-required data errors raise a typed refusal and no full-build artifacts are written.
+Monthly mode selects ``limit_exit_month="YYYY-MM"`` in memory and raises typed refusals.
 """
 from __future__ import annotations
 
@@ -175,14 +173,7 @@ def _effective_exit_trades(trades: pd.DataFrame, month: str) -> pd.DataFrame:
 
 def build_all(*, force: bool = False, limit_years=None,
               limit_exit_month: str | None = None) -> dict:
-    """Build full candidates, or return one exit-month slice in memory.
-
-    ``limit_exit_month`` is a canonical ``YYYY-MM`` value. Monthly mode selects
-    by planned exit date and repaired expiry availability, filters ordinary
-    forecast/chain coverage gaps like a full build, and refuses required
-    prior-month chain/expiry or candidate failures with ``TrainingRefused``.
-    Monthly results stay in memory and do not write full-build artifacts.
-    """
+    """Build full candidates or an in-memory exit-month slice with typed refusals."""
     if limit_exit_month is not None:
         _month_window(pd.DataFrame({"exit_date": []}), limit_exit_month)
     out = RESULTS / "candidates.parquet"
@@ -244,13 +235,13 @@ def build_all(*, force: bool = False, limit_years=None,
         raise
 
     n = len(GRID)
-    tally = {k: np.zeros(n, dtype=np.int64) for k in ("listed", "admissible", "tradeable")}
-    for fam in FAMILIES:
-        tally[f"argmax_{fam}"] = np.zeros(n, dtype=np.int64)
+    if limit_exit_month is None:
+        tally = {k: np.zeros(n, dtype=np.int64) for k in ("listed", "admissible", "tradeable")}
+        for fam in FAMILIES:
+            tally[f"argmax_{fam}"] = np.zeros(n, dtype=np.int64)
     skips: dict[str, int] = {}
     progress_done = 0
     parts, ev_rows, equivalence = [], [], []
-    monthly_tallies = {}
 
     for year, block in events.groupby("_year", sort=True):
         rows = keyframe.reindex(block["event_id"]).dropna(subset=["entry_date"])
@@ -273,7 +264,8 @@ def build_all(*, force: bool = False, limit_years=None,
             er = index.get(row["ticker"], row["entry_date"])
             xr = index.get(row["ticker"], row["exit_date"])
             if er is None or xr is None or er.empty or xr.empty:
-                skips["no_chain"] = skips.get("no_chain", 0) + 1
+                if limit_exit_month is None:
+                    skips["no_chain"] = skips.get("no_chain", 0) + 1
                 continue
             rng = np.random.default_rng(int.from_bytes(
                 hashlib.sha256(f"pick|{row['event_id']}".encode()).digest()[:8], "big"))
@@ -282,7 +274,8 @@ def build_all(*, force: bool = False, limit_years=None,
             except e133.EventSkip as exc:
                 if limit_exit_month is not None:
                     _refuse_monthly_event_skip(exc, row["event_id"])
-                skips[str(exc)] = skips.get(str(exc), 0) + 1
+                if limit_exit_month is None:
+                    skips[str(exc)] = skips.get(str(exc), 0) + 1
                 continue
             except Exception as exc:                               # noqa: BLE001
                 if limit_exit_month is not None:
@@ -299,22 +292,18 @@ def build_all(*, force: bool = False, limit_years=None,
             tradeable = ev["tradeable"] & arb
             sim = ev["sim_sel"]
             usable = tradeable & np.isfinite(sim)
-            tally["listed"] += ev["listed"]
-            tally["admissible"] += ev["admissible"]
-            tally["tradeable"] += tradeable
-            event_tally = None
-            if limit_exit_month is not None:
-                event_tally = {k: np.zeros(n, dtype=np.int64) for k in tally}
-                for key in ("listed", "admissible"):
-                    event_tally[key] = np.array(ev[key], copy=True)
-                event_tally["tradeable"] = np.array(tradeable, copy=True)
+            if limit_exit_month is None:
+                tally["listed"] += ev["listed"]
+                tally["admissible"] += ev["admissible"]
+                tally["tradeable"] += tradeable
 
             # Which families this event can carry AT ALL — the denominator that
             # separates "never wins" from "never even offered".
             offers = {fam: bool((usable & FAMILY_MASK[fam]).any()) for fam in FAMILIES}
             common = all(offers.values())
 
-            if tradeable.any() and len(equivalence) < e133.EQUIV_EVENTS:
+            if (limit_exit_month is None and tradeable.any()
+                    and len(equivalence) < e133.EQUIV_EVENTS):
                 if rng.random() < e133.EQUIV_RATE or not equivalence:
                     ev2 = dict(ev); ev2["tradeable"] = tradeable
                     equivalence.append(e133.check_equivalence(ev2, row, er, xr, pool))
@@ -325,9 +314,8 @@ def build_all(*, force: bool = False, limit_years=None,
                 if ok.size == 0:
                     continue
                 pick = int(ok[np.argmax(sim[ok])])
-                tally[f"argmax_{fam}"][pick] += 1
-                if event_tally is not None:
-                    event_tally[f"argmax_{fam}"][pick] += 1
+                if limit_exit_month is None:
+                    tally[f"argmax_{fam}"][pick] += 1
                 got = e133._emit(ev, row, fam, ev["idx"][pick], GRID.qty[pick],
                                  pick, float(sim[pick]), float(ev["sim_gate"][pick]),
                                  str(GRID.key[pick]))
@@ -348,39 +336,30 @@ def build_all(*, force: bool = False, limit_years=None,
                                           if np.isfinite(s) else np.nan)
             parts += emitted
 
-            ev_rows.append({
-                "event_id": row["event_id"], "ticker": row["ticker"],
-                "event_date": row["event_date"], "year": int(year),
-                "n_tradeable": int(tradeable.sum()),
-                "families_offered": int(sum(offers.values())),
-                "common_universe": common,
-                **{f"offers_{fam}": offers[fam] for fam in FAMILIES},
-            })
-            if event_tally is not None:
-                monthly_tallies[row["event_id"]] = event_tally
+            if limit_exit_month is None:
+                ev_rows.append({
+                    "event_id": row["event_id"], "ticker": row["ticker"],
+                    "event_date": row["event_date"], "year": int(year),
+                    "n_tradeable": int(tradeable.sum()),
+                    "families_offered": int(sum(offers.values())),
+                    "common_universe": common,
+                    **{f"offers_{fam}": offers[fam] for fam in FAMILIES},
+                })
         del index
-        print(f"[e137] {year}: {len(ev_rows):,} events, {len(parts):,} rows, "
-              f"{time.time() - started:.0f}s", flush=True)
+        if limit_exit_month is None:
+            print(f"[e137] {year}: {len(ev_rows):,} events, {len(parts):,} rows, "
+                  f"{time.time() - started:.0f}s", flush=True)
 
     if limit_exit_month is not None:
         elapsed = max(time.time() - started, 0.001)
         rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
         print(f"[e137] month {limit_exit_month} build end events={progress_done} "
               f"elapsed={elapsed:.1f}s RSS {rss_mb:.0f}MB", file=sys.stderr, flush=True)
-    monthly_skip_counts = dict(skips) if limit_exit_month is not None else {}
     trades = pd.DataFrame(parts)
     if limit_exit_month is not None and not trades.empty:
         trades = _effective_exit_trades(trades, limit_exit_month)
     if limit_exit_month is not None:
-        selected_event_ids = set(trades["event_id"]) if not trades.empty else set()
-        ev_rows = [row for row in ev_rows if row["event_id"] in selected_event_ids]
-        skips = {}
-        print(f"[e137] month {limit_exit_month} benign skips={monthly_skip_counts}",
-              file=sys.stderr, flush=True)
-        tally = {key: np.zeros(n, dtype=np.int64) for key in tally}
-        for event_id in selected_event_ids:
-            for key in tally:
-                tally[key] += monthly_tallies[event_id][key]
+        return {"trades": trades}
     tallies = e133._pattern_frame()
     for k, v in tally.items():
         tallies[k] = v

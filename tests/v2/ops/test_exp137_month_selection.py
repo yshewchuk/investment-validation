@@ -246,19 +246,15 @@ def test_monthly_build_filters_coverage_and_slices_output_to_scored_month(monkey
     result = builder.build_all(limit_exit_month="2026-10")
 
     assert filter_calls == [True]
-    assert result["trades"]["event_id"].tolist() == ["oct-event"]
-    assert result["trades"]["exp_pnl_sim_select"].tolist() == [0.90]
-    assert result["trades"]["exit_date"].tolist() == [pd.Timestamp("2026-10-30")]
-    assert result["trades"]["exit_value"].tolist() == [3.0]
-    assert result["trades"]["pnl"].tolist() == [2.5]
-    assert result["trades"]["ret"].tolist() == [5.0]
-    assert result["events"]["event_id"].tolist() == ["oct-event"]
-    assert result["meta"]["events_priced"] == 1
-    assert result["meta"]["skips"] == {}
-    assert result["tallies"]["argmax_family"].sum() == 1
-    assert result["tallies"]["listed"].sum() == 2
-    assert result["tallies"]["admissible"].sum() == 2
-    assert result["tallies"]["tradeable"].sum() == 1
+    assert set(result) == {"trades"}
+    trades = result["trades"]
+    assert trades["event_id"].tolist() == ["oct-event"]
+    assert trades["exp_pnl_sim_select"].tolist() == [0.90]
+    assert trades["exit_date"].tolist() == [pd.Timestamp("2026-10-30")]
+    assert trades["exit_date"].dt.to_period("M").eq("2026-10").all()
+    assert trades["exit_value"].tolist() == [3.0]
+    assert trades["pnl"].tolist() == [2.5]
+    assert trades["ret"].tolist() == [5.0]
     assert list(tmp_path.iterdir()) == []
 
     monkeypatch.setattr(e134, "legs_no_arb_ok", lambda _legs: True)
