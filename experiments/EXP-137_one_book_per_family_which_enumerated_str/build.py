@@ -83,10 +83,8 @@ def _monthly_refusal(code: str, detail: str) -> TrainingRefused:
     return TrainingRefused((ReceiptIssue("candidate_month", code, detail),))
 
 
-_MONTHLY_BENIGN_SKIPS = {
-    "structure_unresolved", "exit_structure_unresolved", "expiry_gone_at_exit", "bad_quote",
-    "zero_cost",
-}
+_MONTHLY_BENIGN_SKIPS = {"structure_unresolved", "exit_structure_unresolved",
+                         "expiry_gone_at_exit", "bad_quote", "zero_cost"}
 
 
 def _month_window(frame: pd.DataFrame, month: str) -> pd.DataFrame:
@@ -156,12 +154,13 @@ def _effective_exit_trades(trades: pd.DataFrame, month: str) -> pd.DataFrame:
     repaired = ~out["exit_arb_ok"].fillna(True).astype(bool)
     effective_exit = pd.to_datetime(out["exit_date"], errors="coerce")
     expiry = pd.to_datetime(out["expiry"], errors="coerce")
+    effective_exit.loc[repaired] = expiry.loc[repaired]
+    selected = effective_exit.dt.strftime("%Y-%m").eq(month)
     if (effective_exit.isna().any() or expiry.loc[repaired].isna().any()
-            or out.loc[repaired, "exit_value_expiry"].isna().any()):
+            or out.loc[repaired & selected, "exit_value_expiry"].isna().any()):
         raise _monthly_refusal(
             "MONTHLY_EFFECTIVE_EXIT_DATA_MISSING",
             "monthly_candidate_effective_exit_date_or_settlement_value_missing")
-    effective_exit.loc[repaired] = expiry.loc[repaired]
     out["exit_date"] = effective_exit
     out.loc[repaired, "exit_value"] = out.loc[repaired, "exit_value_expiry"]
     out["pnl"] = out["exit_value"] - out["entry_cost"]
@@ -169,7 +168,7 @@ def _effective_exit_trades(trades: pd.DataFrame, month: str) -> pd.DataFrame:
     valid_return = out["entry_cost"] > e133.MIN_MEANINGFUL_COST
     out.loc[valid_return, "ret"] = (
         out.loc[valid_return, "pnl"] / out.loc[valid_return, "entry_cost"])
-    return out.loc[effective_exit.dt.strftime("%Y-%m").eq(month)].copy()
+    return out.loc[selected].copy()
 
 
 def build_all(*, force: bool = False, limit_years=None,
@@ -337,7 +336,9 @@ def build_all(*, force: bool = False, limit_years=None,
             for r in emitted:
                 r["exit_arb_ok"] = e134.legs_no_arb_ok(r["legs"])
                 s = spot_at.get((row["ticker"], pd.Timestamp(r["expiry"])), np.nan)
-                if limit_exit_month is not None and not r["exit_arb_ok"] and not np.isfinite(s):
+                in_month = (limit_exit_month is not None
+                            and pd.Timestamp(r["expiry"]).strftime("%Y-%m") == limit_exit_month)
+                if not r["exit_arb_ok"] and in_month and not np.isfinite(s):
                     raise _monthly_refusal(
                         "MONTHLY_SETTLEMENT_SPOT_MISSING",
                         f"required_monthly_settlement_spot_missing: {row['event_id']} {r['expiry']}")
