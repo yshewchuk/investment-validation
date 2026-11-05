@@ -54,6 +54,9 @@ def test_effective_exit_repair_updates_value_pnl_and_return_by_no_arb_or_negativ
          "exit_arb_ok": True, "exit_value": 1.0, "exit_value_expiry": 2.0,
          "entry_cost": builder.e133.MIN_MEANINGFUL_COST / 2, "pnl": 0.0, "ret": np.nan},
     ])
+    trades["spot_exit"] = 90.0
+    trades["spot_expiry"] = 100.0
+    trades["dte_exit"] = 5
 
     result = builder._effective_exit_trades(trades, "2026-10").set_index("event_id")
     assert set(result.index) == {"held-oct", "negative-exit", "low-cost"}
@@ -61,6 +64,8 @@ def test_effective_exit_repair_updates_value_pnl_and_return_by_no_arb_or_negativ
     assert result.loc["held-oct", ["exit_value", "pnl", "ret"]].tolist() == [5.0, 3.0, 1.5]
     assert result.loc["negative-exit", "exit_date"] == pd.Timestamp("2026-10-31")
     assert result.loc["negative-exit", ["exit_value", "pnl", "ret"]].tolist() == [8.0, 7.0, 7.0]
+    assert result.loc["held-oct", ["spot_exit", "dte_exit"]].tolist() == [100.0, 0]
+    assert result.loc["negative-exit", ["spot_exit", "dte_exit"]].tolist() == [100.0, 0]
     assert pd.isna(result.loc["low-cost", "ret"])
 
 
@@ -234,6 +239,7 @@ def test_monthly_build_filters_coverage_and_slices_output_to_scored_month(monkey
         return [{
             "event_id": args[1]["event_id"], "exit_date": args[1]["exit_date"],
             "expiry": pd.Timestamp("2026-10-30"), "legs": [],
+            "spot_exit": 90.0, "dte_exit": 5,
             "exit_value": -0.5 if negative_exit else 1.0,
             "entry_cost": 0.5, "exp_pnl_sim_select": args[6],
         }]
@@ -258,6 +264,8 @@ def test_monthly_build_filters_coverage_and_slices_output_to_scored_month(monkey
     assert trades["exit_value"].tolist() == [3.0]
     assert trades["pnl"].tolist() == [2.5]
     assert trades["ret"].tolist() == [5.0]
+    assert trades["spot_exit"].tolist() == [100.0]
+    assert trades["dte_exit"].tolist() == [0]
     assert list(tmp_path.iterdir()) == []
 
     monkeypatch.setattr(e134, "legs_no_arb_ok", lambda _legs: True)

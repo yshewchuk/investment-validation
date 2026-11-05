@@ -158,10 +158,10 @@ def _effective_exit_trades(trades: pd.DataFrame, month: str) -> pd.DataFrame:
             "MONTHLY_EFFECTIVE_EXIT_DATA_MISSING",
             "monthly_candidate_effective_exit_date_or_settlement_value_missing")
     out["exit_date"] = effective_exit
+    out.loc[repaired, ["spot_exit", "dte_exit"]] = out.loc[repaired, ["spot_expiry"]].assign(dte_exit=0).values
     out.loc[repaired, "exit_value"] = out.loc[repaired, "exit_value_expiry"]
     out["pnl"] = out["exit_value"] - out["entry_cost"]
-    out["ret"] = (out["pnl"] / out["entry_cost"]).where(
-        out["entry_cost"] > e133.MIN_MEANINGFUL_COST)
+    out["ret"] = (out["pnl"] / out["entry_cost"]).where(out["entry_cost"] > e133.MIN_MEANINGFUL_COST)
     return out.loc[selected].copy()
 
 
