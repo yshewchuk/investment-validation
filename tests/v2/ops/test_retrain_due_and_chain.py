@@ -298,12 +298,29 @@ def _plan(session="2026-09-18"):
     return build_nightly_plan(str(root), session)
 
 
-def _requests(plan):
-    return build_legacy_job_requests(plan, tickers=("FAKE",), year_start=2025, year_end=2026)
+def _requests(plan, input_refs=("manifest_artifact",)):
+    return build_legacy_job_requests(plan, tickers=("FAKE",), year_start=2025, year_end=2026,
+                                     input_refs=input_refs)
+
+
+def test_due_retrain_requires_manifest_but_not_due_does_not(tmp_path, monkeypatch):
+    monkeypatch.setenv("MODEL_RELEASE_ROOT", str(tmp_path))
+    plan = _plan()
+    plan["plan_hash"] = "a" * 64
+    plan["retrain"] = {"state": "due", "month": "2026-10", "m_end": "2026-10-31",
+                       "superseded": [], "base": "rel1"}
+    with pytest.raises(OpsError) as exc_info:
+        _requests(plan, input_refs=())
+    assert exc_info.value.code == "INVALID_REQUEST"
+    assert str(exc_info.value) == "INVALID_REQUEST: due retrain requires a pinned legacy manifest"
+
+    plan["retrain"] = {"state": "not_due", "reason": "month_already_recorded", "base": "rel1"}
+    requests = _requests(plan, input_refs=())
+    assert len(_retrain_requests(requests)) == 1
 
 
 def _retrain_requests(requests):
-    return [r for r in requests if r.job.kind == "retrain_step"]
+    return [r for r in requests if r.idempotency_key.startswith("retrain-")]
 
 
 def _score_request(requests):
@@ -338,63 +355,79 @@ def test_not_due_plan_has_restage_only():
     assert requests.index(retrain[0]) < requests.index(score)
 
 
-def test_due_plan_has_six_retrain_steps():
+def test_due_plan_has_six_retrain_steps(monkeypatch, tmp_path):
+    monkeypatch.setenv("MODEL_RELEASE_ROOT", str(tmp_path))
     plan = _plan()
     plan["plan_hash"] = "a" * 64
-    plan["retrain"] = {
-        "state": "due", "month": "2026-10", "m_end": "2026-10-31",
-        "superseded": [], "base": "rel1",
-    }
+    plan["retrain"] = {"state": "due", "month": "2026-10", "m_end": "2026-10-31",
+                       "superseded": [], "base": "rel1"}
     requests = _requests(plan)
     retrain = _retrain_requests(requests)
-    assert len(retrain) == 6
+    assert [r.job.kind for r in retrain] == ["retrain_step", "training", "phase5_state_stage",
+                                             "phase5_accept", "retrain_check", "models_promote"]
     score = _score_request(requests)
-    score_id = job_id_for("shadow", score.idempotency_key)
-    suffix = score_id.rsplit("_", 1)[-1][:16]
-    expected_keys = [
-        f"retrain-restage:2026-09-18:{suffix}",
-        f"retrain-train:2026-09-18:2026-10:rel1:{suffix}",
-        f"retrain-stage:2026-09-18:2026-10:rel1:{suffix}",
-        f"retrain-accept:2026-09-18:2026-10:rel1:{suffix}",
-        f"retrain-check:2026-09-18:2026-10:rel1:{suffix}",
-        f"retrain-promote:2026-09-18:2026-10:rel1:{suffix}",
-    ]
-    for request, key in zip(retrain, expected_keys):
-        assert request.idempotency_key == key
-
+    suffix = job_id_for("shadow", score.idempotency_key).rsplit("_", 1)[-1][:16]
+    keys = [f"retrain-restage:2026-09-18:{suffix}",
+            f"retrain-train:2026-09-18:2026-10:rel1:{suffix}",
+            f"retrain-stage:2026-09-18:2026-10:rel1:{suffix}",
+            f"retrain-accept:2026-09-18:2026-10:rel1:{suffix}",
+            f"retrain-check:2026-09-18:2026-10:rel1:{suffix}",
+            f"retrain-promote:2026-09-18:2026-10:rel1:{suffix}"]
+    assert [r.idempotency_key for r in retrain] == keys
+    restage_id, train_id, stage_id, accept_id, check_id, promote_id = [
+        job_id_for("shadow", key) for key in keys]
+    feature = next(r for r in requests if r.job.kind == "legacy_features")
+    feature_id = job_id_for("shadow", feature.idempotency_key)
     assert retrain[0].job.dependency_job_ids == ()
-    for previous, current in zip(retrain, retrain[1:]):
-        assert job_id_for("shadow", previous.idempotency_key) in current.job.dependency_job_ids
+    assert set(retrain[1].job.dependency_job_ids) == {restage_id, feature_id}
+    assert retrain[2].job.dependency_job_ids == (train_id,)
+    assert retrain[3].job.dependency_job_ids == (stage_id,)
+    assert retrain[4].job.dependency_job_ids == (accept_id,)
+    assert retrain[5].job.dependency_job_ids == (check_id,)
+    assert promote_id in score.job.dependency_job_ids
+    training, stage = retrain[1].job.parameters, retrain[2].job.parameters
+    assert training["mode"] == "monthly_pools" and training["month"] == "2026-10"
+    assert tuple(training["cutoffs"]) == ("2026-11-01",)
+    states = {"driver_residual_pool__size.json", "driver_residual_pool__implied_t1.json",
+              "driver_residual_pool__runup_move.json", "chooser_analog_pool.json"}
+    assert set(stage["state_files"]) == states
+    assert set(stage["input_bindings"]) == states | {"legacy_manifest.json"}
+    assert all(stage["input_bindings"][name] == f"{train_id}#training/{name}"
+               for name in states)
+    assert stage["mode"] == "monthly" and stage["cutoff"] == "2026-11-01"
+    assert stage["release_id"] == "pools-retrain-2026-10-2026-09-18"
+    assert retrain[3].job.parameters["candidate_release_id"] == stage["release_id"]
+    assert training["input_bindings"]["legacy_manifest.json"] == "manifest_artifact"
+    assert stage["input_bindings"]["legacy_manifest.json"] == "manifest_artifact"
+    assert retrain[1].job.input_refs == ("manifest_artifact",)
+    assert retrain[2].job.input_refs == ("manifest_artifact",)
+    assert retrain[4].job.parameters["input_bindings"]["acceptance.json"] == f"{accept_id}#acceptance"
+    assert retrain[5].job.parameters["expected_previous_release_id"] == "rel1"
+    assert retrain[5].job.parameters["release_root"] == str(tmp_path / "deployment")
+    conn = _conn()
+    conn.execute("INSERT INTO jobs VALUES ('shadow', ?, 'succeeded', '2026-09-18T00:00:00Z')",
+                 (keys[0],))
+    conn.execute("INSERT INTO jobs VALUES ('shadow', ?, 'failed', '2026-09-18T00:01:00Z')",
+                 (keys[1],))
+    conn.commit()
+    assert chain_blocks_pool_sidecar(conn, "2026-09-18") is True
 
-    last_key = f"retrain-promote:2026-09-18:2026-10:rel1:{suffix}"
-    assert job_id_for("shadow", last_key) in score.job.dependency_job_ids
 
-
-def test_replan_gets_fresh_retrain_keys():
-    base_plan = _plan()
-    plan1 = base_plan.copy()
-    plan2 = base_plan.copy()
-    plan1["retrain"] = {"state": "not_due", "reason": "month_already_recorded", "base": "rel1"}
-    plan2["retrain"] = {"state": "not_due", "reason": "month_already_recorded", "base": "rel1"}
-    plan1["plan_hash"] = "a" * 64
-    plan2["plan_hash"] = "a" * 64
-    plan1["decision_clock"] = "2026-09-18T10:00:00Z"
-    plan2["decision_clock"] = "2026-09-18T11:00:00Z"
-    requests1 = _requests(plan1)
-    requests2 = _requests(plan2)
-    retrain1 = _retrain_requests(requests1)
-    retrain2 = _retrain_requests(requests2)
-    assert len(retrain1) == 1
-    assert len(retrain2) == 1
-    id1 = job_id_for("shadow", retrain1[0].idempotency_key)
-    id2 = job_id_for("shadow", retrain2[0].idempotency_key)
-    assert id1 != id2
-    score1 = _score_request(requests1)
-    score2 = _score_request(requests2)
-    assert id1 in score1.job.dependency_job_ids
-    assert id2 in score2.job.dependency_job_ids
-    assert id1 not in score2.job.dependency_job_ids
-    assert id2 not in score1.job.dependency_job_ids
+def test_replan_gets_fresh_retrain_keys(monkeypatch, tmp_path):
+    monkeypatch.setenv("MODEL_RELEASE_ROOT", str(tmp_path))
+    base = _plan()
+    plan1, plan2 = copy.deepcopy(base), copy.deepcopy(base)
+    due = {"state": "due", "month": "2026-10", "m_end": "2026-10-31",
+           "superseded": [], "base": "rel1"}
+    plan1["retrain"], plan2["retrain"] = due.copy(), due.copy()
+    plan1["plan_hash"] = plan2["plan_hash"] = "a" * 64
+    plan1["decision_clock"], plan2["decision_clock"] = "2026-09-18T10:00:00Z", "2026-09-18T11:00:00Z"
+    retrain1, retrain2 = _retrain_requests(_requests(plan1)), _retrain_requests(_requests(plan2))
+    assert len(retrain1) == len(retrain2) == 6
+    ids1 = {job_id_for("shadow", r.idempotency_key) for r in retrain1}
+    ids2 = {job_id_for("shadow", r.idempotency_key) for r in retrain2}
+    assert ids1.isdisjoint(ids2)
+    assert all(r.idempotency_key.startswith("retrain-") for r in retrain1 + retrain2)
 
 
 def test_unchanged_saved_plan_resubmission_reuses_the_same_keys():
@@ -420,16 +453,29 @@ def test_worker_restage_stub(tmp_path):
 
 
 @pytest.mark.parametrize("step", ["train", "stage", "accept", "check", "promote"])
-def test_worker_chain_steps_raise(step, tmp_path):
+def test_worker_chain_steps_are_not_retrain_step_requests(step, tmp_path):
     with pytest.raises(OpsError) as excinfo:
-        _dispatch_retrain_step(
-            {"step": step, "session": "s", "month": "m", "expected_ids": ["k"]},
-            tmp_path,
-        )
-    assert excinfo.value.problem.code == "VALIDATION_FAILED"
-    details = excinfo.value.problem.details
-    assert details["code"] == "RETRAIN_UNAVAILABLE"
-    assert details["step"] == step
+        _dispatch_retrain_step({"step": step, "session": "s", "month": "m",
+                                "expected_ids": ["k"]}, tmp_path)
+    assert excinfo.value.problem.code == "INVALID_REQUEST"
+    assert str(excinfo.value) == "INVALID_REQUEST: retrain_step is reserved for restage"
+
+
+def test_retrain_step_admission_rejects_non_restage_requests():
+    from dataclasses import replace
+    from engine.v2.ops.stages import registry
+    from engine.v2.ops.submission import NamespacePolicy, validate_request
+
+    plan = _plan()
+    plan["retrain"] = {"state": "not_due", "reason": "month_already_recorded", "base": "rel1"}
+    request = next(r for r in _retrain_requests(_requests(plan))
+                   if r.job.kind == "retrain_step")
+    parameters = {**request.job.parameters, "step": "train"}
+    invalid = replace(request, job=replace(request.job, parameters=parameters))
+    policy = NamespacePolicy({"operator": frozenset({"shadow"})})
+    with pytest.raises(OpsError) as exc_info:
+        validate_request(registry(), policy, invalid)
+    assert exc_info.value.code == "INVALID_REQUEST"
 
 
 def test_sidecar_gate(monkeypatch, tmp_path):
@@ -476,7 +522,8 @@ def test_decide_reads_a_real_catalog_and_writes_markers(tmp_path):
     assert chain_blocks_pool_sidecar(conn, "2026-11-02") is False
 
 
-def test_chain_submits_through_the_real_registry_and_gates_the_sidecar(tmp_path):
+def test_chain_submits_through_the_real_registry_and_gates_the_sidecar(monkeypatch, tmp_path):
+    monkeypatch.setenv("MODEL_RELEASE_ROOT", str(tmp_path))
     from engine.v2.foundation import SystemClock
     from engine.v2.ops.bootstrap import open_catalog
     from engine.v2.ops.stages import registry
@@ -489,7 +536,8 @@ def test_chain_submits_through_the_real_registry_and_gates_the_sidecar(tmp_path)
         "state": "due", "month": "2026-10", "m_end": "2026-10-31",
         "superseded": [], "base": "rel1",
     }
-    requests = build_legacy_job_requests(plan, tickers=("FAKE",), year_start=2025, year_end=2026)
+    requests = build_legacy_job_requests(plan, tickers=("FAKE",), year_start=2025, year_end=2026,
+                                         input_refs=("manifest_artifact",))
     policy = NamespacePolicy({"operator": frozenset({"shadow"})})
     submit_graph(conn, registry(), policy, requests, clock=SystemClock())
     assert chain_blocks_pool_sidecar(conn, "2026-09-18") is True
