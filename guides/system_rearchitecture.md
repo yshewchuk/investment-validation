@@ -343,12 +343,14 @@ violation. It runs at tier 0 and enforces three rules:
    `engine/v2/**` on legacy `engine/*` is a named entry in
    `checks/legacy_adapters.json`, confined to a single adapter module per
    package. An undeclared legacy import fails the check.
-3. **Legacy never imports v2.** The legacy tree runs the board unchanged and
-   must not acquire a dependency on code that is still being proved.
+3. **Legacy never imports v2 except through an explicitly approved, scoped
+  exception recorded in root architecture.** The legacy tree runs the board
+  unchanged and must not otherwise acquire a dependency on code still being proved.
 
-Because v2 is new code, rules 1 and 3 start satisfied and stay that way — there
-is no backlog and no exemption list. What ratchets is rule 2, and §4.6 explains
-why that is the useful thing to count.
+Because v2 is new code, rule 1 starts satisfied. Rule 3 permits only explicit,
+scoped exceptions recorded in root architecture; it does not create a legacy
+dependency backlog. What ratchets is rule 2, and §4.6 explains why that is the
+useful thing to count.
 
 The legacy tree is measured once, for the record, and then left alone. Parsing
 `engine/` against this layering yields 17 upward edges, in five groups:
