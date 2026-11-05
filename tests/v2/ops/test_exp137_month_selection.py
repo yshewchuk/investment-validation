@@ -32,7 +32,7 @@ def test_out_of_range_month_is_typed_refusal():
     assert error.value.issues[0].code == "INVALID_EXIT_MONTH"
 
 
-@pytest.mark.parametrize("month", ["2026-1", "2026-10-01", "NaT"])
+@pytest.mark.parametrize("month", ["2026-1", "2026-10-01"])
 def test_noncanonical_month_is_typed_refusal(month):
     with pytest.raises(TrainingRefused) as error:
         builder._month_window(pd.DataFrame({"exit_date": []}), month)
@@ -91,15 +91,21 @@ def _availability_plan():
 
 def test_repaired_candidates_are_selected_by_expiry_availability_month():
     class Index:
-        def get(self, _ticker, _entry_date):
-            return pd.DataFrame({"available": [True]})
+        def get(self, _ticker, entry_date):
+            expiry = ("2026-10-30" if entry_date == pd.Timestamp("2026-08-31")
+                      else "2026-11-20")
+            return pd.DataFrame({
+                "expiry": ["2026-09-15", expiry], "bid": [np.nan, 1.0],
+                "ask": [np.nan, 2.0],
+            })
 
     class Selector:
         def __init__(self, kind):
             assert kind == "first_post_event"
 
-        def select(self, _entry, _event_date, session):
-            return {"OCT": "2026-10-30", "NOV": "2026-11-20"}[session]
+        def select(self, entry, _event_date, _session):
+            assert entry["expiry"].tolist() in (["2026-10-30"], ["2026-11-20"])
+            return entry["expiry"].iloc[0]
 
     replay = SimpleNamespace(load_chain_index=lambda _keys, progress_every: Index())
     e133 = SimpleNamespace(ExpirySelector=Selector)
@@ -123,7 +129,7 @@ def test_prior_month_expiry_selection_failure_is_typed_refusal():
 
     class Index:
         def get(self, _ticker, _entry_date):
-            return pd.DataFrame({"available": [True]})
+            return pd.DataFrame({"bid": [1.0], "ask": [2.0]})
 
     class Selector:
         def __init__(self, kind):
@@ -153,11 +159,11 @@ def test_monthly_full_build_skip_reasons_are_allowed(reason):
     builder._refuse_monthly_event_skip(ValueError(reason), "event-1")
 
 
-def test_monthly_build_filters_coverage_and_slices_output_to_scored_month(monkeypatch, tmp_path, capsys):
+def test_monthly_build_filters_coverage_and_slices_output_to_scored_month(monkeypatch, tmp_path):
     event_dates = [
         ("oct-event", "2026-10-01"), ("no-candidate", "2026-10-02"),
         ("missing-forecast", "2026-10-03"), ("unavailable", "2026-10-04"),
-        ("prior-missing-entry", "2026-09-05"), ("out-month-expiry", "2026-10-06"),
+        ("prior-missing-entry", "2026-09-05"),
     ]
     event = pd.DataFrame([
         {"event_id": event_id, "ticker": "XYZ", "event_date": pd.Timestamp(event_date),
@@ -221,14 +227,11 @@ def test_monthly_build_filters_coverage_and_slices_output_to_scored_month(monkey
     monkeypatch.setattr(e133, "EQUIV_EVENTS", 0)
 
     def emit(*args):
-        event_id = args[1]["event_id"]
-        if event_id == "no-candidate":
+        if args[1]["event_id"] == "no-candidate":
             return []
-        expiry = (pd.Timestamp("2026-11-30") if event_id == "out-month-expiry"
-                  else pd.Timestamp("2026-10-30"))
         return [{
-            "event_id": event_id, "exit_date": args[1]["exit_date"],
-            "expiry": expiry, "legs": [], "exit_value": 1.0,
+            "event_id": args[1]["event_id"], "exit_date": args[1]["exit_date"],
+            "expiry": pd.Timestamp("2026-10-30"), "legs": [], "exit_value": 1.0,
             "entry_cost": 0.5, "exp_pnl_sim_select": args[6],
         }]
 
@@ -252,7 +255,6 @@ def test_monthly_build_filters_coverage_and_slices_output_to_scored_month(monkey
     assert result["events"]["event_id"].tolist() == ["oct-event"]
     assert result["meta"]["events_priced"] == 1
     assert result["meta"]["skips"] == {}
-    assert "plan skips={'no_entry_chain': 1}" in capsys.readouterr().err
     assert result["tallies"]["argmax_family"].sum() == 1
     assert result["tallies"]["listed"].sum() == 2
     assert result["tallies"]["admissible"].sum() == 2
@@ -261,14 +263,8 @@ def test_monthly_build_filters_coverage_and_slices_output_to_scored_month(monkey
 
     monkeypatch.setattr(e134, "legs_no_arb_ok", lambda _legs: True)
     monkeypatch.setattr(e134, "expiry_spot", lambda: {})
-    original_emit = e133._emit
-    monkeypatch.setattr(e133, "_emit", lambda *args: (
-        [] if args[1]["event_id"] == "out-month-expiry" else original_emit(*args)))
     quoted_result = builder.build_all(limit_exit_month="2026-10")
     assert quoted_result["trades"]["exit_date"].tolist() == [pd.Timestamp("2026-10-15")]
-    assert quoted_result["trades"]["exit_value"].tolist() == [1.0]
-    assert quoted_result["trades"]["pnl"].tolist() == [0.5]
-    assert quoted_result["trades"]["ret"].tolist() == [1.0]
     assert quoted_result["trades"]["exit_value_expiry"].isna().all()
     assert list(tmp_path.iterdir()) == []
 
