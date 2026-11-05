@@ -1,5 +1,8 @@
 # packages: models
 
+import ast
+from pathlib import Path
+
 import pandas as pd
 import pytest
 
@@ -49,7 +52,7 @@ def test_shared_conditional_exit_accepts_exact_full_debit_loss():
     frame = pd.DataFrame({
         "exit_arb_ok": [True],
         "exit_value": [0.0],
-        "exit_value_expiry": [0.0],
+        "exit_value_expiry": [2.0],
         "entry_cost": [1.0],
     })
 
@@ -69,8 +72,9 @@ def test_shared_conditional_exit_refuses_loss_below_full_debit():
         "entry_cost": [1.0],
     })
 
-    with pytest.raises(RuntimeError, match="loss below the debit"):
+    with pytest.raises(RuntimeError) as error:
         conditional_exit(frame)
+    assert str(error.value) == "conditional exits still contain a loss below the debit"
 
 
 def test_shared_conditional_exit_accepts_loss_within_tolerance():
@@ -83,17 +87,40 @@ def test_shared_conditional_exit_accepts_loss_within_tolerance():
 
     result = conditional_exit(frame)
 
-    assert result["ret"].iloc[0] == pytest.approx(-1.0 - 1.0e-8)
+    assert result["ret"].iloc[0] == pytest.approx(
+        -1.0 - 1.0e-8, rel=0.0, abs=1.0e-15)
 
 
-def test_shared_conditional_exit_missing_column_raises_without_mutation():
+@pytest.mark.parametrize(
+    "missing", ["exit_arb_ok", "exit_value", "exit_value_expiry", "entry_cost"])
+def test_shared_conditional_exit_missing_column_raises_without_mutation(missing):
     frame = pd.DataFrame({
         "exit_arb_ok": [False],
         "exit_value": [1.0],
+        "exit_value_expiry": [1.0],
         "entry_cost": [1.0],
-    })
+    }).drop(columns=[missing])
     source = frame.copy(deep=True)
 
-    with pytest.raises(KeyError):
+    with pytest.raises(KeyError) as error:
         conditional_exit(frame)
+    assert missing in str(error.value)
     pd.testing.assert_frame_equal(frame, source)
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        "experiments/EXP-161_dynamic_short_vol_neural_structure_picker/run.py",
+        "tools/build_chooser_pool.py",
+    ],
+)
+def test_consumers_import_shared_settlement_helper(relative_path):
+    root = Path(__file__).resolve().parents[3]
+    tree = ast.parse((root / relative_path).read_text())
+    assert any(
+        isinstance(node, ast.ImportFrom)
+        and node.module == "engine.v2.models.training.conditional_exit"
+        and any(alias.name == "conditional_exit" for alias in node.names)
+        for node in ast.walk(tree)
+    )

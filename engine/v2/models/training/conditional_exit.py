@@ -7,8 +7,8 @@ import pandas as pd
 def conditional_exit(raw: pd.DataFrame) -> pd.DataFrame:
     """Repair invalid conditional exits and calculate realized P&L.
 
-    The input is copied. Rows with missing entry cost or repaired exit value
-    are dropped; a remaining loss below the entry debit is refused.
+    The input is copied. Rows with missing ``entry_cost`` or post-repair
+    ``exit_value`` are dropped; a remaining loss below the debit is refused.
     """
     out = raw.copy()
     hold = (~out["exit_arb_ok"].fillna(True).astype(bool)) | (out["exit_value"] < 0)
