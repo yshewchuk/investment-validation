@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import resource
 import sys
 import time
 from pathlib import Path
@@ -43,6 +44,8 @@ for p in (ROOT, E133, E134, HERE):
 
 from engine import pnl_sim, replay as replay_mod  # noqa: E402
 from engine.structures import twin_peak_5  # noqa: E402
+from engine.v2.models.training.fold_store import TrainingRefused  # noqa: E402
+from engine.v2.models.training.receipts import ReceiptIssue  # noqa: E402
 
 
 def _load(name: str, path: Path):
@@ -72,9 +75,92 @@ FAMILIES = tuple(f.key for f in _f.FAMILIES)
 FAMILY_MASK = {k: (GRID.family_key == k) for k in FAMILIES}
 
 
-def build_all(*, force: bool = False, limit_years=None) -> dict:
+def _monthly_refusal(code: str, detail: str) -> TrainingRefused:
+    return TrainingRefused((ReceiptIssue("candidate_month", code, detail),))
+
+
+_MONTHLY_BENIGN_SKIPS = {"structure_unresolved", "exit_structure_unresolved"}
+
+
+def _month_window(frame: pd.DataFrame, month: str) -> pd.DataFrame:
+    try:
+        period = pd.Period(month, freq="M")
+    except (TypeError, ValueError) as exc:
+        raise _monthly_refusal("INVALID_EXIT_MONTH", f"invalid_exit_month: {month}") from exc
+    if str(period) != month:
+        raise _monthly_refusal("INVALID_EXIT_MONTH", f"invalid_exit_month: {month}")
+    start, end = period.start_time, (period + 1).start_time
+    dates = pd.to_datetime(frame["exit_date"], errors="coerce")
+    return frame.loc[dates.ge(start) & dates.lt(end)].copy()
+
+
+def _effective_month_plan(frame, month: str, replay, e133):
+    current = _month_window(frame, month)
+    previous = _month_window(frame, str(pd.Period(month, freq="M") - 1))
+    if previous.empty:
+        return current
+    keys = {(row["ticker"], row["entry_date"])
+            for row in previous[["ticker", "entry_date"]].to_dict("records")}
+    started = time.monotonic()
+    print(f"[e137] availability scan start month={month} prior_events={len(previous)}",
+          file=sys.stderr, flush=True)
+    index = replay.load_chain_index(keys, progress_every=100)
+    selected = []
+    for done, row in enumerate(previous.to_dict("records"), 1):
+        entry = index.get(row["ticker"], row["entry_date"])
+        if entry is None or entry.empty:
+            raise _monthly_refusal(
+                "PRIOR_MONTH_ENTRY_CHAIN_MISSING",
+                f"required_prior_month_entry_chain_missing: {row['event_id']}")
+        try:
+            expiry = pd.Timestamp(e133.ExpirySelector(kind="first_post_event").select(
+                entry, row["event_date"], row["session"]))
+            if pd.isna(expiry):
+                raise ValueError("expiry selector returned no date")
+        except Exception as exc:  # noqa: BLE001 — required to classify expiry availability.
+            raise _monthly_refusal(
+                "PRIOR_MONTH_EXPIRY_SELECTION_FAILED",
+                f"prior_month_expiry_selection_failed: {row['event_id']}: {exc}") from exc
+        if expiry.strftime("%Y-%m") == month:
+            selected.append(row["event_id"])
+        if done == 1 or done % 100 == 0 or done == len(previous):
+            elapsed = max(time.monotonic() - started, 0.001)
+            rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+            print(f"[e137] availability scan {done}/{len(previous)}, "
+                  f"{done / elapsed:.2f}/s, ETA {(len(previous)-done)*elapsed/done:.0f}s, "
+                  f"selected={len(selected)}, RSS {rss_mb:.0f}MB", file=sys.stderr, flush=True)
+    earlier = previous.loc[previous["event_id"].isin(selected)]
+    return pd.concat([current, earlier], ignore_index=True)
+
+
+def _refuse_monthly_event_skip(exc: Exception, event_id: str) -> None:
+    if str(exc) not in _MONTHLY_BENIGN_SKIPS:
+        raise _monthly_refusal(
+            "MONTHLY_CANDIDATE_INPUT_FAILED",
+            f"required_monthly_candidate_input_failed: {event_id}: {exc}") from exc
+
+
+def _effective_exit_trades(trades: pd.DataFrame, month: str) -> pd.DataFrame:
+    out = trades.copy()
+    repaired = ((~out["exit_arb_ok"].fillna(True).astype(bool))
+                | (out["exit_value"] < 0))
+    effective_exit = pd.to_datetime(out["exit_date"], errors="coerce")
+    expiry = pd.to_datetime(out["expiry"], errors="coerce")
+    if effective_exit.isna().any() or expiry.loc[repaired].isna().any():
+        raise _monthly_refusal(
+            "MONTHLY_EFFECTIVE_EXIT_DATE_MISSING",
+            "monthly_candidate_effective_exit_date_missing")
+    effective_exit.loc[repaired] = expiry.loc[repaired]
+    out["exit_date"] = effective_exit
+    return out.loc[effective_exit.dt.strftime("%Y-%m").eq(month)].copy()
+
+
+def build_all(*, force: bool = False, limit_years=None,
+              limit_exit_month: str | None = None) -> dict:
+    if limit_exit_month is not None:
+        _month_window(pd.DataFrame({"exit_date": []}), limit_exit_month)
     out = RESULTS / "candidates.parquet"
-    if out.exists() and not force:
+    if limit_exit_month is None and out.exists() and not force:
         print("[e137] cached", flush=True)
         return {"trades": pd.read_parquet(out),
                 "tallies": pd.read_parquet(RESULTS / "tallies.parquet"),
@@ -84,15 +170,31 @@ def build_all(*, force: bool = False, limit_years=None) -> dict:
     started = time.time()
     events = e133.event_universe()
     events["event_date"] = pd.to_datetime(events["event_date"])
-    events = events.merge(e133.forecasts(), on=["ticker", "event_date"], how="inner")
-    plan = replay_mod.filter_plan_by_availability(
-        replay_mod.plan_events(twin_peak_5(wing_multiple=3, width_moneyness=0.05), events))
+    structure = twin_peak_5(wing_multiple=3, width_moneyness=0.05)
+    if limit_exit_month is not None:
+        planned = replay_mod.plan_events(structure, events)
+        month_plan = _effective_month_plan(planned.frame, limit_exit_month, replay_mod, e133)
+        month_ids = set(month_plan["event_id"])
+        month_universe = events[events["event_id"].isin(month_ids)].copy()
+        forecasts = e133.forecasts()
+        events = month_universe.merge(forecasts, on=["ticker", "event_date"], how="inner")
+        if len(events) != len(month_universe):
+            raise _monthly_refusal("MONTHLY_FORECAST_MISSING",
+                                   "required_monthly_forecast_missing")
+        plan = replay_mod.ReplayPlan(frame=month_plan.reset_index(drop=True), skipped={})
+    else:
+        events = events.merge(e133.forecasts(), on=["ticker", "event_date"], how="inner")
+        plan = replay_mod.filter_plan_by_availability(replay_mod.plan_events(structure, events))
+        events = events[events["event_id"].isin(set(plan.frame["event_id"]))].copy()
     keyframe = plan.frame.set_index("event_id")
-    events = events[events["event_id"].isin(set(plan.frame["event_id"]))].copy()
     events["_year"] = events["event_date"].dt.year
     if limit_years is not None:
         events = events[events["_year"].isin(set(limit_years))]
     print(f"[e137] {len(events):,} events with chains and forecasts", flush=True)
+    if limit_exit_month is not None:
+        rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+        print(f"[e137] month {limit_exit_month} build start events={len(events)} "
+              f"RSS {rss_mb:.0f}MB", file=sys.stderr, flush=True)
 
     pool = pnl_sim.ResidualPool(e133.residual_history())
     spot_at = e134.expiry_spot()
@@ -102,6 +204,7 @@ def build_all(*, force: bool = False, limit_years=None) -> dict:
     for fam in FAMILIES:
         tally[f"argmax_{fam}"] = np.zeros(n, dtype=np.int64)
     skips: dict[str, int] = {}
+    progress_done = 0
     parts, ev_rows, equivalence = [], [], []
 
     for year, block in events.groupby("_year", sort=True):
@@ -113,9 +216,22 @@ def build_all(*, force: bool = False, limit_years=None) -> dict:
         merged = block.merge(plan.frame[["event_id", "entry_date", "exit_date"]],
                              on="event_id", how="inner")
         for row in merged.to_dict("records"):
+            progress_done += 1
+            if limit_exit_month is not None and (
+                    progress_done == 1 or progress_done % 50 == 0 or progress_done == len(events)):
+                elapsed = max(time.time() - started, 0.001)
+                rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+                print(f"[e137] month {limit_exit_month}: {progress_done}/{len(events)} events, "
+                      f"{progress_done / elapsed:.2f}/s, "
+                      f"ETA {(len(events) - progress_done) * elapsed / progress_done:.0f}s, "
+                      f"RSS {rss_mb:.0f}MB", file=sys.stderr, flush=True)
             er = index.get(row["ticker"], row["entry_date"])
             xr = index.get(row["ticker"], row["exit_date"])
             if er is None or xr is None or er.empty or xr.empty:
+                if limit_exit_month is not None:
+                    raise _monthly_refusal(
+                        "MONTHLY_CHAIN_MISSING",
+                        f"required_monthly_chain_missing: {row['event_id']}")
                 skips["no_chain"] = skips.get("no_chain", 0) + 1
                 continue
             rng = np.random.default_rng(int.from_bytes(
@@ -123,9 +239,15 @@ def build_all(*, force: bool = False, limit_years=None) -> dict:
             try:
                 ev = e133.price_event(row, er, xr, pool, rng_pick=rng)
             except e133.EventSkip as exc:
+                if limit_exit_month is not None:
+                    _refuse_monthly_event_skip(exc, row["event_id"])
                 skips[str(exc)] = skips.get(str(exc), 0) + 1
                 continue
             except Exception as exc:                               # noqa: BLE001
+                if limit_exit_month is not None:
+                    raise _monthly_refusal(
+                        "MONTHLY_CANDIDATE_FAILED",
+                        f"required_monthly_candidate_failed: {row['event_id']}: {exc}") from exc
                 skips[f"error:{type(exc).__name__}"] = skips.get(
                     f"error:{type(exc).__name__}", 0) + 1
                 continue
@@ -167,6 +289,10 @@ def build_all(*, force: bool = False, limit_years=None) -> dict:
             for r in emitted:
                 r["exit_arb_ok"] = e134.legs_no_arb_ok(r["legs"])
                 s = spot_at.get((row["ticker"], pd.Timestamp(r["expiry"])), np.nan)
+                if limit_exit_month is not None and not np.isfinite(s):
+                    raise _monthly_refusal(
+                        "MONTHLY_SETTLEMENT_SPOT_MISSING",
+                        f"required_monthly_settlement_spot_missing: {row['event_id']} {r['expiry']}")
                 r["spot_expiry"] = float(s) if np.isfinite(s) else np.nan
                 r["exit_value_expiry"] = (e134.terminal_payoff(r["legs"], s)
                                           if np.isfinite(s) else np.nan)
@@ -184,7 +310,14 @@ def build_all(*, force: bool = False, limit_years=None) -> dict:
         print(f"[e137] {year}: {len(ev_rows):,} events, {len(parts):,} rows, "
               f"{time.time() - started:.0f}s", flush=True)
 
+    if limit_exit_month is not None:
+        elapsed = max(time.time() - started, 0.001)
+        rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+        print(f"[e137] month {limit_exit_month} build end events={progress_done} "
+              f"elapsed={elapsed:.1f}s RSS {rss_mb:.0f}MB", file=sys.stderr, flush=True)
     trades = pd.DataFrame(parts)
+    if limit_exit_month is not None and not trades.empty:
+        trades = _effective_exit_trades(trades, limit_exit_month)
     tallies = e133._pattern_frame()
     for k, v in tally.items():
         tallies[k] = v
@@ -193,10 +326,11 @@ def build_all(*, force: bool = False, limit_years=None) -> dict:
             "equivalence": e133._equiv_summary(equivalence),
             "common_universe_events": int(ev_frame["common_universe"].sum()) if len(ev_frame) else 0,
             "elapsed_s": round(time.time() - started, 1)}
-    trades.to_parquet(out, index=False)
-    tallies.to_parquet(RESULTS / "tallies.parquet", index=False)
-    ev_frame.to_parquet(RESULTS / "event_summary.parquet", index=False)
-    (RESULTS / "build_meta.json").write_text(json.dumps(meta, indent=1, default=str))
+    if limit_exit_month is None:
+        trades.to_parquet(out, index=False)
+        tallies.to_parquet(RESULTS / "tallies.parquet", index=False)
+        ev_frame.to_parquet(RESULTS / "event_summary.parquet", index=False)
+        (RESULTS / "build_meta.json").write_text(json.dumps(meta, indent=1, default=str))
     print(f"[e137] done: {len(ev_frame):,} events, {len(trades):,} rows, "
           f"common universe {meta['common_universe_events']:,}, skips {skips}", flush=True)
     return {"trades": trades, "tallies": tallies, "events": ev_frame, "meta": meta}
@@ -208,5 +342,6 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--force", action="store_true")
     ap.add_argument("--years", type=int, nargs="*", default=None)
+    ap.add_argument("--exit-month", default=None)
     a = ap.parse_args()
-    build_all(force=a.force, limit_years=a.years)
+    build_all(force=a.force, limit_years=a.years, limit_exit_month=a.exit_month)
