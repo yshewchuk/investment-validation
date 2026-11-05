@@ -38,6 +38,7 @@ STARTED = time.monotonic()
 sys.path.insert(0, str(ROOT))
 
 from engine import pnl_sim
+from engine.v2.models.training.conditional_exit import conditional_exit
 from engine.evaluate import evaluate
 from engine.features import load_panel
 from experiments import common, lib
@@ -104,19 +105,6 @@ def load_module(name: str, path: Path):
 
 
 margin = load_module("exp161_margin", MARGIN_PATH)
-
-
-def conditional_exit(raw: pd.DataFrame) -> pd.DataFrame:
-    out = raw.copy()
-    hold = (~out["exit_arb_ok"].fillna(True).astype(bool)) | (out["exit_value"] < 0)
-    out.loc[hold, "exit_value"] = out.loc[hold, "exit_value_expiry"]
-    out = out.dropna(subset=["entry_cost", "exit_value"]).copy()
-    out["pnl"] = out["exit_value"] - out["entry_cost"]
-    out["ret"] = out["pnl"] / out["entry_cost"]
-    if (out["ret"] < -1.0 - 1e-8).any():
-        raise RuntimeError("conditional exits still contain a loss below the debit")
-    log(f"Conditional exits repaired {int(hold.sum()):,} stored fill rows")
-    return out
 
 
 def load_data() -> tuple[pd.DataFrame, pd.DataFrame]:

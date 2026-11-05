@@ -21,7 +21,6 @@ for the mean, with identical coverage.
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import sys
 from pathlib import Path
 
@@ -32,9 +31,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from engine import paths  # noqa: E402
+from engine.v2.models.training.conditional_exit import conditional_exit  # noqa: E402
 from engine.score import CHOOSER_ANALOG_POOL, Scorer  # noqa: E402
 
-E161 = ROOT / "experiments/EXP-161_dynamic_short_vol_neural_structure_picker/run.py"
 DEFAULT_SOURCE = ROOT / "experiments/EXP-137_one_book_per_family_which_enumerated_str/results/candidates.parquet"
 
 #: EXP-169's menu7-prime: the enumerated arm -> the registered structure name.
@@ -47,16 +46,7 @@ MENU = {
 ALPHA = 0.5
 
 
-def _load_e161():
-    spec = importlib.util.spec_from_file_location("e161_pool", E161)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules["e161_pool"] = module
-    spec.loader.exec_module(module)
-    return module
-
-
 def build(source: Path) -> pd.DataFrame:
-    e161 = _load_e161()
     columns = ["arm", "event_id", "ticker", "event_date", "entry_date", "exit_date",
                "fill_alpha", "entry_cost", "exit_value", "exit_value_expiry",
                "exit_arb_ok", "exp_pnl_sim", "width_over_forecast",
@@ -68,7 +58,7 @@ def build(source: Path) -> pd.DataFrame:
         raw[column] = pd.to_datetime(raw[column]).dt.normalize()
     # The same conditional-exit repair the training frame went through; without
     # it the realized P&L is not the one the neighbourhood averaged.
-    raw = e161.conditional_exit(raw)
+    raw = conditional_exit(raw)
     raw["pnl"] = raw["exit_value"] - raw["entry_cost"]
     keep = ["strategy", "event_id", "ticker", "event_date", "entry_date", "exit_date", "pnl",
             *Scorer._CHOOSER_ANALOG_DIMS]
