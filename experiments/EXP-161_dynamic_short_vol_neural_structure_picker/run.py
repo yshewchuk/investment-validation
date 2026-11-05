@@ -121,7 +121,11 @@ def load_data() -> tuple[pd.DataFrame, pd.DataFrame]:
     raw["strategy"] = raw["arm"].map(MENU_MAP)
     for col in ("event_date", "entry_date", "exit_date"):
         raw[col] = pd.to_datetime(raw[col]).dt.normalize()
+    n_repaired = int(
+        ((~raw["exit_arb_ok"].fillna(True).astype(bool))
+         | (raw["exit_value"] < 0)).sum())
     raw = conditional_exit(raw)
+    log(f"Conditional exits repaired {n_repaired:,} stored fill rows")
     raw["event_id"] = raw["event_id"].astype(str)
     raw["candidate_id"] = raw["event_id"] + "|" + raw["strategy"]
     raw["entry_cost_pct"] = 100.0 * raw["entry_cost"] / raw["spot_entry"]

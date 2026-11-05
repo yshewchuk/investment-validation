@@ -37,3 +37,28 @@ def test_shared_conditional_exit_matches_exp161(candidate_fills):
 
     pd.testing.assert_frame_equal(actual, expected)
     assert candidate_fills["exit_value"].tolist() == [3.0, -1.0, 2.0, 1.0, -1.0]
+
+
+def test_shared_conditional_exit_accepts_exact_full_debit_loss():
+    frame = pd.DataFrame({
+        "exit_arb_ok": [True],
+        "exit_value": [0.0],
+        "exit_value_expiry": [0.0],
+        "entry_cost": [1.0],
+    })
+
+    result = conditional_exit(frame)
+
+    assert result["ret"].tolist() == [-1.0]
+
+
+def test_shared_conditional_exit_refuses_loss_below_full_debit():
+    frame = pd.DataFrame({
+        "exit_arb_ok": [True],
+        "exit_value": [-1.0],
+        "exit_value_expiry": [-1.0],
+        "entry_cost": [1.0],
+    })
+
+    with pytest.raises(RuntimeError, match="loss below the debit"):
+        conditional_exit(frame)
