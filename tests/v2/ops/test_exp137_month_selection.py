@@ -42,8 +42,8 @@ def test_noncanonical_month_is_typed_refusal(month):
 def test_effective_exit_repair_updates_value_pnl_and_return_by_no_arb_or_negative_value():
     trades = pd.DataFrame([
         {"event_id": "held-oct", "exit_date": "2026-09-30", "expiry": "2026-10-31",
-         "exit_arb_ok": False, "exit_value": -2.0, "exit_value_expiry": 5.0,
-         "entry_cost": 2.0, "pnl": -4.0, "ret": -2.0},
+         "exit_arb_ok": False, "exit_value": 1.0, "exit_value_expiry": 5.0,
+         "entry_cost": 2.0, "pnl": -1.0, "ret": -0.5},
         {"event_id": "negative-exit", "exit_date": "2026-10-10", "expiry": "2026-10-31",
          "exit_arb_ok": True, "exit_value": -0.5, "exit_value_expiry": 8.0,
          "entry_cost": 1.0, "pnl": -1.5, "ret": -1.5},

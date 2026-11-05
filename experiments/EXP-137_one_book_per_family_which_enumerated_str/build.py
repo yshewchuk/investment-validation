@@ -15,8 +15,8 @@ Everything else is EXP-134's and is imported from it rather than
 reimplemented — the enumeration, the width rules, the three no-arbitrage
 conditions, the spread and market-cap filters, the linear expected-P&L
 shortcut, the equivalence receipt, and the two exit branches carried on every
-emitted row. The only new thing here is the arm masks and the ``common``
-flag.
+emitted row. Monthly mode selects candidates by effective exit month and repaired
+expiry availability; it returns rows in memory and uses typed refusals.
 
 **Ungated is emitted too, and it is the point.** A family positive without the
 gate and negative with it has a gate problem, not a structure problem, and
