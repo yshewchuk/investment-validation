@@ -315,8 +315,8 @@ def build_all(*, force: bool = False, limit_years=None,
             for r in emitted:
                 r["exit_arb_ok"] = e134.legs_no_arb_ok(r["legs"])
                 s = spot_at.get((row["ticker"], pd.Timestamp(r["expiry"])), np.nan)
-                if (limit_exit_month and limit_exit_month == pd.Timestamp(r["expiry"]).strftime("%Y-%m")
-                        and not r["exit_arb_ok"] and not np.isfinite(s)):
+                if (limit_exit_month == pd.Timestamp(r["expiry"]).strftime("%Y-%m")
+                        and (not r["exit_arb_ok"] or r["exit_value"] < 0) and not np.isfinite(s)):
                     raise _monthly_refusal(
                         "MONTHLY_SETTLEMENT_SPOT_MISSING",
                         f"required_monthly_settlement_spot_missing: {row['event_id']} {r['expiry']}")

@@ -226,12 +226,15 @@ def test_monthly_build_filters_coverage_and_slices_output_to_scored_month(monkey
     })
     monkeypatch.setattr(e133, "EQUIV_EVENTS", 0)
 
+    negative_exit = False
+
     def emit(*args):
         if args[1]["event_id"] == "no-candidate":
             return []
         return [{
             "event_id": args[1]["event_id"], "exit_date": args[1]["exit_date"],
-            "expiry": pd.Timestamp("2026-10-30"), "legs": [], "exit_value": 1.0,
+            "expiry": pd.Timestamp("2026-10-30"), "legs": [],
+            "exit_value": -0.5 if negative_exit else 1.0,
             "entry_cost": 0.5, "exp_pnl_sim_select": args[6],
         }]
 
@@ -262,6 +265,12 @@ def test_monthly_build_filters_coverage_and_slices_output_to_scored_month(monkey
     quoted_result = builder.build_all(limit_exit_month="2026-10")
     assert quoted_result["trades"]["exit_date"].tolist() == [pd.Timestamp("2026-10-15")]
     assert quoted_result["trades"]["exit_value_expiry"].isna().all()
+    assert list(tmp_path.iterdir()) == []
+
+    negative_exit = True
+    with pytest.raises(TrainingRefused) as spot_error:
+        builder.build_all(limit_exit_month="2026-10")
+    assert spot_error.value.issues[0].code == "MONTHLY_SETTLEMENT_SPOT_MISSING"
     assert list(tmp_path.iterdir()) == []
 
     def fail_event_universe():
