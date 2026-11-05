@@ -26,6 +26,45 @@ def test_month_window_selects_only_exit_dates_in_requested_month():
     assert builder._month_window(frame, "2026-10")["event_id"].tolist() == ["first", "last"]
 
 
+def test_out_of_range_month_is_typed_refusal():
+    with pytest.raises(TrainingRefused) as error:
+        builder._month_window(pd.DataFrame({"exit_date": []}), "10000-01")
+    assert error.value.issues[0].code == "INVALID_EXIT_MONTH"
+
+
+def test_effective_exit_repair_updates_value_pnl_and_return_by_no_arb_only():
+    trades = pd.DataFrame([
+        {"event_id": "held-oct", "exit_date": "2026-09-30", "expiry": "2026-10-31",
+         "exit_arb_ok": False, "exit_value": -2.0, "exit_value_expiry": 5.0,
+         "entry_cost": 2.0, "pnl": -4.0, "ret": -2.0},
+        {"event_id": "quoted-negative", "exit_date": "2026-10-10", "expiry": "2026-11-30",
+         "exit_arb_ok": True, "exit_value": -0.5, "exit_value_expiry": 8.0,
+         "entry_cost": 1.0, "pnl": -1.5, "ret": -1.5},
+        {"event_id": "held-nov", "exit_date": "2026-10-25", "expiry": "2026-11-15",
+         "exit_arb_ok": False, "exit_value": -1.0, "exit_value_expiry": 9.0,
+         "entry_cost": 1.0, "pnl": -2.0, "ret": -2.0},
+    ])
+
+    result = builder._effective_exit_trades(trades, "2026-10").set_index("event_id")
+    assert set(result.index) == {"held-oct", "quoted-negative"}
+    assert result.loc["held-oct", "exit_date"] == pd.Timestamp("2026-10-31")
+    assert result.loc["held-oct", ["exit_value", "pnl", "ret"]].tolist() == [5.0, 3.0, 1.5]
+    assert result.loc["quoted-negative", ["exit_value", "pnl", "ret"]].tolist() == [
+        -0.5, -1.5, -1.5]
+
+
+def test_effective_exit_missing_expiry_value_is_typed_refusal():
+    trades = pd.DataFrame([{
+        "exit_date": "2026-09-30", "expiry": "2026-10-31", "exit_arb_ok": False,
+        "exit_value": -1.0, "exit_value_expiry": np.nan, "entry_cost": 1.0,
+        "pnl": -2.0, "ret": -2.0,
+    }])
+
+    with pytest.raises(TrainingRefused) as error:
+        builder._effective_exit_trades(trades, "2026-10")
+    assert error.value.issues[0].code == "MONTHLY_EFFECTIVE_EXIT_DATA_MISSING"
+
+
 def _availability_plan():
     return pd.DataFrame([
         {"event_id": "current", "ticker": "XYZ", "event_date": "2026-10-01",
@@ -63,8 +102,9 @@ def test_prior_month_entry_chain_failure_is_typed_refusal():
     replay = SimpleNamespace(load_chain_index=lambda _keys, progress_every: SimpleNamespace(
         get=lambda _ticker, _entry_date: None))
 
-    with pytest.raises(TrainingRefused, match="required_prior_month_entry_chain_missing"):
+    with pytest.raises(TrainingRefused, match="required_prior_month_entry_chain_missing") as error:
         builder._effective_month_plan(frame, "2026-10", replay, SimpleNamespace())
+    assert error.value.issues[0].code == "PRIOR_MONTH_ENTRY_CHAIN_MISSING"
 
 
 def test_prior_month_expiry_selection_failure_is_typed_refusal():
@@ -82,14 +122,20 @@ def test_prior_month_expiry_selection_failure_is_typed_refusal():
             raise ValueError("expiry chain unavailable")
 
     replay = SimpleNamespace(load_chain_index=lambda _keys, progress_every: Index())
-    with pytest.raises(TrainingRefused, match="prior_month_expiry_selection_failed"):
+    with pytest.raises(TrainingRefused, match="prior_month_expiry_selection_failed") as error:
         builder._effective_month_plan(frame, "2026-10", replay,
                                       SimpleNamespace(ExpirySelector=Selector))
+    assert error.value.issues[0].code == "PRIOR_MONTH_EXPIRY_SELECTION_FAILED"
 
 
 def test_unclassified_monthly_event_skip_is_typed_refusal():
-    with pytest.raises(TrainingRefused, match="required_monthly_candidate_input_failed"):
+    with pytest.raises(TrainingRefused, match="required_monthly_candidate_input_failed") as error:
         builder._refuse_monthly_event_skip(ValueError("required chain is unavailable"), "event-1")
+    assert error.value.issues[0].code == "MONTHLY_CANDIDATE_INPUT_FAILED"
+
+
+def test_monthly_benign_structural_skip_is_allowed():
+    builder._refuse_monthly_event_skip(ValueError("structure_unresolved"), "event-1")
 
 
 def test_monthly_score_matches_independent_maximum_oracle(monkeypatch, tmp_path):
@@ -134,7 +180,8 @@ def test_monthly_score_matches_independent_maximum_oracle(monkeypatch, tmp_path)
     monkeypatch.setattr(e133, "_emit", lambda *_args: [{
         "exit_date": pd.Timestamp("2026-10-15"),
         "expiry": pd.Timestamp("2026-10-30"), "legs": [], "exit_value": 1.0,
-        "oracle_score": _args[6],
+        "entry_cost": 0.5,
+        "exp_pnl_sim_select": _args[6],
     }])
     monkeypatch.setattr(e133, "_pattern_frame", lambda: pd.DataFrame({"pattern": [0, 0]}))
     monkeypatch.setattr(e133, "_equiv_summary", lambda _items: {})
@@ -145,5 +192,5 @@ def test_monthly_score_matches_independent_maximum_oracle(monkeypatch, tmp_path)
 
     result = builder.build_all(limit_exit_month="2026-10")
 
-    # Independent oracle: the two eligible simulated values are .25 and .90, so the best is .90.
-    assert result["trades"]["oracle_score"].tolist() == [0.90]
+    assert result["trades"]["exp_pnl_sim_select"].tolist() == [0.90]
+    assert list(tmp_path.iterdir()) == []

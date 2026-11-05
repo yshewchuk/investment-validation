@@ -89,7 +89,10 @@ def _month_window(frame: pd.DataFrame, month: str) -> pd.DataFrame:
         raise _monthly_refusal("INVALID_EXIT_MONTH", f"invalid_exit_month: {month}") from exc
     if str(period) != month:
         raise _monthly_refusal("INVALID_EXIT_MONTH", f"invalid_exit_month: {month}")
-    start, end = period.start_time, (period + 1).start_time
+    try:
+        start, end = period.start_time, (period + 1).start_time
+    except (OverflowError, TypeError, ValueError) as exc:
+        raise _monthly_refusal("INVALID_EXIT_MONTH", f"invalid_exit_month: {month}") from exc
     dates = pd.to_datetime(frame["exit_date"], errors="coerce")
     return frame.loc[dates.ge(start) & dates.lt(end)].copy()
 
@@ -142,21 +145,29 @@ def _refuse_monthly_event_skip(exc: Exception, event_id: str) -> None:
 
 def _effective_exit_trades(trades: pd.DataFrame, month: str) -> pd.DataFrame:
     out = trades.copy()
-    repaired = ((~out["exit_arb_ok"].fillna(True).astype(bool))
-                | (out["exit_value"] < 0))
+    repaired = ~out["exit_arb_ok"].fillna(True).astype(bool)
     effective_exit = pd.to_datetime(out["exit_date"], errors="coerce")
     expiry = pd.to_datetime(out["expiry"], errors="coerce")
-    if effective_exit.isna().any() or expiry.loc[repaired].isna().any():
+    if (effective_exit.isna().any() or expiry.loc[repaired].isna().any()
+            or out.loc[repaired, "exit_value_expiry"].isna().any()):
         raise _monthly_refusal(
-            "MONTHLY_EFFECTIVE_EXIT_DATE_MISSING",
-            "monthly_candidate_effective_exit_date_missing")
+            "MONTHLY_EFFECTIVE_EXIT_DATA_MISSING",
+            "monthly_candidate_effective_exit_date_or_settlement_value_missing")
     effective_exit.loc[repaired] = expiry.loc[repaired]
     out["exit_date"] = effective_exit
+    out.loc[repaired, "exit_value"] = out.loc[repaired, "exit_value_expiry"]
+    out["pnl"] = out["exit_value"] - out["entry_cost"]
+    out["ret"] = out["pnl"] / out["entry_cost"]
     return out.loc[effective_exit.dt.strftime("%Y-%m").eq(month)].copy()
 
 
 def build_all(*, force: bool = False, limit_years=None,
               limit_exit_month: str | None = None) -> dict:
+    """Build full candidates, or return one exit-month slice in memory.
+
+    Monthly mode selects by planned exit date and repaired expiry availability,
+    refuses missing required inputs, and does not write full-build artifacts.
+    """
     if limit_exit_month is not None:
         _month_window(pd.DataFrame({"exit_date": []}), limit_exit_month)
     out = RESULTS / "candidates.parquet"
@@ -342,6 +353,5 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--force", action="store_true")
     ap.add_argument("--years", type=int, nargs="*", default=None)
-    ap.add_argument("--exit-month", default=None)
     a = ap.parse_args()
-    build_all(force=a.force, limit_years=a.years, limit_exit_month=a.exit_month)
+    build_all(force=a.force, limit_years=a.years)
