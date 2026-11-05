@@ -959,3 +959,7 @@ pre-existing defect it merely happens to touch, unless the PR makes that
 defect worse or newly reachable. `CONTRIBUTING.md` ("Scope and deferred
 work") has the full rule, including the GitHub-issue format for a real
 finding that falls outside it.
+
+## Approved scope exception: chooser conditional-exit helper
+
+Root §2 rule 3 prohibits legacy-to-v2 imports by default. For chooser analog pool refresh slice 1, the supervisor explicitly approved one scoped exception: `experiments/EXP-161_dynamic_short_vol_neural_structure_picker/run.py` and `tools/build_chooser_pool.py` import `engine.v2.models.training.conditional_exit` so both consumers use the same settlement arithmetic. The EXP-161 import is reachable from the legacy nightly evidence path and loads the v2 package initializers; this exception accepts that dependency and startup cost for this helper only. No other legacy-to-v2 imports are authorized by it. Retire the exception when the legacy chooser evidence path is retired or ported.

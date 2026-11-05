@@ -48,11 +48,11 @@ NumPy/pandas, sklearn and threadpoolctl implement numeric fits; joblib/parquet a
 | FitInputs factory refusal | Guards precede column access; an ordered-column mismatch raises `ValueError`. |
 | FitInputs event dates | Dates are optional. When supplied as a list or tuple, their count must match sized training rows and each value must be a canonical ISO date; unsupported date containers, unavailable row counts, mismatch or malformed values raise `ValueError`. |
 | Numeric fit validation | Matrix conversion/shape/infinity checks precede row-count checks, then label checks; existing messages are preserved. |
+| Conditional exit missing columns | Missing any of `exit_arb_ok`, `exit_value`, `exit_value_expiry` or `entry_cost` propagates pandas `KeyError`; no frame is returned and the input remains unchanged. |
+| Conditional exit below-debit result | A repaired return below `-1.0 - 1e-8` raises `RuntimeError("conditional exits still contain a loss below the debit")`; no frame is returned and the input remains unchanged. |
 | Cache/retry | Numeric fits are fresh, uncached and never retried. Job resume verifies identity, file hashes and rederived receipts before retaining a completed fold; mismatches raise `TrainingRefused`. |
 | Transaction/partial write | Numeric fitters have no I/O/transaction. Jobs publish each completed fold by rename, not an all-job transaction; prior folds survive failure and interrupted partial directories are removed on explicit resume. |
 | Idempotency | Same-environment MLP calls fit afresh deterministically; completed job folds are verified and not refit. A new dataset/recipe needs a new job identity, not silent replacement. |
-
-`conditional_exit` requires `exit_arb_ok`, `exit_value`, `exit_value_expiry` and `entry_cost`; a missing column propagates pandas `KeyError`. If the repaired return is below `-1.0 - 1e-8`, it raises `RuntimeError` and returns no frame. In either case the input is unchanged.
 
 ## 8. Invariants
 
