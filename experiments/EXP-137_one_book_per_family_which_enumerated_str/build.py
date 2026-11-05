@@ -83,13 +83,49 @@ def _month_window(frame: pd.DataFrame, month: str) -> pd.DataFrame:
     return frame.loc[dates.ge(start) & dates.lt(end)].copy()
 
 
+def _effective_month_plan(frame, month: str, replay_mod, e133):
+    current = _month_window(frame, month)
+    period = pd.Period(month, freq="M")
+    previous = _month_window(frame, str(period - 1))
+    if previous.empty:
+        return current
+    keys = {(row["ticker"], row["entry_date"])
+            for row in previous[["ticker", "entry_date"]].to_dict("records")}
+    started = time.monotonic()
+    print(f"[e137] availability scan start month={month} prior_events={len(previous)}",
+          file=sys.stderr, flush=True)
+    index = replay_mod.load_chain_index(keys, progress_every=100)
+    selected, skipped = [], 0
+    for done, row in enumerate(previous.to_dict("records"), 1):
+        entry = index.get(row["ticker"], row["entry_date"])
+        if entry is None or entry.empty:
+            skipped += 1
+        else:
+            try:
+                expiry = e133.ExpirySelector(kind="first_post_event").select(
+                    entry, row["event_date"], row["session"])
+            except Exception:  # noqa: BLE001 — prior-month rows outside the target are not priced.
+                skipped += 1
+            else:
+                if pd.Timestamp(expiry).strftime("%Y-%m") == month:
+                    selected.append(row["event_id"])
+        if done == 1 or done % 100 == 0 or done == len(previous):
+            elapsed = max(time.monotonic() - started, 0.001)
+            rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+            print(f"[e137] availability scan {done}/{len(previous)}, "
+                  f"{done / elapsed:.2f}/s, ETA {(len(previous)-done)*elapsed/done:.0f}s, "
+                  f"skipped={skipped}, RSS {rss_mb:.0f}MB", file=sys.stderr, flush=True)
+    earlier = previous.loc[previous["event_id"].isin(selected)]
+    return pd.concat([current, earlier], ignore_index=True)
+
+
 def _refuse_monthly_event_skip(exc: Exception, event_id: str) -> None:
     if str(exc) not in _MONTHLY_BENIGN_SKIPS:
         raise RuntimeError(
             f"required monthly candidate input failed for {event_id}: {exc}") from exc
 
 
-def _effective_exit_trades(trades: pd.DataFrame) -> pd.DataFrame:
+def _effective_exit_trades(trades: pd.DataFrame, month: str) -> pd.DataFrame:
     out = trades.copy()
     repaired = ((~out["exit_arb_ok"].fillna(True).astype(bool))
                 | (out["exit_value"] < 0))
@@ -99,7 +135,7 @@ def _effective_exit_trades(trades: pd.DataFrame) -> pd.DataFrame:
         raise RuntimeError("monthly candidate has no effective exit availability date")
     effective_exit.loc[repaired] = expiry.loc[repaired]
     out["exit_date"] = effective_exit
-    return out
+    return out.loc[effective_exit.dt.strftime("%Y-%m").eq(month)].copy()
 
 
 def build_all(*, force: bool = False, limit_years=None,
@@ -121,7 +157,7 @@ def build_all(*, force: bool = False, limit_years=None,
     structure = twin_peak_5(wing_multiple=3, width_moneyness=0.05)
     if limit_exit_month is not None:
         planned = replay_mod.plan_events(structure, events)
-        month_plan = _month_window(planned.frame, limit_exit_month)
+        month_plan = _effective_month_plan(planned.frame, limit_exit_month, replay_mod, e133)
         month_ids = set(month_plan["event_id"])
         month_universe = events[events["event_id"].isin(month_ids)].copy()
         forecasts = e133.forecasts()
@@ -250,7 +286,7 @@ def build_all(*, force: bool = False, limit_years=None,
 
     trades = pd.DataFrame(parts)
     if limit_exit_month is not None and not trades.empty:
-        trades = _effective_exit_trades(trades)
+        trades = _effective_exit_trades(trades, limit_exit_month)
     tallies = e133._pattern_frame()
     for k, v in tally.items():
         tallies[k] = v

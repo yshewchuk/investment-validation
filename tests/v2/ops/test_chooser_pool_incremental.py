@@ -46,7 +46,7 @@ def test_append_refuses_future_feature_date_without_changing_table(tmp_path):
     pd.testing.assert_frame_equal(pd.read_parquet(path), original)
 
 
-def test_append_accepts_bmo_event_date_after_entry_date(tmp_path):
+def test_append_accepts_only_pre_event_bmo_entries(tmp_path):
     path = tmp_path / "candidates.parquet"
     pd.DataFrame([_row("existing", 1)]).to_parquet(path, index=False)
 
@@ -54,6 +54,11 @@ def test_append_accepts_bmo_event_date_after_entry_date(tmp_path):
         "bmo", 2, event_date="2026-10-02", entry_date="2026-10-01", session="BMO")])
     assert refresh.append_candidates(path, fresh) == 1
     assert "bmo" in set(pd.read_parquet(path)["event_id"])
+
+    post_event = pd.DataFrame([_row(
+        "late-bmo", 3, event_date="2026-10-02", entry_date="2026-10-02", session="BMO")])
+    with pytest.raises(TrainingRefused, match="candidate_causality_failed"):
+        refresh.append_candidates(path, post_event)
 
 
 def test_atomic_append_failure_preserves_table_and_cleans_temp(tmp_path, monkeypatch):
@@ -127,7 +132,7 @@ def test_append_accepts_entry_date_equality_and_rejects_missing_dates(tmp_path):
 def test_append_refuses_candidate_table_over_size_limit(tmp_path, monkeypatch):
     path = tmp_path / "candidates.parquet"
     pd.DataFrame([_row("existing", 1)]).to_parquet(path, index=False)
-    monkeypatch.setattr(refresh, "CHOOSER_POOL_MAX_BYTES", 1)
+    monkeypatch.setattr(refresh, "CANDIDATE_ARCHIVE_MAX_BYTES", 1)
 
     with pytest.raises(TrainingRefused, match="candidate_table_too_large"):
         refresh.append_candidates(path, pd.DataFrame())
@@ -215,14 +220,49 @@ def test_month_window_is_half_open_and_effective_exit_uses_expiry():
     })
     assert builder._month_window(planned, "2026-10")["event_id"].tolist() == ["first", "last"]
 
+    class EntryIndex:
+        entries = {
+            ("Y", pd.Timestamp("2026-09-15")): pd.DataFrame({"expiry": [pd.Timestamp("2026-10-16")]}),
+            ("Z", pd.Timestamp("2026-09-18")): pd.DataFrame({"expiry": [pd.Timestamp("2026-11-20")]}),
+        }
+
+        def get(self, ticker, entry_date):
+            return self.entries.get((ticker, pd.Timestamp(entry_date)))
+
+    class Selector:
+        def __init__(self, kind):
+            assert kind == "first_post_event"
+
+        def select(self, entry, _event_date, _session):
+            return entry["expiry"].iloc[0]
+
+    plan = pd.DataFrame([
+        {"event_id": "current", "ticker": "X", "event_date": pd.Timestamp("2026-10-01"),
+         "session": "AMC", "entry_date": pd.Timestamp("2026-10-01"),
+         "exit_date": pd.Timestamp("2026-10-15")},
+        {"event_id": "prior-repair", "ticker": "Y", "event_date": pd.Timestamp("2026-09-15"),
+         "session": "AMC", "entry_date": pd.Timestamp("2026-09-15"),
+         "exit_date": pd.Timestamp("2026-09-30")},
+        {"event_id": "prior-unrelated", "ticker": "Z", "event_date": pd.Timestamp("2026-09-18"),
+         "session": "AMC", "entry_date": pd.Timestamp("2026-09-18"),
+         "exit_date": pd.Timestamp("2026-09-30")},
+    ])
+    replay = SimpleNamespace(load_chain_index=lambda _keys, progress_every: EntryIndex())
+    e133 = SimpleNamespace(ExpirySelector=Selector)
+    selected = builder._effective_month_plan(plan, "2026-10", replay, e133)
+    assert selected["event_id"].tolist() == ["current", "prior-repair"]
+
     trades = pd.DataFrame({
-        "exit_arb_ok": [False, True], "exit_value": [-1.0, 2.0],
-        "exit_date": pd.to_datetime(["2026-10-30", "2026-10-30"]),
-        "expiry": pd.to_datetime(["2026-11-06", "2026-11-13"]),
+        "exit_arb_ok": [False, True, False, True], "exit_value": [-1.0, -1.0, 2.0, 2.0],
+        "exit_date": pd.to_datetime(["2026-10-30"] * 4),
+        "expiry": pd.to_datetime(["2026-11-06", "2026-11-13", "2026-11-20", "2026-11-27"]),
     })
-    settled = builder._effective_exit_trades(trades)
-    assert settled["exit_date"].tolist() == list(pd.to_datetime(["2026-11-06", "2026-10-30"]))
-    assert trades["exit_date"].tolist() == list(pd.to_datetime(["2026-10-30", "2026-10-30"]))
+    october = builder._effective_exit_trades(trades, "2026-10")
+    november = builder._effective_exit_trades(trades, "2026-11")
+    assert october["exit_date"].tolist() == list(pd.to_datetime(["2026-10-30"]))
+    assert november["exit_date"].tolist() == list(pd.to_datetime(
+        ["2026-11-06", "2026-11-13", "2026-11-20"]))
+    assert trades["exit_date"].tolist() == list(pd.to_datetime(["2026-10-30"] * 4))
 
 
 def test_monthly_skip_refuses_failed_inputs_but_counts_benign_structure_skips():
@@ -231,4 +271,42 @@ def test_monthly_skip_refuses_failed_inputs_but_counts_benign_structure_skips():
         assert builder._refuse_monthly_event_skip(builder.e133.EventSkip(code), "event") is None
     with pytest.raises(RuntimeError, match="event: bad_quote"):
         builder._refuse_monthly_event_skip(builder.e133.EventSkip("bad_quote"), "event")
+
+
+def test_candidate_byte_cap_applies_after_descriptor_stat(tmp_path, monkeypatch):
+    path = tmp_path / "growing.parquet"
+    path.write_bytes(b"x" * 8)
+    monkeypatch.setattr(refresh, "CANDIDATE_ARCHIVE_MAX_BYTES", 8)
+    original_fdopen = refresh.os.fdopen
+
+    def grow_after_fstat(fd, mode):
+        with path.open("ab") as output:
+            output.write(b"y")
+        return original_fdopen(fd, mode)
+
+    monkeypatch.setattr(refresh.os, "fdopen", grow_after_fstat)
+    with pytest.raises(TrainingRefused, match="candidate_table_too_large"):
+        refresh.append_candidates(path, pd.DataFrame())
+
+
+def test_candidate_reader_refuses_symlink(tmp_path):
+    target = tmp_path / "target.parquet"
+    pd.DataFrame([_row("existing", 1)]).to_parquet(target, index=False)
+    link = tmp_path / "link.parquet"
+    link.symlink_to(target)
+    with pytest.raises(TrainingRefused, match="candidate_table_read_failed"):
+        refresh.append_candidates(link, pd.DataFrame())
+
+
+def test_refresh_success_appends_candidates(tmp_path, monkeypatch):
+    path = tmp_path / "candidates.parquet"
+    pd.DataFrame([_row("existing", 1)]).to_parquet(path, index=False)
+    builder = SimpleNamespace(build_all=lambda **_kwargs: {
+        "trades": pd.DataFrame([_row("new", 2)]), "meta": {"skips": {}}})
+    spec = SimpleNamespace(loader=SimpleNamespace(exec_module=lambda _module: None))
+    monkeypatch.setattr(refresh.importlib.util, "spec_from_file_location", lambda *_args: spec)
+    monkeypatch.setattr(refresh.importlib.util, "module_from_spec", lambda _spec: builder)
+
+    assert refresh.refresh("2026-10", path) == 1
+    assert "new" in set(pd.read_parquet(path)["event_id"])
 

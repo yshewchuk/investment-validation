@@ -18,7 +18,7 @@ import pandas as pd
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from engine.v2.models.training.chooser_pool_source import CHOOSER_POOL_MAX_BYTES
+CANDIDATE_ARCHIVE_MAX_BYTES = 512 * 1024 * 1024
 from engine.v2.models.training.fold_store import TrainingRefused
 from engine.v2.models.training.receipts import ReceiptIssue
 
@@ -54,13 +54,13 @@ def _read_candidate_table(path: Path) -> pd.DataFrame:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode):
             refuse("candidate_table_invalid", "stored candidate path is not a regular file")
-        if info.st_size > CHOOSER_POOL_MAX_BYTES:
+        if info.st_size > CANDIDATE_ARCHIVE_MAX_BYTES:
             refuse("candidate_table_too_large", "stored candidate table exceeds the bounded read limit")
         source = os.fdopen(fd, "rb")
         fd = None
         with source:
-            payload = source.read(CHOOSER_POOL_MAX_BYTES + 1)
-        if len(payload) > CHOOSER_POOL_MAX_BYTES:
+            payload = source.read(CANDIDATE_ARCHIVE_MAX_BYTES + 1)
+        if len(payload) > CANDIDATE_ARCHIVE_MAX_BYTES:
             refuse("candidate_table_too_large", "stored candidate table exceeds the bounded read limit")
         return pd.read_parquet(io.BytesIO(payload))
     except TrainingRefused:
@@ -84,8 +84,9 @@ def append_candidates(path: Path, fresh: pd.DataFrame) -> int:
     entry_dates = pd.to_datetime(fresh["entry_date"], errors="coerce")
     sessions = fresh.get("session", pd.Series("", index=fresh.index)).astype(str).str.upper()
     future_non_bmo = (event_dates > entry_dates) & ~sessions.eq("BMO")
-    if event_dates.isna().any() or entry_dates.isna().any() or future_non_bmo.any():
-        refuse("candidate_causality_failed", "non-BMO event date must be <= entry date")
+    post_event_bmo = sessions.eq("BMO") & entry_dates.ge(event_dates)
+    if event_dates.isna().any() or entry_dates.isna().any() or future_non_bmo.any() or post_event_bmo.any():
+        refuse("candidate_causality_failed", "entry must precede BMO events; other event dates must be <= entry")
     fresh = fresh.drop_duplicates(list(KEY), keep="first")
     old_keys = pd.MultiIndex.from_frame(old[list(KEY)])
     new_keys = pd.MultiIndex.from_frame(fresh[list(KEY)])
