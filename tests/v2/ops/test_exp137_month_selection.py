@@ -32,6 +32,13 @@ def test_out_of_range_month_is_typed_refusal():
     assert error.value.issues[0].code == "INVALID_EXIT_MONTH"
 
 
+@pytest.mark.parametrize("month", ["2026-1", "2026-10-01"])
+def test_noncanonical_month_is_typed_refusal(month):
+    with pytest.raises(TrainingRefused) as error:
+        builder._month_window(pd.DataFrame({"exit_date": []}), month)
+    assert error.value.issues[0].code == "INVALID_EXIT_MONTH"
+
+
 def test_effective_exit_repair_updates_value_pnl_and_return_by_no_arb_only():
     trades = pd.DataFrame([
         {"event_id": "held-oct", "exit_date": "2026-09-30", "expiry": "2026-10-31",
@@ -43,14 +50,18 @@ def test_effective_exit_repair_updates_value_pnl_and_return_by_no_arb_only():
         {"event_id": "held-nov", "exit_date": "2026-10-25", "expiry": "2026-11-15",
          "exit_arb_ok": False, "exit_value": -1.0, "exit_value_expiry": 9.0,
          "entry_cost": 1.0, "pnl": -2.0, "ret": -2.0},
+        {"event_id": "low-cost", "exit_date": "2026-10-11", "expiry": "2026-11-30",
+         "exit_arb_ok": True, "exit_value": 1.0, "exit_value_expiry": 2.0,
+         "entry_cost": builder.e133.MIN_MEANINGFUL_COST / 2, "pnl": 0.0, "ret": np.nan},
     ])
 
     result = builder._effective_exit_trades(trades, "2026-10").set_index("event_id")
-    assert set(result.index) == {"held-oct", "quoted-negative"}
+    assert set(result.index) == {"held-oct", "quoted-negative", "low-cost"}
     assert result.loc["held-oct", "exit_date"] == pd.Timestamp("2026-10-31")
     assert result.loc["held-oct", ["exit_value", "pnl", "ret"]].tolist() == [5.0, 3.0, 1.5]
     assert result.loc["quoted-negative", ["exit_value", "pnl", "ret"]].tolist() == [
         -0.5, -1.5, -1.5]
+    assert pd.isna(result.loc["low-cost", "ret"])
 
 
 def test_effective_exit_missing_expiry_value_is_typed_refusal():
@@ -134,20 +145,32 @@ def test_unclassified_monthly_event_skip_is_typed_refusal():
     assert error.value.issues[0].code == "MONTHLY_CANDIDATE_INPUT_FAILED"
 
 
-def test_monthly_benign_structural_skip_is_allowed():
-    builder._refuse_monthly_event_skip(ValueError("structure_unresolved"), "event-1")
+@pytest.mark.parametrize("reason", ["structure_unresolved", "exit_structure_unresolved"])
+def test_monthly_benign_structural_skip_is_allowed(reason):
+    builder._refuse_monthly_event_skip(ValueError(reason), "event-1")
 
 
-def test_monthly_score_matches_independent_maximum_oracle(monkeypatch, tmp_path):
-    event = pd.DataFrame([{
-        "event_id": "oct-event", "ticker": "XYZ", "event_date": pd.Timestamp("2026-10-01"),
-        "session": "AMC",
-    }])
-    plan = event.assign(entry_date=pd.Timestamp("2026-09-30"),
+def test_monthly_build_filters_coverage_and_slices_output_to_scored_month(monkeypatch, tmp_path):
+    event = pd.DataFrame([
+        {"event_id": event_id, "ticker": "XYZ", "event_date": pd.Timestamp(f"2026-10-{day:02d}"),
+         "session": "AMC"}
+        for event_id, day in (("oct-event", 1), ("no-candidate", 2),
+                              ("missing-forecast", 3), ("unavailable", 4))
+    ])
+    plan = event.assign(entry_date=event["event_date"] - pd.Timedelta(days=1),
                         exit_date=pd.Timestamp("2026-10-15"))
     chain = pd.DataFrame({"available": [True]})
+    filter_calls = []
+
+    def filter_available(replay_plan):
+        filter_calls.append(True)
+        frame = replay_plan.frame.loc[
+            replay_plan.frame["event_id"].ne("unavailable")].copy()
+        return SimpleNamespace(frame=frame, skipped={"no_entry_chain": 1})
+
     replay = SimpleNamespace(
         plan_events=lambda _structure, _events: SimpleNamespace(frame=plan.copy(), skipped={}),
+        filter_plan_by_availability=filter_available,
         load_chain_index=lambda _keys, progress_every: SimpleNamespace(
             get=lambda _ticker, _date: chain),
         ReplayPlan=lambda frame, skipped: SimpleNamespace(frame=frame, skipped=skipped),
@@ -156,6 +179,7 @@ def test_monthly_score_matches_independent_maximum_oracle(monkeypatch, tmp_path)
     monkeypatch.setattr(builder, "RESULTS", tmp_path)
     monkeypatch.setattr(builder, "FAMILIES", ("family",))
     monkeypatch.setattr(builder, "FAMILY_MASK", {"family": np.array([True, True])})
+
     class Grid(SimpleNamespace):
         def __len__(self):
             return 2
@@ -168,29 +192,62 @@ def test_monthly_score_matches_independent_maximum_oracle(monkeypatch, tmp_path)
     e133 = builder.e133
     e134 = builder.e134
     monkeypatch.setattr(e133, "event_universe", lambda: event.copy())
-    monkeypatch.setattr(e133, "forecasts", lambda: event[["ticker", "event_date"]].assign(forecast=1.0))
+    monkeypatch.setattr(e133, "forecasts", lambda: event.loc[
+        event["event_id"].ne("missing-forecast"), ["ticker", "event_date"]].assign(forecast=1.0))
     monkeypatch.setattr(e133, "residual_history", lambda: pd.DataFrame())
     monkeypatch.setattr(e133, "price_event", lambda *_args, **_kwargs: {
         "bid_e": np.zeros((2, 1)), "ask_e": np.ones((2, 1)), "strikes": np.array([100.0]),
         "idx": np.array([0, 1]), "admissible": np.array([True, True]),
-        "tradeable": np.array([True, True]), "sim_sel": np.array([0.25, 0.90]),
-        "sim_gate": np.array([0.2, 0.8]), "listed": np.array([True, True]),
+        "tradeable": np.array([True, True]), "sim_sel": np.array([0.90, 0.25]),
+        "sim_gate": np.array([0.20, 0.80]), "listed": np.array([True, True]),
     })
     monkeypatch.setattr(e133, "EQUIV_EVENTS", 0)
-    monkeypatch.setattr(e133, "_emit", lambda *_args: [{
-        "exit_date": pd.Timestamp("2026-10-15"),
-        "expiry": pd.Timestamp("2026-10-30"), "legs": [], "exit_value": 1.0,
-        "entry_cost": 0.5,
-        "exp_pnl_sim_select": _args[6],
-    }])
+
+    def emit(*args):
+        if args[1]["event_id"] == "no-candidate":
+            return []
+        return [{
+            "event_id": args[1]["event_id"], "exit_date": args[1]["exit_date"],
+            "expiry": pd.Timestamp("2026-10-30"), "legs": [], "exit_value": 1.0,
+            "entry_cost": 0.5, "exp_pnl_sim_select": args[6],
+        }]
+
+    monkeypatch.setattr(e133, "_emit", emit)
     monkeypatch.setattr(e133, "_pattern_frame", lambda: pd.DataFrame({"pattern": [0, 0]}))
     monkeypatch.setattr(e133, "_equiv_summary", lambda _items: {})
     monkeypatch.setattr(e134, "no_arb_ok", lambda *_args, **_kwargs: np.array([True, True]))
     monkeypatch.setattr(e134, "expiry_spot", lambda: {("XYZ", pd.Timestamp("2026-10-30")): 100.0})
-    monkeypatch.setattr(e134, "legs_no_arb_ok", lambda _legs: True)
+    monkeypatch.setattr(e134, "legs_no_arb_ok", lambda _legs: False)
     monkeypatch.setattr(e134, "terminal_payoff", lambda _legs, _spot: 3.0)
 
     result = builder.build_all(limit_exit_month="2026-10")
 
+    assert filter_calls == [True]
+    assert result["trades"]["event_id"].tolist() == ["oct-event"]
     assert result["trades"]["exp_pnl_sim_select"].tolist() == [0.90]
+    assert result["trades"]["exit_date"].tolist() == [pd.Timestamp("2026-10-30")]
+    assert result["trades"]["exit_value"].tolist() == [3.0]
+    assert result["trades"]["pnl"].tolist() == [2.5]
+    assert result["trades"]["ret"].tolist() == [5.0]
+    assert result["events"]["event_id"].tolist() == ["oct-event"]
+    assert result["meta"]["events_priced"] == 1
+    assert result["meta"]["skips"] == {}
+    assert result["tallies"]["argmax_family"].sum() == 1
+    assert result["tallies"]["listed"].sum() == 2
+    assert list(tmp_path.iterdir()) == []
+
+    monkeypatch.setattr(e134, "legs_no_arb_ok", lambda _legs: True)
+    monkeypatch.setattr(e134, "expiry_spot", lambda: {})
+    quoted_result = builder.build_all(limit_exit_month="2026-10")
+    assert quoted_result["trades"]["exit_date"].tolist() == [pd.Timestamp("2026-10-15")]
+    assert quoted_result["trades"]["exit_value_expiry"].isna().all()
+    assert list(tmp_path.iterdir()) == []
+
+    def fail_residual_load(_history):
+        raise OSError("residual source unavailable")
+
+    monkeypatch.setattr(builder.pnl_sim, "ResidualPool", fail_residual_load)
+    with pytest.raises(TrainingRefused) as error:
+        builder.build_all(limit_exit_month="2026-10")
+    assert error.value.issues[0].code == "MONTHLY_SOURCE_LOAD_FAILED"
     assert list(tmp_path.iterdir()) == []

@@ -22,6 +22,10 @@ flag.
 gate and negative with it has a gate problem, not a structure problem, and
 nothing but the unselected population tells the two apart. The gate is applied
 downstream in ``run.py``, so both readings come out of one build.
+
+A monthly caller can pass ``limit_exit_month="YYYY-MM"`` to select by planned
+exit date and repaired expiry availability. The monthly result is in memory;
+required data errors raise a typed refusal and no full-build artifacts are written.
 """
 from __future__ import annotations
 
@@ -157,7 +161,10 @@ def _effective_exit_trades(trades: pd.DataFrame, month: str) -> pd.DataFrame:
     out["exit_date"] = effective_exit
     out.loc[repaired, "exit_value"] = out.loc[repaired, "exit_value_expiry"]
     out["pnl"] = out["exit_value"] - out["entry_cost"]
-    out["ret"] = out["pnl"] / out["entry_cost"]
+    out["ret"] = np.nan
+    valid_return = out["entry_cost"] > e133.MIN_MEANINGFUL_COST
+    out.loc[valid_return, "ret"] = (
+        out.loc[valid_return, "pnl"] / out.loc[valid_return, "entry_cost"])
     return out.loc[effective_exit.dt.strftime("%Y-%m").eq(month)].copy()
 
 
@@ -165,8 +172,11 @@ def build_all(*, force: bool = False, limit_years=None,
               limit_exit_month: str | None = None) -> dict:
     """Build full candidates, or return one exit-month slice in memory.
 
-    Monthly mode selects by planned exit date and repaired expiry availability,
-    refuses missing required inputs, and does not write full-build artifacts.
+    ``limit_exit_month`` is a canonical ``YYYY-MM`` value. Monthly mode selects
+    by planned exit date and repaired expiry availability, filters ordinary
+    forecast/chain coverage gaps like a full build, and refuses required
+    prior-month chain/expiry or candidate failures with ``TrainingRefused``.
+    Monthly results stay in memory and do not write full-build artifacts.
     """
     if limit_exit_month is not None:
         _month_window(pd.DataFrame({"exit_date": []}), limit_exit_month)
@@ -179,20 +189,30 @@ def build_all(*, force: bool = False, limit_years=None,
                 "meta": json.loads((RESULTS / "build_meta.json").read_text())}
 
     started = time.time()
+    planning_started = time.monotonic()
+    if limit_exit_month is not None:
+        rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+        print(f"[e137] month {limit_exit_month} plan start RSS {rss_mb:.0f}MB",
+              file=sys.stderr, flush=True)
     events = e133.event_universe()
     events["event_date"] = pd.to_datetime(events["event_date"])
     structure = twin_peak_5(wing_multiple=3, width_moneyness=0.05)
     if limit_exit_month is not None:
+        forecasts = e133.forecasts()
+        events = events.merge(forecasts, on=["ticker", "event_date"], how="inner")
         planned = replay_mod.plan_events(structure, events)
         month_plan = _effective_month_plan(planned.frame, limit_exit_month, replay_mod, e133)
         month_ids = set(month_plan["event_id"])
         month_universe = events[events["event_id"].isin(month_ids)].copy()
-        forecasts = e133.forecasts()
-        events = month_universe.merge(forecasts, on=["ticker", "event_date"], how="inner")
-        if len(events) != len(month_universe):
-            raise _monthly_refusal("MONTHLY_FORECAST_MISSING",
-                                   "required_monthly_forecast_missing")
+        month_ids = set(month_universe["event_id"])
+        month_plan = month_plan.loc[month_plan["event_id"].isin(month_ids)].copy()
         plan = replay_mod.ReplayPlan(frame=month_plan.reset_index(drop=True), skipped={})
+        plan = replay_mod.filter_plan_by_availability(plan)
+        events = month_universe[month_universe["event_id"].isin(set(plan.frame["event_id"]))].copy()
+        elapsed = max(time.monotonic() - planning_started, 0.001)
+        rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+        print(f"[e137] month {limit_exit_month} plan end events={len(events)} "
+              f"elapsed={elapsed:.1f}s RSS {rss_mb:.0f}MB", file=sys.stderr, flush=True)
     else:
         events = events.merge(e133.forecasts(), on=["ticker", "event_date"], how="inner")
         plan = replay_mod.filter_plan_by_availability(replay_mod.plan_events(structure, events))
@@ -207,8 +227,14 @@ def build_all(*, force: bool = False, limit_years=None,
         print(f"[e137] month {limit_exit_month} build start events={len(events)} "
               f"RSS {rss_mb:.0f}MB", file=sys.stderr, flush=True)
 
-    pool = pnl_sim.ResidualPool(e133.residual_history())
-    spot_at = e134.expiry_spot()
+    try:
+        pool = pnl_sim.ResidualPool(e133.residual_history())
+        spot_at = e134.expiry_spot()
+    except Exception as exc:  # noqa: BLE001 — required monthly source failed.
+        if limit_exit_month is not None:
+            raise _monthly_refusal(
+                "MONTHLY_SOURCE_LOAD_FAILED", f"monthly candidate source load failed: {exc}") from exc
+        raise
 
     n = len(GRID)
     tally = {k: np.zeros(n, dtype=np.int64) for k in ("listed", "admissible", "tradeable")}
@@ -217,6 +243,7 @@ def build_all(*, force: bool = False, limit_years=None,
     skips: dict[str, int] = {}
     progress_done = 0
     parts, ev_rows, equivalence = [], [], []
+    monthly_tallies = {}
 
     for year, block in events.groupby("_year", sort=True):
         rows = keyframe.reindex(block["event_id"]).dropna(subset=["entry_date"])
@@ -272,6 +299,11 @@ def build_all(*, force: bool = False, limit_years=None,
             tally["listed"] += ev["listed"]
             tally["admissible"] += ev["admissible"]
             tally["tradeable"] += tradeable
+            event_tally = None
+            if limit_exit_month is not None:
+                event_tally = {k: np.zeros(n, dtype=np.int64) for k in tally}
+                for key in ("listed", "admissible", "tradeable"):
+                    event_tally[key] = np.array(ev[key], copy=True)
 
             # Which families this event can carry AT ALL — the denominator that
             # separates "never wins" from "never even offered".
@@ -290,6 +322,8 @@ def build_all(*, force: bool = False, limit_years=None,
                     continue
                 pick = int(ok[np.argmax(sim[ok])])
                 tally[f"argmax_{fam}"][pick] += 1
+                if event_tally is not None:
+                    event_tally[f"argmax_{fam}"][pick] += 1
                 got = e133._emit(ev, row, fam, ev["idx"][pick], GRID.qty[pick],
                                  pick, float(sim[pick]), float(ev["sim_gate"][pick]),
                                  str(GRID.key[pick]))
@@ -300,7 +334,7 @@ def build_all(*, force: bool = False, limit_years=None,
             for r in emitted:
                 r["exit_arb_ok"] = e134.legs_no_arb_ok(r["legs"])
                 s = spot_at.get((row["ticker"], pd.Timestamp(r["expiry"])), np.nan)
-                if limit_exit_month is not None and not np.isfinite(s):
+                if limit_exit_month is not None and not r["exit_arb_ok"] and not np.isfinite(s):
                     raise _monthly_refusal(
                         "MONTHLY_SETTLEMENT_SPOT_MISSING",
                         f"required_monthly_settlement_spot_missing: {row['event_id']} {r['expiry']}")
@@ -317,6 +351,8 @@ def build_all(*, force: bool = False, limit_years=None,
                 "common_universe": common,
                 **{f"offers_{fam}": offers[fam] for fam in FAMILIES},
             })
+            if event_tally is not None:
+                monthly_tallies[row["event_id"]] = event_tally
         del index
         print(f"[e137] {year}: {len(ev_rows):,} events, {len(parts):,} rows, "
               f"{time.time() - started:.0f}s", flush=True)
@@ -326,9 +362,20 @@ def build_all(*, force: bool = False, limit_years=None,
         rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
         print(f"[e137] month {limit_exit_month} build end events={progress_done} "
               f"elapsed={elapsed:.1f}s RSS {rss_mb:.0f}MB", file=sys.stderr, flush=True)
+    monthly_skip_counts = dict(skips) if limit_exit_month is not None else {}
     trades = pd.DataFrame(parts)
     if limit_exit_month is not None and not trades.empty:
         trades = _effective_exit_trades(trades, limit_exit_month)
+    if limit_exit_month is not None:
+        selected_event_ids = set(trades["event_id"]) if not trades.empty else set()
+        ev_rows = [row for row in ev_rows if row["event_id"] in selected_event_ids]
+        skips = {}
+        print(f"[e137] month {limit_exit_month} benign skips={monthly_skip_counts}",
+              file=sys.stderr, flush=True)
+        tally = {key: np.zeros(n, dtype=np.int64) for key in tally}
+        for event_id in selected_event_ids:
+            for key in tally:
+                tally[key] += monthly_tallies[event_id][key]
     tallies = e133._pattern_frame()
     for k, v in tally.items():
         tallies[k] = v
