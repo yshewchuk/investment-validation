@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import resource
 import sys
 import time
 from pathlib import Path
@@ -72,9 +73,10 @@ FAMILIES = tuple(f.key for f in _f.FAMILIES)
 FAMILY_MASK = {k: (GRID.family_key == k) for k in FAMILIES}
 
 
-def build_all(*, force: bool = False, limit_years=None) -> dict:
+def build_all(*, force: bool = False, limit_years=None,
+              limit_exit_month: str | None = None) -> dict:
     out = RESULTS / "candidates.parquet"
-    if out.exists() and not force:
+    if limit_exit_month is None and out.exists() and not force:
         print("[e137] cached", flush=True)
         return {"trades": pd.read_parquet(out),
                 "tallies": pd.read_parquet(RESULTS / "tallies.parquet"),
@@ -89,6 +91,12 @@ def build_all(*, force: bool = False, limit_years=None) -> dict:
         replay_mod.plan_events(twin_peak_5(wing_multiple=3, width_moneyness=0.05), events))
     keyframe = plan.frame.set_index("event_id")
     events = events[events["event_id"].isin(set(plan.frame["event_id"]))].copy()
+    if limit_exit_month is not None:
+        month_ids = plan.frame.loc[
+            pd.to_datetime(plan.frame["exit_date"]).dt.strftime("%Y-%m").eq(limit_exit_month),
+            "event_id",
+        ]
+        events = events[events["event_id"].isin(set(month_ids))].copy()
     events["_year"] = events["event_date"].dt.year
     if limit_years is not None:
         events = events[events["_year"].isin(set(limit_years))]
@@ -112,10 +120,21 @@ def build_all(*, force: bool = False, limit_years=None) -> dict:
         index = replay_mod.load_chain_index(keys, progress_every=0)
         merged = block.merge(plan.frame[["event_id", "entry_date", "exit_date"]],
                              on="event_id", how="inner")
-        for row in merged.to_dict("records"):
+        total = len(merged)
+        for done, row in enumerate(merged.to_dict("records"), 1):
+            if limit_exit_month is not None and (done == 1 or done % 50 == 0 or done == total):
+                elapsed = max(time.time() - started, 0.001)
+                rate = done / elapsed
+                eta = (total - done) / rate
+                rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+                print(f"[e137] month {limit_exit_month}: {done}/{total} events, "
+                      f"{rate:.2f}/s, ETA {eta:.0f}s, RSS {rss_mb:.0f}MB",
+                      file=sys.stderr, flush=True)
             er = index.get(row["ticker"], row["entry_date"])
             xr = index.get(row["ticker"], row["exit_date"])
             if er is None or xr is None or er.empty or xr.empty:
+                if limit_exit_month is not None:
+                    raise RuntimeError(f"required chain missing for {row['event_id']}")
                 skips["no_chain"] = skips.get("no_chain", 0) + 1
                 continue
             rng = np.random.default_rng(int.from_bytes(
@@ -126,6 +145,8 @@ def build_all(*, force: bool = False, limit_years=None) -> dict:
                 skips[str(exc)] = skips.get(str(exc), 0) + 1
                 continue
             except Exception as exc:                               # noqa: BLE001
+                if limit_exit_month is not None:
+                    raise
                 skips[f"error:{type(exc).__name__}"] = skips.get(
                     f"error:{type(exc).__name__}", 0) + 1
                 continue
@@ -193,10 +214,11 @@ def build_all(*, force: bool = False, limit_years=None) -> dict:
             "equivalence": e133._equiv_summary(equivalence),
             "common_universe_events": int(ev_frame["common_universe"].sum()) if len(ev_frame) else 0,
             "elapsed_s": round(time.time() - started, 1)}
-    trades.to_parquet(out, index=False)
-    tallies.to_parquet(RESULTS / "tallies.parquet", index=False)
-    ev_frame.to_parquet(RESULTS / "event_summary.parquet", index=False)
-    (RESULTS / "build_meta.json").write_text(json.dumps(meta, indent=1, default=str))
+    if limit_exit_month is None:
+        trades.to_parquet(out, index=False)
+        tallies.to_parquet(RESULTS / "tallies.parquet", index=False)
+        ev_frame.to_parquet(RESULTS / "event_summary.parquet", index=False)
+        (RESULTS / "build_meta.json").write_text(json.dumps(meta, indent=1, default=str))
     print(f"[e137] done: {len(ev_frame):,} events, {len(trades):,} rows, "
           f"common universe {meta['common_universe_events']:,}, skips {skips}", flush=True)
     return {"trades": trades, "tallies": tallies, "events": ev_frame, "meta": meta}
@@ -208,5 +230,6 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--force", action="store_true")
     ap.add_argument("--years", type=int, nargs="*", default=None)
+    ap.add_argument("--exit-month", default=None)
     a = ap.parse_args()
-    build_all(force=a.force, limit_years=a.years)
+    build_all(force=a.force, limit_years=a.years, limit_exit_month=a.exit_month)
