@@ -112,6 +112,7 @@ def build_all(*, force: bool = False, limit_years=None,
     skips: dict[str, int] = {}
     parts, ev_rows, equivalence = [], [], []
 
+    progress_done = 0
     for year, block in events.groupby("_year", sort=True):
         rows = keyframe.reindex(block["event_id"]).dropna(subset=["entry_date"])
         keys = set()
@@ -120,16 +121,16 @@ def build_all(*, force: bool = False, limit_years=None,
         index = replay_mod.load_chain_index(keys, progress_every=0)
         merged = block.merge(plan.frame[["event_id", "entry_date", "exit_date"]],
                              on="event_id", how="inner")
-        total = len(merged)
-        for done, row in enumerate(merged.to_dict("records"), 1):
-            if limit_exit_month is not None and (done == 1 or done % 50 == 0 or done == total):
+        for row in merged.to_dict("records"):
+            progress_done += 1
+            if limit_exit_month is not None and (
+                    progress_done == 1 or progress_done % 50 == 0 or progress_done == len(events)):
                 elapsed = max(time.time() - started, 0.001)
-                rate = done / elapsed
-                eta = (total - done) / rate
                 rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
-                print(f"[e137] month {limit_exit_month}: {done}/{total} events, "
-                      f"{rate:.2f}/s, ETA {eta:.0f}s, RSS {rss_mb:.0f}MB",
-                      file=sys.stderr, flush=True)
+                print(f"[e137] month {limit_exit_month}: {progress_done}/{len(events)} events, "
+                      f"{progress_done / elapsed:.2f}/s, "
+                      f"ETA {(len(events) - progress_done) * elapsed / progress_done:.0f}s, "
+                      f"RSS {rss_mb:.0f}MB", file=sys.stderr, flush=True)
             er = index.get(row["ticker"], row["entry_date"])
             xr = index.get(row["ticker"], row["exit_date"])
             if er is None or xr is None or er.empty or xr.empty:
@@ -142,6 +143,10 @@ def build_all(*, force: bool = False, limit_years=None,
             try:
                 ev = e133.price_event(row, er, xr, pool, rng_pick=rng)
             except e133.EventSkip as exc:
+                if limit_exit_month is not None and str(exc) in {
+                        "bad_quote", "expiry_gone_at_exit", "exit_structure_unresolved"}:
+                    raise RuntimeError(
+                        f"required exit input failed for {row['event_id']}: {exc}") from exc
                 skips[str(exc)] = skips.get(str(exc), 0) + 1
                 continue
             except Exception as exc:                               # noqa: BLE001
@@ -188,6 +193,9 @@ def build_all(*, force: bool = False, limit_years=None,
             for r in emitted:
                 r["exit_arb_ok"] = e134.legs_no_arb_ok(r["legs"])
                 s = spot_at.get((row["ticker"], pd.Timestamp(r["expiry"])), np.nan)
+                if limit_exit_month is not None and not np.isfinite(s):
+                    raise RuntimeError(
+                        f"required settlement spot missing for {row['event_id']} {r['expiry']}")
                 r["spot_expiry"] = float(s) if np.isfinite(s) else np.nan
                 r["exit_value_expiry"] = (e134.terminal_payoff(r["legs"], s)
                                           if np.isfinite(s) else np.nan)
@@ -232,4 +240,7 @@ if __name__ == "__main__":
     ap.add_argument("--years", type=int, nargs="*", default=None)
     ap.add_argument("--exit-month", default=None)
     a = ap.parse_args()
+    if a.exit_month is not None:
+        from tools.refresh_chooser_pool_candidates import require_month
+        a.exit_month = require_month(a.exit_month)
     build_all(force=a.force, limit_years=a.years, limit_exit_month=a.exit_month)

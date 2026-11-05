@@ -1,4 +1,5 @@
 import pandas as pd
+from types import SimpleNamespace
 import pytest
 
 from engine.v2.models.training.fold_store import TrainingRefused
@@ -48,3 +49,40 @@ def test_append_refuses_future_feature_date_without_changing_table(tmp_path):
 def test_missing_candidate_table_is_typed_refusal(tmp_path):
     with pytest.raises(TrainingRefused, match="candidate_table_missing"):
         refresh.append_candidates(tmp_path / "missing.parquet", pd.DataFrame())
+
+
+def test_append_accepts_entry_date_equality_and_rejects_missing_dates(tmp_path):
+    path = tmp_path / "candidates.parquet"
+    pd.DataFrame([_row("existing", 1)]).to_parquet(path, index=False)
+    assert refresh.append_candidates(path, pd.DataFrame([_row("equal", 2)])) == 1
+    before = pd.read_parquet(path)
+
+    with pytest.raises(TrainingRefused, match="candidate_causality_failed"):
+        refresh.append_candidates(path, pd.DataFrame([_row("missing", 3, event_date="NaT")]))
+
+    pd.testing.assert_frame_equal(pd.read_parquet(path), before)
+
+
+def test_append_refuses_candidate_table_over_size_limit(tmp_path, monkeypatch):
+    path = tmp_path / "candidates.parquet"
+    pd.DataFrame([_row("existing", 1)]).to_parquet(path, index=False)
+    monkeypatch.setattr(refresh, "CHOOSER_POOL_MAX_BYTES", 1)
+
+    with pytest.raises(TrainingRefused, match="candidate_table_too_large"):
+        refresh.append_candidates(path, pd.DataFrame())
+
+
+def test_refresh_wraps_builder_failure_as_typed_refusal(tmp_path, monkeypatch):
+    path = tmp_path / "candidates.parquet"
+    pd.DataFrame([_row("existing", 1)]).to_parquet(path, index=False)
+
+    def fail_build(**_kwargs):
+        raise RuntimeError("chain load failed")
+
+    builder = SimpleNamespace(build_all=fail_build)
+    spec = SimpleNamespace(loader=SimpleNamespace(exec_module=lambda _module: None))
+    monkeypatch.setattr(refresh.importlib.util, "spec_from_file_location", lambda *_args: spec)
+    monkeypatch.setattr(refresh.importlib.util, "module_from_spec", lambda _spec: builder)
+
+    with pytest.raises(TrainingRefused, match="candidate_build_failed"):
+        refresh.refresh("2026-10", path)

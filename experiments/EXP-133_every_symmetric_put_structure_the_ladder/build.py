@@ -420,7 +420,7 @@ def price_event(row, entry_rows, exit_rows, pool, *, rng_pick,
     bid_x = np.where(quoted, bid_x, 0.0)
     ask_x = np.where(quoted, ask_x, 0.0)
     if quoted.sum() < 3:
-        raise EventSkip("structure_unresolved")
+        raise EventSkip("exit_structure_unresolved")
 
     exit_snap = ChainSnapshot(ticker=row["ticker"], obs_date=row["exit_date"],
                               event_date=row["event_date"], rows=exit_rows,
