@@ -83,7 +83,10 @@ def _monthly_refusal(code: str, detail: str) -> TrainingRefused:
     return TrainingRefused((ReceiptIssue("candidate_month", code, detail),))
 
 
-_MONTHLY_BENIGN_SKIPS = {"structure_unresolved", "exit_structure_unresolved"}
+_MONTHLY_BENIGN_SKIPS = {
+    "structure_unresolved", "exit_structure_unresolved", "expiry_gone_at_exit", "bad_quote",
+    "zero_cost",
+}
 
 
 def _month_window(frame: pd.DataFrame, month: str) -> pd.DataFrame:
@@ -91,7 +94,7 @@ def _month_window(frame: pd.DataFrame, month: str) -> pd.DataFrame:
         period = pd.Period(month, freq="M")
     except (TypeError, ValueError) as exc:
         raise _monthly_refusal("INVALID_EXIT_MONTH", f"invalid_exit_month: {month}") from exc
-    if str(period) != month:
+    if pd.isna(period) or str(period) != month:
         raise _monthly_refusal("INVALID_EXIT_MONTH", f"invalid_exit_month: {month}")
     try:
         start, end = period.start_time, (period + 1).start_time
@@ -152,12 +155,17 @@ def _effective_exit_trades(trades: pd.DataFrame, month: str) -> pd.DataFrame:
     repaired = ~out["exit_arb_ok"].fillna(True).astype(bool)
     effective_exit = pd.to_datetime(out["exit_date"], errors="coerce")
     expiry = pd.to_datetime(out["expiry"], errors="coerce")
-    if (effective_exit.isna().any() or expiry.loc[repaired].isna().any()
-            or out.loc[repaired, "exit_value_expiry"].isna().any()):
+    if expiry.loc[repaired].isna().any():
         raise _monthly_refusal(
             "MONTHLY_EFFECTIVE_EXIT_DATA_MISSING",
-            "monthly_candidate_effective_exit_date_or_settlement_value_missing")
+            "monthly_candidate_effective_exit_date_missing")
     effective_exit.loc[repaired] = expiry.loc[repaired]
+    selected = effective_exit.dt.strftime("%Y-%m").eq(month)
+    settlement_rows = repaired & selected
+    if out.loc[settlement_rows, "exit_value_expiry"].isna().any():
+        raise _monthly_refusal(
+            "MONTHLY_EFFECTIVE_EXIT_DATA_MISSING",
+            "monthly_candidate_settlement_value_missing")
     out["exit_date"] = effective_exit
     out.loc[repaired, "exit_value"] = out.loc[repaired, "exit_value_expiry"]
     out["pnl"] = out["exit_value"] - out["entry_cost"]
@@ -165,7 +173,7 @@ def _effective_exit_trades(trades: pd.DataFrame, month: str) -> pd.DataFrame:
     valid_return = out["entry_cost"] > e133.MIN_MEANINGFUL_COST
     out.loc[valid_return, "ret"] = (
         out.loc[valid_return, "pnl"] / out.loc[valid_return, "entry_cost"])
-    return out.loc[effective_exit.dt.strftime("%Y-%m").eq(month)].copy()
+    return out.loc[selected].copy()
 
 
 def build_all(*, force: bool = False, limit_years=None,
@@ -177,6 +185,7 @@ def build_all(*, force: bool = False, limit_years=None,
     forecast/chain coverage gaps like a full build, and refuses required
     prior-month chain/expiry or candidate failures with ``TrainingRefused``.
     Monthly results stay in memory and do not write full-build artifacts.
+    Events, tallies, and equivalence receipts are scoped to retained trades.
     """
     if limit_exit_month is not None:
         _month_window(pd.DataFrame({"exit_date": []}), limit_exit_month)
@@ -201,13 +210,15 @@ def build_all(*, force: bool = False, limit_years=None,
         forecasts = e133.forecasts()
         events = events.merge(forecasts, on=["ticker", "event_date"], how="inner")
         planned = replay_mod.plan_events(structure, events)
-        month_plan = _effective_month_plan(planned.frame, limit_exit_month, replay_mod, e133)
+        available_plan = replay_mod.filter_plan_by_availability(planned)
+        month_plan = _effective_month_plan(
+            available_plan.frame, limit_exit_month, replay_mod, e133)
         month_ids = set(month_plan["event_id"])
         month_universe = events[events["event_id"].isin(month_ids)].copy()
         month_ids = set(month_universe["event_id"])
         month_plan = month_plan.loc[month_plan["event_id"].isin(month_ids)].copy()
-        plan = replay_mod.ReplayPlan(frame=month_plan.reset_index(drop=True), skipped={})
-        plan = replay_mod.filter_plan_by_availability(plan)
+        plan = replay_mod.ReplayPlan(
+            frame=month_plan.reset_index(drop=True), skipped=available_plan.skipped)
         events = month_universe[month_universe["event_id"].isin(set(plan.frame["event_id"]))].copy()
         elapsed = max(time.monotonic() - planning_started, 0.001)
         rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
@@ -266,10 +277,6 @@ def build_all(*, force: bool = False, limit_years=None,
             er = index.get(row["ticker"], row["entry_date"])
             xr = index.get(row["ticker"], row["exit_date"])
             if er is None or xr is None or er.empty or xr.empty:
-                if limit_exit_month is not None:
-                    raise _monthly_refusal(
-                        "MONTHLY_CHAIN_MISSING",
-                        f"required_monthly_chain_missing: {row['event_id']}")
                 skips["no_chain"] = skips.get("no_chain", 0) + 1
                 continue
             rng = np.random.default_rng(int.from_bytes(
@@ -302,8 +309,9 @@ def build_all(*, force: bool = False, limit_years=None,
             event_tally = None
             if limit_exit_month is not None:
                 event_tally = {k: np.zeros(n, dtype=np.int64) for k in tally}
-                for key in ("listed", "admissible", "tradeable"):
+                for key in ("listed", "admissible"):
                     event_tally[key] = np.array(ev[key], copy=True)
+                event_tally["tradeable"] = np.array(tradeable, copy=True)
 
             # Which families this event can carry AT ALL — the denominator that
             # separates "never wins" from "never even offered".
@@ -334,7 +342,10 @@ def build_all(*, force: bool = False, limit_years=None,
             for r in emitted:
                 r["exit_arb_ok"] = e134.legs_no_arb_ok(r["legs"])
                 s = spot_at.get((row["ticker"], pd.Timestamp(r["expiry"])), np.nan)
-                if limit_exit_month is not None and not r["exit_arb_ok"] and not np.isfinite(s):
+                needs_monthly_settlement = (
+                    limit_exit_month is not None and not r["exit_arb_ok"]
+                    and pd.Timestamp(r["expiry"]).strftime("%Y-%m") == limit_exit_month)
+                if needs_monthly_settlement and not np.isfinite(s):
                     raise _monthly_refusal(
                         "MONTHLY_SETTLEMENT_SPOT_MISSING",
                         f"required_monthly_settlement_spot_missing: {row['event_id']} {r['expiry']}")
@@ -369,9 +380,12 @@ def build_all(*, force: bool = False, limit_years=None,
     if limit_exit_month is not None:
         selected_event_ids = set(trades["event_id"]) if not trades.empty else set()
         ev_rows = [row for row in ev_rows if row["event_id"] in selected_event_ids]
+        selected_keys = {(row["ticker"], str(row["event_date"])) for row in ev_rows}
+        equivalence = [item for item in equivalence
+                       if (item["ticker"], item["event_date"]) in selected_keys]
         skips = {}
-        print(f"[e137] month {limit_exit_month} benign skips={monthly_skip_counts}",
-              file=sys.stderr, flush=True)
+        print(f"[e137] month {limit_exit_month} plan skips={plan.skipped}, "
+              f"candidate skips={monthly_skip_counts}", file=sys.stderr, flush=True)
         tally = {key: np.zeros(n, dtype=np.int64) for key in tally}
         for event_id in selected_event_ids:
             for key in tally:

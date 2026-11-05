@@ -32,7 +32,7 @@ def test_out_of_range_month_is_typed_refusal():
     assert error.value.issues[0].code == "INVALID_EXIT_MONTH"
 
 
-@pytest.mark.parametrize("month", ["2026-1", "2026-10-01"])
+@pytest.mark.parametrize("month", ["2026-1", "2026-10-01", "NaT"])
 def test_noncanonical_month_is_typed_refusal(month):
     with pytest.raises(TrainingRefused) as error:
         builder._month_window(pd.DataFrame({"exit_date": []}), month)
@@ -145,29 +145,46 @@ def test_unclassified_monthly_event_skip_is_typed_refusal():
     assert error.value.issues[0].code == "MONTHLY_CANDIDATE_INPUT_FAILED"
 
 
-@pytest.mark.parametrize("reason", ["structure_unresolved", "exit_structure_unresolved"])
-def test_monthly_benign_structural_skip_is_allowed(reason):
+@pytest.mark.parametrize("reason", [
+    "structure_unresolved", "exit_structure_unresolved", "expiry_gone_at_exit", "bad_quote",
+    "zero_cost",
+])
+def test_monthly_full_build_skip_reasons_are_allowed(reason):
     builder._refuse_monthly_event_skip(ValueError(reason), "event-1")
 
 
-def test_monthly_build_filters_coverage_and_slices_output_to_scored_month(monkeypatch, tmp_path):
+def test_monthly_build_filters_coverage_and_slices_output_to_scored_month(monkeypatch, tmp_path, capsys):
+    event_dates = [
+        ("oct-event", "2026-10-01"), ("no-candidate", "2026-10-02"),
+        ("missing-forecast", "2026-10-03"), ("unavailable", "2026-10-04"),
+        ("prior-missing-entry", "2026-09-05"), ("out-month-expiry", "2026-10-06"),
+    ]
     event = pd.DataFrame([
-        {"event_id": event_id, "ticker": "XYZ", "event_date": pd.Timestamp(f"2026-10-{day:02d}"),
+        {"event_id": event_id, "ticker": "XYZ", "event_date": pd.Timestamp(event_date),
          "session": "AMC"}
-        for event_id, day in (("oct-event", 1), ("no-candidate", 2),
-                              ("missing-forecast", 3), ("unavailable", 4))
+        for event_id, event_date in event_dates
     ])
-    plan = event.assign(entry_date=event["event_date"] - pd.Timedelta(days=1),
-                        exit_date=pd.Timestamp("2026-10-15"))
+    plan = event.assign(entry_date=event["event_date"] - pd.Timedelta(days=1))
+    plan["exit_date"] = pd.to_datetime([
+        "2026-09-15" if event_id == "prior-missing-entry" else "2026-10-15"
+        for event_id in event["event_id"]
+    ])
     chain = pd.DataFrame({"available": [True]})
     filter_calls = []
 
     def filter_available(replay_plan):
         filter_calls.append(True)
         frame = replay_plan.frame.loc[
-            replay_plan.frame["event_id"].ne("unavailable")].copy()
+            ~replay_plan.frame["event_id"].isin({"unavailable", "prior-missing-entry"})].copy()
         return SimpleNamespace(frame=frame, skipped={"no_entry_chain": 1})
 
+    original_month_selection = builder._effective_month_plan
+
+    def select_after_coverage(frame, month, replay_module, experiment):
+        assert "prior-missing-entry" not in set(frame["event_id"])
+        return original_month_selection(frame, month, replay_module, experiment)
+
+    monkeypatch.setattr(builder, "_effective_month_plan", select_after_coverage)
     replay = SimpleNamespace(
         plan_events=lambda _structure, _events: SimpleNamespace(frame=plan.copy(), skipped={}),
         filter_plan_by_availability=filter_available,
@@ -204,18 +221,21 @@ def test_monthly_build_filters_coverage_and_slices_output_to_scored_month(monkey
     monkeypatch.setattr(e133, "EQUIV_EVENTS", 0)
 
     def emit(*args):
-        if args[1]["event_id"] == "no-candidate":
+        event_id = args[1]["event_id"]
+        if event_id == "no-candidate":
             return []
+        expiry = (pd.Timestamp("2026-11-30") if event_id == "out-month-expiry"
+                  else pd.Timestamp("2026-10-30"))
         return [{
-            "event_id": args[1]["event_id"], "exit_date": args[1]["exit_date"],
-            "expiry": pd.Timestamp("2026-10-30"), "legs": [], "exit_value": 1.0,
+            "event_id": event_id, "exit_date": args[1]["exit_date"],
+            "expiry": expiry, "legs": [], "exit_value": 1.0,
             "entry_cost": 0.5, "exp_pnl_sim_select": args[6],
         }]
 
     monkeypatch.setattr(e133, "_emit", emit)
     monkeypatch.setattr(e133, "_pattern_frame", lambda: pd.DataFrame({"pattern": [0, 0]}))
     monkeypatch.setattr(e133, "_equiv_summary", lambda _items: {})
-    monkeypatch.setattr(e134, "no_arb_ok", lambda *_args, **_kwargs: np.array([True, True]))
+    monkeypatch.setattr(e134, "no_arb_ok", lambda *_args, **_kwargs: np.array([True, False]))
     monkeypatch.setattr(e134, "expiry_spot", lambda: {("XYZ", pd.Timestamp("2026-10-30")): 100.0})
     monkeypatch.setattr(e134, "legs_no_arb_ok", lambda _legs: False)
     monkeypatch.setattr(e134, "terminal_payoff", lambda _legs, _spot: 3.0)
@@ -232,14 +252,23 @@ def test_monthly_build_filters_coverage_and_slices_output_to_scored_month(monkey
     assert result["events"]["event_id"].tolist() == ["oct-event"]
     assert result["meta"]["events_priced"] == 1
     assert result["meta"]["skips"] == {}
+    assert "plan skips={'no_entry_chain': 1}" in capsys.readouterr().err
     assert result["tallies"]["argmax_family"].sum() == 1
     assert result["tallies"]["listed"].sum() == 2
+    assert result["tallies"]["admissible"].sum() == 2
+    assert result["tallies"]["tradeable"].sum() == 1
     assert list(tmp_path.iterdir()) == []
 
     monkeypatch.setattr(e134, "legs_no_arb_ok", lambda _legs: True)
     monkeypatch.setattr(e134, "expiry_spot", lambda: {})
+    original_emit = e133._emit
+    monkeypatch.setattr(e133, "_emit", lambda *args: (
+        [] if args[1]["event_id"] == "out-month-expiry" else original_emit(*args)))
     quoted_result = builder.build_all(limit_exit_month="2026-10")
     assert quoted_result["trades"]["exit_date"].tolist() == [pd.Timestamp("2026-10-15")]
+    assert quoted_result["trades"]["exit_value"].tolist() == [1.0]
+    assert quoted_result["trades"]["pnl"].tolist() == [0.5]
+    assert quoted_result["trades"]["ret"].tolist() == [1.0]
     assert quoted_result["trades"]["exit_value_expiry"].isna().all()
     assert list(tmp_path.iterdir()) == []
 
