@@ -24,12 +24,17 @@ from typing import Any, Iterator
 from engine.data.fetch import CachedEntry, iter_cached
 
 __all__ = [
+    "MARKET_WIDE_META_MAX_BYTES",
     "ORATS_ENVELOPE_KEY",
     "payload_shape",
     "orats_rows",
     "iter_orats_rows",
     "SourceRows",
 ]
+
+#: Metadata sidecars in the market-wide scan are small by construction; a cap
+#: keeps a damaged or runaway sidecar from being read into memory.
+MARKET_WIDE_META_MAX_BYTES = 64 * 1024
 
 #: ORATS wraps every historical payload in a ``data`` list. A response that is
 #: already a bare list (some endpoints, and hand-made fixtures) is accepted too.
@@ -115,6 +120,7 @@ def iter_orats_rows(
     root: Path | None = None,
     stats: dict | None = None,
     order_by_fetched_at: bool = False,
+    max_meta_bytes: int | None = None,
 ) -> Iterator[SourceRows]:
     """Stream ``(source_id, rows)`` for every cached response on one endpoint.
 
@@ -133,6 +139,11 @@ def iter_orats_rows(
     ticker-specific entries before indexing. The default remains cache-key
     order, so existing callers see exactly the deterministic sequence they
     always have.
+
+    ``max_meta_bytes`` bounds each sidecar before it is parsed, so an oversized
+    or unsafe sidecar raises :class:`~engine.data.fetch.FetchError` instead of
+    being read. ``None`` (the default) preserves the unbounded scan existing
+    callers expect.
     """
     if stats is not None:
         stats.setdefault("scanned", 0)
@@ -141,7 +152,9 @@ def iter_orats_rows(
         stats.setdefault("unrecognized", 0)
         stats.setdefault("unreadable", 0)
 
-    entries = iter_cached("orats", endpoint, root=root)
+    entries = iter_cached(
+        "orats", endpoint, root=root, max_meta_bytes=max_meta_bytes
+    )
     if order_by_fetched_at:
         entries = sorted(
             entries,

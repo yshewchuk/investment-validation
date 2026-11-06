@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import gzip
 import json
+import os
 
 import pandas as pd
 import pytest
@@ -141,17 +142,63 @@ def test_latest_fetched_market_wide_snapshot_wins(tmp_path, monkeypatch):
     assert frame["spot"].iloc[0] == pytest.approx(10.0)
 
 
-def test_an_oversized_sidecar_is_refused_before_parsing(tmp_path):
+def test_an_oversized_sidecar_is_refused_before_parsing(tmp_path, monkeypatch):
+    from engine import paths
+
+    monkeypatch.setattr(paths, "RAW_FETCH", tmp_path)
+    monkeypatch.setattr(paths, "RAW_ORATS_SUMMARIES", tmp_path / "absent")
     directory = tmp_path / "orats" / "aa"
     directory.mkdir(parents=True)
     meta = directory / ("aa" + "0" * 62 + ".meta.json")
     meta.write_text("{not json " + "x" * (70 * 1024))
 
-    with pytest.raises(FetchError, match="over the 65536-byte metadata cap"):
-        iter_cached("orats", "hist/summaries", root=tmp_path, max_meta_bytes=64 * 1024)
+    n_daily.fetch_daily_index.cache_clear()
+    try:
+        with pytest.raises(FetchError, match="over the 65536-byte metadata cap"):
+            rebuild._daily_tickers(None)
+        with pytest.raises(FetchError, match="over the 65536-byte metadata cap"):
+            n_daily.list_tickers()
+    finally:
+        n_daily.fetch_daily_index.cache_clear()
 
     # The unbounded default keeps the old skip-bad-sidecar behaviour.
     assert iter_cached("orats", root=tmp_path) == []
+
+
+def test_bounded_reader_refuses_a_symlinked_sidecar(tmp_path):
+    directory = tmp_path / "orats" / "aa"
+    directory.mkdir(parents=True)
+    target = directory / "target.meta.json"
+    target.write_text("{}")
+    link = directory / ("aa" + "0" * 62 + ".meta.json")
+    try:
+        link.symlink_to(target)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks are unavailable")
+
+    with pytest.raises(FetchError, match="metadata sidecar"):
+        iter_cached("orats", root=tmp_path, max_meta_bytes=64 * 1024)
+
+
+def test_bounded_reader_does_not_hang_on_a_fifo(tmp_path):
+    if not hasattr(os, "mkfifo") or not hasattr(os, "O_NONBLOCK"):
+        pytest.skip("FIFOs or O_NONBLOCK are unavailable")
+    directory = tmp_path / "orats" / "bb"
+    directory.mkdir(parents=True)
+    fifo = directory / ("bb" + "0" * 62 + ".meta.json")
+    try:
+        os.mkfifo(fifo)
+    except (OSError, NotImplementedError):
+        pytest.skip("FIFOs are unavailable")
+
+    with pytest.raises(FetchError, match="not a regular file"):
+        iter_cached("orats", root=tmp_path, max_meta_bytes=64 * 1024)
+
+
+@pytest.mark.parametrize("cap", [True, False, -1, 1.5, "64"])
+def test_metadata_cap_argument_must_be_a_nonnegative_int(tmp_path, cap):
+    with pytest.raises(ValueError, match="nonnegative integer"):
+        iter_cached("orats", root=tmp_path, max_meta_bytes=cap)
 
 
 def test_low_date_refuses_before_writer_and_preserves_prior_table(tmp_root, monkeypatch):
@@ -198,6 +245,7 @@ def test_low_date_refuses_before_writer_and_preserves_prior_table(tmp_root, monk
         "daily_market has 7 rows on 2024-01-03, below 75% of the median "
         "of its adjacent published dates (10 and 10); threshold 7.5"
     )
+    assert str(error) == f"{error.code}: {error.reason}"
 
     pd.testing.assert_frame_equal(store.read_table("daily_market"), before)
     assert store.table_stats("daily_market").content_hash == before_hash
@@ -213,6 +261,7 @@ def test_first_date_refuses_against_its_only_neighbour(tmp_root, monkeypatch):
         rebuild.build_daily_table()
 
     error = excinfo.value
+    assert error.code == "DAILY_MARKET_DATE_INCOMPLETE"
     assert error.date == first
     assert error.count == 7
     assert error.previous_count is None
@@ -233,6 +282,7 @@ def test_last_date_refuses_against_its_only_neighbour(tmp_root, monkeypatch):
         rebuild.build_daily_table()
 
     error = excinfo.value
+    assert error.code == "DAILY_MARKET_DATE_INCOMPLETE"
     assert error.date == last
     assert error.count == 7
     assert error.previous_count == 10
@@ -266,6 +316,7 @@ def test_invalid_rows_on_low_date_are_excluded_before_the_count(
         rebuild.build_daily_table()
 
     error = excinfo.value
+    assert error.code == "DAILY_MARKET_DATE_INCOMPLETE"
     assert error.date == LOW_DATE
     assert error.count == 7
     assert error.threshold == pytest.approx(7.5)
@@ -279,6 +330,7 @@ def test_sample_zero_is_a_full_build_and_refuses_the_gap(tmp_root, monkeypatch):
     with pytest.raises(rebuild.DailyMarketCompletenessError) as excinfo:
         rebuild.build_daily_table(sample=0)
 
+    assert excinfo.value.code == "DAILY_MARKET_DATE_INCOMPLETE"
     assert excinfo.value.date == LOW_DATE
     assert excinfo.value.count == 7
 
@@ -346,6 +398,7 @@ def test_empty_market_wide_snapshot_is_a_zero_count_date(tmp_root, monkeypatch):
         rebuild.build_daily_table()
 
     error = excinfo.value
+    assert error.code == "DAILY_MARKET_DATE_INCOMPLETE"
     assert error.date == "2024-01-08"
     assert error.count == 0
     assert error.previous_count == 10
@@ -417,9 +470,10 @@ def test_incomplete_daily_preflight_prevents_the_events_builder(
         rebuild, "build_events_table", lambda *a, **k: called.append("events")
     )
 
-    with pytest.raises(rebuild.DailyMarketCompletenessError):
+    with pytest.raises(rebuild.DailyMarketCompletenessError) as excinfo:
         rebuild.rebuild(tables=("events", "daily"), finalize=False)
 
+    assert excinfo.value.code == "DAILY_MARKET_DATE_INCOMPLETE"
     assert called == []
     assert paths.MANIFEST.read_text() == "prior manifest"
     assert paths.SNAPSHOT_FILE.read_text() == '{"snapshot": "prior"}'
@@ -452,16 +506,31 @@ def test_the_preflight_does_not_quarantine_before_the_write_pass(
     tmp_root, monkeypatch
 ):
     from engine import paths
+    from engine.data import validate
 
     _install_daily_source(
         monkeypatch, invalid_date=LOW_DATE, invalid_tickers={"T00"}
     )
 
+    calls = []
+    real_quarantine = validate.quarantine
+
+    def record_quarantine(source_file, reason, details=None, *, root=None):
+        calls.append((source_file, reason, details, root))
+        return real_quarantine(source_file, reason, details, root=root)
+
+    monkeypatch.setattr(validate, "quarantine", record_quarantine)
+
     report = rebuild.build_daily_table()
 
-    # T00's invalid row is below the floor's impact, so the build succeeds; the
-    # write pass quarantines it once, and the counting pass adds no second flag.
+    # T00's invalid row is below the floor's impact, so the build succeeds; only
+    # the write pass calls the quarantine helper, exactly once, with a source
+    # path. The counting pass passes no source path and must add no call.
     assert report["rows"] == len(TICKERS) * len(DATES) - 1
+    assert len(calls) == 1
+    assert calls[0][0] == "orats/summaries/T00.json.gz"
+    assert calls[0][3] is None
+    assert "daily row validation" in calls[0][1]
     assert len(list(paths.QUARANTINE.glob("*.flag.json"))) == 1
 
 
@@ -474,7 +543,11 @@ def test_complete_full_build_passes(tmp_root, monkeypatch):
     assert report["tickers"] == len(TICKERS)
     assert report["skipped"] == 0
     assert report["rows"] == expected
-    assert len(store.read_table("daily_market")) == expected
+    table = store.read_table("daily_market")
+    assert len(table) == expected
+    assert set(table["ticker"]) == set(TICKERS)
+    assert (table["spot"] > 0).all()
+    assert table["spot"].eq(100.0).all()
 
 
 def test_sample_build_skips_the_guard(tmp_root, monkeypatch):
@@ -488,4 +561,8 @@ def test_sample_build_skips_the_guard(tmp_root, monkeypatch):
     # T00 lacks the low date; T01 has all four.
     assert report["tickers"] == 2
     assert report["rows"] == 7
-    assert len(store.read_table("daily_market")) == 7
+    table = store.read_table("daily_market")
+    assert len(table) == 7
+    assert set(table["ticker"]) == {"T00", "T01"}
+    assert (table["spot"] > 0).all()
+    assert table["spot"].eq(100.0).all()

@@ -37,6 +37,7 @@ from engine.data import manifest, rebuild_incremental, store, validate
 from engine.data.features import panel as panel_mod
 from engine.data.features import tier4 as tier4_mod
 from engine.data.normalize import n_chains, n_daily, n_events, n_option_daily, n_securities, n_trades
+from engine.data.normalize.fetch_store import MARKET_WIDE_META_MAX_BYTES
 from engine.data.rebuild_cache import InputCache
 
 __all__ = ["rebuild", "finalize_rebuild", "finalize_current_store", "RebuildResult",
@@ -44,10 +45,6 @@ __all__ = ["rebuild", "finalize_rebuild", "finalize_current_store", "RebuildResu
 
 #: Fraction of the adjacent-date median a published date must reach.
 DAILY_COMPLETENESS_FLOOR = 0.75
-
-#: Metadata sidecars in the market-wide preflight are small by construction; a
-#: cap keeps a damaged or runaway sidecar from being read into memory.
-MARKET_WIDE_META_MAX_BYTES = 64 * 1024
 
 
 class DailyMarketCompletenessError(RuntimeError):
@@ -106,7 +103,7 @@ class DailyMarketCompletenessError(RuntimeError):
         }
         if details:
             self.details.update(details)
-        super().__init__(self.reason)
+        super().__init__(f"{self.code}: {self.reason}")
 
 
 #: ``daily_market`` before ``securities`` (which is derived from it) and before
@@ -261,9 +258,10 @@ def _preflight_daily_completeness(tickers: list[str], cache) -> None:
 
     Counts are taken from exactly the rows the streaming writer will keep: each
     normalized frame goes through :func:`engine.data.validate.validate_daily`
-    first, so rows that validation excludes do not inflate a date. The flag is
-    deliberately omitted from this counting pass: source provenance and quarantine
-    belong to the write pass, and a second call must not append it again.
+    first, so rows that validation excludes do not inflate a date. The counting
+    pass calls ``validate_daily(frame)`` without a source path, so it counts
+    only the clean rows and cannot emit a quarantine flag; the write pass adds
+    source attribution and can emit the one flag for the same frame.
     Successful market-wide fetch metadata contributes zero-count candidates,
     making an HTTP-200 empty snapshot visible.
 
@@ -403,11 +401,12 @@ def _build_daily_table(tickers: list[str], cache) -> dict:
 def build_daily_table(sample: int | None = None, cache=None) -> dict:
     """Build ``daily_market``; ``cache`` (an ``InputCache``) reuses per-file parses.
 
-    Every public call runs the completeness preflight: a falsey ``sample``
-    (``None`` or ``0``) means a full build, and there is deliberately no public
-    switch to skip the guard. :func:`rebuild` runs it once up front, before any
-    selected table builder, then uses the private implementation helper so the
-    scan is not repeated.
+    A full public call (a falsey ``sample``: ``None`` or ``0``) runs the
+    completeness preflight; a sampled call skips it because a partial slice is
+    not a full build. There is deliberately no public switch to skip the guard
+    on a full build. :func:`rebuild` runs the preflight once up front, before
+    any selected table builder, then uses the private implementation helper so
+    the scan is not repeated.
     """
     tickers = _daily_tickers(sample)
     if not sample:

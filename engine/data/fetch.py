@@ -38,6 +38,7 @@ import gzip
 import hashlib
 import json
 import os
+import stat
 import time
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
@@ -168,6 +169,57 @@ class CachedEntry:
         return json.loads(self.body())
 
 
+def _read_meta_capped(meta_path: Path, max_meta_bytes: int) -> bytes:
+    """Read one sidecar without following links or blocking on special files."""
+    flags = os.O_RDONLY
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    flags |= getattr(os, "O_NONBLOCK", 0)
+    try:
+        fd = os.open(meta_path, flags)
+    except OSError as exc:
+        raise FetchError(
+            f"{meta_path}: cannot open metadata sidecar: {exc}"
+        ) from exc
+    try:
+        try:
+            info = os.fstat(fd)
+        except OSError as exc:
+            raise FetchError(
+                f"{meta_path}: cannot stat metadata sidecar: {exc}"
+            ) from exc
+        if not stat.S_ISREG(info.st_mode):
+            raise FetchError(
+                f"{meta_path}: metadata sidecar is not a regular file"
+            )
+        if info.st_size > max_meta_bytes:
+            raise FetchError(
+                f"{meta_path}: sidecar is {info.st_size} bytes, over the "
+                f"{max_meta_bytes}-byte metadata cap"
+            )
+        chunks: list[bytes] = []
+        remaining = max_meta_bytes + 1
+        try:
+            while remaining > 0:
+                chunk = os.read(fd, remaining)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+        except OSError as exc:
+            raise FetchError(
+                f"{meta_path}: cannot read metadata sidecar: {exc}"
+            ) from exc
+    finally:
+        os.close(fd)
+    data = b"".join(chunks)
+    if len(data) > max_meta_bytes:
+        raise FetchError(
+            f"{meta_path}: sidecar grew past the "
+            f"{max_meta_bytes}-byte metadata cap"
+        )
+    return data
+
+
 def iter_cached(
     source: str,
     endpoint: str | None = None,
@@ -181,30 +233,33 @@ def iter_cached(
     store produces the same output on every run.
 
     ``max_meta_bytes`` bounds each sidecar before it is parsed. ``None`` (the
-    default) preserves the unbounded scan every existing caller expects; a
-    scan that only needs a few metadata fields can pass a cap so a malformed
-    or runaway sidecar raises :class:`FetchError` instead of being read into
-    memory.
+    default) preserves the unbounded scan every existing caller expects. With a
+    cap, malformed or otherwise unreadable sidecar contents that fit the cap are
+    skipped like the uncapped scan; an oversize sidecar, a symlink, a special
+    file, or an I/O failure raises :class:`FetchError` instead of being read
+    into memory or blocking forever.
     """
+    if max_meta_bytes is not None:
+        if isinstance(max_meta_bytes, bool) or not isinstance(max_meta_bytes, int):
+            raise ValueError("max_meta_bytes must be a nonnegative integer or None")
+        if max_meta_bytes < 0:
+            raise ValueError("max_meta_bytes must be a nonnegative integer or None")
     base = (Path(root) if root is not None else paths.RAW_FETCH) / source
     if not base.exists():
         return []
     out: list[CachedEntry] = []
     for meta_path in sorted(base.glob("*/*.meta.json")):
         if max_meta_bytes is not None:
+            data = _read_meta_capped(meta_path, max_meta_bytes)
             try:
-                size = meta_path.stat().st_size
-            except OSError:
+                meta = json.loads(data)
+            except ValueError:
                 continue
-            if size > max_meta_bytes:
-                raise FetchError(
-                    f"{meta_path}: sidecar is {size} bytes, over the "
-                    f"{max_meta_bytes}-byte metadata cap"
-                )
-        try:
-            meta = json.loads(meta_path.read_text())
-        except (OSError, ValueError):
-            continue
+        else:
+            try:
+                meta = json.loads(meta_path.read_text())
+            except (OSError, ValueError):
+                continue
         if endpoint is not None and meta.get("endpoint") != endpoint.strip("/"):
             continue
         body_path = meta_path.with_name(meta_path.name.replace(".meta.json", ".body.gz"))

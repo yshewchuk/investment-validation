@@ -105,11 +105,18 @@ def fetch_daily_index() -> dict[str, dict[str, list[dict]]]:
     these, and normalization's ``keep="last"`` then chooses the final winner
     across all sources.
     """
-    from engine.data.normalize.fetch_store import iter_orats_rows
+    from engine.data.normalize.fetch_store import (
+        MARKET_WIDE_META_MAX_BYTES,
+        iter_orats_rows,
+    )
 
     index: dict[str, dict[str, list[dict]]] = {}
     for endpoint, kind in (("hist/summaries", "summaries"), ("hist/cores", "cores")):
-        for source in iter_orats_rows(endpoint, order_by_fetched_at=True):
+        for source in iter_orats_rows(
+            endpoint,
+            order_by_fetched_at=True,
+            max_meta_bytes=MARKET_WIDE_META_MAX_BYTES,
+        ):
             # A response fetched for ONE ticker is fetched back on demand.
             if (source.params or {}).get("ticker"):
                 continue
