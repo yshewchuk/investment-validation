@@ -15,21 +15,25 @@ import pytest
 
 from engine.data import rebuild, store
 from engine.data.normalize import n_daily
+from engine.data.validate import validate_daily
 
 DATES = ("2024-01-02", "2024-01-03", "2024-01-04", "2024-01-05")
 LOW_DATE = "2024-01-03"
 TICKERS = [f"T{i:02d}" for i in range(10)]
 
-#: Five names lack the low date, so a full build sees only half the market.
-MISSING_ON_LOW = frozenset(TICKERS[i] for i in (0, 2, 3, 4, 5))
+#: Three names lack the low date, so a full build sees only 7 of 10 — below the
+#: 75% floor but above a mere 50% rule.
+MISSING_ON_LOW = frozenset(TICKERS[i] for i in (0, 2, 3))
 
 
-def _write_market_wide(root, key, *, fetched_at, spot):
+def _write_market_wide(
+    root, key, *, fetched_at, spot=None, trade_date="2024-01-02", rows=None
+):
     directory = root / "orats" / key[:2]
     directory.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "data": [{"ticker": "AAA", "tradeDate": "2024-01-02", "stockPrice": spot}]
-    }
+    if rows is None:
+        rows = [{"ticker": "AAA", "tradeDate": trade_date, "stockPrice": spot}]
+    payload = {"data": rows}
     with gzip.open(directory / f"{key}.body.gz", "wb") as fh:
         fh.write(json.dumps(payload).encode())
     (directory / f"{key}.meta.json").write_text(
@@ -38,7 +42,7 @@ def _write_market_wide(root, key, *, fetched_at, spot):
                 "key": key,
                 "source": "orats",
                 "endpoint": "hist/summaries",
-                "params": {"tradeDate": "2024-01-02"},
+                "params": {"tradeDate": trade_date},
                 "status": 200,
                 "fetched_at": fetched_at,
             }
@@ -46,10 +50,20 @@ def _write_market_wide(root, key, *, fetched_at, spot):
     )
 
 
-def _frame(ticker, missing_on_low=()):
-    dates = [day for day in DATES if not (ticker in missing_on_low and day == LOW_DATE)]
+def _frame(
+    ticker,
+    missing_date=None,
+    missing_tickers=(),
+    invalid_date=None,
+    invalid_tickers=(),
+):
+    dates = [
+        day
+        for day in DATES
+        if not (ticker in missing_tickers and day == missing_date)
+    ]
     parsed = pd.to_datetime(dates)
-    return pd.DataFrame(
+    frame = pd.DataFrame(
         {
             "ticker": ticker,
             "date": parsed.astype("datetime64[ns]"),
@@ -57,14 +71,33 @@ def _frame(ticker, missing_on_low=()):
             "spot": 100.0,
         }
     )
+    if ticker in invalid_tickers and invalid_date is not None:
+        frame.loc[frame["date"] == pd.Timestamp(invalid_date), "spot"] = -1.0
+    return frame
 
 
-def _install_daily_source(monkeypatch, *, missing_on_low=()):
+def _install_daily_source(
+    monkeypatch,
+    *,
+    missing_date=None,
+    missing_tickers=(),
+    invalid_date=None,
+    invalid_tickers=(),
+):
     def fake_list_tickers(root=None, *, include_fetch=True):
         return list(TICKERS)
 
     def fake_normalize_ticker(ticker, **_):
-        return _frame(ticker, missing_on_low), {"ticker": ticker}
+        return (
+            _frame(
+                ticker,
+                missing_date,
+                missing_tickers,
+                invalid_date,
+                invalid_tickers,
+            ),
+            {"ticker": ticker},
+        )
 
     monkeypatch.setattr(n_daily, "list_tickers", fake_list_tickers)
     monkeypatch.setattr(n_daily, "normalize_ticker", fake_normalize_ticker)
@@ -108,7 +141,9 @@ def test_low_date_refuses_before_writer_and_preserves_prior_table(tmp_root, monk
     before = store.read_table("daily_market")
     before_hash = store.table_stats("daily_market").content_hash
 
-    _install_daily_source(monkeypatch, missing_on_low=MISSING_ON_LOW)
+    _install_daily_source(
+        monkeypatch, missing_date=LOW_DATE, missing_tickers=MISSING_ON_LOW
+    )
 
     class _WriterMustNotBeConstructed:
         def __init__(self, *args, **kwargs):
@@ -122,14 +157,142 @@ def test_low_date_refuses_before_writer_and_preserves_prior_table(tmp_root, monk
     error = excinfo.value
     assert error.code == "DAILY_MARKET_DATE_INCOMPLETE"
     assert error.date == LOW_DATE
-    assert error.count == 5
+    assert error.count == 7
     assert error.previous_count == 10
     assert error.next_count == 10
     assert error.threshold == pytest.approx(7.5)
+    assert error.details["date"] == LOW_DATE
+    assert error.details["count"] == 7
+    assert error.details["previous_count"] == 10
+    assert error.details["next_count"] == 10
+    assert error.details["threshold"] == pytest.approx(7.5)
+    assert error.details["reason"] == error.reason
     assert LOW_DATE in error.reason
 
     pd.testing.assert_frame_equal(store.read_table("daily_market"), before)
     assert store.table_stats("daily_market").content_hash == before_hash
+
+
+def test_first_date_refuses_against_its_only_neighbour(tmp_root, monkeypatch):
+    first = DATES[0]
+    _install_daily_source(
+        monkeypatch, missing_date=first, missing_tickers=MISSING_ON_LOW
+    )
+
+    with pytest.raises(rebuild.DailyMarketCompletenessError) as excinfo:
+        rebuild.build_daily_table()
+
+    error = excinfo.value
+    assert error.date == first
+    assert error.count == 7
+    assert error.previous_count is None
+    assert error.next_count == 10
+    assert error.threshold == pytest.approx(7.5)
+    assert error.details["previous_count"] is None
+    assert error.details["next_count"] == 10
+    assert "only adjacent published date (10)" in error.reason
+
+
+def test_last_date_refuses_against_its_only_neighbour(tmp_root, monkeypatch):
+    last = DATES[-1]
+    _install_daily_source(
+        monkeypatch, missing_date=last, missing_tickers=MISSING_ON_LOW
+    )
+
+    with pytest.raises(rebuild.DailyMarketCompletenessError) as excinfo:
+        rebuild.build_daily_table()
+
+    error = excinfo.value
+    assert error.date == last
+    assert error.count == 7
+    assert error.previous_count == 10
+    assert error.next_count is None
+    assert error.threshold == pytest.approx(7.5)
+    assert error.details["previous_count"] == 10
+    assert error.details["next_count"] is None
+    assert "only adjacent published date (10)" in error.reason
+
+
+def test_invalid_rows_on_low_date_are_excluded_before_the_count(
+    tmp_root, monkeypatch
+):
+    rows = pd.concat(
+        [
+            _frame(ticker, invalid_date=LOW_DATE, invalid_tickers=MISSING_ON_LOW)
+            for ticker in TICKERS
+        ],
+        ignore_index=True,
+    )
+    low_rows = rows["date"] == pd.Timestamp(LOW_DATE)
+    assert low_rows.sum() == len(TICKERS)
+    clean, _ = validate_daily(rows)
+    assert (clean["date"] == pd.Timestamp(LOW_DATE)).sum() == 7
+
+    _install_daily_source(
+        monkeypatch, invalid_date=LOW_DATE, invalid_tickers=MISSING_ON_LOW
+    )
+
+    with pytest.raises(rebuild.DailyMarketCompletenessError) as excinfo:
+        rebuild.build_daily_table()
+
+    error = excinfo.value
+    assert error.date == LOW_DATE
+    assert error.count == 7
+    assert error.threshold == pytest.approx(7.5)
+
+
+def test_sample_zero_is_a_full_build_and_refuses_the_gap(tmp_root, monkeypatch):
+    _install_daily_source(
+        monkeypatch, missing_date=LOW_DATE, missing_tickers=MISSING_ON_LOW
+    )
+
+    with pytest.raises(rebuild.DailyMarketCompletenessError) as excinfo:
+        rebuild.build_daily_table(sample=0)
+
+    assert excinfo.value.date == LOW_DATE
+    assert excinfo.value.count == 7
+
+
+def test_empty_market_wide_snapshot_is_a_zero_count_date(tmp_root, monkeypatch):
+    from engine import paths
+
+    root = tmp_root / "fetch"
+    monkeypatch.setattr(paths, "RAW_FETCH", root)
+    _write_market_wide(
+        root,
+        "aa" + "0" * 62,
+        fetched_at="2026-09-02T12:00:00+00:00",
+        trade_date="2024-01-08",
+        rows=[],
+    )
+    _install_daily_source(monkeypatch)
+
+    with pytest.raises(rebuild.DailyMarketCompletenessError) as excinfo:
+        rebuild.build_daily_table()
+
+    error = excinfo.value
+    assert error.date == "2024-01-08"
+    assert error.count == 0
+    assert error.previous_count == 10
+    assert error.next_count is None
+    assert error.threshold == pytest.approx(7.5)
+
+
+def test_incomplete_daily_preflight_prevents_the_events_builder(
+    tmp_root, monkeypatch
+):
+    _install_daily_source(
+        monkeypatch, missing_date=LOW_DATE, missing_tickers=MISSING_ON_LOW
+    )
+    called = []
+    monkeypatch.setattr(
+        rebuild, "build_events_table", lambda *a, **k: called.append("events")
+    )
+
+    with pytest.raises(rebuild.DailyMarketCompletenessError):
+        rebuild.rebuild(tables=("events", "daily"), finalize=False)
+
+    assert called == []
 
 
 def test_complete_full_build_passes(tmp_root, monkeypatch):
@@ -146,7 +309,9 @@ def test_complete_full_build_passes(tmp_root, monkeypatch):
 
 def test_sample_build_skips_the_guard(tmp_root, monkeypatch):
     """The same low-date fixture is fine when sampling, because it is partial."""
-    _install_daily_source(monkeypatch, missing_on_low=MISSING_ON_LOW)
+    _install_daily_source(
+        monkeypatch, missing_date=LOW_DATE, missing_tickers=MISSING_ON_LOW
+    )
 
     report = rebuild.build_daily_table(sample=2)
 

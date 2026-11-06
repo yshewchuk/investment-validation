@@ -308,6 +308,15 @@ publish command, per `publish.py`'s `CommandPublisher` variant);
   `nightly_readiness._require_ready`, which refuses it as for a full run.
 - **Validate** — a red validation stops the pipeline; yesterday's snapshot
   stays published and a flag is raised.
+- **Store rebuild refusal** — a full `daily_market` rebuild (no sample, or
+  `--sample 0`) runs a completeness preflight once before any selected table
+  builder and before a `PartitionedWriter` is constructed. If a published date
+  has fewer validated rows than 75% of the median of its nearest published
+  neighbour(s), the rebuild stops with `DAILY_MARKET_DATE_INCOMPLETE` and writes
+  no Tier-2 table (earlier selected tables such as `events` are not built); the
+  previous curated tables and SNAPSHOT stay in place. Successful market-wide
+  fetch metadata `tradeDate` values count as zero-row candidates, so an HTTP-200
+  empty snapshot is visible as a gap.
 - **Selfcheck mismatch** — stops the publish; the nightly records raw
   mismatches, v2's adapter persists `scrub_mismatches` row/field/reason only.
   Board and selfcheck use the same chains: no entry-date chain prices off the

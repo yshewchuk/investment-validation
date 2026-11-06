@@ -164,6 +164,14 @@ lines; writes MANIFEST.md (tables, rows, year coverage, source files, hashes)
 and a snapshot hash (sha256 over table content hashes) into
 `data/features/SNAPSHOT`.
 
+A full rebuild (no `--sample`, or `--sample 0`) refuses before any selected
+table builder writes anything when a published `daily_market` date has fewer
+rows than 75% of the median of its nearest published neighbour(s). The error
+code is `DAILY_MARKET_DATE_INCOMPLETE`; the refusal precedes the daily writer
+and earlier tables such as `events`, so the existing curated tables and
+SNAPSHOT stay intact. Fix the missing raw rows and rerun rather than lowering
+the floor.
+
 **Migration test (`checks/phase0_migration.py`):** join new panel to
 `LEGACY_PANEL` on (ticker, event_date); assert row counts by year match
 (document any legitimate delta, e.g. quarantined rows), moves match to

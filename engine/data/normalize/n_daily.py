@@ -99,9 +99,11 @@ def fetch_daily_index() -> dict[str, dict[str, list[dict]]]:
     Cached because a rebuild asks for it once per ticker.
 
     Snapshots are indexed oldest-fetched first so a later, more complete
-    market-wide response is appended after the ones it supersedes. The consumer
-    (:func:`_rows_for`) keeps the last row per date, so fetch time — not an
-    opaque cache-key order — decides which snapshot wins.
+    market-wide response is appended after the ones it supersedes. Fetch time
+    therefore decides precedence only *among* the market-wide snapshots.
+    :func:`_rows_for` appends the per-ticker legacy and history rows after
+    these, and normalization's ``keep="last"`` then chooses the final winner
+    across all sources.
     """
     from engine.data.normalize.fetch_store import iter_orats_rows
 

@@ -212,7 +212,7 @@ class InputCache:
         not treated as an error.
         """
         st = path.stat()
-        rec = self._old.get(str(path))
+        rec = self._old.get(str(path)) or self._new.get(str(path))
         if rec is not None and (
             rec.get("size") == st.st_size
             and rec.get("mtime_ns") == st.st_mtime_ns
@@ -225,25 +225,40 @@ class InputCache:
         return Signature(st.st_size, st.st_mtime_ns, _sha256(path),
                          st.st_ino, st.st_ctime_ns)
 
+    def _entry_matches(self, entry: Any, sig: Signature, source_id: str) -> bool:
+        return (
+            isinstance(entry, dict)
+            and entry.get("version") == self.version
+            and entry.get("sha256") == sig.sha256
+            and entry.get("source_id") == source_id
+            and "value" in entry
+        )
+
     def lookup(self, path: Path, source_id: str) -> tuple[bool, Any, Signature]:
-        """``(hit, value, signature)`` for one raw input."""
+        """``(hit, value, signature)`` for one raw input.
+
+        An entry stored earlier in this run is a hit too, so a caller that
+        preflights and then streams the same input reuses the parse.
+        """
         sig = self.signature(path)
         key = str(path)
         rec = self._old.get(key)
-        if not rec or rec.get("sha256") != sig.sha256 or rec.get("source_id") != source_id:
-            return False, None, sig
-        entry = self._load_entry(key)
+        if rec and rec.get("sha256") == sig.sha256 and rec.get("source_id") == source_id:
+            entry = self._load_entry(key)
+            if self._entry_matches(entry, sig, source_id):
+                self._new[key] = {**sig.as_dict(), "source_id": source_id}
+                self.stats["reused"] += 1
+                return True, entry["value"], sig
+        stored = self._new.get(key)
         if (
-            not isinstance(entry, dict)
-            or entry.get("version") != self.version
-            or entry.get("sha256") != sig.sha256
-            or entry.get("source_id") != source_id
-            or "value" not in entry
+            stored
+            and stored.get("sha256") == sig.sha256
+            and stored.get("source_id") == source_id
         ):
-            return False, None, sig
-        self._new[key] = {**sig.as_dict(), "source_id": source_id}
-        self.stats["reused"] += 1
-        return True, entry["value"], sig
+            entry = self._load_entry(key)
+            if self._entry_matches(entry, sig, source_id):
+                return True, entry["value"], sig
+        return False, None, sig
 
     def _load_entry(self, key: str) -> Any:
         try:
