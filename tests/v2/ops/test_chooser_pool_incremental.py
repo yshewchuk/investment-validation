@@ -72,9 +72,11 @@ def test_append_deduplicates_and_preserves_existing_rows_with_backup(tmp_path):
     pd.testing.assert_frame_equal(pd.read_parquet(path.with_suffix(".parquet.bak")), original)
 
 
-def test_refresh_refuses_month_already_present_before_builder(tmp_path, monkeypatch):
+def test_refresh_refuses_effective_month_already_present_before_builder(tmp_path, monkeypatch):
     path = tmp_path / "candidates.parquet"
-    _rows(["existing"], exit_dates=["2026-10-15"]).to_parquet(path, index=False)
+    stored = _rows(["existing"], exit_dates=["2026-09-30"])
+    stored.loc[0, ["exit_arb_ok", "exit_value"]] = [False, -1.0]
+    stored.to_parquet(path, index=False)
     before = path.read_bytes()
     monkeypatch.setattr(refresh.importlib.util, "spec_from_file_location", lambda *_: pytest.fail("builder must not run"))
 

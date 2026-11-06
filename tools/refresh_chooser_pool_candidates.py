@@ -118,8 +118,12 @@ def refresh(month: str, path: Path = CANDIDATES) -> int:
     if not path.is_file():
         refuse("candidate_table_missing", "stored EXP-137 candidate table is required", path)
     stored, _ = read_table(path)
-    if "exit_date" not in stored: refuse("candidate_schema_mismatch", "stored candidate exit_date is missing", path)
-    if pd.to_datetime(stored["exit_date"], errors="coerce").dt.strftime("%Y-%m").eq(month).any(): refuse("month_already_present", "stored candidates already contain this exit month; reruns and corrections are out of scope", path)
+    required = {"exit_date", "exit_arb_ok", "exit_value", "expiry"}
+    if not required.issubset(stored.columns): refuse("candidate_schema_mismatch", "stored candidate settlement columns are missing", path)
+    effective_exit = pd.to_datetime(stored["exit_date"], errors="coerce")
+    repaired = ~stored["exit_arb_ok"].fillna(True).astype(bool) | stored["exit_value"].lt(0)
+    effective_exit.loc[repaired] = pd.to_datetime(stored.loc[repaired, "expiry"], errors="coerce")
+    if effective_exit.dt.strftime("%Y-%m").eq(month).any(): refuse("month_already_present", "stored candidates already contain this effective exit month; reruns and corrections are out of scope", path)
     started = time.monotonic()
     rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
     print(f"[chooser-refresh] start month={month} RSS={rss:.0f}MB", file=sys.stderr, flush=True)
