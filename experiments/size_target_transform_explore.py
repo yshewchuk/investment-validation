@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Exploratory SIZE target transforms; not promotion evidence."""
-import argparse, json, resource, sys, time
+import argparse, json, os, resource, stat, sys, time
 from pathlib import Path
 import numpy as np
 import pandas as pd
@@ -16,10 +16,13 @@ MO = ["spy_ret21", "spy_ret63", "spy_ret252", "spy_dd252", "spy_vol5", "spy_vol2
 EPS = 1e-6
 
 
+def score_metrics(y, pred):
+    e = np.asarray(pred)-np.asarray(y); return float(np.mean(np.abs(e))), float(np.sqrt(np.mean(e**2)))
+
+
 def transform(y, mu, sigma, kind):
     y, mu, sigma = np.asarray(y), np.asarray(mu), np.asarray(sigma)
-    if kind == "raw": return y
-    if kind == "residual": return y - mu
+    if kind in ("raw", "residual"): return y if kind == "raw" else y-mu
     if kind == "z": return (y - mu) / sigma
     if kind == "log_ratio": return np.log((y + EPS) / (mu + EPS))
     raise ValueError(kind)
@@ -27,8 +30,7 @@ def transform(y, mu, sigma, kind):
 
 def inverse(z, mu, sigma, kind):
     z, mu, sigma = np.asarray(z), np.asarray(mu), np.asarray(sigma)
-    if kind == "raw": return z
-    if kind == "residual": return z + mu
+    if kind in ("raw", "residual"): return z if kind == "raw" else z+mu
     if kind == "z": return z * sigma + mu
     if kind == "log_ratio": return (mu + EPS) * np.exp(np.clip(z, -30, 30)) - EPS
     raise ValueError(kind)
@@ -47,7 +49,7 @@ def history_stats(frame, train_ids):
     return mu, np.maximum(sig, floor), floor
 
 
-def _ridge_loo_residuals(y, fitted, x, alpha=1):
+def ridge_loo_residuals(y, fitted, x, alpha=1):
     design = np.c_[x, np.ones(len(x))]; penalty = np.eye(design.shape[1]) * alpha; penalty[-1, -1] = 0
     leverage = np.einsum("ij,ji->i", design, np.linalg.solve(design.T@design+penalty, design.T))
     return (np.asarray(y)-fitted) / np.maximum(1-leverage, 1e-9)
@@ -57,7 +59,7 @@ def _key(ticker, date):
     return f"{ticker}_{pd.Timestamp(date):%Y-%m-%d}"
 
 
-def _blocks_ci(y, pred, baseline, quarters, tickers, seed=41):
+def block_bootstrap_ci(y, pred, baseline, quarters, tickers, seed=41):
     groups = [np.flatnonzero((quarters == q) & (tickers == t)) for q, t in sorted(set(zip(quarters, tickers)))]
     rng, out = np.random.default_rng(seed), []
     for _ in range(500):
@@ -66,7 +68,7 @@ def _blocks_ci(y, pred, baseline, quarters, tickers, seed=41):
     return np.quantile(out, [0.025, 0.975], axis=0).T.tolist()
 
 
-def _distribution(pred, residual, scale, y, seed=72):
+def distribution_metrics(pred, residual, scale, y, seed=72):
     rng = np.random.default_rng(seed)
     draws = pred[:, None] + rng.choice(residual, (len(pred), 200), replace=True) * scale[:, None]
     result = {}
@@ -83,18 +85,18 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--panel", default=None); ap.add_argument("--report", required=True); ap.add_argument("--out", required=True)
     a = ap.parse_args()
-    if a.panel is None:
-        import engine.paths as paths
-        a.panel = str(paths.PANEL)
+    if a.panel is None: import engine.paths as paths; a.panel = str(paths.PANEL)
     start = time.time()
-    def log(msg):
-        rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (1024*1024)
-        print(f"[size-transform] {msg}; elapsed={time.time()-start:.1f}s peak_rss={rss:.2f}GiB", file=sys.stderr, flush=True)
+    log = lambda msg: print(f"[size-transform] {msg}; elapsed={time.time()-start:.1f}s peak_rss={resource.getrusage(resource.RUSAGE_SELF).ru_maxrss/(1024*1024):.2f}GiB", file=sys.stderr, flush=True)
     log("start report and panel selection")
-    d = json.loads([l for l in open(a.report) if l.startswith('{')][-1])
+    fd = os.open(a.report, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK); st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode) or st.st_size > 64 << 20: os.close(fd); raise ValueError("report must be a regular file under 64 MiB")
+    with os.fdopen(fd, encoding="utf-8") as f: raw = f.read((64 << 20)+1)
+    if len(raw) > 64 << 20: raise ValueError("report grew beyond 64 MiB")
+    d = json.loads([l for l in raw.splitlines() if l.startswith('{')][-1])
     retained = set(d["frozen_eligibility"]["retained_event_ids"])
     paired = d["paired"]["paired_rows"]
-    del d
+    del d, raw
     test_ids = {r["event_id"] for r in paired}
     if not test_ids <= retained or len(paired) != 751: raise ValueError("paired population mismatch")
     ds0 = ds.dataset(a.panel, format="parquet"); names = set(ds0.schema.names)
@@ -118,9 +120,9 @@ def main():
     quarters = np.array([pmap[k]["quarter"] for k in te.event_id]); tickers = te.ticker.to_numpy()
     result = {"n_train": len(tr), "n_test": len(te), "sigma_floor_pct": floor, "label_note": "Panel abs_move is used only for training labels and causal mu/sigma; paired absolute_move_pct scores 2025.", "features": features, "baselines": {}}
     for name, pred in (("history_mean", base), ("v1.4", incumbent)):
-        result["baselines"][name] = {"mae": float(np.mean(np.abs(pred-y))), "rmse": float(np.sqrt(np.mean((pred-y)**2)))}
+        mae, rmse = score_metrics(y, pred); result["baselines"][name] = {"mae": mae, "rmse": rmse}
     models = {"ridge": Ridge(alpha=1), "elasticnet": ElasticNet(alpha=.01, l1_ratio=.75, max_iter=10000), "hgb": HistGradientBoostingRegressor(max_leaf_nodes=7, random_state=0)}
-    arms, dist, total, done = {}, {}, 24, 0; log("start fixed model arms")
+    base_mae, base_rmse = score_metrics(y, base); arms, dist, total, done = {}, {}, 24, 0; log("start fixed model arms")
     for fs, fcols in features.items():
         med = tr[fcols].median().fillna(0); xt = tr[fcols].fillna(med); xv = te[fcols].fillna(med)
         for kind in ("raw", "residual", "z", "log_ratio"):
@@ -128,12 +130,12 @@ def main():
             for mn, estimator in models.items():
                 pipe = make_pipeline(SimpleImputer(strategy="median"), StandardScaler(), estimator)
                 pipe.fit(xt, target); fit = pipe.predict(xt); pred = inverse(pipe.predict(xv), te.mu, te.sigma, kind)
-                key = f"{fs}/{kind}/{mn}"; err = pred-y; mae = np.mean(np.abs(err)); rmse = np.sqrt(np.mean(err**2))
-                arms[key] = {"mae": float(mae), "rmse": float(rmse), "delta_vs_history_mean": {"mae": float(mae-np.mean(np.abs(base-y))), "rmse": float(rmse-np.sqrt(np.mean((base-y)**2)))}, "delta_ci95": _blocks_ci(y, pred, base, quarters, tickers)}
+                key = f"{fs}/{kind}/{mn}"; mae, rmse = score_metrics(y, pred)
+                arms[key] = {"mae": mae, "rmse": rmse, "delta_vs_history_mean": {"mae": mae-base_mae, "rmse": rmse-base_rmse}, "delta_ci95": block_bootstrap_ci(y, pred, base, quarters, tickers)}
                 if fs == "H" and kind == "raw" and mn == "ridge":
-                    x = pipe[:-1].transform(xt); resid = _ridge_loo_residuals(ytr, fit, x)
-                    dist["unscaled"] = _distribution(pipe.predict(xv), resid, np.ones(len(te)), y)
-                    dist["sigma_scaled"] = _distribution(pipe.predict(xv), resid/tr.sigma.to_numpy(), te.sigma.to_numpy(), y)
+                    x = pipe[:-1].transform(xt); resid = ridge_loo_residuals(ytr, fit, x)
+                    dist["unscaled"] = distribution_metrics(pipe.predict(xv), resid, np.ones(len(te)), y)
+                    dist["sigma_scaled"] = distribution_metrics(pipe.predict(xv), resid / tr.sigma.to_numpy(), te.sigma.to_numpy(), y)
                 done += 1
                 if done % 4 == 0: log(f"fit {done}/{total}; rate={done/(time.time()-start):.2f}/s eta={(total-done)/max(done/(time.time()-start),1e-9):.1f}s")
     result["arms"], result["raw_ridge_H_distribution"] = arms, dist
