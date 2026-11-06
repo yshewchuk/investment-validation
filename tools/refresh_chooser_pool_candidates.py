@@ -84,6 +84,8 @@ def append_candidates(path: Path, fresh: pd.DataFrame) -> int:
     if event.isna().any() or entry.isna().any() or exits.isna().any() or exits.lt(entry).any() or (event.lt(entry) & ~sessions.eq("BMO")).any() or (sessions.eq("BMO") & entry.ge(event)).any():
         refuse("candidate_causality_failed", "event, entry and exit dates must satisfy session causality")
     repaired_fresh = ~fresh["exit_arb_ok"].fillna(True).astype(bool) | fresh["exit_value"].lt(0)
+    if fresh.loc[repaired_fresh, ["exit_value_expiry", "entry_cost"]].isna().any(axis=None):
+        refuse("candidate_causality_failed", "repaired fresh rows require expiry payoff and entry cost")
     fresh.loc[repaired_fresh, "exit_value"] = fresh.loc[repaired_fresh, "exit_value_expiry"]
     fresh["pnl"] = fresh["exit_value"] - fresh["entry_cost"]
     fresh["ret"] = fresh["pnl"].div(fresh["entry_cost"]).where(fresh["entry_cost"].gt(MIN_MEANINGFUL_COST))
@@ -91,9 +93,10 @@ def append_candidates(path: Path, fresh: pd.DataFrame) -> int:
     new_keys, old_keys = (pd.MultiIndex.from_frame(frame[list(KEY)]) for frame in (fresh, old))
     repaired = ~old["exit_arb_ok"].fillna(True).astype(bool) | old["exit_value"].lt(0)
     expiry = pd.to_datetime(old["expiry"], errors="coerce")
-    retained = repaired & ~old_keys.isin(new_keys) & old["exit_value_expiry"].notna()
-    if (expiry.loc[retained].isna()
-            | expiry.loc[retained].lt(pd.to_datetime(old.loc[retained, "entry_date"], errors="coerce"))).any():
+    retained = repaired & ~old_keys.isin(new_keys)
+    if (old.loc[retained, ["exit_value_expiry", "entry_cost"]].isna().any(axis=None)
+            or expiry.loc[retained].isna().any()
+            or expiry.loc[retained].lt(pd.to_datetime(old.loc[retained, "entry_date"], errors="coerce")).any()):
         refuse("candidate_causality_failed", "repaired stored rows require an effective expiry date")
     history_changed = retained & old["exit_date"].ne(expiry)
     old.loc[retained, "exit_date"] = expiry.loc[retained]

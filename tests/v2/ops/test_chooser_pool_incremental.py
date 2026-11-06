@@ -209,18 +209,32 @@ def test_retained_repaired_rows_get_expiry_date_on_a_different_month_refresh(tmp
     assert result.loc["historical", "exit_date"] == pd.Timestamp("2026-10-02")
 
 
-def test_missing_fallback_retained_row_is_preserved_and_filtered_by_chooser(tmp_path):
+@pytest.mark.parametrize("field", ["exit_value_expiry", "entry_cost"])
+def test_refuses_retained_repaired_row_missing_settlement_input(tmp_path, field):
     path = tmp_path / "candidates.parquet"
     old = _rows(["old"])
-    old.loc[0, ["exit_arb_ok", "exit_value", "exit_value_expiry"]] = [False, -1.0, float("nan")]
+    old.loc[0, ["exit_arb_ok", "exit_value"]] = [False, -1.0]
+    old.loc[0, field] = float("nan")
     old.to_parquet(path, index=False)
+    before = path.read_bytes()
 
-    assert refresh.append_candidates(path, _rows(["new"])) == 1
-    stored = pd.read_parquet(path).set_index("event_id")
-    assert pd.isna(stored.loc["old", "exit_value_expiry"])
-    assert stored.loc["old", "exit_date"] == pd.Timestamp("2026-09-30")
-    from tools import build_chooser_pool
-    assert "old" not in set(build_chooser_pool.build(path)["event_id"])
+    with pytest.raises(TrainingRefused, match="candidate_causality_failed"):
+        refresh.append_candidates(path, _rows(["new"]))
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("field", ["exit_value_expiry", "entry_cost"])
+def test_refuses_fresh_repaired_row_missing_settlement_input(tmp_path, field):
+    path = tmp_path / "candidates.parquet"
+    _rows(["old"]).to_parquet(path, index=False)
+    before = path.read_bytes()
+    fresh = _rows(["new"])
+    fresh.loc[0, ["exit_arb_ok", "exit_value"]] = [False, -1.0]
+    fresh.loc[0, field] = float("nan")
+
+    with pytest.raises(TrainingRefused, match="candidate_causality_failed"):
+        refresh.append_candidates(path, fresh)
+    assert path.read_bytes() == before
 
 
 def test_refuses_retained_repaired_row_with_pre_entry_expiry(tmp_path):
