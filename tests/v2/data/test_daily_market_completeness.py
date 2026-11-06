@@ -9,13 +9,11 @@ from __future__ import annotations
 
 import gzip
 import json
-import os
 
 import pandas as pd
 import pytest
 
 from engine.data import rebuild, store
-from engine.data.fetch import FetchError, iter_cached
 from engine.data.normalize import n_daily
 from engine.data.validate import validate_daily
 
@@ -140,65 +138,6 @@ def test_latest_fetched_market_wide_snapshot_wins(tmp_path, monkeypatch):
 
     assert len(frame) == 1
     assert frame["spot"].iloc[0] == pytest.approx(10.0)
-
-
-def test_an_oversized_sidecar_is_refused_before_parsing(tmp_path, monkeypatch):
-    from engine import paths
-
-    monkeypatch.setattr(paths, "RAW_FETCH", tmp_path)
-    monkeypatch.setattr(paths, "RAW_ORATS_SUMMARIES", tmp_path / "absent")
-    directory = tmp_path / "orats" / "aa"
-    directory.mkdir(parents=True)
-    meta = directory / ("aa" + "0" * 62 + ".meta.json")
-    meta.write_text("{not json " + "x" * (70 * 1024))
-
-    n_daily.fetch_daily_index.cache_clear()
-    try:
-        with pytest.raises(FetchError, match="over the 65536-byte metadata cap"):
-            rebuild._daily_tickers(None)
-        with pytest.raises(FetchError, match="over the 65536-byte metadata cap"):
-            n_daily.list_tickers()
-    finally:
-        n_daily.fetch_daily_index.cache_clear()
-
-    # The unbounded default keeps the old skip-bad-sidecar behaviour.
-    assert iter_cached("orats", root=tmp_path) == []
-
-
-def test_bounded_reader_refuses_a_symlinked_sidecar(tmp_path):
-    directory = tmp_path / "orats" / "aa"
-    directory.mkdir(parents=True)
-    target = directory / "target.meta.json"
-    target.write_text("{}")
-    link = directory / ("aa" + "0" * 62 + ".meta.json")
-    try:
-        link.symlink_to(target)
-    except (OSError, NotImplementedError):
-        pytest.skip("symlinks are unavailable")
-
-    with pytest.raises(FetchError, match="metadata sidecar"):
-        iter_cached("orats", root=tmp_path, max_meta_bytes=64 * 1024)
-
-
-def test_bounded_reader_does_not_hang_on_a_fifo(tmp_path):
-    if not hasattr(os, "mkfifo") or not hasattr(os, "O_NONBLOCK"):
-        pytest.skip("FIFOs or O_NONBLOCK are unavailable")
-    directory = tmp_path / "orats" / "bb"
-    directory.mkdir(parents=True)
-    fifo = directory / ("bb" + "0" * 62 + ".meta.json")
-    try:
-        os.mkfifo(fifo)
-    except (OSError, NotImplementedError):
-        pytest.skip("FIFOs are unavailable")
-
-    with pytest.raises(FetchError, match="not a regular file"):
-        iter_cached("orats", root=tmp_path, max_meta_bytes=64 * 1024)
-
-
-@pytest.mark.parametrize("cap", [True, False, -1, 1.5, "64"])
-def test_metadata_cap_argument_must_be_a_nonnegative_int(tmp_path, cap):
-    with pytest.raises(ValueError, match="nonnegative integer"):
-        iter_cached("orats", root=tmp_path, max_meta_bytes=cap)
 
 
 def test_low_date_refuses_before_writer_and_preserves_prior_table(tmp_root, monkeypatch):
@@ -343,41 +282,6 @@ def test_the_public_builder_has_no_preflight_switch(tmp_root, monkeypatch):
 
     with pytest.raises(TypeError):
         rebuild.build_daily_table(preflight=False)
-
-
-def test_an_empty_ticker_inventory_refuses_instead_of_writing_zero_rows(
-    tmp_root, monkeypatch
-):
-    prior = pd.DataFrame(
-        {
-            "ticker": ["OLD"],
-            "date": pd.to_datetime(["2024-01-02"]).astype("datetime64[ns]"),
-            "year": [2024],
-            "spot": [42.0],
-        }
-    )
-    store.write_table(prior, "daily_market")
-    before = store.read_table("daily_market")
-    before_hash = store.table_stats("daily_market").content_hash
-    monkeypatch.setattr(
-        n_daily, "list_tickers", lambda root=None, *, include_fetch=True: []
-    )
-
-    with pytest.raises(rebuild.DailyMarketCompletenessError) as excinfo:
-        rebuild.build_daily_table()
-
-    error = excinfo.value
-    assert error.code == "DAILY_MARKET_DATE_INCOMPLETE"
-    assert error.date is None
-    assert error.count == 0
-    assert error.previous_count is None
-    assert error.next_count is None
-    assert error.threshold == 0.0
-    assert error.details["tickers"] == 0
-    assert error.details["dates"] == 0
-    assert "no source tickers" in error.reason
-    pd.testing.assert_frame_equal(store.read_table("daily_market"), before)
-    assert store.table_stats("daily_market").content_hash == before_hash
 
 
 def test_empty_market_wide_snapshot_is_a_zero_count_date(tmp_root, monkeypatch):

@@ -323,9 +323,8 @@ publish command, per `publish.py`'s `CommandPublisher` variant);
   validated rows than 75% of the median of its nearest published neighbour(s),
   the rebuild stops with `DAILY_MARKET_DATE_INCOMPLETE` and writes no Tier-2
   table (earlier selected tables such as `events` are not built); the previous
-  curated tables, MANIFEST and SNAPSHOT stay in place. An empty source
-  inventory is refused the same way rather than replacing the table with zero
-  rows. Successful market-wide fetch metadata `tradeDate` values count as
+  curated tables, MANIFEST and SNAPSHOT stay in place. Successful market-wide
+  fetch metadata `tradeDate` values count as
   zero-row candidates, so an HTTP-200 empty snapshot is visible as a gap.
 - **Selfcheck mismatch** — stops the publish; the nightly records raw
   mismatches, v2's adapter persists `scrub_mismatches` row/field/reason only.

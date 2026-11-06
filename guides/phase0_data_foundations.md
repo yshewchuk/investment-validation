@@ -171,8 +171,7 @@ the median of its nearest published neighbour(s). The error code is
 `DAILY_MARKET_DATE_INCOMPLETE`; the refusal precedes the daily writer and
 earlier tables such as `events`, so the existing curated tables and SNAPSHOT
 stay intact. A partial-table rebuild that does not select `daily` takes no
-coverage guard. An empty source inventory is also refused rather than replacing
-`daily_market` with zero rows. Fix the missing raw rows and rerun rather than
+coverage guard. Fix the missing raw rows and rerun rather than
 lowering the floor.
 
 **Migration test (`checks/phase0_migration.py`):** join new panel to

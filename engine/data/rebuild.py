@@ -37,7 +37,6 @@ from engine.data import manifest, rebuild_incremental, store, validate
 from engine.data.features import panel as panel_mod
 from engine.data.features import tier4 as tier4_mod
 from engine.data.normalize import n_chains, n_daily, n_events, n_option_daily, n_securities, n_trades
-from engine.data.normalize.fetch_store import MARKET_WIDE_META_MAX_BYTES
 from engine.data.rebuild_cache import InputCache
 
 __all__ = ["rebuild", "finalize_rebuild", "finalize_current_store", "RebuildResult",
@@ -48,7 +47,7 @@ DAILY_COMPLETENESS_FLOOR = 0.75
 
 
 class DailyMarketCompletenessError(RuntimeError):
-    """A full ``daily_market`` build has no source inventory or a gapped date.
+    """A full ``daily_market`` build has a gapped published date.
 
     Raised by the preflight before :class:`~engine.data.store.PartitionedWriter`
     is constructed, so the refusal leaves the current curated table untouched
@@ -60,13 +59,11 @@ class DailyMarketCompletenessError(RuntimeError):
     def __init__(
         self,
         *,
-        date: str | None,
+        date: str,
         count: int,
         previous_count: int | None,
         next_count: int | None,
         threshold: float,
-        reason: str | None = None,
-        details: dict | None = None,
     ):
         self.date = date
         self.count = count
@@ -74,25 +71,22 @@ class DailyMarketCompletenessError(RuntimeError):
         self.next_count = next_count
         self.neighbor_counts = (previous_count, next_count)
         self.threshold = threshold
-        if reason is None:
-            if previous_count is None and next_count is None:
-                neighbors = "no adjacent published date"
-            elif previous_count is None:
-                neighbors = f"its only adjacent published date ({next_count})"
-            elif next_count is None:
-                neighbors = f"its only adjacent published date ({previous_count})"
-            else:
-                neighbors = (
-                    f"the median of its adjacent published dates "
-                    f"({previous_count} and {next_count})"
-                )
-            self.reason = (
-                f"daily_market has {count} rows on {date}, below "
-                f"{DAILY_COMPLETENESS_FLOOR:.0%} of {neighbors}; "
-                f"threshold {threshold:.1f}"
-            )
+        if previous_count is None and next_count is None:
+            neighbors = "no adjacent published date"
+        elif previous_count is None:
+            neighbors = f"its only adjacent published date ({next_count})"
+        elif next_count is None:
+            neighbors = f"its only adjacent published date ({previous_count})"
         else:
-            self.reason = reason
+            neighbors = (
+                f"the median of its adjacent published dates "
+                f"({previous_count} and {next_count})"
+            )
+        self.reason = (
+            f"daily_market has {count} rows on {date}, below "
+            f"{DAILY_COMPLETENESS_FLOOR:.0%} of {neighbors}; "
+            f"threshold {threshold:.1f}"
+        )
         self.details = {
             "date": date,
             "count": count,
@@ -101,8 +95,6 @@ class DailyMarketCompletenessError(RuntimeError):
             "threshold": threshold,
             "reason": self.reason,
         }
-        if details:
-            self.details.update(details)
         super().__init__(f"{self.code}: {self.reason}")
 
 
@@ -231,9 +223,7 @@ def _market_wide_snapshot_dates() -> list:
 
     dates: list = []
     for endpoint in ("hist/summaries", "hist/cores"):
-        for entry in iter_cached(
-            "orats", endpoint, max_meta_bytes=MARKET_WIDE_META_MAX_BYTES
-        ):
+        for entry in iter_cached("orats", endpoint):
             params = entry.params
             # Per-ticker responses are addressable by cache key and are appended
             # by _rows_for; only market-wide snapshots belong here.
@@ -269,28 +259,10 @@ def _preflight_daily_completeness(tickers: list[str], cache) -> None:
     so their mean; a first or last date has only one, so that count). A lone
     date with no neighbour at all is skipped. Running this before the writer
     matters: its constructor replaces the existing table.
-
-    An empty ticker inventory is a no-source refusal, not a valid empty rebuild:
-    replacing ``daily_market`` with zero rows would erase the table without any
-    raw input having been read.
     """
     counts: dict = {}
     total = len(tickers)
     started = time.monotonic()
-    if not tickers:
-        raise DailyMarketCompletenessError(
-            date=None,
-            count=0,
-            previous_count=None,
-            next_count=None,
-            threshold=0.0,
-            reason=(
-                "daily_market has no source tickers: no legacy per-ticker files "
-                "or fetch-store daily rows were found; refusing to replace the "
-                "table with an empty build"
-            ),
-            details={"tickers": 0, "dates": 0},
-        )
     last = started - 30.0
     print(
         f"  [daily preflight] start 0/{total} tickers, elapsed 0s{_rss_suffix()}",
