@@ -495,9 +495,9 @@ def test_the_preflight_does_not_quarantine_before_the_write_pass(
 
     report = rebuild.build_daily_table()
 
-    # T00's invalid row is below the floor's impact, so the build succeeds; only
-    # the write pass calls the quarantine helper, exactly once, with a source
-    # path. The counting pass passes no source path and must add no call.
+    # T00's invalid row is excluded from the clean count, so the build still
+    # succeeds; only the write pass calls the quarantine helper, exactly once,
+    # with a source path. The counting pass passes no source path and adds no call.
     assert report["rows"] == len(TICKERS) * len(DATES) - 1
     assert len(calls) == 1
     assert calls[0][0] == "orats/summaries/T00.json.gz"
@@ -584,3 +584,24 @@ def test_preflight_accepts_the_exact_75_percent_threshold(monkeypatch):
     assert error.previous_count == 8
     assert error.next_count == 8
     assert error.threshold == pytest.approx(6.0)
+
+
+def test_preflight_skips_a_lone_date_with_no_neighbour(monkeypatch):
+    """A single published date has no neighbour, so the guard intentionally skips it."""
+    day = pd.Timestamp("2024-02-02")
+
+    def fake_normalize_daily(ticker, cache):
+        frame = pd.DataFrame(
+            {
+                "ticker": ticker,
+                "date": pd.to_datetime([day]),
+                "year": [day.year],
+                "spot": [100.0],
+            }
+        )
+        return frame, {"ticker": ticker}
+
+    monkeypatch.setattr(rebuild, "_normalize_daily", fake_normalize_daily)
+    monkeypatch.setattr(rebuild, "_market_wide_snapshot_dates", lambda: [])
+
+    assert rebuild._preflight_daily_completeness(["T00"], None) is None
