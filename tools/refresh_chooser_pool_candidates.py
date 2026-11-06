@@ -84,18 +84,19 @@ def append_candidates(path: Path, fresh: pd.DataFrame) -> int:
     exits = pd.to_datetime(fresh["exit_date"], errors="coerce")
     if exits.isna().any() or exits.lt(entry).any():
         refuse("candidate_causality_failed", "exit date must be present and on or after entry")
-    repaired = ~old["exit_arb_ok"].fillna(True).astype(bool) | old["exit_value"].lt(0)
-    expiry = pd.to_datetime(old["expiry"], errors="coerce")
-    if expiry.loc[repaired].isna().any():
-        refuse("candidate_causality_failed", "repaired stored rows require an effective expiry date")
-    history_changed = repaired & old["exit_date"].ne(expiry)
-    old.loc[repaired, "exit_date"] = expiry.loc[repaired]
     sessions = fresh.get("session", pd.Series("", index=fresh.index)).astype(str).str.upper()
     if event.isna().any() or entry.isna().any() or ((event > entry) & ~sessions.eq("BMO")).any() or (sessions.eq("BMO") & entry.ge(event)).any():
         refuse("candidate_causality_failed", "entry must precede BMO events; other event dates must be <= entry")
     fresh = fresh.drop_duplicates(list(KEY), keep="first")
-    new_keys = pd.MultiIndex.from_frame(fresh[list(KEY)])
-    old_keys = pd.MultiIndex.from_frame(old[list(KEY)])
+    new_keys, old_keys = (pd.MultiIndex.from_frame(frame[list(KEY)]) for frame in (fresh, old))
+    repaired = ~old["exit_arb_ok"].fillna(True).astype(bool) | old["exit_value"].lt(0)
+    expiry = pd.to_datetime(old["expiry"], errors="coerce")
+    retained = repaired & ~old_keys.isin(new_keys)
+    if (expiry.loc[retained].isna() | old.loc[retained, "exit_value_expiry"].isna()
+            | expiry.loc[retained].lt(pd.to_datetime(old.loc[retained, "entry_date"], errors="coerce"))).any():
+        refuse("candidate_causality_failed", "repaired stored rows require an effective expiry date")
+    history_changed = repaired & old["exit_date"].ne(expiry)
+    old.loc[repaired, "exit_date"] = expiry.loc[repaired]
     updates = fresh[list(KEY) + list(SETTLEMENT_FIELDS)].rename(
         columns={name: f"_fresh_{name}" for name in SETTLEMENT_FIELDS})
     columns = old.columns

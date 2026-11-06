@@ -184,6 +184,23 @@ def test_retained_repaired_rows_get_expiry_date_on_a_different_month_refresh(tmp
     assert result.loc["historical", "exit_date"] == pd.Timestamp("2026-10-02")
 
 
+@pytest.mark.parametrize(
+    "field,value",
+    [("exit_value_expiry", float("nan")), ("expiry", pd.Timestamp("2026-08-31"))],
+)
+def test_refuses_unsettled_retained_repaired_rows(tmp_path, field, value):
+    path = tmp_path / "candidates.parquet"
+    old = _rows(["old"])
+    old.loc[0, ["exit_arb_ok", "exit_value"]] = [False, -1.0]
+    old.loc[0, field] = value
+    old.to_parquet(path, index=False)
+    before = path.read_bytes()
+
+    with pytest.raises(TrainingRefused, match="candidate_causality_failed"):
+        refresh.append_candidates(path, _rows(["new"]))
+    assert path.read_bytes() == before
+
+
 @pytest.mark.parametrize("exit_date", ["NaT", "2026-08-31"])
 def test_append_refuses_missing_or_pre_entry_exit_date(tmp_path, exit_date):
     path = tmp_path / "candidates.parquet"
