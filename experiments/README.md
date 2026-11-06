@@ -155,6 +155,8 @@ The four `es_` profiles stop on sklearn early stopping (`max_iter=400`, patience
 The 1000-candidate ceiling and explicit logical-fit, child/parent/build/job budgets
 still apply; MLP costs one component per horizon, while the fixed SIZE candidate
 retains its two-component worst-case allowance. V6, v7 and v8 accept the optional `workers` contract: an integer 1 through 8 (omission means 1), removed before request identity hashing; fresh inner trials may run in the bounded process pool, while worker CPU/memory admission remains in force. Neural fits remain one-thread-per-child.
+
+Request v9 accepts any nonempty subsequence of the ordered feature sets H, HM, HMO, MO-, M; candidate and fit counts use only the selected sets. MO- has 28 audited non-history market/options features and M has 15 audited price/market features. The audit drops `ema12r_abs` because its registered derivation selects a prior-earnings-move mean, and drops `mean_prior_or_implied` because it computes a prior-move mean when history exists. V9 accepts 1 through 8 workers; the selected-grid fit counts must fit `max_candidates` and `max_fits`.
 Only inner folds select; outer results never tune profiles. Use `experiments.size_search`
 with fresh source seals; v1-v5 declarations, current runs and the production comparator
 are unchanged. Invalid/unknown profiles refuse before expansion; convergence or

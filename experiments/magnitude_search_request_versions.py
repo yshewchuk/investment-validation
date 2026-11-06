@@ -41,12 +41,15 @@ def compile_request(request, *, horizons=(5, 3, 1)):
     compile_kwargs = ({"horizons": horizons}
                       if allows_lead_selector(request_version(version)) else {})
     dictionary = request.get("feature_dictionary_hash") if type(request) is dict else None
+    if request_version(version) == 9 and dictionary != _V3_HASH:
+        raise fail("INVALID_EXPERIMENT_SPEC", "v9 requires the qualified feature dictionary hash")
     if type(dictionary) is not str or dictionary not in (_V2_HASH, _V3_HASH):
         return compiler(request, **compile_kwargs)
 
     selected = v3_recipe if dictionary == _V3_HASH else v2_recipe
     surrogate = dict(request)
-    surrogate["feature_dictionary_hash"] = v1_recipe("HMO")["dictionary_hash"]
+    if request_version(version) != 9:
+        surrogate["feature_dictionary_hash"] = v1_recipe("HMO")["dictionary_hash"]
     result = compiler(surrogate, **compile_kwargs)
     result["request"]["feature_dictionary_hash"] = dictionary
     result["request_id"] = content_hash(result["request"])

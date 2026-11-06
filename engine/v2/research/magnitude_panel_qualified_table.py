@@ -21,7 +21,11 @@ _DAILY_RANGES = {"implied_move": (0., 100.), "iv10": (0., 500.), "iv30": (0., 50
 
 def feature_dictionary(subset):
     """Keep numeric order/units, explicitly replace incompatible history policy."""
-    fields = v2.feature_dictionary(subset)
+    history_free = subset in ("MO-", "M")
+    fields = v2.feature_dictionary("HMO" if history_free else subset)
+    if history_free:
+        # Preserve frozen HMO descriptors, then remove all features whose registered derivation uses earnings history.
+        fields = fields[12:28] if subset == "M" else fields[12:]
     for field in fields:
         if field["name"] == "mean_prior_or_implied":
             field["derivation_policy"] = {**field["derivation_policy"],
@@ -39,15 +43,24 @@ def feature_dictionary(subset):
                     "normalization_ranges": {k: list(v) for k, v in _DAILY_RANGES.items()},
                     "observable_violation": "refuse", "stored_zero": "preserve_status_only_current",
                     "raw_source_access": "selected_columns_yearly_decode_then_causal_selection"}
+    if history_free:
+        fields = [field for field in fields
+            if field["name"] != "mean_prior_or_implied"
+            and not ({dependency["role"] for dependency in field["source_dependencies"]}
+                     & {"stored_history", "prior_outcomes"})]
     return fields
 
 
 def recipe(subset):
     """New source identity, not a new feature/search axis or fitting authority."""
-    result = v2.recipe(subset)
+    history_free = subset in ("MO-", "M")
+    result = v2.recipe("HMO" if history_free else subset)
     fields = feature_dictionary(subset)
-    return {**result, "schema_version": "research_magnitude_panel.v3", "dictionary": fields,
-            "dictionary_hash": content_hash(fields)}
+    quote = None if history_free else result["quote_indicator"]
+    return {**result, "schema_version": "research_magnitude_panel.v3", "subset": subset,
+            "dictionary": fields, "dictionary_hash": content_hash(fields),
+            "quote_indicator": quote,
+            "model_columns": [field["name"] for field in fields] + ([quote["name"]] if quote else [])}
 
 
 FEATURES = tuple(f["name"] for f in feature_dictionary("HMO"))
