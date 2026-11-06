@@ -14,9 +14,7 @@ Contracts this orchestrator upholds:
   failures quarantine the raw file and exclude the rows, loudly.
 * **Observable.** Progress lines at least once a minute — a silent long job is
   indistinguishable from a hung one, especially on a host that sleeps.
-* **Coverage-guarded.** A full ``daily_market`` build (``daily`` selected, no
-  ``sample``) preflights published-date coverage before any builder, refusing
-  with ``DAILY_MARKET_DATE_INCOMPLETE`` instead of publishing a gap.
+* **Coverage-guarded.** A full ``daily_market`` build refuses on published-date gaps.
 """
 from __future__ import annotations
 
@@ -45,9 +43,7 @@ DAILY_COMPLETENESS_FLOOR = 0.75
 
 
 class DailyMarketCompletenessError(RuntimeError):
-    """A full ``daily_market`` build has a gapped published date.
-
-    Raised before the writer exists; the current table stays intact."""
+    """A gapped published date; raised before the writer, table stays intact."""
 
     code = "DAILY_MARKET_DATE_INCOMPLETE"
 
@@ -59,6 +55,7 @@ class DailyMarketCompletenessError(RuntimeError):
         previous_count: int | None,
         next_count: int | None,
         threshold: float,
+        reason: str | None = None,
     ):
         self.date = date
         self.count = count
@@ -77,7 +74,7 @@ class DailyMarketCompletenessError(RuntimeError):
                 f"the median of its adjacent published dates "
                 f"({previous_count} and {next_count})"
             )
-        self.reason = (
+        self.reason = reason or (
             f"daily_market has {count} rows on {date}, below "
             f"{DAILY_COMPLETENESS_FLOOR:.0%} of {neighbors}; "
             f"threshold {threshold:.1f}"
@@ -211,9 +208,19 @@ def _market_wide_snapshot_dates() -> list:
 
     dates: list = []
     for endpoint in ("hist/summaries", "hist/cores"):
-        for entry in iter_cached("orats", endpoint):
+        try:
+            entries = iter_cached("orats", endpoint, max_meta_bytes=64 * 1024)
+        except ValueError as exc:
+            raise DailyMarketCompletenessError(
+                date=str(getattr(exc, "path", "unknown")),
+                count=int(getattr(exc, "size", 0)),
+                previous_count=None,
+                next_count=None,
+                threshold=float(getattr(exc, "cap", 0.0)),
+                reason=str(exc),
+            ) from exc
+        for entry in entries:
             params = entry.params
-            # Per-ticker responses are addressable by cache key; skip them.
             if params.get("ticker"):
                 continue
             try:
@@ -231,13 +238,7 @@ def _market_wide_snapshot_dates() -> list:
 
 
 def _preflight_daily_completeness(tickers: list[str], cache) -> None:
-    """Refuse a full build whose published dates are missing most of the market.
-
-    Counts use the validated rows the writer keeps plus zero-count candidates
-    from successful market-wide metadata and every non-null raw date; a date is
-    compared with the median of its nearest published neighbours (a lone date is
-    skipped). This runs before the writer, whose constructor replaces the table.
-    """
+    """Refuse a full build whose published dates are missing most of the market."""
     counts: dict = {}
     total = len(tickers)
     started = time.monotonic()
@@ -313,10 +314,7 @@ def _daily_tickers(sample: int | None) -> list[str]:
 
 
 def _build_daily_table(tickers: list[str], cache) -> dict:
-    """Build ``daily_market`` from ``tickers`` without the preflight.
-
-    Private: callers run the guard first.
-    """
+    """Build ``daily_market`` from ``tickers`` without the preflight."""
     _banner("daily_market")
 
     progress = _Progress("daily", len(tickers))
@@ -348,14 +346,7 @@ def _build_daily_table(tickers: list[str], cache) -> dict:
 
 
 def build_daily_table(sample: int | None = None, cache=None) -> dict:
-    """Build ``daily_market``; ``cache`` (an ``InputCache``) reuses per-file parses.
-
-    A full public call runs the completeness preflight; a sampled call skips it
-    because a partial slice is not a full build. :func:`rebuild` runs one
-    preflight up front, then calls the private helper. The cache stores only
-    per-file parse results: the preflight and write each renormalize every
-    ticker's frames, so a cache hit avoids reparsing, not renormalizing.
-    """
+    """Build ``daily_market``; a full call preflights, a sample skips it."""
     tickers = _daily_tickers(sample)
     if not sample:
         _preflight_daily_completeness(tickers, cache)
@@ -671,20 +662,8 @@ def rebuild(
 ) -> RebuildResult:
     """Rebuild the named tables.
 
-    ``incremental=True`` (opt-in; the legacy nightly passes it) reuses cached
-    per-input parses for ``daily_market`` and ``option_chains`` -- see
-    :mod:`engine.data.rebuild_cache`. The outputs are byte-identical to the
-    default full rebuild, which neither reads nor writes that cache.
-
-    ``sample`` cannot be combined with ``incremental``: a sampled run sees only
-    part of the inputs, so committing its manifest would prune the cache of
-    every input the sample skipped.
-
-    ``finalize=False`` returns after the builders, leaving the manifest and
-    snapshot unwritten and stashing ``started`` on the result for a later
-    :func:`finalize_rebuild`. A caller that must not publish a snapshot for a
-    bad build (the nightly, on a gapped Tier-4) uses this and only finalizes
-    once the result checks out; the default path is unchanged.
+    ``incremental=True`` reuses cached ``daily_market``/``option_chains`` parses but
+    cannot combine with ``sample``; ``finalize=False`` defers to :func:`finalize_rebuild`.
     """
     if incremental and sample:
         raise ValueError("--sample cannot be combined with --incremental")
@@ -698,8 +677,7 @@ def rebuild(
     if "daily" in selected:
         daily_tickers = _daily_tickers(sample)
         if not sample:
-            # Refuse before any builder runs; a sampled or daily-excluding
-            # rebuild is partial by design and does not run this guard.
+            # Refuse before any builder; sampled/partial builds skip this guard.
             if incremental:
                 daily_cache = InputCache("daily_market")
             _preflight_daily_completeness(daily_tickers, daily_cache)
@@ -728,13 +706,7 @@ def rebuild(
 
 
 def finalize_rebuild(result: RebuildResult) -> RebuildResult:
-    """Write the manifest and snapshot for a built result and stamp elapsed.
-
-    Split from :func:`rebuild` so a caller can build the tables first and only
-    publish a snapshot after deciding the result is sound -- the nightly
-    defers finalizing the incremental Tier-3/4 build until the Tier-4 gap check
-    passes, so a night whose full repair is refused leaves no new snapshot behind.
-    """
+    """Write the manifest and snapshot for a built result and stamp elapsed."""
     _banner("manifest + snapshot")
     stats = manifest.collect_stats()
     result.tables = stats
@@ -752,15 +724,7 @@ def finalize_rebuild(result: RebuildResult) -> RebuildResult:
 
 
 def finalize_current_store() -> RebuildResult:
-    """Write the manifest and SNAPSHOT of the store as found.
-
-    Called by ``engine.dashboard.nightly.mark_tiers_degraded`` on any tiers
-    degrade; when refresh ran it also covers the refresh rebuild's deferred
-    snapshot. The refresh rebuild was told
-    ``finalize=False`` because the tiers step would finalize, and a degraded
-    tiers step still scores the store as it is found (the refreshed store when
-    refresh ran), so the SNAPSHOT of that store is written here.
-    """
+    """Write the manifest and snapshot of the store as found on tier degradation."""
     return finalize_rebuild(RebuildResult(started=time.time()))
 
 

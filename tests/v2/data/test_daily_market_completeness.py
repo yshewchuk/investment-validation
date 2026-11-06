@@ -472,6 +472,35 @@ def test_market_wide_candidates_need_success_and_no_ticker(tmp_root, monkeypatch
     ]
 
 
+def test_oversized_metadata_sidecar_refuses_before_the_writer(tmp_root, monkeypatch):
+    from engine import paths
+
+    root = tmp_root / "fetch"
+    monkeypatch.setattr(paths, "RAW_FETCH", root)
+    _write_market_wide(
+        root,
+        "aa" + "0" * 62,
+        fetched_at="2026-09-02T12:00:00+00:00",
+        trade_date="2024-01-08",
+        params={"tradeDate": "2024-01-08", "padding": "x" * (64 * 1024)},
+    )
+    _install_daily_source(monkeypatch)
+
+    class _WriterMustNotBeConstructed:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("writer constructed before the preflight")
+
+    monkeypatch.setattr(store, "PartitionedWriter", _WriterMustNotBeConstructed)
+
+    with pytest.raises(rebuild.DailyMarketCompletenessError) as excinfo:
+        rebuild.build_daily_table()
+
+    error = excinfo.value
+    assert error.code == "DAILY_MARKET_DATE_INCOMPLETE"
+    assert "metadata sidecar" in error.reason
+    assert "exceeds cap of 65536 bytes" in error.reason
+
+
 def test_incomplete_daily_preflight_prevents_the_events_builder(
     tmp_root, monkeypatch
 ):
