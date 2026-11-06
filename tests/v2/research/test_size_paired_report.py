@@ -6,7 +6,6 @@ import numpy as np
 import pytest
 
 from experiments.size_paired_report import paired_report
-from experiments.magnitude_search_selection import history_mean_rows
 
 
 def fixture():
@@ -19,7 +18,7 @@ def fixture():
             key = {"event_id": event["event_id"], "horizon_sessions": h}
             challenger.append({**key, "predicted_absolute_move_pct": targets[event["event_id"]] + h / 10})
             incumbent.append({**key, "predicted_absolute_move_pct": targets[event["event_id"]] - 1,
-                "abstention": None, "history_mean": 4.0, "universe_mean": 5.0, "quote_status": "present"})
+                "abstention": None, "history_mean": 4.0, "quote_status": "present"})
     return events, challenger, incumbent, targets
 
 
@@ -37,15 +36,6 @@ def test_exact_pooled_difference_equal_event_weights_and_bootstrap_oracle():
         assert interval["percentile_95"]["rmse"] == pytest.approx([expected_rmse - 1] * 2)
     assert report["metrics"]["challenger"]["bias"] == pytest.approx(0.3)
     assert report["metrics"]["incumbent"]["large_move_underprediction"] == 1
-    assert report["metrics"]["universe_mean"]["mae"] == pytest.approx(
-        np.mean([abs(5.0 - target) for target in (2.0, 6.0, 10.0, 14.0)]))
-    assert set(report["paired_intervals"]) == {"history_mean", "universe_mean"}
-    assert report["paired_intervals"]["universe_mean"]["quarter"]["cluster"] == "quarter"
-    assert report["paired_intervals"]["universe_mean"]["ticker"]["cluster"] == "ticker"
-    assert report["paired_differences"]["universe_mean"]["mae"] == pytest.approx(
-        report["metrics"]["challenger"]["mae"] - report["metrics"]["universe_mean"]["mae"])
-    assert all("universe_mean" in row for row in report["paired_rows"])
-    assert report["broad_coverage_metrics"]["universe_mean"]["count"] == 12
     assert paired_report(*args) == report
 
 
@@ -125,7 +115,7 @@ def test_single_lead_horizon_report_covers_only_horizon_one():
                    "predicted_absolute_move_pct": 2.1}]
     incumbent = [{"event_id": "e0", "horizon_sessions": 1,
                   "predicted_absolute_move_pct": 1.0, "abstention": None,
-                  "history_mean": 4.0, "universe_mean": 5.0, "quote_status": "present"}]
+                  "history_mean": 4.0, "quote_status": "present"}]
     report = paired_report(events, challenger, incumbent, targets, horizons=(1,))
     assert report["forecast_matched_events"] == 1
     assert report["paired_events"] == 1
@@ -147,9 +137,9 @@ def test_two_lead_horizon_subset_report_weights_and_metrics_independently():
     ]
     incumbent = [
         {"event_id": "e0", "horizon_sessions": 1, "predicted_absolute_move_pct": 1.0,
-         "abstention": None, "history_mean": 4.0, "universe_mean": 5.0, "quote_status": "present"},
+         "abstention": None, "history_mean": 4.0, "quote_status": "present"},
         {"event_id": "e0", "horizon_sessions": 3, "predicted_absolute_move_pct": 1.0,
-         "abstention": None, "history_mean": 4.0, "universe_mean": 5.0, "quote_status": "present"},
+         "abstention": None, "history_mean": 4.0, "quote_status": "present"},
     ]
     report = paired_report(events, challenger, incumbent, targets, horizons=(1, 3))
     rows = [r for r in report["paired_rows"] if r["event_id"] == "e0"]
@@ -178,20 +168,3 @@ def test_negative_challenger_is_preserved_but_negative_target_refuses():
     args[3]["e0"] = -2.0
     with pytest.raises(ValueError, match="invalid magnitude target"):
         paired_report(*args)
-
-
-def test_universe_mean_is_the_admitted_training_fold_mean_for_every_event():
-    inputs = {
-        "training": [{"absolute_move_pct": 2.0}, {"absolute_move_pct": 6.0}],
-        "features": [
-            {"event_id": "e0", "horizon_sessions": 1, "n_prior": 1, "mean_prior_abs_move": 3.0},
-            {"event_id": "e1", "horizon_sessions": 1, "n_prior": 0, "mean_prior_abs_move": None},
-        ],
-    }
-    validation = {"targets": [
-        {"event_id": "e0", "absolute_move_pct": 4.0},
-        {"event_id": "e1", "absolute_move_pct": 8.0},
-    ]}
-    rows = history_mean_rows(inputs, validation)
-    assert [row["universe_mean"] for row in rows] == [4.0, 4.0]
-    assert [row["predicted_absolute_move_pct"] for row in rows] == [3.0, 4.0]

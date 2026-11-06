@@ -167,8 +167,7 @@ def history_mean_rows(inputs, validation, *, horizon_sessions=1):
         feature = features[key]
         predicted = history_mean_prediction(feature, fallback)
         result.append({"event_id": event_id, "horizon_sessions": horizon_sessions,
-            "absolute_move_pct": label, "predicted_absolute_move_pct": predicted,
-            "universe_mean": fallback})
+            "absolute_move_pct": label, "predicted_absolute_move_pct": predicted})
     return result
 
 

@@ -20,13 +20,13 @@ def _metrics(rows, field):
             "large_move_underprediction": float(np.mean(large)) if large else None}
 
 
-def _difference(rows, reference="incumbent"):
-    a, b = _metrics(rows, "challenger"), _metrics(rows, reference)
+def _difference(rows):
+    a, b = _metrics(rows, "challenger"), _metrics(rows, "incumbent")
     return {key: a[key] - b[key] for key in ("rmse", "mae")}
 
 
-def _bootstrap(rows, cluster, reference="incumbent"):
-    errors = np.array([[r[arm] - r["absolute_move_pct"] for arm in ("challenger", reference)] for r in rows])
+def _bootstrap(rows, cluster):
+    errors = np.array([[r[arm] - r["absolute_move_pct"] for arm in ("challenger", "incumbent")] for r in rows])
     scale = float(np.max(np.abs(errors))) or 1.0
     errors /= scale
     groups = defaultdict(lambda: np.zeros(5))
@@ -77,7 +77,7 @@ def paired_report(events, challenger, incumbent, targets, *, label_reasons=None,
         if type(value) not in (int, float) or not math.isfinite(value):
             raise ValueError("invalid magnitude challenger")
     for row in incumbent:
-        for name in ("history_mean", "universe_mean", "predicted_absolute_move_pct"):
+        for name in ("history_mean", "predicted_absolute_move_pct"):
             value = row[name]
             if value is None and name == "predicted_absolute_move_pct" and row["abstention"] is not None:
                 continue
@@ -88,8 +88,7 @@ def paired_report(events, challenger, incumbent, targets, *, label_reasons=None,
     for event, h in sorted(expected):
         meta, baseline = metadata[event], b[event, h]
         reason = baseline["abstention"] or "predicted"
-        for arm, status in (("incumbent", reason), ("challenger", "predicted"),
-                            ("history_mean", "predicted"), ("universe_mean", "predicted")):
+        for arm, status in (("incumbent", reason), ("challenger", "predicted"), ("history_mean", "predicted")):
             coverage[(arm, meta["event_date"][:4], h, baseline["quote_status"], status,
                       "available" if event in targets else label_reasons[event],
                       "complete" if event in matched else "other_horizon_abstention")] += 1
@@ -98,8 +97,7 @@ def paired_report(events, challenger, incumbent, targets, *, label_reasons=None,
             rows.append({"event_id": event, "horizon_sessions": h, "year": day[:4], "ticker": meta["ticker"],
                 "quarter": day[:4] + "Q" + str((int(day[5:7]) - 1) // 3 + 1),
                 "absolute_move_pct": targets[event], "challenger": a[event, h]["predicted_absolute_move_pct"],
-                "incumbent": baseline["predicted_absolute_move_pct"], "history_mean": baseline["history_mean"],
-                "universe_mean": baseline["universe_mean"]})
+                "incumbent": baseline["predicted_absolute_move_pct"], "history_mean": baseline["history_mean"]})
     result = {"schema_version": "size_paired_report.v1", "eligible_events": len(metadata),
         "forecast_matched_events": len(matched), "label_unavailable_events": sorted(set(metadata) - set(targets)),
         "paired_events": len({r["event_id"] for r in rows}), "event_total_weight": 1,
@@ -110,22 +108,14 @@ def paired_report(events, challenger, incumbent, targets, *, label_reasons=None,
         "final_read_authority": "none", "claim": "frozen_dataset_development_only",
         "interval_caveat": "does_not_account_for_all_prior_adaptive_design_choices"}
     broad = [{"absolute_move_pct": targets[e], "challenger": a[e, h]["predicted_absolute_move_pct"],
-              "history_mean": b[e, h]["history_mean"], "universe_mean": b[e, h]["universe_mean"]}
-             for e, h in sorted(expected) if e in targets]
-    result["broad_coverage_metrics"] = ({arm: _metrics(broad, arm)
-        for arm in ("challenger", "history_mean", "universe_mean")} if broad else {})
+              "history_mean": b[e, h]["history_mean"]} for e, h in sorted(expected) if e in targets]
+    result["broad_coverage_metrics"] = ({arm: _metrics(broad, arm) for arm in ("challenger", "history_mean")}
+                                         if broad else {})
     result["challenger_abstentions"] = 0  # A failed selected arm refuses the entire report.
     if rows:
-        result.update(metrics={arm: _metrics(rows, arm)
-                               for arm in ("challenger", "incumbent", "history_mean", "universe_mean")},
-            difference=_difference(rows),
-            paired_differences={arm: _difference(rows, arm)
-                                for arm in ("incumbent", "history_mean", "universe_mean")},
-            quarter_bootstrap=_bootstrap(rows, "quarter"),
+        result.update(metrics={arm: _metrics(rows, arm) for arm in ("challenger", "incumbent", "history_mean")},
+            difference=_difference(rows), quarter_bootstrap=_bootstrap(rows, "quarter"),
             issuer_sensitivity=_bootstrap(rows, "ticker"),
-            paired_intervals={arm: {"quarter": _bootstrap(rows, "quarter", arm),
-                                    "ticker": _bootstrap(rows, "ticker", arm)}
-                              for arm in ("history_mean", "universe_mean")},
             per_year={y: _breakdown([r for r in rows if r["year"] == y]) for y in sorted({r["year"] for r in rows})},
             per_horizon={str(h): _breakdown([r for r in rows if r["horizon_sessions"] == h]) for h in leads})
     else:
@@ -134,8 +124,5 @@ def paired_report(events, challenger, incumbent, targets, *, label_reasons=None,
 
 
 def _breakdown(rows):
-    references = ("incumbent", "history_mean", "universe_mean")
-    return {"difference": _difference(rows),
-            "paired_differences": {arm: _difference(rows, arm) for arm in references},
-            "arms": {arm: _metrics(rows, arm)
-                     for arm in ("challenger", *references)}}
+    return {"difference": _difference(rows), "arms": {arm: _metrics(rows, arm)
+            for arm in ("challenger", "incumbent", "history_mean")}}
