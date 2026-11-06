@@ -412,6 +412,7 @@ opened and looked at.
 | Board empty, `no_upcoming_events` flag | the forward calendar has not been pulled | `python3 -m engine.data.pulls.forward_calendar` — ORATS alone can never fill it |
 | `calendar_date_conflict` flag | Nasdaq and yfinance disagree on a print date | both rows are on the board; one is wrong. Trust the one ORATS confirms once it lands |
 | `validation_red`, previous snapshot still up | the store failed the freshness/coverage battery | read the flag file; do not publish around it |
+| Nightly exits 1 with `DAILY_MARKET_DATE_INCOMPLETE` | the full `daily_market` rebuild's completeness preflight saw a published date below 75% of its neighbours, so the refresh is refused | hard refresh stop: the prior curated tables, MANIFEST and SNAPSHOT stay in place and nothing is scored; fix the source gap and rerun |
 | `selfcheck_red` | the bundle and the engine disagree | look at `mismatches`; a model or data change mid-run is the usual cause |
 | `publish_failed` | target down, or the access probe saw a public 200 | the local bundle still rendered; fix the target, retry next night |
 | Nightly exits 1 with a `TIER4_*` code (`TIER4_REPAIR_FAILED`, `TIER4_REPAIR_BUDGET`, `TIER4_GAP_REMAINS`) | the Tier-4 gap repair failed, ran over budget or left the gap; nothing was scored and no new SNAPSHOT was written | read the `tiers_stop` flag in the flag report; fix the cause and rerun (the repair is idempotent) |

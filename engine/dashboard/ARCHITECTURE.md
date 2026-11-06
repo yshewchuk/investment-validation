@@ -310,9 +310,12 @@ publish command, per `publish.py`'s `CommandPublisher` variant);
   table. Ordinary calendar refresh failures and Tier failures still degrade
   as in a full run and are recorded in `steps`/`flags`, but
   `DailyMarketCompletenessError` stops the run at refresh with
-  `DAILY_MARKET_DATE_INCOMPLETE`, as described above. The run writes the flag
-  report and the standard `nightly_<date>.json`, never writes the nightly
-  state file
+  `DAILY_MARKET_DATE_INCOMPLETE`, as described above. That typed stop writes the
+  best-effort `tiers_stop` flag report through `_refuse`, exits 1, and writes
+  neither the standard `nightly_<date>.json` nor the optional `--json` report;
+  it also leaves the nightly state file untouched. A completed fetch-only run
+  writes the flag report and the standard `nightly_<date>.json`, never writes
+  the nightly state file
   (`last_successful_as_of`, calendar), so a later full run still back-fills
   the nights this one did not score, and never touches the ledger, bundle or
   publish target. A degraded `tiers` step is visible to

@@ -98,9 +98,10 @@ def fetch_daily_index() -> dict[str, dict[str, list[dict]]]:
 
     Cached because a rebuild asks for it once per ticker.
 
-    Snapshots are indexed oldest-fetched first so a later, more complete
-    market-wide response is appended after the ones it supersedes. Fetch time
-    therefore decides precedence only *among* the market-wide snapshots.
+    Snapshots are indexed oldest-fetched first. Among market-wide snapshots,
+    later fetch time sets overlap precedence: a later-fetched response is
+    appended after the ones it supersedes. That ordering says nothing about
+    whether the later response is more complete.
     :func:`_rows_for` appends the legacy per-ticker rows before these, then the
     per-ticker history after them; normalization's ``keep="last"`` therefore
     lets the history win any overlap across all sources.

@@ -538,31 +538,46 @@ def test_sample_build_skips_the_guard(tmp_root, monkeypatch):
 
 
 def test_preflight_accepts_the_exact_75_percent_threshold(monkeypatch):
-    """A date with exactly 75% of its neighbours' median is accepted."""
+    """A date at exactly 75% of its neighbours is accepted; one below is refused."""
     previous = pd.Timestamp("2024-02-01")
     centre = pd.Timestamp("2024-02-02")
     following = pd.Timestamp("2024-02-03")
     tickers = [f"N{i:02d}" for i in range(8)]
 
-    def fake_normalize_daily(ticker, cache):
-        index = int(ticker[1:])
-        days = [previous, following]
-        if index < 6:
-            days.append(centre)
-        frame = pd.DataFrame(
-            {
-                "ticker": ticker,
-                "date": pd.to_datetime(days),
-                "year": [day.year for day in days],
-                "spot": 100.0,
-            }
-        )
-        return frame, {"ticker": ticker}
+    def run(present):
+        def fake_normalize_daily(ticker, cache):
+            index = int(ticker[1:])
+            days = [previous, following]
+            if index < present:
+                days.append(centre)
+            frame = pd.DataFrame(
+                {
+                    "ticker": ticker,
+                    "date": pd.to_datetime(days),
+                    "year": [day.year for day in days],
+                    "spot": 100.0,
+                }
+            )
+            return frame, {"ticker": ticker}
 
-    monkeypatch.setattr(rebuild, "_normalize_daily", fake_normalize_daily)
-    monkeypatch.setattr(rebuild, "_market_wide_snapshot_dates", lambda: [])
+        monkeypatch.setattr(rebuild, "_normalize_daily", fake_normalize_daily)
+        monkeypatch.setattr(rebuild, "_market_wide_snapshot_dates", lambda: [])
+        return rebuild._preflight_daily_completeness(tickers, None)
 
+    # 6 of 8 is exactly 75% of the neighbours' count, so it is accepted.
     try:
-        rebuild._preflight_daily_completeness(tickers, None)
+        run(6)
     except rebuild.DailyMarketCompletenessError as exc:
         pytest.fail(f"a date at exactly 75% must be accepted: {exc}")
+
+    # 5 of 8 falls below the same 6.0 threshold, so it is refused.
+    with pytest.raises(rebuild.DailyMarketCompletenessError) as excinfo:
+        run(5)
+
+    error = excinfo.value
+    assert error.code == "DAILY_MARKET_DATE_INCOMPLETE"
+    assert error.date == centre.date().isoformat()
+    assert error.count == 5
+    assert error.previous_count == 8
+    assert error.next_count == 8
+    assert error.threshold == pytest.approx(6.0)
