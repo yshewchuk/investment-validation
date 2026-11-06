@@ -50,26 +50,38 @@ def test_append_deduplicates_and_preserves_existing_rows_with_backup(tmp_path):
     assert refresh.append_candidates(path, fresh) == 1
     result = pd.read_parquet(path).set_index("event_id")
     assert result.loc["old", "marker"] == 1
+    assert result.loc["old", "exit_date"] == pd.Timestamp("2026-09-30")
+    assert result.loc["old", "spot_exit"] == 99.0
+    assert result.loc["old", "dte_exit"] == 3
+    assert result.loc["old", "exit_value"] == -1.0
+    assert result.loc["old", "pnl"] == -3.0
+    assert result.loc["old", "ret"] == -1.5
     assert result.loc["new", "marker"] == 2
     assert result.loc["new", "pnl"] == 1.0
     assert result.loc["new", "ret"] == 0.5
-    assert result.loc["old", "exit_date"] == pd.Timestamp("2026-10-02")
-    assert result.loc["old", "spot_exit"] == 101.0
-    assert result.loc["old", "dte_exit"] == 0
-    assert result.loc["old", "exit_value"] == 3.0
-    assert result.loc["old", "pnl"] == 2.0
-    assert result.loc["old", "ret"] == 2.0
     assert list(pd.read_parquet(path).columns) == list(original.columns)
     from tools import build_chooser_pool
     built = build_chooser_pool.build(path).set_index("event_id")
-    assert built.loc["old", "exit_date"] == pd.Timestamp("2026-10-02")
-    assert built.loc["old", "pnl"] == 2.0
+    assert "old" not in built.index
+    assert built.loc["new", "pnl"] == 1.0
     fresh.loc[0, ["pnl", "ret"]] = [2.0, 2.0]
     before_rerun = path.read_bytes()
     assert refresh.append_candidates(path, fresh) == 0
     assert path.read_bytes() == before_rerun
     assert len(result) == 2
     pd.testing.assert_frame_equal(pd.read_parquet(path.with_suffix(".parquet.bak")), original)
+
+
+def test_append_refuses_changed_family_winner(tmp_path):
+    path = tmp_path / "candidates.parquet"
+    _rows(["same-event"]).to_parquet(path, index=False)
+    before = path.read_bytes()
+    fresh = _rows(["same-event"])
+    fresh["variant"] = 1
+
+    with pytest.raises(TrainingRefused, match="candidate_identity_conflict"):
+        refresh.append_candidates(path, fresh)
+    assert path.read_bytes() == before
 
 
 def test_append_schema_refusal_leaves_prior_table_unchanged(tmp_path):
@@ -198,7 +210,7 @@ def test_publication_fsyncs_staged_file_before_replace_and_directory_after(tmp_p
     assert events == ["fsync", "replace", "fsync"]
 
 
-def test_retained_repaired_rows_get_expiry_date_on_a_different_month_refresh(tmp_path):
+def test_retained_repaired_rows_are_not_rewritten_by_month_refresh(tmp_path):
     path = tmp_path / "candidates.parquet"
     old = _rows(["historical"], exit_dates=["2026-09-30"])
     old.loc[0, ["exit_arb_ok", "exit_value"]] = [False, -1.0]
@@ -206,7 +218,8 @@ def test_retained_repaired_rows_get_expiry_date_on_a_different_month_refresh(tmp
 
     assert refresh.append_candidates(path, _rows(["new"])) == 1
     result = pd.read_parquet(path).set_index("event_id")
-    assert result.loc["historical", "exit_date"] == pd.Timestamp("2026-10-02")
+    assert result.loc["historical", "exit_date"] == pd.Timestamp("2026-09-30")
+    assert result.loc["historical", "exit_value"] == -1.0
 
 
 @pytest.mark.parametrize("field", ["exit_value_expiry", "entry_cost"])
@@ -261,6 +274,17 @@ def test_refuses_fresh_repaired_row_with_missing_or_pre_entry_expiry(tmp_path, e
     with pytest.raises(TrainingRefused, match="candidate_causality_failed"):
         refresh.append_candidates(path, fresh)
     assert path.read_bytes() == before
+
+
+def test_fresh_repaired_exit_date_uses_expiry(tmp_path):
+    path = tmp_path / "candidates.parquet"
+    _rows(["old"]).to_parquet(path, index=False)
+    fresh = _rows(["new"], exit_dates=["2026-09-30"])
+    fresh.loc[0, ["exit_arb_ok", "exit_value"]] = [False, -1.0]
+
+    assert refresh.append_candidates(path, fresh) == 1
+    result = pd.read_parquet(path).set_index("event_id")
+    assert result.loc["new", "exit_date"] == pd.Timestamp("2026-10-02")
 
 
 def test_refuses_retained_repaired_row_with_pre_entry_expiry(tmp_path):

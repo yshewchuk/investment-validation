@@ -89,18 +89,19 @@ def append_candidates(path: Path, fresh: pd.DataFrame) -> int:
     fresh_expiry = pd.to_datetime(fresh["expiry"], errors="coerce")
     if fresh_expiry.loc[repaired_fresh].isna().any() or fresh_expiry.loc[repaired_fresh].lt(pd.to_datetime(fresh.loc[repaired_fresh, "entry_date"], errors="coerce")).any(): refuse("candidate_causality_failed", "repaired fresh rows require expiry on or after entry", path)
     fresh.loc[repaired_fresh, "exit_value"] = fresh.loc[repaired_fresh, "exit_value_expiry"]
+    fresh.loc[repaired_fresh, "exit_date"] = fresh.loc[repaired_fresh, "expiry"]
     fresh["pnl"] = fresh["exit_value"] - fresh["entry_cost"]
     fresh["ret"] = fresh["pnl"].div(fresh["entry_cost"]).where(fresh["entry_cost"].gt(MIN_MEANINGFUL_COST))
     fresh = fresh.drop_duplicates(list(KEY), keep="first")
     new_keys, old_keys = (pd.MultiIndex.from_frame(frame[list(KEY)]) for frame in (fresh, old))
+    if (winner_conflicts := fresh.merge(old, on=["event_id", "arm", "fill_alpha"], suffixes=("_fresh", "_stored"))).eval("variant_fresh != variant_stored").any(): refuse("candidate_identity_conflict", "event, arm and fill already have a different variant winner", path)
     repaired = ~old["exit_arb_ok"].fillna(True).astype(bool) | old["exit_value"].lt(0)
     expiry = pd.to_datetime(old["expiry"], errors="coerce")
     retained = repaired & ~old_keys.isin(new_keys) & old["exit_value_expiry"].notna() & old["entry_cost"].notna()
     if expiry.loc[retained].isna().any(): refuse("candidate_causality_failed", "retained repaired rows require expiry date", path)
     if expiry.loc[retained].lt(pd.to_datetime(old.loc[retained, "entry_date"], errors="coerce")).any(): refuse("candidate_causality_failed", "retained expiry must not precede entry", path)
-    history_changed = retained & old["exit_date"].ne(expiry)
-    old.loc[retained, "exit_date"] = expiry.loc[retained]
-    updates = fresh[list(KEY) + list(SETTLEMENT_FIELDS)].rename(
+    history_changed = pd.Series(False, index=old.index)
+    updates = fresh.loc[~new_keys.isin(old_keys), list(KEY) + list(SETTLEMENT_FIELDS)].rename(
         columns={name: f"_fresh_{name}" for name in SETTLEMENT_FIELDS})
     columns = old.columns
     old = old.merge(updates, on=list(KEY), how="left", sort=False)
