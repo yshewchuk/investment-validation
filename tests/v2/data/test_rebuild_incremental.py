@@ -347,4 +347,5 @@ def test_incremental_refusal_covers_cached_daily_preflight(world, monkeypatch):
 
     assert excinfo.value.code == "DAILY_MARKET_DATE_INCOMPLETE"
     assert excinfo.value.date == "2024-01-05"
+    assert excinfo.value.count == 2
     assert called == []

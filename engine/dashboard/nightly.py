@@ -8,7 +8,9 @@ Order is load-bearing, per the guide:
    enabled and must cover the previous trading session or stops the run. A
    calendar refresh failure degrades to cached data (staleness stays visible in
    meta.json) — except a rotated credential, which stops the run: retry loops
-   against a dead key only burn goodwill.
+   against a dead key only burn goodwill. A daily completeness refusal is not a
+   degradation: it stops the run with ``NightlyStop`` at ``refresh`` and
+   preserves the published snapshot.
 2. **Validate** the fresh data. Red stops the pipeline; yesterday's snapshot
    stays published and a flag is raised.
 2a. **Warm** the Tier-4 serving models score will touch, in a subprocess; a
@@ -1843,7 +1845,7 @@ def run_nightly(
         except CredentialRotated as exc:
             raise NightlyStop("refresh", f"credential rotated — {exc}. Update .env; do not retry.") from exc
         except DailyMarketCompletenessError as exc:
-            raise NightlyStop("refresh", f"{exc.code}: {exc.reason}") from exc
+            raise _refuse(report, "refresh", f"{exc.code}: {exc.reason}") from exc
         except (FetchError, QuotaExhausted, ValueError) as exc:
             report.steps["refresh"] = {"degraded": True, "error": f"{type(exc).__name__}: {exc}"}
             report.flags.append({"kind": "refresh_degraded",

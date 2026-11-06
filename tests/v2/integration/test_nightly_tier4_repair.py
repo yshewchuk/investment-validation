@@ -1256,7 +1256,7 @@ def test_run_nightly_stops_on_a_daily_completeness_refusal(monkeypatch, tmp_path
     def refuse(*args, **kwargs):
         raise DailyMarketCompletenessError(
             date="2026-10-09", count=7, previous_count=10, next_count=10,
-            threshold=7.5, reason="2026-10-09 has 7 rows, below the 75% floor")
+            threshold=7.5)
 
     monkeypatch.setattr(nightly, "refresh_calendar_data", refuse)
     sentinel = _ScorerSentinel()
@@ -1270,8 +1270,17 @@ def test_run_nightly_stops_on_a_daily_completeness_refusal(monkeypatch, tmp_path
 
     assert caught.value.step == "refresh"
     assert caught.value.detail == (
-        "DAILY_MARKET_DATE_INCOMPLETE: "
-        "2026-10-09 has 7 rows, below the 75% floor")
+        "DAILY_MARKET_DATE_INCOMPLETE: daily_market has 7 rows on 2026-10-09, "
+        "below 75% of the median of its adjacent published dates (10 and 10); "
+        "threshold 7.5")
+    report = captured["report"]
+    assert report.stopped == "refresh"
+    stops = [f for f in report.flags if f.get("kind") == "tiers_stop"]
+    assert len(stops) == 1, "a refusal appends exactly one tiers_stop flag"
+    assert stops[0]["detail"] == (
+        "DAILY_MARKET_DATE_INCOMPLETE: daily_market has 7 rows on 2026-10-09, "
+        "below 75% of the median of its adjacent published dates (10 and 10); "
+        "threshold 7.5")
     assert not sentinel.touched
     assert marker_writes == []
     assert calls == []

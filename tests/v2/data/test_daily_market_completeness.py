@@ -261,6 +261,71 @@ def test_invalid_rows_on_low_date_are_excluded_before_the_count(
     assert error.threshold == pytest.approx(7.5)
 
 
+def test_date_whose_raw_rows_all_fail_validation_still_refuses(
+    tmp_root, monkeypatch
+):
+    invalid_day = DATES[2]
+    _install_daily_source(
+        monkeypatch, invalid_date=invalid_day, invalid_tickers=set(TICKERS)
+    )
+    monkeypatch.setattr(rebuild, "_market_wide_snapshot_dates", lambda: [])
+
+    with pytest.raises(rebuild.DailyMarketCompletenessError) as excinfo:
+        rebuild.build_daily_table()
+
+    error = excinfo.value
+    assert error.code == "DAILY_MARKET_DATE_INCOMPLETE"
+    assert error.date == invalid_day
+    assert error.count == 0
+    assert error.previous_count == len(TICKERS)
+    assert error.next_count == len(TICKERS)
+    assert error.threshold == pytest.approx(7.5)
+
+
+def test_asymmetric_neighbours_use_their_arithmetic_median(
+    tmp_root, monkeypatch
+):
+    previous_day = pd.Timestamp("2024-02-01")
+    centre_day = pd.Timestamp("2024-02-02")
+    next_day = pd.Timestamp("2024-02-03")
+    tickers = [f"N{i:02d}" for i in range(16)]
+
+    def fake_list_tickers(root=None, *, include_fetch=True):
+        return list(tickers)
+
+    def fake_normalize_daily(ticker, cache):
+        index = int(ticker[1:])
+        days = [next_day]
+        if index < 8:
+            days.append(previous_day)
+        if index < 7:
+            days.append(centre_day)
+        frame = pd.DataFrame(
+            {
+                "ticker": ticker,
+                "date": pd.to_datetime(days),
+                "year": [day.year for day in days],
+                "spot": 100.0,
+            }
+        )
+        return frame, {"ticker": ticker}
+
+    monkeypatch.setattr(n_daily, "list_tickers", fake_list_tickers)
+    monkeypatch.setattr(rebuild, "_normalize_daily", fake_normalize_daily)
+    monkeypatch.setattr(rebuild, "_market_wide_snapshot_dates", lambda: [])
+
+    with pytest.raises(rebuild.DailyMarketCompletenessError) as excinfo:
+        rebuild.build_daily_table()
+
+    error = excinfo.value
+    assert error.code == "DAILY_MARKET_DATE_INCOMPLETE"
+    assert error.date == centre_day.date().isoformat()
+    assert error.count == 7
+    assert error.previous_count == 8
+    assert error.next_count == 16
+    assert error.threshold == pytest.approx(9.0)
+
+
 def test_sample_zero_is_a_full_build_and_refuses_the_gap(tmp_root, monkeypatch):
     _install_daily_source(
         monkeypatch, missing_date=LOW_DATE, missing_tickers=MISSING_ON_LOW
@@ -470,3 +535,34 @@ def test_sample_build_skips_the_guard(tmp_root, monkeypatch):
     assert set(table["ticker"]) == {"T00", "T01"}
     assert (table["spot"] > 0).all()
     assert table["spot"].eq(100.0).all()
+
+
+def test_preflight_accepts_the_exact_75_percent_threshold(monkeypatch):
+    """A date with exactly 75% of its neighbours' median is accepted."""
+    previous = pd.Timestamp("2024-02-01")
+    centre = pd.Timestamp("2024-02-02")
+    following = pd.Timestamp("2024-02-03")
+    tickers = [f"N{i:02d}" for i in range(8)]
+
+    def fake_normalize_daily(ticker, cache):
+        index = int(ticker[1:])
+        days = [previous, following]
+        if index < 6:
+            days.append(centre)
+        frame = pd.DataFrame(
+            {
+                "ticker": ticker,
+                "date": pd.to_datetime(days),
+                "year": [day.year for day in days],
+                "spot": 100.0,
+            }
+        )
+        return frame, {"ticker": ticker}
+
+    monkeypatch.setattr(rebuild, "_normalize_daily", fake_normalize_daily)
+    monkeypatch.setattr(rebuild, "_market_wide_snapshot_dates", lambda: [])
+
+    try:
+        rebuild._preflight_daily_completeness(tickers, None)
+    except rebuild.DailyMarketCompletenessError as exc:
+        pytest.fail(f"a date at exactly 75% must be accepted: {exc}")

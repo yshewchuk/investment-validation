@@ -253,7 +253,9 @@ def _preflight_daily_completeness(tickers: list[str], cache) -> None:
     only the clean rows and cannot emit a quarantine flag; the write pass adds
     source attribution and can emit the one flag for the same frame.
     Successful market-wide fetch metadata contributes zero-count candidates,
-    making an HTTP-200 empty snapshot visible.
+    making an HTTP-200 empty snapshot visible. Every non-null raw date is also
+    registered as a zero-count candidate before validation, so a date whose
+    rows all fail validation cannot disappear from the check.
 
     A date is compared with the median of its nearest published neighbours (two,
     so their mean; a first or last date has only one, so that count). A lone
@@ -272,6 +274,8 @@ def _preflight_daily_completeness(tickers: list[str], cache) -> None:
     for i, ticker in enumerate(tickers, 1):
         frame, _ = _normalize_daily(ticker, cache)
         if not frame.empty:
+            for day in frame["date"].dropna().unique():
+                counts.setdefault(pd.Timestamp(day), 0)
             clean, _ = validate.validate_daily(frame)
             for day, n in clean.groupby("date").size().items():
                 counts[day] = counts.get(day, 0) + int(n)
@@ -378,7 +382,8 @@ def build_daily_table(sample: int | None = None, cache=None) -> dict:
     not a full build. There is deliberately no public switch to skip the guard
     on a full build. :func:`rebuild` runs the preflight once up front, before
     any selected table builder, then uses the private implementation helper so
-    the scan is not repeated.
+    the scan is not repeated. The streaming write pass still normalizes every
+    ticker's rows again; reusing those parses is deferred to #2287.
     """
     tickers = _daily_tickers(sample)
     if not sample:

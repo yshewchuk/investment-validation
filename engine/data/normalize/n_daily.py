@@ -101,9 +101,9 @@ def fetch_daily_index() -> dict[str, dict[str, list[dict]]]:
     Snapshots are indexed oldest-fetched first so a later, more complete
     market-wide response is appended after the ones it supersedes. Fetch time
     therefore decides precedence only *among* the market-wide snapshots.
-    :func:`_rows_for` appends the per-ticker legacy and history rows after
-    these, and normalization's ``keep="last"`` then chooses the final winner
-    across all sources.
+    :func:`_rows_for` appends the legacy per-ticker rows before these, then the
+    per-ticker history after them; normalization's ``keep="last"`` therefore
+    lets the history win any overlap across all sources.
     """
     from engine.data.normalize.fetch_store import iter_orats_rows
 
