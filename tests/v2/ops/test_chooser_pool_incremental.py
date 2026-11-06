@@ -223,6 +223,19 @@ def test_refuses_retained_repaired_row_missing_settlement_input(tmp_path, field)
     assert path.read_bytes() == before
 
 
+@pytest.mark.parametrize("field", ["exit_value", "entry_cost"])
+def test_refuses_fresh_non_repaired_row_missing_settlement_input(tmp_path, field):
+    path = tmp_path / "candidates.parquet"
+    _rows(["old"]).to_parquet(path, index=False)
+    before = path.read_bytes()
+    fresh = _rows(["new"])
+    fresh.loc[0, field] = float("nan")
+
+    with pytest.raises(TrainingRefused, match="candidate_causality_failed"):
+        refresh.append_candidates(path, fresh)
+    assert path.read_bytes() == before
+
+
 @pytest.mark.parametrize("field", ["exit_value_expiry", "entry_cost"])
 def test_refuses_fresh_repaired_row_missing_settlement_input(tmp_path, field):
     path = tmp_path / "candidates.parquet"

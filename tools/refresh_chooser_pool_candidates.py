@@ -84,8 +84,9 @@ def append_candidates(path: Path, fresh: pd.DataFrame) -> int:
     if event.isna().any() or entry.isna().any() or exits.isna().any() or exits.lt(entry).any() or (event.lt(entry) & ~sessions.eq("BMO")).any() or (sessions.eq("BMO") & entry.ge(event)).any():
         refuse("candidate_causality_failed", "event, entry and exit dates must satisfy session causality")
     repaired_fresh = ~fresh["exit_arb_ok"].fillna(True).astype(bool) | fresh["exit_value"].lt(0)
-    if fresh.loc[repaired_fresh, ["exit_value_expiry", "entry_cost"]].isna().any(axis=None):
-        refuse("candidate_causality_failed", "repaired fresh rows require expiry payoff and entry cost")
+    if (fresh.loc[~repaired_fresh, ["exit_value", "entry_cost"]].isna().any(axis=None)
+            or fresh.loc[repaired_fresh, ["exit_value_expiry", "entry_cost"]].isna().any(axis=None)):
+        refuse("candidate_causality_failed", "fresh rows require settlement value and entry cost")
     fresh.loc[repaired_fresh, "exit_value"] = fresh.loc[repaired_fresh, "exit_value_expiry"]
     fresh["pnl"] = fresh["exit_value"] - fresh["entry_cost"]
     fresh["ret"] = fresh["pnl"].div(fresh["entry_cost"]).where(fresh["entry_cost"].gt(MIN_MEANINGFUL_COST))
