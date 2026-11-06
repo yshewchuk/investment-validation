@@ -1,0 +1,123 @@
+from types import SimpleNamespace
+
+import pandas as pd
+import pytest
+
+from engine.v2.models.training.fold_store import TrainingRefused
+from tools import refresh_chooser_pool_candidates as refresh
+
+
+def _rows(ids, markers=None):
+    markers = markers or list(range(len(ids)))
+    return pd.DataFrame({
+        "event_id": ids, "arm": ["N7q2_-1_-1_1"] * len(ids),
+        "variant": [0] * len(ids), "fill_alpha": [0.5] * len(ids),
+        "event_date": pd.to_datetime(["2026-09-01"] * len(ids)),
+        "entry_date": pd.to_datetime(["2026-09-01"] * len(ids)),
+        "session": ["AMC"] * len(ids), "marker": markers,
+    })
+
+
+def test_month_requires_canonical_yyyy_mm():
+    assert refresh.require_month("2026-10") == "2026-10"
+    for invalid in ("2026-13", "2026-1", "2026-10x"):
+        with pytest.raises(TrainingRefused, match="invalid_exit_month"):
+            refresh.require_month(invalid)
+
+
+def test_append_deduplicates_and_preserves_existing_rows_with_backup(tmp_path):
+    path = tmp_path / "candidates.parquet"
+    original = _rows(["old"], [1])
+    original.to_parquet(path, index=False)
+    fresh = _rows(["old", "new", "new"], [99, 2, 3])
+
+    assert refresh.append_candidates(path, fresh) == 1
+    result = pd.read_parquet(path).set_index("event_id")
+    assert result.loc["old", "marker"] == 1
+    assert result.loc["new", "marker"] == 2
+    assert len(result) == 2
+    pd.testing.assert_frame_equal(pd.read_parquet(path.with_suffix(".parquet.bak")), original)
+
+
+def test_append_schema_refusal_leaves_prior_table_unchanged(tmp_path):
+    path = tmp_path / "candidates.parquet"
+    original = _rows(["old"])
+    original.to_parquet(path, index=False)
+    before = path.read_bytes()
+    with pytest.raises(TrainingRefused, match="candidate_schema_mismatch"):
+        refresh.append_candidates(path, _rows(["new"]).drop(columns="event_date"))
+    assert path.read_bytes() == before
+
+
+def test_append_refuses_bad_dates_without_rewrite(tmp_path):
+    path = tmp_path / "candidates.parquet"
+    original = _rows(["old"])
+    original.to_parquet(path, index=False)
+    before = path.read_bytes()
+    fresh = _rows(["new"])
+    fresh.loc[0, "event_date"] = pd.Timestamp("2026-10-02")
+    with pytest.raises(TrainingRefused, match="candidate_causality_failed"):
+        refresh.append_candidates(path, fresh)
+    assert path.read_bytes() == before
+
+
+def test_missing_stored_table_is_typed_refusal(tmp_path):
+    with pytest.raises(TrainingRefused, match="candidate_table_missing"):
+        refresh.append_candidates(tmp_path / "missing.parquet", _rows(["new"]))
+
+
+def test_refresh_calls_monthly_builder_and_consumes_rows_only(tmp_path, monkeypatch):
+    path = tmp_path / "candidates.parquet"
+    _rows(["old"]).to_parquet(path, index=False)
+    calls = []
+
+    def build_all(**kwargs):
+        calls.append(kwargs)
+        return {"trades": _rows(["new"]), "tallies": object(), "events": object(), "meta": object()}
+
+    builder = SimpleNamespace(build_all=build_all)
+    spec = SimpleNamespace(loader=SimpleNamespace(exec_module=lambda _module: None), name="fake_builder")
+    monkeypatch.setattr(refresh.importlib.util, "spec_from_file_location", lambda *_args: spec)
+    monkeypatch.setattr(refresh.importlib.util, "module_from_spec", lambda _spec: builder)
+
+    assert refresh.refresh("2026-10", path) == 1
+    assert calls == [{"force": True, "limit_exit_month": "2026-10"}]
+    assert set(pd.read_parquet(path)["event_id"]) == {"old", "new"}
+    assert path.with_suffix(".parquet.bak").exists()
+
+
+def test_builder_failure_is_a_typed_refusal_and_does_not_rewrite(tmp_path, monkeypatch):
+    path = tmp_path / "candidates.parquet"
+    _rows(["old"]).to_parquet(path, index=False)
+    before = path.read_bytes()
+
+    def fail(**_kwargs):
+        raise RuntimeError("required chain missing")
+
+    builder = SimpleNamespace(build_all=fail)
+    spec = SimpleNamespace(loader=SimpleNamespace(exec_module=lambda _module: None), name="fake_builder")
+    monkeypatch.setattr(refresh.importlib.util, "spec_from_file_location", lambda *_args: spec)
+    monkeypatch.setattr(refresh.importlib.util, "module_from_spec", lambda _spec: builder)
+    with pytest.raises(TrainingRefused, match="candidate_build_failed"):
+        refresh.refresh("2026-10", path)
+    assert path.read_bytes() == before
+
+
+def test_chooser_source_builder_keeps_event_date(tmp_path, monkeypatch):
+    from tools import build_chooser_pool
+
+    monkeypatch.setattr(build_chooser_pool, "conditional_exit", lambda frame: frame.copy())
+    row = {
+        "arm": "N7q2_-1_-1_1", "event_id": "evt", "ticker": "XYZ",
+        "event_date": pd.Timestamp("2026-09-01"), "entry_date": pd.Timestamp("2026-09-01"),
+        "exit_date": pd.Timestamp("2026-10-01"), "fill_alpha": 0.5,
+        "entry_cost": 2.0, "exit_value": 3.0, "exit_value_expiry": 3.0,
+        "exit_arb_ok": True, "exp_pnl_sim": 1.0, "width_over_forecast": 0.2,
+        "anchor_over_spot": 1.0, "n_legs": 2, "rel_spread": 0.1,
+    }
+    row.update({column: 0.0 for column in build_chooser_pool.Scorer._CHOOSER_ANALOG_DIMS})
+    source = tmp_path / "candidates.parquet"
+    pd.DataFrame([row]).to_parquet(source, index=False)
+
+    result = build_chooser_pool.build(source)
+    assert result.loc[0, "event_date"] == pd.Timestamp("2026-09-01")

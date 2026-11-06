@@ -861,6 +861,10 @@ ids = ["cli:tools/captured_native_comparison.py", "cli:tools/phase4_targeted_rep
 reason = "Phase 4/5/6/7 migration preparation, inventory and targeted replay diagnostic tooling; evidence producers, not production consumers."
 
 [[excluded]]
+ids = ["cli:tools/refresh_chooser_pool_candidates.py"]
+reason = "Explicit supervisor-run monthly candidate-row refresh before chooser-source rebuild; a one-shot input producer, not an automated consumer."
+
+[[excluded]]
 ids = ["cli:tools/finality_probe.py"]
 reason = "Manual supervisor-run EOD finality measurement probe for ORATS and Massive (#877); evidence producer, not a production consumer."
 
