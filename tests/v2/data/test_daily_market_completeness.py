@@ -345,7 +345,10 @@ def test_the_public_builder_has_no_preflight_switch(tmp_root, monkeypatch):
         monkeypatch, missing_date=LOW_DATE, missing_tickers=MISSING_ON_LOW
     )
 
-    with pytest.raises(TypeError):
+    with pytest.raises(
+        TypeError,
+        match=r"build_daily_table\(\) got an unexpected keyword argument 'preflight'",
+    ):
         rebuild.build_daily_table(preflight=False)
 
 

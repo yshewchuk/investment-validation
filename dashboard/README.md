@@ -309,9 +309,11 @@ Order matters; each step gates the next.
    cores, then batched ORATS confirmation for names that printed in the last 10
    days. A dead credential stops the run; any other calendar refresh failure
    degrades to cached data and raises `refresh_degraded` — staleness stays
-   visible in `meta.json` instead of going silent. The separate guarded `^GSPC`
-   refresh runs before the panel rebuild; a failed fetch or source lacking
-   the prior NYSE session refuses the nightly with
+   visible in `meta.json` instead of going silent. The daily completeness
+   refusal (`DAILY_MARKET_DATE_INCOMPLETE`) is not a degraded
+   calendar-provider failure: it is a separate hard stop (see Failure modes).
+   The guarded `^GSPC` refresh runs before the panel rebuild; a failed fetch or
+   source lacking the prior NYSE session refuses the nightly with
    `GSPC_REFRESH_FAILED` or `GSPC_REFRESH_STALE`, preserving the old panel and
    stored series. Correct the source or credential and retry on the next
    nightly or a manual rerun.
@@ -412,7 +414,7 @@ opened and looked at.
 | Board empty, `no_upcoming_events` flag | the forward calendar has not been pulled | `python3 -m engine.data.pulls.forward_calendar` — ORATS alone can never fill it |
 | `calendar_date_conflict` flag | Nasdaq and yfinance disagree on a print date | both rows are on the board; one is wrong. Trust the one ORATS confirms once it lands |
 | `validation_red`, previous snapshot still up | the store failed the freshness/coverage battery | read the flag file; do not publish around it |
-| Nightly exits 1 with `DAILY_MARKET_DATE_INCOMPLETE` | the full `daily_market` rebuild's completeness preflight saw a published date below 75% of its neighbours, so the refresh is refused | hard refresh stop: the prior curated tables, MANIFEST and SNAPSHOT stay in place and nothing is scored; fix the source gap and rerun |
+| Nightly exits 1 with `DAILY_MARKET_DATE_INCOMPLETE` | the full `daily_market` rebuild's completeness preflight saw a published date below 75% of its neighbours, so the refresh is refused | hard refresh stop: the prior curated tables, MANIFEST and SNAPSHOT stay in place and nothing is scored. A plain rebuild reuses the cached, short `hist/summaries`/`hist/cores` responses and will not clear it. The supervisor must fetch fresh market-wide `hist/summaries` and `hist/cores` responses for each affected `tradeDate` using a new `refetch_token`, then run a full `python3 -m engine.data.rebuild --table daily`; do not lower the floor |
 | `selfcheck_red` | the bundle and the engine disagree | look at `mismatches`; a model or data change mid-run is the usual cause |
 | `publish_failed` | target down, or the access probe saw a public 200 | the local bundle still rendered; fix the target, retry next night |
 | Nightly exits 1 with a `TIER4_*` code (`TIER4_REPAIR_FAILED`, `TIER4_REPAIR_BUDGET`, `TIER4_GAP_REMAINS`) | the Tier-4 gap repair failed, ran over budget or left the gap; nothing was scored and no new SNAPSHOT was written | read the `tiers_stop` flag in the flag report; fix the cause and rerun (the repair is idempotent) |

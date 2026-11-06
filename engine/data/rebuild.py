@@ -380,10 +380,13 @@ def build_daily_table(sample: int | None = None, cache=None) -> dict:
     A full public call (a falsey ``sample``: ``None`` or ``0``) runs the
     completeness preflight; a sampled call skips it because a partial slice is
     not a full build. There is deliberately no public switch to skip the guard
-    on a full build. :func:`rebuild` runs the preflight once up front, before
-    any selected table builder, then uses the private implementation helper so
-    the scan is not repeated. The streaming write pass still normalizes every
-    ticker's rows again; reusing those parses is deferred to #2287.
+    on a full build. :func:`rebuild` performs one completeness preflight up
+    front, before any selected table builder, then calls the private
+    implementation helper so that preflight is not repeated. Its daily
+    streaming pass still repeats ``normalize_frames`` on each ticker's per-file
+    frames obtained through ``InputCache``; a cache hit avoids reparsing those
+    raw files, but the normalization itself runs again. Safe reuse of the
+    preflight-normalized results is deferred to #2287.
     """
     tickers = _daily_tickers(sample)
     if not sample:
