@@ -8,6 +8,7 @@ from experiments import magnitude_search_request as v2
 from experiments.magnitude_search_request_schema import (
     allows_hgb_axes, allows_neural, allows_size_family, request_version,
     uses_chrono_neural_profiles, uses_extended_neural_profiles)
+from engine.v2.research.magnitude_panel_qualified_table import recipe as qualified_panel_recipe
 
 __all__ = ["compile_request"]
 
@@ -94,8 +95,15 @@ def _finite_nonnegative(value):
 
 
 def _space(request):
-    v2._require(request["feature_sets"] == v2._SETS,
-                "stage-2 requires exactly ordered H/HM/HMO feature sets")
+    version = request_version(request["schema_version"])
+    allowed_sets = (*v2._SETS, "MO-", "M")
+    feature_sets = request["feature_sets"]
+    valid_sets = (type(feature_sets) is list and bool(feature_sets)
+        and all(type(subset) is str and subset in allowed_sets for subset in feature_sets)
+        and feature_sets == [subset for subset in allowed_sets if subset in feature_sets])
+    v2._require(valid_sets if version == 9 else feature_sets == v2._SETS,
+                "stage-2 v9 requires a nonempty ordered subset of H/HM/HMO/MO-/M"
+                if version == 9 else "stage-2 requires exactly ordered H/HM/HMO feature sets")
     space = request["space"]
     version = request["schema_version"]
     families = (_FAMILIES_V6 if allows_neural(request_version(version))
@@ -156,11 +164,12 @@ def _counts(request, horizons):
     v2._require(all(v2._years(inner[year]) and inner[year][-1] < year for year in outer),
                 "stage-2 inner years must be ordered and strictly earlier than their outer year")
     size = allows_size_family(request_version(request["schema_version"]))
-    count = int(size) + len(v2._SETS) * sum(math.prod(len(values) for values in axes.values())
+    count = int(size) + len(request["feature_sets"]) * sum(
+        math.prod(len(values) for values in axes.values())
         for family, axes in request["space"].items() if family != "size_v1_4")
     if allows_hgb_axes(request_version(request["schema_version"])):
         v2._require(count <= _MAX_V4_CANDIDATES,
-                    "stage-2 v6/v7/v8 grid exceeds the 1000-candidate ceiling"
+                    "stage-2 v6/v7/v8/v9 grid exceeds the 1000-candidate ceiling"
                     if allows_neural(request_version(request["schema_version"]))
                     else "stage-2 v4/v5 grid exceeds the 1000-candidate ceiling")
     inners, outers = sum(map(len, inner.values())), len(outer)
@@ -210,7 +219,8 @@ def compile_request(request, *, horizons=(5, 3, 1)):
     request_id = content_hash(request)
     result = {"schema_version": "magnitude_search_schedule.v2", "request": request,
         "request_id": request_id, "horizons": list(horizons),
-        "candidate_specs": [s for s in v2._specifications(request, request_id)
+        "candidate_specs": [s for s in v2._specifications(request, request_id,
+            recipe=qualified_panel_recipe if request_version(version) == 9 else v2.panel_recipe)
             if s["family"] != "size_v1_4" or s["feature_recipe"]["subset"] == "HMO"],
         "schedule": [{"outer_year": year, "inner_years": request["inner_years"][year]}
                      for year in request["outer_years"]], "counts": counts}
