@@ -7,7 +7,6 @@ import importlib.util
 import io
 import os
 import resource
-import shutil
 import stat
 import sys
 import tempfile
@@ -43,7 +42,7 @@ def require_month(value: str) -> str:
     return value
 
 
-def read_table(path: Path) -> pd.DataFrame:
+def read_table(path: Path) -> tuple[pd.DataFrame, bytes]:
     if not hasattr(os, "O_NOFOLLOW"):
         refuse("candidate_table_read_failed", "safe no-follow reads are unsupported")
     try:
@@ -63,7 +62,7 @@ def read_table(path: Path) -> pd.DataFrame:
             payload = source.read(MAX_BYTES + 1)
         if len(payload) > MAX_BYTES:
             refuse("candidate_table_too_large", "stored candidate table exceeds read limit")
-        return pd.read_parquet(io.BytesIO(payload))
+        return pd.read_parquet(io.BytesIO(payload)), payload
     except TrainingRefused:
         raise
     except Exception as exc:
@@ -74,7 +73,7 @@ def read_table(path: Path) -> pd.DataFrame:
 
 
 def append_candidates(path: Path, fresh: pd.DataFrame) -> int:
-    old = read_table(path)
+    old, original_bytes = read_table(path)
     if list(old.columns) != list(fresh.columns):
         refuse("candidate_schema_mismatch", "fresh and stored candidate columns differ")
     required = (*KEY, "event_date", "entry_date", "pnl", "ret", *SETTLEMENT_FIELDS)
@@ -124,7 +123,7 @@ def append_candidates(path: Path, fresh: pd.DataFrame) -> int:
         os.chmod(temp_path, path.stat().st_mode)
         with temp_path.open("rb") as staged:
             os.fsync(staged.fileno())
-        shutil.copy2(path, path.with_suffix(path.suffix + ".bak"))
+        path.with_suffix(path.suffix + ".bak").write_bytes(original_bytes)
         os.replace(temp_path, path)
         directory_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
         try:
