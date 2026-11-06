@@ -16,8 +16,8 @@ from pathlib import Path
 
 import pandas as pd
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from engine.paths import ROOT
 from engine.v2.models.training.fold_store import TrainingRefused
 from engine.v2.models.training.receipts import ReceiptIssue
 from engine.fills import MIN_MEANINGFUL_COST
@@ -91,12 +91,12 @@ def append_candidates(path: Path, fresh: pd.DataFrame) -> int:
     new_keys, old_keys = (pd.MultiIndex.from_frame(frame[list(KEY)]) for frame in (fresh, old))
     repaired = ~old["exit_arb_ok"].fillna(True).astype(bool) | old["exit_value"].lt(0)
     expiry = pd.to_datetime(old["expiry"], errors="coerce")
-    retained = repaired & ~old_keys.isin(new_keys)
-    if (expiry.loc[retained].isna() | old.loc[retained, "exit_value_expiry"].isna()
+    retained = repaired & ~old_keys.isin(new_keys) & old["exit_value_expiry"].notna()
+    if (expiry.loc[retained].isna()
             | expiry.loc[retained].lt(pd.to_datetime(old.loc[retained, "entry_date"], errors="coerce"))).any():
         refuse("candidate_causality_failed", "repaired stored rows require an effective expiry date")
-    history_changed = repaired & old["exit_date"].ne(expiry)
-    old.loc[repaired, "exit_date"] = expiry.loc[repaired]
+    history_changed = retained & old["exit_date"].ne(expiry)
+    old.loc[retained, "exit_date"] = expiry.loc[retained]
     updates = fresh[list(KEY) + list(SETTLEMENT_FIELDS)].rename(
         columns={name: f"_fresh_{name}" for name in SETTLEMENT_FIELDS})
     columns = old.columns
