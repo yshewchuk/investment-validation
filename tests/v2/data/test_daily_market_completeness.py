@@ -140,6 +140,53 @@ def test_latest_fetched_market_wide_snapshot_wins(tmp_path, monkeypatch):
     assert frame["spot"].iloc[0] == pytest.approx(10.0)
 
 
+def test_latest_fetched_cores_snapshot_sets_market_cap(tmp_path, monkeypatch):
+    """A newer market-wide cores fetch wins even when its key sorts first."""
+    from engine import paths
+
+    root = tmp_path / "fetch"
+    monkeypatch.setattr(paths, "RAW_FETCH", root)
+    trade_date = "2024-01-02"
+    _write_market_wide(
+        root,
+        "aa" + "0" * 62,
+        fetched_at="2026-09-02T12:00:00+00:00",
+        trade_date=trade_date,
+        rows=[{"ticker": "AAA", "tradeDate": trade_date, "stockPrice": 100.0}],
+    )
+    newer_key = "aa" + "1" * 62
+    older_key = "zz" + "0" * 62
+    assert newer_key < older_key
+    _write_market_wide(
+        root,
+        older_key,
+        fetched_at="2026-09-01T12:00:00+00:00",
+        trade_date=trade_date,
+        rows=[{"ticker": "AAA", "tradeDate": trade_date, "mktCap": 1000}],
+        endpoint="hist/cores",
+    )
+    _write_market_wide(
+        root,
+        newer_key,
+        fetched_at="2026-09-02T12:00:00+00:00",
+        trade_date=trade_date,
+        rows=[{"ticker": "AAA", "tradeDate": trade_date, "mktCap": 2000}],
+        endpoint="hist/cores",
+    )
+
+    n_daily.fetch_daily_index.cache_clear()
+    try:
+        frame, _ = n_daily.normalize_ticker(
+            "AAA", summaries_dir=tmp_path / "absent", cores_dir=tmp_path / "absent"
+        )
+    finally:
+        n_daily.fetch_daily_index.cache_clear()
+
+    expected = n_daily.mcap_to_usd([2000], [pd.Timestamp(trade_date)])[0]
+    assert len(frame) == 1
+    assert frame["mcap_usd"].iloc[0] == pytest.approx(expected)
+
+
 def test_low_date_refuses_before_writer_and_preserves_prior_table(tmp_root, monkeypatch):
     prior = pd.DataFrame(
         {
