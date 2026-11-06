@@ -250,6 +250,19 @@ def test_refuses_fresh_repaired_row_missing_settlement_input(tmp_path, field):
     assert path.read_bytes() == before
 
 
+@pytest.mark.parametrize("expiry", [pd.NaT, pd.Timestamp("2026-08-31")])
+def test_refuses_fresh_repaired_row_with_missing_or_pre_entry_expiry(tmp_path, expiry):
+    path = tmp_path / "candidates.parquet"
+    _rows(["old"]).to_parquet(path, index=False)
+    before = path.read_bytes()
+    fresh = _rows(["new"])
+    fresh.loc[0, ["exit_arb_ok", "exit_value", "expiry"]] = [False, -1.0, expiry]
+
+    with pytest.raises(TrainingRefused, match="candidate_causality_failed"):
+        refresh.append_candidates(path, fresh)
+    assert path.read_bytes() == before
+
+
 def test_refuses_retained_repaired_row_with_pre_entry_expiry(tmp_path):
     path = tmp_path / "candidates.parquet"
     old = _rows(["old"])

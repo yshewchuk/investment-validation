@@ -86,6 +86,8 @@ def append_candidates(path: Path, fresh: pd.DataFrame) -> int:
     repaired_fresh = ~fresh["exit_arb_ok"].fillna(True).astype(bool) | fresh["exit_value"].lt(0)
     if fresh.loc[~repaired_fresh, ["exit_value", "entry_cost"]].isna().any(axis=None): refuse("candidate_causality_failed", "non-repaired fresh rows require exit_value and entry_cost", path)
     if fresh.loc[repaired_fresh, ["exit_value_expiry", "entry_cost"]].isna().any(axis=None): refuse("candidate_causality_failed", "repaired fresh rows require exit_value_expiry and entry_cost", path)
+    fresh_expiry = pd.to_datetime(fresh["expiry"], errors="coerce")
+    if fresh_expiry.loc[repaired_fresh].isna().any() or fresh_expiry.loc[repaired_fresh].lt(pd.to_datetime(fresh.loc[repaired_fresh, "entry_date"], errors="coerce")).any(): refuse("candidate_causality_failed", "repaired fresh rows require expiry on or after entry", path)
     fresh.loc[repaired_fresh, "exit_value"] = fresh.loc[repaired_fresh, "exit_value_expiry"]
     fresh["pnl"] = fresh["exit_value"] - fresh["entry_cost"]
     fresh["ret"] = fresh["pnl"].div(fresh["entry_cost"]).where(fresh["entry_cost"].gt(MIN_MEANINGFUL_COST))
