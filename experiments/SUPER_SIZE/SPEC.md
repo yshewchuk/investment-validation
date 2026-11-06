@@ -134,6 +134,12 @@ or release is established by this development implementation.
 
 ## Stage 2 proposal
 
+The [expectations and encoding direction review](https://github.com/yshewchuk/investment-validation/pull/2217)
+records proposed source-qualified feature/model ablations and estimated PR slices.
+The [research-extension boundaries](../ARCHITECTURE.md#size-research-extension-boundaries)
+preserve the existing target, clocks, comparator and admission/evaluation controls.
+This direction adds no executable request, data acquisition or run authority.
+
 See [the stage-2 design](STAGE2_DESIGN.md) for causal panel features, bounded
 inner-only selection and a proposed matched legacy comparison; it is not implemented.
 Stage-2 scope, acceptance criteria and the PR split (design section 5) live in that
