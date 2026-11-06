@@ -35,7 +35,66 @@ from engine.data.normalize import n_chains, n_daily, n_events, n_option_daily, n
 from engine.data.rebuild_cache import InputCache
 
 __all__ = ["rebuild", "finalize_rebuild", "finalize_current_store", "RebuildResult",
+           "DailyMarketCompletenessError", "DailyMarketMetadataTooLargeError",
            "TABLE_ORDER"]
+
+#: Fraction of the adjacent-date median a published date must reach.
+DAILY_COMPLETENESS_FLOOR = 0.75
+
+
+class DailyMarketCompletenessError(RuntimeError):
+    """A gapped published date; raised before the writer, table stays intact."""
+
+    code = "DAILY_MARKET_DATE_INCOMPLETE"
+
+    def __init__(
+        self,
+        *,
+        date: str,
+        count: int,
+        previous_count: int | None,
+        next_count: int | None,
+        threshold: float,
+        reason: str | None = None,
+    ):
+        self.date = date
+        self.count = count
+        self.previous_count = previous_count
+        self.next_count = next_count
+        self.neighbor_counts = (previous_count, next_count)
+        self.threshold = threshold
+        if previous_count is None and next_count is None:
+            neighbors = "no adjacent published date"
+        elif previous_count is None:
+            neighbors = f"its only adjacent published date ({next_count})"
+        elif next_count is None:
+            neighbors = f"its only adjacent published date ({previous_count})"
+        else:
+            neighbors = (
+                f"the median of its adjacent published dates "
+                f"({previous_count} and {next_count})"
+            )
+        self.reason = reason or (
+            f"daily_market has {count} rows on {date}, below "
+            f"{DAILY_COMPLETENESS_FLOOR:.0%} of {neighbors}; "
+            f"threshold {threshold:.1f}"
+        )
+        self.details = {
+            "date": date,
+            "count": count,
+            "previous_count": previous_count,
+            "next_count": next_count,
+            "threshold": threshold,
+            "reason": self.reason,
+        }
+        super().__init__(f"{self.code}: {self.reason}")
+
+
+class DailyMarketMetadataTooLargeError(DailyMarketCompletenessError):
+    """A market-wide metadata sidecar exceeds the preflight byte cap."""
+
+    code = "DAILY_MARKET_METADATA_TOO_LARGE"
+
 
 #: ``daily_market`` before ``securities`` (which is derived from it) and before
 #: the panel (which joins it).
@@ -133,22 +192,143 @@ def build_events_table(sample: int | None = None) -> dict:
     return report
 
 
-def build_daily_table(sample: int | None = None, cache=None) -> dict:
-    """Build ``daily_market``; ``cache`` (an ``InputCache``) reuses per-file parses."""
-    _banner("daily_market")
+def _normalize_daily(ticker: str, cache) -> tuple[pd.DataFrame, dict]:
+    if cache is None:
+        return n_daily.normalize_ticker(ticker)
+    return rebuild_incremental.normalize_ticker_cached(ticker, cache)
+
+
+def _rss_suffix() -> str:
+    """Return a peak-RSS progress suffix, or ``""`` when unavailable."""
+    try:
+        import resource
+        peak_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+    except (ImportError, AttributeError, OSError, ValueError):
+        return ""
+    return f", peak RSS {peak_mb:.0f} MB"
+
+
+def _market_wide_snapshot_dates() -> list:
+    from engine.data.fetch import iter_cached
+
+    dates: list = []
+    for endpoint in ("hist/summaries", "hist/cores"):
+        try:
+            entries = iter_cached("orats", endpoint, max_meta_bytes=64 * 1024)
+        except ValueError as exc:
+            raise DailyMarketMetadataTooLargeError(
+                date=str(getattr(exc, "path", "unknown")),
+                count=int(getattr(exc, "size", 0)),
+                previous_count=None,
+                next_count=None,
+                threshold=float(getattr(exc, "cap", 0.0)),
+                reason=str(exc),
+            ) from exc
+        for entry in entries:
+            params = entry.params
+            if params.get("ticker"):
+                continue
+            try:
+                status = int(entry.meta.get("status", 0))
+            except (TypeError, ValueError):
+                continue
+            if status != 200:
+                continue
+            day = params.get("tradeDate")
+            if day:
+                parsed = pd.to_datetime(day, errors="coerce")
+                if pd.notna(parsed):
+                    dates.append(parsed)
+    return dates
+
+
+def _preflight_daily_completeness(tickers: list[str], cache, snapshot_dates=None) -> None:
+    counts: dict = {}
+    total = len(tickers)
+    started = time.monotonic()
+    last = started - 30.0
+    print(
+        f"  [daily preflight] start 0/{total} tickers, elapsed 0s{_rss_suffix()}",
+        file=sys.stderr,
+        flush=True,
+    )
+    if snapshot_dates is None:
+        snapshot_dates = _market_wide_snapshot_dates()
+    for i, ticker in enumerate(tickers, 1):
+        frame, _ = _normalize_daily(ticker, cache)
+        if not frame.empty:
+            for day in frame["date"].dropna().unique():
+                counts.setdefault(pd.Timestamp(day), 0)
+            clean, _ = validate.validate_daily(frame)
+            for day, n in clean.groupby("date").size().items():
+                counts[day] = counts.get(day, 0) + int(n)
+        now = time.monotonic()
+        if now - last >= 30.0:
+            last = now
+            elapsed = now - started
+            rate = i / elapsed if elapsed > 0 else 0
+            eta = (total - i) / rate if rate > 0 else 0
+            print(
+                f"  [daily preflight] {i}/{total} tickers, {elapsed:.0f}s elapsed, "
+                f"{rate:.1f}/s, ETA {eta:.0f}s, dates={len(counts)}",
+                file=sys.stderr,
+                flush=True,
+            )
+
+    for day in snapshot_dates:
+        counts.setdefault(day, 0)
+
+    dates = sorted(counts)
+    for i, day in enumerate(dates):
+        previous = int(counts[dates[i - 1]]) if i > 0 else None
+        following = int(counts[dates[i + 1]]) if i + 1 < len(dates) else None
+        if previous is None and following is None:
+            continue
+        neighbours = [n for n in (previous, following) if n is not None]
+        threshold = DAILY_COMPLETENESS_FLOOR * (sum(neighbours) / len(neighbours))
+        count = int(counts[day])
+        if count < threshold:
+            date = pd.Timestamp(day).date().isoformat()
+            elapsed = time.monotonic() - started
+            print(
+                f"  [daily preflight] refused after {elapsed:.0f}s: date={date} "
+                f"count={count} threshold={threshold:.1f}{_rss_suffix()}",
+                file=sys.stderr,
+                flush=True,
+            )
+            raise DailyMarketCompletenessError(
+                date=date,
+                count=count,
+                previous_count=previous,
+                next_count=following,
+                threshold=threshold,
+            )
+
+    elapsed = time.monotonic() - started
+    print(
+        f"  [daily preflight] done in {elapsed:.0f}s: {total}/{total} tickers, "
+        f"{len(dates)} date(s){_rss_suffix()}",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
+def _daily_tickers(sample: int | None) -> list[str]:
+    """Return the daily tickers, limited to the first ``sample`` when set."""
     tickers = n_daily.list_tickers()
-    if sample:
-        tickers = tickers[:sample]
+    return tickers[:sample] if sample else tickers
+
+
+def _build_daily_table(tickers: list[str], cache) -> dict:
+    _banner("daily_market")
+
     progress = _Progress("daily", len(tickers))
     batch = validate.ValidationReport(table="daily_market")
     skipped: list[str] = []
 
     with store.PartitionedWriter("daily_market") as writer:
         for i, ticker in enumerate(tickers, 1):
-            if cache is None:
-                frame, report = n_daily.normalize_ticker(ticker)
-            else:
-                frame, report = rebuild_incremental.normalize_ticker_cached(ticker, cache)
+            frame, report = _normalize_daily(ticker, cache)
             if frame.empty:
                 skipped.append(ticker)
             else:
@@ -168,6 +348,15 @@ def build_daily_table(sample: int | None = None, cache=None) -> dict:
         "rows": stats.rows,
         "validation": batch.summary(),
     }
+
+
+def build_daily_table(sample: int | None = None, cache=None) -> dict:
+    """Build ``daily_market``; a full call preflights, a sample skips it."""
+    snapshot_dates = None if sample else _market_wide_snapshot_dates()
+    tickers = _daily_tickers(sample)
+    if not sample:
+        _preflight_daily_completeness(tickers, cache, snapshot_dates)
+    return _build_daily_table(tickers, cache)
 
 
 def build_securities_table() -> dict:
@@ -460,6 +649,16 @@ def _with_cache(table: str, build, incremental: bool):
     return report
 
 
+def _build_daily_from_rebuild(tickers, incremental: bool, cache) -> dict:
+    """Build ``daily_market`` after :func:`rebuild` has run the preflight once."""
+    if incremental:
+        report = _build_daily_table(tickers, cache)
+        cache.commit()
+        print(f"  {cache.summary()}", flush=True)
+        return report
+    return _build_daily_table(tickers, cache)
+
+
 def rebuild(
     tables: tuple[str, ...] = TABLE_ORDER,
     sample: int | None = None,
@@ -469,20 +668,8 @@ def rebuild(
 ) -> RebuildResult:
     """Rebuild the named tables.
 
-    ``incremental=True`` (opt-in; the legacy nightly passes it) reuses cached
-    per-input parses for ``daily_market`` and ``option_chains`` -- see
-    :mod:`engine.data.rebuild_cache`. The outputs are byte-identical to the
-    default full rebuild, which neither reads nor writes that cache.
-
-    ``sample`` cannot be combined with ``incremental``: a sampled run sees only
-    part of the inputs, so committing its manifest would prune the cache of
-    every input the sample skipped.
-
-    ``finalize=False`` returns after the builders, leaving the manifest and
-    snapshot unwritten and stashing ``started`` on the result for a later
-    :func:`finalize_rebuild`. A caller that must not publish a snapshot for a
-    bad build (the nightly, on a gapped Tier-4) uses this and only finalizes
-    once the result checks out; the default path is unchanged.
+    ``incremental=True`` reuses cached ``daily_market``/``option_chains`` parses but
+    cannot combine with ``sample``; ``finalize=False`` defers to :func:`finalize_rebuild`.
     """
     if incremental and sample:
         raise ValueError("--sample cannot be combined with --incremental")
@@ -490,10 +677,20 @@ def rebuild(
     paths.ensure_dirs()
     result = RebuildResult()
 
+    selected = [name for name in TABLE_ORDER if name in tables]
+    daily_cache = None
+    daily_tickers = None
+    if "daily" in selected:
+        snapshot_dates = None if sample else _market_wide_snapshot_dates()
+        daily_tickers = _daily_tickers(sample)
+        if not sample:
+            if incremental:
+                daily_cache = InputCache("daily_market")
+            _preflight_daily_completeness(daily_tickers, daily_cache, snapshot_dates)
+
     builders = {
         "events": lambda: build_events_table(sample),
-        "daily": lambda: _with_cache(
-            "daily_market", lambda c: build_daily_table(sample, c), incremental),
+        "daily": lambda: _build_daily_from_rebuild(daily_tickers, incremental, daily_cache),
         "securities": build_securities_table,
         "chains": lambda: _with_cache(
             "option_chains", lambda c: build_chains_table(sample, c), incremental),
@@ -515,13 +712,7 @@ def rebuild(
 
 
 def finalize_rebuild(result: RebuildResult) -> RebuildResult:
-    """Write the manifest and snapshot for a built result and stamp elapsed.
-
-    Split from :func:`rebuild` so a caller can build the tables first and only
-    publish a snapshot after deciding the result is sound -- the nightly
-    defers finalizing the incremental Tier-3/4 build until the Tier-4 gap check
-    passes, so a night whose full repair is refused leaves no new snapshot behind.
-    """
+    """Write the manifest and snapshot for a built result and stamp elapsed."""
     _banner("manifest + snapshot")
     stats = manifest.collect_stats()
     result.tables = stats
@@ -539,15 +730,7 @@ def finalize_rebuild(result: RebuildResult) -> RebuildResult:
 
 
 def finalize_current_store() -> RebuildResult:
-    """Write the manifest and SNAPSHOT of the store as found.
-
-    Called by ``engine.dashboard.nightly.mark_tiers_degraded`` on any tiers
-    degrade; when refresh ran it also covers the refresh rebuild's deferred
-    snapshot. The refresh rebuild was told
-    ``finalize=False`` because the tiers step would finalize, and a degraded
-    tiers step still scores the store as it is found (the refreshed store when
-    refresh ran), so the SNAPSHOT of that store is written here.
-    """
+    """Write the manifest and snapshot of the store as found on tier degradation."""
     return finalize_rebuild(RebuildResult(started=time.time()))
 
 

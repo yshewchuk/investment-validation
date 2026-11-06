@@ -250,7 +250,14 @@ publish command, per `publish.py`'s `CommandPublisher` variant);
 - **Calendar input / refresh failure** — a calendar refresh failure degrades
   to cached data (staleness stays visible in `meta.json`) — except a rotated
   credential, which stops the run rather than burning retries against a dead
-  key. `^GSPC` refresh failures use the typed refusal above.
+  key. A completeness refusal from the refresh rebuild
+  (`DailyMarketCompletenessError`) is not a degradation: it stops the run with
+  `NightlyStop` at `refresh`, and the detail carries
+  `DAILY_MARKET_DATE_INCOMPLETE` plus the preflight reason. Because that
+  preflight runs before any selected table builder and before the daily writer,
+  the previous curated tables, MANIFEST and published SNAPSHOT stay in place;
+  no partial build is published and the run does not score. `^GSPC` refresh
+  failures use the typed refusal above.
 - **Forward-chain retry ledger** — transient (non-404) failures, wrong-shape
   or non-JSON 200s and quota/abnormal-exit remainders are saved to
   `reports/orats_chain_retry.json` and re-asked for 14 days, including after
@@ -278,6 +285,7 @@ publish command, per `publish.py`'s `CommandPublisher` variant);
   | --- | --- |
   | Empty calendar universe and GSPC helper returns `session_not_final` for the as-of ceiling | Retry once at the expected previous session with the same refetch token; any retry refusal follows the `^GSPC` refresh failure outcome above |
   | `^GSPC` refresh refuses (`GSPC_REFRESH_FAILED`) or source lacks the last NYSE session strictly before the resolved decision date (`GSPC_REFRESH_STALE`; with refresh and tiers on) | `NightlyStop` at `gspc_refresh`; exit 1 after calendar refresh and finality resolution, but before panel rebuild, warm or score; previous panel and published board remain; stale source is refused before the stored series is read or written |
+  | Daily completeness refusal during the refresh rebuild (`DailyMarketCompletenessError`) | `NightlyStop` at `refresh` carrying `DAILY_MARKET_DATE_INCOMPLETE` and the preflight reason; exit 1; previous curated tables, MANIFEST and published SNAPSHOT stay in place; nothing scored or published |
   | Warm step (default scorer, or `--fetch-only`): subprocess exits non-zero, cannot start, times out (3 h), fails to plan/verify, leaves a fit missing or not ready, or the panel changed under it | `NightlyStop` `WARM_SERVING_FAILED`; exit 1; nothing scored; no in-process refit |
   | Incremental build leaves an out-of-window gap (`tier4_gap_partial`) | Full Tier-4 rebuild (no `--since`); no gap flag once repaired |
   | Repair raises / exceeds budget / leaves the gap / its finalize fails | `NightlyStop` with `TIER4_REPAIR_FAILED`, `TIER4_REPAIR_BUDGET` or `TIER4_GAP_REMAINS`; exit 1; nothing scored or published; no new SNAPSHOT (the previous one is kept), so the native import sees no new session for the night (`not_yet`, unless an earlier run that night already wrote one) |
@@ -299,15 +307,35 @@ publish command, per `publish.py`'s `CommandPublisher` variant);
   refresh off, tiers off or backup on raises `ValueError` before any work
   (the CLI turns the same rule into the exit 2 above). The `^GSPC` pre-panel
   refresh is required here too and refuses failed or stale coverage as in the
-  table. Calendar refresh and tiers degrade as in a full run and are recorded
-  in `steps`/`flags`. The run writes the flag report and the
-  standard `nightly_<date>.json`, never writes the nightly state file
+  table. Ordinary calendar refresh failures and Tier failures still degrade
+  as in a full run and are recorded in `steps`/`flags`, but
+  `DailyMarketCompletenessError` stops the run at refresh with
+  `DAILY_MARKET_DATE_INCOMPLETE`, as described above. That typed stop writes the
+  best-effort `tiers_stop` flag report through `_refuse`, exits 1, and writes
+  neither the standard `nightly_<date>.json` nor the optional `--json` report;
+  it also leaves the nightly state file untouched. A completed fetch-only run
+  writes the flag report and the standard `nightly_<date>.json`, never writes
+  the nightly state file
   (`last_successful_as_of`, calendar), so a later full run still back-fills
   the nights this one did not score, and never touches the ledger, bundle or
   publish target. A degraded `tiers` step is visible to
   `nightly_readiness._require_ready`, which refuses it as for a full run.
 - **Validate** — a red validation stops the pipeline; yesterday's snapshot
   stays published and a flag is raised.
+- **Store rebuild refusal** — when the selected tables include `daily` and the
+  build is full (no sample, or `--sample 0`), `daily_market` runs a completeness
+  preflight once before any selected table builder and before a
+  `PartitionedWriter` is constructed. A partial-table rebuild that does not
+  select `daily` takes no coverage guard. If a published date has fewer
+  validated rows than 75% of the median of its nearest published neighbour(s),
+  the rebuild stops with `DAILY_MARKET_DATE_INCOMPLETE` and writes no Tier-2
+  table (earlier selected tables such as `events` are not built); the previous
+  curated tables, MANIFEST and SNAPSHOT stay in place. Successful market-wide
+  fetch metadata `tradeDate` values count as
+  zero-row candidates, so an HTTP-200 empty snapshot is visible as a gap.
+  Only this preflight caps market-wide metadata sidecars at 64 KiB; an
+  oversized sidecar refuses with `DAILY_MARKET_METADATA_TOO_LARGE` (a
+  `DailyMarketCompletenessError` subclass).
 - **Selfcheck mismatch** — stops the publish; the nightly records raw
   mismatches, v2's adapter persists `scrub_mismatches` row/field/reason only.
   Board and selfcheck use the same chains: no entry-date chain prices off the

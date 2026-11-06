@@ -1246,6 +1246,68 @@ def test_run_nightly_refuses_stale_panel_input_when_gspc_refresh_fails(
     assert calls == []
 
 
+def test_run_nightly_stops_on_a_daily_completeness_refusal(monkeypatch, tmp_path):
+    finalize_calls = []
+    nightly, calls, captured, marker_writes = _patch_run_nightly(
+        monkeypatch, rebuild_results=[], finalize_calls=finalize_calls,
+        marker_path=_marker(tmp_path), events=_events_stub(["AAA"]))
+    from engine.data.rebuild import DailyMarketCompletenessError
+
+    def refuse(*args, **kwargs):
+        raise DailyMarketCompletenessError(
+            date="2026-10-09", count=7, previous_count=10, next_count=10,
+            threshold=7.5)
+
+    monkeypatch.setattr(nightly, "refresh_calendar_data", refuse)
+    sentinel = _ScorerSentinel()
+
+    with pytest.raises(NightlyStop) as caught:
+        nightly.run_nightly(
+            as_of="2026-10-13", tickers=["AAA"], refresh=True, tiers=True,
+            publish=False, scorer=sentinel,
+            bundle_dir=tmp_path / "bundle", target=tmp_path / "target",
+        )
+
+    assert caught.value.step == "refresh"
+    assert caught.value.detail == (
+        "DAILY_MARKET_DATE_INCOMPLETE: daily_market has 7 rows on 2026-10-09, "
+        "below 75% of the median of its adjacent published dates (10 and 10); "
+        "threshold 7.5")
+    report = captured["report"]
+    assert report.stopped == "refresh"
+    stops = [f for f in report.flags if f.get("kind") == "tiers_stop"]
+    assert len(stops) == 1, "a refusal appends exactly one tiers_stop flag"
+    assert stops[0]["detail"] == (
+        "DAILY_MARKET_DATE_INCOMPLETE: daily_market has 7 rows on 2026-10-09, "
+        "below 75% of the median of its adjacent published dates (10 and 10); "
+        "threshold 7.5")
+    assert not sentinel.touched
+    assert marker_writes == []
+    assert calls == []
+    assert len(captured["flag_reports"]) == 1, \
+        "the refusal writes the flag report exactly once"
+
+    # The CLI maps the typed stop to exit 1 and writes neither the standard
+    # nightly report nor the state file.
+    from engine import paths
+
+    monkeypatch.setattr(nightly, "single_run_lock",
+                        lambda: contextlib.nullcontext())
+    monkeypatch.setattr(paths, "ROOT", tmp_path)
+    report_path = tmp_path / "reports" / "nightly_2026-10-13.json"
+    state_path = nightly._state_path(tmp_path / "bundle")
+    assert not report_path.exists()
+    assert not state_path.exists()
+
+    assert nightly.main([
+        "--as-of", "2026-10-13", "--tickers", "AAA",
+        "--no-publish", "--no-backfill", "--bundle", str(tmp_path / "bundle"),
+    ]) == 1
+
+    assert not report_path.exists(), "a refused run writes no nightly report"
+    assert not state_path.exists(), "a refused run leaves the state file untouched"
+
+
 def test_run_nightly_skips_gspc_refresh_when_refresh_is_disabled(
         monkeypatch, tmp_path):
     finalize_calls = []

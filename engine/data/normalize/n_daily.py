@@ -97,12 +97,20 @@ def fetch_daily_index() -> dict[str, dict[str, list[dict]]]:
     market-wide (``tradeDate``) responses, which are a few thousand rows each.
 
     Cached because a rebuild asks for it once per ticker.
+
+    Snapshots are indexed oldest-fetched first. Among market-wide snapshots,
+    later fetch time sets overlap precedence: a later-fetched response is
+    appended after the ones it supersedes. That ordering says nothing about
+    whether the later response is more complete.
+    :func:`_rows_for` appends the legacy per-ticker rows before these, then the
+    per-ticker history after them; normalization's ``keep="last"`` therefore
+    lets the history win any overlap across all sources.
     """
     from engine.data.normalize.fetch_store import iter_orats_rows
 
     index: dict[str, dict[str, list[dict]]] = {}
     for endpoint, kind in (("hist/summaries", "summaries"), ("hist/cores", "cores")):
-        for source in iter_orats_rows(endpoint):
+        for source in iter_orats_rows(endpoint, order_by_fetched_at=True):
             # A response fetched for ONE ticker is fetched back on demand.
             if (source.params or {}).get("ticker"):
                 continue
@@ -155,11 +163,12 @@ def read_history_body(path: Path) -> list | None:
 def _rows_for(ticker: str, kind: str, directory: Path) -> list[dict]:
     """Legacy per-ticker file plus anything the fetch store holds, unioned.
 
-    Both generations are kept: the legacy tree is the historical bulk and the
-    fetch store is everything pulled since, and a daily refresh must extend the
-    series rather than replace it. Duplicate trade dates are collapsed by the
-    caller (last wins), so an overlapping re-pull is a no-op rather than a
-    conflict.
+    Order defines precedence because the caller collapses duplicate trade dates
+    with ``keep="last"``. This appends, in turn: the legacy per-ticker file, the
+    market-wide snapshots (oldest fetched first, so the newest response is last
+    and wins), then the per-ticker history pull. Both generations are kept: the
+    legacy tree is the historical bulk and the fetch store is everything pulled
+    since, so a daily refresh extends the series rather than replacing it.
     """
     rows: list[dict] = []
     path = directory / f"{ticker}.json.gz"
