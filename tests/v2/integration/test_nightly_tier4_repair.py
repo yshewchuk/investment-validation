@@ -1284,6 +1284,28 @@ def test_run_nightly_stops_on_a_daily_completeness_refusal(monkeypatch, tmp_path
     assert not sentinel.touched
     assert marker_writes == []
     assert calls == []
+    assert len(captured["flag_reports"]) == 1, \
+        "the refusal writes the flag report exactly once"
+
+    # The CLI maps the typed stop to exit 1 and writes neither the standard
+    # nightly report nor the state file.
+    from engine import paths
+
+    monkeypatch.setattr(nightly, "single_run_lock",
+                        lambda: contextlib.nullcontext())
+    monkeypatch.setattr(paths, "ROOT", tmp_path)
+    report_path = tmp_path / "reports" / "nightly_2026-10-13.json"
+    state_path = nightly._state_path(tmp_path / "bundle")
+    assert not report_path.exists()
+    assert not state_path.exists()
+
+    assert nightly.main([
+        "--as-of", "2026-10-13", "--tickers", "AAA",
+        "--no-publish", "--no-backfill", "--bundle", str(tmp_path / "bundle"),
+    ]) == 1
+
+    assert not report_path.exists(), "a refused run writes no nightly report"
+    assert not state_path.exists(), "a refused run leaves the state file untouched"
 
 
 def test_run_nightly_skips_gspc_refresh_when_refresh_is_disabled(

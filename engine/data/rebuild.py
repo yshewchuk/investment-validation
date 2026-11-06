@@ -14,11 +14,9 @@ Contracts this orchestrator upholds:
   failures quarantine the raw file and exclude the rows, loudly.
 * **Observable.** Progress lines at least once a minute — a silent long job is
   indistinguishable from a hung one, especially on a host that sleeps.
-* **Coverage-guarded.** When the selected tables include ``daily`` and
-  ``sample`` is falsey (``None`` or ``0``), a full ``daily_market`` build
-  preflights published-date coverage before any selected table builder,
-  refusing with ``DAILY_MARKET_DATE_INCOMPLETE`` instead of replacing the table
-  with a gap. Partial-table rebuilds without ``daily`` are unaffected.
+* **Coverage-guarded.** A full ``daily_market`` build (``daily`` selected, no
+  ``sample``) preflights published-date coverage before any builder, refusing
+  with ``DAILY_MARKET_DATE_INCOMPLETE`` instead of publishing a gap.
 """
 from __future__ import annotations
 
@@ -49,10 +47,7 @@ DAILY_COMPLETENESS_FLOOR = 0.75
 class DailyMarketCompletenessError(RuntimeError):
     """A full ``daily_market`` build has a gapped published date.
 
-    Raised by the preflight before :class:`~engine.data.store.PartitionedWriter`
-    is constructed, so the refusal leaves the current curated table untouched
-    instead of publishing a partial rebuild or an empty one.
-    """
+    Raised before the writer exists; the current table stays intact."""
 
     code = "DAILY_MARKET_DATE_INCOMPLETE"
 
@@ -201,7 +196,7 @@ def _normalize_daily(ticker: str, cache) -> tuple[pd.DataFrame, dict]:
 
 
 def _rss_suffix() -> str:
-    """Peak RSS suffix for progress boundaries; empty when unavailable."""
+    """Return a peak-RSS progress suffix, or ``""`` when unavailable."""
     try:
         import resource
         peak_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
@@ -211,22 +206,14 @@ def _rss_suffix() -> str:
 
 
 def _market_wide_snapshot_dates() -> list:
-    """``tradeDate`` values from successful market-wide cached responses.
-
-    Only the sidecar metadata is read — the cached bodies stay untouched. An
-    HTTP-200 snapshot whose body holds no rows leaves no normalized trace, so
-    its ``tradeDate`` is added to the count map as a zero-count candidate. That
-    is what makes an empty market-wide snapshot visible to the preflight instead
-    of silently missing from the dates it checks.
-    """
+    """``tradeDate`` values from successful market-wide cached responses."""
     from engine.data.fetch import iter_cached
 
     dates: list = []
     for endpoint in ("hist/summaries", "hist/cores"):
         for entry in iter_cached("orats", endpoint):
             params = entry.params
-            # Per-ticker responses are addressable by cache key and are appended
-            # by _rows_for; only market-wide snapshots belong here.
+            # Per-ticker responses are addressable by cache key; skip them.
             if params.get("ticker"):
                 continue
             try:
@@ -246,21 +233,10 @@ def _market_wide_snapshot_dates() -> list:
 def _preflight_daily_completeness(tickers: list[str], cache) -> None:
     """Refuse a full build whose published dates are missing most of the market.
 
-    Counts are taken from exactly the rows the streaming writer will keep: each
-    normalized frame goes through :func:`engine.data.validate.validate_daily`
-    first, so rows that validation excludes do not inflate a date. The counting
-    pass calls ``validate_daily(frame)`` without a source path, so it counts
-    only the clean rows and cannot emit a quarantine flag; the write pass adds
-    source attribution and can emit the one flag for the same frame.
-    Successful market-wide fetch metadata contributes zero-count candidates,
-    making an HTTP-200 empty snapshot visible. Every non-null raw date is also
-    registered as a zero-count candidate before validation, so a date whose
-    rows all fail validation cannot disappear from the check.
-
-    A date is compared with the median of its nearest published neighbours (two,
-    so their mean; a first or last date has only one, so that count). A lone
-    date with no neighbour at all is skipped. Running this before the writer
-    matters: its constructor replaces the existing table.
+    Counts use the validated rows the writer keeps plus zero-count candidates
+    from successful market-wide metadata and every non-null raw date; a date is
+    compared with the median of its nearest published neighbours (a lone date is
+    skipped). This runs before the writer, whose constructor replaces the table.
     """
     counts: dict = {}
     total = len(tickers)
@@ -302,7 +278,6 @@ def _preflight_daily_completeness(tickers: list[str], cache) -> None:
         if previous is None and following is None:
             continue
         neighbours = [n for n in (previous, following) if n is not None]
-        # One neighbour is the median by definition; two give their mean.
         threshold = DAILY_COMPLETENESS_FLOOR * (sum(neighbours) / len(neighbours))
         count = int(counts[day])
         if count < threshold:
@@ -332,17 +307,15 @@ def _preflight_daily_completeness(tickers: list[str], cache) -> None:
 
 
 def _daily_tickers(sample: int | None) -> list[str]:
-    """The ticker universe for one daily build, sliced when sampling."""
+    """Return the daily tickers, limited to the first ``sample`` when set."""
     tickers = n_daily.list_tickers()
     return tickers[:sample] if sample else tickers
 
 
 def _build_daily_table(tickers: list[str], cache) -> dict:
-    """Build ``daily_market`` from ``tickers`` without running the preflight.
+    """Build ``daily_market`` from ``tickers`` without the preflight.
 
-    Private on purpose: only :func:`build_daily_table` (which guards first) and
-    :func:`rebuild` (which runs the guard once before any selected builder) may
-    call it, so no public caller can bypass the completeness refusal.
+    Private: callers run the guard first.
     """
     _banner("daily_market")
 
@@ -377,16 +350,11 @@ def _build_daily_table(tickers: list[str], cache) -> dict:
 def build_daily_table(sample: int | None = None, cache=None) -> dict:
     """Build ``daily_market``; ``cache`` (an ``InputCache``) reuses per-file parses.
 
-    A full public call (a falsey ``sample``: ``None`` or ``0``) runs the
-    completeness preflight; a sampled call skips it because a partial slice is
-    not a full build. There is deliberately no public switch to skip the guard
-    on a full build. :func:`rebuild` performs one completeness preflight up
-    front, before any selected table builder, then calls the private
-    implementation helper so that preflight is not repeated. Its daily
-    streaming pass still repeats ``normalize_frames`` on each ticker's per-file
-    frames obtained through ``InputCache``; a cache hit avoids reparsing those
-    raw files, but the normalization itself runs again. Safe reuse of the
-    preflight-normalized results is deferred to #2287.
+    A full public call runs the completeness preflight; a sampled call skips it
+    because a partial slice is not a full build. :func:`rebuild` runs one
+    preflight up front, then calls the private helper. The cache stores only
+    per-file parse results: the preflight and write each renormalize every
+    ticker's frames, so a cache hit avoids reparsing, not renormalizing.
     """
     tickers = _daily_tickers(sample)
     if not sample:
@@ -730,10 +698,8 @@ def rebuild(
     if "daily" in selected:
         daily_tickers = _daily_tickers(sample)
         if not sample:
-            # Refuse a gapped full build before any table builder runs: events
-            # and the others would otherwise land before the daily check could
-            # stop it. A sampled or daily-excluding rebuild is partial by
-            # design and does not run this guard.
+            # Refuse before any builder runs; a sampled or daily-excluding
+            # rebuild is partial by design and does not run this guard.
             if incremental:
                 daily_cache = InputCache("daily_market")
             _preflight_daily_completeness(daily_tickers, daily_cache)

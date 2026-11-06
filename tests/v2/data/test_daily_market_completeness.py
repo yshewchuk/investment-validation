@@ -182,7 +182,7 @@ def test_latest_fetched_cores_snapshot_sets_market_cap(tmp_path, monkeypatch):
     finally:
         n_daily.fetch_daily_index.cache_clear()
 
-    expected = n_daily.mcap_to_usd([2000], [pd.Timestamp(trade_date)])[0]
+    expected = 2_000_000_000.0
     assert len(frame) == 1
     assert frame["mcap_usd"].iloc[0] == pytest.approx(expected)
 
