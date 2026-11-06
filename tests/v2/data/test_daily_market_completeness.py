@@ -484,19 +484,31 @@ def test_oversized_metadata_sidecar_refuses_before_the_writer(tmp_root, monkeypa
         trade_date="2024-01-08",
         params={"tradeDate": "2024-01-08", "padding": "x" * (64 * 1024)},
     )
-    _install_daily_source(monkeypatch)
+
+    def _list_tickers(root=None, *, include_fetch=True):
+        return list(TICKERS)
+
+    def _daily_index_must_not_be_read():
+        raise AssertionError("daily index read before the preflight refusal")
+
+    def _normalize_must_not_run(ticker, cache):
+        return n_daily.fetch_daily_index()
 
     class _WriterMustNotBeConstructed:
         def __init__(self, *args, **kwargs):
             raise AssertionError("writer constructed before the preflight")
 
+    n_daily.fetch_daily_index.cache_clear()
+    monkeypatch.setattr(n_daily, "list_tickers", _list_tickers)
+    monkeypatch.setattr(n_daily, "fetch_daily_index", _daily_index_must_not_be_read)
+    monkeypatch.setattr(rebuild, "_normalize_daily", _normalize_must_not_run)
     monkeypatch.setattr(store, "PartitionedWriter", _WriterMustNotBeConstructed)
 
     with pytest.raises(rebuild.DailyMarketCompletenessError) as excinfo:
         rebuild.build_daily_table()
 
     error = excinfo.value
-    assert error.code == "DAILY_MARKET_DATE_INCOMPLETE"
+    assert error.code == "DAILY_MARKET_METADATA_TOO_LARGE"
     assert "metadata sidecar" in error.reason
     assert "exceeds cap of 65536 bytes" in error.reason
 

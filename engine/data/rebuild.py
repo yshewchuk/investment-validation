@@ -14,7 +14,6 @@ Contracts this orchestrator upholds:
   failures quarantine the raw file and exclude the rows, loudly.
 * **Observable.** Progress lines at least once a minute — a silent long job is
   indistinguishable from a hung one, especially on a host that sleeps.
-* **Coverage-guarded.** A full ``daily_market`` build refuses on published-date gaps.
 """
 from __future__ import annotations
 
@@ -36,7 +35,8 @@ from engine.data.normalize import n_chains, n_daily, n_events, n_option_daily, n
 from engine.data.rebuild_cache import InputCache
 
 __all__ = ["rebuild", "finalize_rebuild", "finalize_current_store", "RebuildResult",
-           "DailyMarketCompletenessError", "TABLE_ORDER"]
+           "DailyMarketCompletenessError", "DailyMarketMetadataTooLargeError",
+           "TABLE_ORDER"]
 
 #: Fraction of the adjacent-date median a published date must reach.
 DAILY_COMPLETENESS_FLOOR = 0.75
@@ -88,6 +88,12 @@ class DailyMarketCompletenessError(RuntimeError):
             "reason": self.reason,
         }
         super().__init__(f"{self.code}: {self.reason}")
+
+
+class DailyMarketMetadataTooLargeError(DailyMarketCompletenessError):
+    """A market-wide metadata sidecar exceeds the preflight byte cap."""
+
+    code = "DAILY_MARKET_METADATA_TOO_LARGE"
 
 
 #: ``daily_market`` before ``securities`` (which is derived from it) and before
@@ -203,7 +209,6 @@ def _rss_suffix() -> str:
 
 
 def _market_wide_snapshot_dates() -> list:
-    """``tradeDate`` values from successful market-wide cached responses."""
     from engine.data.fetch import iter_cached
 
     dates: list = []
@@ -211,7 +216,7 @@ def _market_wide_snapshot_dates() -> list:
         try:
             entries = iter_cached("orats", endpoint, max_meta_bytes=64 * 1024)
         except ValueError as exc:
-            raise DailyMarketCompletenessError(
+            raise DailyMarketMetadataTooLargeError(
                 date=str(getattr(exc, "path", "unknown")),
                 count=int(getattr(exc, "size", 0)),
                 previous_count=None,
@@ -238,7 +243,6 @@ def _market_wide_snapshot_dates() -> list:
 
 
 def _preflight_daily_completeness(tickers: list[str], cache) -> None:
-    """Refuse a full build whose published dates are missing most of the market."""
     counts: dict = {}
     total = len(tickers)
     started = time.monotonic()
@@ -248,6 +252,7 @@ def _preflight_daily_completeness(tickers: list[str], cache) -> None:
         file=sys.stderr,
         flush=True,
     )
+    snapshot_dates = _market_wide_snapshot_dates()
     for i, ticker in enumerate(tickers, 1):
         frame, _ = _normalize_daily(ticker, cache)
         if not frame.empty:
@@ -269,7 +274,7 @@ def _preflight_daily_completeness(tickers: list[str], cache) -> None:
                 flush=True,
             )
 
-    for day in _market_wide_snapshot_dates():
+    for day in snapshot_dates:
         counts.setdefault(day, 0)
 
     dates = sorted(counts)
@@ -314,7 +319,6 @@ def _daily_tickers(sample: int | None) -> list[str]:
 
 
 def _build_daily_table(tickers: list[str], cache) -> dict:
-    """Build ``daily_market`` from ``tickers`` without the preflight."""
     _banner("daily_market")
 
     progress = _Progress("daily", len(tickers))
@@ -677,7 +681,6 @@ def rebuild(
     if "daily" in selected:
         daily_tickers = _daily_tickers(sample)
         if not sample:
-            # Refuse before any builder; sampled/partial builds skip this guard.
             if incremental:
                 daily_cache = InputCache("daily_market")
             _preflight_daily_completeness(daily_tickers, daily_cache)

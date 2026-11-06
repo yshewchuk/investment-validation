@@ -333,6 +333,9 @@ publish command, per `publish.py`'s `CommandPublisher` variant);
   curated tables, MANIFEST and SNAPSHOT stay in place. Successful market-wide
   fetch metadata `tradeDate` values count as
   zero-row candidates, so an HTTP-200 empty snapshot is visible as a gap.
+  Only this preflight caps market-wide metadata sidecars at 64 KiB; an
+  oversized sidecar refuses with `DAILY_MARKET_METADATA_TOO_LARGE` (a
+  `DailyMarketCompletenessError` subclass).
 - **Selfcheck mismatch** — stops the publish; the nightly records raw
   mismatches, v2's adapter persists `scrub_mismatches` row/field/reason only.
   Board and selfcheck use the same chains: no entry-date chain prices off the
