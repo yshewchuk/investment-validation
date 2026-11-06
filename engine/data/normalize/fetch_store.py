@@ -126,10 +126,13 @@ def iter_orats_rows(
     treats a bad file. A recognized envelope that simply holds zero rows is a
     legitimate empty answer and is only counted (``stats["empty"]``).
 
-    ``order_by_fetched_at`` returns market-wide snapshots oldest first, with
-    the cache key as a stable tie-breaker (legacy sidecars without a stamp sort
-    first by key). The default remains cache-key order, so existing callers see
-    exactly the deterministic sequence they always have.
+    ``order_by_fetched_at`` sorts EVERY cached entry on the endpoint oldest
+    first, with the cache key as a stable tie-breaker (legacy sidecars without
+    a stamp sort first by key). It does not filter to market-wide snapshots:
+    that is the caller's job, and ``n_daily.fetch_daily_index`` skips
+    ticker-specific entries before indexing. The default remains cache-key
+    order, so existing callers see exactly the deterministic sequence they
+    always have.
     """
     if stats is not None:
         stats.setdefault("scanned", 0)

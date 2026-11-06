@@ -14,9 +14,11 @@ Contracts this orchestrator upholds:
   failures quarantine the raw file and exclude the rows, loudly.
 * **Observable.** Progress lines at least once a minute — a silent long job is
   indistinguishable from a hung one, especially on a host that sleeps.
-* **Coverage-guarded.** A full ``daily_market`` build preflights published-date
-  coverage before any selected table builder, refusing with
-  ``DAILY_MARKET_DATE_INCOMPLETE`` instead of replacing the table with a gap.
+* **Coverage-guarded.** When the selected tables include ``daily`` and
+  ``sample`` is falsey (``None`` or ``0``), a full ``daily_market`` build
+  preflights published-date coverage before any selected table builder,
+  refusing with ``DAILY_MARKET_DATE_INCOMPLETE`` instead of replacing the table
+  with a gap. Partial-table rebuilds without ``daily`` are unaffected.
 """
 from __future__ import annotations
 
@@ -43,13 +45,17 @@ __all__ = ["rebuild", "finalize_rebuild", "finalize_current_store", "RebuildResu
 #: Fraction of the adjacent-date median a published date must reach.
 DAILY_COMPLETENESS_FLOOR = 0.75
 
+#: Metadata sidecars in the market-wide preflight are small by construction; a
+#: cap keeps a damaged or runaway sidecar from being read into memory.
+MARKET_WIDE_META_MAX_BYTES = 64 * 1024
+
 
 class DailyMarketCompletenessError(RuntimeError):
-    """A full ``daily_market`` build is missing rows on a published date.
+    """A full ``daily_market`` build has no source inventory or a gapped date.
 
     Raised by the preflight before :class:`~engine.data.store.PartitionedWriter`
     is constructed, so the refusal leaves the current curated table untouched
-    instead of publishing a partial rebuild.
+    instead of publishing a partial rebuild or an empty one.
     """
 
     code = "DAILY_MARKET_DATE_INCOMPLETE"
@@ -57,11 +63,13 @@ class DailyMarketCompletenessError(RuntimeError):
     def __init__(
         self,
         *,
-        date: str,
+        date: str | None,
         count: int,
         previous_count: int | None,
         next_count: int | None,
         threshold: float,
+        reason: str | None = None,
+        details: dict | None = None,
     ):
         self.date = date
         self.count = count
@@ -69,22 +77,25 @@ class DailyMarketCompletenessError(RuntimeError):
         self.next_count = next_count
         self.neighbor_counts = (previous_count, next_count)
         self.threshold = threshold
-        if previous_count is None and next_count is None:
-            neighbors = "no adjacent published date"
-        elif previous_count is None:
-            neighbors = f"its only adjacent published date ({next_count})"
-        elif next_count is None:
-            neighbors = f"its only adjacent published date ({previous_count})"
-        else:
-            neighbors = (
-                f"the median of its adjacent published dates "
-                f"({previous_count} and {next_count})"
+        if reason is None:
+            if previous_count is None and next_count is None:
+                neighbors = "no adjacent published date"
+            elif previous_count is None:
+                neighbors = f"its only adjacent published date ({next_count})"
+            elif next_count is None:
+                neighbors = f"its only adjacent published date ({previous_count})"
+            else:
+                neighbors = (
+                    f"the median of its adjacent published dates "
+                    f"({previous_count} and {next_count})"
+                )
+            self.reason = (
+                f"daily_market has {count} rows on {date}, below "
+                f"{DAILY_COMPLETENESS_FLOOR:.0%} of {neighbors}; "
+                f"threshold {threshold:.1f}"
             )
-        self.reason = (
-            f"daily_market has {count} rows on {date}, below "
-            f"{DAILY_COMPLETENESS_FLOOR:.0%} of {neighbors}; "
-            f"threshold {threshold:.1f}"
-        )
+        else:
+            self.reason = reason
         self.details = {
             "date": date,
             "count": count,
@@ -93,6 +104,8 @@ class DailyMarketCompletenessError(RuntimeError):
             "threshold": threshold,
             "reason": self.reason,
         }
+        if details:
+            self.details.update(details)
         super().__init__(self.reason)
 
 
@@ -221,7 +234,9 @@ def _market_wide_snapshot_dates() -> list:
 
     dates: list = []
     for endpoint in ("hist/summaries", "hist/cores"):
-        for entry in iter_cached("orats", endpoint):
+        for entry in iter_cached(
+            "orats", endpoint, max_meta_bytes=MARKET_WIDE_META_MAX_BYTES
+        ):
             params = entry.params
             # Per-ticker responses are addressable by cache key and are appended
             # by _rows_for; only market-wide snapshots belong here.
@@ -246,18 +261,38 @@ def _preflight_daily_completeness(tickers: list[str], cache) -> None:
 
     Counts are taken from exactly the rows the streaming writer will keep: each
     normalized frame goes through :func:`engine.data.validate.validate_daily`
-    first, so rows that validation excludes do not inflate a date. Successful
-    market-wide fetch metadata contributes zero-count candidates, making an
-    HTTP-200 empty snapshot visible.
+    first, so rows that validation excludes do not inflate a date. The flag is
+    deliberately omitted from this counting pass: source provenance and quarantine
+    belong to the write pass, and a second call must not append it again.
+    Successful market-wide fetch metadata contributes zero-count candidates,
+    making an HTTP-200 empty snapshot visible.
 
     A date is compared with the median of its nearest published neighbours (two,
     so their mean; a first or last date has only one, so that count). A lone
     date with no neighbour at all is skipped. Running this before the writer
     matters: its constructor replaces the existing table.
+
+    An empty ticker inventory is a no-source refusal, not a valid empty rebuild:
+    replacing ``daily_market`` with zero rows would erase the table without any
+    raw input having been read.
     """
     counts: dict = {}
     total = len(tickers)
     started = time.monotonic()
+    if not tickers:
+        raise DailyMarketCompletenessError(
+            date=None,
+            count=0,
+            previous_count=None,
+            next_count=None,
+            threshold=0.0,
+            reason=(
+                "daily_market has no source tickers: no legacy per-ticker files "
+                "or fetch-store daily rows were found; refusing to replace the "
+                "table with an empty build"
+            ),
+            details={"tickers": 0, "dates": 0},
+        )
     last = started - 30.0
     print(
         f"  [daily preflight] start 0/{total} tickers, elapsed 0s{_rss_suffix()}",
@@ -267,9 +302,7 @@ def _preflight_daily_completeness(tickers: list[str], cache) -> None:
     for i, ticker in enumerate(tickers, 1):
         frame, _ = _normalize_daily(ticker, cache)
         if not frame.empty:
-            clean, _ = validate.validate_daily(
-                frame, source_file=f"orats/summaries/{ticker}.json.gz"
-            )
+            clean, _ = validate.validate_daily(frame)
             for day, n in clean.groupby("date").size().items():
                 counts[day] = counts.get(day, 0) + int(n)
         now = time.monotonic()
@@ -324,22 +357,20 @@ def _preflight_daily_completeness(tickers: list[str], cache) -> None:
     )
 
 
-def build_daily_table(
-    sample: int | None = None, cache=None, *, preflight: bool = True
-) -> dict:
-    """Build ``daily_market``; ``cache`` (an ``InputCache``) reuses per-file parses.
+def _daily_tickers(sample: int | None) -> list[str]:
+    """The ticker universe for one daily build, sliced when sampling."""
+    tickers = n_daily.list_tickers()
+    return tickers[:sample] if sample else tickers
 
-    Direct callers get the completeness preflight by default. :func:`rebuild`
-    runs it once up front (before any selected table builder) and passes
-    ``preflight=False`` here so the work is not repeated. A falsey ``sample``
-    (``None`` or ``0``) means a full build and takes the guard.
+
+def _build_daily_table(tickers: list[str], cache) -> dict:
+    """Build ``daily_market`` from ``tickers`` without running the preflight.
+
+    Private on purpose: only :func:`build_daily_table` (which guards first) and
+    :func:`rebuild` (which runs the guard once before any selected builder) may
+    call it, so no public caller can bypass the completeness refusal.
     """
     _banner("daily_market")
-    tickers = n_daily.list_tickers()
-    if sample:
-        tickers = tickers[:sample]
-    if preflight and not sample:
-        _preflight_daily_completeness(tickers, cache)
 
     progress = _Progress("daily", len(tickers))
     batch = validate.ValidationReport(table="daily_market")
@@ -367,6 +398,21 @@ def build_daily_table(
         "rows": stats.rows,
         "validation": batch.summary(),
     }
+
+
+def build_daily_table(sample: int | None = None, cache=None) -> dict:
+    """Build ``daily_market``; ``cache`` (an ``InputCache``) reuses per-file parses.
+
+    Every public call runs the completeness preflight: a falsey ``sample``
+    (``None`` or ``0``) means a full build, and there is deliberately no public
+    switch to skip the guard. :func:`rebuild` runs it once up front, before any
+    selected table builder, then uses the private implementation helper so the
+    scan is not repeated.
+    """
+    tickers = _daily_tickers(sample)
+    if not sample:
+        _preflight_daily_completeness(tickers, cache)
+    return _build_daily_table(tickers, cache)
 
 
 def build_securities_table() -> dict:
@@ -659,14 +705,14 @@ def _with_cache(table: str, build, incremental: bool):
     return report
 
 
-def _build_daily_from_rebuild(sample, incremental: bool, cache) -> dict:
+def _build_daily_from_rebuild(tickers, incremental: bool, cache) -> dict:
     """Build ``daily_market`` after :func:`rebuild` has run the preflight once."""
     if incremental:
-        report = build_daily_table(sample, cache, preflight=False)
+        report = _build_daily_table(tickers, cache)
         cache.commit()
         print(f"  {cache.summary()}", flush=True)
         return report
-    return build_daily_table(sample, preflight=False)
+    return _build_daily_table(tickers, cache)
 
 
 def rebuild(
@@ -701,17 +747,21 @@ def rebuild(
 
     selected = [name for name in TABLE_ORDER if name in tables]
     daily_cache = None
-    if "daily" in selected and not sample:
-        # Refuse a gapped full build before any table builder runs: events and
-        # the others would otherwise land before the daily check could stop it.
-        daily_tickers = n_daily.list_tickers()
-        if incremental:
-            daily_cache = InputCache("daily_market")
-        _preflight_daily_completeness(daily_tickers, daily_cache)
+    daily_tickers = None
+    if "daily" in selected:
+        daily_tickers = _daily_tickers(sample)
+        if not sample:
+            # Refuse a gapped full build before any table builder runs: events
+            # and the others would otherwise land before the daily check could
+            # stop it. A sampled or daily-excluding rebuild is partial by
+            # design and does not run this guard.
+            if incremental:
+                daily_cache = InputCache("daily_market")
+            _preflight_daily_completeness(daily_tickers, daily_cache)
 
     builders = {
         "events": lambda: build_events_table(sample),
-        "daily": lambda: _build_daily_from_rebuild(sample, incremental, daily_cache),
+        "daily": lambda: _build_daily_from_rebuild(daily_tickers, incremental, daily_cache),
         "securities": build_securities_table,
         "chains": lambda: _with_cache(
             "option_chains", lambda c: build_chains_table(sample, c), incremental),

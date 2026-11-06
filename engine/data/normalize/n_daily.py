@@ -162,11 +162,12 @@ def read_history_body(path: Path) -> list | None:
 def _rows_for(ticker: str, kind: str, directory: Path) -> list[dict]:
     """Legacy per-ticker file plus anything the fetch store holds, unioned.
 
-    Both generations are kept: the legacy tree is the historical bulk and the
-    fetch store is everything pulled since, and a daily refresh must extend the
-    series rather than replace it. Duplicate trade dates are collapsed by the
-    caller (last wins), so an overlapping re-pull is a no-op rather than a
-    conflict.
+    Order defines precedence because the caller collapses duplicate trade dates
+    with ``keep="last"``. This appends, in turn: the legacy per-ticker file, the
+    market-wide snapshots (oldest fetched first, so the newest response is last
+    and wins), then the per-ticker history pull. Both generations are kept: the
+    legacy tree is the historical bulk and the fetch store is everything pulled
+    since, so a daily refresh extends the series rather than replacing it.
     """
     rows: list[dict] = []
     path = directory / f"{ticker}.json.gz"

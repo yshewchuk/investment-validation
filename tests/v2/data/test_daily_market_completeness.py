@@ -1,4 +1,4 @@
-"""Market-wide daily snapshots must be latest-first and complete.
+"""Market-wide daily snapshots must be ordered oldest-first and complete.
 
 Two adjacent failures let an under-filled ORATS market-wide response become the
 surviving row for a date: the fetch index was ordered by opaque cache key, and a
@@ -14,6 +14,7 @@ import pandas as pd
 import pytest
 
 from engine.data import rebuild, store
+from engine.data.fetch import FetchError, iter_cached
 from engine.data.normalize import n_daily
 from engine.data.validate import validate_daily
 
@@ -27,7 +28,16 @@ MISSING_ON_LOW = frozenset(TICKERS[i] for i in (0, 2, 3))
 
 
 def _write_market_wide(
-    root, key, *, fetched_at, spot=None, trade_date="2024-01-02", rows=None
+    root,
+    key,
+    *,
+    fetched_at,
+    spot=None,
+    trade_date="2024-01-02",
+    rows=None,
+    endpoint="hist/summaries",
+    status=200,
+    params=None,
 ):
     directory = root / "orats" / key[:2]
     directory.mkdir(parents=True, exist_ok=True)
@@ -41,9 +51,9 @@ def _write_market_wide(
             {
                 "key": key,
                 "source": "orats",
-                "endpoint": "hist/summaries",
-                "params": {"tradeDate": trade_date},
-                "status": 200,
+                "endpoint": endpoint,
+                "params": params if params is not None else {"tradeDate": trade_date},
+                "status": status,
                 "fetched_at": fetched_at,
             }
         )
@@ -104,16 +114,19 @@ def _install_daily_source(
 
 
 def test_latest_fetched_market_wide_snapshot_wins(tmp_path, monkeypatch):
-    """The newer fetch wins even when its cache key sorts before the older one."""
+    """The newer fetch wins; its cache key sorts before the older response."""
     from engine import paths
 
     root = tmp_path / "fetch"
     monkeypatch.setattr(paths, "RAW_FETCH", root)
+    newer_key = "aa" + "1" * 62
+    older_key = "zz" + "0" * 62
+    assert newer_key < older_key
     _write_market_wide(
-        root, "aa" + "0" * 62, fetched_at="2026-09-02T12:00:00+00:00", spot=10.0
+        root, older_key, fetched_at="2026-09-01T12:00:00+00:00", spot=20.0
     )
     _write_market_wide(
-        root, "zz" + "1" * 62, fetched_at="2026-09-01T12:00:00+00:00", spot=20.0
+        root, newer_key, fetched_at="2026-09-02T12:00:00+00:00", spot=10.0
     )
 
     n_daily.fetch_daily_index.cache_clear()
@@ -126,6 +139,19 @@ def test_latest_fetched_market_wide_snapshot_wins(tmp_path, monkeypatch):
 
     assert len(frame) == 1
     assert frame["spot"].iloc[0] == pytest.approx(10.0)
+
+
+def test_an_oversized_sidecar_is_refused_before_parsing(tmp_path):
+    directory = tmp_path / "orats" / "aa"
+    directory.mkdir(parents=True)
+    meta = directory / ("aa" + "0" * 62 + ".meta.json")
+    meta.write_text("{not json " + "x" * (70 * 1024))
+
+    with pytest.raises(FetchError, match="over the 65536-byte metadata cap"):
+        iter_cached("orats", "hist/summaries", root=tmp_path, max_meta_bytes=64 * 1024)
+
+    # The unbounded default keeps the old skip-bad-sidecar behaviour.
+    assert iter_cached("orats", root=tmp_path) == []
 
 
 def test_low_date_refuses_before_writer_and_preserves_prior_table(tmp_root, monkeypatch):
@@ -168,6 +194,10 @@ def test_low_date_refuses_before_writer_and_preserves_prior_table(tmp_root, monk
     assert error.details["threshold"] == pytest.approx(7.5)
     assert error.details["reason"] == error.reason
     assert LOW_DATE in error.reason
+    assert error.reason == (
+        "daily_market has 7 rows on 2024-01-03, below 75% of the median "
+        "of its adjacent published dates (10 and 10); threshold 7.5"
+    )
 
     pd.testing.assert_frame_equal(store.read_table("daily_market"), before)
     assert store.table_stats("daily_market").content_hash == before_hash
@@ -253,6 +283,51 @@ def test_sample_zero_is_a_full_build_and_refuses_the_gap(tmp_root, monkeypatch):
     assert excinfo.value.count == 7
 
 
+def test_the_public_builder_has_no_preflight_switch(tmp_root, monkeypatch):
+    """A caller cannot opt out of the guard through the public signature."""
+    _install_daily_source(
+        monkeypatch, missing_date=LOW_DATE, missing_tickers=MISSING_ON_LOW
+    )
+
+    with pytest.raises(TypeError):
+        rebuild.build_daily_table(preflight=False)
+
+
+def test_an_empty_ticker_inventory_refuses_instead_of_writing_zero_rows(
+    tmp_root, monkeypatch
+):
+    prior = pd.DataFrame(
+        {
+            "ticker": ["OLD"],
+            "date": pd.to_datetime(["2024-01-02"]).astype("datetime64[ns]"),
+            "year": [2024],
+            "spot": [42.0],
+        }
+    )
+    store.write_table(prior, "daily_market")
+    before = store.read_table("daily_market")
+    before_hash = store.table_stats("daily_market").content_hash
+    monkeypatch.setattr(
+        n_daily, "list_tickers", lambda root=None, *, include_fetch=True: []
+    )
+
+    with pytest.raises(rebuild.DailyMarketCompletenessError) as excinfo:
+        rebuild.build_daily_table()
+
+    error = excinfo.value
+    assert error.code == "DAILY_MARKET_DATE_INCOMPLETE"
+    assert error.date is None
+    assert error.count == 0
+    assert error.previous_count is None
+    assert error.next_count is None
+    assert error.threshold == 0.0
+    assert error.details["tickers"] == 0
+    assert error.details["dates"] == 0
+    assert "no source tickers" in error.reason
+    pd.testing.assert_frame_equal(store.read_table("daily_market"), before)
+    assert store.table_stats("daily_market").content_hash == before_hash
+
+
 def test_empty_market_wide_snapshot_is_a_zero_count_date(tmp_root, monkeypatch):
     from engine import paths
 
@@ -278,12 +353,65 @@ def test_empty_market_wide_snapshot_is_a_zero_count_date(tmp_root, monkeypatch):
     assert error.threshold == pytest.approx(7.5)
 
 
+def test_market_wide_candidates_need_success_and_no_ticker(tmp_root, monkeypatch):
+    from engine import paths
+
+    root = tmp_root / "fetch"
+    monkeypatch.setattr(paths, "RAW_FETCH", root)
+    _write_market_wide(
+        root,
+        "aa" + "0" * 62,
+        fetched_at="2026-09-02T12:00:00+00:00",
+        trade_date="2024-01-08",
+    )
+    _write_market_wide(
+        root,
+        "bb" + "1" * 62,
+        fetched_at="2026-09-02T12:00:00+00:00",
+        trade_date="2024-01-09",
+        endpoint="hist/cores",
+    )
+    _write_market_wide(
+        root,
+        "cc" + "2" * 62,
+        fetched_at="2026-09-02T12:00:00+00:00",
+        trade_date="2024-01-10",
+        status=500,
+    )
+    _write_market_wide(
+        root,
+        "dd" + "3" * 62,
+        fetched_at="2026-09-02T12:00:00+00:00",
+        trade_date="2024-01-11",
+        params={"ticker": "AAA", "tradeDate": "2024-01-11"},
+    )
+    _write_market_wide(
+        root,
+        "ee" + "4" * 62,
+        fetched_at="2026-09-02T12:00:00+00:00",
+        trade_date="2024-01-12",
+        endpoint="hist/strikes",
+    )
+
+    dates = rebuild._market_wide_snapshot_dates()
+    assert [pd.Timestamp(day).date().isoformat() for day in dates] == [
+        "2024-01-08",
+        "2024-01-09",
+    ]
+
+
 def test_incomplete_daily_preflight_prevents_the_events_builder(
     tmp_root, monkeypatch
 ):
+    from engine import paths
+
     _install_daily_source(
         monkeypatch, missing_date=LOW_DATE, missing_tickers=MISSING_ON_LOW
     )
+    paths.MANIFEST.parent.mkdir(parents=True, exist_ok=True)
+    paths.SNAPSHOT_FILE.parent.mkdir(parents=True, exist_ok=True)
+    paths.MANIFEST.write_text("prior manifest")
+    paths.SNAPSHOT_FILE.write_text('{"snapshot": "prior"}')
     called = []
     monkeypatch.setattr(
         rebuild, "build_events_table", lambda *a, **k: called.append("events")
@@ -293,6 +421,48 @@ def test_incomplete_daily_preflight_prevents_the_events_builder(
         rebuild.rebuild(tables=("events", "daily"), finalize=False)
 
     assert called == []
+    assert paths.MANIFEST.read_text() == "prior manifest"
+    assert paths.SNAPSHOT_FILE.read_text() == '{"snapshot": "prior"}'
+
+
+def test_rebuild_skips_the_guard_when_daily_is_not_selected(
+    tmp_root, monkeypatch
+):
+    _install_daily_source(
+        monkeypatch, missing_date=LOW_DATE, missing_tickers=MISSING_ON_LOW
+    )
+
+    result = rebuild.rebuild(tables=("securities",), finalize=False)
+
+    assert result.reports["securities"]["rows"] == 0
+
+
+def test_rebuild_sample_skips_the_guard(tmp_root, monkeypatch):
+    _install_daily_source(
+        monkeypatch, missing_date=LOW_DATE, missing_tickers=MISSING_ON_LOW
+    )
+
+    result = rebuild.rebuild(tables=("daily",), sample=2, finalize=False)
+
+    assert result.reports["daily"]["tickers"] == 2
+    assert result.reports["daily"]["rows"] == 7
+
+
+def test_the_preflight_does_not_quarantine_before_the_write_pass(
+    tmp_root, monkeypatch
+):
+    from engine import paths
+
+    _install_daily_source(
+        monkeypatch, invalid_date=LOW_DATE, invalid_tickers={"T00"}
+    )
+
+    report = rebuild.build_daily_table()
+
+    # T00's invalid row is below the floor's impact, so the build succeeds; the
+    # write pass quarantines it once, and the counting pass adds no second flag.
+    assert report["rows"] == len(TICKERS) * len(DATES) - 1
+    assert len(list(paths.QUARANTINE.glob("*.flag.json"))) == 1
 
 
 def test_complete_full_build_passes(tmp_root, monkeypatch):

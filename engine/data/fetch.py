@@ -173,17 +173,34 @@ def iter_cached(
     endpoint: str | None = None,
     *,
     root: Path | None = None,
+    max_meta_bytes: int | None = None,
 ) -> list[CachedEntry]:
     """Every cached entry for ``source``, optionally filtered to one endpoint.
 
     Deterministically ordered by cache key, so a rebuild that reads the fetch
     store produces the same output on every run.
+
+    ``max_meta_bytes`` bounds each sidecar before it is parsed. ``None`` (the
+    default) preserves the unbounded scan every existing caller expects; a
+    scan that only needs a few metadata fields can pass a cap so a malformed
+    or runaway sidecar raises :class:`FetchError` instead of being read into
+    memory.
     """
     base = (Path(root) if root is not None else paths.RAW_FETCH) / source
     if not base.exists():
         return []
     out: list[CachedEntry] = []
     for meta_path in sorted(base.glob("*/*.meta.json")):
+        if max_meta_bytes is not None:
+            try:
+                size = meta_path.stat().st_size
+            except OSError:
+                continue
+            if size > max_meta_bytes:
+                raise FetchError(
+                    f"{meta_path}: sidecar is {size} bytes, over the "
+                    f"{max_meta_bytes}-byte metadata cap"
+                )
         try:
             meta = json.loads(meta_path.read_text())
         except (OSError, ValueError):

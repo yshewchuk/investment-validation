@@ -250,7 +250,14 @@ publish command, per `publish.py`'s `CommandPublisher` variant);
 - **Calendar input / refresh failure** — a calendar refresh failure degrades
   to cached data (staleness stays visible in `meta.json`) — except a rotated
   credential, which stops the run rather than burning retries against a dead
-  key. `^GSPC` refresh failures use the typed refusal above.
+  key. A completeness refusal from the refresh rebuild
+  (`DailyMarketCompletenessError`) is not a degradation: it stops the run with
+  `NightlyStop` at `refresh`, and the detail carries
+  `DAILY_MARKET_DATE_INCOMPLETE` plus the preflight reason. Because that
+  preflight runs before any selected table builder and before the daily writer,
+  the previous curated tables, MANIFEST and published SNAPSHOT stay in place;
+  no partial build is published and the run does not score. `^GSPC` refresh
+  failures use the typed refusal above.
 - **Forward-chain retry ledger** — transient (non-404) failures, wrong-shape
   or non-JSON 200s and quota/abnormal-exit remainders are saved to
   `reports/orats_chain_retry.json` and re-asked for 14 days, including after
@@ -308,15 +315,18 @@ publish command, per `publish.py`'s `CommandPublisher` variant);
   `nightly_readiness._require_ready`, which refuses it as for a full run.
 - **Validate** — a red validation stops the pipeline; yesterday's snapshot
   stays published and a flag is raised.
-- **Store rebuild refusal** — a full `daily_market` rebuild (no sample, or
-  `--sample 0`) runs a completeness preflight once before any selected table
-  builder and before a `PartitionedWriter` is constructed. If a published date
-  has fewer validated rows than 75% of the median of its nearest published
-  neighbour(s), the rebuild stops with `DAILY_MARKET_DATE_INCOMPLETE` and writes
-  no Tier-2 table (earlier selected tables such as `events` are not built); the
-  previous curated tables and SNAPSHOT stay in place. Successful market-wide
-  fetch metadata `tradeDate` values count as zero-row candidates, so an HTTP-200
-  empty snapshot is visible as a gap.
+- **Store rebuild refusal** — when the selected tables include `daily` and the
+  build is full (no sample, or `--sample 0`), `daily_market` runs a completeness
+  preflight once before any selected table builder and before a
+  `PartitionedWriter` is constructed. A partial-table rebuild that does not
+  select `daily` takes no coverage guard. If a published date has fewer
+  validated rows than 75% of the median of its nearest published neighbour(s),
+  the rebuild stops with `DAILY_MARKET_DATE_INCOMPLETE` and writes no Tier-2
+  table (earlier selected tables such as `events` are not built); the previous
+  curated tables, MANIFEST and SNAPSHOT stay in place. An empty source
+  inventory is refused the same way rather than replacing the table with zero
+  rows. Successful market-wide fetch metadata `tradeDate` values count as
+  zero-row candidates, so an HTTP-200 empty snapshot is visible as a gap.
 - **Selfcheck mismatch** — stops the publish; the nightly records raw
   mismatches, v2's adapter persists `scrub_mismatches` row/field/reason only.
   Board and selfcheck use the same chains: no entry-date chain prices off the

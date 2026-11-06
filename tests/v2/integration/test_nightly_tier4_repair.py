@@ -1246,6 +1246,37 @@ def test_run_nightly_refuses_stale_panel_input_when_gspc_refresh_fails(
     assert calls == []
 
 
+def test_run_nightly_stops_on_a_daily_completeness_refusal(monkeypatch, tmp_path):
+    finalize_calls = []
+    nightly, calls, captured, marker_writes = _patch_run_nightly(
+        monkeypatch, rebuild_results=[], finalize_calls=finalize_calls,
+        marker_path=_marker(tmp_path), events=_events_stub(["AAA"]))
+    from engine.data.rebuild import DailyMarketCompletenessError
+
+    def refuse(*args, **kwargs):
+        raise DailyMarketCompletenessError(
+            date="2026-10-09", count=7, previous_count=10, next_count=10,
+            threshold=7.5, reason="2026-10-09 has 7 rows, below the 75% floor")
+
+    monkeypatch.setattr(nightly, "refresh_calendar_data", refuse)
+    sentinel = _ScorerSentinel()
+
+    with pytest.raises(NightlyStop) as caught:
+        nightly.run_nightly(
+            as_of="2026-10-13", tickers=["AAA"], refresh=True, tiers=True,
+            publish=False, scorer=sentinel,
+            bundle_dir=tmp_path / "bundle", target=tmp_path / "target",
+        )
+
+    assert caught.value.step == "refresh"
+    assert caught.value.detail == (
+        "DAILY_MARKET_DATE_INCOMPLETE: "
+        "2026-10-09 has 7 rows, below the 75% floor")
+    assert not sentinel.touched
+    assert marker_writes == []
+    assert calls == []
+
+
 def test_run_nightly_skips_gspc_refresh_when_refresh_is_disabled(
         monkeypatch, tmp_path):
     finalize_calls = []

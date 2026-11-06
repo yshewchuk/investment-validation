@@ -1813,6 +1813,7 @@ def run_nightly(
     # -- 1. refresh -----------------------------------------------------------
     if refresh and calendar_tickers:
         from engine.data.fetch import CredentialRotated, FetchError
+        from engine.data.rebuild import DailyMarketCompletenessError
         from engine.data.throttle import QuotaExhausted
 
         try:
@@ -1841,6 +1842,8 @@ def run_nightly(
                 upcoming = upcoming[upcoming["ticker"].isin(set(tickers))]
         except CredentialRotated as exc:
             raise NightlyStop("refresh", f"credential rotated — {exc}. Update .env; do not retry.") from exc
+        except DailyMarketCompletenessError as exc:
+            raise NightlyStop("refresh", f"{exc.code}: {exc.reason}") from exc
         except (FetchError, QuotaExhausted, ValueError) as exc:
             report.steps["refresh"] = {"degraded": True, "error": f"{type(exc).__name__}: {exc}"}
             report.flags.append({"kind": "refresh_degraded",
