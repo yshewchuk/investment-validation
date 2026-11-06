@@ -242,7 +242,7 @@ def _market_wide_snapshot_dates() -> list:
     return dates
 
 
-def _preflight_daily_completeness(tickers: list[str], cache) -> None:
+def _preflight_daily_completeness(tickers: list[str], cache, snapshot_dates=None) -> None:
     counts: dict = {}
     total = len(tickers)
     started = time.monotonic()
@@ -252,7 +252,8 @@ def _preflight_daily_completeness(tickers: list[str], cache) -> None:
         file=sys.stderr,
         flush=True,
     )
-    snapshot_dates = _market_wide_snapshot_dates()
+    if snapshot_dates is None:
+        snapshot_dates = _market_wide_snapshot_dates()
     for i, ticker in enumerate(tickers, 1):
         frame, _ = _normalize_daily(ticker, cache)
         if not frame.empty:
@@ -351,9 +352,10 @@ def _build_daily_table(tickers: list[str], cache) -> dict:
 
 def build_daily_table(sample: int | None = None, cache=None) -> dict:
     """Build ``daily_market``; a full call preflights, a sample skips it."""
+    snapshot_dates = None if sample else _market_wide_snapshot_dates()
     tickers = _daily_tickers(sample)
     if not sample:
-        _preflight_daily_completeness(tickers, cache)
+        _preflight_daily_completeness(tickers, cache, snapshot_dates)
     return _build_daily_table(tickers, cache)
 
 
@@ -679,11 +681,12 @@ def rebuild(
     daily_cache = None
     daily_tickers = None
     if "daily" in selected:
+        snapshot_dates = None if sample else _market_wide_snapshot_dates()
         daily_tickers = _daily_tickers(sample)
         if not sample:
             if incremental:
                 daily_cache = InputCache("daily_market")
-            _preflight_daily_completeness(daily_tickers, daily_cache)
+            _preflight_daily_completeness(daily_tickers, daily_cache, snapshot_dates)
 
     builders = {
         "events": lambda: build_events_table(sample),

@@ -472,7 +472,10 @@ def test_market_wide_candidates_need_success_and_no_ticker(tmp_root, monkeypatch
     ]
 
 
-def test_oversized_metadata_sidecar_refuses_before_the_writer(tmp_root, monkeypatch):
+@pytest.mark.parametrize("entry_point", ["build_daily_table", "rebuild"])
+def test_oversized_metadata_sidecar_refuses_before_the_writer(
+    tmp_root, monkeypatch, entry_point
+):
     from engine import paths
 
     root = tmp_root / "fetch"
@@ -485,10 +488,7 @@ def test_oversized_metadata_sidecar_refuses_before_the_writer(tmp_root, monkeypa
         params={"tradeDate": "2024-01-08", "padding": "x" * (64 * 1024)},
     )
 
-    def _list_tickers(root=None, *, include_fetch=True):
-        return list(TICKERS)
-
-    def _daily_index_must_not_be_read():
+    def _daily_index_must_not_be_read(*args, **kwargs):
         raise AssertionError("daily index read before the preflight refusal")
 
     def _normalize_must_not_run(ticker, cache):
@@ -498,14 +498,19 @@ def test_oversized_metadata_sidecar_refuses_before_the_writer(tmp_root, monkeypa
         def __init__(self, *args, **kwargs):
             raise AssertionError("writer constructed before the preflight")
 
+    def _run():
+        if entry_point == "build_daily_table":
+            rebuild.build_daily_table()
+        else:
+            rebuild.rebuild(tables=("daily",), finalize=False)
+
     n_daily.fetch_daily_index.cache_clear()
-    monkeypatch.setattr(n_daily, "list_tickers", _list_tickers)
     monkeypatch.setattr(n_daily, "fetch_daily_index", _daily_index_must_not_be_read)
     monkeypatch.setattr(rebuild, "_normalize_daily", _normalize_must_not_run)
     monkeypatch.setattr(store, "PartitionedWriter", _WriterMustNotBeConstructed)
 
     with pytest.raises(rebuild.DailyMarketCompletenessError) as excinfo:
-        rebuild.build_daily_table()
+        _run()
 
     error = excinfo.value
     assert error.code == "DAILY_MARKET_METADATA_TOO_LARGE"
