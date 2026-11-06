@@ -307,9 +307,12 @@ publish command, per `publish.py`'s `CommandPublisher` variant);
   refresh off, tiers off or backup on raises `ValueError` before any work
   (the CLI turns the same rule into the exit 2 above). The `^GSPC` pre-panel
   refresh is required here too and refuses failed or stale coverage as in the
-  table. Calendar refresh and tiers degrade as in a full run and are recorded
-  in `steps`/`flags`. The run writes the flag report and the
-  standard `nightly_<date>.json`, never writes the nightly state file
+  table. Ordinary calendar refresh failures and Tier failures still degrade
+  as in a full run and are recorded in `steps`/`flags`, but
+  `DailyMarketCompletenessError` stops the run at refresh with
+  `DAILY_MARKET_DATE_INCOMPLETE`, as described above. The run writes the flag
+  report and the standard `nightly_<date>.json`, never writes the nightly
+  state file
   (`last_successful_as_of`, calendar), so a later full run still back-fills
   the nights this one did not score, and never touches the ledger, bundle or
   publish target. A degraded `tiers` step is visible to
