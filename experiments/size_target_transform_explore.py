@@ -45,7 +45,7 @@ def history_stats(frame, train_ids, logger=None):
                 mu[i], sig[i] = np.mean(labels), np.std(labels, ddof=0)
             if pd.notna(r.move) and pd.notna(r.abs_move): moves.append(float(r.move)); labels.append(float(r.abs_move))
         if logger and n%100==0: logger(f"history tickers={n}/{frame.ticker.nunique()}")
-    train = frame.event_id.isin(train_ids).to_numpy(); floor = max(float(np.median(sig[train]))*.5, 1e-6)
+    train = frame.event_id.isin(train_ids).to_numpy()&(feat.n_prior.to_numpy()>0); floor = max(float(np.median(sig[train]))*.5, 1e-6)
     return mu, np.maximum(sig, floor), floor, feat
 def ridge_loo_residuals(y, fitted, x, alpha=1):
     d = np.c_[x, np.ones(len(x))]; p = np.eye(d.shape[1])*alpha; p[-1, -1] = 0
@@ -117,12 +117,12 @@ def main():
     panel = panel.sort_values(["ticker", "date"]).reset_index(drop=True)
     train_ids = set(panel.loc[panel.date.dt.year<=2024, "event_id"])-test_ids-unusable
     log("start H history rebuild"); mu, sigma, floor, feat = history_stats(panel, train_ids, log); log("complete H history rebuild"); panel["mu"], panel["sigma"] = mu, sigma; panel[H] = feat
-    tr = panel[panel.event_id.isin(train_ids)&panel.abs_move.notna()].copy(); pmap = {r["event_id"]: r for r in paired}
-    te = panel[panel.event_id.isin(test_ids)].copy().set_index("event_id").loc[list(pmap)].reset_index()
+    tr = panel[panel.event_id.isin(train_ids)&panel.abs_move.notna()&(panel.n_prior>0)].copy(); pmap = {r["event_id"]: r for r in paired}
+    te = panel[panel.event_id.isin(test_ids)].copy().set_index("event_id").loc[list(pmap)].reset_index(); te.loc[te.n_prior==0,"mu"] = tr.mu.median()
     ytr = tr.abs_move.to_numpy(float); y = np.array([pmap[k]["absolute_move_pct"] for k in te.event_id], float)
     base = np.array([pmap[k]["history_mean"] for k in te.event_id], float); inc = np.array([pmap[k]["incumbent"] for k in te.event_id], float)
     q = np.array([pmap[k]["quarter"] for k in te.event_id]); tickers = te.ticker.to_numpy()
-    out = {"n_train": len(tr), "n_test": len(te), "missing_panel_events": len(absent), "unusable_training_labels": len(unusable), "missing_population_events": len(missing), "sigma_floor_pct": floor, "feature_note": "H recomputed from retained prior moves; MO- omitted because legacy market/options cutoffs are unsafe.", "label_note": "Panel abs_move is used for training and causal mu/sigma; paired absolute_move_pct scores test.", "features": {"H": H}, "baselines": {}}
+    out = {"n_train": len(tr), "n_test": len(te), "missing_panel_events": len(absent), "unusable_training_labels": len(unusable), "missing_population_events": len(missing), "sigma_floor_pct": floor, "feature_note": "H recomputed from retained prior moves; MO- omitted because legacy market/options cutoffs are unsafe.", "label_note": "Panel abs_move is used for training and causal mu/sigma; paired absolute_move_pct scores test.", "no_history_note": "No-history training rows omitted; test inverse transforms use the training median mu.", "features": {"H": H}, "baselines": {}}
     for name, pred in (("history_mean", base), ("v1.4", inc)):
         mae, rmse = score_metrics(y, pred); out["baselines"][name] = {"mae": mae, "rmse": rmse}
     models = {"ridge": Ridge(alpha=1), "elasticnet": ElasticNet(alpha=.01, l1_ratio=.75, max_iter=10000), "hgb": HistGradientBoostingRegressor(max_leaf_nodes=7, random_state=0)}

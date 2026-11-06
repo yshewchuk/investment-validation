@@ -22,7 +22,8 @@ def test_history_is_strictly_prior_and_sigma_floor_uses_training():
     frame = pd.DataFrame({"ticker": "AAA", "date": dates, "move": [2., -4., 6., -8., 200.], "abs_move": [2., 4., 6., 8., 200.], "event_id": ids})
     mu, sigma, floor, features = history_stats(frame, set(ids[:4]))
     assert mu.tolist() == [0., 2., 3., 4., 5.]
-    assert np.isclose(floor, .25) and sigma[0] == floor and sigma[1] == floor
+    assert np.isclose(floor, .5) and sigma[0] == floor and sigma[1] == floor
+    assert features.loc[0, "n_prior"] == 0
     assert np.isclose(sigma[4], np.std([2., 4., 6., 8.], ddof=0))
     assert features.loc[4, "n_prior"] == 4 and features.loc[4, "mean_prior_move"] == -1.
 
