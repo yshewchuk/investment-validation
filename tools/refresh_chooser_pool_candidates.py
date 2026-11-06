@@ -79,14 +79,14 @@ def append_candidates(path: Path, fresh: pd.DataFrame) -> int:
     required = (*KEY, "event_date", "entry_date", "pnl", "ret", *SETTLEMENT_FIELDS)
     if any(column not in old for column in required):
         refuse("candidate_schema_mismatch", "candidate identity or date columns are missing")
-    event = pd.to_datetime(fresh["event_date"], errors="coerce")
-    entry = pd.to_datetime(fresh["entry_date"], errors="coerce")
-    exits = pd.to_datetime(fresh["exit_date"], errors="coerce")
-    if exits.isna().any() or exits.lt(entry).any():
-        refuse("candidate_causality_failed", "exit date must be present and on or after entry")
-    sessions = fresh.get("session", pd.Series("", index=fresh.index)).astype(str).str.upper()
-    if event.isna().any() or entry.isna().any() or ((event > entry) & ~sessions.eq("BMO")).any() or (sessions.eq("BMO") & entry.ge(event)).any():
-        refuse("candidate_causality_failed", "entry must precede BMO events; other event dates must be <= entry")
+    event, entry, exits = (pd.to_datetime(pd.concat([old[name], fresh[name]]), errors="coerce") for name in ("event_date", "entry_date", "exit_date"))
+    sessions = pd.concat([old.get("session", pd.Series("", index=old.index)), fresh.get("session", pd.Series("", index=fresh.index))]).astype(str).str.upper()
+    if event.isna().any() or entry.isna().any() or exits.isna().any() or exits.lt(entry).any() or (event.lt(entry) & ~sessions.eq("BMO")).any() or (sessions.eq("BMO") & entry.ge(event)).any():
+        refuse("candidate_causality_failed", "event, entry and exit dates must satisfy session causality")
+    repaired_fresh = ~fresh["exit_arb_ok"].fillna(True).astype(bool) | fresh["exit_value"].lt(0)
+    fresh.loc[repaired_fresh, "exit_value"] = fresh.loc[repaired_fresh, "exit_value_expiry"]
+    fresh["pnl"] = fresh["exit_value"] - fresh["entry_cost"]
+    fresh["ret"] = fresh["pnl"].div(fresh["entry_cost"]).where(fresh["entry_cost"].gt(MIN_MEANINGFUL_COST))
     fresh = fresh.drop_duplicates(list(KEY), keep="first")
     new_keys, old_keys = (pd.MultiIndex.from_frame(frame[list(KEY)]) for frame in (fresh, old))
     repaired = ~old["exit_arb_ok"].fillna(True).astype(bool) | old["exit_value"].lt(0)
@@ -108,10 +108,6 @@ def append_candidates(path: Path, fresh: pd.DataFrame) -> int:
         changed |= matched & old[name].ne(fresh_value) & ~(old[name].isna() & fresh_value.isna())
         old[name] = fresh_value.where(matched, old[name])
     old = old[columns]
-    repaired = changed & (~old["exit_arb_ok"].fillna(True).astype(bool) | old["exit_value"].lt(0))
-    old.loc[repaired, "exit_value"] = old.loc[repaired, "exit_value_expiry"]
-    old.loc[changed, "pnl"] = old.loc[changed, "exit_value"] - old.loc[changed, "entry_cost"]
-    old.loc[changed, "ret"] = old.loc[changed, "pnl"].div(old.loc[changed, "entry_cost"]).where(old.loc[changed, "entry_cost"].gt(MIN_MEANINGFUL_COST))
     unseen = fresh.loc[~new_keys.isin(old_keys)]
     if unseen.empty and not changed.any() and not history_changed.any():
         return 0
