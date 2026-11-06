@@ -9,16 +9,21 @@ from tools import refresh_chooser_pool_candidates as refresh
 
 def _rows(ids, markers=None, exit_dates=None):
     markers = markers or list(range(len(ids)))
+    count = len(ids)
     return pd.DataFrame({
-        "event_id": ids, "arm": ["N7q2_-1_-1_1"] * len(ids),
-        "variant": [0] * len(ids), "fill_alpha": [0.5] * len(ids),
-        "event_date": pd.to_datetime(["2026-09-01"] * len(ids)),
-        "entry_date": pd.to_datetime(["2026-09-01"] * len(ids)),
-        "exit_date": pd.to_datetime(exit_dates or ["2026-09-30"] * len(ids)),
-        "spot_exit": [99.0] * len(ids), "dte_exit": [3] * len(ids),
-        "exit_value": [-1.0] * len(ids), "pnl": [-2.0] * len(ids),
-        "ret": [-1.0] * len(ids),
-        "session": ["AMC"] * len(ids), "marker": markers,
+        "event_id": ids, "arm": ["N7q2_-1_-1_1"] * count,
+        "variant": [0] * count, "fill_alpha": [0.5] * count,
+        "ticker": ["XYZ"] * count, "event_date": pd.to_datetime(["2026-09-01"] * count),
+        "entry_date": pd.to_datetime(["2026-09-01"] * count),
+        "exit_date": pd.to_datetime(exit_dates or ["2026-09-30"] * count),
+        "expiry": pd.to_datetime(["2026-10-02"] * count),
+        "entry_cost": [1.0] * count, "exit_value": [3.0] * count,
+        "exit_value_expiry": [3.0] * count, "exit_arb_ok": [True] * count,
+        "spot_exit": [99.0] * count, "dte_exit": [3] * count,
+        "spot_expiry": [101.0] * count, "pnl": [2.0] * count, "ret": [2.0] * count,
+        "exp_pnl_sim": [1.0] * count, "width_over_forecast": [0.2] * count,
+        "anchor_over_spot": [1.0] * count, "n_legs": [2] * count,
+        "rel_spread": [0.1] * count, "session": ["AMC"] * count, "marker": markers,
     })
 
 
@@ -32,11 +37,14 @@ def test_month_requires_canonical_yyyy_mm():
 def test_append_deduplicates_and_preserves_existing_rows_with_backup(tmp_path):
     path = tmp_path / "candidates.parquet"
     original = _rows(["old"], [1], ["2026-09-30"])
+    original.loc[0, ["exit_arb_ok", "exit_value", "exit_value_expiry", "entry_cost", "pnl", "ret"]] = [
+        False, -1.0, float("nan"), 2.0, -3.0, -1.5]
     original.to_parquet(path, index=False)
     fresh = _rows(["old", "new", "new"], [99, 2, 3],
                   ["2026-10-02", "2026-10-15", "2026-10-16"])
-    fresh.loc[0, ["spot_exit", "dte_exit", "exit_value", "pnl", "ret"]] = [
-        101.0, 0, 3.0, 2.0, 1.0]
+    fresh.loc[0, ["exit_arb_ok", "exit_value", "exit_value_expiry", "entry_cost",
+                  "pnl", "ret", "spot_exit", "dte_exit", "spot_expiry"]] = [
+        False, 3.0, 3.0, 1.0, 999.0, 999.0, 101.0, 0, 101.0]
 
     assert refresh.append_candidates(path, fresh) == 1
     result = pd.read_parquet(path).set_index("event_id")
@@ -47,8 +55,13 @@ def test_append_deduplicates_and_preserves_existing_rows_with_backup(tmp_path):
     assert result.loc["old", "dte_exit"] == 0
     assert result.loc["old", "exit_value"] == 3.0
     assert result.loc["old", "pnl"] == 2.0
-    assert result.loc["old", "ret"] == 1.0
+    assert result.loc["old", "ret"] == 2.0
     assert list(pd.read_parquet(path).columns) == list(original.columns)
+    from tools import build_chooser_pool
+    built = build_chooser_pool.build(path).set_index("event_id")
+    assert built.loc["old", "exit_date"] == pd.Timestamp("2026-10-02")
+    assert built.loc["old", "pnl"] == 2.0
+    fresh.loc[0, ["pnl", "ret"]] = [2.0, 2.0]
     before_rerun = path.read_bytes()
     assert refresh.append_candidates(path, fresh) == 0
     assert path.read_bytes() == before_rerun
@@ -158,3 +171,25 @@ def test_publication_fsyncs_staged_file_before_replace_and_directory_after(tmp_p
     monkeypatch.setattr(refresh.os, "replace", record_replace)
     assert refresh.append_candidates(path, _rows(["new"])) == 1
     assert events == ["fsync", "replace", "fsync"]
+
+
+def test_retained_repaired_rows_get_expiry_date_on_a_different_month_refresh(tmp_path):
+    path = tmp_path / "candidates.parquet"
+    old = _rows(["historical"], exit_dates=["2026-09-30"])
+    old.loc[0, ["exit_arb_ok", "exit_value"]] = [False, -1.0]
+    old.to_parquet(path, index=False)
+
+    assert refresh.append_candidates(path, _rows(["new"])) == 1
+    result = pd.read_parquet(path).set_index("event_id")
+    assert result.loc["historical", "exit_date"] == pd.Timestamp("2026-10-02")
+
+
+@pytest.mark.parametrize("exit_date", ["NaT", "2026-08-31"])
+def test_append_refuses_missing_or_pre_entry_exit_date(tmp_path, exit_date):
+    path = tmp_path / "candidates.parquet"
+    _rows(["old"]).to_parquet(path, index=False)
+    before = path.read_bytes()
+
+    with pytest.raises(TrainingRefused, match="candidate_causality_failed"):
+        refresh.append_candidates(path, _rows(["new"], exit_dates=[exit_date]))
+    assert path.read_bytes() == before
