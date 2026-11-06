@@ -24,6 +24,7 @@ from engine.v2.models.training.receipts import ReceiptIssue
 
 CANDIDATES = ROOT / "experiments/EXP-137_one_book_per_family_which_enumerated_str/results/candidates.parquet"
 KEY = ("event_id", "arm", "variant", "fill_alpha")
+SETTLEMENT_FIELDS = ("exit_date", "spot_exit", "dte_exit", "exit_value", "pnl", "ret")
 MAX_BYTES = 512 * 1024 * 1024
 
 
@@ -75,7 +76,7 @@ def append_candidates(path: Path, fresh: pd.DataFrame) -> int:
     old = read_table(path)
     if list(old.columns) != list(fresh.columns):
         refuse("candidate_schema_mismatch", "fresh and stored candidate columns differ")
-    required = (*KEY, "event_date", "entry_date", "exit_date")
+    required = (*KEY, "event_date", "entry_date", *SETTLEMENT_FIELDS)
     if any(column not in old for column in required):
         refuse("candidate_schema_mismatch", "candidate identity or date columns are missing")
     event = pd.to_datetime(fresh["event_date"], errors="coerce")
@@ -86,12 +87,15 @@ def append_candidates(path: Path, fresh: pd.DataFrame) -> int:
     fresh = fresh.drop_duplicates(list(KEY), keep="first")
     new_keys = pd.MultiIndex.from_frame(fresh[list(KEY)])
     old_keys = pd.MultiIndex.from_frame(old[list(KEY)])
-    updates = fresh[list(KEY) + ["exit_date"]].rename(columns={"exit_date": "_effective_exit_date"})
+    updates = fresh[list(KEY) + list(SETTLEMENT_FIELDS)].rename(
+        columns={name: f"_fresh_{name}" for name in SETTLEMENT_FIELDS})
     columns = old.columns
     old = old.merge(updates, on=list(KEY), how="left", sort=False)
-    corrected = old.pop("_effective_exit_date")
+    corrected = old["_fresh_exit_date"]
     changed = corrected.notna() & old["exit_date"].ne(corrected)
-    old.loc[changed, "exit_date"] = corrected[changed]
+    for name in SETTLEMENT_FIELDS:
+        fresh_value = old.pop(f"_fresh_{name}")
+        old.loc[changed, name] = fresh_value[changed]
     old = old[columns]
     unseen = fresh.loc[~new_keys.isin(old_keys)]
     if unseen.empty and not changed.any():
