@@ -210,17 +210,17 @@ def test_retained_repaired_rows_get_expiry_date_on_a_different_month_refresh(tmp
 
 
 @pytest.mark.parametrize("field", ["exit_value_expiry", "entry_cost"])
-def test_refuses_retained_repaired_row_missing_settlement_input(tmp_path, field):
+def test_preserves_retained_repaired_row_missing_settlement_input(tmp_path, field):
     path = tmp_path / "candidates.parquet"
     old = _rows(["old"])
     old.loc[0, ["exit_arb_ok", "exit_value"]] = [False, -1.0]
     old.loc[0, field] = float("nan")
     old.to_parquet(path, index=False)
-    before = path.read_bytes()
 
-    with pytest.raises(TrainingRefused, match="candidate_causality_failed"):
-        refresh.append_candidates(path, _rows(["new"]))
-    assert path.read_bytes() == before
+    assert refresh.append_candidates(path, _rows(["new"])) == 1
+    result = pd.read_parquet(path).set_index("event_id")
+    assert pd.isna(result.loc["old", field])
+    assert result.loc["old", "exit_value"] == -1.0
 
 
 @pytest.mark.parametrize("field", ["exit_value", "entry_cost"])
