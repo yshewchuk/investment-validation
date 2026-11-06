@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Exploratory SIZE target transforms; not promotion evidence."""
-import argparse, json, os, resource, stat, sys, time
+import argparse, json, os, resource, stat, sys, time, tempfile
 from pathlib import Path
 import numpy as np
 import pandas as pd
@@ -29,10 +29,10 @@ def inverse(z, mu, sigma, kind):
     if kind == "z": return z*sigma+mu
     if kind == "log_ratio": return (mu+EPS)*np.exp(np.clip(z, -30, 30))-EPS
     raise ValueError(kind)
-def history_stats(frame, train_ids):
+def history_stats(frame, train_ids, logger=None):
     """Rebuild H and prior-only mu/sigma from retained signed moves."""
     mu, sig = np.zeros(len(frame)), np.zeros(len(frame)); feat = pd.DataFrame(0., index=frame.index, columns=H)
-    for _, g in frame.groupby("ticker", sort=False):
+    for n, (_, g) in enumerate(frame.groupby("ticker", sort=False), 1):
         moves, labels = [], []
         for i, r in g.sort_values("date").iterrows():
             if moves:
@@ -44,6 +44,7 @@ def history_stats(frame, train_ids):
                 feat.loc[i] = [len(moves), p.mean(), p.abs().mean(), *emas, sign*streak]
                 mu[i], sig[i] = np.mean(labels), np.std(labels, ddof=0)
             if pd.notna(r.move) and pd.notna(r.abs_move): moves.append(float(r.move)); labels.append(float(r.abs_move))
+        if logger and n%100==0: logger(f"history tickers={n}/{frame.ticker.nunique()}")
     train = frame.event_id.isin(train_ids).to_numpy(); floor = max(float(np.median(sig[train]))*.5, 1e-6)
     return mu, np.maximum(sig, floor), floor, feat
 def ridge_loo_residuals(y, fitted, x, alpha=1):
@@ -74,12 +75,10 @@ def distribution_metrics(pred, residual, scale, y, seed=72):
     out["crps"] = float(np.mean(np.mean(np.abs(draws-y[:, None]), axis=1)-np.sum((2*np.arange(1,n+1)-n-1)*s, axis=1)/(n*n)))
     return out
 
-
 def _key(t, d): return f"{t}_{pd.Timestamp(d):%Y-%m-%d}"
 
-
 def main():
-    ap = argparse.ArgumentParser(); ap.add_argument("--panel"); ap.add_argument("--report", required=True); ap.add_argument("--out", required=True)
+    ap = argparse.ArgumentParser(description="Standalone exploratory SIZE run; reads report/panel, writes --out, never uses a ledger."); ap.add_argument("--panel"); ap.add_argument("--report", required=True); ap.add_argument("--out", required=True); ap.add_argument("--no-ledger", action="store_true")
     a = ap.parse_args()
     if not a.panel: import engine.paths as paths; a.panel = str(paths.PANEL)
     start = time.time()
@@ -92,6 +91,7 @@ def main():
     retained = set(d["frozen_eligibility"]["retained_event_ids"]); paired = d["paired"]["paired_rows"]; del d, raw
     test_ids = {r["event_id"] for r in paired}
     if len(paired) != 751 or len(test_ids) != len(paired) or not test_ids <= retained: raise ValueError("paired population mismatch")
+    if {int(k.rsplit("_", 1)[1][:4]) for k in test_ids}!={2025}: raise ValueError("paired events must be from 2025")
     if os.path.getsize(a.panel)>1<<30: raise ValueError("panel source exceeds 1 GiB")
     dataset = ds.dataset(a.panel, format="parquet"); pf = pq.ParquetFile(a.panel); md = pf.metadata
     ci = [pf.schema_arrow.names.index(c) for c in ("ticker", "date", "move", "abs_move")]
@@ -99,11 +99,14 @@ def main():
     expr = None
     for eid in retained:
         t, day = eid.rsplit("_", 1); term = (ds.field("ticker")==t)&(ds.field("date")==pd.Timestamp(day)); expr = term if expr is None else expr|term
-    kept, rows, size = [], 0, 0
+    kept, rows, size, last_log, seen = [], 0, 0, time.time(), set()
     for b in dataset.scanner(columns=["ticker", "date", "move", "abs_move"], filter=expr, batch_size=256, use_threads=False).to_batches():
         if b.num_rows > 256 or b.nbytes > 64<<20: raise ValueError("decoded panel batch exceeds budget")
         f = b.to_pandas(); f["event_id"] = [_key(t, d) for t, d in zip(f.ticker, f.date)]; f = f[f.event_id.isin(retained)]
+        if f.event_id.duplicated().any() or not seen.isdisjoint(f.event_id): raise ValueError("duplicate panel event IDs")
+        seen.update(f.event_id)
         rows += len(f); size += int(f.memory_usage(deep=True).sum())
+        if time.time()-last_log>=60: log(f"panel scan {rows}/{len(retained)} rate={rows/max(time.time()-start,1):.1f}/s ETA={(len(retained)-rows)/max(rows/(time.time()-start),1e-9):.0f}s"); last_log=time.time()
         if rows > len(retained) or size > 64<<20: raise ValueError("selected panel exceeds row/byte budget")
         if len(f): kept.append(f)
     panel = pd.concat(kept, ignore_index=True) if kept else pd.DataFrame(columns=["ticker", "date", "move", "abs_move", "event_id"])
@@ -113,7 +116,7 @@ def main():
     log(f"panel rows={len(panel)} retained={len(retained)} missing={len(absent)} unusable_training_labels={len(unusable)}")
     panel = panel.sort_values(["ticker", "date"]).reset_index(drop=True)
     train_ids = set(panel.loc[panel.date.dt.year<=2024, "event_id"])-test_ids-unusable
-    mu, sigma, floor, feat = history_stats(panel, train_ids); panel["mu"], panel["sigma"] = mu, sigma; panel[H] = feat
+    log("start H history rebuild"); mu, sigma, floor, feat = history_stats(panel, train_ids, log); log("complete H history rebuild"); panel["mu"], panel["sigma"] = mu, sigma; panel[H] = feat
     tr = panel[panel.event_id.isin(train_ids)&panel.abs_move.notna()].copy(); pmap = {r["event_id"]: r for r in paired}
     te = panel[panel.event_id.isin(test_ids)].copy().set_index("event_id").loc[list(pmap)].reset_index()
     ytr = tr.abs_move.to_numpy(float); y = np.array([pmap[k]["absolute_move_pct"] for k in te.event_id], float)
@@ -138,7 +141,9 @@ def main():
             done += 1
             if done%3 == 0: log(f"fit {done}/12; rate={done/(time.time()-start):.2f}/s ETA={(12-done)/max(done/(time.time()-start),1e-9):.1f}s")
     out["arms"], out["raw_ridge_H_distribution"] = arms, dist; dest = Path(a.out); dest.mkdir(parents=True, exist_ok=True)
-    (dest/"summary.json").write_text(json.dumps(out, indent=2, allow_nan=False)+"\n"); log(f"complete train={len(tr)} test={len(te)} output={dest/'summary.json'}")
+    fd, tmp = tempfile.mkstemp(dir=dest, prefix=".summary-")
+    with os.fdopen(fd, "w") as f: f.write(json.dumps(out, indent=2, allow_nan=False)+"\n"); f.flush(); os.fsync(f.fileno())
+    os.replace(tmp, dest/"summary.json"); dfd=os.open(dest, os.O_RDONLY|os.O_DIRECTORY); os.fsync(dfd); os.close(dfd); log(f"complete train={len(tr)} test={len(te)} output={dest/'summary.json'}")
 
 
 if __name__ == "__main__": main()

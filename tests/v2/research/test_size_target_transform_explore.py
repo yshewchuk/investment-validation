@@ -11,7 +11,9 @@ from experiments.size_target_transform_explore import (
 
 def test_inverse_transforms_round_trip():
     y, mu, sigma = np.array([.4, 2., 12.]), np.array([0., 1., 5.]), np.array([.5, 1.5, 3.])
+    expected = {"raw": y, "residual": np.array([.4, 1., 7.]), "z": np.array([.8, 2/3, 7/3]), "log_ratio": np.log((y+1e-6)/(mu+1e-6))}
     for kind in ("raw", "residual", "z", "log_ratio"):
+        np.testing.assert_allclose(transform(y, mu, sigma, kind), expected[kind])
         np.testing.assert_allclose(inverse(transform(y, mu, sigma, kind), mu, sigma, kind), y)
 
 
@@ -33,12 +35,17 @@ def test_loo_ridge_residual_matches_direct_refits():
     np.testing.assert_allclose(actual, expected, rtol=1e-10, atol=1e-10)
 
 
+def test_bootstrap_resamples_unequal_quarter_ticker_blocks():
+    ci = block_bootstrap_ci(np.zeros(4), np.array([0., 1., 3., 6.]), np.zeros(4), np.array([1, 1, 1, 2]), np.array(["A", "A", "B", "A"]))
+    assert ci[0][0] < ci[0][1] and ci[1][0] < ci[1][1]
+
+
 def test_scores_bootstrap_and_distribution_match_oracles():
     y, pred, base = np.array([1., 4.]), np.array([2., 2.]), np.array([1., 1.])
     mae, rmse = score_metrics(y, pred); assert np.isclose(mae, 1.5) and np.isclose(rmse, np.sqrt(2.5))
     bmae, brmse = score_metrics(y, base); ci = block_bootstrap_ci(y, pred, base, np.array([1, 1]), np.array(["A", "A"]))
     np.testing.assert_allclose(ci, [[mae-bmae, mae-bmae], [rmse-brmse, rmse-brmse]])
-    p, residual, scale, actual = np.array([.1, 5.]), np.array([-1., 0., 2.]), np.array([1., .5]), np.array([.5, 5.5])
+    p, residual, scale, actual = np.array([.1, 5.]), np.array([-1., 0., 2.]), np.array([1., .5]), np.array([9., 9.])
     got = distribution_metrics(p, residual, scale, actual)
     raw = p[:, None]+np.random.default_rng(72).choice(residual, (2, 200), replace=True)*scale[:, None]; draws = np.maximum(raw, 0.)
     assert raw.min() < 0. and draws.min() == 0.
@@ -46,6 +53,7 @@ def test_scores_bootstrap_and_distribution_match_oracles():
         lo, hi = np.quantile(draws, [(1-c)/2, (1+c)/2], axis=1)
         assert np.isclose(got[str(int(c*100))]["coverage"], np.mean((actual>=lo)&(actual<=hi)))
         assert np.isclose(got[str(int(c*100))]["mean_width"], np.mean(hi-lo))
+    assert got["50"]["coverage"] < 1.
     crps = [np.mean(abs(row-target))-.5*np.mean(abs(row[:, None]-row[None, :])) for row, target in zip(draws, actual)]
     assert np.isclose(got["crps"], np.mean(crps))
 
@@ -54,7 +62,7 @@ def test_missing_training_panel_event_is_tolerated_below_two_percent():
     retained = {f"e{i}" for i in range(100)}; test = {"e99"}; panel = retained-{"e0"}
     assert validate_panel_population(retained, test, panel, False) == {"e0"}
     assert validate_panel_population(retained, test, panel, False, {"e1"}) == {"e0", "e1"}
-    with pytest.raises(ValueError): validate_panel_population(retained, test, panel-test, False)
-    with pytest.raises(ValueError): validate_panel_population(retained, test, panel, False, {"e1", "e2"})
-    with pytest.raises(ValueError): validate_panel_population(retained, test, retained-{"e0", "e1", "e2"}, False)
-    with pytest.raises(ValueError): validate_panel_population(retained, test, panel, True)
+    with pytest.raises(ValueError, match="panel population mismatch"): validate_panel_population(retained, test, panel-test, False)
+    with pytest.raises(ValueError, match="panel population mismatch"): validate_panel_population(retained, test, panel, False, {"e1", "e2"})
+    with pytest.raises(ValueError, match="panel population mismatch"): validate_panel_population(retained, test, retained-{"e0", "e1", "e2"}, False)
+    with pytest.raises(ValueError, match="panel population mismatch"): validate_panel_population(retained, test, panel, True)
