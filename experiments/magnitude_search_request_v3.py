@@ -212,7 +212,8 @@ def compile_request(request, *, horizons=(5, 3, 1)):
     v2.validate_workers(request)
     request.pop("workers", None)
     _selection(request, horizons)
-    v2._references(request)
+    v2._references(request, recipe=(qualified_panel_recipe
+        if request_version(version) == 9 else v2.panel_recipe))
     _space(request)
     counts = _counts(request, horizons)
     v2._comparison(request["comparison"], counts)

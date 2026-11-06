@@ -48,7 +48,8 @@ def compile_request(request, *, horizons=(5, 3, 1)):
 
     selected = v3_recipe if dictionary == _V3_HASH else v2_recipe
     surrogate = dict(request)
-    surrogate["feature_dictionary_hash"] = v1_recipe("HMO")["dictionary_hash"]
+    if request_version(version) != 9:
+        surrogate["feature_dictionary_hash"] = v1_recipe("HMO")["dictionary_hash"]
     result = compiler(surrogate, **compile_kwargs)
     result["request"]["feature_dictionary_hash"] = dictionary
     result["request_id"] = content_hash(result["request"])
