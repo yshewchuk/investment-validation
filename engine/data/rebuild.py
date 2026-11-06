@@ -35,7 +35,53 @@ from engine.data.normalize import n_chains, n_daily, n_events, n_option_daily, n
 from engine.data.rebuild_cache import InputCache
 
 __all__ = ["rebuild", "finalize_rebuild", "finalize_current_store", "RebuildResult",
-           "TABLE_ORDER"]
+           "DailyMarketCompletenessError", "TABLE_ORDER"]
+
+#: Fraction of the adjacent-date median a published date must reach.
+DAILY_COMPLETENESS_FLOOR = 0.75
+
+
+class DailyMarketCompletenessError(RuntimeError):
+    """A full ``daily_market`` build is missing rows on a published date.
+
+    Raised by the preflight before :class:`~engine.data.store.PartitionedWriter`
+    is constructed, so the refusal leaves the current curated table untouched
+    instead of publishing a partial rebuild.
+    """
+
+    code = "DAILY_MARKET_DATE_INCOMPLETE"
+
+    def __init__(
+        self,
+        *,
+        date: str,
+        count: int,
+        previous_count: int,
+        next_count: int,
+        threshold: float,
+    ):
+        self.date = date
+        self.count = count
+        self.previous_count = previous_count
+        self.next_count = next_count
+        self.neighbor_counts = (previous_count, next_count)
+        self.threshold = threshold
+        self.reason = (
+            f"daily_market has {count} rows on {date}, below "
+            f"{DAILY_COMPLETENESS_FLOOR:.0%} of the median of its adjacent "
+            f"published dates ({previous_count} and {next_count}; "
+            f"threshold {threshold:.1f})"
+        )
+        self.details = {
+            "date": date,
+            "count": count,
+            "previous_count": previous_count,
+            "next_count": next_count,
+            "threshold": threshold,
+            "reason": self.reason,
+        }
+        super().__init__(self.reason)
+
 
 #: ``daily_market`` before ``securities`` (which is derived from it) and before
 #: the panel (which joins it).
@@ -133,22 +179,105 @@ def build_events_table(sample: int | None = None) -> dict:
     return report
 
 
+def _normalize_daily(ticker: str, cache) -> tuple[pd.DataFrame, dict]:
+    if cache is None:
+        return n_daily.normalize_ticker(ticker)
+    return rebuild_incremental.normalize_ticker_cached(ticker, cache)
+
+
+def _rss_suffix() -> str:
+    """Peak RSS suffix for progress boundaries; empty when unavailable."""
+    try:
+        import resource
+        peak_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+    except (ImportError, AttributeError, OSError, ValueError):
+        return ""
+    return f", peak RSS {peak_mb:.0f} MB"
+
+
+def _preflight_daily_completeness(tickers: list[str], cache) -> None:
+    """Refuse a full build whose published dates are missing most of the market.
+
+    Counts are taken from the same normalized frames the streaming write will
+    use. A date is compared with the median of its nearest published neighbours
+    (two, so their mean); edge dates have no pair and are skipped. Running this
+    before the writer matters: its constructor replaces the existing table.
+    """
+    counts: dict = {}
+    total = len(tickers)
+    started = time.monotonic()
+    last = started - 30.0
+    print(
+        f"  [daily preflight] start 0/{total} tickers, elapsed 0s{_rss_suffix()}",
+        file=sys.stderr,
+        flush=True,
+    )
+    for i, ticker in enumerate(tickers, 1):
+        frame, _ = _normalize_daily(ticker, cache)
+        if not frame.empty:
+            for day, n in frame.groupby("date").size().items():
+                counts[day] = counts.get(day, 0) + int(n)
+        now = time.monotonic()
+        if now - last >= 30.0:
+            last = now
+            elapsed = now - started
+            rate = i / elapsed if elapsed > 0 else 0
+            eta = (total - i) / rate if rate > 0 else 0
+            print(
+                f"  [daily preflight] {i}/{total} tickers, {elapsed:.0f}s elapsed, "
+                f"{rate:.1f}/s, ETA {eta:.0f}s, dates={len(counts)}",
+                file=sys.stderr,
+                flush=True,
+            )
+
+    dates = sorted(counts)
+    for i in range(1, len(dates) - 1):
+        previous = int(counts[dates[i - 1]])
+        following = int(counts[dates[i + 1]])
+        # Two neighbours, so the median is their mean.
+        threshold = DAILY_COMPLETENESS_FLOOR * ((previous + following) / 2.0)
+        count = int(counts[dates[i]])
+        if count < threshold:
+            date = pd.Timestamp(dates[i]).date().isoformat()
+            elapsed = time.monotonic() - started
+            print(
+                f"  [daily preflight] refused after {elapsed:.0f}s: date={date} "
+                f"count={count} threshold={threshold:.1f}{_rss_suffix()}",
+                file=sys.stderr,
+                flush=True,
+            )
+            raise DailyMarketCompletenessError(
+                date=date,
+                count=count,
+                previous_count=previous,
+                next_count=following,
+                threshold=threshold,
+            )
+
+    elapsed = time.monotonic() - started
+    print(
+        f"  [daily preflight] done in {elapsed:.0f}s: {total}/{total} tickers, "
+        f"{len(dates)} date(s){_rss_suffix()}",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
 def build_daily_table(sample: int | None = None, cache=None) -> dict:
     """Build ``daily_market``; ``cache`` (an ``InputCache``) reuses per-file parses."""
     _banner("daily_market")
     tickers = n_daily.list_tickers()
     if sample:
         tickers = tickers[:sample]
+    if sample is None:
+        _preflight_daily_completeness(tickers, cache)
     progress = _Progress("daily", len(tickers))
     batch = validate.ValidationReport(table="daily_market")
     skipped: list[str] = []
 
     with store.PartitionedWriter("daily_market") as writer:
         for i, ticker in enumerate(tickers, 1):
-            if cache is None:
-                frame, report = n_daily.normalize_ticker(ticker)
-            else:
-                frame, report = rebuild_incremental.normalize_ticker_cached(ticker, cache)
+            frame, report = _normalize_daily(ticker, cache)
             if frame.empty:
                 skipped.append(ticker)
             else:

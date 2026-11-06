@@ -114,6 +114,7 @@ def iter_orats_rows(
     *,
     root: Path | None = None,
     stats: dict | None = None,
+    order_by_fetched_at: bool = False,
 ) -> Iterator[SourceRows]:
     """Stream ``(source_id, rows)`` for every cached response on one endpoint.
 
@@ -124,6 +125,11 @@ def iter_orats_rows(
     ``stats["unreadable"]``) and quarantine-flagged, the way ``validate.py``
     treats a bad file. A recognized envelope that simply holds zero rows is a
     legitimate empty answer and is only counted (``stats["empty"]``).
+
+    ``order_by_fetched_at`` returns market-wide snapshots oldest first, with
+    the cache key as a stable tie-breaker (legacy sidecars without a stamp sort
+    first by key). The default remains cache-key order, so existing callers see
+    exactly the deterministic sequence they always have.
     """
     if stats is not None:
         stats.setdefault("scanned", 0)
@@ -132,7 +138,16 @@ def iter_orats_rows(
         stats.setdefault("unrecognized", 0)
         stats.setdefault("unreadable", 0)
 
-    for entry in iter_cached("orats", endpoint, root=root):
+    entries = iter_cached("orats", endpoint, root=root)
+    if order_by_fetched_at:
+        entries = sorted(
+            entries,
+            key=lambda entry: (
+                str(entry.meta.get("fetched_at") or ""),
+                entry.key,
+            ),
+        )
+    for entry in entries:
         outcome, source = classify_entry(entry, stats)
         if outcome == "payload":
             yield source

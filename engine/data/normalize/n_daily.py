@@ -97,12 +97,17 @@ def fetch_daily_index() -> dict[str, dict[str, list[dict]]]:
     market-wide (``tradeDate``) responses, which are a few thousand rows each.
 
     Cached because a rebuild asks for it once per ticker.
+
+    Snapshots are indexed oldest-fetched first so a later, more complete
+    market-wide response is appended after the ones it supersedes. The consumer
+    (:func:`_rows_for`) keeps the last row per date, so fetch time — not an
+    opaque cache-key order — decides which snapshot wins.
     """
     from engine.data.normalize.fetch_store import iter_orats_rows
 
     index: dict[str, dict[str, list[dict]]] = {}
     for endpoint, kind in (("hist/summaries", "summaries"), ("hist/cores", "cores")):
-        for source in iter_orats_rows(endpoint):
+        for source in iter_orats_rows(endpoint, order_by_fetched_at=True):
             # A response fetched for ONE ticker is fetched back on demand.
             if (source.params or {}).get("ticker"):
                 continue
