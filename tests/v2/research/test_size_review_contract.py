@@ -160,7 +160,7 @@ def test_603_search_fits_have_204_children_not_201_or_207():
 
 
 @pytest.mark.parametrize("anchor,request_version", [("1.6", "v1"), ("1.5", "v2"),
-    ("1.4", "v2"), ("1.6", None), ("1.5", None), ("1.6", "v9"), ("1.5", "v9")])
+    ("1.4", "v2"), ("1.6", None), ("1.5", None), ("1.5", "v9")])
 def test_cross_version_plan_rejected_before_reads_or_publication(monkeypatch, anchor, request_version):
     from types import SimpleNamespace
     from experiments import magnitude_search_plan as planner

@@ -4,11 +4,11 @@ import math
 
 from engine.v2.foundation import content_hash
 from engine.v2.ops.errors import fail
+from engine.v2.research.magnitude_panel_qualified_table import recipe as qualified_panel_recipe
 from experiments import magnitude_search_request as v2
 from experiments.magnitude_search_request_schema import (
     allows_hgb_axes, allows_neural, allows_size_family, request_version,
     uses_chrono_neural_profiles, uses_extended_neural_profiles)
-from engine.v2.research.magnitude_panel_qualified_table import recipe as qualified_panel_recipe
 
 __all__ = ["compile_request"]
 
