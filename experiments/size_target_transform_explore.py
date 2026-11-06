@@ -47,6 +47,12 @@ def history_stats(frame, train_ids):
     return mu, np.maximum(sig, floor), floor
 
 
+def _ridge_loo_residuals(y, fitted, x, alpha=1):
+    design = np.c_[x, np.ones(len(x))]; penalty = np.eye(design.shape[1]) * alpha; penalty[-1, -1] = 0
+    leverage = np.einsum("ij,ji->i", design, np.linalg.solve(design.T@design+penalty, design.T))
+    return (np.asarray(y)-fitted) / np.maximum(1-leverage, 1e-9)
+
+
 def _key(ticker, date):
     return f"{ticker}_{pd.Timestamp(date):%Y-%m-%d}"
 
@@ -125,7 +131,8 @@ def main():
                 key = f"{fs}/{kind}/{mn}"; err = pred-y; mae = np.mean(np.abs(err)); rmse = np.sqrt(np.mean(err**2))
                 arms[key] = {"mae": float(mae), "rmse": float(rmse), "delta_vs_history_mean": {"mae": float(mae-np.mean(np.abs(base-y))), "rmse": float(rmse-np.sqrt(np.mean((base-y)**2)))}, "delta_ci95": _blocks_ci(y, pred, base, quarters, tickers)}
                 if fs == "H" and kind == "raw" and mn == "ridge":
-                    resid = ytr-fit; dist["unscaled"] = _distribution(pipe.predict(xv), resid, np.ones(len(te)), y)
+                    x = pipe[:-1].transform(xt); resid = _ridge_loo_residuals(ytr, fit, x)
+                    dist["unscaled"] = _distribution(pipe.predict(xv), resid, np.ones(len(te)), y)
                     dist["sigma_scaled"] = _distribution(pipe.predict(xv), resid/tr.sigma.to_numpy(), te.sigma.to_numpy(), y)
                 done += 1
                 if done % 4 == 0: log(f"fit {done}/{total}; rate={done/(time.time()-start):.2f}/s eta={(total-done)/max(done/(time.time()-start),1e-9):.1f}s")
