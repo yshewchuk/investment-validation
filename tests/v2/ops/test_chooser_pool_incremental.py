@@ -7,13 +7,14 @@ from engine.v2.models.training.fold_store import TrainingRefused
 from tools import refresh_chooser_pool_candidates as refresh
 
 
-def _rows(ids, markers=None):
+def _rows(ids, markers=None, exit_dates=None):
     markers = markers or list(range(len(ids)))
     return pd.DataFrame({
         "event_id": ids, "arm": ["N7q2_-1_-1_1"] * len(ids),
         "variant": [0] * len(ids), "fill_alpha": [0.5] * len(ids),
         "event_date": pd.to_datetime(["2026-09-01"] * len(ids)),
         "entry_date": pd.to_datetime(["2026-09-01"] * len(ids)),
+        "exit_date": pd.to_datetime(exit_dates or ["2026-09-30"] * len(ids)),
         "session": ["AMC"] * len(ids), "marker": markers,
     })
 
@@ -27,14 +28,20 @@ def test_month_requires_canonical_yyyy_mm():
 
 def test_append_deduplicates_and_preserves_existing_rows_with_backup(tmp_path):
     path = tmp_path / "candidates.parquet"
-    original = _rows(["old"], [1])
+    original = _rows(["old"], [1], ["2026-09-30"])
     original.to_parquet(path, index=False)
-    fresh = _rows(["old", "new", "new"], [99, 2, 3])
+    fresh = _rows(["old", "new", "new"], [99, 2, 3],
+                  ["2026-10-02", "2026-10-15", "2026-10-16"])
 
     assert refresh.append_candidates(path, fresh) == 1
     result = pd.read_parquet(path).set_index("event_id")
     assert result.loc["old", "marker"] == 1
     assert result.loc["new", "marker"] == 2
+    assert result.loc["old", "exit_date"] == pd.Timestamp("2026-10-02")
+    assert list(pd.read_parquet(path).columns) == list(original.columns)
+    before_rerun = path.read_bytes()
+    assert refresh.append_candidates(path, fresh) == 0
+    assert path.read_bytes() == before_rerun
     assert len(result) == 2
     pd.testing.assert_frame_equal(pd.read_parquet(path.with_suffix(".parquet.bak")), original)
 
@@ -121,3 +128,23 @@ def test_chooser_source_builder_keeps_event_date(tmp_path, monkeypatch):
 
     result = build_chooser_pool.build(source)
     assert result.loc[0, "event_date"] == pd.Timestamp("2026-09-01")
+
+
+def test_publication_fsyncs_staged_file_before_replace_and_directory_after(tmp_path, monkeypatch):
+    path = tmp_path / "candidates.parquet"
+    _rows(["old"]).to_parquet(path, index=False)
+    events = []
+    real_fsync, real_replace = refresh.os.fsync, refresh.os.replace
+
+    def record_fsync(fd):
+        events.append("fsync")
+        return real_fsync(fd)
+
+    def record_replace(source, destination):
+        events.append("replace")
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(refresh.os, "fsync", record_fsync)
+    monkeypatch.setattr(refresh.os, "replace", record_replace)
+    assert refresh.append_candidates(path, _rows(["new"])) == 1
+    assert events == ["fsync", "replace", "fsync"]

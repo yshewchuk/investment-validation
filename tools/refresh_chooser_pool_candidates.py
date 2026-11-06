@@ -75,7 +75,7 @@ def append_candidates(path: Path, fresh: pd.DataFrame) -> int:
     old = read_table(path)
     if list(old.columns) != list(fresh.columns):
         refuse("candidate_schema_mismatch", "fresh and stored candidate columns differ")
-    required = (*KEY, "event_date", "entry_date")
+    required = (*KEY, "event_date", "entry_date", "exit_date")
     if any(column not in old for column in required):
         refuse("candidate_schema_mismatch", "candidate identity or date columns are missing")
     event = pd.to_datetime(fresh["event_date"], errors="coerce")
@@ -86,8 +86,15 @@ def append_candidates(path: Path, fresh: pd.DataFrame) -> int:
     fresh = fresh.drop_duplicates(list(KEY), keep="first")
     new_keys = pd.MultiIndex.from_frame(fresh[list(KEY)])
     old_keys = pd.MultiIndex.from_frame(old[list(KEY)])
+    updates = fresh[list(KEY) + ["exit_date"]].rename(columns={"exit_date": "_effective_exit_date"})
+    columns = old.columns
+    old = old.merge(updates, on=list(KEY), how="left", sort=False)
+    corrected = old.pop("_effective_exit_date")
+    changed = corrected.notna() & old["exit_date"].ne(corrected)
+    old.loc[changed, "exit_date"] = corrected[changed]
+    old = old[columns]
     unseen = fresh.loc[~new_keys.isin(old_keys)]
-    if unseen.empty:
+    if unseen.empty and not changed.any():
         return 0
     temp_path = None
     try:
@@ -96,8 +103,15 @@ def append_candidates(path: Path, fresh: pd.DataFrame) -> int:
         os.close(fd)
         pd.concat([old, unseen], ignore_index=True).to_parquet(temp_path, index=False)
         os.chmod(temp_path, path.stat().st_mode)
+        with temp_path.open("rb") as staged:
+            os.fsync(staged.fileno())
         shutil.copy2(path, path.with_suffix(path.suffix + ".bak"))
         os.replace(temp_path, path)
+        directory_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
     except Exception as exc:
         if temp_path is not None:
             temp_path.unlink(missing_ok=True)
