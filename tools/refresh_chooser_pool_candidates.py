@@ -74,47 +74,26 @@ def read_table(path: Path) -> tuple[pd.DataFrame, bytes]:
 
 def append_candidates(path: Path, fresh: pd.DataFrame) -> int:
     old, original_bytes = read_table(path)
-    if list(old.columns) != list(fresh.columns):
-        refuse("candidate_schema_mismatch", "fresh and stored candidate columns differ", path)
+    if list(old.columns) != list(fresh.columns): refuse("candidate_schema_mismatch", "fresh and stored candidate columns differ", path)
     required = (*KEY, "event_date", "entry_date", "pnl", "ret", *SETTLEMENT_FIELDS)
-    if any(column not in old for column in required):
-        refuse("candidate_schema_mismatch", "candidate identity or date columns are missing", path)
-    event, entry, exits = (pd.to_datetime(pd.concat([old[name], fresh[name]]), errors="coerce") for name in ("event_date", "entry_date", "exit_date"))
-    sessions = pd.concat([old.get("session", pd.Series("", index=old.index)), fresh.get("session", pd.Series("", index=fresh.index))]).astype(str).str.upper()
+    if any(column not in old for column in required): refuse("candidate_schema_mismatch", "candidate identity or date columns are missing", path)
+    event, entry, exits = (pd.to_datetime(fresh[name], errors="coerce") for name in ("event_date", "entry_date", "exit_date"))
+    sessions = fresh.get("session", pd.Series("", index=fresh.index)).astype(str).str.upper()
     if event.isna().any() or entry.isna().any() or exits.isna().any() or exits.lt(entry).any() or (event.lt(entry) & ~sessions.eq("BMO")).any() or (sessions.eq("BMO") & entry.ge(event)).any():
         refuse("candidate_causality_failed", "event, entry and exit dates must satisfy session causality", path)
-    repaired_fresh = ~fresh["exit_arb_ok"].fillna(True).astype(bool) | fresh["exit_value"].lt(0)
-    if fresh.loc[~repaired_fresh, ["exit_value", "entry_cost"]].isna().any(axis=None): refuse("candidate_causality_failed", "non-repaired fresh rows require exit_value and entry_cost", path)
-    if fresh.loc[repaired_fresh, ["exit_value_expiry", "entry_cost"]].isna().any(axis=None): refuse("candidate_causality_failed", "repaired fresh rows require exit_value_expiry and entry_cost", path)
-    fresh_expiry = pd.to_datetime(fresh["expiry"], errors="coerce")
-    if fresh_expiry.loc[repaired_fresh].isna().any() or fresh_expiry.loc[repaired_fresh].lt(pd.to_datetime(fresh.loc[repaired_fresh, "entry_date"], errors="coerce")).any(): refuse("candidate_causality_failed", "repaired fresh rows require expiry on or after entry", path)
-    fresh.loc[repaired_fresh, "exit_value"] = fresh.loc[repaired_fresh, "exit_value_expiry"]
-    fresh.loc[repaired_fresh, "exit_date"] = fresh.loc[repaired_fresh, "expiry"]
+    repaired = ~fresh["exit_arb_ok"].fillna(True).astype(bool) | fresh["exit_value"].lt(0)
+    if fresh.loc[~repaired, ["exit_value", "entry_cost"]].isna().any(axis=None): refuse("candidate_causality_failed", "non-repaired fresh rows require exit_value and entry_cost", path)
+    if fresh.loc[repaired, ["exit_value_expiry", "entry_cost"]].isna().any(axis=None): refuse("candidate_causality_failed", "repaired fresh rows require exit_value_expiry and entry_cost", path)
+    expiry = pd.to_datetime(fresh["expiry"], errors="coerce")
+    if expiry.loc[repaired].isna().any() or expiry.loc[repaired].lt(pd.to_datetime(fresh.loc[repaired, "entry_date"], errors="coerce")).any(): refuse("candidate_causality_failed", "repaired fresh rows require expiry on or after entry", path)
+    fresh.loc[repaired, "exit_value"] = fresh.loc[repaired, "exit_value_expiry"]
+    fresh.loc[repaired, "exit_date"] = fresh.loc[repaired, "expiry"]
     fresh["pnl"] = fresh["exit_value"] - fresh["entry_cost"]
     fresh["ret"] = fresh["pnl"].div(fresh["entry_cost"]).where(fresh["entry_cost"].gt(MIN_MEANINGFUL_COST))
     fresh = fresh.drop_duplicates(list(KEY), keep="first")
     new_keys, old_keys = (pd.MultiIndex.from_frame(frame[list(KEY)]) for frame in (fresh, old))
-    if (winner_conflicts := fresh.merge(old, on=["event_id", "arm", "fill_alpha"], suffixes=("_fresh", "_stored"))).eval("variant_fresh != variant_stored").any(): refuse("candidate_identity_conflict", "event, arm and fill already have a different variant winner", path)
-    repaired = ~old["exit_arb_ok"].fillna(True).astype(bool) | old["exit_value"].lt(0)
-    expiry = pd.to_datetime(old["expiry"], errors="coerce")
-    retained = repaired & ~old_keys.isin(new_keys) & old["exit_value_expiry"].notna() & old["entry_cost"].notna()
-    if expiry.loc[retained].isna().any(): refuse("candidate_causality_failed", "retained repaired rows require expiry date", path)
-    if expiry.loc[retained].lt(pd.to_datetime(old.loc[retained, "entry_date"], errors="coerce")).any(): refuse("candidate_causality_failed", "retained expiry must not precede entry", path)
-    history_changed = pd.Series(False, index=old.index)
-    updates = fresh.loc[~new_keys.isin(old_keys), list(KEY) + list(SETTLEMENT_FIELDS)].rename(
-        columns={name: f"_fresh_{name}" for name in SETTLEMENT_FIELDS})
-    columns = old.columns
-    old = old.merge(updates, on=list(KEY), how="left", sort=False)
-    matched = old["_fresh_exit_date"].notna()
-    changed = pd.Series(False, index=old.index)
-    for name in SETTLEMENT_FIELDS:
-        fresh_value = old.pop(f"_fresh_{name}")
-        changed |= matched & old[name].ne(fresh_value) & ~(old[name].isna() & fresh_value.isna())
-        old[name] = fresh_value.where(matched, old[name])
-    old = old[columns]
     unseen = fresh.loc[~new_keys.isin(old_keys)]
-    if unseen.empty and not changed.any() and not history_changed.any():
-        return 0
+    if unseen.empty: return 0
     temp_path = None
     try:
         fd, name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
@@ -122,18 +101,14 @@ def append_candidates(path: Path, fresh: pd.DataFrame) -> int:
         os.close(fd)
         pd.concat([old, unseen], ignore_index=True).to_parquet(temp_path, index=False)
         os.chmod(temp_path, path.stat().st_mode)
-        with temp_path.open("rb") as staged:
-            os.fsync(staged.fileno())
+        with temp_path.open("rb") as staged: os.fsync(staged.fileno())
         path.with_suffix(path.suffix + ".bak").write_bytes(original_bytes)
         os.replace(temp_path, path)
         directory_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
+        try: os.fsync(directory_fd)
+        finally: os.close(directory_fd)
     except Exception as exc:
-        if temp_path is not None:
-            temp_path.unlink(missing_ok=True)
+        if temp_path is not None: temp_path.unlink(missing_ok=True)
         refuse("candidate_table_write_failed", f"{type(exc).__name__}: {exc}", path)
     return len(unseen)
 
@@ -142,6 +117,9 @@ def refresh(month: str, path: Path = CANDIDATES) -> int:
     month = require_month(month, path)
     if not path.is_file():
         refuse("candidate_table_missing", "stored EXP-137 candidate table is required", path)
+    stored, _ = read_table(path)
+    if "exit_date" not in stored: refuse("candidate_schema_mismatch", "stored candidate exit_date is missing", path)
+    if pd.to_datetime(stored["exit_date"], errors="coerce").dt.strftime("%Y-%m").eq(month).any(): refuse("month_already_present", "stored candidates already contain this exit month; reruns and corrections are out of scope", path)
     started = time.monotonic()
     rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
     print(f"[chooser-refresh] start month={month} RSS={rss:.0f}MB", file=sys.stderr, flush=True)
