@@ -5,6 +5,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pyarrow.dataset as ds
+import pyarrow.parquet as pq
 from sklearn.ensemble import HistGradientBoostingRegressor
 from sklearn.linear_model import ElasticNet, Ridge
 from sklearn.pipeline import make_pipeline
@@ -14,27 +15,20 @@ from sklearn.preprocessing import StandardScaler
 H = ["n_prior", "mean_prior_move", "mean_prior_abs_move", *[f"ema{k}_prior_{s}move" for k in (2, 4, 8, 12) for s in ("", "abs_")], "signed_streak"]
 EPS = 1e-6
 
-
 def score_metrics(y, pred):
     e = np.asarray(pred)-np.asarray(y); return float(np.mean(np.abs(e))), float(np.sqrt(np.mean(e**2)))
-
-
 def transform(y, mu, sigma, kind):
     y, mu, sigma = np.asarray(y), np.asarray(mu), np.asarray(sigma)
     if kind in ("raw", "residual"): return y if kind == "raw" else y-mu
     if kind == "z": return (y-mu)/sigma
     if kind == "log_ratio": return np.log((y+EPS)/(mu+EPS))
     raise ValueError(kind)
-
-
 def inverse(z, mu, sigma, kind):
     z, mu, sigma = np.asarray(z), np.asarray(mu), np.asarray(sigma)
     if kind in ("raw", "residual"): return z if kind == "raw" else z+mu
     if kind == "z": return z*sigma+mu
     if kind == "log_ratio": return (mu+EPS)*np.exp(np.clip(z, -30, 30))-EPS
     raise ValueError(kind)
-
-
 def history_stats(frame, train_ids):
     """Rebuild H and prior-only mu/sigma from retained signed moves."""
     mu, sig = np.zeros(len(frame)), np.zeros(len(frame)); feat = pd.DataFrame(0., index=frame.index, columns=H)
@@ -49,24 +43,17 @@ def history_stats(frame, train_ids):
                 emas = [v for k in (2, 4, 8, 12) for v in (p.ewm(span=k, adjust=False).mean().iloc[-1], p.abs().ewm(span=k, adjust=False).mean().iloc[-1])]
                 feat.loc[i] = [len(moves), p.mean(), p.abs().mean(), *emas, sign*streak]
                 mu[i], sig[i] = np.mean(labels), np.std(labels, ddof=0)
-            if pd.notna(r.move): moves.append(float(r.move))
-            if pd.notna(r.abs_move): labels.append(float(r.abs_move))
+            if pd.notna(r.move) and pd.notna(r.abs_move): moves.append(float(r.move)); labels.append(float(r.abs_move))
     train = frame.event_id.isin(train_ids).to_numpy(); floor = max(float(np.median(sig[train]))*.5, 1e-6)
     return mu, np.maximum(sig, floor), floor, feat
-
-
 def ridge_loo_residuals(y, fitted, x, alpha=1):
     d = np.c_[x, np.ones(len(x))]; p = np.eye(d.shape[1])*alpha; p[-1, -1] = 0
     h = np.einsum("ij,ji->i", d, np.linalg.solve(d.T@d+p, d.T))
     return (np.asarray(y)-fitted)/np.maximum(1-h, 1e-9)
-
-
-def validate_panel_population(retained, test_ids, panel_ids, duplicates):
-    missing = retained-panel_ids
+def validate_panel_population(retained, test_ids, panel_ids, duplicates, unusable=()):
+    missing = (retained-panel_ids)|set(unusable)
     if duplicates or not test_ids <= panel_ids or len(missing) > .02*len(retained): raise ValueError("panel population mismatch")
     return missing
-
-
 def block_bootstrap_ci(y, pred, baseline, quarters, tickers, seed=41):
     groups = [np.flatnonzero((quarters == q)&(tickers == t)) for q, t in sorted(set(zip(quarters, tickers)))]
     rng, out = np.random.default_rng(seed), []
@@ -105,26 +92,34 @@ def main():
     retained = set(d["frozen_eligibility"]["retained_event_ids"]); paired = d["paired"]["paired_rows"]; del d, raw
     test_ids = {r["event_id"] for r in paired}
     if len(paired) != 751 or len(test_ids) != len(paired) or not test_ids <= retained: raise ValueError("paired population mismatch")
-    ticks = {x.rsplit("_", 1)[0] for x in retained}; dataset = ds.dataset(a.panel, format="parquet")
+    if os.path.getsize(a.panel)>1<<30: raise ValueError("panel source exceeds 1 GiB")
+    dataset = ds.dataset(a.panel, format="parquet"); pf = pq.ParquetFile(a.panel); md = pf.metadata
+    ci = [pf.schema_arrow.names.index(c) for c in ("ticker", "date", "move", "abs_move")]
+    if any(sum(md.row_group(i).column(j).total_uncompressed_size for j in ci)>64<<20 for i in range(md.num_row_groups)): raise ValueError("panel row-group decode budget exceeded")
+    expr = None
+    for eid in retained:
+        t, day = eid.rsplit("_", 1); term = (ds.field("ticker")==t)&(ds.field("date")==pd.Timestamp(day)); expr = term if expr is None else expr|term
     kept, rows, size = [], 0, 0
-    for b in dataset.scanner(columns=["ticker", "date", "move", "abs_move"], filter=ds.field("ticker").isin(list(ticks)), batch_size=256, use_threads=False).to_batches():
+    for b in dataset.scanner(columns=["ticker", "date", "move", "abs_move"], filter=expr, batch_size=256, use_threads=False).to_batches():
         if b.num_rows > 256 or b.nbytes > 64<<20: raise ValueError("decoded panel batch exceeds budget")
         f = b.to_pandas(); f["event_id"] = [_key(t, d) for t, d in zip(f.ticker, f.date)]; f = f[f.event_id.isin(retained)]
         rows += len(f); size += int(f.memory_usage(deep=True).sum())
         if rows > len(retained) or size > 64<<20: raise ValueError("selected panel exceeds row/byte budget")
         if len(f): kept.append(f)
     panel = pd.concat(kept, ignore_index=True) if kept else pd.DataFrame(columns=["ticker", "date", "move", "abs_move", "event_id"])
-    ids = set(panel.event_id); missing = validate_panel_population(retained, test_ids, ids, panel.event_id.duplicated().any())
-    log(f"panel rows={len(panel)} retained={len(retained)} missing={len(missing)}")
+    ids = set(panel.event_id); absent = retained-ids
+    unusable = set(panel.loc[(panel.date.dt.year<=2024)&panel.abs_move.isna(), "event_id"])
+    missing = validate_panel_population(retained, test_ids, ids, panel.event_id.duplicated().any(), unusable)
+    log(f"panel rows={len(panel)} retained={len(retained)} missing={len(absent)} unusable_training_labels={len(unusable)}")
     panel = panel.sort_values(["ticker", "date"]).reset_index(drop=True)
-    train_ids = set(panel.loc[panel.date.dt.year<=2024, "event_id"])-test_ids
+    train_ids = set(panel.loc[panel.date.dt.year<=2024, "event_id"])-test_ids-unusable
     mu, sigma, floor, feat = history_stats(panel, train_ids); panel["mu"], panel["sigma"] = mu, sigma; panel[H] = feat
     tr = panel[panel.event_id.isin(train_ids)&panel.abs_move.notna()].copy(); pmap = {r["event_id"]: r for r in paired}
     te = panel[panel.event_id.isin(test_ids)].copy().set_index("event_id").loc[list(pmap)].reset_index()
     ytr = tr.abs_move.to_numpy(float); y = np.array([pmap[k]["absolute_move_pct"] for k in te.event_id], float)
     base = np.array([pmap[k]["history_mean"] for k in te.event_id], float); inc = np.array([pmap[k]["incumbent"] for k in te.event_id], float)
     q = np.array([pmap[k]["quarter"] for k in te.event_id]); tickers = te.ticker.to_numpy()
-    out = {"n_train": len(tr), "n_test": len(te), "missing_panel_events": len(missing), "sigma_floor_pct": floor, "feature_note": "H recomputed from retained prior moves; MO- omitted because legacy market/options cutoffs are unsafe.", "label_note": "Panel abs_move is used for training and causal mu/sigma; paired absolute_move_pct scores test.", "features": {"H": H}, "baselines": {}}
+    out = {"n_train": len(tr), "n_test": len(te), "missing_panel_events": len(absent), "unusable_training_labels": len(unusable), "missing_population_events": len(missing), "sigma_floor_pct": floor, "feature_note": "H recomputed from retained prior moves; MO- omitted because legacy market/options cutoffs are unsafe.", "label_note": "Panel abs_move is used for training and causal mu/sigma; paired absolute_move_pct scores test.", "features": {"H": H}, "baselines": {}}
     for name, pred in (("history_mean", base), ("v1.4", inc)):
         mae, rmse = score_metrics(y, pred); out["baselines"][name] = {"mae": mae, "rmse": rmse}
     models = {"ridge": Ridge(alpha=1), "elasticnet": ElasticNet(alpha=.01, l1_ratio=.75, max_iter=10000), "hgb": HistGradientBoostingRegressor(max_leaf_nodes=7, random_state=0)}

@@ -38,10 +38,10 @@ def test_scores_bootstrap_and_distribution_match_oracles():
     mae, rmse = score_metrics(y, pred); assert np.isclose(mae, 1.5) and np.isclose(rmse, np.sqrt(2.5))
     bmae, brmse = score_metrics(y, base); ci = block_bootstrap_ci(y, pred, base, np.array([1, 1]), np.array(["A", "A"]))
     np.testing.assert_allclose(ci, [[mae-bmae, mae-bmae], [rmse-brmse, rmse-brmse]])
-    p, residual, scale, actual = np.array([3., 5.]), np.array([-1., 0., 2.]), np.array([1., .5]), np.array([2.5, 5.5])
+    p, residual, scale, actual = np.array([.1, 5.]), np.array([-1., 0., 2.]), np.array([1., .5]), np.array([.5, 5.5])
     got = distribution_metrics(p, residual, scale, actual)
-    draws = np.maximum(p[:, None]+np.random.default_rng(72).choice(residual, (2, 200), replace=True)*scale[:, None], 0.)
-    assert draws.min() >= 0.
+    raw = p[:, None]+np.random.default_rng(72).choice(residual, (2, 200), replace=True)*scale[:, None]; draws = np.maximum(raw, 0.)
+    assert raw.min() < 0. and draws.min() == 0.
     for c in (.5, .8, .9):
         lo, hi = np.quantile(draws, [(1-c)/2, (1+c)/2], axis=1)
         assert np.isclose(got[str(int(c*100))]["coverage"], np.mean((actual>=lo)&(actual<=hi)))
@@ -53,6 +53,8 @@ def test_scores_bootstrap_and_distribution_match_oracles():
 def test_missing_training_panel_event_is_tolerated_below_two_percent():
     retained = {f"e{i}" for i in range(100)}; test = {"e99"}; panel = retained-{"e0"}
     assert validate_panel_population(retained, test, panel, False) == {"e0"}
+    assert validate_panel_population(retained, test, panel, False, {"e1"}) == {"e0", "e1"}
     with pytest.raises(ValueError): validate_panel_population(retained, test, panel-test, False)
+    with pytest.raises(ValueError): validate_panel_population(retained, test, panel, False, {"e1", "e2"})
     with pytest.raises(ValueError): validate_panel_population(retained, test, retained-{"e0", "e1", "e2"}, False)
     with pytest.raises(ValueError): validate_panel_population(retained, test, panel, True)
