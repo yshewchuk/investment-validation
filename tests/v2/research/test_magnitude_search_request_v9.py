@@ -3,6 +3,7 @@ import pytest
 from engine.v2.ops.errors import OpsError
 from engine.v2.research.eligibility_policy import eligibility_policy
 from engine.v2.research.magnitude_panel_qualified_table import feature_dictionary, recipe
+from engine.v2.research.magnitude_panel_table import recipe as legacy_recipe
 from experiments.magnitude_search_request import validate_workers
 from experiments.magnitude_search_request_versions import compile_request
 from experiments.magnitude_search_request_v3 import _space
@@ -75,15 +76,21 @@ def test_v9_request_sets_and_expanded_candidate_fit_budgets():
     assert compiled["counts"]["total_component_fits"] == 144
     assert len(compiled["candidate_specs"]) == 21
     assert {spec["feature_recipe"]["subset"] for spec in compiled["candidate_specs"]} == set(_V9_SETS)
-    for subsets, candidate_count in ((["MO-", "M"], 9), (["M"], 5), (["HMO", "M"], 9)):
+    for subsets, candidate_count in ((["MO-", "M"], 8), (["M"], 4), (["HMO", "M"], 9)):
         request["feature_sets"] = subsets
         request["max_candidates"] = candidate_count
         request["max_fits"] = 3 * (candidate_count * 2 + 1)
         selected = compile_request(request)
         assert selected["request"]["feature_sets"] == subsets
         assert selected["counts"]["candidates"] == candidate_count
+        assert len(selected["candidate_specs"]) == candidate_count
         assert selected["counts"]["search_fits"] == request["max_fits"]
         assert {spec["feature_recipe"]["subset"] for spec in selected["candidate_specs"]} == set(subsets)
+    unqualified = dict(request)
+    unqualified["feature_dictionary_hash"] = legacy_recipe("HMO")["dictionary_hash"]
+    with pytest.raises(OpsError) as caught:
+        compile_request(unqualified)
+    assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
 
 
 def test_v9_workers_use_the_existing_bounded_worker_contract():

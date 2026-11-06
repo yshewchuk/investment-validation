@@ -41,6 +41,8 @@ def compile_request(request, *, horizons=(5, 3, 1)):
     compile_kwargs = ({"horizons": horizons}
                       if allows_lead_selector(request_version(version)) else {})
     dictionary = request.get("feature_dictionary_hash") if type(request) is dict else None
+    if request_version(version) == 9 and dictionary != _V3_HASH:
+        raise fail("INVALID_EXPERIMENT_SPEC", "v9 requires the qualified feature dictionary hash")
     if type(dictionary) is not str or dictionary not in (_V2_HASH, _V3_HASH):
         return compiler(request, **compile_kwargs)
 

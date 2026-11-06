@@ -163,7 +163,8 @@ def _counts(request, horizons):
                 "stage-2 requires ordered outer years and exact inner-year keys")
     v2._require(all(v2._years(inner[year]) and inner[year][-1] < year for year in outer),
                 "stage-2 inner years must be ordered and strictly earlier than their outer year")
-    size = allows_size_family(request_version(request["schema_version"]))
+    size = (allows_size_family(request_version(request["schema_version"]))
+            and "HMO" in request["feature_sets"])
     count = int(size) + len(request["feature_sets"]) * sum(
         math.prod(len(values) for values in axes.values())
         for family, axes in request["space"].items() if family != "size_v1_4")
