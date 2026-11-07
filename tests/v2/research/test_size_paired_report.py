@@ -261,3 +261,137 @@ def test_implied_move_rejects_keys_outside_the_paired_population():
     with pytest.raises(ValueError, match="implied move coverage differs"):
         paired_report(events, challenger, incumbent, targets,
                       implied_moves={("not-admitted", 1): 2.5})
+
+
+def test_implied_scale_is_known_and_changed_test_rows_cannot_alter_it():
+    from experiments.size_search_report import fit_implied_scale
+
+    class SentinelLabels(dict):
+        def get(self, key, default=None):
+            if key == "test":
+                raise AssertionError("test label accessed")
+            return super().get(key, default)
+
+    features = [
+        {"event_id": "train-a", "horizon_sessions": 1, "implied_move": 1.0},
+        {"event_id": "train-a", "horizon_sessions": 3, "implied_move": 3.0},
+        {"event_id": "train-b", "horizon_sessions": 5, "implied_move": 2.0},
+        {"event_id": "test", "horizon_sessions": 1, "implied_move": 100.0},
+    ]
+    labels = SentinelLabels({"train-a": 2.0, "train-b": 8.0, "test": 1000.0})
+    calibration = fit_implied_scale(["train-a", "train-b"], labels, features, (1, 3, 5))
+    assert calibration["fit_n"] == 3
+    assert calibration["scale"] == pytest.approx(12 / 7)
+
+    features[-1]["implied_move"] = 999.0
+    labels["test"] = 0.0
+    assert fit_implied_scale(["train-a", "train-b"], labels, features, (1, 3, 5)) == calibration
+    assert fit_implied_scale(["train-a"], {"train-a": 2.0},
+                             [{"event_id": "train-a", "horizon_sessions": 1, "implied_move": 0.0}],
+                             (1,)) == {"scale": None, "fit_n": 1}
+
+
+def test_implied_scale_never_accesses_test_row_feature_or_label_values():
+    from experiments.size_search_report import fit_implied_scale
+
+    class GuardedLabels(dict):
+        def get(self, key, default=None):
+            if key == "test":
+                raise AssertionError("test label accessed")
+            return super().get(key, default)
+
+    class GuardedRow(dict):
+        def __getitem__(self, key):
+            if key == "implied_move" and self["event_id"] == "test":
+                raise AssertionError("test feature accessed")
+            return super().__getitem__(key)
+
+    features = [GuardedRow(event_id="train", horizon_sessions=1, implied_move=2.0),
+                GuardedRow(event_id="test", horizon_sessions=1, implied_move=100.0)]
+    calibration = fit_implied_scale(["train"], GuardedLabels(train=4.0, test=1000.0),
+                                    features, (1,))
+    assert calibration == {"scale": 2.0, "fit_n": 1}
+
+
+def test_scaled_implied_reports_coverage_metrics_per_year_and_subset():
+    events, challenger, incumbent, targets = fixture()
+    implied = {("e0", h): 2.5 for h in (1, 3, 5)}
+    implied.update({("e1", h): 5.5 for h in (1, 3, 5)})
+    implied.update({("e3", h): 4.0 for h in (1, 3, 5)})
+    scales = {"2023": {"scale": 2.0, "fit_n": 9}, "2024": {"scale": None, "fit_n": 0}}
+    raw = paired_report(events, challenger, incumbent, targets, implied_moves=implied)
+    report = paired_report(events, challenger, incumbent, targets,
+                           implied_moves=implied, implied_scales=scales)
+    rows = {(row["event_id"], row["horizon_sessions"]): row for row in report["paired_rows"]}
+
+    assert report["implied_move_scaled_calibration"] == scales
+    assert report["implied_move_scaled_coverage"] == {"available_rows": 6, "total_paired_rows": 12}
+    assert rows["e0", 1]["implied_move_scaled"] == pytest.approx(5.0)
+    assert rows["e1", 3]["implied_move_scaled"] == pytest.approx(11.0)
+    assert rows["e3", 1]["implied_move"] == 4.0
+    assert rows["e3", 1]["implied_move_scaled"] is None
+
+    scaled = report["metrics"]["implied_move_scaled"]
+    assert scaled["count"] == 6
+    assert scaled["rmse"] == pytest.approx(math.sqrt(17.0))
+    assert scaled["mae"] == pytest.approx(4.0)
+    assert scaled["bias"] == pytest.approx(4.0)
+
+    like = report["like_for_like_implied_move_scaled"]
+    assert set(like["metrics"]) == {
+        "challenger", "incumbent", "history_mean", "implied_move", "implied_move_scaled"}
+    assert like["metrics"]["implied_move_scaled"] == scaled
+    assert like["metrics"]["implied_move"]["count"] == 6
+    assert like["metrics"]["implied_move"]["rmse"] == pytest.approx(0.5)
+    assert like["available_rows"] == 6
+    assert like["total_paired_rows"] == 12
+
+    bootstrap = report["quarter_bootstrap"]["implied_move_scaled"]
+    assert bootstrap == like["quarter_bootstrap"]
+    assert bootstrap["blocks"] == 1 and bootstrap["events"] == 2
+    assert set(bootstrap["percentile_95"]) == set(like["metrics"])
+    assert bootstrap["percentile_95"]["implied_move_scaled"]["rmse"] == pytest.approx(
+        [math.sqrt(17.0)] * 2)
+    assert bootstrap["difference_percentile_95"]["implied_move_scaled_minus_implied_move"] == {
+        "rmse": pytest.approx([math.sqrt(17.0) - 0.5] * 2),
+        "mae": pytest.approx([4.0 - 0.5] * 2)}
+
+    assert report["per_year"]["2023"]["arms"]["implied_move_scaled"]["count"] == 6
+    assert report["per_year"]["2023"]["implied_move_scaled_coverage"] == {
+        "available_rows": 6, "total_paired_rows": 9}
+    assert report["per_year"]["2024"]["arms"]["implied_move_scaled"] is None
+    assert report["per_year"]["2024"]["implied_move_scaled_coverage"] == {
+        "available_rows": 0, "total_paired_rows": 3}
+
+    assert report["implied_move_coverage"] == raw["implied_move_coverage"]
+    assert report["metrics"]["implied_move"] == raw["metrics"]["implied_move"]
+    assert report["like_for_like"] == raw["like_for_like"]
+    assert report["quarter_bootstrap"]["implied_move"] == raw["quarter_bootstrap"]["implied_move"]
+    for arm in ("challenger", "incumbent", "history_mean"):
+        assert report["metrics"][arm] == raw["metrics"][arm]
+
+
+def test_scaled_implied_without_calibration_is_explicit_zero_coverage():
+    events, challenger, incumbent, targets = fixture()
+    implied = {("e0", h): 2.5 for h in (1, 3, 5)}
+    report = paired_report(events, challenger, incumbent, targets, implied_moves=implied)
+
+    assert report["implied_move_coverage"] == {"available_rows": 3, "total_paired_rows": 12}
+    assert report["implied_move_scaled_calibration"] == {}
+    assert report["implied_move_scaled_coverage"] == {"available_rows": 0, "total_paired_rows": 12}
+    assert all(row["implied_move_scaled"] is None for row in report["paired_rows"])
+    assert report["metrics"]["implied_move_scaled"] is None
+    assert report["like_for_like_implied_move_scaled"]["status"] == "unavailable_no_scaled_implied_move_rows"
+    assert report["like_for_like_implied_move_scaled"]["metrics"] is None
+    assert report["quarter_bootstrap"]["implied_move_scaled"] is None
+
+
+@pytest.mark.parametrize("record", [
+    {"scale": True, "fit_n": 1}, {"scale": -1.0, "fit_n": 1},
+    {"scale": float("nan"), "fit_n": 1}, {"scale": 1.0, "fit_n": True}, {"scale": 1.0},
+])
+def test_implied_scale_calibration_rejects_malformed_records(record):
+    events, challenger, incumbent, targets = fixture()
+    with pytest.raises(ValueError, match="implied scale"):
+        paired_report(events, challenger, incumbent, targets,
+                      implied_moves={}, implied_scales={"2023": record})

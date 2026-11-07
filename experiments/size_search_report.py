@@ -1,15 +1,17 @@
 """Collect verified selected-outer and comparator journals without new fitting."""
+import math
 import sys
 import time
 
 from engine.v2.contracts import SnapshotRef
 from engine.v2.foundation import content_hash, from_document
 from engine.v2.research.magnitude_panel_qualified_table import recipe as qualified_recipe
+from engine.v2.research.progress import Progress, decision, stage
 from experiments.magnitude_search_outer import collect_outer_results
 from experiments.magnitude_search_plan import trial_key
 from experiments.magnitude_search_records import read_record
 from experiments.size_paired_report import paired_report
-from experiments.size_search_binding import _panel_columns, read_stored_panel
+from experiments.size_search_binding import _panel_columns, fold_inputs, read_stored_panel
 from experiments.v2_magnitude_search_run import _admit_driver
 
 
@@ -26,6 +28,50 @@ def _implied_moves(repository, registration, events, plan):
     keys = {(event["event_id"], horizon) for event in events for horizon in plan["horizons"]}
     return {(row["event_id"], row["horizon_sessions"]): row["implied_move"]
             for row in rows if (row["event_id"], row["horizon_sessions"]) in keys}
+
+
+def _valid_scalar(value):
+    return type(value) in (int, float) and math.isfinite(value) and value >= 0
+
+
+def fit_implied_scale(training_event_ids, labels, features, horizons):
+    """Fit one no-intercept k from admitted training event-horizon feature/label pairs."""
+    event_ids, leads, pairs = set(training_event_ids), set(horizons), []
+    for row in features:
+        event_id = row["event_id"]
+        if event_id not in event_ids or row["horizon_sessions"] not in leads:
+            continue
+        x, y = row["implied_move"], labels.get(event_id)
+        if _valid_scalar(x) and _valid_scalar(y):
+            pairs.append((x, y))
+    denominator = sum(x * x for x, _ in pairs)
+    if not pairs or denominator == 0:
+        return {"scale": None, "fit_n": len(pairs)}
+    scale = sum(x * y for x, y in pairs) / denominator
+    return {"scale": scale if math.isfinite(scale) and scale >= 0 else None,
+            "fit_n": len(pairs)}
+
+
+def _implied_move_scales(repository, binding, folds, horizons):
+    """Fit each outer year's k from its own admitted training rows, never evaluation rows."""
+    with stage("implied_move_scales"):
+        execution = binding.get("magnitude_execution")
+        if (not isinstance(execution, dict)
+                or not isinstance(execution.get("evaluation_labels_before"), str)):
+            decision("implied_move_scales",
+                     f"skipped: calibration unavailable for {len(folds)} outer years")
+            return {}
+        scales = {}
+        progress = Progress("implied_move_scales", len(folds))
+        for group in folds:
+            outer = group["outer"]
+            fold = {**outer, "evaluation_labels_before": execution["evaluation_labels_before"]}
+            inputs = fold_inputs(repository, binding, fold)
+            labels = {row["event_id"]: row["absolute_move_pct"] for row in inputs["training"]}
+            scales[str(outer["year"])] = fit_implied_scale(
+                outer["training_candidate_event_ids"], labels, inputs["features"], horizons)
+            progress.tick()
+        return scales
 
 
 def _candidate_evidence(conn, store, run_id, plan):
@@ -99,9 +145,11 @@ def collect(conn, store, repository, registration, request, plan_ref):
         comparison = read_record(conn, store, registration.run_id, "comparison-terminal:" + key)["result"]
         comparisons.extend(comparison["forecasts"])
         comparison_fits.extend({"outer_year": year, **fit} for fit in comparison["fit_details"])
+    scales = _implied_move_scales(repository, registration.document, plan["folds"], plan["horizons"])
     report = {"plan_id": plan["plan_id"], "search": result, "paired": paired_report(events, forecasts, comparisons, targets,
                 horizons=plan["horizons"],
                 implied_moves=_implied_moves(repository, registration, events, plan),
+                implied_scales=scales,
                 label_reasons={o["event_id"]: o["reason"] for f in result["folds"]
                     for o in f["evaluation_inputs"].get("omitted_labels", [])}),
             "preflight": resource_report(plan), "inner_fits": inner_fits, "comparison_fits": comparison_fits,
