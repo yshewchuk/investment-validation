@@ -157,7 +157,7 @@ def _result(started, inputs, inputs_id, execution, forecasts, validation, fold, 
     return {**result, "result_id": content_hash(result)}
 
 
-def _replay(read, store, started, fold, plan, execution, binding):
+def _replay(read, store, started, fold, plan, execution, binding, *, input_callback=None):
     regression = execution.get("schema_version") == "regression_candidate_execution.v1"
     try:
         _equal(read("start"), started)
@@ -169,6 +169,8 @@ def _replay(read, store, started, fold, plan, execution, binding):
             if error.problem.retryable:
                 raise
             raise _conflict() from None
+        if input_callback is not None:
+            input_callback(fold, inputs)
         fits = fit_evidence(inputs, fold, plan, execution)
         forecasts = _forecasts(read("forecasts"), fold, plan["horizons"], forecast_target(plan, execution.get("fit_recipe", {})))
         receipt = {"status": "succeeded", "fits": fits, "fit_attempt_count": len(fits),
@@ -221,7 +223,8 @@ def execute_outer_fold(conn, store, repository, registration, request, plan_ref,
     return _execute_admitted(conn, store, repository, registration, plan, fold, selection, limits)
 
 
-def _execute_admitted(conn, store, repository, registration, plan, fold, selection, limits, *, replay_only=False):
+def _execute_admitted(conn, store, repository, registration, plan, fold, selection, limits, *,
+                      replay_only=False, input_callback=None):
     """Bind each fold independently after this call's complete native admission."""
     binding, outer_year = registration.document, fold["year"]
     execution_key = "regression_execution" if "target" in plan else "magnitude_execution"
@@ -250,7 +253,9 @@ def _execute_admitted(conn, store, repository, registration, plan, fold, selecti
     execution = execution_for_candidate(binding, candidate)
     regression = execution.get("schema_version") == "regression_candidate_execution.v1"
     if replay_only or saved("terminal") is not None:
-        return _replay(saved, store, started, fold, plan, execution, binding)
+        if input_callback is None:
+            return _replay(saved, store, started, fold, plan, execution, binding)
+        return _replay(saved, store, started, fold, plan, execution, binding, input_callback=input_callback)
     forbid_fitting("execute_outer_fold")
     forbid_legacy_fitting("execute_outer_fold")
     resolved = resolved_limits(conn, store, registration, plan, limits) if diagnostic_keys(binding) else execution_limits(limits)
@@ -307,11 +312,17 @@ def _execute_admitted(conn, store, repository, registration, plan, fold, selecti
     _validate_targets(inputs, validation, fold)
     append("validation", validation)
     append("terminal", _result(started, inputs, inputs_id, receipt, forecasts, validation, fold, plan["horizons"], plan.get("target")))
-    return _replay(saved, store, started, fold, plan, execution, binding)
+    if input_callback is None:
+        return _replay(saved, store, started, fold, plan, execution, binding)
+    return _replay(saved, store, started, fold, plan, execution, binding, input_callback=input_callback)
 
 
-def collect_outer_results(conn, store, repository, registration, request, plan_ref):
-    """Read every completed outer fold; pool event errors, never rank by outer loss."""
+def collect_outer_results(conn, store, repository, registration, request, plan_ref, *, input_callback=None):
+    """Read every completed outer fold; pool event errors, never rank by outer loss.
+
+    ``input_callback`` optionally receives each sealed outer fold and its verified
+    in-memory inputs; callers must not retain those rows.
+    """
     require_current(conn, OWNER, MIGRATIONS)
     plan = read_search_plan(conn, store, registration, request, plan_ref)
     pending = []
@@ -331,7 +342,8 @@ def collect_outer_results(conn, store, repository, registration, request, plan_r
         return read_record(conn, store, registration.run_id, slot)
     trials = SearchTrials(conn, store, repository, registration, request, plan_ref)
     selection = _native_selection(trials, plan, read)
-    folds = [_execute_admitted(conn, store, repository, registration, plan, fold, selection, limits, replay_only=True)
+    folds = [_execute_admitted(conn, store, repository, registration, plan, fold, selection, limits,
+                               replay_only=True, input_callback=input_callback)
              for fold, limits in pending]
     predictions = [{**row, "outer_year": fold["outer_year"]} for fold in folds for row in fold["predictions"]]
     result = {"schema_version": "magnitude_search_outer_report.v1", "plan_id": plan["plan_id"],

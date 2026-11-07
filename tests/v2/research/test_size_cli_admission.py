@@ -119,7 +119,7 @@ def test_report_admits_driver_before_result_reads_or_work(monkeypatch, seal, act
     monkeypatch.setattr(legacy, "require_current", lambda *a: None)
     monkeypatch.setattr(legacy, "_binding", lambda *a: ({}, {"expected": True}))
     monkeypatch.setattr(legacy, "read_record", lambda *a: seal)
-    monkeypatch.setattr(report, "collect_outer_results", lambda *a: pytest.fail("unsealed result read"))
+    monkeypatch.setattr(report, "collect_outer_results", lambda *a, **k: pytest.fail("unsealed result read"))
     with pytest.raises(OpsError) as caught:
         context = (None, None, None, SimpleNamespace(run_id="run"), {}, None)
         cli._run(context) if action == "run" else report.collect(*context)

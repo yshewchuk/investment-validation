@@ -276,6 +276,7 @@ def test_implied_scale_is_known_and_changed_test_rows_cannot_alter_it():
         {"event_id": "train-a", "horizon_sessions": 1, "implied_move": 1.0},
         {"event_id": "train-a", "horizon_sessions": 3, "implied_move": 3.0},
         {"event_id": "train-b", "horizon_sessions": 5, "implied_move": 2.0},
+        {"event_id": "train-a", "horizon_sessions": 9, "implied_move": 100.0},
         {"event_id": "test", "horizon_sessions": 1, "implied_move": 100.0},
     ]
     labels = SentinelLabels({"train-a": 2.0, "train-b": 8.0, "test": 1000.0})

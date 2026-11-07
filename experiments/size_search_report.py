@@ -1,33 +1,17 @@
-"""Collect verified selected-outer and comparator journals without new fitting."""
+"""Collect verified selected-outer and comparator journals with report-only scalar calibration.
+
+This module fits one report scalar and performs no model fits.
+"""
 import math
 import sys
 import time
 
-from engine.v2.contracts import SnapshotRef
-from engine.v2.foundation import content_hash, from_document
-from engine.v2.research.magnitude_panel_qualified_table import recipe as qualified_recipe
-from engine.v2.research.progress import Progress, decision, stage
+from engine.v2.foundation import content_hash
 from experiments.magnitude_search_outer import collect_outer_results
 from experiments.magnitude_search_plan import trial_key
 from experiments.magnitude_search_records import read_record
 from experiments.size_paired_report import paired_report
-from experiments.size_search_binding import _panel_columns, fold_inputs, read_stored_panel
 from experiments.v2_magnitude_search_run import _admit_driver
-
-
-def _implied_moves(repository, registration, events, plan):
-    """Read forecast-session implied moves from the same pinned admitted panel."""
-    binding = registration.document
-    request, panel = binding.get("size_panel_request"), binding.get("size_panel")
-    if not isinstance(request, dict) or not isinstance(panel, dict):
-        return None
-    source = from_document(SnapshotRef, binding["snapshot"])
-    columns = _panel_columns(binding["size_request"]["schema_version"],
-                             qualified_recipe("HMO")["model_columns"])
-    rows = read_stored_panel(repository, source, request, columns=columns, expected_panel=panel)["rows"]
-    keys = {(event["event_id"], horizon) for event in events for horizon in plan["horizons"]}
-    return {(row["event_id"], row["horizon_sessions"]): row["implied_move"]
-            for row in rows if (row["event_id"], row["horizon_sessions"]) in keys}
 
 
 def _valid_scalar(value):
@@ -52,26 +36,15 @@ def fit_implied_scale(training_event_ids, labels, features, horizons):
             "fit_n": len(pairs)}
 
 
-def _implied_move_scales(repository, binding, folds, horizons):
-    """Fit each outer year's k from its own admitted training rows, never evaluation rows."""
-    with stage("implied_move_scales"):
-        execution = binding.get("magnitude_execution")
-        if (not isinstance(execution, dict)
-                or not isinstance(execution.get("evaluation_labels_before"), str)):
-            decision("implied_move_scales",
-                     f"skipped: calibration unavailable for {len(folds)} outer years")
-            return {}
-        scales = {}
-        progress = Progress("implied_move_scales", len(folds))
-        for group in folds:
-            outer = group["outer"]
-            fold = {**outer, "evaluation_labels_before": execution["evaluation_labels_before"]}
-            inputs = fold_inputs(repository, binding, fold)
-            labels = {row["event_id"]: row["absolute_move_pct"] for row in inputs["training"]}
-            scales[str(outer["year"])] = fit_implied_scale(
-                outer["training_candidate_event_ids"], labels, inputs["features"], horizons)
-            progress.tick()
-        return scales
+def _implied_evidence(fold, inputs, horizons, *, calibrate):
+    """Extract report-only calibration and evaluation moves from verified inputs."""
+    labels = {row["event_id"]: row["absolute_move_pct"] for row in inputs["training"]}
+    scale = (fit_implied_scale(fold["training_candidate_event_ids"], labels, inputs["features"], horizons)
+             if calibrate else None)
+    keys = {(event_id, horizon) for event_id in fold["evaluation_event_ids"] for horizon in horizons}
+    moves = {(row["event_id"], row["horizon_sessions"]): row["implied_move"]
+             for row in inputs["features"] if (row["event_id"], row["horizon_sessions"]) in keys}
+    return scale, moves
 
 
 def _candidate_evidence(conn, store, run_id, plan):
@@ -131,7 +104,18 @@ def collect(conn, store, repository, registration, request, plan_ref):
     print("[stage] collect start", file=sys.stderr)
     started = time.monotonic()
     plan = _admit_driver(conn, store, registration, request, plan_ref)
-    result = collect_outer_results(conn, store, repository, registration, request, plan_ref)
+    horizons = plan["horizons"]
+    execution = registration.document.get("magnitude_execution")
+    calibrate = (isinstance(execution, dict)
+                 and isinstance(execution.get("evaluation_labels_before"), str))
+    scales, implied_moves = {}, {}
+    def implied_inputs(fold, inputs):
+        scale, moves = _implied_evidence(fold, inputs, horizons, calibrate=calibrate)
+        if calibrate:
+            scales[str(fold["year"])] = scale
+        implied_moves.update(moves)
+    result = collect_outer_results(conn, store, repository, registration, request, plan_ref,
+                                   input_callback=implied_inputs)
     forecasts, comparisons, events, comparison_fits = [], [], [], []
     targets = {r["event_id"]: r["absolute_move_pct"] for r in result["predictions"]}
     ids = {event for group in plan["folds"] for event in group["outer"]["evaluation_event_ids"]}
@@ -145,10 +129,9 @@ def collect(conn, store, repository, registration, request, plan_ref):
         comparison = read_record(conn, store, registration.run_id, "comparison-terminal:" + key)["result"]
         comparisons.extend(comparison["forecasts"])
         comparison_fits.extend({"outer_year": year, **fit} for fit in comparison["fit_details"])
-    scales = _implied_move_scales(repository, registration.document, plan["folds"], plan["horizons"])
     report = {"plan_id": plan["plan_id"], "search": result, "paired": paired_report(events, forecasts, comparisons, targets,
-                horizons=plan["horizons"],
-                implied_moves=_implied_moves(repository, registration, events, plan),
+                horizons=horizons,
+                implied_moves=implied_moves,
                 implied_scales=scales,
                 label_reasons={o["event_id"]: o["reason"] for f in result["folds"]
                     for o in f["evaluation_inputs"].get("omitted_labels", [])}),

@@ -282,9 +282,10 @@ def run(case, year="2024", **kwargs):
                                     r.request, r.plan_ref, year, limits=kwargs.get("limits", LIMITS))
 
 
-def collect(case):
+def collect(case, **kwargs):
     r = case.recorder
-    return outer.collect_outer_results(case.conn, case.store, r.repository, r.registration, r.request, r.plan_ref)
+    return outer.collect_outer_results(case.conn, case.store, r.repository, r.registration, r.request,
+                                       r.plan_ref, **kwargs)
 
 
 def slot(case, name, year="2024"):
@@ -397,6 +398,24 @@ def test_collect_requires_all_folds_and_pools_errors_without_outer_selection(out
                                                           if key != "result_id"})}
     assert report["metrics"]["rmse"] != pytest.approx((first["metrics"]["rmse"] + second["metrics"]["rmse"]) / 2)
     assert (case.conn.total_changes, journal_slots(case)) == before
+
+
+def test_collect_passes_verified_inputs_to_callback_once_per_outer_fold(outer_case):
+    case = outer_case
+    run(case)
+    run(case, "2025")
+    seen = []
+
+    def callback(fold, inputs):
+        seen.append((fold["year"], inputs["training"], inputs["features"]))
+
+    report = collect(case, input_callback=callback)
+    assert [year for year, _, _ in seen] == ["2024", "2025"]
+    for year, training, features in seen:
+        expected, _ = expected_input_receipts(case, year)
+        assert training == expected["training"]
+        assert features == expected["features"]
+    assert report == collect(case)
 
 
 @pytest.mark.parametrize("stage", ["input", "labels"])
