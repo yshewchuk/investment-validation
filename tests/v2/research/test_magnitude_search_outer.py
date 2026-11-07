@@ -367,9 +367,9 @@ def test_collect_requires_all_folds_and_pools_errors_without_outer_selection(out
         return freeze(self)
     def executed(self, *args, **kwargs):
         pytest.fail("outer collection launched an inner execution")
-    def replayed(read, store, started, fold, plan, execution, binding):
+    def replayed(read, store, started, fold, plan, execution, binding, **kwargs):
         trace.append(("outer", fold["year"]))
-        return replay(read, store, started, fold, plan, execution, binding)
+        return replay(read, store, started, fold, plan, execution, binding, **kwargs)
     monkeypatch.setattr(trials.SearchTrials, "freeze", frozen)
     monkeypatch.setattr(trials.SearchTrials, "execute", executed)
     monkeypatch.setattr(outer, "_replay", replayed)
