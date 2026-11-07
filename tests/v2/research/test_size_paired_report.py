@@ -263,6 +263,15 @@ def test_implied_move_rejects_keys_outside_the_paired_population():
                       implied_moves={("not-admitted", 1): 2.5})
 
 
+@pytest.mark.parametrize("horizon", [True, 1.0])
+def test_implied_move_rejects_boolean_and_float_horizon_keys(horizon):
+    events, challenger, incumbent, targets = fixture()
+    assert ("e0", horizon) == ("e0", 1)
+    with pytest.raises(ValueError, match="implied move coverage differs"):
+        paired_report(events, challenger, incumbent, targets,
+                      implied_moves={("e0", horizon): 2.5})
+
+
 def test_implied_scale_is_known_and_changed_test_rows_cannot_alter_it():
     from experiments.size_search_report import fit_implied_scale
 

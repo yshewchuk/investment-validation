@@ -186,3 +186,10 @@ def test_fit_implied_scale_still_skips_unavailable_or_invalid_labels():
     labels = {"invalid": float("nan"), "valid": 4.0}
     result = report.fit_implied_scale(["missing", "invalid", "valid"], labels, features, [1])
     assert result == {"scale": 2.0, "fit_n": 1}
+
+
+@pytest.mark.parametrize("horizons", [(), [], (True,), (1.0,), (2,), (1, 1)])
+def test_fit_implied_scale_refuses_invalid_horizon_declarations(horizons):
+    features = [{"event_id": "e", "horizon_sessions": 1, "implied_move": 2.0}]
+    with pytest.raises(ValueError, match="nonempty unique subset of integer leads"):
+        report.fit_implied_scale(["e"], {"e": 4.0}, features, horizons)

@@ -10,7 +10,7 @@ from engine.v2.foundation import content_hash
 from experiments.magnitude_search_outer import collect_outer_results
 from experiments.magnitude_search_plan import trial_key
 from experiments.magnitude_search_records import read_record
-from experiments.size_paired_report import paired_report
+from experiments.size_paired_report import paired_report, validated_horizons
 from experiments.v2_magnitude_search_run import _admit_driver
 
 
@@ -20,7 +20,7 @@ def _valid_scalar(value):
 
 def fit_implied_scale(training_event_ids, labels, features, horizons):
     """Fit one no-intercept k from admitted training event-horizon feature/label pairs."""
-    event_ids, leads, pairs = set(training_event_ids), set(horizons), []
+    event_ids, leads, pairs = set(training_event_ids), set(validated_horizons(horizons)), []
     for row in features:
         event_id = row["event_id"]
         if event_id not in event_ids or row["horizon_sessions"] not in leads:

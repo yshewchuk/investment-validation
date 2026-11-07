@@ -92,11 +92,26 @@ def _implied_bootstrap(rows, cluster, extra_arm=_IMPLIED_ARM):
             for name, samples in difference_samples.items()}}
 
 
+def validated_horizons(horizons):
+    if (not isinstance(horizons, (tuple, list)) or not horizons
+            or any(type(h) is not int for h in horizons)
+            or len(set(horizons)) != len(horizons)
+            or not set(horizons) <= {1, 3, 5}
+            or (tuple(horizons) != tuple(sorted(horizons))
+                and tuple(horizons) != tuple(h for h in (5, 3, 1) if h in set(horizons)))):
+        raise ValueError("horizons must be a nonempty unique subset of integer leads 1, 3, 5 in ascending or legacy (5,3,1) order")
+    return tuple(sorted(horizons))
+
+
 def _implied_values(implied_moves, expected):
     if implied_moves is None:
         return {}
-    if not isinstance(implied_moves, dict) or not set(implied_moves) <= expected:
+    if not isinstance(implied_moves, dict):
         raise ValueError("implied move coverage differs from paired population")
+    for key in implied_moves:
+        if (not isinstance(key, tuple) or len(key) != 2
+                or type(key[1]) is not int or key not in expected):
+            raise ValueError("implied move coverage differs from paired population")
     values = {}
     for key, value in implied_moves.items():
         if value is None:
@@ -141,14 +156,7 @@ def paired_report(events, challenger, incumbent, targets, *, label_reasons=None,
     """
     if implied_moves is not None and implied_move is not None:
         raise ValueError("duplicate implied move input")
-    if (not isinstance(horizons, (tuple, list)) or not horizons
-            or any(type(h) is not int for h in horizons)
-            or len(set(horizons)) != len(horizons)
-            or not set(horizons) <= {1, 3, 5}
-            or (tuple(horizons) != tuple(sorted(horizons))
-                and tuple(horizons) != tuple(h for h in (5, 3, 1) if h in set(horizons)))):
-        raise ValueError("horizons must be a nonempty unique subset of integer leads 1, 3, 5 in ascending or legacy (5,3,1) order")
-    leads = tuple(sorted(horizons))
+    leads = validated_horizons(horizons)
     def index(rows):
         result = {(r["event_id"], r["horizon_sessions"]): r for r in rows}
         if len(result) != len(rows):
