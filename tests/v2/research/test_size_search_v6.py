@@ -25,11 +25,16 @@ from tests.v2.research.test_magnitude_search_request_v6 import (
     PROFILES, V8_ADDITIONS, v6_request, v8_request)
 
 
-def _case(tmp_path, request, experiment_id, *, days=None, values=None, labels_before="2025-01-01"):
+def _case(tmp_path, request, experiment_id, *, days=None, values=None, labels_before="2025-01-01",
+          outer_year="2024", inner_year="2023", calendar_end=None, as_of_month=None):
     days = days or ["2022-06-02", "2022-09-06", "2022-11-01", "2023-01-03", "2023-06-02", "2024-06-17"]
     values = values or [2., 3., 4., 5., 6., 7.]
-    generator = panel_data.__wrapped__(tmp_path, SimpleNamespace(param={
-        "days": days, "values": values}))
+    panel_parameters = {"days": days, "values": values}
+    if calendar_end is not None:
+        panel_parameters["calendar_end"] = calendar_end
+    if as_of_month is not None:
+        panel_parameters["as_of_month"] = as_of_month
+    generator = panel_data.__wrapped__(tmp_path, SimpleNamespace(param=panel_parameters))
     data = next(generator)
     ids = [event["event_id"] for event in data.events]
     history_request = {**data.request, "limits": data.panel_request["limits"],
@@ -45,13 +50,13 @@ def _case(tmp_path, request, experiment_id, *, days=None, values=None, labels_be
     request.update(feature_dictionary_hash=recipe("HMO")["dictionary_hash"],
         feature_snapshot_id=panel["feature_snapshot"].snapshot_id,
         history_snapshot_id=history["feature_snapshot"].snapshot_id,
-        outer_years=["2024"], inner_years={"2024": ["2023"]}, max_candidates=13, max_fits=14)
+        outer_years=[outer_year], inner_years={outer_year: [inner_year]}, max_candidates=13, max_fits=14)
     request["eligibility_policy_ref"].update(plan_id=panel["context"]["eligibility_plan"]["plan_id"])
     # Existing bounded synthetic integration policy, not new estimator/runtime limits.
     request["limits"] = {"child": {"memory_bytes": 2 << 30, "cpu_seconds": 30, "wall_seconds": 60},
         "parent": {"memory_bytes": 4 << 30, "wall_seconds": 600},
         "build": {"memory_bytes": 3 << 30, "wall_seconds": 60}, "job": {"wall_seconds": 600}}
-    spec = prediction_spec(experiment_id=experiment_id, folds=("2024",),
+    spec = prediction_spec(experiment_id=experiment_id, folds=(outer_year,),
                            runner="experiments/size_search.py")
     registration, spec = binding.prepare(data.repository, spec, request, panel_request,
         scope="panel-source", training_start="2022-01-01", labels_before=labels_before)
@@ -84,9 +89,11 @@ def v8_case(tmp_path):
 def cutoff_case(tmp_path):
     yield from _case(
         tmp_path, v6_request(PROFILES[:1]), "synthetic-qualified-size-cutoff",
-        days=["2022-06-02", "2022-09-06", "2022-11-01", "2023-01-03",
-              "2023-06-02", "2024-06-12", "2024-06-17"],
-        values=[2., 3., 4., 5., 6., 5., 7.], labels_before="2024-06-19")
+        days=["2022-06-02", "2022-09-06", "2022-11-01", "2023-01-03", "2023-06-02",
+              "2024-06-12", "2024-06-17", "2024-12-30", "2025-12-12", "2025-12-30"],
+        values=[2., 3., 4., 5., 6., 5., 7., 6., 8., 9.], labels_before="2026-01-01",
+        outer_year="2025", inner_year="2024", calendar_end="2026-01-05",
+        as_of_month="2026-06")
 
 
 
@@ -355,27 +362,49 @@ def test_v6_outer_cutoff_event_is_excluded_before_targets(cutoff_case, monkeypat
 
     document = cutoff_case.registration.document
     events = document["size_panel"]["context"]["target_events"]
-    cutoff_event = next(event for event in events if event["event_date"] == "2024-06-17")
-    retained_event = next(event for event in events if event["event_date"] == "2024-06-12")
-    cutoff_id, retained_id = cutoff_event["event_id"], retained_event["event_id"]
-    assert cutoff_event["label_end"] == "2024-06-18"
-    assert retained_event["label_end"] < "2024-06-19"
-    assert document["magnitude_execution"]["evaluation_labels_before"] == "2024-06-19"
+    inner_cutoff = next(event for event in events if event["event_date"] == "2024-12-30")
+    inner_retained = next(event for event in events if event["event_date"] == "2024-06-12")
+    outer_cutoff = next(event for event in events if event["event_date"] == "2025-12-30")
+    outer_retained = next(event for event in events if event["event_date"] == "2025-12-12")
+    inner_cutoff_id, inner_retained_id = inner_cutoff["event_id"], inner_retained["event_id"]
+    outer_cutoff_id, outer_retained_id = outer_cutoff["event_id"], outer_retained["event_id"]
+    assert inner_cutoff["label_end"] == "2024-12-31"
+    assert outer_cutoff["label_end"] == "2025-12-31"
 
-    stored = load_magnitude_targets(
-        cutoff_case.repository, from_document(SnapshotRef, document["snapshot"]),
-        as_of_month=document["holdouts"]["holdout_as_of_month"],
-        labels_before="2024-06-20", event_ids=[cutoff_id], omit_not_computed=True)
-    assert stored.loc[0, "target_available_on"] == "2024-06-19"
+    snapshot = from_document(SnapshotRef, document["snapshot"])
+    holdout_as_of_month = document["holdouts"]["holdout_as_of_month"]
+    inner_stored = load_magnitude_targets(
+        cutoff_case.repository, snapshot, as_of_month=holdout_as_of_month,
+        labels_before="2025-01-02", event_ids=[inner_cutoff_id], omit_not_computed=True)
+    assert inner_stored.loc[0, "target_available_on"] == "2025-01-01"
+    outer_stored = load_magnitude_targets(
+        cutoff_case.repository, snapshot, as_of_month=holdout_as_of_month,
+        labels_before="2026-01-02", event_ids=[outer_cutoff_id], omit_not_computed=True)
+    assert outer_stored.loc[0, "target_available_on"] == "2026-01-01"
 
-    for group in cutoff_case.plan["folds"]:
-        for fold in (group["outer"], *group["inner"]):
+    (group,) = cutoff_case.plan["folds"]
+    outer_fold = group["outer"]
+    (inner_fold,) = group["inner"]
+    assert outer_fold["training_labels_before"] == "2025-01-01"
+    assert inner_fold["evaluation_labels_before"] == "2025-01-01"
+    outer_evaluation_cutoff = outer_fold.get(
+        "evaluation_labels_before", document["magnitude_execution"]["evaluation_labels_before"])
+    assert outer_evaluation_cutoff == "2026-01-01"
+    cutoff_reason = ["label_available_at_or_after_cutoff"]
+    assert {"event_id": inner_cutoff_id, "reasons": cutoff_reason} in (
+        outer_fold["training_exclusions"])
+    assert {"event_id": inner_cutoff_id, "reasons": cutoff_reason} in (
+        inner_fold["evaluation_exclusions"])
+    assert {"event_id": outer_cutoff_id, "reasons": cutoff_reason} in (
+        outer_fold["evaluation_exclusions"])
+
+    for fold in (outer_fold, *group["inner"]):
+        for cutoff_id in (inner_cutoff_id, outer_cutoff_id):
             assert cutoff_id not in fold["training_candidate_event_ids"]
             assert cutoff_id not in fold["evaluation_event_ids"]
-    outer_fold = cutoff_case.plan["folds"][0]["outer"]
-    assert retained_id in outer_fold["evaluation_event_ids"]
-    assert {"event_id": cutoff_id, "reasons": ["label_available_at_or_after_cutoff"]} in (
-        outer_fold["evaluation_exclusions"])
+    assert inner_retained_id in inner_fold["evaluation_event_ids"]
+    assert outer_retained_id in outer_fold["evaluation_event_ids"]
+    assert outer_cutoff["event_date"] < outer_evaluation_cutoff
 
     seen = {"training": [], "evaluation": []}
     real_training = size_binding.qualify_magnitude_training_targets
@@ -400,10 +429,16 @@ def test_v6_outer_cutoff_event_is_excluded_before_targets(cutoff_case, monkeypat
 
     result = run_search(*cutoff_case.context, limits=cutoff_case.request["limits"]["child"])
     assert seen["training"] and seen["evaluation"]
-    assert cutoff_id not in seen["training"]
-    assert cutoff_id not in seen["evaluation"]
+    assert inner_cutoff_id not in seen["training"]
+    assert outer_cutoff_id not in seen["training"]
+    assert inner_cutoff_id not in seen["evaluation"]
+    assert outer_cutoff_id not in seen["evaluation"]
+    assert inner_retained_id in seen["evaluation"]
+    assert outer_retained_id in seen["evaluation"]
     (fold,) = result["folds"]
     scored = {row["event_id"] for row in fold["predictions"]}
-    assert cutoff_id not in scored
-    assert retained_id in scored
+    assert inner_cutoff_id not in scored
+    assert outer_cutoff_id not in scored
+    assert inner_retained_id not in scored
+    assert scored == {outer_retained_id}
     assert fold["event_count"] == 1
