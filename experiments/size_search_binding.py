@@ -111,6 +111,7 @@ def prepare(repository, spec, request, panel_request, *, scope, training_start, 
             publish_artifacts=True):
     """Prepare a new development anchor; caller explicitly reserves it separately."""
     from engine.v2.research.magnitude_panel_qualified_table import recipe
+    from experiments.magnitude_search_plan import PLAN_V3
     sources = _sources()
     panel_request = validate_panel_request(panel_request)
     schedule = compile_request(request, horizons=tuple(h for h in (5, 3, 1) if h in panel_request["horizons"]))
@@ -141,7 +142,10 @@ def prepare(repository, spec, request, panel_request, *, scope, training_start, 
     if len(preview) > MAX_NATIVE_EVIDENCE_BYTES:
         raise fail("RESOURCE_LIMIT_EXCEEDED", "native registration exceeds its UTF-8 byte budget",
             details={"registration_bytes": len(preview), "max_registration_bytes": MAX_NATIVE_EVIDENCE_BYTES})
-    _folds(binding, schedule["request"])
+    folds = _folds(binding, schedule["request"])
+    # Legacy request v3 uses PLAN_V2; all other supported request versions use shared PLAN_V3 folds.
+    if _plan_schema_for_request(schedule["request"]) == PLAN_V3:
+        _shared_inner(folds)
     if not publish_artifacts:
         return NativeRegistration(base.run_id, b"", binding), spec
     compact, logical = pack_size_registration(repository._store, binding)
@@ -211,7 +215,10 @@ def _folds(binding, request):
             fold["evaluation_event_ids"] = [e for e in retained if events[e]["label_end"] < cutoff]
             if excluded:
                 fold["evaluation_exclusions"] = excluded
+            # Keep the strict cutoff invariant explicit at the filtered binding boundary.
             _require(all(events[e]["label_end"] < cutoff for e in fold["evaluation_event_ids"]))
+            if not fold["evaluation_event_ids"]:
+                raise fail("INVALID_EXPERIMENT_SPEC", "SIZE fold has no eligible evaluation events")
     return folds
 
 
@@ -227,12 +234,18 @@ def _shared_inner(folds):
                     "repeated inner-year folds differ after eligibility filtering")
 
 
+def _plan_schema_for_request(request):
+    from experiments.magnitude_search_plan import PLAN_V2, PLAN_V3
+    request_version = request.get("schema_version") if isinstance(request, dict) else None
+    return PLAN_V2 if request_version == "magnitude_search_request.v3" else PLAN_V3
+
+
 def prepare_plan(conn, store, registration, request, *, plan_schema=None):
     """Expand the fixed dictionary grid into fully bound executable recipes."""
     from experiments.magnitude_search_plan import PLAN_V2, PLAN_V3
     request_version = request.get("schema_version") if isinstance(request, dict) else None
     if plan_schema is None:
-        plan_schema = PLAN_V2 if request_version == "magnitude_search_request.v3" else PLAN_V3
+        plan_schema = _plan_schema_for_request(request)
     if request_version == "magnitude_search_request.v3" and plan_schema != PLAN_V2:
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search plan schema does not match request version")
     if plan_schema not in (PLAN_V2, PLAN_V3):

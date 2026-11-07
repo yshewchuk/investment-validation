@@ -50,8 +50,9 @@ def test_actual_label_end_purges_training_even_when_event_precedes_fit():
 def test_actual_inner_label_end_must_precede_outer_fit():
     binding, request = temporal()
     binding["size_panel"]["context"]["target_events"][2]["label_end"] = "2024-01-01"
-    with pytest.raises(OpsError, match="differs"):
+    with pytest.raises(OpsError, match="SIZE fold has no eligible evaluation events") as caught:
         _folds(binding, request)
+    assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
 
 
 def test_missing_inner_year_is_not_silently_skipped():
@@ -208,6 +209,81 @@ def test_shared_inner_refuses_modified_shared_membership():
     plan["folds"][1]["inner"][1]["training_candidate_event_ids"] = ["unshared"]
     with pytest.raises(OpsError, match="differ"):
         _shared_inner(plan["folds"])
+
+
+@pytest.mark.parametrize(("request_version", "expected"), [
+    ("magnitude_search_request.v2", PLAN_V3),
+    ("magnitude_search_request.v3", PLAN_V2),
+    ("magnitude_search_request.v8", PLAN_V3),
+])
+def test_default_plan_schema_for_request_matches_legacy_dispatch(request_version, expected):
+    from experiments import size_search_binding as binding
+
+    assert binding._plan_schema_for_request({"schema_version": request_version}) == expected
+
+
+@pytest.mark.parametrize("request_version", ["magnitude_search_request.v2", "magnitude_search_request.v8"])
+def test_prepare_checks_shared_inner_before_registration_publication(monkeypatch, request_version):
+    from engine.v2.research import magnitude_panel_qualified_table
+    from experiments import size_search_binding as binding
+
+    request = {
+        "schema_version": request_version,
+        "feature_dictionary_hash": "dictionary",
+        "feature_snapshot_id": "feature",
+        "history_snapshot_id": "history",
+        "eligibility_policy_ref": {
+            "schema_ref": "group_eligibility_plan.v1",
+            "plan_id": "plan-id",
+            "policy_id": "policy-id",
+        },
+        "limits": {"child": {"memory_bytes": 1}, "parent": {"memory_bytes": 2}},
+    }
+    panel_request = {
+        "feature_snapshot_id": "feature",
+        "history_snapshot": "history",
+        "horizons": [1, 3, 5],
+        "as_of_month": "2025-01",
+        "event_ids": ["event"],
+    }
+    schedule_request = {**request, "outer_years": ["2025"]}
+    base_document = {
+        "execution_plan": {"runner": "experiments/size_search.py"},
+        "magnitude_plan": {"evaluation_years": ["2025"]},
+        "event_ids": ["event"],
+        "snapshot": {},
+    }
+    context = {
+        "target_events": [{"event_id": "event", "ticker": "A", "label_end": "2024-01-01"}],
+        "eligibility_plan": {"plan_id": "plan-id", "policy": {"policy_id": "policy-id"}},
+    }
+    mismatched_folds = [
+        {"outer": {}, "inner": [{"year": "2023", "training_candidate_event_ids": ["train"],
+                                   "evaluation_event_ids": ["first"]}]},
+        {"outer": {}, "inner": [{"year": "2023", "training_candidate_event_ids": ["train"],
+                                   "evaluation_event_ids": ["second"]}]},
+    ]
+    monkeypatch.setattr(magnitude_panel_qualified_table, "recipe",
+                        lambda *_args: {"dictionary_hash": "dictionary", "model_columns": []})
+    monkeypatch.setattr(binding, "_sources", lambda: {"source": "hash"})
+    monkeypatch.setattr(binding, "validate_panel_request", lambda value: value)
+    monkeypatch.setattr(binding, "compile_request", lambda *_args, **_kwargs:
+                        {"request": schedule_request, "horizons": [1, 3, 5]})
+    monkeypatch.setattr(binding, "prepare_native_registration", lambda *_args, **_kwargs:
+                        (SimpleNamespace(document=base_document, run_id="run"), "spec"))
+    monkeypatch.setattr(binding, "_panel_columns", lambda *_args: [])
+    monkeypatch.setattr(binding, "from_document", lambda *_args: None)
+    monkeypatch.setattr(binding, "read_panel", lambda *_args, **_kwargs:
+                        {"context": context, "feature_snapshot": {}})
+    monkeypatch.setattr(binding, "_preview_payload", lambda *_args: b"{}")
+    monkeypatch.setattr(binding, "_folds", lambda *_args: mismatched_folds)
+    monkeypatch.setattr(binding, "pack_size_registration",
+                        lambda *_args, **_kwargs: pytest.fail("published before shared-inner validation"))
+
+    with pytest.raises(OpsError, match="repeated inner-year folds differ") as caught:
+        binding.prepare(None, None, request, panel_request, scope="scope",
+                        training_start="2020-01-01", labels_before="2025-01-01")
+    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
 
 
 def test_shared_inner_allows_cutoff_difference_when_membership_matches(monkeypatch):
