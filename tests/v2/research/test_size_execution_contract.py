@@ -213,6 +213,8 @@ def test_shared_inner_refuses_modified_shared_membership():
 
 @pytest.mark.parametrize("request_version", [
     "magnitude_search_request.v2", "magnitude_search_request.v3",
+    "magnitude_search_request.v4", "magnitude_search_request.v5",
+    "magnitude_search_request.v6", "magnitude_search_request.v7",
     "magnitude_search_request.v8", "magnitude_search_request.v9"])
 def test_prepare_checks_shared_inner_before_registration_publication(monkeypatch, request_version):
     from engine.v2.research import magnitude_panel_qualified_table
@@ -329,6 +331,27 @@ def test_shared_inner_allows_cutoff_difference_when_membership_matches(monkeypat
     with pytest.raises(OpsError) as error:
         binding.prepare_plan(None, None, registration, v3, plan_schema=PLAN_V3)
     assert error.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+
+
+def test_prepare_plan_replays_explicit_historical_plan_v2(monkeypatch):
+    from engine.v2.research.magnitude_panel_qualified_table import recipe
+    from experiments import size_search_binding as binding
+    from tests.v2.research.test_magnitude_search_request import request as search_request
+    document, _ = multi_year_temporal()
+    request = search_request()
+    request["feature_dictionary_hash"] = recipe("HMO")["dictionary_hash"]
+    request["outer_years"] = ["2024", "2025"]
+    request["inner_years"] = {"2024": ["2022", "2023"], "2025": ["2022", "2023"]}
+    document["size_request"] = compile_request(request)["request"]
+    document["schema_version"] = "native_experiment_registration.v1.6"
+    document["source_closure"] = {"synthetic": "source"}
+    document["environment"] = {"synthetic": "environment"}
+    monkeypatch.setattr(binding, "verify_native_registration", lambda *a, **k: None)
+    monkeypatch.setattr(binding, "verify_installation", lambda *a, **k: None)
+    registration = SimpleNamespace(run_id="synthetic-run", variant_id="synthetic-variant",
+                                   document=document)
+    plan = binding.prepare_plan(None, None, registration, request, plan_schema=PLAN_V2)
+    assert plan["schema_version"] == PLAN_V2
 
 
 @pytest.mark.parametrize("plan_schema", ["magnitude_search_plan.v4", 0, []])

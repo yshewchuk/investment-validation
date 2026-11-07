@@ -142,9 +142,10 @@ def prepare(repository, spec, request, panel_request, *, scope, training_start, 
     if len(preview) > MAX_NATIVE_EVIDENCE_BYTES:
         raise fail("RESOURCE_LIMIT_EXCEEDED", "native registration exceeds its UTF-8 byte budget",
             details={"registration_bytes": len(preview), "max_registration_bytes": MAX_NATIVE_EVIDENCE_BYTES})
-    folds = _folds(binding, schedule["request"])
+    plan_schema = plan_schema_for_request(schedule["request"])
+    folds = _folds(binding, schedule["request"], plan_schema)
     # Legacy request v3 uses PLAN_V2; all other supported request versions use shared PLAN_V3 folds.
-    if plan_schema_for_request(schedule["request"]) == PLAN_V3:
+    if plan_schema == PLAN_V3:
         _shared_inner(folds)
     if not publish_artifacts:
         return NativeRegistration(base.run_id, b"", binding), spec
@@ -183,8 +184,8 @@ def verify_installation(binding):
     _require(binding["size_comparison"] == comparison_recipe())
 
 
-def _folds(binding, request):
-    from experiments.magnitude_search_plan import PLAN_V3, _nested, plan_schema_for_request
+def _folds(binding, request, plan_schema=None):
+    from experiments.magnitude_search_plan import PLAN_V3, nested_folds, plan_schema_for_request
     context = binding["size_panel"]["context"]
     events = {e["event_id"]: e for e in context["target_events"]}
     full_start, full_end = date.min.isoformat(), date.max.isoformat()
@@ -192,9 +193,9 @@ def _folds(binding, request):
         if w["start"] == full_start and w["end"] == full_end}
     def hit(event_id):
         return bool(embargoed_tickers) and events[event_id]["ticker"] in embargoed_tickers
-    folds = _nested(binding, request)
+    folds = nested_folds(binding, request)
     default_cutoff = binding["magnitude_execution"]["evaluation_labels_before"]
-    plan_v3 = plan_schema_for_request(request) == PLAN_V3
+    plan_v3 = (plan_schema if plan_schema is not None else plan_schema_for_request(request)) == PLAN_V3
     shared_cutoffs = {}
     if plan_v3:
         for group in folds:
@@ -248,13 +249,14 @@ def _shared_inner(folds):
 def prepare_plan(conn, store, registration, request, *, plan_schema=None):
     """Expand the fixed dictionary grid into fully bound executable recipes."""
     from experiments.magnitude_search_plan import PLAN_V2, PLAN_V3, plan_schema_for_request
-    request_version = request.get("schema_version") if isinstance(request, dict) else None
+    default_schema = plan_schema_for_request(request)
     if plan_schema is None:
-        plan_schema = plan_schema_for_request(request)
-    if request_version == "magnitude_search_request.v3" and plan_schema != PLAN_V2:
-        raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search plan schema does not match request version")
+        plan_schema = default_schema
     if plan_schema not in (PLAN_V2, PLAN_V3):
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "unsupported SIZE search plan schema")
+    if plan_schema != default_schema and not (
+            plan_schema == PLAN_V2 and default_schema == PLAN_V3):
+        raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search plan schema does not match request version")
     verify_native_registration(conn, store, registration, max_evidence_bytes=MAX_NATIVE_EVIDENCE_BYTES)
     binding = registration.document
     verify_installation(binding)
@@ -268,7 +270,7 @@ def prepare_plan(conn, store, registration, request, *, plan_schema=None):
         horizons = tuple(h for h in (5, 3, 1) if h in panel_request["horizons"])
     schedule = compile_request(request, horizons=horizons)
     _require(schedule["request"] == binding["size_request"])
-    folds = _folds(binding, request)
+    folds = _folds(binding, request, plan_schema)
     if plan_schema == PLAN_V3:
         _shared_inner(folds)
     candidates = []
@@ -326,13 +328,18 @@ def execution_for_candidate(binding, candidate):
     return execution
 
 
-def fold_inputs(repository, binding, fold):
+def fold_inputs(repository, binding, fold, *, plan=None):
     """Revalidate installed producer before opening any training outcome."""
     from engine.v2.research.magnitude_panel_qualified_table import recipe
+    from experiments.magnitude_search_plan import PLAN_V2, PLAN_V3
     verify_installation(binding)
+    plan_schema = (plan.get("schema_version") if isinstance(plan, dict)
+                   and plan.get("schema_version") in (PLAN_V2, PLAN_V3) else None)
+    folds = (_folds(binding, binding["size_request"]) if plan_schema is None
+             else _folds(binding, binding["size_request"], plan_schema))
     _require(any(fold in group["inner"] or fold == {**group["outer"],
         "evaluation_labels_before": binding["magnitude_execution"]["evaluation_labels_before"]}
-        for group in _folds(binding, binding["size_request"])))
+        for group in folds))
     source = from_document(SnapshotRef, binding["snapshot"])
     started = time.monotonic()
     panel_columns = _panel_columns(binding["size_request"].get("schema_version"), recipe("HMO")["model_columns"])

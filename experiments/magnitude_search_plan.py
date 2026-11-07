@@ -37,7 +37,11 @@ _INTEGERS = {"max_iter", "max_leaf_nodes", "min_samples_leaf"}
 
 
 def plan_schema_for_request(request):
-    """Return the default plan schema for a supported request version."""
+    """Return the default plan schema for a supported request version.
+
+    Research-only: there is no production entrypoint. Only the research planner
+    and the qualified SIZE binding call this mapping.
+    """
     version = request.get("schema_version") if isinstance(request, dict) else None
     return PLAN_V2 if version == "magnitude_search_request.v3" else PLAN_V3
 
@@ -146,6 +150,11 @@ def _nested(binding, request, *, temporal=None):
     except DataError:
         raise fail("INVALID_EXPERIMENT_SPEC", "every search fold needs earlier training and evaluation candidates") from None
     return nested
+
+
+def nested_folds(binding, request):
+    """Research-only public nested-fold adapter; it has no production entrypoint."""
+    return _nested(binding, request)
 
 
 def _candidates(binding, request):
