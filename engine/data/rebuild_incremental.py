@@ -184,7 +184,8 @@ def normalize_ticker_cached(ticker: str, cache: InputCache) -> tuple[pd.DataFram
 def count_ticker_cached(ticker: str, cache: InputCache) -> tuple[set, dict]:
     """:func:`~engine.data.normalize.n_daily.count_daily_dates`, with cached parses.
 
-    Reuses the same per-input parts, so each input is parsed at most once.
+    Reuses the same per-input parts, so each cacheable input is parsed at most
+    once. Inputs the cache cannot hold are still re-read as in the full path.
     """
     src = _frame_from_parts(ticker, _parts(cache, ticker, "summaries"), "summaries")
     if src is None:

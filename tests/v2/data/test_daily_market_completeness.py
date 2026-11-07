@@ -204,7 +204,14 @@ def test_fetch_index_is_compact_and_keeps_row_content_and_fetch_order(
         },
         {"ticker": "AAA", "tradeDate": "2024-01-03", "stockPrice": 21.0},
     ]
-    newer_rows = [{"ticker": "AAA", "tradeDate": "2024-01-02", "stockPrice": 10.0}]
+    newer_rows = [
+        {
+            "ticker": "AAA",
+            "tradeDate": "2024-01-02",
+            "stockPrice": 10.0,
+            "impliedMove": 0.1,
+        }
+    ]
     # The keys sort opposite to fetch time: fetch time, not the key, sets order.
     _write_market_wide(
         root,
@@ -223,6 +230,8 @@ def test_fetch_index_is_compact_and_keeps_row_content_and_fetch_order(
     try:
         index = n_daily.fetch_daily_index()
         summaries = index["AAA"]["summaries"]
+        assert isinstance(summaries._columns["stockPrice"], tuple)
+        assert summaries._columns["impliedMove"][:2] == (summaries._MISSING,) * 2
         assert not isinstance(summaries, list)
         assert list(summaries) == older_rows + newer_rows
     finally:
@@ -238,9 +247,16 @@ def test_compact_index_preserves_daily_normalization_and_count_behavior(
     root = tmp_path / "fetch"
     monkeypatch.setattr(paths, "RAW_FETCH", root)
     summaries = [
-        {**_summary_rows(tradeDate="2024-03-01", stockPrice=10.0), "ticker": "AAA"},
-        {**_summary_rows(tradeDate="2024-03-01", stockPrice=20.0), "ticker": "AAA"},
-        {**_summary_rows(tradeDate="2024-03-02", stockPrice=0.0), "ticker": "AAA"},
+        {"ticker": "AAA", "tradeDate": "2024-03-01", "stockPrice": 10.0},
+        {"ticker": "AAA", "tradeDate": "2024-03-01", "stockPrice": 20.0},
+        {"ticker": "AAA", "tradeDate": "2024-03-02", "stockPrice": 0.0},
+        # rVol30 first appears in this later row; earlier rows omit it.
+        {
+            "ticker": "AAA",
+            "tradeDate": "2024-03-03",
+            "stockPrice": 30.0,
+            "rVol30": 0.25,
+        },
     ]
     cores = [{"ticker": "AAA", "tradeDate": "2024-03-05", "mktCap": 1000.0}]
     _write_market_wide(
@@ -262,22 +278,36 @@ def test_compact_index_preserves_daily_normalization_and_count_behavior(
 
     n_daily.fetch_daily_index.cache_clear()
     try:
-        src = pd.DataFrame(n_daily._rows_for("AAA", "summaries", absent))
-        core = pd.DataFrame(n_daily._rows_for("AAA", "cores", absent))
+        index = n_daily.fetch_daily_index()
+        compact = index["AAA"]["summaries"]
+        assert isinstance(compact._columns["stockPrice"], tuple)
+        assert compact._columns["rVol30"][:3] == (compact._MISSING,) * 3
+        assert list(compact) == summaries
+        assert list(index["AAA"]["cores"]) == cores
         frame, _ = n_daily.normalize_ticker(
             "AAA", summaries_dir=absent, cores_dir=absent
         )
-        expected = _expected_dates_and_counts("AAA", src, core)
-        counted = n_daily.count_daily_dates("AAA", src, lambda: core)
+        counted = n_daily.count_daily_dates(
+            "AAA", pd.DataFrame(summaries), lambda: pd.DataFrame(cores)
+        )
     finally:
         n_daily.fetch_daily_index.cache_clear()
 
-    assert list(src["stockPrice"]) == [10.0, 20.0, 0.0]
+    expected_present = {
+        pd.Timestamp("2024-03-01"),
+        pd.Timestamp("2024-03-02"),
+        pd.Timestamp("2024-03-03"),
+        pd.Timestamp("2024-03-05"),
+    }
+    expected_counts = {
+        pd.Timestamp("2024-03-01"): 1,
+        pd.Timestamp("2024-03-03"): 1,
+        pd.Timestamp("2024-03-05"): 1,
+    }
     assert frame.loc[frame["date"] == pd.Timestamp("2024-03-01"), "spot"].iloc[0] == (
         pytest.approx(20.0)
     )
-    assert pd.Timestamp("2024-03-05") in expected[0]
-    assert counted == expected
+    assert counted == (expected_present, expected_counts)
 
 
 def test_low_date_refuses_before_writer_and_preserves_prior_table(tmp_root, monkeypatch):
@@ -835,6 +865,9 @@ def test_count_daily_dates_matches_normalized_validated_output():
             _summary_rows(tradeDate="2024-03-03", stockPrice=1e30),
             # A negative IV is clipped to NaN, which is valid, not rejected.
             _summary_rows(tradeDate="2024-03-04", iv30d=-0.1),
+            # Keep-last can also replace a valid row with an invalid one.
+            _summary_rows(tradeDate="2024-03-08", stockPrice=10.0),
+            _summary_rows(tradeDate="2024-03-08", stockPrice=0.0),
         ]
     )
     cores = pd.DataFrame(
@@ -851,17 +884,29 @@ def test_count_daily_dates_matches_normalized_validated_output():
         ]
     )
 
-    expected = _expected_dates_and_counts("AAA", src, cores)
-    assert n_daily.count_daily_dates("AAA", src, lambda: cores.copy()) == expected
-    present, counts = expected
-    assert pd.Timestamp("2024-03-01") in present
-    assert pd.Timestamp("2024-03-02") in present
-    assert pd.Timestamp("2024-03-03") in present
-    assert pd.Timestamp("2024-03-04") in present
-    assert pd.Timestamp("2024-03-05") in present
-    assert pd.Timestamp("2024-03-06") not in present
-    assert pd.Timestamp("2024-03-07") not in present
+    expected_present = {
+        pd.Timestamp("2024-03-01"),
+        pd.Timestamp("2024-03-02"),
+        pd.Timestamp("2024-03-03"),
+        pd.Timestamp("2024-03-04"),
+        pd.Timestamp("2024-03-05"),
+        pd.Timestamp("2024-03-08"),
+    }
+    expected_counts = {
+        pd.Timestamp("2024-03-01"): 1,
+        pd.Timestamp("2024-03-03"): 1,
+        pd.Timestamp("2024-03-04"): 1,
+        pd.Timestamp("2024-03-05"): 1,
+    }
+
+    present, counts = n_daily.count_daily_dates("AAA", src, lambda: cores.copy())
+    assert (present, counts) == (expected_present, expected_counts)
+    assert (present, counts) == _expected_dates_and_counts("AAA", src, cores)
+    assert counts[pd.Timestamp("2024-03-01")] == 1
+    assert counts[pd.Timestamp("2024-03-04")] == 1
     assert counts.get(pd.Timestamp("2024-03-02"), 0) == 0
+    assert pd.Timestamp("2024-03-08") in present
+    assert counts.get(pd.Timestamp("2024-03-08"), 0) == 0
 
 
 def test_count_daily_dates_ignores_cores_without_market_cap():
@@ -882,3 +927,9 @@ def test_count_daily_dates_handles_empty_and_malformed_summaries():
 
     all_bad = pd.DataFrame([_summary_rows(tradeDate="not-a-date")])
     assert n_daily.count_daily_dates("AAA", all_bad, lambda: None) == (set(), {})
+
+    good = pd.DataFrame([_summary_rows(tradeDate="2024-03-01")])
+    assert n_daily.count_daily_dates("AAA", good, lambda: None) == (
+        {pd.Timestamp("2024-03-01")},
+        {pd.Timestamp("2024-03-01"): 1},
+    )

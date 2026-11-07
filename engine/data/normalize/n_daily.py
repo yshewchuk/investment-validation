@@ -89,10 +89,12 @@ class _CompactRows:
     _MISSING = object()
 
     def __init__(self) -> None:
+        """Start an empty column store."""
         self._columns: dict[str, list] = {}
         self._n = 0
 
     def append(self, row: dict) -> None:
+        """Append one row, adding any columns it is the first to carry."""
         columns = self._columns
         for key, column in columns.items():
             column.append(row.get(key, self._MISSING))
@@ -102,13 +104,16 @@ class _CompactRows:
         self._n += 1
 
     def freeze(self) -> "_CompactRows":
+        """Store each column as a tuple once appends are finished."""
         self._columns = {key: tuple(values) for key, values in self._columns.items()}
         return self
 
     def __len__(self) -> int:
+        """Number of stored rows."""
         return self._n
 
     def __iter__(self) -> Iterator[dict]:
+        """Expand the columns back into rows, omitting missing fields."""
         columns = self._columns
         missing = self._MISSING
         for i in range(self._n):
@@ -377,8 +382,10 @@ def normalize_frames(ticker: str, src: pd.DataFrame, cores_frame) -> tuple[pd.Da
     return out, report
 
 
-#: Raw summary fields that can still invalidate a row after sentinel masking,
-#: clipping and deduplication; ``validate_daily`` flags exactly these.
+#: Raw summary fields that are the clipping and validation inputs for the
+#: count. Sentinel masking and clipping can turn a value into a missing one,
+#: which validation accepts; this set names what the gate reads, not what is
+#: guaranteed to invalidate a row.
 _COUNT_FIELDS = ("stockPrice", "iv30d", "impliedMove", "rVol30")
 
 
@@ -390,9 +397,10 @@ def count_daily_dates(
     Count-only counterpart of :func:`normalize_frames`: same date parsing,
     duplicate collapse, cores-only union, sentinel masking, clipping and
     :func:`~engine.data.validate.validate_daily` gate, but materializes only the
-    columns that gate reads. Returns ``(present, counts)``: every normalized
-    date (including dates whose rows all fail validation, which stay present
-    with a zero count) and the per-date count of validated rows.
+    columns that gate reads. Returns ``(present, counts)``: ``present`` includes
+    every normalized date, even one whose rows all fail validation or whose last
+    duplicate is invalid; ``counts`` has an entry only for dates with at least
+    one accepted row.
     """
     from engine.data.validate import validate_daily
 

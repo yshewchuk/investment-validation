@@ -10,7 +10,7 @@ import string
 
 import pytest
 
-from engine.data import rebuild_cache
+from engine.data import rebuild_cache, rebuild_incremental
 
 
 def _gz(path, obj):
@@ -369,3 +369,20 @@ def test_incremental_preflight_counts_without_a_second_normalization(world, monk
     rebuild.rebuild(tables=("daily",), incremental=True, finalize=False)
 
     assert sorted(calls) == ["AAA", "BBB", "CCC"]
+
+
+def test_warm_cached_count_matches_cached_normalization(world):
+    """The warm count-only path agrees with normalization plus validation."""
+    from engine.data.normalize import n_daily
+    from engine.data.validate import validate_daily
+
+    _incr(world)
+    n_daily.fetch_daily_index.cache_clear()
+    cache = rebuild_cache.InputCache("daily_market")
+    frame, _ = rebuild_incremental.normalize_ticker_cached("AAA", cache)
+    clean, _ = validate_daily(frame)
+    expected = (
+        set(frame["date"].dropna().unique()),
+        clean.groupby("date").size().to_dict(),
+    )
+    assert rebuild_incremental.count_ticker_cached("AAA", cache) == expected

@@ -247,8 +247,10 @@ def _preflight_daily_completeness(tickers: list[str], cache, snapshot_dates=None
     total = len(tickers)
     started = time.monotonic()
     last = started - 30.0
+    mode = "normalize" if cache is None else "count-only"
     print(
-        f"  [daily preflight] start 0/{total} tickers, elapsed 0s{_rss_suffix()}",
+        f"  [daily preflight] start mode={mode} 0/{total} tickers, "
+        f"elapsed 0s{_rss_suffix()}",
         file=sys.stderr,
         flush=True,
     )
