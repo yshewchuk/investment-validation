@@ -1,6 +1,8 @@
 """Mixed candidate terminal states retain diagnostics without inventing convergence."""
 from types import SimpleNamespace
 
+import pytest
+
 from experiments import size_search_report as report
 
 
@@ -151,3 +153,36 @@ def test_collect_uses_verified_callback_inputs_per_outer_fold(monkeypatch):
     assert not hasattr(report, "from_document")
     assert not hasattr(report, "_implied_move_scales")
     assert not hasattr(report, "_implied_moves")
+
+
+@pytest.mark.parametrize("value", [-1, True, "2.0", float("nan"), float("inf")])
+def test_fit_implied_scale_rejects_invalid_non_null_implied_move(value):
+    features = [{"event_id": "e", "horizon_sessions": 1, "implied_move": value}]
+    with pytest.raises(ValueError, match="invalid implied move"):
+        report.fit_implied_scale(["e"], {"e": 4.0}, features, [1])
+
+
+def test_fit_implied_scale_null_training_feature_abstains_without_fit_count():
+    features = [
+        {"event_id": "e1", "horizon_sessions": 1, "implied_move": None},
+        {"event_id": "e2", "horizon_sessions": 1, "implied_move": 2.0},
+    ]
+    result = report.fit_implied_scale(["e1", "e2"], {"e1": 100.0, "e2": 4.0}, features, [1])
+    assert result == {"scale": 2.0, "fit_n": 1}
+
+
+def test_fit_implied_scale_null_only_training_feature_abstains():
+    features = [{"event_id": "e", "horizon_sessions": 1, "implied_move": None}]
+    result = report.fit_implied_scale(["e"], {"e": 4.0}, features, [1])
+    assert result == {"scale": None, "fit_n": 0}
+
+
+def test_fit_implied_scale_still_skips_unavailable_or_invalid_labels():
+    features = [
+        {"event_id": "missing", "horizon_sessions": 1, "implied_move": 3.0},
+        {"event_id": "invalid", "horizon_sessions": 1, "implied_move": 3.0},
+        {"event_id": "valid", "horizon_sessions": 1, "implied_move": 2.0},
+    ]
+    labels = {"invalid": float("nan"), "valid": 4.0}
+    result = report.fit_implied_scale(["missing", "invalid", "valid"], labels, features, [1])
+    assert result == {"scale": 2.0, "fit_n": 1}
