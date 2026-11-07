@@ -48,6 +48,9 @@ def test_fold_binding_embargoes_tickers_from_training_and_evaluation(monkeypatch
 
     for fold in [folds[0]["outer"], *folds[0]["inner"]]:
         assert fold["training_candidate_event_ids"] == ["training"]
+        assert fold["training_exclusions"] == [
+            {"event_id": "sibling", "reasons": ["embargo_ticker"]}
+        ]
         assert fold["evaluation_event_ids"] == ["evaluation"]
         assert fold["evaluation_exclusions"] == [
             {"event_id": eid, "reasons": ["embargo_ticker"]}
