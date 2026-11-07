@@ -1008,7 +1008,7 @@ def test_report_reuses_shared_execution_receipt_read_and_keeps_outer_rows(monkey
     registration = SimpleNamespace(run_id="run", document={"size_panel": {"context": {
         "target_events": [{"event_id": "evt"}], "eligibility_plan": {}}}})
     monkeypatch.setattr(report, "_admit_driver", lambda *args: plan)
-    monkeypatch.setattr(report, "collect_outer_results", lambda *args: result)
+    monkeypatch.setattr(report, "collect_outer_results", lambda *args, **kwargs: result)
     monkeypatch.setattr(report, "paired_report", lambda *args, **kwargs: {})
     reads = Counter()
     payload_refs = []
