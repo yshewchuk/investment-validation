@@ -2,12 +2,30 @@
 import sys
 import time
 
-from engine.v2.foundation import content_hash
+from engine.v2.contracts import SnapshotRef
+from engine.v2.foundation import content_hash, from_document
+from engine.v2.research.magnitude_panel_qualified_table import recipe as qualified_recipe
 from experiments.magnitude_search_outer import collect_outer_results
 from experiments.magnitude_search_plan import trial_key
 from experiments.magnitude_search_records import read_record
 from experiments.size_paired_report import paired_report
+from experiments.size_search_binding import _panel_columns, read_stored_panel
 from experiments.v2_magnitude_search_run import _admit_driver
+
+
+def _implied_moves(repository, registration, events, plan):
+    """Read forecast-session implied moves from the same pinned admitted panel."""
+    binding = registration.document
+    request, panel = binding.get("size_panel_request"), binding.get("size_panel")
+    if not isinstance(request, dict) or not isinstance(panel, dict):
+        return None
+    source = from_document(SnapshotRef, binding["snapshot"])
+    columns = _panel_columns(binding["size_request"]["schema_version"],
+                             qualified_recipe("HMO")["model_columns"])
+    rows = read_stored_panel(repository, source, request, columns=columns, expected_panel=panel)["rows"]
+    keys = {(event["event_id"], horizon) for event in events for horizon in plan["horizons"]}
+    return {(row["event_id"], row["horizon_sessions"]): row["implied_move"]
+            for row in rows if (row["event_id"], row["horizon_sessions"]) in keys}
 
 
 def _candidate_evidence(conn, store, run_id, plan):
@@ -83,6 +101,7 @@ def collect(conn, store, repository, registration, request, plan_ref):
         comparison_fits.extend({"outer_year": year, **fit} for fit in comparison["fit_details"])
     report = {"plan_id": plan["plan_id"], "search": result, "paired": paired_report(events, forecasts, comparisons, targets,
                 horizons=plan["horizons"],
+                implied_moves=_implied_moves(repository, registration, events, plan),
                 label_reasons={o["event_id"]: o["reason"] for f in result["folds"]
                     for o in f["evaluation_inputs"].get("omitted_labels", [])}),
             "preflight": resource_report(plan), "inner_fits": inner_fits, "comparison_fits": comparison_fits,

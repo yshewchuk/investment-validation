@@ -168,3 +168,96 @@ def test_negative_challenger_is_preserved_but_negative_target_refuses():
     args[3]["e0"] = -2.0
     with pytest.raises(ValueError, match="invalid magnitude target"):
         paired_report(*args)
+
+
+def test_implied_move_uses_percent_points_and_keeps_full_metrics_and_bootstrap():
+    events, challenger, incumbent, targets = fixture()
+    implied = {(event, horizon): value
+               for event, value in (("e0", 2.5), ("e1", 5.5)) for horizon in (1, 3, 5)}
+    old = paired_report(events, challenger, incumbent, targets)
+    report = paired_report(events, challenger, incumbent, targets, implied_moves=implied)
+    rows = {(row["event_id"], row["horizon_sessions"]): row for row in report["paired_rows"]}
+
+    assert report["schema_version"] == "size_paired_report.v2"
+    assert report["implied_move_coverage"] == {"available_rows": 6, "total_paired_rows": 12}
+    assert rows["e0", 1]["implied_move"] == 2.5
+    assert rows["e1", 3]["implied_move"] == 5.5
+    assert rows["e2", 1]["implied_move"] is None
+    implied_metrics = report["metrics"]["implied_move"]
+    assert implied_metrics["count"] == 6
+    assert implied_metrics["rmse"] == pytest.approx(0.5)
+    assert implied_metrics["mae"] == pytest.approx(0.5)
+    assert implied_metrics["bias"] == pytest.approx(0.0)
+
+    like = report["like_for_like"]
+    assert set(like["metrics"]) == {"challenger", "incumbent", "history_mean", "implied_move"}
+    assert like["metrics"]["implied_move"]["rmse"] == pytest.approx(0.5)
+    assert like["metrics"]["implied_move"]["mae"] == pytest.approx(0.5)
+    assert like["metrics"]["implied_move"]["bias"] == pytest.approx(0.0)
+    assert like["metrics"]["challenger"]["rmse"] == pytest.approx(math.sqrt(0.35 / 3))
+    assert like["metrics"]["challenger"]["mae"] == pytest.approx(0.3)
+    assert like["metrics"]["incumbent"]["rmse"] == pytest.approx(1.0)
+    assert like["metrics"]["history_mean"]["rmse"] == pytest.approx(2.0)
+    assert like["metrics"]["implied_move"]["count"] == 6
+
+    bootstrap = report["quarter_bootstrap"]["implied_move"]
+    assert bootstrap == like["quarter_bootstrap"]
+    assert bootstrap["blocks"] == 1 and bootstrap["events"] == 2
+    assert bootstrap["resamples"] == 2000 and bootstrap["seed"] == 0
+    assert set(bootstrap["percentile_95"]) == {"challenger", "incumbent", "history_mean", "implied_move"}
+    assert bootstrap["percentile_95"]["implied_move"]["rmse"] == pytest.approx([0.5, 0.5])
+    assert bootstrap["percentile_95"]["implied_move"]["mae"] == pytest.approx([0.5, 0.5])
+    assert bootstrap["difference_percentile_95"]["implied_move_minus_incumbent"] == {
+        "rmse": pytest.approx([-0.5, -0.5]), "mae": pytest.approx([-0.5, -0.5])}
+
+    for arm in ("challenger", "incumbent", "history_mean"):
+        assert report["metrics"][arm] == old["metrics"][arm]
+    assert report["difference"] == old["difference"]
+    for key in ("cluster", "blocks", "events", "resamples", "seed"):
+        assert report["quarter_bootstrap"][key] == old["quarter_bootstrap"][key]
+    assert report["quarter_bootstrap"]["percentile_95"] == old["quarter_bootstrap"]["percentile_95"]
+    assert report["issuer_sensitivity"] == old["issuer_sensitivity"]
+    for year in old["per_year"]:
+        for arm in ("challenger", "incumbent", "history_mean"):
+            assert report["per_year"][year]["arms"][arm] == old["per_year"][year]["arms"][arm]
+    assert report["per_year"]["2023"]["arms"]["implied_move"]["rmse"] == pytest.approx(0.5)
+    assert report["per_year"]["2024"]["arms"]["implied_move"] is None
+    assert report["per_year"]["2024"]["implied_move_coverage"] == {
+        "available_rows": 0, "total_paired_rows": 3}
+    assert report == paired_report(events, challenger, incumbent, targets, implied_moves=implied)
+
+
+def test_implied_move_nulls_abstain_and_zero_coverage_is_explicit():
+    events, challenger, incumbent, targets = fixture()
+    implied = {(f"e{i}", horizon): None for i in range(4) for horizon in (1, 3, 5)}
+    report = paired_report(events, challenger, incumbent, targets, implied_moves=implied)
+
+    assert report["implied_move_coverage"] == {"available_rows": 0, "total_paired_rows": 12}
+    assert len(report["paired_rows"]) == 12
+    assert all(row["implied_move"] is None for row in report["paired_rows"])
+    assert report["metrics"]["implied_move"] is None
+    assert report["like_for_like"]["status"] == "unavailable_no_implied_move_rows"
+    assert report["like_for_like"]["metrics"] is None
+    assert report["like_for_like"]["quarter_bootstrap"] is None
+    assert report["quarter_bootstrap"]["implied_move"] is None
+    for breakdown in report["per_year"].values():
+        assert breakdown["arms"]["implied_move"] is None
+        assert breakdown["implied_move_coverage"]["available_rows"] == 0
+    for arm in ("challenger", "incumbent", "history_mean"):
+        assert report["metrics"][arm]["count"] == 12
+    assert report["metrics"] == paired_report(events, challenger, incumbent, targets)["metrics"]
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), -0.1, True, "2"])
+def test_implied_move_rejects_nonfinite_negative_or_non_numeric_values(value):
+    events, challenger, incumbent, targets = fixture()
+    with pytest.raises(ValueError, match="invalid implied move"):
+        paired_report(events, challenger, incumbent, targets,
+                      implied_moves={("e0", 1): value})
+
+
+def test_implied_move_rejects_keys_outside_the_paired_population():
+    events, challenger, incumbent, targets = fixture()
+    with pytest.raises(ValueError, match="implied move coverage differs"):
+        paired_report(events, challenger, incumbent, targets,
+                      implied_moves={("not-admitted", 1): 2.5})

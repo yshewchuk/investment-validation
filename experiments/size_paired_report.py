@@ -44,8 +44,74 @@ def _bootstrap(rows, cluster):
         "percentile_95": {m: np.percentile(v, [2.5, 97.5]).tolist() for m, v in samples.items()}}
 
 
-def paired_report(events, challenger, incumbent, targets, *, label_reasons=None, horizons=(1, 3, 5)):
-    """Match by forecast availability alone, then join targets; retain all exclusions."""
+_IMPLIED_ARM = "implied_move"
+_ARMS = ("challenger", "incumbent", "history_mean")
+_REPORT_ARMS = (*_ARMS, _IMPLIED_ARM)
+
+
+def _implied_bootstrap(rows, cluster):
+    """Additive bootstrap of every arm and its paired comparisons on the implied subset."""
+    pairs = (("challenger", "incumbent"), (_IMPLIED_ARM, "challenger"),
+             (_IMPLIED_ARM, "incumbent"), (_IMPLIED_ARM, "history_mean"))
+    errors = np.array([[r[arm] - r["absolute_move_pct"] for arm in _REPORT_ARMS] for r in rows])
+    scale = float(np.max(np.abs(errors))) or 1.0
+    errors /= scale
+    groups = defaultdict(lambda: np.zeros(1 + 2 * len(_REPORT_ARMS)))
+    for row, error in zip(rows, errors):
+        groups[row[cluster]] += np.r_[1, np.abs(error), error ** 2]
+    keys, rng = sorted(groups), np.random.default_rng(0)
+    aggregates = np.array([groups[key] for key in keys])
+    arm_samples = {arm: {"rmse": [], "mae": []} for arm in _REPORT_ARMS}
+    difference_samples = {left + "_minus_" + right: {"rmse": [], "mae": []} for left, right in pairs}
+    for _ in range(2000):
+        total = aggregates[rng.integers(0, len(keys), size=len(keys))].sum(axis=0)
+        mae = {arm: scale * total[1 + index] / total[0]
+               for index, arm in enumerate(_REPORT_ARMS)}
+        rmse = {arm: scale * np.sqrt(total[1 + len(_REPORT_ARMS) + index] / total[0])
+                for index, arm in enumerate(_REPORT_ARMS)}
+        for arm in _REPORT_ARMS:
+            arm_samples[arm]["mae"].append(mae[arm])
+            arm_samples[arm]["rmse"].append(rmse[arm])
+        for left, right in pairs:
+            name = left + "_minus_" + right
+            difference_samples[name]["mae"].append(mae[left] - mae[right])
+            difference_samples[name]["rmse"].append(rmse[left] - rmse[right])
+    def interval(samples):
+        return {metric: np.percentile(values, [2.5, 97.5]).tolist()
+                for metric, values in samples.items()}
+    return {"cluster": cluster, "blocks": len(keys), "events": len({r["event_id"] for r in rows}),
+        "resamples": 2000, "seed": 0, "arms": list(_REPORT_ARMS),
+        "percentile_95": {arm: interval(samples) for arm, samples in arm_samples.items()},
+        "difference_percentile_95": {name: interval(samples)
+            for name, samples in difference_samples.items()}}
+
+
+def _implied_values(implied_moves, expected):
+    if implied_moves is None:
+        return {}
+    if not isinstance(implied_moves, dict) or not set(implied_moves) <= expected:
+        raise ValueError("implied move coverage differs from paired population")
+    values = {}
+    for key, value in implied_moves.items():
+        if value is None:
+            continue
+        if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
+            raise ValueError("invalid implied move")
+        values[key] = value
+    return values
+
+
+def paired_report(events, challenger, incumbent, targets, *, label_reasons=None,
+                  horizons=(1, 3, 5), implied_moves=None, implied_move=None):
+    """Match by forecast availability alone, then join targets; retain all exclusions.
+
+    ``implied_moves`` optionally maps ``(event_id, horizon_sessions)`` to the qualified
+    panel's percent-point ``implied_move`` feature; absent or null values abstain only
+    for that report-only arm and never shrink the existing full-pair metrics.
+    ``implied_move`` is an equivalent singular alias.
+    """
+    if implied_moves is not None and implied_move is not None:
+        raise ValueError("duplicate implied move input")
     if (not isinstance(horizons, (tuple, list)) or not horizons
             or any(type(h) is not int for h in horizons)
             or len(set(horizons)) != len(horizons)
@@ -83,6 +149,7 @@ def paired_report(events, challenger, incumbent, targets, *, label_reasons=None,
                 continue
             if type(value) not in (int, float) or not math.isfinite(value):
                 raise ValueError("invalid comparison value")
+    implied = _implied_values(implied_moves if implied_moves is not None else implied_move, expected)
     matched = {e for e in metadata if all(b[e, h]["predicted_absolute_move_pct"] is not None for h in leads)}
     coverage, rows = Counter(), []
     for event, h in sorted(expected):
@@ -97,14 +164,18 @@ def paired_report(events, challenger, incumbent, targets, *, label_reasons=None,
             rows.append({"event_id": event, "horizon_sessions": h, "year": day[:4], "ticker": meta["ticker"],
                 "quarter": day[:4] + "Q" + str((int(day[5:7]) - 1) // 3 + 1),
                 "absolute_move_pct": targets[event], "challenger": a[event, h]["predicted_absolute_move_pct"],
-                "incumbent": baseline["predicted_absolute_move_pct"], "history_mean": baseline["history_mean"]})
-    result = {"schema_version": "size_paired_report.v1", "eligible_events": len(metadata),
+                "incumbent": baseline["predicted_absolute_move_pct"], "history_mean": baseline["history_mean"],
+                _IMPLIED_ARM: implied.get((event, h))})
+    available = [row for row in rows if row[_IMPLIED_ARM] is not None]
+    implied_coverage = {"available_rows": len(available), "total_paired_rows": len(rows)}
+    result = {"schema_version": "size_paired_report.v2", "eligible_events": len(metadata),
         "forecast_matched_events": len(matched), "label_unavailable_events": sorted(set(metadata) - set(targets)),
         "paired_events": len({r["event_id"] for r in rows}), "event_total_weight": 1,
         "horizon_weight": 1 / len(leads),
         "coverage": [{"arm": arm, "year": y, "horizon_sessions": h, "quote_status": q, "forecast_status": s,
                       "label_status": label, "paired_forecasts": pairing, "count": n}
             for (arm, y, h, q, s, label, pairing), n in sorted(coverage.items())], "paired_rows": rows,
+        "implied_move_coverage": implied_coverage,
         "final_read_authority": "none", "claim": "frozen_dataset_development_only",
         "interval_caveat": "does_not_account_for_all_prior_adaptive_design_choices"}
     broad = [{"absolute_move_pct": targets[e], "challenger": a[e, h]["predicted_absolute_move_pct"],
@@ -112,9 +183,24 @@ def paired_report(events, challenger, incumbent, targets, *, label_reasons=None,
     result["broad_coverage_metrics"] = ({arm: _metrics(broad, arm) for arm in ("challenger", "history_mean")}
                                          if broad else {})
     result["challenger_abstentions"] = 0  # A failed selected arm refuses the entire report.
+    implied_bootstrap = _implied_bootstrap(available, "quarter") if available else None
+    if available:
+        result["like_for_like"] = {
+            **implied_coverage,
+            "metrics": {arm: _metrics(available, arm) for arm in _REPORT_ARMS},
+            "difference": _difference(available),
+            "quarter_bootstrap": implied_bootstrap}
+    else:
+        result["like_for_like"] = {
+            **implied_coverage, "status": "unavailable_no_implied_move_rows",
+            "metrics": None, "difference": None, "quarter_bootstrap": None}
     if rows:
-        result.update(metrics={arm: _metrics(rows, arm) for arm in ("challenger", "incumbent", "history_mean")},
-            difference=_difference(rows), quarter_bootstrap=_bootstrap(rows, "quarter"),
+        metrics = {arm: _metrics(rows, arm) for arm in _ARMS}
+        metrics[_IMPLIED_ARM] = _metrics(available, _IMPLIED_ARM) if available else None
+        quarter_bootstrap = _bootstrap(rows, "quarter")
+        quarter_bootstrap["implied_move"] = implied_bootstrap
+        result.update(metrics=metrics,
+            difference=_difference(rows), quarter_bootstrap=quarter_bootstrap,
             issuer_sensitivity=_bootstrap(rows, "ticker"),
             per_year={y: _breakdown([r for r in rows if r["year"] == y]) for y in sorted({r["year"] for r in rows})},
             per_horizon={str(h): _breakdown([r for r in rows if r["horizon_sessions"] == h]) for h in leads})
@@ -124,5 +210,8 @@ def paired_report(events, challenger, incumbent, targets, *, label_reasons=None,
 
 
 def _breakdown(rows):
-    return {"difference": _difference(rows), "arms": {arm: _metrics(rows, arm)
-            for arm in ("challenger", "incumbent", "history_mean")}}
+    available = [row for row in rows if row[_IMPLIED_ARM] is not None]
+    arms = {arm: _metrics(rows, arm) for arm in _ARMS}
+    arms[_IMPLIED_ARM] = _metrics(available, _IMPLIED_ARM) if available else None
+    return {"difference": _difference(rows), "arms": arms,
+            "implied_move_coverage": {"available_rows": len(available), "total_paired_rows": len(rows)}}
