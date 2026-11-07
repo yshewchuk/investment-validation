@@ -35,6 +35,8 @@ def fit_implied_scale(training_event_ids, labels, features, horizons):
             continue
         if not _valid_scalar(x):
             raise ValueError("invalid implied move")
+        if x == 0:
+            continue
         if _valid_scalar(y):
             pairs.append((x, y))
     denominator = sum(x * x for x, _ in pairs)

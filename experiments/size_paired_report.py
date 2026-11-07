@@ -118,6 +118,8 @@ def _implied_values(implied_moves, expected):
             continue
         if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
             raise ValueError("invalid implied move")
+        if value == 0:
+            continue
         values[key] = value
     return values
 

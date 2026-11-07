@@ -177,6 +177,18 @@ def test_fit_implied_scale_null_only_training_feature_abstains():
     assert result == {"scale": None, "fit_n": 0}
 
 
+def test_fit_implied_scale_zero_no_quote_sentinel_rows_abstain():
+    features = [
+        {"event_id": "zero", "horizon_sessions": 1, "implied_move": 0},
+        {"event_id": "zero", "horizon_sessions": 3, "implied_move": 0.0},
+        {"event_id": "nonzero", "horizon_sessions": 1, "implied_move": 2.0},
+        {"event_id": "nonzero", "horizon_sessions": 3, "implied_move": 4.0},
+    ]
+    result = report.fit_implied_scale(
+        ["zero", "nonzero"], {"zero": 100.0, "nonzero": 4.0}, features, (1, 3))
+    assert result == {"scale": pytest.approx(1.2), "fit_n": 2}
+
+
 def test_fit_implied_scale_still_skips_unavailable_or_invalid_labels():
     features = [
         {"event_id": "missing", "horizon_sessions": 1, "implied_move": 3.0},

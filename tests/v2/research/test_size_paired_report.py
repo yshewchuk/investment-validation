@@ -248,6 +248,35 @@ def test_implied_move_nulls_abstain_and_zero_coverage_is_explicit():
     assert report["metrics"] == paired_report(events, challenger, incumbent, targets)["metrics"]
 
 
+def test_implied_move_zero_no_quote_sentinel_abstains_without_changing_other_arms():
+    events, challenger, incumbent, targets = fixture()
+    implied = {(event, horizon): value
+               for event, value in (("e0", 0), ("e1", 5.5)) for horizon in (1, 3, 5)}
+    implied.update({("e3", horizon): 0.0 for horizon in (1, 3, 5)})
+    scales = {"2023": {"scale": 2.0, "fit_n": 3}}
+    old = paired_report(events, challenger, incumbent, targets)
+    report = paired_report(events, challenger, incumbent, targets,
+                           implied_moves=implied, implied_scales=scales)
+    rows = {(row["event_id"], row["horizon_sessions"]): row for row in report["paired_rows"]}
+
+    assert len(report["paired_rows"]) == 12
+    assert report["implied_move_coverage"] == {"available_rows": 3, "total_paired_rows": 12}
+    assert report["implied_move_scaled_coverage"] == {"available_rows": 3, "total_paired_rows": 12}
+    for event in ("e0", "e3"):
+        for horizon in (1, 3, 5):
+            assert rows[event, horizon]["implied_move"] is None
+            assert rows[event, horizon]["implied_move_scaled"] is None
+    assert rows["e1", 3]["implied_move"] == 5.5
+    assert rows["e1", 3]["implied_move_scaled"] == pytest.approx(11.0)
+    assert report["metrics"]["implied_move"]["count"] == 3
+    assert report["metrics"]["implied_move"]["rmse"] == pytest.approx(0.5)
+    assert report["metrics"]["implied_move_scaled"]["count"] == 3
+    for arm in ("challenger", "incumbent", "history_mean"):
+        assert report["metrics"][arm] == old["metrics"][arm]
+    assert report["difference"] == old["difference"]
+    assert report["quarter_bootstrap"]["percentile_95"] == old["quarter_bootstrap"]["percentile_95"]
+
+
 @pytest.mark.parametrize("value", [float("nan"), float("inf"), -0.1, True, "2"])
 def test_implied_move_rejects_nonfinite_negative_or_non_numeric_values(value):
     events, challenger, incumbent, targets = fixture()
@@ -298,7 +327,7 @@ def test_implied_scale_is_known_and_changed_test_rows_cannot_alter_it():
     assert fit_implied_scale(["train-a", "train-b"], labels, features, (1, 3, 5)) == calibration
     assert fit_implied_scale(["train-a"], {"train-a": 2.0},
                              [{"event_id": "train-a", "horizon_sessions": 1, "implied_move": 0.0}],
-                             (1,)) == {"scale": None, "fit_n": 1}
+                             (1,)) == {"scale": None, "fit_n": 0}
 
 
 def test_implied_scale_never_accesses_test_row_feature_or_label_values():
