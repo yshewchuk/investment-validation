@@ -341,7 +341,7 @@ typed `embargo_ticker` and/or `label_end_at_or_after_cutoff` reasons. If filteri
 leaves no evaluation IDs, it refuses `INVALID_EXPERIMENT_SPEC`. `PLAN_V3` repeated inner-year membership is checked during preparation before
 registration publication, and again during plan construction; request schema
 `magnitude_search_request.v3` remains legacy `PLAN_V2`, while the supported v2 and
-v4-v8 requests use `PLAN_V3`; differing post-eligibility memberships refuse
+v4-v9 requests use `PLAN_V3`; differing post-eligibility memberships refuse
 `EXPERIMENT_IDENTITY_CONFLICT`. This binder path is exercised by synthetic fold tests
 only. Freeze the window/manifest before outcomes, with no tuning.
 This excludes examples, not individual price bars; do not alter rolling formulas.

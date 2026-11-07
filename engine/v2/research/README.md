@@ -442,7 +442,7 @@ snapshot recorded, and an explicit `--snapshot-id` honoured.
 `grouped_ticker_embargo.v1`; whole calendar-day width is explicit, not globally 30.
 `eligibility_policy.plan_eligibility` rederives random/rolling membership from
 pinned canonical event metadata and returns a content-addressed development
-exclusion plan with retained IDs, reasons, coverage, filtered evaluation IDs,
+exclusion plan with retained IDs, reasons, coverage, ticker-filtered evaluation IDs,
 ambiguous-random event IDs and evaluation exclusion reasons. It merges
 same-ticker random windows and uses inclusive interval overlap; one overlapping
 horizon excludes the whole event, not individual price bars.
@@ -456,11 +456,13 @@ Dates are canonical ISO calendar days. Producers must establish these bounds;
 missing bounds refuse. A caller's digest is not evidence of their truth.
 
 The eligible-history builder below consumes this metadata policy. Evaluation
-IDs outside an ambiguous-random ticker are preserved, not authorized for reading;
-IDs on that ticker are listed in `evaluation_exclusions`. Annual development
-targets still need retained eligibility. The policy identity and dependent
-request/dictionary hashes are unchanged; the embargo appears only in plan content,
-and only when an ambiguous random event exists, so earlier plans keep their IDs.
+IDs outside an ambiguous-random ticker are preserved by this policy, not authorized
+for reading; IDs on that ticker are listed in `evaluation_exclusions`. The separate
+SIZE fold binder retains only IDs that also survive its ticker embargo and precede
+its strict label cutoff, recording those excluded IDs. Annual development targets still need retained
+eligibility. The policy identity and dependent request/dictionary hashes are
+unchanged; the embargo appears only in plan content, and only when an ambiguous
+random event exists, so earlier plans keep their IDs.
 Integration sequencing belongs to the [stage-2 design](../../../experiments/SUPER_SIZE/STAGE2_DESIGN.md).
 
 ## Confirmed metadata index (synthetic only)
