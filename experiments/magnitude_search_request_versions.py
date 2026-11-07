@@ -26,7 +26,7 @@ def _is_default_selector(selector):
 
 
 def compile_request(request, *, horizons=(5, 3, 1)):
-    """Dispatch bounded v3-v8 grids while preserving existing dictionary replay."""
+    """Dispatch bounded v3-v9 grids while preserving existing dictionary replay."""
     version = request.get("schema_version") if type(request) is dict else None
     if (version == "regression_search_request.v1"
             or request_version(version) == 1) and not _is_default_selector(horizons):

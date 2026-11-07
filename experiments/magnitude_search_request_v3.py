@@ -1,4 +1,4 @@
-"""Pure v3-v8 validation with bounded grids, fixed SIZE and named neural profiles."""
+"""Pure v3-v9 validation with bounded grids, fixed SIZE and named neural profiles."""
 import json
 import math
 

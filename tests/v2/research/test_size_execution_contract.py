@@ -50,8 +50,9 @@ def test_actual_label_end_purges_training_even_when_event_precedes_fit():
 def test_actual_inner_label_end_must_precede_outer_fit():
     binding, request = temporal()
     binding["size_panel"]["context"]["target_events"][2]["label_end"] = "2024-01-01"
-    with pytest.raises(OpsError, match="differs"):
+    with pytest.raises(OpsError, match="SIZE fold has no eligible evaluation events") as caught:
         _folds(binding, request)
+    assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
 
 
 def test_missing_inner_year_is_not_silently_skipped():
@@ -210,6 +211,83 @@ def test_shared_inner_refuses_modified_shared_membership():
         _shared_inner(plan["folds"])
 
 
+@pytest.mark.parametrize("request_version", [
+    "magnitude_search_request.v2", "magnitude_search_request.v3",
+    "magnitude_search_request.v4", "magnitude_search_request.v5",
+    "magnitude_search_request.v6", "magnitude_search_request.v7",
+    "magnitude_search_request.v8", "magnitude_search_request.v9"])
+def test_prepare_checks_shared_inner_before_registration_publication(monkeypatch, request_version):
+    from engine.v2.research import magnitude_panel_qualified_table
+    from experiments import size_search_binding as binding
+
+    request = {
+        "schema_version": request_version,
+        "feature_dictionary_hash": "dictionary",
+        "feature_snapshot_id": "feature",
+        "history_snapshot_id": "history",
+        "eligibility_policy_ref": {
+            "schema_ref": "group_eligibility_plan.v1",
+            "plan_id": "plan-id",
+            "policy_id": "policy-id",
+        },
+        "limits": {"child": {"memory_bytes": 1}, "parent": {"memory_bytes": 2}},
+    }
+    panel_request = {
+        "feature_snapshot_id": "feature",
+        "history_snapshot": "history",
+        "horizons": [1, 3, 5],
+        "as_of_month": "2025-01",
+        "event_ids": ["event"],
+    }
+    schedule_request = {**request, "outer_years": ["2025"]}
+    base_document = {
+        "execution_plan": {"runner": "experiments/size_search.py"},
+        "magnitude_plan": {"evaluation_years": ["2025"]},
+        "event_ids": ["event"],
+        "snapshot": {},
+    }
+    context = {
+        "target_events": [{"event_id": "event", "ticker": "A", "label_end": "2024-01-01"}],
+        "eligibility_plan": {"plan_id": "plan-id", "policy": {"policy_id": "policy-id"}},
+    }
+    mismatched_folds = [
+        {"outer": {}, "inner": [{"year": "2023", "training_candidate_event_ids": ["train"],
+                                   "evaluation_event_ids": ["first"]}]},
+        {"outer": {}, "inner": [{"year": "2023", "training_candidate_event_ids": ["train"],
+                                   "evaluation_event_ids": ["second"]}]},
+    ]
+    monkeypatch.setattr(magnitude_panel_qualified_table, "recipe",
+                        lambda *_args: {"dictionary_hash": "dictionary", "model_columns": []})
+    monkeypatch.setattr(binding, "_sources", lambda: {"source": "hash"})
+    monkeypatch.setattr(binding, "validate_panel_request", lambda value: value)
+    monkeypatch.setattr(binding, "compile_request", lambda *_args, **_kwargs:
+                        {"request": schedule_request, "horizons": [1, 3, 5]})
+    monkeypatch.setattr(binding, "prepare_native_registration", lambda *_args, **_kwargs:
+                        (SimpleNamespace(document=base_document, run_id="run"), "spec"))
+    monkeypatch.setattr(binding, "_panel_columns", lambda *_args: [])
+    monkeypatch.setattr(binding, "from_document", lambda *_args: None)
+    monkeypatch.setattr(binding, "read_panel", lambda *_args, **_kwargs:
+                        {"context": context, "feature_snapshot": {}})
+    monkeypatch.setattr(binding, "_preview_payload", lambda *_args: b"{}")
+    monkeypatch.setattr(binding, "_folds", lambda *_args: mismatched_folds)
+
+    def pack(*_args, **_kwargs):
+        pytest.fail("published before shared-inner validation")
+    monkeypatch.setattr(binding, "pack_size_registration", pack)
+
+    def prepare(**kwargs):
+        return binding.prepare(None, None, request, panel_request, scope="scope",
+                               training_start="2020-01-01", labels_before="2025-01-01", **kwargs)
+
+    if request_version == "magnitude_search_request.v3":
+        registration, _ = prepare(publish_artifacts=False)
+        assert registration.run_id == "run"
+    else:
+        with pytest.raises(OpsError, match="repeated inner-year folds differ") as caught:
+            prepare()
+        assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+
+
 def test_shared_inner_allows_cutoff_difference_when_membership_matches(monkeypatch):
     from engine.v2.research.magnitude_panel_qualified_table import recipe
     from experiments import size_search_binding as binding
@@ -253,6 +331,27 @@ def test_shared_inner_allows_cutoff_difference_when_membership_matches(monkeypat
     with pytest.raises(OpsError) as error:
         binding.prepare_plan(None, None, registration, v3, plan_schema=PLAN_V3)
     assert error.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+
+
+def test_prepare_plan_replays_explicit_historical_plan_v2(monkeypatch):
+    from engine.v2.research.magnitude_panel_qualified_table import recipe
+    from experiments import size_search_binding as binding
+    from tests.v2.research.test_magnitude_search_request import request as search_request
+    document, _ = multi_year_temporal()
+    request = search_request()
+    request["feature_dictionary_hash"] = recipe("HMO")["dictionary_hash"]
+    request["outer_years"] = ["2024", "2025"]
+    request["inner_years"] = {"2024": ["2022", "2023"], "2025": ["2022", "2023"]}
+    document["size_request"] = compile_request(request)["request"]
+    document["schema_version"] = "native_experiment_registration.v1.6"
+    document["source_closure"] = {"synthetic": "source"}
+    document["environment"] = {"synthetic": "environment"}
+    monkeypatch.setattr(binding, "verify_native_registration", lambda *a, **k: None)
+    monkeypatch.setattr(binding, "verify_installation", lambda *a, **k: None)
+    registration = SimpleNamespace(run_id="synthetic-run", variant_id="synthetic-variant",
+                                   document=document)
+    plan = binding.prepare_plan(None, None, registration, request, plan_schema=PLAN_V2)
+    assert plan["schema_version"] == PLAN_V2
 
 
 @pytest.mark.parametrize("plan_schema", ["magnitude_search_plan.v4", 0, []])

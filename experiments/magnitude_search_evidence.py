@@ -37,7 +37,7 @@ def admit_fold_inputs(repository, binding, fold, *, history_failure, strict_json
         return fold_inputs(repository, binding, fold, plan=plan)
     if binding.get("schema_version") in ("native_experiment_registration.v1.6", "native_experiment_registration.v1.7"):
         from experiments.size_search_binding import fold_inputs
-        return fold_inputs(repository, binding, fold)
+        return fold_inputs(repository, binding, fold, plan=plan)
     snapshot = from_document(SnapshotRef, binding["snapshot"])
     month = binding["holdouts"]["holdout_as_of_month"]
     history = history_binding(repository, snapshot, binding["magnitude_plan"],

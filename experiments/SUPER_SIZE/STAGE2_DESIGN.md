@@ -332,13 +332,20 @@ ceiling overlaps a window. Apply metadata-first exclusions before preprocessing,
 selection, calibration and fits, including the legacy baseline. On the SIZE path a
 requested development target on an ambiguous-random ticker is excluded, so panel
 preparation refuses `HOLDOUT_ACCESS_DENIED` before any binding exists; fold IDs are
-drawn from those targets, so valid bindings hold none. The fold binder repeats the
-check as defence in depth on the eligibility plan's ambiguous-random tickers: it removes
-matching IDs from outer and inner training and evaluation, records removed evaluation
-IDs in `evaluation_exclusions` with reason `embargo_ticker`, and preserves all other
-IDs; a fold left with no evaluation IDs refuses `INVALID_EXPERIMENT_SPEC`. This
-binder path is exercised by synthetic fold tests only. Freeze the
-window/manifest before outcomes, with no tuning.
+drawn from those targets, so valid bindings hold none. The fold binder repeats
+eligibility as defence in depth: outer and inner training IDs are removed for an
+ambiguous-random ticker or `label_end` at/after the fold training cutoff; evaluation
+IDs are removed for an ambiguous-random ticker or `label_end` at/after their fold
+evaluation cutoff. It records evaluation exclusions in `evaluation_exclusions` with
+typed `embargo_ticker` and/or `label_end_at_or_after_cutoff` reasons. If filtering
+leaves no evaluation IDs, it refuses `INVALID_EXPERIMENT_SPEC`. `PLAN_V3` repeated inner-year membership is checked during preparation before
+registration publication, and again during plan construction; request schema
+`magnitude_search_request.v3` remains legacy `PLAN_V2`, while the supported v2 and
+v4-v9 requests use `PLAN_V3`. Repeated `PLAN_V3` inner years filter evaluation
+events with the minimum owner-specific evaluation cutoff, while each fold retains
+its own recorded cutoff metadata; differing post-eligibility memberships refuse
+`EXPERIMENT_IDENTITY_CONFLICT`. This binder path is exercised by synthetic fold tests
+only. Freeze the window/manifest before outcomes, with no tuning.
 This excludes examples, not individual price bars; do not alter rolling formulas.
 
 Extend protected event-outcome preflight, not production `scan_panel_row`: classify
