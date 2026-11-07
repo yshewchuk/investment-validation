@@ -64,3 +64,22 @@ def test_fold_binding_refuses_when_embargo_removes_every_evaluation(monkeypatch)
 
     assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
     assert caught.value.problem.message == "ambiguous-random ticker embargo removed every fold evaluation event"
+
+
+def test_fold_binding_excludes_evaluation_at_cutoff_and_keeps_earlier_event(monkeypatch):
+    fold = _fold(["at_cutoff", "before_cutoff"])
+    fold["evaluation_labels_before"] = "2024-12-24"
+    nested = [{"outer": fold, "inner": []}]
+    monkeypatch.setattr(planner, "_nested", lambda *_args: deepcopy(nested))
+    source = _binding()
+    source["size_panel"]["context"]["target_events"].extend([
+        {"event_id": "at_cutoff", "ticker": "OTHER", "label_end": "2024-12-24"},
+        {"event_id": "before_cutoff", "ticker": "OTHER", "label_end": "2024-12-23"},
+    ])
+
+    result = binding._folds(source, {})[0]["outer"]
+
+    assert result["evaluation_event_ids"] == ["before_cutoff"]
+    assert result["evaluation_exclusions"] == [
+        {"event_id": "at_cutoff", "reasons": ["label_end_at_or_after_cutoff"]}
+    ]

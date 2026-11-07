@@ -198,12 +198,19 @@ def _folds(binding, request):
             retained = [e for e in fold["evaluation_event_ids"] if not hit(e)]
             if embargoed_tickers and not retained:
                 raise fail("INVALID_EXPERIMENT_SPEC", "ambiguous-random ticker embargo removed every fold evaluation event")
-            excluded = [e for e in fold["evaluation_event_ids"] if hit(e)]
-            fold["evaluation_event_ids"] = retained
-            if excluded:
-                fold["evaluation_exclusions"] = [{"event_id": eid, "reasons": ["embargo_ticker"]}
-                    for eid in excluded]
             cutoff = fold.get("evaluation_labels_before", binding["magnitude_execution"]["evaluation_labels_before"])
+            excluded = []
+            for eid in fold["evaluation_event_ids"]:
+                reasons = []
+                if hit(eid):
+                    reasons.append("embargo_ticker")
+                if events[eid]["label_end"] >= cutoff:
+                    reasons.append("label_end_at_or_after_cutoff")
+                if reasons:
+                    excluded.append({"event_id": eid, "reasons": reasons})
+            fold["evaluation_event_ids"] = [e for e in retained if events[e]["label_end"] < cutoff]
+            if excluded:
+                fold["evaluation_exclusions"] = excluded
             _require(all(events[e]["label_end"] < cutoff for e in fold["evaluation_event_ids"]))
     return folds
 
