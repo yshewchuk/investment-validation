@@ -126,10 +126,11 @@ def test_collect_uses_verified_callback_inputs_per_outer_fold(monkeypatch):
 
     monkeypatch.setattr(report, "collect_outer_results", fake_collect)
     captured = {}
+    paired_report_result = {"paired": True}
 
     def paired(*args, **kwargs):
         captured.update(kwargs)
-        return {"paired": True}
+        return paired_report_result
 
     monkeypatch.setattr(report, "paired_report", paired)
 
@@ -139,8 +140,9 @@ def test_collect_uses_verified_callback_inputs_per_outer_fold(monkeypatch):
         return {"result": {"forecasts": [], "fit_details": []}}
 
     monkeypatch.setattr(report, "read_record", read)
-    report.collect(None, None, None, registration, {}, None)
+    observed = report.collect(None, None, None, registration, {}, None)
 
+    assert observed["paired"] is paired_report_result
     assert invoked == ["2024", "2025"]
     assert captured["implied_scales"] == {
         "2024": {"scale": 2.0, "fit_n": 1}, "2025": {"scale": 2.0, "fit_n": 1}}

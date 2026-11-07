@@ -417,6 +417,13 @@ def test_collect_passes_verified_inputs_to_callback_once_per_outer_fold(outer_ca
         assert features == expected["features"]
     assert report == collect(case)
 
+    def failing(fold, inputs):
+        raise ValueError("callback sentinel")
+
+    with pytest.raises(ValueError, match="callback sentinel") as caught:
+        collect(case, input_callback=failing)
+    assert str(caught.value) == "callback sentinel"
+
 
 @pytest.mark.parametrize("stage", ["input", "labels"])
 def test_collect_refuses_later_committed_start_without_terminal_before_any_replay(outer_case, monkeypatch, stage):

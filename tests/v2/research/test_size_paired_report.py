@@ -5,7 +5,13 @@ from copy import deepcopy
 import numpy as np
 import pytest
 
+from engine.v2.foundation import content_hash
 from experiments.size_paired_report import paired_report
+
+
+def assert_identity(report):
+    assert report["result_id"] == content_hash(
+        {key: value for key, value in report.items() if key != "result_id"})
 
 
 def fixture():
@@ -25,6 +31,7 @@ def fixture():
 def test_exact_pooled_difference_equal_event_weights_and_bootstrap_oracle():
     args = fixture()
     report = paired_report(*args)
+    assert_identity(report)
     expected_rmse = math.sqrt((0.1 ** 2 + 0.3 ** 2 + 0.5 ** 2) / 3)
     assert report["difference"] == {"rmse": pytest.approx(expected_rmse - 1), "mae": pytest.approx(-0.7)}
     assert report["paired_events"] == 4 and len(report["paired_rows"]) == 12
@@ -225,6 +232,7 @@ def test_implied_move_uses_percent_points_and_keeps_full_metrics_and_bootstrap()
     assert report["per_year"]["2024"]["implied_move_coverage"] == {
         "available_rows": 0, "total_paired_rows": 3}
     assert report == paired_report(events, challenger, incumbent, targets, implied_moves=implied)
+    assert paired_report(events, challenger, incumbent, targets, implied_move=implied) == report
 
 
 def test_implied_move_nulls_abstain_and_zero_coverage_is_explicit():
@@ -434,3 +442,33 @@ def test_implied_scale_calibration_rejects_malformed_records(record):
     with pytest.raises(ValueError, match="implied scale"):
         paired_report(events, challenger, incumbent, targets,
                       implied_moves={}, implied_scales={"2023": record})
+
+
+def test_multi_quarter_implied_bootstrap_reports_hand_computed_raw_and_scaled_bounds():
+    events = [
+        {"event_id": "e0", "ticker": "A", "event_date": "2023-01-20"},
+        {"event_id": "e1", "ticker": "B", "event_date": "2023-04-17"},
+    ]
+    targets = {"e0": 2, "e1": 10}
+    challenger = [
+        {"event_id": "e0", "horizon_sessions": 1, "predicted_absolute_move_pct": 3.0},
+        {"event_id": "e1", "horizon_sessions": 1, "predicted_absolute_move_pct": 14.0},
+    ]
+    incumbent = [
+        {"event_id": "e0", "horizon_sessions": 1, "predicted_absolute_move_pct": 2.0,
+         "abstention": None, "history_mean": 4.0, "quote_status": "present"},
+        {"event_id": "e1", "horizon_sessions": 1, "predicted_absolute_move_pct": 10.0,
+         "abstention": None, "history_mean": 4.0, "quote_status": "present"},
+    ]
+    implied = {("e0", 1): 3, ("e1", 1): 14}
+    report = paired_report(events, challenger, incumbent, targets, horizons=(1,),
+                           implied_moves=implied,
+                           implied_scales={"2023": {"scale": 2.0, "fit_n": 2}})
+
+    raw = report["quarter_bootstrap"]["implied_move"]
+    scaled = report["quarter_bootstrap"]["implied_move_scaled"]
+    assert raw["blocks"] == 2 and scaled["blocks"] == 2
+    for metric in ("rmse", "mae"):
+        assert raw["percentile_95"]["implied_move"][metric] == pytest.approx([1, 4])
+        assert scaled["percentile_95"]["implied_move_scaled"][metric] == pytest.approx([4, 18])
+    assert_identity(report)
