@@ -39,7 +39,7 @@ from engine.data.normalize import fetch_store, n_chains, n_daily
 from engine.data.normalize.common import read_gz_json
 from engine.data.rebuild_cache import InputCache
 
-__all__ = ["chain_sources", "normalize_ticker_cached", "EMPTY_PAYLOAD"]
+__all__ = ["chain_sources", "normalize_ticker_cached", "count_ticker_cached", "EMPTY_PAYLOAD"]
 
 #: Cached value for a fetch body that is a recognized zero-row answer.
 EMPTY_PAYLOAD = "empty"
@@ -177,5 +177,19 @@ def normalize_ticker_cached(ticker: str, cache: InputCache) -> tuple[pd.DataFram
     if src is None:
         return pd.DataFrame(), {"ticker": ticker, "reason": "no summaries rows"}
     return n_daily.normalize_frames(
+        ticker, src, lambda: _frame_from_parts(ticker, _parts(cache, ticker, "cores"), "cores")
+    )
+
+
+def count_ticker_cached(ticker: str, cache: InputCache) -> tuple[set, dict]:
+    """:func:`~engine.data.normalize.n_daily.count_daily_dates`, with cached parses.
+
+    Reuses the same per-input parts, so each cacheable input is parsed at most
+    once. Inputs the cache cannot hold are still re-read as in the full path.
+    """
+    src = _frame_from_parts(ticker, _parts(cache, ticker, "summaries"), "summaries")
+    if src is None:
+        return set(), {}
+    return n_daily.count_daily_dates(
         ticker, src, lambda: _frame_from_parts(ticker, _parts(cache, ticker, "cores"), "cores")
     )

@@ -247,20 +247,32 @@ def _preflight_daily_completeness(tickers: list[str], cache, snapshot_dates=None
     total = len(tickers)
     started = time.monotonic()
     last = started - 30.0
+    mode = "normalize" if cache is None else "count-only"
     print(
-        f"  [daily preflight] start 0/{total} tickers, elapsed 0s{_rss_suffix()}",
+        f"  [daily preflight] start mode={mode} 0/{total} tickers, "
+        f"elapsed 0s{_rss_suffix()}",
         file=sys.stderr,
         flush=True,
     )
     if snapshot_dates is None:
         snapshot_dates = _market_wide_snapshot_dates()
     for i, ticker in enumerate(tickers, 1):
-        frame, _ = _normalize_daily(ticker, cache)
-        if not frame.empty:
-            for day in frame["date"].dropna().unique():
+        # The nightly incremental cache counts only the columns validation reads
+        # and leaves the one full normalization to the build; uncached runs keep
+        # the original full pass.
+        if cache is None:
+            frame, _ = _normalize_daily(ticker, cache)
+            if not frame.empty:
+                for day in frame["date"].dropna().unique():
+                    counts.setdefault(pd.Timestamp(day), 0)
+                clean, _ = validate.validate_daily(frame)
+                for day, n in clean.groupby("date").size().items():
+                    counts[day] = counts.get(day, 0) + int(n)
+        else:
+            present, ticker_counts = rebuild_incremental.count_ticker_cached(ticker, cache)
+            for day in present:
                 counts.setdefault(pd.Timestamp(day), 0)
-            clean, _ = validate.validate_daily(frame)
-            for day, n in clean.groupby("date").size().items():
+            for day, n in ticker_counts.items():
                 counts[day] = counts.get(day, 0) + int(n)
         now = time.monotonic()
         if now - last >= 30.0:
