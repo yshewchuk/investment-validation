@@ -48,6 +48,9 @@ def test_fold_binding_embargoes_tickers_from_training_and_evaluation(monkeypatch
 
     for fold in [folds[0]["outer"], *folds[0]["inner"]]:
         assert fold["training_candidate_event_ids"] == ["training"]
+        assert fold["training_exclusions"] == [
+            {"event_id": "sibling", "reasons": ["embargo_ticker"]}
+        ]
         assert fold["evaluation_event_ids"] == ["evaluation"]
         assert fold["evaluation_exclusions"] == [
             {"event_id": eid, "reasons": ["embargo_ticker"]}
@@ -70,8 +73,8 @@ def test_fold_binding_refuses_when_embargo_removes_every_evaluation(monkeypatch)
 
 
 @pytest.mark.parametrize(("cutoff", "before", "after"), [
-    ("2024-12-24", "2024-12-23", "2024-12-25"),
-    ("2024-12-31", "2024-12-30", "2025-01-01"),
+    ("2024-12-24", "2024-12-22", "2024-12-25"),
+    ("2024-12-31", "2024-12-29", "2025-01-01"),
 ])
 def test_fold_binding_excludes_evaluation_at_cutoff_and_keeps_earlier_event(monkeypatch, cutoff, before, after):
     fold = _fold(["at_cutoff", "before_cutoff", "after_cutoff", "also_embargoed_at_cutoff"])
@@ -95,6 +98,32 @@ def test_fold_binding_excludes_evaluation_at_cutoff_and_keeps_earlier_event(monk
         {"event_id": "also_embargoed_at_cutoff", "reasons": [
             "embargo_ticker", "label_end_at_or_after_cutoff"
         ]},
+    ]
+
+
+def test_fold_binding_excludes_event_whose_next_day_availability_hits_cutoff(monkeypatch):
+    cutoff = "2024-12-24"
+    fold = _fold(["near_cutoff", "before_cutoff"])
+    fold["training_candidate_event_ids"] = ["training", "near_cutoff"]
+    fold["training_labels_before"] = cutoff
+    fold["evaluation_labels_before"] = cutoff
+    nested = [{"outer": fold, "inner": []}]
+    monkeypatch.setattr(planner, "_nested", lambda *_args: deepcopy(nested))
+    source = _binding()
+    source["size_panel"]["context"]["target_events"].extend([
+        {"event_id": "near_cutoff", "ticker": "OTHER", "label_end": "2024-12-23"},
+        {"event_id": "before_cutoff", "ticker": "OTHER", "label_end": "2024-12-20"},
+    ])
+
+    result = binding._folds(source, {})[0]["outer"]
+
+    assert result["evaluation_event_ids"] == ["before_cutoff"]
+    assert result["evaluation_exclusions"] == [
+        {"event_id": "near_cutoff", "reasons": ["label_available_at_or_after_cutoff"]}
+    ]
+    assert result["training_candidate_event_ids"] == ["training"]
+    assert result["training_exclusions"] == [
+        {"event_id": "near_cutoff", "reasons": ["label_available_at_or_after_cutoff"]}
     ]
 
 

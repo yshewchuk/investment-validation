@@ -333,17 +333,24 @@ selection, calibration and fits, including the legacy baseline. On the SIZE path
 requested development target on an ambiguous-random ticker is excluded, so panel
 preparation refuses `HOLDOUT_ACCESS_DENIED` before any binding exists; fold IDs are
 drawn from those targets, so valid bindings hold none. The fold binder repeats
-eligibility as defence in depth: outer and inner training IDs are removed for an
-ambiguous-random ticker or `label_end` at/after the fold training cutoff; evaluation
-IDs are removed for an ambiguous-random ticker or `label_end` at/after their fold
-evaluation cutoff. It records evaluation exclusions in `evaluation_exclusions` with
-typed `embargo_ticker` and/or `label_end_at_or_after_cutoff` reasons. If filtering
-leaves no evaluation IDs, it refuses `INVALID_EXPERIMENT_SPEC`. `PLAN_V3` repeated inner-year membership is checked during preparation before
+eligibility as defence in depth. Training IDs are removed for an ambiguous-random
+ticker or a label not available before that fold's own `training_labels_before`;
+evaluation IDs are removed for an ambiguous-random ticker or a label not available
+before the effective evaluation cutoff. Label availability is `label_end` plus one
+calendar day, so a label whose availability is at/after the cutoff is excluded.
+Removed training and evaluation events are recorded in `training_exclusions` and
+`evaluation_exclusions` respectively, with typed `embargo_ticker`,
+`label_end_at_or_after_cutoff` (label_end on/after the cutoff) and/or
+`label_available_at_or_after_cutoff` (label_end before the cutoff but next-day
+availability not before it) reasons. If filtering leaves no evaluation IDs, it
+refuses `INVALID_EXPERIMENT_SPEC`; if it removes every training candidate, the
+existing invariant refuses `EXPERIMENT_IDENTITY_CONFLICT`. `PLAN_V3` repeated inner-year membership is checked during preparation before
 registration publication, and again during plan construction; request schema
 `magnitude_search_request.v3` remains legacy `PLAN_V2`, while the supported v2 and
 v4-v9 requests use `PLAN_V3`. Repeated `PLAN_V3` inner years filter evaluation
 events with the minimum owner-specific evaluation cutoff, while each fold retains
-its own recorded cutoff metadata; differing post-eligibility memberships refuse
+its own recorded cutoff metadata and training uses that fold's own
+`training_labels_before`; differing post-eligibility memberships refuse
 `EXPERIMENT_IDENTITY_CONFLICT`. This binder path is exercised by synthetic fold tests
 only. Freeze the window/manifest before outcomes, with no tuning.
 This excludes examples, not individual price bars; do not alter rolling formulas.
