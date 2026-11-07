@@ -36,6 +36,7 @@ __all__ = [
     "list_tickers",
     "fetch_daily_index",
     "normalize_frames",
+    "count_daily_dates",
     "history_body_path",
     "read_history_body",
     "SOURCE_COLUMNS",
@@ -77,8 +78,49 @@ def list_tickers(root: Path | None = None, *, include_fetch: bool = True) -> lis
     return sorted(tickers)
 
 
+class _CompactRows:
+    """Rows stored by column, expanded into dicts only when a caller iterates.
+
+    One value list per field replaces one dict per row; missing fields use a
+    private sentinel so a sparse response stays sparse.
+    """
+
+    __slots__ = ("_columns", "_n")
+    _MISSING = object()
+
+    def __init__(self) -> None:
+        self._columns: dict[str, list] = {}
+        self._n = 0
+
+    def append(self, row: dict) -> None:
+        columns = self._columns
+        for key, column in columns.items():
+            column.append(row.get(key, self._MISSING))
+        for key, value in row.items():
+            if key not in columns:
+                columns[key] = [self._MISSING] * self._n + [value]
+        self._n += 1
+
+    def freeze(self) -> "_CompactRows":
+        self._columns = {key: tuple(values) for key, values in self._columns.items()}
+        return self
+
+    def __len__(self) -> int:
+        return self._n
+
+    def __iter__(self) -> Iterator[dict]:
+        columns = self._columns
+        missing = self._MISSING
+        for i in range(self._n):
+            yield {
+                key: values[i]
+                for key, values in columns.items()
+                if values[i] is not missing
+            }
+
+
 @lru_cache(maxsize=1)
-def fetch_daily_index() -> dict[str, dict[str, list[dict]]]:
+def fetch_daily_index() -> dict[str, dict[str, _CompactRows]]:
     """Index the fetch store's MARKET-WIDE summaries/cores rows by ticker.
 
     On a fresh machine this is the *only* source of daily data: the legacy
@@ -95,6 +137,8 @@ def fetch_daily_index() -> dict[str, dict[str, list[dict]]]:
     because they are addressable by cache key: :func:`_ticker_history_rows`
     loads exactly the one being asked for. The index is left holding only the
     market-wide (``tradeDate``) responses, which are a few thousand rows each.
+    Each is stored compactly by column in :class:`_CompactRows` and expands to
+    row dicts only for the requested ticker.
 
     Cached because a rebuild asks for it once per ticker.
 
@@ -108,7 +152,7 @@ def fetch_daily_index() -> dict[str, dict[str, list[dict]]]:
     """
     from engine.data.normalize.fetch_store import iter_orats_rows
 
-    index: dict[str, dict[str, list[dict]]] = {}
+    index: dict[str, dict[str, _CompactRows]] = {}
     for endpoint, kind in (("hist/summaries", "summaries"), ("hist/cores", "cores")):
         for source in iter_orats_rows(endpoint, order_by_fetched_at=True):
             # A response fetched for ONE ticker is fetched back on demand.
@@ -118,7 +162,15 @@ def fetch_daily_index() -> dict[str, dict[str, list[dict]]]:
                 ticker = row.get("ticker")
                 if not ticker:
                     continue
-                index.setdefault(str(ticker), {"summaries": [], "cores": []})[kind].append(row)
+                key = str(ticker)
+                parts = index.get(key)
+                if parts is None:
+                    parts = {"summaries": _CompactRows(), "cores": _CompactRows()}
+                    index[key] = parts
+                parts[kind].append(row)
+    for parts in index.values():
+        for rows in parts.values():
+            rows.freeze()
     return index
 
 
@@ -323,6 +375,70 @@ def normalize_frames(ticker: str, src: pd.DataFrame, cores_frame) -> tuple[pd.Da
         "last": str(out["date"].max().date()) if len(out) else None,
     }
     return out, report
+
+
+#: Raw summary fields that can still invalidate a row after sentinel masking,
+#: clipping and deduplication; ``validate_daily`` flags exactly these.
+_COUNT_FIELDS = ("stockPrice", "iv30d", "impliedMove", "rVol30")
+
+
+def count_daily_dates(
+    ticker: str, src: pd.DataFrame, cores_frame
+) -> tuple[set, dict]:
+    """The published dates and validated row counts for one ticker.
+
+    Count-only counterpart of :func:`normalize_frames`: same date parsing,
+    duplicate collapse, cores-only union, sentinel masking, clipping and
+    :func:`~engine.data.validate.validate_daily` gate, but materializes only the
+    columns that gate reads. Returns ``(present, counts)``: every normalized
+    date (including dates whose rows all fail validation, which stay present
+    with a zero count) and the per-date count of validated rows.
+    """
+    from engine.data.validate import validate_daily
+
+    if "tradeDate" not in src.columns:
+        return set(), {}
+
+    out = pd.DataFrame(
+        {
+            "ticker": ticker,
+            "date": pd.to_datetime(src["tradeDate"], errors="coerce"),
+        }
+    )
+    for raw_key in _COUNT_FIELDS:
+        col, mult = SUMMARY_FIELDS[raw_key]
+        if raw_key in src.columns:
+            out[col] = mask_sentinels(src[raw_key]) * mult
+        else:
+            out[col] = np.nan
+    out = out.dropna(subset=["date"]).drop_duplicates("date", keep="last")
+
+    # Cores-only dates join the grid exactly as in normalize_frames: the union
+    # keeps the later row and needs a usable market cap.
+    candidate = cores_frame()
+    if candidate is not None and {"tradeDate", "mktCap"} <= set(candidate.columns):
+        candidate = candidate.assign(
+            date=pd.to_datetime(candidate["tradeDate"], errors="coerce")
+        )
+        candidate = candidate.dropna(subset=["date"]).drop_duplicates("date", keep="last")
+        candidate = candidate.reset_index(drop=True)
+        mcap = mcap_to_usd(candidate["mktCap"], candidate["date"])
+        usable = pd.Series(mcap, index=candidate.index).notna()
+        extra = candidate.loc[usable, ["date"]]
+        extra = extra[~extra["date"].isin(set(out["date"]))]
+        if len(extra):
+            out = pd.concat([out, extra.assign(ticker=ticker)], ignore_index=True)
+            out = out.sort_values("date").reset_index(drop=True)
+
+    out, _ = clip_implausible(out)
+    implied = pd.to_numeric(out.get("implied_move"), errors="coerce")
+    sentinel = implied.notna() & (implied <= 0)
+    if sentinel.any():
+        out.loc[sentinel, "implied_move"] = np.nan
+
+    present = set(out["date"])
+    clean, _ = validate_daily(out)
+    return present, clean.groupby("date").size().to_dict()
 
 
 def iter_normalized(

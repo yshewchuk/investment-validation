@@ -187,6 +187,99 @@ def test_latest_fetched_cores_snapshot_sets_market_cap(tmp_path, monkeypatch):
     assert frame["mcap_usd"].iloc[0] == pytest.approx(expected)
 
 
+def test_fetch_index_is_compact_and_keeps_row_content_and_fetch_order(
+    tmp_path, monkeypatch
+):
+    """The retained index is columnar, but expands to the original rows."""
+    from engine import paths
+
+    root = tmp_path / "fetch"
+    monkeypatch.setattr(paths, "RAW_FETCH", root)
+    older_rows = [
+        {
+            "ticker": "AAA",
+            "tradeDate": "2024-01-02",
+            "stockPrice": 20.0,
+            "rVol30": 0.2,
+        },
+        {"ticker": "AAA", "tradeDate": "2024-01-03", "stockPrice": 21.0},
+    ]
+    newer_rows = [{"ticker": "AAA", "tradeDate": "2024-01-02", "stockPrice": 10.0}]
+    # The keys sort opposite to fetch time: fetch time, not the key, sets order.
+    _write_market_wide(
+        root,
+        "zz" + "0" * 62,
+        fetched_at="2026-09-01T12:00:00+00:00",
+        rows=older_rows,
+    )
+    _write_market_wide(
+        root,
+        "aa" + "1" * 62,
+        fetched_at="2026-09-02T12:00:00+00:00",
+        rows=newer_rows,
+    )
+
+    n_daily.fetch_daily_index.cache_clear()
+    try:
+        index = n_daily.fetch_daily_index()
+        summaries = index["AAA"]["summaries"]
+        assert not isinstance(summaries, list)
+        assert list(summaries) == older_rows + newer_rows
+    finally:
+        n_daily.fetch_daily_index.cache_clear()
+
+
+def test_compact_index_preserves_daily_normalization_and_count_behavior(
+    tmp_path, monkeypatch
+):
+    """Rows expanded from the compact index feed both daily consumers unchanged."""
+    from engine import paths
+
+    root = tmp_path / "fetch"
+    monkeypatch.setattr(paths, "RAW_FETCH", root)
+    summaries = [
+        {**_summary_rows(tradeDate="2024-03-01", stockPrice=10.0), "ticker": "AAA"},
+        {**_summary_rows(tradeDate="2024-03-01", stockPrice=20.0), "ticker": "AAA"},
+        {**_summary_rows(tradeDate="2024-03-02", stockPrice=0.0), "ticker": "AAA"},
+    ]
+    cores = [{"ticker": "AAA", "tradeDate": "2024-03-05", "mktCap": 1000.0}]
+    _write_market_wide(
+        root,
+        "aa" + "0" * 62,
+        fetched_at="2026-09-02T12:00:00+00:00",
+        trade_date="2024-03-01",
+        rows=summaries,
+    )
+    _write_market_wide(
+        root,
+        "bb" + "1" * 62,
+        fetched_at="2026-09-02T12:00:00+00:00",
+        trade_date="2024-03-05",
+        rows=cores,
+        endpoint="hist/cores",
+    )
+    absent = tmp_path / "absent"
+
+    n_daily.fetch_daily_index.cache_clear()
+    try:
+        src = pd.DataFrame(n_daily._rows_for("AAA", "summaries", absent))
+        core = pd.DataFrame(n_daily._rows_for("AAA", "cores", absent))
+        frame, _ = n_daily.normalize_ticker(
+            "AAA", summaries_dir=absent, cores_dir=absent
+        )
+        expected = _expected_dates_and_counts("AAA", src, core)
+        counted = n_daily.count_daily_dates("AAA", src, lambda: core)
+    finally:
+        n_daily.fetch_daily_index.cache_clear()
+
+    assert list(src["stockPrice"]) == [10.0, 20.0, 0.0]
+    assert frame.loc[frame["date"] == pd.Timestamp("2024-03-01"), "spot"].iloc[0] == (
+        pytest.approx(20.0)
+    )
+    assert pd.Timestamp("2024-03-05") in expected[0]
+    assert counted == expected
+
+
 def test_low_date_refuses_before_writer_and_preserves_prior_table(tmp_root, monkeypatch):
     prior = pd.DataFrame(
         {
@@ -698,3 +791,94 @@ def test_preflight_skips_a_lone_date_with_no_neighbour(monkeypatch):
     monkeypatch.setattr(rebuild, "_market_wide_snapshot_dates", lambda: [])
 
     assert rebuild._preflight_daily_completeness(["T00"], None) is None
+
+
+def _expected_dates_and_counts(ticker, src, cores):
+    frame, _ = n_daily.normalize_frames(
+        ticker, src.copy(), lambda: cores.copy() if cores is not None else None
+    )
+    if frame.empty:
+        return set(), {}
+    present = {pd.Timestamp(day) for day in frame["date"].dropna().unique()}
+    clean, _ = validate_daily(frame)
+    counts = {
+        pd.Timestamp(day): int(n)
+        for day, n in clean.groupby("date").size().items()
+    }
+    return present, counts
+
+
+def _summary_rows(**overrides):
+    row = {
+        "tradeDate": "2024-03-01",
+        "stockPrice": 100.0,
+        "iv30d": 0.3,
+        "impliedMove": 0.05,
+        "rVol30": 0.2,
+    }
+    row.update(overrides)
+    return row
+
+
+def test_count_daily_dates_matches_normalized_validated_output():
+    src = pd.DataFrame(
+        [
+            _summary_rows(tradeDate="2024-03-01", stockPrice=10.0),
+            # Duplicate trade date: keep="last" decides both value and validity.
+            _summary_rows(tradeDate="2024-03-01", stockPrice=20.0),
+            # A zero spot survives clipping but fails validation: date stays
+            # present with no validated row.
+            _summary_rows(tradeDate="2024-03-02", stockPrice=0.0),
+            # Malformed dates are dropped before the date set is taken.
+            _summary_rows(tradeDate="not-a-date", stockPrice=10.0),
+            # FLT_MAX is a missing sentinel, not an invalid price.
+            _summary_rows(tradeDate="2024-03-03", stockPrice=1e30),
+            # A negative IV is clipped to NaN, which is valid, not rejected.
+            _summary_rows(tradeDate="2024-03-04", iv30d=-0.1),
+        ]
+    )
+    cores = pd.DataFrame(
+        [
+            # Cores-only date with a usable market cap.
+            {"tradeDate": "2024-03-05", "mktCap": 1000.0},
+            # A zero market cap is not usable, so this date does not join.
+            {"tradeDate": "2024-03-06", "mktCap": 0.0},
+            # Keep-last: the later invalid market cap removes the date.
+            {"tradeDate": "2024-03-07", "mktCap": 1000.0},
+            {"tradeDate": "2024-03-07", "mktCap": None},
+            # Already present from summaries, so it is not a cores-only date.
+            {"tradeDate": "2024-03-01", "mktCap": 1000.0},
+        ]
+    )
+
+    expected = _expected_dates_and_counts("AAA", src, cores)
+    assert n_daily.count_daily_dates("AAA", src, lambda: cores.copy()) == expected
+    present, counts = expected
+    assert pd.Timestamp("2024-03-01") in present
+    assert pd.Timestamp("2024-03-02") in present
+    assert pd.Timestamp("2024-03-03") in present
+    assert pd.Timestamp("2024-03-04") in present
+    assert pd.Timestamp("2024-03-05") in present
+    assert pd.Timestamp("2024-03-06") not in present
+    assert pd.Timestamp("2024-03-07") not in present
+    assert counts.get(pd.Timestamp("2024-03-02"), 0) == 0
+
+
+def test_count_daily_dates_ignores_cores_without_market_cap():
+    src = pd.DataFrame([_summary_rows(tradeDate="2024-03-01")])
+    cores = pd.DataFrame([{"tradeDate": "2024-03-02"}])
+
+    expected = _expected_dates_and_counts("AAA", src, cores)
+    assert n_daily.count_daily_dates("AAA", src, lambda: cores.copy()) == expected
+    assert expected[0] == {pd.Timestamp("2024-03-01")}
+
+
+def test_count_daily_dates_handles_empty_and_malformed_summaries():
+    empty = pd.DataFrame(columns=["tradeDate", "stockPrice"])
+    assert n_daily.count_daily_dates("AAA", empty, lambda: None) == (set(), {})
+
+    no_trade_date = pd.DataFrame([{"stockPrice": 10.0}])
+    assert n_daily.count_daily_dates("AAA", no_trade_date, lambda: None) == (set(), {})
+
+    all_bad = pd.DataFrame([_summary_rows(tradeDate="not-a-date")])
+    assert n_daily.count_daily_dates("AAA", all_bad, lambda: None) == (set(), {})

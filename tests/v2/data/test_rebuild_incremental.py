@@ -349,3 +349,23 @@ def test_incremental_refusal_covers_cached_daily_preflight(world, monkeypatch):
     assert excinfo.value.date == "2024-01-05"
     assert excinfo.value.count == 2
     assert called == []
+
+
+def test_incremental_preflight_counts_without_a_second_normalization(world, monkeypatch):
+    """A warm incremental run fully normalizes each ticker only in the build pass."""
+    from engine.data import rebuild
+    from engine.data.normalize import n_daily
+
+    _incr(world)
+    calls = []
+    real = n_daily.normalize_frames
+
+    def counting(ticker, *args, **kwargs):
+        calls.append(ticker)
+        return real(ticker, *args, **kwargs)
+
+    monkeypatch.setattr(n_daily, "normalize_frames", counting)
+
+    rebuild.rebuild(tables=("daily",), incremental=True, finalize=False)
+
+    assert sorted(calls) == ["AAA", "BBB", "CCC"]
