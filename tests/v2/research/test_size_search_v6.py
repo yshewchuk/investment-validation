@@ -25,10 +25,11 @@ from tests.v2.research.test_magnitude_search_request_v6 import (
     PROFILES, V8_ADDITIONS, v6_request, v8_request)
 
 
-def _case(tmp_path, request, experiment_id):
-    days = ["2022-06-02", "2022-09-06", "2022-11-01", "2023-01-03", "2023-06-02", "2024-06-17"]
+def _case(tmp_path, request, experiment_id, *, days=None, values=None, labels_before="2025-01-01"):
+    days = days or ["2022-06-02", "2022-09-06", "2022-11-01", "2023-01-03", "2023-06-02", "2024-06-17"]
+    values = values or [2., 3., 4., 5., 6., 7.]
     generator = panel_data.__wrapped__(tmp_path, SimpleNamespace(param={
-        "days": days, "values": [2., 3., 4., 5., 6., 7.]}))
+        "days": days, "values": values}))
     data = next(generator)
     ids = [event["event_id"] for event in data.events]
     history_request = {**data.request, "limits": data.panel_request["limits"],
@@ -53,7 +54,7 @@ def _case(tmp_path, request, experiment_id):
     spec = prediction_spec(experiment_id=experiment_id, folds=("2024",),
                            runner="experiments/size_search.py")
     registration, spec = binding.prepare(data.repository, spec, request, panel_request,
-        scope="panel-source", training_start="2022-01-01", labels_before="2025-01-01")
+        scope="panel-source", training_start="2022-01-01", labels_before=labels_before)
     store = data.repository._store
     reserve_native_registration(data.conn, store, registration, spec)
     verify_native_registration(data.conn, store, registration)
@@ -77,6 +78,15 @@ def case(tmp_path):
 @pytest.fixture
 def v8_case(tmp_path):
     yield from _case(tmp_path, v8_request(V8_ADDITIONS[:1]), "synthetic-qualified-size-v8")
+
+
+@pytest.fixture
+def cutoff_case(tmp_path):
+    yield from _case(
+        tmp_path, v6_request(PROFILES[:1]), "synthetic-qualified-size-cutoff",
+        days=["2022-06-02", "2022-09-06", "2022-11-01", "2023-01-03",
+              "2023-06-02", "2024-06-12", "2024-06-17"],
+        values=[2., 3., 4., 5., 6., 5., 7.], labels_before="2024-06-19")
 
 
 
@@ -333,3 +343,67 @@ def test_v6_neural_selection_outer_and_report_replay(case, monkeypatch):
         assert run_search(*case.context, limits=case.request["limits"]["child"]) == report["search"]
         assert collect(*case.context) == report
     assert case.conn.total_changes == before
+
+
+def test_v6_outer_cutoff_event_is_excluded_before_targets(cutoff_case, monkeypatch):
+    from engine.v2.contracts import SnapshotRef
+    from engine.v2.research.magnitude_inputs import load_magnitude_targets
+    from experiments import magnitude_search_outer as outer
+    from experiments import magnitude_search_trials as search_trials
+    from experiments import size_search_binding as size_binding
+    from experiments.v2_magnitude_search_run import run_search
+
+    document = cutoff_case.registration.document
+    events = document["size_panel"]["context"]["target_events"]
+    cutoff_event = next(event for event in events if event["event_date"] == "2024-06-17")
+    retained_event = next(event for event in events if event["event_date"] == "2024-06-12")
+    cutoff_id, retained_id = cutoff_event["event_id"], retained_event["event_id"]
+    assert cutoff_event["label_end"] == "2024-06-18"
+    assert retained_event["label_end"] < "2024-06-19"
+    assert document["magnitude_execution"]["evaluation_labels_before"] == "2024-06-19"
+
+    stored = load_magnitude_targets(
+        cutoff_case.repository, from_document(SnapshotRef, document["snapshot"]),
+        as_of_month=document["holdouts"]["holdout_as_of_month"],
+        labels_before="2024-06-20", event_ids=[cutoff_id], omit_not_computed=True)
+    assert stored.loc[0, "target_available_on"] == "2024-06-19"
+
+    for group in cutoff_case.plan["folds"]:
+        for fold in (group["outer"], *group["inner"]):
+            assert cutoff_id not in fold["training_candidate_event_ids"]
+            assert cutoff_id not in fold["evaluation_event_ids"]
+    outer_fold = cutoff_case.plan["folds"][0]["outer"]
+    assert retained_id in outer_fold["evaluation_event_ids"]
+    assert {"event_id": cutoff_id, "reasons": ["label_available_at_or_after_cutoff"]} in (
+        outer_fold["evaluation_exclusions"])
+
+    seen = {"training": [], "evaluation": []}
+    real_training = size_binding.qualify_magnitude_training_targets
+
+    def training(*args, **kwargs):
+        rows = real_training(*args, **kwargs)
+        seen["training"].extend(rows["event_id"].tolist())
+        return rows
+
+    def evaluation(loader):
+        def load(*args, **kwargs):
+            rows = loader(*args, **kwargs)
+            seen["evaluation"].extend(rows["event_id"].tolist())
+            return rows
+        return load
+
+    monkeypatch.setattr(size_binding, "qualify_magnitude_training_targets", training)
+    monkeypatch.setattr(outer, "load_magnitude_targets",
+                        evaluation(outer.load_magnitude_targets))
+    monkeypatch.setattr(search_trials, "load_magnitude_targets",
+                        evaluation(search_trials.load_magnitude_targets))
+
+    result = run_search(*cutoff_case.context, limits=cutoff_case.request["limits"]["child"])
+    assert seen["training"] and seen["evaluation"]
+    assert cutoff_id not in seen["training"]
+    assert cutoff_id not in seen["evaluation"]
+    (fold,) = result["folds"]
+    scored = {row["event_id"] for row in fold["predictions"]}
+    assert cutoff_id not in scored
+    assert retained_id in scored
+    assert fold["event_count"] == 1

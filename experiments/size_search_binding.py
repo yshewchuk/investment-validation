@@ -3,7 +3,7 @@ import copy
 import json
 import sys
 import time
-from datetime import date
+from datetime import date, timedelta
 from hashlib import sha256
 from pathlib import Path
 
@@ -47,6 +47,18 @@ SCHEMA = "native_experiment_registration.v1.7"
 def _require(condition):
     if not condition:
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "qualified SIZE source/fold binding differs")
+
+
+def _available_before(label_end, cutoff):
+    return (date.fromisoformat(label_end) + timedelta(days=1)).isoformat() < cutoff
+
+
+def _label_cutoff_reason(label_end, cutoff):
+    if label_end >= cutoff:
+        return "label_end_at_or_after_cutoff"
+    if not _available_before(label_end, cutoff):
+        return "label_available_at_or_after_cutoff"
+    return None
 
 
 def _panel_columns(schema_version, model_columns):
@@ -206,9 +218,22 @@ def _folds(binding, request, plan_schema=None):
     for group in folds:
         for fold in [group["outer"], *group["inner"]]:
             is_inner = any(fold is inner for inner in group["inner"])
-            fold["training_candidate_event_ids"] = [e for e in fold["training_candidate_event_ids"]
-                if events[e]["label_end"] < fold["training_labels_before"]
-                and not hit(e)]
+            retained_training = []
+            training_exclusions = []
+            for e in fold["training_candidate_event_ids"]:
+                reasons = []
+                cutoff_reason = _label_cutoff_reason(events[e]["label_end"], fold["training_labels_before"])
+                if cutoff_reason:
+                    reasons.append(cutoff_reason)
+                if hit(e):
+                    reasons.append("embargo_ticker")
+                if reasons:
+                    training_exclusions.append({"event_id": e, "reasons": reasons})
+                else:
+                    retained_training.append(e)
+            fold["training_candidate_event_ids"] = retained_training
+            if training_exclusions:
+                fold["training_exclusions"] = training_exclusions
             _require(bool(fold["training_candidate_event_ids"]))
             retained = [e for e in fold["evaluation_event_ids"] if not hit(e)]
             if embargoed_tickers and not retained:
@@ -220,15 +245,16 @@ def _folds(binding, request, plan_schema=None):
                 reasons = []
                 if hit(eid):
                     reasons.append("embargo_ticker")
-                if events[eid]["label_end"] >= cutoff:
-                    reasons.append("label_end_at_or_after_cutoff")
+                cutoff_reason = _label_cutoff_reason(events[eid]["label_end"], cutoff)
+                if cutoff_reason:
+                    reasons.append(cutoff_reason)
                 if reasons:
                     excluded.append({"event_id": eid, "reasons": reasons})
-            fold["evaluation_event_ids"] = [e for e in retained if events[e]["label_end"] < cutoff]
+            fold["evaluation_event_ids"] = [e for e in retained if _available_before(events[e]["label_end"], cutoff)]
             if excluded:
                 fold["evaluation_exclusions"] = excluded
             # Keep the strict cutoff invariant explicit at the filtered binding boundary.
-            _require(all(events[e]["label_end"] < cutoff for e in fold["evaluation_event_ids"]))
+            _require(all(_available_before(events[e]["label_end"], cutoff) for e in fold["evaluation_event_ids"]))
             if not fold["evaluation_event_ids"]:
                 raise fail("INVALID_EXPERIMENT_SPEC", "SIZE fold has no eligible evaluation events")
     return folds
@@ -346,7 +372,7 @@ def fold_inputs(repository, binding, fold, *, plan=None):
     panel = _stored_panel(repository, source, binding, panel_columns)
     participants = set(fold["training_candidate_event_ids"] + fold["evaluation_event_ids"])
     events = {e["event_id"]: e for e in panel["context"]["target_events"]}
-    _require(participants <= set(events) and all(events[e]["label_end"] < fold["training_labels_before"]
+    _require(participants <= set(events) and all(_available_before(events[e]["label_end"], fold["training_labels_before"])
              for e in fold["training_candidate_event_ids"]))
     print(f"[stage] read_panel done in {time.monotonic() - started:.1f}s", file=sys.stderr)
     month = binding["holdouts"]["holdout_as_of_month"]
