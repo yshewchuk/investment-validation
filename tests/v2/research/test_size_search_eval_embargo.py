@@ -110,3 +110,34 @@ def test_fold_binding_refuses_when_cutoff_removes_every_evaluation(monkeypatch):
 
     assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
     assert caught.value.problem.message == "SIZE fold has no eligible evaluation events"
+
+
+def test_shared_inner_uses_conservative_cutoff_for_repeated_year(monkeypatch):
+    source = _binding()
+    source["size_panel"]["context"]["target_events"].extend([
+        {"event_id": "early_inner", "ticker": "OTHER", "label_end": "2023-01-01"},
+        {"event_id": "between_cutoffs", "ticker": "OTHER", "label_end": "2024-06-01"},
+    ])
+
+    def owner(cutoff):
+        outer = _fold(["evaluation"])
+        outer["training_labels_before"] = cutoff
+        inner = {**_fold(["early_inner", "between_cutoffs"]),
+                 "year": "2023", "evaluation_labels_before": cutoff}
+        return {"outer": outer, "inner": [inner]}
+
+    nested = [owner("2024-01-01"), owner("2025-01-01")]
+    monkeypatch.setattr(planner, "_nested", lambda *_args: deepcopy(nested))
+
+    folds = binding._folds(source, {})
+
+    assert [group["inner"][0]["evaluation_labels_before"] for group in folds] == [
+        "2024-01-01", "2025-01-01"]
+    for group in folds:
+        inner = group["inner"][0]
+        assert inner["evaluation_event_ids"] == ["early_inner"]
+        assert inner["evaluation_exclusions"] == [
+            {"event_id": "between_cutoffs", "reasons": ["label_end_at_or_after_cutoff"]}
+        ]
+    assert folds[0]["inner"][0]["evaluation_event_ids"] == folds[1]["inner"][0]["evaluation_event_ids"]
+    binding._shared_inner(folds)

@@ -211,18 +211,9 @@ def test_shared_inner_refuses_modified_shared_membership():
         _shared_inner(plan["folds"])
 
 
-@pytest.mark.parametrize(("request_version", "expected"), [
-    ("magnitude_search_request.v2", PLAN_V3),
-    ("magnitude_search_request.v3", PLAN_V2),
-    ("magnitude_search_request.v8", PLAN_V3),
-])
-def test_default_plan_schema_for_request_matches_legacy_dispatch(request_version, expected):
-    from experiments import size_search_binding as binding
-
-    assert binding._plan_schema_for_request({"schema_version": request_version}) == expected
-
-
-@pytest.mark.parametrize("request_version", ["magnitude_search_request.v2", "magnitude_search_request.v8"])
+@pytest.mark.parametrize("request_version", [
+    "magnitude_search_request.v2", "magnitude_search_request.v3",
+    "magnitude_search_request.v8", "magnitude_search_request.v9"])
 def test_prepare_checks_shared_inner_before_registration_publication(monkeypatch, request_version):
     from engine.v2.research import magnitude_panel_qualified_table
     from experiments import size_search_binding as binding
@@ -277,13 +268,22 @@ def test_prepare_checks_shared_inner_before_registration_publication(monkeypatch
                         {"context": context, "feature_snapshot": {}})
     monkeypatch.setattr(binding, "_preview_payload", lambda *_args: b"{}")
     monkeypatch.setattr(binding, "_folds", lambda *_args: mismatched_folds)
-    monkeypatch.setattr(binding, "pack_size_registration",
-                        lambda *_args, **_kwargs: pytest.fail("published before shared-inner validation"))
 
-    with pytest.raises(OpsError, match="repeated inner-year folds differ") as caught:
-        binding.prepare(None, None, request, panel_request, scope="scope",
-                        training_start="2020-01-01", labels_before="2025-01-01")
-    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    def pack(*_args, **_kwargs):
+        pytest.fail("published before shared-inner validation")
+    monkeypatch.setattr(binding, "pack_size_registration", pack)
+
+    def prepare(**kwargs):
+        return binding.prepare(None, None, request, panel_request, scope="scope",
+                               training_start="2020-01-01", labels_before="2025-01-01", **kwargs)
+
+    if request_version == "magnitude_search_request.v3":
+        registration, _ = prepare(publish_artifacts=False)
+        assert registration.run_id == "run"
+    else:
+        with pytest.raises(OpsError, match="repeated inner-year folds differ") as caught:
+            prepare()
+        assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
 
 
 def test_shared_inner_allows_cutoff_difference_when_membership_matches(monkeypatch):

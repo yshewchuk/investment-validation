@@ -36,6 +36,12 @@ _AXES = {"history_ridge": {"alpha"}, "history_hgb": {
 _INTEGERS = {"max_iter", "max_leaf_nodes", "min_samples_leaf"}
 
 
+def plan_schema_for_request(request):
+    """Return the default plan schema for a supported request version."""
+    version = request.get("schema_version") if isinstance(request, dict) else None
+    return PLAN_V2 if version == "magnitude_search_request.v3" else PLAN_V3
+
+
 def _request(request):
     """Admit the complete bounded Cartesian request before any artifact access."""
     try:
@@ -184,7 +190,7 @@ def _prepare(conn, store, registration, request, *, plan_schema=None):
         raise fail("INVALID_EXPERIMENT_SPEC", "search requires explicit valid axes, inner years and count caps")
     if qualified:
         from experiments.size_search_binding import prepare_plan
-        default_schema = PLAN_V2 if request_version == "magnitude_search_request.v3" else PLAN_V3
+        default_schema = plan_schema_for_request(request)
         return prepare_plan(conn, store, registration, request, plan_schema=plan_schema or default_schema)
     request, count = _request(request)
     verify_native_registration(conn, store, registration)

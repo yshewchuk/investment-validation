@@ -111,7 +111,7 @@ def prepare(repository, spec, request, panel_request, *, scope, training_start, 
             publish_artifacts=True):
     """Prepare a new development anchor; caller explicitly reserves it separately."""
     from engine.v2.research.magnitude_panel_qualified_table import recipe
-    from experiments.magnitude_search_plan import PLAN_V3
+    from experiments.magnitude_search_plan import PLAN_V3, plan_schema_for_request
     sources = _sources()
     panel_request = validate_panel_request(panel_request)
     schedule = compile_request(request, horizons=tuple(h for h in (5, 3, 1) if h in panel_request["horizons"]))
@@ -144,7 +144,7 @@ def prepare(repository, spec, request, panel_request, *, scope, training_start, 
             details={"registration_bytes": len(preview), "max_registration_bytes": MAX_NATIVE_EVIDENCE_BYTES})
     folds = _folds(binding, schedule["request"])
     # Legacy request v3 uses PLAN_V2; all other supported request versions use shared PLAN_V3 folds.
-    if _plan_schema_for_request(schedule["request"]) == PLAN_V3:
+    if plan_schema_for_request(schedule["request"]) == PLAN_V3:
         _shared_inner(folds)
     if not publish_artifacts:
         return NativeRegistration(base.run_id, b"", binding), spec
@@ -184,7 +184,7 @@ def verify_installation(binding):
 
 
 def _folds(binding, request):
-    from experiments.magnitude_search_plan import _nested
+    from experiments.magnitude_search_plan import PLAN_V3, _nested, plan_schema_for_request
     context = binding["size_panel"]["context"]
     events = {e["event_id"]: e for e in context["target_events"]}
     full_start, full_end = date.min.isoformat(), date.max.isoformat()
@@ -193,8 +193,18 @@ def _folds(binding, request):
     def hit(event_id):
         return bool(embargoed_tickers) and events[event_id]["ticker"] in embargoed_tickers
     folds = _nested(binding, request)
+    default_cutoff = binding["magnitude_execution"]["evaluation_labels_before"]
+    plan_v3 = plan_schema_for_request(request) == PLAN_V3
+    shared_cutoffs = {}
+    if plan_v3:
+        for group in folds:
+            for inner in group["inner"]:
+                cutoff = inner.get("evaluation_labels_before", default_cutoff)
+                year = inner["year"]
+                shared_cutoffs[year] = min(shared_cutoffs.get(year, cutoff), cutoff)
     for group in folds:
         for fold in [group["outer"], *group["inner"]]:
+            is_inner = any(fold is inner for inner in group["inner"])
             fold["training_candidate_event_ids"] = [e for e in fold["training_candidate_event_ids"]
                 if events[e]["label_end"] < fold["training_labels_before"]
                 and not hit(e)]
@@ -202,7 +212,8 @@ def _folds(binding, request):
             retained = [e for e in fold["evaluation_event_ids"] if not hit(e)]
             if embargoed_tickers and not retained:
                 raise fail("INVALID_EXPERIMENT_SPEC", "ambiguous-random ticker embargo removed every fold evaluation event")
-            cutoff = fold.get("evaluation_labels_before", binding["magnitude_execution"]["evaluation_labels_before"])
+            cutoff = (shared_cutoffs[fold["year"]] if plan_v3 and is_inner
+                      else fold.get("evaluation_labels_before", default_cutoff))
             excluded = []
             for eid in fold["evaluation_event_ids"]:
                 reasons = []
@@ -234,18 +245,12 @@ def _shared_inner(folds):
                     "repeated inner-year folds differ after eligibility filtering")
 
 
-def _plan_schema_for_request(request):
-    from experiments.magnitude_search_plan import PLAN_V2, PLAN_V3
-    request_version = request.get("schema_version") if isinstance(request, dict) else None
-    return PLAN_V2 if request_version == "magnitude_search_request.v3" else PLAN_V3
-
-
 def prepare_plan(conn, store, registration, request, *, plan_schema=None):
     """Expand the fixed dictionary grid into fully bound executable recipes."""
-    from experiments.magnitude_search_plan import PLAN_V2, PLAN_V3
+    from experiments.magnitude_search_plan import PLAN_V2, PLAN_V3, plan_schema_for_request
     request_version = request.get("schema_version") if isinstance(request, dict) else None
     if plan_schema is None:
-        plan_schema = _plan_schema_for_request(request)
+        plan_schema = plan_schema_for_request(request)
     if request_version == "magnitude_search_request.v3" and plan_schema != PLAN_V2:
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search plan schema does not match request version")
     if plan_schema not in (PLAN_V2, PLAN_V3):
