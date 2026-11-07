@@ -760,7 +760,7 @@ The original full-row `read_stored` API and its returned envelope remain unchang
 
 `eligibility_policy.eligibility_policy` declares an explicit supported version and
 nonnegative integer calendar-day width. `plan_eligibility` is metadata-only and
-opt-in. The policy identity (including its `preserve_membership` label, kept for replay) and plans without an ambiguous random event are unchanged; with one, evaluation IDs on that ticker are filtered. Eligible-history planning passes no evaluation IDs and refuses development targets on such a ticker, so only the SIZE fold binder's defensive check filters fold IDs. It uses `experiment_population.canonical_events`
+opt-in. The policy identity (including its `preserve_membership` label, kept for replay) and plans without an ambiguous random event are unchanged; with one, evaluation IDs on that ticker are filtered by the policy. The policy does not apply the strict label cutoff; the SIZE fold binder retains only fold IDs surviving its ticker embargo and cutoff and records exclusions. Eligible-history planning passes no evaluation IDs and refuses development targets on such a ticker, so only the SIZE fold binder's defensive check filters fold IDs. It uses `experiment_population.canonical_events`
 for exact committed-snapshot admission and the six-column metadata projection and `experiment_trades.classify_events`
 for detached membership/structural ambiguity labels and caller-pinned context.
 Shared `snapshot_inputs` validates reference shape and exact committed identity;
@@ -775,7 +775,7 @@ No calendar guessing, outcome/feature decoding, write, registration or fit occur
 Random-held windows merge per ticker. Inclusive event/label or forecast-point overlap
 excludes a whole development group; shared random, rolling and ambiguous labels do too.
 The plan ID binds groups/policy/metadata, windows, retained IDs, development reasons,
-coverage, ambiguous IDs and filtered evaluation IDs/reasons. Inputs are detached.
+coverage, ambiguous IDs and ticker-filtered evaluation IDs/reasons; SIZE fold binding also applies its strict label cutoff and records exclusions. Inputs are detached.
 There are no retries, persistence, cache or partial results. Bounded progress and stage
 timing/RSS go to stderr; refusals report only native error codes, not row values.
 
@@ -789,7 +789,7 @@ timing/RSS go to stderr; refusals report only native error codes, not row values
 | Invalid as-of month, unknown group/evaluation identity or colliding canonical population IDs | `HOLDOUT_ACCESS_DENIED` |
 | Structurally ambiguous random event with usable identity | Keep membership unchanged, record its ID and add an inclusive `date.min`–`date.max` ticker window; exclude matching development groups and evaluation IDs, with `embargo_ticker` as the evaluation reason |
 | Ordinary random-event window arithmetic exceeds the supported date range | `HOLDOUT_ACCESS_DENIED` |
-| Evaluation IDs matching an ambiguous-random ticker embargo | Excluded with `embargo_ticker`; all other IDs remain in `evaluation_event_ids` |
+| Evaluation IDs matching an ambiguous-random ticker embargo | Excluded with `embargo_ticker` from the classifier plan; all other IDs remain in its `evaluation_event_ids`. The separate SIZE fold binder then retains only IDs strictly before its evaluation cutoff and records cutoff exclusions. |
 | Valid protected/overlapping development group | Excluded whole event with development reasons |
 
 This is neither a physical-read capability nor a statistical isolation guarantee.
