@@ -1,6 +1,6 @@
 """Collect verified selected-outer and comparator journals with report-only scalar calibration.
 
-This module fits one report scalar and performs no model fits.
+This module fits one report-only scalar per outer year and performs no model fits.
 """
 import math
 import sys
