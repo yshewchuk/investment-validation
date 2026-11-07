@@ -188,6 +188,13 @@ def test_fit_implied_scale_still_skips_unavailable_or_invalid_labels():
     assert result == {"scale": 2.0, "fit_n": 1}
 
 
+@pytest.mark.parametrize("horizon", [True, 1.0])
+def test_fit_implied_scale_refuses_malformed_feature_horizon(horizon):
+    features = [{"event_id": "e", "horizon_sessions": horizon, "implied_move": 2.0}]
+    with pytest.raises(ValueError, match="invalid feature horizon"):
+        report.fit_implied_scale(["e"], {"e": 4.0}, features, [1])
+
+
 @pytest.mark.parametrize("horizons", [(), [], (True,), (1.0,), (2,), (1, 1)])
 def test_fit_implied_scale_refuses_invalid_horizon_declarations(horizons):
     features = [{"event_id": "e", "horizon_sessions": 1, "implied_move": 2.0}]

@@ -23,7 +23,12 @@ def fit_implied_scale(training_event_ids, labels, features, horizons):
     event_ids, leads, pairs = set(training_event_ids), set(validated_horizons(horizons)), []
     for row in features:
         event_id = row["event_id"]
-        if event_id not in event_ids or row["horizon_sessions"] not in leads:
+        if event_id not in event_ids:
+            continue
+        horizon = row["horizon_sessions"]
+        if type(horizon) is not int:
+            raise ValueError("invalid feature horizon")
+        if horizon not in leads:
             continue
         x, y = row["implied_move"], labels.get(event_id)
         if x is None:
