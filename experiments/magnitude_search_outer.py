@@ -253,6 +253,8 @@ def _execute_admitted(conn, store, repository, registration, plan, fold, selecti
     execution = execution_for_candidate(binding, candidate)
     regression = execution.get("schema_version") == "regression_candidate_execution.v1"
     if replay_only or saved("terminal") is not None:
+        if input_callback is None:
+            return _replay(saved, store, started, fold, plan, execution, binding)
         return _replay(saved, store, started, fold, plan, execution, binding, input_callback=input_callback)
     forbid_fitting("execute_outer_fold")
     forbid_legacy_fitting("execute_outer_fold")
@@ -310,6 +312,8 @@ def _execute_admitted(conn, store, repository, registration, plan, fold, selecti
     _validate_targets(inputs, validation, fold)
     append("validation", validation)
     append("terminal", _result(started, inputs, inputs_id, receipt, forecasts, validation, fold, plan["horizons"], plan.get("target")))
+    if input_callback is None:
+        return _replay(saved, store, started, fold, plan, execution, binding)
     return _replay(saved, store, started, fold, plan, execution, binding, input_callback=input_callback)
 
 
