@@ -62,7 +62,7 @@ def _read_document(path):
 
 
 def main(argv=None):
-    """Local metadata-artifact lifecycle; no repository reads or experiment attempts."""
+    """Metadata planning/verification reads bounded label bounds from the repository; no experiment attempts."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("prepare", "verify"))
     for name in ("spec", "catalog", "store-root"):

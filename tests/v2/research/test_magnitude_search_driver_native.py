@@ -82,7 +82,7 @@ def test_fresh_registered_native_driver_executes_and_replays_read_only(source, t
     assert catalog_rows(source.conn) == before
     original_scan = Repository.scan
     def bounds_scan(repository, query, *, table_name, max_object_bytes=None):
-        if table_name != "computed_move_bounds" or max_object_bytes is None:
+        if table_name != "computed_move_bounds" or max_object_bytes != 1 << 20:
             forbidden()
         return original_scan(repository, query, table_name=table_name,
                              max_object_bytes=max_object_bytes)

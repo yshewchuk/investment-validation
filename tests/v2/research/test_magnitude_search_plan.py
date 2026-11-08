@@ -447,10 +447,12 @@ def test_plan_bounds_admission_is_bounded_before_resolve_and_scan(source, monkey
     assert kinds[0] == "admit"
     assert kinds.index("admit") < kinds.index("resolve") < kinds.index("scan")
     assert calls[0][1] == BOUNDS_TABLE
-    assert calls[0][2] == search._BOUNDS_CATALOG_LIMITS
+    assert calls[0][2] == {"max_catalog_tables": 256, "max_catalog_fragments": 65_536,
+        "max_catalog_bytes": 67_108_864, "max_fragments": 65_536, "max_partitions": 65_536}
     assert all(type(value) is int and value > 0 for value in calls[0][2].values())
     assert calls[0][3] == from_document(SnapshotRef, source.registration.document["snapshot"])
-    assert all(call[2] is not None for call in calls if call[0] == "scan")
+    scans = [call for call in calls if call[0] == "scan"]
+    assert scans and all(call[2] == 1 << 20 for call in scans)
     planned = {}
     for event in source.registration.document["magnitude_plan"]["events"]:
         planned.setdefault(event["ticker"], set()).add(event["event_date"])

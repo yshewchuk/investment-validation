@@ -363,9 +363,9 @@ its planner admits the bounded catalog through the public
 `bounded_snapshot.open_bounded_snapshot` API before table access, so missing rows become
 sealed `label_bounds_missing` exclusions, present
 null rows become sealed `label_bounds_unavailable` exclusions, and malformed
-non-null dates refuse identity. Consuming trial/report code reads these sealed
-exclusion lists, while `read_search_plan` reconstructs and revalidates the plan
-(and therefore repeats the bounded bounds admission) instead of re-deriving folds.
+non-null dates refuse identity. Trial/report consumers use the plan's filtered
+`evaluation_event_ids`, while `read_search_plan` reconstructs folds and revalidates
+the sealed plan (including availability), repeating the bounded bounds admission.
 A fold whose strict exclusions remove every evaluation event refuses before plan publication.
 `experiments/magnitude_search_evidence.py` consumes stored-history reads, target
 preflight, training qualification and `magnitude_inputs.magnitude_recipe` for shared inner/outer evidence admission.
