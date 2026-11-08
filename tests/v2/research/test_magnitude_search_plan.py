@@ -14,7 +14,8 @@ from pathlib import Path
 import pyarrow as pa
 import pytest
 
-from engine.v2.contracts import ArtifactRef, KeyPredicate
+from engine.v2.contracts import ArtifactRef, KeyPredicate, SnapshotRef
+from engine.v2.data import bounded_snapshot
 from engine.v2.data.computed_move_bounds import CONTRACT as BOUNDS_CONTRACT
 from engine.v2.data.computed_move_bounds import TABLE as BOUNDS_TABLE
 from engine.v2.data.errors import DataError
@@ -425,29 +426,30 @@ def test_filter_evaluation_reports_both_strict_cutoff_reasons():
 
 def test_plan_bounds_admission_is_bounded_before_resolve_and_scan(source, monkeypatch):
     calls = []
-    original_probe, original_resolve, original_scan = (
-        search.probe_catalog, Repository.resolve, Repository.scan)
-    def probe(conn, snapshot_id, table_name, limits):
-        calls.append(("probe", table_name, dict(limits)))
-        return original_probe(conn, snapshot_id, table_name, limits)
-    def resolve(repository, snapshot_id):
+    original_admit = bounded_snapshot.open_bounded_snapshot
+    original_resolve_full = bounded_snapshot.BoundedSnapshot.resolve_full
+    original_scan = Repository.scan
+    def admit(repository, snapshot, *, table_name, limits):
+        calls.append(("admit", table_name, dict(limits), snapshot))
+        return original_admit(repository, snapshot, table_name=table_name, limits=limits)
+    def resolve_full(session, snapshot_id):
         calls.append(("resolve", snapshot_id))
-        return original_resolve(repository, snapshot_id)
+        return original_resolve_full(session, snapshot_id)
     def scan(repository, query, *, table_name, max_object_bytes=None):
         calls.append(("scan", table_name, max_object_bytes, query))
         yield from original_scan(repository, query, table_name=table_name,
                                  max_object_bytes=max_object_bytes)
-    monkeypatch.setattr(search, "probe_catalog", probe)
-    monkeypatch.setattr(Repository, "resolve", resolve)
+    monkeypatch.setattr(bounded_snapshot, "open_bounded_snapshot", admit)
+    monkeypatch.setattr(bounded_snapshot.BoundedSnapshot, "resolve_full", resolve_full)
     monkeypatch.setattr(Repository, "scan", scan)
     sealed = search.seal_search_plan(source.conn, source.store, source.registration, _request())
     kinds = [call[0] for call in calls]
-    assert kinds[0] == "probe"
-    assert kinds.index("probe") < kinds.index("resolve") < kinds.index("scan")
+    assert kinds[0] == "admit"
+    assert kinds.index("admit") < kinds.index("resolve") < kinds.index("scan")
     assert calls[0][1] == BOUNDS_TABLE
-    assert set(calls[0][2]) == {"max_catalog_tables", "max_catalog_fragments",
-        "max_catalog_bytes", "max_fragments", "max_partitions"}
+    assert calls[0][2] == search._BOUNDS_CATALOG_LIMITS
     assert all(type(value) is int and value > 0 for value in calls[0][2].values())
+    assert calls[0][3] == from_document(SnapshotRef, source.registration.document["snapshot"])
     assert all(call[2] is not None for call in calls if call[0] == "scan")
     planned = {}
     for event in source.registration.document["magnitude_plan"]["events"]:
@@ -493,11 +495,11 @@ def test_absent_bounds_table_refuses_whole_plan_before_reads(tmp_path, monkeypat
 def test_incompatible_bounds_contract_refuses_whole_plan_before_reads(source, monkeypatch):
     stale = replace(BOUNDS_CONTRACT, contract_id="computed_move_bounds.stale")
 
-    def contract(repository, snapshot, table_name):
+    def contract(session, snapshot, table_name):
         assert table_name == BOUNDS_TABLE
         return stale
 
-    monkeypatch.setattr(Repository, "table_contract", contract)
+    monkeypatch.setattr(bounded_snapshot.BoundedSnapshot, "table_contract", contract)
     monkeypatch.setattr(Repository, "scan_population_bound", forbid_access)
     monkeypatch.setattr(Repository, "scan", forbid_access)
     with pytest.raises(OpsError) as caught:

@@ -359,12 +359,14 @@ the pure magnitude window and metadata-only planner to bind research registratio
 `experiments/magnitude_search_plan.py` consumes `magnitude_folds.annual_fold`
 to reconstruct outer metadata and plan nested folds with the same public rule.
 It owns label-bounds and strict-cutoff exclusions from native `computed_move_bounds`;
-its planner admits the catalog through a bounded all-table probe before resolving the
-snapshot, so missing rows become sealed `label_bounds_missing` exclusions, present
+its planner admits the bounded catalog through the public
+`bounded_snapshot.open_bounded_snapshot` API before table access, so missing rows become
+sealed `label_bounds_missing` exclusions, present
 null rows become sealed `label_bounds_unavailable` exclusions, and malformed
 non-null dates refuse identity. Consuming trial/report code reads these sealed
 exclusion lists, while `read_search_plan` reconstructs and revalidates the plan
 (and therefore repeats the bounded bounds admission) instead of re-deriving folds.
+A fold whose strict exclusions remove every evaluation event refuses before plan publication.
 `experiments/magnitude_search_evidence.py` consumes stored-history reads, target
 preflight, training qualification and `magnitude_inputs.magnitude_recipe` for shared inner/outer evidence admission.
 `experiments/magnitude_search_trials.py` and `experiments/magnitude_search_outer.py`

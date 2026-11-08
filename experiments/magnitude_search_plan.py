@@ -1,6 +1,6 @@
 """Research-only sealed nested-search metadata with bounded label-bounds admission.
 
-Planning reads only the anchored feature snapshot's planned bounds keys and
+Planning reads only the registration-pinned snapshot's planned bounds keys and
 publishes or verifies canonical plan bytes; it writes no ledger, outcome or
 catalog reservation.
 """
@@ -12,8 +12,8 @@ from datetime import date
 from pathlib import Path
 
 from engine.v2.contracts import ArtifactRef
-from engine.v2.contracts.data import DataQuery, KeyPredicate
-from engine.v2.data._bounded_catalog import probe_catalog
+from engine.v2.contracts.data import DataQuery, KeyPredicate, SnapshotRef
+from engine.v2.data import bounded_snapshot
 from engine.v2.data.computed_move_bounds import CONTRACT as BOUNDS_CONTRACT
 from engine.v2.data.computed_move_bounds import TABLE as BOUNDS_TABLE
 from engine.v2.data.errors import DataError, fail as data_fail
@@ -23,6 +23,7 @@ from engine.v2.foundation import (
     artifact_reference,
     canonical_json,
     content_hash,
+    from_document,
     to_document,
 )
 from engine.v2.ops.errors import OpsError, fail
@@ -162,23 +163,6 @@ def _label_end(value):
     return value
 
 
-def _admit_bounds_catalog(conn, snapshot_id):
-    """Bound all-table catalog membership and bytes before resolving any table."""
-    began = not conn.in_transaction
-    if began:
-        conn.execute("BEGIN")
-    try:
-        probe_catalog(conn, snapshot_id, BOUNDS_TABLE, _BOUNDS_CATALOG_LIMITS)
-    except DataError as error:
-        if error.code == "CONTRACT_MISMATCH" and error.problem.message == "catalog probe table unavailable":
-            raise data_fail("CONTRACT_MISMATCH",
-                            "planned label bounds require the native bounds contract") from None
-        raise
-    finally:
-        if began and conn.in_transaction:
-            conn.execute("ROLLBACK")
-
-
 def _label_bounds(conn, store, binding):
     """Read only planned event keys after validating the native bounds table/contract.
 
@@ -190,69 +174,80 @@ def _label_bounds(conn, store, binding):
     ``label_bounds_unavailable`` because the data contract finalizes that label
     as unavailable.
 
+    The bounds source is the registration-pinned ``binding["snapshot"]``, not
+    the separate feature snapshot id.
+
     ``computed_move_bounds`` declares ``(ticker, event_date)`` as its unique
     primary key and both columns filterable. Group the plan's events by ticker
     and query each ticker's exact planned dates with ``ticker eq`` and
     ``event_date in``; the unique key makes every returned row the planned row
     for that ticker/date, so cross-pairs and repeated session scans cannot
-    satisfy an unplanned key. Catalog membership and bytes are capped before
-    resolution, and each scan is bounded by its ``scan_population_bound``, the
-    contract's batch/result caps and the same decoded-object cap as native
-    magnitude outcome reads.
+    satisfy an unplanned key. Catalog membership and bytes are admitted through
+    the public ``bounded_snapshot.open_bounded_snapshot`` API under fixed caps
+    before table access, and each scan is bounded by its
+    ``scan_population_bound``, the contract's batch/result caps and the same
+    decoded-object cap as native magnitude outcome reads.
 
     ``_prepare`` admits only a registration whose validated magnitude plan has
     events, but an empty population still validates the table/contract: the
     empty ticker loop is safe and reads no bounds row.
     """
     events = binding["magnitude_plan"]["events"]
-    snapshot = binding["snapshot"]
+    snapshot = from_document(SnapshotRef, binding["snapshot"])
     days_by_ticker = {}
     for event in events:
         days_by_ticker.setdefault(event["ticker"], set()).add(event["event_date"])
     try:
         with stage("label bounds"):
             repository = Repository(conn, store, pin_snapshots=True)
-            snapshot_id = snapshot["snapshot_id"]
-            _admit_bounds_catalog(conn, snapshot_id)
-            resolved = repository.resolve(snapshot_id)
-            if (BOUNDS_TABLE not in resolved.table_versions
-                    or repository.table_contract(resolved, BOUNDS_TABLE) != BOUNDS_CONTRACT):
-                raise data_fail("CONTRACT_MISMATCH", "planned label bounds require the native bounds contract")
-            contract_ref = resolved.table_versions[BOUNDS_TABLE].table_contract_ref
-            found, empty_bounds = {}, 0
-            planned_tickers = sorted(days_by_ticker)
-            total = len(planned_tickers)
-            progress = Progress("label bounds tickers", total)
-            decision("label bounds", f"planned tickers={total} events={len(events)}")
-            for ticker in planned_tickers:
-                key_filter = (
-                    KeyPredicate(column="ticker", operator="eq", values=(ticker,)),
-                    KeyPredicate(column="event_date", operator="in",
-                                 values=tuple(sorted(days_by_ticker[ticker]))))
-                bound = repository.scan_population_bound(snapshot_id, table_name=BOUNDS_TABLE,
-                    table_contract_ref=contract_ref, key_filter=key_filter)
-                if not bound:
-                    empty_bounds += 1
-                else:
-                    request = DataQuery(snapshot_id=snapshot_id, table_contract_ref=contract_ref,
-                        columns=("ticker", "event_date", "post_close_date"),
-                        key_filter=key_filter, order_by=BOUNDS_CONTRACT.primary_key,
-                        max_batch_rows=min(bound, BOUNDS_CONTRACT.maximum_batch_rows), max_result_rows=bound)
-                    for batch in repository.scan(request, table_name=BOUNDS_TABLE,
-                                                 max_object_bytes=MAX_OUTCOME_OBJECT_BYTES):
-                        for row in batch.to_pylist():
-                            found[(row["ticker"], row["event_date"])] = _label_end(row["post_close_date"])
-                progress.tick()
-            missing_rows = sum(1 for event in events
-                               if (event["ticker"], event["event_date"]) not in found)
-            unavailable_rows = sum(1 for event in events
-                                   if (event["ticker"], event["event_date"]) in found
-                                   and found[(event["ticker"], event["event_date"])] is None)
-            decision("label bounds", f"planned tickers={total} empty_bounds={empty_bounds} "
-                     f"missing_rows={missing_rows} unavailable_rows={unavailable_rows}")
+            snapshot_id = snapshot.snapshot_id
+            with bounded_snapshot.open_bounded_snapshot(repository, snapshot,
+                    table_name=BOUNDS_TABLE, limits=_BOUNDS_CATALOG_LIMITS) as session:
+                resolved = session.resolve_full(snapshot_id)
+                if (BOUNDS_TABLE not in resolved.snapshot.table_versions
+                        or session.table_contract(resolved.snapshot, BOUNDS_TABLE) != BOUNDS_CONTRACT):
+                    raise data_fail("CONTRACT_MISMATCH",
+                               "planned label bounds require the native bounds contract")
+                contract_ref = resolved.snapshot.table_versions[BOUNDS_TABLE].table_contract_ref
+                found, empty_bounds = {}, 0
+                planned_tickers = sorted(days_by_ticker)
+                total = len(planned_tickers)
+                progress = Progress("label bounds tickers", total)
+                decision("label bounds", f"planned tickers={total} events={len(events)}")
+                for ticker in planned_tickers:
+                    key_filter = (
+                        KeyPredicate(column="ticker", operator="eq", values=(ticker,)),
+                        KeyPredicate(column="event_date", operator="in",
+                                     values=tuple(sorted(days_by_ticker[ticker]))))
+                    bound = session.scan_population_bound(snapshot_id, table_name=BOUNDS_TABLE,
+                        table_contract_ref=contract_ref, key_filter=key_filter)
+                    if not bound:
+                        empty_bounds += 1
+                    else:
+                        request = DataQuery(snapshot_id=snapshot_id, table_contract_ref=contract_ref,
+                            columns=("ticker", "event_date", "post_close_date"),
+                            key_filter=key_filter, order_by=BOUNDS_CONTRACT.primary_key,
+                            max_batch_rows=min(bound, BOUNDS_CONTRACT.maximum_batch_rows), max_result_rows=bound)
+                        for batch in session.scan(request, table_name=BOUNDS_TABLE,
+                                                  max_object_bytes=MAX_OUTCOME_OBJECT_BYTES):
+                            for row in batch.to_pylist():
+                                found[(row["ticker"], row["event_date"])] = _label_end(row["post_close_date"])
+                    progress.tick()
+                missing_rows = sum(1 for event in events
+                                   if (event["ticker"], event["event_date"]) not in found)
+                unavailable_rows = sum(1 for event in events
+                                       if (event["ticker"], event["event_date"]) in found
+                                       and found[(event["ticker"], event["event_date"])] is None)
+                decision("label bounds", f"planned tickers={total} empty_bounds={empty_bounds} "
+                         f"missing_rows={missing_rows} unavailable_rows={unavailable_rows}")
         return {event["event_id"]: found[(event["ticker"], event["event_date"])]
                 for event in events if (event["ticker"], event["event_date"]) in found}
     except DataError as error:
+        if (error.code == "CONTRACT_MISMATCH"
+                and error.problem.message == "catalog probe table unavailable"):
+            problem = data_fail("CONTRACT_MISMATCH",
+                       "planned label bounds require the native bounds contract").problem
+            raise OpsError(problem) from None
         if error.problem.category == "integrity":
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "planned label bounds could not be read") from None
         raise OpsError(error.problem) from None
@@ -344,7 +339,8 @@ def _nested(binding, request, *, temporal=None, label_bounds=None):
 
 
 def nested_folds(binding, request):
-    """Research-only nested-fold adapter used by the research planner and SIZE/regression bindings."""
+    """Research-only nested-fold adapter used by SIZE; the research planner and
+    regression binding call ``_nested`` directly."""
     return _nested(binding, request)
 
 
