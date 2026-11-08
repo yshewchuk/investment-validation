@@ -69,9 +69,13 @@ def execute(conn, store, repository, registration, plan, fold, *, limits, replay
         except ValueError:
             raise fail("EXPERIMENT_IDENTITY_CONFLICT",
                        "sealed search plan has an unsupported selection tie rule") from None
+        from experiments.size_search_binding import is_legacy_source_closure
+        request_selection = (plan.get("request") or {}).get("selection")
+        legacy_contract = ties == LEGACY_TIE_RULE and (
+            request_selection is not None or is_legacy_source_closure(registration.document))
         _equal(plan, prepare_plan(conn, store, registration, plan["request"],
                                   plan_schema=plan.get("schema_version"),
-                                  legacy_contract=ties == LEGACY_TIE_RULE))
+                                  legacy_contract=legacy_contract))
         execution = {"schema_version": "size_comparison_execution.v1", "features": COLUMNS,
                      "fit_recipe": registration.document["size_comparison"]}
         _equal(execution["fit_recipe"], recipe())

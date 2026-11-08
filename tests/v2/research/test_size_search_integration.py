@@ -272,6 +272,7 @@ def test_current_source_registration_refuses_prior_tie_contract_reference(case):
     with pytest.raises(OpsError) as caught:
         planner.read_search_plan(case.conn, case.store, registration, v4, ref)
     assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert caught.value.problem.message == "search plan reference differs from its complete binding"
 
 
 def test_legacy_source_closure_reconstructs_and_reaches_no_fit_guard(case, monkeypatch):
@@ -290,10 +291,23 @@ def test_legacy_source_closure_reconstructs_and_reaches_no_fit_guard(case, monke
         reserve_native_registration(case.conn, case.store, registration, spec)
         legacy = binding.prepare_plan(case.conn, case.store, registration, v4,
                                       legacy_contract=True)
+    with pytest.raises(OpsError) as caught:
+        planner.seal_search_plan(case.conn, case.store, registration, v4)
+    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
     assert legacy["selection"]["ties"] == LEGACY_TIE_RULE
     ref = case.store.publish_bytes(
         canonical_json(legacy).encode(), schema_ref=legacy["schema_version"])
     assert planner.read_search_plan(case.conn, case.store, registration, v4, ref) == legacy
+
+    changed = deepcopy(legacy)
+    changed["planned_fit_count"] += 1
+    changed["plan_id"] = content_hash({key: value for key, value in changed.items()
+                                       if key != "plan_id"})
+    changed_ref = case.store.publish_bytes(
+        canonical_json(changed).encode(), schema_ref=changed["schema_version"])
+    with pytest.raises(OpsError, match="search plan reference differs from its complete binding") as caught:
+        planner.read_search_plan(case.conn, case.store, registration, v4, changed_ref)
+    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
 
     fold = {**legacy["folds"][0]["outer"], "evaluation_labels_before":
             registration.document["magnitude_execution"]["evaluation_labels_before"]}
@@ -463,16 +477,30 @@ def test_prepare_plan_rejects_non_bool_legacy_contract():
     assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
 
 
-def test_legacy_plan_with_mismatched_fit_count_refuses_identity(case):
-    legacy = binding.prepare_plan(case.conn, case.store, case.registration, case.request,
-                                  legacy_contract=True)
-    legacy["planned_fit_count"] = legacy["planned_fit_count"] + 1
-    legacy["plan_id"] = content_hash({key: value for key, value in legacy.items()
-                                      if key != "plan_id"})
-    ref = case.store.publish_bytes(canonical_json(legacy).encode(),
-                                   schema_ref=legacy["schema_version"])
+def test_verify_installation_rejects_non_bool_legacy_closure_before_sources(monkeypatch):
+    monkeypatch.setattr(binding, "_sources", lambda: pytest.fail("sources must not be read"))
+    with pytest.raises(OpsError) as caught:
+        binding.verify_installation({}, legacy_source_closure="false")
+    assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert caught.value.problem.message == "legacy_source_closure must be a bool"
+
+
+def test_current_plan_with_mismatched_fit_count_refuses_identity(case):
+    plan = binding.prepare_plan(case.conn, case.store, case.registration, case.request)
+    plan["planned_fit_count"] = plan["planned_fit_count"] + 1
+    plan["plan_id"] = content_hash({key: value for key, value in plan.items()
+                                    if key != "plan_id"})
+    ref = case.store.publish_bytes(canonical_json(plan).encode(),
+                                   schema_ref=plan["schema_version"])
     with pytest.raises(OpsError, match="search plan reference differs from its complete binding") as caught:
         planner.read_search_plan(case.conn, case.store, case.registration, case.request, ref)
+    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+
+
+def test_current_source_registration_refuses_legacy_contract(case):
+    with pytest.raises(OpsError, match="legacy_contract requires the exact prior source closure") as caught:
+        binding.prepare_plan(case.conn, case.store, case.registration, case.request,
+                             legacy_contract=True)
     assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
 
 
@@ -489,8 +517,7 @@ def test_no_fit_probe_does_not_claim_comparator(case):
 def test_legacy_plan_comparison_reaches_no_fit_guard(case, monkeypatch):
     from experiments import size_comparison_run as comparison
 
-    legacy = binding.prepare_plan(case.conn, case.store, case.registration, case.request,
-                                  legacy_contract=True)
+    legacy = binding.prepare_plan(case.conn, case.store, case.registration, case.request)
     assert legacy["selection"]["ties"] == "candidate_id_ascending"
     reads = []
 

@@ -29,7 +29,7 @@ from experiments import magnitude_search_trials as trials
 from experiments import native_registration as native
 from experiments.magnitude_search_inputs import load_inputs, publish_inputs
 from experiments.magnitude_search_plan import seal_search_plan
-from experiments.magnitude_search_selection import ZeroComparatorError
+from experiments.magnitude_search_selection import CURRENT_TIE_RULE, ZeroComparatorError
 from tests.v2.research.magnitude_trial_support import (
     CUTOFF,
     HISTORY,
@@ -142,6 +142,7 @@ def test_blended_freeze_uses_admitted_inner_history_and_one_lead1_row_per_event(
         "lead_weights": {"1": 1.0, "3": 0.0, "5": 0.0},
         "large_move_threshold_pct": 10.0, "tie_band_floor": 0.005,
     }
+    plan["selection"]["ties"] = CURRENT_TIE_RULE
     monkeypatch.setattr(case.recorder, "_admit", lambda: plan)
     with no_fit_guard():
         frozen = case.recorder.freeze()
@@ -165,6 +166,7 @@ def test_blended_freeze_refuses_nonzero_candidate_against_zero_history_mean(case
         "lead_weights": {"1": 1.0, "3": 0.0, "5": 0.0},
         "large_move_threshold_pct": 10.0, "tie_band_floor": 0.005,
     }
+    plan["selection"]["ties"] = CURRENT_TIE_RULE
     monkeypatch.setattr(case.recorder, "_admit", lambda: plan)
     monkeypatch.setattr(trials, "history_mean_rows", lambda cohort, validation: [
         {"event_id": row["event_id"], "horizon_sessions": 1,
@@ -227,6 +229,7 @@ def test_blended_freeze_keeps_nonleading_undefined_yearly_ratio_null(case, monke
         "lead_weights": {"1": 1.0, "3": 0.0, "5": 0.0},
         "large_move_threshold_pct": 10.0, "tie_band_floor": 0.005,
     }
+    plan["selection"]["ties"] = CURRENT_TIE_RULE
     monkeypatch.setattr(case.recorder, "_admit", lambda: plan)
     original = trials.blended_event_score
 

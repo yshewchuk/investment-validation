@@ -231,6 +231,8 @@ def _sources():
 
 
 def verify_installation(binding, *, legacy_source_closure=False):
+    if type(legacy_source_closure) is not bool:
+        raise fail("INVALID_EXPERIMENT_SPEC", "legacy_source_closure must be a bool")
     sources = _sources()
     installed = binding.get("source_closure") == sources
     if not installed and legacy_source_closure:
@@ -333,6 +335,9 @@ def prepare_plan(conn, store, registration, request, *, plan_schema=None, legacy
     verify_native_registration(conn, store, registration, max_evidence_bytes=MAX_NATIVE_EVIDENCE_BYTES)
     binding = registration.document
     verify_installation(binding, legacy_source_closure=legacy_contract)
+    if legacy_contract and not is_legacy_source_closure(binding):
+        raise fail("EXPERIMENT_IDENTITY_CONFLICT",
+                   "legacy_contract requires the exact prior source closure")
     if binding["schema_version"] == "native_experiment_registration.v1.6":
         horizons = (5, 3, 1)
     else:

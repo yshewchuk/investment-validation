@@ -448,15 +448,12 @@ def read_search_plan(conn, store, registration, request, ref):
     if legacy_source:
         expected = _prepare(conn, store, registration, request,
                             plan_schema=ref.schema_ref, legacy_contract=True)
-        payload = canonical_json(expected).encode()
-        if ref != artifact_reference(payload, ref.schema_ref):
-            raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search plan reference differs from its complete binding")
     else:
         expected = _prepare(conn, store, registration, request,
                             plan_schema=ref.schema_ref if qualified else None)
-        payload = canonical_json(expected).encode()
-        if ref != artifact_reference(payload, ref.schema_ref):
-            raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search plan reference differs from its complete binding")
+    payload = canonical_json(expected).encode()
+    if ref != artifact_reference(payload, ref.schema_ref):
+        raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search plan reference differs from its complete binding")
     try:
         store.read_verified(ref)
     except ArtifactError as error:
