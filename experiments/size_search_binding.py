@@ -28,7 +28,11 @@ from experiments.label_availability import label_cutoff_reason as _label_cutoff_
 from experiments.magnitude_candidate_recipe import candidate_recipe
 from experiments.magnitude_search_request_schema import allows_size_family, request_version
 from experiments.magnitude_search_request_versions import compile_request
-from experiments.magnitude_search_selection import CURRENT_TIE_RULE, LEGACY_TIE_RULE
+from experiments.magnitude_search_selection import (
+    CURRENT_TIE_RULE,
+    LEGACY_TIE_RULE,
+    selection_contract_tie_rule,
+)
 from experiments.native_registration import (
     MAX_NATIVE_EVIDENCE_BYTES,
     NativeRegistration,
@@ -45,6 +49,48 @@ from experiments.size_registration_artifacts import (
 )
 
 SCHEMA = "native_experiment_registration.v1.7"
+
+# The exact prior published closure whose registrations remain replayable. It is
+# admitted only by the explicit opt-ins below, never as a general source-drift bypass.
+LEGACY_SOURCE_CLOSURE_HASH = "sha256:f7aab0aeb9ab11aad6a68adfc6e2be5bab8802efb0e85bd875ff3a11ddc31aa1"
+_LEGACY_SOURCE_CLOSURE_VALUES = {
+    "experiments/magnitude_search_plan.py":
+        "sha256:f297542bfc24c168a8f8d877c2a6585e825b7e7d38c45fd0afb794e80973013a",
+    "experiments/magnitude_search_selection.py":
+        "sha256:57d08423a8f2bf359a066577a3e2927a5ace9f125feb9e07010c43447c82bf1f",
+    "experiments/magnitude_search_trials.py":
+        "sha256:d3bc5b103031ccf32aa55e4dccafff268e3983ab5d8e682d488e2dd8bbcfa5b1",
+    "experiments/size_comparison_run.py":
+        "sha256:27dbac58107832621b1b781b1e4ae3fbd67f71081412b90105bb9dc385d2d4ea",
+    "experiments/size_search_binding.py":
+        "sha256:a1e9719e3007e30fcac2421613029e0c18010b3ad126d1c832b34b76d25ca69d",
+}
+_LEGACY_SOURCE_CLOSURE_ABSENT = frozenset({"experiments/label_availability.py"})
+
+
+def _matches_legacy_source_closure(pinned, current):
+    """True only for the complete prior map and its exact six-path delta from current."""
+    if not isinstance(pinned, dict) or not isinstance(current, dict):
+        return False
+    try:
+        if content_hash(pinned) != LEGACY_SOURCE_CLOSURE_HASH:
+            return False
+    except (TypeError, ValueError):
+        return False
+    if pinned == current:
+        return True
+    expected = {path: digest for path, digest in current.items()
+                if path not in _LEGACY_SOURCE_CLOSURE_VALUES
+                and path not in _LEGACY_SOURCE_CLOSURE_ABSENT}
+    expected.update(_LEGACY_SOURCE_CLOSURE_VALUES)
+    return pinned == expected
+
+
+def is_legacy_source_closure(binding):
+    """Detect the exact prior closure against the currently installed sources."""
+    return _matches_legacy_source_closure(
+        binding.get("source_closure") if isinstance(binding, dict) else None, _sources())
+
 
 
 def _require(condition):
@@ -180,10 +226,14 @@ def _sources():
     return current
 
 
-def verify_installation(binding):
+def verify_installation(binding, *, legacy_source_closure=False):
+    sources = _sources()
+    installed = binding.get("source_closure") == sources
+    if not installed and legacy_source_closure:
+        installed = _matches_legacy_source_closure(binding.get("source_closure"), sources)
     _require(binding["schema_version"] in ("native_experiment_registration.v1.6", SCHEMA)
         and binding["environment"] == environment_identity(1)
-        and binding["source_closure"] == _sources())
+        and installed)
     _require(binding["size_comparison"] == comparison_recipe())
 
 
@@ -278,7 +328,7 @@ def prepare_plan(conn, store, registration, request, *, plan_schema=None, legacy
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search plan schema does not match request version")
     verify_native_registration(conn, store, registration, max_evidence_bytes=MAX_NATIVE_EVIDENCE_BYTES)
     binding = registration.document
-    verify_installation(binding)
+    verify_installation(binding, legacy_source_closure=legacy_contract)
     if binding["schema_version"] == "native_experiment_registration.v1.6":
         horizons = (5, 3, 1)
     else:
@@ -348,11 +398,32 @@ def execution_for_candidate(binding, candidate):
     return execution
 
 
+def _legacy_plan_source_compatibility(binding, plan):
+    """Only a canonical legacy-tie plan bound to this registration may relax sources."""
+    if not isinstance(plan, dict):
+        return False
+    try:
+        if selection_contract_tie_rule(plan.get("selection")) != LEGACY_TIE_RULE:
+            return False
+    except ValueError:
+        return False
+    implementation = plan.get("implementation")
+    if not isinstance(implementation, dict):
+        return False
+    if implementation.get("source_closure") != binding.get("source_closure"):
+        return False
+    try:
+        identity = {key: value for key, value in plan.items() if key != "plan_id"}
+        return content_hash(identity) == plan.get("plan_id")
+    except (TypeError, ValueError):
+        return False
+
+
 def fold_inputs(repository, binding, fold, *, plan=None):
     """Revalidate installed producer before opening any training outcome."""
     from engine.v2.research.magnitude_panel_qualified_table import recipe
     from experiments.magnitude_search_plan import PLAN_V2, PLAN_V3
-    verify_installation(binding)
+    verify_installation(binding, legacy_source_closure=_legacy_plan_source_compatibility(binding, plan))
     plan_schema = (plan.get("schema_version") if isinstance(plan, dict)
                    and plan.get("schema_version") in (PLAN_V2, PLAN_V3) else None)
     folds = (_folds(binding, binding["size_request"]) if plan_schema is None

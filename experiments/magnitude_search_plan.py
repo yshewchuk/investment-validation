@@ -442,19 +442,30 @@ def read_search_plan(conn, store, registration, request, ref):
     if not isinstance(ref, ArtifactRef) or ref.schema_ref not in schemas:
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search plan reference has the wrong schema")
     qualified = is_qualified_request(parsed_version)
-    expected = _prepare(conn, store, registration, request,
-                        plan_schema=ref.schema_ref if qualified else None)
-    payload = canonical_json(expected).encode()
-    if ref != artifact_reference(payload, ref.schema_ref):
-        if not qualified:
-            raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search plan reference differs from its complete binding")
-        legacy = {**expected, "selection": {**expected["selection"], "ties": LEGACY_TIE_RULE}}
-        legacy.pop("plan_id")
-        legacy["plan_id"] = content_hash(legacy)
-        expected = legacy
+    legacy_source = False
+    if qualified:
+        from experiments.size_search_binding import is_legacy_source_closure
+        legacy_source = is_legacy_source_closure(registration.document)
+    if legacy_source:
+        expected = _prepare(conn, store, registration, request,
+                            plan_schema=ref.schema_ref, legacy_contract=True)
         payload = canonical_json(expected).encode()
         if ref != artifact_reference(payload, ref.schema_ref):
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search plan reference differs from its complete binding")
+    else:
+        expected = _prepare(conn, store, registration, request,
+                            plan_schema=ref.schema_ref if qualified else None)
+        payload = canonical_json(expected).encode()
+        if ref != artifact_reference(payload, ref.schema_ref):
+            if not qualified:
+                raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search plan reference differs from its complete binding")
+            legacy = {**expected, "selection": {**expected["selection"], "ties": LEGACY_TIE_RULE}}
+            legacy.pop("plan_id")
+            legacy["plan_id"] = content_hash(legacy)
+            expected = legacy
+            payload = canonical_json(expected).encode()
+            if ref != artifact_reference(payload, ref.schema_ref):
+                raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search plan reference differs from its complete binding")
     try:
         store.read_verified(ref)
     except ArtifactError as error:

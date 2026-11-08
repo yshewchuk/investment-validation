@@ -25,6 +25,45 @@ from tests.v2.research.test_magnitude_search_request import request as request_f
 # Share the bounded native journal fixture instead of rebuilding it on each xdist worker.
 pytestmark = pytest.mark.xdist_group("size_search_integration")
 
+_LEGACY_SOURCE_VALUES = {
+    "experiments/magnitude_search_plan.py":
+        "sha256:f297542bfc24c168a8f8d877c2a6585e825b7e7d38c45fd0afb794e80973013a",
+    "experiments/magnitude_search_selection.py":
+        "sha256:57d08423a8f2bf359a066577a3e2927a5ace9f125feb9e07010c43447c82bf1f",
+    "experiments/magnitude_search_trials.py":
+        "sha256:d3bc5b103031ccf32aa55e4dccafff268e3983ab5d8e682d488e2dd8bbcfa5b1",
+    "experiments/size_comparison_run.py":
+        "sha256:27dbac58107832621b1b781b1e4ae3fbd67f71081412b90105bb9dc385d2d4ea",
+    "experiments/size_search_binding.py":
+        "sha256:a1e9719e3007e30fcac2421613029e0c18010b3ad126d1c832b34b76d25ca69d",
+}
+
+
+def _legacy_sources():
+    legacy = deepcopy(binding._sources())
+    legacy.pop("experiments/label_availability.py")
+    legacy.update(_LEGACY_SOURCE_VALUES)
+    return legacy
+
+
+def _v4_blended_request(request):
+    v4 = deepcopy(request)
+    v4["schema_version"] = "magnitude_search_request.v4"
+    v4["space"] = {
+        "ridge": {"alpha": [0.01, 0.1, 1.0, 10.0, 100.0]},
+        "elasticnet": {"alpha": [0.001, 0.003, 0.01, 0.03, 0.1, 1.0],
+                       "l1_ratio": [0.25, 0.75]},
+        "hgb": {"learning_rate": [0.05, 0.1], "max_leaf_nodes": [7, 15],
+                "min_samples_leaf": [20, 100], "l2_regularization": [0.0, 1.0]}}
+    v4.update(max_candidates=99, max_fits=300)
+    v4["selection"] = {
+        "metric_weights": {"rmse": 0.6, "mae": 0.3, "large_move_underprediction": 0.1},
+        "lead_weights": {"1": 1.0, "3": 0.0, "5": 0.0},
+        "large_move_threshold_pct": 10.0,
+        "tie_band_floor": 0.005,
+    }
+    return v4
+
 
 @pytest.fixture(scope="module")
 def case(tmp_path_factory):
@@ -197,21 +236,7 @@ def test_v3_qualified_request_seals_reconstructs_v2_plan(case):
 
 
 def test_v4_qualified_request_seals_reconstructs_v3_plan(case, monkeypatch):
-    v4 = deepcopy(case.request)
-    v4["schema_version"] = "magnitude_search_request.v4"
-    v4["space"] = {
-        "ridge": {"alpha": [0.01, 0.1, 1.0, 10.0, 100.0]},
-        "elasticnet": {"alpha": [0.001, 0.003, 0.01, 0.03, 0.1, 1.0],
-                       "l1_ratio": [0.25, 0.75]},
-        "hgb": {"learning_rate": [0.05, 0.1], "max_leaf_nodes": [7, 15],
-                "min_samples_leaf": [20, 100], "l2_regularization": [0.0, 1.0]}}
-    v4.update(max_candidates=99, max_fits=300)
-    v4["selection"] = {
-        "metric_weights": {"rmse": 0.6, "mae": 0.3, "large_move_underprediction": 0.1},
-        "lead_weights": {"1": 1.0, "3": 0.0, "5": 0.0},
-        "large_move_threshold_pct": 10.0,
-        "tie_band_floor": 0.005,
-    }
+    v4 = _v4_blended_request(case.request)
     spec = prediction_spec(experiment_id="synthetic-qualified-size-v4", folds=("2024",),
                            runner="experiments/size_search.py")
     registration, spec = binding.prepare(case.repository, spec, v4, case.panel_request, **case.args)
@@ -238,7 +263,62 @@ def test_v4_qualified_request_seals_reconstructs_v3_plan(case, monkeypatch):
                for candidate in sealed["plan"]["candidates"]) == 48
     ref = from_document(ArtifactRef, sealed["plan_ref"])
     assert planner.read_search_plan(case.conn, case.store, registration, v4, ref) == sealed["plan"]
-    _assert_legacy_plan_replay(case, registration, v4, sealed["plan"], monkeypatch)
+
+    from experiments.size_comparison_run import execute
+    seal_search_run(case.conn, case.store, case.repository, registration, v4, ref,
+                    clock=SystemClock())
+    fold = {**sealed["plan"]["folds"][0]["outer"], "evaluation_labels_before": "2025-01-01"}
+    before = case.conn.execute("SELECT COUNT(*) FROM magnitude_search_records").fetchone()[0]
+    with no_fit_guard(), pytest.raises(RuntimeFitForbidden):
+        execute(case.conn, case.store, case.repository, registration, sealed["plan"], fold,
+                limits=v4["limits"]["child"])
+    assert case.conn.execute("SELECT COUNT(*) FROM magnitude_search_records").fetchone()[0] == before
+
+
+def test_legacy_source_closure_reconstructs_and_reaches_no_fit_guard(case, monkeypatch):
+    from experiments import size_comparison_run as comparison
+
+    legacy_sources = _legacy_sources()
+    assert content_hash(legacy_sources) == (
+        "sha256:f7aab0aeb9ab11aad6a68adfc6e2be5bab8802efb0e85bd875ff3a11ddc31aa1")
+    v4 = _v4_blended_request(case.request)
+    spec = prediction_spec(experiment_id="synthetic-qualified-size-legacy-source",
+                           folds=("2024",), runner="experiments/size_search.py")
+    with monkeypatch.context() as patch:
+        patch.setattr(binding, "_sources", lambda: deepcopy(legacy_sources))
+        registration, spec = binding.prepare(case.repository, spec, v4, case.panel_request,
+                                             **case.args)
+        reserve_native_registration(case.conn, case.store, registration, spec)
+        legacy = binding.prepare_plan(case.conn, case.store, registration, v4,
+                                      legacy_contract=True)
+    assert legacy["selection"]["ties"] == LEGACY_TIE_RULE
+    ref = case.store.publish_bytes(
+        canonical_json(legacy).encode(), schema_ref=legacy["schema_version"])
+    assert planner.read_search_plan(case.conn, case.store, registration, v4, ref) == legacy
+
+    fold = {**legacy["folds"][0]["outer"], "evaluation_labels_before":
+            registration.document["magnitude_execution"]["evaluation_labels_before"]}
+    assert binding.fold_inputs(case.repository, registration.document, fold, plan=legacy)["training"]
+
+    reads = []
+    def read(conn, store, run_id, slot):
+        reads.append(slot)
+        return {"plan_id": legacy["plan_id"]} if slot == "seal" else None
+    monkeypatch.setattr(comparison, "read_record", read)
+    before = case.conn.execute("SELECT COUNT(*) FROM magnitude_search_records").fetchone()[0]
+    with no_fit_guard(), pytest.raises(RuntimeFitForbidden):
+        comparison.execute(case.conn, case.store, case.repository, registration, legacy, fold,
+                           limits=v4["limits"]["child"])
+    assert reads[0] == "seal"
+    assert all(slot.startswith("comparison-terminal:") for slot in reads[1:])
+    assert case.conn.execute("SELECT COUNT(*) FROM magnitude_search_records").fetchone()[0] == before
+
+    drifted = deepcopy(binding._sources())
+    drifted["experiments/size_search.py"] = "sha256:" + "0" * 64
+    monkeypatch.setattr(binding, "_sources", lambda: deepcopy(drifted))
+    assert binding.is_legacy_source_closure(registration.document) is False
+    with pytest.raises(OpsError, match="differs"):
+        planner.read_search_plan(case.conn, case.store, registration, v4, ref)
 
 
 def test_native_registration_detaches_caller_document(case):
@@ -424,11 +504,13 @@ def test_legacy_plan_comparison_reaches_no_fit_guard(case, monkeypatch):
     assert case.conn.execute("SELECT COUNT(*) FROM magnitude_search_records").fetchone()[0] == before
 
 
-def test_comparator_refuses_unknown_selection_ties_before_any_journal_write(case):
+def test_comparator_refuses_unknown_selection_ties_before_any_journal_write(case, monkeypatch):
     from experiments import size_comparison_run as comparison
     plan = deepcopy(case.plan)
     plan["selection"]["ties"] = "unknown_tie_rule"
     fold = {**plan["folds"][0]["outer"], "evaluation_labels_before": "2025-01-01"}
+    monkeypatch.setattr(comparison, "read_record",
+                        lambda *args, **kwargs: pytest.fail("guard must refuse before a read"))
     before = case.conn.execute("SELECT COUNT(*) FROM magnitude_search_records").fetchone()[0]
     with pytest.raises(OpsError, match="unsupported selection tie rule") as caught:
         comparison.execute(case.conn, case.store, case.repository, case.registration, plan, fold,

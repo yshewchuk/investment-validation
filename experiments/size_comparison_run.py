@@ -101,7 +101,7 @@ def execute(conn, store, repository, registration, plan, fold, *, limits, replay
         _equal(read("start"), started)
         stored = load_inputs(store, read("inputs"), terminal["inputs_id"])
     inputs = stored if regression and terminal is not None else admit(
-        repository, registration.document, fold, **({"plan": plan} if regression else {}))
+        repository, registration.document, fold, plan=plan)
     if regression:
         _equal(inputs.get("target"), plan["target"])
     expected = evidence(inputs, fold, plan)
