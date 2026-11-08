@@ -4,6 +4,7 @@ import errno
 import hashlib
 import json
 import os
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -76,7 +77,7 @@ def source(tmp_path_factory):
             event = history_event(day, ticker=ticker)
             events.append(event)
             moves.append(outcome_move(event, -3))
-    value = magnitude_source(root, register=False, build=False, events=events, moves=moves)
+    value = magnitude_source(root, register=False, build=False, events=events, moves=moves, bounds=True)
     value.build, value.feature_snapshot = build_history(value, training_start="2022-01-01",
         evaluation_years=["2024", "2025"])
     value.registration = native.register_native(value.conn, value.store, value.repository, value.spec,
@@ -95,15 +96,36 @@ def _metadata_only(monkeypatch, source):
     forbid_history_rebuild(monkeypatch)
     for estimator in (Ridge, HistGradientBoostingRegressor):
         monkeypatch.setattr(estimator, "__init__", forbid_access)
-    for name in ("scan", "resolve", "resolve_pinned", "fragment_records", "table_contract"):
+    for name in ("resolve_pinned", "fragment_records", "table_contract"):
         monkeypatch.setattr(Repository, name, forbid_access)
+    original_scan, original_resolve, original_bound = (
+        Repository.scan, Repository.resolve, Repository.scan_population_bound)
+
+    def scan(repository, query, *, table_name, max_object_bytes=None):
+        assert table_name == "computed_move_bounds"
+        return original_scan(repository, query, table_name=table_name,
+                             max_object_bytes=max_object_bytes)
+
+    def resolve(repository, snapshot_id):
+        assert snapshot_id == source.registration.document["snapshot"]["snapshot_id"]
+        return original_resolve(repository, snapshot_id)
+
+    def bound(repository, snapshot_id, *, table_name, table_contract_ref, key_filter=(), time_interval=None):
+        assert table_name == "computed_move_bounds"
+        return original_bound(repository, snapshot_id, table_name=table_name,
+            table_contract_ref=table_contract_ref, key_filter=key_filter, time_interval=time_interval)
+
+    monkeypatch.setattr(Repository, "scan", scan)
+    monkeypatch.setattr(Repository, "resolve", resolve)
+    monkeypatch.setattr(Repository, "scan_population_bound", bound)
     from engine.v2.models.training import magnitude
     monkeypatch.setattr(magnitude, "fit_magnitude_predictions", forbid_access)
     original = ArtifactStore.read_verified
     opened = []
 
     def read(store, ref, *args, **kwargs):
-        assert ref.schema_ref in ("native_experiment_registration.v1.5", "magnitude_search_plan.v1")
+        assert ref.schema_ref in ("native_experiment_registration.v1.5", "magnitude_search_plan.v1",
+                                  "parquet_fragment.v1")
         opened.append(ref)
         return original(store, ref, *args, **kwargs)
 
@@ -781,7 +803,9 @@ def test_missing_plan_object_has_exact_resource_problem_without_publication(sour
     sealed = search.seal_search_plan(source.conn, source.store, source.registration, _request())
     ref = from_document(ArtifactRef, sealed["plan_ref"])
     store = ArtifactStore(tmp_path / "registration-only")
+    shutil.copytree(source.store.root, store.root)
     store.publish_bytes(source.registration.binding_json, schema_ref="native_experiment_registration.v1.5")
+    (store.root / ref.storage_key).unlink()
     assert not (store.root / ref.storage_key).exists()
     before = catalog_rows(source.conn), artifact_object_bytes(store)
     request, reference = tmp_path / "request.json", tmp_path / "reference.json"

@@ -6,19 +6,24 @@ collection do not define the available helpers.
 import json
 from contextlib import contextmanager
 from dataclasses import asdict
-from datetime import timedelta
+from datetime import date, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pandas as pd
 import pytest
 
 from engine.v2.data import objects
+from engine.v2.data.computed_move_bounds import CONTRACT as BOUNDS_CONTRACT
+from engine.v2.data.computed_move_bounds import TABLE as BOUNDS_TABLE
+from engine.v2.data.computed_move_bounds import source_bounds
 from engine.v2.data.computed_moves_table import COMPUTED_MOVES_CONTRACT
 from engine.v2.data.repository import Repository
 from engine.v2.features import panel_math
 from engine.v2.foundation import market_calendar
 from engine.v2.foundation.experiment_holdouts import ExperimentHoldouts
+from engine.v2.ops.computed_move_bounds_store import write_bounds
 from engine.v2.ops.experiments import ExperimentSpec
 from engine.v2.research import event_history, magnitude_features
 from engine.v2.research import magnitude_history_store as stored
@@ -125,10 +130,23 @@ def calendar_sessions(start="2024-06-03", end="2024-06-14"):
 
 
 def commit_history_inputs(tmp_path, events, moves, *, days=None, mixed_days=(), include_calendar=True,
-                          marker=None, contract=None):
+                          marker=None, contract=None, bounds=False):
     if contract is None:
         contract = COMPUTED_MOVES_CONTRACT
     tmp_path.mkdir(parents=True, exist_ok=True)
+    session_days = calendar_sessions().days if days is None else days
+    if bounds:
+        sessions = {(event["ticker"], event["event_date"].date().isoformat()): event["session"]
+                    for event in events}
+        sd = np.array(session_days, dtype="datetime64[ns]")
+        for row in moves:
+            key = row["ticker"], row["event_date"]
+            session = sessions.get(key)
+            if (row["skipped"] is False and row["available_as_of_date"] is not None
+                    and isinstance(session, str)):
+                _, post = source_bounds(sd, row["event_date"], session)
+                if post is not None:
+                    row["available_as_of_date"] = (date.fromisoformat(post) + timedelta(days=1)).isoformat()
     conn, clock, store = catalog_and_store(tmp_path)
     contracts = {"earnings_events": contract_for("earnings_events"), "computed_moves": contract}
     inputs = {"earnings_events": events, "computed_moves": moves}
@@ -154,6 +172,16 @@ def commit_history_inputs(tmp_path, events, moves, *, days=None, mixed_days=(), 
         hashes[name] = {key: objects.partition_logical_hash(store,
             [r.object_ref for r in group], contract, contract_ref_for(contract), key)
             for key, group in partitions.items() if len(group) > 1}
+    if bounds:
+        frame = pd.DataFrame(events)
+        records = [record for ticker in sorted({event["ticker"] for event in events})
+            for record in write_bounds(store,
+                sorted((row for row in moves if row["ticker"] == ticker),
+                       key=lambda row: row["event_date"]),
+                frame[frame["ticker"] == ticker].sort_values("event_date"),
+                sd, tables["computed_moves"])]
+        tables[BOUNDS_TABLE] = sorted(records, key=lambda r: (r.partition_key, r.primary_key_min))
+        contracts[BOUNDS_TABLE] = BOUNDS_CONTRACT
     snapshot = commit_tables(conn, clock, tables, contracts, partition_logical_hashes=hashes, store=store)
     return conn, TrackingRepository(conn, store), snapshot
 
@@ -193,11 +221,12 @@ def magnitude_dataset():
     return events + excluded, moves + [outcome_move(event, None) for event in excluded]
 
 
-def magnitude_source(tmp_path, *, register=True, build=True, events=None, moves=None, folds=("2024", "2025"), mixed_days=()):
+def magnitude_source(tmp_path, *, register=True, build=True, events=None, moves=None, folds=("2024", "2025"),
+                     mixed_days=(), bounds=False):
     if events is None:
         events, moves = magnitude_dataset()
     conn, original, snapshot = commit_history_inputs(tmp_path, events, moves, mixed_days=mixed_days,
-        days=calendar_sessions("2022-05-25", "2025-12-05").days)
+        days=calendar_sessions("2022-05-25", "2025-12-05").days, bounds=bounds)
     spec = prediction_spec(experiment_id="synthetic-stored-magnitude", primary_arm_id="history",
         arms=("history",), folds=folds)
     source = SimpleNamespace(conn=conn, repository=PlanRepository(conn, original._store),
