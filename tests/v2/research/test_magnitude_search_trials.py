@@ -178,6 +178,23 @@ def test_blended_freeze_refuses_nonzero_candidate_against_zero_history_mean(case
             case.recorder.freeze()
 
 
+def test_blended_freeze_refuses_unsupported_selection_ties_before_selection(case, monkeypatch):
+    _all(case)
+    plan = copy.deepcopy(case.plan)
+    plan["request"]["selection"] = {
+        "metric_weights": {"rmse": 0.6, "mae": 0.3, "large_move_underprediction": 0.1},
+        "lead_weights": {"1": 1.0, "3": 0.0, "5": 0.0},
+        "large_move_threshold_pct": 10.0, "tie_band_floor": 0.005,
+    }
+    plan["selection"]["ties"] = "band_then_id"
+    monkeypatch.setattr(case.recorder, "_admit", lambda: plan)
+    with _assert_error("EXPERIMENT_IDENTITY_CONFLICT",
+            "sealed search plan has an unsupported selection tie rule"):
+        with no_fit_guard():
+            case.recorder.freeze()
+    assert case.recorder._read("selection") is None
+
+
 def test_blended_freeze_keeps_nonleading_undefined_yearly_ratio_null(case, monkeypatch):
     first, second = [item["candidate_id"] for item in case.plan["candidates"]]
     _all(case, values={args: 7.0 if args[2] == first else 1000.0

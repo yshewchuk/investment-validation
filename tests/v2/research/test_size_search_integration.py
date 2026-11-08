@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from engine.v2.contracts import ArtifactRef
-from engine.v2.foundation import SystemClock, content_hash, from_document
+from engine.v2.foundation import SystemClock, canonical_json, content_hash, from_document
 from engine.v2.models.adapters import RuntimeFitForbidden
 from engine.v2.models.no_fit import no_fit_guard
 from engine.v2.ops.errors import OpsError
@@ -110,6 +110,21 @@ def lead_one_case(tmp_path_factory):
         pass
 
 
+def _assert_legacy_plan_replay(case, registration, request, plan):
+    """Independently rebuild the prior-contract plan and confirm exact sealed replay."""
+    legacy = deepcopy(plan)
+    legacy["selection"]["ties"] = "candidate_id_ascending"
+    legacy.pop("plan_id")
+    legacy["plan_id"] = content_hash(legacy)
+    expected_bytes = canonical_json(legacy).encode()
+    assert legacy["plan_id"] != plan["plan_id"]
+    ref = case.store.publish_bytes(expected_bytes, schema_ref=legacy["schema_version"])
+    assert case.store.read_verified(ref) == expected_bytes
+    reconstructed = planner.read_search_plan(case.conn, case.store, registration, request, ref)
+    assert reconstructed["selection"]["ties"] == "candidate_id_ascending"
+    assert reconstructed == legacy
+
+
 def test_lead_one_seals_single_horizon_plan_and_preserves_v2_request_identity(case, lead_one_case):
     plan = lead_one_case.plan
     assert plan["horizons"] == [1]
@@ -164,10 +179,11 @@ def test_v3_qualified_request_seals_reconstructs_v2_plan(case):
     verify_native_registration(case.conn, case.store, registration)
     sealed = planner.seal_search_plan(case.conn, case.store, registration, v3)
     assert sealed["plan"]["schema_version"] == "magnitude_search_plan.v2"
-    assert sealed["plan"]["selection"] == {"metric": "inner_pooled_rmse", "ties": "candidate_id_ascending",
+    assert sealed["plan"]["selection"] == {"metric": "inner_pooled_rmse", "ties": "lowest_score_then_candidate_id_ascending",
         "retries": 0, "outer": "frozen_selected_only", "final_read_authority": "none"}
     ref = from_document(ArtifactRef, sealed["plan_ref"])
     assert planner.read_search_plan(case.conn, case.store, registration, v3, ref) == sealed["plan"]
+    _assert_legacy_plan_replay(case, registration, v3, sealed["plan"])
 
 
 def test_v4_qualified_request_seals_reconstructs_v3_plan(case):
@@ -202,7 +218,7 @@ def test_v4_qualified_request_seals_reconstructs_v3_plan(case):
         "comparator": "history_mean_report_only",
         "tie_band": "max_sample_se_of_best_pooled_candidate_yearly_blends_or_floor",
         "tie_band_floor": 0.005,
-        "ties": "candidate_id_ascending",
+        "ties": "lowest_score_then_candidate_id_ascending",
         "retries": 0,
         "outer": "frozen_selected_only",
         "final_read_authority": "none",
@@ -212,6 +228,7 @@ def test_v4_qualified_request_seals_reconstructs_v3_plan(case):
                for candidate in sealed["plan"]["candidates"]) == 48
     ref = from_document(ArtifactRef, sealed["plan_ref"])
     assert planner.read_search_plan(case.conn, case.store, registration, v4, ref) == sealed["plan"]
+    _assert_legacy_plan_replay(case, registration, v4, sealed["plan"])
 
 
 def test_native_registration_detaches_caller_document(case):
@@ -339,8 +356,28 @@ def test_preflight_missing_inner_year_refuses_before_reservation(case):
 
 def test_replay_stale_producer_and_request_mismatch_refuse(case, monkeypatch):
     monkeypatch.setattr(binding, "source_closure", lambda *a: {})
-    with pytest.raises(OpsError, match="differs"):
+    with pytest.raises(OpsError, match="differs") as caught:
         planner.read_search_plan(case.conn, case.store, case.registration, case.request, case.ref)
+    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+
+
+def test_prepare_plan_rejects_non_bool_legacy_contract():
+    with pytest.raises(OpsError) as caught:
+        binding.prepare_plan(None, None, None, None, legacy_contract="false")
+    assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
+
+
+def test_legacy_plan_with_mismatched_fit_count_refuses_identity(case):
+    legacy = binding.prepare_plan(case.conn, case.store, case.registration, case.request,
+                                  legacy_contract=True)
+    legacy["planned_fit_count"] = legacy["planned_fit_count"] + 1
+    legacy["plan_id"] = content_hash({key: value for key, value in legacy.items()
+                                      if key != "plan_id"})
+    ref = case.store.publish_bytes(canonical_json(legacy).encode(),
+                                   schema_ref=legacy["schema_version"])
+    with pytest.raises(OpsError) as caught:
+        planner.read_search_plan(case.conn, case.store, case.registration, case.request, ref)
+    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
 
 
 def test_no_fit_probe_does_not_claim_comparator(case):
@@ -350,6 +387,43 @@ def test_no_fit_probe_does_not_claim_comparator(case):
     with no_fit_guard(), pytest.raises(RuntimeFitForbidden):
         execute(case.conn, case.store, case.repository, case.registration, case.plan, fold,
                 limits=case.request["limits"]["child"])
+    assert case.conn.execute("SELECT COUNT(*) FROM magnitude_search_records").fetchone()[0] == before
+
+
+def test_legacy_plan_comparison_reaches_no_fit_guard(case, monkeypatch):
+    from experiments import size_comparison_run as comparison
+
+    legacy = binding.prepare_plan(case.conn, case.store, case.registration, case.request,
+                                  legacy_contract=True)
+    assert legacy["selection"]["ties"] == "candidate_id_ascending"
+    reads = []
+
+    def read(conn, store, run_id, slot):
+        reads.append(slot)
+        return {"plan_id": legacy["plan_id"]} if slot == "seal" else None
+
+    monkeypatch.setattr(comparison, "read_record", read)
+    fold = {**legacy["folds"][0]["outer"], "evaluation_labels_before": "2025-01-01"}
+    before = case.conn.execute("SELECT COUNT(*) FROM magnitude_search_records").fetchone()[0]
+    with no_fit_guard(), pytest.raises(RuntimeFitForbidden):
+        comparison.execute(case.conn, case.store, case.repository, case.registration, legacy, fold,
+                           limits=case.request["limits"]["child"])
+    assert reads[0] == "seal"
+    assert reads[1:]
+    assert all(slot.startswith("comparison-terminal:") for slot in reads[1:])
+    assert case.conn.execute("SELECT COUNT(*) FROM magnitude_search_records").fetchone()[0] == before
+
+
+def test_comparator_refuses_unknown_selection_ties_before_any_journal_write(case):
+    from experiments import size_comparison_run as comparison
+    plan = deepcopy(case.plan)
+    plan["selection"]["ties"] = "unknown_tie_rule"
+    fold = {**plan["folds"][0]["outer"], "evaluation_labels_before": "2025-01-01"}
+    before = case.conn.execute("SELECT COUNT(*) FROM magnitude_search_records").fetchone()[0]
+    with pytest.raises(OpsError, match="unsupported selection tie rule") as caught:
+        comparison.execute(case.conn, case.store, case.repository, case.registration, plan, fold,
+                           limits=case.request["limits"]["child"])
+    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
     assert case.conn.execute("SELECT COUNT(*) FROM magnitude_search_records").fetchone()[0] == before
 
 

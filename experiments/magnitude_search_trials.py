@@ -52,6 +52,7 @@ from experiments.magnitude_search_selection import (
     ZeroComparatorError,
     blended_event_score,
     history_mean_rows,
+    selection_contract_tie_rule,
     selection_tie_band,
 )
 from experiments.size_fit_diagnostics import evidence as diagnostic_evidence
@@ -815,6 +816,11 @@ class SearchTrials:
                              "selected_candidate_id": selected["candidate_id"]}
             else:
                 try:
+                    try:
+                        tie_rule = selection_contract_tie_rule(plan.get("selection"))
+                    except ValueError:
+                        raise fail("EXPERIMENT_IDENTITY_CONFLICT",
+                                   "sealed search plan has an unsupported selection tie rule") from None
                     best = min(eligible,
                                key=lambda score: (score["blend_score"], score["candidate_id"]))
                     if any(value is None for value in best["yearly"].values()):
@@ -822,7 +828,7 @@ class SearchTrials:
                     yearly_scores = [score for score in eligible if all(
                         value is not None for value in score["yearly"].values())]
                     selected_id, tie_band = selection_tie_band(eligible, yearly_scores,
-                        floor=policy["tie_band_floor"])
+                        floor=policy["tie_band_floor"], tie_rule=tie_rule)
                     pooled_history = [row for year in sorted(outer["inner"], key=lambda item: item["year"])
                         for row in history_rows_by_year[year["year"]]]
                     history_score = blended_event_score(pooled_history, pooled_history,

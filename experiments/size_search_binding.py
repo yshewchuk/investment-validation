@@ -26,6 +26,7 @@ from engine.v2.research.magnitude_panel_qualified_table import METADATA, admit_c
 from experiments.magnitude_candidate_recipe import candidate_recipe
 from experiments.magnitude_search_request_schema import allows_size_family, request_version
 from experiments.magnitude_search_request_versions import compile_request
+from experiments.magnitude_search_selection import CURRENT_TIE_RULE, LEGACY_TIE_RULE
 from experiments.native_registration import (
     MAX_NATIVE_EVIDENCE_BYTES,
     NativeRegistration,
@@ -272,8 +273,10 @@ def _shared_inner(folds):
                     "repeated inner-year folds differ after eligibility filtering")
 
 
-def prepare_plan(conn, store, registration, request, *, plan_schema=None):
+def prepare_plan(conn, store, registration, request, *, plan_schema=None, legacy_contract=False):
     """Expand the fixed dictionary grid into fully bound executable recipes."""
+    if type(legacy_contract) is not bool:
+        raise fail("INVALID_EXPERIMENT_SPEC", "legacy_contract must be a bool")
     from experiments.magnitude_search_plan import PLAN_V2, PLAN_V3, plan_schema_for_request
     default_schema = plan_schema_for_request(request)
     if plan_schema is None:
@@ -311,8 +314,9 @@ def prepare_plan(conn, store, registration, request, *, plan_schema=None):
                     "source_binding_id": source_binding_id, "candidate_spec_id": spec["candidate_spec_id"]}
         candidates.append({**identity, "candidate_id": content_hash(identity)})
     requested_selection = schedule["request"].get("selection")
+    ties = LEGACY_TIE_RULE if legacy_contract else CURRENT_TIE_RULE
     if requested_selection is None:
-        selection_contract = {"metric": "inner_pooled_rmse", "ties": "candidate_id_ascending", "retries": 0,
+        selection_contract = {"metric": "inner_pooled_rmse", "ties": ties, "retries": 0,
                               "outer": "frozen_selected_only", "final_read_authority": "none"}
     else:
         selection_contract = {
@@ -324,7 +328,7 @@ def prepare_plan(conn, store, registration, request, *, plan_schema=None):
             "comparator": "history_mean_report_only",
             "tie_band": "max_sample_se_of_best_pooled_candidate_yearly_blends_or_floor",
             "tie_band_floor": requested_selection["tie_band_floor"],
-            "ties": "candidate_id_ascending",
+            "ties": ties,
             "retries": 0,
             "outer": "frozen_selected_only",
             "final_read_authority": "none",

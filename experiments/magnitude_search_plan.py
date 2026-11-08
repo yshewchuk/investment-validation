@@ -186,7 +186,7 @@ def _implementation(binding, *, entrypoints=None):
     return {"source_closure": sources, "environment": environment}
 
 
-def _prepare(conn, store, registration, request, *, plan_schema=None):
+def _prepare(conn, store, registration, request, *, plan_schema=None, legacy_contract=False):
     request_version = request.get("schema_version") if isinstance(request, dict) else None
     anchor_version = getattr(registration, "document", {}).get("schema_version")
     if anchor_version == "native_experiment_registration.v1.8":
@@ -200,7 +200,9 @@ def _prepare(conn, store, registration, request, *, plan_schema=None):
     if qualified:
         from experiments.size_search_binding import prepare_plan
         default_schema = plan_schema_for_request(request)
-        return prepare_plan(conn, store, registration, request, plan_schema=plan_schema or default_schema)
+        return prepare_plan(conn, store, registration, request,
+                            plan_schema=plan_schema or default_schema,
+                            legacy_contract=legacy_contract)
     request, count = _request(request)
     verify_native_registration(conn, store, registration)
     binding = registration.document
@@ -251,11 +253,18 @@ def read_search_plan(conn, store, registration, request, ref):
         schemas = ()
     if not isinstance(ref, ArtifactRef) or ref.schema_ref not in schemas:
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search plan reference has the wrong schema")
+    qualified = is_qualified_request(parsed_version)
     expected = _prepare(conn, store, registration, request,
-                        plan_schema=ref.schema_ref if is_qualified_request(parsed_version) else None)
+                        plan_schema=ref.schema_ref if qualified else None)
     payload = canonical_json(expected).encode()
     if ref != artifact_reference(payload, ref.schema_ref):
-        raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search plan reference differs from its complete binding")
+        if not qualified:
+            raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search plan reference differs from its complete binding")
+        expected = _prepare(conn, store, registration, request,
+                            plan_schema=ref.schema_ref, legacy_contract=True)
+        payload = canonical_json(expected).encode()
+        if ref != artifact_reference(payload, ref.schema_ref):
+            raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search plan reference differs from its complete binding")
     try:
         store.read_verified(ref)
     except ArtifactError as error:
