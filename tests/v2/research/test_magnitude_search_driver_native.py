@@ -80,7 +80,13 @@ def test_fresh_registered_native_driver_executes_and_replays_read_only(source, t
         assert driver.main(["seal", *common]) == 0
         assert json.loads(capsys.readouterr().out) == binding
     assert catalog_rows(source.conn) == before
-    monkeypatch.setattr(Repository, "scan", forbidden)
+    original_scan = Repository.scan
+    def bounds_scan(repository, query, *, table_name, max_object_bytes=None):
+        if table_name != "computed_move_bounds" or max_object_bytes is None:
+            forbidden()
+        return original_scan(repository, query, table_name=table_name,
+                             max_object_bytes=max_object_bytes)
+    monkeypatch.setattr(Repository, "scan", bounds_scan)
     monkeypatch.setattr(trials, "load_magnitude_targets", forbidden)
     monkeypatch.setattr(outer, "load_magnitude_targets", forbidden)
     changed = tmp_path / "changed-code"

@@ -2,9 +2,8 @@
 import itertools
 import json
 import math
-import resource
-import sys
-import time
+from collections import Counter
+from datetime import date
 from pathlib import Path
 
 from engine.v2.contracts import ArtifactRef
@@ -27,6 +26,8 @@ from engine.v2.ops.native_registration import (
     validate_magnitude_fitted_execution,
 )
 from engine.v2.research import magnitude_folds
+from engine.v2.research.event_history import MAX_OUTCOME_OBJECT_BYTES
+from engine.v2.research.progress import Progress, decision, stage
 from experiments.label_availability import label_cutoff_reason
 from experiments.magnitude_search_errors import artifact_failure
 from experiments.magnitude_search_request_schema import (
@@ -136,6 +137,18 @@ def canonical_inner(plan, outer_year, inner_year):
     raise fail("INVALID_EXPERIMENT_SPEC", "trial is outside the sealed search plan")
 
 
+def _label_end(value):
+    """Accept only canonical stored dates; malformed artifacts are not absent rows."""
+    if value is None:
+        return None
+    try:
+        if not isinstance(value, str) or date.fromisoformat(value).isoformat() != value:
+            raise ValueError
+    except (TypeError, ValueError, OverflowError):
+        raise fail("EXPERIMENT_IDENTITY_CONFLICT", "planned label bounds are not canonical dates") from None
+    return value
+
+
 def _label_bounds(conn, store, binding):
     """Read only planned event keys; absent/none remain unavailable.
 
@@ -145,65 +158,59 @@ def _label_bounds(conn, store, binding):
     ``event_date in``; the unique key makes every returned row the planned row
     for that ticker/date, so cross-pairs and repeated session scans cannot
     satisfy an unplanned key. Each scan is bounded by its
-    ``scan_population_bound`` and the contract's batch/result caps.
+    ``scan_population_bound``, the contract's batch/result caps and the same
+    decoded-object cap as native magnitude outcome reads.
     """
-    started = time.monotonic()
-    print(f"[bounds] start rss_kib={resource.getrusage(resource.RUSAGE_SELF).ru_maxrss}",
-          file=sys.stderr)
+    events = binding["magnitude_plan"]["events"]
+    missing = {event["event_id"]: None for event in events}
+    snapshot, versions = binding["snapshot"], binding["snapshot"]["table_versions"]
+    days_by_ticker = {}
+    for event in events:
+        days_by_ticker.setdefault(event["ticker"], set()).add(event["event_date"])
+    if not days_by_ticker or BOUNDS_TABLE not in versions:
+        decision("label bounds", f"skipped planned_tickers={len(days_by_ticker)} "
+                 f"table_present={BOUNDS_TABLE in versions}")
+        return missing
     try:
-        events = binding["magnitude_plan"]["events"]
-        missing = {event["event_id"]: None for event in events}
-        snapshot, versions = binding["snapshot"], binding["snapshot"]["table_versions"]
-        days_by_ticker = {}
-        for event in events:
-            days_by_ticker.setdefault(event["ticker"], set()).add(event["event_date"])
-        if not days_by_ticker or BOUNDS_TABLE not in versions:
-            print(f"[bounds] skipped planned_tickers={len(days_by_ticker)} "
-                  f"table_present={BOUNDS_TABLE in versions}", file=sys.stderr)
-            return missing
-        repository = Repository(conn, store, pin_snapshots=True)
-        snapshot_id = snapshot["snapshot_id"]
-        resolved = repository.resolve(snapshot_id)
-        contract_ref = resolved.table_versions[BOUNDS_TABLE].table_contract_ref
-        found, empty_bounds = {}, 0
-        planned_tickers = sorted(days_by_ticker)
-        total = len(planned_tickers)
-        progress_started = last_progress = time.monotonic()
-        print(f"[bounds] planned tickers={total} events={len(events)}", file=sys.stderr)
-        for processed, ticker in enumerate(planned_tickers, start=1):
-            key_filter = (
-                KeyPredicate(column="ticker", operator="eq", values=(ticker,)),
-                KeyPredicate(column="event_date", operator="in",
-                             values=tuple(sorted(days_by_ticker[ticker]))))
-            bound = repository.scan_population_bound(snapshot_id, table_name=BOUNDS_TABLE,
-                table_contract_ref=contract_ref, key_filter=key_filter)
-            if not bound:
-                empty_bounds += 1
-                continue
-            request = DataQuery(snapshot_id=snapshot_id, table_contract_ref=contract_ref,
-                columns=("ticker", "event_date", "post_close_date"),
-                key_filter=key_filter, order_by=BOUNDS_CONTRACT.primary_key,
-                max_batch_rows=min(bound, BOUNDS_CONTRACT.maximum_batch_rows), max_result_rows=bound)
-            for batch in repository.scan(request, table_name=BOUNDS_TABLE):
-                for row in batch.to_pylist():
-                    found[(row["ticker"], row["event_date"])] = row["post_close_date"]
-            if time.monotonic() - last_progress >= 60:
-                elapsed = time.monotonic() - progress_started
-                rate = processed / elapsed if elapsed > 0 else 0.0
-                eta = (total - processed) / rate if rate > 0 else 0.0
-                print(f"[bounds] {processed}/{total} tickers, {rate:.3f} tickers/s, "
-                      f"ETA {eta:.0f}s", file=sys.stderr)
-                last_progress = time.monotonic()
-        missing_rows = sum(1 for event in events
-                           if found.get((event["ticker"], event["event_date"])) is None)
-        print(f"[bounds] done planned_tickers={total} empty_bounds={empty_bounds} "
-              f"missing_rows={missing_rows}", file=sys.stderr)
+        with stage("label bounds"):
+            repository = Repository(conn, store, pin_snapshots=True)
+            snapshot_id = snapshot["snapshot_id"]
+            resolved = repository.resolve(snapshot_id)
+            contract_ref = resolved.table_versions[BOUNDS_TABLE].table_contract_ref
+            found, empty_bounds = {}, 0
+            planned_tickers = sorted(days_by_ticker)
+            total = len(planned_tickers)
+            progress = Progress("label bounds tickers", total)
+            decision("label bounds", f"planned tickers={total} events={len(events)}")
+            for ticker in planned_tickers:
+                key_filter = (
+                    KeyPredicate(column="ticker", operator="eq", values=(ticker,)),
+                    KeyPredicate(column="event_date", operator="in",
+                                 values=tuple(sorted(days_by_ticker[ticker]))))
+                bound = repository.scan_population_bound(snapshot_id, table_name=BOUNDS_TABLE,
+                    table_contract_ref=contract_ref, key_filter=key_filter)
+                if not bound:
+                    empty_bounds += 1
+                else:
+                    request = DataQuery(snapshot_id=snapshot_id, table_contract_ref=contract_ref,
+                        columns=("ticker", "event_date", "post_close_date"),
+                        key_filter=key_filter, order_by=BOUNDS_CONTRACT.primary_key,
+                        max_batch_rows=min(bound, BOUNDS_CONTRACT.maximum_batch_rows), max_result_rows=bound)
+                    for batch in repository.scan(request, table_name=BOUNDS_TABLE,
+                                                 max_object_bytes=MAX_OUTCOME_OBJECT_BYTES):
+                        for row in batch.to_pylist():
+                            found[(row["ticker"], row["event_date"])] = _label_end(row["post_close_date"])
+                progress.tick()
+            missing_rows = sum(1 for event in events
+                               if found.get((event["ticker"], event["event_date"])) is None)
+            decision("label bounds", f"planned tickers={total} empty_bounds={empty_bounds} "
+                     f"missing_rows={missing_rows}")
         return {event["event_id"]: found.get((event["ticker"], event["event_date"]))
                 for event in events}
-    finally:
-        elapsed = time.monotonic() - started
-        print(f"[bounds] end elapsed={elapsed:.3f}s "
-              f"rss_kib={resource.getrusage(resource.RUSAGE_SELF).ru_maxrss}", file=sys.stderr)
+    except DataError as error:
+        code = ("EXPERIMENT_IDENTITY_CONFLICT" if error.problem.category == "integrity"
+                else "RESOURCE_UNAVAILABLE")
+        raise fail(code, "planned label bounds could not be read") from None
 
 
 def _filter_evaluation(event_ids, bounds, cutoff):
@@ -234,6 +241,7 @@ def _nested(binding, request, *, temporal=None, label_bounds=None):
     outer_cutoff = (binding["magnitude_execution"]["evaluation_labels_before"]
                     if label_bounds is not None else None)
     nested = []
+    exclusion_counts = Counter()
     try:
         for outer in expected:
             if label_bounds is not None:
@@ -242,6 +250,8 @@ def _nested(binding, request, *, temporal=None, label_bounds=None):
                 outer = {**outer, "evaluation_event_ids": retained}
                 if excluded:
                     outer["evaluation_exclusions"] = excluded
+                    for item in excluded:
+                        exclusion_counts.update(item["reasons"])
             members = set(outer["training_candidate_event_ids"])
             population = [event for event in temporal["events"] if event["event_id"] in members]
             inner = []
@@ -253,10 +263,15 @@ def _nested(binding, request, *, temporal=None, label_bounds=None):
                     fold = {**fold, "evaluation_event_ids": retained}
                     if excluded:
                         fold["evaluation_exclusions"] = excluded
+                        for item in excluded:
+                            exclusion_counts.update(item["reasons"])
                 inner.append({**fold, "evaluation_labels_before": outer["training_labels_before"]})
             nested.append({"outer": outer, "inner": inner})
     except DataError:
         raise fail("INVALID_EXPERIMENT_SPEC", "every search fold needs earlier training and evaluation candidates") from None
+    if exclusion_counts:
+        decision("search evaluation exclusions", ", ".join(
+            f"{reason}={count}" for reason, count in sorted(exclusion_counts.items())))
     return nested
 
 

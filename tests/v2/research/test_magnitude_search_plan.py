@@ -15,6 +15,7 @@ import pytest
 
 from engine.v2.contracts import ArtifactRef
 from engine.v2.data.errors import DataError
+from engine.v2.data.errors import fail as data_fail
 from engine.v2.data.repository import Repository
 from engine.v2.foundation import (
     ArtifactError,
@@ -50,6 +51,7 @@ from tests.v2.research.magnitude_trial_support import (
     outcome_move,
 )
 from tests.v2.research.test_native_registration import artifact_object_bytes
+from tests.v2.research import magnitude_trial_support as trial_support
 
 
 def _sha(value):
@@ -89,7 +91,7 @@ def source(tmp_path_factory):
     value.conn.close()
 
 
-def _metadata_only(monkeypatch, source):
+def _allow_bounds_only_access(monkeypatch, source):
     from sklearn.ensemble import HistGradientBoostingRegressor
     from sklearn.linear_model import Ridge
 
@@ -197,7 +199,7 @@ def test_public_fold_rule_is_shared_with_native_planning_and_all_source_bindings
         as_of_month=MONTH, evaluation_years=["2024", "2025"], training_start="2022-01-01")
     assert native_plan["folds"] == [fold["outer"] for fold in _expected_folds(source)]
     assert calls == ["2024", "2025"]
-    _metadata_only(monkeypatch, source)
+    _allow_bounds_only_access(monkeypatch, source)
     plan = search.seal_search_plan(source.conn, source.store, source.registration, _request())["plan"]
     _assert_folds(source, plan)
     assert calls == ["2024", "2025", "2024", "2025", "2023", "2023", "2024"]
@@ -249,8 +251,8 @@ def test_shared_population_refusal_is_normalized_at_outer_reconstruction(source,
         "EXPERIMENT_IDENTITY_CONFLICT", "outer fold metadata differs from its declared boundaries")
 
 
-def test_real_seal_verify_is_complete_metadata_only_idempotent_and_preserves_anchor(source, monkeypatch):
-    opened = _metadata_only(monkeypatch, source)
+def test_real_seal_verify_is_complete_bounds_only_idempotent_and_preserves_anchor(source, monkeypatch):
+    opened = _allow_bounds_only_access(monkeypatch, source)
     catalog, objects, anchor = catalog_rows(source.conn), artifact_object_bytes(source.store), source.registration.binding_json
     request = _request()
     sealed = search.seal_search_plan(source.conn, source.store, source.registration, request)
@@ -293,6 +295,64 @@ def test_real_seal_verify_is_complete_metadata_only_idempotent_and_preserves_anc
     _assert_candidates(reread)
 
 
+def test_missing_bounds_row_excludes_only_that_event_and_sealing_continues(tmp_path, monkeypatch):
+    events, moves = magnitude_dataset()
+    for event in events:
+        if event["event_date"].date().isoformat() in ("2023-01-03", "2025-01-07"):
+            event["session"] = "BMO"
+    for ticker in ("SYNTH_A", "SYNTH_B"):
+        for day in ("2022-12-22", "2022-12-23", "2024-12-27", "2024-12-30"):
+            event = history_event(day, ticker=ticker)
+            events.append(event)
+            moves.append(outcome_move(event, -3))
+    target = next(event for event in events
+                  if event["ticker"] == "SYNTH_B" and event["event_date"].date().isoformat() == "2024-06-17")
+    sibling = next(event for event in events
+                   if event["ticker"] == "SYNTH_B" and event["event_date"].date().isoformat() == "2024-06-12")
+    original = trial_support.write_bounds
+
+    def without_target(store, rows, events, sd, outcome_records):
+        rows = [row for row in rows if (row["ticker"], row["event_date"]) != (
+            target["ticker"], target["event_date"].date().isoformat())]
+        return original(store, rows, events, sd, outcome_records)
+
+    monkeypatch.setattr(trial_support, "write_bounds", without_target)
+    source = magnitude_source(tmp_path, register=False, build=False, events=events, moves=moves, bounds=True)
+    try:
+        source.build, source.feature_snapshot = build_history(source, training_start="2022-01-01",
+            evaluation_years=["2024", "2025"])
+        source.registration = native.register_native(source.conn, source.store, source.repository, source.spec,
+            code_root=ROOT, as_of_month=MONTH, magnitude_training_start="2022-01-01",
+            magnitude_labels_before=CUTOFF, magnitude_feature_snapshot_id=source.feature_snapshot.snapshot_id,
+            magnitude_history_start=HISTORY, magnitude_fit_model="history_ridge")
+        sealed = search.seal_search_plan(source.conn, source.store, source.registration, _request())
+        plan = sealed["plan"]
+        excluded = [item for fold in plan["folds"]
+                    for section in (fold["outer"], *fold["inner"])
+                    for item in section.get("evaluation_exclusions", [])]
+        assert [item for item in excluded if item["event_id"] == target["event_id"]] == [
+            {"event_id": target["event_id"], "reasons": ["label_bounds_missing"]},
+            {"event_id": target["event_id"], "reasons": ["label_bounds_missing"]}]
+        assert all(item["reasons"] == ["label_bounds_missing"] for item in excluded)
+        evaluations = [section["evaluation_event_ids"] for fold in plan["folds"]
+                       for section in (fold["outer"], *fold["inner"])]
+        assert all(target["event_id"] not in ids for ids in evaluations)
+        assert any(sibling["event_id"] in ids for ids in evaluations)
+    finally:
+        source.conn.close()
+
+
+def test_unreadable_bounds_scan_is_controlled_identity_refusal(source, monkeypatch):
+    def unreadable(repository, query, *, table_name, max_object_bytes=None):
+        raise data_fail("OBJECT_CORRUPT", "synthetic unreadable bounds object")
+
+    monkeypatch.setattr(Repository, "scan", unreadable)
+    with pytest.raises(OpsError) as caught:
+        search.seal_search_plan(source.conn, source.store, source.registration, _request())
+    assert to_document(caught.value.problem) == _problem(
+        "EXPERIMENT_IDENTITY_CONFLICT", "planned label bounds could not be read")
+
+
 @pytest.mark.parametrize("years", [{"0003": ["0002"]}, {"9998": ["9997"]}])
 def test_request_admits_both_year_endpoints(years):
     request = _request()
@@ -304,7 +364,7 @@ def test_request_admits_both_year_endpoints(years):
 
 
 def test_minimum_integer_leaf_count_has_exact_published_recipes(source, monkeypatch):
-    _metadata_only(monkeypatch, source)
+    _allow_bounds_only_access(monkeypatch, source)
     request = _request()
     request.update(space={"history_hgb": {"learning_rate": [0.05], "max_iter": [10],
         "max_leaf_nodes": [2, 4], "min_samples_leaf": [2], "l2_regularization": [0]}},
@@ -500,7 +560,7 @@ def test_two_candidate_single_family_request_is_supported_with_exact_refit_budge
 
 @pytest.mark.parametrize("kind", ["history_ridge", "history_hgb"])
 def test_changed_axes_produce_independent_complete_recipes_and_hashes(source, monkeypatch, kind):
-    _metadata_only(monkeypatch, source)
+    _allow_bounds_only_access(monkeypatch, source)
     request = _request()
     if kind == "history_ridge":
         request.update(space={kind: {"alpha": [0.25, 4, 8]}}, max_candidates=3, max_fits=33)
@@ -530,7 +590,7 @@ def test_changed_axes_produce_independent_complete_recipes_and_hashes(source, mo
 
 
 def test_alternate_inner_map_has_exact_fits_and_adjacent_cap_refuses_before_publication(source, monkeypatch):
-    _metadata_only(monkeypatch, source)
+    _allow_bounds_only_access(monkeypatch, source)
     request = _request()
     request.update(inner_years={"2024": ["2023"], "2025": ["2024"]}, max_fits=42)
     expected = _expected_folds(source)
@@ -563,7 +623,7 @@ def test_single_outer_anchor_has_exact_refit_budget_and_adjacent_cap_refusal(sou
     assert native.read_native_registration(source.conn, source.store, spec).binding_json == registration.binding_json
     assert registration.document["magnitude_plan"]["evaluation_years"] == ["2024"]
     assert registration.document["magnitude_plan"]["folds"] == [_expected_folds(source)[0]["outer"]]
-    _metadata_only(monkeypatch, source)
+    _allow_bounds_only_access(monkeypatch, source)
     request = _request()
     request.update(inner_years={"2024": ["2023"]}, max_fits=21)
     catalog = catalog_rows(source.conn)
@@ -664,7 +724,7 @@ def test_installed_identity_drift_refuses_without_publication(source, monkeypatc
 
 @pytest.mark.parametrize("drift", ["anchor_source", "fold_source", "environment"])
 def test_prepare_rejects_installed_anchor_drift_before_publication(source, monkeypatch, drift):
-    _metadata_only(monkeypatch, source)
+    _allow_bounds_only_access(monkeypatch, source)
     before = catalog_rows(source.conn), artifact_object_bytes(source.store)
     if drift == "environment":
         monkeypatch.setattr(search, "environment_identity", lambda _: {"changed": True})
@@ -751,7 +811,7 @@ def test_forged_metadata_schema_cannot_open_arbitrary_payload(source, monkeypatc
 @pytest.mark.parametrize("failure", [fail("INPUT_CHANGED", "missing source"), SyntaxError("invalid source"),
     OSError("unreadable source"), ArtifactError("UNSAFE_PATH", "invalid source path"), ValueError("invalid source")])
 def test_unverifiable_installed_source_is_identity_refusal(source, monkeypatch, failure):
-    _metadata_only(monkeypatch, source)
+    _allow_bounds_only_access(monkeypatch, source)
     before = catalog_rows(source.conn), artifact_object_bytes(source.store)
     def broken(*args):
         raise failure
@@ -821,7 +881,7 @@ def test_missing_plan_object_has_exact_resource_problem_without_publication(sour
     args[args.index("--store-root") + 1] = str(store.root)
     assert cli.main(args) == 2
     captured = capsys.readouterr()
-    assert not captured.err and json.loads(captured.out) == {"refused": expected}
+    assert json.loads(captured.out) == {"refused": expected}
     assert (catalog_rows(source.conn), artifact_object_bytes(store)) == before
 
 
@@ -888,7 +948,7 @@ def _args(source, action, path, reference=None):
 
 
 def test_real_cli_prepare_verify_preserves_catalog_and_no_trial_state(source, tmp_path, capsys, monkeypatch):
-    _metadata_only(monkeypatch, source)
+    _allow_bounds_only_access(monkeypatch, source)
     request, reference = tmp_path / "request.json", tmp_path / "reference.json"
     request.write_text(json.dumps(_request()))
     before = catalog_rows(source.conn)
