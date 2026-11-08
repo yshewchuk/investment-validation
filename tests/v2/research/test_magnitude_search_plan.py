@@ -11,9 +11,12 @@ import sys
 from dataclasses import replace
 from pathlib import Path
 
+import pyarrow as pa
 import pytest
 
 from engine.v2.contracts import ArtifactRef
+from engine.v2.data.computed_move_bounds import CONTRACT as BOUNDS_CONTRACT
+from engine.v2.data.computed_move_bounds import TABLE as BOUNDS_TABLE
 from engine.v2.data.errors import DataError
 from engine.v2.data.errors import fail as data_fail
 from engine.v2.data.repository import Repository
@@ -98,27 +101,37 @@ def _allow_bounds_only_access(monkeypatch, source):
     forbid_history_rebuild(monkeypatch)
     for estimator in (Ridge, HistGradientBoostingRegressor):
         monkeypatch.setattr(estimator, "__init__", forbid_access)
-    for name in ("resolve_pinned", "fragment_records", "table_contract"):
+    for name in ("resolve_pinned", "fragment_records"):
         monkeypatch.setattr(Repository, name, forbid_access)
-    original_scan, original_resolve, original_bound = (
-        Repository.scan, Repository.resolve, Repository.scan_population_bound)
+    original_scan, original_resolve, original_bound, original_contract = (
+        Repository.scan, Repository.resolve, Repository.scan_population_bound, Repository.table_contract)
+    scanning = [0]
 
     def scan(repository, query, *, table_name, max_object_bytes=None):
-        assert table_name == "computed_move_bounds"
-        return original_scan(repository, query, table_name=table_name,
-                             max_object_bytes=max_object_bytes)
+        assert table_name == BOUNDS_TABLE
+        scanning[0] += 1
+        try:
+            yield from original_scan(repository, query, table_name=table_name,
+                                     max_object_bytes=max_object_bytes)
+        finally:
+            scanning[0] -= 1
 
     def resolve(repository, snapshot_id):
         assert snapshot_id == source.registration.document["snapshot"]["snapshot_id"]
         return original_resolve(repository, snapshot_id)
 
+    def contract(repository, snapshot, table_name):
+        assert table_name == BOUNDS_TABLE
+        return original_contract(repository, snapshot, table_name)
+
     def bound(repository, snapshot_id, *, table_name, table_contract_ref, key_filter=(), time_interval=None):
-        assert table_name == "computed_move_bounds"
+        assert table_name == BOUNDS_TABLE
         return original_bound(repository, snapshot_id, table_name=table_name,
             table_contract_ref=table_contract_ref, key_filter=key_filter, time_interval=time_interval)
 
     monkeypatch.setattr(Repository, "scan", scan)
     monkeypatch.setattr(Repository, "resolve", resolve)
+    monkeypatch.setattr(Repository, "table_contract", contract)
     monkeypatch.setattr(Repository, "scan_population_bound", bound)
     from engine.v2.models.training import magnitude
     monkeypatch.setattr(magnitude, "fit_magnitude_predictions", forbid_access)
@@ -126,6 +139,8 @@ def _allow_bounds_only_access(monkeypatch, source):
     opened = []
 
     def read(store, ref, *args, **kwargs):
+        if ref.schema_ref == "parquet_fragment.v1":
+            assert scanning[0] > 0, "parquet fragment opened outside an active bounds scan"
         assert ref.schema_ref in ("native_experiment_registration.v1.5", "magnitude_search_plan.v1",
                                   "parquet_fragment.v1")
         opened.append(ref)
@@ -343,6 +358,76 @@ def test_missing_bounds_row_excludes_only_that_event_and_sealing_continues(tmp_p
             from_document(ArtifactRef, sealed["plan_ref"])) == canonical_json(plan).encode()
     finally:
         source.conn.close()
+
+
+def test_absent_bounds_table_refuses_whole_plan_before_reads(tmp_path, monkeypatch):
+    events, moves = magnitude_dataset()
+    for event in events:
+        if event["event_date"].date().isoformat() in ("2023-01-03", "2025-01-07"):
+            event["session"] = "BMO"
+    for ticker in ("SYNTH_A", "SYNTH_B"):
+        for day in ("2022-12-22", "2022-12-23", "2024-12-27", "2024-12-30"):
+            event = history_event(day, ticker=ticker)
+            events.append(event)
+            moves.append(outcome_move(event, -3))
+    source = magnitude_source(tmp_path, register=False, build=False, events=events, moves=moves, bounds=False)
+    try:
+        source.build, source.feature_snapshot = build_history(source, training_start="2022-01-01",
+            evaluation_years=["2024", "2025"])
+        source.registration = native.register_native(source.conn, source.store, source.repository, source.spec,
+            code_root=ROOT, as_of_month=MONTH, magnitude_training_start="2022-01-01",
+            magnitude_labels_before=CUTOFF, magnitude_feature_snapshot_id=source.feature_snapshot.snapshot_id,
+            magnitude_history_start=HISTORY, magnitude_fit_model="history_ridge")
+        monkeypatch.setattr(Repository, "table_contract", forbid_access)
+        monkeypatch.setattr(Repository, "scan_population_bound", forbid_access)
+        monkeypatch.setattr(Repository, "scan", forbid_access)
+        with pytest.raises(OpsError) as caught:
+            search.seal_search_plan(source.conn, source.store, source.registration, _request())
+        assert to_document(caught.value.problem) == _problem(
+            "CONTRACT_MISMATCH", "planned label bounds require the native bounds contract")
+    finally:
+        source.conn.close()
+
+
+def test_incompatible_bounds_contract_refuses_whole_plan_before_reads(source, monkeypatch):
+    stale = replace(BOUNDS_CONTRACT, contract_id="computed_move_bounds.stale")
+
+    def contract(repository, snapshot, table_name):
+        assert table_name == BOUNDS_TABLE
+        return stale
+
+    monkeypatch.setattr(Repository, "table_contract", contract)
+    monkeypatch.setattr(Repository, "scan_population_bound", forbid_access)
+    monkeypatch.setattr(Repository, "scan", forbid_access)
+    with pytest.raises(OpsError) as caught:
+        search.seal_search_plan(source.conn, source.store, source.registration, _request())
+    assert to_document(caught.value.problem) == _problem(
+        "CONTRACT_MISMATCH", "planned label bounds require the native bounds contract")
+
+
+def test_malformed_stored_post_close_date_is_controlled_refusal(source, monkeypatch):
+    target = next(event for event in source.events
+                  if event["ticker"] == "SYNTH_B" and event["event_date"].date().isoformat() == "2024-06-17")
+    day = target["event_date"].date().isoformat()
+    original_scan = Repository.scan
+
+    def scan(repository, query, *, table_name, max_object_bytes=None):
+        assert table_name == BOUNDS_TABLE
+        for batch in original_scan(repository, query, table_name=table_name,
+                                   max_object_bytes=max_object_bytes):
+            rows = batch.to_pylist()
+            changed = False
+            for row in rows:
+                if row["ticker"] == target["ticker"] and row["event_date"] == day:
+                    row["post_close_date"] = "not-a-canonical-date"
+                    changed = True
+            yield pa.Table.from_pylist(rows) if changed else batch
+
+    monkeypatch.setattr(Repository, "scan", scan)
+    with pytest.raises(OpsError) as caught:
+        search.seal_search_plan(source.conn, source.store, source.registration, _request())
+    assert to_document(caught.value.problem) == _problem(
+        "EXPERIMENT_IDENTITY_CONFLICT", "planned label bounds are not canonical dates")
 
 
 def test_unreadable_bounds_scan_is_controlled_identity_refusal(source, monkeypatch):
@@ -794,17 +879,23 @@ def test_same_hash_reference_metadata_drift_refuses_before_plan_open(source, mon
                "byte_size": ref.byte_size + 1, "schema_version": "artifact_ref.v9.0"}
     changed = replace(ref, **{field: changes[field]})
     assert changed.content_hash == ref.content_hash and changed != ref
-    original, opened = ArtifactStore.read_verified, []
+    original, opened, scanning = ArtifactStore.read_verified, [], [0]
     def read(store, candidate):
+        if candidate.schema_ref == "parquet_fragment.v1":
+            assert scanning[0] > 0, "parquet fragment opened outside a bounds scan"
         assert candidate.schema_ref in ("native_experiment_registration.v1.5",
                                         "parquet_fragment.v1"), "rejected plan opened"
         opened.append(candidate)
         return original(store, candidate)
     original_scan = Repository.scan
     def scan(repository, query, *, table_name, max_object_bytes=None):
-        assert table_name == "computed_move_bounds"
-        return original_scan(repository, query, table_name=table_name,
-                             max_object_bytes=max_object_bytes)
+        assert table_name == BOUNDS_TABLE
+        scanning[0] += 1
+        try:
+            yield from original_scan(repository, query, table_name=table_name,
+                                     max_object_bytes=max_object_bytes)
+        finally:
+            scanning[0] -= 1
     monkeypatch.setattr(ArtifactStore, "read_verified", read)
     monkeypatch.setattr(Repository, "scan", scan)
     monkeypatch.setattr(ArtifactStore, "publish_bytes", forbid_access)
@@ -819,16 +910,22 @@ def test_same_hash_reference_metadata_drift_refuses_before_plan_open(source, mon
 
 def test_forged_metadata_schema_cannot_open_arbitrary_payload(source, monkeypatch):
     ref = source.store.publish_bytes(b"synthetic protected outcome", schema_ref="magnitude_search_plan.v1")
-    original, opened = ArtifactStore.read_verified, []
+    original, opened, scanning = ArtifactStore.read_verified, [], [0]
     def read(store, candidate):
         assert candidate != ref, "unadmitted object opened"
+        if candidate.schema_ref == "parquet_fragment.v1":
+            assert scanning[0] > 0, "parquet fragment opened outside a bounds scan"
         opened.append(candidate)
         return original(store, candidate)
     original_scan = Repository.scan
     def scan(repository, query, *, table_name, max_object_bytes=None):
-        assert table_name == "computed_move_bounds"
-        return original_scan(repository, query, table_name=table_name,
-                             max_object_bytes=max_object_bytes)
+        assert table_name == BOUNDS_TABLE
+        scanning[0] += 1
+        try:
+            yield from original_scan(repository, query, table_name=table_name,
+                                     max_object_bytes=max_object_bytes)
+        finally:
+            scanning[0] -= 1
     monkeypatch.setattr(ArtifactStore, "read_verified", read)
     monkeypatch.setattr(Repository, "scan", scan)
     with pytest.raises(OpsError) as caught:

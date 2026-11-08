@@ -358,6 +358,8 @@ for same-position, read-only fixed-day versus target/stop comparisons.
 the pure magnitude window and metadata-only planner to bind research registrations.
 `experiments/magnitude_search_plan.py` consumes `magnitude_folds.annual_fold`
 to reconstruct outer metadata and plan nested folds with the same public rule.
+It owns label-bounds and strict-cutoff exclusions from native `computed_move_bounds`;
+consumers verify the sealed plan rather than re-deriving its folds.
 `experiments/magnitude_search_evidence.py` consumes stored-history reads, target
 preflight, training qualification and `magnitude_inputs.magnitude_recipe` for shared inner/outer evidence admission.
 `experiments/magnitude_search_trials.py` and `experiments/magnitude_search_outer.py`

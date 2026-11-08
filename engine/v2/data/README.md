@@ -118,6 +118,7 @@ SIZE manifest admission also reads `earnings_events` by ticker from its pinned w
 `documents.reject_duplicate_keys`, the public stdlib JSON object-pairs hook
 shared with `loads_document`; duplicate names raise `DocumentError` without I/O.
 `experiments/size_prep_inputs.py` consumes `Repository` and `computed_move_bounds.TABLE` to check that a no-op refresh head already carries source bounds.
+`experiments/magnitude_search_plan.py` is a bounded `computed_move_bounds` reader for fold label availability, querying only planned `(ticker, event_date)` keys.
 `experiments/registered_runup.py` consumes typed data refusals; `experiments/v2_runup_study.py` also consumes `Repository` and the duplicate-key hook for registered RUNUP admission.
 `experiments/distribution_trials.py` consumes `errors.DataError` to normalize retryable failures after a single-use claim; preclaim, read-only replay and nonretryable data failures preserve their native policy.
 

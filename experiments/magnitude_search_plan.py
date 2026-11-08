@@ -1,4 +1,4 @@
-"""Sealed, non-executable nested-search metadata over native fitted registrations."""
+"""Research-only sealed nested-search metadata for the standalone magnitude CLI."""
 import itertools
 import json
 import math
@@ -10,7 +10,7 @@ from engine.v2.contracts import ArtifactRef
 from engine.v2.contracts.data import DataQuery, KeyPredicate
 from engine.v2.data.computed_move_bounds import CONTRACT as BOUNDS_CONTRACT
 from engine.v2.data.computed_move_bounds import TABLE as BOUNDS_TABLE
-from engine.v2.data.errors import DataError
+from engine.v2.data.errors import DataError, fail as data_fail
 from engine.v2.data.repository import Repository
 from engine.v2.foundation import (
     ArtifactError,
@@ -48,8 +48,8 @@ _INTEGERS = {"max_iter", "max_leaf_nodes", "min_samples_leaf"}
 def plan_schema_for_request(request):
     """Return the default plan schema for a supported request version.
 
-    Research-only: there is no production entrypoint. Only the research planner
-    and the qualified SIZE binding call this mapping.
+    Research-only: the standalone ``experiments.v2_magnitude_search`` CLI and the
+    qualified SIZE binding call this mapping; there is no production entrypoint.
     """
     version = request.get("schema_version") if isinstance(request, dict) else None
     return PLAN_V2 if version == "magnitude_search_request.v3" else PLAN_V3
@@ -150,7 +150,11 @@ def _label_end(value):
 
 
 def _label_bounds(conn, store, binding):
-    """Read only planned event keys; absent/none remain unavailable.
+    """Read only planned event keys after validating the native bounds table/contract.
+
+    A missing table or a different bound contract refuses the whole plan with
+    ``CONTRACT_MISMATCH`` before any scan. An absent row for one planned event is
+    different: it stays ``None`` and is sealed as an exclusion for that event only.
 
     ``computed_move_bounds`` declares ``(ticker, event_date)`` as its unique
     primary key and both columns filterable. Group the plan's events by ticker
@@ -163,19 +167,21 @@ def _label_bounds(conn, store, binding):
     """
     events = binding["magnitude_plan"]["events"]
     missing = {event["event_id"]: None for event in events}
-    snapshot, versions = binding["snapshot"], binding["snapshot"]["table_versions"]
+    snapshot = binding["snapshot"]
     days_by_ticker = {}
     for event in events:
         days_by_ticker.setdefault(event["ticker"], set()).add(event["event_date"])
-    if not days_by_ticker or BOUNDS_TABLE not in versions:
-        decision("label bounds", f"skipped planned_tickers={len(days_by_ticker)} "
-                 f"table_present={BOUNDS_TABLE in versions}")
+    if not days_by_ticker:
+        decision("label bounds", "skipped planned_tickers=0")
         return missing
     try:
         with stage("label bounds"):
             repository = Repository(conn, store, pin_snapshots=True)
             snapshot_id = snapshot["snapshot_id"]
             resolved = repository.resolve(snapshot_id)
+            if (BOUNDS_TABLE not in resolved.table_versions
+                    or repository.table_contract(resolved, BOUNDS_TABLE) != BOUNDS_CONTRACT):
+                raise data_fail("CONTRACT_MISMATCH", "planned label bounds require the native bounds contract")
             contract_ref = resolved.table_versions[BOUNDS_TABLE].table_contract_ref
             found, empty_bounds = {}, 0
             planned_tickers = sorted(days_by_ticker)
@@ -276,7 +282,7 @@ def _nested(binding, request, *, temporal=None, label_bounds=None):
 
 
 def nested_folds(binding, request):
-    """Research-only public nested-fold adapter; it has no production entrypoint."""
+    """Research-only nested-fold adapter used by the research planner and SIZE/regression bindings."""
     return _nested(binding, request)
 
 
