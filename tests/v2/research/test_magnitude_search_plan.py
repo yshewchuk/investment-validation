@@ -14,7 +14,7 @@ from pathlib import Path
 import pyarrow as pa
 import pytest
 
-from engine.v2.contracts import ArtifactRef
+from engine.v2.contracts import ArtifactRef, KeyPredicate
 from engine.v2.data.computed_move_bounds import CONTRACT as BOUNDS_CONTRACT
 from engine.v2.data.computed_move_bounds import TABLE as BOUNDS_TABLE
 from engine.v2.data.errors import DataError
@@ -360,6 +360,95 @@ def test_missing_bounds_row_excludes_only_that_event_and_sealing_continues(tmp_p
         source.conn.close()
 
 
+def test_missing_all_bounds_rows_seals_every_evaluation_exclusion(tmp_path, monkeypatch):
+    events, moves = magnitude_dataset()
+    for event in events:
+        if event["event_date"].date().isoformat() in ("2023-01-03", "2025-01-07"):
+            event["session"] = "BMO"
+    for ticker in ("SYNTH_A", "SYNTH_B"):
+        for day in ("2022-12-22", "2022-12-23", "2024-12-27", "2024-12-30"):
+            event = history_event(day, ticker=ticker)
+            events.append(event)
+            moves.append(outcome_move(event, -3))
+    monkeypatch.setattr(trial_support, "write_bounds", lambda *args: ())
+    source = magnitude_source(tmp_path, register=False, build=False, events=events, moves=moves, bounds=True)
+    try:
+        source.build, source.feature_snapshot = build_history(source, training_start="2022-01-01",
+            evaluation_years=["2024", "2025"])
+        source.registration = native.register_native(source.conn, source.store, source.repository, source.spec,
+            code_root=ROOT, as_of_month=MONTH, magnitude_training_start="2022-01-01",
+            magnitude_labels_before=CUTOFF, magnitude_feature_snapshot_id=source.feature_snapshot.snapshot_id,
+            magnitude_history_start=HISTORY, magnitude_fit_model="history_ridge")
+        sealed = search.seal_search_plan(source.conn, source.store, source.registration, _request())
+        expected = _expected_folds(source)
+        sections = 0
+        for before, after in zip(expected, sealed["plan"]["folds"]):
+            for want, got in ((before["outer"], after["outer"]),
+                              *zip(before["inner"], after["inner"])):
+                sections += 1
+                assert got["evaluation_event_ids"] == []
+                assert got["evaluation_exclusions"] == [
+                    {"event_id": event_id, "reasons": ["label_bounds_missing"]}
+                    for event_id in want["evaluation_event_ids"]]
+        assert sections == 5
+        assert sealed["plan"]["plan_id"] == _sha({
+            key: value for key, value in sealed["plan"].items() if key != "plan_id"})
+        assert source.store.read_verified(
+            from_document(ArtifactRef, sealed["plan_ref"])) == canonical_json(sealed["plan"]).encode()
+    finally:
+        source.conn.close()
+
+
+def test_filter_evaluation_reports_both_strict_cutoff_reasons():
+    bounds = {"end-at-cutoff": "2024-01-02", "available-at-cutoff": "2024-01-01",
+              "before-cutoff": "2023-12-31"}
+    retained, excluded = search._filter_evaluation(
+        ["end-at-cutoff", "available-at-cutoff", "before-cutoff", "missing"], bounds, "2024-01-02")
+    assert retained == ["before-cutoff"]
+    assert excluded == [
+        {"event_id": "end-at-cutoff", "reasons": ["label_end_at_or_after_cutoff"]},
+        {"event_id": "available-at-cutoff", "reasons": ["label_available_at_or_after_cutoff"]},
+        {"event_id": "missing", "reasons": ["label_bounds_missing"]}]
+
+
+def test_plan_bounds_admission_is_bounded_before_resolve_and_scan(source, monkeypatch):
+    calls = []
+    original_probe, original_resolve, original_scan = (
+        search.probe_catalog, Repository.resolve, Repository.scan)
+    def probe(conn, snapshot_id, table_name, limits):
+        calls.append(("probe", table_name, dict(limits)))
+        return original_probe(conn, snapshot_id, table_name, limits)
+    def resolve(repository, snapshot_id):
+        calls.append(("resolve", snapshot_id))
+        return original_resolve(repository, snapshot_id)
+    def scan(repository, query, *, table_name, max_object_bytes=None):
+        calls.append(("scan", table_name, max_object_bytes, query))
+        yield from original_scan(repository, query, table_name=table_name,
+                                 max_object_bytes=max_object_bytes)
+    monkeypatch.setattr(search, "probe_catalog", probe)
+    monkeypatch.setattr(Repository, "resolve", resolve)
+    monkeypatch.setattr(Repository, "scan", scan)
+    sealed = search.seal_search_plan(source.conn, source.store, source.registration, _request())
+    kinds = [call[0] for call in calls]
+    assert kinds[0] == "probe"
+    assert kinds.index("probe") < kinds.index("resolve") < kinds.index("scan")
+    assert calls[0][1] == BOUNDS_TABLE
+    assert set(calls[0][2]) == {"max_catalog_tables", "max_catalog_fragments",
+        "max_catalog_bytes", "max_fragments", "max_partitions"}
+    assert all(type(value) is int and value > 0 for value in calls[0][2].values())
+    assert all(call[2] is not None for call in calls if call[0] == "scan")
+    planned = {}
+    for event in source.registration.document["magnitude_plan"]["events"]:
+        planned.setdefault(event["ticker"], set()).add(event["event_date"])
+    expected = [
+        [to_document(KeyPredicate(column="ticker", operator="eq", values=(ticker,))),
+         to_document(KeyPredicate(column="event_date", operator="in",
+                                  values=tuple(sorted(days))))]
+        for ticker, days in sorted(planned.items())]
+    assert [to_document(call[3])["key_filter"] for call in calls if call[0] == "scan"] == expected
+    assert sealed["plan"]["folds"]
+
+
 def test_absent_bounds_table_refuses_whole_plan_before_reads(tmp_path, monkeypatch):
     events, moves = magnitude_dataset()
     for event in events:
@@ -405,7 +494,8 @@ def test_incompatible_bounds_contract_refuses_whole_plan_before_reads(source, mo
         "CONTRACT_MISMATCH", "planned label bounds require the native bounds contract")
 
 
-def test_malformed_stored_post_close_date_is_controlled_refusal(source, monkeypatch):
+@pytest.mark.parametrize("stored", ["not-a-canonical-date", "2024-02-30"])
+def test_malformed_stored_post_close_date_is_controlled_refusal(source, monkeypatch, stored):
     target = next(event for event in source.events
                   if event["ticker"] == "SYNTH_B" and event["event_date"].date().isoformat() == "2024-06-17")
     day = target["event_date"].date().isoformat()
@@ -419,7 +509,7 @@ def test_malformed_stored_post_close_date_is_controlled_refusal(source, monkeypa
             changed = False
             for row in rows:
                 if row["ticker"] == target["ticker"] and row["event_date"] == day:
-                    row["post_close_date"] = "not-a-canonical-date"
+                    row["post_close_date"] = stored
                     changed = True
             yield pa.Table.from_pylist(rows) if changed else batch
 
@@ -428,6 +518,79 @@ def test_malformed_stored_post_close_date_is_controlled_refusal(source, monkeypa
         search.seal_search_plan(source.conn, source.store, source.registration, _request())
     assert to_document(caught.value.problem) == _problem(
         "EXPERIMENT_IDENTITY_CONFLICT", "planned label bounds are not canonical dates")
+
+
+def test_present_null_bounds_row_is_unavailable_while_absent_row_is_missing(tmp_path, monkeypatch):
+    events, moves = magnitude_dataset()
+    for event in events:
+        if event["event_date"].date().isoformat() in ("2023-01-03", "2025-01-07"):
+            event["session"] = "BMO"
+    for ticker in ("SYNTH_A", "SYNTH_B"):
+        for day in ("2022-12-22", "2022-12-23", "2024-12-27", "2024-12-30"):
+            event = history_event(day, ticker=ticker)
+            events.append(event)
+            moves.append(outcome_move(event, -3))
+    def target(day):
+        return next(event for event in events
+                    if event["ticker"] == "SYNTH_B" and event["event_date"].date().isoformat() == day)
+    absent, unavailable = target("2024-06-17"), target("2024-06-12")
+    original_write = trial_support.write_bounds
+    def without_absent(store, rows, events, sd, outcome_records):
+        rows = [row for row in rows if (row["ticker"], row["event_date"]) != (
+            absent["ticker"], absent["event_date"].date().isoformat())]
+        return original_write(store, rows, events, sd, outcome_records)
+    monkeypatch.setattr(trial_support, "write_bounds", without_absent)
+    source = magnitude_source(tmp_path, register=False, build=False, events=events, moves=moves, bounds=True)
+    try:
+        source.build, source.feature_snapshot = build_history(source, training_start="2022-01-01",
+            evaluation_years=["2024", "2025"])
+        source.registration = native.register_native(source.conn, source.store, source.repository, source.spec,
+            code_root=ROOT, as_of_month=MONTH, magnitude_training_start="2022-01-01",
+            magnitude_labels_before=CUTOFF, magnitude_feature_snapshot_id=source.feature_snapshot.snapshot_id,
+            magnitude_history_start=HISTORY, magnitude_fit_model="history_ridge")
+        day = unavailable["event_date"].date().isoformat()
+        original_scan = Repository.scan
+        def scan(repository, query, *, table_name, max_object_bytes=None):
+            assert table_name == BOUNDS_TABLE
+            for batch in original_scan(repository, query, table_name=table_name,
+                                       max_object_bytes=max_object_bytes):
+                rows = batch.to_pylist()
+                changed = False
+                for row in rows:
+                    if row["ticker"] == unavailable["ticker"] and row["event_date"] == day:
+                        row["post_close_date"] = None
+                        changed = True
+                yield pa.Table.from_pylist(rows) if changed else batch
+        monkeypatch.setattr(Repository, "scan", scan)
+        sealed = search.seal_search_plan(source.conn, source.store, source.registration, _request())
+        plan = sealed["plan"]
+        reasons = {absent["event_id"]: "label_bounds_missing",
+                   unavailable["event_id"]: "label_bounds_unavailable"}
+        sections = 0
+        for before, after in zip(_expected_folds(source), plan["folds"]):
+            for want, got in ((before["outer"], after["outer"]),
+                              *zip(before["inner"], after["inner"])):
+                sections += 1
+                retained, excluded = [], []
+                for event_id in want["evaluation_event_ids"]:
+                    if event_id in reasons:
+                        excluded.append({"event_id": event_id, "reasons": [reasons[event_id]]})
+                    else:
+                        retained.append(event_id)
+                assert got["evaluation_event_ids"] == retained
+                assert got.get("evaluation_exclusions", []) == excluded
+                if not excluded:
+                    assert "evaluation_exclusions" not in got
+        assert sections == 5
+        assert {item["reasons"][0] for fold in plan["folds"]
+                for section in (fold["outer"], *fold["inner"])
+                for item in section.get("evaluation_exclusions", [])} == {
+                    "label_bounds_missing", "label_bounds_unavailable"}
+        assert plan["plan_id"] == _sha({key: value for key, value in plan.items() if key != "plan_id"})
+        assert source.store.read_verified(
+            from_document(ArtifactRef, sealed["plan_ref"])) == canonical_json(plan).encode()
+    finally:
+        source.conn.close()
 
 
 def test_unreadable_bounds_scan_is_controlled_identity_refusal(source, monkeypatch):

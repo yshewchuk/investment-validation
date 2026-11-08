@@ -1,4 +1,8 @@
-"""Prepare or verify a bounded nested magnitude search plan; never execute trials."""
+"""Prepare or verify a bounded nested magnitude search plan; never execute trials.
+
+Planning admits the native bounds catalog through fixed caps, reads only planned
+label keys and seals per-event missing/cutoff exclusions.
+"""
 import argparse
 import errno
 import json

@@ -1,4 +1,9 @@
-"""Research-only sealed nested-search metadata for the standalone magnitude CLI."""
+"""Research-only sealed nested-search metadata with bounded label-bounds admission.
+
+Planning reads only the anchored feature snapshot's planned bounds keys and
+publishes or verifies canonical plan bytes; it writes no ledger, outcome or
+catalog reservation.
+"""
 import itertools
 import json
 import math
@@ -8,6 +13,7 @@ from pathlib import Path
 
 from engine.v2.contracts import ArtifactRef
 from engine.v2.contracts.data import DataQuery, KeyPredicate
+from engine.v2.data._bounded_catalog import probe_catalog
 from engine.v2.data.computed_move_bounds import CONTRACT as BOUNDS_CONTRACT
 from engine.v2.data.computed_move_bounds import TABLE as BOUNDS_TABLE
 from engine.v2.data.errors import DataError, fail as data_fail
@@ -43,6 +49,9 @@ _HORIZONS = (5, 3, 1)
 _AXES = {"history_ridge": {"alpha"}, "history_hgb": {
     "learning_rate", "max_iter", "max_leaf_nodes", "min_samples_leaf", "l2_regularization"}}
 _INTEGERS = {"max_iter", "max_leaf_nodes", "min_samples_leaf"}
+_BOUNDS_CATALOG_LIMITS = {"max_catalog_tables": 256, "max_catalog_fragments": 65_536,
+    "max_catalog_bytes": 64 * 1024 * 1024, "max_fragments": 65_536,
+    "max_partitions": 65_536}
 
 
 def plan_schema_for_request(request):
@@ -138,7 +147,11 @@ def canonical_inner(plan, outer_year, inner_year):
 
 
 def _label_end(value):
-    """Accept only canonical stored dates; malformed artifacts are not absent rows."""
+    """Accept canonical stored dates and null finalized-unavailable labels.
+
+    A null bound is a present row whose label the data contract finalized as
+    unavailable; malformed non-null artifacts remain identity conflicts.
+    """
     if value is None:
         return None
     try:
@@ -149,35 +162,61 @@ def _label_end(value):
     return value
 
 
+def _admit_bounds_catalog(conn, snapshot_id):
+    """Bound all-table catalog membership and bytes before resolving any table."""
+    began = not conn.in_transaction
+    if began:
+        conn.execute("BEGIN")
+    try:
+        probe_catalog(conn, snapshot_id, BOUNDS_TABLE, _BOUNDS_CATALOG_LIMITS)
+    except DataError as error:
+        if error.code == "CONTRACT_MISMATCH" and error.problem.message == "catalog probe table unavailable":
+            raise data_fail("CONTRACT_MISMATCH",
+                            "planned label bounds require the native bounds contract") from None
+        raise
+    finally:
+        if began and conn.in_transaction:
+            conn.execute("ROLLBACK")
+
+
 def _label_bounds(conn, store, binding):
     """Read only planned event keys after validating the native bounds table/contract.
 
     A missing table or a different bound contract refuses the whole plan with
     ``CONTRACT_MISMATCH`` before any scan. An absent row for one planned event is
-    different: it stays ``None`` and is sealed as an exclusion for that event only.
+    different: it stays out of the result and is sealed as
+    ``label_bounds_missing`` for that event only. A present row with a null
+    post-close date is likewise event-local, but seals
+    ``label_bounds_unavailable`` because the data contract finalizes that label
+    as unavailable.
 
     ``computed_move_bounds`` declares ``(ticker, event_date)`` as its unique
     primary key and both columns filterable. Group the plan's events by ticker
     and query each ticker's exact planned dates with ``ticker eq`` and
     ``event_date in``; the unique key makes every returned row the planned row
     for that ticker/date, so cross-pairs and repeated session scans cannot
-    satisfy an unplanned key. Each scan is bounded by its
-    ``scan_population_bound``, the contract's batch/result caps and the same
-    decoded-object cap as native magnitude outcome reads.
+    satisfy an unplanned key. Catalog membership and bytes are capped before
+    resolution, and each scan is bounded by its ``scan_population_bound``, the
+    contract's batch/result caps and the same decoded-object cap as native
+    magnitude outcome reads.
+
+    ``_prepare`` admits only a registration whose validated magnitude plan has
+    events, so the empty-population return is defensive for direct helper use
+    rather than a reachable planning branch, and adds no extra failure.
     """
     events = binding["magnitude_plan"]["events"]
-    missing = {event["event_id"]: None for event in events}
     snapshot = binding["snapshot"]
     days_by_ticker = {}
     for event in events:
         days_by_ticker.setdefault(event["ticker"], set()).add(event["event_date"])
     if not days_by_ticker:
         decision("label bounds", "skipped planned_tickers=0")
-        return missing
+        return {}
     try:
         with stage("label bounds"):
             repository = Repository(conn, store, pin_snapshots=True)
             snapshot_id = snapshot["snapshot_id"]
+            _admit_bounds_catalog(conn, snapshot_id)
             resolved = repository.resolve(snapshot_id)
             if (BOUNDS_TABLE not in resolved.table_versions
                     or repository.table_contract(resolved, BOUNDS_TABLE) != BOUNDS_CONTRACT):
@@ -208,11 +247,14 @@ def _label_bounds(conn, store, binding):
                             found[(row["ticker"], row["event_date"])] = _label_end(row["post_close_date"])
                 progress.tick()
             missing_rows = sum(1 for event in events
-                               if found.get((event["ticker"], event["event_date"])) is None)
+                               if (event["ticker"], event["event_date"]) not in found)
+            unavailable_rows = sum(1 for event in events
+                                   if (event["ticker"], event["event_date"]) in found
+                                   and found[(event["ticker"], event["event_date"])] is None)
             decision("label bounds", f"planned tickers={total} empty_bounds={empty_bounds} "
-                     f"missing_rows={missing_rows}")
-        return {event["event_id"]: found.get((event["ticker"], event["event_date"]))
-                for event in events}
+                     f"missing_rows={missing_rows} unavailable_rows={unavailable_rows}")
+        return {event["event_id"]: found[(event["ticker"], event["event_date"])]
+                for event in events if (event["ticker"], event["event_date"]) in found}
     except DataError as error:
         if error.problem.category == "integrity":
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "planned label bounds could not be read") from None
@@ -220,12 +262,19 @@ def _label_bounds(conn, store, binding):
 
 
 def _filter_evaluation(event_ids, bounds, cutoff):
-    """Keep labels available strictly before the cutoff; report one reason per drop."""
+    """Keep labels available strictly before the cutoff; report one reason per drop.
+
+    ``bounds`` contains only planned events with a bounds row, so membership
+    distinguishes an absent row from a present row whose label is unavailable.
+    """
     retained, excluded = [], []
     for event_id in event_ids:
-        label_end = bounds.get(event_id)
-        reason = ("label_bounds_missing" if label_end is None
-                  else label_cutoff_reason(label_end, cutoff))
+        if event_id not in bounds:
+            reason = "label_bounds_missing"
+        else:
+            label_end = bounds[event_id]
+            reason = ("label_bounds_unavailable" if label_end is None
+                      else label_cutoff_reason(label_end, cutoff))
         if reason is None:
             retained.append(event_id)
         else:
@@ -365,7 +414,7 @@ def seal_search_plan(conn, store, registration, request):
 
 
 def read_search_plan(conn, store, registration, request, ref):
-    """Verify exact reconstruction from the original reservation, without input payloads."""
+    """Reconstruct and revalidate the complete binding, repeating bounded bounds admission."""
     version = request.get("schema_version") if isinstance(request, dict) else None
     parsed_version = parse_request_version(version)
     if is_qualified_request(parsed_version) and parsed_version != 3:

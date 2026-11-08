@@ -663,7 +663,11 @@ def test_sealed_plan_excludes_labels_at_cutoff_and_trial_completes_on_survivors(
         recorder.start(*args)
         terminal = recorder.record(*args, forecasts=trial_forecasts(case, args))
         assert terminal["status"] == "succeeded"
-        assert {row["event_id"] for row in terminal["predictions"]} == set(inner["evaluation_event_ids"])
+        expected = sorted((event_id, horizon) for event_id in inner["evaluation_event_ids"]
+                          for horizon in plan["horizons"])
+        assert sorted((row["event_id"], row["horizon_sessions"])
+                      for row in terminal["predictions"]) == expected
+        assert len(terminal["predictions"]) == len(inner["evaluation_event_ids"]) * len(plan["horizons"])
     finally:
         source.conn.close()
 

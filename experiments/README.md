@@ -138,9 +138,15 @@ Its CLI also consumes `native_registration.read_native_registration`/`valid_regi
 
 `magnitude_search_plan` is research-only metadata planning invoked by the standalone
 `v2_magnitude_search` and `v2_magnitude_search_run` CLIs; it has no production caller.
-Planning requires the feature snapshot's native `computed_move_bounds` table and contract, reads
-only sealed event keys, seals per-event `label_bounds_missing` and strict-cutoff exclusions, and
-refuses a missing or drifted table contract with `CONTRACT_MISMATCH`.
+Planning requires the feature snapshot's native `computed_move_bounds` table and contract, admits its
+catalog through the bounded all-table probe before resolving it, reads
+only sealed event keys, seals per-event `label_bounds_missing`, present-null
+`label_bounds_unavailable` and strict-cutoff exclusions, and
+refuses a missing or drifted table contract with `CONTRACT_MISMATCH`. A malformed non-null stored
+date refuses `EXPERIMENT_IDENTITY_CONFLICT`, never a label-bounds exclusion. It publishes only
+the immutable plan artifact and writes no ledger. Its cutoff rule comes from the shared
+`experiments.label_availability` interface (`available_before`, `label_cutoff_reason`), which
+`size_search_binding` also consumes for SIZE fold admission.
 
 `magnitude_search_request.compile_request` preserves the source-free v2 request
 validator and its closed H/HM/HMO 33-candidate grid.
