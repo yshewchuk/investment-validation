@@ -23,7 +23,7 @@ _SEASON_HEAT_COLUMNS = (
     ColumnContract(name="season_heat_count_20", physical_type="int64", nullable=False,
         unit="count", null_policy="always present; zero before any observed label"),
     ColumnContract(name="season_heat_ratio_20_252", physical_type="float64", nullable=True,
-        unit="ratio", null_policy="null until 20 observed labels in both 20- and 252-session windows"),
+        unit="ratio", null_policy="null below the event minimum or when the 252-session mean is zero"),
 )
 _base = replace(_V1, table_name=TABLE, contract_id=TABLE + ".v2", semantic_version="2.0.0",
     columns=(*_V1.columns, *_SEASON_HEAT_COLUMNS),

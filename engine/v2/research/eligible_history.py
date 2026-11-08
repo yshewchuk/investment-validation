@@ -89,7 +89,7 @@ def _bound(event, anchors, records):
     key = event.ticker, event.event_date.date().isoformat()
     row, record = anchors.get(key), records.get(key)
     if row is None:
-        raise fail("CONTRACT_MISMATCH", "required event is missing native source bounds")
+        raise fail("CONTRACT_MISMATCH", f"required event {key} is missing native source bounds")
     if (record is None or record.row_count != 1
             or record.primary_key_min != key or record.primary_key_max != key
             or record.partition_key != key[0] or record.time_min != key[1] or record.time_max != key[1]
@@ -280,8 +280,6 @@ def _prepare(repository, snapshot, *, as_of_month, policy, event_ids, horizons, 
     season_plans = sorted((plan for plan in all_plans if plan[0].event_id in season_ids),
         key=lambda plan: (plan[0].event_date, plan[0].event_id))
     season_anchors = _anchors(repository, snapshot, limits)
-    season_plans = [plan for plan in season_plans
-        if (plan[0].ticker, plan[0].event_date.date().isoformat()) in season_anchors]
     season_records = {(event.ticker, event.event_date.date().isoformat()): record for event, _request, record in season_plans}
     season_bounds = {plan[0].event_id: bound for plan in season_plans
         if (bound := _bound(plan[0], season_anchors, season_records)) is not None}

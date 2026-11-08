@@ -565,7 +565,7 @@ def test_clock_memo_scales_with_distinct_keys_and_returns_detached_values(monkey
 def test_each_ticker_uses_its_own_history_ceiling_but_full_protected_metadata(tmp_path, protected):
     later = history_event("2023-06-20" if protected else "2024-04-02", ticker="OTHER", protected=protected)
     data = source(tmp_path, extra_ticker=True, extra_events=[later],
-        missing_bounds=[("OTHER", later["event_date"].date().isoformat())])
+        missing_bounds=[("OTHER", later["event_date"].date().isoformat())] if protected else ())
     try:
         request = {**data.request, "event_ids": [data.events[0]["event_id"], data.events[-2]["event_id"]]}
         if protected:
@@ -579,6 +579,19 @@ def test_each_ticker_uses_its_own_history_ceiling_but_full_protected_metadata(tm
             assert len(result["rows"]) == 6
             assert {r["event_id"] for r in result["rows"]} == set(request["event_ids"])
             assert later["event_id"] not in {g["event_id"] for g in artifact["context"]["eligibility"]["groups"]}
+    finally:
+        data.conn.close()
+
+
+def test_missing_season_population_bounds_refuses(tmp_path):
+    later = history_event("2024-04-02", ticker="OTHER")
+    data = source(tmp_path, extra_ticker=True, extra_events=[later],
+        missing_bounds=[("OTHER", later["event_date"].date().isoformat())])
+    try:
+        request = {**data.request, "event_ids": [data.events[0]["event_id"], data.events[-2]["event_id"]]}
+        with pytest.raises(DataError) as caught:
+            history.materialize(data.repository, data.snapshot, **request)
+        assert caught.value.code == "CONTRACT_MISMATCH"
     finally:
         data.conn.close()
 
@@ -779,7 +792,8 @@ def test_season_population_label_availability_is_bound_to_native_bounds(tmp_path
 
 def test_skipped_season_population_label_is_omitted(tmp_path, monkeypatch):
     import engine.v2.research.eligible_history as internal
-    data = source(tmp_path, extra_events=[history_event("2024-06-03", ticker="OTHER")])
+    data = source(tmp_path, extra_events=[history_event("2024-06-03", ticker="OTHER"),
+        history_event("2024-06-04", ticker="KEEP")])
     try:
         target_id = next(event["event_id"] for event in data.events
             if event["event_date"].date().isoformat() == "2024-06-17")
@@ -811,5 +825,6 @@ def test_skipped_season_population_label_is_omitted(tmp_path, monkeypatch):
         artifact = history.materialize(data.repository, data.snapshot, **request)
         assert artifact["feature_snapshot"] is not None
         assert all(label["ticker"] != "OTHER" for label in captured)
+        assert any(label["ticker"] == "KEEP" for label in captured)
     finally:
         data.conn.close()
