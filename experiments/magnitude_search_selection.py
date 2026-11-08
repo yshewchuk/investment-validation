@@ -246,14 +246,19 @@ def selection_tie_band(scores, yearly_scores, *, floor,
             _identifier(year, "selection yearly year")
             _finite_number(_field(yearly[year], "blend_score", "selection yearly year row"),
                            "selection yearly year blend_score")
-        by_candidate[candidate_id] = yearly
+        by_candidate[candidate_id] = (yearly, bool(row.get("diagnostic_unavailable", False)))
     best = min(score_rows, key=lambda row: (row["blend_score"], row["candidate_id"]))
     if best["candidate_id"] not in by_candidate:
         raise ValueError("selection tie band missing candidate yearly scores")
-    yearly = by_candidate[best["candidate_id"]]
+    yearly, diagnostic_unavailable = by_candidate[best["candidate_id"]]
     values = [yearly[year]["blend_score"] for year in sorted(yearly)]
-    standard_error = stdev(values) / math.sqrt(len(values)) if len(values) > 1 else 0.0
-    width = max(standard_error, floor)
+    if diagnostic_unavailable:
+        standard_error = None
+    elif values:
+        standard_error = stdev(values) / math.sqrt(len(values)) if len(values) > 1 else 0.0
+    else:
+        standard_error = 0.0
+    width = floor if standard_error is None else max(standard_error, floor)
     tied = [row for row in scores if row["blend_score"] <= best["blend_score"] + width]
     if tie_rule == LEGACY_TIE_RULE:
         selected = min(tied, key=lambda row: row["candidate_id"])

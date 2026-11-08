@@ -49,6 +49,7 @@ from experiments.magnitude_search_plan import (
 )
 from experiments.magnitude_search_records import MIGRATIONS, OWNER, append_record, read_record
 from experiments.magnitude_search_selection import (
+    LEGACY_TIE_RULE,
     ZeroComparatorError,
     blended_event_score,
     history_mean_rows,
@@ -823,10 +824,16 @@ class SearchTrials:
                                    "sealed search plan has an unsupported selection tie rule") from None
                     best = min(eligible,
                                key=lambda score: (score["blend_score"], score["candidate_id"]))
-                    if any(value is None for value in best["yearly"].values()):
+                    leader_yearly_missing = any(
+                        value is None for value in best["yearly"].values())
+                    if leader_yearly_missing and tie_rule == LEGACY_TIE_RULE:
                         raise ZeroComparatorError("cannot normalize a nonzero candidate error by zero history_mean error")
                     yearly_scores = [score for score in eligible if all(
                         value is not None for value in score["yearly"].values())]
+                    if leader_yearly_missing:
+                        yearly_scores = [{"candidate_id": best["candidate_id"], "yearly": {},
+                                          "diagnostic_unavailable": True},
+                                         *yearly_scores]
                     selected_id, tie_band = selection_tie_band(eligible, yearly_scores,
                         floor=policy["tie_band_floor"], tie_rule=tie_rule)
                     pooled_history = [row for year in sorted(outer["inner"], key=lambda item: item["year"])
