@@ -822,7 +822,8 @@ class SearchTrials:
                     yearly_scores = [score for score in eligible if all(
                         value is not None for value in score["yearly"].values())]
                     selected_id, tie_band = selection_tie_band(eligible, yearly_scores,
-                        floor=policy["tie_band_floor"])
+                        floor=policy["tie_band_floor"],
+                        tie_rule=plan["selection"]["ties"])
                     pooled_history = [row for year in sorted(outer["inner"], key=lambda item: item["year"])
                         for row in history_rows_by_year[year["year"]]]
                     history_score = blended_event_score(pooled_history, pooled_history,

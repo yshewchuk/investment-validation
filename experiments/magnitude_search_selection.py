@@ -197,11 +197,18 @@ def blended_event_score(candidate_rows, history_rows, *, metric_weights, large_m
     return {"metrics": raw, "normalized": normalized, "blend_score": blend}
 
 
-def selection_tie_band(scores, yearly_scores, *, floor):
-    """Return the lowest-score candidate, breaking exact score ties by candidate_id ascending.
+def selection_tie_band(scores, yearly_scores, *, floor,
+                       tie_rule="lowest_score_then_candidate_id_ascending"):
+    """Return the selected candidate under the sealed tie rule plus band diagnostics.
 
-    The max(sample-SE, floor) noise band is diagnostic only and never selects a winner.
+    The max(sample-SE, floor) noise band and its candidate list are diagnostics.
+    The current ``lowest_score_then_candidate_id_ascending`` rule selects the
+    lowest blend score, using candidate_id only for exact score equality.
+    Legacy ``candidate_id_ascending`` selects the lowest candidate_id within
+    that same diagnostic band. Any other tie_rule is rejected.
     """
+    if tie_rule not in ("lowest_score_then_candidate_id_ascending", "candidate_id_ascending"):
+        raise ValueError(f"unsupported tie_rule: {tie_rule!r}")
     _finite_nonnegative(floor, "tie_band_floor")
     score_rows = _rows(scores, "selection score rows")
     if not score_rows:
@@ -230,7 +237,11 @@ def selection_tie_band(scores, yearly_scores, *, floor):
     standard_error = stdev(values) / math.sqrt(len(values)) if len(values) > 1 else 0.0
     width = max(standard_error, floor)
     tied = [row for row in scores if row["blend_score"] <= best["blend_score"] + width]
-    return best["candidate_id"], {
+    if tie_rule == "candidate_id_ascending":
+        selected = min(tied, key=lambda row: row["candidate_id"])
+    else:
+        selected = best
+    return selected["candidate_id"], {
         "best_blend_score": best["blend_score"],
         "standard_error": standard_error,
         "width": width,

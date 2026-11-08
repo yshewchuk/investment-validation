@@ -111,11 +111,13 @@ def lead_one_case(tmp_path_factory):
 
 
 def _assert_legacy_plan_replay(case, registration, request, plan):
-    """The pre-change tie string still reconstructs and reads its exact sealed artifact."""
-    legacy = deepcopy(plan)
-    legacy["selection"]["ties"] = "candidate_id_ascending"
-    legacy["plan_id"] = content_hash({key: value for key, value in legacy.items() if key != "plan_id"})
-    ref = case.store.publish_bytes(canonical_json(legacy).encode(), schema_ref=legacy["schema_version"])
+    """Independently rebuild the prior-contract plan and confirm exact sealed replay."""
+    legacy = binding.prepare_plan(case.conn, case.store, registration, request,
+                                  legacy_contract=True)
+    assert legacy["selection"]["ties"] == "candidate_id_ascending"
+    assert legacy["plan_id"] != plan["plan_id"]
+    ref = case.store.publish_bytes(canonical_json(legacy).encode(),
+                                   schema_ref=legacy["schema_version"])
     assert planner.read_search_plan(case.conn, case.store, registration, request, ref) == legacy
 
 
@@ -350,8 +352,28 @@ def test_preflight_missing_inner_year_refuses_before_reservation(case):
 
 def test_replay_stale_producer_and_request_mismatch_refuse(case, monkeypatch):
     monkeypatch.setattr(binding, "source_closure", lambda *a: {})
-    with pytest.raises(OpsError, match="differs"):
+    with pytest.raises(OpsError, match="differs") as caught:
         planner.read_search_plan(case.conn, case.store, case.registration, case.request, case.ref)
+    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+
+
+def test_prepare_plan_rejects_non_bool_legacy_contract():
+    with pytest.raises(OpsError) as caught:
+        binding.prepare_plan(None, None, None, None, legacy_contract="false")
+    assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
+
+
+def test_legacy_plan_with_mismatched_fit_count_refuses_identity(case):
+    legacy = binding.prepare_plan(case.conn, case.store, case.registration, case.request,
+                                  legacy_contract=True)
+    legacy["planned_fit_count"] = legacy["planned_fit_count"] + 1
+    legacy["plan_id"] = content_hash({key: value for key, value in legacy.items()
+                                      if key != "plan_id"})
+    ref = case.store.publish_bytes(canonical_json(legacy).encode(),
+                                   schema_ref=legacy["schema_version"])
+    with pytest.raises(OpsError) as caught:
+        planner.read_search_plan(case.conn, case.store, case.registration, case.request, ref)
+    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
 
 
 def test_no_fit_probe_does_not_claim_comparator(case):

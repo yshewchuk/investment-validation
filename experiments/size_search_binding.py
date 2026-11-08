@@ -274,6 +274,8 @@ def _shared_inner(folds):
 
 def prepare_plan(conn, store, registration, request, *, plan_schema=None, legacy_contract=False):
     """Expand the fixed dictionary grid into fully bound executable recipes."""
+    if type(legacy_contract) is not bool:
+        raise fail("INVALID_EXPERIMENT_SPEC", "legacy_contract must be a bool")
     from experiments.magnitude_search_plan import PLAN_V2, PLAN_V3, plan_schema_for_request
     default_schema = plan_schema_for_request(request)
     if plan_schema is None:
