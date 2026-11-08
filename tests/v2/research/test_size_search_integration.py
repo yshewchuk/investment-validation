@@ -117,11 +117,12 @@ def _assert_legacy_plan_replay(case, registration, request, plan):
     legacy.pop("plan_id")
     legacy["plan_id"] = content_hash(legacy)
     expected_bytes = canonical_json(legacy).encode()
-    assert legacy["selection"]["ties"] == "candidate_id_ascending"
     assert legacy["plan_id"] != plan["plan_id"]
     ref = case.store.publish_bytes(expected_bytes, schema_ref=legacy["schema_version"])
     assert case.store.read_verified(ref) == expected_bytes
-    assert planner.read_search_plan(case.conn, case.store, registration, request, ref) == legacy
+    reconstructed = planner.read_search_plan(case.conn, case.store, registration, request, ref)
+    assert reconstructed["selection"]["ties"] == "candidate_id_ascending"
+    assert reconstructed == legacy
 
 
 def test_lead_one_seals_single_horizon_plan_and_preserves_v2_request_identity(case, lead_one_case):
@@ -408,6 +409,7 @@ def test_legacy_plan_comparison_reaches_no_fit_guard(case, monkeypatch):
         comparison.execute(case.conn, case.store, case.repository, case.registration, legacy, fold,
                            limits=case.request["limits"]["child"])
     assert reads[0] == "seal"
+    assert reads[1:]
     assert all(slot.startswith("comparison-terminal:") for slot in reads[1:])
     assert case.conn.execute("SELECT COUNT(*) FROM magnitude_search_records").fetchone()[0] == before
 

@@ -10,6 +10,7 @@ from engine.v2.ops.migrations import require_current
 from experiments.magnitude_search_execution import run_fitted_trial
 from experiments.magnitude_search_inputs import load_inputs, publish_inputs
 from experiments.magnitude_search_records import MIGRATIONS, OWNER, append_record, read_record
+from experiments.magnitude_search_selection import LEGACY_TIE_RULE, selection_contract_tie_rule
 from experiments.size_comparator import COLUMNS, _values, fit_evidence, recipe
 from experiments.size_job_budget import resolved_limits
 from experiments.size_search_binding import fold_inputs, prepare_plan
@@ -63,14 +64,14 @@ def execute(conn, store, repository, registration, plan, fold, *, limits, replay
         _equal(plan, iv.prepare_plan(conn, store, registration, plan["request"]))
         execution = iv.execution(plan)
     else:
-        selection = plan.get("selection")
-        ties = selection.get("ties") if isinstance(selection, dict) else None
-        if ties not in ("lowest_score_then_candidate_id_ascending", "candidate_id_ascending"):
+        try:
+            ties = selection_contract_tie_rule(plan.get("selection"))
+        except ValueError:
             raise fail("EXPERIMENT_IDENTITY_CONFLICT",
-                       "sealed search plan has an unsupported selection tie rule")
+                       "sealed search plan has an unsupported selection tie rule") from None
         _equal(plan, prepare_plan(conn, store, registration, plan["request"],
                                   plan_schema=plan.get("schema_version"),
-                                  legacy_contract=ties == "candidate_id_ascending"))
+                                  legacy_contract=ties == LEGACY_TIE_RULE))
         execution = {"schema_version": "size_comparison_execution.v1", "features": COLUMNS,
                      "fit_recipe": registration.document["size_comparison"]}
         _equal(execution["fit_recipe"], recipe())

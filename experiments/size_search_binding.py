@@ -26,6 +26,7 @@ from engine.v2.research.magnitude_panel_qualified_table import METADATA, admit_c
 from experiments.magnitude_candidate_recipe import candidate_recipe
 from experiments.magnitude_search_request_schema import allows_size_family, request_version
 from experiments.magnitude_search_request_versions import compile_request
+from experiments.magnitude_search_selection import CURRENT_TIE_RULE, LEGACY_TIE_RULE
 from experiments.native_registration import (
     MAX_NATIVE_EVIDENCE_BYTES,
     NativeRegistration,
@@ -313,7 +314,7 @@ def prepare_plan(conn, store, registration, request, *, plan_schema=None, legacy
                     "source_binding_id": source_binding_id, "candidate_spec_id": spec["candidate_spec_id"]}
         candidates.append({**identity, "candidate_id": content_hash(identity)})
     requested_selection = schedule["request"].get("selection")
-    ties = "candidate_id_ascending" if legacy_contract else "lowest_score_then_candidate_id_ascending"
+    ties = LEGACY_TIE_RULE if legacy_contract else CURRENT_TIE_RULE
     if requested_selection is None:
         selection_contract = {"metric": "inner_pooled_rmse", "ties": ties, "retries": 0,
                               "outer": "frozen_selected_only", "final_read_authority": "none"}
