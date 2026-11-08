@@ -13,6 +13,7 @@ from engine.v2.ops.migrations import require_current
 from engine.v2.research.magnitude_inputs import load_magnitude_targets
 from experiments.magnitude_report import magnitude_metrics
 from experiments.magnitude_search_evidence import (
+    _requires_event_dates,
     admit_fold_inputs,
     evaluation_targets,
     fit_evidence,
@@ -256,7 +257,8 @@ def _execute_admitted(conn, store, repository, registration, plan, fold, selecti
     forbid_fitting("execute_outer_fold")
     forbid_legacy_fitting("execute_outer_fold")
     resolved = resolved_limits(conn, store, registration, plan, limits) if diagnostic_keys(binding) else execution_limits(limits)
-    inputs = _inputs(repository, binding, fold, plan=plan) if saved("start") is None else None
+    legacy = "target" not in plan and not _requires_event_dates(plan)
+    inputs = _inputs(repository, binding, fold, plan=plan) if saved("start") is None and not legacy else None
     append("start", started)
     if inputs is None:
         inputs = _inputs(repository, binding, fold, plan=plan)
