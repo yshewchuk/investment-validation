@@ -68,6 +68,9 @@ def _fit(recipe, inputs, *, nonnegative, result_schema, row_error):
         empty = np.isnan(train).all(axis=0)
         train[:, empty] = 0.0
         prediction[:, empty] = 0.0
+    floor = recipe.get("target_floor_pct")
+    if floor is not None:
+        labels = np.maximum(labels, floor)
     model = build_estimator(recipe)
     with threadpool_limits(limits=1):
         model.fit(train, labels)

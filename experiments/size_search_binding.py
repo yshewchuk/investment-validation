@@ -3,7 +3,7 @@ import copy
 import json
 import sys
 import time
-from datetime import date, timedelta
+from datetime import date
 from hashlib import sha256
 from pathlib import Path
 
@@ -23,6 +23,8 @@ from engine.v2.research.magnitude_inputs import (
     qualify_magnitude_training_targets,
 )
 from engine.v2.research.magnitude_panel_qualified_table import METADATA, admit_columns
+from experiments.label_availability import available_before as _available_before
+from experiments.label_availability import label_cutoff_reason as _label_cutoff_reason
 from experiments.magnitude_candidate_recipe import candidate_recipe
 from experiments.magnitude_search_request_schema import allows_size_family, request_version
 from experiments.magnitude_search_request_versions import compile_request
@@ -48,18 +50,6 @@ SCHEMA = "native_experiment_registration.v1.7"
 def _require(condition):
     if not condition:
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "qualified SIZE source/fold binding differs")
-
-
-def _available_before(label_end, cutoff):
-    return (date.fromisoformat(label_end) + timedelta(days=1)).isoformat() < cutoff
-
-
-def _label_cutoff_reason(label_end, cutoff):
-    if label_end >= cutoff:
-        return "label_end_at_or_after_cutoff"
-    if not _available_before(label_end, cutoff):
-        return "label_available_at_or_after_cutoff"
-    return None
 
 
 def _panel_columns(schema_version, model_columns):
