@@ -14,6 +14,7 @@ from engine.v2.research.magnitude_panel_qualified_table import recipe
 from experiments import eligible_history, magnitude_search_request_versions, size_panel
 from experiments import magnitude_search_plan as planner
 from experiments import size_search_binding as binding
+from experiments.magnitude_search_selection import LEGACY_TIE_RULE
 from experiments.native_registration import reserve_native_registration, verify_native_registration
 from experiments.size_search_report import collect
 from experiments.v2_magnitude_search_run import run_search, seal_search_run
@@ -110,18 +111,28 @@ def lead_one_case(tmp_path_factory):
         pass
 
 
-def _assert_legacy_plan_replay(case, registration, request, plan):
-    """Independently rebuild the prior-contract plan and confirm exact sealed replay."""
+def _assert_legacy_plan_replay(case, registration, request, plan, monkeypatch):
+    """Pin the canonical prior-contract plan identity and verify exact sealed replay."""
     legacy = deepcopy(plan)
-    legacy["selection"]["ties"] = "candidate_id_ascending"
+    legacy["selection"]["ties"] = LEGACY_TIE_RULE
     legacy.pop("plan_id")
     legacy["plan_id"] = content_hash(legacy)
     expected_bytes = canonical_json(legacy).encode()
     assert legacy["plan_id"] != plan["plan_id"]
+    assert legacy["plan_id"] == "sha256:1da1cfecef7c9e51dd714375bcd6adb738fd45aa9e355dce3b912fe506c072e7"
     ref = case.store.publish_bytes(expected_bytes, schema_ref=legacy["schema_version"])
     assert case.store.read_verified(ref) == expected_bytes
+    original_prepare = planner._prepare
+    calls = []
+
+    def counted_prepare(*args, **kwargs):
+        calls.append(True)
+        return original_prepare(*args, **kwargs)
+
+    monkeypatch.setattr(planner, "_prepare", counted_prepare)
     reconstructed = planner.read_search_plan(case.conn, case.store, registration, request, ref)
-    assert reconstructed["selection"]["ties"] == "candidate_id_ascending"
+    assert len(calls) == 1
+    assert reconstructed["selection"]["ties"] == LEGACY_TIE_RULE
     assert reconstructed == legacy
 
 
@@ -179,14 +190,13 @@ def test_v3_qualified_request_seals_reconstructs_v2_plan(case):
     verify_native_registration(case.conn, case.store, registration)
     sealed = planner.seal_search_plan(case.conn, case.store, registration, v3)
     assert sealed["plan"]["schema_version"] == "magnitude_search_plan.v2"
-    assert sealed["plan"]["selection"] == {"metric": "inner_pooled_rmse", "ties": "lowest_score_then_candidate_id_ascending",
+    assert sealed["plan"]["selection"] == {"metric": "inner_pooled_rmse", "ties": LEGACY_TIE_RULE,
         "retries": 0, "outer": "frozen_selected_only", "final_read_authority": "none"}
     ref = from_document(ArtifactRef, sealed["plan_ref"])
     assert planner.read_search_plan(case.conn, case.store, registration, v3, ref) == sealed["plan"]
-    _assert_legacy_plan_replay(case, registration, v3, sealed["plan"])
 
 
-def test_v4_qualified_request_seals_reconstructs_v3_plan(case):
+def test_v4_qualified_request_seals_reconstructs_v3_plan(case, monkeypatch):
     v4 = deepcopy(case.request)
     v4["schema_version"] = "magnitude_search_request.v4"
     v4["space"] = {
@@ -228,7 +238,7 @@ def test_v4_qualified_request_seals_reconstructs_v3_plan(case):
                for candidate in sealed["plan"]["candidates"]) == 48
     ref = from_document(ArtifactRef, sealed["plan_ref"])
     assert planner.read_search_plan(case.conn, case.store, registration, v4, ref) == sealed["plan"]
-    _assert_legacy_plan_replay(case, registration, v4, sealed["plan"])
+    _assert_legacy_plan_replay(case, registration, v4, sealed["plan"], monkeypatch)
 
 
 def test_native_registration_detaches_caller_document(case):
@@ -362,7 +372,7 @@ def test_replay_stale_producer_and_request_mismatch_refuse(case, monkeypatch):
 
 
 def test_prepare_plan_rejects_non_bool_legacy_contract():
-    with pytest.raises(OpsError) as caught:
+    with pytest.raises(OpsError, match="legacy_contract must be a bool") as caught:
         binding.prepare_plan(None, None, None, None, legacy_contract="false")
     assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
 
@@ -375,7 +385,7 @@ def test_legacy_plan_with_mismatched_fit_count_refuses_identity(case):
                                       if key != "plan_id"})
     ref = case.store.publish_bytes(canonical_json(legacy).encode(),
                                    schema_ref=legacy["schema_version"])
-    with pytest.raises(OpsError) as caught:
+    with pytest.raises(OpsError, match="search plan reference differs from its complete binding") as caught:
         planner.read_search_plan(case.conn, case.store, case.registration, case.request, ref)
     assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
 

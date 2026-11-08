@@ -304,11 +304,11 @@ def prepare_plan(conn, store, registration, request, *, plan_schema=None, legacy
                     "source_binding_id": source_binding_id, "candidate_spec_id": spec["candidate_spec_id"]}
         candidates.append({**identity, "candidate_id": content_hash(identity)})
     requested_selection = schedule["request"].get("selection")
-    ties = LEGACY_TIE_RULE if legacy_contract else CURRENT_TIE_RULE
     if requested_selection is None:
-        selection_contract = {"metric": "inner_pooled_rmse", "ties": ties, "retries": 0,
+        selection_contract = {"metric": "inner_pooled_rmse", "ties": LEGACY_TIE_RULE, "retries": 0,
                               "outer": "frozen_selected_only", "final_read_authority": "none"}
     else:
+        ties = LEGACY_TIE_RULE if legacy_contract else CURRENT_TIE_RULE
         selection_contract = {
             "metric": "inner_pooled_history_mean_normalized_event_blend",
             "metric_weights": requested_selection["metric_weights"],
