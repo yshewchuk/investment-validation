@@ -775,3 +775,41 @@ def test_season_population_label_availability_is_bound_to_native_bounds(tmp_path
         assert caught.value.code == "CONTRACT_MISMATCH"
     finally:
         data.conn.close()
+
+
+def test_skipped_season_population_label_is_omitted(tmp_path, monkeypatch):
+    import engine.v2.research.eligible_history as internal
+    data = source(tmp_path, extra_events=[history_event("2024-06-03", ticker="OTHER")])
+    try:
+        target_id = next(event["event_id"] for event in data.events
+            if event["event_date"].date().isoformat() == "2024-06-17")
+        request = {**data.request, "event_ids": [target_id]}
+        original_plan_with_reader = internal.event_history.plan_with_reader
+
+        def wrapped_plan_with_reader(repository, snapshot, candidates, contract):
+            plans, reader = original_plan_with_reader(repository, snapshot, candidates, contract)
+
+            def checked_reader(event, request):
+                rows = reader(event, request)
+                if event.ticker == "OTHER":
+                    rows = [dict(row) for row in rows]
+                    for row in rows:
+                        row["skipped"] = True
+                return rows
+
+            return plans, checked_reader
+
+        monkeypatch.setattr(internal.event_history, "plan_with_reader", wrapped_plan_with_reader)
+        captured = []
+        original_compute = internal.compute_season_heat
+
+        def captured_compute(labels, heat_targets, calendar_days):
+            captured.extend(labels)
+            return original_compute(labels, heat_targets, calendar_days)
+
+        monkeypatch.setattr(internal, "compute_season_heat", captured_compute)
+        artifact = history.materialize(data.repository, data.snapshot, **request)
+        assert artifact["feature_snapshot"] is not None
+        assert all(label["ticker"] != "OTHER" for label in captured)
+    finally:
+        data.conn.close()

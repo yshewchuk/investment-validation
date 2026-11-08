@@ -137,6 +137,43 @@ def test_weekend_availability_waits_for_next_decision_session():
         assert result["season_heat_ratio_20_252"] is None
 
 
+def test_prior_session_label_available_after_decision_is_excluded():
+    decision = "2025-01-15"
+    sessions = _weekday_sessions(date(2025, 1, 13), date(2025, 1, 16))
+    labels = [
+        _label(
+            f"E{index:02d}",
+            f"T{index:02d}",
+            "2025-01-14",
+            index + 1,
+            available_as_of_date=decision,
+        )
+        for index in range(20)
+    ]
+    labels.append(
+        _label(
+            "LATE-OTHER",
+            "OTHER",
+            "2025-01-14",
+            100,
+            available_as_of_date="2025-01-16",
+        )
+    )
+    targets = [
+        {
+            "event_id": "TARGET",
+            "ticker": "TARGET",
+            "event_date": "2025-01-16",
+            "decision_session": decision,
+        }
+    ]
+
+    result = compute_season_heat(labels, targets, sessions)[("TARGET", decision)]
+
+    assert result["season_heat_count_20"] == 20
+    assert result["season_heat_mean_abs_20"] == pytest.approx(10.5)
+
+
 def test_target_event_and_same_ticker_events_are_excluded():
     sessions = _weekday_sessions(date(2025, 1, 6), date(2025, 2, 7))
     assert len(sessions) == 25

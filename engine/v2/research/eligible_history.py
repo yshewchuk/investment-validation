@@ -279,7 +279,9 @@ def _prepare(repository, snapshot, *, as_of_month, policy, event_ids, horizons, 
     plans = [plan for plan in all_plans if plan[0].event_id in history_ids]
     season_plans = sorted((plan for plan in all_plans if plan[0].event_id in season_ids),
         key=lambda plan: (plan[0].event_date, plan[0].event_id))
-    season_anchors = _anchors(repository, snapshot, limits, required_tickers=sorted({plan[0].ticker for plan in season_plans}))
+    season_anchors = _anchors(repository, snapshot, limits)
+    season_plans = [plan for plan in season_plans
+        if (plan[0].ticker, plan[0].event_date.date().isoformat()) in season_anchors]
     season_records = {(event.ticker, event.event_date.date().isoformat()): record for event, _request, record in season_plans}
     season_bounds = {plan[0].event_id: bound for plan in season_plans
         if (bound := _bound(plan[0], season_anchors, season_records)) is not None}
@@ -360,8 +362,10 @@ def _rows(snapshot, prepared):
     for plan in plans:
         by_ticker.setdefault(plan[0].ticker, []).append(plan)
 
-    def checked(event, request, source_bounds=bounds):
+    def checked(event, request, source_bounds=bounds, allow_skipped=False):
         rows = reader(event, request)
+        if allow_skipped and len(rows) == 1 and rows[0]["skipped"] is True:
+            return rows
         expected = (date.fromisoformat(source_bounds[event.event_id]["post_close_date"]) + timedelta(days=1)).isoformat()
         if len(rows) != 1 or rows[0]["available_as_of_date"] != expected or rows[0]["skipped"] is not False:
             raise fail("CONTRACT_MISMATCH", "outcome availability differs from qualified source bounds")
@@ -372,7 +376,7 @@ def _rows(snapshot, prepared):
     labels = []
     meter = Progress("season heat population labels", len(season_plans))
     for event, request, _record in season_plans:
-        rows = checked(event, request, season_bounds)
+        rows = checked(event, request, season_bounds, allow_skipped=True)
         outcome, reason = event_history._historical_target(rows, event, max_decision_date)
         if not reason:
             labels.append({"event_id": event.event_id, "ticker": event.ticker, "event_date": event.event_date.date().isoformat(),

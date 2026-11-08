@@ -111,8 +111,8 @@ def test_public_full_table_and_independent_missing_realized_quote(panel_data, mo
                        for d in f["source_dependencies"] if d["role"] == "stored_history"]
     assert stored_policies
     for policy in stored_policies:
-        assert policy["schema_version"] == "research_eligible_history.v2"
-        assert policy["recipe_schema"] == "eligible_history_features.v2"
+        assert policy["schema_version"] == "magnitude_eligible_history_source.v1"
+        assert policy["recipe_schema"] == "eligible_history_features.v1"
     assert [r["horizon_sessions"] for r in result["rows"]] == [1, 3, 5]
     assert artifact["context"]["schema_version"] == "magnitude_panel_context.v4"
     assert "price_row_metadata" not in artifact["context"]
