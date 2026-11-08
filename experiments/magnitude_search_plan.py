@@ -201,17 +201,14 @@ def _label_bounds(conn, store, binding):
     magnitude outcome reads.
 
     ``_prepare`` admits only a registration whose validated magnitude plan has
-    events, so the empty-population return is defensive for direct helper use
-    rather than a reachable planning branch, and adds no extra failure.
+    events, but an empty population still validates the table/contract: the
+    empty ticker loop is safe and reads no bounds row.
     """
     events = binding["magnitude_plan"]["events"]
     snapshot = binding["snapshot"]
     days_by_ticker = {}
     for event in events:
         days_by_ticker.setdefault(event["ticker"], set()).add(event["event_date"])
-    if not days_by_ticker:
-        decision("label bounds", "skipped planned_tickers=0")
-        return {}
     try:
         with stage("label bounds"):
             repository = Repository(conn, store, pin_snapshots=True)
