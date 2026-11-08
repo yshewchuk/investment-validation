@@ -65,6 +65,9 @@ def execute(conn, store, repository, registration, plan, fold, *, limits, replay
     else:
         selection = plan.get("selection")
         ties = selection.get("ties") if isinstance(selection, dict) else None
+        if ties not in ("lowest_score_then_candidate_id_ascending", "candidate_id_ascending"):
+            raise fail("EXPERIMENT_IDENTITY_CONFLICT",
+                       "sealed search plan has an unsupported selection tie rule")
         _equal(plan, prepare_plan(conn, store, registration, plan["request"],
                                   plan_schema=plan.get("schema_version"),
                                   legacy_contract=ties == "candidate_id_ascending"))

@@ -817,6 +817,10 @@ class SearchTrials:
                 try:
                     contract = plan["selection"]
                     tie_rule = contract.get("ties", contract.get("tie_break"))
+                    if tie_rule not in ("lowest_score_then_candidate_id_ascending",
+                                        "candidate_id_ascending"):
+                        raise fail("EXPERIMENT_IDENTITY_CONFLICT",
+                                   "sealed search plan has an unsupported selection tie rule")
                     best = min(eligible,
                                key=lambda score: (score["blend_score"], score["candidate_id"]))
                     if any(value is None for value in best["yearly"].values()):

@@ -112,13 +112,15 @@ def lead_one_case(tmp_path_factory):
 
 def _assert_legacy_plan_replay(case, registration, request, plan):
     """Independently rebuild the prior-contract plan and confirm exact sealed replay."""
-    legacy = binding.prepare_plan(case.conn, case.store, registration, request,
-                                  legacy_contract=True)
+    legacy = deepcopy(plan)
+    legacy["selection"]["ties"] = "candidate_id_ascending"
+    legacy.pop("plan_id")
+    legacy["plan_id"] = content_hash(legacy)
+    expected_bytes = canonical_json(legacy).encode()
     assert legacy["selection"]["ties"] == "candidate_id_ascending"
     assert legacy["plan_id"] != plan["plan_id"]
-    ref = case.store.publish_bytes(canonical_json(legacy).encode(),
-                                   schema_ref=legacy["schema_version"])
-    assert case.store.read_verified(ref) == canonical_json(legacy).encode()
+    ref = case.store.publish_bytes(expected_bytes, schema_ref=legacy["schema_version"])
+    assert case.store.read_verified(ref) == expected_bytes
     assert planner.read_search_plan(case.conn, case.store, registration, request, ref) == legacy
 
 
@@ -407,6 +409,19 @@ def test_legacy_plan_comparison_reaches_no_fit_guard(case, monkeypatch):
                            limits=case.request["limits"]["child"])
     assert reads[0] == "seal"
     assert all(slot.startswith("comparison-terminal:") for slot in reads[1:])
+    assert case.conn.execute("SELECT COUNT(*) FROM magnitude_search_records").fetchone()[0] == before
+
+
+def test_comparator_refuses_unknown_selection_ties_before_any_journal_write(case):
+    from experiments import size_comparison_run as comparison
+    plan = deepcopy(case.plan)
+    plan["selection"]["ties"] = "unknown_tie_rule"
+    fold = {**plan["folds"][0]["outer"], "evaluation_labels_before": "2025-01-01"}
+    before = case.conn.execute("SELECT COUNT(*) FROM magnitude_search_records").fetchone()[0]
+    with pytest.raises(OpsError, match="unsupported selection tie rule") as caught:
+        comparison.execute(case.conn, case.store, case.repository, case.registration, plan, fold,
+                           limits=case.request["limits"]["child"])
+    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
     assert case.conn.execute("SELECT COUNT(*) FROM magnitude_search_records").fetchone()[0] == before
 
 
