@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from engine.v2.contracts import ArtifactRef
-from engine.v2.foundation import SystemClock, content_hash, from_document
+from engine.v2.foundation import SystemClock, canonical_json, content_hash, from_document
 from engine.v2.models.adapters import RuntimeFitForbidden
 from engine.v2.models.no_fit import no_fit_guard
 from engine.v2.ops.errors import OpsError
@@ -110,6 +110,15 @@ def lead_one_case(tmp_path_factory):
         pass
 
 
+def _assert_legacy_plan_replay(case, registration, request, plan):
+    """The pre-change tie string still reconstructs and reads its exact sealed artifact."""
+    legacy = deepcopy(plan)
+    legacy["selection"]["ties"] = "candidate_id_ascending"
+    legacy["plan_id"] = content_hash({key: value for key, value in legacy.items() if key != "plan_id"})
+    ref = case.store.publish_bytes(canonical_json(legacy).encode(), schema_ref=legacy["schema_version"])
+    assert planner.read_search_plan(case.conn, case.store, registration, request, ref) == legacy
+
+
 def test_lead_one_seals_single_horizon_plan_and_preserves_v2_request_identity(case, lead_one_case):
     plan = lead_one_case.plan
     assert plan["horizons"] == [1]
@@ -164,10 +173,11 @@ def test_v3_qualified_request_seals_reconstructs_v2_plan(case):
     verify_native_registration(case.conn, case.store, registration)
     sealed = planner.seal_search_plan(case.conn, case.store, registration, v3)
     assert sealed["plan"]["schema_version"] == "magnitude_search_plan.v2"
-    assert sealed["plan"]["selection"] == {"metric": "inner_pooled_rmse", "ties": "candidate_id_ascending",
+    assert sealed["plan"]["selection"] == {"metric": "inner_pooled_rmse", "ties": "lowest_score_then_candidate_id_ascending",
         "retries": 0, "outer": "frozen_selected_only", "final_read_authority": "none"}
     ref = from_document(ArtifactRef, sealed["plan_ref"])
     assert planner.read_search_plan(case.conn, case.store, registration, v3, ref) == sealed["plan"]
+    _assert_legacy_plan_replay(case, registration, v3, sealed["plan"])
 
 
 def test_v4_qualified_request_seals_reconstructs_v3_plan(case):
@@ -202,7 +212,7 @@ def test_v4_qualified_request_seals_reconstructs_v3_plan(case):
         "comparator": "history_mean_report_only",
         "tie_band": "max_sample_se_of_best_pooled_candidate_yearly_blends_or_floor",
         "tie_band_floor": 0.005,
-        "ties": "candidate_id_ascending",
+        "ties": "lowest_score_then_candidate_id_ascending",
         "retries": 0,
         "outer": "frozen_selected_only",
         "final_read_authority": "none",
@@ -212,6 +222,7 @@ def test_v4_qualified_request_seals_reconstructs_v3_plan(case):
                for candidate in sealed["plan"]["candidates"]) == 48
     ref = from_document(ArtifactRef, sealed["plan_ref"])
     assert planner.read_search_plan(case.conn, case.store, registration, v4, ref) == sealed["plan"]
+    _assert_legacy_plan_replay(case, registration, v4, sealed["plan"])
 
 
 def test_native_registration_detaches_caller_document(case):
