@@ -713,3 +713,34 @@ def test_iter_read_matches_list_read_and_scans_rows_lazily(data, monkeypatch):
     assert scanned
     assert scanned_limits and set(scanned_limits) == {admitted_max_object_bytes}
     assert [first, *rows] == expected["rows"]
+
+
+def test_materialization_persists_population_season_heat_fields(tmp_path):
+    data = source(tmp_path, extra_events=[history_event("2024-06-03", ticker="OTHER")])
+    try:
+        target_id = next(event["event_id"] for event in data.events
+            if event["event_date"].date().isoformat() == "2024-06-17")
+        request = {**data.request, "event_ids": [target_id]}
+        artifact = history.materialize(data.repository, data.snapshot, **request)
+        result = history.read(data.repository, data.snapshot, artifact["feature_snapshot"],
+            columns=list(FEATURES), **request)
+        rows = result["rows"]
+        assert len(rows) == 3
+        for row in rows:
+            assert row["season_heat_count_20"] == 1
+            assert type(row["season_heat_count_20"]) is int
+            for name in ("season_heat_mean_abs_5", "season_heat_mean_abs_20",
+                         "season_heat_mean_abs_60", "season_heat_ratio_20_252"):
+                assert row[name] is None
+        assert CONTRACT.contract_id == "research_eligible_history.v2"
+        fields = {column.name: column for column in CONTRACT.columns}
+        for name, physical_type, nullable in (
+                ("season_heat_mean_abs_5", "float64", True),
+                ("season_heat_mean_abs_20", "float64", True),
+                ("season_heat_mean_abs_60", "float64", True),
+                ("season_heat_count_20", "int64", False),
+                ("season_heat_ratio_20_252", "float64", True)):
+            assert fields[name].physical_type == physical_type
+            assert fields[name].nullable is nullable
+    finally:
+        data.conn.close()
