@@ -10,8 +10,8 @@ from engine.v2.research import magnitude_confirmed_metadata
 from engine.v2.research import magnitude_panel_daily as daily
 from engine.v2.research import magnitude_panel_qualified_table as table
 from engine.v2.research.eligibility_policy import eligibility_policy
-from engine.v2.research.eligible_history_table import FEATURES as HISTORY
 from engine.v2.research.experiment_population import load_population
+from engine.v2.research.magnitude_history_table import FEATURES as HISTORY
 from engine.v2.research.magnitude_panel_table import canonical_day
 from engine.v2.research.progress import Progress, stage
 from engine.v2.research.snapshot_inputs import admit_snapshot

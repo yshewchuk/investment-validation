@@ -33,8 +33,8 @@ def feature_dictionary(subset):
                 "noncontributors": "mask_to_null_no_event_quote_lookup_or_contribution"}
         for dependency in field["source_dependencies"]:
             if dependency["role"] == "stored_history":
-                dependency["policy"] = {"schema_version": "magnitude_eligible_history_source.v1",
-                    "recipe_schema": "eligible_history_features.v1",
+                dependency["policy"] = {"schema_version": "research_eligible_history.v2",
+                    "recipe_schema": "eligible_history_features.v2",
                     "compatibility": "exact_installed_context_source_policy_month_cutoffs",
                     "rebuild": "explicit_separate_materialization_only"}
             elif dependency["role"] == "daily_market":

@@ -364,14 +364,15 @@ def _rows(snapshot, prepared):
     max_decision_date = date.fromisoformat(max(cutoff["source_session_ceiling"]
         for target in context["targets"] for cutoff in target["forecasts"]))
     labels = []
+    meter = Progress("season heat population labels", len(season_plans))
     for event, request, _record in season_plans:
         rows = reader(event, request)
         outcome, reason = event_history._historical_target(rows, event, max_decision_date)
-        if reason:
-            continue
-        labels.append({"event_id": event.event_id, "ticker": event.ticker,
-            "event_date": event.event_date.date().isoformat(),
-            "available_as_of_date": outcome[2], "abs_move": abs(outcome[0])})
+        if not reason:
+            labels.append({"event_id": event.event_id, "ticker": event.ticker,
+                "event_date": event.event_date.date().isoformat(),
+                "available_as_of_date": outcome[2], "abs_move": abs(outcome[0])})
+        meter.tick()
     heat_targets = list({(target["event_id"], cutoff["source_session_ceiling"]): {
             "event_id": target["event_id"], "ticker": target["ticker"],
             "event_date": target["event_date"], "decision_session": cutoff["source_session_ceiling"]}
