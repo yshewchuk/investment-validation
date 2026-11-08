@@ -744,3 +744,34 @@ def test_materialization_persists_population_season_heat_fields(tmp_path):
             assert fields[name].nullable is nullable
     finally:
         data.conn.close()
+
+
+def test_season_population_label_availability_is_bound_to_native_bounds(tmp_path, monkeypatch):
+    import engine.v2.research.eligible_history as internal
+    from engine.v2.data.errors import DataError
+    data = source(tmp_path, extra_events=[history_event("2024-06-03", ticker="OTHER")])
+    try:
+        target_id = next(event["event_id"] for event in data.events
+            if event["event_date"].date().isoformat() == "2024-06-17")
+        request = {**data.request, "event_ids": [target_id]}
+        original_plan_with_reader = internal.event_history.plan_with_reader
+
+        def wrapped_plan_with_reader(repository, snapshot, candidates, contract):
+            plans, reader = original_plan_with_reader(repository, snapshot, candidates, contract)
+
+            def checked_reader(event, request):
+                rows = reader(event, request)
+                if event.ticker == "OTHER":
+                    rows = [dict(row) for row in rows]
+                    for row in rows:
+                        row["available_as_of_date"] = "2024-06-03"
+                return rows
+
+            return plans, checked_reader
+
+        monkeypatch.setattr(internal.event_history, "plan_with_reader", wrapped_plan_with_reader)
+        with pytest.raises(DataError) as caught:
+            history.materialize(data.repository, data.snapshot, **request)
+        assert caught.value.code == "CONTRACT_MISMATCH"
+    finally:
+        data.conn.close()

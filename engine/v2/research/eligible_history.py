@@ -279,6 +279,11 @@ def _prepare(repository, snapshot, *, as_of_month, policy, event_ids, horizons, 
     plans = [plan for plan in all_plans if plan[0].event_id in history_ids]
     season_plans = sorted((plan for plan in all_plans if plan[0].event_id in season_ids),
         key=lambda plan: (plan[0].event_date, plan[0].event_id))
+    season_anchors = _anchors(repository, snapshot, limits, required_tickers=sorted({plan[0].ticker for plan in season_plans}))
+    season_records = {(event.ticker, event.event_date.date().isoformat()): record for event, _request, record in season_plans}
+    season_bounds = {plan[0].event_id: bound for plan in season_plans
+        if (bound := _bound(plan[0], season_anchors, season_records)) is not None}
+    season_plans = [plan for plan in season_plans if plan[0].event_id in season_bounds]
     target_rows = [{"event_id": e.event_id, "ticker": e.ticker,
         "event_date": e.event_date.date().isoformat(), "forecasts": forecasts[e.event_id]}
         for e in targets.sort_values("event_id").itertuples(index=False)]
@@ -290,8 +295,8 @@ def _prepare(repository, snapshot, *, as_of_month, policy, event_ids, horizons, 
         "contributors": [{"event_id": e.event_id, **qualified[e.event_id]} for e, _, _ in plans],
         "season_heat_contributors": [{"event_id": e.event_id, "ticker": e.ticker,
             "event_date": e.event_date.date().isoformat(), "fragment_id": record.fragment_id,
-            "object_id": record.object_ref.object_id, "content_hash": record.object_ref.content_hash}
-            for e, _, record in season_plans],
+            "object_id": record.object_ref.object_id, "content_hash": record.object_ref.content_hash,
+            "post_close_date": season_bounds[e.event_id]["post_close_date"]} for e, _, record in season_plans],
         "availability": {"basis": "reconstructed_date_bounds", "source_publication": "unverified",
                          "event_schedule_as_known": "unverified"}}
     context = {**identity, "context_id": content_hash(identity)}
@@ -350,13 +355,14 @@ def _existing(repository, context):
 def _rows(snapshot, prepared):
     context, targets, population, plans, reader, season_plans, calendar_days = prepared
     bounds = {row["event_id"]: row for row in context["contributors"]}
+    season_bounds = {row["event_id"]: row for row in context["season_heat_contributors"]}
     by_ticker = {}
     for plan in plans:
         by_ticker.setdefault(plan[0].ticker, []).append(plan)
 
-    def checked(event, request):
+    def checked(event, request, source_bounds=bounds):
         rows = reader(event, request)
-        expected = (date.fromisoformat(bounds[event.event_id]["post_close_date"]) + timedelta(days=1)).isoformat()
+        expected = (date.fromisoformat(source_bounds[event.event_id]["post_close_date"]) + timedelta(days=1)).isoformat()
         if len(rows) != 1 or rows[0]["available_as_of_date"] != expected or rows[0]["skipped"] is not False:
             raise fail("CONTRACT_MISMATCH", "outcome availability differs from qualified source bounds")
         return rows
@@ -366,16 +372,14 @@ def _rows(snapshot, prepared):
     labels = []
     meter = Progress("season heat population labels", len(season_plans))
     for event, request, _record in season_plans:
-        rows = reader(event, request)
+        rows = checked(event, request, season_bounds)
         outcome, reason = event_history._historical_target(rows, event, max_decision_date)
         if not reason:
-            labels.append({"event_id": event.event_id, "ticker": event.ticker,
-                "event_date": event.event_date.date().isoformat(),
+            labels.append({"event_id": event.event_id, "ticker": event.ticker, "event_date": event.event_date.date().isoformat(),
                 "available_as_of_date": outcome[2], "abs_move": abs(outcome[0])})
         meter.tick()
-    heat_targets = list({(target["event_id"], cutoff["source_session_ceiling"]): {
-            "event_id": target["event_id"], "ticker": target["ticker"],
-            "event_date": target["event_date"], "decision_session": cutoff["source_session_ceiling"]}
+    heat_targets = list({(target["event_id"], cutoff["source_session_ceiling"]): {"event_id": target["event_id"],
+            "ticker": target["ticker"], "event_date": target["event_date"], "decision_session": cutoff["source_session_ceiling"]}
         for target in context["targets"] for cutoff in target["forecasts"]}.values())
     heat = compute_season_heat(labels, heat_targets, calendar_days)
 
