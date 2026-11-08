@@ -22,7 +22,11 @@ _BOUNDS = {
     ("hgb", "max_leaf_nodes"): (2, 64),
     ("hgb", "min_samples_leaf"): (1, 1000),
     ("hgb", "l2_regularization"): (0, 1000),
+    ("hgb", "max_iter"): (100, 5000),
 }
+_HGB_V9_OPTIONAL = {"loss", "max_iter"}
+_HGB_V9_DEFAULTS = {"loss": ["squared_error"], "max_iter": [500]}
+_HGB_LOSSES = ("absolute_error", "gamma", "poisson", "squared_error")
 _FAMILIES = {
     "ridge": {"alpha"},
     "elasticnet": {"alpha", "l1_ratio"},
@@ -106,16 +110,30 @@ def _space(request):
                 if version == 9 else "stage-2 requires exactly ordered H/HM/HMO feature sets")
     space = request["space"]
     version = request["schema_version"]
-    families = (_FAMILIES_V6 if allows_neural(request_version(version))
-                else _FAMILIES_V5 if allows_size_family(request_version(version))
-                else _FAMILIES_V4 if allows_hgb_axes(request_version(version)) else _FAMILIES)
-    v2._require(v2._shape(space, families),
+    version_number = request_version(version)
+    families = (_FAMILIES_V6 if allows_neural(version_number)
+                else _FAMILIES_V5 if allows_size_family(version_number)
+                else _FAMILIES_V4 if allows_hgb_axes(version_number) else _FAMILIES)
+    v2._require((type(space) is dict and set(space) == set(families)
+                 and type(space["hgb"]) is dict) if version_number == 9
+                else v2._shape(space, families),
                 "stage-2 requires the closed family grid")
     canonical = {}
     for family, axes in families.items():
         supplied = space[family]
-        v2._require(v2._shape(supplied, axes),
-                    "stage-2 grid axes differ from the closed policy")
+        if version_number == 9 and family == "hgb":
+            declared = set(supplied) if type(supplied) is dict else None
+            v2._require(declared is not None and axes <= declared
+                        and declared <= axes | _HGB_V9_OPTIONAL,
+                        "stage-2 grid axes differ from the closed policy")
+            if declared - axes:
+                supplied = {**supplied}
+                for optional, default in _HGB_V9_DEFAULTS.items():
+                    supplied.setdefault(optional, list(default))
+                axes = axes | _HGB_V9_OPTIONAL
+        else:
+            v2._require(v2._shape(supplied, axes),
+                        "stage-2 grid axes differ from the closed policy")
         canonical[family] = {}
         for axis in sorted(axes):
             values = supplied[axis]
@@ -137,7 +155,13 @@ def _space(request):
                             "stage-2 HGB max_leaf_nodes grid remains fixed at [7, 15]")
                 canonical[family][axis] = [7, 15]
                 continue
-            if family == "hgb" and axis in ("max_leaf_nodes", "min_samples_leaf"):
+            if family == "hgb" and axis == "loss":
+                v2._require(all(type(value) is str and value in _HGB_LOSSES
+                    for value in values) and values == sorted(set(values)),
+                    "stage-2 HGB loss values must be known, unique and lexicographically ordered")
+                canonical[family][axis] = list(values)
+                continue
+            if family == "hgb" and axis in ("max_leaf_nodes", "min_samples_leaf", "max_iter"):
                 v2._require(all(type(value) is int for value in values),
                             "stage-2 HGB integer grid values must be integers")
                 canonical[family][axis] = [int(value) for value in values]

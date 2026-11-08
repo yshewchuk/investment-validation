@@ -7,14 +7,21 @@ __all__ = ["candidate_recipe"]
 
 _KEYS = {"ridge": {"alpha"}, "elasticnet": {"alpha", "l1_ratio"},
          "hgb": {"max_leaf_nodes"}, "mlp": {"profile"}}
-_HGB_KEYS = ({"max_leaf_nodes"},
-             {"learning_rate", "max_leaf_nodes", "min_samples_leaf", "l2_regularization"})
+_HGB_LEAF = {"max_leaf_nodes"}
+_HGB_BASE = {"learning_rate", "max_leaf_nodes", "min_samples_leaf", "l2_regularization"}
+_HGB_OPTIONAL = {"loss", "max_iter"}
+
+
+def _hgb_keys(parameters):
+    keys = set(parameters)
+    return (_HGB_LEAF <= keys <= _HGB_LEAF | _HGB_OPTIONAL
+            or _HGB_BASE <= keys <= _HGB_BASE | _HGB_OPTIONAL)
 
 
 def candidate_recipe(family, parameters, *, columns, feature_dictionary_hash) -> dict:
     """Return a closed family recipe; columns and hashes prove no source admission."""
     if (type(family) is not str or family not in _KEYS or type(parameters) is not dict
-            or (set(parameters) not in _HGB_KEYS if family == "hgb"
+            or (not _hgb_keys(parameters) if family == "hgb"
                 else set(parameters) != _KEYS[family])):
         raise ValueError("candidate requires a supported family and exact parameter keys")
     if family == "elasticnet":
