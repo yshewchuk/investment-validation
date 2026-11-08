@@ -54,8 +54,7 @@ def _hgb_options(loss, max_iter, target_floor_pct, *, default_max_iter):
     if resolved_loss == "gamma":
         if target_floor_pct is None:
             target_floor_pct = _TARGET_FLOOR_PCT
-        if (not _bounded_number(target_floor_pct, (_TARGET_FLOOR_PCT, _TARGET_FLOOR_PCT))
-                or target_floor_pct != _TARGET_FLOOR_PCT):
+        if not _bounded_number(target_floor_pct, (_TARGET_FLOOR_PCT, _TARGET_FLOOR_PCT)):
             raise ValueError("gamma HGB requires target_floor_pct 0.01")
     elif target_floor_pct is not None:
         raise ValueError("target_floor_pct is only valid for gamma HGB loss")

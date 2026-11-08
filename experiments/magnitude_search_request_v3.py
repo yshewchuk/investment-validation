@@ -114,8 +114,7 @@ def _space(request):
     families = (_FAMILIES_V6 if allows_neural(version_number)
                 else _FAMILIES_V5 if allows_size_family(version_number)
                 else _FAMILIES_V4 if allows_hgb_axes(version_number) else _FAMILIES)
-    v2._require((type(space) is dict and set(space) == set(families)
-                 and type(space["hgb"]) is dict) if version_number == 9
+    v2._require((type(space) is dict and set(space) == set(families)) if version_number == 9
                 else v2._shape(space, families),
                 "stage-2 requires the closed family grid")
     canonical = {}
