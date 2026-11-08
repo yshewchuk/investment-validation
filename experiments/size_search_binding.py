@@ -312,7 +312,7 @@ def prepare_plan(conn, store, registration, request, *, plan_schema=None):
         candidates.append({**identity, "candidate_id": content_hash(identity)})
     requested_selection = schedule["request"].get("selection")
     if requested_selection is None:
-        selection_contract = {"metric": "inner_pooled_rmse", "ties": "candidate_id_ascending", "retries": 0,
+        selection_contract = {"metric": "inner_pooled_rmse", "ties": "lowest_score_then_candidate_id_ascending", "retries": 0,
                               "outer": "frozen_selected_only", "final_read_authority": "none"}
     else:
         selection_contract = {
@@ -324,7 +324,7 @@ def prepare_plan(conn, store, registration, request, *, plan_schema=None):
             "comparator": "history_mean_report_only",
             "tie_band": "max_sample_se_of_best_pooled_candidate_yearly_blends_or_floor",
             "tie_band_floor": requested_selection["tie_band_floor"],
-            "ties": "candidate_id_ascending",
+            "ties": "lowest_score_then_candidate_id_ascending",
             "retries": 0,
             "outer": "frozen_selected_only",
             "final_read_authority": "none",

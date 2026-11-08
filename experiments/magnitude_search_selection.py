@@ -198,7 +198,10 @@ def blended_event_score(candidate_rows, history_rows, *, metric_weights, large_m
 
 
 def selection_tie_band(scores, yearly_scores, *, floor):
-    """Return candidate-ID winner and max(sample-SE, floor) diagnostics."""
+    """Return the lowest-score candidate, breaking exact score ties by candidate_id ascending.
+
+    The max(sample-SE, floor) noise band is diagnostic only and never selects a winner.
+    """
     _finite_nonnegative(floor, "tie_band_floor")
     score_rows = _rows(scores, "selection score rows")
     if not score_rows:
@@ -227,8 +230,7 @@ def selection_tie_band(scores, yearly_scores, *, floor):
     standard_error = stdev(values) / math.sqrt(len(values)) if len(values) > 1 else 0.0
     width = max(standard_error, floor)
     tied = [row for row in scores if row["blend_score"] <= best["blend_score"] + width]
-    winner = min(tied, key=lambda row: row["candidate_id"])
-    return winner["candidate_id"], {
+    return best["candidate_id"], {
         "best_blend_score": best["blend_score"],
         "standard_error": standard_error,
         "width": width,
