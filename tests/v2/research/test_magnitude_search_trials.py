@@ -12,8 +12,6 @@ from types import SimpleNamespace
 import pytest
 
 from engine.v2.contracts import ArtifactRef
-from engine.v2.data.errors import DataError
-from engine.v2.data.errors import fail as data_fail
 from engine.v2.data.repository import Repository
 from engine.v2.foundation import (
     ArtifactError,
@@ -40,8 +38,10 @@ from tests.v2.research.magnitude_trial_support import (
     build_history,
     catalog_rows,
     forbid_history_rebuild,
+    history_event,
     magnitude_dataset,
     magnitude_source,
+    outcome_move,
     poison_outcomes,
     trial_cases,
     trial_forecasts,
@@ -620,12 +620,16 @@ def test_plan_reference_metadata_drift_cannot_initialize_records(case):
         case.recorder.seal(clock=SystemClock())
 
 
-def test_cutoff_equal_validation_label_leaves_unfinished_claim_and_blocks_freeze(tmp_path, monkeypatch):
+def test_sealed_plan_excludes_labels_at_cutoff_and_trial_completes_on_survivors(tmp_path, monkeypatch):
     events, moves = magnitude_dataset()
-    for row in moves:
-        if row["ticker"] == "SYNTH_A" and row["event_date"] == "2023-06-02":
-            row["available_as_of_date"] = "2024-01-01"
-    source = magnitude_source(tmp_path, register=False, build=False, events=events, moves=moves)
+    for event in events:
+        if event["event_date"].date().isoformat() in ("2023-01-03", "2025-01-07"):
+            event["session"] = "BMO"
+    for day, value in (("2024-12-26", 5.0), ("2025-01-31", 6.0)):
+        event = history_event(day, ticker="SYNTH_A", session="BMO")
+        events.append(event)
+        moves.append(outcome_move(event, value))
+    source = magnitude_source(tmp_path, register=False, build=False, events=events, moves=moves, bounds=True)
     try:
         source.build, source.feature_snapshot = build_history(source, training_start="2022-01-01",
                                                      evaluation_years=["2024", "2025"])
@@ -633,27 +637,37 @@ def test_cutoff_equal_validation_label_leaves_unfinished_claim_and_blocks_freeze
             code_root=ROOT, as_of_month=MONTH, magnitude_training_start="2022-01-01", magnitude_labels_before=CUTOFF,
             magnitude_feature_snapshot_id=source.feature_snapshot.snapshot_id,
             magnitude_history_start=HISTORY, magnitude_fit_model="history_ridge")
-        request = {"schema_version": "magnitude_search_request.v1", "inner_years": {"2024": ["2023"], "2025": ["2023"]},
-            "space": {"history_ridge": {"alpha": [0.5, 2]}}, "max_candidates": 2, "max_fits": 18}
+        request = {"schema_version": "magnitude_search_request.v1", "inner_years": {"2024": ["2023"], "2025": ["2023", "2024"]},
+            "space": {"history_ridge": {"alpha": [0.5, 2]}}, "max_candidates": 2, "max_fits": 24}
         sealed = seal_search_plan(source.conn, source.store, source.registration, request)
+        plan = sealed["plan"]
+        outer = next(fold for fold in plan["folds"] if fold["outer"]["year"] == "2025")
+        inner = next(fold for fold in outer["inner"] if fold["year"] == "2024")
+        ids = {(event["ticker"], event["event_date"].date().isoformat()): event["event_id"] for event in events}
+        def event_ids(dates):
+            return [event["event_id"] for event in sorted(events,
+                key=lambda event: (event["event_date"], event["event_id"]))
+                if event["event_date"].date().isoformat() in dates]
+        assert inner["evaluation_labels_before"] == "2024-12-27"
+        assert inner["evaluation_event_ids"] == event_ids(("2024-06-12", "2024-06-17"))
+        assert inner["evaluation_exclusions"] == [
+            {"event_id": ids[("SYNTH_A", "2024-12-26")], "reasons": ["label_available_at_or_after_cutoff"]}]
+        assert outer["outer"]["evaluation_event_ids"] == event_ids(("2025-01-07",))
+        assert outer["outer"]["evaluation_exclusions"] == [
+            {"event_id": ids[("SYNTH_A", "2025-01-31")], "reasons": ["label_available_at_or_after_cutoff"]}]
         recorder = trials.SearchTrials(source.conn, source.store, source.repository, source.registration,
             request, from_document(ArtifactRef, sealed["plan_ref"]))
         recorder.seal(clock=SystemClock())
-        forbid_history_rebuild(monkeypatch)
-        case = SimpleNamespace(source=source, plan=sealed["plan"], recorder=recorder)
-        args = trial_cases(case)[0]
-        started = recorder.start(*args)
-        with pytest.raises(DataError) as caught:
-            recorder.record(*args, forecasts=trial_forecasts(case, args))
-        assert caught.value.problem == data_fail(
-            "EXPERIMENT_VARIANT_FAILED", "magnitude label is not available before cutoff").problem
-        assert recorder._read("terminal:" + started["trial_id"]) is None
-        assert recorder._read("forecasts:" + started["trial_id"]) is not None
-        with _assert_error("EXPERIMENT_VARIANT_FAILED", "search selection requires every terminal attempt"):
-            recorder.freeze()
-        assert recorder._read("selection") is None
-        with _assert_error("EXPERIMENT_IDENTITY_CONFLICT", "search journal slot is already committed"):
-            recorder.start(*args)
+        case = SimpleNamespace(source=source, plan=plan, recorder=recorder)
+        args = ("2025", "2024", plan["candidates"][0]["candidate_id"])
+        recorder.start(*args)
+        terminal = recorder.record(*args, forecasts=trial_forecasts(case, args))
+        assert terminal["status"] == "succeeded"
+        expected = sorted((event_id, horizon) for event_id in inner["evaluation_event_ids"]
+                          for horizon in plan["horizons"])
+        assert sorted((row["event_id"], row["horizon_sessions"])
+                      for row in terminal["predictions"]) == expected
+        assert len(terminal["predictions"]) == len(inner["evaluation_event_ids"]) * len(plan["horizons"])
     finally:
         source.conn.close()
 

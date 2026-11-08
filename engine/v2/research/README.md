@@ -358,6 +358,15 @@ for same-position, read-only fixed-day versus target/stop comparisons.
 the pure magnitude window and metadata-only planner to bind research registrations.
 `experiments/magnitude_search_plan.py` consumes `magnitude_folds.annual_fold`
 to reconstruct outer metadata and plan nested folds with the same public rule.
+It owns label-bounds and strict-cutoff exclusions from native `computed_move_bounds`;
+its planner admits the bounded catalog through the public
+`bounded_snapshot.open_bounded_snapshot` API before table access, so missing rows become
+sealed `label_bounds_missing` exclusions, present
+null rows become sealed `label_bounds_unavailable` exclusions, and malformed
+non-null dates refuse identity. Trial/report consumers use the plan's filtered
+`evaluation_event_ids`, while `read_search_plan` reconstructs folds and revalidates
+the sealed plan (including availability), repeating the bounded bounds admission.
+A fold whose strict exclusions remove every evaluation event refuses before plan publication.
 `experiments/magnitude_search_evidence.py` consumes stored-history reads, target
 preflight, training qualification and `magnitude_inputs.magnitude_recipe` for shared inner/outer evidence admission.
 `experiments/magnitude_search_trials.py` and `experiments/magnitude_search_outer.py`

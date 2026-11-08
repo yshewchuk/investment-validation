@@ -136,6 +136,25 @@ Saved identity and later outcome/worker APIs' separate read policies do not chan
 `distribution_trials` and `distribution_fitted` also consume the shared immutable journal APIs. `v2_magnitude_search_run` consumes `magnitude_search_plan.read_search_plan`, `magnitude_search_records.MIGRATIONS`/`OWNER`/`append_record`/`read_record`, `magnitude_search_trials.SearchTrials`, `magnitude_search_execution.validate_execution_limits`, and `magnitude_search_outer.execute_outer_fold`/`collect_outer_results` for source-sealed orchestration. Fresh inner trials may use bounded process execution; replay and selected outer evaluation remain serial.
 Its CLI also consumes `native_registration.read_native_registration`/`valid_registration_read_budget`/`MAX_NATIVE_EVIDENCE_BYTES` and `native_gate_worker.read_native_staged_input`. The runner uses `magnitude_search_request.validate_workers`, `size_job_budget.remaining`, `memory_guard.start_rss_watchdog`, and both no-fit guards; direct engine dependencies are contracts, data, foundation, models, ops and research (including legacy `engine.models.no_fit`). The [driver section](#serial-magnitude-search-driver) defines the public seal/run helpers and each CLI action's authority.
 
+`magnitude_search_plan` is research-only metadata planning invoked by the standalone
+`v2_magnitude_search prepare|verify` and `v2_magnitude_search_run` CLIs; it has no
+production caller.
+Planning requires the registration-pinned snapshot's native `computed_move_bounds` table and
+contract, admits it through the public bounded-snapshot API under fixed catalog caps before
+table access, reads only sealed event keys, seals per-event `label_bounds_missing`,
+present-null `label_bounds_unavailable` and strict-cutoff exclusions, and
+refuses a missing or drifted table contract with `CONTRACT_MISMATCH`. A fold whose strict
+label exclusions remove every evaluation event refuses `INVALID_EXPERIMENT_SPEC` before plan
+publication. A malformed non-null stored date refuses `EXPERIMENT_IDENTITY_CONFLICT`, never a
+label-bounds exclusion. It publishes only the immutable plan artifact and writes no ledger.
+Trial (`magnitude_search_trials`), evidence (`magnitude_search_evidence`), selected-outer
+report (`magnitude_search_outer`) and history report (`magnitude_history_report`) consumers
+use their plan's filtered fold `training_candidate_event_ids`/`evaluation_event_ids`, not
+per-event exclusion lists.
+Its cutoff rule comes from the shared `experiments.label_availability` interface
+(`available_before`, `label_cutoff_reason`), which `size_search_binding` also consumes for
+SIZE fold admission.
+
 `magnitude_search_request.compile_request` preserves the source-free v2 request
 validator and its closed H/HM/HMO 33-candidate grid.
 `magnitude_search_request_versions.compile_request` keeps v2 replay intact and

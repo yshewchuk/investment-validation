@@ -303,9 +303,12 @@ def forbid_work(monkeypatch):
     monkeypatch.setattr(trials.SearchTrials, "_inputs", forbidden)
     monkeypatch.setattr(outer, "execution_limits", forbidden)
     scan = Repository.scan
-    def metadata_only(self, query, *, table_name):
-        assert table_name not in {"research_magnitude_history", "computed_moves"}, "replay opened native payloads"
-        return scan(self, query, table_name=table_name)
+    def metadata_only(self, query, *, table_name, max_object_bytes=None):
+        if table_name == "computed_move_bounds":
+            assert max_object_bytes == 1 << 20, "replay bounds read did not use the 1 MiB object cap"
+        else:
+            assert table_name not in {"research_magnitude_history", "computed_moves"}, "replay opened native payloads"
+        return scan(self, query, table_name=table_name, max_object_bytes=max_object_bytes)
     monkeypatch.setattr(Repository, "scan", metadata_only)
 
 
