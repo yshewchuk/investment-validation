@@ -279,6 +279,19 @@ def _filter_evaluation(event_ids, bounds, cutoff):
     return retained, excluded
 
 
+def _exclusion_summary(counts):
+    return ", ".join(f"{reason}={count}" for reason, count in sorted(counts.items()))
+
+
+def _refuse_empty_evaluation(scope, year, excluded, total_counts):
+    """Refuse a fold whose label exclusions removed every evaluation event."""
+    decision("search evaluation exclusions", _exclusion_summary(total_counts))
+    fold_counts = Counter(reason for item in excluded for reason in item["reasons"])
+    raise fail("INVALID_EXPERIMENT_SPEC",
+        f"{scope} evaluation fold {year}: no eligible evaluation events remain after label exclusions "
+        f"({_exclusion_summary(fold_counts)})")
+
+
 def _nested(binding, request, *, temporal=None, label_bounds=None):
     """Preserve annual event groups; inner scoring labels must predate outer fitting."""
     temporal = binding["magnitude_plan"] if temporal is None else temporal
@@ -304,6 +317,8 @@ def _nested(binding, request, *, temporal=None, label_bounds=None):
                     outer["evaluation_exclusions"] = excluded
                     for item in excluded:
                         exclusion_counts.update(item["reasons"])
+                if not retained:
+                    _refuse_empty_evaluation("outer", outer["year"], excluded, exclusion_counts)
             members = set(outer["training_candidate_event_ids"])
             population = [event for event in temporal["events"] if event["event_id"] in members]
             inner = []
@@ -317,13 +332,14 @@ def _nested(binding, request, *, temporal=None, label_bounds=None):
                         fold["evaluation_exclusions"] = excluded
                         for item in excluded:
                             exclusion_counts.update(item["reasons"])
+                    if not retained:
+                        _refuse_empty_evaluation("inner", fold["year"], excluded, exclusion_counts)
                 inner.append({**fold, "evaluation_labels_before": outer["training_labels_before"]})
             nested.append({"outer": outer, "inner": inner})
     except DataError:
         raise fail("INVALID_EXPERIMENT_SPEC", "every search fold needs earlier training and evaluation candidates") from None
     if exclusion_counts:
-        decision("search evaluation exclusions", ", ".join(
-            f"{reason}={count}" for reason, count in sorted(exclusion_counts.items())))
+        decision("search evaluation exclusions", _exclusion_summary(exclusion_counts))
     return nested
 
 

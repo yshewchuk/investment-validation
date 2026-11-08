@@ -360,7 +360,7 @@ def test_missing_bounds_row_excludes_only_that_event_and_sealing_continues(tmp_p
         source.conn.close()
 
 
-def test_missing_all_bounds_rows_seals_every_evaluation_exclusion(tmp_path, monkeypatch):
+def test_missing_all_bounds_rows_refuses_plan_before_publication(tmp_path, monkeypatch):
     events, moves = magnitude_dataset()
     for event in events:
         if event["event_date"].date().isoformat() in ("2023-01-03", "2025-01-07"):
@@ -379,24 +379,36 @@ def test_missing_all_bounds_rows_seals_every_evaluation_exclusion(tmp_path, monk
             code_root=ROOT, as_of_month=MONTH, magnitude_training_start="2022-01-01",
             magnitude_labels_before=CUTOFF, magnitude_feature_snapshot_id=source.feature_snapshot.snapshot_id,
             magnitude_history_start=HISTORY, magnitude_fit_model="history_ridge")
-        sealed = search.seal_search_plan(source.conn, source.store, source.registration, _request())
-        expected = _expected_folds(source)
-        sections = 0
-        for before, after in zip(expected, sealed["plan"]["folds"]):
-            for want, got in ((before["outer"], after["outer"]),
-                              *zip(before["inner"], after["inner"])):
-                sections += 1
-                assert got["evaluation_event_ids"] == []
-                assert got["evaluation_exclusions"] == [
-                    {"event_id": event_id, "reasons": ["label_bounds_missing"]}
-                    for event_id in want["evaluation_event_ids"]]
-        assert sections == 5
-        assert sealed["plan"]["plan_id"] == _sha({
-            key: value for key, value in sealed["plan"].items() if key != "plan_id"})
-        assert source.store.read_verified(
-            from_document(ArtifactRef, sealed["plan_ref"])) == canonical_json(sealed["plan"]).encode()
+        outer = _expected_folds(source)[0]["outer"]
+        before = catalog_rows(source.conn), artifact_object_bytes(source.store)
+        monkeypatch.setattr(ArtifactStore, "publish_bytes", forbid_access)
+        with pytest.raises(OpsError) as caught:
+            search.seal_search_plan(source.conn, source.store, source.registration, _request())
+        message = (f"outer evaluation fold {outer['year']}: no eligible evaluation events remain after "
+                   f"label exclusions (label_bounds_missing={len(outer['evaluation_event_ids'])})")
+        assert to_document(caught.value.problem) == _problem("INVALID_EXPERIMENT_SPEC", message)
+        assert (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before
     finally:
         source.conn.close()
+
+
+def test_empty_inner_fold_refuses_while_outer_evaluation_remains(source):
+    expected = _expected_folds(source)
+    bounds = {event_id: "2023-12-01" for fold in expected
+              for section in (fold["outer"], *fold["inner"])
+              for event_id in section["evaluation_event_ids"]}
+    empty = expected[0]["inner"][0]
+    for event_id in empty["evaluation_event_ids"]:
+        bounds[event_id] = "2024-01-01"
+    outer = expected[0]["outer"]
+    cutoff = source.registration.document["magnitude_execution"]["evaluation_labels_before"]
+    assert search._filter_evaluation(outer["evaluation_event_ids"], bounds, cutoff) == (
+        outer["evaluation_event_ids"], [])
+    with pytest.raises(OpsError) as caught:
+        search._nested(source.registration.document, _request(), label_bounds=bounds)
+    message = (f"inner evaluation fold {empty['year']}: no eligible evaluation events remain after "
+               f"label exclusions (label_end_at_or_after_cutoff={len(empty['evaluation_event_ids'])})")
+    assert to_document(caught.value.problem) == _problem("INVALID_EXPERIMENT_SPEC", message)
 
 
 def test_filter_evaluation_reports_both_strict_cutoff_reasons():
