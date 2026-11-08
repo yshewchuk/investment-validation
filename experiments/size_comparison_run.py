@@ -63,8 +63,11 @@ def execute(conn, store, repository, registration, plan, fold, *, limits, replay
         _equal(plan, iv.prepare_plan(conn, store, registration, plan["request"]))
         execution = iv.execution(plan)
     else:
+        selection = plan.get("selection")
+        ties = selection.get("ties") if isinstance(selection, dict) else None
         _equal(plan, prepare_plan(conn, store, registration, plan["request"],
-                                  plan_schema=plan.get("schema_version")))
+                                  plan_schema=plan.get("schema_version"),
+                                  legacy_contract=ties == "candidate_id_ascending"))
         execution = {"schema_version": "size_comparison_execution.v1", "features": COLUMNS,
                      "fit_recipe": registration.document["size_comparison"]}
         _equal(execution["fit_recipe"], recipe())

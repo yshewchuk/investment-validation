@@ -815,6 +815,8 @@ class SearchTrials:
                              "selected_candidate_id": selected["candidate_id"]}
             else:
                 try:
+                    contract = plan["selection"]
+                    tie_rule = contract.get("ties", contract.get("tie_break"))
                     best = min(eligible,
                                key=lambda score: (score["blend_score"], score["candidate_id"]))
                     if any(value is None for value in best["yearly"].values()):
@@ -822,8 +824,7 @@ class SearchTrials:
                     yearly_scores = [score for score in eligible if all(
                         value is not None for value in score["yearly"].values())]
                     selected_id, tie_band = selection_tie_band(eligible, yearly_scores,
-                        floor=policy["tie_band_floor"],
-                        tie_rule=plan["selection"]["ties"])
+                        floor=policy["tie_band_floor"], tie_rule=tie_rule)
                     pooled_history = [row for year in sorted(outer["inner"], key=lambda item: item["year"])
                         for row in history_rows_by_year[year["year"]]]
                     history_score = blended_event_score(pooled_history, pooled_history,

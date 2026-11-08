@@ -118,6 +118,7 @@ def _assert_legacy_plan_replay(case, registration, request, plan):
     assert legacy["plan_id"] != plan["plan_id"]
     ref = case.store.publish_bytes(canonical_json(legacy).encode(),
                                    schema_ref=legacy["schema_version"])
+    assert case.store.read_verified(ref) == canonical_json(legacy).encode()
     assert planner.read_search_plan(case.conn, case.store, registration, request, ref) == legacy
 
 
@@ -383,6 +384,29 @@ def test_no_fit_probe_does_not_claim_comparator(case):
     with no_fit_guard(), pytest.raises(RuntimeFitForbidden):
         execute(case.conn, case.store, case.repository, case.registration, case.plan, fold,
                 limits=case.request["limits"]["child"])
+    assert case.conn.execute("SELECT COUNT(*) FROM magnitude_search_records").fetchone()[0] == before
+
+
+def test_legacy_plan_comparison_reaches_no_fit_guard(case, monkeypatch):
+    from experiments import size_comparison_run as comparison
+
+    legacy = binding.prepare_plan(case.conn, case.store, case.registration, case.request,
+                                  legacy_contract=True)
+    assert legacy["selection"]["ties"] == "candidate_id_ascending"
+    reads = []
+
+    def read(conn, store, run_id, slot):
+        reads.append(slot)
+        return {"plan_id": legacy["plan_id"]} if slot == "seal" else None
+
+    monkeypatch.setattr(comparison, "read_record", read)
+    fold = {**legacy["folds"][0]["outer"], "evaluation_labels_before": "2025-01-01"}
+    before = case.conn.execute("SELECT COUNT(*) FROM magnitude_search_records").fetchone()[0]
+    with no_fit_guard(), pytest.raises(RuntimeFitForbidden):
+        comparison.execute(case.conn, case.store, case.repository, case.registration, legacy, fold,
+                           limits=case.request["limits"]["child"])
+    assert reads[0] == "seal"
+    assert all(slot.startswith("comparison-terminal:") for slot in reads[1:])
     assert case.conn.execute("SELECT COUNT(*) FROM magnitude_search_records").fetchone()[0] == before
 
 
