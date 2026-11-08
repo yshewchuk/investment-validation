@@ -41,7 +41,6 @@ from experiments.magnitude_search_request_schema import (
     qualified as is_qualified_request,
     request_version as parse_request_version,
 )
-from experiments.magnitude_search_selection import LEGACY_TIE_RULE
 from experiments.native_registration import verify_native_registration
 
 SCHEMA = "magnitude_search_plan.v1"
@@ -457,15 +456,7 @@ def read_search_plan(conn, store, registration, request, ref):
                             plan_schema=ref.schema_ref if qualified else None)
         payload = canonical_json(expected).encode()
         if ref != artifact_reference(payload, ref.schema_ref):
-            if not qualified:
-                raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search plan reference differs from its complete binding")
-            legacy = {**expected, "selection": {**expected["selection"], "ties": LEGACY_TIE_RULE}}
-            legacy.pop("plan_id")
-            legacy["plan_id"] = content_hash(legacy)
-            expected = legacy
-            payload = canonical_json(expected).encode()
-            if ref != artifact_reference(payload, ref.schema_ref):
-                raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search plan reference differs from its complete binding")
+            raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search plan reference differs from its complete binding")
     try:
         store.read_verified(ref)
     except ArtifactError as error:

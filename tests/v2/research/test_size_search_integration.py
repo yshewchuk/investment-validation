@@ -26,6 +26,8 @@ from tests.v2.research.test_magnitude_search_request import request as request_f
 pytestmark = pytest.mark.xdist_group("size_search_integration")
 
 _LEGACY_SOURCE_VALUES = {
+    "experiments/magnitude_search_outer.py":
+        "sha256:43f09630964f13433c568b05ecac17b90c666e3b4ad3fd333c3496deb9852c46",
     "experiments/magnitude_search_plan.py":
         "sha256:f297542bfc24c168a8f8d877c2a6585e825b7e7d38c45fd0afb794e80973013a",
     "experiments/magnitude_search_selection.py":
@@ -150,31 +152,6 @@ def lead_one_case(tmp_path_factory):
         pass
 
 
-def _assert_legacy_plan_replay(case, registration, request, plan, monkeypatch):
-    """Pin the canonical prior-contract plan identity and verify exact sealed replay."""
-    legacy = deepcopy(plan)
-    legacy["selection"]["ties"] = LEGACY_TIE_RULE
-    legacy.pop("plan_id")
-    legacy["plan_id"] = content_hash(legacy)
-    expected_bytes = canonical_json(legacy).encode()
-    assert legacy["plan_id"] != plan["plan_id"]
-    assert legacy["plan_id"] == "sha256:1da1cfecef7c9e51dd714375bcd6adb738fd45aa9e355dce3b912fe506c072e7"
-    ref = case.store.publish_bytes(expected_bytes, schema_ref=legacy["schema_version"])
-    assert case.store.read_verified(ref) == expected_bytes
-    original_prepare = planner._prepare
-    calls = []
-
-    def counted_prepare(*args, **kwargs):
-        calls.append(True)
-        return original_prepare(*args, **kwargs)
-
-    monkeypatch.setattr(planner, "_prepare", counted_prepare)
-    reconstructed = planner.read_search_plan(case.conn, case.store, registration, request, ref)
-    assert len(calls) == 1
-    assert reconstructed["selection"]["ties"] == LEGACY_TIE_RULE
-    assert reconstructed == legacy
-
-
 def test_lead_one_seals_single_horizon_plan_and_preserves_v2_request_identity(case, lead_one_case):
     plan = lead_one_case.plan
     assert plan["horizons"] == [1]
@@ -275,6 +252,28 @@ def test_v4_qualified_request_seals_reconstructs_v3_plan(case, monkeypatch):
     assert case.conn.execute("SELECT COUNT(*) FROM magnitude_search_records").fetchone()[0] == before
 
 
+def test_current_source_registration_refuses_prior_tie_contract_reference(case):
+    """A current pinned closure may not replay a plan under the prior tie contract."""
+    v4 = _v4_blended_request(case.request)
+    spec = prediction_spec(experiment_id="synthetic-qualified-size-current-source-tie",
+                           folds=("2024",), runner="experiments/size_search.py")
+    registration, spec = binding.prepare(case.repository, spec, v4, case.panel_request, **case.args)
+    reserve_native_registration(case.conn, case.store, registration, spec)
+    verify_native_registration(case.conn, case.store, registration)
+    plan = planner.seal_search_plan(case.conn, case.store, registration, v4)["plan"]
+    assert plan["selection"]["ties"] != LEGACY_TIE_RULE
+    legacy = deepcopy(plan)
+    legacy["selection"]["ties"] = LEGACY_TIE_RULE
+    legacy.pop("plan_id")
+    legacy["plan_id"] = content_hash(legacy)
+    assert legacy["plan_id"] != plan["plan_id"]
+    ref = case.store.publish_bytes(canonical_json(legacy).encode(),
+                                   schema_ref=legacy["schema_version"])
+    with pytest.raises(OpsError) as caught:
+        planner.read_search_plan(case.conn, case.store, registration, v4, ref)
+    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+
+
 def test_legacy_source_closure_reconstructs_and_reaches_no_fit_guard(case, monkeypatch):
     from experiments import size_comparison_run as comparison
 
@@ -298,7 +297,13 @@ def test_legacy_source_closure_reconstructs_and_reaches_no_fit_guard(case, monke
 
     fold = {**legacy["folds"][0]["outer"], "evaluation_labels_before":
             registration.document["magnitude_execution"]["evaluation_labels_before"]}
-    assert binding.fold_inputs(case.repository, registration.document, fold, plan=legacy)["training"]
+    assert len(binding.fold_inputs(case.repository, registration.document, fold, plan=legacy)["training"]) > 0
+
+    from experiments.magnitude_search_trials import SearchTrials
+
+    recorder = SearchTrials(case.conn, case.store, case.repository, registration, v4, ref)
+    admitted = recorder._inputs(legacy["folds"][0]["inner"][0], plan=legacy)
+    assert len(admitted["training"]) > 0
 
     reads = []
     def read(conn, store, run_id, slot):
@@ -317,8 +322,9 @@ def test_legacy_source_closure_reconstructs_and_reaches_no_fit_guard(case, monke
     drifted["experiments/size_search.py"] = "sha256:" + "0" * 64
     monkeypatch.setattr(binding, "_sources", lambda: deepcopy(drifted))
     assert binding.is_legacy_source_closure(registration.document) is False
-    with pytest.raises(OpsError, match="differs"):
+    with pytest.raises(OpsError, match="differs") as caught:
         planner.read_search_plan(case.conn, case.store, registration, v4, ref)
+    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
 
 
 def test_native_registration_detaches_caller_document(case):

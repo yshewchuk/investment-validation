@@ -25,7 +25,6 @@ from engine.v2.ops.migrations import migrate, require_current
 from engine.v2.research.magnitude_inputs import load_magnitude_targets
 from experiments.magnitude_report import magnitude_metrics
 from experiments.magnitude_search_evidence import (
-    _requires_event_dates,
     admit_fold_inputs,
     evaluation_targets,
     fit_evidence,
@@ -182,7 +181,7 @@ class SearchTrials:
         schema = self.registration.document.get("schema_version")
         if plan is None and schema == "native_experiment_registration.v1.8":
             plan = self._admit()
-        kwargs = {"plan": plan} if schema == "native_experiment_registration.v1.8" or _requires_event_dates(plan) else {}
+        kwargs = {"plan": plan} if plan is not None else {}
         return admit_fold_inputs(self.repository, self.registration.document, inner,
             history_failure=fail("EXPERIMENT_IDENTITY_CONFLICT", "search native history binding changed"), **kwargs)
 
@@ -193,7 +192,7 @@ class SearchTrials:
             if cohort in self._published:
                 manifest, inputs_id = self._published[cohort]
                 self._memo[cohort] = load_inputs(self.store, manifest, inputs_id)
-            elif plan is not None and (self.registration.document.get("schema_version") == "native_experiment_registration.v1.8" or _requires_event_dates(plan)):
+            elif plan is not None:
                 self._memo[cohort] = self._inputs(inner, plan=plan)
             else:
                 self._memo[cohort] = self._inputs(inner)

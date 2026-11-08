@@ -92,7 +92,7 @@ class DistributionTrials:
         self._append("start:" + key, claim, replay=False)
         try:
             with stage("distribution native fold admission"):
-                inputs = fold_inputs(self.repository, self.source.document, fold)
+                inputs = fold_inputs(self.repository, self.source.document, fold, plan=native)
                 columns = ("event_id", "context_id", "horizon_sessions", *plan["recipe"]["point_recipe"]["features"])
                 projected = []
                 progress = Progress("distribution feature projection", len(inputs["features"]))

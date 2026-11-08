@@ -54,6 +54,8 @@ SCHEMA = "native_experiment_registration.v1.7"
 # admitted only by the explicit opt-ins below, never as a general source-drift bypass.
 LEGACY_SOURCE_CLOSURE_HASH = "sha256:f7aab0aeb9ab11aad6a68adfc6e2be5bab8802efb0e85bd875ff3a11ddc31aa1"
 _LEGACY_SOURCE_CLOSURE_VALUES = {
+    "experiments/magnitude_search_outer.py":
+        "sha256:43f09630964f13433c568b05ecac17b90c666e3b4ad3fd333c3496deb9852c46",
     "experiments/magnitude_search_plan.py":
         "sha256:f297542bfc24c168a8f8d877c2a6585e825b7e7d38c45fd0afb794e80973013a",
     "experiments/magnitude_search_selection.py":
@@ -65,11 +67,13 @@ _LEGACY_SOURCE_CLOSURE_VALUES = {
     "experiments/size_search_binding.py":
         "sha256:a1e9719e3007e30fcac2421613029e0c18010b3ad126d1c832b34b76d25ca69d",
 }
-_LEGACY_SOURCE_CLOSURE_ABSENT = frozenset({"experiments/label_availability.py"})
+_LEGACY_SOURCE_CLOSURE_ABSENT = frozenset({
+    "experiments/label_availability.py",
+})
 
 
 def _matches_legacy_source_closure(pinned, current):
-    """True only for the complete prior map and its exact six-path delta from current."""
+    """True only for the complete prior map and its exact seven-path delta from current."""
     if not isinstance(pinned, dict) or not isinstance(current, dict):
         return False
     try:
