@@ -288,7 +288,8 @@ def test_real_seal_verify_is_complete_bounds_only_idempotent_and_preserves_ancho
     after = artifact_object_bytes(source.store)
     assert all(after[key] == value for key, value in objects.items())
     assert set(after) - set(objects) <= {ref.storage_key}
-    assert opened and all(item.schema_ref in (search.SCHEMA, "native_experiment_registration.v1.5") for item in opened)
+    assert opened and all(item.schema_ref in (
+        search.SCHEMA, "native_experiment_registration.v1.5", "parquet_fragment.v1") for item in opened)
     request["space"]["history_ridge"]["alpha"].clear()
     plan["candidates"][0]["recipe"]["features"].clear()
     reread = search.read_search_plan(source.conn, source.store, source.registration, _request(), ref)
@@ -327,17 +328,19 @@ def test_missing_bounds_row_excludes_only_that_event_and_sealing_continues(tmp_p
             magnitude_history_start=HISTORY, magnitude_fit_model="history_ridge")
         sealed = search.seal_search_plan(source.conn, source.store, source.registration, _request())
         plan = sealed["plan"]
-        excluded = [item for fold in plan["folds"]
-                    for section in (fold["outer"], *fold["inner"])
-                    for item in section.get("evaluation_exclusions", [])]
-        assert [item for item in excluded if item["event_id"] == target["event_id"]] == [
-            {"event_id": target["event_id"], "reasons": ["label_bounds_missing"]},
-            {"event_id": target["event_id"], "reasons": ["label_bounds_missing"]}]
-        assert all(item["reasons"] == ["label_bounds_missing"] for item in excluded)
-        evaluations = [section["evaluation_event_ids"] for fold in plan["folds"]
-                       for section in (fold["outer"], *fold["inner"])]
-        assert all(target["event_id"] not in ids for ids in evaluations)
-        assert any(sibling["event_id"] in ids for ids in evaluations)
+        expected = _expected_folds(source)
+        for fold in expected:
+            for section in (fold["outer"], *fold["inner"]):
+                if target["event_id"] in section["evaluation_event_ids"]:
+                    section["evaluation_event_ids"].remove(target["event_id"])
+                    section["evaluation_exclusions"] = [
+                        {"event_id": target["event_id"], "reasons": ["label_bounds_missing"]}]
+        assert plan["folds"] == expected
+        assert any(sibling["event_id"] in section["evaluation_event_ids"]
+                   for fold in plan["folds"] for section in (fold["outer"], *fold["inner"]))
+        assert plan["plan_id"] == _sha({key: value for key, value in plan.items() if key != "plan_id"})
+        assert source.store.read_verified(
+            from_document(ArtifactRef, sealed["plan_ref"])) == canonical_json(plan).encode()
     finally:
         source.conn.close()
 
@@ -351,6 +354,20 @@ def test_unreadable_bounds_scan_is_controlled_identity_refusal(source, monkeypat
         search.seal_search_plan(source.conn, source.store, source.registration, _request())
     assert to_document(caught.value.problem) == _problem(
         "EXPERIMENT_IDENTITY_CONFLICT", "planned label bounds could not be read")
+
+
+@pytest.mark.parametrize("code", ["RESULT_LIMIT_EXCEEDED", "QUERY_NOT_BOUNDED", "CONTRACT_MISMATCH"])
+def test_deterministic_bounds_scan_refusal_keeps_its_classification(source, monkeypatch, code):
+    refusal = data_fail(code, "synthetic deterministic bounds refusal")
+
+    def refuse(repository, query, *, table_name, max_object_bytes=None):
+        raise refusal
+
+    monkeypatch.setattr(Repository, "scan", refuse)
+    with pytest.raises(OpsError) as caught:
+        search.seal_search_plan(source.conn, source.store, source.registration, _request())
+    assert to_document(caught.value.problem) == to_document(refusal.problem)
+    assert caught.value.problem.retryable is False
 
 
 @pytest.mark.parametrize("years", [{"0003": ["0002"]}, {"9998": ["9997"]}])
@@ -779,10 +796,17 @@ def test_same_hash_reference_metadata_drift_refuses_before_plan_open(source, mon
     assert changed.content_hash == ref.content_hash and changed != ref
     original, opened = ArtifactStore.read_verified, []
     def read(store, candidate):
-        assert candidate.schema_ref == "native_experiment_registration.v1.5", "rejected plan opened"
+        assert candidate.schema_ref in ("native_experiment_registration.v1.5",
+                                        "parquet_fragment.v1"), "rejected plan opened"
         opened.append(candidate)
         return original(store, candidate)
+    original_scan = Repository.scan
+    def scan(repository, query, *, table_name, max_object_bytes=None):
+        assert table_name == "computed_move_bounds"
+        return original_scan(repository, query, table_name=table_name,
+                             max_object_bytes=max_object_bytes)
     monkeypatch.setattr(ArtifactStore, "read_verified", read)
+    monkeypatch.setattr(Repository, "scan", scan)
     monkeypatch.setattr(ArtifactStore, "publish_bytes", forbid_access)
     before = catalog_rows(source.conn), artifact_object_bytes(source.store)
     with pytest.raises(OpsError) as caught:
@@ -800,12 +824,19 @@ def test_forged_metadata_schema_cannot_open_arbitrary_payload(source, monkeypatc
         assert candidate != ref, "unadmitted object opened"
         opened.append(candidate)
         return original(store, candidate)
+    original_scan = Repository.scan
+    def scan(repository, query, *, table_name, max_object_bytes=None):
+        assert table_name == "computed_move_bounds"
+        return original_scan(repository, query, table_name=table_name,
+                             max_object_bytes=max_object_bytes)
     monkeypatch.setattr(ArtifactStore, "read_verified", read)
+    monkeypatch.setattr(Repository, "scan", scan)
     with pytest.raises(OpsError) as caught:
         search.read_search_plan(source.conn, source.store, source.registration, _request(), ref)
     assert to_document(caught.value.problem) == _problem(
         "EXPERIMENT_IDENTITY_CONFLICT", "search plan reference differs from its complete binding")
-    assert opened and all(candidate.schema_ref == "native_experiment_registration.v1.5" for candidate in opened)
+    assert opened and all(candidate.schema_ref in (
+        "native_experiment_registration.v1.5", "parquet_fragment.v1") for candidate in opened)
 
 
 @pytest.mark.parametrize("failure", [fail("INPUT_CHANGED", "missing source"), SyntaxError("invalid source"),

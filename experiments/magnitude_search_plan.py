@@ -208,9 +208,9 @@ def _label_bounds(conn, store, binding):
         return {event["event_id"]: found.get((event["ticker"], event["event_date"]))
                 for event in events}
     except DataError as error:
-        code = ("EXPERIMENT_IDENTITY_CONFLICT" if error.problem.category == "integrity"
-                else "RESOURCE_UNAVAILABLE")
-        raise fail(code, "planned label bounds could not be read") from None
+        if error.problem.category == "integrity":
+            raise fail("EXPERIMENT_IDENTITY_CONFLICT", "planned label bounds could not be read") from None
+        raise OpsError(error.problem) from None
 
 
 def _filter_evaluation(event_ids, bounds, cutoff):

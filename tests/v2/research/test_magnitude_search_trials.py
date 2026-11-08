@@ -12,8 +12,6 @@ from types import SimpleNamespace
 import pytest
 
 from engine.v2.contracts import ArtifactRef
-from engine.v2.data.errors import DataError
-from engine.v2.data.errors import fail as data_fail
 from engine.v2.data.repository import Repository
 from engine.v2.foundation import (
     ArtifactError,
