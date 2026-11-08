@@ -52,12 +52,12 @@ SCHEMA = "native_experiment_registration.v1.7"
 
 # The exact prior published closure whose registrations remain replayable. It is
 # admitted only by the explicit opt-ins below, never as a general source-drift bypass.
-LEGACY_SOURCE_CLOSURE_HASH = "sha256:f7aab0aeb9ab11aad6a68adfc6e2be5bab8802efb0e85bd875ff3a11ddc31aa1"
+LEGACY_SOURCE_CLOSURE_HASH = "sha256:f0a2bbb9abf6eb991600f1ccad00bb13fbdfed774d74758299d149407394598b"
 _LEGACY_SOURCE_CLOSURE_VALUES = {
     "experiments/magnitude_search_outer.py":
         "sha256:43f09630964f13433c568b05ecac17b90c666e3b4ad3fd333c3496deb9852c46",
     "experiments/magnitude_search_plan.py":
-        "sha256:f297542bfc24c168a8f8d877c2a6585e825b7e7d38c45fd0afb794e80973013a",
+        "sha256:048b94a53a66b56050bf195f03072d4f737859dd02a726705c801ff04510805a",
     "experiments/magnitude_search_selection.py":
         "sha256:57d08423a8f2bf359a066577a3e2927a5ace9f125feb9e07010c43447c82bf1f",
     "experiments/magnitude_search_trials.py":
@@ -65,15 +65,13 @@ _LEGACY_SOURCE_CLOSURE_VALUES = {
     "experiments/size_comparison_run.py":
         "sha256:27dbac58107832621b1b781b1e4ae3fbd67f71081412b90105bb9dc385d2d4ea",
     "experiments/size_search_binding.py":
-        "sha256:a1e9719e3007e30fcac2421613029e0c18010b3ad126d1c832b34b76d25ca69d",
+        "sha256:718f70fc312feb25a69740cff520d664ff2b925dd1c71ff79c5d841552ce0b05",
 }
-_LEGACY_SOURCE_CLOSURE_ABSENT = frozenset({
-    "experiments/label_availability.py",
-})
+_LEGACY_SOURCE_CLOSURE_ABSENT = frozenset()
 
 
 def _matches_legacy_source_closure(pinned, current):
-    """True only for the complete prior map and its exact seven-path delta from current."""
+    """True only for the complete prior map and its exact six-path delta from current."""
     if not isinstance(pinned, dict) or not isinstance(current, dict):
         return False
     try:
