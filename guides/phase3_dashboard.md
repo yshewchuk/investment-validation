@@ -51,6 +51,8 @@ Order matters; each step gates the next:
    date. A failed fetch or missing cutoff session stops the nightly with
    `GSPC_REFRESH_FAILED` or `GSPC_REFRESH_STALE`; the old panel is kept and
    the source is retried on the next nightly or a manual rerun.
+2a. A daily completeness refusal during the refresh rebuild stops the nightly
+   with `DAILY_MARKET_DATE_INCOMPLETE` before publication.
 3. Validation battery on the fresh data — red stops the pipeline (yesterday's
    snapshot stays published; a flag email/file is raised).
 3a. Warm the Tier-4 serving models the score will touch (subprocess; a

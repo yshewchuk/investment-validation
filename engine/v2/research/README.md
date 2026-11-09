@@ -358,6 +358,15 @@ for same-position, read-only fixed-day versus target/stop comparisons.
 the pure magnitude window and metadata-only planner to bind research registrations.
 `experiments/magnitude_search_plan.py` consumes `magnitude_folds.annual_fold`
 to reconstruct outer metadata and plan nested folds with the same public rule.
+It owns label-bounds and strict-cutoff exclusions from native `computed_move_bounds`;
+its planner admits the bounded catalog through the public
+`bounded_snapshot.open_bounded_snapshot` API before table access, so missing rows become
+sealed `label_bounds_missing` exclusions, present
+null rows become sealed `label_bounds_unavailable` exclusions, and malformed
+non-null dates refuse identity. Trial/report consumers use the plan's filtered
+`evaluation_event_ids`, while `read_search_plan` reconstructs folds and revalidates
+the sealed plan (including availability), repeating the bounded bounds admission.
+A fold whose strict exclusions remove every evaluation event refuses before plan publication.
 `experiments/magnitude_search_evidence.py` consumes stored-history reads, target
 preflight, training qualification and `magnitude_inputs.magnitude_recipe` for shared inner/outer evidence admission.
 `experiments/magnitude_search_trials.py` and `experiments/magnitude_search_outer.py`
@@ -442,7 +451,7 @@ snapshot recorded, and an explicit `--snapshot-id` honoured.
 `grouped_ticker_embargo.v1`; whole calendar-day width is explicit, not globally 30.
 `eligibility_policy.plan_eligibility` rederives random/rolling membership from
 pinned canonical event metadata and returns a content-addressed development
-exclusion plan with retained IDs, reasons, coverage, filtered evaluation IDs,
+exclusion plan with retained IDs, reasons, coverage, ticker-filtered evaluation IDs,
 ambiguous-random event IDs and evaluation exclusion reasons. It merges
 same-ticker random windows and uses inclusive interval overlap; one overlapping
 horizon excludes the whole event, not individual price bars.
@@ -456,11 +465,13 @@ Dates are canonical ISO calendar days. Producers must establish these bounds;
 missing bounds refuse. A caller's digest is not evidence of their truth.
 
 The eligible-history builder below consumes this metadata policy. Evaluation
-IDs outside an ambiguous-random ticker are preserved, not authorized for reading;
-IDs on that ticker are listed in `evaluation_exclusions`. Annual development
-targets still need retained eligibility. The policy identity and dependent
-request/dictionary hashes are unchanged; the embargo appears only in plan content,
-and only when an ambiguous random event exists, so earlier plans keep their IDs.
+IDs outside an ambiguous-random ticker are preserved by this policy, not authorized
+for reading; IDs on that ticker are listed in `evaluation_exclusions`. The separate
+SIZE fold binder retains only IDs that also survive its ticker embargo and precede
+its strict label cutoff, recording those excluded IDs. Annual development targets still need retained
+eligibility. The policy identity and dependent request/dictionary hashes are
+unchanged; the embargo appears only in plan content, and only when an ambiguous
+random event exists, so earlier plans keep their IDs.
 Integration sequencing belongs to the [stage-2 design](../../../experiments/SUPER_SIZE/STAGE2_DESIGN.md).
 
 ## Confirmed metadata index (synthetic only)

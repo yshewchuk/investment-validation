@@ -10,7 +10,7 @@ import string
 
 import pytest
 
-from engine.data import rebuild_cache
+from engine.data import rebuild_cache, rebuild_incremental
 
 
 def _gz(path, obj):
@@ -63,7 +63,7 @@ def world(tmp_root, monkeypatch):
            {"data": [_strike("AAA", "2024-01-03", 95.0)]})
     _fetch(paths, "hist/strikes", {"ticker": "BBB", "tradeDate": "2024-01-04"}, {"data": []})
     _fetch(paths, "hist/summaries", {"tradeDate": "2024-01-08"},
-           {"data": [dict(_summ("2024-01-08", 20.0), ticker="AAA")]})
+           {"data": [dict(_summ("2024-01-08", 20.0), ticker=t) for t in ("AAA", "BBB", "CCC")]})
     return paths
 
 
@@ -169,7 +169,7 @@ def test_daily_file_change_and_new_market_day(world):
     _incr(world)
     _gz(world.RAW_ORATS_SUMMARIES / "BBB.json.gz", [_summ("2024-01-02", 55.0)])
     _fetch(world, "hist/summaries", {"tradeDate": "2024-01-09"},
-           {"data": [dict(_summ("2024-01-09", 21.0), ticker=t) for t in ("AAA", "CCC")]})
+           {"data": [dict(_summ("2024-01-09", 21.0), ticker=t) for t in ("AAA", "BBB", "CCC")]})
     snap, reports, caches, flags = _incr(world)
     assert caches[0].stats["parsed"] == 1
     assert (snap, reports, flags) == _full(world)
@@ -327,3 +327,62 @@ def test_proof_tool_compare_stats_ignores_only_timestamps_and_snapshot():
     assert IGNORED_STAT_KEYS == {"elapsed_s", "flagged_at", "generated_at", "snapshot"}
     b["reports"]["daily"]["rows"] = 3
     assert compare_stats(a, b) == ["reports.daily.rows: 2 != 3"]
+
+
+def test_incremental_refusal_covers_cached_daily_preflight(world, monkeypatch):
+    """A gapped legacy date is refused before the events builder, even incrementally."""
+    from engine.data import rebuild
+
+    _gz(world.RAW_ORATS_SUMMARIES / "CCC.json.gz",
+        [_summ(f"2024-01-0{d}", 10.0 + 2 + d) for d in range(2, 5)])
+    called = []
+    monkeypatch.setattr(
+        rebuild, "build_events_table", lambda *a, **k: called.append("events")
+    )
+
+    with pytest.raises(rebuild.DailyMarketCompletenessError) as excinfo:
+        rebuild.rebuild(
+            tables=("events", "daily"), incremental=True, finalize=False
+        )
+
+    assert excinfo.value.code == "DAILY_MARKET_DATE_INCOMPLETE"
+    assert excinfo.value.date == "2024-01-05"
+    assert excinfo.value.count == 2
+    assert called == []
+
+
+def test_incremental_preflight_counts_without_a_second_normalization(world, monkeypatch):
+    """A warm incremental run fully normalizes each ticker only in the build pass."""
+    from engine.data import rebuild
+    from engine.data.normalize import n_daily
+
+    _incr(world)
+    calls = []
+    real = n_daily.normalize_frames
+
+    def counting(ticker, *args, **kwargs):
+        calls.append(ticker)
+        return real(ticker, *args, **kwargs)
+
+    monkeypatch.setattr(n_daily, "normalize_frames", counting)
+
+    rebuild.rebuild(tables=("daily",), incremental=True, finalize=False)
+
+    assert sorted(calls) == ["AAA", "BBB", "CCC"]
+
+
+def test_warm_cached_count_matches_cached_normalization(world):
+    """The warm count-only path agrees with normalization plus validation."""
+    from engine.data.normalize import n_daily
+    from engine.data.validate import validate_daily
+
+    _incr(world)
+    n_daily.fetch_daily_index.cache_clear()
+    cache = rebuild_cache.InputCache("daily_market")
+    frame, _ = rebuild_incremental.normalize_ticker_cached("AAA", cache)
+    clean, _ = validate_daily(frame)
+    expected = (
+        set(frame["date"].dropna().unique()),
+        clean.groupby("date").size().to_dict(),
+    )
+    assert rebuild_incremental.count_ticker_cached("AAA", cache) == expected

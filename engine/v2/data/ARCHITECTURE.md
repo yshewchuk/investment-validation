@@ -436,7 +436,7 @@ decoding can instead raise `DocumentError` directly.
 Native `computed_moves` uses singleton event objects with inspected key/time bounds and streamed logical hashes; old pins and row contracts stay unchanged.
 `computed_move_bounds.v1` is a separate metadata-only ticker-partitioned table: actual pre/post source dates, session, capture/source hashes and exact outcome object/hash.
 Its `source_bounds` shares native `source_session_indices`; finalized unavailable labels have null dates, never guessed calendar intervals.
-The opt-in ops writer checks post-close + one day against native label availability; this is reconstructed source dating, not publication-time evidence.
+The opt-in ops writer checks post-close + one day against native label availability; this is reconstructed source dating, not publication-time evidence. The research search planner runs the bounded all-table catalog probe under fixed caps before resolving this table, then reads only planned keys; absent rows are `label_bounds_missing` exclusions, present null rows are `label_bounds_unavailable` exclusions, and malformed non-null dates refuse identity.
 Research validates this sibling before outcome admission; missing coverage refuses rather than reconstructing dates from unrelated price captures.
 Predicates filter decoded rows, not physical bytes: research proves event isolation before labels; checksum verification reads each admitted object's full bytes.
 

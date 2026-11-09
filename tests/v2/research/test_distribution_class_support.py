@@ -10,6 +10,7 @@ import pytest
 from engine.v2.data.errors import DataError
 from engine.v2.ops.errors import OpsError
 from experiments import distribution_class_support as support
+from experiments.distribution_candidate_recipe import candidate_recipe
 
 
 def _counts(entries):
@@ -149,8 +150,48 @@ def test_native_error_object_propagates_unchanged(monkeypatch):
     assert error.value is sentinel
 
 
+@pytest.mark.parametrize("variant,entries,expected", [
+    ("raw", {0: 5, 80: 7}, {"requested": False, "used": False, "fallback_reason": None}),
+    ("regularised_v1", {0: 6, 80: 6}, {"requested": True, "used": True, "fallback_reason": None}),
+    ("regularised_v1", {0: 5, 80: 1},
+     {"requested": True, "used": False, "fallback_reason": "class_count_below_2"}),
+    ("regularised_v1", {0: 2, 1: 2, 80: 2},
+     {"requested": True, "used": False, "fallback_reason": "validation_split_too_small"}),
+])
+def test_early_stopping_decision_oracles(variant, entries, expected):
+    recipe = candidate_recipe("H", variant)
+    assert support.early_stopping_decision(recipe, support.training_support(_counts(entries))) == expected
+
+
+def _decision_support(entries=None):
+    return support.training_support(_counts(entries or {0: 2, 80: 2}))
+
+
+@pytest.mark.parametrize("recipe", [
+    None, {}, [], "recipe",
+    {**candidate_recipe("H"), "retries": 1},
+    {**candidate_recipe("H"), "classifier_variant": "other"},
+])
+def test_malformed_recipe_refuses_invalid_spec(recipe):
+    assert _refuses(support.early_stopping_decision, recipe, _decision_support()) == "invalid distribution candidate recipe"
+
+
+@pytest.mark.parametrize("document", [
+    None, {}, [], "support",
+    {**_decision_support(), "sample_count": 5},
+    {**_decision_support(), "observed_class_labels": [0]},
+    {**_decision_support(), "trees_per_iteration": 2},
+    {**_decision_support(), "extra": True},
+    {**_decision_support(), "bin_counts": [0] * 81},
+    {**_decision_support(), "bin_counts": [1] * 80},
+])
+def test_malformed_or_inconsistent_support_refuses_invalid_spec(document):
+    recipe = candidate_recipe("H", "regularised_v1")
+    assert _refuses(support.early_stopping_decision, recipe, document) == "invalid distribution class support"
+
+
 def test_public_arity_and_source_free_operations(monkeypatch):
-    assert support.__all__ == ["training_support", "class_histogram"]
+    assert support.__all__ == ["training_support", "early_stopping_decision", "class_histogram"]
     for function in (support.training_support, support.class_histogram):
         with pytest.raises(TypeError):
             function()

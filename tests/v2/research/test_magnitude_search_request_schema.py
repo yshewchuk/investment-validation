@@ -9,6 +9,7 @@ from engine.v2.ops.native_registration import (
     qualified,
     request_version,
     uses_extended_neural_profiles,
+    uses_chrono_neural_profiles,
     uses_v3_compiler,
 )
 
@@ -27,22 +28,24 @@ ACTUAL_COLUMNS = {
     "extra_panel_columns": allows_size_family,
     "neural_profiles": allows_neural,
     "v7_neural_profiles": uses_extended_neural_profiles,
+    "v8_chrono_profiles": uses_chrono_neural_profiles,
 }
 
 EXPECTED_TRUE_VERSIONS = {
-    "workers": range(2, 8),
-    "qualified_request_envelope": range(2, 8),
-    "prepare_plan": range(2, 8),
-    "read_plan": range(2, 8),
-    "native_registration": range(2, 8),
-    "v2_cli_containment": range(2, 8),
-    "v3_compiler_dispatch": range(3, 8),
-    "lead_selector": range(2, 8),
-    "expanded_hgb_axes": range(4, 8),
-    "fixed_size_family": range(5, 8),
-    "extra_panel_columns": range(5, 8),
-    "neural_profiles": range(6, 8),
-    "v7_neural_profiles": range(7, 8),
+    "workers": range(2, 9),
+    "qualified_request_envelope": range(2, 9),
+    "prepare_plan": range(2, 9),
+    "read_plan": range(2, 9),
+    "native_registration": range(2, 9),
+    "v2_cli_containment": range(2, 9),
+    "v3_compiler_dispatch": range(3, 9),
+    "lead_selector": range(2, 9),
+    "expanded_hgb_axes": range(4, 9),
+    "fixed_size_family": range(5, 9),
+    "extra_panel_columns": range(5, 9),
+    "neural_profiles": range(6, 9),
+    "v7_neural_profiles": range(7, 9),
+    "v8_chrono_profiles": range(8, 9),
 }
 
 SCHEMAS = [
@@ -55,6 +58,7 @@ SCHEMAS = [
     "magnitude_search_request.v5",
     "magnitude_search_request.v6",
     "magnitude_search_request.v7",
+    "magnitude_search_request.v8",
     "magnitude_search_request.v99",
     "garbage",
     None,
@@ -62,7 +66,7 @@ SCHEMAS = [
     [],
 ]
 
-EXPECTED_VERSIONS = [None, 1, None, 2, 3, 4, 5, 6, 7, 99, None, None, None, None]
+EXPECTED_VERSIONS = [None, 1, None, 2, 3, 4, 5, 6, 7, 8, 99, None, None, None, None]
 
 
 @pytest.mark.parametrize("schema,expected", list(zip(SCHEMAS, EXPECTED_VERSIONS)))

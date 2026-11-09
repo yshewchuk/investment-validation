@@ -128,7 +128,7 @@ def test_dispatch_delegates_once_and_preserves_the_entire_result(monkeypatch):
     assert fit_candidate(policy, *arrays, columns=COLUMNS) is result
     assert len(calls) == 1
     assert all(actual is expected for actual, expected in zip(calls[0][0], [policy, *arrays]))
-    assert calls[0][1] == {"columns": COLUMNS}
+    assert calls[0][1] == {"columns": COLUMNS, "train_event_dates": None}
 
 
 @pytest.mark.parametrize("error", [ValueError("fit"), MemoryError("memory"), OSError("io"),

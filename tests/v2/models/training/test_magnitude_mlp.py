@@ -1,9 +1,11 @@
 """Synthetic standalone neural contracts; no source reads or study activation."""
 import copy
 import json
+import math
 import subprocess
 import sys
 import warnings
+from datetime import date, timedelta
 
 import numpy as np
 import pytest
@@ -35,6 +37,14 @@ STOPPING_PROFILES = [
     ("fixed200_relu64x32_l2_1", [64, 32], 1, False, 200, 201, "epoch_budget_success_no_retry"),
     ("fixed200_relu64x32_l2_10", [64, 32], 10, False, 200, 201, "epoch_budget_success_no_retry"),
     ("fixed200_relu64x32_l2_100", [64, 32], 100, False, 200, 201, "epoch_budget_success_no_retry"),
+]
+CHRONO_PROFILES = [
+    ("chrono15_relu32_l2_0p01", [32], 0.01, 0.15),
+    ("chrono15_relu32_l2_1", [32], 1, 0.15),
+    ("chrono15_relu64x32_l2_0p01", [64, 32], 0.01, 0.15),
+    ("chrono15_relu64x32_l2_1", [64, 32], 1, 0.15),
+    ("chrono10_relu64x32_l2_0p01", [64, 32], 0.01, 0.10),
+    ("chrono10_relu64x32_l2_1", [64, 32], 1, 0.10),
 ]
 
 
@@ -523,3 +533,126 @@ def test_informative_missing_features_use_training_median_not_mean(monkeypatch):
     assert np.nanmean(train) == pytest.approx(2.2)  # Asymmetric: median is not the mean.
     assert imputer.statistics_.tolist() == [1.0]
     assert imputer.transform(prediction).ravel().tolist() == [1., 1., 8.]
+
+
+def chrono_dates(size=80):
+    return [(date(2024, 1, 1) + timedelta(days=index)).isoformat() for index in range(size)]
+
+
+def independent_chrono_oracle(train, labels, prediction, event_dates, *, layers, alpha, fraction):
+    ordered = sorted(range(len(event_dates)), key=lambda index: (event_dates[index], index))
+    holdout = math.ceil(len(ordered) * fraction)
+    fit_rows, validation_rows = ordered[:-holdout], ordered[-holdout:]
+    union = FeatureUnion([("imputer", SimpleImputer(strategy="median", keep_empty_features=True)),
+        ("missing_indicator", MissingIndicator(features="all", sparse=False))], n_jobs=1)
+    preprocessing = make_pipeline(union, VarianceThreshold(threshold=0.), StandardScaler())
+    transformer = StandardScaler()
+    fit_features = preprocessing.fit_transform(train[fit_rows])
+    fit_labels = transformer.fit_transform(labels[fit_rows].reshape(-1, 1)).ravel()
+    validation_features = preprocessing.transform(train[validation_rows])
+    validation_labels = transformer.transform(labels[validation_rows].reshape(-1, 1)).ravel()
+    network = MLPRegressor(hidden_layer_sizes=layers, alpha=alpha, max_iter=400,
+        n_iter_no_change=20, early_stopping=False, random_state=20260829)
+    best = (np.inf, None, None, None)
+    stale = 0
+    with threadpool_limits(limits=1), warnings.catch_warnings():
+        warnings.simplefilter("ignore", ConvergenceWarning)
+        for epoch in range(1, 401):
+            network.partial_fit(fit_features, fit_labels)
+            predicted = network.predict(validation_features)
+            loss = float(np.mean((predicted - validation_labels) ** 2))
+            if loss < best[0]:
+                best = (loss, [coef.copy() for coef in network.coefs_],
+                        [intercept.copy() for intercept in network.intercepts_],
+                        float(network.loss_))
+                stale = 0
+            else:
+                stale += 1
+                if stale >= 20:
+                    break
+        network.coefs_, network.intercepts_ = best[1], best[2]
+        network.loss_ = best[3]
+        expected = np.maximum(transformer.inverse_transform(
+            network.predict(preprocessing.transform(prediction)).reshape(-1, 1)).ravel(), 0.)
+    return best[3], expected, epoch, network.n_features_in_
+
+
+@pytest.mark.parametrize("profile,layers,alpha,fraction", CHRONO_PROFILES)
+def test_chrono_profiles_match_closed_policy(profile, layers, alpha, fraction):
+    policy = recipe(profile=profile)
+    assert validate_mlp_recipe(policy) == policy
+    assert policy["requires_event_dates"] is True
+    assert policy["nonconvergence"] == "epoch_budget_success_no_retry"
+    expected = MLPRegressor(hidden_layer_sizes=layers, alpha=alpha, max_iter=400,
+        n_iter_no_change=20, early_stopping=False, random_state=20260829).get_params()
+    assert policy["estimator"]["params"] == expected
+
+
+@pytest.mark.parametrize("profile,layers,alpha,fraction", [
+    ("chrono15_relu32_l2_0p01", [32], 0.01, 0.15),
+    ("chrono10_relu64x32_l2_1", [64, 32], 1, 0.10),
+])
+def test_chrono_fit_uses_chronological_holdout_and_restores_best_epoch(
+        profile, layers, alpha, fraction):
+    train, labels, prediction = arrays()
+    dates = chrono_dates()
+    policy = recipe(profile=profile)
+    loss, expected, epoch, width = independent_chrono_oracle(
+        train, labels, prediction, dates, layers=layers, alpha=alpha, fraction=fraction)
+    result = fitting.fit_mlp_predictions(policy, train, labels, prediction,
+        columns=COLUMNS, train_event_dates=dates)
+    assert result["predictions"] == expected.tolist()
+    assert result["n_iter"] == epoch
+    assert result["loss"] == pytest.approx(loss)
+    assert result["input_features"] == width
+    assert result["converged"] is (epoch < 400)
+
+
+def test_chrono_recipe_requires_aligned_canonical_dates_before_estimator(monkeypatch):
+    monkeypatch.setattr(fitting, "build_estimator",
+                        lambda *args: pytest.fail("invalid dates entered estimator construction"))
+    cases = [None, chrono_dates(79), chrono_dates(79) + ["2024-1-1"],
+             chrono_dates(79) + ["2024-02-30"], chrono_dates(79) + [date(2024, 1, 1)],
+             chrono_dates(79) + [np.datetime64("2024-01", "M")],
+             chrono_dates(79) + [np.datetime64("2024", "Y")]]
+    for event_dates in cases:
+        with pytest.raises(ValueError, match="event dates"):
+            fitting.fit_mlp_predictions(recipe(profile="chrono15_relu32_l2_0p01"),
+                *arrays(), columns=COLUMNS, train_event_dates=event_dates)
+
+
+def test_chrono_split_orders_by_date_then_original_position():
+    dates = ["2024-01-04", "2024-01-02", "2024-01-04", "2024-01-01", "2024-01-03"]
+    fit_rows, validation_rows = fitting._chrono_split(dates, 0.2)
+    assert fit_rows == [3, 1, 4, 0]
+    assert validation_rows == [2]
+
+
+def test_chrono_prediction_rows_cannot_influence_training():
+    train, labels, prediction = arrays()
+    dates = chrono_dates()
+    policy = recipe(profile="chrono10_relu64x32_l2_1")
+    result = fitting.fit_mlp_predictions(policy, train, labels, prediction,
+        columns=COLUMNS, train_event_dates=dates)
+    changed = fitting.fit_mlp_predictions(policy, train, labels,
+        np.vstack([prediction, [1e10, np.nan, 1e10]]), columns=COLUMNS, train_event_dates=dates)
+    assert changed["predictions"][:2] == result["predictions"]
+    assert changed["loss"] == result["loss"] and changed["n_iter"] == result["n_iter"]
+
+
+def test_chrono_interrupted_partial_fit_preserves_original_interrupt(monkeypatch):
+    original = MLPRegressor._backprop
+    interrupt, calls = KeyboardInterrupt("synthetic cancellation"), []
+    def interrupted(self, *args, **kwargs):
+        calls.append(self.n_iter_)
+        if len(calls) == 2:
+            raise interrupt
+        return original(self, *args, **kwargs)
+    monkeypatch.setattr(MLPRegressor, "_backprop", interrupted)
+    monkeypatch.setattr(TransformedTargetRegressor, "predict",
+                        lambda *a, **k: pytest.fail("interrupted fit reached prediction"))
+    with pytest.raises(KeyboardInterrupt) as caught:
+        fitting.fit_mlp_predictions(recipe(profile="chrono15_relu64x32_l2_1"),
+            *arrays(), columns=COLUMNS, train_event_dates=chrono_dates())
+    assert caught.value is interrupt
+    assert len(calls) == 2

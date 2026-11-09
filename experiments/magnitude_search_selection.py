@@ -3,7 +3,9 @@ import math
 from collections.abc import Mapping
 from statistics import stdev
 
-__all__ = ["blended_event_score", "history_mean_rows", "history_mean_prediction", "selection_tie_band"]
+__all__ = ["CURRENT_TIE_RULE", "LEGACY_TIE_RULE", "blended_event_score", "history_mean_rows",
+           "history_mean_prediction", "selection_contract_tie_rule", "selection_tie_band",
+           "validate_tie_rule"]
 
 
 class ZeroComparatorError(ValueError):
@@ -11,6 +13,23 @@ class ZeroComparatorError(ValueError):
 
 
 _METRIC_NAMES = ("rmse", "mae", "large_move_underprediction")
+CURRENT_TIE_RULE = "lowest_score_then_candidate_id_ascending"
+LEGACY_TIE_RULE = "candidate_id_ascending"
+_SUPPORTED_TIE_RULES = (CURRENT_TIE_RULE, LEGACY_TIE_RULE)
+
+
+def validate_tie_rule(tie_rule):
+    """Return a supported sealed tie rule or refuse an unknown value."""
+    if tie_rule not in _SUPPORTED_TIE_RULES:
+        raise ValueError(f"unsupported tie_rule: {tie_rule!r}")
+    return tie_rule
+
+
+def selection_contract_tie_rule(contract):
+    """Validate a sealed selection contract's tie rule, accepting its legacy key."""
+    if not isinstance(contract, Mapping):
+        raise ValueError(f"unsupported tie_rule: {None!r}")
+    return validate_tie_rule(contract.get("ties", contract.get("tie_break")))
 
 
 def _mapping(value, name):
@@ -197,8 +216,17 @@ def blended_event_score(candidate_rows, history_rows, *, metric_weights, large_m
     return {"metrics": raw, "normalized": normalized, "blend_score": blend}
 
 
-def selection_tie_band(scores, yearly_scores, *, floor):
-    """Return candidate-ID winner and max(sample-SE, floor) diagnostics."""
+def selection_tie_band(scores, yearly_scores, *, floor,
+                       tie_rule=CURRENT_TIE_RULE):
+    """Return the selected candidate under the sealed tie rule plus band diagnostics.
+
+    The max(sample-SE, floor) noise band and its candidate list are diagnostics.
+    The sealed rule selects the lowest blend score, using candidate_id only for
+    exact score equality. Any other tie_rule is rejected.
+    """
+    tie_rule = validate_tie_rule(tie_rule)
+    if tie_rule != CURRENT_TIE_RULE:
+        raise ValueError(f"unsupported tie_rule: {tie_rule!r}")
     _finite_nonnegative(floor, "tie_band_floor")
     score_rows = _rows(scores, "selection score rows")
     if not score_rows:
@@ -218,17 +246,21 @@ def selection_tie_band(scores, yearly_scores, *, floor):
             _identifier(year, "selection yearly year")
             _finite_number(_field(yearly[year], "blend_score", "selection yearly year row"),
                            "selection yearly year blend_score")
-        by_candidate[candidate_id] = yearly
+        by_candidate[candidate_id] = (yearly, bool(row.get("diagnostic_unavailable", False)))
     best = min(score_rows, key=lambda row: (row["blend_score"], row["candidate_id"]))
     if best["candidate_id"] not in by_candidate:
         raise ValueError("selection tie band missing candidate yearly scores")
-    yearly = by_candidate[best["candidate_id"]]
+    yearly, diagnostic_unavailable = by_candidate[best["candidate_id"]]
     values = [yearly[year]["blend_score"] for year in sorted(yearly)]
-    standard_error = stdev(values) / math.sqrt(len(values)) if len(values) > 1 else 0.0
-    width = max(standard_error, floor)
+    if diagnostic_unavailable:
+        standard_error = None
+    elif values:
+        standard_error = stdev(values) / math.sqrt(len(values)) if len(values) > 1 else 0.0
+    else:
+        standard_error = 0.0
+    width = floor if standard_error is None else max(standard_error, floor)
     tied = [row for row in scores if row["blend_score"] <= best["blend_score"] + width]
-    winner = min(tied, key=lambda row: row["candidate_id"])
-    return winner["candidate_id"], {
+    return best["candidate_id"], {
         "best_blend_score": best["blend_score"],
         "standard_error": standard_error,
         "width": width,

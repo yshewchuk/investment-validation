@@ -76,7 +76,7 @@ def validate_workers(request):
     if "workers" not in request:
         return 1
     _require(allows_workers(request_version(request.get("schema_version"))),
-             "stage-2 workers require a v2 through v7 search request")
+             "stage-2 workers require a v2 through v9 search request")
     _require(type(request["workers"]) is int and 1 <= request["workers"] <= 8,
              "stage-2 workers requires an integer from 1 through 8")
     return request["workers"]

@@ -164,6 +164,19 @@ lines; writes MANIFEST.md (tables, rows, year coverage, source files, hashes)
 and a snapshot hash (sha256 over table content hashes) into
 `data/features/SNAPSHOT`.
 
+A rebuild refuses before any selected table builder writes anything when its
+selected tables include `daily` and it is a full build (no `--sample`, or
+`--sample 0`) and a published `daily_market` date has fewer rows than 75% of
+the median of its nearest published neighbour(s). The error code is
+`DAILY_MARKET_DATE_INCOMPLETE`; the refusal precedes the daily writer and
+earlier tables such as `events`, so the existing curated tables and SNAPSHOT
+stay intact. A partial-table rebuild that does not select `daily` takes no
+coverage guard. The raw rows may be a short cached provider response, which a
+plain rebuild reuses; fetch fresh market-wide `hist/summaries` and `hist/cores`
+responses for the affected dates using a fresh `refetch_token`, then run the
+full daily rebuild (`python3 -m engine.data.rebuild --table daily`); do not
+lower the floor.
+
 **Migration test (`checks/phase0_migration.py`):** join new panel to
 `LEGACY_PANEL` on (ticker, event_date); assert row counts by year match
 (document any legitimate delta, e.g. quarantined rows), moves match to

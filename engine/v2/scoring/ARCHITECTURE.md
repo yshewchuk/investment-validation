@@ -188,11 +188,11 @@ load-bearing entrypoints:
 `source_inputs.SUPPORTED_STRATEGIES` contains the seven `DYNAMIC_MENU`
 structures, but not DYN-SV, which has no independent forecast-output recipe.
 `SourceBundle.chooser_recipe` names a frozen champion, optional producers and
-state keys; `chooser_fold_pools`, `chooser_analog_pool` and
-`chooser_admissible_table` carry their declared inputs. `chooser_inputs`
-builds that block only for menu candidates; state without a recipe or a recipe
-for another strategy raises `ValueError`. The chooser k-NN pool is distinct
-from the board bucket-analog pool.
+state keys, `artifact_refs` and `fold_provenance`; `chooser_fold_pools`,
+`chooser_analog_pool` and `chooser_admissible_table` carry their declared
+inputs. `chooser_inputs` builds that block only for menu candidates; state
+without a recipe or a recipe for another strategy raises `ValueError`. The
+chooser k-NN pool is distinct from the board bucket-analog pool.
 Strict Tier-0 capture opts into `resolve_production_release_binding`'s
 verified chooser-fold references and passes the verified map to
 `engine.score.Scorer`. The scorer records only references matching a bound
@@ -227,16 +227,13 @@ not used by this legacy capture path.
 native pricing and simulation. Invalid declared frozen state flags
 `MODEL_NOT_READY`; missing/nonfinite champion inputs flag the advisory
 `CHOOSER_MISSING_FEATURES` and withhold `chooser_score`.
-Feature math never fits; frozen executors own model inference. `release_bindings`
-exposes verified chooser pools/depth tables; nightly declares no chooser block.
+Feature math never fits; frozen executors own model inference. `release_bindings` exposes verified chooser pools/depth tables. `native_score_batch` selects chooser state and scores the seven menu-member rows; full portfolio-level DYN-SV selection remains separate.
 
-`application.score_event` requires the complete ordered `DYNAMIC_MENU`, scores
-its members and resolves DYN-SV over finite simulation-bearing candidates:
-available chooser scores rank first, otherwise simulation is the ranking key.
-It retains the winner's economics and gate verdict; ties use stable menu
-order. No eligible candidate yields a refused record with
-`NO_CHOOSER_CANDIDATE`. `score_batch` only preserves request order and never
-calls this menu resolver, so these interfaces do not enable nightly DYN-SV.
+`application.score_event` requires the complete ordered `DYNAMIC_MENU`, scores its
+members and resolves DYN-SV over finite simulation-bearing candidates: available
+chooser scores rank first, otherwise simulation is the ranking key; ties use stable
+menu order, and no eligible candidate yields a refused record with
+`NO_CHOOSER_CANDIDATE`. It retains the winner's economics and gate verdict. `score_batch` only preserves request order and never calls this resolver, while native nightly still scores member rows.
 
 `dynamic_outcomes` owns the separate pure accounting boundary: frozen
 `DynamicMenuIdentity` and `DynamicCandidateOutcome` summaries, validated by
@@ -257,8 +254,8 @@ hash. The helper verifies summaries, not original records or policy hashes.
 There is no I/O, retry, fitting or source/finality/causal-training admission.
 No cache or transaction exists, no partial result escapes (a refusal returns
 no summaries), and equal inputs return equal tuples (see Failure semantics).
-Only tests consume this preparatory interface; existing selection and nightly
-dispatch are unchanged. See README for fields and ownership obligations.
+Only tests consume this preparatory interface; the full DYN-SV resolver remains
+separate from nightly dispatch. See README for fields and ownership obligations.
 
 **Forward forecast assembly.** Contract: native STR-THRU scoring selects the
 exact causal size fold for the earlier of event and decision months and attaches
@@ -714,7 +711,7 @@ and the release is not consulted for it.
 A verified chooser-fold reference carries descriptor/estimator hashes, fold month, producer binding, authoring/carrying release ids and the canonical [training cutoff](../models/ARCHITECTURE.md#chooser-producer-fold-authoring) defined only in the models architecture.
 New references preserve the producer-declared cutoff; cutoffless legacy descriptors remain loadable and hash-stable through the normal serving-fold loader but are omitted from the reference maps.
 By default `resolve_release_binding` returns empty `chooser_fold_references` and authoring-context maps and does no chooser-fold loading for ordinary nightly scoring; it still exposes the canonical current catalog JSON and verified parent manifest.
-Callers that need the references and contexts opt in with `include_chooser_fold_references=True`; resolution returns complete maps or a typed refusal.
+Callers opt in with `include_chooser_fold_references=True`; resolution returns complete maps or a typed refusal. `native_score_batch` explicitly opts in and selects per-member chooser state; strict Tier-0 capture is a separate opt-in caller.
 Chooser references are keyed by `(producer_output, fold_start)` and authoring contexts by descriptor hash; contexts hold the exact authoring release's verified manifest and catalog. Strict capture opts in, passes verified references to the scorer, and records both release ids in trace metadata.
 
 | Condition | Outcome |
@@ -748,12 +745,12 @@ Loading establishes release membership and typed integrity; selecting the exact 
 
 #### `select_chooser_state(binding, event_date, as_of) -> ChooserState`
 
-Inputs are a verified `ScoringReleaseBinding`, the event date and the canonical as-of date; the fold start is derived from those dates (the earlier event/decision month), never a function argument, and the returned `ChooserState` carries the selected pools with fold provenance, producer bindings and artifact refs. The selector is currently unused and not called by nightly scoring; selection adds no fold cache or retry, and cutoffless legacy descriptors remain verified then omitted.
+Inputs are a verified `ScoringReleaseBinding`, the event date and the canonical as-of date; the fold start is derived from those dates (the earlier event/decision month), never a function argument, and the returned `ChooserState` carries the selected pools with fold provenance, producer bindings and artifact refs. The selector chooses the unique chooser analog pool with the greatest cutoff less than or equal to `as_of`: an exact-date pool wins, older pools have no age limit, and future-dated pools are never eligible. `native_score_batch` calls the selector for the seven menu-member strategies; full portfolio-level DYN-SV menu selection remains outside that worker. Selection adds no fold cache or retry, and cutoffless legacy descriptors remain verified then omitted.
 
 | Condition | Outcome |
 |---|---|
 | malformed dates, malformed catalog, or a serving-fold load error | `ModelNotReady("chooser state", ...)` |
-| no unique exact-cutoff analog pool | `ModelNotReady("chooser_analog_pool", ...)` |
+| no analog pool with cutoff at or before `as_of`, or multiple pools at the newest eligible cutoff | `ModelNotReady("chooser_analog_pool", ...)` |
 | no unique v1 admissible-depth table | `ModelNotReady("admissible_table:dyn_sv", ...)` |
 | missing, malformed or noncausal producer descriptor/reference | `ModelNotReady("tier4_folds:<role>", ...)` |
 

@@ -1,4 +1,8 @@
-"""Collect verified selected-outer and comparator journals without new fitting."""
+"""Collect verified selected-outer and comparator journals with report-only scalar calibration.
+
+This module fits one report-only scalar per outer year and performs no model fits.
+"""
+import math
 import sys
 import time
 
@@ -6,8 +10,52 @@ from engine.v2.foundation import content_hash
 from experiments.magnitude_search_outer import collect_outer_results
 from experiments.magnitude_search_plan import trial_key
 from experiments.magnitude_search_records import read_record
-from experiments.size_paired_report import paired_report
+from experiments.size_paired_report import paired_report, validated_horizons
 from experiments.v2_magnitude_search_run import _admit_driver
+
+
+def _valid_scalar(value):
+    return type(value) in (int, float) and math.isfinite(value) and value >= 0
+
+
+def fit_implied_scale(training_event_ids, labels, features, horizons):
+    """Fit one no-intercept k from admitted training event-horizon feature/label pairs."""
+    event_ids, leads, pairs = set(training_event_ids), set(validated_horizons(horizons)), []
+    for row in features:
+        event_id = row["event_id"]
+        if event_id not in event_ids:
+            continue
+        horizon = row["horizon_sessions"]
+        if type(horizon) is not int:
+            raise ValueError("invalid feature horizon")
+        if horizon not in leads:
+            continue
+        x, y = row["implied_move"], labels.get(event_id)
+        if x is None:
+            continue
+        if not _valid_scalar(x):
+            raise ValueError("invalid implied move")
+        if x == 0:
+            continue
+        if _valid_scalar(y):
+            pairs.append((x, y))
+    denominator = sum(x * x for x, _ in pairs)
+    if not pairs or denominator == 0:
+        return {"scale": None, "fit_n": len(pairs)}
+    scale = sum(x * y for x, y in pairs) / denominator
+    return {"scale": scale if math.isfinite(scale) and scale >= 0 else None,
+            "fit_n": len(pairs)}
+
+
+def _implied_evidence(fold, inputs, horizons, *, calibrate):
+    """Extract report-only calibration and evaluation moves from verified inputs."""
+    labels = {row["event_id"]: row["absolute_move_pct"] for row in inputs["training"]}
+    scale = (fit_implied_scale(fold["training_candidate_event_ids"], labels, inputs["features"], horizons)
+             if calibrate else None)
+    keys = {(event_id, horizon) for event_id in fold["evaluation_event_ids"] for horizon in horizons}
+    moves = {(row["event_id"], row["horizon_sessions"]): row["implied_move"]
+             for row in inputs["features"] if (row["event_id"], row["horizon_sessions"]) in keys}
+    return scale, moves
 
 
 def _candidate_evidence(conn, store, run_id, plan):
@@ -67,7 +115,18 @@ def collect(conn, store, repository, registration, request, plan_ref):
     print("[stage] collect start", file=sys.stderr)
     started = time.monotonic()
     plan = _admit_driver(conn, store, registration, request, plan_ref)
-    result = collect_outer_results(conn, store, repository, registration, request, plan_ref)
+    horizons = plan["horizons"]
+    execution = registration.document.get("magnitude_execution")
+    calibrate = (isinstance(execution, dict)
+                 and isinstance(execution.get("evaluation_labels_before"), str))
+    scales, implied_moves = {}, {}
+    def implied_inputs(fold, inputs):
+        scale, moves = _implied_evidence(fold, inputs, horizons, calibrate=calibrate)
+        if calibrate:
+            scales[str(fold["year"])] = scale
+        implied_moves.update(moves)
+    result = collect_outer_results(conn, store, repository, registration, request, plan_ref,
+                                   input_callback=implied_inputs)
     forecasts, comparisons, events, comparison_fits = [], [], [], []
     targets = {r["event_id"]: r["absolute_move_pct"] for r in result["predictions"]}
     ids = {event for group in plan["folds"] for event in group["outer"]["evaluation_event_ids"]}
@@ -82,7 +141,9 @@ def collect(conn, store, repository, registration, request, plan_ref):
         comparisons.extend(comparison["forecasts"])
         comparison_fits.extend({"outer_year": year, **fit} for fit in comparison["fit_details"])
     report = {"plan_id": plan["plan_id"], "search": result, "paired": paired_report(events, forecasts, comparisons, targets,
-                horizons=plan["horizons"],
+                horizons=horizons,
+                implied_moves=implied_moves,
+                implied_scales=scales,
                 label_reasons={o["event_id"]: o["reason"] for f in result["folds"]
                     for o in f["evaluation_inputs"].get("omitted_labels", [])}),
             "preflight": resource_report(plan), "inner_fits": inner_fits, "comparison_fits": comparison_fits,

@@ -1,13 +1,14 @@
-"""Pure v3-v7 validation with bounded grids, fixed SIZE and named neural profiles."""
+"""Pure v3-v9 validation with bounded grids, fixed SIZE and named neural profiles."""
 import json
 import math
 
 from engine.v2.foundation import content_hash
 from engine.v2.ops.errors import fail
+from engine.v2.research.magnitude_panel_qualified_table import recipe as qualified_panel_recipe
 from experiments import magnitude_search_request as v2
 from experiments.magnitude_search_request_schema import (
     allows_hgb_axes, allows_neural, allows_size_family, request_version,
-    uses_extended_neural_profiles)
+    uses_chrono_neural_profiles, uses_extended_neural_profiles)
 
 __all__ = ["compile_request"]
 
@@ -21,7 +22,11 @@ _BOUNDS = {
     ("hgb", "max_leaf_nodes"): (2, 64),
     ("hgb", "min_samples_leaf"): (1, 1000),
     ("hgb", "l2_regularization"): (0, 1000),
+    ("hgb", "max_iter"): (100, 5000),
 }
+_HGB_V9_OPTIONAL = {"loss", "max_iter"}
+_HGB_V9_DEFAULTS = {"loss": ["squared_error"], "max_iter": [500]}
+_HGB_LOSSES = ("absolute_error", "gamma", "poisson", "squared_error")
 _FAMILIES = {
     "ridge": {"alpha"},
     "elasticnet": {"alpha", "l1_ratio"},
@@ -39,6 +44,10 @@ _MLP_PROFILES_V7 = _MLP_PROFILES | {
     "es_relu32_l2_0p01", "es_relu32_l2_1", "es_relu64x32_l2_0p01",
     "es_relu64x32_l2_1", "fixed200_relu64x32_l2_1", "fixed200_relu64x32_l2_10",
     "fixed200_relu64x32_l2_100"}
+_MLP_PROFILES_V8 = _MLP_PROFILES_V7 | {
+    "chrono15_relu32_l2_0p01", "chrono15_relu32_l2_1",
+    "chrono15_relu64x32_l2_0p01", "chrono15_relu64x32_l2_1",
+    "chrono10_relu64x32_l2_0p01", "chrono10_relu64x32_l2_1"}
 
 
 _SELECTION_METRICS = {"rmse": 0.6, "mae": 0.3, "large_move_underprediction": 0.1}
@@ -90,28 +99,51 @@ def _finite_nonnegative(value):
 
 
 def _space(request):
-    v2._require(request["feature_sets"] == v2._SETS,
-                "stage-2 requires exactly ordered H/HM/HMO feature sets")
+    version = request_version(request["schema_version"])
+    allowed_sets = (*v2._SETS, "MO-", "M")
+    feature_sets = request["feature_sets"]
+    valid_sets = (type(feature_sets) is list and bool(feature_sets)
+        and all(type(subset) is str and subset in allowed_sets for subset in feature_sets)
+        and feature_sets == [subset for subset in allowed_sets if subset in feature_sets])
+    v2._require(valid_sets if version == 9 else feature_sets == v2._SETS,
+                "stage-2 v9 requires a nonempty ordered subset of H/HM/HMO/MO-/M"
+                if version == 9 else "stage-2 requires exactly ordered H/HM/HMO feature sets")
     space = request["space"]
     version = request["schema_version"]
-    families = (_FAMILIES_V6 if allows_neural(request_version(version))
-                else _FAMILIES_V5 if allows_size_family(request_version(version))
-                else _FAMILIES_V4 if allows_hgb_axes(request_version(version)) else _FAMILIES)
-    v2._require(v2._shape(space, families),
+    version_number = request_version(version)
+    families = (_FAMILIES_V6 if allows_neural(version_number)
+                else _FAMILIES_V5 if allows_size_family(version_number)
+                else _FAMILIES_V4 if allows_hgb_axes(version_number) else _FAMILIES)
+    v2._require((type(space) is dict and set(space) == set(families)) if version_number == 9
+                else v2._shape(space, families),
                 "stage-2 requires the closed family grid")
     canonical = {}
     for family, axes in families.items():
         supplied = space[family]
-        v2._require(v2._shape(supplied, axes),
-                    "stage-2 grid axes differ from the closed policy")
+        if version_number == 9 and family == "hgb":
+            declared = set(supplied) if type(supplied) is dict else None
+            v2._require(declared is not None and axes <= declared
+                        and declared <= axes | _HGB_V9_OPTIONAL,
+                        "stage-2 grid axes differ from the closed policy")
+            if declared - axes:
+                supplied = {**supplied}
+                for optional, default in _HGB_V9_DEFAULTS.items():
+                    supplied.setdefault(optional, list(default))
+                axes = axes | _HGB_V9_OPTIONAL
+        else:
+            v2._require(v2._shape(supplied, axes),
+                        "stage-2 grid axes differ from the closed policy")
         canonical[family] = {}
         for axis in sorted(axes):
             values = supplied[axis]
             v2._require(type(values) is list and 1 <= len(values) <= _MAX_AXIS_LENGTH,
                         "stage-2 grid axis length must be between 1 and 32")
             if family == "mlp":
-                v2._require(all(type(value) is str and value in (
-                    _MLP_PROFILES_V7 if uses_extended_neural_profiles(request_version(version)) else _MLP_PROFILES)
+                parsed_version = request_version(version)
+                allowed = (_MLP_PROFILES_V8 if uses_chrono_neural_profiles(parsed_version)
+                           else _MLP_PROFILES_V7 if uses_extended_neural_profiles(parsed_version)
+                           else _MLP_PROFILES)
+                v2._require(all(type(value) is str and value in allowed
                     for value in values)
                     and values == sorted(set(values)),
                     "stage-2 MLP profiles must be known, unique and lexicographically ordered")
@@ -122,7 +154,13 @@ def _space(request):
                             "stage-2 HGB max_leaf_nodes grid remains fixed at [7, 15]")
                 canonical[family][axis] = [7, 15]
                 continue
-            if family == "hgb" and axis in ("max_leaf_nodes", "min_samples_leaf"):
+            if family == "hgb" and axis == "loss":
+                v2._require(all(type(value) is str and value in _HGB_LOSSES
+                    for value in values) and values == sorted(set(values)),
+                    "stage-2 HGB loss values must be known, unique and lexicographically ordered")
+                canonical[family][axis] = list(values)
+                continue
+            if family == "hgb" and axis in ("max_leaf_nodes", "min_samples_leaf", "max_iter"):
                 v2._require(all(type(value) is int for value in values),
                             "stage-2 HGB integer grid values must be integers")
                 canonical[family][axis] = [int(value) for value in values]
@@ -148,12 +186,14 @@ def _counts(request, horizons):
                 "stage-2 requires ordered outer years and exact inner-year keys")
     v2._require(all(v2._years(inner[year]) and inner[year][-1] < year for year in outer),
                 "stage-2 inner years must be ordered and strictly earlier than their outer year")
-    size = allows_size_family(request_version(request["schema_version"]))
-    count = int(size) + len(v2._SETS) * sum(math.prod(len(values) for values in axes.values())
+    size = (allows_size_family(request_version(request["schema_version"]))
+            and "HMO" in request["feature_sets"])
+    count = int(size) + len(request["feature_sets"]) * sum(
+        math.prod(len(values) for values in axes.values())
         for family, axes in request["space"].items() if family != "size_v1_4")
     if allows_hgb_axes(request_version(request["schema_version"])):
         v2._require(count <= _MAX_V4_CANDIDATES,
-                    "stage-2 v6/v7 grid exceeds the 1000-candidate ceiling"
+                    "stage-2 v6/v7/v8/v9 grid exceeds the 1000-candidate ceiling"
                     if allows_neural(request_version(request["schema_version"]))
                     else "stage-2 v4/v5 grid exceeds the 1000-candidate ceiling")
     inners, outers = sum(map(len, inner.values())), len(outer)
@@ -189,13 +229,14 @@ def compile_request(request, *, horizons=(5, 3, 1)):
                 or (allows_hgb_axes(request_version(version))
                     and request_keys in (v2._KEYS | {"selection"},
                                          v2._KEYS | {"selection", "workers"})),
-                "stage-2 request requires its closed v6/v7 schema and selection policy"
+                "stage-2 request requires its closed v6/v7/v8 schema and selection policy"
                 if allows_neural(request_version(version))
                 else "stage-2 request requires its closed v3/v4/v5 schema and selection policy")
     v2.validate_workers(request)
     request.pop("workers", None)
     _selection(request, horizons)
-    v2._references(request)
+    v2._references(request, recipe=(qualified_panel_recipe
+        if request_version(version) == 9 else v2.panel_recipe))
     _space(request)
     counts = _counts(request, horizons)
     v2._comparison(request["comparison"], counts)
@@ -203,7 +244,8 @@ def compile_request(request, *, horizons=(5, 3, 1)):
     request_id = content_hash(request)
     result = {"schema_version": "magnitude_search_schedule.v2", "request": request,
         "request_id": request_id, "horizons": list(horizons),
-        "candidate_specs": [s for s in v2._specifications(request, request_id)
+        "candidate_specs": [s for s in v2._specifications(request, request_id,
+            recipe=qualified_panel_recipe if request_version(version) == 9 else v2.panel_recipe)
             if s["family"] != "size_v1_4" or s["feature_recipe"]["subset"] == "HMO"],
         "schedule": [{"outer_year": year, "inner_years": request["inner_years"][year]}
                      for year in request["outer_years"]], "counts": counts}

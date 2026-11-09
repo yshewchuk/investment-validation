@@ -16,12 +16,20 @@ from __future__ import annotations
 
 import json
 import math
+import sys
+import time
+from collections import Counter
 from dataclasses import dataclass, replace
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Mapping, Sequence
 
 import pandas as pd
+
+try:
+    import resource as _resource
+except ImportError:  # pragma: no cover - non-POSIX platforms
+    _resource = None
 
 from engine.v2.contracts import ScoreBatch, ScoreRequest
 from engine.v2.foundation import canonical_json, content_hash, to_document
@@ -48,9 +56,11 @@ from engine.v2.scoring.nightly_source_bundle import (
     validated_as_of,
 )
 from engine.v2.scoring.release_bindings import (
+    ChooserState,
     ModelIdentity,
     ModelNotReady,
     ScoringReleaseBinding,
+    select_chooser_state,
 )
 from engine.v2.scoring.source_inputs import (
     AnswerFieldsInSource,
@@ -82,6 +92,16 @@ _SCORER_COMPUTED_FEATURES = frozenset({
     "entry_cost_pct", "days_to_print", "dte_entry",
 })
 
+_ASSEMBLY_PROGRESS_ROWS = 100
+_ASSEMBLY_PROGRESS_SECONDS = 15.0
+
+
+def _rss_mib() -> float:
+    """Best-effort peak RSS in MiB; 0.0 where ``resource`` is unavailable."""
+    if _resource is None:
+        return 0.0
+    return _resource.getrusage(_resource.RUSAGE_SELF).ru_maxrss / 1024.0
+
 @dataclass(frozen=True, slots=True)
 class _DriverSpec:
     """One forecast output and its exact release role, then optional alias."""
@@ -105,6 +125,7 @@ class _StrategySpec:
     drivers: tuple[_DriverSpec, ...]
     bundle_strategy: str
     entry_rule: bool = False
+    chooser: bool = False
     gate_role: str | None = None
     gate_policy_key: str | None = None
     driver_name: str | None = None
@@ -136,6 +157,30 @@ class _ResolvedDriver:
     identity: ModelIdentity
 
 
+@dataclass(slots=True)
+class _ChooserSelection:
+    """One row's memoized chooser selection, shared by projection and declaration."""
+
+    resolved: bool = False
+    state: ChooserState | None = None
+
+
+def _selected_chooser_state(
+    selection: _ChooserSelection,
+    binding: ScoringReleaseBinding,
+    event_date: Any,
+    as_of: Any,
+) -> ChooserState | None:
+    """Select the chooser state at most once per row; ``None`` means not ready."""
+    if not selection.resolved:
+        selection.resolved = True
+        try:
+            selection.state = select_chooser_state(binding, event_date, as_of)
+        except ModelNotReady:
+            selection.state = None
+    return selection.state
+
+
 # RUNUP's forecast declarations; frozen model-state requirements are separate.
 _RUNUP_SPEC = _StrategySpec(
     drivers=(_DriverSpec("driver_prediction", "driver:STR-RUNUP", "implied_t1:*"),
@@ -148,7 +193,7 @@ _ENTRY_RULE_SPECS = {
     name: _StrategySpec(
         drivers=(_DriverSpec("forecast_abs_move", "size:*"),
                  _DriverSpec("pred_iv_crush_30", "iv_crush:*")),
-        bundle_strategy=name, entry_rule=True)
+        bundle_strategy=name, entry_rule=True, chooser=True)
     for name in ("TWIN-P", "TWIN-P5", "BFLY-P", "BFLY-P5", "CTR5", "RAMP7", "CND-PS")
 }
 
@@ -710,6 +755,88 @@ def _bundle_or_refusal(
     return bundle
 
 
+def _chooser_bundle_or_refusal(
+    bundle: SourceBundle,
+    key: BoardRequest,
+    *,
+    binding: ScoringReleaseBinding,
+    event_date: Any,
+    as_of: Any,
+    selection: _ChooserSelection | None = None,
+) -> SourceBundle | NativeScoreBatchRowRefusal:
+    """Declare the selected DYN-SV chooser state on ``bundle``, or refuse the row.
+
+    ``ModelNotReady`` becomes a fixed ``MODEL_NOT_READY`` refusal; detail never published."""
+    try:
+        if selection is None:
+            selection = _ChooserSelection()
+        state = _selected_chooser_state(selection, binding, event_date, as_of)
+        if state is None:
+            raise ModelNotReady("chooser state", "chooser state is missing or unusable")
+        chooser = binding.model_identity.get("chooser:DYN-SV")
+        implied = state.producer_bindings.get("pred_im_t1_d14")
+        runup = state.producer_bindings.get("pred_runup_abs_move_d14")
+        for selected in (chooser, implied, runup):
+            if (not isinstance(getattr(selected, "binding_id", None), str)
+                    or not selected.binding_id):
+                raise ModelNotReady("chooser state", "chooser state is missing or unusable")
+        bindings = list(bundle.model_release.bindings)
+        present = {item.binding_id for item in bindings}
+        for producer in (implied, runup):
+            if producer.binding_id not in present:
+                bindings.append(producer)
+                present.add(producer.binding_id)
+        recipe = {
+            "binding_id": chooser.binding_id,
+            "producers": {
+                "pred_im_t1_d14": {"binding_id": implied.binding_id},
+                "pred_runup_abs_move_d14": {"binding_id": runup.binding_id},
+            },
+            "analog_pool": {
+                "pool_id": state.analog_pool.pool_id,
+                "cutoff": state.analog_pool.cutoff,
+                "content_hash": state.analog_pool.content_hash,
+            },
+            "admissible_table": {
+                "table_id": state.admissible_table.table_id,
+                "version": state.admissible_table.version,
+                "content_hash": state.admissible_table.content_hash,
+            },
+            "artifact_refs": list(state.artifact_refs),
+            "fold_provenance": state.fold_provenance,
+        }
+    except ModelNotReady:
+        return NativeScoreBatchRowRefusal(
+            key, "MODEL_NOT_READY", "DYN-SV chooser state missing or unusable")
+    return replace(
+        bundle,
+        chooser_recipe=recipe,
+        chooser_fold_pools=state.fold_pools,
+        chooser_analog_pool=state.analog_pool,
+        chooser_admissible_table=state.admissible_table,
+        model_release=replace(bundle.model_release, bindings=tuple(bindings)),
+    )
+
+
+def _apply_declared_chooser(
+    bundle: SourceBundle,
+    key: BoardRequest,
+    spec: _StrategySpec,
+    event: NightlyEventInputs,
+    *,
+    binding: ScoringReleaseBinding,
+    as_of: Any,
+    selection: _ChooserSelection | None = None,
+) -> SourceBundle | NativeScoreBatchRowRefusal:
+    """Apply the chooser block for a chooser-enabled spec, else keep ``bundle``."""
+    if not spec.chooser:
+        return bundle
+    return _chooser_bundle_or_refusal(
+        bundle, key, binding=binding,
+        event_date=event.calendar_row.get("event_date"),
+        as_of=as_of, selection=selection)
+
+
 def _gate_source_or_refusal(
     key: BoardRequest,
     binding: ScoringReleaseBinding,
@@ -740,6 +867,24 @@ def _gate_source_or_refusal(
     return source
 
 
+def _chooser_artifact_refs(bundle: Any) -> list[str]:
+    """Estimator hashes, pool/table hashes and state refs from one chooser recipe."""
+    recipe = bundle.chooser_recipe
+    if not recipe:
+        return []
+    wanted = {recipe["binding_id"]}
+    wanted.update(producer["binding_id"] for producer in recipe["producers"].values())
+    refs = [member.content_hash
+            for bound in bundle.model_release.bindings
+            if bound.binding_id in wanted
+            for member in bound.members
+            if member.name == "estimator"]
+    refs.append(recipe["analog_pool"]["content_hash"])
+    refs.append(recipe["admissible_table"]["content_hash"])
+    refs.extend(recipe["artifact_refs"])
+    return refs
+
+
 def _score_artifact_refs(drivers, gate_identity: ModelIdentity | None, bundle) -> tuple[str, ...]:
     refs = [driver.identity.artifact_hash for driver in drivers]
     if gate_identity is not None:
@@ -747,6 +892,7 @@ def _score_artifact_refs(drivers, gate_identity: ModelIdentity | None, bundle) -
     gate_source = bundle.gate_forecast_source
     if gate_source is not None:
         refs.append(gate_source.artifact_hash)
+    refs.extend(_chooser_artifact_refs(bundle))
     return tuple(dict.fromkeys(refs))
 
 
@@ -786,46 +932,131 @@ def _valid_explicit_feature_names(feature_names: Sequence[str]) -> bool:
     return len(set(feature_names)) == len(feature_names)
 
 
+def _member_features_available(
+    projected: Sequence[str], event: NightlyEventInputs,
+) -> bool:
+    """Whether every projected name has its required staged value available.
+
+    Follows the bundle's exact source precedence: a name present in
+    ``tier4_row`` is available only when that value is non-None; ``panel_row``
+    is consulted only when the name is absent from ``tier4_row``, and then its
+    value must also be non-None. A Tier-4 ``None`` never falls back to panel.
+    """
+    for name in projected:
+        if name in event.tier4_row:
+            if event.tier4_row.get(name) is None:
+                return False
+        elif name not in event.panel_row or event.panel_row.get(name) is None:
+            return False
+    return True
+
+
 def _project_member_features(
     key: BoardRequest,
     event: NightlyEventInputs,
     binding: ScoringReleaseBinding,
-    feature_names: Sequence[str],
+    feature_names: Sequence[str], as_of: Any = None,
+    selection: _ChooserSelection | None = None,
 ) -> Sequence[str] | NativeScoreBatchRowRefusal:
-    """Project required staged chooser/producer features for one DYN-SV row.
+    """Project required staged chooser/producer features for one chooser row.
 
-    Every other supported strategy keeps its explicit/derived ``feature_names``
-    unchanged. Malformed explicit names are returned unchanged so the bundle's
-    own ``INVALID_FEATURE_NAMES`` validation still refuses them before
-    projection. Scorer-computed and stage-owned gate columns are never
-    projected or required from staged rows.
-    """
+    Chooser-enabled members add the selected state's producer feature orders
+    plus chooser primitives; others keep ``feature_names`` unchanged. Malformed
+    names pass through for the bundle's ``INVALID_FEATURE_NAMES`` refusal;
+    scorer-computed and stage-owned gate columns are never projected."""
     if not _valid_explicit_feature_names(feature_names):
         return feature_names
-    if key.strategy != "DYN-SV":
+    spec = _STRATEGY_REGISTRY.get(key.strategy)
+    if spec is None or not spec.chooser:
         return feature_names
-    references = binding.chooser_fold_references
-    if not references:
+    if not isinstance(event.panel_row, Mapping) or not isinstance(event.tier4_row, Mapping):
         return NativeScoreBatchRowRefusal(
-            key, "RELEASE_MISSING_FEATURE_ORDER",
-            "chooser producer references are missing")
-    projected = set(_CHOOSER_PRIMITIVES) - _SCORER_COMPUTED_FEATURES
-    for reference in references.values():
-        if not reference.release_binding.feature_order:
+            key, "MISSING_STAGED_INPUT", "required member feature is missing from staged rows")
+    if selection is None:
+        selection = _ChooserSelection()
+    state = _selected_chooser_state(
+        selection, binding, event.calendar_row.get("event_date"), as_of)
+    if state is None:
+        return feature_names
+    projected = set(_CHOOSER_PRIMITIVES)
+    for producer in state.producer_bindings.values():
+        if not producer.feature_order:
             return NativeScoreBatchRowRefusal(
                 key, "RELEASE_MISSING_FEATURE_ORDER",
                 "chooser producer identity has no feature_order")
-        projected.update(reference.release_binding.feature_order)
+        projected.update(producer.feature_order)
     projected -= _SCORER_COMPUTED_FEATURES
     projected -= set(GATE_FORECAST_COLUMNS)
     projected -= set(GATE_ANALOG_COLUMNS)
     ordered = tuple(sorted(projected.union(feature_names)))
-    for name in projected:
-        if name not in event.tier4_row and name not in event.panel_row:
-            return NativeScoreBatchRowRefusal(
-                key, "MISSING_STAGED_INPUT",
-                "required member feature is missing from staged rows")
+    if not _member_features_available(projected, event):
+        return NativeScoreBatchRowRefusal(
+            key, "MISSING_STAGED_INPUT",
+            "required member feature is missing from staged rows")
     return ordered
+
+
+def _released_member_bundle_or_refusal(
+    bundle: SourceBundle,
+    key: BoardRequest,
+    event: NightlyEventInputs,
+    binding: ScoringReleaseBinding,
+    spec: _StrategySpec,
+    drivers: tuple[_ResolvedDriver, ...],
+    as_of: Any,
+    snapshot_id: str,
+    selection: _ChooserSelection | None = None,
+) -> SourceBundle | NativeScoreBatchRowRefusal:
+    """Declare release artifacts, then apply the chooser, for one row."""
+    bundle = _with_release_artifacts(
+        bundle, binding=binding, key=key, strategy=spec.bundle_strategy,
+        drivers=drivers, as_of=as_of, snapshot_id=snapshot_id,
+        calendar_row=event.calendar_row,
+        quote_max_age_sessions=event.quote_max_age_sessions,
+        panel_row=event.panel_row,
+        entry_rule_ids=((drivers[0].identity, drivers[1].identity)
+                        if spec.entry_rule else None))
+    if isinstance(bundle, NativeScoreBatchRowRefusal):
+        return bundle
+    return _apply_declared_chooser(
+        bundle, key, spec, event, binding=binding, as_of=as_of,
+        selection=selection)
+
+
+def _projected_bundle_or_refusal(
+    key: BoardRequest,
+    event: NightlyEventInputs,
+    *,
+    binding: ScoringReleaseBinding,
+    spec: _StrategySpec,
+    drivers: tuple[_ResolvedDriver, ...],
+    gate_identity: ModelIdentity | None,
+    gate_policy: Mapping[str, Mapping[str, Any]],
+    as_of: Any,
+    feature_names: Sequence[str],
+    driver_name: str,
+    gate_source_cache: dict[tuple[int, str], Any],
+    selection: _ChooserSelection,
+) -> tuple[SourceBundle, NativeScoreBatchRowRefusal | None] | NativeScoreBatchRowRefusal:
+    """Project member features, then assemble the bundle, or refuse the row.
+
+    Returns ``(bundle, None)`` on a successful projection, or
+    ``(bundle, pending)`` when projection refuses but the bundle still builds:
+    ``pending`` is returned only after the later event-id and release checks,
+    so an earlier refusal always wins. A bundle refusal returns directly. A
+    projection refusal still assembles with the original feature names.
+    """
+    projected = _project_member_features(
+        key, event, binding, feature_names, as_of, selection)
+    pending = projected if isinstance(projected, NativeScoreBatchRowRefusal) else None
+    bundle = _bundle_or_refusal(
+        key, event, binding=binding, spec=spec, drivers=drivers,
+        gate_identity=gate_identity, gate_policy=gate_policy, as_of=as_of,
+        feature_names=feature_names if pending is not None else projected,
+        driver_name=driver_name, gate_source_cache=gate_source_cache)
+    if isinstance(bundle, NativeScoreBatchRowRefusal):
+        return bundle
+    return bundle, pending
 
 
 def _assemble_one_event(
@@ -869,30 +1100,25 @@ def _assemble_one_event(
         key, spec, gate_policy, feature_names, drivers, gate_identity)
     if refusal is not None:
         return refusal
-    feature_names = _project_member_features(key, event, binding, feature_names)
-    if isinstance(feature_names, NativeScoreBatchRowRefusal):
-        return feature_names
-    bundle = _bundle_or_refusal(
+    selection = _ChooserSelection()
+    assembled = _projected_bundle_or_refusal(
         key, event, binding=binding, spec=spec, drivers=drivers,
         gate_identity=gate_identity, gate_policy=gate_policy, as_of=as_of,
         feature_names=feature_names, driver_name=driver_name,
-        gate_source_cache=gate_source_cache)
-    if isinstance(bundle, NativeScoreBatchRowRefusal):
-        return bundle
+        gate_source_cache=gate_source_cache, selection=selection)
+    if isinstance(assembled, NativeScoreBatchRowRefusal):
+        return assembled
+    bundle, pending_projection_refusal = assembled
     event_id = event.calendar_row.get("event_id")
     if not isinstance(event_id, str) or not event_id:
         return NativeScoreBatchRowRefusal(
             key, "MISSING_STAGED_INPUT", "calendar_row missing event_id")
-    bundle = _with_release_artifacts(
-        bundle, binding=binding, key=key, strategy=spec.bundle_strategy,
-        drivers=drivers, as_of=as_of, snapshot_id=snapshot_id,
-        calendar_row=event.calendar_row,
-        quote_max_age_sessions=event.quote_max_age_sessions,
-        panel_row=event.panel_row,
-        entry_rule_ids=((drivers[0].identity, drivers[1].identity)
-                        if spec.entry_rule else None))
+    bundle = _released_member_bundle_or_refusal(
+        bundle, key, event, binding, spec, drivers, as_of, snapshot_id, selection)
     if isinstance(bundle, NativeScoreBatchRowRefusal):
         return bundle
+    if pending_projection_refusal is not None:
+        return pending_projection_refusal
     try:
         native_inputs = build_native_score_inputs(bundle)
     except ValueError as exc:
@@ -982,7 +1208,15 @@ def _assemble_validated_events(
     refusals: list[NativeScoreBatchRowRefusal] = []
     seen_hashes: dict[str, BoardRequest] = {}
     gate_source_cache: dict[tuple[int, str], Any] = {}
-    for event in events:
+    total, started = len(events), time.monotonic()
+    last_progress = started
+    refusal_codes: Counter[str] = Counter()
+    print(
+        f"[native-score] assemble start: 0/{total} rows, elapsed=0.0s, "
+        f"peak_rss={_rss_mib():.1f}MiB",
+        file=sys.stderr,
+    )
+    for done, event in enumerate(events, start=1):
         outcome = _assemble_one_event(
             event, binding=binding, gate_policy=gate_policy, as_of=as_of,
             snapshot_id=snapshot_id, calendar_revision=calendar_revision,
@@ -991,15 +1225,46 @@ def _assemble_validated_events(
         )
         if isinstance(outcome, NativeScoreBatchRowRefusal):
             refusals.append(outcome)
-            continue
-        request, _ = outcome
-        row_hash = request_hash(request)
-        if row_hash in seen_hashes:
-            raise ValueError(
-                f"duplicate request_hash {row_hash} for {event.key!r} and "
-                f"{seen_hashes[row_hash]!r}")
-        seen_hashes[row_hash] = event.key
-        results[event.key] = outcome
+            refusal_codes[outcome.code] += 1
+        else:
+            request, _ = outcome
+            row_hash = request_hash(request)
+            if row_hash in seen_hashes:
+                raise ValueError(
+                    f"duplicate request_hash {row_hash} for {event.key!r} and "
+                    f"{seen_hashes[row_hash]!r}")
+            seen_hashes[row_hash] = event.key
+            results[event.key] = outcome
+        now = time.monotonic()
+        if done < total and (
+                done % _ASSEMBLY_PROGRESS_ROWS == 0
+                or now - last_progress >= _ASSEMBLY_PROGRESS_SECONDS):
+            elapsed = now - started
+            rate = done / elapsed if elapsed > 0 else 0.0
+            eta = (total - done) / rate if rate > 0 else 0.0
+            codes = ",".join(
+                f"{code}:{count}" for code, count in sorted(refusal_codes.items()))
+            print(
+                f"[native-score] assemble {done}/{total}, elapsed={elapsed:.1f}s, "
+                f"rate={rate:.2f}/s, ETA={eta:.1f}s, "
+                f"peak_rss={_rss_mib():.1f}MiB, assembled={len(results)}, "
+                f"refused={len(refusals)}, refusal_codes={codes or 'none'}, "
+                f"batch_rows={total}",
+                file=sys.stderr,
+            )
+            last_progress = now
+    elapsed = time.monotonic() - started
+    rate = total / elapsed if elapsed > 0 else 0.0
+    codes = ",".join(
+        f"{code}:{count}" for code, count in sorted(refusal_codes.items()))
+    print(
+        f"[native-score] assemble end: {total}/{total} rows, "
+        f"elapsed={elapsed:.1f}s, rate={rate:.2f}/s, "
+        f"peak_rss={_rss_mib():.1f}MiB, assembled={len(results)}, "
+        f"refused={len(refusals)}, refusal_codes={codes or 'none'}, "
+        f"batch_rows={total}",
+        file=sys.stderr,
+    )
     return results, tuple(refusals)
 
 
@@ -1366,7 +1631,9 @@ def run_native_score_batch_worker(parameters: Mapping[str, Any], root: Path) -> 
 
     as_of = parameters["as_of"]
     snapshot_id = parameters["snapshot_id"]
-    binding = resolve_release_binding(parameters["release_root"])
+    binding = resolve_release_binding(
+        parameters["release_root"], include_chooser_fold_references=True,
+        defer_chooser_fold_failures=True)
     events_doc, producer_doc, calendar_revision = _worker_event_documents(parameters, root)
     events = tuple(_event_inputs_from_document(item) for item in events_doc)
     raw_feature_names = parameters.get("feature_names")

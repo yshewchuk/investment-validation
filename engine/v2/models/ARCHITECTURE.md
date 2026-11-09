@@ -50,8 +50,8 @@ Both fit fresh per fold/horizon, single-threaded, with finite nonnegative predic
 Caller owns protected admission, label qualification and evidence. The no-fit guard runs first;
 invalid shapes/nonfinite labels or predictions raise `ValueError`, translated by the experiment
 caller to `EXPERIMENT_VARIANT_FAILED`. Existing legacy-parity recipes are unchanged.
-`magnitude_mlp_recipe` and `training.magnitude_mlp` expose ten closed standalone neural profiles, not search admission; the original three hashes remain unchanged.
-Seven new stopping variants include four with seeded random 10% training-row validation; only the three `max_iter=200` budget profiles accept a convergence warning.
+`magnitude_mlp_recipe` and `training.magnitude_mlp` expose sixteen closed standalone neural profiles, not search admission; the original three hashes remain unchanged.
+Thirteen new variants include four with seeded random 10% training-row validation, three fixed 200-epoch budgets and six chronological-holdout profiles over 15%/10%; only the fixed-budget `max_iter` cap accepts a convergence warning. Chrono `converged` is true when patience stops before the cap and false at the cap; it does not report sklearn warning state.
 See [the training contract](training/README.md#standalone-neural-magnitude-primitive-opt-in-foundation).
 
 `magnitude_elasticnet_recipe.elasticnet_recipe` binds ordered columns, dictionary hash, preprocessing and closed sklearn parameters in JSON metadata. Request-v3 SIZE candidates admit finite positive alpha in `[1e-6, 1000]` and l1-ratio in `[1e-6, 1]`; the v2 compiler retains its original six alpha/l1 combinations.
@@ -76,7 +76,7 @@ No I/O, publication, release or production wiring; source closures need resealin
 | Same valid inputs and numerical environment | Deterministic fresh fit, not cached or journal replay |
 | Cache, transaction or partial-write concerns | No cache, I/O, persistence or publication; v1 recipes and results are unchanged |
 
-`magnitude_ridge_hgb_recipe` constructs/validates closed variable-width policies binding ordered columns, dictionary hash and estimator parameters, not source admission or dictionary membership. Qualified SIZE v3-v7 Ridge candidates admit finite positive alpha in `[1e-6, 10000]`; the v2 compiler retains its existing grid. `magnitude_ridge_hgb_recipe.v2` (HGB only) adds bounded `learning_rate`, `min_samples_leaf` and `l2_regularization` with `max_iter` 500 and early stopping; partial or out-of-bound values raise `ValueError`, and v1 recipes are unchanged.
+`magnitude_ridge_hgb_recipe` constructs/validates closed variable-width policies binding ordered columns, dictionary hash and estimator parameters, not source admission or dictionary membership. Qualified SIZE v3-v8 Ridge candidates admit finite positive alpha in `[1e-6, 10000]`; the v2 compiler retains its existing grid. `magnitude_ridge_hgb_recipe.v2` (HGB only) adds bounded `learning_rate`, `min_samples_leaf` and `l2_regularization` with `max_iter` 500 and early stopping; partial or out-of-bound values raise `ValueError`, and v1 recipes are unchanged.
 `regression_ridge_hgb_recipe.regression_recipe` adds a distinct
 `regression_ridge_hgb_recipe.v1` identity with explicit `signed`/`nonnegative`
 target domain and respectively `none`/`clip_zero` projection. Its validator
@@ -496,8 +496,8 @@ Binding user decisions D1-D10 (2026-10-25, recorded in #805). Once per calendar 
 | `restage` | Contract check unreadable, `RESTAGE_NEEDS_RETRAIN`, stage or acceptance refusal | Job fails; nightly fails; live release unchanged |
 | train (driver pools, chooser; `monthly_pools`) | Invalid `month`/`cutoff` or other parameter (`INVALID_REQUEST`); missing, oversized or unreadable source, or an empty required member (`VALIDATION_FAILED`); input unverifiable, cutoff past the session's data, unsettled-event filter refuses (`INPUT_CHANGED`) | Job fails; later steps never submitted |
 | stage | `PRIOR_MISMATCH` (base drifted since training), `BINDINGS_DIFFER` on a pool-only retrain, `CUTOFF_NOT_ADVANCED`, `ID_CONFLICT`, light-check failure | Job fails; candidate never promotable (no staging-success record) |
-| accept | Acceptance fails or receipt hash differs from the candidate | Fails; candidate staged, incumbent deployed |
-| check (split 1) | Invalid worker parameters (`INVALID_REQUEST`, detail `RETRAIN_CHECK_PARAMETERS_INVALID`); missing staged manifest (`VALIDATION_FAILED`, detail `RELEASE_NOT_STAGED`); candidate acceptance-evidence mismatch (`INPUT_CHANGED`); accepted-evidence, staged-manifest-hash, or model-object verification failure (`VALIDATION_FAILED`); model-changing candidate has no decided pass rule (`ACCEPTANCE_RULE_UNDEFINED`) | Job fails without a check receipt; candidate stays staged and incumbent remains deployed |
+| accept / `phase5_accept` (S2) | Invalid parameters (`INVALID_REQUEST`, detail `PHASE5_ACCEPT_PARAMETERS_INVALID`); absent staged candidate (`VALIDATION_FAILED`, detail `RELEASE_NOT_STAGED`), release-id mismatch (`VALIDATION_FAILED`, detail `STAGED_RELEASE_ID_MISMATCH`), unreadable manifest (`VALIDATION_FAILED`, detail `STAGED_MANIFEST_READ_FAILED`), malformed manifest (`VALIDATION_FAILED`, detail `STAGED_MANIFEST_INVALID`), or staged-manifest hash mismatch (`VALIDATION_FAILED`, detail `STAGED_MANIFEST_HASH_MISMATCH`); candidate catalog layout invalid (`VALIDATION_FAILED`, detail `P5_RELEASE_LAYOUT`, fixed safe message); evidence release-id mismatch (`INPUT_CHANGED`, detail `PHASE5_ACCEPTANCE_MISMATCH`) or evidence hash/catalog binding mismatch (`INPUT_CHANGED`, detail `POOL_ACCEPTANCE_MISMATCH`); evidence `release_ok=false` (`VALIDATION_FAILED`, detail `PHASE5_ACCEPTANCE_FAILED`) | Emits `acceptance.json` schema `phase5_acceptance.v1.0` for `retrain_check`; evidence is built for the exact `candidate_release_id` from its release-local catalog, never the root selector, and a missing or mismatched candidate catalog is a `P5_RELEASE_LAYOUT` finding. Every refusal is terminal: `RetryPolicy("none", 1)` means no retry and no fallback. A refusal leaves the candidate staged and the live pointer unchanged. Once wired, failure blocks check/promote/score; S2 is unwired, so nightly behavior is unchanged. Acceptance artifacts are attempt-scoped and not deterministic checkpoints. |
+| check (split 1) | Invalid worker parameters (`INVALID_REQUEST`, detail `RETRAIN_CHECK_PARAMETERS_INVALID`); absent staged manifest (`VALIDATION_FAILED`, detail `RELEASE_NOT_STAGED`); candidate acceptance-evidence mismatch (`INPUT_CHANGED`); accepted-evidence, staged-manifest-hash, or model-object verification failure (`VALIDATION_FAILED`); model-changing candidate has no decided pass rule (`ACCEPTANCE_RULE_UNDEFINED`) | Job fails without a check receipt; candidate stays staged and incumbent remains deployed |
 | promote | `ConcurrentPromote`, receipt/guard mismatch | Fails; pointer and history unchanged |
 | any step, crash | Orphan objects, staged manifest | Never promoted; a rerun with the same inputs gives the same catalog |
 | nightly, slices not all built | See "Rollout" | Fails loudly with `RETRAIN_UNAVAILABLE` |
@@ -655,10 +655,9 @@ buffers, including warm calls. The required byte limit is positive. The resolved
 path is checked for containment; bounded reads open the original path with
 final-component no-follow through the shared regular-file reader. Parent directories
 remain operator-trusted. Missing, special, final-component symlinked, oversized or
-changed objects refuse before decode, cold and warm. Direct preparation normalizes bounded I/O and regular-file/size
-refusals to path-free `AdapterError`. During `infer()`, bindings without an established
-cache-entry byte ceiling, including legacy fold bindings and champions, retain unbounded
-verification; preparation always supplies a limit. An established ceiling applies to subsequent inference reads.
+changed objects refuse before decode, cold and warm. Direct preparation maps bounded I/O/regular-file/size failures to path-free `AdapterError`.
+Every `infer()` binding, including legacy folds and champions, has a 256 MiB read-time cap before parse/cache.
+Prepared folds keep their stricter established byte ceiling on subsequent reads.
 
 `FrozenInference` owns the only decoded-artifact cache, retained for its owner
 lifetime without eviction. Its adapter retains fold metadata with the estimator,
@@ -671,7 +670,7 @@ still uses `Tier4ServingFoldAdapter` through the existing inference executors.
 | Verified fold condition | Outcome |
 |---|---|
 | Parent/catalog/descriptor/header or embedded-pool disagreement | `MODEL_NOT_READY`; conditions share one fixed path-free refusal, no inference or fallback |
-| Escaped path, missing/corrupt bytes or object above 32 MiB during fold preparation or prepared inference | Refuse before deserialization, including warm reads; unprepared inference with no established byte ceiling retains legacy unbounded verification |
+| Escaped path, missing/corrupt bytes or object above 32 MiB during fold preparation or prepared inference | Refuse before deserialization, including warm reads; unprepared inference applies the 256 MiB read-time member cap before adapter parsing or cache insertion, including champions |
 | Repeated preparation and inference on the same owner/object | Reverify bytes; reuse the decoded artifact, never a second model cache |
 | Missing/duplicate chooser catalog membership, wrong role/output or opaque undeclared fold | Fixed `MODEL_NOT_READY`; no champion/size/other-fold substitution |
 | Source availability/finality or training-bound proof absent | No causal/source-ready claim; artifact preparation cannot bypass consuming admission |

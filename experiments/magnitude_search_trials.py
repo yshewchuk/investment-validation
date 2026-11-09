@@ -49,9 +49,11 @@ from experiments.magnitude_search_plan import (
 )
 from experiments.magnitude_search_records import MIGRATIONS, OWNER, append_record, read_record
 from experiments.magnitude_search_selection import (
+    CURRENT_TIE_RULE,
     ZeroComparatorError,
     blended_event_score,
     history_mean_rows,
+    selection_contract_tie_rule,
     selection_tie_band,
 )
 from experiments.size_fit_diagnostics import evidence as diagnostic_evidence
@@ -180,7 +182,8 @@ class SearchTrials:
         schema = self.registration.document.get("schema_version")
         if plan is None and schema == "native_experiment_registration.v1.8":
             plan = self._admit()
-        kwargs = {"plan": plan} if schema == "native_experiment_registration.v1.8" or _requires_event_dates(plan) else {}
+        kwargs = ({"plan": plan} if schema == "native_experiment_registration.v1.8"
+                  or _requires_event_dates(plan) else {})
         return admit_fold_inputs(self.repository, self.registration.document, inner,
             history_failure=fail("EXPERIMENT_IDENTITY_CONFLICT", "search native history binding changed"), **kwargs)
 
@@ -191,7 +194,8 @@ class SearchTrials:
             if cohort in self._published:
                 manifest, inputs_id = self._published[cohort]
                 self._memo[cohort] = load_inputs(self.store, manifest, inputs_id)
-            elif plan is not None and (self.registration.document.get("schema_version") == "native_experiment_registration.v1.8" or _requires_event_dates(plan)):
+            elif plan is not None and (self.registration.document.get("schema_version") == "native_experiment_registration.v1.8"
+                    or _requires_event_dates(plan)):
                 self._memo[cohort] = self._inputs(inner, plan=plan)
             else:
                 self._memo[cohort] = self._inputs(inner)
@@ -815,14 +819,26 @@ class SearchTrials:
                              "selected_candidate_id": selected["candidate_id"]}
             else:
                 try:
+                    try:
+                        tie_rule = selection_contract_tie_rule(plan.get("selection"))
+                    except ValueError:
+                        raise fail("EXPERIMENT_IDENTITY_CONFLICT",
+                                   "sealed search plan has an unsupported selection tie rule") from None
+                    if tie_rule != CURRENT_TIE_RULE:
+                        raise fail("EXPERIMENT_IDENTITY_CONFLICT",
+                                   "sealed search plan has an unsupported selection tie rule")
                     best = min(eligible,
                                key=lambda score: (score["blend_score"], score["candidate_id"]))
-                    if any(value is None for value in best["yearly"].values()):
-                        raise ZeroComparatorError("cannot normalize a nonzero candidate error by zero history_mean error")
+                    leader_yearly_missing = any(
+                        value is None for value in best["yearly"].values())
                     yearly_scores = [score for score in eligible if all(
                         value is not None for value in score["yearly"].values())]
+                    if leader_yearly_missing:
+                        yearly_scores = [{"candidate_id": best["candidate_id"], "yearly": {},
+                                          "diagnostic_unavailable": True},
+                                         *yearly_scores]
                     selected_id, tie_band = selection_tie_band(eligible, yearly_scores,
-                        floor=policy["tie_band_floor"])
+                        floor=policy["tie_band_floor"], tie_rule=tie_rule)
                     pooled_history = [row for year in sorted(outer["inner"], key=lambda item: item["year"])
                         for row in history_rows_by_year[year["year"]]]
                     history_score = blended_event_score(pooled_history, pooled_history,

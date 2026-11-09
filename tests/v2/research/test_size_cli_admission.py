@@ -85,7 +85,8 @@ def test_programming_error_is_not_storage_refusal(monkeypatch):
 
 @pytest.mark.parametrize("schema", ["magnitude_search_request.v2", "magnitude_search_request.v3",
                                      "magnitude_search_request.v4", "magnitude_search_request.v5",
-                                     "magnitude_search_request.v6", "magnitude_search_request.v7"])
+                                     "magnitude_search_request.v6", "magnitude_search_request.v7",
+                                     "magnitude_search_request.v8"])
 @pytest.mark.parametrize("action", ["seal", "run", "collect"])
 def test_legacy_cli_refuses_qualified_route_before_catalog_or_worker(monkeypatch, capsys, action, schema):
     monkeypatch.setattr(legacy, "_read_document", lambda path: {"schema_version": schema})
@@ -118,7 +119,7 @@ def test_report_admits_driver_before_result_reads_or_work(monkeypatch, seal, act
     monkeypatch.setattr(legacy, "require_current", lambda *a: None)
     monkeypatch.setattr(legacy, "_binding", lambda *a: ({}, {"expected": True}))
     monkeypatch.setattr(legacy, "read_record", lambda *a: seal)
-    monkeypatch.setattr(report, "collect_outer_results", lambda *a: pytest.fail("unsealed result read"))
+    monkeypatch.setattr(report, "collect_outer_results", lambda *a, **k: pytest.fail("unsealed result read"))
     with pytest.raises(OpsError) as caught:
         context = (None, None, None, SimpleNamespace(run_id="run"), {}, None)
         cli._run(context) if action == "run" else report.collect(*context)

@@ -23,9 +23,12 @@ from engine.v2.research.magnitude_inputs import (
     qualify_magnitude_training_targets,
 )
 from engine.v2.research.magnitude_panel_qualified_table import METADATA, admit_columns
+from experiments.label_availability import available_before as _available_before
+from experiments.label_availability import label_cutoff_reason as _label_cutoff_reason
 from experiments.magnitude_candidate_recipe import candidate_recipe
 from experiments.magnitude_search_request_schema import allows_size_family, request_version
 from experiments.magnitude_search_request_versions import compile_request
+from experiments.magnitude_search_selection import CURRENT_TIE_RULE, LEGACY_TIE_RULE
 from experiments.native_registration import (
     MAX_NATIVE_EVIDENCE_BYTES,
     NativeRegistration,
@@ -111,6 +114,7 @@ def prepare(repository, spec, request, panel_request, *, scope, training_start, 
             publish_artifacts=True):
     """Prepare a new development anchor; caller explicitly reserves it separately."""
     from engine.v2.research.magnitude_panel_qualified_table import recipe
+    from experiments.magnitude_search_plan import PLAN_V3, plan_schema_for_request
     sources = _sources()
     panel_request = validate_panel_request(panel_request)
     schedule = compile_request(request, horizons=tuple(h for h in (5, 3, 1) if h in panel_request["horizons"]))
@@ -141,7 +145,11 @@ def prepare(repository, spec, request, panel_request, *, scope, training_start, 
     if len(preview) > MAX_NATIVE_EVIDENCE_BYTES:
         raise fail("RESOURCE_LIMIT_EXCEEDED", "native registration exceeds its UTF-8 byte budget",
             details={"registration_bytes": len(preview), "max_registration_bytes": MAX_NATIVE_EVIDENCE_BYTES})
-    _folds(binding, schedule["request"])
+    plan_schema = plan_schema_for_request(schedule["request"])
+    folds = _folds(binding, schedule["request"], plan_schema)
+    # Legacy request v3 uses PLAN_V2; all other supported request versions use shared PLAN_V3 folds.
+    if plan_schema == PLAN_V3:
+        _shared_inner(folds)
     if not publish_artifacts:
         return NativeRegistration(base.run_id, b"", binding), spec
     compact, logical = pack_size_registration(repository._store, binding)
@@ -173,14 +181,15 @@ def _sources():
 
 
 def verify_installation(binding):
+    sources = _sources()
     _require(binding["schema_version"] in ("native_experiment_registration.v1.6", SCHEMA)
         and binding["environment"] == environment_identity(1)
-        and binding["source_closure"] == _sources())
+        and binding["source_closure"] == sources)
     _require(binding["size_comparison"] == comparison_recipe())
 
 
-def _folds(binding, request):
-    from experiments.magnitude_search_plan import _nested
+def _folds(binding, request, plan_schema=None):
+    from experiments.magnitude_search_plan import PLAN_V3, nested_folds, plan_schema_for_request
     context = binding["size_panel"]["context"]
     events = {e["event_id"]: e for e in context["target_events"]}
     full_start, full_end = date.min.isoformat(), date.max.isoformat()
@@ -188,23 +197,58 @@ def _folds(binding, request):
         if w["start"] == full_start and w["end"] == full_end}
     def hit(event_id):
         return bool(embargoed_tickers) and events[event_id]["ticker"] in embargoed_tickers
-    folds = _nested(binding, request)
+    folds = nested_folds(binding, request)
+    default_cutoff = binding["magnitude_execution"]["evaluation_labels_before"]
+    plan_v3 = (plan_schema if plan_schema is not None else plan_schema_for_request(request)) == PLAN_V3
+    shared_cutoffs = {}
+    if plan_v3:
+        for group in folds:
+            for inner in group["inner"]:
+                cutoff = inner.get("evaluation_labels_before", default_cutoff)
+                year = inner["year"]
+                shared_cutoffs[year] = min(shared_cutoffs.get(year, cutoff), cutoff)
     for group in folds:
         for fold in [group["outer"], *group["inner"]]:
-            fold["training_candidate_event_ids"] = [e for e in fold["training_candidate_event_ids"]
-                if events[e]["label_end"] < fold["training_labels_before"]
-                and not hit(e)]
+            is_inner = any(fold is inner for inner in group["inner"])
+            retained_training = []
+            training_exclusions = []
+            for e in fold["training_candidate_event_ids"]:
+                reasons = []
+                cutoff_reason = _label_cutoff_reason(events[e]["label_end"], fold["training_labels_before"])
+                if cutoff_reason:
+                    reasons.append(cutoff_reason)
+                if hit(e):
+                    reasons.append("embargo_ticker")
+                if reasons:
+                    training_exclusions.append({"event_id": e, "reasons": reasons})
+                else:
+                    retained_training.append(e)
+            fold["training_candidate_event_ids"] = retained_training
+            if training_exclusions:
+                fold["training_exclusions"] = training_exclusions
             _require(bool(fold["training_candidate_event_ids"]))
             retained = [e for e in fold["evaluation_event_ids"] if not hit(e)]
             if embargoed_tickers and not retained:
                 raise fail("INVALID_EXPERIMENT_SPEC", "ambiguous-random ticker embargo removed every fold evaluation event")
-            excluded = [e for e in fold["evaluation_event_ids"] if hit(e)]
-            fold["evaluation_event_ids"] = retained
+            cutoff = (shared_cutoffs[fold["year"]] if plan_v3 and is_inner
+                      else fold.get("evaluation_labels_before", default_cutoff))
+            excluded = []
+            for eid in fold["evaluation_event_ids"]:
+                reasons = []
+                if hit(eid):
+                    reasons.append("embargo_ticker")
+                cutoff_reason = _label_cutoff_reason(events[eid]["label_end"], cutoff)
+                if cutoff_reason:
+                    reasons.append(cutoff_reason)
+                if reasons:
+                    excluded.append({"event_id": eid, "reasons": reasons})
+            fold["evaluation_event_ids"] = [e for e in retained if _available_before(events[e]["label_end"], cutoff)]
             if excluded:
-                fold["evaluation_exclusions"] = [{"event_id": eid, "reasons": ["embargo_ticker"]}
-                    for eid in excluded]
-            cutoff = fold.get("evaluation_labels_before", binding["magnitude_execution"]["evaluation_labels_before"])
-            _require(all(events[e]["label_end"] < cutoff for e in fold["evaluation_event_ids"]))
+                fold["evaluation_exclusions"] = excluded
+            # Keep the strict cutoff invariant explicit at the filtered binding boundary.
+            _require(all(_available_before(events[e]["label_end"], cutoff) for e in fold["evaluation_event_ids"]))
+            if not fold["evaluation_event_ids"]:
+                raise fail("INVALID_EXPERIMENT_SPEC", "SIZE fold has no eligible evaluation events")
     return folds
 
 
@@ -222,14 +266,15 @@ def _shared_inner(folds):
 
 def prepare_plan(conn, store, registration, request, *, plan_schema=None):
     """Expand the fixed dictionary grid into fully bound executable recipes."""
-    from experiments.magnitude_search_plan import PLAN_V2, PLAN_V3
-    request_version = request.get("schema_version") if isinstance(request, dict) else None
+    from experiments.magnitude_search_plan import PLAN_V2, PLAN_V3, plan_schema_for_request
+    default_schema = plan_schema_for_request(request)
     if plan_schema is None:
-        plan_schema = PLAN_V2 if request_version == "magnitude_search_request.v3" else PLAN_V3
-    if request_version == "magnitude_search_request.v3" and plan_schema != PLAN_V2:
-        raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search plan schema does not match request version")
+        plan_schema = default_schema
     if plan_schema not in (PLAN_V2, PLAN_V3):
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "unsupported SIZE search plan schema")
+    if plan_schema != default_schema and not (
+            plan_schema == PLAN_V2 and default_schema == PLAN_V3):
+        raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search plan schema does not match request version")
     verify_native_registration(conn, store, registration, max_evidence_bytes=MAX_NATIVE_EVIDENCE_BYTES)
     binding = registration.document
     verify_installation(binding)
@@ -243,7 +288,7 @@ def prepare_plan(conn, store, registration, request, *, plan_schema=None):
         horizons = tuple(h for h in (5, 3, 1) if h in panel_request["horizons"])
     schedule = compile_request(request, horizons=horizons)
     _require(schedule["request"] == binding["size_request"])
-    folds = _folds(binding, request)
+    folds = _folds(binding, request, plan_schema)
     if plan_schema == PLAN_V3:
         _shared_inner(folds)
     candidates = []
@@ -259,9 +304,10 @@ def prepare_plan(conn, store, registration, request, *, plan_schema=None):
         candidates.append({**identity, "candidate_id": content_hash(identity)})
     requested_selection = schedule["request"].get("selection")
     if requested_selection is None:
-        selection_contract = {"metric": "inner_pooled_rmse", "ties": "candidate_id_ascending", "retries": 0,
+        selection_contract = {"metric": "inner_pooled_rmse", "ties": LEGACY_TIE_RULE, "retries": 0,
                               "outer": "frozen_selected_only", "final_read_authority": "none"}
     else:
+        ties = CURRENT_TIE_RULE
         selection_contract = {
             "metric": "inner_pooled_history_mean_normalized_event_blend",
             "metric_weights": requested_selection["metric_weights"],
@@ -271,7 +317,7 @@ def prepare_plan(conn, store, registration, request, *, plan_schema=None):
             "comparator": "history_mean_report_only",
             "tie_band": "max_sample_se_of_best_pooled_candidate_yearly_blends_or_floor",
             "tie_band_floor": requested_selection["tie_band_floor"],
-            "ties": "candidate_id_ascending",
+            "ties": ties,
             "retries": 0,
             "outer": "frozen_selected_only",
             "final_read_authority": "none",
@@ -301,20 +347,25 @@ def execution_for_candidate(binding, candidate):
     return execution
 
 
-def fold_inputs(repository, binding, fold):
+def fold_inputs(repository, binding, fold, *, plan=None):
     """Revalidate installed producer before opening any training outcome."""
     from engine.v2.research.magnitude_panel_qualified_table import recipe
+    from experiments.magnitude_search_plan import PLAN_V2, PLAN_V3
     verify_installation(binding)
+    plan_schema = (plan.get("schema_version") if isinstance(plan, dict)
+                   and plan.get("schema_version") in (PLAN_V2, PLAN_V3) else None)
+    folds = (_folds(binding, binding["size_request"]) if plan_schema is None
+             else _folds(binding, binding["size_request"], plan_schema))
     _require(any(fold in group["inner"] or fold == {**group["outer"],
         "evaluation_labels_before": binding["magnitude_execution"]["evaluation_labels_before"]}
-        for group in _folds(binding, binding["size_request"])))
+        for group in folds))
     source = from_document(SnapshotRef, binding["snapshot"])
     started = time.monotonic()
     panel_columns = _panel_columns(binding["size_request"].get("schema_version"), recipe("HMO")["model_columns"])
     panel = _stored_panel(repository, source, binding, panel_columns)
     participants = set(fold["training_candidate_event_ids"] + fold["evaluation_event_ids"])
     events = {e["event_id"]: e for e in panel["context"]["target_events"]}
-    _require(participants <= set(events) and all(events[e]["label_end"] < fold["training_labels_before"]
+    _require(participants <= set(events) and all(_available_before(events[e]["label_end"], fold["training_labels_before"])
              for e in fold["training_candidate_event_ids"]))
     print(f"[stage] read_panel done in {time.monotonic() - started:.1f}s", file=sys.stderr)
     month = binding["holdouts"]["holdout_as_of_month"]

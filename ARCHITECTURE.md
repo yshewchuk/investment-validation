@@ -111,6 +111,12 @@ evidence. See the models and data component contracts.
   `checks/phase5_release_assembly.py` through `tools/phase5_state_stage_job.py` (no direct
   import); the catalog layout already lives in `engine/v2/models`, and the exception ends
   when the assembly helpers move there too (#807).
+  A second sanctioned exception remains a deliberately narrow release-scope acceptance
+  contract boundary, not a general ops dependency rule change:
+  `engine.v2.ops.retrain_check.run_phase5_accept_worker` reaches
+  `checks.phase5_acceptance.build_evidence` only through the lazy
+  `tools.phase5_acceptance_job` shim, with no direct `checks` import. This boundary is
+  active for the wired S3 release-scope retrain chain.
 - **Operator CLIs and experiments.** These operator and research entrypoints
   may call into the legacy and v2 engines. They are not uniformly leaf-only:
   `engine.v2.ops.training` imports the `phase5_training_job` module while
@@ -442,8 +448,9 @@ a panel. Three rules, each blocking on its own:
   credentials, hidden subprocesses, retry behaviour, and its removal
   phase — an adapter is a tracked, temporary bridge, not a permanent
   seam.
-3. **Legacy never imports v2.** The legacy tree runs the board unchanged and
-  must not acquire a dependency on code still being proved.
+3. **Legacy never imports v2 except through an explicitly approved, scoped
+  exception recorded below.** The legacy tree runs the board unchanged and
+  must not otherwise acquire a dependency on code still being proved.
 
 The legacy tree itself is measured once, for the record, against this same
 layering — see `guides/system_rearchitecture.md` §4.2 for the current edge
@@ -953,3 +960,7 @@ pre-existing defect it merely happens to touch, unless the PR makes that
 defect worse or newly reachable. `CONTRIBUTING.md` ("Scope and deferred
 work") has the full rule, including the GitHub-issue format for a real
 finding that falls outside it.
+
+## Approved scope exception: chooser conditional-exit helper
+
+This is the sole current exception to §3 rule 3. It permits `experiments/EXP-161_dynamic_short_vol_neural_structure_picker/run.py` and `tools/build_chooser_pool.py` to import `engine.v2.models.training.conditional_exit` so both consumers use the same settlement arithmetic. EXP-161 is reachable from legacy nightly evidence and importing the helper loads the v2 package initializers; the exception accepts that dependency and startup cost for this helper only. It expires when the legacy chooser evidence path is retired or ported; it grants no other legacy-to-v2 imports.

@@ -25,7 +25,8 @@ Replaces (§4.4): `models/registry.py`, `artifact loading and inference adapters
 ## Public interface
 
 `magnitude_mlp_recipe.mlp_recipe` / `validate_mlp_recipe` provide closed, source-free
-`magnitude_mlp_recipe.v1` metadata for ten fixed standalone neural profiles.
+`magnitude_mlp_recipe.v1` metadata for sixteen fixed standalone neural profiles,
+including six chronological-holdout profiles that require aligned ISO event dates.
 No sklearn import, search admission or production comparator change occurs.
 
 `regression_target.target_descriptor` / `validate_target` bind explicit column,
@@ -224,7 +225,7 @@ for offline fold metadata; its helper `serving_fold_checks.py` imports
 consumes `ChooserFoldPolicy` and `chooser_fold_outputs`, obtains registered
 policies, and invokes `serving_fold_preflight.preflight_chooser_fold`
 before publication.
-`release_layout.py` reads catalogs via `release_objects.read_regular_file`, a bounded final-component no-follow open. `tools/phase5_prepare_release.py` bounds its serving-fold reads (`read_bounded_state`, `MAX_FOLD_BYTES`) and frozen-state reads (`MAX_STATE_BYTES` by default); its model-artifact reads (`MAX_MODEL_BYTES`) are bounded no-follow, and the bootstrap reads each payoff/recalibration artifact once the same way and validates those bytes with the loaders' `load_bytes` (no second read); its training-root payload readers are bounded no-follow reads too; `checks/phase5_acceptance.py`'s staged-member and report reads are uncapped (tracked in #819).
+`release_layout.py` reads catalogs via `release_objects.read_regular_file`, a bounded final-component no-follow open. `tools/phase5_prepare_release.py` bounds its serving-fold reads (`read_bounded_state`, `MAX_FOLD_BYTES`) and frozen-state reads (`MAX_STATE_BYTES` by default); its model-artifact reads (`MAX_MODEL_BYTES`) are bounded no-follow, and the bootstrap reads each payoff/recalibration artifact once the same way and validates those bytes with the loaders' `load_bytes` (no second read); its training-root payload readers are bounded no-follow reads too; `checks/phase5_acceptance.py`'s staged-member hash reads use the same bounded no-follow helper (`MAX_MEMBER_BYTES`), and its frozen-state typed loads pass the same 512 MiB cap to `FrozenStateLoader`; its report reads remain uncapped (tracked in #819).
 `checks/phase5_acceptance.py` publishes staging success after acceptance.
 `tools/phase5_prepare_release.py` invalidates prior success before re-preparation.
 `checks/phase5_release_assembly.py` re-stages a prior release under a new id

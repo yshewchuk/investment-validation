@@ -173,6 +173,7 @@ def iter_cached(
     endpoint: str | None = None,
     *,
     root: Path | None = None,
+    max_meta_bytes: int | None = None,
 ) -> list[CachedEntry]:
     """Every cached entry for ``source``, optionally filtered to one endpoint.
 
@@ -184,8 +185,21 @@ def iter_cached(
         return []
     out: list[CachedEntry] = []
     for meta_path in sorted(base.glob("*/*.meta.json")):
+        raw: bytes | None = None
+        if max_meta_bytes is not None:
+            with open(meta_path, "rb") as fh:
+                raw = fh.read(max_meta_bytes + 1)
+            if len(raw) > max_meta_bytes:
+                size = len(raw)
+                error = ValueError(
+                    f"metadata sidecar {meta_path} is {size} bytes, "
+                    f"exceeds cap of {max_meta_bytes} bytes"
+                )
+                vars(error).update(path=meta_path, size=size, cap=max_meta_bytes)
+                raise error
         try:
-            meta = json.loads(meta_path.read_text())
+            text = raw.decode() if raw is not None else meta_path.read_text()
+            meta = json.loads(text)
         except (OSError, ValueError):
             continue
         if endpoint is not None and meta.get("endpoint") != endpoint.strip("/"):

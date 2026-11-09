@@ -194,6 +194,47 @@ def test_select_chooser_state_assembles_derived_fold_state(monkeypatch):
     )
 
 
+def test_chooser_pool_exact_as_of_wins():
+    from datetime import date, timedelta
+    from engine.v2.scoring.release_bindings import _select_latest_chooser_pool
+
+    as_of = date.fromisoformat(_AS_OF)
+    older = _artifact((as_of - timedelta(days=1)).isoformat())
+    exact = _artifact(_AS_OF)
+    assert _select_latest_chooser_pool([older, exact], _AS_OF) is exact
+
+
+def test_chooser_pool_uses_newest_older_cutoff_without_age_limit():
+    from datetime import date, timedelta
+    from engine.v2.scoring.release_bindings import _select_latest_chooser_pool
+
+    as_of = date.fromisoformat(_AS_OF)
+    older = _artifact((as_of - timedelta(days=3650)).isoformat())
+    newest = _artifact((as_of - timedelta(days=1)).isoformat())
+    assert _select_latest_chooser_pool([older, newest], _AS_OF) is newest
+
+
+def test_chooser_pool_never_selects_future_cutoff():
+    from datetime import date, timedelta
+    from engine.v2.scoring.release_bindings import _select_latest_chooser_pool
+
+    as_of = date.fromisoformat(_AS_OF)
+    eligible = _artifact((as_of - timedelta(days=1)).isoformat())
+    future = _artifact((as_of + timedelta(days=1)).isoformat())
+    assert _select_latest_chooser_pool([future, eligible], _AS_OF) is eligible
+
+
+def test_chooser_pool_without_eligible_cutoff_refuses():
+    from datetime import date, timedelta
+    from engine.v2.scoring.release_bindings import _select_latest_chooser_pool
+
+    future = _artifact((date.fromisoformat(_AS_OF) + timedelta(days=1)).isoformat())
+    with pytest.raises(ModelNotReady) as error:
+        _select_latest_chooser_pool([future], _AS_OF)
+    assert error.value.member_id == "chooser_analog_pool"
+    assert error.value.detail == "no analog pool at or before cutoff"
+
+
 @pytest.mark.parametrize(
     ("event_date", "as_of"),
     [("not-a-date", "2026-10-02"), ("2026-09-30", "not-a-date")],
@@ -215,7 +256,7 @@ def test_select_chooser_state_no_analog():
         select_chooser_state(binding, _EVENT_DATE, _AS_OF)
 
     assert error.value.member_id == "chooser_analog_pool"
-    assert error.value.detail == "no unique analog pool for cutoff"
+    assert error.value.detail == "no analog pool at or before cutoff"
 
 
 def test_select_chooser_state_two_analogs():

@@ -66,6 +66,66 @@ def test_pair_reuses_exact_native_feature_order_and_point_policy(subset, width):
     assert result == {**expected, "recipe_id": content_hash(expected)}
 
 
+@pytest.mark.parametrize("subset", ["H", "HM", "HMO"])
+def test_regularised_v1_changes_only_two_params_and_marks_identity(subset):
+    raw = declaration.candidate_recipe(subset)
+    result = declaration.candidate_recipe(subset, "regularised_v1")
+    params = {**raw["classifier"]["params"], "l2_regularization": 1.0, "early_stopping": True}
+    body = {key: value for key, value in result.items() if key not in ("classifier_variant", "recipe_id")}
+    expected = {key: value for key, value in raw.items() if key != "recipe_id"}
+    expected["classifier"] = {**raw["classifier"], "params": params}
+    assert body == expected
+    assert result["classifier_variant"] == "regularised_v1"
+    assert "classifier_variant" not in raw
+    assert result["point_recipe"] == raw["point_recipe"]
+    marked = {**expected, "classifier_variant": "regularised_v1"}
+    assert result["recipe_id"] == content_hash(marked)
+    assert result["recipe_id"] != raw["recipe_id"]
+    assert declaration.validate_candidate_recipe(raw) == raw
+    assert declaration.validate_candidate_recipe({**marked, "recipe_id": result["recipe_id"]}) == result
+    for key, value in (("validation_fraction", 0.1), ("n_iter_no_change", 10),
+                       ("scoring", "loss"), ("random_state", 0)):
+        assert result["classifier"]["params"][key] == value
+
+
+def test_explicit_raw_variant_matches_default_and_pins_historical_identity():
+    default = declaration.candidate_recipe("H")
+    explicit = declaration.candidate_recipe("H", classifier_variant="raw")
+    assert explicit == default
+    assert default["recipe_id"] == \
+        "sha256:37b00dbcd41661bbccf5c7bce951dd4f49e53605da26b806cbf8e6d4b0b3834d"
+
+
+def test_each_variant_has_distinct_recipe_ids_across_feature_sets():
+    for subset in ("H", "HM", "HMO"):
+        assert declaration.candidate_recipe(subset)["recipe_id"] != \
+            declaration.candidate_recipe(subset, "regularised_v1")["recipe_id"]
+    assert len({declaration.candidate_recipe(s)["recipe_id"] for s in ("H", "HM", "HMO")}) == 3
+    assert len({declaration.candidate_recipe(s, "regularised_v1")["recipe_id"]
+                for s in ("H", "HM", "HMO")}) == 3
+
+
+@pytest.mark.parametrize("bad", ["regularised", "raw ", "REGULARISED_V1", None, 1, True, []])
+def test_unknown_or_malformed_classifier_variant_refuses(bad):
+    _refuses(declaration.candidate_recipe, "H", bad)
+
+
+def test_validator_refuses_unknown_marker_even_if_rehashed():
+    recipe = declaration.candidate_recipe("H")
+    recipe["classifier_variant"] = "regularised_v2"
+    recipe["recipe_id"] = content_hash({k: v for k, v in recipe.items() if k != "recipe_id"})
+    _refuses(declaration.validate_candidate_recipe, recipe,
+             message="invalid distribution candidate recipe")
+
+
+def test_validator_refuses_explicit_raw_marker_even_if_rehashed():
+    recipe = declaration.candidate_recipe("H")
+    recipe["classifier_variant"] = "raw"
+    recipe["recipe_id"] = content_hash({k: v for k, v in recipe.items() if k != "recipe_id"})
+    _refuses(declaration.validate_candidate_recipe, recipe,
+             message="invalid distribution candidate recipe")
+
+
 def test_initial_raw_policy_and_detached_results_are_explicit():
     result = declaration.candidate_recipe("H")
     assert result["output_recipe"] == output_recipe()

@@ -1,4 +1,8 @@
-"""Prepare or verify a bounded nested magnitude search plan; never execute trials."""
+"""Prepare or verify a bounded nested magnitude search plan; never execute trials.
+
+Planning admits the native bounds catalog through fixed caps, reads only planned
+label keys and seals per-event missing/cutoff exclusions.
+"""
 import argparse
 import errno
 import json
@@ -58,7 +62,7 @@ def _read_document(path):
 
 
 def main(argv=None):
-    """Local metadata-artifact lifecycle; no repository reads or experiment attempts."""
+    """Metadata planning/verification reads bounded label bounds from the repository; no experiment attempts."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("prepare", "verify"))
     for name in ("spec", "catalog", "store-root"):

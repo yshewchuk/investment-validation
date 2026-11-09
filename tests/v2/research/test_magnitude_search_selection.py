@@ -142,7 +142,7 @@ def test_history_mean_rows_refuses_malformed_inputs(inputs, validation):
         history_mean_rows(inputs, validation)
 
 
-def test_tie_band_uses_max_sample_se_floor_then_candidate_id():
+def test_tie_band_uses_lowest_score_then_candidate_id_and_keeps_band_diagnostics():
     scores = [
         {"candidate_id": "z", "blend_score": 0.5},
         {"candidate_id": "a", "blend_score": 0.504},
@@ -156,8 +156,9 @@ def test_tie_band_uses_max_sample_se_floor_then_candidate_id():
     selected, band = selection_tie_band(scores, yearly, floor=0.005)
     assert band["standard_error"] == pytest.approx(0.005773502691896258)
     assert band["width"] == pytest.approx(band["standard_error"])
+    assert band["best_blend_score"] == pytest.approx(0.5)
     assert band["tied_candidate_ids"] == ["a", "z"]
-    assert selected == "a"
+    assert selected == "z"
 
     floor_scores = [{"candidate_id": "z", "blend_score": 0.5},
                     {"candidate_id": "a", "blend_score": 0.504},
@@ -166,6 +167,18 @@ def test_tie_band_uses_max_sample_se_floor_then_candidate_id():
         "2023": {"blend_score": 0.5}, "2024": {"blend_score": 0.5}}}]
     selected, band = selection_tie_band(floor_scores, floor_yearly, floor=0.005)
     assert band["width"] == 0.005
+    assert band["best_blend_score"] == pytest.approx(0.5)
+    assert band["tied_candidate_ids"] == ["a", "z"]
+    assert selected == "z"
+
+    equal_scores = [{"candidate_id": "z", "blend_score": 0.5},
+                    {"candidate_id": "a", "blend_score": 0.5}]
+    equal_yearly = [{"candidate_id": "z", "yearly": {"2024": {"blend_score": 0.5}}},
+                    {"candidate_id": "a", "yearly": {}}]
+    selected, band = selection_tie_band(equal_scores, equal_yearly, floor=0.005)
+    assert band["standard_error"] == 0.0
+    assert band["width"] == 0.005
+    assert band["best_blend_score"] == pytest.approx(0.5)
     assert band["tied_candidate_ids"] == ["a", "z"]
     assert selected == "a"
 
@@ -230,6 +243,7 @@ def test_v4_hgb_request_accepts_the_same_hashed_selection_declaration():
 def test_freeze_reuses_verified_history_rows_for_shared_cohort(monkeypatch):
     plan = {"schema_version": PLAN_V3, "plan_id": "synthetic-plan",
         "request": {"selection": copy.deepcopy(POLICY)},
+        "selection": {"ties": "lowest_score_then_candidate_id_ascending"},
         "candidates": [{"candidate_id": "candidate"}],
         "folds": [
             {"outer": {"year": "2024"}, "inner": [{"year": "2023"}]},
@@ -302,9 +316,11 @@ def test_freeze_reuses_verified_history_rows_for_shared_cohort(monkeypatch):
         for item in frozen["selections"])
 
 
-def test_freeze_selects_hand_scored_candidate_within_history_mean_tie_band(monkeypatch):
+def test_freeze_selects_hand_scored_candidate_within_history_mean_tie_band(
+        monkeypatch):
     plan = {"schema_version": PLAN_V3, "plan_id": "oracle-plan",
         "request": {"selection": copy.deepcopy(POLICY)},
+        "selection": {"ties": "lowest_score_then_candidate_id_ascending"},
         "candidates": [{"candidate_id": "a-near-tie"}, {"candidate_id": "z-best"}],
         "folds": [{"outer": {"year": "2024"}, "inner": [{"year": "2023"}]}]}
     cohort_id = cohort_key(plan, "2024", "2023")
@@ -347,8 +363,9 @@ def test_freeze_selects_hand_scored_candidate_within_history_mean_tie_band(monke
     frozen = recorder.freeze()
     selection = frozen["selections"][0]
     # history_mean errors are 2, 2, 2, so RMSE, MAE and large-move underprediction
-    # denominators are each 2. The 0.005 tie floor includes both candidates; the
-    # raw best is z-best, but the simpler lexicographic candidate wins in-band.
+    # denominators are each 2. Both candidates sit inside the diagnostic 0.005
+    # band; the sealed score-first rule picks the winner while band diagnostics
+    # stay identical.
     expected_a = (0.6 * math.sqrt((1.01**2 + 2.0**2 + 2.0**2) / 3) / 2
         + 0.3 * (5.01 / 3) / 2 + 0.1 * (1.01 / 2))
     expected_z = (0.6 * math.sqrt((1.0**2 + 2.0**2 + 2.0**2) / 3) / 2
@@ -357,6 +374,6 @@ def test_freeze_selects_hand_scored_candidate_within_history_mean_tie_band(monke
     assert expected_z < expected_a < expected_z + 0.005
     assert selection["tie_band"]["width"] == pytest.approx(0.005)
     assert selection["tie_band"]["tied_candidate_ids"] == ["a-near-tie", "z-best"]
-    assert selection["selected_candidate_id"] == "a-near-tie"
+    assert selection["selected_candidate_id"] == "z-best"
     assert scores["a-near-tie"] == pytest.approx(expected_a)
     assert scores["z-best"] == pytest.approx(expected_z)

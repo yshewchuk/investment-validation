@@ -586,7 +586,8 @@ def test_service_tick_completes_while_a_claimed_producer_is_blocked(tmp_path, mo
         lambda conn: (score_session, score_scope, producer_parameters))
     from engine.v2.scoring import release_bindings
     monkeypatch.setattr(
-        release_bindings, "resolve_release_binding", lambda root: object())
+        release_bindings, "resolve_release_binding",
+        lambda root, **kwargs: object())
     monkeypatch.setattr(
         release_bindings, "resolve_gate_policy", lambda binding, root: {})
     monkeypatch.setattr(
@@ -817,7 +818,9 @@ def test_native_worker_produces_events_from_its_pinned_snapshot(tmp_path, monkey
         "engine.v2.ops.nightly_raw_row_producer.build_native_score_batch_events",
         producer)
     from engine.v2.scoring import release_bindings
-    monkeypatch.setattr(release_bindings, "resolve_release_binding", lambda root: object())
+    monkeypatch.setattr(
+        release_bindings, "resolve_release_binding",
+        lambda root, **kwargs: object())
     monkeypatch.setattr(release_bindings, "resolve_gate_policy", lambda binding, root: {})
     assembled_calls = []
     monkeypatch.setattr(

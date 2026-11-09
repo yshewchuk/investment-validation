@@ -282,9 +282,10 @@ def run(case, year="2024", **kwargs):
                                     r.request, r.plan_ref, year, limits=kwargs.get("limits", LIMITS))
 
 
-def collect(case):
+def collect(case, **kwargs):
     r = case.recorder
-    return outer.collect_outer_results(case.conn, case.store, r.repository, r.registration, r.request, r.plan_ref)
+    return outer.collect_outer_results(case.conn, case.store, r.repository, r.registration, r.request,
+                                       r.plan_ref, **kwargs)
 
 
 def slot(case, name, year="2024"):
@@ -302,9 +303,12 @@ def forbid_work(monkeypatch):
     monkeypatch.setattr(trials.SearchTrials, "_inputs", forbidden)
     monkeypatch.setattr(outer, "execution_limits", forbidden)
     scan = Repository.scan
-    def metadata_only(self, query, *, table_name):
-        assert table_name not in {"research_magnitude_history", "computed_moves"}, "replay opened native payloads"
-        return scan(self, query, table_name=table_name)
+    def metadata_only(self, query, *, table_name, max_object_bytes=None):
+        if table_name == "computed_move_bounds":
+            assert max_object_bytes == 1 << 20, "replay bounds read did not use the 1 MiB object cap"
+        else:
+            assert table_name not in {"research_magnitude_history", "computed_moves"}, "replay opened native payloads"
+        return scan(self, query, table_name=table_name, max_object_bytes=max_object_bytes)
     monkeypatch.setattr(Repository, "scan", metadata_only)
 
 
@@ -366,9 +370,9 @@ def test_collect_requires_all_folds_and_pools_errors_without_outer_selection(out
         return freeze(self)
     def executed(self, *args, **kwargs):
         pytest.fail("outer collection launched an inner execution")
-    def replayed(read, store, started, fold, plan, execution, binding):
+    def replayed(read, store, started, fold, plan, execution, binding, **kwargs):
         trace.append(("outer", fold["year"]))
-        return replay(read, store, started, fold, plan, execution, binding)
+        return replay(read, store, started, fold, plan, execution, binding, **kwargs)
     monkeypatch.setattr(trials.SearchTrials, "freeze", frozen)
     monkeypatch.setattr(trials.SearchTrials, "execute", executed)
     monkeypatch.setattr(outer, "_replay", replayed)
@@ -399,13 +403,37 @@ def test_collect_requires_all_folds_and_pools_errors_without_outer_selection(out
     assert (case.conn.total_changes, journal_slots(case)) == before
 
 
-@pytest.mark.parametrize("stage", ["input", "labels"])
-def test_collect_refuses_later_committed_start_without_terminal_before_any_replay(outer_case, monkeypatch, stage):
+def test_collect_passes_verified_inputs_to_callback_once_per_outer_fold(outer_case):
+    case = outer_case
+    run(case)
+    run(case, "2025")
+    seen = []
+
+    def callback(fold, inputs):
+        seen.append((fold["year"], inputs["training"], inputs["features"]))
+
+    report = collect(case, input_callback=callback)
+    assert [year for year, _, _ in seen] == ["2024", "2025"]
+    for year, training, features in seen:
+        expected, _ = expected_input_receipts(case, year)
+        assert training == expected["training"]
+        assert features == expected["features"]
+    assert report == collect(case)
+
+    def failing(fold, inputs):
+        raise ValueError("callback sentinel")
+
+    with pytest.raises(ValueError, match="callback sentinel") as caught:
+        collect(case, input_callback=failing)
+    assert str(caught.value) == "callback sentinel"
+
+
+def test_collect_refuses_later_committed_start_without_terminal_before_any_replay(outer_case, monkeypatch):
     case = outer_case
     run(case)
     interruption = Mock(side_effect=fail("RESOURCE_UNAVAILABLE", "synthetic outer interruption"))
     with monkeypatch.context() as patch:
-        patch.setattr(outer, "_inputs" if stage == "input" else "load_magnitude_targets", interruption)
+        patch.setattr(outer, "load_magnitude_targets", interruption)
         with outer_problem("RESOURCE_UNAVAILABLE", "synthetic outer interruption", category="resource", retryable=True):
             run(case, "2025")
     interruption.assert_called_once()
@@ -413,7 +441,7 @@ def test_collect_refuses_later_committed_start_without_terminal_before_any_repla
     assert slot(case, "start", "2025") is not None
     assert slot(case, "terminal", "2025") is None
     for name in ("inputs", "forecasts", "execution"):
-        assert (slot(case, name, "2025") is not None) == (stage == "labels")
+        assert slot(case, name, "2025") is not None
     assert slot(case, "validation", "2025") is None
     before = case.conn.total_changes, list(case.conn.iterdump())
     forbidden = Mock(side_effect=AssertionError("incomplete collection attempted replay or publication"))
@@ -481,16 +509,15 @@ def test_outer_fit_failure_retains_exact_prefix_without_replacement_or_retry(out
     assert all(child.poll() is not None and not path.exists() for child, path in children)
 
 
-@pytest.mark.parametrize("stage", ["labels", "input"])
-def test_outer_shared_failure_never_replaces_candidate_or_retries(outer_case, monkeypatch, stage):
+def test_outer_shared_failure_never_replaces_candidate_or_retries(outer_case, monkeypatch):
     case = outer_case
     def refused(*args, **kwargs):
         raise fail("RESOURCE_UNAVAILABLE", "synthetic shared failure")
-    monkeypatch.setattr(outer, "load_magnitude_targets" if stage == "labels" else "_inputs", refused)
+    monkeypatch.setattr(outer, "load_magnitude_targets", refused)
     with outer_problem("RESOURCE_UNAVAILABLE", "synthetic shared failure", category="resource", retryable=True):
         run(case)
     assert slot(case, "start") is not None and slot(case, "terminal") is None
-    assert (slot(case, "forecasts") is not None) == (stage == "labels")
+    assert slot(case, "forecasts") is not None
     before = case.conn.total_changes, journal_slots(case)
     monkeypatch.setattr(outer, "run_fitted_trial", lambda *a: pytest.fail("retried outer fit"))
     with outer_problem("EXPERIMENT_IDENTITY_CONFLICT", "search journal slot is already committed"):

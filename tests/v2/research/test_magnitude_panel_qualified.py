@@ -31,10 +31,12 @@ def panel_data(tmp_path, request):
     days = spec.get("days", ["2022-06-02", "2023-01-03", "2023-03-20", "2023-04-03",
                              "2023-05-15", "2023-06-02", "2024-06-17"])
     data = source(tmp_path, null_day="2023-05-15", days=days, values=spec.get("values"))
+    if spec.get("as_of_month") is not None:
+        data.request["as_of_month"] = spec["as_of_month"]
     store = data.repository._store
     repo = data.repository = Repository(data.conn, store, pin_snapshots=True)
     daily_contract = repo.table_contract(data.snapshot, "daily_market")
-    days = calendar_sessions("2022-05-20", "2024-06-20").days
+    days = calendar_sessions("2022-05-20", spec.get("calendar_end", "2024-06-20")).days
     market = []
     for day in days:
         values = {name: float(i + 1) for i, name in enumerate(sources.daily._DAILY)}

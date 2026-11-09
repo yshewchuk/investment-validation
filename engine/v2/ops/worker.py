@@ -201,7 +201,8 @@ def dispatch(worker, parameters, root, *, envelope=None):
                              "threads": os.environ["OMP_NUM_THREADS"]}}
     if worker == "experiment":
         return _dispatch_experiment(parameters, root)
-    if worker in ("training", "models_promote", "models_rollback", "phase5_state_stage", "retrain_check"):
+    if worker in ("training", "models_promote", "models_rollback", "phase5_state_stage",
+                  "retrain_check", "phase5_accept"):
         return _dispatch_model_worker(worker, parameters, root)
     raise ValueError("unsupported worker")
 
@@ -226,7 +227,10 @@ def _dispatch_legacy_action(worker, parameters, root, envelope):
 
 
 def _dispatch_model_worker(worker, parameters, root):
-    from engine.v2.ops.retrain_check import run_retrain_check_worker
+    from engine.v2.ops.retrain_check import (
+        run_phase5_accept_worker,
+        run_retrain_check_worker,
+    )
     from engine.v2.ops.state_stage import run_state_stage_worker
     from engine.v2.ops.training import (
         run_promote_worker,
@@ -237,7 +241,8 @@ def _dispatch_model_worker(worker, parameters, root):
     runners = {"training": run_training_worker, "models_promote": run_promote_worker,
                "models_rollback": run_rollback_worker,
                "phase5_state_stage": run_state_stage_worker,
-               "retrain_check": run_retrain_check_worker}
+               "retrain_check": run_retrain_check_worker,
+               "phase5_accept": run_phase5_accept_worker}
     return runners[worker](parameters, root)
 
 
@@ -369,22 +374,16 @@ def _dispatch_effect_receipt(worker, parameters, root):
 
 
 def _dispatch_retrain_step(parameters, root):
-    """#805 slice 2 stub (models ARCHITECTURE section 2.3 Rollout). ``restage`` checks
-    nothing and records ``restage: unchecked``; every chain step fails loudly with
-    ``VALIDATION_FAILED`` / ``details.code`` ``RETRAIN_UNAVAILABLE`` naming the step, so the
-    nightly fails and nothing scores on the incumbent. Never a silent skip."""
-    step = parameters["step"]
-    if step != "restage":
+    """Keep the unchecked restage placeholder; due steps use their typed workers."""
+    if parameters["step"] != "restage":
         from engine.v2.ops.errors import fail
-        raise fail("VALIDATION_FAILED", "retrain step is not implemented",
-                   details={"code": "RETRAIN_UNAVAILABLE", "step": step,
-                            "session": parameters["session"], "month": parameters["month"]})
+        raise fail("INVALID_REQUEST", "retrain_step is reserved for restage")
     receipt = {"schema_version": "effect_receipt.v1.0", "kind": "retrain_step",
                "step": "restage", "restage": "unchecked",
                "expected_ids": list(parameters["expected_ids"])}
     (root / "receipt.json").write_text(json.dumps(receipt))
     return {"outputs": [{"name": "retrain_step_receipt", "path": "receipt.json",
-                         "schema": "effect_receipt.v1.0"}],
+                          "schema": "effect_receipt.v1.0"}],
             "completed_ids": list(parameters["expected_ids"]),
             "no_work": not parameters["expected_ids"]}
 
