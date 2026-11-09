@@ -373,7 +373,7 @@ def _implementation(binding, *, entrypoints=None):
     return {"source_closure": sources, "environment": environment}
 
 
-def _prepare(conn, store, registration, request, *, plan_schema=None, legacy_contract=False):
+def _prepare(conn, store, registration, request, *, plan_schema=None):
     request_version = request.get("schema_version") if isinstance(request, dict) else None
     anchor_version = getattr(registration, "document", {}).get("schema_version")
     if anchor_version == "native_experiment_registration.v1.8":
@@ -388,8 +388,7 @@ def _prepare(conn, store, registration, request, *, plan_schema=None, legacy_con
         from experiments.size_search_binding import prepare_plan
         default_schema = plan_schema_for_request(request)
         return prepare_plan(conn, store, registration, request,
-                            plan_schema=plan_schema or default_schema,
-                            legacy_contract=legacy_contract)
+                            plan_schema=plan_schema or default_schema)
     request, count = _request(request)
     verify_native_registration(conn, store, registration)
     binding = registration.document
@@ -441,16 +440,8 @@ def read_search_plan(conn, store, registration, request, ref):
     if not isinstance(ref, ArtifactRef) or ref.schema_ref not in schemas:
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search plan reference has the wrong schema")
     qualified = is_qualified_request(parsed_version)
-    legacy_source = False
-    if qualified:
-        from experiments.size_search_binding import is_legacy_source_closure
-        legacy_source = is_legacy_source_closure(registration.document)
-    if legacy_source:
-        expected = _prepare(conn, store, registration, request,
-                            plan_schema=ref.schema_ref, legacy_contract=True)
-    else:
-        expected = _prepare(conn, store, registration, request,
-                            plan_schema=ref.schema_ref if qualified else None)
+    expected = _prepare(conn, store, registration, request,
+                        plan_schema=ref.schema_ref if qualified else None)
     payload = canonical_json(expected).encode()
     if ref != artifact_reference(payload, ref.schema_ref):
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search plan reference differs from its complete binding")

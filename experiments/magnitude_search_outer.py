@@ -257,11 +257,11 @@ def _execute_admitted(conn, store, repository, registration, plan, fold, selecti
     forbid_fitting("execute_outer_fold")
     forbid_legacy_fitting("execute_outer_fold")
     resolved = resolved_limits(conn, store, registration, plan, limits) if diagnostic_keys(binding) else execution_limits(limits)
-    legacy = "target" not in plan and not _requires_event_dates(plan)
-    inputs = _inputs(repository, binding, fold, plan=plan) if saved("start") is None and not legacy else None
+    use_plan = "target" in plan or _requires_event_dates(plan)
+    inputs = _inputs(repository, binding, fold, plan=plan) if use_plan and saved("start") is None else None
     append("start", started)
     if inputs is None:
-        inputs = _inputs(repository, binding, fold, plan=plan)
+        inputs = _inputs(repository, binding, fold, plan=plan) if use_plan else _inputs(repository, binding, fold)
     manifest, inputs_id = publish_inputs(store, inputs)
     append("inputs", manifest)
     expected = fit_evidence(inputs, fold, plan, execution)

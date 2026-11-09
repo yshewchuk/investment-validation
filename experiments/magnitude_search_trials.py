@@ -25,6 +25,7 @@ from engine.v2.ops.migrations import migrate, require_current
 from engine.v2.research.magnitude_inputs import load_magnitude_targets
 from experiments.magnitude_report import magnitude_metrics
 from experiments.magnitude_search_evidence import (
+    _requires_event_dates,
     admit_fold_inputs,
     evaluation_targets,
     fit_evidence,
@@ -48,7 +49,7 @@ from experiments.magnitude_search_plan import (
 )
 from experiments.magnitude_search_records import MIGRATIONS, OWNER, append_record, read_record
 from experiments.magnitude_search_selection import (
-    LEGACY_TIE_RULE,
+    CURRENT_TIE_RULE,
     ZeroComparatorError,
     blended_event_score,
     history_mean_rows,
@@ -181,7 +182,8 @@ class SearchTrials:
         schema = self.registration.document.get("schema_version")
         if plan is None and schema == "native_experiment_registration.v1.8":
             plan = self._admit()
-        kwargs = {"plan": plan} if plan is not None else {}
+        kwargs = ({"plan": plan} if schema == "native_experiment_registration.v1.8"
+                  or _requires_event_dates(plan) else {})
         return admit_fold_inputs(self.repository, self.registration.document, inner,
             history_failure=fail("EXPERIMENT_IDENTITY_CONFLICT", "search native history binding changed"), **kwargs)
 
@@ -192,7 +194,8 @@ class SearchTrials:
             if cohort in self._published:
                 manifest, inputs_id = self._published[cohort]
                 self._memo[cohort] = load_inputs(self.store, manifest, inputs_id)
-            elif plan is not None:
+            elif plan is not None and (self.registration.document.get("schema_version") == "native_experiment_registration.v1.8"
+                    or _requires_event_dates(plan)):
                 self._memo[cohort] = self._inputs(inner, plan=plan)
             else:
                 self._memo[cohort] = self._inputs(inner)
@@ -821,12 +824,13 @@ class SearchTrials:
                     except ValueError:
                         raise fail("EXPERIMENT_IDENTITY_CONFLICT",
                                    "sealed search plan has an unsupported selection tie rule") from None
+                    if tie_rule != CURRENT_TIE_RULE:
+                        raise fail("EXPERIMENT_IDENTITY_CONFLICT",
+                                   "sealed search plan has an unsupported selection tie rule")
                     best = min(eligible,
                                key=lambda score: (score["blend_score"], score["candidate_id"]))
                     leader_yearly_missing = any(
                         value is None for value in best["yearly"].values())
-                    if leader_yearly_missing and tie_rule == LEGACY_TIE_RULE:
-                        raise ZeroComparatorError("cannot normalize a nonzero candidate error by zero history_mean error")
                     yearly_scores = [score for score in eligible if all(
                         value is not None for value in score["yearly"].values())]
                     if leader_yearly_missing:
