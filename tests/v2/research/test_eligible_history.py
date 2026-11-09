@@ -233,6 +233,7 @@ def test_size_comparison_uses_one_native_artifact(data):
     assert len(result["rows"]) == 9
     for row in result["rows"]:
         assert (row["n_prior"], row["mean_prior_move"], row["mean_prior_abs_move"]) == expected[row["event_id"]]
+        assert not any(key.startswith("season_heat_") for key in row)
     assert artifact["temporal_plan"]["fold_policy"]["kind"] == "expanding_event_year"
 
 
@@ -743,6 +744,10 @@ def test_materialization_persists_population_season_heat_fields(tmp_path):
                 ("season_heat_ratio_20_252", "float64", True)):
             assert fields[name].physical_type == physical_type
             assert fields[name].nullable is nullable
+        contributors = artifact["context"]["season_heat_contributors"]
+        assert any(row["source_bounds"]["outcome_object_id"] == row["object_id"]
+            and row["source_bounds"]["outcome_content_hash"] == row["content_hash"]
+            for row in contributors)
     finally:
         data.conn.close()
 
@@ -812,6 +817,29 @@ def test_season_population_requires_unique_computed_move_fragment(tmp_path, monk
         monkeypatch.setattr(data.repository, "fragment_records", wrapped_records)
         with pytest.raises(DataError) as caught:
             history.materialize(data.repository, data.snapshot, **request)
+        assert caught.value.code == "HOLDOUT_ACCESS_DENIED"
+    finally:
+        data.conn.close()
+
+
+def test_duplicate_computed_moves_inventory_refuses_even_outside_wanted(tmp_path, monkeypatch):
+    data = source(tmp_path, extra_events=[history_event("2023-01-03", ticker="OTHER")])
+    try:
+        original_records = data.repository.fragment_records
+        unwanted_key = ("OTHER", "2023-01-03")
+
+        def wrapped_records(snapshot, table_name):
+            records = original_records(snapshot, table_name)
+            if table_name != "computed_moves":
+                return records
+            matched = tuple(r for r in records if r.primary_key_min == unwanted_key)
+            if not matched:
+                return records
+            return records + matched
+
+        monkeypatch.setattr(data.repository, "fragment_records", wrapped_records)
+        with pytest.raises(DataError) as caught:
+            history.materialize(data.repository, data.snapshot, **data.request)
         assert caught.value.code == "HOLDOUT_ACCESS_DENIED"
     finally:
         data.conn.close()

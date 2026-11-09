@@ -338,12 +338,13 @@ def _groups(repository, snapshot, selected, forecasts, event_ids, horizons, cale
     """Source-derived label windows; missing evidence differs from null labels."""
     anchors = _anchors(repository, snapshot, limits, required_tickers=selected.ticker.unique())
     wanted = {(e.ticker, e.event_date.date().isoformat()) for e in selected.itertuples(index=False)}
-    records = {}
+    seen, records = set(), {}
     for record in repository.fragment_records(snapshot, "computed_moves"):
         key = record.primary_key_min
+        if key in seen:
+            raise fail("HOLDOUT_ACCESS_DENIED", "ambiguous outcome object identity")
+        seen.add(key)
         if key in wanted:
-            if key in records:
-                raise fail("HOLDOUT_ACCESS_DENIED", "ambiguous outcome object identity")
             records[key] = record
     groups, unavailable, qualified = [], [], {}
     for event in selected.itertuples(index=False):

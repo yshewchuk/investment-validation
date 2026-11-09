@@ -1,7 +1,7 @@
 """SIZE's shared research-refit history for challengers and the legacy comparator."""
 from engine.v2.data.errors import fail
 from engine.v2.research.eligibility_policy import eligibility_policy
-from engine.v2.research.eligible_history_table import FEATURES
+from engine.v2.research.eligible_history_table import HISTORY_FEATURES
 from engine.v2.research.magnitude_folds import magnitude_window, plan_magnitude_folds
 from engine.v2.research.snapshot_inputs import snapshot_reference
 from experiments import eligible_history
@@ -42,4 +42,4 @@ def comparison_inputs(repository, snapshot, artifact):
     eligible_history.validate_request(artifact["request"])
     _policy(artifact["request"]["policy"])
     return eligible_history.read(repository, snapshot, artifact["feature_snapshot"],
-        columns=list(FEATURES), **artifact["request"])
+        columns=list(HISTORY_FEATURES), **artifact["request"])
