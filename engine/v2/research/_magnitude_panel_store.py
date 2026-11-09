@@ -56,7 +56,8 @@ def _validate(rows, context):
 
 
 def _season_row_valid(row):
-    """Season columns: int count, nullable finite non-negative floats, mean/ratio thresholds."""
+    """Season columns: int count, nullable finite non-negative floats, mean_20 present iff count
+    >= 20 (compute contract), ratio needs mean_20."""
     count = row["season_heat_count_20"]
     mean_20 = row["season_heat_mean_abs_20"]
     if type(count) is not int or count < 0:
@@ -68,8 +69,8 @@ def _season_row_valid(row):
         if value is not None and (type(value) not in (float, int) or value < 0
                                   or not math.isfinite(value)):
             return False
-    return (mean_20 is None or count >= 20) and (row["season_heat_ratio_20_252"] is None
-                                                or mean_20 is not None)
+    return (mean_20 is None) == (count < 20) and (row["season_heat_ratio_20_252"] is None
+                                                  or mean_20 is not None)
 
 
 def _validate_row(row, context, target, cutoff):

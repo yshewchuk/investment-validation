@@ -252,3 +252,18 @@ def test_store_refuses_tampered_season_columns(panel_data, column, value):
     with pytest.raises(DataError) as refused:
         list(store._validate(rows, artifact["context"]))
     assert refused.value.code == "CONTRACT_MISMATCH"
+
+
+def test_store_refuses_count_20_above_threshold_with_null_mean_20(panel_data):
+    """The compute contract gives a 20-window mean iff count_20 >= 20; a stored row with
+    count_20 = 25 and mean_20 None violates it."""
+    data = panel_data
+    artifact = size_panel.materialize(data.repository, data.panel_source, **data.panel_request)
+    rows = stored_rows(data, artifact)
+    assert all(row["season_heat_mean_abs_20"] is None and row["season_heat_count_20"] == 0 for row in rows)
+    rows[0]["season_heat_count_20"] = 25
+    rows[0]["row_id"] = content_hash({k: v for k, v in rows[0].items() if k != "row_id"})
+    with pytest.raises(DataError) as refused:
+        list(store._validate(rows, artifact["context"]))
+    assert refused.value.code == "CONTRACT_MISMATCH"
+    assert "season" in str(refused.value)
