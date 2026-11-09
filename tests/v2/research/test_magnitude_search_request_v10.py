@@ -119,6 +119,22 @@ def test_v10_accepts_the_hmos_hash_without_the_hmos_set():
     assert compiled["counts"]["candidates"] == 21
 
 
+def test_prepare_refuses_hmos_candidates_until_the_panel_contract_is_v4(monkeypatch):
+    from experiments import size_search_binding
+    request = _request(10)
+    monkeypatch.setattr(size_search_binding, "_sources", lambda: {})
+    monkeypatch.setattr(size_search_binding, "validate_panel_request",
+                        lambda panel_request: {"horizons": [1]})
+    monkeypatch.setattr(size_search_binding, "compile_request",
+                        lambda request, *, horizons: {"horizons": [1]})
+    with pytest.raises(OpsError) as caught:
+        size_search_binding.prepare(None, {}, request, {"horizons": [1]},
+                                    scope=None, training_start=None, labels_before=None)
+    assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert caught.value.problem.message == (
+        "HMOS candidates need the season panel columns; refused until the panel contract is v4")
+
+
 @pytest.mark.parametrize("feature_sets", [[], ["HMOS", "M"], ["M", "M"], ["HMO", "x"]])
 def test_v10_refuses_empty_duplicate_unknown_or_out_of_order_feature_sets(feature_sets):
     with pytest.raises(OpsError, match="nonempty ordered subset"):

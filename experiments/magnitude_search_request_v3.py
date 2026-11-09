@@ -198,7 +198,7 @@ def _counts(request, horizons):
         for family, axes in request["space"].items() if family != "size_v1_4")
     if allows_hgb_axes(request_version(request["schema_version"])):
         v2._require(count <= _MAX_V4_CANDIDATES,
-                    "stage-2 v6/v7/v8/v9 grid exceeds the 1000-candidate ceiling"
+                    "stage-2 v6 and later grid exceeds the 1000-candidate ceiling"
                     if allows_neural(request_version(request["schema_version"]))
                     else "stage-2 v4/v5 grid exceeds the 1000-candidate ceiling")
     inners, outers = sum(map(len, inner.values())), len(outer)
@@ -234,7 +234,7 @@ def compile_request(request, *, horizons=(5, 3, 1)):
                 or (allows_hgb_axes(request_version(version))
                     and request_keys in (v2._KEYS | {"selection"},
                                          v2._KEYS | {"selection", "workers"})),
-                "stage-2 request requires its closed v6/v7/v8 schema and selection policy"
+                "stage-2 request requires its closed v6 and later schema and selection policy"
                 if allows_neural(request_version(version))
                 else "stage-2 request requires its closed v3/v4/v5 schema and selection policy")
     v2.validate_workers(request)
