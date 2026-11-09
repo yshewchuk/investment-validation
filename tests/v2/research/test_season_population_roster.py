@@ -57,7 +57,7 @@ def _available(day):
 
 class Repository:
     def __init__(self, moves):
-        self.moves, self.tables, self.scans = moves, [], []
+        self.moves, self.tables, self.scans, self.anchor_limits = moves, [], [], []
 
     def fragment_records(self, snapshot, table):
         self.tables.append(table)
@@ -85,8 +85,12 @@ def plan(monkeypatch, events, anchors, moves, sessions=_DEFAULT, calendar=CALEND
         return pd.DataFrame(events)
 
     monkeypatch.setattr(season_population, "load_population", load_population)
-    monkeypatch.setattr(season_population.outcome_binding, "anchors",
-        lambda repository, snapshot, limits, **kwargs: anchors)
+
+    def anchors_stub(repository, snapshot, limits, **kwargs):
+        repository.anchor_limits.append(limits)
+        return anchors
+
+    monkeypatch.setattr(season_population.outcome_binding, "anchors", anchors_stub)
     result = season_population.plan_roster(repository, SNAPSHOT, as_of_month="2024-01",
         decision_sessions=SESSIONS if sessions is _DEFAULT else sessions, calendar=calendar,
         calendar_source=SOURCE, limits=limits, purpose=purpose)
@@ -101,6 +105,17 @@ def _mixed():
         ("CCC", DAYS[273]): bounds_row("CCC", DAYS[273], pre_close_date=None, post_close_date=None),
         ("DDD", saturday): bounds_row("DDD", saturday, pre_close_date=DAYS[274], post_close_date=DAYS[275])}
     moves = [record("AAA", DAYS[270]), record("CCC", DAYS[273]), record("DDD", saturday)]
+    return events, anchors, moves
+
+
+def _retained(count):
+    """Count population events that all survive into the roster (none excluded)."""
+    events, anchors, moves = [], {}, []
+    for i in range(count):
+        day, ticker = DAYS[270 + i], f"T{i:02}"
+        events.append(event(f"ev-{i:02}", ticker, day))
+        anchors[(ticker, day)] = bounds_row(ticker, day)
+        moves.append(record(ticker, day))
     return events, anchors, moves
 
 
@@ -120,6 +135,7 @@ def test_retained_exclusions_and_metadata_only_reads(monkeypatch):
     repository, result, reads, calls = plan(monkeypatch, events, anchors, moves)
     receipt, retained = result["receipt"], result["retained"]
     assert calls == [LIMITS]
+    assert repository.anchor_limits == [LIMITS]
     assert reads == [{"as_of_month": "2024-01", "purpose": "selection",
         "max_object_bytes": LIMITS["max_object_bytes"]}]
     assert (repository.tables, repository.scans) == (["computed_moves"], [])
@@ -296,3 +312,21 @@ def test_purpose_and_identity_reproducible(monkeypatch):
     assert first["receipt"] == second["receipt"]
     assert first["receipt"]["purpose"] == "training"
     _receipt_id_oracle(first["receipt"])
+
+
+@pytest.mark.parametrize("retained, cap", [
+    pytest.param(2, 2, id="at-cap"),
+    pytest.param(3, 2, id="over-cap"),
+])
+def test_max_output_rows_bounds_retained(monkeypatch, retained, cap):
+    events, anchors, moves = _retained(retained)
+    limits = {**LIMITS, "max_output_rows": cap}
+    if retained <= cap:
+        repository, result, _, _ = plan(monkeypatch, events, anchors, moves, limits=limits)
+        assert result["receipt"]["counts"]["retained"] == retained
+        assert len(result["retained"]) == retained
+        assert repository.anchor_limits == [limits]
+    else:
+        with pytest.raises(DataError) as caught:
+            plan(monkeypatch, events, anchors, moves, limits=limits)
+        assert caught.value.code == "RESULT_LIMIT_EXCEEDED"

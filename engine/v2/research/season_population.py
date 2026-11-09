@@ -92,7 +92,8 @@ def plan_roster(repository, snapshot, *, as_of_month, decision_sessions, calenda
     """Metadata-only roster over the population window; opens no outcome.
     limits is the eligible-history limits dict (max_source_rows, max_fragments,
     max_object_bytes, max_total_bytes, max_output_rows); the H11 admission bounds
-    every whole-table read before it happens.
+    every whole-table read before it happens, and the retained count is capped by
+    max_output_rows.
     Returns {"receipt": {...}, "retained": [...]}."""
     admit_source(repository, snapshot, limits)
     sessions = _validate(calendar, decision_sessions)
@@ -104,6 +105,8 @@ def plan_roster(repository, snapshot, *, as_of_month, decision_sessions, calenda
         anchors = outcome_binding.anchors(repository, snapshot, limits)
         records = outcome_binding.fragment_index(repository, snapshot)
         in_window, retained, excluded = _roster(population, anchors, records, calendar, start, last)
+        if len(retained) > limits["max_output_rows"]:
+            raise fail("RESULT_LIMIT_EXCEEDED", "season roster exceeds max_output_rows")
         receipt = _receipt(as_of_month=as_of_month, purpose=purpose, start=start, first=first,
             last=last, calendar_source=calendar_source, population_size=len(population),
             in_window=in_window, retained=retained, excluded=excluded)
