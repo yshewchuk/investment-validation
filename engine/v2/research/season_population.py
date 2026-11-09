@@ -3,17 +3,25 @@
 plan_roster reads the canonical population, the native bounds table and the
 whole-table computed-move fragment index, then binds anchors to fragments with
 the shared outcome_binding helpers, so the roster digest binds label values
-without opening a single outcome object.
+without opening a single outcome object. read_labels is the value build: it
+admits the source, resolves the roster ids through the population, then reads
+exactly those outcome objects: each retained label's object is read once per
+call; reads go ticker by ticker so a ticker's run stream finishes before the
+next opens (adjacent same-ticker labels share one run scan), refusing on any
+contradiction.
 """
+import math
 from datetime import date, timedelta
 
+from engine.v2.data.computed_moves_table import COMPUTED_MOVES_CONTRACT, COMPUTED_MOVES_V5_CONTRACT
 from engine.v2.data.errors import fail
 from engine.v2.foundation import content_hash
 from engine.v2.foundation.market_calendar import CalendarSessions
-from engine.v2.research import outcome_binding
+from engine.v2.research import event_history, outcome_binding
 from engine.v2.research.eligible_history import admit_source
 from engine.v2.research.experiment_population import load_population
-from engine.v2.research.progress import decision, stage
+from engine.v2.research.experiment_trades import _holdout_context
+from engine.v2.research.progress import Progress, decision, stage
 
 WINDOW_SESSIONS = 252
 SAMPLE_IDS = 10
@@ -114,3 +122,150 @@ def plan_roster(repository, snapshot, *, as_of_month, decision_sessions, calenda
             f"{in_window}; retained {len(retained)}; excluded {receipt['counts']['excluded']}; "
             f"not yet available {receipt['counts']['not_yet_available']}; window {start}..{last}")
     return {"receipt": receipt, "retained": retained}
+
+
+def _abs_move(value):
+    """The label move as a finite float magnitude, or a variant refusal."""
+    try:
+        if (isinstance(value, bool) or not isinstance(value, (int, float))
+                or not math.isfinite(value)):
+            raise ValueError
+        return float(abs(value))
+    except (TypeError, ValueError, OverflowError):
+        raise fail("EXPERIMENT_VARIANT_FAILED", "label move is invalid") from None
+
+
+def _label_move(rows, event, item):
+    """Validate one decoded outcome row against its roster binding; returns abs_move."""
+    day = event.event_date.date().isoformat()
+    if len(rows) != 1 or rows[0]["event_date"] != day:
+        raise fail("CONTRACT_MISMATCH", "label outcome identity is invalid")
+    if rows[0]["skipped"] is not False:
+        raise fail("CONTRACT_MISMATCH", "source bounds contradict a skipped label outcome")
+    if rows[0]["available_as_of_date"] != item["available_as_of_date"]:
+        raise fail("CONTRACT_MISMATCH", "label availability differs from the roster anchor")
+    return _abs_move(rows[0]["realized_move_pct"])
+
+
+def _validate_call(retained, as_of_month, purpose, latest_decision):
+    """Refuse a malformed call before admission or any read; a separate function so
+    read_labels stays within the complexity budget."""
+    if type(retained) is not list or any(
+            type(item) is not dict
+            or not {"event_id", "outcome_object_id", "outcome_content_hash",
+                    "available_as_of_date"} <= set(item)
+            or type(item["event_id"]) is not str for item in retained):
+        raise fail("CONTRACT_MISMATCH", "retained roster must be a list of complete roster items")
+    if (type(as_of_month) is not str or not as_of_month or type(purpose) is not str
+            or not purpose):
+        raise fail("CONTRACT_MISMATCH", "as-of month and purpose must be non-empty strings")
+    try:
+        canonical = (type(latest_decision) is str
+            and date.fromisoformat(latest_decision).isoformat() == latest_decision)
+    except (TypeError, ValueError):
+        canonical = False
+    if not canonical:
+        raise fail("CONTRACT_MISMATCH", "latest decision must be a canonical ISO date string")
+
+
+def _check_source_bounds(bounds, records, population, anchors, latest_decision):
+    """Refuse before any outcome opens when a roster binding or availability differs from the
+    native bounds or is available after the latest decision.
+
+    _validate_call has already bound latest_decision to a canonical ISO date string.
+    Full re-authentication mirrors plan_roster: outcome_binding.bound raises for a missing anchor,
+    a fragment mismatch or an invalid bracket, so the returned row's post_close_date is a valid
+    ISO date whenever execution continues here."""
+    for item in anchors.values():
+        available = item["available_as_of_date"]
+        if type(available) is str and available > latest_decision:
+            raise fail("CONTRACT_MISMATCH", "roster label is available after the latest decision")
+    for event in population.itertuples(index=False):
+        row = outcome_binding.bound(event, bounds, records)
+        if row is None:
+            raise fail("CONTRACT_MISMATCH", "roster label has null source bounds")
+        available = (date.fromisoformat(row["post_close_date"]) + timedelta(days=1)).isoformat()
+        if available != anchors[event.event_id]["available_as_of_date"]:
+            raise fail("CONTRACT_MISMATCH",
+                "roster availability differs from the native source bounds")
+
+
+def _admit_roster(repository, snapshot, retained, *, as_of_month, limits, latest_decision,
+                  purpose):
+    """Resolve the retained roster through the population and
+    native bounds, refusing on any contradiction before an outcome opens.
+
+    Returns (population, anchors, contract, ids)."""
+    if len(retained) > limits["max_output_rows"]:
+        raise fail("RESULT_LIMIT_EXCEEDED", "season roster exceeds max_output_rows")
+    ids = [item["event_id"] for item in retained]
+    if len(set(ids)) != len(ids):
+        raise fail("HOLDOUT_ACCESS_DENIED", "roster repeats an event id")
+    population = load_population(repository, snapshot, as_of_month=as_of_month, purpose=purpose,
+        event_ids=ids, max_object_bytes=limits["max_object_bytes"])
+    # load_population can drop ambiguous same-ticker-date events without refusing,
+    # so this recheck stops a silently partial label set.
+    if set(population.event_id) != set(ids) or len(population) != len(ids):
+        raise fail("HOLDOUT_ACCESS_DENIED", "population differs from the planned roster")
+    contract = repository.table_contract(snapshot, "computed_moves")
+    if contract not in (COMPUTED_MOVES_CONTRACT, COMPUTED_MOVES_V5_CONTRACT):
+        raise fail("CONTRACT_MISMATCH", "labels require the native computed-moves contract")
+    bounds = outcome_binding.anchors(repository, snapshot, limits)
+    records = outcome_binding.fragment_index(repository, snapshot)
+    anchors = {item["event_id"]: item for item in retained}
+    _check_source_bounds(bounds, records, population, anchors, latest_decision)
+    return population, anchors, contract, ids
+
+
+def read_labels(repository, snapshot, retained, *, as_of_month, limits, latest_decision,
+                purpose="selection"):
+    """Value-build read of the planned roster's realized labels.
+
+    Each retained label's object is read once per call; reads go ticker by
+    ticker so a ticker's run stream finishes before the next opens (adjacent
+    same-ticker labels share one run scan; event_history.plan_with_reader).
+    limits is the eligible-history limits dict (same as plan_roster); the H11
+    admission validates it and bounds every whole-table read before they
+    happen, its max_object_bytes bounds the population read, and its
+    max_output_rows caps the retained roster before any further read.
+
+    Returns season_heat label dicts (event_id, ticker, event_date, available_as_of_date,
+    abs_move) in retained order. The call shape and holdout context are validated on
+    every call, including an empty roster, before source admission, which itself runs on
+    every call and before any
+    outcome opens, so a
+    held-out label refuses the whole read; nothing is cached across calls, nothing is
+    retried, and any refusal propagates without a partial result. latest_decision is plan_roster's
+    window end (receipt["window"]["latest_decision"]), a canonical ISO date, which mirrors the
+    roster plan that never
+    retains labels available after it, so any such roster item refuses the read.
+    No production caller exists until the panel wiring slice (slice 5 of the season heat plan).
+    """
+    _validate_call(retained, as_of_month, purpose, latest_decision)
+    _holdout_context(snapshot, as_of_month, purpose, [item["event_id"] for item in retained])
+    admit_source(repository, snapshot, limits)
+    if not retained:
+        return []
+    population, anchors, contract, ids = _admit_roster(repository, snapshot, retained,
+        as_of_month=as_of_month, limits=limits, latest_decision=latest_decision, purpose=purpose)
+    candidates = population.sort_values(["event_date", "event_id"])
+    plans, read_rows = event_history.plan_with_reader(repository, snapshot, candidates, contract)
+    for event, _, record in plans:
+        item = anchors[event.event_id]
+        if (record.object_ref.object_id != item["outcome_object_id"]
+                or record.object_ref.content_hash != item["outcome_content_hash"]):
+            raise fail("HOLDOUT_ACCESS_DENIED", "planned outcome differs from the roster binding")
+    labels = {}
+    with stage("season_labels"):
+        meter = Progress("season labels", len(plans))
+        for event, request, _ in sorted(plans, key=lambda plan: (plan[0].ticker, plan[0].event_date,
+                plan[0].event_id)):
+            item = anchors[event.event_id]
+            abs_move = _label_move(read_rows(event, request), event, item)
+            labels[event.event_id] = {"event_id": event.event_id, "ticker": event.ticker,
+                "event_date": event.event_date.date().isoformat(),
+                "available_as_of_date": item["available_as_of_date"], "abs_move": abs_move}
+            meter.tick()
+        decision("season_labels", f"{len(labels)} labels from "
+            f"{len({event.ticker for event, _, _ in plans})} tickers")
+    return [labels[event_id] for event_id in ids]
