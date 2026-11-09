@@ -126,6 +126,52 @@ def test_stored_season_heat_equals_hand_computed_values(panel_data, monkeypatch)
         assert row["season_heat_ratio_20_252"] == 1.0  # all 30 labels are within 252 sessions too
 
 
+def test_stored_season_heat_distinguishes_the_20_and_60_windows(panel_data, monkeypatch):
+    """Second independent oracle: stepped moves split the means, so a swapped window fails.
+
+    The uniform-2.0 oracle above gives every populated mean 2.0 and cannot tell the
+    20-session window from the 60-session one. season_heat windows are inclusive index
+    ranges [d - w + 1, d] at decision d (_Windows.start lower, _Windows.add bound), and
+    a label counts only once available_as_of_date <= the decision date.
+    """
+    data = panel_data
+    sessions = calendar_sessions(*CALENDAR).days
+    decisions = sorted({sessions.index(target["decision_session"])
+                        for target in heat_targets(prepare(data))})
+    assert decisions == [515, 517, 519]  # horizons 1, 3, 5; clock 515 is 2024-06-10
+    clock = decisions[0]
+    # LAB and LAC, 2 per session, at indices 460..514: move 1.0 below 500, 3.0 from 500.
+    # Each is available the next calendar day, so all hold by 2024-06-08 < 2024-06-10.
+    labels = [{"event_id": f"window-{index}-{ticker}", "ticker": ticker, "event_date": sessions[index],
+               "available_as_of_date": (date.fromisoformat(sessions[index])
+                                        + timedelta(days=1)).isoformat(),
+               "abs_move": 1.0 if index < 500 else 3.0}
+              for index in range(460, clock) for ticker in ("LAB", "LAC")]
+    # Boundary label: available_as_of_date == sessions[515] == the decision date is counted
+    # (season_heat adds it while `label.available > decision_date` breaks the sweep at >=).
+    labels.append({"event_id": "window-boundary", "ticker": "LAB", "event_date": sessions[clock - 1],
+                   "available_as_of_date": sessions[clock], "abs_move": 3.0})
+    # 20-window at d=515 is [496, 515]; labels live at 496..514: 4 x 2 x 1.0 + 15 x 2 x 3.0
+    # = 8.0 + 90.0, plus the boundary +3.0 -> count_20 = 38 + 1 = 39, mean_20 = 101 / 39.
+    expected_count_20, expected_mean_20 = 39, 101 / 39
+    # 60-window is [456, 515]; labels 460..514: 40 x 2 x 1.0 + 15 x 2 x 3.0 = 80.0 + 90.0,
+    # plus the boundary -> count_60 = 111, mean_60 = 173 / 111. mean_20 != mean_60.
+    expected_mean_60 = 173 / 111
+    monkeypatch.setattr(builder.season_population, "read_labels", lambda *args, **kwargs: labels)
+    artifact = size_panel.materialize(data.repository, data.panel_source, **data.panel_request)
+    rows = [row for row in stored_rows(data, artifact)
+            if row["source_session_ceiling"] == sessions[clock]]  # the horizon-1 row
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["season_heat_count_20"] == expected_count_20  # the boundary label is in the count
+    assert row["season_heat_mean_abs_20"] == pytest.approx(expected_mean_20)
+    assert row["season_heat_mean_abs_60"] == pytest.approx(expected_mean_60)
+    assert row["season_heat_mean_abs_20"] != row["season_heat_mean_abs_60"]
+    # 5-window is [511, 515]: 4 sessions x 2 + the boundary = 9 labels < the 20-label
+    # threshold, so mean_abs_5 is null.
+    assert row["season_heat_mean_abs_5"] is None
+
+
 def test_replay_returns_the_same_artifact_without_reading_labels_again(panel_data, monkeypatch):
     data = panel_data
     original = builder.season_population.read_labels
