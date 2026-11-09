@@ -25,6 +25,10 @@ from tests.v2.research.test_season_population_roster import (
 PROTECTED = "2023-04-04"
 DAYS = ("2023-01-03", "2023-02-07", "2023-03-07", "2023-05-02", "2023-06-06")
 TICKERS = ("AAA", "BBB", "CCC", "DDD", "EEE")
+# Native bounds rows in place of a bounds table the fixtures never commit: the source
+# fixture's make fills (ticker, event day) -> {"post_close_date": availability - 1 day}
+# and the autouse fixture serves this dict to read_labels through outcome_binding.anchors.
+BOUNDS = {}
 
 
 def _spec(row):
@@ -61,6 +65,11 @@ def source(tmp_path):
         conn, repository, snapshot = commit_event_history(tmp_path, events, moves)
         conns.append(conn)
         items = _items(repository, snapshot, events, moves)
+        for event, item in zip(events, items):
+            available = item["available_as_of_date"]
+            BOUNDS[(event["ticker"], event["event_date"].date().isoformat())] = {
+                "post_close_date": (date.fromisoformat(available) - timedelta(days=1)).isoformat()
+                if available else None}
         held = [item for item in items if item["event_id"] in protected_ids]
         retained = [item for item in items if item["event_id"] not in protected_ids]
         if order is not None:
@@ -75,10 +84,14 @@ def source(tmp_path):
 
 @pytest.fixture(autouse=True)
 def admit_recorder(monkeypatch):
-    """Record admissions: the real-repo fixtures have no bounds table for the real admit_source."""
+    """Record admissions and serve native bounds: the real-repo fixtures have no bounds table
+    for the real admit_source or for the roster-versus-bounds check in read_labels."""
     admitted = []
     monkeypatch.setattr(season_population, "admit_source",
         lambda repository, snapshot, limits: admitted.append(limits))
+    BOUNDS.clear()
+    monkeypatch.setattr(season_population.outcome_binding, "anchors",
+        lambda repository, snapshot, limits, **kwargs: BOUNDS)
     return admitted
 
 
@@ -153,8 +166,29 @@ def test_availability_differing_from_the_roster_refuses(source, shift):
     assert caught.value.code == "CONTRACT_MISMATCH"
 
 
+def test_bounds_post_close_one_day_earlier_than_the_roster_implies_refuses_before_any_scan(source):
+    case = source([(DAYS[0], "AAA", 2.0), (DAYS[1], "BBB", 3.0)])
+    row = BOUNDS[("AAA", DAYS[0])]
+    row["post_close_date"] = (date.fromisoformat(row["post_close_date"]) - timedelta(days=1)).isoformat()
+    with pytest.raises(DataError) as caught:
+        _read(case)
+    assert caught.value.code == "CONTRACT_MISMATCH"
+    assert _moves_scans(case.repository) == []
+
+
+def test_missing_bounds_row_for_a_retained_event_refuses_before_any_scan(source):
+    case = source([(DAYS[0], "AAA", 2.0), (DAYS[1], "BBB", 3.0)])
+    del BOUNDS[("AAA", DAYS[0])]
+    with pytest.raises(DataError) as caught:
+        _read(case)
+    assert caught.value.code == "CONTRACT_MISMATCH"
+    assert _moves_scans(case.repository) == []
+
+
 @pytest.mark.parametrize("value", [pytest.param(float("nan"), id="nan"), pytest.param(True, id="bool"),
-                                   pytest.param("2.0", id="string"), pytest.param(10 ** 400, id="huge-int")])
+                                   pytest.param("2.0", id="string"), pytest.param(10 ** 400, id="huge-int"),
+                                   pytest.param(float("inf"), id="inf"),
+                                   pytest.param(float("-inf"), id="-inf")])
 def test_invalid_move_refuses_variant(source, monkeypatch, value):
     case = source([(DAYS[0], "AAA", 2.0)])
     row = _valid_row(case)
@@ -343,7 +377,8 @@ def test_availability_boundary_and_the_read_of_a_retained_label(monkeypatch, ses
     monkeypatch.setattr(event_history, "plan_with_reader", lambda repository, snapshot, candidates, contract:
         ([(event, object(), planned) for event in candidates.itertuples(index=False)],
          lambda event, request: rows))
-    repository = SimpleNamespace(table_contract=lambda snapshot, name: COMPUTED_MOVES_CONTRACT)
+    repository = SimpleNamespace(table_contract=lambda snapshot, name: COMPUTED_MOVES_CONTRACT,
+        anchor_limits=[])
     assert season_population.read_labels(repository, None, [item], as_of_month=MONTH, limits=LIMITS) == [
         {"event_id": "ev-in", "ticker": "IN", "event_date": in_day, "available_as_of_date": LAST,
             "abs_move": 0.75}]

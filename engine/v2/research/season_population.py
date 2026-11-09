@@ -146,6 +146,20 @@ def _label_move(rows, event, item):
     return _abs_move(rows[0]["realized_move_pct"])
 
 
+def _check_source_bounds(bounds, population, anchors):
+    """Refuse before any outcome opens when a roster availability differs from the native bounds."""
+    for event in population.itertuples(index=False):
+        row = bounds.get((event.ticker, event.event_date.date().isoformat()))
+        try:
+            available = (date.fromisoformat(row["post_close_date"]) + timedelta(days=1)).isoformat()
+        except (TypeError, ValueError):
+            raise fail("CONTRACT_MISMATCH",
+                "roster availability differs from the native source bounds") from None
+        if available != anchors[event.event_id]["available_as_of_date"]:
+            raise fail("CONTRACT_MISMATCH",
+                "roster availability differs from the native source bounds")
+
+
 def read_labels(repository, snapshot, retained, *, as_of_month, limits, purpose="selection"):
     """Value-build read of the planned roster's realized labels.
 
@@ -161,6 +175,7 @@ def read_labels(repository, snapshot, retained, *, as_of_month, limits, purpose=
     held-out label refuses the whole read; nothing is cached across calls, nothing is
     retried, and any refusal propagates without a partial result. The roster already dropped
     labels available after the latest decision, so no decision-date comparison happens here.
+    No production caller exists until the panel wiring slice (slice 5 of the season heat plan).
     """
     if not retained:
         return []
@@ -175,7 +190,9 @@ def read_labels(repository, snapshot, retained, *, as_of_month, limits, purpose=
     contract = repository.table_contract(snapshot, "computed_moves")
     if contract not in (COMPUTED_MOVES_CONTRACT, COMPUTED_MOVES_V5_CONTRACT):
         raise fail("CONTRACT_MISMATCH", "labels require the native computed-moves contract")
+    bounds = outcome_binding.anchors(repository, snapshot, limits)
     anchors = {item["event_id"]: item for item in retained}
+    _check_source_bounds(bounds, population, anchors)
     candidates = population.sort_values(["event_date", "event_id"])
     plans, read_rows = event_history.plan_with_reader(repository, snapshot, candidates, contract)
     for event, _, record in plans:
