@@ -137,6 +137,27 @@ def test_weekend_availability_waits_for_next_decision_session():
         assert result["season_heat_ratio_20_252"] is None
 
 
+def test_off_session_target_event_date_is_accepted():
+    sessions = ["2025-03-07", "2025-03-10", "2025-03-11"]
+    targets = [
+        {
+            "event_id": "WEEKEND",
+            "ticker": "AAA",
+            "event_date": "2025-03-08",
+            "decision_session": "2025-03-07",
+        }
+    ]
+
+    results = compute_season_heat([], targets, sessions)
+    result = results[("WEEKEND", "2025-03-07")]
+
+    assert result["season_heat_count_20"] == 0
+    assert result["season_heat_mean_abs_5"] is None
+    assert result["season_heat_mean_abs_20"] is None
+    assert result["season_heat_mean_abs_60"] is None
+    assert result["season_heat_ratio_20_252"] is None
+
+
 def test_prior_session_label_available_after_decision_is_excluded():
     decision = "2025-01-15"
     sessions = _weekday_sessions(date(2025, 1, 13), date(2025, 1, 16))
@@ -360,6 +381,30 @@ def _availability_on_event_date():
     return labels, targets, sessions
 
 
+def _duplicate_label_event_id():
+    labels, targets, sessions = _valid_inputs()
+    labels.append(dict(labels[0]))
+    return labels, targets, sessions
+
+
+def _label_extra_key():
+    labels, targets, sessions = _valid_inputs()
+    labels[0]["extra"] = 1
+    return labels, targets, sessions
+
+
+def _label_event_date_outside_sessions():
+    labels, targets, sessions = _valid_inputs()
+    labels[0]["event_date"] = "2025-03-08"
+    return labels, targets, sessions
+
+
+def _malformed_availability():
+    labels, targets, sessions = _valid_inputs()
+    labels[0]["available_as_of_date"] = "not-a-date"
+    return labels, targets, sessions
+
+
 def _nan_move():
     labels, targets, sessions = _valid_inputs()
     labels[0]["abs_move"] = float("nan")
@@ -380,6 +425,10 @@ def _negative_move():
         (_availability_on_event_date, "EXPERIMENT_VARIANT_FAILED"),
         (_nan_move, "EXPERIMENT_VARIANT_FAILED"),
         (_negative_move, "EXPERIMENT_VARIANT_FAILED"),
+        (_duplicate_label_event_id, "CONTRACT_MISMATCH"),
+        (_label_extra_key, "CONTRACT_MISMATCH"),
+        (_label_event_date_outside_sessions, "CONTRACT_MISMATCH"),
+        (_malformed_availability, "EXPERIMENT_VARIANT_FAILED"),
     ],
     ids=[
         "duplicate-target",
@@ -387,6 +436,10 @@ def _negative_move():
         "availability-not-after-event",
         "nan-move",
         "negative-move",
+        "duplicate-label-event-id",
+        "label-extra-key",
+        "label-event-date-outside-sessions",
+        "malformed-availability",
     ],
 )
 def test_season_heat_rejects_invalid_inputs_with_native_codes(

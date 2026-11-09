@@ -108,8 +108,7 @@ def _parse_targets(targets, positions):
     for row in _rows(targets, "targets"):
         event_id, ticker = _row_ids(row, _TARGET_KEYS, "target")
         event_date, decision_session = row["event_date"], row["decision_session"]
-        if not isinstance(event_date, str) or event_date not in positions:
-            raise _contract("target event_date is not a trading session")
+        _parse_date(event_date, availability=False)
         if not isinstance(decision_session, str) or decision_session not in positions:
             raise _contract("target decision_session is not a trading session")
         key = (event_id, decision_session)
@@ -181,7 +180,7 @@ def compute_season_heat(labels, targets, trading_sessions) -> dict[tuple[str, st
         label_by_id = {label.event_id: label for label in parsed_labels}
         decision("season heat", f"{len(parsed_labels)} labels, {len(parsed_targets)} targets, windows {list(_WINDOWS)}")
         progress = Progress("season heat targets", len(targets))
-        windows, pending, next_pending, label_position = _Windows(), {}, 0, 0
+        windows, label_position = _Windows(), 0
         results = {}
         for target in parsed_targets:
             decision_index, decision_date = target.decision_index, target.decision_date
@@ -191,14 +190,7 @@ def compute_season_heat(labels, targets, trading_sessions) -> dict[tuple[str, st
                 if label.available > decision_date:
                     break
                 label_position += 1
-                if label.event_index <= decision_index:
-                    windows.add(label, decision_index)
-                else:
-                    pending.setdefault(label.event_index, []).append(label)
-            while next_pending <= decision_index:
-                for label in pending.pop(next_pending, []):
-                    windows.add(label, decision_index)
-                next_pending += 1
+                windows.add(label, decision_index)
             results[(target.event_id, target.decision_session)] = _payload(target, windows, label_by_id)
             progress.tick()
         return results
