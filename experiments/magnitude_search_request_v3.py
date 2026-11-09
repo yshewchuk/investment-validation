@@ -54,6 +54,10 @@ _SELECTION_METRICS = {"rmse": 0.6, "mae": 0.3, "large_move_underprediction": 0.1
 _SELECTION_LEADS = {"1": 1.0, "3": 0.0, "5": 0.0}
 
 
+def _hmos_hash_recipe(subset):
+    return qualified_panel_recipe("HMOS")
+
+
 def _selection(request, horizons):
     if "selection" not in request:
         return
@@ -100,27 +104,28 @@ def _finite_nonnegative(value):
 
 def _space(request):
     version = request_version(request["schema_version"])
-    allowed_sets = (*v2._SETS, "MO-", "M")
+    allowed_sets = (*v2._SETS, "MO-", "M", *(["HMOS"] if version >= 10 else []))
     feature_sets = request["feature_sets"]
     valid_sets = (type(feature_sets) is list and bool(feature_sets)
         and all(type(subset) is str and subset in allowed_sets for subset in feature_sets)
         and feature_sets == [subset for subset in allowed_sets if subset in feature_sets])
-    v2._require(valid_sets if version == 9 else feature_sets == v2._SETS,
-                "stage-2 v9 requires a nonempty ordered subset of H/HM/HMO/MO-/M"
-                if version == 9 else "stage-2 requires exactly ordered H/HM/HMO feature sets")
+    v2._require(valid_sets if version >= 9 else feature_sets == v2._SETS,
+                (f"stage-2 v{version} requires a nonempty ordered subset of H/HM/HMO/MO-/M"
+                 + ("/HMOS" if version >= 10 else ""))
+                if version >= 9 else "stage-2 requires exactly ordered H/HM/HMO feature sets")
     space = request["space"]
     version = request["schema_version"]
     version_number = request_version(version)
     families = (_FAMILIES_V6 if allows_neural(version_number)
                 else _FAMILIES_V5 if allows_size_family(version_number)
                 else _FAMILIES_V4 if allows_hgb_axes(version_number) else _FAMILIES)
-    v2._require((type(space) is dict and set(space) == set(families)) if version_number == 9
+    v2._require((type(space) is dict and set(space) == set(families)) if version_number >= 9
                 else v2._shape(space, families),
                 "stage-2 requires the closed family grid")
     canonical = {}
     for family, axes in families.items():
         supplied = space[family]
-        if version_number == 9 and family == "hgb":
+        if version_number >= 9 and family == "hgb":
             declared = set(supplied) if type(supplied) is dict else None
             v2._require(declared is not None and axes <= declared
                         and declared <= axes | _HGB_V9_OPTIONAL,
@@ -193,7 +198,7 @@ def _counts(request, horizons):
         for family, axes in request["space"].items() if family != "size_v1_4")
     if allows_hgb_axes(request_version(request["schema_version"])):
         v2._require(count <= _MAX_V4_CANDIDATES,
-                    "stage-2 v6/v7/v8/v9 grid exceeds the 1000-candidate ceiling"
+                    "stage-2 v6 and later grid exceeds the 1000-candidate ceiling"
                     if allows_neural(request_version(request["schema_version"]))
                     else "stage-2 v4/v5 grid exceeds the 1000-candidate ceiling")
     inners, outers = sum(map(len, inner.values())), len(outer)
@@ -229,14 +234,15 @@ def compile_request(request, *, horizons=(5, 3, 1)):
                 or (allows_hgb_axes(request_version(version))
                     and request_keys in (v2._KEYS | {"selection"},
                                          v2._KEYS | {"selection", "workers"})),
-                "stage-2 request requires its closed v6/v7/v8 schema and selection policy"
+                "stage-2 request requires its closed v6 and later schema and selection policy"
                 if allows_neural(request_version(version))
                 else "stage-2 request requires its closed v3/v4/v5 schema and selection policy")
     v2.validate_workers(request)
     request.pop("workers", None)
     _selection(request, horizons)
-    v2._references(request, recipe=(qualified_panel_recipe
-        if request_version(version) == 9 else v2.panel_recipe))
+    v2._references(request, recipe=(_hmos_hash_recipe
+        if request_version(version) >= 10 else qualified_panel_recipe
+        if request_version(version) >= 9 else v2.panel_recipe))
     _space(request)
     counts = _counts(request, horizons)
     v2._comparison(request["comparison"], counts)
@@ -245,7 +251,7 @@ def compile_request(request, *, horizons=(5, 3, 1)):
     result = {"schema_version": "magnitude_search_schedule.v2", "request": request,
         "request_id": request_id, "horizons": list(horizons),
         "candidate_specs": [s for s in v2._specifications(request, request_id,
-            recipe=qualified_panel_recipe if request_version(version) == 9 else v2.panel_recipe)
+            recipe=qualified_panel_recipe if request_version(version) >= 9 else v2.panel_recipe)
             if s["family"] != "size_v1_4" or s["feature_recipe"]["subset"] == "HMO"],
         "schedule": [{"outer_year": year, "inner_years": request["inner_years"][year]}
                      for year in request["outer_years"]], "counts": counts}

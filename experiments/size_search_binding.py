@@ -52,6 +52,11 @@ def _require(condition):
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "qualified SIZE source/fold binding differs")
 
 
+def _panel_subset(schema_version):
+    version = request_version(schema_version)
+    return "HMOS" if version is not None and version >= 10 else "HMO"
+
+
 def _panel_columns(schema_version, model_columns):
     if allows_size_family(request_version(schema_version)):
         return list(dict.fromkeys(c for c in COLUMNS + list(model_columns) if c not in METADATA))
@@ -120,7 +125,11 @@ def prepare(repository, spec, request, panel_request, *, scope, training_start, 
     schedule = compile_request(request, horizons=tuple(h for h in (5, 3, 1) if h in panel_request["horizons"]))
     if request["limits"]["child"]["memory_bytes"] > request["limits"]["parent"]["memory_bytes"]:
         raise fail("INVALID_EXPERIMENT_SPEC", "child memory must not exceed inherited parent limit")
-    _require(request["feature_dictionary_hash"] == recipe("HMO")["dictionary_hash"])
+    _require(request["feature_dictionary_hash"] == recipe(_panel_subset(request["schema_version"]))["dictionary_hash"])
+    # HMOS season columns join the panel read when slice 5 flips the contract to v4; until then the projection stays HMO.
+    if "HMOS" in request.get("feature_sets", ()):
+        raise fail("INVALID_EXPERIMENT_SPEC",
+                   "HMOS candidates need the season panel columns; refused until the panel contract is v4")
     _require(panel_request["feature_snapshot_id"] == request["feature_snapshot_id"]
              and panel_request["history_snapshot"] == request["history_snapshot_id"]
              and set(panel_request["horizons"]) == set(schedule["horizons"]))
@@ -361,7 +370,8 @@ def fold_inputs(repository, binding, fold, *, plan=None):
         for group in folds))
     source = from_document(SnapshotRef, binding["snapshot"])
     started = time.monotonic()
-    panel_columns = _panel_columns(binding["size_request"].get("schema_version"), recipe("HMO")["model_columns"])
+    panel_columns = _panel_columns(binding["size_request"].get("schema_version"),
+        recipe("HMO")["model_columns"])
     panel = _stored_panel(repository, source, binding, panel_columns)
     participants = set(fold["training_candidate_event_ids"] + fold["evaluation_event_ids"])
     events = {e["event_id"]: e for e in panel["context"]["target_events"]}

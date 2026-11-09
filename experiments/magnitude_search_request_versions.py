@@ -16,6 +16,7 @@ __all__ = ["compile_request"]
 
 _V2_HASH = v2_recipe("HMO")["dictionary_hash"]
 _V3_HASH = v3_recipe("HMO")["dictionary_hash"]
+_V4_HASH = v3_recipe("HMOS")["dictionary_hash"]
 
 
 def _is_default_selector(selector):
@@ -41,14 +42,21 @@ def compile_request(request, *, horizons=(5, 3, 1)):
     compile_kwargs = ({"horizons": horizons}
                       if allows_lead_selector(request_version(version)) else {})
     dictionary = request.get("feature_dictionary_hash") if type(request) is dict else None
-    if request_version(version) == 9 and dictionary != _V3_HASH:
+    version_number = request_version(version)
+    modern = version_number is not None and version_number >= 10
+    if version_number == 9 and dictionary != _V3_HASH:
         raise fail("INVALID_EXPERIMENT_SPEC", "v9 requires the qualified feature dictionary hash")
-    if type(dictionary) is not str or dictionary not in (_V2_HASH, _V3_HASH):
+    if modern and dictionary != _V4_HASH:
+        raise fail("INVALID_EXPERIMENT_SPEC",
+                   "v10 requires the HMOS qualified feature dictionary hash")
+    accepted = (_V2_HASH, _V3_HASH, _V4_HASH) if modern else (_V2_HASH, _V3_HASH)
+    if type(dictionary) is not str or dictionary not in accepted:
         return compiler(request, **compile_kwargs)
 
-    selected = v3_recipe if dictionary == _V3_HASH else v2_recipe
+    selected = ((lambda subset: v3_recipe(subset)) if modern else
+                v3_recipe if dictionary == _V3_HASH else v2_recipe)
     surrogate = dict(request)
-    if request_version(version) != 9:
+    if version_number is None or version_number < 9:
         surrogate["feature_dictionary_hash"] = v1_recipe("HMO")["dictionary_hash"]
     result = compiler(surrogate, **compile_kwargs)
     result["request"]["feature_dictionary_hash"] = dictionary
