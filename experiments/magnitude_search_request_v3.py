@@ -24,9 +24,9 @@ _BOUNDS = {
     ("hgb", "l2_regularization"): (0, 1000),
     ("hgb", "max_iter"): (100, 5000),
 }
-_HGB_V9_OPTIONAL = {"loss", "max_iter"}
+_HGB_V9_OPTIONAL = {"loss", "max_iter", "quantile"}
 _HGB_V9_DEFAULTS = {"loss": ["squared_error"], "max_iter": [500]}
-_HGB_LOSSES = ("absolute_error", "gamma", "poisson", "squared_error")
+_HGB_LOSSES = ("absolute_error", "gamma", "poisson", "quantile", "squared_error")
 _FAMILIES = {
     "ridge": {"alpha"},
     "elasticnet": {"alpha", "l1_ratio"},
@@ -134,7 +134,15 @@ def _space(request):
                 supplied = {**supplied}
                 for optional, default in _HGB_V9_DEFAULTS.items():
                     supplied.setdefault(optional, list(default))
-                axes = axes | _HGB_V9_OPTIONAL
+                axes = axes | {optional for optional in _HGB_V9_OPTIONAL
+                               if optional in supplied}
+            loss_values = supplied.get("loss")
+            if "quantile" in supplied or (type(loss_values) is list
+                    and "quantile" in loss_values):
+                v2._require(type(loss_values) is list and loss_values == ["quantile"],
+                    "stage-2 HGB quantile loss must be the only declared HGB loss")
+                v2._require("quantile" in supplied,
+                    "stage-2 HGB quantile loss requires a quantile axis")
         else:
             v2._require(v2._shape(supplied, axes),
                         "stage-2 grid axes differ from the closed policy")
@@ -164,6 +172,14 @@ def _space(request):
                     for value in values) and values == sorted(set(values)),
                     "stage-2 HGB loss values must be known, unique and lexicographically ordered")
                 canonical[family][axis] = list(values)
+                continue
+            if family == "hgb" and axis == "quantile":
+                v2._require(all(type(value) in (int, float) and 0 < value < 1
+                    for value in values),
+                    "stage-2 HGB quantile values must be numbers strictly between 0 and 1")
+                v2._require(values == sorted(values) and len(set(values)) == len(values),
+                            "stage-2 grid axes must be strictly increasing")
+                canonical[family][axis] = [float(value) for value in values]
                 continue
             if family == "hgb" and axis in ("max_leaf_nodes", "min_samples_leaf", "max_iter"):
                 v2._require(all(type(value) is int for value in values),
