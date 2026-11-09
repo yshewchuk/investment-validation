@@ -3,6 +3,7 @@ import pytest
 
 from engine.v2.contracts.data import ColumnContract
 from engine.v2.data.errors import DataError
+from engine.v2.data.manifests import table_contract_hash
 from engine.v2.research import magnitude_panel_qualified_table as table
 
 _PINNED_DICTIONARY_HASHES = {
@@ -44,9 +45,11 @@ def test_existing_subset_hashes_are_frozen(subset):
     assert table.recipe(subset)["schema_version"] == "research_magnitude_panel.v3"
 
 
-def test_v3_contract_definition_hash_is_frozen():
-    assert table.CONTRACT.definition_hash == _PINNED_V3_DEFINITION_HASH
-    assert table.CONTRACT.contract_id.endswith(".v3")
+def test_v3_definition_hash_stays_frozen_and_v4_is_installed():
+    assert table_contract_hash(table._base) == _PINNED_V3_DEFINITION_HASH
+    assert table.CONTRACT is table.CONTRACT_V4
+    assert table.CONTRACT.contract_id.endswith(".v4")
+    assert table.CONTRACT.definition_hash == table_contract_hash(table._contract_v4)
 
 
 def test_hmos_dictionary_is_hmo_plus_season_appended_last():
@@ -97,11 +100,10 @@ def test_contract_v4_extends_v3_with_season_columns_in_order():
     season_columns = [ColumnContract(name=name, physical_type=physical_type, nullable=nullable,
         unit=unit, null_policy=on_missing)
         for name, physical_type, unit, nullable, on_missing in _SEASON]
-    assert table.CONTRACT_V4.columns == (*table.CONTRACT.columns, *season_columns)
+    assert table.CONTRACT_V4.columns == (*table._base.columns, *season_columns)
     assert table.CONTRACT_V4.contract_id == table.TABLE + ".v4"
     assert table.CONTRACT_V4.semantic_version == "4.0.0"
-    assert table.CONTRACT_V4.definition_hash != table.CONTRACT.definition_hash
-    assert table.CONTRACT.contract_id == table.TABLE + ".v3"
+    assert table.CONTRACT_V4.definition_hash != table_contract_hash(table._base)
 
 
 @pytest.mark.parametrize("columns", [

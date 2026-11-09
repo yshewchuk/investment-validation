@@ -55,6 +55,24 @@ def _validate(rows, context):
     return validated()
 
 
+def _season_row_valid(row):
+    """Season columns: int count, nullable finite non-negative floats, mean_20 present iff count
+    >= 20 (compute contract), ratio needs mean_20."""
+    count = row["season_heat_count_20"]
+    mean_20 = row["season_heat_mean_abs_20"]
+    if type(count) is not int or count < 0:
+        return False
+    for name in table.SEASON:
+        if name == "season_heat_count_20":
+            continue
+        value = row[name]
+        if value is not None and (type(value) not in (float, int) or value < 0
+                                  or not math.isfinite(value)):
+            return False
+    return (mean_20 is None) == (count < 20) and (row["season_heat_ratio_20_252"] is None
+                                                  or mean_20 is not None)
+
+
 def _validate_row(row, context, target, cutoff):
     pins = {"schema_version": table.CONTRACT.contract_id, "context_id": context["context_id"],
             "history_context_id": context["history_context"]["context_id"],
@@ -66,6 +84,8 @@ def _validate_row(row, context, target, cutoff):
             or row["has_implied_quote"] != int(row["current_quote_status"] == "present")
             or (row["implied_move"] is not None) != bool(row["has_implied_quote"])):
         raise fail("CONTRACT_MISMATCH", "qualified panel identity or quote status differs")
+    if not _season_row_valid(row):
+        raise fail("CONTRACT_MISMATCH", "qualified panel season heat columns differ")
     for name in table.FEATURES:
         value = row[name]
         if value is not None and (type(value) not in (float, int) or not math.isfinite(value)):

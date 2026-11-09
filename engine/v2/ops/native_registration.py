@@ -414,7 +414,28 @@ def _size_plan_v17(document):
             and _size_placeholder_v17(document["event_ids"]))
 
 
-_SIZE_PANEL_CONTEXTS = ("magnitude_panel_context.v3", "magnitude_panel_context.v4")
+_SIZE_PANEL_CONTEXTS = ("magnitude_panel_context.v3", "magnitude_panel_context.v4",
+                       "magnitude_panel_context.v5")
+
+
+def _size_panel_v5_receipt_presence(context):
+    """Compact-tier check: the receipt envelope exists. The body may hold externalized
+    placeholders, so the digest is only verifiable after hydration."""
+    if context.get("schema_version") != "magnitude_panel_context.v5":
+        return True
+    population = context.get("season_heat_population")
+    return isinstance(population, dict) and isinstance(population.get("receipt_id"), str)
+
+
+def _size_panel_v5_receipt(context):
+    """Hydrated-tier check: the receipt_id is the digest of the receipt body."""
+    if context.get("schema_version") != "magnitude_panel_context.v5":
+        return True
+    population = context.get("season_heat_population")
+    return (isinstance(population, dict)
+            and isinstance(population.get("receipt_id"), str)
+            and population["receipt_id"] == content_hash(
+                {k: v for k, v in population.items() if k != "receipt_id"}))
 
 
 def _size_panel_v17(document):
@@ -431,7 +452,8 @@ def _size_panel_v17(document):
             or not _size_placeholder_v17(context.get("target_events"))
             or not isinstance(request, dict)
             or not _size_placeholder_v17(request.get("event_ids"))
-            or not isinstance(feature.get("snapshot_id"), str)):
+            or not isinstance(feature.get("snapshot_id"), str)
+            or not _size_panel_v5_receipt_presence(context)):
         return False
     return (qualified(request_version(document["size_request"]["schema_version"]))
             and document["size_comparison"]["schema_version"] == "size_causal_comparator.v1"
@@ -481,6 +503,19 @@ def _size_shard_v17(shard):
             and isinstance(shard["last_key"], list))
 
 
+def _size_context_binding(document, panel):
+    """Cross-link the v1.6 panel context and search request to the registration identity."""
+    context, request = panel["context"], document["size_request"]
+    return (context["schema_version"] in _SIZE_PANEL_CONTEXTS
+        and _size_panel_v5_receipt(context)
+        and context["context_id"] == content_hash({k: v for k, v in context.items() if k != "context_id"})
+        and context["source_snapshot"] == document["snapshot"]
+        and qualified(request_version(request["schema_version"]))
+        and request["feature_snapshot_id"] == panel["feature_snapshot"]["snapshot_id"]
+        and request["history_snapshot_id"] == context["history_snapshot"]["snapshot_id"]
+        and {e["event_id"] for e in context["target_events"]} == set(document["event_ids"]))
+
+
 def _size_binding(document):
     """Integrity-only additive panel envelope; research owns current source admission."""
     additions = ("size_request", "size_panel_request", "size_panel", "size_comparison")
@@ -488,17 +523,10 @@ def _size_binding(document):
         return False
     baseline = {key: value for key, value in document.items() if key not in additions}
     baseline["schema_version"] = "native_experiment_registration.v1.3"
-    panel, request = document["size_panel"], document["size_request"]
-    context = panel["context"]
-    return (_size_panel_request(document) and document["size_comparison"]["schema_version"] == "size_causal_comparator.v1"
+    return (_size_panel_request(document)
+        and document["size_comparison"]["schema_version"] == "size_causal_comparator.v1"
         and _magnitude_binding(baseline)
-        and context["schema_version"] in _SIZE_PANEL_CONTEXTS
-        and context["context_id"] == content_hash({k: v for k, v in context.items() if k != "context_id"})
-        and context["source_snapshot"] == document["snapshot"]
-        and qualified(request_version(request["schema_version"]))
-        and request["feature_snapshot_id"] == panel["feature_snapshot"]["snapshot_id"]
-        and request["history_snapshot_id"] == context["history_snapshot"]["snapshot_id"]
-        and {e["event_id"] for e in context["target_events"]} == set(document["event_ids"]))
+        and _size_context_binding(document, document["size_panel"]))
 
 
 def _size_panel_request(document):

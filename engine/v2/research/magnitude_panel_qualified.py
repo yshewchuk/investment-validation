@@ -6,12 +6,13 @@ import numpy as np
 from engine.v2.data.errors import fail
 from engine.v2.foundation import canonical_json, content_hash, to_document
 from engine.v2.research import _magnitude_panel_sources as sources
-from engine.v2.research import magnitude_confirmed_metadata
+from engine.v2.research import magnitude_confirmed_metadata, season_heat, season_population
 from engine.v2.research import magnitude_panel_daily as daily
 from engine.v2.research import magnitude_panel_qualified_table as table
 from engine.v2.research.eligibility_policy import eligibility_policy
 from engine.v2.research.eligible_history_table import FEATURES as HISTORY
 from engine.v2.research.experiment_population import load_population
+from engine.v2.research.magnitude_features import calendar_input
 from engine.v2.research.magnitude_panel_table import canonical_day
 from engine.v2.research.progress import Progress, stage
 from engine.v2.research.snapshot_inputs import admit_snapshot
@@ -47,6 +48,21 @@ def _price_inputs(repository, snapshot, tickers, limits):
     return digests, dates
 
 
+def _season_plan(repository, source, history, *, as_of_month, limits):
+    """Roster plan at context derivation: pinned calendar identity plus the receipt and build inputs."""
+    calendar, observed_source = calendar_input(repository, source,
+                                               max_object_bytes=limits["max_object_bytes"])
+    calendar_source = history.get("calendar_source", observed_source)
+    if (type(calendar_source) is dict and type(observed_source) is dict
+            and calendar_source != observed_source):
+        raise fail("IDENTITY_CONFLICT", "panel calendar differs from the admitted history")
+    plan = season_population.plan_roster(repository, source, as_of_month=as_of_month,
+        decision_sessions=sorted({c["source_session_ceiling"] for t in history["targets"]
+                                  for c in t["forecasts"]}),
+        calendar=calendar, calendar_source=calendar_source, limits=limits)
+    return plan["receipt"], plan["retained"], calendar.days
+
+
 def _prepare(repository, source, *, history_snapshot, price_history_snapshot, as_of_month,
              policy, event_ids, horizons, history_start, source_start, limits, metadata_limits, producer, history_admitted):
     _policy(policy)
@@ -67,16 +83,19 @@ def _prepare(repository, source, *, history_snapshot, price_history_snapshot, as
     index = magnitude_confirmed_metadata.build_index(repository, source, tickers=tickers, limits=metadata_limits)
     price_digests, price_day_arrays = _price_inputs(repository, price_history_snapshot, tickers, limits)
     quotes, precoverage = sources.quote_plan(repository, source, index, history, request, price_day_arrays)
+    receipt, roster, sessions = _season_plan(repository, source, history,
+                                             as_of_month=as_of_month, limits=limits)
     groups = {g["event_id"]: g for g in history["eligibility"]["groups"]}
     targets = [{**t, **{k: groups[t["event_id"]][k] for k in ("label_start", "label_end")}}
                for t in targets]
-    identity = {"schema_version": "magnitude_panel_context.v4", "source_snapshot": to_document(source),
+    identity = {"schema_version": "magnitude_panel_context.v5", "source_snapshot": to_document(source),
         "history_snapshot": to_document(history_snapshot), "history_context": history,
+        "season_heat_population": receipt,
         "price_history_snapshot": to_document(price_history_snapshot), "target_events": targets,
         "eligibility_plan": history["eligibility"],
         "quote_eligibility_plan": quotes, "confirmed_metadata": index, "producer": producer,
         "price_row_digests": price_digests,
-        "feature_recipe": table.recipe("HMO"), "request": {**request, "source_start": source_start,
+        "feature_recipe": table.recipe("HMOS"), "request": {**request, "source_start": source_start,
             "metadata_limits": metadata_limits},
         "quote_label_windows": "independent_pinned_price_dates_not_computed_outcome_capture",
         "daily_source_start": daily_start,
@@ -88,7 +107,9 @@ def _prepare(repository, source, *, history_snapshot, price_history_snapshot, as
     context = {**identity, "context_id": content_hash(identity)}
     if len(canonical_json(context).encode()) > limits["max_total_bytes"]:
         raise fail("RESULT_LIMIT_EXCEEDED", "panel context exceeds explicit byte limit")
-    return context, admitted, daily_records, price_records
+    # The retained roster and the pinned sessions are value-build inputs; neither is stored
+    # in the context, so no per-event roster bounds the identity and no calendar is re-read.
+    return context, admitted, daily_records, price_records, roster, sessions
 
 
 def _block(values, anchors, **extra):
@@ -124,8 +145,29 @@ def _ticker_inputs(repository, source, price_snapshot, context, ticker, sequence
     return sequence, runup, surface, [row["date"] for row in surface]
 
 
+def _season_record(record):
+    """The five stored season columns; the count is always int, the rest follow the compute result."""
+    return {**{name: record[name] for name in table.SEASON},
+            "season_heat_count_20": int(record["season_heat_count_20"])}
+
+
+def _season_heat(repository, source, context, roster, sessions, targets):
+    """One population label read and one forward heat sweep over deduplicated target clocks."""
+    receipt = context["season_heat_population"]
+    request = context["request"]
+    labels = season_population.read_labels(repository, source, roster,
+        as_of_month=request["as_of_month"], limits=request["limits"],
+        latest_decision=receipt["window"]["latest_decision"])
+    heat_targets = {(target["event_id"], cutoff["source_session_ceiling"]):
+        {"event_id": target["event_id"], "ticker": target["ticker"], "event_date": target["event_date"],
+         "decision_session": cutoff["source_session_ceiling"]}
+        for target in targets for cutoff in target["forecasts"]}
+    results = season_heat.compute_season_heat(labels, list(heat_targets.values()), sessions)
+    return results, receipt["receipt_id"]
+
+
 def _rows(repository, source, price_snapshot, prepared):
-    context, admitted, daily_records, price_records = prepared
+    context, admitted, daily_records, price_records, roster, sessions = prepared
     daily_anchors = sources.anchor_lookup(daily_records,
         daily_contract=repository.table_contract(source, "daily_market"))
     price_anchors = sources.anchor_lookup(price_records)
@@ -134,6 +176,7 @@ def _rows(repository, source, price_snapshot, prepared):
     population = load_population(repository, source, as_of_month=request["as_of_month"])
     moves = sources.signed_moves(repository, source, admitted, population)
     targets = context["target_events"]
+    heat, season_receipt_id = _season_heat(repository, source, context, roster, sessions, targets)
     targets_by_id = {target["event_id"]: target for target in targets}
     cutoffs = {(target["event_id"], cutoff["horizon_sessions"]): cutoff
         for target in targets for cutoff in target["forecasts"]}
@@ -179,7 +222,8 @@ def _rows(repository, source, price_snapshot, prepared):
             "spy": _block(spy[key]["values"], [gspc_anchors("^GSPC", d, gspc_versions[d])
                                               for d in spy[key]["source_dates"]]),
             "daily_market": _daily_lineage(market, daily_anchors, ticker),
-            "implied_history": implied_lineage}
+            "implied_history": implied_lineage,
+            "season_heat": {"receipt_id": season_receipt_id}}
         row = {"schema_version": table.CONTRACT.contract_id, "event_id": key[0],
             "context_id": context["context_id"], "history_context_id": admitted["context"]["context_id"],
             "horizon_sessions": key[1], "event_date": target["event_date"],
@@ -187,7 +231,8 @@ def _rows(repository, source, price_snapshot, prepared):
             "lineage": canonical_json(blocks), "current_quote_status": market["quote_status"],
             "has_implied_quote": int(market["quote_status"] == "present"), **history_values,
             **prior, **runvalues, **spy[key]["values"], **market["values"],
-            "mean_prior_or_implied": implied}
+            "mean_prior_or_implied": implied,
+            **_season_record(heat[key[0], cutoff["source_session_ceiling"]])}
         yield {**row, "row_id": content_hash(row)}
         if key[1] == target["forecasts"][-1]["horizon_sessions"]:
             meter.tick()
@@ -216,7 +261,7 @@ def _materialize(repository, source, **request):
 def _read(repository, source, feature_snapshot, *, columns, lineage=True, **request):
     from engine.v2.research import _magnitude_panel_store as store
 
-    table.admit_columns(columns)
+    table.admit_columns(columns, season=True)
     with stage("qualified stored panel admission", report_refusals=True):
         context = _prepare(repository, source, **request)[0]
         rows = store.read(repository, feature_snapshot, context, columns, lineage)

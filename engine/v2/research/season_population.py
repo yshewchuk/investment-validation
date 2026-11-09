@@ -239,7 +239,8 @@ def read_labels(repository, snapshot, retained, *, as_of_month, limits, latest_d
     window end (receipt["window"]["latest_decision"]), a canonical ISO date, which mirrors the
     roster plan that never
     retains labels available after it, so any such roster item refuses the read.
-    No production caller exists until the panel wiring slice (slice 5 of the season heat plan).
+    Called once per build by the qualified panel's value build
+    (magnitude_panel_qualified._season_heat); replay never reads labels.
     """
     _validate_call(retained, as_of_month, purpose, latest_decision)
     _holdout_context(snapshot, as_of_month, purpose, [item["event_id"] for item in retained])

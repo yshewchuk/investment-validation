@@ -88,9 +88,15 @@ def _expected_limits(ws, snapshot_id, tables, event_count, margin):
         "JOIN data_objects o ON o.object_id = f.object_id "
         "WHERE t.snapshot_id = ? AND t.table_name IN (" + placeholders + ")",
         (snapshot_id, *tables)).fetchone()
+    bounds = ws.conn.execute(
+        "SELECT COALESCE(SUM(f.row_count),0) AS rows FROM data_snapshot_tables t "
+        "JOIN data_version_fragments v ON v.dataset_version_id = t.dataset_version_id "
+        "JOIN data_fragments f ON f.fragment_id = v.fragment_id "
+        "WHERE t.snapshot_id = ? AND t.table_name = 'computed_move_bounds'",
+        (snapshot_id,)).fetchone()["rows"]
     limits = {"max_source_rows": row["rows"] * margin, "max_fragments": row["frags"] * margin,
               "max_object_bytes": row["biggest"] * margin * hist.EXPANSION_FACTOR, "max_total_bytes": row["total"] * margin,
-              "max_output_rows": event_count * 3 * margin}
+              "max_output_rows": max(event_count * 3 * margin, bounds * margin)}
     assert sum(limits.values()) > 0
     return limits
 
@@ -172,6 +178,27 @@ def test_limits_scale_with_margin_and_event_count(bounds_ws, source_root, monkey
         name: version for name, version in snapshot.table_versions.items() if name != "price_history"})
     _refusal(lambda: hist._derive_history_limits(repository, stripped, 1),
              "PUBLICATION_REFUSED", "limits_unavailable")
+
+
+def _synthetic_derivation(bounds_rows, event_count, margin):
+    """Derive limits from a fake snapshot whose bounds table holds bounds_rows rows."""
+    tables = {table: [SimpleNamespace(row_count=1, object_ref=SimpleNamespace(byte_size=1024))]
+              for table in hist.HISTORY_TABLES}
+    tables["computed_move_bounds"] = [SimpleNamespace(row_count=bounds_rows,
+                                                      object_ref=SimpleNamespace(byte_size=1024))]
+    snapshot = SimpleNamespace(table_versions={table: 1 for table in hist.HISTORY_TABLES})
+    repository = SimpleNamespace(fragment_records=lambda snap, table: tables[table])
+    return hist._derive_history_limits(repository, snapshot, event_count, margin=margin)
+
+
+def test_max_output_rows_covers_a_market_wide_bounds_roster():
+    # a one-target request whose season roster is bounded by the population bounds rows,
+    # not by event_count * 3 * margin (= 6 here), still yields a usable ceiling
+    wide = _synthetic_derivation(4000, 1, 2)
+    assert wide["max_output_rows"] == 4000 * 2
+    # a small bounds count keeps the event-scaled value
+    narrow = _synthetic_derivation(3, 10, 2)
+    assert narrow["max_output_rows"] == 10 * 3 * 2
 
 
 def test_record_refusals_happen_before_producers_or_writes(bounds_ws, source_root, monkeypatch):
