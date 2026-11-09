@@ -423,7 +423,9 @@ def _size_panel_v5_receipt(context):
         return True
     population = context.get("season_heat_population")
     return (isinstance(population, dict)
-            and isinstance(population.get("receipt_id"), str))
+            and isinstance(population.get("receipt_id"), str)
+            and population["receipt_id"] == content_hash(
+                {k: v for k, v in population.items() if k != "receipt_id"}))
 
 
 def _size_panel_v17(document):

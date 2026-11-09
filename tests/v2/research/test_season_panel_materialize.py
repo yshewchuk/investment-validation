@@ -167,6 +167,9 @@ def test_stored_season_heat_distinguishes_the_20_and_60_windows(panel_data, monk
     assert row["season_heat_mean_abs_20"] == pytest.approx(expected_mean_20)
     assert row["season_heat_mean_abs_60"] == pytest.approx(expected_mean_60)
     assert row["season_heat_mean_abs_20"] != row["season_heat_mean_abs_60"]
+    # The 252-window at d=515 is [264, 515], which holds every label here (460..514 plus the
+    # boundary), so mean_252 == mean_60 and the stored ratio is mean_20 / mean_60 exactly.
+    assert row["season_heat_ratio_20_252"] == pytest.approx(expected_mean_20 / expected_mean_60)
     # 5-window is [511, 515]: 4 sessions x 2 + the boundary = 9 labels < the 20-label
     # threshold, so mean_abs_5 is null.
     assert row["season_heat_mean_abs_5"] is None
@@ -208,6 +211,30 @@ def test_roster_digest_change_moves_the_context_identity(panel_data, monkeypatch
         "season_heat_population": receipt}  # the roster digest is the only context change
     assert content_hash(identity) == second["context"]["context_id"]
     assert second["context"]["context_id"] != first["context"]["context_id"]
+
+
+def test_season_plan_refuses_a_calendar_diverging_from_the_admitted_history(panel_data, monkeypatch):
+    """The panel reread must observe the calendar identity the admitted history pinned."""
+    data = panel_data
+    history = size_panel._history(data.repository, data.panel_source, data.panel_request)["context"]
+    limits = data.panel_request["limits"]
+    calendar, observed = builder.calendar_input(data.repository, data.panel_source,
+        max_object_bytes=limits["max_object_bytes"])
+    assert type(history["calendar_source"]) is type(observed) is dict
+    assert history["calendar_source"] == observed  # same snapshot: the identity check passes
+    receipt = builder._season_plan(data.repository, data.panel_source, history,
+        as_of_month=data.panel_request["as_of_month"], limits=limits)[0]
+    assert receipt["calendar_source"] == observed
+
+    def diverging(repository, snapshot, **kwargs):
+        return calendar, {**observed, "dataset_version": observed["dataset_version"] + "-drift"}
+
+    monkeypatch.setattr(builder, "calendar_input", diverging)
+    with pytest.raises(DataError) as refused:
+        builder._season_plan(data.repository, data.panel_source, history,
+            as_of_month=data.panel_request["as_of_month"], limits=limits)
+    assert refused.value.code == "IDENTITY_CONFLICT"
+    assert "calendar" in str(refused.value)
 
 
 @pytest.mark.parametrize("column,value", [

@@ -113,6 +113,13 @@ def _panel_document_v17(context):
         "size_panel_request": {}}
 
 
+def _season_receipt(**fields):
+    """Receipt shaped as season_population._receipt builds it: the id is the digest of the body."""
+    receipt = {"schema_version": "season_heat_population.v1", **fields}
+    receipt["receipt_id"] = content_hash({k: v for k, v in receipt.items() if k != "receipt_id"})
+    return receipt
+
+
 def test_size_panel_v17_v5_requires_season_heat_population_receipt_id():
     context = {"schema_version": "magnitude_panel_context.v5", "context_id": "ctx",
         "source_snapshot": "snap", "target_events": {"$size_artifact": "events"},
@@ -120,7 +127,11 @@ def test_size_panel_v17_v5_requires_season_heat_population_receipt_id():
     assert not native_registration._size_panel_v17(_panel_document_v17(context))
     context["season_heat_population"] = {"window": {"latest_decision": "2024-01-01"}}
     assert not native_registration._size_panel_v17(_panel_document_v17(context))
-    context["season_heat_population"]["receipt_id"] = "sha256:test"
+    context["season_heat_population"] = {**context["season_heat_population"],
+        "receipt_id": "sha256:test"}  # an id that is not the digest of its own body
+    assert not native_registration._size_panel_v17(_panel_document_v17(context))
+    context["season_heat_population"] = _season_receipt(
+        window={"latest_decision": "2024-01-01"})
     assert native_registration._size_panel_v17(_panel_document_v17(context))
     v4 = {**context, "schema_version": "magnitude_panel_context.v4"}
     assert native_registration._size_panel_v17(_panel_document_v17(v4))
@@ -181,8 +192,11 @@ def _v16_size_document():
     context = {"schema_version": "magnitude_panel_context.v5", "source_snapshot": snapshot,
         "history_snapshot": {"snapshot_id": "hist-v16"},
         "price_history_snapshot": {"snapshot_id": "price-v16"},
-        "season_heat_population": {"schema_version": "season_heat_population.v1",
-            "receipt_id": content_hash("roster")},
+        "season_heat_population": _season_receipt(
+            window={"start": "2024-01-02", "end": "2024-06-20",
+                "earliest_decision": "2024-06-10", "latest_decision": "2024-06-20"},
+            counts={"population": 2, "in_window": 2, "retained": 2, "excluded": 0,
+                "not_yet_available": 0}),
         "target_events": [{"event_id": event["event_id"]} for event in events], "request": request}
     context["context_id"] = content_hash({k: v for k, v in context.items() if k != "context_id"})
     feature = {"snapshot_id": "feat-v16"}
@@ -216,3 +230,17 @@ def test_size_binding_v5_context_requires_season_heat_population_receipt():
     context.pop("season_heat_population")
     context["context_id"] = content_hash({k: v for k, v in context.items() if k != "context_id"})
     assert not native_registration._size_binding(tampered)
+
+
+def test_size_binding_v5_context_refuses_an_arbitrary_season_receipt_id():
+    """A made-up receipt_id passes only if the context_id is rehashed over it; the digest must match."""
+    document = _v16_size_document()
+    tampered = deepcopy(document)
+    context = tampered["size_panel"]["context"]
+    receipt = context["season_heat_population"]
+    context["season_heat_population"] = {**receipt, "receipt_id": "sha256:" + "a" * 64}
+    context["context_id"] = content_hash({k: v for k, v in context.items() if k != "context_id"})
+    assert not native_registration._size_binding(tampered)
+    context["season_heat_population"] = receipt  # the derived id of the same body
+    context["context_id"] = content_hash({k: v for k, v in context.items() if k != "context_id"})
+    assert native_registration._size_binding(tampered)
