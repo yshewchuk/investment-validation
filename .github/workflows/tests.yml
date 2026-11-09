@@ -20,7 +20,8 @@ concurrency:
 # named `test`; it fails unless plan and every shard job succeeded.
 jobs:
   plan:
-    runs-on: ubuntu-latest
+    # Pinned: setup-python lacks Python 3.14.4 for ubuntu-26.04 (ubuntu-latest); unpin once available.
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
@@ -81,7 +82,7 @@ jobs:
   shard:
     name: tests (${{ matrix.shard }})
     needs: plan
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 40  # temporary (#791): ops/research shards run 20-25+ min; restore 25 when #791 lands
     strategy:
       fail-fast: false
@@ -154,7 +155,7 @@ jobs:
   test:
     needs: [plan, shard]
     if: ${{ always() }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
 
     steps:
