@@ -64,7 +64,8 @@ class Repository:
         return iter(())
 
 
-def plan(monkeypatch, events, anchors, moves, sessions=None, calendar=CALENDAR, purpose="selection"):
+def plan(monkeypatch, events, anchors, moves, sessions=None, calendar=CALENDAR, purpose="selection",
+        limits=LIMITS):
     repository = Repository(moves)
     reads = []
 
@@ -77,7 +78,7 @@ def plan(monkeypatch, events, anchors, moves, sessions=None, calendar=CALENDAR, 
         lambda repository, snapshot, limits, **kwargs: anchors)
     result = season_population.plan_roster(repository, SNAPSHOT, as_of_month="2024-01",
         decision_sessions=SESSIONS if sessions is None else sessions, calendar=calendar,
-        calendar_source=SOURCE, limits=LIMITS, purpose=purpose)
+        calendar_source=SOURCE, limits=limits, purpose=purpose)
     return repository, result, reads
 
 
@@ -163,6 +164,35 @@ def test_contract_validation_refusals(monkeypatch, calendar, sessions):
         plan(monkeypatch, [event("ev", "AAA", DAYS[270])], {}, [], calendar=calendar,
             sessions=sessions)
     assert caught.value.code == "CONTRACT_MISMATCH"
+
+
+@pytest.mark.parametrize("limits", [
+    pytest.param(None, id="none"),
+    pytest.param({}, id="empty-dict"),
+    pytest.param({"max_object_bytes": None}, id="null-bytes"),
+    pytest.param({"max_object_bytes": 0}, id="zero-bytes"),
+    pytest.param({"max_object_bytes": True}, id="bool-bytes"),
+    pytest.param({"max_object_bytes": "9"}, id="string-bytes"),
+])
+def test_limits_refusals_before_any_reads(monkeypatch, limits):
+    calls = []
+    monkeypatch.setattr(season_population, "load_population",
+        lambda *args, **kwargs: calls.append((args, kwargs)))
+    monkeypatch.setattr(season_population.outcome_binding, "anchors",
+        lambda *args, **kwargs: pytest.fail("anchors opened before limits check"))
+    with pytest.raises(DataError) as caught:
+        season_population.plan_roster(Repository([]), SNAPSHOT, as_of_month="2024-01",
+            decision_sessions=SESSIONS, calendar=CALENDAR, calendar_source=SOURCE,
+            limits=limits, purpose="selection")
+    assert caught.value.code == "CONTRACT_MISMATCH"
+    assert calls == []
+
+
+def test_purpose_forwards_to_load_and_receipt(monkeypatch):
+    events, anchors, moves = _mixed()
+    _, result, reads = plan(monkeypatch, events, anchors, moves, purpose="final")
+    assert reads[0]["purpose"] == "final"
+    assert result["receipt"]["purpose"] == "final"
 
 
 def _receipt_digests(monkeypatch, events, anchors, moves):

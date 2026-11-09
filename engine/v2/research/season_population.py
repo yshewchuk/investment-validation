@@ -20,6 +20,13 @@ SCHEMA = "season_heat_population.v1"
 _REASONS = ("missing_native_bounds", "null_source_bounds", "off_session_event_date")
 
 
+def _limits(limits):
+    if type(limits) is not dict or type(limits.get("max_object_bytes")) is not int \
+            or limits["max_object_bytes"] <= 0:
+        raise fail("CONTRACT_MISMATCH", "explicit positive max_object_bytes required")
+    return limits
+
+
 def _validate(calendar, decision_sessions):
     if not isinstance(calendar, CalendarSessions):
         raise fail("CONTRACT_MISMATCH", "market calendar sessions required")
@@ -85,6 +92,7 @@ def plan_roster(repository, snapshot, *, as_of_month, decision_sessions, calenda
                 limits, purpose="selection"):
     """Metadata-only roster over the population window; opens no outcome.
     Returns {"receipt": {...}, "retained": [...]}."""
+    _limits(limits)
     sessions = _validate(calendar, decision_sessions)
     first, last = min(sessions), max(sessions)
     start = _window_start(calendar, first)
