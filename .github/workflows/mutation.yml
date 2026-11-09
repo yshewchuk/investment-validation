@@ -219,7 +219,8 @@ jobs:
       (github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.event == 'pull_request' &&
       github.event.workflow_run.head_repository.full_name == github.repository)
-    runs-on: ubuntu-latest
+    # Pinned: setup-python lacks Python 3.14.4 for ubuntu-26.04 (ubuntu-latest); unpin once available.
+    runs-on: ubuntu-24.04
     # contents:read for checkout/diff (as before); pull-requests:read is new,
     # for the "PR still open?" gh api call below -- once a job declares
     # `permissions:`, every scope it doesn't list is `none`, so this must be
@@ -441,7 +442,7 @@ jobs:
     # then read '' != '[]' as true and start the matrix with no plan behind
     # it.
     if: needs.plan.result == 'success' && needs.plan.outputs.modules != '[]'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 350
     # contents:read (as before) plus pull-requests:read for this job's own
     # "PR still open?" check -- see the plan job's identical grant for why an
@@ -687,7 +688,7 @@ jobs:
   report:
     needs: [plan, mutate]
     if: always() && needs.plan.result == 'success' && needs.plan.outputs.modules != '[]'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       # The plan's module list, passed to merge as a variable (never interpolated
       # into the script text), so a module set that is not exactly the one the
@@ -810,7 +811,7 @@ jobs:
     # silently recreating the exact invisible-PR problem it exists to fix.
     needs: [plan, report]
     if: always() && needs.plan.outputs.pr_number != ''
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       checks: write
     steps:
