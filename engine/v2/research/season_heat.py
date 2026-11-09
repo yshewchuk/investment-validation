@@ -20,12 +20,15 @@ _Label = namedtuple("_Label", "event_id ticker event_index available move")
 _Target = namedtuple("_Target", "event_id ticker decision_index decision_date decision_session")
 
 def _contract(message):
+    """Raise a CONTRACT_MISMATCH failure with the given message."""
     return fail("CONTRACT_MISMATCH", message)
 
 def _variant(message):
+    """Raise an EXPERIMENT_VARIANT_FAILED failure with the given message."""
     return fail("EXPERIMENT_VARIANT_FAILED", message)
 
 def _finite(value, message):
+    """Return value if finite, otherwise raise a variant failure."""
     try:
         if not math.isfinite(value):
             raise _variant(message)
@@ -34,6 +37,7 @@ def _finite(value, message):
     return value
 
 def _divide(total, count, message):
+    """Divide total by count, mapping errors and nonfinite results to a variant failure."""
     try:
         value = total / count
     except (OverflowError, ZeroDivisionError, TypeError, ValueError):
@@ -41,6 +45,7 @@ def _divide(total, count, message):
     return _finite(value, message)
 
 def _parse_date(value, *, availability):
+    """Parse a canonical ISO date, failing as variant or contract depending on availability."""
     error = _variant if availability else _contract
     message = "value is not a canonical ISO date"
     try:
@@ -52,11 +57,13 @@ def _parse_date(value, *, availability):
     return parsed
 
 def _rows(value, name):
+    """Validate that value is a non-string sequence of mappings."""
     if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
         raise _contract(f"{name} must be a sequence of mappings")
     return value
 
 def _require_keys(row, expected, name):
+    """Require row to be a mapping with exactly the expected keys."""
     if not isinstance(row, Mapping):
         raise _contract(f"{name} row is not a mapping")
     if set(row.keys()) != expected:
@@ -64,20 +71,27 @@ def _require_keys(row, expected, name):
     return row
 
 def _row_ids(row, expected, name):
+    """Require canonical nonblank event_id and ticker strings and return them."""
     _require_keys(row, expected, name)
     event_id, ticker = row["event_id"], row["ticker"]
-    if (not isinstance(event_id, str) or not event_id.strip()
+    if (not isinstance(event_id, str) or not event_id.strip() or event_id != event_id.strip()
             or not isinstance(ticker, str) or not ticker.strip() or ticker != ticker.strip()):
-        raise _contract(f"{name} event_id must be nonblank and ticker a string")
+        raise _contract(f"{name} event IDs and tickers must be nonblank canonical strings")
     return event_id, ticker
 
 def _parse_move(value):
+    """Convert a real, nonnegative abs_move to float and require it to be finite."""
     message = "abs_move must be a finite nonnegative number"
     if isinstance(value, bool) or not isinstance(value, numbers.Real) or value < 0:
         raise _variant(message)
-    return value if isinstance(value, numbers.Integral) else _finite(value, message)
+    try:
+        move = float(value)
+    except (OverflowError, TypeError, ValueError):
+        raise _variant(message) from None
+    return _finite(move, message)
 
 def _session_positions(trading_sessions):
+    """Map each trading session to its index and parsed date, requiring strict ascending order."""
     if isinstance(trading_sessions, (str, bytes)) or not isinstance(trading_sessions, Sequence) or not trading_sessions:
         raise _contract(_SESSIONS)
     positions, previous = {}, None
@@ -89,6 +103,7 @@ def _session_positions(trading_sessions):
     return positions
 
 def _parse_labels(labels, positions):
+    """Parse and sort label rows, enforcing unique event IDs and causal availability."""
     parsed, seen = [], set()
     for row in _rows(labels, "labels"):
         event_id, ticker = _row_ids(row, _LABEL_KEYS, "label")
@@ -104,6 +119,7 @@ def _parse_labels(labels, positions):
     return sorted(parsed, key=lambda label: (label.available, label.event_index, label.event_id))
 
 def _parse_targets(targets, positions):
+    """Parse and sort target rows, enforcing unique event/decision keys."""
     parsed, seen = [], set()
     for row in _rows(targets, "targets"):
         event_id, ticker = _row_ids(row, _TARGET_KEYS, "target")
@@ -120,23 +136,29 @@ def _parse_targets(targets, positions):
     return sorted(parsed, key=lambda target: (target.decision_index, target.event_id))
 
 class _Windows:
+    """Maintain per-window rolling sums and counts of label moves."""
     def __init__(self):
+        """Initialize empty per-window counts, sums, and ticker buckets."""
         self.counts, self.sums = ({w: 0 for w in _WINDOWS}, {w: 0 for w in _WINDOWS})
         self.by_ticker, self.buckets = ({w: {} for w in _WINDOWS}, {w: {} for w in _WINDOWS})
         self.lows = {w: 0 for w in _WINDOWS}
     def start(self, decision_index):
+        """Drop sessions that fell out of each window at the given decision index."""
         for window in _WINDOWS:
             lower = max(0, decision_index - window + 1)
             # Running window state: drop sessions that fell below `lower`.
             for index in range(self.lows[window], lower):
                 for ticker, move in self.buckets[window].pop(index, ()):
                     self.counts[window], self.sums[window] = self.counts[window] - 1, self.sums[window] - move
+                    if not self.counts[window]:
+                        self.sums[window] = 0.0
                     cell = self.by_ticker[window][ticker]
                     cell[0], cell[1] = cell[0] - 1, cell[1] - move
                     if not cell[0]:
                         del self.by_ticker[window][ticker]
             self.lows[window] = max(self.lows[window], lower)
     def add(self, label, decision_index):
+        """Add a label to every window that still covers the decision index."""
         for window in _WINDOWS:
             if label.event_index < decision_index - window + 1:
                 continue
@@ -147,6 +169,7 @@ class _Windows:
             cell[0], cell[1] = cell[0] + 1, cell[1] + label.move
             self.buckets[window].setdefault(label.event_index, []).append((label.ticker, label.move))
     def totals(self, target, label_by_id):
+        """Compute per-window (count, sum) totals excluding the target's own ticker and label."""
         values = {}
         for window in _WINDOWS:
             cell = self.by_ticker[window].get(target.ticker)
@@ -160,6 +183,7 @@ class _Windows:
         return values
 
 def _payload(target, windows, label_by_id):
+    """Build the five season-heat output columns for one target."""
     totals = windows.totals(target, label_by_id)
     (count_5, sum_5), (count_20, sum_20), (count_60, sum_60), (count_252, sum_252) = (totals[w] for w in _WINDOWS)
     for total in (sum_5, sum_20, sum_60, sum_252):
@@ -173,6 +197,7 @@ def _payload(target, windows, label_by_id):
     return {"season_heat_mean_abs_5": mean_5, "season_heat_mean_abs_20": mean_20, "season_heat_mean_abs_60": mean_60, "season_heat_count_20": int(count_20), "season_heat_ratio_20_252": ratio}
 
 def compute_season_heat(labels, targets, trading_sessions) -> dict[tuple[str, str], dict]:
+    """Compute causal per-window season-heat features for each target."""
     with stage("season heat calculation"):
         positions = _session_positions(trading_sessions)
         parsed_labels = _parse_labels(labels, positions)

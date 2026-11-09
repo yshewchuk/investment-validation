@@ -58,7 +58,7 @@ def test_amc_d_label_is_unavailable_for_bmo_and_amc_d_plus_one():
         _label(
             f"E{index:02d}",
             f"L{index:02d}",
-            anchors[index % len(anchors)],
+            sessions[5 + index % 3],
             index + 1,
         )
         for index in range(20)
@@ -93,6 +93,8 @@ def test_amc_d_label_is_unavailable_for_bmo_and_amc_d_plus_one():
 
     assert bmo["season_heat_count_20"] == 20
     assert amc["season_heat_count_20"] == 20
+    assert bmo["season_heat_mean_abs_5"] == pytest.approx(10.5)
+    assert amc["season_heat_mean_abs_5"] == pytest.approx(10.5)
     assert bmo["season_heat_mean_abs_20"] == pytest.approx(10.5)
     assert amc["season_heat_mean_abs_20"] == pytest.approx(10.5)
     assert bmo == amc
@@ -218,8 +220,11 @@ def test_target_event_and_same_ticker_events_are_excluded():
 
     result = compute_season_heat(labels, targets, sessions)[("TARGET", decision)]
 
+    assert result["season_heat_mean_abs_5"] is None
     assert result["season_heat_count_20"] == 20
     assert result["season_heat_mean_abs_20"] == pytest.approx(10.5)
+    assert result["season_heat_mean_abs_60"] == pytest.approx(10.5)
+    assert result["season_heat_ratio_20_252"] == pytest.approx(1.0)
 
 
 def test_all_window_warmups_counts_means_and_ratio():
@@ -322,6 +327,103 @@ def test_all_window_warmups_counts_means_and_ratio():
         assert small[key] is None
 
 
+def test_rolling_windows_match_bruteforce_across_decisions():
+    sessions = _session_sequence(date(2024, 1, 1), 300)
+    position = {session: index for index, session in enumerate(sessions)}
+    labels = [
+        _label(f"E{i}-{k}", f"T{(i + k) % 7}", session, (i * 7 + k * 3) % 41 + 1)
+        for i, session in enumerate(sessions[:-1])
+        for k in range(8)
+    ]
+    labels.append(_label("LATE", "LATE", sessions[0], 41, available_as_of_date=sessions[47]))
+    targets = [
+        {"event_id": f"X{j}", "ticker": f"T{j % 7}", "event_date": day, "decision_session": day}
+        for j, day in enumerate(sessions[30::17])
+    ]
+    results = compute_season_heat(labels, targets, sessions)
+    for target in targets:
+        decision = target["decision_session"]
+        result = results[(target["event_id"], decision)]
+        means = {}
+        for window, key in ((5, "season_heat_mean_abs_5"), (20, "season_heat_mean_abs_20"), (60, "season_heat_mean_abs_60"), (252, None)):
+            moves = [label["abs_move"] for label in labels
+                     if label["ticker"] != target["ticker"]
+                     and label["event_id"] != target["event_id"]
+                     and label["available_as_of_date"] <= decision
+                     and position[label["event_date"]] >= position[decision] - window + 1]
+            if window == 20:
+                assert result["season_heat_count_20"] == len(moves)
+            means[window] = sum(moves) / len(moves) if len(moves) >= 20 else None
+            if key is not None:
+                if means[window] is None:
+                    assert result[key] is None
+                else:
+                    assert result[key] == pytest.approx(means[window])
+        if means[20] is None or means[252] in (None, 0):
+            assert result["season_heat_ratio_20_252"] is None
+        else:
+            assert result["season_heat_ratio_20_252"] == pytest.approx(means[20] / means[252])
+
+
+def test_252_session_cutoff_excludes_expired_label():
+    sessions = _session_sequence(date(2024, 1, 1), 253)
+    decision = sessions[-1]
+    labels = [_label("ANCIENT", "ANCIENT", sessions[0], 1000)]
+    serial = 0
+    for event_date in sessions[-5:-1]:
+        for _ in range(5):
+            labels.append(
+                _label(f"E{serial:02d}", f"T{serial:02d}", event_date, 2)
+            )
+            serial += 1
+    targets = [
+        {
+            "event_id": "TARGET",
+            "ticker": "TARGET",
+            "event_date": decision,
+            "decision_session": decision,
+        }
+    ]
+
+    result = compute_season_heat(labels, targets, sessions)[("TARGET", decision)]
+
+    assert result["season_heat_count_20"] == 20
+    assert result["season_heat_mean_abs_20"] == pytest.approx(2)
+    assert result["season_heat_mean_abs_60"] == pytest.approx(2)
+    assert result["season_heat_ratio_20_252"] == pytest.approx(1)
+
+
+def test_expiring_labels_reset_zero_reference_sum():
+    sessions = _session_sequence(date(2024, 1, 1), 274)
+    labels = [
+        _label(f"OLD{index:02d}", f"O{index:02d}", sessions[0], 0.1)
+        for index in range(20)
+    ]
+    serial = 0
+    for event_date in sessions[269:273]:
+        for _ in range(5):
+            labels.append(
+                _label(f"NEW{serial:02d}", f"N{serial:02d}", event_date, 0.0)
+            )
+            serial += 1
+    targets = [
+        {
+            "event_id": f"TARGET{position}",
+            "ticker": f"G{position}",
+            "event_date": sessions[position],
+            "decision_session": sessions[position],
+        }
+        for position in (251, 252, 273)
+    ]
+
+    results = compute_season_heat(labels, targets, sessions)
+    final = results[("TARGET273", sessions[273])]
+
+    assert final["season_heat_count_20"] == 20
+    assert final["season_heat_mean_abs_20"] == 0.0
+    assert final["season_heat_ratio_20_252"] is None
+
+
 def test_zero_reference_mean_leaves_ratio_null():
     sessions = _session_sequence(date(2024, 1, 1), 252, date(2024, 2, 19))
     decision = sessions[-1]
@@ -417,18 +519,135 @@ def _negative_move():
     return labels, targets, sessions
 
 
+def _empty_sessions():
+    labels, targets, sessions = _valid_inputs()
+    return labels, targets, []
+
+
+def _descending_sessions():
+    labels, targets, sessions = _valid_inputs()
+    return labels, targets, ["2025-03-10", "2025-03-07"]
+
+
+def _malformed_target_event_date():
+    labels, targets, sessions = _valid_inputs()
+    targets[0]["event_date"] = "2025-3-11"
+    return labels, targets, sessions
+
+
+def _label_event_id_whitespace():
+    labels, targets, sessions = _valid_inputs()
+    labels[0]["event_id"] = " L1 "
+    return labels, targets, sessions
+
+
+def _target_event_id_whitespace():
+    labels, targets, sessions = _valid_inputs()
+    targets[0]["event_id"] = " T1 "
+    return labels, targets, sessions
+
+
+def _mixed_integer_float_overflow():
+    labels, targets, sessions = _valid_inputs()
+    labels[0]["abs_move"] = 10**1000
+    labels.append(_label("L2", "DDD", "2025-03-07", 1.5))
+    return labels, targets, sessions
+
+
+def _sum_overflow():
+    labels = [
+        _label(f"L{index:02d}", f"X{index:02d}", "2025-03-07", 1e308)
+        for index in range(20)
+    ]
+    _, targets, sessions = _valid_inputs()
+    return labels, targets, sessions
+
+
 @pytest.mark.parametrize(
-    ("build", "expected_code"),
+    ("build", "expected_code", "expected_message_fragment"),
     [
-        (_duplicate_target, "CONTRACT_MISMATCH"),
-        (_non_session_decision, "CONTRACT_MISMATCH"),
-        (_availability_on_event_date, "EXPERIMENT_VARIANT_FAILED"),
-        (_nan_move, "EXPERIMENT_VARIANT_FAILED"),
-        (_negative_move, "EXPERIMENT_VARIANT_FAILED"),
-        (_duplicate_label_event_id, "CONTRACT_MISMATCH"),
-        (_label_extra_key, "CONTRACT_MISMATCH"),
-        (_label_event_date_outside_sessions, "CONTRACT_MISMATCH"),
-        (_malformed_availability, "EXPERIMENT_VARIANT_FAILED"),
+        (
+            _duplicate_target,
+            "CONTRACT_MISMATCH",
+            "duplicate target key",
+        ),
+        (
+            _non_session_decision,
+            "CONTRACT_MISMATCH",
+            "target decision_session is not a trading session",
+        ),
+        (
+            _availability_on_event_date,
+            "EXPERIMENT_VARIANT_FAILED",
+            "label available_as_of_date must be strictly after event_date",
+        ),
+        (
+            _nan_move,
+            "EXPERIMENT_VARIANT_FAILED",
+            "abs_move must be a finite nonnegative number",
+        ),
+        (
+            _negative_move,
+            "EXPERIMENT_VARIANT_FAILED",
+            "abs_move must be a finite nonnegative number",
+        ),
+        (
+            _duplicate_label_event_id,
+            "CONTRACT_MISMATCH",
+            "duplicate label event_id",
+        ),
+        (
+            _label_extra_key,
+            "CONTRACT_MISMATCH",
+            "label row keys do not match the contract",
+        ),
+        (
+            _label_event_date_outside_sessions,
+            "CONTRACT_MISMATCH",
+            "label event_date is not a trading session",
+        ),
+        (
+            _malformed_availability,
+            "EXPERIMENT_VARIANT_FAILED",
+            "value is not a canonical ISO date",
+        ),
+        (
+            _empty_sessions,
+            "CONTRACT_MISMATCH",
+            "trading_sessions must be a nonempty strictly ascending sequence"
+            " of canonical ISO dates",
+        ),
+        (
+            _descending_sessions,
+            "CONTRACT_MISMATCH",
+            "trading_sessions must be a nonempty strictly ascending sequence"
+            " of canonical ISO dates",
+        ),
+        (
+            _malformed_target_event_date,
+            "CONTRACT_MISMATCH",
+            "value is not a canonical ISO date",
+        ),
+        (
+            _label_event_id_whitespace,
+            "CONTRACT_MISMATCH",
+            "event IDs and tickers must be nonblank canonical strings",
+        ),
+        (
+            _target_event_id_whitespace,
+            "CONTRACT_MISMATCH",
+            "event IDs and tickers must be nonblank canonical strings",
+        ),
+        (
+            _mixed_integer_float_overflow,
+            "EXPERIMENT_VARIANT_FAILED",
+            "abs_move must be a finite nonnegative number",
+        ),
+        (
+            _sum_overflow,
+            "EXPERIMENT_VARIANT_FAILED",
+            "season heat sum is not finite",
+        ),
     ],
     ids=[
         "duplicate-target",
@@ -440,15 +659,23 @@ def _negative_move():
         "label-extra-key",
         "label-event-date-outside-sessions",
         "malformed-availability",
+        "empty-sessions",
+        "descending-sessions",
+        "malformed-target-event-date",
+        "label-event-id-whitespace",
+        "target-event-id-whitespace",
+        "mixed-integer-float-overflow",
+        "sum-overflow",
     ],
 )
 def test_season_heat_rejects_invalid_inputs_with_native_codes(
-    build, expected_code
+    build, expected_code, expected_message_fragment
 ):
     labels, targets, sessions = build()
     with pytest.raises(DataError) as raised:
         compute_season_heat(labels, targets, sessions)
     assert raised.value.code == expected_code
+    assert expected_message_fragment in str(raised.value)
 
 
 @pytest.mark.parametrize("ticker", ["", " ", "\t", " ABC "])
