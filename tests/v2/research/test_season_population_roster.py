@@ -6,6 +6,7 @@ import pandas as pd
 import pytest
 
 from engine.v2.data.errors import DataError, fail
+from engine.v2.foundation import content_hash
 from engine.v2.foundation.market_calendar import CalendarSessions
 from engine.v2.research import eligible_history, season_population
 
@@ -50,6 +51,10 @@ def record(ticker, day, *, object_id="obj-1", content_hash=HASH_A):
         object_ref=SimpleNamespace(object_id=object_id, content_hash=content_hash, byte_size=8))
 
 
+def _available(day):
+    return (date.fromisoformat(day) + timedelta(days=1)).isoformat()
+
+
 class Repository:
     def __init__(self, moves):
         self.moves, self.tables, self.scans = moves, [], []
@@ -65,7 +70,10 @@ class Repository:
         return iter(())
 
 
-def plan(monkeypatch, events, anchors, moves, sessions=None, calendar=CALENDAR, purpose="selection",
+_DEFAULT = object()
+
+
+def plan(monkeypatch, events, anchors, moves, sessions=_DEFAULT, calendar=CALENDAR, purpose="selection",
         limits=LIMITS):
     repository = Repository(moves)
     reads, calls = [], []
@@ -80,7 +88,7 @@ def plan(monkeypatch, events, anchors, moves, sessions=None, calendar=CALENDAR, 
     monkeypatch.setattr(season_population.outcome_binding, "anchors",
         lambda repository, snapshot, limits, **kwargs: anchors)
     result = season_population.plan_roster(repository, SNAPSHOT, as_of_month="2024-01",
-        decision_sessions=SESSIONS if sessions is None else sessions, calendar=calendar,
+        decision_sessions=SESSIONS if sessions is _DEFAULT else sessions, calendar=calendar,
         calendar_source=SOURCE, limits=limits, purpose=purpose)
     return repository, result, reads, calls
 
@@ -94,6 +102,17 @@ def _mixed():
         ("DDD", saturday): bounds_row("DDD", saturday, pre_close_date=DAYS[274], post_close_date=DAYS[275])}
     moves = [record("AAA", DAYS[270]), record("CCC", DAYS[273]), record("DDD", saturday)]
     return events, anchors, moves
+
+
+def _receipt_id_oracle(receipt):
+    assert receipt["receipt_id"] == content_hash(
+        {key: value for key, value in receipt.items() if key != "receipt_id"})
+
+
+def _digest_oracles(receipt, roster, exclusion_pairs):
+    assert receipt["roster_digest"] == content_hash(roster)
+    assert receipt["exclusions_digest"] == content_hash(exclusion_pairs)
+    _receipt_id_oracle(receipt)
 
 
 def test_retained_exclusions_and_metadata_only_reads(monkeypatch):
@@ -113,9 +132,12 @@ def test_retained_exclusions_and_metadata_only_reads(monkeypatch):
     assert receipt["exclusions"] == {"missing_native_bounds": 1, "null_source_bounds": 1,
         "off_session_event_date": 1}
     assert receipt["sample_ids"] == ["ev-miss", "ev-null", "ev-sat"]
+    available = _available(DAYS[270])
     assert retained == [{"event_id": "ev-ret", "outcome_object_id": "obj-1",
-        "outcome_content_hash": HASH_A,
-        "available_as_of_date": (date.fromisoformat(DAYS[270]) + timedelta(days=1)).isoformat()}]
+        "outcome_content_hash": HASH_A, "available_as_of_date": available}]
+    _digest_oracles(receipt, [["ev-ret", "obj-1", HASH_A, available]],
+        sorted([["missing_native_bounds", "ev-miss"], ["null_source_bounds", "ev-null"],
+            ["off_session_event_date", "ev-sat"]]))
 
 
 def test_window_edges_and_start_clamp(monkeypatch):
@@ -131,11 +153,15 @@ def test_window_edges_and_start_clamp(monkeypatch):
     assert receipt["counts"] == {"population": 4, "in_window": 3, "retained": 2, "excluded": 0,
         "not_yet_available": 1}
     counts = receipt["counts"]
-    assert counts["in_window"] == (counts["retained"] + counts["excluded"]
-        + counts["not_yet_available"])
+    assert counts["in_window"] == 3
+    assert counts["retained"] == 2
+    assert counts["excluded"] == 0
+    assert counts["not_yet_available"] == 1
     assert [item["event_id"] for item in result["retained"]] == ["ev-avail", "ev-start"]
     assert receipt["exclusions"] == dict.fromkeys(
         ["missing_native_bounds", "null_source_bounds", "off_session_event_date"], 0)
+    _digest_oracles(receipt, [["ev-avail", "obj-1", HASH_A, _available(avail_last)],
+        ["ev-start", "obj-1", HASH_A, _available(on_start)]], [])
     _, clamped, _, _ = plan(monkeypatch, events, {}, [], sessions=[DAYS[100], LAST])
     assert clamped["receipt"]["window"]["start"] == DAYS[0]
 
@@ -164,6 +190,8 @@ def test_binding_refusals_propagate(monkeypatch, index, code):
 @pytest.mark.parametrize("calendar, sessions", [
     pytest.param(SimpleNamespace(days=tuple(DAYS)), SESSIONS, id="wrong-calendar-type"),
     pytest.param(CALENDAR, [], id="empty-sessions"),
+    pytest.param(CALENDAR, None, id="none-sessions"),
+    pytest.param(CALENDAR, 5, id="non-iterable-sessions"),
     pytest.param(CALENDAR, [FIRST, DAYS[274] + "Sat"], id="non-date-session"),
     pytest.param(CALENDAR, [FIRST, (date.fromisoformat(DAYS[274]) + timedelta(days=1)).isoformat()],
         id="session-off-calendar"),
@@ -222,9 +250,9 @@ def test_result_limit_exceeded_propagates_before_reads(monkeypatch):
 
 def test_purpose_forwards_to_load_and_receipt(monkeypatch):
     events, anchors, moves = _mixed()
-    _, result, reads, _ = plan(monkeypatch, events, anchors, moves, purpose="final")
-    assert reads[0]["purpose"] == "final"
-    assert result["receipt"]["purpose"] == "final"
+    _, result, reads, _ = plan(monkeypatch, events, anchors, moves, purpose="training")
+    assert reads[0]["purpose"] == "training"
+    assert result["receipt"]["purpose"] == "training"
 
 
 def _receipt_digests(monkeypatch, events, anchors, moves):
@@ -246,6 +274,11 @@ def test_digest_stability_and_sensitivity(monkeypatch):
     extra = events + [event("ev-extra", "EEE", DAYS[271])]
     grown = _receipt_digests(monkeypatch, extra, anchors, moves)
     assert grown[0] != baseline[0]
+    _, retrained, _, _ = plan(monkeypatch, events, anchors, moves, purpose="training")
+    assert retrained["receipt"]["purpose"] == "training"
+    assert retrained["receipt"]["exclusions_digest"] == baseline[0]
+    assert retrained["receipt"]["roster_digest"] == baseline[1]
+    assert retrained["receipt"]["receipt_id"] != baseline[2]
 
 
 def test_sample_ids_capped_at_ten(monkeypatch):
@@ -258,7 +291,8 @@ def test_sample_ids_capped_at_ten(monkeypatch):
 
 def test_purpose_and_identity_reproducible(monkeypatch):
     events, anchors, moves = _mixed()
-    _, first, _, _ = plan(monkeypatch, events, anchors, moves, purpose="holdout")
-    _, second, _, _ = plan(monkeypatch, events, anchors, moves, purpose="holdout")
+    _, first, _, _ = plan(monkeypatch, events, anchors, moves, purpose="training")
+    _, second, _, _ = plan(monkeypatch, events, anchors, moves, purpose="training")
     assert first["receipt"] == second["receipt"]
-    assert first["receipt"]["purpose"] == "holdout"
+    assert first["receipt"]["purpose"] == "training"
+    _receipt_id_oracle(first["receipt"])

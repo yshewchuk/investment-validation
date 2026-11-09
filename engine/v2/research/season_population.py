@@ -24,7 +24,10 @@ _REASONS = ("missing_native_bounds", "null_source_bounds", "off_session_event_da
 def _validate(calendar, decision_sessions):
     if not isinstance(calendar, CalendarSessions):
         raise fail("CONTRACT_MISMATCH", "market calendar sessions required")
-    sessions = list(decision_sessions)
+    try:
+        sessions = list(decision_sessions)
+    except TypeError:
+        raise fail("CONTRACT_MISMATCH", "decision sessions must be an iterable") from None
     if not sessions or any(type(day) is not str or day not in calendar.days for day in sessions):
         raise fail("CONTRACT_MISMATCH", "decision sessions must be non-empty calendar sessions")
     return sessions
