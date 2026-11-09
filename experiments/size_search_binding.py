@@ -127,7 +127,7 @@ def prepare(repository, spec, request, panel_request, *, scope, training_start, 
         raise fail("INVALID_EXPERIMENT_SPEC", "child memory must not exceed inherited parent limit")
     _require(request["feature_dictionary_hash"] == recipe(_panel_subset(request["schema_version"]))["dictionary_hash"])
     # HMOS season columns join the panel read when slice 5 flips the contract to v4; until then the projection stays HMO.
-    if "HMOS" in request["feature_sets"]:
+    if "HMOS" in request.get("feature_sets", ()):
         raise fail("INVALID_EXPERIMENT_SPEC",
                    "HMOS candidates need the season panel columns; refused until the panel contract is v4")
     _require(panel_request["feature_snapshot_id"] == request["feature_snapshot_id"]
