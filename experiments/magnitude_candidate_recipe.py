@@ -9,7 +9,7 @@ _KEYS = {"ridge": {"alpha"}, "elasticnet": {"alpha", "l1_ratio"},
          "hgb": {"max_leaf_nodes"}, "mlp": {"profile"}}
 _HGB_LEAF = {"max_leaf_nodes"}
 _HGB_BASE = {"learning_rate", "max_leaf_nodes", "min_samples_leaf", "l2_regularization"}
-_HGB_OPTIONAL = {"loss", "max_iter"}
+_HGB_OPTIONAL = {"loss", "max_iter", "quantile"}
 
 
 def _hgb_keys(parameters):

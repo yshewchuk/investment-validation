@@ -16,7 +16,7 @@ _HGB_MAX_LEAF_NODES_V2_BOUNDS = (2, 64)
 _HGB_MIN_SAMPLES_LEAF_BOUNDS = (1, 1000)
 _HGB_L2_REGULARIZATION_BOUNDS = (0.0, 1000.0)
 _HGB_MAX_ITER_BOUNDS = (100, 5000)
-_HGB_LOSSES = ("absolute_error", "gamma", "poisson", "squared_error")
+_HGB_LOSSES = ("absolute_error", "gamma", "poisson", "quantile", "squared_error")
 _TARGET_FLOOR_PCT = 0.01
 
 
@@ -35,22 +35,31 @@ def _bounded_alpha(value) -> bool:
     return _bounded_number(value, _RIDGE_ALPHA_BOUNDS)
 
 
-def _ridge_parameters(alpha, max_leaf_nodes, early, loss, max_iter, target_floor_pct):
+def _ridge_parameters(alpha, max_leaf_nodes, early, loss, max_iter, quantile, target_floor_pct):
     if (not _bounded_alpha(alpha) or max_leaf_nodes is not None
-            or any(value is not None for value in (*early, loss, max_iter, target_floor_pct))):
+            or any(value is not None for value in (*early, loss, max_iter, quantile,
+                                                   target_floor_pct))):
         raise ValueError("Ridge requires declared alpha and no HGB parameter")
     return {"alpha": float(alpha), "fit_intercept": True, "copy_X": True,
             "max_iter": None, "tol": 0.0001, "solver": "svd", "positive": False,
             "random_state": 0}
 
 
-def _hgb_options(loss, max_iter, target_floor_pct, *, default_max_iter):
+def _hgb_options(loss, max_iter, quantile, target_floor_pct, *, default_max_iter):
     resolved_loss = "squared_error" if loss is None else loss
     if type(resolved_loss) is not str or resolved_loss not in _HGB_LOSSES:
-        raise ValueError("HGB loss must be one of the four supported sklearn losses")
+        raise ValueError("HGB loss must be one of the five supported sklearn losses")
     resolved_iter = default_max_iter if max_iter is None else max_iter
     if not _bounded_number(resolved_iter, _HGB_MAX_ITER_BOUNDS, integer=True):
         raise ValueError("HGB max_iter must be an integer within [100, 5000]")
+    if resolved_loss == "quantile":
+        if type(quantile) not in (int, float) or not 0 < quantile < 1:
+            raise ValueError("quantile HGB loss requires a quantile within (0, 1)")
+        resolved_quantile = float(quantile)
+    elif quantile is not None:
+        raise ValueError("quantile is only valid for quantile HGB loss")
+    else:
+        resolved_quantile = None
     if resolved_loss == "gamma":
         if target_floor_pct is None:
             target_floor_pct = _TARGET_FLOOR_PCT
@@ -58,17 +67,17 @@ def _hgb_options(loss, max_iter, target_floor_pct, *, default_max_iter):
             raise ValueError("gamma HGB requires target_floor_pct 0.01")
     elif target_floor_pct is not None:
         raise ValueError("target_floor_pct is only valid for gamma HGB loss")
-    return resolved_loss, int(resolved_iter), (
+    return resolved_loss, int(resolved_iter), resolved_quantile, (
         _TARGET_FLOOR_PCT if resolved_loss == "gamma" else None)
 
 
-def _legacy_hgb_parameters(alpha, max_leaf_nodes, loss, max_iter, target_floor_pct):
+def _legacy_hgb_parameters(alpha, max_leaf_nodes, loss, max_iter, quantile, target_floor_pct):
     if (type(max_leaf_nodes) is not int
             or max_leaf_nodes not in _HGB_MAX_LEAF_NODES_V1_BOUNDS or alpha is not None):
         raise ValueError("HGB requires declared integer leaf count and no Ridge parameter")
-    resolved_loss, resolved_iter, floor = _hgb_options(
-        loss, max_iter, target_floor_pct, default_max_iter=100)
-    return {"loss": resolved_loss, "quantile": None, "learning_rate": 0.1,
+    resolved_loss, resolved_iter, resolved_quantile, floor = _hgb_options(
+        loss, max_iter, quantile, target_floor_pct, default_max_iter=100)
+    return {"loss": resolved_loss, "quantile": resolved_quantile, "learning_rate": 0.1,
         "max_iter": resolved_iter, "max_leaf_nodes": max_leaf_nodes, "max_depth": None,
         "min_samples_leaf": 20, "l2_regularization": 0.0, "max_features": 1.0,
         "max_bins": 255, "categorical_features": None, "monotonic_cst": None,
@@ -94,12 +103,12 @@ def _check_early_parameters(alpha, max_leaf_nodes, early):
 
 
 def _early_stopping_hgb_parameters(alpha, max_leaf_nodes, learning_rate, min_samples_leaf,
-                                   l2_regularization, loss, max_iter, target_floor_pct):
+                                   l2_regularization, loss, max_iter, quantile, target_floor_pct):
     early = (learning_rate, min_samples_leaf, l2_regularization)
     _check_early_parameters(alpha, max_leaf_nodes, early)
-    resolved_loss, resolved_iter, floor = _hgb_options(
-        loss, max_iter, target_floor_pct, default_max_iter=500)
-    return {"loss": resolved_loss, "quantile": None, "learning_rate": float(learning_rate),
+    resolved_loss, resolved_iter, resolved_quantile, floor = _hgb_options(
+        loss, max_iter, quantile, target_floor_pct, default_max_iter=500)
+    return {"loss": resolved_loss, "quantile": resolved_quantile, "learning_rate": float(learning_rate),
         "max_iter": resolved_iter, "max_leaf_nodes": max_leaf_nodes, "max_depth": None,
         "min_samples_leaf": int(min_samples_leaf), "l2_regularization": float(l2_regularization),
         "max_features": 1.0, "max_bins": 255, "categorical_features": None,
@@ -109,23 +118,25 @@ def _early_stopping_hgb_parameters(alpha, max_leaf_nodes, learning_rate, min_sam
 
 
 def _parameters(model, alpha, max_leaf_nodes, learning_rate=None, min_samples_leaf=None,
-                l2_regularization=None, loss=None, max_iter=None, target_floor_pct=None):
+                l2_regularization=None, loss=None, max_iter=None, quantile=None,
+                target_floor_pct=None):
     early = (learning_rate, min_samples_leaf, l2_regularization)
     if model == "history_ridge":
         return _ridge_parameters(alpha, max_leaf_nodes, early, loss, max_iter,
-                                 target_floor_pct), None
+                                 quantile, target_floor_pct), None
     if model != "history_hgb":
         raise ValueError("unknown variable-width magnitude model")
     if all(value is None for value in early):
-        return _legacy_hgb_parameters(alpha, max_leaf_nodes, loss, max_iter, target_floor_pct)
+        return _legacy_hgb_parameters(alpha, max_leaf_nodes, loss, max_iter,
+                                      quantile, target_floor_pct)
     return _early_stopping_hgb_parameters(alpha, max_leaf_nodes, learning_rate,
                                           min_samples_leaf, l2_regularization, loss, max_iter,
-                                          target_floor_pct)
+                                          quantile, target_floor_pct)
 
 
 def ridge_hgb_recipe(*, model, columns, feature_dictionary_hash, alpha=None, max_leaf_nodes=None,
                      learning_rate=None, min_samples_leaf=None, l2_regularization=None,
-                     loss=None, max_iter=None, target_floor_pct=None) -> dict:
+                     loss=None, max_iter=None, quantile=None, target_floor_pct=None) -> dict:
     """Bind a caller-admitted ordered subset; dictionary membership stays external.
 
     The v2 HGB early-stopping validation holdout is a random 10% of training rows,
@@ -141,7 +152,7 @@ def ridge_hgb_recipe(*, model, columns, feature_dictionary_hash, alpha=None, max
         raise ValueError("magnitude requires a canonical feature dictionary hash")
     params, target_floor_pct = _parameters(
         model, alpha, max_leaf_nodes, learning_rate, min_samples_leaf, l2_regularization,
-        loss, max_iter, target_floor_pct)
+        loss, max_iter, quantile, target_floor_pct)
     ridge = model == "history_ridge"
     version = ("magnitude_ridge_hgb_recipe.v2"
                if model == "history_hgb" and all(value is not None for value in (
@@ -180,6 +191,7 @@ def validate_ridge_hgb_recipe(recipe) -> dict:
             feature_dictionary_hash=recipe["feature_dictionary_hash"],
             alpha=params.get("alpha"), max_leaf_nodes=params.get("max_leaf_nodes"),
             loss=params.get("loss"), max_iter=params.get("max_iter"),
+            quantile=params.get("quantile"),
             target_floor_pct=recipe.get("target_floor_pct"), **early)
         if canonical_json(recipe) == canonical_json(expected):
             return expected
