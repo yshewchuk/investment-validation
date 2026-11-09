@@ -96,6 +96,7 @@ def admit_recorder(monkeypatch):
 
 
 def _read(case, **kwargs):
+    kwargs.setdefault("latest_decision", "2099-12-31")
     return season_population.read_labels(case.repository, case.snapshot, case.retained,
         as_of_month=MONTH, limits=LIMITS, **kwargs)
 
@@ -145,7 +146,8 @@ def test_empty_retained_returns_nothing_and_touches_no_repository():
         def __getattr__(self, name):
             raise AssertionError(f"empty roster touched {name}")
 
-    assert season_population.read_labels(Nothing(), None, [], as_of_month=MONTH, limits=LIMITS) == []
+    assert season_population.read_labels(Nothing(), None, [], as_of_month=MONTH, limits=LIMITS,
+        latest_decision="2099-12-31") == []
 
 
 def test_skipped_outcome_refuses_contract_mismatch(source):
@@ -300,7 +302,7 @@ def test_invalid_limits_refuse_before_any_scan(source, monkeypatch):
     limits = {key: value for key, value in LIMITS.items() if key != "max_output_rows"}
     with pytest.raises(DataError) as caught:
         season_population.read_labels(case.repository, case.snapshot, case.retained,
-            as_of_month=MONTH, limits=limits)
+            as_of_month=MONTH, limits=limits, latest_decision="2099-12-31")
     assert caught.value.code == "CONTRACT_MISMATCH"
     assert _moves_scans(case.repository) == []
 
@@ -334,7 +336,7 @@ def test_population_read_is_bound_by_the_limit_max_object_bytes(source, monkeypa
 
     monkeypatch.setattr(season_population, "load_population", spy)
     labels = season_population.read_labels(case.repository, case.snapshot, case.retained,
-        as_of_month=MONTH, limits={**LIMITS, "max_object_bytes": 12345})
+        as_of_month=MONTH, limits={**LIMITS, "max_object_bytes": 12345}, latest_decision="2099-12-31")
     assert len(labels) == len(DAYS)
     assert [call["max_object_bytes"] for call in calls] == [12345]
 
@@ -379,6 +381,28 @@ def test_availability_boundary_and_the_read_of_a_retained_label(monkeypatch, ses
          lambda event, request: rows))
     repository = SimpleNamespace(table_contract=lambda snapshot, name: COMPUTED_MOVES_CONTRACT,
         anchor_limits=[])
-    assert season_population.read_labels(repository, None, [item], as_of_month=MONTH, limits=LIMITS) == [
+    assert season_population.read_labels(repository, None, [item], as_of_month=MONTH, limits=LIMITS,
+        latest_decision=LAST) == [
         {"event_id": "ev-in", "ticker": "IN", "event_date": in_day, "available_as_of_date": LAST,
             "abs_move": 0.75}]
+
+
+def test_latest_decision_equal_to_the_max_roster_availability_keeps_the_labels(source):
+    case = source([(DAYS[0], "AAA", 2.0), (DAYS[1], "BBB", 3.0)])
+    latest = max(item["available_as_of_date"] for item in case.retained)
+    assert _read(case, latest_decision=latest) == [
+        {"event_id": item["event_id"], "ticker": event["ticker"],
+            "event_date": event["event_date"].date().isoformat(),
+            "available_as_of_date": item["available_as_of_date"], "abs_move": move}
+        for item, event, move in zip(case.retained, case.events, (2.0, 3.0))]
+
+
+def test_latest_decision_one_day_before_the_max_roster_availability_refuses(source):
+    case = source([(DAYS[0], "AAA", 2.0), (DAYS[1], "BBB", 3.0)])
+    latest = (date.fromisoformat(max(item["available_as_of_date"] for item in case.retained))
+        - timedelta(days=1)).isoformat()
+    with pytest.raises(DataError) as caught:
+        _read(case, latest_decision=latest)
+    assert caught.value.code == "CONTRACT_MISMATCH"
+    assert caught.value.problem.message == "roster label is available after the latest decision"
+    assert _moves_scans(case.repository) == []

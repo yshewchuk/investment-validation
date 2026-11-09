@@ -146,8 +146,15 @@ def _label_move(rows, event, item):
     return _abs_move(rows[0]["realized_move_pct"])
 
 
-def _check_source_bounds(bounds, population, anchors):
-    """Refuse before any outcome opens when a roster availability differs from the native bounds."""
+def _check_source_bounds(bounds, population, anchors, latest_decision):
+    """Refuse before any outcome opens when a roster availability differs from the native bounds
+    or is available after the latest decision."""
+    if type(latest_decision) is not str:
+        raise fail("CONTRACT_MISMATCH", "latest decision must be an ISO date string")
+    for item in anchors.values():
+        available = item["available_as_of_date"]
+        if type(available) is str and available > latest_decision:
+            raise fail("CONTRACT_MISMATCH", "roster label is available after the latest decision")
     for event in population.itertuples(index=False):
         row = bounds.get((event.ticker, event.event_date.date().isoformat()))
         try:
@@ -160,7 +167,8 @@ def _check_source_bounds(bounds, population, anchors):
                 "roster availability differs from the native source bounds")
 
 
-def read_labels(repository, snapshot, retained, *, as_of_month, limits, purpose="selection"):
+def read_labels(repository, snapshot, retained, *, as_of_month, limits, latest_decision,
+                purpose="selection"):
     """Value-build read of the planned roster's realized labels.
 
     Each retained label's object is read once per call; reads go ticker by
@@ -173,8 +181,9 @@ def read_labels(repository, snapshot, retained, *, as_of_month, limits, purpose=
     Returns season_heat label dicts (event_id, ticker, event_date, available_as_of_date,
     abs_move) in retained order. Source admission runs before any outcome opens, so a
     held-out label refuses the whole read; nothing is cached across calls, nothing is
-    retried, and any refusal propagates without a partial result. The roster already dropped
-    labels available after the latest decision, so no decision-date comparison happens here.
+    retried, and any refusal propagates without a partial result. latest_decision is plan_roster's
+    window end (receipt["window"]["latest_decision"]), which mirrors the roster plan that never
+    retains labels available after it, so any such roster item refuses the read.
     No production caller exists until the panel wiring slice (slice 5 of the season heat plan).
     """
     if not retained:
@@ -192,7 +201,7 @@ def read_labels(repository, snapshot, retained, *, as_of_month, limits, purpose=
         raise fail("CONTRACT_MISMATCH", "labels require the native computed-moves contract")
     bounds = outcome_binding.anchors(repository, snapshot, limits)
     anchors = {item["event_id"]: item for item in retained}
-    _check_source_bounds(bounds, population, anchors)
+    _check_source_bounds(bounds, population, anchors, latest_decision)
     candidates = population.sort_values(["event_date", "event_id"])
     plans, read_rows = event_history.plan_with_reader(repository, snapshot, candidates, contract)
     for event, _, record in plans:
