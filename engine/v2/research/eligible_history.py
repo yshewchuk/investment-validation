@@ -244,24 +244,33 @@ def plan_targets(repository, snapshot, *, as_of_month, policy, event_ids, horizo
         "before_start": plan["early"], "dated_before_start": plan["dated_before_start"]}
 
 
-def _season_source(repository, snapshot, contract, candidates):
-    """Retain season events bound to exactly one exact computed-move fragment."""
+def _season_source(repository, snapshot, contract, candidates, limits):
+    """Retain season events bound to native anchors and exactly one exact fragment."""
+    anchors = _anchors(repository, snapshot, limits)
     records = repository.fragment_records(snapshot, contract.table_name)
     meter = Progress("season computed-move fragments", len(records) + len(candidates))
     found = {}
     for record in records:
         found.setdefault(record.primary_key_min, []).append(record)
         meter.tick()
-    retained = set()
+    retained, missing_anchor, null_bounds = {}, 0, 0
     for event in candidates.itertuples(index=False):
         key = event.ticker, event.event_date.date().isoformat()
+        if key not in anchors:
+            missing_anchor += 1
+            meter.tick()
+            continue
         match = found.get(key, [])
-        if (len(match) == 1 and (record := match[0]).row_count == 1 and record.primary_key_max == key
-                and record.partition_key == key[0] and record.time_min == key[1] and record.time_max == key[1]):
-            retained.add(event.event_id)
+        if len(match) != 1:
+            raise fail("HOLDOUT_ACCESS_DENIED", "source bounds do not bind the exact isolated outcome")
+        bound = _bound(event, anchors, {key: match[0]})
+        if bound is None:
+            null_bounds += 1
+        else:
+            retained[event.event_id] = bound
         meter.tick()
     decision("season computed-move source", f"{len(retained)}/{len(candidates)} events retained; "
-        f"{len(candidates) - len(retained)} lack exactly one exact source fragment")
+        f"{missing_anchor} lack native source bounds; {null_bounds} have null source bounds")
     return retained
 
 
@@ -293,7 +302,8 @@ def _prepare(repository, snapshot, *, as_of_month, policy, event_ids, horizons, 
     season_candidates = population[population.event_date.dt.strftime("%Y-%m-%d").isin(
         calendar_days[max(0, min(indices) - 251): max(indices) + 1])]
     with stage("season computed-move source admission"):
-        season_ids = _season_source(repository, snapshot, contract, season_candidates)
+        season_bounds = _season_source(repository, snapshot, contract, season_candidates, limits)
+    season_ids = set(season_bounds)
     history_ids = set(candidates.event_id)
     union = population[population.event_id.isin(history_ids | season_ids)].sort_values(
         ["event_date", "event_id"])
@@ -312,7 +322,10 @@ def _prepare(repository, snapshot, *, as_of_month, policy, event_ids, horizons, 
         "contributors": [{"event_id": e.event_id, **qualified[e.event_id]} for e, _, _ in plans],
         "season_heat_contributors": [{"event_id": e.event_id, "ticker": e.ticker,
             "event_date": e.event_date.date().isoformat(), "fragment_id": record.fragment_id,
-            "object_id": record.object_ref.object_id, "content_hash": record.object_ref.content_hash} for e, _, record in season_plans],
+            "object_id": record.object_ref.object_id, "content_hash": record.object_ref.content_hash,
+            "source_bounds": {name: season_bounds[e.event_id][name] for name in
+                ("pre_close_date", "post_close_date", "session",
+                 "outcome_object_id", "outcome_content_hash")}} for e, _, record in season_plans],
         "availability": {"basis": "computed_moves.available_as_of_date", "source_publication": "unverified",
                          "event_schedule_as_known": "unverified"}}
     context = {**identity, "context_id": content_hash(identity)}
