@@ -418,7 +418,17 @@ _SIZE_PANEL_CONTEXTS = ("magnitude_panel_context.v3", "magnitude_panel_context.v
                        "magnitude_panel_context.v5")
 
 
+def _size_panel_v5_receipt_presence(context):
+    """Compact-tier check: the receipt envelope exists. The body may hold externalized
+    placeholders, so the digest is only verifiable after hydration."""
+    if context.get("schema_version") != "magnitude_panel_context.v5":
+        return True
+    population = context.get("season_heat_population")
+    return isinstance(population, dict) and isinstance(population.get("receipt_id"), str)
+
+
 def _size_panel_v5_receipt(context):
+    """Hydrated-tier check: the receipt_id is the digest of the receipt body."""
     if context.get("schema_version") != "magnitude_panel_context.v5":
         return True
     population = context.get("season_heat_population")
@@ -443,7 +453,7 @@ def _size_panel_v17(document):
             or not isinstance(request, dict)
             or not _size_placeholder_v17(request.get("event_ids"))
             or not isinstance(feature.get("snapshot_id"), str)
-            or not _size_panel_v5_receipt(context)):
+            or not _size_panel_v5_receipt_presence(context)):
         return False
     return (qualified(request_version(document["size_request"]["schema_version"]))
             and document["size_comparison"]["schema_version"] == "size_causal_comparator.v1"

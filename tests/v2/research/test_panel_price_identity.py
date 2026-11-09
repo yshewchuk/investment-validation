@@ -127,9 +127,13 @@ def test_size_panel_v17_v5_requires_season_heat_population_receipt_id():
     assert not native_registration._size_panel_v17(_panel_document_v17(context))
     context["season_heat_population"] = {"window": {"latest_decision": "2024-01-01"}}
     assert not native_registration._size_panel_v17(_panel_document_v17(context))
+    # pack_size_registration externalizes >=64-item fragment lists, so the compact
+    # receipt holds a placeholder and its receipt_id cannot digest-match the visible
+    # body. The compact tier checks presence only; hydration re-checks the digest.
     context["season_heat_population"] = {**context["season_heat_population"],
-        "receipt_id": "sha256:test"}  # an id that is not the digest of its own body
-    assert not native_registration._size_panel_v17(_panel_document_v17(context))
+        "calendar_source": {"objects": {"$size_artifact": "objects"}},
+        "receipt_id": "sha256:test"}  # the digest of the hydrated body, not this placeholder form
+    assert native_registration._size_panel_v17(_panel_document_v17(context))
     context["season_heat_population"] = _season_receipt(
         window={"latest_decision": "2024-01-01"})
     assert native_registration._size_panel_v17(_panel_document_v17(context))
