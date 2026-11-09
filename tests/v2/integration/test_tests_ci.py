@@ -280,7 +280,7 @@ EXPECTED_WORKFLOW = {
     },
     "jobs": {
         "plan": {
-            "runs-on": "ubuntu-latest",
+            "runs-on": "ubuntu-24.04",
             "timeout-minutes": 15,
             "outputs": {"matrix": "${{ steps.matrix.outputs.matrix }}"},
             "steps": [
@@ -304,7 +304,7 @@ EXPECTED_WORKFLOW = {
         "shard": {
             "name": "tests (${{ matrix.shard }})",
             "needs": "plan",
-            "runs-on": "ubuntu-latest",
+            "runs-on": "ubuntu-24.04",
             "timeout-minutes": 40,  # temporary (#791), matches tests.yml
             "strategy": {"fail-fast": False,
                          "matrix": "${{ fromJSON(needs.plan.outputs.matrix) }}"},
@@ -333,7 +333,7 @@ EXPECTED_WORKFLOW = {
         "test": {
             "needs": ["plan", "shard"],
             "if": "${{ always() }}",
-            "runs-on": "ubuntu-latest",
+            "runs-on": "ubuntu-24.04",
             "timeout-minutes": 5,
             "steps": [{"name": "Require the plan and every shard to have succeeded",
                        "run": BEHAVIOUR_TESTED}],
