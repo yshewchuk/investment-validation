@@ -151,8 +151,8 @@ def test_empty_retained_admits_once_and_touches_no_repository(admit_recorder):
         def __getattr__(self, name):
             raise AssertionError(f"empty roster touched {name}")
 
-    assert season_population.read_labels(Nothing(), None, [], as_of_month=MONTH, limits=LIMITS,
-        latest_decision="2099-12-31") == []
+    assert season_population.read_labels(Nothing(), SimpleNamespace(snapshot_id="snap-empty"),
+        [], as_of_month=MONTH, limits=LIMITS, latest_decision="2099-12-31") == []
     assert admit_recorder == [LIMITS]
 
 
@@ -185,6 +185,39 @@ def test_malformed_call_refuses_before_admission_and_touches_no_repository(admit
         season_population.read_labels(Nothing(), None, retained, limits=LIMITS,
             **{**_CALL, **overrides})
     assert caught.value.code == "CONTRACT_MISMATCH"
+    assert admit_recorder == []
+
+
+_HOLDOUT_REFUSALS = [
+    pytest.param({"as_of_month": "nonsense"}, id="month-malformed"),
+    pytest.param({"as_of_month": "2999-01"}, id="month-future"),
+    pytest.param({"purpose": "unknown"}, id="purpose-unknown"),
+]
+
+
+@pytest.mark.parametrize("overrides", _HOLDOUT_REFUSALS)
+def test_invalid_holdout_context_refuses_before_admission_with_a_nonempty_roster(source,
+        admit_recorder, overrides):
+    case = source([(DAYS[0], "AAA", 2.0), (DAYS[1], "BBB", 3.0)])
+    with pytest.raises(DataError) as caught:
+        season_population.read_labels(case.repository, case.snapshot, case.retained,
+            limits=LIMITS, **{**_CALL, **overrides})
+    assert caught.value.code == "HOLDOUT_ACCESS_DENIED"
+    assert admit_recorder == []
+    assert _moves_scans(case.repository) == []
+
+
+@pytest.mark.parametrize("overrides", _HOLDOUT_REFUSALS)
+def test_invalid_holdout_context_refuses_before_admission_with_an_empty_roster(admit_recorder,
+        overrides):
+    class Nothing:
+        def __getattr__(self, name):
+            raise AssertionError(f"empty roster touched {name}")
+
+    with pytest.raises(DataError) as caught:
+        season_population.read_labels(Nothing(), SimpleNamespace(snapshot_id="snap-empty"),
+            [], limits=LIMITS, **{**_CALL, **overrides})
+    assert caught.value.code == "HOLDOUT_ACCESS_DENIED"
     assert admit_recorder == []
 
 
@@ -466,7 +499,8 @@ def test_availability_boundary_and_the_read_of_a_retained_label(monkeypatch, ses
          lambda event, request: rows))
     repository = SimpleNamespace(table_contract=lambda snapshot, name: COMPUTED_MOVES_CONTRACT,
         anchor_limits=[], fragment_records=lambda snapshot, name: [planned])
-    assert season_population.read_labels(repository, None, [item], as_of_month=MONTH, limits=LIMITS,
+    assert season_population.read_labels(repository, SimpleNamespace(snapshot_id="snap-boundary"),
+        [item], as_of_month=MONTH, limits=LIMITS,
         latest_decision=LAST) == [
         {"event_id": "ev-in", "ticker": "IN", "event_date": in_day, "available_as_of_date": LAST,
             "abs_move": 0.75}]

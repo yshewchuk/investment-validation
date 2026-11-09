@@ -20,6 +20,7 @@ from engine.v2.foundation.market_calendar import CalendarSessions
 from engine.v2.research import event_history, outcome_binding
 from engine.v2.research.eligible_history import admit_source
 from engine.v2.research.experiment_population import load_population
+from engine.v2.research.experiment_trades import _holdout_context
 from engine.v2.research.progress import Progress, decision, stage
 
 WINDOW_SESSIONS = 252
@@ -229,8 +230,9 @@ def read_labels(repository, snapshot, retained, *, as_of_month, limits, latest_d
     max_output_rows caps the retained roster before any further read.
 
     Returns season_heat label dicts (event_id, ticker, event_date, available_as_of_date,
-    abs_move) in retained order. The call shape is validated on every call, including an
-    empty roster, before source admission, which itself runs on every call and before any
+    abs_move) in retained order. The call shape and holdout context are validated on
+    every call, including an empty roster, before source admission, which itself runs on
+    every call and before any
     outcome opens, so a
     held-out label refuses the whole read; nothing is cached across calls, nothing is
     retried, and any refusal propagates without a partial result. latest_decision is plan_roster's
@@ -240,6 +242,7 @@ def read_labels(repository, snapshot, retained, *, as_of_month, limits, latest_d
     No production caller exists until the panel wiring slice (slice 5 of the season heat plan).
     """
     _validate_call(retained, as_of_month, purpose, latest_decision)
+    _holdout_context(snapshot, as_of_month, purpose, [item["event_id"] for item in retained])
     admit_source(repository, snapshot, limits)
     if not retained:
         return []
