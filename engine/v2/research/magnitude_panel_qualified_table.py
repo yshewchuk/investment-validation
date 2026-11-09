@@ -96,13 +96,12 @@ _base = replace(v2.CONTRACT, contract_id=TABLE + ".v3", semantic_version="3.0.0"
     columns=(*v2.CONTRACT.columns,
         ColumnContract(name="current_quote_status", physical_type="string", nullable=False),
         ColumnContract(name="has_implied_quote", physical_type="int64", nullable=False)))
-# CONTRACT stays v3; slice 5 flips it to CONTRACT_V4.
-CONTRACT = replace(_base, definition_hash=table_contract_hash(_base))
 _contract_v4 = replace(_base, contract_id=TABLE + ".v4", semantic_version="4.0.0",
     columns=(*_base.columns, *(ColumnContract(name=field["name"], physical_type=field["physical_type"],
         nullable=field["nullable"], unit=field["unit"], null_policy=field["on_missing"])
         for field in _season_fields())))
 CONTRACT_V4 = replace(_contract_v4, definition_hash=table_contract_hash(_contract_v4))
+CONTRACT = CONTRACT_V4  # Slice 5 installs v4; no compatibility reader for sealed v3 panels.
 
 
 def admit_columns(columns, *, season=False):
