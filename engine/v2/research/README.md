@@ -540,7 +540,13 @@ Historical publication and schedule knowledge remain unverified reconstruction.
 <!-- public-interface: magnitude_panel_qualified_table.CONTRACT, magnitude_panel_qualified_table.FEATURES, magnitude_panel_qualified_table.METADATA, magnitude_panel_qualified_table.TABLE, magnitude_panel_qualified_table.admit_columns, magnitude_panel_qualified_table.feature_dictionary, magnitude_panel_qualified_table.recipe -->
 
 `experiments.size_panel.materialize/read` is the installed-identity public boundary;
-`magnitude_panel_qualified` and `_magnitude_panel_*` helpers are internal only.
+`magnitude_panel_qualified` and `_magnitude_panel_*` helpers are internal only and
+are not reachable from production or nightly entrypoints.
+Season heat: `season_population.plan_roster` and `read_labels` feed
+`season_heat.compute_season_heat` for the `HMOS` recipe (panel `.v4`, context `.v5`,
+request `v10`); the shared anchor and fragment binding is `outcome_binding`. Contract
+and failure semantics are in `ARCHITECTURE.md`; rationale in
+`guides/size_season_heat_population_design.md`.
 Supply exact source/history/price snapshots, `as_of_month`, frozen 30-day `policy`,
 `event_ids`, a nonempty ascending subset of `horizons` from `[1,3,5]`
 (`horizons=[1]` for lead-1-only runs), `history_start`, `source_start`, eligible-history
