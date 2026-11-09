@@ -1,5 +1,6 @@
 """Price version identity digests, verification and bounded per-ticker memory."""
 import tracemalloc
+from copy import deepcopy
 from datetime import date, timedelta
 
 import numpy as np
@@ -125,3 +126,93 @@ def test_size_panel_v17_v5_requires_season_heat_population_receipt_id():
     assert native_registration._size_panel_v17(_panel_document_v17(v4))
     v4.pop("season_heat_population")
     assert native_registration._size_panel_v17(_panel_document_v17(v4))
+
+
+_TARGET_RECIPE = {"schema_version": "earnings_magnitude.v1", "units": "percentage_points",
+    "target": "absolute_earnings_close_to_close_return",
+    "price_basis": "split_neutral_non_dividend_adjusted", "estimand": "conditional_mean",
+    "primary_loss": "pooled_rmse", "secondary_diagnostics": ["mae", "quantile_calibration"]}
+_FOLD_POLICY = {"kind": "expanding_event_year", "group_key": "event_id",
+    "fit_boundary": "min_year_start_and_evaluation_forecast_ceilings",
+    "training_label_availability": "strictly_before_fit_boundary_required_later",
+    "issuer_overlap": "allowed_across_time", "inner_search": "not_defined"}
+_AVAILABILITY = {"basis": "reconstructed_date_bounds", "event_schedule_as_known": "unverified",
+    "source_publication": "unverified"}
+_EVENT_COLUMNS = ["event_id", "ticker", "event_date", "session", "date_conflict", "event_cluster_id"]
+_CALENDAR_ID = content_hash("synthetic-calendar")
+
+
+def _plan_event(event_id, day, pre_close):
+    event = {"event_id": event_id, "ticker": "AAAA", "event_date": day, "session": "AMC",
+             "population_use": "post-release selection"}
+    event["forecasts"] = []
+    for horizon in (5, 3, 1):
+        clock = {"schema_version": "earnings_forecast_cutoff.v1", "event_date": day,
+            "session": "AMC", "horizon_sessions": horizon, "pre_announcement_close": pre_close,
+            "source_session_ceiling": pre_close, "calendar_id": _CALENDAR_ID}
+        event["forecasts"].append({**clock, "cutoff_id": content_hash(clock)})
+    return event
+
+
+def _v16_size_document():
+    """Synthetic v1.6 SIZE registration whose v1.3 baseline passes the sealed magnitude binding."""
+    events = [_plan_event("early", "2022-06-02", "2022-05-20"),
+              _plan_event("late", "2024-06-02", "2024-05-20")]
+    snapshot = {"snapshot_id": "snap-v16", "calendar_version": "cal-v1",
+        "table_versions": {"earnings_events": {"dataset_version_id": "dv-events"},
+                           "daily_market": {"dataset_version_id": "dv-daily"}}}
+    plan = {"schema_version": "magnitude_temporal_plan.v1", "snapshot_id": snapshot["snapshot_id"],
+        "holdout_as_of_month": "2025-01", "random_membership_version": "canonical-event-sha256.v1",
+        "rolling_membership_version": "calendar-months.v1", "training_start": "2021-01-04",
+        "evaluation_years": ["2024"], "horizons": [5, 3, 1], "target_recipe": _TARGET_RECIPE,
+        "fold_policy": _FOLD_POLICY, "events": events, "availability": _AVAILABILITY,
+        "population_input": {"table": "earnings_events", "columns": _EVENT_COLUMNS,
+            "dataset_version": "dv-events",
+            "objects": [{"fragment_id": "f1", "object_id": "o1", "content_hash": content_hash("obj-1")}]},
+        "calendar_input": {"table": "daily_market", "columns": ["date"], "dataset_version": "dv-daily",
+            "snapshot_id": snapshot["snapshot_id"], "calendar_version": snapshot["calendar_version"],
+            "objects": [{"fragment_id": "f2", "object_id": "o2", "content_hash": content_hash("obj-2")}]},
+        "folds": [{"year": "2024", "training_labels_before": "2023-12-29",
+                   "training_candidate_event_ids": ["early"], "evaluation_event_ids": ["late"]}]}
+    plan["plan_id"] = content_hash({k: v for k, v in plan.items() if k != "plan_id"})
+    request = {"as_of_month": "2024-06", "policy": {}, "event_ids": ["early", "late"],
+        "horizons": [1, 3, 5], "history_start": "2020-01-02", "limits": {},
+        "source_start": "2021-01-04", "metadata_limits": {}}
+    context = {"schema_version": "magnitude_panel_context.v5", "source_snapshot": snapshot,
+        "history_snapshot": {"snapshot_id": "hist-v16"},
+        "price_history_snapshot": {"snapshot_id": "price-v16"},
+        "season_heat_population": {"schema_version": "season_heat_population.v1",
+            "receipt_id": content_hash("roster")},
+        "target_events": [{"event_id": event["event_id"]} for event in events], "request": request}
+    context["context_id"] = content_hash({k: v for k, v in context.items() if k != "context_id"})
+    feature = {"snapshot_id": "feat-v16"}
+    history_ref = context["history_snapshot"]["snapshot_id"]
+    price_ref = context["price_history_snapshot"]["snapshot_id"]
+    return {"schema_version": "native_experiment_registration.v1.6",
+        "spec_hash": content_hash("spec"), "execution_plan": {"folds": ["2024"],
+            "price_source": "computed_moves", "seed": 0, "economic_params": {}},
+        "snapshot": snapshot, "scope": "shadow",
+        "source_closure": {"experiments/size_search.py": content_hash("source")},
+        "environment": {"python": "3.14"}, "event_ids": ["early", "late"],
+        "holdouts": {name: plan[name] for name in ("holdout_as_of_month", "random_membership_version",
+            "rolling_membership_version")},
+        "magnitude_request": {"training_start": plan["training_start"],
+            "evaluation_years": plan["evaluation_years"]},
+        "magnitude_plan": plan,
+        "magnitude_execution": native_registration.magnitude_execution_document("2025-01-02"),
+        "size_request": {"schema_version": "magnitude_search_request.v2",
+            "feature_snapshot_id": feature["snapshot_id"], "history_snapshot_id": history_ref},
+        "size_panel_request": {**request, "feature_snapshot_id": feature["snapshot_id"],
+            "history_snapshot": history_ref, "price_history_snapshot": price_ref},
+        "size_panel": {"context": context, "feature_snapshot": feature},
+        "size_comparison": {"schema_version": "size_causal_comparator.v1"}}
+
+
+def test_size_binding_v5_context_requires_season_heat_population_receipt():
+    document = _v16_size_document()
+    assert native_registration._size_binding(document)
+    tampered = deepcopy(document)
+    context = tampered["size_panel"]["context"]
+    context.pop("season_heat_population")
+    context["context_id"] = content_hash({k: v for k, v in context.items() if k != "context_id"})
+    assert not native_registration._size_binding(tampered)

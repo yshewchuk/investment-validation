@@ -28,18 +28,22 @@ def _derive_history_limits(repository, snapshot, event_count, *, margin=2):
     """Private: callers must bound the catalog first (prepare_workspace_panel runs the bounded probe)."""
     if type(event_count) is not int or event_count < 1 or type(margin) is not int or margin < 1:
         raise _limits_refusal()
-    rows = fragments = total_bytes = biggest = 0
+    rows = fragments = total_bytes = biggest = bounds_rows = 0
     for table in HISTORY_TABLES:
         if table not in snapshot.table_versions:
             raise _limits_refusal(table)
         records = repository.fragment_records(snapshot, table)
-        rows += sum(record.row_count for record in records)
+        table_rows = sum(record.row_count for record in records)
+        rows += table_rows
         fragments += len(records)
         total_bytes += sum(record.object_ref.byte_size for record in records)
         biggest = max([biggest] + [record.object_ref.byte_size for record in records])
+        if table == "computed_move_bounds":
+            bounds_rows = table_rows
+    # the panel plans the market-wide season roster, which never exceeds one label per bounds row
     limits = {"max_source_rows": rows * margin, "max_fragments": fragments * margin,
               "max_object_bytes": biggest * margin * EXPANSION_FACTOR, "max_total_bytes": total_bytes * margin,
-              "max_output_rows": event_count * 3 * margin}
+              "max_output_rows": max(event_count * 3 * margin, bounds_rows * margin)}
     if any(value <= 0 for value in limits.values()):
         raise _limits_refusal()
     return limits
