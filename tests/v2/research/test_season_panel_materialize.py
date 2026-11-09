@@ -1,6 +1,7 @@
 # ruff: noqa: F811
 """Season heat panel wiring: published columns, persisted-value oracle, replay, identity and refusal."""
 import json
+from datetime import date, timedelta
 
 import pytest
 
@@ -33,12 +34,17 @@ def heat_targets(context):
 
 
 def synthetic_labels(sessions, targets):
-    """Two labels on each of the twenty sessions before the earliest decision clock, in window."""
+    """Six labels on each of the twenty sessions before the earliest decision clock, in window.
+
+    Six per session, not two, so the 5-session window of the earliest decision clock still holds
+    4 x 6 = 24 labels and mean_abs_5 is non-null somewhere (the mean threshold is 20 labels).
+    """
     start = max(0, min(sessions.index(target["decision_session"]) for target in targets) - 20)
     return [{"event_id": f"synthetic-{offset}-{ticker}", "ticker": ticker,
              "event_date": sessions[start + offset], "available_as_of_date": sessions[start + offset + 1],
              "abs_move": 1.0 + offset / 10}
-            for offset in range(len(sessions[start:start + 20])) for ticker in ("LAB", "LAC")]
+            for offset in range(len(sessions[start:start + 20]))
+            for ticker in ("LAB", "LAC", "LAD", "LAE", "LAF", "LAG")]
 
 
 def prepare(data):
@@ -57,9 +63,9 @@ def test_published_rows_carry_season_columns_and_receipt_lineage(panel_data):
         assert all(name in row for name in table.SEASON)
         assert type(row["season_heat_count_20"]) is int and row["season_heat_count_20"] >= 0
         assert all(row[name] is None or row[name] >= 0. for name in MEANS)
-        assert json.loads(row["lineage"])["season_heat"] == {"receipt_id": content_hash(receipt)}
+        assert json.loads(row["lineage"])["season_heat"] == {"receipt_id": receipt["receipt_id"]}
     assert [json.loads(row["lineage"])["season_heat"] for row in read(data, artifact)["rows"]] \
-        == [{"receipt_id": content_hash(receipt)}] * 3
+        == [{"receipt_id": receipt["receipt_id"]}] * 3
 
 
 def test_stored_season_columns_equal_an_independent_heat_recompute(panel_data, monkeypatch):
@@ -78,9 +84,46 @@ def test_stored_season_columns_equal_an_independent_heat_recompute(panel_data, m
     rows = stored_rows(data, artifact)
     assert all(row["season_heat_count_20"] >= 20 for row in rows)  # labels reach the mean threshold
     assert any(row["season_heat_ratio_20_252"] is not None for row in rows)
+    assert any(row["season_heat_mean_abs_5"] is not None for row in rows)
+    assert any(row["season_heat_mean_abs_60"] is not None for row in rows)
+    assert any(row["season_heat_mean_abs_5"] is None for row in rows)  # latest clock: 0 in its 5-window
     for row in rows:
         assert {name: row[name] for name in table.SEASON} \
             == expected[(row["event_id"], row["source_session_ceiling"])]
+
+
+def test_stored_season_heat_equals_hand_computed_values(panel_data, monkeypatch):
+    """Independent numeric oracle: no compute_season_heat call, only the labels and their windows.
+
+    Uniform 2.0 moves make every populated mean exactly 2.0 and the 20/252 ratio exactly 1.0.
+    """
+    data = panel_data
+    sessions = calendar_sessions(*CALENDAR).days
+    decisions = sorted({sessions.index(target["decision_session"])
+                        for target in heat_targets(prepare(data))})
+    assert decisions == [515, 517, 519]  # horizons 1, 3, 5 of the fixture's single 2024-06-17 event
+    # The three 20-session windows are [496,515], [498,517], [500,519], so sessions 500..514
+    # (decisions[-1] - 19 up to decisions[0] - 1) are inside every window and strictly before the
+    # earliest clock. Two off-target tickers there = (515 - 500) * 2 = 30 labels, each available the
+    # next calendar day, at latest 2024-06-07 + 1 day = 2024-06-08 < the 2024-06-10 first clock.
+    lo, per_session = decisions[-1] - 19, 2
+    expected_count_20 = (decisions[0] - lo) * per_session  # (515 - 500) * 2 = 30
+    labels = [{"event_id": f"oracle-{index}-{ticker}", "ticker": ticker, "event_date": sessions[index],
+               "available_as_of_date": (date.fromisoformat(sessions[index])
+                                        + timedelta(days=1)).isoformat(), "abs_move": 2.0}
+              for index in range(lo, decisions[0]) for ticker in ("LAB", "LAC")]
+    assert len(labels) == expected_count_20 == 30 >= 20  # 20 labels is the mean threshold
+    monkeypatch.setattr(builder.season_population, "read_labels", lambda *args, **kwargs: labels)
+    artifact = size_panel.materialize(data.repository, data.panel_source, **data.panel_request)
+    rows = stored_rows(data, artifact)
+    assert len(rows) == 3
+    for row in rows:
+        # mean_abs_5 is null everywhere: its window holds only [511,515] -> 4 x 2 = 8 labels at the
+        # 2024-06-10 clock, 2 x 2 = 4 at 2024-06-12 and 0 at 2024-06-14, all below the 20 threshold.
+        # mean_abs_20 and mean_abs_60 both hold all 30 labels: 60.0 / 30 = 2.0 exactly.
+        assert row["season_heat_count_20"] == expected_count_20
+        assert [row[name] for name in MEANS] == [None, 2.0, 2.0]
+        assert row["season_heat_ratio_20_252"] == 1.0  # all 30 labels are within 252 sessions too
 
 
 def test_replay_returns_the_same_artifact_without_reading_labels_again(panel_data, monkeypatch):

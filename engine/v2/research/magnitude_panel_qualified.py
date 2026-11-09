@@ -163,7 +163,7 @@ def _season_heat(repository, source, context, roster, sessions, targets):
          "decision_session": cutoff["source_session_ceiling"]}
         for target in targets for cutoff in target["forecasts"]}
     results = season_heat.compute_season_heat(labels, list(heat_targets.values()), sessions)
-    return results, content_hash(receipt)
+    return results, receipt["receipt_id"]
 
 
 def _rows(repository, source, price_snapshot, prepared):

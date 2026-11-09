@@ -414,7 +414,8 @@ def _size_plan_v17(document):
             and _size_placeholder_v17(document["event_ids"]))
 
 
-_SIZE_PANEL_CONTEXTS = ("magnitude_panel_context.v3", "magnitude_panel_context.v4")
+_SIZE_PANEL_CONTEXTS = ("magnitude_panel_context.v3", "magnitude_panel_context.v4",
+                       "magnitude_panel_context.v5")
 
 
 def _size_panel_v17(document):

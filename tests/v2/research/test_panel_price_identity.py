@@ -99,6 +99,6 @@ def test_identity_peak_memory_independent_of_total_rows(monkeypatch):
     assert peak_120 < 8 * 1024 * 1024
 
 
-def test_registration_accepts_v3_and_v4_contexts():
+def test_registration_accepts_v3_v4_and_v5_contexts():
     assert native_registration._SIZE_PANEL_CONTEXTS == (
-        "magnitude_panel_context.v3", "magnitude_panel_context.v4")
+        "magnitude_panel_context.v3", "magnitude_panel_context.v4", "magnitude_panel_context.v5")
