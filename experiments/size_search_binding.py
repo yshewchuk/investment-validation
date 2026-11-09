@@ -136,7 +136,8 @@ def prepare(repository, spec, request, panel_request, *, scope, training_start, 
     _require(binding["execution_plan"]["runner"] == "experiments/size_search.py")
     binding["source_closure"] = sources
     _require(binding["magnitude_plan"]["evaluation_years"] == schedule["request"]["outer_years"])
-    panel_columns = _panel_columns(request["schema_version"], recipe(_panel_subset(request["schema_version"]))["model_columns"])
+    # HMOS season columns join the panel read when slice 5 flips the contract to v4; until then the projection stays HMO.
+    panel_columns = _panel_columns(request["schema_version"], recipe("HMO")["model_columns"])
     panel = read_panel(repository, from_document(SnapshotRef, binding["snapshot"]), panel_request,
                         columns=panel_columns)
     context = panel["context"]
@@ -366,8 +367,9 @@ def fold_inputs(repository, binding, fold, *, plan=None):
         for group in folds))
     source = from_document(SnapshotRef, binding["snapshot"])
     started = time.monotonic()
+    # HMOS season columns join the panel read when slice 5 flips the contract to v4; until then the projection stays HMO.
     panel_columns = _panel_columns(binding["size_request"].get("schema_version"),
-        recipe(_panel_subset(binding["size_request"].get("schema_version")))["model_columns"])
+        recipe("HMO")["model_columns"])
     panel = _stored_panel(repository, source, binding, panel_columns)
     participants = set(fold["training_candidate_event_ids"] + fold["evaluation_event_ids"])
     events = {e["event_id"]: e for e in panel["context"]["target_events"]}

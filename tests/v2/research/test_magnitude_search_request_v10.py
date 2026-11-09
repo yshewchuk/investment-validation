@@ -3,11 +3,12 @@ import pytest
 from engine.v2.foundation import content_hash
 from engine.v2.ops.errors import OpsError
 from engine.v2.research.eligibility_policy import eligibility_policy
-from engine.v2.research.magnitude_panel_qualified_table import recipe
+from engine.v2.research.magnitude_panel_qualified_table import admit_columns, recipe
 from experiments.magnitude_search_request import validate_workers
 from experiments.magnitude_search_request_schema import LATEST
 from experiments.magnitude_search_request_versions import compile_request
 from experiments.magnitude_search_request_v3 import _space
+from experiments.size_search_binding import _panel_columns
 
 
 _V9_SETS = ["H", "HM", "HMO", "MO-", "M"]
@@ -120,17 +121,30 @@ def test_v10_accepts_the_hmos_hash_without_the_hmos_set():
 
 @pytest.mark.parametrize("feature_sets", [[], ["HMOS", "M"], ["M", "M"], ["HMO", "x"]])
 def test_v10_refuses_empty_duplicate_unknown_or_out_of_order_feature_sets(feature_sets):
-    with pytest.raises(OpsError):
+    with pytest.raises(OpsError, match="nonempty ordered subset"):
         _space({"schema_version": "magnitude_search_request.v10",
                 "feature_sets": feature_sets, "space": {}})
 
 
 def test_v9_refuses_the_hmos_set():
-    with pytest.raises(OpsError):
+    with pytest.raises(OpsError, match="nonempty ordered subset"):
         _space({"schema_version": "magnitude_search_request.v9",
                 "feature_sets": ["HMOS"], "space": {}})
+
+
+def test_v10_panel_projection_is_admissible():
+    admit_columns(_panel_columns(
+        "magnitude_search_request.v10", recipe("HMO")["model_columns"]))
 
 
 def test_v10_workers_use_the_existing_bounded_worker_contract():
     assert validate_workers(
         {"schema_version": "magnitude_search_request.v10", "workers": 4}) == 4
+
+
+@pytest.mark.parametrize("workers", [0, 65])
+def test_v10_workers_refuse_what_v9_refuses(workers):
+    with pytest.raises(OpsError):
+        validate_workers({"schema_version": "magnitude_search_request.v9", "workers": workers})
+    with pytest.raises(OpsError):
+        validate_workers({"schema_version": "magnitude_search_request.v10", "workers": workers})

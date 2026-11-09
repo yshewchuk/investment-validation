@@ -110,7 +110,8 @@ def _space(request):
         and all(type(subset) is str and subset in allowed_sets for subset in feature_sets)
         and feature_sets == [subset for subset in allowed_sets if subset in feature_sets])
     v2._require(valid_sets if version >= 9 else feature_sets == v2._SETS,
-                "stage-2 v9 requires a nonempty ordered subset of H/HM/HMO/MO-/M[/HMOS]"
+                (f"stage-2 v{version} requires a nonempty ordered subset of H/HM/HMO/MO-/M"
+                 + ("/HMOS" if version >= 10 else ""))
                 if version >= 9 else "stage-2 requires exactly ordered H/HM/HMO feature sets")
     space = request["space"]
     version = request["schema_version"]
