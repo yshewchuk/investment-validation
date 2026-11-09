@@ -171,11 +171,10 @@ def _check_source_bounds(bounds, records, population, anchors, latest_decision):
 
 def _admit_roster(repository, snapshot, retained, *, as_of_month, limits, latest_decision,
                   purpose):
-    """Admit the source and resolve the retained roster through the population and
+    """Resolve the retained roster through the population and
     native bounds, refusing on any contradiction before an outcome opens.
 
     Returns (population, anchors, contract, ids)."""
-    admit_source(repository, snapshot, limits)
     if len(retained) > limits["max_output_rows"]:
         raise fail("RESULT_LIMIT_EXCEEDED", "season roster exceeds max_output_rows")
     ids = [item["event_id"] for item in retained]
@@ -208,13 +207,17 @@ def read_labels(repository, snapshot, retained, *, as_of_month, limits, latest_d
     max_output_rows caps the retained roster before any further read.
 
     Returns season_heat label dicts (event_id, ticker, event_date, available_as_of_date,
-    abs_move) in retained order. Source admission runs before any outcome opens, so a
+    abs_move) in retained order. Source admission runs on every call, including an
+    empty roster, and before any outcome opens, so a
     held-out label refuses the whole read; nothing is cached across calls, nothing is
     retried, and any refusal propagates without a partial result. latest_decision is plan_roster's
     window end (receipt["window"]["latest_decision"]), which mirrors the roster plan that never
     retains labels available after it, so any such roster item refuses the read.
     No production caller exists until the panel wiring slice (slice 5 of the season heat plan).
     """
+    admit_source(repository, snapshot, limits)
+    if type(retained) is not list:
+        raise fail("CONTRACT_MISMATCH", "retained roster must be a list")
     if not retained:
         return []
     population, anchors, contract, ids = _admit_roster(repository, snapshot, retained,

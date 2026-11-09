@@ -146,13 +146,14 @@ def test_labels_match_the_roster_in_retained_order(source):
         assert label["available_as_of_date"] == (date.fromisoformat(day) + timedelta(days=2)).isoformat()
 
 
-def test_empty_retained_returns_nothing_and_touches_no_repository():
+def test_empty_retained_admits_once_and_touches_no_repository(admit_recorder):
     class Nothing:
         def __getattr__(self, name):
             raise AssertionError(f"empty roster touched {name}")
 
     assert season_population.read_labels(Nothing(), None, [], as_of_month=MONTH, limits=LIMITS,
         latest_decision="2099-12-31") == []
+    assert admit_recorder == [LIMITS]
 
 
 def test_skipped_outcome_refuses_contract_mismatch(source):
@@ -343,6 +344,17 @@ def test_invalid_limits_refuse_before_any_scan(source, monkeypatch):
     with pytest.raises(DataError) as caught:
         season_population.read_labels(case.repository, case.snapshot, case.retained,
             as_of_month=MONTH, limits=limits, latest_decision="2099-12-31")
+    assert caught.value.code == "CONTRACT_MISMATCH"
+    assert _moves_scans(case.repository) == []
+
+
+def test_empty_retained_with_incomplete_limits_still_refuses_contract_mismatch(source, monkeypatch):
+    monkeypatch.setattr(season_population, "admit_source", eligible_history.admit_source)
+    case = source([(DAYS[0], "AAA", 2.0)])
+    limits = {key: value for key, value in LIMITS.items() if key != "max_output_rows"}
+    with pytest.raises(DataError) as caught:
+        season_population.read_labels(case.repository, case.snapshot, [], as_of_month=MONTH,
+            limits=limits, latest_decision="2099-12-31")
     assert caught.value.code == "CONTRACT_MISMATCH"
     assert _moves_scans(case.repository) == []
 
