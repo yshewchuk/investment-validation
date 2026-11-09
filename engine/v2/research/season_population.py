@@ -4,8 +4,10 @@ plan_roster reads the canonical population, the native bounds table and the
 whole-table computed-move fragment index, then binds anchors to fragments with
 the shared outcome_binding helpers, so the roster digest binds label values
 without opening a single outcome object. read_labels is the value build: it
-admits the roster ids through the population, then opens exactly those outcome
-objects with one scan per label, refusing on any contradiction.
+admits the roster ids through the population, then reads exactly those outcome
+objects: each retained label's object is read at most once; adjacent labels of
+one ticker may share a run scan (event_history.plan_with_reader), refusing on
+any contradiction.
 """
 import math
 from datetime import date, timedelta
@@ -143,8 +145,13 @@ def _label_move(rows, event, item):
     return _abs_move(rows[0]["realized_move_pct"])
 
 
-def read_labels(repository, snapshot, retained, *, as_of_month, purpose="selection"):
-    """Value-build read of the planned roster's realized labels; one scan per retained label.
+def read_labels(repository, snapshot, retained, *, as_of_month, limits, purpose="selection"):
+    """Value-build read of the planned roster's realized labels.
+
+    Each retained label's object is read at most once; adjacent labels of one
+    ticker may share a run scan (event_history.plan_with_reader). limits is the
+    eligible-history limits dict (same as plan_roster); its max_object_bytes
+    bounds the population read.
 
     Returns season_heat label dicts (event_id, ticker, event_date, available_as_of_date,
     abs_move) in retained order. Population admission runs before any outcome opens, so a
@@ -158,7 +165,7 @@ def read_labels(repository, snapshot, retained, *, as_of_month, purpose="selecti
     if len(set(ids)) != len(ids):
         raise fail("HOLDOUT_ACCESS_DENIED", "roster repeats an event id")
     population = load_population(repository, snapshot, as_of_month=as_of_month, purpose=purpose,
-        event_ids=ids)
+        event_ids=ids, max_object_bytes=limits["max_object_bytes"])
     if set(population.event_id) != set(ids) or len(population) != len(ids):
         raise fail("HOLDOUT_ACCESS_DENIED", "population differs from the planned roster")
     contract = repository.table_contract(snapshot, "computed_moves")

@@ -16,6 +16,7 @@ from tests.v2.research.test_season_population_roster import (
     DAYS as ROSTER_DAYS,
     FIRST,
     LAST,
+    LIMITS,
     bounds_row,
     plan,
     record,
@@ -74,7 +75,7 @@ def source(tmp_path):
 
 def _read(case, **kwargs):
     return season_population.read_labels(case.repository, case.snapshot, case.retained,
-        as_of_month=MONTH, **kwargs)
+        as_of_month=MONTH, limits=LIMITS, **kwargs)
 
 
 def _moves_scans(repository, start=0):
@@ -122,7 +123,7 @@ def test_empty_retained_returns_nothing_and_touches_no_repository():
         def __getattr__(self, name):
             raise AssertionError(f"empty roster touched {name}")
 
-    assert season_population.read_labels(Nothing(), None, [], as_of_month=MONTH) == []
+    assert season_population.read_labels(Nothing(), None, [], as_of_month=MONTH, limits=LIMITS) == []
 
 
 def test_skipped_outcome_refuses_contract_mismatch(source):
@@ -235,6 +236,22 @@ def test_one_scan_per_label_and_a_second_call_is_a_new_build(source):
     assert len(_moves_scans(case.repository, start)) == 2 * len(DAYS)
 
 
+def test_population_read_is_bound_by_the_limit_max_object_bytes(source, monkeypatch):
+    case = source([(day, ticker, 1.0) for day, ticker in zip(DAYS, TICKERS)])
+    calls = []
+    real_load = season_population.load_population
+
+    def spy(repository, snapshot, **kwargs):
+        calls.append(kwargs)
+        return real_load(repository, snapshot, **kwargs)
+
+    monkeypatch.setattr(season_population, "load_population", spy)
+    labels = season_population.read_labels(case.repository, case.snapshot, case.retained,
+        as_of_month=MONTH, limits={**LIMITS, "max_object_bytes": 12345})
+    assert len(labels) == len(DAYS)
+    assert [call["max_object_bytes"] for call in calls] == [12345]
+
+
 # (event_day, pre_close, post_close): post_close + 1 calendar day is the availability.
 # AMC labels close on their own session (decision E-1 close for the target session after it);
 # BMO labels carry the prior-close bracket and close one session later (decision E-2 close).
@@ -274,6 +291,6 @@ def test_availability_boundary_and_the_read_of_a_retained_label(monkeypatch, ses
         ([(event, object(), planned) for event in candidates.itertuples(index=False)],
          lambda event, request: rows))
     repository = SimpleNamespace(table_contract=lambda snapshot, name: COMPUTED_MOVES_CONTRACT)
-    assert season_population.read_labels(repository, None, [item], as_of_month=MONTH) == [
+    assert season_population.read_labels(repository, None, [item], as_of_month=MONTH, limits=LIMITS) == [
         {"event_id": "ev-in", "ticker": "IN", "event_date": in_day, "available_as_of_date": LAST,
             "abs_move": 0.75}]
