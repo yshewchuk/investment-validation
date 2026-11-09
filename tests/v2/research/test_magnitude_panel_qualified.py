@@ -855,7 +855,8 @@ def test_panel_rows_consume_canonical_history_order_across_prefix_tickers(monkey
         "confirmed_metadata": {"sequences": [{"ticker": "M"}, {"ticker": "MA"}]},
         "price_row_digests": {t: {"rows": 1, "digest": content_hash([{"date": "2024-01-01"}])} for t in ("M", "MA", "^GSPC")},
         "quote_eligibility_plan": {"retained_event_ids": []}, "daily_source_start": "2023-01-01",
-        "season_heat_population": {"window": {"latest_decision": "2024-01-01"}},
+        "season_heat_population": {"receipt_id": "sha256:test",
+            "window": {"latest_decision": "2024-01-01"}},
         "context_id": "panel-context"}
     admitted = {"context": {"context_id": "history-context"}, "rows": rows}
     prepared = (context, admitted, [], [], [], ("2024-01-01",))

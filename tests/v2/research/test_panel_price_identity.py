@@ -98,7 +98,30 @@ def test_identity_peak_memory_independent_of_total_rows(monkeypatch):
     assert peak_120 < 3 * peak_10
     assert peak_120 < 8 * 1024 * 1024
 
-
 def test_registration_accepts_v3_v4_and_v5_contexts():
     assert native_registration._SIZE_PANEL_CONTEXTS == (
-        "magnitude_panel_context.v3", "magnitude_panel_context.v4", "magnitude_panel_context.v5")
+        "magnitude_panel_context.v3", "magnitude_panel_context.v4",
+        "magnitude_panel_context.v5")
+
+
+def _panel_document_v17(context):
+    return {"snapshot": "snap",
+        "size_panel": {"context": context, "feature_snapshot": {"snapshot_id": "feat"}},
+        "size_request": {"schema_version": "magnitude_search_request.v2"},
+        "size_comparison": {"schema_version": "size_causal_comparator.v1"},
+        "size_panel_request": {}}
+
+
+def test_size_panel_v17_v5_requires_season_heat_population_receipt_id():
+    context = {"schema_version": "magnitude_panel_context.v5", "context_id": "ctx",
+        "source_snapshot": "snap", "target_events": {"$size_artifact": "events"},
+        "request": {"event_ids": {"$size_artifact": "ids"}}}
+    assert not native_registration._size_panel_v17(_panel_document_v17(context))
+    context["season_heat_population"] = {"window": {"latest_decision": "2024-01-01"}}
+    assert not native_registration._size_panel_v17(_panel_document_v17(context))
+    context["season_heat_population"]["receipt_id"] = "sha256:test"
+    assert native_registration._size_panel_v17(_panel_document_v17(context))
+    v4 = {**context, "schema_version": "magnitude_panel_context.v4"}
+    assert native_registration._size_panel_v17(_panel_document_v17(v4))
+    v4.pop("season_heat_population")
+    assert native_registration._size_panel_v17(_panel_document_v17(v4))

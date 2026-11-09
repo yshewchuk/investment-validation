@@ -418,6 +418,14 @@ _SIZE_PANEL_CONTEXTS = ("magnitude_panel_context.v3", "magnitude_panel_context.v
                        "magnitude_panel_context.v5")
 
 
+def _size_panel_v5_receipt(context):
+    if context.get("schema_version") != "magnitude_panel_context.v5":
+        return True
+    population = context.get("season_heat_population")
+    return (isinstance(population, dict)
+            and isinstance(population.get("receipt_id"), str))
+
+
 def _size_panel_v17(document):
     panel = document["size_panel"]
     if not isinstance(panel, dict) or set(panel) != {"context", "feature_snapshot"}:
@@ -432,7 +440,8 @@ def _size_panel_v17(document):
             or not _size_placeholder_v17(context.get("target_events"))
             or not isinstance(request, dict)
             or not _size_placeholder_v17(request.get("event_ids"))
-            or not isinstance(feature.get("snapshot_id"), str)):
+            or not isinstance(feature.get("snapshot_id"), str)
+            or not _size_panel_v5_receipt(context)):
         return False
     return (qualified(request_version(document["size_request"]["schema_version"]))
             and document["size_comparison"]["schema_version"] == "size_causal_comparator.v1"
