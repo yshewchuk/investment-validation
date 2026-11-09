@@ -387,7 +387,8 @@ def _prepare(conn, store, registration, request, *, plan_schema=None):
     if qualified:
         from experiments.size_search_binding import prepare_plan
         default_schema = plan_schema_for_request(request)
-        return prepare_plan(conn, store, registration, request, plan_schema=plan_schema or default_schema)
+        return prepare_plan(conn, store, registration, request,
+                            plan_schema=plan_schema or default_schema)
     request, count = _request(request)
     verify_native_registration(conn, store, registration)
     binding = registration.document
@@ -438,8 +439,9 @@ def read_search_plan(conn, store, registration, request, ref):
         schemas = ()
     if not isinstance(ref, ArtifactRef) or ref.schema_ref not in schemas:
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search plan reference has the wrong schema")
+    qualified = is_qualified_request(parsed_version)
     expected = _prepare(conn, store, registration, request,
-                        plan_schema=ref.schema_ref if is_qualified_request(parsed_version) else None)
+                        plan_schema=ref.schema_ref if qualified else None)
     payload = canonical_json(expected).encode()
     if ref != artifact_reference(payload, ref.schema_ref):
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search plan reference differs from its complete binding")

@@ -29,7 +29,7 @@ from experiments import magnitude_search_trials as trials
 from experiments import native_registration as native
 from experiments.magnitude_search_inputs import load_inputs, publish_inputs
 from experiments.magnitude_search_plan import seal_search_plan
-from experiments.magnitude_search_selection import ZeroComparatorError
+from experiments.magnitude_search_selection import CURRENT_TIE_RULE, ZeroComparatorError
 from tests.v2.research.magnitude_trial_support import (
     CUTOFF,
     HISTORY,
@@ -142,6 +142,7 @@ def test_blended_freeze_uses_admitted_inner_history_and_one_lead1_row_per_event(
         "lead_weights": {"1": 1.0, "3": 0.0, "5": 0.0},
         "large_move_threshold_pct": 10.0, "tie_band_floor": 0.005,
     }
+    plan["selection"]["ties"] = CURRENT_TIE_RULE
     monkeypatch.setattr(case.recorder, "_admit", lambda: plan)
     with no_fit_guard():
         frozen = case.recorder.freeze()
@@ -165,6 +166,7 @@ def test_blended_freeze_refuses_nonzero_candidate_against_zero_history_mean(case
         "lead_weights": {"1": 1.0, "3": 0.0, "5": 0.0},
         "large_move_threshold_pct": 10.0, "tie_band_floor": 0.005,
     }
+    plan["selection"]["ties"] = CURRENT_TIE_RULE
     monkeypatch.setattr(case.recorder, "_admit", lambda: plan)
     monkeypatch.setattr(trials, "history_mean_rows", lambda cohort, validation: [
         {"event_id": row["event_id"], "horizon_sessions": 1,
@@ -176,6 +178,42 @@ def test_blended_freeze_refuses_nonzero_candidate_against_zero_history_mean(case
             "has a zero-error history_mean comparator"):
         with no_fit_guard():
             case.recorder.freeze()
+
+
+def test_blended_freeze_refuses_unsupported_selection_ties_before_selection(case, monkeypatch):
+    _all(case)
+    plan = copy.deepcopy(case.plan)
+    plan["request"]["selection"] = {
+        "metric_weights": {"rmse": 0.6, "mae": 0.3, "large_move_underprediction": 0.1},
+        "lead_weights": {"1": 1.0, "3": 0.0, "5": 0.0},
+        "large_move_threshold_pct": 10.0, "tie_band_floor": 0.005,
+    }
+    plan["selection"]["ties"] = "band_then_id"
+    monkeypatch.setattr(case.recorder, "_admit", lambda: plan)
+    with _assert_error("EXPERIMENT_IDENTITY_CONFLICT",
+            "sealed search plan has an unsupported selection tie rule"):
+        with no_fit_guard():
+            case.recorder.freeze()
+    assert case.recorder._read("selection") is None
+
+
+def test_blended_freeze_refuses_missing_selection_ties_before_selection(case, monkeypatch):
+    _all(case)
+    plan = copy.deepcopy(case.plan)
+    plan["request"]["selection"] = {
+        "metric_weights": {"rmse": 0.6, "mae": 0.3, "large_move_underprediction": 0.1},
+        "lead_weights": {"1": 1.0, "3": 0.0, "5": 0.0},
+        "large_move_threshold_pct": 10.0, "tie_band_floor": 0.005,
+    }
+    for tie_key in ("ties", "tie_break"):
+        plan["selection"].pop(tie_key, None)
+    assert "ties" not in plan["selection"]
+    monkeypatch.setattr(case.recorder, "_admit", lambda: plan)
+    with _assert_error("EXPERIMENT_IDENTITY_CONFLICT",
+            "sealed search plan has an unsupported selection tie rule"):
+        with no_fit_guard():
+            case.recorder.freeze()
+    assert case.recorder._read("selection") is None
 
 
 def test_blended_freeze_keeps_nonleading_undefined_yearly_ratio_null(case, monkeypatch):
@@ -191,6 +229,7 @@ def test_blended_freeze_keeps_nonleading_undefined_yearly_ratio_null(case, monke
         "lead_weights": {"1": 1.0, "3": 0.0, "5": 0.0},
         "large_move_threshold_pct": 10.0, "tie_band_floor": 0.005,
     }
+    plan["selection"]["ties"] = CURRENT_TIE_RULE
     monkeypatch.setattr(case.recorder, "_admit", lambda: plan)
     original = trials.blended_event_score
 
@@ -209,6 +248,46 @@ def test_blended_freeze_keeps_nonleading_undefined_yearly_ratio_null(case, monke
     assert math.isfinite(score["blend_score"])
     assert score["yearly"]["2024"] is None
     assert selection["selected_candidate_id"] == first
+
+
+def test_blended_freeze_handles_leading_undefined_yearly_ratio_null(case, monkeypatch):
+    first = case.plan["candidates"][0]["candidate_id"]
+    _all(case, values={args: 7.0 if args[2] == first else 1000.0
+                       for args in trial_cases(case)})
+    outer = next(item for item in case.plan["folds"] if len(item["inner"]) == 1)
+    inner_year = outer["inner"][0]["year"]
+    plan = copy.deepcopy(case.plan)
+    plan["request"]["selection"] = {
+        "metric_weights": {"rmse": 0.6, "mae": 0.3, "large_move_underprediction": 0.1},
+        "lead_weights": {"1": 1.0, "3": 0.0, "5": 0.0},
+        "large_move_threshold_pct": 10.0, "tie_band_floor": 0.005,
+    }
+    plan["selection"]["ties"] = "lowest_score_then_candidate_id_ascending"
+    monkeypatch.setattr(case.recorder, "_admit", lambda: plan)
+    original = trials.blended_event_score
+    matching_calls = []
+
+    def blended(candidate_rows, history_rows, **kwargs):
+        if (candidate_rows is not history_rows
+                and all(row["predicted_absolute_move_pct"] == 7.0
+                        for row in candidate_rows)):
+            matching_calls.append(candidate_rows)
+            if len(matching_calls) == 2:
+                raise ZeroComparatorError("zero comparator")
+        return original(candidate_rows, history_rows, **kwargs)
+
+    monkeypatch.setattr(trials, "blended_event_score", blended)
+    with no_fit_guard():
+        frozen = case.recorder.freeze()
+    selection = next(item for item in frozen["selections"]
+                     if item["outer_year"] == outer["outer"]["year"])
+    score = next(item for item in selection["scores"] if item["candidate_id"] == first)
+    assert math.isfinite(score["blend_score"])
+    assert score["yearly"][inner_year] is None
+    assert selection["selected_candidate_id"] == first
+    assert selection["tie_band"]["standard_error"] is None
+    assert selection["tie_band"]["width"] == plan["request"]["selection"]["tie_band_floor"]
+    assert selection["tie_band"]["tied_candidate_ids"] == [first]
 
 
 def test_execute_admits_sealed_registration_once_before_start(case, monkeypatch):

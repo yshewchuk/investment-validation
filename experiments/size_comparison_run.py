@@ -10,6 +10,7 @@ from engine.v2.ops.migrations import require_current
 from experiments.magnitude_search_execution import run_fitted_trial
 from experiments.magnitude_search_inputs import load_inputs, publish_inputs
 from experiments.magnitude_search_records import MIGRATIONS, OWNER, append_record, read_record
+from experiments.magnitude_search_selection import selection_contract_tie_rule
 from experiments.size_comparator import COLUMNS, _values, fit_evidence, recipe
 from experiments.size_job_budget import resolved_limits
 from experiments.size_search_binding import fold_inputs, prepare_plan
@@ -63,6 +64,11 @@ def execute(conn, store, repository, registration, plan, fold, *, limits, replay
         _equal(plan, iv.prepare_plan(conn, store, registration, plan["request"]))
         execution = iv.execution(plan)
     else:
+        try:
+            selection_contract_tie_rule(plan.get("selection"))
+        except ValueError:
+            raise fail("EXPERIMENT_IDENTITY_CONFLICT",
+                       "sealed search plan has an unsupported selection tie rule") from None
         _equal(plan, prepare_plan(conn, store, registration, plan["request"],
                                   plan_schema=plan.get("schema_version")))
         execution = {"schema_version": "size_comparison_execution.v1", "features": COLUMNS,
@@ -93,8 +99,11 @@ def execute(conn, store, repository, registration, plan, fold, *, limits, replay
         _equal(sorted(terminal) if isinstance(terminal, dict) else None, ["inputs_id", "result"])
         _equal(read("start"), started)
         stored = load_inputs(store, read("inputs"), terminal["inputs_id"])
-    inputs = stored if regression and terminal is not None else admit(
-        repository, registration.document, fold, **({"plan": plan} if regression else {}))
+    if regression:
+        inputs = stored if terminal is not None else admit(
+            repository, registration.document, fold, plan=plan)
+    else:
+        inputs = admit(repository, registration.document, fold)
     if regression:
         _equal(inputs.get("target"), plan["target"])
     expected = evidence(inputs, fold, plan)

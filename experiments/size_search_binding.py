@@ -28,6 +28,7 @@ from experiments.label_availability import label_cutoff_reason as _label_cutoff_
 from experiments.magnitude_candidate_recipe import candidate_recipe
 from experiments.magnitude_search_request_schema import allows_size_family, request_version
 from experiments.magnitude_search_request_versions import compile_request
+from experiments.magnitude_search_selection import CURRENT_TIE_RULE, LEGACY_TIE_RULE
 from experiments.native_registration import (
     MAX_NATIVE_EVIDENCE_BYTES,
     NativeRegistration,
@@ -180,9 +181,10 @@ def _sources():
 
 
 def verify_installation(binding):
+    sources = _sources()
     _require(binding["schema_version"] in ("native_experiment_registration.v1.6", SCHEMA)
         and binding["environment"] == environment_identity(1)
-        and binding["source_closure"] == _sources())
+        and binding["source_closure"] == sources)
     _require(binding["size_comparison"] == comparison_recipe())
 
 
@@ -302,9 +304,10 @@ def prepare_plan(conn, store, registration, request, *, plan_schema=None):
         candidates.append({**identity, "candidate_id": content_hash(identity)})
     requested_selection = schedule["request"].get("selection")
     if requested_selection is None:
-        selection_contract = {"metric": "inner_pooled_rmse", "ties": "candidate_id_ascending", "retries": 0,
+        selection_contract = {"metric": "inner_pooled_rmse", "ties": LEGACY_TIE_RULE, "retries": 0,
                               "outer": "frozen_selected_only", "final_read_authority": "none"}
     else:
+        ties = CURRENT_TIE_RULE
         selection_contract = {
             "metric": "inner_pooled_history_mean_normalized_event_blend",
             "metric_weights": requested_selection["metric_weights"],
@@ -314,7 +317,7 @@ def prepare_plan(conn, store, registration, request, *, plan_schema=None):
             "comparator": "history_mean_report_only",
             "tie_band": "max_sample_se_of_best_pooled_candidate_yearly_blends_or_floor",
             "tie_band_floor": requested_selection["tie_band_floor"],
-            "ties": "candidate_id_ascending",
+            "ties": ties,
             "retries": 0,
             "outer": "frozen_selected_only",
             "final_read_authority": "none",
