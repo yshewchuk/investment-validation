@@ -140,7 +140,9 @@ The [research-extension boundaries](../ARCHITECTURE.md#size-research-extension-b
 preserve the existing target, clocks, comparator and admission/evaluation controls.
 This direction adds no executable request, data acquisition or run authority.
 
-See [the stage-2 design](STAGE2_DESIGN.md) for causal panel features, bounded
-inner-only selection and a proposed matched legacy comparison; it is not implemented.
+Stage 2 status (stated once): its scope is accepted in [the stage-2 design](STAGE2_DESIGN.md)
+(causal panel features, bounded inner-only selection, a proposed matched legacy
+comparison), but execution is pending: nothing is preregistered or run. Library
+support described in the experiments architecture is not a Stage 2 execution.
 Stage-2 scope, acceptance criteria and the PR split (design section 5) live in that
 design; this Spec adds nothing until a stage-2 PR is accepted.
