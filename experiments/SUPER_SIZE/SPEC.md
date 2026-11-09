@@ -86,10 +86,13 @@ inner RMSE and break exact ties by candidate ID. Requests with a blended
 declaration score one lead-1 row per event: candidate pooled RMSE, MAE and
 large-move underprediction are normalized by the matching `history_mean` metrics
 and weighted 0.6/0.3/0.1.
-Candidates within `max(sample SE of the pooled leader's yearly blends, 0.005)`
-of the best pooled blend tie, with the lowest candidate ID selected. Outer
-evaluation is reserved for that candidate.
-Latest-outer selection defines the prospective frozen winner; no winner exists until recorded execution.
+New blended plans select the lowest pooled blend score, breaking exact
+blend-score ties by candidate ID; `max(sample SE of the pooled leader's yearly
+blends, 0.005)` and its candidate list are diagnostics only and never choose.
+A sealed plan using the former candidate-id-within-band rule fails current
+identity verification and must be re-prepared. Outer evaluation is reserved for
+the selected candidate.
+The latest outer fold's frozen inner selection defines the prospective winner; no winner exists until recorded execution.
 Every planned candidate must be attempted and failures recorded before selection.
 This command neither reads outcomes nor runs the search.
 

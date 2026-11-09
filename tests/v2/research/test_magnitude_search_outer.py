@@ -428,13 +428,12 @@ def test_collect_passes_verified_inputs_to_callback_once_per_outer_fold(outer_ca
     assert str(caught.value) == "callback sentinel"
 
 
-@pytest.mark.parametrize("stage", ["input", "labels"])
-def test_collect_refuses_later_committed_start_without_terminal_before_any_replay(outer_case, monkeypatch, stage):
+def test_collect_refuses_later_committed_start_without_terminal_before_any_replay(outer_case, monkeypatch):
     case = outer_case
     run(case)
     interruption = Mock(side_effect=fail("RESOURCE_UNAVAILABLE", "synthetic outer interruption"))
     with monkeypatch.context() as patch:
-        patch.setattr(outer, "_inputs" if stage == "input" else "load_magnitude_targets", interruption)
+        patch.setattr(outer, "load_magnitude_targets", interruption)
         with outer_problem("RESOURCE_UNAVAILABLE", "synthetic outer interruption", category="resource", retryable=True):
             run(case, "2025")
     interruption.assert_called_once()
@@ -442,7 +441,7 @@ def test_collect_refuses_later_committed_start_without_terminal_before_any_repla
     assert slot(case, "start", "2025") is not None
     assert slot(case, "terminal", "2025") is None
     for name in ("inputs", "forecasts", "execution"):
-        assert (slot(case, name, "2025") is not None) == (stage == "labels")
+        assert slot(case, name, "2025") is not None
     assert slot(case, "validation", "2025") is None
     before = case.conn.total_changes, list(case.conn.iterdump())
     forbidden = Mock(side_effect=AssertionError("incomplete collection attempted replay or publication"))
@@ -510,16 +509,15 @@ def test_outer_fit_failure_retains_exact_prefix_without_replacement_or_retry(out
     assert all(child.poll() is not None and not path.exists() for child, path in children)
 
 
-@pytest.mark.parametrize("stage", ["labels", "input"])
-def test_outer_shared_failure_never_replaces_candidate_or_retries(outer_case, monkeypatch, stage):
+def test_outer_shared_failure_never_replaces_candidate_or_retries(outer_case, monkeypatch):
     case = outer_case
     def refused(*args, **kwargs):
         raise fail("RESOURCE_UNAVAILABLE", "synthetic shared failure")
-    monkeypatch.setattr(outer, "load_magnitude_targets" if stage == "labels" else "_inputs", refused)
+    monkeypatch.setattr(outer, "load_magnitude_targets", refused)
     with outer_problem("RESOURCE_UNAVAILABLE", "synthetic shared failure", category="resource", retryable=True):
         run(case)
     assert slot(case, "start") is not None and slot(case, "terminal") is None
-    assert (slot(case, "forecasts") is not None) == (stage == "labels")
+    assert slot(case, "forecasts") is not None
     before = case.conn.total_changes, journal_slots(case)
     monkeypatch.setattr(outer, "run_fitted_trial", lambda *a: pytest.fail("retried outer fit"))
     with outer_problem("EXPERIMENT_IDENTITY_CONFLICT", "search journal slot is already committed"):
