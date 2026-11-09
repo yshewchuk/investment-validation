@@ -91,28 +91,11 @@ def read(data, artifact, **changes):
 
 
 def test_public_full_table_and_independent_missing_realized_quote(panel_data, monkeypatch):
-    from engine.v2.research.eligible_history_table import SEASON_HEAT_FEATURES
-    from engine.v2.research.magnitude_history_table import FEATURES as H11
-
     data = panel_data
     poison_outcomes(monkeypatch, data.repository, data.panel_source,
                     ["2023-03-20", "2023-04-03", "2023-05-15", "2024-06-17"])
     artifact = size_panel.materialize(data.repository, data.panel_source, **data.panel_request)
-    assert artifact["feature_snapshot"] is not None
-    published_contract = data.repository.table_contract(artifact["feature_snapshot"], table.TABLE)
-    published_names = {c.name for c in published_contract.columns}
-    assert set(H11) <= published_names
-    assert not (set(SEASON_HEAT_FEATURES) & published_names)
     result = read(data, artifact)
-    for row in result["rows"]:
-        assert set(H11) <= set(row)
-        assert not (set(SEASON_HEAT_FEATURES) & set(row))
-    stored_policies = [d["policy"] for f in table.feature_dictionary("HMO")
-                       for d in f["source_dependencies"] if d["role"] == "stored_history"]
-    assert stored_policies
-    for policy in stored_policies:
-        assert policy["schema_version"] == "magnitude_eligible_history_source.v1"
-        assert policy["recipe_schema"] == "eligible_history_features.v1"
     assert [r["horizon_sessions"] for r in result["rows"]] == [1, 3, 5]
     assert artifact["context"]["schema_version"] == "magnitude_panel_context.v4"
     assert "price_row_metadata" not in artifact["context"]

@@ -101,7 +101,7 @@ def test_rebuild_does_not_read_protected_embargoed_null_or_target_outcomes(data,
     assert context["unavailable_contributors"] == [data.events[4]["event_id"]]
     assert context["eligibility"]["random_windows"] == [
         {"ticker": "SYNTH", "start": "2023-03-04", "end": "2023-05-03"}]
-    assert context["availability"] == {"basis": "computed_moves.available_as_of_date",
+    assert context["availability"] == {"basis": "reconstructed_date_bounds",
         "source_publication": "unverified", "event_schedule_as_known": "unverified"}
     before = catalog_rows(data.conn)
     poison_outcomes(monkeypatch, data.repository, data.snapshot, (), all_outcomes=True)
@@ -233,7 +233,6 @@ def test_size_comparison_uses_one_native_artifact(data):
     assert len(result["rows"]) == 9
     for row in result["rows"]:
         assert (row["n_prior"], row["mean_prior_move"], row["mean_prior_abs_move"]) == expected[row["event_id"]]
-        assert not any(key.startswith("season_heat_") for key in row)
     assert artifact["temporal_plan"]["fold_policy"]["kind"] == "expanding_event_year"
 
 
@@ -579,10 +578,7 @@ def test_each_ticker_uses_its_own_history_ceiling_but_full_protected_metadata(tm
                 columns=list(FEATURES), **request)
             assert len(result["rows"]) == 6
             assert {r["event_id"] for r in result["rows"]} == set(request["event_ids"])
-            assert later["event_id"] not in {c["event_id"] for c in artifact["context"]["season_heat_contributors"]}
             assert later["event_id"] not in {g["event_id"] for g in artifact["context"]["eligibility"]["groups"]}
-            assert any(row["event_id"] == later["event_id"] and row["reason"] == "missing_native_bounds"
-                for row in artifact["context"]["season_heat_omissions"])
     finally:
         data.conn.close()
 
@@ -717,207 +713,3 @@ def test_iter_read_matches_list_read_and_scans_rows_lazily(data, monkeypatch):
     assert scanned
     assert scanned_limits and set(scanned_limits) == {admitted_max_object_bytes}
     assert [first, *rows] == expected["rows"]
-
-
-def test_materialization_persists_population_season_heat_fields(tmp_path):
-    late = history_event("2024-06-14", ticker="LATE")
-    data = source(tmp_path, extra_events=[history_event("2024-06-03", ticker="OTHER"), late])
-    try:
-        target_id = next(event["event_id"] for event in data.events
-            if event["event_date"].date().isoformat() == "2024-06-17")
-        request = {**data.request, "event_ids": [target_id]}
-        artifact = history.materialize(data.repository, data.snapshot, **request)
-        result = history.read(data.repository, data.snapshot, artifact["feature_snapshot"],
-            columns=list(FEATURES), **request)
-        rows = result["rows"]
-        assert len(rows) == 3
-        for row in rows:
-            assert row["season_heat_count_20"] == 1
-            assert type(row["season_heat_count_20"]) is int
-            for name in ("season_heat_mean_abs_5", "season_heat_mean_abs_20",
-                         "season_heat_mean_abs_60", "season_heat_ratio_20_252"):
-                assert row[name] is None
-        assert CONTRACT.contract_id == "research_eligible_history.v2"
-        fields = {column.name: column for column in CONTRACT.columns}
-        for name, physical_type, nullable in (
-                ("season_heat_mean_abs_5", "float64", True),
-                ("season_heat_mean_abs_20", "float64", True),
-                ("season_heat_mean_abs_60", "float64", True),
-                ("season_heat_count_20", "int64", False),
-                ("season_heat_ratio_20_252", "float64", True)):
-            assert fields[name].physical_type == physical_type
-            assert fields[name].nullable is nullable
-        contributors = artifact["context"]["season_heat_contributors"]
-        assert any(row["event_id"] == late["event_id"]
-            and row["reason"] == "unavailable_by_latest_decision"
-            for row in artifact["context"]["season_heat_omissions"])
-        assert all(set(row["source_bounds"]) == {"pre_close_date", "post_close_date", "session",
-            "outcome_object_id", "outcome_content_hash"} for row in contributors)
-        assert any(row["source_bounds"]["outcome_object_id"] == row["object_id"]
-            and row["source_bounds"]["outcome_content_hash"] == row["content_hash"]
-            for row in contributors)
-    finally:
-        data.conn.close()
-
-
-def test_season_population_availability_must_match_anchor(tmp_path, monkeypatch):
-    import engine.v2.research.eligible_history as internal
-    data = source(tmp_path, extra_events=[history_event("2024-06-03", ticker="OTHER"),
-        history_event("2024-06-04", ticker="KEEP")])
-    try:
-        target_id = next(event["event_id"] for event in data.events
-            if event["event_date"].date().isoformat() == "2024-06-17")
-        request = {**data.request, "event_ids": [target_id]}
-        original_plan_with_reader = internal.event_history.plan_with_reader
-
-        def wrapped_plan_with_reader(repository, snapshot, candidates, contract):
-            plans, reader = original_plan_with_reader(repository, snapshot, candidates, contract)
-
-            def checked_reader(event, request):
-                rows = reader(event, request)
-                if event.ticker == "OTHER":
-                    rows = [dict(row) for row in rows]
-                    for row in rows:
-                        row["available_as_of_date"] = "2024-06-20"
-                return rows
-
-            return plans, checked_reader
-
-        monkeypatch.setattr(internal.event_history, "plan_with_reader", wrapped_plan_with_reader)
-        with pytest.raises(DataError) as caught:
-            history.materialize(data.repository, data.snapshot, **request)
-        assert caught.value.code == "CONTRACT_MISMATCH"
-    finally:
-        data.conn.close()
-
-
-def test_null_season_source_bounds_are_reported(tmp_path):
-    data = source(tmp_path, extra_events=[history_event("2024-06-03", ticker="OTHER")],
-                  null_day="2024-06-03")
-    try:
-        target_id = next(event["event_id"] for event in data.events
-            if event["event_date"].date().isoformat() == "2024-06-17")
-        other_id = next(event["event_id"] for event in data.events
-            if event["ticker"] == "OTHER"
-            and event["event_date"].date().isoformat() == "2024-06-03")
-        request = {**data.request, "event_ids": [target_id]}
-        artifact = history.materialize(data.repository, data.snapshot, **request)
-        assert any(row["event_id"] == other_id and row["reason"] == "null_source_bounds"
-            for row in artifact["context"]["season_heat_omissions"])
-    finally:
-        data.conn.close()
-
-
-@pytest.mark.parametrize("mode", ["missing", "duplicate"])
-def test_season_population_requires_unique_computed_move_fragment(tmp_path, monkeypatch, mode):
-    other = history_event("2024-06-03", ticker="OTHER")
-    data = source(tmp_path, extra_events=[other])
-    try:
-        target_id = next(event["event_id"] for event in data.events
-            if event["event_date"].date().isoformat() == "2024-06-17")
-        request = {**data.request, "event_ids": [target_id]}
-        original_records = data.repository.fragment_records
-        wanted_key = ("OTHER", "2024-06-03")
-
-        def wrapped_records(snapshot, table_name):
-            records = original_records(snapshot, table_name)
-            if table_name != "computed_moves":
-                return records
-            matched = tuple(r for r in records if r.primary_key_min == wanted_key)
-            if not matched:
-                return records
-            if mode == "missing":
-                return tuple(r for r in records if r.primary_key_min != wanted_key)
-            return records + matched
-
-        monkeypatch.setattr(data.repository, "fragment_records", wrapped_records)
-        with pytest.raises(DataError) as caught:
-            history.materialize(data.repository, data.snapshot, **request)
-        assert caught.value.code == "HOLDOUT_ACCESS_DENIED"
-    finally:
-        data.conn.close()
-
-
-def test_duplicate_computed_moves_inventory_refuses_even_outside_wanted(tmp_path, monkeypatch):
-    data = source(tmp_path, extra_events=[history_event("2023-01-03", ticker="OTHER")])
-    try:
-        original_records = data.repository.fragment_records
-        unwanted_key = ("OTHER", "2023-01-03")
-
-        def wrapped_records(snapshot, table_name):
-            records = original_records(snapshot, table_name)
-            if table_name != "computed_moves":
-                return records
-            matched = tuple(r for r in records if r.primary_key_min == unwanted_key)
-            if not matched:
-                return records
-            return records + matched
-
-        monkeypatch.setattr(data.repository, "fragment_records", wrapped_records)
-        with pytest.raises(DataError) as caught:
-            history.materialize(data.repository, data.snapshot, **data.request)
-        assert caught.value.code == "HOLDOUT_ACCESS_DENIED"
-    finally:
-        data.conn.close()
-
-
-def test_season_population_anchor_mismatch_refuses_before_reader(tmp_path, monkeypatch):
-    import engine.v2.research.eligible_history as internal
-    data = source(tmp_path, extra_events=[history_event("2024-06-03", ticker="OTHER")])
-    try:
-        target_id = next(event["event_id"] for event in data.events
-            if event["event_date"].date().isoformat() == "2024-06-17")
-        request = {**data.request, "event_ids": [target_id]}
-        original_anchors = internal._anchors
-
-        def mismatched_anchors(repository, snapshot, limits, required_tickers=()):
-            anchors = dict(original_anchors(repository, snapshot, limits, required_tickers))
-            key = ("OTHER", "2024-06-03")
-            anchors[key] = {**anchors[key], "outcome_content_hash": "bad-hash"}
-            return anchors
-
-        monkeypatch.setattr(internal, "_anchors", mismatched_anchors)
-        reader_calls = []
-
-        def spy_plan_with_reader(*args, **kwargs):
-            reader_calls.append(True)
-            raise AssertionError("plan_with_reader must not run before season source refusal")
-
-        monkeypatch.setattr(internal.event_history, "plan_with_reader", spy_plan_with_reader)
-        with pytest.raises(DataError) as caught:
-            history.materialize(data.repository, data.snapshot, **request)
-        assert caught.value.code == "HOLDOUT_ACCESS_DENIED"
-        assert reader_calls == []
-    finally:
-        data.conn.close()
-
-
-def test_skipped_season_population_label_is_omitted(tmp_path, monkeypatch):
-    import engine.v2.research.eligible_history as internal
-    data = source(tmp_path, extra_events=[history_event("2024-06-03", ticker="OTHER"),
-        history_event("2024-06-04", ticker="KEEP")])
-    try:
-        target_id = next(event["event_id"] for event in data.events
-            if event["event_date"].date().isoformat() == "2024-06-17")
-        request = {**data.request, "event_ids": [target_id]}
-        original_plan_with_reader = internal.event_history.plan_with_reader
-
-        def wrapped_plan_with_reader(repository, snapshot, candidates, contract):
-            plans, reader = original_plan_with_reader(repository, snapshot, candidates, contract)
-
-            def checked_reader(event, request):
-                rows = reader(event, request)
-                if event.ticker == "OTHER":
-                    rows = [dict(row) for row in rows]
-                    for row in rows:
-                        row["skipped"] = True
-                return rows
-
-            return plans, checked_reader
-
-        monkeypatch.setattr(internal.event_history, "plan_with_reader", wrapped_plan_with_reader)
-        with pytest.raises(DataError) as caught:
-            history.materialize(data.repository, data.snapshot, **request)
-        assert caught.value.code == "CONTRACT_MISMATCH"
-    finally:
-        data.conn.close()

@@ -301,6 +301,33 @@ def test_all_window_warmups_counts_means_and_ratio():
         assert small[key] is None
 
 
+def test_zero_reference_mean_leaves_ratio_null():
+    sessions = _session_sequence(date(2024, 1, 1), 252, date(2024, 2, 19))
+    decision = sessions[-1]
+
+    event_dates = sessions[-5:-1]
+    labels = [
+        _label(f"R{index:02d}", f"R{index:02d}", event_dates[index % 4], 0)
+        for index in range(20)
+    ]
+    targets = [
+        {
+            "event_id": "ZERO",
+            "ticker": "ZZZ",
+            "event_date": decision,
+            "decision_session": decision,
+        }
+    ]
+
+    result = compute_season_heat(labels, targets, sessions)[("ZERO", decision)]
+
+    assert result["season_heat_count_20"] == 20
+    assert result["season_heat_mean_abs_5"] == 0
+    assert result["season_heat_mean_abs_20"] == 0
+    assert result["season_heat_mean_abs_60"] == 0
+    assert result["season_heat_ratio_20_252"] is None
+
+
 def _valid_inputs():
     labels = [_label("L1", "CCC", "2025-03-07", 1)]
     targets = [
