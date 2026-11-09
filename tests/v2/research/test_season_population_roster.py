@@ -104,7 +104,8 @@ def test_retained_exclusions_and_metadata_only_reads(monkeypatch):
     assert receipt["window"] == {"start": START, "end": LAST, "earliest_decision": FIRST,
         "latest_decision": LAST}
     assert receipt["calendar_source"] == SOURCE and receipt["as_of_month"] == "2024-01"
-    assert receipt["counts"] == {"population": 4, "in_window": 4, "retained": 1, "excluded": 3}
+    assert receipt["counts"] == {"population": 4, "in_window": 4, "retained": 1, "excluded": 3,
+        "not_yet_available": 0}
     assert receipt["exclusions"] == {"missing_native_bounds": 1, "null_source_bounds": 1,
         "off_session_event_date": 1}
     assert receipt["sample_ids"] == ["ev-miss", "ev-null", "ev-sat"]
@@ -123,7 +124,11 @@ def test_window_edges_and_start_clamp(monkeypatch):
     moves = [record(t, d) for t, d in anchors]
     _, result, _ = plan(monkeypatch, events, anchors, moves)
     receipt = result["receipt"]
-    assert receipt["counts"] == {"population": 4, "in_window": 3, "retained": 2, "excluded": 0}
+    assert receipt["counts"] == {"population": 4, "in_window": 3, "retained": 2, "excluded": 0,
+        "not_yet_available": 1}
+    counts = receipt["counts"]
+    assert counts["in_window"] == (counts["retained"] + counts["excluded"]
+        + counts["not_yet_available"])
     assert [item["event_id"] for item in result["retained"]] == ["ev-avail", "ev-start"]
     assert receipt["exclusions"] == dict.fromkeys(
         ["missing_native_bounds", "null_source_bounds", "off_session_event_date"], 0)

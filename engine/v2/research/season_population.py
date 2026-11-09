@@ -76,11 +76,13 @@ def _receipt(*, as_of_month, purpose, start, first, last, calendar_source, popul
     roster = [[item["event_id"], item["outcome_object_id"], item["outcome_content_hash"],
         item["available_as_of_date"]] for item in retained]
     excluded_ids = sorted({event_id for event_ids in excluded.values() for event_id in event_ids})
+    excluded_total = sum(len(event_ids) for event_ids in excluded.values())
     receipt = {"schema_version": SCHEMA, "as_of_month": as_of_month, "purpose": purpose,
         "window": {"start": start, "end": last, "earliest_decision": first, "latest_decision": last},
         "calendar_source": calendar_source,
         "counts": {"population": population_size, "in_window": in_window, "retained": len(retained),
-            "excluded": sum(len(event_ids) for event_ids in excluded.values())},
+            "excluded": excluded_total,
+            "not_yet_available": in_window - len(retained) - excluded_total},
         "exclusions": {reason: len(excluded[reason]) for reason in sorted(excluded)},
         "exclusions_digest": content_hash(pairs), "roster_digest": content_hash(roster),
         "sample_ids": excluded_ids[:SAMPLE_IDS]}
@@ -107,5 +109,5 @@ def plan_roster(repository, snapshot, *, as_of_month, decision_sessions, calenda
             in_window=in_window, retained=retained, excluded=excluded)
         decision("season_roster", f"population {receipt['counts']['population']}; in window "
             f"{in_window}; retained {len(retained)}; excluded {receipt['counts']['excluded']}; "
-            f"window {start}..{last}")
+            f"not yet available {receipt['counts']['not_yet_available']}; window {start}..{last}")
     return {"receipt": receipt, "retained": retained}
