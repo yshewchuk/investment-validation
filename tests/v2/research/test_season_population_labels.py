@@ -1,4 +1,4 @@
-"""Value-build label reads: roster binding, contradictions, isolation and one scan per label."""
+"""Value-build label reads: roster binding, contradictions, isolation and run-batched ticker-major reads."""
 from datetime import date, timedelta
 from types import SimpleNamespace
 
@@ -8,7 +8,7 @@ import pytest
 from engine.v2.data.computed_move_bounds import CONTRACT as BOUNDS_CONTRACT
 from engine.v2.data.computed_moves_table import COMPUTED_MOVES_CONTRACT
 from engine.v2.data.errors import DataError
-from engine.v2.research import event_history, season_population
+from engine.v2.research import eligible_history, event_history, season_population
 from tests.v2.research.magnitude_trial_support import history_event, outcome_move, poison_outcomes
 from tests.v2.research.test_event_history import MONTH, commit_event_history
 from tests.v2.research.test_season_population_roster import (
@@ -71,6 +71,15 @@ def source(tmp_path):
     yield make
     for conn in conns:
         conn.close()
+
+
+@pytest.fixture(autouse=True)
+def admit_recorder(monkeypatch):
+    """Record admissions: the real-repo fixtures have no bounds table for the real admit_source."""
+    admitted = []
+    monkeypatch.setattr(season_population, "admit_source",
+        lambda repository, snapshot, limits: admitted.append(limits))
+    return admitted
 
 
 def _read(case, **kwargs):
@@ -223,7 +232,7 @@ def test_only_retained_objects_are_opened(source, monkeypatch):
     assert set(opened) & _outcome_ids(case) == {item["outcome_object_id"] for item in case.retained}
 
 
-def test_one_scan_per_label_and_a_second_call_is_a_new_build(source):
+def test_one_run_scan_per_ticker_and_a_second_call_is_a_new_build(source):
     case = source([(day, ticker, 1.0) for day, ticker in zip(DAYS, TICKERS)])
     start = len(case.repository.scans)
     labels = _read(case)
@@ -234,6 +243,50 @@ def test_one_scan_per_label_and_a_second_call_is_a_new_build(source):
     again = _read(case)
     assert again == labels
     assert len(_moves_scans(case.repository, start)) == 2 * len(DAYS)
+
+
+def test_admission_is_called_once_with_the_limits_before_the_population_read(source, monkeypatch,
+        admit_recorder):
+    case = source([(day, ticker, 1.0) for day, ticker in zip(DAYS, TICKERS)])
+    real_load = season_population.load_population
+
+    def spy(repository, snapshot, **kwargs):
+        admit_recorder.append("load_population")
+        return real_load(repository, snapshot, **kwargs)
+
+    monkeypatch.setattr(season_population, "load_population", spy)
+    labels = _read(case)
+    assert len(labels) == len(DAYS)
+    assert admit_recorder == [LIMITS, "load_population"]
+
+
+def test_invalid_limits_refuse_before_any_scan(source, monkeypatch):
+    monkeypatch.setattr(season_population, "admit_source", eligible_history.admit_source)
+    case = source([(DAYS[0], "AAA", 2.0)])
+    limits = {key: value for key, value in LIMITS.items() if key != "max_output_rows"}
+    with pytest.raises(DataError) as caught:
+        season_population.read_labels(case.repository, case.snapshot, case.retained,
+            as_of_month=MONTH, limits=limits)
+    assert caught.value.code == "CONTRACT_MISMATCH"
+    assert _moves_scans(case.repository) == []
+
+
+def test_same_ticker_labels_share_one_run_scan_across_over_cap_tickers(source):
+    specs = []
+    for index in range(40):
+        ticker = f"T{index:02}"
+        specs.append((DAYS[0], ticker, -(index + 1)))
+        specs.append((DAYS[1], ticker, (index + 1) + 0.5))
+    case = source(specs)
+    start = len(case.repository.scans)
+    labels = _read(case)
+    assert len(_moves_scans(case.repository, start)) == 40
+    assert len(labels) == len(specs)
+    for index, label in enumerate(labels):
+        day, ticker, value = specs[index]
+        assert label["ticker"] == ticker
+        assert label["event_date"] == day
+        assert label["abs_move"] == abs(float(value))
 
 
 def test_population_read_is_bound_by_the_limit_max_object_bytes(source, monkeypatch):

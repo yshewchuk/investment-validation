@@ -4,10 +4,11 @@ plan_roster reads the canonical population, the native bounds table and the
 whole-table computed-move fragment index, then binds anchors to fragments with
 the shared outcome_binding helpers, so the roster digest binds label values
 without opening a single outcome object. read_labels is the value build: it
-admits the roster ids through the population, then reads exactly those outcome
-objects: each retained label's object is read at most once; adjacent labels of
-one ticker may share a run scan (event_history.plan_with_reader), refusing on
-any contradiction.
+admits the source, resolves the roster ids through the population, then reads
+exactly those outcome objects: each retained label's object is read once per
+call; reads go ticker by ticker so a ticker's run stream finishes before the
+next opens (adjacent same-ticker labels share one run scan), refusing on any
+contradiction.
 """
 import math
 from datetime import date, timedelta
@@ -148,19 +149,22 @@ def _label_move(rows, event, item):
 def read_labels(repository, snapshot, retained, *, as_of_month, limits, purpose="selection"):
     """Value-build read of the planned roster's realized labels.
 
-    Each retained label's object is read at most once; adjacent labels of one
-    ticker may share a run scan (event_history.plan_with_reader). limits is the
-    eligible-history limits dict (same as plan_roster); its max_object_bytes
-    bounds the population read.
+    Each retained label's object is read once per call; reads go ticker by
+    ticker so a ticker's run stream finishes before the next opens (adjacent
+    same-ticker labels share one run scan; event_history.plan_with_reader).
+    limits is the eligible-history limits dict (same as plan_roster); the H11
+    admission validates it and bounds every whole-table read before they
+    happen, and its max_object_bytes bounds the population read.
 
     Returns season_heat label dicts (event_id, ticker, event_date, available_as_of_date,
-    abs_move) in retained order. Population admission runs before any outcome opens, so a
+    abs_move) in retained order. Source admission runs before any outcome opens, so a
     held-out label refuses the whole read; nothing is cached across calls, nothing is
     retried, and any refusal propagates without a partial result. The roster already dropped
     labels available after the latest decision, so no decision-date comparison happens here.
     """
     if not retained:
         return []
+    admit_source(repository, snapshot, limits)
     ids = [item["event_id"] for item in retained]
     if len(set(ids)) != len(ids):
         raise fail("HOLDOUT_ACCESS_DENIED", "roster repeats an event id")
@@ -182,7 +186,8 @@ def read_labels(repository, snapshot, retained, *, as_of_month, limits, purpose=
     labels = {}
     with stage("season_labels"):
         meter = Progress("season labels", len(plans))
-        for event, request, _ in plans:
+        for event, request, _ in sorted(plans, key=lambda plan: (plan[0].ticker, plan[0].event_date,
+                plan[0].event_id)):
             item = anchors[event.event_id]
             abs_move = _label_move(read_rows(event, request), event, item)
             labels[event.event_id] = {"event_id": event.event_id, "ticker": event.ticker,
