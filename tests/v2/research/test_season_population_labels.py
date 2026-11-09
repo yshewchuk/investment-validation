@@ -26,7 +26,8 @@ PROTECTED = "2023-04-04"
 DAYS = ("2023-01-03", "2023-02-07", "2023-03-07", "2023-05-02", "2023-06-06")
 TICKERS = ("AAA", "BBB", "CCC", "DDD", "EEE")
 # Native bounds rows in place of a bounds table the fixtures never commit: the source
-# fixture's make fills (ticker, event day) -> {"post_close_date": availability - 1 day}
+# fixture's make fills (ticker, event day) -> the full bounds row read_labels re-authenticates
+# through outcome_binding.bound (session, close bracket and the real fragment object identity)
 # and the autouse fixture serves this dict to read_labels through outcome_binding.anchors.
 BOUNDS = {}
 
@@ -66,10 +67,14 @@ def source(tmp_path):
         conns.append(conn)
         items = _items(repository, snapshot, events, moves)
         for event, item in zip(events, items):
+            day = event["event_date"].date().isoformat()
             available = item["available_as_of_date"]
-            BOUNDS[(event["ticker"], event["event_date"].date().isoformat())] = {
+            BOUNDS[(event["ticker"], day)] = {"ticker": event["ticker"], "event_date": day,
+                "session": event["session"],
+                "pre_close_date": (event["event_date"].date() - timedelta(days=1)).isoformat(),
                 "post_close_date": (date.fromisoformat(available) - timedelta(days=1)).isoformat()
-                if available else None}
+                if available else None, "outcome_object_id": item["outcome_object_id"],
+                "outcome_content_hash": item["outcome_content_hash"]}
         held = [item for item in items if item["event_id"] in protected_ids]
         retained = [item for item in items if item["event_id"] not in protected_ids]
         if order is not None:
@@ -185,6 +190,41 @@ def test_missing_bounds_row_for_a_retained_event_refuses_before_any_scan(source)
         _read(case)
     assert caught.value.code == "CONTRACT_MISMATCH"
     assert _moves_scans(case.repository) == []
+
+
+def test_bounds_row_with_foreign_outcome_object_id_refuses_before_any_scan(source):
+    case = source([(DAYS[0], "AAA", 2.0), (DAYS[1], "BBB", 3.0)])
+    BOUNDS[("AAA", DAYS[0])]["outcome_object_id"] = "foreign-object"
+    with pytest.raises(DataError) as caught:
+        _read(case)
+    assert caught.value.code == "HOLDOUT_ACCESS_DENIED"
+    assert _moves_scans(case.repository) == []
+
+
+def test_bounds_row_with_null_pre_close_and_set_post_close_refuses_before_any_scan(source):
+    case = source([(DAYS[0], "AAA", 2.0), (DAYS[1], "BBB", 3.0)])
+    BOUNDS[("AAA", DAYS[0])]["pre_close_date"] = None
+    with pytest.raises(DataError) as caught:
+        _read(case)
+    assert caught.value.code == "CONTRACT_MISMATCH"
+    assert _moves_scans(case.repository) == []
+
+
+@pytest.mark.parametrize("cap", [pytest.param(1, id="over-cap"), pytest.param(2, id="at-cap")])
+def test_max_output_rows_caps_the_retained_roster_before_any_scan(source, cap):
+    case = source([(DAYS[0], "AAA", 2.0), (DAYS[1], "BBB", 3.0)])
+    limits = {**LIMITS, "max_output_rows": cap}
+    if cap < len(case.retained):
+        with pytest.raises(DataError) as caught:
+            season_population.read_labels(case.repository, case.snapshot, case.retained,
+                as_of_month=MONTH, limits=limits, latest_decision="2099-12-31")
+        assert caught.value.code == "RESULT_LIMIT_EXCEEDED"
+        assert caught.value.problem.message == "season roster exceeds max_output_rows"
+        assert _moves_scans(case.repository) == []
+    else:
+        labels = season_population.read_labels(case.repository, case.snapshot, case.retained,
+            as_of_month=MONTH, limits=limits, latest_decision="2099-12-31")
+        assert [label["abs_move"] for label in labels] == [2.0, 3.0]
 
 
 @pytest.mark.parametrize("value", [pytest.param(float("nan"), id="nan"), pytest.param(True, id="bool"),
@@ -371,7 +411,8 @@ def test_availability_boundary_and_the_read_of_a_retained_label(monkeypatch, ses
     assert result["receipt"]["counts"]["not_yet_available"] == 1
 
     item = result["retained"][0]
-    frame = pd.DataFrame([{"event_id": "ev-in", "ticker": "IN", "event_date": pd.Timestamp(in_day)}])
+    frame = pd.DataFrame([{"event_id": "ev-in", "ticker": "IN", "event_date": pd.Timestamp(in_day),
+        "session": session}])
     monkeypatch.setattr(season_population, "load_population", lambda *args, **kwargs: frame)
     planned = record("IN", in_day)
     rows = [{"event_date": in_day, "skipped": False, "available_as_of_date": LAST,
@@ -380,7 +421,7 @@ def test_availability_boundary_and_the_read_of_a_retained_label(monkeypatch, ses
         ([(event, object(), planned) for event in candidates.itertuples(index=False)],
          lambda event, request: rows))
     repository = SimpleNamespace(table_contract=lambda snapshot, name: COMPUTED_MOVES_CONTRACT,
-        anchor_limits=[])
+        anchor_limits=[], fragment_records=lambda snapshot, name: [planned])
     assert season_population.read_labels(repository, None, [item], as_of_month=MONTH, limits=LIMITS,
         latest_decision=LAST) == [
         {"event_id": "ev-in", "ticker": "IN", "event_date": in_day, "available_as_of_date": LAST,

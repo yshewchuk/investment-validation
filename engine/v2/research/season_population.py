@@ -146,9 +146,13 @@ def _label_move(rows, event, item):
     return _abs_move(rows[0]["realized_move_pct"])
 
 
-def _check_source_bounds(bounds, population, anchors, latest_decision):
-    """Refuse before any outcome opens when a roster availability differs from the native bounds
-    or is available after the latest decision."""
+def _check_source_bounds(bounds, records, population, anchors, latest_decision):
+    """Refuse before any outcome opens when a roster binding or availability differs from the
+    native bounds or is available after the latest decision.
+
+    Full re-authentication mirrors plan_roster: outcome_binding.bound raises for a missing anchor,
+    a fragment mismatch or an invalid bracket, so the returned row's post_close_date is a valid
+    ISO date whenever execution continues here."""
     if type(latest_decision) is not str:
         raise fail("CONTRACT_MISMATCH", "latest decision must be an ISO date string")
     for item in anchors.values():
@@ -156,39 +160,24 @@ def _check_source_bounds(bounds, population, anchors, latest_decision):
         if type(available) is str and available > latest_decision:
             raise fail("CONTRACT_MISMATCH", "roster label is available after the latest decision")
     for event in population.itertuples(index=False):
-        row = bounds.get((event.ticker, event.event_date.date().isoformat()))
-        try:
-            available = (date.fromisoformat(row["post_close_date"]) + timedelta(days=1)).isoformat()
-        except (TypeError, ValueError):
-            raise fail("CONTRACT_MISMATCH",
-                "roster availability differs from the native source bounds") from None
+        row = outcome_binding.bound(event, bounds, records)
+        if row is None:
+            raise fail("CONTRACT_MISMATCH", "roster label has null source bounds")
+        available = (date.fromisoformat(row["post_close_date"]) + timedelta(days=1)).isoformat()
         if available != anchors[event.event_id]["available_as_of_date"]:
             raise fail("CONTRACT_MISMATCH",
                 "roster availability differs from the native source bounds")
 
 
-def read_labels(repository, snapshot, retained, *, as_of_month, limits, latest_decision,
-                purpose="selection"):
-    """Value-build read of the planned roster's realized labels.
+def _admit_roster(repository, snapshot, retained, *, as_of_month, limits, latest_decision,
+                  purpose):
+    """Admit the source and resolve the retained roster through the population and
+    native bounds, refusing on any contradiction before an outcome opens.
 
-    Each retained label's object is read once per call; reads go ticker by
-    ticker so a ticker's run stream finishes before the next opens (adjacent
-    same-ticker labels share one run scan; event_history.plan_with_reader).
-    limits is the eligible-history limits dict (same as plan_roster); the H11
-    admission validates it and bounds every whole-table read before they
-    happen, and its max_object_bytes bounds the population read.
-
-    Returns season_heat label dicts (event_id, ticker, event_date, available_as_of_date,
-    abs_move) in retained order. Source admission runs before any outcome opens, so a
-    held-out label refuses the whole read; nothing is cached across calls, nothing is
-    retried, and any refusal propagates without a partial result. latest_decision is plan_roster's
-    window end (receipt["window"]["latest_decision"]), which mirrors the roster plan that never
-    retains labels available after it, so any such roster item refuses the read.
-    No production caller exists until the panel wiring slice (slice 5 of the season heat plan).
-    """
-    if not retained:
-        return []
+    Returns (population, anchors, contract, ids)."""
     admit_source(repository, snapshot, limits)
+    if len(retained) > limits["max_output_rows"]:
+        raise fail("RESULT_LIMIT_EXCEEDED", "season roster exceeds max_output_rows")
     ids = [item["event_id"] for item in retained]
     if len(set(ids)) != len(ids):
         raise fail("HOLDOUT_ACCESS_DENIED", "roster repeats an event id")
@@ -200,8 +189,36 @@ def read_labels(repository, snapshot, retained, *, as_of_month, limits, latest_d
     if contract not in (COMPUTED_MOVES_CONTRACT, COMPUTED_MOVES_V5_CONTRACT):
         raise fail("CONTRACT_MISMATCH", "labels require the native computed-moves contract")
     bounds = outcome_binding.anchors(repository, snapshot, limits)
+    records = outcome_binding.fragment_index(repository, snapshot)
     anchors = {item["event_id"]: item for item in retained}
-    _check_source_bounds(bounds, population, anchors, latest_decision)
+    _check_source_bounds(bounds, records, population, anchors, latest_decision)
+    return population, anchors, contract, ids
+
+
+def read_labels(repository, snapshot, retained, *, as_of_month, limits, latest_decision,
+                purpose="selection"):
+    """Value-build read of the planned roster's realized labels.
+
+    Each retained label's object is read once per call; reads go ticker by
+    ticker so a ticker's run stream finishes before the next opens (adjacent
+    same-ticker labels share one run scan; event_history.plan_with_reader).
+    limits is the eligible-history limits dict (same as plan_roster); the H11
+    admission validates it and bounds every whole-table read before they
+    happen, its max_object_bytes bounds the population read, and its
+    max_output_rows caps the retained roster before any further read.
+
+    Returns season_heat label dicts (event_id, ticker, event_date, available_as_of_date,
+    abs_move) in retained order. Source admission runs before any outcome opens, so a
+    held-out label refuses the whole read; nothing is cached across calls, nothing is
+    retried, and any refusal propagates without a partial result. latest_decision is plan_roster's
+    window end (receipt["window"]["latest_decision"]), which mirrors the roster plan that never
+    retains labels available after it, so any such roster item refuses the read.
+    No production caller exists until the panel wiring slice (slice 5 of the season heat plan).
+    """
+    if not retained:
+        return []
+    population, anchors, contract, ids = _admit_roster(repository, snapshot, retained,
+        as_of_month=as_of_month, limits=limits, latest_decision=latest_decision, purpose=purpose)
     candidates = population.sort_values(["event_date", "event_id"])
     plans, read_rows = event_history.plan_with_reader(repository, snapshot, candidates, contract)
     for event, _, record in plans:
