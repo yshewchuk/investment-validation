@@ -137,7 +137,18 @@ or release is established by this development implementation.
 
 ## Stage 2 proposal
 
-See [the stage-2 design](STAGE2_DESIGN.md) for causal panel features, bounded
-inner-only selection and a proposed matched legacy comparison; it is not implemented.
+The [expectations and encoding direction review](https://github.com/yshewchuk/investment-validation/pull/2217)
+records proposed source-qualified feature/model ablations and estimated PR slices.
+This direction adds no executable request, data acquisition or run authority. Boundaries for any such extension:
+
+- The target stays conditional mean absolute earnings close-close return in percentage points, on split-neutral, non-dividend-adjusted prices and the existing 5/3/1 full-session forecast ceilings. The installed fourteen-input equal-weight OLS/MLP production blend and its separate causal-refit comparator (masks, abstentions, raw predictions) are preserved; a causal refit is not frozen production replay.
+- Extensions retain the sealed population, grouped eligibility, protected history, holdouts, source ceilings, matured-label qualification, immutable evidence and bounded execution. Current-event actual earnings, realized surprise, new guidance and call text cannot enter pre-event features. Earlier events must independently pass contributor qualification.
+- Immutable source identity does not establish original availability: keep authenticated historical versions, reconstructed history and forward-captured vintages distinct. New sources must bind publication/update/retrieval semantics, revision identity, timezone, security/fiscal identity and units before claiming historical PIT; unknown availability never silently becomes authenticated evidence. Experiments read pinned stored sources, not live providers.
+- Encoders, target transforms/decoders, calibration and stopping belong to versioned recipes fitted inside chronological training/inner folds. Keep all horizons of an event together and the request-declared inner criterion unchanged. Outer results do not tune a recipe; decoded forecasts keep original-unit, matched-cohort evaluation and full-cohort coverage/abstention reporting. Existing artifacts and comparator definitions are never rewritten.
+
+Stage 2 status (stated once): its scope is accepted in [the stage-2 design](STAGE2_DESIGN.md)
+(causal panel features, bounded inner-only selection, a proposed matched legacy
+comparison), but execution is pending: nothing is preregistered or run. Library
+support described in the experiments architecture is not a Stage 2 execution.
 Stage-2 scope, acceptance criteria and the PR split (design section 5) live in that
 design; this Spec adds nothing until a stage-2 PR is accepted.
