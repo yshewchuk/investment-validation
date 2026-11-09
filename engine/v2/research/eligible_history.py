@@ -31,6 +31,10 @@ from engine.v2.research.magnitude_inputs import forecast_cutoff
 from engine.v2.research.progress import Progress, stage
 from engine.v2.research.snapshot_inputs import admit_snapshot
 
+# names kept as module aliases for existing callers/tests
+_anchors = outcome_binding.anchors
+_bound = outcome_binding.bound
+
 _LIMITS = {"max_source_rows", "max_fragments", "max_object_bytes", "max_total_bytes", "max_output_rows"}
 
 
@@ -228,11 +232,11 @@ def _prepare(repository, snapshot, *, as_of_month, policy, event_ids, horizons, 
 def _groups(repository, snapshot, selected, forecasts, event_ids, horizons, calendar, clocks, limits,
             strict=True):
     """Source-derived label windows; missing evidence differs from null labels."""
-    anchors = outcome_binding.anchors(repository, snapshot, limits, required_tickers=selected.ticker.unique())
+    anchors = _anchors(repository, snapshot, limits, required_tickers=selected.ticker.unique())
     records = outcome_binding.fragment_index(repository, snapshot)
     groups, unavailable, qualified = [], [], {}
     for event in selected.itertuples(index=False):
-        bound = outcome_binding.bound(event, anchors, records)
+        bound = _bound(event, anchors, records)
         if bound is None:
             unavailable.append(event.event_id)
             if strict and event.event_id in event_ids:
