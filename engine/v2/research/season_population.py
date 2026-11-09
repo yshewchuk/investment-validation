@@ -146,15 +146,35 @@ def _label_move(rows, event, item):
     return _abs_move(rows[0]["realized_move_pct"])
 
 
+def _validate_call(retained, as_of_month, purpose, latest_decision):
+    """Refuse a malformed call before admission or any read; a separate function so
+    read_labels stays within the complexity budget."""
+    if type(retained) is not list or any(
+            type(item) is not dict
+            or not {"event_id", "outcome_object_id", "outcome_content_hash",
+                    "available_as_of_date"} <= set(item)
+            or type(item["event_id"]) is not str for item in retained):
+        raise fail("CONTRACT_MISMATCH", "retained roster must be a list of complete roster items")
+    if (type(as_of_month) is not str or not as_of_month or type(purpose) is not str
+            or not purpose):
+        raise fail("CONTRACT_MISMATCH", "as-of month and purpose must be non-empty strings")
+    try:
+        canonical = (type(latest_decision) is str
+            and date.fromisoformat(latest_decision).isoformat() == latest_decision)
+    except (TypeError, ValueError):
+        canonical = False
+    if not canonical:
+        raise fail("CONTRACT_MISMATCH", "latest decision must be a canonical ISO date string")
+
+
 def _check_source_bounds(bounds, records, population, anchors, latest_decision):
     """Refuse before any outcome opens when a roster binding or availability differs from the
     native bounds or is available after the latest decision.
 
+    _validate_call has already bound latest_decision to a canonical ISO date string.
     Full re-authentication mirrors plan_roster: outcome_binding.bound raises for a missing anchor,
     a fragment mismatch or an invalid bracket, so the returned row's post_close_date is a valid
     ISO date whenever execution continues here."""
-    if type(latest_decision) is not str:
-        raise fail("CONTRACT_MISMATCH", "latest decision must be an ISO date string")
     for item in anchors.values():
         available = item["available_as_of_date"]
         if type(available) is str and available > latest_decision:
@@ -182,6 +202,8 @@ def _admit_roster(repository, snapshot, retained, *, as_of_month, limits, latest
         raise fail("HOLDOUT_ACCESS_DENIED", "roster repeats an event id")
     population = load_population(repository, snapshot, as_of_month=as_of_month, purpose=purpose,
         event_ids=ids, max_object_bytes=limits["max_object_bytes"])
+    # load_population can drop ambiguous same-ticker-date events without refusing,
+    # so this recheck stops a silently partial label set.
     if set(population.event_id) != set(ids) or len(population) != len(ids):
         raise fail("HOLDOUT_ACCESS_DENIED", "population differs from the planned roster")
     contract = repository.table_contract(snapshot, "computed_moves")
@@ -207,17 +229,18 @@ def read_labels(repository, snapshot, retained, *, as_of_month, limits, latest_d
     max_output_rows caps the retained roster before any further read.
 
     Returns season_heat label dicts (event_id, ticker, event_date, available_as_of_date,
-    abs_move) in retained order. Source admission runs on every call, including an
-    empty roster, and before any outcome opens, so a
+    abs_move) in retained order. The call shape is validated on every call, including an
+    empty roster, before source admission, which itself runs on every call and before any
+    outcome opens, so a
     held-out label refuses the whole read; nothing is cached across calls, nothing is
     retried, and any refusal propagates without a partial result. latest_decision is plan_roster's
-    window end (receipt["window"]["latest_decision"]), which mirrors the roster plan that never
+    window end (receipt["window"]["latest_decision"]), a canonical ISO date, which mirrors the
+    roster plan that never
     retains labels available after it, so any such roster item refuses the read.
     No production caller exists until the panel wiring slice (slice 5 of the season heat plan).
     """
+    _validate_call(retained, as_of_month, purpose, latest_decision)
     admit_source(repository, snapshot, limits)
-    if type(retained) is not list:
-        raise fail("CONTRACT_MISMATCH", "retained roster must be a list")
     if not retained:
         return []
     population, anchors, contract, ids = _admit_roster(repository, snapshot, retained,

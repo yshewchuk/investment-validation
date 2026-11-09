@@ -156,6 +156,38 @@ def test_empty_retained_admits_once_and_touches_no_repository(admit_recorder):
     assert admit_recorder == [LIMITS]
 
 
+_ITEM = {"event_id": "ev-malformed", "outcome_object_id": "obj-1",
+    "outcome_content_hash": "sha256:" + "a" * 64, "available_as_of_date": "2023-01-05"}
+_CALL = {"as_of_month": MONTH, "purpose": "selection", "latest_decision": "2099-12-31"}
+
+
+@pytest.mark.parametrize("retained, overrides", [
+    pytest.param([{}], {}, id="item-without-required-keys"),
+    pytest.param([None], {}, id="item-not-a-dict"),
+    pytest.param([dict(_ITEM, event_id=5)], {}, id="event-id-not-a-string"),
+    pytest.param((dict(_ITEM),), {}, id="roster-not-a-list"),
+    pytest.param([dict(_ITEM)], {"as_of_month": 5}, id="month-not-a-string"),
+    pytest.param([], {"as_of_month": 5}, id="month-not-a-string-empty-roster"),
+    pytest.param([dict(_ITEM)], {"purpose": ""}, id="purpose-empty"),
+    pytest.param([], {"purpose": ""}, id="purpose-empty-empty-roster"),
+    pytest.param([dict(_ITEM)], {"latest_decision": "2024-1-5"}, id="decision-non-canonical"),
+    pytest.param([], {"latest_decision": "2024-1-5"}, id="decision-non-canonical-empty-roster"),
+    pytest.param([dict(_ITEM)], {"latest_decision": 20240105}, id="decision-not-a-string"),
+    pytest.param([], {"latest_decision": 20240105}, id="decision-not-a-string-empty-roster"),
+])
+def test_malformed_call_refuses_before_admission_and_touches_no_repository(admit_recorder,
+        retained, overrides):
+    class Nothing:
+        def __getattr__(self, name):
+            raise AssertionError(f"malformed call touched {name}")
+
+    with pytest.raises(DataError) as caught:
+        season_population.read_labels(Nothing(), None, retained, limits=LIMITS,
+            **{**_CALL, **overrides})
+    assert caught.value.code == "CONTRACT_MISMATCH"
+    assert admit_recorder == []
+
+
 def test_skipped_outcome_refuses_contract_mismatch(source):
     case = source([(DAYS[0], "AAA", None, {"skipped": True, "available_as_of_date": None})])
     with pytest.raises(DataError) as caught:
