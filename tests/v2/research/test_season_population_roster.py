@@ -5,11 +5,12 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
-from engine.v2.data.errors import DataError
+from engine.v2.data.errors import DataError, fail
 from engine.v2.foundation.market_calendar import CalendarSessions
-from engine.v2.research import season_population
+from engine.v2.research import eligible_history, season_population
 
-LIMITS = {"max_object_bytes": 1 << 20}
+LIMITS = {"max_source_rows": 1 << 20, "max_fragments": 1 << 20, "max_object_bytes": 1 << 20,
+    "max_total_bytes": 1 << 20, "max_output_rows": 1 << 20}
 SNAPSHOT = SimpleNamespace(snapshot_id="snap_test", table_versions={})
 SOURCE = "calendar-source-v1"
 HASH_A = "sha256:" + "a" * 64
@@ -67,7 +68,9 @@ class Repository:
 def plan(monkeypatch, events, anchors, moves, sessions=None, calendar=CALENDAR, purpose="selection",
         limits=LIMITS):
     repository = Repository(moves)
-    reads = []
+    reads, calls = [], []
+    monkeypatch.setattr(season_population, "admit_source",
+        lambda repository, snapshot, limits: calls.append(limits))
 
     def load_population(repository, snapshot, **kwargs):
         reads.append(kwargs)
@@ -79,7 +82,7 @@ def plan(monkeypatch, events, anchors, moves, sessions=None, calendar=CALENDAR, 
     result = season_population.plan_roster(repository, SNAPSHOT, as_of_month="2024-01",
         decision_sessions=SESSIONS if sessions is None else sessions, calendar=calendar,
         calendar_source=SOURCE, limits=limits, purpose=purpose)
-    return repository, result, reads
+    return repository, result, reads, calls
 
 
 def _mixed():
@@ -95,8 +98,9 @@ def _mixed():
 
 def test_retained_exclusions_and_metadata_only_reads(monkeypatch):
     events, anchors, moves = _mixed()
-    repository, result, reads = plan(monkeypatch, events, anchors, moves)
+    repository, result, reads, calls = plan(monkeypatch, events, anchors, moves)
     receipt, retained = result["receipt"], result["retained"]
+    assert calls == [LIMITS]
     assert reads == [{"as_of_month": "2024-01", "purpose": "selection",
         "max_object_bytes": LIMITS["max_object_bytes"]}]
     assert (repository.tables, repository.scans) == (["computed_moves"], [])
@@ -122,7 +126,7 @@ def test_window_edges_and_start_clamp(monkeypatch):
         ("CCC", at_last): bounds_row("CCC", at_last),
         ("DDD", avail_last): bounds_row("DDD", avail_last)}
     moves = [record(t, d) for t, d in anchors]
-    _, result, _ = plan(monkeypatch, events, anchors, moves)
+    _, result, _, _ = plan(monkeypatch, events, anchors, moves)
     receipt = result["receipt"]
     assert receipt["counts"] == {"population": 4, "in_window": 3, "retained": 2, "excluded": 0,
         "not_yet_available": 1}
@@ -132,7 +136,7 @@ def test_window_edges_and_start_clamp(monkeypatch):
     assert [item["event_id"] for item in result["retained"]] == ["ev-avail", "ev-start"]
     assert receipt["exclusions"] == dict.fromkeys(
         ["missing_native_bounds", "null_source_bounds", "off_session_event_date"], 0)
-    _, clamped, _ = plan(monkeypatch, events, {}, [], sessions=[DAYS[100], LAST])
+    _, clamped, _, _ = plan(monkeypatch, events, {}, [], sessions=[DAYS[100], LAST])
     assert clamped["receipt"]["window"]["start"] == DAYS[0]
 
 
@@ -174,34 +178,57 @@ def test_contract_validation_refusals(monkeypatch, calendar, sessions):
 @pytest.mark.parametrize("limits", [
     pytest.param(None, id="none"),
     pytest.param({}, id="empty-dict"),
-    pytest.param({"max_object_bytes": None}, id="null-bytes"),
-    pytest.param({"max_object_bytes": 0}, id="zero-bytes"),
-    pytest.param({"max_object_bytes": True}, id="bool-bytes"),
-    pytest.param({"max_object_bytes": "9"}, id="string-bytes"),
+    pytest.param({k: v for k, v in LIMITS.items() if k != "max_fragments"}, id="missing-key"),
+    pytest.param({**LIMITS, "max_object_bytes": None}, id="null-bytes"),
+    pytest.param({**LIMITS, "max_object_bytes": 0}, id="zero-bytes"),
+    pytest.param({**LIMITS, "max_object_bytes": True}, id="bool-bytes"),
+    pytest.param({**LIMITS, "max_object_bytes": "9"}, id="string-bytes"),
+    pytest.param({**LIMITS, "extra": 1}, id="extra-key"),
 ])
 def test_limits_refusals_before_any_reads(monkeypatch, limits):
     calls = []
+    monkeypatch.setattr(season_population, "admit_source", eligible_history.admit_source)
     monkeypatch.setattr(season_population, "load_population",
         lambda *args, **kwargs: calls.append((args, kwargs)))
     monkeypatch.setattr(season_population.outcome_binding, "anchors",
         lambda *args, **kwargs: pytest.fail("anchors opened before limits check"))
     with pytest.raises(DataError) as caught:
-        season_population.plan_roster(Repository([]), SNAPSHOT, as_of_month="2024-01",
+        season_population.plan_roster(SimpleNamespace(), SNAPSHOT, as_of_month="2024-01",
             decision_sessions=SESSIONS, calendar=CALENDAR, calendar_source=SOURCE,
             limits=limits, purpose="selection")
     assert caught.value.code == "CONTRACT_MISMATCH"
     assert calls == []
 
 
+def test_result_limit_exceeded_propagates_before_reads(monkeypatch):
+    def refuse(repository, snapshot, limits):
+        raise fail("RESULT_LIMIT_EXCEEDED", "history source exceeds explicit bounds")
+
+    calls = []
+    monkeypatch.setattr(season_population, "admit_source", refuse)
+    monkeypatch.setattr(season_population, "load_population",
+        lambda *args, **kwargs: calls.append("population"))
+    monkeypatch.setattr(season_population.outcome_binding, "anchors",
+        lambda *args, **kwargs: calls.append("anchors"))
+    monkeypatch.setattr(season_population.outcome_binding, "fragment_index",
+        lambda *args, **kwargs: calls.append("fragments"))
+    with pytest.raises(DataError) as caught:
+        season_population.plan_roster(SimpleNamespace(), SNAPSHOT, as_of_month="2024-01",
+            decision_sessions=SESSIONS, calendar=CALENDAR, calendar_source=SOURCE,
+            limits=LIMITS, purpose="selection")
+    assert caught.value.code == "RESULT_LIMIT_EXCEEDED"
+    assert calls == []
+
+
 def test_purpose_forwards_to_load_and_receipt(monkeypatch):
     events, anchors, moves = _mixed()
-    _, result, reads = plan(monkeypatch, events, anchors, moves, purpose="final")
+    _, result, reads, _ = plan(monkeypatch, events, anchors, moves, purpose="final")
     assert reads[0]["purpose"] == "final"
     assert result["receipt"]["purpose"] == "final"
 
 
 def _receipt_digests(monkeypatch, events, anchors, moves):
-    _, result, _ = plan(monkeypatch, events, anchors, moves)
+    _, result, _, _ = plan(monkeypatch, events, anchors, moves)
     receipt = result["receipt"]
     return receipt["exclusions_digest"], receipt["roster_digest"], receipt["receipt_id"]
 
@@ -223,7 +250,7 @@ def test_digest_stability_and_sensitivity(monkeypatch):
 
 def test_sample_ids_capped_at_ten(monkeypatch):
     events = [event(f"ev-{i:02}", f"T{i:02}", DAYS[265 + i]) for i in range(12)]
-    _, result, _ = plan(monkeypatch, events, {}, [])
+    _, result, _, _ = plan(monkeypatch, events, {}, [])
     receipt = result["receipt"]
     assert receipt["counts"]["excluded"] == 12
     assert receipt["sample_ids"] == [f"ev-{i:02}" for i in range(10)]
@@ -231,7 +258,7 @@ def test_sample_ids_capped_at_ten(monkeypatch):
 
 def test_purpose_and_identity_reproducible(monkeypatch):
     events, anchors, moves = _mixed()
-    _, first, _ = plan(monkeypatch, events, anchors, moves, purpose="holdout")
-    _, second, _ = plan(monkeypatch, events, anchors, moves, purpose="holdout")
+    _, first, _, _ = plan(monkeypatch, events, anchors, moves, purpose="holdout")
+    _, second, _, _ = plan(monkeypatch, events, anchors, moves, purpose="holdout")
     assert first["receipt"] == second["receipt"]
     assert first["receipt"]["purpose"] == "holdout"

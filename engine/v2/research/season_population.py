@@ -11,6 +11,7 @@ from engine.v2.data.errors import fail
 from engine.v2.foundation import content_hash
 from engine.v2.foundation.market_calendar import CalendarSessions
 from engine.v2.research import outcome_binding
+from engine.v2.research.eligible_history import admit_source
 from engine.v2.research.experiment_population import load_population
 from engine.v2.research.progress import decision, stage
 
@@ -18,13 +19,6 @@ WINDOW_SESSIONS = 252
 SAMPLE_IDS = 10
 SCHEMA = "season_heat_population.v1"
 _REASONS = ("missing_native_bounds", "null_source_bounds", "off_session_event_date")
-
-
-def _limits(limits):
-    if type(limits) is not dict or type(limits.get("max_object_bytes")) is not int \
-            or limits["max_object_bytes"] <= 0:
-        raise fail("CONTRACT_MISMATCH", "explicit positive max_object_bytes required")
-    return limits
 
 
 def _validate(calendar, decision_sessions):
@@ -93,8 +87,11 @@ def _receipt(*, as_of_month, purpose, start, first, last, calendar_source, popul
 def plan_roster(repository, snapshot, *, as_of_month, decision_sessions, calendar, calendar_source,
                 limits, purpose="selection"):
     """Metadata-only roster over the population window; opens no outcome.
+    limits is the eligible-history limits dict (max_source_rows, max_fragments,
+    max_object_bytes, max_total_bytes, max_output_rows); the H11 admission bounds
+    every whole-table read before it happens.
     Returns {"receipt": {...}, "retained": [...]}."""
-    _limits(limits)
+    admit_source(repository, snapshot, limits)
     sessions = _validate(calendar, decision_sessions)
     first, last = min(sessions), max(sessions)
     start = _window_start(calendar, first)
