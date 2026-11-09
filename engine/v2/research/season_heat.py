@@ -5,7 +5,6 @@ import numbers
 from collections import namedtuple
 from collections.abc import Mapping, Sequence
 from datetime import date
-from typing import Any
 
 from engine.v2.data.errors import fail
 from engine.v2.research.progress import Progress, decision, stage
@@ -28,11 +27,10 @@ def _variant(message):
 
 def _finite(value, message):
     try:
-        finite = math.isfinite(value)
+        if not math.isfinite(value):
+            raise _variant(message)
     except (TypeError, OverflowError, ValueError):
-        finite = False
-    if not finite:
-        raise _variant(message)
+        raise _variant(message) from None
     return value
 
 def _divide(total, count, message):
@@ -45,14 +43,12 @@ def _divide(total, count, message):
 def _parse_date(value, *, availability):
     error = _variant if availability else _contract
     message = "value is not a canonical ISO date"
-    if not isinstance(value, str):
-        raise error(message)
     try:
         parsed = date.fromisoformat(value)
+        if parsed.isoformat() != value:
+            raise error(message)
     except (TypeError, ValueError):
         raise error(message) from None
-    if parsed.isoformat() != value:
-        raise error(message)
     return parsed
 
 def _rows(value, name):
@@ -66,6 +62,14 @@ def _require_keys(row, expected, name):
     if set(row.keys()) != expected:
         raise _contract(f"{name} row keys do not match the contract")
     return row
+
+def _row_ids(row, expected, name):
+    _require_keys(row, expected, name)
+    event_id, ticker = row["event_id"], row["ticker"]
+    if (not isinstance(event_id, str) or not event_id.strip()
+            or not isinstance(ticker, str) or not ticker.strip() or ticker != ticker.strip()):
+        raise _contract(f"{name} event_id must be nonblank and ticker a string")
+    return event_id, ticker
 
 def _parse_move(value):
     message = "abs_move must be a finite nonnegative number"
@@ -81,17 +85,13 @@ def _session_positions(trading_sessions):
         parsed = _parse_date(raw, availability=False)
         if previous is not None and parsed <= previous:
             raise _contract(_SESSIONS)
-        previous = parsed
-        positions[raw] = (position, parsed)
+        positions[raw], previous = (position, parsed), parsed
     return positions
 
 def _parse_labels(labels, positions):
     parsed, seen = [], set()
     for row in _rows(labels, "labels"):
-        _require_keys(row, _LABEL_KEYS, "label")
-        event_id, ticker = row["event_id"], row["ticker"]
-        if not isinstance(event_id, str) or not event_id.strip() or not isinstance(ticker, str):
-            raise _contract("label event_id must be nonblank and ticker a string")
+        event_id, ticker = _row_ids(row, _LABEL_KEYS, "label")
         if event_id in seen:
             raise _contract("duplicate label event_id")
         seen.add(event_id)
@@ -101,16 +101,12 @@ def _parse_labels(labels, positions):
         if available <= positions[event_date][1]:
             raise _variant("label available_as_of_date must be strictly after event_date")
         parsed.append(_Label(event_id, ticker, positions[event_date][0], available, _parse_move(row["abs_move"])))
-    parsed.sort(key=lambda label: (label.available, label.event_index, label.event_id))
-    return parsed
+    return sorted(parsed, key=lambda label: (label.available, label.event_index, label.event_id))
 
 def _parse_targets(targets, positions):
     parsed, seen = [], set()
     for row in _rows(targets, "targets"):
-        _require_keys(row, _TARGET_KEYS, "target")
-        event_id, ticker = row["event_id"], row["ticker"]
-        if not isinstance(event_id, str) or not event_id.strip() or not isinstance(ticker, str):
-            raise _contract("target event_id must be nonblank and ticker a string")
+        event_id, ticker = _row_ids(row, _TARGET_KEYS, "target")
         event_date, decision_session = row["event_date"], row["decision_session"]
         if not isinstance(event_date, str) or event_date not in positions:
             raise _contract("target event_date is not a trading session")
@@ -122,15 +118,12 @@ def _parse_targets(targets, positions):
         seen.add(key)
         decision_index, decision_date = positions[decision_session]
         parsed.append(_Target(event_id, ticker, decision_index, decision_date, decision_session))
-    parsed.sort(key=lambda target: (target.decision_index, target.event_id))
-    return parsed
+    return sorted(parsed, key=lambda target: (target.decision_index, target.event_id))
 
 class _Windows:
     def __init__(self):
-        self.counts = {w: 0 for w in _WINDOWS}
-        self.sums = {w: 0 for w in _WINDOWS}
-        self.by_ticker = {w: {} for w in _WINDOWS}
-        self.buckets = {w: {} for w in _WINDOWS}
+        self.counts, self.sums = ({w: 0 for w in _WINDOWS}, {w: 0 for w in _WINDOWS})
+        self.by_ticker, self.buckets = ({w: {} for w in _WINDOWS}, {w: {} for w in _WINDOWS})
         self.lows = {w: 0 for w in _WINDOWS}
     def start(self, decision_index):
         for window in _WINDOWS:
@@ -138,11 +131,9 @@ class _Windows:
             # Running window state: drop sessions that fell below `lower`.
             for index in range(self.lows[window], lower):
                 for ticker, move in self.buckets[window].pop(index, ()):
-                    self.counts[window] -= 1
-                    self.sums[window] -= move
+                    self.counts[window], self.sums[window] = self.counts[window] - 1, self.sums[window] - move
                     cell = self.by_ticker[window][ticker]
-                    cell[0] -= 1
-                    cell[1] -= move
+                    cell[0], cell[1] = cell[0] - 1, cell[1] - move
                     if not cell[0]:
                         del self.by_ticker[window][ticker]
             self.lows[window] = max(self.lows[window], lower)
@@ -150,13 +141,11 @@ class _Windows:
         for window in _WINDOWS:
             if label.event_index < decision_index - window + 1:
                 continue
-            self.counts[window] += 1
-            self.sums[window] += label.move
+            self.counts[window], self.sums[window] = self.counts[window] + 1, self.sums[window] + label.move
             cell = self.by_ticker[window].get(label.ticker)
             if cell is None:
                 self.by_ticker[window][label.ticker] = cell = [0, 0]
-            cell[0] += 1
-            cell[1] += label.move
+            cell[0], cell[1] = cell[0] + 1, cell[1] + label.move
             self.buckets[window].setdefault(label.event_index, []).append((label.ticker, label.move))
     def totals(self, target, label_by_id):
         values = {}
@@ -167,8 +156,7 @@ class _Windows:
             total = self.sums[window] - ticker_sum
             label = label_by_id.get(target.event_id)
             if label is not None and label.ticker != target.ticker and label.available <= target.decision_date and label.event_index <= target.decision_index and label.event_index >= target.decision_index - window + 1:
-                count -= 1
-                total -= label.move
+                count, total = count - 1, total - label.move
             values[window] = (count, total)
         return values
 
@@ -181,13 +169,11 @@ def _payload(target, windows, label_by_id):
     mean_20 = _divide(sum_20, count_20, _MEAN) if count_20 >= 20 else None
     mean_60 = _divide(sum_60, count_60, _MEAN) if count_60 >= 20 else None
     ratio = None
-    if count_20 >= 20 and count_252 >= 20:
-        mean_252 = _divide(sum_252, count_252, _MEAN)
-        if mean_252 != 0:
-            ratio = _divide(mean_20, mean_252, _RATIO)
+    if count_20 >= 20 and count_252 >= 20 and (mean_252 := _divide(sum_252, count_252, _MEAN)) != 0:
+        ratio = _divide(mean_20, mean_252, _RATIO)
     return {"season_heat_mean_abs_5": mean_5, "season_heat_mean_abs_20": mean_20, "season_heat_mean_abs_60": mean_60, "season_heat_count_20": int(count_20), "season_heat_ratio_20_252": ratio}
 
-def compute_season_heat(labels: Any, targets: Any, trading_sessions: Any) -> dict[tuple[str, str], dict]:
+def compute_season_heat(labels, targets, trading_sessions) -> dict[tuple[str, str], dict]:
     with stage("season heat calculation"):
         positions = _session_positions(trading_sessions)
         parsed_labels = _parse_labels(labels, positions)

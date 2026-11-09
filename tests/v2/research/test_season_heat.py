@@ -369,3 +369,23 @@ def test_season_heat_rejects_invalid_inputs_with_native_codes(
     with pytest.raises(DataError) as raised:
         compute_season_heat(labels, targets, sessions)
     assert raised.value.code == expected_code
+
+
+@pytest.mark.parametrize("ticker", ["", " ", "\t", " ABC "])
+def test_blank_tickers_are_refused(ticker):
+    labels = [_label("L1", ticker, "2025-03-07", 1)]
+    targets = [{
+        "event_id": "T1",
+        "ticker": "AAA",
+        "event_date": "2025-03-11",
+        "decision_session": "2025-03-10",
+    }]
+    sessions = ["2025-03-07", "2025-03-10", "2025-03-11"]
+    with pytest.raises(DataError) as raised:
+        compute_season_heat(labels, targets, sessions)
+    assert raised.value.code == "CONTRACT_MISMATCH"
+    labels = [_label("L1", "CCC", "2025-03-07", 1)]
+    targets[0]["ticker"] = ticker
+    with pytest.raises(DataError) as raised:
+        compute_season_heat(labels, targets, sessions)
+    assert raised.value.code == "CONTRACT_MISMATCH"

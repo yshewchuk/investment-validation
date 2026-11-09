@@ -28,7 +28,7 @@ from engine.v2.research.eligible_history_table import (
 from engine.v2.research.experiment_population import load_population
 from engine.v2.research.magnitude_features import _feature_recipe, calendar_input
 from engine.v2.research.magnitude_inputs import forecast_cutoff
-from engine.v2.research.progress import Progress, stage
+from engine.v2.research.progress import Progress, decision, stage
 from engine.v2.research.season_heat import compute_season_heat
 from engine.v2.research.snapshot_inputs import admit_snapshot
 
@@ -244,6 +244,27 @@ def plan_targets(repository, snapshot, *, as_of_month, policy, event_ids, horizo
         "before_start": plan["early"], "dated_before_start": plan["dated_before_start"]}
 
 
+def _season_source(repository, snapshot, contract, candidates):
+    """Retain season events bound to exactly one exact computed-move fragment."""
+    records = repository.fragment_records(snapshot, contract.table_name)
+    meter = Progress("season computed-move fragments", len(records) + len(candidates))
+    found = {}
+    for record in records:
+        found.setdefault(record.primary_key_min, []).append(record)
+        meter.tick()
+    retained = set()
+    for event in candidates.itertuples(index=False):
+        key = event.ticker, event.event_date.date().isoformat()
+        match = found.get(key, [])
+        if (len(match) == 1 and (record := match[0]).row_count == 1 and record.primary_key_max == key
+                and record.partition_key == key[0] and record.time_min == key[1] and record.time_max == key[1]):
+            retained.add(event.event_id)
+        meter.tick()
+    decision("season computed-move source", f"{len(retained)}/{len(candidates)} events retained; "
+        f"{len(candidates) - len(retained)} lack exactly one exact source fragment")
+    return retained
+
+
 def _prepare(repository, snapshot, *, as_of_month, policy, event_ids, horizons, history_start, limits,
              producer):
     plan = _plan(repository, snapshot, as_of_month=as_of_month, policy=policy, event_ids=event_ids,
@@ -267,23 +288,19 @@ def _prepare(repository, snapshot, *, as_of_month, policy, event_ids, horizons, 
         raise fail("CONTRACT_MISMATCH", "history requires native computed moves")
     calendar_days = plan["calendar"].days
     session_index = {day: index for index, day in enumerate(calendar_days)}
-    decision_indices = sorted({session_index[c["source_session_ceiling"]]
-        for event_clocks in forecasts.values() for c in event_clocks})
-    lower, upper = max(0, min(decision_indices) - 251), max(decision_indices)
-    population_days = population.event_date.dt.strftime("%Y-%m-%d")
-    season_candidates = population[population_days.map(session_index).between(lower, upper)]
-    history_ids, season_ids = set(candidates.event_id), set(season_candidates.event_id)
+    indices = [session_index[c["source_session_ceiling"]]
+        for event_clocks in forecasts.values() for c in event_clocks]
+    season_candidates = population[population.event_date.dt.strftime("%Y-%m-%d").isin(
+        calendar_days[max(0, min(indices) - 251): max(indices) + 1])]
+    with stage("season computed-move source admission"):
+        season_ids = _season_source(repository, snapshot, contract, season_candidates)
+    history_ids = set(candidates.event_id)
     union = population[population.event_id.isin(history_ids | season_ids)].sort_values(
         ["event_date", "event_id"])
     all_plans, reader = event_history.plan_with_reader(repository, snapshot, union, contract)
     plans = [plan for plan in all_plans if plan[0].event_id in history_ids]
     season_plans = sorted((plan for plan in all_plans if plan[0].event_id in season_ids),
         key=lambda plan: (plan[0].event_date, plan[0].event_id))
-    season_anchors = _anchors(repository, snapshot, limits)
-    season_records = {(event.ticker, event.event_date.date().isoformat()): record for event, _request, record in season_plans}
-    season_bounds = {plan[0].event_id: bound for plan in season_plans
-        if (bound := _bound(plan[0], season_anchors, season_records)) is not None}
-    season_plans = [plan for plan in season_plans if plan[0].event_id in season_bounds]
     target_rows = [{"event_id": e.event_id, "ticker": e.ticker,
         "event_date": e.event_date.date().isoformat(), "forecasts": forecasts[e.event_id]}
         for e in targets.sort_values("event_id").itertuples(index=False)]
@@ -295,9 +312,8 @@ def _prepare(repository, snapshot, *, as_of_month, policy, event_ids, horizons, 
         "contributors": [{"event_id": e.event_id, **qualified[e.event_id]} for e, _, _ in plans],
         "season_heat_contributors": [{"event_id": e.event_id, "ticker": e.ticker,
             "event_date": e.event_date.date().isoformat(), "fragment_id": record.fragment_id,
-            "object_id": record.object_ref.object_id, "content_hash": record.object_ref.content_hash,
-            "post_close_date": season_bounds[e.event_id]["post_close_date"]} for e, _, record in season_plans],
-        "availability": {"basis": "reconstructed_date_bounds", "source_publication": "unverified",
+            "object_id": record.object_ref.object_id, "content_hash": record.object_ref.content_hash} for e, _, record in season_plans],
+        "availability": {"basis": "computed_moves.available_as_of_date", "source_publication": "unverified",
                          "event_schedule_as_known": "unverified"}}
     context = {**identity, "context_id": content_hash(identity)}
     return (context, targets.set_index("event_id", drop=False), population, plans, reader,
@@ -308,12 +324,14 @@ def _groups(repository, snapshot, selected, forecasts, event_ids, horizons, cale
             strict=True):
     """Source-derived label windows; missing evidence differs from null labels."""
     anchors = _anchors(repository, snapshot, limits, required_tickers=selected.ticker.unique())
+    wanted = {(e.ticker, e.event_date.date().isoformat()) for e in selected.itertuples(index=False)}
     records = {}
     for record in repository.fragment_records(snapshot, "computed_moves"):
         key = record.primary_key_min
-        if key in records:
-            raise fail("HOLDOUT_ACCESS_DENIED", "ambiguous outcome object identity")
-        records[key] = record
+        if key in wanted:
+            if key in records:
+                raise fail("HOLDOUT_ACCESS_DENIED", "ambiguous outcome object identity")
+            records[key] = record
     groups, unavailable, qualified = [], [], {}
     for event in selected.itertuples(index=False):
         bound = _bound(event, anchors, records)
@@ -355,27 +373,22 @@ def _existing(repository, context):
 def _rows(snapshot, prepared):
     context, targets, population, plans, reader, season_plans, calendar_days = prepared
     bounds = {row["event_id"]: row for row in context["contributors"]}
-    season_bounds = {row["event_id"]: row for row in context["season_heat_contributors"]}
     by_ticker = {}
     for plan in plans:
         by_ticker.setdefault(plan[0].ticker, []).append(plan)
 
-    def checked(event, request, source_bounds=bounds, allow_skipped=False):
+    def checked(event, request):
         rows = reader(event, request)
-        if allow_skipped and len(rows) == 1 and rows[0]["skipped"] is True:
-            return rows
-        expected = (date.fromisoformat(source_bounds[event.event_id]["post_close_date"]) + timedelta(days=1)).isoformat()
+        expected = (date.fromisoformat(bounds[event.event_id]["post_close_date"]) + timedelta(days=1)).isoformat()
         if len(rows) != 1 or rows[0]["available_as_of_date"] != expected or rows[0]["skipped"] is not False:
             raise fail("CONTRACT_MISMATCH", "outcome availability differs from qualified source bounds")
         return rows
 
     max_decision_date = date.fromisoformat(max(cutoff["source_session_ceiling"]
         for target in context["targets"] for cutoff in target["forecasts"]))
-    labels = []
-    meter = Progress("season heat population labels", len(season_plans))
+    labels, meter = [], Progress("season heat population labels", len(season_plans))
     for event, request, _record in season_plans:
-        rows = checked(event, request, season_bounds, allow_skipped=True)
-        outcome, reason = event_history._historical_target(rows, event, max_decision_date)
+        outcome, reason = event_history._historical_target(reader(event, request), event, max_decision_date)
         if not reason:
             labels.append({"event_id": event.event_id, "ticker": event.ticker, "event_date": event.event_date.date().isoformat(),
                 "available_as_of_date": outcome[2], "abs_move": abs(outcome[0])})

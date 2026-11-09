@@ -565,7 +565,7 @@ def test_clock_memo_scales_with_distinct_keys_and_returns_detached_values(monkey
 def test_each_ticker_uses_its_own_history_ceiling_but_full_protected_metadata(tmp_path, protected):
     later = history_event("2023-06-20" if protected else "2024-04-02", ticker="OTHER", protected=protected)
     data = source(tmp_path, extra_ticker=True, extra_events=[later],
-        missing_bounds=[("OTHER", later["event_date"].date().isoformat())] if protected else ())
+        missing_bounds=[("OTHER", later["event_date"].date().isoformat())])
     try:
         request = {**data.request, "event_ids": [data.events[0]["event_id"], data.events[-2]["event_id"]]}
         if protected:
@@ -578,20 +578,8 @@ def test_each_ticker_uses_its_own_history_ceiling_but_full_protected_metadata(tm
                 columns=list(FEATURES), **request)
             assert len(result["rows"]) == 6
             assert {r["event_id"] for r in result["rows"]} == set(request["event_ids"])
+            assert later["event_id"] in {c["event_id"] for c in artifact["context"]["season_heat_contributors"]}
             assert later["event_id"] not in {g["event_id"] for g in artifact["context"]["eligibility"]["groups"]}
-    finally:
-        data.conn.close()
-
-
-def test_missing_season_population_bounds_refuses(tmp_path):
-    later = history_event("2024-04-02", ticker="OTHER")
-    data = source(tmp_path, extra_ticker=True, extra_events=[later],
-        missing_bounds=[("OTHER", later["event_date"].date().isoformat())])
-    try:
-        request = {**data.request, "event_ids": [data.events[0]["event_id"], data.events[-2]["event_id"]]}
-        with pytest.raises(DataError) as caught:
-            history.materialize(data.repository, data.snapshot, **request)
-        assert caught.value.code == "CONTRACT_MISMATCH"
     finally:
         data.conn.close()
 
@@ -759,10 +747,10 @@ def test_materialization_persists_population_season_heat_fields(tmp_path):
         data.conn.close()
 
 
-def test_season_population_label_availability_is_bound_to_native_bounds(tmp_path, monkeypatch):
+def test_season_population_label_availability_is_causal(tmp_path, monkeypatch):
     import engine.v2.research.eligible_history as internal
-    from engine.v2.data.errors import DataError
-    data = source(tmp_path, extra_events=[history_event("2024-06-03", ticker="OTHER")])
+    data = source(tmp_path, extra_events=[history_event("2024-06-03", ticker="OTHER"),
+        history_event("2024-06-04", ticker="KEEP")])
     try:
         target_id = next(event["event_id"] for event in data.events
             if event["event_date"].date().isoformat() == "2024-06-17")
@@ -777,15 +765,53 @@ def test_season_population_label_availability_is_bound_to_native_bounds(tmp_path
                 if event.ticker == "OTHER":
                     rows = [dict(row) for row in rows]
                     for row in rows:
-                        row["available_as_of_date"] = "2024-06-03"
+                        row["available_as_of_date"] = "2024-06-20"
                 return rows
 
             return plans, checked_reader
 
         monkeypatch.setattr(internal.event_history, "plan_with_reader", wrapped_plan_with_reader)
-        with pytest.raises(DataError) as caught:
-            history.materialize(data.repository, data.snapshot, **request)
-        assert caught.value.code == "CONTRACT_MISMATCH"
+        captured = []
+        original_compute = internal.compute_season_heat
+
+        def captured_compute(labels, heat_targets, calendar_days):
+            captured.extend(labels)
+            return original_compute(labels, heat_targets, calendar_days)
+
+        monkeypatch.setattr(internal, "compute_season_heat", captured_compute)
+        artifact = history.materialize(data.repository, data.snapshot, **request)
+        assert artifact["feature_snapshot"] is not None
+        assert all(label["ticker"] != "OTHER" for label in captured)
+        assert any(label["ticker"] == "KEEP" for label in captured)
+    finally:
+        data.conn.close()
+
+
+@pytest.mark.parametrize("mode", ["missing", "duplicate"])
+def test_population_without_unique_computed_move_fragment_is_omitted(tmp_path, monkeypatch, mode):
+    other = history_event("2024-06-03", ticker="OTHER")
+    data = source(tmp_path, extra_events=[other])
+    try:
+        target_id = next(event["event_id"] for event in data.events
+            if event["event_date"].date().isoformat() == "2024-06-17")
+        request = {**data.request, "event_ids": [target_id]}
+        original_records = data.repository.fragment_records
+        wanted_key = ("OTHER", "2024-06-03")
+
+        def wrapped_records(snapshot, table_name):
+            records = original_records(snapshot, table_name)
+            if table_name != "computed_moves":
+                return records
+            matched = tuple(r for r in records if r.primary_key_min == wanted_key)
+            if not matched:
+                return records
+            if mode == "missing":
+                return tuple(r for r in records if r.primary_key_min != wanted_key)
+            return records + matched
+
+        monkeypatch.setattr(data.repository, "fragment_records", wrapped_records)
+        artifact = history.materialize(data.repository, data.snapshot, **request)
+        assert other["event_id"] not in {c["event_id"] for c in artifact["context"]["season_heat_contributors"]}
     finally:
         data.conn.close()
 
