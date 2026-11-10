@@ -86,7 +86,7 @@ def materialize(repository, source, **request):
 
 def read(repository, source, feature_snapshot, *, columns=None, lineage=True, **request):
     """Re-admit exact stored rows; projections cannot relax grouped eligibility."""
-    admit_columns(columns)
+    admit_columns(columns, season=True)
     _request(source, request)
     snapshot_reference(feature_snapshot)
     producer = _producer(request)

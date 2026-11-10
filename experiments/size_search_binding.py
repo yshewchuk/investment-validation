@@ -90,7 +90,7 @@ _PANEL_MEMO = {}
 def read_stored_panel(repository, source, request, *, columns, expected_panel=None):
     """Share one admitted panel per process; validate each request and return detached copies."""
     validate_panel_request(request)
-    admit_columns(columns)
+    admit_columns(columns, season=True)
     key = (id(repository), content_hash(to_document(source)),
            content_hash(request), tuple(columns))
     entry = _PANEL_MEMO.get(key)
@@ -126,10 +126,6 @@ def prepare(repository, spec, request, panel_request, *, scope, training_start, 
     if request["limits"]["child"]["memory_bytes"] > request["limits"]["parent"]["memory_bytes"]:
         raise fail("INVALID_EXPERIMENT_SPEC", "child memory must not exceed inherited parent limit")
     _require(request["feature_dictionary_hash"] == recipe(_panel_subset(request["schema_version"]))["dictionary_hash"])
-    # HMOS season columns join the panel read when slice 5 flips the contract to v4; until then the projection stays HMO.
-    if "HMOS" in request.get("feature_sets", ()):
-        raise fail("INVALID_EXPERIMENT_SPEC",
-                   "HMOS candidates need the season panel columns; refused until the panel contract is v4")
     _require(panel_request["feature_snapshot_id"] == request["feature_snapshot_id"]
              and panel_request["history_snapshot"] == request["history_snapshot_id"]
              and set(panel_request["horizons"]) == set(schedule["horizons"]))
@@ -140,7 +136,8 @@ def prepare(repository, spec, request, panel_request, *, scope, training_start, 
     _require(binding["execution_plan"]["runner"] == "experiments/size_search.py")
     binding["source_closure"] = sources
     _require(binding["magnitude_plan"]["evaluation_years"] == schedule["request"]["outer_years"])
-    panel_columns = _panel_columns(request["schema_version"], recipe("HMO")["model_columns"])
+    panel_columns = _panel_columns(request["schema_version"],
+        recipe(_panel_subset(request["schema_version"]))["model_columns"])
     panel = read_panel(repository, from_document(SnapshotRef, binding["snapshot"]), panel_request,
                         columns=panel_columns)
     context = panel["context"]
@@ -371,7 +368,7 @@ def fold_inputs(repository, binding, fold, *, plan=None):
     source = from_document(SnapshotRef, binding["snapshot"])
     started = time.monotonic()
     panel_columns = _panel_columns(binding["size_request"].get("schema_version"),
-        recipe("HMO")["model_columns"])
+        recipe(_panel_subset(binding["size_request"].get("schema_version")))["model_columns"])
     panel = _stored_panel(repository, source, binding, panel_columns)
     participants = set(fold["training_candidate_event_ids"] + fold["evaluation_event_ids"])
     events = {e["event_id"]: e for e in panel["context"]["target_events"]}
