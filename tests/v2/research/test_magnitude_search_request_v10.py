@@ -119,20 +119,44 @@ def test_v10_accepts_the_hmos_hash_without_the_hmos_set():
     assert compiled["counts"]["candidates"] == 21
 
 
-def test_prepare_refuses_hmos_candidates_until_the_panel_contract_is_v4(monkeypatch):
+def test_prepare_accepts_hmos_candidates(monkeypatch):
     from experiments import size_search_binding
+
+    class ReachedRegistration(Exception):
+        pass
+
     request = _request(10)
     monkeypatch.setattr(size_search_binding, "_sources", lambda: {})
     monkeypatch.setattr(size_search_binding, "validate_panel_request",
-                        lambda panel_request: {"horizons": [1]})
+                        lambda panel_request: {"horizons": [1],
+                                                "feature_snapshot_id": request["feature_snapshot_id"],
+                                                "history_snapshot": request["history_snapshot_id"],
+                                                "as_of_month": "2023-01-01", "event_ids": []})
     monkeypatch.setattr(size_search_binding, "compile_request",
                         lambda request, *, horizons: {"horizons": [1]})
-    with pytest.raises(OpsError) as caught:
+    def reach_registration(*args, **kwargs):
+        raise ReachedRegistration("past the guard")
+
+    monkeypatch.setattr(size_search_binding, "prepare_native_registration", reach_registration)
+    with pytest.raises(ReachedRegistration):
         size_search_binding.prepare(None, {}, request, {"horizons": [1]},
                                     scope=None, training_start=None, labels_before=None)
-    assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
-    assert caught.value.problem.message == (
-        "HMOS candidates need the season panel columns; refused until the panel contract is v4")
+
+
+def test_hmos_candidates_get_season_columns_and_hmo_do_not():
+    from engine.v2.research.magnitude_panel_qualified_table import SEASON
+    compiled = compile_request(_request(10))
+    for spec in compiled["candidate_specs"]:
+        feature_recipe = spec["feature_recipe"]
+        if feature_recipe["subset"] == "HMOS":
+            assert all(name in feature_recipe["model_columns"] for name in SEASON)
+        elif feature_recipe["subset"] == "HMO":
+            assert not any(name in feature_recipe["model_columns"] for name in SEASON)
+    hmos_projection = _panel_columns("magnitude_search_request.v10", recipe("HMOS")["model_columns"])
+    assert all(name in hmos_projection for name in SEASON)
+    admit_columns(hmos_projection, season=True)
+    hmo_projection = _panel_columns("magnitude_search_request.v9", recipe("HMO")["model_columns"])
+    assert not any(name in hmo_projection for name in SEASON)
 
 
 @pytest.mark.parametrize("feature_sets", [[], ["HMOS", "M"], ["M", "M"], ["HMO", "x"]])
@@ -150,7 +174,7 @@ def test_v9_refuses_the_hmos_set():
 
 def test_v10_panel_projection_is_admissible():
     admit_columns(_panel_columns(
-        "magnitude_search_request.v10", recipe("HMO")["model_columns"]))
+        "magnitude_search_request.v10", recipe("HMOS")["model_columns"]), season=True)
 
 
 def test_v10_workers_use_the_existing_bounded_worker_contract():
