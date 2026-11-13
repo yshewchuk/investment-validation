@@ -21,6 +21,10 @@ from engine.v2.research.progress import Progress, decision, stage
 from engine.v2.research.snapshot_inputs import admit_snapshot
 from engine.v2.research.tail_history import compute_tail_history
 
+# replaced by slice 6b's computed blocks
+_PENDING_X = {"sources": [], "missing": dict.fromkeys(
+    (*x.IVDYN, *x.OWNVOL), "not_implemented_until_slice_6b")}
+
 
 def _policy(policy):
     if policy != eligibility_policy(version="grouped_ticker_embargo.v1", embargo_days=30):
@@ -129,8 +133,8 @@ def _block(values, anchors, **extra):
 
 def _history_x(history, moves, target):
     """G1 tail and G4 calendar columns from the H11 contributor list and the stored clock.
-    Invoked by `_rows` during `experiments.size_panel.materialize`; the request that selects
-    the HMOSX set is slice 7, the contract text slice 8."""
+    Invoked by `_rows` during `experiments.size_panel.materialize`; request binding is slice 7,
+    contract text slice 8."""
     entries = history["history"]
     tail = compute_tail_history([abs(moves[e["event_id"]]) for e in entries])
     prior = entries[-1]["event_date"] if entries else None
@@ -201,7 +205,7 @@ class _NullCounts:
 
 
 def _history_missing(history_values, hx):
-    return {**history_values, **{k: hx[k] for k in x.TAIL}}
+    return {**history_values, **{k: hx[k] for k in (*x.TAIL, "cal_days_since_prior")}}
 
 
 def _rows(repository, source, price_snapshot, prepared):
@@ -263,7 +267,8 @@ def _rows(repository, source, price_snapshot, prepared):
                                               for d in spy[key]["source_dates"]]),
             "daily_market": _daily_lineage(market, daily_anchors, ticker),
             "implied_history": implied_lineage,
-            "season_heat": {"receipt_id": season_receipt_id}}
+            "season_heat": {"receipt_id": season_receipt_id},
+            "x_pending": _PENDING_X}
         row = {"schema_version": table.CONTRACT.contract_id, "event_id": key[0],
             "context_id": context["context_id"], "history_context_id": admitted["context"]["context_id"],
             "horizon_sessions": key[1], "event_date": target["event_date"],

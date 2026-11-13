@@ -214,6 +214,21 @@ def _prepared_rows(data):
     return list(builder._rows(data.repository, data.panel_source, data.prices, prepared))
 
 
+def test_lineage_records_x_missingness(panel_data):
+    rows = _prepared_rows(panel_data)
+    assert rows
+    expected = set((*x.IVDYN, *x.OWNVOL))
+    for row in rows:
+        blocks = json.loads(row["lineage"])
+        assert set(blocks["x_pending"]["missing"]) == expected
+        assert all(reason == "not_implemented_until_slice_6b"
+            for reason in blocks["x_pending"]["missing"].values())
+        if row["cal_days_since_prior"] is None:
+            assert "cal_days_since_prior" in blocks["history"]["missing"]
+        if row["tail_max_abs"] is None:
+            assert "tail_max_abs" in blocks["history"]["missing"]
+
+
 def test_history_x_empty_history_leaves_tail_and_days_since_prior_null():
     result = builder._history_x({"history": []}, {},
         {"session": "AMC", "event_date": "2024-03-08"})
