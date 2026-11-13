@@ -14,6 +14,29 @@ RATIO_FLOOR = 0.05
 _METRICS = ("pinball_p50", "pinball_p90", "pinball_mean", "coverage_p90", "coverage_p10_p90")
 
 
+class TrialArrays(dict):
+    MAX_BYTES = 256 * 1024 * 1024
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.capped = False
+        self.nbytes = 0
+
+    def add(self, key, arrays):
+        if self.capped:
+            return
+        size = sum(part.nbytes for value in arrays.values() for part in value)
+        if self.nbytes + size > self.MAX_BYTES:
+            self.clear()
+            self.capped = True
+            self.nbytes = 0
+            print("[distribution] retained trial arrays exceed cap; distribution skipped",
+                  file=sys.stderr)
+            return
+        self[key] = arrays
+        self.nbytes += size
+
+
 def _validate(arrays):
     for array in arrays:
         for value in array.values():
@@ -22,6 +45,22 @@ def _validate(arrays):
             parts = [np.asarray(part) for part in value]
             if any(part.ndim != 1 for part in parts) or len({part.size for part in parts}) != 1:
                 raise ValueError("malformed distribution input")
+            if not all(np.isfinite(np.asarray(part, dtype=float)).all() for part in parts[:2]):
+                raise ValueError("non-finite distribution input")
+
+
+def _restrict(arrays, allowed):
+    restricted = {}
+    for horizon, value in arrays.items():
+        pred, y, event_ids = value
+        event_ids = np.asarray(event_ids, dtype=object)
+        keep = np.array([event_id in allowed for event_id in event_ids], dtype=bool)
+        restricted[horizon] = (np.asarray(pred)[keep], np.asarray(y)[keep], event_ids[keep])
+    return restricted
+
+
+def _has_rows(arrays):
+    return any(len(value[0]) for value in arrays.values())
 
 
 def _values(arrays, horizon):
@@ -99,6 +138,9 @@ def _failed():
 def collect_distribution(plan, trial_arrays, outer_rows, selected_ids):
     if "target" in plan:
         return {"schema_version": SCHEMA, "status": "unsupported_target"}
+    if getattr(trial_arrays, "capped", False):
+        return {"schema_version": SCHEMA, "status": "skipped_resource_cap"}
+    _validate(list(trial_arrays.values()) + list(outer_rows.values()))
     horizons, groups = plan["horizons"], plan["folds"]
     total = sum(len(group["inner"]) for group in groups) * len(plan["candidates"])
     started = last_progress = time.monotonic()
@@ -114,10 +156,15 @@ def collect_distribution(plan, trial_arrays, outer_rows, selected_ids):
             keys = {year: trial_key(plan, outer_year, year, candidate_id) for year in years}
             for year in years:
                 allowed = set(folds_by_year[year]["training_candidate_event_ids"])
-                pool_years = [earlier for earlier in years
-                              if earlier < year and keys[earlier] in trial_arrays]
-                pool = [trial_arrays[keys[earlier]] for earlier in pool_years]
-                metrics = (band_metrics(pool, trial_arrays[keys[year]], horizons, allowed=allowed)
+                pool_years, pool = [], []
+                for earlier in years:
+                    if earlier >= year or keys[earlier] not in trial_arrays:
+                        continue
+                    restricted = _restrict(trial_arrays[keys[earlier]], allowed)
+                    if _has_rows(restricted):
+                        pool_years.append(earlier)
+                        pool.append(restricted)
+                metrics = (band_metrics(pool, trial_arrays[keys[year]], horizons)
                            if keys[year] in trial_arrays else _failed())
                 inner.append({"outer_year": outer_year, "inner_year": year,
                     "candidate_id": candidate_id, "trial_id": keys[year],
@@ -137,12 +184,18 @@ def collect_distribution(plan, trial_arrays, outer_rows, selected_ids):
         candidate_id = selected_ids[outer_year]
         years = sorted(fold["year"] for fold in group["inner"])
         keys = {year: trial_key(plan, outer_year, year, candidate_id) for year in years}
-        pool_years = [year for year in years if keys[year] in trial_arrays]
-        pool = [trial_arrays[keys[year]] for year in pool_years]
         allowed = set(group["outer"]["training_candidate_event_ids"])
+        pool_years, pool = [], []
+        for year in years:
+            if keys[year] not in trial_arrays:
+                continue
+            restricted = _restrict(trial_arrays[keys[year]], allowed)
+            if _has_rows(restricted):
+                pool_years.append(year)
+                pool.append(restricted)
         outer.append({"outer_year": outer_year, "arm": "selected", "candidate_id": candidate_id,
             "pool_years": pool_years,
-            **band_metrics(pool, outer_rows.get(outer_year, {}), horizons, allowed=allowed)})
+            **band_metrics(pool, outer_rows.get(outer_year, {}), horizons)})
         outer.extend({"outer_year": outer_year, "arm": arm, "status": "no_pool"}
                      for arm in ("incumbent", "history_mean", "implied_move"))
     print(f"[distribution] done in {time.monotonic() - started:.1f}s", file=sys.stderr)

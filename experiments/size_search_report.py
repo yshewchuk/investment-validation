@@ -12,7 +12,7 @@ from engine.v2.foundation import content_hash
 from experiments.magnitude_search_outer import collect_outer_results
 from experiments.magnitude_search_plan import trial_key
 from experiments.magnitude_search_records import read_record
-from experiments.size_distribution_report import collect_distribution
+from experiments.size_distribution_report import TrialArrays, collect_distribution
 from experiments.size_paired_report import paired_report, validated_horizons
 from experiments.v2_magnitude_search_run import _admit_driver
 
@@ -86,14 +86,14 @@ def _candidate_evidence(conn, store, run_id, plan, predictions=None):
                     inner_metrics = terminal.get("inner_metrics")
                     if predictions is not None and terminal.get("status") == "succeeded" and "target" not in plan:
                         stored = terminal["predictions"]
-                        predictions[key] = {horizon: (
+                        predictions.add(key, {horizon: (
                             np.array([row["predicted_absolute_move_pct"] for row in stored
                                       if row["horizon_sessions"] == horizon], dtype=float),
                             np.array([row["absolute_move_pct"] for row in stored
                                       if row["horizon_sessions"] == horizon], dtype=float),
-                            np.array([row["event_id"] for row in stored
+                            np.array([sys.intern(str(row["event_id"])) for row in stored
                                       if row["horizon_sessions"] == horizon], dtype=object))
-                            for horizon in plan["horizons"]}
+                            for horizon in plan["horizons"]})
                         del stored
                     fit_seconds = []
                     for horizon in plan["horizons"]:
@@ -145,7 +145,7 @@ def collect(conn, store, repository, registration, request, plan_ref):
     targets = {r["event_id"]: r["absolute_move_pct"] for r in result["predictions"]}
     ids = {event for group in plan["folds"] for event in group["outer"]["evaluation_event_ids"]}
     events = [e for e in registration.document["size_panel"]["context"]["target_events"] if e["event_id"] in ids]
-    trial_arrays = {}
+    trial_arrays = TrialArrays()
     inner_fits = _candidate_evidence(conn, store, registration.run_id, plan, trial_arrays)
     outer_rows = {}
     if "target" not in plan:
@@ -162,8 +162,10 @@ def collect(conn, store, repository, registration, request, plan_ref):
     selected_ids = {fold["outer_year"]: fold["candidate"]["candidate_id"]
                     for fold in result["folds"]}
     distribution = collect_distribution(plan, trial_arrays, outer_rows, selected_ids)
+    trial_arrays.clear()
     matches = ({(row["outer_year"], row["inner_year"], row["candidate_id"]): row
-                for row in distribution["inner"]} if distribution["status"] != "unsupported_target" else {})
+                for row in distribution.get("inner", [])}
+               if distribution["status"] != "unsupported_target" else {})
     for row in inner_fits:
         match = matches.get((row["outer_year"], row["inner_year"], row["candidate_id"]))
         row["distribution"] = ({key: value for key, value in match.items()

@@ -8,6 +8,7 @@ from experiments.magnitude_search_plan import trial_key
 from experiments.size_distribution_report import (
     RATIO_FLOOR,
     SCHEMA,
+    TrialArrays,
     band_metrics,
     collect_distribution,
 )
@@ -168,3 +169,59 @@ def test_floored_zero_and_negative_predictions_stay_finite():
     assert 0.0 < RATIO_FLOOR < 1.0
     assert all(np.isfinite(horizon[key]) for key in (
         "pinball_p50", "pinball_p90", "pinball_mean", "coverage_p90", "coverage_p10_p90"))
+
+
+def test_pool_years_drop_donors_with_no_allowed_rows():
+    plan = plan_with_years()
+    plan["folds"][0]["inner"][1]["training_candidate_event_ids"] = ["not-a-pool-event"]
+    keys = {year: trial_key(plan, "2024", year, "c") for year in ("2021", "2022", "2023")}
+    trials = {key: pooled() for key in keys.values()}
+    result = collect_distribution(plan, trials, {"2024": arrays([10.0], [20.0])}, {"2024": "c"})
+    rows = {row["inner_year"]: row for row in result["inner"]}
+    assert rows["2022"]["pool_years"] == []
+    assert rows["2022"]["status"] == "no_pool"
+    assert rows["2022"]["pooled"] is None
+    assert rows["2023"]["pool_years"] == ["2021", "2022"]
+
+
+def test_every_donor_filtered_reports_no_pool():
+    plan = plan_with_years()
+    for fold in plan["folds"][0]["inner"]:
+        fold["training_candidate_event_ids"] = ["not-a-pool-event"]
+    keys = {year: trial_key(plan, "2024", year, "c") for year in ("2021", "2022", "2023")}
+    trials = {key: pooled() for key in keys.values()}
+    result = collect_distribution(plan, trials, {"2024": arrays([10.0], [20.0])}, {"2024": "c"})
+    for row in result["inner"]:
+        assert row["pool_years"] == []
+        assert row["status"] == "no_pool"
+
+
+def test_non_finite_excluded_donor_row_refuses_before_filtering():
+    plan = plan_with_years()
+    plan["folds"][0]["inner"][1]["training_candidate_event_ids"] = ["e0"]
+    keys = {year: trial_key(plan, "2024", year, "c") for year in ("2021", "2022", "2023")}
+    pred = POOL.copy()
+    pred[5] = np.nan
+    trials = {keys["2021"]: arrays(pred, 2.0 * POOL, POOL_IDS),
+              keys["2022"]: arrays([10.0], [20.0]),
+              keys["2023"]: arrays([10.0], [20.0])}
+    with pytest.raises(ValueError, match="non-finite distribution input"):
+        collect_distribution(plan, trials, {"2024": arrays([10.0], [20.0])}, {"2024": "c"})
+
+
+def test_non_finite_unrequested_horizon_refuses():
+    pool = {**arrays(POOL, 2.0 * POOL, POOL_IDS, horizon=1),
+            **arrays([np.nan], [1.0], ["unused"], horizon=3)}
+    with pytest.raises(ValueError, match="non-finite distribution input"):
+        band_metrics([pool], arrays([10.0], [20.0]), [1])
+
+
+def test_trial_arrays_cap_marks_empty_and_collect_skips(monkeypatch):
+    monkeypatch.setattr(TrialArrays, "MAX_BYTES", 70)
+    trial_arrays = TrialArrays()
+    trial_arrays.add("first", arrays([1.0, 2.0], [3.0, 4.0]))
+    trial_arrays.add("second", arrays([1.0, 2.0], [3.0, 4.0]))
+    assert trial_arrays.capped is True
+    assert trial_arrays == {}
+    assert collect_distribution(plan_with_years(), trial_arrays, {}, {}) == {
+        "schema_version": SCHEMA, "status": "skipped_resource_cap"}

@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from experiments import size_search_report as report
+from experiments.size_distribution_report import TrialArrays
 
 
 def test_mixed_failed_and_successful_trials_report_diagnostics(monkeypatch):
@@ -102,7 +103,7 @@ def test_candidate_evidence_distinguishes_missing_metrics_from_empty(monkeypatch
 
     assert [row["inner_metrics"] for row in rows] == [None, []]
 
-    predictions = {}
+    predictions = TrialArrays()
     report._candidate_evidence(None, None, "run", plan, predictions)
     assert set(predictions) == {legacy_key, empty_key}
     assert predictions[legacy_key][1][0].tolist() == [2.0]
@@ -132,12 +133,12 @@ def test_candidate_evidence_predictions_skip_failed_and_target_plans(monkeypatch
         raise AssertionError(f"unexpected journal slot: {slot}")
 
     monkeypatch.setattr(report, "read_record", read)
-    predictions = {}
+    predictions = TrialArrays()
     report._candidate_evidence(None, None, "run", plan, predictions)
     assert set(predictions) == {ok_key}
     assert predictions[ok_key][1][0].tolist() == [2.0]
     assert predictions[ok_key][1][1].tolist() == [3.0]
-    predictions = {}
+    predictions = TrialArrays()
     report._candidate_evidence(None, None, "run",
         {**plan, "target": {"column": "absolute_move_pct"}}, predictions)
     assert predictions == {}
@@ -160,7 +161,7 @@ def test_candidate_evidence_refuses_malformed_stored_prediction(monkeypatch):
 
     monkeypatch.setattr(report, "read_record", read)
     with pytest.raises(KeyError):
-        report._candidate_evidence(None, None, "run", plan, {})
+        report._candidate_evidence(None, None, "run", plan, TrialArrays())
 
 
 def test_collect_uses_verified_callback_inputs_per_outer_fold(monkeypatch):
@@ -232,6 +233,49 @@ def test_collect_uses_verified_callback_inputs_per_outer_fold(monkeypatch):
     assert not hasattr(report, "from_document")
     assert not hasattr(report, "_implied_move_scales")
     assert not hasattr(report, "_implied_moves")
+
+
+def test_collect_releases_trial_arrays_after_distribution(monkeypatch):
+    plan = {"plan_id": "plan", "horizons": [1], "folds": [{"outer": {"year": "2024",
+        "training_candidate_event_ids": ["e"], "evaluation_event_ids": ["e"]},
+        "inner": [{"year": "2023", "training_candidate_event_ids": ["e"]}]}],
+        "candidates": [{"candidate_id": "c"}]}
+    result = {"predictions": [], "folds": [{"outer_year": "2024",
+        "candidate": {"candidate_id": "c"},
+        "evaluation_inputs": {"omitted_labels": []}}]}
+    registration = SimpleNamespace(run_id="run", document={"size_panel": {"context": {
+        "target_events": [], "eligibility_plan": {}}}})
+    key = report.content_hash(["plan", "2024", "2023", "c"])
+
+    def read(conn, store, run_id, slot):
+        if slot.startswith("execution:"):
+            return {"status": "succeeded"}
+        if slot.startswith("fit-completed:"):
+            return None
+        if slot == "terminal:" + key:
+            return {"status": "succeeded", "predictions": [{"event_id": "e", "horizon_sessions": 1,
+                "predicted_absolute_move_pct": 2.0, "absolute_move_pct": 3.0}]}
+        if slot.startswith("outer-forecasts:"):
+            return []
+        return {"result": {"forecasts": [], "fit_details": []}}
+
+    monkeypatch.setattr(report, "_admit_driver", lambda *a: plan)
+    monkeypatch.setattr(report, "collect_outer_results", lambda *a, **k: result)
+    monkeypatch.setattr(report, "resource_report", lambda p: {})
+    monkeypatch.setattr(report, "paired_report", lambda *a, **k: {})
+    monkeypatch.setattr(report, "read_record", read)
+    retained, sizes = [], []
+
+    def distribution(plan_arg, arrays, outer_rows, selected_ids):
+        retained.append(arrays)
+        sizes.append(len(arrays))
+        return {"schema_version": "size_distribution.v1", "status": "ok", "inner": []}
+
+    monkeypatch.setattr(report, "collect_distribution", distribution)
+    observed = report.collect(None, None, None, registration, {}, None)
+    assert sizes == [1]
+    assert retained[0] == {}
+    assert observed["distribution"]["status"] == "ok"
 
 
 @pytest.mark.parametrize("value", [-1, True, "2.0", float("nan"), float("inf")])
