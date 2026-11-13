@@ -54,8 +54,12 @@ _SELECTION_METRICS = {"rmse": 0.6, "mae": 0.3, "large_move_underprediction": 0.1
 _SELECTION_LEADS = {"1": 1.0, "3": 0.0, "5": 0.0}
 
 
-def _hmos_hash_recipe(subset):
-    return qualified_panel_recipe("HMOS")
+def _hash_recipe(version):
+    if version >= 11:
+        return lambda subset: qualified_panel_recipe("HMOSX")
+    if version >= 10:
+        return lambda subset: qualified_panel_recipe("HMOS")
+    return qualified_panel_recipe if version >= 9 else v2.panel_recipe
 
 
 def _selection(request, horizons):
@@ -104,14 +108,16 @@ def _finite_nonnegative(value):
 
 def _space(request):
     version = request_version(request["schema_version"])
-    allowed_sets = (*v2._SETS, "MO-", "M", *(["HMOS"] if version >= 10 else []))
+    allowed_sets = (*v2._SETS, "MO-", "M",
+        *(["HMOS"] if version >= 10 else []), *(["HMOSX"] if version >= 11 else []))
     feature_sets = request["feature_sets"]
     valid_sets = (type(feature_sets) is list and bool(feature_sets)
         and all(type(subset) is str and subset in allowed_sets for subset in feature_sets)
         and feature_sets == [subset for subset in allowed_sets if subset in feature_sets])
     v2._require(valid_sets if version >= 9 else feature_sets == v2._SETS,
                 (f"stage-2 v{version} requires a nonempty ordered subset of H/HM/HMO/MO-/M"
-                 + ("/HMOS" if version >= 10 else ""))
+                 + ("/HMOS" if version >= 10 else "")
+                 + ("/HMOSX" if version >= 11 else ""))
                 if version >= 9 else "stage-2 requires exactly ordered H/HM/HMO feature sets")
     space = request["space"]
     version = request["schema_version"]
@@ -256,9 +262,7 @@ def compile_request(request, *, horizons=(5, 3, 1)):
     v2.validate_workers(request)
     request.pop("workers", None)
     _selection(request, horizons)
-    v2._references(request, recipe=(_hmos_hash_recipe
-        if request_version(version) >= 10 else qualified_panel_recipe
-        if request_version(version) >= 9 else v2.panel_recipe))
+    v2._references(request, recipe=_hash_recipe(request_version(version)))
     _space(request)
     counts = _counts(request, horizons)
     v2._comparison(request["comparison"], counts)
