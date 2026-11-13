@@ -253,6 +253,15 @@ def test_trial_arrays_size_includes_object_event_id_strings(monkeypatch):
     assert stored.nbytes == 8 + 8 + OBJECT_ELEMENT_BYTES
 
 
+def test_trial_arrays_add_same_key_is_idempotent():
+    trial_arrays = TrialArrays()
+    trial_arrays.add("shared", arrays([1.0], [2.0]))
+    single = trial_arrays.nbytes
+    trial_arrays.add("shared", arrays([1.0], [2.0]))
+    assert trial_arrays.nbytes == single == 8 + 8 + OBJECT_ELEMENT_BYTES
+    assert len(trial_arrays) == 1
+
+
 def test_trial_arrays_cap_marks_empty_and_collect_skips(monkeypatch):
     monkeypatch.setattr(TrialArrays, "MAX_BYTES", 70)
     trial_arrays = TrialArrays()

@@ -25,6 +25,8 @@ class TrialArrays(dict):
 
     def add(self, key, arrays):
         _validate([arrays])
+        if key in self:
+            return
         if self.capped:
             return
         size = sum(part.size * OBJECT_ELEMENT_BYTES if part.dtype == object else part.nbytes
