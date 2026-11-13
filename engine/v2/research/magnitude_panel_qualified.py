@@ -138,7 +138,9 @@ def _ivdyn_x(surface, dates, ceiling, anchor_for, ticker):
     """G2 columns from the last 21 surface rows dated <= ceiling; lineage anchors the lag reference rows."""
     end = bisect_right(dates, ceiling)
     window = surface[max(0, end - 21):end]
-    values = compute_iv_dynamics([{k: row[k] for k in _IV_FIELDS} for row in window])
+    rows = [{**{k: row[k] for k in _IV_FIELDS}, "implied_move": row["implied_move"] or None}
+            for row in window]
+    values = compute_iv_dynamics(rows)
     anchors = [anchor_for(ticker, window[-1 - lag]["date"]) for lag in _IV_LAGS if len(window) > lag]
     return values, _block(values, anchors)
 

@@ -259,6 +259,24 @@ def test_ivdyn_x_oracle():
     assert unchanged == capped
 
 
+def test_ivdyn_x_zero_implied_move_is_null():
+    dates = [(date(2024, 1, 2) + timedelta(days=index)).isoformat() for index in range(11)]
+    surface = [{"date": day, "implied_move": 5.0, "iv10": 10.0, "iv30": 10.0,
+                "exern_iv30": 10.0, "rvol30": 10.0, "ticker": "T"} for day in dates]
+    surface[-1]["implied_move"] = 0.0
+    values, _ = builder._ivdyn_x(
+        surface, dates, surface[-1]["date"], lambda ticker, day: {"t": ticker, "d": day}, "T")
+    assert values["imp_chg5"] is None
+    assert values["imp_chg10"] is None
+
+    surface[-1]["implied_move"] = 5.0
+    surface[-6]["implied_move"] = 0.0
+    values, _ = builder._ivdyn_x(
+        surface, dates, surface[-1]["date"], lambda ticker, day: {"t": ticker, "d": day}, "T")
+    assert values["imp_chg5"] is None
+    assert values["imp_chg10"] == pytest.approx(1.0)
+
+
 def test_ownvol_x_oracle():
     price = namedtuple("Price", "date close_adj")
     start = date(2024, 1, 2)
