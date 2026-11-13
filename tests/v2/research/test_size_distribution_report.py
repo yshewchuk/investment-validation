@@ -6,6 +6,7 @@ import pytest
 
 from experiments.magnitude_search_plan import trial_key
 from experiments.size_distribution_report import (
+    OBJECT_ELEMENT_BYTES,
     RATIO_FLOOR,
     SCHEMA,
     TrialArrays,
@@ -236,6 +237,20 @@ def test_non_finite_outer_rows_refuses_even_when_trial_arrays_capped(monkeypatch
     with pytest.raises(ValueError, match="non-finite distribution input"):
         collect_distribution(plan_with_years(), trial_arrays,
                              {"2024": arrays([np.nan], [1.0])}, {"2024": "c"})
+
+
+def test_trial_arrays_size_includes_object_event_id_strings(monkeypatch):
+    monkeypatch.setattr(TrialArrays, "MAX_BYTES", 100)
+    trial_arrays = TrialArrays()
+    trial_arrays.add("first", arrays([1.0, 2.0], [3.0, 4.0]))
+    assert trial_arrays.capped is True
+    assert trial_arrays == {}
+
+    stored = TrialArrays()
+    stored.MAX_BYTES = 1000
+    stored.add("small", arrays([1.0], [2.0]))
+    assert stored.capped is False
+    assert stored.nbytes == 8 + 8 + OBJECT_ELEMENT_BYTES
 
 
 def test_trial_arrays_cap_marks_empty_and_collect_skips(monkeypatch):

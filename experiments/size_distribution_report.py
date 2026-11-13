@@ -11,6 +11,7 @@ TAUS = (0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95)
 BUCKETS = 5
 MIN_BUCKET_ROWS = 20
 RATIO_FLOOR = 0.05
+OBJECT_ELEMENT_BYTES = 72
 _METRICS = ("pinball_p50", "pinball_p90", "pinball_mean", "coverage_p90", "coverage_p10_p90")
 
 
@@ -26,7 +27,8 @@ class TrialArrays(dict):
         _validate([arrays])
         if self.capped:
             return
-        size = sum(part.nbytes for value in arrays.values() for part in value)
+        size = sum(part.size * OBJECT_ELEMENT_BYTES if part.dtype == object else part.nbytes
+                   for value in arrays.values() for part in value)
         if self.nbytes + size > self.MAX_BYTES:
             self.clear()
             self.capped = True
