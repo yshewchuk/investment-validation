@@ -266,17 +266,28 @@ def test_ivdyn_x_zero_implied_move_is_null():
     surface = [{"date": day, "implied_move": 5.0, "iv10": 10.0, "iv30": 10.0,
                 "exern_iv30": 10.0, "rvol30": 10.0, "ticker": "T"} for day in dates]
     surface[-1]["implied_move"] = 0.0
-    values, _ = builder._ivdyn_x(
+    values, block = builder._ivdyn_x(
         surface, dates, surface[-1]["date"], lambda ticker, day: {"t": ticker, "d": day}, "T")
     assert values["imp_chg5"] is None
     assert values["imp_chg10"] is None
+    assert block["missing"]["imp_chg5"] == "no_quote"
+    assert block["missing"]["imp_chg10"] == "no_quote"
 
     surface[-1]["implied_move"] = 5.0
     surface[-6]["implied_move"] = 0.0
-    values, _ = builder._ivdyn_x(
+    values, block = builder._ivdyn_x(
         surface, dates, surface[-1]["date"], lambda ticker, day: {"t": ticker, "d": day}, "T")
     assert values["imp_chg5"] is None
     assert values["imp_chg10"] == pytest.approx(1.0)
+    assert block["missing"]["imp_chg5"] == "no_quote"
+    assert "imp_chg10" not in block["missing"]
+
+    short = [{"date": day, "implied_move": 5.0, "iv10": 10.0, "iv30": 10.0,
+              "exern_iv30": 10.0, "rvol30": 10.0, "ticker": "T"} for day in dates[:3]]
+    values, block = builder._ivdyn_x(
+        short, dates[:3], short[-1]["date"], lambda ticker, day: {"t": ticker, "d": day}, "T")
+    assert values["imp_chg5"] is None
+    assert block["missing"]["imp_chg5"] == "insufficient_history"
 
 
 def test_ownvol_x_oracle():

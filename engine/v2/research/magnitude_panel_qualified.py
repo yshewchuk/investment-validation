@@ -142,7 +142,12 @@ def _ivdyn_x(surface, dates, ceiling, anchor_for, ticker):
             for row in window]
     values = compute_iv_dynamics(rows)
     anchors = [anchor_for(ticker, window[-1 - lag]["date"]) for lag in _IV_LAGS if len(window) > lag]
-    return values, _block(values, anchors)
+    block = _block(values, anchors)
+    for name, lag in (("imp_chg5", 5), ("imp_chg10", 10)):
+        if values[name] is None and len(window) > lag and (
+                not window[-1]["implied_move"] or not window[-1 - lag]["implied_move"]):
+            block["missing"][name] = "no_quote"
+    return values, block
 
 
 def _ownvol_x(prices, price_dates, ceiling):
