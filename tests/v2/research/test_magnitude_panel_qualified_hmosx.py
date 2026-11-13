@@ -5,6 +5,7 @@ import math
 from collections import namedtuple
 from datetime import date, timedelta
 
+import numpy as np
 import pytest
 
 from engine.v2.contracts.data import ColumnContract
@@ -16,6 +17,7 @@ from engine.v2.research import magnitude_panel_qualified_table as table
 from engine.v2.research import magnitude_panel_qualified_x as x
 from engine.v2.research.tail_history import compute_tail_history
 from experiments import size_panel
+from tests.v2.research.magnitude_trial_support import calendar_sessions
 from tests.v2.research.test_magnitude_panel_qualified import panel_data
 
 _PINNED_DICTIONARY_HASHES = {
@@ -424,6 +426,56 @@ def test_built_rows_match_v5_contract_and_carry_g1_g4(panel_data):
         assert row["cal_month"] == int(row["event_date"][5:7])
 
 
+def test_built_rows_g2_g3_match_independent_oracle(panel_data):
+    rows = _prepared_rows(panel_data)
+    days = calendar_sessions("2022-05-20", "2024-06-20").days
+    zero_days = {"2023-06-01", "2024-06-14"}
+
+    def v(name):
+        return float(builder.daily._DAILY.index(name) + 1)
+
+    saw_nonnull_imp_chg5 = False
+    saw_zero_day_null = False
+    saw_g3 = False
+    for row in rows:
+        ceiling = row["source_session_ceiling"]
+        idx = days.index(ceiling)
+        assert row["iv10_30"] == pytest.approx(v("iv10") / v("iv30"))
+        assert row["iv_rv"] == pytest.approx(v("iv30") / v("rvol30"))
+        assert row["ex_ratio"] == pytest.approx(v("exern_iv30") / v("iv30"))
+        if idx >= 20:
+            for k, col, field in ((5, "imp_chg5", "implied"), (10, "imp_chg10", "implied"),
+                                  (5, "iv30_chg5", "iv30"), (20, "iv30_chg20", "iv30"),
+                                  (5, "iv10_chg5", "iv10")):
+                reference = days[idx - k]
+                stale = (date.fromisoformat(ceiling)
+                         - date.fromisoformat(reference)).days > 2 * k + 4
+                zero = field == "implied" and (ceiling in zero_days or reference in zero_days)
+                if stale or zero:
+                    assert row[col] is None
+                    if col == "imp_chg5" and zero:
+                        saw_zero_day_null = True
+                else:
+                    assert row[col] == pytest.approx(1.0)
+                    if col == "imp_chg5":
+                        saw_nonnull_imp_chg5 = True
+        if idx >= 60:
+            saw_g3 = True
+            window = [100 + j / 10 for j in range(idx - 60, idx + 1)]
+            r = np.diff(np.log(window))
+            own_rvol5 = np.std(r[-5:], ddof=1) * np.sqrt(252) * 100
+            own_rvol10 = np.std(r[-10:], ddof=1) * np.sqrt(252) * 100
+            own_rvol60 = np.std(r[-60:], ddof=1) * np.sqrt(252) * 100
+            assert row["own_absret1"] == pytest.approx(abs(r[-1]) * 100)
+            assert row["own_rvol5"] == pytest.approx(own_rvol5)
+            assert row["own_rvol10"] == pytest.approx(own_rvol10)
+            assert row["own_rvol60"] == pytest.approx(own_rvol60)
+            assert row["own_rvol5_60"] == pytest.approx(own_rvol5 / own_rvol60)
+    assert saw_nonnull_imp_chg5
+    assert saw_zero_day_null
+    assert saw_g3
+
+
 def test_x_null_counts_are_logged_once_with_every_column(panel_data, capsys):
     rows = _prepared_rows(panel_data)
     lines = [line for line in capsys.readouterr().err.splitlines()
@@ -432,4 +484,5 @@ def test_x_null_counts_are_logged_once_with_every_column(panel_data, capsys):
     assert f"rows={len(rows)}" in lines[0]
     assert all(f"{name}=" in lines[0] for name in x.X_COLUMNS)
     counts = dict(item.split("=") for item in lines[0].split("null counts: ")[1].split(", "))
-    assert all(0 <= int(value) <= len(rows) for value in counts.values())
+    assert {k: int(v) for k, v in counts.items()} == {
+        name: sum(row[name] is None for row in rows) for name in x.X_COLUMNS}
