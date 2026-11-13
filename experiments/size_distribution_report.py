@@ -23,6 +23,9 @@ class TrialArrays(dict):
         self.nbytes = 0
 
     def add(self, key, arrays):
+        for value in arrays.values():
+            if not all(np.isfinite(np.asarray(part, dtype=float)).all() for part in value[:2]):
+                raise ValueError("non-finite distribution input")
         if self.capped:
             return
         size = sum(part.nbytes for value in arrays.values() for part in value)

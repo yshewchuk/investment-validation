@@ -216,6 +216,18 @@ def test_non_finite_unrequested_horizon_refuses():
         band_metrics([pool], arrays([10.0], [20.0]), [1])
 
 
+def test_trial_arrays_add_refuses_non_finite_before_and_after_cap(monkeypatch):
+    trial_arrays = TrialArrays()
+    with pytest.raises(ValueError, match="non-finite distribution input"):
+        trial_arrays.add("nan", arrays([np.nan], [1.0]))
+    monkeypatch.setattr(TrialArrays, "MAX_BYTES", 70)
+    trial_arrays.add("first", arrays([1.0, 2.0], [3.0, 4.0]))
+    trial_arrays.add("second", arrays([1.0, 2.0], [3.0, 4.0]))
+    assert trial_arrays.capped is True
+    with pytest.raises(ValueError, match="non-finite distribution input"):
+        trial_arrays.add("nan", arrays([1.0], [np.nan]))
+
+
 def test_trial_arrays_cap_marks_empty_and_collect_skips(monkeypatch):
     monkeypatch.setattr(TrialArrays, "MAX_BYTES", 70)
     trial_arrays = TrialArrays()
