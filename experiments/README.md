@@ -166,8 +166,10 @@ candidates use `magnitude_ridge_hgb_recipe.v2` (early stopping, `max_iter` 500
 cap), so they get new candidate ids; the early-stopping holdout is a random 10%
 of training rows, not time-ordered, and only picks the tree count. The design
 grid (2x2x2x2 HGB, 99 candidates over H/HM/HMO) is in #1848 section 5. Qualified
-SIZE v1.6 keeps request v2 replay; v1.7 sealing and admission accept v2 through v10. V5 adds one fixed HMO-attributed
+SIZE v1.6 keeps request v2 replay; v1.7 sealing and admission accept v2 through v11. V5 adds one fixed HMO-attributed
 SIZE v1.4 plus causal history-mean fallback candidate, not three duplicate variants.
+V11 requires the HMOSX dictionary hash and allows `H/HM/HMO/MO-/M/HMOS/HMOSX`; `size_v1_4`
+stays HMO-only; adding HMOSX to k sets gives (k+1)*G candidates.
 V6 is an explicit opt-in: retain v5's four family grids and admit the original three closed MLP profiles. V7 retains those grids and admits seven more: `es_relu32_l2_0p01`, `es_relu32_l2_1`, `es_relu64x32_l2_0p01`, `es_relu64x32_l2_1`, `fixed200_relu64x32_l2_1`, `fixed200_relu64x32_l2_10`, and `fixed200_relu64x32_l2_100`. V8 adds six chronological profiles: `chrono15_relu32_l2_0p01`, `chrono15_relu32_l2_1`, `chrono15_relu64x32_l2_0p01`, `chrono15_relu64x32_l2_1`, `chrono10_relu64x32_l2_0p01` and `chrono10_relu64x32_l2_1`.
 Choose one or more unique profiles in lexicographic order; each adds H/HM/HMO candidates, not independent optimizer axes. The [fixed neural recipes](../engine/v2/models/training/README.md#standalone-neural-magnitude-primitive-opt-in-foundation) use train-only preprocessing/target scaling, seed 20260829 and one CPU thread.
 The four `es_` profiles stop on sklearn early stopping (`max_iter=400`, patience 10), using a seeded random 10% of training rows as validation. The three `fixed200_` profiles disable early stopping and complete at the 200-epoch budget. Original profiles retain training-loss stopping at up to 400 epochs. The six `chrono15_`/`chrono10_` profiles require aligned ISO dates, fit earlier rows and hold out the latest 15%/10% chronologically, with patience 20 and a best-holdout restore; the chrono family allows its declared 400-epoch cap.

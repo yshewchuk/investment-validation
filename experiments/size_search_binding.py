@@ -54,7 +54,8 @@ def _require(condition):
 
 def _panel_subset(schema_version):
     version = request_version(schema_version)
-    return "HMOS" if version is not None and version >= 10 else "HMO"
+    return ("HMOSX" if version is not None and version >= 11
+            else "HMOS" if version is not None and version >= 10 else "HMO")
 
 
 def _panel_columns(schema_version, model_columns):

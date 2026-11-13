@@ -973,7 +973,7 @@ Each invocation revalidates bindings/evidence; there is no cross-call admission 
 | Condition | Enforced outcome |
 |---|---|
 | Invalid CLI flags/resource arguments, worker declaration, registration-read budget or embedded-NUL paths | Parser exit 2 with stderr and no stdout or storage. All actions share the loader's pure budget validator; `--max-registration-bytes` defaults to 16 MiB and affects only initial registration loading. Direct `run_search` limit admission refuses `INVALID_EXPERIMENT_SPEC` before journal access for an invalid worker declaration (Boolean, non-integer, or outside 1..8) or invalid execution limits; only v2-v10 requests may declare workers. |
-| Qualified SIZE request v2/v3/v4/v5/v6/v7/v8/v9/v10 passed to `v2_magnitude_search_run` | `INVALID_EXPERIMENT_SPEC` before catalog or registration access; use `experiments.size_search` for RSS watchdog, parent/job containment and receipt admission. |
+| Qualified SIZE request v2/v3/v4/v5/v6/v7/v8/v9/v10/v11 passed to `v2_magnitude_search_run` | `INVALID_EXPERIMENT_SPEC` before catalog or registration access; use `experiments.size_search` for RSS watchdog, parent/job containment and receipt admission. |
 | Missing metadata, catalog or store; raw artifact, filesystem or SQLite failure | CLI emits sanitized `RESOURCE_UNAVAILABLE`, exit 2; absent inputs are not created. |
 | Malformed/duplicate-key JSON, nonobject metadata, invalid typed reference, or nonregular/symlink/oversized metadata file | `INVALID_EXPERIMENT_SPEC` before dispatch; no partial result. Metadata reads are capped at 16 MiB per file. |
 | Run/collect with missing or incompatible journal migrations | Driver admission refuses `INTEGRITY_FAILED` before search-plan/evidence access; no implicit migration. |

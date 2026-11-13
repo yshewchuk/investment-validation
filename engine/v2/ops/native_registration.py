@@ -19,7 +19,7 @@ from engine.v2.ops.errors import OpsError, fail
 
 MAX_NATIVE_EVIDENCE_BYTES = 16 * 1024 * 1024
 MAX_NATIVE_SIZE_ARTIFACT_BYTES = 1024 * 1024 * 1024
-LATEST = 10
+LATEST = 11
 
 
 def request_version(schema_version):
