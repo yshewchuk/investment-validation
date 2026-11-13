@@ -4,12 +4,18 @@ from types import SimpleNamespace
 import pytest
 
 from experiments import size_search_report as report
+from experiments.size_distribution_report import TrialArrays
 
 
 def test_mixed_failed_and_successful_trials_report_diagnostics(monkeypatch):
-    plan = {"plan_id": "plan", "horizons": [5, 3, 1], "folds": [{"outer": {"year": "2024", "evaluation_event_ids": ["e"]},
-        "inner": [{"year": "2023"}]}], "candidates": [{"candidate_id": "ok"}, {"candidate_id": "failed"}]}
-    result = {"predictions": [{"event_id": "e", "absolute_move_pct": 2}], "folds": []}
+    plan = {"plan_id": "plan", "horizons": [5, 3, 1], "folds": [{"outer": {"year": "2024",
+        "training_candidate_event_ids": ["e"], "evaluation_event_ids": ["e"]},
+        "inner": [{"year": "2023", "training_candidate_event_ids": ["e"]}]}],
+        "candidates": [{"candidate_id": "ok"}, {"candidate_id": "failed"}]}
+    result = {"predictions": [{"event_id": "e", "outer_year": "2024", "horizon_sessions": 1,
+                "predicted_absolute_move_pct": 2.0, "absolute_move_pct": 2.0}],
+        "folds": [{"outer_year": "2024", "candidate": {"candidate_id": "ok"},
+                   "evaluation_inputs": {"omitted_labels": []}}]}
     registration = SimpleNamespace(run_id="run", document={"size_panel": {"context": {
         "target_events": [{"event_id": "e"}], "eligibility_plan": {"frozen": True}}}})
     monkeypatch.setattr(report, "_admit_driver", lambda *a: plan)
@@ -41,6 +47,8 @@ def test_mixed_failed_and_successful_trials_report_diagnostics(monkeypatch):
                 "rss_delta_kib": 2048 if succeeded else 512}
             if succeeded:
                 terminal["inner_metrics"] = [{"horizon_sessions": 1, "mean_absolute_move_pct": 0.4}]
+                terminal["predictions"] = [{"event_id": "e", "horizon_sessions": 1,
+                    "predicted_absolute_move_pct": 2.0, "absolute_move_pct": 2.0}]
             return terminal
         if slot.startswith("outer-forecasts:"):
             return []
@@ -67,6 +75,8 @@ def test_mixed_failed_and_successful_trials_report_diagnostics(monkeypatch):
     assert succeeded["inner_metrics"] == [{"horizon_sessions": 1, "mean_absolute_move_pct": 0.4}]
     assert failed["inner_metrics"] is None
     assert observed["comparison_fits"][0]["component_fits"] == 2
+    assert observed["distribution"]["schema_version"] == "size_distribution.v1"
+    assert [row["distribution"]["status"] for row in observed["inner_fits"]] == ["no_pool", "trial_failed"]
 
 
 def test_candidate_evidence_distinguishes_missing_metrics_from_empty(monkeypatch):
@@ -82,9 +92,10 @@ def test_candidate_evidence_distinguishes_missing_metrics_from_empty(monkeypatch
         if slot.startswith("fit-completed:"):
             return None
         if slot == "terminal:" + legacy_key:
-            return {"status": "succeeded"}
+            return {"status": "succeeded", "predictions": [{"event_id": "e", "horizon_sessions": 1,
+                "predicted_absolute_move_pct": 2.0, "absolute_move_pct": 3.0}]}
         if slot == "terminal:" + empty_key:
-            return {"status": "succeeded", "inner_metrics": []}
+            return {"status": "succeeded", "inner_metrics": [], "predictions": []}
         raise AssertionError(f"unexpected journal slot: {slot}")
 
     monkeypatch.setattr(report, "read_record", read)
@@ -92,15 +103,79 @@ def test_candidate_evidence_distinguishes_missing_metrics_from_empty(monkeypatch
 
     assert [row["inner_metrics"] for row in rows] == [None, []]
 
+    predictions = TrialArrays()
+    report._candidate_evidence(None, None, "run", plan, predictions)
+    assert set(predictions) == {legacy_key, empty_key}
+    assert predictions[legacy_key][1][0].tolist() == [2.0]
+    assert predictions[legacy_key][1][1].tolist() == [3.0]
+    assert predictions[legacy_key][1][2].tolist() == ["e"]
+    assert predictions[empty_key][1][0].size == 0
+
+
+def test_candidate_evidence_predictions_skip_failed_and_target_plans(monkeypatch):
+    plan = {"plan_id": "plan", "horizons": [1], "folds": [
+        {"outer": {"year": "2024"}, "inner": [{"year": "2023"}]}],
+        "candidates": [{"candidate_id": "ok"}, {"candidate_id": "failed"}]}
+    ok_key = report.content_hash(["plan", "2024", "2023", "ok"])
+    failed_key = report.content_hash(["plan", "2024", "2023", "failed"])
+
+    def read(conn, store, run_id, slot):
+        if slot.startswith("execution:"):
+            return {"status": "succeeded"}
+        if slot.startswith("fit-completed:"):
+            return None
+        if slot == "terminal:" + ok_key:
+            return {"status": "succeeded", "predictions": [{"event_id": "e", "horizon_sessions": 1,
+                "predicted_absolute_move_pct": 2.0, "absolute_move_pct": 3.0}]}
+        if slot == "terminal:" + failed_key:
+            return {"status": "failed", "predictions": [{"event_id": "e", "horizon_sessions": 1,
+                "predicted_absolute_move_pct": 9.0, "absolute_move_pct": 9.0}]}
+        raise AssertionError(f"unexpected journal slot: {slot}")
+
+    monkeypatch.setattr(report, "read_record", read)
+    predictions = TrialArrays()
+    report._candidate_evidence(None, None, "run", plan, predictions)
+    assert set(predictions) == {ok_key}
+    assert predictions[ok_key][1][0].tolist() == [2.0]
+    assert predictions[ok_key][1][1].tolist() == [3.0]
+    predictions = TrialArrays()
+    report._candidate_evidence(None, None, "run",
+        {**plan, "target": {"column": "absolute_move_pct"}}, predictions)
+    assert predictions == {}
+
+
+def test_candidate_evidence_refuses_malformed_stored_prediction(monkeypatch):
+    plan = {"plan_id": "plan", "horizons": [1], "folds": [
+        {"outer": {"year": "2024"}, "inner": [{"year": "2023"}]}],
+        "candidates": [{"candidate_id": "malformed"}]}
+    key = report.content_hash(["plan", "2024", "2023", "malformed"])
+
+    def read(conn, store, run_id, slot):
+        if slot.startswith("execution:"):
+            return {"status": "succeeded"}
+        if slot.startswith("fit-completed:"):
+            return None
+        if slot == "terminal:" + key:
+            return {"status": "succeeded", "predictions": [{"event_id": "e"}]}
+        raise AssertionError(f"unexpected journal slot: {slot}")
+
+    monkeypatch.setattr(report, "read_record", read)
+    with pytest.raises(KeyError):
+        report._candidate_evidence(None, None, "run", plan, TrialArrays())
+
 
 def test_collect_uses_verified_callback_inputs_per_outer_fold(monkeypatch):
     folds = [{"outer": {"year": year, "training_candidate_event_ids": ["t" + year],
                         "evaluation_event_ids": ["e" + year]}, "inner": []}
              for year in ("2024", "2025")]
     plan = {"plan_id": "plan", "horizons": [1], "folds": folds, "candidates": []}
-    result = {"predictions": [], "folds": [
-        {"outer_year": group["outer"]["year"], "evaluation_inputs": {"omitted_labels": []}}
-        for group in folds]}
+    result = {"predictions": [
+        {"event_id": "e" + group["outer"]["year"], "outer_year": group["outer"]["year"],
+         "horizon_sessions": 1,
+         "predicted_absolute_move_pct": 3.0, "absolute_move_pct": 4.0} for group in folds],
+        "folds": [{"outer_year": group["outer"]["year"],
+                   "candidate": {"candidate_id": "c" + group["outer"]["year"]},
+                   "evaluation_inputs": {"omitted_labels": []}} for group in folds]}
     registration = SimpleNamespace(run_id="run", document={
         "size_panel": {"context": {
             "target_events": [{"event_id": "e2024"}, {"event_id": "e2025"}],
@@ -147,6 +222,9 @@ def test_collect_uses_verified_callback_inputs_per_outer_fold(monkeypatch):
     assert captured["implied_scales"] == {
         "2024": {"scale": 2.0, "fit_n": 1}, "2025": {"scale": 2.0, "fit_n": 1}}
     assert captured["implied_moves"] == {("e2024", 1): 3.0, ("e2025", 1): 3.0}
+    assert observed["distribution"]["schema_version"] == "size_distribution.v1"
+    assert [row["status"] for row in observed["distribution"]["outer"]
+            if row["arm"] == "selected"] == ["no_pool", "no_pool"]
     assert not hasattr(report, "fold_inputs")
     assert not hasattr(report, "read_stored_panel")
     assert not hasattr(report, "_panel_columns")
@@ -155,6 +233,49 @@ def test_collect_uses_verified_callback_inputs_per_outer_fold(monkeypatch):
     assert not hasattr(report, "from_document")
     assert not hasattr(report, "_implied_move_scales")
     assert not hasattr(report, "_implied_moves")
+
+
+def test_collect_releases_trial_arrays_after_distribution(monkeypatch):
+    plan = {"plan_id": "plan", "horizons": [1], "folds": [{"outer": {"year": "2024",
+        "training_candidate_event_ids": ["e"], "evaluation_event_ids": ["e"]},
+        "inner": [{"year": "2023", "training_candidate_event_ids": ["e"]}]}],
+        "candidates": [{"candidate_id": "c"}]}
+    result = {"predictions": [], "folds": [{"outer_year": "2024",
+        "candidate": {"candidate_id": "c"},
+        "evaluation_inputs": {"omitted_labels": []}}]}
+    registration = SimpleNamespace(run_id="run", document={"size_panel": {"context": {
+        "target_events": [], "eligibility_plan": {}}}})
+    key = report.content_hash(["plan", "2024", "2023", "c"])
+
+    def read(conn, store, run_id, slot):
+        if slot.startswith("execution:"):
+            return {"status": "succeeded"}
+        if slot.startswith("fit-completed:"):
+            return None
+        if slot == "terminal:" + key:
+            return {"status": "succeeded", "predictions": [{"event_id": "e", "horizon_sessions": 1,
+                "predicted_absolute_move_pct": 2.0, "absolute_move_pct": 3.0}]}
+        if slot.startswith("outer-forecasts:"):
+            return []
+        return {"result": {"forecasts": [], "fit_details": []}}
+
+    monkeypatch.setattr(report, "_admit_driver", lambda *a: plan)
+    monkeypatch.setattr(report, "collect_outer_results", lambda *a, **k: result)
+    monkeypatch.setattr(report, "resource_report", lambda p: {})
+    monkeypatch.setattr(report, "paired_report", lambda *a, **k: {})
+    monkeypatch.setattr(report, "read_record", read)
+    retained, sizes = [], []
+
+    def distribution(plan_arg, arrays, outer_rows, selected_ids):
+        retained.append(arrays)
+        sizes.append(len(arrays))
+        return {"schema_version": "size_distribution.v1", "status": "ok", "inner": []}
+
+    monkeypatch.setattr(report, "collect_distribution", distribution)
+    observed = report.collect(None, None, None, registration, {}, None)
+    assert sizes == [1]
+    assert retained[0] == {}
+    assert observed["distribution"]["status"] == "ok"
 
 
 @pytest.mark.parametrize("value", [-1, True, "2.0", float("nan"), float("inf")])
@@ -214,3 +335,47 @@ def test_fit_implied_scale_refuses_invalid_horizon_declarations(horizons):
     features = [{"event_id": "e", "horizon_sessions": 1, "implied_move": 2.0}]
     with pytest.raises(ValueError, match="nonempty unique subset of integer leads"):
         report.fit_implied_scale(["e"], {"e": 4.0}, features, horizons)
+
+
+def test_collect_outer_selected_arm_reports_ok_with_allowed_pool(monkeypatch):
+    ids = [f"e{index}" for index in range(100)]
+    plan = {"plan_id": "plan", "horizons": [1], "folds": [{
+        "outer": {"year": "2024", "training_candidate_event_ids": ids,
+                  "evaluation_event_ids": ["outer"]},
+        "inner": [{"year": "2021", "training_candidate_event_ids": ids}]}],
+        "candidates": [{"candidate_id": "c"}]}
+    rows = [{"event_id": event_id, "horizon_sessions": 1,
+             "predicted_absolute_move_pct": float(index + 1),
+             "absolute_move_pct": 2.0 * (index + 1)}
+            for index, event_id in enumerate(ids)]
+    key = report.content_hash(["plan", "2024", "2021", "c"])
+    result = {"predictions": [{"event_id": "outer", "outer_year": "2024",
+                "horizon_sessions": 1, "predicted_absolute_move_pct": 10.0,
+                "absolute_move_pct": 20.0}],
+        "folds": [{"outer_year": "2024", "candidate": {"candidate_id": "c"},
+                   "evaluation_inputs": {"omitted_labels": []}}]}
+    registration = SimpleNamespace(run_id="run", document={"size_panel": {"context": {
+        "target_events": [{"event_id": "outer"}], "eligibility_plan": {}}}})
+    monkeypatch.setattr(report, "_admit_driver", lambda *a: plan)
+    monkeypatch.setattr(report, "collect_outer_results", lambda *a, **k: result)
+    monkeypatch.setattr(report, "resource_report", lambda p: {})
+    monkeypatch.setattr(report, "paired_report", lambda *a, **k: {})
+
+    def read(conn, store, run, slot):
+        if slot.startswith("execution:"):
+            return {"status": "succeeded"}
+        if slot.startswith("fit-completed:"):
+            return None
+        if slot == "terminal:" + key:
+            return {"status": "succeeded", "predictions": rows}
+        if slot.startswith("outer-forecasts:"):
+            return []
+        return {"result": {"forecasts": [], "fit_details": []}}
+
+    monkeypatch.setattr(report, "read_record", read)
+    observed = report.collect(None, None, None, registration, {}, None)
+    selected = next(row for row in observed["distribution"]["outer"]
+                    if row["arm"] == "selected")
+    assert selected["status"] == "ok"
+    assert selected["pooled"]["n_pool"] == 100 and selected["pooled"]["n_scored"] == 1
+    assert "pinball_p50" in selected["pooled"]
