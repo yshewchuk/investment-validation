@@ -5,6 +5,7 @@ from engine.v2.contracts.data import ColumnContract
 from engine.v2.data.errors import fail
 from engine.v2.data.manifests import table_contract_hash
 from engine.v2.foundation import content_hash
+from engine.v2.research import magnitude_panel_qualified_x as x
 from engine.v2.research import magnitude_panel_table as v1
 from engine.v2.research import magnitude_panel_v2_table as v2
 
@@ -39,7 +40,7 @@ _DAILY_RANGES = {"implied_move": (0., 100.), "iv10": (0., 500.), "iv30": (0., 50
 
 
 def _base_subset(subset):
-    return "HMO" if subset in ("MO-", "M", "HMOS") else subset
+    return "HMO" if subset in ("MO-", "M", "HMOS", "HMOSX") else subset
 
 
 def _dictionary(subset):
@@ -75,6 +76,8 @@ def _dictionary(subset):
 
 def feature_dictionary(subset):
     """Keep numeric order/units, explicitly replace incompatible history policy."""
+    if subset == "HMOSX":
+        return _dictionary(subset) + _season_fields() + x.x_fields()
     return _dictionary(subset) + (_season_fields() if subset == "HMOS" else [])
 
 
@@ -92,6 +95,8 @@ def recipe(subset):
 
 FEATURES = tuple(f["name"] for f in feature_dictionary("HMO"))
 FEATURES_HMOS = (*FEATURES, *SEASON)
+X = x.X_COLUMNS
+FEATURES_HMOSX = (*FEATURES_HMOS, *X)
 _base = replace(v2.CONTRACT, contract_id=TABLE + ".v3", semantic_version="3.0.0",
     columns=(*v2.CONTRACT.columns,
         ColumnContract(name="current_quote_status", physical_type="string", nullable=False),
@@ -101,11 +106,17 @@ _contract_v4 = replace(_base, contract_id=TABLE + ".v4", semantic_version="4.0.0
         nullable=field["nullable"], unit=field["unit"], null_policy=field["on_missing"])
         for field in _season_fields())))
 CONTRACT_V4 = replace(_contract_v4, definition_hash=table_contract_hash(_contract_v4))
-CONTRACT = CONTRACT_V4  # Slice 5 installs v4; no compatibility reader for sealed v3 panels.
+_contract_v5 = replace(_contract_v4, contract_id=TABLE + ".v5", semantic_version="5.0.0",
+    columns=(*_contract_v4.columns, *(ColumnContract(name=field["name"],
+        physical_type=field["physical_type"], nullable=field["nullable"], unit=field["unit"],
+        null_policy=field["on_missing"]) for field in x.x_fields())))
+CONTRACT_V5 = replace(_contract_v5, definition_hash=table_contract_hash(_contract_v5))
+CONTRACT = CONTRACT_V4  # Slice 6 installs v5; the builder does not yet produce the x columns.
 
 
-def admit_columns(columns, *, season=False):
-    allowed = (*FEATURES, "has_implied_quote", *(SEASON if season else ()))
+def admit_columns(columns, *, season=False, x_groups=False):
+    allowed = (*FEATURES, "has_implied_quote", *(SEASON if season else ()),
+               *(X if x_groups else ()))
     if (type(columns) not in (list, tuple) or not columns
             or any(type(name) is not str or name not in allowed for name in columns)
             or len(columns) != len(set(columns))):
