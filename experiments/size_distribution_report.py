@@ -23,9 +23,7 @@ class TrialArrays(dict):
         self.nbytes = 0
 
     def add(self, key, arrays):
-        for value in arrays.values():
-            if not all(np.isfinite(np.asarray(part, dtype=float)).all() for part in value[:2]):
-                raise ValueError("non-finite distribution input")
+        _validate([arrays])
         if self.capped:
             return
         size = sum(part.nbytes for value in arrays.values() for part in value)
@@ -77,8 +75,7 @@ def _values(arrays, horizon):
 
 
 def band_metrics(pool, scored, horizons, allowed=None):
-    _validate(pool)
-    _validate([scored])
+    _validate(pool + [scored])
     per_horizon, measured = [], []
     for horizon in horizons:
         pool_pred, pool_y, pool_ids = _values(pool, horizon)
@@ -86,9 +83,6 @@ def band_metrics(pool, scored, horizons, allowed=None):
         if allowed is not None:
             keep = np.array([event_id in allowed for event_id in pool_ids], dtype=bool)
             pool_pred, pool_y = pool_pred[keep], pool_y[keep]
-        if not (np.isfinite(pool_pred).all() and np.isfinite(pool_y).all()
-                and np.isfinite(scored_pred).all() and np.isfinite(scored_y).all()):
-            raise ValueError("non-finite distribution input")
         metrics = {}
         if pool_pred.size == 0:
             status = "no_pool"
@@ -141,9 +135,9 @@ def _failed():
 def collect_distribution(plan, trial_arrays, outer_rows, selected_ids):
     if "target" in plan:
         return {"schema_version": SCHEMA, "status": "unsupported_target"}
+    _validate(list(outer_rows.values()))
     if getattr(trial_arrays, "capped", False):
         return {"schema_version": SCHEMA, "status": "skipped_resource_cap"}
-    _validate(list(trial_arrays.values()) + list(outer_rows.values()))
     horizons, groups = plan["horizons"], plan["folds"]
     total = sum(len(group["inner"]) for group in groups) * len(plan["candidates"])
     started = last_progress = time.monotonic()

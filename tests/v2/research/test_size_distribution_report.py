@@ -196,19 +196,6 @@ def test_every_donor_filtered_reports_no_pool():
         assert row["status"] == "no_pool"
 
 
-def test_non_finite_excluded_donor_row_refuses_before_filtering():
-    plan = plan_with_years()
-    plan["folds"][0]["inner"][1]["training_candidate_event_ids"] = ["e0"]
-    keys = {year: trial_key(plan, "2024", year, "c") for year in ("2021", "2022", "2023")}
-    pred = POOL.copy()
-    pred[5] = np.nan
-    trials = {keys["2021"]: arrays(pred, 2.0 * POOL, POOL_IDS),
-              keys["2022"]: arrays([10.0], [20.0]),
-              keys["2023"]: arrays([10.0], [20.0])}
-    with pytest.raises(ValueError, match="non-finite distribution input"):
-        collect_distribution(plan, trials, {"2024": arrays([10.0], [20.0])}, {"2024": "c"})
-
-
 def test_non_finite_unrequested_horizon_refuses():
     pool = {**arrays(POOL, 2.0 * POOL, POOL_IDS, horizon=1),
             **arrays([np.nan], [1.0], ["unused"], horizon=3)}
@@ -226,6 +213,29 @@ def test_trial_arrays_add_refuses_non_finite_before_and_after_cap(monkeypatch):
     assert trial_arrays.capped is True
     with pytest.raises(ValueError, match="non-finite distribution input"):
         trial_arrays.add("nan", arrays([1.0], [np.nan]))
+
+
+def test_trial_arrays_add_refuses_malformed_before_and_after_cap(monkeypatch):
+    trial_arrays = TrialArrays()
+    with pytest.raises(ValueError, match="malformed distribution input"):
+        trial_arrays.add("bad", {1: (np.array([1.0]), np.array([2.0]))})
+    monkeypatch.setattr(TrialArrays, "MAX_BYTES", 70)
+    trial_arrays.add("first", arrays([1.0, 2.0], [3.0, 4.0]))
+    trial_arrays.add("second", arrays([1.0, 2.0], [3.0, 4.0]))
+    assert trial_arrays.capped is True
+    with pytest.raises(ValueError, match="malformed distribution input"):
+        trial_arrays.add("bad", {1: (np.array([1.0]), np.array([2.0]))})
+
+
+def test_non_finite_outer_rows_refuses_even_when_trial_arrays_capped(monkeypatch):
+    monkeypatch.setattr(TrialArrays, "MAX_BYTES", 70)
+    trial_arrays = TrialArrays()
+    trial_arrays.add("first", arrays([1.0, 2.0], [3.0, 4.0]))
+    trial_arrays.add("second", arrays([1.0, 2.0], [3.0, 4.0]))
+    assert trial_arrays.capped is True
+    with pytest.raises(ValueError, match="non-finite distribution input"):
+        collect_distribution(plan_with_years(), trial_arrays,
+                             {"2024": arrays([np.nan], [1.0])}, {"2024": "c"})
 
 
 def test_trial_arrays_cap_marks_empty_and_collect_skips(monkeypatch):
