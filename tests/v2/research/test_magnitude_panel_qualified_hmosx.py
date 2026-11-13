@@ -1,5 +1,7 @@
 """HMOSX declaration pins: appended x fields, v5 contract, extended admission."""
 import copy
+import json
+from datetime import date
 
 import pytest
 
@@ -7,8 +9,12 @@ from engine.v2.contracts.data import ColumnContract
 from engine.v2.data.errors import DataError
 from engine.v2.data.manifests import table_contract_hash
 from engine.v2.foundation import content_hash
+from engine.v2.research import magnitude_panel_qualified as builder
 from engine.v2.research import magnitude_panel_qualified_table as table
 from engine.v2.research import magnitude_panel_qualified_x as x
+from engine.v2.research.tail_history import compute_tail_history
+from experiments import size_panel
+from tests.v2.research.test_magnitude_panel_qualified import panel_data
 
 _PINNED_DICTIONARY_HASHES = {
     "H": "sha256:65851a015c584c3670fb035080fef6dd5652900297f7fbcb80b87ee537bd7147",
@@ -68,7 +74,7 @@ _DERIVATIONS = {
     "tail": ("tail_history.v1", "compute_tail_history"),
     "ivdyn": ("iv_dynamics.v1", "compute_iv_dynamics"),
     "ownvol": ("own_vol.v1", "compute_own_vol"),
-    "calendar": ("calendar_features.v1", "compute_calendar_features"),
+    "calendar": ("calendar_features.v1", "calendar_features"),
 }
 
 
@@ -162,7 +168,7 @@ def test_contract_v5_extends_v4_with_x_columns_in_order():
     assert table.CONTRACT_V5.columns == (*table._contract_v4.columns, *x_columns)
     assert table.CONTRACT_V5.definition_hash != table.CONTRACT_V4.definition_hash
     assert table.CONTRACT_V5.definition_hash == table_contract_hash(table._contract_v5)
-    assert table.CONTRACT is table.CONTRACT_V4
+    assert table.CONTRACT is table.CONTRACT_V5
 
 
 @pytest.mark.parametrize("columns", [
@@ -198,3 +204,158 @@ def test_request_feature_set_order_still_excludes_hmosx():
         pytest.skip("no exported feature-set order constant")
     assert tuple(ordered) == ("H", "HM", "HMO")
     assert "HMOSX" not in ordered
+
+
+def _prepared_rows(data):
+    prepared = builder._prepare(data.repository, data.panel_source,
+        producer=size_panel._producer({}),
+        history_admitted=size_panel._history(data.repository, data.panel_source, data.panel_request),
+        **data.panel_request)
+    return list(builder._rows(data.repository, data.panel_source, data.prices, prepared))
+
+
+def test_lineage_records_x_missingness(panel_data):
+    rows = _prepared_rows(panel_data)
+    assert rows
+    expected = set((*x.IVDYN, *x.OWNVOL))
+    for row in rows:
+        blocks = json.loads(row["lineage"])
+        assert set(blocks["x_pending"]["missing"]) == expected
+        assert all(reason == "not_implemented_until_slice_6b"
+            for reason in blocks["x_pending"]["missing"].values())
+        if row["cal_days_since_prior"] is None:
+            assert "cal_days_since_prior" in blocks["history"]["missing"]
+        if row["tail_max_abs"] is None:
+            assert "tail_max_abs" in blocks["history"]["missing"]
+
+
+def test_history_x_empty_history_leaves_tail_and_days_since_prior_null():
+    result = builder._history_x({"history": []}, {},
+        {"session": "AMC", "event_date": "2024-03-08"})
+    assert {name: result[name] for name in x.TAIL} == dict.fromkeys(x.TAIL)
+    assert result["cal_days_since_prior"] is None
+    assert result["cal_amc"] == 1
+    assert result["cal_weekday"] == date(2024, 3, 8).weekday()
+    assert result["cal_month"] == 3
+
+
+def test_history_x_uses_absolute_signed_moves_and_last_contributor_date():
+    history = {"history": [{"event_id": "a", "event_date": "2023-06-01"},
+                           {"event_id": "b", "event_date": "2023-12-15"}]}
+    result = builder._history_x(history, {"a": -4.0, "b": 7.5},
+        {"session": "BMO", "event_date": "2024-03-08"})
+    assert {name: result[name] for name in x.TAIL} == compute_tail_history([4.0, 7.5])
+    assert result["cal_days_since_prior"] == (date(2024, 3, 8) - date(2023, 12, 15)).days
+    assert result["cal_amc"] == 0
+    assert result["cal_weekday"] == date(2024, 3, 8).weekday()
+    assert result["cal_month"] == 3
+
+
+def test_history_x_hand_computed_oracle():
+    history = {"history": [{"event_id": "a", "event_date": "2023-01-10"},
+                           {"event_id": "b", "event_date": "2023-04-11"},
+                           {"event_id": "c", "event_date": "2023-07-12"},
+                           {"event_id": "d", "event_date": "2023-10-10"}]}
+    moves = {"a": 2.0, "b": -4.0, "c": 12.0, "d": -6.0}
+    result = builder._history_x(history, moves,
+        {"session": "AMC", "event_date": "2024-01-09"})
+    assert sorted(abs(value) for value in moves.values()) == [2.0, 4.0, 6.0, 12.0]
+    assert result["tail_max_abs"] == 12.0
+    assert result["tail_max4_abs"] == 12.0
+    assert result["tail_share_gt10"] == 0.25
+    assert result["tail_p75_abs"] == 7.5
+    assert result["tail_p90_abs"] == pytest.approx(10.2)
+    assert result["tail_std_abs"] == pytest.approx(14 ** 0.5)
+    assert result["tail_std_over_mean"] == pytest.approx((14 ** 0.5) / 6.0)
+    assert result["tail_max_over_mean"] == 2.0
+    assert result["cal_amc"] == 1
+    assert result["cal_weekday"] == 1
+    assert result["cal_month"] == 1
+    assert result["cal_days_since_prior"] == 91
+
+
+def test_history_x_refuses_an_unknown_session():
+    with pytest.raises(DataError) as raised:
+        builder._history_x({"history": []}, {},
+            {"session": "XYZ", "event_date": "2024-03-08"})
+    assert raised.value.code == "CONTRACT_MISMATCH"
+    assert "session" in str(raised.value)
+
+
+def test_built_rows_g1_g4_match_independent_identities(panel_data):
+    rows = _prepared_rows(panel_data)
+    assert rows
+    histories = set()
+    for row in rows:
+        event = date.fromisoformat(row["event_date"])
+        assert row["cal_weekday"] == event.weekday()
+        assert row["cal_month"] == event.month
+        assert row["cal_amc"] in (0, 1)
+        assert row["tail_max_abs"] >= row["mean_prior_abs_move"] - 1e-9
+        assert row["tail_max4_abs"] <= row["tail_max_abs"] + 1e-9
+        assert row["tail_p90_abs"] <= row["tail_max_abs"] + 1e-9
+        if row["n_prior"] == 1:
+            assert row["tail_max_abs"] == pytest.approx(row["mean_prior_abs_move"])
+            assert row["tail_std_abs"] == 0
+            assert row["tail_max_over_mean"] == pytest.approx(1.0)
+        histories.add(json.dumps(json.loads(row["lineage"])["history"]["sources"],
+            sort_keys=True))
+    assert any(row["cal_days_since_prior"] is not None
+        and row["cal_days_since_prior"] > 0 for row in rows)
+    if len(histories) > 1:
+        assert len({row["tail_max_abs"] for row in rows}) > 1
+
+
+def test_rows_pass_exact_contributor_moves_and_prior_date(panel_data, monkeypatch):
+    tail_calls, calendar_calls = [], []
+    real_tail, real_calendar = builder.compute_tail_history, builder.calendar_features
+
+    def tail_spy(moves):
+        tail_calls.append((moves,))
+        return real_tail(moves)
+
+    def calendar_spy(session, event_date, prior_event_date=None):
+        calendar_calls.append((session, event_date, prior_event_date))
+        return real_calendar(session, event_date, prior_event_date)
+
+    monkeypatch.setattr(builder, "compute_tail_history", tail_spy)
+    monkeypatch.setattr(builder, "calendar_features", calendar_spy)
+    rows = _prepared_rows(panel_data)
+    assert rows and any(row["n_prior"] > 0 for row in rows)
+    assert len(tail_calls) == len(rows) == len(calendar_calls)
+    for row, (moves,), (_, event_date, prior) in zip(rows, tail_calls, calendar_calls):
+        assert len(moves) == row["n_prior"]
+        if row["n_prior"]:
+            assert sum(moves) / len(moves) == pytest.approx(row["mean_prior_abs_move"])
+            assert max(moves) == pytest.approx(row["tail_max_abs"])
+        assert event_date == row["event_date"]
+        assert (prior is None) == (row["n_prior"] == 0)
+        if prior is not None:
+            assert date.fromisoformat(prior) < date.fromisoformat(row["event_date"])
+            assert (date.fromisoformat(row["event_date"])
+                    - date.fromisoformat(prior)).days == row["cal_days_since_prior"]
+
+
+def test_built_rows_match_v5_contract_and_carry_g1_g4(panel_data):
+    rows = _prepared_rows(panel_data)
+    assert rows
+    columns = {column.name for column in table.CONTRACT.columns}
+    assert len((*x.TAIL, *x.CALENDAR)) == 12
+    for row in rows:
+        assert set(row) == columns
+        assert set((*x.TAIL, *x.CALENDAR)) <= set(row)
+        assert all(row[name] is not None for name in (*x.TAIL, *x.CALENDAR))
+        assert all(row[name] is None for name in (*x.IVDYN, *x.OWNVOL))
+        assert row["cal_amc"] in (0, 1)
+        assert row["cal_weekday"] == date.fromisoformat(row["event_date"]).weekday()
+        assert row["cal_month"] == int(row["event_date"][5:7])
+
+
+def test_x_null_counts_are_logged_once_with_every_column(panel_data, capsys):
+    rows = _prepared_rows(panel_data)
+    lines = [line for line in capsys.readouterr().err.splitlines()
+             if "[panel x columns]" in line]
+    assert len(lines) == 1
+    assert f"rows={len(rows)}" in lines[0]
+    assert all(f"{name}=" in lines[0] for name in x.X_COLUMNS)
+    assert all(f"{name}={len(rows)}" in lines[0] for name in (*x.IVDYN, *x.OWNVOL))

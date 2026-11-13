@@ -45,11 +45,12 @@ def test_existing_subset_hashes_are_frozen(subset):
     assert table.recipe(subset)["schema_version"] == "research_magnitude_panel.v3"
 
 
-def test_v3_definition_hash_stays_frozen_and_v4_is_installed():
+def test_v3_definition_hash_stays_frozen_and_v5_is_installed():
     assert table_contract_hash(table._base) == _PINNED_V3_DEFINITION_HASH
-    assert table.CONTRACT is table.CONTRACT_V4
-    assert table.CONTRACT.contract_id.endswith(".v4")
-    assert table.CONTRACT.definition_hash == table_contract_hash(table._contract_v4)
+    assert table.CONTRACT is table.CONTRACT_V5
+    assert table.CONTRACT.contract_id.endswith(".v5")
+    assert table.CONTRACT.definition_hash == table_contract_hash(table._contract_v5)
+    assert table.CONTRACT.definition_hash != table_contract_hash(table._contract_v4)
 
 
 def test_hmos_dictionary_is_hmo_plus_season_appended_last():

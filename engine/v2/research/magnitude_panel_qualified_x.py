@@ -1,4 +1,4 @@
-"""HMOSX block descriptors; declared only, appended last, nothing computed."""
+"""HMOSX block descriptors: tail and calendar are computed by the builder; ivdyn and ownvol are declared only until slice 6b."""
 
 TAIL = ("tail_max_abs", "tail_std_abs", "tail_p75_abs", "tail_p90_abs",
         "tail_share_gt10", "tail_max4_abs", "tail_std_over_mean", "tail_max_over_mean")
@@ -26,7 +26,7 @@ _DERIVATIONS = {
     "tail": ("tail_history.v1", "compute_tail_history"),
     "ivdyn": ("iv_dynamics.v1", "compute_iv_dynamics"),
     "ownvol": ("own_vol.v1", "compute_own_vol"),
-    "calendar": ("calendar_features.v1", "compute_calendar_features"),
+    "calendar": ("calendar_features.v1", "calendar_features"),
 }
 _FIELDS = (
     ("tail_max_abs", "tail", "float64", "percent", True, "null"),

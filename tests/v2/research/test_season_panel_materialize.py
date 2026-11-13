@@ -16,12 +16,12 @@ from tests.v2.research.magnitude_trial_support import calendar_sessions
 from tests.v2.research.test_magnitude_panel_qualified import panel_data, read  # noqa: F401
 
 CALENDAR = ("2022-05-20", "2024-06-20")
-ALL_COLUMNS = [*table.FEATURES_HMOS, "has_implied_quote"]
+ALL_COLUMNS = [*table.FEATURES_HMOSX, "has_implied_quote"]
 MEANS = ("season_heat_mean_abs_5", "season_heat_mean_abs_20", "season_heat_mean_abs_60")
 
 
 def stored_rows(data, artifact):
-    """Every stored v4 column of the published panel, bypassing the public projection gate."""
+    """Every stored v5 column of the published panel, bypassing the public projection gate."""
     return store.read(data.repository, artifact["feature_snapshot"], artifact["context"], ALL_COLUMNS)
 
 

@@ -86,7 +86,7 @@ def _validate_row(row, context, target, cutoff):
         raise fail("CONTRACT_MISMATCH", "qualified panel identity or quote status differs")
     if not _season_row_valid(row):
         raise fail("CONTRACT_MISMATCH", "qualified panel season heat columns differ")
-    for name in table.FEATURES:
+    for name in (*table.FEATURES, *table.X):
         value = row[name]
         if value is not None and (type(value) not in (float, int) or not math.isfinite(value)):
             raise fail("CONTRACT_MISMATCH", "qualified panel feature is not finite")

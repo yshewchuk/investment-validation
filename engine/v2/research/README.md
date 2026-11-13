@@ -543,8 +543,9 @@ Historical publication and schedule knowledge remain unverified reconstruction.
 `magnitude_panel_qualified` and `_magnitude_panel_*` helpers are internal only and
 are not reachable from production or nightly entrypoints.
 Season heat: `season_population.plan_roster` and `read_labels` feed
-`season_heat.compute_season_heat` for the `HMOS` recipe (panel `.v4`, context `.v5`,
-request `v10`); the shared anchor and fragment binding is `outcome_binding`. Contract
+`season_heat.compute_season_heat` for the `HMOSX` recipe (panel `.v5`, context `.v5`,
+request `v10`; G1 tail and G4 calendar are computed, G2/G3 stay null until market-side
+wiring); the shared anchor and fragment binding is `outcome_binding`. Contract
 and failure semantics are in `ARCHITECTURE.md`; rationale in
 `guides/size_season_heat_population_design.md`.
 Supply exact source/history/price snapshots, `as_of_month`, frozen 30-day `policy`,
