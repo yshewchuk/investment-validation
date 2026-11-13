@@ -1,5 +1,6 @@
 """HMOSX declaration pins: appended x fields, v5 contract, extended admission."""
 import copy
+import json
 from datetime import date
 
 import pytest
@@ -235,11 +236,59 @@ def test_history_x_uses_absolute_signed_moves_and_last_contributor_date():
     assert result["cal_month"] == 3
 
 
+def test_history_x_hand_computed_oracle():
+    history = {"history": [{"event_id": "a", "event_date": "2023-01-10"},
+                           {"event_id": "b", "event_date": "2023-04-11"},
+                           {"event_id": "c", "event_date": "2023-07-12"},
+                           {"event_id": "d", "event_date": "2023-10-10"}]}
+    moves = {"a": 2.0, "b": -4.0, "c": 12.0, "d": -6.0}
+    result = builder._history_x(history, moves,
+        {"session": "AMC", "event_date": "2024-01-09"})
+    assert sorted(abs(value) for value in moves.values()) == [2.0, 4.0, 6.0, 12.0]
+    assert result["tail_max_abs"] == 12.0
+    assert result["tail_max4_abs"] == 12.0
+    assert result["tail_share_gt10"] == 0.25
+    assert result["tail_p75_abs"] == 7.5
+    assert result["tail_p90_abs"] == pytest.approx(10.2)
+    assert result["tail_std_abs"] == pytest.approx(14 ** 0.5)
+    assert result["tail_std_over_mean"] == pytest.approx((14 ** 0.5) / 6.0)
+    assert result["tail_max_over_mean"] == 2.0
+    assert result["cal_amc"] == 1
+    assert result["cal_weekday"] == 1
+    assert result["cal_month"] == 1
+    assert result["cal_days_since_prior"] == 91
+
+
 def test_history_x_refuses_an_unknown_session():
     with pytest.raises(DataError) as raised:
         builder._history_x({"history": []}, {},
             {"session": "XYZ", "event_date": "2024-03-08"})
     assert raised.value.code == "CONTRACT_MISMATCH"
+    assert "session" in str(raised.value)
+
+
+def test_built_rows_g1_g4_match_independent_identities(panel_data):
+    rows = _prepared_rows(panel_data)
+    assert rows
+    histories = set()
+    for row in rows:
+        event = date.fromisoformat(row["event_date"])
+        assert row["cal_weekday"] == event.weekday()
+        assert row["cal_month"] == event.month
+        assert row["cal_amc"] in (0, 1)
+        assert row["tail_max_abs"] >= row["mean_prior_abs_move"] - 1e-9
+        assert row["tail_max4_abs"] <= row["tail_max_abs"] + 1e-9
+        assert row["tail_p90_abs"] <= row["tail_max_abs"] + 1e-9
+        if row["n_prior"] == 1:
+            assert row["tail_max_abs"] == pytest.approx(row["mean_prior_abs_move"])
+            assert row["tail_std_abs"] == 0
+            assert row["tail_max_over_mean"] == pytest.approx(1.0)
+        histories.add(json.dumps(json.loads(row["lineage"])["history"]["sources"],
+            sort_keys=True))
+    assert any(row["cal_days_since_prior"] is not None
+        and row["cal_days_since_prior"] > 0 for row in rows)
+    if len(histories) > 1:
+        assert len({row["tail_max_abs"] for row in rows}) > 1
 
 
 def test_built_rows_match_v5_contract_and_carry_g1_g4(panel_data):

@@ -1,5 +1,6 @@
 """Synthetic full qualified panel, protected quote independence and stored replay."""
 import json
+from datetime import date
 from types import SimpleNamespace
 
 import pandas as pd
@@ -180,8 +181,14 @@ def test_public_read_admits_x_columns(panel_data):
     data = panel_data
     artifact = size_panel.materialize(data.repository, data.panel_source, **data.panel_request)
     rows = size_panel.read(data.repository, data.panel_source, artifact["feature_snapshot"],
-        columns=["tail_max_abs", "cal_amc"], **data.panel_request)["rows"]
-    assert rows and {"tail_max_abs", "cal_amc"} <= set(rows[0])
+        columns=["tail_max_abs", "cal_amc", "cal_weekday"], **data.panel_request)["rows"]
+    assert rows and {"tail_max_abs", "cal_amc", "cal_weekday"} <= set(rows[0])
+    assert rows[0]["cal_amc"] in (0, 1)
+    if "event_date" in rows[0]:
+        assert all(row["cal_weekday"] == date.fromisoformat(row["event_date"]).weekday()
+            for row in rows)
+    else:
+        assert all(row["cal_weekday"] in range(5) for row in rows)
 
 
 def test_native_streak_not_inferred_from_aggregate():
