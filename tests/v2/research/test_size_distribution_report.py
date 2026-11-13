@@ -13,20 +13,26 @@ from experiments.size_distribution_report import (
 )
 
 POOL = np.arange(1, 101, dtype=float)
+POOL_IDS = [f"e{index}" for index in range(POOL.size)]
 
 
-def arrays(pred, y):
-    return {1: (np.asarray(pred, dtype=float), np.asarray(y, dtype=float))}
+def arrays(pred, y, event_ids=None, horizon=1):
+    pred = np.asarray(pred, dtype=float)
+    if event_ids is None:
+        event_ids = [f"e{index}" for index in range(pred.size)]
+    return {horizon: (pred, np.asarray(y, dtype=float), np.asarray(event_ids, dtype=object))}
 
 
 def pooled(ratio=2.0):
-    return arrays(POOL, ratio * POOL)
+    return arrays(POOL, ratio * POOL, POOL_IDS)
 
 
 def plan_with_years():
     return {"plan_id": "plan", "schema_version": "magnitude_search_plan.v1",
-        "folds": [{"outer": {"year": "2024"}, "inner": [
-            {"year": "2021"}, {"year": "2022"}, {"year": "2023"}]}],
+        "folds": [{"outer": {"year": "2024", "training_candidate_event_ids": POOL_IDS}, "inner": [
+            {"year": "2021", "training_candidate_event_ids": POOL_IDS},
+            {"year": "2022", "training_candidate_event_ids": POOL_IDS},
+            {"year": "2023", "training_candidate_event_ids": POOL_IDS}]}],
         "candidates": [{"candidate_id": "c"}], "horizons": [1]}
 
 
@@ -42,6 +48,40 @@ def test_constant_ratio_band_matches_hand_arithmetic():
     assert horizon["coverage_p10_p90"] == pytest.approx(1 / 3)
     assert observed["pooled"]["n_scored"] == 3 and observed["pooled"]["n_pool"] == 100
     assert observed["pooled"]["pinball_p50"] == pytest.approx(horizon["pinball_p50"])
+
+
+def test_two_horizon_pooled_metrics_are_scored_row_weighted():
+    pool = [{**arrays(POOL, 2.0 * POOL, POOL_IDS, horizon=1),
+             **arrays(POOL, 3.0 * POOL, POOL_IDS, horizon=3)}]
+    scored = {**arrays([10.0, 10.0], [15.0, 25.0], horizon=1),
+              **arrays([10.0, 10.0, 10.0], [10.0, 30.0, 50.0], horizon=3)}
+    observed = band_metrics(pool, scored, [1, 3])
+    assert observed["status"] == "ok"
+    assert [row["n_scored"] for row in observed["per_horizon"]] == [2, 3]
+    assert [row["n_pool"] for row in observed["per_horizon"]] == [100, 100]
+    pooled = observed["pooled"]
+    assert pooled["n_scored"] == 5 and pooled["n_pool"] == 200
+    assert pooled["pinball_p50"] == pytest.approx((2.5 * 2 + (20 / 3) * 3) / 5)
+    assert pooled["pinball_p90"] == pytest.approx((2.5 * 2 + (20 / 3) * 3) / 5)
+    assert pooled["pinball_mean"] == pytest.approx((2.5 * 2 + (20 / 3) * 3) / 5)
+    assert pooled["coverage_p90"] == pytest.approx((0.5 * 2 + (2 / 3) * 3) / 5)
+    assert pooled["coverage_p10_p90"] == pytest.approx((0 * 2 + (1 / 3) * 3) / 5)
+
+
+def test_pool_rows_outside_destination_training_events_are_excluded():
+    ratios = np.full(POOL.size, 2.0)
+    ratios[90:] = 4.0
+    y = POOL * ratios
+    pool = [arrays(np.append(POOL, 1000.0), np.append(y, 1000.0 * 3.5),
+                   POOL_IDS + ["outside"])]
+    scored = arrays([90.0], [270.0])
+    full = band_metrics(pool, scored, [1])
+    allowed = band_metrics(pool, scored, [1], allowed=set(POOL_IDS))
+    only_allowed = band_metrics([arrays(POOL, y, POOL_IDS)], scored, [1])
+    assert full["per_horizon"][0]["n_pool"] == 101
+    assert allowed["per_horizon"][0]["n_pool"] == 100
+    assert allowed["per_horizon"][0] == only_allowed["per_horizon"][0]
+    assert full["per_horizon"][0]["pinball_p50"] != allowed["per_horizon"][0]["pinball_p50"]
 
 
 def test_empty_pool_is_no_pool_and_never_uses_in_sample_residuals():
@@ -74,6 +114,23 @@ def test_collect_inner_pool_is_strictly_prior_years_only():
     assert row_for(pooled(3.0))[1] == base
     assert row_for(pooled(3.0), pooled(3.0))[1] != base
     json.dumps(result, allow_nan=False)
+
+
+def test_middle_inner_pool_uses_only_allowed_first_year_rows():
+    plan = plan_with_years()
+    keys = {year: trial_key(plan, "2024", year, "c") for year in ("2021", "2022", "2023")}
+    pool = np.arange(1, 201, dtype=float)
+    ids = [f"e{index}" for index in range(pool.size)]
+    allowed = {f"e{index}" for index in range(100)}
+    plan["folds"][0]["inner"][1]["training_candidate_event_ids"] = sorted(allowed) + ["later-only"]
+    trials = {keys["2021"]: arrays(pool, 2.0 * pool, ids),
+              keys["2022"]: arrays([10.0], [20.0]),
+              keys["2023"]: arrays([10.0], [20.0])}
+    result = collect_distribution(plan, trials, {"2024": arrays([10.0], [20.0])}, {"2024": "c"})
+    row = next(row for row in result["inner"] if row["inner_year"] == "2022")
+    assert row["pool_years"] == ["2021"]
+    assert row["status"] == "ok"
+    assert row["pooled"]["n_pool"] == len(allowed)
 
 
 def test_failed_trial_is_reported_and_omitted_from_later_pools():

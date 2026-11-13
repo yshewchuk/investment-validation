@@ -14,19 +14,36 @@ RATIO_FLOOR = 0.05
 _METRICS = ("pinball_p50", "pinball_p90", "pinball_mean", "coverage_p90", "coverage_p10_p90")
 
 
+def _validate(arrays):
+    for array in arrays:
+        for value in array.values():
+            if not isinstance(value, tuple) or len(value) != 3:
+                raise ValueError("malformed distribution input")
+            parts = [np.asarray(part) for part in value]
+            if any(part.ndim != 1 for part in parts) or len({part.size for part in parts}) != 1:
+                raise ValueError("malformed distribution input")
+
+
 def _values(arrays, horizon):
     present = [array[horizon] for array in arrays if horizon in array]
     if not present:
-        return np.array([], dtype=float), np.array([], dtype=float)
-    return (np.concatenate([np.asarray(pred, dtype=float) for pred, _ in present]),
-            np.concatenate([np.asarray(y, dtype=float) for _, y in present]))
+        return (np.array([], dtype=float), np.array([], dtype=float),
+                np.array([], dtype=object))
+    return (np.concatenate([np.asarray(pred, dtype=float) for pred, _, _ in present]),
+            np.concatenate([np.asarray(y, dtype=float) for _, y, _ in present]),
+            np.concatenate([np.asarray(event_ids, dtype=object) for _, _, event_ids in present]))
 
 
-def band_metrics(pool, scored, horizons):
+def band_metrics(pool, scored, horizons, allowed=None):
+    _validate(pool)
+    _validate([scored])
     per_horizon, measured = [], []
     for horizon in horizons:
-        pool_pred, pool_y = _values(pool, horizon)
-        scored_pred, scored_y = _values([scored], horizon)
+        pool_pred, pool_y, pool_ids = _values(pool, horizon)
+        scored_pred, scored_y, _ = _values([scored], horizon)
+        if allowed is not None:
+            keep = np.array([event_id in allowed for event_id in pool_ids], dtype=bool)
+            pool_pred, pool_y = pool_pred[keep], pool_y[keep]
         if not (np.isfinite(pool_pred).all() and np.isfinite(pool_y).all()
                 and np.isfinite(scored_pred).all() and np.isfinite(scored_y).all()):
             raise ValueError("non-finite distribution input")
@@ -91,14 +108,16 @@ def collect_distribution(plan, trial_arrays, outer_rows, selected_ids):
     for group in groups:
         outer_year = group["outer"]["year"]
         years = sorted(fold["year"] for fold in group["inner"])
+        folds_by_year = {fold["year"]: fold for fold in group["inner"]}
         for candidate in plan["candidates"]:
             candidate_id = candidate["candidate_id"]
             keys = {year: trial_key(plan, outer_year, year, candidate_id) for year in years}
             for year in years:
+                allowed = set(folds_by_year[year]["training_candidate_event_ids"])
                 pool_years = [earlier for earlier in years
                               if earlier < year and keys[earlier] in trial_arrays]
                 pool = [trial_arrays[keys[earlier]] for earlier in pool_years]
-                metrics = (band_metrics(pool, trial_arrays[keys[year]], horizons)
+                metrics = (band_metrics(pool, trial_arrays[keys[year]], horizons, allowed=allowed)
                            if keys[year] in trial_arrays else _failed())
                 inner.append({"outer_year": outer_year, "inner_year": year,
                     "candidate_id": candidate_id, "trial_id": keys[year],
@@ -120,9 +139,10 @@ def collect_distribution(plan, trial_arrays, outer_rows, selected_ids):
         keys = {year: trial_key(plan, outer_year, year, candidate_id) for year in years}
         pool_years = [year for year in years if keys[year] in trial_arrays]
         pool = [trial_arrays[keys[year]] for year in pool_years]
+        allowed = set(group["outer"]["training_candidate_event_ids"])
         outer.append({"outer_year": outer_year, "arm": "selected", "candidate_id": candidate_id,
             "pool_years": pool_years,
-            **band_metrics(pool, outer_rows.get(outer_year, {}), horizons)})
+            **band_metrics(pool, outer_rows.get(outer_year, {}), horizons, allowed=allowed)})
         outer.extend({"outer_year": outer_year, "arm": arm, "status": "no_pool"}
                      for arm in ("incumbent", "history_mean", "implied_move"))
     print(f"[distribution] done in {time.monotonic() - started:.1f}s", file=sys.stderr)

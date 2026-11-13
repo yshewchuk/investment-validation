@@ -1087,10 +1087,13 @@ def test_report_reuses_shared_execution_receipt_read_and_keeps_outer_rows(monkey
         "request": {"limits": limits},
         "horizons": [5, 3, 1],
         "folds": [
-            {"outer": {"year": "2024", "evaluation_event_ids": ["evt"]},
-             "inner": [{"year": "2023"}]},
-            {"outer": {"year": "2025", "evaluation_event_ids": ["evt"]},
-             "inner": [{"year": "2023"}, {"year": "2024"}]},
+            {"outer": {"year": "2024", "training_candidate_event_ids": ["evt"],
+                       "evaluation_event_ids": ["evt"]},
+             "inner": [{"year": "2023", "training_candidate_event_ids": ["evt"]}]},
+            {"outer": {"year": "2025", "training_candidate_event_ids": ["evt"],
+                       "evaluation_event_ids": ["evt"]},
+             "inner": [{"year": "2023", "training_candidate_event_ids": ["evt"]},
+                       {"year": "2024", "training_candidate_event_ids": ["evt"]}]},
         ]}
     result = {"predictions": [{"event_id": "evt", "absolute_move_pct": 1.0,
                                "outer_year": "2024", "horizon_sessions": 5,
@@ -1131,7 +1134,7 @@ def test_report_reuses_shared_execution_receipt_read_and_keeps_outer_rows(monkey
             payload = ReceiptPayload()
             terminal_payload_refs.append(weakref.ref(payload))
             return {"status": "succeeded", "score_seconds": 0.25, "rss_delta_kib": 64,
-                    "inner_metrics": [], "predictions": payload, "evaluation_receipt": payload}
+                    "inner_metrics": [], "predictions": [], "evaluation_receipt": payload}
         if slot.startswith("fit-completed:"):
             return {"fit_seconds": 0.125}
         pytest.fail("unexpected journal slot " + slot)

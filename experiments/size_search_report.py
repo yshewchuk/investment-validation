@@ -86,15 +86,14 @@ def _candidate_evidence(conn, store, run_id, plan, predictions=None):
                     inner_metrics = terminal.get("inner_metrics")
                     if predictions is not None and terminal.get("status") == "succeeded" and "target" not in plan:
                         stored = terminal["predictions"]
-                        try:
-                            predictions[key] = {horizon: (
-                                np.array([row["predicted_absolute_move_pct"] for row in stored
-                                          if row["horizon_sessions"] == horizon], dtype=float),
-                                np.array([row["absolute_move_pct"] for row in stored
-                                          if row["horizon_sessions"] == horizon], dtype=float))
-                                for horizon in plan["horizons"]}
-                        except (KeyError, TypeError, ValueError):
-                            pass
+                        predictions[key] = {horizon: (
+                            np.array([row["predicted_absolute_move_pct"] for row in stored
+                                      if row["horizon_sessions"] == horizon], dtype=float),
+                            np.array([row["absolute_move_pct"] for row in stored
+                                      if row["horizon_sessions"] == horizon], dtype=float),
+                            np.array([row["event_id"] for row in stored
+                                      if row["horizon_sessions"] == horizon], dtype=object))
+                            for horizon in plan["horizons"]}
                         del stored
                     fit_seconds = []
                     for horizon in plan["horizons"]:
@@ -151,11 +150,14 @@ def collect(conn, store, repository, registration, request, plan_ref):
     outer_rows = {}
     if "target" not in plan:
         for row in result["predictions"]:
-            arrays = outer_rows.setdefault(row["outer_year"], {horizon: ([], []) for horizon in horizons})
+            arrays = outer_rows.setdefault(
+                row["outer_year"], {horizon: ([], [], []) for horizon in horizons})
             arrays[row["horizon_sessions"]][0].append(row["predicted_absolute_move_pct"])
             arrays[row["horizon_sessions"]][1].append(row["absolute_move_pct"])
-        outer_rows = {year: {horizon: (np.array(pred, dtype=float), np.array(y, dtype=float))
-                             for horizon, (pred, y) in arrays.items()}
+            arrays[row["horizon_sessions"]][2].append(row["event_id"])
+        outer_rows = {year: {horizon: (np.array(pred, dtype=float), np.array(y, dtype=float),
+                                       np.array(event_ids, dtype=object))
+                             for horizon, (pred, y, event_ids) in arrays.items()}
                       for year, arrays in outer_rows.items()}
     selected_ids = {fold["outer_year"]: fold["candidate"]["candidate_id"]
                     for fold in result["folds"]}
