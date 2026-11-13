@@ -1,21 +1,25 @@
 """Complete immutable qualified SIZE panel; private installed-wrapper backend."""
 import json
+from collections import Counter
 
 import numpy as np
 
 from engine.v2.data.errors import fail
+from engine.v2.features.calendar_features import calendar_features
 from engine.v2.foundation import canonical_json, content_hash, to_document
 from engine.v2.research import _magnitude_panel_sources as sources
 from engine.v2.research import magnitude_confirmed_metadata, season_heat, season_population
 from engine.v2.research import magnitude_panel_daily as daily
 from engine.v2.research import magnitude_panel_qualified_table as table
+from engine.v2.research import magnitude_panel_qualified_x as x
 from engine.v2.research.eligibility_policy import eligibility_policy
 from engine.v2.research.eligible_history_table import FEATURES as HISTORY
 from engine.v2.research.experiment_population import load_population
 from engine.v2.research.magnitude_features import calendar_input
 from engine.v2.research.magnitude_panel_table import canonical_day
-from engine.v2.research.progress import Progress, stage
+from engine.v2.research.progress import Progress, decision, stage
 from engine.v2.research.snapshot_inputs import admit_snapshot
+from engine.v2.research.tail_history import compute_tail_history
 
 
 def _policy(policy):
@@ -86,7 +90,10 @@ def _prepare(repository, source, *, history_snapshot, price_history_snapshot, as
     receipt, roster, sessions = _season_plan(repository, source, history,
                                              as_of_month=as_of_month, limits=limits)
     groups = {g["event_id"]: g for g in history["eligibility"]["groups"]}
-    targets = [{**t, **{k: groups[t["event_id"]][k] for k in ("label_start", "label_end")}}
+    event_sessions = {event["event_id"]: event["session"]
+        for sequence in index["sequences"] for event in sequence["events"]}
+    targets = [{**t, "session": event_sessions[t["event_id"]],
+                **{k: groups[t["event_id"]][k] for k in ("label_start", "label_end")}}
                for t in targets]
     identity = {"schema_version": "magnitude_panel_context.v5", "source_snapshot": to_document(source),
         "history_snapshot": to_document(history_snapshot), "history_context": history,
@@ -95,7 +102,7 @@ def _prepare(repository, source, *, history_snapshot, price_history_snapshot, as
         "eligibility_plan": history["eligibility"],
         "quote_eligibility_plan": quotes, "confirmed_metadata": index, "producer": producer,
         "price_row_digests": price_digests,
-        "feature_recipe": table.recipe("HMOS"), "request": {**request, "source_start": source_start,
+        "feature_recipe": table.recipe("HMOSX"), "request": {**request, "source_start": source_start,
             "metadata_limits": metadata_limits},
         "quote_label_windows": "independent_pinned_price_dates_not_computed_outcome_capture",
         "daily_source_start": daily_start,
@@ -115,6 +122,14 @@ def _prepare(repository, source, *, history_snapshot, price_history_snapshot, as
 def _block(values, anchors, **extra):
     return {"sources": anchors, "missing": {name: "insufficient_history"
             for name, value in values.items() if value is None}, **extra}
+
+
+def _history_x(history, moves, target):
+    """G1 tail and G4 calendar columns from the H11 contributor list and the stored clock."""
+    entries = history["history"]
+    tail = compute_tail_history([abs(moves[e["event_id"]]) for e in entries])
+    prior = entries[-1]["event_date"] if entries else None
+    return {**tail, **calendar_features(target["session"], target["event_date"], prior)}
 
 
 def _daily_lineage(market, anchor_for, ticker):
@@ -166,6 +181,24 @@ def _season_heat(repository, source, context, roster, sessions, targets):
     return results, receipt["receipt_id"]
 
 
+class _NullCounts:
+    """Per-build null counts of the HMOSX columns; one stderr line, never per row."""
+    def __init__(self):
+        self.rows, self.counts = 0, Counter()
+
+    def add(self, row):
+        self.rows += 1
+        self.counts.update(k for k in x.X_COLUMNS if row[k] is None)
+
+    def log(self):
+        decision("panel x columns", f"rows={self.rows} null counts: " + ", ".join(
+            f"{k}={self.counts[k]}" for k in x.X_COLUMNS))
+
+
+def _history_missing(history_values, hx):
+    return {**history_values, **{k: hx[k] for k in x.TAIL}}
+
+
 def _rows(repository, source, price_snapshot, prepared):
     context, admitted, daily_records, price_records, roster, sessions = prepared
     daily_anchors = sources.anchor_lookup(daily_records,
@@ -195,6 +228,7 @@ def _rows(repository, source, price_snapshot, prepared):
     meter = Progress("qualified panel events", len(targets))
     history_rows = iter(admitted["rows"])
     current_ticker = None
+    nulls = _NullCounts()
     for stored in history_rows:
         key = stored["event_id"], stored["horizon_sessions"]
         target = targets_by_id[key[0]]
@@ -208,6 +242,7 @@ def _rows(repository, source, price_snapshot, prepared):
             versions = _versions(repository, price_snapshot, context, ticker)
             current_ticker = ticker
         history = json.loads(stored["history_json"])
+        hx = _history_x(history, moves, target)
         prior = {"signed_streak": sources.streak(history, moves),
             "ema12r_abs": stored["ema12_prior_abs_move"] if stored["n_prior"] >= 12
             else stored["mean_prior_abs_move"]}
@@ -216,7 +251,7 @@ def _rows(repository, source, price_snapshot, prepared):
         implied, implied_lineage = sources.implied_history(sequence, target,
             cutoff["source_session_ceiling"], retained, surface, daily_anchors, request["history_start"])
         history_values = {name: stored[name] for name in HISTORY}
-        blocks = {"history": _block(history_values, history["history"]),
+        blocks = {"history": _block(_history_missing(history_values, hx), history["history"]),
             "prior_events": _block(prior, history["history"]),
             "runup": _block(runvalues, [price_anchors(ticker, d, versions[d]) for d in rundates]),
             "spy": _block(spy[key]["values"], [gspc_anchors("^GSPC", d, gspc_versions[d])
@@ -232,10 +267,15 @@ def _rows(repository, source, price_snapshot, prepared):
             "has_implied_quote": int(market["quote_status"] == "present"), **history_values,
             **prior, **runvalues, **spy[key]["values"], **market["values"],
             "mean_prior_or_implied": implied,
-            **_season_record(heat[key[0], cutoff["source_session_ceiling"]])}
+            **_season_record(heat[key[0], cutoff["source_session_ceiling"]]),
+            **hx,
+            # slice 6b computes these; nulls until then
+            **dict.fromkeys((*x.IVDYN, *x.OWNVOL))}
+        nulls.add(row)
         yield {**row, "row_id": content_hash(row)}
         if key[1] == target["forecasts"][-1]["horizon_sessions"]:
             meter.tick()
+    nulls.log()
 
 
 def _materialize(repository, source, **request):
@@ -261,7 +301,7 @@ def _materialize(repository, source, **request):
 def _read(repository, source, feature_snapshot, *, columns, lineage=True, **request):
     from engine.v2.research import _magnitude_panel_store as store
 
-    table.admit_columns(columns, season=True)
+    table.admit_columns(columns, season=True, x_groups=True)
     with stage("qualified stored panel admission", report_refusals=True):
         context = _prepare(repository, source, **request)[0]
         rows = store.read(repository, feature_snapshot, context, columns, lineage)

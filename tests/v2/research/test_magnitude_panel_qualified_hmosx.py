@@ -1,5 +1,6 @@
 """HMOSX declaration pins: appended x fields, v5 contract, extended admission."""
 import copy
+from datetime import date
 
 import pytest
 
@@ -7,8 +8,12 @@ from engine.v2.contracts.data import ColumnContract
 from engine.v2.data.errors import DataError
 from engine.v2.data.manifests import table_contract_hash
 from engine.v2.foundation import content_hash
+from engine.v2.research import magnitude_panel_qualified as builder
 from engine.v2.research import magnitude_panel_qualified_table as table
 from engine.v2.research import magnitude_panel_qualified_x as x
+from engine.v2.research.tail_history import compute_tail_history
+from experiments import size_panel
+from tests.v2.research.test_magnitude_panel_qualified import panel_data
 
 _PINNED_DICTIONARY_HASHES = {
     "H": "sha256:65851a015c584c3670fb035080fef6dd5652900297f7fbcb80b87ee537bd7147",
@@ -162,7 +167,7 @@ def test_contract_v5_extends_v4_with_x_columns_in_order():
     assert table.CONTRACT_V5.columns == (*table._contract_v4.columns, *x_columns)
     assert table.CONTRACT_V5.definition_hash != table.CONTRACT_V4.definition_hash
     assert table.CONTRACT_V5.definition_hash == table_contract_hash(table._contract_v5)
-    assert table.CONTRACT is table.CONTRACT_V4
+    assert table.CONTRACT is table.CONTRACT_V5
 
 
 @pytest.mark.parametrize("columns", [
@@ -198,3 +203,65 @@ def test_request_feature_set_order_still_excludes_hmosx():
         pytest.skip("no exported feature-set order constant")
     assert tuple(ordered) == ("H", "HM", "HMO")
     assert "HMOSX" not in ordered
+
+
+def _prepared_rows(data):
+    prepared = builder._prepare(data.repository, data.panel_source,
+        producer=size_panel._producer({}),
+        history_admitted=size_panel._history(data.repository, data.panel_source, data.panel_request),
+        **data.panel_request)
+    return list(builder._rows(data.repository, data.panel_source, data.prices, prepared))
+
+
+def test_history_x_empty_history_leaves_tail_and_days_since_prior_null():
+    result = builder._history_x({"history": []}, {},
+        {"session": "AMC", "event_date": "2024-03-08"})
+    assert {name: result[name] for name in x.TAIL} == dict.fromkeys(x.TAIL)
+    assert result["cal_days_since_prior"] is None
+    assert result["cal_amc"] == 1
+    assert result["cal_weekday"] == date(2024, 3, 8).weekday()
+    assert result["cal_month"] == 3
+
+
+def test_history_x_uses_absolute_signed_moves_and_last_contributor_date():
+    history = {"history": [{"event_id": "a", "event_date": "2023-06-01"},
+                           {"event_id": "b", "event_date": "2023-12-15"}]}
+    result = builder._history_x(history, {"a": -4.0, "b": 7.5},
+        {"session": "BMO", "event_date": "2024-03-08"})
+    assert {name: result[name] for name in x.TAIL} == compute_tail_history([4.0, 7.5])
+    assert result["cal_days_since_prior"] == (date(2024, 3, 8) - date(2023, 12, 15)).days
+    assert result["cal_amc"] == 0
+    assert result["cal_weekday"] == date(2024, 3, 8).weekday()
+    assert result["cal_month"] == 3
+
+
+def test_history_x_refuses_an_unknown_session():
+    with pytest.raises(DataError) as raised:
+        builder._history_x({"history": []}, {},
+            {"session": "XYZ", "event_date": "2024-03-08"})
+    assert raised.value.code == "CONTRACT_MISMATCH"
+
+
+def test_built_rows_match_v5_contract_and_carry_g1_g4(panel_data):
+    rows = _prepared_rows(panel_data)
+    assert rows
+    columns = {column.name for column in table.CONTRACT.columns}
+    assert len((*x.TAIL, *x.CALENDAR)) == 12
+    for row in rows:
+        assert set(row) == columns
+        assert set((*x.TAIL, *x.CALENDAR)) <= set(row)
+        assert all(row[name] is not None for name in (*x.TAIL, *x.CALENDAR))
+        assert all(row[name] is None for name in (*x.IVDYN, *x.OWNVOL))
+        assert row["cal_amc"] in (0, 1)
+        assert row["cal_weekday"] == date.fromisoformat(row["event_date"]).weekday()
+        assert row["cal_month"] == int(row["event_date"][5:7])
+
+
+def test_x_null_counts_are_logged_once_with_every_column(panel_data, capsys):
+    rows = _prepared_rows(panel_data)
+    lines = [line for line in capsys.readouterr().err.splitlines()
+             if "[panel x columns]" in line]
+    assert len(lines) == 1
+    assert f"rows={len(rows)}" in lines[0]
+    assert all(f"{name}=" in lines[0] for name in x.X_COLUMNS)
+    assert all(f"{name}={len(rows)}" in lines[0] for name in (*x.IVDYN, *x.OWNVOL))

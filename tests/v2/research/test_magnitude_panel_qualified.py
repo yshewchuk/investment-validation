@@ -98,7 +98,7 @@ def test_public_full_table_and_independent_missing_realized_quote(panel_data, mo
     result = read(data, artifact)
     assert [r["horizon_sessions"] for r in result["rows"]] == [1, 3, 5]
     assert artifact["context"]["schema_version"] == "magnitude_panel_context.v5"
-    assert artifact["context"]["feature_recipe"] == table.recipe("HMOS")
+    assert artifact["context"]["feature_recipe"] == table.recipe("HMOSX")
     assert artifact["context"]["season_heat_population"]["schema_version"] == "season_heat_population.v1"
     assert "price_row_metadata" not in artifact["context"]
     assert set(artifact["context"]["price_row_digests"]) >= {"^GSPC"}
@@ -272,9 +272,9 @@ def test_stored_rows_detect_identity_or_feature_corruption(panel_data):
 
     data = panel_data
     artifact = size_panel.materialize(data.repository, data.panel_source, **data.panel_request)
-    # The v4 projection is the whole stored row: season columns must be part of what is checked.
+    # The v5 projection is the whole stored row: season and x columns must be part of what is checked.
     rows = store.read(data.repository, artifact["feature_snapshot"], artifact["context"],
-                      [*table.FEATURES_HMOS, "has_implied_quote"])
+                      [*table.FEATURES_HMOSX, "has_implied_quote"])
     for key, value in (("context_id", "sha256:" + "a" * 64), ("signed_streak", 100.),
                        ("current_quote_status", "present"), ("n_prior", float("inf"))):
         changed = [dict(r) for r in rows]
@@ -518,7 +518,7 @@ def test_publication_enforces_native_expanded_parquet_budget(panel_data, budget_
 
     data = panel_data
     artifact = size_panel.materialize(data.repository, data.panel_source, **data.panel_request)
-    columns = [*table.FEATURES_HMOS, "has_implied_quote"]  # every stored v4 non-key column
+    columns = [*table.FEATURES_HMOSX, "has_implied_quote"]  # every stored v5 non-key column
     rows = transport.read(data.repository, artifact["feature_snapshot"], artifact["context"], columns)
     context = deepcopy(artifact["context"])
     context["context_id"] = content_hash({k: v for k, v in context.items() if k != "context_id"})
@@ -842,7 +842,7 @@ def test_panel_rows_consume_canonical_history_order_across_prefix_tickers(monkey
         forecasts = [{"horizon_sessions": horizon, "cutoff_id": f"{event_id}:{horizon}",
             "source_session_ceiling": "2024-01-01"} for horizon in (1, 3, 5)]
         targets.append({"event_id": event_id, "ticker": ticker, "event_date": "2024-01-02",
-            "forecasts": forecasts})
+            "session": "AMC", "forecasts": forecasts})
         for cutoff in forecasts:
             rows.append({**{name: None for name in HISTORY_FEATURES},
                 "event_id": event_id, "horizon_sessions": cutoff["horizon_sessions"],

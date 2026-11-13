@@ -111,7 +111,7 @@ _contract_v5 = replace(_contract_v4, contract_id=TABLE + ".v5", semantic_version
         physical_type=field["physical_type"], nullable=field["nullable"], unit=field["unit"],
         null_policy=field["on_missing"]) for field in x.x_fields())))
 CONTRACT_V5 = replace(_contract_v5, definition_hash=table_contract_hash(_contract_v5))
-CONTRACT = CONTRACT_V4  # Slice 6 installs v5; the builder does not yet produce the x columns.
+CONTRACT = CONTRACT_V5
 
 
 def admit_columns(columns, *, season=False, x_groups=False):
