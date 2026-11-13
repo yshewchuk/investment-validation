@@ -91,7 +91,7 @@ _PANEL_MEMO = {}
 def read_stored_panel(repository, source, request, *, columns, expected_panel=None):
     """Share one admitted panel per process; validate each request and return detached copies."""
     validate_panel_request(request)
-    admit_columns(columns, season=True)
+    admit_columns(columns, season=True, x_groups=True)
     key = (id(repository), content_hash(to_document(source)),
            content_hash(request), tuple(columns))
     entry = _PANEL_MEMO.get(key)

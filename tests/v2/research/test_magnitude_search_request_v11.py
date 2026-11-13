@@ -3,9 +3,10 @@ import json
 
 import pytest
 
+from engine.v2.data.errors import DataError
 from engine.v2.ops.errors import OpsError
 from engine.v2.research.eligibility_policy import eligibility_policy
-from engine.v2.research.magnitude_panel_qualified_table import recipe
+from engine.v2.research.magnitude_panel_qualified_table import admit_columns, recipe
 from experiments.magnitude_search_request import validate_workers
 from experiments.magnitude_search_request_versions import compile_request
 from experiments.magnitude_search_request_v3 import _space
@@ -162,6 +163,51 @@ def test_v11_panel_projection_is_unique_and_complete():
     columns = _panel_columns("magnitude_search_request.v11", model_columns)
     assert len(columns) == len(set(columns))
     assert all(name in columns for name in model_columns)
+
+
+def test_v11_panel_projection_is_admissible():
+    columns = _panel_columns("magnitude_search_request.v11", recipe("HMOSX")["model_columns"])
+    admit_columns(columns, season=True, x_groups=True)
+    with pytest.raises(DataError) as caught:
+        admit_columns(columns, season=True, x_groups=False)
+    assert caught.value.code == "HOLDOUT_ACCESS_DENIED"
+
+
+def test_size_panel_read_admits_hmosx_projection(monkeypatch):
+    import experiments.size_panel as size_panel
+
+    seen = []
+
+    class _Stop(Exception):
+        pass
+
+    def rec(columns, **kw):
+        seen.append(kw)
+        raise _Stop()
+
+    monkeypatch.setattr(size_panel, "admit_columns", rec)
+    with pytest.raises(_Stop):
+        size_panel.read(None, None, None, columns=["x"])
+    assert seen == [{"season": True, "x_groups": True}]
+
+
+def test_read_stored_panel_admits_hmosx_projection(monkeypatch):
+    import experiments.size_search_binding as binding
+
+    seen = []
+
+    class _Stop(Exception):
+        pass
+
+    def rec(columns, **kw):
+        seen.append(kw)
+        raise _Stop()
+
+    monkeypatch.setattr(binding, "validate_panel_request", lambda request: request)
+    monkeypatch.setattr(binding, "admit_columns", rec)
+    with pytest.raises(_Stop):
+        binding.read_stored_panel(None, None, {}, columns=["x"])
+    assert seen == [{"season": True, "x_groups": True}]
 
 
 def test_v11_workers_use_the_existing_bounded_worker_contract():
