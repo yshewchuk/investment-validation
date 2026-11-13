@@ -1092,8 +1092,11 @@ def test_report_reuses_shared_execution_receipt_read_and_keeps_outer_rows(monkey
             {"outer": {"year": "2025", "evaluation_event_ids": ["evt"]},
              "inner": [{"year": "2023"}, {"year": "2024"}]},
         ]}
-    result = {"predictions": [{"event_id": "evt", "absolute_move_pct": 1.0}],
-        "folds": [{"outer_year": year, "evaluation_inputs": {"omitted_labels": []}}
+    result = {"predictions": [{"event_id": "evt", "absolute_move_pct": 1.0,
+                               "outer_year": "2024", "horizon_sessions": 5,
+                               "predicted_absolute_move_pct": 2.0}],
+        "folds": [{"outer_year": year, "evaluation_inputs": {"omitted_labels": []},
+                   "candidate": {"candidate_id": "c"}}
                   for year in ("2024", "2025")]}
     registration = SimpleNamespace(run_id="run", document={"size_panel": {"context": {
         "target_events": [{"event_id": "evt"}], "eligibility_plan": {}}}})
