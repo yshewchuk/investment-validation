@@ -67,7 +67,7 @@ Candidate count today is `len(feature_sets) * G + (1 if HMO in sets)`, where `G`
 
 Totals: about 720 code, 750 test, 55 doc lines. Tests do not count against the size limit; every slice is under the ~300 cap and only slice 5 is above the ~150 target.
 
-**Total about 720 non-test code lines in 8 code PRs, plus one doc PR.** Slices are sequential (one open PR per owner); 1-4 are independent of each other. No heavy job runs in any slice; data runs wait for separate authorization.
+**Total about 720 non-test code lines in 8 code PRs, plus one doc PR.** Each slice has its own owner and one open PR; slices 1-5 may run in parallel (1-4 are independent pure modules, and slice 5 declares columns only), while 6a/6b need 1-5 merged, 7 needs 5, and 8 is last. No heavy job runs in any slice; data runs wait for separate authorization.
 
 ## 6. Cheaper subsets
 
@@ -86,8 +86,6 @@ Cost per group including its share of table and wiring, with the shared fixed pa
 
 The exploratory result does not rank groups by value ("no single group dominates"), so this ranking is by cost only; a dropped group's effect is unmeasured, not shown to be zero.
 
-## 7. Open points for the user
+## 7. Decisions (user, 2026-11-12)
 
-1. Same-date count dropped (section 1); accept, or require a PIT calendar source first.
-2. Own volatility from `close_adj` rather than `spot` (section 2).
-3. One set `HMOSX` for all groups versus one set per group (section 4); the former is recommended.
+All four groups are built. Accepted as proposed: (1) same-date count dropped (section 1); (2) own volatility from `close_adj` rather than `spot` (section 2); (3) one set `HMOSX` for all groups (section 4).
