@@ -37,6 +37,9 @@ provides `FeatureContextPlanner` and causal `FeatureFrame` construction.
 `runup_math.add_runup_features(frame, prices_by_ticker, as_of_column)` computes
 shared streak and price-history inputs from caller-selected event/price frames.
 
+`calendar_features.calendar_features(session, event_date, prior_event_date=None)`
+returns the G4 calendar columns from the target clock and prior event date.
+
 `daily_state_inputs.scan_daily_state_inputs(repository, snapshot, *, ticker,
 history_start, decision_session)` reads one ticker's bounded `daily_market` rows
 from a pinned snapshot and returns `daily_state_inputs.DailyStateInputs`. The
@@ -50,7 +53,7 @@ decision_session, history_start)` composes `daily_state_inputs`/`panel_math`/
 `nightly_raw_row_producer` calls it once per `(ticker, event_date, session)`
 (`engine/v2/ops/ARCHITECTURE.md` "Raw-row producer").
 
-<!-- public-interface: panel_math.DAILY_STATE_FIELDS, recipes, FeatureRegistry, default_feature_registry, runup_math, add_runup_features, regime.add_regime_features, regime.validated_regime_closes, daily_state_inputs.DailyStateInputs, daily_state_inputs.scan_daily_state_inputs, panel_row_inputs.PanelRowInputs, panel_row_inputs.scan_panel_row -->
+<!-- public-interface: panel_math.DAILY_STATE_FIELDS, recipes, FeatureRegistry, default_feature_registry, runup_math, add_runup_features, calendar_features.calendar_features, regime.add_regime_features, regime.validated_regime_closes, daily_state_inputs.DailyStateInputs, daily_state_inputs.scan_daily_state_inputs, panel_row_inputs.PanelRowInputs, panel_row_inputs.scan_panel_row -->
 
 ## Consumers
 

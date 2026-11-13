@@ -308,6 +308,21 @@ def test_stored_rows_detect_identity_or_feature_corruption(panel_data):
     assert caught.value.code == "CONTRACT_MISMATCH"
 
 
+def test_stored_rows_detect_nonfinite_x_feature(panel_data):
+    from engine.v2.research import _magnitude_panel_store as store
+
+    data = panel_data
+    artifact = size_panel.materialize(data.repository, data.panel_source, **data.panel_request)
+    rows = store.read(data.repository, artifact["feature_snapshot"], artifact["context"],
+                      [*table.FEATURES_HMOSX, "has_implied_quote"])
+    rows[0]["tail_max_abs"] = float("inf")
+    rows[0]["row_id"] = content_hash({k: v for k, v in rows[0].items() if k != "row_id"})
+    with pytest.raises(DataError) as caught:
+        list(store._validate(rows, artifact["context"]))
+    assert caught.value.code == "CONTRACT_MISMATCH"
+    assert "feature is not finite" in str(caught.value)
+
+
 def test_size_panel_read_revalidates_history_coverage(panel_data, monkeypatch):
     data = panel_data
     artifact = size_panel.materialize(data.repository, data.panel_source, **data.panel_request)

@@ -306,6 +306,36 @@ def test_built_rows_g1_g4_match_independent_identities(panel_data):
         assert len({row["tail_max_abs"] for row in rows}) > 1
 
 
+def test_rows_pass_exact_contributor_moves_and_prior_date(panel_data, monkeypatch):
+    tail_calls, calendar_calls = [], []
+    real_tail, real_calendar = builder.compute_tail_history, builder.calendar_features
+
+    def tail_spy(moves):
+        tail_calls.append((moves,))
+        return real_tail(moves)
+
+    def calendar_spy(session, event_date, prior_event_date=None):
+        calendar_calls.append((session, event_date, prior_event_date))
+        return real_calendar(session, event_date, prior_event_date)
+
+    monkeypatch.setattr(builder, "compute_tail_history", tail_spy)
+    monkeypatch.setattr(builder, "calendar_features", calendar_spy)
+    rows = _prepared_rows(panel_data)
+    assert rows and any(row["n_prior"] > 0 for row in rows)
+    assert len(tail_calls) == len(rows) == len(calendar_calls)
+    for row, (moves,), (_, event_date, prior) in zip(rows, tail_calls, calendar_calls):
+        assert len(moves) == row["n_prior"]
+        if row["n_prior"]:
+            assert sum(moves) / len(moves) == pytest.approx(row["mean_prior_abs_move"])
+            assert max(moves) == pytest.approx(row["tail_max_abs"])
+        assert event_date == row["event_date"]
+        assert (prior is None) == (row["n_prior"] == 0)
+        if prior is not None:
+            assert date.fromisoformat(prior) < date.fromisoformat(row["event_date"])
+            assert (date.fromisoformat(row["event_date"])
+                    - date.fromisoformat(prior)).days == row["cal_days_since_prior"]
+
+
 def test_built_rows_match_v5_contract_and_carry_g1_g4(panel_data):
     rows = _prepared_rows(panel_data)
     assert rows
