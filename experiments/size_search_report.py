@@ -6,10 +6,13 @@ import math
 import sys
 import time
 
+import numpy as np
+
 from engine.v2.foundation import content_hash
 from experiments.magnitude_search_outer import collect_outer_results
 from experiments.magnitude_search_plan import trial_key
 from experiments.magnitude_search_records import read_record
+from experiments.size_distribution_report import collect_distribution
 from experiments.size_paired_report import paired_report, validated_horizons
 from experiments.v2_magnitude_search_run import _admit_driver
 
@@ -58,7 +61,7 @@ def _implied_evidence(fold, inputs, horizons, *, calibrate):
     return scale, moves
 
 
-def _candidate_evidence(conn, store, run_id, plan):
+def _candidate_evidence(conn, store, run_id, plan, predictions=None):
     """Read-only per-run candidate listing bound to the sealed plan's exact trial keys."""
     rows, evidence_by_key = [], {}
     for group in plan["folds"]:
@@ -81,6 +84,18 @@ def _candidate_evidence(conn, store, run_id, plan):
                     score_seconds = terminal.get("score_seconds")
                     rss_delta_kib = terminal.get("rss_delta_kib")
                     inner_metrics = terminal.get("inner_metrics")
+                    if predictions is not None and terminal.get("status") == "succeeded" and "target" not in plan:
+                        stored = terminal["predictions"]
+                        try:
+                            predictions[key] = {horizon: (
+                                np.array([row["predicted_absolute_move_pct"] for row in stored
+                                          if row["horizon_sessions"] == horizon], dtype=float),
+                                np.array([row["absolute_move_pct"] for row in stored
+                                          if row["horizon_sessions"] == horizon], dtype=float))
+                                for horizon in plan["horizons"]}
+                        except (KeyError, TypeError, ValueError):
+                            pass
+                        del stored
                     fit_seconds = []
                     for horizon in plan["horizons"]:
                         slot = "fit-completed:" + key + ":" + str(horizon)
@@ -131,7 +146,27 @@ def collect(conn, store, repository, registration, request, plan_ref):
     targets = {r["event_id"]: r["absolute_move_pct"] for r in result["predictions"]}
     ids = {event for group in plan["folds"] for event in group["outer"]["evaluation_event_ids"]}
     events = [e for e in registration.document["size_panel"]["context"]["target_events"] if e["event_id"] in ids]
-    inner_fits = _candidate_evidence(conn, store, registration.run_id, plan)
+    trial_arrays = {}
+    inner_fits = _candidate_evidence(conn, store, registration.run_id, plan, trial_arrays)
+    outer_rows = {}
+    if "target" not in plan:
+        for row in result["predictions"]:
+            arrays = outer_rows.setdefault(row["outer_year"], {horizon: ([], []) for horizon in horizons})
+            arrays[row["horizon_sessions"]][0].append(row["predicted_absolute_move_pct"])
+            arrays[row["horizon_sessions"]][1].append(row["absolute_move_pct"])
+        outer_rows = {year: {horizon: (np.array(pred, dtype=float), np.array(y, dtype=float))
+                             for horizon, (pred, y) in arrays.items()}
+                      for year, arrays in outer_rows.items()}
+    selected_ids = {fold["outer_year"]: fold["candidate"]["candidate_id"]
+                    for fold in result["folds"]}
+    distribution = collect_distribution(plan, trial_arrays, outer_rows, selected_ids)
+    matches = ({(row["outer_year"], row["inner_year"], row["candidate_id"]): row
+                for row in distribution["inner"]} if distribution["status"] != "unsupported_target" else {})
+    for row in inner_fits:
+        match = matches.get((row["outer_year"], row["inner_year"], row["candidate_id"]))
+        row["distribution"] = ({key: value for key, value in match.items()
+            if key not in ("outer_year", "inner_year", "candidate_id", "trial_id")}
+            if match is not None else None)
     for group in plan["folds"]:
         year = group["outer"]["year"]
         key = content_hash([plan["plan_id"], year])
@@ -147,6 +182,7 @@ def collect(conn, store, repository, registration, request, plan_ref):
                 label_reasons={o["event_id"]: o["reason"] for f in result["folds"]
                     for o in f["evaluation_inputs"].get("omitted_labels", [])}),
             "preflight": resource_report(plan), "inner_fits": inner_fits, "comparison_fits": comparison_fits,
+            "distribution": distribution,
             "frozen_eligibility": registration.document["size_panel"]["context"]["eligibility_plan"],
             "label_exclusions": [{"outer_year": f["outer_year"], **omission} for f in result["folds"]
                 for omission in f["evaluation_inputs"].get("omitted_labels", [])]}
