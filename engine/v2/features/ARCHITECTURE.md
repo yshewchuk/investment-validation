@@ -327,6 +327,15 @@ uses no implicit clock, and owns no cache.
   `null_mask_hash`, built only after every row has passed the causal
   timestamp check described above.
 
+### Panel helpers for the research `HMOSX` groups
+
+Two source-free helpers; the column rules, null policy and lineage are specified in `engine/v2/research/ARCHITECTURE.md` ("HMOSX feature groups").
+
+- `own_vol.compute_own_vol(closes, ceiling)` (G3): `closes` are ascending `(ISO date, close)` pairs; a date after `ceiling` or an unsorted, malformed or non-finite pair refuses `CONTRACT_MISMATCH`, a non-finite result `EXPERIMENT_VARIANT_FAILED`. It returns `OWN_VOL_COLUMNS`, all `None` when the series is empty, the last close is more than 5 calendar days before `ceiling`, or the last 61 closes include a non-positive one; each volatility is `None` while the window is short.
+- `calendar_features.calendar_features(session, event_date, prior_event_date=None)` (G4): `session` must be `AMC` or `BMO`, dates canonical ISO, and the prior date not after the event, else `CONTRACT_MISMATCH`; `cal_days_since_prior` is `None` without a prior date.
+
+Both import only `engine.v2.data.errors`; their consumer is `engine/v2/research` (`magnitude_panel_qualified`).
+
 ## Dependencies and callers
 
 - `engine.v2.models.training.d14_dataset` calls `panel_math.daily_state_lookup`
