@@ -92,6 +92,9 @@ def _prepare(repository, source, *, history_snapshot, price_history_snapshot, as
     groups = {g["event_id"]: g for g in history["eligibility"]["groups"]}
     event_sessions = {event["event_id"]: event["session"]
         for sequence in index["sequences"] for event in sequence["events"]}
+    missing = [t["event_id"] for t in targets if t["event_id"] not in event_sessions]
+    if missing:
+        raise fail("CONTRACT_MISMATCH", "target event has no confirmed session")
     targets = [{**t, "session": event_sessions[t["event_id"]],
                 **{k: groups[t["event_id"]][k] for k in ("label_start", "label_end")}}
                for t in targets]
@@ -125,7 +128,9 @@ def _block(values, anchors, **extra):
 
 
 def _history_x(history, moves, target):
-    """G1 tail and G4 calendar columns from the H11 contributor list and the stored clock."""
+    """G1 tail and G4 calendar columns from the H11 contributor list and the stored clock.
+    Invoked by `_rows` during `experiments.size_panel.materialize`; the request that selects
+    the HMOSX set is slice 7, the contract text slice 8."""
     entries = history["history"]
     tail = compute_tail_history([abs(moves[e["event_id"]]) for e in entries])
     prior = entries[-1]["event_date"] if entries else None
