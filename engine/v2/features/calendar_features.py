@@ -1,4 +1,4 @@
-"""Weekday/month/session come from the target's own stored event date and session, days-since-prior from the last H11 contributor's event date (design guides/size_feature_groups_design.md section 2); no production caller yet."""
+"""Calendar columns from the target's own session and event date, and days since the last prior same-ticker event date."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from engine.v2.data.errors import fail
 
 
 def _contract(message):
-    """Raise a CONTRACT_MISMATCH failure with the given message."""
+    """Return a CONTRACT_MISMATCH failure for the caller to raise."""
     return fail("CONTRACT_MISMATCH", message)
 
 

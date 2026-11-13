@@ -54,18 +54,19 @@ def test_result_has_exact_columns_and_int_values():
 
 
 @pytest.mark.parametrize(
-    ("session", "event_date", "prior_event_date"),
+    ("session", "event_date", "prior_event_date", "message"),
     [
-        ("amc", "2025-03-14", None),
-        ("DMH", "2025-03-14", None),
-        (None, "2025-03-14", None),
-        (1, "2025-03-14", None),
-        ("AMC", "2025-3-14", None),
-        ("AMC", "20250314", None),
-        ("AMC", None, None),
-        ("AMC", date(2025, 3, 14), None),
-        ("AMC", "2025-03-14", "bad"),
-        ("AMC", "2025-03-14", "2025-03-15"),
+        ("amc", "2025-03-14", None, "session must be AMC or BMO"),
+        ("DMH", "2025-03-14", None, "session must be AMC or BMO"),
+        (None, "2025-03-14", None, "session must be AMC or BMO"),
+        (1, "2025-03-14", None, "session must be AMC or BMO"),
+        ("AMC", "2025-3-14", None, "event_date must be a canonical ISO date"),
+        ("AMC", "20250314", None, "event_date must be a canonical ISO date"),
+        ("AMC", None, None, "event_date must be a canonical ISO date"),
+        ("AMC", date(2025, 3, 14), None, "event_date must be a canonical ISO date"),
+        ("AMC", "2025-03-14", "bad", "prior_event_date must be None or a canonical ISO date"),
+        ("AMC", "2025-03-14", "2025-3-7", "prior_event_date must be None or a canonical ISO date"),
+        ("AMC", "2025-03-14", "2025-03-15", "prior_event_date is after event_date"),
     ],
     ids=[
         "lowercase-session",
@@ -77,11 +78,13 @@ def test_result_has_exact_columns_and_int_values():
         "none-event-date",
         "date-object-event-date",
         "bad-prior-date",
+        "non-canonical-prior-date",
         "prior-after-event",
     ],
 )
-def test_invalid_inputs_are_refused(session, event_date, prior_event_date):
+def test_invalid_inputs_are_refused(session, event_date, prior_event_date, message):
     with pytest.raises(DataError) as raised:
         calendar_features(session, event_date, prior_event_date)
 
     assert raised.value.code == "CONTRACT_MISMATCH"
+    assert message in str(raised.value)
