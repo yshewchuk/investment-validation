@@ -176,6 +176,14 @@ def test_projection_and_context_mismatch(panel_data):
                             columns=columns, **data.panel_request)
 
 
+def test_public_read_admits_x_columns(panel_data):
+    data = panel_data
+    artifact = size_panel.materialize(data.repository, data.panel_source, **data.panel_request)
+    rows = size_panel.read(data.repository, data.panel_source, artifact["feature_snapshot"],
+        columns=["tail_max_abs", "cal_amc"], **data.panel_request)["rows"]
+    assert rows and {"tail_max_abs", "cal_amc"} <= set(rows[0])
+
+
 def test_native_streak_not_inferred_from_aggregate():
     history = {"ticker": "A", "history": [{"event_id": str(i)} for i in range(4)]}
     assert sources.streak(history, dict(zip(map(str, range(4)), [-2., 2., 3., 4.]))) == 3.

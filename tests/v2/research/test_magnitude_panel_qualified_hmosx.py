@@ -73,7 +73,7 @@ _DERIVATIONS = {
     "tail": ("tail_history.v1", "compute_tail_history"),
     "ivdyn": ("iv_dynamics.v1", "compute_iv_dynamics"),
     "ownvol": ("own_vol.v1", "compute_own_vol"),
-    "calendar": ("calendar_features.v1", "compute_calendar_features"),
+    "calendar": ("calendar_features.v1", "calendar_features"),
 }
 
 
