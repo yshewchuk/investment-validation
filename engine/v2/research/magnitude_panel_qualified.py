@@ -1,11 +1,13 @@
 """Complete immutable qualified SIZE panel; private installed-wrapper backend."""
 import json
+from bisect import bisect_right
 from collections import Counter
 
 import numpy as np
 
 from engine.v2.data.errors import fail
 from engine.v2.features.calendar_features import calendar_features
+from engine.v2.features.own_vol import compute_own_vol
 from engine.v2.foundation import canonical_json, content_hash, to_document
 from engine.v2.research import _magnitude_panel_sources as sources
 from engine.v2.research import magnitude_confirmed_metadata, season_heat, season_population
@@ -15,15 +17,12 @@ from engine.v2.research import magnitude_panel_qualified_x as x
 from engine.v2.research.eligibility_policy import eligibility_policy
 from engine.v2.research.eligible_history_table import FEATURES as HISTORY
 from engine.v2.research.experiment_population import load_population
+from engine.v2.research.iv_dynamics import compute_iv_dynamics
 from engine.v2.research.magnitude_features import calendar_input
 from engine.v2.research.magnitude_panel_table import canonical_day
 from engine.v2.research.progress import Progress, decision, stage
 from engine.v2.research.snapshot_inputs import admit_snapshot
 from engine.v2.research.tail_history import compute_tail_history
-
-# replaced by slice 6b's computed blocks
-_PENDING_X = {"sources": [], "missing": dict.fromkeys(
-    (*x.IVDYN, *x.OWNVOL), "not_implemented_until_slice_6b")}
 
 
 def _policy(policy):
@@ -131,6 +130,36 @@ def _block(values, anchors, **extra):
             for name, value in values.items() if value is None}, **extra}
 
 
+_IV_FIELDS = ("date", "implied_move", "iv10", "iv30", "exern_iv30", "rvol30")
+_IV_LAGS = (5, 10, 20)
+
+
+def _ivdyn_x(surface, dates, ceiling, anchor_for, ticker):
+    """G2 columns from the last 21 surface rows dated <= ceiling; lineage anchors the lag reference rows."""
+    end = bisect_right(dates, ceiling)
+    window = surface[max(0, end - 21):end]
+    rows = [{**{k: row[k] for k in _IV_FIELDS}, "implied_move": row["implied_move"] or None}
+            for row in window]
+    values = compute_iv_dynamics(rows)
+    anchors = [anchor_for(ticker, window[-1 - lag]["date"]) for lag in _IV_LAGS if len(window) > lag]
+    block = _block(values, anchors)
+    for name, lag in (("imp_chg5", 5), ("imp_chg10", 10)):
+        if values[name] is None and len(window) > lag and (
+                not window[-1]["implied_move"] or not window[-1 - lag]["implied_move"]):
+            block["missing"][name] = "no_quote"
+    return values, block
+
+
+def _ownvol_x(prices, price_dates, ceiling):
+    """G3 columns from the last 61 adjusted closes dated <= ceiling; lineage records window dates and row count."""
+    end = bisect_right(price_dates, ceiling)
+    window = prices[max(0, end - 61):end]
+    values = compute_own_vol([(row.date, float(row.close_adj)) for row in window], ceiling)
+    extra = {"first_date": window[0].date if window else None,
+             "last_date": window[-1].date if window else None, "rows": len(window)}
+    return values, _block(values, [], **extra)
+
+
 def _history_x(history, moves, target):
     """G1 tail and G4 calendar columns from the H11 contributor list and the stored clock.
     Invoked by `_rows` during `experiments.size_panel.materialize`; request binding is slice 7,
@@ -166,7 +195,7 @@ def _ticker_inputs(repository, source, price_snapshot, context, ticker, sequence
     runup = sources.runup(selected, prices)
     surface = sources.daily_surface(repository, source, ticker, context["daily_source_start"],
                                    end, request["limits"])
-    return sequence, runup, surface, [row["date"] for row in surface]
+    return sequence, runup, surface, [row["date"] for row in surface], prices
 
 
 def _season_record(record):
@@ -208,6 +237,21 @@ def _history_missing(history_values, hx):
     return {**history_values, **{k: hx[k] for k in (*x.TAIL, "cal_days_since_prior")}}
 
 
+def _prior_events(history, moves, stored):
+    """Signed streak and the 12-event EMA (mean prior move until twelve prior events exist)."""
+    return {"signed_streak": sources.streak(history, moves),
+            "ema12r_abs": stored["ema12_prior_abs_move"] if stored["n_prior"] >= 12
+            else stored["mean_prior_abs_move"]}
+
+
+def _market_x(inputs, ceiling, anchor_for, ticker):
+    """G2 and G3 columns plus their lineage blocks for one decision ceiling."""
+    surface, dates, prices, price_dates = inputs
+    iv, iv_block = _ivdyn_x(surface, dates, ceiling, anchor_for, ticker)
+    own, own_block = _ownvol_x(prices, price_dates, ceiling)
+    return {**iv, **own}, {"ivdyn": iv_block, "ownvol": own_block}
+
+
 def _rows(repository, source, price_snapshot, prepared):
     context, admitted, daily_records, price_records, roster, sessions = prepared
     daily_anchors = sources.anchor_lookup(daily_records,
@@ -246,17 +290,18 @@ def _rows(repository, source, price_snapshot, prepared):
         if ticker != current_ticker:
             price_anchors.clear()  # anchor caches are per active ticker, not per run
             daily_anchors.clear()
-            sequence, runup, surface, dates = _ticker_inputs(repository, source, price_snapshot,
+            sequence, runup, surface, dates, prices = _ticker_inputs(repository, source, price_snapshot,
                 context, ticker, sequences, selected_by_ticker, request)
+            price_dates = [row.date for row in prices]
+            inputs = (surface, dates, prices, price_dates)
             versions = _versions(repository, price_snapshot, context, ticker)
             current_ticker = ticker
         history = json.loads(stored["history_json"])
         hx = _history_x(history, moves, target)
-        prior = {"signed_streak": sources.streak(history, moves),
-            "ema12r_abs": stored["ema12_prior_abs_move"] if stored["n_prior"] >= 12
-            else stored["mean_prior_abs_move"]}
+        prior = _prior_events(history, moves, stored)
         runvalues, rundates = runup[key]
         market = daily._daily(surface, dates, cutoff["source_session_ceiling"])
+        xm, xm_blocks = _market_x(inputs, cutoff["source_session_ceiling"], daily_anchors, ticker)
         implied, implied_lineage = sources.implied_history(sequence, target,
             cutoff["source_session_ceiling"], retained, surface, daily_anchors, request["history_start"])
         history_values = {name: stored[name] for name in HISTORY}
@@ -268,7 +313,7 @@ def _rows(repository, source, price_snapshot, prepared):
             "daily_market": _daily_lineage(market, daily_anchors, ticker),
             "implied_history": implied_lineage,
             "season_heat": {"receipt_id": season_receipt_id},
-            "x_pending": _PENDING_X}
+            **xm_blocks}
         row = {"schema_version": table.CONTRACT.contract_id, "event_id": key[0],
             "context_id": context["context_id"], "history_context_id": admitted["context"]["context_id"],
             "horizon_sessions": key[1], "event_date": target["event_date"],
@@ -278,9 +323,7 @@ def _rows(repository, source, price_snapshot, prepared):
             **prior, **runvalues, **spy[key]["values"], **market["values"],
             "mean_prior_or_implied": implied,
             **_season_record(heat[key[0], cutoff["source_session_ceiling"]]),
-            **hx,
-            # slice 6b computes these; nulls until then
-            **dict.fromkeys((*x.IVDYN, *x.OWNVOL))}
+            **hx, **xm}
         nulls.add(row)
         yield {**row, "row_id": content_hash(row)}
         if key[1] == target["forecasts"][-1]["horizon_sessions"]:

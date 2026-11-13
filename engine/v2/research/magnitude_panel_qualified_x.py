@@ -1,4 +1,4 @@
-"""HMOSX block descriptors: tail and calendar are computed by the builder; ivdyn and ownvol are declared only until slice 6b."""
+"""HMOSX block descriptors; all four blocks (tail, ivdyn, ownvol, calendar) are computed by the panel builder."""
 
 TAIL = ("tail_max_abs", "tail_std_abs", "tail_p75_abs", "tail_p90_abs",
         "tail_share_gt10", "tail_max4_abs", "tail_std_over_mean", "tail_max_over_mean")

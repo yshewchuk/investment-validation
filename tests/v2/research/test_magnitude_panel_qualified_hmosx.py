@@ -1,8 +1,11 @@
 """HMOSX declaration pins: appended x fields, v5 contract, extended admission."""
 import copy
 import json
-from datetime import date
+import math
+from collections import namedtuple
+from datetime import date, timedelta
 
+import numpy as np
 import pytest
 
 from engine.v2.contracts.data import ColumnContract
@@ -14,6 +17,7 @@ from engine.v2.research import magnitude_panel_qualified_table as table
 from engine.v2.research import magnitude_panel_qualified_x as x
 from engine.v2.research.tail_history import compute_tail_history
 from experiments import size_panel
+from tests.v2.research.magnitude_trial_support import calendar_sessions
 from tests.v2.research.test_magnitude_panel_qualified import panel_data
 
 _PINNED_DICTIONARY_HASHES = {
@@ -217,16 +221,96 @@ def _prepared_rows(data):
 def test_lineage_records_x_missingness(panel_data):
     rows = _prepared_rows(panel_data)
     assert rows
-    expected = set((*x.IVDYN, *x.OWNVOL))
     for row in rows:
         blocks = json.loads(row["lineage"])
-        assert set(blocks["x_pending"]["missing"]) == expected
-        assert all(reason == "not_implemented_until_slice_6b"
-            for reason in blocks["x_pending"]["missing"].values())
+        assert "x_pending" not in blocks
+        assert set(blocks["ivdyn"]["missing"]) <= set(x.IVDYN)
+        assert set(blocks["ownvol"]["missing"]) <= set(x.OWNVOL)
+        for block, columns in (("ivdyn", x.IVDYN), ("ownvol", x.OWNVOL)):
+            for column in columns:
+                assert (column in blocks[block]["missing"]) == (row[column] is None)
+        assert {"first_date", "last_date", "rows"} <= set(blocks["ownvol"])
+        if blocks["ownvol"]["rows"] > 0:
+            assert (blocks["ownvol"]["first_date"] <= blocks["ownvol"]["last_date"]
+                    <= row["source_session_ceiling"])
         if row["cal_days_since_prior"] is None:
             assert "cal_days_since_prior" in blocks["history"]["missing"]
         if row["tail_max_abs"] is None:
             assert "tail_max_abs" in blocks["history"]["missing"]
+
+
+def test_ivdyn_x_oracle():
+    dates = [(date(2024, 1, 2) + timedelta(days=index)).isoformat() for index in range(22)]
+    surface = [{"date": day, "implied_move": 10.0, "iv10": 10.0, "iv30": 20.0 + index,
+                "exern_iv30": 10.0, "rvol30": 10.0, "ticker": "T"}
+               for index, day in enumerate(dates)]
+    values, block = builder._ivdyn_x(
+        surface, dates, surface[-1]["date"], lambda ticker, day: {"t": ticker, "d": day}, "T")
+    assert values["iv30_chg5"] == pytest.approx(41 / 36)
+    assert values["iv30_chg20"] == pytest.approx(41 / 21)
+    assert [anchor["d"] for anchor in block["sources"]] == [dates[-6], dates[-11], dates[-21]]
+
+    capped, capped_block = builder._ivdyn_x(
+        surface, dates, surface[9]["date"], lambda ticker, day: {"t": ticker, "d": day}, "T")
+    assert len(capped_block["sources"]) == 1
+    assert capped_block["sources"][0]["d"] == surface[4]["date"]
+    assert capped["iv30_chg20"] is None
+    surface[15]["iv30"] = 1e9
+    unchanged, _ = builder._ivdyn_x(
+        surface, dates, surface[9]["date"], lambda ticker, day: {"t": ticker, "d": day}, "T")
+    assert unchanged == capped
+
+
+def test_ivdyn_x_zero_implied_move_is_null():
+    dates = [(date(2024, 1, 2) + timedelta(days=index)).isoformat() for index in range(11)]
+    surface = [{"date": day, "implied_move": 5.0, "iv10": 10.0, "iv30": 10.0,
+                "exern_iv30": 10.0, "rvol30": 10.0, "ticker": "T"} for day in dates]
+    surface[-1]["implied_move"] = 0.0
+    values, block = builder._ivdyn_x(
+        surface, dates, surface[-1]["date"], lambda ticker, day: {"t": ticker, "d": day}, "T")
+    assert values["imp_chg5"] is None
+    assert values["imp_chg10"] is None
+    assert block["missing"]["imp_chg5"] == "no_quote"
+    assert block["missing"]["imp_chg10"] == "no_quote"
+
+    surface[-1]["implied_move"] = 5.0
+    surface[-6]["implied_move"] = 0.0
+    values, block = builder._ivdyn_x(
+        surface, dates, surface[-1]["date"], lambda ticker, day: {"t": ticker, "d": day}, "T")
+    assert values["imp_chg5"] is None
+    assert values["imp_chg10"] == pytest.approx(1.0)
+    assert block["missing"]["imp_chg5"] == "no_quote"
+    assert "imp_chg10" not in block["missing"]
+
+    short = [{"date": day, "implied_move": 5.0, "iv10": 10.0, "iv30": 10.0,
+              "exern_iv30": 10.0, "rvol30": 10.0, "ticker": "T"} for day in dates[:3]]
+    values, block = builder._ivdyn_x(
+        short, dates[:3], short[-1]["date"], lambda ticker, day: {"t": ticker, "d": day}, "T")
+    assert values["imp_chg5"] is None
+    assert block["missing"]["imp_chg5"] == "insufficient_history"
+
+
+def test_ownvol_x_oracle():
+    price = namedtuple("Price", "date close_adj")
+    start = date(2024, 1, 2)
+    prices = [price((start + timedelta(days=index)).isoformat(), 100 * 1.01 ** index)
+              for index in range(70)]
+    price_dates = [row.date for row in prices]
+    values, block = builder._ownvol_x(prices, price_dates, price_dates[-1])
+    assert values["own_absret1"] == pytest.approx(math.log(1.01) * 100)
+    assert block["rows"] == 61
+    assert block["first_date"] == prices[-61].date
+    assert block["last_date"] == prices[-1].date
+    _, capped_block = builder._ownvol_x(prices, price_dates, price_dates[50])
+    assert capped_block["last_date"] == price_dates[50]
+
+
+def test_ownvol_x_no_prices():
+    values, block = builder._ownvol_x([], [], "2024-01-02")
+    assert values == dict.fromkeys(x.OWNVOL)
+    assert block["rows"] == 0
+    assert block["first_date"] is None
+    assert block["last_date"] is None
 
 
 def test_history_x_empty_history_leaves_tail_and_days_since_prior_null():
@@ -345,10 +429,62 @@ def test_built_rows_match_v5_contract_and_carry_g1_g4(panel_data):
         assert set(row) == columns
         assert set((*x.TAIL, *x.CALENDAR)) <= set(row)
         assert all(row[name] is not None for name in (*x.TAIL, *x.CALENDAR))
-        assert all(row[name] is None for name in (*x.IVDYN, *x.OWNVOL))
+        blocks = json.loads(row["lineage"])
+        assert all((row[name] is None) == (name in blocks[block]["missing"])
+            for block, names in (("ivdyn", x.IVDYN), ("ownvol", x.OWNVOL)) for name in names)
         assert row["cal_amc"] in (0, 1)
         assert row["cal_weekday"] == date.fromisoformat(row["event_date"]).weekday()
         assert row["cal_month"] == int(row["event_date"][5:7])
+
+
+def test_built_rows_g2_g3_match_independent_oracle(panel_data):
+    rows = _prepared_rows(panel_data)
+    days = calendar_sessions("2022-05-20", "2024-06-20").days
+    zero_days = {"2023-06-01", "2024-06-14"}
+
+    def v(name):
+        return float(builder.daily._DAILY.index(name) + 1)
+
+    saw_nonnull_imp_chg5 = False
+    saw_zero_day_null = False
+    saw_g3 = False
+    for row in rows:
+        ceiling = row["source_session_ceiling"]
+        idx = days.index(ceiling)
+        assert row["iv10_30"] == pytest.approx(v("iv10") / v("iv30"))
+        assert row["iv_rv"] == pytest.approx(v("iv30") / v("rvol30"))
+        assert row["ex_ratio"] == pytest.approx(v("exern_iv30") / v("iv30"))
+        if idx >= 20:
+            for k, col, field in ((5, "imp_chg5", "implied"), (10, "imp_chg10", "implied"),
+                                  (5, "iv30_chg5", "iv30"), (20, "iv30_chg20", "iv30"),
+                                  (5, "iv10_chg5", "iv10")):
+                reference = days[idx - k]
+                stale = (date.fromisoformat(ceiling)
+                         - date.fromisoformat(reference)).days > 2 * k + 4
+                zero = field == "implied" and (ceiling in zero_days or reference in zero_days)
+                if stale or zero:
+                    assert row[col] is None
+                    if col == "imp_chg5" and zero:
+                        saw_zero_day_null = True
+                else:
+                    assert row[col] == pytest.approx(1.0)
+                    if col == "imp_chg5":
+                        saw_nonnull_imp_chg5 = True
+        if idx >= 60:
+            saw_g3 = True
+            window = [100 + j / 10 for j in range(idx - 60, idx + 1)]
+            r = np.diff(np.log(window))
+            own_rvol5 = np.std(r[-5:], ddof=1) * np.sqrt(252) * 100
+            own_rvol10 = np.std(r[-10:], ddof=1) * np.sqrt(252) * 100
+            own_rvol60 = np.std(r[-60:], ddof=1) * np.sqrt(252) * 100
+            assert row["own_absret1"] == pytest.approx(abs(r[-1]) * 100)
+            assert row["own_rvol5"] == pytest.approx(own_rvol5)
+            assert row["own_rvol10"] == pytest.approx(own_rvol10)
+            assert row["own_rvol60"] == pytest.approx(own_rvol60)
+            assert row["own_rvol5_60"] == pytest.approx(own_rvol5 / own_rvol60)
+    assert saw_nonnull_imp_chg5
+    assert saw_zero_day_null
+    assert saw_g3
 
 
 def test_x_null_counts_are_logged_once_with_every_column(panel_data, capsys):
@@ -358,4 +494,6 @@ def test_x_null_counts_are_logged_once_with_every_column(panel_data, capsys):
     assert len(lines) == 1
     assert f"rows={len(rows)}" in lines[0]
     assert all(f"{name}=" in lines[0] for name in x.X_COLUMNS)
-    assert all(f"{name}={len(rows)}" in lines[0] for name in (*x.IVDYN, *x.OWNVOL))
+    counts = dict(item.split("=") for item in lines[0].split("null counts: ")[1].split(", "))
+    assert {k: int(v) for k, v in counts.items()} == {
+        name: sum(row[name] is None for row in rows) for name in x.X_COLUMNS}

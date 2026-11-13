@@ -544,9 +544,12 @@ Historical publication and schedule knowledge remain unverified reconstruction.
 are not reachable from production or nightly entrypoints.
 Season heat: `season_population.plan_roster` and `read_labels` feed
 `season_heat.compute_season_heat` for the `HMOSX` recipe (panel `.v5`, context `.v5`,
-request `v10`; G1 tail and G4 calendar are computed, G2/G3 stay null until market-side
-wiring); the shared anchor and fragment binding is `outcome_binding`. Contract
-and failure semantics are in `ARCHITECTURE.md`; rationale in
+request `v10`; G1 tail, G2 IV changes, G3 own vol and G4 calendar are all computed by the builder;
+the shared anchor and fragment binding is `outcome_binding`. Season-heat
+contract and failure semantics are in `ARCHITECTURE.md`; the G1-G4
+`HMOSX` column contract is promoted there in slice 8 of
+`guides/size_feature_groups_design.md` (tracked in #2426); the rationale
+and per-group availability rules are in that guide and in
 `guides/size_season_heat_population_design.md`.
 Supply exact source/history/price snapshots, `as_of_month`, frozen 30-day `policy`,
 `event_ids`, a nonempty ascending subset of `horizons` from `[1,3,5]`
