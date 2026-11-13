@@ -11,8 +11,8 @@ The HMO dictionary has 42 numeric columns, HMOS adds 5 season columns (47). Reus
 | Requested | Already in the panel | New column |
 | --- | --- | --- |
 | G1 tail history | `n_prior`, `mean_prior_abs_move`, `ema{2,4,8,12}_prior_abs_move` (mean and EMAs only; no spread or tail statistic) | all 8 |
-| G2 IV changes | levels `implied_move`, `iv10`, `iv30`, `exern_iv30`, `rvol30`. The legacy `daily_state_lookup` makes `_d5/_d10` differences but the dictionary does not carry them | all 8 (5 lagged ratios; `iv10/iv30`, `iv30/rvol30`, `exern_iv30/iv30` are same-row ratios of existing columns, materialised so the model input has one source) |
-| G3 own volatility | `ret5/10/20`, `rvol30` (ORATS) | 5: `own_rvol5/10/60`, `own_absret1`, `own_rvol5_60`. `ret*` and `rvol30` are not repeated; the `own_` prefix keeps them apart from vendor `rvol30` and `spy_vol*` |
+| G2 IV changes | levels `implied_move`, `iv10`, `iv30`, `exern_iv30`, `rvol30`. The legacy `daily_state_lookup` makes `_d1/_d5/_d10` differences (not ratios) but the dictionary does not carry them | all 8 (5 lagged ratios; `iv10/iv30`, `iv30/rvol30`, `exern_iv30/iv30` are same-row ratios of existing columns, materialised so the model input has one source) |
+| G3 own volatility | `ret5/10/20` (from `price_history` via `runup_math`), `rvol30` (ORATS, in `daily_market`) | 5: `own_rvol5/10/60`, `own_absret1`, `own_rvol5_60`. `ret*` and `rvol30` are not repeated; the `own_` prefix keeps them apart from vendor `rvol30` and `spy_vol*` |
 | G4 calendar/crowding | none | 4: `cal_amc`, `cal_weekday`, `cal_month`, `cal_days_since_prior` (the same-date count is dropped, below) |
 
 25 new columns; HMOSX has 72 numeric columns plus `has_implied_quote`. Names are final unless review changes them.
@@ -53,17 +53,19 @@ Candidate count today is `len(feature_sets) * G + (1 if HMO in sets)`, where `G`
 
 ## 5. Split list (code lines are non-test added lines, estimates +/-30%)
 
-| # | PR | Est. code | Notes |
-| --- | --- | --- | --- |
-| 1 | `tail_history` pure computation (G1) | 70 | `engine/v2/features`, source-free, like `season_heat` |
-| 2 | `iv_dynamics` pure computation (G2) | 80 | lag and staleness rule |
-| 3 | `own_vol` pure computation (G3) | 75 | |
-| 4 | `calendar_features` pure computation (G4) | 45 | |
-| 5 | `HMOSX` dictionary, contract v5, `admit_columns` | 155 | 30 base + 40/40/25/20 per group |
-| 6a | Builder wiring for G1 + G4 (history side) | 85 | in `_rows`; null-count log; lineage |
-| 6b | Builder wiring for G2 + G3 (market side) | 130 | passes `surface`/`prices`; lineage |
-| 7 | Request v11, `HMOSX` binding, registration validator, `size_search_binding` | 80 | candidate-count tests |
-| 8 | Contract promotion in `ARCHITECTURE.md` (doc) | ~55 doc lines | last, like #2390 |
+| # | PR | Est. code | Est. test | Est. doc | Notes |
+| --- | --- | --- | --- | --- | --- |
+| 1 | `tail_history` pure computation (G1) | 70 | 90 | 0 | `engine/v2/features`, source-free, like `season_heat` |
+| 2 | `iv_dynamics` pure computation (G2) | 80 | 100 | 0 | lag and staleness rule |
+| 3 | `own_vol` pure computation (G3) | 75 | 90 | 0 | |
+| 4 | `calendar_features` pure computation (G4) | 45 | 50 | 0 | |
+| 5 | `HMOSX` dictionary, contract v5, `admit_columns` | 155 | 100 | 0 | 30 base + 40/40/25/20 per group |
+| 6a | Builder wiring for G1 + G4 (history side) | 85 | 90 | 0 | in `_rows`; null-count log; lineage |
+| 6b | Builder wiring for G2 + G3 (market side) | 130 | 110 | 0 | passes `surface`/`prices`; lineage |
+| 7 | Request v11, `HMOSX` binding, registration validator, `size_search_binding` | 80 | 120 | 0 | candidate-count tests |
+| 8 | Contract promotion in `ARCHITECTURE.md` (doc) | 0 | 0 | ~55 | last, like #2390; run the doc-budget check first |
+
+Totals: about 720 code, 750 test, 55 doc lines. Tests do not count against the size limit; every slice is under the ~300 cap and only slice 5 is above the ~150 target.
 
 **Total about 720 non-test code lines in 8 code PRs, plus one doc PR.** Slices are sequential (one open PR per owner); 1-4 are independent of each other. No heavy job runs in any slice; data runs wait for separate authorization.
 
