@@ -920,7 +920,7 @@ def test_panel_rows_consume_canonical_history_order_across_prefix_tickers(monkey
     monkeypatch.setattr(builder.daily, "_daily", lambda *args: {
         "quote_status": "missing", "anchor": None,
         "values": {name: None for name in builder.daily._DAILY}})
-    monkeypatch.setattr(builder, "_block", lambda values, anchors: {})
+    monkeypatch.setattr(builder, "_block", lambda values, anchors, **extra: {})
     monkeypatch.setattr(sources, "price_dates", lambda *args: [{"date": "2024-01-01"}])
 
     repository = SimpleNamespace(table_contract=lambda *args: object())
