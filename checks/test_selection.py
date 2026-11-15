@@ -13,7 +13,7 @@ V2, TESTS = "engine/v2/", "tests/v2/"
 INTEGRATION = TESTS + "integration/"
 META_TESTS = (
     "tests/test_import_layers.py", "tests/test_layer_map.py", "tests/test_repo_hygiene.py",
-    "tests/test_architecture_docs.py", "tests/test_architecture_doc_budgets.py",
+    "tests/test_architecture_docs.py", INTEGRATION + "test_architecture_doc_budgets.py",
     "tests/test_code_budgets.py", INTEGRATION + "test_test_selection.py",
 )
 _FULL = ("checks/", "tools/", "ui/", ".github/")

@@ -6,6 +6,7 @@ did nothing.
 """
 from __future__ import annotations
 # land: always-run
+# packages: engine.v2.foundation
 
 import os
 import shutil
@@ -15,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 
 from checks import architecture_doc_budgets as adb  # noqa: E402
@@ -39,8 +40,8 @@ def _init_repo(path):
     _git(["config", "user.name", "t"], path)
 
 
-def _lines(n):
-    return ("x\n" * n).encode()
+def _words(n):
+    return ("w " * n).encode()
 
 
 # --------------------------------------------------------------------------
@@ -49,67 +50,67 @@ def _lines(n):
 
 
 def test_growth_within_limit_passes():
-    base = {"a/ARCHITECTURE.md": _lines(500)}
-    new = {"a/ARCHITECTURE.md": _lines(500 + adb.MAX_PR_GROWTH)}
+    base = {"a/ARCHITECTURE.md": _words(500)}
+    new = {"a/ARCHITECTURE.md": _words(500 + adb.MAX_PR_GROWTH)}
     assert adb.check_files(base, new).ok
 
 
 def test_growth_over_limit_fails():
-    base = {"a/ARCHITECTURE.md": _lines(500)}
-    new = {"a/ARCHITECTURE.md": _lines(500 + adb.MAX_PR_GROWTH + 1)}
+    base = {"a/ARCHITECTURE.md": _words(500)}
+    new = {"a/ARCHITECTURE.md": _words(500 + adb.MAX_PR_GROWTH + 1)}
     report = adb.check_files(base, new)
     assert not report.ok
     assert report.violations[0].reason == "growth"
 
 
 def test_growth_message_says_split_or_move_to_pr_body():
-    base = {"a/ARCHITECTURE.md": _lines(10)}
-    new = {"a/ARCHITECTURE.md": _lines(10 + adb.MAX_PR_GROWTH + 5)}
+    base = {"a/ARCHITECTURE.md": _words(10)}
+    new = {"a/ARCHITECTURE.md": _words(10 + adb.MAX_PR_GROWTH + 5)}
     v = adb.check_files(base, new).violations[0]
     assert "split it or move detail to the PR body" in str(v)
 
 
 def test_doc_at_ceiling_cannot_grow_at_all():
-    base = {"a/ARCHITECTURE.md": _lines(adb.CEILING)}
-    new = {"a/ARCHITECTURE.md": _lines(adb.CEILING + 1)}
+    base = {"a/ARCHITECTURE.md": _words(adb.CEILING)}
+    new = {"a/ARCHITECTURE.md": _words(adb.CEILING + 1)}
     report = adb.check_files(base, new)
     assert not report.ok
     assert report.violations[0].reason == "ceiling"
 
 
 def test_ceiling_message_says_needs_a_compression_pr():
-    base = {"a/ARCHITECTURE.md": _lines(adb.CEILING + 200)}
-    new = {"a/ARCHITECTURE.md": _lines(adb.CEILING + 201)}
+    base = {"a/ARCHITECTURE.md": _words(adb.CEILING + 200)}
+    new = {"a/ARCHITECTURE.md": _words(adb.CEILING + 201)}
     v = adb.check_files(base, new).violations[0]
     assert "doc at ceiling, needs a compression PR" in str(v)
 
 
 def test_doc_over_ceiling_can_shrink():
-    base = {"a/ARCHITECTURE.md": _lines(adb.CEILING + 500)}
-    new = {"a/ARCHITECTURE.md": _lines(adb.CEILING + 400)}
+    base = {"a/ARCHITECTURE.md": _words(adb.CEILING + 500)}
+    new = {"a/ARCHITECTURE.md": _words(adb.CEILING + 400)}
     assert adb.check_files(base, new).ok
 
 
 def test_doc_over_ceiling_unchanged_passes():
-    base = {"a/ARCHITECTURE.md": _lines(adb.CEILING + 50)}
-    new = {"a/ARCHITECTURE.md": _lines(adb.CEILING + 50)}
+    base = {"a/ARCHITECTURE.md": _words(adb.CEILING + 50)}
+    new = {"a/ARCHITECTURE.md": _words(adb.CEILING + 50)}
     assert adb.check_files(base, new).ok
 
 
 def test_new_doc_within_limit_passes():
-    new = {"a/ARCHITECTURE.md": _lines(adb.MAX_PR_GROWTH)}
+    new = {"a/ARCHITECTURE.md": _words(adb.MAX_PR_GROWTH)}
     assert adb.check_files({}, new).ok
 
 
 def test_new_doc_over_limit_fails():
-    new = {"a/ARCHITECTURE.md": _lines(adb.MAX_PR_GROWTH + 1)}
+    new = {"a/ARCHITECTURE.md": _words(adb.MAX_PR_GROWTH + 1)}
     report = adb.check_files({}, new)
     assert not report.ok
-    assert report.violations[0].base_lines == 0
+    assert report.violations[0].base_words == 0
 
 
 def test_removed_doc_is_not_scored():
-    base = {"a/ARCHITECTURE.md": _lines(2000)}
+    base = {"a/ARCHITECTURE.md": _words(2000)}
     new = {}
     report = adb.check_files(base, new)
     assert report.ok
@@ -117,7 +118,7 @@ def test_removed_doc_is_not_scored():
 
 
 def test_non_architecture_markdown_is_ignored():
-    new = {"a/README.md": _lines(5000)}
+    new = {"a/README.md": _words(5000)}
     report = adb.check_files({}, new)
     assert report.ok
     assert report.docs == 0
@@ -128,9 +129,79 @@ def test_growth_can_cross_the_ceiling_within_one_pr_allowance():
     A doc just under the ceiling may cross it in one PR if the crossing is
     itself within MAX_PR_GROWTH -- the freeze only starts applying to the
     NEXT PR, once the doc's base size is at/over CEILING."""
-    base = {"a/ARCHITECTURE.md": _lines(adb.CEILING - 10)}
-    new = {"a/ARCHITECTURE.md": _lines(adb.CEILING - 10 + adb.MAX_PR_GROWTH)}
+    base = {"a/ARCHITECTURE.md": _words(adb.CEILING - 10)}
+    new = {"a/ARCHITECTURE.md": _words(adb.CEILING - 10 + adb.MAX_PR_GROWTH)}
     assert adb.check_files(base, new).ok
+
+
+def test_reflow_only_change_measures_equal():
+    wrapped = ("alpha beta gamma\ndelta epsilon\n" * 40).encode()
+    joined = ("alpha beta gamma delta epsilon " * 40).encode()
+    assert adb._size(wrapped) == adb._size(joined)
+
+    path = "a/ARCHITECTURE.md"
+    one_per_line = ("w\n" * adb.CEILING).encode()
+    one_line = ("w " * adb.CEILING).encode()
+    assert adb._size(one_per_line) == adb._size(one_line)
+    assert adb.check_files({path: one_per_line}, {path: one_line}).ok
+    assert adb.check_files({path: one_line}, {path: one_per_line}).ok
+
+
+def test_real_deletion_shrinks():
+    assert adb._size(_words(100)) < adb._size(_words(200))
+
+    path = "a/ARCHITECTURE.md"
+    base = {path: _words(adb.CEILING + 300)}
+    new = {path: _words(adb.CEILING)}
+    assert adb.check_files(base, new).ok
+    assert adb._size(new[path]) < adb._size(base[path])
+
+
+def test_indentation_and_blank_lines_do_not_count():
+    assert adb._size(b"a b\n\n\n    c\n") == adb._size(b"a b c")
+
+
+def test_at_ceiling_growth_by_one_word_fails_and_shrink_passes():
+    path = "a/ARCHITECTURE.md"
+    base = {path: _words(adb.CEILING)}
+    grown = adb.check_files(base, {path: _words(adb.CEILING + 1)})
+    assert len(grown.violations) == 1
+    assert grown.violations[0].reason == "ceiling"
+    assert adb.check_files(base, {path: _words(adb.CEILING - 1)}).ok
+
+
+def test_growth_limit_is_words_not_lines():
+    path = "a/ARCHITECTURE.md"
+    base = {path: _words(100)}
+    over = {path: _words(100) + _words(adb.MAX_PR_GROWTH + 1)}
+    assert adb.check_files(base, over).violations[0].reason == "growth"
+    at = {path: _words(100) + _words(adb.MAX_PR_GROWTH)}
+    assert adb.check_files(base, at).ok
+
+
+def test_policy_constants_are_pinned():
+    assert adb.CEILING == 10_500
+    assert adb.MAX_PR_GROWTH == 500
+
+
+def test_oversized_blob_is_refused():
+    with pytest.raises(ValueError):
+        adb._size(b"w" * (adb.MAX_DOC_BYTES + 1))
+    assert adb._size(b"w" * adb.MAX_DOC_BYTES) == 1
+    assert adb.MAX_DOC_BYTES == 8 * 1024 * 1024
+
+
+def test_violation_messages_report_words():
+    base = {"a/ARCHITECTURE.md": _words(adb.CEILING)}
+    new = {"a/ARCHITECTURE.md": _words(adb.CEILING + 1)}
+    v = adb.check_files(base, new).violations[0]
+    assert "words" in str(v)
+    assert str(adb.CEILING) in str(v)
+
+    base = {"a/ARCHITECTURE.md": _words(10)}
+    new = {"a/ARCHITECTURE.md": _words(10 + adb.MAX_PR_GROWTH + 1)}
+    v = adb.check_files(base, new).violations[0]
+    assert f"PR adds {adb.MAX_PR_GROWTH + 1}>{adb.MAX_PR_GROWTH} words" in str(v)
 
 
 # --------------------------------------------------------------------------
@@ -229,14 +300,14 @@ def test_unreadable_architecture_doc_raises_rather_than_scoring_empty(tmp_path, 
     _init_repo(repo)
     (repo / "ARCHITECTURE.md").write_text("x\n" * 100)
     _git(["add", "ARCHITECTURE.md"], repo)
-    real = Path.read_bytes
+    real = Path.open
 
-    def read_bytes(self):
+    def open_(self, *a, **k):
         if self.name == "ARCHITECTURE.md":
             raise PermissionError(13, "Permission denied", str(self))
-        return real(self)
+        return real(self, *a, **k)
 
-    monkeypatch.setattr(Path, "read_bytes", read_bytes)
+    monkeypatch.setattr(Path, "open", open_)
     with pytest.raises(PermissionError):
         adb._sources(repo, use_worktree=True, base_ref="HEAD")
 
@@ -260,6 +331,32 @@ def test_ambient_git_dir_does_not_silently_empty_the_source_list(tmp_path, monke
     # may not exist locally in a shallow CI checkout.
     base, new = adb._sources(ROOT, use_worktree=True, base_ref="HEAD")
     assert "ARCHITECTURE.md" in new
+
+
+def test_oversized_worktree_doc_is_refused_while_reading(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    monkeypatch.setattr(adb, "MAX_DOC_BYTES", 100)
+    doc = repo / "ARCHITECTURE.md"
+    doc.write_bytes(b"x" * 101)
+    with pytest.raises(ValueError):
+        adb._read_worktree_strict(repo, "ARCHITECTURE.md")
+    doc.write_bytes(b"x" * 100)
+    assert adb._read_worktree_strict(repo, "ARCHITECTURE.md") == b"x" * 100
+
+
+def test_oversized_staged_and_base_doc_is_refused_while_reading(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    doc = repo / "ARCHITECTURE.md"
+    doc.write_bytes(b"x" * 101)
+    _git(["add", "ARCHITECTURE.md"], repo)
+    _git(["commit", "-q", "-m", "init"], repo)
+    monkeypatch.setattr(adb, "MAX_DOC_BYTES", 100)
+    with pytest.raises(ValueError):
+        adb._read_staged_strict(repo, "ARCHITECTURE.md")
+    with pytest.raises(ValueError):
+        adb._read_base(repo, "ARCHITECTURE.md", "HEAD")
 
 
 def test_git_index_file_is_honored_not_stripped(tmp_path, monkeypatch):

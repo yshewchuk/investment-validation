@@ -2,26 +2,40 @@
 """A per-PR growth ceiling for every ``ARCHITECTURE.md``.
 
 User decision 2026-09-29 (replaces the 2026-09-28 fixed-budget/EXEMPT
-model): below CEILING lines, a PR may add at most MAX_PR_GROWTH net lines to
-any one ARCHITECTURE.md, measured against that doc's size on the base
+model): below CEILING words, a PR may add at most MAX_PR_GROWTH net words
+to any one ARCHITECTURE.md, measured against that doc's size on the base
 branch -- a doc creeps up over many small PRs, never jumps in one. At or
 over CEILING, a PR may shrink the doc but not grow it at all: it needs a
 dedicated compression PR, or a code refactor, before it can take more
 content. An owner is never responsible for trimming a doc's unrelated
 sections to make room for their own change (AGENTS.md "Small PRs").
 
+Measure: words (whitespace-split tokens), not lines, because a line count
+is satisfiable by reflowing (#2439 joined hard-wrapped paragraphs, 1007 ->
+486 lines, same bytes, and passed). Words are unchanged by any
+whitespace/layout change, so a reflow neither shrinks nor grows a doc,
+and a real deletion always shrinks it.
+
+Calibration (user decision 2026-11-15, option A): the old limits were
+1000 lines and +50 lines. Rule: CEILING = the median word count of the
+tracked ARCHITECTURE.md docs that sat within 5% of the old 1000-line
+ceiling on 2026-11-15 (5 docs: 9,248; 9,888; 10,454; 15,417; 23,580 words
+-> median 10,454, rounded to the nearest 500 = 10,500); MAX_PR_GROWTH =
+CEILING / 20 (the old 50/1000 ratio) = 525, rounded down to 500. Never
+tuned to a particular PR.
+
 "The PR's base" is the base branch's current tip (``origin/<branch>``), not
 a true merge-base: CI's checkout is shallow and lacks the history a real
 merge-base needs, and the tip is the fallback the user's rule names. This
 can over/undercount a PR's own growth by whatever the base moved meanwhile;
 see ``_resolve_base_ref``, which refreshes a missing local ref rather than
-silently reading 0 lines.
+silently reading 0 words.
 
 Reads every tracked ARCHITECTURE.md's staged content by default (what would
 actually be committed); ``--all`` reads worktree content instead. Any
 relevant read failing raises -- a check that can silently pass on a read
 error is not a check -- except a doc missing from the base branch, which is
-a doc new in this PR and scores 0 base lines.
+a doc new in this PR and scores 0 base words.
 
 Usage::
 
@@ -70,34 +84,37 @@ def _clean_git_process_env():
                 os.environ[k] = v
 
 
-__all__ = ["CEILING", "MAX_PR_GROWTH", "Violation", "Report", "check_files", "main"]
+__all__ = ["CEILING", "MAX_PR_GROWTH", "MAX_DOC_BYTES", "Violation", "Report", "check_files", "main"]
 
-#: A doc at or over this many lines may only shrink; see the module docstring.
-CEILING = 1000
+#: A doc at or over this many words may only shrink; see the module docstring.
+CEILING = 10_500
 
-#: Net lines any one PR may add to a doc still under CEILING, measured
+#: Net words any one PR may add to a doc still under CEILING, measured
 #: against that doc's size on the base branch.
-MAX_PR_GROWTH = 50
+MAX_PR_GROWTH = 500
+
+#: Largest ARCHITECTURE.md (bytes) the check will tokenise; a bigger blob is refused, never silently scored.
+MAX_DOC_BYTES = 8 * 1024 * 1024
 
 
 @dataclass(frozen=True)
 class Violation:
     path: str
-    base_lines: int
-    new_lines: int
+    base_words: int
+    new_words: int
     reason: str  # "ceiling" or "growth"
 
     @property
     def growth(self) -> int:
-        return self.new_lines - self.base_lines
+        return self.new_words - self.base_words
 
     def __str__(self) -> str:  # pragma: no cover - formatting only
         if self.reason == "ceiling":
-            return (f"  {self.path}: {self.base_lines} lines, at/over the "
-                     f"{CEILING}-line ceiling and grew to {self.new_lines} "
+            return (f"  {self.path}: {self.base_words} words, at/over the "
+                     f"{CEILING}-word ceiling and grew to {self.new_words} "
                      f"-- doc at ceiling, needs a compression PR")
-        return (f"  {self.path}: {self.base_lines} -> {self.new_lines} lines "
-                 f"-- PR adds {self.growth}>{MAX_PR_GROWTH} lines, split it "
+        return (f"  {self.path}: {self.base_words} -> {self.new_words} words "
+                 f"-- PR adds {self.growth}>{MAX_PR_GROWTH} words, split it "
                  f"or move detail to the PR body")
 
 
@@ -115,22 +132,28 @@ def _is_architecture_doc(path: str) -> bool:
     return path == "ARCHITECTURE.md" or path.endswith("/ARCHITECTURE.md")
 
 
+def _size(blob: bytes) -> int:
+    if len(blob) > MAX_DOC_BYTES:
+        raise ValueError(f"ARCHITECTURE.md blob of {len(blob)} bytes exceeds MAX_DOC_BYTES={MAX_DOC_BYTES}")
+    return len(blob.decode("utf-8", "replace").split())
+
+
 def check_files(base: dict[str, bytes], new: dict[str, bytes]) -> Report:
     """The pure core the CLI and the tests both drive. ``base``/``new`` map
     path -> content; a path absent from ``base`` is new in this PR (0 base
-    lines), one absent from ``new`` was removed (not scored)."""
+    words), one absent from ``new`` was removed (not scored)."""
     report = Report()
     for path in sorted(p for p in new if _is_architecture_doc(p)):
-        new_lines = len(new[path].splitlines())
+        new_words = _size(new[path])
         base_blob = base.get(path)
-        base_lines = len(base_blob.splitlines()) if base_blob is not None else 0
+        base_words = _size(base_blob) if base_blob is not None else 0
         report.docs += 1
-        if base_lines >= CEILING:
-            if new_lines > base_lines:
-                report.violations.append(Violation(path, base_lines, new_lines, "ceiling"))
+        if base_words >= CEILING:
+            if new_words > base_words:
+                report.violations.append(Violation(path, base_words, new_words, "ceiling"))
             continue
-        if new_lines - base_lines > MAX_PR_GROWTH:
-            report.violations.append(Violation(path, base_lines, new_lines, "growth"))
+        if new_words - base_words > MAX_PR_GROWTH:
+            report.violations.append(Violation(path, base_words, new_words, "growth"))
     return report
 
 
@@ -139,17 +162,38 @@ def check_files(base: dict[str, bytes], new: dict[str, bytes]) -> Report:
 # --------------------------------------------------------------------------
 
 
+def _run_bounded(cmd: list[str], env: dict[str, str]) -> subprocess.CompletedProcess:
+    """``subprocess.run`` capturing output, but refuses (ValueError) stdout
+    over MAX_DOC_BYTES while reading it, so an oversized blob is never fully
+    buffered. stderr is only read after stdout is drained (git errors are tiny)."""
+    with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env) as proc:
+        out = proc.stdout.read(MAX_DOC_BYTES + 1)
+        if len(out) > MAX_DOC_BYTES:
+            proc.kill()
+            raise ValueError(f"{cmd[-1]} exceeds MAX_DOC_BYTES={MAX_DOC_BYTES}")
+        err = proc.stderr.read()
+        rc = proc.wait()
+    return subprocess.CompletedProcess(cmd, rc, out, err)
+
+
 def _read_worktree_strict(root: Path, rel: str) -> bytes:
-    """Raises OSError on a read failure -- never scored as an empty doc."""
-    return (root / rel).read_bytes()
+    """Raises OSError on a read failure, ValueError over MAX_DOC_BYTES --
+    never scored as an empty doc."""
+    with (root / rel).open("rb") as f:
+        data = f.read(MAX_DOC_BYTES + 1)
+    if len(data) > MAX_DOC_BYTES:
+        raise ValueError(f"{rel} exceeds MAX_DOC_BYTES={MAX_DOC_BYTES}")
+    return data
 
 
 def _read_staged_strict(root: Path, rel: str) -> bytes:
-    """Raises CalledProcessError if ``rel`` can't be read from the index."""
-    proc = subprocess.run(
-        ["git", "-C", str(root), "show", f":{rel}"],
-        capture_output=True, check=True, env=_clean_git_env(),
+    """Raises CalledProcessError if ``rel`` can't be read from the index,
+    ValueError over MAX_DOC_BYTES."""
+    proc = _run_bounded(
+        ["git", "-C", str(root), "show", f":{rel}"], _clean_git_env(),
     )
+    if proc.returncode:
+        raise subprocess.CalledProcessError(proc.returncode, proc.args, proc.stdout, proc.stderr)
     return proc.stdout
 
 
@@ -161,11 +205,11 @@ def _read_base(root: Path, rel: str, base_ref: str) -> bytes | None:
     exist there (new in this PR) -- detected from git's English stderr text,
     so the subprocess is forced to the C locale regardless of the caller's
     LANG/LC_ALL. Any other git failure (a bad ref, a
-    corrupt object) raises rather than reading as 0 lines, which would
+    corrupt object) raises rather than reading as 0 words, which would
     silently exempt a doc from the growth check."""
-    proc = subprocess.run(
+    proc = _run_bounded(
         ["git", "-C", str(root), "show", f"{base_ref}:{rel}"],
-        capture_output=True, env={**_clean_git_env(), "LC_ALL": "C"},
+        {**_clean_git_env(), "LC_ALL": "C"},
     )
     if proc.returncode == 0:
         return proc.stdout
@@ -241,7 +285,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if not args.quiet:
         print(f"ARCHITECTURE.md growth: {report.docs} doc(s), "
-              f"ceiling {CEILING} lines, {MAX_PR_GROWTH} net lines/PR below it")
+              f"ceiling {CEILING} words, {MAX_PR_GROWTH} net words/PR below it")
     if report.ok:
         if not args.quiet:
             print("ARCHITECTURE DOC GROWTH OK")

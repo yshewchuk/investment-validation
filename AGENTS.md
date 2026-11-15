@@ -27,7 +27,7 @@
 - Size limits count added lines only: code PRs, target about 150 non-test code lines, limit about 300 added non-test code lines (user 2026-10-28; PRs opened before 2026-10-28 keep the old ~400 limit) and 120 doc lines; design PRs, about 300 doc lines and a split list. Deleted lines do not count; a category with zero or negative net change is never size-blocked. A PR within limits at its first reviewed head is not size-blocked when the overage is review- or gate-found bug fixes. For scope growth over a limit mid-work, stop and split (add, then wire, then remove). Split at design time into slices of about 150 code lines.
 - A comment from the shared GitHub login that starts with `@pr-owner` force-wakes that PR's owner, bypassing the wake gap and hourly cap. This is the user's lever; owners never start their own comments with it.
 - Owner tooling (watcher, gate, owner scripts and metrics) lives outside this repository.
-- Before the first push of a PR that edits an `ARCHITECTURE.md`, run `python3 tools/oc_check.py tests/test_architecture_doc_budgets.py`.
+- Before the first push of a PR that edits an `ARCHITECTURE.md`, run `python3 tools/oc_check.py tests/v2/integration/test_architecture_doc_budgets.py`.
 - To update a PR description, write a Markdown file and run `gh pr edit <n> --body-file <file>`. Do not use an inline script that writes files.
 - New tests go in `tests/v2/<package>/` (package names from `checks/layer_map.py`) or `tests/v2/integration/`, never the root `tests/` folder. A PR that edits a root-level test should move it and lower `checks/test_layout_budget.txt` by exactly the number of files moved. Before pushing, run `python3 checks/test_layout_budget.py --base-ref origin/main`; PR CI enforces it.
 
