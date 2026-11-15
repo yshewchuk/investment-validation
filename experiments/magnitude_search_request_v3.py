@@ -48,6 +48,7 @@ _MLP_PROFILES_V8 = _MLP_PROFILES_V7 | {
     "chrono15_relu32_l2_0p01", "chrono15_relu32_l2_1",
     "chrono15_relu64x32_l2_0p01", "chrono15_relu64x32_l2_1",
     "chrono10_relu64x32_l2_0p01", "chrono10_relu64x32_l2_1"}
+_MLP_PROFILES_V13 = _MLP_PROFILES_V8 | {"chrono15_relu128x64_l2_1", "chrono15_relu128x64x32_l2_1"}
 
 
 _SELECTION_METRICS = {"rmse": 0.6, "mae": 0.3, "large_move_underprediction": 0.1}
@@ -129,11 +130,15 @@ def _space(request):
     families = (_FAMILIES_V6 if allows_neural(version_number)
                 else _FAMILIES_V5 if allows_size_family(version_number)
                 else _FAMILIES_V4 if allows_hgb_axes(version_number) else _FAMILIES)
-    v2._require((type(space) is dict and set(space) == set(families)) if version_number >= 9
+    v2._require((type(space) is dict and set(space) in (set(families), set(families) - {"ridge"}))
+                if version_number >= 13 else
+                (type(space) is dict and set(space) == set(families)) if version_number >= 9
                 else v2._shape(space, families),
                 "stage-2 requires the closed family grid")
     canonical = {}
     for family, axes in families.items():
+        if family not in space:
+            continue
         supplied = space[family]
         if version_number >= 9 and family == "hgb":
             declared = set(supplied) if type(supplied) is dict else None
@@ -163,7 +168,8 @@ def _space(request):
                         "stage-2 grid axis length must be between 1 and 32")
             if family == "mlp":
                 parsed_version = request_version(version)
-                allowed = (_MLP_PROFILES_V8 if uses_chrono_neural_profiles(parsed_version)
+                allowed = (_MLP_PROFILES_V13 if parsed_version >= 13
+                           else _MLP_PROFILES_V8 if uses_chrono_neural_profiles(parsed_version)
                            else _MLP_PROFILES_V7 if uses_extended_neural_profiles(parsed_version)
                            else _MLP_PROFILES)
                 v2._require(all(type(value) is str and value in allowed

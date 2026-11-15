@@ -21,6 +21,8 @@ _PROFILES = {
     "chrono15_relu32_l2_1": ([32], 1, "chrono15", "epoch_budget_success_no_retry"),
     "chrono15_relu64x32_l2_0p01": ([64, 32], 0.01, "chrono15", "epoch_budget_success_no_retry"),
     "chrono15_relu64x32_l2_1": ([64, 32], 1, "chrono15", "epoch_budget_success_no_retry"),
+    "chrono15_relu128x64_l2_1": ([128, 64], 1, "chrono15", "epoch_budget_success_no_retry"),
+    "chrono15_relu128x64x32_l2_1": ([128, 64, 32], 1, "chrono15", "epoch_budget_success_no_retry"),
     "chrono10_relu64x32_l2_0p01": ([64, 32], 0.01, "chrono10", "epoch_budget_success_no_retry"),
     "chrono10_relu64x32_l2_1": ([64, 32], 1, "chrono10", "epoch_budget_success_no_retry"),
 }
