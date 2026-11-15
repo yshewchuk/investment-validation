@@ -143,7 +143,7 @@ def _result(started, inputs, inputs_id, execution, forecasts, validation, fold, 
         "plan_id": started["plan_id"], "outer_year": fold["year"], "candidate": started["candidate"],
         "selection_id": started["selection_id"], "inputs_id": inputs_id,
         "execution_id": content_hash(execution), "validation_id": content_hash(validation),
-        "training_inputs": inputs["training_inputs"], "evaluation_inputs": validation["evaluation_inputs"],
+        "evaluation_inputs": validation["evaluation_inputs"],
         "fit_attempt_count": execution["fit_attempt_count"], "event_count": len(targets),
         "forecast_count": len(predictions), "predictions": predictions, "metrics": magnitude_metrics(predictions, target=target),
         "per_horizon": [{"horizon_sessions": horizon, **magnitude_metrics([

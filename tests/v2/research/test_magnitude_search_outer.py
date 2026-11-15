@@ -181,7 +181,7 @@ def assert_fold_oracle(case, result, year):
         "outer_id": content_hash([case.plan["plan_id"], year]), "plan_id": case.plan["plan_id"],
         "outer_year": year, "candidate": candidate, "selection_id": content_hash(case.selected),
         "inputs_id": expected_inputs_id(inputs), "execution_id": content_hash(execution),
-        "validation_id": content_hash(validation), "training_inputs": inputs["training_inputs"],
+        "validation_id": content_hash(validation),
         "evaluation_inputs": validation["evaluation_inputs"], "fit_attempt_count": 3,
         "event_count": {"2024": 8, "2025": 2}[year], "forecast_count": {"2024": 24, "2025": 6}[year],
         "predictions": expected_predictions, "metrics": independent_metrics(expected_predictions),
@@ -192,6 +192,7 @@ def assert_fold_oracle(case, result, year):
         "holdout_results": HOLDOUTS}
     assert result == {**expected, "result_id": content_hash({key: value for key, value in result.items()
                                                           if key != "result_id"})}
+    assert "training_inputs" not in result
     return expected_predictions
 
 
@@ -345,6 +346,19 @@ def test_real_outer_selected_only_forecasts_precede_labels_and_replay(outer_case
     assert case.conn.total_changes == before
     with outer_problem("EXPERIMENT_IDENTITY_CONFLICT", CONFLICT):
         run(case, limits={**LIMITS, "cpu_seconds": 31})
+
+
+def test_replay_refuses_when_the_referenced_inputs_manifest_is_missing_or_mismatched(outer_case, monkeypatch):
+    case = outer_case
+    run(case)
+    before = case.conn.total_changes
+    forbid_work(monkeypatch)
+    def missing(*args, **kwargs):
+        raise fail("EXPERIMENT_IDENTITY_CONFLICT", "x")
+    monkeypatch.setattr(outer, "load_inputs", missing)
+    with outer_problem("EXPERIMENT_IDENTITY_CONFLICT", CONFLICT):
+        run(case)
+    assert case.conn.total_changes == before
 
 
 def test_collect_requires_all_folds_and_pools_errors_without_outer_selection(outer_case, monkeypatch):
