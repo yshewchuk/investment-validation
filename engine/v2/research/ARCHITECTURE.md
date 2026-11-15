@@ -386,6 +386,21 @@ refuses a derived set with `CONTRACT_MISMATCH` (a derived set is a
 model-feature recipe, never a stored-panel recipe). The recipe only declares
 columns: it reads no data, persists nothing and holds no retained state.
 
+**Request `v12` and the derived-set binding (the fit path does not use
+`HMOSXL`/`HMOSXLP` yet):** `v12` requires the `HMOSXLP` dictionary hash (the
+widest superset, as `HMOSX` was for `v11`; any other hash refuses
+`INVALID_EXPERIMENT_SPEC`) and admits feature sets
+`H/HM/HMO/MO-/M/HMOS/HMOSX/HMOSXL/HMOSXLP` in that order; `v11` and earlier
+still require their own hashes and refuse `HMOSXL*` as an unknown set. The
+candidate count is unchanged (set count times `G`, plus one `size_v1_4`
+candidate when `HMO` is among the sets) and the existing 1000-candidate
+ceiling applies to the total, so three arms need `G <= 333`. In
+`size_search_binding` the dictionary-hash check uses the dictionary subset
+(`v12`: `HMOSXLP`), while the stored-panel recipe and read use the stored-panel
+subset (`v12`: `HMOSX`), so the panel read never names derived columns and a
+hash mismatch at binding is `EXPERIMENT_IDENTITY_CONFLICT`. Nothing is read,
+stored or cached by this binding.
+
 The separate `research_eligible_history.v1` table binds exact source/bounds, policy/month/membership versions, history start, a nonempty ascending subset of the canonical 1/3/5 clocks, contributors and producer identity. Exact receipts replay; live/v1 aggregates never substitute. Full canonical metadata establishes protected windows. Once selected target/history population is known, missing required ticker/event bounds refuse `CONTRACT_MISMATCH` before outcomes; unrelated tickers need no bounds. Native bounds precede grouped eligibility/object preflight; null historical bounds are omissions, wrong object binding/isolation remains `HOLDOUT_ACCESS_DENIED`.
 All selection targets, including annual evaluation, require retained eligibility; protected confirmation is not this API. Read only eligible prior outcomes available by each ceiling; preserve native means/EMA/nulls. `eligible_history_table.admit_fields` accepts only the exact research contract/recipe/policy and known H11 fields; live/unknown provenance and unsupported aliases/derivations refuse before feature reads. Implied history remains separate. Limits cap decoded source rows, fragments and physical source bytes after native catalog resolution; output byte caps apply after per-target serialization, not peak allocations. Progress is bounded; failures publish no receipt, unreferenced objects use normal cleanup.
 Publication/schedule-as-known remain unverified reconstruction. Full admitted object bytes are hashed; protected outcomes stay unopened. Refusals: malformed dates `CONTRACT_MISMATCH`; fields/provenance/producer overrides, unisolated outcomes/excluded targets/wrong artifact `HOLDOUT_ACCESS_DENIED`; limits `RESULT_LIMIT_EXCEEDED`; changed receipt `IDENTITY_CONFLICT`. Native errors propagate; no production/provider/fit/final-read authority.

@@ -52,6 +52,13 @@ def _require(condition):
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "qualified SIZE source/fold binding differs")
 
 
+def _dictionary_subset(schema_version):
+    version = request_version(schema_version)
+    return ("HMOSXLP" if version is not None and version >= 12
+            else "HMOSX" if version is not None and version >= 11
+            else "HMOS" if version is not None and version >= 10 else "HMO")
+
+
 def _panel_subset(schema_version):
     version = request_version(schema_version)
     return ("HMOSX" if version is not None and version >= 11
@@ -126,7 +133,7 @@ def prepare(repository, spec, request, panel_request, *, scope, training_start, 
     schedule = compile_request(request, horizons=tuple(h for h in (5, 3, 1) if h in panel_request["horizons"]))
     if request["limits"]["child"]["memory_bytes"] > request["limits"]["parent"]["memory_bytes"]:
         raise fail("INVALID_EXPERIMENT_SPEC", "child memory must not exceed inherited parent limit")
-    _require(request["feature_dictionary_hash"] == recipe(_panel_subset(request["schema_version"]))["dictionary_hash"])
+    _require(request["feature_dictionary_hash"] == recipe(_dictionary_subset(request["schema_version"]))["dictionary_hash"])
     _require(panel_request["feature_snapshot_id"] == request["feature_snapshot_id"]
              and panel_request["history_snapshot"] == request["history_snapshot_id"]
              and set(panel_request["horizons"]) == set(schedule["horizons"]))

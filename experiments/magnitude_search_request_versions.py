@@ -18,6 +18,7 @@ _V2_HASH = v2_recipe("HMO")["dictionary_hash"]
 _V3_HASH = v3_recipe("HMO")["dictionary_hash"]
 _V4_HASH = v3_recipe("HMOS")["dictionary_hash"]
 _V5_HASH = v3_recipe("HMOSX")["dictionary_hash"]
+_V6_HASH = v3_recipe("HMOSXLP")["dictionary_hash"]
 
 
 def _is_default_selector(selector):
@@ -47,14 +48,19 @@ def compile_request(request, *, horizons=(5, 3, 1)):
     modern = version_number is not None and version_number >= 10
     if version_number == 9 and dictionary != _V3_HASH:
         raise fail("INVALID_EXPERIMENT_SPEC", "v9 requires the qualified feature dictionary hash")
-    if version_number is not None and version_number >= 11 and dictionary != _V5_HASH:
+    if version_number == 11 and dictionary != _V5_HASH:
         raise fail("INVALID_EXPERIMENT_SPEC",
                    "v11 requires the HMOSX qualified feature dictionary hash")
+    if version_number is not None and version_number >= 12 and dictionary != _V6_HASH:
+        raise fail("INVALID_EXPERIMENT_SPEC",
+                   "v12 requires the HMOSXLP qualified feature dictionary hash")
     if modern and version_number < 11 and dictionary != _V4_HASH:
         raise fail("INVALID_EXPERIMENT_SPEC",
                    "v10 requires the HMOS qualified feature dictionary hash")
-    accepted = ((_V2_HASH, _V3_HASH, _V4_HASH, _V5_HASH) if version_number is not None
-                and version_number >= 11 else (_V2_HASH, _V3_HASH, _V4_HASH) if modern
+    accepted = ((_V2_HASH, _V3_HASH, _V4_HASH, _V5_HASH, _V6_HASH) if version_number is not None
+                and version_number >= 12
+                else (_V2_HASH, _V3_HASH, _V4_HASH, _V5_HASH) if version_number == 11
+                else (_V2_HASH, _V3_HASH, _V4_HASH) if modern
                 else (_V2_HASH, _V3_HASH))
     if type(dictionary) is not str or dictionary not in accepted:
         return compiler(request, **compile_kwargs)
