@@ -74,7 +74,7 @@ def test_hmos_dictionary_hash_is_registered_and_differs_from_hmo():
     assert recipe("HMOS")["dictionary_hash"] != recipe("HMO")["dictionary_hash"]
 
 
-def test_latest_request_version_is_twelve():
+def test_latest_request_version_is_thirteen():
     assert LATEST == 13
 
 
