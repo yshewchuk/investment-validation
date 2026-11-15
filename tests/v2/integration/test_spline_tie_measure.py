@@ -74,6 +74,56 @@ def test_read_request_parses_a_small_file(tmp_path):
         "price_history_snapshot": "abc"}
 
 
+def _horizon_rows():
+    rows = []
+    index = 0
+    next_positive = 1.0
+    next_continuous = 1000.0
+    for year in range(2010, 2015):
+        for slot in range(5):
+            if slot < 2:
+                tied_value = 0.0
+            else:
+                tied_value = next_positive
+                next_positive += 1.0
+            rows.append({"event_id": f"T{index}_{year}-01-05",
+                         "horizon_sessions": 1, "col": tied_value})
+            index += 1
+            rows.append({"event_id": f"T{index}_{year}-01-05",
+                         "horizon_sessions": 3, "col": next_continuous})
+            next_continuous += 1.0
+            index += 1
+    return rows
+
+
+def test_split_by_horizon_and_measure_keep_horizons_separate():
+    rows = _horizon_rows()
+
+    groups = spline_tie_measure.split_by_horizon(rows, ("col",))
+
+    assert set(groups) == {1, 3}
+    assert groups[1][0].shape == (25, 1) and len(groups[1][1]) == 25
+    assert groups[3][0].shape == (25, 1) and len(groups[3][1]) == 25
+
+    horizon_one = spline_tie_measure.measure(*groups[1], ("col",), (2014,))
+    horizon_three = spline_tie_measure.measure(*groups[3], ("col",), (2014,))
+    assert horizon_one["col"]["tied_years"][6] == [2014]
+    assert horizon_three["col"]["tied_years"][6] == []
+
+    pooled_matrix = np.vstack([groups[1][0], groups[3][0]])
+    pooled_years = np.concatenate([groups[1][1], groups[3][1]])
+    pooled = spline_tie_measure.measure(
+        pooled_matrix, pooled_years, ("col",), (2014,))
+    assert pooled["col"]["tied_years"][6] == []
+
+
+def test_split_by_horizon_rejects_a_row_without_horizon_sessions():
+    rows = [{"event_id": "T0_2010-01-05", "col": 1.0}]
+
+    with pytest.raises(ValueError, match="row without horizon_sessions"):
+        spline_tie_measure.split_by_horizon(rows, ("col",))
+
+
 def test_measure_computes_exact_values_and_excludes_the_test_year():
     values = [0.0] * 5 + [1.0, 2.0, 3.0, 4.0, 5.0]
     matrix = np.array([[v] for v in values] + [[100.0 + i] for i in range(10)])

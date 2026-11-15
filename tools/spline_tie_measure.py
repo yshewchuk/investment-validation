@@ -3,9 +3,12 @@
 The supervisor runs this under ``tools/bounded_run.py``; owners and CI never do.
 It resolves one stored v11 panel, imputes each test year's training rows exactly
 as the recipe does, and reports the largest single-value share and the distinct
-quantile-knot count per ``SPLINE_COLUMNS`` column. Opens the catalog with the
-run's own ``connect(..., must_exist=True)`` (SQLite WAL pragmas); run it on a
-private copy root.
+quantile-knot count per ``SPLINE_COLUMNS`` column. Ties are measured separately
+per horizon: production fits build one training matrix per ``horizon_sessions``,
+so pooling horizons would hide ties. The training window is the event-year
+approximation ``2010..Y-1``, not production membership cutoffs. Opens the
+catalog with the run's own ``connect(..., must_exist=True)`` (SQLite WAL
+pragmas); run it on a private copy root.
 """
 from __future__ import annotations
 
@@ -23,7 +26,7 @@ from sklearn.impute import SimpleImputer
 from engine.v2.models.magnitude_elasticnet_spline_recipe import SPLINE_COLUMNS
 from engine.v2.models.training._magnitude_spline_step import distinct_knots
 
-__all__ = ["year_of", "measure", "format_table", "main"]
+__all__ = ["year_of", "split_by_horizon", "measure", "format_table", "main"]
 
 _MAX_REQUEST_BYTES = 64 * 1024 * 1024
 
@@ -54,6 +57,28 @@ def _rss_mb():
 def year_of(event_id):
     """Event ids end in ``_YYYY-MM-DD``."""
     return int(event_id[-10:-6])
+
+
+def split_by_horizon(rows, columns):
+    """Build one training matrix and year vector per ``horizon_sessions``."""
+    columns = list(columns)
+    grouped = {}
+    for row in rows:
+        if "horizon_sessions" not in row:
+            raise ValueError("row without horizon_sessions")
+        grouped.setdefault(row["horizon_sessions"], []).append(row)
+    groups = {}
+    for horizon, horizon_rows in grouped.items():
+        matrix = np.full((len(horizon_rows), len(columns)), np.nan, dtype=float)
+        years = np.empty(len(horizon_rows), dtype=int)
+        for index, row in enumerate(horizon_rows):
+            years[index] = year_of(row["event_id"])
+            for column_index, name in enumerate(columns):
+                value = row.get(name)
+                if value is not None:
+                    matrix[index, column_index] = value
+        groups[horizon] = (matrix, years)
+    return groups
 
 
 def measure(matrix, years, columns, test_years, first_year=2010, ks=(4, 6, 8)):
@@ -143,23 +168,23 @@ def main(argv=None):
           f"rows={len(rows)} rss={_rss_mb():.1f}MB", file=sys.stderr)
 
     columns = list(SPLINE_COLUMNS)
-    matrix = np.full((len(rows), len(columns)), np.nan, dtype=float)
-    years = np.empty(len(rows), dtype=int)
-    for index, row in enumerate(rows):
-        years[index] = year_of(row["event_id"])
-        for column_index, name in enumerate(columns):
-            value = row.get(name)
-            if value is not None:
-                matrix[index, column_index] = value
+    groups = split_by_horizon(rows, columns)
+    counts = ", ".join(f"{horizon}={len(group[0])}"
+                       for horizon, group in sorted(groups.items()))
+    print(f"[spline-tie] horizons={sorted(groups)} rows={counts}",
+          file=sys.stderr)
 
     started = time.monotonic()
     print("[spline-tie] stage=measure start", file=sys.stderr)
-    result = measure(matrix, years, columns,
-                     range(args.test_years[0], args.test_years[1] + 1),
-                     first_year=args.first_year, ks=tuple(args.ks))
+    for horizon in sorted(groups):
+        matrix, years = groups[horizon]
+        result = measure(matrix, years, columns,
+                         range(args.test_years[0], args.test_years[1] + 1),
+                         first_year=args.first_year, ks=tuple(args.ks))
+        print(f"horizon_sessions={horizon}")
+        print(format_table(result, tuple(args.ks)))
     print(f"[spline-tie] stage=measure done in {time.monotonic() - started:.1f}s "
           f"rss={_rss_mb():.1f}MB", file=sys.stderr)
-    print(format_table(result, tuple(args.ks)))
 
     peak_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
     print(f"[spline-tie] peak RSS {peak_mb:.1f} MB", file=sys.stderr)
