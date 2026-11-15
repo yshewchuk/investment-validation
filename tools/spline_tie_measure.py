@@ -3,13 +3,17 @@
 The supervisor runs this under ``tools/bounded_run.py``; owners and CI never do.
 It resolves one stored v11 panel, imputes each test year's training rows exactly
 as the recipe does, and reports the largest single-value share and the distinct
-quantile-knot count per ``SPLINE_COLUMNS`` column. No store writes.
+quantile-knot count per ``SPLINE_COLUMNS`` column. Opens the catalog with the
+run's own ``connect(..., must_exist=True)`` (SQLite WAL pragmas); run it on a
+private copy root.
 """
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import resource
+import stat
 import sys
 import time
 
@@ -21,6 +25,31 @@ from engine.v2.models.training._magnitude_spline_step import distinct_knots
 
 __all__ = ["year_of", "measure", "format_table", "main"]
 
+_MAX_REQUEST_BYTES = 64 * 1024 * 1024
+
+
+def _read_request(path):
+    """Load the panel request JSON with a bounded read."""
+    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise SystemExit("panel request must be a regular file")
+        if info.st_size > _MAX_REQUEST_BYTES:
+            raise SystemExit("panel request exceeds 64 MiB")
+        with os.fdopen(fd, "rb") as handle:
+            fd = -1
+            payload = handle.read(_MAX_REQUEST_BYTES + 1)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+    return json.loads(payload)
+
+
+def _rss_mb():
+    """Current peak resident set size in MiB."""
+    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+
 
 def year_of(event_id):
     """Event ids end in ``_YYYY-MM-DD``."""
@@ -31,13 +60,16 @@ def measure(matrix, years, columns, test_years, first_year=2010, ks=(4, 6, 8)):
     """Measure imputed training-row ties for each column across the test years."""
     matrix = np.asarray(matrix, dtype=float)
     years = np.asarray(years, dtype=int)
+    test_years = list(test_years)
+    if not test_years:
+        raise ValueError("test_years is empty")
     result = {name: {"max_share": 0.0, "worst_year": None,
                      "min_distinct": {k: None for k in ks},
                      "tied_years": {k: [] for k in ks}} for name in columns}
     for year in test_years:
         training = matrix[(years >= first_year) & (years <= year - 1)]
         if training.size == 0:
-            continue
+            raise ValueError(f"no training rows before {year}")
         imputed = SimpleImputer(
             strategy="median", keep_empty_features=True).fit_transform(training)
         for index, name in enumerate(columns):
@@ -90,6 +122,8 @@ def main(argv=None):
     parser.add_argument("--first-year", type=int, default=2010)
     parser.add_argument("--ks", nargs="+", type=int, default=(4, 6, 8))
     args = parser.parse_args(argv)
+    if args.test_years[0] > args.test_years[1]:
+        parser.error("--test-years LO must be <= HI")
 
     from engine.v2.data.repository import Repository
     from engine.v2.foundation import ArtifactStore
@@ -100,13 +134,12 @@ def main(argv=None):
     print("[spline-tie] stage=read-panel start", file=sys.stderr)
     conn = connect(f"{args.store_root}/catalog.sqlite", must_exist=True)
     repository = Repository(conn, ArtifactStore(args.store_root), pin_snapshots=True)
-    with open(args.panel_request, encoding="utf-8") as handle:
-        request = json.load(handle)
+    request = _read_request(args.panel_request)
     source = repository.resolve(request["price_history_snapshot"])
     panel = read_panel(repository, source, request, columns=list(SPLINE_COLUMNS))
     rows = panel["rows"]
     print(f"[spline-tie] stage=read-panel done in {time.monotonic() - started:.1f}s "
-          f"rows={len(rows)}", file=sys.stderr)
+          f"rows={len(rows)} rss={_rss_mb():.1f}MB", file=sys.stderr)
 
     columns = list(SPLINE_COLUMNS)
     matrix = np.full((len(rows), len(columns)), np.nan, dtype=float)
@@ -123,8 +156,8 @@ def main(argv=None):
     result = measure(matrix, years, columns,
                      range(args.test_years[0], args.test_years[1] + 1),
                      first_year=args.first_year, ks=tuple(args.ks))
-    print(f"[spline-tie] stage=measure done in {time.monotonic() - started:.1f}s",
-          file=sys.stderr)
+    print(f"[spline-tie] stage=measure done in {time.monotonic() - started:.1f}s "
+          f"rss={_rss_mb():.1f}MB", file=sys.stderr)
     print(format_table(result, tuple(args.ks)))
 
     peak_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024

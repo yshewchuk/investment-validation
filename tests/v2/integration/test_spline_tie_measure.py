@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from tools import spline_tie_measure
 
@@ -40,5 +41,34 @@ def test_format_table_lists_only_columns_tied_at_some_k():
 
     assert "continuous" in text and "tied" in text
     final = text.strip().splitlines()[-1]
-    assert final.startswith("tied columns at any k:")
-    assert "tied" in final and "continuous" not in final
+    assert final == "tied columns at any k: tied"
+
+
+def test_measure_rejects_a_test_year_with_no_training_rows():
+    matrix, years = _matrix()
+
+    with pytest.raises(ValueError, match="no training rows before 2010"):
+        spline_tie_measure.measure(
+            matrix, years, ("continuous", "tied"), (2010,))
+
+
+def test_read_request_rejects_a_directory(tmp_path):
+    with pytest.raises(SystemExit, match="regular file"):
+        spline_tie_measure._read_request(tmp_path)
+
+
+def test_read_request_rejects_a_file_over_the_cap(tmp_path, monkeypatch):
+    monkeypatch.setattr(spline_tie_measure, "_MAX_REQUEST_BYTES", 10)
+    request = tmp_path / "request.json"
+    request.write_bytes(b"x" * 20)
+
+    with pytest.raises(SystemExit, match="exceeds 64 MiB"):
+        spline_tie_measure._read_request(request)
+
+
+def test_read_request_parses_a_small_file(tmp_path):
+    request = tmp_path / "request.json"
+    request.write_text('{"price_history_snapshot": "abc"}', encoding="utf-8")
+
+    assert spline_tie_measure._read_request(request) == {
+        "price_history_snapshot": "abc"}
