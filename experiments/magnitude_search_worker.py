@@ -20,6 +20,7 @@ def main():
     try:
         import pandas as pd
 
+        from engine.v2.data.errors import DataError
         from engine.v2.foundation import ArtifactStore
         from engine.v2.ops.errors import OpsError
         from experiments.magnitude_fitted import fitted_forecasts
@@ -49,14 +50,20 @@ def main():
         target = request["execution"]["target"] if regression else None
         numeric = not (schema in ("size_comparison_execution.v1", "iv_crush_comparison_execution.v1")
                        or (schema == "size_candidate_execution.v1" and request["execution"].get("model") == "size_v1_4"))
-        inputs = load_fit_inputs(ArtifactStore(request["store_root"]), request["manifest"], request["inputs_id"],
-                                 request["inner"]["evaluation_event_ids"], request["plan"]["horizons"],
-                                 request["execution"]["features"],
-                                 **({"numeric_fit_inputs": True} if numeric else {}),
-                                 **({"recipe": request["execution"]["fit_recipe"]}
-                                    if isinstance(request["execution"].get("fit_recipe"), dict)
-                                    and request["execution"]["fit_recipe"].get("requires_event_dates") is True else {}),
-                                 **({"target_column": target["column"]} if regression else {}))
+        try:
+            inputs = load_fit_inputs(ArtifactStore(request["store_root"]), request["manifest"], request["inputs_id"],
+                                     request["inner"]["evaluation_event_ids"], request["plan"]["horizons"],
+                                     request["execution"]["features"],
+                                     **({"numeric_fit_inputs": True} if numeric else {}),
+                                     **({"recipe": request["execution"]["fit_recipe"]}
+                                        if isinstance(request["execution"].get("fit_recipe"), dict)
+                                        and request["execution"]["fit_recipe"].get("requires_event_dates") is True else {}),
+                                     **({"target_column": target["column"]} if regression else {}))
+        except (OpsError, DataError) as error:
+            if error.code == "EXPERIMENT_VARIANT_FAILED":
+                emit({"event": "failed"})
+                return
+            raise
         indexed = {(row["event_id"], row["horizon_sessions"]): row for row in inputs["features"]}
 
         def progress(state, fit):

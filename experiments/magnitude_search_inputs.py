@@ -6,7 +6,9 @@ from datetime import date
 
 from engine.v2.foundation import content_hash
 from engine.v2.ops.errors import fail
+from engine.v2.research.derived_features import derived_names
 from engine.v2.research.horizon_fitted import build_fit_inputs
+from experiments.derived_rows import derived_set, with_derived
 from experiments.magnitude_search_shards import (
     MANIFEST_SCHEMA,
     build_manifest,
@@ -152,7 +154,10 @@ def load_fit_inputs(store, manifest, expected_id, evaluation_event_ids, horizons
                 for row in _iter_rows(store, members["training"], sections["training"])]
     events = {row["event_id"] for row in training} | set(evaluation_event_ids)
     wanted = set(horizons)
-    columns = ("event_id", "context_id", "horizon_sessions", *feature_columns)
+    set_name = derived_set(feature_columns)
+    derived = set(derived_names(set_name)) if set_name is not None else set()
+    columns = ("event_id", "context_id", "horizon_sessions",
+               *(name for name in feature_columns if name not in derived))
     requires_dates = isinstance(recipe, dict) and recipe.get("requires_event_dates") is True
     features = []
     for row in _iter_rows(store, members["features"], sections["features"]):
@@ -162,6 +167,7 @@ def load_fit_inputs(store, manifest, expected_id, evaluation_event_ids, horizons
         if requires_dates:
             feature["event_date"] = _required_event_date(row)
         features.append(feature)
+    features = with_derived(features, feature_columns)
     indexed = {(row["event_id"], row["horizon_sessions"]): row for row in features}
     fit_inputs = None if not numeric_fit_inputs else build_fit_inputs(indexed, [row["event_id"] for row in training],
         evaluation_event_ids, horizons, feature_columns,
