@@ -75,7 +75,7 @@ def test_hmos_dictionary_hash_is_registered_and_differs_from_hmo():
 
 
 def test_latest_request_version_is_twelve():
-    assert LATEST == 12
+    assert LATEST == 13
 
 
 def test_v10_compiles_all_six_sets_with_only_hmo_size_candidate():
