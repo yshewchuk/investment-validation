@@ -11,8 +11,8 @@ __all__ = ["distinct_knots", "spline_step"]
 
 
 def distinct_knots(column, n_knots):
-    """Count distinct knots using SplineTransformer's quantile rule."""
-    return len(np.unique(np.percentile(column, np.linspace(0, 100, n_knots))))
+    """Count distinct knots using the same percentile grid expression as sklearn."""
+    return len(np.unique(np.percentile(column, 100 * np.linspace(0, 1, n_knots))))
 
 
 class _CheckedSpline(SplineTransformer):
