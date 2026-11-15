@@ -72,3 +72,18 @@ def test_read_request_parses_a_small_file(tmp_path):
 
     assert spline_tie_measure._read_request(request) == {
         "price_history_snapshot": "abc"}
+
+
+def test_measure_computes_exact_values_and_excludes_the_test_year():
+    values = [0.0] * 5 + [1.0, 2.0, 3.0, 4.0, 5.0]
+    matrix = np.array([[v] for v in values] + [[100.0 + i] for i in range(10)])
+    years = np.array([2010] * 10 + [2011] * 10)
+
+    result = spline_tie_measure.measure(matrix, years, ("col",), (2011,), ks=(6,))
+
+    # Training rows are 2010 only (the test year 2011 rows must not leak in):
+    # share 5/10; k=6 quantile knots 0, 0, 0, 1.4, 3.2, 5 -> 4 distinct.
+    assert result["col"]["max_share"] == 0.5
+    assert result["col"]["worst_year"] == 2011
+    assert result["col"]["min_distinct"] == {6: 4}
+    assert result["col"]["tied_years"] == {6: [2011]}
