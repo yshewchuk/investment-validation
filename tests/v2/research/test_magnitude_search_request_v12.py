@@ -5,7 +5,12 @@ from engine.v2.research.eligibility_policy import eligibility_policy
 from engine.v2.research.magnitude_panel_qualified_table import recipe
 from experiments.magnitude_search_request_versions import compile_request
 from experiments.magnitude_search_request_v3 import _space
-from experiments.size_search_binding import _dictionary_subset, _panel_columns, _panel_subset
+from experiments.size_search_binding import (
+    _dictionary_subset,
+    _panel_columns,
+    _panel_subset,
+    _refuse_unwired_derived_sets,
+)
 
 
 _G = 4
@@ -105,15 +110,28 @@ def test_v11_refuses_the_hmosxlp_hash():
 @pytest.mark.parametrize("version", [10, 11])
 @pytest.mark.parametrize("feature_sets", [["HMOSXL"], ["HMOSXLP"]])
 def test_v10_and_v11_refuse_the_derived_sets(version, feature_sets):
-    with pytest.raises(OpsError, match="nonempty ordered subset"):
+    with pytest.raises(OpsError, match="nonempty ordered subset") as caught:
         _space({"schema_version": f"magnitude_search_request.v{version}",
                 "feature_sets": feature_sets, "space": {}})
+    assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
 
 
 def test_v12_refuses_out_of_order_derived_sets():
-    with pytest.raises(OpsError, match="nonempty ordered subset"):
+    with pytest.raises(OpsError, match="nonempty ordered subset") as caught:
         _space({"schema_version": "magnitude_search_request.v12",
                 "feature_sets": ["HMOSXL", "HMOSX"], "space": {}})
+    assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
+
+
+def test_refuse_unwired_derived_sets_rejects_derived_sets():
+    schedule = compile_request(_request(12, feature_sets=["HMOSX", "HMOSXL"]))
+    with pytest.raises(OpsError) as caught:
+        _refuse_unwired_derived_sets(schedule)
+    assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
+
+
+def test_refuse_unwired_derived_sets_allows_wired_sets():
+    _refuse_unwired_derived_sets(compile_request(_request(12, feature_sets=["HMOSX"])))
 
 
 def test_dictionary_and_panel_subsets_track_the_request_version():

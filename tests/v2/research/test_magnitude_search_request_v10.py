@@ -74,8 +74,8 @@ def test_hmos_dictionary_hash_is_registered_and_differs_from_hmo():
     assert recipe("HMOS")["dictionary_hash"] != recipe("HMO")["dictionary_hash"]
 
 
-def test_latest_request_version_is_eleven():
-    assert LATEST == 11
+def test_latest_request_version_is_twelve():
+    assert LATEST == 12
 
 
 def test_v10_compiles_all_six_sets_with_only_hmo_size_candidate():
@@ -133,7 +133,8 @@ def test_prepare_accepts_hmos_candidates(monkeypatch):
                                                 "history_snapshot": request["history_snapshot_id"],
                                                 "as_of_month": "2023-01-01", "event_ids": []})
     monkeypatch.setattr(size_search_binding, "compile_request",
-                        lambda request, *, horizons: {"horizons": [1]})
+                        lambda request, *, horizons: {"horizons": [1],
+                                                      "request": {"feature_sets": []}})
     def reach_registration(*args, **kwargs):
         raise ReachedRegistration("past the guard")
 

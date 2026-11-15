@@ -18,6 +18,7 @@ from engine.v2.foundation import (
 from engine.v2.models.frozen_state_io import BoundedStateReadError, read_bounded_state
 from engine.v2.ops.errors import fail
 from engine.v2.ops.fingerprints import environment_identity, source_closure
+from engine.v2.research.derived_features import SET_NAMES
 from engine.v2.research.magnitude_inputs import (
     preflight_magnitude_targets,
     qualify_magnitude_training_targets,
@@ -50,6 +51,14 @@ SCHEMA = "native_experiment_registration.v1.7"
 def _require(condition):
     if not condition:
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "qualified SIZE source/fold binding differs")
+
+
+def _refuse_unwired_derived_sets(schedule):
+    """Derived sets (HMOSXL/HMOSXLP) compile in request v12 but the fit path (slice 4) cannot load them yet."""
+    derived = [s for s in schedule["request"].get("feature_sets", []) if s in SET_NAMES]
+    if derived:
+        raise fail("INVALID_EXPERIMENT_SPEC",
+                   f"derived feature sets {derived} are not wired into the fit path yet")
 
 
 def _dictionary_subset(schema_version):
@@ -131,6 +140,7 @@ def prepare(repository, spec, request, panel_request, *, scope, training_start, 
     sources = _sources()
     panel_request = validate_panel_request(panel_request)
     schedule = compile_request(request, horizons=tuple(h for h in (5, 3, 1) if h in panel_request["horizons"]))
+    _refuse_unwired_derived_sets(schedule)
     if request["limits"]["child"]["memory_bytes"] > request["limits"]["parent"]["memory_bytes"]:
         raise fail("INVALID_EXPERIMENT_SPEC", "child memory must not exceed inherited parent limit")
     _require(request["feature_dictionary_hash"] == recipe(_dictionary_subset(request["schema_version"]))["dictionary_hash"])
@@ -301,6 +311,7 @@ def prepare_plan(conn, store, registration, request, *, plan_schema=None):
         validate_panel_request(panel_request)
         horizons = tuple(h for h in (5, 3, 1) if h in panel_request["horizons"])
     schedule = compile_request(request, horizons=horizons)
+    _refuse_unwired_derived_sets(schedule)
     _require(schedule["request"] == binding["size_request"])
     folds = _folds(binding, request, plan_schema)
     if plan_schema == PLAN_V3:
