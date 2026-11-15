@@ -1,47 +1,46 @@
 # `engine/v2/research` — architecture
 
-Layer 7.0 in `checks/layer_map.py` and root `/ARCHITECTURE.md`. Native snapshot-reading counterparts to `tools/signal_screen.py`, `tools/fill_quality.py`, `engine/data/pulls/polygon_fills.py`'s read path, `engine/replay.py` (committed snapshots) and `engine/build_trades.py`'s v2 write path. Legacy modules remain untouched and publish as before; parallel `tools/v2_*` CLIs read pinned v2 snapshots. `tools/log_diagnostics.py` stays put: it reads only a local transactions-log CSV and optional sibling `metrics_*.json`, never Tier-2, so needs no snapshot counterpart.
+Layer 7.0 in `checks/layer_map.py` and root `/ARCHITECTURE.md`. Native snapshot-reading counterparts to `tools/signal_screen.py`, `tools/fill_quality.py`, `engine/data/pulls/polygon_fills.py`'s read path, `engine/replay.py` (committed snapshots) and `engine/build_trades.py`'s v2 write path. Legacy modules remain untouched and publish as before; parallel `tools/v2_*` CLIs read pinned v2 snapshots. `tools/log_diagnostics.py` stays put: it reads only a local transactions-log CSV, never Tier-2.
 
 ## Purpose
 
-Offline analysis CLIs cover real-fill quality, cross-sectional screening, the real-trade pull's universe plan, deterministic as-of replay and its trade table, reading exactly one resolved named snapshot per run instead of mutable Tier-2. Measured tables/reports are for a person: no research verdict, provider fetch or legacy-ledger mutation. `experiment_trades.load_trades` extends this contract to v2 experiments, reading committed `trades` published by `tools/v2_build_trades.py`, never legacy mutable storage. Completed experiments need not stay runnable; historical wrappers are unsupported execution boundaries.
+Offline analysis CLIs cover real-fill quality, cross-sectional screening, the real-trade pull's universe plan, deterministic as-of replay and its trade table, reading exactly one resolved named snapshot per run instead of mutable Tier-2. Measured tables/reports are for a person: no research verdict, provider fetch or legacy-ledger mutation. `experiment_trades.load_trades` extends it to v2 experiments (committed `trades` only). Completed experiments need not stay runnable; historical wrappers are unsupported execution boundaries.
 
 ## Source-free magnitude distributions
 
-The source-free numerical APIs `magnitude_distribution` (`recipe`, `histogram`, `validate_distribution`, `bin_index`), `magnitude_distribution_math` (`components`, `cdf`, `mean`, `crps`, `bin_scores`, `brier`, `empirical_crps`, `prepare_empirical_crps`, `mean_matched_control`), `magnitude_distribution_payoff` (`bridge_summary`, `empirical_bridge_summary`) and the opt-in `magnitude_distribution_diagnostics` own no source admission; consumers are experiment distribution declarations/fitting/OOF adapters and synthetic tests. The closed plain-JSON `research_magnitude_distribution.v1` represents absolute simple-return percentage points: quarter-point half-open bins through 20, then uncapped overflow (exact boundaries go right), 81 finite masses in [0, 1] summing to one within absolute 1e-12 without repair or smoothing; tail policy is `unresolved` or `empirical_excess` (equal-weight nonnegative excesses relative to 20). Full-law APIs refuse unresolved tails even at zero overflow mass; `bin_scores` allows them. Inputs are plain `int`/`float` (not bool/subclasses), finite (magnitudes, tail excesses and empirical samples also nonnegative), probabilities in [0,1], empirical samples a nonempty plain list; documents are returned detached and no caller value is echoed in refusals. The payoff bridge returns `expected_profit`, `probability_profit`, `mean_exit_value` and `probability_negative_exit` as per-share dollar decision-quote proxies, not realized net-profit forecasts. `mean_matched_control` is named support repair (target mean must be positive); its original payoff-module export stays compatible, including its legacy refusal Problem. The caller owns sample eligibility, resource limits and sealed PIT randomization. No helper does I/O, writes, caching, retries or transactions, or provides source/fold/calibration envelope, fitting, holdout access or production wiring; `earnings_magnitude.v1` is unchanged. Per-function semantics, algorithms and costs: `guides/research_architecture_design_notes.md`. The [experiment design PR](https://github.com/yshewchuk/investment-validation/pull/1425) is a scientific proposal, not a code dependency, preregistration or approval of results.
+The source-free numerical APIs `magnitude_distribution` (`recipe`, `histogram`, `validate_distribution`, `bin_index`), `magnitude_distribution_math` (`components`, `cdf`, `mean`, `crps`, `bin_scores`, `brier`, `empirical_crps`, `prepare_empirical_crps`, `mean_matched_control`), `magnitude_distribution_payoff` (`bridge_summary`, `empirical_bridge_summary`) and the opt-in `magnitude_distribution_diagnostics` own no source admission; consumers are experiment distribution declarations/fitting/OOF adapters and synthetic tests. The closed plain-JSON `research_magnitude_distribution.v1` represents absolute simple-return percentage points: quarter-point half-open bins through 20, then uncapped overflow (exact boundaries go right), 81 finite masses in [0, 1] summing to one within absolute 1e-12 without repair or smoothing; tail policy is `unresolved` or `empirical_excess` (equal-weight nonnegative excesses relative to 20). Full-law APIs refuse unresolved tails even at zero overflow mass; `bin_scores` allows them. Inputs are plain `int`/`float` (not bool/subclasses), finite (magnitudes, tail excesses and empirical samples also nonnegative), probabilities in [0,1], empirical samples a nonempty plain list; documents are returned detached and no caller value is echoed in refusals. The payoff bridge returns `expected_profit`, `probability_profit`, `mean_exit_value` and `probability_negative_exit` as per-share dollar decision-quote proxies, not realized net-profit forecasts. `mean_matched_control` is named support repair (target mean must be positive); its original payoff-module export stays compatible, including its legacy refusal Problem. The caller owns sample eligibility, resource limits and sealed PIT randomization. No helper does I/O, writes, caching, retries or transactions, or provides source/fold/calibration envelope, fitting, holdout access or production wiring; `earnings_magnitude.v1` is unchanged. Per-function semantics, algorithms and costs: `guides/research_architecture_design_notes.md`.
 
 | Condition | Outcome |
 | --- | --- |
 | Malformed histogram schema/types/support/masses/tail policy/counts | Non-retryable `CONTRACT_MISMATCH`; no partial result |
 | Invalid `bin_index` numeric type, negative/nonfinite or unrepresentable magnitude | Non-retryable `CONTRACT_MISMATCH`; no index |
-| Invalid math/payoff/diagnostic arguments (including nonfinite/negative magnitudes, probabilities outside [0,1] or empty/non-list empirical samples), unresolved full-law tail, nonfinite/unrepresentable arithmetic, nonpositive target mean or zero repaired mean/scale | Non-retryable `CONTRACT_MISMATCH`; no partial result |
+| Invalid math/payoff/diagnostic arguments (input rules above), unresolved full-law tail, nonfinite/unrepresentable arithmetic, nonpositive target mean or zero repaired mean/scale | Non-retryable `CONTRACT_MISMATCH`; no partial result |
 | Zero observed-bin probability | `bin_scores.log_loss` is positive infinity; no smoothing |
 | Omitted required argument to any numerical helper | Python `TypeError` |
 
 ## Stage-2 magnitude panel foundation
 
-`magnitude_confirmed_metadata.build_index(repository, snapshot, *, tickers, limits)` is complete pinned-view admission (consumed by `magnitude_panel_qualified`, `experiments.size_panel`) returning one detached, content-hashed proof (`index_id` hashes the proof without that field; `limits` gate admission and retention but are not hashed; identical successful calls return the same proof). Catalog admission uses one read transaction released before the `bounded_snapshot` session is yielded; every limit is explicit (no defaults, retries, cache, fallback SQL or durable writes); inventory caps bind before any object read and retained-row/byte caps as data is read (not an RSS guarantee). Admission authenticates exact `snapshot_inputs` and the frozen earnings contract allowlist. Failure returns no partial proof and native envelopes propagate unchanged; malformed shapes/incomplete inventory refuse `CONTRACT_MISMATCH`, unknown contracts `UNSUPPORTED_CONTRACT`, caps `RESULT_LIMIT_EXCEEDED`, duplicate `event_id` or `(ticker, day)` `IDENTITY_CONFLICT`. Proof `counts` carry `unconfirmed_date_conflict` and `unconfirmed_cluster_ambiguous`; `policy.conflicts` is `unconfirm_date_and_cluster_conflicts.v2`; receipt references stay unopened. Complete membership proves neither expected-population coverage, observed-PIT knowledge nor protected/numerical eligibility. Progress is aggregate stage/RSS/counts at bounded cadence, never source diagnostics or secrets.
+`magnitude_confirmed_metadata.build_index(repository, snapshot, *, tickers, limits)` is complete pinned-view admission (consumed by `magnitude_panel_qualified`, `experiments.size_panel`) returning one detached, content-hashed proof (`index_id` hashes the proof without that field; `limits` gate admission and retention but are not hashed; identical successful calls return the same proof). Catalog admission uses one read transaction released before the `bounded_snapshot` session is yielded; every limit is explicit (no defaults, retries, cache, fallback SQL or durable writes); inventory caps bind before any object read and retained-row/byte caps as data is read (not an RSS guarantee). Admission authenticates exact `snapshot_inputs` and the frozen earnings contract allowlist. Failure returns no partial proof; refusal codes are in the table below. Proof `counts` carry `unconfirmed_date_conflict` and `unconfirmed_cluster_ambiguous`; `policy.conflicts` is `unconfirm_date_and_cluster_conflicts.v2`; receipt references stay unopened. Complete membership proves neither expected-population coverage nor PIT/protected/numerical eligibility.
 
-`confirmed_metadata.reduce_sequences` is a public pure seven-column DataFrame reducer of a complete caller-supplied view (not evidence of completeness; strict naive `datetime64[ns]` types precede `confirmed_event_metadata.classify_metadata`); `event_sequence(warmup=4)` counts all supplied confirmed rows from zero with no date cutoff. All rows, including unconfirmed siblings, participate in duplicate ID and ticker/day refusal. A `date_conflict` row is unconfirmed with reason `date_conflict`, and every row of a duplicated `(ticker, event_cluster_id)` with reason `cluster_ambiguous`; neither refuses the view. This is a deliberate modeling assumption (rationale: `experiments/SUPER_SIZE/CONFIRMED_METADATA_DESIGN.md`) matching live behaviour: both are disregarded for training and evaluation, a later-dated sibling may unconfirm an earlier row, the view applies no as-of cutoff, and equal clusters across tickers are independent. Such rows leave the confirmed sequence (ordinals, warm-up) but stay in `selected_rows`; a row already unconfirmed for another reason keeps that reason and is not counted. `reduce_with_counts` returns `(sequences, {unconfirmed_date_conflict, unconfirmed_cluster_ambiguous})`, `reduce_sequences` the sequences only. R1 missing input, none; R2 malformed shape or types, `CONTRACT_MISMATCH` before any conflict check; R3 duplicate `event_id` or `(ticker, day)`, `IDENTITY_CONFLICT` with no partial output; R4 no retry, cache or fallback; R5 counts come from the same pass as the sequences, so a refusal records nothing; R6 equal input gives equal output. Work is O(n log n + t log t), state O(n + t), no hard cap or RSS bound; no I/O, transaction, index identity, source admission, coverage, holdout/value eligibility or runtime integration.
+`confirmed_metadata.reduce_sequences` is a public pure seven-column DataFrame reducer of a complete caller-supplied view (not evidence of completeness; strict naive `datetime64[ns]` types precede `confirmed_event_metadata.classify_metadata`); `event_sequence(warmup=4)` counts all supplied confirmed rows from zero with no date cutoff. All rows, including unconfirmed siblings, participate in duplicate ID and ticker/day refusal. A `date_conflict` row is unconfirmed with reason `date_conflict`, and every row of a duplicated `(ticker, event_cluster_id)` with reason `cluster_ambiguous`; neither refuses the view. This is a deliberate modeling assumption (rationale: `experiments/SUPER_SIZE/CONFIRMED_METADATA_DESIGN.md`) matching live behaviour: both are disregarded for training and evaluation, a later-dated sibling may unconfirm an earlier row, the view applies no as-of cutoff, and equal clusters across tickers are independent. Such rows leave the confirmed sequence (ordinals, warm-up) but stay in `selected_rows`; a row already unconfirmed for another reason keeps that reason and is not counted. `reduce_with_counts` returns `(sequences, {unconfirmed_date_conflict, unconfirmed_cluster_ambiguous})`, `reduce_sequences` the sequences only. Shape/type refusals (table below) precede any conflict check; counts come from the same pass as the sequences, so a refusal records nothing. No index identity, source admission, coverage, holdout/value eligibility or runtime integration.
 
-`magnitude_panel_table` (native `TableContract`/`ColumnContract`, JSON and canonical hashing) has an immutable v1 event/context/horizon key with ordered H/HM/HMO dictionaries, excluding learned Tier4 outputs/current-event outcomes; rows require exact cohort coverage, finite typed values, missing/quote status, row/fragment identity and a canonical SHA-256 `content_hash`; contexts are reconstructed-only, never relabeled observed; pure validation checks digest syntax/binding, not source membership or value equality. `magnitude_panel_plan` (no production caller; no raw-payload read authority) reconstructs protected population/calendar metadata and checks exact history receipts and isolated fragments without payloads; detached validation checks JSON types, closed schemas, native folds, fragments and calendar-source consistency, repository preflight authenticates membership/source truth, and horizon cutoffs require native calendar reconstruction. Public helpers `validate_context_identity`, `validate_event_forecasts`, `preflight_source`, `validate_features`, `magnitude_features.calendar_input` and `magnitude_inputs.target_object_identity` (detaches admitted `event_id`, `fragment_id`, `object_id` and object `content_hash` without reading target values) share existing validation without new authority; `canonical_day` refuses non-canonical dates `CONTRACT_MISMATCH`. Panel boundaries require plain JSON; detached refusals use `CONTRACT_MISMATCH`, native refusals propagate. `magnitude_panel_v2_policies.policy_definitions()` supplies detached source/derivation/quote/missing policies ([parity design](https://github.com/yshewchuk/investment-validation/blob/26b5958d868afc5189611aa77ec1774a9e246d71/experiments/SUPER_SIZE/STAGE2_DESIGN.md#incumbent-parity-amendment-october-24-design-only)) to the additive `magnitude_panel_v2_table` (`CONTRACT`, `feature_dictionary(subset)`, `recipe(subset)`; H/HM/HMO have 11/28/42 ordered numeric descriptors and 11/28/43 raw model columns, HMO alone appending `has_implied_quote`). Inline source/derivation policies change all dictionary hashes (including H); v1 APIs, contracts, hashes and the eleven H numeric values/order are unchanged; contract and dictionary hashes are distinct and admit no sources, snapshots or rows. There is no writer, materializer, CLI, model, v2 context, reader or runtime activation.
+`magnitude_panel_table` (native `TableContract`/`ColumnContract`, JSON and canonical hashing) has an immutable v1 event/context/horizon key with ordered H/HM/HMO dictionaries, excluding learned Tier4 outputs/current-event outcomes; rows require exact cohort coverage, finite typed values, missing/quote status, row/fragment identity and a canonical SHA-256 `content_hash`; contexts are reconstructed-only, never relabeled observed; pure validation checks digest syntax/binding, not source membership or value equality. `magnitude_panel_plan` (no production caller; no raw-payload read authority) reconstructs protected population/calendar metadata and checks exact history receipts and isolated fragments without payloads; detached validation checks JSON types, closed schemas, native folds, fragments and calendar-source consistency, repository preflight authenticates membership/source truth, and horizon cutoffs require native calendar reconstruction. Public helpers `validate_context_identity`, `validate_event_forecasts`, `preflight_source`, `validate_features`, `magnitude_features.calendar_input` and `magnitude_inputs.target_object_identity` (detaches admitted `event_id`, `fragment_id`, `object_id` and object `content_hash` without reading target values) share existing validation without new authority; Panel boundaries require plain JSON; detached refusals use `CONTRACT_MISMATCH` (including `canonical_day` on non-canonical dates), native refusals propagate. `magnitude_panel_v2_policies.policy_definitions()` supplies detached source/derivation/quote/missing policies ([parity design](https://github.com/yshewchuk/investment-validation/blob/26b5958d868afc5189611aa77ec1774a9e246d71/experiments/SUPER_SIZE/STAGE2_DESIGN.md#incumbent-parity-amendment-october-24-design-only)) to the additive `magnitude_panel_v2_table` (`CONTRACT`, `feature_dictionary(subset)`, `recipe(subset)`; H/HM/HMO have 11/28/42 ordered numeric descriptors and 11/28/43 raw model columns, HMO alone appending `has_implied_quote`). Inline source/derivation policies change all dictionary hashes (including H); v1 APIs, contracts, hashes and the eleven H numeric values/order are unchanged; contract and dictionary hashes are distinct and admit no sources, snapshots or rows. There is no writer, materializer, CLI, model, v2 context, reader or runtime activation.
 
 | Condition | Outcome |
 | --- | --- |
 | Index malformed request/row/partition, incomplete inventory, or unsupported holder/session | Nonretryable `CONTRACT_MISMATCH`; no partial index |
 | Index missing/nonexact/unresolvable native snapshot | `SNAPSHOT_UNRESOLVED`; no object access or index |
 | Index unsupported exact earnings contract; explicit cap exceeded; semantic conflict | `UNSUPPORTED_CONTRACT`; `RESULT_LIMIT_EXCEEDED`; `IDENTITY_CONFLICT`, respectively; no partial index |
-| Index native catalog/query/object failure | Same exception/code/category/retryability/stage/message/details; no retry or partial index |
-| Index success after every partition exhausts | Detached plain-JSON proof; mutating it cannot alter admitted/caller state; membership is not numerical/PIT eligibility |
+| Index native catalog/query/object failure | Same exception/code/category/retryability/stage/message/details; no partial index |
+| Index success after every partition exhausts | Detached plain-JSON proof; mutating it cannot alter admitted/caller state |
 | Malformed reducer request/frame/row, including unrequested ticker | `CONTRACT_MISMATCH`; no partial sequence |
 | Reducer duplicate ID or ticker/day | `IDENTITY_CONFLICT`; no partial sequence (date-conflict and duplicated ticker/cluster rows are unconfirmed, not refused) |
 | Reducer native failure | Existing `DataError` code/retryability unchanged; no partial sequence |
-| `policy_definitions()` | No arguments; detached metadata only, no I/O/fits/verification or retry/cache. Shared declaration exceptions propagate unchanged. |
-| Invalid v2 subset (not a plain H/HM/HMO string); omitted argument | `CONTRACT_MISMATCH`; omitted argument raises Python `TypeError`. Detached metadata only; no I/O/fits/admission or retry/cache. |
-| Invalid detached panel identity/schema, nested digest/folds, snapshot, calendar, cutoff or row | `CONTRACT_MISMATCH` |
+| `policy_definitions()` | No arguments; detached metadata only, no I/O/fits/verification. Shared declaration exceptions propagate unchanged. |
+| Invalid v2 subset (not a plain H/HM/HMO string); omitted argument | `CONTRACT_MISMATCH`; omitted argument raises Python `TypeError`. |
+| Invalid detached panel identity/schema, nested digest/folds, snapshot, calendar, cutoff or row; non-plain builder producer/snapshot or history metadata, or invalid lane | `CONTRACT_MISMATCH` |
 | Malformed or forged direct calendar snapshot | `SNAPSHOT_UNRESOLVED` |
 | Empty native observed session calendar | `CALENDAR_UNAVAILABLE` |
-| Malformed builder producer/snapshot, non-plain history metadata or invalid lane | `CONTRACT_MISMATCH` |
 | Native history identity/digest or committed binding differs | `IDENTITY_CONFLICT` |
 | Builder history metadata exceeds structural depth | Existing native `IDENTITY_CONFLICT` |
 | Structurally invalid direct history identity / source-admission input | `CONTRACT_MISMATCH` / `IDENTITY_CONFLICT`, respectively; native identity/safety refusals remain unchanged |
@@ -51,12 +50,12 @@ The source-free numerical APIs `magnitude_distribution` (`recipe`, `histogram`, 
 | Snapshot ID is absent from the native catalog | `SNAPSHOT_NOT_FOUND` |
 | Catalog snapshot/manifest identity is inconsistent | `MANIFEST_CORRUPT` |
 | Repository-reconstructed temporal population lacks training/evaluation coverage | `POPULATION_COLLAPSED` |
-| Cache / retry | Observed days are reused per weak-referenceable pinned repository and snapshot ID; failures are not cached. `preflight_context` reconstructs metadata through native repository APIs (including their catalog caches); no panel-layer retries. |
-| Transaction / partial write / idempotency | No enclosing/write transaction or durable writes; native repository resolution/table reads use read transactions. No partial artifact; identical inputs and metadata give the same `context_id`. |
+| Cache / retry | Observed days are reused per weak-referenceable pinned repository and snapshot ID; failures are not cached. `preflight_context` reconstructs metadata through native repository APIs (including their catalog caches). |
+| Transaction / partial write / idempotency | No enclosing/write transaction or durable writes; native repository resolution/table reads use read transactions. Identical inputs and metadata give the same `context_id`. |
 
 ## Partial daily-market blocks
 
-`magnitude_panel_daily.build_daily_blocks` is an opt-in library-only reader (only synthetic tests call it). Inputs are pinned source/history/price_history snapshots, the metadata-only v1 plan, plain-JSON producer metadata, grouped eligibility declarations and explicit source/event/byte bounds; the output has a distinct versioned context and detached daily-market/regime blocks, never stored-panel admission, and the context binds parent, bounds, policy, exclusions, snapshot fragment inventory and producer (declarations, not installed-code attestation). The thirteen daily fields and nine historical `spy_*` values obey each forecast's source ceiling; regime closes come from pinned `price_history` `REGIME_TICKER` (`^GSPC`) via `get_price_series`, never daily SPY spot. Reads are row-capped (one ticker/year scan per event ticker plus one regime read at the latest ceiling) and a required context-bound `max_object_bytes` bounds new value scans; availability is reconstructed, not observed-PIT/fit-admissible. No history/runup block or outcomes are read; no cross-call cache, retry, write transaction, durable write, CLI, fit, registration or runtime consumer; calls revalidate and reread pinned sources. Protected evaluation membership confers no reads. Detailed bounds and exclusion semantics: `guides/research_architecture_design_notes.md`.
+`magnitude_panel_daily.build_daily_blocks` is an opt-in library-only reader (only synthetic tests call it). Inputs are pinned source/history/price_history snapshots, the metadata-only v1 plan, plain-JSON producer metadata, grouped eligibility declarations and explicit source/event/byte bounds; the output has a distinct versioned context and detached daily-market/regime blocks, never stored-panel admission, and the context binds parent, bounds, policy, exclusions, snapshot fragment inventory and producer (declarations, not installed-code attestation). The thirteen daily fields and nine historical `spy_*` values obey each forecast's source ceiling; regime closes come from pinned `price_history` `REGIME_TICKER` (`^GSPC`) via `get_price_series`, never daily SPY spot. Reads are row-capped (one ticker/year scan per event ticker plus one regime read at the latest ceiling) and a required context-bound `max_object_bytes` bounds new value scans; availability is reconstructed, not observed-PIT/fit-admissible. No history/runup block or outcomes are read; no CLI, fit, registration or runtime consumer; calls revalidate and reread pinned sources. Protected evaluation membership confers no reads. Detailed bounds and exclusion semantics: `guides/research_architecture_design_notes.md`.
 
 | Condition | Outcome |
 | --- | --- |
@@ -110,8 +109,7 @@ a `Repository` and resolved `SnapshotRef`, it returns one strategy's committed,
 session-joined trades with legacy-compatible columns and holdout context; an
 omitted/`None` as-of month refuses `HOLDOUT_ACCESS_DENIED` (no implicit month).
 `_pricing.trading_calendar_from_snapshot` lets pinned-snapshot repricers share
-`replay()`'s calendar; `_pricing.execution_variant_label` gives
-`experiments/v2_candidate_grid.py`'s `price_candidate_grid` replay's
+`replay()`'s calendar; `_pricing.execution_variant_label` gives replay's
 execution-variant labels for each priced grid-position step.
 
 Experiment training, selection-fold and sweep reads exclude the union of the
@@ -135,13 +133,13 @@ already saved (identity conflict, ledger unchanged). `register`, a run with no
 admitted registration, and `--no-ledger` smoke write none. `ledger_context`
 excludes `refused*` rows from specs tried.
 
-`experiment_population.load_population` validates an exact committed `SnapshotRef` and returns canonical event metadata under the same holdout contract, without reading outcomes; it shares the trade loader's membership and ambiguity logic. Explicit IDs are checked against the full canonical calendar, including conflicting siblings, before any caller consumes an eligible population; neither source dates nor ticker names substitute for event IDs, and multiple IDs on one ticker/day are ambiguous even when their sessions differ. Its consumers (`experiments.v2_gate_variant`, `experiments.gate_report`, `prediction_inputs.load_prediction_targets`) keep their no-report/no-ledger and date-ceiling contracts in `experiments/ARCHITECTURE.md`.
+`experiment_population.load_population` validates an exact committed `SnapshotRef` and returns canonical event metadata under the same holdout contract, without reading outcomes; it shares the trade loader's membership and ambiguity logic. Explicit IDs are checked against the full canonical calendar, including conflicting siblings, before any caller consumes an eligible population; neither source dates nor ticker names substitute for event IDs, and multiple IDs on one ticker/day are ambiguous even when their sessions differ.
 
-`prediction_inputs.load_prediction_targets` consumes this population first, then scans each eligible ticker/event-date pair in pinned `computed_moves`. The history and magnitude readers (`event_history`, `magnitude_inputs`, `magnitude_history_store`) accept the `computed_moves.v4` or `computed_moves.v5` contract and refuse any other `CONTRACT_MISMATCH`; on v5 a row with a `not_computed_reason` other than `no_price_window` is `skipped`, carries no outcome and never counts as a scoreable event. The omission lists (`omitted_history`, `omitted_labels`) carry the writer's `not_computed_reason` as `reason` (v4 rows and v5 rows without one keep `skipped`; the magnitude search's `validate_targets` accepts exactly `skipped` and the writer's closed reason set, any other is `EXPERIMENT_IDENTITY_CONFLICT`), never a research-side re-derivation; non-skipped rows omitted for availability keep `unavailable` / `not_available_before_fit`. The isolation guard of the history and magnitude readers (`_plans` per-candidate checks, shared with `plan_with_reader`) is unchanged: every candidate needs exactly one isolated fragment, else `HOLDOUT_ACCESS_DENIED`. `prediction_inputs` does not use that guard: it refuses a table whose contract is neither native contract with `CONTRACT_MISMATCH` before any target scan, and a v5 skipped row with `EXPERIMENT_VARIANT_FAILED` naming the reason (a reason-less skipped row is malformed and gets the generic target message). It returns the signed move, binary `positive_move` target and `target_available_on` date (required and later than the event); fold consumers admit training labels only when available before their decision cutoff. It performs no feature construction, model fitting or report/ledger publication and has no supervisor caller.
+`prediction_inputs.load_prediction_targets` consumes this population first, then scans each eligible ticker/event-date pair in pinned `computed_moves`. The history and magnitude readers (`event_history`, `magnitude_inputs`, `magnitude_history_store`) accept the `computed_moves.v4` or `computed_moves.v5` contract and refuse any other `CONTRACT_MISMATCH`; on v5 a row with a `not_computed_reason` other than `no_price_window` is `skipped`, carries no outcome and never counts as a scoreable event. The omission lists (`omitted_history`, `omitted_labels`) carry the writer's `not_computed_reason` as `reason` (v4 rows and v5 rows without one keep `skipped`; the magnitude search's `validate_targets` accepts exactly `skipped` and the writer's closed reason set, any other is `EXPERIMENT_IDENTITY_CONFLICT`), never a research-side re-derivation; non-skipped rows omitted for availability keep `unavailable` / `not_available_before_fit`. The isolation guard of the history and magnitude readers (`_plans` per-candidate checks, shared with `plan_with_reader`) is unchanged: every candidate needs exactly one isolated fragment, else `HOLDOUT_ACCESS_DENIED`. `prediction_inputs` does not use that guard: it refuses a table whose contract is neither native contract with `CONTRACT_MISMATCH` before any target scan, and a v5 skipped row with `EXPERIMENT_VARIANT_FAILED` naming the reason (a reason-less skipped row is malformed and gets the generic target message). It returns the signed move, binary `positive_move` target and `target_available_on` date (required and later than the event); fold consumers admit training labels only when available before their decision cutoff.
 
 | Prediction/population input condition | Outcome |
 |---|---|
-| Snapshot cannot be resolved or its identity does not match (design #372 R2) | Non-retryable `SNAPSHOT_UNRESOLVED`; no source fallback. |
+| Snapshot cannot be resolved or its identity does not match | Non-retryable `SNAPSHOT_UNRESOLVED`; no source fallback. |
 | Integrity or object failure during a table scan | Repository's typed refusal, such as `MANIFEST_CORRUPT` or `OBJECT_CORRUPT`; no partial returned frame. |
 | Missing table or malformed table contract | Repository's typed refusal; no partial returned frame. |
 | Invalid holdout context, unknown requested ID, excluded/ambiguous requested event, or empty explicit population (R5) | `HOLDOUT_ACCESS_DENIED` before target scans; no metrics or report. |
@@ -151,13 +149,11 @@ excludes `refused*` rows from specs tried.
 | `omit_not_computed=True` and a row is `skipped` | Event omitted, object still bound in `consumed_inputs`, listed in `omitted_labels`; other events returned. |
 | `omit_not_computed=True` and every planned label is `skipped` | Empty frame whose attrs list every event in `omitted_labels`; scoring then refuses `EXPERIMENT_VARIANT_FAILED` ("require scored rows"), which the inner search records as a refused terminal. |
 | `omit_not_computed` is not a `bool` | `CONTRACT_MISMATCH` before any repository access. |
-| Cache, retry, transaction, partial write, replay | No cache or automatic retry; read-only, no writes; complete scans precede return; identical pinned inputs return identical rows (R6). |
 
 These readers preserve no economic variant identity and cannot authorize the
 separate user-only final holdout read.
 
-`horizon_fit_inputs.prepare_horizon_inputs` assembles ordered selected-column training/prediction float arrays and freezes null-preserving input hashes under an explicit training-target column; reserved matrix keys refuse `ValueError` before event-ID/column iterables are materialized once. It reads no evaluation targets, preserves signed labels without a floor and returns detached arrays/evidence; the caller owns target/domain validation, source/membership admission and fitting. Its caller is offline `experiments.magnitude_fitted`, preserving legacy magnitude evidence bytes.
-`horizon_fitted.fitted_forecasts` shares the per-horizon fit loop over closed numeric routes with an explicit target column/domain, accepting raw fit inputs or prebuilt `HorizonInputs` from `build_fit_inputs` (consumed as assembled, not checked against positional inputs). The builder carries canonical `train_event_dates` only when the recipe declares `requires_event_dates`, so other recipe hashes are unchanged. Regression recipe/domain must match and magnitude routes require nonnegative outcomes; signed predictions need only be finite and nonnegative routes reject negative forecasts; no evaluation labels or repository are accepted. `measure_fit_seconds=True` adds `fit_seconds` to completed progress markers (`experiments.magnitude_fitted.fitted_forecasts` always opts in; returned fit evidence stays static). Only fit/forecast-validation exceptions become native `HorizonFitFailure` with the original `__cause__`; preparation/progress errors propagate; callbacks receive deep-copied evidence and are provisional. No partial predictions/evidence return, retries, writes or production entrypoint; the offline magnitude wrapper retains its legacy exception/strict-failure policy.
+`horizon_fit_inputs.prepare_horizon_inputs` assembles ordered selected-column training/prediction float arrays and freezes null-preserving input hashes under an explicit training-target column; reserved matrix keys refuse `ValueError` before event-ID/column iterables are materialized once. It reads no evaluation targets, preserves signed labels without a floor and returns detached arrays/evidence; the caller owns target/domain validation, source/membership admission and fitting.`horizon_fitted.fitted_forecasts` shares the per-horizon fit loop over closed numeric routes with an explicit target column/domain, accepting raw fit inputs or prebuilt `HorizonInputs` from `build_fit_inputs` (consumed as assembled, not checked against positional inputs). The builder carries canonical `train_event_dates` only when the recipe declares `requires_event_dates`, so other recipe hashes are unchanged. Regression recipe/domain must match and magnitude routes require nonnegative outcomes; signed predictions need only be finite and nonnegative routes reject negative forecasts; no evaluation labels or repository are accepted. Only fit/forecast-validation exceptions become native `HorizonFitFailure` with the original `__cause__`; preparation/progress errors propagate; callbacks receive deep-copied evidence and are provisional. No partial predictions/evidence return, retries, writes or production entrypoint; the offline magnitude wrapper retains its legacy exception/strict-failure policy.
 `event_history.load_event_history(repository, snapshot, *, event_id, as_of_month, decision_session, history_start, purpose="selection")` constructs prior-event features for one admitted target, with explicit calendar days satisfying `history_start <= decision_session <= target event day`; shared `load_population` excludes random, rolling and ambiguous history before outcome reads. Candidates are same-ticker events in `[history_start, min(target day, decision_session))`.
 
 Every candidate query is planned before any outcome scan, using the same fragment planner as `Repository`; a candidate's entire surviving membership must be one inspected singleton with the exact ticker/day key, partition and time bounds. The resolved committed catalog/manifest identity is the metadata trust anchor (native producer inspection, not adversarially forged metadata). Caller rows, implicit latest and another experiment's outputs are not inputs. Mixed, missing or unprovable membership refuses `HOLDOUT_ACCESS_DENIED` before opening outcome objects; old whole-ticker layouts are refused, never migrated, and row predicates are not physical isolation. Preflight indexing and planner-ordering detail: `guides/research_architecture_design_notes.md`.
@@ -167,13 +163,12 @@ day must follow its event and be on or before the decision day; later labels are
 omitted before numeric validation or arithmetic. Their admitted objects are
 decoded; protected event objects have a no-read guarantee. Malformed
 availability or invalid eligible values refuse `EXPERIMENT_VARIANT_FAILED`;
-repository failures propagate. The date bound is reconstructed source
-availability, not intraday publication/finality evidence. Pure
+repository failures propagate. Pure
 `panel_math.history_features` owns the arithmetic: empty history and undersized
 EMAs retain `None`, never zero fill.
 Results carry features/status, ordered consumed event/object identities and availability, omitted-history reasons, snapshot/dataset/month/membership/cutoff pins and a deterministic digest.
 The `research_event_history.v2` identity also binds every decoded `read_inputs` object, including skipped/unavailable labels omitted from arithmetic.
-No cache, retry, write, transaction, partial return, supervisor dispatch or provider access. `experiments.gate_report` consumes fold-local exploratory reporting; production and final authority are unchanged.
+No supervisor dispatch or provider access. `experiments.gate_report` consumes fold-local exploratory reporting; production and final authority are unchanged.
 
 `iv_crush_inputs.load_iv_crush_targets(repository, snapshot, *, as_of_month, labels_before, purpose="selection", event_ids=None)` reads signed relative IV30 change from the exact `iv_crush_targets.v2` contract/hash (semantic version `2.0.0`).
 `preflight_iv_crush_targets(..., as_of_month, event_ids)` requires explicit selection participants (`CONTRACT_MISMATCH` when absent) and returns metadata-only planned-object evidence, not a capability; the loader repeats admission.
@@ -183,19 +178,19 @@ These offline APIs do not publish sources, register experiments or participate i
 |---|---|
 | Snapshot/population | Shared canonical snapshot, holdout-union and ambiguity admission precedes targets; unsupported/final purposes or malformed holdout context refuse `HOLDOUT_ACCESS_DENIED`; a missing/malformed label cutoff refuses `CONTRACT_MISMATCH`. Bulk reads omit events on/after the explicit calendar-day label cutoff; explicit requests containing one refuse `CONTRACT_MISMATCH`. An empty eligible set refuses `POPULATION_COLLAPSED`. |
 | Public planner candidates | `plan_event_targets` requires ticker and naive midnight event_date columns. Only candidate shape/identity checks translate to `CONTRACT_MISMATCH` before repository access; every error raised while planning, including native `DataError` envelopes, propagates unchanged. |
-| Physical admission | Every candidate passes public `event_history.plan_event_targets` (metadata-only singleton admission) before any target opens. Missing/mixed objects or unprovable exact ticker/date bounds refuse `HOLDOUT_ACCESS_DENIED`; nonmatching contract/hash refuses `CONTRACT_MISMATCH`. Every declared target object is capped at 1 MiB before opening (`RESULT_LIMIT_EXCEEDED`); bounded Repository scans also cap compressed and total uncompressed bytes. Computed-moves defaults remain unchanged. |
+| Physical admission | Every candidate passes public `event_history.plan_event_targets` (metadata-only singleton admission) before any target opens. Missing/mixed objects or unprovable exact ticker/date bounds refuse `HOLDOUT_ACCESS_DENIED`; nonmatching contract/hash refuses `CONTRACT_MISMATCH`. Every declared target object is capped at 1 MiB before opening (`RESULT_LIMIT_EXCEEDED`); bounded Repository scans also cap compressed and total uncompressed bytes. |
 | Stored label | Exactly one matching ticker/date/session, boolean false skip and null reason are required. Canonical anchors span 1–5 calendar days: AMC requires pre ≤ event < post; BMO requires pre < event ≤ post. Availability equals post plus one calendar day, follows the event and precedes the cutoff before numeric use. These checks do not prove source-row adjacency or exchange sessions. Skipped, late or malformed rows refuse the whole read with `EXPERIMENT_VARIANT_FAILED`; finite signed values, including zero and values below -100, remain unchanged. |
-| Provenance | `validate_iv_crush_receipt(preflight, fold, receipt, targets)` checks exact evaluation membership/order, finite signed rows, cutoff/context/object identities and the full receipt/hash without I/O; malformed evidence raises structural/numeric exceptions. Attributes bind dataset/contract ref, cutoff, month/membership pins, purpose, future exclusions and ordered fragment/object/content hashes plus caller source_id/input_hash; source marker/hash syntax is checked, not authenticated or recomputed. Publication/finality remain unverified; availability is a modeled floor. |
-| Progress | Admission, planning and read stages log start/end/failure, elapsed time and peak RSS to stderr, with count/rate/ETA ticks at most every 30 seconds and aggregate decisions; IV refusal stages log the native code only (`report_refusals`), never message text, event identities or details. Logging cannot change results, identities, errors or read authority. |
-| Effects/failures | No source-quote reads, target rebuilding, retries, persistent cache, writes, partial returns or experiment authority. Earlier admitted objects may decode availability before a late-label refusal. Native repository integrity/resource refusals propagate unchanged. |
+| Provenance | `validate_iv_crush_receipt(preflight, fold, receipt, targets)` checks exact evaluation membership/order, finite signed rows, cutoff/context/object identities and the full receipt/hash without I/O; malformed evidence raises structural/numeric exceptions. Attributes bind dataset/contract ref, cutoff, month/membership pins, purpose, future exclusions and ordered fragment/object/content hashes plus caller source_id/input_hash; source marker/hash syntax is checked, not authenticated or recomputed. |
+| Progress | Admission, planning and read stages follow the "Progress logging" invariant; IV refusal stages log the native code only (`report_refusals`). |
+| Effects/failures | No source-quote reads, target rebuilding or experiment authority. Native repository integrity/resource refusals propagate unchanged. |
 
 The reader accepts only the exact definition (no grandfathering), uses `event_history.POPULATION_CONTEXT_COLUMNS`, and supplies no source-receipt validation, forecast recipe or model.
 
-`event_target_store.publish_event_targets` is a shared, source-free, opt-in publisher of explicit complete earnings metadata rows and a selected ticker/date target set, each with its exact contract (no production caller; callers are `experiments.iv_crush_prepare` and synthetic tests). Every target must match metadata, but metadata need not have a target; supplied aliases/conflicts and nullable fields are preserved. Missing/extra fields, null required values, duplicate/non-string keys, unsupported or structurally invalid native-decoder contracts, invalid caps, non-JSON values or cyclic provenance refuse `CONTRACT_MISMATCH` before hashing or publication; exceeded row/object/byte caps refuse `RESULT_LIMIT_EXCEEDED`; PyArrow/native conversion, inspection and catalog errors propagate with no row repair or dropped fields. Inputs are an asserted native source snapshot, nonempty JSON provenance (bound into the request hash, not authenticated), explicit positive per-table row/per-object/total-byte caps and an explicit output Repository; the caller owns admission and workspace isolation. A single native `commit_snapshot` transaction publishes only earnings metadata and the target table in reconstructed knowledge mode; exact reordered replay reuses the successful receipt without catalog changes; failure may leave unreferenced immutable objects but never a partial committed snapshot. It does no provider/source reads, target arithmetic, fitting, holdout policy, cache or retry. Writer batching and progress: `guides/research_architecture_design_notes.md`.
+`event_target_store.publish_event_targets` is a shared, source-free, opt-in publisher of explicit complete earnings metadata rows and a selected ticker/date target set, each with its exact contract (no production caller). Every target must match metadata, but metadata need not have a target; supplied aliases/conflicts and nullable fields are preserved. Missing/extra fields, null required values, duplicate/non-string keys, unsupported or structurally invalid native-decoder contracts, invalid caps, non-JSON values or cyclic provenance refuse `CONTRACT_MISMATCH` before hashing or publication; exceeded row/object/byte caps refuse `RESULT_LIMIT_EXCEEDED`; PyArrow/native conversion, inspection and catalog errors propagate with no row repair or dropped fields. Inputs are an asserted native source snapshot, nonempty JSON provenance (bound into the request hash, not authenticated), explicit positive per-table row/per-object/total-byte caps and an explicit output Repository; the caller owns admission and workspace isolation. A single native `commit_snapshot` transaction publishes only earnings metadata and the target table in reconstructed knowledge mode; exact reordered replay reuses the successful receipt without catalog changes; failure may leave unreferenced immutable objects but never a partial committed snapshot. It does no provider/source reads, target arithmetic, fitting, holdout policy, cache or retry. Writer batching and progress: `guides/research_architecture_design_notes.md`.
 
 `snapshot_rows.iter_snapshot_rows` streams an exact committed snapshot/table projection with explicit key predicates as Arrow-native Python rows; `read_snapshot_rows` collects it without partial returns or pandas null/integer coercion.
 Positive candidate-row, cumulative decoded Arrow-byte, per-object and batch-row caps (default1024, bounded by contract/population) are required; invalid caps refuse `CONTRACT_MISMATCH`, exceeded row/decoded-byte caps refuse `RESULT_LIMIT_EXCEEDED`; native scan/integrity refusals propagate. Byte caps are not Python heap limits.
-Streaming rows remain provisional until exhaustion; abandoned streams must close. This layer releases each decoded batch before advancing; the collector retains its complete list. Bounded stage/progress telemetry, no retry/writes/outcome authority; callers own admission.
+Streaming rows remain provisional until exhaustion; abandoned streams must close. This layer releases each decoded batch before advancing; the collector retains its complete list. No outcome authority; callers own admission.
 
 `magnitude_inputs.forecast_cutoff(event_date, session, horizon, calendar)` uses native `CalendarSessions`: five, three or one full intervening sessions backward from the shared last-pre-print close; Wednesday AMC at one uses Tuesday close, BMO uses Monday.
 Invalid dates/sessions/horizons/calendars, projected anchors, required-session gaps or insufficient history refuse `CONTRACT_MISMATCH`.
@@ -210,9 +205,7 @@ labels_before, purpose="selection", event_ids=None)` is the separate label
 view. The fixed target recipe is absolute split-neutral, non-dividend-adjusted
 earnings close-to-close return in percentage points; the native signed
 `computed_moves` value is retained, never rescaled, clipped or adjusted again.
-The primary estimand is conditional mean, selected by pooled RMSE; MAE is
-secondary (implemented by the magnitude reporter) and quantile calibration is
-unimplemented. Shared population admission precedes label access. Bulk reads
+Shared population admission precedes label access. Bulk reads
 exclude events on/after `labels_before`; explicit requests containing one
 refuse. All remaining objects pass `event_history`'s shared singleton preflight
 before any is opened; mixed inherited snapshots refuse. Each scan uses the
@@ -221,32 +214,25 @@ refuse before object access and oversized summed Parquet row-group bytes before
 row decoding (`RESULT_LIMIT_EXCEEDED`); this is not a population/heap cap. Label
 availability must be strictly before `labels_before`; missing, skipped,
 malformed or non-finite labels refuse the whole call, with zero a valid value.
-Opt-in `omit_not_computed=True` (a `bool`, else `CONTRACT_MISMATCH`; used by the
-magnitude search's inner and outer evaluation reads) omits, without parsing, a
-row the writer marked `skipped` (v5 `not_computed_reason`), as
-`qualify_magnitude_training_targets` does. Omissions are listed in the frame
+Opt-in `omit_not_computed=True` (a `bool`, else `CONTRACT_MISMATCH`) omits, without parsing, a
+row the writer marked `skipped` (v5 `not_computed_reason`). Omissions are listed in the frame
 attrs and receipt as `omitted_labels` (`[{"event_id", "reason"}]`, sorted by
 event ID, `reason` the row's `not_computed_reason` or `skipped`; the receipt
 carries the key only when non-empty). Only `skipped=true` is omitted, never
 null/late availability; every other refusal is unchanged; forecasts for omitted
 events are made but not scored and `event_count` counts scored events. Earlier
-events with late availability can be decoded to check their recorded date
-(reconstructed availability, not publication evidence). Output rows carry
+events with late availability can be decoded to check their recorded date. Output rows carry
 target/object identity; frame attributes bind recipe, label cutoff,
 snapshot/dataset/month/membership versions and consumed inputs. Forecast cutoff
 and label cutoff are distinct contracts; this seam neither fits a model nor
-joins labels into features. Repository failures propagate; no cache, retry,
-write or partial return. `experiments/magnitude_report.py` consumes it through
-the magnitude CLI; there is no supervisor or final-read caller.
+joins labels into features. It has no supervisor or final-read caller.
 
 `magnitude_inputs.preflight_magnitude_targets(repository, snapshot, *,
 as_of_month, event_ids)` admits an explicit selection population and proves
 every candidate object's singleton isolation without opening outcomes; its
 detached digest binds the population/context and planned object identities.
-The magnitude runner preflights the union of actual train/evaluation participants
-across all folds before its first label read. The preflight is evidence, not a
-capability: target loaders repeat their own admission and physical checks and
-accept no caller-supplied scan plan.
+The preflight is evidence, not a capability: target loaders repeat their own
+admission and physical checks and accept no caller-supplied scan plan.
 
 `qualify_magnitude_training_targets(repository, snapshot, *, as_of_month,
 labels_before, event_ids)` admits explicit candidates whose event dates precede
@@ -259,16 +245,14 @@ omissions), qualified IDs, omission reasons and the cutoff. Empty qualification
 refuses `POPULATION_COLLAPSED`; malformed eligible labels `EXPERIMENT_VARIANT_FAILED`.
 Protected/ambiguous identities and mixed objects refuse before outcome access;
 late admitted objects may be decoded, protected objects are never opened.
-Repository refusals propagate: no cache, retry, write or partial result. Strict
-target identities are unchanged; these seams publish no evidence and compute no
+Strict target identities are unchanged; these seams publish no evidence and compute no
 historical feature aggregates.
 
-`magnitude_features.load_magnitude_history(repository, snapshot, *, event_id, as_of_month, horizon, history_start, purpose="selection")` binds one canonical event's prior-history features to its full-session forecast ceiling. Exact snapshot and target holdout/alias admission precede calendar or outcomes. The calendar is the sorted union of canonical `daily_market.date` values from that snapshot (only the date column; no projected days or external override); missing/empty calendars refuse through the shared reader/`CALENDAR_UNAVAILABLE`, and malformed dates, invalid horizons or incomplete anchor/session windows refuse `CONTRACT_MISMATCH` before historical outcome access. The shared `forecast_cutoff` computes the ceiling and `load_event_history` uses that exact day, excluding protected/ambiguous/current/future outcomes before its physical singleton preflight; the adapter never reads the target label. Prior-label availability on the source-session day is admitted, later dates omitted, never zero-filled. Outputs bind canonical event/session, snapshot, calendar version, dataset/object identities, horizon/cutoff, target and history-feature recipes, all history reads/omissions and membership versions into one deterministic input digest. Empty history keeps explicit null features; non-finite derived features refuse `EXPERIMENT_VARIANT_FAILED`. Provenance is reconstructed date bounds; event-schedule as-known and source-publication evidence stay unverified. The stored build uses `plan_magnitude_folds`, `event_history._assemble_history` and `_feature_recipe`, not this adapter, which has no fitting, target-join, CLI, provider, report, ledger or final-read caller, no retry, write or partial result, and only the observed-session cache (fold table "Cache, retry" row).
+`magnitude_features.load_magnitude_history(repository, snapshot, *, event_id, as_of_month, horizon, history_start, purpose="selection")` binds one canonical event's prior-history features to its full-session forecast ceiling. Exact snapshot and target holdout/alias admission precede calendar or outcomes. The calendar is the sorted union of canonical `daily_market.date` values from that snapshot (only the date column; no projected days or external override); missing/empty calendars refuse through the shared reader/`CALENDAR_UNAVAILABLE`, and malformed dates, invalid horizons or incomplete anchor/session windows refuse `CONTRACT_MISMATCH` before historical outcome access. The shared `forecast_cutoff` computes the ceiling and `load_event_history` uses that exact day, excluding protected/ambiguous/current/future outcomes before its physical singleton preflight; the adapter never reads the target label. Prior-label availability on the source-session day is admitted (as in `event_history`). Outputs bind canonical event/session, snapshot, calendar version, dataset/object identities, horizon/cutoff, target and history-feature recipes, all history reads/omissions and membership versions into one deterministic input digest. Empty history keeps explicit null features; non-finite derived features refuse `EXPERIMENT_VARIANT_FAILED`. The stored build uses `plan_magnitude_folds`, `event_history._assemble_history` and `_feature_recipe`, not this adapter, which has no fitting, target-join, CLI, provider, report, ledger or final-read caller, no retry, write or partial result, and only the observed-session cache (fold table "Cache, retry" row).
 
 `magnitude_folds.plan_magnitude_folds(repository, snapshot, *, as_of_month, evaluation_years, training_start, event_ids=None)` plans metadata-only expanding annual evaluation folds from one admitted snapshot and its pinned calendar.
 `plan_regression_folds` shares that population/calendar implementation but binds a validated explicit target descriptor into `regression_temporal_plan.v1`; legacy magnitude plans remain byte-identical. IV metadata planning uses its annual candidate folds and 5/3/1 clocks, not label qualification, native registration or nested search.
-No outcomes, writes, caches, retries or target-snapshot identity are introduced; native admission failures propagate. Complexity and metadata scans are unchanged from magnitude planning.
-`magnitude_folds.magnitude_window(evaluation_years, training_start)` exposes the
+No outcomes or target-snapshot identity are introduced.`magnitude_folds.magnitude_window(evaluation_years, training_start)` exposes the
 same pure request validation to native preregistration and returns a detached
 canonical window; invalid requests refuse `CONTRACT_MISMATCH` without reads.
 `magnitude_folds.annual_fold(year, events)` is the public annual rule shared by
@@ -282,7 +266,7 @@ the native planner and `experiments.magnitude_search_plan` for admitted metadata
 - Exact snapshot and random/rolling/ambiguous-union admission precede calendar reads; bulk membership includes `training_start` and excludes January 1 after the last evaluation year.
 - Each event's 5/3/1 horizons share its event-year fold. Training candidates precede `min(year_start, all evaluation source-session ceilings)`; usable labels also need availability strictly before that boundary. Earlier evaluation events may train later folds, including the same issuer; annual membership need not cover a full year; no inner HPO split is defined.
 - The digest binds request, target/fold rules, ordered canonical event/cutoff memberships, holdout versions, snapshot and metadata-source objects; equivalent explicit/bulk memberships give the same `plan_id`.
-- No computed-move, label or history-feature access, fitting or registration/final-read authority; schedule/publication evidence stays unverified reconstruction.
+- No computed-move, label or history-feature access, fitting or registration/final-read authority.
 
 | Magnitude fold condition | Outcome |
 |---|---|
@@ -328,16 +312,13 @@ decisions into one row per trade with separate `mark_based_pnl`, `exit_reason`,
 `exit_day`, ambiguity and provenance columns for report callers; it does not
 write files or blend mark-based P&L with fill-validated results.
 
-| Exit-walker failure condition | Outcome (design #372 R4) |
+| Exit-walker failure condition | Outcome |
 |---|---|
-| Malformed position or leg record | Non-retryable `EXPERIMENT_VARIANT_FAILED`; whole call fails, no excluded trade or partial tuple. |
-| Missing required leg mark or mark past held-leg expiry | Non-retryable `EXPERIMENT_VARIANT_FAILED`; whole call fails, no excluded trade or partial tuple. Failure details identify the trade and failing session. |
-| Unusable quote reaching pricing | Non-retryable `EXPERIMENT_VARIANT_FAILED`; whole call fails, no excluded trade or partial tuple. |
-| Insufficient calendar coverage | Non-retryable `EXPERIMENT_VARIANT_FAILED`; whole call fails, no excluded trade or partial tuple. |
-| Invalid fractional debit basis or converted threshold | Non-retryable `EXPERIMENT_VARIANT_FAILED`; whole call fails, with entry trade/session context and no partial tuple. |
+| Malformed position or leg record; unusable quote reaching pricing; insufficient calendar coverage | Non-retryable `EXPERIMENT_VARIANT_FAILED`; whole call fails, no excluded trade or partial tuple. |
+| Missing required leg mark or mark past held-leg expiry | Same, and failure details identify the trade and failing session. |
+| Invalid fractional debit basis or converted threshold | Same, with entry trade/session context. |
 
-Other repository refusals propagate. No cache, retry, transaction or write:
-identical inputs return identical results; report/ledger publication is outside this seam.
+Other repository refusals propagate. Report/ledger publication is outside this seam.
 
 Internal (not interface, despite the non-underscore package norm elsewhere):
 `_scan.py` and `_snapshot.py` (see Dependencies — two independent
@@ -348,9 +329,9 @@ snapshot-read helpers), `_pricing.py` (except the names carved out above),
 
 Request preparation, the private ops authorization/spend primitive, the private metadata-only final population reader and the private frozen evaluator are implemented; no production authorization entrypoint, final-read caller or result retrieval exists. Agents and supervisors may prepare requests, never authorize them ([user decision](https://github.com/yshewchuk/investment-validation/issues/490#issuecomment-6072905454)); #445's union exclusion is preserved.
 
-**Request.** Canonical versioned bytes use the existing `experiment_id` as the decision identity ([decisions](https://github.com/yshewchuk/investment-validation/issues/490#issuecomment-6101284544)) and bind the registered `variant_id`/registration reference, resolved plan/source/evaluation-recipe and frozen-model hashes, exact committed `snapshot_id`, `holdout_as_of_month` and both membership versions; no latest-head resolution, caller population, alternate arm, fitting, threshold search or evaluator callback is accepted. Membership stays in `foundation.experiment_holdouts` (ambiguous identities refused, random and rolling sets bound together); changing month, version, snapshot or winner cannot reset a decision's spend, and the request digest identifies bytes, not a new decision. `native_registration.prepare_final_holdout_request` verifies existing registration metadata only (never resolves a head, scans a population or reads results); the registration's optional `final_read` declaration seals recipe, completeness-bar and frozen-model references, preparation derives them, and registrations without it refuse preparation. Request validity proves neither winner selection nor read eligibility: the later metadata-only preflight must verify the preregistered completeness artifact and refuse an unmet bar before any holdout outcome read.
+**Request.** Canonical versioned bytes use the existing `experiment_id` as the decision identity ([decisions](https://github.com/yshewchuk/investment-validation/issues/490#issuecomment-6101284544)) and bind the registered `variant_id`/registration reference, resolved plan/source/evaluation-recipe and frozen-model hashes, exact committed `snapshot_id`, `holdout_as_of_month` and both membership versions; no latest-head resolution, caller population, alternate arm, fitting, threshold search or evaluator callback is accepted. Membership stays in `foundation.experiment_holdouts` (ambiguous identities refused, random and rolling sets bound together); changing month, version, snapshot or winner cannot reset a decision's spend. `native_registration.prepare_final_holdout_request` verifies existing registration metadata only (never resolves a head, scans a population or reads results); the registration's optional `final_read` declaration seals recipe, completeness-bar and frozen-model references, and registrations without it refuse preparation. Request validity proves neither winner selection nor read eligibility: the later metadata-only preflight must verify the preregistered completeness artifact and refuse an unmet bar before any holdout outcome read.
 
-**Population reader.** Private `_final_population.load_final_population(repository, request)` is the only final-read reader that returns separate held-out event-ID sets. It accepts a validated `FinalHoldoutRequest` (never a caller population) and returns a frozen `FinalPopulation` with sorted random and rolling IDs, overlap and ambiguity counts, and bound snapshot/month/version context. It reads only canonical `earnings_events` metadata with the loaders' shared membership/ambiguity rules, excludes ambiguous events from both sets, performs no writes, and does not inspect ops state or hold a grant. It is not exported or reachable from loaders, training, selection or sweep.
+**Population reader.** Private `_final_population.load_final_population(repository, request)` is the only final-read reader that returns separate held-out event-ID sets. It accepts a validated `FinalHoldoutRequest` (never a caller population) and returns a frozen `FinalPopulation` with sorted random and rolling IDs, overlap and ambiguity counts, and bound snapshot/month/version context. It reads only canonical `earnings_events` metadata with the loaders' shared membership/ambiguity rules, excludes ambiguous events from both sets, and does not inspect ops state or hold a grant. It is not reachable from loaders, training, selection or sweep.
 
 | Population reader condition | Outcome |
 |---|---|
@@ -359,9 +340,8 @@ Request preparation, the private ops authorization/spend primitive, the private 
 | `earnings_events` absent from the snapshot | `CONTRACT_MISMATCH`; no partial population. Present with no fragments, the scan yields no events and the empty-population row applies. |
 | `resolve` raising a non-integrity `DataError` (such as not-found), `ValueError`, `TypeError` or `KeyError` | `SNAPSHOT_UNRESOLVED`. An integrity-category `DataError` (such as `MANIFEST_CORRUPT`) and any other exception propagate unchanged. Integrity failures during the scan propagate as the repository's typed refusal. |
 | Both sets empty after ambiguity exclusion | `POPULATION_COLLAPSED`; never an empty success. Preregistered completeness remains the later preflight's refusal. |
-| Retry, cache, write | None; read-only, identical pinned inputs return identical populations. |
 
-**Evaluator.** Private `_final_evaluator.evaluate_final_holdout(repository, request, population)` takes only a validated `FinalHoldoutRequest` and the `FinalPopulation` that `load_final_population` returns; it has no other parameter, fit, alternate arm, threshold search or callback. It scores the committed `trades` rows of the pinned snapshot with this package's provenance whose `variant` equals `request.variant_id` (the frozen winner); the table is read whole, then filtered. It returns frozen `FinalMetrics` with the random and rolling results separately, each with event count, trade count, events without a trade, total and mean `ret` and win rate (`None` when a set has no trade), plus overlap and ambiguity counts; the sets are never averaged or merged. It does no writes, caching or retries, never imports ops, and checks no fence or revocation: the later leaf does that before invoking it.
+**Evaluator.** Private `_final_evaluator.evaluate_final_holdout(repository, request, population)` takes only a validated `FinalHoldoutRequest` and the `FinalPopulation` that `load_final_population` returns; it has no other parameter, fit, alternate arm, threshold search or callback. It scores the committed `trades` rows of the pinned snapshot with this package's provenance whose `variant` equals `request.variant_id` (the frozen winner). It returns frozen `FinalMetrics` with the random and rolling results separately, each with event count, trade count, events without a trade, total and mean `ret` and win rate (`None` when a set has no trade), plus overlap and ambiguity counts; the sets are never averaged or merged. It never imports ops and checks no fence or revocation: the later leaf does that before invoking it.
 
 | Evaluator condition | Outcome |
 |---|---|
@@ -374,11 +354,9 @@ Request preparation, the private ops authorization/spend primitive, the private 
 **Authority and lifecycle.** Ops owns authorization, spend and state fencing
 (`engine/v2/ops/ARCHITECTURE.md`, `ops.final_holdout`; currently test-consumed
 only). The `tools/v2_final_holdout.py` leaf that would call this evaluator, and
-result retrieval, are not built; their proposed design (state machine,
-crash/reconciliation, retrieval) is `guides/final_holdout_authorized_read_design.md`,
-design and not contract. Ops and research stay layer-7 peers with no imports
-between them, and training, selection, sweep and the loaders accept no grant
-argument, final purpose or returned holdout frame.
+result retrieval, are not built (design only:
+`guides/final_holdout_authorized_read_design.md`). Training, selection, sweep and
+the loaders accept no grant argument, final purpose or returned holdout frame.
 
 ## Inputs
 
@@ -391,10 +369,8 @@ Each scan uses that bound for its snapshot, contract and predicates; the partial
 daily builder also enforces its explicit cumulative row bound. Empty selected
 membership allows zero result rows with a positive batch size. A complete read
 either returns its population or raises its typed refusal (no month/day retries
-or null-overflow refusals). Predicates, exact-pair filtering, batch filtering,
-row ordering and deduplication remain part of the read contract.
-
-Shared `_scan` reads report decoded-row progress on stderr at bounded cadence against the candidate-row bound (an upper bound; filtered scans also report retained/skipped rows) and log start and completion/failure with elapsed time and peak RSS for every row scan; no additional scan is used for telemetry and native errors propagate unchanged.
+or null-overflow refusals).
+Shared `_scan` reads follow the "Progress logging" invariant, reporting decoded rows against the candidate-row bound (an upper bound; filtered scans also report retained/skipped rows); no additional scan is used for telemetry.
 
 Public `_chains.read_chains_for_years` delegates a nonempty iterable of years to `_snapshot.read_table`/`_scan.read_table` with the fixed chain projection, optional key predicates and `batch_filter`; it materializes retained rows and performs no experiment holdout admission. The callback runs on each batch's pandas frame before retention and returns narrowed rows or `None` (omitting it or `None` preserves existing reads). `_chains.load_chain_index` uses it to keep exactly the requested ticker/date pairs, one manifest year at a time: only the exact pair mask, never the cross product, defines retained rows; frames retain ordering and duplicates. This bounds retained unmatched rows, not process RSS.
 
@@ -403,8 +379,7 @@ Public `_chains.read_chains_for_years` delegates a nonempty iterable of years to
   `engine.v2.foundation.ArtifactStore`.
 - `--scope` (default `"shadow"`, `_scan.DEFAULT_SCOPE`/`_snapshot.DEFAULT_SCOPE`)
   and `--snapshot-id` (default `None`) resolve the *one* `SnapshotRef` the run
-  reads. An explicit id reproduces a run after the scope's head has moved;
-  omitting it resolves the current pinned head. A CLI that resolves before its
+  reads. A CLI that resolves before its
   first table read passes that id downstream; later lookups use the explicit id,
   never the possibly advanced head.
 - Tier-2 tables, read through `Repository.scan` against that snapshot:
@@ -443,14 +418,11 @@ Public `_chains.read_chains_for_years` delegates a nonempty iterable of years to
   committed through `engine.v2.data.generic_incremental`, plus a JSON
   outcome summary (`committed`, `outcome`, plus `emitted_revisions` for
   build-trades and `committed_snapshot_id` for reconcile-trades) — never a rewrite of the table version the run read.
-- Every snapshot-reading output that carries data also carries the `snapshot_id` it was
-  read from, so a report is reproducible without re-resolving anything.
-  `experiment_trades.load_trades` includes its explicit snapshot and holdout
-  context columns alongside the legacy-compatible trade columns.
+- Every snapshot-reading output that carries data also carries its `snapshot_id`.
 
 ## Dependencies
 
-`engine.v2.data` (`Repository`, `errors`, `generic_incremental`, `incremental_tables`, `bounded_snapshot`, `catalog`, `documents`, `objects`, `manifests`, `query`, `time_formats`, `computed_moves_table`, `computed_move_bounds`, `confirmed_event_metadata`, `event_history`, `iv_crush_table`, `price_history_query`, `price_history_table`), `engine.v2.contracts` (`RevisionCandidate`, `CompletedCoverage`, `CoverageKey`, `CoverageOutcome`, `TimeInterval`), `engine.v2.contracts.data` (`DataQuery`, `KeyPredicate`, `SnapshotRef`, `TimeInterval`, `ObjectRef`, `TableContractRef`, `ColumnContract`, `TableContract`), `engine.v2.contracts.final_holdout` (`FinalHoldoutRequest`, for `_final_population`), `engine.v2.features.calendar_features` (`calendar_features`), `engine.v2.features.own_vol` (`compute_own_vol`, the G3 consumer edge), `engine.v2.features.panel_math` (`history_features`, `DAILY_STATE_FIELDS`) and `engine.v2.features.regime` (`add_regime_features`, `validated_regime_closes`), `engine.v2.models.training` (`FitInputs`, `fit_routes` for offline horizon fitting), `engine.v2.foundation` (`ArtifactStore`, `SystemClock`, `canonical_json`, `iter_canonical_json`, `content_hash`, `from_document`, `to_document`, `format_timestamp`, `market_calendar`, `experiment_exits.valid_exit_recipe`, `experiment_holdouts.calendar_date` (canonical days for IV input/anchor/clock validation), `experiment_holdouts.ExperimentHoldouts` (panel membership-policy versions), plus
+`engine.v2.data` (`Repository`, `errors`, `generic_incremental`, `incremental_tables`, `bounded_snapshot`, `catalog`, `documents`, `objects`, `manifests`, `query`, `time_formats`, `computed_moves_table`, `computed_move_bounds`, `confirmed_event_metadata`, `event_history`, `iv_crush_table`, `price_history_query`, `price_history_table`), `engine.v2.contracts` and `engine.v2.contracts.data` (revision/coverage and data-query/snapshot/table contract types), `engine.v2.contracts.final_holdout` (`FinalHoldoutRequest`, for `_final_population`), `engine.v2.features` (`calendar_features`, `own_vol.compute_own_vol` (the G3 consumer edge), `panel_math`, `regime`), `engine.v2.models.training` (`FitInputs`, `fit_routes` for offline horizon fitting), `engine.v2.foundation` (`ArtifactStore`, `SystemClock`, canonical JSON/hash/document helpers, `format_timestamp`, `market_calendar`, `experiment_exits.valid_exit_recipe`, `experiment_holdouts.calendar_date` (canonical days for IV input/anchor/clock validation), `experiment_holdouts.ExperimentHoldouts` (panel membership-policy versions), plus
 `final_holdout.request_from_document` and `typed.to_document` for `_final_population`); research itself owns `tail_history` and `iv_dynamics` (G1, G2).
 Only lower-layer imports are allowed (`checks/layer_map.py`, `only_imports` unset):
 no `engine.v2.scoring`, `engine.v2.evaluation`, `engine.v2.ledger` or sibling/higher
@@ -464,16 +436,12 @@ this native write path advances only its dedicated context scope, never source h
 verbatim from `engine.data.sources.polygon.option_ticker`. Research has no legacy
 adapter; v2 cannot import legacy without a declared adapter.
 
-**Known duplication (issue #69):** `_scan.py` (used by `fill_quality.py`,
-`polygon_fills.py`, `signal_screen.py` and
-`_pricing.trading_calendar_from_snapshot`) and `_snapshot.py` (used by
-`_chains.py`'s replay reads and `_trades_publish.py`'s build/reconcile reads) are
-two independent modules. `_snapshot.read_table` delegates its scan to
+**Known duplication (issue #69):** `_scan.py` and `_snapshot.py` are two
+independent snapshot-read modules. `_snapshot.read_table` delegates its scan to
 `_scan.read_table`, forwarding caller `key_filter` predicates, and keeps its own
 partition-key resolution, no-partition refusal and empty-result frame shape.
-Merging them remains issue #69.
 
-Callers: no `engine/` modules import this package (`checks/import_layers.py` parses only `engine*` importers, so the `tools/v2_*.py` CLI leaves and `experiments/` callers sit outside the layering hook). The `experiments/` consumers of each public seam are listed in `guides/research_architecture_design_notes.md` and their contracts live in `experiments/ARCHITECTURE.md`. Two consumer rules stay here: `experiments/magnitude_search_plan.py` consumes `magnitude_folds.annual_fold` and owns native bounds/cutoff exclusions from the registration-pinned `binding["snapshot"]` (public bounded-snapshot admission precedes table access; a missing bounds row seals `label_bounds_missing`, a present null row `label_bounds_unavailable`, a malformed non-null stored date refuses identity; a fold whose strict exclusions remove every evaluation event refuses before plan publication; `read_search_plan` reconstructs folds and revalidates the sealed plan, including availability, repeating the bounded bounds admission); and the archived `experiments/common_v2.py` trade-read caller omits required holdout context and is refused.
+Callers: no `engine/` modules import this package (`checks/import_layers.py` parses only `engine*` importers, so the `tools/v2_*.py` CLI leaves and `experiments/` callers sit outside the layering hook). The `experiments/` consumers of each public seam are listed in `guides/research_architecture_design_notes.md` and their contracts live in `experiments/ARCHITECTURE.md`. `experiments/magnitude_search_plan.py` consumes `magnitude_folds.annual_fold` and owns native bounds/cutoff exclusions from the registration-pinned `binding["snapshot"]` (its seal and refusal rules are in `experiments/ARCHITECTURE.md`); the archived `experiments/common_v2.py` trade-read caller omits required holdout context and is refused.
 
 ### Stored magnitude-history materialization
 
@@ -481,21 +449,19 @@ Callers: no `engine/` modules import this package (`checks/import_layers.py` par
 
 | Boundary | Contract |
 | --- | --- |
-| Inputs | Exact source snapshot, admitted temporal plan, history start, fixed 5/3/1 clocks, per-feature missingness and installed producer source/environment identity; no experiment outputs. |
-| Protected reads | The complete eligible singleton candidate union is preflighted before any outcome opens; protected/ambiguous objects never open; admitted late labels may decode availability and are omitted before arithmetic. An admitted outcome is decoded once per build; no cache persists across builds; memory has no fixed byte cap. Outcomes are read through `event_history.plan_with_reader`: malformed candidates refuse `CONTRACT_MISMATCH`; membership that is not exactly the preflighted set, an unplanned event, or a mismatched day, ticker or request refuses `HOLDOUT_ACCESS_DENIED` before any outcome opens; each object is capped at 1 MiB (`MAX_OUTCOME_OBJECT_BYTES`, `RESULT_LIMIT_EXCEEDED`); at most 32 run streams are live (beyond that only extra scans). A scan failure propagates its native code and fails the build before any snapshot, receipt or head is published. |
-| Catalog reads and progress | The CLI opens its `Repository` with `pin_snapshots=True`; canonical population scans report start/end/failure with elapsed seconds and peak RSS on stderr, periodic ticks at most every 30 s, and refusal stages include the native `DataError` code only. Telemetry never changes results, errors or stdout (native experiment CLIs retain JSON stdout). |
+| Protected reads | The complete eligible singleton candidate union is preflighted before any outcome opens; protected/ambiguous objects never open; admitted late labels may decode availability and are omitted before arithmetic. An admitted outcome is decoded once per build; no cache persists across builds; memory has no fixed byte cap. Outcomes are read through `event_history.plan_with_reader`: malformed candidates refuse `CONTRACT_MISMATCH`; membership that is not exactly the preflighted set, an unplanned event, or a mismatched day, ticker or request refuses `HOLDOUT_ACCESS_DENIED` before any outcome opens; each object is capped at 1 MiB (`MAX_OUTCOME_OBJECT_BYTES`, `RESULT_LIMIT_EXCEEDED`); at most 32 run streams are live. A scan failure propagates its native code and fails the build before any snapshot, receipt or head is published. |
+| Catalog reads and progress | The CLI opens its `Repository` with `pin_snapshots=True`; canonical population scans follow the "Progress logging" invariant (native experiment CLIs retain JSON stdout). |
 | Per-forecast features | Shared history arithmetic preserves availability and numeric-refusal order; consumed objects, omissions and availability accompany all eleven columns. Exclusion rosters stay transient: persisted lineage omits `holdout_exclusions` and the stored reader refuses it. Empty `n_prior` is zero; other missing values are null with `on_missing=null`; no runtime imputation or production v4 aggregates. |
 | Output | Features-only `research_magnitude_history.v1` snapshot, separate from unchanged source: three ordered horizons per event-isolated object; primary key `(event_id, context_id, horizon_sessions)`, physical context field and context partition. |
 | Publication | Inspected objects/manifests and success receipt commit atomically under an initially empty deterministic scope; failure admits no snapshot (complete unreferenced objects remain for normal cleanup). |
 | Replay/conflict | A matching success receipt returns the original artifact without moving a head; a failed/conflict receipt for the same context, or conflicting receipts/heads, refuse `IDENTITY_CONFLICT`; nothing retries automatically. |
 | Stored read | The supported entrypoint reconstructs context; the engine verifies exact receipt/output and complete object isolation, then all row metadata before feature-column decoding (checksum verification reads bytes); no historical outcomes or arithmetic; malformed reads return no partial rows. |
-| Trust/authority | Native inspected catalog metadata is trusted, not attested against malicious catalog writers; schedule/publication availability stays unverified reconstruction; no experiment/final-read authority; registration v1.0–v1.3 and the fixed baseline are unchanged. |
+| Trust/authority | Native inspected catalog metadata is trusted, not attested against malicious catalog writers; no experiment/final-read authority; registration v1.0–v1.3 and the fixed baseline are unchanged. |
 | Refusals | Missing or changed context/receipt `IDENTITY_CONFLICT`; unprovable isolation `HOLDOUT_ACCESS_DENIED`; bad stored schema/metadata/missingness `CONTRACT_MISMATCH`; non-string selections, malformed selection containers, unknown event/feature or duplicate feature `CONTRACT_MISMATCH` before any payload scan. |
 | Source/publication failures | Unknown source/feature snapshot ID `SNAPSHOT_NOT_FOUND`; resolved source-pin mismatch during public build/read context derivation `SNAPSHOT_UNRESOLVED`; direct `materialize` source/context mismatch `IDENTITY_CONFLICT`; non-native computed-moves contract `CONTRACT_MISMATCH`; empty fold `POPULATION_COLLAPSED`; invalid eligible label/features `EXPERIMENT_VARIANT_FAILED`; competing head `SNAPSHOT_CONFLICT`; other native catalog/object/source-admission errors propagate. |
 
 `magnitude_history_inputs.admit_stored` delegates to `magnitude_history_store.preflight_stored`: exact receipt/output, features-only contract and event isolation; no payloads or arithmetic.
-Missing/changed receipt/pin refuses `IDENTITY_CONFLICT`, bad contract `CONTRACT_MISMATCH`, unprovable isolation `HOLDOUT_ACCESS_DENIED`.
-Its unlayered caller owns context derivation/registration; `experiments/magnitude_history_report.py` uses stored reads and target qualification. Both v1 consumers remain unchanged.
+Refusal codes are the table's Refusals row. Its unlayered caller owns context derivation/registration.
 
 **Eligible history:** sole public build/read boundary `experiments.eligible_history` rejects producer overrides and fingerprints installed code/environment; backend `_materialize`/`_read`/`_iter_read` are trusted internal helpers, not admitted APIs or Python security. The backend `plan_targets` is a read-only planner (no materialization, no read capability) that SIZE target derivation calls to learn the retained set before `materialize`. SIZE's library-only wrapper consumes the public `iter_read` stream for bounded panel composition and validates it on stored reads and receipt replay. No production/nightly entrypoint invokes that wrapper; production wiring and data runs require separate authorization.
 
@@ -508,7 +474,7 @@ Its unlayered caller owns context derivation/registration; `experiments/magnitud
 | Derived sets, request `v12`, `experiments.derived_rows.with_derived` | `v12` requires the `HMOSXLP` hash (any other `INVALID_EXPERIMENT_SPEC`) and admits `H/HM/HMO/MO-/M/HMOS/HMOSX/HMOSXL/HMOSXLP`; `v11` and earlier refuse `HMOSXL*` as an unknown set; the 1000-candidate ceiling applies to set count times `G`. `size_search_binding` checks the dictionary subset (`v12`: `HMOSXLP`) but reads the stored panel with the stored-panel subset (`v12`: `HMOSX`), so the stored fold input and sealed panel are the same for every arm. `with_derived` is the only fit-path caller of `derive_columns` (in `load_fit_inputs` and `fit_evidence`), acts only when `features` name a derived column, keeps nulls null and copies rows; a negative or non-null infinite source or missing source column refuses `CONTRACT_MISMATCH`, an overflowing product `EXPERIMENT_VARIANT_FAILED` (the fit child reports a `failed` event). |
 | R1-R6 | R1 at most 61 closes, 21 surface rows and 252 label buckets per target, no per-target copies; R4 fragments are written before the snapshot commit, so failed publication leaves unreferenced objects and no partial snapshot; R2/R3/R5/R6 as in Failure semantics (equal pinned inputs give equal values, row ids and context id). |
 
-The separate `research_eligible_history.v1` table binds exact source/bounds, policy/month/membership versions, history start, a nonempty ascending subset of the canonical 1/3/5 clocks, contributors and producer identity; exact receipts replay and live/v1 aggregates never substitute. Full canonical metadata establishes protected windows. Once the selected target/history population is known, missing required ticker/event bounds refuse `CONTRACT_MISMATCH` before outcomes (unrelated tickers need none); native bounds precede grouped eligibility/object preflight; null historical bounds are omissions. All selection targets, including annual evaluation, require retained eligibility. Only eligible prior outcomes available by each ceiling are read, preserving native means/EMA/nulls. `eligible_history_table.admit_fields` accepts only the exact research contract/recipe/policy and known H11 fields; live/unknown provenance and unsupported aliases/derivations refuse before feature reads; implied history remains separate. Limits cap decoded source rows, fragments and physical source bytes after native catalog resolution (output byte caps apply after per-target serialization, not peak allocations). Refusals: malformed dates `CONTRACT_MISMATCH`; fields/provenance/producer overrides, unisolated outcomes, excluded targets and wrong artifact `HOLDOUT_ACCESS_DENIED`; limits `RESULT_LIMIT_EXCEEDED`; changed receipt `IDENTITY_CONFLICT`. Full admitted object bytes are hashed and protected outcomes stay unopened; progress is bounded; failures publish no receipt (unreferenced objects use normal cleanup); native errors propagate. Publication/schedule-as-known remain unverified reconstruction; no production/provider/fit/final-read authority.
+The separate `research_eligible_history.v1` table binds exact source/bounds, policy/month/membership versions, history start, a nonempty ascending subset of the canonical 1/3/5 clocks, contributors and producer identity; exact receipts replay and live/v1 aggregates never substitute. Full canonical metadata establishes protected windows. Once the selected target/history population is known, missing required ticker/event bounds refuse `CONTRACT_MISMATCH` before outcomes (unrelated tickers need none); null historical bounds are omissions. All selection targets, including annual evaluation, require retained eligibility. `eligible_history_table.admit_fields` accepts only the exact research contract/recipe/policy and known H11 fields; live/unknown provenance and unsupported aliases/derivations refuse before feature reads. Limits cap decoded source rows, fragments and physical source bytes after native catalog resolution (output byte caps apply after per-target serialization, not peak allocations). Refusals: malformed dates `CONTRACT_MISMATCH`; fields/provenance/producer overrides, unisolated outcomes, excluded targets and wrong artifact `HOLDOUT_ACCESS_DENIED`; limits `RESULT_LIMIT_EXCEEDED`; changed receipt `IDENTITY_CONFLICT`. Protected outcomes stay unopened; failures publish no receipt (unreferenced objects use normal cleanup); no production/provider/fit/final-read authority.
 
 `magnitude_history_store.read_stored_for_events` is the projected search reader.
 Every call revalidates the complete receipt, isolation, metadata and feature content,
@@ -516,9 +482,7 @@ including events and columns not retained. Complete metadata admission precedes
 numeric validation; corruption or inconsistent source content refuses the read.
 Returned `inputs_id` names the exact original `read_stored` full-source envelope,
 not the projection. Selected rows contain only primary-key identity and requested
-numeric features, without lineage strings. Full-snapshot lineage is not retained;
-memory still scales with metadata and selected rows, with no fixed overall byte cap.
-A prior successful read never substitutes for fresh validation.
+numeric features, without lineage strings. Memory scales with metadata and selected rows, with no fixed overall byte cap.
 The original full-row `read_stored` API and its returned envelope remain unchanged.
 
 ## Opt-in eligibility policy boundary
@@ -540,9 +504,8 @@ No calendar guessing, outcome/feature decoding, write, registration or fit occur
 Random-held windows merge per ticker. Inclusive event/label or forecast-point overlap
 excludes a whole development group; shared random, rolling and ambiguous labels do too.
 The plan ID binds groups/policy/metadata, windows, retained IDs, development reasons,
-coverage, ambiguous IDs and ticker-filtered evaluation IDs/reasons; SIZE fold binding also applies its strict label cutoff and records exclusions. Inputs are detached.
-There are no retries, persistence, cache or partial results. Bounded progress and stage
-timing/RSS go to stderr; refusals report only native error codes, not row values.
+coverage, ambiguous IDs and ticker-filtered evaluation IDs/reasons. Inputs are detached.
+Progress follows the "Progress logging" invariant.
 
 | Condition | Outcome |
 | --- | --- |
@@ -552,14 +515,11 @@ timing/RSS go to stderr; refusals report only native error codes, not row values
 | Missing/duplicate classifier columns, malformed event IDs or metadata values that prevent classification | `CONTRACT_MISMATCH` |
 | Invalid scalar dates/sessions or structural collisions handled by membership classification | Successful classification with `ambiguous` membership and IDs; a random member with a missing, blank, padded or non-string ticker, or without usable event/canonical dates, refuses with `HOLDOUT_ACCESS_DENIED` |
 | Invalid as-of month, unknown group/evaluation identity or colliding canonical population IDs | `HOLDOUT_ACCESS_DENIED` |
-| Structurally ambiguous random event with usable identity | Keep membership unchanged, record its ID and add an inclusive `date.min`–`date.max` ticker window; exclude matching development groups and evaluation IDs, with `embargo_ticker` as the evaluation reason |
+| Structurally ambiguous random event with usable identity | Keep membership unchanged, record its ID and add an inclusive `date.min`–`date.max` ticker window; exclude matching development groups and evaluation IDs, with `embargo_ticker` as the evaluation reason; all other IDs remain in `evaluation_event_ids` |
 | Ordinary random-event window arithmetic exceeds the supported date range | `HOLDOUT_ACCESS_DENIED` |
-| Evaluation IDs matching an ambiguous-random ticker embargo | Excluded with `embargo_ticker` from the classifier plan; all other IDs remain in its `evaluation_event_ids`. The separate SIZE fold binder then retains only IDs strictly before its evaluation cutoff and records cutoff exclusions. |
 | Valid protected/overlapping development group | Excluded whole event with development reasons |
 
 This is neither a physical-read capability nor a statistical isolation guarantee.
-Long-memory/cross-ticker effects remain; chronological and random holdouts are
-complementary, not interchangeable.
 
 ## External systems and libraries
 
@@ -600,9 +560,7 @@ an uncaught traceback instead.
 - **R1, missing input.**
   - **No committed scope head and no `--snapshot-id`:** `resolve_pinned(scope)`
     (or `_snapshot.py`'s `head_generation`) raises `SNAPSHOT_NOT_READY`
-    (`dependency`, **retryable**). With a head, resolution is deterministic and
-    once per run; outputs carry the ID for later explicit `--snapshot-id` replay.
-  - **Explicit `--snapshot-id` that does not exist:** `Repository.resolve`/
+    (`dependency`, **retryable**).  - **Explicit `--snapshot-id` that does not exist:** `Repository.resolve`/
     `resolve_full` raises `SNAPSHOT_NOT_FOUND` (`dependency`, not retryable);
     never substituted for the scope head.
   - **Manifest fails its identity/hash check** (dataset version, contract or
@@ -612,8 +570,7 @@ an uncaught traceback instead.
     (`validation`, not retryable). `_scan.read_table` returns an *empty* frame,
     not a refusal, when a partition filter matches no fragment records. Replay/
     build-trades get the same refusal for a snapshot without `daily_market`
-    (`_pricing.trading_calendar_from_snapshot` reads it through
-    `_scan.read_table`), never a fallback to `trading_calendar()`'s local CSV.
+    (see Inputs), never a fallback to `trading_calendar()`'s local CSV.
   - **`daily_market` present but with no valid dates** (zero fragments or all
     unparseable): `_pricing._calendar_from_dates` raises `CALENDAR_UNAVAILABLE`
     (`validation`, not retryable), distinct from the table-absent case.
@@ -642,14 +599,9 @@ an uncaught traceback instead.
   run the resolved `SnapshotRef` and, in replay, the loaded `ChainIndex` are held
   in memory (a pinned snapshot never changes, so nothing invalidates). The one
   exception is the magnitude observed-session day tuple, held per pinned
-  `Repository` and snapshot id. With `index=None`, replay scopes chain
-  availability and loaded chain data to the plan's own years, tickers and dates,
-  so the `ChainIndex` holds only available plan keys; an explicit `index=`
-  bypasses chain reads. `_build_run.run` creates an independent replay per
-  strategy.
+  `Repository` and snapshot id.
 - **R3, retry.** No scan automatically retries. `SNAPSHOT_NOT_READY`,
-  `SNAPSHOT_CONFLICT` and propagated `RESOURCE_UNAVAILABLE` are retryable (an
-  operator may rerun after the head appears or the conflicting writer finishes);
+  `SNAPSHOT_CONFLICT` and propagated `RESOURCE_UNAVAILABLE` are retryable;
   limit and integrity refusals, including `RESULT_LIMIT_EXCEEDED` and
   `MANIFEST_CORRUPT`, are not.
 - **R4, transaction.** Build-trades and reconcile-trades are the only writers of
@@ -668,8 +620,7 @@ an uncaught traceback instead.
   limit raises `RESULT_LIMIT_EXCEEDED`. Writes use the atomic
   `commit_generic_table_candidate`: a pre-call crash leaves the parent untouched.
 - **R6, idempotency.** A byte-identical read of the same pinned snapshot and
-  request returns identical rows, so read-only tools (fill quality, polygon
-  fills, signal screen) give identical report rows; file names carry a date
+  request returns identical rows, so read-only tools give identical report rows; file names carry a date
   stamp (default today), and replay's JSON also embeds a `generated_at` UTC
   stamp, so its bytes differ per run. Build-trades and
   reconcile-trades are NOT idempotent: each commit publishes a new `trades`
@@ -695,14 +646,16 @@ an uncaught traceback instead.
   predicates, so result rows cannot duplicate across partitions.
 - No production entrypoint derives calendars from local files/environment
   variables: `_replay_run.run` and `_build_run.run` pass the pinned snapshot's
-  `daily_market` calendar into `replay()` (which derives it itself whenever
-  `calendar` is unset), so CSV changes cannot affect replay/build-trades output
-  (refusals: Inputs, Failure semantics; the isolated CSV reader: External systems).
+  `daily_market` calendar into `replay()`, so CSV changes cannot affect
+  replay/build-trades output (refusals: Inputs, Failure semantics).
 - **Year-scoped rebuilds cannot tombstone other years.** `_build_run.run` passes
   the same `years` to `_trades_revisions.filter_events` and `revisions_for_rebuild`.
   A tombstone requires replay provenance, membership in `rebuilt_strategies`, a
   `trade_id` absent from the rebuild, and (when `years` is supplied) the existing
   row's own `year` in that scope. Omitting `--years` tombstones across all years.
+- **Progress logging.** Admission, planning, scan and build stages log start/end/failure with elapsed time and peak RSS to stderr, with count/rate/ETA ticks at most every 30 seconds and aggregate decisions; refusal stages log the native `DataError` code only, never message text, row values, event identities, details, source diagnostics or secrets. Logging cannot change results, errors, stdout or read authority.
+- **Availability evidence.** Availability dates, forecast cutoffs and schedule knowledge are reconstructed bounds from stored data, never evidence of publication, finality or as-known event schedules, for every reader, planner and stored feature here.
+- **Read-only by default.** Unless a section states otherwise (stored-history materialization, `event_target_store`, build-trades/reconcile-trades), readers, planners and validators write nothing, retry nothing, cache nothing across calls and return no partial result; native refusals propagate unchanged and identical pinned inputs give identical outputs.
 - Never mutates the legacy trades ledger and never calls a network provider
   (`engine/build_trades.py` and `engine/data/pulls` keep doing both).
 - A trade-table write always goes through `generic_incremental`'s fenced commit,
@@ -711,31 +664,22 @@ an uncaught traceback instead.
 
 ## Source-free regression evidence
 
-`regression_evidence.normalize_forecasts` validates exact supplied event/horizon coverage, explicit prediction-column names and signed/nonnegative domains, normalizing complete finite Real/Integral rows to detached ordered JSON floats/ints (strict JSON mode rejects non-native numeric types; Booleans, duplicates, extra fields and nonfinite values refuse). `error_metrics` pools finite residuals at equal row weight (scaling before squaring) and returns count/RMSE/MAE; empty, nonnumeric or nonfinite residuals refuse. Both raise numeric/structural exceptions without partial results, I/O, fitting, cache, retries or publication; membership/domain arguments are caller declarations, not sealed target identity, source admission or holdout authority, and the caller owns horizon coverage and residual subtraction. Existing experiment magnitude normalization delegates with fixed nonnegative domain/column and keeps its typed failure envelope; signed use is an additive platform primitive, not a registered IV experiment.
+`regression_evidence.normalize_forecasts` validates exact supplied event/horizon coverage, explicit prediction-column names and signed/nonnegative domains, normalizing complete finite Real/Integral rows to detached ordered JSON floats/ints (strict JSON mode rejects non-native numeric types; Booleans, duplicates, extra fields and nonfinite values refuse). `error_metrics` pools finite residuals at equal row weight (scaling before squaring) and returns count/RMSE/MAE; empty, nonnumeric or nonfinite residuals refuse. Both raise numeric/structural exceptions without partial results, I/O, fitting, cache, retries or publication; membership/domain arguments are caller declarations, not sealed target identity, source admission or holdout authority, and the caller owns horizon coverage and residual subtraction. Existing experiment magnitude normalization delegates with fixed nonnegative domain/column and keeps its typed failure envelope.
 
 ## Diagram
 
-```mermaid
-flowchart LR
-    CLI["tools/v2_*.py"] -->|"--scope / --snapshot-id"| Resolve["resolve_pinned / resolve\n(_scan.py or _snapshot.py)"]
-    Resolve -->|"SnapshotRef, pinned for the run"| Read["Repository.scan\n(read_table)"]
-    Read --> Core["pure analysis / pricing core\n(fill_quality, signal_screen,\nreplay, build_trades)"]
-    Core -->|"read-only tools"| Report["reports/*.{md,parquet,json}\n+ snapshot_id"]
-    Core -->|"build-trades / reconcile-trades"| Publish["_trades_publish.publish"]
-    Publish --> Commit["generic_incremental.commit_generic_table_candidate\n(fenced: expected_head_snapshot_id)"]
-    Commit -->|ok| NewVersion["new trades\ndataset version"]
-    Commit -->|"head moved"| Conflict["SNAPSHOT_CONFLICT"]
-```
+
+The CLI data-flow diagram and all text moved by the third compression are in `guides/research_architecture_design_notes.md` ("Compression 3").
 
 ### Qualified SIZE panel composition
 
-`experiments.size_panel` is the installed public boundary over internal composition/storage helpers. Its v3 dictionary binds eligible history without changing v1/v2 identities. Complete metadata, independent quote groups and daily/runup/^GSPC inputs preserve projection-independent source admission. Native clocks/outcome guards, exact versioned anchors and ticker/year/date fragment membership bind lineage; date-only quote windows do not attest computed-outcome capture. Native immutable catalog/Parquet storage enforces physical/expanded limits and exact bounded receipt/context replay. Fitting authority belongs to the execution/fold consumer; see the stage-2 contract for reconstruction limits and synthetic-only verification. Quote eligibility records forecast clocks only for the horizon subset selected in the panel request, while full canonical metadata still establishes protected windows.
+`experiments.size_panel` is the installed public boundary over internal composition/storage helpers. Its v3 dictionary binds eligible history without changing v1/v2 identities. Complete metadata, independent quote groups and daily/runup/^GSPC inputs preserve projection-independent source admission. Native clocks/outcome guards, exact versioned anchors and ticker/year/date fragment membership bind lineage; date-only quote windows do not attest computed-outcome capture. Native immutable catalog/Parquet storage enforces physical/expanded limits and exact bounded receipt/context replay. Fitting authority belongs to the execution/fold consumer. Quote eligibility records forecast clocks only for the horizon subset selected in the panel request.
 
 | Qualified panel admission condition | Outcome before dependent reads |
 | --- | --- |
 | Request/admission refusals | Malformed request or empty required inventory: `CONTRACT_MISMATCH`; caller producer override or incompatible frozen SIZE policy: `HOLDOUT_ACCESS_DENIED` |
 | Derived set passed as a stored-panel recipe | `panel_recipe("HMOSXL"/"HMOSXLP")`: `CONTRACT_MISMATCH`; `recipe()` itself declares columns and reads nothing |
 | HMOSX feature-group inputs | Refusals are those listed in the "G1-G4" row of the SIZE panel feature sets table; legitimate shortage is null, never a refusal |
-| Memory/bounds | Peak memory is bounded by explicit query/source limits plus selected targets, the unique contributor union and the active ticker's source window (no RSS cap claimed); stored-read batches are capped at the largest stored fragment's `row_count`, in no identity. Stored reads and receipt replays validate complete history coverage first (`CONTRACT_MISMATCH`); publication exposes no partial snapshot. Context `magnitude_panel_context.v5` carries `season_heat_population` (roster capped by `max_output_rows`, `RESULT_LIMIT_EXCEEDED`; calendar-source mismatch `IDENTITY_CONFLICT`) and `price_row_digests` instead of v3's inline `price_row_metadata`; a value build whose re-read count or digest differs refuses `IDENTITY_CONFLICT`, so any changed price-version row changes the `context_id`. The registration validator accepts v3, v4 and v5 (v5 needs the season receipt). The stored-panel read streams one scanner batch at a time; `read(..., lineage=False)` omits only `lineage` (default `True`, in no identity); a corrupt row refuses when its batch is reached with no rows returned. Anchor-cache and retention detail: `guides/research_architecture_design_notes.md`. |
+| Memory/bounds | Peak memory is bounded by explicit query/source limits plus selected targets, the unique contributor union and the active ticker's source window (no RSS cap claimed); stored-read batches are capped at the largest stored fragment's `row_count`, in no identity. Stored reads and receipt replays validate complete history coverage first (`CONTRACT_MISMATCH`); publication exposes no partial snapshot. Context `magnitude_panel_context.v5` carries `season_heat_population` (roster capped by `max_output_rows`, `RESULT_LIMIT_EXCEEDED`; calendar-source mismatch `IDENTITY_CONFLICT`) and `price_row_digests` instead of v3's inline `price_row_metadata`; a value build whose re-read count or digest differs refuses `IDENTITY_CONFLICT`, so any changed price-version row changes the `context_id`. The stored-panel read streams one scanner batch at a time; `read(..., lineage=False)` omits only `lineage` (default `True`, in no identity); a corrupt row refuses when its batch is reached with no rows returned. Anchor-cache and retention detail: `guides/research_architecture_design_notes.md`. |
 | Non-native snapshot reference shape | `SNAPSHOT_UNRESOLVED` |
-| Confirmed event dated strictly before its ticker's first non-deleted price date | No label bracket can exist, so `quote_plan` (returns `(plan, excluded)`) leaves it out of the quote groups with reason `before_price_coverage` instead of refusing. It is then absent from the retained quote ids, so implied-history marks it ineligible. The panel context carries `quote_precoverage_excluded` (`reason`, `count`, sorted `event_ids`) only when non-empty, so other context ids are unchanged; one stderr decision line is logged. The confirmed-metadata index is not mutated. Any other bracket miss (inside the coverage range, after the last price date, or a `BMO` event on the first date, which has no prior session) still refuses `CONTRACT_MISMATCH`; no substitute bracket or retry. |
+| Confirmed event dated strictly before its ticker's first non-deleted price date | No label bracket can exist, so `quote_plan` (returns `(plan, excluded)`) leaves it out of the quote groups with reason `before_price_coverage` instead of refusing. It is then absent from the retained quote ids, so implied-history marks it ineligible. The panel context carries `quote_precoverage_excluded` (`reason`, `count`, sorted `event_ids`) only when non-empty, so other context ids are unchanged. Any other bracket miss (inside the coverage range, after the last price date, or a `BMO` event on the first date, which has no prior session) still refuses `CONTRACT_MISMATCH`; no substitute bracket or retry. |
