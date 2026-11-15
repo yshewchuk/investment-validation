@@ -841,16 +841,17 @@ change their arithmetic or imply that source receipt production is available.
   deleting them. Design: `guides/authority_fence_switch_rollback.md`.
 - **Every `ARCHITECTURE.md` stays under a growth ceiling.**
   `checks/architecture_doc_budgets.py` enforces a growth ceiling, not an
-  absolute cap: below 1000 lines, one PR may add at most 50 net lines to
+  absolute cap: below 10,500 words, one PR may add at most 500 net words to
   any one `ARCHITECTURE.md` (root or component), measured against its size
   on `origin/main` (CI's shallow checkout has no real merge-base, so the
   branch tip is the fallback) -- so a doc creeps up over many small PRs,
   and a single PR starting just under the ceiling can cross it by up to
-  that same 50-line allowance. A doc whose size at the START of a PR is
-  already at or over 1000 lines may shrink but may not grow at all -- it
+  that same 500-word allowance. A doc whose size at the START of a PR is
+  already at or over 10,500 words may shrink but may not grow at all -- it
   needs a dedicated compression PR, or a code refactor, before it takes on
   more content. An owner is never responsible for trimming a doc's
   unrelated sections to make room for their own change.
+  Size is counted in words (whitespace-split), so reflowing changes nothing.
 
 ## 6. Anti-patterns
 
