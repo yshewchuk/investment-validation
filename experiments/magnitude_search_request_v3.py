@@ -26,6 +26,8 @@ _BOUNDS = {
 }
 _HGB_V9_OPTIONAL = {"loss", "max_iter", "quantile"}
 _HGB_V9_DEFAULTS = {"loss": ["squared_error"], "max_iter": [500]}
+_SPLINE_SETS = {"HMOSX", "HMOSXL", "HMOSXLP"}
+_SPLINE_KNOTS = (0, 4, 5, 6)
 _HGB_LOSSES = ("absolute_error", "gamma", "poisson", "quantile", "squared_error")
 _FAMILIES = {
     "ridge": {"alpha"},
@@ -159,6 +161,9 @@ def _space(request):
                 v2._require("quantile" in supplied,
                     "stage-2 HGB quantile loss requires a quantile axis")
         else:
+            if (version_number >= 13 and family == "elasticnet"
+                    and type(supplied) is dict and "spline_knots" in supplied):
+                axes = axes | {"spline_knots"}
             v2._require(v2._shape(supplied, axes),
                         "stage-2 grid axes differ from the closed policy")
         canonical[family] = {}
@@ -196,6 +201,18 @@ def _space(request):
                 v2._require(values == sorted(values) and len(set(values)) == len(values),
                             "stage-2 grid axes must be strictly increasing")
                 canonical[family][axis] = [float(value) for value in values]
+                continue
+            if family == "elasticnet" and axis == "spline_knots":
+                v2._require(all(type(value) is int and value in _SPLINE_KNOTS
+                    for value in values),
+                    "stage-2 spline_knots values must be 0 or integers 4..6")
+                v2._require(values == sorted(values) and len(set(values)) == len(values),
+                            "stage-2 grid axes must be strictly increasing")
+                v2._require(max(values) == 0 or all(subset in _SPLINE_SETS
+                    for subset in request["feature_sets"]),
+                    "stage-2 spline_knots > 0 requires feature sets that contain all"
+                    " spline source columns (HMOSX, HMOSXL, HMOSXLP)")
+                canonical[family][axis] = list(values)
                 continue
             if family == "hgb" and axis in ("max_leaf_nodes", "min_samples_leaf", "max_iter"):
                 v2._require(all(type(value) is int for value in values),
