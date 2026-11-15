@@ -369,7 +369,7 @@ prerequisite). The stored build uses `plan_magnitude_folds`,
 `event_history._assemble_history` and `_feature_recipe`, not this adapter,
 which has no fitting, target-join, CLI, provider, report, ledger or final-read
 caller, no retry, write or partial result, and only the observed-session cache
-(see its failure row); Repository failures propagate.
+(see the "Cache, retry" row of the fold table); Repository failures propagate.
 
 `magnitude_folds.plan_magnitude_folds(repository, snapshot, *, as_of_month, evaluation_years, training_start, event_ids=None)` plans metadata-only expanding annual evaluation folds from one admitted snapshot and its pinned calendar.
 `plan_regression_folds` shares that population/calendar implementation but binds a validated explicit target descriptor into `regression_temporal_plan.v1`; legacy magnitude plans remain byte-identical. IV metadata planning uses its annual candidate folds and 5/3/1 clocks, not label qualification, native registration or nested search.
@@ -501,7 +501,8 @@ Request validity proves neither winner selection nor read eligibility. The later
 | Retained winner trade's event date or ticker differs from its pinned canonical event (for example after a calendar correction that kept the event ID) | `CONTRACT_MISMATCH` listing the offending event IDs; never skipped or scored. |
 | Non-finite `ret` | `CONTRACT_MISMATCH`; infinities are already refused at publication. |
 
-**Authority and lifecycle (not yet implemented).** A `tools/v2_final_holdout.py`
+**Authority and lifecycle (ops authorization/fencing built; evaluator caller and
+result retrieval not yet).** A `tools/v2_final_holdout.py`
 leaf is the sole supported evaluator caller, composing ops' private
 authorization/spend state with this evaluator; ops and research stay layer-7 peers
 with no imports between them. Training, selection, sweep and the loaders gain no
@@ -906,8 +907,9 @@ an uncaught traceback instead.
   `commit_generic_table_candidate`: a pre-call crash leaves the parent untouched.
 - **R6, idempotency.** A byte-identical read of the same pinned snapshot and
   request returns identical rows, so read-only tools (fill quality, polygon
-  fills, signal screen, replay) give identical report contents (report file
-  names carry a date stamp, default today). Build-trades and
+  fills, signal screen) give identical report rows; file names carry a date
+  stamp (default today), and replay's JSON also embeds a `generated_at` UTC
+  stamp, so its bytes differ per run. Build-trades and
   reconcile-trades are NOT idempotent: each commit publishes a new `trades`
   version, so re-running against the same parent snapshot afterwards reads the
   newer version and may produce a different non-empty changeset (or `noop` when
