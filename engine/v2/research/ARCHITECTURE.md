@@ -1,6 +1,6 @@
 # `engine/v2/research` — architecture
 
-Layer 7.0 in `checks/layer_map.py` and root `/ARCHITECTURE.md`. Native snapshot-reading counterparts to `tools/signal_screen.py`, `tools/fill_quality.py`, `engine/data/pulls/polygon_fills.py`'s read path, `engine/replay.py` (committed snapshots) and `engine/build_trades.py`'s v2 write path. Legacy modules remain untouched and publish as before; parallel `tools/v2_*` CLIs read pinned v2 snapshots. `tools/log_diagnostics.py` stays put: it reads only a local transactions-log CSV, never Tier-2.
+Layer 7.0 in `checks/layer_map.py` and root `/ARCHITECTURE.md`. Native snapshot-reading counterparts to `tools/signal_screen.py`, `tools/fill_quality.py`, `engine/data/pulls/polygon_fills.py`'s read path, `engine/replay.py` (committed snapshots) and `engine/build_trades.py`'s v2 write path. Legacy modules remain untouched and publish as before; parallel `tools/v2_*` CLIs read pinned v2 snapshots. `tools/log_diagnostics.py` stays put: it reads a local transactions-log CSV and an optional sibling `metrics_*.json`, never Tier-2.
 
 ## Purpose
 
@@ -657,7 +657,7 @@ an uncaught traceback instead.
   A tombstone requires replay provenance, membership in `rebuilt_strategies`, a
   `trade_id` absent from the rebuild, and (when `years` is supplied) the existing
   row's own `year` in that scope. Omitting `--years` tombstones across all years.
-- **Progress logging.** Admission, planning, scan and build stages log start/end/failure with elapsed time and peak RSS to stderr, with count/rate/ETA ticks at most every 30 seconds and aggregate decisions; refusal stages log the native `DataError` code only, never message text, row values, identities, details or secrets. Logging cannot change results, errors, stdout or read authority.
+- **Progress logging.** Stages that use the progress helper (not every planner) log start/end/failure with elapsed time and peak RSS to stderr, with count/rate/ETA ticks at most every 30 seconds and aggregate decisions; refusal stages log the native `DataError` code only, never message text, row values, identities, details or secrets. Logging cannot change results, errors, stdout or read authority.
 - **Availability evidence.** Availability dates, forecast cutoffs and schedule knowledge are reconstructed bounds from stored data, never evidence of publication, finality or as-known event schedules, for every reader, planner and stored feature here.
 - **Read-only by default.** Unless a section states otherwise (stored-history materialization, `event_target_store`, build-trades/reconcile-trades), readers, planners and validators write nothing, retry nothing, cache nothing across calls and return no partial result; native refusals propagate unchanged and identical pinned inputs give identical outputs.
 - Never mutates the legacy trades ledger and never calls a network provider
@@ -673,7 +673,7 @@ an uncaught traceback instead.
 ## Diagram
 
 
-The CLI diagram and text moved by the third compression: `guides/research_architecture_design_notes.md` ("Compression 3").
+CLI data-flow diagram: `guides/research_architecture_design_notes.md`.
 
 ### Qualified SIZE panel composition
 
