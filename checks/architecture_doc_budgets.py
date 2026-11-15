@@ -162,17 +162,38 @@ def check_files(base: dict[str, bytes], new: dict[str, bytes]) -> Report:
 # --------------------------------------------------------------------------
 
 
+def _run_bounded(cmd: list[str], env: dict[str, str]) -> subprocess.CompletedProcess:
+    """``subprocess.run`` capturing output, but refuses (ValueError) stdout
+    over MAX_DOC_BYTES while reading it, so an oversized blob is never fully
+    buffered. stderr is only read after stdout is drained (git errors are tiny)."""
+    with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env) as proc:
+        out = proc.stdout.read(MAX_DOC_BYTES + 1)
+        if len(out) > MAX_DOC_BYTES:
+            proc.kill()
+            raise ValueError(f"{cmd[-1]} exceeds MAX_DOC_BYTES={MAX_DOC_BYTES}")
+        err = proc.stderr.read()
+        rc = proc.wait()
+    return subprocess.CompletedProcess(cmd, rc, out, err)
+
+
 def _read_worktree_strict(root: Path, rel: str) -> bytes:
-    """Raises OSError on a read failure -- never scored as an empty doc."""
-    return (root / rel).read_bytes()
+    """Raises OSError on a read failure, ValueError over MAX_DOC_BYTES --
+    never scored as an empty doc."""
+    with (root / rel).open("rb") as f:
+        data = f.read(MAX_DOC_BYTES + 1)
+    if len(data) > MAX_DOC_BYTES:
+        raise ValueError(f"{rel} exceeds MAX_DOC_BYTES={MAX_DOC_BYTES}")
+    return data
 
 
 def _read_staged_strict(root: Path, rel: str) -> bytes:
-    """Raises CalledProcessError if ``rel`` can't be read from the index."""
-    proc = subprocess.run(
-        ["git", "-C", str(root), "show", f":{rel}"],
-        capture_output=True, check=True, env=_clean_git_env(),
+    """Raises CalledProcessError if ``rel`` can't be read from the index,
+    ValueError over MAX_DOC_BYTES."""
+    proc = _run_bounded(
+        ["git", "-C", str(root), "show", f":{rel}"], _clean_git_env(),
     )
+    if proc.returncode:
+        raise subprocess.CalledProcessError(proc.returncode, proc.args, proc.stdout, proc.stderr)
     return proc.stdout
 
 
@@ -184,11 +205,11 @@ def _read_base(root: Path, rel: str, base_ref: str) -> bytes | None:
     exist there (new in this PR) -- detected from git's English stderr text,
     so the subprocess is forced to the C locale regardless of the caller's
     LANG/LC_ALL. Any other git failure (a bad ref, a
-    corrupt object) raises rather than reading as 0 lines, which would
+    corrupt object) raises rather than reading as 0 words, which would
     silently exempt a doc from the growth check."""
-    proc = subprocess.run(
+    proc = _run_bounded(
         ["git", "-C", str(root), "show", f"{base_ref}:{rel}"],
-        capture_output=True, env={**_clean_git_env(), "LC_ALL": "C"},
+        {**_clean_git_env(), "LC_ALL": "C"},
     )
     if proc.returncode == 0:
         return proc.stdout

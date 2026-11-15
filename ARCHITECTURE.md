@@ -852,6 +852,7 @@ change their arithmetic or imply that source receipt production is available.
   more content. An owner is never responsible for trimming a doc's
   unrelated sections to make room for their own change.
   Size is counted in words (whitespace-split), so reflowing changes nothing.
+  A doc over 8 MiB is refused while being read, never scored.
 
 ## 6. Anti-patterns
 

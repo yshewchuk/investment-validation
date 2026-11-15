@@ -187,6 +187,8 @@ def test_policy_constants_are_pinned():
 def test_oversized_blob_is_refused():
     with pytest.raises(ValueError):
         adb._size(b"w" * (adb.MAX_DOC_BYTES + 1))
+    assert adb._size(b"w" * adb.MAX_DOC_BYTES) == 1
+    assert adb.MAX_DOC_BYTES == 8 * 1024 * 1024
 
 
 def test_violation_messages_report_words():
@@ -298,14 +300,14 @@ def test_unreadable_architecture_doc_raises_rather_than_scoring_empty(tmp_path, 
     _init_repo(repo)
     (repo / "ARCHITECTURE.md").write_text("x\n" * 100)
     _git(["add", "ARCHITECTURE.md"], repo)
-    real = Path.read_bytes
+    real = Path.open
 
-    def read_bytes(self):
+    def open_(self, *a, **k):
         if self.name == "ARCHITECTURE.md":
             raise PermissionError(13, "Permission denied", str(self))
-        return real(self)
+        return real(self, *a, **k)
 
-    monkeypatch.setattr(Path, "read_bytes", read_bytes)
+    monkeypatch.setattr(Path, "open", open_)
     with pytest.raises(PermissionError):
         adb._sources(repo, use_worktree=True, base_ref="HEAD")
 
@@ -329,6 +331,32 @@ def test_ambient_git_dir_does_not_silently_empty_the_source_list(tmp_path, monke
     # may not exist locally in a shallow CI checkout.
     base, new = adb._sources(ROOT, use_worktree=True, base_ref="HEAD")
     assert "ARCHITECTURE.md" in new
+
+
+def test_oversized_worktree_doc_is_refused_while_reading(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    monkeypatch.setattr(adb, "MAX_DOC_BYTES", 100)
+    doc = repo / "ARCHITECTURE.md"
+    doc.write_bytes(b"x" * 101)
+    with pytest.raises(ValueError):
+        adb._read_worktree_strict(repo, "ARCHITECTURE.md")
+    doc.write_bytes(b"x" * 100)
+    assert adb._read_worktree_strict(repo, "ARCHITECTURE.md") == b"x" * 100
+
+
+def test_oversized_staged_and_base_doc_is_refused_while_reading(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    doc = repo / "ARCHITECTURE.md"
+    doc.write_bytes(b"x" * 101)
+    _git(["add", "ARCHITECTURE.md"], repo)
+    _git(["commit", "-q", "-m", "init"], repo)
+    monkeypatch.setattr(adb, "MAX_DOC_BYTES", 100)
+    with pytest.raises(ValueError):
+        adb._read_staged_strict(repo, "ARCHITECTURE.md")
+    with pytest.raises(ValueError):
+        adb._read_base(repo, "ARCHITECTURE.md", "HEAD")
 
 
 def test_git_index_file_is_honored_not_stripped(tmp_path, monkeypatch):
