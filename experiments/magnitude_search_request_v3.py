@@ -55,6 +55,8 @@ _SELECTION_LEADS = {"1": 1.0, "3": 0.0, "5": 0.0}
 
 
 def _hash_recipe(version):
+    if version >= 12:
+        return lambda subset: qualified_panel_recipe("HMOSXLP")
     if version >= 11:
         return lambda subset: qualified_panel_recipe("HMOSX")
     if version >= 10:
@@ -109,7 +111,8 @@ def _finite_nonnegative(value):
 def _space(request):
     version = request_version(request["schema_version"])
     allowed_sets = (*v2._SETS, "MO-", "M",
-        *(["HMOS"] if version >= 10 else []), *(["HMOSX"] if version >= 11 else []))
+        *(["HMOS"] if version >= 10 else []), *(["HMOSX"] if version >= 11 else []),
+        *(["HMOSXL", "HMOSXLP"] if version >= 12 else []))
     feature_sets = request["feature_sets"]
     valid_sets = (type(feature_sets) is list and bool(feature_sets)
         and all(type(subset) is str and subset in allowed_sets for subset in feature_sets)
@@ -117,7 +120,8 @@ def _space(request):
     v2._require(valid_sets if version >= 9 else feature_sets == v2._SETS,
                 (f"stage-2 v{version} requires a nonempty ordered subset of H/HM/HMO/MO-/M"
                  + ("/HMOS" if version >= 10 else "")
-                 + ("/HMOSX" if version >= 11 else ""))
+                 + ("/HMOSX" if version >= 11 else "")
+                 + ("/HMOSXL/HMOSXLP" if version >= 12 else ""))
                 if version >= 9 else "stage-2 requires exactly ordered H/HM/HMO feature sets")
     space = request["space"]
     version = request["schema_version"]

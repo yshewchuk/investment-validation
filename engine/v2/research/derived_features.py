@@ -1,7 +1,7 @@
 """Fixed L/LP derived-feature lists and the pure derive_columns step.
 
-Slice 2 (magnitude_panel_qualified_table.recipe) now consumes the lists to declare
-the recipes; request v12 and the fit-path call (slices 3-4) are not yet wired.
+the recipes and request v12 (slice 3) consume them; the fit-path call (slice 4) is not
+yet wired, so size_search_binding refuses derived sets at prepare.
 """
 from __future__ import annotations
 
