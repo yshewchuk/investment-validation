@@ -29,13 +29,13 @@ a true merge-base: CI's checkout is shallow and lacks the history a real
 merge-base needs, and the tip is the fallback the user's rule names. This
 can over/undercount a PR's own growth by whatever the base moved meanwhile;
 see ``_resolve_base_ref``, which refreshes a missing local ref rather than
-silently reading 0 lines.
+silently reading 0 words.
 
 Reads every tracked ARCHITECTURE.md's staged content by default (what would
 actually be committed); ``--all`` reads worktree content instead. Any
 relevant read failing raises -- a check that can silently pass on a read
 error is not a check -- except a doc missing from the base branch, which is
-a doc new in this PR and scores 0 base lines.
+a doc new in this PR and scores 0 base words.
 
 Usage::
 
@@ -84,7 +84,7 @@ def _clean_git_process_env():
                 os.environ[k] = v
 
 
-__all__ = ["CEILING", "MAX_PR_GROWTH", "Violation", "Report", "check_files", "main"]
+__all__ = ["CEILING", "MAX_PR_GROWTH", "MAX_DOC_BYTES", "Violation", "Report", "check_files", "main"]
 
 #: A doc at or over this many words may only shrink; see the module docstring.
 CEILING = 10_500
@@ -92,6 +92,9 @@ CEILING = 10_500
 #: Net words any one PR may add to a doc still under CEILING, measured
 #: against that doc's size on the base branch.
 MAX_PR_GROWTH = 500
+
+#: Largest ARCHITECTURE.md (bytes) the check will tokenise; a bigger blob is refused, never silently scored.
+MAX_DOC_BYTES = 8 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -130,13 +133,15 @@ def _is_architecture_doc(path: str) -> bool:
 
 
 def _size(blob: bytes) -> int:
+    if len(blob) > MAX_DOC_BYTES:
+        raise ValueError(f"ARCHITECTURE.md blob of {len(blob)} bytes exceeds MAX_DOC_BYTES={MAX_DOC_BYTES}")
     return len(blob.decode("utf-8", "replace").split())
 
 
 def check_files(base: dict[str, bytes], new: dict[str, bytes]) -> Report:
     """The pure core the CLI and the tests both drive. ``base``/``new`` map
     path -> content; a path absent from ``base`` is new in this PR (0 base
-    lines), one absent from ``new`` was removed (not scored)."""
+    words), one absent from ``new`` was removed (not scored)."""
     report = Report()
     for path in sorted(p for p in new if _is_architecture_doc(p)):
         new_words = _size(new[path])

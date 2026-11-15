@@ -179,6 +179,29 @@ def test_growth_limit_is_words_not_lines():
     assert adb.check_files(base, at).ok
 
 
+def test_policy_constants_are_pinned():
+    assert adb.CEILING == 10_500
+    assert adb.MAX_PR_GROWTH == 500
+
+
+def test_oversized_blob_is_refused():
+    with pytest.raises(ValueError):
+        adb._size(b"w" * (adb.MAX_DOC_BYTES + 1))
+
+
+def test_violation_messages_report_words():
+    base = {"a/ARCHITECTURE.md": _words(adb.CEILING)}
+    new = {"a/ARCHITECTURE.md": _words(adb.CEILING + 1)}
+    v = adb.check_files(base, new).violations[0]
+    assert "words" in str(v)
+    assert str(adb.CEILING) in str(v)
+
+    base = {"a/ARCHITECTURE.md": _words(10)}
+    new = {"a/ARCHITECTURE.md": _words(10 + adb.MAX_PR_GROWTH + 1)}
+    v = adb.check_files(base, new).violations[0]
+    assert f"PR adds {adb.MAX_PR_GROWTH + 1}>{adb.MAX_PR_GROWTH} words" in str(v)
+
+
 # --------------------------------------------------------------------------
 # _read_base / _resolve_base_ref: real git, no network
 # --------------------------------------------------------------------------
