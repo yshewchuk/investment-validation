@@ -128,13 +128,14 @@ def main(argv=None):
     from engine.v2.data.repository import Repository
     from engine.v2.foundation import ArtifactStore
     from engine.v2.ops.catalog import connect
-    from experiments.size_search_binding import read_panel
+    from experiments.size_search_binding import read_panel, validate_panel_request
 
     started = time.monotonic()
     print("[spline-tie] stage=read-panel start", file=sys.stderr)
     conn = connect(f"{args.store_root}/catalog.sqlite", must_exist=True)
     repository = Repository(conn, ArtifactStore(args.store_root), pin_snapshots=True)
     request = _read_request(args.panel_request)
+    validate_panel_request(request)
     source = repository.resolve(request["price_history_snapshot"])
     panel = read_panel(repository, source, request, columns=list(SPLINE_COLUMNS))
     rows = panel["rows"]
