@@ -565,3 +565,7 @@ SIZE shares this artifact across challenger/comparator; annual evaluation is sti
 development. Implied-quote history and final confirmation remain separate work.
 The user approved 650 added source / 120 docs for this coherent implementation;
 review the inline contract before numerical code, not a separate design PR.
+
+## Rationale for unconfirming date-conflict and ambiguous-cluster rows
+
+Moved from `engine/v2/research/ARCHITECTURE.md` (2026-11-15); the contract stays there. This is a deliberate modeling assumption (user decision 2026-10-30), not a deferred leak: whether a projected date was confirmed was knowable on that date (the company's investor-relations announcements show whether the release was scheduled), and a conflicting candidate date in the same cluster is evidence that at least one date was unconfirmed then. Since the true row cannot be told apart, both are disregarded for training and evaluation, matching live behaviour, which acts only on confirmed dates. A later-dated sibling therefore may unconfirm an earlier row by design, and the view applies no as-of cutoff.
