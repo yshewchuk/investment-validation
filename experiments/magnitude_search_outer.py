@@ -143,7 +143,7 @@ def _result(started, inputs, inputs_id, execution, forecasts, validation, fold, 
         "plan_id": started["plan_id"], "outer_year": fold["year"], "candidate": started["candidate"],
         "selection_id": started["selection_id"], "inputs_id": inputs_id,
         "execution_id": content_hash(execution), "validation_id": content_hash(validation),
-        "training_inputs": inputs["training_inputs"], "evaluation_inputs": validation["evaluation_inputs"],
+        "evaluation_inputs": validation["evaluation_inputs"],
         "fit_attempt_count": execution["fit_attempt_count"], "event_count": len(targets),
         "forecast_count": len(predictions), "predictions": predictions, "metrics": magnitude_metrics(predictions, target=target),
         "per_horizon": [{"horizon_sessions": horizon, **magnitude_metrics([
@@ -151,7 +151,8 @@ def _result(started, inputs, inputs_id, execution, forecasts, validation, fold, 
         "prospective_candidate_id": started["prospective_candidate_id"],
         "evaluation_authority": "selected_outer_fold_only", "final_read_authority": "none",
         "holdout_results": {"random": "excluded; not evaluated", "rolling": "excluded; not evaluated"},
-        **({"fit_diagnostics": execution["diagnostics"]} if "diagnostics" in execution else {})}
+        **({"fit_diagnostics": [{k: v for k, v in item.items() if k != "training_event_ids"}
+                                for item in execution["diagnostics"]]} if "diagnostics" in execution else {})}
     if target is not None:
         result.update(schema_version="regression_search_outer_result.v1", target=target)
     return {**result, "result_id": content_hash(result)}

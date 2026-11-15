@@ -944,7 +944,7 @@ from event counts; scientific selection and cutoff rules are unchanged.
 | Missing any outer terminal during collection | `EXPERIMENT_IDENTITY_CONFLICT` before any outer replay; no writes or missing-work launch. |
 | Metric computation refuses | `EXPERIMENT_VARIANT_FAILED` propagates; no successful terminal/report or candidate substitution. |
 
-`collect_outer_results` inventories all outer terminals/limits, admits native inner evidence once per call,
+The `outer-terminal` record binds training lineage by reference only: it carries `inputs_id` (the Merkle hash of the published `outer-inputs` manifest, which includes `training_inputs`) and neither inline `training_inputs` nor per-horizon `training_event_ids` in `fit_diagnostics`, so its size does not scale with the training set. `evaluation_inputs` stay inline. Replay loads the manifest for the terminal's `inputs_id` and verifies it by manifest hash before reading any shard; a missing manifest, or one whose hash differs from `inputs_id`, refuses `EXPERIMENT_IDENTITY_CONFLICT` (retryable store errors propagate); no inline fallback, no rewrite. A journal holding an older terminal refuses replay and a new run is required. `collect_outer_results` inventories all outer terminals/limits, admits native inner evidence once per call,
 then verifies every fold's source/evidence bindings through a replay-only internal path. It returns a deterministic
 read-only aggregate; no admission is cached across calls. Fold/horizon metrics retain complete forecast-target pairs;
 primary RMSE pools event/horizon errors rather than fold RMSEs. Equal complete

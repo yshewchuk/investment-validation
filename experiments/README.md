@@ -314,8 +314,8 @@ forecasts alone cannot authorize it. All planned native inner completions,
 including permitted candidate failures, are verified before outer execution.
 
 The immutable outer journal owns source bindings, native inputs and full fit evidence.
-Returned results contain the selected recipe, evidence IDs, training/evaluation
-receipts, actual fit count, complete forecast/target pairs, event/forecast counts
+Returned results contain the selected recipe, evidence IDs, the inputs ID
+(training lineage by reference) and evaluation receipt, actual fit count, complete forecast/target pairs, event/forecast counts
 and pooled/per-horizon RMSE/MAE; they do not inline all journal evidence. Forecasts
 are durably fixed before that fold's evaluation targets open.
 Repeating a completed call verifies the original evidence without fitting or
