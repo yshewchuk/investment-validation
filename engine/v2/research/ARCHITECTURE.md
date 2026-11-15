@@ -666,6 +666,13 @@ an uncaught traceback instead.
   never a read-modify-write of an existing table version.
 - Pure pricing/planning/chain cores (`replay.py`, `_plan.py`, `_chains.py`, `_trades_table.py`) retain legacy arithmetic; only store edges changed. Synthetic legacy parity remains covered by the research tools/replay/build-trades/reconcile-trades tests.
 
+## Spline ElasticNet recipe
+
+`engine/v2/models/magnitude_elasticnet_spline_recipe` is closed metadata only (no sklearn, I/O or fitting). `SPLINE_COLUMNS` is the single literal list of 34 raw source columns; a test asserts it is a subset of the L-list sources.
+`elasticnet_spline_recipe(columns, feature_dictionary_hash, alpha, l1_ratio, n_knots)` returns schema `magnitude_elasticnet_spline_recipe.v1`: the plain ElasticNet recipe with `precompute: True` (Gram solver, needed at about 500 inputs) and a `preprocessing.spline` block (`columns`, `n_knots`, `degree: 3`, `knot_rule: quantile`, `extrapolation: constant`, `include_bias: false`, `input: imputed`, `output: append`). `output_features` adds `34 * (n_knots + 1)`.
+`validate_elasticnet_spline_recipe` rebuilds from `(features, hash, alpha, l1_ratio, n_knots)` and refuses any drift with `ValueError`. `n_knots` must be a plain int in 4..8, and every spline column must be among `features`. Learned knots are fit outputs, never identity.
+`experiments.magnitude_candidate_recipe.candidate_recipe` accepts the elasticnet key `spline_knots` (exact key sets): `0` returns the unchanged `elasticnet_recipe` (byte-identical JSON, `precompute: False`); 4..8 returns the spline recipe. Request-version gating belongs to the request validator.
+
 ## Source-free regression evidence
 
 `regression_evidence.normalize_forecasts` validates exact supplied event/horizon coverage, explicit prediction-column names and signed/nonnegative domains, normalizing complete finite Real/Integral rows to detached ordered JSON floats/ints (strict JSON mode rejects non-native numeric types; Booleans, duplicates, extra fields and nonfinite values refuse). `error_metrics` pools finite residuals at equal row weight (scaling before squaring) and returns count/RMSE/MAE; empty, nonnumeric or nonfinite residuals refuse. Both raise numeric/structural exceptions without partial results, I/O, fitting, cache, retries or publication; membership/domain arguments are caller declarations, not sealed target identity, source admission or holdout authority, and the caller owns horizon coverage and residual subtraction. Existing experiment magnitude normalization delegates with fixed nonnegative domain/column and keeps its typed failure envelope.
