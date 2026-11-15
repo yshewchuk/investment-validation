@@ -111,6 +111,8 @@ def measure(matrix, years, columns, test_years, first_year=2010, ks=(4, 6, 8)):
     test_years = list(test_years)
     if not test_years:
         raise ValueError("test_years is empty")
+    if any(not isinstance(k, int) or k < 2 for k in ks):
+        raise ValueError("knot counts must be integers >= 2")
     result = {name: {"max_share": 0.0, "worst_year": None,
                      "min_distinct": {k: None for k in ks},
                      "tied_years": {k: [] for k in ks}} for name in columns}
@@ -172,6 +174,8 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if args.test_years[0] > args.test_years[1]:
         parser.error("--test-years LO must be <= HI")
+    if any(k < 2 for k in args.ks):
+        parser.error("--ks values must be >= 2")
 
     from engine.v2.data.repository import Repository
     from engine.v2.foundation import ArtifactStore

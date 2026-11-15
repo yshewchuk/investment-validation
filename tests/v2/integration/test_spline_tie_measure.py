@@ -52,6 +52,21 @@ def test_measure_rejects_a_test_year_with_no_training_rows():
             matrix, years, ("continuous", "tied"), (2010,))
 
 
+def test_measure_rejects_a_knot_count_below_two():
+    matrix, years = _matrix()
+
+    with pytest.raises(ValueError, match="knot counts"):
+        spline_tie_measure.measure(
+            matrix, years, ("col",), (2011,), ks=(1,))
+
+
+def test_main_rejects_a_knot_count_below_two_before_store_access():
+    with pytest.raises(SystemExit):
+        spline_tie_measure.main(
+            ["--store-root", "/nonexistent", "--panel-request",
+             "/nonexistent", "--ks", "1"])
+
+
 def test_read_request_rejects_a_directory(tmp_path):
     with pytest.raises(SystemExit, match="regular file"):
         spline_tie_measure._read_request(tmp_path)
