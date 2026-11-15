@@ -588,8 +588,8 @@ This bounds retained unmatched rows, not total process RSS.
   provenance tag, never the legacy `engine.replay` tag.
 - Build-trades / reconcile-trades: a **new version** of the `trades` table,
   committed through `engine.v2.data.generic_incremental`, plus a JSON
-  outcome summary (`committed`, `outcome`, `committed_snapshot_id`,
-  `emitted_revisions`) — never a rewrite of the table version the run read.
+  outcome summary (`committed`, `outcome`, plus `emitted_revisions` for
+  build-trades and `committed_snapshot_id` for reconcile-trades) — never a rewrite of the table version the run read.
 - Every snapshot-reading output that carries data also carries the `snapshot_id` it was
   read from, so a report is reproducible without re-resolving anything.
   `experiment_trades.load_trades` includes its explicit snapshot and holdout
@@ -900,9 +900,11 @@ an uncaught traceback instead.
   stamp (default today), and replay's JSON also embeds a `generated_at` UTC
   stamp, so its bytes differ per run. Build-trades and
   reconcile-trades are NOT idempotent: each commit publishes a new `trades`
-  version, so re-running against the same parent snapshot afterwards reads the
-  newer version and may produce a different non-empty changeset (or `noop` when
-  replay recomputes revisions already published). The commit is not re-entrant or
+  version. An explicit `--snapshot-id` stays pinned to its parent, so a rerun
+  after a successful commit refuses `SNAPSHOT_CONFLICT` (stale parent); omitting
+  it resolves the current head, which reads the newer version and may produce a
+  different non-empty changeset (or `noop` when replay recomputes revisions
+  already published). The commit is not re-entrant or
   retried internally; "publish this exact changeset once" relies on the
   `SNAPSHOT_CONFLICT` fence.
 
