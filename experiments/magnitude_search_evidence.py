@@ -15,6 +15,7 @@ from engine.v2.research.magnitude_inputs import (
 from engine.v2.research.regression_evidence import (
     normalize_forecasts as normalize_regression_forecasts,
 )
+from experiments.derived_rows import with_derived
 from experiments.magnitude_history_inputs import history_binding
 from experiments.magnitude_search_inputs import _required_event_date
 
@@ -64,7 +65,8 @@ def admit_fold_inputs(repository, binding, fold, *, history_failure, strict_json
 def fit_evidence(inputs, fold, plan, execution):
     """Bind ordered native matrices and training targets without fitting."""
     target = inputs.get("target", {}).get("column", "absolute_move_pct")
-    indexed = {(row["event_id"], row["horizon_sessions"]): row for row in inputs["features"]}
+    indexed = {(row["event_id"], row["horizon_sessions"]): row
+               for row in with_derived(inputs["features"], execution["features"])}
     train = [row["event_id"] for row in inputs["training"]]
     recipe = execution.get("fit_recipe")
     return [shared_fit_evidence(execution["features"],
