@@ -386,3 +386,289 @@ Existing experiment magnitude normalization delegates with fixed nonnegative dom
 ## Diagram / Qualified SIZE panel composition (main lines 969-969)
 
 | Memory/bounds | Peak memory is bounded by explicit query/source limits plus selected targets, the unique contributor union and the active ticker's source window. Streaming adds one scanner batch, one decoded history row and up to three output rows; no fixed RSS cap is claimed. The eligible-history stored-read batch cap is the largest stored fragment's `row_count` (the total only when the snapshot has one fragment); fragments are already bounded by `max_object_bytes`, so batch memory does not grow with fragment count. Rows, order, coverage checks and refusals are unchanged, and the cap is not part of any identity. Stored reads and receipt replays validate complete history coverage before returning. Coverage mismatch refuses `CONTRACT_MISMATCH`; panel publication exposes no partial snapshot. Context `magnitude_panel_context.v5` carries `season_heat_population` (roster receipt; recipe `HMOSX`, table `.v5` season columns; the market-wide roster is capped by `max_output_rows`, `RESULT_LIMIT_EXCEEDED`; a calendar-source mismatch is `IDENTITY_CONFLICT`; one label read per build, replay reads none) and `price_row_digests` (`{ticker: {rows, digest}}`, `content_hash` of that ticker's non-deleted date/retrieved_at/deleted/source_hash/capture_id rows) instead of v3's inline `price_row_metadata`; per-date rows are held one ticker at a time, so identity memory is independent of total price rows (only dates are kept for the quote plan). Value build (not stored read, which recomputes the digests and so the `context_id`) re-reads each active ticker (and `^GSPC`) and a count or digest mismatch refuses `IDENTITY_CONFLICT` (R3); no identity-row cache or retry (R5); equal pinned inputs give equal `context_id`, any changed price-version row changes it (R6). Existing v3 registrations stay valid (the registration validator accepts v3, v4 and v5; v5 needs the season receipt); v3 panels are not re-derived, v4 has a new context id and slot, so new panels rebuild. Value-build anchor caches are per active ticker: `anchor_lookup` exposes `clear()` and a test-only `size()`, the ticker-scoped price and daily lookups are cleared when the ticker changes, and `^GSPC` regime anchors use their own lookup holding only regime dates, so retained anchor memory does not grow with ticker count (R1 bound: active ticker plus regime dates; R2 a cleared entry is recomputed from the same pinned fragment records, so rows, `row_id`s and published bytes are unchanged; R3 no new refusal; R4 nothing persisted; R5 no retry; R6 equal inputs give equal output). The qualified stored-panel read streams: its scan batch cap is the largest stored fragment's `row_count` (one event, 3 rows; not the total), and each batch row is validated (cohort order, pins, `row_id` over every column including the multi-MB `lineage`) then projected to `METADATA` plus the requested columns and dropped. `read(..., lineage=True)` (default, also `size_panel.read`) returns `lineage` as before; `lineage=False` omits only that key, and the SIZE binding's `read_panel` (callers use `context` and feature columns, never `lineage`) passes it, so the cells are not retained into the fits (R1 bound: one scanner batch plus the projected output; with the default `lineage=True` retention still grows with row count). R2 with the default the returned list equals the former all-rows read, with `lineage=False` it equals it minus the `lineage` key; cap and flag are in no identity. R3 no new refusal: `CONTRACT_MISMATCH`, `HOLDOUT_ACCESS_DENIED` and `RESULT_LIMIT_EXCEEDED` are unchanged, but a corrupt row refuses when its batch is reached, with the same code and no rows returned. R4 nothing persisted. R5 no retry. R6 equal inputs give equal rows. |
+
+## Compression 3
+
+Text that the third compression removed from `engine/v2/research/ARCHITECTURE.md` (11,493 words on `origin/main`), verbatim, one entry per changed place with its main line number; `[...]` joins separate removed fragments of one paragraph. Replaced wording stays in the doc. Three Invariants ("Progress logging", "Availability evidence", "Read-only by default") now carry the progress, availability-evidence and no-cache/retry/write statements that sections repeated, and merged table rows keep every condition and code.
+
+### CLI data-flow diagram (main lines 718-728)
+
+```mermaid
+flowchart LR
+    CLI["tools/v2_*.py"] -->|"--scope / --snapshot-id"| Resolve["resolve_pinned / resolve\n(_scan.py or _snapshot.py)"]
+    Resolve -->|"SnapshotRef, pinned for the run"| Read["Repository.scan\n(read_table)"]
+    Read --> Core["pure analysis / pricing core\n(fill_quality, signal_screen,\nreplay, build_trades)"]
+    Core -->|"read-only tools"| Report["reports/*.{md,parquet,json}\n+ snapshot_id"]
+    Core -->|"build-trades / reconcile-trades"| Publish["_trades_publish.publish"]
+    Publish --> Commit["generic_incremental.commit_generic_table_candidate\n(fenced: expected_head_snapshot_id)"]
+    Commit -->|ok| NewVersion["new trades\ndataset version"]
+    Commit -->|"head moved"| Conflict["SNAPSHOT_CONFLICT"]
+```
+
+### Removed or replaced text near main line 3
+
+CSV and optional sibling `metrics_*.json`, [...] Tier-2, so needs no snapshot counterpart.
+
+### Removed or replaced text near main line 7
+
+this contract [...] experiments, reading committed [...] published by `tools/v2_build_trades.py`, never legacy mutable storage.
+
+### Removed or replaced text near main line 11
+
+The [experiment design PR](https://github.com/yshewchuk/investment-validation/pull/1425) is a scientific proposal, not a code dependency, preregistration or approval of results.
+
+### Removed or replaced text near main line 17
+
+(including nonfinite/negative magnitudes, probabilities outside [0,1] or empty/non-list empirical samples),
+
+### Removed or replaced text near main line 23
+
+proof and native envelopes propagate unchanged; malformed shapes/incomplete inventory refuse `CONTRACT_MISMATCH`, unknown contracts `UNSUPPORTED_CONTRACT`, caps `RESULT_LIMIT_EXCEEDED`, duplicate `event_id` or `(ticker, day)` `IDENTITY_CONFLICT`. [...] coverage, observed-PIT knowledge [...] protected/numerical [...] Progress is aggregate stage/RSS/counts at bounded cadence, never source diagnostics or secrets.
+
+### Removed or replaced text near main line 25
+
+R1 missing input, none; R2 malformed shape or types, `CONTRACT_MISMATCH` before [...] R3 duplicate `event_id` or `(ticker, day)`, `IDENTITY_CONFLICT` with no partial output; R4 no retry, cache or fallback; R5 [...] nothing; R6 equal input gives equal output. Work is O(n log n + t log t), state O(n + t), no hard cap or RSS bound; no I/O, transaction,
+
+### Removed or replaced text near main line 27
+
+`canonical_day` refuses non-canonical dates `CONTRACT_MISMATCH`. [...] `CONTRACT_MISMATCH`,
+
+### Removed or replaced text near main line 34
+
+retry or [...] state; membership is not numerical/PIT eligibility
+
+### Removed or replaced text near main line 39
+
+I/O/fits/verification or retry/cache. [...] Detached metadata only; no I/O/fits/admission or retry/cache. [...] row
+
+### Removed or replaced text near main line 44
+
+| Malformed builder producer/snapshot, non-plain history metadata or invalid lane | `CONTRACT_MISMATCH` |
+
+### Removed or replaced text near main line 54
+
+caches); no panel-layer retries. [...] No partial artifact; identical
+
+### Removed or replaced text near main line 59
+
+cross-call cache, retry, write transaction, durable write,
+
+### Removed or replaced text near main line 113
+
+`experiments/v2_candidate_grid.py`'s `price_candidate_grid`
+
+### Removed or replaced text near main line 138
+
+Its consumers (`experiments.v2_gate_variant`, `experiments.gate_report`, `prediction_inputs.load_prediction_targets`) keep their no-report/no-ledger and date-ceiling contracts in `experiments/ARCHITECTURE.md`. [...] It performs no feature construction, model fitting or report/ledger publication and has no supervisor caller.
+
+### Removed or replaced text near main line 144
+
+(design #372 R2)
+
+### Removed or replaced text near main line 154
+
+| Cache, retry, transaction, partial write, replay | No cache or automatic retry; read-only, no writes; complete scans precede return; identical pinned inputs return identical rows (R6). |
+
+### Removed or replaced text near main line 159
+
+fitting. Its caller is offline `experiments.magnitude_fitted`, preserving legacy magnitude evidence bytes. [...] `horizon_fitted.fitted_forecasts` [...] `measure_fit_seconds=True` adds `fit_seconds` to completed progress markers (`experiments.magnitude_fitted.fitted_forecasts` always opts in; returned fit evidence stays static).
+
+### Removed or replaced text near main line 170
+
+The date bound is reconstructed source [...] availability, not intraday publication/finality evidence.
+
+### Removed or replaced text near main line 176
+
+cache, retry, write, transaction, partial return,
+
+### Removed or replaced text near main line 186
+
+Computed-moves defaults remain unchanged.
+
+### Removed or replaced text near main line 188
+
+Publication/finality remain unverified; availability is a modeled floor. [...] log start/end/failure, elapsed time and peak RSS to stderr, with count/rate/ETA ticks at most every 30 seconds and aggregate decisions; [...] (`report_refusals`), never message text, event identities or details. Logging cannot change results, identities, errors or read authority. [...] rebuilding, retries, persistent cache, writes, partial returns [...] Earlier admitted objects may decode availability before a late-label refusal.
+
+### Removed or replaced text near main line 194
+
+caller; callers are `experiments.iv_crush_prepare` and synthetic tests).
+
+### Removed or replaced text near main line 198
+
+Bounded stage/progress telemetry, no retry/writes/outcome
+
+### Removed or replaced text near main line 213
+
+The primary estimand is conditional mean, selected by pooled RMSE; MAE is [...] secondary (implemented by the magnitude reporter) and quantile calibration is [...] unimplemented.
+
+### Removed or replaced text near main line 224
+
+`CONTRACT_MISMATCH`; used by the [...] magnitude search's inner and outer evaluation reads) [...] `not_computed_reason`), as [...] `qualify_magnitude_training_targets` does.
+
+### Removed or replaced text near main line 233
+
+date [...] (reconstructed availability, not publication evidence).
+
+### Removed or replaced text near main line 238
+
+Repository failures propagate; no cache, retry, [...] write or partial return. `experiments/magnitude_report.py` consumes it through [...] the magnitude CLI; there is
+
+### Removed or replaced text near main line 246
+
+magnitude runner preflights the union of actual train/evaluation participants [...] across all folds before its first label read. The
+
+### Removed or replaced text near main line 262
+
+Repository refusals propagate: no cache, retry, write or partial result.
+
+### Removed or replaced text near main line 266
+
+admitted, later dates omitted, never zero-filled. [...] Provenance is reconstructed date bounds; event-schedule as-known and source-publication evidence stay unverified.
+
+### Removed or replaced text near main line 270
+
+outcomes, writes, caches, retries [...] introduced; native admission failures propagate. Complexity and metadata scans are unchanged from magnitude planning. [...] `magnitude_folds.magnitude_window(evaluation_years,
+
+### Removed or replaced text near main line 285
+
+authority; schedule/publication evidence stays unverified reconstruction.
+
+### Removed or replaced text near main line 331
+
+(design #372 R4)
+
+### Removed or replaced text near main line 333
+
+record [...] Non-retryable `EXPERIMENT_VARIANT_FAILED`; whole call fails, no excluded trade or partial tuple. Failure [...] Unusable quote reaching pricing | Non-retryable `EXPERIMENT_VARIANT_FAILED`; whole call fails, no excluded trade or partial tuple. | [...] | Insufficient calendar coverage | Non-retryable `EXPERIMENT_VARIANT_FAILED`; whole call fails, no excluded trade or partial tuple. | [...] | [...] Non-retryable `EXPERIMENT_VARIANT_FAILED`; whole call fails, [...] context and no partial tuple.
+
+### Removed or replaced text near main line 339
+
+No cache, retry, transaction or write: [...] identical inputs return identical results; report/ledger
+
+### Removed or replaced text near main line 351
+
+spend, and the request digest identifies bytes, not a new decision. [...] preparation derives them,
+
+### Removed or replaced text near main line 353
+
+performs no writes, [...] exported or
+
+### Removed or replaced text near main line 362
+
+| Retry, cache, write | None; read-only, identical pinned inputs return identical populations. |
+
+### Removed or replaced text near main line 364
+
+winner); the table is read whole, then filtered. [...] does no writes, caching or retries, [...] ops,
+
+### Removed or replaced text near main line 377
+
+built; their proposed design (state machine, [...] crash/reconciliation, retrieval) is `guides/final_holdout_authorized_read_design.md`, [...] design and not contract. Ops and research stay layer-7 peers with no imports [...] between them, and training,
+
+### Removed or replaced text near main line 394
+
+Predicates, exact-pair filtering, batch filtering, [...] row ordering and deduplication remain part of the read contract. [...] report decoded-row progress on stderr at bounded cadence [...] rows) and log start and completion/failure with elapsed time and peak RSS for every row scan; [...] telemetry and native errors propagate unchanged.
+
+### Removed or replaced text near main line 406
+
+An explicit id reproduces a run after the scope's head has moved; [...]   omitting it resolves the current pinned head.
+
+### Removed or replaced text near main line 446
+
+the `snapshot_id` it was [...]   read from, so a report is reproducible without re-resolving anything. [...]   `experiment_trades.load_trades` includes [...] explicit snapshot and holdout [...]   context columns alongside the legacy-compatible trade columns.
+
+### Removed or replaced text near main line 453
+
+(`RevisionCandidate`, `CompletedCoverage`, `CoverageKey`, `CoverageOutcome`, `TimeInterval`), [...] (`DataQuery`, `KeyPredicate`, `SnapshotRef`, `TimeInterval`, `ObjectRef`, `TableContractRef`, `ColumnContract`, `TableContract`), [...] `engine.v2.features.calendar_features` (`calendar_features`), `engine.v2.features.own_vol` (`compute_own_vol`, the [...] `engine.v2.features.panel_math` (`history_features`, `DAILY_STATE_FIELDS`) and `engine.v2.features.regime` (`add_regime_features`, `validated_regime_closes`), [...] `canonical_json`, `iter_canonical_json`, `content_hash`, `from_document`, `to_document`,
+
+### Removed or replaced text near main line 467
+
+(used by `fill_quality.py`, [...] `polygon_fills.py`, `signal_screen.py` and [...] `_pricing.trading_calendar_from_snapshot`) [...] (used by [...] `_chains.py`'s replay reads and `_trades_publish.py`'s build/reconcile reads)
+
+### Removed or replaced text near main line 474
+
+Merging them remains issue #69.
+
+### Removed or replaced text near main line 476
+
+Two consumer rules stay here: [...] (public bounded-snapshot admission precedes table access; a missing bounds row seals `label_bounds_missing`, a present null row `label_bounds_unavailable`, a malformed non-null stored date refuses identity; a fold whose strict exclusions remove every evaluation event refuses before plan publication; `read_search_plan` reconstructs folds and revalidates the sealed plan, including availability, repeating the bounded bounds admission);
+
+### Removed or replaced text near main line 484
+
+Inputs | Exact source snapshot, admitted temporal plan, history start, fixed 5/3/1 clocks, per-feature missingness and installed producer source/environment identity; no experiment outputs. | [...] | [...] live (beyond that only extra scans). [...] report start/end/failure with elapsed seconds and peak RSS on stderr, periodic ticks at most every 30 s, and refusal stages include [...] native `DataError` code only. Telemetry never changes results, errors or stdout
+
+### Removed or replaced text near main line 492
+
+schedule/publication availability stays unverified reconstruction;
+
+### Removed or replaced text near main line 497
+
+Missing/changed receipt/pin refuses `IDENTITY_CONFLICT`, bad contract `CONTRACT_MISMATCH`, unprovable isolation `HOLDOUT_ACCESS_DENIED`. [...] derivation/registration; `experiments/magnitude_history_report.py` uses stored reads and target qualification. Both v1 consumers remain unchanged.
+
+### Removed or replaced text near main line 511
+
+native bounds precede grouped eligibility/object preflight; [...] Only eligible prior outcomes available by each ceiling are read, preserving native means/EMA/nulls. [...] reads; implied history remains separate. [...] Full admitted object bytes are hashed and protected [...] progress is bounded; [...] native errors propagate. Publication/schedule-as-known remain unverified reconstruction;
+
+### Removed or replaced text near main line 519
+
+Full-snapshot lineage is not retained; [...] memory still [...] A prior successful read never substitutes for fresh validation.
+
+### Removed or replaced text near main line 543
+
+IDs/reasons; SIZE fold binding also applies its strict label cutoff and records exclusions. [...] There are no retries, persistence, cache or partial results. Bounded progress and stage [...] timing/RSS go to stderr; refusals report only native error codes, not row values.
+
+### Removed or replaced text near main line 555
+
+reason
+
+### Removed or replaced text near main line 557
+
+| Evaluation IDs matching an ambiguous-random ticker embargo | Excluded with `embargo_ticker` from the classifier plan; all other IDs remain in its `evaluation_event_ids`. The separate SIZE fold binder then retains only IDs strictly before its evaluation cutoff and records cutoff exclusions. |
+
+### Removed or replaced text near main line 561
+
+Long-memory/cross-ticker effects remain; chronological and random holdouts are [...] complementary, not interchangeable.
+
+### Removed or replaced text near main line 603
+
+With a head, resolution is deterministic and [...]     once per run; outputs carry the ID for later explicit `--snapshot-id` replay.
+
+### Removed or replaced text near main line 615
+
+(`_pricing.trading_calendar_from_snapshot` reads it through [...]     `_scan.read_table`),
+
+### Removed or replaced text near main line 645
+
+With `index=None`, replay scopes chain [...]   availability and loaded chain data to the plan's own years, tickers and dates, [...]   so the `ChainIndex` holds only available plan keys; an explicit `index=` [...]   bypasses chain reads. `_build_run.run` creates an independent replay per [...]   strategy.
+
+### Removed or replaced text near main line 651
+
+retryable (an [...]   operator may rerun after the head appears or the conflicting writer finishes);
+
+### Removed or replaced text near main line 671
+
+(fill quality, polygon [...]   fills, signal screen)
+
+### Removed or replaced text near main line 698
+
+`replay()` (which derives it itself whenever [...]   `calendar` is unset), [...] semantics; the isolated CSV reader: External systems).
+
+### Removed or replaced text near main line 705
+
+### Removed or replaced text near main line 714
+
+envelope; signed use is an additive platform primitive, not a registered IV experiment.
+
+
+
+### Removed or replaced text near main line 732
+
+consumer; see the stage-2 contract for reconstruction limits and synthetic-only verification. [...] request, while full canonical metadata still establishes protected windows.
+
+### Removed or replaced text near main line 739
+
+registration validator accepts v3, v4 and v5 (v5 needs the season receipt). The
+
+### Removed or replaced text near main line 741
+
+unchanged; one stderr decision line is logged. The confirmed-metadata index is not mutated.
