@@ -145,6 +145,22 @@ def test_invalid_sources_fail_contract(kind):
     assert "iv10" in str(caught.value)
 
 
+@pytest.mark.parametrize(
+    "bad_source",
+    [[1.0, 2.0, 3.0], np.ones((3, 1), dtype=np.float64)],
+    ids=["list", "2d"],
+)
+def test_non_1d_array_source_fails_contract(bad_source):
+    frame = _sources()
+    frame["iv10"] = bad_source
+
+    with pytest.raises(DataError) as caught:
+        derive_columns(frame, "HMOSXL")
+
+    assert caught.value.code == "CONTRACT_MISMATCH"
+    assert "iv10" in str(caught.value)
+
+
 @pytest.mark.parametrize("set_name", ["UNKNOWN", ""])
 def test_unknown_set_name_fails_contract_mismatch(set_name):
     with pytest.raises(DataError) as caught:

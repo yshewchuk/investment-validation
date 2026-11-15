@@ -1,4 +1,9 @@
-"""Derive source-free log and product feature columns."""
+"""Fixed L/LP derived-feature lists and the pure derive_columns step.
+
+No caller yet by design: slices 2-4 of guides/size_log_product_features_design.md
+(section 8) add the HMOSXL/HMOSXLP recipes, request v12 and the fit-path call at
+the panel-to-matrix seam; this slice only fixes the lists and refusal semantics.
+"""
 from __future__ import annotations
 
 from collections.abc import Mapping
