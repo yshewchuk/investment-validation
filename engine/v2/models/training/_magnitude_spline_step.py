@@ -36,6 +36,10 @@ class _CheckedSpline(SplineTransformer):
 
 def spline_step(feature_names, spline_columns, n_knots):
     """Pass imputed features through and append a checked spline basis."""
+    if type(n_knots) is not int or n_knots < 2:
+        raise fail("CONTRACT_MISMATCH", "n_knots must be an integer >= 2")
+    if len(set(spline_columns)) != len(spline_columns):
+        raise fail("CONTRACT_MISMATCH", "spline columns must be unique")
     position = {name: index for index, name in enumerate(feature_names)}
     missing = [name for name in spline_columns if name not in position]
     if missing:

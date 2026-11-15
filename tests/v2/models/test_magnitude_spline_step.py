@@ -92,3 +92,17 @@ def test_unknown_spline_column_is_a_contract_mismatch():
         spline_step(("a", "b"), ("c",), 6)
 
     assert raised.value.code == "CONTRACT_MISMATCH"
+
+
+@pytest.mark.parametrize("args", [
+    (("a", "b"), ("a",), 1),
+    (("a", "b"), ("a",), 0),
+    (("a", "b"), ("a",), True),
+    (("a", "b"), ("a",), 2.5),
+    (("a", "b"), ("a", "a"), 6),
+])
+def test_invalid_spline_arguments_are_contract_mismatches(args):
+    with pytest.raises(DataError) as raised:
+        spline_step(*args)
+
+    assert raised.value.code == "CONTRACT_MISMATCH"
