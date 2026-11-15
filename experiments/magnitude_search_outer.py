@@ -151,7 +151,8 @@ def _result(started, inputs, inputs_id, execution, forecasts, validation, fold, 
         "prospective_candidate_id": started["prospective_candidate_id"],
         "evaluation_authority": "selected_outer_fold_only", "final_read_authority": "none",
         "holdout_results": {"random": "excluded; not evaluated", "rolling": "excluded; not evaluated"},
-        **({"fit_diagnostics": execution["diagnostics"]} if "diagnostics" in execution else {})}
+        **({"fit_diagnostics": [{k: v for k, v in item.items() if k != "training_event_ids"}
+                                for item in execution["diagnostics"]]} if "diagnostics" in execution else {})}
     if target is not None:
         result.update(schema_version="regression_search_outer_result.v1", target=target)
     return {**result, "result_id": content_hash(result)}

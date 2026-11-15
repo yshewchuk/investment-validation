@@ -24,8 +24,19 @@ def test_terminal_omits_lineage_and_stays_within_the_manifest_cap(monkeypatch):
     started = {"outer_id": "outer", "plan_id": "plan", "candidate": {"candidate_id": "candidate"},
         "selection_id": "selection", "prospective_candidate_id": "candidate"}
     monkeypatch.setattr(outer, "_validate_targets", lambda *args: None)
-    result = outer._result(started, inputs, "inputs-id", {"fit_attempt_count": 1}, forecasts,
+    execution = {"fit_attempt_count": 1, "diagnostics": [{
+        "schema_version": "size_v1_4_fit.v1", "horizon_sessions": 1,
+        "training_event_ids": [f"SYNTH:{index:06d}" for index in range(LINEAGE_ROWS)],
+        "logical_fits": 1, "component_fits": 2, "fallback_counts": {}}]}
+    result = outer._result(started, inputs, "inputs-id", execution, forecasts,
                            validation, {"year": "2024"}, [1])
     assert len(canonical_json(inputs["training_inputs"]).encode()) > MAX_BYTES
     assert "training_inputs" not in result
     assert len(canonical_json(result).encode()) < MAX_BYTES
+    assert result["fit_diagnostics"] == [{
+        "schema_version": "size_v1_4_fit.v1", "horizon_sessions": 1,
+        "logical_fits": 1, "component_fits": 2, "fallback_counts": {}}]
+    assert result["event_count"] == 1
+    assert result["forecast_count"] == 1
+    assert result["inputs_id"] == "inputs-id"
+    assert result["evaluation_inputs"] == validation["evaluation_inputs"]
