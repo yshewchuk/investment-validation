@@ -181,7 +181,7 @@ These offline APIs do not publish sources, register experiments or participate i
 | Physical admission | Every candidate passes public `event_history.plan_event_targets` (metadata-only singleton admission) before any target opens. Missing/mixed objects or unprovable exact ticker/date bounds refuse `HOLDOUT_ACCESS_DENIED`; nonmatching contract/hash refuses `CONTRACT_MISMATCH`. Every declared target object is capped at 1 MiB before opening (`RESULT_LIMIT_EXCEEDED`); bounded Repository scans also cap compressed and total uncompressed bytes. |
 | Stored label | Exactly one matching ticker/date/session, boolean false skip and null reason are required. Canonical anchors span 1–5 calendar days: AMC requires pre ≤ event < post; BMO requires pre < event ≤ post. Availability equals post plus one calendar day, follows the event and precedes the cutoff before numeric use. These checks do not prove source-row adjacency or exchange sessions. Skipped, late or malformed rows refuse the whole read with `EXPERIMENT_VARIANT_FAILED`; finite signed values, including zero and values below -100, remain unchanged. |
 | Provenance | `validate_iv_crush_receipt(preflight, fold, receipt, targets)` checks exact evaluation membership/order, finite signed rows, cutoff/context/object identities and the full receipt/hash without I/O; malformed evidence raises structural/numeric exceptions. Attributes bind dataset/contract ref, cutoff, month/membership pins, purpose, future exclusions and ordered fragment/object/content hashes plus caller source_id/input_hash; source marker/hash syntax is checked, not authenticated or recomputed. |
-| Progress | Admission, planning and read stages follow the "Progress logging" invariant; IV refusal stages log the native code only (`report_refusals`). |
+| Progress | Per "Progress logging"; refusal stages log the native code only (`report_refusals`). |
 | Effects/failures | No source-quote reads, target rebuilding or experiment authority. Native repository integrity/resource refusals propagate unchanged. |
 
 The reader accepts only the exact definition (no grandfathering), uses `event_history.POPULATION_CONTEXT_COLUMNS`, and supplies no source-receipt validation, forecast recipe or model.
@@ -314,8 +314,10 @@ write files or blend mark-based P&L with fill-validated results.
 
 | Exit-walker failure condition | Outcome |
 |---|---|
-| Malformed position or leg record; unusable quote reaching pricing; insufficient calendar coverage | Non-retryable `EXPERIMENT_VARIANT_FAILED`; whole call fails, no excluded trade or partial tuple. |
-| Missing required leg mark or mark past held-leg expiry | Same, and failure details identify the trade and failing session. |
+| Malformed position or leg record | Non-retryable `EXPERIMENT_VARIANT_FAILED`; whole call fails, no excluded trade or partial tuple. |
+| Missing required leg mark or mark past held-leg expiry | Non-retryable `EXPERIMENT_VARIANT_FAILED`; whole call fails, no excluded trade or partial tuple. Failure details identify the trade and failing session. |
+| Unusable quote reaching pricing | Non-retryable `EXPERIMENT_VARIANT_FAILED`; whole call fails, no excluded trade or partial tuple. |
+| Insufficient calendar coverage | Non-retryable `EXPERIMENT_VARIANT_FAILED`; whole call fails, no excluded trade or partial tuple. |
 | Invalid fractional debit basis or converted threshold | Same, with entry trade/session context. |
 
 Other repository refusals propagate. Report/ledger publication is outside this seam.
@@ -370,7 +372,7 @@ daily builder also enforces its explicit cumulative row bound. Empty selected
 membership allows zero result rows with a positive batch size. A complete read
 either returns its population or raises its typed refusal (no month/day retries
 or null-overflow refusals).
-Shared `_scan` reads follow the "Progress logging" invariant, reporting decoded rows against the candidate-row bound (an upper bound; filtered scans also report retained/skipped rows); no additional scan is used for telemetry.
+Shared `_scan` reads report decoded rows against the candidate-row bound (an upper bound; filtered scans also report retained/skipped rows); no additional scan is used for telemetry.
 
 Public `_chains.read_chains_for_years` delegates a nonempty iterable of years to `_snapshot.read_table`/`_scan.read_table` with the fixed chain projection, optional key predicates and `batch_filter`; it materializes retained rows and performs no experiment holdout admission. The callback runs on each batch's pandas frame before retention and returns narrowed rows or `None` (omitting it or `None` preserves existing reads). `_chains.load_chain_index` uses it to keep exactly the requested ticker/date pairs, one manifest year at a time: only the exact pair mask, never the cross product, defines retained rows; frames retain ordering and duplicates. This bounds retained unmatched rows, not process RSS.
 
@@ -542,7 +544,6 @@ The 4c R1–R6 template covers data-boundary refusals, generally `DataError`
 (`engine.v2.data.errors.DataError`) carrying a registered `DATA_FAILURE_CODES` code.
 CLI leaves catch these at `main()` and exit 2: stored-history runtime refusals
 are JSON on stdout; other tools print code/message on stderr.
-Argument validation is separate because it can refuse before that handler.
 One pre-existing data-path exception, called out below
 where it applies (`_snapshot.py`'s bare `ValueError`, issue #70), escapes as
 an uncaught traceback instead.
@@ -653,7 +654,7 @@ an uncaught traceback instead.
   A tombstone requires replay provenance, membership in `rebuilt_strategies`, a
   `trade_id` absent from the rebuild, and (when `years` is supplied) the existing
   row's own `year` in that scope. Omitting `--years` tombstones across all years.
-- **Progress logging.** Admission, planning, scan and build stages log start/end/failure with elapsed time and peak RSS to stderr, with count/rate/ETA ticks at most every 30 seconds and aggregate decisions; refusal stages log the native `DataError` code only, never message text, row values, event identities, details, source diagnostics or secrets. Logging cannot change results, errors, stdout or read authority.
+- **Progress logging.** Admission, planning, scan and build stages log start/end/failure with elapsed time and peak RSS to stderr, with count/rate/ETA ticks at most every 30 seconds and aggregate decisions; refusal stages log the native `DataError` code only, never message text, row values, identities, details or secrets. Logging cannot change results, errors, stdout or read authority.
 - **Availability evidence.** Availability dates, forecast cutoffs and schedule knowledge are reconstructed bounds from stored data, never evidence of publication, finality or as-known event schedules, for every reader, planner and stored feature here.
 - **Read-only by default.** Unless a section states otherwise (stored-history materialization, `event_target_store`, build-trades/reconcile-trades), readers, planners and validators write nothing, retry nothing, cache nothing across calls and return no partial result; native refusals propagate unchanged and identical pinned inputs give identical outputs.
 - Never mutates the legacy trades ledger and never calls a network provider
@@ -669,7 +670,7 @@ an uncaught traceback instead.
 ## Diagram
 
 
-The CLI data-flow diagram and all text moved by the third compression are in `guides/research_architecture_design_notes.md` ("Compression 3").
+The CLI diagram and text moved by the third compression: `guides/research_architecture_design_notes.md` ("Compression 3").
 
 ### Qualified SIZE panel composition
 
