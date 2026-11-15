@@ -889,21 +889,25 @@ an uncaught traceback instead.
   operator may rerun after the head appears or the conflicting writer finishes);
   limit and integrity refusals, including `RESULT_LIMIT_EXCEEDED` and
   `MANIFEST_CORRUPT`, are not.
-- **R4, transaction.** Build-trades and reconcile-trades are the only writers;
-  both use `_trades_publish.publish` →
+- **R4, transaction.** Build-trades and reconcile-trades are the only writers of
+  the `trades` table (stored-history materialization separately commits its own
+  scope through `data.catalog.commit_snapshot`, see its Publication row); both
+  use `_trades_publish.publish` →
   `generic_incremental.build_generic_table_candidate`/
   `commit_generic_table_candidate`, fenced to the snapshot the run read
   (`expected_head_snapshot_id`, `expected_head_generation`). If another writer
   advanced the head meanwhile, the commit refuses `SNAPSHOT_CONFLICT`
   (`dependency`, retryable), never overwriting or merging. `--dry-run` builds the
-  same candidate and stops before the commit: no write.
+  same candidate and stops before the commit: no snapshot is committed, though
+  building may leave unreferenced immutable objects in the store.
 - **R5, partial result/write.** Read batches stay provisional until scan
   exhaustion; a later failure returns no partial frame. A smaller explicit caller
   limit raises `RESULT_LIMIT_EXCEEDED`. Writes use the atomic
   `commit_generic_table_candidate`: a pre-call crash leaves the parent untouched.
 - **R6, idempotency.** A byte-identical read of the same pinned snapshot and
   request returns identical rows, so read-only tools (fill quality, polygon
-  fills, signal screen, replay) give byte-identical reports. Build-trades and
+  fills, signal screen, replay) give identical report contents (report file
+  names carry a date stamp, default today). Build-trades and
   reconcile-trades are NOT idempotent: each commit publishes a new `trades`
   version, so re-running against the same parent snapshot afterwards reads the
   newer version and may produce a different non-empty changeset (or `noop` when
