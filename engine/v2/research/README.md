@@ -537,7 +537,7 @@ Historical publication and schedule knowledge remain unverified reconstruction.
 
 ## Complete qualified SIZE panel
 
-<!-- public-interface: magnitude_panel_qualified_table.CONTRACT, magnitude_panel_qualified_table.FEATURES, magnitude_panel_qualified_table.METADATA, magnitude_panel_qualified_table.TABLE, magnitude_panel_qualified_table.admit_columns, magnitude_panel_qualified_table.feature_dictionary, magnitude_panel_qualified_table.recipe -->
+<!-- public-interface: magnitude_panel_qualified_table.CONTRACT, magnitude_panel_qualified_table.FEATURES, magnitude_panel_qualified_table.METADATA, magnitude_panel_qualified_table.TABLE, magnitude_panel_qualified_table.admit_columns, magnitude_panel_qualified_table.feature_dictionary, magnitude_panel_qualified_table.panel_recipe, magnitude_panel_qualified_table.recipe -->
 
 `experiments.size_panel.materialize/read` is the installed-identity public boundary;
 `magnitude_panel_qualified` and `_magnitude_panel_*` helpers are internal only and

@@ -77,6 +77,40 @@ def test_hmosxlp_appends_products_after_the_log_descriptors():
         assert field["on_missing"] == "null"
 
 
+def test_hmosxlp_descriptors_are_exact_literals():
+    base = _base()
+    units = {field["name"]: field["unit"] for field in base}
+    derived = table.feature_dictionary("HMOSXLP")[len(base):]
+    by_name = {field["name"]: field for field in derived}
+    assert by_name["log1p_implied_move"] == {
+        "name": "log1p_implied_move", "block": "derived",
+        "source_alias": "log1p_implied_move", "native_output_alias": "log1p_implied_move",
+        "physical_type": "float64", "unit": f"log1p({units['implied_move']})",
+        "nullable": True, "on_missing": "null",
+        "source_dependencies": [{"role": "panel_column", "name": "implied_move"}],
+        "derivation_policy": {"schema_version": "derived_feature.v1", "function": "log1p",
+            "sources": ["implied_move"], "output": "log1p_implied_move"}}
+    assert by_name["implied_move_x_mean_prior_abs_move"] == {
+        "name": "implied_move_x_mean_prior_abs_move", "block": "derived",
+        "source_alias": "implied_move_x_mean_prior_abs_move",
+        "native_output_alias": "implied_move_x_mean_prior_abs_move",
+        "physical_type": "float64",
+        "unit": f"{units['implied_move']}*{units['mean_prior_abs_move']}",
+        "nullable": True, "on_missing": "null",
+        "source_dependencies": [{"role": "panel_column", "name": "implied_move"},
+            {"role": "panel_column", "name": "mean_prior_abs_move"}],
+        "derivation_policy": {"schema_version": "derived_feature.v1", "function": "product",
+            "sources": ["implied_move", "mean_prior_abs_move"],
+            "output": "implied_move_x_mean_prior_abs_move"}}
+    for field in derived:
+        assert field["derivation_policy"]["sources"]
+        assert field["derivation_policy"]["sources"] == [dep["name"]
+            for dep in field["source_dependencies"]]
+    with pytest.raises(DataError) as raised:
+        table.panel_recipe("HMOSXL")
+    assert "HMOSXL" in str(raised.value)
+
+
 def test_derived_sources_are_hmosx_model_columns():
     columns = set(table.recipe("HMOSX")["model_columns"])
     for subset in SET_NAMES:
