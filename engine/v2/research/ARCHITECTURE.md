@@ -290,9 +290,8 @@ and S is finite and negative. Declaration admission is shared with ops through
 `foundation.experiment_exits.valid_exit_recipe`. Target/stop recipes may declare `threshold_units`:
 `quote_price_times_quantity` (also the omitted-field behavior) or
 `entry_debit_fraction`. Fractions multiply each position's positive net opening
-debit, priced once at the declared alpha, before walking its daily closing marks.
-This basis includes spread but excludes fees, commissions and contract multipliers;
-it is not gross premium or a portfolio return. Zero/credit entry or converted
+debit, priced once at the declared alpha, before walking its daily closing marks
+(spread included; fees, commissions and contract multipliers excluded). Zero/credit entry or converted
 thresholds that overflow or underflow to zero refuse the whole call. Fractions
 are signed ratios, never percentage-point inputs; no clipping or normalization.
 The resolved economics and canonical plan identity retain every recipe field, so
@@ -302,16 +301,16 @@ snapshot, using the pinned `daily_market` calendar, `_pricing.FillModel` and the
 alpha ladder; it adds no projected calendar, replacement contract or mark source.
 A target or stop exits on its first observed crossing. If one day's alpha 0/1
 aggregate mark range spans both thresholds, the stop is selected and
-`ambiguous_exit` is true (daily marks cannot order the exits), with exit value
-and P&L priced at the worst alpha (0.0) so it cannot beat the stop. No crossing
+`ambiguous_exit` is true, with exit value
+and P&L priced at the worst alpha (0.0). No crossing
 by N sessions uses the 7a fixed-day fallback; the expiry bound and typed refusal
 still apply. Results are
 `mark_based` net held-position P&L with exit reason/date, visited dates, source,
 the declared recipe alpha, the alpha actually applied at exit
-(`exit_fill_alpha`, equal to the recipe alpha except for an ambiguous stop) and
+(`exit_fill_alpha`) and
 snapshot identity. `exit_report_frame` projects those
 decisions into one row per trade with separate `mark_based_pnl`, `exit_reason`,
-`exit_day`, ambiguity and provenance columns for report callers; it does not
+`exit_day`, ambiguity and provenance columns; it does not
 write files or blend mark-based P&L with fill-validated results.
 
 | Exit-walker failure condition | Outcome |
@@ -333,9 +332,9 @@ snapshot-read helpers), `_pricing.py` (except the names carved out above),
 
 Request preparation, the private ops authorization/spend primitive, the private metadata-only final population reader and the private frozen evaluator are implemented; no production authorization entrypoint, final-read caller or result retrieval exists. Agents and supervisors may prepare requests, never authorize them ([user decision](https://github.com/yshewchuk/investment-validation/issues/490#issuecomment-6072905454)); #445's union exclusion is preserved.
 
-**Request.** Canonical versioned bytes use the existing `experiment_id` as the decision identity ([decisions](https://github.com/yshewchuk/investment-validation/issues/490#issuecomment-6101284544)) and bind the registered `variant_id`/registration reference, resolved plan/source/evaluation-recipe and frozen-model hashes, exact committed `snapshot_id`, `holdout_as_of_month` and both membership versions; no latest-head resolution, caller population, alternate arm, fitting, threshold search or evaluator callback is accepted. Membership stays in `foundation.experiment_holdouts` (ambiguous identities refused, random and rolling sets bound together); changing month, version, snapshot or winner cannot reset a decision's spend. `native_registration.prepare_final_holdout_request` verifies existing registration metadata only (never resolves a head, scans a population or reads results); the registration's optional `final_read` declaration seals recipe, completeness-bar and frozen-model references, and registrations without it refuse preparation. Request validity proves neither winner selection nor read eligibility: the later metadata-only preflight must verify the preregistered completeness artifact and refuse an unmet bar before any holdout outcome read.
+**Request.** Canonical versioned bytes use the existing `experiment_id` as the decision identity ([decisions](https://github.com/yshewchuk/investment-validation/issues/490#issuecomment-6101284544)) and bind the registered `variant_id`/registration reference, resolved plan/source/evaluation-recipe and frozen-model hashes, exact committed `snapshot_id`, `holdout_as_of_month` and both membership versions; no latest-head resolution, caller population, alternate arm, fitting, threshold search or evaluator callback is accepted. Changing month, version, snapshot or winner cannot reset a decision's spend. `native_registration.prepare_final_holdout_request` verifies existing registration metadata only; registrations without a `final_read` declaration refuse preparation. Request validity proves neither winner selection nor read eligibility: the later metadata-only preflight must verify the preregistered completeness artifact and refuse an unmet bar before any holdout outcome read.
 
-**Population reader.** Private `_final_population.load_final_population(repository, request)` is the only final-read reader that returns separate held-out event-ID sets. It accepts a validated `FinalHoldoutRequest` (never a caller population) and returns a frozen `FinalPopulation` with sorted random and rolling IDs, overlap and ambiguity counts, and bound snapshot/month/version context. It reads only canonical `earnings_events` metadata with the loaders' shared membership/ambiguity rules, excludes ambiguous events from both sets, and does not inspect ops state or hold a grant. It is not reachable from loaders, training, selection or sweep.
+**Population reader.** Private `_final_population.load_final_population(repository, request)` is the only final-read reader that returns separate held-out event-ID sets. It accepts a validated `FinalHoldoutRequest` (never a caller population) and returns a frozen `FinalPopulation`. It reads only canonical `earnings_events` metadata with the loaders' shared membership/ambiguity rules, excludes ambiguous events from both sets, and does not inspect ops state or hold a grant. It is not reachable from loaders, training, selection or sweep.
 
 | Population reader condition | Outcome |
 |---|---|
@@ -345,7 +344,7 @@ Request preparation, the private ops authorization/spend primitive, the private 
 | `resolve` raising a non-integrity `DataError` (such as not-found), `ValueError`, `TypeError` or `KeyError` | `SNAPSHOT_UNRESOLVED`. An integrity-category `DataError` (such as `MANIFEST_CORRUPT`) and any other exception propagate unchanged. Integrity failures during the scan propagate as the repository's typed refusal. |
 | Both sets empty after ambiguity exclusion | `POPULATION_COLLAPSED`; never an empty success. Preregistered completeness remains the later preflight's refusal. |
 
-**Evaluator.** Private `_final_evaluator.evaluate_final_holdout(repository, request, population)` takes only a validated `FinalHoldoutRequest` and the `FinalPopulation` that `load_final_population` returns; it has no other parameter, fit, alternate arm, threshold search or callback. It scores the committed `trades` rows of the pinned snapshot with this package's provenance whose `variant` equals `request.variant_id` (the frozen winner). It returns frozen `FinalMetrics` with the random and rolling results separately, each with event count, trade count, events without a trade, total and mean `ret` and win rate (`None` when a set has no trade), plus overlap and ambiguity counts; the sets are never averaged or merged. It never imports ops and checks no fence or revocation: the later leaf does that before invoking it.
+**Evaluator.** Private `_final_evaluator.evaluate_final_holdout(repository, request, population)` takes only a validated `FinalHoldoutRequest` and the `FinalPopulation` that `load_final_population` returns; it has no other parameter, fit, alternate arm, threshold search or callback. It scores the committed `trades` rows of the pinned snapshot with this package's provenance whose `variant` equals `request.variant_id` (the frozen winner) and returns frozen `FinalMetrics` with the random and rolling results separately, never averaged or merged. It never imports ops and checks no fence or revocation: the later leaf does that before invoking it.
 
 | Evaluator condition | Outcome |
 |---|---|
@@ -356,11 +355,11 @@ Request preparation, the private ops authorization/spend primitive, the private 
 | Non-finite `ret` | `CONTRACT_MISMATCH`; infinities are already refused at publication. |
 
 **Authority and lifecycle.** Ops owns authorization, spend and state fencing
-(`engine/v2/ops/ARCHITECTURE.md`, `ops.final_holdout`; currently test-consumed
-only). The `tools/v2_final_holdout.py` leaf that would call this evaluator, and
-result retrieval, are not built (design only:
-`guides/final_holdout_authorized_read_design.md`). Training, selection, sweep and
-the loaders accept no grant argument, final purpose or returned holdout frame.
+(`engine/v2/ops/ARCHITECTURE.md`, `ops.final_holdout`). The
+`tools/v2_final_holdout.py` leaf that would call this evaluator, and result
+retrieval, are not built (design only: `guides/final_holdout_authorized_read_design.md`).
+Training, selection, sweep and the loaders accept no grant argument, final purpose or
+returned holdout frame.
 
 ## Inputs
 
@@ -376,7 +375,7 @@ either returns its population or raises its typed refusal (no month/day retries
 or null-overflow refusals).
 Shared `_scan` reads report decoded rows against the candidate-row bound (an upper bound; filtered scans also report retained/skipped rows); no additional scan is used for telemetry.
 
-Public `_chains.read_chains_for_years` delegates a nonempty iterable of years to `_snapshot.read_table`/`_scan.read_table` with the fixed chain projection, optional key predicates and `batch_filter`; it materializes retained rows and performs no experiment holdout admission. The callback runs on each batch's pandas frame before retention and returns narrowed rows or `None` (omitting it or `None` preserves existing reads). `_chains.load_chain_index` uses it to keep exactly the requested ticker/date pairs, one manifest year at a time: only the exact pair mask, never the cross product, defines retained rows; frames retain ordering and duplicates. This bounds retained unmatched rows, not process RSS.
+Public `_chains.read_chains_for_years` delegates a nonempty iterable of years to `_snapshot.read_table`/`_scan.read_table` with the fixed chain projection, optional key predicates and `batch_filter`; it materializes retained rows and performs no experiment holdout admission. The `batch_filter` callback runs on each batch's pandas frame before retention and returns narrowed rows or `None` (omitting it or `None` preserves existing reads). `_chains.load_chain_index` uses it to keep exactly the requested ticker/date pairs, one manifest year at a time (the exact pair mask, never the cross product); this bounds retained unmatched rows, not process RSS.
 
 - `--catalog` (sqlite path) and `--store-root` (`ArtifactStore` root): required by
   every CLI; opened once per run via `engine.v2.ops.bootstrap.open_catalog` /
@@ -426,8 +425,7 @@ Public `_chains.read_chains_for_years` delegates a nonempty iterable of years to
 
 ## Dependencies
 
-`engine.v2.data` (`Repository`, `errors`, `generic_incremental`, `incremental_tables`, `bounded_snapshot`, `catalog`, `documents`, `objects`, `manifests`, `query`, `time_formats`, `computed_moves_table`, `computed_move_bounds`, `confirmed_event_metadata`, `event_history`, `iv_crush_table`, `price_history_query`, `price_history_table`), `engine.v2.contracts` and `engine.v2.contracts.data` (revision/coverage and data-query/snapshot/table contract types), `engine.v2.contracts.final_holdout` (`FinalHoldoutRequest`, for `_final_population`), `engine.v2.features` (`calendar_features`, `own_vol.compute_own_vol` (the G3 consumer edge), `panel_math`, `regime`), `engine.v2.models.training` (`FitInputs`, `fit_routes` for offline horizon fitting), `engine.v2.foundation` (`ArtifactStore`, `SystemClock`, canonical JSON/hash/document helpers, `format_timestamp`, `market_calendar`, `experiment_exits.valid_exit_recipe`, `experiment_holdouts.calendar_date` (canonical days for IV input/anchor/clock validation), `experiment_holdouts.ExperimentHoldouts` (panel membership-policy versions), plus
-`final_holdout.request_from_document` and `typed.to_document` for `_final_population`); research itself owns `tail_history` and `iv_dynamics` (G1, G2).
+`engine.v2.data`, `engine.v2.contracts` (including `contracts.data` and `contracts.final_holdout` for `_final_population`), `engine.v2.features` (`own_vol.compute_own_vol` is the G3 consumer edge), `engine.v2.models.training` (offline horizon fitting) and `engine.v2.foundation` (`ArtifactStore`, `SystemClock`, canonical JSON/hash helpers, `market_calendar`, `experiment_exits.valid_exit_recipe`, `experiment_holdouts`); research itself owns `tail_history` and `iv_dynamics` (G1, G2). Symbol-level lists: `guides/research_architecture_design_notes.md` (Compression 4).
 Only lower-layer imports are allowed (`checks/layer_map.py`, `only_imports` unset):
 no `engine.v2.scoring`, `engine.v2.evaluation`, `engine.v2.ledger` or sibling/higher
 packages. Ops and research are both layer 7.0, so research cannot import ops.
@@ -440,10 +438,7 @@ this native write path advances only its dedicated context scope, never source h
 verbatim from `engine.data.sources.polygon.option_ticker`. Research has no legacy
 adapter; v2 cannot import legacy without a declared adapter.
 
-**Known duplication (issue #69):** `_scan.py` and `_snapshot.py` are two
-independent snapshot-read modules. `_snapshot.read_table` delegates its scan to
-`_scan.read_table`, forwarding caller `key_filter` predicates, and keeps its own
-partition-key resolution, no-partition refusal and empty-result frame shape.
+**Known duplication (issue #69):** `_scan.py` and `_snapshot.py` are two independent snapshot-read modules; `_snapshot.read_table` delegates its scan to `_scan.read_table` and keeps its own no-partition refusal.
 
 Callers: no `engine/` modules import this package (`checks/import_layers.py` parses only `engine*` importers, so the `tools/v2_*.py` CLI leaves and `experiments/` callers sit outside the layering hook). The `experiments/` consumers of each public seam are listed in `guides/research_architecture_design_notes.md` and their contracts live in `experiments/ARCHITECTURE.md`. `experiments/magnitude_search_plan.py` consumes `magnitude_folds.annual_fold` and owns native bounds/cutoff exclusions from the registration-pinned `binding["snapshot"]` (its seal and refusal rules are in `experiments/ARCHITECTURE.md`); the archived `experiments/common_v2.py` trade-read caller omits required holdout context and is refused.
 
@@ -493,7 +488,7 @@ The original full-row `read_stored` API and its returned envelope remain unchang
 
 `eligibility_policy.eligibility_policy` declares an explicit supported version and
 nonnegative integer calendar-day width. `plan_eligibility` is metadata-only and
-opt-in. The policy identity (including its `preserve_membership` label, kept for replay) and plans without an ambiguous random event are unchanged; with one, evaluation IDs on that ticker are filtered by the policy. The policy does not apply the strict label cutoff; the SIZE fold binder retains only fold IDs surviving its ticker embargo and cutoff and records exclusions. Eligible-history planning passes no evaluation IDs and refuses development targets on such a ticker, so only the SIZE fold binder's defensive check filters fold IDs. It uses `experiment_population.canonical_events`
+opt-in. The policy identity (including its `preserve_membership` label, kept for replay) and plans without an ambiguous random event are unchanged; with one, evaluation IDs on that ticker are filtered by the policy. It uses `experiment_population.canonical_events`
 for exact committed-snapshot admission and the six-column metadata projection and `experiment_trades.classify_events`
 for detached membership/structural ambiguity labels and caller-pinned context.
 Shared `snapshot_inputs` validates reference shape and exact committed identity;
@@ -509,6 +504,7 @@ Random-held windows merge per ticker. Inclusive event/label or forecast-point ov
 excludes a whole development group; shared random, rolling and ambiguous labels do too.
 The plan ID binds groups/policy/metadata, windows, retained IDs, development reasons,
 coverage, ambiguous IDs and ticker-filtered evaluation IDs/reasons. Inputs are detached.
+
 Progress follows the "Progress logging" invariant.
 
 | Condition | Outcome |
@@ -585,9 +581,7 @@ an uncaught traceback instead.
     `_snapshot.read_table` cannot build a `KeyPredicate` and raises bare
     `ValueError`, not `DataError`. Omitted or empty `partition_keys=[]` derives
     values from fragments and does not cause this; valid nonmatching keys return
-    an empty frame. Affects `_replay_run.py`, `replay.py`, `_chains.py` and
-    `_trades_publish.py`, not `_scan.py`; their CLIs (`v2_replay.py`,
-    `v2_build_trades.py`, `v2_reconcile_trades.py`) catch only `DataError`, so it
+    an empty frame. Affects the `_snapshot.py` callers, not `_scan.py`; the replay/build/reconcile CLIs catch only `DataError`, so it
     escapes as an uncaught traceback.
   - **No overlap rows after a join/filter** (fill quality's `since` join;
     `load_trades`'s strategy/provenance filter): `POPULATION_COLLAPSED`
