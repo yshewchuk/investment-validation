@@ -8,6 +8,7 @@ from engine.v2.foundation import content_hash
 from engine.v2.research import magnitude_panel_qualified_x as x
 from engine.v2.research import magnitude_panel_table as v1
 from engine.v2.research import magnitude_panel_v2_table as v2
+from engine.v2.research.derived_features import LOG_COLUMNS, PRODUCT_PAIRS, SET_NAMES
 
 TABLE = v1.TABLE
 METADATA = (*v1.METADATA, "current_quote_status")
@@ -40,7 +41,7 @@ _DAILY_RANGES = {"implied_move": (0., 100.), "iv10": (0., 500.), "iv30": (0., 50
 
 
 def _base_subset(subset):
-    return "HMO" if subset in ("MO-", "M", "HMOS", "HMOSX") else subset
+    return "HMO" if subset in ("MO-", "M", "HMOS", "HMOSX", *SET_NAMES) else subset
 
 
 def _dictionary(subset):
@@ -76,9 +77,36 @@ def _dictionary(subset):
 
 def feature_dictionary(subset):
     """Keep numeric order/units, explicitly replace incompatible history policy."""
+    if subset in SET_NAMES:
+        return feature_dictionary("HMOSX") + _derived_fields(subset)
     if subset == "HMOSX":
         return _dictionary(subset) + _season_fields() + x.x_fields()
     return _dictionary(subset) + (_season_fields() if subset == "HMOS" else [])
+
+
+def _derived_fields(subset):
+    """Detached derived descriptors; sources are declared HMOSX model columns."""
+    units = {field["name"]: field["unit"] for field in feature_dictionary("HMOSX")}
+
+    def descriptor(name, function, sources):
+        for source in sources:
+            if source not in units:
+                raise fail("CONTRACT_MISMATCH", f"derived source {source} is not declared")
+        unit = (f"log1p({units[sources[0]]})" if function == "log1p"
+                else f"{units[sources[0]]}*{units[sources[1]]}")
+        return {"name": name, "block": "derived", "source_alias": name,
+            "native_output_alias": name, "physical_type": "float64", "unit": unit,
+            "nullable": True, "on_missing": "null",
+            "source_dependencies": [{"role": "panel_column", "name": source}
+                for source in sources],
+            "derivation_policy": {"schema_version": "derived_feature.v1",
+                "function": function, "sources": list(sources), "output": name}}
+
+    fields = [descriptor(f"log1p_{column}", "log1p", (column,)) for column in LOG_COLUMNS]
+    if subset == "HMOSXLP":
+        fields += [descriptor(f"{left}_x_{right}", "product", (left, right))
+            for left, right in PRODUCT_PAIRS]
+    return fields
 
 
 def recipe(subset):
@@ -87,10 +115,21 @@ def recipe(subset):
     result = v2.recipe(_base_subset(subset))
     fields = feature_dictionary(subset)
     quote = None if history_free else result["quote_indicator"]
-    return {**result, "schema_version": "research_magnitude_panel.v3", "subset": subset,
+    document = {**result, "schema_version": "research_magnitude_panel.v3", "subset": subset,
             "dictionary": fields, "dictionary_hash": content_hash(fields),
             "quote_indicator": quote,
             "model_columns": [field["name"] for field in fields] + ([quote["name"]] if quote else [])}
+    if subset in SET_NAMES:
+        document.update({"base_subset": "HMOSX",
+            "derivation": {"schema_version": "derived_feature.v1"}})
+    return document
+
+
+def panel_recipe(subset):
+    """Stored panel and validator use this; derived sets are model-feature recipes only."""
+    if subset in SET_NAMES:
+        raise fail("CONTRACT_MISMATCH", f"derived feature set {subset} is not a stored-panel recipe")
+    return recipe(subset)
 
 
 FEATURES = tuple(f["name"] for f in feature_dictionary("HMO"))

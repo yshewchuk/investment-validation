@@ -108,7 +108,7 @@ def _prepare(repository, source, *, history_snapshot, price_history_snapshot, as
         "eligibility_plan": history["eligibility"],
         "quote_eligibility_plan": quotes, "confirmed_metadata": index, "producer": producer,
         "price_row_digests": price_digests,
-        "feature_recipe": table.recipe("HMOSX"), "request": {**request, "source_start": source_start,
+        "feature_recipe": table.panel_recipe("HMOSX"), "request": {**request, "source_start": source_start,
             "metadata_limits": metadata_limits},
         "quote_label_windows": "independent_pinned_price_dates_not_computed_outcome_capture",
         "daily_source_start": daily_start,
