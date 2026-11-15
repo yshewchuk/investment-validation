@@ -144,11 +144,14 @@ def test_measure_computes_exact_values_and_excludes_the_test_year():
     matrix = np.array([[v] for v in values] + [[100.0 + i] for i in range(10)])
     years = np.array([2010] * 10 + [2011] * 10)
 
-    result = spline_tie_measure.measure(matrix, years, ("col",), (2011,), ks=(6,))
+    result = spline_tie_measure.measure(matrix, years, ("col",), (2011,), ks=(4, 6, 8))
 
-    # Training rows are 2010 only (the test year 2011 rows must not leak in):
-    # share 5/10; k=6 quantile knots 0, 0, 0, 1.4, 3.2, 5 -> 4 distinct.
+    # Training rows are 2010 only (the test year 2011 rows must not leak in).
+    # Training column sorted: [0, 0, 0, 0, 0, 1, 2, 3, 4, 5].
+    # k=4 quantile knots 0, 0, ~2, 5 -> 3 distinct.
+    # k=6 quantile knots 0, 0, 0, 1.4, 3.2, 5 -> 4 distinct.
+    # k=8 quantile knots 0, 0, 0, 0, 1.143, 2.429, 3.714, 5 -> 5 distinct.
     assert result["col"]["max_share"] == 0.5
     assert result["col"]["worst_year"] == 2011
-    assert result["col"]["min_distinct"] == {6: 4}
-    assert result["col"]["tied_years"] == {6: [2011]}
+    assert result["col"]["min_distinct"] == {4: 3, 6: 4, 8: 5}
+    assert result["col"]["tied_years"] == {4: [2011], 6: [2011], 8: [2011]}
