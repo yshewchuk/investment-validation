@@ -6,6 +6,7 @@ did nothing.
 """
 from __future__ import annotations
 # land: always-run
+# packages: engine.v2.foundation
 
 import os
 import shutil
@@ -15,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 
 from checks import architecture_doc_budgets as adb  # noqa: E402

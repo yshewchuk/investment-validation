@@ -3201,7 +3201,7 @@ def test_select_pr_tests_always_runs_ratchet_for_unrelated_test_only_diff(tmp_pa
     assert cfg["pr_selection"]["always_run"] == [
         "tests/test_import_layers.py", "tests/test_layer_map.py",
         "tests/test_repo_hygiene.py", "tests/test_architecture_docs.py",
-        "tests/test_architecture_doc_budgets.py", "tests/test_code_budgets.py",
+        "tests/v2/integration/test_architecture_doc_budgets.py", "tests/test_code_budgets.py",
         "tests/v2/integration/test_test_selection.py"]
     tracked = _write_repo(tmp_path, {
         "tests/v2/integration/test_test_selection.py": "def test_ratchet(): pass\n",
