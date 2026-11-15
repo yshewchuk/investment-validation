@@ -9,26 +9,49 @@ so pooling horizons would hide ties. The training window is the event-year
 approximation ``2010..Y-1``, not production membership cutoffs. Opens the
 catalog with the run's own ``connect(..., must_exist=True)`` (SQLite WAL
 pragmas); run it on a private copy root.
+
+Usage: to read a stored panel the tool must run with the PINNED code tree of the
+run that produced it on ``PYTHONPATH`` (the panel context embeds the code closure
+and environment), e.g. ``cd <pinned worktree> && PYTHONPATH=<pinned worktree>
+python3 <this repo>/tools/spline_tie_measure.py --store-root ... --panel-request
+...``; do not use ``-I``.
 """
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import resource
 import stat
 import sys
 import time
+from pathlib import Path
 
 import numpy as np
 from sklearn.impute import SimpleImputer
 
-from engine.v2.models.magnitude_elasticnet_spline_recipe import SPLINE_COLUMNS
-from engine.v2.models.training._magnitude_spline_step import distinct_knots
-
 __all__ = ["year_of", "split_by_horizon", "measure", "format_table", "main"]
 
 _MAX_REQUEST_BYTES = 64 * 1024 * 1024
+
+
+def _load(name, relative_path):
+    """Load a module from this tree by path, independent of ``PYTHONPATH``."""
+    path = Path(__file__).resolve().parents[1] / relative_path
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+_spline_recipe = _load(
+    "_spline_recipe", "engine/v2/models/magnitude_elasticnet_spline_recipe.py")
+_spline_step = _load(
+    "_spline_step", "engine/v2/models/training/_magnitude_spline_step.py")
+SPLINE_COLUMNS = _spline_recipe.SPLINE_COLUMNS
+distinct_knots = _spline_step.distinct_knots
 
 
 def _read_request(path):
@@ -166,6 +189,10 @@ def main(argv=None):
     rows = panel["rows"]
     print(f"[spline-tie] stage=read-panel done in {time.monotonic() - started:.1f}s "
           f"rows={len(rows)} rss={_rss_mb():.1f}MB", file=sys.stderr)
+    code_tree = Path(
+        sys.modules["experiments.size_search_binding"].__file__).resolve().parents[1]
+    print(f"[spline-tie] code tree for engine/experiments: {code_tree}",
+          file=sys.stderr)
 
     columns = list(SPLINE_COLUMNS)
     groups = split_by_horizon(rows, columns)
