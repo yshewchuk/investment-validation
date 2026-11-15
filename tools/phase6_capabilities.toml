@@ -881,6 +881,10 @@ ids = ["cli:tools/mem_sampler.py"]
 reason = "In-process RSS/stack sampler for profiling a run (py-spy cannot attach on this host); diagnostic tooling, not a consumer."
 
 [[excluded]]
+ids = ["cli:tools/spline_tie_measure.py"]
+reason = "Read-only SIZE spline-arm quantile-tie measurement over a stored panel (design 6(c)); supervisor-run diagnostic, not a consumer."
+
+[[excluded]]
 ids = ["cli:tools/v2_controlled_failure_drill.py", "cli:tools/v2_resource_measurement.py", "cli:tools/v2_route_probe.py", "cli:tools/v2_session_evidence_check.py"]
 reason = "P6-6 rehearsal tooling: controlled-failure drill, resource-measurement recorder, route probe and session-evidence completeness check; evidence producers and gates, not board/nightly consumers."
 
