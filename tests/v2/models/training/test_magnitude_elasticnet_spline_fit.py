@@ -5,6 +5,7 @@ import numpy as np
 import pytest
 from sklearn.exceptions import ConvergenceWarning
 from sklearn.linear_model import ElasticNet
+from sklearn.preprocessing import SplineTransformer, StandardScaler
 
 from engine.v2.data.errors import DataError
 from engine.v2.models.magnitude_candidate import magnitude_candidate_family
@@ -45,6 +46,41 @@ def test_spline_fit_returns_finite_ordered_evidence(spline_inputs):
     assert build_estimator(recipe)[-1].precompute is True
 
 
+def test_spline_predictions_match_independent_sklearn_oracle(spline_inputs):
+    recipe, train, labels, prediction = spline_inputs
+    idx = [COLS.index(column) for column in SPLINE_COLUMNS]
+    basis = SplineTransformer(n_knots=4, degree=3, knots="quantile",
+                              extrapolation="constant", include_bias=False).fit(train[:, idx])
+    missing = recipe["preprocessing"]["missing_indicator"]
+    spline_width = basis.transform(train[:, idx]).shape[1]
+    width = len(COLS) if missing["features"] == "all" else (
+        recipe["preprocessing"]["output_features"] - train.shape[1] - spline_width)
+    assert width == len(COLS)
+
+    def matrix(raw):
+        return np.hstack([raw, basis.transform(raw[:, idx]), np.zeros((len(raw), width))])
+
+    scaler = StandardScaler().fit(matrix(train))
+    model = ElasticNet(**recipe["estimator"]["params"]).fit(
+        scaler.transform(matrix(train)), labels)
+    reference = np.maximum(model.predict(scaler.transform(matrix(prediction))), 0)
+    result = fit(recipe, train, labels, prediction)
+    assert np.allclose(result["predictions"], reference, atol=1e-8)
+
+
+def test_nonfinite_spline_basis_refuses_the_variant(monkeypatch, spline_inputs):
+    recipe, train, labels, prediction = spline_inputs
+    original = SplineTransformer.transform
+
+    def nonfinite(self, x):
+        return original(self, x) * np.nan
+
+    monkeypatch.setattr(SplineTransformer, "transform", nonfinite)
+    with pytest.raises(DataError) as raised:
+        fit(recipe, train, labels, prediction)
+    assert raised.value.code == "EXPERIMENT_VARIANT_FAILED"
+
+
 def test_tied_training_column_refuses_the_variant(spline_inputs):
     recipe, train, labels, prediction = spline_inputs
     train[:200, 0] = 0.0
@@ -77,7 +113,9 @@ def test_spline_fit_logs_first_fit_only(monkeypatch, capsys, spline_inputs):
     lines = [line for line in capsys.readouterr().err.splitlines()
              if line.startswith("[spline-fit]")]
     assert len(lines) == 1
-    assert "spline_knots=4" in lines[0] and "inputs=" in lines[0]
+    assert "spline_knots=4" in lines[0]
+    assert f"inputs={recipe['preprocessing']['output_features']}" in lines[0]
+    assert "elapsed=" in lines[0] and "rss_mb=" in lines[0]
     fit(recipe, train, labels, prediction)
     assert "[spline-fit]" not in capsys.readouterr().err
 
