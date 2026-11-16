@@ -89,20 +89,20 @@ _PAIRS = (("challenger", "incumbent"), ("challenger", "training_mean"),
 _TRUTH = "crush_pct_iv30"
 
 
-def _implied_arm_values(implied, event_ids):
-    if not isinstance(implied, dict) or set(implied) != event_ids:
+def _implied_arm_values(implied, keys):
+    if not isinstance(implied, dict) or set(implied) != keys:
         raise ValueError("IV implied ex-earnings coverage differs")
     values = {}
-    for event, record in implied.items():
+    for key, record in implied.items():
         if not isinstance(record, dict) or set(record) != {"iv30", "exern_iv30"}:
             raise ValueError("IV implied ex-earnings coverage differs")
         for value in record.values():
             if value is not None and (type(value) not in (int, float) or not math.isfinite(value)):
                 raise ValueError("invalid IV implied input")
         iv30, exern = record["iv30"], record["exern_iv30"]
-        values[event] = (100 * (exern / iv30 - 1)
-                         if iv30 is not None and exern is not None and iv30 > 0 and exern > 0
-                         else None)
+        values[key] = (100 * (exern / iv30 - 1)
+                       if iv30 is not None and exern is not None and iv30 > 0 and exern > 0
+                       else None)
     return values
 
 
@@ -113,7 +113,8 @@ def paired_report_v2(events, challenger, incumbent, targets, implied, *,
     leads = validate_horizons(horizons)
     metadata = {event["event_id"]: event for event in events}
     event_ids = set(metadata)
-    implied_values = _implied_arm_values(implied, event_ids)
+    keys = {(event, h) for event in event_ids for h in leads}
+    implied_values = _implied_arm_values(implied, keys)
     a = {(row["event_id"], row["horizon_sessions"]): row for row in challenger}
     b = {(row["event_id"], row["horizon_sessions"]): row for row in incumbent}
     matched = {row["event_id"] for row in base["paired_rows"]}
@@ -127,7 +128,7 @@ def paired_report_v2(events, challenger, incumbent, targets, implied, *,
             "training_mean": b[event, horizon]["training_mean"],
             "incumbent": (b[event, horizon]["predicted_crush_pct_iv30"]
                           if event in matched else None),
-            "implied_ex_earnings": implied_values[event]})
+            "implied_ex_earnings": implied_values[event, horizon]})
     arm_metrics = {}
     for arm in _ARMS_V2:
         subset = [row for row in all_rows if row[arm] is not None]
@@ -148,12 +149,13 @@ def paired_report_v2(events, challenger, incumbent, targets, implied, *,
             f"{left}_minus_{right}": _bootstrap(common, field, truth=_TRUTH, arms=(left, right))
             for left, right in _PAIRS}
             for cluster_name, field in (("ticker", "ticker"), ("event_month", "month"))}
-    common_ids = {row["event_id"] for row in common}
+    common_keys = {(row["event_id"], row["horizon_sessions"]) for row in common}
     counts = Counter()
     for event, horizon in sorted((event, h) for event in event_ids for h in leads):
-        status = ("predicted" if implied_values[event] is not None
+        status = ("predicted" if implied_values[event, horizon] is not None
                   else "abstained_missing_or_nonpositive_input")
-        counts[metadata[event]["event_date"][:4], horizon, status, event in common_ids] += 1
+        counts[metadata[event]["event_date"][:4], horizon, status,
+               (event, horizon) in common_keys] += 1
     coverage = list(base["coverage"]) + [
         {"arm": "implied_ex_earnings", "year": year, "horizon_sessions": horizon,
          "forecast_status": status, "paired_forecasts": paired, "count": count}

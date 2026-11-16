@@ -17,8 +17,14 @@ def case():
                   for e in targets for h in (1, 3, 5)]
     incumbent = [{"event_id": e, "horizon_sessions": h, "predicted_crush_pct_iv30": targets[e] + 4.,
                   "abstention": None, "training_mean": -60.} for e in targets for h in (1, 3, 5)]
-    implied = {e: {"iv30": 50., "exern_iv30": 40.} for e in targets}
+    implied = {(e, h): {"iv30": 50., "exern_iv30": 40.}
+               for e in targets for h in (1, 3, 5)}
     return events, challenger, incumbent, targets, implied
+
+
+def set_event(implied, event, record):
+    for h in (1, 3, 5):
+        implied[event, h] = record
 
 
 def test_implied_arm_value_identity_order_and_v1_unchanged():
@@ -39,8 +45,8 @@ def test_implied_arm_value_identity_order_and_v1_unchanged():
 
 def test_implied_abstention_shrinks_implied_and_common_sets_without_imputation():
     events, challenger, incumbent, targets, implied = case()
-    implied["a"] = {"iv30": None, "exern_iv30": 40.}
-    implied["b"] = {"iv30": 50., "exern_iv30": 0.}
+    set_event(implied, "a", {"iv30": None, "exern_iv30": 40.})
+    set_event(implied, "b", {"iv30": 50., "exern_iv30": 0.})
     result = paired_report_v2(events, challenger, incumbent, targets, implied)
 
     implied_metrics = result["arm_metrics"]["implied_ex_earnings"]
@@ -77,6 +83,26 @@ def test_incumbent_horizon_abstention_removes_event_from_common_and_incumbent_se
                and row["count"] == 1 for row in result["coverage"])
 
 
+def test_implied_inputs_are_horizon_specific():
+    events, challenger, incumbent, targets, implied = case()
+    implied["a", 1] = {"iv30": 50., "exern_iv30": 40.}
+    implied["a", 3] = {"iv30": 100., "exern_iv30": 40.}
+    result = paired_report_v2(events, challenger, incumbent, targets, implied)
+    assert result["arm_metrics"]["implied_ex_earnings"]["bias"] == pytest.approx(20 / 12)
+
+    implied["a", 3] = {"iv30": None, "exern_iv30": 40.}
+    result = paired_report_v2(events, challenger, incumbent, targets, implied)
+    assert result["arm_metrics"]["implied_ex_earnings"]["count"] == 11
+    assert result["common_matched_events"] == 4
+    assert result["common_matched"]["metrics"]["implied_ex_earnings"]["count"] == 11
+    abstained = [row for row in result["coverage"]
+                 if row["arm"] == "implied_ex_earnings"
+                 and row["forecast_status"] == "abstained_missing_or_nonpositive_input"]
+    assert len(abstained) == 1
+    assert abstained[0]["count"] == 1
+    assert abstained[0]["horizon_sessions"] == 3
+
+
 def test_bootstrap_clusters_pairs_and_deterministic_intervals():
     args = case()
     result = paired_report_v2(*args)
@@ -101,15 +127,15 @@ def test_bootstrap_clusters_pairs_and_deterministic_intervals():
 def test_invalid_implied_or_coverage_refuses(mutation):
     events, challenger, incumbent, targets, implied = case()
     if mutation == "missing_event":
-        del implied["a"]
+        del implied["a", 1]
     elif mutation == "extra_event":
-        implied["e"] = {"iv30": 50., "exern_iv30": 40.}
+        implied["e", 1] = {"iv30": 50., "exern_iv30": 40.}
     elif mutation == "bool":
-        implied["a"] = {"iv30": True, "exern_iv30": 40.}
+        implied["a", 1] = {"iv30": True, "exern_iv30": 40.}
     elif mutation == "nan":
-        implied["a"] = {"iv30": float("nan"), "exern_iv30": 40.}
+        implied["a", 1] = {"iv30": float("nan"), "exern_iv30": 40.}
     elif mutation == "extra_key":
-        implied["a"] = {"iv30": 50., "exern_iv30": 40., "extra": 1}
+        implied["a", 1] = {"iv30": 50., "exern_iv30": 40., "extra": 1}
     else:
         challenger.pop()
     messages = {"missing_event": "IV implied ex-earnings coverage differs",
@@ -163,7 +189,8 @@ def oracle_case():
     incumbent = [{"event_id": e, "horizon_sessions": h, "predicted_crush_pct_iv30": targets[e] + 4.,
                   "abstention": None, "training_mean": targets[e] - 10.} for e in targets for h in (1, 3, 5)]
     # implied forecast = target + 6, from distinct ratios: 100*(exern/100 - 1) = target + 6
-    implied = {e: {"iv30": 100., "exern_iv30": 106. + targets[e]} for e in targets}
+    implied = {(e, h): {"iv30": 100., "exern_iv30": 106. + targets[e]}
+               for e in targets for h in (1, 3, 5)}
     return events, challenger, incumbent, targets, implied
 
 
@@ -190,7 +217,7 @@ def test_common_matched_differences_and_bootstrap_match_hand_oracle():
                                     {"iv30": -5., "exern_iv30": 40.}, {"iv30": 50., "exern_iv30": None}])
 def test_nonpositive_or_missing_implied_input_abstains(record):
     events, challenger, incumbent, targets, implied = case()
-    implied["a"] = record
+    set_event(implied, "a", record)
     result = paired_report_v2(events, challenger, incumbent, targets, implied)
     assert result["arm_metrics"]["implied_ex_earnings"]["count"] == 9
     assert result["common_matched_events"] == 3
@@ -198,6 +225,6 @@ def test_nonpositive_or_missing_implied_input_abstains(record):
 
 def test_infinite_implied_input_refuses():
     events, challenger, incumbent, targets, implied = case()
-    implied["a"] = {"iv30": math.inf, "exern_iv30": 40.}
+    set_event(implied, "a", {"iv30": math.inf, "exern_iv30": 40.})
     with pytest.raises(ValueError, match="invalid IV implied input"):
         paired_report_v2(events, challenger, incumbent, targets, implied)
