@@ -171,6 +171,7 @@ def test_all_candidates_selected_outer_and_read_only_replay(oracle_case, monkeyp
         from experiments.iv_crush_search_report import collect
         report = collect(*args)
         assert report["search"] == result
+        assert report["distribution"]["schema_version"] == "iv_distribution.v1"
         assert report["paired"]["paired_events"] == 0
         assert report["paired"]["broad_coverage_metrics"] == {
             arm: {"count": 3, "rmse": 10., "mae": 10., "bias": 10.}
