@@ -141,6 +141,10 @@ def test_challenger_distribution_defaults_embeds_supplied_and_refuses_non_dict()
     assert result["challenger_distribution"] == supplied
     with pytest.raises(ValueError, match="invalid challenger distribution"):
         paired_report_v2(*args, distribution=[1])
+    with pytest.raises(ValueError, match="invalid challenger distribution"):
+        paired_report_v2(*args, distribution={})
+    with pytest.raises(ValueError, match="invalid challenger distribution"):
+        paired_report_v2(*args, distribution={"schema_version": "other.v1"})
 
 
 def oracle_case():

@@ -161,10 +161,10 @@ def paired_report_v2(events, challenger, incumbent, targets, implied, *,
                                    row["forecast_status"], row["paired_forecasts"]))
     if distribution is None:
         challenger_distribution = {"status": "not_supplied"}
-    elif isinstance(distribution, dict):
-        challenger_distribution = distribution
-    else:
+    elif not isinstance(distribution, dict) or distribution.get("schema_version") != "iv_distribution.v1":
         raise ValueError("invalid challenger distribution")
+    else:
+        challenger_distribution = distribution
     result = {"schema_version": "iv_crush_paired_report.v2", "target": target(),
         "eligible_events": base["eligible_events"],
         "forecast_matched_events": base["forecast_matched_events"],
