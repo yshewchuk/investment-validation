@@ -708,8 +708,8 @@ Use the installed Linux test environment and pinned dependencies, not a live cat
 `preflight`, `register`, `seal`, `run` and `report`; every action requires `--no-ledger`.
 Inputs are an existing native catalog/store, a spec with runner
 `experiments/iv_crush_search.py` and price source `iv_crush_targets`, and the closed
-`regression_search_request.v1` JSON. The request pins the qualified panel, history,
-dictionary, development windows, all 33 candidates, causal comparison and explicit
+`regression_search_request.v1` (or `.v2`: five SIZE feature sets, exact selection) JSON. The request pins the qualified panel, history,
+dictionary, development windows, all candidates, causal comparison and explicit
 child/parent/build/job limits. Use IV policy, not a renamed SIZE request or selection rule.
 For the commands below, set each variable to its explicit input path, native scope/ID
 or date, and use a separate output directory. The source scope must resolve committed
