@@ -675,7 +675,7 @@ unchanged; one stderr decision line is logged. The confirmed-metadata index is n
 
 ## Compression 4 (fourth compression of `ARCHITECTURE.md`)
 
-Verbatim text removed or replaced by the fourth compression (diff of `origin/main` df93364ba against this PR; each entry is the full original source line, of which only part was removed or replaced, in file order). The removed wording is design/implementation narrative or a symbol-level list; the contract statement itself stays in `engine/v2/research/ARCHITECTURE.md`.
+Verbatim text removed or replaced by the fourth compression (diff of `origin/main` df93364ba against this PR; each entry is the full original source line, of which only part was removed or replaced, in file order). The removed wording is mostly design/implementation narrative or a symbol-level list; some entries also removed small interface clauses (for example the exit-walker `exit_fill_alpha` gloss and the dependency symbol lists), which are recorded here only. The `FinalPopulation`/`FinalMetrics` field enumerations in the final-read entries were restored in the polish push and remain in `engine/v2/research/ARCHITECTURE.md`.
 
 > debit, priced once at the declared alpha, before walking its daily closing marks.
 > This basis includes spread but excludes fees, commissions and contract multipliers;
