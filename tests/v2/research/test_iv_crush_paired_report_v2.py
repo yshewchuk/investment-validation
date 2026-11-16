@@ -112,7 +112,11 @@ def test_invalid_implied_or_coverage_refuses(mutation):
         implied["a"] = {"iv30": 50., "exern_iv30": 40., "extra": 1}
     else:
         challenger.pop()
-    with pytest.raises(ValueError):
+    messages = {"missing_event": "IV implied ex-earnings coverage differs",
+                "extra_event": "IV implied ex-earnings coverage differs",
+                "extra_key": "IV implied ex-earnings coverage differs",
+                "bool": "invalid IV implied input", "nan": "invalid IV implied input"}
+    with pytest.raises(ValueError, match=messages.get(mutation)):
         paired_report_v2(events, challenger, incumbent, targets, implied)
 
 
@@ -135,5 +139,55 @@ def test_challenger_distribution_defaults_embeds_supplied_and_refuses_non_dict()
     supplied = {"schema_version": "iv_distribution.v1", "median": 1.5}
     result = paired_report_v2(*args, distribution=supplied)
     assert result["challenger_distribution"] == supplied
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="invalid challenger distribution"):
         paired_report_v2(*args, distribution=[1])
+
+
+def oracle_case():
+    """Constant per-arm errors so every bootstrap resample equals the hand-computed pooled difference."""
+    events = [{"event_id": e, "ticker": "AAA" if i < 2 else "BBB", "event_date": f"202{y}-0{m}-02"}
+              for i, (e, y, m) in enumerate((("a", 3, 6), ("b", 3, 7), ("c", 4, 6), ("d", 4, 7)))]
+    targets = {"a": -30., "b": 20., "c": 60., "d": -40.}
+    challenger = [{"event_id": e, "horizon_sessions": h, "predicted_crush_pct_iv30": targets[e] + 2.}
+                  for e in targets for h in (1, 3, 5)]
+    incumbent = [{"event_id": e, "horizon_sessions": h, "predicted_crush_pct_iv30": targets[e] + 4.,
+                  "abstention": None, "training_mean": targets[e] - 10.} for e in targets for h in (1, 3, 5)]
+    # implied forecast = target + 6, from distinct ratios: 100*(exern/100 - 1) = target + 6
+    implied = {e: {"iv30": 100., "exern_iv30": 106. + targets[e]} for e in targets}
+    return events, challenger, incumbent, targets, implied
+
+
+def test_common_matched_differences_and_bootstrap_match_hand_oracle():
+    result = paired_report_v2(*oracle_case())
+    # errors: challenger +2, incumbent +4, training_mean -10, implied +6 (RMSE == MAE == |error|)
+    expected = {"challenger_minus_incumbent": -2.0, "challenger_minus_training_mean": -8.0,
+                "challenger_minus_implied_ex_earnings": -4.0, "incumbent_minus_training_mean": -6.0}
+    bias = {"challenger": 2.0, "incumbent": 4.0, "training_mean": -10.0, "implied_ex_earnings": 6.0}
+    for arm, value in bias.items():
+        metrics = result["common_matched"]["metrics"][arm]
+        assert metrics["bias"] == pytest.approx(value) and metrics["count"] == 12
+        assert metrics["mae"] == pytest.approx(abs(value)) and metrics["rmse"] == pytest.approx(abs(value))
+    for name, value in expected.items():
+        assert result["common_matched"]["difference"][name] == {"rmse": pytest.approx(value), "mae": pytest.approx(value)}
+        for cluster, blocks in (("ticker", 2), ("event_month", 4)):
+            pair = result["bootstrap"][cluster][name]
+            assert pair["blocks"] == blocks and pair["events"] == 4
+            assert pair["percentile_95"]["rmse"] == pytest.approx([value, value])
+            assert pair["percentile_95"]["mae"] == pytest.approx([value, value])
+
+
+@pytest.mark.parametrize("record", [{"iv30": 0., "exern_iv30": 40.}, {"iv30": 50., "exern_iv30": -1.},
+                                    {"iv30": -5., "exern_iv30": 40.}, {"iv30": 50., "exern_iv30": None}])
+def test_nonpositive_or_missing_implied_input_abstains(record):
+    events, challenger, incumbent, targets, implied = case()
+    implied["a"] = record
+    result = paired_report_v2(events, challenger, incumbent, targets, implied)
+    assert result["arm_metrics"]["implied_ex_earnings"]["count"] == 9
+    assert result["common_matched_events"] == 3
+
+
+def test_infinite_implied_input_refuses():
+    events, challenger, incumbent, targets, implied = case()
+    implied["a"] = {"iv30": math.inf, "exern_iv30": 40.}
+    with pytest.raises(ValueError, match="invalid IV implied input"):
+        paired_report_v2(events, challenger, incumbent, targets, implied)
