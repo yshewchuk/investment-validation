@@ -133,6 +133,7 @@ def test_explicit_lead_selector_and_panel_horizon_derivation():
     (("space", "ridge", "alpha"), ["0.1"]), (("space", "ridge", "alpha"), [True]),
     (("space", "elasticnet", "l1_ratio"), [2.0]), (("space", "hgb", "max_leaf_nodes"), [7.5]),
     (("space", "hgb", "max_leaf_nodes"), [1]), (("space", "hgb", "max_leaf_nodes"), [65]),
+    (("space", "hgb", "max_leaf_nodes"), [8]), (("space", "hgb", "max_leaf_nodes"), [7, 16]),
     (("space", "hgb"), _DELETE), (("space", "hgb", "loss"), ["squared_error"]),
     (("space", "elasticnet", "spline_knots"), [0]),
     (("workers",), 0), (("workers",), 9), (("workers",), True), (("workers",), "2"),
@@ -230,7 +231,9 @@ def test_binding_on_real_plan_path(prepared, capsys):  # noqa: F811
     plan = sealed["plan"]
     ref = from_document(ArtifactRef, sealed["plan_ref"])
     with no_fit_guard(), legacy_no_fit():
-        assert plans.read_search_plan(data.conn, data.store, registered, document, ref) == plan
+        with pytest.raises(OpsError) as refused:
+            plans.read_search_plan(data.conn, data.store, registered, document, ref)
+    assert refused.value.code == "INVALID_EXPERIMENT_SPEC"
     assert _seal(data, registered, document) == sealed
     assert v1_plan["selection"]["metric"] == "inner_pooled_rmse"
     assert plan["selection"]["metric"] == "blend_rmse_mae"
@@ -251,6 +254,13 @@ def test_binding_on_real_plan_path(prepared, capsys):  # noqa: F811
     assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
     assert len(set(ids)) > 0 and f"outside={len(set(ids))}" in capsys.readouterr().err
     assert catalog_rows(data.conn) == before and artifact_object_bytes(data.store) == objects
+
+
+def test_read_search_plan_refuses_v2_before_any_read():
+    with pytest.raises(OpsError) as refused:
+        plans.read_search_plan(None, None, None, v2_request(), None)
+    assert refused.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert "awaits its signed selection scorer" in refused.value.problem.message
 
 
 def test_v2_requests_refused_by_size_cli_and_v2_run_cli(tmp_path, capsys):

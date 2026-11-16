@@ -66,6 +66,9 @@ def _space(request):
             lower, upper = _BOUNDS[(family, axis)]
             base._require(all(lower <= value <= upper for value in values),
                           "stage-2 grid values exceed their allowed bounds")
+            if family == "hgb":
+                base._require(all(value in (7, 15) for value in values),
+                              "stage-2 regression v2 HGB max_leaf_nodes admits 7 and 15 until the wider grid lands")
             canonical[family][axis] = ([int(value) for value in values] if integer_axis
                                        else [float(value) for value in values])
     request["space"] = canonical
