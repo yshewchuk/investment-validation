@@ -1,5 +1,6 @@
 """regression_search_request.v2 compile, dispatch, binding by version (P1)."""
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -290,3 +291,44 @@ def test_iv_cli_refuses_v2_seal_and_run_before_any_fit(tmp_path, capsys, action)
     assert refusal["refused"] == "INVALID_EXPERIMENT_SPEC"
     assert refusal["message"] == "INVALID_EXPERIMENT_SPEC: regression v2 execution awaits its signed selection scorer"
     assert not (tmp_path / "catalog.sqlite").exists()
+
+
+def test_panel_coverage_helper_is_v2_only():
+    registration = SimpleNamespace(document={"event_ids": ["a", "b"]})
+    request = v2_request(
+        panel_request={**v2_request()["panel_request"], "event_ids": ["b", "c"]})
+    assert iv_crush_run._panel_coverage(registration, request) == {
+        "iv_events": 2, "in_size_panel": 1, "outside": 1}
+    assert iv_crush_run._panel_coverage(
+        registration, {"schema_version": "regression_search_request.v1"}) is None
+
+
+def test_register_refuses_coverage_shortfall_before_reserving(tmp_path, monkeypatch, capsys):
+    request = v2_request(
+        panel_request={**v2_request()["panel_request"], "event_ids": ["b", "c"]})
+    request_path, spec_path = tmp_path / "request.json", tmp_path / "spec.json"
+    (tmp_path / "store").mkdir()
+
+    def read_input(path):
+        return request if path == str(request_path) else {}
+
+    def registration(*args, **kwargs):
+        return SimpleNamespace(document={"event_ids": ["a"]}, run_id="r", variant_id="v"), "spec"
+
+    monkeypatch.setattr(iv_crush_run, "_input", read_input)
+    monkeypatch.setattr(iv_crush_run, "experiment_spec_from_document", lambda document: SimpleNamespace(
+        runner="experiments/iv_crush_search.py", price_source="iv_crush_targets"))
+    monkeypatch.setattr(iv_crush_run, "connect", lambda *args, **kwargs: SimpleNamespace(close=lambda: None))
+    monkeypatch.setattr(iv_crush_run, "ArtifactStore", lambda *args, **kwargs: SimpleNamespace())
+    monkeypatch.setattr(iv_crush_run, "Repository", lambda *args, **kwargs: SimpleNamespace())
+    monkeypatch.setattr(iv_crush_run, "_prepare", registration)
+    monkeypatch.setattr(iv_crush_run, "reserve_native_registration",
+        lambda *args, **kwargs: pytest.fail("reserved"))
+    monkeypatch.setattr(iv_crush_run, "seal_search_plan", lambda *args, **kwargs: pytest.fail("sealed"))
+    assert iv_crush_run.main(["register", "--spec", str(spec_path), "--request", str(request_path),
+        "--catalog", str(tmp_path / "catalog.sqlite"), "--store-root", str(tmp_path / "store"),
+        "--scope", "scope", "--target-snapshot-id", "target", "--training-start", "2020-01",
+        "--labels-before", "2021-01", "--no-ledger"]) == 2
+    refusal = json.loads(capsys.readouterr().out)
+    assert refusal["refused"] == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert refusal["message"] == "EXPERIMENT_IDENTITY_CONFLICT: regression search differs from its native binding"

@@ -58,6 +58,13 @@ def _prepare(repository, spec, request, args):
     return registration, spec
 
 
+def _panel_coverage(registration, request):
+    """v2 only: measure IV events against the SIZE panel; None for v1."""
+    if regression_request_version(request["schema_version"]) != 2:
+        return None
+    return panel_coverage(registration.document["event_ids"], request["panel_request"]["event_ids"])
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("preflight", "register", "seal", "run", "report"))
@@ -110,10 +117,13 @@ def main(argv=None):
                     result = {"preflight": resource_report({"counts": schedule["counts"], "request": request}),
                         "run_id": registration.run_id, "variant_id": registration.variant_id,
                         "qualification": "metadata_only; panel and causal labels admitted during execution"}
-                    if regression_request_version(request["schema_version"]) == 2:
-                        result["panel_coverage"] = panel_coverage(
-                            registration.document["event_ids"], request["panel_request"]["event_ids"])
+                    coverage = _panel_coverage(registration, request)
+                    if coverage is not None:
+                        result["panel_coverage"] = coverage
                 else:
+                    coverage = _panel_coverage(registration, request)
+                    if coverage is not None and coverage["outside"]:
+                        raise fail("EXPERIMENT_IDENTITY_CONFLICT", "regression search differs from its native binding")
                     reserve_native_registration(conn, store, registration, spec)
                     result = seal_search_plan(conn, store, registration, request)
             else:
