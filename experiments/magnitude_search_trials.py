@@ -23,6 +23,7 @@ from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.fingerprints import source_closure
 from engine.v2.ops.migrations import migrate, require_current
 from engine.v2.research.magnitude_inputs import load_magnitude_targets
+from experiments.iv_selection import signed_event_score, training_mean_rows
 from experiments.magnitude_report import magnitude_metrics
 from experiments.magnitude_search_evidence import (
     _requires_event_dates,
@@ -729,6 +730,21 @@ class SearchTrials:
         progress_started = last_progress
         print(f"[selection] planned trials={total_trials}", file=sys.stderr)
         policy = plan.get("request", {}).get("selection")
+        signed = plan.get("selection", {}).get("metric") == "blend_rmse_mae"
+
+        def history_rows_for(cohort, validation):
+            if signed:
+                return training_mean_rows(cohort, validation, target=plan["target"])
+            return history_mean_rows(cohort, validation)
+
+        def score_rows(candidate_rows, baseline_rows):
+            if signed:
+                return signed_event_score(candidate_rows, baseline_rows,
+                    metric_weights=policy["metric_weights"], target=plan["target"])
+            return blended_event_score(candidate_rows, baseline_rows,
+                metric_weights=policy["metric_weights"],
+                large_move_threshold_pct=policy["large_move_threshold_pct"])
+
         history_cohort_uses = {}
         for planned_outer in plan["folds"]:
             for planned_inner in planned_outer["inner"]:
@@ -771,7 +787,7 @@ class SearchTrials:
                                 cohort = self._cohort(admitted)
                                 validation = self._read("validation:" + cohort_id)
                                 self._validation(inner, admitted, cohort, validation)
-                                history_rows_cache[cohort_id] = history_mean_rows(cohort, validation)
+                                history_rows_cache[cohort_id] = history_rows_for(cohort, validation)
                                 del cohort, validation
                             history_rows_by_year[inner["year"]] = history_rows_cache[cohort_id]
                     uses[key] -= 1
@@ -795,16 +811,12 @@ class SearchTrials:
                         pooled_history = [
                             row for year in sorted(outer["inner"], key=lambda item: item["year"])
                             for row in history_rows_by_year[year["year"]]]
-                        pooled = blended_event_score(rows, pooled_history,
-                            metric_weights=policy["metric_weights"],
-                            large_move_threshold_pct=policy["large_move_threshold_pct"])
+                        pooled = score_rows(rows, pooled_history)
                         yearly = {}
                         for year in sorted(yearly_rows):
                             try:
-                                yearly[year] = blended_event_score(yearly_rows[year],
-                                    history_rows_by_year[year],
-                                    metric_weights=policy["metric_weights"],
-                                    large_move_threshold_pct=policy["large_move_threshold_pct"])
+                                yearly[year] = score_rows(yearly_rows[year],
+                                    history_rows_by_year[year])
                             except ZeroComparatorError:
                                 yearly[year] = None
                     except (KeyError, TypeError, ValueError, OverflowError) as error:
@@ -841,13 +853,9 @@ class SearchTrials:
                         floor=policy["tie_band_floor"], tie_rule=tie_rule)
                     pooled_history = [row for year in sorted(outer["inner"], key=lambda item: item["year"])
                         for row in history_rows_by_year[year["year"]]]
-                    history_score = blended_event_score(pooled_history, pooled_history,
-                        metric_weights=policy["metric_weights"],
-                        large_move_threshold_pct=policy["large_move_threshold_pct"])
-                    history_score["yearly"] = {year: blended_event_score(
-                        history_rows_by_year[year], history_rows_by_year[year],
-                        metric_weights=policy["metric_weights"],
-                        large_move_threshold_pct=policy["large_move_threshold_pct"])
+                    history_score = score_rows(pooled_history, pooled_history)
+                    history_score["yearly"] = {year: score_rows(
+                        history_rows_by_year[year], history_rows_by_year[year])
                         for year in sorted(history_rows_by_year)}
                 except (KeyError, TypeError, ValueError, OverflowError) as error:
                     raise fail("EXPERIMENT_VARIANT_FAILED", _blended_failure(error)) from None
