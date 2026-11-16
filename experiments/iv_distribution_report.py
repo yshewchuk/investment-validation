@@ -20,7 +20,8 @@ from experiments.size_distribution_report import (
 
 SCHEMA = "iv_distribution.v1"
 _METRICS = ("pinball_p10", "pinball_p50", "pinball_p90", "pinball_mean",
-            "coverage_p10", "coverage_p90", "coverage_p10_p90")
+            "coverage_p10", "coverage_p90", "coverage_p10_p90",
+            "band_p10", "band_p50", "band_p90")
 
 
 def read_trial_arrays(conn, store, run_id, plan):
@@ -69,15 +70,12 @@ def outer_arrays(plan, predictions):
     return arrays
 
 
-def band_metrics(pool, scored, horizons, allowed=None):
+def band_metrics(pool, scored, horizons):
     _validate(pool + [scored])
     per_horizon, measured = [], []
     for horizon in horizons:
-        pool_pred, pool_y, pool_ids = _values(pool, horizon)
+        pool_pred, pool_y, _ = _values(pool, horizon)
         scored_pred, scored_y, _ = _values([scored], horizon)
-        if allowed is not None:
-            keep = np.array([event_id in allowed for event_id in pool_ids], dtype=bool)
-            pool_pred, pool_y = pool_pred[keep], pool_y[keep]
         metrics = {}
         if pool_pred.size == 0:
             status = "no_pool"

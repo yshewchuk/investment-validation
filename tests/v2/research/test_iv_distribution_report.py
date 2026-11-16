@@ -48,6 +48,7 @@ def test_additive_band_is_exact():
     assert horizon["n_pool"] == 100 and horizon["n_scored"] == 1
     for name in ("band_p10", "band_p50", "band_p90"):
         assert horizon[name] == pytest.approx(53.0)
+    assert observed["pooled"]["band_p50"] == pytest.approx(53.0)
     assert horizon["pinball_p50"] == pytest.approx(0.0)
     assert horizon["coverage_p10"] == pytest.approx(1.0)
     assert horizon["coverage_p90"] == pytest.approx(1.0)
@@ -85,6 +86,18 @@ def test_statuses_and_pooled_require_every_horizon():
     assert [row["status"] for row in observed["per_horizon"]] == ["ok", "pool_too_small"]
     assert observed["status"] == "pool_too_small"
     assert observed["pooled"] is None
+    pool_both = [{**arrays(POOL, POOL + 3.0, POOL_IDS, horizon=1),
+                  **arrays(POOL, POOL + 5.0, POOL_IDS, horizon=3)}]
+    scored_both = {**arrays([50.0], [53.0], horizon=1),
+                   **arrays([50.0, 60.0], [58.0, 73.0], horizon=3)}
+    observed = band_metrics(pool_both, scored_both, [1, 3])
+    assert observed["status"] == "ok"
+    per_horizon = {row["horizon_sessions"]: row for row in observed["per_horizon"]}
+    for name in ("band_p10", "band_p50", "band_p90"):
+        weighted = sum(per_horizon[horizon][name] * per_horizon[horizon]["n_scored"]
+                       for horizon in (1, 3)) / sum(per_horizon[horizon]["n_scored"]
+                                                    for horizon in (1, 3))
+        assert observed["pooled"][name] == pytest.approx(weighted)
 
 
 def test_non_finite_input_refuses():
