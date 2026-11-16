@@ -28,6 +28,8 @@ The refresh requires the current event, forecast/residual, option-chain and cand
 
 ## 4. Outputs
 
+A `magnitude_elasticnet_spline_recipe.v1` recipe is fitted by `fit_elasticnet_predictions` with the spline validator: imputer, then the checked quantile B-spline step on the recipe's columns, in parallel with the unchanged missing indicator, then scaler and ElasticNet (`precompute: True`). Quantile-knot ties, a non-finite basis and nonconvergence raise `EXPERIMENT_VARIANT_FAILED` with no retry. Coefficient evidence orders value, spline, then missing-indicator entries. The first spline fit and every hundredth log one bounded stderr line (knots, input width, elapsed, RSS).
+
 Jobs publish identity/summary JSON and per-fold receipts, estimators and optional predictions through `fold_store`. Numeric APIs return detached predictions/evidence, never files: MLP v1 includes recipe hash, one component, convergence, iterations, learned width and standardized-target optimizer loss; inverse-transformed finite predictions clip at zero. Signed regression policies retain signed outputs. Builders return artifacts for caller-owned release assembly.
 
 ## 5. Dependencies
