@@ -25,9 +25,11 @@ from engine.v2.ops.experiments import experiment_spec_from_document
 from experiments.iv_crush_search import prepare
 from experiments.iv_crush_search_report import collect, resource_report
 from experiments.magnitude_search_plan import _nested, seal_search_plan
+from experiments.magnitude_search_request_schema import regression_request_version
 from experiments.magnitude_search_request_versions import compile_request
 from experiments.memory_guard import rss_watchdog
 from experiments.native_registration import read_native_registration, reserve_native_registration
+from experiments.regression_search_binding import panel_coverage
 from experiments.size_search import _contain, _run
 from experiments.v2_magnitude_search_run import _read_document, _render, seal_search_run
 
@@ -47,12 +49,20 @@ def _prepare(repository, spec, request, args):
         feature_snapshot=repository.resolve(request["feature_snapshot_id"]),
         target_snapshot=repository.resolve(args.target_snapshot_id), scope=args.scope,
         as_of_month=panel["as_of_month"], training_start=args.training_start,
-        labels_before=args.labels_before, event_ids=panel["event_ids"])
+        labels_before=args.labels_before,
+        event_ids=panel["event_ids"] if regression_request_version(request["schema_version"]) == 1 else None)
     temporal = registration.document["regression_plan"]
     if temporal["evaluation_years"] != request["outer_years"]:
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "IV request outer years differ from registration")
     _nested(registration.document, request, temporal=temporal)
     return registration, spec
+
+
+def _panel_coverage(registration, request):
+    """v2 only: measure IV events against the SIZE panel; None for v1."""
+    if regression_request_version(request["schema_version"]) != 2:
+        return None
+    return panel_coverage(registration.document["event_ids"], request["panel_request"]["event_ids"])
 
 
 def main(argv=None):
@@ -74,8 +84,10 @@ def main(argv=None):
     conn, started, stack = None, time.monotonic(), ExitStack()
     try:
         request = _input(args.request)
-        if request.get("schema_version") != "regression_search_request.v1":
+        if regression_request_version(request.get("schema_version")) not in (1, 2):
             raise fail("INVALID_EXPERIMENT_SPEC", "IV requires its closed regression request")
+        if regression_request_version(request.get("schema_version")) == 2 and args.action in ("seal", "run"):
+            raise fail("INVALID_EXPERIMENT_SPEC", "regression v2 execution awaits its signed selection scorer")
         schedule = compile_request(request)
         try:
             memory = _contain(request)
@@ -105,7 +117,13 @@ def main(argv=None):
                     result = {"preflight": resource_report({"counts": schedule["counts"], "request": request}),
                         "run_id": registration.run_id, "variant_id": registration.variant_id,
                         "qualification": "metadata_only; panel and causal labels admitted during execution"}
+                    coverage = _panel_coverage(registration, request)
+                    if coverage is not None:
+                        result["panel_coverage"] = coverage
                 else:
+                    coverage = _panel_coverage(registration, request)
+                    if coverage is not None and coverage["outside"]:
+                        raise fail("EXPERIMENT_IDENTITY_CONFLICT", "regression search differs from its native binding")
                     reserve_native_registration(conn, store, registration, spec)
                     result = seal_search_plan(conn, store, registration, request)
             else:

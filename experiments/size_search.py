@@ -27,6 +27,7 @@ from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.experiments import experiment_spec_from_document
 from experiments.magnitude_search_plan import seal_search_plan
 from experiments.magnitude_search_records import read_record
+from experiments.magnitude_search_request_schema import regression_request_version
 from experiments.memory_guard import rss_watchdog
 from experiments.native_registration import (
     MAX_NATIVE_EVIDENCE_BYTES,
@@ -100,7 +101,7 @@ def main(argv=None):
     stack = ExitStack()
     try:
         request = _read_document(args.request)
-        if isinstance(request, dict) and request.get("schema_version") == "regression_search_request.v1":
+        if isinstance(request, dict) and regression_request_version(request.get("schema_version")) is not None:
             raise fail("INVALID_EXPERIMENT_SPEC", "IV requires its dedicated CLI; use the admitted library path")
         panel_request = validate_panel_request(_read_document(args.panel_request)) if fresh else None
         # _contain only extracts resource ceilings here for every action; exact fit-count

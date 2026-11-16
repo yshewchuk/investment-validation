@@ -1,13 +1,19 @@
 """Target-aware nested plan binding using the existing native search mechanisms."""
+import sys
+
 from engine.v2.contracts import SnapshotRef
 from engine.v2.foundation import content_hash, from_document
 from engine.v2.models.regression_candidate import regression_candidate_recipe
 from engine.v2.ops.errors import fail
 from engine.v2.research.magnitude_panel_qualified_table import recipe as panel_recipe
+from experiments.magnitude_search_request_schema import regression_request_version
 from experiments.magnitude_search_request_versions import compile_request
 from experiments.native_registration import MAX_NATIVE_EVIDENCE_BYTES, verify_native_registration
 from experiments.size_panel_request import validate_panel_request
 from experiments.size_search_binding import read_stored_panel
+
+_STORED = {"HMO": 0, "HMOS": 1, "HMOSX": 2, "HMOSXL": 2, "HMOSXLP": 2}
+_STORED_NAME = ("HMO", "HMOS", "HMOSX")
 
 
 def _require(condition):
@@ -15,10 +21,24 @@ def _require(condition):
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "regression search differs from its native binding")
 
 
+def panel_coverage(event_ids, panel_event_ids):
+    """Measure how many IV events the SIZE panel holds; a shortfall is reported, never dropped."""
+    ids, panel = set(event_ids), set(panel_event_ids)
+    return {"iv_events": len(ids), "in_size_panel": len(ids & panel), "outside": len(ids - panel)}
+
+
+def stored_columns(request):
+    """Stored panel columns by request version: HMO for v1, the widest declared stored subset for v2."""
+    if regression_request_version(request["schema_version"]) == 1:
+        return panel_recipe("HMO")["model_columns"]
+    return panel_recipe(_STORED_NAME[max(_STORED[name] for name in request["feature_sets"])])["model_columns"]
+
+
 def prepare_plan(conn, store, registration, request, *, target, comparison):
     """Bind metadata only; installed fold readers later qualify causal payloads."""
     from experiments.magnitude_search_plan import _implementation, _nested
-    if type(request) is not dict or request.get("schema_version") != "regression_search_request.v1":
+    version = regression_request_version(request.get("schema_version")) if type(request) is dict else None
+    if version not in (1, 2):
         raise fail("INVALID_EXPERIMENT_SPEC", "regression search requires its explicit request")
     schedule = compile_request(request)
     request = schedule["request"]
@@ -31,12 +51,16 @@ def prepare_plan(conn, store, registration, request, *, target, comparison):
     temporal = binding["regression_plan"]
     _require(temporal["target_recipe"] == target
         and temporal["evaluation_years"] == request["outer_years"]
-        and request["feature_dictionary_hash"] == panel_recipe("HMO")["dictionary_hash"]
+        and request["feature_dictionary_hash"] == panel_recipe("HMO" if version == 1 else "HMOSXLP")["dictionary_hash"]
         and request["feature_snapshot_id"] == panel["feature_snapshot_id"] == binding["feature_snapshot"]["snapshot_id"]
         and request["history_snapshot_id"] == panel["history_snapshot"]
         and panel["as_of_month"] == binding["holdouts"]["holdout_as_of_month"]
-        and set(panel["event_ids"]) == set(binding["event_ids"])
+        and (version == 2 or set(panel["event_ids"]) == set(binding["event_ids"]))
         and panel["policy"]["policy_id"] == request["eligibility_policy_ref"]["policy_id"])
+    if version == 2:
+        coverage = panel_coverage(binding["event_ids"], panel["event_ids"])
+        print(f"[iv] panel_coverage iv_events={coverage['iv_events']} in_size_panel={coverage['in_size_panel']} outside={coverage['outside']}", file=sys.stderr)
+        _require(coverage["outside"] == 0)
     implementation = _implementation(binding, entrypoints=[binding["execution_plan"]["runner"],
         "experiments/magnitude_search_worker.py"])
     folds = _nested(binding, request, temporal=temporal)
@@ -55,7 +79,7 @@ def prepare_plan(conn, store, registration, request, *, target, comparison):
         "candidates": sorted(candidates, key=lambda candidate: candidate["candidate_id"]),
         "horizons": schedule["horizons"], "candidate_count": schedule["counts"]["candidates"],
         "planned_fit_count": schedule["counts"]["search_fits"], "counts": schedule["counts"],
-        "selection": {"metric": "inner_pooled_rmse", "ties": "candidate_id_ascending", "retries": 0,
+        "selection": {"metric": "inner_pooled_rmse" if version == 1 else "blend_rmse_mae", "ties": "candidate_id_ascending", "retries": 0,
             "outer": "frozen_selected_only", "final_read_authority": "none"}}
     return {**identity, "plan_id": content_hash(identity)}
 
@@ -77,7 +101,7 @@ def fold_inputs(repository, binding, fold, *, plan):
     snapshot = from_document(SnapshotRef, binding["target_snapshot"])
     preflight = preflight_iv_crush_targets(repository, snapshot, as_of_month=month, event_ids=sorted(participants))
     panel = read_stored_panel(repository, from_document(SnapshotRef, binding["snapshot"]),
-        plan["request"]["panel_request"], columns=panel_recipe("HMO")["model_columns"])
+        plan["request"]["panel_request"], columns=stored_columns(plan["request"]))
     context = panel["context"]
     _require(panel["feature_snapshot"] == binding["feature_snapshot"]
         and plan["request"]["eligibility_policy_ref"] == {"schema_ref": "group_eligibility_plan.v1",

@@ -39,6 +39,7 @@ from experiments.label_availability import label_cutoff_reason
 from experiments.magnitude_search_errors import artifact_failure
 from experiments.magnitude_search_request_schema import (
     qualified as is_qualified_request,
+    regression_request_version,
     request_version as parse_request_version,
 )
 from experiments.native_registration import verify_native_registration
@@ -426,12 +427,14 @@ def seal_search_plan(conn, store, registration, request):
 def read_search_plan(conn, store, registration, request, ref):
     """Reconstruct and revalidate the complete binding, repeating bounded bounds admission."""
     version = request.get("schema_version") if isinstance(request, dict) else None
+    if regression_request_version(version) == 2:
+        raise fail("INVALID_EXPERIMENT_SPEC", "regression v2 execution awaits its signed selection scorer")
     parsed_version = parse_request_version(version)
     if is_qualified_request(parsed_version) and parsed_version != 3:
         schemas = (PLAN_V2, PLAN_V3)
     elif version == "magnitude_search_request.v3":
         schemas = (PLAN_V2,)
-    elif version == "regression_search_request.v1":
+    elif regression_request_version(version) in (1, 2):
         schemas = ("regression_search_plan.v1",)
     elif version == "magnitude_search_request.v1":
         schemas = (SCHEMA,)
