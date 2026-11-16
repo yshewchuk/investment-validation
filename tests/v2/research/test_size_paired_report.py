@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 from engine.v2.foundation import content_hash
-from experiments.size_paired_report import paired_report
+from experiments.size_paired_report import _bootstrap, paired_report
 
 
 def assert_identity(report):
@@ -472,3 +472,12 @@ def test_multi_quarter_implied_bootstrap_reports_hand_computed_raw_and_scaled_bo
         assert raw["percentile_95"]["implied_move"][metric] == pytest.approx([1, 4])
         assert scaled["percentile_95"]["implied_move_scaled"][metric] == pytest.approx([4, 18])
     assert_identity(report)
+
+
+def test_bootstrap_truth_keyword_default_is_byte_identical():
+    rows = [{"event_id": f"e{i}", "ticker": "AB"[i % 2], "quarter": f"q{i % 3}", "absolute_move_pct": 2.0 + i,
+             "challenger": 2.5 + i * 1.1, "incumbent": 1.0 + i * 0.9} for i in range(6)]
+    assert content_hash(_bootstrap(rows, "ticker")) == "sha256:f044b8e041062aa331aef12cd109e8515643263c86e090aa94cd782e2a17a4ee"
+    assert content_hash(_bootstrap(rows, "quarter")) == "sha256:1716e9bd9ef53c7e3e296afcf6e67b900df09a0318d5fa8b1fec24fde7bd137a"
+    renamed = [{**{k: v for k, v in r.items() if k != "absolute_move_pct"}, "truth": r["absolute_move_pct"]} for r in rows]
+    assert _bootstrap(renamed, "ticker", truth="truth") == _bootstrap(rows, "ticker")

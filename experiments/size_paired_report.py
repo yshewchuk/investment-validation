@@ -25,8 +25,8 @@ def _difference(rows):
     return {key: a[key] - b[key] for key in ("rmse", "mae")}
 
 
-def _bootstrap(rows, cluster):
-    errors = np.array([[r[arm] - r["absolute_move_pct"] for arm in ("challenger", "incumbent")] for r in rows])
+def _bootstrap(rows, cluster, *, truth="absolute_move_pct", arms=("challenger", "incumbent")):
+    errors = np.array([[r[arm] - r[truth] for arm in arms] for r in rows])
     scale = float(np.max(np.abs(errors))) or 1.0
     errors /= scale
     groups = defaultdict(lambda: np.zeros(5))
