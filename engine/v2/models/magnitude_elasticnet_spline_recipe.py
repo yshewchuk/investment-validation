@@ -18,7 +18,8 @@ SPLINE_COLUMNS = (
     "iv10_chg5", "own_rvol5", "own_rvol10", "own_rvol60", "own_absret1",
 )
 
-__all__ = ["SPLINE_COLUMNS", "elasticnet_spline_recipe", "validate_elasticnet_spline_recipe"]
+__all__ = ["SPLINE_COLUMNS", "elasticnet_spline_recipe", "spline_coefficient_layout",
+           "validate_elasticnet_spline_recipe"]
 
 
 def elasticnet_spline_recipe(*, columns, feature_dictionary_hash, alpha, l1_ratio,
@@ -44,6 +45,15 @@ def elasticnet_spline_recipe(*, columns, feature_dictionary_hash, alpha, l1_rati
             "estimator": {**base["estimator"],
                           "params": {**base["estimator"]["params"], "precompute": True}},
             "preprocessing": preprocessing}
+
+
+def spline_coefficient_layout(recipe):
+    """Return the ordered (kind, column) coefficient attribution for a spline recipe."""
+    block = recipe["preprocessing"]["spline"]
+    return ([("value", column) for column in recipe["features"]]
+            + [("spline", column) for column in block["columns"]
+               for _ in range(block["n_knots"] + 1)]
+            + [("missing_indicator", column) for column in recipe["features"]])
 
 
 def validate_elasticnet_spline_recipe(recipe) -> dict:

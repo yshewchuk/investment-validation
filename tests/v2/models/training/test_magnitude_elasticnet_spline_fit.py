@@ -10,7 +10,7 @@ from sklearn.preprocessing import SplineTransformer, StandardScaler
 from engine.v2.data.errors import DataError
 from engine.v2.models.magnitude_candidate import magnitude_candidate_family
 from engine.v2.models.magnitude_elasticnet_spline_recipe import (
-    SPLINE_COLUMNS, elasticnet_spline_recipe)
+    SPLINE_COLUMNS, elasticnet_spline_recipe, spline_coefficient_layout)
 from engine.v2.models.training import (
     _magnitude_elasticnet_spline_fit as spline_fit)
 from engine.v2.models.training._magnitude_elasticnet_estimator import build_estimator
@@ -41,6 +41,8 @@ def test_spline_fit_returns_finite_ordered_evidence(spline_inputs):
     assert np.isfinite(result["predictions"]).all()
     coefficients = result["coefficients"]
     assert len(coefficients) == recipe["preprocessing"]["output_features"]
+    assert ([(entry["kind"], entry["column"]) for entry in coefficients]
+            == spline_coefficient_layout(recipe))
     kinds = [entry["kind"] for entry in coefficients]
     assert kinds.index("value") < kinds.index("spline") < kinds.index("missing_indicator")
     assert build_estimator(recipe)[-1].precompute is True

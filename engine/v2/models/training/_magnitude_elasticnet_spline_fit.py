@@ -10,6 +10,7 @@ from engine.v2.models.magnitude_elasticnet_recipe import (
     validate_elasticnet_recipe,
 )
 from engine.v2.models.magnitude_elasticnet_spline_recipe import (
+    spline_coefficient_layout,
     validate_elasticnet_spline_recipe,
 )
 
@@ -41,11 +42,7 @@ def select_validator(recipe):
 
 def coefficient_pairs(recipe, columns):
     if is_spline(recipe):
-        block = recipe["preprocessing"]["spline"]
-        return ([("value", column) for column in columns]
-                + [("spline", column) for column in block["columns"]
-                   for _ in range(block["n_knots"] + 1)]
-                + [("missing_indicator", column) for column in columns])
+        return spline_coefficient_layout(recipe)
     return [(kind, column) for kind in ("value", "missing_indicator") for column in columns]
 
 
