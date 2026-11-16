@@ -85,25 +85,28 @@ def test_v13_absent_axis_is_unchanged():
 
 
 def test_v13_spline_axis_expands_elasticnet_candidates():
-    compiled = compile_request(_spline_request([0, 4, 6], feature_sets=_SPLINE_SETS))
+    compiled = compile_request(_spline_request([0, 4, 5, 6], feature_sets=_SPLINE_SETS))
     without = compile_request(_request(13, feature_sets=_SPLINE_SETS))
     assert compiled["counts"]["candidates"] == (
-        without["counts"]["candidates"] + len(_SPLINE_SETS) * 2)
+        without["counts"]["candidates"] + len(_SPLINE_SETS) * 3)
     assert compiled["request_id"] != without["request_id"]
     elastics = [spec for spec in compiled["candidate_specs"]
                 if spec["family"] == "elasticnet"]
-    assert len(elastics) == len(_SPLINE_SETS) * 3
+    assert len(elastics) == len(_SPLINE_SETS) * 4
     for subset in _SPLINE_SETS:
         per_set = [spec for spec in elastics
                    if spec["feature_recipe"]["subset"] == subset]
-        assert len(per_set) == 3
+        assert len(per_set) == 4
     for spec in elastics:
         assert set(spec["parameters"]) == {"alpha", "l1_ratio", "spline_knots"}
-    assert {spec["parameters"]["spline_knots"] for spec in elastics} == {0, 4, 6}
+    assert {spec["parameters"]["spline_knots"] for spec in elastics} == {0, 4, 5, 6}
+    assert {(spec["feature_recipe"]["subset"], spec["parameters"]["spline_knots"])
+            for spec in elastics} == {
+        (subset, knots) for subset in _SPLINE_SETS for knots in (0, 4, 5, 6)}
 
 
 def test_v13_spline_elasticnet_candidates_pass_candidate_recipe():
-    compiled = compile_request(_spline_request([0, 4, 6], feature_sets=_SPLINE_SETS))
+    compiled = compile_request(_spline_request([0, 4, 5, 6], feature_sets=_SPLINE_SETS))
     emitted = set()
     for spec in compiled["candidate_specs"]:
         if spec["family"] != "elasticnet":
@@ -120,7 +123,26 @@ def test_v13_spline_elasticnet_candidates_pass_candidate_recipe():
             assert built["preprocessing"]["spline"]["n_knots"] == knots
         else:
             assert "spline" not in built["preprocessing"]
-    assert emitted == {0, 4, 6}
+    assert emitted == {0, 4, 5, 6}
+
+
+def test_v13_spline_axis_is_the_only_identity_difference():
+    without = compile_request(_spline_request([0], feature_sets=_SPLINE_SETS))
+    with_spline = compile_request(_spline_request([0, 4], feature_sets=_SPLINE_SETS))
+    assert without["request_id"] != with_spline["request_id"]
+    without_space = without["request"]["space"]
+    with_spline_space = with_spline["request"]["space"]
+    without_normalized = {
+        **without_space,
+        "elasticnet": {key: value for key, value in without_space["elasticnet"].items()
+                       if key != "spline_knots"},
+    }
+    with_spline_normalized = {
+        **with_spline_space,
+        "elasticnet": {key: value for key, value in with_spline_space["elasticnet"].items()
+                       if key != "spline_knots"},
+    }
+    assert without_normalized == with_spline_normalized
 
 
 def test_v13_accepts_zero_knots_for_default_sets():
