@@ -47,7 +47,8 @@ def v2_request(**over):
         feature_sets=["HMO", "HMOS", "HMOSX", "HMOSXL", "HMOSXLP"],
         space={"ridge": {"alpha": [0.1, 1.0, 10.0]},
                "elasticnet": {"alpha": [0.01, 0.1, 1.0], "l1_ratio": [0.25, 0.75]},
-               "hgb": {"max_leaf_nodes": [7, 15]}},
+               "hgb": {"max_leaf_nodes": [7, 15], "learning_rate": [0.05],
+                       "min_samples_leaf": [20], "l2_regularization": [0.0]}},
         selection=_selection(), max_candidates=55, max_fits=2000,
         comparison={"reference": "iv_crush_causal_refit", "sanity_reference": "training_mean",
                     "max_logical_fits": 9, "max_component_fits": 2000})
@@ -134,8 +135,20 @@ def test_explicit_lead_selector_and_panel_horizon_derivation():
     (("space", "ridge", "alpha"), ["0.1"]), (("space", "ridge", "alpha"), [True]),
     (("space", "elasticnet", "l1_ratio"), [2.0]), (("space", "hgb", "max_leaf_nodes"), [7.5]),
     (("space", "hgb", "max_leaf_nodes"), [1]), (("space", "hgb", "max_leaf_nodes"), [65]),
-    (("space", "hgb", "max_leaf_nodes"), [8]), (("space", "hgb", "max_leaf_nodes"), [7, 16]),
-    (("space", "hgb"), _DELETE), (("space", "hgb", "loss"), ["squared_error"]),
+    (("space", "hgb"), _DELETE),
+    (("space", "hgb", "l2_regularization"), _DELETE),
+    (("space", "hgb", "learning_rate"), _DELETE),
+    (("space", "hgb", "max_leaf_nodes"), _DELETE),
+    (("space", "hgb", "min_samples_leaf"), _DELETE),
+    (("space", "hgb", "loss"), ["gamma"]), (("space", "hgb", "loss"), ["poisson"]),
+    (("space", "hgb", "loss"), ["squared_error", "absolute_error"]),
+    (("space", "hgb", "loss"), ["quantile"]), (("space", "hgb", "quantile"), [0.5]),
+    (("space", "hgb", "quantile"), [1.0]),
+    (("space", "hgb", "learning_rate"), [0.0]), (("space", "hgb", "learning_rate"), [2.0]),
+    (("space", "hgb", "min_samples_leaf"), [0]), (("space", "hgb", "min_samples_leaf"), [1001]),
+    (("space", "hgb", "min_samples_leaf"), [True]),
+    (("space", "hgb", "l2_regularization"), [-1]), (("space", "hgb", "l2_regularization"), [1001]),
+    (("space", "hgb", "max_iter"), [99]), (("space", "hgb", "max_iter"), [5001]),
     (("space", "elasticnet", "spline_knots"), [0]),
     (("workers",), 0), (("workers",), 9), (("workers",), True), (("workers",), "2"),
     (("extra",), 1), (("schema_version",), "regression_search_request.v3"),
@@ -150,6 +163,46 @@ def test_refusals(path, value):
     document = v2_request()
     _put(document, path, value)
     refuses(document)
+
+
+def test_hgb_declared_defaults_match_omitted():
+    omitted = compile_request(v2_request())
+    declared_document = v2_request()
+    declared_document["space"]["hgb"].update(loss=["squared_error"], max_iter=[500])
+    declared = compile_request(declared_document)
+    assert declared["request_id"] == omitted["request_id"]
+    assert declared["candidate_specs"] == omitted["candidate_specs"]
+
+
+def _wide_hgb_request():
+    document = v2_request()
+    document["space"]["hgb"] = {
+        "max_leaf_nodes": [7, 15, 31], "learning_rate": [0.03, 0.1],
+        "min_samples_leaf": [20, 50], "l2_regularization": [0.0, 1.0],
+        "loss": ["absolute_error", "squared_error"], "max_iter": [300, 500]}
+    document["max_candidates"] = 525
+    document["max_fits"] = 4000
+    document["comparison"]["max_component_fits"] = 4000
+    return document
+
+
+def test_wide_hgb_grid_compiles_and_respects_candidate_cap():
+    result = compile_request(_wide_hgb_request())
+    assert result["counts"]["candidates"] == (96 + 3 + 6) * 5
+    assert len(result["candidate_specs"]) == 525
+    document = _wide_hgb_request()
+    document["max_candidates"] = 524
+    refuses(document)
+
+
+def test_quantile_loss_request_compiles():
+    document = v2_request()
+    document["space"]["hgb"].update(loss=["quantile"], quantile=[0.1, 0.5])
+    document["max_candidates"] = 65
+    result = compile_request(document)
+    assert result["request"]["space"]["hgb"]["loss"] == ["quantile"]
+    assert result["request"]["space"]["hgb"]["quantile"] == [0.1, 0.5]
+    assert result["counts"]["candidates"] == 65
 
 
 @pytest.mark.parametrize("path,value", [
@@ -212,7 +265,11 @@ def _v2_plan_request(data):
     document = v1_request(data)
     document.update(schema_version="regression_search_request.v2",
         feature_dictionary_hash=recipe("HMOSXLP")["dictionary_hash"],
-        feature_sets=["HMO", "HMOS"], selection=_selection(), max_candidates=22, max_fits=23)
+        feature_sets=["HMO", "HMOS"], selection=_selection(), max_candidates=22, max_fits=23,
+        space={"ridge": {"alpha": [0.1, 1.0, 10.0]},
+               "elasticnet": {"alpha": [0.01, 0.1, 1.0], "l1_ratio": [0.25, 0.75]},
+               "hgb": {"max_leaf_nodes": [7, 15], "learning_rate": [0.05],
+                       "min_samples_leaf": [20], "l2_regularization": [0.0]}})
     document["comparison"].update(max_logical_fits=1, max_component_fits=24)
     document["panel_request"]["horizons"] = [1]
     return document

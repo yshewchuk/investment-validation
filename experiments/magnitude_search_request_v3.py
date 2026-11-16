@@ -29,6 +29,18 @@ _HGB_V9_DEFAULTS = {"loss": ["squared_error"], "max_iter": [500]}
 _SPLINE_SETS = {"HMOSX", "HMOSXL", "HMOSXLP"}
 _SPLINE_KNOTS = (0, 4, 5, 6)
 _HGB_LOSSES = ("absolute_error", "gamma", "poisson", "quantile", "squared_error")
+_SIGNED_HGB_LOSSES = tuple(loss for loss in _HGB_LOSSES if loss not in ("gamma", "poisson"))
+
+
+def hgb_losses(target_domain="nonnegative"):
+    """Return the losses admitted for a target domain."""
+    if target_domain == "nonnegative":
+        return _HGB_LOSSES
+    if target_domain == "signed":
+        return _SIGNED_HGB_LOSSES
+    raise ValueError("HGB losses require a signed or nonnegative target domain")
+
+
 _FAMILIES = {
     "ridge": {"alpha"},
     "elasticnet": {"alpha", "l1_ratio"},
@@ -189,7 +201,7 @@ def _space(request):
                 canonical[family][axis] = [7, 15]
                 continue
             if family == "hgb" and axis == "loss":
-                v2._require(all(type(value) is str and value in _HGB_LOSSES
+                v2._require(all(type(value) is str and value in hgb_losses()
                     for value in values) and values == sorted(set(values)),
                     "stage-2 HGB loss values must be known, unique and lexicographically ordered")
                 canonical[family][axis] = list(values)

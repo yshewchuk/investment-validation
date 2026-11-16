@@ -8,14 +8,17 @@ from engine.v2.ops.errors import fail
 from engine.v2.research.magnitude_panel_qualified_table import recipe as qualified_recipe
 from experiments import magnitude_search_request as base
 from experiments.magnitude_search_request_v3 import (
-    _BOUNDS, _MAX_AXIS_LENGTH, _MAX_V4_CANDIDATES, _finite_positive)
+    _BOUNDS, _MAX_AXIS_LENGTH, _MAX_V4_CANDIDATES, _finite_positive, hgb_losses)
 from experiments.size_panel_request import validate_panel_request
 
 __all__ = ["compile_request"]
 
 SCHEMA = "regression_search_request.v2"
 _SETS = ["HMO", "HMOS", "HMOSX", "HMOSXL", "HMOSXLP"]
-_FAMILIES = {"ridge": ("alpha",), "elasticnet": ("alpha", "l1_ratio"), "hgb": ("max_leaf_nodes",)}
+_HGB_REQUIRED = ("l2_regularization", "learning_rate", "max_leaf_nodes", "min_samples_leaf")
+_HGB_OPTIONAL = ("loss", "max_iter", "quantile")
+_HGB_DEFAULTS = {"loss": ["squared_error"], "max_iter": [500]}
+_FAMILIES = {"ridge": ("alpha",), "elasticnet": ("alpha", "l1_ratio"), "hgb": _HGB_REQUIRED}
 _KEYS = base._KEYS | {"panel_request", "selection"}
 _METRICS = {"rmse": 0.67, "mae": 0.33}
 _LEADS = {"1": 1.0, "3": 0.0, "5": 0.0}
@@ -23,6 +26,15 @@ _LEADS = {"1": 1.0, "3": 0.0, "5": 0.0}
 
 def _number(value):
     return type(value) in (int, float) and math.isfinite(value)
+
+
+def _finite_nonnegative(value):
+    if type(value) not in (int, float) or value < 0:
+        return False
+    try:
+        return math.isfinite(float(value))
+    except (OverflowError, ValueError):
+        return False
 
 
 def _selection(request):
@@ -47,30 +59,71 @@ def _selection(request):
 
 def _space(request):
     space = request["space"]
-    base._require(base._shape(space, _FAMILIES), "stage-2 grid axes differ from the closed policy")
+    base._require(type(space) is dict and set(space) == set(_FAMILIES),
+                  "stage-2 grid axes differ from the closed policy")
     canonical = {}
     for family in sorted(_FAMILIES):
-        axes = _FAMILIES[family]
+        required = _FAMILIES[family]
         supplied = space[family]
-        base._require(base._shape(supplied, axes), "stage-2 grid axes differ from the closed policy")
+        if family == "hgb":
+            declared = set(supplied) if type(supplied) is dict else set()
+            base._require(type(supplied) is dict and set(required) <= declared
+                          and declared <= set(required) | set(_HGB_OPTIONAL),
+                          "stage-2 grid axes differ from the closed policy")
+            supplied = {**supplied}
+            for optional, default in _HGB_DEFAULTS.items():
+                supplied.setdefault(optional, list(default))
+            loss_values = supplied.get("loss")
+            if "quantile" in declared or (type(loss_values) is list
+                                          and "quantile" in loss_values):
+                base._require(type(loss_values) is list and loss_values == ["quantile"],
+                    "stage-2 HGB quantile loss must be the only declared HGB loss")
+                base._require("quantile" in declared,
+                    "stage-2 HGB quantile loss requires a quantile axis")
+            axes = sorted(declared | set(_HGB_DEFAULTS))
+        else:
+            base._require(base._shape(supplied, required),
+                          "stage-2 grid axes differ from the closed policy")
+            axes = sorted(required)
         canonical[family] = {}
-        for axis in sorted(axes):
+        for axis in axes:
             values = supplied[axis]
             base._require(type(values) is list and 1 <= len(values) <= _MAX_AXIS_LENGTH,
                           "stage-2 grid axis length must be between 1 and 32")
-            integer_axis = family == "hgb" and axis == "max_leaf_nodes"
-            base._require((all(type(value) is int for value in values) if integer_axis
-                           else all(_finite_positive(value) for value in values)),
-                          "stage-2 grid values must be finite positive numbers (integers for max_leaf_nodes)")
-            base._require(values == sorted(set(values)), "stage-2 grid axes must be strictly increasing")
+            if family == "hgb" and axis == "loss":
+                base._require(all(type(value) is str and value in hgb_losses("signed")
+                                  for value in values) and values == sorted(set(values)),
+                    "stage-2 HGB loss values must be known, unique and lexicographically ordered")
+                canonical[family][axis] = list(values)
+                continue
+            if family == "hgb" and axis == "quantile":
+                base._require(all(type(value) in (int, float) and 0 < value < 1
+                                  for value in values),
+                    "stage-2 HGB quantile values must be numbers strictly between 0 and 1")
+                base._require(values == sorted(values) and len(set(values)) == len(values),
+                              "stage-2 grid axes must be strictly increasing")
+                canonical[family][axis] = [float(value) for value in values]
+                continue
+            integer_axis = family == "hgb" and axis in (
+                "max_leaf_nodes", "min_samples_leaf", "max_iter")
+            if integer_axis:
+                base._require(all(type(value) is int for value in values),
+                              "stage-2 grid values must be finite positive numbers"
+                              " (integers for HGB count axes)")
+                canonical[family][axis] = [int(value) for value in values]
+            elif family == "hgb" and axis == "l2_regularization":
+                base._require(all(_finite_nonnegative(value) for value in values),
+                              "stage-2 grid values must be finite nonnegative numbers")
+                canonical[family][axis] = [float(value) for value in values]
+            else:
+                base._require(all(_finite_positive(value) for value in values),
+                              "stage-2 grid values must be finite positive numbers")
+                canonical[family][axis] = [float(value) for value in values]
+            base._require(values == sorted(values) and len(set(values)) == len(values),
+                          "stage-2 grid axes must be strictly increasing")
             lower, upper = _BOUNDS[(family, axis)]
             base._require(all(lower <= value <= upper for value in values),
                           "stage-2 grid values exceed their allowed bounds")
-            if family == "hgb":
-                base._require(all(value in (7, 15) for value in values),
-                              "stage-2 regression v2 HGB max_leaf_nodes admits 7 and 15 until the wider grid lands")
-            canonical[family][axis] = ([int(value) for value in values] if integer_axis
-                                       else [float(value) for value in values])
     request["space"] = canonical
 
 

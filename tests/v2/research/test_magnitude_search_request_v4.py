@@ -7,6 +7,7 @@ from engine.v2.foundation import content_hash
 from engine.v2.ops.errors import OpsError
 from experiments import magnitude_search_request as compiler
 from experiments import magnitude_search_request_versions as versions
+from experiments.magnitude_search_request_v3 import hgb_losses
 from tests.v2.research.test_magnitude_search_request import request as v2_request
 from tests.v2.research.test_magnitude_search_request_v3 import (
     ELASTICNET_ALPHA, ELASTICNET_L1_RATIO, RIDGE_ALPHA, fail_if_called, set_value, v3_request)
@@ -199,3 +200,9 @@ def test_v3_replay_and_v4_axis_refusal_through_versions(monkeypatch):
     with pytest.raises(OpsError) as caught:
         versions.compile_request(invalid)
     assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
+
+
+def test_hgb_losses_defaults_and_signed_subset():
+    assert hgb_losses() == (
+        "absolute_error", "gamma", "poisson", "quantile", "squared_error")
+    assert hgb_losses("signed") == ("absolute_error", "quantile", "squared_error")
