@@ -25,9 +25,11 @@ from engine.v2.ops.experiments import experiment_spec_from_document
 from experiments.iv_crush_search import prepare
 from experiments.iv_crush_search_report import collect, resource_report
 from experiments.magnitude_search_plan import _nested, seal_search_plan
+from experiments.magnitude_search_request_schema import regression_request_version
 from experiments.magnitude_search_request_versions import compile_request
 from experiments.memory_guard import rss_watchdog
 from experiments.native_registration import read_native_registration, reserve_native_registration
+from experiments.regression_search_binding import panel_coverage
 from experiments.size_search import _contain, _run
 from experiments.v2_magnitude_search_run import _read_document, _render, seal_search_run
 
@@ -47,7 +49,8 @@ def _prepare(repository, spec, request, args):
         feature_snapshot=repository.resolve(request["feature_snapshot_id"]),
         target_snapshot=repository.resolve(args.target_snapshot_id), scope=args.scope,
         as_of_month=panel["as_of_month"], training_start=args.training_start,
-        labels_before=args.labels_before, event_ids=panel["event_ids"])
+        labels_before=args.labels_before,
+        event_ids=panel["event_ids"] if regression_request_version(request["schema_version"]) == 1 else None)
     temporal = registration.document["regression_plan"]
     if temporal["evaluation_years"] != request["outer_years"]:
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "IV request outer years differ from registration")
@@ -74,7 +77,7 @@ def main(argv=None):
     conn, started, stack = None, time.monotonic(), ExitStack()
     try:
         request = _input(args.request)
-        if request.get("schema_version") != "regression_search_request.v1":
+        if regression_request_version(request.get("schema_version")) not in (1, 2):
             raise fail("INVALID_EXPERIMENT_SPEC", "IV requires its closed regression request")
         schedule = compile_request(request)
         try:
@@ -105,6 +108,9 @@ def main(argv=None):
                     result = {"preflight": resource_report({"counts": schedule["counts"], "request": request}),
                         "run_id": registration.run_id, "variant_id": registration.variant_id,
                         "qualification": "metadata_only; panel and causal labels admitted during execution"}
+                    if regression_request_version(request["schema_version"]) == 2:
+                        result["panel_coverage"] = panel_coverage(
+                            registration.document["event_ids"], request["panel_request"]["event_ids"])
                 else:
                     reserve_native_registration(conn, store, registration, spec)
                     result = seal_search_plan(conn, store, registration, request)

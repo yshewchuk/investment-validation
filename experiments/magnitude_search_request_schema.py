@@ -8,6 +8,7 @@ from engine.v2.ops.native_registration import (
     allows_size_family as allows_size_family,
     allows_workers as allows_workers,
     qualified as qualified,
+    regression_request_version as regression_request_version,
     request_version as request_version,
     uses_chrono_neural_profiles as uses_chrono_neural_profiles,
     uses_extended_neural_profiles as uses_extended_neural_profiles,

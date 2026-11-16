@@ -11,6 +11,7 @@ from experiments.magnitude_search_request_leads import compile_request as compil
 from experiments.magnitude_search_request_schema import (
     allows_lead_selector, request_version, uses_v3_compiler)
 from experiments.magnitude_search_request_v3 import compile_request as compile_v3_request
+from experiments.regression_search_request_v2 import compile_request as compile_regression_v2_request
 
 __all__ = ["compile_request"]
 
@@ -31,6 +32,9 @@ def _is_default_selector(selector):
 def compile_request(request, *, horizons=(5, 3, 1)):
     """Dispatch bounded v3-v9 grids while preserving existing dictionary replay."""
     version = request.get("schema_version") if type(request) is dict else None
+    if version == "regression_search_request.v2":
+        return compile_regression_v2_request(
+            request, horizons=None if _is_default_selector(horizons) else horizons)
     if (version == "regression_search_request.v1"
             or request_version(version) == 1) and not _is_default_selector(horizons):
         raise fail("INVALID_EXPERIMENT_SPEC",

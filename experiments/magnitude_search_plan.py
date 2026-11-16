@@ -39,6 +39,7 @@ from experiments.label_availability import label_cutoff_reason
 from experiments.magnitude_search_errors import artifact_failure
 from experiments.magnitude_search_request_schema import (
     qualified as is_qualified_request,
+    regression_request_version,
     request_version as parse_request_version,
 )
 from experiments.native_registration import verify_native_registration
@@ -431,7 +432,7 @@ def read_search_plan(conn, store, registration, request, ref):
         schemas = (PLAN_V2, PLAN_V3)
     elif version == "magnitude_search_request.v3":
         schemas = (PLAN_V2,)
-    elif version == "regression_search_request.v1":
+    elif regression_request_version(version) in (1, 2):
         schemas = ("regression_search_plan.v1",)
     elif version == "magnitude_search_request.v1":
         schemas = (SCHEMA,)

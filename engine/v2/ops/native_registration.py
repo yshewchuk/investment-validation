@@ -33,6 +33,14 @@ def request_version(schema_version):
         return None
 
 
+def regression_request_version(schema_version):
+    """Return N for `regression_search_request.vN` (N a positive int), else None."""
+    if type(schema_version) is not str:
+        return None
+    match = re.fullmatch(r"regression_search_request\.v([1-9][0-9]*)", schema_version)
+    return int(match.group(1)) if match else None
+
+
 def _request_version_in_range(value, low):
     return type(value) is int and low <= value <= LATEST
 
