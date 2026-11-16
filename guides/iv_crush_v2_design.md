@@ -1,6 +1,6 @@
 # IV crush v2: nested search at SIZE parity (design)
 
-Design only; no code in this PR. The contract stays in this guide and lands with each code PR: `experiments/ARCHITECTURE.md` and the models/research ARCHITECTURE files are at their growth ceiling, so no code PR adds ARCHITECTURE growth. Facts checked against origin/main 874ac5fd1; each code PR re-verifies what it relies on.
+Design only; no code in this PR. The contract stays in this guide and lands with each code PR: `experiments/ARCHITECTURE.md` and the models/research ARCHITECTURE files are at their growth ceiling, so no code PR adds ARCHITECTURE growth. Facts checked against origin/main 874ac5fd1.
 
 ## 1. Scope and decisions (user, 2026-11-16, binding)
 
@@ -37,7 +37,7 @@ Frozen files nearby include `engine/v2/models/regression_target.py`, `engine/mod
 - `space.ridge`: `alpha`. `space.elasticnet`: `alpha`, `l1_ratio`, optional `spline_knots` (0 or 4..6; >0 only on sets containing the spline source columns: HMOSX, HMOSXL, HMOSXLP). `space.hgb`: `max_leaf_nodes`, `learning_rate`, `min_samples_leaf`, `l2_regularization`, optional `max_iter` (default `[500]`) and `loss` (default `["squared_error"]`), plus `quantile` when and only when `loss == ["quantile"]` (SIZE's rule that quantile is the only declared loss stays). **Losses are `squared_error`, `absolute_error`, `quantile` only; `gamma` and `poisson` are refused at compile** because the target is signed (SIZE's `_HGB_LOSSES` filtered by `target_domain`). `space.mlp`: `profile` from the SIZE v13 profile table (18 names), all with signed variants (section 5). Not admitted: `size_v1_4`, `blend`, `n_seeds` (SIZE-specific or phase 2), `ridge` extras beyond v13's.
 - Bounds are SIZE's v4+ table (`_BOUNDS` in `magnitude_search_request_v3.py`: for example `learning_rate` 1e-3..1, `max_leaf_nodes` 2..64, `min_samples_leaf` 1..1000, `l2_regularization` 0..1000, `max_iter` 100..5000, `l1_ratio` 1e-6..1, `alpha` per family); values outside are refused.
 
-**Closed-grid rule.** Each axis is a nonempty, unique, ascending list of in-bounds numbers; absent optional axes take the default list, so declaring a default equals omitting it and gives the same recipe and candidate ids (the rule SIZE's ensemble design states for `n_seeds=[1]`). The compiler computes candidates = sum over families of product of axis lengths, times the set count, and search fits = horizons x (candidates x inner folds + outer folds), the same accounting as `_counts`; `max_candidates` and `max_fits` must cover them, else `INVALID_EXPERIMENT_SPEC` before anything is sealed. The component total (`total_component_fits`) must fit `comparison.max_component_fits`; component weights: 1 per candidate, MLP 1, the comparator's refit as today.
+**Closed-grid rule.** Each axis is a nonempty, unique, ascending list of in-bounds numbers; the v2 compiler fills every absent optional axis (HGB `loss`, `max_iter`) with its default before building the space, not via v3's conditional insertion, so declaring a default equals omitting it and gives the same recipe and candidate ids (the rule SIZE's ensemble design states for `n_seeds=[1]`). The compiler computes candidates = sum over families of product of axis lengths, times the set count, and search fits = horizons x (candidates x inner folds + outer folds), the same accounting as `_counts`; `max_candidates` and `max_fits` must cover them, else `INVALID_EXPERIMENT_SPEC` before anything is sealed. The component total (`total_component_fits`) must fit `comparison.max_component_fits`; component weights: 1 per candidate, MLP 1, the comparator's refit as today.
 
 **Compile-time refusals** (all `INVALID_EXPERIMENT_SPEC`, nothing partial): unknown or missing keys, unsupported loss, spline on a set without its source columns, duplicate or unsorted values, non-finite or bool/str numbers, child memory above parent, and year shapes violating the v1 rule.
 
@@ -135,4 +135,4 @@ Each code PR is at most ~300 added non-test code lines (AGENTS.md's current limi
 
 ## 10. Open questions
 
-`outside > 0`: refuse (default) or exclude and report; signed `tie_band_floor` (SIZE's by default). Decide after the smoke.
+`outside > 0`: refuse (default) or exclude; signed `tie_band_floor` (SIZE's default). Decide after the smoke.
