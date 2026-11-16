@@ -4,6 +4,7 @@ from engine.v2.research.progress import stage
 from experiments.iv_crush_paired_report import paired_report
 from experiments.iv_crush_plan import target
 from experiments.iv_crush_registration import validate_registration
+from experiments.iv_distribution_report import collect_distribution, outer_arrays, read_trial_arrays
 from experiments.magnitude_search_outer import collect_outer_results
 from experiments.magnitude_search_records import read_record
 from experiments.size_search_report import _candidate_evidence
@@ -25,6 +26,12 @@ def collect(conn, store, repository, registration, request, plan_ref):
         validate_registration(registration.document)
         plan = _admit_driver(conn, store, registration, request, plan_ref)
         result = collect_outer_results(conn, store, repository, registration, request, plan_ref)
+        trial_arrays = read_trial_arrays(conn, store, registration.run_id, plan)
+        outer_rows = outer_arrays(plan, result["predictions"])
+        selected_ids = {fold["outer_year"]: fold["candidate"]["candidate_id"]
+                        for fold in result["folds"]}
+        distribution = collect_distribution(plan, trial_arrays, outer_rows, selected_ids)
+        trial_arrays.clear()
         forecasts, comparisons, fits = [], [], []
         for group in plan["folds"]:
             year = group["outer"]["year"]
@@ -40,6 +47,7 @@ def collect(conn, store, repository, registration, request, plan_ref):
         report = {"schema_version": "iv_crush_search_report.v1", "plan_id": plan["plan_id"], "search": result,
             "paired": paired_report(events, forecasts, comparisons, targets, horizons=plan["horizons"]),
             "preflight": resource_report(plan), "comparison_fits": fits,
+            "distribution": distribution,
             "inner_fits": _candidate_evidence(conn, store, registration.run_id, plan),
             "eligibility_policy_ref": plan["request"]["eligibility_policy_ref"],
             "final_read_authority": "none"}
