@@ -139,6 +139,12 @@ def test_challenger_distribution_defaults_embeds_supplied_and_refuses_non_dict()
     supplied = {"schema_version": "iv_distribution.v1", "median": 1.5}
     result = paired_report_v2(*args, distribution=supplied)
     assert result["challenger_distribution"] == supplied
+    supplied = {"schema_version": "iv_distribution.v1", "bands": {"p50": 1.0}}
+    result = paired_report_v2(*args, distribution=supplied)
+    supplied["bands"]["p50"] = 2.0
+    assert result["challenger_distribution"]["bands"]["p50"] == 1.0
+    assert result["result_id"] == content_hash(
+        {key: value for key, value in result.items() if key != "result_id"})
     with pytest.raises(ValueError, match="invalid challenger distribution"):
         paired_report_v2(*args, distribution=[1])
     with pytest.raises(ValueError, match="invalid challenger distribution"):

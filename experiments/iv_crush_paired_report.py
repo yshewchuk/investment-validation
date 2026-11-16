@@ -1,6 +1,7 @@
 """Descriptive signed-IV comparison; no new selection, threshold or release policy."""
 import math
 from collections import Counter
+from copy import deepcopy
 from statistics import mean
 
 from engine.v2.foundation import content_hash
@@ -164,7 +165,7 @@ def paired_report_v2(events, challenger, incumbent, targets, implied, *,
     elif not isinstance(distribution, dict) or distribution.get("schema_version") != "iv_distribution.v1":
         raise ValueError("invalid challenger distribution")
     else:
-        challenger_distribution = distribution
+        challenger_distribution = deepcopy(distribution)
     result = {"schema_version": "iv_crush_paired_report.v2", "target": target(),
         "eligible_events": base["eligible_events"],
         "forecast_matched_events": base["forecast_matched_events"],
