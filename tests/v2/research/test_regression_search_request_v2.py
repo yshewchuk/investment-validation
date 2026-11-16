@@ -10,6 +10,7 @@ from engine.v2.models.no_fit import no_fit_guard
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.native_registration import regression_request_version
 from engine.v2.research.magnitude_panel_qualified_table import recipe
+from experiments import iv_crush_run
 from experiments import magnitude_search_plan as plans
 from experiments import magnitude_search_request
 from experiments import magnitude_search_request_v3
@@ -271,3 +272,21 @@ def test_v2_requests_refused_by_size_cli_and_v2_run_cli(tmp_path, capsys):
     refusal = json.loads(capsys.readouterr().out)["refused"]
     assert refusal["code"] == "INVALID_EXPERIMENT_SPEC"
     assert refusal["message"] == "IV requires dedicated CLI containment; use the admitted library path"
+
+
+@pytest.mark.parametrize("action", ["seal", "run"])
+def test_iv_cli_refuses_v2_seal_and_run_before_any_fit(tmp_path, capsys, action):
+    (tmp_path / "request.json").write_text(json.dumps(v2_request()))
+    (tmp_path / "spec.json").write_text(json.dumps({}))
+    (tmp_path / "ref.json").write_text(json.dumps(to_document(ArtifactRef(artifact_id="a",
+        content_hash="sha256:" + "0" * 64, schema_ref="regression_search_plan.v1", byte_size=1,
+        storage_key="objects/00/" + "0" * 64))))
+    (tmp_path / "store").mkdir()
+    assert iv_crush_run.main([action, "--spec", str(tmp_path / "spec.json"),
+        "--request", str(tmp_path / "request.json"), "--catalog", str(tmp_path / "catalog.sqlite"),
+        "--store-root", str(tmp_path / "store"), "--plan-ref", str(tmp_path / "ref.json"),
+        "--no-ledger"]) == 2
+    refusal = json.loads(capsys.readouterr().out)
+    assert refusal["refused"] == "INVALID_EXPERIMENT_SPEC"
+    assert refusal["message"] == "INVALID_EXPERIMENT_SPEC: regression v2 execution awaits its signed selection scorer"
+    assert not (tmp_path / "catalog.sqlite").exists()

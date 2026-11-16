@@ -79,6 +79,8 @@ def main(argv=None):
         request = _input(args.request)
         if regression_request_version(request.get("schema_version")) not in (1, 2):
             raise fail("INVALID_EXPERIMENT_SPEC", "IV requires its closed regression request")
+        if regression_request_version(request.get("schema_version")) == 2 and args.action in ("seal", "run"):
+            raise fail("INVALID_EXPERIMENT_SPEC", "regression v2 execution awaits its signed selection scorer")
         schedule = compile_request(request)
         try:
             memory = _contain(request)
