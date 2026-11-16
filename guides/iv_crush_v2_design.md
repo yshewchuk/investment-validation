@@ -1,6 +1,6 @@
 # IV crush v2: nested search at SIZE parity (design)
 
-Design only; no code in this PR. The contract stays in this guide and lands with each code PR: `experiments/ARCHITECTURE.md` and the models/research ARCHITECTURE files are at their growth ceiling, so no code PR adds ARCHITECTURE growth (at most a one-line pointer replacing an existing line). Facts below were checked against origin/main 874ac5fd1 (2026-11-16); each code PR re-verifies the ones it relies on.
+Design only; no code in this PR. The contract stays in this guide and lands with each code PR: `experiments/ARCHITECTURE.md` and the models/research ARCHITECTURE files are at their growth ceiling, so no code PR adds ARCHITECTURE growth. Facts checked against origin/main 874ac5fd1; each code PR re-verifies what it relies on.
 
 ## 1. Scope and decisions (user, 2026-11-16, binding)
 
@@ -11,7 +11,7 @@ Design only; no code in this PR. The contract stays in this guide and lands with
 | 3 | Target stays signed `crush_pct_iv30 = 100*(post_iv30/pre_iv30-1)`; no log-ratio or other transform. |
 | 4 | Runs: a 50-ticker smoke, then the full panel; IV events reuse SIZE's stored panel; outer year 2025. |
 
-**Phase 2 (future work only, not designed here):** prior-crush history (its own store, as-of logic mirroring `eligible_history`), and crush-specific derived features (252-day IV rank, implied move over `mean_prior_abs_move`, iv30 over rvol60). Log-ratio target is rejected by decision 3.
+**Phase 2 (future work only, not designed here):** prior-crush history (own store, as-of logic like `eligible_history`) and crush-specific derived features (252-day IV rank, implied move over `mean_prior_abs_move`, iv30 over rvol60).
 
 **Standard tool check.** sklearn (`HistGradientBoostingRegressor`, `ElasticNet`, `SplineTransformer`, `MLPRegressor`) and numpy remain the only estimator and bootstrap code; the recipes already wrap them. Nothing here hand-rolls a standard format.
 
@@ -24,7 +24,7 @@ python3 -c "from pathlib import Path; from engine.v2.ops.fingerprints import sou
 git diff --name-only origin/main...HEAD | sort | comm -12 - /tmp/closure.txt   # must print nothing
 ```
 
-Frozen files this design touches nearby: `engine/v2/models/regression_target.py`, `engine/models/training/iv_crush.py` (the legacy champion), `engine/v2/research/magnitude_panel_*`. The search stack is **outside** the closure and may change: `experiments/regression_search_binding.py`, `magnitude_search_request*.py`, `magnitude_search_selection.py`, `magnitude_search_{plan,trials,outer,worker}.py`, `size_search_binding.py`, `size_distribution_report.py`, `size_paired_report.py`, `engine/v2/models/*_recipe.py`, `engine/v2/models/regression_candidate.py`, `engine/v2/models/training/*`. Even so, IV-specific logic goes in new modules (`iv_*`, `regression_*`); a change to a shared SIZE module is allowed only as a behaviour-preserving generalization whose default argument reproduces today's bytes, and a test pins that (see section 8). Cross-PR landing is checked with `git log origin/main`, not PR state.
+Frozen files nearby include `engine/v2/models/regression_target.py`, `engine/models/training/iv_crush.py` and `engine/v2/research/magnitude_panel_*`. The search stack is **outside** the closure and may change (`regression_search_binding.py`, `magnitude_search_*`, `size_search_binding.py`, `size_distribution_report.py`, `size_paired_report.py`, the model recipes, `engine/v2/models/training/*`). Even so, IV-specific logic goes in new modules (`iv_*`, `regression_*`); a change to a shared SIZE module is allowed only as a behaviour-preserving generalization whose default argument reproduces today's bytes, and a test pins that (see section 8). Cross-PR landing is checked with `git log origin/main`, not PR state.
 
 ## 3. Request `regression_search_request.v2`
 
@@ -41,7 +41,7 @@ Frozen files this design touches nearby: `engine/v2/models/regression_target.py`
 
 **Compile-time refusals** (all `INVALID_EXPERIMENT_SPEC`, nothing partial): unknown or missing keys, unsupported loss, spline on a set without its source columns, duplicate or unsorted values, non-finite or bool/str numbers, `child.memory_bytes > parent.memory_bytes`, an `outer_years`/`inner_years` shape violating the v1 rule (inner strictly earlier, 30-day grouped ticker embargo policy ref).
 
-**Binding (P1).** `regression_search_binding` currently hardcodes `panel_recipe("HMO")`, requires `panel["event_ids"] == binding["event_ids"]` and reads columns for HMO. v2 changes it to: columns = union of the declared sets' stored columns (H..HMOSX; L/P are derived at fit time by `derived_rows.with_derived`, unchanged), dictionary hash checked against the request's, and `set(binding["event_ids"]) <= set(panel["event_ids"])` (IV events are a subset of SIZE's panel). Events missing from the panel are a measurement, not a silent drop: the 50-ticker smoke reports `iv_events`, `in_size_panel`, `outside` and the labelled-and-would-have-traded count, and the default for `outside > 0` at plan time is refuse (`EXPERIMENT_IDENTITY_CONFLICT`) until the user rules; registration then lists the excluded ids.
+**Binding (P1).** `regression_search_binding` currently hardcodes `panel_recipe("HMO")`, requires `panel["event_ids"] == binding["event_ids"]` and reads columns for HMO. v2 changes it to: columns = union of the declared sets' stored columns (H..HMOSX; L/P are derived at fit time by `derived_rows.with_derived`, unchanged), dictionary hash checked against the request's, and `set(binding["event_ids"]) <= set(panel["event_ids"])` (IV events are a subset of SIZE's panel). Events missing from the panel are a measurement, not a silent drop: a pre-binding step in P1 (the smoke's registration check, which reads the panel's event ids without binding) reports `iv_events`, `in_size_panel` and `outside`; binding with `outside > 0` refuses (`EXPERIMENT_IDENTITY_CONFLICT`) until the user rules.
 
 ## 4. Capability contracts and failure semantics (R1-R6)
 
@@ -49,7 +49,7 @@ R1 member/fit failure, R2 memory and CPU, R3 determinism, R4 persistence/evidenc
 
 **Common.**
 - **R1:** a failed fit fails its trial with the fit's own `ValueError`; no retry, no partial forecast stored, no reweighting. A failed trial is handled by the existing trial layer exactly as a failed SIZE trial is (P7 verifies how selection treats it and records the rule in its PR; it never invents a score). Compile and binding refusals are `INVALID_EXPERIMENT_SPEC` / `EXPERIMENT_IDENTITY_CONFLICT` and write nothing.
-- **R2:** fits are single-threaded within a trial; `workers` (1..8) only parallelizes trials through the existing worker/shard machinery and is not part of request identity beyond today's rule (it is popped before sealing in the v3 compiler; v2 does the same). Peak memory is one panel copy (the shared `_PANEL_MEMO`) plus the largest in-flight fit per worker.
+- **R2:** fits are single-threaded within a trial; `workers` (1..8) only parallelizes trials through the existing worker/shard machinery and is not part of request identity beyond today's rule (it is popped before sealing in the v3 compiler; v2 does the same). Memory is bounded by the sealed job `limits`.
 - **R3:** fixed seeds (HGB `random_state` 0, MLP per profile as today), fixed candidate order by `candidate_id`, `math.fsum` in selection: equal inputs give equal bytes.
 - **R4:** stored artifacts are the per-trial forecast arrays, fit diagnostics per horizon (existing `size_fit_diagnostics.evidence` branches by schema) and the sealed plan; nothing carries paths or raw exception text.
 - **R5:** `candidate_id` hashes the full recipe including `target_domain`; the plan seals all ids before any fit; nothing chooses candidates from scores.
@@ -58,20 +58,20 @@ R1 member/fit failure, R2 memory and CPU, R3 determinism, R4 persistence/evidenc
 | Capability | Contract | Deltas to the common rules |
 | --- | --- | --- |
 | Request sets (P1) | v2 admits the five sets; binding by version | Missing column in the stored panel or derived rows fails the reader (`EXPERIMENT_IDENTITY_CONFLICT`), never imputes. Derived L/P rows come from `with_derived` on the same fit rows, so a set never sees a row another set did not. A cached panel is revalidated by fingerprint on every read (existing memo). Idempotent: same request, same plan id. |
-| Grid (P2) | signed-valid HGB axes, EN bounds, leads, workers | `regression_candidate_recipe` (closed `_KEYS`) grows the optional HGB params it already forwards to `ridge_hgb_recipe` (`learning_rate`, `min_samples_leaf`, `l2_regularization`, `loss`, `max_iter`, `quantile`); an unsupported loss reaching a recipe raises `ValueError` there too (defence in depth). v1 recipes unchanged. |
-| Signed spline EN (P3) | section 5 | R1: non-convergence raises (as the unsigned spline). R3: knots by training quantiles, deterministic; constant extrapolation. |
-| Signed MLP (P4) | section 5 | R1: non-convergence and nonfinite weights raise, no retry (profile `variant_failure_no_retry`). R3: profile-fixed seed and early-stopping rules. |
+| Grid (P2) | signed-valid HGB axes, EN bounds, leads, workers | `regression_candidate_recipe` (closed `_KEYS`) and `regression_recipe` (today only `alpha`, `max_leaf_nodes`) grow to forward the optional HGB params `ridge_hgb_recipe` already accepts (`learning_rate`, `min_samples_leaf`, `l2_regularization`, `loss`, `max_iter`, `quantile`); an unsupported loss raises `ValueError` there too. v1 recipes unchanged. |
+| Signed spline EN (P3) | section 5 | R1: non-convergence raises `EXPERIMENT_VARIANT_FAILED` (as the unsigned spline). R3: deterministic quantile knots. |
+| Signed MLP (P4) | section 5 | R1: non-convergence and nonfinite weights raise, no retry. R3: profile-fixed seed and early-stopping rules. |
 | Blended selection (P7) | section 6 | R1: a zero comparator RMSE or MAE with a nonzero candidate error raises `ZeroComparatorError` (SIZE behaviour); empty or non-lead-1 rows raise. Pure function, no IO. |
 | Distribution (P8) | section 6 | Statuses `no_pool`, `pool_too_small`, `no_scored_rows`, `trial_failed`, `skipped_resource_cap`, `ok` as SIZE; a resource cap skips the report, never the run. Report-only: it never influences selection. |
 | Paired report v2 (P9) | section 7 | Coverage mismatch raises as v1 does; an abstaining arm is reported as abstention, not zero, and never imputed. Pure function of stored forecasts and labels. |
 
-**Progress logging (conventions).** The existing trial loop's bounded stage progress carries done/total, rate, ETA and RSS; P2 weights nothing new. The distribution and report stages log stage start/end with elapsed seconds, per horizon, never per event.
+**Progress logging.** The existing trial loop's bounded progress is reused; the distribution and report stages log start/end with elapsed seconds, per horizon, never per event.
 
 ## 5. Signed variants
 
 **Pattern.** SIZE's nonnegative recipes carry no domain; the regression recipes carry `target_domain` and `prediction_projection` (`none` for signed, `clip_zero` for nonnegative), as `regression_ridge_hgb_recipe.v1` and `regression_elasticnet_recipe` already do for ridge/EN/HGB (their fit entries `fit_regression_*` pass `nonnegative=domain == "nonnegative"`). The two missing families follow the same shape; each adds a new schema and validator, leaves the magnitude schemas and ids untouched, and rebuilds-and-compares in its validator.
 
-**Spline ElasticNet (P3).** `engine/v2/models/regression_elasticnet_spline_recipe.py`: `regression_elasticnet_spline_recipe(target_domain, columns, feature_dictionary_hash, alpha, l1_ratio, n_knots)` wraps `elasticnet_spline_recipe` (same `SPLINE_COLUMNS` of 34, cubic, quantile knots, `extrapolation: constant`, `include_bias: False`, `precompute: True`; same `n_knots` 4..6 admitted by the request, 4..8 by the recipe), changes the schema to `regression_elasticnet_spline_recipe.v1`, adds `target_domain` and `prediction_projection: none` (signed). The spline block is unchanged: it is a feature transform, independent of the label sign. In the fit, `select_validator` and `is_spline` gain the new schema, `fit_regression_elasticnet_predictions` calls `_fit(..., nonnegative=False)`, and `magnitude_candidate_family` maps the schema to `elasticnet`. The unsigned `magnitude_elasticnet_spline_recipe.v1` hard-codes `clip_zero` only through `_fit(nonnegative=True)`; nothing is edited there. Spline source columns are not IV-specific this phase.
+**Spline ElasticNet (P3).** `engine/v2/models/regression_elasticnet_spline_recipe.py`: `regression_elasticnet_spline_recipe(target_domain, columns, feature_dictionary_hash, alpha, l1_ratio, n_knots)` wraps `elasticnet_spline_recipe` (same `SPLINE_COLUMNS` of 34, cubic, quantile knots, `extrapolation: constant`, `include_bias: False`, `precompute: True`; same `n_knots` 4..6 admitted by the request, 4..8 by the recipe), changes the schema to `regression_elasticnet_spline_recipe.v1`, adds `target_domain` and `prediction_projection: none` (signed). The spline block is unchanged: it is a feature transform, independent of the label sign. In the fit, `select_validator` and `is_spline` gain the new schema, `fit_regression_elasticnet_predictions` (which today validates only `validate_regression_elasticnet_recipe`) gains a spline branch choosing the spline validator, and `magnitude_candidate_family` maps the schema to `elasticnet`. The unsigned spline stays clipped via `_fit(nonnegative=True)`; nothing is edited there.
 
 **MLP (P4).** `regression_mlp_recipe.v1` = `mlp_recipe` plus `target_domain` and `prediction_projection: none`; the fit's final `np.maximum(predictions, 0.0)` (`magnitude_mlp.py:73`) becomes conditional on the recipe's projection, default `clip_zero` so the magnitude path is byte-identical. The estimator needs no change: `TransformedTargetRegressor(StandardScaler)` already centers and scales a signed target, and the chronological early-stopping holdouts are label-sign agnostic. All 18 SIZE profile names are admitted (identity differs through `target_domain`, so no id collision with SIZE).
 
@@ -85,7 +85,7 @@ nrmse = rmse / rmse0     nmae = mae / mae0          (rmse0, mae0 from the traini
 blend_score = 0.67*nrmse + 0.33*nmae               (lower is better; weights fsum'd)
 ```
 
-A zero baseline with a nonzero candidate error raises `ZeroComparatorError` (reused); a zero baseline with zero error normalizes to 1.0, as SIZE does. Candidate and baseline rows must hold the same events and targets. `selection_tie_band` is reused unchanged (lowest `blend_score`, `candidate_id` ascending on exact equality; the `max(SE, tie_band_floor)` band is a diagnostic) and so is `ZeroComparatorError`; only the event-row function is new because `blended_event_score` is bound to `absolute_move_pct` and the large-move term. Yearly scores for the SE use the same function per inner year. Dispatch is on `"target" in plan` (as the distribution report already does). The v1 `inner_pooled_rmse` path remains for v1 plans.
+A zero baseline with a nonzero candidate error raises `ZeroComparatorError` (reused); a zero baseline with zero error normalizes to 1.0, as SIZE does. Candidate and baseline rows must hold the same events and targets. `selection_tie_band` is reused unchanged (lowest `blend_score`, `candidate_id` ascending on exact equality; the `max(SE, tie_band_floor)` band is a diagnostic) and so is `ZeroComparatorError`; only the event-row function is new because `blended_event_score` is bound to `absolute_move_pct` and the large-move term. Dispatch is on the request version (v2 regression plans use the signed blend, as `regression_search_binding` already dispatches on version). The v1 `inner_pooled_rmse` path remains for v1 plans.
 
 **Signed distribution (P8), module `experiments/iv_distribution_report.py`, schema `iv_distribution.v1`.** SIZE's band is multiplicative (`y/pred` ratios with `max(pred, 0.05)`), which is wrong for a signed target near zero. The signed band is additive: pool the inner OOF `(pred, y)` pairs, cut `pred` into 5 quantile buckets (`MIN_BUCKET_ROWS` 20, else `pool_too_small`), take quantiles of `y - pred` per bucket at `TAUS = (0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95)`, and band each scored forecast `f` as `f + q[bucket(f)]`. Reported: p10/p50/p90 of the band, `pinball_p10/p50/p90/mean`, `coverage_p10` (target at or under 10%), `coverage_p90`, `coverage_p10_p90` (nominal 80%), `n_pool`, `n_scored`, per horizon and pooled. It consumes the same `{horizon: (pred, y, event_ids)}` arrays as `size_distribution_report`. **The `unsupported_target` gate in `size_distribution_report.collect_distribution` stays** (it is the correct answer for SIZE's ratio machinery); the IV search report calls the new collector instead, so SIZE's report is not edited.
 
@@ -97,14 +97,14 @@ A zero baseline with a nonzero candidate error raises `ZeroComparatorError` (reu
 - `training_mean`: the fold's training mean (v1 field).
 - `implied_ex_earnings`: `100*(exern_iv30/iv30 - 1)` from the stored panel features. It abstains when either input is missing or non-positive; it is a reported arm and never a fallback for another.
 
-Metrics per arm on its matched set and, for paired comparisons, on the **common-matched** set (every arm forecasts): `rmse`, `mae`, `bias = mean(yhat - y)`, count. The v1 coverage table is kept and extended with the new arm. For the challenger only: the `iv_distribution.v1` band metrics of section 6 on outer 2025. Bootstrap: 95% percentile intervals for the challenger-minus-each-other-arm differences in RMSE and MAE (and incumbent-minus-training-mean), 2000 resamples, seed 0, blocks by `ticker` and, separately, by event month; the RMSE difference is `sqrt(mean e_a^2) - sqrt(mean e_b^2)`, errors scaled by the largest absolute error as in `size_paired_report._bootstrap`. That function and `_implied_bootstrap` hard-code `absolute_move_pct`; P9 adds a `truth` keyword defaulting to it (SIZE output byte-identical, pinned by a test) rather than copying 30 lines. Claim stays `frozen_dataset_development_only`, `final_read_authority: none`. Reported numbers are measured; no threshold or promotion rule is added here.
+Metrics per arm on its matched set and, for paired comparisons, on the **common-matched** set (every arm forecasts): `rmse`, `mae`, `bias = mean(yhat - y)`, count. The v1 coverage table is kept and extended with the new arm. For the challenger only: the `iv_distribution.v1` band metrics of section 6 on outer 2025. Bootstrap: 95% percentile intervals for the challenger-minus-each-other-arm differences in RMSE and MAE (and incumbent-minus-training-mean), 2000 resamples, seed 0, blocks by `ticker` and, separately, by event month; the RMSE difference is `sqrt(mean e_a^2) - sqrt(mean e_b^2)`, errors scaled by the largest absolute error as in `size_paired_report._bootstrap`. That function and `_implied_bootstrap` hard-code `absolute_move_pct`; P9 adds a `truth` keyword defaulting to it (SIZE output byte-identical, pinned by a test) rather than copying 30 lines. Claim stays `frozen_dataset_development_only`, `final_read_authority: none`.
 
 ## 8. Reuse, generalize, port
 
 | Module | Disposition | Why |
 | --- | --- | --- |
 | `size_panel` closure, `derived_features.py`, `derived_rows.with_derived`, `read_stored_panel` | **Reuse unchanged** | Frozen; IV events are a subset of the stored panel and L/P are derived at fit time. |
-| `magnitude_search_plan/outer/trials/worker/journal`, `size_comparison_run`, `workers` | **Reuse** | Already target-aware (`"target" in plan`); candidates carry `target_domain`. |
+| `magnitude_search_plan/outer/trials/worker`, `size_comparison_run`, `workers` | **Reuse** | Already target-aware (`"target" in plan`); candidates carry `target_domain`. |
 | `regression_search_binding.py` | **Generalize** (P1) | HMO constants become per-version; v1 path untouched. |
 | `magnitude_search_request_v3` axis helpers and `_BOUNDS` | **Generalize** (P2) | Add a `target_domain` argument to the loss validator, default today's behaviour; a new `regression_search_request_v2.py` composes them. |
 | `regression_candidate.py` (models and training) | **Generalize** (P2-P4) | Closed `_KEYS` and dispatch gain families by schema; P3 then P4 serialize merges. |
@@ -117,23 +117,22 @@ Metrics per arm on its matched set and, for paired comparisons, on the **common-
 
 ## 9. PR split
 
-All code PRs target about 150 and at most ~300 added non-test code lines (limit as of 2026-10-28; the brief's ~400 bound is the ceiling). Each states its contract in the PR body and adds no ARCHITECTURE growth. Estimates are mine.
+Each code PR is at most ~300 added non-test code lines (the ~400 brief bound is the ceiling; slices above ~150 are indivisible contracts). Contract text goes in the PR body, so doc lines are 0. Estimates are mine.
 
-| PR | Scope | Code / test lines | Depends on | Parallel with |
+| PR | Scope | Code / test / doc lines | Depends on | Parallel with |
 | --- | --- | --- | --- | --- |
-| P1 | `regression_search_request.v2` skeleton: shape, `selection` and `workers` keys, version dispatch, set list, dictionary hash, closed-grid accounting for the v1 families; binding by version, subset panel read, smoke coverage report | ~250 / ~200 | this design | none (all others branch from it) |
-| P2 | Wider grid: signed-valid HGB axes, EN bounds, loss refusal, leads selector, `regression_candidate_recipe` params | ~200 / ~150 | P1 | P3, P4, P7, P8, P9 (design-wise) |
-| P3 | Signed spline recipe, validator, fit dispatch, `spline_knots` axis admission | ~200 / ~150 | P1 (axis admission after P2 merges) | P2, P4, P7, P8, P9 |
-| P4 | Signed MLP recipe, fit projection switch, profile axis admission | ~200 / ~150 | P1; merges after P3 (both edit `regression_candidate.py`) | P2, P7, P8, P9 |
-| P7 | `iv_selection.py`, plan `selection.metric` dispatch, yearly SE rows | ~200 / ~180 | P1 | everything except plan wiring conflicts with P2 |
-| P8 | `iv_distribution_report.py` and the IV search report call | ~200 / ~160 | none (reads stored arrays) | all |
-| P9 | `paired_report_v2`, ex-earnings arm, bootstrap `truth` keyword, coverage extension | ~250 / ~200 | none (pure function) | all |
+| P1 | `regression_search_request.v2` skeleton: shape, `selection` and `workers` keys, version dispatch, set list, dictionary hash, closed-grid accounting for the v1 families; binding by version, subset panel read, smoke coverage report | ~250 / ~200 / 0 | this design | none (all others branch from it) |
+| P2 | Wider grid: signed-valid HGB axes, EN bounds, loss refusal, leads selector, `regression_candidate_recipe` params | ~200 / ~150 / 0 | P1 | P3, P4, P7, P8, P9 (design-wise) |
+| P3 | Signed spline recipe, validator, fit dispatch, `spline_knots` axis admission | ~200 / ~150 / 0 | P1 (axis admission after P2 merges) | P2, P4, P7, P8, P9 |
+| P4 | Signed MLP recipe, fit projection switch, profile axis admission | ~200 / ~150 / 0 | P1; merges after P3 (both edit `regression_candidate.py`) | P2, P7, P8, P9 |
+| P7 | `iv_selection.py`, plan `selection.metric` dispatch, yearly SE rows | ~200 / ~180 / 0 | P1 | everything except plan wiring conflicts with P2 |
+| P8 | `iv_distribution_report.py` and the IV search report call | ~200 / ~160 / 0 | none (reads stored arrays) | all |
+| P9 | `paired_report_v2`, ex-earnings arm, bootstrap `truth` keyword, coverage extension | ~250 / ~200 / 0 | none (pure function) | all |
 
 (P5 and P6 are phase 2: IV derived features and the prior-crush store; P10 is dropped by decision 3.) Merge order: P1 first; then P8 and P9 any time; P2, P3, P7 in any order with rebases on `regression_search_binding`/`regression_candidate.py`; P4 after P3. A smoke on 50 tickers (`--no-ledger`) follows P1+P2+P7 and reports the coverage counts above and candidate and fit counts; the full run follows the remaining PRs, outer 2025 only, with 2025 unread before the sealed plan.
 
 **Acceptance for the series.** (a) a v2 request with every set, a signed grid, spline and MLP candidates compiles, seals and runs; (b) every v1 request, candidate and plan id is unchanged, and the unsigned spline/MLP and SIZE paired-report outputs are byte-identical (tests); (c) `gamma`/`poisson` and wrong-set spline are refused at compile; (d) a failing fit fails its trial with nothing stored; (e) the closure check of section 2 prints nothing for every PR; (f) preflight refuses counts above `max_candidates`, `max_fits` or `max_component_fits`.
 
-## 10. Open questions for the user
+## 10. Open questions
 
-1. `outside > 0` events at plan time: refuse (default here) or exclude and report? Decide after the smoke measurement.
-2. `tie_band_floor` value for the signed blend (SIZE's carried over by default).
+`outside > 0` events: refuse (default) or exclude and report; and the signed `tie_band_floor` (SIZE's by default). Decide after the smoke.
