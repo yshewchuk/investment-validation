@@ -9,11 +9,13 @@ import numpy as np
 import pytest
 
 from engine.models.no_fit import RuntimeFitForbidden as LegacyRuntimeFitForbidden
-from engine.v2.data.errors import DataError
+from engine.v2.data.errors import DataError, make_problem
 from engine.v2.foundation import canonical_json, to_document
 from engine.v2.models.adapters import RuntimeFitForbidden
 from engine.v2.models.training import magnitude as training
 from engine.v2.ops.errors import OpsError
+from engine.v2.research.horizon_fitted import HorizonFitFailure
+from experiments import magnitude_fitted as fitted
 from experiments import magnitude_history_report as model
 from experiments import magnitude_inputs as inputs
 from experiments import native_outcomes as outcomes
@@ -658,6 +660,31 @@ def test_failed_fit_never_falls_back_or_returns_partial_success(source, monkeypa
     assert len(calls) == 2
     assert (catalog_rows(source.conn), artifact_object_bytes(source.store)) == before
     assert not list(source.root.rglob("REPORT.md")) and not list(source.root.rglob("*.csv"))
+
+
+def _raise_variant_failure(monkeypatch, cause):
+    def broken(*args, **kwargs):
+        raise HorizonFitFailure("synthetic fit failure") from cause
+    monkeypatch.setattr(fitted, "fit_horizons", broken)
+
+
+def test_variant_data_failure_is_normalized_to_ops_failure(monkeypatch):
+    _raise_variant_failure(monkeypatch, DataError(make_problem("EXPERIMENT_VARIANT_FAILED", "x")))
+    with pytest.raises(OpsError) as caught:
+        fitted.fitted_forecasts({}, None, {"evaluation_event_ids": []}, {"horizons": []},
+                                {"features": [], "schema_version": "size_candidate_execution.v1"},
+                                strict_failures=True, fit_inputs={})
+    assert caught.value.code == "EXPERIMENT_VARIANT_FAILED"
+
+
+def test_other_data_failure_is_reraised_in_strict_mode(monkeypatch):
+    error = DataError(make_problem("CONTRACT_MISMATCH", "x"))
+    _raise_variant_failure(monkeypatch, error)
+    with pytest.raises(DataError) as caught:
+        fitted.fitted_forecasts({}, None, {"evaluation_event_ids": []}, {"horizons": []},
+                                {"features": [], "schema_version": "size_candidate_execution.v1"},
+                                strict_failures=True, fit_inputs={})
+    assert caught.value is error
 
 
 @pytest.mark.parametrize("guard", [RuntimeFitForbidden, LegacyRuntimeFitForbidden])

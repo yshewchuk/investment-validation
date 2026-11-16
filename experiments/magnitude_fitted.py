@@ -1,5 +1,6 @@
 """Fixed-magnitude compatibility policy over shared admitted horizon fitting."""
 from engine.models.no_fit import RuntimeFitForbidden as LegacyRuntimeFitForbidden
+from engine.v2.data.errors import DataError
 from engine.v2.models.adapters import RuntimeFitForbidden
 from engine.v2.models.training.fit_routes import check_fitting_allowed
 from engine.v2.ops.errors import OpsError, fail
@@ -24,7 +25,8 @@ def fitted_forecasts(indexed, train, fold, plan, execution, *, progress=None, st
         error = failure.__cause__
         if isinstance(error, (RuntimeFitForbidden, LegacyRuntimeFitForbidden)):
             raise error
-        if strict_failures and (isinstance(error, (MemoryError, OSError, ImportError, OpsError))
-                                or not isinstance(error, (ValueError, ArithmeticError))):
+        variant = isinstance(error, DataError) and error.code == "EXPERIMENT_VARIANT_FAILED"
+        if strict_failures and not variant and (isinstance(error, (MemoryError, OSError, ImportError, OpsError))
+                                                or not isinstance(error, (ValueError, ArithmeticError))):
             raise error
         raise fail("EXPERIMENT_VARIANT_FAILED", "fitted magnitude estimator failed") from None

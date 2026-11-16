@@ -94,7 +94,7 @@ consume this API, never production entrypoints. Legacy error translation stays a
 domain-aware Ridge/HGB or ElasticNet recipe to its existing guarded fitter. Both
 no-fit guards precede recipe/input inspection; delegated validation, results and
 errors remain unchanged. No source reads, retries, selection or persistence occur. Existing
-experiment magnitude dispatch remains fixed to nonnegative recipe schemas (Ridge v1, HGB v1 and v2, ElasticNet v1 and MLP v1).
+experiment magnitude dispatch remains fixed to nonnegative recipe schemas (Ridge v1, HGB v1 and v2, ElasticNet v1, ElasticNet spline v1 and MLP v1).
 
 `magnitude.fit_magnitude_predictions` accepts an ops-admitted closed Ridge/HGB
 recipe as data and eleven-column numeric matrices
@@ -113,7 +113,7 @@ the recipe order. The caller owns causal membership, source identity, fit caps a
 inner-only choice of subset/alpha/l1_ratio; this API cannot certify those from arrays.
 The experiment dispatcher is a numeric caller, not a grid or production activation.
 No validation-target selection, cache or persistence is added.
-Nonconvergence raises `ValueError` with no retry or partial result.
+Nonconvergence raises `ValueError` (`DataError` `EXPERIMENT_VARIANT_FAILED` for the spline recipe) with no retry or partial result.
 
 `magnitude_elasticnet.fit_regression_elasticnet_predictions` accepts the distinct
 domain-aware ElasticNet policy through the same guarded, training-only fitter.

@@ -2,6 +2,7 @@
 import math
 
 from engine.v2.foundation import canonical_json, content_hash
+from engine.v2.models.magnitude_elasticnet_spline_recipe import spline_coefficient_layout
 from engine.v2.models.magnitude_mlp_recipe import validate_mlp_recipe
 from engine.v2.ops.errors import fail
 
@@ -77,7 +78,10 @@ def evidence(result, execution, horizons, inputs=None, fold=None):
                 raise ValueError
             if elastic:
                 entries = item["coefficients"]
-                layout = [(kind, column) for kind in ("value", "missing_indicator") for column in recipe["features"]]
+                layout = (spline_coefficient_layout(recipe)
+                          if recipe.get("schema_version") == "magnitude_elasticnet_spline_recipe.v1"
+                          else [(kind, column) for kind in ("value", "missing_indicator")
+                                for column in recipe["features"]])
                 if ([(e["kind"], e["column"]) for e in entries] != layout or item["converged"] is not True
                         or item["coefficient_scale"] != "standardized_inputs" or type(item["n_iter"]) is not int
                         or not 0 <= item["n_iter"] <= 10000):
