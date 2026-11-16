@@ -79,7 +79,9 @@ def evidence(result, execution, horizons, inputs=None, fold=None):
             if elastic:
                 entries = item["coefficients"]
                 layout = (spline_coefficient_layout(recipe)
-                          if recipe.get("schema_version") == "magnitude_elasticnet_spline_recipe.v1"
+                          if recipe.get("schema_version") in (
+                              "magnitude_elasticnet_spline_recipe.v1",
+                              "regression_elasticnet_spline_recipe.v1")
                           else [(kind, column) for kind in ("value", "missing_indicator")
                                 for column in recipe["features"]])
                 if ([(e["kind"], e["column"]) for e in entries] != layout or item["converged"] is not True

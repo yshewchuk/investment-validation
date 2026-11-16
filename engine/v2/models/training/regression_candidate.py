@@ -14,7 +14,8 @@ def fit_regression_candidate(recipe, inputs: FitInputs):
     schema, model = recipe.get("schema_version"), recipe.get("model")
     if type(schema) is not str or type(model) is not str:
         raise ValueError("regression candidate requires a supported recipe schema/model pair")
-    if schema == "regression_elasticnet_recipe.v1" and model == "elasticnet":
+    if schema in ("regression_elasticnet_recipe.v1",
+                  "regression_elasticnet_spline_recipe.v1") and model == "elasticnet":
         from .magnitude_elasticnet import fit_regression_elasticnet_predictions as fit
     elif schema == "regression_ridge_hgb_recipe.v1" and model in ("history_ridge", "history_hgb"):
         from .magnitude_ridge_hgb import fit_regression_predictions as fit

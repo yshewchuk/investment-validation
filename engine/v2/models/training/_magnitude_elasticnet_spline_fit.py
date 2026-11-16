@@ -8,10 +8,14 @@ import time
 from engine.v2.data.errors import fail
 from engine.v2.models.magnitude_elasticnet_recipe import (
     validate_elasticnet_recipe,
+    validate_regression_elasticnet_recipe,
 )
 from engine.v2.models.magnitude_elasticnet_spline_recipe import (
     spline_coefficient_layout,
     validate_elasticnet_spline_recipe,
+)
+from engine.v2.models.regression_elasticnet_spline_recipe import (
+    validate_regression_elasticnet_spline_recipe,
 )
 
 _SPLINE_FITS = 0
@@ -30,7 +34,7 @@ def log_spline_fit(recipe, elapsed):
 
 
 def is_spline(recipe):
-    return recipe["schema_version"].startswith("magnitude_elasticnet_spline")
+    return recipe["schema_version"].endswith("elasticnet_spline_recipe.v1")
 
 
 def select_validator(recipe):
@@ -38,6 +42,13 @@ def select_validator(recipe):
             if type(recipe) is dict
             and recipe.get("schema_version") == "magnitude_elasticnet_spline_recipe.v1"
             else validate_elasticnet_recipe)
+
+
+def select_regression_validator(recipe):
+    return (validate_regression_elasticnet_spline_recipe
+            if type(recipe) is dict
+            and recipe.get("schema_version") == "regression_elasticnet_spline_recipe.v1"
+            else validate_regression_elasticnet_recipe)
 
 
 def coefficient_pairs(recipe, columns):
