@@ -6,6 +6,11 @@ elsewhere; each row here is one candidate that any rule picked in some outer yea
 import sys
 
 PRIMARY_RULE = "overall"
+LOG1P_SCHEMAS = frozenset({
+    "magnitude_elasticnet_recipe.v2",
+    "magnitude_elasticnet_spline_recipe.v2",
+    "magnitude_mlp_recipe.v2",
+})
 
 
 def _score(row):
@@ -83,11 +88,11 @@ def winner_rows(plan, selection, refits, forecasts, events, comparisons, targets
                   "scores": entry["years"][year]["scores"], "tie_band": entry["years"][year]["tie_band"]}
                  for year in years]
         candidate = candidates.get(cid) or {}
-        transform = (candidate.get("recipe") or {}).get("target_transform")
+        recipe = candidate.get("recipe")
         rows.append({
             "candidate_id": cid, "rules": rules, "primary": PRIMARY_RULE in rules,
             "kind": "candidate", "components": [],
-            "target_transform": "log1p" if transform else "none",
+            "target_transform": "log1p" if (recipe or {}).get("schema_version") in LOG1P_SCHEMAS else "none",
             "outer_years": years, "inner": inner,
             "status": "completed" if completed else "failed",
             "error_code": None if completed else error_code,

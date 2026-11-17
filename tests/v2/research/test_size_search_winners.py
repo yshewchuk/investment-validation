@@ -1,7 +1,11 @@
 """Unit tests for report-only winner rows (fake paired callable, hand-built records)."""
 import pytest
 
+from engine.v2.models.magnitude_elasticnet_recipe import elasticnet_recipe
+from engine.v2.models.magnitude_mlp_recipe import mlp_recipe
 from experiments.size_search_winners import winner_rows
+
+_HASH = "sha256:" + "0" * 64
 
 
 class FakePaired:
@@ -20,9 +24,14 @@ def _score(cid, rmse, blend):
 
 def _plan(rules=("overall", "rmse", "mae")):
     plan = {"plan_id": "p", "horizons": [1, 3],
-            "candidates": [{"candidate_id": "a", "recipe": {"target_transform": "log1p"}},
-                           {"candidate_id": "b", "recipe": {}},
-                           {"candidate_id": "c", "recipe": {}}],
+            "candidates": [
+                {"candidate_id": "a", "recipe": elasticnet_recipe(
+                    columns=["a"], feature_dictionary_hash=_HASH, alpha=0.1, l1_ratio=0.5,
+                    target_transform="log1p")},
+                {"candidate_id": "b", "recipe": elasticnet_recipe(
+                    columns=["a"], feature_dictionary_hash=_HASH, alpha=0.1, l1_ratio=0.5)},
+                {"candidate_id": "c", "recipe": mlp_recipe(
+                    columns=["a"], feature_dictionary_hash=_HASH, profile="relu32_l2_0p01")}],
             "folds": [{"outer": {"year": "2024", "evaluation_event_ids": ["e1", "e2", "e3"]}},
                       {"outer": {"year": "2025", "evaluation_event_ids": ["e4"]}}]}
     if rules:
@@ -101,6 +110,17 @@ def test_rows_primary_first_then_by_id_and_inner_scores_match_candidate():
     assert by_id["b"]["inner"][0]["scores"]["rmse"]["blend"] == 0.4
     assert by_id["a"]["target_transform"] == "log1p"
     assert by_id["b"]["target_transform"] == "none"
+    assert by_id["c"]["target_transform"] == "none"
+
+
+def test_missing_refit_marks_row_failed_with_error_code():
+    refits = [r for r in REFITS if not (r["candidate_id"] == "b" and r["outer_year"] == "2024")]
+    rows = _by_id(_run(FakePaired(), refits=refits))
+    assert rows["b"]["status"] == "failed"
+    assert rows["b"]["error_code"] == "missing_refit"
+    assert rows["b"]["paired"] is None
+    assert rows["b"]["actual_above_forecast_share"] is None
+    assert rows["c"]["status"] == "completed"
 
 
 def test_failed_refit_marks_its_row_and_leaves_others_unaffected():
@@ -120,8 +140,12 @@ def test_failed_refit_marks_its_row_and_leaves_others_unaffected():
 
 def test_share_uses_lowest_horizon_and_strict_greater():
     rows = _by_id(_run(FakePaired()))
-    # predictions [1, 2, 3] against actuals [2, 2, 1] at horizon 1 -> only the first is above.
+    # b: predictions [1, 2, 3] against actuals [2, 2, 1] at horizon 1 -> only the first is above.
     assert rows["b"]["actual_above_forecast_share"] == pytest.approx(1 / 3)
+    # a: predictions [1.5, 1.5, 1.5] against actuals [2, 2, 1] -> two are above.
+    # Distinct shares across candidates rule out a constant output.
+    assert rows["a"]["actual_above_forecast_share"] == pytest.approx(2 / 3)
+    assert rows["a"]["actual_above_forecast_share"] != rows["b"]["actual_above_forecast_share"]
 
 
 def test_candidate_winning_one_year_gets_only_that_years_events():
