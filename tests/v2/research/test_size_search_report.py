@@ -218,6 +218,7 @@ def test_collect_uses_verified_callback_inputs_per_outer_fold(monkeypatch):
     observed = report.collect(None, None, None, registration, {}, None)
 
     assert observed["paired"] is paired_report_result
+    assert "winners" not in observed
     assert invoked == ["2024", "2025"]
     assert captured["implied_scales"] == {
         "2024": {"scale": 2.0, "fit_n": 1}, "2025": {"scale": 2.0, "fit_n": 1}}
@@ -379,3 +380,73 @@ def test_collect_outer_selected_arm_reports_ok_with_allowed_pool(monkeypatch):
     assert selected["status"] == "ok"
     assert selected["pooled"]["n_pool"] == 100 and selected["pooled"]["n_scored"] == 1
     assert "pinball_p50" in selected["pooled"]
+
+
+def test_collect_adds_winners_rows_for_winner_rules_plans(monkeypatch):
+    years = ("2024", "2025")
+    plan = {"plan_id": "plan", "horizons": [1], "folds": [
+        {"outer": {"year": year, "training_candidate_event_ids": ["t" + year],
+                   "evaluation_event_ids": ["e" + year]}, "inner": []} for year in years],
+        "candidates": [{"candidate_id": "a", "recipe": {}}, {"candidate_id": "b", "recipe": {}}],
+        "selection": {"winner_rules": ["overall", "rmse", "mae"], "extra_refits": ["x"]}}
+    refits = [{"outer_year": year, "candidate_id": cid, "status": "completed", "result": {}}
+              for year in years for cid in ("a", "b", "x")]
+    result = {"predictions": [
+        {"event_id": "e" + year, "outer_year": year, "horizon_sessions": 1,
+         "predicted_absolute_move_pct": 3.0, "absolute_move_pct": 4.0} for year in years],
+        "folds": [{"outer_year": year, "candidate": {"candidate_id": "a"},
+                   "evaluation_inputs": {"omitted_labels": []}} for year in years],
+        "refits": refits}
+    registration = SimpleNamespace(run_id="run", document={"size_panel": {"context": {
+        "target_events": [{"event_id": "e" + year, "ticker": ticker, "event_date": year + "-01-20"}
+                          for year, ticker in zip(years, ("A", "B"))],
+        "eligibility_plan": {"frozen": True}}}})
+    score_rows = [{"candidate_id": "a", "metrics": {"rmse": 2.0, "mae": 1.0}, "normalized": {}, "blend_score": 0.5},
+                  {"candidate_id": "b", "metrics": {"rmse": 1.0, "mae": 1.5}, "normalized": {}, "blend_score": 0.4}]
+    selection = {"selections": [
+        {"outer_year": year, "scores": score_rows, "selected_candidate_id": "a",
+         "winners": {"overall": {"candidate_id": "a", "tie_band": 0.1},
+                     "rmse": {"candidate_id": "b", "tie_band": 0.1},
+                     "mae": {"candidate_id": "a", "tie_band": 0.2}}}
+        for year in years]}
+    offsets = {"a": -1.0, "b": -0.5, "x": -2.0}
+    outer = {"outer-forecasts:" + report.refit_key(plan, year, cid): [
+                {"event_id": "e" + year, "horizon_sessions": 1, "predicted_absolute_move_pct": 4.0 + offsets[cid]}]
+             for year in years for cid in offsets}
+    comparison = {"comparison-terminal:" + report.content_hash([plan["plan_id"], year, "comparison"]): {
+                      "result": {"forecasts": [{"event_id": "e" + year, "horizon_sessions": 1,
+                                                "predicted_absolute_move_pct": 2.0, "abstention": None,
+                                                "history_mean": 4.0, "quote_status": "present"}],
+                                 "fit_details": []}}
+                  for year in years}
+    monkeypatch.setattr(report, "_admit_driver", lambda *a: plan)
+    monkeypatch.setattr(report, "collect_outer_results", lambda *a, **k: result)
+    monkeypatch.setattr(report, "resource_report", lambda p: {})
+    slots = []
+
+    def read(conn, store, run, slot):
+        slots.append(slot)
+        if slot == "selection":
+            return selection
+        if slot in outer:
+            return outer[slot]
+        if slot in comparison:
+            return comparison[slot]
+        raise AssertionError(f"unexpected journal slot: {slot}")
+
+    monkeypatch.setattr(report, "read_record", read)
+    observed = report.collect(None, None, None, registration, {}, None)
+
+    winners = {row["candidate_id"]: row for row in observed["winners"]}
+    assert [row["candidate_id"] for row in observed["winners"]] == ["a", "b"]
+    assert winners["a"]["rules"] == ["mae", "overall"] and winners["a"]["primary"] is True
+    assert winners["b"]["rules"] == ["rmse"] and winners["b"]["primary"] is False
+    assert winners["a"]["status"] == "completed" and winners["b"]["status"] == "completed"
+    assert "x" not in winners
+    for year in years:
+        for cid in ("a", "b"):
+            assert "outer-forecasts:" + report.refit_key(plan, year, cid) in slots
+        assert "outer-forecasts:" + report.refit_key(plan, year, "x") not in slots
+    # The primary (overall-winner) paired result is still built from the selected candidate "a".
+    assert observed["paired"]["paired_events"] == 2
+    assert observed["paired"]["difference"]["mae"] == pytest.approx(-1.0)

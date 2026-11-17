@@ -3,6 +3,7 @@ import pytest
 
 from engine.v2.models.magnitude_elasticnet_recipe import elasticnet_recipe
 from engine.v2.models.magnitude_mlp_recipe import mlp_recipe
+from experiments.size_paired_report import paired_report
 from experiments.size_search_winners import winner_rows
 
 _HASH = "sha256:" + "0" * 64
@@ -158,3 +159,60 @@ def test_candidate_winning_one_year_gets_only_that_years_events():
     assert c_call["kwargs"]["implied_moves"] == {("e4", 1): 0.7}
     assert c_call["kwargs"]["implied_scales"] == PAIRED_KWARGS["implied_scales"]
     assert rows["b"]["paired"] == {"fake": True, "n_events": 3}
+
+
+# Real paired_report oracle: two outer years, one event pair per year.
+REAL_EVENTS = [{"event_id": e, "ticker": t, "event_date": d} for e, t, d in (
+    ("e0", "A", "2024-01-18"), ("e1", "B", "2024-04-18"),
+    ("e2", "A", "2025-01-16"), ("e3", "B", "2025-04-17"))]
+REAL_TARGETS = {"e0": 2.0, "e1": 6.0, "e2": 10.0, "e3": 14.0}
+REAL_SELECTION = {"selections": [
+    {"outer_year": "2024", "scores": [],
+     "winners": {"overall": {"candidate_id": "a", "tie_band": 0.1},
+                 "rmse": {"candidate_id": "b", "tie_band": 0.1}},
+     "selected_candidate_id": "a"},
+    {"outer_year": "2025", "scores": [],
+     "winners": {"overall": {"candidate_id": "a", "tie_band": 0.1}},
+     "selected_candidate_id": "a"}]}
+REAL_REFITS = [{"outer_year": "2024", "candidate_id": "a", "status": "completed", "result": {}},
+               {"outer_year": "2024", "candidate_id": "b", "status": "completed", "result": {}},
+               {"outer_year": "2025", "candidate_id": "a", "status": "completed", "result": {}}]
+
+
+def _real_plan():
+    return {"plan_id": "p", "horizons": [1, 3],
+            "candidates": [{"candidate_id": "a"}, {"candidate_id": "b"}],
+            "folds": [{"outer": {"year": "2024", "evaluation_event_ids": ["e0", "e1"]}},
+                      {"outer": {"year": "2025", "evaluation_event_ids": ["e2", "e3"]}}],
+            "selection": {"winner_rules": ["overall", "rmse"]}}
+
+
+def _real_forecasts(preds):
+    return [{"event_id": e, "horizon_sessions": h, "predicted_absolute_move_pct": p}
+            for e, p in preds.items() for h in (1, 3)]
+
+
+REAL_FORECASTS = {
+    ("2024", "a"): _real_forecasts({"e0": 2.5, "e1": 6.5}),
+    ("2025", "a"): _real_forecasts({"e2": 10.5, "e3": 14.5}),
+    ("2024", "b"): _real_forecasts({"e0": 3.0, "e1": 7.0}),
+}
+# Incumbent is target - 2 at every horizon, so its absolute error is 2 everywhere.
+REAL_COMPARISONS = [{"event_id": e, "horizon_sessions": h, "predicted_absolute_move_pct": REAL_TARGETS[e] - 2,
+                     "abstention": None, "history_mean": 4.0, "quote_status": "present"}
+                    for e in REAL_TARGETS for h in (1, 3)]
+
+
+def test_real_paired_report_scores_each_winner_over_its_own_outer_years():
+    rows = _by_id(winner_rows(_real_plan(), REAL_SELECTION, REAL_REFITS, REAL_FORECASTS, REAL_EVENTS,
+                              REAL_COMPARISONS, REAL_TARGETS, paired=paired_report,
+                              paired_kwargs={"horizons": [1, 3], "implied_moves": None,
+                                             "implied_scales": {}, "label_reasons": {}}))
+    assert rows["a"]["status"] == "completed" and rows["b"]["status"] == "completed"
+    # a wins in both years: all four events, error 0.5 vs incumbent error 2.0.
+    assert rows["a"]["paired"]["paired_events"] == 4
+    assert rows["a"]["paired"]["difference"]["mae"] == pytest.approx(0.5 - 2)
+    # b wins only rmse in 2024: only e0 and e1 are paired.
+    assert rows["b"]["paired"]["paired_events"] == 2
+    assert rows["b"]["paired"]["difference"]["mae"] == pytest.approx(1.0 - 2)
+    assert {r["event_id"] for r in rows["b"]["paired"]["paired_rows"]} == {"e0", "e1"}
