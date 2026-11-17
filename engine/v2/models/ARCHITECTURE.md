@@ -71,19 +71,19 @@ See [the training contract](training/README.md#standalone-neural-magnitude-primi
 `regression_ridge_hgb_recipe.regression_recipe` adds a distinct
 `regression_ridge_hgb_recipe.v1` identity with explicit `signed`/`nonnegative`
 target domain and respectively `none`/`clip_zero` projection. Its validator
-refuses unknown fields or inconsistent domain/projection pairs; no training imports.
+refuses unknown fields or inconsistent domain/projection pairs; no training imports. It forwards the optional HGB params (`learning_rate`, `min_samples_leaf`, `l2_regularization`, `loss`, `max_iter`, `quantile`); a signed target refuses `gamma`/`poisson`.
 `training.magnitude_ridge_hgb.fit_regression_predictions` uses that new policy;
 `fit_ridge_hgb_predictions` retains its existing magnitude recipe/result schema.
 Both guards precede inspection; the shared private fitter copies arrays, learns Ridge imputation/indicators/scaling only on training rows and freezes HGB's
 training-all-null columns to zero. Fresh sklearn estimators use one thread.
-Signed labels/predictions need only be finite (no floor, absolute value or log); nonnegative labels still reject negatives and predictions clip at zero.
+Signed labels/predictions need only be finite; nonnegative labels still reject negatives and predictions clip at zero.
 The new result is `regression_ridge_hgb_fit.v1` with recipe hash and detached
 forecasts. No I/O, cache, retries, source/fold/holdout admission or release occurs.
-Existing magnitude numerics remain unchanged; source closures require resealing.
-`regression_candidate.regression_candidate_recipe` accepts only ridge/alpha, hgb/max_leaf_nodes or elasticnet/alpha+l1_ratio and delegates explicit signed/nonnegative policy construction; it imports no training or source admission.
+Magnitude numerics are unchanged.
+`regression_candidate.regression_candidate_recipe` accepts only ridge/alpha, elasticnet/alpha+l1_ratio or hgb (leaf count alone, or with the three early-stopping axes plus optional loss/max_iter/quantile) and delegates policy construction; it imports no training or source admission.
 `training.regression_candidate.fit_regression_candidate` checks both no-fit guards before inspection, dispatches only matching regression schema/model pairs, then preserves the existing fitter result/validation/errors. Unsupported pairs refuse ValueError; no reads, selection, retries, writes or production caller.
-Experiment magnitude dispatch accepts additive v2 HGB and standalone MLP v1 schemas; its fit adapter delegates to `training.magnitude_candidate.fit_candidate`, refusing unsupported schemas (Ridge v1, HGB v1 and v2, ElasticNet v1, its spline v1 (`magnitude_elasticnet_spline_recipe.v1`) and standalone MLP v1 are accepted) before training imports via `magnitude_candidate.magnitude_candidate_family` metadata validation.
-`training.fit_routes.fit_execution` accepts only magnitude/magnitude_candidate/regression_candidate numeric routes, checks both guards first and original magnitude column order against its admitted recipe, and preserves delegated errors/results (original magnitude lists become predictions-only dictionaries). It grants no source/registration authority and has no production caller; legacy exception translation stays in experiment wrappers.
+Experiment magnitude dispatch accepts additive v2 HGB and standalone MLP v1 schemas; its fit adapter delegates to `training.magnitude_candidate.fit_candidate`, refusing unsupported schemas (it accepts Ridge v1, HGB v1/v2, ElasticNet v1 and its spline v1, MLP v1) before training imports via `magnitude_candidate.magnitude_candidate_family` metadata validation.
+`training.fit_routes.fit_execution` accepts only magnitude/magnitude_candidate/regression_candidate numeric routes, checks both guards first and original magnitude column order against its admitted recipe, and preserves delegated errors/results (original magnitude lists become predictions-only dictionaries). It grants no source/registration authority.
 
 | Ridge/HGB condition | Outcome |
 |---|---|
