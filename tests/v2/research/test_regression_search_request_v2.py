@@ -14,6 +14,7 @@ from engine.v2.ops.errors import OpsError
 from engine.v2.ops.native_registration import regression_request_version
 from engine.v2.research.magnitude_panel_qualified_table import recipe
 from experiments import iv_crush_run
+from experiments import iv_crush_search
 from experiments import magnitude_search_plan as plans
 from experiments import magnitude_search_request
 from experiments import magnitude_search_request_v3
@@ -410,6 +411,14 @@ def test_event_ids_file_semantics(tmp_path, content):
     assert refused.value.code == "INVALID_EXPERIMENT_SPEC"
     path.write_bytes(b"b\na\n")
     assert iv_crush_run._event_ids(path) == ["a", "b"]
+
+
+def test_library_prepare_validates_event_ids():
+    for value in ([], ["a", "a"], [" a"], [""], "ab"):
+        with pytest.raises(OpsError) as refused:
+            iv_crush_search.validate_event_ids(value)
+        assert refused.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert iv_crush_search.validate_event_ids(["b", "a"]) == ["b", "a"]
 
 
 def test_event_ids_rejected_outside_preflight_register_and_v1(tmp_path, capsys):

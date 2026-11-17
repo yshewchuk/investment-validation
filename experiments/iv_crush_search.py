@@ -11,11 +11,23 @@ from experiments.iv_crush_registration import validate_registration as validate_
 from experiments.native_registration import prepare_regression_registration
 
 
+def validate_event_ids(event_ids):
+    """One entry-path-independent check of an explicit IV event-id list."""
+    if (not isinstance(event_ids, (list, tuple)) or not event_ids
+            or any(not isinstance(item, str) or not item or item != item.strip() for item in event_ids)):
+        raise fail("INVALID_EXPERIMENT_SPEC", "IV event ids must be a nonempty list of unpadded strings")
+    if len(set(event_ids)) != len(event_ids):
+        raise fail("INVALID_EXPERIMENT_SPEC", "IV event ids must be unique")
+    return list(event_ids)
+
+
 def prepare(repository, spec, *, source, feature_snapshot, target_snapshot, scope, as_of_month,
             training_start, labels_before, event_ids=None):
     """Pin committed feature/target tables; later fold admission owns payload qualification."""
     if not isinstance(spec, ExperimentSpec):
         raise fail("INVALID_EXPERIMENT_SPEC", "regression registration requires an experiment specification")
+    if event_ids is not None:
+        event_ids = validate_event_ids(event_ids)
     resolve_experiment_plan(spec)
     if (spec.runner != "experiments/iv_crush_search.py" or spec.price_source != IV_CRUSH_TABLE_NAME
             or type(spec.seed) is not int or spec.seed != 0 or spec.economic_params):
