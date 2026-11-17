@@ -258,6 +258,17 @@ def _replay_failed(saved, store, started, key, outer_year, chosen, fold, plan, e
             _equal_completed_fit(saved("fit-completed" + slot), fit, legacy=False)
         if attempts == k + 1:
             _equal(saved("fit-started:" + str(expected[k]["horizon_sessions"])), expected[k])
+        for index, fit in enumerate(expected):
+            slot = ":" + str(fit["horizon_sessions"])
+            if index < k:
+                continue
+            if index == k and attempts == k + 1:
+                if saved("fit-completed" + slot) is not None:
+                    raise _conflict()
+                continue
+            if (saved("fit-started" + slot) is not None
+                    or saved("fit-completed" + slot) is not None):
+                raise _conflict()
         rebuilt = {"status": "failed", "fits": receipt["fits"], "fit_attempt_count": receipt["fit_attempt_count"],
                    "completed_fit_count": len(receipt["fits"]), "forecasts_id": None,
                    **diagnostic_evidence(worker, execution, plan["horizons"], inputs, fold)}

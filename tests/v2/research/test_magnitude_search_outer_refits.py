@@ -192,6 +192,22 @@ def test_replay_failed_rejects_a_missing_attempted_fit_start(monkeypatch):
     assert caught.value.problem.code == "EXPERIMENT_IDENTITY_CONFLICT"
 
 
+def test_replay_failed_rejects_a_truncated_attempt_count_against_the_durable_marker(monkeypatch):
+    records, key, started = _failed_journal()
+    records["execution"]["fit_attempt_count"] = 1
+    with pytest.raises(OpsError) as caught:
+        _replay_failed(records, key, started, monkeypatch)
+    assert caught.value.problem.code == "EXPERIMENT_IDENTITY_CONFLICT"
+
+
+def test_replay_failed_rejects_fits_truncated_against_the_completed_marker(monkeypatch):
+    records, key, started = _failed_journal(fits=[], attempt_count=0)
+    records["fit-completed:5"] = {**EXPECTED[0], "fit_seconds": 1.0}
+    with pytest.raises(OpsError) as caught:
+        _replay_failed(records, key, started, monkeypatch)
+    assert caught.value.problem.code == "EXPERIMENT_IDENTITY_CONFLICT"
+
+
 def test_replay_failed_rejects_an_attempt_count_beyond_the_attempted_fit(monkeypatch):
     records, key, started = _failed_journal(attempt_count=3)
     with pytest.raises(OpsError) as caught:
