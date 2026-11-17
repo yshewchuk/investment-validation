@@ -1,0 +1,106 @@
+id: EXP-188
+title: "SIZE decision-level P&L re-score: do median-type forecasts suit short vol and mean-type forecasts suit long vol?"
+hypothesis: "H1 (short vol): for each matched pair, d = P&L(median-type) - P&L(mean-type) > 0 on the seven put-side short-vol structures. H2 (long vol, rule R_L): d < 0 on the straddle. H3 (secondary interaction): d_short - d_long > 0 in return per candidate event. Reads stored SIZE predictions, scores the trading decisions they produce, selects nothing for SIZE, feeds nothing back."
+type: decision_rescore
+strategy: "*"
+price_source: "ORATS chains (bid/ask) on the SIZE panel's pinned v2 snapshot; marks only from engine.fills FillModel alpha ladder"
+design: guides/size_decision_pnl_design.md
+data_snapshot: "size_panel_pinned_v2_snapshot (resolved and bound by S2a)"
+preregistered_at: "2026-11-17T20:40:34+00:00"
+constraints:
+  - "no edit to any SIZE search module or any file in source_closure(root, [experiments/size_panel.py]); no new module imported by that closure"
+  - "nothing enters STRUCTURES, the registry or the board"
+  - "no call-side short leg anywhere, baselines included"
+  - "holdouts never read: admission through the shared population admission and outcome-isolation checks first, member and conflicting-sibling events dropped before any quote or label read"
+  - "every non-recorded run uses --no-ledger"
+  - "one heavy job at a time, never beside the v14 run"
+inputs:
+  size_run: "sealed SIZE v14 run (guides/size_search_v14_design.md)"
+  production: "size_v1_4 walk-forward tier-4 pred_abs_move"
+  lead: 1
+  crush_forecast: "production tier-4 pred_iv_crush_30, held fixed for every model"
+  labels: "abs_move, crush_pct_iv30, read by admitted event keys only"
+  pair_2025_forecasts: "v14 pre-registered selection.extra_refits (v14 S2b, PR #2565); a pair member missing from the sealed plan makes its pair not_testable; this experiment never refits"
+roster:
+  - {id: M0, model: "production size_v1_4", type: "reference"}
+  - {id: M1, model: "v14 overall winner (blend score)", type: "reference"}
+  - {id: M2, model: "v14 RMSE winner", type: "mean-type"}
+  - {id: M3, model: "v14 MAE winner", type: "median-type"}
+  - {id: M4, model: "blend size_b1_v1", type: "mixed"}
+  - {id: M5, model: "blend size_b2_v1", type: "mixed"}
+  - {id: H-sq, model: "HGB HMOSXLP lr 0.03 l2 10 max_iter 3000 leaves 15 min_samples_leaf 300 squared_error", type: "mean-type"}
+  - {id: H-abs, model: "HGB HMOSXLP lr 0.03 l2 10 max_iter 3000 leaves 15 min_samples_leaf 300 absolute_error", type: "median-type"}
+  - {id: E-raw, model: "spline ElasticNet HMOSXLP alpha 0.03 l1_ratio 0.75 knots 6 raw target", type: "mean-type"}
+  - {id: E-log, model: "spline ElasticNet HMOSXLP alpha 0.03 l1_ratio 0.75 knots 6 log1p target", type: "median-type, if log residuals are symmetric"}
+  - {id: N-raw, model: "MLP chrono15_relu64x32_l2_1 HMOSXLP raw target", type: "mean-type"}
+  - {id: N-log, model: "MLP chrono15_relu64x32_l2_1 HMOSXLP log1p target", type: "median-type, if log residuals are symmetric"}
+pairs:
+  - {id: H, mean_type: H-sq, median_type: H-abs}
+  - {id: E, mean_type: E-raw, median_type: E-log}
+  - {id: N, mean_type: N-raw, median_type: N-log}
+primary_contrasts: "the three matched pairs"
+secondary_contrasts: "M2 vs M3, and the M0/M1/M4/M5 rows; unadjusted for multiplicity; never re-select anything"
+primary_spec:
+  stage_order: [inner, outer]
+  inner_years: [2023, 2024]
+  outer_year: 2025
+  alpha: 0.5
+  alpha_grid_reported: [0.0, 0.25, 0.5, 0.75, 1.0]
+  metric: "flat-dollar P&L per candidate event in the paired population E (non-trades count 0), whole lots by CAPITAL_PER_TRADE"
+  seed_key: "event_id, identical for every model and structure"
+  draws: 4000
+pool:
+  primary: "common support: every model, production included, uses only events dated 2023-01-01 or later"
+  sensitivity: "production with its native full-history pool, labelled"
+  causality: "data dates only, never computed_at; pool rows are events strictly before the event date whose labels had printed; cutoff window [month_start - 6 months, month_start); 2025 decisions frozen per month before that month's labels are read"
+  decision_4: "design default: common 2023+ support is primary"
+short_vol:
+  structures: [TWIN-P, TWIN-P5, CND-PS, BFLY-P, BFLY-P5, RAMP7, CTR5]
+  arms:
+    as_is: "registered divisors and bounds, as the board does"
+    retuned:
+      c_grid: [0.75, 0.9, 1.0, 1.1, 1.25, 1.5]
+      breadth: "ONE multiplier c per model, pooled over the seven structures (decision 5), chosen on 2023/2024 by summed flat-dollar P&L through the full entry rule with the cutoff recomputed per c, ties to c nearest 1, frozen in the tuning receipt and applied unchanged to 2025; a model with fewer than 300 selected inner trades pooled over the seven structures skips tuning (c = 1), labelled"
+      rationale: "live DYN-SV uses one fixed width per structure (forecast divided by a divisor, engine/forecast_sizing.py); EXP-133's per-event width search was falsified (overfit, widened the universe about 2.6x and did worse); EXP-137's chosen widths clustered at 1.3-1.7x forecast and the live divisors are the conservative end, so the re-tune only asks where in that band each model's forecast should sit"
+long_vol:
+  structure: "straddle_through (STR-THRU factory, called only; not registered)"
+  R_L: "primary: buy when edge = pred_abs_move_m - implied_move is at or above the top-20% trailing cutoff of the model's own edge over the prior six months (at least 100 scores, strictly before the month), within the short-vol universe filters"
+  R_L2: "secondary: fixed edge >= 0, no cutoff"
+  undetermined: "missing implied move or legs, or a crossed, locked or zero-bid entry quote, is undetermined, not no"
+marks:
+  - "1 valid non-wide non-zero-bid quote: alpha mark"
+  - "2 zero-bid or wide: alpha 0 for that leg"
+  - "3 no usable exit quote incl. crossed: structure marked at worst-case payoff, labelled exit_unquoted_worst_case; a locked quote is valid"
+rung3_sensitivity: "a sensitivity row drops rung 3"
+hypotheses:
+  H1: "H1 (short vol): for each matched pair, d = P&L(median-type) - P&L(mean-type) > 0 on the seven put-side short-vol structures."
+  H2: "H2 (long vol, under R_L): d < 0 on the straddle."
+  H3: "H3 (secondary interaction, in return per candidate event): d_short - d_long > 0."
+judgement:
+  units: "calendar quarters 2023Q3 to 2025Q4, and years"
+  bootstrap:
+    quarter: "paired bootstrap resampling quarters"
+    ticker: "paired bootstrap resampling tickers, events kept together"
+    resamples: 10000
+    interval: 0.90
+    seed: 188
+  clear: "predicted sign in at least 2 of 3 pairs, none clearly opposite; in each used pair predicted sign in at least 75% of quarters and every full year (2024, 2025); both intervals exclude 0; sign holds in both geometry arms (short vol) or both R_L and R_L2 (long vol)"
+  directional: "same pair and year signs, quarter share at least 60%, but an interval includes 0 or the sign fails in one arm"
+  no_difference: "neither, and not reversed"
+  reversed: "Clear in the opposite direction"
+  not_testable: "a pair with an excluded model"
+  thresholds_decision: "decision 2: the design defaults (75% / 60% quarter shares, 90% intervals); the shares are the author's judgement calls, not derived; the report shows raw counts"
+  no_magnitude_cutoff: true
+  winners_unchanged: "results do not alter any SIZE winner"
+conditional_followup:
+  trigger: "H1 or H2 judged Clear or Directional"
+  required_before_board_change: "a per-model chooser retrain (DYN-SV) and, for long vol, a STR-THRU gate refit, run BEFORE any board change"
+  rule: "no forecast swap reaches the board on per-structure evidence alone"
+  in_scope_here: false
+decisions:
+  d1: "(a) 2025 forecasts for the six matched-pair members come from v14 selection.extra_refits (v14 S2b, PR #2565)"
+  d2: "consistency thresholds = the design defaults"
+  d3: "DYN-SV chooser and STR-THRU gate are out of scope; conditional follow-up pre-registered (conditional_followup)"
+  d4: "pool length = the design default, common 2023+ support primary"
+  d5: "re-tune breadth = one scale factor per model pooled over the seven structures"
+grid: {}

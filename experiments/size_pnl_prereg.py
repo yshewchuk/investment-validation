@@ -1,0 +1,175 @@
+#!/usr/bin/env python3
+"""Pre-registration guard for EXP-188 (SIZE decision-level P&L re-score).
+
+``engine.evaluate`` sets ``spec_hash_checked=False`` and does not fail when no
+PLANNED row exists, so a plain run would silently skip the registration check.
+This guard fails closed instead: every path either returns a receipt whose
+``spec_hash_checked`` is True, or raises an ``OpsError``. It never returns a
+receipt that says the check was skipped.
+
+    python3 -m experiments.size_pnl_prereg --check      # verify, print receipt
+    python3 -m experiments.size_pnl_prereg --register   # append PLANNED row once
+"""
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+import pandas as pd
+import yaml
+
+from engine.v2.ops.errors import OpsError, fail
+from experiments import lib
+
+EXPERIMENT_ID = "EXP-188"
+SPEC_PATH = Path(__file__).resolve().parent / "EXP-188_size_decision_pnl_rescore" / "spec.yaml"
+
+
+def _refuse(reason, message):
+    return fail("EXPERIMENT_IDENTITY_CONFLICT", f"{reason}: {message}",
+                details={"reason": reason})
+
+
+def _load(spec_path):
+    """Return ``(spec, hash)`` for a readable EXP-188 spec mapping, else refuse."""
+    try:
+        spec = lib.load_spec(spec_path)
+    except (OSError, ValueError, yaml.YAMLError):
+        raise _refuse("spec_unreadable", "spec is missing, unparseable or not a mapping") from None
+    if spec.get("id") != EXPERIMENT_ID:
+        raise _refuse("spec_id_mismatch", f"spec id is not {EXPERIMENT_ID}")
+    return spec, lib.spec_hash(spec)
+
+
+def _planned_hashes(ledger_path):
+    """Spec hashes of every PLANNED row for EXP-188, in file order."""
+    path = Path(ledger_path)
+    if not path.exists():
+        return []
+    with path.open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        header = reader.fieldnames or []
+        if any(column not in header for column in lib.LEDGER_COLUMNS):
+            raise _refuse("ledger_malformed", "ledger header lacks a required column")
+        return [row.get("spec_hash") for row in reader
+                if row.get("id") == EXPERIMENT_ID and row.get("stage") == "planned"]
+
+
+def _parse_ts(value):
+    """A timezone-aware pandas Timestamp (naive means UTC), or None if unparseable."""
+    if not isinstance(value, (str, datetime)):
+        return None
+    try:
+        stamp = pd.Timestamp(value)
+    except (ValueError, TypeError):
+        return None
+    if pd.isna(stamp):
+        return None
+    if stamp.tzinfo is None:
+        stamp = stamp.tz_localize("UTC")
+    return stamp
+
+
+def _first_run_ts(run_log_path):
+    """The ``ts`` of the first non-blank run-log line, or None if the log is empty."""
+    try:
+        lines = [line for line in
+                 Path(run_log_path).read_text(encoding="utf-8").splitlines() if line.strip()]
+    except (OSError, ValueError):
+        raise _refuse("run_log_malformed", "run log is unreadable") from None
+    if not lines:
+        return None
+    try:
+        record = json.loads(lines[0])
+    except ValueError:
+        record = None
+    stamp = _parse_ts(record.get("ts")) if isinstance(record, dict) else None
+    if stamp is None:
+        raise _refuse("run_log_malformed", "first run-log line carries no parseable ts")
+    return stamp
+
+
+def require_preregistration(spec_path=SPEC_PATH, ledger_path=None, run_log_path=None) -> dict:
+    """Verify the spec is registered before any run; return a receipt or raise.
+
+    ``lib.LEDGER_PATH`` is read at call time, so tests can monkeypatch it.
+    """
+    spec_path = Path(spec_path)
+    ledger = lib.LEDGER_PATH if ledger_path is None else ledger_path
+    run_log = (spec_path.parent / "results" / "run_log.jsonl" if run_log_path is None
+               else Path(run_log_path))
+
+    spec, digest = _load(spec_path)
+    planned = _planned_hashes(ledger)
+    if not planned:
+        raise _refuse("planned_row_missing", f"no PLANNED row for {EXPERIMENT_ID} in the ledger")
+    if len(planned) > 1:
+        raise _refuse("planned_row_ambiguous", f"{len(planned)} PLANNED rows for {EXPERIMENT_ID}")
+    if planned[0] != digest:
+        raise _refuse("spec_hash_mismatch", "spec differs from its PLANNED row")
+
+    prereg = _parse_ts(spec.get("preregistered_at"))
+    if prereg is None:
+        raise _refuse("preregistered_at_missing", "spec has no parseable preregistered_at")
+
+    first_ts = None
+    if run_log.exists():
+        first_ts = _first_run_ts(run_log)
+        if first_ts is not None and prereg > first_ts:
+            raise _refuse("preregistered_after_run", "preregistered_at is after the first run")
+
+    return {
+        "spec_hash": digest,
+        "spec_hash_checked": True,
+        "preregistered_at": str(prereg),
+        "first_run_ts": None if first_ts is None else str(first_ts),
+    }
+
+
+def register_planned(spec_path=SPEC_PATH, ledger_path=None, today=None) -> bool:
+    """Append the PLANNED row once. True if appended, False if already registered."""
+    ledger = lib.LEDGER_PATH if ledger_path is None else ledger_path
+    _, digest = _load(spec_path)
+    planned = _planned_hashes(ledger)
+    if planned == [digest]:
+        return False
+    if planned:
+        raise _refuse("planned_row_conflict", f"ledger holds a different PLANNED hash for "
+                      f"{EXPERIMENT_ID}")
+    lib.ledger_append([{
+        "id": EXPERIMENT_ID,
+        "spec_hash": digest,
+        "date": today or datetime.now(tz=timezone.utc).strftime("%Y-%m-%d"),
+        "stage": "planned",
+        "oos_mean_mid": "",
+        "sharpe_trade": "",
+        "promoted": "False",
+    }], path=ledger)
+    return True
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--check", action="store_true",
+                      help="verify registration and print the receipt as JSON")
+    mode.add_argument("--register", action="store_true",
+                      help="append the PLANNED row if it is not already present")
+    args = parser.parse_args(argv)
+    try:
+        if args.check:
+            print(json.dumps(require_preregistration()))
+        else:
+            print("registered" if register_planned() else "already registered")
+    except OpsError as exc:
+        print(f"refused: {exc.code} {exc.problem.message}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
