@@ -23,6 +23,7 @@ from experiments.magnitude_search_request_versions import compile_request
 from experiments.magnitude_search_selection import CURRENT_TIE_RULE
 from experiments.regression_search_binding import panel_coverage, stored_columns
 from tests.v2.research.magnitude_trial_support import catalog_rows
+from tests.v2.research.test_iv_crush_cli import request as v1_cli_request
 from tests.v2.research.test_iv_crush_registration import prepared  # noqa: F401
 from tests.v2.research.test_iv_crush_search_plan import _preview_request, request as v1_request
 from tests.v2.research.test_magnitude_panel_qualified import panel_data  # noqa: F401
@@ -336,9 +337,7 @@ def test_binding_on_real_plan_path(prepared, capsys):  # noqa: F811
     plan = sealed["plan"]
     ref = from_document(ArtifactRef, sealed["plan_ref"])
     with no_fit_guard(), legacy_no_fit():
-        with pytest.raises(OpsError) as refused:
-            plans.read_search_plan(data.conn, data.store, registered, document, ref)
-    assert refused.value.code == "INVALID_EXPERIMENT_SPEC"
+        assert plans.read_search_plan(data.conn, data.store, registered, document, ref) == plan
     assert _seal(data, registered, document) == sealed
     assert v1_plan["selection"]["metric"] == "inner_pooled_rmse"
     assert plan["selection"]["metric"] == "blend_rmse_mae"
@@ -360,13 +359,6 @@ def test_binding_on_real_plan_path(prepared, capsys):  # noqa: F811
     assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
     assert len(set(ids)) > 0 and f"outside={len(set(ids))}" in capsys.readouterr().err
     assert catalog_rows(data.conn) == before and artifact_object_bytes(data.store) == objects
-
-
-def test_read_search_plan_refuses_v2_before_any_read():
-    with pytest.raises(OpsError) as refused:
-        plans.read_search_plan(None, None, None, v2_request(), None)
-    assert refused.value.code == "INVALID_EXPERIMENT_SPEC"
-    assert "awaits its signed selection scorer" in refused.value.problem.message
 
 
 def test_v2_requests_refused_by_size_cli_and_v2_run_cli(tmp_path, capsys):
@@ -403,10 +395,58 @@ def test_iv_cli_refuses_v2_seal_and_run_before_any_fit(tmp_path, capsys, action)
         "--request", str(tmp_path / "request.json"), "--catalog", str(tmp_path / "catalog.sqlite"),
         "--store-root", str(tmp_path / "store"), "--plan-ref", str(tmp_path / "ref.json"),
         "--no-ledger"]) == 2
-    refusal = json.loads(capsys.readouterr().out)
-    assert refusal["refused"] == "INVALID_EXPERIMENT_SPEC"
-    assert refusal["message"] == "INVALID_EXPERIMENT_SPEC: regression v2 execution awaits its signed selection scorer"
+    assert "awaits its signed selection scorer" not in capsys.readouterr().out
     assert not (tmp_path / "catalog.sqlite").exists()
+
+
+@pytest.mark.parametrize("content", [b"", b"a\n\nb\n", b"a\na\n", b" a\n", b"\xff", None])
+def test_event_ids_file_semantics(tmp_path, content):
+    path = tmp_path / "event-ids.txt"
+    if content is not None:
+        path.write_bytes(content)
+    with pytest.raises(OpsError) as refused:
+        iv_crush_run._event_ids(path)
+    assert refused.value.code == "INVALID_EXPERIMENT_SPEC"
+    path.write_bytes(b"b\na\n")
+    assert iv_crush_run._event_ids(path) == ["a", "b"]
+
+
+def test_event_ids_rejected_outside_preflight_register_and_v1(tmp_path, capsys):
+    event_ids = tmp_path / "event-ids.txt"
+    event_ids.write_text("a\n")
+    common = ["--spec", str(tmp_path / "spec.json"), "--request", str(tmp_path / "request.json"),
+              "--catalog", str(tmp_path / "catalog.sqlite"), "--store-root", str(tmp_path / "store"),
+              "--plan-ref", str(tmp_path / "ref.json"), "--no-ledger"]
+    with pytest.raises(SystemExit):
+        iv_crush_run.main(["seal", *common, "--event-ids", str(event_ids)])
+    (tmp_path / "request.json").write_text(json.dumps(v1_cli_request()))
+    assert iv_crush_run.main(["preflight", "--spec", str(tmp_path / "spec.json"),
+        "--request", str(tmp_path / "request.json"), "--catalog", str(tmp_path / "catalog.sqlite"),
+        "--store-root", str(tmp_path / "store"), "--scope", "s", "--target-snapshot-id", "t",
+        "--training-start", "2010-01-01", "--labels-before", "2026-01-15",
+        "--event-ids", str(event_ids), "--no-ledger"]) == 2
+    assert "--event-ids requires a regression v2 request" in capsys.readouterr().out
+
+
+def test_prepare_passes_event_ids_for_v2_only(monkeypatch):
+    document = v2_request()
+    captured = {}
+
+    def prepare(repository, spec, **kwargs):
+        captured.update(kwargs)
+        return (SimpleNamespace(document={"regression_plan": {
+            "evaluation_years": document["outer_years"]}}), "spec")
+
+    monkeypatch.setattr(iv_crush_run, "prepare", prepare)
+    monkeypatch.setattr(iv_crush_run, "_nested", lambda *args, **kwargs: None)
+    repository = SimpleNamespace(resolve=lambda value: value, resolve_pinned=lambda value: value)
+    args = SimpleNamespace(scope="s", target_snapshot_id="t", training_start="2010-01-01",
+                           labels_before="2026-01-15")
+    iv_crush_run._prepare(repository, None, document, args, event_ids=["a"])
+    assert captured["event_ids"] == ["a"]
+    captured.clear()
+    iv_crush_run._prepare(repository, None, document, args)
+    assert captured["event_ids"] is None
 
 
 def test_panel_coverage_helper_is_v2_only():
