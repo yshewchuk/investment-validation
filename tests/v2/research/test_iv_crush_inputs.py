@@ -397,6 +397,63 @@ def test_label_error_returns_no_partial_result_after_an_earlier_valid_read(tmp_p
         assert len([q for name, q in repository.scans if name == TABLE]) == 2
 
 
+def test_skipped_target_scan_reports_reason_while_load_refuses(tmp_path):
+    skipped_event, clean_event = history_event("2024-05-06"), history_event("2024-03-05")
+    row = target(skipped_event, skipped=True, skip_reason="gap_exceeds_limit",
+                 crush_pct_iv30=None, available_as_of_date=None)
+    with committed(tmp_path, [skipped_event, clean_event], [row, target(clean_event)]) as (_, repository, snapshot):
+        before = len(repository.scans)
+        result = reader.skipped_iv_crush_targets(repository, snapshot, as_of_month=MONTH,
+            event_ids=[clean_event["event_id"], skipped_event["event_id"]])
+        queries = [query for name, query in repository.scans[before:] if name == TABLE]
+        assert queries and all("crush_pct_iv30" not in query.columns for query in queries)
+        assert result == {skipped_event["event_id"]: "gap_exceeds_limit"}
+        with pytest.raises(DataError) as caught:
+            load(repository, snapshot)
+        exact_problem(caught, "EXPERIMENT_VARIANT_FAILED", "IV-crush label identity or availability is invalid")
+
+
+def test_skipped_target_scan_shares_explicit_population_admission(tmp_path):
+    event = history_event("2024-05-06")
+    valid = event["event_id"]
+    with committed(tmp_path, [event], [target(event)]) as (_, repository, snapshot):
+        for event_ids in ([valid, None], {valid: 1}):
+            actions = (
+                lambda: load(repository, snapshot, event_ids=event_ids),
+                lambda: reader.skipped_iv_crush_targets(repository, snapshot, as_of_month=MONTH,
+                                                        event_ids=event_ids))
+            for action in actions:
+                with pytest.raises(DataError) as caught:
+                    action()
+                exact_problem(caught, "HOLDOUT_ACCESS_DENIED", "explicit valid holdout context is required")
+
+
+@pytest.mark.parametrize("canonical,stored", [("AMC", "BMO"), ("BMO", "AMC")])
+def test_skipped_target_scan_refuses_identity_mismatch(tmp_path, canonical, stored):
+    event = history_event("2024-05-06", session=canonical)
+    row = target(event, skipped=True, skip_reason="gap_exceeds_limit",
+                 crush_pct_iv30=None, available_as_of_date=None, session=stored)
+    with committed(tmp_path, [event], [row]) as (_, repository, snapshot):
+        with pytest.raises(DataError) as caught:
+            reader.skipped_iv_crush_targets(repository, snapshot, as_of_month=MONTH,
+                event_ids=[event["event_id"]])
+        exact_problem(caught, "EXPERIMENT_VARIANT_FAILED", "IV-crush label identity or availability is invalid")
+
+
+@pytest.mark.parametrize("changes", [
+    {"skipped": True, "skip_reason": None},
+    {"skipped": False, "skip_reason": "gap_exceeds_limit"},
+])
+def test_skipped_target_scan_refuses_inconsistent_skip_evidence(tmp_path, changes):
+    event = history_event("2024-05-06")
+    row = target(event, **changes)
+    with committed(tmp_path, [event], [row]) as (_, repository, snapshot):
+        with pytest.raises(DataError) as caught:
+            reader.skipped_iv_crush_targets(repository, snapshot, as_of_month=MONTH,
+                event_ids=[event["event_id"]])
+        exact_problem(caught, "EXPERIMENT_VARIANT_FAILED", "IV-crush label identity or availability is invalid")
+
+
 def test_last_day_clock_strictness_and_native_refusal_propagation(tmp_path, monkeypatch):
     event = history_event("2024-06-28")
     with committed(tmp_path, [event], [target(event)]) as (_, repository, snapshot):

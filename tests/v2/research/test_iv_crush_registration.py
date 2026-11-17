@@ -47,13 +47,14 @@ def prepared(panel_data, monkeypatch):  # noqa: F811 - imported pytest fixture
         contract.table_name: contract}, scope="iv-target", receipt_id="iv-target", attempt_id="iv-target",
         partition_logical_hashes={contract.table_name: hashes}, store=store)
     poison_outcomes(monkeypatch, repository, data.panel_source, (), all_outcomes=True)
-    poison(monkeypatch, repository, targets)
     spec = native_spec(experiment_id="iv-native", runner="experiments/iv_crush_search.py",
                        seed=0, economic_params={}, price_source="iv_crush_targets")
     options = dict(source=data.panel_source, feature_snapshot=features, target_snapshot=targets,
         scope="panel-source", as_of_month=data.panel_request["as_of_month"], training_start="2022-06-01",
         labels_before="2025-01-01")
-    registration, spec = iv_crush_search.prepare(repository, spec, **options)
+    with monkeypatch.context() as scoped:
+        poison(scoped, repository, targets)
+        registration, spec = iv_crush_search.prepare(repository, spec, **options)
     return SimpleNamespace(**vars(data), store=store, features=features, targets=targets,
                            spec=spec, registration=registration, options=options)
 

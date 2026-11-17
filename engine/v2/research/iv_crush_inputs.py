@@ -11,9 +11,10 @@ from engine.v2.foundation.experiment_holdouts import calendar_date
 from engine.v2.research import event_history, experiment_population, progress
 
 MAX_TARGET_OBJECT_BYTES = 1 << 20
+SKIP_COLUMNS = ("ticker", "event_date", "session", "skipped", "skip_reason")
 
 
-def _candidates(repository, snapshot, as_of_month, purpose, event_ids, cutoff=None):
+def _candidates(repository, snapshot, as_of_month, purpose, event_ids, cutoff=None, columns=None):
     """Complete population and singleton-object admission precedes any target read."""
     progress.decision("IV population", "selection=" + ("bulk" if event_ids is None else "explicit"))
     try:
@@ -36,7 +37,7 @@ def _candidates(repository, snapshot, as_of_month, purpose, event_ids, cutoff=No
     if contract != IV_CRUSH_CONTRACT:
         raise errors.fail("CONTRACT_MISMATCH", "IV-crush labels require the exact native contract")
     plans = event_history.plan_event_targets(repository, snapshot, rows, contract,
-                               columns=tuple(column.name for column in contract.columns))
+                               columns=columns or tuple(column.name for column in contract.columns))
     if any(record.object_ref.byte_size > MAX_TARGET_OBJECT_BYTES for _, _, record in plans):
         raise errors.fail("RESULT_LIMIT_EXCEEDED", "IV-crush target object exceeds the 1 MiB byte bound")
     progress.decision("IV targets", f"planned={len(plans)}; max_batch_rows={plans[0][1].max_batch_rows}; "
@@ -68,6 +69,36 @@ def preflight_iv_crush_targets(repository, snapshot, *, as_of_month, event_ids):
         **_identity(rows, snapshot, "selection"), "event_ids": rows.event_id.tolist(),
         "planned_inputs": [_object_input(event, record) for event, _, record in plans]}
     return {**identity, "preflight_id": content_hash(identity)}
+
+
+def skipped_iv_crush_targets(repository, snapshot, *, as_of_month, event_ids):
+    """Report events whose single identity-checked target row is skipped; only identity and skip columns are projected, never the numeric label."""
+    with progress.stage("IV target skip scan", report_refusals=True):
+        _, plans, _ = _candidates(repository, snapshot, as_of_month, "selection", event_ids,
+                                  columns=SKIP_COLUMNS)
+        reported = {}
+        reporter = progress.Progress("IV skip scan", len(plans))
+        for event, request, _ in plans:
+            decoded = [row for batch in repository.scan(request, table_name=IV_CRUSH_TABLE_NAME,
+                                                        max_object_bytes=MAX_TARGET_OBJECT_BYTES)
+                       for row in batch.to_pylist()]
+            if (len(decoded) != 1
+                    or decoded[0].get("event_date") != event.event_date.date().isoformat()
+                    or decoded[0].get("ticker") != event.ticker
+                    or decoded[0].get("session") != event.session):
+                raise errors.fail("EXPERIMENT_VARIANT_FAILED", "IV-crush label identity or availability is invalid")
+            row = decoded[0]
+            skipped = row.get("skipped")
+            if skipped is True:
+                reason = row.get("skip_reason")
+                if not isinstance(reason, str) or not reason:
+                    raise errors.fail("EXPERIMENT_VARIANT_FAILED", "IV-crush label identity or availability is invalid")
+                reported[event.event_id] = reason
+            elif skipped is not False or row.get("skip_reason") is not None:
+                raise errors.fail("EXPERIMENT_VARIANT_FAILED", "IV-crush label identity or availability is invalid")
+            reporter.tick()
+        progress.decision("IV skip scan", f"skipped={len(reported)}")
+    return reported
 
 
 def _label_before(rows, event, cutoff):

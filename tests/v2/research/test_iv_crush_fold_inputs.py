@@ -81,6 +81,21 @@ def test_real_fold_roundtrip_and_target_projection(fold_case, monkeypatch):
     assert all(set(row) == {"event_id", "context_id", "horizon_sessions", "n_prior"} for row in projected["features"])
 
 
+def test_target_label_refusal_precedes_stored_panel_read(fold_case, monkeypatch):
+    data = fold_case
+    from engine.v2.research import iv_crush_inputs
+    from experiments import regression_search_binding
+    refusal = fail("EXPERIMENT_VARIANT_FAILED", "IV-crush label identity or availability is invalid")
+    def refused(*args, **kwargs):
+        raise refusal
+    monkeypatch.setattr(iv_crush_inputs, "load_iv_crush_targets", refused)
+    monkeypatch.setattr(regression_search_binding, "read_stored_panel",
+                        lambda *args, **kwargs: pytest.fail("stored panel read preceded the label refusal"))
+    with pytest.raises(OpsError) as caught:
+        admit(data)
+    assert caught.value is refusal
+
+
 @pytest.mark.parametrize("fold_case", ["outer"], indirect=True)
 def test_normalized_outer_fold_reads_only_its_earlier_training(fold_case):
     data = fold_case
@@ -95,7 +110,8 @@ def test_normalized_outer_fold_reads_only_its_earlier_training(fold_case):
 def test_changed_fold_or_binding_refuses_before_training(fold_case, monkeypatch, change):
     data = fold_case
     from engine.v2.research import iv_crush_inputs
-    monkeypatch.setattr(iv_crush_inputs, "load_iv_crush_targets", lambda *a, **k: pytest.fail("training opened"))
+    if change != "policy":
+        monkeypatch.setattr(iv_crush_inputs, "load_iv_crush_targets", lambda *a, **k: pytest.fail("training opened"))
     if change == "fold":
         data.fold = {**data.fold, "training_labels_before": "2024-01-01"}
     else:

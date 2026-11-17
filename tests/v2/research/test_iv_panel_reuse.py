@@ -54,13 +54,10 @@ def test_inner_and_outer_reuse_panel_but_read_each_training_cohort(fold_case, mo
 
 
 @pytest.mark.parametrize("drift", ["feature", "policy"])
-def test_warm_iv_binding_drift_refuses_before_training(fold_case, monkeypatch, drift):  # noqa: F811
-    from engine.v2.research import iv_crush_inputs
+def test_warm_iv_binding_drift_refuses_after_label_admission(fold_case, monkeypatch, drift):  # noqa: F811
     data = fold_case
     calls = counted_panel(monkeypatch)
     admit(data)
-    monkeypatch.setattr(iv_crush_inputs, "load_iv_crush_targets",
-                        lambda *a, **k: pytest.fail("changed binding opened training"))
     binding = deepcopy(data.registration.document)
     if drift == "feature":
         binding["feature_snapshot"] = {"snapshot_id": "changed"}

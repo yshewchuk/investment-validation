@@ -18,13 +18,18 @@ from experiments import iv_crush_search
 from experiments import magnitude_search_plan as plans
 from experiments import magnitude_search_request
 from experiments import magnitude_search_request_v3
+from experiments import regression_search_binding
 from experiments.magnitude_search_request import validate_workers
 from experiments import native_registration as native
 from experiments import size_search
 from experiments import v2_magnitude_search_run
 from experiments.magnitude_search_request_versions import compile_request
 from experiments.magnitude_search_selection import CURRENT_TIE_RULE
-from experiments.regression_search_binding import panel_coverage, stored_columns
+from experiments.regression_search_binding import (
+    _apply_label_exclusions,
+    panel_coverage,
+    stored_columns,
+)
 from tests.v2.research.magnitude_trial_support import catalog_rows
 from tests.v2.research.test_iv_crush_cli import request as v1_cli_request
 from tests.v2.research.test_iv_crush_registration import prepared  # noqa: F401
@@ -329,6 +334,33 @@ def test_stored_columns_by_version():
     assert panel_coverage([], []) == {"iv_events": 0, "in_size_panel": 0, "outside": 0}
 
 
+def test_apply_label_exclusions_removes_training_and_evaluation_events():
+    folds = [{"outer": {"year": 2024, "training_candidate_event_ids": ["a", "b"],
+                        "evaluation_event_ids": ["c", "d"]},
+              "inner": [{"year": 2023, "training_candidate_event_ids": ["a", "b"],
+                         "evaluation_event_ids": ["c", "d"]}]}]
+    excluded = {"b": "gap_exceeds_limit", "c": "skipped"}
+    entries = [{"event_id": "b", "reasons": ["gap_exceeds_limit"]},
+               {"event_id": "c", "reasons": ["skipped"]}]
+    assert _apply_label_exclusions(folds, excluded) == [
+        {"outer": {**folds[0]["outer"], "training_candidate_event_ids": ["a"],
+                   "evaluation_event_ids": ["d"], "label_exclusions": entries},
+         "inner": [{**folds[0]["inner"][0], "training_candidate_event_ids": ["a"],
+                    "evaluation_event_ids": ["d"], "label_exclusions": entries}]}]
+    assert folds[0]["outer"]["training_candidate_event_ids"] == ["a", "b"]
+    assert _apply_label_exclusions(folds, {}) == folds
+
+
+@pytest.mark.parametrize("excluded", [{"b": "skipped"}, {"a": "skipped"}])
+def test_apply_label_exclusions_refuses_fold_with_no_events_left(excluded):
+    folds = [{"outer": {"training_candidate_event_ids": ["a"], "evaluation_event_ids": ["b"]},
+              "inner": []}]
+    with pytest.raises(OpsError) as caught:
+        _apply_label_exclusions(folds, excluded)
+    assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert caught.value.problem.message == "regression fold has no events left after IV label exclusions"
+
+
 def _v2_plan_request(data):
     document = v1_request(data)
     document.update(schema_version="regression_search_request.v2",
@@ -379,6 +411,52 @@ def test_binding_on_real_plan_path(prepared, capsys):  # noqa: F811
     assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
     assert len(set(ids)) > 0 and f"outside={len(set(ids))}" in capsys.readouterr().err
     assert catalog_rows(data.conn) == before and artifact_object_bytes(data.store) == objects
+
+
+def test_plan_seals_skipped_target_exclusions(prepared, monkeypatch):  # noqa: F811
+    data = prepared
+    registered = native.reserve_native_registration(data.conn, data.store, data.registration, data.spec)
+    document = _v2_plan_request(data)
+    regression_search_binding._SKIP_SCANS.clear()
+    plan = _seal(data, registered, document)["plan"]
+    assert "label_exclusions" not in plan
+    outer = plan["folds"][0]["outer"]
+    inner = plan["folds"][0]["inner"][0]
+    assert len(outer["training_candidate_event_ids"]) > 1
+    assert len(inner["evaluation_event_ids"]) > 1
+    victim = inner["evaluation_event_ids"][0]
+    assert victim in outer["training_candidate_event_ids"]
+    calls = []
+
+    def scan(*args, **kwargs):
+        calls.append((args, kwargs))
+        return {victim: "gap_exceeds_limit"}
+
+    monkeypatch.setattr(regression_search_binding, "skipped_iv_crush_targets", scan)
+    regression_search_binding._SKIP_SCANS.clear()
+    sealed = _seal(data, registered, document)["plan"]
+    assert all(victim not in fold[key] for group in sealed["folds"]
+               for fold in (group["outer"], *group["inner"])
+               for key in ("training_candidate_event_ids", "evaluation_event_ids"))
+    assert sealed["label_exclusions"] == {"counts": {"gap_exceeds_limit": 1},
+        "events": [{"event_id": victim, "reason": "gap_exceeds_limit"}]}
+    assert sealed["plan_id"] != plan["plan_id"]
+    regression_search_binding._SKIP_SCANS.clear()
+    calls.clear()
+    _seal(data, registered, document)
+    _seal(data, registered, document)
+    assert len(calls) == 1
+    repository = SimpleNamespace()
+    snapshot = SimpleNamespace(snapshot_id="memo_scope_probe")
+    before = len(calls)
+    regression_search_binding._skipped_targets(
+        data.conn, data.store, repository, snapshot, "2026-01", ["a"])
+    regression_search_binding._skipped_targets(
+        data.conn, data.store, repository, snapshot, "2026-01", ["a"])
+    assert len(calls) == before + 1
+    regression_search_binding._skipped_targets(
+        data.conn, object(), repository, snapshot, "2026-01", ["a"])
+    assert len(calls) == before + 2
 
 
 def test_v2_requests_refused_by_size_cli_and_v2_run_cli(tmp_path, capsys):
