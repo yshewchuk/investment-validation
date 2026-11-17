@@ -108,3 +108,17 @@ def test_variant_failure_profile_refuses_a_convergence_warning(monkeypatch, arra
     monkeypatch.setattr(magnitude_mlp, "build_estimator", lambda recipe: Stub())
     with pytest.raises(ValueError, match="convergence failed; no retry"):
         _fit(_recipe(profile="relu32_l2_0p01"), arrays)
+
+
+def test_signed_fit_recovers_a_constant_negative_label(arrays):
+    train, _, prediction = arrays
+    labels = np.full(120, -5.0)
+    result = _fit(_recipe(), (train, labels, prediction))
+    np.testing.assert_allclose(result["predictions"], -5.0, atol=0.2)
+
+
+def test_nonnegative_fit_recovers_a_constant_positive_label(arrays):
+    train, _, prediction = arrays
+    labels = np.full(120, 7.0)
+    result = _fit(_recipe("nonnegative"), (train, labels, prediction))
+    np.testing.assert_allclose(result["predictions"], 7.0, atol=0.2)

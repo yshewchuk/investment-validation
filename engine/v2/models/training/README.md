@@ -91,7 +91,7 @@ consume this API, never production entrypoints. Legacy error translation stays a
 `fit_routes.check_fitting_allowed` exposes both existing switches for pre-inspection orchestration guards.
 
 `regression_candidate.fit_regression_candidate(recipe, inputs)` dispatches the new
-domain-aware Ridge/HGB or ElasticNet recipe to its existing guarded fitter. Both
+domain-aware Ridge/HGB, ElasticNet or MLP recipe to its existing guarded fitter. Both
 no-fit guards precede recipe/input inspection; delegated validation, results and
 errors remain unchanged. No source reads, retries, selection or persistence occur. Existing
 experiment magnitude dispatch remains fixed to nonnegative recipe schemas (Ridge v1, HGB v1 and v2, ElasticNet v1, ElasticNet spline v1 and MLP v1).
