@@ -139,13 +139,15 @@ def _failed_journal(*, fits=None, attempt_count=None):
     return records, key, started
 
 
-def _replay_failed(records, key, started, monkeypatch):
+def _replay_failed(records, key, started, monkeypatch, diagnostic=None):
     monkeypatch.setattr(outer, "load_inputs",
                         lambda store, record, inputs_id: {"inputs_id": inputs_id})
     monkeypatch.setattr(outer, "fit_evidence",
                         lambda inputs, fold, plan, execution: EXPECTED)
-    return outer._replay_failed(records.get, None, started, key, "2024", "rmse", {}, {},
-                                records["execution"])
+    monkeypatch.setattr(outer, "diagnostic_evidence",
+                        lambda *args, **kwargs: {} if diagnostic is None else diagnostic)
+    return outer._replay_failed(records.get, None, started, key, "2024", "rmse",
+                                {}, {"horizons": [5, 3]}, records["execution"])
 
 
 def test_replay_failed_returns_the_terminal_for_a_valid_journal(monkeypatch):
@@ -204,6 +206,14 @@ def test_replay_failed_rejects_a_worker_result_with_an_extra_key(monkeypatch):
                                 "rss_delta_kib": 0, "extra": True}
     with pytest.raises(OpsError) as caught:
         _replay_failed(records, key, started, monkeypatch)
+    assert caught.value.problem.code == "EXPERIMENT_IDENTITY_CONFLICT"
+
+
+def test_replay_failed_rejects_a_conflicting_diagnostic(monkeypatch):
+    records, key, started = _failed_journal()
+    records["execution"]["diag"] = 2
+    with pytest.raises(OpsError) as caught:
+        _replay_failed(records, key, started, monkeypatch, diagnostic={"diag": 1})
     assert caught.value.problem.code == "EXPERIMENT_IDENTITY_CONFLICT"
 
 
