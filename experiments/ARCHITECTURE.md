@@ -932,8 +932,8 @@ from event counts; scientific selection and cutoff rules are unchanged.
 | Missing/older/newer or checksum-mismatched journal migrations | `INTEGRITY_FAILED` before plan/evidence/native reads; no implicit migration. |
 | Missing frozen selection, incomplete/submitted-only inner evidence, changed source/selection/input/result binding | `EXPERIMENT_IDENTITY_CONFLICT`; no missing inner execution or replacement. Prior journal associations remain unchanged. |
 | Either no-fit guard on a new outer call | Its original `RuntimeFitForbidden` propagates before affinity resolution/claim; completed replay never invokes either guard. |
-| Invalid child progress, completion or forecast coverage/types | `EXPERIMENT_IDENTITY_CONFLICT`; retain fit evidence; no outer targets or terminal. |
-| Selected estimator fails after zero or more horizon starts | `EXPERIMENT_VARIANT_FAILED`; persist attempted prefix and failed execution; no forecasts. Overall: no terminal; other `winner_rules` units commit a failed terminal, listed in `refits`. |
+| Invalid child progress, completion or forecast coverage/types | `EXPERIMENT_IDENTITY_CONFLICT`; retain fit evidence; no targets or terminal. |
+| Selected estimator fails after one or more horizon starts (zero under `winner_rules`) | `EXPERIMENT_VARIANT_FAILED`; persist attempted prefix and failed execution; no forecasts. Overall: no terminal; other `winner_rules` units commit a failed terminal, listed in `refits`. |
 | Shared native-input/target admission or resource failure, including late/missing outer targets | Preserve the typed refusal; retain the unfinished claim and durable forecasts; no partial result, retry or replacement. |
 | Repeated unfinished outer claim | `EXPERIMENT_IDENTITY_CONFLICT` at create-only start; no refit or recovery. |
 | Artifact publication/read failure, 16 MiB journal cap, or raw SQLite failure | Existing journal policy applies: integrity conflicts, resource unavailability, `RESOURCE_LIMIT_EXCEEDED`, or unchanged raw SQLite error. Keep committed evidence/unreferenced complete objects; no retry or rollback of earlier records. |

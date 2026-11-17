@@ -246,6 +246,9 @@ def _replay_failed(saved, store, started, key, outer_year, chosen, fold, plan, e
         _equal(fits, expected[:k])
         if receipt["completed_fit_count"] != k:
             raise _conflict()
+        if (type(receipt["fit_attempt_count"]) is not int
+                or type(receipt["completed_fit_count"]) is not int):
+            raise _conflict()
         attempts = receipt["fit_attempt_count"]
         if attempts not in (k, k + 1) or (attempts == k + 1 and k + 1 > len(expected)):
             raise _conflict()

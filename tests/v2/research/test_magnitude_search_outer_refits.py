@@ -162,6 +162,13 @@ def test_replay_failed_accepts_a_failure_before_the_first_horizon(monkeypatch):
         key, "2024", "rmse", "inputs")
 
 
+def test_replay_failed_rejects_a_boolean_attempt_count(monkeypatch):
+    records, key, started = _failed_journal(fits=[], attempt_count=False)
+    with pytest.raises(OpsError) as caught:
+        _replay_failed(records, key, started, monkeypatch)
+    assert caught.value.problem.code == "EXPERIMENT_IDENTITY_CONFLICT"
+
+
 def test_replay_failed_rejects_receipt_fits_that_differ_from_the_recomputed_prefix(monkeypatch):
     records, key, started = _failed_journal(fits=[{"horizon_sessions": 9}], attempt_count=1)
     with pytest.raises(OpsError) as caught:
