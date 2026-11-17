@@ -232,8 +232,7 @@ def _replay_failed(saved, started, key, outer_year, chosen, horizons):
         for fit in fits:
             slot = ":" + str(fit["horizon_sessions"])
             _equal(saved("fit-started" + slot), fit)
-            if not isinstance(saved("fit-completed" + slot), dict):
-                raise _conflict()
+            _equal_completed_fit(saved("fit-completed" + slot), fit, legacy=False)
         completed = {fit["horizon_sessions"] for fit in fits}
         attempted = next((horizon for horizon in horizons if horizon not in completed), None)
         if attempted is None or not isinstance(saved("fit-started:" + str(attempted)), dict):

@@ -123,7 +123,7 @@ def _failed_journal():
                "worker-result": {"event": "failed"},
                "execution": {"status": "failed", "forecasts_id": None, "fits": [fit],
                              "completed_fit_count": 1, "fit_attempt_count": 2},
-               "fit-started:1": fit, "fit-completed:1": fit,
+               "fit-started:1": fit, "fit-completed:1": {**fit, "fit_seconds": 1.0},
                "fit-started:2": attempted}
     return records, key, started
 
@@ -135,6 +135,14 @@ def _replay_failed(records, key, started):
 def test_replay_failed_returns_the_terminal_for_a_valid_journal():
     records, key, started = _failed_journal()
     assert _replay_failed(records, key, started) == failed_terminal(key, "2024", "rmse")
+
+
+def test_replay_failed_rejects_an_invalid_completed_fit_marker():
+    records, key, started = _failed_journal()
+    records["fit-completed:1"] = {}
+    with pytest.raises(OpsError) as caught:
+        _replay_failed(records, key, started)
+    assert caught.value.problem.code == "EXPERIMENT_IDENTITY_CONFLICT"
 
 
 def test_replay_failed_rejects_a_missing_attempted_fit_start():
