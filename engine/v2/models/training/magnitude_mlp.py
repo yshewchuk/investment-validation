@@ -27,10 +27,11 @@ def fit_mlp_predictions(recipe, train_features, train_labels, prediction_feature
     return _fit(recipe, inputs)
 
 
-def _fit(recipe, inputs):
+def _fit(recipe, inputs, *, nonnegative=True, result_schema="magnitude_mlp_fit.v1"):
+    row_error = ("magnitude labels require one finite nonnegative value per training row"
+                 if nonnegative else "MLP labels require one finite value per training row")
     train, labels, prediction = _matrices(
-        inputs, len(inputs.columns),
-        "magnitude labels require one finite nonnegative value per training row")
+        inputs, len(inputs.columns), row_error, nonnegative=nonnegative)
     chrono = recipe["profile"].startswith("chrono")
     if chrono and inputs.train_event_dates is None:
         raise ValueError("chronological MLP profile requires training event dates")
@@ -43,37 +44,42 @@ def _fit(recipe, inputs):
             predictions, converged, n_iter, loss, input_features = _fit_chrono(
                 model, recipe, train, labels, prediction, inputs.train_event_dates)
         else:
-            try:
-                model.fit(train, labels)
-            except UserWarning as error:
-                if (str(error) == "Training interrupted by user."
-                        and isinstance(error.__context__, KeyboardInterrupt)):
-                    raise error.__context__ from None
-                raise
-            budget_complete = (
-                recipe["nonconvergence"], model.regressor_[-1].n_iter_
-            ) == ("epoch_budget_success_no_retry",
-                  recipe["estimator"]["params"]["max_iter"])
-            convergence_warning = any(
-                issubclass(item.category, ConvergenceWarning) for item in caught)
-            if (convergence_warning, budget_complete) == (True, False):
-                raise ValueError("MLP convergence failed; no retry permitted")
-            network = model.regressor_[-1]
-            if (not np.isfinite(network.loss_)
-                    or any(not np.isfinite(array).all()
-                           for array in (*network.coefs_, *network.intercepts_))):
-                raise ValueError("MLP produced nonfinite fit evidence")
-            predictions, converged, n_iter, loss, input_features = (
-                np.asarray(model.predict(prediction), dtype=float),
-                not convergence_warning, int(network.n_iter_),
-                float(network.loss_), int(network.n_features_in_))
+            predictions, converged, n_iter, loss, input_features = _fit_standard(
+                model, recipe, train, labels, prediction, caught)
     if predictions.shape != (len(prediction),) or not np.isfinite(predictions).all():
         raise ValueError("MLP predictions require one finite value per prediction row")
-    return {"schema_version": "magnitude_mlp_fit.v1", "recipe_id": content_hash(recipe),
-        "predictions": np.maximum(predictions, 0.0).tolist(), "component_fits": 1,
+    return {"schema_version": result_schema, "recipe_id": content_hash(recipe),
+        "predictions": (np.maximum(predictions, 0.0).tolist() if nonnegative
+                        else predictions.tolist()), "component_fits": 1,
         "converged": converged, "n_iter": n_iter,
         "input_features": input_features,
         "loss": loss, "loss_scale": "standardized_target"}
+
+
+def _fit_standard(model, recipe, train, labels, prediction, caught):
+    try:
+        model.fit(train, labels)
+    except UserWarning as error:
+        if (str(error) == "Training interrupted by user."
+                and isinstance(error.__context__, KeyboardInterrupt)):
+            raise error.__context__ from None
+        raise
+    budget_complete = (
+        recipe["nonconvergence"], model.regressor_[-1].n_iter_
+    ) == ("epoch_budget_success_no_retry",
+          recipe["estimator"]["params"]["max_iter"])
+    convergence_warning = any(
+        issubclass(item.category, ConvergenceWarning) for item in caught)
+    if (convergence_warning, budget_complete) == (True, False):
+        raise ValueError("MLP convergence failed; no retry permitted")
+    network = model.regressor_[-1]
+    if (not np.isfinite(network.loss_)
+            or any(not np.isfinite(array).all()
+                   for array in (*network.coefs_, *network.intercepts_))):
+        raise ValueError("MLP produced nonfinite fit evidence")
+    return (np.asarray(model.predict(prediction), dtype=float),
+            not convergence_warning, int(network.n_iter_),
+            float(network.loss_), int(network.n_features_in_))
 
 
 def _fit_chrono(model, recipe, train, labels, prediction, event_dates):

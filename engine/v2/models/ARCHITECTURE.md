@@ -44,19 +44,20 @@ gets fit — see its own package doc reference in the root index. Nothing in
 
 Research-only `training.magnitude` consumes ops-admitted recipes and numeric matrices, without I/O or release.
 Ridge learns median imputation, full missing indicators and scaling on training only;
-HGB freezes training-all-null columns to zero, routing other nulls natively. HGB v1 has
-no random early-stopping split; v2 uses a random 10% training-row validation split.
+HGB freezes all-null training columns to zero and routes other nulls natively. HGB v1 has
+no early-stopping split; v2 uses a random 10% training-row validation split.
 Both fit fresh per fold/horizon, single-threaded, with finite nonnegative predictions.
-Caller owns protected admission, label qualification and evidence. The no-fit guard runs first;
-invalid shapes/nonfinite labels or predictions raise `ValueError`, translated by the experiment
-caller to `EXPERIMENT_VARIANT_FAILED`. Existing legacy-parity recipes are unchanged.
-`magnitude_mlp_recipe` and `training.magnitude_mlp` expose sixteen closed standalone neural profiles, not search admission; the original three hashes remain unchanged.
-Thirteen new variants include four with seeded random 10% training-row validation, three fixed 200-epoch budgets and six chronological-holdout profiles over 15%/10%; only the fixed-budget `max_iter` cap accepts a convergence warning. Chrono `converged` is true when patience stops before the cap and false at the cap; it does not report sklearn warning state.
+Caller owns admission, label qualification and evidence. The no-fit guard runs first;
+invalid shapes or nonfinite labels/predictions raise `ValueError`, mapped by the experiment
+caller to `EXPERIMENT_VARIANT_FAILED`. Legacy-parity recipes are unchanged.
+`magnitude_mlp_recipe` and `training.magnitude_mlp` expose sixteen closed neural profiles (no search admission); the original three hashes are unchanged.
+Thirteen added variants: four seeded 10% random validation, three fixed 200-epoch budgets, six chronological holdouts (15%/10%); only a fixed-budget cap accepts a convergence warning. Chrono `converged` means patience stopped before the cap.
 See [the training contract](training/README.md#standalone-neural-magnitude-primitive-opt-in-foundation).
+`regression_mlp_recipe.v1` = `mlp_recipe` plus `target_domain` (signed: projection `none`; nonnegative: `clip_zero`), rebuild-and-compare validated. `training.regression_mlp.fit_regression_mlp_predictions` admits labels by domain, floors only under `clip_zero` and returns `regression_mlp_fit.v1` (accepted by `size_fit_diagnostics.evidence`); `fit_mlp_predictions` is unchanged. Nonfinite weights, or non-convergence outside epoch-budget profiles, raise `ValueError` (`EXPERIMENT_VARIANT_FAILED` at the worker); no retry, fixed seed.
 
 `magnitude_elasticnet_recipe.elasticnet_recipe` binds ordered columns, dictionary hash, preprocessing and closed sklearn parameters in JSON metadata. Request-v3 SIZE candidates admit finite positive alpha in `[1e-6, 1000]` and l1-ratio in `[1e-6, 1]`; the v2 compiler retains its original six alpha/l1 combinations.
-`regression_elasticnet_recipe` adds `regression_elasticnet_recipe.v1`: explicit signed/nonnegative domain, none/clip_zero projection, drift-rejecting validator. `regression_elasticnet_spline_recipe` adds the signed-only `regression_elasticnet_spline_recipe.v1`: the unchanged spline block, `prediction_projection: none`; its validator rebuilds and compares, refuses nonnegative, and leaves magnitude ids unchanged. Neither imports training or proves source admission.
-`training.magnitude_elasticnet.fit_regression_elasticnet_predictions` validates by schema (plain or spline) and fits signed labels unfloored; the original API still rejects negative labels. Both share one-thread preprocessing, evidence and no-retry failure. Results use `regression_elasticnet_fit.v1`; `size_fit_diagnostics.evidence` accepts the signed spline layout. Caller owns membership, selection and resource caps; no I/O or production wiring.
+`regression_elasticnet_recipe.v1` adds a signed/nonnegative domain (none/clip_zero projection) and a drift-rejecting validator; `regression_elasticnet_spline_recipe.v1` is signed-only with the unchanged spline block, rebuild-and-compare validation and unchanged magnitude ids. None imports training.
+`training.magnitude_elasticnet.fit_regression_elasticnet_predictions` validates by schema and fits signed labels unfloored; the original API still rejects negative labels. Results use `regression_elasticnet_fit.v1`; `size_fit_diagnostics.evidence` accepts the signed spline layout. Caller owns membership, selection and caps; no I/O.
 
 | ElasticNet condition | Outcome |
 |---|---|

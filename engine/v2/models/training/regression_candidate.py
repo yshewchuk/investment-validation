@@ -14,12 +14,16 @@ def fit_regression_candidate(recipe, inputs: FitInputs):
     schema, model = recipe.get("schema_version"), recipe.get("model")
     if type(schema) is not str or type(model) is not str:
         raise ValueError("regression candidate requires a supported recipe schema/model pair")
+    kwargs = {}
     if schema in ("regression_elasticnet_recipe.v1",
                   "regression_elasticnet_spline_recipe.v1") and model == "elasticnet":
         from .magnitude_elasticnet import fit_regression_elasticnet_predictions as fit
     elif schema == "regression_ridge_hgb_recipe.v1" and model in ("history_ridge", "history_hgb"):
         from .magnitude_ridge_hgb import fit_regression_predictions as fit
+    elif schema == "regression_mlp_recipe.v1" and model == "mlp":
+        from .regression_mlp import fit_regression_mlp_predictions as fit
+        kwargs["train_event_dates"] = inputs.train_event_dates
     else:
         raise ValueError("regression candidate requires a supported recipe schema/model pair")
     return fit(recipe, inputs.train_features, inputs.train_labels,
-               inputs.prediction_features, columns=inputs.columns)
+               inputs.prediction_features, columns=inputs.columns, **kwargs)
