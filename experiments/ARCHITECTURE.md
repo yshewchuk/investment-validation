@@ -898,15 +898,15 @@ Whole-cohort coverage and daily-mark units remain the exploratory comparison con
 frozen selection and completed native execution/terminal evidence for every inner
 trial before public `freeze`/`execute` replay. Missing or submitted-only evidence
 never launches inner work; permitted candidate failures retain sealed exclusions.
-The frozen inner winner is already fixed; outer execution uses that frozen candidate and never recomputes selection or resolves ties under the sealed rule. A distinct immutable `outer-*`
-namespace binds the plan, selection, recipe, limits and installed outer/child sources.
-Only that fold's winner receives bounded horizon refits. Every fit marker commits
-before its child ACK; complete forecasts and successful accounting commit before
-outer targets open. Training is strictly prior to the outer fit boundary.
+Outer execution uses the frozen winner and never recomputes selection or ties. A distinct immutable `outer-*`
+namespace binds the plan, selection, recipe, limits and installed outer/child sources. With `winner_rules`, slots are keyed `[plan_id, outer_year, candidate_id]`; a non-overall failure commits a failed terminal, never retried.
+Only refit units get bounded horizon refits. Every fit marker commits
+before its child ACK; forecasts and accounting commit before
+outer targets open. Training is strictly prior to the outer fit.
 
 `magnitude_search_evidence` shares native input admission, matrix identities,
 forecast coverage and target-receipt validation across inner and outer callers.
-Stored-panel admission includes verified event dates only for opted-in recipes; missing or noncanonical dates refuse `EXPERIMENT_IDENTITY_CONFLICT`, while non-opted rows and `inputs_id` stay unchanged.
+Stored-panel admission includes verified event dates only for opted-in recipes; missing or noncanonical dates refuse `EXPERIMENT_IDENTITY_CONFLICT`; other rows and `inputs_id` stay unchanged.
 SearchTrials wrappers preserve their existing error boundaries and Real/Integral
 submission semantics; outer wrappers require JSON-native numeric types. Target
 validation reconstructs the protected receipt from admitted physical preflight.
