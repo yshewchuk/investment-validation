@@ -4,6 +4,7 @@ import math
 import re
 
 from engine.v2.foundation import content_hash
+from engine.v2.models.magnitude_mlp_recipe import mlp_recipe
 from engine.v2.ops.errors import fail
 from engine.v2.research.magnitude_panel_qualified_table import recipe as qualified_recipe
 from experiments import magnitude_search_request as base
@@ -19,6 +20,8 @@ _HGB_REQUIRED = ("l2_regularization", "learning_rate", "max_leaf_nodes", "min_sa
 _HGB_OPTIONAL = ("loss", "max_iter", "quantile")
 _HGB_DEFAULTS = {"loss": ["squared_error"], "max_iter": [500]}
 _FAMILIES = {"ridge": ("alpha",), "elasticnet": ("alpha", "l1_ratio"), "hgb": _HGB_REQUIRED}
+_SPLINE_KNOTS = (0, 4, 5, 6)
+_SPLINE_SETS = ("HMOSX", "HMOSXL", "HMOSXLP")
 _KEYS = base._KEYS | {"panel_request", "selection"}
 _METRICS = {"rmse": 0.67, "mae": 0.33}
 _LEADS = {"1": 1.0, "3": 0.0, "5": 0.0}
@@ -59,10 +62,31 @@ def _selection(request):
 
 def _space(request):
     space = request["space"]
-    base._require(type(space) is dict and set(space) == set(_FAMILIES),
+    families = set(_FAMILIES)
+    base._require(type(space) is dict and set(space) in (families, families | {"mlp"}),
                   "stage-2 grid axes differ from the closed policy")
     canonical = {}
-    for family in sorted(_FAMILIES):
+    for family in sorted(space):
+        if family == "mlp":
+            supplied = space[family]
+            base._require(type(supplied) is dict and set(supplied) == {"profile"},
+                          "stage-2 grid axes differ from the closed policy")
+            values = supplied["profile"]
+            base._require(type(values) is list and 1 <= len(values) <= _MAX_AXIS_LENGTH
+                          and all(type(value) is str for value in values)
+                          and values == sorted(set(values)),
+                          "stage-2 mlp profile values must be known, unique and"
+                          " lexicographically ordered")
+            for profile in values:
+                try:
+                    mlp_recipe(columns=["x"],
+                               feature_dictionary_hash=request["feature_dictionary_hash"],
+                               profile=profile)
+                except ValueError:
+                    base._require(False, "stage-2 mlp profile values must be known, unique"
+                                         " and lexicographically ordered")
+            canonical[family] = {"profile": list(values)}
+            continue
         required = _FAMILIES[family]
         supplied = space[family]
         if family == "hgb":
@@ -81,6 +105,13 @@ def _space(request):
                 base._require("quantile" in declared,
                     "stage-2 HGB quantile loss requires a quantile axis")
             axes = sorted(declared | set(_HGB_DEFAULTS))
+        elif family == "elasticnet":
+            declared = set(supplied) if type(supplied) is dict else set()
+            base._require(type(supplied) is dict and set(required) <= declared
+                          and declared <= set(required) | {"spline_knots"},
+                          "stage-2 grid axes differ from the closed policy")
+            supplied = {**supplied}
+            axes = sorted(declared)
         else:
             base._require(base._shape(supplied, required),
                           "stage-2 grid axes differ from the closed policy")
@@ -90,6 +121,20 @@ def _space(request):
             values = supplied[axis]
             base._require(type(values) is list and 1 <= len(values) <= _MAX_AXIS_LENGTH,
                           "stage-2 grid axis length must be between 1 and 32")
+            if family == "elasticnet" and axis == "spline_knots":
+                base._require(all(type(value) is int and value in _SPLINE_KNOTS
+                                  for value in values)
+                              and values == sorted(set(values)),
+                              "stage-2 spline_knots values must be ascending 0 or 4..6")
+                if values == [0]:
+                    continue
+                if any(value > 0 for value in values):
+                    base._require(all(subset in _SPLINE_SETS
+                                      for subset in request["feature_sets"]),
+                                  "stage-2 spline_knots above 0 need every feature set to"
+                                  " hold the spline source columns")
+                canonical[family][axis] = [int(value) for value in values]
+                continue
             if family == "hgb" and axis == "loss":
                 base._require(not any(type(value) is str and value in ("gamma", "poisson")
                                       for value in values),

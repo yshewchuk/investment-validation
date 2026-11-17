@@ -174,10 +174,17 @@ def test_existing_request_schedule_identities_match_pre_neural_dispatch(factory,
     assert content_hash(compile_request(factory())) == "sha256:" + digest
 
 
-def test_signed_recipe_dispatch_does_not_gain_neural_admission():
+def test_signed_recipe_dispatch_admits_regression_mlp():
+    result = regression_candidate_recipe("mlp", {"profile": PROFILES[0]}, target_domain="signed",
+                                         columns=COLUMNS, feature_dictionary_hash=DICTIONARY)
+    assert result["schema_version"] == "regression_mlp_recipe.v1"
+    assert result["model"] == "mlp"
+    assert result["target_domain"] == "signed"
+    assert result["profile"] == PROFILES[0]
     with pytest.raises(ValueError):
-        regression_candidate_recipe("mlp", {"profile": PROFILES[0]}, target_domain="signed",
-                                    columns=COLUMNS, feature_dictionary_hash=DICTIONARY)
+        regression_candidate_recipe("mlp", {"profile": PROFILES[0], "extra": 1},
+                                    target_domain="signed", columns=COLUMNS,
+                                    feature_dictionary_hash=DICTIONARY)
 
 
 def test_real_contained_child_preserves_forecasts_diagnostics_and_component_count(tmp_path):

@@ -9,11 +9,15 @@ from engine.models import no_fit as legacy_no_fit
 from engine.v2.models import no_fit
 from engine.v2.models.magnitude_elasticnet_recipe import regression_elasticnet_recipe
 from engine.v2.models.regression_candidate import regression_candidate_recipe
+from engine.v2.models.regression_elasticnet_spline_recipe import (
+    validate_regression_elasticnet_spline_recipe)
+from engine.v2.models.regression_mlp_recipe import validate_regression_mlp_recipe
 from engine.v2.models.regression_ridge_hgb_recipe import regression_recipe
 from engine.v2.models.training.magnitude_elasticnet import fit_regression_elasticnet_predictions
 from engine.v2.models.training.fit_inputs import FitInputs
 from engine.v2.models.training.magnitude_ridge_hgb import fit_regression_predictions
 from engine.v2.models.training.regression_candidate import fit_regression_candidate
+from engine.v2.research.magnitude_panel_qualified_table import recipe as qualified_recipe
 from experiments.magnitude_candidate_fit import fit_candidate
 from experiments.magnitude_candidate_recipe import candidate_recipe
 
@@ -24,6 +28,13 @@ FEATURES = dict(columns=["x"], feature_dictionary_hash="sha256:" + "a" * 64)
 
 def policy(family, parameters, domain="signed"):
     return regression_candidate_recipe(family, parameters, target_domain=domain, **FEATURES)
+
+
+def real_policy(family, parameters, domain="signed"):
+    features = qualified_recipe("HMOSX")
+    return regression_candidate_recipe(family, parameters, target_domain=domain,
+        columns=features["model_columns"],
+        feature_dictionary_hash=features["dictionary_hash"])
 
 
 def pack(train, labels, prediction, columns=("x",)):
@@ -141,3 +152,31 @@ def test_delegated_failure_is_preserved_without_retry(monkeypatch):
         fit_regression_candidate(recipe, pack([[0.]], [-1.], [[0.]]))
     assert caught.value is failure and len(calls) == 1
     assert calls[0][0][0] is recipe
+
+
+def test_elasticnet_spline_recipe_builds_and_zero_matches_plain():
+    spline = real_policy("elasticnet", {"alpha": .1, "l1_ratio": .75, "spline_knots": 5})
+    assert spline["schema_version"] == "regression_elasticnet_spline_recipe.v1"
+    assert spline == validate_regression_elasticnet_spline_recipe(spline)
+    plain = real_policy("elasticnet", {"alpha": .1, "l1_ratio": .75})
+    zero = real_policy("elasticnet", {"alpha": .1, "l1_ratio": .75, "spline_knots": 0})
+    assert zero == plain
+    assert zero["schema_version"] == "regression_elasticnet_recipe.v1"
+    for knots in (3, True):
+        with pytest.raises(ValueError):
+            real_policy("elasticnet", {"alpha": .1, "l1_ratio": .75, "spline_knots": knots})
+    with pytest.raises(ValueError):
+        real_policy("elasticnet", {"alpha": .1, "l1_ratio": .75, "spline_knots": 5},
+                    domain="nonnegative")
+
+
+def test_mlp_recipe_builds_with_profile():
+    recipe = real_policy("mlp", {"profile": "es_relu32_l2_1"})
+    assert recipe["schema_version"] == "regression_mlp_recipe.v1"
+    assert recipe["model"] == "mlp"
+    assert recipe["target_domain"] == "signed"
+    assert recipe == validate_regression_mlp_recipe(recipe)
+    for parameters in ({"profile": "unknown"},
+                       {"profile": "es_relu32_l2_1", "extra": 1}):
+        with pytest.raises(ValueError):
+            real_policy("mlp", parameters)
