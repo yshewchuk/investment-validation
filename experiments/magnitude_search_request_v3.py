@@ -134,6 +134,53 @@ def _finite_nonnegative(value):
         return False
 
 
+def _log_target(value, canonical):
+    v2._require(type(value) is dict and bool(value),
+                "stage-2 log_target must be a nonempty object")
+    v2._require(set(value) <= {"elasticnet", "mlp"},
+                "stage-2 log_target names an unknown family")
+    result = {}
+    for family in sorted(value):
+        v2._require(family in canonical,
+                    "stage-2 log_target requires its base family grid")
+        base = canonical[family]
+        supplied = value[family]
+        v2._require(type(supplied) is dict and set(supplied) == set(base),
+                    "stage-2 log_target axes differ from the base grid")
+        family_grid = {}
+        for axis in sorted(base):
+            values = supplied[axis]
+            v2._require(type(values) is list and bool(values),
+                        "stage-2 log_target axis must be a nonempty list")
+            if axis == "profile":
+                v2._require(all(type(item) is str for item in values)
+                            and values == sorted(set(values)),
+                            "stage-2 log_target MLP profiles must be unique"
+                            " and lexicographically ordered")
+                v2._require(all(item in base[axis] for item in values),
+                            "stage-2 log_target profile is not in the base grid")
+                family_grid[axis] = list(values)
+            elif axis == "spline_knots":
+                v2._require(all(type(item) is int for item in values),
+                            "stage-2 log_target spline_knots values must be integers")
+                v2._require(values == sorted(values) and len(set(values)) == len(values),
+                            "stage-2 log_target axes must be strictly increasing")
+                v2._require(all(item in base[axis] for item in values),
+                            "stage-2 log_target spline_knots is not in the base grid")
+                family_grid[axis] = list(values)
+            else:
+                v2._require(all(type(item) in (int, float) for item in values),
+                            "stage-2 log_target grid values must be numbers")
+                values = [float(item) for item in values]
+                v2._require(values == sorted(values) and len(set(values)) == len(values),
+                            "stage-2 log_target axes must be strictly increasing")
+                v2._require(all(item in base[axis] for item in values),
+                            "stage-2 log_target grid value is not in the base grid")
+                family_grid[axis] = values
+        result[family] = family_grid
+    return result
+
+
 def _space(request):
     version = request_version(request["schema_version"])
     allowed_sets = (*v2._SETS, "MO-", "M",
@@ -152,6 +199,10 @@ def _space(request):
     space = request["space"]
     version = request["schema_version"]
     version_number = request_version(version)
+    has_log_target = False
+    if version_number >= 14 and type(space) is dict and "log_target" in space:
+        log_target = space.pop("log_target")
+        has_log_target = True
     families = (_FAMILIES_V6 if allows_neural(version_number)
                 else _FAMILIES_V5 if allows_size_family(version_number)
                 else _FAMILIES_V4 if allows_hgb_axes(version_number) else _FAMILIES)
@@ -254,6 +305,8 @@ def _space(request):
             lower, upper = _BOUNDS[(family, axis)]
             v2._require(all(lower <= value <= upper for value in values),
                         "stage-2 grid values exceed their allowed bounds")
+    if has_log_target:
+        canonical["log_target"] = _log_target(log_target, canonical)
     request["space"] = canonical
 
 
@@ -267,7 +320,11 @@ def _counts(request, horizons):
             and "HMO" in request["feature_sets"])
     count = int(size) + len(request["feature_sets"]) * sum(
         math.prod(len(values) for values in axes.values())
-        for family, axes in request["space"].items() if family != "size_v1_4")
+        for family, axes in request["space"].items()
+        if family not in ("size_v1_4", "log_target"))
+    count += len(request["feature_sets"]) * sum(
+        math.prod(len(values) for values in axes.values())
+        for axes in request["space"].get("log_target", {}).values())
     if allows_hgb_axes(request_version(request["schema_version"])):
         v2._require(count <= _MAX_V4_CANDIDATES,
                     "stage-2 v6 and later grid exceeds the 1000-candidate ceiling"
