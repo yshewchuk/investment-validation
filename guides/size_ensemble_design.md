@@ -1,5 +1,7 @@
 # SIZE averaged candidates: seed bagging and the HGB+elastic-net blend (design)
 
+**Superseded for blends (2026-11-17):** blend candidates are now specified in `size_search_v14_design.md` (fixed profiles scored from stored component predictions). Everything below about the `blend` family (decision 2, section 2, the blend parts of sections 3 to 5, and the `hgb_en_mean_v1` official-run plan) is void; `blend` axis, S3 and S4 blend work are not to be built from this guide. Seed bagging is unchanged and unbuilt.
+
 Design only; no code in this PR. The contract stays in this guide; the two ARCHITECTURE files are at their growth ceiling (section 5).
 
 **Evidence (exploratory, not promotion evidence).** `stack.py`/`stack1.out` (owner inputs outside the repo, `/root/agent-ops/owner_inputs/size_stack_1112/`, 2026-11-12): yearly folds `range(2018, 2025)`, i.e. 2018-2024, so 2025 is not an outer fold, direct parquet reads (reference only; the pipeline reads none). Averaging 5 HGB fits that differ only in `random_state`: RMSE -0.1% vs one fit, better in 6/7 years (the owner's seed-only figure; `stack1.out` shows only the combined tuned-trees-plus-5-seeds row, F vs E -0.26% RMSE). Averaging that HGB (gamma, 31 leaves, lr 0.03, min_samples_leaf 300) with an elastic net (alpha 0.01, l1_ratio 0.75) on the same features: a further -0.19% RMSE, better 7/7 years, but MAE +0.8%. So the blend is a candidate to compare, never a default. The official search scores both levers and decides.
@@ -9,13 +11,13 @@ Design only; no code in this PR. The contract stays in this guide; the two ARCHI
 | # | Question | Decision | Why |
 | --- | --- | --- | --- |
 | 1 | Seed bagging | An HGB axis `n_seeds`, integer in [1, 10]; member i uses `random_state = i`. Default `[1]`. | `n_seeds=1` is today's fit exactly (`random_state` 0) and its recipe omits the field, so declaring `[1]` or nothing gives the same recipe and id. A recipe with `n_seeds > 1` uses schema `magnitude_ridge_hgb_recipe.v3` (v1/v2 and their validators unchanged; the v3 validator rebuilds with the field). Members differ only by seed, which also changes the seeded 10% early-stopping holdout the recipe already uses. |
-| 2 | Blend | A fixed-recipe family `blend` with one axis `profile` naming code-declared recipes. One profile now: `hgb_en_mean_v1`. | Same pattern as the MLP `profile` axis: identity is a recipe hash fixed in the sealed plan before any fit. Combining stored member forecasts at scoring time is rejected (section 2). |
+| 2 | Blend (superseded) | A fixed-recipe family `blend` with one axis `profile` naming code-declared recipes. One profile now: `hgb_en_mean_v1`. | Same pattern as the MLP `profile` axis: identity is a recipe hash fixed in the sealed plan before any fit. Combining stored member forecasts at scoring time is rejected (section 2). |
 | 3 | Slower trees | Already inside the request bounds (v4+ grid bounds; the `loss` and `max_iter` axes themselves are v9+, so v9 to v11 requests can declare it today): learning_rate 0.03 in [1e-3, 1], max_leaf_nodes 31 in [2, 64], min_samples_leaf 300 in [1, 1000], l2 10 in [0, 1000], max_iter 3000 in [100, 5000], loss `gamma` (v9). **Config only**, no bounds change. | A request can declare it today. Only `n_seeds` and the `blend` family need a request bump (v12). |
 | 4 | Distribution band (#2401) | Unchanged. A bagged or blended trial stores one averaged forecast array; `size_distribution_report` pools and scores that array like any other. | It reads stored per-trial forecasts only, never members. |
 
 Known differences from the exploratory script, so the official run is read as its own measurement: the pipeline HGB recipe fixes `n_iter_no_change` 10 (script: 20), early stopping uses the recipe's seeded random 10% holdout, and fits run single-threaded. The script's `ElasticNet(max_iter=10000)` would only warn on non-convergence; the pipeline member raises `ValueError`, so under R1 a non-converged elastic net fails the blend trial. No attempt is made to reproduce the script's numbers.
 
-## 2. Blend: why a fixed-recipe family
+## 2. Blend: why a fixed-recipe family (SUPERSEDED by `size_search_v14_design.md`; sections 2, 3 R4-R5 and the blend rows of 4-5 do not apply)
 
 Rejected: combining stored member forecasts at scoring time. It needs every member stored for every trial (the `TrialArrays` retention cap already trips on large grids), makes "which pairs" a choice over stored scores (picking members after seeing scores), and adds a second scoring path with its own identity, receipts and failure rules. A blend candidate is instead one ordinary candidate:
 
@@ -25,7 +27,7 @@ Rejected: combining stored member forecasts at scoring time. It needs every memb
 - The feature set is the candidate spec's (`H` to `HMOSX`), as for every family. A new profile is a later one-constant change plus a request bump.
 - `magnitude_candidate_family` gains the `(magnitude_blend_recipe.v1, blend)` pair and the `(magnitude_ridge_hgb_recipe.v3, history_hgb)` pair (S1; the dispatcher rejects v3 today); `fit_candidate` dispatches to `engine/v2/models/training/magnitude_blend.py`, which calls the existing member fitters on the same `FitInputs` and averages. Selection, inner/outer folds, rmse/mae/large-move metrics and the #2401 metrics are untouched because a trial still yields one forecast array.
 
-## 3. Failure semantics (R1-R6)
+## 3. Failure semantics (R1-R6; the blend-specific parts of R1-R5 are superseded by `size_search_v14_design.md`, the seed-bagging parts stay)
 
 - **R1 member failure.** Any member error (HGB, EN non-convergence, non-finite, shape) fails the whole trial, propagating the member's own exception unchanged (members raise `ValueError`; the blend adds no refusal code and the trial layer records it as it records the same error from a single candidate). No partial average, no reweighting, no retry. A failed blend trial is handled as any single candidate's failed trial today (distribution reports `trial_failed`).
 - **R2 memory/CPU.** Members, and the seeds inside an HGB member, fit one at a time, single-threaded; peak = the largest member plus one prediction vector per finished member, freed after the mean. Nothing is retained beyond the single stored forecast.
