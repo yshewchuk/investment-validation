@@ -74,7 +74,7 @@ def preflight_iv_crush_targets(repository, snapshot, *, as_of_month, event_ids):
 def skipped_iv_crush_targets(repository, snapshot, *, as_of_month, event_ids):
     """Report events whose single identity-checked target row is skipped; only identity and skip columns are projected, never the numeric label."""
     with progress.stage("IV target skip scan", report_refusals=True):
-        _, plans, _ = _candidates(repository, snapshot, as_of_month, "selection", sorted(event_ids),
+        _, plans, _ = _candidates(repository, snapshot, as_of_month, "selection", event_ids,
                                   columns=SKIP_COLUMNS)
         reported = {}
         reporter = progress.Progress("IV skip scan", len(plans))

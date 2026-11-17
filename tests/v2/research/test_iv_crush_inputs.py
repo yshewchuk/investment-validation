@@ -413,6 +413,21 @@ def test_skipped_target_scan_reports_reason_while_load_refuses(tmp_path):
         exact_problem(caught, "EXPERIMENT_VARIANT_FAILED", "IV-crush label identity or availability is invalid")
 
 
+def test_skipped_target_scan_shares_explicit_population_admission(tmp_path):
+    event = history_event("2024-05-06")
+    valid = event["event_id"]
+    with committed(tmp_path, [event], [target(event)]) as (_, repository, snapshot):
+        for event_ids in ([valid, None], {valid: 1}):
+            actions = (
+                lambda: load(repository, snapshot, event_ids=event_ids),
+                lambda: reader.skipped_iv_crush_targets(repository, snapshot, as_of_month=MONTH,
+                                                        event_ids=event_ids))
+            for action in actions:
+                with pytest.raises(DataError) as caught:
+                    action()
+                exact_problem(caught, "HOLDOUT_ACCESS_DENIED", "explicit valid holdout context is required")
+
+
 @pytest.mark.parametrize("canonical,stored", [("AMC", "BMO"), ("BMO", "AMC")])
 def test_skipped_target_scan_refuses_identity_mismatch(tmp_path, canonical, stored):
     event = history_event("2024-05-06", session=canonical)
