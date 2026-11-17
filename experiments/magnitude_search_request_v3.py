@@ -79,14 +79,24 @@ def _hash_recipe(version):
     return qualified_panel_recipe if version >= 9 else v2.panel_recipe
 
 
-def _selection(request, horizons):
+def _winner_rules(request, policy, version):
+    if version < 14 or "winner_rules" not in policy:
+        return
+    rules = policy["winner_rules"]
+    v2._require(type(rules) is list and rules == ["overall", "rmse", "mae"],
+                "stage-2 selection winner_rules must be exactly overall, rmse, mae")
+    request["selection"]["winner_rules"] = ["overall", "rmse", "mae"]
+
+
+def _selection(request, horizons, version):
     if "selection" not in request:
         return
     v2._require(1 in horizons, "stage-2 blended selection requires lead-1 horizon")
     policy = request["selection"]
-    v2._require(v2._shape(policy, {"metric_weights", "lead_weights",
-        "large_move_threshold_pct", "tie_band_floor"}),
-        "stage-2 selection policy has an invalid shape")
+    keys = {"metric_weights", "lead_weights", "large_move_threshold_pct", "tie_band_floor"}
+    v2._require(v2._shape(policy, keys) if version < 14
+                else type(policy) is dict and set(policy) in (keys, keys | {"winner_rules"}),
+                "stage-2 selection policy has an invalid shape")
     metrics, leads = policy["metric_weights"], policy["lead_weights"]
     v2._require(v2._shape(metrics, set(_SELECTION_METRICS))
         and all(type(metrics[key]) in (int, float) and metrics[key] == expected
@@ -103,6 +113,7 @@ def _selection(request, horizons):
     request["selection"] = {"metric_weights": dict(_SELECTION_METRICS),
         "lead_weights": dict(_SELECTION_LEADS), "large_move_threshold_pct": 10.0,
         "tie_band_floor": 0.005}
+    _winner_rules(request, policy, version)
 
 
 def _finite_positive(value):
@@ -300,7 +311,7 @@ def compile_request(request, *, horizons=(5, 3, 1)):
                 else "stage-2 request requires its closed v3/v4/v5 schema and selection policy")
     v2.validate_workers(request)
     request.pop("workers", None)
-    _selection(request, horizons)
+    _selection(request, horizons, request_version(version))
     v2._references(request, recipe=_hash_recipe(request_version(version)))
     _space(request)
     counts = _counts(request, horizons)

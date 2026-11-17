@@ -57,6 +57,7 @@ from experiments.magnitude_search_selection import (
     selection_contract_tie_rule,
     selection_tie_band,
 )
+from experiments.magnitude_search_winners import rule_winners
 from experiments.size_fit_diagnostics import evidence as diagnostic_evidence
 from experiments.size_fit_diagnostics import keys as diagnostic_keys
 from experiments.size_job_budget import resolved_limits
@@ -731,6 +732,7 @@ class SearchTrials:
         print(f"[selection] planned trials={total_trials}", file=sys.stderr)
         policy = plan.get("request", {}).get("selection")
         signed = plan.get("selection", {}).get("metric") == "blend_rmse_mae"
+        winner_rules = plan.get("selection", {}).get("winner_rules")
 
         def history_rows_for(cohort, validation):
             if signed:
@@ -851,6 +853,10 @@ class SearchTrials:
                                          *yearly_scores]
                     selected_id, tie_band = selection_tie_band(eligible, yearly_scores,
                         floor=policy["tie_band_floor"], tie_rule=tie_rule)
+                    if winner_rules:
+                        winners = rule_winners(eligible, yearly_scores,
+                            floor=policy["tie_band_floor"], tie_rule=tie_rule,
+                            rules=winner_rules)
                     pooled_history = [row for year in sorted(outer["inner"], key=lambda item: item["year"])
                         for row in history_rows_by_year[year["year"]]]
                     history_score = score_rows(pooled_history, pooled_history)
@@ -862,11 +868,16 @@ class SearchTrials:
                 selection = {"outer_year": outer["outer"]["year"], "scores": scores,
                     "history_mean": history_score, "tie_band": tie_band,
                     "selected_candidate_id": selected_id}
+                if winner_rules:
+                    selection["winners"] = winners["winners"]
+                    selection["distinct_winner_ids"] = winners["distinct_winner_ids"]
             selections.append(selection)
             failed_candidates = sum(score["metrics"] is None for score in scores)
             print(f"[selection] outer={selection['outer_year']} "
                   f"selected={selection['selected_candidate_id']} "
-                  f"failed_candidates={failed_candidates}", file=sys.stderr)
+                  f"failed_candidates={failed_candidates}"
+                  + (f" distinct_winners={len(selection['distinct_winner_ids'])}"
+                     if winner_rules else ""), file=sys.stderr)
             for inner in outer["inner"]:
                 owner_year, _ = canonical_inner(plan, outer["outer"]["year"], inner["year"])
                 cohort_id = cohort_key(plan, owner_year, inner["year"])
