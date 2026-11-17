@@ -41,7 +41,7 @@ Consumes the sealed **SIZE v14** run (`guides/size_search_v14_design.md`, PR #25
 
 - **R1.** A model with missing, partial or `failed` stored predictions is excluded with its reason; contrasts needing it are `not_testable`. Nothing is imputed, retried or substituted. Whole-run refusals: unbound or mismatched plan/seal/panel (`EXPERIMENT_IDENTITY_CONFLICT`) and a failed production series.
 - **R2.** One process, one heavy job at a time (never beside the v14 run), under `bounded_run`. Work is chunked by quarter; tables are compact numpy arrays. Over-limit refuses `RESOURCE_LIMIT_EXCEEDED`; no partial report.
-- **R3.** `pnl_sim.expected_pnl` seeds from `sha256(key|event_date)`; the experiment passes `key = f"{structure}|{event_id}"`, **identical for every model**, so every model draws the same random stream. The residuals drawn still differ because each model's pool differs; the shared stream reduces, not removes, simulation noise between models. Roster order and the bootstrap seed are fixed in the spec.
+- **R3.** `pnl_sim.expected_pnl` seeds from `sha256(key|event_date)`; the experiment passes `key = event_id`, **identical for every model and every structure** (the draw depends on the key, date, pool and forecast, never on the structure, so one per-event simulation table reproduces `expected_pnl` for each structure exactly and the cost is not multiplied by seven). Every model draws the same random stream. The residuals drawn still differ because each model's pool differs; the shared stream reduces, not removes, simulation noise between models. Roster order and the bootstrap seed are fixed in the spec.
 - **R4.** Stage receipts (`inputs`, `inner`, `tuning`, `outer`) carry content hashes, are atomic and immutable; exact replay is read-only. A changed input under an existing receipt refuses `EXPERIMENT_IDENTITY_CONFLICT`; no repair. Intermediate arrays are disposable scratch under `/tmp`.
 - **R5.** `model_id = content_hash({source, candidate_id|blend_id|"size_v1_4", target_transform})`. The roster is sealed in the spec before any read; the spec hash is in the PLANNED row.
 - **R6.** Causality by **data dates**, never `computed_at`. Pool rows for an event dated D are events strictly before D whose labels had printed; the cutoff window is `[month_start - 6 months, month_start)`; tuning reads 2023/2024 only; the 2025 stage refuses to start without the immutable `tuning` receipt and reads no 2025 label until its decisions are written.
@@ -92,7 +92,7 @@ STR-THRU's registered gate is a trained GBM (EXP-105, -184), STR-RUNUP's a trail
 
 Neither rule fits anything or looks at a P&L.
 
-**Marks and ambiguous exits.** Every leg is priced with `FillModel(alpha).buy/sell`. Per-leg fallback, each step labelled in the row: (1) valid bid and ask: alpha mark; (2) crossed, locked, zero-bid or wide (`FillModel.is_wide`): alpha 0 (worst) for that leg; (3) no exit quote: the **structure** is marked at its worst-case payoff (zero for the straddle; the defined-risk floor for put structures), labelled `exit_unquoted_worst_case`. Tables report each model's share per rung, so geometry landing on thinly quoted strikes cannot hide; a sensitivity row drops rung 3.
+**Marks and ambiguous exits.** Every leg is priced with `FillModel(alpha).buy/sell`. Per-leg fallback, each step labelled in the row: (1) valid bid and ask: alpha mark; (2) zero-bid or wide (`FillModel.is_wide`): alpha 0 (worst) for that leg; (3) no usable exit quote, including crossed or locked (`FillModel` refuses those): the **structure** is marked at its worst-case payoff (zero for the straddle; the defined-risk floor for put structures), labelled `exit_unquoted_worst_case`. Tables report each model's share per rung, so geometry landing on thinly quoted strikes cannot hide; a sensitivity row drops rung 3.
 
 ## 7. Hypotheses, pre-registration and judgement
 
@@ -121,7 +121,7 @@ The 75% and 60% shares are **my judgement calls**, not derived; the report shows
 
 ## 9. Split list (code PRs, about 150 non-test lines each)
 
-| Slice | Scope | Code / test / doc words | After |
+| Slice | Scope | Code lines / test lines / doc words | After |
 | --- | --- | --- | --- |
 | S1 | Scaffold EXP-188 (`spec.yaml` from this design, PLANNED row), prereg guard that cannot no-op, closure-hash test | ~100 / ~120 / 60 | - |
 | S2a | `size_pnl_inputs`: bind v14 plan/seal/panel, resolve roster, refusals | ~160 / ~180 / 80 | S1, v14 S2c |
