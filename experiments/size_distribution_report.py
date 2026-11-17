@@ -139,6 +139,9 @@ def _failed():
 def collect_distribution(plan, trial_arrays, outer_rows, selected_ids):
     if "target" in plan:
         return {"schema_version": SCHEMA, "status": "unsupported_target"}
+    blend_ids = {blend["blend_id"] for blend in plan.get("blends") or []}
+    if any(candidate_id in blend_ids for candidate_id in selected_ids.values()):
+        return {"schema_version": SCHEMA, "status": "blend_not_distributed"}
     _validate(list(outer_rows.values()))
     if getattr(trial_arrays, "capped", False):
         return {"schema_version": SCHEMA, "status": "skipped_resource_cap"}

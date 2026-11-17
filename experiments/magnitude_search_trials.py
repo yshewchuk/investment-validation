@@ -889,6 +889,12 @@ class SearchTrials:
                 if winner_rules:
                     selection["winners"] = winners["winners"]
                     selection["distinct_winner_ids"] = winners["distinct_winner_ids"]
+                    if blends:
+                        non_blend = [score for score in eligible if score.get("kind") != "blend"]
+                        if not non_blend:
+                            raise fail("EXPERIMENT_VARIANT_FAILED", "all candidates failed for an outer fold")
+                        selection["best_non_blend_id"] = min(
+                            non_blend, key=lambda score: (score["blend_score"], score["candidate_id"]))["candidate_id"]
             selections.append(selection)
             failed_candidates = sum(score["metrics"] is None for score in scores)
             print(f"[selection] outer={selection['outer_year']} "

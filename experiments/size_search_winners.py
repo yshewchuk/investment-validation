@@ -33,6 +33,7 @@ def winner_rows(plan, selection, refits, forecasts, events, comparisons, targets
     candidates = {c["candidate_id"]: c for c in plan["candidates"]}
     fold_events = {g["outer"]["year"]: set(g["outer"]["evaluation_event_ids"]) for g in plan["folds"]}
     refit_index = {(r["outer_year"], r["candidate_id"]): r for r in refits}
+    blends = {b["blend_id"]: b for b in plan.get("blends") or []}
     lowest = min(plan["horizons"])
 
     # candidate_id -> {"rules": set, "years": {outer_year: {"rules", "scores", "tie_band"}}}
@@ -58,7 +59,10 @@ def winner_rows(plan, selection, refits, forecasts, events, comparisons, targets
             if refit is None:
                 error_code = "missing_refit"
             elif refit["status"] == "failed":
-                error_code = (refit.get("result") or {}).get("code") or "failed"
+                if cid in blends and refit.get("result") is None:
+                    error_code = "component_failed"
+                else:
+                    error_code = (refit.get("result") or {}).get("code") or "failed"
             elif refit["status"] != "completed" or (year, cid) not in forecasts:
                 error_code = "missing_refit"
             if error_code is not None:
@@ -89,14 +93,18 @@ def winner_rows(plan, selection, refits, forecasts, events, comparisons, targets
                  for year in years]
         candidate = candidates.get(cid) or {}
         recipe = candidate.get("recipe")
-        rows.append({
+        row = {
             "candidate_id": cid, "rules": rules, "primary": PRIMARY_RULE in rules,
             "kind": "candidate", "components": [],
             "target_transform": "log1p" if (recipe or {}).get("schema_version") in LOG1P_SCHEMAS else "none",
             "outer_years": years, "inner": inner,
             "status": "completed" if completed else "failed",
             "error_code": None if completed else error_code,
-            "paired": paired_result, "actual_above_forecast_share": share})
+            "paired": paired_result, "actual_above_forecast_share": share}
+        if cid in blends:
+            row.update({"kind": "blend", "components": sorted(blends[cid]["component_candidate_ids"]),
+                        "target_transform": "mixed", "inner_scores_optimistic": True})
+        rows.append(row)
 
     rows.sort(key=lambda row: (not row["primary"], row["candidate_id"]))
     failed = sum(1 for row in rows if row["status"] == "failed")
