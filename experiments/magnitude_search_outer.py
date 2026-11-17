@@ -231,7 +231,9 @@ def _execute_admitted(conn, store, repository, registration, plan, fold, selecti
     execution_key = "regression_execution" if "target" in plan else "magnitude_execution"
     fold = {**fold, "evaluation_labels_before": binding[execution_key]["evaluation_labels_before"]}
     chosen = next(item["selected_candidate_id"] for item in selection["selections"] if item["outer_year"] == outer_year)
-    candidate = next(item for item in plan["candidates"] if item["candidate_id"] == chosen)
+    candidate = next((item for item in plan["candidates"] if item["candidate_id"] == chosen), None)
+    if candidate is None:
+        raise fail("EXPERIMENT_VARIANT_FAILED", "selected winner is not a plan candidate; blend winner outer evaluation is not supported yet")
     try:
         sources = source_closure(Path(__file__).resolve().parents[1], [
             "experiments/magnitude_search_outer.py", "experiments/magnitude_search_worker.py"])
