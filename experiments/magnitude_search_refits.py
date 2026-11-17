@@ -1,7 +1,8 @@
 """Per-candidate outer refit slots for three-winner search plans."""
 from engine.v2.foundation import content_hash
 
-__all__ = ["per_candidate", "refit_key", "refit_units", "possible_slots", "failed_terminal"]
+__all__ = ["per_candidate", "refit_key", "refit_units", "possible_slots", "failed_terminal",
+           "overall_key", "terminal_keys"]
 
 
 def per_candidate(plan):
@@ -31,6 +32,25 @@ def refit_units(plan, selection_item):
             units.append(candidate_id)
             seen.add(candidate_id)
     return units
+
+
+def overall_key(plan, selection_item):
+    """The overall winner's slot key for its fold year."""
+    year = selection_item["outer_year"]
+    if per_candidate(plan):
+        return refit_key(plan, year, selection_item["selected_candidate_id"])
+    return refit_key(plan, year)
+
+
+def terminal_keys(plan, selection):
+    """Every required outer-terminal key: each fold's units, overall first."""
+    by_year = {item["outer_year"]: item for item in selection["selections"]}
+    keys = []
+    for fold in plan["folds"]:
+        year = fold["outer"]["year"]
+        for unit in refit_units(plan, by_year[year]):
+            keys.append(refit_key(plan, year, unit))
+    return keys
 
 
 def possible_slots(plan):

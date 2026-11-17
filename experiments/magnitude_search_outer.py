@@ -224,7 +224,10 @@ def execute_outer_fold(conn, store, repository, registration, request, plan_ref,
         fold = next(item["outer"] for item in plan["folds"] if item["outer"]["year"] == outer_year)
     except StopIteration:
         raise fail("INVALID_EXPERIMENT_SPEC", "outer fold is outside the sealed search plan") from None
-    if candidate_id is not None and not per_candidate(plan):
+    if candidate_id is None:
+        if per_candidate(plan):
+            raise fail("INVALID_EXPERIMENT_SPEC", "refit unit is outside the sealed selection")
+    elif not per_candidate(plan):
         raise fail("INVALID_EXPERIMENT_SPEC", "refit unit is outside the sealed selection")
     def read(slot):
         return read_record(conn, store, registration.run_id, slot)
@@ -279,6 +282,12 @@ def _execute_admitted(conn, store, repository, registration, plan, fold, selecti
                 _equal(saved("start"), started)
                 expected = failed_terminal(key, outer_year, chosen)
                 _equal(terminal, expected)
+                worker = saved("worker-result")
+                execution_record = saved("execution")
+                if (not isinstance(worker, dict) or worker.get("event") != "failed"
+                        or not isinstance(execution_record, dict)
+                        or execution_record.get("status") != "failed"):
+                    raise _conflict()
                 return terminal
         return _replay(saved, store, started, fold, plan, execution, binding, input_callback=input_callback)
     forbid_fitting("execute_outer_fold")

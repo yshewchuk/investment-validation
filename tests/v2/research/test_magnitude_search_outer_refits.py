@@ -47,6 +47,13 @@ def test_execute_outer_fold_refuses_a_candidate_outside_the_refit_units(monkeypa
         "INVALID_EXPERIMENT_SPEC", MESSAGE)
 
 
+def test_execute_outer_fold_refuses_a_missing_candidate_on_a_winner_plan(monkeypatch):
+    with pytest.raises(OpsError) as caught:
+        _call(monkeypatch, _plan(winner=True), None)
+    assert (caught.value.problem.code, caught.value.problem.message) == (
+        "INVALID_EXPERIMENT_SPEC", MESSAGE)
+
+
 def test_execute_outer_fold_refuses_a_candidate_on_a_legacy_plan(monkeypatch):
     with pytest.raises(OpsError) as caught:
         _call(monkeypatch, _plan(winner=False), "overall")

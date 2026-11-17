@@ -12,6 +12,7 @@ from engine.v2.foundation import content_hash
 from experiments.magnitude_search_outer import collect_outer_results
 from experiments.magnitude_search_plan import trial_key
 from experiments.magnitude_search_records import read_record
+from experiments.magnitude_search_refits import per_candidate, refit_key
 from experiments.size_distribution_report import TrialArrays, collect_distribution
 from experiments.size_paired_report import paired_report, validated_horizons
 from experiments.v2_magnitude_search_run import _admit_driver
@@ -173,7 +174,8 @@ def collect(conn, store, repository, registration, request, plan_ref):
             if match is not None else None)
     for group in plan["folds"]:
         year = group["outer"]["year"]
-        key = content_hash([plan["plan_id"], year])
+        key = (refit_key(plan, year, selected_ids[year]) if per_candidate(plan)
+               else content_hash([plan["plan_id"], year]))
         forecasts.extend(read_record(conn, store, registration.run_id, "outer-forecasts:" + key))
         key = content_hash([plan["plan_id"], year, "comparison"])
         comparison = read_record(conn, store, registration.run_id, "comparison-terminal:" + key)["result"]

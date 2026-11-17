@@ -1,10 +1,12 @@
 from engine.v2.foundation import content_hash
 from experiments.magnitude_search_refits import (
     failed_terminal,
+    overall_key,
     per_candidate,
     possible_slots,
     refit_key,
     refit_units,
+    terminal_keys,
 )
 
 LEGACY = {"plan_id": "plan", "candidates": [{"candidate_id": "a"}, {"candidate_id": "b"}],
@@ -58,6 +60,27 @@ def test_winner_possible_slots_cover_every_fold_and_candidate_with_distinct_keys
     assert not legacy & set(keys)
     for year, candidate_id, key in slots:
         assert key == refit_key(plan, year, candidate_id)
+
+
+def test_overall_key_uses_the_selected_candidate_only_for_winner_plans():
+    legacy = {"outer_year": "2025", "selected_candidate_id": "a"}
+    assert overall_key(LEGACY, legacy) == content_hash(["plan", "2025"])
+    plan = _winner()
+    winner = {"outer_year": "2025", "selected_candidate_id": "c"}
+    assert overall_key(plan, winner) == content_hash(["plan", "2025", "c"])
+
+
+def test_terminal_keys_list_every_fold_unit_with_the_overall_first():
+    plan = _winner()
+    selection = {"selections": [
+        {"outer_year": "2024", "selected_candidate_id": "c", "distinct_winner_ids": ["b", "c"]},
+        {"outer_year": "2025", "selected_candidate_id": "a", "distinct_winner_ids": ["a"]},
+    ]}
+    assert terminal_keys(plan, selection) == [
+        refit_key(plan, "2024", "c"),
+        refit_key(plan, "2024", "b"),
+        refit_key(plan, "2025", "a"),
+    ]
 
 
 def test_failed_terminal_has_the_exact_durable_shape():
