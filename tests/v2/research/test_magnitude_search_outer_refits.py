@@ -205,3 +205,40 @@ def test_replay_failed_rejects_a_worker_result_with_an_extra_key(monkeypatch):
     with pytest.raises(OpsError) as caught:
         _replay_failed(records, key, started, monkeypatch)
     assert caught.value.problem.code == "EXPERIMENT_IDENTITY_CONFLICT"
+
+
+def _failed_terminal_replay(monkeypatch, candidate_id):
+    plan = {"plan_id": "plan",
+            "selection": {"winner_rules": ["overall", "rmse"]},
+            "candidates": [{"candidate_id": value} for value in ("overall", "rmse")]}
+    registration = Mock(run_id="run",
+                        document={"magnitude_execution": {"evaluation_labels_before": None}})
+    terminal = {"status": "failed"}
+    records = {"outer-terminal:" + refit_key(plan, "2024", candidate_id): terminal}
+    replay_failed = Mock(return_value=terminal)
+    monkeypatch.setattr(outer, "source_closure", lambda *args: {})
+    monkeypatch.setattr(outer, "execution_for_candidate", lambda *args: {})
+    monkeypatch.setattr(outer, "read_record",
+                        lambda conn, store, run_id, slot: records.get(slot))
+    monkeypatch.setattr(outer, "_replay_failed", replay_failed)
+
+    def run():
+        return outer._execute_admitted(
+            None, None, None, registration, plan, {"year": "2024"}, _selection(), {},
+            replay_only=True, candidate_id=candidate_id)
+
+    return run, replay_failed
+
+
+def test_execute_admitted_refuses_a_failed_terminal_for_the_overall_winner(monkeypatch):
+    run, replay_failed = _failed_terminal_replay(monkeypatch, "overall")
+    with pytest.raises(OpsError) as caught:
+        run()
+    assert caught.value.problem.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    replay_failed.assert_not_called()
+
+
+def test_execute_admitted_replays_a_failed_non_overall_terminal(monkeypatch):
+    run, replay_failed = _failed_terminal_replay(monkeypatch, "rmse")
+    assert run() == {"status": "failed"}
+    replay_failed.assert_called_once()

@@ -262,7 +262,7 @@ def _replay_failed(saved, store, started, key, outer_year, chosen, fold, plan, e
 
 def execute_outer_fold(conn, store, repository, registration, request, plan_ref, outer_year, *, limits,
                        candidate_id=None):
-    """Refit one frozen inner winner once; replay complete evidence without fitting."""
+    """Refit one frozen unit (the overall winner, or a winner_rules refit unit by candidate_id) once; replay complete evidence without fitting."""
     validate_execution_limits(limits)
     require_current(conn, OWNER, MIGRATIONS)
     plan = read_search_plan(conn, store, registration, request, plan_ref)
@@ -327,10 +327,13 @@ def _execute_admitted(conn, store, repository, registration, plan, fold, selecti
     regression = execution.get("schema_version") == "regression_candidate_execution.v1"
     if replay_only or saved("terminal") is not None:
         # A failed non-overall slot replays only its exact durable terminal; every other slot
-        # (including a committed overall winner) uses the ordinary evidence replay.
+        # (including a committed overall winner, which never commits a failed terminal) uses
+        # the ordinary evidence replay.
         if per_candidate(plan):
             terminal = saved("terminal")
             if isinstance(terminal, dict) and terminal.get("status") == "failed":
+                if chosen == overall:
+                    raise _conflict()
                 return _replay_failed(saved, store, started, key, outer_year, chosen, fold, plan, execution)
         return _replay(saved, store, started, fold, plan, execution, binding, input_callback=input_callback)
     forbid_fitting("execute_outer_fold")
