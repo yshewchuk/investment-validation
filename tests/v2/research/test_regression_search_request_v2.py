@@ -8,6 +8,7 @@ from engine.models.no_fit import no_fit_guard as legacy_no_fit
 from engine.v2.contracts import ArtifactRef
 from engine.v2.foundation import content_hash, from_document, to_document
 from engine.v2.models.no_fit import no_fit_guard
+from engine.v2.models.regression_candidate import regression_candidate_recipe
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.native_registration import regression_request_version
 from engine.v2.research.magnitude_panel_qualified_table import recipe
@@ -71,6 +72,7 @@ def refuses(request):
         compile_request(request)
     assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
     assert caught.value.problem.retryable is False
+    return caught.value
 
 
 def test_v2_compiles_five_sets_with_counts_and_specs():
@@ -174,6 +176,26 @@ def test_hgb_declared_defaults_match_omitted():
     assert declared["candidate_specs"] == omitted["candidate_specs"]
 
 
+@pytest.mark.parametrize("loss", ["gamma", "poisson"])
+def test_signed_target_refuses_unsupported_hgb_losses(loss):
+    document = v2_request()
+    document["space"]["hgb"]["loss"] = [loss]
+    assert "signed target" in str(refuses(document))
+
+
+def test_default_hgb_candidates_carry_declared_defaults():
+    result = compile_request(v2_request())
+    hgb = [spec for spec in result["candidate_specs"] if spec["family"] == "hgb"]
+    assert len(hgb) == 10  # 2 leaf counts x 5 feature sets
+    assert {spec["parameters"]["max_leaf_nodes"] for spec in hgb} == {7, 15}
+    for spec in hgb:
+        params = spec["parameters"]
+        assert params == {"max_leaf_nodes": params["max_leaf_nodes"],
+                          "learning_rate": 0.05, "min_samples_leaf": 20,
+                          "l2_regularization": 0.0, "loss": "squared_error",
+                          "max_iter": 500}
+
+
 def _wide_hgb_request():
     document = v2_request()
     document["space"]["hgb"] = {
@@ -195,6 +217,25 @@ def test_wide_hgb_grid_compiles_and_respects_candidate_cap():
     refuses(document)
 
 
+def test_wide_hgb_grid_loss_and_iter_axes_reach_candidate_recipes():
+    result = compile_request(_wide_hgb_request())
+    hgb = [spec for spec in result["candidate_specs"] if spec["family"] == "hgb"]
+    assert {(spec["parameters"]["loss"], spec["parameters"]["max_iter"])
+            for spec in hgb} == {("absolute_error", 300), ("absolute_error", 500),
+                                 ("squared_error", 300), ("squared_error", 500)}
+    for spec in hgb:
+        params = spec["parameters"]
+        recipe = regression_candidate_recipe(
+            "hgb", params, target_domain="signed",
+            columns=spec["feature_recipe"]["model_columns"],
+            feature_dictionary_hash=spec["feature_recipe"]["dictionary_hash"])
+        estimator = recipe["estimator"]["params"]
+        for name in ("learning_rate", "min_samples_leaf", "l2_regularization",
+                     "loss", "max_iter", "max_leaf_nodes"):
+            assert estimator[name] == params[name]
+        assert estimator["early_stopping"] is True
+
+
 def test_quantile_loss_request_compiles():
     document = v2_request()
     document["space"]["hgb"].update(loss=["quantile"], quantile=[0.1, 0.5])
@@ -203,6 +244,13 @@ def test_quantile_loss_request_compiles():
     assert result["request"]["space"]["hgb"]["loss"] == ["quantile"]
     assert result["request"]["space"]["hgb"]["quantile"] == [0.1, 0.5]
     assert result["counts"]["candidates"] == 65
+
+
+@pytest.mark.parametrize("quantile", [0.0, 1.0])
+def test_quantile_axis_outside_open_unit_interval_is_refused(quantile):
+    document = v2_request()
+    document["space"]["hgb"].update(loss=["quantile"], quantile=[quantile])
+    assert "quantile" in str(refuses(document))
 
 
 @pytest.mark.parametrize("path,value", [

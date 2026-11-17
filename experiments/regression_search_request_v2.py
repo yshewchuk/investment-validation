@@ -91,6 +91,9 @@ def _space(request):
             base._require(type(values) is list and 1 <= len(values) <= _MAX_AXIS_LENGTH,
                           "stage-2 grid axis length must be between 1 and 32")
             if family == "hgb" and axis == "loss":
+                base._require(not any(type(value) is str and value in ("gamma", "poisson")
+                                      for value in values),
+                    "stage-2 regression v2 HGB loss gamma and poisson do not support a signed target")
                 base._require(all(type(value) is str and value in hgb_losses("signed")
                                   for value in values) and values == sorted(set(values)),
                     "stage-2 HGB loss values must be known, unique and lexicographically ordered")
