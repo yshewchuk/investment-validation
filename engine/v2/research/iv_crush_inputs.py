@@ -71,7 +71,7 @@ def preflight_iv_crush_targets(repository, snapshot, *, as_of_month, event_ids):
 
 
 def skipped_iv_crush_targets(repository, snapshot, *, as_of_month, event_ids):
-    """Report events whose single committed target row is skipped, without reading labels."""
+    """Report events whose single identity-checked target row is skipped; only that flag is kept (the object is read, the label is not used)."""
     with progress.stage("IV target skip scan", report_refusals=True):
         _, plans, _ = _candidates(repository, snapshot, as_of_month, "selection", sorted(event_ids))
         skipped = {}
@@ -80,7 +80,12 @@ def skipped_iv_crush_targets(repository, snapshot, *, as_of_month, event_ids):
             decoded = [row for batch in repository.scan(request, table_name=IV_CRUSH_TABLE_NAME,
                                                         max_object_bytes=MAX_TARGET_OBJECT_BYTES)
                        for row in batch.to_pylist()]
-            if len(decoded) == 1 and decoded[0].get("skipped") is True:
+            if (len(decoded) != 1
+                    or decoded[0].get("event_date") != event.event_date.date().isoformat()
+                    or decoded[0].get("ticker") != event.ticker
+                    or decoded[0].get("session") != event.session):
+                raise errors.fail("EXPERIMENT_VARIANT_FAILED", "IV-crush label identity or availability is invalid")
+            if decoded[0].get("skipped") is True:
                 reason = decoded[0].get("skip_reason")
                 skipped[event.event_id] = reason if isinstance(reason, str) and reason else "skipped"
             reporter.tick()
