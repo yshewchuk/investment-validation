@@ -72,17 +72,17 @@ Sizes are estimated code lines / test lines / doc words (ARCHITECTURE contract t
 | Slice | Scope | Code / test / doc words | Depends on |
 | --- | --- | --- | --- |
 | S1a | Log-target recipes (3), validators, `candidate_recipe` key, estimator wrapping, fit evidence and diagnostics; panel-closure-hash test | ~170 / ~200 / 60 | none |
-| S1b | Request v14 + `LATEST`, `space.log_target`, counts and `max_fits` formula | ~130 / ~160 / 120 | S1a |
-| S2a | `selection.winner_rules`, plan keys, three-rule freeze and selection record | ~150 / ~180 / 80 | none |
+| S1b | Request v14 field block `space.log_target` (+ `LATEST` bump if first to merge), counts and `max_fits` formula | ~130 / ~160 / 120 | S1a |
+| S2a | `selection.winner_rules` field block (+ `LATEST` bump if first to merge), plan keys, three-rule freeze and selection record | ~150 / ~180 / 80 | none |
 | S2b | Per-candidate refit slots, multi-winner outer execution, collect, failure and crash-resume rules (a refit slot is committed once, replayed like today's `outer-*` records) | ~220 / ~250 / 100 | S2a |
 | S2c | Report `winners` rows, check share | ~120 / ~150 / 60 | S2b |
-| S3a | `blends` request field, profile table, `plan.blends`, counts | ~140 / ~150 / 100 | S1b, S2a |
+| S3a | `blends` request field, profile table, `plan.blends`, counts | ~140 / ~150 / 100 | P2 merged (S2c) |
 | S3b | Blend inner scoring in the freeze | ~120 / ~180 / 40 | S3a |
-| S3c | Blend outer refit by components, blend report rows, `blend_not_distributed` | ~150 / ~180 / 80 | S2c, S3b |
+| S3c | Blend outer refit by components, blend report rows, `blend_not_distributed` | ~150 / ~180 / 80 | S3b |
 
 Refusal codes: request and blend-resolution errors `INVALID_EXPERIMENT_SPEC`; misaligned component rows `EXPERIMENT_IDENTITY_CONFLICT`; a refit failure is `EXPERIMENT_VARIANT_FAILED` per unit.
 
-Order: S1a, S2a first (independent; S1b and S2a both touch the request/selection code, rebase small), then S1b, S2b, S2c, S3a, S3b, S3c. After S3c: fresh registration, panel snapshot reused, run. Each slice changes behaviour only for v14 requests that use its field, so v13 replay is unaffected. ARCHITECTURE text per slice: contract lines only, within the doc budget.
+Order (user 2026-11-17, faster delivery): track P1 = S1a, S1b (log-target) and track P2 = S2a, S2b, S2c (three winners) run in parallel, both branching from main right after this design merges. Their modules are disjoint (P1: engine recipes/fit, `magnitude_candidate_recipe.py`, `space.log_target`; P2: selection, trials, outer, report, `selection.winner_rules`). Each track owns its own v14 field block and validator section (`_log_target` and `_winner_rules` as separate functions in the request validator), so the schema bump does not race: whichever PR merges first carries the `LATEST` 13 to 14 bump, the second rebases once onto it. Track P3 = S3a, S3b, S3c (blends) depends on P2 only (components are base grid cells, not twins) and starts when P2 merges. No stacked PRs: every slice branches from and merges to main; within a track, the next slice starts after the previous merges. After the last slice: fresh registration, panel snapshot reused, run. Each slice changes behaviour only for v14 requests that use its field, so v13 replay is unaffected. ARCHITECTURE text per slice: contract lines only, within the doc budget.
 
 ## 7. Acceptance criteria
 
