@@ -8,7 +8,7 @@ Design only; no code. Contract text lands in the ARCHITECTURE files with the sli
 - No edit to any SIZE search module or any file in `source_closure(root, ["experiments/size_panel.py"])`, and no new module imported by that closure. Only new `size_pnl_*` modules and one `EXP-188_*` directory. S1 recomputes the closure hash before and after and requires equality.
 - Nothing enters `STRUCTURES` (`engine/structures.py:1414`), the registry or the board; the straddle rule lives in an experiment module and existing factories are only called.
 - The account cannot sell calls: short-vol books are the seven put-side structures; the straddle is long call + long put. No call-side short leg anywhere, baselines included.
-- Holdouts are never read: `ExperimentHoldouts.classify` (`engine/v2/foundation/experiment_holdouts.py:31`) drops member events at the reader before any quote or label read, counted by reason.
+- Holdouts are never read: `ExperimentHoldouts.classify` (`engine/v2/foundation/experiment_holdouts.py:31`) only labels events. Admission therefore uses the shared population admission and outcome-isolation checks (the research boundary in `engine/v2/research/ARCHITECTURE.md`) first; member and conflicting-sibling events are dropped before any quote or label read, counted by reason. Neither the chain loader nor any raw reader substitutes for it.
 - Marks come only from `engine/fills.py`'s alpha ladder (`FillModel.buy/sell`); ambiguous exits are conservative and labelled (section 6).
 - Every non-recorded run uses `--no-ledger` (a required CLI flag, as on the distribution and IV CLIs); the recorded run needs a PLANNED ledger row (section 7).
 
@@ -44,7 +44,7 @@ Consumes the sealed **SIZE v14** run (`guides/size_search_v14_design.md`, PR #25
 - **R3.** `pnl_sim.expected_pnl` seeds from `sha256(key|event_date)`; the experiment passes `key = event_id`, **identical for every model and every structure** (the draw depends on the key, date, pool and forecast, never on the structure, so one per-event simulation table reproduces `expected_pnl` for each structure exactly and the cost is not multiplied by seven). Every model draws the same random stream. The residuals drawn still differ because each model's pool differs; the shared stream reduces, not removes, simulation noise between models. Roster order and the bootstrap seed are fixed in the spec.
 - **R4.** Stage receipts (`inputs`, `inner`, `tuning`, `outer`) carry content hashes, are atomic and immutable; exact replay is read-only. A changed input under an existing receipt refuses `EXPERIMENT_IDENTITY_CONFLICT`; no repair. Intermediate arrays are disposable scratch under `/tmp`.
 - **R5.** `model_id = content_hash({source, candidate_id|blend_id|"size_v1_4", target_transform})`. The roster is sealed in the spec before any read; the spec hash is in the PLANNED row.
-- **R6.** Causality by **data dates**, never `computed_at`. Pool rows for an event dated D are events strictly before D whose labels had printed; the cutoff window is `[month_start - 6 months, month_start)`; tuning reads 2023/2024 only; the 2025 stage refuses to start without the immutable `tuning` receipt and reads no 2025 label until its decisions are written.
+- **R6.** Causality by **data dates**, never `computed_at`. Pool rows for an event dated D are events strictly before D whose labels had printed; the cutoff window is `[month_start - 6 months, month_start)`; tuning reads 2023/2024 only; the 2025 stage refuses to start without the immutable `tuning` receipt and freezes decisions **per month**: a month's decisions are written before that month's labels are read, and a decision may use only labels of events that had printed before the month began (the rolling pool and cutoff).
 
 ## 3. Pre-registered roster (no P&L-based search)
 
@@ -92,7 +92,7 @@ STR-THRU's registered gate is a trained GBM (EXP-105, -184), STR-RUNUP's a trail
 
 Neither rule fits anything or looks at a P&L.
 
-**Marks and ambiguous exits.** Every leg is priced with `FillModel(alpha).buy/sell`. Per-leg fallback, each step labelled in the row: (1) valid bid and ask: alpha mark; (2) zero-bid or wide (`FillModel.is_wide`): alpha 0 (worst) for that leg; (3) no usable exit quote, including crossed or locked (`FillModel` refuses those): the **structure** is marked at its worst-case payoff (zero for the straddle; the defined-risk floor for put structures), labelled `exit_unquoted_worst_case`. Tables report each model's share per rung, so geometry landing on thinly quoted strikes cannot hide; a sensitivity row drops rung 3.
+**Marks and ambiguous exits.** Every leg is priced with `FillModel(alpha).buy/sell`. Per-leg fallback, each step labelled in the row: (1) valid, non-wide, non-zero-bid quote: alpha mark; (2) zero-bid or wide (`FillModel.is_wide`): alpha 0 (worst) for that leg; (3) no usable exit quote, including crossed or locked (`FillModel` refuses those): the **structure** is marked at its worst-case payoff (zero for the straddle; the defined-risk floor for put structures), labelled `exit_unquoted_worst_case`. Tables report each model's share per rung, so geometry landing on thinly quoted strikes cannot hide; a sensitivity row drops rung 3.
 
 ## 7. Hypotheses, pre-registration and judgement
 
@@ -124,9 +124,9 @@ The 75% and 60% shares are **my judgement calls**, not derived; the report shows
 | Slice | Scope | Code lines / test lines / doc words | After |
 | --- | --- | --- | --- |
 | S1 | Scaffold EXP-188 (`spec.yaml` from this design, PLANNED row), prereg guard that cannot no-op, closure-hash test | ~100 / ~120 / 60 | - |
-| S2a | `size_pnl_inputs`: bind v14 plan/seal/panel, resolve roster, refusals | ~160 / ~180 / 80 | S1, v14 S2c |
+| S2a | `size_pnl_inputs`: bind v14 plan/seal/panel, resolve roster, refusals; order: check event ids against the sealed population, apply admission, read and hash `y` only for admitted rows (the hash also covers the admission result) | ~160 / ~180 / 80 | S1, v14 S2c |
 | S2b | Production and label readers, holdout drop, lead-1 check, per-model tables | ~140 / ~160 / 40 | S2a |
-| S3 | Ladder-quote table over the pinned snapshot, quarter-chunked, progress | ~150 / ~150 / 40 | S1 |
+| S3 | Ladder-quote table over the pinned snapshot, quarter-chunked, progress | ~150 / ~150 / 40 | S1, S2b (admitted keys only) |
 | S4 | Per-model pool, linear fast path, equivalence check | ~170 / ~180 / 40 | S2b, S3 |
 | S5 | Short-vol scoring: geometry, entry rule, marks and rung labels | ~170 / ~200 / 60 | S4 |
 | S6 | Divisor re-tune on inner, `tuning` receipt | ~110 / ~130 / 40 | S5 |
