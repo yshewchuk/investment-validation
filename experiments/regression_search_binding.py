@@ -20,15 +20,16 @@ _STORED_NAME = ("HMO", "HMOS", "HMOSX")
 _SKIP_SCANS = {}
 
 
-def _skipped_targets(repository, snapshot, month, event_ids):
-    """Plan reads recompute the scan; one process reads each (snapshot, month, ids) once."""
-    key = (snapshot.snapshot_id, month, tuple(sorted(event_ids)))
+def _skipped_targets(conn, store, repository, snapshot, month, event_ids):
+    """Plan reads recompute the scan; one process reads each (catalog, snapshot, month, ids) once."""
+    ids = tuple(sorted(event_ids))
+    key = (id(conn), id(store), snapshot.snapshot_id, month, ids)
     if key not in _SKIP_SCANS:
         if len(_SKIP_SCANS) >= 4:
             _SKIP_SCANS.pop(next(iter(_SKIP_SCANS)))
-        _SKIP_SCANS[key] = skipped_iv_crush_targets(repository, snapshot, as_of_month=month,
-                                                    event_ids=list(key[2]))
-    return dict(_SKIP_SCANS[key])
+        _SKIP_SCANS[key] = (conn, store, skipped_iv_crush_targets(
+            repository, snapshot, as_of_month=month, event_ids=list(ids)))
+    return dict(_SKIP_SCANS[key][2])
 
 
 def _require(condition):
@@ -103,7 +104,7 @@ def prepare_plan(conn, store, registration, request, *, target, comparison):
     label_exclusions = None
     if "target_snapshot" in binding:
         repository = Repository(conn, store, pin_snapshots=True)
-        excluded = _skipped_targets(repository,
+        excluded = _skipped_targets(conn, store, repository,
             from_document(SnapshotRef, binding["target_snapshot"]),
             binding["holdouts"]["holdout_as_of_month"], binding["event_ids"])
         folds = _apply_label_exclusions(folds, excluded)

@@ -446,6 +446,17 @@ def test_plan_seals_skipped_target_exclusions(prepared, monkeypatch):  # noqa: F
     _seal(data, registered, document)
     _seal(data, registered, document)
     assert len(calls) == 1
+    repository = SimpleNamespace()
+    snapshot = SimpleNamespace(snapshot_id="memo_scope_probe")
+    before = len(calls)
+    regression_search_binding._skipped_targets(
+        data.conn, data.store, repository, snapshot, "2026-01", ["a"])
+    regression_search_binding._skipped_targets(
+        data.conn, data.store, repository, snapshot, "2026-01", ["a"])
+    assert len(calls) == before + 1
+    regression_search_binding._skipped_targets(
+        data.conn, object(), repository, snapshot, "2026-01", ["a"])
+    assert len(calls) == before + 2
 
 
 def test_v2_requests_refused_by_size_cli_and_v2_run_cli(tmp_path, capsys):
