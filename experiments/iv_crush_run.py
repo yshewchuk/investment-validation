@@ -28,6 +28,7 @@ from experiments.magnitude_search_plan import _nested, seal_search_plan
 from experiments.magnitude_search_request_schema import regression_request_version
 from experiments.magnitude_search_request_versions import compile_request
 from experiments.memory_guard import rss_watchdog
+from experiments.native_gate_worker import read_native_staged_input
 from experiments.native_registration import read_native_registration, reserve_native_registration
 from experiments.regression_search_binding import panel_coverage
 from experiments.size_search import _contain, _run
@@ -45,7 +46,7 @@ def _input(path):
 def _event_ids(path):
     """Operator-supplied event ids are strict invalid input, not a storage outage."""
     try:
-        raw = open(path, "rb").read(1048577)
+        raw = read_native_staged_input(path)
     except OSError:
         raise fail("INVALID_EXPERIMENT_SPEC", "IV event-id file is unavailable") from None
     if len(raw) > 1048576:
@@ -102,8 +103,6 @@ def main(argv=None):
         parser.error("preflight/register require scope, target-snapshot-id, training-start and labels-before")
     if not fresh and not args.plan_ref:
         parser.error("seal/run/report require plan-ref")
-    if args.event_ids and not fresh:
-        parser.error("--event-ids applies only to preflight/register")
     if any("\0" in (getattr(args, name) or "") for name in ("spec", "request", "catalog", "store_root", "plan_ref", "event_ids")):
         parser.error("IV paths must not contain NUL characters")
     conn, started, stack = None, time.monotonic(), ExitStack()
@@ -111,9 +110,11 @@ def main(argv=None):
         request = _input(args.request)
         if regression_request_version(request.get("schema_version")) not in (1, 2):
             raise fail("INVALID_EXPERIMENT_SPEC", "IV requires its closed regression request")
-        if args.event_ids and regression_request_version(request.get("schema_version")) != 2:
+        if args.event_ids is not None and not fresh:
+            raise fail("INVALID_EXPERIMENT_SPEC", "--event-ids applies only to preflight/register")
+        if args.event_ids is not None and regression_request_version(request.get("schema_version")) != 2:
             raise fail("INVALID_EXPERIMENT_SPEC", "--event-ids requires a regression v2 request")
-        event_ids = _event_ids(args.event_ids) if args.event_ids else None
+        event_ids = _event_ids(args.event_ids) if args.event_ids is not None else None
         schedule = compile_request(request)
         try:
             memory = _contain(request)

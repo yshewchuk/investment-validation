@@ -1,5 +1,6 @@
 """regression_search_request.v2 compile, dispatch, binding by version (P1)."""
 import json
+import os
 from types import SimpleNamespace
 
 import pytest
@@ -417,8 +418,9 @@ def test_event_ids_rejected_outside_preflight_register_and_v1(tmp_path, capsys):
     common = ["--spec", str(tmp_path / "spec.json"), "--request", str(tmp_path / "request.json"),
               "--catalog", str(tmp_path / "catalog.sqlite"), "--store-root", str(tmp_path / "store"),
               "--plan-ref", str(tmp_path / "ref.json"), "--no-ledger"]
-    with pytest.raises(SystemExit):
-        iv_crush_run.main(["seal", *common, "--event-ids", str(event_ids)])
+    (tmp_path / "request.json").write_text(json.dumps(v2_request()))
+    assert iv_crush_run.main(["seal", *common, "--event-ids", str(event_ids)]) == 2
+    assert "applies only to preflight/register" in capsys.readouterr().out
     (tmp_path / "request.json").write_text(json.dumps(v1_cli_request()))
     assert iv_crush_run.main(["preflight", "--spec", str(tmp_path / "spec.json"),
         "--request", str(tmp_path / "request.json"), "--catalog", str(tmp_path / "catalog.sqlite"),
@@ -426,6 +428,26 @@ def test_event_ids_rejected_outside_preflight_register_and_v1(tmp_path, capsys):
         "--training-start", "2010-01-01", "--labels-before", "2026-01-15",
         "--event-ids", str(event_ids), "--no-ledger"]) == 2
     assert "--event-ids requires a regression v2 request" in capsys.readouterr().out
+    (tmp_path / "request.json").write_text(json.dumps(v2_request()))
+    assert iv_crush_run.main(["preflight", "--spec", str(tmp_path / "spec.json"),
+        "--request", str(tmp_path / "request.json"), "--catalog", str(tmp_path / "catalog.sqlite"),
+        "--store-root", str(tmp_path / "store"), "--scope", "s", "--target-snapshot-id", "t",
+        "--training-start", "2010-01-01", "--labels-before", "2026-01-15",
+        "--event-ids", "", "--no-ledger"]) == 2
+    assert "INVALID_EXPERIMENT_SPEC" in capsys.readouterr().out
+
+
+def test_event_ids_refuses_symlink_and_fifo(tmp_path):
+    real = tmp_path / "real.txt"
+    real.write_bytes(b"a\n")
+    link = tmp_path / "link.txt"
+    link.symlink_to(real)
+    fifo = tmp_path / "fifo"
+    os.mkfifo(fifo)
+    for path in (link, fifo):
+        with pytest.raises(OpsError) as refused:
+            iv_crush_run._event_ids(path)
+        assert refused.value.code == "INVALID_EXPERIMENT_SPEC"
 
 
 def test_prepare_passes_event_ids_for_v2_only(monkeypatch):
