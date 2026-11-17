@@ -371,7 +371,8 @@ def _execute_admitted(conn, store, repository, registration, plan, fold, selecti
         resolved = resolved_limits(conn, store, registration, plan, limits)
     result = run_fitted_trial(source, fold, plan, execution, resolved, progress)
     succeeded = result.get("event") == "succeeded"
-    failed_pending_ok = len(pending) in (0, 1) if chosen != overall else len(pending) == 1
+    # On winner_rules plans the overall winner may have failed before any horizon start, refusing with EXPERIMENT_VARIANT_FAILED; legacy plans are unchanged.
+    failed_pending_ok = len(pending) in (0, 1) if per_candidate(plan) else len(pending) == 1
     if ((succeeded and (pending or len(fits) != len(expected)
                         or not _timed_shape(result, {"event", "forecasts"} | diagnostic_keys(binding), untimed=regression)))
             or (not succeeded and (not _timed_shape(result, {"event"}, untimed=regression)

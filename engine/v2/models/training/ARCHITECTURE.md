@@ -28,6 +28,8 @@ The refresh requires the current event, forecast/residual, option-chain and cand
 
 ## 4. Outputs
 
+The three magnitude recipes (ElasticNet, spline ElasticNet, MLP) take `target_transform="none"|"log1p"`; `none` keeps the `.v1` bytes and ids, `log1p` emits a `.v2` schema recording an `expm1` back-transform with squared loss on the transformed scale (the MLP chains it before its `StandardScaler`). Validators refuse a `.v2` recipe with `none` and a `.v1` one with `log1p`. Fits wrap the estimator in `TransformedTargetRegressor`; results and diagnostics add `target_transform: "log1p"`, and ElasticNet `coefficient_scale` becomes `standardized_inputs_log1p_target`. A non-finite `expm1` is an ordinary non-finite-prediction failure.
+
 A `magnitude_elasticnet_spline_recipe.v1` recipe is fitted by `fit_elasticnet_predictions` with the spline validator: imputer, then the checked quantile B-spline step on the recipe's columns, in parallel with the unchanged missing indicator, then scaler and ElasticNet (`precompute: True`). Quantile-knot ties, a non-finite basis and nonconvergence raise `EXPERIMENT_VARIANT_FAILED` with no retry. Coefficient evidence orders value, spline, then missing-indicator entries. Spline fits log a bounded stderr line (first fit, then every hundredth).
 
 Jobs publish identity/summary JSON and per-fold receipts, estimators and optional predictions through `fold_store`. Numeric APIs return detached predictions/evidence, never files: MLP v1 includes recipe hash, one component, convergence, iterations, learned width and standardized-target optimizer loss; inverse-transformed finite predictions clip at zero. Signed regression policies retain signed outputs. Builders return artifacts for caller-owned release assembly.

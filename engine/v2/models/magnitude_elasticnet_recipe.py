@@ -7,8 +7,12 @@ import re
 
 from engine.v2.foundation import canonical_json
 
-__all__ = ["elasticnet_recipe", "validate_elasticnet_recipe",
+__all__ = ["LOG1P_TARGET", "elasticnet_recipe", "validate_elasticnet_recipe",
            "regression_elasticnet_recipe", "validate_regression_elasticnet_recipe"]
+
+LOG1P_TARGET = {"kind": "log1p", "inverse": "expm1",
+                "statistic": "median_if_log_residuals_symmetric",
+                "loss": "squared_error_on_transformed"}
 
 _ALPHA_BOUNDS = (1e-6, 1000.0)
 _L1_RATIO_BOUNDS = (1e-6, 1.0)
@@ -24,8 +28,11 @@ def _bounded_number(value, bounds) -> bool:
         return False
 
 
-def elasticnet_recipe(*, columns, feature_dictionary_hash, alpha, l1_ratio) -> dict:
+def elasticnet_recipe(*, columns, feature_dictionary_hash, alpha, l1_ratio,
+                      target_transform="none") -> dict:
     """Bind a caller-admitted ordered subset; its dictionary membership is external."""
+    if type(target_transform) is not str or target_transform not in ("none", "log1p"):
+        raise ValueError("ElasticNet target_transform must be 'none' or 'log1p'")
     if (not isinstance(columns, (list, tuple)) or not columns
             or any(not isinstance(name, str) or not re.fullmatch(r"[a-z][a-z0-9_]*", name)
                    for name in columns) or len(set(columns)) != len(columns)):
@@ -37,8 +44,11 @@ def elasticnet_recipe(*, columns, feature_dictionary_hash, alpha, l1_ratio) -> d
             or not _bounded_number(l1_ratio, _L1_RATIO_BOUNDS)):
         raise ValueError(
             "ElasticNet parameters must be finite numeric values within declared bounds")
+    log1p = target_transform == "log1p"
     return {
-        "schema_version": "magnitude_elasticnet_recipe.v1", "model": "elasticnet",
+        "schema_version": ("magnitude_elasticnet_recipe.v2" if log1p
+                           else "magnitude_elasticnet_recipe.v1"),
+        "model": "elasticnet",
         "features": list(columns), "feature_dictionary_hash": feature_dictionary_hash,
         "estimator": {"class": "ElasticNet", "params": {
             "alpha": float(alpha), "l1_ratio": float(l1_ratio), "fit_intercept": True,
@@ -51,7 +61,8 @@ def elasticnet_recipe(*, columns, feature_dictionary_hash, alpha, l1_ratio) -> d
             "scaler": {"with_mean": True, "with_std": True},
             "output_features": 2 * len(columns),
         },
-        "target_transform": "none", "prediction_projection": "clip_zero",
+        "target_transform": dict(LOG1P_TARGET) if log1p else "none",
+        "prediction_projection": "clip_zero",
         "fit_scope": "fold_and_horizon", "numerical_threads": 1,
         "nonconvergence": "variant_failure_no_retry",
     }
@@ -64,7 +75,9 @@ def validate_elasticnet_recipe(recipe) -> dict:
         params = recipe["estimator"]["params"]
         expected = elasticnet_recipe(columns=recipe["features"],
             feature_dictionary_hash=recipe["feature_dictionary_hash"],
-            alpha=params["alpha"], l1_ratio=params["l1_ratio"])
+            alpha=params["alpha"], l1_ratio=params["l1_ratio"],
+            target_transform=("log1p" if recipe["schema_version"]
+                              == "magnitude_elasticnet_recipe.v2" else "none"))
         if canonical_json(recipe) == canonical_json(expected):
             return expected
     except (KeyError, TypeError, ValueError, OverflowError, RecursionError):

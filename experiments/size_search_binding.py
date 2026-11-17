@@ -35,6 +35,7 @@ from experiments.native_registration import (
     prepare_native_registration,
     verify_native_registration,
 )
+from experiments.size_blend_profiles import blend_records, resolve_blends
 from experiments.size_comparator import COLUMNS
 from experiments.size_comparator import candidate_recipe as size_candidate_recipe
 from experiments.size_comparator import recipe as comparison_recipe
@@ -306,6 +307,7 @@ def prepare_plan(conn, store, registration, request, *, plan_schema=None):
     if plan_schema == PLAN_V3:
         _shared_inner(folds)
     candidates = []
+    candidate_id_by_spec = {}
     source_binding_id = (content_hash(json.loads(registration.binding_json)["size_panel"])
                          if binding["schema_version"] == "native_experiment_registration.v1.7"
                          else content_hash(binding["size_panel"]))
@@ -315,7 +317,9 @@ def prepare_plan(conn, store, registration, request, *, plan_schema=None):
                              feature_dictionary_hash=spec["feature_recipe"]["dictionary_hash"]))
         identity = {"recipe": recipe, "feature_recipe": spec["feature_recipe"],
                     "source_binding_id": source_binding_id, "candidate_spec_id": spec["candidate_spec_id"]}
-        candidates.append({**identity, "candidate_id": content_hash(identity)})
+        candidate = {**identity, "candidate_id": content_hash(identity)}
+        candidates.append(candidate)
+        candidate_id_by_spec[spec["candidate_spec_id"]] = candidate["candidate_id"]
     requested_selection = schedule["request"].get("selection")
     if requested_selection is None:
         selection_contract = {"metric": "inner_pooled_rmse", "ties": LEGACY_TIE_RULE, "retries": 0,
@@ -348,6 +352,9 @@ def prepare_plan(conn, store, registration, request, *, plan_schema=None):
         "horizons": schedule["horizons"], "candidate_count": schedule["counts"]["candidates"],
         "planned_fit_count": schedule["counts"]["search_fits"], "counts": schedule["counts"],
         "selection": selection_contract}
+    if schedule["request"].get("blends"):
+        resolved = resolve_blends(schedule["request"]["blends"], schedule["candidate_specs"])
+        identity["blends"] = blend_records(resolved, candidate_id_by_spec)
     return {**identity, "plan_id": content_hash(identity)}
 
 

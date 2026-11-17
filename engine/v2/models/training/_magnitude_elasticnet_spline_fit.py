@@ -33,14 +33,21 @@ def log_spline_fit(recipe, elapsed):
             f"elapsed={elapsed:.2f}s rss_mb={rss_mb:.1f}\n")
 
 
+def is_log1p(recipe):
+    return type(recipe["target_transform"]) is dict
+
+
 def is_spline(recipe):
-    return recipe["schema_version"].endswith("elasticnet_spline_recipe.v1")
+    return recipe["schema_version"].endswith(
+        ("elasticnet_spline_recipe.v1", "elasticnet_spline_recipe.v2"))
 
 
 def select_validator(recipe):
     return (validate_elasticnet_spline_recipe
             if type(recipe) is dict
-            and recipe.get("schema_version") == "magnitude_elasticnet_spline_recipe.v1"
+            and recipe.get("schema_version") in (
+                "magnitude_elasticnet_spline_recipe.v1",
+                "magnitude_elasticnet_spline_recipe.v2")
             else validate_elasticnet_recipe)
 
 

@@ -171,13 +171,25 @@ def _limits(value):
 
 def _specifications(request, request_id, recipe=panel_recipe):
     specs = []
+    log_target = request["space"].get("log_target", {})
     for subset in request["feature_sets"]:
         feature_recipe = recipe(subset)
         for family, axes in request["space"].items():
+            if family == "log_target":
+                continue
             names = sorted(axes)
             for values in itertools.product(*(axes[name] for name in names)):
                 spec = {"family": family, "feature_recipe": feature_recipe,
                         "parameters": dict(zip(names, values))}
+                specs.append({**spec, "candidate_spec_id": content_hash({"request_id": request_id, **spec})})
+        for family in sorted(log_target):
+            axes = log_target[family]
+            names = sorted(axes)
+            for values in itertools.product(*(axes[name] for name in names)):
+                parameters = dict(zip(names, values))
+                parameters["target"] = "log1p_median"
+                spec = {"family": family, "feature_recipe": feature_recipe,
+                        "parameters": parameters}
                 specs.append({**spec, "candidate_spec_id": content_hash({"request_id": request_id, **spec})})
     return sorted(specs, key=lambda spec: spec["candidate_spec_id"])
 

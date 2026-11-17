@@ -92,7 +92,7 @@ from experiments.magnitude_candidate_recipe import candidate_recipe
 from experiments.magnitude_candidate_fit import fit_candidate
 value = candidate_recipe('mlp', {'profile':'relu32_l2_0p01'}, columns=['x'],
                          feature_dictionary_hash='sha256:' + '1' * 64)
-value['schema_version'] = 'magnitude_mlp_recipe.v2'
+value['schema_version'] = 'magnitude_mlp_recipe.v3'
 try:
     fit_candidate(value, None, None, None, columns=None)
 except ValueError:

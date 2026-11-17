@@ -1,6 +1,6 @@
 # SIZE search v14: median-trained EN/MLP, three winners, fixed blends (design)
 
-Design only; no code in this PR. Contract text lands in the ARCHITECTURE files with the slice that changes it (both are near their growth ceiling).
+Design document; the code lands in the slices of section 6. Contract text lands in the ARCHITECTURE files with the slice that changes it (both are near their growth ceiling).
 
 **Constraint (user 2026-11-17).** The restarted v12 full run is held until this lands. It reuses the stored v12 panel snapshot unchanged. No slice edits `experiments/size_panel.py`, `derived_features.py` or any of the 150 files in `source_closure(root, ["experiments/size_panel.py"])` (closure hash prefix `b286c0f3` at the pin), and no new module may be imported by that closure. Every file named below was checked to be outside it. Acceptance test (S1): recompute that closure hash before and after and require equality. The search/registration closure does change, so the run needs a fresh experiment id and registration; the panel snapshot is reused.
 
@@ -37,7 +37,7 @@ Design only; no code in this PR. Contract text lands in the ARCHITECTURE files w
 | `selection.extra_refits` | P2 | Optional (user 2026-11-17), pre-registered. A sorted unique list of candidate ids that get an outer-year refit in addition to the winners. Request compile checks only shape (sorted, unique, 64-hex strings; needs `winner_rules`); plan build resolves each id against the compiled grid, and an unknown id is `INVALID_EXPERIMENT_SPEC`. Ids are recipe hashes, so the list is run config, not code. Sealed as `plan.selection.extra_refits`. Extra units are deduped against winners at run time, share the per-candidate refit slots and the failure semantics of section 4, are never selected from outer results, and enter no rule. |
 | `blends` | P3 | Optional sorted unique list of names from the code table `{"size_b1_v1", "size_b2_v1"}`. Each profile resolves its components against the compiled grid (section 5); a component with no matching compiled candidate, or whose feature set is not in `feature_sets`, refuses. Blends require both `selection` and `selection.winner_rules` (refused otherwise with `INVALID_EXPERIMENT_SPEC`), since component refit slots exist only under `winner_rules`. |
 
-Counts. `counts.blends` is reported. Blends cost no inner fits, so `max_candidates` is unchanged. Outer refits rise: `fits = leads x (candidates x inner_folds + outer_folds x R)` with `R = 3` plus the number of distinct blend components when blends are declared (without `winner_rules` only the overall winner is refit, so `R = 1`; blends require `selection` and are reachable only with `winner_rules`, so a blend request always has `R >= 3 + components`). `max_fits` must cover it. For the intended run: 129 candidates, 2 inner years, one outer year, `R = 3 + 4 = 7`, so `leads x 265` (the interrupted request's caps of 105/315 must be raised). `extra_refits` adds its list length to `R` (a worst-case bound; dedupe against winners happens at run time), so the EXP-188 config below gives `R = 3 + 4 + 6 = 13` at most.
+Counts. `counts.blends` is reported. Blends cost no inner fits, so `max_candidates` is unchanged. Outer refits rise: `fits = leads x (candidates x inner_folds + outer_folds x R)` with `R = 3` plus the number of distinct blend components plus 1 (the best-single refit, section 5) when blends are declared (without `winner_rules` only the overall winner is refit, so `R = 1`; blends require `selection` and are reachable only with `winner_rules`, so a blend request always has `R >= 3 + components + 1`). `max_fits` must cover it. For the intended run: 129 candidates, 2 inner years, one outer year, `R = 3 + 4 + 1 = 8`, so `leads x 266` (the interrupted request's caps of 105/315 must be raised). `extra_refits` adds its list length to `R` (a worst-case bound; dedupe against winners happens at run time), so the EXP-188 config below gives `R = 8 + 6 = 14` at most.
 
 Plan. The plan schema stays `magnitude_search_plan.v3`. Keys appear only for v14 requests that use them: `plan.blends` (below), `plan.selection.winner_rules` and `plan.selection.rule_metrics = {overall: blend_score, rmse: normalized.rmse, mae: normalized.mae}`. `read_search_plan` reconstructs under the current contract, so a v13 plan and every v13 receipt stay byte-identical (acceptance test). Candidate ids change under v14 anyway (the request id is in the spec id), so nothing from the interrupted attempt is reusable.
 
@@ -66,6 +66,8 @@ Inner scoring. After an outer fold's candidate loop, for each blend the freeze a
 
 Outer. A blend winner refits each component through the per-candidate refit slots above and averages the stored refit forecasts per (event, horizon), clip-zero as a no-op guard. A component refit failure fails the blend winner (section 4 failure rule). A blend record stores component refit references and the averaged forecast id.
 
+Best single model (user 2026-11-17). When a plan has blends, the run always also refits the best non-blend candidate under the overall rule (lowest `blend_score` among non-blend candidates, lowest `candidate_id` on exact ties) on each outer year, so the report shows single model vs blend vs incumbent even when blends win all three rules. It is a derived refit unit, not a request field: it exists exactly when `plan.blends` does, is deduped against the winners, the blend components and `extra_refits` (fitted once if it is already one of them), shares the per-candidate refit slots and the failure semantics of section 4, enters no rule and never reselects. The selection record names it per outer year as `best_non_blend_id`. The report lists it as a secondary `winners` row with `kind: candidate` and `rules: []` unless it also wins a rule. S3a only counts it in `R`; S3c implements it.
+
 ## 6. Split list
 
 Sizes are estimated code lines / test lines / doc words (ARCHITECTURE contract text). Code target about 150, limit about 300.
@@ -78,9 +80,9 @@ Sizes are estimated code lines / test lines / doc words (ARCHITECTURE contract t
 | S2b | Per-candidate refit slots (including the `v2_magnitude_search_run` driver that enumerates outer keys), multi-winner outer execution, collect, failure and crash-resume rules (a refit slot is committed once, replayed like today's `outer-*` records) | ~220 / ~250 / 100 | S2a |
 | S2b-x | `selection.extra_refits` request field, plan resolution against the compiled grid, `R` and `max_fits` counts. S2b's refit units already read `plan.selection.extra_refits`, so this adds no execution code. Its own PR immediately after S2b (size; user decision 2026-11-17) | ~60 / ~90 / 40 | S2b |
 | S2c | Report `winners` rows, check share | ~120 / ~150 / 60 | S2b |
-| S3a | `blends` request field, profile table, `plan.blends`, counts | ~140 / ~150 / 100 | P2 merged (S2c) |
+| S3a | `blends` request field, profile table, `plan.blends`, counts | ~140 / ~150 / 100 | S2a (started early, user 2026-11-17; rebases once after S2b/S2c) |
 | S3b | Blend inner scoring in the freeze | ~120 / ~180 / 40 | S3a |
-| S3c | Blend outer refit by components, blend report rows, `blend_not_distributed` | ~150 / ~180 / 80 | S3b |
+| S3c | Blend outer refit by components, best-single refit (section 5), blend report rows, `blend_not_distributed` | ~190 / ~220 / 100 | S3b |
 
 Refusal codes: request and blend-resolution errors `INVALID_EXPERIMENT_SPEC`; misaligned component rows `EXPERIMENT_IDENTITY_CONFLICT`; a refit failure is `EXPERIMENT_VARIANT_FAILED` per unit.
 

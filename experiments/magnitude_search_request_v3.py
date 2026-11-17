@@ -10,6 +10,8 @@ from experiments.magnitude_search_refits import outer_refit_bound
 from experiments.magnitude_search_request_schema import (
     allows_hgb_axes, allows_neural, allows_size_family, request_version,
     uses_chrono_neural_profiles, uses_extended_neural_profiles)
+from experiments.size_blend_profiles import (
+    distinct_component_count, resolve_blends, validate_blends)
 
 __all__ = ["compile_request"]
 
@@ -117,6 +119,13 @@ def _selection(request, horizons, version):
     _winner_rules(request, policy, version)
 
 
+def _blends(request, blends):
+    blends = validate_blends(blends)
+    v2._require("selection" in request and "winner_rules" in request["selection"],
+                "stage-2 blends require selection.winner_rules")
+    request["blends"] = list(blends)
+
+
 def _finite_positive(value):
     if type(value) not in (int, float) or value <= 0:
         return False
@@ -133,6 +142,53 @@ def _finite_nonnegative(value):
         return math.isfinite(float(value))
     except (OverflowError, ValueError):
         return False
+
+
+def _log_target(value, canonical):
+    v2._require(type(value) is dict and bool(value),
+                "stage-2 log_target must be a nonempty object")
+    v2._require(set(value) <= {"elasticnet", "mlp"},
+                "stage-2 log_target names an unknown family")
+    result = {}
+    for family in sorted(value):
+        v2._require(family in canonical,
+                    "stage-2 log_target requires its base family grid")
+        base = canonical[family]
+        supplied = value[family]
+        v2._require(type(supplied) is dict and set(supplied) == set(base),
+                    "stage-2 log_target axes differ from the base grid")
+        family_grid = {}
+        for axis in sorted(base):
+            values = supplied[axis]
+            v2._require(type(values) is list and bool(values),
+                        "stage-2 log_target axis must be a nonempty list")
+            if axis == "profile":
+                v2._require(all(type(item) is str for item in values)
+                            and values == sorted(set(values)),
+                            "stage-2 log_target MLP profiles must be unique"
+                            " and lexicographically ordered")
+                v2._require(all(item in base[axis] for item in values),
+                            "stage-2 log_target profile is not in the base grid")
+                family_grid[axis] = list(values)
+            elif axis == "spline_knots":
+                v2._require(all(type(item) is int for item in values),
+                            "stage-2 log_target spline_knots values must be integers")
+                v2._require(values == sorted(values) and len(set(values)) == len(values),
+                            "stage-2 log_target axes must be strictly increasing")
+                v2._require(all(item in base[axis] for item in values),
+                            "stage-2 log_target spline_knots is not in the base grid")
+                family_grid[axis] = list(values)
+            else:
+                v2._require(all(type(item) in (int, float) for item in values),
+                            "stage-2 log_target grid values must be numbers")
+                values = [float(item) for item in values]
+                v2._require(values == sorted(values) and len(set(values)) == len(values),
+                            "stage-2 log_target axes must be strictly increasing")
+                v2._require(all(item in base[axis] for item in values),
+                            "stage-2 log_target grid value is not in the base grid")
+                family_grid[axis] = values
+        result[family] = family_grid
+    return result
 
 
 def _space(request):
@@ -153,6 +209,10 @@ def _space(request):
     space = request["space"]
     version = request["schema_version"]
     version_number = request_version(version)
+    has_log_target = False
+    if version_number >= 14 and type(space) is dict and "log_target" in space:
+        log_target = space.pop("log_target")
+        has_log_target = True
     families = (_FAMILIES_V6 if allows_neural(version_number)
                 else _FAMILIES_V5 if allows_size_family(version_number)
                 else _FAMILIES_V4 if allows_hgb_axes(version_number) else _FAMILIES)
@@ -255,6 +315,8 @@ def _space(request):
             lower, upper = _BOUNDS[(family, axis)]
             v2._require(all(lower <= value <= upper for value in values),
                         "stage-2 grid values exceed their allowed bounds")
+    if has_log_target:
+        canonical["log_target"] = _log_target(log_target, canonical)
     request["space"] = canonical
 
 
@@ -268,7 +330,11 @@ def _counts(request, horizons):
             and "HMO" in request["feature_sets"])
     count = int(size) + len(request["feature_sets"]) * sum(
         math.prod(len(values) for values in axes.values())
-        for family, axes in request["space"].items() if family != "size_v1_4")
+        for family, axes in request["space"].items()
+        if family not in ("size_v1_4", "log_target"))
+    count += len(request["feature_sets"]) * sum(
+        math.prod(len(values) for values in axes.values())
+        for axes in request["space"].get("log_target", {}).values())
     if allows_hgb_axes(request_version(request["schema_version"])):
         v2._require(count <= _MAX_V4_CANDIDATES,
                     "stage-2 v6 and later grid exceeds the 1000-candidate ceiling"
@@ -276,7 +342,10 @@ def _counts(request, horizons):
                     else "stage-2 v4/v5 grid exceeds the 1000-candidate ceiling")
     inners, outers = sum(map(len, inner.values())), len(outer)
     lead_count = len(horizons)
-    fits = lead_count * (count * inners + outers * outer_refit_bound(request.get("selection")))
+    # design section 3: winner refits (+ extra_refits) plus, when blends are declared, their components and the best-single refit
+    outer_units = (outer_refit_bound(request.get("selection"))
+                   + (distinct_component_count(request["blends"]) + 1 if "blends" in request else 0))
+    fits = lead_count * (count * inners + outer_units * outers)
     baseline_logical_fits = lead_count * outers
     baseline_component_fits = 2 * lead_count * outers
     extra_components = lead_count * (inners + outers) if size else 0
@@ -299,6 +368,10 @@ def compile_request(request, *, horizons=(5, 3, 1)):
     except (ValueError, TypeError, OverflowError, RecursionError):
         raise fail("INVALID_EXPERIMENT_SPEC", "stage-2 request requires plain finite JSON") from None
     version = request.get("schema_version") if type(request) is dict else None
+    has_blends = (type(request) is dict and "blends" in request
+                  and request_version(version) is not None and request_version(version) >= 14)
+    if has_blends:
+        blends = request.pop("blends")
     request_keys = set(request) if type(request) is dict else set()
     v2._require((version == "magnitude_search_request.v3"
                  and request_keys in (v2._KEYS, v2._KEYS | {"selection"},
@@ -313,17 +386,23 @@ def compile_request(request, *, horizons=(5, 3, 1)):
     v2.validate_workers(request)
     request.pop("workers", None)
     _selection(request, horizons, request_version(version))
+    if has_blends:
+        _blends(request, blends)
     v2._references(request, recipe=_hash_recipe(request_version(version)))
     _space(request)
     counts = _counts(request, horizons)
+    if has_blends:
+        counts["blends"] = len(request["blends"])
     v2._comparison(request["comparison"], counts)
     v2._limits(request["limits"])
     request_id = content_hash(request)
+    specs = [s for s in v2._specifications(request, request_id,
+        recipe=qualified_panel_recipe if request_version(version) >= 9 else v2.panel_recipe)
+        if s["family"] != "size_v1_4" or s["feature_recipe"]["subset"] == "HMO"]
+    if has_blends:
+        resolve_blends(request["blends"], specs)
     result = {"schema_version": "magnitude_search_schedule.v2", "request": request,
-        "request_id": request_id, "horizons": list(horizons),
-        "candidate_specs": [s for s in v2._specifications(request, request_id,
-            recipe=qualified_panel_recipe if request_version(version) >= 9 else v2.panel_recipe)
-            if s["family"] != "size_v1_4" or s["feature_recipe"]["subset"] == "HMO"],
+        "request_id": request_id, "horizons": list(horizons), "candidate_specs": specs,
         "schedule": [{"outer_year": year, "inner_years": request["inner_years"][year]}
                      for year in request["outer_years"]], "counts": counts}
     return json.loads(json.dumps(result, sort_keys=True, allow_nan=False))

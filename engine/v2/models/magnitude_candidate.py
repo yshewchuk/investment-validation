@@ -9,10 +9,11 @@ def magnitude_candidate_family(recipe):
     schema, model = recipe.get("schema_version"), recipe.get("model")
     if type(schema) is not str or type(model) is not str:
         raise ValueError(message)
-    if schema in ("magnitude_elasticnet_recipe.v1",
-                  "magnitude_elasticnet_spline_recipe.v1") and model == "elasticnet":
+    if schema in ("magnitude_elasticnet_recipe.v1", "magnitude_elasticnet_recipe.v2",
+                  "magnitude_elasticnet_spline_recipe.v1",
+                  "magnitude_elasticnet_spline_recipe.v2") and model == "elasticnet":
         return "elasticnet"
-    if schema == "magnitude_mlp_recipe.v1" and model == "mlp":
+    if schema in ("magnitude_mlp_recipe.v1", "magnitude_mlp_recipe.v2") and model == "mlp":
         return "mlp"
     if schema == "magnitude_ridge_hgb_recipe.v1" and model in ("history_ridge", "history_hgb"):
         return "ridge_hgb"

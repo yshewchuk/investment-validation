@@ -24,8 +24,11 @@ def _mlp_diagnostics(diagnostics, recipe, horizons):
     chrono_profile = recipe["profile"].startswith("chrono")
     chrono_cap = chrono_profile and max_iter == 400
     allowed_cap = fixed_budget and (not chrono_profile or chrono_cap)
+    log1p = recipe["schema_version"] == "magnitude_mlp_recipe.v2"
     expected = {"schema_version", "recipe_id", "horizon_sessions", "component_fits",
                 "converged", "n_iter", "input_features", "loss", "loss_scale"}
+    if log1p:
+        expected.add("target_transform")
     if type(diagnostics) is not list or len(diagnostics) != len(horizons):
         raise ValueError
     for item, horizon in zip(diagnostics, horizons):
@@ -38,6 +41,7 @@ def _mlp_diagnostics(diagnostics, recipe, horizons):
                 or (item["converged"] is False
                     and (not allowed_cap or item["n_iter"] != max_iter))
                 or item["loss_scale"] != "standardized_target"
+                or (log1p and item["target_transform"] != "log1p")
                 or type(item["n_iter"]) is not int
                 or not 1 <= item["n_iter"] <= max_iter
                 or type(item["input_features"]) is not int
@@ -59,7 +63,8 @@ def evidence(result, execution, horizons, inputs=None, fold=None):
         diagnostics, recipe = result["diagnostics"], execution["fit_recipe"]
         if (recipe.get("model") == "mlp"
                 or recipe.get("schema_version") in (
-                    "magnitude_mlp_recipe.v1", "regression_mlp_recipe.v1")):
+                    "magnitude_mlp_recipe.v1", "magnitude_mlp_recipe.v2",
+                    "regression_mlp_recipe.v1")):
             regression = recipe.get("schema_version") == "regression_mlp_recipe.v1"
             required = ("regression_candidate_execution.v1" if regression
                         else "size_candidate_execution.v1")
@@ -78,8 +83,13 @@ def evidence(result, execution, horizons, inputs=None, fold=None):
         for item, horizon in zip(diagnostics, horizons):
             expected = {"schema_version", "recipe_id", "horizon_sessions"}
             elastic = recipe["model"] == "elasticnet"
+            log1p = recipe.get("schema_version") in (
+                "magnitude_elasticnet_recipe.v2",
+                "magnitude_elasticnet_spline_recipe.v2")
             if elastic:
                 expected |= {"coefficients", "coefficient_scale", "selected_columns", "intercept", "converged", "n_iter", "dual_gap"}
+                if log1p:
+                    expected.add("target_transform")
             prefix = "regression" if execution["schema_version"] == "regression_candidate_execution.v1" else "magnitude"
             schema = prefix + ("_elasticnet_fit.v1" if elastic else "_ridge_hgb_fit.v1")
             if (set(item) != expected or item["horizon_sessions"] != horizon or item["schema_version"] != schema
@@ -90,11 +100,15 @@ def evidence(result, execution, horizons, inputs=None, fold=None):
                 layout = (spline_coefficient_layout(recipe)
                           if recipe.get("schema_version") in (
                               "magnitude_elasticnet_spline_recipe.v1",
+                              "magnitude_elasticnet_spline_recipe.v2",
                               "regression_elasticnet_spline_recipe.v1")
                           else [(kind, column) for kind in ("value", "missing_indicator")
                                 for column in recipe["features"]])
+                scale = ("standardized_inputs_log1p_target" if log1p
+                         else "standardized_inputs")
                 if ([(e["kind"], e["column"]) for e in entries] != layout or item["converged"] is not True
-                        or item["coefficient_scale"] != "standardized_inputs" or type(item["n_iter"]) is not int
+                        or item["coefficient_scale"] != scale or type(item["n_iter"]) is not int
+                        or (log1p and item["target_transform"] != "log1p")
                         or not 0 <= item["n_iter"] <= 10000):
                     raise ValueError
                 numbers = [item["intercept"], item["dual_gap"], *[e["coefficient"] for e in entries]]
