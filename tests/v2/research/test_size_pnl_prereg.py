@@ -4,6 +4,7 @@ import ast
 import csv
 import importlib.util
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -198,6 +199,44 @@ def test_ledger_missing_a_column_is_ledger_malformed(tmp_path):
     ledger = _write_ledger(tmp_path / "LEDGER.csv", [_planned_row(_digest(spec))],
                            columns=columns)
     assert refusal(lambda: _check(tmp_path, spec, ledger)) == "ledger_malformed"
+
+
+def test_fifo_spec_is_spec_unreadable_and_returns_promptly(tmp_path):
+    spec = tmp_path / "spec.yaml"
+    os.mkfifo(spec)
+    assert refusal(lambda: _check(tmp_path, spec, tmp_path / "LEDGER.csv")) == "spec_unreadable"
+
+
+def test_oversized_spec_is_spec_unreadable(tmp_path):
+    spec = tmp_path / "spec.yaml"
+    spec.write_text("id: EXP-188\npad: '" + "a" * (1 << 20) + "'\n")
+    assert refusal(lambda: _check(tmp_path, spec, tmp_path / "LEDGER.csv")) == "spec_unreadable"
+
+
+def test_directory_as_ledger_is_ledger_malformed(tmp_path):
+    spec = _write_spec(tmp_path)
+    ledger = tmp_path / "ledger_dir"
+    ledger.mkdir()
+    assert refusal(lambda: _check(tmp_path, spec, ledger)) == "ledger_malformed"
+
+
+def test_huge_second_run_log_line_does_not_block_a_valid_first_line(tmp_path):
+    spec = _write_spec(tmp_path)
+    ledger = _write_ledger(tmp_path / "LEDGER.csv", [_planned_row(_digest(spec))])
+    first = json.dumps({"ts": "2026-11-17T21:00:00+00:00"})
+    _write_run_log(tmp_path, first + "\n" + "x" * (1 << 20) + "\n")
+    receipt = _check(tmp_path, spec, ledger)
+    assert receipt["spec_hash_checked"] is True
+    assert receipt["first_run_ts"].startswith("2026-11-17 21:00:00")
+
+
+def test_register_planned_without_stamp_refuses_and_writes_no_row(tmp_path):
+    spec = _write_spec(tmp_path, drop=("preregistered_at",))
+    ledger = tmp_path / "LEDGER.csv"
+    reason = refusal(lambda: size_pnl_prereg.register_planned(
+        spec_path=spec, ledger_path=ledger, today="2026-11-17"))
+    assert reason == "preregistered_at_missing"
+    assert not ledger.exists()
 
 
 # --------------------------------------------------------------------------

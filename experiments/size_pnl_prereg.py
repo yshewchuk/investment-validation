@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Pre-registration guard for EXP-188 (SIZE decision-level P&L re-score).
 
-``engine.evaluate`` sets ``spec_hash_checked=False`` and does not fail when no
-PLANNED row exists, so a plain run would silently skip the registration check.
+``engine.evaluate`` records ``spec_hash_checked=False`` when no PLANNED row
+exists and does not refuse the run, so a plain run would silently skip the
+registration check.
 This guard fails closed instead: every path either returns a receipt whose
 ``spec_hash_checked`` is True, or raises an ``OpsError``. It never returns a
 receipt that says the check was skipped.
@@ -14,7 +15,10 @@ from __future__ import annotations
 
 import argparse
 import csv
+import io
 import json
+import os
+import stat
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -34,10 +38,41 @@ def _refuse(reason, message):
                 details={"reason": reason})
 
 
+def _read_bounded(path, limit, *, first_line=False) -> str:
+    """Read a regular file without blocking on FIFOs and without reading past ``limit``.
+
+    With ``first_line`` the text is cut at the first newline and the size check is
+    skipped, so a grown log is never read in full. Callers catch OSError/ValueError.
+    """
+    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise ValueError(f"not a regular file: {path}")
+        if not first_line and st.st_size > limit:
+            raise ValueError(f"file larger than {limit} bytes: {path}")
+        chunks = []
+        remaining = limit
+        while remaining > 0:
+            chunk = os.read(fd, min(remaining, 1 << 16))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+    finally:
+        os.close(fd)
+    data = b"".join(chunks)
+    if first_line:
+        data = data.split(b"\n", 1)[0]
+    return data.decode("utf-8")
+
+
 def _load(spec_path):
     """Return ``(spec, hash)`` for a readable EXP-188 spec mapping, else refuse."""
     try:
-        spec = lib.load_spec(spec_path)
+        spec = yaml.safe_load(_read_bounded(spec_path, 1 << 20))
+        if not isinstance(spec, dict):
+            raise ValueError("spec did not parse to a mapping")
     except (OSError, ValueError, yaml.YAMLError):
         raise _refuse("spec_unreadable", "spec is missing, unparseable or not a mapping") from None
     if spec.get("id") != EXPERIMENT_ID:
@@ -50,13 +85,16 @@ def _planned_hashes(ledger_path):
     path = Path(ledger_path)
     if not path.exists():
         return []
-    with path.open(newline="", encoding="utf-8") as handle:
-        reader = csv.DictReader(handle)
-        header = reader.fieldnames or []
-        if any(column not in header for column in lib.LEDGER_COLUMNS):
-            raise _refuse("ledger_malformed", "ledger header lacks a required column")
-        return [row.get("spec_hash") for row in reader
-                if row.get("id") == EXPERIMENT_ID and row.get("stage") == "planned"]
+    try:
+        text = _read_bounded(path, 16 << 20)
+    except (OSError, ValueError):
+        raise _refuse("ledger_malformed", "ledger is unreadable or not a regular file") from None
+    reader = csv.DictReader(io.StringIO(text, newline=""))
+    header = reader.fieldnames or []
+    if any(column not in header for column in lib.LEDGER_COLUMNS):
+        raise _refuse("ledger_malformed", "ledger header lacks a required column")
+    return [row.get("spec_hash") for row in reader
+            if row.get("id") == EXPERIMENT_ID and row.get("stage") == "planned"]
 
 
 def _parse_ts(value):
@@ -75,22 +113,29 @@ def _parse_ts(value):
 
 
 def _first_run_ts(run_log_path):
-    """The ``ts`` of the first non-blank run-log line, or None if the log is empty."""
+    """The ``ts`` of the first run-log line, or None if that line is blank or the log is empty."""
     try:
-        lines = [line for line in
-                 Path(run_log_path).read_text(encoding="utf-8").splitlines() if line.strip()]
+        first = _read_bounded(run_log_path, 1 << 16, first_line=True)
     except (OSError, ValueError):
         raise _refuse("run_log_malformed", "run log is unreadable") from None
-    if not lines:
+    if not first.strip():
         return None
     try:
-        record = json.loads(lines[0])
+        record = json.loads(first)
     except ValueError:
         record = None
     stamp = _parse_ts(record.get("ts")) if isinstance(record, dict) else None
     if stamp is None:
         raise _refuse("run_log_malformed", "first run-log line carries no parseable ts")
     return stamp
+
+
+def _checked_stamp(spec):
+    """The parsed ``preregistered_at`` of the spec, or refuse if it is missing or unparseable."""
+    prereg = _parse_ts(spec.get("preregistered_at"))
+    if prereg is None:
+        raise _refuse("preregistered_at_missing", "spec has no parseable preregistered_at")
+    return prereg
 
 
 def require_preregistration(spec_path=SPEC_PATH, ledger_path=None, run_log_path=None) -> dict:
@@ -112,9 +157,7 @@ def require_preregistration(spec_path=SPEC_PATH, ledger_path=None, run_log_path=
     if planned[0] != digest:
         raise _refuse("spec_hash_mismatch", "spec differs from its PLANNED row")
 
-    prereg = _parse_ts(spec.get("preregistered_at"))
-    if prereg is None:
-        raise _refuse("preregistered_at_missing", "spec has no parseable preregistered_at")
+    prereg = _checked_stamp(spec)
 
     first_ts = None
     if run_log.exists():
@@ -133,7 +176,8 @@ def require_preregistration(spec_path=SPEC_PATH, ledger_path=None, run_log_path=
 def register_planned(spec_path=SPEC_PATH, ledger_path=None, today=None) -> bool:
     """Append the PLANNED row once. True if appended, False if already registered."""
     ledger = lib.LEDGER_PATH if ledger_path is None else ledger_path
-    _, digest = _load(spec_path)
+    spec, digest = _load(spec_path)
+    _checked_stamp(spec)
     planned = _planned_hashes(ledger)
     if planned == [digest]:
         return False
