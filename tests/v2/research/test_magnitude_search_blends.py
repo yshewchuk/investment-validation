@@ -130,6 +130,12 @@ def test_differing_absolute_move_pct_raises_identity_conflict():
     assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
 
 
+def test_empty_component_rows_raise_identity_conflict():
+    with pytest.raises(OpsError) as caught:
+        average_component_rows([])
+    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+
+
 def test_duplicate_lead1_event_ids_raise_identity_conflict():
     components = [[_lead("a0", 12.0, 9.0), _lead("a0", 12.0, 10.0)], [_lead("a0", 12.0, 11.0)]]
     with pytest.raises(OpsError) as caught:

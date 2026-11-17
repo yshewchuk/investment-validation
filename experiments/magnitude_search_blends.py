@@ -21,6 +21,8 @@ def average_component_rows(component_rows):
     raise fail("EXPERIMENT_IDENTITY_CONFLICT", "blend component rows do not align on events and targets").
     Return rows sorted by event_id: {"event_id", "horizon_sessions": 1, "absolute_move_pct": <target>,
     "predicted_absolute_move_pct": math.fsum(preds in component order)/len(components)}."""
+    if not component_rows:
+        raise _conflict()
     maps = []
     for rows in component_rows:
         by_id = _lead1(rows)
