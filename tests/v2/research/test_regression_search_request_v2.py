@@ -19,6 +19,7 @@ from experiments import native_registration as native
 from experiments import size_search
 from experiments import v2_magnitude_search_run
 from experiments.magnitude_search_request_versions import compile_request
+from experiments.magnitude_search_selection import CURRENT_TIE_RULE
 from experiments.regression_search_binding import panel_coverage, stored_columns
 from tests.v2.research.magnitude_trial_support import catalog_rows
 from tests.v2.research.test_iv_crush_registration import prepared  # noqa: F401
@@ -237,6 +238,7 @@ def test_binding_on_real_plan_path(prepared, capsys):  # noqa: F811
     assert _seal(data, registered, document) == sealed
     assert v1_plan["selection"]["metric"] == "inner_pooled_rmse"
     assert plan["selection"]["metric"] == "blend_rmse_mae"
+    assert plan["selection"]["ties"] == CURRENT_TIE_RULE
     assert plan["horizons"] == [1] and plan["counts"]["candidates"] == 22
     assert {candidate["feature_recipe"]["subset"] for candidate in plan["candidates"]} == {"HMO", "HMOS"}
     assert all(candidate["recipe"]["target_domain"] == "signed" for candidate in plan["candidates"])
