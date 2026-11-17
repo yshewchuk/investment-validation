@@ -27,7 +27,7 @@ Rejected: combining stored member forecasts at scoring time. It needs every memb
 - The feature set is the candidate spec's (`H` to `HMOSX`), as for every family. A new profile is a later one-constant change plus a request bump.
 - `magnitude_candidate_family` gains the `(magnitude_blend_recipe.v1, blend)` pair and the `(magnitude_ridge_hgb_recipe.v3, history_hgb)` pair (S1; the dispatcher rejects v3 today); `fit_candidate` dispatches to `engine/v2/models/training/magnitude_blend.py`, which calls the existing member fitters on the same `FitInputs` and averages. Selection, inner/outer folds, rmse/mae/large-move metrics and the #2401 metrics are untouched because a trial still yields one forecast array.
 
-## 3. Failure semantics (R1-R6)
+## 3. Failure semantics (R1-R6; the blend-specific parts of R1-R5 are superseded by `size_search_v14_design.md`, the seed-bagging parts stay)
 
 - **R1 member failure.** Any member error (HGB, EN non-convergence, non-finite, shape) fails the whole trial, propagating the member's own exception unchanged (members raise `ValueError`; the blend adds no refusal code and the trial layer records it as it records the same error from a single candidate). No partial average, no reweighting, no retry. A failed blend trial is handled as any single candidate's failed trial today (distribution reports `trial_failed`).
 - **R2 memory/CPU.** Members, and the seeds inside an HGB member, fit one at a time, single-threaded; peak = the largest member plus one prediction vector per finished member, freed after the mean. Nothing is retained beyond the single stored forecast.
