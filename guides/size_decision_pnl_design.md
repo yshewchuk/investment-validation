@@ -1,6 +1,6 @@
 # SIZE decision-level P&L re-score (design)
 
-Design only; no code. Contract text lands in the ARCHITECTURE files with the slice that changes a contract (net-zero: both docs are at their word ceiling). Experiment id **EXP-188** (next free: the local ledger ends at EXP-187, no open PR claims it; S1 re-checks).
+Design; S1 (PR #2570) adds the scaffold and guard, later slices add the rest. Contract text lands in the ARCHITECTURE files with the slice that changes a contract (net-zero: both docs are at their word ceiling). Experiment id **EXP-188** (next free: the local ledger ends at EXP-187, no open PR claims it; S1 re-checks).
 
 **Question (user, 2026-11-17).** Short-vol structures have capped loss and set strike width from the forecast, so they may prefer a *median* forecast (MAE-like). Long straddles pay for the tail, so they may prefer a *mean* forecast (RMSE-like). Does decision P&L agree? A SEPARATE experiment: it reads stored SIZE predictions and scores the trading decisions they produce, selects nothing for SIZE and feeds no P&L back into it.
 
@@ -61,7 +61,7 @@ Fixed before any run; none is chosen from P&L. Winner identities come from the v
 | Pair E | spline ElasticNet, HMOSXLP, alpha 0.03, l1_ratio 0.75, knots 6: raw (E-raw, mean) vs `log1p` twin (E-log, median if log residuals are symmetric) | only the target changes |
 | Pair N | MLP `chrono15_relu64x32_l2_1`, HMOSXLP: raw (N-raw) vs `log1p` twin (N-log) | only the target changes |
 
-At most 12 distinct models. Pair cells are fixed grid cells in the v14 design (B1's EN, an HGB loss, B1's MLP profile), not score-chosen. **Gap**: v14 refits only winners and blend components for 2025, so the pairs have no stored 2025 forecast unless v14 adds them (Decision 1). The primary H1/H2 test is the three matched pairs; M2-vs-M3 (differs in more than loss) and the M0/M1/M4/M5 rows are secondary, unadjusted for multiplicity, and never re-select anything.
+At most 12 distinct models. Pair cells are fixed grid cells in the v14 design (B1's EN, an HGB loss, B1's MLP profile), not score-chosen. **Gap, closed (Decision 1 = a)**: v14 refits only winners and blend components for 2025; the six pair members come from v14's pre-registered `selection.extra_refits` (v14 S2b, PR #2565), not from a refit here. The primary H1/H2 test is the three matched pairs; M2-vs-M3 (differs in more than loss) and the M0/M1/M4/M5 rows are secondary, unadjusted for multiplicity, and never re-select anything.
 
 The v14 log1p caveat applies: a log-target forecast is the median only if log residuals are symmetric. Every table reports `actual_above_forecast_share` per model (about 0.5 supports the median reading) and the mean forecast ratio median-type/mean-type, since geometry reacts to level.
 
@@ -70,7 +70,7 @@ The v14 log1p caveat applies: a log-target forecast is the median only if log re
 Reusing production's pool would bias the test: its residuals pair with production's forecast, so another forecast lands in the wrong decile and draws the wrong error. For each model m the experiment builds its own `ResidualPool` (unmodified) from rows `(event_date, pred_m, err_move_m = abs_move - pred_m, err_crush = crush_pct_iv30 - pred_iv_crush_30)`, `dropna` as in `Scorer._residual_pool` (`engine/score.py:3739`), strictly earlier events, the same decile rule and `MIN_POOL`.
 
 - **Common support.** Candidates have stored predictions only from 2023; production has 2018 onward. Primary arm: **every model, production included, uses only events dated 2023-01-01 or later**, so pool size and burn-in are equal. Sensitivity arm (labelled): production with its native full-history pool; the gap shows how much of production's edge is pool length.
-- **Burn-in.** An event is undetermined until its pool has `MIN_POOL` rows and its cutoff has 100 prior-window scores, so scoring starts in 2023H2 for all models alike. Events undetermined under any roster model leave the **paired population E** for all models (counts per quarter). A (model, structure) with fewer than 300 selected inner trades skips tuning, labelled (section 5).
+- **Burn-in.** An event is undetermined until its pool has `MIN_POOL` rows and its cutoff has 100 prior-window scores, so scoring starts in 2023H2 for all models alike. Events undetermined under any roster model leave the **paired population E** for all models (counts per quarter). A model with fewer than 300 selected inner trades pooled over the seven structures skips tuning (`c` = 1), labelled (section 5).
 - **Fast path.** As in EXP-133 (`build.py`), expected P&L is linear in the legs: simulate once per (model, event) the mean exit value of a single put at each listed ladder strike (about 45); every (structure, width) is then a dot product. The runner first checks equivalence against `pnl_sim.expected_pnl` and `price_structure` on a fixed sample and aborts above 1e-9.
 
 ## 5. Short-vol scoring and geometry divisors
@@ -79,7 +79,7 @@ Per (model, event, structure): forecast, width by `forecast_sizing` (declined if
 
 Two geometry arms, both pre-registered:
 - **As-is.** Registered divisors and bounds: what the board does.
-- **Re-tuned.** A multiplier `c` on each structure's divisor, grid `{0.75, 0.9, 1.0, 1.1, 1.25, 1.5}`, chosen **per (model, structure)** on 2023/2024 by the primary metric through the full entry rule with the cutoff recomputed per `c`, ties to `c` nearest 1, frozen in the `tuning` receipt and applied unchanged to 2025. A median forecast is lower, hence narrower wings, so as-is partly tests the forecast's *scale*; re-tuning removes scale and asks about *shape*.
+- **Re-tuned.** A multiplier `c` on every structure's divisor, grid `{0.75, 0.9, 1.0, 1.1, 1.25, 1.5}`, chosen **once per model, pooled over the seven structures** (Decision 5, settled) on 2023/2024 by the primary metric (summed flat-dollar P&L over the seven books) through the full entry rule with the cutoff recomputed per `c`, ties to `c` nearest 1, frozen in the `tuning` receipt and applied unchanged to 2025. A median forecast is lower, hence narrower wings, so as-is partly tests the forecast's *scale*; re-tuning removes scale and asks about *shape*. Why one `c`: live DYN-SV uses one fixed width per structure (forecast divided by a divisor, `engine/forecast_sizing.py`); EXP-133's per-event width search was falsified (it overfit, widened the universe about 2.6x and did worse); EXP-137's chosen widths clustered at 1.3-1.7x forecast and the live divisors are the conservative end. So the re-tune only asks where in that band each model's forecast should sit; per (model, structure) `c` would add 7x the freedom for no live counterpart.
 
 Primary metric: **flat-dollar P&L per candidate event** in E (non-trades count 0), lots by `CAPITAL_PER_TRADE` whole lots as in `portfolio.py`, alpha 0.5; the alpha grid {0, 0.25, 0.5, 0.75, 1} is reported. Secondary: return per taken trade, trade count, hit rate, share declined by width.
 
@@ -137,10 +137,10 @@ The 75% and 60% shares are **my judgement calls**, not derived; the report shows
 
 S1 and S8a can start in parallel (S3 waits for S2b's admitted keys); each slice changes behaviour only inside the new experiment.
 
-## 10. Decisions for the user
+## 10. Decisions (settled by the user, 2026-11-17)
 
-1. **2025 forecasts for the matched pairs (blocking).** v14 stores 2025 forecasts only for refit units. (a, default) amend v14 S2b/S3 with a small pre-registered `extra_refits` list, the six pair members, before v14's plan is sealed (six more outer refits); (b) score pairs on inner 2023/2024 only and test 2025 on winners/blends, weakening H1/H2; (c) this experiment refits the six itself via the public refit API: most cost, edges toward the SIZE search. A sealed plan cannot be extended later.
-2. **Consistency thresholds.** 75% / 60% quarter shares and 90% intervals, or stricter?
-3. **Chooser and trained straddle gate.** Out of scope here. Follow-up scoring DYN-SV and a refit STR-THRU gate per forecast model (default: no)?
-4. **Pool length.** Primary uses common 2023+ support (default), or production's native pool as primary?
-5. **Re-tune breadth.** Per (model, structure) `c` (default), or one `c` per model pooled over the seven structures (less overfit, less flexible)?
+1. **2025 forecasts for the matched pairs: (a).** The six pair members come from v14's pre-registered `selection.extra_refits` (v14 S2b, PR #2565). A pair member missing from the sealed v14 plan makes its pair `not_testable` (R1); this experiment never refits.
+2. **Consistency thresholds: the design defaults.** 75% / 60% quarter shares, 90% intervals (section 7).
+3. **Scope.** The DYN-SV chooser and the STR-THRU trained gate are OUT of EXP-188. Pre-registered **conditional follow-up**: if H1 or H2 is judged Clear or Directional, a per-model chooser retrain (and, for long vol, a STR-THRU gate refit) must run BEFORE any board change. No forecast swap reaches the board on per-structure evidence alone, because the chooser and gate were trained on the production forecast's features.
+4. **Pool length: the design default.** Common 2023+ support is primary; production's native pool is the labelled sensitivity arm (section 4).
+5. **Re-tune breadth: one `c` per model**, pooled over the seven structures (section 5 gives the rationale).
