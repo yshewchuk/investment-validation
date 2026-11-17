@@ -79,7 +79,8 @@ def prepare_plan(conn, store, registration, request, *, target, comparison):
         "candidates": sorted(candidates, key=lambda candidate: candidate["candidate_id"]),
         "horizons": schedule["horizons"], "candidate_count": schedule["counts"]["candidates"],
         "planned_fit_count": schedule["counts"]["search_fits"], "counts": schedule["counts"],
-        "selection": {"metric": "inner_pooled_rmse" if version == 1 else "blend_rmse_mae", "ties": "candidate_id_ascending", "retries": 0,
+        "selection": {"metric": "inner_pooled_rmse" if version == 1 else "blend_rmse_mae",
+            "ties": "candidate_id_ascending" if version == 1 else "lowest_score_then_candidate_id_ascending", "retries": 0,
             "outer": "frozen_selected_only", "final_read_authority": "none"}}
     return {**identity, "plan_id": content_hash(identity)}
 
