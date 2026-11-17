@@ -1,5 +1,7 @@
 # SIZE averaged candidates: seed bagging and the HGB+elastic-net blend (design)
 
+**Superseded for blends (2026-11-17):** blend candidates are now specified in `size_search_v14_design.md` (fixed profiles scored from stored component predictions); decision 2 and section 2 below no longer apply. Seed bagging is unchanged and unbuilt.
+
 Design only; no code in this PR. The contract stays in this guide; the two ARCHITECTURE files are at their growth ceiling (section 5).
 
 **Evidence (exploratory, not promotion evidence).** `stack.py`/`stack1.out` (owner inputs outside the repo, `/root/agent-ops/owner_inputs/size_stack_1112/`, 2026-11-12): yearly folds `range(2018, 2025)`, i.e. 2018-2024, so 2025 is not an outer fold, direct parquet reads (reference only; the pipeline reads none). Averaging 5 HGB fits that differ only in `random_state`: RMSE -0.1% vs one fit, better in 6/7 years (the owner's seed-only figure; `stack1.out` shows only the combined tuned-trees-plus-5-seeds row, F vs E -0.26% RMSE). Averaging that HGB (gamma, 31 leaves, lr 0.03, min_samples_leaf 300) with an elastic net (alpha 0.01, l1_ratio 0.75) on the same features: a further -0.19% RMSE, better 7/7 years, but MAE +0.8%. So the blend is a candidate to compare, never a default. The official search scores both levers and decides.

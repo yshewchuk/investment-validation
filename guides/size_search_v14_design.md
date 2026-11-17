@@ -19,7 +19,7 @@ Design only; no code in this PR. Contract text lands in the ARCHITECTURE files w
 
 ## 2. P1: log-target recipes (engine)
 
-- Recipes. `elasticnet_recipe`, `elasticnet_spline_recipe` and `mlp_recipe` take `target_transform="none"|"log1p"`. `none` emits today's bytes (schema `.v1`, unchanged ids). `log1p` emits a new schema (`magnitude_elasticnet_recipe.v2`, `magnitude_elasticnet_spline_recipe.v2`, `magnitude_mlp_recipe.v2`) with `target_transform: {"kind": "log1p", "inverse": "expm1", "statistic": "median", "loss": "squared_error_on_transformed"}`. Validators rebuild from fields and require canonical equality (existing pattern); a v2 recipe with `none` or a v1 recipe with `log1p` refuses.
+- Recipes. `elasticnet_recipe`, `elasticnet_spline_recipe` and `mlp_recipe` take `target_transform="none"|"log1p"`. `none` emits today's bytes (schema `.v1`, unchanged ids). `log1p` emits a new schema (`magnitude_elasticnet_recipe.v2`, `magnitude_elasticnet_spline_recipe.v2`, `magnitude_mlp_recipe.v2`) with `target_transform: {"kind": "log1p", "inverse": "expm1", "statistic": "median_if_log_residuals_symmetric", "loss": "squared_error_on_transformed"}`. Validators rebuild from fields and require canonical equality (existing pattern); a v2 recipe with `none` or a v1 recipe with `log1p` refuses. For the MLP the existing `StandardScaler` target stage stays; `log1p` is applied before it (`target_transform.then: "StandardScaler"`). Refusals: invalid request fields are `INVALID_EXPERIMENT_SPEC`; invalid recipes raise `ValueError` as today.
 - Candidate parameters. A twin carries `target: "log1p_median"`; base candidates omit it, so base recipe ids are unchanged. `candidate_recipe._keys_ok` admits the extra key for elasticnet (plain and spline) and mlp only; HGB with it refuses.
 - Fit. EN: the pipeline is wrapped in `TransformedTargetRegressor`; coefficient evidence reads `model.regressor_[-1]` and `coefficient_scale` becomes `standardized_inputs_log1p_target`. MLP standard and chrono paths use the chained transformer (chrono early stopping then scores on the transformed, standardized scale, which is the trained scale). `size_fit_diagnostics.evidence` accepts the new schemas and fields; the fit result gains `target_transform: "log1p"`.
 - Failure semantics. (a) Labels are already required finite and nonnegative, so `log1p` is defined. (b) A non-finite `expm1` (overflow) raises `ValueError`, the same path as any non-finite prediction: variant failure, no clipping to hide it, no retry. (c) An all-zero training target gives a constant transformed target; sklearn's scalers guard zero variance, EN returns zero coefficients and the forecast is 0. It is not special-cased and scores normally. (d) Non-convergence is unchanged (`variant_failure_no_retry` for EN, the profile's own rule for MLP).
@@ -36,7 +36,7 @@ Design only; no code in this PR. Contract text lands in the ARCHITECTURE files w
 | `selection.winner_rules` | P2 | Optional; if present exactly `["overall", "rmse", "mae"]` (closed registered value, like the weights). Absent means overall only. |
 | `blends` | P3 | Optional sorted unique list of names from the code table `{"size_b1_v1", "size_b2_v1"}`. Each profile resolves its components against the compiled grid (section 5); a component with no matching compiled candidate, or whose feature set is not in `feature_sets`, refuses. Blends need `selection` (they are scored by it). |
 
-Counts. `counts.blends` is reported. Blends cost no inner fits, so `max_candidates` is unchanged. Outer refits rise: `fits = leads x (candidates x inner_folds + outer_folds x R)` with `R = 3` plus the number of distinct blend components when blends are declared (`R = 1` for a request without `winner_rules`). `max_fits` must cover it. For the intended run: 129 candidates, 2 inner years, one outer year, `R = 3 + 4 = 7`, so `leads x 265` (the interrupted request's caps of 105/315 must be raised).
+Counts. `counts.blends` is reported. Blends cost no inner fits, so `max_candidates` is unchanged. Outer refits rise: `fits = leads x (candidates x inner_folds + outer_folds x R)` with `R = 3` plus the number of distinct blend components when blends are declared (without `winner_rules` only the overall winner is refit, so `R = 1`; blends require `selection` and are reachable only with `winner_rules`, so a blend request always has `R >= 3 + components`). `max_fits` must cover it. For the intended run: 129 candidates, 2 inner years, one outer year, `R = 3 + 4 = 7`, so `leads x 265` (the interrupted request's caps of 105/315 must be raised).
 
 Plan. The plan schema stays `magnitude_search_plan.v3`. Keys appear only for v14 requests that use them: `plan.blends` (below), `plan.selection.winner_rules` and `plan.selection.rule_metrics = {overall: blend_score, rmse: normalized.rmse, mae: normalized.mae}`. `read_search_plan` reconstructs under the current contract, so a v13 plan and every v13 receipt stay byte-identical (acceptance test). Candidate ids change under v14 anyway (the request id is in the spec id), so nothing from the interrupted attempt is reusable.
 
@@ -54,31 +54,33 @@ Report (`size_search_report.collect`). `report["paired"]` stays the overall winn
 
 Profiles (code constant in a new `experiments/size_blend_profiles.py`, outside the panel closure), all equal weight, all on HMOSXLP:
 
-- `size_b1_v1` = {spline EN alpha 0.03, l1_ratio 0.75, spline_knots 6; HGB absolute_error, leaves 15, min_samples_leaf 300; HGB squared_error, leaves 15, min_samples_leaf 1000; MLP [64, 32] alpha 1}.
+- `size_b1_v1` = {spline EN alpha 0.03, l1_ratio 0.75, spline_knots 6; HGB absolute_error, leaves 15, min_samples_leaf 300; HGB squared_error, leaves 15, min_samples_leaf 1000; MLP profile per Decision B (default `chrono15_relu64x32_l2_1`)}.
 - `size_b2_v1` = B1 minus the spline EN.
 
 Checked against the interrupted v13 request (`space`: EN alpha {0.003, 0.01, 0.03, 0.1}, l1 {0.25, 0.75}, knots {0, 6}; HGB lr 0.03, l2 10, max_iter 3000, losses {absolute_error, gamma, squared_error}, leaves {7, 15}, msl {300, 1000}; MLP chrono profiles): the EN and both HGB components are exact grid cells. The MLP is ambiguous: `chrono10_relu64x32_l2_1` and `chrono15_relu64x32_l2_1` both match (Decision B). The profile table names the exact profile.
 
 Identity. `blend_id = content_hash({profile, aggregation: "equal_mean", component_candidate_ids (sorted)})`, sealed in `plan.blends` with `defined_from: "interrupted_v12_inner_2023_2024"` and `inner_scores_optimistic: true`. B1/B2 were defined after seeing the interrupted attempt's inner years 2023/2024, so their inner scores are optimistic and likely to win the inner rules; only the outer 2025 result is a fair test.
 
-Inner scoring. After an outer fold's candidate loop, for each blend the freeze averages the four (three) components' stored lead-1 rows per event in sorted component-id order with `math.fsum`, then calls the same `score_rows` against the cached history rows, pooled and per year. Retained state is lead-1 rows of the component candidates only, dropped after the outer fold. Blends enter all three rules next to ordinary candidates. If any component trial failed in any inner year, the blend is excluded (failed-candidate rule). Rows that do not align on event ids and targets across components mean corrupted evidence: refuse `EXPERIMENT_IDENTITY_CONFLICT`, not exclusion.
+Inner scoring. After an outer fold's candidate loop, for each blend the freeze averages the four (three) components' stored lead-1 rows per event in sorted component-id order with `math.fsum`, then scores them with the freeze's local `score_rows` wrapper of `blended_event_score` against the cached history rows, pooled and per year. Retained state is lead-1 rows of the component candidates only, dropped after the outer fold. Blends enter all three rules next to ordinary candidates. If any component trial failed in any inner year, the blend is excluded (failed-candidate rule). Rows that do not align on event ids and targets across components mean corrupted evidence: refuse `EXPERIMENT_IDENTITY_CONFLICT`, not exclusion.
 
 Outer. A blend winner refits each component through the per-candidate refit slots above and averages the stored refit forecasts per (event, horizon), clip-zero as a no-op guard. A component refit failure fails the blend winner (section 4 failure rule). A blend record stores component refit references and the averaged forecast id.
 
 ## 6. Split list
 
-Sizes are estimated non-test code lines. Targets are about 150, limit about 300.
+Sizes are estimated code lines / test lines / doc words (ARCHITECTURE contract text). Code target about 150, limit about 300.
 
-| Slice | Scope | Code | Depends on |
+| Slice | Scope | Code / test / doc words | Depends on |
 | --- | --- | --- | --- |
-| S1a | Log-target recipes (3), validators, `candidate_recipe` key, estimator wrapping, fit evidence and diagnostics; panel-closure-hash test | ~170 | none |
-| S1b | Request v14 + `LATEST`, `space.log_target`, counts and `max_fits` formula | ~130 | S1a |
-| S2a | `selection.winner_rules`, plan keys, three-rule freeze and selection record | ~150 | none |
-| S2b | Per-candidate refit slots, multi-winner outer execution, collect, failure rules | ~220 | S2a |
-| S2c | Report `winners` rows, check share, report tests | ~120 | S2b |
-| S3a | `blends` request field, profile table, `plan.blends`, counts | ~140 | S1b, S2a |
-| S3b | Blend inner scoring in the freeze | ~120 | S3a |
-| S3c | Blend outer refit by components, blend report rows, `blend_not_distributed` | ~150 | S2c, S3b |
+| S1a | Log-target recipes (3), validators, `candidate_recipe` key, estimator wrapping, fit evidence and diagnostics; panel-closure-hash test | ~170 / ~200 / 60 | none |
+| S1b | Request v14 + `LATEST`, `space.log_target`, counts and `max_fits` formula | ~130 / ~160 / 120 | S1a |
+| S2a | `selection.winner_rules`, plan keys, three-rule freeze and selection record | ~150 / ~180 / 80 | none |
+| S2b | Per-candidate refit slots, multi-winner outer execution, collect, failure and crash-resume rules (a refit slot is committed once, replayed like today's `outer-*` records) | ~220 / ~250 / 100 | S2a |
+| S2c | Report `winners` rows, check share | ~120 / ~150 / 60 | S2b |
+| S3a | `blends` request field, profile table, `plan.blends`, counts | ~140 / ~150 / 100 | S1b, S2a |
+| S3b | Blend inner scoring in the freeze | ~120 / ~180 / 40 | S3a |
+| S3c | Blend outer refit by components, blend report rows, `blend_not_distributed` | ~150 / ~180 / 80 | S2c, S3b |
+
+Refusal codes: request and blend-resolution errors `INVALID_EXPERIMENT_SPEC`; misaligned component rows `EXPERIMENT_IDENTITY_CONFLICT`; a refit failure is `EXPERIMENT_VARIANT_FAILED` per unit.
 
 Order: S1a, S2a first (independent; S1b and S2a both touch the request/selection code, rebase small), then S1b, S2b, S2c, S3a, S3b, S3c. After S3c: fresh registration, panel snapshot reused, run. Each slice changes behaviour only for v14 requests that use its field, so v13 replay is unaffected. ARCHITECTURE text per slice: contract lines only, within the doc budget.
 
