@@ -1,9 +1,11 @@
 """Construct a fresh maintained pipeline; fitting and guards stay in the adapter."""
+import numpy as np
+from sklearn.compose import TransformedTargetRegressor
 from sklearn.exceptions import ConvergenceWarning
 from sklearn.impute import MissingIndicator, SimpleImputer
 from sklearn.linear_model import ElasticNet
 from sklearn.pipeline import FeatureUnion, make_pipeline
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import FunctionTransformer, StandardScaler
 
 from ._magnitude_spline_step import spline_step
 
@@ -21,8 +23,12 @@ def _imputer_branch(recipe):
 
 def build_estimator(recipe):
     preprocessing = recipe["preprocessing"]
-    return make_pipeline(FeatureUnion([
+    pipeline = make_pipeline(FeatureUnion([
         ("imputer", _imputer_branch(recipe)),
         ("missing_indicator", MissingIndicator(**preprocessing["missing_indicator"])),
     ], n_jobs=1), StandardScaler(**preprocessing["scaler"]),
         ElasticNet(**recipe["estimator"]["params"]))
+    if recipe["target_transform"] != "none":
+        return TransformedTargetRegressor(regressor=pipeline,
+            transformer=FunctionTransformer(np.log1p, np.expm1, check_inverse=False))
+    return pipeline

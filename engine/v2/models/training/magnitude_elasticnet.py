@@ -41,7 +41,9 @@ def _coefficient_evidence(model, columns, recipe):
     entries = [{"column": column, "kind": kind, "coefficient": float(coefficient)}
         for (kind, column), coefficient in zip(pairs, coefficients)]
     selected = {entry["column"] for entry in entries if entry["coefficient"] != 0.0}
-    return {"coefficients": entries, "coefficient_scale": "standardized_inputs",
+    return {"coefficients": entries,
+        "coefficient_scale": ("standardized_inputs_log1p_target"
+                              if spline_fit.is_log1p(recipe) else "standardized_inputs"),
         "selected_columns": [column for column in columns if column in selected],
         "intercept": float(model.intercept_), "converged": True,
         "n_iter": int(model.n_iter_), "dual_gap": float(model.dual_gap_)}
@@ -85,11 +87,15 @@ def _fit(recipe, inputs, *, nonnegative, result_schema, row_error):
         elapsed = spline_fit.timed_fit(model, train, labels)
         if any(issubclass(item.category, ConvergenceWarning) for item in caught):
             raise spline_fit.convergence_error(recipe)
-        evidence = _coefficient_evidence(model[-1], inputs.columns, recipe)
+        inner = model.regressor_ if spline_fit.is_log1p(recipe) else model
+        evidence = _coefficient_evidence(inner[-1], inputs.columns, recipe)
         predictions = np.asarray(model.predict(prediction), dtype=float)
     if spline_fit.is_spline(recipe):
         spline_fit.log_spline_fit(recipe, elapsed)
     if predictions.shape != (len(prediction),) or not np.isfinite(predictions).all():
         raise ValueError("ElasticNet predictions require one finite value per prediction row")
-    return {"schema_version": result_schema, "recipe_id": content_hash(recipe),
+    result = {"schema_version": result_schema, "recipe_id": content_hash(recipe),
         "predictions": (np.maximum(predictions, 0.0) if nonnegative else predictions).tolist(), **evidence}
+    if spline_fit.is_log1p(recipe):
+        result["target_transform"] = "log1p"
+    return result

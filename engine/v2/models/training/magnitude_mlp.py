@@ -48,12 +48,16 @@ def _fit(recipe, inputs, *, nonnegative=True, result_schema="magnitude_mlp_fit.v
                 model, recipe, train, labels, prediction, caught)
     if predictions.shape != (len(prediction),) or not np.isfinite(predictions).all():
         raise ValueError("MLP predictions require one finite value per prediction row")
-    return {"schema_version": result_schema, "recipe_id": content_hash(recipe),
+    result = {"schema_version": result_schema, "recipe_id": content_hash(recipe),
         "predictions": (np.maximum(predictions, 0.0).tolist() if nonnegative
                         else predictions.tolist()), "component_fits": 1,
         "converged": converged, "n_iter": n_iter,
         "input_features": input_features,
         "loss": loss, "loss_scale": "standardized_target"}
+    target = recipe["target_transform"]
+    if type(target) is dict and target.get("kind") == "log1p":
+        result["target_transform"] = "log1p"
+    return result
 
 
 def _fit_standard(model, recipe, train, labels, prediction, caught):

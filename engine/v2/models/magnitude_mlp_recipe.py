@@ -3,6 +3,7 @@ import json
 import re
 
 from engine.v2.foundation import canonical_json
+from engine.v2.models.magnitude_elasticnet_recipe import LOG1P_TARGET
 
 __all__ = ["mlp_recipe", "validate_mlp_recipe"]
 
@@ -28,8 +29,17 @@ _PROFILES = {
 }
 
 
-def mlp_recipe(*, columns, feature_dictionary_hash, profile):
+def _target_stage(target_transform):
+    if type(target_transform) is not str or target_transform not in ("none", "log1p"):
+        raise ValueError("MLP target_transform must be 'none' or 'log1p'")
+    if target_transform == "log1p":
+        return "magnitude_mlp_recipe.v2", {**LOG1P_TARGET, "then": "StandardScaler"}
+    return "magnitude_mlp_recipe.v1", {"class": "StandardScaler", "with_mean": True, "with_std": True}
+
+
+def mlp_recipe(*, columns, feature_dictionary_hash, profile, target_transform="none"):
     """Bind one fixed profile and ordered caller-admitted feature subset."""
+    schema, target_stage = _target_stage(target_transform)
     if (not isinstance(columns, (list, tuple)) or not columns
             or any(type(name) is not str or not re.fullmatch(r"[a-z][a-z0-9_]*", name)
                    for name in columns) or len(set(columns)) != len(columns)):
@@ -43,7 +53,8 @@ def mlp_recipe(*, columns, feature_dictionary_hash, profile):
         "training": (400, 15), "early": (400, 10), "budget": (200, 201),
         "chrono15": (400, 20), "chrono10": (400, 20)}[stopping]
     recipe = {
-        "schema_version": "magnitude_mlp_recipe.v1", "model": "mlp", "profile": profile,
+        "schema_version": schema,
+        "model": "mlp", "profile": profile,
         "features": list(columns), "feature_dictionary_hash": feature_dictionary_hash,
         "estimator": {"class": "MLPRegressor", "params": {
             "hidden_layer_sizes": list(layers), "activation": "relu", "solver": "adam",
@@ -60,7 +71,7 @@ def mlp_recipe(*, columns, feature_dictionary_hash, profile):
             "missing_indicator": {"features": "all", "sparse": False},
             "scaler": {"with_mean": True, "with_std": True},
             "union_features": 2 * len(columns), "output_features": "training_nonconstant"},
-        "target_transform": {"class": "StandardScaler", "with_mean": True, "with_std": True},
+        "target_transform": target_stage,
         "prediction_projection": "clip_zero", "fit_scope": "fold_and_horizon",
         "numerical_threads": 1, "component_fits": 1,
         "nonconvergence": convergence}
@@ -74,7 +85,9 @@ def validate_mlp_recipe(recipe):
     try:
         json.dumps(recipe, allow_nan=False)
         expected = mlp_recipe(columns=recipe["features"],
-            feature_dictionary_hash=recipe["feature_dictionary_hash"], profile=recipe["profile"])
+            feature_dictionary_hash=recipe["feature_dictionary_hash"], profile=recipe["profile"],
+            target_transform=("log1p" if recipe["schema_version"]
+                              == "magnitude_mlp_recipe.v2" else "none"))
         if canonical_json(recipe) == canonical_json(expected):
             return expected
     except (KeyError, TypeError, ValueError, OverflowError, RecursionError):
