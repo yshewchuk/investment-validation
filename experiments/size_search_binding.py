@@ -336,6 +336,11 @@ def prepare_plan(conn, store, registration, request, *, plan_schema=None):
             "outer": "frozen_selected_only",
             "final_read_authority": "none",
         }
+        if "winner_rules" in requested_selection:
+            selection_contract["winner_rules"] = ["overall", "rmse", "mae"]
+            selection_contract["rule_metrics"] = {
+                "overall": "blend_score", "rmse": "normalized.rmse",
+                "mae": "normalized.mae"}
     identity = {"schema_version": plan_schema, "request": schedule["request"],
         "anchor": {"run_id": registration.run_id, "variant_id": registration.variant_id},
         "implementation": {"source_closure": binding["source_closure"], "environment": binding["environment"]},
