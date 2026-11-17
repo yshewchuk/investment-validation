@@ -17,6 +17,18 @@ from experiments.size_search_binding import read_stored_panel
 
 _STORED = {"HMO": 0, "HMOS": 1, "HMOSX": 2, "HMOSXL": 2, "HMOSXLP": 2}
 _STORED_NAME = ("HMO", "HMOS", "HMOSX")
+_SKIP_SCANS = {}
+
+
+def _skipped_targets(repository, snapshot, month, event_ids):
+    """Plan reads recompute the scan; one process reads each (snapshot, month, ids) once."""
+    key = (snapshot.snapshot_id, month, tuple(sorted(event_ids)))
+    if key not in _SKIP_SCANS:
+        if len(_SKIP_SCANS) >= 4:
+            _SKIP_SCANS.pop(next(iter(_SKIP_SCANS)))
+        _SKIP_SCANS[key] = skipped_iv_crush_targets(repository, snapshot, as_of_month=month,
+                                                    event_ids=list(key[2]))
+    return dict(_SKIP_SCANS[key])
 
 
 def _require(condition):
@@ -91,9 +103,9 @@ def prepare_plan(conn, store, registration, request, *, target, comparison):
     label_exclusions = None
     if "target_snapshot" in binding:
         repository = Repository(conn, store, pin_snapshots=True)
-        excluded = skipped_iv_crush_targets(repository,
+        excluded = _skipped_targets(repository,
             from_document(SnapshotRef, binding["target_snapshot"]),
-            as_of_month=binding["holdouts"]["holdout_as_of_month"], event_ids=binding["event_ids"])
+            binding["holdouts"]["holdout_as_of_month"], binding["event_ids"])
         folds = _apply_label_exclusions(folds, excluded)
         label_exclusions = {"counts": dict(sorted(Counter(excluded.values()).items())),
             "events": [{"event_id": event_id, "reason": reason}

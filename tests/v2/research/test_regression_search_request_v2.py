@@ -18,6 +18,7 @@ from experiments import iv_crush_search
 from experiments import magnitude_search_plan as plans
 from experiments import magnitude_search_request
 from experiments import magnitude_search_request_v3
+from experiments import regression_search_binding
 from experiments.magnitude_search_request import validate_workers
 from experiments import native_registration as native
 from experiments import size_search
@@ -410,6 +411,40 @@ def test_binding_on_real_plan_path(prepared, capsys):  # noqa: F811
     assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
     assert len(set(ids)) > 0 and f"outside={len(set(ids))}" in capsys.readouterr().err
     assert catalog_rows(data.conn) == before and artifact_object_bytes(data.store) == objects
+
+
+def test_plan_seals_skipped_target_exclusions(prepared, monkeypatch):  # noqa: F811
+    data = prepared
+    registered = native.reserve_native_registration(data.conn, data.store, data.registration, data.spec)
+    document = _v2_plan_request(data)
+    regression_search_binding._SKIP_SCANS.clear()
+    plan = _seal(data, registered, document)["plan"]
+    outer = plan["folds"][0]["outer"]
+    inner = plan["folds"][0]["inner"][0]
+    assert len(outer["training_candidate_event_ids"]) > 1
+    assert len(inner["evaluation_event_ids"]) > 1
+    victim = inner["evaluation_event_ids"][0]
+    assert victim in outer["training_candidate_event_ids"]
+    calls = []
+
+    def scan(*args, **kwargs):
+        calls.append((args, kwargs))
+        return {victim: "gap_exceeds_limit"}
+
+    monkeypatch.setattr(regression_search_binding, "skipped_iv_crush_targets", scan)
+    regression_search_binding._SKIP_SCANS.clear()
+    sealed = _seal(data, registered, document)["plan"]
+    assert all(victim not in fold[key] for group in sealed["folds"]
+               for fold in (group["outer"], *group["inner"])
+               for key in ("training_candidate_event_ids", "evaluation_event_ids"))
+    assert sealed["label_exclusions"] == {"counts": {"gap_exceeds_limit": 1},
+        "events": [{"event_id": victim, "reason": "gap_exceeds_limit"}]}
+    assert sealed["plan_id"] != plan["plan_id"]
+    regression_search_binding._SKIP_SCANS.clear()
+    calls.clear()
+    _seal(data, registered, document)
+    _seal(data, registered, document)
+    assert len(calls) == 1
 
 
 def test_v2_requests_refused_by_size_cli_and_v2_run_cli(tmp_path, capsys):
