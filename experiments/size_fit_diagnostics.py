@@ -4,6 +4,7 @@ import math
 from engine.v2.foundation import canonical_json, content_hash
 from engine.v2.models.magnitude_elasticnet_spline_recipe import spline_coefficient_layout
 from engine.v2.models.magnitude_mlp_recipe import validate_mlp_recipe
+from engine.v2.models.regression_mlp_recipe import validate_regression_mlp_recipe
 from engine.v2.ops.errors import fail
 
 
@@ -13,7 +14,10 @@ def keys(binding):
 
 def _mlp_diagnostics(diagnostics, recipe, horizons):
     """Validate worker claims, not convergence by refitting or reading source data."""
-    recipe = validate_mlp_recipe(recipe)
+    regression = recipe.get("schema_version") == "regression_mlp_recipe.v1"
+    recipe = (validate_regression_mlp_recipe(recipe) if regression
+              else validate_mlp_recipe(recipe))
+    result_schema = "regression_mlp_fit.v1" if regression else "magnitude_mlp_fit.v1"
     recipe_id = content_hash(recipe)
     max_iter = recipe["estimator"]["params"]["max_iter"]
     fixed_budget = recipe["nonconvergence"] == "epoch_budget_success_no_retry"
@@ -26,7 +30,7 @@ def _mlp_diagnostics(diagnostics, recipe, horizons):
         raise ValueError
     for item, horizon in zip(diagnostics, horizons):
         if (type(item) is not dict or set(item) != expected
-                or item["schema_version"] != "magnitude_mlp_fit.v1"
+                or item["schema_version"] != result_schema
                 or item["recipe_id"] != recipe_id
                 or type(item["horizon_sessions"]) is not int or item["horizon_sessions"] != horizon
                 or type(item["component_fits"]) is not int or item["component_fits"] != 1
@@ -53,8 +57,13 @@ def evidence(result, execution, horizons, inputs=None, fold=None):
         return {}
     try:
         diagnostics, recipe = result["diagnostics"], execution["fit_recipe"]
-        if recipe.get("model") == "mlp" or recipe.get("schema_version") == "magnitude_mlp_recipe.v1":
-            if execution["schema_version"] != "size_candidate_execution.v1":
+        if (recipe.get("model") == "mlp"
+                or recipe.get("schema_version") in (
+                    "magnitude_mlp_recipe.v1", "regression_mlp_recipe.v1")):
+            regression = recipe.get("schema_version") == "regression_mlp_recipe.v1"
+            required = ("regression_candidate_execution.v1" if regression
+                        else "size_candidate_execution.v1")
+            if execution["schema_version"] != required:
                 raise ValueError
             return _mlp_diagnostics(diagnostics, recipe, horizons)
         if recipe.get("schema_version") == "size_history_mean_candidate.v1":
