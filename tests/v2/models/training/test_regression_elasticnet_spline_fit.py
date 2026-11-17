@@ -68,6 +68,24 @@ def test_signed_accepts_negative_labels_while_unsigned_requires_nonnegative(reci
         fit_elasticnet_predictions(_unsigned(), train, labels, prediction, columns=COLS)
 
 
+def test_signed_spline_fit_tracks_an_independent_linear_signal():
+    rng = np.random.default_rng(1)
+    train = rng.normal(size=(400, len(COLS)))
+    prediction = rng.normal(size=(30, len(COLS)))
+    truth = lambda x: -5.0 + 2.0 * x[:, 0]
+    labels = truth(train)
+    expected = truth(prediction)
+    recipe = regression_elasticnet_spline_recipe(
+        target_domain="signed", columns=COLS, feature_dictionary_hash=H,
+        alpha=1e-4, l1_ratio=0.5, n_knots=4)
+    result = fit_regression_candidate(recipe, FitInputs(train, labels, prediction, COLS))
+    predictions = np.asarray(result["predictions"])
+    assert np.max(np.abs(predictions - expected)) < 0.5
+    deep = int(np.argmin(expected))
+    assert expected[deep] < -5.0
+    assert predictions[deep] < -4.0
+
+
 def test_evidence_accepts_signed_diagnostics_and_refuses_a_swapped_kind(recipe, arrays):
     result = signed_fit(recipe, arrays)
     detail = {"horizon_sessions": 1,
