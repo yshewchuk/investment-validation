@@ -231,7 +231,11 @@ def _replay_failed(saved, store, started, key, outer_year, chosen, fold, plan, e
         expected = fit_evidence(inputs, fold, plan, execution)
         worker = saved("worker-result")
         receipt = saved("execution")
-        if not isinstance(worker, dict) or worker.get("event") != "failed" or not isinstance(receipt, dict):
+        regression = execution.get("schema_version") == "regression_candidate_execution.v1"
+        required = {"status", "fits", "fit_attempt_count", "completed_fit_count", "forecasts_id"}
+        if (not isinstance(worker, dict) or worker.get("event") != "failed"
+                or not _timed_shape(worker, {"event"}, untimed=regression)
+                or not isinstance(receipt, dict) or not set(receipt) >= required):
             raise _conflict()
         fits = receipt["fits"]
         if not isinstance(fits, list):
@@ -278,7 +282,13 @@ def execute_outer_fold(conn, store, repository, registration, request, plan_ref,
     if candidate_id is not None:
         item = next((entry for entry in selection["selections"]
                      if entry["outer_year"] == outer_year), None)
-        if item is None or candidate_id not in refit_units(plan, item):
+        if item is None:
+            raise fail("INVALID_EXPERIMENT_SPEC", "refit unit is outside the sealed selection")
+        try:
+            units = refit_units(plan, item)
+        except (ValueError, TypeError, KeyError):
+            raise _conflict() from None
+        if candidate_id not in units:
             raise fail("INVALID_EXPERIMENT_SPEC", "refit unit is outside the sealed selection")
     return _execute_admitted(conn, store, repository, registration, plan, fold, selection, limits,
                              candidate_id=candidate_id)
@@ -415,7 +425,10 @@ def collect_outer_results(conn, store, repository, registration, request, plan_r
             except (KeyError, TypeError):
                 raise fail("EXPERIMENT_IDENTITY_CONFLICT", "outer report requires every completed outer fold") from None
             overall_by_year[year] = overall
-            units = refit_units(plan, selection_item)
+            try:
+                units = refit_units(plan, selection_item)
+            except (ValueError, TypeError, KeyError):
+                raise _conflict() from None
             for unit in units:
                 key = refit_key(plan, year, unit)
                 started = read_record(conn, store, registration.run_id, "outer-start:" + key)

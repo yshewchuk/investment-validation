@@ -1,3 +1,5 @@
+import pytest
+
 from engine.v2.foundation import content_hash
 from experiments.magnitude_search_refits import (
     failed_terminal,
@@ -44,6 +46,16 @@ def test_winner_units_put_the_overall_winner_first_then_sorted_winners_and_extra
 def test_shared_winners_and_extras_are_deduped_to_one_unit():
     plan = _winner(extra=["a"])
     assert refit_units(plan, _item("a", ["a", "a", "a"])) == ["a"]
+
+
+@pytest.mark.parametrize("plan, item", [
+    (_winner(), {"selected_candidate_id": "c", "distinct_winner_ids": "c"}),
+    (_winner(), {"selected_candidate_id": 1, "distinct_winner_ids": ["c"]}),
+    (_winner(extra="d"), {"selected_candidate_id": "c", "distinct_winner_ids": ["c"]}),
+])
+def test_malformed_selection_is_rejected(plan, item):
+    with pytest.raises(ValueError, match="malformed refit selection"):
+        refit_units(plan, item)
 
 
 def test_winner_possible_slots_cover_every_fold_and_candidate_with_distinct_keys():

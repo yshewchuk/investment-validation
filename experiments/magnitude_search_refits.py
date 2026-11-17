@@ -21,13 +21,22 @@ def refit_units(plan, selection_item):
     """Ordered distinct refit units: overall winner, other winners, extras."""
     if not per_candidate(plan):
         return [None]
-    overall = selection_item["selected_candidate_id"]
+    if not isinstance(selection_item, dict):
+        raise ValueError("malformed refit selection")
+    overall = selection_item.get("selected_candidate_id")
+    winners = selection_item.get("distinct_winner_ids", [])
+    extras = plan["selection"].get("extra_refits", [])
+    if (not isinstance(overall, str) or not isinstance(winners, list)
+            or not isinstance(extras, list)
+            or not all(isinstance(value, str) for value in winners)
+            or not all(isinstance(value, str) for value in extras)):
+        raise ValueError("malformed refit selection")
     units, seen = [overall], {overall}
-    for candidate_id in sorted(selection_item.get("distinct_winner_ids", [])):
+    for candidate_id in sorted(winners):
         if candidate_id not in seen:
             units.append(candidate_id)
             seen.add(candidate_id)
-    for candidate_id in sorted(plan["selection"].get("extra_refits", [])):
+    for candidate_id in sorted(extras):
         if candidate_id not in seen:
             units.append(candidate_id)
             seen.add(candidate_id)

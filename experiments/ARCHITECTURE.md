@@ -933,7 +933,7 @@ from event counts; scientific selection and cutoff rules are unchanged.
 | Missing frozen selection, incomplete/submitted-only inner evidence, changed source/selection/input/result binding | `EXPERIMENT_IDENTITY_CONFLICT`; no missing inner execution or replacement. Prior journal associations remain unchanged. |
 | Either no-fit guard on a new outer call | Its original `RuntimeFitForbidden` propagates before affinity resolution/claim; completed replay never invokes either guard. |
 | Invalid child progress, completion or forecast coverage/types | `EXPERIMENT_IDENTITY_CONFLICT`; retain fit evidence; no outer targets or terminal. |
-| Selected estimator fails after one or more horizon starts | `EXPERIMENT_VARIANT_FAILED`; persist attempted prefix and failed execution; no forecasts. Overall: no terminal; other `winner_rules` units commit a failed terminal, listed in `refits`. |
+| Selected estimator fails after zero or more horizon starts | `EXPERIMENT_VARIANT_FAILED`; persist attempted prefix and failed execution; no forecasts. Overall: no terminal; other `winner_rules` units commit a failed terminal, listed in `refits`. |
 | Shared native-input/target admission or resource failure, including late/missing outer targets | Preserve the typed refusal; retain the unfinished claim and durable forecasts; no partial result, retry or replacement. |
 | Repeated unfinished outer claim | `EXPERIMENT_IDENTITY_CONFLICT` at create-only start; no refit or recovery. |
 | Artifact publication/read failure, 16 MiB journal cap, or raw SQLite failure | Existing journal policy applies: integrity conflicts, resource unavailability, `RESOURCE_LIMIT_EXCEEDED`, or unchanged raw SQLite error. Keep committed evidence/unreferenced complete objects; no retry or rollback of earlier records. |
@@ -951,7 +951,7 @@ returned result dictionaries carry their IDs and selected summaries, not all jou
 payloads. Collection does not persist a report artifact, export or ledger row.
 No holdout evaluation, final read, release or deployment authority is added.
 Research remains reconstructed, not observed point-in-time. Direct dependencies are
-the search plan/journal/trial/execution/evidence/inputs (cohort loader) modules, contracts, foundation,
+the search plan/journal/trial/execution/evidence/inputs/refits modules, contracts, foundation,
 ops migrations/fingerprints/errors, both no-fit guards, `engine.v2.research.magnitude_inputs.load_magnitude_targets`
 for outer label reads and `magnitude_report.magnitude_metrics` for fold/aggregate scoring.
 The evidence helper separately consumes native history admission and research stored-history/target APIs; no new scheduler, parser, estimator implementation or third-party dependency is needed.

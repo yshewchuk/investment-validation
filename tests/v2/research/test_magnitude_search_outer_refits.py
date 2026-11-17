@@ -127,7 +127,7 @@ def _failed_journal(*, fits=None, attempt_count=None):
     records = {"start": started,
                "inputs": {"manifest": "inputs"},
                "terminal": failed_terminal(key, "2024", "rmse", inputs_id),
-               "worker-result": {"event": "failed"},
+               "worker-result": {"event": "failed", "score_seconds": 1.0, "rss_delta_kib": 0},
                "execution": {"status": "failed", "forecasts_id": None, "fits": fits,
                              "completed_fit_count": len(fits), "fit_attempt_count": attempt_count}}
     for fit in fits:
@@ -193,6 +193,15 @@ def test_replay_failed_rejects_an_attempt_count_beyond_the_attempted_fit(monkeyp
 def test_replay_failed_rejects_a_non_failed_worker_result(monkeypatch):
     records, key, started = _failed_journal()
     records["worker-result"] = {"event": "succeeded"}
+    with pytest.raises(OpsError) as caught:
+        _replay_failed(records, key, started, monkeypatch)
+    assert caught.value.problem.code == "EXPERIMENT_IDENTITY_CONFLICT"
+
+
+def test_replay_failed_rejects_a_worker_result_with_an_extra_key(monkeypatch):
+    records, key, started = _failed_journal()
+    records["worker-result"] = {"event": "failed", "score_seconds": 1.0,
+                                "rss_delta_kib": 0, "extra": True}
     with pytest.raises(OpsError) as caught:
         _replay_failed(records, key, started, monkeypatch)
     assert caught.value.problem.code == "EXPERIMENT_IDENTITY_CONFLICT"

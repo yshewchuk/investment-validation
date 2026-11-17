@@ -326,8 +326,11 @@ def run_search(conn, store, repository, registration, request, plan_ref, *, limi
     selected = trials.freeze()
     completed = set(completed_outer)
     if per_candidate(plan):
-        units = [(item["outer_year"], unit) for item in selected["selections"]
-                 for unit in refit_units(plan, item)]
+        try:
+            units = [(item["outer_year"], unit) for item in selected["selections"]
+                     for unit in refit_units(plan, item)]
+        except (ValueError, TypeError, KeyError):
+            raise fail("EXPERIMENT_IDENTITY_CONFLICT", "stored selection is malformed") from None
         fresh_units = [pair for pair in units if pair not in completed]
         decision("search refits", f"{len(units)} units; {len(units) - len(fresh_units)} completed replays; "
                  f"{len(fresh_units)} fresh refits")
@@ -341,7 +344,11 @@ def run_search(conn, store, repository, registration, request, plan_ref, *, limi
                     decision("search refit failed", f"{unit} year={year}")
     else:
         for item in selected["selections"]:
-            for unit in refit_units(plan, item):
+            try:
+                units = refit_units(plan, item)
+            except (ValueError, TypeError, KeyError):
+                raise fail("EXPERIMENT_IDENTITY_CONFLICT", "stored selection is malformed") from None
+            for unit in units:
                 if (item["outer_year"], unit) not in completed:
                     execute_outer_fold(conn, store, repository, registration, request, plan_ref,
                                        item["outer_year"], limits=limits, candidate_id=unit)

@@ -70,9 +70,15 @@ def _run(context, *, collector=None, read_only=False):
         for group in plan["folds"])
     if per_candidate(plan):
         selection = read_record(conn, store, registration.run_id, "selection")
+        keys = []
+        if isinstance(selection, dict):
+            try:
+                keys = terminal_keys(plan, selection)
+            except (ValueError, TypeError, KeyError):
+                raise fail("EXPERIMENT_IDENTITY_CONFLICT", "stored selection is malformed") from None
         complete = comparisons and isinstance(selection, dict) and all(
             read_record(conn, store, registration.run_id, "outer-terminal:" + key) is not None
-            for key in terminal_keys(plan, selection))
+            for key in keys)
     else:
         complete = comparisons and all(
             read_record(conn, store, registration.run_id,
