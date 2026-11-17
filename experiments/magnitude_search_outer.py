@@ -214,29 +214,43 @@ def _replay(read, store, started, fold, plan, execution, binding, *, input_callb
     return result
 
 
-def _replay_failed(saved, started, key, outer_year, chosen, horizons):
+def _replay_failed(saved, store, started, key, outer_year, chosen, fold, plan, execution):
     try:
         _equal(saved("start"), started)
         terminal = saved("terminal")
-        _equal(terminal, failed_terminal(key, outer_year, chosen))
-        worker = saved("worker-result")
-        execution = saved("execution")
-        if not isinstance(worker, dict) or worker.get("event") != "failed" or not isinstance(execution, dict):
+        if not isinstance(terminal, dict) or "inputs_id" not in terminal:
             raise _conflict()
-        fits = execution["fits"]
-        if (execution["status"] != "failed" or execution["forecasts_id"] is not None
-                or not isinstance(fits, list)
-                or execution["completed_fit_count"] != len(fits)
-                or execution["fit_attempt_count"] != len(fits) + 1):
+        _equal(terminal, failed_terminal(key, outer_year, chosen, terminal["inputs_id"]))
+        inputs_id = terminal["inputs_id"]
+        try:
+            inputs = load_inputs(store, saved("inputs"), inputs_id)
+        except OpsError as error:
+            if error.problem.retryable:
+                raise
+            raise _conflict() from None
+        expected = fit_evidence(inputs, fold, plan, execution)
+        worker = saved("worker-result")
+        receipt = saved("execution")
+        if not isinstance(worker, dict) or worker.get("event") != "failed" or not isinstance(receipt, dict):
+            raise _conflict()
+        fits = receipt["fits"]
+        if not isinstance(fits, list):
+            raise _conflict()
+        k = len(fits)
+        if receipt["status"] != "failed" or receipt["forecasts_id"] is not None:
+            raise _conflict()
+        _equal(fits, expected[:k])
+        if receipt["completed_fit_count"] != k:
+            raise _conflict()
+        attempts = receipt["fit_attempt_count"]
+        if attempts not in (k, k + 1) or (attempts == k + 1 and k + 1 > len(expected)):
             raise _conflict()
         for fit in fits:
             slot = ":" + str(fit["horizon_sessions"])
             _equal(saved("fit-started" + slot), fit)
             _equal_completed_fit(saved("fit-completed" + slot), fit, legacy=False)
-        completed = {fit["horizon_sessions"] for fit in fits}
-        attempted = next((horizon for horizon in horizons if horizon not in completed), None)
-        if attempted is None or not isinstance(saved("fit-started:" + str(attempted)), dict):
-            raise _conflict()
+        if attempts == k + 1:
+            _equal(saved("fit-started:" + str(expected[k]["horizon_sessions"])), expected[k])
     except (KeyError, TypeError, ValueError):
         raise _conflict() from None
     return terminal
@@ -307,7 +321,7 @@ def _execute_admitted(conn, store, repository, registration, plan, fold, selecti
         if per_candidate(plan):
             terminal = saved("terminal")
             if isinstance(terminal, dict) and terminal.get("status") == "failed":
-                return _replay_failed(saved, started, key, outer_year, chosen, plan["horizons"])
+                return _replay_failed(saved, store, started, key, outer_year, chosen, fold, plan, execution)
         return _replay(saved, store, started, fold, plan, execution, binding, input_callback=input_callback)
     forbid_fitting("execute_outer_fold")
     forbid_legacy_fitting("execute_outer_fold")
@@ -340,10 +354,11 @@ def _execute_admitted(conn, store, repository, registration, plan, fold, selecti
         resolved = resolved_limits(conn, store, registration, plan, limits)
     result = run_fitted_trial(source, fold, plan, execution, resolved, progress)
     succeeded = result.get("event") == "succeeded"
+    failed_pending_ok = len(pending) in (0, 1) if chosen != overall else len(pending) == 1
     if ((succeeded and (pending or len(fits) != len(expected)
                         or not _timed_shape(result, {"event", "forecasts"} | diagnostic_keys(binding), untimed=regression)))
             or (not succeeded and (not _timed_shape(result, {"event"}, untimed=regression)
-                                   or result.get("event") != "failed" or len(pending) != 1))):
+                                   or result.get("event") != "failed" or not failed_pending_ok))):
         raise _conflict()
     forecasts = _forecasts(result["forecasts"], fold, plan["horizons"], forecast_target(plan, execution.get("fit_recipe", {}))) if succeeded else None
     if succeeded:
@@ -357,7 +372,7 @@ def _execute_admitted(conn, store, repository, registration, plan, fold, selecti
         if chosen == overall:
             raise fail("EXPERIMENT_VARIANT_FAILED", "selected outer candidate failed; replacement and retry are forbidden")
         # A failed non-overall refit is terminal: targets never open and resume never retries it.
-        terminal = failed_terminal(key, outer_year, chosen)
+        terminal = failed_terminal(key, outer_year, chosen, inputs_id)
         append("terminal", terminal)
         return terminal
     append("forecasts", forecasts)

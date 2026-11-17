@@ -66,8 +66,8 @@ def possible_slots(plan):
     return slots
 
 
-def failed_terminal(key, year, candidate_id):
+def failed_terminal(key, year, candidate_id, inputs_id):
     """A failed non-overall refit unit is durable and is never retried."""
     return {"schema_version": "magnitude_search_outer_failed.v1", "outer_id": key,
-            "outer_year": year, "candidate_id": candidate_id, "status": "failed",
-            "code": "EXPERIMENT_VARIANT_FAILED"}
+            "outer_year": year, "candidate_id": candidate_id, "inputs_id": inputs_id,
+            "status": "failed", "code": "EXPERIMENT_VARIANT_FAILED"}

@@ -75,11 +75,12 @@ def test_terminal_keys_list_every_fold_unit_with_the_overall_first():
 
 
 def test_failed_terminal_has_the_exact_durable_shape():
-    assert failed_terminal("key", "2024", "candidate") == {
+    assert failed_terminal("key", "2024", "candidate", "inputs") == {
         "schema_version": "magnitude_search_outer_failed.v1",
         "outer_id": "key",
         "outer_year": "2024",
         "candidate_id": "candidate",
+        "inputs_id": "inputs",
         "status": "failed",
         "code": "EXPERIMENT_VARIANT_FAILED",
     }

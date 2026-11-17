@@ -76,7 +76,7 @@ def test_collect_outer_results_refits_every_winner_unit(monkeypatch):
                "outer-start:" + key_a: {"limits": {}},
                "outer-start:" + key_b: {"limits": {}},
                "outer-terminal:" + key_a: {"status": "succeeded"},
-               "outer-terminal:" + key_b: failed_terminal(key_b, "2024", "b")}
+               "outer-terminal:" + key_b: failed_terminal(key_b, "2024", "b", "inputs-b")}
     fold_a = {"outer_year": "2024",
               "predictions": [{"event_id": "event", "horizon_sessions": 1,
                                "predicted_absolute_move_pct": 1.0,
@@ -84,7 +84,7 @@ def test_collect_outer_results_refits_every_winner_unit(monkeypatch):
               "event_count": 1, "forecast_count": 1,
               "prospective_candidate_id": "a",
               "holdout_results": {"random": "excluded", "rolling": "excluded"}}
-    failed_b = failed_terminal(key_b, "2024", "b")
+    failed_b = failed_terminal(key_b, "2024", "b", "inputs-b")
 
     def execute(conn, store, repository, registration, plan, fold, selection, limits, *,
                 replay_only=False, input_callback=None, candidate_id=None):
@@ -112,58 +112,87 @@ def test_collect_outer_results_refits_every_winner_unit(monkeypatch):
     assert result["folds"] == [fold_a]
 
 
-def _failed_journal():
+EXPECTED = [{"horizon_sessions": 5}, {"horizon_sessions": 3}]
+
+
+def _failed_journal(*, fits=None, attempt_count=None):
     plan = {"plan_id": "plan"}
     key = refit_key(plan, "2024", "rmse")
     started = {"outer_id": key}
-    fit = {"horizon_sessions": 1}
-    attempted = {"horizon_sessions": 2}
+    if fits is None:
+        fits = [EXPECTED[0]]
+    if attempt_count is None:
+        attempt_count = len(fits) + 1
+    inputs_id = "inputs"
     records = {"start": started,
-               "terminal": failed_terminal(key, "2024", "rmse"),
+               "inputs": {"manifest": "inputs"},
+               "terminal": failed_terminal(key, "2024", "rmse", inputs_id),
                "worker-result": {"event": "failed"},
-               "execution": {"status": "failed", "forecasts_id": None, "fits": [fit],
-                             "completed_fit_count": 1, "fit_attempt_count": 2},
-               "fit-started:1": fit, "fit-completed:1": {**fit, "fit_seconds": 1.0},
-               "fit-started:2": attempted}
+               "execution": {"status": "failed", "forecasts_id": None, "fits": fits,
+                             "completed_fit_count": len(fits), "fit_attempt_count": attempt_count}}
+    for fit in fits:
+        slot = ":" + str(fit["horizon_sessions"])
+        records["fit-started" + slot] = fit
+        records["fit-completed" + slot] = {**fit, "fit_seconds": 1.0}
+    if attempt_count == len(fits) + 1 and len(fits) < len(EXPECTED):
+        records["fit-started:" + str(EXPECTED[len(fits)]["horizon_sessions"])] = EXPECTED[len(fits)]
     return records, key, started
 
 
-def _replay_failed(records, key, started):
-    return outer._replay_failed(records.get, started, key, "2024", "rmse", [1, 2])
+def _replay_failed(records, key, started, monkeypatch):
+    monkeypatch.setattr(outer, "load_inputs",
+                        lambda store, record, inputs_id: {"inputs_id": inputs_id})
+    monkeypatch.setattr(outer, "fit_evidence",
+                        lambda inputs, fold, plan, execution: EXPECTED)
+    return outer._replay_failed(records.get, None, started, key, "2024", "rmse", {}, {},
+                                records["execution"])
 
 
-def test_replay_failed_returns_the_terminal_for_a_valid_journal():
+def test_replay_failed_returns_the_terminal_for_a_valid_journal(monkeypatch):
     records, key, started = _failed_journal()
-    assert _replay_failed(records, key, started) == failed_terminal(key, "2024", "rmse")
+    assert _replay_failed(records, key, started, monkeypatch) == failed_terminal(
+        key, "2024", "rmse", "inputs")
 
 
-def test_replay_failed_rejects_an_invalid_completed_fit_marker():
-    records, key, started = _failed_journal()
-    records["fit-completed:1"] = {}
+def test_replay_failed_accepts_a_failure_before_the_first_horizon(monkeypatch):
+    records, key, started = _failed_journal(fits=[], attempt_count=0)
+    assert _replay_failed(records, key, started, monkeypatch) == failed_terminal(
+        key, "2024", "rmse", "inputs")
+
+
+def test_replay_failed_rejects_receipt_fits_that_differ_from_the_recomputed_prefix(monkeypatch):
+    records, key, started = _failed_journal(fits=[{"horizon_sessions": 9}], attempt_count=1)
     with pytest.raises(OpsError) as caught:
-        _replay_failed(records, key, started)
+        _replay_failed(records, key, started, monkeypatch)
     assert caught.value.problem.code == "EXPERIMENT_IDENTITY_CONFLICT"
 
 
-def test_replay_failed_rejects_a_missing_attempted_fit_start():
+def test_replay_failed_rejects_an_invalid_completed_fit_marker(monkeypatch):
     records, key, started = _failed_journal()
-    del records["fit-started:2"]
+    records["fit-completed:5"] = {}
     with pytest.raises(OpsError) as caught:
-        _replay_failed(records, key, started)
+        _replay_failed(records, key, started, monkeypatch)
     assert caught.value.problem.code == "EXPERIMENT_IDENTITY_CONFLICT"
 
 
-def test_replay_failed_rejects_a_wrong_fit_attempt_count():
+def test_replay_failed_rejects_a_missing_attempted_fit_start(monkeypatch):
     records, key, started = _failed_journal()
-    records["execution"]["fit_attempt_count"] = 1
+    del records["fit-started:3"]
     with pytest.raises(OpsError) as caught:
-        _replay_failed(records, key, started)
+        _replay_failed(records, key, started, monkeypatch)
     assert caught.value.problem.code == "EXPERIMENT_IDENTITY_CONFLICT"
 
 
-def test_replay_failed_rejects_a_non_failed_worker_result():
+def test_replay_failed_rejects_an_attempt_count_beyond_the_attempted_fit(monkeypatch):
+    records, key, started = _failed_journal(attempt_count=3)
+    with pytest.raises(OpsError) as caught:
+        _replay_failed(records, key, started, monkeypatch)
+    assert caught.value.problem.code == "EXPERIMENT_IDENTITY_CONFLICT"
+
+
+def test_replay_failed_rejects_a_non_failed_worker_result(monkeypatch):
     records, key, started = _failed_journal()
     records["worker-result"] = {"event": "succeeded"}
     with pytest.raises(OpsError) as caught:
-        _replay_failed(records, key, started)
+        _replay_failed(records, key, started, monkeypatch)
     assert caught.value.problem.code == "EXPERIMENT_IDENTITY_CONFLICT"
