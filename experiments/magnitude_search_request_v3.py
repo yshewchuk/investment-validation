@@ -9,6 +9,8 @@ from experiments import magnitude_search_request as v2
 from experiments.magnitude_search_request_schema import (
     allows_hgb_axes, allows_neural, allows_size_family, request_version,
     uses_chrono_neural_profiles, uses_extended_neural_profiles)
+from experiments.size_blend_profiles import (
+    distinct_component_count, resolve_blends, validate_blends)
 
 __all__ = ["compile_request"]
 
@@ -114,6 +116,13 @@ def _selection(request, horizons, version):
         "lead_weights": dict(_SELECTION_LEADS), "large_move_threshold_pct": 10.0,
         "tie_band_floor": 0.005}
     _winner_rules(request, policy, version)
+
+
+def _blends(request, blends):
+    blends = validate_blends(blends)
+    v2._require("selection" in request and "winner_rules" in request["selection"],
+                "stage-2 blends require selection.winner_rules")
+    request["blends"] = list(blends)
 
 
 def _finite_positive(value):
@@ -332,7 +341,9 @@ def _counts(request, horizons):
                     else "stage-2 v4/v5 grid exceeds the 1000-candidate ceiling")
     inners, outers = sum(map(len, inner.values())), len(outer)
     lead_count = len(horizons)
-    fits = lead_count * (count * inners + outers)
+    # design section 3; S2b's outer_refit_bound replaces the non-blend base when it merges
+    outer_units = 3 + distinct_component_count(request["blends"]) + 1 if "blends" in request else 1
+    fits = lead_count * (count * inners + outer_units * outers)
     baseline_logical_fits = lead_count * outers
     baseline_component_fits = 2 * lead_count * outers
     extra_components = lead_count * (inners + outers) if size else 0
@@ -355,6 +366,10 @@ def compile_request(request, *, horizons=(5, 3, 1)):
     except (ValueError, TypeError, OverflowError, RecursionError):
         raise fail("INVALID_EXPERIMENT_SPEC", "stage-2 request requires plain finite JSON") from None
     version = request.get("schema_version") if type(request) is dict else None
+    has_blends = (type(request) is dict and "blends" in request
+                  and request_version(version) is not None and request_version(version) >= 14)
+    if has_blends:
+        blends = request.pop("blends")
     request_keys = set(request) if type(request) is dict else set()
     v2._require((version == "magnitude_search_request.v3"
                  and request_keys in (v2._KEYS, v2._KEYS | {"selection"},
@@ -369,17 +384,23 @@ def compile_request(request, *, horizons=(5, 3, 1)):
     v2.validate_workers(request)
     request.pop("workers", None)
     _selection(request, horizons, request_version(version))
+    if has_blends:
+        _blends(request, blends)
     v2._references(request, recipe=_hash_recipe(request_version(version)))
     _space(request)
     counts = _counts(request, horizons)
+    if has_blends:
+        counts["blends"] = len(request["blends"])
     v2._comparison(request["comparison"], counts)
     v2._limits(request["limits"])
     request_id = content_hash(request)
+    specs = [s for s in v2._specifications(request, request_id,
+        recipe=qualified_panel_recipe if request_version(version) >= 9 else v2.panel_recipe)
+        if s["family"] != "size_v1_4" or s["feature_recipe"]["subset"] == "HMO"]
+    if has_blends:
+        resolve_blends(request["blends"], specs)
     result = {"schema_version": "magnitude_search_schedule.v2", "request": request,
-        "request_id": request_id, "horizons": list(horizons),
-        "candidate_specs": [s for s in v2._specifications(request, request_id,
-            recipe=qualified_panel_recipe if request_version(version) >= 9 else v2.panel_recipe)
-            if s["family"] != "size_v1_4" or s["feature_recipe"]["subset"] == "HMO"],
+        "request_id": request_id, "horizons": list(horizons), "candidate_specs": specs,
         "schedule": [{"outer_year": year, "inner_years": request["inner_years"][year]}
                      for year in request["outer_years"]], "counts": counts}
     return json.loads(json.dumps(result, sort_keys=True, allow_nan=False))
