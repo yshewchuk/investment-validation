@@ -1,6 +1,6 @@
 # SIZE averaged candidates: seed bagging and the HGB+elastic-net blend (design)
 
-**Superseded for blends (2026-11-17):** blend candidates are now specified in `size_search_v14_design.md` (fixed profiles scored from stored component predictions); decision 2 and section 2 below no longer apply. Seed bagging is unchanged and unbuilt.
+**Superseded for blends (2026-11-17):** blend candidates are now specified in `size_search_v14_design.md` (fixed profiles scored from stored component predictions). Everything below about the `blend` family (decision 2, section 2, the blend parts of sections 3 to 5, and the `hgb_en_mean_v1` official-run plan) is void; `blend` axis, S3 and S4 blend work are not to be built from this guide. Seed bagging is unchanged and unbuilt.
 
 Design only; no code in this PR. The contract stays in this guide; the two ARCHITECTURE files are at their growth ceiling (section 5).
 
