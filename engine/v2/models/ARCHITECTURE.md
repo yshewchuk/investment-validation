@@ -56,13 +56,13 @@ See [the training contract](training/README.md#standalone-neural-magnitude-primi
 
 `magnitude_elasticnet_recipe.elasticnet_recipe` binds ordered columns, dictionary hash, preprocessing and closed sklearn parameters in JSON metadata. Request-v3 SIZE candidates admit finite positive alpha in `[1e-6, 1000]` and l1-ratio in `[1e-6, 1]`; the v2 compiler retains its original six alpha/l1 combinations.
 `regression_elasticnet_recipe` adds `regression_elasticnet_recipe.v1`: explicit signed/nonnegative domain, none/clip_zero projection, drift-rejecting validator. `regression_elasticnet_spline_recipe` adds the signed-only `regression_elasticnet_spline_recipe.v1`: the unchanged spline block, `prediction_projection: none`; its validator rebuilds and compares, refuses nonnegative, and leaves magnitude ids unchanged. Neither imports training or proves source admission.
-`training.magnitude_elasticnet.fit_regression_elasticnet_predictions` validates by schema (plain or spline) and fits signed labels unfloored; the original API still rejects negative labels. Both share one-thread preprocessing, evidence and no-retry failure (spline nonconvergence raises `EXPERIMENT_VARIANT_FAILED`). Results use `regression_elasticnet_fit.v1`; `size_fit_diagnostics.evidence` accepts the signed spline layout. Caller owns membership, selection and resource caps; no I/O or production wiring.
+`training.magnitude_elasticnet.fit_regression_elasticnet_predictions` validates by schema (plain or spline) and fits signed labels unfloored; the original API still rejects negative labels. Both share one-thread preprocessing, evidence and no-retry failure. Results use `regression_elasticnet_fit.v1`; `size_fit_diagnostics.evidence` accepts the signed spline layout. Caller owns membership, selection and resource caps; no I/O or production wiring.
 
 | ElasticNet condition | Outcome |
 |---|---|
 | Either no-fit guard is active | Its `RuntimeFitForbidden` precedes recipe or array inspection |
 | Invalid closed recipe, column order, matrix dimensions, infinities or label domain | `ValueError`; no fit or partial result |
-| Nonconvergence or nonfinite fit evidence/predictions | `ValueError`; no partial result, retry or iteration increase |
+| Nonconvergence or nonfinite fit evidence/predictions | `ValueError` (spline: `EXPERIMENT_VARIANT_FAILED`); no partial result, retry or iteration increase |
 | Same valid inputs and numerical environment | Deterministic fresh fit, not cached or journal replay |
 | Cache, transaction or partial-write concerns | No cache, I/O, persistence or publication; v1 recipes and results are unchanged |
 

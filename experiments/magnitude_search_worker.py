@@ -124,6 +124,7 @@ def main():
 
 def regression_forecasts(fit_inputs, request, progress, diagnostics):
     """Fit the closed explicit-target route; infrastructure failures are never candidate failures."""
+    from engine.v2.data.errors import DataError
     from engine.v2.models.training.fit_routes import check_fitting_allowed
     from engine.v2.ops.errors import fail
     from engine.v2.research.horizon_fitted import HorizonFitFailure, fitted_forecasts
@@ -136,7 +137,7 @@ def regression_forecasts(fit_inputs, request, progress, diagnostics):
             recipe=execution["fit_recipe"], progress=progress, diagnostics=diagnostics)
     except HorizonFitFailure as failure:
         error = failure.__cause__
-        if isinstance(error, (ValueError, ArithmeticError)):
+        if isinstance(error, (ValueError, ArithmeticError)) or (isinstance(error, DataError) and error.code == "EXPERIMENT_VARIANT_FAILED"):
             raise fail("EXPERIMENT_VARIANT_FAILED", "fitted regression estimator failed") from None
         raise error
     return predictions
