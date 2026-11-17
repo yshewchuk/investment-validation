@@ -1,10 +1,13 @@
 """Target-aware nested plan binding using the existing native search mechanisms."""
 import sys
+from collections import Counter
 
 from engine.v2.contracts import SnapshotRef
+from engine.v2.data.repository import Repository
 from engine.v2.foundation import content_hash, from_document
 from engine.v2.models.regression_candidate import regression_candidate_recipe
 from engine.v2.ops.errors import fail
+from engine.v2.research.iv_crush_inputs import skipped_iv_crush_targets
 from engine.v2.research.magnitude_panel_qualified_table import recipe as panel_recipe
 from experiments.magnitude_search_request_schema import regression_request_version
 from experiments.magnitude_search_request_versions import compile_request
@@ -25,6 +28,27 @@ def panel_coverage(event_ids, panel_event_ids):
     """Measure how many IV events the SIZE panel holds; a shortfall is reported, never dropped."""
     ids, panel = set(event_ids), set(panel_event_ids)
     return {"iv_events": len(ids), "in_size_panel": len(ids & panel), "outside": len(ids - panel)}
+
+
+def _apply_label_exclusions(folds, excluded):
+    """Drop skipped-label events from each fold's training and evaluation cohorts."""
+    def filtered(fold):
+        result, removed = dict(fold), []
+        for key in ("training_candidate_event_ids", "evaluation_event_ids"):
+            original = fold[key]
+            kept = [event_id for event_id in original if event_id not in excluded]
+            if len(kept) != len(original):
+                result[key] = kept
+                removed.extend(event_id for event_id in original if event_id in excluded)
+        if removed:
+            result["label_exclusions"] = [{"event_id": event_id, "reasons": [excluded[event_id]]}
+                                          for event_id in sorted(set(removed))]
+            if not result["evaluation_event_ids"] or not result["training_candidate_event_ids"]:
+                raise fail("INVALID_EXPERIMENT_SPEC",
+                           "regression fold has no events left after IV label exclusions")
+        return result
+    return [{**group, "outer": filtered(group["outer"]),
+             "inner": [filtered(fold) for fold in group["inner"]]} for group in folds]
 
 
 def stored_columns(request):
@@ -64,6 +88,19 @@ def prepare_plan(conn, store, registration, request, *, target, comparison):
     implementation = _implementation(binding, entrypoints=[binding["execution_plan"]["runner"],
         "experiments/magnitude_search_worker.py"])
     folds = _nested(binding, request, temporal=temporal)
+    label_exclusions = None
+    if "target_snapshot" in binding:
+        repository = Repository(conn, store, pin_snapshots=True)
+        excluded = skipped_iv_crush_targets(repository,
+            from_document(SnapshotRef, binding["target_snapshot"]),
+            as_of_month=binding["holdouts"]["holdout_as_of_month"], event_ids=binding["event_ids"])
+        folds = _apply_label_exclusions(folds, excluded)
+        label_exclusions = {"counts": dict(sorted(Counter(excluded.values()).items())),
+            "events": [{"event_id": event_id, "reason": reason}
+                       for event_id, reason in sorted(excluded.items())]}
+        print(f"[iv] label_exclusions target_skipped_excluded={len(excluded)} by_reason="
+              + ", ".join(f"{reason}={count}" for reason, count in label_exclusions["counts"].items()),
+              file=sys.stderr)
     candidates = []
     for spec in schedule["candidate_specs"]:
         recipe = regression_candidate_recipe(spec["family"], spec["parameters"],
@@ -82,6 +119,8 @@ def prepare_plan(conn, store, registration, request, *, target, comparison):
         "selection": {"metric": "inner_pooled_rmse" if version == 1 else "blend_rmse_mae",
             "ties": "candidate_id_ascending" if version == 1 else "lowest_score_then_candidate_id_ascending", "retries": 0,
             "outer": "frozen_selected_only", "final_read_authority": "none"}}
+    if label_exclusions is not None:
+        identity["label_exclusions"] = label_exclusions
     return {**identity, "plan_id": content_hash(identity)}
 
 
@@ -94,6 +133,8 @@ def fold_inputs(repository, binding, fold, *, plan):
     _require(plan["implementation"] == _implementation(binding, entrypoints=[
         binding["execution_plan"]["runner"], "experiments/magnitude_search_worker.py"]))
     folds = _nested(binding, plan["request"], temporal=binding["regression_plan"])
+    folds = _apply_label_exclusions(folds, {entry["event_id"]: entry["reason"]
+        for entry in plan.get("label_exclusions", {}).get("events", [])})
     _require(plan["folds"] == folds and any(fold in group["inner"] or fold == {**group["outer"],
         "evaluation_labels_before": binding["regression_execution"]["evaluation_labels_before"]}
         for group in folds))
@@ -101,6 +142,8 @@ def fold_inputs(repository, binding, fold, *, plan):
     month = binding["holdouts"]["holdout_as_of_month"]
     snapshot = from_document(SnapshotRef, binding["target_snapshot"])
     preflight = preflight_iv_crush_targets(repository, snapshot, as_of_month=month, event_ids=sorted(participants))
+    train = load_iv_crush_targets(repository, snapshot, as_of_month=month,
+        labels_before=fold["training_labels_before"], event_ids=fold["training_candidate_event_ids"])
     panel = read_stored_panel(repository, from_document(SnapshotRef, binding["snapshot"]),
         plan["request"]["panel_request"], columns=stored_columns(plan["request"]))
     context = panel["context"]
@@ -108,8 +151,6 @@ def fold_inputs(repository, binding, fold, *, plan):
         and plan["request"]["eligibility_policy_ref"] == {"schema_ref": "group_eligibility_plan.v1",
             "plan_id": context["eligibility_plan"]["plan_id"], "policy_id": context["eligibility_plan"]["policy"]["policy_id"]}
         and participants <= {event["event_id"] for event in context["target_events"]})
-    train = load_iv_crush_targets(repository, snapshot, as_of_month=month,
-        labels_before=fold["training_labels_before"], event_ids=fold["training_candidate_event_ids"])
     return {"preflight": preflight, "target": plan["target"],
         "stored_inputs_id": content_hash({"context": context, "feature_snapshot": panel["feature_snapshot"]}),
         "training_inputs": dict(train.attrs), "training": train[["event_id", plan["target"]["column"]]].to_dict("records"),

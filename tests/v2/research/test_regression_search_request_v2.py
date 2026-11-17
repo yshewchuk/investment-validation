@@ -24,7 +24,11 @@ from experiments import size_search
 from experiments import v2_magnitude_search_run
 from experiments.magnitude_search_request_versions import compile_request
 from experiments.magnitude_search_selection import CURRENT_TIE_RULE
-from experiments.regression_search_binding import panel_coverage, stored_columns
+from experiments.regression_search_binding import (
+    _apply_label_exclusions,
+    panel_coverage,
+    stored_columns,
+)
 from tests.v2.research.magnitude_trial_support import catalog_rows
 from tests.v2.research.test_iv_crush_cli import request as v1_cli_request
 from tests.v2.research.test_iv_crush_registration import prepared  # noqa: F401
@@ -327,6 +331,33 @@ def test_stored_columns_by_version():
     assert panel_coverage(["a", "b", "c"], ["b", "c", "d"]) == {
         "iv_events": 3, "in_size_panel": 2, "outside": 1}
     assert panel_coverage([], []) == {"iv_events": 0, "in_size_panel": 0, "outside": 0}
+
+
+def test_apply_label_exclusions_removes_training_and_evaluation_events():
+    folds = [{"outer": {"year": 2024, "training_candidate_event_ids": ["a", "b"],
+                        "evaluation_event_ids": ["c", "d"]},
+              "inner": [{"year": 2023, "training_candidate_event_ids": ["a", "b"],
+                         "evaluation_event_ids": ["c", "d"]}]}]
+    excluded = {"b": "gap_exceeds_limit", "c": "skipped"}
+    entries = [{"event_id": "b", "reasons": ["gap_exceeds_limit"]},
+               {"event_id": "c", "reasons": ["skipped"]}]
+    assert _apply_label_exclusions(folds, excluded) == [
+        {"outer": {**folds[0]["outer"], "training_candidate_event_ids": ["a"],
+                   "evaluation_event_ids": ["d"], "label_exclusions": entries},
+         "inner": [{**folds[0]["inner"][0], "training_candidate_event_ids": ["a"],
+                    "evaluation_event_ids": ["d"], "label_exclusions": entries}]}]
+    assert folds[0]["outer"]["training_candidate_event_ids"] == ["a", "b"]
+    assert _apply_label_exclusions(folds, {}) == folds
+
+
+@pytest.mark.parametrize("excluded", [{"b": "skipped"}, {"a": "skipped"}])
+def test_apply_label_exclusions_refuses_fold_with_no_events_left(excluded):
+    folds = [{"outer": {"training_candidate_event_ids": ["a"], "evaluation_event_ids": ["b"]},
+              "inner": []}]
+    with pytest.raises(OpsError) as caught:
+        _apply_label_exclusions(folds, excluded)
+    assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert caught.value.problem.message == "regression fold has no events left after IV label exclusions"
 
 
 def _v2_plan_request(data):

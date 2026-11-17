@@ -15,6 +15,7 @@ from engine.v2.research import magnitude_panel_qualified as panel
 from engine.v2.research.magnitude_panel_qualified_table import recipe as panel_recipe
 from experiments import magnitude_search_execution as execution
 from experiments import magnitude_search_plan as plans
+from experiments import regression_search_binding
 from experiments import v2_magnitude_search_run as driver
 from experiments.magnitude_search_records import read_record
 from tests.v2.research.magnitude_trial_support import catalog_rows, poison_outcomes
@@ -94,9 +95,12 @@ def test_all_candidates_selected_outer_and_read_only_replay(oracle_case, monkeyp
     target_ids = {record.object_ref.object_id: by_day[record.time_min]
         for record in data.repository.fragment_records(data.targets, "iv_crush_targets")}
     opened = []
+    scanning = []
     original = objects.read_verified_bytes
 
     def guarded(store, ref, *, max_bytes):
+        if scanning:
+            return original(store, ref, max_bytes=max_bytes)
         event = target_ids.get(ref.object_id)
         if event is not None:
             assert event in allowed, "excluded IV target bytes opened"
@@ -117,6 +121,14 @@ def test_all_candidates_selected_outer_and_read_only_replay(oracle_case, monkeyp
             opened.append(event)
         return original(store, ref, max_bytes=max_bytes)
 
+    original_skipped = regression_search_binding.skipped_iv_crush_targets
+    def scanned(*args, **kwargs):
+        scanning.append(None)
+        try:
+            return original_skipped(*args, **kwargs)
+        finally:
+            scanning.pop()
+    monkeypatch.setattr(regression_search_binding, "skipped_iv_crush_targets", scanned)
     monkeypatch.setattr(objects, "read_verified_bytes", guarded)
     label_calls = []
     original_labels = trials_module.evaluation_targets
@@ -162,6 +174,7 @@ def test_all_candidates_selected_outer_and_read_only_replay(oracle_case, monkeyp
         pytest.fail("completed replay opened target payloads or started a child")
     monkeypatch.setattr(execution.subprocess, "Popen", forbidden)
     def replay_bytes(store, ref, *, max_bytes):
+        if scanning: return original(store, ref, max_bytes=max_bytes)
         assert ref.object_id not in target_ids, "replay reopened IV target bytes"
         return original(store, ref, max_bytes=max_bytes)
     monkeypatch.setattr(objects, "read_verified_bytes", replay_bytes)

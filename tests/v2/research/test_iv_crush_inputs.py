@@ -397,6 +397,18 @@ def test_label_error_returns_no_partial_result_after_an_earlier_valid_read(tmp_p
         assert len([q for name, q in repository.scans if name == TABLE]) == 2
 
 
+def test_skipped_target_scan_reports_reason_while_load_refuses(tmp_path):
+    event = history_event("2024-05-06")
+    row = target(event, skipped=True, skip_reason="gap_exceeds_limit",
+                 crush_pct_iv30=None, available_as_of_date=None)
+    with committed(tmp_path, [event], [row]) as (_, repository, snapshot):
+        assert reader.skipped_iv_crush_targets(repository, snapshot, as_of_month=MONTH,
+            event_ids=[event["event_id"]]) == {event["event_id"]: "gap_exceeds_limit"}
+        with pytest.raises(DataError) as caught:
+            load(repository, snapshot)
+        exact_problem(caught, "EXPERIMENT_VARIANT_FAILED", "IV-crush label identity or availability is invalid")
+
+
 def test_last_day_clock_strictness_and_native_refusal_propagation(tmp_path, monkeypatch):
     event = history_event("2024-06-28")
     with committed(tmp_path, [event], [target(event)]) as (_, repository, snapshot):

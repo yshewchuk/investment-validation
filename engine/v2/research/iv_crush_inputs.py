@@ -70,6 +70,24 @@ def preflight_iv_crush_targets(repository, snapshot, *, as_of_month, event_ids):
     return {**identity, "preflight_id": content_hash(identity)}
 
 
+def skipped_iv_crush_targets(repository, snapshot, *, as_of_month, event_ids):
+    """Report events whose single committed target row is skipped, without reading labels."""
+    with progress.stage("IV target skip scan", report_refusals=True):
+        _, plans, _ = _candidates(repository, snapshot, as_of_month, "selection", sorted(event_ids))
+        skipped = {}
+        reporter = progress.Progress("IV skip scan", len(plans))
+        for event, request, _ in plans:
+            decoded = [row for batch in repository.scan(request, table_name=IV_CRUSH_TABLE_NAME,
+                                                        max_object_bytes=MAX_TARGET_OBJECT_BYTES)
+                       for row in batch.to_pylist()]
+            if len(decoded) == 1 and decoded[0].get("skipped") is True:
+                reason = decoded[0].get("skip_reason")
+                skipped[event.event_id] = reason if isinstance(reason, str) and reason else "skipped"
+            reporter.tick()
+        progress.decision("IV skip scan", f"skipped={len(skipped)}")
+    return skipped
+
+
 def _label_before(rows, event, cutoff):
     """Check the recorded modeled clock before consuming the signed numeric label."""
     try:
