@@ -263,6 +263,24 @@ def test_mlp_log1p_changes_fitted_predictions():
     assert np.abs(none - log1p).max() > 1e-3
 
 
+def test_mlp_log1p_matches_none_recipe_fitted_on_log1p_labels():
+    train, prediction = matrices(seed=11)
+    labels = np.random.default_rng(12).exponential(3.0, 60)
+    profile = "fixed200_relu64x32_l2_1"
+    none_recipe = candidate_recipe("mlp", {"profile": profile}, columns=COLS,
+                                   feature_dictionary_hash=HASH)
+    log1p_recipe = candidate_recipe("mlp", {"profile": profile,
+                                            "target": "log1p_median"},
+                                    columns=COLS, feature_dictionary_hash=HASH)
+
+    log1p = np.asarray(fit_mlp_predictions(
+        log1p_recipe, train, labels, prediction, columns=COLS)["predictions"])
+    expected = np.expm1(np.asarray(fit_mlp_predictions(
+        none_recipe, train, np.log1p(labels), prediction, columns=COLS)["predictions"]))
+    assert np.allclose(log1p, expected, rtol=1e-6, atol=1e-8)
+    assert expected.max() > 0.5
+
+
 def test_invalid_target_transform_refused():
     with pytest.raises(ValueError, match="target_transform"):
         elasticnet_recipe(columns=COLS, feature_dictionary_hash=HASH,
