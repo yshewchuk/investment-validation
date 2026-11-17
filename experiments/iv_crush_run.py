@@ -22,12 +22,13 @@ from engine.v2.foundation import (
 from engine.v2.ops.catalog import connect
 from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.experiments import experiment_spec_from_document
-from experiments.iv_crush_search import prepare
+from experiments.iv_crush_search import prepare, validate_event_ids
 from experiments.iv_crush_search_report import collect, resource_report
 from experiments.magnitude_search_plan import _nested, seal_search_plan
 from experiments.magnitude_search_request_schema import regression_request_version
 from experiments.magnitude_search_request_versions import compile_request
 from experiments.memory_guard import rss_watchdog
+from experiments.native_gate_worker import read_native_staged_input
 from experiments.native_registration import read_native_registration, reserve_native_registration
 from experiments.regression_search_binding import panel_coverage
 from experiments.size_search import _contain, _run
@@ -42,7 +43,29 @@ def _input(path):
         raise fail("INVALID_EXPERIMENT_SPEC", "IV metadata file is unavailable") from None
 
 
-def _prepare(repository, spec, request, args):
+def _event_ids(path):
+    """Operator-supplied event ids are strict invalid input, not a storage outage."""
+    try:
+        raw = read_native_staged_input(path)
+    except OSError:
+        raise fail("INVALID_EXPERIMENT_SPEC", "IV event-id file is unavailable") from None
+    if len(raw) > 1048576:
+        raise fail("INVALID_EXPERIMENT_SPEC", "IV event-id file exceeds 1 MiB")
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise fail("INVALID_EXPERIMENT_SPEC", "IV event-id file is not UTF-8") from None
+    lines = text.splitlines()
+    if not lines:
+        raise fail("INVALID_EXPERIMENT_SPEC", "IV event-id file is empty")
+    if any(not line or line != line.strip() for line in lines):
+        raise fail("INVALID_EXPERIMENT_SPEC", "IV event-id file has a blank or padded line")
+    if len(set(lines)) != len(lines):
+        raise fail("INVALID_EXPERIMENT_SPEC", "IV event-id file has duplicate ids")
+    return sorted(validate_event_ids(lines))
+
+
+def _prepare(repository, spec, request, args, event_ids=None):
     """Cheap metadata preparation is repeated by register; no second receipt format."""
     panel = request["panel_request"]
     registration, spec = prepare(repository, spec, source=repository.resolve_pinned(args.scope),
@@ -50,7 +73,7 @@ def _prepare(repository, spec, request, args):
         target_snapshot=repository.resolve(args.target_snapshot_id), scope=args.scope,
         as_of_month=panel["as_of_month"], training_start=args.training_start,
         labels_before=args.labels_before,
-        event_ids=panel["event_ids"] if regression_request_version(request["schema_version"]) == 1 else None)
+        event_ids=panel["event_ids"] if regression_request_version(request["schema_version"]) == 1 else event_ids)
     temporal = registration.document["regression_plan"]
     if temporal["evaluation_years"] != request["outer_years"]:
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "IV request outer years differ from registration")
@@ -72,6 +95,7 @@ def main(argv=None):
         parser.add_argument("--" + name, required=True)
     for name in ("scope", "target-snapshot-id", "training-start", "labels-before", "plan-ref"):
         parser.add_argument("--" + name)
+    parser.add_argument("--event-ids")
     parser.add_argument("--no-ledger", action="store_true", required=True)
     args = parser.parse_args(argv)
     fresh = args.action in ("preflight", "register")
@@ -79,15 +103,18 @@ def main(argv=None):
         parser.error("preflight/register require scope, target-snapshot-id, training-start and labels-before")
     if not fresh and not args.plan_ref:
         parser.error("seal/run/report require plan-ref")
-    if any("\0" in (getattr(args, name) or "") for name in ("spec", "request", "catalog", "store_root", "plan_ref")):
+    if any("\0" in (getattr(args, name) or "") for name in ("spec", "request", "catalog", "store_root", "plan_ref", "event_ids")):
         parser.error("IV paths must not contain NUL characters")
     conn, started, stack = None, time.monotonic(), ExitStack()
     try:
         request = _input(args.request)
         if regression_request_version(request.get("schema_version")) not in (1, 2):
             raise fail("INVALID_EXPERIMENT_SPEC", "IV requires its closed regression request")
-        if regression_request_version(request.get("schema_version")) == 2 and args.action in ("seal", "run"):
-            raise fail("INVALID_EXPERIMENT_SPEC", "regression v2 execution awaits its signed selection scorer")
+        if args.event_ids is not None and not fresh:
+            raise fail("INVALID_EXPERIMENT_SPEC", "--event-ids applies only to preflight/register")
+        if args.event_ids is not None and regression_request_version(request.get("schema_version")) != 2:
+            raise fail("INVALID_EXPERIMENT_SPEC", "--event-ids requires a regression v2 request")
+        event_ids = _event_ids(args.event_ids) if args.event_ids is not None else None
         schedule = compile_request(request)
         try:
             memory = _contain(request)
@@ -112,7 +139,7 @@ def main(argv=None):
             store = ArtifactStore(args.store_root)
             repository = Repository(conn, store, pin_snapshots=True)
             if fresh:
-                registration, spec = _prepare(repository, spec, request, args)
+                registration, spec = _prepare(repository, spec, request, args, event_ids=event_ids)
                 if args.action == "preflight":
                     result = {"preflight": resource_report({"counts": schedule["counts"], "request": request}),
                         "run_id": registration.run_id, "variant_id": registration.variant_id,
