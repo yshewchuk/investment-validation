@@ -32,10 +32,10 @@ Consumes the sealed **SIZE v14** run (`guides/size_search_v14_design.md`, PR #25
 
 | Input | Source | Binding |
 | --- | --- | --- |
-| Inner predictions (2023, 2024) per candidate | stored trial arrays `(pred, y, event_ids)`, lead 1 (the board's horizon; S2a verifies, else refuses) | plan id, registration id, driver seal, candidate id; content hash of each array set; event ids equal the sealed inner population |
+| Inner predictions (2023, 2024) per candidate | stored trial arrays `(pred, y, event_ids)`, lead 1 (the board's horizon; S2a verifies, else refuses). The SIZE panel already admitted these events, so no protected event is in them. This experiment reads only `pred` and `event_ids`; it never uses the stored `y` (labels come from the label tables below) | plan id, registration id, driver seal, candidate id; content hash of the whole stored array object (hashing bytes is not a read of label values); event ids equal the sealed inner population |
 | Outer (2025) predictions | v14 refit units only: overall, RMSE and MAE winners, blend components, averaged blend forecasts | slot `[plan_id, 2025, candidate_id]`, `status: completed` |
 | Production | `size_v1_4` walk-forward tier-4 `pred_abs_move` | content hash of the stored table; no refit |
-| Labels | `abs_move`, `crush_pct_iv30` | joined by event id; read only after a stage's decisions are frozen |
+| Labels | `abs_move`, `crush_pct_iv30` | read from the label tables by admitted event keys only (a protected event's label is never opened, so physical isolation is by key at the table reader, not by masking a decoded array); a month's labels are read only after that month's decisions are written |
 | Crush forecast | production tier-4 `pred_iv_crush_30`, **held fixed for every model** | only the move forecast varies; stated in every table header |
 | Chains, exit quotes | the SIZE panel's pinned v2 snapshot | snapshot id; changed bytes refuse `INPUT_CHANGED` |
 
@@ -92,7 +92,7 @@ STR-THRU's registered gate is a trained GBM (EXP-105, -184), STR-RUNUP's a trail
 
 Neither rule fits anything or looks at a P&L.
 
-**Marks and ambiguous exits.** Every leg is priced with `FillModel(alpha).buy/sell`. Per-leg fallback, each step labelled in the row: (1) valid, non-wide, non-zero-bid quote: alpha mark; (2) zero-bid or wide (`FillModel.is_wide`): alpha 0 (worst) for that leg; (3) no usable exit quote, including crossed or locked (`FillModel` refuses those): the **structure** is marked at its worst-case payoff (zero for the straddle; the defined-risk floor for put structures), labelled `exit_unquoted_worst_case`. Tables report each model's share per rung, so geometry landing on thinly quoted strikes cannot hide; a sensitivity row drops rung 3.
+**Marks and ambiguous exits.** Every leg is priced with `FillModel(alpha).buy/sell`. Per-leg fallback, each step labelled in the row: (1) valid, non-wide, non-zero-bid quote: alpha mark; (2) zero-bid or wide (`FillModel.is_wide`): alpha 0 (worst) for that leg; (3) no usable exit quote, including crossed (`bid > ask`, which `FillModel` refuses; a locked quote, bid equal to ask, is valid and priced normally): the **structure** is marked at its worst-case payoff (zero for the straddle; the defined-risk floor for put structures), labelled `exit_unquoted_worst_case`. Tables report each model's share per rung, so geometry landing on thinly quoted strikes cannot hide; a sensitivity row drops rung 3.
 
 ## 7. Hypotheses, pre-registration and judgement
 
@@ -124,7 +124,7 @@ The 75% and 60% shares are **my judgement calls**, not derived; the report shows
 | Slice | Scope | Code lines / test lines / doc words | After |
 | --- | --- | --- | --- |
 | S1 | Scaffold EXP-188 (`spec.yaml` from this design, PLANNED row), prereg guard that cannot no-op, closure-hash test | ~100 / ~120 / 60 | - |
-| S2a | `size_pnl_inputs`: bind v14 plan/seal/panel, resolve roster, refusals; order: check event ids against the sealed population, apply admission, read and hash `y` only for admitted rows (the hash also covers the admission result) | ~160 / ~180 / 80 | S1, v14 S2c |
+| S2a | `size_pnl_inputs`: bind v14 plan/seal/panel, resolve roster, refusals; order: check event ids against the sealed population, apply admission, read `pred` and `event_ids` only (never stored `y`); the binding hash covers the array object and the admission result | ~160 / ~180 / 80 | S1, v14 S2c |
 | S2b | Production and label readers, holdout drop, lead-1 check, per-model tables | ~140 / ~160 / 40 | S2a |
 | S3 | Ladder-quote table over the pinned snapshot, quarter-chunked, progress | ~150 / ~150 / 40 | S1, S2b (admitted keys only) |
 | S4 | Per-model pool, linear fast path, equivalence check | ~170 / ~180 / 40 | S2b, S3 |
@@ -135,7 +135,7 @@ The 75% and 60% shares are **my judgement calls**, not derived; the report shows
 | S8b | Report tables T1-T10 | ~170 / ~150 / 40 | S6, S7, S8a |
 | S9 | Driver (inner/outer), 50-ticker smoke, runbook, contract lines | ~120 / ~120 / 100 | S8b |
 
-S1, S3 and S8a can start in parallel; each slice changes behaviour only inside the new experiment.
+S1 and S8a can start in parallel (S3 waits for S2b's admitted keys); each slice changes behaviour only inside the new experiment.
 
 ## 10. Decisions for the user
 
