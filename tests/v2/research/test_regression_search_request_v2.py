@@ -18,6 +18,7 @@ from experiments import iv_crush_search
 from experiments import magnitude_search_plan as plans
 from experiments import magnitude_search_request
 from experiments import magnitude_search_request_v3
+from experiments.magnitude_search_request import validate_workers
 from experiments import native_registration as native
 from experiments import size_search
 from experiments import v2_magnitude_search_run
@@ -105,6 +106,23 @@ def test_workers_are_not_identity_and_default_equals_omitted(workers):
     assert result["candidate_specs"] == baseline["candidate_specs"]
     assert "workers" not in result["request"]
     assert json.dumps(result) == json.dumps(compile_request(document))
+
+
+def test_validate_workers_admits_regression_v2():
+    document = v2_request()
+    document.pop("workers", None)
+    assert validate_workers(document) == 1
+    for workers in (1, 8):
+        document["workers"] = workers
+        assert validate_workers(document) == workers
+    for workers in (0, 9, True, "2"):
+        document["workers"] = workers
+        with pytest.raises(OpsError) as caught:
+            validate_workers(document)
+        assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
+    with pytest.raises(OpsError) as caught:
+        validate_workers({"schema_version": "regression_search_request.v1", "workers": 2})
+    assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
 
 
 def test_explicit_lead_selector_and_panel_horizon_derivation():

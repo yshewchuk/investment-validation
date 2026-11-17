@@ -11,7 +11,11 @@ from engine.v2.research.eligibility_policy import eligibility_policy
 from engine.v2.research.magnitude_panel_qualified_table import recipe as qualified_recipe
 from engine.v2.research.magnitude_panel_table import recipe as panel_recipe
 from experiments.magnitude_search_execution import validate_execution_limits
-from experiments.magnitude_search_request_schema import allows_workers, request_version
+from experiments.magnitude_search_request_schema import (
+    allows_workers,
+    regression_request_version,
+    request_version,
+)
 from experiments.size_panel_request import validate_panel_request
 
 __all__ = ["compile_request", "validate_horizons", "validate_workers"]
@@ -75,7 +79,8 @@ def validate_workers(request):
     _require(type(request) is dict, "stage-2 request requires an object")
     if "workers" not in request:
         return 1
-    _require(allows_workers(request_version(request.get("schema_version"))),
+    _require(allows_workers(request_version(request.get("schema_version")))
+             or regression_request_version(request.get("schema_version")) == 2,
              "stage-2 workers require a v2 or later search request")
     _require(type(request["workers"]) is int and 1 <= request["workers"] <= 8,
              "stage-2 workers requires an integer from 1 through 8")
