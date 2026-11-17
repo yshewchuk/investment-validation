@@ -23,14 +23,15 @@ __all__ = ["SPLINE_COLUMNS", "elasticnet_spline_recipe", "spline_coefficient_lay
 
 
 def elasticnet_spline_recipe(*, columns, feature_dictionary_hash, alpha, l1_ratio,
-                             n_knots) -> dict:
+                             n_knots, target_transform="none") -> dict:
     """Bind the closed ElasticNet policy plus the closed spline transform."""
     if type(n_knots) is not int or not 4 <= n_knots <= 8:
         raise ValueError("spline n_knots must be an integer in 4..8")
     if any(name not in columns for name in SPLINE_COLUMNS):
         raise ValueError("spline columns must be a subset of the feature columns")
     base = elasticnet_recipe(columns=columns, feature_dictionary_hash=feature_dictionary_hash,
-                             alpha=alpha, l1_ratio=l1_ratio)
+                             alpha=alpha, l1_ratio=l1_ratio,
+                             target_transform=target_transform)
     preprocessing = {
         "imputer": base["preprocessing"]["imputer"],
         "missing_indicator": base["preprocessing"]["missing_indicator"],
@@ -41,7 +42,9 @@ def elasticnet_spline_recipe(*, columns, feature_dictionary_hash, alpha, l1_rati
         "output_features": base["preprocessing"]["output_features"]
                             + len(SPLINE_COLUMNS) * (n_knots + 1),
     }
-    return {**base, "schema_version": "magnitude_elasticnet_spline_recipe.v1",
+    return {**base, "schema_version": (
+                "magnitude_elasticnet_spline_recipe.v2" if target_transform == "log1p"
+                else "magnitude_elasticnet_spline_recipe.v1"),
             "estimator": {**base["estimator"],
                           "params": {**base["estimator"]["params"], "precompute": True}},
             "preprocessing": preprocessing}
@@ -64,7 +67,9 @@ def validate_elasticnet_spline_recipe(recipe) -> dict:
         expected = elasticnet_spline_recipe(columns=recipe["features"],
             feature_dictionary_hash=recipe["feature_dictionary_hash"],
             alpha=params["alpha"], l1_ratio=params["l1_ratio"],
-            n_knots=recipe["preprocessing"]["spline"]["n_knots"])
+            n_knots=recipe["preprocessing"]["spline"]["n_knots"],
+            target_transform=("log1p" if recipe["schema_version"]
+                              == "magnitude_elasticnet_spline_recipe.v2" else "none"))
         if canonical_json(recipe) == canonical_json(expected):
             return expected
     except (KeyError, TypeError, ValueError, OverflowError, RecursionError):

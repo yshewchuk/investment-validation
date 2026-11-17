@@ -25,7 +25,10 @@ def _keys_ok(family, parameters):
         return _hgb_keys(parameters)
     keys = set(parameters)
     if family == "elasticnet":
-        return keys in (_KEYS[family], _SPLINE_KEYS)
+        return keys in (_KEYS[family], _SPLINE_KEYS,
+                        _KEYS[family] | {"target"}, _SPLINE_KEYS | {"target"})
+    if family == "mlp":
+        return keys in (_KEYS[family], _KEYS[family] | {"target"})
     return keys == _KEYS[family]
 
 
@@ -34,22 +37,29 @@ def candidate_recipe(family, parameters, *, columns, feature_dictionary_hash) ->
     if (type(family) is not str or family not in _KEYS or type(parameters) is not dict
             or not _keys_ok(family, parameters)):
         raise ValueError("candidate requires a supported family and exact parameter keys")
+    parameters = dict(parameters)
+    has_target = "target" in parameters
+    target = parameters.pop("target", None)
+    if has_target and (type(target) is not str or target != "log1p_median"):
+        raise ValueError("candidate target must be 'log1p_median'")
+    transform = {"target_transform": "log1p"} if has_target else {}
     if family == "elasticnet":
         if "spline_knots" in parameters:
             knots = parameters["spline_knots"]
             if type(knots) is int and knots == 0:
                 return elasticnet_recipe(columns=columns,
                     feature_dictionary_hash=feature_dictionary_hash,
-                    alpha=parameters["alpha"], l1_ratio=parameters["l1_ratio"])
+                    alpha=parameters["alpha"], l1_ratio=parameters["l1_ratio"],
+                    **transform)
             return elasticnet_spline_recipe(columns=columns,
                 feature_dictionary_hash=feature_dictionary_hash,
                 alpha=parameters["alpha"], l1_ratio=parameters["l1_ratio"],
-                n_knots=knots)
+                n_knots=knots, **transform)
         return elasticnet_recipe(columns=columns, feature_dictionary_hash=feature_dictionary_hash,
-                                 **parameters)
+                                 **parameters, **transform)
     if family == "mlp":
         return mlp_recipe(columns=columns, feature_dictionary_hash=feature_dictionary_hash,
-                          **parameters)
+                          **parameters, **transform)
     return ridge_hgb_recipe(model="history_ridge" if family == "ridge" else "history_hgb",
                            columns=columns, feature_dictionary_hash=feature_dictionary_hash,
                            **parameters)
