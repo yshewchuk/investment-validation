@@ -151,5 +151,60 @@ def test_zero_comparator_year_gives_yearly_none_while_pooled_is_scored():
     assert result["yearly"]["2023"] is None
     assert result["yearly"]["2024"] is not None
     assert math.isfinite(result["blend_score"])
+    # Hand-computed pooled blend: 0.6/sqrt(3) + 0.3*(23/27) + 0.1*(7/12) = 0.2*sqrt(3) + 113/360.
+    assert result["blend_score"] == pytest.approx(0.2 * math.sqrt(3.0) + 113.0 / 360.0)
     with pytest.raises(ZeroComparatorError):
         _score_fn(_explicit_average(TARGETS_2023), perfect_2023)
+
+
+def test_score_blends_hand_computed_numeric_oracle_single_year():
+    weights = {"rmse": 0.5, "mae": 0.3, "large_move_underprediction": 0.2}
+    threshold = 10.0
+    component_years = {
+        "c-one": {"2023": [_lead("e1", 4.0, 2.0), _lead("e2", 12.0, 8.0)]},
+        "c-two": {"2023": [_lead("e1", 4.0, 4.0), _lead("e2", 12.0, 10.0)]},
+    }
+    history_rows_by_year = {"2023": [_lead("e1", 4.0, 5.0), _lead("e2", 12.0, 5.0)]}
+    blend = {"name": "blend-oracle", "blend_id": "blend:oracle",
+             "component_candidate_ids": ["c-one", "c-two"]}
+
+    def score_fn(candidate_rows, history_rows):
+        return blended_event_score(candidate_rows, history_rows, metric_weights=weights,
+                                   large_move_threshold_pct=threshold)
+
+    # Averaged candidate forecasts: e1 = (2+4)/2 = 3.0, e2 = (8+10)/2 = 9.0.
+    # Candidate errors [1, 3]: rmse = sqrt(5), mae = 2.0, large (actual >= 10: e2) under = 12-9 = 3.0.
+    # History errors [1, 7]: rmse = sqrt(25) = 5.0, mae = 4.0, large under = 12-5 = 7.0.
+    # Normalized: rmse sqrt(5)/5, mae 2/4 = 0.5, large 3/7.
+    expected_rmse = math.sqrt(5.0)
+    expected_mae = 2.0
+    expected_large = 3.0
+    expected_norm_rmse = math.sqrt(5.0) / 5.0
+    expected_norm_mae = 0.5
+    expected_norm_large = 3.0 / 7.0
+    expected_blend = 0.5 * expected_norm_rmse + 0.3 * expected_norm_mae + 0.2 * expected_norm_large
+
+    scores = score_blends([blend], component_years, ["2023"], history_rows_by_year, score_fn, set())
+    assert len(scores) == 1
+    result = scores[0]
+    assert result["candidate_id"] == "blend:oracle"
+    assert result["kind"] == "blend"
+    assert result["blend_name"] == "blend-oracle"
+
+    assert result["metrics"]["rmse"] == pytest.approx(expected_rmse)
+    assert result["metrics"]["mae"] == pytest.approx(expected_mae)
+    assert result["metrics"]["large_move_underprediction"] == pytest.approx(expected_large)
+    assert result["normalized"]["rmse"] == pytest.approx(expected_norm_rmse)
+    assert result["normalized"]["mae"] == pytest.approx(expected_norm_mae)
+    assert result["normalized"]["large_move_underprediction"] == pytest.approx(expected_norm_large)
+    assert result["blend_score"] == pytest.approx(expected_blend)
+
+    yearly_2023 = result["yearly"]["2023"]
+    assert list(result["yearly"]) == ["2023"]
+    assert yearly_2023["metrics"]["rmse"] == pytest.approx(expected_rmse)
+    assert yearly_2023["metrics"]["mae"] == pytest.approx(expected_mae)
+    assert yearly_2023["metrics"]["large_move_underprediction"] == pytest.approx(expected_large)
+    assert yearly_2023["normalized"]["rmse"] == pytest.approx(expected_norm_rmse)
+    assert yearly_2023["normalized"]["mae"] == pytest.approx(expected_norm_mae)
+    assert yearly_2023["normalized"]["large_move_underprediction"] == pytest.approx(expected_norm_large)
+    assert yearly_2023["blend_score"] == pytest.approx(expected_blend)
