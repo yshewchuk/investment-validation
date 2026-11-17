@@ -141,6 +141,22 @@ def _checked_stamp(spec):
     return prereg
 
 
+def _chronology(spec, spec_path, run_log_path):
+    """Return ``(prereg, first_ts)``: the checked stamp and the first run-log ts (or None).
+
+    Refuses if the stamp is missing or unparseable, if the run log is malformed, or if
+    the stamp is later than the first run. ``run_log_path`` is only read if it exists.
+    """
+    prereg = _checked_stamp(spec)
+    first_ts = None
+    run_log = Path(run_log_path)
+    if run_log.exists():
+        first_ts = _first_run_ts(run_log)
+        if first_ts is not None and prereg > first_ts:
+            raise _refuse("preregistered_after_run", "preregistered_at is after the first run")
+    return prereg, first_ts
+
+
 def require_preregistration(spec_path=SPEC_PATH, ledger_path=None, run_log_path=None) -> dict:
     """Verify the spec is registered before any run; return a receipt or raise.
 
@@ -160,13 +176,7 @@ def require_preregistration(spec_path=SPEC_PATH, ledger_path=None, run_log_path=
     if planned[0] != digest:
         raise _refuse("spec_hash_mismatch", "spec differs from its PLANNED row")
 
-    prereg = _checked_stamp(spec)
-
-    first_ts = None
-    if run_log.exists():
-        first_ts = _first_run_ts(run_log)
-        if first_ts is not None and prereg > first_ts:
-            raise _refuse("preregistered_after_run", "preregistered_at is after the first run")
+    prereg, first_ts = _chronology(spec, spec_path, run_log)
 
     return {
         "spec_hash": digest,
@@ -176,11 +186,19 @@ def require_preregistration(spec_path=SPEC_PATH, ledger_path=None, run_log_path=
     }
 
 
-def register_planned(spec_path=SPEC_PATH, ledger_path=None, today=None) -> bool:
-    """Append the PLANNED row once. True if appended, False if already registered."""
+def register_planned(spec_path=SPEC_PATH, ledger_path=None, today=None,
+                     run_log_path=None) -> bool:
+    """Append the PLANNED row once. True if appended, False if already registered.
+
+    Runs the same stamp and run-log chronology check as ``require_preregistration``
+    before any ledger write.
+    """
     ledger = lib.LEDGER_PATH if ledger_path is None else ledger_path
+    spec_path = Path(spec_path)
+    run_log = (spec_path.parent / "results" / "run_log.jsonl" if run_log_path is None
+               else Path(run_log_path))
     spec, digest = _load(spec_path)
-    _checked_stamp(spec)
+    _chronology(spec, spec_path, run_log)
     planned = _planned_hashes(ledger)
     if planned == [digest]:
         return False

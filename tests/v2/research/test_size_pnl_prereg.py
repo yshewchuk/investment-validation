@@ -290,6 +290,27 @@ def test_register_planned_refuses_a_different_planned_hash(tmp_path):
     assert reason == "planned_row_conflict"
 
 
+def test_register_planned_refuses_run_log_earlier_than_stamp_and_writes_no_row(tmp_path):
+    spec = _write_spec(tmp_path)
+    ledger = tmp_path / "LEDGER.csv"
+    _write_run_log(tmp_path, json.dumps({"ts": "2026-11-17T19:00:00+00:00"}) + "\n")
+    reason = refusal(lambda: size_pnl_prereg.register_planned(
+        spec_path=spec, ledger_path=ledger, today="2026-11-17",
+        run_log_path=_run_log_path(tmp_path)))
+    assert reason == "preregistered_after_run"
+    assert not ledger.exists()
+
+
+def test_register_planned_with_later_run_log_registers(tmp_path):
+    spec = _write_spec(tmp_path)
+    ledger = tmp_path / "LEDGER.csv"
+    _write_run_log(tmp_path, json.dumps({"ts": "2026-11-17T21:00:00+00:00"}) + "\n")
+    assert size_pnl_prereg.register_planned(
+        spec_path=spec, ledger_path=ledger, today="2026-11-17",
+        run_log_path=_run_log_path(tmp_path)) is True
+    assert size_pnl_prereg._planned_hashes(ledger) == [_digest(spec)]
+
+
 # --------------------------------------------------------------------------
 # no-op regression: no failure setup may ever return a receipt
 # --------------------------------------------------------------------------
