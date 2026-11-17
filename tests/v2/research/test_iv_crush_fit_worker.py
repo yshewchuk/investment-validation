@@ -5,6 +5,7 @@ import subprocess
 import pytest
 
 from engine.models.no_fit import RuntimeFitForbidden as LegacyFitForbidden, no_fit_guard as legacy_guard
+from engine.v2.data.errors import DataError, fail
 from engine.v2.models.no_fit import RuntimeFitForbidden, no_fit_guard
 from engine.v2.ops.errors import OpsError
 from experiments import magnitude_search_execution as execution
@@ -81,6 +82,27 @@ def test_signed_worker_adapter_preserves_failure_classification(monkeypatch, err
         assert "private" not in str(caught.value)
     else:
         with pytest.raises(type(error)) as caught:
+            worker.regression_forecasts({}, request, None, [])
+        assert caught.value is error
+
+
+@pytest.mark.parametrize("error", [fail("EXPERIMENT_VARIANT_FAILED", "private spline detail"),
+    fail("CONTRACT_MISMATCH", "x")])
+def test_signed_worker_adapter_maps_typed_variant_failure(monkeypatch, error):
+    from engine.v2.research import horizon_fitted
+    def broken(*a, **k):
+        raise horizon_fitted.HorizonFitFailure("wrapped") from error
+    monkeypatch.setattr(horizon_fitted, "fitted_forecasts", broken)
+    request = {"execution": {"target": {"column": "crush_pct_iv30", "domain": "signed"},
+        "features": ["x"], "fit_recipe": {}}, "inner": {"evaluation_event_ids": ["test"]}, "plan": {"horizons": [5, 3, 1]}}
+    if error.code == "EXPERIMENT_VARIANT_FAILED":
+        with pytest.raises(OpsError) as caught:
+            worker.regression_forecasts({}, request, None, [])
+        assert caught.value.code == "EXPERIMENT_VARIANT_FAILED"
+        assert str(caught.value) == "EXPERIMENT_VARIANT_FAILED: fitted regression estimator failed"
+        assert "private" not in str(caught.value)
+    else:
+        with pytest.raises(DataError) as caught:
             worker.regression_forecasts({}, request, None, [])
         assert caught.value is error
 

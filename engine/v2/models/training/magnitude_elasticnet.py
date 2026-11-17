@@ -7,9 +7,6 @@ import numpy as np
 from threadpoolctl import threadpool_limits
 
 from engine.v2.foundation import content_hash
-from engine.v2.models.magnitude_elasticnet_recipe import (
-    validate_regression_elasticnet_recipe,
-)
 
 from . import _magnitude_elasticnet_spline_fit as spline_fit
 from ._magnitude_elasticnet_estimator import ConvergenceWarning, build_estimator
@@ -67,7 +64,7 @@ def fit_regression_elasticnet_predictions(recipe, train_features, train_labels,
                                           prediction_features, *, columns):
     """Fit an explicit domain-aware recipe without inferring source or target admission."""
     check_fitting_allowed("engine.v2.models.training.magnitude_elasticnet.fit_regression_elasticnet_predictions")
-    recipe = validate_regression_elasticnet_recipe(recipe)
+    recipe = spline_fit.select_regression_validator(recipe)(recipe)
     domain = "nonnegative " if recipe["target_domain"] == "nonnegative" else ""
     inputs = FitInputs.from_recipe(
         recipe, train_features, train_labels, prediction_features, columns,
