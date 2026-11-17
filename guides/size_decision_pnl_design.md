@@ -1,6 +1,6 @@
 # SIZE decision-level P&L re-score (design)
 
-Design only; no code. Contract text lands in the ARCHITECTURE files with the slice that changes a contract (net-zero: both docs are at their word ceiling). Experiment id **EXP-188** (next free: the local ledger ends at EXP-187, no open PR claims it; S1 re-checks).
+Design; S1 (PR #2570) adds the scaffold and guard, later slices add the rest. Contract text lands in the ARCHITECTURE files with the slice that changes a contract (net-zero: both docs are at their word ceiling). Experiment id **EXP-188** (next free: the local ledger ends at EXP-187, no open PR claims it; S1 re-checks).
 
 **Question (user, 2026-11-17).** Short-vol structures have capped loss and set strike width from the forecast, so they may prefer a *median* forecast (MAE-like). Long straddles pay for the tail, so they may prefer a *mean* forecast (RMSE-like). Does decision P&L agree? A SEPARATE experiment: it reads stored SIZE predictions and scores the trading decisions they produce, selects nothing for SIZE and feeds no P&L back into it.
 
