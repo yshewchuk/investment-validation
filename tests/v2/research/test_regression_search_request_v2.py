@@ -151,7 +151,6 @@ def test_explicit_lead_selector_and_panel_horizon_derivation():
     (("space", "hgb", "min_samples_leaf"), [True]),
     (("space", "hgb", "l2_regularization"), [-1]), (("space", "hgb", "l2_regularization"), [1001]),
     (("space", "hgb", "max_iter"), [99]), (("space", "hgb", "max_iter"), [5001]),
-    (("space", "elasticnet", "spline_knots"), [0]),
     (("workers",), 0), (("workers",), 9), (("workers",), True), (("workers",), "2"),
     (("extra",), 1), (("schema_version",), "regression_search_request.v3"),
     (("max_candidates",), 54), (("max_fits",), 332),
@@ -449,3 +448,63 @@ def test_register_refuses_coverage_shortfall_before_reserving(tmp_path, monkeypa
     refusal = json.loads(capsys.readouterr().out)
     assert refusal["refused"] == "EXPERIMENT_IDENTITY_CONFLICT"
     assert refusal["message"] == "EXPERIMENT_IDENTITY_CONFLICT: regression search differs from its native binding"
+
+
+def _spline_mlp_request():
+    document = v2_request(feature_sets=["HMOSX", "HMOSXL"])
+    document["space"]["elasticnet"]["spline_knots"] = [0, 4, 6]
+    document["space"]["mlp"] = {"profile": ["es_relu32_l2_1", "relu32_l2_0p01"]}
+    document["max_candidates"] = 50
+    document["max_fits"] = 400
+    document["comparison"]["max_component_fits"] = 400
+    return document
+
+
+def test_spline_and_mlp_families_compile_with_counts_and_specs():
+    result = compile_request(_spline_mlp_request())
+    per_set = 3 + (3 * 2 * 3) + 2 + 2
+    assert result["counts"]["candidates"] == 2 * per_set
+    mlp = [spec for spec in result["candidate_specs"] if spec["family"] == "mlp"]
+    assert len(mlp) == 4
+    assert {spec["parameters"]["profile"] for spec in mlp} == {
+        "es_relu32_l2_1", "relu32_l2_0p01"}
+    assert all(set(spec["parameters"]) == {"profile"} for spec in mlp)
+    elasticnet = [spec for spec in result["candidate_specs"]
+                  if spec["family"] == "elasticnet"]
+    assert len(elasticnet) == 2 * 3 * 2 * 3
+    assert {spec["parameters"]["spline_knots"] for spec in elasticnet} == {0, 4, 6}
+
+
+def test_spline_zero_axis_equals_omitted():
+    omitted = compile_request(v2_request())
+    document = v2_request()
+    document["space"]["elasticnet"]["spline_knots"] = [0]
+    result = compile_request(document)
+    assert result["request_id"] == omitted["request_id"]
+    assert result["candidate_specs"] == omitted["candidate_specs"]
+
+
+@pytest.mark.parametrize("path,value", [
+    (("space", "elasticnet", "spline_knots"), [4]),
+    (("space", "elasticnet", "spline_knots"), [3]),
+    (("space", "elasticnet", "spline_knots"), [7]),
+    (("space", "elasticnet", "spline_knots"), [6, 4]),
+    (("space", "elasticnet", "spline_knots"), [4, 4]),
+    (("space", "elasticnet", "spline_knots"), [True]),
+    (("space", "elasticnet", "spline_knots"), [4.0]),
+    (("space", "mlp"), {"profile": ["unknown"]}),
+    (("space", "mlp"), {"profile": ["relu32_l2_0p01", "es_relu32_l2_1"]}),
+    (("space", "mlp"), {"profile": ["es_relu32_l2_1"], "alpha": [1.0]}),
+    (("space", "mlp"), ["es_relu32_l2_1"]),
+    (("space", "foo"), {"alpha": [1.0]}),
+])
+def test_spline_mlp_refusals(path, value):
+    document = v2_request()
+    _put(document, path, value)
+    refuses(document)
+
+
+def test_mlp_candidate_cap_is_enforced():
+    document = v2_request()
+    document["space"]["mlp"] = {"profile": ["es_relu32_l2_1"]}
+    assert "cap is insufficient" in str(refuses(document))
