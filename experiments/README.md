@@ -688,8 +688,8 @@ whole-event pairing gives equal event weight. Broad challenger/training-mean los
 retain events omitted by incumbent abstention. Coverage records every arm/status;
 no matched events is an explicit unavailable comparison, not a success or zero loss.
 The existing shared regression loss/forecast helpers own finite signed arithmetic
-and exact challenger coverage. `paired_report_v2` (library-only until the search report
-calls it) adds an `implied_ex_earnings` arm, common-matched metrics and ticker/event-month
+and exact challenger coverage. `paired_report_v2` (used by the search report for
+v2 requests) adds an `implied_ex_earnings` arm, common-matched metrics and ticker/event-month
 cluster-bootstrap differences. Neither helper adds promotion thresholds, SIZE large-move
 rules, provider access, a new winner or final authority.
 
