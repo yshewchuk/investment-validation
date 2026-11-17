@@ -22,7 +22,7 @@ from engine.v2.foundation import (
 from engine.v2.ops.catalog import connect
 from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.experiments import experiment_spec_from_document
-from experiments.iv_crush_search import prepare
+from experiments.iv_crush_search import prepare, validate_event_ids
 from experiments.iv_crush_search_report import collect, resource_report
 from experiments.magnitude_search_plan import _nested, seal_search_plan
 from experiments.magnitude_search_request_schema import regression_request_version
@@ -62,7 +62,7 @@ def _event_ids(path):
         raise fail("INVALID_EXPERIMENT_SPEC", "IV event-id file has a blank or padded line")
     if len(set(lines)) != len(lines):
         raise fail("INVALID_EXPERIMENT_SPEC", "IV event-id file has duplicate ids")
-    return sorted(lines)
+    return sorted(validate_event_ids(lines))
 
 
 def _prepare(repository, spec, request, args, event_ids=None):

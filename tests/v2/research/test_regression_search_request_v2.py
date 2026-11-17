@@ -419,7 +419,8 @@ def test_iv_cli_refuses_v2_seal_and_run_before_any_fit(tmp_path, capsys, action)
     assert not (tmp_path / "catalog.sqlite").exists()
 
 
-@pytest.mark.parametrize("content", [b"", b"a\n\nb\n", b"a\na\n", b" a\n", b"\xff", None])
+@pytest.mark.parametrize("content", [b"", b"a\n\nb\n", b"a\na\n", b" a\n", b"\xff",
+    b"\xef\xbb\xbfa\n", b"a\x00b\n", None])
 def test_event_ids_file_semantics(tmp_path, content):
     path = tmp_path / "event-ids.txt"
     if content is not None:
@@ -432,7 +433,7 @@ def test_event_ids_file_semantics(tmp_path, content):
 
 
 def test_library_prepare_validates_event_ids():
-    for value in ([], ["a", "a"], [" a"], [""], "ab"):
+    for value in ([], ["a", "a"], [" a"], [""], "ab", "﻿a", "a\tb"):
         with pytest.raises(OpsError) as refused:
             iv_crush_search.validate_event_ids(value)
         assert refused.value.code == "INVALID_EXPERIMENT_SPEC"

@@ -14,8 +14,9 @@ from experiments.native_registration import prepare_regression_registration
 def validate_event_ids(event_ids):
     """One entry-path-independent check of an explicit IV event-id list."""
     if (not isinstance(event_ids, (list, tuple)) or not event_ids
-            or any(not isinstance(item, str) or not item or item != item.strip() for item in event_ids)):
-        raise fail("INVALID_EXPERIMENT_SPEC", "IV event ids must be a nonempty list of unpadded strings")
+            or any(not isinstance(item, str) or not item or item != item.strip()
+                   or not item.isprintable() for item in event_ids)):
+        raise fail("INVALID_EXPERIMENT_SPEC", "IV event ids must be a nonempty list of printable unpadded strings")
     if len(set(event_ids)) != len(event_ids):
         raise fail("INVALID_EXPERIMENT_SPEC", "IV event ids must be unique")
     return list(event_ids)
