@@ -230,6 +230,33 @@ def test_huge_second_run_log_line_does_not_block_a_valid_first_line(tmp_path):
     assert receipt["first_run_ts"].startswith("2026-11-17 21:00:00")
 
 
+def test_leading_blank_lines_do_not_hide_an_earlier_first_run(tmp_path):
+    spec = _write_spec(tmp_path)
+    ledger = _write_ledger(tmp_path / "LEDGER.csv", [_planned_row(_digest(spec))])
+    record = json.dumps({"ts": "2026-11-17T19:00:00+00:00"})
+    _write_run_log(tmp_path, "\n\n" + record + "\n")
+    assert refusal(lambda: _check(tmp_path, spec, ledger)) == "preregistered_after_run"
+
+
+def test_leading_blank_lines_then_later_run_passes_with_exact_first_run_ts(tmp_path):
+    spec = _write_spec(tmp_path)
+    ledger = _write_ledger(tmp_path / "LEDGER.csv", [_planned_row(_digest(spec))])
+    record = json.dumps({"ts": "2026-11-17T21:00:00+00:00"})
+    _write_run_log(tmp_path, "\n\n" + record + "\n")
+    receipt = _check(tmp_path, spec, ledger)
+    assert receipt["spec_hash_checked"] is True
+    assert receipt["first_run_ts"] == "2026-11-17 21:00:00+00:00"
+
+
+def test_run_log_of_only_blank_lines_has_no_first_run_ts(tmp_path):
+    spec = _write_spec(tmp_path)
+    ledger = _write_ledger(tmp_path / "LEDGER.csv", [_planned_row(_digest(spec))])
+    _write_run_log(tmp_path, "\n\n")
+    receipt = _check(tmp_path, spec, ledger)
+    assert receipt["spec_hash_checked"] is True
+    assert receipt["first_run_ts"] is None
+
+
 def test_register_planned_without_stamp_refuses_and_writes_no_row(tmp_path):
     spec = _write_spec(tmp_path, drop=("preregistered_at",))
     ledger = tmp_path / "LEDGER.csv"

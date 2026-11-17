@@ -41,8 +41,11 @@ def _refuse(reason, message):
 def _read_bounded(path, limit, *, first_line=False) -> str:
     """Read a regular file without blocking on FIFOs and without reading past ``limit``.
 
-    With ``first_line`` the text is cut at the first newline and the size check is
-    skipped, so a grown log is never read in full. Callers catch OSError/ValueError.
+    With ``first_line`` the text is cut to the first non-blank line within the bytes
+    read (leading blank or whitespace-only lines are skipped, matching
+    ``engine.evaluate``), and the size check is skipped, so a grown log is never read
+    in full. If no non-blank line occurs within the read, the result is "".
+    Callers catch OSError/ValueError.
     """
     fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
     try:
@@ -63,7 +66,7 @@ def _read_bounded(path, limit, *, first_line=False) -> str:
         os.close(fd)
     data = b"".join(chunks)
     if first_line:
-        data = data.split(b"\n", 1)[0]
+        data = next((line for line in data.split(b"\n") if line.strip()), b"")
     return data.decode("utf-8")
 
 
