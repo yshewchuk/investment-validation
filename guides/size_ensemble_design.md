@@ -11,13 +11,13 @@ Design only; no code in this PR. The contract stays in this guide; the two ARCHI
 | # | Question | Decision | Why |
 | --- | --- | --- | --- |
 | 1 | Seed bagging | An HGB axis `n_seeds`, integer in [1, 10]; member i uses `random_state = i`. Default `[1]`. | `n_seeds=1` is today's fit exactly (`random_state` 0) and its recipe omits the field, so declaring `[1]` or nothing gives the same recipe and id. A recipe with `n_seeds > 1` uses schema `magnitude_ridge_hgb_recipe.v3` (v1/v2 and their validators unchanged; the v3 validator rebuilds with the field). Members differ only by seed, which also changes the seeded 10% early-stopping holdout the recipe already uses. |
-| 2 | Blend | A fixed-recipe family `blend` with one axis `profile` naming code-declared recipes. One profile now: `hgb_en_mean_v1`. | Same pattern as the MLP `profile` axis: identity is a recipe hash fixed in the sealed plan before any fit. Combining stored member forecasts at scoring time is rejected (section 2). |
+| 2 | Blend (superseded) | A fixed-recipe family `blend` with one axis `profile` naming code-declared recipes. One profile now: `hgb_en_mean_v1`. | Same pattern as the MLP `profile` axis: identity is a recipe hash fixed in the sealed plan before any fit. Combining stored member forecasts at scoring time is rejected (section 2). |
 | 3 | Slower trees | Already inside the request bounds (v4+ grid bounds; the `loss` and `max_iter` axes themselves are v9+, so v9 to v11 requests can declare it today): learning_rate 0.03 in [1e-3, 1], max_leaf_nodes 31 in [2, 64], min_samples_leaf 300 in [1, 1000], l2 10 in [0, 1000], max_iter 3000 in [100, 5000], loss `gamma` (v9). **Config only**, no bounds change. | A request can declare it today. Only `n_seeds` and the `blend` family need a request bump (v12). |
 | 4 | Distribution band (#2401) | Unchanged. A bagged or blended trial stores one averaged forecast array; `size_distribution_report` pools and scores that array like any other. | It reads stored per-trial forecasts only, never members. |
 
 Known differences from the exploratory script, so the official run is read as its own measurement: the pipeline HGB recipe fixes `n_iter_no_change` 10 (script: 20), early stopping uses the recipe's seeded random 10% holdout, and fits run single-threaded. The script's `ElasticNet(max_iter=10000)` would only warn on non-convergence; the pipeline member raises `ValueError`, so under R1 a non-converged elastic net fails the blend trial. No attempt is made to reproduce the script's numbers.
 
-## 2. Blend: why a fixed-recipe family
+## 2. Blend: why a fixed-recipe family (SUPERSEDED by `size_search_v14_design.md`; sections 2, 3 R4-R5 and the blend rows of 4-5 do not apply)
 
 Rejected: combining stored member forecasts at scoring time. It needs every member stored for every trial (the `TrialArrays` retention cap already trips on large grids), makes "which pairs" a choice over stored scores (picking members after seeing scores), and adds a second scoring path with its own identity, receipts and failure rules. A blend candidate is instead one ordinary candidate:
 
