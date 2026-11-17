@@ -110,3 +110,52 @@ def test_collect_outer_results_refits_every_winner_unit(monkeypatch):
          "result": failed_b},
     ]
     assert result["folds"] == [fold_a]
+
+
+def _failed_journal():
+    plan = {"plan_id": "plan"}
+    key = refit_key(plan, "2024", "rmse")
+    started = {"outer_id": key}
+    fit = {"horizon_sessions": 1}
+    attempted = {"horizon_sessions": 2}
+    records = {"start": started,
+               "terminal": failed_terminal(key, "2024", "rmse"),
+               "worker-result": {"event": "failed"},
+               "execution": {"status": "failed", "forecasts_id": None, "fits": [fit],
+                             "completed_fit_count": 1, "fit_attempt_count": 2},
+               "fit-started:1": fit, "fit-completed:1": fit,
+               "fit-started:2": attempted}
+    return records, key, started
+
+
+def _replay_failed(records, key, started):
+    return outer._replay_failed(records.get, started, key, "2024", "rmse", [1, 2])
+
+
+def test_replay_failed_returns_the_terminal_for_a_valid_journal():
+    records, key, started = _failed_journal()
+    assert _replay_failed(records, key, started) == failed_terminal(key, "2024", "rmse")
+
+
+def test_replay_failed_rejects_a_missing_attempted_fit_start():
+    records, key, started = _failed_journal()
+    del records["fit-started:2"]
+    with pytest.raises(OpsError) as caught:
+        _replay_failed(records, key, started)
+    assert caught.value.problem.code == "EXPERIMENT_IDENTITY_CONFLICT"
+
+
+def test_replay_failed_rejects_a_wrong_fit_attempt_count():
+    records, key, started = _failed_journal()
+    records["execution"]["fit_attempt_count"] = 1
+    with pytest.raises(OpsError) as caught:
+        _replay_failed(records, key, started)
+    assert caught.value.problem.code == "EXPERIMENT_IDENTITY_CONFLICT"
+
+
+def test_replay_failed_rejects_a_non_failed_worker_result():
+    records, key, started = _failed_journal()
+    records["worker-result"] = {"event": "succeeded"}
+    with pytest.raises(OpsError) as caught:
+        _replay_failed(records, key, started)
+    assert caught.value.problem.code == "EXPERIMENT_IDENTITY_CONFLICT"

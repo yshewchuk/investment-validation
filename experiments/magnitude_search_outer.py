@@ -214,6 +214,35 @@ def _replay(read, store, started, fold, plan, execution, binding, *, input_callb
     return result
 
 
+def _replay_failed(saved, started, key, outer_year, chosen, horizons):
+    try:
+        _equal(saved("start"), started)
+        terminal = saved("terminal")
+        _equal(terminal, failed_terminal(key, outer_year, chosen))
+        worker = saved("worker-result")
+        execution = saved("execution")
+        if not isinstance(worker, dict) or worker.get("event") != "failed" or not isinstance(execution, dict):
+            raise _conflict()
+        fits = execution["fits"]
+        if (execution["status"] != "failed" or execution["forecasts_id"] is not None
+                or not isinstance(fits, list)
+                or execution["completed_fit_count"] != len(fits)
+                or execution["fit_attempt_count"] != len(fits) + 1):
+            raise _conflict()
+        for fit in fits:
+            slot = ":" + str(fit["horizon_sessions"])
+            _equal(saved("fit-started" + slot), fit)
+            if not isinstance(saved("fit-completed" + slot), dict):
+                raise _conflict()
+        completed = {fit["horizon_sessions"] for fit in fits}
+        attempted = next((horizon for horizon in horizons if horizon not in completed), None)
+        if attempted is None or not isinstance(saved("fit-started:" + str(attempted)), dict):
+            raise _conflict()
+    except (KeyError, TypeError, ValueError):
+        raise _conflict() from None
+    return terminal
+
+
 def execute_outer_fold(conn, store, repository, registration, request, plan_ref, outer_year, *, limits,
                        candidate_id=None):
     """Refit one frozen inner winner once; replay complete evidence without fitting."""
@@ -279,16 +308,7 @@ def _execute_admitted(conn, store, repository, registration, plan, fold, selecti
         if per_candidate(plan):
             terminal = saved("terminal")
             if isinstance(terminal, dict) and terminal.get("status") == "failed":
-                _equal(saved("start"), started)
-                expected = failed_terminal(key, outer_year, chosen)
-                _equal(terminal, expected)
-                worker = saved("worker-result")
-                execution_record = saved("execution")
-                if (not isinstance(worker, dict) or worker.get("event") != "failed"
-                        or not isinstance(execution_record, dict)
-                        or execution_record.get("status") != "failed"):
-                    raise _conflict()
-                return terminal
+                return _replay_failed(saved, started, key, outer_year, chosen, plan["horizons"])
         return _replay(saved, store, started, fold, plan, execution, binding, input_callback=input_callback)
     forbid_fitting("execute_outer_fold")
     forbid_legacy_fitting("execute_outer_fold")
