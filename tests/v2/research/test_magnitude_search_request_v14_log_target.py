@@ -19,6 +19,7 @@ _BAD = [
     {},
     [],
     True,
+    None,
     {"mlp": {"profile": ["relu32_l2_0p01"]}},
     {"elasticnet": {**_EN, "spline_knots": [0, 4]}},
     {"elasticnet": {**_EN, "spline_knots": [0, True]}},
@@ -55,6 +56,17 @@ def test_log_target_adds_twenty_four_twins():
     assert all(spec["parameters"]["target"] == "log1p_median" for spec in twins)
     plain = [spec for spec in twin["candidate_specs"] if "target" not in spec["parameters"]]
     assert _parameters(plain) == _parameters(base["candidate_specs"])
+
+
+def test_log_target_sub_grid_compiles_fewer_twins_than_full_grid():
+    base = compile_request(_rich(log_target=False))
+    full = compile_request(_rich())
+    subset = _rich()
+    subset["space"]["log_target"]["elasticnet"]["alpha"] = [0.01]
+    compiled = compile_request(subset)
+    assert (base["counts"]["candidates"] < compiled["counts"]["candidates"]
+            < base["counts"]["candidates"] + 24)
+    assert compiled["counts"]["candidates"] < full["counts"]["candidates"]
 
 
 def test_v14_without_log_target_matches_v13_counts_and_schedule():

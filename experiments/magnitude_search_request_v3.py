@@ -199,9 +199,10 @@ def _space(request):
     space = request["space"]
     version = request["schema_version"]
     version_number = request_version(version)
-    log_target = None
+    has_log_target = False
     if version_number >= 14 and type(space) is dict and "log_target" in space:
         log_target = space.pop("log_target")
+        has_log_target = True
     families = (_FAMILIES_V6 if allows_neural(version_number)
                 else _FAMILIES_V5 if allows_size_family(version_number)
                 else _FAMILIES_V4 if allows_hgb_axes(version_number) else _FAMILIES)
@@ -304,7 +305,7 @@ def _space(request):
             lower, upper = _BOUNDS[(family, axis)]
             v2._require(all(lower <= value <= upper for value in values),
                         "stage-2 grid values exceed their allowed bounds")
-    if log_target is not None:
+    if has_log_target:
         canonical["log_target"] = _log_target(log_target, canonical)
     request["space"] = canonical
 
