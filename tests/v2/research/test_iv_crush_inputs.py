@@ -402,9 +402,12 @@ def test_skipped_target_scan_reports_reason_while_load_refuses(tmp_path):
     row = target(skipped_event, skipped=True, skip_reason="gap_exceeds_limit",
                  crush_pct_iv30=None, available_as_of_date=None)
     with committed(tmp_path, [skipped_event, clean_event], [row, target(clean_event)]) as (_, repository, snapshot):
-        assert reader.skipped_iv_crush_targets(repository, snapshot, as_of_month=MONTH,
-            event_ids=[clean_event["event_id"], skipped_event["event_id"]]) == {
-            skipped_event["event_id"]: "gap_exceeds_limit"}
+        before = len(repository.scans)
+        result = reader.skipped_iv_crush_targets(repository, snapshot, as_of_month=MONTH,
+            event_ids=[clean_event["event_id"], skipped_event["event_id"]])
+        queries = [query for name, query in repository.scans[before:] if name == TABLE]
+        assert queries and all("crush_pct_iv30" not in query.columns for query in queries)
+        assert result == {skipped_event["event_id"]: "gap_exceeds_limit"}
         with pytest.raises(DataError) as caught:
             load(repository, snapshot)
         exact_problem(caught, "EXPERIMENT_VARIANT_FAILED", "IV-crush label identity or availability is invalid")

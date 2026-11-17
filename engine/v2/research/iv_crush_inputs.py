@@ -11,9 +11,10 @@ from engine.v2.foundation.experiment_holdouts import calendar_date
 from engine.v2.research import event_history, experiment_population, progress
 
 MAX_TARGET_OBJECT_BYTES = 1 << 20
+SKIP_COLUMNS = ("ticker", "event_date", "session", "skipped", "skip_reason")
 
 
-def _candidates(repository, snapshot, as_of_month, purpose, event_ids, cutoff=None):
+def _candidates(repository, snapshot, as_of_month, purpose, event_ids, cutoff=None, columns=None):
     """Complete population and singleton-object admission precedes any target read."""
     progress.decision("IV population", "selection=" + ("bulk" if event_ids is None else "explicit"))
     try:
@@ -36,7 +37,7 @@ def _candidates(repository, snapshot, as_of_month, purpose, event_ids, cutoff=No
     if contract != IV_CRUSH_CONTRACT:
         raise errors.fail("CONTRACT_MISMATCH", "IV-crush labels require the exact native contract")
     plans = event_history.plan_event_targets(repository, snapshot, rows, contract,
-                               columns=tuple(column.name for column in contract.columns))
+                               columns=columns or tuple(column.name for column in contract.columns))
     if any(record.object_ref.byte_size > MAX_TARGET_OBJECT_BYTES for _, _, record in plans):
         raise errors.fail("RESULT_LIMIT_EXCEEDED", "IV-crush target object exceeds the 1 MiB byte bound")
     progress.decision("IV targets", f"planned={len(plans)}; max_batch_rows={plans[0][1].max_batch_rows}; "
@@ -71,9 +72,10 @@ def preflight_iv_crush_targets(repository, snapshot, *, as_of_month, event_ids):
 
 
 def skipped_iv_crush_targets(repository, snapshot, *, as_of_month, event_ids):
-    """Report events whose single identity-checked target row is skipped; only that flag is kept (the object is read, the label is not used)."""
+    """Report events whose single identity-checked target row is skipped; only identity and skip columns are projected, never the numeric label."""
     with progress.stage("IV target skip scan", report_refusals=True):
-        _, plans, _ = _candidates(repository, snapshot, as_of_month, "selection", sorted(event_ids))
+        _, plans, _ = _candidates(repository, snapshot, as_of_month, "selection", sorted(event_ids),
+                                  columns=SKIP_COLUMNS)
         reported = {}
         reporter = progress.Progress("IV skip scan", len(plans))
         for event, request, _ in plans:
