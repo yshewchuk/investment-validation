@@ -4,6 +4,10 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from sklearn.impute import MissingIndicator, SimpleImputer
+from sklearn.linear_model import ElasticNet
+from sklearn.pipeline import FeatureUnion, make_pipeline
+from sklearn.preprocessing import StandardScaler
 
 from engine.v2.foundation import content_hash
 from engine.v2.models.magnitude_candidate import magnitude_candidate_family
@@ -201,6 +205,98 @@ def test_log1p_diagnostics_admitted_and_tampering_refused():
     document = _diagnostics(recipe, fit_mlp_predictions(
         recipe, train, np.zeros(60), prediction, columns=COLS))
     assert evidence(document, _execution(recipe), [1]) == {"diagnostics": document["diagnostics"]}
+
+
+def test_en_log1p_prediction_matches_independent_oracle():
+    train, prediction = matrices(seed=7)
+    labels = np.random.default_rng(8).exponential(3.0, 60)
+    recipe = en_target()
+    result = fit_elasticnet_predictions(recipe, train, labels, prediction, columns=COLS)
+
+    params = recipe["estimator"]["params"]
+    oracle = make_pipeline(
+        FeatureUnion([
+            ("i", SimpleImputer(strategy="median", keep_empty_features=True)),
+            ("m", MissingIndicator(features="all", sparse=False)),
+        ]),
+        StandardScaler(),
+        ElasticNet(alpha=params["alpha"], l1_ratio=params["l1_ratio"],
+                   max_iter=10000, tol=0.0001, precompute=False,
+                   random_state=0, selection="cyclic"),
+    )
+    oracle.fit(train, np.log1p(labels))
+    expected = np.maximum(np.expm1(oracle.predict(prediction)), 0)
+    assert np.allclose(result["predictions"], expected, rtol=1e-9, atol=1e-9)
+
+    none = candidate_recipe("elasticnet", {"alpha": params["alpha"],
+                                           "l1_ratio": params["l1_ratio"]},
+                            columns=COLS, feature_dictionary_hash=HASH)
+    baseline = fit_elasticnet_predictions(none, train, labels, prediction, columns=COLS)
+    difference = np.abs(np.asarray(result["predictions"])
+                        - np.asarray(baseline["predictions"])).max()
+    assert difference > 1e-3
+
+
+def _fit_mlp_pair(profile, train, labels, prediction):
+    none = candidate_recipe("mlp", {"profile": profile}, columns=COLS,
+                            feature_dictionary_hash=HASH)
+    log1p = candidate_recipe("mlp", {"profile": profile, "target": "log1p_median"},
+                             columns=COLS, feature_dictionary_hash=HASH)
+    return (fit_mlp_predictions(none, train, labels, prediction, columns=COLS),
+            fit_mlp_predictions(log1p, train, labels, prediction, columns=COLS))
+
+
+def test_mlp_log1p_changes_fitted_predictions():
+    train, prediction = matrices(seed=10)
+    labels = np.random.default_rng(9).exponential(3.0, 60)
+    try:
+        none_result, log1p_result = _fit_mlp_pair("relu32_l2_0p01", train, labels, prediction)
+    except ValueError as error:
+        if "convergence" not in str(error):
+            raise
+        none_result, log1p_result = _fit_mlp_pair(
+            "fixed200_relu64x32_l2_1", train, labels, prediction)
+
+    none = np.asarray(none_result["predictions"])
+    log1p = np.asarray(log1p_result["predictions"])
+    assert np.isfinite(none).all() and np.isfinite(log1p).all()
+    assert np.abs(none - log1p).max() > 1e-3
+
+
+def test_invalid_target_transform_refused():
+    with pytest.raises(ValueError, match="target_transform"):
+        elasticnet_recipe(columns=COLS, feature_dictionary_hash=HASH,
+                          target_transform="bad", **EN)
+    with pytest.raises(ValueError, match="target_transform"):
+        mlp_recipe(columns=COLS, feature_dictionary_hash=HASH,
+                   profile="relu32_l2_0p01", target_transform="bad")
+    with pytest.raises(ValueError, match="target_transform"):
+        elasticnet_spline_recipe(columns=SPLINE_COLS, feature_dictionary_hash=HASH,
+                                 n_knots=6, target_transform="bad", **EN)
+
+
+def test_log1p_diagnostics_wrong_values_refused():
+    train, prediction = matrices(seed=11)
+    recipe = en_target()
+    labels = np.random.default_rng(12).random(60) + 0.5
+    document = _diagnostics(recipe, fit_elasticnet_predictions(
+        recipe, train, labels, prediction, columns=COLS))
+    tampered = copy.deepcopy(document)
+    tampered["diagnostics"][0]["target_transform"] = "none"
+    with pytest.raises(OpsError) as caught:
+        evidence(tampered, _execution(recipe), [1])
+    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+
+    recipe = mlp_target()
+    document = _diagnostics(recipe, fit_mlp_predictions(
+        recipe, train, np.zeros(60), prediction, columns=COLS))
+    for mutate in (lambda item: item.pop("target_transform"),
+                   lambda item: item.__setitem__("target_transform", "none")):
+        tampered = copy.deepcopy(document)
+        mutate(tampered["diagnostics"][0])
+        with pytest.raises(OpsError) as caught:
+            evidence(tampered, _execution(recipe), [1])
+        assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
 
 
 def test_panel_closure_is_unchanged():
