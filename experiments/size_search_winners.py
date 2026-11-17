@@ -1,6 +1,6 @@
 """Report-only rows for every distinct winner under ``selection.winner_rules``.
 
-Pure: reads only its arguments. The primary (``overall``) winner stays in ``paired``
+Builds report rows from already-read records; logs one stderr line. The primary (``overall``) winner stays in ``paired``
 elsewhere; each row here is one candidate that any rule picked in some outer year.
 """
 import sys
