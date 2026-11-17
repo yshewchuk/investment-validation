@@ -11,6 +11,7 @@ _RULES = ["overall", "rmse", "mae"]
 def _with_rules(version, rules):
     request = _request(version)
     request["selection"]["winner_rules"] = rules
+    request["max_fits"] += 2 * 3 * len(request["outer_years"])
     return request
 
 

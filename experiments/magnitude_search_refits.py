@@ -2,7 +2,7 @@
 from engine.v2.foundation import content_hash
 
 __all__ = ["per_candidate", "refit_key", "refit_units", "possible_slots", "failed_terminal",
-           "overall_key", "terminal_keys"]
+           "outer_refit_bound", "terminal_keys"]
 
 
 def per_candidate(plan):
@@ -34,12 +34,11 @@ def refit_units(plan, selection_item):
     return units
 
 
-def overall_key(plan, selection_item):
-    """The overall winner's slot key for its fold year."""
-    year = selection_item["outer_year"]
-    if per_candidate(plan):
-        return refit_key(plan, year, selection_item["selected_candidate_id"])
-    return refit_key(plan, year)
+def outer_refit_bound(selection_policy):
+    """Outer refit slots per fold: one for legacy plans, three plus extras for winners."""
+    if selection_policy is None or "winner_rules" not in selection_policy:
+        return 1
+    return 3 + len(selection_policy.get("extra_refits", []))
 
 
 def terminal_keys(plan, selection):

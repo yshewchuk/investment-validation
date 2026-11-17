@@ -6,6 +6,7 @@ from engine.v2.foundation import content_hash
 from engine.v2.ops.errors import fail
 from engine.v2.research.magnitude_panel_qualified_table import recipe as qualified_panel_recipe
 from experiments import magnitude_search_request as v2
+from experiments.magnitude_search_refits import outer_refit_bound
 from experiments.magnitude_search_request_schema import (
     allows_hgb_axes, allows_neural, allows_size_family, request_version,
     uses_chrono_neural_profiles, uses_extended_neural_profiles)
@@ -275,7 +276,7 @@ def _counts(request, horizons):
                     else "stage-2 v4/v5 grid exceeds the 1000-candidate ceiling")
     inners, outers = sum(map(len, inner.values())), len(outer)
     lead_count = len(horizons)
-    fits = lead_count * (count * inners + outers)
+    fits = lead_count * (count * inners + outers * outer_refit_bound(request.get("selection")))
     baseline_logical_fits = lead_count * outers
     baseline_component_fits = 2 * lead_count * outers
     extra_components = lead_count * (inners + outers) if size else 0
