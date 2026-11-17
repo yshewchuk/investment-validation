@@ -12,7 +12,8 @@ from engine.v2.foundation import content_hash
 from experiments.magnitude_search_outer import collect_outer_results
 from experiments.magnitude_search_plan import trial_key
 from experiments.magnitude_search_records import read_record
-from experiments.magnitude_search_refits import outer_refit_bound, per_candidate, refit_key
+from experiments.magnitude_search_request_v3 import outer_units
+from experiments.magnitude_search_refits import per_candidate, refit_key
 from experiments.size_distribution_report import TrialArrays, collect_distribution
 from experiments.size_paired_report import paired_report, validated_horizons
 from experiments.v2_magnitude_search_run import _admit_driver
@@ -205,8 +206,7 @@ def collect(conn, store, repository, registration, request, plan_ref):
 def resource_report(plan):
     counts = plan["counts"]
     jobs = {"inner_candidates": counts["candidates"] * counts["inner_folds"],
-            "outer_challengers": counts["outer_folds"] * outer_refit_bound(
-                plan["request"].get("selection")),
+            "outer_challengers": counts["outer_folds"] * outer_units(plan["request"]),
             "outer_comparators": counts["outer_folds"]}
     invocations = sum(jobs.values())
     return {"maximum_child_invocations": invocations, "child_jobs": jobs,

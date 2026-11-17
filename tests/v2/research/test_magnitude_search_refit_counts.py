@@ -27,3 +27,16 @@ def test_resource_report_counts_winner_outer_challengers():
             "request": {"selection": {"winner_rules": list(_RULES)},
                         "limits": {"child": {"wall_seconds": 10}}}}
     assert resource_report(plan)["child_jobs"]["outer_challengers"] == 3
+
+
+def test_resource_report_counts_blend_outer_challengers(monkeypatch):
+    monkeypatch.setattr(
+        "experiments.magnitude_search_request_v3.distinct_component_count",
+        lambda names: 4)
+    outer_folds = 1
+    plan = {"counts": {"candidates": 2, "inner_folds": 3, "outer_folds": outer_folds},
+            "request": {"selection": {"winner_rules": list(_RULES)},
+                        "blends": ["size_b1_v1"],
+                        "limits": {"child": {"wall_seconds": 10}}}}
+    assert resource_report(plan)["child_jobs"]["outer_challengers"] == (
+        outer_folds * (3 + 4 + 1))
