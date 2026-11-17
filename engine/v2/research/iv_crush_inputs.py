@@ -74,7 +74,7 @@ def skipped_iv_crush_targets(repository, snapshot, *, as_of_month, event_ids):
     """Report events whose single identity-checked target row is skipped; only that flag is kept (the object is read, the label is not used)."""
     with progress.stage("IV target skip scan", report_refusals=True):
         _, plans, _ = _candidates(repository, snapshot, as_of_month, "selection", sorted(event_ids))
-        skipped = {}
+        reported = {}
         reporter = progress.Progress("IV skip scan", len(plans))
         for event, request, _ in plans:
             decoded = [row for batch in repository.scan(request, table_name=IV_CRUSH_TABLE_NAME,
@@ -85,12 +85,18 @@ def skipped_iv_crush_targets(repository, snapshot, *, as_of_month, event_ids):
                     or decoded[0].get("ticker") != event.ticker
                     or decoded[0].get("session") != event.session):
                 raise errors.fail("EXPERIMENT_VARIANT_FAILED", "IV-crush label identity or availability is invalid")
-            if decoded[0].get("skipped") is True:
-                reason = decoded[0].get("skip_reason")
-                skipped[event.event_id] = reason if isinstance(reason, str) and reason else "skipped"
+            row = decoded[0]
+            skipped = row.get("skipped")
+            if skipped is True:
+                reason = row.get("skip_reason")
+                if not isinstance(reason, str) or not reason:
+                    raise errors.fail("EXPERIMENT_VARIANT_FAILED", "IV-crush label identity or availability is invalid")
+                reported[event.event_id] = reason
+            elif skipped is not False or row.get("skip_reason") is not None:
+                raise errors.fail("EXPERIMENT_VARIANT_FAILED", "IV-crush label identity or availability is invalid")
             reporter.tick()
-        progress.decision("IV skip scan", f"skipped={len(skipped)}")
-    return skipped
+        progress.decision("IV skip scan", f"skipped={len(reported)}")
+    return reported
 
 
 def _label_before(rows, event, cutoff):

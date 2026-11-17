@@ -422,6 +422,20 @@ def test_skipped_target_scan_refuses_identity_mismatch(tmp_path, canonical, stor
         exact_problem(caught, "EXPERIMENT_VARIANT_FAILED", "IV-crush label identity or availability is invalid")
 
 
+@pytest.mark.parametrize("changes", [
+    {"skipped": True, "skip_reason": None},
+    {"skipped": False, "skip_reason": "gap_exceeds_limit"},
+])
+def test_skipped_target_scan_refuses_inconsistent_skip_evidence(tmp_path, changes):
+    event = history_event("2024-05-06")
+    row = target(event, **changes)
+    with committed(tmp_path, [event], [row]) as (_, repository, snapshot):
+        with pytest.raises(DataError) as caught:
+            reader.skipped_iv_crush_targets(repository, snapshot, as_of_month=MONTH,
+                event_ids=[event["event_id"]])
+        exact_problem(caught, "EXPERIMENT_VARIANT_FAILED", "IV-crush label identity or availability is invalid")
+
+
 def test_last_day_clock_strictness_and_native_refusal_propagation(tmp_path, monkeypatch):
     event = history_event("2024-06-28")
     with committed(tmp_path, [event], [target(event)]) as (_, repository, snapshot):

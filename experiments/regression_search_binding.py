@@ -131,7 +131,7 @@ def prepare_plan(conn, store, registration, request, *, target, comparison):
         "selection": {"metric": "inner_pooled_rmse" if version == 1 else "blend_rmse_mae",
             "ties": "candidate_id_ascending" if version == 1 else "lowest_score_then_candidate_id_ascending", "retries": 0,
             "outer": "frozen_selected_only", "final_read_authority": "none"}}
-    if label_exclusions is not None:
+    if label_exclusions is not None and label_exclusions["events"]:
         identity["label_exclusions"] = label_exclusions
     return {**identity, "plan_id": content_hash(identity)}
 

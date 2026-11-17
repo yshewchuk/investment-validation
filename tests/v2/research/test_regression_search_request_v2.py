@@ -419,6 +419,7 @@ def test_plan_seals_skipped_target_exclusions(prepared, monkeypatch):  # noqa: F
     document = _v2_plan_request(data)
     regression_search_binding._SKIP_SCANS.clear()
     plan = _seal(data, registered, document)["plan"]
+    assert "label_exclusions" not in plan
     outer = plan["folds"][0]["outer"]
     inner = plan["folds"][0]["inner"][0]
     assert len(outer["training_candidate_event_ids"]) > 1
