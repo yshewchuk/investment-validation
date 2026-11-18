@@ -257,3 +257,14 @@ def test_register_checks_extra_refits_before_reservation():
     check_at = text.index("check_extra_refits(registration, request)", admit_at)
     reserve_at = text.index("reserve_native_registration(conn", admit_at)
     assert admit_at < check_at < reserve_at
+
+
+def test_preflight_checks_extra_refits_between_prepare_and_issue():
+    root = Path(__file__).resolve().parents[3]
+    text = (root / "experiments" / "size_search.py").read_text(encoding="utf-8")
+    branch_at = text.index('if args.action == "preflight":')
+    branch = text[branch_at:]
+    prepare_at = branch.index("prepare(repository")
+    check_at = branch.index("check_extra_refits(registration, request)")
+    issue_at = branch.index("issue(store")
+    assert prepare_at < check_at < issue_at

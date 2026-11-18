@@ -142,6 +142,8 @@ def main(argv=None):
                     registration, spec = prepare(repository, spec, request, panel_request,
                         scope=args.scope, training_start=args.training_start,
                         labels_before=args.labels_before)
+                    # Registration shards are content-addressed (section = hash of the value) and do not depend on
+                    # selection.extra_refits, so a refusal here leaves only shards the corrected retry reuses; no receipt names an unknown id.
                     check_extra_refits(registration, request)
                     from experiments.magnitude_search_request_versions import compile_request
                     counts = compile_request(request, horizons=tuple(h for h in (5, 3, 1)
