@@ -93,7 +93,7 @@ Reused unchanged: numpy (`default_rng`, OLS for the slope via `numpy.polyfit`), 
 
 | Slice | Scope | Code / test lines / doc words | After |
 | --- | --- | --- | --- |
-| SY | Generator and guards (§2, §3); `source: "synthetic"` wiring; `synthetic` receipt; slope, contrast and X1-X7 evaluation using S8a; T11; amend the spec with the `synthetic_arm` block; `SYNTHETIC_IN_TUNING` | ~140 / ~160 / 100 | S2a, S2b (needs the admitted-label reader); T11 needs S8b |
+| SY | Generator and guards (§2, §3); `source: "synthetic"` wiring; `synthetic` receipt; slope, contrast and X1-X7 evaluation using S8a; T11; amend the spec with the `synthetic_arm` block; `SYNTHETIC_IN_TUNING` | ~140 / ~160 / 100 | S2a, S2b (admitted-label reader), S4, S5, S6 (hosts the `SYNTHETIC_IN_TUNING` guard), S7 and S8a (statistics); T11 needs S8b. If the ~140-line estimate proves low at Spec time, split into SY1 (generator, guards, wiring) and SY2 (evaluation, T11) |
 | Run | Smoke, then the recorded synthetic stage and T11 | no code | v14 completed; S9 driver |
 
 The run step is heavy: after v14 finishes, alone, bounded, as in the main doc §8. The new slice changes behaviour only inside the new experiment; it edits no SIZE search module and nothing in the `experiments/size_panel.py` closure, and S1's closure-hash equality check still applies to it.
