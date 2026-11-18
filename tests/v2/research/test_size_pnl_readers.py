@@ -153,6 +153,33 @@ def test_window_excludes_2025_and_nan_labels_dropped_not_imputed(capsys):
     assert "label_missing=1" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("bad", [np.inf, -np.inf])
+def test_infinite_label_refuses_label_not_finite(bad):
+    table = {**TABLE, "a2": {**TABLE["a2"], "abs_move": bad}}
+    fetch, _ = _spy(table)
+    with pytest.raises(OpsError) as exc:
+        rd.read_labels(fetch, ADM)
+    assert _refusal(exc) == (CONFLICT, "label_not_finite")
+
+
+def test_string_label_refuses_label_not_finite():
+    table = {**TABLE, "a1": {**TABLE["a1"], "crush_pct_iv30": "abc"}}
+    fetch, _ = _spy(table)
+    with pytest.raises(OpsError) as exc:
+        rd.read_labels(fetch, ADM)
+    assert _refusal(exc) == (CONFLICT, "label_not_finite")
+
+
+def test_nan_and_none_labels_dropped_as_missing_with_float_columns(capsys):
+    table = {**TABLE, "a1": {**TABLE["a1"], "abs_move": np.nan},
+             "a3": {**TABLE["a3"], "crush_pct_iv30": None}}
+    fetch, _ = _spy(table)
+    out = rd.read_labels(fetch, ADM)
+    assert list(out.index) == ["a2", "a4", "a5"]
+    assert out["abs_move"].dtype == float and out["crush_pct_iv30"].dtype == float
+    assert "label_missing=2" in capsys.readouterr().err
+
+
 PROD_ADM = _admitted([("p0", "2018-06-01"), ("p1", "2023-02-01"), ("p2", "2023-06-01"), ("p3", "2024-01-10")])
 PROD_TABLE = {"p0": _row(0), "p1": {**_row(1), "pred_abs_move": 0.6, "horizon_sessions": 1},
               "p2": {**_row(2), "pred_abs_move": 0.7, "pred_iv_crush_30": -2.0},
@@ -288,6 +315,14 @@ def test_no_crush_rows_dropped_and_counted_and_outside_ids_refused():
     assert out["m"]["dropped"] == {"no_crush_forecast": 1}
     with pytest.raises(OpsError) as exc:
         _tables({"m": _bound({2023: [("e1", 1.0), ("zz", 2.0)]})}, [_model("m", "candidate")])
+    assert _refusal(exc) == (CONFLICT, "event_ids_outside_population")
+
+
+def test_production_frame_with_unadmitted_id_refuses():
+    frame = PROD["frame"].rename(index={"e5": "zz"})
+    bad_prod = {"frame": frame, "binding": PROD["binding"]}
+    with pytest.raises(OpsError) as exc:
+        rd.model_tables({}, {"models": [_model("p", "production", source="production")]}, MT_ADM, bad_prod)
     assert _refusal(exc) == (CONFLICT, "event_ids_outside_population")
 
 

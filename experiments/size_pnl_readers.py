@@ -108,7 +108,13 @@ def read_labels(fetch, admitted, *, start=None, end=None, event_ids=None):
     """
     ids = _window_ids(admitted, start, end, event_ids)
     frame = _fetch(fetch, admitted, LABEL_COLUMNS, ids)
-    out = frame[list(LABEL_COLUMNS)].copy()
+    raw = frame[list(LABEL_COLUMNS)]
+    coerced = pd.DataFrame({col: pd.to_numeric(raw[col], errors="coerce") for col in LABEL_COLUMNS},
+                           index=raw.index).astype(float)
+    bad = (raw.notna() & (coerced.isna() | np.isinf(coerced))).any(axis=1)
+    if bad.any():
+        raise _conflict("label_not_finite", "a label is non-numeric or infinite")
+    out = coerced.copy()
     out["event_date"] = _dates(admitted).reindex(out.index)
     keep = out[list(LABEL_COLUMNS)].notna().all(axis=1)
     print(f"[pnl_readers] labels requested={len(ids)} label_missing={int((~keep).sum())}", file=sys.stderr)
@@ -176,11 +182,15 @@ def model_tables(bound, roster, admitted, production, *, start=None, end=None):
     """Per-model (event_date, pred_move, pred_crush) tables; crush is the production forecast, fixed for every model."""
     dates = _dates(admitted)
     crush = production["frame"]["pred_crush"]
+    if not set(production["frame"].index) <= set(dates.index):
+        raise _conflict("event_ids_outside_population", "a production event id is outside the admitted population")
     out = {}
     for model in roster["models"]:
         mid = model["model_id"]
         if model["kind"] == "production":
             frame = production["frame"]
+            if not set(frame.index) <= set(dates.index):
+                raise _conflict("event_ids_outside_population", "a production event id is outside the admitted population")
             if start is not None or end is not None:
                 frame = frame[_in_window(frame["event_date"], start, end).to_numpy()]
             out[mid] = {"status": "ready", "table": frame,
