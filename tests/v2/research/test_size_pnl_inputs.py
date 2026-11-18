@@ -331,8 +331,58 @@ def test_bind_models_counts_and_defers_production(capsys):
     out = sp.bind_models(plan, _store(plan).get, roster, _admit_all)
     production = [m["model_id"] for m in roster["models"] if m["source"] == "production"]
     assert out[production[0]] == {"status": "deferred", "reason": "production_bound_by_s2b"}
-    assert sorted(r["status"] for r in out.values()) == ["bound", "bound", "deferred", "excluded"]
-    assert "models=4 bound=2 excluded=1 deferred=1" in capsys.readouterr().err
+    assert sorted(r["status"] for r in out.values()) == ["bound", "bound", "bound", "deferred"]
+    assert "models=4 bound=3 excluded=0 deferred=1" in capsys.readouterr().err
+
+
+def test_roster_kinds_mark_production_candidate_and_blend():
+    roster = _roster()
+    kinds = {m["source"] + ":" + m["candidate_id"]: m["kind"] for m in roster["models"]}
+    assert kinds == {"production:size_v1_4": "production", "v14:c1": "candidate",
+                     "v14:c2": "candidate", "v14:b1": "blend"}
+
+
+def test_blend_binds_its_components():
+    plan = _plan()
+    store = _store(plan)
+    out = sp.bind_models(plan, store.get, _roster(plan), _admit_all)
+    model_id = [m["model_id"] for m in _roster(plan)["models"] if m["kind"] == "blend"][0]
+    blend = out[model_id]
+    assert blend["status"] == "bound"
+    assert blend["kind"] == "blend"
+    assert sorted(blend["components"]) == ["c1", "c2"]
+    assert all(blend["components"][cid]["status"] == "bound" for cid in ("c1", "c2"))
+    again = sp.bind_models(plan, _store(plan).get, _roster(plan), _admit_all)[model_id]
+    assert blend["binding"] == again["binding"]
+
+
+def test_blend_binding_changes_when_a_component_record_changes():
+    plan = _plan()
+    roster = _roster(plan)
+    model_id = [m["model_id"] for m in roster["models"] if m["kind"] == "blend"][0]
+    base = sp.bind_models(plan, _store(plan).get, roster, _admit_all)[model_id]["binding"]
+    store = _store(plan)
+    store[_key(plan, 2023, "c1")] = _record(E23, y=0.9)
+    changed = sp.bind_models(plan, store.get, roster, _admit_all)[model_id]["binding"]
+    assert changed != base
+
+
+def test_blend_with_missing_component_is_excluded_with_reason():
+    plan = _plan()
+    store = _store(plan)
+    del store[_key(plan, 2024, "c2")]
+    roster = _roster(plan)
+    model_id = [m["model_id"] for m in roster["models"] if m["kind"] == "blend"][0]
+    out = sp.bind_models(plan, store.get, roster, _admit_all)
+    assert out[model_id] == {"status": "excluded", "reason": "component_missing"}
+
+
+def test_unknown_blend_id_is_excluded_with_reason():
+    plan = _plan()
+    roster = {"models": [{"model_id": "m-unknown", "source": "v14", "candidate_id": "zz",
+                          "target_transform": "mixed", "kind": "blend", "roles": ["M4"]}]}
+    out = sp.bind_models(plan, _store(plan).get, roster, _admit_all)
+    assert out["m-unknown"] == {"status": "excluded", "reason": "blend_unknown"}
 
 
 def test_module_source_never_names_outcome_key():

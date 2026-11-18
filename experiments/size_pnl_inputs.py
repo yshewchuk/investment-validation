@@ -3,6 +3,7 @@
 Only ``event_id`` and the lead-horizon predicted move are read from each stored
 prediction. Stored outcome values are never read. Run-level identity failures
 refuse the whole run; per-candidate gaps become exclusions (no imputation).
+A blend binds its component candidates' inner arrays; averaging is left to the reader slice.
 
 No production entrypoint calls these functions yet; the S2b reader slice and the S9 driver are their first callers.
 """
@@ -13,6 +14,7 @@ import numpy as np
 from engine.v2.foundation import content_hash
 from engine.v2.ops.errors import OpsError, fail
 from experiments.magnitude_search_plan import trial_key
+from experiments.magnitude_search_refits import blend_components
 from experiments.size_search_winners import LOG1P_SCHEMAS
 
 _CONFLICT = "EXPERIMENT_IDENTITY_CONFLICT"
@@ -179,8 +181,14 @@ def resolve_roster(plan, selection, *, outer_year, pair_candidates, blend_ids):
         if model_id in models:
             models[model_id]["roles"].append(role)
         else:
+            if source == "production":
+                kind = "production"
+            elif transform == "mixed":
+                kind = "blend"
+            else:
+                kind = "candidate"
             models[model_id] = {"model_id": model_id, "source": source, "candidate_id": candidate_id,
-                                "target_transform": transform, "roles": [role]}
+                                "target_transform": transform, "kind": kind, "roles": [role]}
     if len(models) > MAX_MODELS:
         raise fail("INVALID_EXPERIMENT_SPEC", "the roster exceeds the model budget",
                    details={"reason": "too_many_models"})
@@ -190,12 +198,27 @@ def resolve_roster(plan, selection, *, outer_year, pair_candidates, blend_ids):
     return {"models": list(models.values()), "not_testable": not_testable, "pairs": pairs}
 
 
+def _bind_blend(plan, read, blend_id, admit, horizon):
+    components = blend_components(plan, blend_id)
+    if components is None:
+        return {"status": "excluded", "reason": "blend_unknown"}
+    bound = {cid: bind_candidate(plan, read, cid, admit, horizon=horizon) for cid in components}
+    for cid in components:
+        if bound[cid]["status"] != "bound":
+            return {"status": "excluded", "reason": "component_" + bound[cid]["reason"]}
+    pairs = [[cid, bound[cid]["binding"]] for cid in components]
+    return {"status": "bound", "kind": "blend", "components": bound,
+            "binding": content_hash(pairs)}
+
+
 def bind_models(plan, read, roster, admit, *, horizon=1):
     """Bind every v14 model in the roster; production is deferred to S2b."""
     out = {}
     for model in roster["models"]:
-        if model["source"] == "production":
+        if model["kind"] == "production":
             out[model["model_id"]] = {"status": "deferred", "reason": "production_bound_by_s2b"}
+        elif model["kind"] == "blend":
+            out[model["model_id"]] = _bind_blend(plan, read, model["candidate_id"], admit, horizon)
         else:
             out[model["model_id"]] = bind_candidate(
                 plan, read, model["candidate_id"], admit, horizon=horizon)
