@@ -2,6 +2,7 @@
 import pytest
 
 from engine.v2.models.magnitude_elasticnet_recipe import elasticnet_recipe
+from engine.v2.models.magnitude_elasticnet_spline_recipe import SPLINE_COLUMNS, elasticnet_spline_recipe
 from engine.v2.models.magnitude_mlp_recipe import mlp_recipe
 from experiments.size_paired_report import paired_report
 from experiments.size_search_winners import winner_rows
@@ -32,7 +33,16 @@ def _plan(rules=("overall", "rmse", "mae")):
                 {"candidate_id": "b", "recipe": elasticnet_recipe(
                     columns=["a"], feature_dictionary_hash=_HASH, alpha=0.1, l1_ratio=0.5)},
                 {"candidate_id": "c", "recipe": mlp_recipe(
-                    columns=["a"], feature_dictionary_hash=_HASH, profile="relu32_l2_0p01")}],
+                    columns=["a"], feature_dictionary_hash=_HASH, profile="relu32_l2_0p01")},
+                {"candidate_id": "d", "recipe": mlp_recipe(
+                    columns=["a"], feature_dictionary_hash=_HASH, profile="relu32_l2_0p01",
+                    target_transform="log1p")},
+                {"candidate_id": "e", "recipe": elasticnet_spline_recipe(
+                    columns=list(SPLINE_COLUMNS), feature_dictionary_hash=_HASH, alpha=0.1, l1_ratio=0.5,
+                    n_knots=4, target_transform="log1p")},
+                {"candidate_id": "f", "recipe": elasticnet_spline_recipe(
+                    columns=list(SPLINE_COLUMNS), feature_dictionary_hash=_HASH, alpha=0.1, l1_ratio=0.5,
+                    n_knots=4)}],
             "folds": [{"outer": {"year": "2024", "evaluation_event_ids": ["e1", "e2", "e3"]}},
                       {"outer": {"year": "2025", "evaluation_event_ids": ["e4"]}}]}
     if rules:
@@ -103,6 +113,10 @@ def test_rows_primary_first_then_by_id_and_inner_scores_match_candidate():
     rows = _run(FakePaired())
     assert [row["candidate_id"] for row in rows] == ["b", "c", "a"]
     assert [row["primary"] for row in rows] == [True, True, False]
+    assert [(row["kind"], row["components"]) for row in rows] == [("candidate", [])] * 3
+    assert [row["outer_years"] for row in rows] == [["2024"], ["2025"], ["2024"]]
+    assert [row["rules"] for row in rows] == [["overall", "rmse"], ["mae", "overall", "rmse"], ["mae"]]
+    assert [(row["status"], row["error_code"]) for row in rows] == [("completed", None)] * 3
     by_id = _by_id(rows)
     assert by_id["a"]["rules"] == ["mae"]
     assert by_id["a"]["inner"][0]["scores"]["mae"]["rmse"] == 2.0
@@ -147,6 +161,28 @@ def test_share_uses_lowest_horizon_and_strict_greater():
     # Distinct shares across candidates rule out a constant output.
     assert rows["a"]["actual_above_forecast_share"] == pytest.approx(2 / 3)
     assert rows["a"]["actual_above_forecast_share"] != rows["b"]["actual_above_forecast_share"]
+
+
+def test_target_transform_detected_from_real_recipe_schemas():
+    plan = _plan()
+    assert plan["candidates"][3]["recipe"]["schema_version"] == "magnitude_mlp_recipe.v2"
+    assert plan["candidates"][4]["recipe"]["schema_version"] == "magnitude_elasticnet_spline_recipe.v2"
+    assert plan["candidates"][5]["recipe"]["schema_version"] == "magnitude_elasticnet_spline_recipe.v1"
+    selection = {"selections": [
+        {"outer_year": "2024", "scores": [],
+         "winners": {"overall": {"candidate_id": "d", "tie_band": 0.1},
+                     "rmse": {"candidate_id": "e", "tie_band": 0.1},
+                     "mae": {"candidate_id": "f", "tie_band": 0.1}},
+         "selected_candidate_id": "d"}]}
+    refits = [{"outer_year": "2024", "candidate_id": cid, "status": "completed", "result": {}}
+              for cid in ("d", "e", "f")]
+    forecasts = {("2024", cid): _fc({"e1": 1.0, "e2": 2.0, "e3": 3.0}) for cid in ("d", "e", "f")}
+    rows = _by_id(winner_rows(plan, selection, refits, forecasts, EVENTS, COMPARISONS, TARGETS,
+                              paired=FakePaired(), paired_kwargs=PAIRED_KWARGS))
+    assert rows["d"]["target_transform"] == "log1p"
+    assert rows["e"]["target_transform"] == "log1p"
+    assert rows["f"]["target_transform"] == "none"
+    assert all(rows[cid]["status"] == "completed" for cid in ("d", "e", "f"))
 
 
 def test_candidate_winning_one_year_gets_only_that_years_events():
