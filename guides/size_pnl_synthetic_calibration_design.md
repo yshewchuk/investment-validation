@@ -64,7 +64,7 @@ Fixed in the spec's `synthetic_arm` block before any run. Directions for the mea
 | X2 | P&L is non-increasing down the ladder (each of the three noise types, each book) | all three adjacent steps non-positive = Clear; at most one inversion with a negative slope = Directional; else Failed |
 | X3 | Short vol: `d_s > 0` (median-unbiased beats mean-unbiased) at every rung `s >= 0.4` | S8a categories on each rung's contrast, across the seven short-vol books |
 | X4 | Straddle (R_L2 and R_L): `d_s < 0` at every rung `s >= 0.4` | as X3; R_L2 is the sharper test because its trade count follows the level, R_L's trailing cutoff absorbs most of it |
-| X5 | Consistency of levels: sign of `P&L(+10%) - P&L(-10%)` (noise-free) equals the sign of `P&L(median) - P&L(mean)` at the rung where `exp(s^2/2) - 1` is nearest 0.10 (`s = 0.4`, ratio 1.083) | sign agreement per book |
+| X5 | Consistency of levels: sign of `P&L(+10%) - P&L(-10%)` (noise-free) equals the sign of `P&L(median) - P&L(mean)` at the rung whose level ratio `exp(s^2/2)` is nearest the shift pair's ratio 1.1/0.9 = 1.222 (`s = 0.6`, ratio 1.197) | sign agreement per book |
 | X6 | Null predictor (`L = 1`): every short-vol book shows one width for every event within a calendar quarter (the constant is the expanding mean, so it changes only between quarters; zero within-quarter width variance) and the straddle edge ranks events by implied move alone | width variance and trade count printed; failing means information is entering the rule from somewhere else |
 | X7 | Exact-replay: the same spec and inputs reproduce every table bit for bit | rerun on a 50-ticker smoke |
 
