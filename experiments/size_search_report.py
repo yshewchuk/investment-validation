@@ -13,10 +13,11 @@ from experiments.magnitude_search_outer import collect_outer_results
 from experiments.magnitude_search_plan import trial_key
 from experiments.magnitude_search_records import read_record
 from experiments.magnitude_search_request_v3 import outer_units
-from experiments.magnitude_search_refits import per_candidate, refit_key
+from experiments.magnitude_search_blend_outer import average_forecasts
+from experiments.magnitude_search_refits import per_candidate
 from experiments.size_distribution_report import TrialArrays, collect_distribution
 from experiments.size_paired_report import paired_report, validated_horizons
-from experiments.size_search_winners import winner_rows
+from experiments.size_search_winners import refit_forecast_map, selected_forecasts, winner_rows
 from experiments.v2_magnitude_search_run import _admit_driver
 
 
@@ -176,9 +177,10 @@ def collect(conn, store, repository, registration, request, plan_ref):
             if match is not None else None)
     for group in plan["folds"]:
         year = group["outer"]["year"]
-        key = (refit_key(plan, year, selected_ids[year]) if per_candidate(plan)
-               else content_hash([plan["plan_id"], year]))
-        forecasts.extend(read_record(conn, store, registration.run_id, "outer-forecasts:" + key))
+        forecasts.extend(selected_forecasts(
+            plan, year, selected_ids[year],
+            lambda key: read_record(conn, store, registration.run_id, "outer-forecasts:" + key),
+            average_forecasts, per_candidate(plan)))
         key = content_hash([plan["plan_id"], year, "comparison"])
         comparison = read_record(conn, store, registration.run_id, "comparison-terminal:" + key)["result"]
         comparisons.extend(comparison["forecasts"])
@@ -197,14 +199,11 @@ def collect(conn, store, repository, registration, request, plan_ref):
     if per_candidate(plan):
         selection = read_record(conn, store, registration.run_id, "selection")
         winners_by_year = {item["outer_year"]: {win["candidate_id"] for win in item["winners"].values()}
+                           | ({item["best_non_blend_id"]} if item.get("best_non_blend_id") else set())
                            for item in selection["selections"]}
-        forecast_map = {}
-        for r in result.get("refits", []):
-            if r["status"] != "completed" or r["candidate_id"] not in winners_by_year.get(r["outer_year"], set()):
-                continue
-            key = (r["outer_year"], r["candidate_id"])
-            forecast_map[key] = read_record(conn, store, registration.run_id,
-                                            "outer-forecasts:" + refit_key(plan, r["outer_year"], r["candidate_id"]))
+        forecast_map = refit_forecast_map(plan, result.get("refits", []), winners_by_year,
+            lambda key: read_record(conn, store, registration.run_id, "outer-forecasts:" + key),
+            average_forecasts)
         rows = winner_rows(plan, selection, result.get("refits", []), forecast_map, events, comparisons, targets,
                            paired=paired_report, paired_kwargs=paired_kwargs)
         if rows is not None:

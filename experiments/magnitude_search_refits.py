@@ -2,7 +2,7 @@
 from engine.v2.foundation import content_hash
 
 __all__ = ["per_candidate", "refit_key", "refit_units", "possible_slots", "failed_terminal",
-           "outer_refit_bound", "terminal_keys"]
+           "outer_refit_bound", "terminal_keys", "blend_components", "required_units"]
 
 
 def per_candidate(plan):
@@ -17,8 +17,25 @@ def refit_key(plan, year, candidate_id=None):
     return content_hash([plan["plan_id"], year, candidate_id])
 
 
+def blend_components(plan, candidate_id):
+    """Sorted component ids of the plan blend named candidate_id, else None."""
+    for blend in plan.get("blends") or []:
+        if blend["blend_id"] == candidate_id:
+            return sorted(blend["component_candidate_ids"])
+    return None
+
+
+def required_units(plan, selection_item):
+    """Units the overall winner needs: its blend components, or itself."""
+    overall = selection_item["selected_candidate_id"]
+    return blend_components(plan, overall) or [overall]
+
+
 def refit_units(plan, selection_item):
-    """Ordered distinct refit units: overall winner, other winners, extras."""
+    """Ordered distinct refit units: overall winner, other winners, best non-blend, extras.
+
+    A blend winner expands to its sorted components; the blend id itself is never a unit.
+    """
     if not per_candidate(plan):
         return [None]
     if not isinstance(selection_item, dict):
@@ -26,16 +43,28 @@ def refit_units(plan, selection_item):
     overall = selection_item.get("selected_candidate_id")
     winners = selection_item.get("distinct_winner_ids", [])
     extras = plan["selection"].get("extra_refits", [])
+    blends = bool(plan.get("blends"))
+    best = selection_item.get("best_non_blend_id")
     if (not isinstance(overall, str) or not isinstance(winners, list)
             or not isinstance(extras, list)
             or not all(isinstance(value, str) for value in winners)
-            or not all(isinstance(value, str) for value in extras)):
+            or not all(isinstance(value, str) for value in extras)
+            or (blends and not isinstance(best, str))):
         raise ValueError("malformed refit selection")
-    units, seen = [overall], {overall}
+    units, seen = [], set()
+
+    def add(candidate_id):
+        components = blend_components(plan, candidate_id)
+        for unit in (components if components is not None else [candidate_id]):
+            if unit not in seen:
+                units.append(unit)
+                seen.add(unit)
+
+    add(overall)
     for candidate_id in sorted(winners):
-        if candidate_id not in seen:
-            units.append(candidate_id)
-            seen.add(candidate_id)
+        add(candidate_id)
+    if blends:
+        add(best)
     for candidate_id in sorted(extras):
         if candidate_id not in seen:
             units.append(candidate_id)

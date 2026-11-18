@@ -75,3 +75,11 @@ def score_blends(blends, component_years, inner_years, history_rows_by_year, sco
                 yearly[year] = None
         scores.append({"candidate_id": blend_id, **pooled, "yearly": yearly, "kind": "blend", "blend_name": name})
     return scores
+
+
+def best_non_blend_id(eligible):
+    """candidate_id of the lowest (blend_score, candidate_id) row whose kind is not "blend"."""
+    non_blend = [score for score in eligible if score.get("kind") != "blend"]
+    if not non_blend:
+        raise fail("EXPERIMENT_VARIANT_FAILED", "all candidates failed for an outer fold")
+    return min(non_blend, key=lambda score: (score["blend_score"], score["candidate_id"]))["candidate_id"]

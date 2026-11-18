@@ -25,7 +25,7 @@ from engine.v2.ops.migrations import migrate, require_current
 from engine.v2.research.magnitude_inputs import load_magnitude_targets
 from experiments.iv_selection import signed_event_score, training_mean_rows
 from experiments.magnitude_report import magnitude_metrics
-from experiments.magnitude_search_blends import score_blends
+from experiments.magnitude_search_blends import best_non_blend_id, score_blends
 from experiments.magnitude_search_evidence import (
     _requires_event_dates,
     admit_fold_inputs,
@@ -889,6 +889,8 @@ class SearchTrials:
                 if winner_rules:
                     selection["winners"] = winners["winners"]
                     selection["distinct_winner_ids"] = winners["distinct_winner_ids"]
+                    if blends:
+                        selection["best_non_blend_id"] = best_non_blend_id(eligible)
             selections.append(selection)
             failed_candidates = sum(score["metrics"] is None for score in scores)
             print(f"[selection] outer={selection['outer_year']} "

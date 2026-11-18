@@ -5,6 +5,9 @@ elsewhere; each row here is one candidate that any rule picked in some outer yea
 """
 import sys
 
+from engine.v2.foundation import content_hash
+from experiments.magnitude_search_refits import blend_components, refit_key
+
 PRIMARY_RULE = "overall"
 LOG1P_SCHEMAS = frozenset({
     "magnitude_elasticnet_recipe.v2",
@@ -27,12 +30,46 @@ def _share(lowest, forecast_rows, targets):
     return above / len(scored)
 
 
+def selected_forecasts(plan, year, selected_id, read, average, per_candidate):
+    """Outer forecasts of the selected (overall) winner for one year.
+
+    A per-candidate blend averages its component refit forecasts; a per-candidate plain candidate reads its own
+    refit; a legacy plan reads the fold-keyed forecasts. read(key) returns stored forecasts for a key.
+    """
+    if per_candidate:
+        components = blend_components(plan, selected_id)
+        if components is not None:
+            return average([read(refit_key(plan, year, c)) for c in components])
+        return read(refit_key(plan, year, selected_id))
+    return read(content_hash([plan["plan_id"], year]))
+
+
+def refit_forecast_map(plan, refits, wanted_by_year, read, average):
+    """{(outer_year, candidate_id): forecasts} for completed refits of wanted candidates.
+
+    A blend refit averages its component stored forecasts (all events, labels not required);
+    other refits read their own stored forecasts. read(key) returns the stored forecasts for a refit key.
+    """
+    forecast_map = {}
+    for r in refits:
+        year = r["outer_year"]
+        if r["status"] != "completed" or r["candidate_id"] not in wanted_by_year.get(year, set()):
+            continue
+        if r.get("kind") == "blend":
+            value = average([read(refit_key(plan, year, c)) for c in r["component_candidate_ids"]])
+        else:
+            value = read(refit_key(plan, year, r["candidate_id"]))
+        forecast_map[(year, r["candidate_id"])] = value
+    return forecast_map
+
+
 def winner_rows(plan, selection, refits, forecasts, events, comparisons, targets, *, paired, paired_kwargs):
     if not plan.get("selection", {}).get("winner_rules"):
         return None
     candidates = {c["candidate_id"]: c for c in plan["candidates"]}
     fold_events = {g["outer"]["year"]: set(g["outer"]["evaluation_event_ids"]) for g in plan["folds"]}
     refit_index = {(r["outer_year"], r["candidate_id"]): r for r in refits}
+    blends = {b["blend_id"]: b for b in plan.get("blends") or []}
     lowest = min(plan["horizons"])
 
     # candidate_id -> {"rules": set, "years": {outer_year: {"rules", "scores", "tie_band"}}}
@@ -48,6 +85,12 @@ def winner_rows(plan, selection, refits, forecasts, events, comparisons, targets
             per_year["rules"].add(rule)
             per_year["scores"][rule] = _score(score_by.get(cid, {}))
             per_year["tie_band"][rule] = win["tie_band"]
+    # A best non-blend that wins no rule still gets a report row (rules == []).
+    for item in selection["selections"]:
+        best = item.get("best_non_blend_id")
+        if best:
+            entry = won.setdefault(best, {"rules": set(), "years": {}})
+            entry["years"].setdefault(item["outer_year"], {"rules": set(), "scores": {}, "tie_band": {}})
 
     rows = []
     for cid, entry in won.items():
@@ -58,7 +101,10 @@ def winner_rows(plan, selection, refits, forecasts, events, comparisons, targets
             if refit is None:
                 error_code = "missing_refit"
             elif refit["status"] == "failed":
-                error_code = (refit.get("result") or {}).get("code") or "failed"
+                if cid in blends and refit.get("result") is None:
+                    error_code = "component_failed"
+                else:
+                    error_code = (refit.get("result") or {}).get("code") or "failed"
             elif refit["status"] != "completed" or (year, cid) not in forecasts:
                 error_code = "missing_refit"
             if error_code is not None:
@@ -89,14 +135,18 @@ def winner_rows(plan, selection, refits, forecasts, events, comparisons, targets
                  for year in years]
         candidate = candidates.get(cid) or {}
         recipe = candidate.get("recipe")
-        rows.append({
+        row = {
             "candidate_id": cid, "rules": rules, "primary": PRIMARY_RULE in rules,
             "kind": "candidate", "components": [],
             "target_transform": "log1p" if (recipe or {}).get("schema_version") in LOG1P_SCHEMAS else "none",
             "outer_years": years, "inner": inner,
             "status": "completed" if completed else "failed",
             "error_code": None if completed else error_code,
-            "paired": paired_result, "actual_above_forecast_share": share})
+            "paired": paired_result, "actual_above_forecast_share": share}
+        if cid in blends:
+            row.update({"kind": "blend", "components": sorted(blends[cid]["component_candidate_ids"]),
+                        "target_transform": "mixed", "inner_scores_optimistic": True})
+        rows.append(row)
 
     rows.sort(key=lambda row: (not row["primary"], row["candidate_id"]))
     failed = sum(1 for row in rows if row["status"] == "failed")

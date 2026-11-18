@@ -232,6 +232,12 @@ def test_blended_freeze_scores_plan_blends_from_component_rows(case, monkeypatch
         assert set(selection["winners"]) == {"overall", "rmse", "mae"}
         assert {winner["candidate_id"] for winner in selection["winners"].values()} <= valid
 
+        non_blend = [row for row in selection["scores"]
+                     if row.get("kind") != "blend" and row["metrics"] is not None]
+        expected_best = min(non_blend, key=lambda row: (row["blend_score"], row["candidate_id"]))["candidate_id"]
+        assert selection["best_non_blend_id"] == expected_best
+        assert selection["best_non_blend_id"] != "blend_test_1"
+
 
 def test_blended_freeze_excludes_blend_with_failed_component(case, monkeypatch):
     first, second = [item["candidate_id"] for item in case.plan["candidates"]]
@@ -245,6 +251,8 @@ def test_blended_freeze_excludes_blend_with_failed_component(case, monkeypatch):
     blends = [row for row in selection["scores"] if row["candidate_id"] == "blend_test_1"]
     assert len(blends) == 1 and blends[0]["metrics"] is None
     assert all(winner["candidate_id"] != "blend_test_1" for winner in selection["winners"].values())
+    assert "best_non_blend_id" in selection
+    assert selection["best_non_blend_id"] in {item["candidate_id"] for item in plan["candidates"]}
 
 
 def test_blended_freeze_refuses_nonzero_candidate_against_zero_history_mean(case, monkeypatch):

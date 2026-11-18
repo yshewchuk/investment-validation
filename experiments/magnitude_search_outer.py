@@ -29,11 +29,14 @@ from experiments.magnitude_search_execution import (
 from experiments.magnitude_search_inputs import load_inputs, publish_inputs
 from experiments.magnitude_search_plan import PLAN_V2, PLAN_V3, read_search_plan, trial_key
 from experiments.magnitude_search_records import MIGRATIONS, OWNER, append_record, read_record
+from experiments.magnitude_search_blend_outer import blend_outer_result
 from experiments.magnitude_search_refits import (
+    blend_components,
     failed_terminal,
     per_candidate,
     refit_key,
     refit_units,
+    required_units,
 )
 from experiments.magnitude_search_trials import (
     SearchTrials,
@@ -57,6 +60,14 @@ def _conflict():
 def _equal(left, right):
     if canonical_json(left) != canonical_json(right):
         raise _conflict()
+
+
+def _failed(outcome):
+    return isinstance(outcome, dict) and outcome.get("status") == "failed"
+
+
+def _blend_record(plan, candidate_id):
+    return next(blend for blend in plan["blends"] if blend["blend_id"] == candidate_id)
 
 
 def _timed_shape(result, keys, *, legacy=False, untimed=False):
@@ -318,8 +329,9 @@ def _execute_admitted(conn, store, repository, registration, plan, fold, selecti
     binding, outer_year = registration.document, fold["year"]
     execution_key = "regression_execution" if "target" in plan else "magnitude_execution"
     fold = {**fold, "evaluation_labels_before": binding[execution_key]["evaluation_labels_before"]}
-    overall = next(item["selected_candidate_id"] for item in selection["selections"]
-                   if item["outer_year"] == outer_year)
+    item = next(entry for entry in selection["selections"] if entry["outer_year"] == outer_year)
+    overall = item["selected_candidate_id"]
+    required = required_units(plan, item) if per_candidate(plan) else [overall]
     chosen = candidate_id or overall
     candidate = next((item for item in plan["candidates"] if item["candidate_id"] == chosen), None)
     if candidate is None:
@@ -352,7 +364,7 @@ def _execute_admitted(conn, store, repository, registration, plan, fold, selecti
         if per_candidate(plan):
             terminal = saved("terminal")
             if isinstance(terminal, dict) and terminal.get("status") == "failed":
-                if chosen == overall:
+                if chosen in required:
                     raise _conflict()
                 return _replay_failed(saved, store, started, key, outer_year, chosen, fold, plan, execution)
         return _replay(saved, store, started, fold, plan, execution, binding, input_callback=input_callback)
@@ -403,7 +415,7 @@ def _execute_admitted(conn, store, repository, registration, plan, fold, selecti
     append("worker-result", result)
     append("execution", receipt)
     if not succeeded:
-        if chosen == overall:
+        if chosen in required:
             raise fail("EXPERIMENT_VARIANT_FAILED", "selected outer candidate failed; replacement and retry are forbidden")
         # A failed non-overall refit is terminal: targets never open and resume never retries it.
         terminal = failed_terminal(key, outer_year, chosen, inputs_id)
@@ -431,7 +443,7 @@ def collect_outer_results(conn, store, repository, registration, request, plan_r
     require_current(conn, OWNER, MIGRATIONS)
     plan = read_search_plan(conn, store, registration, request, plan_ref)
     refit_plan = per_candidate(plan)
-    overall_by_year = {}
+    overall_by_year, required_by_year = {}, {}
     pending = []
     if refit_plan:
         stored = read_record(conn, store, registration.run_id, "selection")
@@ -451,6 +463,7 @@ def collect_outer_results(conn, store, repository, registration, request, plan_r
             overall_by_year[year] = overall
             try:
                 units = refit_units(plan, selection_item)
+                required_by_year[year] = required_units(plan, selection_item)
             except (ValueError, TypeError, KeyError):
                 raise _conflict() from None
             for unit in units:
@@ -483,16 +496,37 @@ def collect_outer_results(conn, store, repository, registration, request, plan_r
     selection = _native_selection(trials, plan, read)
     refits = []
     if refit_plan:
-        folds = []
+        outcomes, folds, blend_results = {}, [], {}
         for fold, limits, unit in pending:
+            year = fold["year"]
             outcome = _execute_admitted(conn, store, repository, registration, plan, fold, selection, limits,
                                         replay_only=True, candidate_id=unit,
-                                        input_callback=input_callback if unit == overall_by_year[fold["year"]] else None)
-            failed = isinstance(outcome, dict) and outcome.get("status") == "failed"
-            refits.append({"outer_year": fold["year"], "candidate_id": unit,
+                                        input_callback=input_callback if unit == required_by_year[year][0] else None)
+            outcomes[(year, unit)] = outcome
+            failed = _failed(outcome)
+            refits.append({"outer_year": year, "candidate_id": unit,
                            "status": "failed" if failed else "completed", "result": outcome})
-            if not failed and unit == overall_by_year[fold["year"]]:
-                folds.append(outcome)
+        for item in plan["folds"]:
+            year = item["outer"]["year"]
+            overall = overall_by_year[year]
+            # Required units completed (a required failure already raised), so blend results are complete.
+            winners = list(dict.fromkeys([overall, *sorted(by_year[year].get("distinct_winner_ids", []))]))
+            for candidate_id in winners:
+                components = blend_components(plan, candidate_id)
+                if components is None:
+                    continue
+                results = [outcomes[(year, component)] for component in components]
+                failed = any(_failed(result) for result in results)
+                blend_results[(year, candidate_id)] = None if failed else blend_outer_result(
+                    plan, _blend_record(plan, candidate_id), year, results,
+                    [read_record(conn, store, registration.run_id, "outer-forecasts:" + refit_key(plan, year, component))
+                     for component in components])
+                refits.append({"outer_year": year, "candidate_id": candidate_id, "kind": "blend",
+                               "component_candidate_ids": components,
+                               "status": "failed" if failed else "completed",
+                               "result": blend_results[(year, candidate_id)]})
+            folds.append(blend_results[(year, overall)] if blend_components(plan, overall) is not None
+                         else outcomes[(year, overall)])
     else:
         folds = [_execute_admitted(conn, store, repository, registration, plan, fold, selection, limits,
                                    replay_only=True, input_callback=input_callback)
