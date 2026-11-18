@@ -23,6 +23,7 @@ _SEAL_SLOT = "driver-seal"
 
 PAIRS = {"H": ("H-sq", "H-abs"), "E": ("E-raw", "E-log"), "N": ("N-raw", "N-log")}
 PAIR_ROLES = ("H-sq", "H-abs", "E-raw", "E-log", "N-raw", "N-log")
+PAIR_TRANSFORM = {"E-raw": "none", "N-raw": "none", "E-log": "log1p", "N-log": "log1p"}
 ROLES = ("M0", "M1", "M2", "M3", "M4", "M5") + PAIR_ROLES
 MAX_MODELS = 12
 
@@ -46,8 +47,11 @@ def bind_run(plan, read, *, expected, panel_id):
     return dict(actual)
 
 
-def population_admit(repository, snapshot, as_of_month, load=None):
+def population_admit(repository, snapshot, as_of_month, *, max_object_bytes, load=None):
     """Return ``admit(event_ids)`` backed by the canonical population reader."""
+    if isinstance(max_object_bytes, bool) or not isinstance(max_object_bytes, int) or max_object_bytes <= 0:
+        raise fail("INVALID_EXPERIMENT_SPEC", "max_object_bytes must be a positive integer",
+                   details={"reason": "max_object_bytes_invalid"})
     if load is None:
         from engine.v2.research.experiment_population import load_population
         load = load_population
@@ -55,7 +59,7 @@ def population_admit(repository, snapshot, as_of_month, load=None):
     def admit(event_ids):
         ids = sorted(event_ids)
         frame = load(repository, snapshot, as_of_month=as_of_month,
-                     purpose="selection", event_ids=ids)
+                     purpose="selection", event_ids=ids, max_object_bytes=max_object_bytes)
         return {"admitted": sorted(frame["event_id"].tolist()), "dropped": []}
 
     return admit
@@ -149,7 +153,11 @@ def _pair(cands, extra, pair_candidates, role):
         return None, "not_in_extra_refits"
     if candidate_id not in cands:
         return None, "not_in_plan"
-    return ("v14", candidate_id, _transform(cands[candidate_id])), None
+    transform = _transform(cands[candidate_id])
+    required = PAIR_TRANSFORM.get(role)
+    if required is not None and transform != required:
+        return None, "transform_mismatch"
+    return ("v14", candidate_id, transform), None
 
 
 def resolve_roster(plan, selection, *, outer_year, pair_candidates, blend_ids):
@@ -171,7 +179,7 @@ def resolve_roster(plan, selection, *, outer_year, pair_candidates, blend_ids):
     for role in PAIR_ROLES:
         found[role] = _pair(cands, extra, pair_candidates, role)
 
-    models, not_testable = {}, []
+    models, not_testable, role_model = {}, [], {}
     for role in ROLES:
         spec, reason = found[role]
         if spec is None:
@@ -180,6 +188,7 @@ def resolve_roster(plan, selection, *, outer_year, pair_candidates, blend_ids):
         source, candidate_id, transform = spec
         model_id = content_hash({"source": source, "candidate_id": candidate_id,
                                  "target_transform": transform})
+        role_model[role] = model_id
         if model_id in models:
             models[model_id]["roles"].append(role)
         else:
@@ -195,8 +204,11 @@ def resolve_roster(plan, selection, *, outer_year, pair_candidates, blend_ids):
         raise fail("INVALID_EXPERIMENT_SPEC", "the roster exceeds the model budget",
                    details={"reason": "too_many_models"})
     dead = {item["role"] for item in not_testable}
-    pairs = {pid: "not_testable" if dead & set(members) else "testable"
-             for pid, members in PAIRS.items()}
+    pairs = {}
+    for pid, members in PAIRS.items():
+        ids = [role_model.get(role) for role in members]
+        blocked = bool(dead & set(members)) or ids[0] == ids[1]
+        pairs[pid] = "not_testable" if blocked else "testable"
     return {"models": list(models.values()), "not_testable": not_testable, "pairs": pairs}
 
 

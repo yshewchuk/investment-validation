@@ -20,7 +20,7 @@ RUN_READ = {"driver-seal": SEAL}.get
 SELECTION = {"selections": [{"outer_year": 2025, "selected_candidate_id": "c1",
                              "winners": {"rmse": {"candidate_id": "c2"},
                                          "mae": {"candidate_id": "c1"}}}]}
-PAIR_MAP = {"H-sq": "c2", "H-abs": "c2", "E-raw": "c1", "E-log": "c1", "N-raw": "c2", "N-log": "c2"}
+PAIR_MAP = {"H-sq": "c2", "H-abs": "c1", "E-raw": "c2", "E-log": "c1", "N-raw": "c2", "N-log": "c1"}
 BLEND_MAP = {"M4": "b1", "M5": "b1"}
 
 
@@ -264,20 +264,30 @@ def test_repeated_inner_year_under_distinct_trials_refused(monkeypatch):
 def test_population_admit_reads_frame_with_selection_purpose():
     seen = {}
 
-    def load(repository, snapshot, *, as_of_month, purpose, event_ids):
-        seen.update(as_of_month=as_of_month, purpose=purpose, event_ids=event_ids)
+    def load(repository, snapshot, *, as_of_month, purpose, event_ids, max_object_bytes):
+        seen.update(as_of_month=as_of_month, purpose=purpose, event_ids=event_ids,
+                    max_object_bytes=max_object_bytes)
         return pd.DataFrame({"event_id": ["e2", "e1"]})
 
-    admit = sp.population_admit("repo", "snap", "2025-01", load=load)
+    admit = sp.population_admit("repo", "snap", "2025-01", max_object_bytes=4096, load=load)
     assert admit(["e2", "e1"]) == {"admitted": ["e1", "e2"], "dropped": []}
-    assert seen == {"as_of_month": "2025-01", "purpose": "selection", "event_ids": ["e1", "e2"]}
+    assert seen == {"as_of_month": "2025-01", "purpose": "selection", "event_ids": ["e1", "e2"],
+                    "max_object_bytes": 4096}
+
+
+@pytest.mark.parametrize("bad", [0, -1, True, None])
+def test_population_admit_refuses_invalid_object_cap(bad):
+    with pytest.raises(OpsError) as exc:
+        sp.population_admit("repo", "snap", "2025-01", max_object_bytes=bad,
+                            load=lambda *args, **kwargs: None)
+    assert _refusal(exc) == ("INVALID_EXPERIMENT_SPEC", "max_object_bytes_invalid")
 
 
 def test_population_admit_propagates_ops_refusal_unchanged():
     def load(*args, **kwargs):
         raise fail("SNAPSHOT_UNRESOLVED", "unresolved")
 
-    admit = sp.population_admit("repo", "snap", "2025-01", load=load)
+    admit = sp.population_admit("repo", "snap", "2025-01", max_object_bytes=4096, load=load)
     with pytest.raises(OpsError) as exc:
         admit(["e1"])
     assert exc.value.problem.code == "SNAPSHOT_UNRESOLVED"
@@ -287,10 +297,11 @@ def test_resolve_roster_roles_collapse_and_log_forms():
     roster = _roster()
     by_role = {role: m for m in roster["models"] for role in m["roles"]}
     assert by_role["M1"] is by_role["M3"]
-    assert by_role["M1"]["roles"] == ["M1", "M3", "E-raw", "E-log"]
+    assert by_role["M1"]["roles"] == ["M1", "M3", "H-abs", "E-log", "N-log"]
     assert by_role["M1"]["target_transform"] == "log1p"
     assert by_role["M2"]["candidate_id"] == "c2"
     assert by_role["M2"]["target_transform"] == "none"
+    assert by_role["M2"]["roles"] == ["M2", "H-sq", "E-raw", "N-raw"]
     assert by_role["M0"]["source"] == "production"
     assert by_role["M4"]["target_transform"] == "mixed"
     assert len(roster["models"]) == 4
@@ -329,13 +340,30 @@ def test_winner_neither_candidate_nor_blend_is_not_in_plan():
 def test_pair_not_in_extra_refits_or_unmapped_is_not_testable():
     roster = _roster(_plan(selection={"extra_refits": ["c2"]}))
     reasons = {r["role"]: r["reason"] for r in roster["not_testable"]}
-    assert reasons["E-raw"] == reasons["E-log"] == "not_in_extra_refits"
-    assert roster["pairs"] == {"H": "testable", "E": "not_testable", "N": "testable"}
+    assert reasons == {"H-abs": "not_in_extra_refits", "E-log": "not_in_extra_refits",
+                       "N-log": "not_in_extra_refits"}
+    assert roster["pairs"] == {"H": "not_testable", "E": "not_testable", "N": "not_testable"}
     partial = {k: v for k, v in PAIR_MAP.items() if k != "N-log"}
     roster = _roster(pairs=partial, blends={"M4": "b1"})
     reasons = {r["role"]: r["reason"] for r in roster["not_testable"]}
     assert reasons == {"N-log": "unmapped", "M5": "unmapped"}
     assert roster["pairs"]["N"] == "not_testable"
+
+
+@pytest.mark.parametrize("role, mapped, pair", [("E-raw", "c1", "E"), ("N-log", "c2", "N")])
+def test_transform_mismatch_makes_role_and_pair_not_testable(role, mapped, pair):
+    roster = _roster(pairs={**PAIR_MAP, role: mapped})
+    assert {r["role"]: r["reason"] for r in roster["not_testable"]} == {role: "transform_mismatch"}
+    assert roster["pairs"] == {p: ("not_testable" if p == pair else "testable") for p in sp.PAIRS}
+
+
+def test_pair_with_both_members_on_one_model_is_not_testable():
+    roster = _roster(pairs={**PAIR_MAP, "H-sq": "c1", "H-abs": "c1"})
+    by_role = {role: m for m in roster["models"] for role in m["roles"]}
+    assert by_role["H-sq"] is by_role["H-abs"] is by_role["M1"]
+    assert {"H-sq", "H-abs"} <= set(by_role["H-sq"]["roles"])
+    assert roster["not_testable"] == []
+    assert roster["pairs"] == {"H": "not_testable", "E": "testable", "N": "testable"}
 
 
 def test_too_many_models_refused(monkeypatch):
