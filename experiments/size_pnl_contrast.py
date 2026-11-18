@@ -53,6 +53,10 @@ def bootstrap_interval(d, labels, *, resamples=RESAMPLES, interval=INTERVAL, see
     Returns (mean, lo, hi). Each resample draws whole groups (unique labels)
     with replacement, so events sharing a label stay together.
     """
+    if resamples < 1:
+        raise ValueError("resamples must be at least 1")
+    if not 0.0 <= interval < 1.0:
+        raise ValueError("interval must satisfy 0 <= interval < 1")
     d = _check(d, labels)
     _, sums, counts = _totals(d, labels)
     g = len(sums)
@@ -125,16 +129,23 @@ def _clearly_opposite(summary, sign, full_years):
 
 
 def _level(summaries, sign, share, require_intervals, full_years):
-    """True if one arm's pair summaries show the sign at the given share."""
-    hits = [st for st in (pair_status(s, sign, share=share, full_years=full_years)
-                          for s in summaries) if st["predicted"]]
-    if len(hits) < 2:
-        return False
-    for st in hits:
-        if not (st["years_ok"] and st["meets_share"]):
-            return False
+    """True if one arm's pair summaries show the sign at the given share.
+
+    A pair is "used" (qualifies) when it has the predicted sign, years_ok,
+    meets_share and, if require_intervals, intervals_exclude_zero. Needs at
+    least 2 used pairs and no pair clearly opposite. Other pairs (predicted
+    sign but weak consistency) do not block.
+    """
+    used = 0
+    for s in summaries:
+        st = pair_status(s, sign, share=share, full_years=full_years)
+        if not (st["predicted"] and st["years_ok"] and st["meets_share"]):
+            continue
         if require_intervals and not st["intervals_exclude_zero"]:
-            return False
+            continue
+        used += 1
+    if used < 2:
+        return False
     return not any(_clearly_opposite(s, sign, full_years) for s in summaries)
 
 
@@ -144,14 +155,31 @@ def classify(pairs, predicted_sign, *, full_years=FULL_YEARS):
     Returns one of "clear", "directional", "no_difference", "reversed",
     "not_testable". A pair with any None arm (excluded model) is dropped.
 
+    A level holds when at least 2 pairs are "used" (qualify: predicted sign,
+    years_ok, meets the share, and intervals excluding zero where required)
+    and no pair is clearly opposite. Pairs that do not qualify but carry the
+    predicted-sign mean do not block the level.
+
+    Raises ValueError if predicted_sign is not 1 or -1, if there are no pairs,
+    if any pair has empty arms, or if testable pairs do not share one arm-name set.
+
     The "clearly opposite" rule and the 75% / 60% quarter shares are the
     author's pre-registered judgement calls (design section 7, decision 2).
     No category depends on a P&L magnitude.
     """
+    if predicted_sign not in (1, -1):
+        raise ValueError("predicted_sign must be 1 or -1")
+    if not pairs:
+        raise ValueError("no pairs to classify")
+    for pid, arms in pairs.items():
+        if not arms:
+            raise ValueError(f"pair {pid!r} has empty arms")
     testable = {pid: arms for pid, arms in pairs.items()
                 if all(v is not None for v in arms.values())}
     if len(testable) < 2:
         return "not_testable"
+    if len({frozenset(arms) for arms in testable.values()}) > 1:
+        raise ValueError("testable pairs must all share the same arm names")
     arms = list(next(iter(testable.values())))
     by_arm = {arm: [testable[pid][arm] for pid in testable] for arm in arms}
 

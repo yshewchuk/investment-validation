@@ -76,6 +76,67 @@ def test_known_effect_classify_clear_and_reversed():
     assert classify(pairs, -1) == "reversed"
 
 
+def test_weak_third_pair_does_not_block_clear():
+    strong = {
+        "as_is": {
+            "n_events": 1600,
+            "mean": 1.0,
+            "quarter_signs": {q: 1 for q in QUARTERS},
+            "year_signs": {2023: 1, 2024: 1, 2025: 1},
+            "quarter_interval": (0.8, 1.2),
+            "ticker_interval": (0.8, 1.2),
+            "quarter_counts": {"positive": 10, "negative": 0, "zero": 0},
+        },
+        "retuned": {
+            "n_events": 1600,
+            "mean": 1.0,
+            "quarter_signs": {q: 1 for q in QUARTERS},
+            "year_signs": {2023: 1, 2024: 1, 2025: 1},
+            "quarter_interval": (0.8, 1.2),
+            "ticker_interval": (0.8, 1.2),
+            "quarter_counts": {"positive": 10, "negative": 0, "zero": 0},
+        },
+    }
+    weak = {
+        "n_events": 1600,
+        "mean": 0.05,
+        "quarter_signs": {
+            "2023Q3": 1,
+            "2023Q4": 1,
+            "2024Q1": -1,
+            "2024Q2": 1,
+            "2024Q3": -1,
+            "2024Q4": 1,
+            "2025Q1": 1,
+            "2025Q2": -1,
+            "2025Q3": 1,
+            "2025Q4": -1,
+        },
+        "year_signs": {2023: 1, 2024: 1, 2025: 1},
+        "quarter_interval": (-0.1, 0.2),
+        "ticker_interval": (-0.1, 0.2),
+        "quarter_counts": {"positive": 6, "negative": 4, "zero": 0},
+    }
+    pairs = {
+        "pair0": strong,
+        "pair1": strong,
+        "pair2": {"as_is": weak, "retuned": weak},
+    }
+    assert classify(pairs, 1) == "clear"
+
+
+def test_bootstrap_oracle_exact_values():
+    d = np.array([0.0, 4.0, 4.0, 4.0])
+    labels = ["a", "b", "b", "b"]
+    mean, lo, hi = bootstrap_interval(d, labels, resamples=10000, seed=1, interval=0.0)
+    assert mean == 3.0
+    assert lo == 3.0
+    assert hi == 3.0
+    mean, lo, hi = bootstrap_interval(d, labels, resamples=10000, seed=1, interval=0.9)
+    assert mean == 3.0
+    assert (lo, hi) == (0.0, 4.0)
+
+
 def test_null_effect_is_no_difference():
     pairs = _pairs(0.0, 200)
     assert classify(pairs, 1) == "no_difference"
@@ -135,12 +196,35 @@ def test_ticker_and_quarter_intervals_bracket_mean():
 
 
 def test_validation_raises_value_error():
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="equal length"):
         group_signs([1.0, 2.0], ["2024Q1"])
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="empty input"):
         group_signs([], [])
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="must be finite"):
         group_signs([1.0, float("nan")], ["2024Q1", "2024Q2"])
+
+
+def test_classify_validation_raises_value_error():
+    pairs = _pairs(1.0, 400)
+    with pytest.raises(ValueError, match="predicted_sign"):
+        classify(pairs, 0)
+    with pytest.raises(ValueError, match="no pairs"):
+        classify({}, 1)
+    with pytest.raises(ValueError, match="empty arms"):
+        classify({"pair0": {}, "pair1": pairs["pair1"]}, 1)
+    renamed = {"pair1": {"as_is": pairs["pair1"]["as_is"], "other": pairs["pair1"]["retuned"]}}
+    with pytest.raises(ValueError, match="same arm names"):
+        classify({"pair0": pairs["pair0"], **renamed}, 1)
+
+
+def test_bootstrap_validation_raises_value_error():
+    d, q, _ = _events(0.5, 13)
+    with pytest.raises(ValueError, match="resamples"):
+        bootstrap_interval(d, q, resamples=0)
+    with pytest.raises(ValueError, match="interval"):
+        bootstrap_interval(d, q, resamples=RS, interval=1.0)
+    with pytest.raises(ValueError, match="interval"):
+        bootstrap_interval(d, q, resamples=RS, interval=-0.1)
 
 
 def test_missing_year_makes_years_ok_false():
