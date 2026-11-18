@@ -1,5 +1,6 @@
 import json
 import types
+from pathlib import Path
 
 import pytest
 
@@ -138,7 +139,7 @@ def test_resolve_extra_refits_accepts_content_hash_ids():
     assert resolve_extra_refits({"extra_refits": [x]}, [x, y]) == [x]
 
 
-def _prepare(request, monkeypatch):
+def _registration(request, monkeypatch):
     compiled = compile_request(request)
     registration = types.SimpleNamespace(
         document={"schema_version": "native_experiment_registration.v1.7",
@@ -158,6 +159,11 @@ def _prepare(request, monkeypatch):
     monkeypatch.setattr(binding, "_folds", lambda *a, **k: [])
     monkeypatch.setattr(binding, "_shared_inner", lambda *a, **k: None)
     monkeypatch.setattr(binding, "size_candidate_recipe", lambda *a, **k: {"stub": True})
+    return registration
+
+
+def _prepare(request, monkeypatch):
+    registration = _registration(request, monkeypatch)
     return binding.prepare_plan(None, None, registration, request)
 
 
@@ -169,6 +175,8 @@ def test_plan_without_extras_has_no_extra_refits_key(monkeypatch):
     ids = [c["candidate_id"] for c in plan["candidates"]]
     assert ids
     assert all(i.startswith("sha256:") for i in ids)
+    assert len(set(ids)) == len(ids)
+    assert len(ids) > 1
 
 
 def test_plan_with_extras_records_them_and_keeps_candidate_ids(monkeypatch):
@@ -192,3 +200,60 @@ def test_plan_refuses_unknown_extra_refit_id(monkeypatch):
     with pytest.raises(OpsError, match="INVALID_EXPERIMENT_SPEC.*unknown candidate ids") as caught:
         _prepare(request, monkeypatch)
     assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
+
+
+def _known_ids(monkeypatch):
+    base_request = _with_rules()
+    base_request["max_fits"] = _PLAN_MAX_FITS
+    base_plan = _prepare(base_request, monkeypatch)
+    return sorted(c["candidate_id"] for c in base_plan["candidates"])
+
+
+def test_check_extra_refits_skips_requests_without_extras(monkeypatch):
+    request = _with_rules()
+    request["max_fits"] = _PLAN_MAX_FITS
+    registration = _registration(request, monkeypatch)
+
+    def no_compile(*a, **k):
+        raise AssertionError("compile_request must not run without extras")
+
+    monkeypatch.setattr(binding, "compile_request", no_compile)
+    assert binding.check_extra_refits(registration, request) is None
+
+
+def test_check_extra_refits_accepts_known_ids(monkeypatch):
+    ids = _known_ids(monkeypatch)
+    extras = ids[:2]
+    request = _with_extras(extras)
+    request["max_fits"] = _PLAN_MAX_FITS
+    registration = _registration(request, monkeypatch)
+    assert binding.check_extra_refits(registration, request) is None
+
+
+def test_check_extra_refits_refuses_unknown_well_formed_id(monkeypatch):
+    request = _with_extras(["sha256:" + "f" * 64])
+    request["max_fits"] = _PLAN_MAX_FITS
+    registration = _registration(request, monkeypatch)
+    with pytest.raises(OpsError, match="INVALID_EXPERIMENT_SPEC.*unknown candidate ids") as caught:
+        binding.check_extra_refits(registration, request)
+    assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
+
+
+def test_check_extra_refits_refuses_mixed_known_and_unknown(monkeypatch):
+    known = _known_ids(monkeypatch)[0]
+    unknown = "sha256:" + "f" * 64
+    request = _with_extras(sorted([known, unknown]))
+    request["max_fits"] = _PLAN_MAX_FITS
+    registration = _registration(request, monkeypatch)
+    with pytest.raises(OpsError, match="INVALID_EXPERIMENT_SPEC.*unknown candidate ids") as caught:
+        binding.check_extra_refits(registration, request)
+    assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
+
+
+def test_register_checks_extra_refits_before_reservation():
+    root = Path(__file__).resolve().parents[3]
+    text = (root / "experiments" / "size_search.py").read_text(encoding="utf-8")
+    admit_at = text.index("admit(store, receipt_ref")
+    check_at = text.index("check_extra_refits(registration, request)", admit_at)
+    reserve_at = text.index("reserve_native_registration(conn", admit_at)
+    assert admit_at < check_at < reserve_at

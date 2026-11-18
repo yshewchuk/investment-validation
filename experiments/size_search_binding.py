@@ -290,6 +290,44 @@ def resolve_extra_refits(requested_selection, candidate_ids):
     return list(extras)
 
 
+def _candidates(registration, schedule):
+    """Bind every compiled candidate spec to its recipe; returns (candidates, id by spec id)."""
+    binding = registration.document
+    candidates = []
+    candidate_id_by_spec = {}
+    source_binding_id = (content_hash(json.loads(registration.binding_json)["size_panel"])
+                         if binding["schema_version"] == "native_experiment_registration.v1.7"
+                         else content_hash(binding["size_panel"]))
+    for spec in schedule["candidate_specs"]:
+        recipe = (size_candidate_recipe(binding["size_comparison"]) if spec["family"] == "size_v1_4" else
+            candidate_recipe(spec["family"], spec["parameters"], columns=spec["feature_recipe"]["model_columns"],
+                             feature_dictionary_hash=spec["feature_recipe"]["dictionary_hash"]))
+        identity = {"recipe": recipe, "feature_recipe": spec["feature_recipe"],
+                    "source_binding_id": source_binding_id, "candidate_spec_id": spec["candidate_spec_id"]}
+        candidate = {**identity, "candidate_id": content_hash(identity)}
+        candidates.append(candidate)
+        candidate_id_by_spec[spec["candidate_spec_id"]] = candidate["candidate_id"]
+    return candidates, candidate_id_by_spec
+
+
+def check_extra_refits(registration, request):
+    """Refuse unknown selection.extra_refits ids before any reservation or receipt; no I/O."""
+    requested = request.get("selection") if isinstance(request, dict) else None
+    if not isinstance(requested, dict) or "extra_refits" not in requested:
+        return
+    binding = registration.document
+    if binding["schema_version"] == "native_experiment_registration.v1.6":
+        horizons = (5, 3, 1)
+    else:
+        panel_request = binding.get("size_panel_request")
+        if not isinstance(panel_request, dict):
+            raise fail("EXPERIMENT_IDENTITY_CONFLICT", "qualified SIZE registration is missing its panel request")
+        horizons = tuple(h for h in (5, 3, 1) if h in panel_request["horizons"])
+    schedule = compile_request(request, horizons=horizons)
+    candidates, _ = _candidates(registration, schedule)
+    resolve_extra_refits(schedule["request"]["selection"], [c["candidate_id"] for c in candidates])
+
+
 def prepare_plan(conn, store, registration, request, *, plan_schema=None):
     """Expand the fixed dictionary grid into fully bound executable recipes."""
     from experiments.magnitude_search_plan import PLAN_V2, PLAN_V3, plan_schema_for_request
@@ -317,20 +355,7 @@ def prepare_plan(conn, store, registration, request, *, plan_schema=None):
     folds = _folds(binding, request, plan_schema)
     if plan_schema == PLAN_V3:
         _shared_inner(folds)
-    candidates = []
-    candidate_id_by_spec = {}
-    source_binding_id = (content_hash(json.loads(registration.binding_json)["size_panel"])
-                         if binding["schema_version"] == "native_experiment_registration.v1.7"
-                         else content_hash(binding["size_panel"]))
-    for spec in schedule["candidate_specs"]:
-        recipe = (size_candidate_recipe(binding["size_comparison"]) if spec["family"] == "size_v1_4" else
-            candidate_recipe(spec["family"], spec["parameters"], columns=spec["feature_recipe"]["model_columns"],
-                             feature_dictionary_hash=spec["feature_recipe"]["dictionary_hash"]))
-        identity = {"recipe": recipe, "feature_recipe": spec["feature_recipe"],
-                    "source_binding_id": source_binding_id, "candidate_spec_id": spec["candidate_spec_id"]}
-        candidate = {**identity, "candidate_id": content_hash(identity)}
-        candidates.append(candidate)
-        candidate_id_by_spec[spec["candidate_spec_id"]] = candidate["candidate_id"]
+    candidates, candidate_id_by_spec = _candidates(registration, schedule)
     requested_selection = schedule["request"].get("selection")
     if requested_selection is None:
         selection_contract = {"metric": "inner_pooled_rmse", "ties": LEGACY_TIE_RULE, "retries": 0,
