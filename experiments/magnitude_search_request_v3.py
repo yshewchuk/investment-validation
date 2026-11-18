@@ -13,7 +13,7 @@ from experiments.magnitude_search_request_schema import (
 from experiments.size_blend_profiles import (
     distinct_component_count, resolve_blends, validate_blends)
 
-__all__ = ["compile_request", "outer_units"]
+__all__ = ["compile_request", "outer_units", "spec_request_id"]
 
 _MAX_AXIS_LENGTH = 32
 _MAX_V4_CANDIDATES = 1000
@@ -91,6 +91,18 @@ def _winner_rules(request, policy, version):
     request["selection"]["winner_rules"] = ["overall", "rmse", "mae"]
 
 
+def _extra_refits(request, policy):
+    if "extra_refits" not in policy:
+        return
+    value = policy["extra_refits"]
+    v2._require(type(value) is list and bool(value)
+                and all(type(item) is str and len(item) == 64
+                        and set(item) <= set("0123456789abcdef") for item in value)
+                and value == sorted(set(value)),
+                "stage-2 selection extra_refits must be a sorted unique list of 64-hex candidate ids")
+    request["selection"]["extra_refits"] = list(value)
+
+
 def _selection(request, horizons, version):
     if "selection" not in request:
         return
@@ -98,7 +110,8 @@ def _selection(request, horizons, version):
     policy = request["selection"]
     keys = {"metric_weights", "lead_weights", "large_move_threshold_pct", "tie_band_floor"}
     v2._require(v2._shape(policy, keys) if version < 14
-                else type(policy) is dict and set(policy) in (keys, keys | {"winner_rules"}),
+                else type(policy) is dict and set(policy) in (
+                    keys, keys | {"winner_rules"}, keys | {"winner_rules", "extra_refits"}),
                 "stage-2 selection policy has an invalid shape")
     metrics, leads = policy["metric_weights"], policy["lead_weights"]
     v2._require(v2._shape(metrics, set(_SELECTION_METRICS))
@@ -117,6 +130,7 @@ def _selection(request, horizons, version):
         "lead_weights": dict(_SELECTION_LEADS), "large_move_threshold_pct": 10.0,
         "tie_band_floor": 0.005}
     _winner_rules(request, policy, version)
+    _extra_refits(request, policy)
 
 
 def _blends(request, blends):
@@ -363,6 +377,18 @@ def _counts(request, horizons):
         "total_component_fits": fits + extra_components + baseline_component_fits}
 
 
+def spec_request_id(request):
+    """Request id used for candidate specs; ignores selection.extra_refits.
+
+    Candidate ids must not depend on extra_refits (they are the ids extras name).
+    """
+    selection = request.get("selection")
+    if type(selection) is not dict or "extra_refits" not in selection:
+        return content_hash(request)
+    stripped = {**request, "selection": {k: v for k, v in selection.items() if k != "extra_refits"}}
+    return content_hash(stripped)
+
+
 def compile_request(request, *, horizons=(5, 3, 1)):
     """Return canonical declarations/counts; no source/fold verification or I/O."""
     horizons = v2.validate_horizons(horizons)
@@ -400,7 +426,7 @@ def compile_request(request, *, horizons=(5, 3, 1)):
     v2._comparison(request["comparison"], counts)
     v2._limits(request["limits"])
     request_id = content_hash(request)
-    specs = [s for s in v2._specifications(request, request_id,
+    specs = [s for s in v2._specifications(request, spec_request_id(request),
         recipe=qualified_panel_recipe if request_version(version) >= 9 else v2.panel_recipe)
         if s["family"] != "size_v1_4" or s["feature_recipe"]["subset"] == "HMO"]
     if has_blends:

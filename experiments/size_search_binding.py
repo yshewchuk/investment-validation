@@ -279,6 +279,17 @@ def _shared_inner(folds):
                     "repeated inner-year folds differ after eligibility filtering")
 
 
+def resolve_extra_refits(requested_selection, candidate_ids):
+    """Sealed extra_refits: every id must be a compiled candidate id (design section 3)."""
+    extras = requested_selection.get("extra_refits")
+    if extras is None:
+        return None
+    unknown = sorted(set(extras) - set(candidate_ids))
+    if unknown:
+        raise fail("INVALID_EXPERIMENT_SPEC", f"selection.extra_refits names unknown candidate ids: {unknown[:3]}")
+    return list(extras)
+
+
 def prepare_plan(conn, store, registration, request, *, plan_schema=None):
     """Expand the fixed dictionary grid into fully bound executable recipes."""
     from experiments.magnitude_search_plan import PLAN_V2, PLAN_V3, plan_schema_for_request
@@ -345,6 +356,9 @@ def prepare_plan(conn, store, registration, request, *, plan_schema=None):
             selection_contract["rule_metrics"] = {
                 "overall": "blend_score", "rmse": "normalized.rmse",
                 "mae": "normalized.mae"}
+            extras = resolve_extra_refits(requested_selection, [c["candidate_id"] for c in candidates])
+            if extras is not None:
+                selection_contract["extra_refits"] = extras
     identity = {"schema_version": plan_schema, "request": schedule["request"],
         "anchor": {"run_id": registration.run_id, "variant_id": registration.variant_id},
         "implementation": {"source_closure": binding["source_closure"], "environment": binding["environment"]},
