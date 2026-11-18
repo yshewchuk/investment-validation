@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from experiments import size_search_report as report
+from experiments.magnitude_search_refits import refit_key
 from experiments.size_distribution_report import TrialArrays
 
 
@@ -410,7 +411,7 @@ def test_collect_adds_winners_rows_for_winner_rules_plans(monkeypatch):
                      "mae": {"candidate_id": "a", "tie_band": 0.2}}}
         for year in years]}
     offsets = {"a": -1.0, "b": -0.5, "x": -2.0}
-    outer = {"outer-forecasts:" + report.refit_key(plan, year, cid): [
+    outer = {"outer-forecasts:" + refit_key(plan, year, cid): [
                 {"event_id": "e" + year, "horizon_sessions": 1, "predicted_absolute_move_pct": 4.0 + offsets[cid]}]
              for year in years for cid in offsets}
     comparison = {"comparison-terminal:" + report.content_hash([plan["plan_id"], year, "comparison"]): {
@@ -445,8 +446,8 @@ def test_collect_adds_winners_rows_for_winner_rules_plans(monkeypatch):
     assert "x" not in winners
     for year in years:
         for cid in ("a", "b"):
-            assert "outer-forecasts:" + report.refit_key(plan, year, cid) in slots
-        assert "outer-forecasts:" + report.refit_key(plan, year, "x") not in slots
+            assert "outer-forecasts:" + refit_key(plan, year, cid) in slots
+        assert "outer-forecasts:" + refit_key(plan, year, "x") not in slots
     # The primary (overall-winner) paired result is still built from the selected candidate "a".
     assert observed["paired"]["paired_events"] == 2
     assert observed["paired"]["difference"]["mae"] == pytest.approx(-1.0)

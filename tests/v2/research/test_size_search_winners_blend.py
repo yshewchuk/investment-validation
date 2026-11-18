@@ -1,10 +1,11 @@
 """Unit tests for blend winner rows in report-only winner rows (fake paired callable)."""
 import math
 
+from engine.v2.foundation import content_hash
 from engine.v2.models.magnitude_elasticnet_recipe import elasticnet_recipe
 from experiments.magnitude_search_blend_outer import average_forecasts
 from experiments.magnitude_search_refits import refit_key
-from experiments.size_search_winners import refit_forecast_map, winner_rows
+from experiments.size_search_winners import refit_forecast_map, selected_forecasts, winner_rows
 
 _HASH = "sha256:" + "0" * 64
 PAIRED_KWARGS = {"horizons": [1], "implied_moves": None, "implied_scales": {}, "label_reasons": {}}
@@ -139,3 +140,76 @@ def test_refit_forecast_map_blend_average_is_fsum_of_component_values():
                "component_candidate_ids": ["a", "c"]}]
     result = refit_forecast_map(PLAN_FM, refits, {"2024": {"B"}}, lambda key: stored[key], average_forecasts)
     assert result[("2024", "B")][0]["predicted_absolute_move_pct"] == math.fsum([0.1, 0.2]) / 2
+
+
+def test_selected_forecasts_blend_is_fsum_average_of_component_refits():
+    plan = _plan()
+    stored = {
+        refit_key(plan, "2024", "a"): _stored([("e1", 1.0), ("e2", 4.0)]),
+        refit_key(plan, "2024", "c"): _stored([("e1", 3.0), ("e2", 6.0)]),
+    }
+    result = selected_forecasts(plan, "2024", "B", lambda key: stored[key], average_forecasts, True)
+    # e1: fsum([1.0, 3.0]) / 2 = 2.0 ; e2: fsum([4.0, 6.0]) / 2 = 5.0
+    assert result == _stored([("e1", 2.0), ("e2", 5.0)])
+
+
+def test_selected_forecasts_plain_candidate_reads_its_own_refit():
+    plan = _plan()
+    stored = {refit_key(plan, "2024", "a"): _stored([("e1", 1.0), ("e2", 4.0)])}
+
+    def no_average(lists):
+        raise AssertionError("average must not be called for a plain candidate")
+
+    result = selected_forecasts(plan, "2024", "a", lambda key: stored[key], no_average, True)
+    assert result == _stored([("e1", 1.0), ("e2", 4.0)])
+
+
+def test_selected_forecasts_legacy_reads_fold_key():
+    plan = _plan()
+    legacy_key = content_hash(["p", "2024"])
+    stored = {legacy_key: _stored([("e1", 7.0)])}
+    keys = []
+
+    def read(key):
+        keys.append(key)
+        return stored[key]
+
+    result = selected_forecasts(plan, "2024", "a", read, average_forecasts, False)
+    assert keys == [legacy_key]
+    assert result == _stored([("e1", 7.0)])
+
+
+DISTINCT_PAIRED = {"sentinel": "distinct-paired-result"}
+
+
+class RecordingPaired:
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, ev, fc, cmp, tg, **kwargs):
+        self.calls.append({"events": ev, "forecasts": fc, "comparisons": cmp, "targets": tg, "kwargs": kwargs})
+        return DISTINCT_PAIRED
+
+
+def test_completed_blend_winner_row_pairs_averaged_fold_forecasts_and_share():
+    plan = _plan()
+    blend_refit = {"outer_year": "2024", "candidate_id": "B", "kind": "blend", "status": "completed",
+                   "component_candidate_ids": ["a", "c"], "result": _blend_predictions()}
+    # Stored component forecasts. e2 is outside the fold (and outside TARGETS) and must not reach paired.
+    stored = {
+        refit_key(plan, "2024", "a"): _stored([("e1", 1.0), ("e2", 4.0)]),
+        refit_key(plan, "2024", "c"): _stored([("e1", 2.0), ("e2", 6.0)]),
+    }
+    forecasts = refit_forecast_map(plan, [blend_refit], {"2024": {"B"}}, lambda key: stored[key], average_forecasts)
+    paired = RecordingPaired()
+    rows = _by_id(winner_rows(plan, SELECTION, [blend_refit], forecasts, EVENTS, COMPARISONS, TARGETS,
+                              paired=paired, paired_kwargs=PAIRED_KWARGS))
+    row = rows["B"]
+    assert row["status"] == "completed"
+    assert row["paired"] is DISTINCT_PAIRED
+    assert len(paired.calls) == 1
+    # Averaged e1 forecast: fsum([1.0, 2.0]) / 2 = 1.5 (e2 averaged to 5.0 but is outside the fold, so dropped).
+    assert paired.calls[0]["forecasts"] == _stored([("e1", 1.5)])
+    # Hand computation: lowest horizon is 1. Only e1 is in TARGETS (2.0). Averaged e1 forecast 1.5 < target 2.0,
+    # so the one scored row is above forecast: share = 1 / 1 = 1.0.
+    assert row["actual_above_forecast_share"] == 1.0

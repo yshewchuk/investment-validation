@@ -14,10 +14,10 @@ from experiments.magnitude_search_plan import trial_key
 from experiments.magnitude_search_records import read_record
 from experiments.magnitude_search_request_v3 import outer_units
 from experiments.magnitude_search_blend_outer import average_forecasts
-from experiments.magnitude_search_refits import blend_components, per_candidate, refit_key
+from experiments.magnitude_search_refits import per_candidate
 from experiments.size_distribution_report import TrialArrays, collect_distribution
 from experiments.size_paired_report import paired_report, validated_horizons
-from experiments.size_search_winners import refit_forecast_map, winner_rows
+from experiments.size_search_winners import refit_forecast_map, selected_forecasts, winner_rows
 from experiments.v2_magnitude_search_run import _admit_driver
 
 
@@ -177,15 +177,10 @@ def collect(conn, store, repository, registration, request, plan_ref):
             if match is not None else None)
     for group in plan["folds"]:
         year = group["outer"]["year"]
-        components = blend_components(plan, selected_ids[year]) if per_candidate(plan) else None
-        if components is not None:
-            forecasts.extend(average_forecasts([
-                read_record(conn, store, registration.run_id, "outer-forecasts:" + refit_key(plan, year, component))
-                for component in components]))
-        else:
-            key = (refit_key(plan, year, selected_ids[year]) if per_candidate(plan)
-                   else content_hash([plan["plan_id"], year]))
-            forecasts.extend(read_record(conn, store, registration.run_id, "outer-forecasts:" + key))
+        forecasts.extend(selected_forecasts(
+            plan, year, selected_ids[year],
+            lambda key: read_record(conn, store, registration.run_id, "outer-forecasts:" + key),
+            average_forecasts, per_candidate(plan)))
         key = content_hash([plan["plan_id"], year, "comparison"])
         comparison = read_record(conn, store, registration.run_id, "comparison-terminal:" + key)["result"]
         comparisons.extend(comparison["forecasts"])

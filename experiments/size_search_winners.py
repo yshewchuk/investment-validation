@@ -5,7 +5,8 @@ elsewhere; each row here is one candidate that any rule picked in some outer yea
 """
 import sys
 
-from experiments.magnitude_search_refits import refit_key
+from engine.v2.foundation import content_hash
+from experiments.magnitude_search_refits import blend_components, refit_key
 
 PRIMARY_RULE = "overall"
 LOG1P_SCHEMAS = frozenset({
@@ -27,6 +28,20 @@ def _share(lowest, forecast_rows, targets):
         return None
     above = sum(1 for r in scored if targets[r["event_id"]] > r["predicted_absolute_move_pct"])
     return above / len(scored)
+
+
+def selected_forecasts(plan, year, selected_id, read, average, per_candidate):
+    """Outer forecasts of the selected (overall) winner for one year.
+
+    A per-candidate blend averages its component refit forecasts; a per-candidate plain candidate reads its own
+    refit; a legacy plan reads the fold-keyed forecasts. read(key) returns stored forecasts for a key.
+    """
+    if per_candidate:
+        components = blend_components(plan, selected_id)
+        if components is not None:
+            return average([read(refit_key(plan, year, c)) for c in components])
+        return read(refit_key(plan, year, selected_id))
+    return read(content_hash([plan["plan_id"], year]))
 
 
 def refit_forecast_map(plan, refits, wanted_by_year, read, average):
