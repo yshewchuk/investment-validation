@@ -13,6 +13,7 @@ from tests.v2.research.test_magnitude_search_request_v13 import _request
 _RULES = ["overall", "rmse", "mae"]
 _A = "sha256:" + "a" * 64
 _B = "sha256:" + "b" * 64
+_PLAN_MAX_FITS = 10 ** 6
 
 
 def _with_rules(version=14):
@@ -51,8 +52,9 @@ def test_valid_sorted_unique_extras_compile_and_add_fits():
 ])
 def test_invalid_extra_refits_are_refused(extras):
     request = _with_rules()
+    request["max_fits"] = _PLAN_MAX_FITS
     request["selection"]["extra_refits"] = extras
-    with pytest.raises(OpsError, match="INVALID_EXPERIMENT_SPEC") as caught:
+    with pytest.raises(OpsError, match="extra_refits must be a sorted unique list of sha256 candidate ids") as caught:
         compile_request(request)
     assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
 
@@ -107,7 +109,7 @@ def test_resolve_extra_refits_returns_list_when_all_known():
 
 
 def test_resolve_extra_refits_refuses_unknown_ids():
-    with pytest.raises(OpsError, match="INVALID_EXPERIMENT_SPEC") as caught:
+    with pytest.raises(OpsError, match="INVALID_EXPERIMENT_SPEC.*unknown candidate ids") as caught:
         resolve_extra_refits({"extra_refits": [_A]}, [_B])
     assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
 
@@ -121,9 +123,6 @@ def test_content_hash_id_compiles_as_extra():
 def test_resolve_extra_refits_accepts_content_hash_ids():
     x, y = content_hash({"x": 1}), content_hash({"x": 2})
     assert resolve_extra_refits({"extra_refits": [x]}, [x, y]) == [x]
-
-
-_PLAN_MAX_FITS = 10 ** 6
 
 
 def _prepare(request, monkeypatch):
@@ -177,6 +176,6 @@ def test_plan_with_extras_records_them_and_keeps_candidate_ids(monkeypatch):
 def test_plan_refuses_unknown_extra_refit_id(monkeypatch):
     request = _with_extras(["sha256:" + "f" * 64])
     request["max_fits"] = _PLAN_MAX_FITS
-    with pytest.raises(OpsError, match="INVALID_EXPERIMENT_SPEC") as caught:
+    with pytest.raises(OpsError, match="INVALID_EXPERIMENT_SPEC.*unknown candidate ids") as caught:
         _prepare(request, monkeypatch)
     assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
