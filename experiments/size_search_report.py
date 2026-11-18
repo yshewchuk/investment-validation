@@ -17,7 +17,7 @@ from experiments.magnitude_search_blend_outer import average_forecasts
 from experiments.magnitude_search_refits import blend_components, per_candidate, refit_key
 from experiments.size_distribution_report import TrialArrays, collect_distribution
 from experiments.size_paired_report import paired_report, validated_horizons
-from experiments.size_search_winners import winner_rows
+from experiments.size_search_winners import refit_forecast_map, winner_rows
 from experiments.v2_magnitude_search_run import _admit_driver
 
 
@@ -204,18 +204,11 @@ def collect(conn, store, repository, registration, request, plan_ref):
     if per_candidate(plan):
         selection = read_record(conn, store, registration.run_id, "selection")
         winners_by_year = {item["outer_year"]: {win["candidate_id"] for win in item["winners"].values()}
+                           | ({item["best_non_blend_id"]} if item.get("best_non_blend_id") else set())
                            for item in selection["selections"]}
-        forecast_map = {}
-        for r in result.get("refits", []):
-            if r["status"] != "completed" or r["candidate_id"] not in winners_by_year.get(r["outer_year"], set()):
-                continue
-            key = (r["outer_year"], r["candidate_id"])
-            if r.get("kind") == "blend":
-                forecast_map[key] = [{k: v for k, v in row.items() if k != "absolute_move_pct"}
-                                     for row in r["result"]["predictions"]]
-            else:
-                forecast_map[key] = read_record(conn, store, registration.run_id,
-                                                "outer-forecasts:" + refit_key(plan, r["outer_year"], r["candidate_id"]))
+        forecast_map = refit_forecast_map(plan, result.get("refits", []), winners_by_year,
+            lambda key: read_record(conn, store, registration.run_id, "outer-forecasts:" + key),
+            average_forecasts)
         rows = winner_rows(plan, selection, result.get("refits", []), forecast_map, events, comparisons, targets,
                            paired=paired_report, paired_kwargs=paired_kwargs)
         if rows is not None:

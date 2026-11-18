@@ -5,6 +5,8 @@ elsewhere; each row here is one candidate that any rule picked in some outer yea
 """
 import sys
 
+from experiments.magnitude_search_refits import refit_key
+
 PRIMARY_RULE = "overall"
 LOG1P_SCHEMAS = frozenset({
     "magnitude_elasticnet_recipe.v2",
@@ -25,6 +27,25 @@ def _share(lowest, forecast_rows, targets):
         return None
     above = sum(1 for r in scored if targets[r["event_id"]] > r["predicted_absolute_move_pct"])
     return above / len(scored)
+
+
+def refit_forecast_map(plan, refits, wanted_by_year, read, average):
+    """{(outer_year, candidate_id): forecasts} for completed refits of wanted candidates.
+
+    A blend refit averages its component stored forecasts (all events, labels not required);
+    other refits read their own stored forecasts. read(key) returns the stored forecasts for a refit key.
+    """
+    forecast_map = {}
+    for r in refits:
+        year = r["outer_year"]
+        if r["status"] != "completed" or r["candidate_id"] not in wanted_by_year.get(year, set()):
+            continue
+        if r.get("kind") == "blend":
+            value = average([read(refit_key(plan, year, c)) for c in r["component_candidate_ids"]])
+        else:
+            value = read(refit_key(plan, year, r["candidate_id"]))
+        forecast_map[(year, r["candidate_id"])] = value
+    return forecast_map
 
 
 def winner_rows(plan, selection, refits, forecasts, events, comparisons, targets, *, paired, paired_kwargs):
@@ -49,6 +70,12 @@ def winner_rows(plan, selection, refits, forecasts, events, comparisons, targets
             per_year["rules"].add(rule)
             per_year["scores"][rule] = _score(score_by.get(cid, {}))
             per_year["tie_band"][rule] = win["tie_band"]
+    # A best non-blend that wins no rule still gets a report row (rules == []).
+    for item in selection["selections"]:
+        best = item.get("best_non_blend_id")
+        if best:
+            entry = won.setdefault(best, {"rules": set(), "years": {}})
+            entry["years"].setdefault(item["outer_year"], {"rules": set(), "scores": {}, "tie_band": {}})
 
     rows = []
     for cid, entry in won.items():

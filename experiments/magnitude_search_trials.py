@@ -25,7 +25,7 @@ from engine.v2.ops.migrations import migrate, require_current
 from engine.v2.research.magnitude_inputs import load_magnitude_targets
 from experiments.iv_selection import signed_event_score, training_mean_rows
 from experiments.magnitude_report import magnitude_metrics
-from experiments.magnitude_search_blends import score_blends
+from experiments.magnitude_search_blends import best_non_blend_id, score_blends
 from experiments.magnitude_search_evidence import (
     _requires_event_dates,
     admit_fold_inputs,
@@ -890,11 +890,7 @@ class SearchTrials:
                     selection["winners"] = winners["winners"]
                     selection["distinct_winner_ids"] = winners["distinct_winner_ids"]
                     if blends:
-                        non_blend = [score for score in eligible if score.get("kind") != "blend"]
-                        if not non_blend:
-                            raise fail("EXPERIMENT_VARIANT_FAILED", "all candidates failed for an outer fold")
-                        selection["best_non_blend_id"] = min(
-                            non_blend, key=lambda score: (score["blend_score"], score["candidate_id"]))["candidate_id"]
+                        selection["best_non_blend_id"] = best_non_blend_id(eligible)
             selections.append(selection)
             failed_candidates = sum(score["metrics"] is None for score in scores)
             print(f"[selection] outer={selection['outer_year']} "
