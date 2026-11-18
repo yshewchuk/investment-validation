@@ -108,6 +108,9 @@ def _selection(request, horizons, version):
     v2._require(1 in horizons, "stage-2 blended selection requires lead-1 horizon")
     policy = request["selection"]
     keys = {"metric_weights", "lead_weights", "large_move_threshold_pct", "tie_band_floor"}
+    if version >= 14 and type(policy) is dict:
+        v2._require(not ("extra_refits" in policy and "winner_rules" not in policy),
+                    "stage-2 selection extra_refits requires winner_rules")
     v2._require(v2._shape(policy, keys) if version < 14
                 else type(policy) is dict and set(policy) in (
                     keys, keys | {"winner_rules"}, keys | {"winner_rules", "extra_refits"}),

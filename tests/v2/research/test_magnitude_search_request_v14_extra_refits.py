@@ -44,6 +44,7 @@ def test_valid_sorted_unique_extras_compile_and_add_fits():
     [_B, _A],
     [_A, _A],
     ["sha256:" + "g" * 64],
+    [_A, "sha256:" + "g" * 64],
     ["sha256:" + "a" * 63],
     ["a" * 64],
     [],
@@ -62,7 +63,7 @@ def test_invalid_extra_refits_are_refused(extras):
 def test_extra_refits_without_winner_rules_are_refused():
     request = _request(14)
     request["selection"]["extra_refits"] = [_A]
-    with pytest.raises(OpsError, match="INVALID_EXPERIMENT_SPEC") as caught:
+    with pytest.raises(OpsError, match="extra_refits requires winner_rules") as caught:
         compile_request(request)
     assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
 
@@ -98,6 +99,18 @@ def test_extras_do_not_change_candidate_ids_or_specs():
     spec_ids = [s["candidate_spec_id"] for s in plain["candidate_specs"]]
     assert spec_ids
     assert all(sid.startswith("sha256:") for sid in spec_ids)
+    assert len(set(spec_ids)) == len(spec_ids)
+    assert len(spec_ids) > 1
+
+
+def test_max_fits_is_request_content_and_changes_candidate_ids():
+    base = compile_request(_with_rules())
+    bumped = _with_rules()
+    bumped["max_fits"] += 1000
+    other = compile_request(bumped)
+    base_ids = [s["candidate_spec_id"] for s in base["candidate_specs"]]
+    other_ids = [s["candidate_spec_id"] for s in other["candidate_specs"]]
+    assert base_ids != other_ids
 
 
 def test_resolve_extra_refits_returns_none_without_key():
