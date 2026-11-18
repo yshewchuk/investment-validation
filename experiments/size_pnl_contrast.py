@@ -62,6 +62,8 @@ def bootstrap_interval(d, labels, *, resamples=RESAMPLES, interval=INTERVAL, see
     d = _check(d, labels)
     _, sums, counts = _totals(d, labels)
     g = len(sums)
+    if g < 2:
+        raise ValueError("bootstrap needs at least 2 groups")
     rng = np.random.default_rng(seed)
     stats = np.empty(resamples)
     for start in range(0, resamples, _CHUNK):
@@ -130,25 +132,22 @@ def _clearly_opposite(summary, sign, full_years):
     return st["predicted"] and st["years_ok"] and st["meets_share"] and st["intervals_exclude_zero"]
 
 
-def _level(summaries, sign, share, require_intervals, full_years):
-    """True if one arm's pair summaries show the sign at the given share.
+def _qualifying(by_pair_summaries_for_one_arm, sign, share, require_intervals, full_years):
+    """Set of pair ids whose summary in one arm qualifies for the sign.
 
-    A pair is "used" (qualifies) when it has the predicted sign, years_ok,
-    meets_share and, if require_intervals, intervals_exclude_zero. Needs at
-    least 2 used pairs and no pair clearly opposite. Other pairs (predicted
-    sign but weak consistency) do not block.
+    A pair qualifies when it has the predicted sign, years_ok, meets_share
+    and, if require_intervals, intervals_exclude_zero. Pairs that do not
+    qualify do not count towards a level but do not block it either.
     """
-    used = 0
-    for s in summaries:
+    out = set()
+    for pid, s in by_pair_summaries_for_one_arm.items():
         st = pair_status(s, sign, share=share, full_years=full_years)
         if not (st["predicted"] and st["years_ok"] and st["meets_share"]):
             continue
         if require_intervals and not st["intervals_exclude_zero"]:
             continue
-        used += 1
-    if used < 2:
-        return False
-    return not any(_clearly_opposite(s, sign, full_years) for s in summaries)
+        out.add(pid)
+    return out
 
 
 def classify(pairs, predicted_sign, *, full_years=FULL_YEARS):
@@ -158,10 +157,13 @@ def classify(pairs, predicted_sign, *, full_years=FULL_YEARS):
     "not_testable". Returns "not_testable" if there are fewer than 2 pairs or
     if any pair has a None arm (an excluded model) (design section 7).
 
-    A level holds when at least 2 pairs are "used" (qualify: predicted sign,
-    years_ok, meets the share, and intervals excluding zero where required)
-    and no pair is clearly opposite. Pairs that do not qualify but carry the
-    predicted-sign mean do not block the level.
+    clear(sign): the pair ids that qualify (predicted sign, years_ok, meets
+    CLEAR_SHARE, intervals excluding zero) are intersected across ALL arms;
+    the intersection must hold at least 2 pairs and no pair may be clearly
+    opposite in any arm. So every counted pair holds in every arm.
+    directional(sign), when not clear: in at least one arm, at least 2 pairs
+    qualify at DIRECTIONAL_SHARE without intervals, and no pair is clearly
+    opposite in any arm. Pairs that do not qualify do not block a level.
 
     Raises ValueError if predicted_sign is not 1 or -1, if there are no pairs,
     if any pair has empty arms, or if pairs do not all share one arm-name set.
@@ -185,18 +187,24 @@ def classify(pairs, predicted_sign, *, full_years=FULL_YEARS):
     if any(v is None for arms in pairs.values() for v in arms.values()):
         return "not_testable"
     arms = list(next(iter(pairs.values())))
-    by_arm = {arm: [pairs[pid][arm] for pid in pairs] for arm in arms}
+    by_arm = {arm: {pid: pairs[pid][arm] for pid in pairs} for arm in arms}
+
+    def no_clear_opposite(sign):
+        return not any(_clearly_opposite(s, sign, full_years)
+                       for a in arms for s in by_arm[a].values())
 
     def clear(sign):
-        return all(_level(by_arm[a], sign, CLEAR_SHARE, True, full_years) for a in arms)
+        common = set.intersection(*(
+            _qualifying(by_arm[a], sign, CLEAR_SHARE, True, full_years) for a in arms))
+        return len(common) >= 2 and no_clear_opposite(sign)
 
     def directional(sign):
         if clear(sign):
             return False
-        if not any(_level(by_arm[a], sign, DIRECTIONAL_SHARE, False, full_years) for a in arms):
+        if not any(len(_qualifying(by_arm[a], sign, DIRECTIONAL_SHARE, False, full_years)) >= 2
+                   for a in arms):
             return False
-        return not any(_clearly_opposite(s, sign, full_years)
-                       for a in arms for s in by_arm[a])
+        return no_clear_opposite(sign)
 
     if clear(predicted_sign):
         return "clear"

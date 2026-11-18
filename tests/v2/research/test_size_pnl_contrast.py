@@ -257,3 +257,46 @@ def test_missing_year_makes_years_ok_false():
     broken = dict(s, year_signs=dict(s["year_signs"]))
     del broken["year_signs"][2025]
     assert pair_status(broken, 1, share=CLEAR_SHARE)["years_ok"] is False
+
+
+def _weak_summary():
+    # Mean and intervals point the predicted way, but only half the quarters
+    # agree, so it fails both the clear and the directional share.
+    quarter_signs = {q: (1 if i % 2 == 0 else -1) for i, q in enumerate(QUARTERS)}
+    return dict(_summary(0.05, (-0.1, 0.2)), quarter_signs=quarter_signs)
+
+
+def test_clear_uses_same_qualifying_pairs_in_every_arm():
+    strong = _summary(1.0, (0.8, 1.2))
+    weak = _weak_summary()
+    # as_is qualifies pairs 0,1; retuned qualifies pairs 1,2: no common pair set of size 2.
+    pairs = {
+        "pair0": {"as_is": strong, "retuned": weak},
+        "pair1": {"as_is": strong, "retuned": strong},
+        "pair2": {"as_is": weak, "retuned": strong},
+    }
+    assert classify(pairs, 1) == "directional"
+    assert classify(pairs, 1) != "clear"
+
+
+def test_clear_when_both_arms_qualify_same_pairs():
+    strong = _summary(1.0, (0.8, 1.2))
+    weak = _weak_summary()
+    pairs = {
+        "pair0": {"as_is": strong, "retuned": strong},
+        "pair1": {"as_is": strong, "retuned": strong},
+        "pair2": {"as_is": weak, "retuned": weak},
+    }
+    assert classify(pairs, 1) == "clear"
+
+
+def test_single_pair_is_not_testable():
+    pairs = {"pair0": {"as_is": _summary(1.0, (0.8, 1.2)),
+                       "retuned": _summary(1.0, (0.8, 1.2))}}
+    assert classify(pairs, 1) == "not_testable"
+
+
+def test_bootstrap_one_unique_label_raises():
+    d = np.array([1.0, 2.0, 3.0])
+    with pytest.raises(ValueError, match="at least 2 groups"):
+        bootstrap_interval(d, ["2024Q1", "2024Q1", "2024Q1"], resamples=RS)
