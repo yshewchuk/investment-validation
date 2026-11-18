@@ -149,8 +149,23 @@ def read_labels(fetch, admitted, *, start=None, end=None, event_ids=None):
     return out[keep]
 
 
+def _is_hash(value):
+    return isinstance(value, str) and value.strip() != ""
+
+
+def _production_binding(table_hash, frame):
+    """Binding of a production table: its hash and the sorted rows of the validated frame."""
+    srt = frame.sort_index()
+    rows = [[eid, day.isoformat(), move, crush] for eid, day, move, crush in
+            zip(srt.index.tolist(), srt["event_date"].tolist(), srt["pred_move"].tolist(),
+                srt["pred_crush"].tolist())]
+    return content_hash({"table": table_hash, "rows": rows})
+
+
 def read_production(fetch, admitted, *, expected_hash, table_hash, start=None, end=None):
     """Lead-horizon production forecasts for admitted events in the window (R1 whole-run refusal)."""
+    if not (_is_hash(expected_hash) and _is_hash(table_hash)):
+        raise _conflict("production_hash_invalid", "the production hashes must be non-blank strings")
     if table_hash != expected_hash:
         raise _conflict("production_hash_mismatch", "the production table does not match the expected hash")
     ids = _window_ids(admitted, start, end)
@@ -162,12 +177,8 @@ def read_production(fetch, admitted, *, expected_hash, table_hash, start=None, e
     out = _checked_production(built, admitted)
     print(f"[pnl_readers] production rows={len(out)} production_missing={len(ids) - len(out)}",
           file=sys.stderr)
-    srt = out.sort_index()
-    rows = [[eid, day.isoformat(), move, crush] for eid, day, move, crush in
-            zip(srt.index.tolist(), srt["event_date"].tolist(), srt["pred_move"].tolist(),
-                srt["pred_crush"].tolist())]
-    binding = content_hash({"table": table_hash, "rows": rows})
-    return {"frame": out, "binding": binding}
+    binding = _production_binding(table_hash, out)
+    return {"frame": out, "binding": binding, "table_hash": table_hash}
 
 
 def _candidate_series(bound):
@@ -208,6 +219,9 @@ def model_tables(bound, roster, admitted, production, *, start=None, end=None):
     """Per-model (event_date, pred_move, pred_crush) tables; crush is the production forecast, fixed for every model."""
     dates = _dates(admitted)
     prod = _checked_production(production["frame"], admitted)
+    table_hash = production.get("table_hash")
+    if not _is_hash(table_hash) or _production_binding(table_hash, prod) != production["binding"]:
+        raise _conflict("production_binding_mismatch", "the production binding does not match its frame and table hash")
     crush = prod["pred_crush"]
     out = {}
     for model in roster["models"]:

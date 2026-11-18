@@ -249,13 +249,25 @@ def test_missing_production_row_logged_not_imputed(capsys):
     assert "production_missing=1" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("table_hash, expected", [(None, None), ("", ""), ("   ", "   "), (None, "h1"), ("h1", None)])
+def test_read_production_refuses_none_or_blank_hashes(table_hash, expected):
+    with pytest.raises(OpsError) as exc:
+        _production(PROD_TABLE, table_hash=table_hash, expected=expected, start="2023-01-01")
+    assert _refusal(exc) == (CONFLICT, "production_hash_invalid")
+
+
 MT_ADM = _admitted([("e1", "2023-02-01"), ("e2", "2023-06-01"), ("e3", "2024-02-01"),
                     ("e4", "2024-05-01"), ("e5", "2024-09-01")])
-PROD = {"frame": pd.DataFrame({"event_date": pd.to_datetime(["2023-02-01", "2023-06-01", "2024-02-01", "2024-09-01"]),
-                               "pred_move": [0.1, 0.2, 0.3, 0.5],
-                               "pred_crush": [-1.0, -1.5, -2.0, -2.5]},
-                              index=pd.Index(["e1", "e2", "e3", "e5"], name="event_id")),
-        "binding": "pb"}
+def _prod(frame, table_hash="h1"):
+    """Production dict as read_production builds it: binding over the admission-checked frame."""
+    checked = rd._checked_production(frame, MT_ADM)
+    return {"frame": frame, "binding": rd._production_binding(table_hash, checked), "table_hash": table_hash}
+
+
+PROD = _prod(pd.DataFrame({"event_date": pd.to_datetime(["2023-02-01", "2023-06-01", "2024-02-01", "2024-09-01"]),
+                           "pred_move": [0.1, 0.2, 0.3, 0.5],
+                           "pred_crush": [-1.0, -1.5, -2.0, -2.5]},
+                          index=pd.Index(["e1", "e2", "e3", "e5"], name="event_id")))
 
 
 def _bound(years):
@@ -322,7 +334,8 @@ def test_no_crush_rows_dropped_and_counted_and_outside_ids_refused():
 
 def test_production_frame_with_unadmitted_id_refuses():
     frame = PROD["frame"].rename(index={"e5": "zz"})
-    bad_prod = {"frame": frame, "binding": PROD["binding"]}
+    # Admission refusals fire before the binding check, so PROD's binding is enough here.
+    bad_prod = {"frame": frame, "binding": PROD["binding"], "table_hash": "h1"}
     with pytest.raises(OpsError) as exc:
         rd.model_tables({}, {"models": [_model("p", "production", source="production")]}, MT_ADM, bad_prod)
     assert _refusal(exc) == (CONFLICT, "event_ids_outside_population")
@@ -330,7 +343,7 @@ def test_production_frame_with_unadmitted_id_refuses():
 
 def test_model_tables_refuses_non_finite_production_prediction():
     frame = PROD["frame"].assign(pred_move=[0.1, float("nan"), 0.3, 0.5])
-    bad_prod = {"frame": frame, "binding": PROD["binding"]}
+    bad_prod = {"frame": frame, "binding": PROD["binding"], "table_hash": "h1"}
     with pytest.raises(OpsError) as exc:
         rd.model_tables({}, {"models": [_model("p", "production", source="production")]}, MT_ADM, bad_prod)
     assert _refusal(exc) == (CONFLICT, "production_series_failed")
@@ -338,7 +351,7 @@ def test_model_tables_refuses_non_finite_production_prediction():
 
 def test_model_tables_refuses_production_frame_missing_column():
     frame = PROD["frame"].drop(columns=["pred_crush"])
-    bad_prod = {"frame": frame, "binding": PROD["binding"]}
+    bad_prod = {"frame": frame, "binding": PROD["binding"], "table_hash": "h1"}
     with pytest.raises(OpsError) as exc:
         rd.model_tables({}, {"models": [_model("p", "production", source="production")]}, MT_ADM, bad_prod)
     assert _refusal(exc) == (CONFLICT, "production_series_failed")
@@ -347,7 +360,7 @@ def test_model_tables_refuses_production_frame_missing_column():
 def _via_model_tables(frame):
     """Production frame through model_tables; returns the production table."""
     roster = {"models": [_model("p", "production", source="production")]}
-    return rd.model_tables({}, roster, MT_ADM, {"frame": frame, "binding": "pb"})["p"]["table"]
+    return rd.model_tables({}, roster, MT_ADM, _prod(frame))["p"]["table"]
 
 
 def _via_read_production(frame):
@@ -402,7 +415,7 @@ def test_model_tables_replaces_supplied_event_date_with_admitted_date():
 def test_model_tables_windowing_uses_admitted_date_not_supplied_date():
     frame = PROD["frame"].assign(event_date=pd.to_datetime(["2030-01-01"] * 4))
     roster = {"models": [_model("p", "production", source="production")]}
-    out = rd.model_tables({}, roster, MT_ADM, {"frame": frame, "binding": "pb"},
+    out = rd.model_tables({}, roster, MT_ADM, _prod(frame),
                           start="2023-03-01", end="2024-01-01")
     assert list(out["p"]["table"].index) == ["e2"]
 
@@ -430,12 +443,37 @@ def test_changed_production_crush_changes_candidate_binding_with_same_ids_and_pr
     base = _tables(bound, [_model("m", "candidate")])
     crush = PROD["frame"]["pred_crush"].copy()
     crush.iloc[1] = -9.0  # e2's production crush forecast changes
-    changed_prod = {"frame": PROD["frame"].assign(pred_crush=crush), "binding": PROD["binding"]}
+    changed_prod = _prod(PROD["frame"].assign(pred_crush=crush))
     changed = rd.model_tables(bound, {"models": [_model("m", "candidate")]}, MT_ADM, changed_prod)
     assert list(changed["m"]["table"].index) == list(base["m"]["table"].index)
     assert list(changed["m"]["table"]["pred_move"]) == list(base["m"]["table"]["pred_move"])
     assert list(changed["m"]["table"]["pred_crush"]) != list(base["m"]["table"]["pred_crush"])
     assert changed["m"]["binding"] != base["m"]["binding"]
+
+
+def _production_roster():
+    return {"models": [_model("p", "production", source="production")]}
+
+
+def test_model_tables_refuses_production_binding_that_disagrees_with_frame():
+    other = _prod(PROD["frame"].assign(pred_move=[0.9, 0.2, 0.3, 0.5]))["binding"]
+    with pytest.raises(OpsError) as exc:
+        rd.model_tables({}, _production_roster(), MT_ADM, {**PROD, "binding": other})
+    assert _refusal(exc) == (CONFLICT, "production_binding_mismatch")
+
+
+def test_model_tables_refuses_production_binding_for_different_table_hash():
+    other = _prod(PROD["frame"], table_hash="h2")["binding"]
+    with pytest.raises(OpsError) as exc:
+        rd.model_tables({}, _production_roster(), MT_ADM, {**PROD, "binding": other})
+    assert _refusal(exc) == (CONFLICT, "production_binding_mismatch")
+
+
+def test_model_tables_refuses_production_missing_table_hash():
+    prod = {k: v for k, v in PROD.items() if k != "table_hash"}
+    with pytest.raises(OpsError) as exc:
+        rd.model_tables({}, _production_roster(), MT_ADM, prod)
+    assert _refusal(exc) == (CONFLICT, "production_binding_mismatch")
 
 
 @pytest.mark.parametrize("bad", [None, 0, True])
@@ -462,7 +500,7 @@ def test_candidate_binding_matches_independent_digest_and_tracks_source_binding(
     out = _tables(bound, [_model("m", "candidate")])
     expected = content_hash({
         "source": "cand",
-        "crush": "pb",
+        "crush": PROD["binding"],
         "rows": [["e1", "2023-02-01T00:00:00", 1.0, -1.0], ["e2", "2023-06-01T00:00:00", 2.0, -1.5]],
     })
     assert out["m"]["binding"] == expected
