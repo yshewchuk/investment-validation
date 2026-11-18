@@ -37,7 +37,7 @@ from experiments.native_registration import (
 )
 from experiments.size_job_budget import remaining
 from experiments.size_preflight_receipt import admit, input_bindings, issue
-from experiments.size_search_binding import prepare, validate_panel_request
+from experiments.size_search_binding import check_extra_refits, prepare, validate_panel_request
 from experiments.size_search_report import collect, resource_report
 from experiments.v2_magnitude_search_run import (
     _admit_driver,
@@ -142,6 +142,9 @@ def main(argv=None):
                     registration, spec = prepare(repository, spec, request, panel_request,
                         scope=args.scope, training_start=args.training_start,
                         labels_before=args.labels_before)
+                    # Registration shards are content-addressed (section = hash of the value) and do not depend on
+                    # selection.extra_refits, so a refusal here leaves only shards the corrected retry reuses; no receipt names an unknown id.
+                    check_extra_refits(registration, request)
                     from experiments.magnitude_search_request_versions import compile_request
                     counts = compile_request(request, horizons=tuple(h for h in (5, 3, 1)
                         if h in panel_request["horizons"]))["counts"]
@@ -153,6 +156,7 @@ def main(argv=None):
                     except FileNotFoundError:
                         raise fail("INVALID_EXPERIMENT_SPEC", "SIZE preflight receipt is missing", details={"reason": "receipt_missing"}) from None
                     registration, spec = admit(store, receipt_ref, bind(), spec)
+                    check_extra_refits(registration, request)
                     reserve_native_registration(conn, store, registration, spec, max_evidence_bytes=MAX_NATIVE_EVIDENCE_BYTES)
                     result = seal_search_plan(conn, store, registration, request)
                 print("[size] receipt " + ("issued" if args.action == "preflight" else "admitted"), file=sys.stderr)

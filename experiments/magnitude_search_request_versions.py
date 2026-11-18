@@ -11,6 +11,7 @@ from experiments.magnitude_search_request_leads import compile_request as compil
 from experiments.magnitude_search_request_schema import (
     allows_lead_selector, request_version, uses_v3_compiler)
 from experiments.magnitude_search_request_v3 import compile_request as compile_v3_request
+from experiments.magnitude_search_request_v3 import spec_request_id
 from experiments.regression_search_request_v2 import compile_request as compile_regression_v2_request
 
 __all__ = ["compile_request"]
@@ -81,7 +82,7 @@ def compile_request(request, *, horizons=(5, 3, 1)):
     for spec in result["candidate_specs"]:
         spec["feature_recipe"] = recipes[spec["feature_recipe"]["subset"]]
         spec["candidate_spec_id"] = content_hash({
-            "request_id": result["request_id"], "family": spec["family"],
+            "request_id": spec_request_id(result["request"]), "family": spec["family"],
             "feature_recipe": spec["feature_recipe"], "parameters": spec["parameters"]})
     result["candidate_specs"].sort(key=lambda spec: spec["candidate_spec_id"])
     return json.loads(json.dumps(result, sort_keys=True, allow_nan=False))
