@@ -27,6 +27,7 @@ from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.experiments import experiment_spec_from_document
 from experiments.magnitude_search_plan import seal_search_plan
 from experiments.magnitude_search_records import read_record
+from experiments.magnitude_search_refits import per_candidate, terminal_keys
 from experiments.magnitude_search_request_schema import regression_request_version
 from experiments.memory_guard import rss_watchdog
 from experiments.native_registration import (
@@ -64,10 +65,25 @@ def _run(context, *, collector=None, read_only=False):
     """Verify completed collection; a read-only incomplete probe returns None."""
     conn, store, _, registration, request, ref = context
     plan = _admit_driver(conn, store, registration, request, ref)
-    complete = all(read_record(conn, store, registration.run_id, prefix + content_hash(parts)) is not None
-        for group in plan["folds"] for prefix, parts in (
-            ("outer-terminal:", [plan["plan_id"], group["outer"]["year"]]),
-            ("comparison-terminal:", [plan["plan_id"], group["outer"]["year"], "comparison"])))
+    comparisons = all(read_record(conn, store, registration.run_id,
+        "comparison-terminal:" + content_hash([plan["plan_id"], group["outer"]["year"], "comparison"])) is not None
+        for group in plan["folds"])
+    if per_candidate(plan):
+        selection = read_record(conn, store, registration.run_id, "selection")
+        keys = []
+        if isinstance(selection, dict):
+            try:
+                keys = terminal_keys(plan, selection)
+            except (ValueError, TypeError, KeyError):
+                raise fail("EXPERIMENT_IDENTITY_CONFLICT", "stored selection is malformed") from None
+        complete = comparisons and isinstance(selection, dict) and all(
+            read_record(conn, store, registration.run_id, "outer-terminal:" + key) is not None
+            for key in keys)
+    else:
+        complete = comparisons and all(
+            read_record(conn, store, registration.run_id,
+                        "outer-terminal:" + content_hash([plan["plan_id"], group["outer"]["year"]])) is not None
+            for group in plan["folds"])
     if not complete:
         if read_only:
             return None
