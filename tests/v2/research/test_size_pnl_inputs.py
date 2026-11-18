@@ -306,6 +306,26 @@ def test_unresolved_winners_and_unknown_candidates_are_not_testable():
     assert {r["role"]: r["reason"] for r in _roster(selection=unknown)["not_testable"]} == {"M1": "not_in_plan"}
 
 
+def test_blend_winner_resolves_as_mixed_model():
+    blend_winner = {"selections": [{"outer_year": 2025, "selected_candidate_id": "b1",
+                                    "winners": {"rmse": {"candidate_id": "c2"},
+                                                "mae": {"candidate_id": "c1"}}}]}
+    roster = _roster(selection=blend_winner)
+    by_role = {role: m for m in roster["models"] for role in m["roles"]}
+    assert by_role["M1"]["candidate_id"] == "b1"
+    assert by_role["M1"]["target_transform"] == "mixed"
+    assert by_role["M1"]["kind"] == "blend"
+    assert "M1" not in {r["role"] for r in roster["not_testable"]}
+
+
+def test_winner_neither_candidate_nor_blend_is_not_in_plan():
+    neither = {"selections": [{"outer_year": 2025, "selected_candidate_id": "c1",
+                               "winners": {"rmse": {"candidate_id": "zz"},
+                                           "mae": {"candidate_id": "c1"}}}]}
+    reasons = {r["role"]: r["reason"] for r in _roster(selection=neither)["not_testable"]}
+    assert reasons == {"M2": "not_in_plan"}
+
+
 def test_pair_not_in_extra_refits_or_unmapped_is_not_testable():
     roster = _roster(_plan(selection={"extra_refits": ["c2"]}))
     reasons = {r["role"]: r["reason"] for r in roster["not_testable"]}

@@ -122,9 +122,11 @@ def _transform(candidate):
     return "log1p" if candidate["recipe"]["schema_version"] in LOG1P_SCHEMAS else "none"
 
 
-def _pick(cands, candidate_id, missing_reason):
+def _pick(cands, candidate_id, missing_reason, blends=frozenset()):
     if candidate_id is None:
         return None, missing_reason
+    if candidate_id in blends:
+        return ("v14", candidate_id, "mixed"), None
     if candidate_id not in cands:
         return None, "not_in_plan"
     return ("v14", candidate_id, _transform(cands[candidate_id])), None
@@ -160,9 +162,9 @@ def resolve_roster(plan, selection, *, outer_year, pair_candidates, blend_ids):
     winners = item.get("winners", {})
     found = {
         "M0": (("production", "size_v1_4", "none"), None),
-        "M1": _pick(cands, item.get("selected_candidate_id"), "winner_unresolved"),
-        "M2": _pick(cands, winners.get("rmse", {}).get("candidate_id"), "winner_unresolved"),
-        "M3": _pick(cands, winners.get("mae", {}).get("candidate_id"), "winner_unresolved"),
+        "M1": _pick(cands, item.get("selected_candidate_id"), "winner_unresolved", blends),
+        "M2": _pick(cands, winners.get("rmse", {}).get("candidate_id"), "winner_unresolved", blends),
+        "M3": _pick(cands, winners.get("mae", {}).get("candidate_id"), "winner_unresolved", blends),
         "M4": _blend(blends, blend_ids, "M4"),
         "M5": _blend(blends, blend_ids, "M5"),
     }
