@@ -229,7 +229,7 @@ def test_candidate_concatenates_inner_years():
     out = _tables({"m": _bound({2023: [("e1", 1.0), ("e2", 2.0)], 2024: [("e3", 3.0)]})}, [_model("m", "candidate")])
     assert list(out["m"]["table"].index) == ["e1", "e2", "e3"]
     assert list(out["m"]["table"]["pred_move"]) == [1.0, 2.0, 3.0]
-    assert out["m"]["status"] == "ready" and out["m"]["binding"] == "cand"
+    assert out["m"]["status"] == "ready" and out["m"]["binding"] != "cand" and isinstance(out["m"]["binding"], str)
 
 
 def test_blend_is_equal_weight_mean_of_components():
@@ -258,7 +258,7 @@ def test_excluded_deferred_and_production_models_pass_through():
                           _model("p", "production", source="production")])
     assert out["x"] == {"status": "excluded", "reason": "missing"}
     assert out["y"] == {"status": "excluded", "reason": "production_bound_by_s2b"}
-    assert out["p"]["table"] is PROD["frame"] and out["p"]["binding"] == "pb"
+    assert out["p"]["table"].equals(PROD["frame"]) and out["p"]["binding"] != "pb"
 
 
 def test_no_crush_rows_dropped_and_counted_and_outside_ids_refused():
@@ -274,3 +274,28 @@ def test_start_and_end_filters_applied():
     out = _tables({"m": _bound({2023: [("e1", 1.0), ("e2", 2.0), ("e3", 3.0)]})},
                   [_model("m", "candidate")], start="2023-03-01", end="2024-01-01")
     assert list(out["m"]["table"].index) == ["e2"]
+
+
+def test_production_model_window_excludes_pre_start_rows():
+    out = _tables({}, [_model("p", "production", source="production")], start="2023-03-01")
+    assert list(out["p"]["table"].index) == ["e2", "e3", "e5"]
+
+
+def test_same_candidate_different_windows_give_different_bindings():
+    bound = {"m": _bound({2023: [("e1", 1.0), ("e2", 2.0), ("e3", 3.0)]})}
+    full = _tables(bound, [_model("m", "candidate")])
+    narrow = _tables(bound, [_model("m", "candidate")], start="2023-03-01", end="2024-01-01")
+    assert full["m"]["binding"] != narrow["m"]["binding"]
+
+
+def test_changed_production_crush_changes_candidate_binding_with_same_ids_and_preds():
+    bound = {"m": _bound({2023: [("e1", 1.0), ("e2", 2.0), ("e3", 3.0)]})}
+    base = _tables(bound, [_model("m", "candidate")])
+    crush = PROD["frame"]["pred_crush"].copy()
+    crush.iloc[1] = -9.0  # e2's production crush forecast changes
+    changed_prod = {"frame": PROD["frame"].assign(pred_crush=crush), "binding": PROD["binding"]}
+    changed = rd.model_tables(bound, {"models": [_model("m", "candidate")]}, MT_ADM, changed_prod)
+    assert list(changed["m"]["table"].index) == list(base["m"]["table"].index)
+    assert list(changed["m"]["table"]["pred_move"]) == list(base["m"]["table"]["pred_move"])
+    assert list(changed["m"]["table"]["pred_crush"]) != list(base["m"]["table"]["pred_crush"])
+    assert changed["m"]["binding"] != base["m"]["binding"]

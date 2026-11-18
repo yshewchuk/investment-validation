@@ -156,6 +156,15 @@ def _blend_series(bound):
     return pd.Series(np.mean(stacked, axis=0), index=base.index)
 
 
+def _consumed_binding(table, source, crush_binding):
+    """Hash of the final consumed table: source binding, crush binding, and the sorted rows."""
+    srt = table.sort_index()
+    rows = [[eid, day.isoformat(), float(move), float(cr)] for eid, day, move, cr in
+            zip(srt.index.tolist(), srt["event_date"].tolist(), srt["pred_move"].tolist(),
+                srt["pred_crush"].tolist())]
+    return content_hash({"source": source, "crush": crush_binding, "rows": rows})
+
+
 def model_tables(bound, roster, admitted, production, *, start=None, end=None):
     """Per-model (event_date, pred_move, pred_crush) tables; crush is the production forecast, fixed for every model."""
     dates = _dates(admitted)
@@ -164,8 +173,12 @@ def model_tables(bound, roster, admitted, production, *, start=None, end=None):
     for model in roster["models"]:
         mid = model["model_id"]
         if model["kind"] == "production":
-            out[mid] = {"status": "ready", "table": production["frame"],
-                        "binding": production["binding"], "dropped": {"no_crush_forecast": 0}}
+            frame = production["frame"]
+            if start is not None or end is not None:
+                frame = frame[_in_window(frame["event_date"], start, end).to_numpy()]
+            out[mid] = {"status": "ready", "table": frame,
+                        "binding": _consumed_binding(frame, production["binding"], production["binding"]),
+                        "dropped": {"no_crush_forecast": 0}}
             continue
         entry = bound[mid]
         if entry["status"] != "bound":
@@ -179,7 +192,9 @@ def model_tables(bound, roster, admitted, production, *, start=None, end=None):
         table = table[_in_window(table["event_date"], start, end).to_numpy()]
         table = table.assign(pred_crush=crush.reindex(table.index))
         has = table["pred_crush"].notna()
-        out[mid] = {"status": "ready", "table": table[has.to_numpy()], "binding": entry["binding"],
+        table = table[has.to_numpy()]
+        out[mid] = {"status": "ready", "table": table,
+                    "binding": _consumed_binding(table, entry["binding"], production["binding"]),
                     "dropped": {"no_crush_forecast": int((~has).sum())}}
     ready = [entry for entry in out.values() if entry["status"] == "ready"]
     print(f"[pnl_readers] models ready={len(ready)} excluded={len(out) - len(ready)} "
