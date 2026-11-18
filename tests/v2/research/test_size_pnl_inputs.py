@@ -80,6 +80,23 @@ def _roster(plan=None, selection=SELECTION, outer=2025, pairs=PAIR_MAP, blends=B
                              pair_candidates=pairs, blend_ids=blends)
 
 
+def _twelve_args():
+    """Plan and roster inputs that resolve to exactly 12 distinct models (all roles distinct)."""
+    raw, log = "magnitude_raw_recipe.v1", "magnitude_elasticnet_recipe.v2"
+    plan = _plan(
+        candidates=[{"candidate_id": f"w{i}", "recipe": {"schema_version": schema}}
+                    for i, schema in enumerate([raw, log, raw, log, raw, log])],
+        blends=[{"blend_id": f"bl{i}", "component_candidate_ids": ["w0", "w1"]} for i in range(1, 6)],
+        selection={"extra_refits": [f"w{i}" for i in range(6)]})
+    selection = {"selections": [{"outer_year": 2025, "selected_candidate_id": "bl1",
+                                 "winners": {"rmse": {"candidate_id": "bl2"},
+                                             "mae": {"candidate_id": "bl3"}}}]}
+    return {"plan": plan, "selection": selection, "outer_year": 2025,
+            "pair_candidates": {"H-sq": "w0", "H-abs": "w1", "E-raw": "w2",
+                                "E-log": "w3", "N-raw": "w4", "N-log": "w5"},
+            "blend_ids": {"M4": "bl4", "M5": "bl5"}}
+
+
 def test_bind_run_ok():
     assert sp.bind_run(_plan(), RUN_READ, expected=_expected(), panel_id=PANEL) == _expected()
 
@@ -118,11 +135,10 @@ def test_bind_run_missing_seal_refuses():
 
 
 def test_bind_array_happy_path_and_horizon_filter():
-    out = sp.bind_array(_record(E23), E23, _admit_all, horizon=1)
+    out = sp.bind_array(_record(E23), E23, _admit_all)
     assert list(out["event_ids"]) == E23
     assert out["event_ids"].dtype == object
     assert np.allclose(out["pred"], 2.0)
-    assert np.allclose(sp.bind_array(_record(E23), E23, _admit_all, horizon=5)["pred"], 6.0)
 
 
 def test_outcome_values_are_never_read():
@@ -205,7 +221,12 @@ def test_bind_candidate_bound():
     out = sp.bind_candidate(plan, _store(plan).get, "c1", _admit_all)
     assert out["status"] == "bound"
     assert sorted(out["years"]) == ["2023", "2024"]
-    assert out["binding"] == sp.bind_candidate(plan, _store(plan).get, "c1", _admit_all)["binding"]
+    assert list(out["years"]["2023"]["pred"]) == [2.0] * len(E23)
+    assert list(out["years"]["2024"]["pred"]) == [2.0] * len(E24)
+    assert list(out["years"]["2023"]["event_ids"]) == E23
+    assert list(out["years"]["2024"]["event_ids"]) == E24
+    assert out["binding"] == content_hash(
+        [[year, out["years"][year]["binding"]] for year in sorted(out["years"])])
 
 
 def test_bind_candidate_missing_failed_partial_are_excluded():
@@ -267,12 +288,15 @@ def test_population_admit_reads_frame_with_selection_purpose():
     def load(repository, snapshot, *, as_of_month, purpose, event_ids, max_object_bytes):
         seen.update(as_of_month=as_of_month, purpose=purpose, event_ids=event_ids,
                     max_object_bytes=max_object_bytes)
-        return pd.DataFrame({"event_id": ["e2", "e1"]})
+        return pd.DataFrame({"event_id": ["e1", "e3"]})
 
     admit = sp.population_admit("repo", "snap", "2025-01", max_object_bytes=4096, load=load)
-    assert admit(["e2", "e1"]) == {"admitted": ["e1", "e2"], "dropped": []}
+    assert admit(["e2", "e1"]) == {"admitted": ["e1", "e3"], "dropped": []}
     assert seen == {"as_of_month": "2025-01", "purpose": "selection", "event_ids": ["e1", "e2"],
                     "max_object_bytes": 4096}
+    with pytest.raises(OpsError) as exc:
+        sp.bind_array(_record(["e1", "e2"]), ["e1", "e2"], admit)
+    assert _refusal(exc) == (CONFLICT, "admission_dropped")
 
 
 @pytest.mark.parametrize("bad", [0, -1, True, None])
@@ -284,13 +308,15 @@ def test_population_admit_refuses_invalid_object_cap(bad):
 
 
 def test_population_admit_propagates_ops_refusal_unchanged():
+    original = fail("SNAPSHOT_UNRESOLVED", "unresolved", details={"reason": "snapshot_missing"})
+
     def load(*args, **kwargs):
-        raise fail("SNAPSHOT_UNRESOLVED", "unresolved")
+        raise original
 
     admit = sp.population_admit("repo", "snap", "2025-01", max_object_bytes=4096, load=load)
     with pytest.raises(OpsError) as exc:
         admit(["e1"])
-    assert exc.value.problem.code == "SNAPSHOT_UNRESOLVED"
+    assert exc.value.problem == original.problem
 
 
 def test_resolve_roster_roles_collapse_and_log_forms():
@@ -366,10 +392,17 @@ def test_pair_with_both_members_on_one_model_is_not_testable():
     assert roster["pairs"] == {"H": "not_testable", "E": "testable", "N": "testable"}
 
 
+def test_exactly_max_models_resolves():
+    roster = sp.resolve_roster(**_twelve_args())
+    assert len(roster["models"]) == sp.MAX_MODELS == 12
+    assert len({m["model_id"] for m in roster["models"]}) == 12
+    assert roster["not_testable"] == []
+
+
 def test_too_many_models_refused(monkeypatch):
-    monkeypatch.setattr(sp, "MAX_MODELS", 3)
+    monkeypatch.setattr(sp, "MAX_MODELS", 11)
     with pytest.raises(OpsError) as exc:
-        _roster()
+        sp.resolve_roster(**_twelve_args())
     assert _refusal(exc) == ("INVALID_EXPERIMENT_SPEC", "too_many_models")
 
 
@@ -381,6 +414,14 @@ def test_bind_models_counts_and_defers_production(capsys):
     assert out[production[0]] == {"status": "deferred", "reason": "production_bound_by_s2b"}
     assert sorted(r["status"] for r in out.values()) == ["bound", "bound", "bound", "deferred"]
     assert "models=4 bound=3 excluded=0 deferred=1" in capsys.readouterr().err
+
+
+def test_model_ids_are_content_hashes_of_source_candidate_and_transform():
+    by_role = {role: m for m in _roster()["models"] for role in m["roles"]}
+    assert by_role["M2"]["model_id"] == content_hash(
+        {"source": "v14", "candidate_id": "c2", "target_transform": "none"})
+    assert by_role["M0"]["model_id"] == content_hash(
+        {"source": "production", "candidate_id": "size_v1_4", "target_transform": "none"})
 
 
 def test_roster_kinds_mark_production_candidate_and_blend():

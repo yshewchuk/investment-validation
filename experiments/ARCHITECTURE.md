@@ -997,4 +997,4 @@ Library-only, no data-run authority. Inputs: a Tier-1 source root (read-only: ca
 
 `size_pnl_prereg.require_preregistration` returns `spec_hash_checked` true or refuses `EXPERIMENT_IDENTITY_CONFLICT` with `details.reason` (`planned_row_missing`, `planned_row_ambiguous`, `spec_hash_mismatch`, `preregistered_at_missing`, `preregistered_after_run`, `*_malformed`, `spec_unreadable`); never an unchecked pass.
 
-`size_pnl_inputs` (EXP-188 S2a) binds stored v14 predictions: id mismatches refuse `EXPERIMENT_IDENTITY_CONFLICT` (`details.reason`); admission refusals propagate; a missing, failed or partial candidate is excluded with a reason, never imputed; only event ids and lead-1 predictions are read. No production caller yet.
+`size_pnl_inputs` (EXP-188 S2a) binds stored v14 predictions: id mismatches refuse `EXPERIMENT_IDENTITY_CONFLICT` (`details.reason`); admission refusals propagate; a missing, failed or partial candidate is excluded with a reason, never imputed; the stored object is hashed whole, but only event ids and lead-1 predictions are read. No production caller yet.

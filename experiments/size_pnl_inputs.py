@@ -1,7 +1,7 @@
 """EXP-188 S2a: bind stored v14 trial predictions to the SIZE selection population.
 
 Only ``event_id`` and the lead-horizon predicted move are read from each stored
-prediction. Stored outcome values are never read. Run-level identity failures
+prediction. The whole stored object is hashed (bytes, not values); stored outcome values are never read or used. Run-level identity failures
 refuse the whole run; per-candidate gaps become exclusions (no imputation).
 A blend binds its component candidates' inner arrays; averaging is left to the reader slice.
 
@@ -26,6 +26,7 @@ PAIR_ROLES = ("H-sq", "H-abs", "E-raw", "E-log", "N-raw", "N-log")
 PAIR_TRANSFORM = {"E-raw": "none", "N-raw": "none", "E-log": "log1p", "N-log": "log1p"}
 ROLES = ("M0", "M1", "M2", "M3", "M4", "M5") + PAIR_ROLES
 MAX_MODELS = 12
+LEAD = 1
 
 
 def _conflict(reason, message):
@@ -42,7 +43,7 @@ def bind_run(plan, read, *, expected, panel_id):
     for key in ("plan_id", "registration_id", "seal_id", "panel_id"):
         if key not in expected or expected[key] != actual[key]:
             raise _conflict(key + "_mismatch", "run identity does not match the expected registration")
-    if 1 not in plan["horizons"]:
+    if LEAD not in plan["horizons"]:
         raise _conflict("lead_unavailable", "the plan has no lead-horizon (1) predictions")
     return dict(actual)
 
@@ -65,9 +66,9 @@ def population_admit(repository, snapshot, as_of_month, *, max_object_bytes, loa
     return admit
 
 
-def bind_array(record, sealed_ids, admit, *, horizon=1):
-    """Bind one stored prediction object at ``horizon`` to its sealed event ids."""
-    rows = [row for row in record["predictions"] if row["horizon_sessions"] == horizon]
+def bind_array(record, sealed_ids, admit):
+    """Bind one stored prediction object at the lead (LEAD) to its sealed event ids."""
+    rows = [row for row in record["predictions"] if row["horizon_sessions"] == LEAD]
     if not rows:
         raise _conflict("lead_unavailable", "no predictions at the requested horizon")
     ids = [row["event_id"] for row in rows]
@@ -92,7 +93,7 @@ def bind_array(record, sealed_ids, admit, *, horizon=1):
             "binding": content_hash({"array_object": content_hash(record), "admission": result})}
 
 
-def bind_candidate(plan, read, candidate_id, admit, *, horizon=1):
+def bind_candidate(plan, read, candidate_id, admit):
     """Bind one candidate across every outer group and inner year (R1, no imputation)."""
     years, seen = {}, set()
     for group in plan["folds"]:
@@ -112,8 +113,7 @@ def bind_candidate(plan, read, candidate_id, admit, *, horizon=1):
             if not isinstance(record, dict) or record.get("status") != "succeeded":
                 return {"status": "excluded", "reason": "failed"}
             try:
-                years[year] = bind_array(
-                    record, inner["evaluation_event_ids"], admit, horizon=horizon)
+                years[year] = bind_array(record, inner["evaluation_event_ids"], admit)
             except OpsError as exc:
                 if exc.problem.details.get("reason") != "partial_event_ids":
                     raise
@@ -212,11 +212,11 @@ def resolve_roster(plan, selection, *, outer_year, pair_candidates, blend_ids):
     return {"models": list(models.values()), "not_testable": not_testable, "pairs": pairs}
 
 
-def _bind_blend(plan, read, blend_id, admit, horizon):
+def _bind_blend(plan, read, blend_id, admit):
     components = blend_components(plan, blend_id)
     if components is None:
         return {"status": "excluded", "reason": "blend_unknown"}
-    bound = {cid: bind_candidate(plan, read, cid, admit, horizon=horizon) for cid in components}
+    bound = {cid: bind_candidate(plan, read, cid, admit) for cid in components}
     for cid in components:
         if bound[cid]["status"] != "bound":
             return {"status": "excluded", "reason": "component_" + bound[cid]["reason"]}
@@ -225,17 +225,16 @@ def _bind_blend(plan, read, blend_id, admit, horizon):
             "binding": content_hash(pairs)}
 
 
-def bind_models(plan, read, roster, admit, *, horizon=1):
+def bind_models(plan, read, roster, admit):
     """Bind every v14 model in the roster; production is deferred to S2b."""
     out = {}
     for model in roster["models"]:
         if model["kind"] == "production":
             out[model["model_id"]] = {"status": "deferred", "reason": "production_bound_by_s2b"}
         elif model["kind"] == "blend":
-            out[model["model_id"]] = _bind_blend(plan, read, model["candidate_id"], admit, horizon)
+            out[model["model_id"]] = _bind_blend(plan, read, model["candidate_id"], admit)
         else:
-            out[model["model_id"]] = bind_candidate(
-                plan, read, model["candidate_id"], admit, horizon=horizon)
+            out[model["model_id"]] = bind_candidate(plan, read, model["candidate_id"], admit)
     statuses = [result["status"] for result in out.values()]
     print(f"[pnl_inputs] models={len(out)} bound={statuses.count('bound')} "
           f"excluded={statuses.count('excluded')} deferred={statuses.count('deferred')}",
