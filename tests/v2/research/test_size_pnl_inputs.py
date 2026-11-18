@@ -246,6 +246,21 @@ def test_v3_shared_trials_are_read_once():
     assert len(calls) == 2
 
 
+def test_repeated_inner_year_under_distinct_trials_refused(monkeypatch):
+    monkeypatch.setattr(sp, "trial_key",
+                        lambda plan, outer, inner, cid: f"{outer}:{trial_key(plan, outer, inner, cid)}")
+    inner = _plan()["folds"][0]["inner"]
+    plan = _plan(folds=[{"outer": {"year": y}, "inner": inner} for y in (2025, 2026)])
+    store = {"driver-seal": SEAL}
+    for group in plan["folds"]:
+        for item in group["inner"]:
+            key = "terminal:" + sp.trial_key(plan, group["outer"]["year"], item["year"], "c1")
+            store[key] = _record(item["evaluation_event_ids"])
+    with pytest.raises(OpsError) as exc:
+        sp.bind_candidate(plan, store.get, "c1", _admit_all)
+    assert _refusal(exc) == ("INVALID_EXPERIMENT_SPEC", "repeated_inner_year")
+
+
 def test_population_admit_reads_frame_with_selection_purpose():
     seen = {}
 
@@ -258,14 +273,14 @@ def test_population_admit_reads_frame_with_selection_purpose():
     assert seen == {"as_of_month": "2025-01", "purpose": "selection", "event_ids": ["e1", "e2"]}
 
 
-def test_population_admit_maps_ops_refusal_to_conflict():
+def test_population_admit_propagates_ops_refusal_unchanged():
     def load(*args, **kwargs):
         raise fail("SNAPSHOT_UNRESOLVED", "unresolved")
 
     admit = sp.population_admit("repo", "snap", "2025-01", load=load)
     with pytest.raises(OpsError) as exc:
         admit(["e1"])
-    assert _refusal(exc) == (CONFLICT, "admission_refused")
+    assert exc.value.problem.code == "SNAPSHOT_UNRESOLVED"
 
 
 def test_resolve_roster_roles_collapse_and_log_forms():

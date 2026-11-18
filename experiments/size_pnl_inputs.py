@@ -3,6 +3,8 @@
 Only ``event_id`` and the lead-horizon predicted move are read from each stored
 prediction. Stored outcome values are never read. Run-level identity failures
 refuse the whole run; per-candidate gaps become exclusions (no imputation).
+
+No production entrypoint calls these functions yet; the S2b reader slice and the S9 driver are their first callers.
 """
 import sys
 
@@ -50,11 +52,8 @@ def population_admit(repository, snapshot, as_of_month, load=None):
 
     def admit(event_ids):
         ids = sorted(event_ids)
-        try:
-            frame = load(repository, snapshot, as_of_month=as_of_month,
-                         purpose="selection", event_ids=ids)
-        except OpsError as exc:
-            raise _conflict("admission_refused", "population admission refused the event ids") from exc
+        frame = load(repository, snapshot, as_of_month=as_of_month,
+                     purpose="selection", event_ids=ids)
         return {"admitted": sorted(frame["event_id"].tolist()), "dropped": []}
 
     return admit
@@ -97,13 +96,17 @@ def bind_candidate(plan, read, candidate_id, admit, *, horizon=1):
             if key in seen:
                 continue
             seen.add(key)
+            year = str(inner["year"])
+            if year in years:
+                raise fail("INVALID_EXPERIMENT_SPEC", "an inner year repeats under distinct trials",
+                           details={"reason": "repeated_inner_year"})
             record = read("terminal:" + key)
             if record is None:
                 return {"status": "excluded", "reason": "missing"}
             if not isinstance(record, dict) or record.get("status") != "succeeded":
                 return {"status": "excluded", "reason": "failed"}
             try:
-                years[str(inner["year"])] = bind_array(
+                years[year] = bind_array(
                     record, inner["evaluation_event_ids"], admit, horizon=horizon)
             except OpsError as exc:
                 if exc.problem.details.get("reason") != "partial_event_ids":
