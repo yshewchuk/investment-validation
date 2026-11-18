@@ -3,6 +3,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from engine.v2.foundation import content_hash
 from engine.v2.foundation.experiment_holdouts import ExperimentHoldouts
 from engine.v2.ops.errors import OpsError
 from experiments import size_pnl_readers as rd
@@ -435,3 +436,35 @@ def test_changed_production_crush_changes_candidate_binding_with_same_ids_and_pr
     assert list(changed["m"]["table"]["pred_move"]) == list(base["m"]["table"]["pred_move"])
     assert list(changed["m"]["table"]["pred_crush"]) != list(base["m"]["table"]["pred_crush"])
     assert changed["m"]["binding"] != base["m"]["binding"]
+
+
+@pytest.mark.parametrize("bad", [None, 0, True])
+def test_admit_refuses_invalid_max_object_bytes_before_load(bad):
+    calls = []
+
+    def load(*args, **kwargs):
+        calls.append((args, kwargs))
+        return pd.DataFrame(UNIVERSE, columns=["event_id", "event_date"])
+    with pytest.raises(OpsError) as exc:
+        rd.admit_events("repo", "snap", AS_OF, max_object_bytes=bad, load=load)
+    assert _refusal(exc) == ("INVALID_EXPERIMENT_SPEC", "max_object_bytes_invalid")
+    assert calls == []
+
+
+def test_bound_candidate_with_nan_prediction_refuses_from_model_tables():
+    with pytest.raises(OpsError) as exc:
+        _tables({"m": _bound({2023: [("e1", float("nan")), ("e2", 2.0)]})}, [_model("m", "candidate")])
+    assert _refusal(exc) == (CONFLICT, "nonfinite_prediction")
+
+
+def test_candidate_binding_matches_independent_digest_and_tracks_source_binding():
+    bound = {"m": _bound({2023: [("e1", 1.0), ("e2", 2.0)]})}
+    out = _tables(bound, [_model("m", "candidate")])
+    expected = content_hash({
+        "source": "cand",
+        "crush": "pb",
+        "rows": [["e1", "2023-02-01T00:00:00", 1.0, -1.0], ["e2", "2023-06-01T00:00:00", 2.0, -1.5]],
+    })
+    assert out["m"]["binding"] == expected
+    relabeled = {"m": {**bound["m"], "binding": "cand-2"}}
+    assert _tables(relabeled, [_model("m", "candidate")])["m"]["binding"] != expected

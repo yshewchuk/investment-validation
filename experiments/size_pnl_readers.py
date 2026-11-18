@@ -51,6 +51,9 @@ def _in_window(dates, start, end):
 
 def admit_events(repository, snapshot, as_of_month, *, max_object_bytes, load=None):
     """Full-universe admission through the shared reader; dropped events never reach a read."""
+    if isinstance(max_object_bytes, bool) or not isinstance(max_object_bytes, int) or max_object_bytes <= 0:
+        raise fail("INVALID_EXPERIMENT_SPEC", "max_object_bytes must be a positive integer",
+                   details={"reason": "max_object_bytes_invalid"})
     if load is None:
         from engine.v2.research.experiment_population import load_population
         load = load_population
@@ -175,7 +178,10 @@ def _candidate_series(bound):
         preds.extend(np.asarray(block["pred"], dtype=float).tolist())
     if len(set(ids)) != len(ids):
         raise _conflict("duplicate_event_id", "an event id repeats across inner years")
-    return pd.Series(preds, index=pd.Index(ids, name="event_id"), dtype=float)
+    values = np.asarray(preds, dtype=float)
+    if not np.isfinite(values).all():
+        raise _conflict("nonfinite_prediction", "a candidate prediction is not finite")
+    return pd.Series(values, index=pd.Index(ids, name="event_id"), dtype=float)
 
 
 def _blend_series(bound):
