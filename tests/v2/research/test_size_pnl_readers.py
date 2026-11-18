@@ -25,7 +25,7 @@ def _ids(n, *, want):
 def _admitted(rows):
     frame = pd.DataFrame(rows, columns=["event_id", "event_date"])
     frame["event_date"] = pd.to_datetime(frame["event_date"])
-    return {"events": frame.sort_values("event_id").reset_index(drop=True), "excluded": {}}
+    return rd.Admitted({"events": frame.sort_values("event_id").reset_index(drop=True), "excluded": {}})
 
 
 def _load(universe, calls=None):
@@ -119,6 +119,15 @@ def test_dropped_holdouts_never_reach_fetch_and_explicit_ones_refuse():
     assert log == []
 
 
+def test_plain_dict_admission_refuses_from_read_labels():
+    plain = {"events": ADM["events"], "excluded": {}}
+    fetch, log = _spy(TABLE)
+    with pytest.raises(OpsError) as exc:
+        rd.read_labels(fetch, plain)
+    assert _refusal(exc) == (DENIED, "admission_not_issued")
+    assert log == []
+
+
 def test_fetch_returning_unrequested_key_refuses():
     fetch, _ = _spy(TABLE, extra=["zz"])
     with pytest.raises(OpsError) as exc:
@@ -163,6 +172,18 @@ def test_read_production_happy_path_start_filter_and_hash_binding():
     assert frame.loc["p2", "pred_move"] == 0.7 and frame.loc["p2", "pred_crush"] == -2.0
     moved = _production(PROD_TABLE, table_hash="h2", expected="h2", start="2023-01-01")
     assert moved["binding"] != out["binding"]
+
+
+def test_production_binding_changes_when_only_admitted_event_date_changes():
+    base = _production(PROD_TABLE, start="2023-01-01")
+    moved_adm = _admitted([("p0", "2018-06-01"), ("p1", "2023-02-01"), ("p2", "2023-06-15"), ("p3", "2024-01-10")])
+    fetch, _ = _spy(PROD_TABLE)
+    moved = rd.read_production(fetch, moved_adm, expected_hash="h1", table_hash="h1", start="2023-01-01")
+    assert list(moved["frame"].index) == list(base["frame"].index) == ["p1", "p2", "p3"]
+    for col in ("pred_move", "pred_crush"):
+        assert list(moved["frame"][col]) == list(base["frame"][col])
+    assert moved["frame"].loc["p2", "event_date"] != base["frame"].loc["p2", "event_date"]
+    assert moved["binding"] != base["binding"]
 
 
 def test_production_binding_covers_prediction_values():

@@ -22,6 +22,10 @@ LABEL_COLUMNS = ("abs_move", "crush_pct_iv30")
 PRODUCTION_COLUMNS = ("pred_abs_move", "pred_iv_crush_30", "horizon_sessions")
 
 
+class Admitted(dict):
+    """Admission result; built by admit_events only. Readers refuse any other mapping."""
+
+
 def _conflict(reason, message):
     return fail(_CONFLICT, message, details={"reason": reason})
 
@@ -31,6 +35,8 @@ def _denied(reason, message):
 
 
 def _dates(admitted):
+    if not isinstance(admitted, Admitted):
+        raise _denied("admission_not_issued", "readers accept only an admission issued by admit_events")
     return admitted["events"].set_index("event_id")["event_date"]
 
 
@@ -63,7 +69,7 @@ def admit_events(repository, snapshot, as_of_month, *, max_object_bytes, load=No
             counts[label] = counts.get(label, 0) + 1
     excluded = dict(sorted(counts.items()))
     print(f"[pnl_readers] admitted={len(events)} excluded={excluded}", file=sys.stderr)
-    return {"events": events, "excluded": excluded}
+    return Admitted({"events": events, "excluded": excluded})
 
 
 def _fetch(fetch, admitted, columns, ids):
@@ -128,8 +134,9 @@ def read_production(fetch, admitted, *, expected_hash, table_hash, start=None, e
     print(f"[pnl_readers] production rows={len(out)} production_missing={len(ids) - len(out)}",
           file=sys.stderr)
     srt = out.sort_index()
-    rows = [[eid, move, crush] for eid, move, crush in
-            zip(srt.index.tolist(), srt["pred_move"].tolist(), srt["pred_crush"].tolist())]
+    rows = [[eid, day.isoformat(), move, crush] for eid, day, move, crush in
+            zip(srt.index.tolist(), srt["event_date"].tolist(), srt["pred_move"].tolist(),
+                srt["pred_crush"].tolist())]
     binding = content_hash({"table": table_hash, "rows": rows})
     return {"frame": out, "binding": binding}
 
