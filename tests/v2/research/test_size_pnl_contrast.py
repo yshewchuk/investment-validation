@@ -125,6 +125,28 @@ def test_weak_third_pair_does_not_block_clear():
     assert classify(pairs, 1) == "clear"
 
 
+def test_clearly_opposite_third_pair_blocks_clear():
+    strong = {
+        "as_is": _summary(1.0, (0.8, 1.2)),
+        "retuned": _summary(1.0, (0.8, 1.2)),
+    }
+    opposite = {
+        "n_events": 1600,
+        "mean": -1.0,
+        "quarter_signs": {q: -1 for q in QUARTERS},
+        "year_signs": {2023: -1, 2024: -1, 2025: -1},
+        "quarter_interval": (-1.2, -0.8),
+        "ticker_interval": (-1.2, -0.8),
+        "quarter_counts": {"positive": 0, "negative": len(QUARTERS), "zero": 0},
+    }
+    pairs = {
+        "pair0": strong,
+        "pair1": strong,
+        "pair2": {"as_is": opposite, "retuned": opposite},
+    }
+    assert classify(pairs, 1) != "clear"
+
+
 def test_bootstrap_oracle_exact_values():
     d = np.array([0.0, 4.0, 4.0, 4.0])
     labels = ["a", "b", "b", "b"]
@@ -157,10 +179,11 @@ def test_directional_from_literal_summaries():
     assert classify(pairs, -1) == "no_difference"
 
 
-def test_one_none_arm_drops_pair_and_still_classifies():
+def test_one_none_arm_among_three_clear_pairs_is_not_testable():
     pairs = _pairs(1.0, 300)
-    pairs["pair2"]["retuned"] = None
     assert classify(pairs, 1) == "clear"
+    pairs["pair2"]["retuned"] = None
+    assert classify(pairs, 1) == "not_testable"
 
 
 def test_two_none_arms_make_not_testable():

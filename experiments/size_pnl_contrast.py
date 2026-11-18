@@ -3,7 +3,9 @@
 Implements design guides/size_decision_pnl_design.md section 7: paired P&L
 contrasts (median-type minus mean-type, or any other matched-pair contrast)
 are summarised by quarter, year and ticker, and each predicted-sign pair of
-arms is classified as clear, directional, no_difference or reversed.
+arms is classified as clear, directional, no_difference, reversed or
+not_testable. classify works on hypothesis-level pair/arm summaries (one
+contrast() result per pair and arm), not on raw per-event arrays.
 
 Pure functions, no data access: callers pass per-event arrays and receive
 summaries and a category label. No I/O, no logging, no engine imports.
@@ -153,7 +155,8 @@ def classify(pairs, predicted_sign, *, full_years=FULL_YEARS):
     """Classify {pair_id: {arm: summary-or-None}} against predicted_sign.
 
     Returns one of "clear", "directional", "no_difference", "reversed",
-    "not_testable". A pair with any None arm (excluded model) is dropped.
+    "not_testable". Returns "not_testable" if there are fewer than 2 pairs or
+    if any pair has a None arm (an excluded model) (design section 7).
 
     A level holds when at least 2 pairs are "used" (qualify: predicted sign,
     years_ok, meets the share, and intervals excluding zero where required)
@@ -161,10 +164,11 @@ def classify(pairs, predicted_sign, *, full_years=FULL_YEARS):
     predicted-sign mean do not block the level.
 
     Raises ValueError if predicted_sign is not 1 or -1, if there are no pairs,
-    if any pair has empty arms, or if testable pairs do not share one arm-name set.
+    if any pair has empty arms, or if pairs do not all share one arm-name set.
 
-    The "clearly opposite" rule and the 75% / 60% quarter shares are the
-    author's pre-registered judgement calls (design section 7, decision 2).
+    The 75% / 60% quarter shares and the "clearly opposite" rule are the
+    design's defaults and the author's judgement calls (design section 7,
+    decision 2), not pre-registered in themselves.
     No category depends on a P&L magnitude.
     """
     if predicted_sign not in (1, -1):
@@ -174,14 +178,14 @@ def classify(pairs, predicted_sign, *, full_years=FULL_YEARS):
     for pid, arms in pairs.items():
         if not arms:
             raise ValueError(f"pair {pid!r} has empty arms")
-    testable = {pid: arms for pid, arms in pairs.items()
-                if all(v is not None for v in arms.values())}
-    if len(testable) < 2:
+    if len({frozenset(arms) for arms in pairs.values()}) > 1:
+        raise ValueError("pairs must all share the same arm names")
+    if len(pairs) < 2:
         return "not_testable"
-    if len({frozenset(arms) for arms in testable.values()}) > 1:
-        raise ValueError("testable pairs must all share the same arm names")
-    arms = list(next(iter(testable.values())))
-    by_arm = {arm: [testable[pid][arm] for pid in testable] for arm in arms}
+    if any(v is None for arms in pairs.values() for v in arms.values()):
+        return "not_testable"
+    arms = list(next(iter(pairs.values())))
+    by_arm = {arm: [pairs[pid][arm] for pid in pairs] for arm in arms}
 
     def clear(sign):
         return all(_level(by_arm[a], sign, CLEAR_SHARE, True, full_years) for a in arms)
