@@ -133,7 +133,7 @@ Saved identity and later outcome/worker APIs' separate read policies do not chan
 
 `record_export` (run-record export) is consumed by `v2_gate` and `v2_prediction` `run`; it depends on `lib` (EXP numbering) and ops errors only.
 
-`distribution_trials` and `distribution_fitted` also consume the shared immutable journal APIs. `v2_magnitude_search_run` consumes `magnitude_search_plan.read_search_plan`, `magnitude_search_records.MIGRATIONS`/`OWNER`/`append_record`/`read_record`, `magnitude_search_trials.SearchTrials`, `magnitude_search_execution.validate_execution_limits`, and `magnitude_search_outer.execute_outer_fold`/`collect_outer_results` for source-sealed orchestration. Fresh inner trials may use bounded process execution; replay and selected outer evaluation remain serial.
+`distribution_trials` and `distribution_fitted` also consume the shared immutable journal APIs. `v2_magnitude_search_run` consumes `magnitude_search_plan.read_search_plan`, `magnitude_search_records.MIGRATIONS`/`OWNER`/`append_record`/`read_record`, `magnitude_search_trials.SearchTrials`, `magnitude_search_execution.validate_execution_limits`, `magnitude_search_refits.possible_slots`/`refit_units`/`per_candidate`, and `magnitude_search_outer.execute_outer_fold`/`collect_outer_results` for source-sealed orchestration. Fresh inner trials may use bounded process execution; replay and selected outer evaluation remain serial.
 Its CLI also consumes `native_registration.read_native_registration`/`valid_registration_read_budget`/`MAX_NATIVE_EVIDENCE_BYTES` and `native_gate_worker.read_native_staged_input`. The runner uses `magnitude_search_request.validate_workers`, `size_job_budget.remaining`, `memory_guard.start_rss_watchdog`, and both no-fit guards; direct engine dependencies are contracts, data, foundation, models, ops and research (including legacy `engine.models.no_fit`). The [driver section](#serial-magnitude-search-driver) defines the public seal/run helpers and each CLI action's authority.
 
 `magnitude_search_plan` is research-only metadata planning invoked by the standalone
@@ -309,7 +309,7 @@ After explicitly completing native inner trials and calling `SearchTrials.freeze
 call `magnitude_search_outer.execute_outer_fold(conn, store, repository,
 registration, request, plan_ref, outer_year, limits=...)`. Limits use the existing
 explicit `memory_bytes`, `cpu_seconds`, `wall_seconds` contract. This library API
-refits only that year's frozen inner winner on qualified prior labels. Submitted
+refits only that year's frozen inner winner on qualified prior labels (with `winner_rules`, pass `candidate_id=` once per refit unit). Submitted
 forecasts alone cannot authorize it. All planned native inner completions,
 including permitted candidate failures, are verified before outer execution.
 
@@ -324,7 +324,7 @@ there is no retry, replacement candidate or recovery API in this slice.
 
 `collect_outer_results(conn, store, repository, registration, request, plan_ref)`
 requires all outer folds complete and returns their verified results plus pooled
-and per-horizon event-error metrics. After inventorying every outer terminal and limit,
+and per-horizon event-error metrics (plus `refits`, one row per unit, under `winner_rules`). After inventorying every outer terminal and limit,
 it verifies the native inner inventory once per call, then independently replays each fold.
 No admission is cached across calls. It never launches missing work or chooses a
 winner using outer results: `prospective_candidate_id` is the latest fold's inner

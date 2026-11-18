@@ -39,6 +39,7 @@ from experiments.magnitude_search_execution import validate_execution_limits
 from experiments.magnitude_search_outer import collect_outer_results, execute_outer_fold
 from experiments.magnitude_search_plan import read_search_plan, trial_key
 from experiments.magnitude_search_records import MIGRATIONS, OWNER, append_record, read_record
+from experiments.magnitude_search_refits import per_candidate, possible_slots, refit_units
 from experiments.magnitude_search_request import validate_workers
 from experiments.magnitude_search_request_schema import qualified, regression_request_version, request_version
 from experiments.magnitude_search_trials import SearchTrials
@@ -224,7 +225,7 @@ def seal_search_run(conn, store, repository, registration, request, plan_ref, *,
     SearchTrials(conn, store, repository, registration, request, plan_ref).seal(clock=clock)
     previous = read_record(conn, store, registration.run_id, "driver-seal")
     absent = tuple(["start:" + trial_key(plan, *args) for args in _roster(plan)]
-        + ["outer-start:" + content_hash([plan["plan_id"], fold["outer"]["year"]]) for fold in plan["folds"]]
+        + ["outer-start:" + key for _, _, key in possible_slots(plan)]
         + ["selection"])
     if "target" in plan:
         absent += tuple("comparison-start:" + content_hash([plan["plan_id"], fold["outer"]["year"], "comparison"])
@@ -263,12 +264,11 @@ def run_search(conn, store, repository, registration, request, plan_ref, *, limi
     if fresh and read("selection") is not None:
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search selection precedes unfinished inner work")
     completed_outer = []
-    for fold in plan["folds"]:
-        key = content_hash([plan["plan_id"], fold["outer"]["year"]])
+    for year, candidate_id, key in possible_slots(plan):
         if (read("outer-start:" + key) is None) != (read("outer-terminal:" + key) is None):
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search contains an unfinished or orphan outer claim")
         if read("outer-start:" + key) is not None:
-            completed_outer.append(fold["outer"]["year"])
+            completed_outer.append((year, candidate_id))
     parallel = workers > 1 and bool(fresh)
     deadline_seconds = None
     if parallel:
@@ -285,8 +285,9 @@ def run_search(conn, store, repository, registration, request, plan_ref, *, limi
     for args, key in claimed:
         _complete_trial(trials, trials.reconcile, args, key, limits=limits, read=read)
         meter.tick()
-    for year in completed_outer:
-        execute_outer_fold(conn, store, repository, registration, request, plan_ref, year, limits=limits)
+    for year, candidate_id in completed_outer:
+        execute_outer_fold(conn, store, repository, registration, request, plan_ref, year,
+                           limits=limits, candidate_id=candidate_id)
     if not parallel:
         for args, key in fresh:
             _complete_trial(trials, trials.execute, args, key, limits=limits, read=read)
@@ -323,11 +324,34 @@ def run_search(conn, store, repository, registration, request, plan_ref, *, limi
             else:
                 executor.shutdown()
     selected = trials.freeze()
-    for selection in selected["selections"]:
-        if selection["outer_year"] in completed_outer:
-            continue
-        execute_outer_fold(conn, store, repository, registration, request, plan_ref,
-                           selection["outer_year"], limits=limits)
+    completed = set(completed_outer)
+    if per_candidate(plan):
+        try:
+            units = [(item["outer_year"], unit) for item in selected["selections"]
+                     for unit in refit_units(plan, item)]
+        except (ValueError, TypeError, KeyError):
+            raise fail("EXPERIMENT_IDENTITY_CONFLICT", "stored selection is malformed") from None
+        fresh_units = [pair for pair in units if pair not in completed]
+        decision("search refits", f"{len(units)} units; {len(units) - len(fresh_units)} completed replays; "
+                 f"{len(fresh_units)} fresh refits")
+        refit_meter = Progress("search refits", len(fresh_units))
+        with stage("search refits"):
+            for year, unit in fresh_units:
+                outcome = execute_outer_fold(conn, store, repository, registration, request, plan_ref,
+                                             year, limits=limits, candidate_id=unit)
+                refit_meter.tick()
+                if isinstance(outcome, dict) and outcome.get("status") == "failed":
+                    decision("search refit failed", f"{unit} year={year}")
+    else:
+        for item in selected["selections"]:
+            try:
+                units = refit_units(plan, item)
+            except (ValueError, TypeError, KeyError):
+                raise fail("EXPERIMENT_IDENTITY_CONFLICT", "stored selection is malformed") from None
+            for unit in units:
+                if (item["outer_year"], unit) not in completed:
+                    execute_outer_fold(conn, store, repository, registration, request, plan_ref,
+                                       item["outer_year"], limits=limits, candidate_id=unit)
     if not collect_results:
         return None
     return collect_outer_results(conn, store, repository, registration, request, plan_ref)

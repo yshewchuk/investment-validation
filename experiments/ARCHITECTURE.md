@@ -216,7 +216,7 @@ The standalone `python -m experiments.v2_magnitude_search prepare|verify` CLI an
 | A label is at or after its fold's strict cutoff | Exclude it with `label_end_at_or_after_cutoff` or `label_available_at_or_after_cutoff`; retain the reason in the sealed plan. |
 | Strict label exclusions leave a fold with no eligible evaluation events | Nonretryable `INVALID_EXPERIMENT_SPEC` naming the fold and exclusion counts, before plan publication; no empty fold is sealed. |
 | Valid nested metadata | Inner events come only from outer training membership; each event remains grouped across horizons. The shared annual rule defines the conservative fit boundary. Recorded label/selection policies are metadata, not evidence of qualified labels or a selected winner. |
-| Candidate/inner-fold/horizon fits plus selected outer-fold/horizon refits exceed the explicit fit cap | Nonretryable `INVALID_EXPERIMENT_SPEC` before Cartesian expansion/publication. No time, memory or accuracy guarantee. |
+| Candidate/inner-fold/horizon fits plus outer-fold/horizon refits (three per fold under `winner_rules`) exceed the explicit fit cap | Nonretryable `INVALID_EXPERIMENT_SPEC` before Cartesian expansion/publication. No time, memory or accuracy guarantee. |
 | Catalog ownership, fitted schema, installed anchor sources or environment differ | Nonretryable `EXPERIMENT_IDENTITY_CONFLICT`; no publication. |
 | Prepare succeeds or repeats unchanged inputs | Publish/return the same immutable content-addressed plan; no catalog reservation, attempt, ledger or final authority. Existing anchor/producer bytes remain unchanged. |
 | Verify/`read_search_plan` receives a reference differing from the complete plan reconstructed from the registration and request, including bounded label-bounds admission | `read_search_plan` always reconstructs under the current contract. A reference differing from that reconstruction is nonretryable `EXPERIMENT_IDENTITY_CONFLICT` before that plan object opens; only byte-identical reconstructed plans are read. |
@@ -897,15 +897,15 @@ Whole-cohort coverage and daily-mark units remain the exploratory comparison con
 frozen selection and completed native execution/terminal evidence for every inner
 trial before public `freeze`/`execute` replay. Missing or submitted-only evidence
 never launches inner work; permitted candidate failures retain sealed exclusions.
-The frozen inner winner is already fixed; outer execution uses that frozen candidate and never recomputes selection or resolves ties under the sealed rule. A distinct immutable `outer-*`
-namespace binds the plan, selection, recipe, limits and installed outer/child sources.
-Only that fold's winner receives bounded horizon refits. Every fit marker commits
-before its child ACK; complete forecasts and successful accounting commit before
-outer targets open. Training is strictly prior to the outer fit boundary.
+Outer execution uses the frozen winner and never recomputes selection or ties. A distinct immutable `outer-*`
+namespace binds the plan, selection, recipe, limits and installed outer/child sources. With `winner_rules`, slots are keyed `[plan_id, outer_year, candidate_id]`; a non-overall failure commits a failed terminal, never retried.
+Only refit units get bounded horizon refits. Every fit marker commits
+before its child ACK; forecasts and accounting commit before
+outer targets open. Training is strictly prior to the outer fit.
 
 `magnitude_search_evidence` shares native input admission, matrix identities,
 forecast coverage and target-receipt validation across inner and outer callers.
-Stored-panel admission includes verified event dates only for opted-in recipes; missing or noncanonical dates refuse `EXPERIMENT_IDENTITY_CONFLICT`, while non-opted rows and `inputs_id` stay unchanged.
+Stored-panel admission includes verified event dates only for opted-in recipes; missing or noncanonical dates refuse `EXPERIMENT_IDENTITY_CONFLICT`; other rows and `inputs_id` stay unchanged.
 SearchTrials wrappers preserve their existing error boundaries and Real/Integral
 submission semantics; outer wrappers require JSON-native numeric types. Target
 validation reconstructs the protected receipt from admitted physical preflight.
@@ -931,10 +931,10 @@ from event counts; scientific selection and cutoff rules are unchanged.
 | Missing/older/newer or checksum-mismatched journal migrations | `INTEGRITY_FAILED` before plan/evidence/native reads; no implicit migration. |
 | Missing frozen selection, incomplete/submitted-only inner evidence, changed source/selection/input/result binding | `EXPERIMENT_IDENTITY_CONFLICT`; no missing inner execution or replacement. Prior journal associations remain unchanged. |
 | Either no-fit guard on a new outer call | Its original `RuntimeFitForbidden` propagates before affinity resolution/claim; completed replay never invokes either guard. |
-| Invalid child progress, completion or forecast coverage/types | `EXPERIMENT_IDENTITY_CONFLICT`; retain committed fit evidence, open no outer targets, publish no terminal. |
-| Selected estimator fails after one or more horizon starts | `EXPERIMENT_VARIANT_FAILED`; persist exact attempted/completed prefix and failed execution, with no forecasts or successful terminal. |
-| Shared native-input/target admission or resource failure, including late/missing outer targets | Preserve the owning typed refusal; retain the unfinished claim and any durable forecasts, with no partial successful result. No retry or replacement is authorized. |
-| Repeated unfinished outer claim | `EXPERIMENT_IDENTITY_CONFLICT` at create-only start; no refit, replacement or publication recovery. |
+| Invalid child progress, completion or forecast coverage/types | `EXPERIMENT_IDENTITY_CONFLICT`; retain fit evidence; no targets or terminal. |
+| Selected estimator fails after one or more horizon starts (zero: `winner_rules`) | `EXPERIMENT_VARIANT_FAILED`; persist attempted prefix, failed execution; no forecasts. Overall: no terminal; other `winner_rules` units commit a failed terminal, listed in `refits`. |
+| Shared native-input/target admission or resource failure, including late/missing outer targets | Preserve the typed refusal; retain the unfinished claim and durable forecasts; no partial result, retry or replacement. |
+| Repeated unfinished outer claim | `EXPERIMENT_IDENTITY_CONFLICT` at create-only start; no refit or recovery. |
 | Artifact publication/read failure, 16 MiB journal cap, or raw SQLite failure | Existing journal policy applies: integrity conflicts, resource unavailability, `RESOURCE_LIMIT_EXCEEDED`, or unchanged raw SQLite error. Keep committed evidence/unreferenced complete objects; no retry or rollback of earlier records. |
 | Invalid replay evidence or target receipt | `EXPERIMENT_IDENTITY_CONFLICT`; no native payloads, fitting or new associations. |
 | Missing any outer terminal during collection | `EXPERIMENT_IDENTITY_CONFLICT` before any outer replay; no writes or missing-work launch. |
@@ -950,7 +950,7 @@ returned result dictionaries carry their IDs and selected summaries, not all jou
 payloads. Collection does not persist a report artifact, export or ledger row.
 No holdout evaluation, final read, release or deployment authority is added.
 Research remains reconstructed, not observed point-in-time. Direct dependencies are
-the search plan/journal/trial/execution/evidence/inputs (cohort loader) modules, contracts, foundation,
+the search plan/journal/trial/execution/evidence/inputs/refits modules, contracts, foundation,
 ops migrations/fingerprints/errors, both no-fit guards, `engine.v2.research.magnitude_inputs.load_magnitude_targets`
 for outer label reads and `magnitude_report.magnitude_metrics` for fold/aggregate scoring.
 The evidence helper separately consumes native history admission and research stored-history/target APIs; no new scheduler, parser, estimator implementation or third-party dependency is needed.

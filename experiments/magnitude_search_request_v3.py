@@ -6,13 +6,14 @@ from engine.v2.foundation import content_hash
 from engine.v2.ops.errors import fail
 from engine.v2.research.magnitude_panel_qualified_table import recipe as qualified_panel_recipe
 from experiments import magnitude_search_request as v2
+from experiments.magnitude_search_refits import outer_refit_bound
 from experiments.magnitude_search_request_schema import (
     allows_hgb_axes, allows_neural, allows_size_family, request_version,
     uses_chrono_neural_profiles, uses_extended_neural_profiles)
 from experiments.size_blend_profiles import (
     distinct_component_count, resolve_blends, validate_blends)
 
-__all__ = ["compile_request"]
+__all__ = ["compile_request", "outer_units"]
 
 _MAX_AXIS_LENGTH = 32
 _MAX_V4_CANDIDATES = 1000
@@ -319,6 +320,12 @@ def _space(request):
     request["space"] = canonical
 
 
+def outer_units(request):
+    """design section 3: winner refits (+ extra_refits) plus, when blends are declared, their components and the best-single refit"""
+    return (outer_refit_bound(request.get("selection"))
+            + (distinct_component_count(request["blends"]) + 1 if "blends" in request else 0))
+
+
 def _counts(request, horizons):
     outer, inner = request["outer_years"], request["inner_years"]
     v2._require(v2._years(outer) and v2._shape(inner, outer),
@@ -341,9 +348,8 @@ def _counts(request, horizons):
                     else "stage-2 v4/v5 grid exceeds the 1000-candidate ceiling")
     inners, outers = sum(map(len, inner.values())), len(outer)
     lead_count = len(horizons)
-    # design section 3; S2b's outer_refit_bound replaces the non-blend base when it merges
-    outer_units = 3 + distinct_component_count(request["blends"]) + 1 if "blends" in request else 1
-    fits = lead_count * (count * inners + outer_units * outers)
+    units = outer_units(request)
+    fits = lead_count * (count * inners + units * outers)
     baseline_logical_fits = lead_count * outers
     baseline_component_fits = 2 * lead_count * outers
     extra_components = lead_count * (inners + outers) if size else 0
