@@ -56,7 +56,7 @@ Derived, per type (median-unbiased, mean-unbiased, regression-direction) and per
 
 ## 5. Pre-registered expectations and what each failure means
 
-Fixed in the spec's `synthetic_arm` block before any run. Directions for the mean/median pair follow the user's hypotheses (short vol prefers the median-unbiased level, straddles the mean-unbiased level), stated by predictor name; the report also prints them as level orderings. A rung counts only where the level gap is non-trivial: `s >= 0.4` (ratio of levels `exp(-s^2/2)` at most 0.92).
+Fixed in the spec's `synthetic_arm` block before any run. Directions for the mean/median pair follow the user's hypotheses (short vol prefers the median-unbiased level, straddles the mean-unbiased level), stated by predictor name; the report also prints them as level orderings. A rung counts only where the level gap is non-trivial: `s >= 0.4` (ratio of levels `exp(-s^2/2)` at most 0.93).
 
 | # | Expectation | Judged how |
 | --- | --- | --- |
@@ -65,13 +65,13 @@ Fixed in the spec's `synthetic_arm` block before any run. Directions for the mea
 | X3 | Short vol: `d_s > 0` (median-unbiased beats mean-unbiased) at every rung `s >= 0.4` | S8a categories on each rung's contrast, across the seven short-vol books |
 | X4 | Straddle (R_L2 and R_L): `d_s < 0` at every rung `s >= 0.4` | as X3; R_L2 is the sharper test because its trade count follows the level, R_L's trailing cutoff absorbs most of it |
 | X5 | Consistency of levels: sign of `P&L(+10%) - P&L(-10%)` (noise-free) equals the sign of `P&L(median) - P&L(mean)` at the rung where `exp(s^2/2) - 1` is nearest 0.10 (`s = 0.4`, ratio 1.083) | sign agreement per book |
-| X6 | Null predictor (`L = 1`): every short-vol book shows one width for every event (zero width variance) and the straddle edge ranks events by implied move alone | width variance and trade count printed; failing means information is entering the rule from somewhere else |
+| X6 | Null predictor (`L = 1`): every short-vol book shows one width for every event within a calendar quarter (the constant is the expanding mean, so it changes only between quarters; zero within-quarter width variance) and the straddle edge ranks events by implied move alone | width variance and trade count printed; failing means information is entering the rule from somewhere else |
 | X7 | Exact-replay: the same spec and inputs reproduce every table bit for bit | rerun on a 50-ticker smoke |
 
 **Reading a failure** (machinery bug or hypothesis wrong, in order of check):
 
 - **All predictors earn identical P&L to 1e-9 in a book:** the forecast never reaches geometry or the entry rule for that book. Machinery bug (wiring, wrong column, a constant overriding the forecast).
-- **X1 fails in one structure only, by a small margin:** the structure's registered divisor is off-optimum for a perfect forecast; a hypothesis about the divisor, not a bug. Failing in all books, or by a large margin with the oracle's trade count far from the others': suspect the oracle's degenerate residual pool (its move residuals are identically zero, so `exp_pnl_sim` reduces to the crush term) before suspecting the engine; a sanity check prints the oracle's pool size and residual spread.
+- **X1 fails in one structure only, by a small margin:** the structure's registered divisor is off-optimum for a perfect forecast; a hypothesis about the divisor, not a bug. Failing in all books, or by a large margin with the oracle's trade count far from the others': suspect the oracle's degenerate residual pool (its move residuals are zero, so the move draw is deterministic and only the crush residual varies) before suspecting the engine; a sanity check prints the oracle's pool size and residual spread.
 - **X2 fails (P&L rises with noise) in several books:** a selection or ordering bug (labels reaching a decision, a cutoff computed on the wrong window) or an effect where noise widens wings that pay off. Check trade counts: if noisier forecasts trade far more, it is the trade filter, not the forecast information.
 - **X2 holds but all slopes are near 0 with wide intervals:** forecast quality barely moves P&L at these spreads, or the sample is too short for this arm: EXP-188's real contrasts are then underpowered by the same measure (this is the intended read of §4's power line, not a failure of the machinery).
 - **X3/X4 wrong sign, X5 right:** the level effect is real but the hypothesis direction (as set by the user) is wrong. **X3/X4 wrong sign and X5 wrong sign with the same direction:** consistent, hypothesis wrong. **X5 disagrees with X3/X4:** the noise-by-level interaction or a bug; compare trade counts and rerun the two level-only predictors.
@@ -85,7 +85,7 @@ A Failed X1, X2, X6 or X7 stops the real run until the cause is classified in th
 - **Separate arm, receipt and report.** A `synthetic` stage receipt (immutable, atomic, content hashes, R4) and `decisions_synthetic.parquet`; the report gains **T11 (SYNTHETIC calibration)** after T10, with the X-table of §5. Synthetic models are absent from T1-T10, from the 12-model cap, from the pair and multiplicity accounting, and from the PLANNED row's roster; the `synthetic_arm` block (families, `s` ladder, `L` values, shifts, seed tag, expectations) is inside the spec and its hash.
 - **Cannot feed tuning.** S6's `tuning` receipt and `c` search reject any synthetic `model_id` (`SYNTHETIC_IN_TUNING`), and a test asserts that deleting every synthetic file leaves every roster output byte-identical. The only read-across to real models is the descriptive power line of §4.
 - **Stage and timing.** It needs inner data only, so it never reads the 2025 outer stage; but it still waits for the sealed v14 plan (event population) and runs after the v14 run completes.
-- **Cost.** 19 models, inner years only (about two thirds of the events), as-is geometry and no re-tune: about 55% of the main run, in the same quarter-chunked single process under `bounded_run`, one heavy job at a time (the main doc's R2 and §8). Smoke on the 50-ticker `--event-ids` population with `--no-ledger`. Progress logging as in main doc §8, plus the exclusion counts.
+- **Cost.** 19 models, inner years only (about two thirds of the events), as-is geometry and no re-tune: a rough estimate of about 55% of the main run (the smoke measures it), in the same quarter-chunked single process under `bounded_run`, one heavy job at a time (the main doc's R2 and §8). Smoke on the 50-ticker `--event-ids` population with `--no-ledger`. Progress logging as in main doc §8, plus the exclusion counts.
 
 ## 7. Standard-tool check and split
 
