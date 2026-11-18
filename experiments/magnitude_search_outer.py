@@ -518,7 +518,9 @@ def collect_outer_results(conn, store, repository, registration, request, plan_r
                 results = [outcomes[(year, component)] for component in components]
                 failed = any(_failed(result) for result in results)
                 blend_results[(year, candidate_id)] = None if failed else blend_outer_result(
-                    plan, _blend_record(plan, candidate_id), year, results)
+                    plan, _blend_record(plan, candidate_id), year, results,
+                    [read_record(conn, store, registration.run_id, "outer-forecasts:" + refit_key(plan, year, component))
+                     for component in components])
                 refits.append({"outer_year": year, "candidate_id": candidate_id, "kind": "blend",
                                "component_candidate_ids": components,
                                "status": "failed" if failed else "completed",

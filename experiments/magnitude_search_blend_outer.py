@@ -39,10 +39,13 @@ def average_forecasts(forecast_lists, column="predicted_absolute_move_pct"):
     return averaged
 
 
-def blend_outer_result(plan, blend, year, component_results):
-    """component_results: completed collect fold results in sorted component-id order."""
+def blend_outer_result(plan, blend, year, component_results, component_forecasts):
+    """component_results: completed collect fold results in sorted component-id order.
+    component_forecasts: each component's full stored forecast rows, same order and length."""
     ids = sorted(blend["component_candidate_ids"])
     if not component_results or len(component_results) != len(ids):
+        raise _conflict()
+    if len(component_forecasts) != len(component_results):
         raise _conflict()
     first = component_results[0]
     if any(result["event_count"] != first["event_count"] for result in component_results):
@@ -56,8 +59,7 @@ def blend_outer_result(plan, blend, year, component_results):
                       "component_candidate_ids": ids},
         "component_refits": [{"candidate_id": candidate_id, "result_id": result["result_id"]}
                              for candidate_id, result in zip(ids, component_results)],
-        "forecasts_id": content_hash([{k: v for k, v in row.items() if k != "absolute_move_pct"}
-                                      for row in predictions]),
+        "forecasts_id": content_hash(average_forecasts(component_forecasts)),
         "evaluation_inputs": first["evaluation_inputs"],
         "event_count": first["event_count"],
         "forecast_count": len(predictions),

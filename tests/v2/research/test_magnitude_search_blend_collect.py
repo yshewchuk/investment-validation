@@ -36,6 +36,8 @@ def _collect(monkeypatch, plan, stored, outcomes):
     for unit, outcome in outcomes.items():
         records["outer-start:" + keys[unit]] = {"limits": {}}
         records["outer-terminal:" + keys[unit]] = {"status": "succeeded"}
+        if "predictions" in outcome:
+            records["outer-forecasts:" + keys[unit]] = outcome["predictions"]
     callbacks = []
 
     def execute(conn, store, repository, registration, plan, fold, selection, limits, *,

@@ -69,7 +69,8 @@ def test_blend_outer_metrics_are_real_metrics_of_averaged_two_event_forecasts():
     second = [_row("e1", 3.0, actual=2.0), _row("e2", 7.0, actual=4.0)]
     result = blend_outer_result(PLAN, BLEND, "2024",
                                 [_component("a", None, event_count=2, rows=first),
-                                 _component("b", None, event_count=2, rows=second)])
+                                 _component("b", None, event_count=2, rows=second)],
+                                [first, second])
     # Hand-averaged: e1 = (1+3)/2 = 2.0 vs actual 2.0; e2 = (5+7)/2 = 6.0 vs actual 4.0.
     expected_predictions = [_row("e1", 2.0, actual=2.0), _row("e2", 6.0, actual=4.0)]
     expected_metrics = magnitude_metrics(expected_predictions)
@@ -83,7 +84,8 @@ def test_blend_outer_metrics_are_real_metrics_of_averaged_two_event_forecasts():
 
 
 def test_blend_outer_result_binds_components_and_averages_forecasts():
-    result = blend_outer_result(PLAN, BLEND, "2024", [_component("a", 1.0), _component("b", 3.0)])
+    forecasts = [[_row("e", 1.0, actual=2.0)], [_row("e", 3.0, actual=2.0)]]
+    result = blend_outer_result(PLAN, BLEND, "2024", [_component("a", 1.0), _component("b", 3.0)], forecasts)
     assert result["schema_version"] == "magnitude_search_outer_blend_result.v1"
     assert result["plan_id"] == "plan"
     assert result["outer_year"] == "2024"
@@ -92,7 +94,7 @@ def test_blend_outer_result_binds_components_and_averages_forecasts():
     assert result["component_refits"] == [{"candidate_id": "a", "result_id": "result-a"},
                                           {"candidate_id": "b", "result_id": "result-b"}]
     assert result["predictions"] == [_row("e", 2.0, actual=2.0)]
-    assert result["forecasts_id"] == content_hash([_row("e", 2.0)])
+    assert result["forecasts_id"] == content_hash(average_forecasts(forecasts))
     assert result["event_count"] == 1
     assert result["forecast_count"] == 1
     assert result["fit_attempt_count"] == 4
@@ -109,4 +111,22 @@ def test_blend_outer_result_binds_components_and_averages_forecasts():
 
 def test_blend_outer_result_refuses_component_event_count_mismatch():
     _conflict(lambda: blend_outer_result(
-        PLAN, BLEND, "2024", [_component("a", 1.0), _component("b", 3.0, event_count=2)]))
+        PLAN, BLEND, "2024", [_component("a", 1.0), _component("b", 3.0, event_count=2)],
+        [[_row("e", 1.0, actual=2.0)], [_row("e", 3.0, actual=2.0)]]))
+
+
+def test_blend_forecasts_id_hashes_the_complete_averaged_forecasts_including_unlabeled_events():
+    first = [_row("e", 1.0, actual=2.0), _row("e_unlabeled", 4.0)]
+    second = [_row("e", 3.0, actual=2.0), _row("e_unlabeled", 6.0)]
+    result = blend_outer_result(PLAN, BLEND, "2024",
+                                [_component("a", None, rows=[_row("e", 1.0, actual=2.0)]),
+                                 _component("b", None, rows=[_row("e", 3.0, actual=2.0)])],
+                                [first, second])
+    assert all(row["event_id"] != "e_unlabeled" for row in result["predictions"])
+    assert result["forecasts_id"] == content_hash(average_forecasts([first, second]))
+
+
+def test_blend_outer_result_refuses_component_forecast_count_mismatch():
+    _conflict(lambda: blend_outer_result(
+        PLAN, BLEND, "2024", [_component("a", 1.0), _component("b", 3.0)],
+        [[_row("e", 1.0, actual=2.0)]]))
