@@ -16,6 +16,7 @@ from experiments.magnitude_search_request_v3 import outer_units
 from experiments.magnitude_search_refits import per_candidate, refit_key
 from experiments.size_distribution_report import TrialArrays, collect_distribution
 from experiments.size_paired_report import paired_report, validated_horizons
+from experiments.size_search_winners import winner_rows
 from experiments.v2_magnitude_search_run import _admit_driver
 
 
@@ -182,17 +183,32 @@ def collect(conn, store, repository, registration, request, plan_ref):
         comparison = read_record(conn, store, registration.run_id, "comparison-terminal:" + key)["result"]
         comparisons.extend(comparison["forecasts"])
         comparison_fits.extend({"outer_year": year, **fit} for fit in comparison["fit_details"])
-    report = {"plan_id": plan["plan_id"], "search": result, "paired": paired_report(events, forecasts, comparisons, targets,
-                horizons=horizons,
-                implied_moves=implied_moves,
-                implied_scales=scales,
-                label_reasons={o["event_id"]: o["reason"] for f in result["folds"]
-                    for o in f["evaluation_inputs"].get("omitted_labels", [])}),
+    label_reasons = {o["event_id"]: o["reason"] for f in result["folds"]
+                     for o in f["evaluation_inputs"].get("omitted_labels", [])}
+    paired_kwargs = {"horizons": horizons, "implied_moves": implied_moves,
+                     "implied_scales": scales, "label_reasons": label_reasons}
+    report = {"plan_id": plan["plan_id"], "search": result,
+            "paired": paired_report(events, forecasts, comparisons, targets, **paired_kwargs),
             "preflight": resource_report(plan), "inner_fits": inner_fits, "comparison_fits": comparison_fits,
             "distribution": distribution,
             "frozen_eligibility": registration.document["size_panel"]["context"]["eligibility_plan"],
             "label_exclusions": [{"outer_year": f["outer_year"], **omission} for f in result["folds"]
                 for omission in f["evaluation_inputs"].get("omitted_labels", [])]}
+    if per_candidate(plan):
+        selection = read_record(conn, store, registration.run_id, "selection")
+        winners_by_year = {item["outer_year"]: {win["candidate_id"] for win in item["winners"].values()}
+                           for item in selection["selections"]}
+        forecast_map = {}
+        for r in result.get("refits", []):
+            if r["status"] != "completed" or r["candidate_id"] not in winners_by_year.get(r["outer_year"], set()):
+                continue
+            key = (r["outer_year"], r["candidate_id"])
+            forecast_map[key] = read_record(conn, store, registration.run_id,
+                                            "outer-forecasts:" + refit_key(plan, r["outer_year"], r["candidate_id"]))
+        rows = winner_rows(plan, selection, result.get("refits", []), forecast_map, events, comparisons, targets,
+                           paired=paired_report, paired_kwargs=paired_kwargs)
+        if rows is not None:
+            report["winners"] = rows
     fallbacks = [{"outer_year": f["outer_year"],
         "horizon_sessions": d["horizon_sessions"], "fallback_counts": d["fallback_counts"]}
         for f in result["folds"] for d in f.get("fit_diagnostics", []) if "fallback_counts" in d]
