@@ -1,13 +1,14 @@
 import pytest
 
+from engine.v2.foundation import content_hash
 from engine.v2.ops.errors import OpsError
 from experiments.magnitude_search_request_versions import compile_request
 from experiments.size_search_binding import resolve_extra_refits
 from tests.v2.research.test_magnitude_search_request_v13 import _request
 
 _RULES = ["overall", "rmse", "mae"]
-_A = "a" * 64
-_B = "b" * 64
+_A = "sha256:" + "a" * 64
+_B = "sha256:" + "b" * 64
 
 
 def _with_rules(version=14):
@@ -37,8 +38,9 @@ def test_valid_sorted_unique_extras_compile_and_add_fits():
 @pytest.mark.parametrize("extras", [
     [_B, _A],
     [_A, _A],
-    ["g" * 64],
-    ["a" * 63],
+    ["sha256:" + "g" * 64],
+    ["sha256:" + "a" * 63],
+    ["a" * 64],
     [],
     _A,
     [1],
@@ -96,3 +98,14 @@ def test_resolve_extra_refits_returns_list_when_all_known():
 def test_resolve_extra_refits_refuses_unknown_ids():
     with pytest.raises(OpsError, match="INVALID_EXPERIMENT_SPEC"):
         resolve_extra_refits({"extra_refits": [_A]}, [_B])
+
+
+def test_content_hash_id_compiles_as_extra():
+    cid = content_hash({"x": 1})
+    compiled = compile_request(_with_extras([cid]))
+    assert compiled["request"]["selection"]["extra_refits"] == [cid]
+
+
+def test_resolve_extra_refits_accepts_content_hash_ids():
+    x, y = content_hash({"x": 1}), content_hash({"x": 2})
+    assert resolve_extra_refits({"extra_refits": [x]}, [x, y]) == [x]

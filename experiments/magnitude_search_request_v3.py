@@ -96,10 +96,9 @@ def _extra_refits(request, policy):
         return
     value = policy["extra_refits"]
     v2._require(type(value) is list and bool(value)
-                and all(type(item) is str and len(item) == 64
-                        and set(item) <= set("0123456789abcdef") for item in value)
+                and all(v2._hash(item) for item in value)
                 and value == sorted(set(value)),
-                "stage-2 selection extra_refits must be a sorted unique list of 64-hex candidate ids")
+                "stage-2 selection extra_refits must be a sorted unique list of sha256 candidate ids")
     request["selection"]["extra_refits"] = list(value)
 
 
