@@ -24,9 +24,9 @@ def test_average_forecasts_is_the_fsum_mean_per_key():
     assert result == [_row("a", 2.0)]
 
 
-def test_average_forecasts_clips_a_negative_mean_to_zero():
+def test_average_forecasts_keeps_a_negative_mean():
     result = average_forecasts([[_row("a", -1.0)], [_row("a", -2.0)]])
-    assert result[0]["predicted_absolute_move_pct"] == 0.0
+    assert result[0]["predicted_absolute_move_pct"] == -1.5
 
 
 def test_average_forecasts_keeps_the_first_list_order_and_other_fields():

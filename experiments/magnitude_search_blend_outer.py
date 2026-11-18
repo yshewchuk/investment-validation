@@ -14,7 +14,7 @@ def average_forecasts(forecast_lists, column="predicted_absolute_move_pct"):
     """forecast_lists: one row list per component, in sorted component-id order.
     Rows key on (event_id, horizon_sessions); every list must have the same keys with no duplicates,
     and equal absolute_move_pct where rows carry it, else refuse EXPERIMENT_IDENTITY_CONFLICT.
-    Returns the first list's rows in order with `column` replaced by the clipped-at-zero fsum mean."""
+    Returns the first list's rows in order with `column` replaced by the fsum mean."""
     if not forecast_lists:
         raise _conflict()
     maps = []
@@ -35,7 +35,7 @@ def average_forecasts(forecast_lists, column="predicted_absolute_move_pct"):
         if any(by_key[key].get("absolute_move_pct") != row.get("absolute_move_pct") for by_key in maps[1:]):
             raise _conflict()
         values = [by_key[key][column] for by_key in maps]
-        averaged.append({**row, column: max(math.fsum(values) / len(forecast_lists), 0.0)})
+        averaged.append({**row, column: math.fsum(values) / len(forecast_lists)})
     return averaged
 
 
