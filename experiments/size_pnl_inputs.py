@@ -24,6 +24,21 @@ _SEAL_SLOT = "driver-seal"
 PAIRS = {"H": ("H-sq", "H-abs"), "E": ("E-raw", "E-log"), "N": ("N-raw", "N-log")}
 PAIR_ROLES = ("H-sq", "H-abs", "E-raw", "E-log", "N-raw", "N-log")
 PAIR_TRANSFORM = {"E-raw": "none", "N-raw": "none", "E-log": "log1p", "N-log": "log1p"}
+_HGB_PAIR = {"learning_rate": 0.03, "l2_regularization": 10, "max_iter": 3000,
+             "max_leaf_nodes": 15, "min_samples_leaf": 300}
+_EN_PAIR = {"alpha": 0.03, "l1_ratio": 0.75, "n_knots": 6}
+_MLP_PAIR = {"profile": "chrono15_relu64x32_l2_1"}
+# Pre-registered candidate recipe per pair role (design section 3). "family" is a schema_version
+# prefix; "params" are the built recipe's declared fields (estimator params, spline n_knots, MLP profile).
+# The HMOSXLP feature set is NOT checked here: feature columns are bound by the plan hash.
+PAIR_RECIPES = {
+    "H-sq": {"family": "magnitude_ridge_hgb_recipe", "params": {**_HGB_PAIR, "loss": "squared_error"}},
+    "H-abs": {"family": "magnitude_ridge_hgb_recipe", "params": {**_HGB_PAIR, "loss": "absolute_error"}},
+    "E-raw": {"family": "magnitude_elasticnet_spline_recipe", "params": _EN_PAIR},
+    "E-log": {"family": "magnitude_elasticnet_spline_recipe", "params": _EN_PAIR},
+    "N-raw": {"family": "magnitude_mlp_recipe", "params": _MLP_PAIR},
+    "N-log": {"family": "magnitude_mlp_recipe", "params": _MLP_PAIR},
+}
 ROLES = ("M0", "M1", "M2", "M3", "M4", "M5") + PAIR_ROLES
 MAX_MODELS = 12
 LEAD = 1
@@ -145,6 +160,31 @@ def _blend(blends, blend_ids, role):
     return ("v14", blend_id, "mixed"), None
 
 
+def _recipe_fields(recipe):
+    """Declared fields of a built recipe under their real names: estimator params, MLP profile, spline n_knots."""
+    fields = {}
+    estimator = recipe.get("estimator")
+    if isinstance(estimator, dict) and isinstance(estimator.get("params"), dict):
+        fields.update(estimator["params"])
+    if "profile" in recipe:
+        fields["profile"] = recipe["profile"]
+    preprocessing = recipe.get("preprocessing")
+    spline = preprocessing.get("spline") if isinstance(preprocessing, dict) else None
+    if isinstance(spline, dict) and "n_knots" in spline:
+        fields["n_knots"] = spline["n_knots"]
+    return fields
+
+
+def _recipe_matches(recipe, role):
+    spec = PAIR_RECIPES[role]
+    schema = recipe.get("schema_version") if isinstance(recipe, dict) else None
+    if not isinstance(schema, str) or not (
+            schema == spec["family"] or schema.startswith(spec["family"] + ".")):
+        return False
+    fields = _recipe_fields(recipe)
+    return all(key in fields and fields[key] == value for key, value in spec["params"].items())
+
+
 def _pair(cands, extra, pair_candidates, role):
     candidate_id = pair_candidates.get(role)
     if candidate_id is None:
@@ -157,6 +197,8 @@ def _pair(cands, extra, pair_candidates, role):
     required = PAIR_TRANSFORM.get(role)
     if required is not None and transform != required:
         return None, "transform_mismatch"
+    if not _recipe_matches(cands[candidate_id]["recipe"], role):
+        return None, "recipe_mismatch"
     return ("v14", candidate_id, transform), None
 
 

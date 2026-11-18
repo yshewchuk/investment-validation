@@ -20,8 +20,41 @@ RUN_READ = {"driver-seal": SEAL}.get
 SELECTION = {"selections": [{"outer_year": 2025, "selected_candidate_id": "c1",
                              "winners": {"rmse": {"candidate_id": "c2"},
                                          "mae": {"candidate_id": "c1"}}}]}
-PAIR_MAP = {"H-sq": "c2", "H-abs": "c1", "E-raw": "c2", "E-log": "c1", "N-raw": "c2", "N-log": "c1"}
+PAIR_MAP = {"H-sq": "c-hsq", "H-abs": "c-habs", "E-raw": "c-eraw", "E-log": "c-elog",
+            "N-raw": "c-nraw", "N-log": "c-nlog"}
+PAIR_IDS = tuple(PAIR_MAP.values())
 BLEND_MAP = {"M4": "b1", "M5": "b1"}
+
+
+def _hgb_recipe(loss):
+    return {"schema_version": "magnitude_ridge_hgb_recipe.v2", "model": "history_hgb",
+            "estimator": {"class": "HistGradientBoostingRegressor", "params": {
+                "loss": loss, "learning_rate": 0.03, "l2_regularization": 10.0,
+                "max_iter": 3000, "max_leaf_nodes": 15, "min_samples_leaf": 300}},
+            "target_transform": "none"}
+
+
+def _en_recipe(schema, alpha=0.03):
+    return {"schema_version": schema, "model": "elasticnet",
+            "estimator": {"class": "ElasticNet", "params": {"alpha": alpha, "l1_ratio": 0.75}},
+            "preprocessing": {"spline": {"n_knots": 6, "degree": 3}}}
+
+
+def _mlp_recipe(schema, profile="chrono15_relu64x32_l2_1"):
+    return {"schema_version": schema, "model": "mlp", "profile": profile,
+            "estimator": {"class": "MLPRegressor", "params": {"hidden_layer_sizes": [64, 32]}}}
+
+
+def _pair_candidates():
+    """Six pair members with the real recipe shapes for their roles (H-sq, H-abs, E-raw, E-log, N-raw, N-log)."""
+    return [
+        {"candidate_id": "c-hsq", "recipe": _hgb_recipe("squared_error")},
+        {"candidate_id": "c-habs", "recipe": _hgb_recipe("absolute_error")},
+        {"candidate_id": "c-eraw", "recipe": _en_recipe("magnitude_elasticnet_spline_recipe.v1")},
+        {"candidate_id": "c-elog", "recipe": _en_recipe("magnitude_elasticnet_spline_recipe.v2")},
+        {"candidate_id": "c-nraw", "recipe": _mlp_recipe("magnitude_mlp_recipe.v1")},
+        {"candidate_id": "c-nlog", "recipe": _mlp_recipe("magnitude_mlp_recipe.v2")},
+    ]
 
 
 def _plan(**extra):
@@ -30,9 +63,10 @@ def _plan(**extra):
         "candidates": [
             {"candidate_id": "c1", "recipe": {"schema_version": "magnitude_elasticnet_recipe.v2"}},
             {"candidate_id": "c2", "recipe": {"schema_version": "magnitude_raw_recipe.v1"}},
+            *_pair_candidates(),
         ],
         "blends": [{"blend_id": "b1", "component_candidate_ids": ["c1", "c2"]}],
-        "selection": {"extra_refits": ["c1", "c2"]},
+        "selection": {"extra_refits": ["c1", "c2", *PAIR_IDS]},
         "folds": [{"outer": {"year": 2025}, "inner": [
             {"year": 2023, "evaluation_event_ids": E23},
             {"year": 2024, "evaluation_event_ids": E24}]}],
@@ -51,7 +85,7 @@ def _key(plan, inner_year, candidate_id):
     return "terminal:" + trial_key(plan, 2025, inner_year, candidate_id)
 
 
-def _store(plan, cids=("c1", "c2")):
+def _store(plan, cids=("c1", "c2") + PAIR_IDS):
     store = {"driver-seal": SEAL}
     for group in plan["folds"]:
         for inner in group["inner"]:
@@ -82,10 +116,9 @@ def _roster(plan=None, selection=SELECTION, outer=2025, pairs=PAIR_MAP, blends=B
 
 def _twelve_args():
     """Plan and roster inputs that resolve to exactly 12 distinct models (all roles distinct)."""
-    raw, log = "magnitude_raw_recipe.v1", "magnitude_elasticnet_recipe.v2"
     plan = _plan(
-        candidates=[{"candidate_id": f"w{i}", "recipe": {"schema_version": schema}}
-                    for i, schema in enumerate([raw, log, raw, log, raw, log])],
+        candidates=[{"candidate_id": f"w{i}", "recipe": c["recipe"]}
+                    for i, c in enumerate(_pair_candidates())],
         blends=[{"blend_id": f"bl{i}", "component_candidate_ids": ["w0", "w1"]} for i in range(1, 6)],
         selection={"extra_refits": [f"w{i}" for i in range(6)]})
     selection = {"selections": [{"outer_year": 2025, "selected_candidate_id": "bl1",
@@ -323,14 +356,16 @@ def test_resolve_roster_roles_collapse_and_log_forms():
     roster = _roster()
     by_role = {role: m for m in roster["models"] for role in m["roles"]}
     assert by_role["M1"] is by_role["M3"]
-    assert by_role["M1"]["roles"] == ["M1", "M3", "H-abs", "E-log", "N-log"]
+    assert by_role["M1"]["roles"] == ["M1", "M3"]
     assert by_role["M1"]["target_transform"] == "log1p"
     assert by_role["M2"]["candidate_id"] == "c2"
     assert by_role["M2"]["target_transform"] == "none"
-    assert by_role["M2"]["roles"] == ["M2", "H-sq", "E-raw", "N-raw"]
+    assert by_role["M2"]["roles"] == ["M2"]
+    assert by_role["H-abs"]["candidate_id"] == "c-habs"
+    assert by_role["N-log"]["target_transform"] == "log1p"
     assert by_role["M0"]["source"] == "production"
     assert by_role["M4"]["target_transform"] == "mixed"
-    assert len(roster["models"]) == 4
+    assert len(roster["models"]) == 10
     assert roster["not_testable"] == []
     assert roster["pairs"] == {"H": "testable", "E": "testable", "N": "testable"}
 
@@ -364,7 +399,7 @@ def test_winner_neither_candidate_nor_blend_is_not_in_plan():
 
 
 def test_pair_not_in_extra_refits_or_unmapped_is_not_testable():
-    roster = _roster(_plan(selection={"extra_refits": ["c2"]}))
+    roster = _roster(_plan(selection={"extra_refits": ["c1", "c2", "c-hsq", "c-eraw", "c-nraw"]}))
     reasons = {r["role"]: r["reason"] for r in roster["not_testable"]}
     assert reasons == {"H-abs": "not_in_extra_refits", "E-log": "not_in_extra_refits",
                        "N-log": "not_in_extra_refits"}
@@ -383,13 +418,43 @@ def test_transform_mismatch_makes_role_and_pair_not_testable(role, mapped, pair)
     assert roster["pairs"] == {p: ("not_testable" if p == pair else "testable") for p in sp.PAIRS}
 
 
-def test_pair_with_both_members_on_one_model_is_not_testable():
+def test_pair_on_one_candidate_cannot_satisfy_both_losses():
     roster = _roster(pairs={**PAIR_MAP, "H-sq": "c1", "H-abs": "c1"})
-    by_role = {role: m for m in roster["models"] for role in m["roles"]}
-    assert by_role["H-sq"] is by_role["H-abs"] is by_role["M1"]
-    assert {"H-sq", "H-abs"} <= set(by_role["H-sq"]["roles"])
-    assert roster["not_testable"] == []
+    assert {r["role"]: r["reason"] for r in roster["not_testable"]} == {
+        "H-sq": "recipe_mismatch", "H-abs": "recipe_mismatch"}
     assert roster["pairs"] == {"H": "not_testable", "E": "testable", "N": "testable"}
+
+
+def test_pair_mapped_to_wrong_loss_is_recipe_mismatch():
+    roster = _roster(pairs={**PAIR_MAP, "H-sq": "c-habs"})
+    assert {r["role"]: r["reason"] for r in roster["not_testable"]} == {"H-sq": "recipe_mismatch"}
+    assert roster["pairs"] == {"H": "not_testable", "E": "testable", "N": "testable"}
+
+
+def test_old_unrelated_mapping_is_recipe_mismatch():
+    roster = _roster(pairs={**PAIR_MAP, "H-sq": "c1"})
+    assert {r["role"]: r["reason"] for r in roster["not_testable"]} == {"H-sq": "recipe_mismatch"}
+    assert roster["pairs"]["H"] == "not_testable"
+
+
+def test_e_raw_wrong_alpha_is_recipe_mismatch():
+    plan = _plan()
+    plan["candidates"].append({"candidate_id": "c-ewrong",
+                               "recipe": _en_recipe("magnitude_elasticnet_spline_recipe.v1", alpha=0.01)})
+    plan["selection"]["extra_refits"].append("c-ewrong")
+    roster = _roster(plan, pairs={**PAIR_MAP, "E-raw": "c-ewrong"})
+    assert {r["role"]: r["reason"] for r in roster["not_testable"]} == {"E-raw": "recipe_mismatch"}
+    assert roster["pairs"]["E"] == "not_testable"
+
+
+def test_n_role_with_other_mlp_profile_is_recipe_mismatch():
+    plan = _plan()
+    plan["candidates"].append({"candidate_id": "c-nother", "recipe": _mlp_recipe(
+        "magnitude_mlp_recipe.v1", profile="chrono10_relu64x32_l2_1")})
+    plan["selection"]["extra_refits"].append("c-nother")
+    roster = _roster(plan, pairs={**PAIR_MAP, "N-raw": "c-nother"})
+    assert {r["role"]: r["reason"] for r in roster["not_testable"]} == {"N-raw": "recipe_mismatch"}
+    assert roster["pairs"]["N"] == "not_testable"
 
 
 def test_exactly_max_models_resolves():
@@ -412,8 +477,8 @@ def test_bind_models_counts_and_defers_production(capsys):
     out = sp.bind_models(plan, _store(plan).get, roster, _admit_all)
     production = [m["model_id"] for m in roster["models"] if m["source"] == "production"]
     assert out[production[0]] == {"status": "deferred", "reason": "production_bound_by_s2b"}
-    assert sorted(r["status"] for r in out.values()) == ["bound", "bound", "bound", "deferred"]
-    assert "models=4 bound=3 excluded=0 deferred=1" in capsys.readouterr().err
+    assert sorted(r["status"] for r in out.values()) == ["bound"] * 9 + ["deferred"]
+    assert "models=10 bound=9 excluded=0 deferred=1" in capsys.readouterr().err
 
 
 def test_model_ids_are_content_hashes_of_source_candidate_and_transform():
@@ -428,7 +493,8 @@ def test_roster_kinds_mark_production_candidate_and_blend():
     roster = _roster()
     kinds = {m["source"] + ":" + m["candidate_id"]: m["kind"] for m in roster["models"]}
     assert kinds == {"production:size_v1_4": "production", "v14:c1": "candidate",
-                     "v14:c2": "candidate", "v14:b1": "blend"}
+                     "v14:c2": "candidate", "v14:b1": "blend",
+                     **{f"v14:{cid}": "candidate" for cid in PAIR_IDS}}
 
 
 def test_blend_binds_its_components():
