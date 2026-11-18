@@ -321,7 +321,9 @@ def _execute_admitted(conn, store, repository, registration, plan, fold, selecti
     overall = next(item["selected_candidate_id"] for item in selection["selections"]
                    if item["outer_year"] == outer_year)
     chosen = candidate_id or overall
-    candidate = next(item for item in plan["candidates"] if item["candidate_id"] == chosen)
+    candidate = next((item for item in plan["candidates"] if item["candidate_id"] == chosen), None)
+    if candidate is None:
+        raise fail("EXPERIMENT_VARIANT_FAILED", "selected winner is not a plan candidate; blend winner outer evaluation is not supported yet")
     try:
         sources = source_closure(Path(__file__).resolve().parents[1], [
             "experiments/magnitude_search_outer.py", "experiments/magnitude_search_worker.py"])

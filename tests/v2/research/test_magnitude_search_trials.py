@@ -28,8 +28,13 @@ from experiments import magnitude_search_evidence as evidence
 from experiments import magnitude_search_trials as trials
 from experiments import native_registration as native
 from experiments.magnitude_search_inputs import load_inputs, publish_inputs
-from experiments.magnitude_search_plan import seal_search_plan
-from experiments.magnitude_search_selection import CURRENT_TIE_RULE, ZeroComparatorError
+from experiments.magnitude_search_plan import seal_search_plan, trial_key
+from experiments.magnitude_search_selection import (
+    CURRENT_TIE_RULE,
+    ZeroComparatorError,
+    blended_event_score,
+    history_mean_rows,
+)
 from tests.v2.research.magnitude_trial_support import (
     CUTOFF,
     HISTORY,
@@ -156,6 +161,90 @@ def test_blended_freeze_uses_admitted_inner_history_and_one_lead1_row_per_event(
             for inner in outer["inner"]:
                 assert score["yearly"][inner["year"]]["metrics"]["count"] == len(
                     inner["evaluation_event_ids"])
+
+
+def _blend_plan(case, components):
+    plan = copy.deepcopy(case.plan)
+    plan["request"]["selection"] = {
+        "metric_weights": {"rmse": 0.6, "mae": 0.3, "large_move_underprediction": 0.1},
+        "lead_weights": {"1": 1.0, "3": 0.0, "5": 0.0},
+        "large_move_threshold_pct": 10.0, "tie_band_floor": 0.005,
+    }
+    plan["selection"]["ties"] = CURRENT_TIE_RULE
+    plan["selection"]["winner_rules"] = ["overall", "rmse", "mae"]
+    plan["blends"] = [{"name": "size_b2_v1", "blend_id": "blend_test_1",
+                       "component_candidate_ids": sorted(components)}]
+    return plan
+
+
+def _constant_rows(predictions, value):
+    return [{"event_id": row["event_id"], "horizon_sessions": 1,
+             "absolute_move_pct": row["absolute_move_pct"], "predicted_absolute_move_pct": value}
+            for row in sorted(predictions, key=lambda row: row["event_id"]) if row["horizon_sessions"] == 1]
+
+
+def test_blended_freeze_scores_plan_blends_from_component_rows(case, monkeypatch):
+    first, second = [item["candidate_id"] for item in case.plan["candidates"]]
+    # The fixture caps candidates at two, so no third component exists; the fallback oracle is
+    # the constant 6.0 forecast that the equal-weight mean of A=4.0 and B=8.0 produces.
+    _all(case, values={args: 4.0 if args[2] == first else 8.0 for args in trial_cases(case)})
+    plan = _blend_plan(case, [first, second])
+    monkeypatch.setattr(case.recorder, "_admit", lambda: plan)
+    with no_fit_guard():
+        frozen = case.recorder.freeze()
+    policy = plan["request"]["selection"]
+    valid = {item["candidate_id"] for item in plan["candidates"]} | {"blend_test_1"}
+
+    def oracle(rows, history):
+        return blended_event_score(rows, history, metric_weights=policy["metric_weights"],
+                                   large_move_threshold_pct=policy["large_move_threshold_pct"])
+
+    for outer, selection in zip(plan["folds"], frozen["selections"]):
+        outer_year = outer["outer"]["year"]
+        inner_years = sorted(inner["year"] for inner in outer["inner"])
+        candidate_by_year, history_by_year = {}, {}
+        for year in inner_years:
+            key = trial_key(case.plan, outer_year, year, first)
+            admitted = case.recorder._read("inputs:" + key)
+            cohort = case.recorder._cohort(admitted)
+            validation = case.recorder._read("validation:" + admitted["cohort"])
+            history_by_year[year] = history_mean_rows(cohort, validation)
+            _, record = case.recorder._terminal(case.plan, outer_year, year, first)
+            candidate_by_year[year] = _constant_rows(record["predictions"], 6.0)
+        pooled = oracle([row for year in inner_years for row in candidate_by_year[year]],
+                        [row for year in inner_years for row in history_by_year[year]])
+        assert pooled["metrics"]["count"] == sum(len(candidate_by_year[year]) for year in inner_years)
+
+        blends = [row for row in selection["scores"] if row["candidate_id"] == "blend_test_1"]
+        assert len(blends) == 1
+        blend = blends[0]
+        assert blend["kind"] == "blend" and blend["blend_name"] == "size_b2_v1"
+        assert blend["metrics"] == {name: pytest.approx(value) for name, value in pooled["metrics"].items()}
+        assert blend["normalized"] == {name: pytest.approx(value) for name, value in pooled["normalized"].items()}
+        assert blend["blend_score"] == pytest.approx(pooled["blend_score"])
+        assert set(blend["yearly"]) == set(inner_years)
+        for year in inner_years:
+            expected = oracle(candidate_by_year[year], history_by_year[year])
+            assert blend["yearly"][year]["metrics"] == {
+                name: pytest.approx(value) for name, value in expected["metrics"].items()}
+            assert blend["yearly"][year]["blend_score"] == pytest.approx(expected["blend_score"])
+
+        assert set(selection["winners"]) == {"overall", "rmse", "mae"}
+        assert {winner["candidate_id"] for winner in selection["winners"].values()} <= valid
+
+
+def test_blended_freeze_excludes_blend_with_failed_component(case, monkeypatch):
+    first, second = [item["candidate_id"] for item in case.plan["candidates"]]
+    _all(case, fail_case=("2025", "2024", second),
+         values={args: 4.0 if args[2] == first else 8.0 for args in trial_cases(case)})
+    plan = _blend_plan(case, [first, second])
+    monkeypatch.setattr(case.recorder, "_admit", lambda: plan)
+    with no_fit_guard():
+        frozen = case.recorder.freeze()
+    selection = next(item for item in frozen["selections"] if item["outer_year"] == "2025")
+    blends = [row for row in selection["scores"] if row["candidate_id"] == "blend_test_1"]
+    assert len(blends) == 1 and blends[0]["metrics"] is None
+    assert all(winner["candidate_id"] != "blend_test_1" for winner in selection["winners"].values())
 
 
 def test_blended_freeze_refuses_nonzero_candidate_against_zero_history_mean(case, monkeypatch):

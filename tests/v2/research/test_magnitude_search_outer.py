@@ -1,4 +1,5 @@
 """Native selected outer fits, temporal ordering and pooled independent oracles."""
+import copy
 import hashlib
 import math
 import shutil
@@ -549,3 +550,21 @@ def test_invalid_request_never_claims(outer_case, year, limits):
     with outer_problem("INVALID_EXPERIMENT_SPEC", message):
         run(outer_case, year, limits=limits)
     assert outer_case.conn.total_changes == before
+
+
+def test_outer_refuses_blend_winner_with_typed_error(outer_case, monkeypatch):
+    case = outer_case
+    original = outer._native_selection
+
+    def blend_winner(trials, plan, read):
+        selection = copy.deepcopy(original(trials, plan, read))
+        for item in selection["selections"]:
+            if item["outer_year"] == "2024":
+                item["selected_candidate_id"] = "blend_test_1"
+        return selection
+
+    monkeypatch.setattr(outer, "_native_selection", blend_winner)
+    with pytest.raises(OpsError) as caught:
+        run(case)
+    assert caught.value.problem == fail("EXPERIMENT_VARIANT_FAILED",
+        "selected winner is not a plan candidate; blend winner outer evaluation is not supported yet").problem

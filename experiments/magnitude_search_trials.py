@@ -25,6 +25,7 @@ from engine.v2.ops.migrations import migrate, require_current
 from engine.v2.research.magnitude_inputs import load_magnitude_targets
 from experiments.iv_selection import signed_event_score, training_mean_rows
 from experiments.magnitude_report import magnitude_metrics
+from experiments.magnitude_search_blends import score_blends
 from experiments.magnitude_search_evidence import (
     _requires_event_dates,
     admit_fold_inputs,
@@ -733,6 +734,8 @@ class SearchTrials:
         policy = plan.get("request", {}).get("selection")
         signed = plan.get("selection", {}).get("metric") == "blend_rmse_mae"
         winner_rules = plan.get("selection", {}).get("winner_rules")
+        blends = plan.get("blends") or []
+        component_ids = {c for b in blends for c in b["component_candidate_ids"]}
 
         def history_rows_for(cohort, validation):
             if signed:
@@ -757,6 +760,7 @@ class SearchTrials:
         for outer in plan["folds"]:
             history_rows_by_year = {}
             scores = []
+            component_years, failed_components = {}, set()
             for candidate in plan["candidates"]:
                 rows, yearly_rows, failed = [], {}, False
                 for inner in outer["inner"]:
@@ -804,6 +808,13 @@ class SearchTrials:
                             cache_bytes -= removed_bytes
                         cache[key] = (record, terminal_id, record_bytes)
                         cache_bytes += record_bytes
+                if candidate["candidate_id"] in component_ids:
+                    if failed:
+                        failed_components.add(candidate["candidate_id"])
+                    else:
+                        component_years[candidate["candidate_id"]] = {
+                            year: [row for row in rows_ if row.get("horizon_sessions") == 1]
+                            for year, rows_ in yearly_rows.items()}
                 if failed:
                     scores.append({"candidate_id": candidate["candidate_id"], "metrics": None})
                 elif policy is None:
@@ -824,6 +835,13 @@ class SearchTrials:
                     except (KeyError, TypeError, ValueError, OverflowError) as error:
                         raise fail("EXPERIMENT_VARIANT_FAILED", _blended_failure(error)) from None
                     scores.append({"candidate_id": candidate["candidate_id"], **pooled, "yearly": yearly})
+            if blends and policy is not None:
+                try:
+                    scores.extend(score_blends(blends, component_years,
+                        [year["year"] for year in sorted(outer["inner"], key=lambda item: item["year"])],
+                        history_rows_by_year, score_rows, failed_components))
+                except (KeyError, TypeError, ValueError, OverflowError) as error:
+                    raise fail("EXPERIMENT_VARIANT_FAILED", _blended_failure(error)) from None
             eligible = [score for score in scores if score["metrics"] is not None]
             if not eligible:
                 raise fail("EXPERIMENT_VARIANT_FAILED", "all candidates failed for an outer fold")
