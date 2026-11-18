@@ -326,6 +326,22 @@ def test_production_frame_with_unadmitted_id_refuses():
     assert _refusal(exc) == (CONFLICT, "event_ids_outside_population")
 
 
+def test_model_tables_refuses_non_finite_production_prediction():
+    frame = PROD["frame"].assign(pred_move=[0.1, float("nan"), 0.3, 0.5])
+    bad_prod = {"frame": frame, "binding": PROD["binding"]}
+    with pytest.raises(OpsError) as exc:
+        rd.model_tables({}, {"models": [_model("p", "production", source="production")]}, MT_ADM, bad_prod)
+    assert _refusal(exc) == (CONFLICT, "production_series_failed")
+
+
+def test_model_tables_refuses_production_frame_missing_column():
+    frame = PROD["frame"].drop(columns=["pred_crush"])
+    bad_prod = {"frame": frame, "binding": PROD["binding"]}
+    with pytest.raises(OpsError) as exc:
+        rd.model_tables({}, {"models": [_model("p", "production", source="production")]}, MT_ADM, bad_prod)
+    assert _refusal(exc) == (CONFLICT, "production_series_failed")
+
+
 def test_start_and_end_filters_applied():
     out = _tables({"m": _bound({2023: [("e1", 1.0), ("e2", 2.0), ("e3", 3.0)]})},
                   [_model("m", "candidate")], start="2023-03-01", end="2024-01-01")

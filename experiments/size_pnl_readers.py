@@ -181,6 +181,14 @@ def _consumed_binding(table, source, crush_binding):
 def model_tables(bound, roster, admitted, production, *, start=None, end=None):
     """Per-model (event_date, pred_move, pred_crush) tables; crush is the production forecast, fixed for every model."""
     dates = _dates(admitted)
+    if not {"event_date", "pred_move", "pred_crush"} <= set(production["frame"].columns):
+        raise _conflict("production_series_failed", "the production frame lacks event_date, pred_move or pred_crush")
+    try:
+        preds = production["frame"][["pred_move", "pred_crush"]].to_numpy(dtype=float)
+    except (TypeError, ValueError):
+        raise _conflict("production_series_failed", "a production prediction is not numeric") from None
+    if not np.isfinite(preds).all():
+        raise _conflict("production_series_failed", "production predictions are not finite")
     crush = production["frame"]["pred_crush"]
     if not set(production["frame"].index) <= set(dates.index):
         raise _conflict("event_ids_outside_population", "a production event id is outside the admitted population")
