@@ -6,6 +6,7 @@ import pytest
 from engine.v2.foundation.experiment_holdouts import ExperimentHoldouts
 from engine.v2.ops.errors import OpsError
 from experiments import size_pnl_readers as rd
+from experiments.size_pnl_inputs import LEAD
 
 CONFLICT = "EXPERIMENT_IDENTITY_CONFLICT"
 DENIED = "HOLDOUT_ACCESS_DENIED"
@@ -340,6 +341,69 @@ def test_model_tables_refuses_production_frame_missing_column():
     with pytest.raises(OpsError) as exc:
         rd.model_tables({}, {"models": [_model("p", "production", source="production")]}, MT_ADM, bad_prod)
     assert _refusal(exc) == (CONFLICT, "production_series_failed")
+
+
+def _via_model_tables(frame):
+    """Production frame through model_tables; returns the production table."""
+    roster = {"models": [_model("p", "production", source="production")]}
+    return rd.model_tables({}, roster, MT_ADM, {"frame": frame, "binding": "pb"})["p"]["table"]
+
+
+def _via_read_production(frame):
+    """Production frame served through the fetch path of read_production; returns its frame."""
+    def fetch(columns, ids):
+        rows = [{"event_id": eid, "pred_abs_move": move, "pred_iv_crush_30": crush, "horizon_sessions": LEAD}
+                for eid, move, crush in zip(frame.index, frame["pred_move"], frame["pred_crush"])]
+        return pd.DataFrame(rows, columns=["event_id", *columns])
+    return rd.read_production(fetch, MT_ADM, expected_hash="h1", table_hash="h1")["frame"]
+
+
+ENTRY_PATHS = [_via_model_tables, _via_read_production]
+
+
+@pytest.mark.parametrize("run", ENTRY_PATHS)
+def test_production_path_refuses_empty_frame(run):
+    with pytest.raises(OpsError) as exc:
+        run(PROD["frame"].iloc[:0])
+    assert _refusal(exc) == (CONFLICT, "production_series_failed")
+
+
+@pytest.mark.parametrize("run", ENTRY_PATHS)
+def test_production_path_refuses_duplicate_index(run):
+    with pytest.raises(OpsError) as exc:
+        run(PROD["frame"].iloc[[0, 0, 1, 2]])
+    assert _refusal(exc) == (CONFLICT, "duplicate_event_id")
+
+
+@pytest.mark.parametrize("run", ENTRY_PATHS)
+def test_production_path_refuses_string_predictions(run):
+    with pytest.raises(OpsError) as exc:
+        run(PROD["frame"].assign(pred_move=["abc", "0.2", "0.3", "0.5"]))
+    assert _refusal(exc) == (CONFLICT, "production_series_failed")
+
+
+@pytest.mark.parametrize("run", ENTRY_PATHS)
+def test_production_path_returns_numeric_strings_as_floats(run):
+    frame = PROD["frame"].assign(pred_move=["0.1", "0.2", "0.3", "0.5"], pred_crush=["-1.0", "-1.5", "-2.0", "-2.5"])
+    out = run(frame)
+    assert list(out["pred_move"]) == [0.1, 0.2, 0.3, 0.5]
+    assert list(out["pred_crush"]) == [-1.0, -1.5, -2.0, -2.5]
+    assert out["pred_move"].dtype == float and out["pred_crush"].dtype == float
+
+
+def test_model_tables_replaces_supplied_event_date_with_admitted_date():
+    frame = PROD["frame"].assign(event_date=pd.to_datetime(["2030-01-01"] * 4))
+    table = _via_model_tables(frame)
+    assert list(table["event_date"]) == list(PROD["frame"]["event_date"])
+    assert table.loc["e2", "event_date"] == pd.Timestamp("2023-06-01")
+
+
+def test_model_tables_windowing_uses_admitted_date_not_supplied_date():
+    frame = PROD["frame"].assign(event_date=pd.to_datetime(["2030-01-01"] * 4))
+    roster = {"models": [_model("p", "production", source="production")]}
+    out = rd.model_tables({}, roster, MT_ADM, {"frame": frame, "binding": "pb"},
+                          start="2023-03-01", end="2024-01-01")
+    assert list(out["p"]["table"].index) == ["e2"]
 
 
 def test_start_and_end_filters_applied():

@@ -89,6 +89,31 @@ def _fetch(fetch, admitted, columns, ids):
     return got.loc[:, ["event_id", *columns]].set_index("event_id")
 
 
+def _checked_production(frame, admitted):
+    """Shared production-frame admission for read_production and model_tables.
+
+    event_date is not trusted: it is replaced by the admitted date. Returns a new frame with
+    columns event_date, pred_move, pred_crush (float), indexed like the input.
+    """
+    dates = _dates(admitted)
+    if not {"pred_move", "pred_crush"} <= set(frame.columns):
+        raise _conflict("production_series_failed", "the production frame lacks pred_move or pred_crush")
+    if not len(frame):
+        raise _conflict("production_series_failed", "production predictions are empty")
+    try:
+        values = frame[["pred_move", "pred_crush"]].to_numpy(dtype=float)
+    except (TypeError, ValueError):
+        raise _conflict("production_series_failed", "a production prediction is not numeric") from None
+    if not np.isfinite(values).all():
+        raise _conflict("production_series_failed", "production predictions are not finite")
+    if frame.index.duplicated().any():
+        raise _conflict("duplicate_event_id", "the production frame repeats an event id")
+    if not set(frame.index) <= set(dates.index):
+        raise _conflict("event_ids_outside_population", "a production event id is outside the admitted population")
+    return pd.DataFrame({"event_date": dates.reindex(frame.index),
+                         "pred_move": values[:, 0], "pred_crush": values[:, 1]}, index=frame.index)
+
+
 def _window_ids(admitted, start, end, event_ids=None):
     dates = _dates(admitted)
     ids = set(dates.index[_in_window(dates, start, end).to_numpy()])
@@ -129,14 +154,9 @@ def read_production(fetch, admitted, *, expected_hash, table_hash, start=None, e
     frame = _fetch(fetch, admitted, PRODUCTION_COLUMNS, ids)
     if (frame["horizon_sessions"] != LEAD).any():
         raise _conflict("lead_unavailable", "a production row is not at the lead horizon")
-    try:
-        values = frame[["pred_abs_move", "pred_iv_crush_30"]].to_numpy(dtype=float)
-    except (TypeError, ValueError):
-        raise _conflict("production_series_failed", "a production prediction is not numeric") from None
-    if not len(frame) or not np.isfinite(values).all():
-        raise _conflict("production_series_failed", "production predictions are empty or not finite")
-    out = pd.DataFrame({"event_date": _dates(admitted).reindex(frame.index),
-                        "pred_move": values[:, 0], "pred_crush": values[:, 1]}, index=frame.index)
+    built = pd.DataFrame({"pred_move": frame["pred_abs_move"].to_numpy(),
+                          "pred_crush": frame["pred_iv_crush_30"].to_numpy()}, index=frame.index)
+    out = _checked_production(built, admitted)
     print(f"[pnl_readers] production rows={len(out)} production_missing={len(ids) - len(out)}",
           file=sys.stderr)
     srt = out.sort_index()
@@ -181,24 +201,13 @@ def _consumed_binding(table, source, crush_binding):
 def model_tables(bound, roster, admitted, production, *, start=None, end=None):
     """Per-model (event_date, pred_move, pred_crush) tables; crush is the production forecast, fixed for every model."""
     dates = _dates(admitted)
-    if not {"event_date", "pred_move", "pred_crush"} <= set(production["frame"].columns):
-        raise _conflict("production_series_failed", "the production frame lacks event_date, pred_move or pred_crush")
-    try:
-        preds = production["frame"][["pred_move", "pred_crush"]].to_numpy(dtype=float)
-    except (TypeError, ValueError):
-        raise _conflict("production_series_failed", "a production prediction is not numeric") from None
-    if not np.isfinite(preds).all():
-        raise _conflict("production_series_failed", "production predictions are not finite")
-    crush = production["frame"]["pred_crush"]
-    if not set(production["frame"].index) <= set(dates.index):
-        raise _conflict("event_ids_outside_population", "a production event id is outside the admitted population")
+    prod = _checked_production(production["frame"], admitted)
+    crush = prod["pred_crush"]
     out = {}
     for model in roster["models"]:
         mid = model["model_id"]
         if model["kind"] == "production":
-            frame = production["frame"]
-            if not set(frame.index) <= set(dates.index):
-                raise _conflict("event_ids_outside_population", "a production event id is outside the admitted population")
+            frame = prod
             if start is not None or end is not None:
                 frame = frame[_in_window(frame["event_date"], start, end).to_numpy()]
             out[mid] = {"status": "ready", "table": frame,
