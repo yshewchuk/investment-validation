@@ -144,3 +144,7 @@ S1 and S8a can start in parallel (S3 waits for S2b's admitted keys); each slice 
 3. **Scope.** The DYN-SV chooser and the STR-THRU trained gate are OUT of EXP-188. Pre-registered **conditional follow-up**: if H1 or H2 is judged Clear or Directional, a per-model chooser retrain (and, for long vol, a STR-THRU gate refit) must run BEFORE any board change. No forecast swap reaches the board on per-structure evidence alone, because the chooser and gate were trained on the production forecast's features.
 4. **Pool length: the design default.** Common 2023+ support is primary; production's native pool is the labelled sensitivity arm (section 4).
 5. **Re-tune breadth: one `c` per model**, pooled over the seven structures (section 5 gives the rationale).
+
+## 11. Addendum
+
+A synthetic-predictor calibration arm (controls and power; never part of the roster or judgement) is designed in `guides/size_pnl_synthetic_calibration_design.md`.
