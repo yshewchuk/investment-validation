@@ -75,6 +75,10 @@ def test_blend_outer_metrics_are_real_metrics_of_averaged_two_event_forecasts():
     expected_metrics = magnitude_metrics(expected_predictions)
     assert result["predictions"] == expected_predictions
     assert result["metrics"] == expected_metrics
+    # Independent oracle: errors are 0 and 2, so RMSE = sqrt(2), MAE = 1, count = 2.
+    assert result["metrics"]["count"] == 2
+    assert result["metrics"]["rmse"] == pytest.approx(2 ** 0.5)
+    assert result["metrics"]["mae"] == pytest.approx(1.0)
     assert result["per_horizon"][0] == {"horizon_sessions": 1, **expected_metrics}
 
 
