@@ -21,7 +21,8 @@ from tests.v2.research.magnitude_trial_support import trial_cases
 from tests.v2.research.test_magnitude_search_plan import source as base_source  # noqa: F401
 from tests.v2.research.test_magnitude_search_trials import case  # noqa: F401
 
-REQUEST = {"schema_version": "magnitude_search_request.v4", "limits": {"parent": {"memory_bytes": 1 << 30}}}
+REQUEST = {"schema_version": "magnitude_search_request.v4",
+           "limits": {"parent": {"memory_bytes": 1 << 30}, "child": {"memory_bytes": 1}}}
 
 
 @pytest.fixture
@@ -178,6 +179,15 @@ def test_prepublish_worker_problem_receipt_raises_its_ops_error(monkeypatch):
     assert caught.value.problem == fail("EXPERIMENT_IDENTITY_CONFLICT", "search anchor differs").problem
     assert abort.call_count == 1 and len(created) == 1
     assert created[0].kwargs["max_workers"] == 1
+
+
+def test_parallel_limits_differing_from_sealed_child_refuse_before_any_pool(monkeypatch):
+    created, _ = _wire(monkeypatch, None)
+    with pytest.raises(OpsError) as caught:
+        run_mod.run_search(None, SimpleNamespace(root="store"), None, SimpleNamespace(run_id="run"), REQUEST, None,
+                           limits={"memory_bytes": 2})
+    assert caught.value.problem == fail("INVALID_EXPERIMENT_SPEC", "v2 trial limits differ from sealed request").problem
+    assert created == []
 
 
 def test_prepublish_broken_pool_maps_to_resource_unavailable_and_aborts(monkeypatch):

@@ -322,6 +322,8 @@ def _run_search(conn, store, repository, registration, request, plan_ref, *, lim
     deadline_seconds = None
     if parallel:
         cpus, conn_path = _parallel_preflight(conn, request, limits, workers)
+        if limits != request["limits"]["child"]:
+            raise fail("INVALID_EXPERIMENT_SPEC", "v2 trial limits differ from sealed request")
         forbid_fitting("run_search")
         forbid_legacy_fitting("run_search")
         deadline_seconds = remaining(conn, store, registration, plan)
