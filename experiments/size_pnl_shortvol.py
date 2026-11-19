@@ -18,7 +18,6 @@ from engine.forecast_sizing import FORECAST_SIZED, forecast_params
 from engine.portfolio import CONTRACT_MULTIPLIER
 from engine.pnl_sim import DRAWS, trailing_cutoff
 from engine.structures import BUY, PUT, SELL, STRUCTURES, StructureError
-from engine.v2.ops.errors import fail
 from experiments.size_pnl_pool import MIN_WINDOW, put_means, structure_pnl
 from experiments.size_pnl_straddle import EXIT_UNQUOTED, lots
 
@@ -32,6 +31,13 @@ _CLOSE = {BUY: SELL, SELL: BUY}
 # A numerical guard against float-noise debits, not a market rule: the design and _short_vol_rule
 # set no minimum debit.
 MIN_DEBIT = 1e-6
+
+
+class Refusal(ValueError):
+    """A refusal with a stable ``code`` and ``details["reason"]``, kept local so this module adds no engine.v2 edge."""
+    def __init__(self, code, message, details):
+        super().__init__(message)
+        self.code, self.details = code, details
 
 
 def _num(x):
@@ -49,12 +55,12 @@ def pinned(name):
               "anchor_offset": spec.params.get("anchor_offset", 0) == 0}
     for field, ok in checks.items():
         if not ok:
-            raise fail(_CONFLICT, f"{name}: factory default {field} is not pinned",
-                       details={"reason": "factory_default_mismatch", "structure": name, "field": field})
+            raise Refusal(_CONFLICT, f"{name}: factory default {field} is not pinned",
+                          {"reason": "factory_default_mismatch", "structure": name, "field": field})
     for leg in spec.legs:
         if leg.right != PUT:
-            raise fail(_CONFLICT, f"{name}: leg {leg.name} is a call",
-                       details={"reason": "call_leg_refused", "structure": name, "field": leg.name})
+            raise Refusal(_CONFLICT, f"{name}: leg {leg.name} is a call",
+                          {"reason": "call_leg_refused", "structure": name, "field": leg.name})
     return spec
 
 

@@ -12,7 +12,6 @@ from engine.forecast_sizing import FORECAST_SIZED, forecast_params
 from engine.pnl_sim import expected_pnl
 from engine.portfolio import CONTRACT_MULTIPLIER
 from engine.structures import CALL, PUT, STRUCTURES
-from engine.v2.ops.errors import OpsError
 from experiments import size_pnl_ladder as lad
 from experiments import size_pnl_shortvol as sv
 from experiments.size_pnl_pool import build_pool
@@ -136,10 +135,10 @@ def test_pinned_passes_for_every_name(name):
 def test_pinned_refuses_moved_exit(monkeypatch):
     real = STRUCTURES["CND-PS"]
     monkeypatch.setitem(STRUCTURES, "CND-PS", lambda: dataclasses.replace(real(), exit_offset=2))
-    with pytest.raises(OpsError) as caught:
+    with pytest.raises(sv.Refusal) as caught:
         sv.pinned("CND-PS")
     assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
-    details = caught.value.problem.details
+    details = caught.value.details
     assert details["reason"] == "factory_default_mismatch"
     assert details["structure"] == "CND-PS" and details["field"] == "exit_offset"
 
@@ -147,10 +146,10 @@ def test_pinned_refuses_moved_exit(monkeypatch):
 def test_pinned_refuses_moved_entry(monkeypatch):
     real = STRUCTURES["CND-PS"]
     monkeypatch.setitem(STRUCTURES, "CND-PS", lambda: dataclasses.replace(real(), entry_offset=1, exit_offset=2))
-    with pytest.raises(OpsError) as caught:
+    with pytest.raises(sv.Refusal) as caught:
         sv.pinned("CND-PS")
     assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
-    details = caught.value.problem.details
+    details = caught.value.details
     assert details["reason"] == "factory_default_mismatch"
     assert details["structure"] == "CND-PS" and details["field"] == "entry_offset"
 
@@ -159,10 +158,10 @@ def test_score_refuses_a_drifted_factory(monkeypatch):
     real = STRUCTURES["CND-PS"]
     monkeypatch.setitem(STRUCTURES, "CND-PS", lambda: dataclasses.replace(real(), exit_offset=2))
     chunk = chunk_of(("A", {}))
-    with pytest.raises(OpsError) as caught:
+    with pytest.raises(sv.Refusal) as caught:
         sv.score(chunk, events_for("A"), taken(chunk), "CND-PS", 0.5)
     assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
-    assert caught.value.problem.details["reason"] == "factory_default_mismatch"
+    assert caught.value.details["reason"] == "factory_default_mismatch"
 
 
 @pytest.mark.parametrize("index", [0, 1])
@@ -172,10 +171,10 @@ def test_pinned_refuses_any_call_leg(monkeypatch, index):
     legs = list(real.legs)
     legs[index] = dataclasses.replace(legs[index], right=CALL)
     monkeypatch.setitem(STRUCTURES, "BFLY-P", lambda: dataclasses.replace(real, legs=tuple(legs)))
-    with pytest.raises(OpsError) as caught:
+    with pytest.raises(sv.Refusal) as caught:
         sv.pinned("BFLY-P")
     assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
-    assert caught.value.problem.details["reason"] == "call_leg_refused"
+    assert caught.value.details["reason"] == "call_leg_refused"
 
 
 @pytest.mark.parametrize("name", NAMES)
@@ -222,10 +221,10 @@ def test_resolve_refuses_a_call_leg_factory(monkeypatch):
         legs[0] = dataclasses.replace(legs[0], right=CALL)
         return dataclasses.replace(spec, legs=tuple(legs))
     monkeypatch.setitem(STRUCTURES, "BFLY-P", call_leg_factory)
-    with pytest.raises(OpsError) as caught:
+    with pytest.raises(sv.Refusal) as caught:
         sv.resolve(chunk_of(("A", {})), 0, "BFLY-P", PRED)
     assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
-    assert caught.value.problem.details["reason"] == "call_leg_refused"
+    assert caught.value.details["reason"] == "call_leg_refused"
 
 
 @pytest.mark.parametrize("c", [0.0, -1.0, NAN, math.inf])
