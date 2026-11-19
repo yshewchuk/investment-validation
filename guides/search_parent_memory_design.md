@@ -109,7 +109,7 @@ SIZE registrations bind `source_closure` of `experiments/size_search.py`, and `v
 4. Journal and report equality before and after for the same inputs.
 5. A holder breakdown at each boundary (sizes of `_PANEL_MEMO`, `_memo`, hydrated registration, plan) with a bounded deep-size helper, so "parent is X GiB because Y" is evidence.
 
-Pass: parent current VmRSS after pool creation <= 2 GiB with `workers>=2` on the smoke, scaling checked against panel-size ratio before extrapolating to the full universe; identical journal and report; `workers=3` wall time below `workers=1`. Failing the first criterion means H3/H4 dominate and P4 moves up.
+Pass: parent current VmRSS after pool creation <= 2 GiB with `workers>=2` on the smoke, scaling checked against panel-size ratio before extrapolating to the full universe; identical journal and report; `workers=3` wall time below `workers=1`. Failing the first criterion means H3/H4 dominate and P4b (compact registration) becomes necessary.
 
 ## 6. Split into code PRs (each merges as ready; in-flight runs use pinned worktrees; estimates are code / test / doc words, code and test in added lines)
 

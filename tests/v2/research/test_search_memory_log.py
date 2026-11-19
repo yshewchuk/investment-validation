@@ -1,6 +1,8 @@
 """Stage-boundary memory logging is bounded, quiet on failure, and never raises."""
 import sys
 
+import pytest
+
 from experiments import search_memory_log as log
 
 
@@ -26,6 +28,23 @@ def test_log_memory_prints_one_line_and_omits_none(capsys):
     assert "[search memory] probe:" in lines[0]
     assert "VmRSS" in lines[0] and "peak" in lines[0] and "alpha" in lines[0]
     assert "beta" not in lines[0]
+
+
+def test_deep_size_wide_list_truncates_to_lower_bound():
+    wide = list(range(10))
+    full_size, full_truncated = log.deep_size(wide)
+    size, truncated = log.deep_size(wide, cap=3)
+    assert full_truncated is False
+    assert truncated is True
+    assert size <= full_size
+
+
+def test_log_memory_propagates_memory_error(monkeypatch):
+    def exhausted():
+        raise MemoryError("synthetic RSS watchdog trip")
+    monkeypatch.setattr(log, "rss_bytes", exhausted)
+    with pytest.raises(MemoryError):
+        log.log_memory("watchdog", holder=[1])
 
 
 def test_log_memory_never_raises(capsys, monkeypatch):

@@ -9,7 +9,11 @@ _NODE_CAP = 200_000
 
 
 def deep_size(root, cap=_NODE_CAP):
-    """Bounded sys.getsizeof walk over dict/list/tuple/set values; returns (bytes, truncated)."""
+    """Bounded sys.getsizeof walk over dict keys and values and list/tuple/set/frozenset items.
+
+    Counts at most `cap` objects (visited plus queued); returns (bytes, truncated).
+    When truncated is True the size is a lower bound.
+    """
     seen, stack, total, visited = set(), [root], 0, 0
     while stack:
         obj = stack.pop()
@@ -25,6 +29,8 @@ def deep_size(root, cap=_NODE_CAP):
             stack.extend(obj.values())
         elif isinstance(obj, (list, tuple, set, frozenset)):
             stack.extend(obj)
+        if len(stack) + visited > cap:
+            return total, True
     return total, False
 
 
@@ -40,6 +46,8 @@ def log_memory(label, **holders):
             size, truncated = deep_size(holder)
             parts.append(f", {name} {size/2**20:.1f}{'+' if truncated else ''} MiB")
         decision("search memory", "".join(parts))
+    except MemoryError:
+        raise
     except Exception:
         return
 
