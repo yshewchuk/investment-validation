@@ -26,6 +26,10 @@ class Admitted(dict):
     """Admission result; built by admit_events only. Readers refuse any other mapping."""
 
 
+class Production(dict):
+    """Result of read_production, which has checked the expected hash and the lead-1 horizon; model_tables refuses any other mapping."""
+
+
 def _conflict(reason, message):
     return fail(_CONFLICT, message, details={"reason": reason})
 
@@ -178,7 +182,7 @@ def read_production(fetch, admitted, *, expected_hash, table_hash, start=None, e
     print(f"[pnl_readers] production rows={len(out)} production_missing={len(ids) - len(out)}",
           file=sys.stderr)
     binding = _production_binding(table_hash, out)
-    return {"frame": out, "binding": binding, "table_hash": table_hash}
+    return Production({"frame": out, "binding": binding, "table_hash": table_hash})
 
 
 def _candidate_series(bound):
@@ -217,6 +221,8 @@ def _consumed_binding(table, source, crush_binding):
 
 def model_tables(bound, roster, admitted, production, *, start=None, end=None):
     """Per-model (event_date, pred_move, pred_crush) tables; crush is the production forecast, fixed for every model."""
+    if not isinstance(production, Production):
+        raise _conflict("production_not_issued", "model_tables accepts only a production issued by read_production")
     dates = _dates(admitted)
     prod = _checked_production(production["frame"], admitted)
     table_hash = production.get("table_hash")
