@@ -231,7 +231,7 @@ class SearchTrials:
             _, inner, _ = self._trial(plan, outer_year, inner_year, candidate_id)
             owner_year, _ = canonical_inner(plan, outer_year, inner_year)
             cohort = cohort_key(plan, owner_year, inner_year)
-            if cohort in seen or self._read("cohort:" + cohort) is not None:
+            if cohort in seen:
                 continue
             seen.add(cohort)
             inputs = self._cohort_inputs(cohort, inner, plan=plan)

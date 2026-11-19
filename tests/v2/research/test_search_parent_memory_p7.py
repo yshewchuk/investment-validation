@@ -110,24 +110,39 @@ def test_prepublish_failure_matches_start_and_leaves_no_cohort_slot(case, copy, 
     assert published.value.problem.code == lazy.value.problem.code == "EXPERIMENT_IDENTITY_CONFLICT"
 
 
-def test_prepublish_visits_each_distinct_cohort_once_and_skips_published(case, copy, monkeypatch):
+def test_prepublish_visits_each_distinct_cohort_once_and_readmits_published(case, copy, monkeypatch):
     seeded = _recorder(case, copy)
     first = trial_cases(case)[0]
     seeded.start(*first)
     published = {_cohort(case.plan, args) for args in trial_cases(case)}
-    visited = []
-    original = seeded._cohort_inputs
-
-    def counted(cohort, inner, plan=None):
-        visited.append(cohort)
-        return original(cohort, inner, plan=plan)
-
-    monkeypatch.setattr(seeded, "_cohort_inputs", counted)
     seeded.prepublish(trial_cases(case) + trial_cases(case))
-    assert sorted(visited) == sorted(published - {_cohort(case.plan, first)})
-    visited.clear()
-    seeded.prepublish(trial_cases(case))
-    assert visited == []
+    slots = {c: canonical_json(seeded._read("cohort:" + c)) for c in published}
+    admitted = []
+    fresh = _recorder(case, copy)
+    original = fresh._inputs
+
+    def counted(inner, plan=None):
+        admitted.append(inner["year"])
+        return original(inner, plan=plan)
+
+    monkeypatch.setattr(fresh, "_inputs", counted)
+    fresh.prepublish(trial_cases(case))
+    assert len(admitted) == len(published)
+    assert {c: canonical_json(fresh._read("cohort:" + c)) for c in published} == slots
+
+
+def test_prepublish_refuses_a_published_cohort_whose_body_drifted(case, copy, monkeypatch):
+    _recorder(case, copy).prepublish(trial_cases(case))
+    drifted = _recorder(case, copy)
+    original = drifted._inputs
+
+    def changed(inner, plan=None):
+        return {**original(inner, plan=plan), "drift": 1}
+
+    monkeypatch.setattr(drifted, "_inputs", changed)
+    with pytest.raises(OpsError) as refused:
+        drifted.prepublish(trial_cases(case))
+    assert refused.value.problem.code == "EXPERIMENT_IDENTITY_CONFLICT"
 
 
 def _wire(monkeypatch, outcome):
