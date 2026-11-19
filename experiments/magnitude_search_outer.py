@@ -1,6 +1,7 @@
 """Bounded selected-candidate outer fits; immutable evidence, no final authority."""
 import sys
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 from engine.models.no_fit import forbid_fitting as forbid_legacy_fitting
@@ -40,6 +41,8 @@ from experiments.magnitude_search_refits import (
 )
 from experiments.magnitude_search_trials import (
     SearchTrials,
+    freeze_is_verified,
+    plan_key,
 )
 from experiments.magnitude_search_trials import (
     _completed_fit as _valid_completed_fit,
@@ -92,8 +95,36 @@ def _equal_completed_fit(fit, expected, *, legacy=False):
     _equal(fit, expected)
 
 
-def _native_selection(trials, plan, read):
-    """Presence checks plus freeze verification make completed replays strict."""
+_SHARED = None
+
+
+@contextmanager
+def shared_freeze(run_id, plan_ref, value):
+    """Driver-only scope: run_search shares the one freeze it verified with the refit units of its own run/plan.
+
+    ``value`` must be an object returned by a SearchTrials.freeze() call in this process, bound to
+    the producing run, plan and the result's content; a caller cannot supply evidence it did not verify.
+    """
+    global _SHARED
+    key = plan_key(plan_ref)
+    if not freeze_is_verified(value, run_id, key):
+        raise fail("EXPERIMENT_IDENTITY_CONFLICT", "shared freeze must be a verified trials.freeze() result")
+    previous = _SHARED
+    _SHARED = (run_id, key, value)
+    try:
+        yield
+    finally:
+        _SHARED = previous
+
+
+def _native_selection(trials, plan, read, frozen=None):
+    """Presence checks plus freeze verification make completed replays strict.
+
+    ``frozen`` is passed only by execute_outer_fold from an active shared_freeze scope whose
+    run_id and plan_ref match (the driver's refit stage); direct callers cannot supply it
+    through execute_outer_fold. When ``frozen`` is None the freeze is recomputed via trials.freeze();
+    otherwise the shared value is compared against the stored selection.
+    """
     print("[stage] native_selection start", file=sys.stderr)
     started = time.monotonic()
     selection = read("selection")
@@ -126,7 +157,10 @@ def _native_selection(trials, plan, read):
                     raise _conflict() from None
                 if plan.get("schema_version") in (PLAN_V2, PLAN_V3, "regression_search_plan.v1") and limits != plan["request"]["limits"]["child"]:
                     raise fail("INVALID_EXPERIMENT_SPEC", "native trial limits differ from sealed request")
-    _equal(trials.freeze(), selection)
+    if frozen is None:
+        _equal(trials.freeze(), selection)
+    else:
+        _equal(frozen, selection)
     print(f"[stage] native_selection done in {time.monotonic() - started:.1f}s", file=sys.stderr)
     return selection
 
@@ -292,7 +326,10 @@ def _replay_failed(saved, store, started, key, outer_year, chosen, fold, plan, e
 
 def execute_outer_fold(conn, store, repository, registration, request, plan_ref, outer_year, *, limits,
                        candidate_id=None):
-    """Refit one frozen unit (the overall winner, or a winner_rules refit unit by candidate_id) once; replay complete evidence without fitting."""
+    """Refit one frozen unit (the overall winner, or a winner_rules refit unit by candidate_id) once; replay complete evidence without fitting.
+
+    Inside the driver's shared_freeze scope for this run and plan, the freeze run_search verified is reused; otherwise the freeze is recomputed.
+    """
     validate_execution_limits(limits)
     require_current(conn, OWNER, MIGRATIONS)
     plan = read_search_plan(conn, store, registration, request, plan_ref)
@@ -308,7 +345,11 @@ def execute_outer_fold(conn, store, repository, registration, request, plan_ref,
     def read(slot):
         return read_record(conn, store, registration.run_id, slot)
     trials = SearchTrials(conn, store, repository, registration, request, plan_ref)
-    selection = _native_selection(trials, plan, read)
+    shared = _SHARED
+    if shared is not None and shared[0] == registration.run_id and shared[1] == plan_key(plan_ref):
+        selection = _native_selection(trials, plan, read, shared[2])
+    else:
+        selection = _native_selection(trials, plan, read)
     if candidate_id is not None:
         item = next((entry for entry in selection["selections"]
                      if entry["outer_year"] == outer_year), None)

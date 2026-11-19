@@ -330,7 +330,7 @@ def check_extra_refits(registration, request):
 
 def prepare_plan(conn, store, registration, request, *, plan_schema=None):
     """Expand the fixed dictionary grid into fully bound executable recipes."""
-    from experiments.magnitude_search_plan import PLAN_V2, PLAN_V3, plan_schema_for_request
+    from experiments.magnitude_search_plan import PLAN_V2, PLAN_V3, memoized_plan, plan_schema_for_request
     default_schema = plan_schema_for_request(request)
     if plan_schema is None:
         plan_schema = default_schema
@@ -342,59 +342,62 @@ def prepare_plan(conn, store, registration, request, *, plan_schema=None):
     verify_native_registration(conn, store, registration, max_evidence_bytes=MAX_NATIVE_EVIDENCE_BYTES)
     binding = registration.document
     verify_installation(binding)
-    if binding["schema_version"] == "native_experiment_registration.v1.6":
-        horizons = (5, 3, 1)
-    else:
-        panel_request = binding.get("size_panel_request")
-        if not isinstance(panel_request, dict):
-            raise fail("EXPERIMENT_IDENTITY_CONFLICT", "qualified SIZE registration is missing its panel request")
-        validate_panel_request(panel_request)
-        horizons = tuple(h for h in (5, 3, 1) if h in panel_request["horizons"])
-    schedule = compile_request(request, horizons=horizons)
-    _require(schedule["request"] == binding["size_request"])
-    folds = _folds(binding, request, plan_schema)
-    if plan_schema == PLAN_V3:
-        _shared_inner(folds)
-    candidates, candidate_id_by_spec = _candidates(registration, schedule)
-    requested_selection = schedule["request"].get("selection")
-    if requested_selection is None:
-        selection_contract = {"metric": "inner_pooled_rmse", "ties": LEGACY_TIE_RULE, "retries": 0,
-                              "outer": "frozen_selected_only", "final_read_authority": "none"}
-    else:
-        ties = CURRENT_TIE_RULE
-        selection_contract = {
-            "metric": "inner_pooled_history_mean_normalized_event_blend",
-            "metric_weights": requested_selection["metric_weights"],
-            "lead_weights": requested_selection["lead_weights"],
-            "large_move_threshold_pct": requested_selection["large_move_threshold_pct"],
-            "pooling": "all_inner_year_rows",
-            "comparator": "history_mean_report_only",
-            "tie_band": "max_sample_se_of_best_pooled_candidate_yearly_blends_or_floor",
-            "tie_band_floor": requested_selection["tie_band_floor"],
-            "ties": ties,
-            "retries": 0,
-            "outer": "frozen_selected_only",
-            "final_read_authority": "none",
-        }
-        if "winner_rules" in requested_selection:
-            selection_contract["winner_rules"] = ["overall", "rmse", "mae"]
-            selection_contract["rule_metrics"] = {
-                "overall": "blend_score", "rmse": "normalized.rmse",
-                "mae": "normalized.mae"}
-            extras = resolve_extra_refits(requested_selection, [c["candidate_id"] for c in candidates])
-            if extras is not None:
-                selection_contract["extra_refits"] = extras
-    identity = {"schema_version": plan_schema, "request": schedule["request"],
-        "anchor": {"run_id": registration.run_id, "variant_id": registration.variant_id},
-        "implementation": {"source_closure": binding["source_closure"], "environment": binding["environment"]},
-        "candidates": sorted(candidates, key=lambda c: c["candidate_id"]), "folds": folds,
-        "horizons": schedule["horizons"], "candidate_count": schedule["counts"]["candidates"],
-        "planned_fit_count": schedule["counts"]["search_fits"], "counts": schedule["counts"],
-        "selection": selection_contract}
-    if schedule["request"].get("blends"):
-        resolved = resolve_blends(schedule["request"]["blends"], schedule["candidate_specs"])
-        identity["blends"] = blend_records(resolved, candidate_id_by_spec)
-    return {**identity, "plan_id": content_hash(identity)}
+
+    def build():
+        if binding["schema_version"] == "native_experiment_registration.v1.6":
+            horizons = (5, 3, 1)
+        else:
+            panel_request = binding.get("size_panel_request")
+            if not isinstance(panel_request, dict):
+                raise fail("EXPERIMENT_IDENTITY_CONFLICT", "qualified SIZE registration is missing its panel request")
+            validate_panel_request(panel_request)
+            horizons = tuple(h for h in (5, 3, 1) if h in panel_request["horizons"])
+        schedule = compile_request(request, horizons=horizons)
+        _require(schedule["request"] == binding["size_request"])
+        folds = _folds(binding, request, plan_schema)
+        if plan_schema == PLAN_V3:
+            _shared_inner(folds)
+        candidates, candidate_id_by_spec = _candidates(registration, schedule)
+        requested_selection = schedule["request"].get("selection")
+        if requested_selection is None:
+            selection_contract = {"metric": "inner_pooled_rmse", "ties": LEGACY_TIE_RULE, "retries": 0,
+                                  "outer": "frozen_selected_only", "final_read_authority": "none"}
+        else:
+            ties = CURRENT_TIE_RULE
+            selection_contract = {
+                "metric": "inner_pooled_history_mean_normalized_event_blend",
+                "metric_weights": requested_selection["metric_weights"],
+                "lead_weights": requested_selection["lead_weights"],
+                "large_move_threshold_pct": requested_selection["large_move_threshold_pct"],
+                "pooling": "all_inner_year_rows",
+                "comparator": "history_mean_report_only",
+                "tie_band": "max_sample_se_of_best_pooled_candidate_yearly_blends_or_floor",
+                "tie_band_floor": requested_selection["tie_band_floor"],
+                "ties": ties,
+                "retries": 0,
+                "outer": "frozen_selected_only",
+                "final_read_authority": "none",
+            }
+            if "winner_rules" in requested_selection:
+                selection_contract["winner_rules"] = ["overall", "rmse", "mae"]
+                selection_contract["rule_metrics"] = {
+                    "overall": "blend_score", "rmse": "normalized.rmse",
+                    "mae": "normalized.mae"}
+                extras = resolve_extra_refits(requested_selection, [c["candidate_id"] for c in candidates])
+                if extras is not None:
+                    selection_contract["extra_refits"] = extras
+        identity = {"schema_version": plan_schema, "request": schedule["request"],
+            "anchor": {"run_id": registration.run_id, "variant_id": registration.variant_id},
+            "implementation": {"source_closure": binding["source_closure"], "environment": binding["environment"]},
+            "candidates": sorted(candidates, key=lambda c: c["candidate_id"]), "folds": folds,
+            "horizons": schedule["horizons"], "candidate_count": schedule["counts"]["candidates"],
+            "planned_fit_count": schedule["counts"]["search_fits"], "counts": schedule["counts"],
+            "selection": selection_contract}
+        if schedule["request"].get("blends"):
+            resolved = resolve_blends(schedule["request"]["blends"], schedule["candidate_specs"])
+            identity["blends"] = blend_records(resolved, candidate_id_by_spec)
+        return {**identity, "plan_id": content_hash(identity)}
+    return memoized_plan(registration, request, plan_schema, build)
 
 
 def execution_for_candidate(binding, candidate):

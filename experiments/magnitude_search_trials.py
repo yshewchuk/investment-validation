@@ -110,6 +110,20 @@ def _completed_fit(marker, static):
 
 _NOT_ADMITTED = object()
 _FREEZE_CACHE_BYTES = 32 << 20
+_FREEZES = []  # most recent (result, run_id, plan_key, digest) from trials.freeze() in this process (bounded to 4)
+
+
+def freeze_is_verified(value, run_id, plan_key):
+    """True only for this process's own freeze(): same object, same run and plan, and unchanged content."""
+    if run_id is None:
+        return False
+    return any(item[0] is value and item[1] == run_id and item[2] == plan_key
+               and content_hash(value) == item[3] for item in _FREEZES)
+
+
+def plan_key(plan_ref):
+    """Canonical key of a plan reference; the single derivation used by freeze provenance."""
+    return canonical_json(to_document(plan_ref))
 
 
 class SearchTrials:
@@ -709,7 +723,13 @@ class SearchTrials:
         print(f"[selection] freeze start rss_kib={resource.getrusage(resource.RUSAGE_SELF).ru_maxrss}",
               file=sys.stderr)
         try:
-            return self._freeze()
+            result = self._freeze()
+            run_id = getattr(getattr(self, "registration", None), "run_id", None)
+            plan_ref = getattr(self, "plan_ref", None)
+            key = plan_key(plan_ref)
+            _FREEZES.append((result, run_id, key, content_hash(result)))
+            del _FREEZES[:-4]
+            return result
         finally:
             elapsed = time.monotonic() - started
             print(f"[selection] freeze done elapsed={elapsed:.3f}s "
