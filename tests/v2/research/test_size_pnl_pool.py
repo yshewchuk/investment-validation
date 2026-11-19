@@ -222,3 +222,58 @@ def test_put_means_retains_nothing(pool):
     means = _means(pool)
     assert means.shape == (len(STRIKES),)
     assert means.base is None
+
+
+def test_equivalence_all_unsimulable_refuses(pool):
+    item = _item([SINGLE], 2.0)
+    item["spot"] = np.nan
+    with pytest.raises(OpsError) as caught:
+        check_equivalence(pool, [item], draws=DRAW)
+    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert caught.value.problem.details["reason"] == "equivalence_empty"
+
+
+def test_equivalence_mixed_sample_counts_compared_and_skipped(pool):
+    bad = _item([SINGLE], 2.0)
+    bad["spot"] = np.nan
+    out = check_equivalence(pool, [bad, _item(SPREAD, 1.5)], draws=DRAW)
+    assert out["checked"] == 1
+    assert out["skipped"] == 1
+    assert out["max_abs_diff"] <= 1e-9
+
+
+def test_put_means_rejects_non_increasing_strikes(pool):
+    with pytest.raises(ValueError, match="strictly increasing"):
+        put_means(pool, key="K", event_date=LATE, spot=100.0, pre_iv30=40.0, pred_move=5.0,
+                  pred_crush=-15.0, dte_exit=9, strikes=np.array([100.0, 95.0]), draws=DRAW)
+
+
+def test_build_pool_missing_crush_label_refuses(data):
+    table, labels = data
+    with pytest.raises(OpsError) as caught:
+        build_pool(table, labels.drop(columns="crush_pct_iv30"), floor=None)
+    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert caught.value.problem.details["reason"] == "pool_columns_missing"
+
+
+def _pool_of(n):
+    """A pool of exactly ``n`` rows, all dated before LATE."""
+    index = pd.Index([f"R{i}" for i in range(n)], name="event_id")
+    table = pd.DataFrame({"event_date": pd.Timestamp("2024-01-01"), "pred_move": 5.0,
+                          "pred_crush": -15.0}, index=index)
+    labels = pd.DataFrame({"abs_move": 6.0, "crush_pct_iv30": -14.0}, index=index)
+    return build_pool(table, labels, floor=None)
+
+
+def test_min_pool_boundary_is_not_thin_pool():
+    # Exactly MIN_POOL rows before the date: the pool check passes, so the window check decides.
+    at_min = _pool_of(MIN_POOL)
+    assert at_min.before(LATE) == MIN_POOL
+    assert undetermined_reason(at_min, _history(99), LATE) == "thin_window"
+    assert undetermined_reason(at_min, _history(100), LATE) is None
+
+
+def test_one_below_min_pool_is_thin_pool():
+    below = _pool_of(MIN_POOL - 1)
+    assert below.before(LATE) == MIN_POOL - 1
+    assert undetermined_reason(below, _history(100), LATE) == "thin_pool"

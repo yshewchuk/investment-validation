@@ -58,7 +58,8 @@ def put_means(pool, *, key, event_date, spot, pre_iv30, pred_move, pred_crush, d
     """Mean exit value of a single put at each strike, or ``None`` if unsimulable.
 
     Validation, seed and draw order match ``expected_pnl``, so the same simulated exits price every
-    strike. Only the (draws, strikes) grid is allocated and nothing is retained.
+    strike. Allocates the draws vectors and one (draws, strikes) grid transiently; only the (strikes,)
+    means are returned.
     """
     strikes = np.asarray(strikes, dtype=float)
     if strikes.ndim != 1 or not np.all(np.isfinite(strikes)) or np.any(np.diff(strikes) <= 0):
@@ -140,6 +141,7 @@ def check_equivalence(pool, sample, *, tolerance=TOLERANCE, draws=DRAWS):
     if not sample:
         raise ValueError("equivalence needs a non-empty sample")
     worst = 0.0
+    compared = 0
     for item in sample:
         means = put_means(pool, key=item["key"], event_date=item["event_date"], spot=item["spot"],
                           pre_iv30=item["pre_iv30"], pred_move=item["pred_move"],
@@ -159,6 +161,12 @@ def check_equivalence(pool, sample, *, tolerance=TOLERANCE, draws=DRAWS):
         if fast is None or ref is None or abs(fast - ref) > tolerance:
             raise fail(_CONFLICT, "the fast path disagrees with expected_pnl",
                        details={"reason": "fast_path_mismatch"})
+        compared += 1
         worst = max(worst, abs(fast - ref))
-    print(f"[pnl_pool] equivalence checked={len(sample)} max_abs_diff={worst:.3e}", file=sys.stderr)
-    return {"checked": len(sample), "max_abs_diff": worst}
+    if compared == 0:
+        raise fail(_CONFLICT, "no sample item was simulable, so nothing was compared",
+                   details={"reason": "equivalence_empty"})
+    skipped = len(sample) - compared
+    print(f"[pnl_pool] equivalence checked={compared} skipped={skipped} "
+          f"max_abs_diff={worst:.3e}", file=sys.stderr)
+    return {"checked": compared, "skipped": skipped, "max_abs_diff": worst}
