@@ -1,6 +1,6 @@
 # Search parent releases its data before dispatch (design)
 
-Status: design only. No code in this PR. Scope rules: no edit to SIZE search modules or to the `experiments/size_panel.py` source closure in this PR; no heavy job; nothing here touches the ledger.
+Status: design; decisions 1-4 of section 7 settled by the user on 2026-11-18. P1 (Measure) is the first code PR. Scope rules: no edit to SIZE search modules or to the `experiments/size_panel.py` source closure in this PR; no heavy job; nothing here touches the ledger.
 
 Standard tool check: nothing off the shelf covers this. The levers are plain Python/glibc (`gc.collect`, `malloc_trim`) and the repo's own spawn pool, so the design reuses the existing `ProcessPoolExecutor` spawn path and `experiments/memory_guard.py`; it adds no library.
 
@@ -51,10 +51,10 @@ Not holders: the fit child (streams manifests, own RSS watchdog), `collect_outer
 
 ### 3.2 Release points
 
-1. **Process isolation for the serial path (proposed main change; the default is open decision 1).** With containment on, `workers=1` runs through the same one-worker spawn pool as `workers>1` (a pool of one), so the parent never materializes inputs. The worker already runs inside its 4 GiB child cap and per-process RSS watchdog, a path exercised for `workers>1`. The parent drops from "panel + cohort" to "registration + plan + records". Library callers and tests keep today's in-process serial path (`run_search(..., isolate=False)` default; the SIZE and IV CLIs pass `True`), because in-process fakes cannot cross `spawn`.
+1. **Process isolation for the serial path (proposed main change; decision 1: isolate by default).** With containment on, `workers=1` runs through the same one-worker spawn pool as `workers>1` (a pool of one), so the parent never materializes inputs. The worker already runs inside its 4 GiB child cap and per-process RSS watchdog, a path exercised for `workers>1`. The parent drops from "panel + cohort" to "registration + plan + records". Library callers and tests keep today's in-process serial path (`run_search(..., isolate=False)` default; the SIZE and IV CLIs pass `True`), because in-process fakes cannot cross `spawn`.
 2. **Reference release with measurement** for what the parent still holds. A single helper `release_parent_caches()` clears the shared `_PANEL_MEMO` (one memo serves SIZE and IV), `SearchTrials._memo` (not `_published`, see 3.3), runs `gc.collect()` and `ctypes` `malloc_trim(0)` when available (an absent libc symbol is a logged no-op, never an error). Called at: (a) after the claimed-trial and completed-outer replays (which load a cohort or panel in the parent on resume) and before the pool is created, (b) after pool shutdown and before `freeze`, (c) at the end of the refit stage (not between refit units: the memo exists to share one panel across units, and releasing per unit would re-read it per unit), (d) before `collect`.
 3. **Refits stay in the parent** for now. They are sequential and run after the pool is gone, so the parent holds one panel at a time and releases at (c). If the smoke shows the refit stage still exceeding the box, refits move to the one-worker pool as a follow-up slice.
-4. **Cheap fixes to H4/H5 are separate and optional** (section 6): memoize the plan rebuild per `(plan_ref, request)` within one `run_search` call, and share one verified `freeze` across the refit units of one stage. Both are speed-ups that weaken a repeated independent re-verification, so each needs the user's call (open decision 3).
+4. **Speed-ups H4/H5 are unconditional slices** (decision 3, section 6): memoize the plan rebuild per `(plan_ref, request)` within one `run_search` call, and share one verified `freeze` across the refit units of one stage. Each drops a repeated independent re-verification; the user accepted that.
 
 ### 3.3 How references are dropped
 
@@ -62,7 +62,7 @@ Not holders: the fit child (streams manifests, own RSS watchdog), `collect_outer
 
 ### 3.4 Memory budget semantics
 
-- The request's `limits.parent.memory_bytes` stays the parent's RSS watchdog cap, and the preflight rule `workers * child <= parent` stays as is. With a small real parent the rule is conservative: 3 workers x 4 GiB needs a 12 GiB ceiling in the request even though the parent's target is 1-2 GiB (a target to be measured, not a measured figure; it excludes retained cohorts and fit children, which are separate processes). Changing the rule would loosen admission or change request identity, so this design does not; operators set a high parent ceiling for the next request (open decision 2).
+- The request's `limits.parent.memory_bytes` stays the parent's RSS watchdog cap, and the preflight rule `workers * child <= parent` stays as is. With a small real parent the rule is conservative: 3 workers x 4 GiB needs a 12 GiB ceiling in the request even though the parent's target is 1-2 GiB (a target to be measured, not a measured figure; it excludes retained cohorts and fit children, which are separate processes). Changing the rule would loosen admission or change request identity, so this design does not; operators set a high parent ceiling for the next request (decision 2).
 - Preflight adds a `decision()` log line with host `MemAvailable` and the projected family size (`parent_target + workers*child`). It refuses nothing new; host admission stays with `bounded_run` (per-process caps, not host reservations, as the memory ceiling contract says).
 - The parent logs VmRSS and `ru_maxrss` at stage boundaries (progress-logging convention, bounded cadence).
 
@@ -77,17 +77,17 @@ Not holders: the fit child (streams manifests, own RSS watchdog), `collect_outer
 
 ### 3.6 Source-closure ordering constraint (important)
 
-SIZE registrations bind `source_closure` of `experiments/size_search.py`, and `verify_installation` refuses a binding whose closure differs from the installed tree; the driver seal binds the closure of `v2_magnitude_search_run.py`, and journal records bind the trials/outer closures. So **any code slice changes the closure and makes an existing SIZE run (including the in-flight v14 run, its `report`, and resumes) refuse `EXPERIMENT_IDENTITY_CONFLICT` on the merged tree.** Rule: no code slice merges until v14 has finished and its report is collected, or the v14 report is run from a pinned checkout; the next SIZE run re-preflights and re-registers anyway. The `experiments/size_panel.py` closure is not edited: the release helper lives in the two binding modules and the driver, which import `size_panel` but are not in its closure, and P2's tests assert its closure hash is unchanged. The bindings are in the `size_search.py` closure; that is the ordering constraint above, not a violation of the size_panel rule.
+SIZE registrations bind `source_closure` of `experiments/size_search.py`, and `verify_installation` refuses a binding whose closure differs from the installed tree; the driver seal binds the closure of `v2_magnitude_search_run.py`, and journal records bind the trials/outer closures. So **any code slice changes the closure and makes an existing SIZE run (including the in-flight v14 run, its `report`, and resumes) refuse `EXPERIMENT_IDENTITY_CONFLICT` on the merged tree.** Rule (decision 4): slices merge as ready. The in-flight v14 run and its report execute from their own pinned worktree, so the closure change on main does not affect them; no run directory is touched. The next SIZE run re-preflights and re-registers anyway. The `experiments/size_panel.py` closure is not edited: the release helper lives in the two binding modules and the driver, which import `size_panel` but are not in its closure, and P2's tests assert its closure hash is unchanged. The bindings are in the `size_search.py` closure; that is the ordering constraint above, not a violation of the size_panel rule.
 
 ### 3.7 Contract text (moves into `experiments/ARCHITECTURE.md` with the first code slice)
 
-`experiments/ARCHITECTURE.md` is about 23,500 words against a 10,500-word ceiling (`checks/architecture_doc_budgets.py`); a doc over the ceiling may only shrink, so it cannot grow in this PR. The contract lives here until a PR that nets a shrink of that file (a compression, or a slice whose text replaces more words than it adds) carries it. Each code slice that changes failure semantics must update the contract in the same PR, so P2 or P3 pairs with that shrink. Proposed contract (items marked proposed depend on open decision 1) for the shared search layer (`run_search`, `SearchTrials`, `execute_outer_fold`, the shared panel memo), covering SIZE and IV:
+`experiments/ARCHITECTURE.md` is about 23,500 words against a 10,500-word ceiling (`checks/architecture_doc_budgets.py`); a doc over the ceiling may only shrink, so it cannot grow in this PR. The contract lives here until a PR that nets a shrink of that file (a compression, or a slice whose text replaces more words than it adds) carries it. Each code slice that changes failure semantics must update the contract in the same PR, so P2 or P3 pairs with that shrink. Proposed contract (items marked proposed follow decision 1) for the shared search layer (`run_search`, `SearchTrials`, `execute_outer_fold`, the shared panel memo), covering SIZE and IV:
 
 - Identity, journal slot names and forecasts are unchanged by release.
 - The parent drops its panel memo and cohort memo before the pool starts, after it shuts down, at the end of the refit stage and before `collect`; proposed (decision 1): contained CLIs run `workers=1` as a pool of one; library callers keep in-process serial.
 - `limits.parent.memory_bytes` stays the parent watchdog cap and `workers * child <= parent` is unchanged; preflight logs `MemAvailable` and refuses nothing new.
 - A failed release logs and continues; a pool of one that cannot start refuses before any claim (missing CPU affinity `RESOURCE_UNAVAILABLE`; worker/memory bound violations `INVALID_EXPERIMENT_SPEC`, as `_parallel_preflight` does today; a spawn failure is a new preflight check and refuses `RESOURCE_UNAVAILABLE`); worker/parent exhaustion, OOM kill and restart keep existing outcomes (claim retained, no freeze, no retry).
-- Any code slice changes the closures SIZE registrations and driver seals bind; slices merge only after the in-flight run is reported.
+- Any code slice changes the closures SIZE registrations and driver seals bind; slices merge as ready, and in-flight runs use pinned worktrees.
 
 ## 4. Other drivers
 
@@ -111,19 +111,20 @@ SIZE registrations bind `source_closure` of `experiments/size_search.py`, and `v
 
 Pass: parent current VmRSS after pool creation <= 2 GiB with `workers>=2` on the smoke, scaling checked against panel-size ratio before extrapolating to the full universe; identical journal and report; `workers=3` wall time below `workers=1`. Failing the first criterion means H3/H4 dominate and P4 moves up.
 
-## 6. Split into code PRs (each merges only after the v14 report is collected; estimates are code / test / doc words, code and test in added lines)
+## 6. Split into code PRs (each merges as ready; in-flight runs use pinned worktrees; estimates are code / test / doc words, code and test in added lines)
 
 - **P1 Measure.** Stage-boundary VmRSS/`ru_maxrss` and holder-size logging in `run_search`, refit and collect. No behaviour change. Produces the baseline. About 100 / 80 / 0.
 - **P2 Release helper.** `release_parent_caches()` plus a clear of the shared memo, called at the four points of 3.2 (point (a) is after the claimed-trial and completed-outer replays); retention and identity tests. About 90 / 150 / 10 doc lines (about 250 words) of contract text, paired with the shrink slice below (3.7).
-- **P3 Isolated serial path (needs decision 1).** `run_search(isolate=...)`; CLIs pass `True`; pool of one; parity test (isolated vs in-process on a tiny fixture: identical journal). About 120 / 180 / 6 doc lines (about 150 words, contract delta).
-- **P4 (conditional on smoke) Hydration and plan admission.** Compact registration for the parent after plan admission; memoize plan rebuild per call. Only if H3/H4 measure large. About 150 / 150 / 0.
+- **P3 Isolated serial path (decision 1: isolate by default).** `run_search(isolate=...)`; CLIs pass `True`; pool of one; parity test (isolated vs in-process on a tiny fixture: identical journal). About 120 / 180 / 6 doc lines (about 150 words, contract delta).
+- **P4 Plan-rebuild memo and shared freeze (unconditional, decision 3).** Memoize the plan rebuild per `(plan_ref, request)` per `run_search` call; share one verified `freeze` across the refit units of one stage. About 150 / 150 / 0.
+- **P4b (conditional on smoke) Compact registration** for the parent after plan admission, only if H3 measures large. About 100 / 100 / 0.
 - **P5 (conditional) Refits through the pool** if the refit stage still exceeds the box after P2. About 150 / 150 / 0.
 - **S0 Shrink (lands with or before P2).** Compress `experiments/ARCHITECTURE.md` by at least the words P2 and P3 add (about 400 words), so the contract can move in without growth. About 0 / 0 / net -400 words (a larger number of deleted lines).
-- **Issues (not slices):** share one verified `freeze` across refit units; audit the distribution drivers' parent holdings after P1.
+- **Issue (not a slice):** audit the distribution drivers' parent holdings after P1.
 
-## 7. Open decisions for the user
+## 7. Decisions (user, 2026-11-18; all settled)
 
-1. **Isolate by default for the contained CLIs?** `workers=1` becomes a pool of one (CLIs only). Cost: one spawn per run, and a killed worker kills the run. Alternative: keep in-process serial and rely on reference release, which section 1.2 says cannot be trusted to return RSS.
-2. **Meaning of `parent.memory_bytes`.** Keep it as the parent watchdog cap and have operators set it at or above `workers * child` (no identity change), or add a separate family ceiling in a new request version (identity change). Recommendation: keep.
-3. **Verification versus speed for H4/H5.** Whether to memoize the plan rebuild and share one `freeze` across refit units, each dropping a repeated independent re-verification. Recommendation: defer to issues unless the smoke shows them dominant.
-4. **Merge ordering.** Confirm no code slice merges until v14 and its report are done (3.6), accepting that v14 cannot be resumed or re-reported on the merged tree.
+1. **Isolate by default.** `workers=1` in the contained CLIs runs as a spawn pool of one (P3). Cost accepted: one spawn per run, and a killed worker kills the run. Library callers keep in-process serial.
+2. **Keep `limits.parent.memory_bytes`** as the parent watchdog cap, no new request version; operators set it at or above `workers * child`.
+3. **Include the speedups now.** Memoizing the plan rebuild per call and sharing one verified freeze across refit units are unconditional slices (P4), not issues.
+4. **Merge slices as ready.** The in-flight v14 run and its report execute from their own pinned worktree, so the closure change on main does not affect them.
