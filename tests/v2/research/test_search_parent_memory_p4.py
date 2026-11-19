@@ -13,6 +13,7 @@ from experiments import size_search_binding as binding
 from experiments import magnitude_search_trials as trials_module
 from experiments import v2_magnitude_search_run as run_mod
 
+PLAN_V2 = plan_mod.PLAN_V2
 PLAN_V3 = plan_mod.PLAN_V3
 REQUEST = {"schema_version": "magnitude_search_request.v4"}
 SIZE_REQUEST = {"schema_version": "magnitude_search_request.v4"}
@@ -151,6 +152,51 @@ def test_memo_still_refuses_a_wrong_ref_on_a_hit(calls):
             plan_mod.read_search_plan(None, store, registration, REQUEST, wrong)
     assert caught.value.problem.code == "EXPERIMENT_IDENTITY_CONFLICT"
     assert calls["folds"] == 1
+
+
+def test_memo_ref_comparison_is_keyed_per_ref_so_a_passed_ref_does_not_cover_another(calls):
+    store, registration, ref = _setup(calls)
+    wrong = artifact_reference(b"tampered", PLAN_V3)
+    other_schema = artifact_reference(b"tampered", PLAN_V2)
+    with plan_mod.plan_memo():
+        plan_mod.read_search_plan(None, store, registration, REQUEST, ref)
+        for bad in (wrong, other_schema):
+            with pytest.raises(OpsError) as caught:
+                plan_mod.read_search_plan(None, store, registration, REQUEST, bad)
+            assert caught.value.problem.code == "EXPERIMENT_IDENTITY_CONFLICT"
+        assert plan_mod.read_search_plan(None, store, registration, REQUEST, ref) == \
+            plan_mod.read_search_plan(None, store, registration, REQUEST, ref)
+    # Different plan_schema is a different memo entry, so the PLAN_V2 read builds a second plan.
+    assert calls["folds"] == 2
+
+
+def test_memo_wrong_ref_first_does_not_block_the_right_ref_after_it(calls):
+    store, registration, ref = _setup(calls)
+    wrong = artifact_reference(b"tampered", PLAN_V3)
+    with plan_mod.plan_memo():
+        with pytest.raises(OpsError) as caught:
+            plan_mod.read_search_plan(None, store, registration, REQUEST, wrong)
+        assert caught.value.problem.code == "EXPERIMENT_IDENTITY_CONFLICT"
+        plan_mod.read_search_plan(None, store, registration, REQUEST, ref)
+        with pytest.raises(OpsError) as caught:
+            plan_mod.read_search_plan(None, store, registration, REQUEST, wrong)
+        assert caught.value.problem.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert calls["folds"] == 1
+
+
+def test_memo_last_key_differs_per_request_and_each_request_builds_once(calls):
+    _, registration, _ = _setup(calls)
+    other_request = {**REQUEST, "note": "changed"}
+    with plan_mod.plan_memo():
+        binding.prepare_plan(None, Store(), registration, REQUEST, plan_schema=PLAN_V3)
+        first_key = plan_mod._PLAN_MEMO["last"]
+        binding.prepare_plan(None, Store(), registration, other_request, plan_schema=PLAN_V3)
+        second_key = plan_mod._PLAN_MEMO["last"]
+        assert first_key != second_key
+        assert first_key in plan_mod._PLAN_MEMO and second_key in plan_mod._PLAN_MEMO
+        binding.prepare_plan(None, Store(), registration, REQUEST, plan_schema=PLAN_V3)
+        assert plan_mod._PLAN_MEMO["last"] == first_key
+    assert calls["folds"] == 2
 
 
 def test_memo_still_verifies_stored_bytes_on_a_hit(calls):
