@@ -75,7 +75,8 @@ def taken(chunk, *eids, name="CND-PS", alpha=0.5, c=1.0):
                 cost = entered[0]
         costs.append(cost)
     return pd.DataFrame({"event_id": list(eids), "status": ["taken"] * len(eids),
-                         "structure": [name] * len(eids), "entry_cost": costs})
+                         "structure": [name] * len(eids), "entry_cost": costs,
+                         "alpha": [alpha] * len(eids), "c": [c] * len(eids)})
 
 
 def _tables(seed=7, n=600):
@@ -102,7 +103,7 @@ def run(chunk, events, pool, name="CND-PS"):
 def scored_row(eid, *, pnl=0.5, mcap=20e9, rel=0.1, date="2024-06-10", name="TWIN-P"):
     return {"event_id": eid, "event_date": pd.Timestamp(date), "structure": name, "width": 0.04,
             "entry_cost": 3.0, "rel_spread": rel, "mcap_usd": mcap, "exp_pnl_sim": pnl,
-            "status": "scored", "reason": None}
+            "status": "scored", "reason": None, "alpha": 0.5, "c": 1.0}
 
 
 def scored_frame(*rows):
@@ -479,4 +480,22 @@ def test_score_refuses_a_nan_entry_cost():
     chunk, events = chunk_of(("A", {})), events_for("A")
     decisions = taken(chunk, "A").assign(entry_cost=NAN)
     with pytest.raises(ValueError, match="decision was not priced at this alpha and c"):
+        sv.score(chunk, events, decisions, "CND-PS", 0.5)
+
+
+def test_score_refuses_a_decision_priced_at_another_c_with_the_same_cost(monkeypatch):
+    # Force resolve to ignore c, so c=1.25 yields the same strikes and entry cost as the c=1.0 decision.
+    real = sv.resolve
+    monkeypatch.setattr(sv, "resolve", lambda chunk, i, name, pred, c=1.0: real(chunk, i, name, pred, 1.0))
+    chunk, events = chunk_of(("A", {})), events_for("A")
+    decisions = taken(chunk, "A", c=1.0)
+    assert sv.score(chunk, events, decisions, "CND-PS", 0.5, c=1.0).shape[0] == 1
+    with pytest.raises(ValueError, match="decision was not priced at this alpha and c"):
+        sv.score(chunk, events, decisions, "CND-PS", 0.5, c=1.25)
+
+
+def test_score_needs_alpha_and_c_columns():
+    chunk, events = chunk_of(("A", {})), events_for("A")
+    decisions = taken(chunk, "A").drop(columns="c")
+    with pytest.raises(ValueError, match="alpha and c columns"):
         sv.score(chunk, events, decisions, "CND-PS", 0.5)

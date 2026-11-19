@@ -23,7 +23,7 @@ from experiments.size_pnl_straddle import EXIT_UNQUOTED, lots
 
 NAMES = tuple(sorted(FORECAST_SIZED))
 SCORE_COLS = ["event_id", "event_date", "structure", "width", "entry_cost", "rel_spread", "mcap_usd",
-              "exp_pnl_sim", "status", "reason"]
+              "exp_pnl_sim", "status", "reason", "alpha", "c"]
 _OUT_COLS = ["event_id", "structure", "entry_cost", "exit_value", "rung", "lots", "pnl_per_share",
              "pnl_dollars"]
 _CONFLICT = "EXPERIMENT_IDENTITY_CONFLICT"
@@ -179,7 +179,8 @@ def _row(ev, name, **kw):
     """A score row for ``ev`` with NaN measures and an undetermined status, overridden by ``kw``."""
     row = {"event_id": str(ev["event_id"]), "event_date": ev["event_date"], "structure": name,
            "width": math.nan, "entry_cost": math.nan, "rel_spread": math.nan,
-           "mcap_usd": _num(ev["mcap_usd"]), "exp_pnl_sim": math.nan, "status": "undetermined", "reason": None}
+           "mcap_usd": _num(ev["mcap_usd"]), "exp_pnl_sim": math.nan, "status": "undetermined", "reason": None,
+           "alpha": math.nan, "c": math.nan}
     row.update(kw)
     return row
 
@@ -194,7 +195,7 @@ def score_events(chunk, events, sims, name, *, alpha=0.5, c=1.0):
     for ev in events.to_dict("records"):
         eid = str(ev["event_id"])
         params = _width_params(name, ev["pred_move"], c)
-        row = _row(ev, name, width=params["width_moneyness"] if params else math.nan)
+        row = _row(ev, name, width=params["width_moneyness"] if params else math.nan, alpha=alpha, c=c)
         sim = sims.get(eid)
         if eid not in pos or sim is None:
             row["reason"] = "unsimulable"
@@ -288,6 +289,8 @@ def score(chunk, events, decisions, name, alpha, *, c=1.0, drop_unquoted=False):
         raise ValueError("decisions must carry a structure column")
     if "entry_cost" not in decisions.columns:
         raise ValueError("decisions must carry an entry_cost column")
+    if not {"alpha", "c"} <= set(decisions.columns):
+        raise ValueError("decisions must carry alpha and c columns")
     pred = dict(zip(events["event_id"].astype(str), events["pred_move"]))
     pos = {str(e): i for i, e in enumerate(chunk["event_id"])}
     mine = decisions[(decisions["status"] == "taken") & (decisions["structure"] == name)]
@@ -304,7 +307,8 @@ def score(chunk, events, decisions, name, alpha, *, c=1.0, drop_unquoted=False):
             raise ValueError(f"taken event {eid!r} has an unusable entry quote")
         cost = entered[0]
         bound = _num(dec["entry_cost"])
-        if not (math.isfinite(bound) and abs(bound - cost) <= 1e-9):
+        if not (math.isfinite(bound) and abs(bound - cost) <= 1e-9
+                and _num(dec["alpha"]) == float(alpha) and _num(dec["c"]) == float(c)):
             raise ValueError("decision was not priced at this alpha and c")
         if not (math.isfinite(cost) and cost >= MIN_DEBIT):
             raise ValueError(f"taken event {eid!r} has an entry debit below {MIN_DEBIT} a share ({cost!r})")
