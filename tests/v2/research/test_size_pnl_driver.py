@@ -79,7 +79,8 @@ def stubs(monkeypatch):
 
     def fake_tune(items, mid, **kwargs):
         log.append(("tune", mid, tuple(sorted(str(e) for _c, ev, _s in items for e in ev["event_id"]))))
-        return {"stage": "tuning", "model_id": mid, "c": 1.0, "events": sum(len(ev) for _c, ev, _s in items)}
+        return {"stage": "tuning", "model_id": mid, "c": 1.0, "skipped": False,
+                "events": sum(len(ev) for _c, ev, _s in items)}
 
     def fake_scored(chunk_, events, sims, name, *, alpha=0.5, c=1.0):
         return pd.DataFrame({"event_id": events["event_id"].astype(str), "event_date": events["event_date"],
@@ -144,6 +145,7 @@ def test_outer_refuses_before_building_any_chunk(tmp_path, stubs):
     loads = []
     with pytest.raises(Refusal) as caught:
         driver.run(sources(load_index=lambda keys: loads.append(keys)), "outer", tmp_path, prereg=OK)
+    assert caught.value.code == CONFLICT
     assert caught.value.details["reason"] == "tuning_receipt_missing"
     assert loads == []
 
@@ -214,6 +216,7 @@ def test_changed_outer_receipt_leaves_decisions_untouched_and_no_tmp(tmp_path, s
     use_chunks(monkeypatch, [("2024Q3", chunk("E2"))])
     with pytest.raises(Refusal) as caught:
         driver.run(sources(), "outer", tmp_path, prereg=OK)
+    assert caught.value.code == CONFLICT
     assert caught.value.details["reason"] == "tuning_receipt_changed"
     assert (tmp_path / "decisions.parquet").read_bytes() == b"EXISTING"
     assert not (tmp_path / "decisions.parquet.tmp").exists()
@@ -263,6 +266,14 @@ def test_run_py_refuses_on_prereg_before_importing_sources(tmp_path, monkeypatch
     assert json.loads(capsys.readouterr().out)["refused"] == CONFLICT
 
 
+def test_run_py_refuses_a_sources_spec_without_a_colon(tmp_path, monkeypatch, capsys):
+    run_py = _run_main()
+    monkeypatch.setattr(run_py.size_pnl_prereg, "require_preregistration", OK)
+    monkeypatch.setenv("BOUNDED_RUN_NESTED", "1")
+    assert run_py.main(_argv(tmp_path, "--no-ledger", sources="nocolon")) == 2
+    assert json.loads(capsys.readouterr().out)["reason"] == "sources_invalid"
+
+
 def test_run_py_refuses_not_bounded_before_importing_sources(tmp_path, monkeypatch, capsys):
     run_py = _run_main()
     monkeypatch.setattr(run_py.size_pnl_prereg, "require_preregistration", OK)
@@ -309,6 +320,22 @@ def test_outer_refuses_when_inner_json_names_another_model_hash(tmp_path, stubs,
         driver.run(sources(), "outer", inner_out, prereg=OK)
     assert caught.value.code == CONFLICT
     assert caught.value.details["reason"] == "inner_receipt_mismatch"
+
+
+def test_outer_refuses_when_inputs_inner_names_another_production(tmp_path, stubs, monkeypatch):
+    use_chunks(monkeypatch, [("2024Q3", chunk("E2"))])
+    driver.run(sources(), "inner", tmp_path / "inner", prereg=OK)
+    receipts = tmp_path / "inner" / "receipts"
+    inputs = tuning.load_receipt(receipts / "inputs_inner.json")
+    tampered = {k: v for k, v in inputs.items() if k != "content_hash"}
+    tampered["production"] = {"other": "0" * 64}
+    (receipts / "inputs_inner.json").unlink()
+    tuning.write_receipt(receipts / "inputs_inner.json", tampered)
+    use_chunks(monkeypatch, [("2024Q3", chunk("E2"))])
+    with pytest.raises(Refusal) as caught:
+        driver.run(sources(), "outer", tmp_path / "inner", prereg=OK)
+    assert caught.value.code == CONFLICT
+    assert caught.value.details["reason"] == "inner_inputs_mismatch"
 
 
 def test_outer_refuses_an_inner_receipt_tuned_on_smoke_ids(tmp_path, stubs, monkeypatch):

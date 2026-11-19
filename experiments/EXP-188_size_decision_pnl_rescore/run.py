@@ -78,12 +78,16 @@ def main(argv: list[str] | None = None) -> int:
         args.expected_identities = _read_json(args.expected)
         # Imported only after the gates above, so a missing PLANNED row refuses first.
         from experiments import size_pnl_driver
-        module_name, _, func = args.sources.partition(":")
+        module_name, sep, func = args.sources.partition(":")
         try:
+            if not sep:
+                raise ValueError(args.sources)
             factory = getattr(importlib.import_module(module_name), func)
-        except (OSError, ValueError, json.JSONDecodeError) as exc:
-            raise fail(_INVALID, f"--sources {args.sources} is unreadable",
-                       details={"reason": "input_unreadable"}) from exc
+            if not callable(factory):
+                raise AttributeError(func)
+        except (ValueError, ImportError, AttributeError) as exc:
+            raise fail(_INVALID, f"--sources {args.sources} is invalid",
+                       details={"reason": "sources_invalid"}) from exc
         sources = factory(args)
         if sources.expected != args.expected_identities:
             raise fail(_CONFLICT, "--expected differs from the sources' expected identities",
@@ -94,7 +98,8 @@ def main(argv: list[str] | None = None) -> int:
         summary = size_pnl_driver.run(sources, args.stage, args.out_dir, event_ids=event_ids,
                                       prereg=lambda: receipt)
     except (OpsError, Refusal) as exc:
-        print(json.dumps({"refused": exc.code, "message": str(exc)}))
+        details = exc.details if isinstance(exc, Refusal) else exc.problem.details
+        print(json.dumps({"refused": exc.code, "message": str(exc), "reason": details.get("reason")}))
         return 2
     print(json.dumps(summary))
     return 0

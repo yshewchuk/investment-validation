@@ -16,6 +16,7 @@ the S3 ladder one quarter at a time and writes the receipts. The synthetic arm
 No production caller beyond ``run.py``.
 """
 import hashlib
+import json
 import os
 import resource
 import sys
@@ -148,9 +149,12 @@ def _plan_window(plan, window, ids):
     return plan[keep]
 
 
-def _outer_gate(out, ready, scope):
+_BOUND = ("spec_hash", "identity", "roster", "models", "production")  # not "tables": windows differ by stage
+
+
+def _outer_gate(out, ready, scope, body):
     """Refuses before any chunk is built: every ready model needs its tuning receipt, and inner.json must exist,
-    bind those receipts, and have been tuned on this run's event scope."""
+    bind those receipts, have been tuned on this run's event scope, and bind this run's inputs."""
     receipts = {mid: tuning.load_receipt(out / "receipts" / f"tuning_{mid}.json") for mid in ready}
     inner = tuning.load_receipt(out / "receipts" / "inner.json")
     if any(inner["models"].get(mid) != receipts[mid]["content_hash"] for mid in ready):
@@ -158,6 +162,9 @@ def _outer_gate(out, ready, scope):
                       {"reason": "inner_receipt_mismatch"})
     if "scope" not in inner or inner["scope"] != scope:
         raise Refusal(_CONFLICT, "inner.json was tuned on a different event scope", {"reason": "scope_mismatch"})
+    inputs_inner, now = tuning.load_receipt(out / "receipts" / "inputs_inner.json"), json.loads(json.dumps(body))
+    if any(inputs_inner.get(k) != now[k] for k in _BOUND):
+        raise Refusal(_CONFLICT, "inputs_inner.json was bound to different inputs", {"reason": "inner_inputs_mismatch"})
     return receipts
 
 
@@ -175,9 +182,12 @@ def _inner(src, out, ready, plan, ids):
             items[mid].append((chunk, events, shortvol.simulate(chunk, events, pools[mid])))
         _log(f"inner quarter {number}/{quarters} {label} events={len(chunk['event_id'])} rss={_rss_mb():.0f}MB")
     hashes = {}
-    for mid in ready:
+    for i, mid in enumerate(ready, start=1):
+        started = time.monotonic()
         body = tuning.tune(items[mid], mid)
         hashes[mid] = tuning.write_receipt(out / "receipts" / f"tuning_{mid}.json", body)["content_hash"]
+        _log(f"tuning model {i}/{len(ready)} {mid} elapsed={time.monotonic() - started:.1f}s "
+             f"c={body['c']} skipped={body['skipped']}")
     return hashes, kept
 
 
@@ -306,7 +316,7 @@ def run(src, stage, out_dir, *, event_ids=None, prereg=size_pnl_prereg.require_p
     tuning.write_receipt(out / "receipts" / f"inputs_{stage}.json", body)
     if not ready:
         raise Refusal(_CONFLICT, "no model is ready to be tuned or scored", {"reason": "no_ready_models"})
-    receipts = _outer_gate(out, ready, scope) if stage == "outer" else {}
+    receipts = _outer_gate(out, ready, scope, body) if stage == "outer" else {}
     plan = _plan_window(src.plan_frame, _window(stage), ids)
     if plan.empty:
         raise Refusal(_CONFLICT, "the plan window holds no events", {"reason": "empty_population"})

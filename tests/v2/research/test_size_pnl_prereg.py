@@ -429,6 +429,7 @@ def test_run_refuses_without_planned_row_before_any_stage(tmp_path, monkeypatch,
     assert code == 2
     refused = json.loads(capsys.readouterr().out)
     assert refused["refused"] == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert refused["reason"] == "planned_row_missing"
     assert "planned" in refused["message"].lower()
 
 
