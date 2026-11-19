@@ -6,6 +6,14 @@ crossed, negative bid, ask<=0) are set to NaN, never dropped, so consumers see t
 Each exit quote gets a mark rung
 (1 usable, 2 zero-bid or wide, 3 unusable) via ``FillModel.is_wide``; no marks are computed here
 (S5). Chains arrive only through the injected ``load_index``, once per quarter.
+
+Skips depend only on entry-time facts (no entry chain, no session, selector failure, no put or no call
+row in the entry chain, NaN entry dte). Future exit data never drops an event: a missing exit chain, no
+rows at the expiry on the exit date, or a NaN exit dte keeps the event with every exit quote NaN, rung 3,
+``dte_exit = -1`` (sentinel for "unknown") and NaN ``spot_exit`` where no spot is available. These
+events are counted in the chunk's ``exit_missing`` dict so a straddle decision never depends on exit
+coverage (the design's worst-case rung 3). Chunk fields: ``offsets``, ``skipped``, ``exit_missing``,
+per-event scalars, and per-contract arrays.
 """
 import sys
 import time
@@ -20,8 +28,8 @@ from experiments.size_pnl_readers import Admitted
 
 _CONFLICT = "EXPERIMENT_IDENTITY_CONFLICT"
 _DENIED = "HOLDOUT_ACCESS_DENIED"
-_REASONS = ("no_entry_chain", "no_exit_chain", "no_session", "structure_unresolved",
-            "expiry_gone_at_exit")
+_REASONS = ("no_entry_chain", "no_session", "structure_unresolved")
+_EXIT_MISSING = ("no_exit_chain", "expiry_gone_at_exit")
 _PLAN_COLS = ("event_id", "ticker", "event_date", "session", "entry_date", "exit_date")
 _DATE_COLS = ("event_date", "entry_date", "exit_date")
 _SESSIONS = ("AMC", "BMO")
@@ -106,51 +114,61 @@ def _exit_rungs(bid, ask):
 
 
 def _event(row, index, selector):
-    """(reason, None) for a skipped event, else (None, record) with contract quotes and scalars."""
+    """(skip, gap, record). ``skip`` is a reason for a dropped event; otherwise ``gap`` is None or the
+    ``_EXIT_MISSING`` key for an event kept with no exit quotes, and ``record`` holds the contract quotes
+    and scalars. Skips use entry-time facts only: no entry chain, no session, selector failure, an entry
+    chain with no put row or no call row (any quote validity), or NaN entry dte. Whether a short-vol
+    structure has enough valid puts is not checked here; S5 applies that depth rule."""
     entry = index.get(row["ticker"], row["entry_date"])
     if entry is None or entry.empty:
-        return "no_entry_chain", None
-    exit_ = index.get(row["ticker"], row["exit_date"])
-    if exit_ is None or exit_.empty:
-        return "no_exit_chain", None
+        return "no_entry_chain", None, None
     if pd.isna(row["session"]):
-        return "no_session", None
+        return "no_session", None, None
     try:
         expiry = pd.Timestamp(selector.select(entry, row["event_date"], row["session"]))
     except StructureError:
-        return "structure_unresolved", None
+        return "structure_unresolved", None, None
     ent_rows = entry[entry["expiry"] == expiry]
     ent = _contracts(ent_rows, entry=True).rename(columns={"bid": "bid_e", "ask": "ask_e"})
-    if int(((ent["right"] == 0) & ent["bid_e"].notna()).sum()) < 3:
-        return "structure_unresolved", None
-    ex_rows = exit_[exit_["expiry"] == expiry]
-    if ex_rows.empty:
-        return "expiry_gone_at_exit", None
-    dte_e, dte_x = _first(ent_rows["dte"]), _first(ex_rows["dte"])
+    if not ((ent["right"] == 0).any() and (ent["right"] == 1).any()):
+        return "structure_unresolved", None, None
+    dte_e = _first(ent_rows["dte"])
     if np.isnan(dte_e):
-        return "structure_unresolved", None
-    if np.isnan(dte_x):
-        return "expiry_gone_at_exit", None
-    ex = _contracts(ex_rows, entry=False).rename(columns={"bid": "bid_x", "ask": "ask_x"})
-    got = ent.merge(ex[["right", "strike", "bid_x", "ask_x"]], on=["right", "strike"], how="left")
-    bid_x = np.array(got["bid_x"], dtype=float)
-    ask_x = np.array(got["ask_x"], dtype=float)
+        return "structure_unresolved", None, None
+    # Exit data never skips: a missing chain, expiry or dte is recorded as a gap and the event is kept.
+    exit_ = index.get(row["ticker"], row["exit_date"])
+    if exit_ is None or exit_.empty:
+        gap, ex_rows, spot_x, dte_x = "no_exit_chain", None, float("nan"), float("nan")
+    else:
+        ex_rows = exit_[exit_["expiry"] == expiry]
+        spot_x, dte_x = _first(exit_["spot"]), _first(ex_rows["dte"])  # NaN dte if no rows at expiry
+        gap = "expiry_gone_at_exit" if np.isnan(dte_x) else None
+    if gap is None:
+        ex = _contracts(ex_rows, entry=False).rename(columns={"bid": "bid_x", "ask": "ask_x"})
+        ent = ent.merge(ex[["right", "strike", "bid_x", "ask_x"]], on=["right", "strike"], how="left")
+        bid_x = np.array(ent["bid_x"], dtype=float)
+        ask_x = np.array(ent["ask_x"], dtype=float)
+    else:
+        bid_x = np.full(len(ent), np.nan)
+        ask_x = np.full(len(ent), np.nan)
     rung = _exit_rungs(bid_x, ask_x)
     bid_x[rung == 3] = np.nan
     ask_x[rung == 3] = np.nan
-    return None, {"event_id": str(row["event_id"]), "expiry": expiry.to_datetime64(),
-                  "spot_entry": _first(entry["spot"]), "spot_exit": _first(exit_["spot"]),
-                  "dte_entry": int(dte_e), "dte_exit": int(dte_x),
-                  "right": got["right"].to_numpy(float), "strike": got["strike"].to_numpy(float),
-                  "bid_e": got["bid_e"].to_numpy(float), "ask_e": got["ask_e"].to_numpy(float),
-                  "bid_x": bid_x, "ask_x": ask_x, "exit_rung": rung}
+    record = {"event_id": str(row["event_id"]), "expiry": expiry.to_datetime64(),
+              "spot_entry": _first(entry["spot"]), "spot_exit": spot_x,
+              "dte_entry": int(dte_e), "dte_exit": -1 if gap else int(dte_x),
+              "right": ent["right"].to_numpy(float), "strike": ent["strike"].to_numpy(float),
+              "bid_e": ent["bid_e"].to_numpy(float), "ask_e": ent["ask_e"].to_numpy(float),
+              "bid_x": bid_x, "ask_x": ask_x, "exit_rung": rung}
+    return None, gap, record
 
 
-def _pack(recs, skipped):
+def _pack(recs, skipped, exit_missing=None):
     """CSR chunk: per-event scalars, flat per-contract arrays, offsets into the flat arrays."""
     offsets = np.zeros(len(recs) + 1, dtype=np.int64)
     offsets[1:] = np.cumsum([len(r["right"]) for r in recs], dtype=np.int64)
-    chunk = {"offsets": offsets, "skipped": dict(skipped)}
+    gaps = dict.fromkeys(_EXIT_MISSING, 0) if exit_missing is None else dict(exit_missing)
+    chunk = {"offsets": offsets, "skipped": dict(skipped), "exit_missing": gaps}
     chunk.update({k: np.array([r[k] for r in recs], dtype=dt) for k, dt in _SCALARS.items()})
     chunk.update({k: np.concatenate([np.zeros(0, dt)] + [np.asarray(r[k], dt) for r in recs])
                   for k, dt in _FLATS.items()})
@@ -173,7 +191,8 @@ def _progress(label, number, quarters, events, chunk, done, total, started):
     rate = done / max(time.monotonic() - started, 1e-9)
     eta = (total - done) / rate if rate > 0 else 0.0
     print(f"[pnl_ladder] {label} {number}/{quarters} events={events} kept={len(chunk['event_id'])} "
-          f"skipped={chunk['skipped']} rate={rate:.1f}/s eta={eta:.0f}s rss={_rss_mib():.0f}MiB {shares}",
+          f"skipped={chunk['skipped']} exit_missing={chunk['exit_missing']} "
+          f"rate={rate:.1f}/s eta={eta:.0f}s rss={_rss_mib():.0f}MiB {shares}",
           file=sys.stderr)
 
 
@@ -189,14 +208,17 @@ def _quarters(plan, load_index, selector):
         keys |= {(str(t), pd.Timestamp(d).normalize()) for t, d in zip(part["ticker"], part["exit_date"])}
         index = load_index(keys)
         reasons = dict.fromkeys(_REASONS, 0)
+        gaps = dict.fromkeys(_EXIT_MISSING, 0)
         recs = []
         for row in part.to_dict("records"):
-            reason, rec = _event(row, index, selector)
-            if reason is None:
-                recs.append(rec)
-            else:
+            reason, gap, rec = _event(row, index, selector)
+            if reason is not None:
                 reasons[reason] += 1
-        chunk = _pack(recs, reasons)
+                continue
+            recs.append(rec)
+            if gap is not None:
+                gaps[gap] += 1
+        chunk = _pack(recs, reasons, gaps)
         index = None  # chunk holds only numpy copies; drop the index before suspending at yield
         done += len(part)
         _progress(label, number, len(labels), len(part), chunk, done, total, started)

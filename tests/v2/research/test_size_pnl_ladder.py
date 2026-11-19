@@ -172,14 +172,14 @@ def test_null_session_is_skipped_as_no_session_not_refused():
 
 def test_entry_negative_bid_set_nan_zero_bid_kept():
     entry = [(E1, 2, "P", 85, -0.5, 1.0), (E1, 2, "P", 90, 0.0, 1.2),
-             (E1, 2, "P", 95, 1.0, 1.2), (E1, 2, "P", 100, 1.0, 1.2)]
+             (E1, 2, "P", 95, 1.0, 1.2), (E1, 2, "P", 100, 1.0, 1.2), (E1, 2, "C", 100, 1.0, 1.2)]
     [(_, chunk)], _ = _run([_event("n1", entry_rows=entry)])
     assert chunk["event_id"].tolist() == ["n1"]
-    assert chunk["right"].tolist() == [0, 0, 0, 0]
-    assert chunk["strike"].tolist() == [85, 90, 95, 100]
+    assert chunk["right"].tolist() == [0, 0, 0, 0, 1]
+    assert chunk["strike"].tolist() == [85, 90, 95, 100, 100]
     assert np.isnan(chunk["bid_e"][0]) and np.isnan(chunk["ask_e"][0])
     assert chunk["bid_e"][1] == 0.0 and chunk["ask_e"][1] == 1.2
-    assert chunk["bid_e"][2:].tolist() == [1.0, 1.0]
+    assert chunk["bid_e"][2:].tolist() == [1.0, 1.0, 1.0]
 
 
 def test_one_load_per_quarter_ascending_keys_limited():
@@ -241,9 +241,10 @@ def test_skip_reasons_counted_never_raised():
                      exit_rows=_exit_rows("2024-01-05", 0)),
               _event("gone", exit_rows=_exit_rows(E2, 7))]
     [(_, chunk)], _ = _run(events)
-    assert chunk["event_id"].tolist() == ["ok"]
-    assert chunk["skipped"] == {"no_entry_chain": 1, "no_exit_chain": 1, "no_session": 1,
-                                "structure_unresolved": 2, "expiry_gone_at_exit": 1}
+    # Exit gaps keep the event: noexit and gone are kept, counted in exit_missing, not skipped.
+    assert chunk["event_id"].tolist() == ["fewputs", "gone", "noexit", "ok"]
+    assert chunk["skipped"] == {"no_entry_chain": 1, "no_session": 1, "structure_unresolved": 1}
+    assert chunk["exit_missing"] == {"no_exit_chain": 1, "expiry_gone_at_exit": 1}
 
 
 def test_all_skipped_quarter_yields_empty_chunk():
@@ -298,15 +299,41 @@ def test_invalid_exit_duplicate_before_valid_does_not_shadow_it():
     assert chunk["bid_x"][0] == 0.8 and chunk["ask_x"][0] == 1.0
 
 
-def test_invalid_put_quotes_do_not_count_toward_skip_gate():
-    all_nan = _quotes(E1, 2, (90, 100, 110), (90, 100, 110), np.nan, 1.2)
-    [(_, chunk)], _ = _run([_event("g1", entry_rows=all_nan)])
+def test_entry_gate_needs_a_put_row_and_a_call_row_not_valid_quotes():
+    no_puts = _quotes(E1, 2, (), (90, 100, 110), 1.0, 1.2)
+    [(_, chunk)], _ = _run([_event("np", entry_rows=no_puts)])
     assert chunk["event_id"].tolist() == []
     assert chunk["skipped"]["structure_unresolved"] == 1
-    extra = _entry_rows() + [(E1, 2, "P", 85, np.nan, 1.2), (E1, 2, "P", 115, 1.5, 1.0)]
-    [(_, chunk)], _ = _run([_event("g2", entry_rows=extra)])
-    assert chunk["event_id"].tolist() == ["g2"]
+    no_calls = _quotes(E1, 2, (90, 100, 110), (), 1.0, 1.2)
+    [(_, chunk)], _ = _run([_event("nc", entry_rows=no_calls)])
+    assert chunk["event_id"].tolist() == []
+    assert chunk["skipped"]["structure_unresolved"] == 1
+    # Puts whose quotes are all invalid still count as put rows: the event is kept.
+    all_nan_puts = _quotes(E1, 2, (90, 100, 110), (90, 100, 110), np.nan, 1.2)
+    [(_, chunk)], _ = _run([_event("g1", entry_rows=all_nan_puts)])
+    assert chunk["event_id"].tolist() == ["g1"]
     assert chunk["skipped"]["structure_unresolved"] == 0
+
+
+@pytest.mark.parametrize("exit_rows, gap", [
+    (None, "no_exit_chain"),
+    (_exit_rows(E2, 7), "expiry_gone_at_exit"),
+    (_exit_rows(E1, np.nan), "expiry_gone_at_exit"),
+])
+def test_missing_exit_keeps_event_at_rung3(exit_rows, gap):
+    [(_, chunk)], _ = _run([_event("mx", exit_rows=exit_rows)])
+    assert chunk["event_id"].tolist() == ["mx"]
+    assert chunk["exit_rung"].tolist() == [3] * 6
+    assert np.isnan(chunk["bid_x"]).all() and np.isnan(chunk["ask_x"]).all()
+    assert chunk["dte_exit"].tolist() == [-1]
+    assert chunk["dte_entry"].tolist() == [2]
+    if exit_rows is None:
+        assert np.isnan(chunk["spot_exit"][0])
+    else:
+        assert chunk["spot_exit"][0] == 100.0  # spot from the exit chain's available rows
+    assert chunk["exit_missing"] == {"no_exit_chain": int(gap == "no_exit_chain"),
+                                     "expiry_gone_at_exit": int(gap == "expiry_gone_at_exit")}
+    assert chunk["skipped"] == {"no_entry_chain": 0, "no_session": 0, "structure_unresolved": 0}
 
 
 def test_progress_lines_on_stderr(capsys):

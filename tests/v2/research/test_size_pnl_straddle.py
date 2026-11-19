@@ -1,5 +1,6 @@
 """EXP-188 S7: straddle rules. Synthetic fixtures only; no repository."""
 import math
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -8,6 +9,7 @@ import pytest
 from engine.entry_rules import MCAP_FLOOR
 from engine.portfolio import CAPITAL_PER_TRADE, CONTRACT_MULTIPLIER
 from experiments import size_pnl_ladder as lad
+from experiments import size_pnl_readers as rd
 from experiments import size_pnl_straddle as sd
 
 NAN = float("nan")
@@ -388,3 +390,46 @@ def test_score_bad_alpha_raises_with_no_taken_trades(alpha, msg):
     none_taken = sd.decide(events, EMPTY, "R_L2", chunk).assign(status="not_taken")
     with pytest.raises(ValueError, match=msg):
         sd.score(chunk, events, none_taken, alpha)
+
+
+# ---- real ladder path: missing exit chain ----------------------------------
+
+EXPIRY = "2024-03-15"
+
+
+def _chain(rows, day):
+    frame = pd.DataFrame(rows, columns=["expiry", "dte", "right", "strike", "bid", "ask"])
+    frame["expiry"] = pd.to_datetime(frame["expiry"])
+    frame.insert(0, "ticker", "E")
+    frame["obs_date"], frame["spot"] = pd.Timestamp(day), 100.0
+    return frame
+
+
+def _ladder_chunk(exit_rows):
+    """Chunk from ``lad.ladder_chunks`` for one BMO event on 2024-03-14 (entry 03-13, exit 03-15), with the
+    ATM-healthy entry quotes of ``good()``. ``exit_rows=None`` means the exit chain is absent."""
+    strikes = (90, 100, 110)
+    entry = [(EXPIRY, 2, "P", k, 1.8, 2.0) for k in strikes] + [(EXPIRY, 2, "C", k, 2.0, 2.2) for k in strikes]
+    groups = {("E", pd.Timestamp("2024-03-13")): _chain(entry, "2024-03-13")}
+    if exit_rows is not None:
+        groups[("E", pd.Timestamp("2024-03-15"))] = _chain(exit_rows, "2024-03-15")
+    admitted = rd.Admitted({"events": pd.DataFrame({"event_id": ["E"], "event_date": pd.to_datetime(["2024-03-14"])}),
+                            "excluded": {}})
+    plan = pd.DataFrame([{"event_id": "E", "ticker": "E", "event_date": "2024-03-14", "session": "BMO",
+                          "entry_date": "2024-03-13", "exit_date": "2024-03-15"}])
+    index = SimpleNamespace(get=lambda t, d: groups.get((str(t), pd.Timestamp(d).normalize())))
+    [(_, chunk)] = lad.ladder_chunks(admitted, plan, lambda keys: index)
+    return chunk
+
+
+def test_missing_exit_chain_decides_as_covered_and_scores_worst_case():
+    events = pd.DataFrame([ev("E", 1.0)])
+    exit_rows = [(EXPIRY, 0, r, k, 0.8, 1.0) for r in "PC" for k in (90, 100, 110)]
+    covered, missing = _ladder_chunk(exit_rows), _ladder_chunk(None)
+    dec_cov = sd.decide(events, EMPTY, "R_L2", covered).loc[0]
+    dec_miss = sd.decide(events, EMPTY, "R_L2", missing).loc[0]
+    assert dec_miss["status"] == "taken" and dec_cov["status"] == "taken"
+    assert dec_miss["rel_spread"] == dec_cov["rel_spread"]
+    scored = sd.score(missing, events, sd.decide(events, EMPTY, "R_L2", missing), 0.5).set_index("event_id")
+    assert scored.loc["E", "exit_value"] == 0.0
+    assert scored.loc["E", "rung"] == sd.EXIT_UNQUOTED
