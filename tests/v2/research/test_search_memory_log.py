@@ -48,6 +48,17 @@ def test_deep_size_big_list_expansion_is_bounded():
     assert size - sys.getsizeof(big) < 100 * 1024
 
 
+def test_log_memory_reports_elapsed_since_start(capsys, monkeypatch):
+    monkeypatch.setattr("experiments.search_memory_log._T0", None)
+    monkeypatch.setattr("experiments.search_memory_log.time.monotonic", iter([100.0, 107.0]).__next__)
+    log.log_memory("start")
+    log.log_memory("after freeze")
+    lines = [line for line in capsys.readouterr().err.splitlines() if line.strip()]
+    assert len(lines) == 2
+    assert "0s since search start" in lines[0]
+    assert "7s since search start" in lines[1]
+
+
 def test_log_memory_marks_truncated_holder(capsys, monkeypatch):
     monkeypatch.setattr(log, "deep_size", lambda root: (2**20 * 3, True))
     log.log_memory("wide", holder=[1])

@@ -2,11 +2,13 @@
 import itertools
 import resource
 import sys
+import time
 
 from engine.v2.research.progress import decision
 from experiments.memory_guard import rss_bytes
 
 _NODE_CAP = 200_000
+_T0 = None
 
 
 def deep_size(root, cap=_NODE_CAP):
@@ -45,10 +47,14 @@ def deep_size(root, cap=_NODE_CAP):
 
 def log_memory(label, **holders):
     """Emit one stage-boundary memory line; any Exception is swallowed so logging cannot fail a run; MemoryError (the RSS watchdog's signal) propagates."""
+    global _T0
     try:
         rss = rss_bytes()
         peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-        parts = [f"{label}: VmRSS {rss/2**20:.0f} MiB, peak {peak/1024:.0f} MiB"]
+        now = time.monotonic()
+        if _T0 is None or label == "start":
+            _T0 = now
+        parts = [f"{label}: VmRSS {rss/2**20:.0f} MiB, peak {peak/1024:.0f} MiB, {now - _T0:.0f}s since search start"]
         for name, holder in holders.items():
             if holder is None:
                 continue
