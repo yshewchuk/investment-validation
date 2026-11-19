@@ -249,7 +249,8 @@ def decide(scored):
 
 
 def _exit_value(chunk, traded, alpha):
-    """Value of the traded legs at exit: BUY legs close on the bid, SELL legs on the ask; rung 2 at alpha 0."""
+    """Value of the traded legs at exit. A BUY leg closes by selling (``FillModel.sell``, at the bid for alpha 0);
+    a SELL leg closes by buying (``FillModel.buy``, at the ask for alpha 0). Rung-2 legs use alpha 0."""
     total = 0.0
     for leg in traded:
         k = leg["idx"]

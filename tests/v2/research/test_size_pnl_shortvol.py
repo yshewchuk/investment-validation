@@ -174,6 +174,7 @@ def test_pinned_refuses_any_call_leg(monkeypatch, index):
     monkeypatch.setitem(STRUCTURES, "BFLY-P", lambda: dataclasses.replace(real, legs=tuple(legs)))
     with pytest.raises(OpsError) as caught:
         sv.pinned("BFLY-P")
+    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
     assert caught.value.problem.details["reason"] == "call_leg_refused"
 
 
@@ -223,6 +224,7 @@ def test_resolve_refuses_a_call_leg_factory(monkeypatch):
     monkeypatch.setitem(STRUCTURES, "BFLY-P", call_leg_factory)
     with pytest.raises(OpsError) as caught:
         sv.resolve(chunk_of(("A", {})), 0, "BFLY-P", PRED)
+    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
     assert caught.value.problem.details["reason"] == "call_leg_refused"
 
 
