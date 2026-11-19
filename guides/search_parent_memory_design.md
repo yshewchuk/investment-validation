@@ -114,10 +114,11 @@ Pass: parent current VmRSS after pool creation <= 2 GiB with `workers>=2` on the
 ## 6. Split into code PRs (each merges only after the v14 report is collected; estimates are code / test / doc words, code and test in added lines)
 
 - **P1 Measure.** Stage-boundary VmRSS/`ru_maxrss` and holder-size logging in `run_search`, refit and collect. No behaviour change. Produces the baseline. About 100 / 80 / 0.
-- **P2 Release helper.** `release_parent_caches()` plus a clear of the shared memo, called at the four points of 3.2, including before claimed-trial replay; retention and identity tests. About 90 / 150 / 250 doc words of contract text, paired with a larger shrink elsewhere in that file (3.7).
-- **P3 Isolated serial path (needs decision 1).** `run_search(isolate=...)`; CLIs pass `True`; pool of one; parity test (isolated vs in-process on a tiny fixture: identical journal). About 120 / 180 / 150 doc words (contract delta).
+- **P2 Release helper.** `release_parent_caches()` plus a clear of the shared memo, called at the four points of 3.2 (point (a) is after the claimed-trial and completed-outer replays); retention and identity tests. About 90 / 150 / 10 doc lines (about 250 words) of contract text, paired with the shrink slice below (3.7).
+- **P3 Isolated serial path (needs decision 1).** `run_search(isolate=...)`; CLIs pass `True`; pool of one; parity test (isolated vs in-process on a tiny fixture: identical journal). About 120 / 180 / 6 doc lines (about 150 words, contract delta).
 - **P4 (conditional on smoke) Hydration and plan admission.** Compact registration for the parent after plan admission; memoize plan rebuild per call. Only if H3/H4 measure large. About 150 / 150 / 0.
 - **P5 (conditional) Refits through the pool** if the refit stage still exceeds the box after P2. About 150 / 150 / 0.
+- **S0 Shrink (lands with or before P2).** Compress `experiments/ARCHITECTURE.md` by at least the words P2 and P3 add (about 400 words), so the contract can move in without growth. About 0 / 0 / net -400 words (a larger number of deleted lines).
 - **Issues (not slices):** share one verified `freeze` across refit units; audit the distribution drivers' parent holdings after P1.
 
 ## 7. Open decisions for the user
