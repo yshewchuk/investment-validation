@@ -59,8 +59,9 @@ def events_for(*eids, pred=PRED, mcap=20e9, date="2024-06-10"):
                          for e in eids])
 
 
-def taken(*eids):
-    return pd.DataFrame({"event_id": list(eids), "status": ["taken"] * len(eids)})
+def taken(*eids, name="CND-PS"):
+    return pd.DataFrame({"event_id": list(eids), "status": ["taken"] * len(eids),
+                         "structure": [name] * len(eids)})
 
 
 def _tables(seed=7, n=600):
@@ -277,11 +278,17 @@ def test_score_events_reasons(pool):
     assert run(flat, events_for("A"), pool).loc[0, "reason"] == "entry_not_debit"
 
 
-def test_debit_of_a_tenth_of_a_cent_is_not_a_debit(pool):
-    # Mids are 1.5 everywhere except the BUY at 94 (1.501): the entry debit is 0.001 a share, under MIN_DEBIT.
-    thin = chunk_of(("A", {}), entry=lambda k: (1.0, 2.002) if k == 94 else (1.0, 2.0))
+def test_debit_of_a_nanodollar_is_not_a_debit(pool):
+    # Mids are 1.5 everywhere except the BUY at 94 (mid 1.5 + 1e-9): the entry debit is 1e-9 a share, under MIN_DEBIT.
+    thin = chunk_of(("A", {}), entry=lambda k: (1.0, 2.0 + 2e-9) if k == 94 else (1.0, 2.0))
     out = run(thin, events_for("A"), pool).iloc[0]
-    assert out["entry_cost"] == pytest.approx(0.001) and out["reason"] == "entry_not_debit"
+    assert out["entry_cost"] == pytest.approx(1e-9, abs=1e-12) and out["reason"] == "entry_not_debit"
+
+
+def test_score_refuses_a_nanodollar_debit():
+    thin = chunk_of(("A", {}), entry=lambda k: (1.0, 2.0 + 2e-9) if k == 94 else (1.0, 2.0))
+    with pytest.raises(ValueError, match="entry debit below"):
+        sv.score(thin, events_for("A"), taken("A"), "CND-PS", 0.5)
 
 
 def test_score_events_refuses_bad_alpha_and_c(pool):
@@ -384,3 +391,24 @@ def test_score_refuses_invalid_alpha_even_with_nothing_taken():
     chunk = chunk_of(("A", {}))
     with pytest.raises(ValueError, match=r"alpha must lie in \[0, 1\], got 2\.0"):
         sv.score(chunk, events_for("A"), taken(), "CND-PS", 2.0)
+
+
+def test_score_ignores_a_taken_row_for_another_structure():
+    chunk, events = chunk_of(("A", {})), events_for("A")
+    assert sv.score(chunk, events, taken("A", name="TWIN-P"), "CND-PS", 0.5).empty
+
+
+def test_score_needs_a_structure_column():
+    chunk, events = chunk_of(("A", {})), events_for("A")
+    bare = pd.DataFrame({"event_id": ["A"], "status": ["taken"]})
+    with pytest.raises(ValueError, match="structure column"):
+        sv.score(chunk, events, bare, "CND-PS", 0.5)
+
+
+def test_score_binds_to_the_pricing_alpha(pool):
+    chunk, events = chunk_of(("A", {})), events_for("A")
+    priced = run(chunk, events, pool).assign(status="taken")  # priced at alpha 0.5, c 1.0
+    with pytest.raises(ValueError, match="decision was priced at a different alpha or c"):
+        sv.score(chunk, events, priced, "CND-PS", 0.25)
+    same = sv.score(chunk, events, priced, "CND-PS", 0.5)
+    assert len(same) == 1 and same.iloc[0]["entry_cost"] == pytest.approx(priced.iloc[0]["entry_cost"])

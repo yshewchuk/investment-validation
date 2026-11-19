@@ -29,9 +29,9 @@ _OUT_COLS = ["event_id", "structure", "entry_cost", "exit_value", "rung", "lots"
              "pnl_dollars"]
 _CONFLICT = "EXPERIMENT_IDENTITY_CONFLICT"
 _CLOSE = {BUY: SELL, SELL: BUY}
-# One cent a share: the owner's judgement call to stop float-noise debits from sizing huge lots;
-# not from the design.
-MIN_DEBIT = 0.01
+# A numerical guard against float-noise debits, not a market rule: the design and _short_vol_rule
+# set no minimum debit.
+MIN_DEBIT = 1e-6
 
 
 def _num(x):
@@ -261,14 +261,21 @@ def _exit_value(chunk, traded, alpha):
 
 
 def score(chunk, events, decisions, name, alpha, *, c=1.0, drop_unquoted=False):
-    """Marked P&L of the TAKEN events only; ``drop_unquoted`` removes the worst-case rung-3 rows."""
+    """Marked P&L of the TAKEN events of ``name`` only; ``drop_unquoted`` removes the worst-case rung-3 rows.
+
+    A decision priced at a different alpha or c than this call is refused, not silently re-marked.
+    """
     FillModel(alpha)  # validate up front, even when nothing is taken
     pinned(name)
     _check_c(c)
+    if "structure" not in decisions.columns:
+        raise ValueError("decisions must carry a structure column")
     pred = dict(zip(events["event_id"].astype(str), events["pred_move"]))
     pos = {str(e): i for i, e in enumerate(chunk["event_id"])}
+    mine = decisions[(decisions["status"] == "taken") & (decisions["structure"] == name)]
     rows = []
-    for eid in decisions.loc[decisions["status"] == "taken", "event_id"].astype(str):
+    for dec in mine.to_dict("records"):
+        eid = str(dec["event_id"])
         if eid not in pred or eid not in pos:
             raise ValueError(f"taken event {eid!r} is missing from the chunk or events")
         legs, reason = resolve(chunk, pos[eid], name, pred[eid], c)
@@ -278,6 +285,8 @@ def score(chunk, events, decisions, name, alpha, *, c=1.0, drop_unquoted=False):
         if entered is None:
             raise ValueError(f"taken event {eid!r} has an unusable entry quote")
         cost = entered[0]
+        if "entry_cost" in decisions.columns and abs(float(dec["entry_cost"]) - cost) > 1e-9:
+            raise ValueError("decision was priced at a different alpha or c")
         if not (math.isfinite(cost) and cost >= MIN_DEBIT):
             raise ValueError(f"taken event {eid!r} has an entry debit below {MIN_DEBIT} a share ({cost!r})")
         traded = [leg for leg in legs if leg["qty"] > 0]
