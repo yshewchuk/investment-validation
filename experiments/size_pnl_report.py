@@ -1,8 +1,15 @@
 """Report tables T1-T10 for EXP-188 slice S8b.
 
 Pure functions: each takes plain frames, lists or dicts and returns a Markdown
-section (a ``### Tn`` heading, an optional note line, then a pipe table).
+string (a ``### Tn`` heading, an optional note line, then a pipe table).
 No I/O, no logging, no engine imports. ``build_report`` joins the sections.
+
+Input contract: the frames are the S5/S7 scored outputs concatenated by the S9 driver, which adds the
+`model_id`, `structure`/`rule`, `arm` and `taken` columns the producers do not carry themselves
+(`size_pnl_shortvol.score`, `size_pnl_straddle.score`/`decide`), plus `quarter`/`ticker` labels.
+
+Not wired to a production caller yet: the S9 driver (guides/size_decision_pnl_design.md section 9)
+builds these inputs, calls each `t*` function and writes `REPORT.md` via `build_report`.
 """
 
 import math
