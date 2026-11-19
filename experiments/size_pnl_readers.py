@@ -167,7 +167,10 @@ def _production_binding(table_hash, frame):
 
 
 def read_production(fetch, admitted, *, expected_hash, table_hash, start=None, end=None):
-    """Lead-horizon production forecasts for admitted events in the window (R1 whole-run refusal)."""
+    """Lead-horizon production forecasts for admitted events in the window (R1 whole-run refusal).
+
+    `table_hash` identifies the whole stored table (protected rows included) and is supplied by the catalog caller; it cannot be recomputed from admitted-only rows, because hashing protected rows would read them. The binding therefore covers `table_hash` plus the consumed rows.
+    """
     if not (_is_hash(expected_hash) and _is_hash(table_hash)):
         raise _conflict("production_hash_invalid", "the production hashes must be non-blank strings")
     if table_hash != expected_hash:
