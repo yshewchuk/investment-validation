@@ -128,6 +128,26 @@ def test_pinned_refuses_moved_exit(monkeypatch):
     assert details["structure"] == "CND-PS" and details["field"] == "exit_offset"
 
 
+def test_pinned_refuses_moved_entry(monkeypatch):
+    real = STRUCTURES["CND-PS"]
+    monkeypatch.setitem(STRUCTURES, "CND-PS", lambda: dataclasses.replace(real(), entry_offset=1, exit_offset=2))
+    with pytest.raises(OpsError) as caught:
+        sv.pinned("CND-PS")
+    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    details = caught.value.problem.details
+    assert details["reason"] == "factory_default_mismatch"
+    assert details["structure"] == "CND-PS" and details["field"] == "entry_offset"
+
+
+def test_score_refuses_a_drifted_factory(monkeypatch):
+    real = STRUCTURES["CND-PS"]
+    monkeypatch.setitem(STRUCTURES, "CND-PS", lambda: dataclasses.replace(real(), exit_offset=2))
+    with pytest.raises(OpsError) as caught:
+        sv.score(chunk_of(("A", {})), events_for("A"), taken(), "CND-PS", 0.5)
+    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert caught.value.problem.details["reason"] == "factory_default_mismatch"
+
+
 @pytest.mark.parametrize("index", [0, 1])
 def test_pinned_refuses_any_call_leg(monkeypatch, index):
     # Index 0 is the short anchor leg (side SELL) and index 1 a long wing: each refuses on its own.
@@ -157,9 +177,16 @@ def test_twin_p_width_is_forecast_over_divisor():
 
 
 def test_c_divides_the_forecast_before_sizing():
-    legs, reason = sv.resolve(chunk_of(("A", {})), 0, "TWIN-P", PRED, c=1.5)
+    chunk = chunk_of(("A", {}))
+    legs, reason = sv.resolve(chunk, 0, "TWIN-P", PRED, c=1.5)
     assert reason is None
     assert forecast_params("TWIN-P", PRED / 1.5) == pytest.approx({"width_moneyness": 0.04 / 1.5})
+    base, _ = sv.resolve(chunk, 0, "TWIN-P", PRED)
+    strikes = sorted(leg["strike"] for leg in legs)
+    assert strikes != sorted(leg["strike"] for leg in base)
+    # resolve builds its factory from forecast_params(name, pred / c) at c=1, so this is that factory's ladder.
+    factory, _ = sv.resolve(chunk, 0, "TWIN-P", PRED / 1.5)
+    assert strikes == sorted(leg["strike"] for leg in factory)
 
 
 def test_out_of_range_forecast_declines():
@@ -224,6 +251,9 @@ def test_score_events_entry_quotes_and_cost(pool):
     out = run(chunk_of(("A", {})), events_for("A"), pool).iloc[0]
     assert out["entry_cost"] == pytest.approx(2 * 1.36 - 2 * 1.09)  # BUY 94, 106 minus SELL 97, 103
     assert out["width"] == pytest.approx(0.03)
+    legs, _ = sv.resolve(chunk_of(("A", {})), 0, "CND-PS", PRED)  # every leg, references included
+    mids = [1.0 + 0.01 * (leg["strike"] - 100) ** 2 for leg in legs]  # the 0.2 spread over the mid, per leg
+    assert out["rel_spread"] == pytest.approx(np.mean([0.2 / mid for mid in mids]))
 
 
 def test_score_events_reasons(pool):
@@ -231,6 +261,13 @@ def test_score_events_reasons(pool):
     assert run(nan_leg, events_for("A"), pool).loc[0, "reason"] == "entry_quote_unusable"
     flat = chunk_of(("A", {}), entry=lambda k: (1.0, 2.0))  # buys and sells cancel to exactly 0
     assert run(flat, events_for("A"), pool).loc[0, "reason"] == "entry_not_debit"
+
+
+def test_debit_of_a_tenth_of_a_cent_is_not_a_debit(pool):
+    # Mids are 1.5 everywhere except the BUY at 94 (1.501): the entry debit is 0.001 a share, under MIN_DEBIT.
+    thin = chunk_of(("A", {}), entry=lambda k: (1.0, 2.002) if k == 94 else (1.0, 2.0))
+    out = run(thin, events_for("A"), pool).iloc[0]
+    assert out["entry_cost"] == pytest.approx(0.001) and out["reason"] == "entry_not_debit"
 
 
 def test_score_events_refuses_bad_alpha_and_c(pool):

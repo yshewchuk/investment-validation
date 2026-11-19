@@ -2,9 +2,9 @@
 
 S5 of guides/size_decision_pnl_design.md. The seven forecast-sized put-only families (``NAMES``) are
 resolved per event from the ladder chunk, priced at entry through ``engine.fills.FillModel`` and marked
-at exit by the rung rules. Pure functions over numpy/pandas: no I/O, no ledger. Called by the S6/S9
-drivers, which run ``simulate``, ``score_events``, ``decide`` and ``score`` per quarter. No production
-caller yet. Progress logging: none needed (pure per-quarter functions).
+at exit by the rung rules. Pure functions over numpy/pandas: no I/O, no ledger. The S6/S9 drivers WILL
+call ``simulate``, ``score_events``, ``decide`` and ``score`` per quarter (future); no production caller
+yet. Progress logging: none needed (pure per-quarter functions).
 """
 import itertools
 import math
@@ -20,7 +20,7 @@ from engine.pnl_sim import DRAWS, trailing_cutoff
 from engine.structures import BUY, PUT, SELL, STRUCTURES, StructureError
 from engine.v2.ops.errors import fail
 from experiments.size_pnl_pool import MIN_WINDOW, put_means, structure_pnl
-from experiments.size_pnl_straddle import EXIT_UNQUOTED, _num, lots
+from experiments.size_pnl_straddle import EXIT_UNQUOTED, lots
 
 NAMES = tuple(sorted(FORECAST_SIZED))
 SCORE_COLS = ["event_id", "event_date", "structure", "width", "entry_cost", "rel_spread", "mcap_usd",
@@ -29,6 +29,16 @@ _OUT_COLS = ["event_id", "structure", "entry_cost", "exit_value", "rung", "lots"
              "pnl_dollars"]
 _CONFLICT = "EXPERIMENT_IDENTITY_CONFLICT"
 _CLOSE = {BUY: SELL, SELL: BUY}
+# One cent a share: the owner's judgement call to stop float-noise debits from sizing huge lots;
+# not from the design.
+MIN_DEBIT = 0.01
+
+
+def _num(x):
+    """``float(x)``, or NaN when ``x`` is None, pd.NA or another null."""
+    if x is None or pd.isna(x):
+        return float("nan")
+    return float(x)
 
 
 def pinned(name):
@@ -186,7 +196,7 @@ def score_events(chunk, events, sims, name, *, alpha=0.5, c=1.0):
             else:
                 cost, rel = entered
                 row.update(entry_cost=cost, rel_spread=rel)
-                if not (math.isfinite(cost) and cost > 0):
+                if not (math.isfinite(cost) and cost >= MIN_DEBIT):
                     row["reason"] = "entry_not_debit"
                 else:
                     exits = [{"strike": leg["strike"], "side": _CLOSE[leg["side"]], "qty": leg["qty"]}
@@ -252,6 +262,7 @@ def _exit_value(chunk, traded, alpha):
 def score(chunk, events, decisions, name, alpha, *, c=1.0, drop_unquoted=False):
     """Marked P&L of the TAKEN events only; ``drop_unquoted`` removes the worst-case rung-3 rows."""
     FillModel(alpha)  # validate up front, even when nothing is taken
+    pinned(name)
     _check_c(c)
     pred = dict(zip(events["event_id"].astype(str), events["pred_move"]))
     pos = {str(e): i for i, e in enumerate(chunk["event_id"])}
@@ -266,6 +277,8 @@ def score(chunk, events, decisions, name, alpha, *, c=1.0, drop_unquoted=False):
         if entered is None:
             raise ValueError(f"taken event {eid!r} has an unusable entry quote")
         cost = entered[0]
+        if not (math.isfinite(cost) and cost >= MIN_DEBIT):
+            raise ValueError(f"taken event {eid!r} has an entry debit below {MIN_DEBIT} a share ({cost!r})")
         traded = [leg for leg in legs if leg["qty"] > 0]
         rungs = [int(chunk["exit_rung"][leg["idx"]]) for leg in traded]
         if 3 in rungs:  # defined-risk floor: the whole structure is marked at zero
