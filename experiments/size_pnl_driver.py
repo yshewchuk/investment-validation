@@ -87,6 +87,12 @@ def _window(stage):
     return INNER if stage == "inner" else (WARMUP_START, OUTER[1])
 
 
+def _table_window(stage):
+    """The model tables' window: the outer pool needs all history from INNER[0] (design section 4)."""
+    _window(stage)  # validates the stage
+    return (INNER[0], OUTER[1]) if stage == "outer" else INNER
+
+
 def _strip(models):
     """Inputs-level status per model: status, reason and binding only (arrays are not receipted)."""
     return {mid: {k: m[k] for k in ("status", "reason", "binding") if k in m} for mid, m in models.items()}
@@ -98,7 +104,7 @@ def prepare(src, stage):
     Returns ``(roster, bound_tables, production)``. ``bound_tables`` is ``{"identity", "bound", "tables"}``:
     the bound run identity, each model's binding status, and every model's table (ready or excluded).
     """
-    start, end = _window(stage)
+    start, end = _table_window(stage)
     identity = inputs.bind_run(src.plan, src.read, expected=src.expected, panel_id=src.panel_id)
     roster = inputs.resolve_roster(src.plan, src.selection, outer_year=int(OUTER[0][:4]),
                                    pair_candidates=src.pair_candidates, blend_ids=src.blend_ids)

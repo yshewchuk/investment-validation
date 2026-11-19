@@ -214,6 +214,29 @@ def test_warm_up_month_adds_history_only(tmp_path, stubs, monkeypatch):
     assert not any(e[0] == "labels" and e[1] == ("E2",) for e in stubs)  # and no month's labels are read
 
 
+def test_outer_pool_sees_the_2023_history(tmp_path, stubs, monkeypatch):
+    """The outer tables span INNER[0]..OUTER[1], so a 2025 month's pool includes the 2023 residual row."""
+    def model_tables(bound, roster, admitted, production, *, start, end, **kw):
+        keep = [(e, d) for e, d in EVENTS.items() if pd.Timestamp(start) <= pd.Timestamp(d) < pd.Timestamp(end)]
+        table = pd.DataFrame({"pred_move": 5.0, "pred_crush": -12.0,
+                              "event_date": pd.to_datetime([d for _e, d in keep])},
+                             index=pd.Index([e for e, _d in keep], name="event_id"))
+        return {m["model_id"]: {"status": "ready", "table": table, "binding": {"rows": len(keep)}}
+                for m in roster["models"]}
+
+    pools = []
+    monkeypatch.setattr(readers, "model_tables", model_tables)
+    monkeypatch.setattr(driver, "build_pool", lambda table, labels: pools.append(table))
+    use_chunks(monkeypatch, [("2024Q3", chunk("E2"))])
+    driver.run(sources(), "inner", tmp_path, prereg=OK)
+    pools.clear()
+    use_chunks(monkeypatch, [("2024Q3", chunk("E2")), ("2025Q1", chunk("E3", "E4"))])
+    driver.run(sources(), "outer", tmp_path, prereg=OK)
+    e1_date = pd.Timestamp(EVENTS["E1"])
+    assert pools and all(t["event_date"].min() == e1_date for t in pools)  # the 2023 row is in every pool
+    assert any(len(t) == 2 for t in pools)  # the 2025-01 month's pool holds the 2023 and 2024 rows
+
+
 def test_changed_outer_receipt_leaves_decisions_untouched_and_no_tmp(tmp_path, stubs, monkeypatch):
     use_chunks(monkeypatch, [("2024Q3", chunk("E2"))])
     driver.run(sources(), "inner", tmp_path, prereg=OK)
