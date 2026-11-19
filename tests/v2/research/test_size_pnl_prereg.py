@@ -421,13 +421,15 @@ def _load_run():
     return module
 
 
-def test_run_refuses_without_planned_row_before_any_stage(tmp_path, monkeypatch):
+def test_run_refuses_without_planned_row_before_any_stage(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(lib, "LEDGER_PATH", tmp_path / "LEDGER.csv")
     run = _load_run()
-    with pytest.raises(OpsError) as exc:
-        run.main(["--no-ledger"])
-    assert exc.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
-    assert exc.value.problem.details["reason"] == "planned_row_missing"
+    code = run.main(["--stage", "inner", "--out-dir", str(tmp_path / "o"), "--expected", str(tmp_path / "e.json"),
+                     "--sources", "x:y", "--no-ledger"])
+    assert code == 2
+    refused = json.loads(capsys.readouterr().out)
+    assert refused["refused"] == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert "planned" in refused["message"].lower()
 
 
 def test_run_requires_the_no_ledger_flag():

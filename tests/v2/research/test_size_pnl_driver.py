@@ -2,6 +2,8 @@
 import dataclasses
 import importlib.util
 import json
+import sys
+import types
 from pathlib import Path
 
 import numpy as np
@@ -154,7 +156,7 @@ def test_inner_writes_receipts_replays_read_only_and_refuses_a_changed_binding(t
     summary = driver.run(src, "inner", out, prereg=OK)
     mid = summary["models"][0]
     assert sorted(p.name for p in (out / "receipts").iterdir()) == sorted(
-        ["inputs.json", f"tuning_{mid}.json", "inner.json"])
+        ["inputs_inner.json", f"tuning_{mid}.json", "inner.json"])
     before = {p: (p.stat().st_ino, p.stat().st_mtime_ns) for p in (out / "receipts").iterdir()}
     assert driver.run(src, "inner", out, prereg=OK) == summary  # exact replay succeeds
     assert {p: (p.stat().st_ino, p.stat().st_mtime_ns) for p in (out / "receipts").iterdir()} == before
@@ -226,11 +228,22 @@ def _run_main():
     return module
 
 
-def _argv(tmp_path, *extra):
+NO_SOURCES = "no_such_module_zz:make"
+FAKE = "exp188_fake_sources:make"
+
+
+def _argv(tmp_path, *extra, stage="inner", sources=NO_SOURCES):
     expected = tmp_path / "expected.json"
     expected.write_text(json.dumps(EXPECTED), encoding="utf-8")
-    return ["--stage", "inner", "--out-dir", str(tmp_path / "out"), "--expected", str(expected),
-            "--sources", "no_such_module_zz:make", *extra]
+    return ["--stage", stage, "--out-dir", str(tmp_path / "out"), "--expected", str(expected),
+            "--sources", sources, *extra]
+
+
+def _install_sources(monkeypatch, src):
+    """Make ``src`` the factory behind the ``--sources`` spec FAKE."""
+    module = types.ModuleType("exp188_fake_sources")
+    module.make = lambda args: src
+    monkeypatch.setitem(sys.modules, "exp188_fake_sources", module)
 
 
 def test_run_py_requires_no_ledger(tmp_path):
@@ -257,3 +270,106 @@ def test_run_py_refuses_not_bounded_before_importing_sources(tmp_path, monkeypat
     assert run_py.main(_argv(tmp_path, "--no-ledger")) == 2
     refused = json.loads(capsys.readouterr().out)
     assert refused["refused"] == "RESOURCE_UNAVAILABLE"
+
+
+def test_run_py_refuses_a_missing_tuning_receipt_as_a_typed_refusal(tmp_path, monkeypatch, capsys, stubs):
+    run_py = _run_main()
+    monkeypatch.setattr(run_py.size_pnl_prereg, "require_preregistration", OK)
+    monkeypatch.setenv("BOUNDED_RUN_NESTED", "1")
+    _install_sources(monkeypatch, sources())
+    assert run_py.main(_argv(tmp_path, "--no-ledger", stage="outer", sources=FAKE)) == 2
+    refused = json.loads(capsys.readouterr().out)
+    assert refused["refused"] == CONFLICT
+    assert "missing" in refused["message"]
+
+
+def test_run_py_refuses_an_expected_that_differs_from_the_sources(tmp_path, monkeypatch, capsys):
+    run_py = _run_main()
+    monkeypatch.setattr(run_py.size_pnl_prereg, "require_preregistration", OK)
+    monkeypatch.setenv("BOUNDED_RUN_NESTED", "1")
+    _install_sources(monkeypatch, sources(expected={**EXPECTED, "panel_id": "OTHER"}))
+    assert run_py.main(_argv(tmp_path, "--no-ledger", sources=FAKE)) == 2
+    assert json.loads(capsys.readouterr().out)["refused"] == CONFLICT
+    assert not (tmp_path / "out").exists()  # refused before the driver wrote anything
+
+
+# ---- inner receipt binding, zero and empty populations, and the oracle ---------
+
+def test_outer_refuses_when_inner_json_names_another_model_hash(tmp_path, stubs, monkeypatch):
+    use_chunks(monkeypatch, [("2024Q3", chunk("E2"))])
+    driver.run(sources(), "inner", tmp_path / "inner", prereg=OK)
+    inner = tuning.load_receipt(tmp_path / "inner" / "receipts" / "inner.json")
+    tampered = {k: v for k, v in inner.items() if k != "content_hash"}
+    tampered["models"] = {mid: "0" * 64 for mid in tampered["models"]}
+    inner_out = tmp_path / "inner"
+    (inner_out / "receipts" / "inner.json").unlink()
+    tuning.write_receipt(inner_out / "receipts" / "inner.json", tampered)
+    use_chunks(monkeypatch, [("2024Q3", chunk("E2"))])
+    with pytest.raises(Refusal) as caught:
+        driver.run(sources(), "outer", inner_out, prereg=OK)
+    assert caught.value.code == CONFLICT
+    assert caught.value.details["reason"] == "inner_receipt_mismatch"
+
+
+def test_outer_refuses_an_inner_receipt_tuned_on_smoke_ids(tmp_path, stubs, monkeypatch):
+    use_chunks(monkeypatch, [("2023Q2", chunk("E1"))])
+    driver.run(sources(), "inner", tmp_path / "inner", event_ids={"E1"}, prereg=OK)
+    use_chunks(monkeypatch, [("2024Q3", chunk("E2"))])
+    with pytest.raises(Refusal) as caught:
+        driver.run(sources(), "outer", tmp_path / "inner", prereg=OK)
+    assert caught.value.code == CONFLICT
+    assert caught.value.details["reason"] == "scope_mismatch"
+
+
+def test_zero_ready_models_refuses_after_the_inputs_receipt(tmp_path, stubs, monkeypatch):
+    monkeypatch.setattr(readers, "model_tables", lambda bound, roster, admitted, production, **kw: {
+        m["model_id"]: {"status": "excluded", "reason": "forced"} for m in roster["models"]})
+    with pytest.raises(Refusal) as caught:
+        driver.run(sources(), "inner", tmp_path, prereg=OK)
+    assert caught.value.code == CONFLICT
+    assert caught.value.details["reason"] == "no_ready_models"
+    assert [p.name for p in (tmp_path / "receipts").iterdir()] == ["inputs_inner.json"]
+
+
+def test_empty_smoke_set_refuses_before_any_receipt(tmp_path, stubs):
+    with pytest.raises(Refusal) as caught:
+        driver.run(sources(), "inner", tmp_path, event_ids=set(), prereg=OK)
+    assert caught.value.details["reason"] == "empty_population"
+    assert not (tmp_path / "receipts").exists()
+
+
+def test_oracle_one_taken_short_vol_row_is_written_with_its_marks(tmp_path, stubs, monkeypatch):
+    first = driver.shortvol.NAMES[0]
+    taken_once = []
+
+    def decide(scored):
+        out = scored.assign(cutoff=np.nan)
+        if not taken_once:  # the run's first decision: E3 on the first short-vol name is taken
+            taken_once.append(True)
+            out.loc[out["event_id"].astype(str) == "E3", "status"] = "taken"
+        return out
+
+    def score(chunk_, events, decisions, name, alpha, *, c=1.0):
+        rows = decisions[decisions["status"] == "taken"]
+        return pd.DataFrame({"event_id": rows["event_id"].astype(str).to_numpy(), "entry_cost": 1.0,
+                             "exit_value": 1.5, "rung": "rung1", "lots": 2, "pnl_per_share": 0.5,
+                             "pnl_dollars": 100.0})
+
+    monkeypatch.setattr(driver.shortvol, "decide", decide)
+    monkeypatch.setattr(driver.shortvol, "score", score)
+    use_chunks(monkeypatch, [("2024Q3", chunk("E2"))])
+    driver.run(sources(), "inner", tmp_path / "inner", prereg=OK)
+    use_chunks(monkeypatch, [("2024Q3", chunk("E2")), ("2025Q1", chunk("E3", "E4"))])
+    summary = driver.run(sources(), "outer", tmp_path / "inner", prereg=OK)
+    decisions = pd.read_parquet(tmp_path / "inner" / "decisions.parquet")
+    taken = decisions[decisions["status"] == "taken"]
+    assert len(taken) == 1
+    row = taken.iloc[0]
+    assert row["model_id"] == summary["models"][0]
+    assert row["book"] == "short_vol"
+    assert row["arm_or_rule"] == "as_is"
+    assert row["structure"] == first
+    assert row["event_id"] == "E3"
+    assert row["pnl_dollars"] == 100.0
+    assert row["exit_value"] == 1.5
+    assert row["rung"] == "rung1"

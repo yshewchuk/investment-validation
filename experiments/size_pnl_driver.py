@@ -19,6 +19,7 @@ import hashlib
 import os
 import resource
 import sys
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,6 +27,7 @@ from typing import Callable
 
 import pandas as pd
 
+from engine.v2.foundation import content_hash
 from engine.v2.ops.errors import fail
 from experiments import size_pnl_inputs as inputs
 from experiments import size_pnl_ladder as ladder
@@ -35,6 +37,7 @@ from experiments import size_pnl_shortvol as shortvol
 from experiments import size_pnl_straddle as straddle
 from experiments import size_pnl_tuning as tuning
 from experiments.size_pnl_pool import build_pool
+from experiments.size_pnl_shortvol import Refusal
 
 INNER = ("2023-01-01", "2025-01-01")
 OUTER = ("2025-01-01", "2026-01-01")
@@ -45,6 +48,8 @@ _DENIED = "HOLDOUT_ACCESS_DENIED"
 _FACTS = ("pre_iv30", "mcap_usd", "implied_move")
 _MARKS = ["exit_value", "rung", "lots", "pnl_dollars"]
 _FRONT = ["model_id", "book", "arm_or_rule", "structure", "event_id", "event_date", "status", "reason"]
+_CONFLICT = "EXPERIMENT_IDENTITY_CONFLICT"
+_HASH_BLOCK = 1 << 20
 
 
 @dataclass(frozen=True)
@@ -143,10 +148,16 @@ def _plan_window(plan, window, ids):
     return plan[keep]
 
 
-def _outer_gate(out, ready):
-    """Refuses before any chunk is built: every ready model needs its tuning receipt, and inner.json must exist."""
+def _outer_gate(out, ready, scope):
+    """Refuses before any chunk is built: every ready model needs its tuning receipt, and inner.json must exist,
+    bind those receipts, and have been tuned on this run's event scope."""
     receipts = {mid: tuning.load_receipt(out / "receipts" / f"tuning_{mid}.json") for mid in ready}
-    tuning.load_receipt(out / "receipts" / "inner.json")
+    inner = tuning.load_receipt(out / "receipts" / "inner.json")
+    if any(inner["models"].get(mid) != receipts[mid]["content_hash"] for mid in ready):
+        raise Refusal(_CONFLICT, "inner.json does not bind every ready model's tuning receipt",
+                      {"reason": "inner_receipt_mismatch"})
+    if "scope" not in inner or inner["scope"] != scope:
+        raise Refusal(_CONFLICT, "inner.json was tuned on a different event scope", {"reason": "scope_mismatch"})
     return receipts
 
 
@@ -209,13 +220,23 @@ def _month(mid, table, events, chunk, labels, start_m, st):
     return frames
 
 
-def _write_decisions(out, frames):
-    """Write only ``decisions.parquet.tmp``. Returns (sha256 of the tmp bytes, rows); the caller promotes it."""
+def _unique_tmp(out):
+    """A fresh, uniquely named ``.tmp`` file in ``out``; the caller unlinks it unless it was promoted."""
+    with tempfile.NamedTemporaryFile(dir=out, delete=False, suffix=".tmp") as handle:
+        return Path(handle.name)
+
+
+def _write_decisions(tmp, frames):
+    """Write the decision rows to ``tmp`` and fsync it. Returns (sha256 of the tmp bytes, rows)."""
     frame = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=_FRONT)
     frame = frame[_FRONT + [c for c in frame.columns if c not in _FRONT]]
-    tmp = out / "decisions.parquet.tmp"
     frame.to_parquet(tmp, index=False)
-    return hashlib.sha256(tmp.read_bytes()).hexdigest(), len(frame)
+    digest = hashlib.sha256()
+    with open(tmp, "rb") as handle:
+        for block in iter(lambda: handle.read(_HASH_BLOCK), b""):
+            digest.update(block)
+        os.fsync(handle.fileno())
+    return digest.hexdigest(), len(frame)
 
 
 def _outer(src, out, ready, receipts, plan, ids):
@@ -245,9 +266,9 @@ def _outer(src, out, ready, receipts, plan, ids):
                 fresh = readers.read_labels(src.fetch, src.admitted, start=start_m,
                                             end=(period + 1).start_time, event_ids=ids)
                 labels = pd.concat([labels, fresh])
-    final, tmp = out / "decisions.parquet", out / "decisions.parquet.tmp"
+    final, tmp = out / "decisions.parquet", _unique_tmp(out)
     try:
-        sha, rows = _write_decisions(out, frames)
+        sha, rows = _write_decisions(tmp, frames)
         # The receipt refuses a changed replay before the final file is touched.
         tuning.write_receipt(out / "receipts" / "outer.json",
                              {"stage": "outer", "decisions_sha256": sha, "rows": rows, "models": list(ready)})
@@ -271,19 +292,29 @@ def run(src, stage, out_dir, *, event_ids=None, prereg=size_pnl_prereg.require_p
     _log(f"stage={stage} start rss={_rss_mb():.0f}MB")
     out = Path(out_dir)
     ids = _smoke(src, event_ids)
-    roster, bound_tables, _ = prepare(src, stage)
+    if ids is not None and not ids:
+        raise Refusal(_CONFLICT, "the smoke event id set is empty", {"reason": "empty_population"})
+    roster, bound_tables, production = prepare(src, stage)
     tables = bound_tables["tables"]
     ready = {mid: {**e, "table": _restrict(e["table"], ids)} for mid, e in tables.items() if e["status"] == "ready"}
     excluded = {mid: e["reason"] for mid, e in tables.items() if e["status"] != "ready"}
+    scope = None if ids is None else content_hash(sorted(ids))
     body = {"stage": "inputs", "spec_hash": receipt["spec_hash"], "identity": bound_tables["identity"],
-            "roster": roster, "models": _strip(bound_tables["bound"])}
-    tuning.write_receipt(out / "receipts" / "inputs.json", body)
-    receipts = _outer_gate(out, ready) if stage == "outer" else {}
+            "roster": roster, "models": _strip(bound_tables["bound"]),
+            "tables": {mid: e["binding"] for mid, e in tables.items() if e["status"] == "ready"},
+            "production": production["binding"], "scope": scope}
+    tuning.write_receipt(out / "receipts" / f"inputs_{stage}.json", body)
+    if not ready:
+        raise Refusal(_CONFLICT, "no model is ready to be tuned or scored", {"reason": "no_ready_models"})
+    receipts = _outer_gate(out, ready, scope) if stage == "outer" else {}
     plan = _plan_window(src.plan_frame, _window(stage), ids)
+    if plan.empty:
+        raise Refusal(_CONFLICT, "the plan window holds no events", {"reason": "empty_population"})
     if stage == "inner":
         hashes, rows = _inner(src, out, ready, plan, ids)
         tuning.write_receipt(out / "receipts" / "inner.json",
-                             {"stage": "inner", "models": hashes, "events": rows, "excluded": excluded})
+                             {"stage": "inner", "models": hashes, "events": rows, "excluded": excluded,
+                              "scope": scope})
     else:
         rows = _outer(src, out, ready, receipts, plan, ids)
     _log(f"stage={stage} end elapsed={time.monotonic() - started:.1f}s rss={_rss_mb():.0f}MB")

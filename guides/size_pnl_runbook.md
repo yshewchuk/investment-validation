@@ -9,7 +9,7 @@ beside the v14 run, container 12 GiB). Agents never run them.
 1. The v14 **rerun** (not the killed `v2full14` run) has completed and been collected. Record its `plan_id`,
    `registration_id`, driver-seal id and `panel_id` in a JSON file (`--expected`).
 2. The spec is registered: exactly one PLANNED `EXP-188` ledger row whose `spec_hash` equals the spec's
-   (`python3 experiments/size_pnl_prereg.py --check`). Without it the runner refuses
+   (`python3 -m experiments.size_pnl_prereg --check`). Without it the runner refuses
    `EXPERIMENT_IDENTITY_CONFLICT` (`planned_row_missing`) before reading anything.
 3. A `--sources MODULE:FUNC` callable builds `size_pnl_driver.Sources` from the parsed args (catalog, store
    root, v14 run, pinned snapshot, production table hash). The store adapter is not part of this slice.
@@ -32,7 +32,7 @@ refuses `HOLDOUT_ACCESS_DENIED`. Delete the scratch directory afterwards.
 ## Real run
 
 Same command without `--event-ids`, `--out-dir` under `experiments/EXP-188_*/results/`. `inner` first; it
-writes `receipts/inputs.json`, one `receipts/tuning_<model>.json` per ready model and `receipts/inner.json`.
+writes `receipts/inputs_<stage>.json`, one `receipts/tuning_<model>.json` per ready model and `receipts/inner.json`.
 `outer` refuses (`tuning_receipt_missing`) unless all of them exist. Receipts are immutable: a rerun with the
 same inputs replays read-only; changed inputs refuse `EXPERIMENT_IDENTITY_CONFLICT`. Never delete a receipt to
 force a rerun; use a fresh out-dir and a fresh experiment.
