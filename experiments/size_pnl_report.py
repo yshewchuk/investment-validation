@@ -1,7 +1,7 @@
 """Report tables T1-T10 for EXP-188 slice S8b.
 
 Pure functions: each takes plain frames, lists or dicts and returns a Markdown
-string (a ``### Tn`` heading, an optional note line, then a pipe table).
+string (a ``### Tn`` heading, an optional note line, then a pipe table) (t3_forecast returns two sections, T3 and T3b).
 No I/O, no logging, no engine imports. ``build_report`` joins the sections.
 
 Input contract: the frames are the S5/S7 scored outputs concatenated by the S9 driver, which adds the
