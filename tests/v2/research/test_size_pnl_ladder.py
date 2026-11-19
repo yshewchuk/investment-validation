@@ -282,6 +282,26 @@ def test_entry_crossed_and_nan_set_nan_zero_bid_kept():
     assert chunk["bid_e"][6] == 1.0 and chunk["ask_e"][6] == 1.2
 
 
+def test_invalid_duplicate_before_valid_does_not_shadow_it():
+    entry = [(E1, 2, "P", 90, 1.5, 1.0)] + _entry_rows()  # crossed P90 listed first
+    [(_, chunk)], _ = _run([_event("d1", entry_rows=entry)])
+    assert chunk["event_id"].tolist() == ["d1"]
+    assert chunk["right"][:3].tolist() == [0, 0, 0]
+    assert chunk["strike"][:3].tolist() == [90, 100, 110]
+    assert chunk["bid_e"][0] == 1.0 and chunk["ask_e"][0] == 1.2
+
+
+def test_invalid_put_quotes_do_not_count_toward_skip_gate():
+    all_nan = _quotes(E1, 2, (90, 100, 110), (90, 100, 110), np.nan, 1.2)
+    [(_, chunk)], _ = _run([_event("g1", entry_rows=all_nan)])
+    assert chunk["event_id"].tolist() == []
+    assert chunk["skipped"]["structure_unresolved"] == 1
+    extra = _entry_rows() + [(E1, 2, "P", 85, np.nan, 1.2), (E1, 2, "P", 115, 1.5, 1.0)]
+    [(_, chunk)], _ = _run([_event("g2", entry_rows=extra)])
+    assert chunk["event_id"].tolist() == ["g2"]
+    assert chunk["skipped"]["structure_unresolved"] == 0
+
+
 def test_progress_lines_on_stderr(capsys):
     events = [_event("a1"),
               _event("b2", day="2024-05-10", entry="2024-05-09", exit="2024-05-13",

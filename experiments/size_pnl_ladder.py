@@ -86,7 +86,8 @@ def _contracts(rows, *, entry):
     out = out[out["right"].notna() & out["strike"].notna()]
     if entry:
         valid = out["bid"].notna() & out["ask"].notna() & (out["bid"] <= out["ask"]) & (out["ask"] > 0) & (out["bid"] >= 0)
-        out = out.assign(bid=out["bid"].where(valid), ask=out["ask"].where(valid))
+        out = out.assign(bid=out["bid"].where(valid), ask=out["ask"].where(valid), _rank=(~valid).astype(int))
+        out = out.sort_values(["right", "strike", "_rank"], kind="mergesort").drop(columns="_rank")
     return out.drop_duplicates(["right", "strike"], keep="first").sort_values(["right", "strike"])
 
 
@@ -116,7 +117,7 @@ def _event(row, index, selector):
         return "structure_unresolved", None
     ent_rows = entry[entry["expiry"] == expiry]
     ent = _contracts(ent_rows, entry=True).rename(columns={"bid": "bid_e", "ask": "ask_e"})
-    if int((ent["right"] == 0).sum()) < 3:
+    if int(((ent["right"] == 0) & ent["bid_e"].notna()).sum()) < 3:
         return "structure_unresolved", None
     ex_rows = exit_[exit_["expiry"] == expiry]
     if ex_rows.empty:
