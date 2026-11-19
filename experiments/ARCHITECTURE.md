@@ -975,4 +975,4 @@ Library-only, no data-run authority. Inputs: a Tier-1 source root (read-only: ca
 
 `size_pnl_prereg.require_preregistration` returns `spec_hash_checked` true or refuses `EXPERIMENT_IDENTITY_CONFLICT` (`details.reason`: `planned_row_*`, `spec_*`, `preregistered_*`); never an unchecked pass.
 
-`size_pnl_inputs` (S2a) binds v14 predictions; `size_pnl_readers` (S2b): admitted keys (others refuse `HOLDOUT_ACCESS_DENIED`); `size_pnl_pool` (S4): per-model pools; `size_pnl_shortvol` (S5): puts (drift refuses `EXPERIMENT_IDENTITY_CONFLICT`). `size_pnl_tuning` (S6): one divisor `c` per model on 2023-24 only (else `HOLDOUT_ACCESS_DENIED`), immutable `tuning` receipt; changed or missing refuses.
+EXP-188: `size_pnl_inputs` binds v14 predictions; `size_pnl_readers` admits keys (others `HOLDOUT_ACCESS_DENIED`); `size_pnl_pool`; `size_pnl_shortvol`; `size_pnl_tuning`: one `c` per model, 2023-24 only. `size_pnl_report` (S8b): Markdown renderers `t1_roster`..`t10_verdicts`, unwired until S9 supplies the columns; invalid inputs (columns, flags, non-finite P&L, counts, arm/status/pool) raise `ValueError`.
