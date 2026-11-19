@@ -287,6 +287,31 @@ def test_receipt_hash_is_sha256_of_the_canonical_json():
     assert tuning.receipt_hash({"a": 1}) == hashlib.sha256(b'{"a":1}').hexdigest()
 
 
+def test_write_refuses_a_non_dict_body_and_creates_no_file(tmp_path):
+    path = tmp_path / "r.json"
+    with pytest.raises(ValueError):
+        tuning.write_receipt(path, [])
+    assert not path.exists()
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_nested_int_keys_are_admitted_and_round_trip(tmp_path):
+    # JSON stringifies the keys, so 2 and 10 sort as "10" < "2" unless the body is admitted first.
+    path = tmp_path / "r.json"
+    body = {"t": {2: 1, 10: 2}}
+    written = tuning.write_receipt(path, body)
+    assert written["t"] == {"2": 1, "10": 2}
+    assert {k: v for k, v in written.items() if k != "content_hash"} == {"t": {"2": 1, "10": 2}}
+    assert tuning.load_receipt(path) == written
+
+
+def test_nan_body_is_refused_as_value_error(tmp_path):
+    path = tmp_path / "r.json"
+    with pytest.raises(ValueError):
+        tuning.write_receipt(path, {"c": math.nan})
+    assert not path.exists()
+
+
 def test_write_then_load_round_trip(tmp_path):
     path = tmp_path / "sub" / "receipt.json"
     written = tuning.write_receipt(path, dict(BODY))
@@ -400,6 +425,15 @@ def test_symlinked_receipt_refuses_as_unreadable(tmp_path):
 def test_missing_hash_refuses_as_unreadable(tmp_path):
     path = tmp_path / "r.json"
     path.write_text(json.dumps(dict(BODY)), encoding="utf-8")
+    with pytest.raises(sv.Refusal) as caught:
+        tuning.load_receipt(path)
+    assert caught.value.code == CONFLICT
+    assert caught.value.details["reason"] == UNREADABLE
+
+
+def test_nan_receipt_text_refuses_as_unreadable(tmp_path):
+    path = tmp_path / "r.json"
+    path.write_text('{"a": NaN, "content_hash": "x"}', encoding="utf-8")
     with pytest.raises(sv.Refusal) as caught:
         tuning.load_receipt(path)
     assert caught.value.code == CONFLICT

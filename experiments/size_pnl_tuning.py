@@ -75,12 +75,27 @@ def tune(items, model_id, *, alpha=ALPHA, grid=C_GRID):
             "totals": {str(c): total for c, total in totals.items()}}
 
 
-def receipt_hash(body):
-    """sha256 of the canonical JSON of ``body``; the body itself must not carry ``content_hash``."""
-    if "content_hash" in body:
+def _admit(body):
+    """The JSON-decoded form of ``body``: what a receipt publishes and hashes. Non-dict or non-JSON input is refused."""
+    if not isinstance(body, dict):
+        raise ValueError(f"a receipt body must be a dict, got {type(body).__name__}")
+    try:
+        return json.loads(json.dumps(body, allow_nan=False))
+    except (TypeError, ValueError) as exc:  # non-serialisable values, NaN/inf, mixed key types
+        raise ValueError(f"a receipt body must be strict JSON: {exc}") from exc
+
+
+def _digest(admitted):
+    """sha256 of the canonical JSON of an admitted mapping; it must not carry ``content_hash``."""
+    if "content_hash" in admitted:
         raise ValueError("a receipt body must not contain content_hash")
-    text = json.dumps(body, sort_keys=True, separators=(",", ":"))
+    text = json.dumps(admitted, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def receipt_hash(body):
+    """sha256 of the canonical JSON of ``body`` after admission; the body itself must not carry ``content_hash``."""
+    return _digest(_admit(body))
 
 
 def _refuse(reason, path, message):
@@ -131,7 +146,11 @@ def _read(path):
     if not isinstance(data, dict) or "content_hash" not in data:
         raise _refuse("tuning_receipt_unreadable", path, f"tuning receipt {path} has no content_hash")
     body = {k: v for k, v in data.items() if k != "content_hash"}
-    if receipt_hash(body) != data["content_hash"]:
+    try:
+        digest = receipt_hash(body)
+    except (ValueError, TypeError) as exc:  # e.g. a hand-edited NaN or a non-dict body
+        raise _refuse("tuning_receipt_unreadable", path, f"tuning receipt {path} is unreadable") from exc
+    if digest != data["content_hash"]:
         raise _refuse("tuning_receipt_unreadable", path, f"tuning receipt {path} does not match its hash")
     return data
 
@@ -147,8 +166,9 @@ def _same_or_refuse(path, digest):
 def write_receipt(path, body):
     """``body`` plus its content_hash, written once. An existing receipt is replayed read-only or refused, never overwritten."""
     path = Path(path)
-    digest = receipt_hash(body)
-    full = dict(body, content_hash=digest)
+    admitted = _admit(body)  # refused before any filesystem access
+    digest = _digest(admitted)
+    full = dict(admitted, content_hash=digest)
     text = json.dumps(full, sort_keys=True, indent=2) + "\n"
     if len(text.encode("utf-8")) > MAX_RECEIPT_BYTES:  # refused before any filesystem access, so load can always read it
         raise _refuse("tuning_receipt_too_large", path, f"tuning receipt {path} exceeds {MAX_RECEIPT_BYTES} bytes")
