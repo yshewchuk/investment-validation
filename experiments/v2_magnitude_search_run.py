@@ -53,6 +53,7 @@ from experiments.native_registration import (
     valid_registration_read_budget,
     verified_registration_bytes,
 )
+from experiments.search_memory_log import log_memory, panel_memo_holder
 from experiments.size_job_budget import remaining
 
 _PARALLEL = None
@@ -244,13 +245,14 @@ def _admit_driver(conn, store, registration, request, plan_ref):
     return plan
 
 
-def run_search(conn, store, repository, registration, request, plan_ref, *, limits, collect_results=True, before_dispatch=None):
-    """Validate claimed inner results before fresh work; never retry; collect_results=False returns None before the final collect."""
+def run_search(conn, store, repository, registration, request, plan_ref, *, limits, collect_results=True, before_dispatch=None, isolate=False):
+    """Validate claimed inner results before fresh work; never retry; collect_results=False returns None before the final collect. isolate=True sends fresh trials through the spawn pool even for workers=1 (requires a v2+ request with limits); library callers keep the in-process default."""
     workers = validate_workers(request)
     request = {key: value for key, value in request.items() if key != "workers"}
     validate_execution_limits(limits)
     plan = _admit_driver(conn, store, registration, request, plan_ref)
     trials = SearchTrials(conn, store, repository, registration, request, plan_ref)
+    log_memory("start", panel_memo=panel_memo_holder(), trials_memo=getattr(trials, "_memo", None))
     def read(slot):
         return read_record(conn, store, registration.run_id, slot)
     claimed, fresh = [], []
@@ -269,7 +271,7 @@ def run_search(conn, store, repository, registration, request, plan_ref, *, limi
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search contains an unfinished or orphan outer claim")
         if read("outer-start:" + key) is not None:
             completed_outer.append((year, candidate_id))
-    parallel = workers > 1 and bool(fresh)
+    parallel = (workers > 1 or isolate) and bool(fresh)
     deadline_seconds = None
     if parallel:
         cpus, conn_path = _parallel_preflight(conn, request, limits, workers)
@@ -288,6 +290,7 @@ def run_search(conn, store, repository, registration, request, plan_ref, *, limi
     for year, candidate_id in completed_outer:
         execute_outer_fold(conn, store, repository, registration, request, plan_ref, year,
                            limits=limits, candidate_id=candidate_id)
+    log_memory("after claim replays", panel_memo=panel_memo_holder(), trials_memo=getattr(trials, "_memo", None))
     if not parallel:
         for args, key in fresh:
             _complete_trial(trials, trials.execute, args, key, limits=limits, read=read)
@@ -323,7 +326,9 @@ def run_search(conn, store, repository, registration, request, plan_ref, *, limi
                 raise
             else:
                 executor.shutdown()
+    log_memory("after fresh trials", panel_memo=panel_memo_holder(), trials_memo=getattr(trials, "_memo", None))
     selected = trials.freeze()
+    log_memory("after freeze", panel_memo=panel_memo_holder(), trials_memo=getattr(trials, "_memo", None))
     completed = set(completed_outer)
     if per_candidate(plan):
         try:
@@ -352,6 +357,7 @@ def run_search(conn, store, repository, registration, request, plan_ref, *, limi
                 if (item["outer_year"], unit) not in completed:
                     execute_outer_fold(conn, store, repository, registration, request, plan_ref,
                                        item["outer_year"], limits=limits, candidate_id=unit)
+    log_memory("after refits", panel_memo=panel_memo_holder(), trials_memo=getattr(trials, "_memo", None))
     if not collect_results:
         return None
     return collect_outer_results(conn, store, repository, registration, request, plan_ref)
