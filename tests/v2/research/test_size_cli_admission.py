@@ -205,7 +205,7 @@ def test_parallel_run_preflights_before_deadline_callback(monkeypatch):
 
     with pytest.raises(StopDispatch):
         legacy.run_search(object(), object(), object(), SimpleNamespace(run_id="run"),
-                          {"workers": 3}, object(), limits={},
+                          {"workers": 3, "limits": {"child": {}}}, object(), limits={},
                           before_dispatch=commit_deadline)
     assert order == ["preflight", "remaining", ("deadline", 30)]
 
