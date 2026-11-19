@@ -1,4 +1,5 @@
 """Stage-boundary memory lines for the shared search driver; logging only, never changes results."""
+import itertools
 import resource
 import sys
 
@@ -11,31 +12,39 @@ _NODE_CAP = 200_000
 def deep_size(root, cap=_NODE_CAP):
     """Bounded sys.getsizeof walk over dict keys and values and list/tuple/set/frozenset items.
 
-    Counts at most `cap` objects (visited plus queued); returns (bytes, truncated).
-    When truncated is True the size is a lower bound.
+    Walks at most `cap` objects (visited plus queued) and never materialises more than
+    room+1 children of any one object. Returns (bytes, truncated); when truncated is True
+    the size is a lower bound.
     """
-    seen, stack, total, visited = set(), [root], 0, 0
+    seen, stack, total, truncated = set(), [root], 0, False
     while stack:
         obj = stack.pop()
         if id(obj) in seen:
             continue
-        if visited >= cap:
-            return total, True
         seen.add(id(obj))
-        visited += 1
         total += sys.getsizeof(obj)
         if isinstance(obj, dict):
-            stack.extend(obj.keys())
-            stack.extend(obj.values())
+            it = itertools.chain(obj.keys(), obj.values())
         elif isinstance(obj, (list, tuple, set, frozenset)):
-            stack.extend(obj)
-        if len(stack) + visited > cap:
-            return total, True
-    return total, False
+            it = iter(obj)
+        else:
+            it = None
+        room = cap - len(seen) - len(stack)
+        if room <= 0:
+            truncated = True
+            continue
+        if it is None:
+            continue
+        kids = list(itertools.islice(it, room + 1))
+        if len(kids) > room:
+            truncated = True
+            kids = kids[:room]
+        stack.extend(kids)
+    return total, truncated
 
 
 def log_memory(label, **holders):
-    """Emit one stage-boundary memory line; any failure is swallowed so logging cannot raise."""
+    """Emit one stage-boundary memory line; any Exception is swallowed so logging cannot fail a run; MemoryError (the RSS watchdog's signal) propagates."""
     try:
         rss = rss_bytes()
         peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss

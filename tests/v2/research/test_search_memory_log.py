@@ -39,6 +39,23 @@ def test_deep_size_wide_list_truncates_to_lower_bound():
     assert size <= full_size
 
 
+def test_deep_size_big_list_expansion_is_bounded():
+    big = list(range(1_000_000))
+    size, truncated = log.deep_size(big, cap=1000)
+    assert truncated is True
+    # The root list's own shallow size is ~8 MiB; the bound checks that the children
+    # added only a small amount on top of it (no expansion of all 1M ints).
+    assert size - sys.getsizeof(big) < 100 * 1024
+
+
+def test_log_memory_marks_truncated_holder(capsys, monkeypatch):
+    monkeypatch.setattr(log, "deep_size", lambda root: (2**20 * 3, True))
+    log.log_memory("wide", holder=[1])
+    lines = [line for line in capsys.readouterr().err.splitlines() if line.strip()]
+    assert len(lines) == 1
+    assert "holder 3.0+ MiB" in lines[0]
+
+
 def test_log_memory_propagates_memory_error(monkeypatch):
     def exhausted():
         raise MemoryError("synthetic RSS watchdog trip")
