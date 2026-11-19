@@ -38,7 +38,7 @@ from engine.v2.ops.fingerprints import source_closure
 from engine.v2.ops.migrations import require_current
 from engine.v2.research.progress import Progress, decision, stage
 from experiments.magnitude_search_execution import validate_execution_limits
-from experiments.magnitude_search_outer import VerifiedFreeze, collect_outer_results, execute_outer_fold
+from experiments.magnitude_search_outer import collect_outer_results, execute_outer_fold, shared_freeze
 from experiments.magnitude_search_plan import plan_memo, read_search_plan, trial_key
 from experiments.magnitude_search_records import MIGRATIONS, OWNER, append_record, read_record
 from experiments.magnitude_search_refits import per_candidate, possible_slots, refit_units
@@ -354,34 +354,35 @@ def _run_search(conn, store, repository, registration, request, plan_ref, *, lim
     release_parent_caches("before freeze", trials)
     selected = trials.freeze()
     log_memory("after freeze", panel_memo=panel_memo_holder(), trials_memo=getattr(trials, "_memo", None))
-    completed = set(completed_outer)
-    if per_candidate(plan):
-        try:
-            units = [(item["outer_year"], unit) for item in selected["selections"]
-                     for unit in refit_units(plan, item)]
-        except (ValueError, TypeError, KeyError):
-            raise fail("EXPERIMENT_IDENTITY_CONFLICT", "stored selection is malformed") from None
-        fresh_units = [pair for pair in units if pair not in completed]
-        decision("search refits", f"{len(units)} units; {len(units) - len(fresh_units)} completed replays; "
-                 f"{len(fresh_units)} fresh refits")
-        refit_meter = Progress("search refits", len(fresh_units))
-        with stage("search refits"):
-            for year, unit in fresh_units:
-                outcome = execute_outer_fold(conn, store, repository, registration, request, plan_ref,
-                                             year, limits=limits, candidate_id=unit, frozen=VerifiedFreeze(selected))
-                refit_meter.tick()
-                if isinstance(outcome, dict) and outcome.get("status") == "failed":
-                    decision("search refit failed", f"{unit} year={year}")
-    else:
-        for item in selected["selections"]:
+    with shared_freeze(registration.run_id, plan_ref, selected):
+        completed = set(completed_outer)
+        if per_candidate(plan):
             try:
-                units = refit_units(plan, item)
+                units = [(item["outer_year"], unit) for item in selected["selections"]
+                         for unit in refit_units(plan, item)]
             except (ValueError, TypeError, KeyError):
                 raise fail("EXPERIMENT_IDENTITY_CONFLICT", "stored selection is malformed") from None
-            for unit in units:
-                if (item["outer_year"], unit) not in completed:
-                    execute_outer_fold(conn, store, repository, registration, request, plan_ref,
-                                       item["outer_year"], limits=limits, candidate_id=unit, frozen=VerifiedFreeze(selected))
+            fresh_units = [pair for pair in units if pair not in completed]
+            decision("search refits", f"{len(units)} units; {len(units) - len(fresh_units)} completed replays; "
+                     f"{len(fresh_units)} fresh refits")
+            refit_meter = Progress("search refits", len(fresh_units))
+            with stage("search refits"):
+                for year, unit in fresh_units:
+                    outcome = execute_outer_fold(conn, store, repository, registration, request, plan_ref,
+                                                 year, limits=limits, candidate_id=unit)
+                    refit_meter.tick()
+                    if isinstance(outcome, dict) and outcome.get("status") == "failed":
+                        decision("search refit failed", f"{unit} year={year}")
+        else:
+            for item in selected["selections"]:
+                try:
+                    units = refit_units(plan, item)
+                except (ValueError, TypeError, KeyError):
+                    raise fail("EXPERIMENT_IDENTITY_CONFLICT", "stored selection is malformed") from None
+                for unit in units:
+                    if (item["outer_year"], unit) not in completed:
+                        execute_outer_fold(conn, store, repository, registration, request, plan_ref,
+                                           item["outer_year"], limits=limits, candidate_id=unit)
     release_parent_caches("after refits", trials)
     log_memory("after refits", panel_memo=panel_memo_holder(), trials_memo=getattr(trials, "_memo", None))
     if not collect_results:
