@@ -70,11 +70,18 @@ def test_atm_bad_entry_quote_keeps_true_strike():
     assert st["status"] == "undetermined" and st["reason"] == "entry_quote_unusable"
 
 
-def test_atm_missing_call_at_nearest_falls_to_next_common():
-    put_only = [(0, 100, 1.8, 2.0, 0.6, 1.0, 1)]
-    chunk = lad._pack([rec("E", 100.0, pair(95) + pair(110) + put_only)], {})
-    c, p = sd.atm_legs(chunk, 0)
-    assert chunk["strike"][c] == 95 and chunk["strike"][p] == 95
+def test_atm_call_without_put_at_atm_is_none_no_shift():
+    # Healthy pairs at 95 and 110 do not rescue an ATM strike (100) that has a call but no put.
+    call_only = [(1, 100, 2.0, 2.2, 1.0, 1.4, 1)]
+    chunk = lad._pack([rec("E", 100.0, pair(95) + pair(110) + call_only)], {})
+    assert sd.atm_legs(chunk, 0) is None
+    assert sd.decide(pd.DataFrame([ev("E", 1.0)]), EMPTY, "R_L2", chunk).loc[0, "reason"] == "no_atm_pair"
+
+
+def test_atm_put_only_at_nearest_call_strike_is_none():
+    # Full pair at 95, call-only at 100: the ATM strike is the nearest call (100), which has no put.
+    chunk = lad._pack([rec("E", 100.0, pair(95) + [(1, 100, 2.0, 2.2, 1.0, 1.4, 1)])], {})
+    assert sd.atm_legs(chunk, 0) is None
 
 
 def test_atm_none_without_common_strike_or_finite_spot():
@@ -112,6 +119,12 @@ def test_entry_missing_mcap_and_no_pair():
     assert st["status"] == "undetermined" and st["reason"] == "no_atm_pair"
 
 
+@pytest.mark.parametrize("null", [None, pd.NA])
+def test_entry_null_mcap_is_missing_mcap(null):
+    st = sd.entry_state(one(), 0, mcap=null)
+    assert st["status"] == "undetermined" and st["reason"] == "missing_mcap"
+
+
 # ---- exit_value -----------------------------------------------------------
 
 def test_exit_rung1_at_half_is_mid_sum():
@@ -143,6 +156,16 @@ def test_exit_locked_quote_priced_as_rung1():
     c, p = sd.atm_legs(chunk, 0)
     value, label = sd.exit_value(chunk, c, p, 0.5)
     assert value == pytest.approx(1.0 + 0.8) and label == "rung1"
+
+
+@pytest.mark.parametrize("alpha, msg", [(2.0, r"alpha must lie in \[0, 1\], got 2\.0"),
+                                        (NAN, r"alpha must be finite, got nan")])
+def test_exit_value_bad_alpha_raises_on_rung2_and_rung3(alpha, msg):
+    for chunk in (one(call_x=(0.0, 0.5, 2), put_x=(0.0, 0.4, 2)),  # all rung 2
+                  one(call_x=(NAN, NAN, 3))):                      # rung 3
+        c, p = sd.atm_legs(chunk, 0)
+        with pytest.raises(ValueError, match=msg):
+            sd.exit_value(chunk, c, p, alpha)
 
 
 # ---- entry_cost and lots --------------------------------------------------
@@ -212,6 +235,28 @@ def test_missing_pred_is_missing_forecast():
     assert out.loc[0, "status"] == "undetermined" and out.loc[0, "reason"] == "missing_forecast"
 
 
+@pytest.mark.parametrize("null", [None, pd.NA])
+@pytest.mark.parametrize("field", ["pred_abs_move", "implied_move"])
+def test_null_forecast_input_is_missing_forecast(field, null):
+    event = dict(ev("n", 1.0), **{field: null})
+    out = sd.decide(pd.DataFrame([event]), EMPTY, "R_L2", good("n"))
+    assert out.loc[0, "status"] == "undetermined" and out.loc[0, "reason"] == "missing_forecast"
+
+
+@pytest.mark.parametrize("null", [None, pd.NA])
+def test_null_mcap_is_missing_mcap(null):
+    event = dict(ev("m", 1.0), mcap_usd=null)
+    out = sd.decide(pd.DataFrame([event]), EMPTY, "R_L2", good("m"))
+    assert out.loc[0, "status"] == "undetermined" and out.loc[0, "reason"] == "missing_mcap"
+
+
+@pytest.mark.parametrize("null", [None, pd.NA])
+def test_missing_forecast_beats_null_mcap(null):
+    event = dict(ev("b", 1.0, implied=NAN), mcap_usd=null)
+    out = sd.decide(pd.DataFrame([event]), EMPTY, "R_L2", good("b"))
+    assert out.loc[0, "reason"] == "missing_forecast"
+
+
 def test_zero_bid_atm_leg_with_passing_edge_is_never_taken():
     chunk = lad._pack([rec("z", 100.0, pair(100, put_e=(0.0, 0.5)))], {})
     events = pd.DataFrame([ev("z", 1.0)])
@@ -269,7 +314,7 @@ def test_rl2_takes_zero_and_ignores_history():
 
 
 def test_unknown_rule_raises():
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=r"unknown rule 'R_X'"):
         sd.decide(pd.DataFrame([ev("hi", 1.0)]), prior(), "R_X", good("hi"))
 
 
@@ -323,7 +368,7 @@ def test_score_missing_event_raises():
     chunk = lad._pack([rec("A", 100.0, pair(100))], {})
     events = pd.DataFrame([ev("Z", 1.0)])
     forced = sd.decide(events, EMPTY, "R_L2", chunk).assign(status="taken")  # defence-in-depth: taken but absent
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=r"taken event 'Z' is missing from the chunk or events"):
         sd.score(chunk, events, forced, 0.5)
 
 
@@ -331,5 +376,15 @@ def test_score_taken_event_without_legs_raises():
     chunk = lad._pack([rec("P", 100.0, [(0, 100, 1.8, 2.0, 0.6, 1.0, 1)])], {})
     events = pd.DataFrame([ev("P", 1.0)])
     forced = sd.decide(events, EMPTY, "R_L2", chunk).assign(status="taken")  # defence-in-depth: taken, no ATM pair
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=r"taken event 'P' has no ATM straddle"):
         sd.score(chunk, events, forced, 0.5)
+
+
+@pytest.mark.parametrize("alpha, msg", [(2.0, r"alpha must lie in \[0, 1\], got 2\.0"),
+                                        (NAN, r"alpha must be finite, got nan")])
+def test_score_bad_alpha_raises_with_no_taken_trades(alpha, msg):
+    chunk = lad._pack([rec("A", 100.0, pair(100))], {})
+    events = pd.DataFrame([ev("A", 1.0)])
+    none_taken = sd.decide(events, EMPTY, "R_L2", chunk).assign(status="not_taken")
+    with pytest.raises(ValueError, match=msg):
+        sd.score(chunk, events, none_taken, alpha)

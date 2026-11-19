@@ -25,20 +25,34 @@ STATUSES = ("taken", "not_taken", "undetermined")
 DECISION_COLS = ["event_id", "event_date", "edge", "cutoff", "rel_spread", "status", "reason"]
 
 
+def _num(x):
+    """``float(x)``, or NaN when ``x`` is None, pd.NA or another null."""
+    if x is None or pd.isna(x):
+        return float("nan")
+    return float(x)
+
+
 def atm_legs(chunk, i):
-    """(call_idx, put_idx) of the ATM straddle for event ``i``, or None."""
+    """(call_idx, put_idx) of the ATM straddle for event ``i``, or None.
+
+    As in the registered ``straddle_through``: the ATM strike is the CALL strike nearest
+    ``spot_entry`` (ties go to the lower strike), and the put must exist at that same strike.
+    No shifting to another common strike.
+    """
     spot = float(chunk["spot_entry"][i])
     if not math.isfinite(spot):
         return None
     lo, hi = int(chunk["offsets"][i]), int(chunk["offsets"][i + 1])
     right, strike = chunk["right"][lo:hi], chunk["strike"][lo:hi]
-    common = sorted(set(strike[right == 0]) & set(strike[right == 1]))
-    if not common:
+    calls = sorted(set(strike[right == 1]))
+    if not calls:
         return None
-    best = min(common, key=lambda s: (abs(s - spot), s))  # ties go to the lower strike
+    best = min(calls, key=lambda s: (abs(s - spot), s))  # ties go to the lower strike
+    puts = np.flatnonzero((right == 0) & (strike == best))
+    if puts.size == 0:
+        return None
     call = lo + int(np.flatnonzero((right == 1) & (strike == best))[0])
-    put = lo + int(np.flatnonzero((right == 0) & (strike == best))[0])
-    return call, put
+    return call, lo + int(puts[0])
 
 
 def entry_state(chunk, i, *, mcap):
@@ -55,7 +69,7 @@ def entry_state(chunk, i, *, mcap):
             out["reason"] = "entry_quote_unusable"
             return out
         spreads.append((a - b) / ((a + b) / 2.0))
-    if not math.isfinite(float(mcap)):
+    if not math.isfinite(_num(mcap)):
         out["reason"] = "missing_mcap"
         return out
     out.update(status="ok", rel_spread=float(np.mean(spreads)))
@@ -65,7 +79,8 @@ def entry_state(chunk, i, *, mcap):
 def exit_value(chunk, c, p, alpha):
     """(value_per_share, rung_label) for the straddle at exit. A rung-3 leg marks the whole
     structure at worst-case payoff 0.0; rung-2 legs fill at alpha 0 (the bid)."""
-    rungs = (int(chunk["exit_rung"][c]), int(chunk["exit_rung"][p]))
+    FillModel(alpha)  # validate alpha up front, whatever the rungs
+    rungs =(int(chunk["exit_rung"][c]), int(chunk["exit_rung"][p]))
     if 3 in rungs:
         return 0.0, EXIT_UNQUOTED
     total = 0.0
@@ -77,7 +92,7 @@ def exit_value(chunk, c, p, alpha):
 
 def entry_cost(chunk, c, p, alpha):
     """Per-share cost of buying the call and the put at the alpha mark."""
-    model = FillModel(alpha)
+    model = FillModel(alpha)  # validates alpha
     return float(sum(model.buy(chunk["bid_e"][leg], chunk["ask_e"][leg]) for leg in (c, p)))
 
 
@@ -104,15 +119,15 @@ def decide(events, history, rule, chunk):
     pos = {str(e): i for i, e in enumerate(chunk["event_id"])}
     rows = []
     for ev in events.to_dict("records"):
-        edge = forecast_edge(float(ev["pred_abs_move"]), float(ev["implied_move"]))
+        edge = forecast_edge(_num(ev["pred_abs_move"]), _num(ev["implied_move"]))
         row = {"event_id": ev["event_id"], "event_date": ev["event_date"], "edge": edge,
                "cutoff": float("nan"), "rel_spread": float("nan"), "status": "undetermined", "reason": None}
-        mcap = float(ev["mcap_usd"])
         if not math.isfinite(edge):
             row["reason"] = "missing_forecast"
         elif str(ev["event_id"]) not in pos:
             row["reason"] = "no_ladder_chunk"
         else:
+            mcap = _num(ev["mcap_usd"])  # read only once the forecast is known to be present
             state = entry_state(chunk, pos[str(ev["event_id"])], mcap=mcap)
             if state["status"] != "ok":
                 row["reason"] = state["reason"]
@@ -140,6 +155,7 @@ def decide(events, history, rule, chunk):
 
 def score(chunk, events, decisions, alpha, *, drop_unquoted=False):
     """Marked P&L for TAKEN events only. ``drop_unquoted`` removes the worst-case rung-3 rows."""
+    FillModel(alpha)  # validate alpha up front, even when nothing is taken
     known = set(events["event_id"].astype(str))
     pos = {str(e): i for i, e in enumerate(chunk["event_id"])}
     rows = []
