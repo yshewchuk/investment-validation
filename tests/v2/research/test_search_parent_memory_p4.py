@@ -288,3 +288,42 @@ def test_run_search_shares_one_freeze_across_the_refit_loop(monkeypatch, per_can
     assert trials.freeze.call_count == 1
     assert [(year, unit) for year, unit, _ in refits] == [("2024", "overall"), ("2024", "rmse")]
     assert all(frozen is FROZEN for _, _, frozen in refits)
+
+
+@pytest.mark.parametrize("left, right", [
+    ({"max_fits": 1000}, {"max_fits": 1000.0}),
+    ({"max_fits": 1}, {"max_fits": True}),
+    ({"axes": [1, 2]}, {"axes": (1, 2)}),
+])
+def test_memo_keys_keep_value_types_apart(calls, left, right):
+    _, registration, _ = _setup(calls)
+    with plan_mod.plan_memo():
+        binding.prepare_plan(None, Store(), registration, {**REQUEST, **left}, plan_schema=PLAN_V3)
+        size = len(plan_mod._PLAN_MEMO)
+        binding.prepare_plan(None, Store(), registration, {**REQUEST, **right}, plan_schema=PLAN_V3)
+        assert len(plan_mod._PLAN_MEMO) == size + 1
+    assert calls["folds"] == 2
+
+
+def test_memo_keys_on_plan_schema(calls):
+    _, registration, _ = _setup(calls)
+    with plan_mod.plan_memo():
+        binding.prepare_plan(None, Store(), registration, REQUEST, plan_schema=PLAN_V3)
+        binding.prepare_plan(None, Store(), registration, REQUEST, plan_schema=plan_mod.PLAN_V2)
+    assert calls["folds"] == 2
+
+
+def test_plans_built_outside_the_memo_are_never_retained(monkeypatch):
+    plan = {"plan_id": "fresh", "folds": []}
+    monkeypatch.setattr(plan_mod, "_prepare", lambda conn, store, registration, request, **kwargs: dict(plan))
+    store, registration = Store(), Registration()
+    ref = artifact_reference(canonical_json(plan).encode(), PLAN_V3)
+    tampered = artifact_reference(b"tampered", PLAN_V3)
+    with plan_mod.plan_memo():
+        for _ in range(3):
+            assert plan_mod.read_search_plan(None, store, registration, REQUEST, ref) == plan
+        assert len(plan_mod._PLAN_MEMO) == 0
+        with pytest.raises(OpsError) as caught:
+            plan_mod.read_search_plan(None, store, registration, REQUEST, tampered)
+    assert caught.value.problem.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert store.reads == 3

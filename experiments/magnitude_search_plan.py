@@ -435,14 +435,26 @@ def plan_memo():
             _PLAN_MEMO = None
 
 
+def _exact_key(value):
+    """Hashable key that keeps types apart (1000 vs 1000.0, int vs bool, tuple vs list)."""
+    if isinstance(value, dict):
+        items = sorted(((repr(k), _exact_key(v)) for k, v in value.items()), key=lambda item: item[0])
+        return ("d", tuple(items))
+    if isinstance(value, (list, tuple)):
+        return (type(value).__name__, tuple(_exact_key(v) for v in value))
+    return (type(value).__name__, repr(value))
+
+
 def memoized_plan(registration, request, plan_schema, build):
     """Return ``build()``, reusing a plan built earlier in the active memo for the same registration, schema and request."""
     memo = _PLAN_MEMO
     if memo is None:
         return build()
-    key = (id(registration), plan_schema, content_hash(request))
+    key = (id(registration), plan_schema, _exact_key(request))
     if key not in memo:
-        memo[key] = (registration, build())
+        plan = build()
+        memo[key] = (registration, plan)
+        memo.setdefault("plan_ids", set()).add(id(plan))
     return memo[key][1]
 
 
@@ -476,7 +488,9 @@ def read_search_plan(conn, store, registration, request, ref):
     expected = _prepare(conn, store, registration, request,
                         plan_schema=ref.schema_ref if qualified else None)
     memo = _PLAN_MEMO
-    ref_key = None if memo is None else ("ref", id(expected), canonical_json(to_document(ref)))
+    ref_key = None
+    if memo is not None and id(expected) in memo.get("plan_ids", ()):
+        ref_key = ("ref", id(expected), canonical_json(to_document(ref)))
     if ref_key is None or ref_key not in memo:
         payload = canonical_json(expected).encode()
         if ref != artifact_reference(payload, ref.schema_ref):
