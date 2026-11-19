@@ -22,6 +22,7 @@ _REASONS = ("no_entry_chain", "no_exit_chain", "no_session", "structure_unresolv
             "expiry_gone_at_exit")
 _PLAN_COLS = ("event_id", "ticker", "event_date", "session", "entry_date", "exit_date")
 _DATE_COLS = ("event_date", "entry_date", "exit_date")
+_SESSIONS = ("AMC", "BMO")
 _CODE = {"P": 0, "C": 1}
 _SELECTOR = ExpirySelector(kind="first_post_event")
 _SCALARS = {"event_id": object, "expiry": "datetime64[ns]", "spot_entry": np.float64,
@@ -31,7 +32,8 @@ _FLATS = {"right": np.int8, "strike": np.float64, "bid_e": np.float64, "ask_e": 
 
 
 def _check_plan(admitted, plan):
-    """Refuse an unissued admission, plan ids outside it, repeated ids, and mismatched dates."""
+    """Refuse an unissued admission, malformed plan fields, plan ids outside it, repeated ids, and
+    mismatched or inconsistent dates."""
     if not isinstance(admitted, Admitted):
         raise fail(_DENIED, "the ladder accepts only an admission issued by admit_events",
                    details={"reason": "admission_not_issued"})
@@ -43,6 +45,15 @@ def _check_plan(admitted, plan):
             bad = True
     if bad:
         raise fail(_CONFLICT, "the plan is malformed", details={"reason": "plan_malformed"})
+    if any(not isinstance(t, str) or not t.strip() for t in plan["ticker"]):
+        raise fail(_CONFLICT, "the plan has an empty or null ticker", details={"reason": "plan_malformed"})
+    if any(not pd.isna(s) and (not isinstance(s, str) or s.upper() not in _SESSIONS)
+           for s in plan["session"]):
+        raise fail(_CONFLICT, "the plan has a session outside AMC/BMO", details={"reason": "plan_session_invalid"})
+    entry, event, exit_ = (pd.to_datetime(plan[c]).dt.normalize() for c in ("entry_date", "event_date", "exit_date"))
+    if not ((entry <= event) & (event <= exit_) & (entry < exit_)).all():
+        raise fail(_CONFLICT, "the plan dates are not entry <= event <= exit with entry < exit",
+                   details={"reason": "plan_dates_inconsistent"})
     dates = admitted["events"].set_index("event_id")["event_date"]
     ids = plan["event_id"].astype(str)
     if not set(ids) <= set(dates.index):
@@ -62,7 +73,7 @@ def _first(values):
 
 def _contracts(rows, *, entry):
     """Puts/calls with a usable strike, first (right, strike) kept, sorted. Entry rows also lose
-    NaN, crossed and ask<=0 quotes; exit rows keep every quote so rung 3 can record them."""
+    NaN, crossed, negative-bid and ask<=0 quotes; exit rows keep every quote so rung 3 can record them."""
     out = pd.DataFrame({
         "right": rows["right"].map(_CODE).astype(float).to_numpy(),
         "strike": pd.to_numeric(rows["strike"], errors="coerce").astype(float).to_numpy(),
@@ -71,7 +82,7 @@ def _contracts(rows, *, entry):
     })
     out = out[out["right"].notna() & out["strike"].notna()]
     if entry:
-        out = out[out["bid"].notna() & out["ask"].notna() & (out["bid"] <= out["ask"]) & (out["ask"] > 0)]
+        out = out[out["bid"].notna() & out["ask"].notna() & (out["bid"] <= out["ask"]) & (out["ask"] > 0) & (out["bid"] >= 0)]
     return out.drop_duplicates(["right", "strike"], keep="first").sort_values(["right", "strike"])
 
 

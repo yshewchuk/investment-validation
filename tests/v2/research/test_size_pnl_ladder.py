@@ -118,7 +118,8 @@ def test_plan_outside_admission_refused_before_any_load():
 def test_date_mismatch_and_duplicate_ids_refused():
     admitted, plan, chains = _world([_event("a1")])
     with pytest.raises(OpsError) as exc:
-        list(lad.ladder_chunks(admitted, plan.assign(event_date="2024-03-20"), _loader(chains, [])))
+        moved = plan.assign(event_date="2024-03-20", entry_date="2024-03-19", exit_date="2024-03-21")
+        list(lad.ladder_chunks(admitted, moved, _loader(chains, [])))
     assert _refusal(exc) == (CONFLICT, "event_date_mismatch")
     calls = []
     doubled = pd.concat([plan, plan], ignore_index=True)
@@ -140,6 +141,43 @@ def test_plan_malformed_refused_before_any_load(broken, expect_reason):
         list(lad.ladder_chunks(admitted, broken(plan), _loader(chains, calls)))
     assert _refusal(exc) == (CONFLICT, expect_reason)
     assert calls == []
+
+
+@pytest.mark.parametrize("broken, expect_reason", [
+    (lambda p: p.assign(ticker=""), "plan_malformed"),                                   # empty ticker
+    (lambda p: p.assign(session="XYZ"), "plan_session_invalid"),                         # unknown session
+    (lambda p: p.assign(entry_date="2024-03-16", exit_date="2024-03-17"),
+     "plan_dates_inconsistent"),                                                         # entry after event
+    (lambda p: p.assign(entry_date="2024-03-12", exit_date="2024-03-13"),
+     "plan_dates_inconsistent"),                                                         # exit before event
+    (lambda p: p.assign(entry_date="2024-03-14", exit_date="2024-03-14"),
+     "plan_dates_inconsistent"),                                                         # entry >= exit
+])
+def test_plan_fields_refused_before_any_load(broken, expect_reason):
+    admitted, plan, chains = _world([_event("a1")])
+    calls = []
+    with pytest.raises(OpsError) as exc:
+        list(lad.ladder_chunks(admitted, broken(plan), _loader(chains, calls)))
+    assert _refusal(exc) == (CONFLICT, expect_reason)
+    assert calls == []
+
+
+def test_null_session_is_skipped_as_no_session_not_refused():
+    chunks, calls = _run([_event("a1", session=None)])
+    [(_, chunk)] = chunks
+    assert chunk["event_id"].tolist() == []
+    assert chunk["skipped"]["no_session"] == 1
+    assert len(calls) == 1
+
+
+def test_entry_negative_bid_dropped_zero_bid_kept():
+    entry = [(E1, 2, "P", 85, -0.5, 1.0), (E1, 2, "P", 90, 0.0, 1.2),
+             (E1, 2, "P", 95, 1.0, 1.2), (E1, 2, "P", 100, 1.0, 1.2)]
+    [(_, chunk)], _ = _run([_event("n1", entry_rows=entry)])
+    assert chunk["event_id"].tolist() == ["n1"]
+    assert chunk["right"].tolist() == [0, 0, 0]
+    assert chunk["strike"].tolist() == [90, 95, 100]
+    assert chunk["bid_e"].tolist() == [0.0, 1.0, 1.0]
 
 
 def test_one_load_per_quarter_ascending_keys_limited():
