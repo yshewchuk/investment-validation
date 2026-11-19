@@ -11,6 +11,7 @@ import hashlib
 import json
 import math
 import os
+import stat
 import tempfile
 from pathlib import Path
 
@@ -24,6 +25,7 @@ MIN_TRADES = 300
 ALPHA = 0.5
 _CONFLICT = "EXPERIMENT_IDENTITY_CONFLICT"
 _HOLDOUT = "HOLDOUT_ACCESS_DENIED"
+MAX_RECEIPT_BYTES = 1 << 20
 
 
 def choose_c(totals, trades):
@@ -85,11 +87,46 @@ def _refuse(reason, path, message):
     return Refusal(_CONFLICT, message, {"reason": reason, "path": str(path)})
 
 
+def _read_capped(path):
+    """Bytes of the regular file at ``path``, opened without following a symlink and capped at MAX_RECEIPT_BYTES.
+
+    O_NONBLOCK keeps a FIFO from blocking the open; the fstat check then refuses it.
+    """
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise ValueError(f"{path} is not a regular file")
+        if st.st_size > MAX_RECEIPT_BYTES:
+            raise ValueError(f"{path} is larger than {MAX_RECEIPT_BYTES} bytes")
+        parts, total = [], 0
+        while total <= MAX_RECEIPT_BYTES:  # reads at most MAX + 1 bytes in all
+            part = os.read(fd, MAX_RECEIPT_BYTES + 1 - total)
+            if not part:
+                break
+            parts.append(part)
+            total += len(part)
+        if total > MAX_RECEIPT_BYTES:
+            raise ValueError(f"{path} grew past {MAX_RECEIPT_BYTES} bytes")
+        return b"".join(parts)
+    finally:
+        os.close(fd)
+
+
+def _fsync_dir(directory):
+    """Flush a directory so a link created in it is durable."""
+    fd = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 def _read(path):
     """The receipt at ``path`` with its content_hash checked against its body; refuses when unreadable."""
     try:
-        data = json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
+        data = json.loads(_read_capped(path).decode("utf-8"))
+    except (OSError, ValueError) as exc:  # UnicodeDecodeError and JSONDecodeError are ValueErrors
         raise _refuse("tuning_receipt_unreadable", path, f"tuning receipt {path} is unreadable") from exc
     if not isinstance(data, dict) or "content_hash" not in data:
         raise _refuse("tuning_receipt_unreadable", path, f"tuning receipt {path} has no content_hash")
@@ -125,6 +162,7 @@ def write_receipt(path, body):
             os.link(tmp.name, path)  # atomic and fails if the target exists
         except FileExistsError:
             return _same_or_refuse(path, digest)
+        _fsync_dir(path.parent)
         return full
     finally:
         os.unlink(tmp.name)
