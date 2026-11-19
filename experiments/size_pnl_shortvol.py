@@ -209,7 +209,8 @@ def score_events(chunk, events, sims, name, *, alpha=0.5, c=1.0):
 
 
 def decide(scored):
-    """Taken / not_taken / undetermined per row, with the trailing cutoff of ``_short_vol_rule``.
+    """Taken / not_taken / undetermined per row, following ``EntryRule.evaluate`` (undetermined wins over not_taken),
+    with the trailing cutoff of ``_short_vol_rule``.
 
     History is every scored row of the same structure with a finite ``exp_pnl_sim``, whatever its universe
     filter, so a filtered-out event still counts toward the bar. Rows already undetermined pass through.
@@ -225,25 +226,28 @@ def decide(scored):
     for k, row in enumerate(out.to_dict("records")):
         if row["status"] != "scored":
             continue
+        name, month = row["structure"], pd.Timestamp(row["event_date"]).to_period("M")
+        if (name, month) not in cache:  # the cutoff depends only on the month
+            cache[(name, month)] = trailing_cutoff(history.get(name), row["event_date"], min_window=MIN_WINDOW)
+        bar = cache[(name, month)]
+        if bar is not None:
+            cut[k] = bar
         mcap, rel = _num(row["mcap_usd"]), _num(row["rel_spread"])
-        if math.isnan(mcap):
-            status[k], reason[k] = "undetermined", "missing_mcap"
-        elif mcap < MCAP_FLOOR or rel > MAX_REL_SPREAD:
-            status[k], reason[k] = "not_taken", "universe_filter"
-        elif math.isnan(rel):
+        pnl_ok = None if bar is None else bool(value[k] >= bar)
+        spread_ok = None if math.isnan(rel) else rel <= MAX_REL_SPREAD
+        mcap_ok = None if math.isnan(mcap) else mcap >= MCAP_FLOOR
+        if pnl_ok is None:
+            status[k], reason[k] = "undetermined", "thin_history"
+        elif spread_ok is None:
             status[k], reason[k] = "undetermined", "missing_spread"
+        elif mcap_ok is None:
+            status[k], reason[k] = "undetermined", "missing_mcap"
+        elif not pnl_ok:
+            status[k], reason[k] = "not_taken", "below_cutoff"
+        elif not (spread_ok and mcap_ok):
+            status[k], reason[k] = "not_taken", "universe_filter"
         else:
-            name, month = row["structure"], pd.Timestamp(row["event_date"]).to_period("M")
-            if (name, month) not in cache:  # the cutoff depends only on the month
-                cache[(name, month)] = trailing_cutoff(history.get(name), row["event_date"],
-                                                       min_window=MIN_WINDOW)
-            bar = cache[(name, month)]
-            if bar is None:
-                status[k], reason[k] = "undetermined", "thin_history"
-            else:
-                cut[k] = bar
-                taken = value[k] >= bar
-                status[k], reason[k] = ("taken", None) if taken else ("not_taken", "below_cutoff")
+            status[k], reason[k] = "taken", None
     out["cutoff"], out["status"], out["reason"] = cut, status, reason
     return out
 

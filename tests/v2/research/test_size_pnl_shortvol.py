@@ -335,7 +335,7 @@ def test_taken_and_below_cutoff_with_enough_history():
 
 
 def test_universe_filters_and_boundaries():
-    frame = scored_frame(scored_row("small", mcap=MCAP_FLOOR - 1), scored_row("wide", rel=0.3),
+    frame = scored_frame(scored_row("small", pnl=1.0, mcap=MCAP_FLOOR - 1), scored_row("wide", pnl=1.0, rel=0.3),
                          scored_row("floor", mcap=MCAP_FLOOR), scored_row("edge", rel=MAX_REL_SPREAD),
                          *prior_scores())
     out = sv.decide(frame).set_index("event_id")
@@ -346,11 +346,32 @@ def test_universe_filters_and_boundaries():
         assert out.loc[eid, "status"] in ("taken", "not_taken") and out.loc[eid, "cutoff"] == pytest.approx(0.952)
 
 
+def test_universe_failure_with_usable_cutoff_is_universe_filter():
+    frame = scored_frame(scored_row("wide", pnl=1.0, rel=MAX_REL_SPREAD + 0.01), *prior_scores())
+    out = sv.decide(frame).set_index("event_id")
+    assert out.loc["wide", "status"] == "not_taken" and out.loc["wide", "reason"] == "universe_filter"
+    assert out.loc["wide", "cutoff"] == pytest.approx(0.952)
+
+
+def test_below_cutoff_with_passing_universe_is_below_cutoff():
+    frame = scored_frame(scored_row("lo", pnl=0.5, mcap=MCAP_FLOOR, rel=MAX_REL_SPREAD), *prior_scores())
+    out = sv.decide(frame).set_index("event_id")
+    assert out.loc["lo", "status"] == "not_taken" and out.loc["lo", "reason"] == "below_cutoff"
+
+
+def test_nan_spread_with_thin_history_is_thin_history():
+    frame = scored_frame(scored_row("s", rel=NAN), *prior_scores(99))
+    out = sv.decide(frame).set_index("event_id")
+    assert out.loc["s", "status"] == "undetermined" and out.loc["s", "reason"] == "thin_history"
+
+
 def test_missing_mcap_and_missing_spread_are_undetermined():
-    frame = scored_frame(scored_row("m", mcap=NAN), scored_row("s", rel=NAN))
+    frame = scored_frame(scored_row("m", mcap=NAN), scored_row("s", rel=NAN),
+                         scored_row("ms", mcap=NAN, rel=0.3), *prior_scores())
     out = sv.decide(frame).set_index("event_id")
     assert out.loc["m", "reason"] == "missing_mcap" and out.loc["m", "status"] == "undetermined"
     assert out.loc["s", "reason"] == "missing_spread" and out.loc["s", "status"] == "undetermined"
+    assert out.loc["ms", "reason"] == "missing_mcap" and out.loc["ms", "status"] == "undetermined"
 
 
 def test_decide_does_not_mutate_input():
