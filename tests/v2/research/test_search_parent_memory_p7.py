@@ -1,6 +1,8 @@
 """Search parent memory P7: pre-published cohort inputs adopted by workers, not re-admitted."""
 # ruff: noqa: F811
+import gc
 import os
+import weakref
 from concurrent.futures import Future
 from concurrent.futures.process import BrokenProcessPool
 from types import SimpleNamespace
@@ -129,6 +131,28 @@ def test_prepublish_visits_each_distinct_cohort_once_and_readmits_published(case
     fresh.prepublish(trial_cases(case))
     assert len(admitted) == len(published)
     assert {c: canonical_json(fresh._read("cohort:" + c)) for c in published} == slots
+
+
+class Tracked(dict):
+    """A dict that supports weak references, so a test can observe when its cohort inputs are released."""
+
+
+def test_prepublish_releases_each_cohort_inputs_before_admitting_the_next(case, copy, monkeypatch):
+    recorder = _recorder(case, copy)
+    original = recorder._inputs
+    refs = []
+
+    def tracked(inner, plan=None):
+        if refs:
+            gc.collect()
+            assert refs[-1]() is None, "previous cohort inputs still resident when the next cohort is admitted"
+        result = Tracked(original(inner, plan=plan))
+        refs.append(weakref.ref(result))
+        return result
+
+    monkeypatch.setattr(recorder, "_inputs", tracked)
+    recorder.prepublish(trial_cases(case))
+    assert len(refs) >= 2  # otherwise the release check above never ran
 
 
 def test_prepublish_refuses_a_published_cohort_whose_body_drifted(case, copy, monkeypatch):

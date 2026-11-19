@@ -237,6 +237,7 @@ class SearchTrials:
             inputs = self._cohort_inputs(cohort, inner, plan=plan)
             self._published[cohort] = publish_inputs(self.store, inputs)
             self._append("cohort:" + cohort, self._published[cohort][0])
+            del inputs  # the next cohort is admitted while this one would otherwise still be resident
         self._memo.clear()
 
     def _cohort(self, admitted):
