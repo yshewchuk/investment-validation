@@ -121,6 +121,11 @@ def freeze_is_verified(value, run_id, plan_key):
                and content_hash(value) == item[3] for item in _FREEZES)
 
 
+def plan_key(plan_ref):
+    """Canonical key of a plan reference; the single derivation used by freeze provenance."""
+    return canonical_json(to_document(plan_ref))
+
+
 class SearchTrials:
     """Native inner fits or submitted forecasts; no outer evaluation or final authority."""
 
@@ -721,8 +726,8 @@ class SearchTrials:
             result = self._freeze()
             run_id = getattr(getattr(self, "registration", None), "run_id", None)
             plan_ref = getattr(self, "plan_ref", None)
-            plan_key = canonical_json(to_document(plan_ref))
-            _FREEZES.append((result, run_id, plan_key, content_hash(result)))
+            key = plan_key(plan_ref)
+            _FREEZES.append((result, run_id, key, content_hash(result)))
             del _FREEZES[:-4]
             return result
         finally:

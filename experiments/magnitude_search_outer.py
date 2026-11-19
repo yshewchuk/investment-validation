@@ -6,7 +6,7 @@ from pathlib import Path
 
 from engine.models.no_fit import forbid_fitting as forbid_legacy_fitting
 from engine.v2.contracts import SnapshotRef
-from engine.v2.foundation import ArtifactError, canonical_json, content_hash, from_document, to_document
+from engine.v2.foundation import ArtifactError, canonical_json, content_hash, from_document
 from engine.v2.models.no_fit import forbid_fitting
 from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.fingerprints import source_closure
@@ -42,6 +42,7 @@ from experiments.magnitude_search_refits import (
 from experiments.magnitude_search_trials import (
     SearchTrials,
     freeze_is_verified,
+    plan_key,
 )
 from experiments.magnitude_search_trials import (
     _completed_fit as _valid_completed_fit,
@@ -105,11 +106,11 @@ def shared_freeze(run_id, plan_ref, value):
     the producing run, plan and the result's content; a caller cannot supply evidence it did not verify.
     """
     global _SHARED
-    plan_key = canonical_json(to_document(plan_ref))
-    if not freeze_is_verified(value, run_id, plan_key):
+    key = plan_key(plan_ref)
+    if not freeze_is_verified(value, run_id, key):
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "shared freeze must be a verified trials.freeze() result")
     previous = _SHARED
-    _SHARED = (run_id, plan_key, value)
+    _SHARED = (run_id, key, value)
     try:
         yield
     finally:
@@ -345,7 +346,7 @@ def execute_outer_fold(conn, store, repository, registration, request, plan_ref,
         return read_record(conn, store, registration.run_id, slot)
     trials = SearchTrials(conn, store, repository, registration, request, plan_ref)
     shared = _SHARED
-    if shared is not None and shared[0] == registration.run_id and shared[1] == canonical_json(to_document(plan_ref)):
+    if shared is not None and shared[0] == registration.run_id and shared[1] == plan_key(plan_ref):
         selection = _native_selection(trials, plan, read, shared[2])
     else:
         selection = _native_selection(trials, plan, read)

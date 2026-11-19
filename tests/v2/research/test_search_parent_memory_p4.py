@@ -372,6 +372,15 @@ def test_freeze_registry_keeps_only_the_last_four(monkeypatch):
     assert all(trials_module.freeze_is_verified(value, "run", plan_key) for value in values[-4:])
 
 
+def test_plan_key_is_one_derivation_shared_by_freeze_shared_freeze_and_outer_match(monkeypatch):
+    assert trials_module.plan_key(None) == "null"
+    frozen = _frozen_by_trials(monkeypatch, {"a": 1}, plan_ref=PLAN_REF)
+    with outer.shared_freeze("run", PLAN_REF, frozen):
+        assert outer._SHARED[1] == trials_module.plan_key(PLAN_REF)
+    seen, _ = _execute(monkeypatch, plan_ref=PLAN_REF, shared=("run", PLAN_REF, frozen))
+    assert len(seen) == 1 and len(seen[0]) == 4 and seen[0][3] is frozen
+
+
 def test_freeze_with_no_plan_ref_is_accepted_for_none_and_refused_for_another(monkeypatch):
     value = {"a": 1}
     monkeypatch.setattr(trials_module.SearchTrials, "_freeze", lambda self: value)
