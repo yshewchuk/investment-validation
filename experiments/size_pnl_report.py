@@ -32,6 +32,8 @@ def _require(frame, cols, who):
 
 
 def _flag(series, who, col):
+    if len(series) == 0:
+        return series.astype(bool)
     if pd.api.types.is_bool_dtype(series):
         ok = series.notna()
     else:
@@ -43,6 +45,8 @@ def _flag(series, who, col):
 
 
 def _finite(series, who, col):
+    if len(series) == 0:
+        return
     if not pd.api.types.is_numeric_dtype(series):
         raise ValueError(f"{who}: column {col!r} must be numeric, got dtype {series.dtype}")
     bad = ~np.isfinite(series.to_numpy(dtype=float))
@@ -180,8 +184,15 @@ def t6_straddle(scored, decisions, n_events):
     bad = set(decisions["status"]) - set(STATUSES)
     if bad:
         raise ValueError(f"t6_straddle: unknown decision status {sorted(bad, key=str)} in column 'status'")
+    rules = set(decisions["rule"])
+    decided = set(decisions["model_id"])
+    pairs = set(zip(decisions["model_id"], decisions["rule"]))
+    pairs |= set(zip(scored["model_id"], scored["rule"]))
+    # models with candidate events but no decisions get a zero row for every decided rule
+    pairs |= {(m, r) for m in n_events if m not in decided for r in rules}
     rows = []
-    for (m, rule), g in decisions.groupby(["model_id", "rule"]):
+    for m, rule in sorted(pairs):
+        g = decisions[(decisions["model_id"] == m) & (decisions["rule"] == rule)]
         counts = [int((g["status"] == s).sum()) for s in STATUSES]
         mine = scored[(scored["model_id"] == m) & (scored["rule"] == rule)]
         pnl = float(mine["pnl_dollars"].sum())
@@ -212,9 +223,10 @@ def t7_contrasts(contrasts):
                     note="Intervals are 90% bootstrap intervals; share_positive = positive quarters / all quarters.")
 
 
-def t8_rungs(shares):
+def t8_rungs(shares, *, models=None):
     rungs = sorted({RUNG_ALWAYS}.union(*(d.keys() for d in shares.values())))
-    rows = [[m] + [shares[m].get(r) for r in rungs] for m in sorted(shares)]
+    ids = sorted(set(shares) | (set() if models is None else set(models)))
+    rows = [[m] + [shares.get(m, {}).get(r) for r in rungs] for m in ids]
     return _section("T8 Exit rungs", ["model_id", *rungs], rows,
                     note=f"Share per exit rung; {RUNG_ALWAYS} is always shown.")
 
