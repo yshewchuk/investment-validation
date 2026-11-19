@@ -170,14 +170,16 @@ def test_null_session_is_skipped_as_no_session_not_refused():
     assert len(calls) == 1
 
 
-def test_entry_negative_bid_dropped_zero_bid_kept():
+def test_entry_negative_bid_set_nan_zero_bid_kept():
     entry = [(E1, 2, "P", 85, -0.5, 1.0), (E1, 2, "P", 90, 0.0, 1.2),
              (E1, 2, "P", 95, 1.0, 1.2), (E1, 2, "P", 100, 1.0, 1.2)]
     [(_, chunk)], _ = _run([_event("n1", entry_rows=entry)])
     assert chunk["event_id"].tolist() == ["n1"]
-    assert chunk["right"].tolist() == [0, 0, 0]
-    assert chunk["strike"].tolist() == [90, 95, 100]
-    assert chunk["bid_e"].tolist() == [0.0, 1.0, 1.0]
+    assert chunk["right"].tolist() == [0, 0, 0, 0]
+    assert chunk["strike"].tolist() == [85, 90, 95, 100]
+    assert np.isnan(chunk["bid_e"][0]) and np.isnan(chunk["ask_e"][0])
+    assert chunk["bid_e"][1] == 0.0 and chunk["ask_e"][1] == 1.2
+    assert chunk["bid_e"][2:].tolist() == [1.0, 1.0]
 
 
 def test_one_load_per_quarter_ascending_keys_limited():
@@ -266,15 +268,18 @@ def test_expiry_choice_bmo_same_day_amc_next():
     assert expiry["amc"] == np.datetime64(E2)
 
 
-def test_entry_crossed_and_nan_dropped_zero_bid_kept():
+def test_entry_crossed_and_nan_set_nan_zero_bid_kept():
     entry = [(E1, 2, "P", 85, 1.0, 1.2), (E1, 2, "P", 90, 1.0, 1.2), (E1, 2, "P", 95, 0.0, 0.5),
              (E1, 2, "P", 100, 1.5, 1.0), (E1, 2, "P", 105, 0.0, 0.0), (E1, 2, "P", 110, np.nan, 1.0),
              (E1, 2, "C", 100, 1.0, 1.2)]
     [(_, chunk)], _ = _run([_event("z", entry_rows=entry)])
-    assert chunk["offsets"].tolist() == [0, 4]
-    assert chunk["right"].tolist() == [0, 0, 0, 1]
-    assert chunk["strike"].tolist() == [85, 90, 95, 100]
-    assert chunk["bid_e"][2] == 0.0
+    assert chunk["offsets"].tolist() == [0, 7]
+    assert chunk["right"].tolist() == [0, 0, 0, 0, 0, 0, 1]
+    assert chunk["strike"].tolist() == [85, 90, 95, 100, 105, 110, 100]
+    assert chunk["bid_e"][:2].tolist() == [1.0, 1.0]
+    assert chunk["bid_e"][2] == 0.0 and chunk["ask_e"][2] == 0.5
+    assert np.isnan(chunk["bid_e"][3:6]).all() and np.isnan(chunk["ask_e"][3:6]).all()
+    assert chunk["bid_e"][6] == 1.0 and chunk["ask_e"][6] == 1.2
 
 
 def test_progress_lines_on_stderr(capsys):

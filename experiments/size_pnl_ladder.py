@@ -1,7 +1,9 @@
 """EXP-188 S3: ladder-quote table for admitted events, built one quarter at a time.
 
 Per event: put and call quotes at the first post-event expiry on the entry date, and the same
-contracts' quotes on the exit date (matched by right and strike). Each exit quote gets a mark rung
+contracts' quotes on the exit date (matched by right and strike). Entry quotes that fail validity (NaN,
+crossed, negative bid, ask<=0) are set to NaN, never dropped, so consumers see the true strike ladder.
+Each exit quote gets a mark rung
 (1 usable, 2 zero-bid or wide, 3 unusable) via ``FillModel.is_wide``; no marks are computed here
 (S5). Chains arrive only through the injected ``load_index``, once per quarter.
 """
@@ -72,8 +74,9 @@ def _first(values):
 
 
 def _contracts(rows, *, entry):
-    """Puts/calls with a usable strike, first (right, strike) kept, sorted. Entry rows also lose
-    NaN, crossed, negative-bid and ask<=0 quotes; exit rows keep every quote so rung 3 can record them."""
+    """Puts/calls with a usable strike, first (right, strike) kept, sorted. Entry rows keep every
+    such strike but set bid/ask to NaN where the quote is NaN, crossed, negative-bid or ask<=0, so the
+    true strike ladder survives; exit rows keep every quote so rung 3 can record them."""
     out = pd.DataFrame({
         "right": rows["right"].map(_CODE).astype(float).to_numpy(),
         "strike": pd.to_numeric(rows["strike"], errors="coerce").astype(float).to_numpy(),
@@ -82,7 +85,8 @@ def _contracts(rows, *, entry):
     })
     out = out[out["right"].notna() & out["strike"].notna()]
     if entry:
-        out = out[out["bid"].notna() & out["ask"].notna() & (out["bid"] <= out["ask"]) & (out["ask"] > 0) & (out["bid"] >= 0)]
+        valid = out["bid"].notna() & out["ask"].notna() & (out["bid"] <= out["ask"]) & (out["ask"] > 0) & (out["bid"] >= 0)
+        out = out.assign(bid=out["bid"].where(valid), ask=out["ask"].where(valid))
     return out.drop_duplicates(["right", "strike"], keep="first").sort_values(["right", "strike"])
 
 

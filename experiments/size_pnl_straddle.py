@@ -4,6 +4,9 @@ Pure functions over numpy/pandas: no I/O, no repository, no ledger. A straddle i
 plus a long ATM put at the first post-event expiry. Decisions use only forecast edges and entry
 facts (never labels or exit quotes); marks come only from ``engine.fills.FillModel`` (section 6 of
 the design). Progress logging: none needed (pure, per-quarter, called by the S9 driver).
+
+Not wired to a production caller yet: the S9 driver (guides/size_decision_pnl_design.md section 9)
+calls ``decide`` then ``score`` per quarter chunk.
 """
 import math
 
@@ -19,7 +22,7 @@ from engine.v2.scoring.native_chooser_features import forecast_edge
 RULES = ("R_L", "R_L2")
 EXIT_UNQUOTED = "exit_unquoted_worst_case"
 STATUSES = ("taken", "not_taken", "undetermined")
-DECISION_COLS = ["event_id", "event_date", "edge", "cutoff", "status", "reason"]
+DECISION_COLS = ["event_id", "event_date", "edge", "cutoff", "rel_spread", "status", "reason"]
 
 
 def atm_legs(chunk, i):
@@ -91,39 +94,46 @@ def _verdict(clears, why):
     return ("taken", None) if clears else ("not_taken", why)
 
 
-def decide(events, history, rule):
-    """One decision row per event. ``history`` holds the model's own ``edge`` for all its events."""
+def decide(events, history, rule, chunk):
+    """One decision row per event. ``history`` holds the model's own ``edge`` for all its events;
+    ``chunk`` is the S3 ladder chunk that carries each event's entry quotes at the true ATM."""
     if rule not in RULES:
         raise ValueError(f"unknown rule {rule!r}; expected one of {RULES}")
     frame = history[["event_date", "edge"]].rename(columns={"edge": "exp_pnl_sim"})
     cache = {}  # trailing cutoff depends only on the month, so compute it once per month
+    pos = {str(e): i for i, e in enumerate(chunk["event_id"])}
     rows = []
     for ev in events.to_dict("records"):
         edge = forecast_edge(float(ev["pred_abs_move"]), float(ev["implied_move"]))
         row = {"event_id": ev["event_id"], "event_date": ev["event_date"], "edge": edge,
-               "cutoff": float("nan"), "status": "undetermined", "reason": None}
-        rel, mcap = float(ev["rel_spread"]), float(ev["mcap_usd"])
+               "cutoff": float("nan"), "rel_spread": float("nan"), "status": "undetermined", "reason": None}
+        mcap = float(ev["mcap_usd"])
         if not math.isfinite(edge):
-            row["reason"] = "missing_implied_move"
-        elif not bool(ev["entry_ok"]):
-            row["reason"] = "entry_unusable"
-        elif not (math.isfinite(rel) and math.isfinite(mcap)):
-            row["reason"] = "missing_filter"
-        elif mcap < MCAP_FLOOR or rel > MAX_REL_SPREAD:
-            row.update(status="not_taken", reason="universe_filter")
-        elif rule == "R_L2":
-            row["status"], row["reason"] = _verdict(edge >= 0, "below_zero")
+            row["reason"] = "missing_forecast"
+        elif str(ev["event_id"]) not in pos:
+            row["reason"] = "no_ladder_chunk"
         else:
-            date = pd.Timestamp(ev["event_date"])
-            key = date.to_period("M")
-            if key not in cache:
-                cache[key] = trailing_cutoff(frame, date)
-            cut = cache[key]
-            if cut is None:
-                row["reason"] = "thin_history"
+            state = entry_state(chunk, pos[str(ev["event_id"])], mcap=mcap)
+            if state["status"] != "ok":
+                row["reason"] = state["reason"]
             else:
-                row["cutoff"] = cut
-                row["status"], row["reason"] = _verdict(edge >= cut, "below_cutoff")
+                rel = state["rel_spread"]
+                row["rel_spread"] = rel
+                if mcap < MCAP_FLOOR or rel > MAX_REL_SPREAD:
+                    row.update(status="not_taken", reason="universe_filter")
+                elif rule == "R_L2":
+                    row["status"], row["reason"] = _verdict(edge >= 0, "below_zero")
+                else:
+                    date = pd.Timestamp(ev["event_date"])
+                    key = date.to_period("M")
+                    if key not in cache:
+                        cache[key] = trailing_cutoff(frame, date)
+                    cut = cache[key]
+                    if cut is None:
+                        row["reason"] = "thin_history"
+                    else:
+                        row["cutoff"] = cut
+                        row["status"], row["reason"] = _verdict(edge >= cut, "below_cutoff")
         rows.append(row)
     return pd.DataFrame(rows, columns=DECISION_COLS)
 
