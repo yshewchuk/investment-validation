@@ -95,7 +95,9 @@ def _contracts(rows, *, entry):
     out = out[out["right"].notna() & out["strike"].notna()]
     if entry:
         valid = out["bid"].notna() & out["ask"].notna() & (out["bid"] <= out["ask"]) & (out["ask"] > 0) & (out["bid"] >= 0)
-        out = out.assign(bid=out["bid"].where(valid), ask=out["ask"].where(valid), _rank=(~valid).astype(int))
+        tradable = valid & (out["bid"] > 0) & (out["bid"] < out["ask"])
+        rank = np.where(tradable, 0, np.where(valid, 1, 2))  # 0 tradable, 1 zero-bid/locked, 2 invalid
+        out = out.assign(bid=out["bid"].where(valid), ask=out["ask"].where(valid), _rank=rank)
         out = out.sort_values(["right", "strike", "_rank"], kind="mergesort").drop(columns="_rank")
     else:
         usable = np.isfinite(out["bid"]) & np.isfinite(out["ask"]) & (out["bid"] >= 0) & (out["ask"] >= out["bid"])

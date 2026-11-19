@@ -292,6 +292,31 @@ def test_invalid_duplicate_before_valid_does_not_shadow_it():
     assert chunk["bid_e"][0] == 1.0 and chunk["ask_e"][0] == 1.2
 
 
+def _entry_quote_at(chunk, right, strike):
+    idx = [j for j, (r, s) in enumerate(zip(chunk["right"].tolist(), chunk["strike"].tolist()))
+           if r == right and s == strike]
+    assert len(idx) == 1
+    return chunk["bid_e"][idx[0]], chunk["ask_e"][idx[0]]
+
+
+def test_zero_bid_or_locked_duplicate_does_not_shadow_tradable():
+    rest = _quotes(E1, 2, (90, 110), (90, 100, 110), 1.0, 1.2)
+    zero_first = [(E1, 2, "P", 100, 0.0, 0.5), (E1, 2, "P", 100, 1.8, 2.0)] + rest
+    [(_, chunk)], _ = _run([_event("zf", entry_rows=zero_first)])
+    assert len(chunk["right"]) == 6
+    assert _entry_quote_at(chunk, 0, 100) == (1.8, 2.0)
+
+    locked_first = [(E1, 2, "P", 100, 1.0, 1.0), (E1, 2, "P", 100, 1.8, 2.0)] + rest
+    [(_, chunk)], _ = _run([_event("lf", entry_rows=locked_first)])
+    assert len(chunk["right"]) == 6
+    assert _entry_quote_at(chunk, 0, 100) == (1.8, 2.0)
+
+    zero_only = [(E1, 2, "P", 100, 0.0, 0.5)] + rest
+    [(_, chunk)], _ = _run([_event("zo", entry_rows=zero_only)])
+    assert len(chunk["right"]) == 6
+    assert _entry_quote_at(chunk, 0, 100) == (0.0, 0.5)
+
+
 def test_invalid_exit_duplicate_before_valid_does_not_shadow_it():
     exit_rows = [(E1, 0, "P", 90, 1.5, 1.0)] + _exit_rows()  # crossed P90 listed first
     [(_, chunk)], _ = _run([_event("d2", exit_rows=exit_rows)])
