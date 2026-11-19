@@ -249,6 +249,22 @@ def test_outer_pool_sees_the_2023_history(tmp_path, stubs, monkeypatch):
     assert any(len(t) == 2 for t in pools)  # the 2025-01 month's pool holds the 2023 and 2024 rows
 
 
+def test_label_joins_the_pool_only_once_its_exit_is_printed(stubs, monkeypatch):
+    """An event dated on a month's last day, exiting in the next month, is out of that next pool but in the month after."""
+    pools = []
+    monkeypatch.setattr(driver, "build_pool", lambda table, labels: pools.append(set(labels.index.astype(str))))
+    table = pd.DataFrame({"event_date": pd.to_datetime(["2025-01-31"]), "pred_move": 5.0, "pred_crush": -12.0},
+                         index=pd.Index(["E3"], name="event_id"))
+    labels = pd.DataFrame({"abs_move": [4.0], "crush_pct_iv30": [-10.0]}, index=pd.Index(["E3"], name="event_id"))
+    events = pd.DataFrame(columns=["event_id", "event_date", "pred_abs_move", "implied_move", "mcap_usd"])
+    exits = {"E3": "2025-02-03"}
+    st = driver._model_state(1.0)
+    driver._month("m", table, events, chunk(), labels, exits, pd.Timestamp("2025-02-01"), st)
+    driver._month("m", table, events, chunk(), labels, exits, pd.Timestamp("2025-03-01"), st)
+    assert pools[0] == set()  # exit 2025-02-03 is not printed before 2025-02-01
+    assert pools[1] == {"E3"}  # printed before 2025-03-01
+
+
 def test_exact_outer_replay_does_not_rewrite_decisions(tmp_path, stubs, monkeypatch):
     use_chunks(monkeypatch, [("2024Q3", chunk("E2"))])
     driver.run(sources(), "inner", tmp_path, prereg=OK)
@@ -494,3 +510,16 @@ def test_oracle_one_taken_short_vol_row_is_written_with_its_marks(tmp_path, stub
     assert row["pnl_dollars"] == 100.0
     assert row["exit_value"] == 1.5
     assert row["rung"] == "rung1"
+    assert "entry_cost" in decisions.columns
+    assert row["pnl_per_share"] == 0.5
+
+
+def test_changed_fact_value_refuses_an_inner_replay(tmp_path, stubs, monkeypatch):
+    use_chunks(monkeypatch, [("2023Q2", chunk("E1")), ("2024Q3", chunk("E2"))])
+    driver.run(sources(), "inner", tmp_path, prereg=OK)
+    moved = FACTS.copy()
+    moved.loc["E2", "pre_iv30"] = 41.0
+    with pytest.raises(Refusal) as caught:
+        driver.run(sources(facts=lambda ids: moved.reindex(list(ids))), "inner", tmp_path, prereg=OK)
+    assert caught.value.code == CONFLICT
+    assert caught.value.details["reason"] == "tuning_receipt_changed"

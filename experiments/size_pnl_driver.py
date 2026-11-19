@@ -31,6 +31,7 @@ import pandas as pd
 
 from engine.v2.foundation import content_hash
 from engine.v2.ops.errors import fail
+from experiments import label_availability
 from experiments import size_pnl_inputs as inputs
 from experiments import size_pnl_ladder as ladder
 from experiments import size_pnl_prereg
@@ -222,16 +223,19 @@ def _model_state(c):
 
 def _rows(mid, book, arm, dec, taken):
     """Decision rows of one (model, book, arm), with the marks of the taken rows merged on event_id."""
-    frame = dec.merge(taken[["event_id", *_MARKS]], on="event_id", how="left")
+    take = [c for c in [*_MARKS, "entry_cost", "pnl_per_share"] if c not in dec.columns]
+    frame = dec.merge(taken[["event_id", *take]], on="event_id", how="left")
     if "structure" not in frame.columns:
         frame = frame.assign(structure=None)
     return frame.assign(model_id=mid, book=book, arm_or_rule=arm)
 
 
-def _month(mid, table, events, chunk, labels, start_m, st):
+def _month(mid, table, events, chunk, labels, exits, start_m, st):
     """Steps 7a-7d for one model and one calendar month. Warm-up months only add history."""
     output = start_m >= pd.Timestamp(OUTER[0])
-    pool = build_pool(table[table["event_date"] < start_m], labels)
+    cutoff = start_m.date().isoformat()
+    printed = [e for e in labels.index.astype(str) if e in exits and label_availability.available_before(exits[e], cutoff)]
+    pool = build_pool(table[table["event_date"] < start_m], labels[labels.index.astype(str).isin(printed)])
     sims = shortvol.simulate(chunk, events, pool)
     ids = set(events["event_id"].astype(str))
     frames = []
@@ -298,6 +302,7 @@ def _file_sha256(path):
 
 def _outer(src, out, ready, receipts, plan, ids):
     labels = readers.read_labels(src.fetch, src.admitted, start=INNER[0], end=OUTER[0], event_ids=ids)
+    exits = {str(e): pd.Timestamp(x).date().isoformat() for e, x in zip(src.plan_frame["event_id"], src.plan_frame["exit_date"]) if pd.notna(x)}
     dates = pd.to_datetime(plan["event_date"])
     quarter, month = dates.dt.to_period("Q").astype(str).to_numpy(), dates.dt.to_period("M").to_numpy()
     total = len(set(month))
@@ -312,7 +317,7 @@ def _outer(src, out, ready, receipts, plan, ids):
             for mid, entry in ready.items():
                 ev = events[mid]
                 at = ev[ev["event_date"].dt.to_period("M") == period]
-                month_frames += _month(mid, entry["table"], at, chunk, labels, start_m, state[mid])
+                month_frames += _month(mid, entry["table"], at, chunk, labels, exits, start_m, state[mid])
             frames += month_frames
             done += 1
             rate = done / max(time.monotonic() - started, 1e-9)
@@ -358,10 +363,14 @@ def run(src, stage, out_dir, *, event_ids=None, prereg=size_pnl_prereg.require_p
     excluded = {mid: e["reason"] for mid, e in tables.items() if e["status"] != "ready"}
     scope = None if ids is None else content_hash(sorted(ids))
     plan = _plan_window(src.plan_frame, _window(stage), ids)
+    facts = src.facts(sorted(str(e) for e in plan["event_id"]))
+    facts_rows = sorted(([str(e), *[None if pd.isna(v) else float(v) for v in vals]]
+                         for e, vals in zip(facts.index, facts[list(_FACTS)].to_numpy(dtype=float))), key=lambda r: r[0])
     body = {"stage": "inputs", "spec_hash": receipt["spec_hash"], "identity": bound_tables["identity"],
             "roster": roster, "models": _strip(bound_tables["bound"]),
             "tables": {mid: e["binding"] for mid, e in tables.items() if e["status"] == "ready"},
-            "production": production["binding"], "scope": scope, "plan": content_hash(_plan_rows(plan))}
+            "production": production["binding"], "scope": scope, "plan": content_hash(_plan_rows(plan)),
+            "facts": content_hash(facts_rows)}
     inputs_receipt = tuning.write_receipt(out / "receipts" / f"inputs_{stage}.json", body)
     if not ready:
         raise Refusal(_CONFLICT, "no model is ready to be tuned or scored", {"reason": "no_ready_models"})
