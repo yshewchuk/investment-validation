@@ -406,7 +406,10 @@ def run(src, stage, out_dir, *, event_ids=None, prereg=size_pnl_prereg.require_p
     excluded = {mid: e["reason"] for mid, e in tables.items() if e["status"] != "ready"}
     scope = None if ids is None else content_hash(sorted(ids))
     plan = _plan_window(src.plan_frame, _window(stage), ids)
-    facts_all = src.facts(sorted(str(e) for e in plan["event_id"]))  # the only facts call of the run
+    admitted_ids = set(src.admitted["events"]["event_id"].astype(str))
+    if any(str(e) not in admitted_ids for e in plan["event_id"]):
+        raise fail(_DENIED, "plan event ids include a key that is not admitted", details={"reason": "key_not_admitted"})
+    facts_all =src.facts(sorted(str(e) for e in plan["event_id"]))  # the only facts call of the run
     facts_rows = sorted(([str(e), *[None if pd.isna(v) else float(v) for v in vals]]
                          for e, vals in zip(facts_all.index, facts_all[list(_FACTS)].to_numpy(dtype=float))),
                         key=lambda r: r[0])

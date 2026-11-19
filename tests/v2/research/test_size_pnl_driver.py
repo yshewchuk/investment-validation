@@ -320,6 +320,23 @@ def test_inner_month_pool_drops_a_label_printed_after_a_later_month_starts(tmp_p
     assert any("E1" in tabled and "E1" not in labelled for tabled, labelled in pools)
 
 
+def test_plan_row_with_a_non_admitted_id_refuses_before_facts(tmp_path, stubs, monkeypatch):
+    calls = []
+
+    def counting(ids):
+        calls.append(list(ids))
+        return FACTS.reindex(list(ids))
+
+    plan = PLAN_FRAME.copy()
+    plan.loc[plan["event_id"] == "E1", "event_id"] = "ZZ"  # same window and date, id not admitted
+    use_chunks(monkeypatch, [("2023Q2", chunk("E1"))])
+    with pytest.raises(OpsError) as caught:
+        driver.run(sources(plan_frame=plan, facts=counting), "inner", tmp_path, prereg=OK)
+    assert caught.value.code == DENIED
+    assert caught.value.problem.details["reason"] == "key_not_admitted"
+    assert calls == []
+
+
 def test_facts_are_fetched_once_per_run(tmp_path, stubs, monkeypatch):
     calls = []
 
