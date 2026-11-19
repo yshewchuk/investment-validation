@@ -110,12 +110,15 @@ def _completed_fit(marker, static):
 
 _NOT_ADMITTED = object()
 _FREEZE_CACHE_BYTES = 32 << 20
-_FREEZES = []  # most recent verified trials.freeze() results in this process (bounded to 4)
+_FREEZES = []  # most recent (result, run_id, plan_key, digest) from trials.freeze() in this process (bounded to 4)
 
 
-def freeze_is_verified(value):
-    """True only for an object this process received from SearchTrials.freeze() (identity, not equality)."""
-    return any(item is value for item in _FREEZES)
+def freeze_is_verified(value, run_id, plan_key):
+    """True only for this process's own freeze(): same object, same run and plan, and unchanged content."""
+    if run_id is None:
+        return False
+    return any(item[0] is value and item[1] == run_id and item[2] == plan_key
+               and content_hash(value) == item[3] for item in _FREEZES)
 
 
 class SearchTrials:
@@ -716,7 +719,10 @@ class SearchTrials:
               file=sys.stderr)
         try:
             result = self._freeze()
-            _FREEZES.append(result)
+            run_id = getattr(getattr(self, "registration", None), "run_id", None)
+            plan_ref = getattr(self, "plan_ref", None)
+            plan_key = canonical_json(to_document(plan_ref)) if plan_ref is not None else None
+            _FREEZES.append((result, run_id, plan_key, content_hash(result)))
             del _FREEZES[:-4]
             return result
         finally:

@@ -4,7 +4,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from engine.v2.foundation import ArtifactError, artifact_reference, canonical_json
+from engine.v2.foundation import ArtifactError, artifact_reference, canonical_json, content_hash, to_document
 from engine.v2.ops.errors import OpsError, fail
 from experiments import magnitude_search_outer as outer
 from experiments import magnitude_search_plan as plan_mod
@@ -18,10 +18,21 @@ SIZE_REQUEST = {"schema_version": "magnitude_search_request.v4"}
 FROZEN = {"selections": [{"outer_year": "2024", "selected_candidate_id": "overall"}]}
 
 
-def _verified(value):
-    """Register ``value`` as if this process had received it from SearchTrials.freeze()."""
-    trials_module._FREEZES.append(value)
+def _verified(value, run_id="run", plan_ref=None):
+    """Register ``value`` as if SearchTrials.freeze() had returned it for ``run_id`` and ``plan_ref``."""
+    plan_ref = PLAN_REF if plan_ref is None else plan_ref
+    trials_module._FREEZES.append((value, run_id, canonical_json(to_document(plan_ref)), content_hash(value)))
     return value
+
+
+def _frozen_by_trials(monkeypatch, value, run_id="run", plan_ref=None):
+    """Return what SearchTrials.freeze() returns when its private _freeze yields ``value``."""
+    plan_ref = PLAN_REF if plan_ref is None else plan_ref
+    monkeypatch.setattr(trials_module.SearchTrials, "_freeze", lambda self: value)
+    registration = Registration()
+    registration.run_id = run_id
+    trials = trials_module.SearchTrials(None, Store(), None, registration, {}, plan_ref)
+    return trials.freeze()
 
 
 class Registration:
@@ -250,13 +261,13 @@ def test_execute_outer_fold_inside_matching_scope_passes_the_shared_value(monkey
     trials.freeze.assert_not_called()
 
 
-def test_execute_outer_fold_refuses_shared_scope_for_another_run(monkeypatch):
-    seen, _ = _execute(monkeypatch, shared=("other-run", PLAN_REF, _verified(FROZEN)))
+def test_execute_outer_fold_falls_back_to_trials_freeze_for_another_run(monkeypatch):
+    seen, _ = _execute(monkeypatch, shared=("other-run", PLAN_REF, _verified(FROZEN, run_id="other-run")))
     assert len(seen) == 1 and len(seen[0]) == 3
 
 
-def test_execute_outer_fold_refuses_shared_scope_for_another_plan(monkeypatch):
-    seen, _ = _execute(monkeypatch, plan_ref=PLAN_REF, shared=("run", OTHER_REF, _verified(FROZEN)))
+def test_execute_outer_fold_falls_back_to_trials_freeze_for_another_plan(monkeypatch):
+    seen, _ = _execute(monkeypatch, plan_ref=PLAN_REF, shared=("run", OTHER_REF, _verified(FROZEN, plan_ref=OTHER_REF)))
     assert len(seen) == 1 and len(seen[0]) == 3
 
 
@@ -306,9 +317,42 @@ def test_freeze_registry_keeps_only_the_last_four(monkeypatch):
     for _ in values:
         trials.freeze()
     assert len(trials_module._FREEZES) == 4
-    assert all(kept is value for kept, value in zip(trials_module._FREEZES, values[-4:]))
-    assert not any(trials_module.freeze_is_verified(value) for value in values[:2])
-    assert all(trials_module.freeze_is_verified(value) for value in values[-4:])
+    plan_key = canonical_json(to_document(PLAN_REF))
+    assert all(kept[0] is value for kept, value in zip(trials_module._FREEZES, values[-4:]))
+    assert not any(trials_module.freeze_is_verified(value, "run", plan_key) for value in values[:2])
+    assert all(trials_module.freeze_is_verified(value, "run", plan_key) for value in values[-4:])
+
+
+def test_shared_freeze_refuses_a_freeze_registered_for_another_run(monkeypatch):
+    frozen = _frozen_by_trials(monkeypatch, {"a": 1}, run_id="run")
+    assert outer._SHARED is None
+    with pytest.raises(OpsError) as caught:
+        with outer.shared_freeze("other-run", PLAN_REF, frozen):
+            pass  # pragma: no cover
+    assert caught.value.problem.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert caught.value.problem.retryable is False
+    assert outer._SHARED is None
+
+
+def test_shared_freeze_refuses_a_freeze_registered_for_another_plan(monkeypatch):
+    frozen = _frozen_by_trials(monkeypatch, {"a": 1}, plan_ref=PLAN_REF)
+    with pytest.raises(OpsError) as caught:
+        with outer.shared_freeze("run", OTHER_REF, frozen):
+            pass  # pragma: no cover
+    assert caught.value.problem.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert caught.value.problem.retryable is False
+    assert outer._SHARED is None
+
+
+def test_shared_freeze_refuses_a_registered_result_mutated_after_freezing(monkeypatch):
+    frozen = _frozen_by_trials(monkeypatch, {"a": 1})
+    frozen["a"] = 2
+    with pytest.raises(OpsError) as caught:
+        with outer.shared_freeze("run", PLAN_REF, frozen):
+            pass  # pragma: no cover
+    assert caught.value.problem.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert caught.value.problem.retryable is False
+    assert outer._SHARED is None
 
 
 PLAN = {"folds": [], "candidates": []}
