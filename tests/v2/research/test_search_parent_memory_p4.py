@@ -1,4 +1,5 @@
 """Search parent memory P4: plan-rebuild memo and shared freeze verification."""
+import sys
 from unittest.mock import Mock
 
 import pytest
@@ -212,7 +213,7 @@ def _execute(monkeypatch, **kwargs):
 
 
 def test_execute_outer_fold_passes_frozen_and_never_refreezes(monkeypatch):
-    frozen = {"selections": []}
+    frozen = outer.VerifiedFreeze({"selections": []})
     seen, trials = _execute(monkeypatch, frozen=frozen)
     assert len(seen) == 1 and seen[0][3] is frozen
     trials.freeze.assert_not_called()
@@ -233,15 +234,32 @@ def _reader(stored):
 def test_native_selection_refuses_a_frozen_value_that_differs():
     trials = Mock()
     with pytest.raises(OpsError) as caught:
-        outer._native_selection(trials, PLAN, _reader({"a": 1}), frozen={"a": 2})
+        outer._native_selection(trials, PLAN, _reader({"a": 1}), frozen=outer.VerifiedFreeze({"a": 2}))
     assert caught.value.problem.code == "EXPERIMENT_IDENTITY_CONFLICT"
     trials.freeze.assert_not_called()
 
 
 def test_native_selection_accepts_an_equal_frozen_value_without_refreezing():
     trials = Mock()
-    assert outer._native_selection(trials, PLAN, _reader({"a": 1}), frozen={"a": 1}) == {"a": 1}
+    assert outer._native_selection(trials, PLAN, _reader({"a": 1}),
+                                   frozen=outer.VerifiedFreeze({"a": 1})) == {"a": 1}
     trials.freeze.assert_not_called()
+
+
+def test_native_selection_raw_frozen_value_still_verifies_via_trials_freeze():
+    trials = Mock()
+    trials.freeze.return_value = {"a": 1}
+    assert outer._native_selection(trials, PLAN, _reader({"a": 1}), frozen={"a": 1}) == {"a": 1}
+    trials.freeze.assert_called_once_with()
+
+
+def test_native_selection_raw_frozen_value_refuses_when_trials_freeze_differs():
+    trials = Mock()
+    trials.freeze.return_value = {"a": 2}
+    with pytest.raises(OpsError) as caught:
+        outer._native_selection(trials, PLAN, _reader({"a": 1}), frozen={"a": 1})
+    assert caught.value.problem.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    trials.freeze.assert_called_once_with()
 
 
 def test_native_selection_without_frozen_verifies_a_fresh_freeze():
@@ -287,7 +305,35 @@ def test_run_search_shares_one_freeze_across_the_refit_loop(monkeypatch, per_can
     assert plan_mod._PLAN_MEMO is None
     assert trials.freeze.call_count == 1
     assert [(year, unit) for year, unit, _ in refits] == [("2024", "overall"), ("2024", "rmse")]
-    assert all(frozen is FROZEN for _, _, frozen in refits)
+    assert all(isinstance(frozen, outer.VerifiedFreeze) and frozen.value is FROZEN
+               for _, _, frozen in refits)
+
+
+def test_memo_keys_dict_subclass_misses_the_plain_dict_entry(calls):
+    _, registration, _ = _setup(calls)
+
+    class Request(dict):
+        pass
+
+    with plan_mod.plan_memo():
+        binding.prepare_plan(None, Store(), registration, REQUEST, plan_schema=PLAN_V3)
+        binding.prepare_plan(None, Store(), registration, Request(REQUEST), plan_schema=PLAN_V3)
+    assert calls["folds"] == 2
+
+
+def test_memoized_plan_key_step_does_not_raise_on_deep_nesting():
+    deep = []
+    for _ in range(sys.getrecursionlimit() + 100):
+        deep = [deep]
+    built = []
+
+    def build():
+        built.append(1)
+        return {"plan": "built"}
+
+    with plan_mod.plan_memo():
+        assert plan_mod.memoized_plan(object(), deep, PLAN_V3, build) == {"plan": "built"}
+    assert built == [1]
 
 
 @pytest.mark.parametrize("left, right", [

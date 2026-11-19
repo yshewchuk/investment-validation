@@ -435,13 +435,18 @@ def plan_memo():
             _PLAN_MEMO = None
 
 
+def _qualified_type(value):
+    return type(value).__module__ + "." + type(value).__qualname__
+
+
 def _exact_key(value):
-    """Hashable key that keeps types apart (1000 vs 1000.0, int vs bool, tuple vs list)."""
+    """Hashable key that keeps types apart (1000 vs 1000.0, int vs bool, tuple vs list, dict vs dict subclass)."""
     if isinstance(value, dict):
-        items = sorted(((repr(k), _exact_key(v)) for k, v in value.items()), key=lambda item: item[0])
-        return ("d", tuple(items))
+        items = sorted((((_qualified_type(k), repr(k)), _exact_key(v)) for k, v in value.items()),
+                       key=lambda item: item[0])
+        return (_qualified_type(value), tuple(items))
     if isinstance(value, (list, tuple)):
-        return (type(value).__name__, tuple(_exact_key(v) for v in value))
+        return (_qualified_type(value), tuple(_exact_key(v) for v in value))
     return (type(value).__name__, repr(value))
 
 
@@ -450,7 +455,10 @@ def memoized_plan(registration, request, plan_schema, build):
     memo = _PLAN_MEMO
     if memo is None:
         return build()
-    key = (id(registration), plan_schema, _exact_key(request))
+    try:
+        key = (id(registration), plan_schema, _exact_key(request))
+    except (RecursionError, TypeError, ValueError):
+        return build()
     if key not in memo:
         plan = build()
         memo[key] = (registration, plan)

@@ -38,7 +38,7 @@ from engine.v2.ops.fingerprints import source_closure
 from engine.v2.ops.migrations import require_current
 from engine.v2.research.progress import Progress, decision, stage
 from experiments.magnitude_search_execution import validate_execution_limits
-from experiments.magnitude_search_outer import collect_outer_results, execute_outer_fold
+from experiments.magnitude_search_outer import VerifiedFreeze, collect_outer_results, execute_outer_fold
 from experiments.magnitude_search_plan import plan_memo, read_search_plan, trial_key
 from experiments.magnitude_search_records import MIGRATIONS, OWNER, append_record, read_record
 from experiments.magnitude_search_refits import per_candidate, possible_slots, refit_units
@@ -368,7 +368,7 @@ def _run_search(conn, store, repository, registration, request, plan_ref, *, lim
         with stage("search refits"):
             for year, unit in fresh_units:
                 outcome = execute_outer_fold(conn, store, repository, registration, request, plan_ref,
-                                             year, limits=limits, candidate_id=unit, frozen=selected)
+                                             year, limits=limits, candidate_id=unit, frozen=VerifiedFreeze(selected))
                 refit_meter.tick()
                 if isinstance(outcome, dict) and outcome.get("status") == "failed":
                     decision("search refit failed", f"{unit} year={year}")
@@ -381,7 +381,7 @@ def _run_search(conn, store, repository, registration, request, plan_ref, *, lim
             for unit in units:
                 if (item["outer_year"], unit) not in completed:
                     execute_outer_fold(conn, store, repository, registration, request, plan_ref,
-                                       item["outer_year"], limits=limits, candidate_id=unit, frozen=selected)
+                                       item["outer_year"], limits=limits, candidate_id=unit, frozen=VerifiedFreeze(selected))
     release_parent_caches("after refits", trials)
     log_memory("after refits", panel_memo=panel_memo_holder(), trials_memo=getattr(trials, "_memo", None))
     if not collect_results:

@@ -92,11 +92,21 @@ def _equal_completed_fit(fit, expected, *, legacy=False):
     _equal(fit, expected)
 
 
+class VerifiedFreeze:
+    """Provenance token: wraps a freeze that run_search verified once via trials.freeze(); only that driver constructs it."""
+
+    __slots__ = ("value",)
+
+    def __init__(self, value):
+        self.value = value
+
+
 def _native_selection(trials, plan, read, frozen=None):
     """Presence checks plus freeze verification make completed replays strict.
 
-    ``frozen`` is a freeze the caller already verified once for this stage; it is
-    shared only within one run_search call. Without it, the freeze is recomputed.
+    Only a ``VerifiedFreeze`` from run_search skips recomputation; it is shared only
+    within one run_search call. Any other ``frozen`` value (None or a raw value from a
+    public caller) is not trusted: the freeze is recomputed via trials.freeze() and compared.
     """
     print("[stage] native_selection start", file=sys.stderr)
     started = time.monotonic()
@@ -130,10 +140,10 @@ def _native_selection(trials, plan, read, frozen=None):
                     raise _conflict() from None
                 if plan.get("schema_version") in (PLAN_V2, PLAN_V3, "regression_search_plan.v1") and limits != plan["request"]["limits"]["child"]:
                     raise fail("INVALID_EXPERIMENT_SPEC", "native trial limits differ from sealed request")
-    if frozen is None:
-        _equal(trials.freeze(), selection)
+    if isinstance(frozen, VerifiedFreeze):
+        _equal(frozen.value, selection)
     else:
-        _equal(frozen, selection)
+        _equal(trials.freeze(), selection)
     print(f"[stage] native_selection done in {time.monotonic() - started:.1f}s", file=sys.stderr)
     return selection
 
@@ -301,7 +311,7 @@ def execute_outer_fold(conn, store, repository, registration, request, plan_ref,
                        candidate_id=None, frozen=None):
     """Refit one frozen unit (the overall winner, or a winner_rules refit unit by candidate_id) once; replay complete evidence without fitting.
 
-    ``frozen`` optionally passes a freeze the caller already verified once for this stage (shared only within one run_search call); None recomputes it.
+    ``frozen`` optionally passes a VerifiedFreeze from run_search (shared only within one run_search call); None or a raw value is passed on and not trusted, so the freeze is recomputed.
     """
     validate_execution_limits(limits)
     require_current(conn, OWNER, MIGRATIONS)
