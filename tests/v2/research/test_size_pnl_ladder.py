@@ -345,6 +345,7 @@ def test_progress_lines_on_stderr(capsys):
     assert "[pnl_ladder] start events=2 quarters=2" in err
     assert "[pnl_ladder] 2024Q1 1/2 events=1 kept=1" in err
     assert "[pnl_ladder] 2024Q2 2/2 events=1 kept=1" in err
+    assert "exit_missing=" in err
     assert "rung1=" in err and "rung3=" in err
     assert "[pnl_ladder] end" in err
 

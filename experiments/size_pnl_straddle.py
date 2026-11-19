@@ -17,7 +17,6 @@ from engine.entry_rules import MAX_REL_SPREAD, MCAP_FLOOR
 from engine.fills import FillModel
 from engine.pnl_sim import trailing_cutoff
 from engine.portfolio import CAPITAL_PER_TRADE, CONTRACT_MULTIPLIER
-from engine.v2.scoring.native_chooser_features import forecast_edge
 
 RULES = ("R_L", "R_L2")
 EXIT_UNQUOTED = "exit_unquoted_worst_case"
@@ -30,6 +29,18 @@ def _num(x):
     if x is None or pd.isna(x):
         return float("nan")
     return float(x)
+
+
+def _edge(pred, implied):
+    """``pred - implied`` when both are finite, else NaN.
+
+    Identical to ``forecast_edge`` in the v2 chooser features (``engine.v2.scoring.native_chooser_features``).
+    It is kept local because this legacy experiment must not import from ``engine.v2``
+    (root ARCHITECTURE.md section 3, the legacy-to-v2 layer boundary).
+    """
+    if math.isfinite(pred) and math.isfinite(implied):
+        return pred - implied
+    return float("nan")
 
 
 def atm_legs(chunk, i):
@@ -121,7 +132,7 @@ def decide(events, history, rule, chunk):
     pos = {str(e): i for i, e in enumerate(chunk["event_id"])}
     rows = []
     for ev in events.to_dict("records"):
-        edge = forecast_edge(_num(ev["pred_abs_move"]), _num(ev["implied_move"]))
+        edge = _edge(_num(ev["pred_abs_move"]), _num(ev["implied_move"]))
         row = {"event_id": ev["event_id"], "event_date": ev["event_date"], "edge": edge,
                "cutoff": float("nan"), "rel_spread": float("nan"), "status": "undetermined", "reason": None}
         if not math.isfinite(edge):
