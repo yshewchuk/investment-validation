@@ -445,6 +445,13 @@ def test_zero_ready_models_refuses_after_the_inputs_receipt(tmp_path, stubs, mon
     assert [p.name for p in (tmp_path / "receipts").iterdir()] == ["inputs_inner.json"]
 
 
+def test_non_collection_smoke_event_ids_is_an_invalid_spec(tmp_path, stubs):
+    with pytest.raises(OpsError) as caught:
+        driver.run(sources(), "inner", tmp_path, event_ids=0, prereg=OK)
+    assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert caught.value.details["reason"] == "event_ids_invalid"
+
+
 def test_empty_smoke_set_refuses_before_any_receipt(tmp_path, stubs):
     with pytest.raises(Refusal) as caught:
         driver.run(sources(), "inner", tmp_path, event_ids=set(), prereg=OK)

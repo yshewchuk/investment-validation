@@ -140,6 +140,9 @@ def _smoke(src, event_ids):
     """The smoke id set, or None. Ids outside the admitted population refuse; a subset never widens anything."""
     if event_ids is None:
         return None
+    if not (isinstance(event_ids, (set, frozenset, list, tuple)) and all(isinstance(e, str) for e in event_ids)):
+        raise fail("INVALID_EXPERIMENT_SPEC", "smoke event ids must be a collection of strings",
+                   details={"reason": "event_ids_invalid"})
     ids = {str(e) for e in event_ids}
     if not ids <= set(src.admitted["events"]["event_id"].astype(str)):
         raise fail(_DENIED, "smoke event ids include a key that is not admitted",
