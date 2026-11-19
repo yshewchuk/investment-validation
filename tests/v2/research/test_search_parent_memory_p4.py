@@ -1,4 +1,5 @@
 """Search parent memory P4: plan-rebuild memo and shared freeze verification."""
+import copy
 import sys
 from unittest.mock import Mock
 
@@ -161,6 +162,54 @@ def test_memo_still_verifies_stored_bytes_on_a_hit(calls):
             plan_mod.read_search_plan(None, store, registration, REQUEST, ref)
     assert caught.value.problem.code == "EXPERIMENT_IDENTITY_CONFLICT"
     assert store.reads == 2
+
+
+def test_memo_hit_returns_a_copy_that_mutation_cannot_carry_into_later_reads(calls):
+    store, registration, ref = _setup(calls)
+    with plan_mod.plan_memo():
+        first = plan_mod.read_search_plan(None, store, registration, REQUEST, ref)
+        pristine = copy.deepcopy(first)
+        first["folds"].clear()
+        first["candidates"].append({"candidate_id": "junk"})
+        first["plan_id"] = "x"
+        second = plan_mod.read_search_plan(None, store, registration, REQUEST, ref)
+    assert second == pristine
+    assert second["plan_id"] != "x"
+    assert calls["folds"] == 1
+    assert store.reads == 2
+
+
+def test_memo_master_is_not_the_object_returned_on_a_hit(calls):
+    store, registration, ref = _setup(calls)
+    with plan_mod.plan_memo():
+        returned = plan_mod.read_search_plan(None, store, registration, REQUEST, ref)
+        key = plan_mod._PLAN_MEMO["last"]
+        master = plan_mod._PLAN_MEMO[key][1]
+        again = plan_mod.read_search_plan(None, store, registration, REQUEST, ref)
+    assert master is not returned
+    assert master is not again
+    assert returned is not again
+    assert master == returned == again
+
+
+def test_unmemoized_prepare_path_leaves_no_last_or_ref_entries_and_compares_every_read(monkeypatch):
+    plan = {"plan_id": "fresh", "folds": []}
+    monkeypatch.setattr(plan_mod, "_prepare", lambda conn, store, registration, request, **kwargs: copy.deepcopy(plan))
+    store, registration = Store(), Registration()
+    ref = artifact_reference(canonical_json(plan).encode(), PLAN_V3)
+    tampered = artifact_reference(b"tampered", PLAN_V3)
+    with plan_mod.plan_memo():
+        for _ in range(3):
+            assert plan_mod.read_search_plan(None, store, registration, REQUEST, ref) == plan
+            assert "last" not in plan_mod._PLAN_MEMO
+            assert not any(isinstance(key, tuple) and key and key[0] == "ref"
+                           for key in plan_mod._PLAN_MEMO)
+        assert plan_mod._PLAN_MEMO == {}
+        with pytest.raises(OpsError) as caught:
+            plan_mod.read_search_plan(None, store, registration, REQUEST, tampered)
+        assert caught.value.problem.code == "EXPERIMENT_IDENTITY_CONFLICT"
+        assert plan_mod._PLAN_MEMO == {}
+    assert store.reads == 3
 
 
 def test_plan_memo_is_cleared_after_exit_and_nested_use_keeps_the_outer_dict():

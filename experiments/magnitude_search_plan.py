@@ -4,6 +4,7 @@ Planning reads only the registration-pinned snapshot's planned bounds keys and
 publishes or verifies canonical plan bytes; it writes no ledger, outcome or
 catalog reservation.
 """
+import copy
 import itertools
 import json
 import math
@@ -462,8 +463,8 @@ def memoized_plan(registration, request, plan_schema, build):
     if key not in memo:
         plan = build()
         memo[key] = (registration, plan)
-        memo.setdefault("plan_ids", set()).add(id(plan))
-    return memo[key][1]
+    memo["last"] = key
+    return copy.deepcopy(memo[key][1])
 
 
 def seal_search_plan(conn, store, registration, request):
@@ -493,18 +494,19 @@ def read_search_plan(conn, store, registration, request, ref):
     if not isinstance(ref, ArtifactRef) or ref.schema_ref not in schemas:
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search plan reference has the wrong schema")
     qualified = is_qualified_request(parsed_version)
+    memo = _PLAN_MEMO
+    if memo is not None:
+        memo.pop("last", None)
     expected = _prepare(conn, store, registration, request,
                         plan_schema=ref.schema_ref if qualified else None)
-    memo = _PLAN_MEMO
-    ref_key = None
-    if memo is not None and id(expected) in memo.get("plan_ids", ()):
-        ref_key = ("ref", id(expected), canonical_json(to_document(ref)))
+    entry = memo.get("last") if memo is not None else None
+    ref_key = ("ref", entry, canonical_json(to_document(ref))) if entry is not None else None
     if ref_key is None or ref_key not in memo:
         payload = canonical_json(expected).encode()
         if ref != artifact_reference(payload, ref.schema_ref):
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search plan reference differs from its complete binding")
         if ref_key is not None:
-            memo[ref_key] = (expected, True)
+            memo[ref_key] = True
     try:
         store.read_verified(ref)
     except ArtifactError as error:
