@@ -1,4 +1,7 @@
 """EXP-188 S3: ladder-quote table. Synthetic fixtures only; no repository."""
+import gc
+import weakref
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -247,3 +250,40 @@ def test_progress_lines_on_stderr(capsys):
     assert "[pnl_ladder] 2024Q2 2/2 events=1 kept=1" in err
     assert "rung1=" in err and "rung3=" in err
     assert "[pnl_ladder] end" in err
+
+
+LIVE_INDEXES = weakref.WeakSet()
+
+
+class CountedIndex(FakeIndex):
+    """FakeIndex that registers each live instance so the test can count them."""
+
+    def __init__(self, groups):
+        super().__init__(groups)
+        LIVE_INDEXES.add(self)
+
+
+def test_only_one_chain_index_resident_across_quarters():
+    events = [_event("q1a", day="2024-02-14", entry="2024-02-13", exit="2024-02-15"),
+              _event("q1b"),
+              _event("q2a", day="2024-05-10", entry="2024-05-09", exit="2024-05-13",
+                     entry_rows=_entry_rows("2024-05-17", 4), exit_rows=_exit_rows("2024-05-17", 0))]
+    admitted, plan, chains = _world(events)
+    live_at_load = []
+
+    def load(keys):
+        gc.collect()
+        live_at_load.append(len(LIVE_INDEXES))
+        return CountedIndex({k: v for k, v in chains.items() if k in keys})
+
+    gen = lad.ladder_chunks(admitted, plan, load)
+    label, chunk = next(gen)  # generator now suspended at its first yield
+    assert label == "2024Q1"
+    assert chunk["event_id"].tolist() == ["q1a", "q1b"]
+    gc.collect()
+    assert len(LIVE_INDEXES) == 0  # first quarter's index already freed while suspended at yield
+
+    rest = list(gen)
+    assert [lbl for lbl, _ in rest] == ["2024Q2"]
+    assert live_at_load == [0, 0]  # no index was alive when either quarter's load ran
+    assert len(LIVE_INDEXES) == 0

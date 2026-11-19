@@ -161,7 +161,9 @@ def _quarters(plan, load_index, selector):
     labels = sorted(plan["quarter"].unique())
     total, done, started = len(plan), 0, time.monotonic()
     print(f"[pnl_ladder] start events={total} quarters={len(labels)}", file=sys.stderr)
+    index = None
     for number, label in enumerate(labels, start=1):
+        index = None  # release the previous quarter's index before loading the next
         part = plan[plan["quarter"] == label].sort_values("event_id", kind="mergesort")
         keys = {(str(t), pd.Timestamp(d).normalize()) for t, d in zip(part["ticker"], part["entry_date"])}
         keys |= {(str(t), pd.Timestamp(d).normalize()) for t, d in zip(part["ticker"], part["exit_date"])}
@@ -175,6 +177,7 @@ def _quarters(plan, load_index, selector):
             else:
                 reasons[reason] += 1
         chunk = _pack(recs, reasons)
+        index = None  # chunk holds only numpy copies; drop the index before suspending at yield
         done += len(part)
         _progress(label, number, len(labels), len(part), chunk, done, total, started)
         yield label, chunk
