@@ -106,6 +106,8 @@ def test_choose_c_tie_between_0_75_and_1_1_goes_to_1_1():
 
 def test_choose_c_equidistant_tie_goes_to_the_smaller_c():
     assert tuning.choose_c({1.1: 5.0, 0.9: 5.0}, 300) == (0.9, None)
+    # 0.75 and 1.25 are both 0.25 from 1, so the smaller c wins.
+    assert tuning.choose_c({0.75: 5.0, 1.25: 5.0}, 300) == (0.75, None)
 
 
 def test_choose_c_below_min_trades_is_unity_with_reason():
@@ -365,10 +367,18 @@ def test_load_tampered_receipt_refuses(tmp_path):
     assert caught.value.details["reason"] == UNREADABLE
 
 
-def test_oversize_receipt_refuses_as_unreadable(tmp_path):
+def test_oversize_receipt_is_refused_at_write_and_unreadable_at_load(tmp_path):
+    big = {**BODY, "pad": "x" * tuning.MAX_RECEIPT_BYTES}
     path = tmp_path / "big.json"
-    # A well-formed, correctly hashed receipt that is only too big: the size cap alone must refuse it.
-    tuning.write_receipt(path, {**BODY, "pad": "x" * tuning.MAX_RECEIPT_BYTES})
+    # The writer refuses an oversize body before touching the filesystem: no target, no temp file.
+    with pytest.raises(sv.Refusal) as caught:
+        tuning.write_receipt(path, big)
+    assert caught.value.code == CONFLICT
+    assert caught.value.details == {"reason": "tuning_receipt_too_large", "path": str(path)}
+    assert list(tmp_path.iterdir()) == []
+    # A well-formed, correctly hashed oversize receipt written by hand: the size cap alone must refuse it on load.
+    full = dict(big, content_hash=tuning.receipt_hash(big))
+    path.write_bytes((json.dumps(full, sort_keys=True, indent=2) + "\n").encode("utf-8"))
     assert path.stat().st_size > tuning.MAX_RECEIPT_BYTES
     with pytest.raises(sv.Refusal) as caught:
         tuning.load_receipt(path)

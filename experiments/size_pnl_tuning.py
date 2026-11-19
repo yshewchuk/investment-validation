@@ -148,14 +148,17 @@ def write_receipt(path, body):
     """``body`` plus its content_hash, written once. An existing receipt is replayed read-only or refused, never overwritten."""
     path = Path(path)
     digest = receipt_hash(body)
+    full = dict(body, content_hash=digest)
+    text = json.dumps(full, sort_keys=True, indent=2) + "\n"
+    if len(text.encode("utf-8")) > MAX_RECEIPT_BYTES:  # refused before any filesystem access, so load can always read it
+        raise _refuse("tuning_receipt_too_large", path, f"tuning receipt {path} exceeds {MAX_RECEIPT_BYTES} bytes")
     if path.exists():
         return _same_or_refuse(path, digest)
-    full = dict(body, content_hash=digest)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = tempfile.NamedTemporaryFile("w", delete=False, dir=path.parent, encoding="utf-8", suffix=".tmp")
     try:
         with tmp:
-            tmp.write(json.dumps(full, sort_keys=True, indent=2) + "\n")
+            tmp.write(text)
             tmp.flush()
             os.fsync(tmp.fileno())
         try:
