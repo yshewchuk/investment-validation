@@ -250,6 +250,21 @@ def test_exact_outer_replay_does_not_rewrite_decisions(tmp_path, stubs, monkeypa
     assert not list(tmp_path.glob("*.tmp"))
 
 
+def test_symlinked_decisions_refuses_an_outer_rerun(tmp_path, stubs, monkeypatch):
+    use_chunks(monkeypatch, [("2024Q3", chunk("E2"))])
+    driver.run(sources(), "inner", tmp_path, prereg=OK)
+    use_chunks(monkeypatch, [("2024Q3", chunk("E2")), ("2025Q1", chunk("E3", "E4"))])
+    driver.run(sources(fetch_log=stubs), "outer", tmp_path, prereg=OK)
+    real = tmp_path / "real.parquet"
+    (tmp_path / "decisions.parquet").rename(real)
+    (tmp_path / "decisions.parquet").symlink_to(real)
+    use_chunks(monkeypatch, [("2024Q3", chunk("E2")), ("2025Q1", chunk("E3", "E4"))])
+    with pytest.raises(Refusal) as caught:
+        driver.run(sources(fetch_log=stubs), "outer", tmp_path, prereg=OK)
+    assert caught.value.code == CONFLICT
+    assert caught.value.details["reason"] == "decisions_artifact_invalid"
+
+
 def test_changed_outer_receipt_leaves_decisions_untouched_and_no_tmp(tmp_path, stubs, monkeypatch):
     use_chunks(monkeypatch, [("2024Q3", chunk("E2"))])
     driver.run(sources(), "inner", tmp_path, prereg=OK)

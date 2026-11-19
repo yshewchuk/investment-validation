@@ -19,6 +19,7 @@ import hashlib
 import json
 import os
 import resource
+import stat
 import sys
 import tempfile
 import time
@@ -51,6 +52,7 @@ _MARKS = ["exit_value", "rung", "lots", "pnl_dollars"]
 _FRONT = ["model_id", "book", "arm_or_rule", "structure", "event_id", "event_date", "status", "reason"]
 _CONFLICT = "EXPERIMENT_IDENTITY_CONFLICT"
 _HASH_BLOCK = 1 << 20
+MAX_DECISIONS_BYTES = 4 << 30
 
 
 @dataclass(frozen=True)
@@ -258,9 +260,18 @@ def _write_decisions(tmp, frames):
 
 
 def _file_sha256(path):
-    """Streamed sha256 of the file at ``path``."""
+    """Streamed sha256 of the regular file at ``path``; refuses a symlink, a non-regular file or an oversized one."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError as exc:
+        raise Refusal(_CONFLICT, f"decisions artifact cannot be opened safely: {exc}",
+                      {"reason": "decisions_artifact_invalid"}) from exc
     digest = hashlib.sha256()
-    with open(path, "rb") as handle:
+    with os.fdopen(fd, "rb") as handle:
+        st = os.fstat(handle.fileno())
+        if not stat.S_ISREG(st.st_mode) or st.st_size > MAX_DECISIONS_BYTES:
+            raise Refusal(_CONFLICT, "decisions artifact must be a regular file of at most MAX_DECISIONS_BYTES",
+                          {"reason": "decisions_artifact_invalid"})
         for block in iter(lambda: handle.read(_HASH_BLOCK), b""):
             digest.update(block)
     return digest.hexdigest()
