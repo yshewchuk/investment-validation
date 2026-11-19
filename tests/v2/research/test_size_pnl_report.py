@@ -117,6 +117,22 @@ def test_t4_refusals():
         t4_t5_shortvol(_scored("retuned"), {"m1": 4}, {}, arm="retuned")
 
 
+def test_t4_t5_model_with_no_scored_rows_gets_row():
+    scored = pd.concat([_scored("retuned"), _scored("as_is")], ignore_index=True)
+    scored = scored[scored["model_id"] == "A"]
+    n_events = {"A": 2, "B": 4}
+    tuning = {
+        "A": {"c": 1.0, "skipped": False, "skip_reason": None},
+        "B": {"c": 1.0, "skipped": True, "skip_reason": "fewer_than_300_inner_trades"},
+    }
+    out = t4_t5_shortvol(scored, n_events, tuning, arm="retuned")
+    assert "| B | 1 | 0 | 0 | 0 | - | fewer_than_300_inner_trades |" in out
+    out_as_is = t4_t5_shortvol(scored, n_events, tuning, arm="as_is")
+    assert "| B | 1 | 0 | 0 | 0 | - |" in out_as_is
+    with pytest.raises(ValueError, match="tuning receipt"):
+        t4_t5_shortvol(scored, n_events, {"A": tuning["A"]}, arm="retuned")
+
+
 def test_t6_undetermined_kept_separate():
     scored = pd.DataFrame({"model_id": ["m1", "m1"], "rule": ["R_L", "R_L"],
                            "pnl_dollars": [3.0, 2.0]})

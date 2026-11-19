@@ -111,7 +111,8 @@ def t4_t5_shortvol(scored, n_events, tuning, *, arm):
     sub = scored[scored["arm"] == arm]
     taken = sub[sub["taken"].astype(bool)]
     rows = []
-    for m in sorted(sub["model_id"].unique()):
+    # score() returns taken trades only; models with zero scored rows still get a row.
+    for m in sorted(set(sub["model_id"]) | set(n_events)):
         pnl = taken[taken["model_id"] == m]["pnl_dollars"]
         total = float(pnl.sum())
         per_event = _per_event(total, m, n_events)
