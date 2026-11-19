@@ -299,6 +299,68 @@ def test_native_selection_without_frozen_verifies_a_fresh_freeze():
     trials.freeze.assert_called_once_with()
 
 
+def test_native_selection_deferred_path_refuses_a_fresh_freeze_that_differs():
+    trials = Mock()
+    trials.freeze.return_value = {"a": 2}
+    with pytest.raises(OpsError) as caught:
+        outer._native_selection(trials, PLAN, _reader({"a": 1}))
+    assert caught.value.problem.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    trials.freeze.assert_called_once_with()
+
+
+ONE_PLAN = {"plan_id": "plan",
+            "folds": [{"outer": {"year": "2024"}, "inner": [{"year": "2023"}]}],
+            "candidates": [{"candidate_id": "overall"}]}
+ONE_KEY = plan_mod.trial_key(ONE_PLAN, "2024", "2023", "overall")
+ONE_ATTEMPT = {"limits": {}, "candidate_id": "overall", "trial_id": ONE_KEY}
+
+
+def _records(*, missing=(), **overrides):
+    records = {"selection": {"a": 1}, "execution:" + ONE_KEY: {"attempt": ONE_ATTEMPT},
+               "terminal:" + ONE_KEY: {"status": "completed"},
+               "execution-start:" + ONE_KEY: ONE_ATTEMPT}
+    records.update(overrides)
+    for slot in missing:
+        records.pop(slot + ONE_KEY)
+    return lambda slot: records.get(slot)
+
+
+@pytest.fixture
+def one_trial(monkeypatch):
+    monkeypatch.setattr(outer, "validate_execution_limits", lambda limits: None)
+
+
+def test_native_selection_shared_branch_refuses_a_missing_terminal_record(one_trial):
+    trials = Mock()
+    with pytest.raises(OpsError) as caught:
+        outer._native_selection(trials, ONE_PLAN, _records(missing=("terminal:",)), frozen={"a": 1})
+    assert caught.value.problem.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    trials.freeze.assert_not_called()
+
+
+def test_native_selection_shared_branch_refuses_a_missing_execution_record(one_trial):
+    trials = Mock()
+    with pytest.raises(OpsError) as caught:
+        outer._native_selection(trials, ONE_PLAN, _records(missing=("execution:",)), frozen={"a": 1})
+    assert caught.value.problem.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    trials.freeze.assert_not_called()
+
+
+def test_native_selection_shared_branch_refuses_an_execution_start_that_differs(one_trial):
+    trials = Mock()
+    read = _records(**{"execution-start:" + ONE_KEY: {**ONE_ATTEMPT, "candidate_id": "rmse"}})
+    with pytest.raises(OpsError) as caught:
+        outer._native_selection(trials, ONE_PLAN, read, frozen={"a": 1})
+    assert caught.value.problem.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    trials.freeze.assert_not_called()
+
+
+def test_native_selection_shared_branch_passes_with_complete_records(one_trial):
+    trials = Mock()
+    assert outer._native_selection(trials, ONE_PLAN, _records(), frozen={"a": 1}) == {"a": 1}
+    trials.freeze.assert_not_called()
+
+
 @pytest.mark.parametrize("per_candidate_plan", [True, False])
 def test_run_search_shares_one_freeze_across_the_refit_loop(monkeypatch, per_candidate_plan):
     trials = Mock()

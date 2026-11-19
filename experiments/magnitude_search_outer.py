@@ -111,8 +111,9 @@ def shared_freeze(run_id, plan_ref, value):
 def _native_selection(trials, plan, read, frozen=None):
     """Presence checks plus freeze verification make completed replays strict.
 
-    Internal use only: the ``frozen`` argument is only reachable through the driver's
-    shared_freeze scope. When ``frozen`` is None the freeze is recomputed via trials.freeze();
+    ``frozen`` is passed only by execute_outer_fold from an active shared_freeze scope whose
+    run_id and plan_ref match (the driver's refit stage); direct callers cannot supply it
+    through execute_outer_fold. When ``frozen`` is None the freeze is recomputed via trials.freeze();
     otherwise the shared value is compared against the stored selection.
     """
     print("[stage] native_selection start", file=sys.stderr)
