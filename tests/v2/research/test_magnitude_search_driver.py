@@ -331,6 +331,17 @@ def test_all_failed_candidates_refuse_before_outer_work(ready, monkeypatch):
     assert ready.recorder._read("selection") is None
 
 
+def test_search_memory_lines_bracket_each_stage(ready, capsys):
+    result = run(ready)
+    err = capsys.readouterr().err
+    markers = ["[search memory] start:", "after claim replays", "after fresh trials", "after freeze", "after refits"]
+    positions = [err.find(marker) for marker in markers]
+    assert all(position >= 0 for position in positions), err
+    assert positions == sorted(positions)
+    assert result["schema_version"] == "magnitude_search_outer_report.v1"
+    assert result["final_read_authority"] == "none"
+
+
 def test_selection_cannot_precede_missing_inner_work(ready, monkeypatch):
     ready.recorder._append("selection", {"premature": True})
     before = durable_evidence(ready)

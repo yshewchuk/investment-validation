@@ -47,6 +47,7 @@ from experiments.magnitude_search_trials import (
 from experiments.magnitude_search_trials import (
     _timing as _valid_timing,
 )
+from experiments.search_memory_log import log_memory, panel_memo_holder
 from experiments.size_fit_diagnostics import evidence as diagnostic_evidence
 from experiments.size_fit_diagnostics import keys as diagnostic_keys
 from experiments.size_job_budget import resolved_limits
@@ -442,6 +443,7 @@ def collect_outer_results(conn, store, repository, registration, request, plan_r
     """
     require_current(conn, OWNER, MIGRATIONS)
     plan = read_search_plan(conn, store, registration, request, plan_ref)
+    log_memory("collect start", panel_memo=panel_memo_holder())
     refit_plan = per_candidate(plan)
     overall_by_year, required_by_year = {}, {}
     pending = []
