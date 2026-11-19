@@ -877,7 +877,7 @@ Whole-cohort coverage and daily-mark units remain the exploratory comparison con
 frozen selection and completed native execution/terminal evidence for every inner
 trial before public `freeze`/`execute` replay. Missing or submitted-only evidence
 never launches inner work; permitted candidate failures retain sealed exclusions.
-Outer execution uses the frozen winner and never reselects; it only re-verifies `freeze()`. A distinct immutable `outer-*`
+Outer execution uses the frozen winner and never reselects; it re-runs `freeze()` unless the driver shares its own. A distinct immutable `outer-*`
 namespace binds the plan, selection, recipe, limits and installed outer/child sources. With `winner_rules`, slots are keyed `[plan_id, outer_year, candidate_id]`; a non-overall failure commits a failed terminal, never retried. A blend winner refits its components (`fsum` mean, `magnitude_search_blend_outer`); a failed component fails the blend (overall: refuses the run); `best_non_blend_id` is also refit; distribution `blend_not_distributed`.
 Only refit units get bounded horizon refits. Every fit marker commits
 before its child ACK; forecasts and accounting commit before
@@ -892,7 +892,7 @@ validation reconstructs the protected receipt from admitted physical preflight.
 Static imports include these helpers in recorder and outer source bindings.
 Completed replay verifies the full chain without payloads/fitting; native responses
 require valid terminal/durable evidence bound to exact attempts and limits.
-Replay is read-only and launch-free; every call checks current journal integrity (not cached), except `run_search`'s refit stage shares its one `freeze()` with its refit units; the scope refuses (`EXPERIMENT_IDENTITY_CONFLICT`) any value but that run/plan's own `freeze()` result; per-unit checks still run.
+Replay is read-only and launch-free; every call checks current journal integrity (not cached), except `run_search`'s refit stage shares its one `freeze()` with its refit units; any other value refuses `EXPERIMENT_IDENTITY_CONFLICT`; per-unit checks still run.
 Freeze and submitted recording require valid evidence.
 
 Fresh inner/outer admission streams complete validation, retaining only fold participants'
