@@ -82,6 +82,8 @@ def _rss_mb():
 
 
 def _window(stage):
+    if stage not in STAGES:
+        raise ValueError(f"stage must be one of {STAGES}, got {stage!r}")
     return INNER if stage == "inner" else (WARMUP_START, OUTER[1])
 
 
@@ -242,7 +244,7 @@ def _write_decisions(tmp, frames):
     frame = frame[_FRONT + [c for c in frame.columns if c not in _FRONT]]
     frame.to_parquet(tmp, index=False)
     digest = hashlib.sha256()
-    with open(tmp, "rb") as handle:
+    with open(tmp, "r+b") as handle:
         for block in iter(lambda: handle.read(_HASH_BLOCK), b""):
             digest.update(block)
         os.fsync(handle.fileno())
@@ -295,8 +297,6 @@ def run(src, stage, out_dir, *, event_ids=None, prereg=size_pnl_prereg.require_p
     """
     started = time.monotonic()
     receipt = prereg()
-    if stage not in STAGES:
-        raise ValueError(f"stage must be one of {STAGES}, got {stage!r}")
     if tuned is not None:
         raise ValueError("tuned is reserved; the outer stage reads the tuning receipts from disk")
     _log(f"stage={stage} start rss={_rss_mb():.0f}MB")

@@ -141,6 +141,13 @@ def test_bad_stage_raises_value_error(tmp_path):
         driver.run(sources(), "2025", tmp_path, prereg=OK)
 
 
+def test_prepare_rejects_a_typo_stage_before_any_source_call():
+    calls = []
+    with pytest.raises(ValueError, match="stage must be one of"):
+        driver.prepare(sources(read=lambda slot: calls.append(slot)), "typo")
+    assert calls == []
+
+
 def test_outer_refuses_before_building_any_chunk(tmp_path, stubs):
     loads = []
     with pytest.raises(Refusal) as caught:
