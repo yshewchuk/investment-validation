@@ -41,6 +41,7 @@ from experiments.magnitude_search_refits import (
 )
 from experiments.magnitude_search_trials import (
     SearchTrials,
+    freeze_is_verified,
 )
 from experiments.magnitude_search_trials import (
     _completed_fit as _valid_completed_fit,
@@ -98,8 +99,14 @@ _SHARED = None
 
 @contextmanager
 def shared_freeze(run_id, plan_ref, value):
-    """Driver-only scope: run_search shares the one freeze it verified with the refit units of its own run/plan."""
+    """Driver-only scope: run_search shares the one freeze it verified with the refit units of its own run/plan.
+
+    ``value`` must be an object returned by a SearchTrials.freeze() call in this process, so a
+    caller cannot supply evidence it did not verify.
+    """
     global _SHARED
+    if not freeze_is_verified(value):
+        raise fail("EXPERIMENT_IDENTITY_CONFLICT", "shared freeze must be a verified trials.freeze() result")
     previous = _SHARED
     _SHARED = (run_id, canonical_json(to_document(plan_ref)), value)
     try:

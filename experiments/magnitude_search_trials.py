@@ -110,6 +110,12 @@ def _completed_fit(marker, static):
 
 _NOT_ADMITTED = object()
 _FREEZE_CACHE_BYTES = 32 << 20
+_FREEZES = []  # most recent verified trials.freeze() results in this process (bounded to 4)
+
+
+def freeze_is_verified(value):
+    """True only for an object this process received from SearchTrials.freeze() (identity, not equality)."""
+    return any(item is value for item in _FREEZES)
 
 
 class SearchTrials:
@@ -709,7 +715,10 @@ class SearchTrials:
         print(f"[selection] freeze start rss_kib={resource.getrusage(resource.RUSAGE_SELF).ru_maxrss}",
               file=sys.stderr)
         try:
-            return self._freeze()
+            result = self._freeze()
+            _FREEZES.append(result)
+            del _FREEZES[:-4]
+            return result
         finally:
             elapsed = time.monotonic() - started
             print(f"[selection] freeze done elapsed={elapsed:.3f}s "

@@ -9,12 +9,19 @@ from engine.v2.ops.errors import OpsError, fail
 from experiments import magnitude_search_outer as outer
 from experiments import magnitude_search_plan as plan_mod
 from experiments import size_search_binding as binding
+from experiments import magnitude_search_trials as trials_module
 from experiments import v2_magnitude_search_run as run_mod
 
 PLAN_V3 = plan_mod.PLAN_V3
 REQUEST = {"schema_version": "magnitude_search_request.v4"}
 SIZE_REQUEST = {"schema_version": "magnitude_search_request.v4"}
 FROZEN = {"selections": [{"outer_year": "2024", "selected_candidate_id": "overall"}]}
+
+
+def _verified(value):
+    """Register ``value`` as if this process had received it from SearchTrials.freeze()."""
+    trials_module._FREEZES.append(value)
+    return value
 
 
 class Registration:
@@ -238,37 +245,70 @@ def test_execute_outer_fold_outside_any_scope_uses_three_arguments(monkeypatch):
 
 
 def test_execute_outer_fold_inside_matching_scope_passes_the_shared_value(monkeypatch):
-    seen, trials = _execute(monkeypatch, shared=("run", PLAN_REF, FROZEN))
+    seen, trials = _execute(monkeypatch, shared=("run", PLAN_REF, _verified(FROZEN)))
     assert len(seen) == 1 and len(seen[0]) == 4 and seen[0][3] is FROZEN
     trials.freeze.assert_not_called()
 
 
 def test_execute_outer_fold_refuses_shared_scope_for_another_run(monkeypatch):
-    seen, _ = _execute(monkeypatch, shared=("other-run", PLAN_REF, FROZEN))
+    seen, _ = _execute(monkeypatch, shared=("other-run", PLAN_REF, _verified(FROZEN)))
     assert len(seen) == 1 and len(seen[0]) == 3
 
 
 def test_execute_outer_fold_refuses_shared_scope_for_another_plan(monkeypatch):
-    seen, _ = _execute(monkeypatch, plan_ref=PLAN_REF, shared=("run", OTHER_REF, FROZEN))
+    seen, _ = _execute(monkeypatch, plan_ref=PLAN_REF, shared=("run", OTHER_REF, _verified(FROZEN)))
     assert len(seen) == 1 and len(seen[0]) == 3
 
 
 def test_shared_freeze_restores_previous_value_on_exit():
     assert outer._SHARED is None
-    with outer.shared_freeze("run", PLAN_REF, "outer"):
-        with outer.shared_freeze("run", PLAN_REF, "inner"):
+    with outer.shared_freeze("run", PLAN_REF, _verified("outer")):
+        with outer.shared_freeze("run", PLAN_REF, _verified("inner")):
             assert outer._SHARED[2] == "inner"
         assert outer._SHARED[2] == "outer"
     assert outer._SHARED is None
 
 
 def test_shared_freeze_restores_previous_value_when_the_body_raises():
-    with outer.shared_freeze("run", PLAN_REF, "outer"):
+    with outer.shared_freeze("run", PLAN_REF, _verified("outer")):
         with pytest.raises(RuntimeError):
-            with outer.shared_freeze("run", PLAN_REF, "inner"):
+            with outer.shared_freeze("run", PLAN_REF, _verified("inner")):
                 raise RuntimeError("boom")
         assert outer._SHARED[2] == "outer"
     assert outer._SHARED is None
+
+
+def test_shared_freeze_refuses_an_unregistered_equal_value():
+    assert outer._SHARED is None
+    with pytest.raises(OpsError) as caught:
+        with outer.shared_freeze("run", PLAN_REF, dict(FROZEN)):
+            pass  # pragma: no cover
+    assert caught.value.problem.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert outer._SHARED is None
+
+
+def test_shared_freeze_accepts_a_value_returned_by_trials_freeze(monkeypatch):
+    value = {"a": 1}
+    monkeypatch.setattr(trials_module.SearchTrials, "_freeze", lambda self: value)
+    trials = trials_module.SearchTrials(None, Store(), None, Registration(), {}, PLAN_REF)
+    frozen = trials.freeze()
+    assert frozen is value
+    with outer.shared_freeze("run", PLAN_REF, frozen):
+        assert outer._SHARED[2] is frozen
+    assert outer._SHARED is None
+
+
+def test_freeze_registry_keeps_only_the_last_four(monkeypatch):
+    values = [{"n": number} for number in range(6)]
+    pending = iter(values)
+    monkeypatch.setattr(trials_module.SearchTrials, "_freeze", lambda self: next(pending))
+    trials = trials_module.SearchTrials(None, Store(), None, Registration(), {}, PLAN_REF)
+    for _ in values:
+        trials.freeze()
+    assert len(trials_module._FREEZES) == 4
+    assert all(kept is value for kept, value in zip(trials_module._FREEZES, values[-4:]))
+    assert not any(trials_module.freeze_is_verified(value) for value in values[:2])
+    assert all(trials_module.freeze_is_verified(value) for value in values[-4:])
 
 
 PLAN = {"folds": [], "candidates": []}
@@ -364,7 +404,7 @@ def test_native_selection_shared_branch_passes_with_complete_records(one_trial):
 @pytest.mark.parametrize("per_candidate_plan", [True, False])
 def test_run_search_shares_one_freeze_across_the_refit_loop(monkeypatch, per_candidate_plan):
     trials = Mock()
-    trials.freeze.return_value = FROZEN
+    trials.freeze.return_value = _verified(FROZEN)
     memo_seen, refits = [], []
 
     def admit(conn, store, registration, request, plan_ref):
@@ -451,7 +491,7 @@ def test_memo_keys_on_plan_schema(calls):
     assert calls["folds"] == 2
 
 
-def test_plans_built_outside_the_memo_are_never_retained(monkeypatch):
+def test_memo_scope_does_not_retain_plans_from_unmemoized_prepare(monkeypatch):
     plan = {"plan_id": "fresh", "folds": []}
     monkeypatch.setattr(plan_mod, "_prepare", lambda conn, store, registration, request, **kwargs: dict(plan))
     store, registration = Store(), Registration()
