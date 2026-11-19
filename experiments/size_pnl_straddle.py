@@ -36,8 +36,10 @@ def atm_legs(chunk, i):
     """(call_idx, put_idx) of the ATM straddle for event ``i``, or None.
 
     As in the registered ``straddle_through``: the ATM strike is the CALL strike nearest
-    ``spot_entry`` (ties go to the lower strike), and the put must exist at that same strike.
-    No shifting to another common strike.
+    ``spot_entry``, and the put must exist at that same strike. No shifting to another common strike.
+    Ties go to the lower strike by this module's own rule: the explicit ``(distance, strike)`` key
+    below. This is not ``StrikeSelector``'s atm, which takes the first ``idxmin`` row and so equals
+    the lower strike only on an ascending ladder.
     """
     spot = float(chunk["spot_entry"][i])
     if not math.isfinite(spot):

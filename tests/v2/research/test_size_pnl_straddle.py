@@ -182,6 +182,7 @@ def test_entry_cost_sums_buy_prices():
 def test_lots_floor_floor_of_one_and_nonfinite():
     assert sd.lots(3.0) == math.floor(CAPITAL_PER_TRADE / (3.0 * CONTRACT_MULTIPLIER))
     assert sd.lots(4.0) == 25
+    assert sd.lots(0.70) == 142  # 10000 / 70 = 142.86 -> 142; round() would give 143
     assert sd.lots(150.0) == 1  # expensive straddle still takes one lot
     for bad in (NAN, math.inf, 0.0, -1.0):
         assert sd.lots(bad) == 1
@@ -303,6 +304,7 @@ def test_universe_filters_are_not_taken():
                        rec("wide", 100.0, pair(100, put_e=(1.0, 2.0), call_e=(1.0, 2.0)))], {})
     events = pd.DataFrame([ev("small", 1.0, mcap=5e9), ev("wide", 1.0)])
     out = sd.decide(events, prior(), "R_L", chunk).set_index("event_id")
+    assert set(out.index) == {"small", "wide"}
     assert (out["status"] == "not_taken").all()
     assert (out["reason"] == "universe_filter").all()
 
@@ -328,8 +330,13 @@ def test_trade_counts_keep_undetermined_separate():
 
 def test_decide_reads_no_exit_quotes():
     events = pd.DataFrame([ev("hi", 1.0)])
-    assert not {"bid_x", "ask_x"} & set(events.columns)
-    assert sd.decide(events, EMPTY, "R_L2", good("hi")).loc[0, "status"] == "taken"
+    chunk = good("hi")
+    with_exit = sd.decide(events, EMPTY, "R_L2", chunk)
+    for key in ("bid_x", "ask_x", "exit_rung"):
+        del chunk[key]
+    without_exit = sd.decide(events, EMPTY, "R_L2", chunk)
+    pd.testing.assert_frame_equal(with_exit, without_exit)
+    assert without_exit.loc[0, "status"] == "taken"
 
 
 # ---- score, rung_shares, trade_counts -------------------------------------
@@ -370,6 +377,14 @@ def test_score_missing_event_raises():
     chunk = lad._pack([rec("A", 100.0, pair(100))], {})
     events = pd.DataFrame([ev("Z", 1.0)])
     forced = sd.decide(events, EMPTY, "R_L2", chunk).assign(status="taken")  # defence-in-depth: taken but absent
+    with pytest.raises(ValueError, match=r"taken event 'Z' is missing from the chunk or events"):
+        sd.score(chunk, events, forced, 0.5)
+
+
+def test_score_taken_event_absent_from_events_raises():
+    chunk = lad._pack([rec("Z", 100.0, pair(100))], {})
+    events = pd.DataFrame([ev("A", 1.0)])  # Z is in the chunk but not in events
+    forced = sd.decide(pd.DataFrame([ev("Z", 1.0)]), EMPTY, "R_L2", chunk).assign(status="taken")
     with pytest.raises(ValueError, match=r"taken event 'Z' is missing from the chunk or events"):
         sd.score(chunk, events, forced, 0.5)
 

@@ -82,9 +82,10 @@ def _first(values):
 
 
 def _contracts(rows, *, entry):
-    """Puts/calls with a usable strike, first (right, strike) kept, sorted. Entry rows keep every
-    such strike but set bid/ask to NaN where the quote is NaN, crossed, negative-bid or ask<=0, so the
-    true strike ladder survives; exit rows keep every quote so rung 3 can record them."""
+    """Puts/calls with a usable strike, sorted. Among rows with the same (right, strike), a valid/usable
+    quote wins over an invalid one; otherwise the first row. Entry rows keep every such strike but set
+    bid/ask to NaN where the quote is NaN, crossed, negative-bid or ask<=0, so the true strike ladder
+    survives; exit rows keep every quote so rung 3 can record them."""
     out = pd.DataFrame({
         "right": rows["right"].map(_CODE).astype(float).to_numpy(),
         "strike": pd.to_numeric(rows["strike"], errors="coerce").astype(float).to_numpy(),
