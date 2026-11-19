@@ -308,6 +308,62 @@ def test_changed_outer_receipt_leaves_decisions_untouched_and_no_tmp(tmp_path, s
     assert not (tmp_path / "decisions.parquet.tmp").exists()
 
 
+def test_inner_month_pool_drops_a_label_printed_after_a_later_month_starts(tmp_path, stubs, monkeypatch):
+    """E1's exit (2024-08-03) falls after E2's month starts (2024-08-01): E1 is in E2's month table but not its labels."""
+    plan = PLAN_FRAME.copy()
+    plan.loc[plan["event_id"] == "E1", "exit_date"] = pd.Timestamp("2024-08-03")
+    pools = []
+    monkeypatch.setattr(driver, "build_pool",
+                        lambda table, labels: pools.append((set(table.index.astype(str)), set(labels.index.astype(str)))))
+    use_chunks(monkeypatch, [("2023Q2", chunk("E1", "E2"))])
+    driver.run(sources(plan_frame=plan), "inner", tmp_path, prereg=OK)
+    assert any("E1" in tabled and "E1" not in labelled for tabled, labelled in pools)
+
+
+def test_facts_are_fetched_once_per_run(tmp_path, stubs, monkeypatch):
+    calls = []
+
+    def counting(ids):
+        calls.append(list(ids))
+        return FACTS.reindex(list(ids))
+
+    use_chunks(monkeypatch, [("2023Q2", chunk("E1")), ("2024Q3", chunk("E2"))])
+    driver.run(sources(facts=counting), "inner", tmp_path, prereg=OK)
+    assert calls == [["E1", "E2"]]
+    calls.clear()
+    use_chunks(monkeypatch, [("2024Q3", chunk("E2")), ("2025Q1", chunk("E3", "E4"))])
+    driver.run(sources(facts=counting), "outer", tmp_path, prereg=OK)  # the inner run above wrote the receipts
+    assert len(calls) == 1
+
+
+def test_outer_refuses_a_candidate_without_2025_rows_before_any_chunk(tmp_path, stubs, monkeypatch):
+    """Candidate predictions for 2025 are not bound yet: a non-production model with only 2024 rows refuses."""
+    roster = {"models": [{"model_id": "prod", "source": "production"}, {"model_id": "cand", "source": "v14"}]}
+    rows = {"prod": EVENTS, "cand": {"E2": EVENTS["E2"]}}
+    monkeypatch.setattr(driver.inputs, "resolve_roster", lambda *a, **kw: roster)
+    monkeypatch.setattr(driver.inputs, "bind_models", lambda *a, **kw: {})
+
+    def model_tables(bound, roster_, admitted, production, *, start, end, **kw):
+        out = {}
+        for mid, events in rows.items():
+            keep = [(e, d) for e, d in events.items() if pd.Timestamp(start) <= pd.Timestamp(d) < pd.Timestamp(end)]
+            table = pd.DataFrame({"pred_move": 5.0, "pred_crush": -12.0,
+                                  "event_date": pd.to_datetime([d for _e, d in keep])},
+                                 index=pd.Index([e for e, _d in keep], name="event_id"))
+            out[mid] = {"status": "ready", "table": table, "binding": {"rows": len(keep)}}
+        return out
+
+    monkeypatch.setattr(readers, "model_tables", model_tables)
+    use_chunks(monkeypatch, [("2024Q3", chunk("E2"))])
+    driver.run(sources(), "inner", tmp_path, prereg=OK)
+    loads = []
+    with pytest.raises(Refusal) as caught:
+        driver.run(sources(load_index=lambda keys: loads.append(keys)), "outer", tmp_path, prereg=OK)
+    assert caught.value.code == CONFLICT
+    assert caught.value.details["reason"] == "outer_predictions_unbound"
+    assert loads == []
+
+
 # ---- run.py gate ---------------------------------------------------------------
 
 def _run_main():

@@ -13,6 +13,9 @@ the S3 ladder one quarter at a time and writes the receipts. The synthetic arm
   added to the pool. Warm-up months (2024 H2) add history only. Then ``decisions.parquet`` and the
   ``outer`` receipt are written.
 
+The v14 2025 refit-prediction binder is a separate slice; until it exists a full outer run refuses
+``outer_predictions_unbound``.
+
 No production caller beyond ``run.py``.
 """
 import hashlib
@@ -191,18 +194,48 @@ def _outer_gate(out, ready, scope, body):
     return receipts
 
 
-def _inner(src, out, ready, plan, ids):
+def _exit_map(plan_frame):
+    """Event id -> the event's exit_date as an ISO date, for the events whose exit is known."""
+    return {str(e): pd.Timestamp(x).date().isoformat() for e, x in zip(plan_frame["event_id"], plan_frame["exit_date"])
+            if pd.notna(x)}
+
+
+def _printed(labels, exits, cutoff):
+    """The labels whose event's exit_date is printed before ``cutoff`` (an ISO date); later exits are not yet known."""
+    ids = labels.index.astype(str)
+    return labels[ids.isin([e for e in ids if e in exits and label_availability.available_before(exits[e], cutoff)])]
+
+
+def _chunk_facts(facts, chunk):
+    """The shared facts frame restricted to one chunk's event ids, so no second source call is made."""
+    fx = facts.copy()
+    fx.index = fx.index.astype(str)
+    return fx.reindex([str(e) for e in chunk["event_id"]])
+
+
+def _sims(chunk, events, table, labels, exits):
+    """One model's simulations for one chunk, one calendar month at a time: a month's pool holds only the rows dated
+    before it, with labels printed before it (the outer stage's rule)."""
+    sims, months = {}, events["event_date"].dt.to_period("M")
+    for period in sorted(set(months)):
+        start_m = period.start_time
+        pool = build_pool(table[table["event_date"] < start_m], _printed(labels, exits, start_m.date().isoformat()))
+        sims.update(shortvol.simulate(chunk, events[months == period], pool))
+    return sims
+
+
+def _inner(src, out, ready, plan, ids, facts_all):
     labels = readers.read_labels(src.fetch, src.admitted, start=INNER[0], end=INNER[1], event_ids=ids)
-    pools = {mid: build_pool(entry["table"], labels) for mid, entry in ready.items()}
+    exits = _exit_map(src.plan_frame)
     items = {mid: [] for mid in ready}
     quarters = pd.to_datetime(plan["event_date"]).dt.to_period("Q").nunique()
     kept, started = 0, time.monotonic()
     for number, (label, chunk) in enumerate(ladder.ladder_chunks(src.admitted, plan, src.load_index), start=1):
-        facts = src.facts([str(e) for e in chunk["event_id"]])
+        facts = _chunk_facts(facts_all, chunk)
         kept += len(chunk["event_id"])
         for mid, entry in ready.items():
             events = model_events(entry["table"], facts, chunk)
-            items[mid].append((chunk, events, shortvol.simulate(chunk, events, pools[mid])))
+            items[mid].append((chunk, events, _sims(chunk, events, entry["table"], labels, exits)))
         elapsed = max(time.monotonic() - started, 1e-9)
         _log(f"inner quarter {number}/{quarters} {label} events={len(chunk['event_id'])} "
              f"rate={kept / elapsed:.2f}/s eta={(quarters - number) * elapsed / number:.0f}s rss={_rss_mb():.0f}MB")
@@ -234,8 +267,7 @@ def _month(mid, table, events, chunk, labels, exits, start_m, st):
     """Steps 7a-7d for one model and one calendar month. Warm-up months only add history."""
     output = start_m >= pd.Timestamp(OUTER[0])
     cutoff = start_m.date().isoformat()
-    printed = [e for e in labels.index.astype(str) if e in exits and label_availability.available_before(exits[e], cutoff)]
-    pool = build_pool(table[table["event_date"] < start_m], labels[labels.index.astype(str).isin(printed)])
+    pool = build_pool(table[table["event_date"] < start_m], _printed(labels, exits, cutoff))
     sims = shortvol.simulate(chunk, events, pool)
     ids = set(events["event_id"].astype(str))
     frames = []
@@ -300,16 +332,27 @@ def _file_sha256(path):
     return digest.hexdigest()
 
 
-def _outer(src, out, ready, receipts, plan, ids):
+def _unbound_outer(roster, tables, ready):
+    """Refuses a non-production model with no table rows in the outer year (its 2025 predictions are unbound)."""
+    sources = {m["model_id"]: m["source"] for m in roster["models"]}
+    for mid in ready:
+        dates = pd.to_datetime(tables[mid]["table"]["event_date"])
+        in_year = (dates >= pd.Timestamp(OUTER[0])) & (dates < pd.Timestamp(OUTER[1]))
+        if sources[mid] != "production" and not in_year.any():
+            raise Refusal(_CONFLICT, "v14 2025 refit predictions are not bound for a non-production model",
+                          {"reason": "outer_predictions_unbound"})
+
+
+def _outer(src, out, ready, receipts, plan, ids, facts_all):
     labels = readers.read_labels(src.fetch, src.admitted, start=INNER[0], end=OUTER[0], event_ids=ids)
-    exits = {str(e): pd.Timestamp(x).date().isoformat() for e, x in zip(src.plan_frame["event_id"], src.plan_frame["exit_date"]) if pd.notna(x)}
+    exits = _exit_map(src.plan_frame)
     dates = pd.to_datetime(plan["event_date"])
     quarter, month = dates.dt.to_period("Q").astype(str).to_numpy(), dates.dt.to_period("M").to_numpy()
     total = len(set(month))
     state = {mid: _model_state(receipts[mid]["c"]) for mid in ready}
     frames, done, started = [], 0, time.monotonic()
     for label, chunk in ladder.ladder_chunks(src.admitted, plan, src.load_index):
-        facts = src.facts([str(e) for e in chunk["event_id"]])
+        facts = _chunk_facts(facts_all, chunk)
         events = {mid: model_events(entry["table"], facts, chunk) for mid, entry in ready.items()}
         for period in sorted({m for m, q in zip(month, quarter) if q == label}):
             start_m = period.start_time
@@ -363,9 +406,10 @@ def run(src, stage, out_dir, *, event_ids=None, prereg=size_pnl_prereg.require_p
     excluded = {mid: e["reason"] for mid, e in tables.items() if e["status"] != "ready"}
     scope = None if ids is None else content_hash(sorted(ids))
     plan = _plan_window(src.plan_frame, _window(stage), ids)
-    facts = src.facts(sorted(str(e) for e in plan["event_id"]))
+    facts_all = src.facts(sorted(str(e) for e in plan["event_id"]))  # the only facts call of the run
     facts_rows = sorted(([str(e), *[None if pd.isna(v) else float(v) for v in vals]]
-                         for e, vals in zip(facts.index, facts[list(_FACTS)].to_numpy(dtype=float))), key=lambda r: r[0])
+                         for e, vals in zip(facts_all.index, facts_all[list(_FACTS)].to_numpy(dtype=float))),
+                        key=lambda r: r[0])
     body = {"stage": "inputs", "spec_hash": receipt["spec_hash"], "identity": bound_tables["identity"],
             "roster": roster, "models": _strip(bound_tables["bound"]),
             "tables": {mid: e["binding"] for mid, e in tables.items() if e["status"] == "ready"},
@@ -375,14 +419,16 @@ def run(src, stage, out_dir, *, event_ids=None, prereg=size_pnl_prereg.require_p
     if not ready:
         raise Refusal(_CONFLICT, "no model is ready to be tuned or scored", {"reason": "no_ready_models"})
     receipts = _outer_gate(out, ready, scope, body) if stage == "outer" else {}
+    if stage == "outer":
+        _unbound_outer(roster, tables, ready)
     if plan.empty:
         raise Refusal(_CONFLICT, "the plan window holds no events", {"reason": "empty_population"})
     if stage == "inner":
-        hashes, rows = _inner(src, out, ready, plan, ids)
+        hashes, rows = _inner(src, out, ready, plan, ids, facts_all)
         tuning.write_receipt(out / "receipts" / "inner.json",
                              {"stage": "inner", "models": hashes, "events": rows, "excluded": excluded,
                               "scope": scope, "inputs": inputs_receipt["content_hash"]})
     else:
-        rows = _outer(src, out, ready, receipts, plan, ids)
+        rows = _outer(src, out, ready, receipts, plan, ids, facts_all)
     _log(f"stage={stage} end elapsed={time.monotonic() - started:.1f}s rss={_rss_mb():.0f}MB")
     return {"stage": stage, "models": sorted(ready), "excluded": excluded, "rows": rows}
