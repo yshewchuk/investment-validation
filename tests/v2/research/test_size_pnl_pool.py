@@ -90,12 +90,33 @@ def test_build_pool_residual_columns(data):
     assert np.allclose(np.sort(pool._crush), np.sort(labels.crush_pct_iv30 - table.pred_crush))
 
 
-def test_floor_drops_pre_2023_rows(data):
-    table, labels = data
-    kept = int((table.event_date >= pool_mod.COMMON_START).sum())
-    assert 0 < kept < len(table)
-    assert len(build_pool(table, labels)) == kept
-    assert len(build_pool(table, labels, floor=None)) == len(table)
+def test_build_pool_residuals_pair_by_event_id():
+    # Labels are listed in reverse order; the join must pair each event by id, and the pool keeps date order.
+    index = pd.Index(["E0", "E1", "E2"], name="event_id")
+    table = pd.DataFrame({"event_date": pd.to_datetime(["2023-03-01", "2023-06-01", "2023-09-01"]),
+                          "pred_move": [5.0, 4.0, 6.0],
+                          "pred_crush": [-15.0, -10.0, -20.0]}, index=index)
+    labels = pd.DataFrame({"abs_move": [6.5, 3.0, 7.5],
+                           "crush_pct_iv30": [-18.5, -14.0, -12.0]},
+                          index=pd.Index(["E2", "E1", "E0"], name="event_id"))
+    pool = build_pool(table, labels, floor=None)
+    # E0: move 7.5 - 5.0 = 2.5, crush -12.0 - (-15.0) = 3.0
+    # E1: move 3.0 - 4.0 = -1.0, crush -14.0 - (-10.0) = -4.0
+    # E2: move 6.5 - 6.0 = 0.5, crush -18.5 - (-20.0) = 1.5
+    assert np.allclose(pool._move, [2.5, -1.0, 0.5])
+    assert np.allclose(pool._crush, [3.0, -4.0, 1.5])
+
+
+def test_floor_drops_pre_2023_rows():
+    index = pd.Index(["before", "boundary"], name="event_id")
+    table = pd.DataFrame({"event_date": [pd.Timestamp("2022-12-31"), pd.Timestamp("2023-01-01")],
+                          "pred_move": [5.0, 5.0], "pred_crush": [-15.0, -15.0]}, index=index)
+    labels = pd.DataFrame({"abs_move": [7.0, 9.0], "crush_pct_iv30": [-12.0, -10.0]}, index=index)
+    kept = build_pool(table, labels)
+    assert len(kept) == 1
+    # Only the 2023-01-01 row survives: move 9.0 - 5.0 = 4.0.
+    assert np.allclose(kept._move, [4.0])
+    assert len(build_pool(table, labels, floor=None)) == 2
 
 
 def test_missing_column_refuses(data):
@@ -188,7 +209,7 @@ def test_paired_events_drop_for_every_model():
 
 
 def test_paired_events_refuses_unknown_id():
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="not in the candidate population"):
         paired_events({"A": {"ZZ"}}, _candidates())
 
 
@@ -214,13 +235,41 @@ def test_equivalence_refuses_perturbed_fast_path(pool, monkeypatch):
 
 
 def test_equivalence_refuses_empty_sample(pool):
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="non-empty sample"):
         check_equivalence(pool, [], draws=DRAW)
+
+
+@pytest.mark.parametrize("shift,passes", [(1e-6, False), (1e-12, True)])
+def test_tolerance_pinned_both_sides(pool, monkeypatch, shift, passes):
+    real = pool_mod.put_means
+
+    def shifted(*args, **kwargs):
+        means = real(*args, **kwargs)
+        return None if means is None else means + shift
+
+    monkeypatch.setattr(pool_mod, "put_means", shifted)
+    item = [_item([SINGLE], 2.0)]
+    if passes:
+        assert check_equivalence(pool, item, draws=DRAW)["checked"] == 1
+    else:
+        with pytest.raises(OpsError) as caught:
+            check_equivalence(pool, item, draws=DRAW)
+        assert caught.value.problem.details["reason"] == "fast_path_mismatch"
+
+
+def test_one_sided_none_fast_path_refuses(pool, monkeypatch):
+    # The direct path prices this good item, but the fast path returns None: a mismatch, not a skip.
+    monkeypatch.setattr(pool_mod, "put_means", lambda *args, **kwargs: None)
+    with pytest.raises(OpsError) as caught:
+        check_equivalence(pool, [_item([SINGLE], 2.0)], draws=DRAW)
+    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert caught.value.problem.details["reason"] == "fast_path_mismatch"
 
 
 def test_put_means_retains_nothing(pool):
     means = _means(pool)
     assert means.shape == (len(STRIKES),)
+    assert np.isfinite(means).all()
     assert means.base is None
 
 
