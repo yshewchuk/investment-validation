@@ -58,8 +58,8 @@ def put_means(pool, *, key, event_date, spot, pre_iv30, pred_move, pred_crush, d
     """Mean exit value of a single put at each strike, or ``None`` if unsimulable.
 
     Validation, seed and draw order match ``expected_pnl``, so the same simulated exits price every
-    strike. Allocates the draws vectors and one (draws, strikes) grid transiently; only the (strikes,)
-    means are returned.
+    strike. A non-finite spot, vol or forecast returns None, as in expected_pnl. Allocates the draws
+    vectors and one (draws, strikes) grid transiently; only the (strikes,) means are returned.
     """
     strikes = np.asarray(strikes, dtype=float)
     if strikes.ndim != 1 or not np.all(np.isfinite(strikes)) or np.any(np.diff(strikes) <= 0):
@@ -84,16 +84,26 @@ def put_means(pool, *, key, event_date, spot, pre_iv30, pred_move, pred_crush, d
 
 
 def structure_value(means, strikes, legs):
-    """Value per unit of a structure: sum of side * qty * mean put at each leg's strike."""
+    """Value per unit of a structure: sum of side * qty * mean put at each leg's strike.
+
+    Legs are skipped as ``expected_pnl`` skips them: no strike, a non-finite strike, or zero qty.
+    """
     grid = np.asarray(strikes, dtype=float)
     total = 0.0
     for leg in legs:
+        strike = leg.get("strike")
+        if strike is None or not np.isfinite(float(strike)):
+            continue
         qty = float(leg.get("qty", 0.0))
+        if not np.isfinite(qty):
+            raise fail(_CONFLICT, "a leg quantity is not finite",
+                       details={"reason": "leg_invalid"})
         if qty == 0:
             continue
-        hit = np.flatnonzero(grid == float(leg["strike"]))
+        hit = np.flatnonzero(grid == float(strike))
         if hit.size != 1:
-            raise ValueError("leg strike off the ladder")
+            raise fail(_CONFLICT, "a leg strike is off the ladder",
+                       details={"reason": "leg_off_ladder"})
         # `sell` means the position is LONG that leg and receives its value, as in expected_pnl.
         side = 1.0 if str(leg.get("side", "")).lower() == "sell" else -1.0
         total += side * qty * float(means[hit[0]])
@@ -138,6 +148,8 @@ def paired_events(undetermined, event_dates):
 
 def check_equivalence(pool, sample, *, tolerance=TOLERANCE, draws=DRAWS):
     """Hold the fast path to ``expected_pnl`` on sampled structures; a mismatch refuses the run."""
+    if not (np.isfinite(tolerance) and tolerance > 0):
+        raise ValueError("tolerance must be a positive finite number")
     if not sample:
         raise ValueError("equivalence needs a non-empty sample")
     worst = 0.0
@@ -158,7 +170,7 @@ def check_equivalence(pool, sample, *, tolerance=TOLERANCE, draws=DRAWS):
         ref = None if direct is None else direct["exp_pnl_sim"]
         if fast is None and ref is None:
             continue
-        if fast is None or ref is None or abs(fast - ref) > tolerance:
+        if fast is None or ref is None or not abs(fast - ref) <= tolerance:
             raise fail(_CONFLICT, "the fast path disagrees with expected_pnl",
                        details={"reason": "fast_path_mismatch"})
         compared += 1

@@ -6,6 +6,7 @@ import pandas as pd
 import pytest
 
 from engine.pnl_sim import MIN_POOL, expected_pnl
+from engine.structures import ResolvedLeg
 from engine.v2.ops.errors import OpsError
 from experiments import size_pnl_pool as pool_mod
 from experiments.size_pnl_pool import (build_pool, check_equivalence, event_seed, paired_events,
@@ -187,10 +188,65 @@ def test_structure_value_convention_and_guards():
             {"strike": 105.0, "side": "buy", "qty": 0}]
     assert structure_value(means, STRIKES, legs) == pytest.approx(4.0 - 2.0)
     assert structure_pnl(means, STRIKES, legs, 2.0) == pytest.approx(0.0)
-    with pytest.raises(ValueError, match="off the ladder"):
+    with pytest.raises(OpsError) as caught:
         structure_value(means, STRIKES, [{"strike": 97.0, "side": "sell", "qty": 1}])
+    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert caught.value.problem.details["reason"] == "leg_off_ladder"
     for bad in (0.0, -1.0, np.nan):
         assert structure_pnl(means, STRIKES, legs, bad) is None
+
+
+def test_leg_with_no_strike_is_skipped():
+    means = np.array([1.0, 2.0, 4.0, 8.0])
+    no_strike = SPREAD + [{"strike": None, "side": "buy", "qty": 1}]
+    nan_strike = SPREAD + [{"strike": np.nan, "side": "buy", "qty": 1}]
+    base = structure_value(means, STRIKES, SPREAD)
+    assert structure_value(means, STRIKES, no_strike) == pytest.approx(base)
+    assert structure_value(means, STRIKES, nan_strike) == pytest.approx(base)
+
+
+def test_nan_leg_quantity_refuses():
+    means = np.array([1.0, 2.0, 4.0, 8.0])
+    with pytest.raises(OpsError) as caught:
+        structure_value(means, STRIKES, [{"strike": 100.0, "side": "sell", "qty": np.nan}])
+    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert caught.value.problem.details["reason"] == "leg_invalid"
+
+
+def test_put_means_increase_with_strike(pool):
+    ladder = np.array([90.0, 95.0, 100.0, 105.0, 110.0])
+    means = put_means(pool, key="K", event_date=LATE, spot=100.0, pre_iv30=40.0, pred_move=5.0,
+                      pred_crush=-15.0, dte_exit=9, strikes=ladder, draws=DRAW)
+    assert means.shape == (5,)
+    assert np.all(np.diff(means) > 0)
+
+
+def test_equivalence_refuses_nan_means(pool, monkeypatch):
+    monkeypatch.setattr(pool_mod, "put_means",
+                        lambda *args, **kwargs: np.full(len(STRIKES), np.nan))
+    with pytest.raises(OpsError) as caught:
+        check_equivalence(pool, [_item([SINGLE], 2.0)], draws=DRAW)
+    assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert caught.value.problem.details["reason"] == "fast_path_mismatch"
+
+
+@pytest.mark.parametrize("tolerance", [0.0, np.nan])
+def test_tolerance_must_be_positive_and_finite(pool, tolerance):
+    with pytest.raises(ValueError, match="tolerance must be a positive finite number"):
+        check_equivalence(pool, [_item([SINGLE], 2.0)], tolerance=tolerance, draws=DRAW)
+
+
+def test_resolved_legs_feed_the_check(pool):
+    # A put spread as price_structure resolves it: sell the 100 put, buy the 95 put.
+    expiry = pd.Timestamp("2024-11-10")
+    common = dict(name="put", right="P", expiry=expiry, dte=9, bid=1.0, ask=1.2, price=1.1,
+                  cash_flow=0.0, wide_market=False)
+    resolved = [ResolvedLeg(side="sell", qty=1.0, strike=100.0, **common),
+                ResolvedLeg(side="buy", qty=1.0, strike=95.0, **common)]
+    legs = [{"strike": leg.strike, "side": leg.side, "qty": leg.qty} for leg in resolved]
+    out = check_equivalence(pool, [_item(legs, 1.5)], draws=DRAW)
+    assert out["checked"] == 1
+    assert out["max_abs_diff"] <= 1e-9
 
 
 def test_undetermined_reasons(pool):
