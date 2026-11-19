@@ -244,8 +244,8 @@ def _admit_driver(conn, store, registration, request, plan_ref):
     return plan
 
 
-def run_search(conn, store, repository, registration, request, plan_ref, *, limits, collect_results=True, before_dispatch=None):
-    """Validate claimed inner results before fresh work; never retry; collect_results=False returns None before the final collect."""
+def run_search(conn, store, repository, registration, request, plan_ref, *, limits, collect_results=True, before_dispatch=None, isolate=False):
+    """Validate claimed inner results before fresh work; never retry; collect_results=False returns None before the final collect. isolate=True runs workers=1 as a one-worker spawn pool so the parent never materializes trial inputs; library callers keep the in-process default."""
     workers = validate_workers(request)
     request = {key: value for key, value in request.items() if key != "workers"}
     validate_execution_limits(limits)
@@ -269,7 +269,7 @@ def run_search(conn, store, repository, registration, request, plan_ref, *, limi
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search contains an unfinished or orphan outer claim")
         if read("outer-start:" + key) is not None:
             completed_outer.append((year, candidate_id))
-    parallel = workers > 1 and bool(fresh)
+    parallel = (workers > 1 or isolate) and bool(fresh)
     deadline_seconds = None
     if parallel:
         cpus, conn_path = _parallel_preflight(conn, request, limits, workers)
@@ -438,7 +438,7 @@ def main(argv=None):
             if args.action == "seal":
                 result = seal_search_run(*context, clock=SystemClock())
             elif args.action == "run":
-                result = run_search(*context, limits=limits)
+                result = run_search(*context, limits=limits, isolate=True)
             else:
                 _admit_driver(conn, store, registration, request, reference)
                 result = collect_outer_results(*context)
