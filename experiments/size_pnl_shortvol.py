@@ -95,6 +95,7 @@ def _floor_ok(legs):
 def resolve(chunk, i, name, pred, c=1.0):
     """(legs, reason) for event ``i``: every leg as a dict (traded and reference), or (None, reason)."""
     params = _width_params(name, pred, c)
+    pinned(name)
     if params is None:
         return None, "width_declined"
     spec = STRUCTURES[name](**params)

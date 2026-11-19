@@ -195,6 +195,20 @@ def test_out_of_range_forecast_declines():
         assert sv.resolve(chunk, 0, "TWIN-P", pred) == (None, "width_declined")
 
 
+def test_resolve_refuses_a_call_leg_factory(monkeypatch):
+    # Same call-leg fixture as test_pinned_refuses_any_call_leg, on the short anchor leg; resolve must refuse it too.
+    real = STRUCTURES["BFLY-P"]
+    def call_leg_factory(**kw):
+        spec = real(**kw)
+        legs = list(spec.legs)
+        legs[0] = dataclasses.replace(legs[0], right=CALL)
+        return dataclasses.replace(spec, legs=tuple(legs))
+    monkeypatch.setitem(STRUCTURES, "BFLY-P", call_leg_factory)
+    with pytest.raises(OpsError) as caught:
+        sv.resolve(chunk_of(("A", {})), 0, "BFLY-P", PRED)
+    assert caught.value.problem.details["reason"] == "call_leg_refused"
+
+
 @pytest.mark.parametrize("c", [0.0, -1.0, NAN, math.inf])
 def test_bad_c_refuses(c):
     with pytest.raises(ValueError, match="c must be finite and > 0"):
