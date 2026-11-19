@@ -291,6 +291,13 @@ def test_invalid_duplicate_before_valid_does_not_shadow_it():
     assert chunk["bid_e"][0] == 1.0 and chunk["ask_e"][0] == 1.2
 
 
+def test_invalid_exit_duplicate_before_valid_does_not_shadow_it():
+    exit_rows = [(E1, 0, "P", 90, 1.5, 1.0)] + _exit_rows()  # crossed P90 listed first
+    [(_, chunk)], _ = _run([_event("d2", exit_rows=exit_rows)])
+    assert chunk["exit_rung"][0] == 1
+    assert chunk["bid_x"][0] == 0.8 and chunk["ask_x"][0] == 1.0
+
+
 def test_invalid_put_quotes_do_not_count_toward_skip_gate():
     all_nan = _quotes(E1, 2, (90, 100, 110), (90, 100, 110), np.nan, 1.2)
     [(_, chunk)], _ = _run([_event("g1", entry_rows=all_nan)])

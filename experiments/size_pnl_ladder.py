@@ -88,6 +88,10 @@ def _contracts(rows, *, entry):
         valid = out["bid"].notna() & out["ask"].notna() & (out["bid"] <= out["ask"]) & (out["ask"] > 0) & (out["bid"] >= 0)
         out = out.assign(bid=out["bid"].where(valid), ask=out["ask"].where(valid), _rank=(~valid).astype(int))
         out = out.sort_values(["right", "strike", "_rank"], kind="mergesort").drop(columns="_rank")
+    else:
+        usable = np.isfinite(out["bid"]) & np.isfinite(out["ask"]) & (out["bid"] >= 0) & (out["ask"] >= out["bid"])
+        out = out.assign(_rank=(~usable).astype(int))
+        out = out.sort_values(["right", "strike", "_rank"], kind="mergesort").drop(columns="_rank")
     return out.drop_duplicates(["right", "strike"], keep="first").sort_values(["right", "strike"])
 
 
