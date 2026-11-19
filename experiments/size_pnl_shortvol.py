@@ -147,7 +147,10 @@ def entry_legs(chunk, legs, fill):
     """(entry cost per share, mean relative spread), or None when a traded leg has no finite entry quote.
 
     Zero-bid and locked entry quotes are priced normally, as ``price_structure`` does. This is
-    deliberately NOT the straddle's stricter entry rule. The spread averages every leg, references too.
+    deliberately NOT the straddle's stricter entry rule. The spread averages every resolved leg, reference legs
+    included, exactly as the board does: `engine.score._mean_relative_spread` iterates `priced.legs`
+    (engine/score.py:2476, 5333), which holds the zero-quantity reference legs too. EXP-133's `build.py` averages
+    only used legs; the design (section 5) pins the board's rule.
     """
     cost, spreads = 0.0, []
     for leg in legs:
