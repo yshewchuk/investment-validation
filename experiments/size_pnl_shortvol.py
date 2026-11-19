@@ -270,6 +270,8 @@ def score(chunk, events, decisions, name, alpha, *, c=1.0, drop_unquoted=False):
     _check_c(c)
     if "structure" not in decisions.columns:
         raise ValueError("decisions must carry a structure column")
+    if "entry_cost" not in decisions.columns:
+        raise ValueError("decisions must carry an entry_cost column")
     pred = dict(zip(events["event_id"].astype(str), events["pred_move"]))
     pos = {str(e): i for i, e in enumerate(chunk["event_id"])}
     mine = decisions[(decisions["status"] == "taken") & (decisions["structure"] == name)]
@@ -285,8 +287,9 @@ def score(chunk, events, decisions, name, alpha, *, c=1.0, drop_unquoted=False):
         if entered is None:
             raise ValueError(f"taken event {eid!r} has an unusable entry quote")
         cost = entered[0]
-        if "entry_cost" in decisions.columns and abs(float(dec["entry_cost"]) - cost) > 1e-9:
-            raise ValueError("decision was priced at a different alpha or c")
+        bound = _num(dec["entry_cost"])
+        if not (math.isfinite(bound) and abs(bound - cost) <= 1e-9):
+            raise ValueError("decision was not priced at this alpha and c")
         if not (math.isfinite(cost) and cost >= MIN_DEBIT):
             raise ValueError(f"taken event {eid!r} has an entry debit below {MIN_DEBIT} a share ({cost!r})")
         traded = [leg for leg in legs if leg["qty"] > 0]

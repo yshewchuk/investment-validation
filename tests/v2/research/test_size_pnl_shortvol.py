@@ -7,6 +7,7 @@ import pandas as pd
 import pytest
 
 from engine.entry_rules import MAX_REL_SPREAD, MCAP_FLOOR
+from engine.fills import FillModel
 from engine.forecast_sizing import FORECAST_SIZED, forecast_params
 from engine.pnl_sim import expected_pnl
 from engine.portfolio import CONTRACT_MULTIPLIER
@@ -59,9 +60,23 @@ def events_for(*eids, pred=PRED, mcap=20e9, date="2024-06-10"):
                          for e in eids])
 
 
-def taken(*eids, name="CND-PS"):
+def taken(chunk, *eids, name="CND-PS", alpha=0.5, c=1.0):
+    """Taken decisions for ``eids``, each carrying the entry cost the module prices at ``alpha`` and ``c``.
+
+    An event absent from the chunk, or with no entry cost, gets NaN, so ``score`` refuses it on its own checks.
+    """
+    pos = {str(e): i for i, e in enumerate(chunk["event_id"])}
+    costs = []
+    for eid in eids:
+        cost = NAN
+        if eid in pos:
+            legs, _ = sv.resolve(chunk, pos[eid], name, PRED, c)
+            entered = None if legs is None else sv.entry_legs(chunk, legs, FillModel(alpha))
+            if entered is not None:
+                cost = entered[0]
+        costs.append(cost)
     return pd.DataFrame({"event_id": list(eids), "status": ["taken"] * len(eids),
-                         "structure": [name] * len(eids)})
+                         "structure": [name] * len(eids), "entry_cost": costs})
 
 
 def _tables(seed=7, n=600):
@@ -143,8 +158,9 @@ def test_pinned_refuses_moved_entry(monkeypatch):
 def test_score_refuses_a_drifted_factory(monkeypatch):
     real = STRUCTURES["CND-PS"]
     monkeypatch.setitem(STRUCTURES, "CND-PS", lambda: dataclasses.replace(real(), exit_offset=2))
+    chunk = chunk_of(("A", {}))
     with pytest.raises(OpsError) as caught:
-        sv.score(chunk_of(("A", {})), events_for("A"), taken(), "CND-PS", 0.5)
+        sv.score(chunk, events_for("A"), taken(chunk), "CND-PS", 0.5)
     assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
     assert caught.value.problem.details["reason"] == "factory_default_mismatch"
 
@@ -288,7 +304,7 @@ def test_debit_of_a_nanodollar_is_not_a_debit(pool):
 def test_score_refuses_a_nanodollar_debit():
     thin = chunk_of(("A", {}), entry=lambda k: (1.0, 2.0 + 2e-9) if k == 94 else (1.0, 2.0))
     with pytest.raises(ValueError, match="entry debit below"):
-        sv.score(thin, events_for("A"), taken("A"), "CND-PS", 0.5)
+        sv.score(thin, events_for("A"), taken(thin, "A"), "CND-PS", 0.5)
 
 
 def test_score_events_refuses_bad_alpha_and_c(pool):
@@ -346,7 +362,7 @@ def test_decide_does_not_mutate_input():
 
 def test_rung1_marks_and_lots():
     chunk = chunk_of(("A", {94: (2.0, 2.0, 1), 106: (2.0, 2.0, 1)}))
-    scored = sv.score(chunk, events_for("A"), taken("A"), "CND-PS", 0.5)
+    scored = sv.score(chunk, events_for("A"), taken(chunk, "A"), "CND-PS", 0.5)
     row = scored.iloc[0]
     assert row["rung"] == "rung1" and row["exit_value"] == pytest.approx(4.0 - 2.0)
     assert row["entry_cost"] == pytest.approx(0.54)
@@ -357,16 +373,16 @@ def test_rung1_marks_and_lots():
 
 def test_rung2_leg_marks_at_zero_alpha_and_rung1_leg_uses_alpha():
     chunk = chunk_of(("A", {94: (1.0, 2.0, 1), 106: (1.0, 2.0, 2)}))
-    rung2 = sv.score(chunk, events_for("A"), taken("A"), "CND-PS", 0.5).iloc[0]
+    rung2 = sv.score(chunk, events_for("A"), taken(chunk, "A"), "CND-PS", 0.5).iloc[0]
     assert rung2["rung"] == "rung2" and rung2["exit_value"] == pytest.approx(1.5 + 1.0 - 2.0)
     # Moving alpha moves only the rung-1 leg (94): it sells at 2.0; the rung-2 leg stays on its bid at 1.0.
-    assert sv.score(chunk, events_for("A"), taken("A"), "CND-PS", 1.0).iloc[0]["exit_value"] == \
+    assert sv.score(chunk, events_for("A"), taken(chunk, "A", alpha=1.0), "CND-PS", 1.0).iloc[0]["exit_value"] == \
         pytest.approx(2.0 + 1.0 - 2.0)
 
 
 def test_rung3_marks_zero_and_drop_unquoted_removes_it():
     chunk = chunk_of(("A", {106: (NAN, NAN, 3)}), ("B", {}))
-    events, decisions = events_for("A", "B"), taken("A", "B")
+    events, decisions = events_for("A", "B"), taken(chunk, "A", "B")
     scored = sv.score(chunk, events, decisions, "CND-PS", 0.5).set_index("event_id")
     assert scored.loc["A", "exit_value"] == 0.0 and scored.loc["A", "rung"] == EXIT_UNQUOTED
     assert scored.loc["B", "rung"] == "rung1"
@@ -376,7 +392,7 @@ def test_rung3_marks_zero_and_drop_unquoted_removes_it():
 
 def test_rung_shares_and_empty():
     chunk = chunk_of(("A", {}), ("B", {106: (NAN, NAN, 3)}))
-    scored = sv.score(chunk, events_for("A", "B"), taken("A", "B"), "CND-PS", 0.5)
+    scored = sv.score(chunk, events_for("A", "B"), taken(chunk, "A", "B"), "CND-PS", 0.5)
     assert sv.rung_shares(scored) == {"rung1": 0.5, EXIT_UNQUOTED: 0.5}
     assert sv.rung_shares(scored.iloc[:0]) == {}
 
@@ -384,18 +400,18 @@ def test_rung_shares_and_empty():
 def test_score_taken_event_absent_from_chunk_raises():
     chunk = chunk_of(("A", {}))
     with pytest.raises(ValueError, match=r"taken event 'Z' is missing from the chunk or events"):
-        sv.score(chunk, events_for("A"), taken("Z"), "CND-PS", 0.5)
+        sv.score(chunk, events_for("A"), taken(chunk, "Z"), "CND-PS", 0.5)
 
 
 def test_score_refuses_invalid_alpha_even_with_nothing_taken():
     chunk = chunk_of(("A", {}))
     with pytest.raises(ValueError, match=r"alpha must lie in \[0, 1\], got 2\.0"):
-        sv.score(chunk, events_for("A"), taken(), "CND-PS", 2.0)
+        sv.score(chunk, events_for("A"), taken(chunk), "CND-PS", 2.0)
 
 
 def test_score_ignores_a_taken_row_for_another_structure():
     chunk, events = chunk_of(("A", {})), events_for("A")
-    assert sv.score(chunk, events, taken("A", name="TWIN-P"), "CND-PS", 0.5).empty
+    assert sv.score(chunk, events, taken(chunk, "A", name="TWIN-P"), "CND-PS", 0.5).empty
 
 
 def test_score_needs_a_structure_column():
@@ -408,7 +424,21 @@ def test_score_needs_a_structure_column():
 def test_score_binds_to_the_pricing_alpha(pool):
     chunk, events = chunk_of(("A", {})), events_for("A")
     priced = run(chunk, events, pool).assign(status="taken")  # priced at alpha 0.5, c 1.0
-    with pytest.raises(ValueError, match="decision was priced at a different alpha or c"):
+    with pytest.raises(ValueError, match="decision was not priced at this alpha and c"):
         sv.score(chunk, events, priced, "CND-PS", 0.25)
     same = sv.score(chunk, events, priced, "CND-PS", 0.5)
     assert len(same) == 1 and same.iloc[0]["entry_cost"] == pytest.approx(priced.iloc[0]["entry_cost"])
+
+
+def test_score_needs_an_entry_cost_column():
+    chunk, events = chunk_of(("A", {})), events_for("A")
+    bare = pd.DataFrame({"event_id": ["A"], "status": ["taken"], "structure": ["CND-PS"]})
+    with pytest.raises(ValueError, match="entry_cost column"):
+        sv.score(chunk, events, bare, "CND-PS", 0.5)
+
+
+def test_score_refuses_a_nan_entry_cost():
+    chunk, events = chunk_of(("A", {})), events_for("A")
+    decisions = taken(chunk, "A").assign(entry_cost=NAN)
+    with pytest.raises(ValueError, match="decision was not priced at this alpha and c"):
+        sv.score(chunk, events, decisions, "CND-PS", 0.5)
