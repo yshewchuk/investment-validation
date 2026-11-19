@@ -274,7 +274,12 @@ def _file_sha256(path):
         if not stat.S_ISREG(st.st_mode) or st.st_size > MAX_DECISIONS_BYTES:
             raise Refusal(_CONFLICT, "decisions artifact must be a regular file of at most MAX_DECISIONS_BYTES",
                           {"reason": "decisions_artifact_invalid"})
-        for block in iter(lambda: handle.read(_HASH_BLOCK), b""):
+        total = 0
+        for block in iter(lambda: handle.read(min(_HASH_BLOCK, MAX_DECISIONS_BYTES + 1 - total)), b""):
+            total += len(block)
+            if total > MAX_DECISIONS_BYTES:
+                raise Refusal(_CONFLICT, "decisions artifact must be a regular file of at most MAX_DECISIONS_BYTES",
+                              {"reason": "decisions_artifact_invalid"})
             digest.update(block)
     return digest.hexdigest()
 
