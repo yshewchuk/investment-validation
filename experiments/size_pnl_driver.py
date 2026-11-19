@@ -257,6 +257,15 @@ def _write_decisions(tmp, frames):
     return digest.hexdigest(), len(frame)
 
 
+def _file_sha256(path):
+    """Streamed sha256 of the file at ``path``."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for block in iter(lambda: handle.read(_HASH_BLOCK), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
 def _outer(src, out, ready, receipts, plan, ids):
     labels = readers.read_labels(src.fetch, src.admitted, start=INNER[0], end=OUTER[0], event_ids=ids)
     dates = pd.to_datetime(plan["event_date"])
@@ -290,7 +299,10 @@ def _outer(src, out, ready, receipts, plan, ids):
         # The receipt refuses a changed replay before the final file is touched.
         tuning.write_receipt(out / "receipts" / "outer.json",
                              {"stage": "outer", "decisions_sha256": sha, "rows": rows, "models": list(ready)})
-        os.replace(tmp, final)
+        if final.exists() and _file_sha256(final) == sha:  # exact replay: keep the existing file untouched
+            tmp.unlink()
+        else:
+            os.replace(tmp, final)
     finally:
         tmp.unlink(missing_ok=True)  # no-op after a successful replace
     return rows

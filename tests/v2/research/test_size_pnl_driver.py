@@ -237,6 +237,19 @@ def test_outer_pool_sees_the_2023_history(tmp_path, stubs, monkeypatch):
     assert any(len(t) == 2 for t in pools)  # the 2025-01 month's pool holds the 2023 and 2024 rows
 
 
+def test_exact_outer_replay_does_not_rewrite_decisions(tmp_path, stubs, monkeypatch):
+    use_chunks(monkeypatch, [("2024Q3", chunk("E2"))])
+    driver.run(sources(), "inner", tmp_path, prereg=OK)
+    use_chunks(monkeypatch, [("2024Q3", chunk("E2")), ("2025Q1", chunk("E3", "E4"))])
+    first = driver.run(sources(fetch_log=stubs), "outer", tmp_path, prereg=OK)
+    before = (tmp_path / "decisions.parquet").stat()
+    second = driver.run(sources(fetch_log=stubs), "outer", tmp_path, prereg=OK)
+    after = (tmp_path / "decisions.parquet").stat()
+    assert second == first
+    assert (after.st_ino, after.st_mtime_ns) == (before.st_ino, before.st_mtime_ns)
+    assert not list(tmp_path.glob("*.tmp"))
+
+
 def test_changed_outer_receipt_leaves_decisions_untouched_and_no_tmp(tmp_path, stubs, monkeypatch):
     use_chunks(monkeypatch, [("2024Q3", chunk("E2"))])
     driver.run(sources(), "inner", tmp_path, prereg=OK)
