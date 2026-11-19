@@ -174,7 +174,8 @@ def test_v6_workers_one_and_two_match_candidates_results_and_metrics(case, tmp_p
 
     serial_result, serial_report = execute("serial", 1)
     parallel_result, parallel_report = execute("parallel", 2)
-    assert executor_calls == [2]
+    # Prepublish pool (1 worker) is created before the 2-worker trial pool.
+    assert executor_calls == [1, 2]
 
     # The timing/execution identities differ between serial and worker runs: folds[*].selection_id,
     # folds[*].result_id, and the top-level result_id. They depend on terminal IDs whose records
