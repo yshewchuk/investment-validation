@@ -515,8 +515,8 @@ def test_real_serial_isolated_and_parallel_trials_have_equal_journaled_fit_resul
         parallel_executor_calls = executor_calls[len(serial_executor_calls) + len(isolated_executor_calls):]
 
         assert serial_executor_calls == []
-        assert isolated_executor_calls == [1]
-        assert parallel_executor_calls == [2]
+        assert isolated_executor_calls == [1, 1]
+        assert parallel_executor_calls == [1, 2]
 
         from experiments.magnitude_search_plan import trial_key
         from experiments.magnitude_search_records import read_record

@@ -58,6 +58,7 @@ from experiments.magnitude_search_selection import (
     selection_contract_tie_rule,
     selection_tie_band,
 )
+from experiments.magnitude_search_shards import manifest_id
 from experiments.magnitude_search_winners import rule_winners
 from experiments.size_fit_diagnostics import evidence as diagnostic_evidence
 from experiments.size_fit_diagnostics import keys as diagnostic_keys
@@ -134,6 +135,7 @@ class SearchTrials:
         self.registration, self.plan_ref = registration, plan_ref
         self._memo = {}
         self._published = {}  # cohort -> (manifest, inputs_id) of this instance's successful publication.
+        self.adopt_published = False
         try:
             self.request = json.loads(json.dumps(request, allow_nan=False))
             if self.request != request:
@@ -208,6 +210,9 @@ class SearchTrials:
         """Keep only the latest cohort resident; a revisit of a published cohort reloads its manifest; failures are never memoised."""
         if cohort not in self._memo:
             self._memo.clear()  # at most one cohort resident: release the previous one before loading
+            record = self._read("cohort:" + cohort) if self.adopt_published and cohort not in self._published else None
+            if record is not None:
+                self._published[cohort] = (record, manifest_id(record))
             if cohort in self._published:
                 manifest, inputs_id = self._published[cohort]
                 self._memo[cohort] = load_inputs(self.store, manifest, inputs_id)
@@ -217,6 +222,23 @@ class SearchTrials:
             else:
                 self._memo[cohort] = self._inputs(inner)
         return self._memo[cohort]
+
+    def prepublish(self, trials):
+        """Admit and publish each distinct fresh cohort once, so workers adopt instead of re-admitting."""
+        plan = self._admit()
+        seen = set()
+        for outer_year, inner_year, candidate_id in trials:
+            _, inner, _ = self._trial(plan, outer_year, inner_year, candidate_id)
+            owner_year, _ = canonical_inner(plan, outer_year, inner_year)
+            cohort = cohort_key(plan, owner_year, inner_year)
+            if cohort in seen:
+                continue
+            seen.add(cohort)
+            inputs = self._cohort_inputs(cohort, inner, plan=plan)
+            self._published[cohort] = publish_inputs(self.store, inputs)
+            self._append("cohort:" + cohort, self._published[cohort][0])
+            del inputs  # the next cohort is admitted while this one would otherwise still be resident
+        self._memo.clear()
 
     def _cohort(self, admitted):
         """Load a stored cohort (v2 manifest or v1 whole record) bound to its admitted id."""

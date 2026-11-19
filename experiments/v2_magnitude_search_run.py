@@ -83,7 +83,7 @@ def _terminate_worker(signum, frame):
     raise _WorkerTerminating
 
 
-def _init_trial_worker(conn_path, store_root, run_id, request, plan_ref, memory_bytes):
+def _init_trial_worker(conn_path, store_root, run_id, request, plan_ref, memory_bytes, adopt=False):
     global _PARALLEL, _WORKER_WATCHDOG_STOP, _WORKER_TERMINATING
     _WORKER_WATCHDOG_STOP = None
     _WORKER_TERMINATING = False
@@ -106,7 +106,9 @@ def _init_trial_worker(conn_path, store_root, run_id, request, plan_ref, memory_
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "native registration evidence is invalid") from None
         repository = Repository(conn, store, pin_snapshots=True)
         plan = read_search_plan(conn, store, registration, request, plan_ref)
-        _PARALLEL = (conn, store, SearchTrials(conn, store, repository, registration, request, plan_ref), registration, plan)
+        trials = SearchTrials(conn, store, repository, registration, request, plan_ref)
+        trials.adopt_published = adopt
+        _PARALLEL = (conn, store, trials, registration, plan)
     except (OpsError, DataError) as error:
         _PARALLEL = _worker_problem(error)
     except MemoryError:
@@ -134,8 +136,15 @@ def _worker_problem(error):
     return {"worker_problem": to_document(error.problem), "worker_error_type": kind}
 
 
-def _parallel_trial_task(task):
-    args, cpu_id, limits = task
+def _raise_receipt(receipt):
+    if (isinstance(receipt, dict) and set(receipt) == {"worker_problem", "worker_error_type"}
+            and receipt["worker_error_type"] in ("ops", "data")):
+        problem = from_document(Problem, receipt["worker_problem"])
+        raise DataError(problem) if receipt["worker_error_type"] == "data" else OpsError(problem)
+    raise fail("RESOURCE_UNAVAILABLE", "search worker returned an invalid result")
+
+
+def _guarded(cpu_id, work):
     try:
         if (isinstance(_PARALLEL, dict)
                 and set(_PARALLEL) == {"worker_problem", "worker_error_type"}):
@@ -144,11 +153,7 @@ def _parallel_trial_task(task):
             os.sched_setaffinity(0, {cpu_id})
         except (OSError, ValueError):
             return _worker_problem(fail("RESOURCE_UNAVAILABLE", "search worker affinity unavailable"))
-        conn, store, trials, registration, plan = _PARALLEL
-        key = trial_key(plan, *args)
-        _complete_trial(
-            trials, trials._execute_borrowed, args, key, limits=limits,
-            read=lambda slot: read_record(conn, store, registration.run_id, slot))
+        work()
         return None
     except _WorkerTerminating:
         os._exit(128 + signal.SIGTERM)
@@ -159,6 +164,25 @@ def _parallel_trial_task(task):
         return _worker_problem(fail("RESOURCE_LIMIT_EXCEEDED", "search worker memory exhausted"))
     except (OSError, sqlite3.Error):
         return _worker_problem(fail("RESOURCE_UNAVAILABLE", "search worker storage unavailable"))
+
+
+def _parallel_trial_task(task):
+    args, cpu_id, limits = task
+
+    def work():
+        conn, store, trials, registration, plan = _PARALLEL
+        key = trial_key(plan, *args)
+        _complete_trial(
+            trials, trials._execute_borrowed, args, key, limits=limits,
+            read=lambda slot: read_record(conn, store, registration.run_id, slot))
+        if panel_memo_holder():
+            release_parent_caches("worker trial")
+    return _guarded(cpu_id, work)
+
+
+def _prepublish_task(task):
+    args_list, cpu_id = task
+    return _guarded(cpu_id, lambda: _PARALLEL[2].prepublish(args_list))
 
 
 def _parallel_preflight(conn, request, limits, workers):
@@ -298,6 +322,8 @@ def _run_search(conn, store, repository, registration, request, plan_ref, *, lim
     deadline_seconds = None
     if parallel:
         cpus, conn_path = _parallel_preflight(conn, request, limits, workers)
+        if limits != request["limits"]["child"]:
+            raise fail("INVALID_EXPERIMENT_SPEC", "v2 trial limits differ from sealed request")
         forbid_fitting("run_search")
         forbid_legacy_fitting("run_search")
         deadline_seconds = remaining(conn, store, registration, plan)
@@ -320,11 +346,29 @@ def _run_search(conn, store, repository, registration, request, plan_ref, *, lim
             _complete_trial(trials, trials.execute, args, key, limits=limits, read=read)
             meter.tick()
     else:
+        with stage("search prepublish"):
+            pool = ProcessPoolExecutor(
+                max_workers=1, mp_context=get_context("spawn"), initializer=_init_trial_worker,
+                initargs=(conn_path, str(store.root), registration.run_id, request, plan_ref,
+                          request["limits"]["parent"]["memory_bytes"]))
+            try:
+                receipt = pool.submit(_prepublish_task, ([args for args, _ in fresh], cpus[0])).result()
+                if receipt is not None:
+                    _raise_receipt(receipt)
+            except BrokenProcessPool:
+                _abort_executor(pool)
+                raise fail("RESOURCE_UNAVAILABLE", "search worker process exited unexpectedly") from None
+            except BaseException:
+                _abort_executor(pool)
+                raise
+            else:
+                pool.shutdown()
+        log_memory("after prepublish", panel_memo=panel_memo_holder(), trials_memo=getattr(trials, "_memo", None))
         executor = ProcessPoolExecutor(
             max_workers=workers,
             mp_context=get_context("spawn"),
             initializer=_init_trial_worker,
-            initargs=(conn_path, str(store.root), registration.run_id, request, plan_ref, limits["memory_bytes"]),
+            initargs=(conn_path, str(store.root), registration.run_id, request, plan_ref, limits["memory_bytes"], True),
         )
         with stage("search fresh trials"):
             parallel_meter = Progress("search fresh trials", len(fresh))
@@ -334,12 +378,7 @@ def _run_search(conn, store, repository, registration, request, plan_ref, *, lim
                              for index in range(min(workers, len(fresh) - offset))]
                     for receipt in executor.map(_parallel_trial_task, batch):
                         if receipt is not None:
-                            if (isinstance(receipt, dict)
-                                    and set(receipt) == {"worker_problem", "worker_error_type"}
-                                    and receipt["worker_error_type"] in ("ops", "data")):
-                                problem = from_document(Problem, receipt["worker_problem"])
-                                raise DataError(problem) if receipt["worker_error_type"] == "data" else OpsError(problem)
-                            raise fail("RESOURCE_UNAVAILABLE", "search worker returned an invalid result")
+                            _raise_receipt(receipt)
                         meter.tick()
                         parallel_meter.tick()
             except BrokenProcessPool:
