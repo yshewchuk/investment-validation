@@ -175,6 +175,8 @@ def _outer_gate(out, ready, scope, body):
     inputs_inner, now = tuning.load_receipt(out / "receipts" / "inputs_inner.json"), json.loads(json.dumps(body))
     if any(inputs_inner.get(k) != now[k] for k in _BOUND):
         raise Refusal(_CONFLICT, "inputs_inner.json was bound to different inputs", {"reason": "inner_inputs_mismatch"})
+    if inner["inputs"] != inputs_inner["content_hash"]:
+        raise Refusal(_CONFLICT, "inner.json was tuned on different inner tables", {"reason": "inner_tables_mismatch"})
     return receipts
 
 
@@ -342,7 +344,7 @@ def run(src, stage, out_dir, *, event_ids=None, prereg=size_pnl_prereg.require_p
             "roster": roster, "models": _strip(bound_tables["bound"]),
             "tables": {mid: e["binding"] for mid, e in tables.items() if e["status"] == "ready"},
             "production": production["binding"], "scope": scope}
-    tuning.write_receipt(out / "receipts" / f"inputs_{stage}.json", body)
+    inputs_receipt = tuning.write_receipt(out / "receipts" / f"inputs_{stage}.json", body)
     if not ready:
         raise Refusal(_CONFLICT, "no model is ready to be tuned or scored", {"reason": "no_ready_models"})
     receipts = _outer_gate(out, ready, scope, body) if stage == "outer" else {}
@@ -353,7 +355,7 @@ def run(src, stage, out_dir, *, event_ids=None, prereg=size_pnl_prereg.require_p
         hashes, rows = _inner(src, out, ready, plan, ids)
         tuning.write_receipt(out / "receipts" / "inner.json",
                              {"stage": "inner", "models": hashes, "events": rows, "excluded": excluded,
-                              "scope": scope})
+                              "scope": scope, "inputs": inputs_receipt["content_hash"]})
     else:
         rows = _outer(src, out, ready, receipts, plan, ids)
     _log(f"stage={stage} end elapsed={time.monotonic() - started:.1f}s rss={_rss_mb():.0f}MB")

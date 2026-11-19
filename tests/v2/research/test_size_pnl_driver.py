@@ -2,6 +2,7 @@
 import dataclasses
 import importlib.util
 import json
+import shutil
 import sys
 import types
 from pathlib import Path
@@ -394,6 +395,23 @@ def test_outer_refuses_when_inputs_inner_names_another_production(tmp_path, stub
         driver.run(sources(), "outer", tmp_path / "inner", prereg=OK)
     assert caught.value.code == CONFLICT
     assert caught.value.details["reason"] == "inner_inputs_mismatch"
+
+
+def test_outer_refuses_when_inner_json_names_other_inner_tables(tmp_path, stubs, monkeypatch):
+    use_chunks(monkeypatch, [("2024Q3", chunk("E2"))])
+    driver.run(sources(), "inner", tmp_path / "inner", prereg=OK)
+    copy = tmp_path / "copy"
+    shutil.copytree(tmp_path / "inner", copy)
+    inner = tuning.load_receipt(copy / "receipts" / "inner.json")
+    tampered = {k: v for k, v in inner.items() if k != "content_hash"}
+    tampered["inputs"] = "0" * 64
+    (copy / "receipts" / "inner.json").unlink()
+    tuning.write_receipt(copy / "receipts" / "inner.json", tampered)
+    use_chunks(monkeypatch, [("2024Q3", chunk("E2"))])
+    with pytest.raises(Refusal) as caught:
+        driver.run(sources(), "outer", copy, prereg=OK)
+    assert caught.value.code == CONFLICT
+    assert caught.value.details["reason"] == "inner_tables_mismatch"
 
 
 def test_outer_refuses_an_inner_receipt_tuned_on_smoke_ids(tmp_path, stubs, monkeypatch):
