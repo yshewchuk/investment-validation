@@ -245,7 +245,7 @@ def _admit_driver(conn, store, registration, request, plan_ref):
 
 
 def run_search(conn, store, repository, registration, request, plan_ref, *, limits, collect_results=True, before_dispatch=None, isolate=False):
-    """Validate claimed inner results before fresh work; never retry; collect_results=False returns None before the final collect. isolate=True runs workers=1 as a one-worker spawn pool so the parent never materializes trial inputs; library callers keep the in-process default."""
+    """Validate claimed inner results before fresh work; never retry; collect_results=False returns None before the final collect. isolate=True sends fresh trials through the spawn pool even for workers=1 (requires a v2+ request with limits); library callers keep the in-process default."""
     workers = validate_workers(request)
     request = {key: value for key, value in request.items() if key != "workers"}
     validate_execution_limits(limits)
@@ -438,7 +438,7 @@ def main(argv=None):
             if args.action == "seal":
                 result = seal_search_run(*context, clock=SystemClock())
             elif args.action == "run":
-                result = run_search(*context, limits=limits, isolate=True)
+                result = run_search(*context, limits=limits)
             else:
                 _admit_driver(conn, store, registration, request, reference)
                 result = collect_outer_results(*context)
