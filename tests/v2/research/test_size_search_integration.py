@@ -443,7 +443,7 @@ def test_comparator_refuses_unknown_selection_ties_before_any_journal_write(case
     assert case.conn.execute("SELECT COUNT(*) FROM magnitude_search_records").fetchone()[0] == before
 
 
-def test_real_serial_and_parallel_trials_have_equal_journaled_fit_results(tmp_path, monkeypatch):
+def test_real_serial_isolated_and_parallel_trials_have_equal_journaled_fit_results(tmp_path, monkeypatch):
     def build(root, workers):
         root.mkdir()
         generator = panel_data.__wrapped__(root, SimpleNamespace(param={"values": [4.0] * 7}))
@@ -488,6 +488,7 @@ def test_real_serial_and_parallel_trials_have_equal_journaled_fit_results(tmp_pa
         return context, sealed["plan"], generator, data
 
     serial, serial_plan, serial_generator, serial_data = build(tmp_path / "serial", 1)
+    isolated, isolated_plan, isolated_generator, isolated_data = build(tmp_path / "isolated", 1)
     parallel, parallel_plan, parallel_generator, parallel_data = build(tmp_path / "parallel", 2)
     try:
         # The closed production v2 grid has 33 candidates; one fold and horizon keep it bounded.
@@ -508,10 +509,13 @@ def test_real_serial_and_parallel_trials_have_equal_journaled_fit_results(tmp_pa
 
         run_search(*serial, limits=serial[4]["limits"]["child"])
         serial_executor_calls = list(executor_calls)
+        run_search(*isolated, limits=isolated[4]["limits"]["child"], isolate=True)
+        isolated_executor_calls = executor_calls[len(serial_executor_calls):]
         run_search(*parallel, limits=parallel[4]["limits"]["child"])
-        parallel_executor_calls = executor_calls[len(serial_executor_calls):]
+        parallel_executor_calls = executor_calls[len(serial_executor_calls) + len(isolated_executor_calls):]
 
         assert serial_executor_calls == []
+        assert isolated_executor_calls == [1]
         assert parallel_executor_calls == [2]
 
         from experiments.magnitude_search_plan import trial_key
@@ -559,10 +563,12 @@ def test_real_serial_and_parallel_trials_have_equal_journaled_fit_results(tmp_pa
             return rows, selected
 
         assert journaled(serial, serial_plan) == journaled(parallel, parallel_plan)
+        assert journaled(isolated, isolated_plan) == journaled(serial, serial_plan)
     finally:
         serial_data.conn.close()
+        isolated_data.conn.close()
         parallel_data.conn.close()
-        for generator in (serial_generator, parallel_generator):
+        for generator in (serial_generator, isolated_generator, parallel_generator):
             try:
                 next(generator)
             except StopIteration:

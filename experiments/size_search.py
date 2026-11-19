@@ -92,7 +92,7 @@ def _run(context, *, collector=None, read_only=False):
             positive = [value for value in (previous, seconds) if value > 0]
             signal.alarm(min(positive) if positive else 0)
         run_search(*context, limits=request["limits"]["child"], collect_results=False,
-                   before_dispatch=before_dispatch)
+                   before_dispatch=before_dispatch, isolate=True)
     return (collect if collector is None else collector)(*context)
 
 
