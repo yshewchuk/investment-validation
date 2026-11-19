@@ -120,7 +120,9 @@ def resolve(chunk, i, name, pred, c=1.0):
         hit = puts[np.isclose(chunk["strike"][puts], resolved[leg.name])]
         if hit.size == 0:
             return None, "structure_unresolved"
-        legs.append({"name": leg.name, "strike": float(resolved[leg.name]), "side": leg.side,
+        # The LISTED strike, not the arithmetic one: a mirrored leg can be 93.99999999999999 for a listed 94.0,
+        # and structure_value needs exact grid equality.
+        legs.append({"name": leg.name, "strike": float(chunk["strike"][hit[0]]), "side": leg.side,
                      "qty": float(leg.qty), "idx": int(hit[0])})
     if not _floor_ok(legs):
         return None, "negative_floor"

@@ -256,6 +256,22 @@ def test_unflipped_condor_has_a_floor():
     assert sorted(leg["strike"] for leg in legs if leg["qty"] > 0) == [94.0, 97.0, 103.0, 106.0]
 
 
+def test_mirrored_leg_takes_the_listed_strike_and_scores(pool):
+    # BFLY-P's anchor is the listed 100.1 (bracket below spot 100.5) and its wings sit at +/-6.1 about it, so the
+    # upper wing is the listed 106.2 and the mirror is 2*100.1 - 106.2 = 93.99999999999999 in float, not 94.0.
+    spot = 100.5
+    pred = 100.0 * 6.1 / spot  # BFLY-P's width is pred/100 (outer 1.0), so width * spot = 6.1
+    strikes = sorted({float(k) for k in range(80, 121)} | {100.1, 106.2})
+    chunk = lad._pack([rec("A", spot, put_legs(strikes=strikes))], {})
+    legs, reason = sv.resolve(chunk, 0, "BFLY-P", pred)
+    assert reason is None
+    listed = set(chunk["strike"].tolist())
+    assert {leg["strike"] for leg in legs} <= listed
+    assert {leg["strike"] for leg in legs} == {94.0, 100.1, 106.2}
+    out = run(chunk, events_for("A", pred=pred), pool, name="BFLY-P").iloc[0]
+    assert out["status"] == "scored" and math.isfinite(out["exp_pnl_sim"])
+
+
 # ---- simulate and the S4 equivalence --------------------------------------
 
 def test_simulate_then_score_equals_expected_pnl(pool):
