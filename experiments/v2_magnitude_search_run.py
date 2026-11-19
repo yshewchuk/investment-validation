@@ -1,5 +1,7 @@
 """Explicitly seal, run or read-only collect a registered magnitude search."""
 import argparse
+import ctypes
+import gc
 import io
 import json
 import os
@@ -245,6 +247,27 @@ def _admit_driver(conn, store, registration, request, plan_ref):
     return plan
 
 
+def release_parent_caches(label, *trials):
+    """Drop the parent's re-derivable inputs: the shared panel memo and each SearchTrials._memo (never _published), then gc and malloc_trim. A failure logs and continues; MemoryError propagates."""
+    try:
+        panel = panel_memo_holder()
+        if panel is not None:
+            panel.clear()
+        for item in trials:
+            memo = getattr(item, "_memo", None)
+            if isinstance(memo, dict):
+                memo.clear()
+        gc.collect()
+        try:
+            ctypes.CDLL("libc.so.6").malloc_trim(0)
+        except (OSError, AttributeError):
+            decision("search release", f"{label}: malloc_trim unavailable")
+    except MemoryError:
+        raise
+    except Exception as error:
+        decision("search release", f"{label}: release failed ({type(error).__name__}); continuing")
+
+
 def run_search(conn, store, repository, registration, request, plan_ref, *, limits, collect_results=True, before_dispatch=None, isolate=False):
     """Validate claimed inner results before fresh work; never retry; collect_results=False returns None before the final collect. isolate=True sends fresh trials through the spawn pool even for workers=1 (requires a v2+ request with limits); library callers keep the in-process default."""
     workers = validate_workers(request)
@@ -290,6 +313,7 @@ def run_search(conn, store, repository, registration, request, plan_ref, *, limi
     for year, candidate_id in completed_outer:
         execute_outer_fold(conn, store, repository, registration, request, plan_ref, year,
                            limits=limits, candidate_id=candidate_id)
+    release_parent_caches("before pool", trials)
     log_memory("after claim replays", panel_memo=panel_memo_holder(), trials_memo=getattr(trials, "_memo", None))
     if not parallel:
         for args, key in fresh:
@@ -327,6 +351,7 @@ def run_search(conn, store, repository, registration, request, plan_ref, *, limi
             else:
                 executor.shutdown()
     log_memory("after fresh trials", panel_memo=panel_memo_holder(), trials_memo=getattr(trials, "_memo", None))
+    release_parent_caches("before freeze", trials)
     selected = trials.freeze()
     log_memory("after freeze", panel_memo=panel_memo_holder(), trials_memo=getattr(trials, "_memo", None))
     completed = set(completed_outer)
@@ -357,9 +382,11 @@ def run_search(conn, store, repository, registration, request, plan_ref, *, limi
                 if (item["outer_year"], unit) not in completed:
                     execute_outer_fold(conn, store, repository, registration, request, plan_ref,
                                        item["outer_year"], limits=limits, candidate_id=unit)
+    release_parent_caches("after refits", trials)
     log_memory("after refits", panel_memo=panel_memo_holder(), trials_memo=getattr(trials, "_memo", None))
     if not collect_results:
         return None
+    release_parent_caches("before collect", trials)
     return collect_outer_results(conn, store, repository, registration, request, plan_ref)
 
 
