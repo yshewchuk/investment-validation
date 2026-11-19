@@ -4,10 +4,12 @@ Planning reads only the registration-pinned snapshot's planned bounds keys and
 publishes or verifies canonical plan bytes; it writes no ledger, outcome or
 catalog reservation.
 """
+import copy
 import itertools
 import json
 import math
 from collections import Counter
+from contextlib import contextmanager
 from datetime import date
 from pathlib import Path
 
@@ -414,6 +416,57 @@ def _prepare(conn, store, registration, request, *, plan_schema=None):
     return json.loads(canonical_json({**identity, "plan_id": content_hash(identity)}))
 
 
+_PLAN_MEMO = None
+
+
+@contextmanager
+def plan_memo():
+    """Share plan rebuilds and ref comparisons across reads in one run; off outside this context.
+
+    Nested use reuses the outer dict, and only the outermost exit clears it.
+    """
+    global _PLAN_MEMO
+    outer = _PLAN_MEMO
+    if outer is None:
+        _PLAN_MEMO = {}
+    try:
+        yield
+    finally:
+        if outer is None:
+            _PLAN_MEMO = None
+
+
+def _qualified_type(value):
+    return type(value).__module__ + "." + type(value).__qualname__
+
+
+def _exact_key(value):
+    """Hashable key that keeps types apart (1000 vs 1000.0, int vs bool, tuple vs list, dict vs dict subclass)."""
+    if isinstance(value, dict):
+        items = sorted((((_qualified_type(k), repr(k)), _exact_key(v)) for k, v in value.items()),
+                       key=lambda item: item[0])
+        return (_qualified_type(value), tuple(items))
+    if isinstance(value, (list, tuple)):
+        return (_qualified_type(value), tuple(_exact_key(v) for v in value))
+    return (type(value).__name__, repr(value))
+
+
+def memoized_plan(registration, request, plan_schema, build):
+    """Return ``build()``, reusing a plan built earlier in the active memo for the same registration, schema and request."""
+    memo = _PLAN_MEMO
+    if memo is None:
+        return build()
+    try:
+        key = (id(registration), plan_schema, _exact_key(request))
+    except (RecursionError, TypeError, ValueError):
+        return build()
+    if key not in memo:
+        plan = build()
+        memo[key] = (registration, plan)
+    memo["last"] = key
+    return copy.deepcopy(memo[key][1])
+
+
 def seal_search_plan(conn, store, registration, request):
     """Publish immutable planning bytes only; no catalog reservation, attempt or result."""
     plan = _prepare(conn, store, registration, request)
@@ -441,11 +494,19 @@ def read_search_plan(conn, store, registration, request, ref):
     if not isinstance(ref, ArtifactRef) or ref.schema_ref not in schemas:
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search plan reference has the wrong schema")
     qualified = is_qualified_request(parsed_version)
+    memo = _PLAN_MEMO
+    if memo is not None:
+        memo.pop("last", None)
     expected = _prepare(conn, store, registration, request,
                         plan_schema=ref.schema_ref if qualified else None)
-    payload = canonical_json(expected).encode()
-    if ref != artifact_reference(payload, ref.schema_ref):
-        raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search plan reference differs from its complete binding")
+    entry = memo.get("last") if memo is not None else None
+    ref_key = ("ref", entry, canonical_json(to_document(ref))) if entry is not None else None
+    if ref_key is None or ref_key not in memo:
+        payload = canonical_json(expected).encode()
+        if ref != artifact_reference(payload, ref.schema_ref):
+            raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search plan reference differs from its complete binding")
+        if ref_key is not None:
+            memo[ref_key] = True
     try:
         store.read_verified(ref)
     except ArtifactError as error:
