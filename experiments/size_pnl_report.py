@@ -25,6 +25,31 @@ STATUSES = ("taken", "not_taken", "undetermined")
 RUNG_ALWAYS = "exit_unquoted_worst_case"
 
 
+def _require(frame, cols, who):
+    missing = [c for c in cols if c not in frame.columns]
+    if missing:
+        raise ValueError(f"{who}: missing column(s) {missing}")
+
+
+def _flag(series, who, col):
+    if pd.api.types.is_bool_dtype(series):
+        ok = series.notna()
+    else:
+        ok = series.isin([0, 1, True, False])
+    if not ok.all():
+        bad = series[~ok].iloc[0]
+        raise ValueError(f"{who}: column {col!r} must be bool or 0/1, got {bad!r}")
+    return series.astype(bool)
+
+
+def _finite(series, who, col):
+    if not pd.api.types.is_numeric_dtype(series):
+        raise ValueError(f"{who}: column {col!r} must be numeric, got dtype {series.dtype}")
+    bad = ~np.isfinite(series.to_numpy(dtype=float))
+    if bad.any():
+        raise ValueError(f"{who}: column {col!r} has non-finite value {series.iloc[int(np.argmax(bad))]!r}")
+
+
 def _cell(x):
     if x is None or (isinstance(x, (float, np.floating)) and math.isnan(x)):
         return "-"
@@ -54,6 +79,10 @@ def _per_event(total, model_id, n_events):
     if model_id not in n_events:
         raise ValueError(f"no candidate-event count for model {model_id!r}")
     n = n_events[model_id]
+    if (isinstance(n, bool) or not isinstance(n, (int, float, np.integer, np.floating))
+            or not math.isfinite(n) or n < 0 or n != int(n)):
+        raise ValueError(f"_per_event: candidate-event count for model {model_id!r} "
+                         f"must be a non-negative integer, got {n!r}")
     return total / n if n else None
 
 
@@ -74,9 +103,11 @@ def t1_roster(roster):
 
 
 def t2_population(events):
+    _require(events, ["quarter", "in_e"], "t2_population")
+    events = events.assign(in_e=_flag(events["in_e"], "t2_population", "in_e"))
     rows = []
     for quarter, g in events.groupby("quarter"):
-        kept = int(g["in_e"].astype(bool).sum())
+        kept = int(g["in_e"].sum())
         rows.append([quarter, len(g), kept, len(g) - kept])
     if rows:
         rows.append(["total"] + [sum(r[i] for r in rows) for i in (1, 2, 3)])
@@ -85,6 +116,9 @@ def t2_population(events):
 
 
 def t3_forecast(frame, pairs):
+    _require(frame, ["model_id", "pred", "actual"], "t3_forecast")
+    _finite(frame["pred"], "t3_forecast", "pred")
+    _finite(frame["actual"], "t3_forecast", "actual")
     g = frame.assign(above=frame["actual"] > frame["pred"]).groupby("model_id")
     per = pd.DataFrame({"n": g.size(), "mean_forecast": g["pred"].mean(), "share": g["above"].mean()})
     rows = [[m, int(r["n"]), r["mean_forecast"], r["share"]] for m, r in per.iterrows()]
@@ -108,23 +142,28 @@ def t3_forecast(frame, pairs):
 def t4_t5_shortvol(scored, n_events, tuning, *, arm):
     if arm not in ARMS:
         raise ValueError(f"arm must be one of {ARMS}, got {arm!r}")
+    who = "t4_t5_shortvol"
+    _require(scored, ["model_id", "arm", "taken", "pnl_dollars"], who)
     sub = scored[scored["arm"] == arm]
-    taken = sub[sub["taken"].astype(bool)]
+    sub = sub.assign(taken=_flag(sub["taken"], who, "taken"))
+    taken = sub[sub["taken"]]
+    _finite(taken["pnl_dollars"], who, "pnl_dollars")
     rows = []
     # score() returns taken trades only; models with zero scored rows still get a row.
     for m in sorted(set(sub["model_id"]) | set(n_events)):
         pnl = taken[taken["model_id"] == m]["pnl_dollars"]
         total = float(pnl.sum())
+        total_cell = f"{total:.2f}"
         per_event = _per_event(total, m, n_events)
         hit = float((pnl > 0).mean()) if len(pnl) else None
         if arm == "as_is":
-            rows.append([m, 1.0, len(pnl), total, per_event, hit])
+            rows.append([m, 1.0, len(pnl), total_cell, per_event, hit])
             continue
         body = tuning.get(m)
         if body is None:
             raise ValueError(f"no tuning receipt for model {m!r}")
         skip = body["skip_reason"] if body["skipped"] else "-"
-        rows.append([m, body["c"], len(pnl), total, per_event, hit, skip])
+        rows.append([m, body["c"], len(pnl), total_cell, per_event, hit, skip])
     headers = ["model_id", "c", "trades", "total_pnl", "pnl_per_event", "hit_rate"]
     if arm == "retuned":
         headers.append("skip_note")
@@ -135,9 +174,12 @@ def t4_t5_shortvol(scored, n_events, tuning, *, arm):
 
 
 def t6_straddle(scored, decisions, n_events):
+    _require(scored, ["model_id", "rule", "pnl_dollars"], "t6_straddle scored")
+    _require(decisions, ["model_id", "rule", "status"], "t6_straddle decisions")
+    _finite(scored["pnl_dollars"], "t6_straddle", "pnl_dollars")
     bad = set(decisions["status"]) - set(STATUSES)
     if bad:
-        raise ValueError(f"unknown decision status {sorted(bad)}")
+        raise ValueError(f"t6_straddle: unknown decision status {sorted(bad, key=str)} in column 'status'")
     rows = []
     for (m, rule), g in decisions.groupby(["model_id", "rule"]):
         counts = [int((g["status"] == s).sum()) for s in STATUSES]
@@ -181,8 +223,15 @@ def t9_pool_sensitivity(rows):
     table = {}
     for r in rows:
         if r["pool"] not in POOLS:
-            raise ValueError(f"unknown pool {r['pool']!r}")
-        table.setdefault(r["model_id"], {})[r["pool"]] = r["pnl_per_event"]
+            raise ValueError(f"t9_pool_sensitivity: unknown pool {r['pool']!r}")
+        if r["pool"] in table.get(r["model_id"], {}):
+            raise ValueError(f"t9_pool_sensitivity: duplicate (model_id, pool) pair "
+                             f"{(r['model_id'], r['pool'])!r}")
+        v = r["pnl_per_event"]
+        if v is not None and not (isinstance(v, (int, float, np.integer, np.floating))
+                                  and math.isfinite(v)):
+            raise ValueError(f"t9_pool_sensitivity: column 'pnl_per_event' must be finite or None, got {v!r}")
+        table.setdefault(r["model_id"], {})[r["pool"]] = v
     out = []
     for m in sorted(table):
         common = table[m].get("common_2023")

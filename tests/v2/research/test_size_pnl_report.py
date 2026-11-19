@@ -97,7 +97,7 @@ def _scored(arm):
 def test_t4_per_event_counts_non_trade_as_zero():
     out = t4_t5_shortvol(_scored("as_is"), {"m1": 4}, {}, arm="as_is")
     assert out.startswith("### T4")
-    assert "| m1 | 1 | 2 | 6 | 1.5 | 0.5 |" in out
+    assert "| m1 | 1 | 2 | 6.00 | 1.5 | 0.5 |" in out
     assert "skip_note" not in out
 
 
@@ -105,7 +105,7 @@ def test_t5_retuned_shows_c_and_skip_note():
     tuning = {"m1": {"c": 1.25, "skipped": True, "skip_reason": "fewer_than_300_inner_trades"}}
     out = t4_t5_shortvol(_scored("retuned"), {"m1": 4}, tuning, arm="retuned")
     assert out.startswith("### T5")
-    assert "| m1 | 1.25 | 2 | 6 | 1.5 | 0.5 | fewer_than_300_inner_trades |" in out
+    assert "| m1 | 1.25 | 2 | 6.00 | 1.5 | 0.5 | fewer_than_300_inner_trades |" in out
 
 
 def test_t4_refusals():
@@ -126,9 +126,9 @@ def test_t4_t5_model_with_no_scored_rows_gets_row():
         "B": {"c": 1.0, "skipped": True, "skip_reason": "fewer_than_300_inner_trades"},
     }
     out = t4_t5_shortvol(scored, n_events, tuning, arm="retuned")
-    assert "| B | 1 | 0 | 0 | 0 | - | fewer_than_300_inner_trades |" in out
+    assert "| B | 1 | 0 | 0.00 | 0 | - | fewer_than_300_inner_trades |" in out
     out_as_is = t4_t5_shortvol(scored, n_events, tuning, arm="as_is")
-    assert "| B | 1 | 0 | 0 | 0 | - |" in out_as_is
+    assert "| B | 1 | 0 | 0.00 | 0 | - |" in out_as_is
     with pytest.raises(ValueError, match="tuning receipt"):
         t4_t5_shortvol(scored, n_events, {"A": tuning["A"]}, arm="retuned")
 
@@ -176,6 +176,42 @@ def test_t10_known_categories_and_note():
     assert "| H2 | -1 | reversed |" in out
     assert "75%" in out and "60%" in out
     assert "judgement calls" in out
+
+
+def test_input_refusals():
+    with pytest.raises(ValueError, match="missing.*pnl_dollars"):
+        t4_t5_shortvol(_scored("as_is").drop(columns=["pnl_dollars"]), {"m1": 4}, {}, arm="as_is")
+    bad = _scored("as_is")
+    bad["taken"] = ["True", "False", "True"]
+    with pytest.raises(ValueError, match="taken"):
+        t4_t5_shortvol(bad, {"m1": 4}, {}, arm="as_is")
+    with pytest.raises(ValueError, match="in_e"):
+        t2_population(pd.DataFrame({"quarter": ["2024Q1"], "in_e": [np.nan]}))
+    nan_taken = _scored("as_is")
+    nan_taken.loc[2, "pnl_dollars"] = np.nan  # row 2 is taken
+    with pytest.raises(ValueError, match="pnl_dollars"):
+        t4_t5_shortvol(nan_taken, {"m1": 4}, {}, arm="as_is")
+    # Row 1 is untaken with NaN pnl (in _scored) and must be ignored.
+    assert "| m1 | 1 | 2 | 6.00 |" in t4_t5_shortvol(_scored("as_is"), {"m1": 4}, {}, arm="as_is")
+    with pytest.raises(ValueError, match="_per_event"):
+        t4_t5_shortvol(_scored("as_is"), {"m1": -4}, {}, arm="as_is")
+
+
+def test_cents_and_t3_t6_t9_refusals():
+    cents = pd.DataFrame({"model_id": ["m1"] * 2, "structure": ["s"] * 2, "arm": ["as_is"] * 2,
+                          "taken": [True, True], "pnl_dollars": [12000.5, 345.17]})
+    assert "| m1 | 1 | 2 | 12345.67 |" in t4_t5_shortvol(cents, {"m1": 2}, {}, arm="as_is")
+    row = {"model_id": "m1", "pool": "common_2023", "pnl_per_event": 2.0}
+    with pytest.raises(ValueError, match="duplicate"):
+        t9_pool_sensitivity([row, dict(row)])
+    with pytest.raises(ValueError, match="unknown pool"):
+        t9_pool_sensitivity([{**row, "pool": "bogus"}])
+    scored = pd.DataFrame({"model_id": ["m1"], "rule": ["R_L"], "pnl_dollars": [1.0]})
+    decisions = pd.DataFrame({"model_id": ["m1"], "rule": ["R_L"], "status": ["maybe"]})
+    with pytest.raises(ValueError, match="unknown decision status"):
+        t6_straddle(scored, decisions, {"m1": 4})
+    with pytest.raises(ValueError, match="pred"):
+        t3_forecast(pd.DataFrame({"model_id": ["m1"], "pred": [np.nan], "actual": [0.5]}), [])
 
 
 def test_build_report_joins_sections():
