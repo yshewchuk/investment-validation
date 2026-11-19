@@ -149,7 +149,7 @@ def read_labels(fetch, admitted, *, start=None, end=None, event_ids=None):
     out = coerced.copy()
     out["event_date"] = _dates(admitted).reindex(out.index)
     keep = out[list(LABEL_COLUMNS)].notna().all(axis=1)
-    print(f"[pnl_readers] labels requested={len(ids)} label_missing={int((~keep).sum())}", file=sys.stderr)
+    print(f"[pnl_readers] labels requested={len(ids)} label_missing={len(ids) - int(keep.sum())}", file=sys.stderr)
     return out[keep]
 
 

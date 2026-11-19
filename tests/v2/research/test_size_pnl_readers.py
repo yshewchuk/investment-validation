@@ -182,7 +182,15 @@ def test_nan_and_none_labels_dropped_as_missing_with_float_columns(capsys):
     assert "label_missing=2" in capsys.readouterr().err
 
 
-PROD_ADM = _admitted([("p0", "2018-06-01"), ("p1", "2023-02-01"), ("p2", "2023-06-01"), ("p3", "2024-01-10")])
+def test_label_missing_counts_unreturned_ids_and_null_labels(capsys):
+    table = {"a1": TABLE["a1"], "a2": {**TABLE["a2"], "abs_move": np.nan}}
+    fetch, _ = _spy(table)
+    out = rd.read_labels(fetch, ADM, event_ids=["a1", "a2", "a3"])
+    assert list(out.index) == ["a1"]
+    assert "requested=3 label_missing=2" in capsys.readouterr().err
+
+
+PROD_ADM =_admitted([("p0", "2018-06-01"), ("p1", "2023-02-01"), ("p2", "2023-06-01"), ("p3", "2024-01-10")])
 PROD_TABLE = {"p0": _row(0), "p1": {**_row(1), "pred_abs_move": 0.6, "horizon_sessions": 1},
               "p2": {**_row(2), "pred_abs_move": 0.7, "pred_iv_crush_30": -2.0},
               "p3": {**_row(3), "pred_abs_move": 0.8}}
