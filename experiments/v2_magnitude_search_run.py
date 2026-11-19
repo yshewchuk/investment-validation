@@ -37,7 +37,7 @@ from engine.v2.ops.migrations import require_current
 from engine.v2.research.progress import Progress, decision, stage
 from experiments.magnitude_search_execution import validate_execution_limits
 from experiments.magnitude_search_outer import collect_outer_results, execute_outer_fold
-from experiments.magnitude_search_plan import read_search_plan, trial_key
+from experiments.magnitude_search_plan import plan_memo, read_search_plan, trial_key
 from experiments.magnitude_search_records import MIGRATIONS, OWNER, append_record, read_record
 from experiments.magnitude_search_refits import per_candidate, possible_slots, refit_units
 from experiments.magnitude_search_request import validate_workers
@@ -245,8 +245,8 @@ def _admit_driver(conn, store, registration, request, plan_ref):
     return plan
 
 
-def run_search(conn, store, repository, registration, request, plan_ref, *, limits, collect_results=True, before_dispatch=None, isolate=False):
-    """Validate claimed inner results before fresh work; never retry; collect_results=False returns None before the final collect. isolate=True sends fresh trials through the spawn pool even for workers=1 (requires a v2+ request with limits); library callers keep the in-process default."""
+def _run_search(conn, store, repository, registration, request, plan_ref, *, limits, collect_results=True, before_dispatch=None, isolate=False):
+    """Body of run_search; the public wrapper installs the plan memo."""
     workers = validate_workers(request)
     request = {key: value for key, value in request.items() if key != "workers"}
     validate_execution_limits(limits)
@@ -343,7 +343,7 @@ def run_search(conn, store, repository, registration, request, plan_ref, *, limi
         with stage("search refits"):
             for year, unit in fresh_units:
                 outcome = execute_outer_fold(conn, store, repository, registration, request, plan_ref,
-                                             year, limits=limits, candidate_id=unit)
+                                             year, limits=limits, candidate_id=unit, frozen=selected)
                 refit_meter.tick()
                 if isinstance(outcome, dict) and outcome.get("status") == "failed":
                     decision("search refit failed", f"{unit} year={year}")
@@ -356,11 +356,18 @@ def run_search(conn, store, repository, registration, request, plan_ref, *, limi
             for unit in units:
                 if (item["outer_year"], unit) not in completed:
                     execute_outer_fold(conn, store, repository, registration, request, plan_ref,
-                                       item["outer_year"], limits=limits, candidate_id=unit)
+                                       item["outer_year"], limits=limits, candidate_id=unit, frozen=selected)
     log_memory("after refits", panel_memo=panel_memo_holder(), trials_memo=getattr(trials, "_memo", None))
     if not collect_results:
         return None
     return collect_outer_results(conn, store, repository, registration, request, plan_ref)
+
+
+def run_search(conn, store, repository, registration, request, plan_ref, *, limits, collect_results=True, before_dispatch=None, isolate=False):
+    """Validate claimed inner results before fresh work; never retry; collect_results=False returns None before the final collect. isolate=True sends fresh trials through the spawn pool even for workers=1 (requires a v2+ request with limits); library callers keep the in-process default."""
+    with plan_memo():
+        return _run_search(conn, store, repository, registration, request, plan_ref, limits=limits,
+                           collect_results=collect_results, before_dispatch=before_dispatch, isolate=isolate)
 
 
 def _read_document(path):

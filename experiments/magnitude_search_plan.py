@@ -8,6 +8,7 @@ import itertools
 import json
 import math
 from collections import Counter
+from contextlib import contextmanager
 from datetime import date
 from pathlib import Path
 
@@ -414,6 +415,37 @@ def _prepare(conn, store, registration, request, *, plan_schema=None):
     return json.loads(canonical_json({**identity, "plan_id": content_hash(identity)}))
 
 
+_PLAN_MEMO = None
+
+
+@contextmanager
+def plan_memo():
+    """Share plan rebuilds and ref comparisons across reads in one run; off outside this context.
+
+    Nested use reuses the outer dict, and only the outermost exit clears it.
+    """
+    global _PLAN_MEMO
+    outer = _PLAN_MEMO
+    if outer is None:
+        _PLAN_MEMO = {}
+    try:
+        yield
+    finally:
+        if outer is None:
+            _PLAN_MEMO = None
+
+
+def memoized_plan(registration, request, plan_schema, build):
+    """Return ``build()``, reusing a plan built earlier in the active memo for the same registration, schema and request."""
+    memo = _PLAN_MEMO
+    if memo is None:
+        return build()
+    key = (id(registration), plan_schema, content_hash(request))
+    if key not in memo:
+        memo[key] = (registration, build())
+    return memo[key][1]
+
+
 def seal_search_plan(conn, store, registration, request):
     """Publish immutable planning bytes only; no catalog reservation, attempt or result."""
     plan = _prepare(conn, store, registration, request)
@@ -443,9 +475,14 @@ def read_search_plan(conn, store, registration, request, ref):
     qualified = is_qualified_request(parsed_version)
     expected = _prepare(conn, store, registration, request,
                         plan_schema=ref.schema_ref if qualified else None)
-    payload = canonical_json(expected).encode()
-    if ref != artifact_reference(payload, ref.schema_ref):
-        raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search plan reference differs from its complete binding")
+    memo = _PLAN_MEMO
+    ref_key = None if memo is None else ("ref", id(expected), canonical_json(to_document(ref)))
+    if ref_key is None or ref_key not in memo:
+        payload = canonical_json(expected).encode()
+        if ref != artifact_reference(payload, ref.schema_ref):
+            raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search plan reference differs from its complete binding")
+        if ref_key is not None:
+            memo[ref_key] = (expected, True)
     try:
         store.read_verified(ref)
     except ArtifactError as error:

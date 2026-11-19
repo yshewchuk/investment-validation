@@ -92,8 +92,12 @@ def _equal_completed_fit(fit, expected, *, legacy=False):
     _equal(fit, expected)
 
 
-def _native_selection(trials, plan, read):
-    """Presence checks plus freeze verification make completed replays strict."""
+def _native_selection(trials, plan, read, frozen=None):
+    """Presence checks plus freeze verification make completed replays strict.
+
+    ``frozen`` is a freeze the caller already verified once for this stage; it is
+    shared only within one run_search call. Without it, the freeze is recomputed.
+    """
     print("[stage] native_selection start", file=sys.stderr)
     started = time.monotonic()
     selection = read("selection")
@@ -126,7 +130,10 @@ def _native_selection(trials, plan, read):
                     raise _conflict() from None
                 if plan.get("schema_version") in (PLAN_V2, PLAN_V3, "regression_search_plan.v1") and limits != plan["request"]["limits"]["child"]:
                     raise fail("INVALID_EXPERIMENT_SPEC", "native trial limits differ from sealed request")
-    _equal(trials.freeze(), selection)
+    if frozen is None:
+        _equal(trials.freeze(), selection)
+    else:
+        _equal(frozen, selection)
     print(f"[stage] native_selection done in {time.monotonic() - started:.1f}s", file=sys.stderr)
     return selection
 
@@ -291,8 +298,11 @@ def _replay_failed(saved, store, started, key, outer_year, chosen, fold, plan, e
 
 
 def execute_outer_fold(conn, store, repository, registration, request, plan_ref, outer_year, *, limits,
-                       candidate_id=None):
-    """Refit one frozen unit (the overall winner, or a winner_rules refit unit by candidate_id) once; replay complete evidence without fitting."""
+                       candidate_id=None, frozen=None):
+    """Refit one frozen unit (the overall winner, or a winner_rules refit unit by candidate_id) once; replay complete evidence without fitting.
+
+    ``frozen`` optionally passes a freeze the caller already verified once for this stage (shared only within one run_search call); None recomputes it.
+    """
     validate_execution_limits(limits)
     require_current(conn, OWNER, MIGRATIONS)
     plan = read_search_plan(conn, store, registration, request, plan_ref)
@@ -308,7 +318,8 @@ def execute_outer_fold(conn, store, repository, registration, request, plan_ref,
     def read(slot):
         return read_record(conn, store, registration.run_id, slot)
     trials = SearchTrials(conn, store, repository, registration, request, plan_ref)
-    selection = _native_selection(trials, plan, read)
+    selection = (_native_selection(trials, plan, read) if frozen is None
+                 else _native_selection(trials, plan, read, frozen))
     if candidate_id is not None:
         item = next((entry for entry in selection["selections"]
                      if entry["outer_year"] == outer_year), None)
