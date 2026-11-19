@@ -189,6 +189,17 @@ def test_event_ids_must_be_admitted_and_restrict_the_plan_and_tables(tmp_path, s
     assert tunes and all(entry[2] == ("E1",) for entry in tunes)  # the tables were restricted too
 
 
+def test_inner_refuses_a_changed_plan_window_on_replay(tmp_path, stubs, monkeypatch):
+    use_chunks(monkeypatch, [("2023Q2", chunk("E1")), ("2024Q3", chunk("E2"))])
+    driver.run(sources(), "inner", tmp_path, prereg=OK)
+    changed = PLAN_FRAME.copy()
+    changed.loc[changed["event_id"] == "E2", "entry_date"] = pd.Timestamp("2024-08-05")  # same ids, one entry_date
+    with pytest.raises(Refusal) as caught:
+        driver.run(sources(plan_frame=changed), "inner", tmp_path, prereg=OK)
+    assert caught.value.code == CONFLICT
+    assert caught.value.details["reason"] == "tuning_receipt_changed"
+
+
 # ---- outer stage: R6 ordering and the warm-up -----------------------------------
 
 def test_outer_reads_a_month_s_labels_only_after_its_rows_are_complete(tmp_path, stubs, monkeypatch):

@@ -159,6 +159,13 @@ def _plan_window(plan, window, ids):
     return plan[keep]
 
 
+def _plan_rows(plan):
+    """The windowed plan as plain rows sorted by event_id, so a changed window or date changes the receipt."""
+    rows = [[str(e), str(d), str(en), str(x), s, t] for e, d, en, x, s, t in zip(
+        plan["event_id"], plan["event_date"], plan["entry_date"], plan["exit_date"], plan["session"], plan["ticker"])]
+    return sorted(rows, key=lambda r: r[0])
+
+
 _BOUND = ("spec_hash", "identity", "roster", "models", "production")  # not "tables": windows differ by stage
 
 
@@ -185,14 +192,16 @@ def _inner(src, out, ready, plan, ids):
     pools = {mid: build_pool(entry["table"], labels) for mid, entry in ready.items()}
     items = {mid: [] for mid in ready}
     quarters = pd.to_datetime(plan["event_date"]).dt.to_period("Q").nunique()
-    kept = 0
+    kept, started = 0, time.monotonic()
     for number, (label, chunk) in enumerate(ladder.ladder_chunks(src.admitted, plan, src.load_index), start=1):
         facts = src.facts([str(e) for e in chunk["event_id"]])
         kept += len(chunk["event_id"])
         for mid, entry in ready.items():
             events = model_events(entry["table"], facts, chunk)
             items[mid].append((chunk, events, shortvol.simulate(chunk, events, pools[mid])))
-        _log(f"inner quarter {number}/{quarters} {label} events={len(chunk['event_id'])} rss={_rss_mb():.0f}MB")
+        elapsed = max(time.monotonic() - started, 1e-9)
+        _log(f"inner quarter {number}/{quarters} {label} events={len(chunk['event_id'])} "
+             f"rate={kept / elapsed:.2f}/s eta={(quarters - number) * elapsed / number:.0f}s rss={_rss_mb():.0f}MB")
     hashes = {}
     for i, mid in enumerate(ready, start=1):
         started = time.monotonic()
@@ -345,15 +354,15 @@ def run(src, stage, out_dir, *, event_ids=None, prereg=size_pnl_prereg.require_p
     ready = {mid: {**e, "table": _restrict(e["table"], ids)} for mid, e in tables.items() if e["status"] == "ready"}
     excluded = {mid: e["reason"] for mid, e in tables.items() if e["status"] != "ready"}
     scope = None if ids is None else content_hash(sorted(ids))
+    plan = _plan_window(src.plan_frame, _window(stage), ids)
     body = {"stage": "inputs", "spec_hash": receipt["spec_hash"], "identity": bound_tables["identity"],
             "roster": roster, "models": _strip(bound_tables["bound"]),
             "tables": {mid: e["binding"] for mid, e in tables.items() if e["status"] == "ready"},
-            "production": production["binding"], "scope": scope}
+            "production": production["binding"], "scope": scope, "plan": content_hash(_plan_rows(plan))}
     inputs_receipt = tuning.write_receipt(out / "receipts" / f"inputs_{stage}.json", body)
     if not ready:
         raise Refusal(_CONFLICT, "no model is ready to be tuned or scored", {"reason": "no_ready_models"})
     receipts = _outer_gate(out, ready, scope, body) if stage == "outer" else {}
-    plan = _plan_window(src.plan_frame, _window(stage), ids)
     if plan.empty:
         raise Refusal(_CONFLICT, "the plan window holds no events", {"reason": "empty_population"})
     if stage == "inner":
