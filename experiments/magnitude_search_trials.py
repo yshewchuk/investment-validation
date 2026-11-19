@@ -721,7 +721,7 @@ class SearchTrials:
             result = self._freeze()
             run_id = getattr(getattr(self, "registration", None), "run_id", None)
             plan_ref = getattr(self, "plan_ref", None)
-            plan_key = canonical_json(to_document(plan_ref)) if plan_ref is not None else None
+            plan_key = canonical_json(to_document(plan_ref))
             _FREEZES.append((result, run_id, plan_key, content_hash(result)))
             del _FREEZES[:-4]
             return result

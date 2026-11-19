@@ -323,6 +323,22 @@ def test_freeze_registry_keeps_only_the_last_four(monkeypatch):
     assert all(trials_module.freeze_is_verified(value, "run", plan_key) for value in values[-4:])
 
 
+def test_freeze_with_no_plan_ref_is_accepted_for_none_and_refused_for_another(monkeypatch):
+    value = {"a": 1}
+    monkeypatch.setattr(trials_module.SearchTrials, "_freeze", lambda self: value)
+    trials = trials_module.SearchTrials(None, Store(), None, Registration(), {}, None)
+    frozen = trials.freeze()
+    assert frozen is value
+    with outer.shared_freeze("run", None, frozen):
+        assert outer._SHARED[2] is frozen
+    assert outer._SHARED is None
+    with pytest.raises(OpsError) as caught:
+        with outer.shared_freeze("run", PLAN_REF, frozen):
+            pass  # pragma: no cover
+    assert caught.value.problem.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert outer._SHARED is None
+
+
 def test_shared_freeze_refuses_a_freeze_registered_for_another_run(monkeypatch):
     frozen = _frozen_by_trials(monkeypatch, {"a": 1}, run_id="run")
     assert outer._SHARED is None
