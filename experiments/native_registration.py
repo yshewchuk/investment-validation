@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 from copy import deepcopy
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from engine.v2.contracts.data import SnapshotRef
@@ -84,23 +84,65 @@ def decode_native_gate_sweep(payload, *, failure_code="EXPERIMENT_IDENTITY_CONFL
         raise fail(failure_code, "native sweep requires bounded JSON object evidence") from None
 
 
+_LEAN_PATHS = (("schema_version",), ("magnitude_execution",), ("regression_execution",),
+               ("regression_plan", "target_recipe"))
+_ABSENT = object()
+
+
+def _lean_document(compact):
+    """Worker view: only small execution sections; None when a placeholder needs full hydration."""
+    lean = {}
+    for path in _LEAN_PATHS:
+        source = compact
+        for name in path:
+            if not isinstance(source, dict) or name not in source:
+                source = _ABSENT
+                break
+            source = source[name]
+        if source is _ABSENT:
+            continue
+        if "$size_artifact" in json.dumps(source):
+            return None
+        target = lean
+        for name in path[:-1]:
+            target = target.setdefault(name, {})
+        target[path[-1]] = deepcopy(source)
+    return lean
+
+
 @dataclass(frozen=True)
 class NativeRegistration:
-    """Immutable binding; optionally retain a detached logical SIZE document."""
+    """Immutable binding; optionally retain a detached logical SIZE document or hydrate it on demand."""
     run_id: str
     binding_json: bytes
     document_value: dict | None = None
+    hydrate: object = field(default=None, compare=False, repr=False)
 
     def __post_init__(self):
         if self.document_value is not None:
             object.__setattr__(self, "document_value", deepcopy(self.document_value))
+        if self.hydrate is not None:
+            object.__setattr__(self, "_lean", _lean_document(json.loads(self.binding_json)))
 
     @property
     def document(self):
-        return deepcopy(self.document_value) if self.document_value is not None else json.loads(self.binding_json)
+        if self.document_value is not None:
+            return deepcopy(self.document_value)
+        if self.hydrate is not None:
+            return self.hydrate()
+        return json.loads(self.binding_json)
+
+    @property
+    def lean(self):
+        """Read-only worker view; callers never mutate it."""
+        if self.hydrate is not None and getattr(self, "_lean", None) is not None:
+            return self._lean
+        return self.document
 
     @property
     def variant_id(self):
+        if self.hydrate is not None:
+            return content_hash(json.loads(self.binding_json))
         if self.document_value is not None and self.document_value.get("schema_version") == "native_experiment_registration.v1.7":
             return content_hash(json.loads(self.binding_json))
         return content_hash(self.document)

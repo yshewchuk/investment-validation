@@ -103,6 +103,19 @@ def _terminate_worker(signum, frame):
     raise _WorkerTerminating
 
 
+def _stored_plan(store, plan_ref):
+    """Read the verified plan artifact the parent sealed; the worker does not rebuild it from the registration."""
+    if not isinstance(plan_ref, ArtifactRef):
+        raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search plan reference is invalid")
+    try:
+        plan = json.loads(store.read_verified(plan_ref))
+    except (ArtifactError, ValueError, RecursionError):
+        raise fail("EXPERIMENT_IDENTITY_CONFLICT", "stored search plan failed verification") from None
+    if not isinstance(plan, dict) or not isinstance(plan.get("plan_id"), str):
+        raise fail("EXPERIMENT_IDENTITY_CONFLICT", "stored search plan failed verification")
+    return plan
+
+
 def _init_trial_worker(conn_path, store_root, run_id, request, plan_ref, memory_bytes, adopt=False):
     global _PARALLEL, _WORKER_WATCHDOG_STOP, _WORKER_TERMINATING
     _WORKER_WATCHDOG_STOP = None
@@ -120,16 +133,18 @@ def _init_trial_worker(conn_path, store_root, run_id, request, plan_ref, memory_
         if binding is None:
             raise fail("INVALID_EXPERIMENT_SPEC", "native experiment has not been preregistered")
         try:
-            document = load_registration_document(store, binding, verified_size_rows=verified_size_rows)
-            registration = NativeRegistration(run_id, binding,
-                document if document.get("schema_version") == "native_experiment_registration.v1.7" else None)
-            log_memory("worker registration loaded", registration=registration.document_value)
-        except (ArtifactError, ValueError, KeyError, TypeError):
+            schema = json.loads(binding).get("schema_version")
+            hydrate = ((lambda: load_registration_document(store, binding, verified_size_rows=verified_size_rows))
+                       if schema == "native_experiment_registration.v1.7" else None)
+            registration = NativeRegistration(run_id, binding, hydrate=hydrate)
+            log_memory("worker registration loaded", registration=registration.lean)
+        except (ArtifactError, ValueError, KeyError, TypeError, AttributeError):
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "native registration evidence is invalid") from None
         repository = Repository(conn, store, pin_snapshots=True)
-        plan = read_search_plan(conn, store, registration, request, plan_ref)
+        plan = _stored_plan(store, plan_ref)
         log_memory("worker plan read", plan=plan)
         trials = SearchTrials(conn, store, repository, registration, request, plan_ref)
+        trials.trusted_plan = plan
         _worker_stage(trials)
         trials.adopt_published = adopt
         _PARALLEL = (conn, store, trials, registration, plan)

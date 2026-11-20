@@ -136,6 +136,7 @@ class SearchTrials:
         self._memo = {}
         self._published = {}  # cohort -> (manifest, inputs_id) of this instance's successful publication.
         self.adopt_published = False
+        self.trusted_plan = None
         try:
             self.request = json.loads(json.dumps(request, allow_nan=False))
             if self.request != request:
@@ -162,7 +163,9 @@ class SearchTrials:
             raise error from publication_error
 
     def _binding(self):
-        plan = read_search_plan(self.conn, self.store, self.registration, self.request, self.plan_ref)
+        # A worker trusts the plan its parent fully verified and sealed; `_admit` still compares the seal.
+        plan = (self.trusted_plan if self.trusted_plan is not None
+                else read_search_plan(self.conn, self.store, self.registration, self.request, self.plan_ref))
         try:
             sources = source_closure(Path(__file__).resolve().parents[1], ["experiments/magnitude_search_trials.py",
                 "experiments/magnitude_search_worker.py"])
@@ -198,7 +201,7 @@ class SearchTrials:
         return trial_key(plan, outer_year, inner_year, candidate_id), requested, candidate
 
     def _inputs(self, inner, plan=None):
-        schema = self.registration.document.get("schema_version")
+        schema = self.registration.lean.get("schema_version")
         if plan is None and schema == "native_experiment_registration.v1.8":
             plan = self._admit()
         kwargs = ({"plan": plan} if schema == "native_experiment_registration.v1.8"
@@ -216,7 +219,7 @@ class SearchTrials:
             if cohort in self._published:
                 manifest, inputs_id = self._published[cohort]
                 self._memo[cohort] = load_inputs(self.store, manifest, inputs_id)
-            elif plan is not None and (self.registration.document.get("schema_version") == "native_experiment_registration.v1.8"
+            elif plan is not None and (self.registration.lean.get("schema_version") == "native_experiment_registration.v1.8"
                     or _requires_event_dates(plan)):
                 self._memo[cohort] = self._inputs(inner, plan=plan)
             else:
@@ -315,7 +318,7 @@ class SearchTrials:
         resolved = resolved_limits(self.conn, self.store, self.registration, plan, limits) if bounded_plan else execution_limits(limits)
         started = self._start(outer_year, inner_year, candidate_id, attempt, plan, detach=detach)
         inputs = started["inputs"]
-        execution = execution_for_candidate(self.registration.document, candidate)
+        execution = execution_for_candidate(self.registration.lean, candidate)
         regression = execution.get("schema_version") == "regression_candidate_execution.v1"
         fits, pending = [], []
         expected = self._fit_evidence(inputs, inner, plan, execution)
@@ -347,7 +350,7 @@ class SearchTrials:
         timing = set() if regression else {"score_seconds", "rss_delta_kib"}
         if (not isinstance(result, dict) or result.get("event") not in ("succeeded", "failed")
                 or (not regression and not _timing(result))
-                or (succeeded and (pending or len(fits) != len(plan["horizons"]) or set(result) != {"event", "forecasts"} | timing | diagnostic_keys(self.registration.document)))
+                or (succeeded and (pending or len(fits) != len(plan["horizons"]) or set(result) != {"event", "forecasts"} | timing | diagnostic_keys(self.registration.lean)))
                 or (not succeeded and (len(pending) != 1 or set(result) != {"event"} | timing))):
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search fit completion differs from admitted attempts")
         # run_fitted_trial has returned only after checking exit and reaping the child.
@@ -421,9 +424,9 @@ class SearchTrials:
                 raise ValueError
             if timed:
                 if (not _timing(result)
-                        or set(result) != (({"event", "forecasts"} | timing | diagnostic_keys(self.registration.document)) if succeeded else {"event"} | timing)):
+                        or set(result) != (({"event", "forecasts"} | timing | diagnostic_keys(self.registration.lean)) if succeeded else {"event"} | timing)):
                     raise ValueError
-            elif set(result) != (({"event", "forecasts"} | diagnostic_keys(self.registration.document)) if succeeded else {"event"}):
+            elif set(result) != (({"event", "forecasts"} | diagnostic_keys(self.registration.lean)) if succeeded else {"event"}):
                 raise ValueError
             forecasts = None
             if succeeded:
@@ -440,7 +443,7 @@ class SearchTrials:
                 validation = self._read("validation:" + cohort)
                 if validation is not None:
                     self._validation(inner, admitted, inputs, validation)
-            execution = execution_for_candidate(self.registration.document, candidate)
+            execution = execution_for_candidate(self.registration.lean, candidate)
             expected = self._fit_evidence(inputs, inner, plan, execution)
             started_fits, completed_fits = [], []
             for fit in expected:
