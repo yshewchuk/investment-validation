@@ -136,6 +136,7 @@ def _init_trial_worker(conn_path, store_root, run_id, request, plan_ref, memory_
         binding = verified_registration_bytes(conn, store, run_id, max_evidence_bytes=MAX_NATIVE_EVIDENCE_BYTES)
         if binding is None:
             raise fail("INVALID_EXPERIMENT_SPEC", "native experiment has not been preregistered")
+        release_parent_caches("worker startup")  # verification holds every v1.7 shard row; return the heap before trials start
         try:
             schema = json.loads(binding).get("schema_version")
             hydrate = ((lambda: load_registration_document(store, binding))

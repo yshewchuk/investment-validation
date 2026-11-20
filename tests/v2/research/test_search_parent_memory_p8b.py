@@ -92,7 +92,10 @@ def _patch_worker(monkeypatch, *, binding, store):
 
 def test_worker_uses_stored_plan_and_compact_registration(monkeypatch):
     _patch_worker(monkeypatch, binding=BINDING, store=FakeStore(canonical_json(PLAN).encode()))
+    release = Mock()
+    monkeypatch.setattr(run_mod, "release_parent_caches", release)
     run_mod._init_trial_worker("c", "s", "native_x", {}, REF, 1)
+    release.assert_called_once_with("worker startup")
     assert isinstance(run_mod._PARALLEL, tuple)
     _, _, trials, registration, plan = run_mod._PARALLEL
     assert isinstance(registration, NativeRegistration)
