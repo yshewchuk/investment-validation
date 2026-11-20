@@ -75,6 +75,9 @@ def _check_plan(admitted, plan):
                    details={"reason": "event_date_mismatch"})
 
 
+check_plan = _check_plan
+
+
 def _first(values):
     """First non-null numeric value, or NaN."""
     got = pd.to_numeric(values, errors="coerce").dropna()

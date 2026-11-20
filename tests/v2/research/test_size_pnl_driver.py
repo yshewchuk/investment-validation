@@ -248,6 +248,32 @@ def test_plan_row_with_a_shifted_event_date_refuses_before_facts(tmp_path, stubs
     assert calls == []
 
 
+def test_duplicate_plan_id_refuses_before_facts_labels_or_receipts(tmp_path, stubs, monkeypatch):
+    calls = []
+
+    def counting(ids):
+        calls.append(list(ids))
+        return FACTS.reindex(list(ids))
+
+    plan = pd.concat([PLAN_FRAME, PLAN_FRAME[PLAN_FRAME["event_id"] == "E1"]], ignore_index=True)  # E1 twice
+    use_chunks(monkeypatch, [("2023Q2", chunk("E1"))])
+    with pytest.raises(OpsError) as caught:
+        driver.run(sources(plan_frame=plan, facts=counting), "inner", tmp_path, prereg=OK)
+    assert caught.value.code == CONFLICT
+    assert caught.value.problem.details["reason"] == "duplicate_event_id"
+    assert calls == []
+    assert not (tmp_path / "receipts").exists()
+
+
+def test_facts_missing_a_requested_id_refuses_before_any_receipt(tmp_path, stubs, monkeypatch):
+    use_chunks(monkeypatch, [("2023Q2", chunk("E1")), ("2024Q3", chunk("E2"))])
+    with pytest.raises(OpsError) as caught:
+        driver.run(sources(facts=lambda ids: FACTS.reindex(["E1"])), "inner", tmp_path, prereg=OK)
+    assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert caught.value.problem.details["reason"] == "facts_incomplete"
+    assert not (tmp_path / "receipts").exists()
+
+
 def test_production_fetch_never_reads_an_outer_year_event(tmp_path, stubs, monkeypatch):
     calls = []
 

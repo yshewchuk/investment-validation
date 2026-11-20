@@ -975,4 +975,4 @@ Library-only, no data-run authority. Inputs: a Tier-1 source root (read-only: ca
 
 `size_pnl_prereg.require_preregistration` returns `spec_hash_checked` true or refuses `EXPERIMENT_IDENTITY_CONFLICT` (`details.reason`: `planned_row_*`, `spec_*`, `preregistered_*`); never an unchecked pass.
 
-EXP-188: `size_pnl_inputs` binds v14 predictions; `size_pnl_readers` admits keys (others `HOLDOUT_ACCESS_DENIED`); `size_pnl_tuning`: one `c` per model, 2023-24 only; `size_pnl_report` raises `ValueError` on bad input. `size_pnl_driver` (runbook): `inner` writes `tuning` receipts; the outer stage is S9b (#2660).
+EXP-188: `size_pnl_inputs` binds v14 predictions; `size_pnl_readers` admits keys (others `HOLDOUT_ACCESS_DENIED`); `size_pnl_tuning`: one `c` per model, 2023-24 only; `size_pnl_report` raises `ValueError`. `size_pnl_driver.run` (inner years): plan or facts invalid before any receipt: `HOLDOUT_ACCESS_DENIED`/`facts_incomplete`; changed replay: `inputs_receipt_changed`, `inner_receipt_changed`.

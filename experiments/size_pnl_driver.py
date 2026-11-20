@@ -179,7 +179,12 @@ def run(src, stage, out_dir, *, prereg=size_pnl_prereg.require_preregistration):
     if any(pd.Timestamp(d) != admitted_dates[str(e)] for e, d in zip(plan["event_id"], plan["event_date"])):
         raise fail(_DENIED, "plan event dates differ from the admitted dates",
                    details={"reason": "plan_date_mismatch"})
+    ladder.check_plan(src.admitted, plan)  # full plan validation before any facts, label read or receipt
     facts_all = src.facts(sorted(str(e) for e in plan["event_id"]))  # the only facts call of the run
+    requested = {str(e) for e in plan["event_id"]}
+    if not set(_FACTS) <= set(facts_all.columns) or set(facts_all.index.astype(str)) != requested:
+        raise fail("INVALID_EXPERIMENT_SPEC", "facts source is incomplete", details={"reason": "facts_incomplete"})
+    _log(f"facts_nan_rows={int(facts_all[list(_FACTS)].isna().any(axis=1).sum())}")
     facts_rows = sorted([str(e), *[None if pd.isna(v) else float(v) for v in vals]] for e, vals in
                         zip(facts_all.index, facts_all[list(_FACTS)].to_numpy(dtype=float)))
     labels = readers.read_labels(src.fetch, src.admitted, start=INNER[0], end=INNER[1], event_ids=None)  # inner only
