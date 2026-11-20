@@ -104,12 +104,17 @@ def _terminate_worker(signum, frame):
     raise _WorkerTerminating
 
 
+def _plan_bound(plan_ref):
+    """Refuse a plan reference above the parallel-worker read bound; checked in the parent before any dispatch or deadline write."""
+    if getattr(plan_ref, "byte_size", 0) > MAX_REPORT_BYTES:
+        raise fail("RESOURCE_LIMIT_EXCEEDED", "stored search plan exceeds the read bound")
+
+
 def _stored_plan(store, plan_ref):
     """Read the verified plan artifact the parent sealed; the worker does not rebuild it from the registration."""
     if not isinstance(plan_ref, ArtifactRef):
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search plan reference is invalid")
-    if plan_ref.byte_size > MAX_REPORT_BYTES:
-        raise fail("RESOURCE_LIMIT_EXCEEDED", "stored search plan exceeds the read bound")
+    _plan_bound(plan_ref)
     try:
         plan = json.loads(store.read_verified(plan_ref))
     except ArtifactError as error:
@@ -375,6 +380,7 @@ def _run_search(conn, store, repository, registration, request, plan_ref, *, lim
     deadline_seconds = None
     if parallel:
         cpus, conn_path = _parallel_preflight(conn, request, limits, workers)
+        _plan_bound(plan_ref)
         if limits != request["limits"]["child"]:
             raise fail("INVALID_EXPERIMENT_SPEC", "v2 trial limits differ from sealed request")
         forbid_fitting("run_search")

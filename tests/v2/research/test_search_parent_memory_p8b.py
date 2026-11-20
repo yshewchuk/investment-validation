@@ -190,6 +190,20 @@ def test_stored_plan_refuses_oversize_reference_before_read():
     store.read_verified.assert_not_called()
 
 
+def test_plan_bound_refuses_above_max_report_bytes():
+    oversize = ArtifactRef(artifact_id="a", content_hash="sha256:" + "0" * 64, schema_ref="s",
+                           byte_size=run_mod.MAX_REPORT_BYTES + 1, storage_key="k")
+    with pytest.raises(OpsError) as raised:
+        run_mod._plan_bound(oversize)
+    assert raised.value.code == "RESOURCE_LIMIT_EXCEEDED"
+
+
+def test_plan_bound_passes_at_exactly_max_report_bytes():
+    at_bound = ArtifactRef(artifact_id="a", content_hash="sha256:" + "0" * 64, schema_ref="s",
+                           byte_size=run_mod.MAX_REPORT_BYTES, storage_key="k")
+    assert run_mod._plan_bound(at_bound) is None
+
+
 def test_stored_plan_refuses_non_json_bytes():
     with pytest.raises(OpsError) as raised:
         run_mod._stored_plan(FakeStore(b"{not json"), REF)
