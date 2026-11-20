@@ -28,11 +28,11 @@ def _is_int(value):
 
 
 def _grid_ok(values, needed, ok):
-    """A list of reals passing ``ok``; non-empty iff ``needed`` (the family is in the arm)."""
+    """A list of reals passing ``ok`` with no duplicates; non-empty iff ``needed`` (the family is in the arm)."""
     values = [] if values is None else values
     if not isinstance(values, list) or bool(values) != needed:
         return False
-    return all(_is_real(v) and ok(v) for v in values)
+    return all(_is_real(v) and ok(v) for v in values) and len(set(values)) == len(values)
 
 
 def _valid(arm):
@@ -40,7 +40,8 @@ def _valid(arm):
     if not isinstance(arm, dict) or not (isinstance(arm.get("seed_tag"), str) and arm["seed_tag"]):
         return False
     years, families = arm.get("inner_years"), arm.get("families")
-    if not (isinstance(years, list) and len(years) == 2 and all(_is_int(y) for y in years) and years[0] <= years[1]):
+    if not (isinstance(years, list) and len(years) == 2 and all(_is_int(y) for y in years)
+            and 2023 <= years[0] <= years[1] <= 2024):
         return False
     if not (isinstance(families, list) and families and all(isinstance(f, str) and f in _FAMILIES for f in families)
             and len(set(families)) == len(families)):
@@ -50,13 +51,17 @@ def _valid(arm):
             and _grid_ok(arm.get("level_shift"), "level_shift" in families, lambda v: v > -1))
 
 
-def arm_from_spec(spec):
-    """The validated synthetic_arm block of the parsed spec; refuses when it is missing or malformed."""
-    arm = spec.get("synthetic_arm") if isinstance(spec, dict) else None
+def _checked(arm):
+    """``arm`` itself when it is well formed; otherwise the synthetic_arm_invalid refusal."""
     if not _valid(arm):
         raise fail("INVALID_EXPERIMENT_SPEC", "the spec's synthetic_arm block is missing or invalid",
                    details={"reason": "synthetic_arm_invalid"})
     return arm
+
+
+def arm_from_spec(spec):
+    """The validated synthetic_arm block of the parsed spec; refuses when it is missing or malformed."""
+    return _checked(spec.get("synthetic_arm") if isinstance(spec, dict) else None)
 
 
 def predictors(arm):
@@ -114,23 +119,37 @@ def _forecast(pred, y, z, prior):
     return y * np.exp(s * z + s * s / 2)
 
 
+def _dates_ok(labels):
+    """Whether event_date converts with pd.to_datetime with no NaT."""
+    try:
+        return not pd.to_datetime(labels["event_date"]).isna().any()
+    except (ValueError, TypeError):
+        return False
+
+
 def _labels_ok(labels):
-    """Whether labels is a non-empty frame with finite numeric abs_move, event_date, and a unique string event_id index."""
+    """Whether labels is a non-empty frame with finite numeric abs_move, valid event_date, and a unique string event_id index."""
     return (isinstance(labels, pd.DataFrame) and {"abs_move", "event_date"} <= set(labels.columns)
             and len(labels) > 0 and labels.index.name == "event_id" and labels.index.is_unique
             and all(isinstance(i, str) for i in labels.index)
             and pd.api.types.is_numeric_dtype(labels["abs_move"])
-            and np.isfinite(labels["abs_move"].to_numpy(dtype=float)).all())
+            and np.isfinite(labels["abs_move"].to_numpy(dtype=float)).all() and _dates_ok(labels))
 
 
 def _guard(admitted, labels, arm):
-    """Refuses unadmitted event ids and event dates outside the inner years, before any forecast is made."""
-    if not labels.index.isin(admitted["events"]["event_id"].to_numpy()).all():
+    """Refuses unadmitted ids, label dates not equal to the admitted date, and admitted dates outside the inner years."""
+    events = admitted["events"]
+    if not labels.index.isin(events["event_id"].to_numpy()).all():
         raise fail(_DENIED, "a synthetic label id is not admitted",
                    details={"reason": OUT_OF_SCOPE, "why": "event_not_admitted"})
+    admitted_dates = pd.Series(pd.to_datetime(events["event_date"]).to_numpy(), index=events["event_id"].to_numpy())
+    want = admitted_dates.reindex(labels.index)
+    mismatch = pd.to_datetime(labels["event_date"]).to_numpy() != want.to_numpy()
+    if mismatch.any():
+        raise fail(_DENIED, "a synthetic label date differs from its admitted date",
+                   details={"reason": OUT_OF_SCOPE, "why": "date_not_admitted", "events": int(mismatch.sum())})
     y0, y1 = arm["inner_years"]
-    dates = pd.to_datetime(labels["event_date"])
-    inside = ((dates >= pd.Timestamp(f"{y0}-01-01")) & (dates < pd.Timestamp(f"{y1 + 1}-01-01"))).to_numpy()
+    inside = ((want >= pd.Timestamp(f"{y0}-01-01")) & (want < pd.Timestamp(f"{y1 + 1}-01-01"))).to_numpy()
     if not inside.all():
         raise fail(_DENIED, "a synthetic event date is outside the inner years",
                    details={"reason": OUT_OF_SCOPE, "why": "date_out_of_scope", "events": int((~inside).sum())})
@@ -157,6 +176,7 @@ def _entry(pred, mid, ctx, f):
 
 def generate(admitted, labels, production, arm):
     """Synthetic forecast entries keyed by model_id, built only from the admitted inner-year labels."""
+    _checked(arm)
     start = time.monotonic()
     if not isinstance(admitted, readers.Admitted):
         raise fail("HOLDOUT_ACCESS_DENIED", "the synthetic generator accepts only an admission issued by admit_events",
@@ -171,7 +191,7 @@ def generate(admitted, labels, production, arm):
     ids = labels.index
     dates = pd.DatetimeIndex(pd.to_datetime(labels["event_date"]))
     y = labels["abs_move"].to_numpy(dtype=float)
-    labels_hash = content_hash([[str(i), d.date().isoformat(), float(v)] for i, d, v in zip(ids, dates, y)])
+    labels_hash = content_hash([[str(i), d.isoformat(), float(v)] for i, d, v in zip(ids, dates, y)])
     ctx = {"ids": ids, "dates": dates, "y": y, "binding": production["binding"], "labels_hash": labels_hash,
            "crush": production["frame"]["pred_crush"].reindex(ids).to_numpy(dtype=float)}
     z, prior = _z(ids, arm["seed_tag"]), _prior_mean(dates, y)

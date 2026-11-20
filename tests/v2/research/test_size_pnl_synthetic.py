@@ -219,6 +219,31 @@ def test_label_id_not_admitted_refuses():
     assert exc.value.problem.details["why"] == "event_not_admitted"
 
 
+def test_label_date_not_bound_to_admitted_date_refuses():
+    events = _events(50)
+    labels = _labels(events, np.ones(50))
+    admitted_events = events.copy()
+    admitted_events.loc[0, "event_date"] = pd.Timestamp("2025-03-01")
+    labels.loc[labels.index[0], "event_date"] = pd.Timestamp("2024-03-01")
+    with pytest.raises(OpsError) as exc:
+        syn.generate(_admitted(admitted_events), labels, _production(events), ARM)
+    assert _refusal(exc) == (DENIED, OUT_OF_SCOPE)
+    assert exc.value.problem.details["why"] == "date_not_admitted"
+    assert exc.value.problem.details["events"] == 1
+
+
+def _binding_of_oracle(dates):
+    events = pd.DataFrame({"event_id": ["sd0", "sd1"], "event_date": pd.to_datetime(dates)})
+    out = syn.generate(_admitted(events), _labels(events, [2.0, 4.0]), _production(events), ARM)
+    return next(e for e in out.values() if e["family"] == "oracle")["binding"]
+
+
+def test_binding_distinguishes_same_day_times_from_midnight():
+    timed = _binding_of_oracle(["2023-03-01 10:00", "2023-03-01 15:00"])
+    assert timed != _binding_of_oracle(["2023-03-01", "2023-03-01"])
+    assert timed == _binding_of_oracle(["2023-03-01 10:00", "2023-03-01 15:00"])
+
+
 def test_holdout_event_is_never_read_or_generated():
     admitted, labels, production = _world(40)
     calls = []
@@ -254,6 +279,8 @@ def test_plain_dict_production_refuses():
     lambda lab: lab.iloc[:0],
     lambda lab: pd.concat([lab, lab.iloc[:1]]),
     lambda lab: lab.set_axis(range(len(lab))),
+    lambda lab: lab.assign(event_date="not a date"),
+    lambda lab: lab.assign(event_date=None),
     lambda lab: None,
 ])
 def test_malformed_labels_refuse(make):
@@ -305,10 +332,24 @@ def _arm_with(**changes):
     _arm_with(shrinkage_L=[1.5]),
     _arm_with(level_shift=[-1.0, 0.1]),
     _arm_with(families=["oracle", "oracle"]),
+    _arm_with(inner_years=[2025, 2025]),
+    _arm_with(spread_ladder=[0.4, 0.4]),
+    _arm_with(shrinkage_L=[0.5, 0.5]),
 ])
 def test_arm_from_spec_refuses_malformed_blocks(spec):
     with pytest.raises(OpsError) as exc:
         syn.arm_from_spec(spec)
+    assert _refusal(exc) == ("INVALID_EXPERIMENT_SPEC", "synthetic_arm_invalid")
+
+
+@pytest.mark.parametrize("arm", [
+    _arm_with(inner_years=[2025, 2025])["synthetic_arm"],
+    _arm_with(spread_ladder=[0.4, 0.4])["synthetic_arm"],
+])
+def test_generate_refuses_malformed_arm(arm):
+    admitted, labels, production = _world(20)
+    with pytest.raises(OpsError) as exc:
+        syn.generate(admitted, labels, production, arm)
     assert _refusal(exc) == ("INVALID_EXPERIMENT_SPEC", "synthetic_arm_invalid")
 
 
