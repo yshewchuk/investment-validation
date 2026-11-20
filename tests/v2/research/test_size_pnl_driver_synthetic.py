@@ -1,5 +1,6 @@
 """EXP-188 SY2 driver: run_synthetic on a tiny inner population. The SY1 generator and the synthetic scoring are stood in
 for (the scoring needs the full simulator); the receipts, refusals, evaluation, publish and T11 are the real code."""
+import copy
 import json
 
 import numpy as np
@@ -232,13 +233,13 @@ def test_a_replay_receipt_for_other_inputs_is_ignored(tmp_path, fakes):
 def test_a_replay_receipt_with_other_frames_or_a_non_bool_verdict_is_ignored(tmp_path):
     (tmp_path / "receipts").mkdir()
     path = tmp_path / "receipts" / "synthetic_replay.json"
-    body = {"stage": "synthetic_replay", "scope": None, "inputs": "sha256:in", "ladder": "sha256:l", "frames": "sha256:f", "equal": True}
+    body = {"stage": "synthetic_replay", "scope": None, "inputs": "sha256:in", "ladder": "sha256:l", "frames": "sha256:f", "declined": "sha256:d", "equal": True}
     tuning.write_receipt(path, body)
-    assert driver._replay_equal(tmp_path, "sha256:in", "sha256:l", "sha256:f") is True
-    assert driver._replay_equal(tmp_path, "sha256:in", "sha256:l", "sha256:other") is None  # frames differ
+    assert driver._replay_equal(tmp_path, "sha256:in", "sha256:l", "sha256:f", "sha256:d") is True
+    assert driver._replay_equal(tmp_path, "sha256:in", "sha256:l", "sha256:other", "sha256:d") is None  # frames differ
     path.unlink()
     tuning.write_receipt(path, {**body, "equal": "false"})
-    assert driver._replay_equal(tmp_path, "sha256:in", "sha256:l", "sha256:f") is None  # a string verdict is not a bool
+    assert driver._replay_equal(tmp_path, "sha256:in", "sha256:l", "sha256:f", "sha256:d") is None  # a string verdict is not a bool
 
 
 def test_a_replay_whose_second_scoring_differs_fails_x7_and_stops(tmp_path, monkeypatch, fakes):
@@ -255,6 +256,23 @@ def test_a_replay_whose_second_scoring_differs_fails_x7_and_stops(tmp_path, monk
     driver.run_synthetic(sources(), tmp_path, prereg=OK, replay=True)
     text = (tmp_path / "t11_synthetic.md").read_text(encoding="utf-8")
     assert "| X7 | replay | fail |" in text and "X7 replay" in text  # the stop list carries the X7 entry
+
+
+def test_a_replay_whose_declined_counts_differ_fails_x7(tmp_path, monkeypatch, fakes):
+    calls = []
+
+    def scores(*args):
+        frames, skipped, ladder, dropped, _declined = fake_scores(*args)
+        declined = {mid: {name: [0, 1] for name in driver.shortvol.NAMES} for mid in args[1]}  # per model and unit: [declined, candidates]
+        calls.append(1)
+        if len(calls) == 2:  # the replay's second scoring returns the same frames with one more decline
+            declined = copy.deepcopy(declined)
+            declined[sorted(args[1])[0]][sorted(driver.shortvol.NAMES)[0]][0] += 1
+        return frames, skipped, ladder, dropped, declined
+
+    monkeypatch.setattr(driver, "_synthetic_scores", scores)
+    driver.run_synthetic(sources(), tmp_path, prereg=OK, replay=True)
+    assert "| X7 | replay | fail |" in (tmp_path / "t11_synthetic.md").read_text(encoding="utf-8")
 
 
 def test_a_spec_that_differs_from_the_preregistered_one_refuses_before_any_write(tmp_path, fakes):

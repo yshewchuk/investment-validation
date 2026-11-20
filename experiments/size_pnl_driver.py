@@ -535,17 +535,17 @@ def _fit(table, labels, kept):
     return {"n": len(sub), "rmse": float(np.sqrt(np.mean(err ** 2))), "mae": float(np.mean(np.abs(err)))}
 
 
-def _replay_equal(out, inputs_hash, ladder_hash, frames_hash):
-    """The recorded replay verdict if it was written for this run's inputs, ladder and scored frames, else None (X7 not run)."""
+def _replay_equal(out, inputs_hash, ladder_hash, frames_hash, declined_hash):
+    """The recorded replay verdict if it was written for this run's inputs, ladder, scored frames and decline counts, else None (X7 not run)."""
     path = out / "receipts" / "synthetic_replay.json"
     if not path.exists(): return None
     loaded = tuning.load_receipt(path)
-    ok = loaded["inputs"] == inputs_hash and loaded["ladder"] == ladder_hash and loaded.get("frames") == frames_hash
+    ok = loaded["inputs"] == inputs_hash and loaded["ladder"] == ladder_hash and loaded.get("frames") == frames_hash and loaded.get("declined") == declined_hash
     return loaded["equal"] if ok and isinstance(loaded["equal"], bool) else None
 
 
 def _write_t11(out, text):
-    """Publish the T11 report: a per-process tmp file in ``out``, then ``os.replace``; the tmp is removed on failure (no fsync, like the sibling publications)."""
+    """Publish the T11 report: a per-process tmp file in ``out``, then ``os.replace``; the tmp is removed on failure (no fsync of the file or directory)."""
     tmp = out / f".t11_synthetic.md.{os.getpid()}.tmp"
     try:
         tmp.write_text(text, encoding="utf-8")
@@ -595,10 +595,11 @@ def run_synthetic(src, out_dir, *, event_ids=None, replay=False, prereg=size_pnl
             "production": production["binding"], "tables": {mid: _table_binding(e, ids) for mid, e in ready.items()}}
     inputs_receipt = _receipt(out / "receipts" / "inputs_synthetic.json", body, "inputs_receipt_changed")  # after both population refusals: a refused run pins nothing
     if replay:  # X7 evidence: the replay verdict is receipted, so a later plain run can read it
-        equal = _frames_digest(frames) == _frames_digest(_synthetic_scores(src, ready, plan, facts_all, labels)[0])
+        again = _synthetic_scores(src, ready, plan, facts_all, labels)
+        equal = _frames_digest(frames) == _frames_digest(again[0]) and declined == again[4]
         _receipt(out / "receipts" / "synthetic_replay.json", {"stage": "synthetic_replay", "scope": scope, "inputs": inputs_receipt["content_hash"],
-                                                             "ladder": ladder_hash, "frames": _frames_digest(frames), "equal": equal}, "synthetic_replay_changed")
-    replay_equal = _replay_equal(out, inputs_receipt["content_hash"], ladder_hash, _frames_digest(frames))
+                                                             "ladder": ladder_hash, "frames": _frames_digest(frames), "declined": content_hash(declined), "equal": equal}, "synthetic_replay_changed")
+    replay_equal = _replay_equal(out, inputs_receipt["content_hash"], ladder_hash, _frames_digest(frames), content_hash(declined))
     common, pools = _common_dropped(ready), _pool_tables(ready)
     fits = {mid: _fit(pools[mid], labels, kept) for mid in ready}  # rmse and mae on E
     undetermined = len(set(full["event_id"].astype(str)) - kept)
