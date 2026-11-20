@@ -61,7 +61,7 @@ def publish(out, frames, body):
         except Refusal as refusal:
             if refusal.details.get("reason") != "tuning_receipt_changed": raise
             raise Refusal(_CONFLICT, str(refusal), {**refusal.details, "reason": "outer_receipt_changed"}) from refusal
-        if final.exists() and _file_sha256(final) == sha: tmp.unlink()  # exact replay: keep the existing file
+        if os.path.lexists(final) and _file_sha256(final) == sha: tmp.unlink()  # exact replay: keep the existing file; a dangling symlink is refused by _file_sha256
         else: os.replace(tmp, final)
     finally:
         tmp.unlink(missing_ok=True)

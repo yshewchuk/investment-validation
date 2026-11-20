@@ -470,6 +470,19 @@ def test_symlinked_decisions_refuses_an_outer_rerun(tmp_path, outer_stubs, monke
     assert caught.value.details["reason"] == "decisions_artifact_invalid"
 
 
+def test_dangling_decisions_symlink_refuses_an_outer_rerun(tmp_path, outer_stubs, monkeypatch):
+    _run_both(tmp_path, monkeypatch)
+    final = tmp_path / "decisions.parquet"
+    final.unlink()
+    final.symlink_to(tmp_path / "missing.parquet")
+    use_chunks(monkeypatch, [("2024Q3", chunk("E2")), ("2025Q1", chunk("E3", "E4"))])
+    with pytest.raises(Refusal) as caught:
+        driver.run(sources(), "outer", tmp_path, prereg=OK)
+    assert caught.value.code == CONFLICT
+    assert caught.value.details["reason"] == "decisions_artifact_invalid"
+    assert final.is_symlink() and not final.exists()
+
+
 def test_changed_outer_receipt_leaves_decisions_untouched_and_no_tmp(tmp_path, outer_stubs, monkeypatch):
     use_chunks(monkeypatch, [("2024Q3", chunk("E2"))])
     driver.run(sources(), "inner", tmp_path, prereg=OK)
