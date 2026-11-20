@@ -64,8 +64,7 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(receipt), file=sys.stderr)
         # The supervisor owns heavy jobs: this run must sit under tools/bounded_run.py --heavy.
         if os.environ.get("BOUNDED_RUN_NESTED") != "1":
-            raise fail("RESOURCE_UNAVAILABLE", "run under tools/bounded_run.py --heavy",
-                       details={"reason": "not_bounded"})
+            raise fail("RESOURCE_UNAVAILABLE", "run under tools/bounded_run.py --heavy", details={"reason": "not_bounded"})
         args.expected_identities = _read_json(args.expected)
         if not isinstance(args.expected_identities, dict):
             raise fail(_INVALID, "--expected must be a JSON object", details={"reason": "input_unreadable"})
@@ -77,12 +76,10 @@ def main(argv: list[str] | None = None) -> int:
             if not callable(factory):
                 raise AttributeError(func)
         except (ValueError, ImportError, AttributeError) as exc:
-            raise fail(_INVALID, f"--sources {args.sources} is invalid",
-                       details={"reason": "sources_invalid"}) from exc
-        sources = factory(args)
+            raise fail(_INVALID, f"--sources {args.sources} is invalid", details={"reason": "sources_invalid"}) from exc
+        sources = size_pnl_driver.check_sources(factory(args))
         if sources.expected != args.expected_identities:
-            raise fail(_CONFLICT, "--expected differs from the sources' expected identities",
-                       details={"reason": "expected_mismatch"})
+            raise fail(_CONFLICT, "--expected differs from the sources' expected identities", details={"reason": "expected_mismatch"})
         summary = size_pnl_driver.run(sources, args.stage, args.out_dir, prereg=lambda: receipt)
     except (OpsError, Refusal) as exc:
         details = exc.details if isinstance(exc, Refusal) else exc.problem.details

@@ -509,6 +509,25 @@ def test_run_py_refuses_not_bounded_before_importing_sources(tmp_path, monkeypat
     assert refused["reason"] == "not_bounded"
 
 
+def test_run_refuses_sources_without_a_dict_expected(tmp_path):
+    with pytest.raises(OpsError) as caught:
+        driver.run(sources(expected=None), "inner", tmp_path, prereg=OK)
+    assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert caught.value.problem.details["reason"] == "sources_invalid"
+    assert not (tmp_path / "receipts").exists()
+
+
+def test_run_py_refuses_a_factory_result_that_is_not_sources(tmp_path, monkeypatch, capsys):
+    run_py = _run_main()
+    monkeypatch.setattr(run_py.size_pnl_prereg, "require_preregistration", OK)
+    monkeypatch.setenv("BOUNDED_RUN_NESTED", "1")
+    _install_sources(monkeypatch, object())
+    assert run_py.main(_argv(tmp_path, "--no-ledger", sources=FAKE)) == 2
+    refused = json.loads(capsys.readouterr().out)
+    assert refused["refused"] == "INVALID_EXPERIMENT_SPEC"
+    assert refused["reason"] == "sources_invalid"
+
+
 def test_run_py_refuses_an_expected_that_differs_from_the_sources(tmp_path, monkeypatch, capsys):
     run_py = _run_main()
     monkeypatch.setattr(run_py.size_pnl_prereg, "require_preregistration", OK)

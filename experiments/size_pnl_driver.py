@@ -1,8 +1,4 @@
-"""EXP-188 S9a: driver for the inner stage (2023-2024) of the SIZE decision-level P&L re-score.
-
-Orchestrates S2a-S8 through the injected ``Sources`` and writes receipts. Outer stage: S9b (#2660).
-``prepare`` and ``model_events`` also serve the synthetic arm.
-"""
+"""EXP-188 S9a: inner-stage (2023-2024) driver of the SIZE P&L re-score; outer stage S9b (#2660); also serves the synthetic arm."""
 import resource
 import sys
 import time
@@ -44,6 +40,13 @@ class Sources:
     load_index: Callable
     facts: Callable
     snapshot_id: str
+
+
+def check_sources(src):
+    if not (isinstance(src, Sources) and isinstance(src.expected, dict)):
+        raise fail("INVALID_EXPERIMENT_SPEC", "sources must be a Sources with an object `expected`",
+                   details={"reason": "sources_invalid"})
+    return src
 
 
 def _log(message):
@@ -88,11 +91,6 @@ def model_events(table, facts, chunk, exits):
     return out
 
 
-def _plan_window(plan):
-    dates = pd.to_datetime(plan["event_date"])
-    return plan[((dates >= pd.Timestamp(INNER[0])) & (dates < pd.Timestamp(INNER[1]))).to_numpy()]
-
-
 def _plan_rows(plan):
     """The windowed plan as rows sorted by event_id, so a changed window or date changes the receipt."""
     rows = [[str(e), str(d), str(en), str(x), s, t] for e, d, en, x, s, t in zip(
@@ -108,12 +106,6 @@ def _receipt(path, body, reason):
         if refusal.details.get("reason") != "tuning_receipt_changed":
             raise
         raise shortvol.Refusal(_CONFLICT, str(refusal), {**refusal.details, "reason": reason}) from refusal
-
-
-def _exit_map(plan_frame):
-    """Event id -> exit_date as an ISO date, for the events whose exit is known."""
-    return {str(e): pd.Timestamp(x).date().isoformat()
-            for e, x in zip(plan_frame["event_id"], plan_frame["exit_date"]) if pd.notna(x)}
 
 
 def _printed(labels, exits, cutoff):
@@ -133,7 +125,8 @@ def _sims(chunk, events, table, labels, exits):
 
 
 def _inner(src, out, ready, plan, facts_all, labels):
-    exits = _exit_map(src.plan_frame)
+    exits = {str(e): pd.Timestamp(x).date().isoformat()  # event id -> exit_date (ISO), where known
+             for e, x in zip(src.plan_frame["event_id"], src.plan_frame["exit_date"]) if pd.notna(x)}
     items = {mid: [] for mid in ready}
     quarters = pd.to_datetime(plan["event_date"]).dt.to_period("Q").nunique()
     kept, started, skipped, common = 0, time.monotonic(), {}, {}
@@ -168,6 +161,7 @@ def _inner(src, out, ready, plan, facts_all, labels):
 def run(src, stage, out_dir, *, prereg=size_pnl_prereg.require_preregistration):
     """Run the inner stage, write its receipts under ``out_dir``, and return a JSON-safe summary."""
     started = time.monotonic()
+    check_sources(src)
     receipt = prereg()
     out = Path(out_dir)
     roster, bound_tables, production = prepare(src, stage)  # refuses any stage but "inner" before reading
@@ -179,7 +173,8 @@ def run(src, stage, out_dir, *, prereg=size_pnl_prereg.require_preregistration):
     if full[cols].isna().to_numpy().any():
         raise fail("INVALID_EXPERIMENT_SPEC", "plan dates must not be null", details={"reason": "plan_dates_null"})
     ladder.check_plan(src.admitted, full)  # the full plan, before the window can drop any row
-    plan = _plan_window(full)
+    dates = pd.to_datetime(full["event_date"])  # the inner window, as a row mask
+    plan = full[((dates >= pd.Timestamp(INNER[0])) & (dates < pd.Timestamp(INNER[1]))).to_numpy()]
     admitted_dates = dict(zip(src.admitted["events"]["event_id"].astype(str),
                               pd.to_datetime(src.admitted["events"]["event_date"])))
     if any(str(e) not in admitted_dates for e in plan["event_id"]):
