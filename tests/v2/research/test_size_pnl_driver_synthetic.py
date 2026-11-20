@@ -115,7 +115,7 @@ def fake_scores(src, ready, plan, facts_all, labels):
         frames.append(pd.DataFrame({"model_id": mid, "book": "straddle", "arm_or_rule": "R_L", "structure": None, "event_id": ids,
                                     "event_date": dates, "status": "taken", "reason": None,
                                     "pnl_dollars": 1.0 + k + np.arange(len(ids)) * 0.5, "pred_move": move}))
-    return frames, {}, "sha256:fake", 0
+    return frames, {}, "sha256:fake", 0, {}
 
 
 @pytest.fixture
@@ -204,11 +204,11 @@ def test_a_replay_whose_second_scoring_differs_fails_x7_and_stops(tmp_path, monk
     calls = []
 
     def scores(*args):
-        frames, skipped, ladder, dropped = fake_scores(*args)
+        frames, skipped, ladder, dropped, declined = fake_scores(*args)
         calls.append(1)
         if len(calls) == 2:  # the replay's second scoring returns altered P&L
             frames = [f.assign(pnl_dollars=f["pnl_dollars"] + 1.0) for f in frames]
-        return frames, skipped, ladder, dropped
+        return frames, skipped, ladder, dropped, declined
 
     monkeypatch.setattr(driver, "_synthetic_scores", scores)
     driver.run_synthetic(sources(), tmp_path, prereg=OK, replay=True)
@@ -306,8 +306,8 @@ def test_run_synthetic_refuses_an_expected_that_differs_from_the_plan_identity(t
 
 def test_an_empty_scored_population_refuses_before_any_decision(tmp_path, monkeypatch, fakes):
     def all_undetermined(src, ready, plan, facts_all, labels):
-        frames, skipped, ladder, dropped = fake_scores(src, ready, plan, facts_all, labels)
-        return [f.assign(status="undetermined") for f in frames], skipped, ladder, dropped
+        frames, skipped, ladder, dropped, declined = fake_scores(src, ready, plan, facts_all, labels)
+        return [f.assign(status="undetermined") for f in frames], skipped, ladder, dropped, declined
 
     monkeypatch.setattr(driver, "_synthetic_scores", all_undetermined)
     with pytest.raises(Refusal) as caught:
@@ -319,8 +319,8 @@ def test_an_empty_scored_population_refuses_before_any_decision(tmp_path, monkey
 
 def test_one_decided_quarter_refuses_as_underclustered(tmp_path, monkeypatch, fakes):
     def one_event_decided(src, ready, plan, facts_all, labels):
-        frames, skipped, ladder, dropped = fake_scores(src, ready, plan, facts_all, labels)
-        return [f.assign(status=["taken" if e == "E1" else "undetermined" for e in f["event_id"]]) for f in frames], skipped, ladder, dropped
+        frames, skipped, ladder, dropped, declined = fake_scores(src, ready, plan, facts_all, labels)
+        return [f.assign(status=["taken" if e == "E1" else "undetermined" for e in f["event_id"]]) for f in frames], skipped, ladder, dropped, declined
 
     monkeypatch.setattr(driver, "_synthetic_scores", one_event_decided)
     with pytest.raises(Refusal) as caught:
@@ -436,3 +436,25 @@ def test_a_planned_event_in_no_model_table_is_counted_as_no_prediction(tmp_path,
     driver.run_synthetic(sources(plan_frame=plan, admitted=admitted), tmp_path, prereg=OK)
     receipt = json.loads((tmp_path / "receipts" / "synthetic.json").read_text(encoding="utf-8"))
     assert receipt["events_no_prediction"] == 1 and receipt["planned"] == 3  # E1, E2 and E9 are planned in the inner window
+
+
+def test_reads_take_only_the_planned_events_and_an_unplanned_admitted_event_is_never_requested(tmp_path, monkeypatch, fakes):
+    """E5 is admitted and dated inside the inner window but is not in the plan. Neither reader is asked for it, and the generator
+    sees only the planned labels, so E5's label cannot reach any other event's shrinkage forecast."""
+    admitted = readers.Admitted({"events": pd.DataFrame({"event_id": [*EVENTS, "E5"], "event_date": pd.to_datetime([*EVENTS.values(), "2024-05-01"])}), "excluded": {}})
+    asked = []
+    real_prod, real_labels = readers.read_production, readers.read_labels
+
+    def spy(real):
+        def wrapped(*args, **kwargs):
+            asked.append(kwargs.get("event_ids"))
+            return real(*args, **kwargs)
+        return wrapped
+
+    monkeypatch.setattr(readers, "read_production", spy(real_prod))
+    monkeypatch.setattr(readers, "read_labels", spy(real_labels))
+    driver.run_synthetic(sources(admitted=admitted), tmp_path, prereg=OK)
+    assert asked == [{"E1", "E2"}, {"E1", "E2"}]  # production, then labels: the plan's ids only
+    assert fakes == [["E1", "E2"]]
+    receipt = json.loads((tmp_path / "receipts" / "synthetic.json").read_text(encoding="utf-8"))
+    assert receipt["declined"] == {} and receipt["planned"] == 2

@@ -205,10 +205,20 @@ def test_population_drops_an_event_undetermined_under_any_model_or_unit():
 
 def test_means_and_contrast_rows_hand_checked():
     out = run()
-    assert len(out["means"]) == 8 * 3 and all(len(r) == 10 for r in out["means"])
-    # M06 on S1: 8 taken events at a constant 2.0 per event; rmse and mae from META
-    assert ["M06", "median_noise", '{"s": 0.6}', "S1", 8, 8, 0, 2.0, 1.8, 0.9] in out["means"]
+    assert len(out["means"]) == 8 * 3 and all(len(r) == 11 for r in out["means"])
+    # M06 on S1: 8 taken events at a constant 2.0 per event; rmse and mae from META; no declines given, so no share
+    assert ["M06", "median_noise", '{"s": 0.6}', "S1", 8, 8, 0, 2.0, 1.8, 0.9, None] in out["means"]
     # median M06 (2.0) minus mean N06 (1.0) is +1 on every event, so the mean is 1.0 and every quarter (4 of 4) is positive;
-    # a constant series gives degenerate bootstrap intervals at 1.0
-    assert ["S1", "s=0.6", 1.0, "4/0/0", 1.0, 1.0, 1.0, 1.0] in out["contrasts"]
-    assert all(len(r) == 8 for r in out["contrasts"])
+    # a constant series gives degenerate bootstrap intervals at 1.0; all events are in 2024, so the year sign is +
+    assert ["S1", "s=0.6", 1.0, "4/0/0", 1.0, 1.0, 1.0, 1.0, "2024:+"] in out["contrasts"]
+    assert all(len(r) == 9 for r in out["contrasts"])
+
+
+def test_declined_share_and_year_signs_hand_checked():
+    """M06 declines 2 of its 8 S1 candidates: share 2/8 = 0.25. S2 has no declines given and R_L is a straddle unit: both None.
+    The S1 contrast (median M06 minus mean N06, all in 2024) carries the year sign 2024:+."""
+    out = ev.evaluate(frame_of(), META, TICKERS, ARM, resamples=RESAMPLES, declined={"M06": {"S1": [2, 8]}})
+    assert ["M06", "median_noise", '{"s": 0.6}', "S1", 8, 8, 0, 2.0, 1.8, 0.9, 0.25] in out["means"]
+    assert ["M06", "median_noise", '{"s": 0.6}', "S2", 8, 8, 0, 2.0, 1.8, 0.9, None] in out["means"]
+    assert ["M06", "median_noise", '{"s": 0.6}', "R_L", 8, 8, 0, 2.0, 1.8, 0.9, None] in out["means"]
+    assert ["S1", "s=0.6", 1.0, "4/0/0", 1.0, 1.0, 1.0, 1.0, "2024:+"] in out["contrasts"]

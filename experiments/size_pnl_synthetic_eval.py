@@ -66,6 +66,14 @@ def _quarter_var(sub, column="width"):
     return float(v.max()) if v.notna().any() else 0.0
 
 
+_MARKS = {1: "+", -1: "-", 0: "0"}
+
+
+def _year_signs(summary):
+    """A contrast summary's yearly signs as ``2023:+ 2024:-``, sorted by year."""
+    return " ".join(f"{y}:{_MARKS[int(np.sign(v))]}" for y, v in sorted(summary["year_signs"].items()))
+
+
 def _rung_rows(id_, units, meta, names, sign, arm, resamples, seed):
     """X3/X4: each rung s >= level_gap_min_s, median-minus-mean P&L per named unit, classified against sign.
     Also returns each named unit's contrast summary at that rung (the T11 contrasts table)."""
@@ -79,7 +87,7 @@ def _rung_rows(id_, units, meta, names, sign, arm, resamples, seed):
             res = contrast.contrast(w[med].to_numpy() - w[mean].to_numpy(), u["quarters"], u["tickers"], resamples=resamples, seed=seed)
             pairs[name] = {"inner": res}
             qc = res["quarter_counts"]
-            summaries.append([name, f"s={s}", res["mean"], f"{qc['positive']}/{qc['negative']}/{qc['zero']}", *res["quarter_interval"], *res["ticker_interval"]])
+            summaries.append([name, f"s={s}", res["mean"], f"{qc['positive']}/{qc['negative']}/{qc['zero']}", *res["quarter_interval"], *res["ticker_interval"], _year_signs(res)])
         rows.append([id_, f"s={s}", contrast.classify(pairs, sign, full_years=(arm["inner_years"][1],)), f"pairs={len(pairs)}"])
     return rows, summaries
 
@@ -95,21 +103,24 @@ def population(decisions):
     return decisions[~decisions["event_id"].astype(str).isin(bad)]
 
 
-def _means(units, meta):
-    """Per (predictor, unit) on E: events, taken and not_taken counts, mean P&L per event (untaken rows 0) and the fit errors."""
+def _means(units, meta, declined):
+    """Per (predictor, unit) on E: events, taken and not_taken counts, mean P&L per event (untaken rows 0), the fit errors,
+    and the declined share (declined over candidates) of a short-vol unit, None for a straddle unit or when absent."""
     rows = []
     for unit, u in units.items():
         for mid in u["wide"].columns:
             status = u["rows"].loc[u["rows"]["model_id"] == mid, "status"]
+            got = declined.get(mid, {}).get(unit) if u["book"] == SHORT else None
+            share = got[0] / got[1] if got and got[1] else None
             rows.append([mid, meta[mid]["family"], json.dumps(meta[mid]["params"], sort_keys=True), unit, len(u["wide"]),
                          int((status == "taken").sum()), int((status == "not_taken").sum()),
-                         float(u["wide"][mid].mean()), meta[mid]["rmse"], meta[mid]["mae"]])
+                         float(u["wide"][mid].mean()), meta[mid]["rmse"], meta[mid]["mae"], share])
     return rows
 
 
-def evaluate(decisions, meta, tickers, arm, *, replay_equal=None, resamples=contrast.RESAMPLES, seed=contrast.SEED):
+def evaluate(decisions, meta, tickers, arm, *, replay_equal=None, resamples=contrast.RESAMPLES, seed=contrast.SEED, declined=None):
     """SY2 evaluation of the synthetic decisions on E: quarter-bootstrap slopes, the X1-X7 table, the calibration means
-    and contrasts, and the stop ids."""
+    and contrasts, and the stop ids. ``declined`` is {model: {short-vol unit: [declined, candidates]}}, the width declines."""
     decisions = population(decisions)
     units, slopes, x = _units(decisions, tickers), [], []
     for unit, u in units.items():
@@ -163,6 +174,6 @@ def evaluate(decisions, meta, tickers, arm, *, replay_equal=None, resamples=cont
     x += rung3 + rung4
     x.append(["X7", "replay", "not_run" if replay_equal is None else ("pass" if replay_equal else "fail"), f"replay_equal={replay_equal}"])
     stop = [f"{r[0]} {r[1]}" for r in x if r[0] in STOP_IDS and r[2] in ("fail", "Failed")]
-    slopes, x, means, contrasts = _safe(slopes), _safe(x), _safe(_means(units, meta)), _safe(sums3 + sums4)
+    slopes, x, means, contrasts = _safe(slopes), _safe(x), _safe(_means(units, meta, declined or {})), _safe(sums3 + sums4)
     hashed = {"slopes": slopes, "x": [r for r in x if r[0] != "X7"], "means": means, "contrasts": contrasts}
     return {"slopes": slopes, "x": x, "means": means, "contrasts": contrasts, "stop": stop, "hash": content_hash(hashed)}

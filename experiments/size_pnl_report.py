@@ -272,11 +272,11 @@ def t11_synthetic(result):
     second = _section("T11 SYNTHETIC slopes", ["type", "unit", "metric", "slope", "lo_90", "hi_90"], result["slopes"],
                       note="dollars per event per error point; quarter bootstrap 90% interval")
     means = _section("T11 SYNTHETIC means", ["model_id", "family", "params", "unit", "n_events", "taken", "not_taken",
-                                             "mean_pnl_per_event", "rmse", "mae"], result["means"],
+                                             "mean_pnl_per_event", "rmse", "mae", "declined_share"], result["means"],
                      note="mean_pnl_per_event = mean P&L per event of E (untaken rows count 0). The quarterly series behind each mean is "
                           "the published decisions_synthetic.parquet.")
     contrasts = _section("T11 SYNTHETIC contrasts", ["unit", "rung_s", "mean", "quarters +/-/0", "quarter_lo_90", "quarter_hi_90",
-                                                     "ticker_lo_90", "ticker_hi_90"], result["contrasts"],
+                                                     "ticker_lo_90", "ticker_hi_90", "year_signs"], result["contrasts"],
                          note="median-type minus mean-type P&L per event at each rung s >= level_gap_min_s; 90% quarter and ticker bootstrap intervals.")
     return [first, second, means, contrasts]
 
