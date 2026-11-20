@@ -1,5 +1,6 @@
-"""EXP-188 S9a: inner-stage (2023-2024) driver of the SIZE P&L re-score; outer stage S9b (#2660); the synthetic arm gets a gated helper in its own slice."""
+"""EXP-188 S9: driver of the SIZE P&L re-score, inner (S9a, 2023-2024) and outer (S9b, 2025, #2660) stages; the synthetic arm gets a gated helper in its own slice."""
 import hashlib
+import json
 import os
 import resource
 import sys
@@ -13,15 +14,23 @@ import pandas as pd
 
 from engine.v2.foundation import content_hash
 from engine.v2.ops.errors import fail
-from experiments import label_availability, size_pnl_inputs as inputs, size_pnl_ladder as ladder, size_pnl_prereg
-from experiments import size_pnl_readers as readers, size_pnl_shortvol as shortvol, size_pnl_tuning as tuning
+from experiments import label_availability, size_pnl_decisions as decisions, size_pnl_inputs as inputs, size_pnl_ladder as ladder, size_pnl_prereg
+from experiments import size_pnl_readers as readers, size_pnl_shortvol as shortvol, size_pnl_straddle as straddle, size_pnl_tuning as tuning
 from experiments.size_pnl_pool import build_pool
+from experiments.size_pnl_shortvol import Refusal
 
 INNER = ("2023-01-01", "2025-01-01")
-OUTER_YEAR = 2025  # the roster is resolved for this year; the outer stage itself is S9b
-STAGES = ("inner",)
+OUTER = ("2025-01-01", "2026-01-01")
+WARMUP_START = "2024-07-01"  # six months of inner history so the trailing cutoff is defined in 2025-01
+OUTER_YEAR = 2025  # the roster is resolved for this year
+STAGES = ("inner", "outer")
+ALPHA = tuning.ALPHA
 _DENIED, _CONFLICT = "HOLDOUT_ACCESS_DENIED", "EXPERIMENT_IDENTITY_CONFLICT"
 _FACTS = ("pre_iv30", "mcap_usd", "implied_move")
+_MARKS = ["exit_value", "rung", "lots", "pnl_dollars"]
+# The inputs receipt binds only what is the same in both stages: the production and table windows differ by stage
+# (the production binding hashes the windowed frame), so they are bound by the stage's own receipts instead.
+_BOUND = ("spec_hash", "identity", "roster", "models", "snapshot")
 
 
 @dataclass(frozen=True)
@@ -66,17 +75,19 @@ def _content(value):
     return repr(sorted(value.items()) if isinstance(value, dict) else value).encode()
 
 
+def _window(stage):
+    return (WARMUP_START, OUTER[1]) if stage == "outer" else INNER
+
+
 def _prepare(src, stage):
     """Steps 2-4: bind run, roster, models; read production and tables. Returns (roster, bound_tables, production)."""
     check_sources(src)
     if stage not in STAGES: raise ValueError(f"stage must be one of {STAGES}, got {stage!r}")
-    start, end = INNER
+    start, end = (INNER[0], OUTER[1]) if stage == "outer" else INNER  # the outer pool needs all history from INNER[0]
     identity = inputs.bind_run(src.plan, src.read, expected=src.expected, panel_id=src.panel_id)
-    roster = inputs.resolve_roster(src.plan, src.selection, outer_year=OUTER_YEAR,
-                                   pair_candidates=src.pair_candidates, blend_ids=src.blend_ids)
+    roster = inputs.resolve_roster(src.plan, src.selection, outer_year=OUTER_YEAR, pair_candidates=src.pair_candidates, blend_ids=src.blend_ids)
     bound = inputs.bind_models(src.plan, src.read, roster, src.admit)
-    production = readers.read_production(src.fetch, src.admitted, expected_hash=src.production_hash,
-                                         table_hash=src.production_table_hash, start=start, end=end)
+    production = readers.read_production(src.fetch, src.admitted, expected_hash=src.production_hash, table_hash=src.production_table_hash, start=start, end=end)
     return roster, {"identity": identity, "bound": bound, "tables": readers.model_tables(bound, roster, src.admitted, production, start=start, end=end)}, production
 
 
@@ -93,6 +104,32 @@ def model_events(table, facts, chunk, exits):
     return out
 
 
+def _smoke(src, event_ids):
+    """The smoke id set, or None. Ids outside the admitted population refuse; a subset never widens anything."""
+    if event_ids is None: return None
+    if not (isinstance(event_ids, (set, frozenset, list, tuple)) and all(isinstance(e, str) for e in event_ids)):
+        raise fail("INVALID_EXPERIMENT_SPEC", "smoke event ids must be a collection of strings", details={"reason": "event_ids_invalid"})
+    ids = {str(e) for e in event_ids}
+    if not ids <= set(src.admitted["events"]["event_id"].astype(str)): raise fail(_DENIED, "smoke event ids include a key that is not admitted", details={"reason": "key_not_admitted"})
+    if not ids: raise Refusal(_CONFLICT, "the smoke event id set is empty", {"reason": "empty_population"})
+    return ids
+
+
+def _restrict(table, ids):
+    return table if ids is None else table[table.index.astype(str).isin(list(ids))]
+
+
+def _plan_window(plan, window, ids):
+    dates = pd.to_datetime(plan["event_date"])
+    keep = ((dates >= pd.Timestamp(window[0])) & (dates < pd.Timestamp(window[1]))).to_numpy()
+    if ids is not None: keep = keep & plan["event_id"].astype(str).isin(list(ids)).to_numpy()
+    return plan[keep]
+
+
+def _scope(ids):
+    return None if ids is None else content_hash(sorted(ids))
+
+
 def _plan_rows(plan):
     """The windowed plan as rows sorted by event_id, so a changed window or date changes the receipt."""
     return sorted([[str(e), str(d), str(en), str(x), s, t] for e, d, en, x, s, t in zip(plan["event_id"], plan["event_date"], plan["entry_date"], plan["exit_date"], plan["session"], plan["ticker"])], key=lambda r: r[0])
@@ -107,10 +144,26 @@ def _receipt(path, body, reason):
         raise shortvol.Refusal(_CONFLICT, str(refusal), {**refusal.details, "reason": reason}) from refusal
 
 
+def _exits(src):
+    """Event id -> the event's exit_date as an ISO date, where known."""
+    return {str(e): pd.Timestamp(x).date().isoformat() for e, x in zip(src.plan_frame["event_id"], src.plan_frame["exit_date"]) if pd.notna(x)}
+
+
+def _pool_tables(ready):
+    """Each ready model's table on the ids every ready model has: one population rule for both stages (design section 4)."""
+    common = set.intersection(*(set(e["table"].index.astype(str)) for e in ready.values()))
+    return {mid: e["table"][e["table"].index.astype(str).isin(common)] for mid, e in ready.items()}
+
+
 def _printed(labels, exits, cutoff):
     """The labels whose event's exit_date is printed before ``cutoff`` (an ISO date)."""
     ids = labels.index.astype(str)
     return labels[ids.isin([e for e in ids if e in exits and label_availability.available_before(exits[e], cutoff)])]
+
+
+def _tally(total, chunk):
+    for reason, n in chunk.get("skipped", {}).items(): total[str(reason)] = total.get(str(reason), 0) + int(n)
+    return total
 
 
 def _sims(chunk, events, table, labels, exits):
@@ -123,16 +176,14 @@ def _sims(chunk, events, table, labels, exits):
 
 
 def _inner(src, out, ready, plan, facts_all, labels):
-    exits = {str(e): pd.Timestamp(x).date().isoformat()  # event id -> exit_date (ISO), where known
-             for e, x in zip(src.plan_frame["event_id"], src.plan_frame["exit_date"]) if pd.notna(x)}
+    exits = _exits(src)
     items, quarters = {mid: [] for mid in ready}, pd.to_datetime(plan["event_date"]).dt.to_period("Q").nunique()
     kept, started, skipped, common, digest = 0, time.monotonic(), {}, {}, hashlib.sha256()
-    common_ids = set.intersection(*(set(e["table"].index.astype(str)) for e in ready.values()))  # forecast coverage shared by every ready model
-    pool_tables = {mid: e["table"][e["table"].index.astype(str).isin(common_ids)] for mid, e in ready.items()}  # residual pools use only common ids
+    pool_tables = _pool_tables(ready)
     for number, (label, chunk) in enumerate(ladder.ladder_chunks(src.admitted, plan, src.load_index), start=1):
         digest.update(str(label).encode() + b"".join(f"{key}\0".encode() + _content(chunk[key]) for key in sorted(chunk)))  # the consumed quotes, bound
         kept += len(chunk["event_id"])
-        for reason, n in chunk.get("skipped", {}).items(): skipped[str(reason)] = skipped.get(str(reason), 0) + int(n)
+        skipped = _tally(skipped, chunk)
         built = {}
         for mid, entry in ready.items():
             events = model_events(entry["table"], facts_all, chunk, exits)  # facts_all: the run's only facts call
@@ -149,40 +200,128 @@ def _inner(src, out, ready, plan, facts_all, labels):
     for mid in ready:
         for c in tuning.C_GRID:
             for name in shortvol.NAMES:
-                rows = pd.concat([shortvol.score_events(chunk, events, sims, name, alpha=tuning.ALPHA, c=c)
-                                  for chunk, events, sims in items[mid]], ignore_index=True)
+                rows = pd.concat([shortvol.score_events(chunk, events, sims, name, alpha=tuning.ALPHA, c=c) for chunk, events, sims in items[mid]], ignore_index=True)
                 bad |= set(rows.loc[rows["status"] != "scored", "event_id"].astype(str))
     for mid in ready:  # the common population is one event set for history and trades alike (design section 4)
-        items[mid] = [(chunk, events[~events["event_id"].isin(bad)], {e: s for e, s in sims.items() if e not in bad})
-                      for chunk, events, sims in items[mid]]
+        items[mid] = [(chunk, events[~events["event_id"].isin(bad)], {e: s for e, s in sims.items() if e not in bad}) for chunk, events, sims in items[mid]]
     by_model = {mid: sum(len(events) for _c, events, _s in items[mid]) for mid in ready}
     hashes = {}
     for i, mid in enumerate(ready, start=1):
         started = time.monotonic()
         body = tuning.tune(items[mid], mid)
         hashes[mid] = tuning.write_receipt(out / "receipts" / f"tuning_{mid}.json", body)["content_hash"]
-        _log(f"tuning model {i}/{len(ready)} {mid} elapsed={time.monotonic() - started:.1f}s "
-             f"c={body['c']} skipped={body['skipped']}")
+        _log(f"tuning model {i}/{len(ready)} {mid} elapsed={time.monotonic() - started:.1f}s " f"c={body['c']} skipped={body['skipped']}")
     return hashes, max(by_model.values(), default=0), skipped, by_model, common, len(bad), "sha256:" + digest.hexdigest()
 
 
-def run(src, stage, out_dir, *, prereg=size_pnl_prereg.require_preregistration):
-    """Run the inner stage, write its receipts under ``out_dir``, and return a JSON-safe summary."""
+def _outer_gate(out, ready, scope, body):
+    """Refuses before any chunk is built: every ready model needs its tuning receipt, and inner.json must bind those
+    receipts, have been tuned on this run's event scope, and bind this run's inputs."""
+    receipts = {mid: tuning.load_receipt(out / "receipts" / f"tuning_{mid}.json") for mid in ready}
+    inner = tuning.load_receipt(out / "receipts" / "inner.json")
+    if any(inner["models"].get(mid) != receipts[mid]["content_hash"] for mid in ready):
+        raise Refusal(_CONFLICT, "inner.json does not bind every ready model's tuning receipt", {"reason": "inner_receipt_mismatch"})
+    if "scope" not in inner or inner["scope"] != scope: raise Refusal(_CONFLICT, "inner.json was tuned on a different event scope", {"reason": "scope_mismatch"})
+    inputs_inner, now = tuning.load_receipt(out / "receipts" / "inputs_inner.json"), json.loads(json.dumps(body))
+    if any(inputs_inner.get(k) != now[k] for k in _BOUND): raise Refusal(_CONFLICT, "inputs_inner.json was bound to different inputs", {"reason": "inner_inputs_mismatch"})
+    if inner["inputs"] != inputs_inner["content_hash"]: raise Refusal(_CONFLICT, "inner.json was tuned on different inner tables", {"reason": "inner_tables_mismatch"})
+    return receipts
+
+
+def _unbound_outer(roster, tables, ready):
+    """Refuses a non-production model with no table rows in the outer year (its 2025 predictions are not bound yet)."""
+    kinds = {m["model_id"]: m["kind"] for m in roster["models"]}
+    for mid in ready:
+        dates = pd.to_datetime(tables[mid]["table"]["event_date"])
+        if kinds[mid] != "production" and not ((dates >= pd.Timestamp(OUTER[0])) & (dates < pd.Timestamp(OUTER[1]))).any():
+            raise Refusal(_CONFLICT, "v14 2025 refit predictions are not bound for a non-production model", {"reason": "outer_predictions_unbound"})
+
+
+def _model_state(c):
+    edges = pd.DataFrame({"event_date": pd.Series([], dtype="datetime64[ns]"), "edge": pd.Series([], dtype=float)})
+    return {"c": float(c), "scored": {"as_is": [], "retuned": []}, "edges": edges}
+
+
+def _rows(mid, book, arm, dec, taken, events):
+    """Decision rows of one (model, book, arm), with the marks of the taken rows and the model's forecast (pred_move, pred_crush) merged on event_id."""
+    take = [c for c in [*_MARKS, "entry_cost", "pnl_per_share"] if c not in dec.columns]
+    fc = events[["event_id", "pred_move", "pred_crush"]].assign(event_id=events["event_id"].astype(str))
+    frame = dec.merge(taken[["event_id", *take]], on="event_id", how="left").merge(fc, on="event_id", how="left")
+    if "structure" not in frame.columns: frame = frame.assign(structure=None)
+    return frame.assign(model_id=mid, book=book, arm_or_rule=arm)
+
+
+def _month(mid, table, events, chunk, labels, exits, start_m, st):
+    """Steps 7a-7d for one model and one calendar month, with the pool of rows and labels known before the month (R6).
+    Warm-up months (before OUTER[0]) only add history and emit no rows."""
+    output = start_m >= pd.Timestamp(OUTER[0])
+    pool = build_pool(table[table["event_date"] < start_m], _printed(labels, exits, start_m.date().isoformat()))
+    sims = shortvol.simulate(chunk, events, pool)
+    ids, frames = set(events["event_id"].astype(str)), []
+    for arm, c in (("as_is", 1.0), ("retuned", st["c"])):
+        for name in shortvol.NAMES:
+            st["scored"][arm].append(shortvol.score_events(chunk, events, sims, name, alpha=ALPHA, c=c))
+            if not output: continue
+            decided = shortvol.decide(pd.concat(st["scored"][arm], ignore_index=True))
+            mine = decided[decided["event_id"].astype(str).isin(ids) & (decided["structure"] == name)]
+            frames.append(_rows(mid, "short_vol", arm, mine, shortvol.score(chunk, events, mine, name, ALPHA, c=c), events))
+    first = None
+    for rule in straddle.RULES:
+        dec = straddle.decide(events, st["edges"], rule, chunk)
+        first = dec if first is None else first
+        if output: frames.append(_rows(mid, "straddle", rule, dec, straddle.score(chunk, events, dec, ALPHA), events))
+    st["edges"] = pd.concat([st["edges"], first[["event_date", "edge"]]], ignore_index=True)
+    return frames
+
+
+def _outer(src, out, ready, receipts, plan, ids, facts_all, labels):
+    """The outer stage: per ladder chunk and calendar month, decide, then read that month's labels (R6). Publishes decisions."""
+    exits, pools = _exits(src), _pool_tables(ready)
+    dates = pd.to_datetime(plan["event_date"])
+    quarter, month = dates.dt.to_period("Q").astype(str).to_numpy(), dates.dt.to_period("M").to_numpy()
+    total, state = len(set(month)), {mid: _model_state(receipts[mid]["c"]) for mid in ready}
+    frames, done, started, skipped = [], 0, time.monotonic(), {}
+    for label, chunk in ladder.ladder_chunks(src.admitted, plan, src.load_index):
+        skipped = _tally(skipped, chunk)
+        events = {mid: model_events(pools[mid], facts_all, chunk, exits) for mid in ready}
+        for period in sorted({m for m, q in zip(month, quarter) if q == label}):
+            start_m, month_frames = period.start_time, []
+            for mid in ready:
+                at = events[mid][events[mid]["event_date"].dt.to_period("M") == period]
+                month_frames += _month(mid, pools[mid], at, chunk, labels, exits, start_m, state[mid])
+            frames += month_frames
+            done += 1
+            rate = done / max(time.monotonic() - started, 1e-9)
+            skips = pd.concat(month_frames)["reason"].value_counts().to_dict() if month_frames else {}
+            _log(f"outer month {period} {done}/{total} rate={rate:.2f}/s eta={(total - done) / rate:.0f}s skips={skips} rss={_rss_mb():.0f}MB")
+            if start_m >= pd.Timestamp(OUTER[0]):  # R6: only after this month's rows are complete
+                labels = pd.concat([labels, readers.read_labels(src.fetch, src.admitted, start=start_m, end=(period + 1).start_time, event_ids=ids)])
+    inputs_hash = tuning.load_receipt(out / "receipts" / "inputs_outer.json")["content_hash"]
+    rows = decisions.publish(out, frames, {"stage": "outer", "models": list(ready), "ladder_skipped": skipped, "scope": _scope(ids), "inputs": inputs_hash})
+    return rows, skipped
+
+
+def run(src, stage, out_dir, *, event_ids=None, prereg=size_pnl_prereg.require_preregistration):
+    """Run one stage, write its receipts under ``out_dir``, and return a JSON-safe summary.
+
+    ``event_ids`` is an optional smoke set: every model table, the plan and the labels are restricted to it, and its
+    scope is receipted, so a smoke receipt cannot pass for a full-population one.
+    """
     started = time.monotonic()
     receipt = prereg()
     check_sources(src)
     # The supervisor owns heavy jobs: this run must sit under tools/bounded_run.py --heavy.
     if os.environ.get("BOUNDED_RUN_NESTED") != "1":
         raise fail("RESOURCE_UNAVAILABLE", "run under tools/bounded_run.py --heavy", details={"reason": "not_bounded"})
-    out = Path(out_dir)
-    roster, bound_tables, production = _prepare(src, stage)  # refuses any stage but "inner" before reading
-    ready = {mid: e for mid, e in bound_tables["tables"].items() if e["status"] == "ready"}
-    excluded = {mid: e["reason"] for mid, e in bound_tables["tables"].items() if e["status"] != "ready"}
+    out, ids = Path(out_dir), _smoke(src, event_ids)
+    roster, bound_tables, production = _prepare(src, stage)  # refuses any stage but "inner" or "outer" before reading
+    tables = bound_tables["tables"]
+    ready = {mid: {**e, "table": _restrict(e["table"], ids)} for mid, e in tables.items() if e["status"] == "ready"}
+    excluded = {mid: e["reason"] for mid, e in tables.items() if e["status"] != "ready"}
     full = src.plan_frame
     if full[[c for c in ("event_date", "entry_date", "exit_date") if c in full.columns]].isna().to_numpy().any(): raise fail("INVALID_EXPERIMENT_SPEC", "plan dates must not be null", details={"reason": "plan_dates_null"})
     ladder.check_plan(src.admitted, full)  # the full plan, before the window can drop any row
-    dates = pd.to_datetime(full["event_date"])  # the inner window, as a row mask
-    plan = full[((dates >= pd.Timestamp(INNER[0])) & (dates < pd.Timestamp(INNER[1]))).to_numpy()]
+    plan = _plan_window(full, _window(stage), ids)
     admitted_dates = dict(zip(src.admitted["events"]["event_id"].astype(str), pd.to_datetime(src.admitted["events"]["event_date"])))
     if any(str(e) not in admitted_dates for e in plan["event_id"]): raise fail(_DENIED, "plan event ids include a key that is not admitted", details={"reason": "key_not_admitted"})
     facts_all = src.facts(sorted(str(e) for e in plan["event_id"]))  # the only facts call of the run
@@ -194,24 +333,31 @@ def run(src, stage, out_dir, *, prereg=size_pnl_prereg.require_preregistration):
     facts_all = pd.concat([facts_all.drop(columns=list(_FACTS)), numeric], axis=1)
     _log(f"facts_nan_rows={int(facts_all[list(_FACTS)].isna().any(axis=1).sum())}")
     facts_rows = sorted([str(e), *[None if pd.isna(v) else float(v) for v in vals]] for e, vals in zip(facts_all.index, facts_all[list(_FACTS)].to_numpy(dtype=float)))
-    labels = readers.read_labels(src.fetch, src.admitted, start=INNER[0], end=INNER[1], event_ids=None)  # inner only
+    labels = readers.read_labels(src.fetch, src.admitted, start=INNER[0], end=OUTER[0], event_ids=ids)  # the pre-2025 labels; outer adds each month's
     label_rows = sorted([[str(e), float(a), float(c)] for e, a, c in zip(labels.index, labels["abs_move"], labels["crush_pct_iv30"])], key=lambda r: r[0])
+    scope = _scope(ids)
     body = {"stage": "inputs", "spec_hash": receipt["spec_hash"], "identity": bound_tables["identity"],
             "roster": roster,  # inputs-level status per model: arrays are not receipted
             "models": {mid: ({"status": "ready"} if mid in ready and m["status"] == "deferred"
                              else {k: m[k] for k in ("status", "reason", "binding") if k in m})
                        for mid, m in bound_tables["bound"].items()},
             "tables": {mid: e["binding"] for mid, e in ready.items()},
-            "production": production["binding"], "scope": None, "plan": content_hash(_plan_rows(plan)),
+            "production": production["binding"], "scope": scope, "plan": content_hash(_plan_rows(plan)),
             "facts": content_hash(facts_rows), "labels": content_hash(label_rows), "snapshot": src.snapshot_id}
-    inputs_receipt = _receipt(out / "receipts" / "inputs_inner.json", body, "inputs_receipt_changed")
+    inputs_receipt = _receipt(out / "receipts" / f"inputs_{stage}.json", body, "inputs_receipt_changed")
     if not ready: raise shortvol.Refusal(_CONFLICT, "no model is ready to be tuned or scored", {"reason": "no_ready_models"})
+    receipts = _outer_gate(out, ready, scope, body) if stage == "outer" else {}  # refuses before any chunk is built
+    if stage == "outer": _unbound_outer(roster, tables, ready)
     if plan.empty: raise shortvol.Refusal(_CONFLICT, "the plan window holds no events", {"reason": "empty_population"})
-    hashes, rows, skipped, by_model, common, structure, ladder_hash = _inner(src, out, ready, plan, facts_all, labels)
-    _receipt(out / "receipts" / "inner.json",
-             {"stage": "inner", "models": hashes, "events": rows, "events_by_model": by_model, "ladder": ladder_hash,
-              "excluded": excluded, "scope": None, "inputs": inputs_receipt["content_hash"],
-              "ladder_skipped": skipped, "common_dropped": common, "common_dropped_structure": structure}, "inner_receipt_changed")
-    _log(f"stage={stage} end elapsed={time.monotonic() - started:.1f}s rss={_rss_mb():.0f}MB "
-         f"ladder_skipped={skipped} common_dropped={common} common_dropped_structure={structure}")
+    if stage == "inner":
+        hashes, rows, skipped, by_model, common, structure, ladder_hash = _inner(src, out, ready, plan, facts_all, labels)
+        _receipt(out / "receipts" / "inner.json",
+                 {"stage": "inner", "models": hashes, "events": rows, "events_by_model": by_model, "ladder": ladder_hash,
+                  "excluded": excluded, "scope": scope, "inputs": inputs_receipt["content_hash"],
+                  "ladder_skipped": skipped, "common_dropped": common, "common_dropped_structure": structure}, "inner_receipt_changed")
+        _log(f"stage={stage} end elapsed={time.monotonic() - started:.1f}s rss={_rss_mb():.0f}MB "
+             f"ladder_skipped={skipped} common_dropped={common} common_dropped_structure={structure}")
+    else:
+        rows, skipped = _outer(src, out, ready, receipts, plan, ids, facts_all, labels)
+        _log(f"stage={stage} end elapsed={time.monotonic() - started:.1f}s rss={_rss_mb():.0f}MB ladder_skipped={skipped}")
     return {"stage": stage, "models": sorted(ready), "excluded": excluded, "rows": rows, "ladder_skipped": skipped}
