@@ -88,9 +88,9 @@ def test_outer_refuses_before_building_any_chunk(tmp_path, outer_stubs):
     assert not (tmp_path / "receipts" / "inputs_outer.json").exists()
 
 
-def _stub_tables(monkeypatch, rows):
+def _stub_tables(monkeypatch, rows, moves=None):
     """Roster of one production and one candidate model; each model's table holds its own ``rows`` (event id -> date),
-    clipped to the stage's window."""
+    clipped to the stage's window. ``moves`` (model id -> pred_move) tells the models apart inside a stub; default 5.0."""
     roster = {"models": [{"model_id": "prod", "kind": "production"}, {"model_id": "cand", "kind": "v14"}]}
     monkeypatch.setattr(driver.inputs, "resolve_roster", lambda *a, **kw: roster)
     monkeypatch.setattr(driver.inputs, "bind_models", lambda *a, **kw: {})
@@ -99,7 +99,7 @@ def _stub_tables(monkeypatch, rows):
         out = {}
         for mid, events in rows.items():
             keep = [(e, d) for e, d in events.items() if pd.Timestamp(start) <= pd.Timestamp(d) < pd.Timestamp(end)]
-            table = pd.DataFrame({"pred_move": 5.0, "pred_crush": -12.0, "event_date": pd.to_datetime([d for _e, d in keep])},
+            table = pd.DataFrame({"pred_move": (moves or {}).get(mid, 5.0), "pred_crush": -12.0, "event_date": pd.to_datetime([d for _e, d in keep])},
                                  index=pd.Index([e for e, _d in keep], name="event_id"))
             out[mid] = {"status": "ready", "table": table, "binding": {"rows": len(keep)}}
         return out
@@ -469,6 +469,78 @@ def test_changed_ladder_quote_refuses_an_outer_replay(tmp_path, outer_stubs, mon
     assert not list(tmp_path.glob("*.tmp"))
 
 
+# ---- shared scoreability (design section 4) and the decisions cap ---------------------
+
+def _shared_drop_run(tmp_path, monkeypatch):
+    """Inner over 2024 Q3, then outer over 2024 Q3 and 2025 Q1 with the candidate's pred_move at 6.0 (the production's 5.0).
+    Returns the decide inputs, recorded in call order."""
+    _stub_tables(monkeypatch, {"prod": EVENTS, "cand": EVENTS}, moves={"cand": 6.0})
+    use_chunks(monkeypatch, [("2024Q3", chunk("E2"))])
+    driver.run(sources(), "inner", tmp_path, prereg=OK)
+    decide_inputs, passthrough = [], driver.shortvol.decide
+
+    def recording_decide(scored):
+        decide_inputs.append(scored.copy())
+        return passthrough(scored)
+
+    monkeypatch.setattr(driver.shortvol, "decide", recording_decide)
+    use_chunks(monkeypatch, [("2024Q3", chunk("E2")), ("2025Q1", chunk("E3", "E4"))])
+    return decide_inputs
+
+
+def _assert_e3_shared_dropped(tmp_path, decide_inputs):
+    frame = pd.read_parquet(tmp_path / "decisions.parquet")
+    assert set(frame["model_id"]) == {"prod", "cand"}  # both models still publish rows
+    assert "E3" not in set(frame["event_id"].astype(str))
+    assert not any("E3" in set(d["event_id"].astype(str)) for d in decide_inputs)  # neither model's history
+    assert any("E4" in set(d["event_id"].astype(str)) for d in decide_inputs)
+    assert tuning.load_receipt(tmp_path / "receipts" / "outer.json")["scoreability_dropped"] == 1
+
+
+def test_one_model_simulation_failure_drops_the_event_for_every_model(tmp_path, outer_stubs, monkeypatch):
+    decide_inputs = _shared_drop_run(tmp_path, monkeypatch)
+    simulate = driver.shortvol.simulate
+
+    def no_e3_for_cand(chunk_, events, pool, **kw):
+        sims = simulate(chunk_, events, pool, **kw)
+        if set(events["pred_move"]) == {6.0}: sims.pop("E3", None)  # the candidate's 2025-01 simulation is missing
+        return sims
+
+    monkeypatch.setattr(driver.shortvol, "simulate", no_e3_for_cand)
+    driver.run(sources(), "outer", tmp_path, prereg=OK)
+    _assert_e3_shared_dropped(tmp_path, decide_inputs)
+
+
+def test_one_model_structure_refusal_drops_the_event_for_every_model(tmp_path, outer_stubs, monkeypatch):
+    decide_inputs = _shared_drop_run(tmp_path, monkeypatch)
+    first = driver.shortvol.NAMES[0]
+
+    def refuse_e3_for_cand(chunk_, events, sims, name, *, alpha=0.5, c=1.0):
+        ids = events["event_id"].astype(str).to_numpy()
+        cand = set(events["pred_move"]) == {6.0} and name == first
+        status = ["undetermined" if cand and e == "E3" else "scored" for e in ids]
+        return pd.DataFrame({"event_id": ids, "event_date": events["event_date"].to_numpy(), "structure": name,
+                             "status": status, "reason": "scored"})
+
+    monkeypatch.setattr(driver.shortvol, "score_events", refuse_e3_for_cand)
+    driver.run(sources(), "outer", tmp_path, prereg=OK)
+    _assert_e3_shared_dropped(tmp_path, decide_inputs)
+
+
+def test_oversized_decisions_tmp_refuses_before_outer_json(tmp_path, outer_stubs, monkeypatch):
+    use_chunks(monkeypatch, [("2024Q3", chunk("E2"))])
+    driver.run(sources(), "inner", tmp_path, prereg=OK)
+    monkeypatch.setattr(driver.decisions, "MAX_DECISIONS_BYTES", 10)
+    use_chunks(monkeypatch, [("2024Q3", chunk("E2")), ("2025Q1", chunk("E3", "E4"))])
+    with pytest.raises(Refusal) as caught:
+        driver.run(sources(), "outer", tmp_path, prereg=OK)
+    assert caught.value.code == CONFLICT
+    assert caught.value.details["reason"] == "decisions_artifact_invalid"
+    assert not (tmp_path / "receipts" / "outer.json").exists()
+    assert not (tmp_path / "decisions.parquet").exists()
+    assert not list(tmp_path.glob("*.tmp"))
+
+
 # ---- run.py: --event-ids shape, and the cross-month oracle ------------------------
 
 @pytest.mark.parametrize("payload", [{"a": 1}, [1, 2]])
@@ -500,7 +572,7 @@ def test_cross_month_history_oracle_through_the_driver(tmp_path, outer_stubs, mo
     use_chunks(monkeypatch, [("2024Q3", chunk("E2"))])
     driver.run(sources(), "inner", tmp_path, prereg=OK)
     edges = {"E2": 0.25, "E3": 0.5, "E4": 0.75}
-    statuses = {"E2": "scored", "E3": "scored", "E4": "undetermined"}
+    statuses = {"E2": "scored", "E3": "scored", "E4": "scored"}
 
     def scored_literal(chunk_, events, sims, name, *, alpha=0.5, c=1.0):
         ids = events["event_id"].astype(str).to_numpy()

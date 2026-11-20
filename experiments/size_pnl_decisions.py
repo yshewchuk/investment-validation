@@ -31,11 +31,8 @@ def _write_decisions(tmp, frames):
     frame = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=_FRONT)
     frame = frame[_FRONT + [c for c in frame.columns if c not in _FRONT]]
     frame.to_parquet(tmp, index=False)
-    digest = hashlib.sha256()
-    with open(tmp, "r+b") as handle:
-        for block in iter(lambda: handle.read(_HASH_BLOCK), b""): digest.update(block)
-        os.fsync(handle.fileno())
-    return digest.hexdigest(), len(frame)
+    with open(tmp, "r+b") as handle: os.fsync(handle.fileno())
+    return _file_sha256(tmp), len(frame)  # bounded: refuses a non-regular or oversized tmp before outer.json is written
 
 
 def _file_sha256(path):

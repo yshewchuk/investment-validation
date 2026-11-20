@@ -284,16 +284,35 @@ def _rows(mid, book, arm, dec, taken, events):
     return frame.assign(model_id=mid, book=book, arm_or_rule=arm)
 
 
-def _month(mid, table, events, chunk, labels, exits, start_m, st):
-    """Steps 7a-7d for one model and one calendar month, with the pool of rows and labels known before the month (R6).
-    Warm-up months (before OUTER[0]) only add history and emit no rows."""
-    output = start_m >= pd.Timestamp(OUTER[0])
+def _month_scores(mid, table, events, chunk, labels, exits, start_m, st):
+    """Pass A for one model and calendar month: simulate once and score every (arm, name), with the pool of rows and
+    labels known before the month (R6). Returns the scored frames by (arm, name) and the ids with no simulation."""
     pool = build_pool(table[table["event_date"] < start_m], _printed(labels, exits, start_m.date().isoformat()))
     sims = shortvol.simulate(chunk, events, pool)
+    scored = {(arm, name): shortvol.score_events(chunk, events, sims, name, alpha=ALPHA, c=c)
+              for arm, c in (("as_is", 1.0), ("retuned", st["c"])) for name in shortvol.NAMES}
+    return scored, {str(e) for e in events["event_id"] if sims.get(e) is None}
+
+
+def _unscoreable(scored, missing):
+    """Ids a model cannot score this month: no simulation, or a non-"scored" row at any (arm, name)."""
+    return set(missing) | {str(e) for f in scored.values() for e in f.loc[f["status"] != "scored", "event_id"]}
+
+
+def _kept(frame, bad):
+    return frame[~frame["event_id"].astype(str).isin(bad)]
+
+
+def _month(mid, events, scored, bad, chunk, start_m, st):
+    """Pass B for one model and calendar month: drop the ``bad`` ids from the events, the scored frames and the straddle
+    inputs, then steps 7a-7d on Pass A's frames. Warm-up months (before OUTER[0]) apply the same mask (they feed history)
+    but only add history and emit no rows."""
+    output = start_m >= pd.Timestamp(OUTER[0])
+    events = _kept(events, bad)
     ids, frames = set(events["event_id"].astype(str)), []
     for arm, c in (("as_is", 1.0), ("retuned", st["c"])):
         for name in shortvol.NAMES:
-            st["scored"][arm].append(shortvol.score_events(chunk, events, sims, name, alpha=ALPHA, c=c))
+            st["scored"][arm].append(_kept(scored[(arm, name)], bad))
             if not output: continue
             decided = shortvol.decide(pd.concat(st["scored"][arm], ignore_index=True))
             mine = decided[decided["event_id"].astype(str).isin(ids) & (decided["structure"] == name)]
@@ -313,21 +332,24 @@ def _outer(src, out, ready, receipts, plan, ids, facts_all, labels):
     dates = pd.to_datetime(plan["event_date"])
     quarter, month = dates.dt.to_period("Q").astype(str).to_numpy(), dates.dt.to_period("M").to_numpy()
     total, state = len(set(month)), {mid: _model_state(receipts[mid]["c"]) for mid in ready}
-    frames, done, started, skipped, fresh, digest = [], 0, time.monotonic(), {}, [], hashlib.sha256()
+    frames, done, started, skipped, fresh, digest, dropped = [], 0, time.monotonic(), {}, [], hashlib.sha256(), set()
     for label, chunk in ladder.ladder_chunks(src.admitted, plan, src.load_index):
         _bind_chunk(digest, label, chunk)
         skipped = _tally(skipped, chunk)
         events = {mid: model_events(pools[mid], facts_all, chunk, exits) for mid in ready}
         for period in sorted({m for m, q in zip(month, quarter) if q == label}):
             start_m, month_frames = period.start_time, []
+            at = {mid: events[mid][events[mid]["event_date"].dt.to_period("M") == period] for mid in ready}
+            scored = {mid: _month_scores(mid, pools[mid], at[mid], chunk, labels, exits, start_m, state[mid]) for mid in ready}
+            bad = set().union(*(_unscoreable(s, m) for s, m in scored.values()))  # one shared population for all models (design section 4)
+            dropped |= bad
             for mid in ready:
-                at = events[mid][events[mid]["event_date"].dt.to_period("M") == period]
-                month_frames += _month(mid, pools[mid], at, chunk, labels, exits, start_m, state[mid])
+                month_frames += _month(mid, at[mid], scored[mid][0], bad, chunk, start_m, state[mid])
             frames += month_frames
             done += 1
             rate = done / max(time.monotonic() - started, 1e-9)
             skips = pd.concat(month_frames)["reason"].value_counts().to_dict() if month_frames else {}
-            _log(f"outer month {period} {done}/{total} rate={rate:.2f}/s eta={(total - done) / rate:.0f}s skips={skips} rss={_rss_mb():.0f}MB")
+            _log(f"outer month {period} {done}/{total} rate={rate:.2f}/s eta={(total - done) / rate:.0f}s scoreability_dropped={len(dropped)} skips={skips} rss={_rss_mb():.0f}MB")
             if start_m >= pd.Timestamp(OUTER[0]):  # R6: only after this month's rows are complete
                 got = readers.read_labels(src.fetch, src.admitted, start=start_m, end=(period + 1).start_time, event_ids=ids)
                 fresh.append(got)
@@ -335,7 +357,8 @@ def _outer(src, out, ready, receipts, plan, ids, facts_all, labels):
     inputs_hash = tuning.load_receipt(out / "receipts" / "inputs_outer.json")["content_hash"]
     body = {"stage": "outer", "models": list(ready), "ladder_skipped": skipped, "scope": _scope(ids), "inputs": inputs_hash,
             "tuning": {mid: receipts[mid]["content_hash"] for mid in ready}, "c": {mid: receipts[mid]["c"] for mid in ready},
-            "labels": content_hash(_label_rows(fresh)), "common_dropped": _common_dropped(ready), "ladder": "sha256:" + digest.hexdigest()}
+            "labels": content_hash(_label_rows(fresh)), "common_dropped": _common_dropped(ready),
+            "scoreability_dropped": len(dropped), "ladder": "sha256:" + digest.hexdigest()}
     rows = decisions.publish(out, frames, body)
     return rows, skipped
 
