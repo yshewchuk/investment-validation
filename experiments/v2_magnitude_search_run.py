@@ -37,6 +37,7 @@ from engine.v2.ops.experiments import experiment_spec_from_document
 from engine.v2.ops.fingerprints import source_closure
 from engine.v2.ops.migrations import require_current
 from engine.v2.research.progress import Progress, decision, stage
+from experiments.magnitude_search_errors import artifact_failure
 from experiments.magnitude_search_execution import validate_execution_limits
 from experiments.magnitude_search_outer import collect_outer_results, execute_outer_fold, shared_freeze
 from experiments.magnitude_search_plan import plan_memo, read_search_plan, trial_key
@@ -103,6 +104,29 @@ def _terminate_worker(signum, frame):
     raise _WorkerTerminating
 
 
+def _plan_bound(plan_ref):
+    """Refuse a plan reference above the parallel-worker read bound; checked in the parent before any dispatch or deadline write."""
+    if getattr(plan_ref, "byte_size", 0) > MAX_REPORT_BYTES:
+        raise fail("RESOURCE_LIMIT_EXCEEDED", "stored search plan exceeds the read bound")
+
+
+def _stored_plan(store, plan_ref):
+    """Read the verified plan artifact the parent sealed; the worker does not rebuild it from the registration."""
+    if not isinstance(plan_ref, ArtifactRef):
+        raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search plan reference is invalid")
+    _plan_bound(plan_ref)
+    try:
+        plan = json.loads(store.read_verified(plan_ref))
+    except ArtifactError as error:
+        raise artifact_failure(error, integrity_message="stored search plan failed integrity verification",
+                               resource_message="stored search plan could not be read") from None
+    except (ValueError, RecursionError):
+        raise fail("EXPERIMENT_IDENTITY_CONFLICT", "stored search plan failed verification") from None
+    if not isinstance(plan, dict) or not isinstance(plan.get("plan_id"), str):
+        raise fail("EXPERIMENT_IDENTITY_CONFLICT", "stored search plan failed verification")
+    return plan
+
+
 def _init_trial_worker(conn_path, store_root, run_id, request, plan_ref, memory_bytes, adopt=False):
     global _PARALLEL, _WORKER_WATCHDOG_STOP, _WORKER_TERMINATING
     _WORKER_WATCHDOG_STOP = None
@@ -114,22 +138,23 @@ def _init_trial_worker(conn_path, store_root, run_id, request, plan_ref, memory_
         conn = connect(conn_path, must_exist=True)
         conn.execute("PRAGMA busy_timeout=30000")
         store = ArtifactStore(store_root)
-        verified_size_rows = {}
-        binding = verified_registration_bytes(conn, store, run_id, max_evidence_bytes=MAX_NATIVE_EVIDENCE_BYTES,
-                                              verified_size_rows=verified_size_rows)
+        binding = verified_registration_bytes(conn, store, run_id, max_evidence_bytes=MAX_NATIVE_EVIDENCE_BYTES)
         if binding is None:
             raise fail("INVALID_EXPERIMENT_SPEC", "native experiment has not been preregistered")
+        release_parent_caches("worker startup")  # verification holds every v1.7 shard row; return the heap before trials start
         try:
-            document = load_registration_document(store, binding, verified_size_rows=verified_size_rows)
-            registration = NativeRegistration(run_id, binding,
-                document if document.get("schema_version") == "native_experiment_registration.v1.7" else None)
-            log_memory("worker registration loaded", registration=registration.document_value)
-        except (ArtifactError, ValueError, KeyError, TypeError):
+            schema = json.loads(binding).get("schema_version")
+            hydrate = ((lambda: load_registration_document(store, binding))
+                       if schema == "native_experiment_registration.v1.7" else None)
+            registration = NativeRegistration(run_id, binding, hydrate=hydrate)
+            log_memory("worker registration loaded", registration=registration.lean)
+        except (ArtifactError, ValueError, KeyError, TypeError, AttributeError):
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "native registration evidence is invalid") from None
         repository = Repository(conn, store, pin_snapshots=True)
-        plan = read_search_plan(conn, store, registration, request, plan_ref)
+        plan = _stored_plan(store, plan_ref)
         log_memory("worker plan read", plan=plan)
         trials = SearchTrials(conn, store, repository, registration, request, plan_ref)
+        trials.trusted_plan = plan
         _worker_stage(trials)
         trials.adopt_published = adopt
         _PARALLEL = (conn, store, trials, registration, plan)
@@ -208,7 +233,14 @@ def _parallel_trial_task(task):
 
 def _prepublish_task(task):
     args_list, cpu_id = task
-    return _guarded(cpu_id, lambda: _PARALLEL[2].prepublish(args_list))
+
+    def work():
+        trials = _PARALLEL[2]
+        registration = trials.registration
+        if isinstance(registration, NativeRegistration) and registration.hydrate is not None:  # one hydration for every cohort of this short-lived child
+            trials.registration = NativeRegistration(registration.run_id, registration.binding_json, registration.document)
+        return trials.prepublish(args_list)
+    return _guarded(cpu_id, work)
 
 
 def _parallel_preflight(conn, request, limits, workers):
@@ -348,6 +380,7 @@ def _run_search(conn, store, repository, registration, request, plan_ref, *, lim
     deadline_seconds = None
     if parallel:
         cpus, conn_path = _parallel_preflight(conn, request, limits, workers)
+        _plan_bound(plan_ref)
         if limits != request["limits"]["child"]:
             raise fail("INVALID_EXPERIMENT_SPEC", "v2 trial limits differ from sealed request")
         forbid_fitting("run_search")
