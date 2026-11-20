@@ -1,4 +1,5 @@
 """EXP-188 S9a: inner-stage (2023-2024) driver of the SIZE P&L re-score; outer stage S9b (#2660); also serves the synthetic arm."""
+import os
 import resource
 import sys
 import time
@@ -166,6 +167,9 @@ def run(src, stage, out_dir, *, prereg=size_pnl_prereg.require_preregistration):
     started = time.monotonic()
     check_sources(src)
     receipt = prereg()
+    # The supervisor owns heavy jobs: this run must sit under tools/bounded_run.py --heavy.
+    if os.environ.get("BOUNDED_RUN_NESTED") != "1":
+        raise fail("RESOURCE_UNAVAILABLE", "run under tools/bounded_run.py --heavy", details={"reason": "not_bounded"})
     out = Path(out_dir)
     roster, bound_tables, production = prepare(src, stage)  # refuses any stage but "inner" before reading
     tables = bound_tables["tables"]

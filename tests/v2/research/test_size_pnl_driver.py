@@ -71,6 +71,12 @@ def chunk(*eids):
     return {"event_id": np.array(eids, dtype=object), "dte_exit": np.full(len(eids), 9, dtype=np.int32)}
 
 
+@pytest.fixture(autouse=True)
+def bounded(monkeypatch):
+    """Every run sits under the supervisor; the not-bounded tests unset the variable themselves."""
+    monkeypatch.setenv("BOUNDED_RUN_NESTED", "1")
+
+
 @pytest.fixture
 def stubs(monkeypatch):
     """Pool, simulation and tuning are stubbed so the tests exercise the driver's own orchestration.
@@ -527,14 +533,31 @@ def test_run_py_refuses_a_sources_spec_without_a_colon(tmp_path, monkeypatch, ca
     assert json.loads(capsys.readouterr().out)["reason"] == "sources_invalid"
 
 
-def test_run_py_refuses_not_bounded_before_importing_sources(tmp_path, monkeypatch, capsys):
+def test_run_py_refuses_not_bounded_through_the_driver(tmp_path, monkeypatch, capsys):
     run_py = _run_main()
     monkeypatch.setattr(run_py.size_pnl_prereg, "require_preregistration", OK)
     monkeypatch.delenv("BOUNDED_RUN_NESTED", raising=False)
-    assert run_py.main(_argv(tmp_path, "--no-ledger")) == 2
+    _install_sources(monkeypatch, sources())
+    assert run_py.main(_argv(tmp_path, "--no-ledger", sources=FAKE)) == 2
     refused = json.loads(capsys.readouterr().out)
     assert refused["refused"] == "RESOURCE_UNAVAILABLE"
     assert refused["reason"] == "not_bounded"
+
+
+def test_driver_run_refuses_not_bounded_after_prereg_before_any_read(tmp_path, monkeypatch):
+    monkeypatch.delenv("BOUNDED_RUN_NESTED", raising=False)
+    calls = []
+    src = sources(read=lambda slot: calls.append(slot))
+
+    def prereg():
+        calls.append("prereg")
+        return OK()
+
+    with pytest.raises(OpsError) as caught:
+        driver.run(src, "inner", tmp_path, prereg=prereg)
+    assert caught.value.code == "RESOURCE_UNAVAILABLE"
+    assert caught.value.problem.details["reason"] == "not_bounded"
+    assert calls == ["prereg"]  # prereg first; no source read
 
 
 def test_run_py_propagates_a_type_error_raised_inside_the_factory(tmp_path, monkeypatch):

@@ -60,9 +60,6 @@ def main(argv: list[str] | None = None) -> int:
         # Refuses before anything else, with or without --no-ledger.
         receipt = size_pnl_prereg.require_preregistration()
         print(json.dumps(receipt), file=sys.stderr)
-        # The supervisor owns heavy jobs: this run must sit under tools/bounded_run.py --heavy.
-        if os.environ.get("BOUNDED_RUN_NESTED") != "1":
-            raise fail("RESOURCE_UNAVAILABLE", "run under tools/bounded_run.py --heavy", details={"reason": "not_bounded"})
         args.expected_identities = _read_json(args.expected)
         if not isinstance(args.expected_identities, dict):
             raise fail(_INVALID, "--expected must be a JSON object", details={"reason": "input_unreadable"})
