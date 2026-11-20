@@ -273,10 +273,11 @@ def test_an_event_unsimulable_under_one_model_leaves_for_every_model(tmp_path, s
         tables = real(bound, roster, admitted, production, **kw)
         mid = next(iter(tables))
         seen["twin"] = tables[mid]["table"].copy()
+        seen["twin"].attrs["twin"] = True
         return {mid: tables[mid], "twin": {**tables[mid], "table": seen["twin"]}}
 
     def sims_of(chunk_, events, table, labels, exits):
-        return {e: (None if table is seen["twin"] and e == "E2" else "sim") for e in events["event_id"]}
+        return {e: (None if table.attrs.get("twin") and e == "E2" else "sim") for e in events["event_id"]}
 
     monkeypatch.setattr(readers, "model_tables", twinned)
     monkeypatch.setattr(driver, "_sims", sims_of)
@@ -315,10 +316,11 @@ def test_an_event_undetermined_only_off_unity_leaves_the_taken_population_for_ev
         tables = real(bound, roster, admitted, production, **kw)
         mid = next(iter(tables))
         seen["twin"] = tables[mid]["table"].copy()
+        seen["twin"].attrs["twin"] = True
         return {mid: tables[mid], "twin": {**tables[mid], "table": seen["twin"]}}
 
     def sims_of(chunk_, events, table, labels, exits):  # the twin's E2 is marked undetermined
-        return {e: ("undetermined" if table is seen["twin"] and e == "E2" else "sim") for e in events["event_id"]}
+        return {e: ("undetermined" if table.attrs.get("twin") and e == "E2" else "sim") for e in events["event_id"]}
 
     def scored_of(chunk_, events, sims, name, c, **kw):
         return pd.DataFrame({"event_id": events["event_id"].to_numpy(),
@@ -359,6 +361,26 @@ def test_inner_month_pool_drops_a_label_printed_after_a_later_month_starts(tmp_p
     use_chunks(monkeypatch, [("2023Q2", chunk("E1", "E2"))])
     driver.run(sources(plan_frame=plan), "inner", tmp_path, prereg=OK)
     assert any("E1" in tabled and "E1" not in labelled for tabled, labelled in pools)
+
+
+def test_residual_pool_excludes_history_missing_from_any_ready_model(tmp_path, stubs, monkeypatch):
+    """H1 is an old production event in model A's table only; no residual pool of either model may hold it."""
+    real, pools = readers.model_tables, []
+
+    def twinned(bound, roster, admitted, production, **kw):
+        tables = real(bound, roster, admitted, production, **kw)
+        mid = next(iter(tables))
+        base = tables[mid]["table"]
+        old = base.iloc[[0]].copy()
+        old.index = ["H1"]
+        old["event_date"] = pd.Timestamp("2022-06-01")
+        return {mid: {**tables[mid], "table": pd.concat([base, old])}, "twin": {**tables[mid], "table": base.copy()}}
+
+    monkeypatch.setattr(readers, "model_tables", twinned)
+    monkeypatch.setattr(driver, "build_pool", lambda table, labels: pools.append(set(table.index.astype(str))))
+    use_chunks(monkeypatch, [("2023Q2", chunk("E1", "E2"))])
+    driver.run(sources(), "inner", tmp_path, prereg=OK)
+    assert len(pools) >= 2 and not any("H1" in pool for pool in pools)
 
 
 def test_plan_row_with_a_non_admitted_id_refuses_before_facts(tmp_path, stubs, monkeypatch):
@@ -534,6 +556,28 @@ def test_changed_label_value_refuses_an_inner_replay(tmp_path, stubs, monkeypatc
     assert caught.value.details["reason"] == "inputs_receipt_changed"
 
 
+def test_changed_ladder_quote_refuses_an_inner_replay(tmp_path, stubs, monkeypatch):
+    """The ladder digest binds the consumed quotes: one quote value changed under the same snapshot and plan is refused."""
+    def quoted(bid):
+        return {**chunk("E1"), "bid": np.array([1.5, bid])}
+
+    out = tmp_path / "out"
+    use_chunks(monkeypatch, [("2023Q2", quoted(2.0))])
+    driver.run(sources(), "inner", out, prereg=OK)
+    before = {p: (p.stat().st_ino, p.stat().st_mtime_ns) for p in (out / "receipts").iterdir()}
+    assert driver.run(sources(), "inner", out, prereg=OK)  # identical rerun replays
+    assert {p: (p.stat().st_ino, p.stat().st_mtime_ns) for p in (out / "receipts").iterdir()} == before
+    use_chunks(monkeypatch, [("2023Q2", quoted(2.5))])
+    driver.run(sources(), "inner", tmp_path / "other", prereg=OK)
+    assert (tuning.load_receipt(tmp_path / "other" / "receipts" / "inner.json")["ladder"]
+            != tuning.load_receipt(out / "receipts" / "inner.json")["ladder"])
+    with pytest.raises(Refusal) as caught:
+        driver.run(sources(), "inner", out, prereg=OK)
+    assert caught.value.code == CONFLICT
+    assert caught.value.details["reason"] == "inner_receipt_changed"
+    assert {p: (p.stat().st_ino, p.stat().st_mtime_ns) for p in (out / "receipts").iterdir()} == before
+
+
 def test_zero_ready_models_refuses_after_the_inputs_receipt(tmp_path, stubs, monkeypatch):
     monkeypatch.setattr(readers, "model_tables", lambda bound, roster, admitted, production, **kw: {
         m["model_id"]: {"status": "excluded", "reason": "forced"} for m in roster["models"]})
@@ -586,6 +630,24 @@ def test_run_refuses_sources_with_a_non_callable_source(tmp_path):
         driver.run(sources(facts=None), "inner", tmp_path, prereg=OK)
     assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
     assert caught.value.problem.details["reason"] == "sources_invalid"
+    assert not (tmp_path / "receipts").exists()
+
+
+@pytest.mark.parametrize("snapshot_id", ["", "   "])
+def test_run_refuses_a_blank_snapshot_id(tmp_path, snapshot_id):
+    with pytest.raises(OpsError) as caught:
+        driver.run(sources(snapshot_id=snapshot_id), "inner", tmp_path, prereg=OK)
+    assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert caught.value.problem.details["reason"] == "sources_invalid"
+    assert not (tmp_path / "receipts").exists()
+
+
+def test_run_refuses_facts_that_are_not_a_frame(tmp_path, stubs, monkeypatch):
+    use_chunks(monkeypatch, [("2023Q2", chunk("E1")), ("2024Q3", chunk("E2"))])
+    with pytest.raises(OpsError) as caught:
+        driver.run(sources(facts=lambda ids: None), "inner", tmp_path, prereg=OK)
+    assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert caught.value.problem.details["reason"] == "facts_incomplete"
     assert not (tmp_path / "receipts").exists()
 
 
@@ -749,6 +811,28 @@ def test_run_py_refuses_an_expected_that_is_not_a_json_object(tmp_path, monkeypa
     refused = json.loads(capsys.readouterr().out)
     assert refused["refused"] == "INVALID_EXPERIMENT_SPEC"
     assert refused["reason"] == "input_unreadable"
+
+
+def test_run_py_refuses_an_expected_missing_identity_keys_before_the_factory(tmp_path, monkeypatch, capsys):
+    run_py = _run_main()
+    monkeypatch.setattr(run_py.size_pnl_prereg, "require_preregistration", OK)
+    monkeypatch.setenv("BOUNDED_RUN_NESTED", "1")
+    calls = []
+    module = types.ModuleType("exp188_fake_sources")
+
+    def make(args):  # spy: records any call to the factory
+        calls.append(args)
+        return sources()
+
+    module.make = make
+    monkeypatch.setitem(sys.modules, "exp188_fake_sources", module)
+    argv = _argv(tmp_path, "--no-ledger", sources=FAKE)
+    (tmp_path / "expected.json").write_text("{}", encoding="utf-8")
+    assert run_py.main(argv) == 2
+    refused = json.loads(capsys.readouterr().out)
+    assert refused["refused"] == "INVALID_EXPERIMENT_SPEC"
+    assert refused["reason"] == "input_unreadable"
+    assert calls == []
 
 
 def test_run_py_refuses_an_expected_that_is_a_symlink(tmp_path, monkeypatch, capsys):

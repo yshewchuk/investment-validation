@@ -62,8 +62,8 @@ def main(argv: list[str] | None = None) -> int:
             if os.environ.get("BOUNDED_RUN_NESTED") != "1":  # refuse before reading inputs or importing --sources
                 raise fail("RESOURCE_UNAVAILABLE", "run under tools/bounded_run.py --heavy", details={"reason": "not_bounded"})
             args.expected_identities = _read_json(args.expected)
-            if not isinstance(args.expected_identities, dict):
-                raise fail(_INVALID, "--expected must be a JSON object", details={"reason": "input_unreadable"})
+            if not isinstance(args.expected_identities, dict) or not {"plan_id", "registration_id", "seal_id", "panel_id"} <= set(args.expected_identities):
+                raise fail(_INVALID, "--expected must be a JSON object with plan_id, registration_id, seal_id, panel_id", details={"reason": "input_unreadable"})
             from experiments import size_pnl_driver  # after the gates, so a missing PLANNED row refuses first
             module_name, _, func = args.sources.partition(":")
             try:  # no colon gives func "", not an attribute; a bad module raises ImportError
