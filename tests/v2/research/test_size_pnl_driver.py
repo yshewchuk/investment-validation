@@ -155,6 +155,7 @@ def test_inner_receipts_bind_scope_none_and_the_snapshot(tmp_path, stubs, monkey
     assert inner["models"] == {mid: tuned["content_hash"]}
     assert inner["inputs"] == inputs["content_hash"]
     assert inner["ladder_skipped"] == {}
+    assert inner["events_by_model"] == {mid: 1}
     assert inputs["stage"] == "inputs"
     for digest in (inputs["plan"], inputs["facts"]):
         assert digest.startswith("sha256:")
@@ -226,6 +227,37 @@ def test_plan_row_with_a_non_admitted_id_refuses_before_facts(tmp_path, stubs, m
     assert caught.value.code == DENIED
     assert caught.value.problem.details["reason"] == "key_not_admitted"
     assert calls == []
+
+
+def test_plan_row_with_a_shifted_event_date_refuses_before_facts(tmp_path, stubs, monkeypatch):
+    calls = []
+
+    def counting(ids):
+        calls.append(list(ids))
+        return FACTS.reindex(list(ids))
+
+    plan = PLAN_FRAME.copy()
+    plan.loc[plan["event_id"] == "E2", "event_date"] = pd.Timestamp("2024-08-08")  # same id, shifted date
+    use_chunks(monkeypatch, [("2023Q2", chunk("E1"))])
+    with pytest.raises(OpsError) as caught:
+        driver.run(sources(plan_frame=plan, facts=counting), "inner", tmp_path, prereg=OK)
+    assert caught.value.code == DENIED
+    assert caught.value.problem.details["reason"] == "plan_date_mismatch"
+    assert calls == []
+
+
+def test_production_fetch_never_reads_an_outer_year_event(tmp_path, stubs, monkeypatch):
+    calls = []
+
+    def recording(columns, ids):
+        ids = list(ids)
+        calls.append([str(e) for e in ids])
+        return BASE[BASE["event_id"].isin(ids)]
+
+    use_chunks(monkeypatch, [("2023Q2", chunk("E1")), ("2024Q3", chunk("E2"))])
+    driver.run(sources(fetch=recording), "inner", tmp_path, prereg=OK)
+    assert calls
+    assert not any(e in ids for ids in calls for e in ("E3", "E4"))
 
 
 def test_facts_are_fetched_once_per_run(tmp_path, stubs, monkeypatch):

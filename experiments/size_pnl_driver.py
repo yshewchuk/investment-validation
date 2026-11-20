@@ -68,7 +68,7 @@ def prepare(src, stage):
                                    pair_candidates=src.pair_candidates, blend_ids=src.blend_ids)
     bound = inputs.bind_models(src.plan, src.read, roster, src.admit)
     production = readers.read_production(src.fetch, src.admitted, expected_hash=src.production_hash,
-                                         table_hash=src.production_table_hash)
+                                         table_hash=src.production_table_hash, start=start, end=end)
     tables = readers.model_tables(bound, roster, src.admitted, production, start=start, end=end)
     return roster, {"identity": identity, "bound": bound, "tables": tables}, production
 
@@ -141,6 +141,7 @@ def _inner(src, out, ready, plan, facts_all):
         elapsed = max(time.monotonic() - started, 1e-9)
         _log(f"inner quarter {number}/{quarters} {label} events={len(chunk['event_id'])} "
              f"rate={kept / elapsed:.2f}/s eta={(quarters - number) * elapsed / number:.0f}s rss={_rss_mb():.0f}MB")
+    by_model = {mid: sum(len(events) for _c, events, _s in items[mid]) for mid in ready}
     hashes = {}
     for i, mid in enumerate(ready, start=1):
         started = time.monotonic()
@@ -148,7 +149,7 @@ def _inner(src, out, ready, plan, facts_all):
         hashes[mid] = tuning.write_receipt(out / "receipts" / f"tuning_{mid}.json", body)["content_hash"]
         _log(f"tuning model {i}/{len(ready)} {mid} elapsed={time.monotonic() - started:.1f}s "
              f"c={body['c']} skipped={body['skipped']}")
-    return hashes, kept, skipped
+    return hashes, kept, skipped, by_model
 
 
 def run(src, stage, out_dir, *, prereg=size_pnl_prereg.require_preregistration):
@@ -162,9 +163,13 @@ def run(src, stage, out_dir, *, prereg=size_pnl_prereg.require_preregistration):
     ready = {mid: e for mid, e in tables.items() if e["status"] == "ready"}
     excluded = {mid: e["reason"] for mid, e in tables.items() if e["status"] != "ready"}
     plan = _plan_window(src.plan_frame)
-    admitted_ids = set(src.admitted["events"]["event_id"].astype(str))
-    if any(str(e) not in admitted_ids for e in plan["event_id"]):
+    admitted_dates = dict(zip(src.admitted["events"]["event_id"].astype(str),
+                              pd.to_datetime(src.admitted["events"]["event_date"])))
+    if any(str(e) not in admitted_dates for e in plan["event_id"]):
         raise fail(_DENIED, "plan event ids include a key that is not admitted", details={"reason": "key_not_admitted"})
+    if any(pd.Timestamp(d) != admitted_dates[str(e)] for e, d in zip(plan["event_id"], plan["event_date"])):
+        raise fail(_DENIED, "plan event dates differ from the admitted dates",
+                   details={"reason": "plan_date_mismatch"})
     facts_all = src.facts(sorted(str(e) for e in plan["event_id"]))  # the only facts call of the run
     facts_rows = sorted([str(e), *[None if pd.isna(v) else float(v) for v in vals]] for e, vals in
                         zip(facts_all.index, facts_all[list(_FACTS)].to_numpy(dtype=float)))
@@ -180,10 +185,11 @@ def run(src, stage, out_dir, *, prereg=size_pnl_prereg.require_preregistration):
         raise shortvol.Refusal(_CONFLICT, "no model is ready to be tuned or scored", {"reason": "no_ready_models"})
     if plan.empty:
         raise shortvol.Refusal(_CONFLICT, "the plan window holds no events", {"reason": "empty_population"})
-    hashes, rows, skipped = _inner(src, out, ready, plan, facts_all)
+    hashes, rows, skipped, by_model = _inner(src, out, ready, plan, facts_all)
     tuning.write_receipt(out / "receipts" / "inner.json",
-                         {"stage": "inner", "models": hashes, "events": rows, "excluded": excluded,
-                          "scope": None, "inputs": inputs_receipt["content_hash"], "ladder_skipped": skipped})
+                         {"stage": "inner", "models": hashes, "events": rows, "events_by_model": by_model,
+                          "excluded": excluded, "scope": None, "inputs": inputs_receipt["content_hash"],
+                          "ladder_skipped": skipped})
     _log(f"stage={stage} end elapsed={time.monotonic() - started:.1f}s rss={_rss_mb():.0f}MB "
          f"ladder_skipped={skipped}")
     return {"stage": stage, "models": sorted(ready), "excluded": excluded, "rows": rows, "ladder_skipped": skipped}
