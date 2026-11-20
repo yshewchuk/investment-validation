@@ -1042,3 +1042,12 @@ def test_run_py_replay_with_another_stage_is_ignored(tmp_path, monkeypatch, caps
     assert run_py.main(_argv(tmp_path, "--no-ledger", "--replay", sources=FAKE)) == 0
     assert stages == ["inner"]
     assert json.loads(capsys.readouterr().out)["stage"] == "inner"
+
+
+def test_frames_digest_binds_column_names_and_dtypes():
+    base = pd.DataFrame({"event_id": ["E1", "E2"], "pnl_dollars": [1.0, 2.0]})
+    renamed = base.rename(columns={"pnl_dollars": "pnl"})
+    retyped = base.assign(pnl_dollars=base["pnl_dollars"].astype("float32"))
+    assert driver._frames_digest([base]) == driver._frames_digest([base.copy()])
+    assert driver._frames_digest([base]) != driver._frames_digest([renamed])
+    assert driver._frames_digest([base]) != driver._frames_digest([retyped])

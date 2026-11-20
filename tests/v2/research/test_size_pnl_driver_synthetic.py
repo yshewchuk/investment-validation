@@ -104,11 +104,17 @@ def fake_entries(labels, arm):
 
 
 def fake_scores(src, ready, plan, facts_all, labels):
-    """One straddle row per (model, event), P&L offset by the model's order so the evaluation has a spread."""
+    """One straddle row per (model, event), P&L offset by the model's order so the evaluation has a spread. Each row carries the
+    model's pred_move: constant within each calendar quarter for the shrinkage model, arbitrary finite values for the others."""
     ids, dates = plan["event_id"].astype(str).to_numpy(), pd.to_datetime(plan["event_date"]).to_numpy()
-    frames = [pd.DataFrame({"model_id": mid, "book": "straddle", "arm_or_rule": "R_L", "structure": None, "event_id": ids,
-                            "event_date": dates, "status": "taken", "reason": None,
-                            "pnl_dollars": 1.0 + k + np.arange(len(ids)) * 0.5}) for k, mid in enumerate(sorted(ready))]
+    quarter_key = pd.DatetimeIndex(dates).year * 4 + pd.DatetimeIndex(dates).quarter
+    shrink_move = 5.0 + 0.1 * (quarter_key - quarter_key.min()).to_numpy(dtype=float)
+    frames = []
+    for k, mid in enumerate(sorted(ready)):
+        move = shrink_move if ready[mid]["family"] == "shrinkage" else 5.0 + np.arange(len(ids)) * 0.25
+        frames.append(pd.DataFrame({"model_id": mid, "book": "straddle", "arm_or_rule": "R_L", "structure": None, "event_id": ids,
+                                    "event_date": dates, "status": "taken", "reason": None,
+                                    "pnl_dollars": 1.0 + k + np.arange(len(ids)) * 0.5, "pred_move": move}))
     return frames, {}, "sha256:fake", 0
 
 

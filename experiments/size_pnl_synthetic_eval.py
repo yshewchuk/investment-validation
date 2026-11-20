@@ -59,10 +59,10 @@ def _slope(x, point, boot):
     return float(np.polyfit(x, point, 1)[0]), float(lo), float(hi)
 
 
-def _quarter_var(sub):
-    """The largest within-quarter population variance of width (NaN ignored); 0 when there is none."""
+def _quarter_var(sub, column="width"):
+    """The largest within-quarter population variance of ``column`` (NaN ignored); 0 when there is none."""
     q = pd.to_datetime(sub["event_date"]).dt.to_period("Q").to_numpy()
-    v = pd.to_numeric(sub["width"]).groupby(q).var(ddof=0)
+    v = pd.to_numeric(sub[column]).groupby(q).var(ddof=0)
     return float(v.max()) if v.notna().any() else 0.0
 
 
@@ -153,8 +153,10 @@ def evaluate(decisions, meta, tickers, arm, *, replay_equal=None, resamples=cont
                 missing, var = int(sub["width"].isna().sum()), _quarter_var(sub)
                 if missing: x.append(["X6", unit, "fail", f"missing_widths={missing} taken={taken}"])
                 else: x.append(["X6", unit, "pass" if var <= 1e-12 else "fail", f"var={var:.3g} taken={taken}"])
-            else:
-                x.append(["X6", unit, "printed", f"taken={taken}"])
+            else:  # straddle edge = pred_move - implied_move: constant pred_move per quarter ranks by implied move alone
+                missing, var = int(sub["pred_move"].isna().sum()), _quarter_var(sub, "pred_move")
+                if missing: x.append(["X6", unit, "fail", f"missing_pred={missing} taken={taken}"])
+                else: x.append(["X6", unit, "pass" if var <= 1e-12 else "fail", f"pred_var={var:.3g} taken={taken}"])
     short = [n for n, u in units.items() if u["book"] == SHORT]
     rung3, sums3 = _rung_rows("X3", units, meta, short, 1, arm, resamples, seed)
     rung4, sums4 = _rung_rows("X4", units, meta, [n for n in ("R_L", "R_L2") if n in units], -1, arm, resamples, seed)

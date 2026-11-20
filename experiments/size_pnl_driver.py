@@ -514,7 +514,9 @@ def _synthetic_scores(src, ready, plan, facts_all, labels):
 
 def _frames_digest(frames):
     frame = pd.concat(frames, ignore_index=True)
-    return hashlib.sha256(pd.util.hash_pandas_object(frame, index=False).to_numpy().tobytes()).hexdigest()
+    digest = hashlib.sha256(repr(list(zip(frame.columns, frame.dtypes.astype(str)))).encode())  # the schema: names and dtypes
+    digest.update(pd.util.hash_pandas_object(frame, index=False).to_numpy().tobytes())
+    return digest.hexdigest()
 
 
 def _fit(table, labels, kept):

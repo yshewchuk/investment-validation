@@ -26,22 +26,23 @@ META = {
 DEFAULT = {"O": 3.0, "M02": 2.0, "M06": 2.0, "N02": 2.0, "N06": 1.0, "SH": 1.5, "U1": 1.0, "U2": 1.0}
 
 
-def frame_of(over=None, *, width=None, status="taken"):
+def frame_of(over=None, *, width=None, pred=None, status="taken"):
     """Decision rows for every model on short-vol units S1, S2 and straddle unit R_L; P&L per event from ``over``."""
     pnl, frames = {**DEFAULT, **(over or {})}, []
     w = np.ones(8) if width is None else np.asarray(width, dtype=float)
+    p = np.full(8, 0.05) if pred is None else np.asarray(pred, dtype=float)  # constant overall, so constant per quarter
     for mid, value in pnl.items():
         for book, unit in (("short_vol", "S1"), ("short_vol", "S2"), ("straddle", "R_L")):
             short = book == "short_vol"
             frames.append(pd.DataFrame({
                 "model_id": mid, "book": book, "arm_or_rule": "as_is" if short else unit,
                 "structure": unit if short else None, "event_id": EVENTS, "event_date": DATES,
-                "status": status, "pnl_dollars": np.full(8, float(value)), "width": w}))
+                "status": status, "pnl_dollars": np.full(8, float(value)), "width": w, "pred_move": p}))
     return pd.concat(frames, ignore_index=True)
 
 
-def run(over=None, *, width=None, meta=None, replay_equal=None):
-    return ev.evaluate(frame_of(over, width=width), META if meta is None else meta, TICKERS, ARM,
+def run(over=None, *, width=None, pred=None, meta=None, replay_equal=None):
+    return ev.evaluate(frame_of(over, width=width, pred=pred), META if meta is None else meta, TICKERS, ARM,
                        replay_equal=replay_equal, resamples=RESAMPLES)
 
 
@@ -93,7 +94,25 @@ def test_x5_agrees_disagrees_and_zero_only_agrees_with_zero():
 def test_x6_passes_with_constant_width_within_each_quarter():
     out = run(width=[1, 1, 2, 2, 3, 3, 4, 4])
     assert row(out, "X6", "S1")[2] == "pass"
-    assert row(out, "X6", "R_L")[2:] == ["printed", "taken=8"]
+    assert row(out, "X6", "R_L")[2:] == ["pass", "pred_var=0 taken=8"]
+
+
+def test_x6_straddle_passes_with_pred_move_constant_within_each_quarter():
+    out = run(pred=[0.1, 0.1, 0.2, 0.2, 0.3, 0.3, 0.4, 0.4])
+    assert row(out, "X6", "R_L")[2:] == ["pass", "pred_var=0 taken=8"]
+    assert "X6 R_L" not in out["stop"]
+
+
+def test_x6_straddle_fails_on_pred_move_variance_within_a_quarter_and_stops():
+    out = run(pred=[0.1, 0.2, 0.2, 0.2, 0.3, 0.3, 0.4, 0.4])
+    assert row(out, "X6", "R_L")[2] == "fail"
+    assert "X6 R_L" in out["stop"]
+
+
+def test_x6_straddle_fails_with_a_nan_pred_move_before_the_variance_test():
+    out = run(pred=[0.1, 0.1, 0.2, 0.2, 0.3, 0.3, 0.4, np.nan])
+    assert row(out, "X6", "R_L")[2:] == ["fail", "missing_pred=1 taken=8"]
+    assert "X6 R_L" in out["stop"]
 
 
 def test_x6_fails_on_within_quarter_width_variance():
