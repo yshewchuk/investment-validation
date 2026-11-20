@@ -46,8 +46,9 @@ class Sources:
 
 
 def check_sources(src):
-    if not (isinstance(src, Sources) and isinstance(src.expected, dict) and isinstance(src.plan_frame, pd.DataFrame)
-            and isinstance(src.plan, dict) and isinstance(src.snapshot_id, str) and src.snapshot_id.strip() and all(callable(getattr(src, f)) for f in ("read", "admit", "fetch", "load_index", "facts"))):
+    if not (isinstance(src, Sources) and isinstance(src.expected, dict) and {"plan_id", "registration_id", "seal_id", "panel_id"} <= set(src.expected) and isinstance(src.plan_frame, pd.DataFrame)
+            and isinstance(src.plan, dict) and {"plan_id", "horizons"} <= set(src.plan) and isinstance(src.plan.get("anchor"), dict) and "run_id" in src.plan["anchor"]
+            and all(isinstance(getattr(src, f), dict) for f in ("selection", "pair_candidates", "blend_ids")) and isinstance(src.snapshot_id, str) and src.snapshot_id.strip() and all(callable(getattr(src, f)) for f in ("read", "admit", "fetch", "load_index", "facts"))):
         raise fail("INVALID_EXPERIMENT_SPEC", "sources must be a Sources with an object `expected`", details={"reason": "sources_invalid"})
     return src
 
@@ -168,8 +169,8 @@ def _inner(src, out, ready, plan, facts_all, labels):
 def run(src, stage, out_dir, *, prereg=size_pnl_prereg.require_preregistration):
     """Run the inner stage, write its receipts under ``out_dir``, and return a JSON-safe summary."""
     started = time.monotonic()
-    check_sources(src)
     receipt = prereg()
+    check_sources(src)
     # The supervisor owns heavy jobs: this run must sit under tools/bounded_run.py --heavy.
     if os.environ.get("BOUNDED_RUN_NESTED") != "1":
         raise fail("RESOURCE_UNAVAILABLE", "run under tools/bounded_run.py --heavy", details={"reason": "not_bounded"})
@@ -185,7 +186,7 @@ def run(src, stage, out_dir, *, prereg=size_pnl_prereg.require_preregistration):
     admitted_dates = dict(zip(src.admitted["events"]["event_id"].astype(str), pd.to_datetime(src.admitted["events"]["event_date"])))
     if any(str(e) not in admitted_dates for e in plan["event_id"]): raise fail(_DENIED, "plan event ids include a key that is not admitted", details={"reason": "key_not_admitted"})
     facts_all = src.facts(sorted(str(e) for e in plan["event_id"]))  # the only facts call of the run
-    if not isinstance(facts_all, pd.DataFrame): raise fail("INVALID_EXPERIMENT_SPEC", "facts source is incomplete", details={"reason": "facts_incomplete"})
+    if not isinstance(facts_all, pd.DataFrame) or not facts_all.columns.is_unique: raise fail("INVALID_EXPERIMENT_SPEC", "facts source is incomplete", details={"reason": "facts_incomplete"})
     raw = facts_all.reindex(columns=list(_FACTS)).where(lambda c: c.notna(), np.nan)  # pd.NA and None are NaN
     numeric = raw.apply(pd.to_numeric, errors="coerce")
     if (not set(_FACTS) <= set(facts_all.columns) or set(facts_all.index.astype(str)) != {str(e) for e in plan["event_id"]}

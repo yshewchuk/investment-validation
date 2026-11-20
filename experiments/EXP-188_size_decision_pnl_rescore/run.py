@@ -8,6 +8,7 @@ import importlib
 import inspect
 import json
 import os
+import re
 import stat
 import sys
 from pathlib import Path
@@ -79,7 +80,7 @@ def main(argv: list[str] | None = None) -> int:
             summary = size_pnl_driver.run(sources, args.stage, args.out_dir, prereg=lambda: receipt)
     except (OpsError, Refusal, DataError) as exc:
         details = exc.details if isinstance(exc, Refusal) else exc.problem.details
-        print(json.dumps({"refused": exc.code, "message": str(exc), "reason": details.get("reason")}))
+        print(json.dumps({"refused": exc.code, "message": re.sub(r"(?<![\w.])/[^\s:'\"]+", "<path>", str(exc)), "reason": details.get("reason")}))
         return 2
     print(json.dumps(summary))
     return 0

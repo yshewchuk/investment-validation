@@ -125,6 +125,29 @@ def test_prereg_refusal_runs_before_any_source_call(tmp_path):
     assert calls == []
 
 
+def test_prereg_refusal_wins_over_invalid_sources(tmp_path):
+    def refuse():
+        raise fail(CONFLICT, "no planned row", details={"reason": "planned_row_missing"})
+
+    with pytest.raises(OpsError) as caught:
+        driver.run(sources(plan={}), "inner", tmp_path, prereg=refuse)
+    assert caught.value.code == CONFLICT
+    with pytest.raises(OpsError) as caught:
+        driver.run(None, "inner", tmp_path, prereg=refuse)
+    assert caught.value.code == CONFLICT
+
+
+@pytest.mark.parametrize("over", [{"plan": {}}, {"selection": None}, {"expected": {}}])
+def test_malformed_sources_refuse_before_any_read(tmp_path, over):
+    calls = []
+    src = sources(read=lambda slot: calls.append(slot), **over)
+    with pytest.raises(OpsError) as caught:
+        driver.run(src, "inner", tmp_path, prereg=OK)
+    assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert caught.value.problem.details["reason"] == "sources_invalid"
+    assert calls == []
+
+
 @pytest.mark.parametrize("stage", ["outer", "2025"])
 def test_only_the_inner_stage_runs(tmp_path, stage):
     with pytest.raises(ValueError, match="stage must be one of"):
@@ -478,6 +501,16 @@ def test_duplicate_facts_ids_refuse_before_any_receipt(tmp_path, stubs, monkeypa
     use_chunks(monkeypatch, [("2023Q2", chunk("E1")), ("2024Q3", chunk("E2"))])
     # Same id set as the plan, but E1 appears twice.
     facts = lambda ids: pd.concat([FACTS.reindex(list(ids)), FACTS.reindex(["E1"])])  # noqa: E731
+    with pytest.raises(OpsError) as caught:
+        driver.run(sources(facts=facts), "inner", tmp_path, prereg=OK)
+    assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert caught.value.problem.details["reason"] == "facts_incomplete"
+    assert not (tmp_path / "receipts").exists()
+
+
+def test_duplicate_facts_columns_refuse_before_any_receipt(tmp_path, stubs, monkeypatch):
+    use_chunks(monkeypatch, [("2023Q2", chunk("E1")), ("2024Q3", chunk("E2"))])
+    facts = lambda ids: FACTS.reindex(list(ids)).rename(columns={"mcap_usd": "pre_iv30"})  # two pre_iv30 columns  # noqa: E731
     with pytest.raises(OpsError) as caught:
         driver.run(sources(facts=facts), "inner", tmp_path, prereg=OK)
     assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
@@ -905,3 +938,14 @@ def test_run_py_refuses_a_native_data_error_as_json(tmp_path, monkeypatch, capsy
     refused = json.loads(capsys.readouterr().out)
     assert refused["refused"] == "CONTRACT_MISMATCH"
     assert refused["reason"] is None
+
+
+def test_run_py_refusal_message_has_no_absolute_path(tmp_path, monkeypatch, capsys):
+    run_py = _run_main()
+    monkeypatch.setattr(run_py.size_pnl_prereg, "require_preregistration", OK)
+    monkeypatch.setenv("BOUNDED_RUN_NESTED", "1")
+    argv = _argv(tmp_path, "--no-ledger")
+    argv[argv.index("--expected") + 1] = "/nonexistent/abs/path.json"
+    assert run_py.main(argv) == 2
+    out = capsys.readouterr().out
+    assert "/nonexistent" not in out and "<path>" in json.loads(out)["message"]
