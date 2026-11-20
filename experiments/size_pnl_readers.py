@@ -166,7 +166,7 @@ def _production_binding(table_hash, frame):
     return content_hash({"table": table_hash, "rows": rows})
 
 
-def read_production(fetch, admitted, *, expected_hash, table_hash, start=None, end=None):
+def read_production(fetch, admitted, *, expected_hash, table_hash, start=None, end=None, event_ids=None):
     """Lead-horizon production forecasts for admitted events in the window (R1 whole-run refusal).
 
     `table_hash` identifies the whole stored table (protected rows included) and is supplied by the catalog caller; it cannot be recomputed from admitted-only rows, because hashing protected rows would read them. The binding therefore covers `table_hash` plus the consumed rows.
@@ -175,7 +175,7 @@ def read_production(fetch, admitted, *, expected_hash, table_hash, start=None, e
         raise _conflict("production_hash_invalid", "the production hashes must be non-blank strings")
     if table_hash != expected_hash:
         raise _conflict("production_hash_mismatch", "the production table does not match the expected hash")
-    ids = _window_ids(admitted, start, end)
+    ids = _window_ids(admitted, start, end, event_ids)
     frame = _fetch(fetch, admitted, PRODUCTION_COLUMNS, ids)
     if (frame["horizon_sessions"] != LEAD).any():
         raise _conflict("lead_unavailable", "a production row is not at the lead horizon")

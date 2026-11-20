@@ -308,12 +308,12 @@ def test_empty_smoke_set_refuses_before_any_receipt(tmp_path, stubs):
     assert not (tmp_path / "receipts").exists()
 
 
-def test_smoke_ids_outside_the_window_refuse_before_the_inputs_receipt(tmp_path, stubs, monkeypatch):
+def test_smoke_ids_with_no_window_event_refuse_before_the_inputs_receipt_for_any_reason(tmp_path, stubs, monkeypatch):
     use_chunks(monkeypatch, [("2024Q3", chunk("E2"))])
-    with pytest.raises(Refusal) as caught:
+    with pytest.raises(OpsError) as caught:
         driver.run(sources(), "inner", tmp_path, event_ids={"E3"}, prereg=OK)  # E3 is outside the inner window
     assert caught.value.code == CONFLICT
-    assert caught.value.details["reason"] == "empty_population"
+    assert caught.value.problem.details["reason"] == "production_series_failed"
     assert not (tmp_path / "receipts" / "inputs_inner.json").exists()
     summary = driver.run(sources(), "inner", tmp_path, event_ids={"E2"}, prereg=OK)  # the corrected rerun succeeds
     assert summary["stage"] == "inner"
@@ -386,6 +386,36 @@ def test_outer_smoke_of_only_warm_up_events_refuses_unbound_2025(tmp_path, outer
     assert caught.value.details["reason"] == "outer_predictions_unbound"
     assert loads == []
     assert not (tmp_path / "receipts" / "inputs_outer.json").exists()  # refused before the outer input receipt
+
+
+def _production_reads(log):
+    return [ids for kind, ids in log if kind == "production"]
+
+
+def test_smoke_run_reads_production_only_for_the_smoke_ids(tmp_path, stubs, monkeypatch):
+    log = []
+    use_chunks(monkeypatch, [("2024Q3", chunk("E2"))])
+    driver.run(sources(fetch=recording(log)), "inner", tmp_path, event_ids={"E2"}, prereg=OK)
+    reads = _production_reads(log)
+    assert reads and all(set(ids) == {"E2"} for ids in reads)  # the window holds E1 too; the smoke read never asks for it
+
+
+def test_non_smoke_run_still_reads_production_for_the_full_window(tmp_path, stubs, monkeypatch):
+    log = []
+    use_chunks(monkeypatch, [("2023Q2", chunk("E1")), ("2024Q3", chunk("E2"))])
+    driver.run(sources(fetch=recording(log)), "inner", tmp_path, prereg=OK)
+    reads = _production_reads(log)
+    assert reads and all(set(ids) == {"E1", "E2"} for ids in reads)
+
+
+def test_outer_smoke_after_inner_smoke_with_the_same_ids_passes_the_gate(tmp_path, outer_stubs, monkeypatch):
+    ids = {"E2", "E3"}
+    use_chunks(monkeypatch, [("2024Q3", chunk("E2"))])
+    driver.run(sources(), "inner", tmp_path, event_ids=ids, prereg=OK)
+    use_chunks(monkeypatch, [("2024Q3", chunk("E2")), ("2025Q1", chunk("E3"))])
+    summary = driver.run(sources(), "outer", tmp_path, event_ids=ids, prereg=OK)
+    assert summary["stage"] == "outer"
+    assert (tmp_path / "receipts" / "outer.json").exists()
 
 
 # ---- outer stage: R6 ordering, the warm-up and the pool ---------------------------

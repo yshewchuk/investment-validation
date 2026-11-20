@@ -83,7 +83,7 @@ def _window(stage):
     return (WARMUP_START, OUTER[1]) if stage == "outer" else INNER
 
 
-def _prepare(src, stage):
+def _prepare(src, stage, ids=None):
     """Steps 2-4: bind run, roster, models; read production and tables. Returns (roster, bound_tables, production)."""
     check_sources(src)
     if stage not in STAGES: raise ValueError(f"stage must be one of {STAGES}, got {stage!r}")
@@ -91,7 +91,7 @@ def _prepare(src, stage):
     identity = inputs.bind_run(src.plan, src.read, expected=src.expected, panel_id=src.panel_id)
     roster = inputs.resolve_roster(src.plan, src.selection, outer_year=OUTER_YEAR, pair_candidates=src.pair_candidates, blend_ids=src.blend_ids)
     bound = inputs.bind_models(src.plan, src.read, roster, src.admit)
-    production = readers.read_production(src.fetch, src.admitted, expected_hash=src.production_hash, table_hash=src.production_table_hash, start=start, end=end)
+    production = readers.read_production(src.fetch, src.admitted, expected_hash=src.production_hash, table_hash=src.production_table_hash, start=start, end=end, event_ids=ids)
     return roster, {"identity": identity, "bound": bound, "tables": readers.model_tables(bound, roster, src.admitted, production, start=start, end=end)}, production
 
 
@@ -386,7 +386,7 @@ def run(src, stage, out_dir, *, event_ids=None, prereg=size_pnl_prereg.require_p
     if os.environ.get("BOUNDED_RUN_NESTED") != "1":
         raise fail("RESOURCE_UNAVAILABLE", "run under tools/bounded_run.py --heavy", details={"reason": "not_bounded"})
     out, ids = Path(out_dir), _smoke(src, event_ids)
-    roster, bound_tables, production = _prepare(src, stage)  # refuses any stage but "inner" or "outer" before reading
+    roster, bound_tables, production = _prepare(src, stage, ids)  # refuses any stage but "inner" or "outer" before reading
     tables = bound_tables["tables"]
     ready = _ready(tables, ids)
     excluded = {mid: e["reason"] for mid, e in tables.items() if e["status"] != "ready"}
@@ -422,7 +422,7 @@ def run(src, stage, out_dir, *, event_ids=None, prereg=size_pnl_prereg.require_p
     receipts = {}
     if stage == "outer":  # preflight: a refusal here leaves no outer input receipt, and no chunk is built
         if not ready: raise _no_ready()
-        _, inner_bound, inner_production = _prepare(src, "inner")  # the inner window's bindings, to match inputs_inner.json
+        _, inner_bound, inner_production = _prepare(src, "inner", ids)  # the inner window's bindings, to match inputs_inner.json
         inner_tables = {mid: _table_binding(e, ids) for mid, e in _ready(inner_bound["tables"], ids).items()}
         inner_plan = content_hash(_plan_rows(inner_window))
         inner_facts = content_hash(_facts_rows(facts_all, {str(e) for e in inner_window["event_id"]}))
