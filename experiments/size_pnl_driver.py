@@ -15,8 +15,8 @@ import pandas as pd
 from engine.v2.foundation import content_hash
 from engine.v2.ops.errors import fail
 from experiments import label_availability, size_pnl_decisions as decisions, size_pnl_inputs as inputs, size_pnl_ladder as ladder, size_pnl_prereg
-from experiments import size_pnl_readers as readers, size_pnl_shortvol as shortvol, size_pnl_straddle as straddle, size_pnl_tuning as tuning
-from experiments.size_pnl_pool import build_pool
+from experiments import size_pnl_readers as readers, size_pnl_shortvol as shortvol, size_pnl_straddle as straddle, size_pnl_tuning as tuning, size_pnl_equivalence as equivalence
+from experiments.size_pnl_pool import TOLERANCE, build_pool
 from experiments.size_pnl_shortvol import Refusal
 
 INNER = ("2023-01-01", "2025-01-01")
@@ -208,11 +208,23 @@ def _sims(chunk, events, table, labels, exits):
     return sims
 
 
+def _equivalence(table, events, sims, chunk, labels, exits):
+    """The fast-path check of one model on one chunk, run on the first simulable event's calendar month; None when nothing is simulable."""
+    simable = sorted(str(e) for e in events["event_id"] if sims.get(str(e)) is not None)
+    if not simable: return None
+    first = events[events["event_id"].astype(str) == simable[0]]
+    period = pd.Timestamp(first["event_date"].iloc[0]).to_period("M")
+    month = events[events["event_date"].dt.to_period("M") == period]
+    pool = build_pool(table[table["event_date"] < period.start_time], _printed(labels, exits, period.start_time.date().isoformat()))
+    return equivalence.check_chunk(chunk, month, sims, pool, alpha=ALPHA)
+
+
 def _inner(src, out, ready, plan, facts_all, labels):
     exits = _exits(src)
     items, quarters = {mid: [] for mid in ready}, pd.to_datetime(plan["event_date"]).dt.to_period("Q").nunique()
     kept, started, skipped, common, digest = 0, time.monotonic(), {}, {}, hashlib.sha256()
     pool_tables = _pool_tables(ready)
+    pending, checked = set(ready), {}
     for number, (label, chunk) in enumerate(ladder.ladder_chunks(src.admitted, plan, src.load_index), start=1):
         _bind_chunk(digest, label, chunk)
         kept +=len(chunk["event_id"])
@@ -221,6 +233,12 @@ def _inner(src, out, ready, plan, facts_all, labels):
         for mid, entry in ready.items():
             events = model_events(entry["table"], facts_all, chunk, exits)  # facts_all: the run's only facts call
             built[mid] = (events, _sims(chunk, events, pool_tables[mid], labels, exits))
+        for mid in sorted(pending):
+            got = _equivalence(pool_tables[mid], *built[mid], chunk, labels, exits)
+            if got is None: continue
+            checked[mid] = got
+            pending.discard(mid)
+            _log(f"equivalence model {mid} checked={got['checked']} skipped={got['skipped']} max_abs_diff={got['max_abs_diff']:.3e}")
         # A no-sim event, or an id missing from ANY model's table, leaves for ALL, cutoff history included (design section 4).
         dropped = {e for events, sims in built.values() for e in events["event_id"] if sims.get(e) is None}
         dropped |= {e for events, _s in built.values() for e in set(map(str, chunk["event_id"])) - set(events["event_id"])}
@@ -229,6 +247,7 @@ def _inner(src, out, ready, plan, facts_all, labels):
             items[mid].append((chunk, events[~events["event_id"].isin(dropped)], {e: s for e, s in sims.items() if e not in dropped}))
         elapsed = max(time.monotonic() - started, 1e-9)
         _log(f"inner quarter {number}/{quarters} {label} events={len(chunk['event_id'])} " f"rate={kept / elapsed:.2f}/s eta={(quarters - number) * elapsed / number:.0f}s rss={_rss_mb():.0f}MB")
+    if pending: raise fail(_CONFLICT, "no simulable sample for the fast-path equivalence check", details={"reason": "equivalence_empty", "models": sorted(pending)})
     bad = set()  # structure-level refusal at ANY c, name or model: the event leaves every model's items, history included
     for mid in ready:
         for c in tuning.C_GRID:
@@ -244,18 +263,28 @@ def _inner(src, out, ready, plan, facts_all, labels):
         body = tuning.tune(items[mid], mid)
         hashes[mid] = tuning.write_receipt(out / "receipts" / f"tuning_{mid}.json", body)["content_hash"]
         _log(f"tuning model {i}/{len(ready)} {mid} elapsed={time.monotonic() - started:.1f}s " f"c={body['c']} skipped={body['skipped']}")
-    return hashes, max(by_model.values(), default=0), skipped, by_model, common, len(bad), "sha256:" + digest.hexdigest()
+    return hashes, max(by_model.values(), default=0), skipped, by_model, common, len(bad), "sha256:" + digest.hexdigest(), checked
+
+
+def _equivalence_ok(entry):
+    """A model's fast-path evidence: a dict with an int ``checked`` >= 1 and a numeric ``max_abs_diff`` within TOLERANCE."""
+    return (isinstance(entry, dict) and isinstance(entry.get("checked"), int) and not isinstance(entry.get("checked"), bool) and entry["checked"] >= 1
+            and isinstance(entry.get("max_abs_diff"), (int, float)) and not isinstance(entry.get("max_abs_diff"), bool) and entry["max_abs_diff"] <= TOLERANCE)
 
 
 def _outer_gate(out, ready, scope, body, inner_tables, inner_production, inner_plan, inner_facts):
     """Refuses before any chunk is built: every ready model needs its tuning receipt, and inner.json must bind those
-    receipts, have been tuned on this run's event scope, and bind the inner window's inputs. The inner window's inputs,
-    plan and facts are re-bound here from this run's own sources, not trusted from the receipts."""
+    receipts, have been tuned on this run's event scope, carry every ready model's fast-path equivalence evidence, and
+    bind the inner window's inputs. The inner window's inputs, plan and facts are re-bound here from this run's own
+    sources, not trusted from the receipts."""
     receipts = {mid: tuning.load_receipt(out / "receipts" / f"tuning_{mid}.json") for mid in ready}
     inner = tuning.load_receipt(out / "receipts" / "inner.json")
     if any(inner["models"].get(mid) != receipts[mid]["content_hash"] for mid in ready):
         raise Refusal(_CONFLICT, "inner.json does not bind every ready model's tuning receipt", {"reason": "inner_receipt_mismatch"})
     if "scope" not in inner or inner["scope"] != scope: raise Refusal(_CONFLICT, "inner.json was tuned on a different event scope", {"reason": "scope_mismatch"})
+    evidence = inner.get("equivalence")
+    if not isinstance(evidence, dict) or not all(_equivalence_ok(evidence.get(mid)) for mid in ready):
+        raise Refusal(_CONFLICT, "inner.json lacks the fast-path equivalence evidence for a ready model", {"reason": "inner_equivalence_missing"})
     inputs_inner, now = tuning.load_receipt(out / "receipts" / "inputs_inner.json"), json.loads(json.dumps(body))
     if any(inputs_inner.get(k) != now[k] for k in _BOUND): raise Refusal(_CONFLICT, "inputs_inner.json was bound to different inputs", {"reason": "inner_inputs_mismatch"})
     if inputs_inner.get("plan") != inner_plan: raise Refusal(_CONFLICT, "inputs_inner.json was bound to a different inner plan", {"reason": "inner_plan_mismatch"})
@@ -432,11 +461,12 @@ def run(src, stage, out_dir, *, event_ids=None, prereg=size_pnl_prereg.require_p
     inputs_receipt = _receipt(out / "receipts" / f"inputs_{stage}.json", body, "inputs_receipt_changed")
     if not ready: raise _no_ready()
     if stage == "inner":
-        hashes, rows, skipped, by_model, common, structure, ladder_hash = _inner(src, out, ready, plan, facts_all, labels)
+        hashes, rows, skipped, by_model, common, structure, ladder_hash, checked = _inner(src, out, ready, plan, facts_all, labels)
         _receipt(out / "receipts" / "inner.json",
                  {"stage": "inner", "models": hashes, "events": rows, "events_by_model": by_model, "ladder": ladder_hash,
                   "excluded": excluded, "scope": scope, "inputs": inputs_receipt["content_hash"],
-                  "ladder_skipped": skipped, "common_dropped": common, "common_dropped_structure": structure}, "inner_receipt_changed")
+                  "ladder_skipped": skipped, "common_dropped": common, "common_dropped_structure": structure,
+                  "equivalence": checked}, "inner_receipt_changed")
         _log(f"stage={stage} end elapsed={time.monotonic() - started:.1f}s rss={_rss_mb():.0f}MB "
              f"ladder_skipped={skipped} common_dropped={common} common_dropped_structure={structure}")
     else:

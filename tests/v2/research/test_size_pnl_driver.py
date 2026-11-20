@@ -85,6 +85,12 @@ def structure_gate_passes(monkeypatch):
         {"event_id": events["event_id"].to_numpy(), "status": "scored"}))
 
 
+@pytest.fixture(autouse=True)
+def equivalence_passes(monkeypatch):
+    """The fast-path preflight passes on every chunk unless a test replaces it, so the stubbed pools still hold."""
+    monkeypatch.setattr(driver, "_equivalence", lambda *args, **kwargs: {"checked": 1, "skipped": 0, "max_abs_diff": 0.0})
+
+
 @pytest.fixture
 def stubs(monkeypatch):
     """Pool, simulation and tuning are stubbed so the tests exercise the driver's own orchestration.
@@ -632,6 +638,45 @@ def test_ladder_skipped_counts_reach_the_inner_receipt_and_summary(tmp_path, stu
 
 
 # ---- run.py gate ---------------------------------------------------------------
+
+def test_equivalence_runs_before_tuning_and_is_receipted(tmp_path, stubs, monkeypatch):
+    def logged(*args, **kwargs):
+        stubs.append(("equivalence",))
+        return {"checked": 1, "skipped": 0, "max_abs_diff": 0.0}
+
+    monkeypatch.setattr(driver, "_equivalence", logged)
+    use_chunks(monkeypatch, [("2023Q2", chunk("E1")), ("2024Q3", chunk("E2"))])
+    out = tmp_path / "out"
+    summary = driver.run(sources(), "inner", out, prereg=OK)
+    kinds = [entry[0] for entry in stubs]
+    assert kinds.index("equivalence") < kinds.index("tune")
+    receipt = json.loads((out / "receipts" / "inner.json").read_text())
+    assert receipt["equivalence"] == {summary["models"][0]: {"checked": 1, "skipped": 0, "max_abs_diff": 0.0}}
+
+
+def test_a_fast_path_mismatch_aborts_before_any_tuning(tmp_path, stubs, monkeypatch):
+    def mismatch(*args, **kwargs):
+        raise fail(CONFLICT, "the fast path disagrees with expected_pnl", details={"reason": "fast_path_mismatch"})
+
+    monkeypatch.setattr(driver, "_equivalence", mismatch)
+    use_chunks(monkeypatch, [("2023Q2", chunk("E1")), ("2024Q3", chunk("E2"))])
+    with pytest.raises(OpsError) as caught:
+        driver.run(sources(), "inner", tmp_path / "out", prereg=OK)
+    assert caught.value.code == CONFLICT
+    assert caught.value.problem.details["reason"] == "fast_path_mismatch"
+    assert not [entry for entry in stubs if entry[0] == "tune"]
+
+
+def test_no_simulable_sample_refuses_before_any_tuning(tmp_path, stubs, monkeypatch):
+    monkeypatch.setattr(driver, "_equivalence", lambda *args, **kwargs: None)
+    use_chunks(monkeypatch, [("2023Q2", chunk("E1")), ("2024Q3", chunk("E2"))])
+    with pytest.raises(OpsError) as caught:
+        driver.run(sources(), "inner", tmp_path / "out", prereg=OK)
+    assert caught.value.code == CONFLICT
+    assert caught.value.problem.details["reason"] == "equivalence_empty"
+    assert caught.value.problem.details["models"]
+    assert not [entry for entry in stubs if entry[0] == "tune"]
+
 
 def _run_main():
     spec = importlib.util.spec_from_file_location("exp188_run", RUN)

@@ -15,9 +15,9 @@ from experiments import size_pnl_driver as driver
 from experiments import size_pnl_readers as readers
 from experiments import size_pnl_tuning as tuning
 from experiments.size_pnl_shortvol import Refusal
-from tests.v2.research.test_size_pnl_driver import (  # noqa: F401  (bounded, stubs, structure_gate_passes are fixtures)
+from tests.v2.research.test_size_pnl_driver import (  # noqa: F401  (bounded, stubs, structure_gate_passes, equivalence_passes are fixtures)
     BASE, CONFLICT, DENIED, EVENTS, EXPECTED, FACTS, FAKE, OK, PLAN_FRAME, _install_sources, _run_main, bounded, chunk, sources,
-    stubs, structure_gate_passes)
+    stubs, structure_gate_passes, equivalence_passes)
 
 FRONT = ["model_id", "book", "arm_or_rule", "structure", "event_id", "event_date", "status", "reason"]
 EMPTY_MARKS = ["event_id", "entry_cost", "exit_value", "rung", "lots", "pnl_per_share", "pnl_dollars"]
@@ -278,6 +278,37 @@ def test_outer_refuses_an_inner_receipt_tuned_on_smoke_ids(tmp_path, stubs, monk
         driver.run(sources(), "outer", tmp_path / "inner", prereg=OK)
     assert caught.value.code == CONFLICT
     assert caught.value.details["reason"] == "scope_mismatch"
+
+
+def _rewrite_inner_json(tmp_path, monkeypatch, change):
+    """A normal inner run under tmp_path/inner, then inner.json rewritten by ``change`` (as the inner_receipt_mismatch tests do)."""
+    use_chunks(monkeypatch, [("2024Q3", chunk("E2"))])
+    driver.run(sources(), "inner", tmp_path / "inner", prereg=OK)
+    inner = tuning.load_receipt(tmp_path / "inner" / "receipts" / "inner.json")
+    tampered = change({k: v for k, v in inner.items() if k != "content_hash"})
+    (tmp_path / "inner" / "receipts" / "inner.json").unlink()
+    tuning.write_receipt(tmp_path / "inner" / "receipts" / "inner.json", tampered)
+    use_chunks(monkeypatch, [("2024Q3", chunk("E2"))])
+
+
+def test_outer_refuses_when_inner_json_lacks_equivalence_evidence(tmp_path, stubs, monkeypatch):
+    _rewrite_inner_json(tmp_path, monkeypatch, lambda body: {k: v for k, v in body.items() if k != "equivalence"})
+    with pytest.raises(Refusal) as caught:
+        driver.run(sources(), "outer", tmp_path / "inner", prereg=OK)
+    assert caught.value.code == CONFLICT
+    assert caught.value.details["reason"] == "inner_equivalence_missing"
+
+
+def test_outer_refuses_when_a_model_has_zero_equivalence_checks(tmp_path, stubs, monkeypatch):
+    def zero_first_model(body):
+        mid = sorted(body["equivalence"])[0]
+        return {**body, "equivalence": {**body["equivalence"], mid: {**body["equivalence"][mid], "checked": 0}}}
+
+    _rewrite_inner_json(tmp_path, monkeypatch, zero_first_model)
+    with pytest.raises(Refusal) as caught:
+        driver.run(sources(), "outer", tmp_path / "inner", prereg=OK)
+    assert caught.value.code == CONFLICT
+    assert caught.value.details["reason"] == "inner_equivalence_missing"
 
 
 # ---- smoke ids -------------------------------------------------------------------
