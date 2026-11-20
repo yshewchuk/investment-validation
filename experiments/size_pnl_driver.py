@@ -140,7 +140,7 @@ def _inner(src, out, ready, plan, facts_all, labels):
         elapsed = max(time.monotonic() - started, 1e-9)
         _log(f"inner quarter {number}/{quarters} {label} events={len(chunk['event_id'])} "
              f"rate={kept / elapsed:.2f}/s eta={(quarters - number) * elapsed / number:.0f}s rss={_rss_mb():.0f}MB")
-    bad = set()  # structure-level refusal at ANY c, name or model: excluded from every model's taken population, history kept
+    bad = set()  # structure-level refusal at ANY c, name or model: the event leaves every model's items, history included
     for mid in ready:
         for c in tuning.C_GRID:
             for name in shortvol.NAMES:
