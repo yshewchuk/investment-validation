@@ -2,8 +2,11 @@
 import json
 from unittest.mock import Mock
 
+import pytest
+
 from engine.v2.contracts import ArtifactRef
 from engine.v2.foundation import ArtifactError, canonical_json, content_hash
+from engine.v2.ops.errors import OpsError
 from experiments import magnitude_search_trials as trials_mod
 from experiments import v2_magnitude_search_run as run_mod
 from experiments.native_registration import NativeRegistration
@@ -34,6 +37,19 @@ def test_lean_view_skips_hydration_and_keeps_small_sections():
     registration = NativeRegistration("run", BINDING, hydrate=hydrate)
     assert registration.lean == {"schema_version": V17, "magnitude_execution": {"small": 1},
                                  "regression_plan": {"target_recipe": {"recipe": "r"}}}
+    hydrate.assert_not_called()
+
+
+def test_lean_view_keeps_snapshot_and_holdouts_without_hydration():
+    full = {"schema_version": V17, "magnitude_execution": {"small": 1},
+            "snapshot": {"snapshot_id": "s1"}, "target_snapshot": {"snapshot_id": "t1"},
+            "holdouts": {"holdout_as_of_month": "2020-01"}}
+    binding = json.dumps(full, sort_keys=True).encode()
+    hydrate = Mock(return_value=FULL)
+    registration = NativeRegistration("run", binding, hydrate=hydrate)
+    assert registration.lean["snapshot"] == {"snapshot_id": "s1"}
+    assert registration.lean["target_snapshot"] == {"snapshot_id": "t1"}
+    assert registration.lean["holdouts"] == {"holdout_as_of_month": "2020-01"}
     hydrate.assert_not_called()
 
 
@@ -86,6 +102,27 @@ def test_worker_uses_stored_plan_and_compact_registration(monkeypatch):
     assert run_mod.read_search_plan.call_count == 0
 
 
+def test_worker_clears_shard_rows_and_hydrates_without_them(monkeypatch):
+    captured = {}
+
+    def verified(conn, store, run_id, *, max_evidence_bytes, verified_size_rows):
+        captured["rows"] = verified_size_rows
+        verified_size_rows["h1"] = {"row": 1}
+        return BINDING
+
+    _patch_worker(monkeypatch, binding=BINDING, store=FakeStore(canonical_json(PLAN).encode()))
+    monkeypatch.setattr(run_mod, "verified_registration_bytes", verified)
+    loader = Mock(return_value=FULL)
+    monkeypatch.setattr(run_mod, "load_registration_document", loader)
+    run_mod._init_trial_worker("c", "s", "native_x", {}, REF, 1)
+    assert captured["rows"] == {}
+    _, _, _, registration, _ = run_mod._PARALLEL
+    assert registration.document == FULL
+    loader.assert_called_once()
+    assert loader.call_args.args[1] == BINDING
+    assert "verified_size_rows" not in loader.call_args.kwargs
+
+
 def test_worker_refuses_missing_registration(monkeypatch):
     _patch_worker(monkeypatch, binding=None, store=FakeStore(canonical_json(PLAN).encode()))
     run_mod._init_trial_worker("c", "s", "native_x", {}, REF, 1)
@@ -99,6 +136,32 @@ def test_worker_refuses_tampered_stored_plan(monkeypatch):
     run_mod._init_trial_worker("c", "s", "native_x", {}, REF, 1)
     assert set(run_mod._PARALLEL) == {"worker_problem", "worker_error_type"}
     assert run_mod._PARALLEL["worker_problem"]["code"] == "EXPERIMENT_IDENTITY_CONFLICT"
+
+
+@pytest.mark.parametrize("ref", ["not-a-ref", None, {"artifact_id": "a"}])
+def test_stored_plan_refuses_non_artifact_reference(ref):
+    with pytest.raises(OpsError) as raised:
+        run_mod._stored_plan(FakeStore(canonical_json(PLAN).encode()), ref)
+    assert raised.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+
+
+def test_stored_plan_refuses_artifact_error_from_read_verified():
+    with pytest.raises(OpsError) as raised:
+        run_mod._stored_plan(FakeStore(error=ArtifactError("INTEGRITY_FAILED", "x")), REF)
+    assert raised.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+
+
+def test_stored_plan_refuses_non_json_bytes():
+    with pytest.raises(OpsError) as raised:
+        run_mod._stored_plan(FakeStore(b"{not json"), REF)
+    assert raised.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+
+
+@pytest.mark.parametrize("payload", [b'{"plan_id": 1}', b'{"folds": []}', b"[]"])
+def test_stored_plan_refuses_json_without_string_plan_id(payload):
+    with pytest.raises(OpsError) as raised:
+        run_mod._stored_plan(FakeStore(payload), REF)
+    assert raised.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
 
 
 def _trials():
@@ -122,3 +185,14 @@ def test_binding_rebuilds_plan_without_trusted_plan(monkeypatch):
     plan, _ = _trials()._binding()
     reader.assert_called_once()
     assert plan == {"plan_id": "p2"}
+
+
+def test_admit_refuses_seal_that_differs_from_trusted_plan(monkeypatch):
+    monkeypatch.setattr(trials_mod, "source_closure", lambda *a, **k: [])
+    monkeypatch.setattr(trials_mod, "require_current", lambda *a, **k: None)
+    trials = _trials()
+    trials.trusted_plan = PLAN
+    trials._read = lambda slot: {"plan_id": "other"}
+    with pytest.raises(OpsError) as raised:
+        trials._admit()
+    assert raised.value.code == "EXPERIMENT_IDENTITY_CONFLICT"

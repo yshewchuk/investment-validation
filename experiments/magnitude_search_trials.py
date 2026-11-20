@@ -575,7 +575,7 @@ class SearchTrials:
             if (content_hash(self._cohort_inputs(admitted["cohort"], inner, plan=plan))
                     != content_hash(stored)):
                 raise fail("EXPERIMENT_IDENTITY_CONFLICT", "trial native inputs changed after start")
-            binding = self.registration.document
+            binding = self.registration.lean
             labels = evaluation_targets(self.repository, binding, inner) if "target" in plan else load_magnitude_targets(self.repository, from_document(SnapshotRef, binding["snapshot"]),
                 as_of_month=binding["holdouts"]["holdout_as_of_month"], labels_before=inner["evaluation_labels_before"],
                 event_ids=inner["evaluation_event_ids"], omit_not_computed=True)

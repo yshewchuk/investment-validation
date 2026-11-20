@@ -134,9 +134,10 @@ def _init_trial_worker(conn_path, store_root, run_id, request, plan_ref, memory_
             raise fail("INVALID_EXPERIMENT_SPEC", "native experiment has not been preregistered")
         try:
             schema = json.loads(binding).get("schema_version")
-            hydrate = ((lambda: load_registration_document(store, binding, verified_size_rows=verified_size_rows))
+            hydrate = ((lambda: load_registration_document(store, binding))
                        if schema == "native_experiment_registration.v1.7" else None)
             registration = NativeRegistration(run_id, binding, hydrate=hydrate)
+            verified_size_rows.clear()  # decoded shard rows must not live for the worker's lifetime
             log_memory("worker registration loaded", registration=registration.lean)
         except (ArtifactError, ValueError, KeyError, TypeError, AttributeError):
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "native registration evidence is invalid") from None

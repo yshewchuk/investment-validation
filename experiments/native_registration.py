@@ -85,7 +85,7 @@ def decode_native_gate_sweep(payload, *, failure_code="EXPERIMENT_IDENTITY_CONFL
 
 
 _LEAN_PATHS = (("schema_version",), ("magnitude_execution",), ("regression_execution",),
-               ("regression_plan", "target_recipe"))
+               ("regression_plan", "target_recipe"), ("snapshot",), ("target_snapshot",), ("holdouts",))
 _ABSENT = object()
 
 
