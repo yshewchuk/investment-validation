@@ -103,6 +103,16 @@ def _plan_rows(plan):
     return sorted(rows, key=lambda r: r[0])
 
 
+def _receipt(path, body, reason):
+    """``tuning.write_receipt``, with a changed replay refused under ``reason`` so the refusal names the receipt."""
+    try:
+        return tuning.write_receipt(path, body)
+    except shortvol.Refusal as refusal:
+        if refusal.details.get("reason") != "tuning_receipt_changed":
+            raise
+        raise shortvol.Refusal(_CONFLICT, str(refusal), {**refusal.details, "reason": reason}) from refusal
+
+
 def _exit_map(plan_frame):
     """Event id -> exit_date as an ISO date, for the events whose exit is known."""
     return {str(e): pd.Timestamp(x).date().isoformat()
@@ -125,8 +135,7 @@ def _sims(chunk, events, table, labels, exits):
     return sims
 
 
-def _inner(src, out, ready, plan, facts_all):
-    labels = readers.read_labels(src.fetch, src.admitted, start=INNER[0], end=INNER[1], event_ids=None)
+def _inner(src, out, ready, plan, facts_all, labels):
     exits = _exit_map(src.plan_frame)
     items = {mid: [] for mid in ready}
     quarters = pd.to_datetime(plan["event_date"]).dt.to_period("Q").nunique()
@@ -173,23 +182,27 @@ def run(src, stage, out_dir, *, prereg=size_pnl_prereg.require_preregistration):
     facts_all = src.facts(sorted(str(e) for e in plan["event_id"]))  # the only facts call of the run
     facts_rows = sorted([str(e), *[None if pd.isna(v) else float(v) for v in vals]] for e, vals in
                         zip(facts_all.index, facts_all[list(_FACTS)].to_numpy(dtype=float)))
+    labels = readers.read_labels(src.fetch, src.admitted, start=INNER[0], end=INNER[1], event_ids=None)  # inner only
+    label_rows = sorted([[str(e), float(a), float(c)] for e, a, c in zip(
+        labels.index, labels["abs_move"], labels["crush_pct_iv30"])], key=lambda r: r[0])
     body = {"stage": "inputs", "spec_hash": receipt["spec_hash"], "identity": bound_tables["identity"],
             "roster": roster,  # inputs-level status per model: arrays are not receipted
-            "models": {mid: {k: m[k] for k in ("status", "reason", "binding") if k in m}
+            "models": {mid: ({"status": "ready"} if mid in ready and m["status"] == "deferred"
+                             else {k: m[k] for k in ("status", "reason", "binding") if k in m})
                        for mid, m in bound_tables["bound"].items()},
             "tables": {mid: e["binding"] for mid, e in ready.items()},
             "production": production["binding"], "scope": None, "plan": content_hash(_plan_rows(plan)),
-            "facts": content_hash(facts_rows), "snapshot": src.snapshot_id}
-    inputs_receipt = tuning.write_receipt(out / "receipts" / "inputs_inner.json", body)
+            "facts": content_hash(facts_rows), "labels": content_hash(label_rows), "snapshot": src.snapshot_id}
+    inputs_receipt = _receipt(out / "receipts" / "inputs_inner.json", body, "inputs_receipt_changed")
     if not ready:
         raise shortvol.Refusal(_CONFLICT, "no model is ready to be tuned or scored", {"reason": "no_ready_models"})
     if plan.empty:
         raise shortvol.Refusal(_CONFLICT, "the plan window holds no events", {"reason": "empty_population"})
-    hashes, rows, skipped, by_model = _inner(src, out, ready, plan, facts_all)
-    tuning.write_receipt(out / "receipts" / "inner.json",
-                         {"stage": "inner", "models": hashes, "events": rows, "events_by_model": by_model,
-                          "excluded": excluded, "scope": None, "inputs": inputs_receipt["content_hash"],
-                          "ladder_skipped": skipped})
+    hashes, rows, skipped, by_model = _inner(src, out, ready, plan, facts_all, labels)
+    _receipt(out / "receipts" / "inner.json",
+             {"stage": "inner", "models": hashes, "events": rows, "events_by_model": by_model,
+              "excluded": excluded, "scope": None, "inputs": inputs_receipt["content_hash"],
+              "ladder_skipped": skipped}, "inner_receipt_changed")
     _log(f"stage={stage} end elapsed={time.monotonic() - started:.1f}s rss={_rss_mb():.0f}MB "
          f"ladder_skipped={skipped}")
     return {"stage": stage, "models": sorted(ready), "excluded": excluded, "rows": rows, "ladder_skipped": skipped}

@@ -149,6 +149,8 @@ def test_inner_receipts_bind_scope_none_and_the_snapshot(tmp_path, stubs, monkey
     tuned = tuning.load_receipt(tmp_path / "receipts" / f"tuning_{mid}.json")
     assert inputs["scope"] is None and inner["scope"] is None
     assert inputs["snapshot"] == "snap-1"
+    production = next(m["model_id"] for m in inputs["roster"]["models"] if m["kind"] == "production")
+    assert inputs["models"][production] == {"status": "ready"}
     # Literal content of each receipt (the tune stub's fields, and the bindings between receipts).
     assert tuned["stage"] == "tuning" and tuned["model_id"] == mid and tuned["c"] == 1.0
     assert inner["stage"] == "inner"
@@ -197,7 +199,7 @@ def test_inner_refuses_a_changed_plan_window_on_replay(tmp_path, stubs, monkeypa
     with pytest.raises(Refusal) as caught:
         driver.run(sources(plan_frame=changed), "inner", tmp_path, prereg=OK)
     assert caught.value.code == CONFLICT
-    assert caught.value.details["reason"] == "tuning_receipt_changed"
+    assert caught.value.details["reason"] == "inputs_receipt_changed"
 
 
 def test_inner_month_pool_drops_a_label_printed_after_a_later_month_starts(tmp_path, stubs, monkeypatch):
@@ -278,7 +280,7 @@ def test_changed_snapshot_refuses_an_inner_replay(tmp_path, stubs, monkeypatch):
     with pytest.raises(Refusal) as caught:
         driver.run(sources(snapshot_id="snap-2"), "inner", tmp_path, prereg=OK)
     assert caught.value.code == CONFLICT
-    assert caught.value.details["reason"] == "tuning_receipt_changed"
+    assert caught.value.details["reason"] == "inputs_receipt_changed"
 
 
 def test_changed_fact_value_refuses_an_inner_replay(tmp_path, stubs, monkeypatch):
@@ -289,7 +291,22 @@ def test_changed_fact_value_refuses_an_inner_replay(tmp_path, stubs, monkeypatch
     with pytest.raises(Refusal) as caught:
         driver.run(sources(facts=lambda ids: moved.reindex(list(ids))), "inner", tmp_path, prereg=OK)
     assert caught.value.code == CONFLICT
-    assert caught.value.details["reason"] == "tuning_receipt_changed"
+    assert caught.value.details["reason"] == "inputs_receipt_changed"
+
+
+def test_changed_label_value_refuses_an_inner_replay(tmp_path, stubs, monkeypatch):
+    use_chunks(monkeypatch, [("2023Q2", chunk("E1")), ("2024Q3", chunk("E2"))])
+    driver.run(sources(), "inner", tmp_path, prereg=OK)
+
+    def relabelled(columns, ids):
+        rows = BASE[BASE["event_id"].isin(list(ids))].copy()
+        rows.loc[rows["event_id"] == "E2", "abs_move"] = 9.0  # one label value moves
+        return rows
+
+    with pytest.raises(Refusal) as caught:
+        driver.run(sources(fetch=relabelled), "inner", tmp_path, prereg=OK)
+    assert caught.value.code == CONFLICT
+    assert caught.value.details["reason"] == "inputs_receipt_changed"
 
 
 def test_zero_ready_models_refuses_after_the_inputs_receipt(tmp_path, stubs, monkeypatch):
