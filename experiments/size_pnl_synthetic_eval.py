@@ -121,6 +121,8 @@ def _means(units, meta, declined):
 def evaluate(decisions, meta, tickers, arm, *, replay_equal=None, resamples=contrast.RESAMPLES, seed=contrast.SEED, declined=None):
     """SY2 evaluation of the synthetic decisions on E: quarter-bootstrap slopes, the X1-X7 table, the calibration means
     and contrasts, and the stop ids. ``declined`` is {model: {short-vol unit: [declined, candidates]}}, the width declines."""
+    if replay_equal is not None and not isinstance(replay_equal, bool):
+        raise ValueError("replay_equal must be a bool or None")
     decisions = population(decisions)
     units, slopes, x = _units(decisions, tickers), [], []
     for unit, u in units.items():

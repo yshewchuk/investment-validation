@@ -155,6 +155,15 @@ def test_x7_values_and_stop_membership():
     assert "X7 replay" in failed["stop"]
 
 
+@pytest.mark.parametrize("bad", ["false", 1])
+def test_replay_equal_must_be_bool_or_none(bad):
+    with pytest.raises(ValueError):
+        run(replay_equal=bad)
+    assert row(run(replay_equal=True), "X7", "replay")[2] == "pass"
+    assert row(run(replay_equal=False), "X7", "replay")[2] == "fail"
+    assert row(run(replay_equal=None), "X7", "replay")[2] == "not_run"
+
+
 def test_stop_holds_gating_rows_only():
     out = run(replay_equal=False)
     assert out["stop"] == ["X7 replay"]  # X5 fails here but never stops the run
