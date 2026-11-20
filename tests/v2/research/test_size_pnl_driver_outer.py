@@ -15,9 +15,9 @@ from experiments import size_pnl_driver as driver
 from experiments import size_pnl_readers as readers
 from experiments import size_pnl_tuning as tuning
 from experiments.size_pnl_shortvol import Refusal
-from tests.v2.research.test_size_pnl_driver import (  # noqa: F401  (bounded, stubs, structure_gate_passes are fixtures)
+from tests.v2.research.test_size_pnl_driver import (  # noqa: F401  (bounded, stubs, structure_gate_passes, equivalence_passes are fixtures)
     BASE, CONFLICT, DENIED, EVENTS, EXPECTED, FACTS, FAKE, OK, PLAN_FRAME, _install_sources, _run_main, bounded, chunk, sources,
-    stubs, structure_gate_passes)
+    stubs, structure_gate_passes, equivalence_passes)
 
 FRONT = ["model_id", "book", "arm_or_rule", "structure", "event_id", "event_date", "status", "reason"]
 EMPTY_MARKS = ["event_id", "entry_cost", "exit_value", "rung", "lots", "pnl_per_share", "pnl_dollars"]
