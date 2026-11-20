@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import importlib
 import inspect
 import json
@@ -14,6 +15,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
+from engine.v2.data.errors import DataError  # noqa: E402
 from engine.v2.ops.errors import OpsError, fail  # noqa: E402
 from experiments import size_pnl_prereg, size_pnl_shortvol  # noqa: E402
 Refusal = size_pnl_shortvol.Refusal
@@ -39,8 +41,7 @@ def _read_input(path: str, limit: int = _INPUT_LIMIT) -> bytes:
     with os.fdopen(fd, "rb") as handle:
         st = os.fstat(handle.fileno())
         if not stat.S_ISREG(st.st_mode) or st.st_size > limit:
-            raise fail(_INVALID, f"{path} must be a regular file of at most {limit} bytes",
-                       details={"reason": "input_not_regular_or_too_large"})
+            raise fail(_INVALID, f"{path} must be a regular file of at most {limit} bytes", details={"reason": "input_not_regular_or_too_large"})
         data = handle.read(limit + 1)
     if len(data) > limit:
         raise fail(_INVALID, f"{path} grew past {limit} bytes", details={"reason": "input_not_regular_or_too_large"})
@@ -57,28 +58,26 @@ def _read_json(path: str):
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
-        # Refuses before anything else, with or without --no-ledger.
-        receipt = size_pnl_prereg.require_preregistration()
-        print(json.dumps(receipt), file=sys.stderr)
-        args.expected_identities = _read_json(args.expected)
-        if not isinstance(args.expected_identities, dict):
-            raise fail(_INVALID, "--expected must be a JSON object", details={"reason": "input_unreadable"})
-        # Imported only after the gates above, so a missing PLANNED row refuses first.
-        from experiments import size_pnl_driver
-        module_name, _, func = args.sources.partition(":")
-        try:  # no colon gives func "", which is not an attribute; a bad module raises ImportError
-            factory = getattr(importlib.import_module(module_name), func)
-            if not callable(factory):
-                raise AttributeError(func)
-            inspect.signature(factory).bind(args)  # a signature that rejects the parsed args is a refusal
-        except (ValueError, TypeError, ImportError, AttributeError) as exc:
-            raise fail(_INVALID, f"--sources {args.sources} is invalid: {(type(exc).__name__ + ': ' + str(exc))[:200]}", details={"reason": "sources_invalid"}) from exc
-        made = factory(args)  # outside any try: an error raised inside the factory body propagates unchanged
-        sources = size_pnl_driver.check_sources(made)
-        if sources.expected != args.expected_identities:
-            raise fail(_CONFLICT, "--expected differs from the sources' expected identities", details={"reason": "expected_mismatch"})
-        summary = size_pnl_driver.run(sources, args.stage, args.out_dir, prereg=lambda: receipt)
-    except (OpsError, Refusal) as exc:
+        with contextlib.redirect_stdout(sys.stderr):  # library prints go to stderr; stdout is one JSON document
+            receipt = size_pnl_prereg.require_preregistration()  # refuses first, with or without --no-ledger
+            print(json.dumps(receipt), file=sys.stderr)
+            args.expected_identities = _read_json(args.expected)
+            if not isinstance(args.expected_identities, dict):
+                raise fail(_INVALID, "--expected must be a JSON object", details={"reason": "input_unreadable"})
+            from experiments import size_pnl_driver  # after the gates, so a missing PLANNED row refuses first
+            module_name, _, func = args.sources.partition(":")
+            try:  # no colon gives func "", not an attribute; a bad module raises ImportError
+                factory = getattr(importlib.import_module(module_name), func)
+                if not callable(factory): raise AttributeError(func)
+                inspect.signature(factory).bind(args)  # a signature rejecting the parsed args is a refusal
+            except (ValueError, TypeError, ImportError, AttributeError) as exc:
+                raise fail(_INVALID, f"--sources {args.sources} is invalid: {(type(exc).__name__ + ': ' + str(exc))[:200]}", details={"reason": "sources_invalid"}) from exc
+            made = factory(args)  # outside the try: factory-body errors propagate unchanged
+            sources = size_pnl_driver.check_sources(made)
+            if sources.expected != args.expected_identities:
+                raise fail(_CONFLICT, "--expected differs from the sources' expected identities", details={"reason": "expected_mismatch"})
+            summary = size_pnl_driver.run(sources, args.stage, args.out_dir, prereg=lambda: receipt)
+    except (OpsError, Refusal, DataError) as exc:
         details = exc.details if isinstance(exc, Refusal) else exc.problem.details
         print(json.dumps({"refused": exc.code, "message": str(exc), "reason": details.get("reason")}))
         return 2

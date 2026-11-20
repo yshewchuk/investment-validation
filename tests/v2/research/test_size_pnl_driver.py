@@ -12,6 +12,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from engine.v2.data import errors as data_errors
 from engine.v2.foundation import content_hash
 from engine.v2.ops.errors import OpsError, fail
 from experiments import size_pnl_driver as driver
@@ -691,3 +692,38 @@ def test_run_py_main_refuses_a_plan_without_exit_date(tmp_path, monkeypatch, cap
     _install_sources(monkeypatch, sources(plan_frame=PLAN_FRAME.drop(columns="exit_date")))
     assert run_py.main(_argv(tmp_path, "--no-ledger", sources=FAKE)) == 2
     assert json.loads(capsys.readouterr().out)["refused"] == CONFLICT
+
+
+def test_run_py_stdout_is_one_json_document_when_a_dependency_prints(tmp_path, stubs, monkeypatch, capsys):
+    run_py = _run_main()
+    monkeypatch.setattr(run_py.size_pnl_prereg, "require_preregistration", OK)
+    monkeypatch.setenv("BOUNDED_RUN_NESTED", "1")
+    use_chunks(monkeypatch, [("2023Q2", chunk("E1")), ("2024Q3", chunk("E2"))])
+
+    def noisy(ids):  # a library print during run
+        print("noise")
+        return FACTS.reindex(list(ids))
+
+    _install_sources(monkeypatch, sources(facts=noisy))
+    assert run_py.main(_argv(tmp_path, "--no-ledger", sources=FAKE)) == 0
+    captured = capsys.readouterr()
+    assert len(captured.out.splitlines()) == 1
+    assert json.loads(captured.out)["stage"] == "inner"
+    assert "noise" in captured.err
+
+
+def test_run_py_refuses_a_native_data_error_as_json(tmp_path, monkeypatch, capsys):
+    run_py = _run_main()
+    monkeypatch.setattr(run_py.size_pnl_prereg, "require_preregistration", OK)
+    monkeypatch.setenv("BOUNDED_RUN_NESTED", "1")
+    module = types.ModuleType("exp188_fake_sources")
+
+    def make(args):
+        raise data_errors.fail("CONTRACT_MISMATCH", "x")
+
+    module.make = make
+    monkeypatch.setitem(sys.modules, "exp188_fake_sources", module)
+    assert run_py.main(_argv(tmp_path, "--no-ledger", sources=FAKE)) == 2
+    refused = json.loads(capsys.readouterr().out)
+    assert refused["refused"] == "CONTRACT_MISMATCH"
+    assert refused["reason"] is None
