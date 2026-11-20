@@ -218,6 +218,13 @@ def _chunk_facts(facts, chunk):
     return fx.reindex([str(e) for e in chunk["event_id"]])
 
 
+def _tally(total, chunk):
+    """Adds one ladder chunk's skip counts (reason -> count) into the running per-reason total."""
+    for reason, n in chunk.get("skipped", {}).items():
+        total[str(reason)] = total.get(str(reason), 0) + int(n)
+    return total
+
+
 def _sims(chunk, events, table, labels, exits):
     """One model's simulations for one chunk, one calendar month at a time: a month's pool holds only the rows dated
     before it, with labels printed before it (the outer stage's rule)."""
@@ -234,10 +241,11 @@ def _inner(src, out, ready, plan, ids, facts_all):
     exits = _exit_map(src.plan_frame)
     items = {mid: [] for mid in ready}
     quarters = pd.to_datetime(plan["event_date"]).dt.to_period("Q").nunique()
-    kept, started = 0, time.monotonic()
+    kept, started, skipped = 0, time.monotonic(), {}
     for number, (label, chunk) in enumerate(ladder.ladder_chunks(src.admitted, plan, src.load_index), start=1):
         facts = _chunk_facts(facts_all, chunk)
         kept += len(chunk["event_id"])
+        skipped = _tally(skipped, chunk)
         for mid, entry in ready.items():
             events = model_events(entry["table"], facts, chunk)
             items[mid].append((chunk, events, _sims(chunk, events, entry["table"], labels, exits)))
@@ -251,7 +259,7 @@ def _inner(src, out, ready, plan, ids, facts_all):
         hashes[mid] = tuning.write_receipt(out / "receipts" / f"tuning_{mid}.json", body)["content_hash"]
         _log(f"tuning model {i}/{len(ready)} {mid} elapsed={time.monotonic() - started:.1f}s "
              f"c={body['c']} skipped={body['skipped']}")
-    return hashes, kept
+    return hashes, kept, skipped
 
 
 def _model_state(c):
@@ -357,9 +365,10 @@ def _outer(src, out, ready, receipts, plan, ids, facts_all):
     quarter, month = dates.dt.to_period("Q").astype(str).to_numpy(), dates.dt.to_period("M").to_numpy()
     total = len(set(month))
     state = {mid: _model_state(receipts[mid]["c"]) for mid in ready}
-    frames, done, started = [], 0, time.monotonic()
+    frames, done, started, skipped = [], 0, time.monotonic(), {}
     for label, chunk in ladder.ladder_chunks(src.admitted, plan, src.load_index):
         facts = _chunk_facts(facts_all, chunk)
+        skipped = _tally(skipped, chunk)
         events = {mid: model_events(entry["table"], facts, chunk) for mid, entry in ready.items()}
         for period in sorted({m for m, q in zip(month, quarter) if q == label}):
             start_m = period.start_time
@@ -383,14 +392,15 @@ def _outer(src, out, ready, receipts, plan, ids, facts_all):
         sha, rows = _write_decisions(tmp, frames)
         # The receipt refuses a changed replay before the final file is touched.
         tuning.write_receipt(out / "receipts" / "outer.json",
-                             {"stage": "outer", "decisions_sha256": sha, "rows": rows, "models": list(ready)})
+                             {"stage": "outer", "decisions_sha256": sha, "rows": rows, "models": list(ready),
+                              "ladder_skipped": skipped})
         if final.exists() and _file_sha256(final) == sha:  # exact replay: keep the existing file untouched
             tmp.unlink()
         else:
             os.replace(tmp, final)
     finally:
         tmp.unlink(missing_ok=True)  # no-op after a successful replace
-    return rows
+    return rows, skipped
 
 
 def run(src, stage, out_dir, *, event_ids=None, prereg=size_pnl_prereg.require_preregistration, tuned=None):
@@ -434,11 +444,12 @@ def run(src, stage, out_dir, *, event_ids=None, prereg=size_pnl_prereg.require_p
     if plan.empty:
         raise Refusal(_CONFLICT, "the plan window holds no events", {"reason": "empty_population"})
     if stage == "inner":
-        hashes, rows = _inner(src, out, ready, plan, ids, facts_all)
+        hashes, rows, skipped = _inner(src, out, ready, plan, ids, facts_all)
         tuning.write_receipt(out / "receipts" / "inner.json",
                              {"stage": "inner", "models": hashes, "events": rows, "excluded": excluded,
-                              "scope": scope, "inputs": inputs_receipt["content_hash"]})
+                              "scope": scope, "inputs": inputs_receipt["content_hash"], "ladder_skipped": skipped})
     else:
-        rows = _outer(src, out, ready, receipts, plan, ids, facts_all)
-    _log(f"stage={stage} end elapsed={time.monotonic() - started:.1f}s rss={_rss_mb():.0f}MB")
-    return {"stage": stage, "models": sorted(ready), "excluded": excluded, "rows": rows}
+        rows, skipped = _outer(src, out, ready, receipts, plan, ids, facts_all)
+    _log(f"stage={stage} end elapsed={time.monotonic() - started:.1f}s rss={_rss_mb():.0f}MB "
+         f"ladder_skipped={skipped}")
+    return {"stage": stage, "models": sorted(ready), "excluded": excluded, "rows": rows, "ladder_skipped": skipped}

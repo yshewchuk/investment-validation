@@ -592,6 +592,67 @@ def test_oracle_one_taken_short_vol_row_is_written_with_its_marks(tmp_path, stub
     assert (straddle_rows["pred_move"] == 5.0).all() and (straddle_rows["pred_crush"] == -12.0).all()
 
 
+def test_ladder_skipped_counts_reach_the_inner_receipt_and_summary(tmp_path, stubs, monkeypatch):
+    first, second = chunk("E1"), {**chunk("E2"), "skipped": {"no_chain": 1, "thin": 3}}
+    first["skipped"] = {"no_chain": 2}
+    use_chunks(monkeypatch, [("2023Q2", first), ("2024Q3", second)])
+    summary = driver.run(sources(), "inner", tmp_path, prereg=OK)
+    expected = {"no_chain": 3, "thin": 3}
+    assert tuning.load_receipt(tmp_path / "receipts" / "inner.json")["ladder_skipped"] == expected
+    assert summary["ladder_skipped"] == expected
+
+
+def test_oracle_three_events_in_one_month_persist_their_own_forecast_and_marks(tmp_path, stubs, monkeypatch):
+    """Three 2025-01 events with distinct forecasts and distinct scorer marks: each persisted row carries its own."""
+    cases = {  # literal per event: exit date, the model's forecast, and the marks the stubbed scorer returns
+        "E2": {"date": "2024-08-07", "pred_move": 5.0, "pred_crush": -12.0, "exit_value": 1.0, "pnl_dollars": 0.0},
+        "E3": {"date": "2025-01-15", "pred_move": 4.0, "pred_crush": -9.0, "exit_value": 1.25, "pnl_dollars": 80.0},
+        "E5": {"date": "2025-01-20", "pred_move": 6.5, "pred_crush": -14.0, "exit_value": 2.0, "pnl_dollars": -35.0},
+        "E6": {"date": "2025-01-28", "pred_move": 7.25, "pred_crush": -16.5, "exit_value": 0.75, "pnl_dollars": 210.0},
+    }
+    ids = list(cases)
+    dates = pd.to_datetime([c["date"] for c in cases.values()])
+    admitted = readers.Admitted({"events": pd.DataFrame({"event_id": ids, "event_date": dates}), "excluded": {}})
+    plan_frame = pd.DataFrame({"event_id": ids, "ticker": "T", "event_date": dates, "session": "AMC",
+                               "entry_date": dates - pd.Timedelta(days=1), "exit_date": dates + pd.Timedelta(days=1)})
+    varied = pd.DataFrame([{"event_id": e, "pred_abs_move": c["pred_move"], "pred_iv_crush_30": c["pred_crush"],
+                            "horizon_sessions": 1, "abs_move": 4.0, "crush_pct_iv30": -10.0}
+                           for e, c in cases.items()])
+    facts = pd.DataFrame({"pre_iv30": 40.0, "mcap_usd": 2e10, "implied_move": 5.0},
+                         index=pd.Index(ids, name="event_id"))
+
+    def decide(scored):
+        out = scored.assign(cutoff=np.nan)
+        out.loc[out["event_id"].astype(str).isin(["E3", "E5", "E6"]), "status"] = "taken"
+        return out
+
+    def score(chunk_, events, decisions, name, alpha, *, c=1.0):
+        taken = decisions[decisions["status"] == "taken"]
+        eids = taken["event_id"].astype(str).to_numpy()
+        return pd.DataFrame({"event_id": eids, "entry_cost": 1.0,
+                             "exit_value": [cases[e]["exit_value"] for e in eids], "rung": "rung1", "lots": 2,
+                             "pnl_per_share": 0.5, "pnl_dollars": [cases[e]["pnl_dollars"] for e in eids]})
+
+    monkeypatch.setattr(driver.shortvol, "decide", decide)
+    monkeypatch.setattr(driver.shortvol, "score", score)
+    kw = dict(admitted=admitted, plan_frame=plan_frame, facts=lambda req: facts.reindex(list(req)),
+              fetch=lambda columns, req: varied[varied["event_id"].isin(list(req))])
+    use_chunks(monkeypatch, [("2024Q3", chunk("E2"))])
+    driver.run(sources(**kw), "inner", tmp_path, prereg=OK)
+    use_chunks(monkeypatch, [("2024Q3", chunk("E2")), ("2025Q1", chunk("E3", "E5", "E6"))])
+    driver.run(sources(**kw), "outer", tmp_path, prereg=OK)
+    decisions = pd.read_parquet(tmp_path / "decisions.parquet")
+    taken = decisions[(decisions["book"] == "short_vol") & (decisions["status"] == "taken")]
+    assert set(taken["event_id"]) == {"E3", "E5", "E6"}
+    for eid in ("E3", "E5", "E6"):
+        want, rows = cases[eid], taken[taken["event_id"] == eid]
+        assert len(rows) > 0
+        assert (rows["pred_move"] == want["pred_move"]).all()
+        assert (rows["pred_crush"] == want["pred_crush"]).all()
+        assert (rows["exit_value"] == want["exit_value"]).all()
+        assert (rows["pnl_dollars"] == want["pnl_dollars"]).all()
+
+
 def test_changed_snapshot_refuses_an_inner_replay(tmp_path, stubs, monkeypatch):
     use_chunks(monkeypatch, [("2023Q2", chunk("E1")), ("2024Q3", chunk("E2"))])
     driver.run(sources(), "inner", tmp_path, prereg=OK)
