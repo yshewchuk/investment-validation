@@ -726,3 +726,18 @@ def test_outer_arms_use_their_own_c_and_rows_carry_marks_and_forecasts(tmp_path,
         assert len(rows) > 0
         assert (rows["pred_move"].to_numpy(dtype=float) == move).all()
         assert (rows["pred_crush"].to_numpy(dtype=float) == crush).all()
+
+
+def test_ladder_content_digest_sees_a_mid_array_change_in_a_large_array():
+    """_content hashes ndarrays by value (pd.util.hash_array), not by repr: one mid-array change in a large array changes the digest."""
+    a = np.linspace(0.0, 1.0, 5000)
+    b = a.copy()
+    b[2500] += 1e-12
+    assert driver._content(a) != driver._content(b)
+    assert driver._content(a) == driver._content(a.copy())
+
+    s = np.array([f"s{i}" for i in range(3000)], dtype=object)
+    t = s.copy()
+    t[1500] = "changed"
+    assert driver._content(s) != driver._content(t)
+    assert driver._content(s) == driver._content(s.copy())
