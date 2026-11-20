@@ -997,3 +997,48 @@ def test_run_py_refusal_message_has_no_absolute_path(tmp_path, monkeypatch, caps
     assert run_py.main(argv) == 2
     out = capsys.readouterr().out
     assert "/nonexistent" not in out and "<path>" in json.loads(out)["message"]
+
+
+def test_run_py_synthetic_stage_dispatches_to_run_synthetic_with_smoke_ids_and_replay(tmp_path, monkeypatch, capsys):
+    run_py = _run_main()
+    monkeypatch.setattr(run_py.size_pnl_prereg, "require_preregistration", OK)
+    monkeypatch.setenv("BOUNDED_RUN_NESTED", "1")
+    _install_sources(monkeypatch, sources())
+    (tmp_path / "ids.json").write_text('["E1"]', encoding="utf-8")
+    calls = []
+
+    def fake_synthetic(src, out_dir, *args, **kwargs):
+        calls.append(kwargs)
+        return {"stage": "synthetic", "models": [], "rows": 0, "stop": []}
+
+    def no_run(*args, **kwargs):
+        raise AssertionError("the synthetic stage must not dispatch to run")
+
+    monkeypatch.setattr(driver, "run_synthetic", fake_synthetic)
+    monkeypatch.setattr(driver, "run", no_run)
+    argv = _argv(tmp_path, "--no-ledger", "--replay", "--event-ids", str(tmp_path / "ids.json"), sources=FAKE)
+    argv[argv.index("--stage") + 1] = "synthetic"
+    assert run_py.main(argv) == 0
+    assert len(calls) == 1 and calls[0]["event_ids"] == ["E1"] and calls[0]["replay"] is True
+    assert json.loads(capsys.readouterr().out)["stage"] == "synthetic"
+
+
+def test_run_py_replay_with_another_stage_is_ignored(tmp_path, monkeypatch, capsys):
+    run_py = _run_main()
+    monkeypatch.setattr(run_py.size_pnl_prereg, "require_preregistration", OK)
+    monkeypatch.setenv("BOUNDED_RUN_NESTED", "1")
+    _install_sources(monkeypatch, sources())
+    stages = []
+
+    def fake_run(src, stage, out_dir, **kwargs):
+        stages.append(stage)
+        return {"stage": stage, "models": [], "excluded": {}, "rows": 0, "ladder_skipped": {}}
+
+    def no_synthetic(*args, **kwargs):
+        raise AssertionError("the inner stage must not dispatch to run_synthetic")
+
+    monkeypatch.setattr(driver, "run", fake_run)
+    monkeypatch.setattr(driver, "run_synthetic", no_synthetic)
+    assert run_py.main(_argv(tmp_path, "--no-ledger", "--replay", sources=FAKE)) == 0
+    assert stages == ["inner"]
+    assert json.loads(capsys.readouterr().out)["stage"] == "inner"

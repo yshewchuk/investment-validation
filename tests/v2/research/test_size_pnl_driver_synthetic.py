@@ -1,5 +1,7 @@
 """EXP-188 SY2 driver: run_synthetic on a tiny inner population. The SY1 generator and the synthetic scoring are stood in
 for (the scoring needs the full simulator); the receipts, refusals, evaluation, publish and T11 are the real code."""
+import json
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -229,3 +231,80 @@ def test_publish_defaults_keep_the_outer_names_and_the_stem_renames_both(tmp_pat
     with pytest.raises(Refusal) as caught:
         decisions.publish(tmp_path / "b", [frame], {"stage": "y"}, stem="decisions_synthetic", receipt="synthetic")
     assert caught.value.details["reason"] == "synthetic_receipt_changed"
+
+
+def test_run_synthetic_refuses_an_expected_that_differs_from_the_plan_identity(tmp_path, fakes):
+    with pytest.raises(OpsError) as caught:
+        driver.run_synthetic(sources(expected={**EXPECTED, "panel_id": "OTHER"}), tmp_path, spec=SPEC, prereg=OK)
+    assert caught.value.code == CONFLICT
+    assert not (tmp_path / "receipts").exists()
+
+
+# Three inner events in two quarters and two tickers, so one drop leaves two quarters and two tickers for the evaluation.
+EVENTS3 = {"E1": "2023-06-10", "E2": "2023-09-12", "E3": "2024-08-07"}
+TICKERS3 = {"E1": "T1", "E2": "T2", "E3": "T1"}
+DATES3 = pd.to_datetime(list(EVENTS3.values()))
+ADMITTED3 = readers.Admitted({"events": pd.DataFrame({"event_id": list(EVENTS3), "event_date": DATES3}), "excluded": {}})
+PLAN3 = pd.DataFrame({"event_id": list(EVENTS3), "ticker": [TICKERS3[e] for e in EVENTS3], "event_date": DATES3, "session": "AMC",
+                      "entry_date": DATES3 - pd.Timedelta(days=1), "exit_date": DATES3 + pd.Timedelta(days=1)})
+BASE3 = pd.DataFrame([{"event_id": e, "pred_abs_move": 5.0, "pred_iv_crush_30": -12.0, "horizon_sessions": 1,
+                       "abs_move": 4.0, "crush_pct_iv30": -10.0} for e in EVENTS3])
+FACTS3 = pd.DataFrame({"pre_iv30": 40.0, "mcap_usd": 2e10, "implied_move": 5.0}, index=pd.Index(list(EVENTS3), name="event_id"))
+
+
+def _scored(chunk_, events, sims, name, **kwargs):
+    """Every event scored for the structure; the real decide then sets the status (thin history stays undetermined)."""
+    n = len(events)
+    return pd.DataFrame({"event_id": events["event_id"].astype(str).to_numpy(), "event_date": events["event_date"].to_numpy(),
+                         "structure": name, "status": "scored", "reason": None, "exp_pnl_sim": 1.0 + np.arange(n),
+                         "mcap_usd": 2e10, "rel_spread": 0.1, "width": 1.0})
+
+
+def _marks(chunk_, events, decisions, *args, **kwargs):
+    """The P&L marks of the taken rows (the real scorers need the chunk's quotes)."""
+    taken = decisions[decisions["status"] == "taken"]
+    n = len(taken)
+    return pd.DataFrame({"event_id": taken["event_id"].astype(str).to_numpy(), "exit_value": np.ones(n), "rung": np.ones(n, dtype=int),
+                         "lots": np.ones(n, dtype=int), "entry_cost": np.ones(n), "pnl_per_share": np.ones(n), "pnl_dollars": np.ones(n)})
+
+
+def _straddle_decide(events, edges, rule, chunk_):
+    """Every straddle event taken (the real rules need the chunk's quotes)."""
+    return pd.DataFrame({"event_id": events["event_id"].astype(str).to_numpy(), "event_date": events["event_date"].to_numpy(),
+                         "edge": events["pred_abs_move"].to_numpy(dtype=float), "cutoff": np.nan, "rel_spread": np.nan,
+                         "status": "taken", "reason": None})
+
+
+def test_the_real_scoring_loop_drops_an_event_unscoreable_for_one_model_from_every_model(tmp_path, monkeypatch):
+    """No _synthetic_scores stub: the real month loop runs. One model has no simulation for E3, so E3 leaves for every model."""
+    def generate(admitted, labels, production, arm):
+        entries = fake_entries(labels, arm)
+        odd = sorted(entries)[0]
+        table = entries[odd]["table"].copy()
+        table.attrs["odd"] = True  # the pool keeps the table's attrs through the month slices
+        return {**entries, odd: {**entries[odd], "table": table}}
+
+    monkeypatch.setattr(synthetic, "generate", generate)
+    monkeypatch.setattr(driver, "build_pool", lambda table, labels: table)
+    monkeypatch.setattr(driver.shortvol, "simulate", lambda chunk_, events, pool, **kw: {
+        e: (None if pool.attrs.get("odd") and e == "E3" else "sim") for e in events["event_id"]})
+    monkeypatch.setattr(driver.shortvol, "score_events", _scored)
+    monkeypatch.setattr(driver.shortvol, "score", _marks)
+    monkeypatch.setattr(driver.straddle, "decide", _straddle_decide)
+    monkeypatch.setattr(driver.straddle, "score", _marks)
+    use_chunks(monkeypatch, [("2023Q2", chunk("E1")), ("2023Q3", chunk("E2")), ("2024Q3", chunk("E3"))])
+    src = sources(plan_frame=PLAN3, admitted=ADMITTED3, facts=lambda ids: FACTS3.reindex(list(ids)),
+                  fetch=lambda columns, ids: BASE3[BASE3["event_id"].isin(list(ids))])
+    out = tmp_path / "out"
+    driver.run_synthetic(src, out, spec=SPEC, prereg=OK)
+    frame = pd.read_parquet(out / "decisions_synthetic.parquet")
+    units = len(driver.shortvol.NAMES) + len(driver.straddle.RULES)
+    assert sorted(frame["event_id"].astype(str).unique()) == ["E1", "E2"]  # E3 is gone for every model
+    assert len(set(frame["model_id"])) == 3
+    assert len(frame) == 3 * 2 * units  # one row per model per surviving event per unit
+    assert not frame.duplicated(["model_id", "book", "arm_or_rule", "structure", "event_id"]).any()
+    receipt = json.loads((out / "receipts" / "synthetic.json").read_text(encoding="utf-8"))
+    assert receipt["scoreability_dropped"] == 1
+    first = snapshot(out)
+    driver.run_synthetic(src, out, spec=SPEC, prereg=OK)
+    assert snapshot(out) == first  # a second identical run is byte-identical

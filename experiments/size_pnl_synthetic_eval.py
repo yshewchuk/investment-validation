@@ -123,9 +123,10 @@ def evaluate(decisions, meta, tickers, arm, *, replay_equal=None, resamples=cont
         if shr is not None:
             sub = u["rows"][u["rows"]["model_id"] == shr]
             taken = int((sub["status"] == "taken").sum())
-            if u["book"] == SHORT:
-                var = _quarter_var(sub)
-                x.append(["X6", unit, "pass" if var <= 1e-12 else "fail", f"var={var:.3g} taken={taken}"])
+            if u["book"] == SHORT:  # completeness first: any NaN width fails, before the variance test
+                missing, var = int(sub["width"].isna().sum()), _quarter_var(sub)
+                if missing: x.append(["X6", unit, "fail", f"missing_widths={missing} taken={taken}"])
+                else: x.append(["X6", unit, "pass" if var <= 1e-12 else "fail", f"var={var:.3g} taken={taken}"])
             else:
                 x.append(["X6", unit, "printed", f"taken={taken}"])
     short = [n for n, u in units.items() if u["book"] == SHORT]

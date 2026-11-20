@@ -268,7 +268,7 @@ def t10_verdicts(hypotheses):
 def t11_synthetic(result):
     stop = ", ".join(result["stop"]) or "none"
     first = _section("T11 SYNTHETIC calibration, X-table", ["id", "scope", "result", "detail"], result["x"],
-                     note=f"SYNTHETIC: controls and power, never a roster or SIZE result; stop on a failed X1, X2, X6 or X7: {stop}")
+                     note=f"SYNTHETIC: controls and power, never a roster or SIZE result; stop on a failed I1, X1, X2, X6 or X7: {stop}")
     second = _section("T11 SYNTHETIC slopes", ["type", "unit", "metric", "slope", "lo_90", "hi_90"], result["slopes"],
                       note="dollars per event per error point; quarter bootstrap 90% interval")
     return [first, second]

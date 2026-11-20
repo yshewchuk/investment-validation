@@ -525,6 +525,7 @@ def run_synthetic(src, out_dir, spec=None, *, event_ids=None, replay=False, prer
     check_sources(src)
     if os.environ.get("BOUNDED_RUN_NESTED") != "1":
         raise fail("RESOURCE_UNAVAILABLE", "run under tools/bounded_run.py --heavy", details={"reason": "not_bounded"})
+    identity = inputs.bind_run(src.plan, src.read, expected=src.expected, panel_id=src.panel_id)  # as _prepare: before any read
     arm = synthetic.arm_from_spec(size_pnl_prereg._load(size_pnl_prereg.SPEC_PATH)[0] if spec is None else spec)
     out, ids = Path(out_dir), _smoke(src, event_ids)
     full = src.plan_frame
@@ -540,7 +541,7 @@ def run_synthetic(src, out_dir, spec=None, *, event_ids=None, replay=False, prer
     ready = _ready(synthetic.generate(src.admitted, labels, production, arm), ids)
     if not ready: raise _no_ready()
     scope = _scope(ids)
-    body = {"stage": "inputs_synthetic", "spec_hash": receipt["spec_hash"], "arm": content_hash(arm), "snapshot": src.snapshot_id, "scope": scope,
+    body = {"stage": "inputs_synthetic", "spec_hash": receipt["spec_hash"], "identity": identity, "arm": content_hash(arm), "snapshot": src.snapshot_id, "scope": scope,
             "plan": content_hash(_plan_rows(plan)), "facts": content_hash(_facts_rows(facts_all, stage_ids)), "labels": content_hash(_label_rows([labels])),
             "production": production["binding"], "tables": {mid: _table_binding(e, ids) for mid, e in ready.items()}}
     inputs_receipt = _receipt(out / "receipts" / "inputs_synthetic.json", body, "inputs_receipt_changed")

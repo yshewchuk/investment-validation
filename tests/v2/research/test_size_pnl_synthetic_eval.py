@@ -102,6 +102,22 @@ def test_x6_fails_on_within_quarter_width_variance():
     assert "X6 S1" in out["stop"]
 
 
+def test_x6_passes_with_complete_constant_widths():
+    assert row(run(width=[2] * 8), "X6", "S1")[2:] == ["pass", "var=0 taken=8"]
+
+
+def test_x6_fails_when_every_width_is_missing():
+    out = run(width=[np.nan] * 8)
+    assert row(out, "X6", "S1")[2:] == ["fail", "missing_widths=8 taken=8"]
+    assert "X6 S1" in out["stop"]
+
+
+def test_x6_fails_on_one_missing_width_before_the_variance_test():
+    out = run(width=[1, 1, 2, 2, 3, 3, 4, np.nan])
+    assert row(out, "X6", "S1")[2:] == ["fail", "missing_widths=1 taken=8"]
+    assert "X6 S1" in out["stop"]
+
+
 def test_x7_values_and_stop_membership():
     assert row(run(replay_equal=True), "X7", "replay")[2] == "pass"
     assert row(run(replay_equal=None), "X7", "replay")[2] == "not_run"
@@ -132,6 +148,14 @@ def test_evaluation_is_deterministic_and_json_safe():
     assert first["hash"] == second["hash"]
     assert first["x"] == second["x"] and first["slopes"] == second["slopes"]
     json.dumps(first)
+    moved = frame_of()
+    at = (moved["model_id"] == "M06") & (moved["event_id"] == "E3") & (moved["structure"] == "S1")
+    moved.loc[at, "pnl_dollars"] += 0.5  # one P&L cell
+    assert ev.evaluate(moved, META, TICKERS, ARM, resamples=RESAMPLES)["hash"] != first["hash"]
+
+
+def _s1(frame):
+    return frame[(frame["book"] == "short_vol") & (frame["structure"] == "S1")]
 
 
 def test_a_missing_cell_raises_and_a_nan_pnl_counts_zero():
@@ -139,6 +163,8 @@ def test_a_missing_cell_raises_and_a_nan_pnl_counts_zero():
     at = (d["model_id"] == "M06") & (d["event_id"] == "E3") & (d["structure"] == "S1")
     with pytest.raises(ValueError):
         ev.evaluate(d[~at], META, TICKERS, ARM, resamples=RESAMPLES)
-    nan = d.copy()
+    nan, zero = d.copy(), d.copy()
     nan.loc[at, "pnl_dollars"] = np.nan
-    assert ev.evaluate(nan, META, TICKERS, ARM, resamples=RESAMPLES)["x"]
+    zero.loc[at, "pnl_dollars"] = 0.0
+    pd.testing.assert_series_equal(ev._wide(_s1(nan)).mean(), ev._wide(_s1(zero)).mean())  # the NaN cell is 0
+    assert ev.evaluate(nan, META, TICKERS, ARM, resamples=RESAMPLES)["hash"] == ev.evaluate(zero, META, TICKERS, ARM, resamples=RESAMPLES)["hash"]
