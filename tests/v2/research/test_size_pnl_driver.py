@@ -301,7 +301,10 @@ def test_an_event_unsimulable_under_one_model_leaves_for_every_model(tmp_path, s
     driver.run(sources(), "inner", tmp_path, prereg=OK)
     tuned = [ids for kind, _mid, ids in stubs if kind == "tune"]
     assert len(tuned) == 2 and all(ids == ("E1",) for ids in tuned)  # neither model's items hold E2
-    assert tuning.load_receipt(tmp_path / "receipts" / "inner.json")["common_dropped"] == {"2023Q2": 1}
+    inner = tuning.load_receipt(tmp_path / "receipts" / "inner.json")
+    assert inner["common_dropped"] == {"2023Q2": 1}
+    assert inner["events"] == len(tuned[0]) == 1  # the taken population: the common-dropped E2 is not counted
+    assert set(inner["events_by_model"].values()) == {inner["events"]}
 
 
 def test_an_event_missing_from_one_table_leaves_for_every_model(tmp_path, stubs, monkeypatch):
@@ -592,6 +595,14 @@ def _install_sources(monkeypatch, src):
     module = types.ModuleType("exp188_fake_sources")
     module.make = lambda args: src
     monkeypatch.setitem(sys.modules, "exp188_fake_sources", module)
+
+
+def test_run_refuses_sources_with_a_non_callable_source(tmp_path):
+    with pytest.raises(OpsError) as caught:
+        driver.run(sources(facts=None), "inner", tmp_path, prereg=OK)
+    assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert caught.value.problem.details["reason"] == "sources_invalid"
+    assert not (tmp_path / "receipts").exists()
 
 
 def test_run_py_requires_no_ledger(tmp_path):

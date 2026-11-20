@@ -45,7 +45,8 @@ class Sources:
 
 
 def check_sources(src):
-    if not (isinstance(src, Sources) and isinstance(src.expected, dict) and isinstance(src.plan_frame, pd.DataFrame)):
+    if not (isinstance(src, Sources) and isinstance(src.expected, dict) and isinstance(src.plan_frame, pd.DataFrame)
+            and all(callable(getattr(src, f)) for f in ("read", "admit", "fetch", "load_index", "facts"))):
         raise fail("INVALID_EXPERIMENT_SPEC", "sources must be a Sources with an object `expected`", details={"reason": "sources_invalid"})
     return src
 
@@ -160,7 +161,7 @@ def _inner(src, out, ready, plan, facts_all, labels):
         hashes[mid] = tuning.write_receipt(out / "receipts" / f"tuning_{mid}.json", body)["content_hash"]
         _log(f"tuning model {i}/{len(ready)} {mid} elapsed={time.monotonic() - started:.1f}s "
              f"c={body['c']} skipped={body['skipped']}")
-    return hashes, kept - len(bad), skipped, by_model, common, len(bad)
+    return hashes, max(by_model.values(), default=0), skipped, by_model, common, len(bad)
 
 
 def run(src, stage, out_dir, *, prereg=size_pnl_prereg.require_preregistration):
