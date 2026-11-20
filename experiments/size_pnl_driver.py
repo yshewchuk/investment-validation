@@ -1,4 +1,4 @@
-"""EXP-188 S9: driver of the SIZE P&L re-score, inner (S9a, 2023-2024) and outer (S9b, 2025, #2660) stages; the synthetic arm gets a gated helper in its own slice."""
+"""EXP-188 S9: driver of the SIZE P&L re-score, inner (S9a, 2023-2024) and outer (S9b, 2025, #2660) stages; the synthetic arm runs through `run_synthetic` (SY2)."""
 import hashlib
 import json
 import os
@@ -517,16 +517,34 @@ def _frames_digest(frames):
     return hashlib.sha256(pd.util.hash_pandas_object(frame, index=False).to_numpy().tobytes()).hexdigest()
 
 
-def run_synthetic(src, out_dir, spec=None, *, event_ids=None, replay=False, prereg=size_pnl_prereg.require_preregistration):
+def _fit(table, labels, kept):
+    """n, rmse and mae (percent points) of one model's pred_move on the kept ids; the SY1 error is pred minus abs_move."""
+    sub = table[table.index.astype(str).isin(kept)]
+    truth = pd.Series(labels["abs_move"].to_numpy(dtype=float), index=labels.index.astype(str)).reindex(sub.index.astype(str)).to_numpy(dtype=float)
+    err = sub["pred_move"].to_numpy(dtype=float) - truth
+    return {"n": len(sub), "rmse": float(np.sqrt(np.mean(err ** 2))), "mae": float(np.mean(np.abs(err)))}
+
+
+def _replay_equal(out, inputs_hash, ladder_hash):
+    """The recorded replay verdict if it was written for this run's inputs and ladder, else None (X7 not run)."""
+    path = out / "receipts" / "synthetic_replay.json"
+    if not path.exists(): return None
+    loaded = tuning.load_receipt(path)
+    return loaded["equal"] if loaded["inputs"] == inputs_hash and loaded["ladder"] == ladder_hash else None
+
+
+def run_synthetic(src, out_dir, *, event_ids=None, replay=False, prereg=size_pnl_prereg.require_preregistration):
     """The SY2 synthetic stage on the inner window: score, evaluate X1-X7, publish decisions_synthetic and T11. Never tunes or reads 2025."""
     started = time.monotonic()
     _log(f"stage=synthetic start rss={_rss_mb():.0f}MB")
     receipt = prereg()
+    spec, digest = size_pnl_prereg.load_spec()
+    if digest != receipt["spec_hash"]: raise Refusal(_CONFLICT, "the spec differs from the preregistered one", {"reason": "spec_not_preregistered"})
     check_sources(src)
     if os.environ.get("BOUNDED_RUN_NESTED") != "1":
         raise fail("RESOURCE_UNAVAILABLE", "run under tools/bounded_run.py --heavy", details={"reason": "not_bounded"})
     identity = inputs.bind_run(src.plan, src.read, expected=src.expected, panel_id=src.panel_id)  # as _prepare: before any read
-    arm = synthetic.arm_from_spec(size_pnl_prereg._load(size_pnl_prereg.SPEC_PATH)[0] if spec is None else spec)
+    arm = synthetic.arm_from_spec(spec)
     out, ids = Path(out_dir), _smoke(src, event_ids)
     full = src.plan_frame
     if full[[c for c in ("event_date", "entry_date", "exit_date") if c in full.columns]].isna().to_numpy().any(): raise fail("INVALID_EXPERIMENT_SPEC", "plan dates must not be null", details={"reason": "plan_dates_null"})
@@ -546,13 +564,22 @@ def run_synthetic(src, out_dir, spec=None, *, event_ids=None, replay=False, prer
             "production": production["binding"], "tables": {mid: _table_binding(e, ids) for mid, e in ready.items()}}
     inputs_receipt = _receipt(out / "receipts" / "inputs_synthetic.json", body, "inputs_receipt_changed")
     frames, skipped, ladder_hash, dropped = _synthetic_scores(src, ready, plan, facts_all, labels)
-    replay_equal = None if not replay else _frames_digest(frames) == _frames_digest(_synthetic_scores(src, ready, plan, facts_all, labels)[0])
-    meta = {mid: {"family": e["family"], "params": e["params"], "rmse": e["metrics"]["rmse"], "mae": e["metrics"]["mae"]} for mid, e in ready.items()}
+    if replay:  # X7 evidence: the replay verdict is receipted, so a later plain run can read it
+        equal = _frames_digest(frames) == _frames_digest(_synthetic_scores(src, ready, plan, facts_all, labels)[0])
+        _receipt(out / "receipts" / "synthetic_replay.json", {"stage": "synthetic_replay", "scope": scope, "inputs": inputs_receipt["content_hash"],
+                                                             "ladder": ladder_hash, "equal": equal}, "synthetic_replay_changed")
+    replay_equal = _replay_equal(out, inputs_receipt["content_hash"], ladder_hash)
+    kept, common = set(pd.concat(frames, ignore_index=True)["event_id"].astype(str)), _common_dropped(ready)
+    pools = _pool_tables(ready)
+    fits = {mid: _fit(pools[mid], labels, kept) for mid in ready}  # rmse and mae on the events that were scored (population E)
+    _log(f"synthetic common_dropped={common} events={len(kept)} scoreability_dropped={dropped}")
+    meta = {mid: {"family": e["family"], "params": e["params"], "rmse": fits[mid]["rmse"], "mae": fits[mid]["mae"]} for mid, e in ready.items()}
     tickers = dict(zip(plan["event_id"].astype(str), plan["ticker"]))
     result = synthetic_eval.evaluate(pd.concat(frames, ignore_index=True), meta, tickers, arm, replay_equal=replay_equal)
     body = {"stage": "synthetic", "models": sorted(ready), "scope": scope, "inputs": inputs_receipt["content_hash"], "arm": content_hash(arm),
-            "ladder_skipped": skipped, "ladder": ladder_hash, "scoreability_dropped": dropped, "evaluation": result["hash"],
-            "stop": result["stop"], "metrics": {mid: ready[mid]["metrics"] for mid in ready}}
+            "ladder_skipped": skipped, "ladder": ladder_hash, "scoreability_dropped": dropped, "common_dropped": common, "events": len(kept),
+            "events_by_model": {mid: len(e["table"]) for mid, e in ready.items()}, "evaluation": result["hash"],
+            "stop": result["stop"], "metrics": fits}
     rows = decisions.publish(out, frames, body, stem="decisions_synthetic", receipt="synthetic")
     (out / "t11_synthetic.md").write_text(report.build_report(report.t11_synthetic(result)), encoding="utf-8")
     _log(f"stage=synthetic end elapsed={time.monotonic() - started:.1f}s rss={_rss_mb():.0f}MB ladder_skipped={skipped} stop={result['stop']}")

@@ -64,6 +64,11 @@ def bounded(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def preregistered_spec(monkeypatch):
+    monkeypatch.setattr(driver.size_pnl_prereg, "load_spec", lambda spec_path=None: (SPEC, "SPEC"))
+
+
+@pytest.fixture(autouse=True)
 def structure_gate_passes(monkeypatch):
     monkeypatch.setattr(driver.shortvol, "score_events", lambda chunk_, events, sims, name, **kw: pd.DataFrame(
         {"event_id": events["event_id"].to_numpy(), "status": "scored"}))
@@ -124,7 +129,7 @@ def fakes(monkeypatch):
 def test_refuses_without_the_bounded_run_before_any_write(tmp_path, monkeypatch, fakes):
     monkeypatch.delenv("BOUNDED_RUN_NESTED", raising=False)
     with pytest.raises(OpsError) as caught:
-        driver.run_synthetic(sources(), tmp_path, spec=SPEC, prereg=OK)
+        driver.run_synthetic(sources(), tmp_path, prereg=OK)
     assert caught.value.code == "RESOURCE_UNAVAILABLE"
     assert caught.value.problem.details["reason"] == "not_bounded"
     assert not (tmp_path / "receipts").exists()
@@ -135,7 +140,7 @@ def test_writes_the_synthetic_artifacts_and_no_tuning_or_outer_files(tmp_path, m
         raise AssertionError("the synthetic stage must never tune")
 
     monkeypatch.setattr(tuning, "tune", no_tune)
-    summary = driver.run_synthetic(sources(), tmp_path, spec=SPEC, prereg=OK)
+    summary = driver.run_synthetic(sources(), tmp_path, prereg=OK)
     assert sorted(p.name for p in (tmp_path / "receipts").iterdir()) == ["inputs_synthetic.json", "synthetic.json"]
     assert (tmp_path / "decisions_synthetic.parquet").is_file() and not (tmp_path / "decisions.parquet").exists()
     text = (tmp_path / "t11_synthetic.md").read_text(encoding="utf-8")
@@ -145,26 +150,50 @@ def test_writes_the_synthetic_artifacts_and_no_tuning_or_outer_files(tmp_path, m
 
 
 def test_replay_is_byte_identical_and_passes_x7(tmp_path, fakes):
-    driver.run_synthetic(sources(), tmp_path, spec=SPEC, prereg=OK, replay=True)
+    driver.run_synthetic(sources(), tmp_path, prereg=OK, replay=True)
     first = snapshot(tmp_path)
     assert "| X7 | replay | pass |" in first["t11_synthetic.md"].decode("utf-8")
-    driver.run_synthetic(sources(), tmp_path, spec=SPEC, prereg=OK, replay=True)
+    driver.run_synthetic(sources(), tmp_path, prereg=OK, replay=True)
     assert snapshot(tmp_path) == first
 
 
 def test_replay_then_plain_run_keeps_the_receipt_and_decisions_byte_identical(tmp_path, fakes):
-    driver.run_synthetic(sources(), tmp_path, spec=SPEC, prereg=OK, replay=True)
+    driver.run_synthetic(sources(), tmp_path, prereg=OK, replay=True)
     keep = ("receipts/synthetic.json", "decisions_synthetic.parquet")
     first = {name: (tmp_path / name).read_bytes() for name in keep}
-    driver.run_synthetic(sources(), tmp_path, spec=SPEC, prereg=OK)
+    driver.run_synthetic(sources(), tmp_path, prereg=OK)
     assert {name: (tmp_path / name).read_bytes() for name in keep} == first
 
 
+def test_replay_then_plain_run_keeps_t11_byte_identical_and_x7_pass(tmp_path, fakes):
+    driver.run_synthetic(sources(), tmp_path, prereg=OK, replay=True)
+    first = (tmp_path / "t11_synthetic.md").read_bytes()
+    assert "| X7 | replay | pass |" in first.decode("utf-8")
+    driver.run_synthetic(sources(), tmp_path, prereg=OK)
+    assert (tmp_path / "t11_synthetic.md").read_bytes() == first
+
+
+def test_a_replay_receipt_for_other_inputs_is_ignored(tmp_path, fakes):
+    driver.run_synthetic(sources(), tmp_path, prereg=OK)
+    tuning.write_receipt(tmp_path / "receipts" / "synthetic_replay.json",
+                         {"stage": "synthetic_replay", "scope": None, "inputs": "sha256:other", "ladder": "sha256:other", "equal": True})
+    driver.run_synthetic(sources(), tmp_path, prereg=OK)
+    assert "| X7 | replay | not_run |" in (tmp_path / "t11_synthetic.md").read_text(encoding="utf-8")
+
+
+def test_a_spec_that_differs_from_the_preregistered_one_refuses_before_any_write(tmp_path, fakes):
+    with pytest.raises(Refusal) as caught:
+        driver.run_synthetic(sources(), tmp_path, prereg=lambda: {"spec_hash": "OTHER", "spec_hash_checked": True})
+    assert caught.value.code == CONFLICT
+    assert caught.value.details["reason"] == "spec_not_preregistered"
+    assert not any(tmp_path.iterdir())
+
+
 def test_changed_inputs_refuse_and_leave_the_receipts_as_they_were(tmp_path, fakes):
-    driver.run_synthetic(sources(), tmp_path, spec=SPEC, prereg=OK)
+    driver.run_synthetic(sources(), tmp_path, prereg=OK)
     before = snapshot(tmp_path)
     with pytest.raises(Refusal) as caught:
-        driver.run_synthetic(sources(snapshot_id="snap-2"), tmp_path, spec=SPEC, prereg=OK)
+        driver.run_synthetic(sources(snapshot_id="snap-2"), tmp_path, prereg=OK)
     assert caught.value.code == CONFLICT
     assert caught.value.details["reason"] == "inputs_receipt_changed"
     assert snapshot(tmp_path) == before
@@ -181,7 +210,7 @@ def test_the_stage_reads_no_2025_event(tmp_path, monkeypatch, fakes):
 
     monkeypatch.setattr(readers, "read_production", spy(real_prod))
     monkeypatch.setattr(readers, "read_labels", spy(real_labels))
-    driver.run_synthetic(sources(), tmp_path, spec=SPEC, prereg=OK)
+    driver.run_synthetic(sources(), tmp_path, prereg=OK)
     assert ends and all(pd.Timestamp(e) <= pd.Timestamp("2025-01-01") for e in ends)
     assert fakes and all(set(ids) <= {"E1", "E2"} for ids in fakes)
 
@@ -191,7 +220,7 @@ def test_deleting_the_synthetic_files_leaves_the_inner_receipts_byte_identical(t
     out = tmp_path / "out"
     driver.run(sources(), "inner", out, prereg=OK)
     inner = {p.name: p.read_bytes() for p in (out / "receipts").iterdir()}
-    driver.run_synthetic(sources(), out, spec=SPEC, prereg=OK)
+    driver.run_synthetic(sources(), out, prereg=OK)
     for path in (out / "decisions_synthetic.parquet", out / "t11_synthetic.md",
                  out / "receipts" / "synthetic.json", out / "receipts" / "inputs_synthetic.json"):
         path.unlink()
@@ -235,14 +264,15 @@ def test_publish_defaults_keep_the_outer_names_and_the_stem_renames_both(tmp_pat
 
 def test_run_synthetic_refuses_an_expected_that_differs_from_the_plan_identity(tmp_path, fakes):
     with pytest.raises(OpsError) as caught:
-        driver.run_synthetic(sources(expected={**EXPECTED, "panel_id": "OTHER"}), tmp_path, spec=SPEC, prereg=OK)
+        driver.run_synthetic(sources(expected={**EXPECTED, "panel_id": "OTHER"}), tmp_path, prereg=OK)
     assert caught.value.code == CONFLICT
     assert not (tmp_path / "receipts").exists()
 
 
-# Three inner events in two quarters and two tickers, so one drop leaves two quarters and two tickers for the evaluation.
-EVENTS3 = {"E1": "2023-06-10", "E2": "2023-09-12", "E3": "2024-08-07"}
-TICKERS3 = {"E1": "T1", "E2": "T2", "E3": "T1"}
+# Six inner events in five quarters and two tickers. E1 (the shrinkage model's first-quarter gap) and E3 (unscoreable for one model)
+# leave for every model, so E2, E4, E5 and E6 survive: four events in four quarters and both tickers for the evaluation.
+EVENTS3 = {"E1": "2023-06-10", "E2": "2023-09-12", "E3": "2024-08-07", "E4": "2023-12-06", "E5": "2024-02-14", "E6": "2024-11-13"}
+TICKERS3 = {"E1": "T1", "E2": "T2", "E3": "T1", "E4": "T1", "E5": "T2", "E6": "T1"}
 DATES3 = pd.to_datetime(list(EVENTS3.values()))
 ADMITTED3 = readers.Admitted({"events": pd.DataFrame({"event_id": list(EVENTS3), "event_date": DATES3}), "excluded": {}})
 PLAN3 = pd.DataFrame({"event_id": list(EVENTS3), "ticker": [TICKERS3[e] for e in EVENTS3], "event_date": DATES3, "session": "AMC",
@@ -265,7 +295,8 @@ def _marks(chunk_, events, decisions, *args, **kwargs):
     taken = decisions[decisions["status"] == "taken"]
     n = len(taken)
     return pd.DataFrame({"event_id": taken["event_id"].astype(str).to_numpy(), "exit_value": np.ones(n), "rung": np.ones(n, dtype=int),
-                         "lots": np.ones(n, dtype=int), "entry_cost": np.ones(n), "pnl_per_share": np.ones(n), "pnl_dollars": np.ones(n)})
+                         "lots": np.ones(n, dtype=int), "entry_cost": np.ones(n), "pnl_per_share": np.ones(n),
+                         "pnl_dollars": 10.0 * np.array([int(e[1:]) for e in taken["event_id"].astype(str)], dtype=float)})  # 10 x the event number
 
 
 def _straddle_decide(events, edges, rule, chunk_):
@@ -276,13 +307,21 @@ def _straddle_decide(events, edges, rule, chunk_):
 
 
 def test_the_real_scoring_loop_drops_an_event_unscoreable_for_one_model_from_every_model(tmp_path, monkeypatch):
-    """No _synthetic_scores stub: the real month loop runs. One model has no simulation for E3, so E3 leaves for every model."""
+    """No _synthetic_scores stub: the real month loop runs. The shrinkage model has no E1 (its first quarter), so E1 leaves the
+    common population; one non-shrinkage model has no simulation for E3, so E3 leaves for every model. Predictions are 5.0 except
+    E3 (104.0) and the realised abs_move is 4.0, so on the kept population {E2, E4, E5, E6} rmse = mae = 1.0 (E3 would dominate otherwise).
+    Each survivor's straddle P&L is 10 x its event number (E2 20, E4 40, E5 50, E6 60); short_vol stays undetermined (thin history)."""
     def generate(admitted, labels, production, arm):
         entries = fake_entries(labels, arm)
-        odd = sorted(entries)[0]
-        table = entries[odd]["table"].copy()
-        table.attrs["odd"] = True  # the pool keeps the table's attrs through the month slices
-        return {**entries, odd: {**entries[odd], "table": table}}
+        shrink = {mid for mid in entries if entries[mid]["family"] == "shrinkage"}
+        odd = sorted(mid for mid in entries if mid not in shrink)[0]
+        out = {}
+        for mid, entry in entries.items():
+            table = entry["table"].drop(index=["E1"]) if mid in shrink else entry["table"]
+            table = table.assign(pred_move=np.where(table.index == "E3", 104.0, 5.0))
+            if mid == odd: table.attrs["odd"] = True  # the pool keeps the table's attrs through the month slices
+            out[mid] = {**entry, "table": table}
+        return out
 
     monkeypatch.setattr(synthetic, "generate", generate)
     monkeypatch.setattr(driver, "build_pool", lambda table, labels: table)
@@ -292,19 +331,28 @@ def test_the_real_scoring_loop_drops_an_event_unscoreable_for_one_model_from_eve
     monkeypatch.setattr(driver.shortvol, "score", _marks)
     monkeypatch.setattr(driver.straddle, "decide", _straddle_decide)
     monkeypatch.setattr(driver.straddle, "score", _marks)
-    use_chunks(monkeypatch, [("2023Q2", chunk("E1")), ("2023Q3", chunk("E2")), ("2024Q3", chunk("E3"))])
+    use_chunks(monkeypatch, [("2023Q2", chunk("E1")), ("2023Q3", chunk("E2")), ("2023Q4", chunk("E4")), ("2024Q1", chunk("E5")),
+                             ("2024Q3", chunk("E3")), ("2024Q4", chunk("E6"))])
     src = sources(plan_frame=PLAN3, admitted=ADMITTED3, facts=lambda ids: FACTS3.reindex(list(ids)),
                   fetch=lambda columns, ids: BASE3[BASE3["event_id"].isin(list(ids))])
     out = tmp_path / "out"
-    driver.run_synthetic(src, out, spec=SPEC, prereg=OK)
+    driver.run_synthetic(src, out, prereg=OK)
     frame = pd.read_parquet(out / "decisions_synthetic.parquet")
     units = len(driver.shortvol.NAMES) + len(driver.straddle.RULES)
-    assert sorted(frame["event_id"].astype(str).unique()) == ["E1", "E2"]  # E3 is gone for every model
+    assert sorted(frame["event_id"].astype(str).unique()) == ["E2", "E4", "E5", "E6"]  # E1 leaves with the shrinkage gap, E3 for every model
     assert len(set(frame["model_id"])) == 3
-    assert len(frame) == 3 * 2 * units  # one row per model per surviving event per unit
+    assert len(frame) == 3 * 4 * units  # one row per model per surviving event per unit
     assert not frame.duplicated(["model_id", "book", "arm_or_rule", "structure", "event_id"]).any()
+    taken = frame["status"] == "taken"  # the P&L oracle: a taken row carries 10 x its event's number, every other row carries no P&L
+    assert taken.any()
+    expected_pnl = {"E2": 20.0, "E4": 40.0, "E5": 50.0, "E6": 60.0}
+    assert (frame.loc[taken, "pnl_dollars"] == frame.loc[taken, "event_id"].astype(str).map(expected_pnl)).all()
+    assert frame.loc[~taken, "pnl_dollars"].isna().all()
     receipt = json.loads((out / "receipts" / "synthetic.json").read_text(encoding="utf-8"))
     assert receipt["scoreability_dropped"] == 1
+    assert receipt["common_dropped"] == 1 and receipt["events"] == 4
+    assert sorted(receipt["events_by_model"].values()) == [5, 6, 6]  # the shrinkage table lacks E1
+    assert receipt["metrics"] and all(m["n"] == 4 and m["rmse"] == 1.0 and m["mae"] == 1.0 for m in receipt["metrics"].values())
     first = snapshot(out)
-    driver.run_synthetic(src, out, spec=SPEC, prereg=OK)
+    driver.run_synthetic(src, out, prereg=OK)
     assert snapshot(out) == first  # a second identical run is byte-identical
