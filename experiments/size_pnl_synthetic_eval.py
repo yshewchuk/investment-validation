@@ -88,7 +88,7 @@ def _rung_rows(id_, units, meta, names, sign, arm, resamples, seed):
             pairs[name] = {"inner": res}
             qc = res["quarter_counts"]
             summaries.append([name, f"s={s}", res["mean"], f"{qc['positive']}/{qc['negative']}/{qc['zero']}", *res["quarter_interval"], *res["ticker_interval"], _year_signs(res)])
-        rows.append([id_, f"s={s}", contrast.classify(pairs, sign, full_years=(arm["inner_years"][1],)), f"pairs={len(pairs)}"])
+        rows.append([id_, f"s={s}", contrast.classify(pairs, sign, full_years=tuple(range(arm["inner_years"][0], arm["inner_years"][1] + 1))), f"pairs={len(pairs)}"])
     return rows, summaries
 
 

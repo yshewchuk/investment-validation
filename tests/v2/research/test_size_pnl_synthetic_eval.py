@@ -8,8 +8,8 @@ import pytest
 from experiments import size_pnl_synthetic_eval as ev
 
 EVENTS = [f"E{i}" for i in range(8)]
-DATES = pd.to_datetime(["2024-01-15", "2024-01-20", "2024-04-15", "2024-04-20",
-                        "2024-07-15", "2024-07-20", "2024-10-15", "2024-10-20"])
+DATES = pd.to_datetime(["2023-01-15", "2023-01-20", "2023-04-15", "2023-04-20",
+                        "2024-01-15", "2024-01-20", "2024-04-15", "2024-04-20"])  # both inner years, two events per quarter
 TICKERS = {e: ("T1" if i % 2 == 0 else "T2") for i, e in enumerate(EVENTS)}
 ARM = {"spread_ladder": [0.2, 0.6], "level_gap_min_s": 0.4, "inner_years": [2023, 2024]}
 RESAMPLES = 200
@@ -78,6 +78,16 @@ def test_x3_classifies_the_median_minus_mean_contrast():
     out = run()
     assert row(out, "X3", "s=0.6")[2] == "clear"
     assert not [r for r in out["x"] if r[0] == "X3" and r[1] == "s=0.2"]  # below level_gap_min_s
+
+
+def test_x3_needs_the_sign_in_every_inner_year():
+    """M06 scores 0 on the 2023 events and 2 on the 2024 events, against N06's 1: the median-minus-mean gap is -1 in 2023 and +1 in 2024.
+    The sign is right in 2024 but opposite in 2023, so X3 is neither clear nor directional."""
+    d = frame_of()
+    d.loc[(d["model_id"] == "M06") & (d["event_date"].dt.year == 2023), "pnl_dollars"] = 0.0
+    out = ev.evaluate(d, META, TICKERS, ARM, resamples=RESAMPLES)
+    assert row(out, "X3", "s=0.6")[2] not in ("clear", "directional")
+    assert next(r for r in out["contrasts"] if r[:2] == ["S1", "s=0.6"])[-1] == "2023:- 2024:+"
 
 
 def test_x4_with_one_straddle_unit_is_not_testable():
@@ -209,16 +219,16 @@ def test_means_and_contrast_rows_hand_checked():
     # M06 on S1: 8 taken events at a constant 2.0 per event; rmse and mae from META; no declines given, so no share
     assert ["M06", "median_noise", '{"s": 0.6}', "S1", 8, 8, 0, 2.0, 1.8, 0.9, None] in out["means"]
     # median M06 (2.0) minus mean N06 (1.0) is +1 on every event, so the mean is 1.0 and every quarter (4 of 4) is positive;
-    # a constant series gives degenerate bootstrap intervals at 1.0; all events are in 2024, so the year sign is +
-    assert ["S1", "s=0.6", 1.0, "4/0/0", 1.0, 1.0, 1.0, 1.0, "2024:+"] in out["contrasts"]
+    # a constant series gives degenerate bootstrap intervals at 1.0; the gap is +1 in both inner years, so the year signs are +
+    assert ["S1", "s=0.6", 1.0, "4/0/0", 1.0, 1.0, 1.0, 1.0, "2023:+ 2024:+"] in out["contrasts"]
     assert all(len(r) == 9 for r in out["contrasts"])
 
 
 def test_declined_share_and_year_signs_hand_checked():
     """M06 declines 2 of its 8 S1 candidates: share 2/8 = 0.25. S2 has no declines given and R_L is a straddle unit: both None.
-    The S1 contrast (median M06 minus mean N06, all in 2024) carries the year sign 2024:+."""
+    The S1 contrast (median M06 minus mean N06, +1 in both inner years) carries the year signs 2023:+ 2024:+."""
     out = ev.evaluate(frame_of(), META, TICKERS, ARM, resamples=RESAMPLES, declined={"M06": {"S1": [2, 8]}})
     assert ["M06", "median_noise", '{"s": 0.6}', "S1", 8, 8, 0, 2.0, 1.8, 0.9, 0.25] in out["means"]
     assert ["M06", "median_noise", '{"s": 0.6}', "S2", 8, 8, 0, 2.0, 1.8, 0.9, None] in out["means"]
     assert ["M06", "median_noise", '{"s": 0.6}', "R_L", 8, 8, 0, 2.0, 1.8, 0.9, None] in out["means"]
-    assert ["S1", "s=0.6", 1.0, "4/0/0", 1.0, 1.0, 1.0, 1.0, "2024:+"] in out["contrasts"]
+    assert ["S1", "s=0.6", 1.0, "4/0/0", 1.0, 1.0, 1.0, 1.0, "2023:+ 2024:+"] in out["contrasts"]

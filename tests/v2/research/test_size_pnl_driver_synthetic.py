@@ -141,6 +141,18 @@ def test_refuses_without_the_bounded_run_before_any_write(tmp_path, monkeypatch,
     assert not (tmp_path / "receipts").exists()
 
 
+def test_a_non_bool_replay_refuses_before_any_read(tmp_path, monkeypatch, fakes):
+    def no_read(*args, **kwargs):
+        raise AssertionError("an invalid replay flag must refuse before any read")
+
+    monkeypatch.setattr(readers, "read_production", no_read)
+    with pytest.raises(OpsError) as caught:
+        driver.run_synthetic(sources(), tmp_path, prereg=OK, replay="false")
+    assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert caught.value.problem.details["reason"] == "replay_invalid"
+    assert not (tmp_path / "receipts").exists()
+
+
 def test_writes_the_synthetic_artifacts_and_no_tuning_or_outer_files(tmp_path, monkeypatch, fakes):
     def no_tune(*args, **kwargs):
         raise AssertionError("the synthetic stage must never tune")

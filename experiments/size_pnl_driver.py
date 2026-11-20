@@ -505,7 +505,7 @@ def _synthetic_scores(src, ready, plan, facts_all, labels):
             for mid in ready:  # Pass A rows, before the shared mask: a non-"scored" row is a width decline
                 for name in shortvol.NAMES:
                     f = scored[mid][0][("as_is", name)]
-                    declined[mid][name][0] += int((f["status"] != "scored").sum())
+                    declined[mid][name][0] += int(((f["status"] != "scored") & (f["reason"] == "width_declined")).sum())
                     declined[mid][name][1] += len(f)
             bad = set().union(*(_unscoreable(s, m) for s, m in scored.values()))  # one shared population for all models
             dropped |= bad
@@ -546,6 +546,7 @@ def run_synthetic(src, out_dir, *, event_ids=None, replay=False, prereg=size_pnl
     """The SY2 synthetic stage on the inner window: score, evaluate X1-X7, publish decisions_synthetic and T11. Never tunes or reads 2025."""
     started = time.monotonic()
     _log(f"stage=synthetic start rss={_rss_mb():.0f}MB")
+    if not isinstance(replay, bool): raise fail("INVALID_EXPERIMENT_SPEC", "replay must be a boolean", details={"reason": "replay_invalid"})
     receipt = prereg()
     spec, digest = size_pnl_prereg.load_spec()
     if digest != receipt["spec_hash"]: raise Refusal(_CONFLICT, "the spec differs from the preregistered one", {"reason": "spec_not_preregistered"})
