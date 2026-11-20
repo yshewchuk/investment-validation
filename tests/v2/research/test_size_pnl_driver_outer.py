@@ -241,6 +241,18 @@ def test_empty_smoke_set_refuses_before_any_receipt(tmp_path, stubs):
     assert not (tmp_path / "receipts").exists()
 
 
+def test_smoke_ids_outside_the_window_refuse_before_the_inputs_receipt(tmp_path, stubs, monkeypatch):
+    use_chunks(monkeypatch, [("2024Q3", chunk("E2"))])
+    with pytest.raises(Refusal) as caught:
+        driver.run(sources(), "inner", tmp_path, event_ids={"E3"}, prereg=OK)  # E3 is outside the inner window
+    assert caught.value.code == CONFLICT
+    assert caught.value.details["reason"] == "empty_population"
+    assert not (tmp_path / "receipts" / "inputs_inner.json").exists()
+    summary = driver.run(sources(), "inner", tmp_path, event_ids={"E2"}, prereg=OK)  # the corrected rerun succeeds
+    assert summary["stage"] == "inner"
+    assert (tmp_path / "receipts" / "inputs_inner.json").exists()
+
+
 def test_run_py_forwards_event_ids_to_the_outer_stage(tmp_path, monkeypatch, capsys):
     run_py = _run_main()
     monkeypatch.setattr(run_py.size_pnl_prereg, "require_preregistration", OK)
