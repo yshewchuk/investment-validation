@@ -563,9 +563,6 @@ def run_synthetic(src, out_dir, *, event_ids=None, replay=False, prereg=size_pnl
     ready = _ready(synthetic.generate(src.admitted, labels, production, arm), ids)
     if not ready: raise _no_ready()
     scope = _scope(ids)
-    body = {"stage": "inputs_synthetic", "spec_hash": receipt["spec_hash"], "identity": identity, "arm": content_hash(arm), "snapshot": src.snapshot_id, "scope": scope, "plan": content_hash(_plan_rows(plan)),
-            "facts": content_hash(_facts_rows(facts_all, planned)), "labels": content_hash(_label_rows([labels])), "production": production["binding"], "tables": {mid: _table_binding(e, ids) for mid, e in ready.items()}}
-    inputs_receipt = _receipt(out / "receipts" / "inputs_synthetic.json", body, "inputs_receipt_changed")
     frames, skipped, ladder_hash, dropped = _synthetic_scores(src, ready, plan, facts_all, labels)
     full = pd.concat(frames, ignore_index=True)
     pop = synthetic_eval.population(full)  # E, the evaluated population; undetermined rows stay published as evidence
@@ -573,6 +570,9 @@ def run_synthetic(src, out_dir, *, event_ids=None, replay=False, prereg=size_pnl
     if not kept: raise Refusal(_CONFLICT, "the scored population is empty", {"reason": "empty_population"})
     if pd.to_datetime(pop["event_date"]).dt.to_period("Q").nunique() < 2 or len({tickers[e] for e in kept}) < 2:
         raise Refusal(_CONFLICT, "too few quarters or tickers to bootstrap", {"reason": "underclustered_population"})
+    body = {"stage": "inputs_synthetic", "spec_hash": receipt["spec_hash"], "identity": identity, "arm": content_hash(arm), "snapshot": src.snapshot_id, "scope": scope, "plan": content_hash(_plan_rows(plan)),
+            "facts": content_hash(_facts_rows(facts_all, planned)), "labels": content_hash(_label_rows([labels])), "production": production["binding"], "tables": {mid: _table_binding(e, ids) for mid, e in ready.items()}}
+    inputs_receipt = _receipt(out / "receipts" / "inputs_synthetic.json", body, "inputs_receipt_changed")  # after both population refusals: a refused run pins nothing
     if replay:  # X7 evidence: the replay verdict is receipted, so a later plain run can read it
         equal = _frames_digest(frames) == _frames_digest(_synthetic_scores(src, ready, plan, facts_all, labels)[0])
         _receipt(out / "receipts" / "synthetic_replay.json", {"stage": "synthetic_replay", "scope": scope, "inputs": inputs_receipt["content_hash"],

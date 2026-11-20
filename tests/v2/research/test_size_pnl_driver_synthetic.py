@@ -339,8 +339,24 @@ def test_an_empty_scored_population_refuses_before_any_decision(tmp_path, monkey
     with pytest.raises(Refusal) as caught:
         driver.run_synthetic(sources(), tmp_path, prereg=OK)
     assert caught.value.code == CONFLICT and caught.value.details["reason"] == "empty_population"
-    assert sorted(p.name for p in (tmp_path / "receipts").iterdir()) == ["inputs_synthetic.json"]
+    assert not (tmp_path / "receipts" / "inputs_synthetic.json").exists()
     assert not (tmp_path / "decisions_synthetic.parquet").exists()
+
+
+def test_a_refused_smoke_run_pins_nothing_and_a_broader_run_in_the_same_dir_succeeds(tmp_path, monkeypatch, fakes):
+    def all_undetermined(src, ready, plan, facts_all, labels):
+        frames, skipped, ladder, dropped = fake_scores(src, ready, plan, facts_all, labels)
+        return [f.assign(status="undetermined") for f in frames], skipped, ladder, dropped
+
+    monkeypatch.setattr(driver, "_synthetic_scores", all_undetermined)
+    with pytest.raises(Refusal) as caught:
+        driver.run_synthetic(sources(), tmp_path, prereg=OK, event_ids=["E1"])
+    assert caught.value.details["reason"] == "empty_population"
+    assert not (tmp_path / "receipts" / "inputs_synthetic.json").exists() and not (tmp_path / "decisions_synthetic.parquet").exists()
+    monkeypatch.setattr(driver, "_synthetic_scores", fake_scores)
+    summary = driver.run_synthetic(sources(), tmp_path, prereg=OK)
+    assert (tmp_path / "receipts" / "inputs_synthetic.json").is_file() and (tmp_path / "decisions_synthetic.parquet").is_file()
+    assert summary["stage"] == "synthetic"
 
 
 def test_one_decided_quarter_refuses_as_underclustered(tmp_path, monkeypatch, fakes):
@@ -352,14 +368,14 @@ def test_one_decided_quarter_refuses_as_underclustered(tmp_path, monkeypatch, fa
     with pytest.raises(Refusal) as caught:
         driver.run_synthetic(sources(), tmp_path, prereg=OK)
     assert caught.value.code == CONFLICT and caught.value.details["reason"] == "underclustered_population"
-    assert not (tmp_path / "decisions_synthetic.parquet").exists()
+    assert not (tmp_path / "receipts" / "inputs_synthetic.json").exists() and not (tmp_path / "decisions_synthetic.parquet").exists()
 
 
 def test_one_ticker_refuses_as_underclustered(tmp_path, fakes):
     with pytest.raises(Refusal) as caught:
         driver.run_synthetic(sources(plan_frame=PLAN_FRAME.assign(ticker="T1")), tmp_path, prereg=OK)
     assert caught.value.code == CONFLICT and caught.value.details["reason"] == "underclustered_population"
-    assert not (tmp_path / "decisions_synthetic.parquet").exists()
+    assert not (tmp_path / "receipts" / "inputs_synthetic.json").exists() and not (tmp_path / "decisions_synthetic.parquet").exists()
 
 
 # Six inner events in five quarters and two tickers. E1 (the shrinkage model's first-quarter gap) and E3 (unscoreable for one model)
