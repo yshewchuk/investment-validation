@@ -36,7 +36,7 @@ The construction conditions on `y`, whereas a real mean forecast satisfies `E(y 
 ## 3. Scope and exclusion (inner years 2023-2024 only)
 
 - The generator's only inputs are the sealed inner population's event ids as returned by S2a's binding (which has already applied shared population admission and outcome isolation, dropping member and conflicting-sibling events before any label read) and the labels the S2b reader returns for those admitted keys. It has no path to a raw label table, the 2025 slot, the random 3% holdout or the rolling 6-month holdouts.
-- It asserts that every event date is in `[2023-01-01, 2024-12-31]` and that its output id set equals its input id set. A violation refuses `SYNTHETIC_OUT_OF_SCOPE` (no partial output, no repair).
+- It asserts that every event date is in `[2023-01-01, 2024-12-31]` and that its output ids are a subset of its input ids, every input id kept or counted as dropped with its reason; each label date must also equal the admitted event date. A violation refuses `SYNTHETIC_OUT_OF_SCOPE` (no partial output, no repair).
 - A test passes a fixture containing a holdout-classified event and a 2025 event: the first is absent from the admitted ids (so never generated), the second makes the generator refuse. Excluded counts by reason are logged to stderr and printed in the report header.
 - The oracle and the noisy families use the event's own label by construction (look-ahead is the point). The main doc's R6 month-by-month label rule governs the real roster only; here it is deliberately void for the forecast, but still holds for the residual pools: the pool for an event contains strictly earlier events (pool row = earlier event, its synthetic forecast, its label), as in main doc §4.
 
@@ -81,9 +81,9 @@ A Failed X1, X2, X6 or X7 stops the real run until the cause is classified in th
 
 ## 6. How it plugs in
 
-- **Source type.** S2a's binding yields, per model, arrays of `(event_id, pred)` for the sealed inner population. The generator returns the same shape under `source: "synthetic"`, with `model_id = content_hash({source: "synthetic", family, params, seed_tag})` (main doc R5). Downstream stages (S3 ladder table, S4 pool, S5 short vol, S7 straddle) take any such array with no change: that generality is the contract the new slice checks, not a new reader.
+- **Source type.** S2a's binding yields, per model, arrays of `(event_id, pred)` for the sealed inner population. The generator returns the same shape under `source: "synthetic"`, with `model_id = "synthetic-" + content_hash({source: "synthetic", family, params, seed_tag})` (main doc R5; the prefix is what S6's guard keys on). Downstream stages (S3 ladder table, S4 pool, S5 short vol, S7 straddle) take any such array with no change: that generality is the contract the new slice checks, not a new reader.
 - **Separate arm, receipt and report.** A `synthetic` stage receipt (immutable, atomic, content hashes, R4) and `decisions_synthetic.parquet`; the report gains **T11 (SYNTHETIC calibration)** after T10, with the X-table of §5. Synthetic models are absent from T1-T10, from the 12-model cap, from the pair and multiplicity accounting, and from the PLANNED row's roster; the `synthetic_arm` block (families, `s` ladder, `L` values, shifts, seed tag, expectations) is inside the spec and its hash.
-- **Cannot feed tuning.** S6's `tuning` receipt and `c` search reject any synthetic `model_id` (`SYNTHETIC_IN_TUNING`), and a test asserts that deleting every synthetic file leaves every roster output byte-identical. The only read-across to real models is the descriptive power line of §4.
+- **Cannot feed tuning.** S6's `tuning` receipt and `c` search reject any synthetic `model_id` (`SYNTHETIC_IN_TUNING`), and a test asserts that deleting every synthetic file leaves every roster output byte-identical (SY1 pins the precondition, that no roster module imports the synthetic module; SY2 pins the byte-identity). The only read-across to real models is the descriptive power line of §4.
 - **Stage and timing.** It needs inner data only, so it never reads the 2025 outer stage; but it still waits for the sealed v14 plan (event population) and runs after the v14 run completes.
 - **Cost.** 19 models, inner years only (about two thirds of the events), as-is geometry and no re-tune: a rough estimate of about 55% of the main run (the smoke measures it), in the same quarter-chunked single process under `bounded_run`, one heavy job at a time (the main doc's R2 and §8). Smoke on the 50-ticker `--event-ids` population with `--no-ledger`. Progress logging as in main doc §8, plus the exclusion counts.
 
@@ -93,14 +93,18 @@ Reused unchanged: numpy (`default_rng`, OLS for the slope via `numpy.polyfit`), 
 
 | Slice | Scope | Code / test lines / doc words | After |
 | --- | --- | --- | --- |
-| SY | Generator and guards (§2, §3); `source: "synthetic"` wiring; `synthetic` receipt; slope, contrast and X1-X7 evaluation using S8a; T11; amend the spec with the `synthetic_arm` block; `SYNTHETIC_IN_TUNING` | ~140 / ~160 / 100 | S2a, S2b (admitted-label reader), S4, S5, S6 (hosts the `SYNTHETIC_IN_TUNING` guard), S7 and S8a (statistics); T11 needs S8b. If the ~140-line estimate proves low at Spec time, split into SY1 (generator, guards, wiring) and SY2 (evaluation, T11) |
+| SY1 (this PR) | Generator and guards (§2, §3); tables in the `model_tables` shape for `source: "synthetic"`; spec `synthetic_arm` block; `SYNTHETIC_IN_TUNING` | ~150 / ~320 / 150 | S2a, S2b, S6 |
+| SY2 | The inner-year synthetic stage (as-is scoring of the 19 tables), `synthetic` receipt, slope, contrast and X1-X7 evaluation using S8a; T11 | split from SY, see below | SY1, S4, S5, S7, S8a, S8b |
+| SY (original) | Generator and guards (§2, §3); `source: "synthetic"` wiring; `synthetic` receipt; slope, contrast and X1-X7 evaluation using S8a; T11; amend the spec with the `synthetic_arm` block; `SYNTHETIC_IN_TUNING` | ~140 / ~160 / 100 | S2a, S2b (admitted-label reader), S4, S5, S6 (hosts the `SYNTHETIC_IN_TUNING` guard), S7 and S8a (statistics); T11 needs S8b. If the ~140-line estimate proves low at Spec time, split into SY1 (generator, guards, wiring) and SY2 (evaluation, T11) |
 | Run | Smoke, then the recorded synthetic stage and T11 | no code | v14 completed; S9 driver |
 
 The run step is heavy: after v14 finishes, alone, bounded, as in the main doc §8. The new slice changes behaviour only inside the new experiment; it edits no SIZE search module and nothing in the `experiments/size_panel.py` closure, and S1's closure-hash equality check still applies to it.
 
-## 8. Open decisions for the user
+## 8. Decisions (settled by the user, 2026-11-18)
 
-1. **Spread rungs.** Fixed `s` in {0.2, 0.4, 0.6, 0.8} (this design), or rescale the rungs to multiples of production's measured inner `sd(log(y/pred))` (more realistic, but data-derived)?
-2. **Regression-direction family.** Keep the third, real-direction mean-type family (adds 4 predictors, answers the real question's level direction), or run only the two families you specified?
-3. **Spec amendment mechanics.** If S1 has already merged with a spec and PLANNED row, the `synthetic_arm` block changes the spec hash: re-plan the row before any run (allowed because no P&L has been seen), or give the arm its own PLANNED row?
-4. **Power read-across.** Is it acceptable that the arm reads real inner RMSE/MAE gaps (descriptively, from the stored inner predictions) to print the `likely_underpowered` line, or must the arm touch synthetic data only?
+1. **Spread rungs: fixed.** `s` in {0.2, 0.4, 0.6, 0.8}; production's measured inner `sd(log(y/pred))` is printed beside them, and the rungs are not rescaled to it.
+2. **Regression-direction family: kept.** The third, real-direction mean-type family stays (19 predictors).
+3. **Spec amendment: re-plan the single PLANNED row.** The `synthetic_arm` block changes the spec hash. No P&L has been seen, so the one EXP-188 PLANNED row is re-planned before any run, not a separate row. The ledger is data outside git, so the supervisor re-registers the row before the first run.
+4. **Power read-across: allowed.** The arm may read real inner RMSE/MAE gaps descriptively (stored inner predictions) for the `likely_underpowered` line; it reads nothing from 2025 or any holdout.
+
+Implementation notes (SY1, PR for `feat/pnsy1`): synthetic model ids are `"synthetic-" + content_hash(...)`, so S6's `SYNTHETIC_IN_TUNING` guard needs no registry. The out-of-scope refusal uses the registered code `HOLDOUT_ACCESS_DENIED` with `details.reason = SYNTHETIC_OUT_OF_SCOPE`. A shrinkage event with no prior quarter is dropped from that model's table and counted (`undetermined_mean`).

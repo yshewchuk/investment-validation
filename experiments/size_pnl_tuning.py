@@ -5,6 +5,7 @@ short-vol structures are scored over the inner-year quarters with S5's ``score_e
 and the ``c`` with the largest taken-trade P&L is chosen; ``choose_c`` falls back to 1.0 when the inner sample has
 fewer than ``MIN_TRADES`` taken trades. Outer years are refused before any scoring. The S9 driver calls
 ``tune`` and ``write_receipt`` per model. Progress logging: none (pure, per-model, small loops).
+Synthetic model ids (``SYNTHETIC_PREFIX``) are refused by both ``tune`` and ``write_receipt`` (SYNTHETIC_IN_TUNING).
 """
 import hashlib
 import json
@@ -25,6 +26,7 @@ ALPHA = 0.5
 _CONFLICT = "EXPERIMENT_IDENTITY_CONFLICT"
 _HOLDOUT = "HOLDOUT_ACCESS_DENIED"
 MAX_RECEIPT_BYTES = 1 << 20
+SYNTHETIC_PREFIX = "synthetic-"
 
 
 def choose_c(totals, trades):
@@ -43,8 +45,16 @@ def choose_c(totals, trades):
     return float(min(tied, key=lambda c: (abs(c - 1.0), c))), None
 
 
+def _refuse_synthetic(model_id):
+    """Refuses a synthetic model id: synthetic predictors can never be tuned or receipted (SYNTHETIC_IN_TUNING)."""
+    if str(model_id).startswith(SYNTHETIC_PREFIX):
+        raise Refusal(_CONFLICT, "a synthetic model cannot be tuned or receipted as a tuning result",
+                      {"reason": "SYNTHETIC_IN_TUNING"})
+
+
 def tune(items, model_id, *, alpha=ALPHA, grid=C_GRID):
     """The S6 tuning receipt body for one model. ``items`` is ``[(chunk, events, sims), ...]``, one per quarter."""
+    _refuse_synthetic(model_id)
     if 1.0 not in grid:
         raise ValueError("grid must include the unity divisor 1.0")
     if not items:
@@ -164,6 +174,7 @@ def _same_or_refuse(path, digest):
 
 def write_receipt(path, body):
     """``body`` plus its content_hash, written once. An existing receipt is replayed read-only or refused, never overwritten."""
+    _refuse_synthetic(body.get("model_id", "")) if isinstance(body, dict) else None
     path = Path(path)
     admitted = _admit(body)  # refused before any filesystem access
     digest = _digest(admitted)
