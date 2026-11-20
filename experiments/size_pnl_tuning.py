@@ -3,9 +3,8 @@
 S6 of guides/size_decision_pnl_design.md (sections 5, 7, R4, R6). For each divisor ``c`` in ``C_GRID`` the seven
 short-vol structures are scored over the inner-year quarters with S5's ``score_events``, ``decide`` and ``score``,
 and the ``c`` with the largest taken-trade P&L is chosen; ``choose_c`` falls back to 1.0 when the inner sample has
-fewer than ``MIN_TRADES`` taken trades. Outer years are refused before any scoring. The S9 driver WILL call
-``tune`` and ``write_receipt`` per model (future; no production caller yet). Progress logging: none (pure,
-per-model, small loops).
+fewer than ``MIN_TRADES`` taken trades. Outer years are refused before any scoring. The S9 driver calls
+``tune`` and ``write_receipt`` per model. Progress logging: none (pure, per-model, small loops).
 """
 import hashlib
 import json
