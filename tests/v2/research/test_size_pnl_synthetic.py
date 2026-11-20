@@ -376,6 +376,31 @@ def test_generate_refuses_malformed_arm(arm):
     assert _refusal(exc) == ("INVALID_EXPERIMENT_SPEC", "synthetic_arm_invalid")
 
 
+@pytest.mark.parametrize("arm", [None, {}])
+def test_predictors_refuses_malformed_arm(arm):
+    with pytest.raises(OpsError) as exc:
+        syn.predictors(arm)
+    assert _refusal(exc) == ("INVALID_EXPERIMENT_SPEC", "synthetic_arm_invalid")
+
+
+def test_model_id_refuses_malformed_arm():
+    with pytest.raises(OpsError) as exc:
+        syn.model_id({}, syn.predictors(ARM)[0])
+    assert _refusal(exc) == ("INVALID_EXPERIMENT_SPEC", "synthetic_arm_invalid")
+
+
+@pytest.mark.parametrize("predictor", [
+    {"family": "oracle", "params": {"x": 1}},
+    {"family": "oracle", "params": {}, "extra": 1},
+    {"family": "median_noise", "params": {"s": 0.123}},
+    None,
+])
+def test_model_id_refuses_predictor_not_in_arm(predictor):
+    with pytest.raises(OpsError) as exc:
+        syn.model_id(ARM, predictor)
+    assert _refusal(exc) == ("INVALID_EXPERIMENT_SPEC", "synthetic_predictor_invalid")
+
+
 # 9. tuning guard
 def test_synthetic_model_cannot_be_tuned_or_receipted(tmp_path):
     mid = syn.model_id(ARM, syn.predictors(ARM)[1])

@@ -66,6 +66,7 @@ def arm_from_spec(spec):
 
 def predictors(arm):
     """The ordered (family, params) predictor list for the arm's families (19 under the default spec)."""
+    _checked(arm)
     out = []
     for name in _FAMILIES:
         if name not in arm["families"]:
@@ -82,7 +83,14 @@ def predictors(arm):
 
 
 def model_id(arm, predictor):
-    """The stable synthetic model id: SYNTHETIC_PREFIX plus the hash of the predictor's definition."""
+    """The stable synthetic model id: SYNTHETIC_PREFIX plus the hash of the predictor's definition.
+
+    Refuses unless ``arm`` is well formed and ``predictor`` is one of ``predictors(arm)``.
+    """
+    _checked(arm)
+    if not isinstance(predictor, dict) or predictor not in predictors(arm):
+        raise fail("INVALID_EXPERIMENT_SPEC", "the synthetic predictor is not one of the arm's predictors",
+                   details={"reason": "synthetic_predictor_invalid"})
     return SYNTHETIC_PREFIX + content_hash({"source": "synthetic", "family": predictor["family"],
                                             "params": predictor["params"], "seed_tag": arm["seed_tag"]})
 
