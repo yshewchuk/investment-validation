@@ -16,8 +16,8 @@ from experiments import size_pnl_readers as readers
 from experiments import size_pnl_tuning as tuning
 from experiments.size_pnl_shortvol import Refusal
 from tests.v2.research.test_size_pnl_driver import (  # noqa: F401  (bounded, stubs, structure_gate_passes are fixtures)
-    BASE, CONFLICT, DENIED, EVENTS, EXPECTED, FAKE, OK, _install_sources, _run_main, bounded, chunk, sources, stubs,
-    structure_gate_passes)
+    BASE, CONFLICT, DENIED, EVENTS, EXPECTED, FAKE, OK, PLAN_FRAME, _install_sources, _run_main, bounded, chunk, sources,
+    stubs, structure_gate_passes)
 
 FRONT = ["model_id", "book", "arm_or_rule", "structure", "event_id", "event_date", "status", "reason"]
 EMPTY_MARKS = ["event_id", "entry_cost", "exit_value", "rung", "lots", "pnl_per_share", "pnl_dollars"]
@@ -174,6 +174,20 @@ def test_changed_inner_window_prediction_between_stages_refuses_inner_tables(tmp
         driver.run(sources(fetch=moved), "outer", tmp_path, prereg=OK)
     assert caught.value.code == CONFLICT
     assert caught.value.details["reason"] == "inner_tables_mismatch"
+    assert not (tmp_path / "receipts" / "inputs_outer.json").exists()  # preflight: no outer input receipt
+
+
+def test_changed_inner_window_plan_row_between_stages_refuses_inner_plan(tmp_path, outer_stubs, monkeypatch):
+    """Tables, production and labels are unchanged; E2 (inner window) has a different entry_date in the outer run's plan."""
+    use_chunks(monkeypatch, [("2024Q3", chunk("E2"))])
+    driver.run(sources(), "inner", tmp_path, prereg=OK)
+    changed = PLAN_FRAME.copy()
+    changed.loc[changed["event_id"] == "E2", "entry_date"] = pd.Timestamp("2024-08-05")  # same ids, one entry_date, still valid
+    use_chunks(monkeypatch, [("2024Q3", chunk("E2")), ("2025Q1", chunk("E3", "E4"))])
+    with pytest.raises(Refusal) as caught:
+        driver.run(sources(plan_frame=changed), "outer", tmp_path, prereg=OK)
+    assert caught.value.code == CONFLICT
+    assert caught.value.details["reason"] == "inner_plan_mismatch"
     assert not (tmp_path / "receipts" / "inputs_outer.json").exists()  # preflight: no outer input receipt
 
 

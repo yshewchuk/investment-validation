@@ -241,7 +241,7 @@ def _inner(src, out, ready, plan, facts_all, labels):
     return hashes, max(by_model.values(), default=0), skipped, by_model, common, len(bad), "sha256:" + digest.hexdigest()
 
 
-def _outer_gate(out, ready, scope, body, inner_tables, inner_production):
+def _outer_gate(out, ready, scope, body, inner_tables, inner_production, inner_plan):
     """Refuses before any chunk is built: every ready model needs its tuning receipt, and inner.json must bind those
     receipts, have been tuned on this run's event scope, and bind the inner window's inputs, re-bound here."""
     receipts = {mid: tuning.load_receipt(out / "receipts" / f"tuning_{mid}.json") for mid in ready}
@@ -251,6 +251,7 @@ def _outer_gate(out, ready, scope, body, inner_tables, inner_production):
     if "scope" not in inner or inner["scope"] != scope: raise Refusal(_CONFLICT, "inner.json was tuned on a different event scope", {"reason": "scope_mismatch"})
     inputs_inner, now = tuning.load_receipt(out / "receipts" / "inputs_inner.json"), json.loads(json.dumps(body))
     if any(inputs_inner.get(k) != now[k] for k in _BOUND): raise Refusal(_CONFLICT, "inputs_inner.json was bound to different inputs", {"reason": "inner_inputs_mismatch"})
+    if inputs_inner.get("plan") != inner_plan: raise Refusal(_CONFLICT, "inputs_inner.json was bound to a different inner plan", {"reason": "inner_plan_mismatch"})
     inner_now = json.loads(json.dumps({"tables": inner_tables, "production": inner_production}))
     if inner["inputs"] != inputs_inner["content_hash"] or any(inputs_inner.get(k) != inner_now[k] for k in ("tables", "production")):
         raise Refusal(_CONFLICT, "inner.json was tuned on different inner tables", {"reason": "inner_tables_mismatch"})
@@ -387,7 +388,8 @@ def run(src, stage, out_dir, *, event_ids=None, prereg=size_pnl_prereg.require_p
         if not ready: raise _no_ready()
         _, inner_bound, inner_production = _prepare(src, "inner")  # the inner window's bindings, to match inputs_inner.json
         inner_tables = {mid: _table_binding(e, ids) for mid, e in _ready(inner_bound["tables"], ids).items()}
-        receipts = _outer_gate(out, ready, scope, body, inner_tables, inner_production["binding"])
+        inner_plan = content_hash(_plan_rows(_plan_window(full, INNER, ids)))
+        receipts = _outer_gate(out, ready, scope, body, inner_tables, inner_production["binding"], inner_plan)
         _unbound_outer(ready)
     inputs_receipt = _receipt(out / "receipts" / f"inputs_{stage}.json", body, "inputs_receipt_changed")
     if not ready: raise _no_ready()
