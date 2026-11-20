@@ -130,6 +130,13 @@ def _scope(ids):
     return None if ids is None else content_hash(sorted(ids))
 
 
+def _table_binding(entry, ids):
+    """A ready model's binding. A smoke run (``ids``) binds the restricted rows it consumed, so its receipt cannot pass for a full one."""
+    if ids is None: return entry["binding"]
+    rows = sorted([str(i), str(d), float(m), float(c)] for i, d, m, c in zip(entry["table"].index, entry["table"]["event_date"], entry["table"]["pred_move"], entry["table"]["pred_crush"]))
+    return content_hash({"binding": entry["binding"], "scope": _scope(ids), "rows": rows})
+
+
 def _plan_rows(plan):
     """The windowed plan as rows sorted by event_id, so a changed window or date changes the receipt."""
     return sorted([[str(e), str(d), str(en), str(x), s, t] for e, d, en, x, s, t in zip(plan["event_id"], plan["event_date"], plan["entry_date"], plan["exit_date"], plan["session"], plan["ticker"])], key=lambda r: r[0])
@@ -243,10 +250,10 @@ def _no_ready():
     return shortvol.Refusal(_CONFLICT, "no model is ready to be tuned or scored", {"reason": "no_ready_models"})
 
 
-def _unbound_outer(tables, ready):
-    """Refuses a ready model with no table rows in the outer year (its 2025 predictions are not bound yet). Partial coverage is not refused: it is a common-support drop."""
+def _unbound_outer(ready):
+    """Refuses a ready model with no table rows in the outer year (its 2025 predictions are not bound yet). Partial coverage is not refused: it is a common-support drop. ``ready`` holds the consumed, smoke-restricted tables."""
     for mid in ready:
-        dates = pd.to_datetime(tables[mid]["table"]["event_date"])
+        dates = pd.to_datetime(ready[mid]["table"]["event_date"])
         if not ((dates >= pd.Timestamp(OUTER[0])) & (dates < pd.Timestamp(OUTER[1]))).any():
             raise Refusal(_CONFLICT, "2025 predictions are not bound for a ready model with no 2025 rows", {"reason": "outer_predictions_unbound"})
 
@@ -359,14 +366,14 @@ def run(src, stage, out_dir, *, event_ids=None, prereg=size_pnl_prereg.require_p
             "models": {mid: ({"status": "ready"} if mid in ready and m["status"] == "deferred"
                              else {k: m[k] for k in ("status", "reason", "binding") if k in m})
                        for mid, m in bound_tables["bound"].items()},
-            "tables": {mid: e["binding"] for mid, e in ready.items()},
+            "tables": {mid: _table_binding(e, ids) for mid, e in ready.items()},
             "production": production["binding"], "scope": scope, "plan": content_hash(_plan_rows(plan)),
             "facts": content_hash(facts_rows), "labels": content_hash(_label_rows([labels])), "snapshot": src.snapshot_id}
     receipts = {}
     if stage == "outer":  # preflight: a refusal here leaves no outer input receipt, and no chunk is built
         if not ready: raise _no_ready()
         receipts = _outer_gate(out, ready, scope, body)
-        _unbound_outer(tables, ready)
+        _unbound_outer(ready)
     inputs_receipt = _receipt(out / "receipts" / f"inputs_{stage}.json", body, "inputs_receipt_changed")
     if not ready: raise _no_ready()
     if plan.empty: raise shortvol.Refusal(_CONFLICT, "the plan window holds no events", {"reason": "empty_population"})

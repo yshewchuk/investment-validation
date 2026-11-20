@@ -258,6 +258,55 @@ def test_run_py_forwards_event_ids_to_the_outer_stage(tmp_path, monkeypatch, cap
     assert json.loads(capsys.readouterr().out)["stage"] == "outer"
 
 
+def test_run_py_refuses_an_event_ids_file_holding_null(tmp_path, monkeypatch, capsys):
+    run_py = _run_main()
+    monkeypatch.setattr(run_py.size_pnl_prereg, "require_preregistration", OK)
+    monkeypatch.setenv("BOUNDED_RUN_NESTED", "1")
+    ids_file = tmp_path / "ids.json"
+    ids_file.write_text("null", encoding="utf-8")
+    monkeypatch.setattr(driver, "run", lambda *a, **kw: pytest.fail("the driver must not run"))
+    _install_sources(monkeypatch, sources())
+    assert run_py.main(_argv_for(tmp_path, "inner", "--event-ids", str(ids_file))) == 2
+    refused = json.loads(capsys.readouterr().out)
+    assert refused["refused"] == "INVALID_EXPERIMENT_SPEC"
+    assert refused["reason"] == "event_ids_invalid"
+
+
+def test_smoke_tables_binding_describes_the_rows_consumed(tmp_path, stubs, monkeypatch):
+    real, captured = readers.model_tables, {}
+
+    def spy(*args, **kw):
+        out = real(*args, **kw)
+        captured.update(out)
+        return out
+
+    monkeypatch.setattr(readers, "model_tables", spy)
+    use_chunks(monkeypatch, [("2023Q2", chunk("E1")), ("2024Q3", chunk("E2"))])
+    full = driver.run(sources(), "inner", tmp_path / "full", prereg=OK)
+    bindings = {mid: captured[mid]["binding"] for mid in full["models"]}
+    assert tuning.load_receipt(tmp_path / "full" / "receipts" / "inputs_inner.json")["tables"] == bindings
+    use_chunks(monkeypatch, [("2023Q2", chunk("E1"))])
+    smoke = driver.run(sources(), "inner", tmp_path / "one", event_ids={"E1"}, prereg=OK)
+    one = tuning.load_receipt(tmp_path / "one" / "receipts" / "inputs_inner.json")["tables"]
+    assert set(one) == set(smoke["models"]) and one != bindings  # the smoke entry describes its rows, not the model binding
+    use_chunks(monkeypatch, [("2023Q2", chunk("E1")), ("2024Q3", chunk("E2"))])
+    driver.run(sources(), "inner", tmp_path / "two", event_ids={"E1", "E2"}, prereg=OK)
+    two = tuning.load_receipt(tmp_path / "two" / "receipts" / "inputs_inner.json")["tables"]
+    assert two != one  # a changed smoke id set changes the entry
+
+
+def test_outer_smoke_of_only_warm_up_events_refuses_unbound_2025(tmp_path, outer_stubs, monkeypatch):
+    use_chunks(monkeypatch, [("2024Q3", chunk("E2"))])
+    driver.run(sources(), "inner", tmp_path, event_ids={"E2"}, prereg=OK)  # E2 is 2024-H2: warm-up only
+    loads = []
+    with pytest.raises(Refusal) as caught:
+        driver.run(sources(load_index=lambda keys: loads.append(keys)), "outer", tmp_path, event_ids={"E2"}, prereg=OK)
+    assert caught.value.code == CONFLICT
+    assert caught.value.details["reason"] == "outer_predictions_unbound"
+    assert loads == []
+    assert not (tmp_path / "receipts" / "inputs_outer.json").exists()  # refused before the outer input receipt
+
+
 # ---- outer stage: R6 ordering, the warm-up and the pool ---------------------------
 
 def test_outer_reads_a_month_s_labels_only_after_its_rows_are_complete(tmp_path, outer_stubs, monkeypatch):
