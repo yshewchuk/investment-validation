@@ -394,6 +394,16 @@ def test_duplicate_facts_ids_refuse_before_any_receipt(tmp_path, stubs, monkeypa
     assert not (tmp_path / "receipts").exists()
 
 
+def test_infinite_facts_refuse_before_any_receipt(tmp_path, stubs, monkeypatch):
+    use_chunks(monkeypatch, [("2023Q2", chunk("E1")), ("2024Q3", chunk("E2"))])
+    facts = lambda ids: FACTS.reindex(list(ids)).assign(mcap_usd=float("inf"))  # noqa: E731
+    with pytest.raises(OpsError) as caught:
+        driver.run(sources(facts=facts), "inner", tmp_path, prereg=OK)
+    assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert caught.value.problem.details["reason"] == "facts_incomplete"
+    assert not (tmp_path / "receipts").exists()
+
+
 def test_production_fetch_never_reads_an_outer_year_event(tmp_path, stubs, monkeypatch):
     calls = []
 

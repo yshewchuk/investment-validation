@@ -191,7 +191,7 @@ def run(src, stage, out_dir, *, prereg=size_pnl_prereg.require_preregistration):
     raw = facts_all.reindex(columns=list(_FACTS)).where(lambda c: c.notna(), np.nan)  # pd.NA and None are NaN
     numeric = raw.apply(pd.to_numeric, errors="coerce")
     if (not set(_FACTS) <= set(facts_all.columns) or set(facts_all.index.astype(str)) != requested
-            or not facts_all.index.astype(str).is_unique or (numeric.isna() & raw.notna()).to_numpy().any()):
+            or not facts_all.index.astype(str).is_unique or (numeric.isna() & raw.notna()).to_numpy().any() or np.isinf(numeric.to_numpy(dtype=float)).any()):
         raise fail("INVALID_EXPERIMENT_SPEC", "facts source is incomplete", details={"reason": "facts_incomplete"})
     facts_all = pd.concat([facts_all.drop(columns=list(_FACTS)), numeric], axis=1)
     _log(f"facts_nan_rows={int(facts_all[list(_FACTS)].isna().any(axis=1).sum())}")
