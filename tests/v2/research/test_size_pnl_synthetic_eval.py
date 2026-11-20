@@ -87,6 +87,7 @@ def test_x3_needs_the_sign_in_every_inner_year():
     d.loc[(d["model_id"] == "M06") & (d["event_date"].dt.year == 2023), "pnl_dollars"] = 0.0
     out = ev.evaluate(d, META, TICKERS, ARM, resamples=RESAMPLES)
     assert row(out, "X3", "s=0.6")[2] not in ("clear", "directional")
+    assert next(r for r in out["contrasts"] if r[:2] == ["S1", "s=0.6"])[-1] == "2023:- 2024:+"
 
 
 def test_x4_with_one_straddle_unit_is_not_testable():
@@ -103,16 +104,25 @@ def test_x5_agrees_disagrees_and_zero_only_agrees_with_zero():
 def test_x6_passes_with_constant_width_within_each_quarter():
     out = run(width=[1, 1, 2, 2, 3, 3, 4, 4])
     assert row(out, "X6", "S1")[2] == "pass"
-    assert row(out, "X6", "R_L")[2:] == ["printed", "taken=8"]
+    assert row(out, "X6", "R_L")[2:] == ["pass", "pred_var=0 taken=8"]
 
 
-@pytest.mark.parametrize("pred", [[0.1, 0.1, 0.2, 0.2, 0.3, 0.3, 0.4, 0.4], [0.1, 0.2, 0.2, 0.2, 0.3, 0.3, 0.4, 0.4],
-                                  [0.1, 0.1, 0.2, 0.2, 0.3, 0.3, 0.4, np.nan]])
-def test_x6_straddle_is_printed_and_never_stops_whatever_its_pred_move(pred):
-    """The straddle pred_move check moved to SY2b: the R_L row prints the taken count and cannot stop the run."""
-    out = run(pred=pred)
-    assert row(out, "X6", "R_L")[2:] == ["printed", "taken=8"]
+def test_x6_straddle_passes_with_pred_move_constant_within_each_quarter():
+    out = run(pred=[0.1, 0.1, 0.2, 0.2, 0.3, 0.3, 0.4, 0.4])
+    assert row(out, "X6", "R_L")[2:] == ["pass", "pred_var=0 taken=8"]
     assert "X6 R_L" not in out["stop"]
+
+
+def test_x6_straddle_fails_on_pred_move_variance_within_a_quarter_and_stops():
+    out = run(pred=[0.1, 0.2, 0.2, 0.2, 0.3, 0.3, 0.4, 0.4])
+    assert row(out, "X6", "R_L")[2] == "fail"
+    assert "X6 R_L" in out["stop"]
+
+
+def test_x6_straddle_fails_with_a_nan_pred_move_before_the_variance_test():
+    out = run(pred=[0.1, 0.1, 0.2, 0.2, 0.3, 0.3, 0.4, np.nan])
+    assert row(out, "X6", "R_L")[2:] == ["fail", "missing_pred=1 taken=8"]
+    assert "X6 R_L" in out["stop"]
 
 
 def test_x6_fails_on_within_quarter_width_variance():
@@ -210,3 +220,24 @@ def test_population_drops_an_event_undetermined_under_any_model_or_unit():
     assert len(ev.population(d)) == len(d) - 8 * 3  # E0's rows under all 8 models and 3 units leave E
     assert "E0" not in set(ev.population(d)["event_id"])
     assert ev.evaluate(d, META, TICKERS, ARM, resamples=RESAMPLES)["hash"] == ev.evaluate(d[d["event_id"] != "E0"], META, TICKERS, ARM, resamples=RESAMPLES)["hash"]
+
+
+def test_means_and_contrast_rows_hand_checked():
+    out = run()
+    assert len(out["means"]) == 8 * 3 and all(len(r) == 11 for r in out["means"])
+    # M06 on S1: 8 taken events at a constant 2.0 per event; rmse and mae from META; no declines given, so no share
+    assert ["M06", "median_noise", '{"s": 0.6}', "S1", 8, 8, 0, 2.0, 1.8, 0.9, None] in out["means"]
+    # median M06 (2.0) minus mean N06 (1.0) is +1 on every event, so the mean is 1.0 and every quarter (4 of 4) is positive;
+    # a constant series gives degenerate bootstrap intervals at 1.0; the gap is +1 in both inner years, so the year signs are +
+    assert ["S1", "s=0.6", 1.0, "4/0/0", 1.0, 1.0, 1.0, 1.0, "2023:+ 2024:+"] in out["contrasts"]
+    assert all(len(r) == 9 for r in out["contrasts"])
+
+
+def test_declined_share_and_year_signs_hand_checked():
+    """M06 declines 2 of its 8 S1 candidates: share 2/8 = 0.25. S2 has no declines given and R_L is a straddle unit: both None.
+    The S1 contrast (median M06 minus mean N06, +1 in both inner years) carries the year signs 2023:+ 2024:+."""
+    out = ev.evaluate(frame_of(), META, TICKERS, ARM, resamples=RESAMPLES, declined={"M06": {"S1": [2, 8]}})
+    assert ["M06", "median_noise", '{"s": 0.6}', "S1", 8, 8, 0, 2.0, 1.8, 0.9, 0.25] in out["means"]
+    assert ["M06", "median_noise", '{"s": 0.6}', "S2", 8, 8, 0, 2.0, 1.8, 0.9, None] in out["means"]
+    assert ["M06", "median_noise", '{"s": 0.6}', "R_L", 8, 8, 0, 2.0, 1.8, 0.9, None] in out["means"]
+    assert ["S1", "s=0.6", 1.0, "4/0/0", 1.0, 1.0, 1.0, 1.0, "2023:+ 2024:+"] in out["contrasts"]

@@ -1,5 +1,5 @@
 """EXP-188 SY2 driver: run_synthetic on a tiny inner population. The SY1 generator and the synthetic scoring are stood in
-for (the scoring needs the full simulator); the receipts, refusals, evaluation, publish and X table are the real code."""
+for (the scoring needs the full simulator); the receipts, refusals, evaluation, publish and T11 are the real code."""
 import json
 
 import numpy as np
@@ -56,11 +56,6 @@ def use_chunks(monkeypatch, pairs):
 def snapshot(out):
     """Every file under ``out`` with its bytes."""
     return {str(p.relative_to(out)): p.read_bytes() for p in sorted(out.rglob("*")) if p.is_file()}
-
-
-def x_row(summary, id_, scope):
-    """The X-table row of ``run_synthetic``'s summary with id ``id_`` and scope ``scope``."""
-    return next(r for r in summary["x"] if r[0] == id_ and r[1] == scope)
 
 
 @pytest.fixture(autouse=True)
@@ -120,7 +115,7 @@ def fake_scores(src, ready, plan, facts_all, labels):
         frames.append(pd.DataFrame({"model_id": mid, "book": "straddle", "arm_or_rule": "R_L", "structure": None, "event_id": ids,
                                     "event_date": dates, "status": "taken", "reason": None,
                                     "pnl_dollars": 1.0 + k + np.arange(len(ids)) * 0.5, "pred_move": move}))
-    return frames, {}, "sha256:fake", 0
+    return frames, {}, "sha256:fake", 0, {}
 
 
 @pytest.fixture
@@ -179,16 +174,33 @@ def test_writes_the_synthetic_artifacts_and_no_tuning_or_outer_files(tmp_path, m
     summary = driver.run_synthetic(sources(), tmp_path, prereg=OK)
     assert sorted(p.name for p in (tmp_path / "receipts").iterdir()) == ["inputs_synthetic.json", "synthetic.json"]
     assert (tmp_path / "decisions_synthetic.parquet").is_file() and not (tmp_path / "decisions.parquet").exists()
-    assert not (tmp_path / "t11_synthetic.md").exists()
-    assert x_row(summary, "X7", "replay")[2] == "not_run"
+    text = (tmp_path / "t11_synthetic.md").read_text(encoding="utf-8")
+    assert "T11 SYNTHETIC calibration, X-table" in text and "T11 SYNTHETIC slopes" in text
+    assert "T11 SYNTHETIC means" in text and "T11 SYNTHETIC contrasts" in text
+    assert "| X7 | replay | not_run |" in text
     assert summary["stage"] == "synthetic" and summary["models"] == sorted(summary["models"]) and len(summary["models"]) == 3
-    assert isinstance(summary["slopes"], list) and summary["x"]
+
+
+def test_a_failed_t11_publication_leaves_no_report_and_no_tmp_file(tmp_path, monkeypatch, fakes):
+    real_replace = driver.os.replace
+
+    def fail_t11(src, dst, *args, **kwargs):  # the T11 publication's rename fails; every other rename (the decisions publish) is real
+        if str(dst).endswith("t11_synthetic.md"):
+            raise OSError("rename refused")
+        return real_replace(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(driver.os, "replace", fail_t11)
+    with pytest.raises(OSError):
+        driver.run_synthetic(sources(), tmp_path, prereg=OK)
+    assert (tmp_path / "decisions_synthetic.parquet").is_file()  # the failure is at the T11 step, after the decisions publish
+    assert not (tmp_path / "t11_synthetic.md").exists()
+    assert not [p for p in tmp_path.iterdir() if p.name.startswith(".t11")]
 
 
 def test_replay_is_byte_identical_and_passes_x7(tmp_path, fakes):
-    summary = driver.run_synthetic(sources(), tmp_path, prereg=OK, replay=True)
-    assert x_row(summary, "X7", "replay")[2] == "pass"
+    driver.run_synthetic(sources(), tmp_path, prereg=OK, replay=True)
     first = snapshot(tmp_path)
+    assert "| X7 | replay | pass |" in first["t11_synthetic.md"].decode("utf-8")
     driver.run_synthetic(sources(), tmp_path, prereg=OK, replay=True)
     assert snapshot(tmp_path) == first
 
@@ -201,19 +213,20 @@ def test_replay_then_plain_run_keeps_the_receipt_and_decisions_byte_identical(tm
     assert {name: (tmp_path / name).read_bytes() for name in keep} == first
 
 
-def test_replay_then_plain_run_keeps_x7_pass_and_the_x_table(tmp_path, fakes):
-    first = driver.run_synthetic(sources(), tmp_path, prereg=OK, replay=True)
-    assert x_row(first, "X7", "replay")[2] == "pass"
-    again = driver.run_synthetic(sources(), tmp_path, prereg=OK)
-    assert x_row(again, "X7", "replay")[2] == "pass" and again["x"] == first["x"]
+def test_replay_then_plain_run_keeps_t11_byte_identical_and_x7_pass(tmp_path, fakes):
+    driver.run_synthetic(sources(), tmp_path, prereg=OK, replay=True)
+    first = (tmp_path / "t11_synthetic.md").read_bytes()
+    assert "| X7 | replay | pass |" in first.decode("utf-8")
+    driver.run_synthetic(sources(), tmp_path, prereg=OK)
+    assert (tmp_path / "t11_synthetic.md").read_bytes() == first
 
 
 def test_a_replay_receipt_for_other_inputs_is_ignored(tmp_path, fakes):
     driver.run_synthetic(sources(), tmp_path, prereg=OK)
     tuning.write_receipt(tmp_path / "receipts" / "synthetic_replay.json",
                          {"stage": "synthetic_replay", "scope": None, "inputs": "sha256:other", "ladder": "sha256:other", "equal": True})
-    summary = driver.run_synthetic(sources(), tmp_path, prereg=OK)
-    assert x_row(summary, "X7", "replay")[2] == "not_run"
+    driver.run_synthetic(sources(), tmp_path, prereg=OK)
+    assert "| X7 | replay | not_run |" in (tmp_path / "t11_synthetic.md").read_text(encoding="utf-8")
 
 
 def test_a_replay_receipt_with_other_frames_or_a_non_bool_verdict_is_ignored(tmp_path):
@@ -232,15 +245,16 @@ def test_a_replay_whose_second_scoring_differs_fails_x7_and_stops(tmp_path, monk
     calls = []
 
     def scores(*args):
-        frames, skipped, ladder, dropped = fake_scores(*args)
+        frames, skipped, ladder, dropped, declined = fake_scores(*args)
         calls.append(1)
         if len(calls) == 2:  # the replay's second scoring returns altered P&L
             frames = [f.assign(pnl_dollars=f["pnl_dollars"] + 1.0) for f in frames]
-        return frames, skipped, ladder, dropped
+        return frames, skipped, ladder, dropped, declined
 
     monkeypatch.setattr(driver, "_synthetic_scores", scores)
-    summary = driver.run_synthetic(sources(), tmp_path, prereg=OK, replay=True)
-    assert x_row(summary, "X7", "replay")[2] == "fail" and "X7 replay" in summary["stop"]
+    driver.run_synthetic(sources(), tmp_path, prereg=OK, replay=True)
+    text = (tmp_path / "t11_synthetic.md").read_text(encoding="utf-8")
+    assert "| X7 | replay | fail |" in text and "X7 replay" in text  # the stop list carries the X7 entry
 
 
 def test_a_spec_that_differs_from_the_preregistered_one_refuses_before_any_write(tmp_path, fakes):
@@ -283,7 +297,8 @@ def test_deleting_the_synthetic_files_leaves_the_inner_receipts_byte_identical(t
     driver.run(sources(), "inner", out, prereg=OK)
     inner = {p.name: p.read_bytes() for p in (out / "receipts").iterdir()}
     driver.run_synthetic(sources(), out, prereg=OK)
-    for path in (out / "decisions_synthetic.parquet", out / "receipts" / "synthetic.json", out / "receipts" / "inputs_synthetic.json"):
+    for path in (out / "decisions_synthetic.parquet", out / "t11_synthetic.md",
+                 out / "receipts" / "synthetic.json", out / "receipts" / "inputs_synthetic.json"):
         path.unlink()
     driver.run(sources(), "inner", out, prereg=OK)
     assert {p.name: p.read_bytes() for p in (out / "receipts").iterdir()} == inner
@@ -332,8 +347,8 @@ def test_run_synthetic_refuses_an_expected_that_differs_from_the_plan_identity(t
 
 def test_an_empty_scored_population_refuses_before_any_decision(tmp_path, monkeypatch, fakes):
     def all_undetermined(src, ready, plan, facts_all, labels):
-        frames, skipped, ladder, dropped = fake_scores(src, ready, plan, facts_all, labels)
-        return [f.assign(status="undetermined") for f in frames], skipped, ladder, dropped
+        frames, skipped, ladder, dropped, declined = fake_scores(src, ready, plan, facts_all, labels)
+        return [f.assign(status="undetermined") for f in frames], skipped, ladder, dropped, declined
 
     monkeypatch.setattr(driver, "_synthetic_scores", all_undetermined)
     with pytest.raises(Refusal) as caught:
@@ -345,8 +360,8 @@ def test_an_empty_scored_population_refuses_before_any_decision(tmp_path, monkey
 
 def test_a_refused_smoke_run_pins_nothing_and_a_broader_run_in_the_same_dir_succeeds(tmp_path, monkeypatch, fakes):
     def all_undetermined(src, ready, plan, facts_all, labels):
-        frames, skipped, ladder, dropped = fake_scores(src, ready, plan, facts_all, labels)
-        return [f.assign(status="undetermined") for f in frames], skipped, ladder, dropped
+        frames, skipped, ladder, dropped, declined = fake_scores(src, ready, plan, facts_all, labels)
+        return [f.assign(status="undetermined") for f in frames], skipped, ladder, dropped, declined
 
     monkeypatch.setattr(driver, "_synthetic_scores", all_undetermined)
     with pytest.raises(Refusal) as caught:
@@ -361,8 +376,8 @@ def test_a_refused_smoke_run_pins_nothing_and_a_broader_run_in_the_same_dir_succ
 
 def test_one_decided_quarter_refuses_as_underclustered(tmp_path, monkeypatch, fakes):
     def one_event_decided(src, ready, plan, facts_all, labels):
-        frames, skipped, ladder, dropped = fake_scores(src, ready, plan, facts_all, labels)
-        return [f.assign(status=["taken" if e == "E1" else "undetermined" for e in f["event_id"]]) for f in frames], skipped, ladder, dropped
+        frames, skipped, ladder, dropped, declined = fake_scores(src, ready, plan, facts_all, labels)
+        return [f.assign(status=["taken" if e == "E1" else "undetermined" for e in f["event_id"]]) for f in frames], skipped, ladder, dropped, declined
 
     monkeypatch.setattr(driver, "_synthetic_scores", one_event_decided)
     with pytest.raises(Refusal) as caught:
@@ -505,7 +520,7 @@ def test_reads_take_only_the_planned_events_and_an_unplanned_admitted_event_is_n
     assert asked == [{"E1", "E2"}, {"E1", "E2"}]  # production, then labels: the plan's ids only
     assert fakes == [["E1", "E2"]]
     receipt = json.loads((tmp_path / "receipts" / "synthetic.json").read_text(encoding="utf-8"))
-    assert receipt["planned"] == 2
+    assert receipt["declined"] == {} and receipt["planned"] == 2
 
 
 def test_the_real_loop_drops_a_planned_event_one_model_lacks_from_every_model(monkeypatch):
@@ -526,7 +541,7 @@ def test_the_real_loop_drops_a_planned_event_one_model_lacks_from_every_model(mo
     use_chunks(monkeypatch, [("2023Q2", chunk("E1")), ("2023Q3", chunk("E2")), ("2023Q4", chunk("E4")), ("2024Q1", chunk("E5")),
                              ("2024Q3", chunk("E3")), ("2024Q4", chunk("E6"))])
     src = sources(plan_frame=PLAN3, admitted=ADMITTED3)
-    frames, _skipped, _digest, dropped = driver._synthetic_scores(src, ready, PLAN3, FACTS3, labels)
+    frames, _skipped, _digest, dropped, _declined = driver._synthetic_scores(src, ready, PLAN3, FACTS3, labels)
     assert dropped == 1
     seen = pd.concat(frames, ignore_index=True)
     assert set(seen["model_id"]) == {"m1", "m2"}

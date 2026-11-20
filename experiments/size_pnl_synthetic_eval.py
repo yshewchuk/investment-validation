@@ -1,4 +1,6 @@
 """EXP-188 SY2: X1-X7 evaluation and quarter-bootstrap slopes of the synthetic arm (design sections 4-5). SYNTHETIC only."""
+import json
+
 import numpy as np
 import pandas as pd
 
@@ -24,8 +26,9 @@ def _wide(g):
 def _units(decisions, tickers):
     """Unit name -> book, wide P&L, quarters and tickers in wide's row order, and the unit's rows."""
     short = decisions[(decisions["book"] == SHORT) & (decisions["arm_or_rule"] == "as_is")]
+    strad = decisions[decisions["book"] == STRADDLE]
     data = {}
-    for book, frame, key in ((SHORT, short, "structure"), (STRADDLE, decisions[decisions["book"] == STRADDLE], "arm_or_rule")):
+    for book, frame, key in ((SHORT, short, "structure"), (STRADDLE, strad, "arm_or_rule")):
         for unit, g in frame.groupby(key):
             wide = _wide(g)
             dates = {str(e): str(pd.Timestamp(d).to_period("Q")) for e, d in zip(g["event_id"], g["event_date"])}
@@ -36,6 +39,11 @@ def _units(decisions, tickers):
 
 def _find(meta, family, params):
     return next((mid for mid, m in meta.items() if m["family"] == family and m["params"] == params), None)
+
+
+def _sums(wide, mids, codes):
+    grouped = wide[mids].groupby(codes)
+    return grouped.sum().to_numpy(), grouped.size().to_numpy().astype(float)
 
 
 def _boot_means(sums, counts, resamples, seed):
@@ -51,16 +59,37 @@ def _slope(x, point, boot):
     return float(np.polyfit(x, point, 1)[0]), float(lo), float(hi)
 
 
+def _quarter_var(sub, column="width"):
+    """The largest within-quarter population variance of ``column`` (NaN ignored); 0 when there is none."""
+    q = pd.to_datetime(sub["event_date"]).dt.to_period("Q").to_numpy()
+    v = pd.to_numeric(sub[column]).groupby(q).var(ddof=0)
+    return float(v.max()) if v.notna().any() else 0.0
+
+
+_MARKS = {1: "+", -1: "-", 0: "0"}
+
+
+def _year_signs(summary):
+    """A contrast summary's yearly signs as ``2023:+ 2024:-``, sorted by year."""
+    return " ".join(f"{y}:{_MARKS[int(np.sign(v))]}" for y, v in sorted(summary["year_signs"].items()))
+
+
 def _rung_rows(id_, units, meta, names, sign, arm, resamples, seed):
-    """X3/X4: each rung s >= level_gap_min_s, median-minus-mean P&L per named unit, classified against sign."""
-    years, rows = tuple(range(arm["inner_years"][0], arm["inner_years"][1] + 1)), []
+    """X3/X4: each rung s >= level_gap_min_s, median-minus-mean P&L per named unit, classified against sign.
+    Also returns each named unit's contrast summary at that rung (the T11 contrasts table)."""
+    rows, summaries = [], []
     for s in sorted({m["params"]["s"] for m in meta.values() if m["family"] == "median_noise"}):
         med, mean = _find(meta, "median_noise", {"s": s}), _find(meta, "mean_noise", {"s": s})
         if s < arm["level_gap_min_s"] or med is None or mean is None or not names: continue
-        pairs = {n: {"inner": contrast.contrast(units[n]["wide"][med].to_numpy() - units[n]["wide"][mean].to_numpy(), units[n]["quarters"],
-                                                units[n]["tickers"], resamples=resamples, seed=seed)} for n in names}
-        rows.append([id_, f"s={s}", contrast.classify(pairs, sign, full_years=years), f"pairs={len(pairs)}"])
-    return rows
+        pairs = {}
+        for name in names:
+            w, u = units[name]["wide"], units[name]
+            res = contrast.contrast(w[med].to_numpy() - w[mean].to_numpy(), u["quarters"], u["tickers"], resamples=resamples, seed=seed)
+            pairs[name] = {"inner": res}
+            qc = res["quarter_counts"]
+            summaries.append([name, f"s={s}", res["mean"], f"{qc['positive']}/{qc['negative']}/{qc['zero']}", *res["quarter_interval"], *res["ticker_interval"], _year_signs(res)])
+        rows.append([id_, f"s={s}", contrast.classify(pairs, sign, full_years=tuple(range(arm["inner_years"][0], arm["inner_years"][1] + 1))), f"pairs={len(pairs)}"])
+    return rows, summaries
 
 
 def _safe(rows):
@@ -74,8 +103,24 @@ def population(decisions):
     return decisions[~decisions["event_id"].astype(str).isin(bad)]
 
 
-def evaluate(decisions, meta, tickers, arm, *, replay_equal=None, resamples=contrast.RESAMPLES, seed=contrast.SEED):
-    """SY2 evaluation of the synthetic decisions on E: quarter-bootstrap slopes, the X1-X7 table and the stop ids."""
+def _means(units, meta, declined):
+    """Per (predictor, unit) on E: events, taken and not_taken counts, mean P&L per event (untaken rows 0), the fit errors,
+    and the declined share (declined over candidates) of a short-vol unit, None for a straddle unit or when absent."""
+    rows = []
+    for unit, u in units.items():
+        for mid in u["wide"].columns:
+            status = u["rows"].loc[u["rows"]["model_id"] == mid, "status"]
+            got = declined.get(mid, {}).get(unit) if u["book"] == SHORT else None
+            share = got[0] / got[1] if got and got[1] else None
+            rows.append([mid, meta[mid]["family"], json.dumps(meta[mid]["params"], sort_keys=True), unit, len(u["wide"]),
+                         int((status == "taken").sum()), int((status == "not_taken").sum()),
+                         float(u["wide"][mid].mean()), meta[mid]["rmse"], meta[mid]["mae"], share])
+    return rows
+
+
+def evaluate(decisions, meta, tickers, arm, *, replay_equal=None, resamples=contrast.RESAMPLES, seed=contrast.SEED, declined=None):
+    """SY2 evaluation of the synthetic decisions on E: quarter-bootstrap slopes, the X1-X7 table, the calibration means
+    and contrasts, and the stop ids. ``declined`` is {model: {short-vol unit: [declined, candidates]}}, the width declines."""
     if replay_equal is not None and not isinstance(replay_equal, bool):
         raise ValueError("replay_equal must be a bool or None")
     decisions = population(decisions)
@@ -98,8 +143,7 @@ def evaluate(decisions, meta, tickers, arm, *, replay_equal=None, resamples=cont
         for typ in TYPES:
             mids = sorted((m for m in wide.columns if meta[m]["family"] == typ), key=lambda m: meta[m]["params"]["s"])
             if not mids: continue
-            grouped = wide[mids].groupby(codes)
-            sums, counts = grouped.sum().to_numpy(), grouped.size().to_numpy().astype(float)
+            sums, counts = _sums(wide, mids, codes)
             point, boot = sums.sum(0) / counts.sum(), _boot_means(sums, counts, resamples, seed)
             xs = {metric: np.array([meta[m][metric] for m in mids], dtype=float) for metric in METRICS}
             steps = np.diff(point)
@@ -118,16 +162,20 @@ def evaluate(decisions, meta, tickers, arm, *, replay_equal=None, resamples=cont
         if shr is not None:
             sub = u["rows"][u["rows"]["model_id"] == shr]
             taken = int((sub["status"] == "taken").sum())
-            if u["book"] == STRADDLE: x.append(["X6", unit, "printed", f"taken={taken}"])  # the pred_move check moved to SY2b
-            else:  # completeness first: any NaN width fails, before the variance test
-                missing = int(sub["width"].isna().sum())  # the largest within-quarter population variance of width (NaN ignored, 0 if none)
-                var = float(pd.to_numeric(sub["width"]).groupby(pd.to_datetime(sub["event_date"]).dt.to_period("Q").to_numpy()).var(ddof=0).fillna(0.0).max())
-                x.append(["X6", unit, "fail", f"missing_widths={missing} taken={taken}"] if missing else
-                         ["X6", unit, "pass" if var <= 1e-12 else "fail", f"var={var:.3g} taken={taken}"])
+            if u["book"] == SHORT:  # completeness first: any NaN width fails, before the variance test
+                missing, var = int(sub["width"].isna().sum()), _quarter_var(sub)
+                if missing: x.append(["X6", unit, "fail", f"missing_widths={missing} taken={taken}"])
+                else: x.append(["X6", unit, "pass" if var <= 1e-12 else "fail", f"var={var:.3g} taken={taken}"])
+            else:  # straddle edge = pred_move - implied_move: constant pred_move per quarter ranks by implied move alone
+                missing, var = int(sub["pred_move"].isna().sum()), _quarter_var(sub, "pred_move")
+                if missing: x.append(["X6", unit, "fail", f"missing_pred={missing} taken={taken}"])
+                else: x.append(["X6", unit, "pass" if var <= 1e-12 else "fail", f"pred_var={var:.3g} taken={taken}"])
     short = [n for n, u in units.items() if u["book"] == SHORT]
-    x += _rung_rows("X3", units, meta, short, 1, arm, resamples, seed)
-    x += _rung_rows("X4", units, meta, [n for n in ("R_L", "R_L2") if n in units], -1, arm, resamples, seed)
+    rung3, sums3 = _rung_rows("X3", units, meta, short, 1, arm, resamples, seed)
+    rung4, sums4 = _rung_rows("X4", units, meta, [n for n in ("R_L", "R_L2") if n in units], -1, arm, resamples, seed)
+    x += rung3 + rung4
     x.append(["X7", "replay", "not_run" if replay_equal is None else ("pass" if replay_equal else "fail"), f"replay_equal={replay_equal}"])
     stop = [f"{r[0]} {r[1]}" for r in x if r[0] in STOP_IDS and r[2] in ("fail", "Failed")]
-    slopes, x = _safe(slopes), _safe(x)
-    return {"slopes": slopes, "x": x, "stop": stop, "hash": content_hash({"slopes": slopes, "x": [r for r in x if r[0] != "X7"]})}
+    slopes, x, means, contrasts = _safe(slopes), _safe(x), _safe(_means(units, meta, declined or {})), _safe(sums3 + sums4)
+    hashed = {"slopes": slopes, "x": [r for r in x if r[0] != "X7"], "means": means, "contrasts": contrasts}
+    return {"slopes": slopes, "x": x, "means": means, "contrasts": contrasts, "stop": stop, "hash": content_hash(hashed)}
