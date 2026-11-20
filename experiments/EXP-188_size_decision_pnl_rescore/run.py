@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""EXP-188 runner: the S1 pre-registration gate, then the S9 driver for the inner and outer stages."""
+"""EXP-188 runner: the S1 pre-registration gate, then the S9a driver for the inner stage."""
 from __future__ import annotations
 
 import argparse
@@ -14,8 +14,8 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from engine.v2.ops.errors import OpsError, fail  # noqa: E402
-from experiments import size_pnl_prereg  # noqa: E402
-from experiments.size_pnl_shortvol import Refusal  # noqa: E402
+from experiments import size_pnl_prereg, size_pnl_shortvol  # noqa: E402
+Refusal = size_pnl_shortvol.Refusal
 
 _INVALID = "INVALID_EXPERIMENT_SPEC"
 _CONFLICT = "EXPERIMENT_IDENTITY_CONFLICT"
@@ -24,13 +24,12 @@ _INPUT_LIMIT = 1 << 20
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--stage", required=True, choices=("inner", "outer"))
+    parser.add_argument("--stage", required=True, choices=("inner",))
     parser.add_argument("--out-dir", required=True)
     parser.add_argument("--expected", required=True,
                         help="JSON with plan_id, registration_id, seal_id, panel_id of the v14 RERUN")
     parser.add_argument("--sources", required=True,
                         help="MODULE:FUNC, called with the parsed args, returns a size_pnl_driver.Sources")
-    parser.add_argument("--event-ids", help="optional file, one event id per line (smoke runs)")
     parser.add_argument("--no-ledger", action="store_true", required=True,
                         help="required: every non-recorded run uses --no-ledger")
     return parser
@@ -50,19 +49,11 @@ def _read_input(path: str, limit: int = _INPUT_LIMIT) -> bytes:
     return data
 
 
-def _read_text(path: str) -> str:
-    try:
-        return _read_input(path).decode("utf-8")
-    except (OSError, ValueError) as exc:  # unreadable, or not UTF-8
-        raise fail(_INVALID, f"{path} is unreadable", details={"reason": "input_unreadable"}) from exc
-
-
 def _read_json(path: str):
-    text = _read_text(path)
     try:
-        return json.loads(text)
-    except json.JSONDecodeError as exc:
-        raise fail(_INVALID, f"{path} is not JSON", details={"reason": "input_unreadable"}) from exc
+        return json.loads(_read_input(path).decode("utf-8"))
+    except (OSError, ValueError) as exc:  # unreadable, not UTF-8, or not JSON
+        raise fail(_INVALID, f"{path} is unreadable", details={"reason": "input_unreadable"}) from exc
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -78,10 +69,8 @@ def main(argv: list[str] | None = None) -> int:
         args.expected_identities = _read_json(args.expected)
         # Imported only after the gates above, so a missing PLANNED row refuses first.
         from experiments import size_pnl_driver
-        module_name, sep, func = args.sources.partition(":")
-        try:
-            if not sep:
-                raise ValueError(args.sources)
+        module_name, _, func = args.sources.partition(":")
+        try:  # no colon gives func "", which is not an attribute; a bad module raises ImportError
             factory = getattr(importlib.import_module(module_name), func)
             if not callable(factory):
                 raise AttributeError(func)
@@ -92,11 +81,7 @@ def main(argv: list[str] | None = None) -> int:
         if sources.expected != args.expected_identities:
             raise fail(_CONFLICT, "--expected differs from the sources' expected identities",
                        details={"reason": "expected_mismatch"})
-        event_ids = None
-        if args.event_ids is not None:
-            event_ids = {line.strip() for line in _read_text(args.event_ids).splitlines() if line.strip()}
-        summary = size_pnl_driver.run(sources, args.stage, args.out_dir, event_ids=event_ids,
-                                      prereg=lambda: receipt)
+        summary = size_pnl_driver.run(sources, args.stage, args.out_dir, prereg=lambda: receipt)
     except (OpsError, Refusal) as exc:
         details = exc.details if isinstance(exc, Refusal) else exc.problem.details
         print(json.dumps({"refused": exc.code, "message": str(exc), "reason": details.get("reason")}))

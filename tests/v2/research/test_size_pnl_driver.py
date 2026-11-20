@@ -1,8 +1,8 @@
-"""EXP-188 S9: driver orchestration with small fakes. Real inputs and readers; pool, ladder, scorers and tuning stubbed."""
+"""EXP-188 S9a: inner-stage driver orchestration with small fakes. Real inputs and readers; pool, simulation and tuning
+stubbed."""
 import dataclasses
 import importlib.util
 import json
-import shutil
 import sys
 import types
 from pathlib import Path
@@ -49,11 +49,7 @@ FACTS = pd.DataFrame({"pre_iv30": 40.0, "mcap_usd": 2e10, "implied_move": 5.0},
 
 
 def sources(**over):
-    fetch_log = over.pop("fetch_log", None)
-
     def fetch(columns, ids):
-        if fetch_log is not None:
-            fetch_log.append(("labels" if "abs_move" in columns else "production", tuple(ids)))
         return BASE[BASE["event_id"].isin(list(ids))]
 
     base = dict(plan=PLAN, read=lambda slot: SEAL if slot == "driver-seal" else None,
@@ -67,15 +63,16 @@ def sources(**over):
 
 
 def chunk(*eids):
-    """A minimal ladder chunk: the event ids and dte_exit are all the driver reads outside the scorers."""
+    """A minimal ladder chunk: the event ids and dte_exit are all the driver reads outside the simulator."""
     return {"event_id": np.array(eids, dtype=object), "dte_exit": np.full(len(eids), 9, dtype=np.int32)}
 
 
 @pytest.fixture
 def stubs(monkeypatch):
-    """Pool, scorers and tuning are stubbed so the tests exercise the driver's own orchestration.
+    """Pool, simulation and tuning are stubbed so the tests exercise the driver's own orchestration.
 
-    Returns the call log that the stubs append to (tune calls and straddle decides)."""
+    Returns the call log that the tune stub appends to.
+    """
     log = []
 
     def fake_tune(items, mid, **kwargs):
@@ -83,42 +80,15 @@ def stubs(monkeypatch):
         return {"stage": "tuning", "model_id": mid, "c": 1.0, "skipped": False,
                 "events": sum(len(ev) for _c, ev, _s in items)}
 
-    def fake_scored(chunk_, events, sims, name, *, alpha=0.5, c=1.0):
-        return pd.DataFrame({"event_id": events["event_id"].astype(str), "event_date": events["event_date"],
-                             "structure": name, "status": "undetermined", "reason": "thin_history",
-                             "exp_pnl_sim": np.nan, "entry_cost": np.nan, "rel_spread": np.nan,
-                             "mcap_usd": events["mcap_usd"], "alpha": alpha, "c": c})
-
-    def fake_short_score(chunk_, events, decisions, name, alpha, *, c=1.0):
-        return pd.DataFrame(columns=["event_id", "structure", "entry_cost", "exit_value", "rung", "lots",
-                                     "pnl_per_share", "pnl_dollars"])
-
-    def fake_straddle(events, history, rule, chunk_):
-        log.append(("decide", tuple(sorted(events["event_id"].astype(str)))))
-        return pd.DataFrame({"event_id": events["event_id"].astype(str), "event_date": events["event_date"],
-                             "edge": events["pred_abs_move"] - events["implied_move"], "cutoff": np.nan,
-                             "rel_spread": np.nan, "status": "undetermined", "reason": "thin_history"})
-
-    def fake_straddle_score(chunk_, events, dec, alpha, **kwargs):
-        return pd.DataFrame(columns=["event_id", "entry_cost", "exit_value", "rung", "lots", "pnl_per_share",
-                                     "pnl_dollars"])
-
     monkeypatch.setattr(driver, "build_pool", lambda table, labels: None)
     monkeypatch.setattr(tuning, "tune", fake_tune)
     monkeypatch.setattr(driver.shortvol, "simulate", lambda chunk_, events, pool, **kw: {})
-    monkeypatch.setattr(driver.shortvol, "score_events", fake_scored)
-    monkeypatch.setattr(driver.shortvol, "decide", lambda scored: scored.assign(cutoff=np.nan))
-    monkeypatch.setattr(driver.shortvol, "score", fake_short_score)
-    monkeypatch.setattr(driver.straddle, "decide", fake_straddle)
-    monkeypatch.setattr(driver.straddle, "score", fake_straddle_score)
     return log
 
 
-def use_chunks(monkeypatch, pairs, seen=None):
-    """Replace the ladder with a generator over fixed (quarter, chunk) pairs; ``seen`` records the plan."""
+def use_chunks(monkeypatch, pairs):
+    """Replace the ladder with a generator over fixed (quarter, chunk) pairs."""
     def fake(admitted, plan, load_index):
-        if seen is not None:
-            seen.append(plan)
         yield from pairs
     monkeypatch.setattr(driver.ladder, "ladder_chunks", fake)
 
@@ -137,9 +107,10 @@ def test_prereg_refusal_runs_before_any_source_call(tmp_path):
     assert calls == []
 
 
-def test_bad_stage_raises_value_error(tmp_path):
-    with pytest.raises(ValueError):
-        driver.run(sources(), "2025", tmp_path, prereg=OK)
+@pytest.mark.parametrize("stage", ["outer", "2025"])
+def test_only_the_inner_stage_runs(tmp_path, stage):
+    with pytest.raises(ValueError, match="stage must be one of"):
+        driver.run(sources(), stage, tmp_path, prereg=OK)
 
 
 def test_prepare_rejects_a_typo_stage_before_any_source_call():
@@ -147,15 +118,6 @@ def test_prepare_rejects_a_typo_stage_before_any_source_call():
     with pytest.raises(ValueError, match="stage must be one of"):
         driver.prepare(sources(read=lambda slot: calls.append(slot)), "typo")
     assert calls == []
-
-
-def test_outer_refuses_before_building_any_chunk(tmp_path, stubs):
-    loads = []
-    with pytest.raises(Refusal) as caught:
-        driver.run(sources(load_index=lambda keys: loads.append(keys)), "outer", tmp_path, prereg=OK)
-    assert caught.value.code == CONFLICT
-    assert caught.value.details["reason"] == "tuning_receipt_missing"
-    assert loads == []
 
 
 # ---- inner stage, replay and identity -----------------------------------------
@@ -177,16 +139,13 @@ def test_inner_writes_receipts_replays_read_only_and_refuses_a_changed_binding(t
     assert {p: (p.stat().st_ino, p.stat().st_mtime_ns) for p in (out / "receipts").iterdir()} == before
 
 
-def test_event_ids_must_be_admitted_and_restrict_the_plan_and_tables(tmp_path, stubs, monkeypatch):
-    seen = []
-    use_chunks(monkeypatch, [("2023Q2", chunk("E1"))], seen)
-    with pytest.raises(OpsError) as caught:
-        driver.run(sources(), "inner", tmp_path / "bad", event_ids={"E1", "ZZ"}, prereg=OK)
-    assert caught.value.code == DENIED
-    driver.run(sources(), "inner", tmp_path / "ok", event_ids={"E1"}, prereg=OK)
-    assert set(seen[0]["event_id"]) == {"E1"}
-    tunes = [e for e in stubs if e[0] == "tune"]
-    assert tunes and all(entry[2] == ("E1",) for entry in tunes)  # the tables were restricted too
+def test_inner_receipts_bind_scope_none_and_the_snapshot(tmp_path, stubs, monkeypatch):
+    use_chunks(monkeypatch, [("2023Q2", chunk("E1"))])
+    driver.run(sources(), "inner", tmp_path, prereg=OK)
+    inputs = tuning.load_receipt(tmp_path / "receipts" / "inputs_inner.json")
+    inner = tuning.load_receipt(tmp_path / "receipts" / "inner.json")
+    assert inputs["scope"] is None and inner["scope"] is None
+    assert inputs["snapshot"] == "snap-1"
 
 
 def test_inner_refuses_a_changed_plan_window_on_replay(tmp_path, stubs, monkeypatch):
@@ -198,115 +157,6 @@ def test_inner_refuses_a_changed_plan_window_on_replay(tmp_path, stubs, monkeypa
         driver.run(sources(plan_frame=changed), "inner", tmp_path, prereg=OK)
     assert caught.value.code == CONFLICT
     assert caught.value.details["reason"] == "tuning_receipt_changed"
-
-
-# ---- outer stage: R6 ordering and the warm-up -----------------------------------
-
-def test_outer_reads_a_month_s_labels_only_after_its_rows_are_complete(tmp_path, stubs, monkeypatch):
-    use_chunks(monkeypatch, [("2024Q3", chunk("E2"))])
-    driver.run(sources(), "inner", tmp_path, prereg=OK)  # writes inputs, tuning and inner receipts
-    use_chunks(monkeypatch, [("2024Q3", chunk("E2")), ("2025Q1", chunk("E3", "E4"))])
-    summary = driver.run(sources(fetch_log=stubs), "outer", tmp_path, prereg=OK)
-    # Two 2025 months, each with one row per (arm, short-vol name) and one per straddle rule.
-    assert summary["rows"] == 2 * (2 * len(driver.shortvol.NAMES) + len(driver.straddle.RULES))
-    assert (tmp_path / "decisions.parquet").exists()
-    assert not (tmp_path / "decisions.parquet.tmp").exists()
-    for event in ("E3", "E4"):
-        decided = max(i for i, e in enumerate(stubs) if e[0] == "decide" and event in e[1])
-        labelled = next(i for i, e in enumerate(stubs) if e[0] == "labels" and event in e[1])
-        assert labelled > decided
-
-
-def test_warm_up_month_adds_history_only(tmp_path, stubs, monkeypatch):
-    use_chunks(monkeypatch, [("2024Q3", chunk("E2"))])
-    driver.run(sources(), "inner", tmp_path, prereg=OK)
-    use_chunks(monkeypatch, [("2024Q3", chunk("E2"))])
-    summary = driver.run(sources(fetch_log=stubs), "outer", tmp_path, prereg=OK)
-    assert summary["rows"] == 0  # 2024 H2 is warm-up: history is built, but no decision row is written
-    assert not any(e[0] == "labels" and e[1] == ("E2",) for e in stubs)  # and no month's labels are read
-
-
-def test_outer_pool_sees_the_2023_history(tmp_path, stubs, monkeypatch):
-    """The outer tables span INNER[0]..OUTER[1], so a 2025 month's pool includes the 2023 residual row."""
-    def model_tables(bound, roster, admitted, production, *, start, end, **kw):
-        keep = [(e, d) for e, d in EVENTS.items() if pd.Timestamp(start) <= pd.Timestamp(d) < pd.Timestamp(end)]
-        table = pd.DataFrame({"pred_move": 5.0, "pred_crush": -12.0,
-                              "event_date": pd.to_datetime([d for _e, d in keep])},
-                             index=pd.Index([e for e, _d in keep], name="event_id"))
-        return {m["model_id"]: {"status": "ready", "table": table, "binding": {"rows": len(keep)}}
-                for m in roster["models"]}
-
-    pools = []
-    monkeypatch.setattr(readers, "model_tables", model_tables)
-    monkeypatch.setattr(driver, "build_pool", lambda table, labels: pools.append(table))
-    use_chunks(monkeypatch, [("2024Q3", chunk("E2"))])
-    driver.run(sources(), "inner", tmp_path, prereg=OK)
-    pools.clear()
-    use_chunks(monkeypatch, [("2024Q3", chunk("E2")), ("2025Q1", chunk("E3", "E4"))])
-    driver.run(sources(), "outer", tmp_path, prereg=OK)
-    e1_date = pd.Timestamp(EVENTS["E1"])
-    assert pools and all(t["event_date"].min() == e1_date for t in pools)  # the 2023 row is in every pool
-    assert any(len(t) == 2 for t in pools)  # the 2025-01 month's pool holds the 2023 and 2024 rows
-
-
-def test_label_joins_the_pool_only_once_its_exit_is_printed(stubs, monkeypatch):
-    """An event dated on a month's last day, exiting in the next month, is out of that next pool but in the month after."""
-    pools = []
-    monkeypatch.setattr(driver, "build_pool", lambda table, labels: pools.append(set(labels.index.astype(str))))
-    table = pd.DataFrame({"event_date": pd.to_datetime(["2025-01-31"]), "pred_move": 5.0, "pred_crush": -12.0},
-                         index=pd.Index(["E3"], name="event_id"))
-    labels = pd.DataFrame({"abs_move": [4.0], "crush_pct_iv30": [-10.0]}, index=pd.Index(["E3"], name="event_id"))
-    events = pd.DataFrame(columns=["event_id", "event_date", "pred_abs_move", "pred_move", "pred_crush",
-                                   "implied_move", "mcap_usd"])
-    exits = {"E3": "2025-02-03"}
-    st = driver._model_state(1.0)
-    driver._month("m", table, events, chunk(), labels, exits, pd.Timestamp("2025-02-01"), st)
-    driver._month("m", table, events, chunk(), labels, exits, pd.Timestamp("2025-03-01"), st)
-    assert pools[0] == set()  # exit 2025-02-03 is not printed before 2025-02-01
-    assert pools[1] == {"E3"}  # printed before 2025-03-01
-
-
-def test_exact_outer_replay_does_not_rewrite_decisions(tmp_path, stubs, monkeypatch):
-    use_chunks(monkeypatch, [("2024Q3", chunk("E2"))])
-    driver.run(sources(), "inner", tmp_path, prereg=OK)
-    use_chunks(monkeypatch, [("2024Q3", chunk("E2")), ("2025Q1", chunk("E3", "E4"))])
-    first = driver.run(sources(fetch_log=stubs), "outer", tmp_path, prereg=OK)
-    before = (tmp_path / "decisions.parquet").stat()
-    second = driver.run(sources(fetch_log=stubs), "outer", tmp_path, prereg=OK)
-    after = (tmp_path / "decisions.parquet").stat()
-    assert second == first
-    assert (after.st_ino, after.st_mtime_ns) == (before.st_ino, before.st_mtime_ns)
-    assert not list(tmp_path.glob("*.tmp"))
-
-
-def test_symlinked_decisions_refuses_an_outer_rerun(tmp_path, stubs, monkeypatch):
-    use_chunks(monkeypatch, [("2024Q3", chunk("E2"))])
-    driver.run(sources(), "inner", tmp_path, prereg=OK)
-    use_chunks(monkeypatch, [("2024Q3", chunk("E2")), ("2025Q1", chunk("E3", "E4"))])
-    driver.run(sources(fetch_log=stubs), "outer", tmp_path, prereg=OK)
-    real = tmp_path / "real.parquet"
-    (tmp_path / "decisions.parquet").rename(real)
-    (tmp_path / "decisions.parquet").symlink_to(real)
-    use_chunks(monkeypatch, [("2024Q3", chunk("E2")), ("2025Q1", chunk("E3", "E4"))])
-    with pytest.raises(Refusal) as caught:
-        driver.run(sources(fetch_log=stubs), "outer", tmp_path, prereg=OK)
-    assert caught.value.code == CONFLICT
-    assert caught.value.details["reason"] == "decisions_artifact_invalid"
-
-
-def test_changed_outer_receipt_leaves_decisions_untouched_and_no_tmp(tmp_path, stubs, monkeypatch):
-    use_chunks(monkeypatch, [("2024Q3", chunk("E2"))])
-    driver.run(sources(), "inner", tmp_path, prereg=OK)
-    (tmp_path / "decisions.parquet").write_bytes(b"EXISTING")
-    tuning.write_receipt(tmp_path / "receipts" / "outer.json",
-                         {"stage": "outer", "decisions_sha256": "OTHER", "rows": 99, "models": []})
-    use_chunks(monkeypatch, [("2024Q3", chunk("E2"))])
-    with pytest.raises(Refusal) as caught:
-        driver.run(sources(), "outer", tmp_path, prereg=OK)
-    assert caught.value.code == CONFLICT
-    assert caught.value.details["reason"] == "tuning_receipt_changed"
-    assert (tmp_path / "decisions.parquet").read_bytes() == b"EXISTING"
-    assert not (tmp_path / "decisions.parquet.tmp").exists()
 
 
 def test_inner_month_pool_drops_a_label_printed_after_a_later_month_starts(tmp_path, stubs, monkeypatch):
@@ -348,38 +198,46 @@ def test_facts_are_fetched_once_per_run(tmp_path, stubs, monkeypatch):
     use_chunks(monkeypatch, [("2023Q2", chunk("E1")), ("2024Q3", chunk("E2"))])
     driver.run(sources(facts=counting), "inner", tmp_path, prereg=OK)
     assert calls == [["E1", "E2"]]
-    calls.clear()
-    use_chunks(monkeypatch, [("2024Q3", chunk("E2")), ("2025Q1", chunk("E3", "E4"))])
-    driver.run(sources(facts=counting), "outer", tmp_path, prereg=OK)  # the inner run above wrote the receipts
-    assert len(calls) == 1
 
 
-def test_outer_refuses_a_candidate_without_2025_rows_before_any_chunk(tmp_path, stubs, monkeypatch):
-    """Candidate predictions for 2025 are not bound yet: a non-production model with only 2024 rows refuses."""
-    roster = {"models": [{"model_id": "prod", "source": "production"}, {"model_id": "cand", "source": "v14"}]}
-    rows = {"prod": EVENTS, "cand": {"E2": EVENTS["E2"]}}
-    monkeypatch.setattr(driver.inputs, "resolve_roster", lambda *a, **kw: roster)
-    monkeypatch.setattr(driver.inputs, "bind_models", lambda *a, **kw: {})
-
-    def model_tables(bound, roster_, admitted, production, *, start, end, **kw):
-        out = {}
-        for mid, events in rows.items():
-            keep = [(e, d) for e, d in events.items() if pd.Timestamp(start) <= pd.Timestamp(d) < pd.Timestamp(end)]
-            table = pd.DataFrame({"pred_move": 5.0, "pred_crush": -12.0,
-                                  "event_date": pd.to_datetime([d for _e, d in keep])},
-                                 index=pd.Index([e for e, _d in keep], name="event_id"))
-            out[mid] = {"status": "ready", "table": table, "binding": {"rows": len(keep)}}
-        return out
-
-    monkeypatch.setattr(readers, "model_tables", model_tables)
-    use_chunks(monkeypatch, [("2024Q3", chunk("E2"))])
+def test_changed_snapshot_refuses_an_inner_replay(tmp_path, stubs, monkeypatch):
+    use_chunks(monkeypatch, [("2023Q2", chunk("E1")), ("2024Q3", chunk("E2"))])
     driver.run(sources(), "inner", tmp_path, prereg=OK)
-    loads = []
     with pytest.raises(Refusal) as caught:
-        driver.run(sources(load_index=lambda keys: loads.append(keys)), "outer", tmp_path, prereg=OK)
+        driver.run(sources(snapshot_id="snap-2"), "inner", tmp_path, prereg=OK)
     assert caught.value.code == CONFLICT
-    assert caught.value.details["reason"] == "outer_predictions_unbound"
-    assert loads == []
+    assert caught.value.details["reason"] == "tuning_receipt_changed"
+
+
+def test_changed_fact_value_refuses_an_inner_replay(tmp_path, stubs, monkeypatch):
+    use_chunks(monkeypatch, [("2023Q2", chunk("E1")), ("2024Q3", chunk("E2"))])
+    driver.run(sources(), "inner", tmp_path, prereg=OK)
+    moved = FACTS.copy()
+    moved.loc["E2", "pre_iv30"] = 41.0
+    with pytest.raises(Refusal) as caught:
+        driver.run(sources(facts=lambda ids: moved.reindex(list(ids))), "inner", tmp_path, prereg=OK)
+    assert caught.value.code == CONFLICT
+    assert caught.value.details["reason"] == "tuning_receipt_changed"
+
+
+def test_zero_ready_models_refuses_after_the_inputs_receipt(tmp_path, stubs, monkeypatch):
+    monkeypatch.setattr(readers, "model_tables", lambda bound, roster, admitted, production, **kw: {
+        m["model_id"]: {"status": "excluded", "reason": "forced"} for m in roster["models"]})
+    with pytest.raises(Refusal) as caught:
+        driver.run(sources(), "inner", tmp_path, prereg=OK)
+    assert caught.value.code == CONFLICT
+    assert caught.value.details["reason"] == "no_ready_models"
+    assert [p.name for p in (tmp_path / "receipts").iterdir()] == ["inputs_inner.json"]
+
+
+def test_ladder_skipped_counts_reach_the_inner_receipt_and_summary(tmp_path, stubs, monkeypatch):
+    first, second = chunk("E1"), {**chunk("E2"), "skipped": {"no_chain": 1, "thin": 3}}
+    first["skipped"] = {"no_chain": 2}
+    use_chunks(monkeypatch, [("2023Q2", first), ("2024Q3", second)])
+    summary = driver.run(sources(), "inner", tmp_path, prereg=OK)
+    expected = {"no_chain": 3, "thin": 3}
+    assert tuning.load_receipt(tmp_path / "receipts" / "inner.json")["ladder_skipped"] == expected
+    assert summary["ladder_skipped"] == expected
 
 
 # ---- run.py gate ---------------------------------------------------------------
@@ -395,10 +253,10 @@ NO_SOURCES = "no_such_module_zz:make"
 FAKE = "exp188_fake_sources:make"
 
 
-def _argv(tmp_path, *extra, stage="inner", sources=NO_SOURCES):
+def _argv(tmp_path, *extra, sources=NO_SOURCES):
     expected = tmp_path / "expected.json"
     expected.write_text(json.dumps(EXPECTED), encoding="utf-8")
-    return ["--stage", stage, "--out-dir", str(tmp_path / "out"), "--expected", str(expected),
+    return ["--stage", "inner", "--out-dir", str(tmp_path / "out"), "--expected", str(expected),
             "--sources", sources, *extra]
 
 
@@ -412,6 +270,12 @@ def _install_sources(monkeypatch, src):
 def test_run_py_requires_no_ledger(tmp_path):
     with pytest.raises(SystemExit):
         _run_main().main(_argv(tmp_path))
+
+
+def test_run_py_accepts_only_the_inner_stage(tmp_path):
+    with pytest.raises(SystemExit):
+        _run_main().main(["--stage", "outer", "--out-dir", str(tmp_path), "--expected", "e.json",
+                          "--sources", NO_SOURCES, "--no-ledger"])
 
 
 def test_run_py_refuses_on_prereg_before_importing_sources(tmp_path, monkeypatch, capsys):
@@ -441,17 +305,7 @@ def test_run_py_refuses_not_bounded_before_importing_sources(tmp_path, monkeypat
     assert run_py.main(_argv(tmp_path, "--no-ledger")) == 2
     refused = json.loads(capsys.readouterr().out)
     assert refused["refused"] == "RESOURCE_UNAVAILABLE"
-
-
-def test_run_py_refuses_a_missing_tuning_receipt_as_a_typed_refusal(tmp_path, monkeypatch, capsys, stubs):
-    run_py = _run_main()
-    monkeypatch.setattr(run_py.size_pnl_prereg, "require_preregistration", OK)
-    monkeypatch.setenv("BOUNDED_RUN_NESTED", "1")
-    _install_sources(monkeypatch, sources())
-    assert run_py.main(_argv(tmp_path, "--no-ledger", stage="outer", sources=FAKE)) == 2
-    refused = json.loads(capsys.readouterr().out)
-    assert refused["refused"] == CONFLICT
-    assert "missing" in refused["message"]
+    assert refused["reason"] == "not_bounded"
 
 
 def test_run_py_refuses_an_expected_that_differs_from_the_sources(tmp_path, monkeypatch, capsys):
@@ -460,214 +314,7 @@ def test_run_py_refuses_an_expected_that_differs_from_the_sources(tmp_path, monk
     monkeypatch.setenv("BOUNDED_RUN_NESTED", "1")
     _install_sources(monkeypatch, sources(expected={**EXPECTED, "panel_id": "OTHER"}))
     assert run_py.main(_argv(tmp_path, "--no-ledger", sources=FAKE)) == 2
-    assert json.loads(capsys.readouterr().out)["refused"] == CONFLICT
+    refused = json.loads(capsys.readouterr().out)
+    assert refused["refused"] == CONFLICT
+    assert refused["reason"] == "expected_mismatch"
     assert not (tmp_path / "out").exists()  # refused before the driver wrote anything
-
-
-# ---- inner receipt binding, zero and empty populations, and the oracle ---------
-
-def test_outer_refuses_when_inner_json_names_another_model_hash(tmp_path, stubs, monkeypatch):
-    use_chunks(monkeypatch, [("2024Q3", chunk("E2"))])
-    driver.run(sources(), "inner", tmp_path / "inner", prereg=OK)
-    inner = tuning.load_receipt(tmp_path / "inner" / "receipts" / "inner.json")
-    tampered = {k: v for k, v in inner.items() if k != "content_hash"}
-    tampered["models"] = {mid: "0" * 64 for mid in tampered["models"]}
-    inner_out = tmp_path / "inner"
-    (inner_out / "receipts" / "inner.json").unlink()
-    tuning.write_receipt(inner_out / "receipts" / "inner.json", tampered)
-    use_chunks(monkeypatch, [("2024Q3", chunk("E2"))])
-    with pytest.raises(Refusal) as caught:
-        driver.run(sources(), "outer", inner_out, prereg=OK)
-    assert caught.value.code == CONFLICT
-    assert caught.value.details["reason"] == "inner_receipt_mismatch"
-
-
-def test_outer_refuses_when_inputs_inner_names_another_production(tmp_path, stubs, monkeypatch):
-    use_chunks(monkeypatch, [("2024Q3", chunk("E2"))])
-    driver.run(sources(), "inner", tmp_path / "inner", prereg=OK)
-    receipts = tmp_path / "inner" / "receipts"
-    inputs = tuning.load_receipt(receipts / "inputs_inner.json")
-    tampered = {k: v for k, v in inputs.items() if k != "content_hash"}
-    tampered["production"] = {"other": "0" * 64}
-    (receipts / "inputs_inner.json").unlink()
-    tuning.write_receipt(receipts / "inputs_inner.json", tampered)
-    use_chunks(monkeypatch, [("2024Q3", chunk("E2"))])
-    with pytest.raises(Refusal) as caught:
-        driver.run(sources(), "outer", tmp_path / "inner", prereg=OK)
-    assert caught.value.code == CONFLICT
-    assert caught.value.details["reason"] == "inner_inputs_mismatch"
-
-
-def test_outer_refuses_when_inner_json_names_other_inner_tables(tmp_path, stubs, monkeypatch):
-    use_chunks(monkeypatch, [("2024Q3", chunk("E2"))])
-    driver.run(sources(), "inner", tmp_path / "inner", prereg=OK)
-    copy = tmp_path / "copy"
-    shutil.copytree(tmp_path / "inner", copy)
-    inner = tuning.load_receipt(copy / "receipts" / "inner.json")
-    tampered = {k: v for k, v in inner.items() if k != "content_hash"}
-    tampered["inputs"] = "0" * 64
-    (copy / "receipts" / "inner.json").unlink()
-    tuning.write_receipt(copy / "receipts" / "inner.json", tampered)
-    use_chunks(monkeypatch, [("2024Q3", chunk("E2"))])
-    with pytest.raises(Refusal) as caught:
-        driver.run(sources(), "outer", copy, prereg=OK)
-    assert caught.value.code == CONFLICT
-    assert caught.value.details["reason"] == "inner_tables_mismatch"
-
-
-def test_outer_refuses_an_inner_receipt_tuned_on_smoke_ids(tmp_path, stubs, monkeypatch):
-    use_chunks(monkeypatch, [("2023Q2", chunk("E1"))])
-    driver.run(sources(), "inner", tmp_path / "inner", event_ids={"E1"}, prereg=OK)
-    use_chunks(monkeypatch, [("2024Q3", chunk("E2"))])
-    with pytest.raises(Refusal) as caught:
-        driver.run(sources(), "outer", tmp_path / "inner", prereg=OK)
-    assert caught.value.code == CONFLICT
-    assert caught.value.details["reason"] == "scope_mismatch"
-
-
-def test_zero_ready_models_refuses_after_the_inputs_receipt(tmp_path, stubs, monkeypatch):
-    monkeypatch.setattr(readers, "model_tables", lambda bound, roster, admitted, production, **kw: {
-        m["model_id"]: {"status": "excluded", "reason": "forced"} for m in roster["models"]})
-    with pytest.raises(Refusal) as caught:
-        driver.run(sources(), "inner", tmp_path, prereg=OK)
-    assert caught.value.code == CONFLICT
-    assert caught.value.details["reason"] == "no_ready_models"
-    assert [p.name for p in (tmp_path / "receipts").iterdir()] == ["inputs_inner.json"]
-
-
-def test_non_collection_smoke_event_ids_is_an_invalid_spec(tmp_path, stubs):
-    with pytest.raises(OpsError) as caught:
-        driver.run(sources(), "inner", tmp_path, event_ids=0, prereg=OK)
-    assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
-    assert caught.value.problem.details["reason"] == "event_ids_invalid"
-
-
-def test_empty_smoke_set_refuses_before_any_receipt(tmp_path, stubs):
-    with pytest.raises(Refusal) as caught:
-        driver.run(sources(), "inner", tmp_path, event_ids=set(), prereg=OK)
-    assert caught.value.details["reason"] == "empty_population"
-    assert not (tmp_path / "receipts").exists()
-
-
-def test_oracle_one_taken_short_vol_row_is_written_with_its_marks(tmp_path, stubs, monkeypatch):
-    first = driver.shortvol.NAMES[0]
-    taken_once = []
-
-    def decide(scored):
-        out = scored.assign(cutoff=np.nan)
-        if not taken_once:  # the run's first decision: E3 on the first short-vol name is taken
-            taken_once.append(True)
-            out.loc[out["event_id"].astype(str) == "E3", "status"] = "taken"
-        return out
-
-    def score(chunk_, events, decisions, name, alpha, *, c=1.0):
-        rows = decisions[decisions["status"] == "taken"]
-        return pd.DataFrame({"event_id": rows["event_id"].astype(str).to_numpy(), "entry_cost": 1.0,
-                             "exit_value": 1.5, "rung": "rung1", "lots": 2, "pnl_per_share": 0.5,
-                             "pnl_dollars": 100.0})
-
-    monkeypatch.setattr(driver.shortvol, "decide", decide)
-    monkeypatch.setattr(driver.shortvol, "score", score)
-    use_chunks(monkeypatch, [("2024Q3", chunk("E2"))])
-    driver.run(sources(), "inner", tmp_path / "inner", prereg=OK)
-    use_chunks(monkeypatch, [("2024Q3", chunk("E2")), ("2025Q1", chunk("E3", "E4"))])
-    summary = driver.run(sources(), "outer", tmp_path / "inner", prereg=OK)
-    decisions = pd.read_parquet(tmp_path / "inner" / "decisions.parquet")
-    taken = decisions[decisions["status"] == "taken"]
-    assert len(taken) == 1
-    row = taken.iloc[0]
-    assert row["model_id"] == summary["models"][0]
-    assert row["book"] == "short_vol"
-    assert row["arm_or_rule"] == "as_is"
-    assert row["structure"] == first
-    assert row["event_id"] == "E3"
-    assert row["pnl_dollars"] == 100.0
-    assert row["exit_value"] == 1.5
-    assert row["rung"] == "rung1"
-    assert "entry_cost" in decisions.columns
-    assert row["pnl_per_share"] == 0.5
-    assert row["pred_move"] == 5.0 and row["pred_crush"] == -12.0  # the model's forecast rides on the taken row
-    straddle_rows = decisions[decisions["book"] == "straddle"]
-    assert len(straddle_rows) > 0
-    assert (straddle_rows["pred_move"] == 5.0).all() and (straddle_rows["pred_crush"] == -12.0).all()
-
-
-def test_ladder_skipped_counts_reach_the_inner_receipt_and_summary(tmp_path, stubs, monkeypatch):
-    first, second = chunk("E1"), {**chunk("E2"), "skipped": {"no_chain": 1, "thin": 3}}
-    first["skipped"] = {"no_chain": 2}
-    use_chunks(monkeypatch, [("2023Q2", first), ("2024Q3", second)])
-    summary = driver.run(sources(), "inner", tmp_path, prereg=OK)
-    expected = {"no_chain": 3, "thin": 3}
-    assert tuning.load_receipt(tmp_path / "receipts" / "inner.json")["ladder_skipped"] == expected
-    assert summary["ladder_skipped"] == expected
-
-
-def test_oracle_three_events_in_one_month_persist_their_own_forecast_and_marks(tmp_path, stubs, monkeypatch):
-    """Three 2025-01 events with distinct forecasts and distinct scorer marks: each persisted row carries its own."""
-    cases = {  # literal per event: exit date, the model's forecast, and the marks the stubbed scorer returns
-        "E2": {"date": "2024-08-07", "pred_move": 5.0, "pred_crush": -12.0, "exit_value": 1.0, "pnl_dollars": 0.0},
-        "E3": {"date": "2025-01-15", "pred_move": 4.0, "pred_crush": -9.0, "exit_value": 1.25, "pnl_dollars": 80.0},
-        "E5": {"date": "2025-01-20", "pred_move": 6.5, "pred_crush": -14.0, "exit_value": 2.0, "pnl_dollars": -35.0},
-        "E6": {"date": "2025-01-28", "pred_move": 7.25, "pred_crush": -16.5, "exit_value": 0.75, "pnl_dollars": 210.0},
-    }
-    ids = list(cases)
-    dates = pd.to_datetime([c["date"] for c in cases.values()])
-    admitted = readers.Admitted({"events": pd.DataFrame({"event_id": ids, "event_date": dates}), "excluded": {}})
-    plan_frame = pd.DataFrame({"event_id": ids, "ticker": "T", "event_date": dates, "session": "AMC",
-                               "entry_date": dates - pd.Timedelta(days=1), "exit_date": dates + pd.Timedelta(days=1)})
-    varied = pd.DataFrame([{"event_id": e, "pred_abs_move": c["pred_move"], "pred_iv_crush_30": c["pred_crush"],
-                            "horizon_sessions": 1, "abs_move": 4.0, "crush_pct_iv30": -10.0}
-                           for e, c in cases.items()])
-    facts = pd.DataFrame({"pre_iv30": 40.0, "mcap_usd": 2e10, "implied_move": 5.0},
-                         index=pd.Index(ids, name="event_id"))
-
-    def decide(scored):
-        out = scored.assign(cutoff=np.nan)
-        out.loc[out["event_id"].astype(str).isin(["E3", "E5", "E6"]), "status"] = "taken"
-        return out
-
-    def score(chunk_, events, decisions, name, alpha, *, c=1.0):
-        taken = decisions[decisions["status"] == "taken"]
-        eids = taken["event_id"].astype(str).to_numpy()
-        return pd.DataFrame({"event_id": eids, "entry_cost": 1.0,
-                             "exit_value": [cases[e]["exit_value"] for e in eids], "rung": "rung1", "lots": 2,
-                             "pnl_per_share": 0.5, "pnl_dollars": [cases[e]["pnl_dollars"] for e in eids]})
-
-    monkeypatch.setattr(driver.shortvol, "decide", decide)
-    monkeypatch.setattr(driver.shortvol, "score", score)
-    kw = dict(admitted=admitted, plan_frame=plan_frame, facts=lambda req: facts.reindex(list(req)),
-              fetch=lambda columns, req: varied[varied["event_id"].isin(list(req))])
-    use_chunks(monkeypatch, [("2024Q3", chunk("E2"))])
-    driver.run(sources(**kw), "inner", tmp_path, prereg=OK)
-    use_chunks(monkeypatch, [("2024Q3", chunk("E2")), ("2025Q1", chunk("E3", "E5", "E6"))])
-    driver.run(sources(**kw), "outer", tmp_path, prereg=OK)
-    decisions = pd.read_parquet(tmp_path / "decisions.parquet")
-    taken = decisions[(decisions["book"] == "short_vol") & (decisions["status"] == "taken")]
-    assert set(taken["event_id"]) == {"E3", "E5", "E6"}
-    for eid in ("E3", "E5", "E6"):
-        want, rows = cases[eid], taken[taken["event_id"] == eid]
-        assert len(rows) > 0
-        assert (rows["pred_move"] == want["pred_move"]).all()
-        assert (rows["pred_crush"] == want["pred_crush"]).all()
-        assert (rows["exit_value"] == want["exit_value"]).all()
-        assert (rows["pnl_dollars"] == want["pnl_dollars"]).all()
-
-
-def test_changed_snapshot_refuses_an_inner_replay(tmp_path, stubs, monkeypatch):
-    use_chunks(monkeypatch, [("2023Q2", chunk("E1")), ("2024Q3", chunk("E2"))])
-    driver.run(sources(), "inner", tmp_path, prereg=OK)
-    with pytest.raises(Refusal) as caught:
-        driver.run(sources(snapshot_id="snap-2"), "inner", tmp_path, prereg=OK)
-    assert caught.value.code == CONFLICT
-    assert caught.value.details["reason"] == "tuning_receipt_changed"
-
-
-def test_changed_fact_value_refuses_an_inner_replay(tmp_path, stubs, monkeypatch):
-    use_chunks(monkeypatch, [("2023Q2", chunk("E1")), ("2024Q3", chunk("E2"))])
-    driver.run(sources(), "inner", tmp_path, prereg=OK)
-    moved = FACTS.copy()
-    moved.loc["E2", "pre_iv30"] = 41.0
-    with pytest.raises(Refusal) as caught:
-        driver.run(sources(facts=lambda ids: moved.reindex(list(ids))), "inner", tmp_path, prereg=OK)
-    assert caught.value.code == CONFLICT
-    assert caught.value.details["reason"] == "tuning_receipt_changed"
