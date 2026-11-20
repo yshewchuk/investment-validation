@@ -61,7 +61,11 @@ MAX_DECISIONS_BYTES = 4 << 30
 
 @dataclass(frozen=True)
 class Sources:
-    """Every store-facing input of the run; tests pass fakes, the real store adapter is a later slice."""
+    """Every store-facing input of the run; tests pass fakes, the real store adapter is a later slice.
+
+    ``snapshot_id`` is the pinned v2 snapshot id the chains come from; changed chain bytes refuse INPUT_CHANGED
+    upstream; the id is receipted here.
+    """
     plan: dict
     read: Callable
     selection: dict
@@ -77,6 +81,7 @@ class Sources:
     plan_frame: pd.DataFrame
     load_index: Callable
     facts: Callable
+    snapshot_id: str
 
 
 def _log(message):
@@ -173,7 +178,7 @@ def _plan_rows(plan):
     return sorted(rows, key=lambda r: r[0])
 
 
-_BOUND = ("spec_hash", "identity", "roster", "models", "production")  # not "tables": windows differ by stage
+_BOUND = ("spec_hash", "identity", "roster", "models", "production", "snapshot")  # not "tables": windows differ by stage
 
 
 def _outer_gate(out, ready, scope, body):
@@ -254,10 +259,12 @@ def _model_state(c):
     return {"c": float(c), "scored": {"as_is": [], "retuned": []}, "edges": edges}
 
 
-def _rows(mid, book, arm, dec, taken):
-    """Decision rows of one (model, book, arm), with the marks of the taken rows merged on event_id."""
+def _rows(mid, book, arm, dec, taken, events):
+    """Decision rows of one (model, book, arm), with the marks of the taken rows and the model's forecast
+    (pred_move, pred_crush) of the month's events merged on event_id."""
     take = [c for c in [*_MARKS, "entry_cost", "pnl_per_share"] if c not in dec.columns]
-    frame = dec.merge(taken[["event_id", *take]], on="event_id", how="left")
+    fc = events[["event_id", "pred_move", "pred_crush"]].assign(event_id=events["event_id"].astype(str))
+    frame = dec.merge(taken[["event_id", *take]], on="event_id", how="left").merge(fc, on="event_id", how="left")
     if "structure" not in frame.columns:
         frame = frame.assign(structure=None)
     return frame.assign(model_id=mid, book=book, arm_or_rule=arm)
@@ -279,13 +286,13 @@ def _month(mid, table, events, chunk, labels, exits, start_m, st):
             decided = shortvol.decide(pd.concat(st["scored"][arm], ignore_index=True))
             mine = decided[decided["event_id"].astype(str).isin(ids) & (decided["structure"] == name)]
             taken = shortvol.score(chunk, events, mine, name, ALPHA, c=c)
-            frames.append(_rows(mid, "short_vol", arm, mine, taken))
+            frames.append(_rows(mid, "short_vol", arm, mine, taken, events))
     first = None
     for rule in straddle.RULES:
         dec = straddle.decide(events, st["edges"], rule, chunk)
         first = dec if first is None else first
         if output:
-            frames.append(_rows(mid, "straddle", rule, dec, straddle.score(chunk, events, dec, ALPHA)))
+            frames.append(_rows(mid, "straddle", rule, dec, straddle.score(chunk, events, dec, ALPHA), events))
     st["edges"] = pd.concat([st["edges"], first[["event_date", "edge"]]], ignore_index=True)
     return frames
 
@@ -417,7 +424,7 @@ def run(src, stage, out_dir, *, event_ids=None, prereg=size_pnl_prereg.require_p
             "roster": roster, "models": _strip(bound_tables["bound"]),
             "tables": {mid: e["binding"] for mid, e in tables.items() if e["status"] == "ready"},
             "production": production["binding"], "scope": scope, "plan": content_hash(_plan_rows(plan)),
-            "facts": content_hash(facts_rows)}
+            "facts": content_hash(facts_rows), "snapshot": src.snapshot_id}
     inputs_receipt = tuning.write_receipt(out / "receipts" / f"inputs_{stage}.json", body)
     if not ready:
         raise Refusal(_CONFLICT, "no model is ready to be tuned or scored", {"reason": "no_ready_models"})

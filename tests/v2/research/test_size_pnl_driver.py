@@ -61,7 +61,7 @@ def sources(**over):
                 panel_id="P", admit=lambda ids: {"admitted": sorted(ids), "dropped": []},
                 admitted=ADMITTED, fetch=fetch, production_hash="H", production_table_hash="H",
                 plan_frame=PLAN_FRAME, load_index=lambda keys: None,
-                facts=lambda ids: FACTS.reindex(list(ids)))
+                facts=lambda ids: FACTS.reindex(list(ids)), snapshot_id="snap-1")
     base.update(over)
     return driver.Sources(**base)
 
@@ -256,7 +256,8 @@ def test_label_joins_the_pool_only_once_its_exit_is_printed(stubs, monkeypatch):
     table = pd.DataFrame({"event_date": pd.to_datetime(["2025-01-31"]), "pred_move": 5.0, "pred_crush": -12.0},
                          index=pd.Index(["E3"], name="event_id"))
     labels = pd.DataFrame({"abs_move": [4.0], "crush_pct_iv30": [-10.0]}, index=pd.Index(["E3"], name="event_id"))
-    events = pd.DataFrame(columns=["event_id", "event_date", "pred_abs_move", "implied_move", "mcap_usd"])
+    events = pd.DataFrame(columns=["event_id", "event_date", "pred_abs_move", "pred_move", "pred_crush",
+                                   "implied_move", "mcap_usd"])
     exits = {"E3": "2025-02-03"}
     st = driver._model_state(1.0)
     driver._month("m", table, events, chunk(), labels, exits, pd.Timestamp("2025-02-01"), st)
@@ -585,6 +586,19 @@ def test_oracle_one_taken_short_vol_row_is_written_with_its_marks(tmp_path, stub
     assert row["rung"] == "rung1"
     assert "entry_cost" in decisions.columns
     assert row["pnl_per_share"] == 0.5
+    assert row["pred_move"] == 5.0 and row["pred_crush"] == -12.0  # the model's forecast rides on the taken row
+    straddle_rows = decisions[decisions["book"] == "straddle"]
+    assert len(straddle_rows) > 0
+    assert (straddle_rows["pred_move"] == 5.0).all() and (straddle_rows["pred_crush"] == -12.0).all()
+
+
+def test_changed_snapshot_refuses_an_inner_replay(tmp_path, stubs, monkeypatch):
+    use_chunks(monkeypatch, [("2023Q2", chunk("E1")), ("2024Q3", chunk("E2"))])
+    driver.run(sources(), "inner", tmp_path, prereg=OK)
+    with pytest.raises(Refusal) as caught:
+        driver.run(sources(snapshot_id="snap-2"), "inner", tmp_path, prereg=OK)
+    assert caught.value.code == CONFLICT
+    assert caught.value.details["reason"] == "tuning_receipt_changed"
 
 
 def test_changed_fact_value_refuses_an_inner_replay(tmp_path, stubs, monkeypatch):
