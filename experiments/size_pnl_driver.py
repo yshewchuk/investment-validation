@@ -18,7 +18,7 @@ from experiments import label_availability, size_pnl_decisions as decisions, siz
 from experiments import size_pnl_readers as readers, size_pnl_shortvol as shortvol, size_pnl_straddle as straddle, size_pnl_tuning as tuning, size_pnl_equivalence as equivalence
 from experiments.size_pnl_pool import TOLERANCE, build_pool
 from experiments.size_pnl_shortvol import Refusal
-from experiments import size_pnl_report as report, size_pnl_synthetic as synthetic, size_pnl_synthetic_eval as synthetic_eval
+from experiments import size_pnl_synthetic as synthetic, size_pnl_synthetic_eval as synthetic_eval
 
 INNER = ("2023-01-01", "2025-01-01")
 OUTER = ("2025-01-01", "2026-01-01")
@@ -492,7 +492,6 @@ def _synthetic_scores(src, ready, plan, facts_all, labels):
     quarter, month = dates.dt.to_period("Q").astype(str).to_numpy(), dates.dt.to_period("M").to_numpy()
     total, state = len(set(month)), {mid: _model_state(1.0) for mid in ready}
     frames, done, started, skipped, digest, dropped = [], 0, time.monotonic(), {}, hashlib.sha256(), set()
-    declined = {mid: {name: [0, 0] for name in shortvol.NAMES} for mid in ready}  # width declines: [declined, candidates] per short-vol unit
     _log(f"synthetic start months={total} models={len(ready)}")
     for label, chunk in ladder.ladder_chunks(src.admitted, plan, src.load_index):
         _bind_chunk(digest, label, chunk)
@@ -502,22 +501,15 @@ def _synthetic_scores(src, ready, plan, facts_all, labels):
             start_m, month_frames = period.start_time, []
             at = {mid: events[mid][events[mid]["event_date"].dt.to_period("M") == period] for mid in ready}
             scored = {mid: _month_scores(mid, pools[mid], at[mid], chunk, labels, exits, start_m, state[mid], arms=_AS_IS) for mid in ready}
-            for mid in ready:  # Pass A rows, before the shared mask: a non-"scored" row is a width decline
-                for name in shortvol.NAMES:
-                    f = scored[mid][0][("as_is", name)]
-                    declined[mid][name][0] += int(((f["status"] != "scored") & (f["reason"] == "width_declined")).sum())
-                    declined[mid][name][1] += len(f)
             bad = set().union(*(_unscoreable(s, m) for s, m in scored.values()))  # one shared population for all models
             ids = [set(at[mid]["event_id"].astype(str)) for mid in ready]  # an id missing from any model's month frame leaves for all
-            bad |= set().union(*ids) - set.intersection(*ids)
-            dropped |= bad
+            bad |= set().union(*ids) - set.intersection(*ids); dropped |= bad
             for mid in ready:
                 month_frames += _month(mid, at[mid], scored[mid][0], bad, chunk, start_m, state[mid], arms=_AS_IS, emit_from=pd.Timestamp(INNER[0]))
-            frames += month_frames
-            done += 1
+            frames += month_frames; done += 1
             rate = done / max(time.monotonic() - started, 1e-9)
             _log(f"synthetic month {period} {done}/{total} rate={rate:.2f}/s eta={(total - done) / rate:.0f}s scoreability_dropped={len(dropped)} rss={_rss_mb():.0f}MB")
-    return frames, skipped, "sha256:" + digest.hexdigest(), len(dropped), declined
+    return frames, skipped, "sha256:" + digest.hexdigest(), len(dropped)
 
 
 def _frames_digest(frames):
@@ -545,7 +537,7 @@ def _replay_equal(out, inputs_hash, ladder_hash, frames_hash):
 
 
 def run_synthetic(src, out_dir, *, event_ids=None, replay=False, prereg=size_pnl_prereg.require_preregistration):
-    """The SY2 synthetic stage on the inner window: score, evaluate X1-X7, publish decisions_synthetic and T11. Never tunes or reads 2025."""
+    """The SY2 synthetic stage on the inner window: score, evaluate X1-X7, publish decisions_synthetic. Never tunes or reads 2025."""
     started = time.monotonic()
     _log(f"stage=synthetic start rss={_rss_mb():.0f}MB")
     if not isinstance(replay, bool): raise fail("INVALID_EXPERIMENT_SPEC", "replay must be a boolean", details={"reason": "replay_invalid"})
@@ -565,18 +557,16 @@ def run_synthetic(src, out_dir, *, event_ids=None, replay=False, prereg=size_pnl
     if not set(plan["event_id"].astype(str)) <= set(src.admitted["events"]["event_id"].astype(str)): raise fail(_DENIED, "plan event ids include a key that is not admitted", details={"reason": "key_not_admitted"})
     if plan.empty: raise shortvol.Refusal(_CONFLICT, "the plan window holds no events", {"reason": "empty_population"})
     planned = {str(e) for e in plan["event_id"]}  # the reads take only planned events, never an admitted key outside the plan
-    stage_ids = {str(e) for e in plan["event_id"]}
-    facts_all = _load_facts(src, sorted(stage_ids))
+    facts_all = _load_facts(src, sorted(planned))
     production = readers.read_production(src.fetch, src.admitted, expected_hash=src.production_hash, table_hash=src.production_table_hash, start=INNER[0], end=INNER[1], event_ids=planned)
     labels = readers.read_labels(src.fetch, src.admitted, start=INNER[0], end=INNER[1], event_ids=planned)
     ready = _ready(synthetic.generate(src.admitted, labels, production, arm), ids)
     if not ready: raise _no_ready()
     scope = _scope(ids)
-    body = {"stage": "inputs_synthetic", "spec_hash": receipt["spec_hash"], "identity": identity, "arm": content_hash(arm), "snapshot": src.snapshot_id, "scope": scope,
-            "plan": content_hash(_plan_rows(plan)), "facts": content_hash(_facts_rows(facts_all, stage_ids)), "labels": content_hash(_label_rows([labels])),
-            "production": production["binding"], "tables": {mid: _table_binding(e, ids) for mid, e in ready.items()}}
+    body = {"stage": "inputs_synthetic", "spec_hash": receipt["spec_hash"], "identity": identity, "arm": content_hash(arm), "snapshot": src.snapshot_id, "scope": scope, "plan": content_hash(_plan_rows(plan)),
+            "facts": content_hash(_facts_rows(facts_all, planned)), "labels": content_hash(_label_rows([labels])), "production": production["binding"], "tables": {mid: _table_binding(e, ids) for mid, e in ready.items()}}
     inputs_receipt = _receipt(out / "receipts" / "inputs_synthetic.json", body, "inputs_receipt_changed")
-    frames, skipped, ladder_hash, dropped, declined = _synthetic_scores(src, ready, plan, facts_all, labels)
+    frames, skipped, ladder_hash, dropped = _synthetic_scores(src, ready, plan, facts_all, labels)
     full = pd.concat(frames, ignore_index=True)
     pop = synthetic_eval.population(full)  # E, the evaluated population; undetermined rows stay published as evidence
     kept, tickers = set(pop["event_id"].astype(str)), dict(zip(plan["event_id"].astype(str), plan["ticker"]))
@@ -590,18 +580,13 @@ def run_synthetic(src, out_dir, *, event_ids=None, replay=False, prereg=size_pnl
     replay_equal = _replay_equal(out, inputs_receipt["content_hash"], ladder_hash, _frames_digest(frames))
     common, pools = _common_dropped(ready), _pool_tables(ready)
     fits = {mid: _fit(pools[mid], labels, kept) for mid in ready}  # rmse and mae on E
-    undetermined = len(set(full["event_id"].astype(str)) - kept)
-    no_prediction = {str(e) for e in plan["event_id"]} - set().union(*(set(e["table"].index.astype(str)) for e in ready.values()))  # in no model table
+    undetermined = len(set(full["event_id"].astype(str)) - kept); no_prediction = planned - set().union(*(set(e["table"].index.astype(str)) for e in ready.values()))  # in no model table
     _log(f"synthetic common_dropped={common} events={len(kept)} undetermined={undetermined} scoreability_dropped={dropped}")
     meta = {mid: {"family": e["family"], "params": e["params"], "rmse": fits[mid]["rmse"], "mae": fits[mid]["mae"]} for mid, e in ready.items()}
-    result = synthetic_eval.evaluate(pop, meta, tickers, arm, replay_equal=replay_equal, declined=declined)
-    body = {"stage": "synthetic", "models": sorted(ready), "scope": scope, "inputs": inputs_receipt["content_hash"], "arm": content_hash(arm),
-            "ladder_skipped": skipped, "ladder": ladder_hash, "scoreability_dropped": dropped, "common_dropped": common, "events": len(kept), "declined": declined,
-            "events_undetermined": undetermined, "planned": len(plan), "events_no_prediction": len(no_prediction), "events_by_model": {mid: len(set(e["table"].index.astype(str)) & kept) for mid, e in ready.items()},
-            "evaluation": result["hash"],
-            "stop": result["stop"], "metrics": fits}
+    result = synthetic_eval.evaluate(pop, meta, tickers, arm, replay_equal=replay_equal)
+    body = {"stage": "synthetic", "models": sorted(ready), "scope": scope, "inputs": inputs_receipt["content_hash"], "arm": content_hash(arm), "ladder_skipped": skipped, "ladder": ladder_hash,
+            "scoreability_dropped": dropped, "common_dropped": common, "events": len(kept), "events_undetermined": undetermined, "planned": len(plan), "events_no_prediction": len(no_prediction),
+            "events_by_model": {mid: len(set(e["table"].index.astype(str)) & kept) for mid, e in ready.items()}, "evaluation": result["hash"], "stop": result["stop"], "metrics": fits}
     rows = decisions.publish(out, frames, body, stem="decisions_synthetic", receipt="synthetic")
-    (out / "t11_synthetic.md").write_text(report.build_report(report.t11_synthetic(result)), encoding="utf-8")
-    _log(f"stage=synthetic end elapsed={time.monotonic() - started:.1f}s rss={_rss_mb():.0f}MB ladder_skipped={skipped} stop={result['stop']} "
-         f"planned={len(plan)} events_no_prediction={len(no_prediction)}")
-    return {"stage": "synthetic", "models": sorted(ready), "rows": rows, "stop": result["stop"]}
+    _log(f"stage=synthetic end elapsed={time.monotonic() - started:.1f}s rss={_rss_mb():.0f}MB ladder_skipped={skipped} stop={result['stop']} planned={len(plan)} events_no_prediction={len(no_prediction)}")
+    return {"stage": "synthetic", "models": sorted(ready), "rows": rows, "stop": result["stop"], "x": result["x"], "slopes": result["slopes"]}
