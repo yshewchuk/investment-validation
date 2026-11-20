@@ -581,15 +581,17 @@ def run_synthetic(src, out_dir, *, event_ids=None, replay=False, prereg=size_pnl
     common, pools = _common_dropped(ready), _pool_tables(ready)
     fits = {mid: _fit(pools[mid], labels, kept) for mid in ready}  # rmse and mae on E
     undetermined = len(set(full["event_id"].astype(str)) - kept)
+    no_prediction = {str(e) for e in plan["event_id"]} - set().union(*(set(e["table"].index.astype(str)) for e in ready.values()))  # in no model table
     _log(f"synthetic common_dropped={common} events={len(kept)} undetermined={undetermined} scoreability_dropped={dropped}")
     meta = {mid: {"family": e["family"], "params": e["params"], "rmse": fits[mid]["rmse"], "mae": fits[mid]["mae"]} for mid, e in ready.items()}
     result = synthetic_eval.evaluate(pop, meta, tickers, arm, replay_equal=replay_equal)
     body = {"stage": "synthetic", "models": sorted(ready), "scope": scope, "inputs": inputs_receipt["content_hash"], "arm": content_hash(arm),
             "ladder_skipped": skipped, "ladder": ladder_hash, "scoreability_dropped": dropped, "common_dropped": common, "events": len(kept),
-            "events_undetermined": undetermined, "events_by_model": {mid: len(set(e["table"].index.astype(str)) & kept) for mid, e in ready.items()},
+            "events_undetermined": undetermined, "planned": len(plan), "events_no_prediction": len(no_prediction), "events_by_model": {mid: len(set(e["table"].index.astype(str)) & kept) for mid, e in ready.items()},
             "evaluation": result["hash"],
             "stop": result["stop"], "metrics": fits}
     rows = decisions.publish(out, frames, body, stem="decisions_synthetic", receipt="synthetic")
     (out / "t11_synthetic.md").write_text(report.build_report(report.t11_synthetic(result)), encoding="utf-8")
-    _log(f"stage=synthetic end elapsed={time.monotonic() - started:.1f}s rss={_rss_mb():.0f}MB ladder_skipped={skipped} stop={result['stop']}")
+    _log(f"stage=synthetic end elapsed={time.monotonic() - started:.1f}s rss={_rss_mb():.0f}MB ladder_skipped={skipped} stop={result['stop']} "
+         f"planned={len(plan)} events_no_prediction={len(no_prediction)}")
     return {"stage": "synthetic", "models": sorted(ready), "rows": rows, "stop": result["stop"]}

@@ -426,3 +426,13 @@ def test_the_real_scoring_loop_drops_an_event_unscoreable_for_one_model_from_eve
     first = snapshot(out)
     driver.run_synthetic(src, out, prereg=OK)
     assert snapshot(out) == first  # a second identical run is byte-identical
+
+
+def test_a_planned_event_in_no_model_table_is_counted_as_no_prediction(tmp_path, fakes):
+    """E9 is planned in the inner window but no model table holds it: it is counted in events_no_prediction, and planned is the plan size."""
+    plan = pd.concat([PLAN_FRAME, pd.DataFrame({"event_id": ["E9"], "ticker": ["T2"], "event_date": pd.to_datetime(["2024-03-05"]), "session": ["AMC"],
+                                               "entry_date": pd.to_datetime(["2024-03-04"]), "exit_date": pd.to_datetime(["2024-03-06"])})], ignore_index=True)
+    admitted = readers.Admitted({"events": pd.DataFrame({"event_id": [*EVENTS, "E9"], "event_date": pd.to_datetime([*EVENTS.values(), "2024-03-05"])}), "excluded": {}})
+    driver.run_synthetic(sources(plan_frame=plan, admitted=admitted), tmp_path, prereg=OK)
+    receipt = json.loads((tmp_path / "receipts" / "synthetic.json").read_text(encoding="utf-8"))
+    assert receipt["events_no_prediction"] == 1 and receipt["planned"] == 3  # E1, E2 and E9 are planned in the inner window
