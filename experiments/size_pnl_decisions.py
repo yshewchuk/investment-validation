@@ -66,3 +66,17 @@ def publish(out, frames, body):
     finally:
         tmp.unlink(missing_ok=True)
     return rows
+
+
+def freeze_month(out, period, frames):
+    """Persist one month's rows to ``out/months/<period>.parquet`` before its labels are read (R6). A month file with the same
+    bytes is kept on a rerun; one with other bytes refuses and is left as it was, since a frozen month is immutable."""
+    months = Path(out) / "months"
+    months.mkdir(exist_ok=True)
+    final, tmp = months / f"{period}.parquet", _unique_tmp(months)
+    try:
+        sha, _rows = _write_decisions(tmp, frames)
+        if not os.path.lexists(final): os.replace(tmp, final)
+        elif _file_sha256(final) != sha: raise Refusal(_CONFLICT, f"frozen month {period} differs from this run's rows", {"reason": "month_freeze_changed"})
+    finally:
+        tmp.unlink(missing_ok=True)

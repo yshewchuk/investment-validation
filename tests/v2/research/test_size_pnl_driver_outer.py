@@ -436,6 +436,49 @@ def test_outer_reads_a_month_s_labels_only_after_its_rows_are_complete(tmp_path,
         assert labelled > decided
 
 
+def test_outer_freezes_each_month_before_its_labels_are_read(tmp_path, outer_stubs, monkeypatch):
+    use_chunks(monkeypatch, [("2024Q3", chunk("E2"))])
+    driver.run(sources(), "inner", tmp_path, prereg=OK)
+    outer_stubs.clear()
+    use_chunks(monkeypatch, [("2024Q3", chunk("E2")), ("2025Q1", chunk("E3", "E4"))])
+    base, frozen_at_read = recording(outer_stubs), {}
+
+    def fetch(columns, ids):
+        if "abs_move" in columns and ({"E3", "E4"} & {str(e) for e in ids}):
+            month = "2025-01" if "E3" in ids else "2025-02"
+            frozen_at_read[month] = (tmp_path / "months" / f"{month}.parquet").exists()  # the month file exists at label-read time
+        return base(columns, ids)
+
+    driver.run(sources(fetch=fetch), "outer", tmp_path, prereg=OK)
+    assert frozen_at_read == {"2025-01": True, "2025-02": True}
+
+
+def test_outer_rerun_keeps_the_frozen_month_files(tmp_path, outer_stubs, monkeypatch):
+    _run_both(tmp_path, monkeypatch)
+    before = {p.name: (p.read_bytes(), p.stat().st_mtime_ns) for p in (tmp_path / "months").glob("*.parquet")}
+    assert set(before) == {"2025-01.parquet", "2025-02.parquet"}
+    use_chunks(monkeypatch, [("2024Q3", chunk("E2")), ("2025Q1", chunk("E3", "E4"))])
+    driver.run(sources(), "outer", tmp_path, prereg=OK)
+    after = {p.name: (p.read_bytes(), p.stat().st_mtime_ns) for p in (tmp_path / "months").glob("*.parquet")}
+    assert after == before
+
+
+def test_frozen_month_with_other_bytes_refuses_before_its_labels_are_read(tmp_path, outer_stubs, monkeypatch):
+    use_chunks(monkeypatch, [("2024Q3", chunk("E2"))])
+    driver.run(sources(), "inner", tmp_path, prereg=OK)
+    (tmp_path / "months").mkdir()
+    (tmp_path / "months" / "2025-01.parquet").write_bytes(b"EXISTING")
+    outer_stubs.clear()
+    use_chunks(monkeypatch, [("2024Q3", chunk("E2")), ("2025Q1", chunk("E3", "E4"))])
+    with pytest.raises(Refusal) as caught:
+        driver.run(sources(fetch=recording(outer_stubs)), "outer", tmp_path, prereg=OK)
+    assert caught.value.code == CONFLICT
+    assert caught.value.details["reason"] == "month_freeze_changed"
+    assert not any(e[0] == "labels" and {"E3", "E4"} & set(e[1]) for e in outer_stubs)  # no 2025 label was read
+    assert (tmp_path / "months" / "2025-01.parquet").read_bytes() == b"EXISTING"
+    assert not (tmp_path / "receipts" / "outer.json").exists()
+
+
 def test_warm_up_month_adds_history_only(tmp_path, outer_stubs, monkeypatch):
     use_chunks(monkeypatch, [("2024Q3", chunk("E2"))])
     driver.run(sources(), "inner", tmp_path, prereg=OK)

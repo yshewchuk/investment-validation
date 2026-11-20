@@ -359,8 +359,9 @@ def _outer(src, out, ready, receipts, plan, ids, facts_all, labels):
             rate = done / max(time.monotonic() - started, 1e-9)
             skips = pd.concat(month_frames)["reason"].value_counts().to_dict() if month_frames else {}
             _log(f"outer month {period} {done}/{total} rate={rate:.2f}/s eta={(total - done) / rate:.0f}s scoreability_dropped={len(dropped)} skips={skips} rss={_rss_mb():.0f}MB")
-            if start_m >= pd.Timestamp(OUTER[0]):  # R6: only after this month's rows are complete
-                got = readers.read_labels(src.fetch, src.admitted, start=start_m, end=(period + 1).start_time, event_ids=ids)
+            if start_m >= pd.Timestamp(OUTER[0]):  # R6: only after this month's rows are complete and frozen
+                decisions.freeze_month(out, period, month_frames)
+                got =readers.read_labels(src.fetch, src.admitted, start=start_m, end=(period + 1).start_time, event_ids=ids)
                 fresh.append(got)
                 labels = pd.concat([labels, got])
     inputs_hash = tuning.load_receipt(out / "receipts" / "inputs_outer.json")["content_hash"]

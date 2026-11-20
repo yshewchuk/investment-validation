@@ -122,6 +122,8 @@ def _checked_production(frame, admitted):
 
 
 def _window_ids(admitted, start, end, event_ids=None):
+    if event_ids is not None and not (isinstance(event_ids, (list, tuple, set, frozenset)) and all(isinstance(e, str) for e in event_ids)):
+        raise fail("INVALID_EXPERIMENT_SPEC", "event_ids must be a collection of strings", details={"reason": "event_ids_invalid"})
     dates = _dates(admitted)
     ids = set(dates.index[_in_window(dates, start, end).to_numpy()])
     if event_ids is not None:
