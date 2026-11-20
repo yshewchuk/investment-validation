@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+import numpy as np
 import pandas as pd
 
 from engine.v2.foundation import content_hash
@@ -43,7 +44,7 @@ class Sources:
 
 
 def check_sources(src):
-    if not (isinstance(src, Sources) and isinstance(src.expected, dict)):
+    if not (isinstance(src, Sources) and isinstance(src.expected, dict) and isinstance(src.plan_frame, pd.DataFrame)):
         raise fail("INVALID_EXPERIMENT_SPEC", "sources must be a Sources with an object `expected`",
                    details={"reason": "sources_invalid"})
     return src
@@ -59,6 +60,7 @@ def _rss_mb():
 
 def prepare(src, stage):
     """Steps 2-4: bind run, roster, models; read production and tables. Returns (roster, bound_tables, production)."""
+    check_sources(src)
     if stage not in STAGES:
         raise ValueError(f"stage must be one of {STAGES}, got {stage!r}")
     start, end = INNER
@@ -138,8 +140,9 @@ def _inner(src, out, ready, plan, facts_all, labels):
         for mid, entry in ready.items():
             events = model_events(entry["table"], facts_all, chunk, exits)  # facts_all: the run's only facts call
             built[mid] = (events, _sims(chunk, events, entry["table"], labels, exits))
-        # A no-sim event under ANY model leaves for ALL, and its cutoff history with it (design section 4).
+        # A no-sim event, or an id missing from ANY model's table, leaves for ALL, cutoff history included (design section 4).
         dropped = {e for events, sims in built.values() for e in events["event_id"] if sims.get(e) is None}
+        dropped |= {e for events, _s in built.values() for e in set(map(str, chunk["event_id"])) - set(events["event_id"])}
         common[label] = len(dropped)
         for mid, (events, sims) in built.items():
             items[mid].append((chunk, events[~events["event_id"].isin(dropped)],
@@ -181,8 +184,12 @@ def run(src, stage, out_dir, *, prereg=size_pnl_prereg.require_preregistration):
         raise fail(_DENIED, "plan event ids include a key that is not admitted", details={"reason": "key_not_admitted"})
     facts_all = src.facts(sorted(str(e) for e in plan["event_id"]))  # the only facts call of the run
     requested = {str(e) for e in plan["event_id"]}
-    if not set(_FACTS) <= set(facts_all.columns) or set(facts_all.index.astype(str)) != requested:
+    raw = facts_all.reindex(columns=list(_FACTS)).where(lambda c: c.notna(), np.nan)  # pd.NA and None are NaN
+    numeric = raw.apply(pd.to_numeric, errors="coerce")
+    if (not set(_FACTS) <= set(facts_all.columns) or set(facts_all.index.astype(str)) != requested
+            or not facts_all.index.astype(str).is_unique or (numeric.isna() & raw.notna()).to_numpy().any()):
         raise fail("INVALID_EXPERIMENT_SPEC", "facts source is incomplete", details={"reason": "facts_incomplete"})
+    facts_all = pd.concat([facts_all.drop(columns=list(_FACTS)), numeric], axis=1)
     _log(f"facts_nan_rows={int(facts_all[list(_FACTS)].isna().any(axis=1).sum())}")
     facts_rows = sorted([str(e), *[None if pd.isna(v) else float(v) for v in vals]] for e, vals in
                         zip(facts_all.index, facts_all[list(_FACTS)].to_numpy(dtype=float)))

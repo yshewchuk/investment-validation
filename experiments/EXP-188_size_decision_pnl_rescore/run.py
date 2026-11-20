@@ -26,12 +26,9 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--stage", required=True, choices=("inner",))
     parser.add_argument("--out-dir", required=True)
-    parser.add_argument("--expected", required=True,
-                        help="JSON with plan_id, registration_id, seal_id, panel_id of the v14 RERUN")
-    parser.add_argument("--sources", required=True,
-                        help="MODULE:FUNC, called with the parsed args, returns a size_pnl_driver.Sources")
-    parser.add_argument("--no-ledger", action="store_true", required=True,
-                        help="required: every non-recorded run uses --no-ledger")
+    parser.add_argument("--expected", required=True, help="JSON with plan_id, registration_id, seal_id, panel_id of the v14 RERUN")
+    parser.add_argument("--sources", required=True, help="MODULE:FUNC, called with the parsed args, returns a size_pnl_driver.Sources")
+    parser.add_argument("--no-ledger", action="store_true", required=True, help="required: every non-recorded run uses --no-ledger")
     return parser
 
 
@@ -77,7 +74,11 @@ def main(argv: list[str] | None = None) -> int:
                 raise AttributeError(func)
         except (ValueError, ImportError, AttributeError) as exc:
             raise fail(_INVALID, f"--sources {args.sources} is invalid", details={"reason": "sources_invalid"}) from exc
-        sources = size_pnl_driver.check_sources(factory(args))
+        try:  # a factory whose signature rejects the parsed args is a refusal, not a crash
+            made = factory(args)
+        except TypeError as exc:
+            raise fail(_INVALID, f"--sources {args.sources} is invalid", details={"reason": "sources_invalid"}) from exc
+        sources = size_pnl_driver.check_sources(made)
         if sources.expected != args.expected_identities:
             raise fail(_CONFLICT, "--expected differs from the sources' expected identities", details={"reason": "expected_mismatch"})
         summary = size_pnl_driver.run(sources, args.stage, args.out_dir, prereg=lambda: receipt)

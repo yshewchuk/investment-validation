@@ -246,6 +246,23 @@ def test_an_event_unsimulable_under_one_model_leaves_for_every_model(tmp_path, s
     assert tuning.load_receipt(tmp_path / "receipts" / "inner.json")["common_dropped"] == {"2023Q2": 1}
 
 
+def test_an_event_missing_from_one_table_leaves_for_every_model(tmp_path, stubs, monkeypatch):
+    real, seen = readers.model_tables, {}
+
+    def twinned(bound, roster, admitted, production, **kw):
+        tables = real(bound, roster, admitted, production, **kw)
+        mid = next(iter(tables))
+        seen["twin"] = tables[mid]["table"].drop(index="E3", errors="ignore")  # model B lacks E3
+        return {mid: tables[mid], "twin": {**tables[mid], "table": seen["twin"]}}
+
+    monkeypatch.setattr(readers, "model_tables", twinned)
+    use_chunks(monkeypatch, [("2023Q2", chunk("E1", "E2", "E3"))])
+    driver.run(sources(), "inner", tmp_path, prereg=OK)
+    tuned = [ids for kind, _mid, ids in stubs if kind == "tune"]
+    assert len(tuned) == 2 and all(ids == ("E1", "E2") for ids in tuned)  # E3 is in neither model's items
+    assert tuning.load_receipt(tmp_path / "receipts" / "inner.json")["common_dropped"] == {"2023Q2": 1}
+
+
 def test_inner_refuses_a_changed_plan_window_on_replay(tmp_path, stubs, monkeypatch):
     use_chunks(monkeypatch, [("2023Q2", chunk("E1")), ("2024Q3", chunk("E2"))])
     driver.run(sources(), "inner", tmp_path, prereg=OK)
@@ -355,6 +372,17 @@ def test_facts_missing_a_requested_id_refuses_before_any_receipt(tmp_path, stubs
     use_chunks(monkeypatch, [("2023Q2", chunk("E1")), ("2024Q3", chunk("E2"))])
     with pytest.raises(OpsError) as caught:
         driver.run(sources(facts=lambda ids: FACTS.reindex(["E1"])), "inner", tmp_path, prereg=OK)
+    assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert caught.value.problem.details["reason"] == "facts_incomplete"
+    assert not (tmp_path / "receipts").exists()
+
+
+def test_duplicate_facts_ids_refuse_before_any_receipt(tmp_path, stubs, monkeypatch):
+    use_chunks(monkeypatch, [("2023Q2", chunk("E1")), ("2024Q3", chunk("E2"))])
+    # Same id set as the plan, but E1 appears twice.
+    facts = lambda ids: pd.concat([FACTS.reindex(list(ids)), FACTS.reindex(["E1"])])  # noqa: E731
+    with pytest.raises(OpsError) as caught:
+        driver.run(sources(facts=facts), "inner", tmp_path, prereg=OK)
     assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
     assert caught.value.problem.details["reason"] == "facts_incomplete"
     assert not (tmp_path / "receipts").exists()
@@ -522,6 +550,19 @@ def test_run_py_refuses_a_factory_result_that_is_not_sources(tmp_path, monkeypat
     monkeypatch.setattr(run_py.size_pnl_prereg, "require_preregistration", OK)
     monkeypatch.setenv("BOUNDED_RUN_NESTED", "1")
     _install_sources(monkeypatch, object())
+    assert run_py.main(_argv(tmp_path, "--no-ledger", sources=FAKE)) == 2
+    refused = json.loads(capsys.readouterr().out)
+    assert refused["refused"] == "INVALID_EXPERIMENT_SPEC"
+    assert refused["reason"] == "sources_invalid"
+
+
+def test_run_py_refuses_a_factory_with_the_wrong_signature(tmp_path, monkeypatch, capsys):
+    run_py = _run_main()
+    monkeypatch.setattr(run_py.size_pnl_prereg, "require_preregistration", OK)
+    monkeypatch.setenv("BOUNDED_RUN_NESTED", "1")
+    module = types.ModuleType("exp188_fake_sources")
+    module.make = lambda: sources()  # takes no args, so calling it with the parsed args is a TypeError
+    monkeypatch.setitem(sys.modules, "exp188_fake_sources", module)
     assert run_py.main(_argv(tmp_path, "--no-ledger", sources=FAKE)) == 2
     refused = json.loads(capsys.readouterr().out)
     assert refused["refused"] == "INVALID_EXPERIMENT_SPEC"
