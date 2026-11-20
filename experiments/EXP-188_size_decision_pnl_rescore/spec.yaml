@@ -103,4 +103,28 @@ decisions:
   d3: "DYN-SV chooser and STR-THRU gate are out of scope; conditional follow-up pre-registered (conditional_followup)"
   d4: "pool length = the design default, common 2023+ support primary"
   d5: "re-tune breadth = one scale factor per model pooled over the seven structures"
+synthetic_arm:
+  design: guides/size_pnl_synthetic_calibration_design.md
+  label: SYNTHETIC
+  purpose: "controls and power for the P&L machinery; never in the roster, T1-T10, the 12-model cap, pair or multiplicity accounting, tuning, a SIZE winner or a board decision"
+  seed_tag: "exp188-synth-v1"
+  inner_years: [2023, 2024]
+  spread_ladder: [0.2, 0.4, 0.6, 0.8]
+  families: [oracle, median_noise, mean_noise, regression_direction, shrinkage, level_shift]
+  shrinkage_L: [0.25, 0.5, 0.75, 1.0]
+  level_shift: [-0.10, 0.10]
+  geometry: as_is
+  alpha: 0.5
+  level_gap_min_s: 0.4
+  production_spread_printed_beside_rungs: true
+  power_read_across: "descriptive only: real inner RMSE and MAE gaps from the stored inner predictions; likely_underpowered when the implied gap is under half the quarter-bootstrap interval width"
+  expectations:
+    X1: "oracle P&L per event at least every other predictor's, per book: quarter-bootstrap interval not entirely below 0 and sign positive in at least 60% of quarters"
+    X2: "P&L non-increasing down the ladder for each noise type and book: Clear (all three steps non-positive), Directional (one inversion, negative slope), else Failed"
+    X3: "short vol: median-unbiased beats mean-unbiased at every rung s >= 0.4"
+    X4: "straddle (R_L2, R_L): mean-unbiased beats median-unbiased at every rung s >= 0.4"
+    X5: "sign of P&L(+10%) - P&L(-10%) equals the sign of median minus mean at s = 0.6, per book"
+    X6: "null predictor (L = 1): one width per event within a calendar quarter on every short-vol book; straddle edge ranks by implied move alone"
+    X7: "exact replay of every table on a 50-ticker smoke"
+  stop_rule: "a Failed X1, X2, X6 or X7 stops the real run until the cause is classified in the report; X3-X5 outcomes do not stop it"
 grid: {}

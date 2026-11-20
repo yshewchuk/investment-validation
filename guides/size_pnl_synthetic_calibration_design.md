@@ -93,14 +93,18 @@ Reused unchanged: numpy (`default_rng`, OLS for the slope via `numpy.polyfit`), 
 
 | Slice | Scope | Code / test lines / doc words | After |
 | --- | --- | --- | --- |
-| SY | Generator and guards (§2, §3); `source: "synthetic"` wiring; `synthetic` receipt; slope, contrast and X1-X7 evaluation using S8a; T11; amend the spec with the `synthetic_arm` block; `SYNTHETIC_IN_TUNING` | ~140 / ~160 / 100 | S2a, S2b (admitted-label reader), S4, S5, S6 (hosts the `SYNTHETIC_IN_TUNING` guard), S7 and S8a (statistics); T11 needs S8b. If the ~140-line estimate proves low at Spec time, split into SY1 (generator, guards, wiring) and SY2 (evaluation, T11) |
+| SY1 (this PR) | Generator and guards (§2, §3); tables in the `model_tables` shape for `source: "synthetic"`; spec `synthetic_arm` block; `SYNTHETIC_IN_TUNING` | ~150 / ~320 / 150 | S2a, S2b, S6 |
+| SY2 | The inner-year synthetic stage (as-is scoring of the 19 tables), `synthetic` receipt, slope, contrast and X1-X7 evaluation using S8a; T11 | split from SY, see below | SY1, S4, S5, S7, S8a, S8b |
+| SY (original) | Generator and guards (§2, §3); `source: "synthetic"` wiring; `synthetic` receipt; slope, contrast and X1-X7 evaluation using S8a; T11; amend the spec with the `synthetic_arm` block; `SYNTHETIC_IN_TUNING` | ~140 / ~160 / 100 | S2a, S2b (admitted-label reader), S4, S5, S6 (hosts the `SYNTHETIC_IN_TUNING` guard), S7 and S8a (statistics); T11 needs S8b. If the ~140-line estimate proves low at Spec time, split into SY1 (generator, guards, wiring) and SY2 (evaluation, T11) |
 | Run | Smoke, then the recorded synthetic stage and T11 | no code | v14 completed; S9 driver |
 
 The run step is heavy: after v14 finishes, alone, bounded, as in the main doc §8. The new slice changes behaviour only inside the new experiment; it edits no SIZE search module and nothing in the `experiments/size_panel.py` closure, and S1's closure-hash equality check still applies to it.
 
-## 8. Open decisions for the user
+## 8. Decisions (settled by the user, 2026-11-18)
 
-1. **Spread rungs.** Fixed `s` in {0.2, 0.4, 0.6, 0.8} (this design), or rescale the rungs to multiples of production's measured inner `sd(log(y/pred))` (more realistic, but data-derived)?
-2. **Regression-direction family.** Keep the third, real-direction mean-type family (adds 4 predictors, answers the real question's level direction), or run only the two families you specified?
-3. **Spec amendment mechanics.** If S1 has already merged with a spec and PLANNED row, the `synthetic_arm` block changes the spec hash: re-plan the row before any run (allowed because no P&L has been seen), or give the arm its own PLANNED row?
-4. **Power read-across.** Is it acceptable that the arm reads real inner RMSE/MAE gaps (descriptively, from the stored inner predictions) to print the `likely_underpowered` line, or must the arm touch synthetic data only?
+1. **Spread rungs: fixed.** `s` in {0.2, 0.4, 0.6, 0.8}; production's measured inner `sd(log(y/pred))` is printed beside them, and the rungs are not rescaled to it.
+2. **Regression-direction family: kept.** The third, real-direction mean-type family stays (19 predictors).
+3. **Spec amendment: re-plan the single PLANNED row.** The `synthetic_arm` block changes the spec hash. No P&L has been seen, so the one EXP-188 PLANNED row is re-planned before any run, not a separate row. The ledger is data outside git, so the supervisor re-registers the row before the first run.
+4. **Power read-across: allowed.** The arm may read real inner RMSE/MAE gaps descriptively (stored inner predictions) for the `likely_underpowered` line; it reads nothing from 2025 or any holdout.
+
+Implementation notes (SY1, PR for `feat/pnsy1`): synthetic model ids are `"synthetic-" + content_hash(...)`, so S6's `SYNTHETIC_IN_TUNING` guard needs no registry. The out-of-scope refusal uses the registered code `HOLDOUT_ACCESS_DENIED` with `details.reason = SYNTHETIC_OUT_OF_SCOPE`. A shrinkage event with no prior quarter is dropped from that model's table and counted (`undetermined_mean`).
