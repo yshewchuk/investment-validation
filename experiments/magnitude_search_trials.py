@@ -127,6 +127,12 @@ def plan_key(plan_ref):
     return canonical_json(to_document(plan_ref))
 
 
+def _lean(registration):
+    """Worker-lean view when the registration offers one; plain registrations (and test doubles) use their document."""
+    lean = getattr(registration, "lean", None)
+    return registration.document if lean is None else lean
+
+
 class SearchTrials:
     """Native inner fits or submitted forecasts; no outer evaluation or final authority."""
 
@@ -201,7 +207,7 @@ class SearchTrials:
         return trial_key(plan, outer_year, inner_year, candidate_id), requested, candidate
 
     def _inputs(self, inner, plan=None):
-        schema = self.registration.lean.get("schema_version")
+        schema = _lean(self.registration).get("schema_version")
         if plan is None and schema == "native_experiment_registration.v1.8":
             plan = self._admit()
         kwargs = ({"plan": plan} if schema == "native_experiment_registration.v1.8"
@@ -219,7 +225,7 @@ class SearchTrials:
             if cohort in self._published:
                 manifest, inputs_id = self._published[cohort]
                 self._memo[cohort] = load_inputs(self.store, manifest, inputs_id)
-            elif plan is not None and (self.registration.lean.get("schema_version") == "native_experiment_registration.v1.8"
+            elif plan is not None and (_lean(self.registration).get("schema_version") == "native_experiment_registration.v1.8"
                     or _requires_event_dates(plan)):
                 self._memo[cohort] = self._inputs(inner, plan=plan)
             else:
@@ -318,7 +324,7 @@ class SearchTrials:
         resolved = resolved_limits(self.conn, self.store, self.registration, plan, limits) if bounded_plan else execution_limits(limits)
         started = self._start(outer_year, inner_year, candidate_id, attempt, plan, detach=detach)
         inputs = started["inputs"]
-        execution = execution_for_candidate(self.registration.lean, candidate)
+        execution = execution_for_candidate(_lean(self.registration), candidate)
         regression = execution.get("schema_version") == "regression_candidate_execution.v1"
         fits, pending = [], []
         expected = self._fit_evidence(inputs, inner, plan, execution)
@@ -350,7 +356,7 @@ class SearchTrials:
         timing = set() if regression else {"score_seconds", "rss_delta_kib"}
         if (not isinstance(result, dict) or result.get("event") not in ("succeeded", "failed")
                 or (not regression and not _timing(result))
-                or (succeeded and (pending or len(fits) != len(plan["horizons"]) or set(result) != {"event", "forecasts"} | timing | diagnostic_keys(self.registration.lean)))
+                or (succeeded and (pending or len(fits) != len(plan["horizons"]) or set(result) != {"event", "forecasts"} | timing | diagnostic_keys(_lean(self.registration))))
                 or (not succeeded and (len(pending) != 1 or set(result) != {"event"} | timing))):
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search fit completion differs from admitted attempts")
         # run_fitted_trial has returned only after checking exit and reaping the child.
@@ -424,9 +430,9 @@ class SearchTrials:
                 raise ValueError
             if timed:
                 if (not _timing(result)
-                        or set(result) != (({"event", "forecasts"} | timing | diagnostic_keys(self.registration.lean)) if succeeded else {"event"} | timing)):
+                        or set(result) != (({"event", "forecasts"} | timing | diagnostic_keys(_lean(self.registration))) if succeeded else {"event"} | timing)):
                     raise ValueError
-            elif set(result) != (({"event", "forecasts"} | diagnostic_keys(self.registration.lean)) if succeeded else {"event"}):
+            elif set(result) != (({"event", "forecasts"} | diagnostic_keys(_lean(self.registration))) if succeeded else {"event"}):
                 raise ValueError
             forecasts = None
             if succeeded:
@@ -443,7 +449,7 @@ class SearchTrials:
                 validation = self._read("validation:" + cohort)
                 if validation is not None:
                     self._validation(inner, admitted, inputs, validation)
-            execution = execution_for_candidate(self.registration.lean, candidate)
+            execution = execution_for_candidate(_lean(self.registration), candidate)
             expected = self._fit_evidence(inputs, inner, plan, execution)
             started_fits, completed_fits = [], []
             for fit in expected:
@@ -575,7 +581,7 @@ class SearchTrials:
             if (content_hash(self._cohort_inputs(admitted["cohort"], inner, plan=plan))
                     != content_hash(stored)):
                 raise fail("EXPERIMENT_IDENTITY_CONFLICT", "trial native inputs changed after start")
-            binding = self.registration.lean
+            binding = _lean(self.registration)
             labels = evaluation_targets(self.repository, binding, inner) if "target" in plan else load_magnitude_targets(self.repository, from_document(SnapshotRef, binding["snapshot"]),
                 as_of_month=binding["holdouts"]["holdout_as_of_month"], labels_before=inner["evaluation_labels_before"],
                 event_ids=inner["evaluation_event_ids"], omit_not_computed=True)

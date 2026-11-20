@@ -37,6 +37,7 @@ from engine.v2.ops.experiments import experiment_spec_from_document
 from engine.v2.ops.fingerprints import source_closure
 from engine.v2.ops.migrations import require_current
 from engine.v2.research.progress import Progress, decision, stage
+from experiments.magnitude_search_errors import artifact_failure
 from experiments.magnitude_search_execution import validate_execution_limits
 from experiments.magnitude_search_outer import collect_outer_results, execute_outer_fold, shared_freeze
 from experiments.magnitude_search_plan import plan_memo, read_search_plan, trial_key
@@ -107,9 +108,14 @@ def _stored_plan(store, plan_ref):
     """Read the verified plan artifact the parent sealed; the worker does not rebuild it from the registration."""
     if not isinstance(plan_ref, ArtifactRef):
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search plan reference is invalid")
+    if plan_ref.byte_size > MAX_REPORT_BYTES:
+        raise fail("RESOURCE_LIMIT_EXCEEDED", "stored search plan exceeds the read bound")
     try:
         plan = json.loads(store.read_verified(plan_ref))
-    except (ArtifactError, ValueError, RecursionError):
+    except ArtifactError as error:
+        raise artifact_failure(error, integrity_message="stored search plan failed integrity verification",
+                               resource_message="stored search plan could not be read") from None
+    except (ValueError, RecursionError):
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "stored search plan failed verification") from None
     if not isinstance(plan, dict) or not isinstance(plan.get("plan_id"), str):
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "stored search plan failed verification")

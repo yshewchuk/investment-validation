@@ -6,7 +6,7 @@ import pytest
 
 from engine.v2.contracts import ArtifactRef
 from engine.v2.foundation import ArtifactError, canonical_json, content_hash
-from engine.v2.ops.errors import OpsError
+from engine.v2.ops.errors import OpsError, fail
 from experiments import magnitude_search_trials as trials_mod
 from experiments import v2_magnitude_search_run as run_mod
 from experiments.native_registration import NativeRegistration
@@ -145,10 +145,25 @@ def test_stored_plan_refuses_non_artifact_reference(ref):
     assert raised.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
 
 
-def test_stored_plan_refuses_artifact_error_from_read_verified():
+@pytest.mark.parametrize(("code", "expected"), [
+    ("INTEGRITY_FAILED", "EXPERIMENT_IDENTITY_CONFLICT"),
+    ("NOT_FOUND", "RESOURCE_UNAVAILABLE"),
+])
+def test_stored_plan_maps_artifact_error_from_read_verified(code, expected):
     with pytest.raises(OpsError) as raised:
-        run_mod._stored_plan(FakeStore(error=ArtifactError("INTEGRITY_FAILED", "x")), REF)
-    assert raised.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+        run_mod._stored_plan(FakeStore(error=ArtifactError(code, "x")), REF)
+    assert raised.value.code == expected
+
+
+def test_stored_plan_refuses_oversize_reference_before_read():
+    oversize = ArtifactRef(artifact_id="a", content_hash="sha256:" + "0" * 64, schema_ref="s",
+                           byte_size=run_mod.MAX_REPORT_BYTES + 1, storage_key="k")
+    store = Mock()
+    store.read_verified = Mock(side_effect=AssertionError("read"))
+    with pytest.raises(OpsError) as raised:
+        run_mod._stored_plan(store, oversize)
+    assert raised.value.code == "RESOURCE_LIMIT_EXCEEDED"
+    store.read_verified.assert_not_called()
 
 
 def test_stored_plan_refuses_non_json_bytes():
@@ -196,3 +211,24 @@ def test_admit_refuses_seal_that_differs_from_trusted_plan(monkeypatch):
     with pytest.raises(OpsError) as raised:
         trials._admit()
     assert raised.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
+
+
+def test_admit_returns_plan_when_seal_matches_trusted_plan(monkeypatch):
+    monkeypatch.setattr(trials_mod, "source_closure", lambda *a, **k: [])
+    monkeypatch.setattr(trials_mod, "require_current", lambda *a, **k: None)
+    trials = _trials()
+    trials.trusted_plan = PLAN
+    _, binding = trials._binding()
+    trials._read = lambda slot: binding
+    assert trials._admit() is PLAN
+
+
+def test_worker_setup_maps_registration_tamper_to_identity_conflict(monkeypatch):
+    def tampered(*a, **k):
+        raise fail("EXPERIMENT_IDENTITY_CONFLICT", "x")
+
+    _patch_worker(monkeypatch, binding=BINDING, store=FakeStore(canonical_json(PLAN).encode()))
+    monkeypatch.setattr(run_mod, "verified_registration_bytes", tampered)
+    run_mod._init_trial_worker("c", "s", "native_x", {}, REF, 1)
+    assert set(run_mod._PARALLEL) == {"worker_problem", "worker_error_type"}
+    assert run_mod._PARALLEL["worker_problem"]["code"] == "EXPERIMENT_IDENTITY_CONFLICT"
