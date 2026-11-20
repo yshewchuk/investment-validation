@@ -612,6 +612,24 @@ def test_run_py_refuses_on_prereg_before_importing_sources(tmp_path, monkeypatch
     assert json.loads(capsys.readouterr().out)["refused"] == CONFLICT
 
 
+def test_run_py_refuses_not_bounded_before_the_sources_factory(tmp_path, monkeypatch, capsys):
+    run_py = _run_main()
+    monkeypatch.setattr(run_py.size_pnl_prereg, "require_preregistration", OK)
+    monkeypatch.delenv("BOUNDED_RUN_NESTED", raising=False)
+    calls = []
+    module = types.ModuleType("exp188_fake_sources")
+
+    def make(args):  # spy: records any call to the factory
+        calls.append(args)
+        return sources()
+
+    module.make = make
+    monkeypatch.setitem(sys.modules, "exp188_fake_sources", module)
+    assert run_py.main(_argv(tmp_path, "--no-ledger", sources=FAKE)) == 2
+    assert json.loads(capsys.readouterr().out)["reason"] == "not_bounded"
+    assert calls == []
+
+
 def test_run_py_refuses_a_sources_spec_without_a_colon(tmp_path, monkeypatch, capsys):
     run_py = _run_main()
     monkeypatch.setattr(run_py.size_pnl_prereg, "require_preregistration", OK)

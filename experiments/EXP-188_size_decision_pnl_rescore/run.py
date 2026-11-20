@@ -59,6 +59,8 @@ def main(argv: list[str] | None = None) -> int:
         with contextlib.redirect_stdout(sys.stderr):  # library prints go to stderr; stdout is one JSON document
             receipt = size_pnl_prereg.require_preregistration()  # refuses first, with or without --no-ledger
             print(json.dumps(receipt), file=sys.stderr)
+            if os.environ.get("BOUNDED_RUN_NESTED") != "1":  # refuse before reading inputs or importing --sources
+                raise fail("RESOURCE_UNAVAILABLE", "run under tools/bounded_run.py --heavy", details={"reason": "not_bounded"})
             args.expected_identities = _read_json(args.expected)
             if not isinstance(args.expected_identities, dict):
                 raise fail(_INVALID, "--expected must be a JSON object", details={"reason": "input_unreadable"})
