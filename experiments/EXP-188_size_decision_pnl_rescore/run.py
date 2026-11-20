@@ -67,7 +67,7 @@ def main(argv: list[str] | None = None) -> int:
             if not isinstance(args.expected_identities, dict) or not {"plan_id", "registration_id", "seal_id", "panel_id"} <= set(args.expected_identities):
                 raise fail(_INVALID, "--expected must be a JSON object with plan_id, registration_id, seal_id, panel_id", details={"reason": "input_unreadable"})
             event_ids = _read_json(args.event_ids) if args.event_ids is not None else None
-            if args.event_ids is not None and event_ids is None: raise fail(_INVALID, "--event-ids must be a JSON array of strings", details={"reason": "event_ids_invalid"})
+            if args.event_ids is not None and not (isinstance(event_ids, list) and all(isinstance(e, str) for e in event_ids)): raise fail(_INVALID, "--event-ids must be a JSON array of strings", details={"reason": "event_ids_invalid"})
             from experiments import size_pnl_driver  # after the gates, so a missing PLANNED row refuses first
             module_name, _, func = args.sources.partition(":")
             try:  # no colon gives func "", not an attribute; a bad module raises ImportError

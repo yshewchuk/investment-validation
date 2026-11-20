@@ -2,6 +2,8 @@
 simulation, scorers and tuning stubbed."""
 import json
 import shutil
+import sys
+import types
 
 import numpy as np
 import pandas as pd
@@ -401,3 +403,77 @@ def test_changed_outer_receipt_leaves_decisions_untouched_and_no_tmp(tmp_path, o
     assert caught.value.details["reason"] == "tuning_receipt_changed"
     assert (tmp_path / "decisions.parquet").read_bytes() == b"EXISTING"
     assert not list(tmp_path.glob("*.tmp"))
+
+
+# ---- run.py: --event-ids shape, and the cross-month oracle ------------------------
+
+@pytest.mark.parametrize("payload", [{"a": 1}, [1, 2]])
+def test_run_py_refuses_event_ids_not_an_array_of_strings_before_the_factory(tmp_path, monkeypatch, capsys, payload):
+    run_py = _run_main()
+    monkeypatch.setattr(run_py.size_pnl_prereg, "require_preregistration", OK)
+    monkeypatch.setenv("BOUNDED_RUN_NESTED", "1")
+    ids_file = tmp_path / "ids.json"
+    ids_file.write_text(json.dumps(payload), encoding="utf-8")
+    calls = []
+    module = types.ModuleType("exp188_fake_sources")
+
+    def make(args):  # spy: records any call to the factory
+        calls.append(args)
+        return sources()
+
+    module.make = make
+    monkeypatch.setitem(sys.modules, "exp188_fake_sources", module)
+    assert run_py.main(_argv_for(tmp_path, "inner", "--event-ids", str(ids_file))) == 2
+    refused = json.loads(capsys.readouterr().out)
+    assert refused["refused"] == "INVALID_EXPERIMENT_SPEC"
+    assert refused["reason"] == "event_ids_invalid"
+    assert calls == []
+
+
+def test_cross_month_history_oracle_through_the_driver(tmp_path, outer_stubs, monkeypatch):
+    """Warm-up 2024-H2 history reaches the 2025 decisions; each 2025 month's pool and labels obey R6 and the cutoff."""
+    _stub_tables(monkeypatch, {"prod": EVENTS, "cand": EVENTS})
+    use_chunks(monkeypatch, [("2024Q3", chunk("E2"))])
+    driver.run(sources(), "inner", tmp_path, prereg=OK)
+    edges = {"E2": 0.25, "E3": 0.5, "E4": 0.75}
+    statuses = {"E2": "scored", "E3": "scored", "E4": "undetermined"}
+
+    def scored_literal(chunk_, events, sims, name, *, alpha=0.5, c=1.0):
+        ids = events["event_id"].astype(str).to_numpy()
+        return pd.DataFrame({"event_id": ids, "event_date": events["event_date"].to_numpy(), "structure": name,
+                             "edge": [edges[e] for e in ids], "status": [statuses[e] for e in ids], "reason": "scored"})
+
+    decide_inputs, passthrough = [], driver.shortvol.decide
+
+    def recording_decide(scored):
+        decide_inputs.append(scored.copy())
+        return passthrough(scored)
+
+    pools = []
+    monkeypatch.setattr(driver.shortvol, "score_events", scored_literal)
+    monkeypatch.setattr(driver.shortvol, "decide", recording_decide)
+    monkeypatch.setattr(driver, "build_pool",
+                        lambda table, labels: pools.append((table["event_date"].max(), set(labels.index.astype(str)))))
+    use_chunks(monkeypatch, [("2024Q3", chunk("E2")), ("2025Q1", chunk("E3", "E4"))])
+    summary = driver.run(sources(), "outer", tmp_path, prereg=OK)
+    assert summary["rows"] > 0
+
+    # Decide ran only for the two 2025 months, never for the warm-up month: 2 ready models x 2 months x 2 arms x every short-vol name.
+    assert len(decide_inputs) == 2 * 2 * 2 * len(driver.shortvol.NAMES)
+    assert {"E2", "E3"} <= set(decide_inputs[0]["event_id"].astype(str))  # January: warm-up history plus its own event
+    last = decide_inputs[-1]  # February: history through January plus February's event
+    assert {"E2", "E3", "E4"} <= set(last["event_id"].astype(str))
+    assert dict(zip(last["event_id"].astype(str), last["edge"])) == edges
+    frame = pd.read_parquet(tmp_path / "decisions.parquet")
+    assert (pd.to_datetime(frame["event_date"]) >= pd.Timestamp("2025-01-01")).all()
+
+    # Pools: January's table is the rows before 2025-01-01 (max E2); February's adds E3 (max E3). Warm-up's max is E1.
+    by_max = {}
+    for max_date, labelled in pools:
+        by_max.setdefault(max_date, []).append(labelled)
+    january, february = pd.Timestamp("2024-08-07"), pd.Timestamp("2025-01-15")
+    assert set(by_max) == {pd.Timestamp("2023-06-10"), january, february}
+    # January: E3's exit (2025-01-16) is not printed before 2025-01-01, so its label is absent; E2's is present.
+    assert by_max[january] and all("E3" not in labelled and "E2" in labelled for labelled in by_max[january])
+    # February: E3's label, read after January's rows were complete, is present; E4's exit (2025-02-13) is not printed.
+    assert by_max[february] and all("E3" in labelled and "E4" not in labelled for labelled in by_max[february])
