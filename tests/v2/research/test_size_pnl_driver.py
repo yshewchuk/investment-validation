@@ -617,6 +617,21 @@ def test_run_py_refuses_a_factory_with_the_wrong_signature(tmp_path, monkeypatch
     assert refused["reason"] == "sources_invalid"
 
 
+def test_run_py_refusal_message_carries_the_import_error_cause(tmp_path, monkeypatch, capsys):
+    run_py = _run_main()
+    monkeypatch.setattr(run_py.size_pnl_prereg, "require_preregistration", OK)
+    monkeypatch.setenv("BOUNDED_RUN_NESTED", "1")
+
+    def broken_import(name):
+        raise ImportError("adapter dep missing")
+
+    monkeypatch.setattr("importlib.import_module", broken_import)
+    assert run_py.main(_argv(tmp_path, "--no-ledger", sources=FAKE)) == 2
+    refused = json.loads(capsys.readouterr().out)
+    assert refused["reason"] == "sources_invalid"
+    assert "adapter dep missing" in refused["message"]
+
+
 def test_run_py_refuses_an_expected_that_differs_from_the_sources(tmp_path, monkeypatch, capsys):
     run_py = _run_main()
     monkeypatch.setattr(run_py.size_pnl_prereg, "require_preregistration", OK)

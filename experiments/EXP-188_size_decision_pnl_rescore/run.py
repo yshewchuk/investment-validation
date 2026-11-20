@@ -72,7 +72,7 @@ def main(argv: list[str] | None = None) -> int:
                 raise AttributeError(func)
             inspect.signature(factory).bind(args)  # a signature that rejects the parsed args is a refusal
         except (ValueError, TypeError, ImportError, AttributeError) as exc:
-            raise fail(_INVALID, f"--sources {args.sources} is invalid", details={"reason": "sources_invalid"}) from exc
+            raise fail(_INVALID, f"--sources {args.sources} is invalid: {(type(exc).__name__ + ': ' + str(exc))[:200]}", details={"reason": "sources_invalid"}) from exc
         made = factory(args)  # outside any try: an error raised inside the factory body propagates unchanged
         sources = size_pnl_driver.check_sources(made)
         if sources.expected != args.expected_identities:
