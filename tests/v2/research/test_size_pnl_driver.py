@@ -149,7 +149,7 @@ def test_malformed_sources_refuse_before_any_read(tmp_path, over):
 
 
 @pytest.mark.parametrize("stage", ["typo", "2025"])  # "outer" is a valid stage since S9b
-def test_only_the_inner_stage_runs(tmp_path, stage):
+def test_a_typo_stage_is_refused(tmp_path, stage):
     with pytest.raises(ValueError, match="stage must be one of"):
         driver.run(sources(), stage, tmp_path, prereg=OK)
 
@@ -689,7 +689,7 @@ def test_run_py_requires_no_ledger(tmp_path):
         _run_main().main(_argv(tmp_path))
 
 
-def test_run_py_accepts_only_the_inner_stage(tmp_path):
+def test_run_py_refuses_a_typo_stage(tmp_path):
     run_py = _run_main()
     with pytest.raises(SystemExit):  # a typo stage is refused by argparse
         run_py.main(["--stage", "outr", "--out-dir", str(tmp_path), "--expected", "e.json",

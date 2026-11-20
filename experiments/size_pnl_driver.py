@@ -341,6 +341,7 @@ def _outer(src, out, ready, receipts, plan, ids, facts_all, labels):
     quarter, month = dates.dt.to_period("Q").astype(str).to_numpy(), dates.dt.to_period("M").to_numpy()
     total, state = len(set(month)), {mid: _model_state(receipts[mid]["c"]) for mid in ready}
     frames, done, started, skipped, fresh, digest, dropped = [], 0, time.monotonic(), {}, [], hashlib.sha256(), set()
+    _log(f"outer start months={total} models={len(ready)}")
     for label, chunk in ladder.ladder_chunks(src.admitted, plan, src.load_index):
         _bind_chunk(digest, label, chunk)
         skipped = _tally(skipped, chunk)
@@ -378,6 +379,7 @@ def run(src, stage, out_dir, *, event_ids=None, prereg=size_pnl_prereg.require_p
     scope is receipted, so a smoke receipt cannot pass for a full-population one.
     """
     started = time.monotonic()
+    _log(f"stage={stage} start rss={_rss_mb():.0f}MB")
     receipt = prereg()
     check_sources(src)
     # The supervisor owns heavy jobs: this run must sit under tools/bounded_run.py --heavy.

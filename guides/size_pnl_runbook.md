@@ -5,7 +5,7 @@ Operating steps for `experiments/EXP-188_size_decision_pnl_rescore/run.py --stag
 beside the v14 run, container 12 GiB). Agents never run them.
 
 `--stage` is `inner` (2023-24 tuning) then `outer` (2025 decisions). A full outer run also needs the v14 2025
-refit-prediction binder (#2658); until it lands, a non-production model with no 2025 rows refuses
+refit-prediction binder (#2658); until it lands, any ready model with no 2025 rows (production included) refuses
 `outer_predictions_unbound`.
 
 ## Before any run
