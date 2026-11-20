@@ -165,6 +165,26 @@ def test_inner_receipts_bind_scope_none_and_the_snapshot(tmp_path, stubs, monkey
         assert len(remainder) == 64 and set(remainder) <= set("0123456789abcdef")
 
 
+def test_real_tune_skips_with_no_trades_and_binds_the_receipt(tmp_path, monkeypatch):
+    """The real ``tune`` (not stubbed) on a fixture where nothing is taken: the S6 fallback is persisted and bound."""
+    monkeypatch.setattr(driver, "build_pool", lambda table, labels: None)
+    monkeypatch.setattr(driver.shortvol, "simulate", lambda chunk_, events, pool, **kw: {})
+    scored_ids = lambda chunk_, events, sims, name, **kw: pd.DataFrame({"event_id": events["event_id"].to_numpy()})  # noqa: E731
+    monkeypatch.setattr(tuning, "score_events", scored_ids)
+    monkeypatch.setattr(tuning, "decide", lambda scored: scored.iloc[:0])  # every row undetermined, none taken
+    monkeypatch.setattr(tuning, "score", lambda chunk_, events, mine, name, alpha, c: pd.DataFrame(
+        {"pnl_dollars": pd.Series(dtype=float)}))
+    use_chunks(monkeypatch, [("2023Q2", chunk("E1")), ("2024Q3", chunk("E2"))])
+    summary = driver.run(sources(), "inner", tmp_path, prereg=OK)
+    mid = summary["models"][0]
+    tuned = tuning.load_receipt(tmp_path / "receipts" / f"tuning_{mid}.json")
+    inner = tuning.load_receipt(tmp_path / "receipts" / "inner.json")
+    _c, reason = tuning.choose_c({1.0: 0.0}, 0)  # the literal skip reason for fewer than MIN_TRADES
+    assert tuned["skipped"] is True and tuned["c"] == 1.0 and tuned["trades"] == 0
+    assert tuned["skip_reason"] == reason == "fewer_than_300_inner_trades"
+    assert inner["models"][mid] == tuned["content_hash"]
+
+
 def test_model_events_aligns_every_column_by_event_id():
     table = pd.DataFrame({"event_date": pd.to_datetime(["2023-06-10", "2024-08-07", "2025-01-15"]),
                           "pred_move": [1.5, 2.5, 3.5], "pred_crush": [-10.0, -20.0, -30.0]},
@@ -243,8 +263,8 @@ def test_plan_row_with_a_shifted_event_date_refuses_before_facts(tmp_path, stubs
     use_chunks(monkeypatch, [("2023Q2", chunk("E1"))])
     with pytest.raises(OpsError) as caught:
         driver.run(sources(plan_frame=plan, facts=counting), "inner", tmp_path, prereg=OK)
-    assert caught.value.code == DENIED
-    assert caught.value.problem.details["reason"] == "plan_date_mismatch"
+    assert caught.value.code == CONFLICT
+    assert caught.value.problem.details["reason"] == "event_date_mismatch"
     assert calls == []
 
 
@@ -262,6 +282,28 @@ def test_duplicate_plan_id_refuses_before_facts_labels_or_receipts(tmp_path, stu
     assert caught.value.code == CONFLICT
     assert caught.value.problem.details["reason"] == "duplicate_event_id"
     assert calls == []
+    assert not (tmp_path / "receipts").exists()
+
+
+def test_duplicate_id_outside_the_inner_window_refuses_before_any_receipt(tmp_path, stubs, monkeypatch):
+    plan = pd.concat([PLAN_FRAME, PLAN_FRAME[PLAN_FRAME["event_id"] == "E3"]], ignore_index=True)  # E3 is a 2025 row
+    use_chunks(monkeypatch, [("2023Q2", chunk("E1"))])
+    with pytest.raises(OpsError) as caught:
+        driver.run(sources(plan_frame=plan), "inner", tmp_path, prereg=OK)
+    assert caught.value.code == CONFLICT
+    assert caught.value.problem.details["reason"] == "duplicate_event_id"
+    assert not (tmp_path / "receipts").exists()
+
+
+@pytest.mark.parametrize("column", ["event_date", "entry_date", "exit_date"])
+def test_null_plan_date_refuses_before_any_receipt(tmp_path, stubs, monkeypatch, column):
+    plan = PLAN_FRAME.copy()
+    plan.loc[plan["event_id"] == "E1", column] = pd.NaT
+    use_chunks(monkeypatch, [("2023Q2", chunk("E1"))])
+    with pytest.raises(OpsError) as caught:
+        driver.run(sources(plan_frame=plan), "inner", tmp_path, prereg=OK)
+    assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
+    assert caught.value.problem.details["reason"] == "plan_dates_null"
     assert not (tmp_path / "receipts").exists()
 
 

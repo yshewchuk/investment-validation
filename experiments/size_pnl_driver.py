@@ -171,15 +171,15 @@ def run(src, stage, out_dir, *, prereg=size_pnl_prereg.require_preregistration):
     tables = bound_tables["tables"]
     ready = {mid: e for mid, e in tables.items() if e["status"] == "ready"}
     excluded = {mid: e["reason"] for mid, e in tables.items() if e["status"] != "ready"}
-    plan = _plan_window(src.plan_frame)
+    full = src.plan_frame
+    if full[["event_date", "entry_date", "exit_date"]].isna().to_numpy().any():
+        raise fail("INVALID_EXPERIMENT_SPEC", "plan dates must not be null", details={"reason": "plan_dates_null"})
+    ladder.check_plan(src.admitted, full)  # the full plan, before the window can drop any row
+    plan = _plan_window(full)
     admitted_dates = dict(zip(src.admitted["events"]["event_id"].astype(str),
                               pd.to_datetime(src.admitted["events"]["event_date"])))
     if any(str(e) not in admitted_dates for e in plan["event_id"]):
         raise fail(_DENIED, "plan event ids include a key that is not admitted", details={"reason": "key_not_admitted"})
-    if any(pd.Timestamp(d) != admitted_dates[str(e)] for e, d in zip(plan["event_id"], plan["event_date"])):
-        raise fail(_DENIED, "plan event dates differ from the admitted dates",
-                   details={"reason": "plan_date_mismatch"})
-    ladder.check_plan(src.admitted, plan)  # full plan validation before any facts, label read or receipt
     facts_all = src.facts(sorted(str(e) for e in plan["event_id"]))  # the only facts call of the run
     requested = {str(e) for e in plan["event_id"]}
     if not set(_FACTS) <= set(facts_all.columns) or set(facts_all.index.astype(str)) != requested:
