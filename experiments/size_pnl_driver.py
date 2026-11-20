@@ -145,23 +145,22 @@ def _inner(src, out, ready, plan, facts_all, labels):
         elapsed = max(time.monotonic() - started, 1e-9)
         _log(f"inner quarter {number}/{quarters} {label} events={len(chunk['event_id'])} "
              f"rate={kept / elapsed:.2f}/s eta={(quarters - number) * elapsed / number:.0f}s rss={_rss_mb():.0f}MB")
-    bad = set()  # structure-level: an event undetermined for ANY structure of ANY model leaves for ALL (c = 1.0)
+    bad = set()  # structure-level refusal at ANY c, name or model: excluded from every model's taken population, history kept
     for mid in ready:
-        scored = pd.concat([shortvol.score_events(chunk, events, sims, name, alpha=tuning.ALPHA, c=1.0)
-                            for chunk, events, sims in items[mid] for name in shortvol.NAMES], ignore_index=True)
-        decided = shortvol.decide(scored)
-        bad |= set(decided.loc[decided["status"] == "undetermined", "event_id"].astype(str))
-    for mid in ready:
-        items[mid] = [(chunk, events[~events["event_id"].isin(bad)], {e: s for e, s in sims.items() if e not in bad}) for chunk, events, sims in items[mid]]
-    by_model = {mid: sum(len(events) for _c, events, _s in items[mid]) for mid in ready}
+        for c in tuning.C_GRID:
+            for name in shortvol.NAMES:
+                rows = pd.concat([shortvol.score_events(chunk, events, sims, name, alpha=tuning.ALPHA, c=c)
+                                  for chunk, events, sims in items[mid]], ignore_index=True)
+                bad |= set(rows.loc[rows["status"] != "scored", "event_id"].astype(str))
+    by_model = {mid: sum(int((~events["event_id"].isin(bad)).sum()) for _c, events, _s in items[mid]) for mid in ready}
     hashes = {}
     for i, mid in enumerate(ready, start=1):
         started = time.monotonic()
-        body = tuning.tune(items[mid], mid)
+        body = tuning.tune(items[mid], mid, exclude=bad)
         hashes[mid] = tuning.write_receipt(out / "receipts" / f"tuning_{mid}.json", body)["content_hash"]
         _log(f"tuning model {i}/{len(ready)} {mid} elapsed={time.monotonic() - started:.1f}s "
              f"c={body['c']} skipped={body['skipped']}")
-    return hashes, kept, skipped, by_model, common, len(bad)
+    return hashes, kept - len(bad), skipped, by_model, common, len(bad)
 
 
 def run(src, stage, out_dir, *, prereg=size_pnl_prereg.require_preregistration):

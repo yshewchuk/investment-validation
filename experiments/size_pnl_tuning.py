@@ -3,9 +3,8 @@
 S6 of guides/size_decision_pnl_design.md (sections 5, 7, R4, R6). For each divisor ``c`` in ``C_GRID`` the seven
 short-vol structures are scored over the inner-year quarters with S5's ``score_events``, ``decide`` and ``score``,
 and the ``c`` with the largest taken-trade P&L is chosen; ``choose_c`` falls back to 1.0 when the inner sample has
-fewer than ``MIN_TRADES`` taken trades. Outer years are refused before any scoring. The S9 driver WILL call
-``tune`` and ``write_receipt`` per model (future; no production caller yet). Progress logging: none (pure,
-per-model, small loops).
+fewer than ``MIN_TRADES`` taken trades. Outer years are refused before any scoring. The S9 driver calls
+``tune`` and ``write_receipt`` per model. Progress logging: none (pure, per-model, small loops).
 """
 import hashlib
 import json
@@ -44,8 +43,11 @@ def choose_c(totals, trades):
     return float(min(tied, key=lambda c: (abs(c - 1.0), c))), None
 
 
-def tune(items, model_id, *, alpha=ALPHA, grid=C_GRID):
-    """The S6 tuning receipt body for one model. ``items`` is ``[(chunk, events, sims), ...]``, one per quarter."""
+def tune(items, model_id, *, alpha=ALPHA, grid=C_GRID, exclude=frozenset()):
+    """The S6 tuning receipt body for one model. ``items`` is ``[(chunk, events, sims), ...]``, one per quarter.
+
+    ``exclude`` holds event ids dropped from the taken population only; their scores stay in the cutoff history.
+    """
     if 1.0 not in grid:
         raise ValueError("grid must include the unity divisor 1.0")
     if not items:
@@ -63,7 +65,7 @@ def tune(items, model_id, *, alpha=ALPHA, grid=C_GRID):
                                 for chunk, events, sims in items], ignore_index=True)
             decisions = decide(scored)  # the cutoff history spans quarters, recomputed per c
             for chunk, events, _sims in items:
-                ids = {str(e) for e in chunk["event_id"]}
+                ids = {str(e) for e in chunk["event_id"]} - {str(e) for e in exclude}
                 mine = decisions[decisions["event_id"].astype(str).isin(ids)]
                 taken = score(chunk, events, mine, name, alpha, c=c)
                 total += float(taken["pnl_dollars"].sum())

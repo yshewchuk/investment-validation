@@ -83,7 +83,6 @@ def structure_gate_passes(monkeypatch):
     """The structure gate passes every event (no structure undetermined) unless a test replaces these."""
     monkeypatch.setattr(driver.shortvol, "score_events", lambda chunk_, events, sims, name, **kw: pd.DataFrame(
         {"event_id": events["event_id"].to_numpy(), "status": "scored"}))
-    monkeypatch.setattr(driver.shortvol, "decide", lambda scored: scored)
 
 
 @pytest.fixture
@@ -94,8 +93,8 @@ def stubs(monkeypatch):
     """
     log = []
 
-    def fake_tune(items, mid, **kwargs):
-        log.append(("tune", mid, tuple(sorted(str(e) for _c, ev, _s in items for e in ev["event_id"]))))
+    def fake_tune(items, mid, *, exclude=frozenset(), **kwargs):  # logs the taken population only
+        log.append(("tune", mid, tuple(sorted(str(e) for _c, ev, _s in items for e in ev["event_id"] if str(e) not in exclude))))
         return {"stage": "tuning", "model_id": mid, "c": 1.0, "skipped": False,
                 "events": sum(len(ev) for _c, ev, _s in items)}
 
@@ -230,6 +229,23 @@ def test_real_tune_selects_the_argmax_and_binds_the_receipt(tmp_path, monkeypatc
     assert inner["models"][mid] == tuned["content_hash"]
 
 
+def test_excluded_event_still_counts_in_the_cutoff_history(monkeypatch):
+    """E3 is excluded from the taken population but still sets the history: the others are decided with it present."""
+    monkeypatch.setattr(tuning, "score_events", lambda chunk_, events, sims, name, **kw: pd.DataFrame(
+        {"event_id": events["event_id"].to_numpy()}))
+    monkeypatch.setattr(tuning, "decide", lambda scored: scored.assign(taken=len(scored) >= 3))  # history of 3 needed
+    monkeypatch.setattr(tuning, "score", lambda chunk_, events, mine, name, alpha, c: pd.DataFrame(
+        {"pnl_dollars": np.ones(int(mine["taken"].sum()))}))
+    dates = pd.to_datetime(["2023-06-10", "2023-07-10", "2023-08-10"])
+    full = [({"event_id": np.array(["E1", "E2", "E3"], dtype=object)},
+             pd.DataFrame({"event_id": ["E1", "E2", "E3"], "event_date": dates}), {})]
+    kept = tuning.tune(full, "M", exclude={"E3"})  # E3 kept in history, never taken
+    deleted = tuning.tune([({"event_id": np.array(["E1", "E2"], dtype=object)},
+                            pd.DataFrame({"event_id": ["E1", "E2"], "event_date": dates[:2]}), {})], "M")
+    assert kept["trades"] == 14 and deleted["trades"] == 0  # 2 taken events x 7 structures vs no history
+    assert kept["totals"] != deleted["totals"]
+
+
 def test_model_events_aligns_every_column_by_event_id():
     table = pd.DataFrame({"event_date": pd.to_datetime(["2023-06-10", "2024-08-07", "2025-01-15"]),
                           "pred_move": [1.5, 2.5, 3.5], "pred_crush": [-10.0, -20.0, -30.0]},
@@ -305,7 +321,8 @@ def test_an_event_missing_from_one_table_leaves_for_every_model(tmp_path, stubs,
     assert tuning.load_receipt(tmp_path / "receipts" / "inner.json")["common_dropped"] == {"2023Q2": 1}
 
 
-def test_an_event_undetermined_for_a_structure_leaves_for_every_model(tmp_path, stubs, monkeypatch):
+def test_an_event_undetermined_only_off_unity_leaves_the_taken_population_for_every_model(tmp_path, stubs, monkeypatch):
+    """The twin's E2 is undetermined at c != 1.0 only: it is still excluded from every model's taken population."""
     real, seen = readers.model_tables, {}
 
     def twinned(bound, roster, admitted, production, **kw):
@@ -314,12 +331,13 @@ def test_an_event_undetermined_for_a_structure_leaves_for_every_model(tmp_path, 
         seen["twin"] = tables[mid]["table"].copy()
         return {mid: tables[mid], "twin": {**tables[mid], "table": seen["twin"]}}
 
-    def sims_of(chunk_, events, table, labels, exits):  # the twin's E2 is marked undetermined for every structure
+    def sims_of(chunk_, events, table, labels, exits):  # the twin's E2 is marked undetermined
         return {e: ("undetermined" if table is seen["twin"] and e == "E2" else "sim") for e in events["event_id"]}
 
-    def scored_of(chunk_, events, sims, name, **kw):
+    def scored_of(chunk_, events, sims, name, c, **kw):
         return pd.DataFrame({"event_id": events["event_id"].to_numpy(),
-                             "status": ["undetermined" if sims.get(e) == "undetermined" else "scored" for e in events["event_id"]]})
+                             "status": ["undetermined" if sims.get(e) == "undetermined" and c != 1.0 else "scored"
+                                        for e in events["event_id"]]})
 
     monkeypatch.setattr(readers, "model_tables", twinned)
     monkeypatch.setattr(driver, "_sims", sims_of)
@@ -327,7 +345,7 @@ def test_an_event_undetermined_for_a_structure_leaves_for_every_model(tmp_path, 
     use_chunks(monkeypatch, [("2023Q2", chunk("E1", "E2"))])
     driver.run(sources(), "inner", tmp_path, prereg=OK)
     tuned = [ids for kind, _mid, ids in stubs if kind == "tune"]
-    assert len(tuned) == 2 and all(ids == ("E1",) for ids in tuned)  # E2 is in neither model's items
+    assert len(tuned) == 2 and all(ids == ("E1",) for ids in tuned)  # E2 is excluded from both taken populations
     inner = tuning.load_receipt(tmp_path / "receipts" / "inner.json")
     assert inner["common_dropped_structure"] == 1
     assert inner["common_dropped"] == {"2023Q2": 0}  # the quarter-level count is unchanged
