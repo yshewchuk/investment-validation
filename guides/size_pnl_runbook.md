@@ -1,6 +1,6 @@
-# EXP-188 runbook (SIZE decision-level P&L re-score, inner stage)
+# EXP-188 runbook (SIZE decision-level P&L re-score, inner and outer stages)
 
-Operating steps for `experiments/EXP-188_size_decision_pnl_rescore/run.py --stage inner`. Design:
+Operating steps for `experiments/EXP-188_size_decision_pnl_rescore/run.py --stage inner|outer`. Design:
 `guides/size_decision_pnl_design.md`. Only the supervisor runs these steps (one heavy job at a time, never
 beside the v14 run, container 12 GiB). Agents never run them.
 

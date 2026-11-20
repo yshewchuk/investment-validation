@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from engine.v2.foundation import content_hash
 from engine.v2.ops.errors import OpsError
 from experiments import size_pnl_driver as driver
 from experiments import size_pnl_readers as readers
@@ -82,12 +83,13 @@ def test_outer_refuses_before_building_any_chunk(tmp_path, outer_stubs):
     assert caught.value.code == CONFLICT
     assert caught.value.details["reason"] == "tuning_receipt_missing"
     assert loads == []
+    assert not (tmp_path / "receipts" / "inputs_outer.json").exists()
 
 
-def test_outer_refuses_a_candidate_without_2025_rows_before_any_chunk(tmp_path, stubs, monkeypatch):
-    """Candidate predictions for 2025 are not bound yet: a non-production model with only 2024 rows refuses."""
+def _stub_tables(monkeypatch, rows):
+    """Roster of one production and one candidate model; each model's table holds its own ``rows`` (event id -> date),
+    clipped to the stage's window."""
     roster = {"models": [{"model_id": "prod", "kind": "production"}, {"model_id": "cand", "kind": "v14"}]}
-    rows = {"prod": EVENTS, "cand": {"E2": EVENTS["E2"]}}
     monkeypatch.setattr(driver.inputs, "resolve_roster", lambda *a, **kw: roster)
     monkeypatch.setattr(driver.inputs, "bind_models", lambda *a, **kw: {})
 
@@ -101,6 +103,14 @@ def test_outer_refuses_a_candidate_without_2025_rows_before_any_chunk(tmp_path, 
         return out
 
     monkeypatch.setattr(readers, "model_tables", model_tables)
+
+
+@pytest.mark.parametrize("short", ["prod", "cand"])
+def test_outer_refuses_a_ready_model_without_2025_rows_before_any_chunk(tmp_path, stubs, monkeypatch, short):
+    """A ready model with only 2024 rows refuses, production or candidate: its 2025 predictions are not bound yet."""
+    rows = {"prod": EVENTS, "cand": EVENTS}
+    rows[short] = {"E2": EVENTS["E2"]}
+    _stub_tables(monkeypatch, rows)
     use_chunks(monkeypatch, [("2024Q3", chunk("E2"))])
     driver.run(sources(), "inner", tmp_path, prereg=OK)
     loads = []
@@ -109,6 +119,54 @@ def test_outer_refuses_a_candidate_without_2025_rows_before_any_chunk(tmp_path, 
     assert caught.value.code == CONFLICT
     assert caught.value.details["reason"] == "outer_predictions_unbound"
     assert loads == []
+    assert not (tmp_path / "receipts" / "inputs_outer.json").exists()  # the refusal leaves no outer input receipt
+
+
+def test_outer_receipt_binds_what_it_consumed(tmp_path, outer_stubs, monkeypatch):
+    _run_both(tmp_path, monkeypatch)
+    outer = tuning.load_receipt(tmp_path / "receipts" / "outer.json")
+    tuned = {mid: tuning.load_receipt(tmp_path / "receipts" / f"tuning_{mid}.json") for mid in outer["models"]}
+    assert outer["tuning"] == {mid: t["content_hash"] for mid, t in tuned.items()}
+    assert outer["c"] == {mid: t["c"] for mid, t in tuned.items()}
+    assert outer["labels"] == content_hash([["E3", 4.0, -10.0], ["E4", 4.0, -10.0]])  # the 2025 month reads, in order
+    assert outer["common_dropped"] == 0
+
+
+def test_partial_2025_coverage_is_a_recorded_common_drop(tmp_path, outer_stubs, monkeypatch):
+    """Candidate has no E4 row: not refused, E4 leaves the common pool and is counted in outer.json."""
+    _stub_tables(monkeypatch, {"prod": EVENTS, "cand": {k: v for k, v in EVENTS.items() if k != "E4"}})
+    outer = _run_both(tmp_path, monkeypatch)
+    assert outer["rows"] > 0
+    assert tuning.load_receipt(tmp_path / "receipts" / "outer.json")["common_dropped"] == 1
+
+
+def test_changed_pre_2025_label_between_stages_refuses_inner_inputs(tmp_path, outer_stubs, monkeypatch):
+    use_chunks(monkeypatch, [("2024Q3", chunk("E2"))])
+    driver.run(sources(), "inner", tmp_path, prereg=OK)
+
+    def changed(columns, ids):
+        rows = BASE[BASE["event_id"].isin([str(e) for e in ids])].copy()
+        if "abs_move" in columns: rows["abs_move"] = rows["abs_move"] + 1.0
+        return rows
+
+    use_chunks(monkeypatch, [("2024Q3", chunk("E2")), ("2025Q1", chunk("E3", "E4"))])
+    with pytest.raises(Refusal) as caught:
+        driver.run(sources(fetch=changed), "outer", tmp_path, prereg=OK)
+    assert caught.value.code == CONFLICT
+    assert caught.value.details["reason"] == "inner_inputs_mismatch"
+    assert not (tmp_path / "receipts" / "inputs_outer.json").exists()
+
+
+def test_oracle_one_taken_2025_event_carries_its_literal_marks(tmp_path, outer_stubs, monkeypatch):
+    """Only E3 is taken; its scorer marks are literal, so its decision rows must carry exactly those values."""
+    monkeypatch.setattr(driver.shortvol, "decide", lambda scored: scored[scored["event_id"].astype(str) == "E3"].assign(status="taken", reason="taken"))
+    marks = {"event_id": ["E3"], "exit_value": [101.5], "rung": [2], "lots": [3], "pnl_dollars": [-42.25], "entry_cost": [10.0], "pnl_per_share": [-0.5]}
+    monkeypatch.setattr(driver.shortvol, "score", lambda chunk_, events, decisions, name, alpha, *, c=1.0, drop_unquoted=False: pd.DataFrame(marks))
+    _run_both(tmp_path, monkeypatch)
+    frame = pd.read_parquet(tmp_path / "decisions.parquet")
+    taken = frame[(frame["book"] == "short_vol") & (frame["event_id"] == "E3")]
+    assert len(taken) == 2 * len(driver.shortvol.NAMES)  # both arms, every short-vol structure
+    assert (taken["pnl_dollars"] == -42.25).all() and (taken["rung"] == 2).all()
 
 
 def test_outer_refuses_when_inner_json_names_another_model_hash(tmp_path, stubs, monkeypatch):

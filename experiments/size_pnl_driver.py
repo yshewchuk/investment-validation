@@ -28,9 +28,9 @@ ALPHA = tuning.ALPHA
 _DENIED, _CONFLICT = "HOLDOUT_ACCESS_DENIED", "EXPERIMENT_IDENTITY_CONFLICT"
 _FACTS = ("pre_iv30", "mcap_usd", "implied_move")
 _MARKS = ["exit_value", "rung", "lots", "pnl_dollars"]
-# The inputs receipt binds only what is the same in both stages: the production and table windows differ by stage
-# (the production binding hashes the windowed frame), so they are bound by the stage's own receipts instead.
-_BOUND = ("spec_hash", "identity", "roster", "models", "snapshot")
+# The inputs receipt binds only what is the same in both stages. Production and tables are excluded because their windows
+# differ by stage (the production binding hashes the windowed frame), so each stage's receipts bind them instead.
+_BOUND = ("spec_hash", "identity", "roster", "models", "snapshot", "labels")  # the pre-2025 labels read is identical in both
 
 
 @dataclass(frozen=True)
@@ -155,6 +155,17 @@ def _pool_tables(ready):
     return {mid: e["table"][e["table"].index.astype(str).isin(common)] for mid, e in ready.items()}
 
 
+def _label_rows(frames):
+    """Label rows [event_id, abs_move, crush_pct_iv30] of the label frames, sorted by event_id (the receipts' shape)."""
+    return sorted([[str(e), float(a), float(c)] for f in frames for e, a, c in zip(f.index, f["abs_move"], f["crush_pct_iv30"])], key=lambda r: r[0])
+
+
+def _common_dropped(ready):
+    """Ids in some ready model's table but not in every one's: the common-support drop (design section 4)."""
+    sets = [set(e["table"].index.astype(str)) for e in ready.values()]
+    return len(set.union(*sets) - set.intersection(*sets))
+
+
 def _printed(labels, exits, cutoff):
     """The labels whose event's exit_date is printed before ``cutoff`` (an ISO date)."""
     ids = labels.index.astype(str)
@@ -228,13 +239,16 @@ def _outer_gate(out, ready, scope, body):
     return receipts
 
 
-def _unbound_outer(roster, tables, ready):
-    """Refuses a non-production model with no table rows in the outer year (its 2025 predictions are not bound yet)."""
-    kinds = {m["model_id"]: m["kind"] for m in roster["models"]}
+def _no_ready():
+    return shortvol.Refusal(_CONFLICT, "no model is ready to be tuned or scored", {"reason": "no_ready_models"})
+
+
+def _unbound_outer(tables, ready):
+    """Refuses a ready model with no table rows in the outer year (its 2025 predictions are not bound yet). Partial coverage is not refused: it is a common-support drop."""
     for mid in ready:
         dates = pd.to_datetime(tables[mid]["table"]["event_date"])
-        if kinds[mid] != "production" and not ((dates >= pd.Timestamp(OUTER[0])) & (dates < pd.Timestamp(OUTER[1]))).any():
-            raise Refusal(_CONFLICT, "v14 2025 refit predictions are not bound for a non-production model", {"reason": "outer_predictions_unbound"})
+        if not ((dates >= pd.Timestamp(OUTER[0])) & (dates < pd.Timestamp(OUTER[1]))).any():
+            raise Refusal(_CONFLICT, "2025 predictions are not bound for a ready model with no 2025 rows", {"reason": "outer_predictions_unbound"})
 
 
 def _model_state(c):
@@ -280,7 +294,7 @@ def _outer(src, out, ready, receipts, plan, ids, facts_all, labels):
     dates = pd.to_datetime(plan["event_date"])
     quarter, month = dates.dt.to_period("Q").astype(str).to_numpy(), dates.dt.to_period("M").to_numpy()
     total, state = len(set(month)), {mid: _model_state(receipts[mid]["c"]) for mid in ready}
-    frames, done, started, skipped = [], 0, time.monotonic(), {}
+    frames, done, started, skipped, fresh = [], 0, time.monotonic(), {}, []
     for label, chunk in ladder.ladder_chunks(src.admitted, plan, src.load_index):
         skipped = _tally(skipped, chunk)
         events = {mid: model_events(pools[mid], facts_all, chunk, exits) for mid in ready}
@@ -295,9 +309,14 @@ def _outer(src, out, ready, receipts, plan, ids, facts_all, labels):
             skips = pd.concat(month_frames)["reason"].value_counts().to_dict() if month_frames else {}
             _log(f"outer month {period} {done}/{total} rate={rate:.2f}/s eta={(total - done) / rate:.0f}s skips={skips} rss={_rss_mb():.0f}MB")
             if start_m >= pd.Timestamp(OUTER[0]):  # R6: only after this month's rows are complete
-                labels = pd.concat([labels, readers.read_labels(src.fetch, src.admitted, start=start_m, end=(period + 1).start_time, event_ids=ids)])
+                got = readers.read_labels(src.fetch, src.admitted, start=start_m, end=(period + 1).start_time, event_ids=ids)
+                fresh.append(got)
+                labels = pd.concat([labels, got])
     inputs_hash = tuning.load_receipt(out / "receipts" / "inputs_outer.json")["content_hash"]
-    rows = decisions.publish(out, frames, {"stage": "outer", "models": list(ready), "ladder_skipped": skipped, "scope": _scope(ids), "inputs": inputs_hash})
+    body = {"stage": "outer", "models": list(ready), "ladder_skipped": skipped, "scope": _scope(ids), "inputs": inputs_hash,
+            "tuning": {mid: receipts[mid]["content_hash"] for mid in ready}, "c": {mid: receipts[mid]["c"] for mid in ready},
+            "labels": content_hash(_label_rows(fresh)), "common_dropped": _common_dropped(ready)}
+    rows = decisions.publish(out, frames, body)
     return rows, skipped
 
 
@@ -334,7 +353,6 @@ def run(src, stage, out_dir, *, event_ids=None, prereg=size_pnl_prereg.require_p
     _log(f"facts_nan_rows={int(facts_all[list(_FACTS)].isna().any(axis=1).sum())}")
     facts_rows = sorted([str(e), *[None if pd.isna(v) else float(v) for v in vals]] for e, vals in zip(facts_all.index, facts_all[list(_FACTS)].to_numpy(dtype=float)))
     labels = readers.read_labels(src.fetch, src.admitted, start=INNER[0], end=OUTER[0], event_ids=ids)  # the pre-2025 labels; outer adds each month's
-    label_rows = sorted([[str(e), float(a), float(c)] for e, a, c in zip(labels.index, labels["abs_move"], labels["crush_pct_iv30"])], key=lambda r: r[0])
     scope = _scope(ids)
     body = {"stage": "inputs", "spec_hash": receipt["spec_hash"], "identity": bound_tables["identity"],
             "roster": roster,  # inputs-level status per model: arrays are not receipted
@@ -343,11 +361,14 @@ def run(src, stage, out_dir, *, event_ids=None, prereg=size_pnl_prereg.require_p
                        for mid, m in bound_tables["bound"].items()},
             "tables": {mid: e["binding"] for mid, e in ready.items()},
             "production": production["binding"], "scope": scope, "plan": content_hash(_plan_rows(plan)),
-            "facts": content_hash(facts_rows), "labels": content_hash(label_rows), "snapshot": src.snapshot_id}
+            "facts": content_hash(facts_rows), "labels": content_hash(_label_rows([labels])), "snapshot": src.snapshot_id}
+    receipts = {}
+    if stage == "outer":  # preflight: a refusal here leaves no outer input receipt, and no chunk is built
+        if not ready: raise _no_ready()
+        receipts = _outer_gate(out, ready, scope, body)
+        _unbound_outer(tables, ready)
     inputs_receipt = _receipt(out / "receipts" / f"inputs_{stage}.json", body, "inputs_receipt_changed")
-    if not ready: raise shortvol.Refusal(_CONFLICT, "no model is ready to be tuned or scored", {"reason": "no_ready_models"})
-    receipts = _outer_gate(out, ready, scope, body) if stage == "outer" else {}  # refuses before any chunk is built
-    if stage == "outer": _unbound_outer(roster, tables, ready)
+    if not ready: raise _no_ready()
     if plan.empty: raise shortvol.Refusal(_CONFLICT, "the plan window holds no events", {"reason": "empty_population"})
     if stage == "inner":
         hashes, rows, skipped, by_model, common, structure, ladder_hash = _inner(src, out, ready, plan, facts_all, labels)
