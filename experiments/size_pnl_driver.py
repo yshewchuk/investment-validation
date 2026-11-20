@@ -525,12 +525,13 @@ def _fit(table, labels, kept):
     return {"n": len(sub), "rmse": float(np.sqrt(np.mean(err ** 2))), "mae": float(np.mean(np.abs(err)))}
 
 
-def _replay_equal(out, inputs_hash, ladder_hash):
-    """The recorded replay verdict if it was written for this run's inputs and ladder, else None (X7 not run)."""
+def _replay_equal(out, inputs_hash, ladder_hash, frames_hash):
+    """The recorded replay verdict if it was written for this run's inputs, ladder and scored frames, else None (X7 not run)."""
     path = out / "receipts" / "synthetic_replay.json"
     if not path.exists(): return None
     loaded = tuning.load_receipt(path)
-    return loaded["equal"] if loaded["inputs"] == inputs_hash and loaded["ladder"] == ladder_hash else None
+    ok = loaded["inputs"] == inputs_hash and loaded["ladder"] == ladder_hash and loaded.get("frames") == frames_hash
+    return loaded["equal"] if ok and isinstance(loaded["equal"], bool) else None
 
 
 def run_synthetic(src, out_dir, *, event_ids=None, replay=False, prereg=size_pnl_prereg.require_preregistration):
@@ -567,8 +568,8 @@ def run_synthetic(src, out_dir, *, event_ids=None, replay=False, prereg=size_pnl
     if replay:  # X7 evidence: the replay verdict is receipted, so a later plain run can read it
         equal = _frames_digest(frames) == _frames_digest(_synthetic_scores(src, ready, plan, facts_all, labels)[0])
         _receipt(out / "receipts" / "synthetic_replay.json", {"stage": "synthetic_replay", "scope": scope, "inputs": inputs_receipt["content_hash"],
-                                                             "ladder": ladder_hash, "equal": equal}, "synthetic_replay_changed")
-    replay_equal = _replay_equal(out, inputs_receipt["content_hash"], ladder_hash)
+                                                             "ladder": ladder_hash, "frames": _frames_digest(frames), "equal": equal}, "synthetic_replay_changed")
+    replay_equal = _replay_equal(out, inputs_receipt["content_hash"], ladder_hash, _frames_digest(frames))
     kept, common = set(pd.concat(frames, ignore_index=True)["event_id"].astype(str)), _common_dropped(ready)
     pools = _pool_tables(ready)
     fits = {mid: _fit(pools[mid], labels, kept) for mid in ready}  # rmse and mae on the events that were scored (population E)

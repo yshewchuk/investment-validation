@@ -181,6 +181,34 @@ def test_a_replay_receipt_for_other_inputs_is_ignored(tmp_path, fakes):
     assert "| X7 | replay | not_run |" in (tmp_path / "t11_synthetic.md").read_text(encoding="utf-8")
 
 
+def test_a_replay_receipt_with_other_frames_or_a_non_bool_verdict_is_ignored(tmp_path):
+    (tmp_path / "receipts").mkdir()
+    path = tmp_path / "receipts" / "synthetic_replay.json"
+    body = {"stage": "synthetic_replay", "scope": None, "inputs": "sha256:in", "ladder": "sha256:l", "frames": "sha256:f", "equal": True}
+    tuning.write_receipt(path, body)
+    assert driver._replay_equal(tmp_path, "sha256:in", "sha256:l", "sha256:f") is True
+    assert driver._replay_equal(tmp_path, "sha256:in", "sha256:l", "sha256:other") is None  # frames differ
+    path.unlink()
+    tuning.write_receipt(path, {**body, "equal": "false"})
+    assert driver._replay_equal(tmp_path, "sha256:in", "sha256:l", "sha256:f") is None  # a string verdict is not a bool
+
+
+def test_a_replay_whose_second_scoring_differs_fails_x7_and_stops(tmp_path, monkeypatch, fakes):
+    calls = []
+
+    def scores(*args):
+        frames, skipped, ladder, dropped = fake_scores(*args)
+        calls.append(1)
+        if len(calls) == 2:  # the replay's second scoring returns altered P&L
+            frames = [f.assign(pnl_dollars=f["pnl_dollars"] + 1.0) for f in frames]
+        return frames, skipped, ladder, dropped
+
+    monkeypatch.setattr(driver, "_synthetic_scores", scores)
+    driver.run_synthetic(sources(), tmp_path, prereg=OK, replay=True)
+    text = (tmp_path / "t11_synthetic.md").read_text(encoding="utf-8")
+    assert "| X7 | replay | fail |" in text and "X7 replay" in text  # the stop list carries the X7 entry
+
+
 def test_a_spec_that_differs_from_the_preregistered_one_refuses_before_any_write(tmp_path, fakes):
     with pytest.raises(Refusal) as caught:
         driver.run_synthetic(sources(), tmp_path, prereg=lambda: {"spec_hash": "OTHER", "spec_hash_checked": True})

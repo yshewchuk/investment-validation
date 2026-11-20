@@ -7,7 +7,7 @@ from experiments import size_pnl_contrast as contrast
 
 TYPES = ("median_noise", "mean_noise", "regression_direction")
 METRICS = ("rmse", "mae")
-STOP_IDS = ("I1", "X1", "X2", "X6", "X7")
+STOP_IDS = ("X1", "X2", "X6", "X7")  # spec.yaml:129 and design section 5; I1 is reported but never stops
 SHORT, STRADDLE = "short_vol", "straddle"
 SHIFTS, RATIO_S = (0.1, -0.1), 0.6
 TAIL = 100 * (1 - contrast.INTERVAL) / 2

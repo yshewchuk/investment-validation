@@ -130,8 +130,13 @@ def test_stop_holds_gating_rows_only():
     out = run(replay_equal=False)
     assert out["stop"] == ["X7 replay"]  # X5 fails here but never stops the run
     assert row(out, "X5", "S1")[2] == "fail"
-    ident = run({k: 1.0 for k in DEFAULT})
-    assert {"I1 S1", "I1 S2", "I1 R_L"} <= set(ident["stop"])
+
+
+def test_identical_pnl_fails_i1_and_x1_and_only_x_ids_stop():
+    out = run({k: 1.0 for k in DEFAULT})
+    assert row(out, "I1", "S1")[2] == "fail" and row(out, "X1", "S1")[2] == "fail"
+    assert "X1 S1" in out["stop"] and "I1 S1" not in out["stop"]
+    assert all(s.startswith("X") for s in out["stop"])
 
 
 def test_slope_matches_polyfit_and_its_interval_brackets_it():
