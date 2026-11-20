@@ -648,3 +648,81 @@ def test_cross_month_history_oracle_through_the_driver(tmp_path, outer_stubs, mo
     assert by_max[january] and all("E3" not in labelled and "E2" in labelled for labelled in by_max[january])
     # February: E3's label, read after January's rows were complete, is present; E4's exit (2025-02-13) is not printed.
     assert by_max[february] and all("E3" in labelled and "E4" not in labelled for labelled in by_max[february])
+
+
+def test_outer_arms_use_their_own_c_and_rows_carry_marks_and_forecasts(tmp_path, outer_stubs, monkeypatch):
+    """The tuning receipts carry c=0.7. The as_is arm must score at c=1.0 and the retuned arm at c=0.7; every straddle rule
+    carries literal marks; each model's rows carry that model's literal pred_move and pred_crush. The scorers are stubbed:
+    the shortvol scorer records the c it receives and returns marks derived from it."""
+    literals = {"prod": (5.25, -12.5), "cand": (6.75, -17.0)}  # (pred_move, pred_crush): distinct per model and per column
+    marks = {"exit_value": 101.5, "rung": 2, "lots": 3, "pnl_dollars": -42.25}
+
+    def tune_c07(items, mid, **kwargs):  # the inner run's tuning receipt: c=0.7 for every model
+        return {"stage": "tuning", "model_id": mid, "c": 0.7, "skipped": False, "events": sum(len(ev) for _c, ev, _s in items)}
+
+    monkeypatch.setattr(tuning, "tune", tune_c07)
+    _stub_tables(monkeypatch, {"prod": EVENTS, "cand": EVENTS})  # roster and bindings; the tables are replaced below
+
+    def model_tables(bound, roster, admitted, production, *, start, end, **kw):
+        out = {}
+        for mid, (move, crush) in literals.items():
+            keep = [(e, d) for e, d in EVENTS.items() if pd.Timestamp(start) <= pd.Timestamp(d) < pd.Timestamp(end)]
+            table = pd.DataFrame({"pred_move": move, "pred_crush": crush, "event_date": pd.to_datetime([d for _e, d in keep])},
+                                 index=pd.Index([e for e, _d in keep], name="event_id"))
+            out[mid] = {"status": "ready", "table": table, "binding": {"rows": len(keep)}}
+        return out
+
+    monkeypatch.setattr(readers, "model_tables", model_tables)
+    use_chunks(monkeypatch, [("2024Q3", chunk("E2"))])
+    driver.run(sources(), "inner", tmp_path, prereg=OK)  # tunes c=0.7; the inner run's own scoring is not recorded
+
+    calls = []
+
+    def recording_score_events(chunk_, events, sims, name, *, alpha=0.5, c=1.0):
+        calls.append(c)
+        return pd.DataFrame({"event_id": events["event_id"].astype(str).to_numpy(), "event_date": events["event_date"].to_numpy(),
+                             "structure": name, "status": "scored", "reason": "scored"})
+
+    def c_marks(chunk_, events, decisions, name, alpha, *, c=1.0, drop_unquoted=False):
+        ids = decisions["event_id"].astype(str).to_numpy()
+        return pd.DataFrame({"event_id": ids, "exit_value": marks["exit_value"], "rung": marks["rung"], "lots": marks["lots"],
+                             "entry_cost": 10.0, "pnl_per_share": -0.5, "pnl_dollars": 100.0 * c})
+
+    def taken_straddle(events, history, rule, chunk_):
+        return pd.DataFrame({"event_id": events["event_id"].astype(str).to_numpy(), "event_date": events["event_date"].to_numpy(),
+                             "edge": 0.5, "cutoff": np.nan, "rel_spread": np.nan, "status": "taken", "reason": "taken"})
+
+    def straddle_marks(chunk_, events, dec, alpha, **kw):
+        ids = dec["event_id"].astype(str).to_numpy()
+        return pd.DataFrame({"event_id": ids, "exit_value": marks["exit_value"], "rung": marks["rung"], "lots": marks["lots"],
+                             "pnl_dollars": marks["pnl_dollars"], "entry_cost": 10.0, "pnl_per_share": -0.5})
+
+    monkeypatch.setattr(driver.shortvol, "score_events", recording_score_events)
+    monkeypatch.setattr(driver.shortvol, "score", c_marks)
+    monkeypatch.setattr(driver.straddle, "decide", taken_straddle)
+    monkeypatch.setattr(driver.straddle, "score", straddle_marks)
+    use_chunks(monkeypatch, [("2024Q3", chunk("E2")), ("2025Q1", chunk("E3", "E4"))])
+    driver.run(sources(), "outer", tmp_path, prereg=OK)
+
+    outer = tuning.load_receipt(tmp_path / "receipts" / "outer.json")
+    assert outer["c"] == {"prod": 0.7, "cand": 0.7}  # the receipt holds the c the test relies on
+    assert set(calls) == {1.0, 0.7}  # every call received one of the two c values, and both were used
+
+    frame = pd.read_parquet(tmp_path / "decisions.parquet")
+    short = frame[frame["book"] == "short_vol"]
+    for arm, expected in (("as_is", 100.0), ("retuned", 70.0)):
+        rows = short[short["arm_or_rule"] == arm]
+        assert len(rows) > 0
+        assert np.isclose(rows["pnl_dollars"].to_numpy(dtype=float), expected).all()
+    straddle_rows = frame[frame["book"] == "straddle"]
+    assert set(straddle_rows["arm_or_rule"]) == set(driver.straddle.RULES)
+    for rule in driver.straddle.RULES:
+        rows = straddle_rows[straddle_rows["arm_or_rule"] == rule]
+        assert len(rows) > 0
+        for col, value in marks.items():
+            assert rows[col].notna().all() and (rows[col].to_numpy(dtype=float) == value).all()
+    for mid, (move, crush) in literals.items():
+        rows = frame[frame["model_id"] == mid]
+        assert len(rows) > 0
+        assert (rows["pred_move"].to_numpy(dtype=float) == move).all()
+        assert (rows["pred_crush"].to_numpy(dtype=float) == crush).all()
