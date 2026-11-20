@@ -67,6 +67,8 @@ def main(argv: list[str] | None = None) -> int:
             raise fail("RESOURCE_UNAVAILABLE", "run under tools/bounded_run.py --heavy",
                        details={"reason": "not_bounded"})
         args.expected_identities = _read_json(args.expected)
+        if not isinstance(args.expected_identities, dict):
+            raise fail(_INVALID, "--expected must be a JSON object", details={"reason": "input_unreadable"})
         # Imported only after the gates above, so a missing PLANNED row refuses first.
         from experiments import size_pnl_driver
         module_name, _, func = args.sources.partition(":")

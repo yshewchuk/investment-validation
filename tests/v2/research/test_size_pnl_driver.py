@@ -3,6 +3,7 @@ stubbed."""
 import dataclasses
 import importlib.util
 import json
+import os
 import sys
 import types
 from pathlib import Path
@@ -141,11 +142,50 @@ def test_inner_writes_receipts_replays_read_only_and_refuses_a_changed_binding(t
 
 def test_inner_receipts_bind_scope_none_and_the_snapshot(tmp_path, stubs, monkeypatch):
     use_chunks(monkeypatch, [("2023Q2", chunk("E1"))])
-    driver.run(sources(), "inner", tmp_path, prereg=OK)
+    summary = driver.run(sources(), "inner", tmp_path, prereg=OK)
+    mid = summary["models"][0]
     inputs = tuning.load_receipt(tmp_path / "receipts" / "inputs_inner.json")
     inner = tuning.load_receipt(tmp_path / "receipts" / "inner.json")
+    tuned = tuning.load_receipt(tmp_path / "receipts" / f"tuning_{mid}.json")
     assert inputs["scope"] is None and inner["scope"] is None
     assert inputs["snapshot"] == "snap-1"
+    # Literal content of each receipt (the tune stub's fields, and the bindings between receipts).
+    assert tuned["stage"] == "tuning" and tuned["model_id"] == mid and tuned["c"] == 1.0
+    assert inner["stage"] == "inner"
+    assert inner["models"] == {mid: tuned["content_hash"]}
+    assert inner["inputs"] == inputs["content_hash"]
+    assert inner["ladder_skipped"] == {}
+    assert inputs["stage"] == "inputs"
+    for digest in (inputs["plan"], inputs["facts"]):
+        assert digest.startswith("sha256:")
+        remainder = digest[len("sha256:"):]
+        assert len(remainder) == 64 and set(remainder) <= set("0123456789abcdef")
+
+
+def test_model_events_aligns_every_column_by_event_id():
+    table = pd.DataFrame({"event_date": pd.to_datetime(["2023-06-10", "2024-08-07", "2025-01-15"]),
+                          "pred_move": [1.5, 2.5, 3.5], "pred_crush": [-10.0, -20.0, -30.0]},
+                         index=pd.Index(["E1", "E2", "E3"]))
+    # Facts deliberately in a different row order than the table.
+    facts = pd.DataFrame({"pre_iv30": [33.0, 31.0, 32.0], "mcap_usd": [3e9, 1e9, 2e9],
+                          "implied_move": [6.0, 4.0, 5.0]},
+                         index=pd.Index(["E3", "E1", "E2"], name="event_id"))
+    # The chunk lists events in yet another order, with a distinct dte_exit for each.
+    ladder = {"event_id": np.array(["E2", "E1", "E3"], dtype=object),
+              "dte_exit": np.array([7, 8, 9], dtype=np.int32)}
+    out = driver.model_events(table, facts, ladder).set_index("event_id")
+    expected = {
+        "E1": dict(event_date=pd.Timestamp("2023-06-10"), pred_move=1.5, pred_abs_move=1.5, pred_crush=-10.0,
+                   pre_iv30=31.0, mcap_usd=1e9, implied_move=4.0, dte_exit=8),
+        "E2": dict(event_date=pd.Timestamp("2024-08-07"), pred_move=2.5, pred_abs_move=2.5, pred_crush=-20.0,
+                   pre_iv30=32.0, mcap_usd=2e9, implied_move=5.0, dte_exit=7),
+        "E3": dict(event_date=pd.Timestamp("2025-01-15"), pred_move=3.5, pred_abs_move=3.5, pred_crush=-30.0,
+                   pre_iv30=33.0, mcap_usd=3e9, implied_move=6.0, dte_exit=9),
+    }
+    assert sorted(out.index) == ["E1", "E2", "E3"]
+    for eid, fields in expected.items():
+        for column, value in fields.items():
+            assert out.loc[eid, column] == value, (eid, column)
 
 
 def test_inner_refuses_a_changed_plan_window_on_replay(tmp_path, stubs, monkeypatch):
@@ -318,3 +358,43 @@ def test_run_py_refuses_an_expected_that_differs_from_the_sources(tmp_path, monk
     assert refused["refused"] == CONFLICT
     assert refused["reason"] == "expected_mismatch"
     assert not (tmp_path / "out").exists()  # refused before the driver wrote anything
+
+
+def test_run_py_refuses_an_expected_that_is_not_a_json_object(tmp_path, monkeypatch, capsys):
+    run_py = _run_main()
+    monkeypatch.setattr(run_py.size_pnl_prereg, "require_preregistration", OK)
+    monkeypatch.setenv("BOUNDED_RUN_NESTED", "1")
+    argv = _argv(tmp_path, "--no-ledger")
+    (tmp_path / "expected.json").write_text("[1]", encoding="utf-8")
+    assert run_py.main(argv) == 2
+    refused = json.loads(capsys.readouterr().out)
+    assert refused["refused"] == "INVALID_EXPERIMENT_SPEC"
+    assert refused["reason"] == "input_unreadable"
+
+
+def test_run_py_refuses_an_expected_that_is_a_symlink(tmp_path, monkeypatch, capsys):
+    run_py = _run_main()
+    monkeypatch.setattr(run_py.size_pnl_prereg, "require_preregistration", OK)
+    monkeypatch.setenv("BOUNDED_RUN_NESTED", "1")
+    argv = _argv(tmp_path, "--no-ledger")
+    target = tmp_path / "target.json"
+    target.write_text(json.dumps(EXPECTED), encoding="utf-8")
+    (tmp_path / "expected.json").unlink()
+    os.symlink(target, tmp_path / "expected.json")
+    assert run_py.main(argv) == 2
+    refused = json.loads(capsys.readouterr().out)
+    assert refused["refused"] == "INVALID_EXPERIMENT_SPEC"
+    assert refused["reason"] == "input_unreadable"
+
+
+def test_run_py_main_returns_zero_and_prints_the_summary(tmp_path, stubs, monkeypatch, capsys):
+    run_py = _run_main()
+    monkeypatch.setattr(run_py.size_pnl_prereg, "require_preregistration", OK)
+    monkeypatch.setenv("BOUNDED_RUN_NESTED", "1")
+    use_chunks(monkeypatch, [("2023Q2", chunk("E1")), ("2024Q3", chunk("E2"))])
+    _install_sources(monkeypatch, sources())
+    assert run_py.main(_argv(tmp_path, "--no-ledger", sources=FAKE)) == 0
+    summary = json.loads(capsys.readouterr().out)
+    inner = tuning.load_receipt(tmp_path / "out" / "receipts" / "inner.json")
+    assert summary["stage"] == "inner"
+    assert summary["models"] == sorted(inner["models"]) and summary["models"]
