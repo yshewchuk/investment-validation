@@ -123,6 +123,11 @@ def _restrict(table, ids):
     return table if ids is None else table[table.index.astype(str).isin(list(ids))]
 
 
+def _ready(tables, ids):
+    """The ready entries of a stage's bound tables, each restricted to the smoke ids."""
+    return {mid: {**e, "table": _restrict(e["table"], ids)} for mid, e in tables.items() if e["status"] == "ready"}
+
+
 def _plan_window(plan, window, ids):
     dates = pd.to_datetime(plan["event_date"])
     keep = ((dates >= pd.Timestamp(window[0])) & (dates < pd.Timestamp(window[1]))).to_numpy()
@@ -236,9 +241,9 @@ def _inner(src, out, ready, plan, facts_all, labels):
     return hashes, max(by_model.values(), default=0), skipped, by_model, common, len(bad), "sha256:" + digest.hexdigest()
 
 
-def _outer_gate(out, ready, scope, body):
+def _outer_gate(out, ready, scope, body, inner_tables, inner_production):
     """Refuses before any chunk is built: every ready model needs its tuning receipt, and inner.json must bind those
-    receipts, have been tuned on this run's event scope, and bind this run's inputs."""
+    receipts, have been tuned on this run's event scope, and bind the inner window's inputs, re-bound here."""
     receipts = {mid: tuning.load_receipt(out / "receipts" / f"tuning_{mid}.json") for mid in ready}
     inner = tuning.load_receipt(out / "receipts" / "inner.json")
     if any(inner["models"].get(mid) != receipts[mid]["content_hash"] for mid in ready):
@@ -246,7 +251,9 @@ def _outer_gate(out, ready, scope, body):
     if "scope" not in inner or inner["scope"] != scope: raise Refusal(_CONFLICT, "inner.json was tuned on a different event scope", {"reason": "scope_mismatch"})
     inputs_inner, now = tuning.load_receipt(out / "receipts" / "inputs_inner.json"), json.loads(json.dumps(body))
     if any(inputs_inner.get(k) != now[k] for k in _BOUND): raise Refusal(_CONFLICT, "inputs_inner.json was bound to different inputs", {"reason": "inner_inputs_mismatch"})
-    if inner["inputs"] != inputs_inner["content_hash"]: raise Refusal(_CONFLICT, "inner.json was tuned on different inner tables", {"reason": "inner_tables_mismatch"})
+    inner_now = json.loads(json.dumps({"tables": inner_tables, "production": inner_production}))
+    if inner["inputs"] != inputs_inner["content_hash"] or any(inputs_inner.get(k) != inner_now[k] for k in ("tables", "production")):
+        raise Refusal(_CONFLICT, "inner.json was tuned on different inner tables", {"reason": "inner_tables_mismatch"})
     return receipts
 
 
@@ -347,7 +354,7 @@ def run(src, stage, out_dir, *, event_ids=None, prereg=size_pnl_prereg.require_p
     out, ids = Path(out_dir), _smoke(src, event_ids)
     roster, bound_tables, production = _prepare(src, stage)  # refuses any stage but "inner" or "outer" before reading
     tables = bound_tables["tables"]
-    ready = {mid: {**e, "table": _restrict(e["table"], ids)} for mid, e in tables.items() if e["status"] == "ready"}
+    ready = _ready(tables, ids)
     excluded = {mid: e["reason"] for mid, e in tables.items() if e["status"] != "ready"}
     full = src.plan_frame
     if full[[c for c in ("event_date", "entry_date", "exit_date") if c in full.columns]].isna().to_numpy().any(): raise fail("INVALID_EXPERIMENT_SPEC", "plan dates must not be null", details={"reason": "plan_dates_null"})
@@ -378,7 +385,9 @@ def run(src, stage, out_dir, *, event_ids=None, prereg=size_pnl_prereg.require_p
     receipts = {}
     if stage == "outer":  # preflight: a refusal here leaves no outer input receipt, and no chunk is built
         if not ready: raise _no_ready()
-        receipts = _outer_gate(out, ready, scope, body)
+        _, inner_bound, inner_production = _prepare(src, "inner")  # the inner window's bindings, to match inputs_inner.json
+        inner_tables = {mid: _table_binding(e, ids) for mid, e in _ready(inner_bound["tables"], ids).items()}
+        receipts = _outer_gate(out, ready, scope, body, inner_tables, inner_production["binding"])
         _unbound_outer(ready)
     inputs_receipt = _receipt(out / "receipts" / f"inputs_{stage}.json", body, "inputs_receipt_changed")
     if not ready: raise _no_ready()

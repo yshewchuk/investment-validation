@@ -159,6 +159,24 @@ def test_changed_pre_2025_label_between_stages_refuses_inner_inputs(tmp_path, ou
     assert not (tmp_path / "receipts" / "inputs_outer.json").exists()
 
 
+def test_changed_inner_window_prediction_between_stages_refuses_inner_tables(tmp_path, outer_stubs, monkeypatch):
+    """Labels are unchanged, but one inner-window production value moved: the re-bound inner tables and production differ."""
+    use_chunks(monkeypatch, [("2024Q3", chunk("E2"))])
+    driver.run(sources(), "inner", tmp_path, prereg=OK)
+
+    def moved(columns, ids):
+        rows = BASE[BASE["event_id"].isin([str(e) for e in ids])].copy()
+        if "pred_abs_move" in columns: rows.loc[rows["event_id"] == "E2", "pred_abs_move"] = 6.0
+        return rows
+
+    use_chunks(monkeypatch, [("2024Q3", chunk("E2")), ("2025Q1", chunk("E3", "E4"))])
+    with pytest.raises(Refusal) as caught:
+        driver.run(sources(fetch=moved), "outer", tmp_path, prereg=OK)
+    assert caught.value.code == CONFLICT
+    assert caught.value.details["reason"] == "inner_tables_mismatch"
+    assert not (tmp_path / "receipts" / "inputs_outer.json").exists()  # preflight: no outer input receipt
+
+
 def test_oracle_one_taken_2025_event_carries_its_literal_marks(tmp_path, outer_stubs, monkeypatch):
     """Only E3 is taken; its scorer marks are literal, so its decision rows must carry exactly those values."""
     monkeypatch.setattr(driver.shortvol, "decide", lambda scored: scored[scored["event_id"].astype(str) == "E3"].assign(status="taken", reason="taken"))
@@ -412,7 +430,7 @@ def test_changed_outer_receipt_leaves_decisions_untouched_and_no_tmp(tmp_path, o
     with pytest.raises(Refusal) as caught:
         driver.run(sources(), "outer", tmp_path, prereg=OK)
     assert caught.value.code == CONFLICT
-    assert caught.value.details["reason"] == "tuning_receipt_changed"
+    assert caught.value.details["reason"] == "outer_receipt_changed"
     assert (tmp_path / "decisions.parquet").read_bytes() == b"EXISTING"
     assert not list(tmp_path.glob("*.tmp"))
 
@@ -431,7 +449,7 @@ def test_changed_ladder_quote_refuses_an_outer_replay(tmp_path, outer_stubs, mon
     with pytest.raises(Refusal) as caught:
         driver.run(sources(), "outer", tmp_path, prereg=OK)
     assert caught.value.code == CONFLICT
-    assert caught.value.details["reason"] == "tuning_receipt_changed"
+    assert caught.value.details["reason"] == "outer_receipt_changed"
     after = (tmp_path / "decisions.parquet").stat()
     assert (after.st_ino, after.st_mtime_ns) == (before.st_ino, before.st_mtime_ns)
     assert not list(tmp_path.glob("*.tmp"))

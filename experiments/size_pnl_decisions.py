@@ -60,7 +60,10 @@ def publish(out, frames, body):
     final, tmp = out / "decisions.parquet", _unique_tmp(out)
     try:
         sha, rows = _write_decisions(tmp, frames)
-        tuning.write_receipt(out / "receipts" / "outer.json", {**body, "decisions_sha256": sha, "rows": rows})  # before the final file
+        try: tuning.write_receipt(out / "receipts" / "outer.json", {**body, "decisions_sha256": sha, "rows": rows})  # before the final file
+        except Refusal as refusal:
+            if refusal.details.get("reason") != "tuning_receipt_changed": raise
+            raise Refusal(_CONFLICT, str(refusal), {**refusal.details, "reason": "outer_receipt_changed"}) from refusal
         if final.exists() and _file_sha256(final) == sha: tmp.unlink()  # exact replay: keep the existing file
         else: os.replace(tmp, final)
     finally:
