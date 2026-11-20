@@ -70,8 +70,7 @@ def _prepare(src, stage):
     bound = inputs.bind_models(src.plan, src.read, roster, src.admit)
     production = readers.read_production(src.fetch, src.admitted, expected_hash=src.production_hash,
                                          table_hash=src.production_table_hash, start=start, end=end)
-    tables = readers.model_tables(bound, roster, src.admitted, production, start=start, end=end)
-    return roster, {"identity": identity, "bound": bound, "tables": tables}, production
+    return roster, {"identity": identity, "bound": bound, "tables": readers.model_tables(bound, roster, src.admitted, production, start=start, end=end)}, production
 
 
 def model_events(table, facts, chunk, exits):
@@ -81,23 +80,19 @@ def model_events(table, facts, chunk, exits):
            for i, (e, d) in enumerate(zip(ids, chunk["dte_exit"].tolist()))}
     part = table[table.index.astype(str).isin(ids)]
     eids = part.index.astype(str).to_numpy()
-    fx = facts.copy()
-    fx.index = fx.index.astype(str)
-    fx = fx.reindex(eids)
+    fx = facts.set_axis(facts.index.astype(str)).reindex(eids)
     move = part["pred_move"].to_numpy(dtype=float)
     out = pd.DataFrame({"event_id": eids, "event_date": pd.to_datetime(part["event_date"]).to_numpy(),
                         "pred_move": move, "pred_abs_move": move,
                         "pred_crush": part["pred_crush"].to_numpy(dtype=float), "dte_exit": [dte[e] for e in eids]})
-    for col in _FACTS:
-        out[col] = fx[col].to_numpy(dtype=float)
+    for col in _FACTS: out[col] = fx[col].to_numpy(dtype=float)
     return out
 
 
 def _plan_rows(plan):
     """The windowed plan as rows sorted by event_id, so a changed window or date changes the receipt."""
-    rows = [[str(e), str(d), str(en), str(x), s, t] for e, d, en, x, s, t in zip(
-        plan["event_id"], plan["event_date"], plan["entry_date"], plan["exit_date"], plan["session"], plan["ticker"])]
-    return sorted(rows, key=lambda r: r[0])
+    return sorted([[str(e), str(d), str(en), str(x), s, t] for e, d, en, x, s, t in zip(
+        plan["event_id"], plan["event_date"], plan["entry_date"], plan["exit_date"], plan["session"], plan["ticker"])], key=lambda r: r[0])
 
 
 def _receipt(path, body, reason):
@@ -119,8 +114,7 @@ def _sims(chunk, events, table, labels, exits):
     """One model's simulations per calendar month; each month's pool uses only rows and labels known before it."""
     sims, months = {}, events["event_date"].dt.to_period("M")
     for period in sorted(set(months)):
-        start_m = period.start_time
-        pool = build_pool(table[table["event_date"] < start_m], _printed(labels, exits, start_m.date().isoformat()))
+        pool = build_pool(table[table["event_date"] < period.start_time], _printed(labels, exits, period.start_time.date().isoformat()))
         sims.update(shortvol.simulate(chunk, events[months == period], pool))
     return sims
 
@@ -174,12 +168,10 @@ def run(src, stage, out_dir, *, prereg=size_pnl_prereg.require_preregistration):
         raise fail("RESOURCE_UNAVAILABLE", "run under tools/bounded_run.py --heavy", details={"reason": "not_bounded"})
     out = Path(out_dir)
     roster, bound_tables, production = _prepare(src, stage)  # refuses any stage but "inner" before reading
-    tables = bound_tables["tables"]
-    ready = {mid: e for mid, e in tables.items() if e["status"] == "ready"}
-    excluded = {mid: e["reason"] for mid, e in tables.items() if e["status"] != "ready"}
+    ready = {mid: e for mid, e in bound_tables["tables"].items() if e["status"] == "ready"}
+    excluded = {mid: e["reason"] for mid, e in bound_tables["tables"].items() if e["status"] != "ready"}
     full = src.plan_frame
-    cols = [c for c in ("event_date", "entry_date", "exit_date") if c in full.columns]
-    if full[cols].isna().to_numpy().any(): raise fail("INVALID_EXPERIMENT_SPEC", "plan dates must not be null", details={"reason": "plan_dates_null"})
+    if full[[c for c in ("event_date", "entry_date", "exit_date") if c in full.columns]].isna().to_numpy().any(): raise fail("INVALID_EXPERIMENT_SPEC", "plan dates must not be null", details={"reason": "plan_dates_null"})
     ladder.check_plan(src.admitted, full)  # the full plan, before the window can drop any row
     dates = pd.to_datetime(full["event_date"])  # the inner window, as a row mask
     plan = full[((dates >= pd.Timestamp(INNER[0])) & (dates < pd.Timestamp(INNER[1]))).to_numpy()]
@@ -187,10 +179,9 @@ def run(src, stage, out_dir, *, prereg=size_pnl_prereg.require_preregistration):
                               pd.to_datetime(src.admitted["events"]["event_date"])))
     if any(str(e) not in admitted_dates for e in plan["event_id"]): raise fail(_DENIED, "plan event ids include a key that is not admitted", details={"reason": "key_not_admitted"})
     facts_all = src.facts(sorted(str(e) for e in plan["event_id"]))  # the only facts call of the run
-    requested = {str(e) for e in plan["event_id"]}
     raw = facts_all.reindex(columns=list(_FACTS)).where(lambda c: c.notna(), np.nan)  # pd.NA and None are NaN
     numeric = raw.apply(pd.to_numeric, errors="coerce")
-    if (not set(_FACTS) <= set(facts_all.columns) or set(facts_all.index.astype(str)) != requested
+    if (not set(_FACTS) <= set(facts_all.columns) or set(facts_all.index.astype(str)) != {str(e) for e in plan["event_id"]}
             or not facts_all.index.astype(str).is_unique or (numeric.isna() & raw.notna()).to_numpy().any() or np.isinf(numeric.to_numpy(dtype=float)).any()): raise fail("INVALID_EXPERIMENT_SPEC", "facts source is incomplete", details={"reason": "facts_incomplete"})
     facts_all = pd.concat([facts_all.drop(columns=list(_FACTS)), numeric], axis=1)
     _log(f"facts_nan_rows={int(facts_all[list(_FACTS)].isna().any(axis=1).sum())}")
