@@ -175,7 +175,9 @@ def _entry(pred, mid, ctx, f):
         raise fail(_DENIED, "the synthetic output ids differ from the input ids",
                    details={"reason": OUT_OF_SCOPE, "why": "output_ids_differ"})
     err = f[keep] - y[keep]
-    binding = content_hash({"model_id": mid, "production": ctx["binding"], "labels": ctx["labels_hash"]})
+    binding = content_hash({"model_id": mid, "production": ctx["binding"], "labels": ctx["labels_hash"],
+                            "version": "sy1",
+                            "table": hashlib.sha256(pd.util.hash_pandas_object(table, index=True).to_numpy().tobytes()).hexdigest()})
     return {"status": "ready", "source": "synthetic", "family": pred["family"], "params": pred["params"],
             "table": table, "binding": binding, "dropped": {"no_crush_forecast": n1, "undetermined_mean": n2},
             "metrics": {"n": int(keep.sum()), "rmse": float(np.sqrt(np.mean(err ** 2))),
@@ -192,6 +194,8 @@ def generate(admitted, labels, production, arm):
     if not isinstance(production, readers.Production):
         raise fail(_CONFLICT, "the synthetic generator accepts only a production issued by read_production",
                    details={"reason": "production_not_issued"})
+    if not isinstance(production.get("frame"), pd.DataFrame):
+        raise fail(_CONFLICT, "the production frame is not a table", details={"reason": "production_series_failed"})
     prod = readers._checked_production(production["frame"], admitted)
     table_hash = production.get("table_hash")
     if not readers._is_hash(table_hash) or readers._production_binding(table_hash, prod) != production["binding"]:

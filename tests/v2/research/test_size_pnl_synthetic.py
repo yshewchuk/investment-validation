@@ -247,6 +247,35 @@ def test_binding_distinguishes_same_day_times_from_midnight():
     assert timed == _binding_of_oracle(["2023-03-01 10:00", "2023-03-01 15:00"])
 
 
+def test_entry_bindings_differ_between_predictors_and_are_stable():
+    admitted, labels, production = _world(40)
+    first = syn.generate(admitted, labels, production, ARM)
+    second = syn.generate(admitted, labels, production, ARM)
+    bindings = [e["binding"] for e in first.values()]
+    assert len(set(bindings)) == len(bindings)
+    assert bindings == [e["binding"] for e in second.values()]
+
+
+def test_entry_binding_changes_when_generated_table_changes(monkeypatch):
+    admitted, labels, production = _world(40)
+    before = next(e for e in syn.generate(admitted, labels, production, ARM).values()
+                  if e["family"] == "oracle")["binding"]
+    original = syn._forecast
+    monkeypatch.setattr(syn, "_forecast", lambda pred, y, z, prior: original(pred, y, z, prior) + 1e-6)
+    after = next(e for e in syn.generate(admitted, labels, production, ARM).values()
+                 if e["family"] == "oracle")["binding"]
+    assert before != after
+
+
+def test_one_label_change_changes_every_binding():
+    admitted, labels, production = _world(40)
+    first = syn.generate(admitted, labels, production, ARM)
+    changed = labels.copy()
+    changed.iloc[0, changed.columns.get_loc("abs_move")] += 1e-3
+    second = syn.generate(admitted, changed, production, ARM)
+    assert all(first[mid]["binding"] != second[mid]["binding"] for mid in first)
+
+
 def test_holdout_event_is_never_read_or_generated():
     admitted, labels, production = _world(40)
     calls = []
@@ -325,6 +354,14 @@ def test_mutated_production_frame_refuses_binding_mismatch():
     with pytest.raises(OpsError) as exc:
         syn.generate(admitted, labels, production, ARM)
     assert _refusal(exc) == (CONFLICT, "production_binding_mismatch")
+
+
+def test_production_frame_not_a_dataframe_refuses():
+    events = _events(20)
+    production = readers.Production({"frame": None, "binding": "b", "table_hash": "t"})
+    with pytest.raises(OpsError) as exc:
+        syn.generate(_admitted(events), _labels(events, np.ones(20)), production, ARM)
+    assert _refusal(exc) == (CONFLICT, "production_series_failed")
 
 
 @pytest.mark.parametrize("drop", ["pred_move", "pred_crush"])
