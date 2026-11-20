@@ -43,11 +43,8 @@ def choose_c(totals, trades):
     return float(min(tied, key=lambda c: (abs(c - 1.0), c))), None
 
 
-def tune(items, model_id, *, alpha=ALPHA, grid=C_GRID, exclude=frozenset()):
-    """The S6 tuning receipt body for one model. ``items`` is ``[(chunk, events, sims), ...]``, one per quarter.
-
-    ``exclude`` holds event ids dropped from the taken population only; their scores stay in the cutoff history.
-    """
+def tune(items, model_id, *, alpha=ALPHA, grid=C_GRID):
+    """The S6 tuning receipt body for one model. ``items`` is ``[(chunk, events, sims), ...]``, one per quarter."""
     if 1.0 not in grid:
         raise ValueError("grid must include the unity divisor 1.0")
     if not items:
@@ -65,7 +62,7 @@ def tune(items, model_id, *, alpha=ALPHA, grid=C_GRID, exclude=frozenset()):
                                 for chunk, events, sims in items], ignore_index=True)
             decisions = decide(scored)  # the cutoff history spans quarters, recomputed per c
             for chunk, events, _sims in items:
-                ids = {str(e) for e in chunk["event_id"]} - {str(e) for e in exclude}
+                ids = {str(e) for e in chunk["event_id"]}
                 mine = decisions[decisions["event_id"].astype(str).isin(ids)]
                 taken = score(chunk, events, mine, name, alpha, c=c)
                 total += float(taken["pnl_dollars"].sum())

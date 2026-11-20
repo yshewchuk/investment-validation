@@ -147,11 +147,14 @@ def _inner(src, out, ready, plan, facts_all, labels):
                 rows = pd.concat([shortvol.score_events(chunk, events, sims, name, alpha=tuning.ALPHA, c=c)
                                   for chunk, events, sims in items[mid]], ignore_index=True)
                 bad |= set(rows.loc[rows["status"] != "scored", "event_id"].astype(str))
-    by_model = {mid: sum(int((~events["event_id"].isin(bad)).sum()) for _c, events, _s in items[mid]) for mid in ready}
+    for mid in ready:  # the common population is one event set for history and trades alike (design section 4)
+        items[mid] = [(chunk, events[~events["event_id"].isin(bad)], {e: s for e, s in sims.items() if e not in bad})
+                      for chunk, events, sims in items[mid]]
+    by_model = {mid: sum(len(events) for _c, events, _s in items[mid]) for mid in ready}
     hashes = {}
     for i, mid in enumerate(ready, start=1):
         started = time.monotonic()
-        body = tuning.tune(items[mid], mid, exclude=bad)
+        body = tuning.tune(items[mid], mid)
         hashes[mid] = tuning.write_receipt(out / "receipts" / f"tuning_{mid}.json", body)["content_hash"]
         _log(f"tuning model {i}/{len(ready)} {mid} elapsed={time.monotonic() - started:.1f}s "
              f"c={body['c']} skipped={body['skipped']}")
