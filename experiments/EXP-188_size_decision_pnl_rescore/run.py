@@ -20,9 +20,7 @@ from engine.v2.ops.errors import OpsError, fail  # noqa: E402
 from experiments import size_pnl_prereg, size_pnl_shortvol  # noqa: E402
 Refusal = size_pnl_shortvol.Refusal
 
-_INVALID = "INVALID_EXPERIMENT_SPEC"
-_CONFLICT = "EXPERIMENT_IDENTITY_CONFLICT"
-_INPUT_LIMIT = 1 << 20
+_INVALID, _CONFLICT, _INPUT_LIMIT = "INVALID_EXPERIMENT_SPEC", "EXPERIMENT_IDENTITY_CONFLICT", 1 << 20
 
 
 def _parser() -> argparse.ArgumentParser:

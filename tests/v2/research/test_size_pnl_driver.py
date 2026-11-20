@@ -78,6 +78,14 @@ def bounded(monkeypatch):
     monkeypatch.setenv("BOUNDED_RUN_NESTED", "1")
 
 
+@pytest.fixture(autouse=True)
+def structure_gate_passes(monkeypatch):
+    """The structure gate passes every event (no structure undetermined) unless a test replaces these."""
+    monkeypatch.setattr(driver.shortvol, "score_events", lambda chunk_, events, sims, name, **kw: pd.DataFrame(
+        {"event_id": events["event_id"].to_numpy(), "status": "scored"}))
+    monkeypatch.setattr(driver.shortvol, "decide", lambda scored: scored)
+
+
 @pytest.fixture
 def stubs(monkeypatch):
     """Pool, simulation and tuning are stubbed so the tests exercise the driver's own orchestration.
@@ -295,6 +303,34 @@ def test_an_event_missing_from_one_table_leaves_for_every_model(tmp_path, stubs,
     tuned = [ids for kind, _mid, ids in stubs if kind == "tune"]
     assert len(tuned) == 2 and all(ids == ("E1", "E2") for ids in tuned)  # E3 is in neither model's items
     assert tuning.load_receipt(tmp_path / "receipts" / "inner.json")["common_dropped"] == {"2023Q2": 1}
+
+
+def test_an_event_undetermined_for_a_structure_leaves_for_every_model(tmp_path, stubs, monkeypatch):
+    real, seen = readers.model_tables, {}
+
+    def twinned(bound, roster, admitted, production, **kw):
+        tables = real(bound, roster, admitted, production, **kw)
+        mid = next(iter(tables))
+        seen["twin"] = tables[mid]["table"].copy()
+        return {mid: tables[mid], "twin": {**tables[mid], "table": seen["twin"]}}
+
+    def sims_of(chunk_, events, table, labels, exits):  # the twin's E2 is marked undetermined for every structure
+        return {e: ("undetermined" if table is seen["twin"] and e == "E2" else "sim") for e in events["event_id"]}
+
+    def scored_of(chunk_, events, sims, name, **kw):
+        return pd.DataFrame({"event_id": events["event_id"].to_numpy(),
+                             "status": ["undetermined" if sims.get(e) == "undetermined" else "scored" for e in events["event_id"]]})
+
+    monkeypatch.setattr(readers, "model_tables", twinned)
+    monkeypatch.setattr(driver, "_sims", sims_of)
+    monkeypatch.setattr(driver.shortvol, "score_events", scored_of)
+    use_chunks(monkeypatch, [("2023Q2", chunk("E1", "E2"))])
+    driver.run(sources(), "inner", tmp_path, prereg=OK)
+    tuned = [ids for kind, _mid, ids in stubs if kind == "tune"]
+    assert len(tuned) == 2 and all(ids == ("E1",) for ids in tuned)  # E2 is in neither model's items
+    inner = tuning.load_receipt(tmp_path / "receipts" / "inner.json")
+    assert inner["common_dropped_structure"] == 1
+    assert inner["common_dropped"] == {"2023Q2": 0}  # the quarter-level count is unchanged
 
 
 def test_inner_refuses_a_changed_plan_window_on_replay(tmp_path, stubs, monkeypatch):

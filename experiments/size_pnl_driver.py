@@ -46,8 +46,7 @@ class Sources:
 
 def check_sources(src):
     if not (isinstance(src, Sources) and isinstance(src.expected, dict) and isinstance(src.plan_frame, pd.DataFrame)):
-        raise fail("INVALID_EXPERIMENT_SPEC", "sources must be a Sources with an object `expected`",
-                   details={"reason": "sources_invalid"})
+        raise fail("INVALID_EXPERIMENT_SPEC", "sources must be a Sources with an object `expected`", details={"reason": "sources_invalid"})
     return src
 
 
@@ -62,8 +61,7 @@ def _rss_mb():
 def _prepare(src, stage):
     """Steps 2-4: bind run, roster, models; read production and tables. Returns (roster, bound_tables, production)."""
     check_sources(src)
-    if stage not in STAGES:
-        raise ValueError(f"stage must be one of {STAGES}, got {stage!r}")
+    if stage not in STAGES: raise ValueError(f"stage must be one of {STAGES}, got {stage!r}")
     start, end = INNER
     identity = inputs.bind_run(src.plan, src.read, expected=src.expected, panel_id=src.panel_id)
     roster = inputs.resolve_roster(src.plan, src.selection, outer_year=OUTER_YEAR,
@@ -106,8 +104,7 @@ def _receipt(path, body, reason):
     try:
         return tuning.write_receipt(path, body)
     except shortvol.Refusal as refusal:
-        if refusal.details.get("reason") != "tuning_receipt_changed":
-            raise
+        if refusal.details.get("reason") != "tuning_receipt_changed": raise
         raise shortvol.Refusal(_CONFLICT, str(refusal), {**refusal.details, "reason": reason}) from refusal
 
 
@@ -130,13 +127,11 @@ def _sims(chunk, events, table, labels, exits):
 def _inner(src, out, ready, plan, facts_all, labels):
     exits = {str(e): pd.Timestamp(x).date().isoformat()  # event id -> exit_date (ISO), where known
              for e, x in zip(src.plan_frame["event_id"], src.plan_frame["exit_date"]) if pd.notna(x)}
-    items = {mid: [] for mid in ready}
-    quarters = pd.to_datetime(plan["event_date"]).dt.to_period("Q").nunique()
+    items, quarters = {mid: [] for mid in ready}, pd.to_datetime(plan["event_date"]).dt.to_period("Q").nunique()
     kept, started, skipped, common = 0, time.monotonic(), {}, {}
     for number, (label, chunk) in enumerate(ladder.ladder_chunks(src.admitted, plan, src.load_index), start=1):
         kept += len(chunk["event_id"])
-        for reason, n in chunk.get("skipped", {}).items():
-            skipped[str(reason)] = skipped.get(str(reason), 0) + int(n)
+        for reason, n in chunk.get("skipped", {}).items(): skipped[str(reason)] = skipped.get(str(reason), 0) + int(n)
         built = {}
         for mid, entry in ready.items():
             events = model_events(entry["table"], facts_all, chunk, exits)  # facts_all: the run's only facts call
@@ -146,11 +141,18 @@ def _inner(src, out, ready, plan, facts_all, labels):
         dropped |= {e for events, _s in built.values() for e in set(map(str, chunk["event_id"])) - set(events["event_id"])}
         common[label] = len(dropped)
         for mid, (events, sims) in built.items():
-            items[mid].append((chunk, events[~events["event_id"].isin(dropped)],
-                               {e: s for e, s in sims.items() if e not in dropped}))
+            items[mid].append((chunk, events[~events["event_id"].isin(dropped)], {e: s for e, s in sims.items() if e not in dropped}))
         elapsed = max(time.monotonic() - started, 1e-9)
         _log(f"inner quarter {number}/{quarters} {label} events={len(chunk['event_id'])} "
              f"rate={kept / elapsed:.2f}/s eta={(quarters - number) * elapsed / number:.0f}s rss={_rss_mb():.0f}MB")
+    bad = set()  # structure-level: an event undetermined for ANY structure of ANY model leaves for ALL (c = 1.0)
+    for mid in ready:
+        scored = pd.concat([shortvol.score_events(chunk, events, sims, name, alpha=tuning.ALPHA, c=1.0)
+                            for chunk, events, sims in items[mid] for name in shortvol.NAMES], ignore_index=True)
+        decided = shortvol.decide(scored)
+        bad |= set(decided.loc[decided["status"] == "undetermined", "event_id"].astype(str))
+    for mid in ready:
+        items[mid] = [(chunk, events[~events["event_id"].isin(bad)], {e: s for e, s in sims.items() if e not in bad}) for chunk, events, sims in items[mid]]
     by_model = {mid: sum(len(events) for _c, events, _s in items[mid]) for mid in ready}
     hashes = {}
     for i, mid in enumerate(ready, start=1):
@@ -159,7 +161,7 @@ def _inner(src, out, ready, plan, facts_all, labels):
         hashes[mid] = tuning.write_receipt(out / "receipts" / f"tuning_{mid}.json", body)["content_hash"]
         _log(f"tuning model {i}/{len(ready)} {mid} elapsed={time.monotonic() - started:.1f}s "
              f"c={body['c']} skipped={body['skipped']}")
-    return hashes, kept, skipped, by_model, common
+    return hashes, kept, skipped, by_model, common, len(bad)
 
 
 def run(src, stage, out_dir, *, prereg=size_pnl_prereg.require_preregistration):
@@ -177,22 +179,19 @@ def run(src, stage, out_dir, *, prereg=size_pnl_prereg.require_preregistration):
     excluded = {mid: e["reason"] for mid, e in tables.items() if e["status"] != "ready"}
     full = src.plan_frame
     cols = [c for c in ("event_date", "entry_date", "exit_date") if c in full.columns]
-    if full[cols].isna().to_numpy().any():
-        raise fail("INVALID_EXPERIMENT_SPEC", "plan dates must not be null", details={"reason": "plan_dates_null"})
+    if full[cols].isna().to_numpy().any(): raise fail("INVALID_EXPERIMENT_SPEC", "plan dates must not be null", details={"reason": "plan_dates_null"})
     ladder.check_plan(src.admitted, full)  # the full plan, before the window can drop any row
     dates = pd.to_datetime(full["event_date"])  # the inner window, as a row mask
     plan = full[((dates >= pd.Timestamp(INNER[0])) & (dates < pd.Timestamp(INNER[1]))).to_numpy()]
     admitted_dates = dict(zip(src.admitted["events"]["event_id"].astype(str),
                               pd.to_datetime(src.admitted["events"]["event_date"])))
-    if any(str(e) not in admitted_dates for e in plan["event_id"]):
-        raise fail(_DENIED, "plan event ids include a key that is not admitted", details={"reason": "key_not_admitted"})
+    if any(str(e) not in admitted_dates for e in plan["event_id"]): raise fail(_DENIED, "plan event ids include a key that is not admitted", details={"reason": "key_not_admitted"})
     facts_all = src.facts(sorted(str(e) for e in plan["event_id"]))  # the only facts call of the run
     requested = {str(e) for e in plan["event_id"]}
     raw = facts_all.reindex(columns=list(_FACTS)).where(lambda c: c.notna(), np.nan)  # pd.NA and None are NaN
     numeric = raw.apply(pd.to_numeric, errors="coerce")
     if (not set(_FACTS) <= set(facts_all.columns) or set(facts_all.index.astype(str)) != requested
-            or not facts_all.index.astype(str).is_unique or (numeric.isna() & raw.notna()).to_numpy().any() or np.isinf(numeric.to_numpy(dtype=float)).any()):
-        raise fail("INVALID_EXPERIMENT_SPEC", "facts source is incomplete", details={"reason": "facts_incomplete"})
+            or not facts_all.index.astype(str).is_unique or (numeric.isna() & raw.notna()).to_numpy().any() or np.isinf(numeric.to_numpy(dtype=float)).any()): raise fail("INVALID_EXPERIMENT_SPEC", "facts source is incomplete", details={"reason": "facts_incomplete"})
     facts_all = pd.concat([facts_all.drop(columns=list(_FACTS)), numeric], axis=1)
     _log(f"facts_nan_rows={int(facts_all[list(_FACTS)].isna().any(axis=1).sum())}")
     facts_rows = sorted([str(e), *[None if pd.isna(v) else float(v) for v in vals]] for e, vals in
@@ -209,15 +208,13 @@ def run(src, stage, out_dir, *, prereg=size_pnl_prereg.require_preregistration):
             "production": production["binding"], "scope": None, "plan": content_hash(_plan_rows(plan)),
             "facts": content_hash(facts_rows), "labels": content_hash(label_rows), "snapshot": src.snapshot_id}
     inputs_receipt = _receipt(out / "receipts" / "inputs_inner.json", body, "inputs_receipt_changed")
-    if not ready:
-        raise shortvol.Refusal(_CONFLICT, "no model is ready to be tuned or scored", {"reason": "no_ready_models"})
-    if plan.empty:
-        raise shortvol.Refusal(_CONFLICT, "the plan window holds no events", {"reason": "empty_population"})
-    hashes, rows, skipped, by_model, common = _inner(src, out, ready, plan, facts_all, labels)
+    if not ready: raise shortvol.Refusal(_CONFLICT, "no model is ready to be tuned or scored", {"reason": "no_ready_models"})
+    if plan.empty: raise shortvol.Refusal(_CONFLICT, "the plan window holds no events", {"reason": "empty_population"})
+    hashes, rows, skipped, by_model, common, structure = _inner(src, out, ready, plan, facts_all, labels)
     _receipt(out / "receipts" / "inner.json",
              {"stage": "inner", "models": hashes, "events": rows, "events_by_model": by_model,
               "excluded": excluded, "scope": None, "inputs": inputs_receipt["content_hash"],
-              "ladder_skipped": skipped, "common_dropped": common}, "inner_receipt_changed")
+              "ladder_skipped": skipped, "common_dropped": common, "common_dropped_structure": structure}, "inner_receipt_changed")
     _log(f"stage={stage} end elapsed={time.monotonic() - started:.1f}s rss={_rss_mb():.0f}MB "
-         f"ladder_skipped={skipped} common_dropped={common}")
+         f"ladder_skipped={skipped} common_dropped={common} common_dropped_structure={structure}")
     return {"stage": stage, "models": sorted(ready), "excluded": excluded, "rows": rows, "ladder_skipped": skipped}
