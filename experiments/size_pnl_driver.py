@@ -1,8 +1,7 @@
 """EXP-188 S9a: driver for the inner stage (2023-2024) of the SIZE decision-level P&L re-score.
 
-Orchestrates S2a-S8 through the injected ``Sources``: binds inputs, runs the S3 ladder per quarter, tunes each
-model's divisor and writes the receipts. The outer stage, ``--event-ids`` smoke and decisions output are S9b
-(issue #2660). ``prepare`` and ``model_events`` serve the synthetic arm.
+Orchestrates S2a-S8 through the injected ``Sources`` and writes receipts. Outer stage: S9b (#2660).
+``prepare`` and ``model_events`` also serve the synthetic arm.
 """
 import resource
 import sys
@@ -56,10 +55,7 @@ def _rss_mb():
 
 
 def prepare(src, stage):
-    """Steps 2-4: bind run, roster and models, then read production and the stage's tables.
-
-    Returns ``(roster, bound_tables, production)``; ``bound_tables`` holds ``identity``, ``bound`` and ``tables``.
-    """
+    """Steps 2-4: bind run, roster, models; read production and tables. Returns (roster, bound_tables, production)."""
     if stage not in STAGES:
         raise ValueError(f"stage must be one of {STAGES}, got {stage!r}")
     start, end = INNER
@@ -73,10 +69,11 @@ def prepare(src, stage):
     return roster, {"identity": identity, "bound": bound, "tables": tables}, production
 
 
-def model_events(table, facts, chunk):
-    """One model's events in one ladder chunk: its table rows joined with facts and the chunk's dte_exit."""
+def model_events(table, facts, chunk, exits):
+    """One model's events in one ladder chunk. A -1 dte_exit (no exit quotes) becomes expiry minus exit_date."""
     ids = [str(e) for e in chunk["event_id"]]
-    dte = dict(zip(ids, chunk["dte_exit"].tolist()))
+    dte = {e: int((pd.Timestamp(chunk["expiry"][i]) - pd.Timestamp(exits[e])).days) if d < 0 else d
+           for i, (e, d) in enumerate(zip(ids, chunk["dte_exit"].tolist()))}
     part = table[table.index.astype(str).isin(ids)]
     eids = part.index.astype(str).to_numpy()
     fx = facts.copy()
@@ -139,14 +136,21 @@ def _inner(src, out, ready, plan, facts_all, labels):
     exits = _exit_map(src.plan_frame)
     items = {mid: [] for mid in ready}
     quarters = pd.to_datetime(plan["event_date"]).dt.to_period("Q").nunique()
-    kept, started, skipped = 0, time.monotonic(), {}
+    kept, started, skipped, common = 0, time.monotonic(), {}, {}
     for number, (label, chunk) in enumerate(ladder.ladder_chunks(src.admitted, plan, src.load_index), start=1):
         kept += len(chunk["event_id"])
         for reason, n in chunk.get("skipped", {}).items():
             skipped[str(reason)] = skipped.get(str(reason), 0) + int(n)
+        built = {}
         for mid, entry in ready.items():
-            events = model_events(entry["table"], facts_all, chunk)  # facts_all: the run's only facts call
-            items[mid].append((chunk, events, _sims(chunk, events, entry["table"], labels, exits)))
+            events = model_events(entry["table"], facts_all, chunk, exits)  # facts_all: the run's only facts call
+            built[mid] = (events, _sims(chunk, events, entry["table"], labels, exits))
+        # A no-sim event under ANY model leaves for ALL, and its cutoff history with it (design section 4).
+        dropped = {e for events, sims in built.values() for e in events["event_id"] if sims.get(e) is None}
+        common[label] = len(dropped)
+        for mid, (events, sims) in built.items():
+            items[mid].append((chunk, events[~events["event_id"].isin(dropped)],
+                               {e: s for e, s in sims.items() if e not in dropped}))
         elapsed = max(time.monotonic() - started, 1e-9)
         _log(f"inner quarter {number}/{quarters} {label} events={len(chunk['event_id'])} "
              f"rate={kept / elapsed:.2f}/s eta={(quarters - number) * elapsed / number:.0f}s rss={_rss_mb():.0f}MB")
@@ -158,21 +162,21 @@ def _inner(src, out, ready, plan, facts_all, labels):
         hashes[mid] = tuning.write_receipt(out / "receipts" / f"tuning_{mid}.json", body)["content_hash"]
         _log(f"tuning model {i}/{len(ready)} {mid} elapsed={time.monotonic() - started:.1f}s "
              f"c={body['c']} skipped={body['skipped']}")
-    return hashes, kept, skipped, by_model
+    return hashes, kept, skipped, by_model, common
 
 
 def run(src, stage, out_dir, *, prereg=size_pnl_prereg.require_preregistration):
     """Run the inner stage, write its receipts under ``out_dir``, and return a JSON-safe summary."""
     started = time.monotonic()
     receipt = prereg()
-    _log(f"stage={stage} start rss={_rss_mb():.0f}MB")
     out = Path(out_dir)
     roster, bound_tables, production = prepare(src, stage)  # refuses any stage but "inner" before reading
     tables = bound_tables["tables"]
     ready = {mid: e for mid, e in tables.items() if e["status"] == "ready"}
     excluded = {mid: e["reason"] for mid, e in tables.items() if e["status"] != "ready"}
     full = src.plan_frame
-    if full[["event_date", "entry_date", "exit_date"]].isna().to_numpy().any():
+    cols = [c for c in ("event_date", "entry_date", "exit_date") if c in full.columns]
+    if full[cols].isna().to_numpy().any():
         raise fail("INVALID_EXPERIMENT_SPEC", "plan dates must not be null", details={"reason": "plan_dates_null"})
     ladder.check_plan(src.admitted, full)  # the full plan, before the window can drop any row
     plan = _plan_window(full)
@@ -203,11 +207,11 @@ def run(src, stage, out_dir, *, prereg=size_pnl_prereg.require_preregistration):
         raise shortvol.Refusal(_CONFLICT, "no model is ready to be tuned or scored", {"reason": "no_ready_models"})
     if plan.empty:
         raise shortvol.Refusal(_CONFLICT, "the plan window holds no events", {"reason": "empty_population"})
-    hashes, rows, skipped, by_model = _inner(src, out, ready, plan, facts_all, labels)
+    hashes, rows, skipped, by_model, common = _inner(src, out, ready, plan, facts_all, labels)
     _receipt(out / "receipts" / "inner.json",
              {"stage": "inner", "models": hashes, "events": rows, "events_by_model": by_model,
               "excluded": excluded, "scope": None, "inputs": inputs_receipt["content_hash"],
-              "ladder_skipped": skipped}, "inner_receipt_changed")
+              "ladder_skipped": skipped, "common_dropped": common}, "inner_receipt_changed")
     _log(f"stage={stage} end elapsed={time.monotonic() - started:.1f}s rss={_rss_mb():.0f}MB "
-         f"ladder_skipped={skipped}")
+         f"ladder_skipped={skipped} common_dropped={common}")
     return {"stage": stage, "models": sorted(ready), "excluded": excluded, "rows": rows, "ladder_skipped": skipped}

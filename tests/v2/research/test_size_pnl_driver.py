@@ -63,6 +63,9 @@ def sources(**over):
     return driver.Sources(**base)
 
 
+SIMS = lambda chunk_, events, pool, **kw: {e: "sim" for e in events["event_id"]}  # noqa: E731
+
+
 def chunk(*eids):
     """A minimal ladder chunk: the event ids and dte_exit are all the driver reads outside the simulator."""
     return {"event_id": np.array(eids, dtype=object), "dte_exit": np.full(len(eids), 9, dtype=np.int32)}
@@ -83,7 +86,7 @@ def stubs(monkeypatch):
 
     monkeypatch.setattr(driver, "build_pool", lambda table, labels: None)
     monkeypatch.setattr(tuning, "tune", fake_tune)
-    monkeypatch.setattr(driver.shortvol, "simulate", lambda chunk_, events, pool, **kw: {})
+    monkeypatch.setattr(driver.shortvol, "simulate", SIMS)
     return log
 
 
@@ -168,7 +171,7 @@ def test_inner_receipts_bind_scope_none_and_the_snapshot(tmp_path, stubs, monkey
 def test_real_tune_skips_with_no_trades_and_binds_the_receipt(tmp_path, monkeypatch):
     """The real ``tune`` (not stubbed) on a fixture where nothing is taken: the S6 fallback is persisted and bound."""
     monkeypatch.setattr(driver, "build_pool", lambda table, labels: None)
-    monkeypatch.setattr(driver.shortvol, "simulate", lambda chunk_, events, pool, **kw: {})
+    monkeypatch.setattr(driver.shortvol, "simulate", SIMS)
     scored_ids = lambda chunk_, events, sims, name, **kw: pd.DataFrame({"event_id": events["event_id"].to_numpy()})  # noqa: E731
     monkeypatch.setattr(tuning, "score_events", scored_ids)
     monkeypatch.setattr(tuning, "decide", lambda scored: scored.iloc[:0])  # every row undetermined, none taken
@@ -196,7 +199,7 @@ def test_model_events_aligns_every_column_by_event_id():
     # The chunk lists events in yet another order, with a distinct dte_exit for each.
     ladder = {"event_id": np.array(["E2", "E1", "E3"], dtype=object),
               "dte_exit": np.array([7, 8, 9], dtype=np.int32)}
-    out = driver.model_events(table, facts, ladder).set_index("event_id")
+    out = driver.model_events(table, facts, ladder, {}).set_index("event_id")
     expected = {
         "E1": dict(event_date=pd.Timestamp("2023-06-10"), pred_move=1.5, pred_abs_move=1.5, pred_crush=-10.0,
                    pre_iv30=31.0, mcap_usd=1e9, implied_move=4.0, dte_exit=8),
@@ -209,6 +212,38 @@ def test_model_events_aligns_every_column_by_event_id():
     for eid, fields in expected.items():
         for column, value in fields.items():
             assert out.loc[eid, column] == value, (eid, column)
+
+
+def test_model_events_derives_dte_when_exit_quotes_are_missing():
+    table = pd.DataFrame({"event_date": pd.to_datetime(["2023-06-10"]), "pred_move": [1.5], "pred_crush": [-10.0]},
+                         index=pd.Index(["E1"]))
+    facts = pd.DataFrame({"pre_iv30": [33.0], "mcap_usd": [3e9], "implied_move": [6.0]},
+                         index=pd.Index(["E1"], name="event_id"))
+    gap = {"event_id": np.array(["E1"], dtype=object), "dte_exit": np.array([-1], dtype=np.int32),
+           "expiry": np.array(["2023-07-21"], dtype="datetime64[ns]")}
+    out = driver.model_events(table, facts, gap, {"E1": "2023-07-14"})
+    assert out["dte_exit"].tolist() == [7]  # 2023-07-21 minus 2023-07-14
+
+
+def test_an_event_unsimulable_under_one_model_leaves_for_every_model(tmp_path, stubs, monkeypatch):
+    real, seen = readers.model_tables, {}
+
+    def twinned(bound, roster, admitted, production, **kw):
+        tables = real(bound, roster, admitted, production, **kw)
+        mid = next(iter(tables))
+        seen["twin"] = tables[mid]["table"].copy()
+        return {mid: tables[mid], "twin": {**tables[mid], "table": seen["twin"]}}
+
+    def sims_of(chunk_, events, table, labels, exits):
+        return {e: (None if table is seen["twin"] and e == "E2" else "sim") for e in events["event_id"]}
+
+    monkeypatch.setattr(readers, "model_tables", twinned)
+    monkeypatch.setattr(driver, "_sims", sims_of)
+    use_chunks(monkeypatch, [("2023Q2", chunk("E1", "E2"))])
+    driver.run(sources(), "inner", tmp_path, prereg=OK)
+    tuned = [ids for kind, _mid, ids in stubs if kind == "tune"]
+    assert len(tuned) == 2 and all(ids == ("E1",) for ids in tuned)  # neither model's items hold E2
+    assert tuning.load_receipt(tmp_path / "receipts" / "inner.json")["common_dropped"] == {"2023Q2": 1}
 
 
 def test_inner_refuses_a_changed_plan_window_on_replay(tmp_path, stubs, monkeypatch):
@@ -304,6 +339,15 @@ def test_null_plan_date_refuses_before_any_receipt(tmp_path, stubs, monkeypatch,
         driver.run(sources(plan_frame=plan), "inner", tmp_path, prereg=OK)
     assert caught.value.code == "INVALID_EXPERIMENT_SPEC"
     assert caught.value.problem.details["reason"] == "plan_dates_null"
+    assert not (tmp_path / "receipts").exists()
+
+
+def test_plan_without_exit_date_refuses_through_check_plan(tmp_path, monkeypatch):
+    use_chunks(monkeypatch, [("2023Q2", chunk("E1"))])
+    with pytest.raises(OpsError) as caught:
+        driver.run(sources(plan_frame=PLAN_FRAME.drop(columns="exit_date")), "inner", tmp_path, prereg=OK)
+    assert caught.value.code == CONFLICT
+    assert caught.value.problem.details["reason"] == "plan_malformed"
     assert not (tmp_path / "receipts").exists()
 
 
@@ -515,3 +559,12 @@ def test_run_py_main_returns_zero_and_prints_the_summary(tmp_path, stubs, monkey
     inner = tuning.load_receipt(tmp_path / "out" / "receipts" / "inner.json")
     assert summary["stage"] == "inner"
     assert summary["models"] == sorted(inner["models"]) and summary["models"]
+
+
+def test_run_py_main_refuses_a_plan_without_exit_date(tmp_path, monkeypatch, capsys):
+    run_py = _run_main()
+    monkeypatch.setattr(run_py.size_pnl_prereg, "require_preregistration", OK)
+    monkeypatch.setenv("BOUNDED_RUN_NESTED", "1")
+    _install_sources(monkeypatch, sources(plan_frame=PLAN_FRAME.drop(columns="exit_date")))
+    assert run_py.main(_argv(tmp_path, "--no-ledger", sources=FAKE)) == 2
+    assert json.loads(capsys.readouterr().out)["refused"] == CONFLICT
