@@ -51,16 +51,16 @@ def _file_sha256(path):
     return digest.hexdigest()
 
 
-def publish(out, frames, body):
-    """Write ``frames`` to ``out/decisions.parquet`` through a receipted tmp; returns the row count."""
+def publish(out, frames, body, *, stem="decisions", receipt="outer"):
+    """Write ``frames`` to ``out/{stem}.parquet`` through a receipted tmp; returns the row count."""
     out = Path(out)
-    final, tmp = out / "decisions.parquet", _unique_tmp(out)
+    final, tmp = out / f"{stem}.parquet", _unique_tmp(out)
     try:
         sha, rows = _write_decisions(tmp, frames)
-        try: tuning.write_receipt(out / "receipts" / "outer.json", {**body, "decisions_sha256": sha, "rows": rows})  # before the final file
+        try: tuning.write_receipt(out / "receipts" / f"{receipt}.json", {**body, "decisions_sha256": sha, "rows": rows})  # before the final file
         except Refusal as refusal:
             if refusal.details.get("reason") != "tuning_receipt_changed": raise
-            raise Refusal(_CONFLICT, str(refusal), {**refusal.details, "reason": "outer_receipt_changed"}) from refusal
+            raise Refusal(_CONFLICT, str(refusal), {**refusal.details, "reason": f"{receipt}_receipt_changed"}) from refusal
         if os.path.lexists(final) and _file_sha256(final) == sha: tmp.unlink()  # exact replay: keep the existing file; a dangling symlink is refused by _file_sha256
         else: os.replace(tmp, final)
     finally:

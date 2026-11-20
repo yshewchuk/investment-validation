@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""EXP-188 runner: the S1 pre-registration gate, then the S9b driver (inner and outer stages, optional smoke ids)."""
+"""EXP-188 runner: the S1 pre-registration gate, then the S9b driver (inner and outer stages, optional smoke ids) and the SY2 synthetic stage (optional X7 replay)."""
 from __future__ import annotations
 
 import argparse
@@ -26,7 +26,8 @@ _INVALID, _CONFLICT, _INPUT_LIMIT = "INVALID_EXPERIMENT_SPEC", "EXPERIMENT_IDENT
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--stage", required=True, choices=("inner", "outer"))
+    parser.add_argument("--stage", required=True, choices=("inner", "outer", "synthetic"))
+    parser.add_argument("--replay", action="store_true", help="synthetic stage only: re-score and compare (X7); other stages ignore it")
     parser.add_argument("--event-ids", default=None, help="optional smoke set: a JSON array of event id strings (validated by the driver)")
     parser.add_argument("--out-dir", required=True)
     parser.add_argument("--expected", required=True, help="JSON with plan_id, registration_id, seal_id, panel_id of the v14 RERUN")
@@ -80,7 +81,8 @@ def main(argv: list[str] | None = None) -> int:
             sources = size_pnl_driver.check_sources(made)
             if sources.expected != args.expected_identities:
                 raise fail(_CONFLICT, "--expected differs from the sources' expected identities", details={"reason": "expected_mismatch"})
-            summary = size_pnl_driver.run(sources, args.stage, args.out_dir, event_ids=event_ids, prereg=lambda: receipt)
+            if args.stage == "synthetic": summary = size_pnl_driver.run_synthetic(sources, args.out_dir, event_ids=event_ids, replay=args.replay, prereg=lambda: receipt)
+            else: summary = size_pnl_driver.run(sources, args.stage, args.out_dir, event_ids=event_ids, prereg=lambda: receipt)
     except (OpsError, Refusal, DataError) as exc:
         details = exc.details if isinstance(exc, Refusal) else exc.problem.details
         print(json.dumps({"refused": exc.code, "message": re.sub(r"(?<![\w.])/[^\s:'\"]+", "<path>", str(exc)), "reason": details.get("reason")}))

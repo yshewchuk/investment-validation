@@ -83,6 +83,10 @@ def _load(spec_path):
     return spec, lib.spec_hash(spec)
 
 
+def load_spec(spec_path=SPEC_PATH):
+    return _load(spec_path)
+
+
 def _planned_hashes(ledger_path):
     """Spec hashes of every PLANNED row for EXP-188, in file order."""
     path = Path(ledger_path)
