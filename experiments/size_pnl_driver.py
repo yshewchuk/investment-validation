@@ -16,7 +16,7 @@ from engine.v2.foundation import content_hash
 from engine.v2.ops.errors import fail
 from experiments import label_availability, size_pnl_decisions as decisions, size_pnl_inputs as inputs, size_pnl_ladder as ladder, size_pnl_prereg
 from experiments import size_pnl_readers as readers, size_pnl_shortvol as shortvol, size_pnl_straddle as straddle, size_pnl_tuning as tuning, size_pnl_equivalence as equivalence
-from experiments.size_pnl_pool import build_pool
+from experiments.size_pnl_pool import TOLERANCE, build_pool
 from experiments.size_pnl_shortvol import Refusal
 
 INNER = ("2023-01-01", "2025-01-01")
@@ -266,15 +266,25 @@ def _inner(src, out, ready, plan, facts_all, labels):
     return hashes, max(by_model.values(), default=0), skipped, by_model, common, len(bad), "sha256:" + digest.hexdigest(), checked
 
 
+def _equivalence_ok(entry):
+    """A model's fast-path evidence: a dict with an int ``checked`` >= 1 and a numeric ``max_abs_diff`` within TOLERANCE."""
+    return (isinstance(entry, dict) and isinstance(entry.get("checked"), int) and not isinstance(entry.get("checked"), bool) and entry["checked"] >= 1
+            and isinstance(entry.get("max_abs_diff"), (int, float)) and not isinstance(entry.get("max_abs_diff"), bool) and entry["max_abs_diff"] <= TOLERANCE)
+
+
 def _outer_gate(out, ready, scope, body, inner_tables, inner_production, inner_plan, inner_facts):
     """Refuses before any chunk is built: every ready model needs its tuning receipt, and inner.json must bind those
-    receipts, have been tuned on this run's event scope, and bind the inner window's inputs. The inner window's inputs,
-    plan and facts are re-bound here from this run's own sources, not trusted from the receipts."""
+    receipts, have been tuned on this run's event scope, carry every ready model's fast-path equivalence evidence, and
+    bind the inner window's inputs. The inner window's inputs, plan and facts are re-bound here from this run's own
+    sources, not trusted from the receipts."""
     receipts = {mid: tuning.load_receipt(out / "receipts" / f"tuning_{mid}.json") for mid in ready}
     inner = tuning.load_receipt(out / "receipts" / "inner.json")
     if any(inner["models"].get(mid) != receipts[mid]["content_hash"] for mid in ready):
         raise Refusal(_CONFLICT, "inner.json does not bind every ready model's tuning receipt", {"reason": "inner_receipt_mismatch"})
     if "scope" not in inner or inner["scope"] != scope: raise Refusal(_CONFLICT, "inner.json was tuned on a different event scope", {"reason": "scope_mismatch"})
+    evidence = inner.get("equivalence")
+    if not isinstance(evidence, dict) or not all(_equivalence_ok(evidence.get(mid)) for mid in ready):
+        raise Refusal(_CONFLICT, "inner.json lacks the fast-path equivalence evidence for a ready model", {"reason": "inner_equivalence_missing"})
     inputs_inner, now = tuning.load_receipt(out / "receipts" / "inputs_inner.json"), json.loads(json.dumps(body))
     if any(inputs_inner.get(k) != now[k] for k in _BOUND): raise Refusal(_CONFLICT, "inputs_inner.json was bound to different inputs", {"reason": "inner_inputs_mismatch"})
     if inputs_inner.get("plan") != inner_plan: raise Refusal(_CONFLICT, "inputs_inner.json was bound to a different inner plan", {"reason": "inner_plan_mismatch"})

@@ -128,3 +128,18 @@ def test_corrupted_fast_path_refuses(case, pool, monkeypatch):
         eq.check_chunk(chunk, events, sims, pool, alpha=0.5)
     assert caught.value.code == "EXPERIMENT_IDENTITY_CONFLICT"
     assert caught.value.problem.details["reason"] == "fast_path_mismatch"
+
+
+def test_planted_difference_is_reported_as_max_abs_diff(case, pool, monkeypatch):
+    """A 3e-10 offset on the fast path's structure_pnl is under the 1e-9 tolerance: it passes and is reported exactly."""
+    chunk, events, sims = case
+    real = pool_mod.structure_pnl
+
+    def shifted(*args, **kwargs):
+        value = real(*args, **kwargs)
+        return None if value is None else value + 3e-10
+
+    monkeypatch.setattr(pool_mod, "structure_pnl", shifted)
+    out = eq.check_chunk(chunk, events, sims, pool, alpha=0.5)
+    assert out["max_abs_diff"] == pytest.approx(3e-10, abs=1e-12)
+    assert out["checked"] == len(eq.build_sample(chunk, events, sims, alpha=0.5))

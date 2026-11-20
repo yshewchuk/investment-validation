@@ -280,6 +280,37 @@ def test_outer_refuses_an_inner_receipt_tuned_on_smoke_ids(tmp_path, stubs, monk
     assert caught.value.details["reason"] == "scope_mismatch"
 
 
+def _rewrite_inner_json(tmp_path, monkeypatch, change):
+    """A normal inner run under tmp_path/inner, then inner.json rewritten by ``change`` (as the inner_receipt_mismatch tests do)."""
+    use_chunks(monkeypatch, [("2024Q3", chunk("E2"))])
+    driver.run(sources(), "inner", tmp_path / "inner", prereg=OK)
+    inner = tuning.load_receipt(tmp_path / "inner" / "receipts" / "inner.json")
+    tampered = change({k: v for k, v in inner.items() if k != "content_hash"})
+    (tmp_path / "inner" / "receipts" / "inner.json").unlink()
+    tuning.write_receipt(tmp_path / "inner" / "receipts" / "inner.json", tampered)
+    use_chunks(monkeypatch, [("2024Q3", chunk("E2"))])
+
+
+def test_outer_refuses_when_inner_json_lacks_equivalence_evidence(tmp_path, stubs, monkeypatch):
+    _rewrite_inner_json(tmp_path, monkeypatch, lambda body: {k: v for k, v in body.items() if k != "equivalence"})
+    with pytest.raises(Refusal) as caught:
+        driver.run(sources(), "outer", tmp_path / "inner", prereg=OK)
+    assert caught.value.code == CONFLICT
+    assert caught.value.details["reason"] == "inner_equivalence_missing"
+
+
+def test_outer_refuses_when_a_model_has_zero_equivalence_checks(tmp_path, stubs, monkeypatch):
+    def zero_first_model(body):
+        mid = sorted(body["equivalence"])[0]
+        return {**body, "equivalence": {**body["equivalence"], mid: {**body["equivalence"][mid], "checked": 0}}}
+
+    _rewrite_inner_json(tmp_path, monkeypatch, zero_first_model)
+    with pytest.raises(Refusal) as caught:
+        driver.run(sources(), "outer", tmp_path / "inner", prereg=OK)
+    assert caught.value.code == CONFLICT
+    assert caught.value.details["reason"] == "inner_equivalence_missing"
+
+
 # ---- smoke ids -------------------------------------------------------------------
 
 def test_event_ids_must_be_admitted_and_restrict_the_plan_and_tables(tmp_path, stubs, monkeypatch):
