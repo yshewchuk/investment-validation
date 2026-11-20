@@ -1,11 +1,12 @@
-# EXP-188 runbook (SIZE decision-level P&L re-score, inner stage)
+# EXP-188 runbook (SIZE decision-level P&L re-score, inner and outer stages)
 
-Operating steps for `experiments/EXP-188_size_decision_pnl_rescore/run.py --stage inner`. Design:
+Operating steps for `experiments/EXP-188_size_decision_pnl_rescore/run.py --stage inner|outer`. Design:
 `guides/size_decision_pnl_design.md`. Only the supervisor runs these steps (one heavy job at a time, never
 beside the v14 run, container 12 GiB). Agents never run them.
 
-The outer stage (2025 decisions, warm-up, `decisions.parquet`), the `--event-ids` smoke and the decisions
-output land in S9b (#2660). Until then `--stage` accepts `inner` only.
+`--stage` is `inner` (2023-24 tuning) then `outer` (2025 decisions). A full outer run also needs the v14 2025
+refit-prediction binder (#2658); until it lands, any ready model with no 2025 rows (production included) refuses
+`outer_predictions_unbound`.
 
 ## Before any run
 
@@ -29,6 +30,32 @@ Use an `--out-dir` under `experiments/EXP-188_*/results/`. The run writes `recei
 the same inputs replays read-only; changed inputs refuse `EXPERIMENT_IDENTITY_CONFLICT`. Never delete a receipt
 to force a rerun; use a fresh out-dir and a fresh experiment. Without `BOUNDED_RUN_NESTED=1` the runner refuses
 `not_bounded`.
+
+## Smoke run (50 tickers)
+
+Write a JSON array of about 50 tickers' admitted event ids to `<ids.json>` (at most 1 MiB) and run both stages
+with the same file and a fresh `--out-dir` under `/tmp` (smoke output is disposable):
+
+```
+python3 tools/bounded_run.py --heavy --cores 8 -- python3 experiments/EXP-188_size_decision_pnl_rescore/run.py \
+  --stage inner --event-ids <ids.json> --no-ledger --expected <expected.json> --sources <module>:<func> --out-dir <smoke-dir>
+```
+
+Then repeat with `--stage outer` and the same `--event-ids`. The ids are receipted as `scope`; a full-population
+`inner.json` cannot feed a smoke outer run (or the reverse): `scope_mismatch`. An id outside the admitted
+population refuses `key_not_admitted`; an empty array refuses `empty_population`. Record the smoke's RSS and wall
+time from stderr before scheduling the full run.
+
+## Outer stage
+
+Run `--stage outer` without `--event-ids`, against the same `--out-dir` as the completed inner run. It refuses
+before any chunk is built unless `inner.json` and every ready model's tuning receipt exist and match this run
+(`inner_receipt_mismatch`, `scope_mismatch`, `inner_inputs_mismatch`, `inner_tables_mismatch`). It warms the
+history from 2024-07, decides each 2025 month before reading that month's labels, and writes
+`receipts/inputs_outer.json`, `receipts/outer.json` and `decisions.parquet` (model, book, arm or rule, structure,
+event, status, reason, marks, P&L). Rerunning with identical inputs keeps `decisions.parquet` untouched; a changed
+input refuses `EXPERIMENT_IDENTITY_CONFLICT`. A symlinked or oversized `decisions.parquet` refuses
+`decisions_artifact_invalid`.
 
 ## Exit codes and artifacts
 

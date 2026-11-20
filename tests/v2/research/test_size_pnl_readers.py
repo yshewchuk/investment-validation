@@ -110,6 +110,24 @@ def test_read_labels_window_and_month_reads_only_admitted_ids():
     assert log[-1] == ["a4"]
 
 
+@pytest.mark.parametrize("bad", [0, "E1", [["E1"]], [1]])
+def test_event_ids_must_be_a_collection_of_strings(bad):
+    fetch, log = _spy(TABLE)
+    with pytest.raises(OpsError) as exc:
+        rd.read_labels(fetch, ADM, event_ids=bad)
+    assert _refusal(exc) == ("INVALID_EXPERIMENT_SPEC", "event_ids_invalid")
+    with pytest.raises(OpsError) as exc:
+        rd.read_production(fetch, PROD_ADM, expected_hash="h1", table_hash="h1", event_ids=bad)
+    assert _refusal(exc) == ("INVALID_EXPERIMENT_SPEC", "event_ids_invalid")
+    assert log == []
+
+
+def test_event_ids_accepts_a_set_or_frozenset_of_strings():
+    assert list(rd.read_labels(_spy(TABLE)[0], ADM, event_ids={"a1", "a3"}).index) == ["a1", "a3"]
+    assert list(rd.read_labels(_spy(TABLE)[0], ADM, event_ids=frozenset({"a2"})).index) == ["a2"]
+    assert list(rd.read_production(_spy(PROD_TABLE)[0], PROD_ADM, expected_hash="h1", table_hash="h1", event_ids={"p1"})["frame"].index) == ["p1"]
+
+
 def test_dropped_holdouts_never_reach_fetch_and_explicit_ones_refuse():
     fetch, log = _spy(TABLE)
     rd.read_labels(fetch, rd.admit_events("repo", "snap", AS_OF, max_object_bytes=4096, load=_load(UNIVERSE)))
