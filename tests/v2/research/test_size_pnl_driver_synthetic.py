@@ -470,3 +470,28 @@ def test_reads_take_only_the_planned_events_and_an_unplanned_admitted_event_is_n
     assert fakes == [["E1", "E2"]]
     receipt = json.loads((tmp_path / "receipts" / "synthetic.json").read_text(encoding="utf-8"))
     assert receipt["declined"] == {} and receipt["planned"] == 2
+
+
+def test_the_real_loop_drops_a_planned_event_one_model_lacks_from_every_model(monkeypatch):
+    """_pool_tables is replaced so model m2's table has no E3 while m1's does. The real month loop must still complete, E3 must be
+    absent from every model's frames, and scoreability_dropped must count it (E3 is the only dropped id)."""
+    monkeypatch.setattr(driver.shortvol, "MIN_WINDOW", 1)
+    full = pd.DataFrame({"event_date": DATES3, "pred_move": 5.0, "pred_crush": -10.0}, index=pd.Index(list(EVENTS3), name="event_id"))
+    short = full.drop(index=["E3"])
+    ready = {mid: {"status": "ready", "family": "oracle", "params": {}, "table": full} for mid in ("m1", "m2")}
+    monkeypatch.setattr(driver, "_pool_tables", lambda ready_: {mid: (short if mid == "m2" else full) for mid in ready_})
+    labels = pd.DataFrame({"abs_move": 4.0, "crush_pct_iv30": -10.0}, index=pd.Index(list(EVENTS3), name="event_id"))
+    monkeypatch.setattr(driver, "build_pool", lambda table, labels: table)
+    monkeypatch.setattr(driver.shortvol, "simulate", lambda chunk_, events, pool, **kw: {e: "sim" for e in events["event_id"]})
+    monkeypatch.setattr(driver.shortvol, "score_events", _scored)
+    monkeypatch.setattr(driver.shortvol, "score", _marks)
+    monkeypatch.setattr(driver.straddle, "decide", _straddle_decide)
+    monkeypatch.setattr(driver.straddle, "score", _marks)
+    use_chunks(monkeypatch, [("2023Q2", chunk("E1")), ("2023Q3", chunk("E2")), ("2023Q4", chunk("E4")), ("2024Q1", chunk("E5")),
+                             ("2024Q3", chunk("E3")), ("2024Q4", chunk("E6"))])
+    src = sources(plan_frame=PLAN3, admitted=ADMITTED3)
+    frames, _skipped, _digest, dropped, _declined = driver._synthetic_scores(src, ready, PLAN3, FACTS3, labels)
+    assert dropped == 1
+    seen = pd.concat(frames, ignore_index=True)
+    assert set(seen["model_id"]) == {"m1", "m2"}
+    assert "E3" not in set(seen["event_id"].astype(str))  # absent for every model, m1 included

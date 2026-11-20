@@ -508,6 +508,8 @@ def _synthetic_scores(src, ready, plan, facts_all, labels):
                     declined[mid][name][0] += int(((f["status"] != "scored") & (f["reason"] == "width_declined")).sum())
                     declined[mid][name][1] += len(f)
             bad = set().union(*(_unscoreable(s, m) for s, m in scored.values()))  # one shared population for all models
+            ids = [set(at[mid]["event_id"].astype(str)) for mid in ready]  # an id missing from any model's month frame leaves for all
+            bad |= set().union(*ids) - set.intersection(*ids)
             dropped |= bad
             for mid in ready:
                 month_frames += _month(mid, at[mid], scored[mid][0], bad, chunk, start_m, state[mid], arms=_AS_IS, emit_from=pd.Timestamp(INNER[0]))
