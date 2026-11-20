@@ -1,4 +1,4 @@
-"""Report tables T1-T10 for EXP-188 slice S8b.
+"""Report tables T1-T11 for EXP-188 slice S8b.
 
 Pure functions: each takes plain frames, lists or dicts and returns a Markdown
 string (a ``### Tn`` heading, an optional note line, then a pipe table) (t3_forecast returns two sections, T3 and T3b).

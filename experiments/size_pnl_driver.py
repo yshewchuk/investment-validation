@@ -545,7 +545,7 @@ def _replay_equal(out, inputs_hash, ladder_hash, frames_hash):
 
 
 def _write_t11(out, text):
-    """Publish the T11 report atomically: a unique tmp file in ``out``, then ``os.replace``; the tmp never survives."""
+    """Publish the T11 report: a per-process tmp file in ``out``, then ``os.replace``; the tmp is removed on failure (no fsync, like the sibling publications)."""
     tmp = out / f".t11_synthetic.md.{os.getpid()}.tmp"
     try:
         tmp.write_text(text, encoding="utf-8")

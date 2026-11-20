@@ -190,7 +190,7 @@ def test_a_failed_t11_publication_leaves_no_report_and_no_tmp_file(tmp_path, mon
         return real_replace(src, dst, *args, **kwargs)
 
     monkeypatch.setattr(driver.os, "replace", fail_t11)
-    with pytest.raises(OSError):
+    with pytest.raises(OSError, match="rename refused"):
         driver.run_synthetic(sources(), tmp_path, prereg=OK)
     assert (tmp_path / "decisions_synthetic.parquet").is_file()  # the failure is at the T11 step, after the decisions publish
     assert not (tmp_path / "t11_synthetic.md").exists()
