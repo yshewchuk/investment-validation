@@ -265,5 +265,14 @@ def t10_verdicts(hypotheses):
     return _section("T10 Verdicts", ["hypothesis", "predicted_sign", "category"], rows, note=note)
 
 
+def t11_synthetic(result):
+    stop = ", ".join(result["stop"]) or "none"
+    first = _section("T11 SYNTHETIC calibration, X-table", ["id", "scope", "result", "detail"], result["x"],
+                     note=f"SYNTHETIC: controls and power, never a roster or SIZE result; stop on a failed X1, X2, X6 or X7: {stop}")
+    second = _section("T11 SYNTHETIC slopes", ["type", "unit", "metric", "slope", "lo_90", "hi_90"], result["slopes"],
+                      note="dollars per event per error point; quarter bootstrap 90% interval")
+    return [first, second]
+
+
 def build_report(sections):
     return "# EXP-188 REPORT\n\n" + "\n\n".join(sections) + "\n"

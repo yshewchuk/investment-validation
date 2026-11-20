@@ -461,7 +461,10 @@ def test_real_model_ids_and_inputs_receipts_still_work(tmp_path):
 
 
 # 10. independence
-ROSTER_MODULES = ("size_pnl_driver", "size_pnl_inputs", "size_pnl_readers", "size_pnl_pool",
+# The driver hosts the synthetic stage since SY2; its independence is pinned by
+# byte-identity of the inner receipts with and without the synthetic arm in
+# tests/v2/research/test_size_pnl_driver_synthetic.py.
+ROSTER_MODULES = ("size_pnl_inputs", "size_pnl_readers", "size_pnl_pool",
                   "size_pnl_tuning", "size_pnl_report")
 
 
