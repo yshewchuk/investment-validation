@@ -184,6 +184,11 @@ def generate(admitted, labels, production, arm):
     if not isinstance(production, readers.Production):
         raise fail(_CONFLICT, "the synthetic generator accepts only a production issued by read_production",
                    details={"reason": "production_not_issued"})
+    prod = readers._checked_production(production["frame"], admitted)
+    table_hash = production.get("table_hash")
+    if not readers._is_hash(table_hash) or readers._production_binding(table_hash, prod) != production["binding"]:
+        raise fail(_CONFLICT, "the production binding does not match its frame and table hash",
+                   details={"reason": "production_binding_mismatch"})
     if not _labels_ok(labels):
         raise fail(_CONFLICT, "the synthetic labels are malformed", details={"reason": "synthetic_labels_malformed"})
     _guard(admitted, labels, arm)
@@ -193,7 +198,7 @@ def generate(admitted, labels, production, arm):
     y = labels["abs_move"].to_numpy(dtype=float)
     labels_hash = content_hash([[str(i), d.isoformat(), float(v)] for i, d, v in zip(ids, dates, y)])
     ctx = {"ids": ids, "dates": dates, "y": y, "binding": production["binding"], "labels_hash": labels_hash,
-           "crush": production["frame"]["pred_crush"].reindex(ids).to_numpy(dtype=float)}
+           "crush": prod["pred_crush"].reindex(ids).to_numpy(dtype=float)}
     z, prior = _z(ids, arm["seed_tag"]), _prior_mean(dates, y)
     out = {}
     for pred in predictors(arm):

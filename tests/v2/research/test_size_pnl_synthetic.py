@@ -46,11 +46,14 @@ def _admitted(events):
     return readers.Admitted({"events": events.copy(), "excluded": {"random_3pct": 1}})
 
 
-def _production(events, crush=-1.0):
+def _production(events, crush=-1.0, admitted=None):
+    """A real Production: frame checked by the shared reader, binding computed from it, table hash "t"."""
     frame = pd.DataFrame({"pred_move": 1.0, "pred_crush": crush,
                           "event_date": pd.to_datetime(events["event_date"]).to_numpy()},
                          index=pd.Index(events["event_id"], name="event_id"))
-    return readers.Production({"frame": frame, "binding": "pb", "table_hash": "t"})
+    checked = readers._checked_production(frame, _admitted(events) if admitted is None else admitted)
+    return readers.Production({"frame": checked, "binding": readers._production_binding("t", checked),
+                               "table_hash": "t"})
 
 
 def _world(n=300, seed=0):
@@ -226,7 +229,7 @@ def test_label_date_not_bound_to_admitted_date_refuses():
     admitted_events.loc[0, "event_date"] = pd.Timestamp("2025-03-01")
     labels.loc[labels.index[0], "event_date"] = pd.Timestamp("2024-03-01")
     with pytest.raises(OpsError) as exc:
-        syn.generate(_admitted(admitted_events), labels, _production(events), ARM)
+        syn.generate(_admitted(admitted_events), labels, _production(admitted_events), ARM)
     assert _refusal(exc) == (DENIED, OUT_OF_SCOPE)
     assert exc.value.problem.details["why"] == "date_not_admitted"
     assert exc.value.problem.details["events"] == 1
@@ -305,8 +308,8 @@ def test_missing_crush_dropped_and_counted_zero_label_kept():
     move = np.linspace(1.0, 3.0, 60)
     move[0] = 0.0
     labels = _labels(events, move)
-    production = _production(events)
-    production["frame"].iloc[1:6, production["frame"].columns.get_loc("pred_crush")] = np.nan
+    # Missing crush is modelled as absent production rows: NaN crush is refused by the shared reader.
+    production = _production(events.drop(events.index[1:6]), admitted=_admitted(events))
     out = syn.generate(_admitted(events), labels, production, ARM)
     entry = next(e for e in out.values() if e["family"] == "median_noise" and e["params"] == {"s": 0.4})
     assert entry["dropped"]["no_crush_forecast"] == 5
@@ -314,6 +317,26 @@ def test_missing_crush_dropped_and_counted_zero_label_kept():
     assert len(entry["table"]) + sum(entry["dropped"].values()) == len(labels)
     oracle = _by(out, "oracle")
     assert labels.index[0] in oracle.index and oracle.loc[labels.index[0], "pred_move"] == 0.0
+
+
+def test_mutated_production_frame_refuses_binding_mismatch():
+    admitted, labels, production = _world(40)
+    production["frame"].iloc[0, production["frame"].columns.get_loc("pred_crush")] = -9.0
+    with pytest.raises(OpsError) as exc:
+        syn.generate(admitted, labels, production, ARM)
+    assert _refusal(exc) == (CONFLICT, "production_binding_mismatch")
+
+
+@pytest.mark.parametrize("drop", ["pred_move", "pred_crush"])
+def test_production_frame_lacking_prediction_column_refuses(drop):
+    events = _events(20)
+    frame = pd.DataFrame({"pred_move": 1.0, "pred_crush": -1.0,
+                          "event_date": pd.to_datetime(events["event_date"]).to_numpy()},
+                         index=pd.Index(events["event_id"], name="event_id")).drop(columns=[drop])
+    production = readers.Production({"frame": frame, "binding": "pb", "table_hash": "t"})
+    with pytest.raises(OpsError) as exc:
+        syn.generate(_admitted(events), _labels(events, np.ones(20)), production, ARM)
+    assert _refusal(exc) == (CONFLICT, "production_series_failed")
 
 
 # 8. arm_from_spec refusals
