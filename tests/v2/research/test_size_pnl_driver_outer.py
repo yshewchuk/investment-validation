@@ -16,7 +16,7 @@ from experiments import size_pnl_readers as readers
 from experiments import size_pnl_tuning as tuning
 from experiments.size_pnl_shortvol import Refusal
 from tests.v2.research.test_size_pnl_driver import (  # noqa: F401  (bounded, stubs, structure_gate_passes are fixtures)
-    BASE, CONFLICT, DENIED, EVENTS, EXPECTED, FAKE, OK, PLAN_FRAME, _install_sources, _run_main, bounded, chunk, sources,
+    BASE, CONFLICT, DENIED, EVENTS, EXPECTED, FACTS, FAKE, OK, PLAN_FRAME, _install_sources, _run_main, bounded, chunk, sources,
     stubs, structure_gate_passes)
 
 FRONT = ["model_id", "book", "arm_or_rule", "structure", "event_id", "event_date", "status", "reason"]
@@ -189,6 +189,41 @@ def test_changed_inner_window_plan_row_between_stages_refuses_inner_plan(tmp_pat
     assert caught.value.code == CONFLICT
     assert caught.value.details["reason"] == "inner_plan_mismatch"
     assert not (tmp_path / "receipts" / "inputs_outer.json").exists()  # preflight: no outer input receipt
+
+
+def test_changed_inner_window_fact_between_stages_refuses_inner_facts(tmp_path, outer_stubs, monkeypatch):
+    """Labels, tables and plan are unchanged; E2 (inner window) has a different pre_iv30 in the outer run's facts."""
+    use_chunks(monkeypatch, [("2024Q3", chunk("E2"))])
+    driver.run(sources(), "inner", tmp_path, prereg=OK)
+    moved = FACTS.copy()
+    moved.loc["E2", "pre_iv30"] = 41.0
+    calls = []
+
+    def counting(ids):
+        calls.append(list(ids))
+        return moved.reindex(list(ids))
+
+    use_chunks(monkeypatch, [("2024Q3", chunk("E2")), ("2025Q1", chunk("E3", "E4"))])
+    with pytest.raises(Refusal) as caught:
+        driver.run(sources(facts=counting), "outer", tmp_path, prereg=OK)
+    assert caught.value.code == CONFLICT
+    assert caught.value.details["reason"] == "inner_facts_mismatch"
+    assert not (tmp_path / "receipts" / "inputs_outer.json").exists()  # preflight: no outer input receipt
+    assert len(calls) == 1  # the outer run still makes exactly one facts call
+
+
+def test_outer_makes_one_facts_call_for_the_stage_and_inner_window(tmp_path, outer_stubs, monkeypatch):
+    use_chunks(monkeypatch, [("2024Q3", chunk("E2"))])
+    driver.run(sources(), "inner", tmp_path, prereg=OK)
+    calls = []
+
+    def counting(ids):
+        calls.append(sorted(ids))
+        return FACTS.reindex(list(ids))
+
+    use_chunks(monkeypatch, [("2024Q3", chunk("E2")), ("2025Q1", chunk("E3", "E4"))])
+    driver.run(sources(facts=counting), "outer", tmp_path, prereg=OK)
+    assert calls == [["E1", "E2", "E3", "E4"]]  # one call: the stage plan's ids plus the inner window's
 
 
 def test_oracle_one_taken_2025_event_carries_its_literal_marks(tmp_path, outer_stubs, monkeypatch):

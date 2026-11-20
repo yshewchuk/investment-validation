@@ -135,6 +135,12 @@ def _plan_window(plan, window, ids):
     return plan[keep]
 
 
+def _facts_rows(facts, ids):
+    """The receipted facts of ``ids``: each event id with its numeric facts, sorted. The stage and inner facts hashes share it."""
+    sub = facts[facts.index.astype(str).isin(sorted(ids))]
+    return sorted([str(e), *[None if pd.isna(v) else float(v) for v in vals]] for e, vals in zip(sub.index, sub[list(_FACTS)].to_numpy(dtype=float)))
+
+
 def _scope(ids):
     return None if ids is None else content_hash(sorted(ids))
 
@@ -241,9 +247,10 @@ def _inner(src, out, ready, plan, facts_all, labels):
     return hashes, max(by_model.values(), default=0), skipped, by_model, common, len(bad), "sha256:" + digest.hexdigest()
 
 
-def _outer_gate(out, ready, scope, body, inner_tables, inner_production, inner_plan):
+def _outer_gate(out, ready, scope, body, inner_tables, inner_production, inner_plan, inner_facts):
     """Refuses before any chunk is built: every ready model needs its tuning receipt, and inner.json must bind those
-    receipts, have been tuned on this run's event scope, and bind the inner window's inputs, re-bound here."""
+    receipts, have been tuned on this run's event scope, and bind the inner window's inputs. The inner window's inputs,
+    plan and facts are re-bound here from this run's own sources, not trusted from the receipts."""
     receipts = {mid: tuning.load_receipt(out / "receipts" / f"tuning_{mid}.json") for mid in ready}
     inner = tuning.load_receipt(out / "receipts" / "inner.json")
     if any(inner["models"].get(mid) != receipts[mid]["content_hash"] for mid in ready):
@@ -252,6 +259,7 @@ def _outer_gate(out, ready, scope, body, inner_tables, inner_production, inner_p
     inputs_inner, now = tuning.load_receipt(out / "receipts" / "inputs_inner.json"), json.loads(json.dumps(body))
     if any(inputs_inner.get(k) != now[k] for k in _BOUND): raise Refusal(_CONFLICT, "inputs_inner.json was bound to different inputs", {"reason": "inner_inputs_mismatch"})
     if inputs_inner.get("plan") != inner_plan: raise Refusal(_CONFLICT, "inputs_inner.json was bound to a different inner plan", {"reason": "inner_plan_mismatch"})
+    if inputs_inner.get("facts") != inner_facts: raise Refusal(_CONFLICT, "inputs_inner.json was bound to different inner facts", {"reason": "inner_facts_mismatch"})
     inner_now = json.loads(json.dumps({"tables": inner_tables, "production": inner_production}))
     if inner["inputs"] != inputs_inner["content_hash"] or any(inputs_inner.get(k) != inner_now[k] for k in ("tables", "production")):
         raise Refusal(_CONFLICT, "inner.json was tuned on different inner tables", {"reason": "inner_tables_mismatch"})
@@ -387,15 +395,18 @@ def run(src, stage, out_dir, *, event_ids=None, prereg=size_pnl_prereg.require_p
     admitted_dates = dict(zip(src.admitted["events"]["event_id"].astype(str), pd.to_datetime(src.admitted["events"]["event_date"])))
     if any(str(e) not in admitted_dates for e in plan["event_id"]): raise fail(_DENIED, "plan event ids include a key that is not admitted", details={"reason": "key_not_admitted"})
     if plan.empty: raise shortvol.Refusal(_CONFLICT, "the plan window holds no events", {"reason": "empty_population"})  # before any receipt
-    facts_all = src.facts(sorted(str(e) for e in plan["event_id"]))  # the only facts call of the run
+    inner_window = _plan_window(full, INNER, ids)  # the inner window's plan: the outer gate re-binds its facts and plan
+    stage_ids = {str(e) for e in plan["event_id"]}
+    wanted = stage_ids | {str(e) for e in inner_window["event_id"]}
+    facts_all = src.facts(sorted(wanted))  # the only facts call of the run: the stage plan's ids and the inner window's
     if not isinstance(facts_all, pd.DataFrame) or not facts_all.columns.is_unique: raise fail("INVALID_EXPERIMENT_SPEC", "facts source is incomplete", details={"reason": "facts_incomplete"})
     raw = facts_all.reindex(columns=list(_FACTS)).where(lambda c: c.notna(), np.nan)  # pd.NA and None are NaN
     numeric = raw.apply(pd.to_numeric, errors="coerce")
-    if (not set(_FACTS) <= set(facts_all.columns) or set(facts_all.index.astype(str)) != {str(e) for e in plan["event_id"]}
+    if (not set(_FACTS) <= set(facts_all.columns) or set(facts_all.index.astype(str)) != wanted
             or not facts_all.index.astype(str).is_unique or (numeric.isna() & raw.notna()).to_numpy().any() or np.isinf(numeric.to_numpy(dtype=float)).any()): raise fail("INVALID_EXPERIMENT_SPEC", "facts source is incomplete", details={"reason": "facts_incomplete"})
     facts_all = pd.concat([facts_all.drop(columns=list(_FACTS)), numeric], axis=1)
     _log(f"facts_nan_rows={int(facts_all[list(_FACTS)].isna().any(axis=1).sum())}")
-    facts_rows = sorted([str(e), *[None if pd.isna(v) else float(v) for v in vals]] for e, vals in zip(facts_all.index, facts_all[list(_FACTS)].to_numpy(dtype=float)))
+    facts_rows = _facts_rows(facts_all, stage_ids)
     labels = readers.read_labels(src.fetch, src.admitted, start=INNER[0], end=OUTER[0], event_ids=ids)  # the pre-2025 labels; outer adds each month's
     scope = _scope(ids)
     body = {"stage": "inputs", "spec_hash": receipt["spec_hash"], "identity": bound_tables["identity"],
@@ -411,8 +422,9 @@ def run(src, stage, out_dir, *, event_ids=None, prereg=size_pnl_prereg.require_p
         if not ready: raise _no_ready()
         _, inner_bound, inner_production = _prepare(src, "inner")  # the inner window's bindings, to match inputs_inner.json
         inner_tables = {mid: _table_binding(e, ids) for mid, e in _ready(inner_bound["tables"], ids).items()}
-        inner_plan = content_hash(_plan_rows(_plan_window(full, INNER, ids)))
-        receipts = _outer_gate(out, ready, scope, body, inner_tables, inner_production["binding"], inner_plan)
+        inner_plan = content_hash(_plan_rows(inner_window))
+        inner_facts = content_hash(_facts_rows(facts_all, {str(e) for e in inner_window["event_id"]}))
+        receipts = _outer_gate(out, ready, scope, body, inner_tables, inner_production["binding"], inner_plan, inner_facts)
         _unbound_outer(ready)
     inputs_receipt = _receipt(out / "receipts" / f"inputs_{stage}.json", body, "inputs_receipt_changed")
     if not ready: raise _no_ready()
