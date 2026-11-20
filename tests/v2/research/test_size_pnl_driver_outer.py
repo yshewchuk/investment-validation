@@ -405,6 +405,26 @@ def test_changed_outer_receipt_leaves_decisions_untouched_and_no_tmp(tmp_path, o
     assert not list(tmp_path.glob("*.tmp"))
 
 
+def test_changed_ladder_quote_refuses_an_outer_replay(tmp_path, outer_stubs, monkeypatch):
+    """The outer receipt binds the consumed quotes: one 2025 quote changed under identical decisions is refused, decisions untouched."""
+    def quoted(bid):
+        return {**chunk("E3", "E4"), "bid": np.array([1.5, bid])}
+
+    use_chunks(monkeypatch, [("2024Q3", chunk("E2"))])
+    driver.run(sources(), "inner", tmp_path, prereg=OK)
+    use_chunks(monkeypatch, [("2024Q3", chunk("E2")), ("2025Q1", quoted(2.0))])
+    driver.run(sources(), "outer", tmp_path, prereg=OK)
+    before = (tmp_path / "decisions.parquet").stat()
+    use_chunks(monkeypatch, [("2024Q3", chunk("E2")), ("2025Q1", quoted(2.5))])
+    with pytest.raises(Refusal) as caught:
+        driver.run(sources(), "outer", tmp_path, prereg=OK)
+    assert caught.value.code == CONFLICT
+    assert caught.value.details["reason"] == "tuning_receipt_changed"
+    after = (tmp_path / "decisions.parquet").stat()
+    assert (after.st_ino, after.st_mtime_ns) == (before.st_ino, before.st_mtime_ns)
+    assert not list(tmp_path.glob("*.tmp"))
+
+
 # ---- run.py: --event-ids shape, and the cross-month oracle ------------------------
 
 @pytest.mark.parametrize("payload", [{"a": 1}, [1, 2]])

@@ -75,6 +75,10 @@ def _content(value):
     return repr(sorted(value.items()) if isinstance(value, dict) else value).encode()
 
 
+def _bind_chunk(digest, label, chunk):
+    digest.update(str(label).encode() + b"".join(f"{key}\0".encode() + _content(chunk[key]) for key in sorted(chunk)))  # the consumed quotes, bound
+
+
 def _window(stage):
     return (WARMUP_START, OUTER[1]) if stage == "outer" else INNER
 
@@ -199,8 +203,8 @@ def _inner(src, out, ready, plan, facts_all, labels):
     kept, started, skipped, common, digest = 0, time.monotonic(), {}, {}, hashlib.sha256()
     pool_tables = _pool_tables(ready)
     for number, (label, chunk) in enumerate(ladder.ladder_chunks(src.admitted, plan, src.load_index), start=1):
-        digest.update(str(label).encode() + b"".join(f"{key}\0".encode() + _content(chunk[key]) for key in sorted(chunk)))  # the consumed quotes, bound
-        kept += len(chunk["event_id"])
+        _bind_chunk(digest, label, chunk)
+        kept +=len(chunk["event_id"])
         skipped = _tally(skipped, chunk)
         built = {}
         for mid, entry in ready.items():
@@ -301,8 +305,9 @@ def _outer(src, out, ready, receipts, plan, ids, facts_all, labels):
     dates = pd.to_datetime(plan["event_date"])
     quarter, month = dates.dt.to_period("Q").astype(str).to_numpy(), dates.dt.to_period("M").to_numpy()
     total, state = len(set(month)), {mid: _model_state(receipts[mid]["c"]) for mid in ready}
-    frames, done, started, skipped, fresh = [], 0, time.monotonic(), {}, []
+    frames, done, started, skipped, fresh, digest = [], 0, time.monotonic(), {}, [], hashlib.sha256()
     for label, chunk in ladder.ladder_chunks(src.admitted, plan, src.load_index):
+        _bind_chunk(digest, label, chunk)
         skipped = _tally(skipped, chunk)
         events = {mid: model_events(pools[mid], facts_all, chunk, exits) for mid in ready}
         for period in sorted({m for m, q in zip(month, quarter) if q == label}):
@@ -322,7 +327,7 @@ def _outer(src, out, ready, receipts, plan, ids, facts_all, labels):
     inputs_hash = tuning.load_receipt(out / "receipts" / "inputs_outer.json")["content_hash"]
     body = {"stage": "outer", "models": list(ready), "ladder_skipped": skipped, "scope": _scope(ids), "inputs": inputs_hash,
             "tuning": {mid: receipts[mid]["content_hash"] for mid in ready}, "c": {mid: receipts[mid]["c"] for mid in ready},
-            "labels": content_hash(_label_rows(fresh)), "common_dropped": _common_dropped(ready)}
+            "labels": content_hash(_label_rows(fresh)), "common_dropped": _common_dropped(ready), "ladder": "sha256:" + digest.hexdigest()}
     rows = decisions.publish(out, frames, body)
     return rows, skipped
 
