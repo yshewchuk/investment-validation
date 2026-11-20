@@ -145,6 +145,7 @@ def test_writes_the_synthetic_artifacts_and_no_tuning_or_outer_files(tmp_path, m
     assert (tmp_path / "decisions_synthetic.parquet").is_file() and not (tmp_path / "decisions.parquet").exists()
     text = (tmp_path / "t11_synthetic.md").read_text(encoding="utf-8")
     assert "T11 SYNTHETIC calibration, X-table" in text and "T11 SYNTHETIC slopes" in text
+    assert "T11 SYNTHETIC means" in text and "T11 SYNTHETIC contrasts" in text
     assert "| X7 | replay | not_run |" in text
     assert summary["stage"] == "synthetic" and summary["models"] == sorted(summary["models"]) and len(summary["models"]) == 3
 
@@ -297,6 +298,38 @@ def test_run_synthetic_refuses_an_expected_that_differs_from_the_plan_identity(t
     assert not (tmp_path / "receipts").exists()
 
 
+def test_an_empty_scored_population_refuses_before_any_decision(tmp_path, monkeypatch, fakes):
+    def all_undetermined(src, ready, plan, facts_all, labels):
+        frames, skipped, ladder, dropped = fake_scores(src, ready, plan, facts_all, labels)
+        return [f.assign(status="undetermined") for f in frames], skipped, ladder, dropped
+
+    monkeypatch.setattr(driver, "_synthetic_scores", all_undetermined)
+    with pytest.raises(Refusal) as caught:
+        driver.run_synthetic(sources(), tmp_path, prereg=OK)
+    assert caught.value.code == CONFLICT and caught.value.details["reason"] == "empty_population"
+    assert sorted(p.name for p in (tmp_path / "receipts").iterdir()) == ["inputs_synthetic.json"]
+    assert not (tmp_path / "decisions_synthetic.parquet").exists()
+
+
+def test_one_decided_quarter_refuses_as_underclustered(tmp_path, monkeypatch, fakes):
+    def one_event_decided(src, ready, plan, facts_all, labels):
+        frames, skipped, ladder, dropped = fake_scores(src, ready, plan, facts_all, labels)
+        return [f.assign(status=["taken" if e == "E1" else "undetermined" for e in f["event_id"]]) for f in frames], skipped, ladder, dropped
+
+    monkeypatch.setattr(driver, "_synthetic_scores", one_event_decided)
+    with pytest.raises(Refusal) as caught:
+        driver.run_synthetic(sources(), tmp_path, prereg=OK)
+    assert caught.value.code == CONFLICT and caught.value.details["reason"] == "underclustered_population"
+    assert not (tmp_path / "decisions_synthetic.parquet").exists()
+
+
+def test_one_ticker_refuses_as_underclustered(tmp_path, fakes):
+    with pytest.raises(Refusal) as caught:
+        driver.run_synthetic(sources(plan_frame=PLAN_FRAME.assign(ticker="T1")), tmp_path, prereg=OK)
+    assert caught.value.code == CONFLICT and caught.value.details["reason"] == "underclustered_population"
+    assert not (tmp_path / "decisions_synthetic.parquet").exists()
+
+
 # Six inner events in five quarters and two tickers. E1 (the shrinkage model's first-quarter gap) and E3 (unscoreable for one model)
 # leave for every model, so E2, E4, E5 and E6 survive: four events in four quarters and both tickers for the evaluation.
 EVENTS3 = {"E1": "2023-06-10", "E2": "2023-09-12", "E3": "2024-08-07", "E4": "2023-12-06", "E5": "2024-02-14", "E6": "2024-11-13"}
@@ -336,9 +369,12 @@ def _straddle_decide(events, edges, rule, chunk_):
 
 def test_the_real_scoring_loop_drops_an_event_unscoreable_for_one_model_from_every_model(tmp_path, monkeypatch):
     """No _synthetic_scores stub: the real month loop runs. The shrinkage model has no E1 (its first quarter), so E1 leaves the
-    common population; one non-shrinkage model has no simulation for E3, so E3 leaves for every model. Predictions are 5.0 except
-    E3 (104.0) and the realised abs_move is 4.0, so on the kept population {E2, E4, E5, E6} rmse = mae = 1.0 (E3 would dominate otherwise).
-    Each survivor's straddle P&L is 10 x its event number (E2 20, E4 40, E5 50, E6 60); short_vol stays undetermined (thin history)."""
+    common population; one non-shrinkage model has no simulation for E3, so E3 leaves for every model. MIN_WINDOW is 1 here, since
+    the production 100 leaves every short-vol row thin on six events. Then E2 (no prior history) and E6 (no prior row in its six-month
+    window) are undetermined under every short-vol unit: published as evidence, but outside E. E4 and E5 are determined and form E.
+    Predictions are 5.0 except E3 (104.0) and the realised abs_move is 4.0, so on E = {E4, E5} rmse = mae = 1.0.
+    Each straddle P&L is 10 x its event number (E2 20, E4 40, E5 50, E6 60)."""
+    monkeypatch.setattr(driver.shortvol, "MIN_WINDOW", 1)
     def generate(admitted, labels, production, arm):
         entries = fake_entries(labels, arm)
         shrink = {mid for mid in entries if entries[mid]["family"] == "shrinkage"}
@@ -378,9 +414,9 @@ def test_the_real_scoring_loop_drops_an_event_unscoreable_for_one_model_from_eve
     assert frame.loc[~taken, "pnl_dollars"].isna().all()
     receipt = json.loads((out / "receipts" / "synthetic.json").read_text(encoding="utf-8"))
     assert receipt["scoreability_dropped"] == 1
-    assert receipt["common_dropped"] == 1 and receipt["events"] == 4
-    assert sorted(receipt["events_by_model"].values()) == [5, 6, 6]  # the shrinkage table lacks E1
-    assert receipt["metrics"] and all(m["n"] == 4 and m["rmse"] == 1.0 and m["mae"] == 1.0 for m in receipt["metrics"].values())
+    assert receipt["common_dropped"] == 1 and receipt["events"] == 2 and receipt["events_undetermined"] == 2  # E2, E6 leave E
+    assert sorted(receipt["events_by_model"].values()) == [2, 2, 2]  # E4 and E5 in every model's table
+    assert receipt["metrics"] and all(m["n"] == 2 and m["rmse"] == 1.0 and m["mae"] == 1.0 for m in receipt["metrics"].values())
     first = snapshot(out)
     driver.run_synthetic(src, out, prereg=OK)
     assert snapshot(out) == first  # a second identical run is byte-identical

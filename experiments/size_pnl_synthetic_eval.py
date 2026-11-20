@@ -1,4 +1,6 @@
 """EXP-188 SY2: X1-X7 evaluation and quarter-bootstrap slopes of the synthetic arm (design sections 4-5). SYNTHETIC only."""
+import json
+
 import numpy as np
 import pandas as pd
 
@@ -65,18 +67,21 @@ def _quarter_var(sub):
 
 
 def _rung_rows(id_, units, meta, names, sign, arm, resamples, seed):
-    """X3/X4: each rung s >= level_gap_min_s, median-minus-mean P&L per named unit, classified against sign."""
-    rows = []
+    """X3/X4: each rung s >= level_gap_min_s, median-minus-mean P&L per named unit, classified against sign.
+    Also returns each named unit's contrast summary at that rung (the T11 contrasts table)."""
+    rows, summaries = [], []
     for s in sorted({m["params"]["s"] for m in meta.values() if m["family"] == "median_noise"}):
         med, mean = _find(meta, "median_noise", {"s": s}), _find(meta, "mean_noise", {"s": s})
         if s < arm["level_gap_min_s"] or med is None or mean is None or not names: continue
         pairs = {}
         for name in names:
             w, u = units[name]["wide"], units[name]
-            pairs[name] = {"inner": contrast.contrast(w[med].to_numpy() - w[mean].to_numpy(), u["quarters"], u["tickers"],
-                                                      resamples=resamples, seed=seed)}
+            res = contrast.contrast(w[med].to_numpy() - w[mean].to_numpy(), u["quarters"], u["tickers"], resamples=resamples, seed=seed)
+            pairs[name] = {"inner": res}
+            qc = res["quarter_counts"]
+            summaries.append([name, f"s={s}", res["mean"], f"{qc['positive']}/{qc['negative']}/{qc['zero']}", *res["quarter_interval"], *res["ticker_interval"]])
         rows.append([id_, f"s={s}", contrast.classify(pairs, sign, full_years=(arm["inner_years"][1],)), f"pairs={len(pairs)}"])
-    return rows
+    return rows, summaries
 
 
 def _safe(rows):
@@ -84,8 +89,28 @@ def _safe(rows):
     return [[(None if not np.isfinite(v) else float(v)) if isinstance(v, (float, np.floating)) else v for v in r] for r in rows]
 
 
+def population(decisions):
+    """The evaluated population E: the events with no undetermined row under any (model, unit) (design section 4)."""
+    bad = set(decisions.loc[decisions["status"] == "undetermined", "event_id"].astype(str))
+    return decisions[~decisions["event_id"].astype(str).isin(bad)]
+
+
+def _means(units, meta):
+    """Per (predictor, unit) on E: events, taken and not_taken counts, mean P&L per event (untaken rows 0) and the fit errors."""
+    rows = []
+    for unit, u in units.items():
+        for mid in u["wide"].columns:
+            status = u["rows"].loc[u["rows"]["model_id"] == mid, "status"]
+            rows.append([mid, meta[mid]["family"], json.dumps(meta[mid]["params"], sort_keys=True), unit, len(u["wide"]),
+                         int((status == "taken").sum()), int((status == "not_taken").sum()),
+                         float(u["wide"][mid].mean()), meta[mid]["rmse"], meta[mid]["mae"]])
+    return rows
+
+
 def evaluate(decisions, meta, tickers, arm, *, replay_equal=None, resamples=contrast.RESAMPLES, seed=contrast.SEED):
-    """SY2 evaluation of the synthetic decisions: quarter-bootstrap slopes, the X1-X7 table and the stop ids."""
+    """SY2 evaluation of the synthetic decisions on E: quarter-bootstrap slopes, the X1-X7 table, the calibration means
+    and contrasts, and the stop ids."""
+    decisions = population(decisions)
     units, slopes, x = _units(decisions, tickers), [], []
     for unit, u in units.items():
         wide, quarters = u["wide"], u["quarters"]
@@ -97,9 +122,10 @@ def evaluate(decisions, meta, tickers, arm, *, replay_equal=None, resamples=cont
             ok = []
             for mid in wide.columns:
                 if mid == oracle: continue
-                s = contrast.contrast(wide[oracle].to_numpy() - wide[mid].to_numpy(), quarters, u["tickers"], resamples=resamples, seed=seed)
-                qc = s["quarter_counts"]
-                ok.append(bool(s["quarter_interval"][1] >= 0 and qc["positive"] / sum(qc.values()) >= 0.6))
+                d = wide[oracle].to_numpy() - wide[mid].to_numpy()
+                hi = contrast.bootstrap_interval(d, quarters, resamples=resamples, seed=seed)[2]  # quarter bootstrap only
+                signs = contrast.group_signs(d, quarters)
+                ok.append(bool(hi >= 0 and sum(v > 0 for v in signs.values()) / len(signs) >= 0.6))
             x.append(["X1", unit, "pass" if all(ok) else "fail", f"failing={ok.count(False)} of {len(ok)}"])
         for typ in TYPES:
             mids = sorted((m for m in wide.columns if meta[m]["family"] == typ), key=lambda m: meta[m]["params"]["s"])
@@ -130,9 +156,11 @@ def evaluate(decisions, meta, tickers, arm, *, replay_equal=None, resamples=cont
             else:
                 x.append(["X6", unit, "printed", f"taken={taken}"])
     short = [n for n, u in units.items() if u["book"] == SHORT]
-    x += _rung_rows("X3", units, meta, short, 1, arm, resamples, seed)
-    x += _rung_rows("X4", units, meta, [n for n in ("R_L", "R_L2") if n in units], -1, arm, resamples, seed)
+    rung3, sums3 = _rung_rows("X3", units, meta, short, 1, arm, resamples, seed)
+    rung4, sums4 = _rung_rows("X4", units, meta, [n for n in ("R_L", "R_L2") if n in units], -1, arm, resamples, seed)
+    x += rung3 + rung4
     x.append(["X7", "replay", "not_run" if replay_equal is None else ("pass" if replay_equal else "fail"), f"replay_equal={replay_equal}"])
     stop = [f"{r[0]} {r[1]}" for r in x if r[0] in STOP_IDS and r[2] in ("fail", "Failed")]
-    slopes, x = _safe(slopes), _safe(x)
-    return {"slopes": slopes, "x": x, "stop": stop, "hash": content_hash({"slopes": slopes, "x": [r for r in x if r[0] != "X7"]})}
+    slopes, x, means, contrasts = _safe(slopes), _safe(x), _safe(_means(units, meta)), _safe(sums3 + sums4)
+    hashed = {"slopes": slopes, "x": [r for r in x if r[0] != "X7"], "means": means, "contrasts": contrasts}
+    return {"slopes": slopes, "x": x, "means": means, "contrasts": contrasts, "stop": stop, "hash": content_hash(hashed)}

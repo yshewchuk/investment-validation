@@ -173,3 +173,23 @@ def test_a_missing_cell_raises_and_a_nan_pnl_counts_zero():
     zero.loc[at, "pnl_dollars"] = 0.0
     pd.testing.assert_series_equal(ev._wide(_s1(nan)).mean(), ev._wide(_s1(zero)).mean())  # the NaN cell is 0
     assert ev.evaluate(nan, META, TICKERS, ARM, resamples=RESAMPLES)["hash"] == ev.evaluate(zero, META, TICKERS, ARM, resamples=RESAMPLES)["hash"]
+
+
+def test_population_drops_an_event_undetermined_under_any_model_or_unit():
+    d = frame_of()
+    at = (d["model_id"] == "M02") & (d["event_id"] == "E0") & (d["structure"] == "S1")
+    d.loc[at, "status"] = "undetermined"
+    assert len(ev.population(d)) == len(d) - 8 * 3  # E0's rows under all 8 models and 3 units leave E
+    assert "E0" not in set(ev.population(d)["event_id"])
+    assert ev.evaluate(d, META, TICKERS, ARM, resamples=RESAMPLES)["hash"] == ev.evaluate(d[d["event_id"] != "E0"], META, TICKERS, ARM, resamples=RESAMPLES)["hash"]
+
+
+def test_means_and_contrast_rows_hand_checked():
+    out = run()
+    assert len(out["means"]) == 8 * 3 and all(len(r) == 10 for r in out["means"])
+    # M06 on S1: 8 taken events at a constant 2.0 per event; rmse and mae from META
+    assert ["M06", "median_noise", '{"s": 0.6}', "S1", 8, 8, 0, 2.0, 1.8, 0.9] in out["means"]
+    # median M06 (2.0) minus mean N06 (1.0) is +1 on every event, so the mean is 1.0 and every quarter (4 of 4) is positive;
+    # a constant series gives degenerate bootstrap intervals at 1.0
+    assert ["S1", "s=0.6", 1.0, "4/0/0", 1.0, 1.0, 1.0, 1.0] in out["contrasts"]
+    assert all(len(r) == 8 for r in out["contrasts"])

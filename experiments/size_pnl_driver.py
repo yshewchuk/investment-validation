@@ -565,21 +565,27 @@ def run_synthetic(src, out_dir, *, event_ids=None, replay=False, prereg=size_pnl
             "production": production["binding"], "tables": {mid: _table_binding(e, ids) for mid, e in ready.items()}}
     inputs_receipt = _receipt(out / "receipts" / "inputs_synthetic.json", body, "inputs_receipt_changed")
     frames, skipped, ladder_hash, dropped = _synthetic_scores(src, ready, plan, facts_all, labels)
+    full = pd.concat(frames, ignore_index=True)
+    pop = synthetic_eval.population(full)  # E, the evaluated population; undetermined rows stay published as evidence
+    kept, tickers = set(pop["event_id"].astype(str)), dict(zip(plan["event_id"].astype(str), plan["ticker"]))
+    if not kept: raise Refusal(_CONFLICT, "the scored population is empty", {"reason": "empty_population"})
+    if pd.to_datetime(pop["event_date"]).dt.to_period("Q").nunique() < 2 or len({tickers[e] for e in kept}) < 2:
+        raise Refusal(_CONFLICT, "too few quarters or tickers to bootstrap", {"reason": "underclustered_population"})
     if replay:  # X7 evidence: the replay verdict is receipted, so a later plain run can read it
         equal = _frames_digest(frames) == _frames_digest(_synthetic_scores(src, ready, plan, facts_all, labels)[0])
         _receipt(out / "receipts" / "synthetic_replay.json", {"stage": "synthetic_replay", "scope": scope, "inputs": inputs_receipt["content_hash"],
                                                              "ladder": ladder_hash, "frames": _frames_digest(frames), "equal": equal}, "synthetic_replay_changed")
     replay_equal = _replay_equal(out, inputs_receipt["content_hash"], ladder_hash, _frames_digest(frames))
-    kept, common = set(pd.concat(frames, ignore_index=True)["event_id"].astype(str)), _common_dropped(ready)
-    pools = _pool_tables(ready)
-    fits = {mid: _fit(pools[mid], labels, kept) for mid in ready}  # rmse and mae on the events that were scored (population E)
-    _log(f"synthetic common_dropped={common} events={len(kept)} scoreability_dropped={dropped}")
+    common, pools = _common_dropped(ready), _pool_tables(ready)
+    fits = {mid: _fit(pools[mid], labels, kept) for mid in ready}  # rmse and mae on E
+    undetermined = len(set(full["event_id"].astype(str)) - kept)
+    _log(f"synthetic common_dropped={common} events={len(kept)} undetermined={undetermined} scoreability_dropped={dropped}")
     meta = {mid: {"family": e["family"], "params": e["params"], "rmse": fits[mid]["rmse"], "mae": fits[mid]["mae"]} for mid, e in ready.items()}
-    tickers = dict(zip(plan["event_id"].astype(str), plan["ticker"]))
-    result = synthetic_eval.evaluate(pd.concat(frames, ignore_index=True), meta, tickers, arm, replay_equal=replay_equal)
+    result = synthetic_eval.evaluate(pop, meta, tickers, arm, replay_equal=replay_equal)
     body = {"stage": "synthetic", "models": sorted(ready), "scope": scope, "inputs": inputs_receipt["content_hash"], "arm": content_hash(arm),
             "ladder_skipped": skipped, "ladder": ladder_hash, "scoreability_dropped": dropped, "common_dropped": common, "events": len(kept),
-            "events_by_model": {mid: len(e["table"]) for mid, e in ready.items()}, "evaluation": result["hash"],
+            "events_undetermined": undetermined, "events_by_model": {mid: len(set(e["table"].index.astype(str)) & kept) for mid, e in ready.items()},
+            "evaluation": result["hash"],
             "stop": result["stop"], "metrics": fits}
     rows = decisions.publish(out, frames, body, stem="decisions_synthetic", receipt="synthetic")
     (out / "t11_synthetic.md").write_text(report.build_report(report.t11_synthetic(result)), encoding="utf-8")
