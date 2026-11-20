@@ -123,10 +123,10 @@ def test_only_the_inner_stage_runs(tmp_path, stage):
         driver.run(sources(), stage, tmp_path, prereg=OK)
 
 
-def test_prepare_rejects_a_typo_stage_before_any_source_call():
+def test__prepare_rejects_a_typo_stage_before_any_source_call():
     calls = []
     with pytest.raises(ValueError, match="stage must be one of"):
-        driver.prepare(sources(read=lambda slot: calls.append(slot)), "typo")
+        driver._prepare(sources(read=lambda slot: calls.append(slot)), "typo")
     assert calls == []
 
 

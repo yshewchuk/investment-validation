@@ -1,4 +1,4 @@
-"""EXP-188 S9a: inner-stage (2023-2024) driver of the SIZE P&L re-score; outer stage S9b (#2660); also serves the synthetic arm."""
+"""EXP-188 S9a: inner-stage (2023-2024) driver of the SIZE P&L re-score; outer stage S9b (#2660); the synthetic arm gets a gated helper in its own slice."""
 import os
 import resource
 import sys
@@ -59,7 +59,7 @@ def _rss_mb():
     return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
 
 
-def prepare(src, stage):
+def _prepare(src, stage):
     """Steps 2-4: bind run, roster, models; read production and tables. Returns (roster, bound_tables, production)."""
     check_sources(src)
     if stage not in STAGES:
@@ -171,7 +171,7 @@ def run(src, stage, out_dir, *, prereg=size_pnl_prereg.require_preregistration):
     if os.environ.get("BOUNDED_RUN_NESTED") != "1":
         raise fail("RESOURCE_UNAVAILABLE", "run under tools/bounded_run.py --heavy", details={"reason": "not_bounded"})
     out = Path(out_dir)
-    roster, bound_tables, production = prepare(src, stage)  # refuses any stage but "inner" before reading
+    roster, bound_tables, production = _prepare(src, stage)  # refuses any stage but "inner" before reading
     tables = bound_tables["tables"]
     ready = {mid: e for mid, e in tables.items() if e["status"] == "ready"}
     excluded = {mid: e["reason"] for mid, e in tables.items() if e["status"] != "ready"}

@@ -36,5 +36,4 @@ Exit 0 prints a JSON summary on stdout. Exit 2 prints `{"refused": code, "messag
 `reason` is the machine-readable cause (for example `sources_invalid`, `expected_mismatch`, `not_bounded`,
 `no_ready_models`, `key_not_admitted`). Progress goes to stderr: stage start and end with elapsed time and RSS,
 quarters done with rate and ETA, and per-model tuning lines. The synthetic calibration arm
-(`guides/size_pnl_synthetic_calibration_design.md`) is a separate slice that reuses `size_pnl_driver.prepare`
-and `model_events`.
+(`guides/size_pnl_synthetic_calibration_design.md`) is a separate slice that will get its own gated helper and reuses `model_events`.
