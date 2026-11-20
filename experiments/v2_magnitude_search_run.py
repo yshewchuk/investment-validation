@@ -133,9 +133,7 @@ def _init_trial_worker(conn_path, store_root, run_id, request, plan_ref, memory_
         conn = connect(conn_path, must_exist=True)
         conn.execute("PRAGMA busy_timeout=30000")
         store = ArtifactStore(store_root)
-        verified_size_rows = {}
-        binding = verified_registration_bytes(conn, store, run_id, max_evidence_bytes=MAX_NATIVE_EVIDENCE_BYTES,
-                                              verified_size_rows=verified_size_rows)
+        binding = verified_registration_bytes(conn, store, run_id, max_evidence_bytes=MAX_NATIVE_EVIDENCE_BYTES)
         if binding is None:
             raise fail("INVALID_EXPERIMENT_SPEC", "native experiment has not been preregistered")
         try:
@@ -143,7 +141,6 @@ def _init_trial_worker(conn_path, store_root, run_id, request, plan_ref, memory_
             hydrate = ((lambda: load_registration_document(store, binding))
                        if schema == "native_experiment_registration.v1.7" else None)
             registration = NativeRegistration(run_id, binding, hydrate=hydrate)
-            verified_size_rows.clear()  # decoded shard rows must not live for the worker's lifetime
             log_memory("worker registration loaded", registration=registration.lean)
         except (ArtifactError, ValueError, KeyError, TypeError, AttributeError):
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "native registration evidence is invalid") from None
@@ -230,7 +227,14 @@ def _parallel_trial_task(task):
 
 def _prepublish_task(task):
     args_list, cpu_id = task
-    return _guarded(cpu_id, lambda: _PARALLEL[2].prepublish(args_list))
+
+    def work():
+        trials = _PARALLEL[2]
+        registration = trials.registration
+        if isinstance(registration, NativeRegistration) and registration.hydrate is not None:  # one hydration for every cohort of this short-lived child
+            trials.registration = NativeRegistration(registration.run_id, registration.binding_json, registration.document)
+        return trials.prepublish(args_list)
+    return _guarded(cpu_id, work)
 
 
 def _parallel_preflight(conn, request, limits, workers):

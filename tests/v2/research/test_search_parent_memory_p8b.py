@@ -102,12 +102,11 @@ def test_worker_uses_stored_plan_and_compact_registration(monkeypatch):
     assert run_mod.read_search_plan.call_count == 0
 
 
-def test_worker_clears_shard_rows_and_hydrates_without_them(monkeypatch):
+def test_worker_verifies_and_hydrates_without_shard_row_kwargs(monkeypatch):
     captured = {}
 
-    def verified(conn, store, run_id, *, max_evidence_bytes, verified_size_rows):
-        captured["rows"] = verified_size_rows
-        verified_size_rows["h1"] = {"row": 1}
+    def verified(conn, store, run_id, **kwargs):
+        captured["kwargs"] = kwargs
         return BINDING
 
     _patch_worker(monkeypatch, binding=BINDING, store=FakeStore(canonical_json(PLAN).encode()))
@@ -115,12 +114,34 @@ def test_worker_clears_shard_rows_and_hydrates_without_them(monkeypatch):
     loader = Mock(return_value=FULL)
     monkeypatch.setattr(run_mod, "load_registration_document", loader)
     run_mod._init_trial_worker("c", "s", "native_x", {}, REF, 1)
-    assert captured["rows"] == {}
+    assert "verified_size_rows" not in captured["kwargs"]
     _, _, _, registration, _ = run_mod._PARALLEL
     assert registration.document == FULL
     loader.assert_called_once()
     assert loader.call_args.args[1] == BINDING
-    assert "verified_size_rows" not in loader.call_args.kwargs
+    assert loader.call_args.kwargs == {}
+
+
+def test_prepublish_task_hydrates_registration_once_for_the_child(monkeypatch):
+    hydrate = Mock(return_value=FULL)
+    registration = NativeRegistration("run", BINDING, hydrate=hydrate)
+    seen = []
+
+    class FakeTrials:
+        def __init__(self):
+            self.registration = registration
+
+        def prepublish(self, args_list):
+            seen.append(self.registration)
+
+    trials = FakeTrials()
+    monkeypatch.setattr(run_mod, "_PARALLEL", (None, None, trials, registration, PLAN))
+    monkeypatch.setattr(run_mod.os, "sched_setaffinity", lambda pid, cpus: None)
+    assert run_mod._prepublish_task(([], 0)) is None
+    hydrate.assert_called_once()
+    assert trials.registration.hydrate is None
+    assert trials.registration.document_value == FULL
+    assert seen == [trials.registration]
 
 
 def test_worker_refuses_missing_registration(monkeypatch):
