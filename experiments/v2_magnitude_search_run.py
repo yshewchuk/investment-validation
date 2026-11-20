@@ -61,6 +61,26 @@ from experiments.size_job_budget import remaining
 _PARALLEL = None
 _WORKER_WATCHDOG_STOP = None
 _WORKER_TERMINATING = False
+_WORKER_LOG = {"slices": 0, "fits": 0}
+
+
+def _worker_due(kind):
+    """Count one worker stage line of this kind; True for the first three and every twentieth."""
+    _WORKER_LOG[kind] += 1
+    return _WORKER_LOG[kind] <= 3 or _WORKER_LOG[kind] % 20 == 0
+
+
+def _worker_stage(trials):
+    """Log worker memory after a cohort slice loads and after trials fit, at a bounded cadence."""
+    load = trials._cohort_inputs
+
+    def loaded(cohort, *args, **kwargs):
+        fresh = cohort not in trials._memo
+        result = load(cohort, *args, **kwargs)
+        if fresh and _worker_due("slices"):
+            log_memory("worker slice loaded", panel=panel_memo_holder())
+        return result
+    trials._cohort_inputs = loaded
 
 
 def _stop_worker_watchdog():
@@ -87,6 +107,7 @@ def _init_trial_worker(conn_path, store_root, run_id, request, plan_ref, memory_
     global _PARALLEL, _WORKER_WATCHDOG_STOP, _WORKER_TERMINATING
     _WORKER_WATCHDOG_STOP = None
     _WORKER_TERMINATING = False
+    _WORKER_LOG["slices"] = _WORKER_LOG["fits"] = 0
     try:
         signal.signal(signal.SIGTERM, _terminate_worker)
         _WORKER_WATCHDOG_STOP = start_rss_watchdog(memory_bytes)
@@ -102,11 +123,14 @@ def _init_trial_worker(conn_path, store_root, run_id, request, plan_ref, memory_
             document = load_registration_document(store, binding, verified_size_rows=verified_size_rows)
             registration = NativeRegistration(run_id, binding,
                 document if document.get("schema_version") == "native_experiment_registration.v1.7" else None)
+            log_memory("worker registration loaded", registration=registration.document_value)
         except (ArtifactError, ValueError, KeyError, TypeError):
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "native registration evidence is invalid") from None
         repository = Repository(conn, store, pin_snapshots=True)
         plan = read_search_plan(conn, store, registration, request, plan_ref)
+        log_memory("worker plan read", plan=plan)
         trials = SearchTrials(conn, store, repository, registration, request, plan_ref)
+        _worker_stage(trials)
         trials.adopt_published = adopt
         _PARALLEL = (conn, store, trials, registration, plan)
     except (OpsError, DataError) as error:
@@ -175,6 +199,8 @@ def _parallel_trial_task(task):
         _complete_trial(
             trials, trials._execute_borrowed, args, key, limits=limits,
             read=lambda slot: read_record(conn, store, registration.run_id, slot))
+        if _worker_due("fits"):
+            log_memory("worker after fit", panel=panel_memo_holder())
         if panel_memo_holder():
             release_parent_caches("worker trial")
     return _guarded(cpu_id, work)
