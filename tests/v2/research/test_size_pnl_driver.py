@@ -537,6 +537,21 @@ def test_run_py_refuses_not_bounded_before_importing_sources(tmp_path, monkeypat
     assert refused["reason"] == "not_bounded"
 
 
+def test_run_py_propagates_a_type_error_raised_inside_the_factory(tmp_path, monkeypatch):
+    run_py = _run_main()
+    monkeypatch.setattr(run_py.size_pnl_prereg, "require_preregistration", OK)
+    monkeypatch.setenv("BOUNDED_RUN_NESTED", "1")
+    module = types.ModuleType("exp188_fake_sources")
+
+    def make(args):
+        raise TypeError("boom")
+
+    module.make = make
+    monkeypatch.setitem(sys.modules, "exp188_fake_sources", module)
+    with pytest.raises(TypeError, match="boom"):  # a real error in the body, not a sources_invalid refusal
+        run_py.main(_argv(tmp_path, "--no-ledger", sources=FAKE))
+
+
 def test_run_refuses_sources_without_a_dict_expected(tmp_path):
     with pytest.raises(OpsError) as caught:
         driver.run(sources(expected=None), "inner", tmp_path, prereg=OK)

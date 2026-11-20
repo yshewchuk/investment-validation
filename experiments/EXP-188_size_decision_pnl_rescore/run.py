@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import inspect
 import json
 import os
 import stat
@@ -72,12 +73,10 @@ def main(argv: list[str] | None = None) -> int:
             factory = getattr(importlib.import_module(module_name), func)
             if not callable(factory):
                 raise AttributeError(func)
-        except (ValueError, ImportError, AttributeError) as exc:
+            inspect.signature(factory).bind(args)  # a signature that rejects the parsed args is a refusal
+        except (ValueError, TypeError, ImportError, AttributeError) as exc:
             raise fail(_INVALID, f"--sources {args.sources} is invalid", details={"reason": "sources_invalid"}) from exc
-        try:  # a factory whose signature rejects the parsed args is a refusal, not a crash
-            made = factory(args)
-        except TypeError as exc:
-            raise fail(_INVALID, f"--sources {args.sources} is invalid", details={"reason": "sources_invalid"}) from exc
+        made = factory(args)  # outside any try: an error raised inside the factory body propagates unchanged
         sources = size_pnl_driver.check_sources(made)
         if sources.expected != args.expected_identities:
             raise fail(_CONFLICT, "--expected differs from the sources' expected identities", details={"reason": "expected_mismatch"})
