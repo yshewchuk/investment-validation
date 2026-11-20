@@ -195,6 +195,33 @@ def test_real_tune_skips_with_no_trades_and_binds_the_receipt(tmp_path, monkeypa
     assert inner["models"][mid] == tuned["content_hash"]
 
 
+def test_real_tune_selects_the_argmax_and_binds_the_receipt(tmp_path, monkeypatch):
+    """The real ``tune`` (not stubbed) with taken trades: 7 structures x 50 trades per c, so 350 >= MIN_TRADES.
+
+    Only c == 1.1 earns 2.0 per trade, so it has the largest total (700.0); every other c totals 350.0.
+    """
+    monkeypatch.setattr(driver, "build_pool", lambda table, labels: None)
+    monkeypatch.setattr(driver.shortvol, "simulate", SIMS)
+    scored_ids = lambda chunk_, events, sims, name, **kw: pd.DataFrame({"event_id": events["event_id"].to_numpy()})  # noqa: E731
+    monkeypatch.setattr(tuning, "score_events", scored_ids)
+    monkeypatch.setattr(tuning, "decide", lambda scored: scored)  # every row taken; score below sets the trades
+
+    def taken_50(chunk_, events, mine, name, alpha, c):
+        pnl = 2.0 if c == 1.1 else 1.0
+        return pd.DataFrame({"pnl_dollars": np.full(50, pnl)})
+
+    monkeypatch.setattr(tuning, "score", taken_50)
+    use_chunks(monkeypatch, [("2023Q2", chunk("E1"))])
+    summary = driver.run(sources(), "inner", tmp_path, prereg=OK)
+    mid = summary["models"][0]
+    tuned = tuning.load_receipt(tmp_path / "receipts" / f"tuning_{mid}.json")
+    inner = tuning.load_receipt(tmp_path / "receipts" / "inner.json")
+    assert tuned["c"] == 1.1 and tuned["skipped"] is False and tuned["skip_reason"] is None
+    assert tuned["trades"] == 350
+    assert tuned["totals"] == {"0.75": 350.0, "0.9": 350.0, "1.0": 350.0, "1.1": 700.0, "1.25": 350.0, "1.5": 350.0}
+    assert inner["models"][mid] == tuned["content_hash"]
+
+
 def test_model_events_aligns_every_column_by_event_id():
     table = pd.DataFrame({"event_date": pd.to_datetime(["2023-06-10", "2024-08-07", "2025-01-15"]),
                           "pred_move": [1.5, 2.5, 3.5], "pred_crush": [-10.0, -20.0, -30.0]},
