@@ -6,6 +6,7 @@ from engine.v2.models.training.fit_routes import check_fitting_allowed
 from engine.v2.ops.errors import OpsError, fail
 from engine.v2.research.horizon_fitted import HorizonFitFailure, build_fit_inputs
 from engine.v2.research.horizon_fitted import fitted_forecasts as fit_horizons
+from experiments.magnitude_failure_reason import classify
 
 
 def fitted_forecasts(indexed, train, fold, plan, execution, *, progress=None, strict_failures=False, diagnostics=None,
@@ -29,4 +30,6 @@ def fitted_forecasts(indexed, train, fold, plan, execution, *, progress=None, st
         if strict_failures and not variant and (isinstance(error, (MemoryError, OSError, ImportError, OpsError))
                                                 or not isinstance(error, (ValueError, ArithmeticError))):
             raise error
-        raise fail("EXPERIMENT_VARIANT_FAILED", "fitted magnitude estimator failed") from None
+        failed = fail("EXPERIMENT_VARIANT_FAILED", "fitted magnitude estimator failed")
+        failed.failure_reason = classify(error)
+        raise failed from None

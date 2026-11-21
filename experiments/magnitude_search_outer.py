@@ -12,6 +12,7 @@ from engine.v2.ops.errors import OpsError, fail
 from engine.v2.ops.fingerprints import source_closure
 from engine.v2.ops.migrations import require_current
 from engine.v2.research.magnitude_inputs import load_magnitude_targets
+from experiments.magnitude_failure_reason import valid_reason
 from experiments.magnitude_report import magnitude_metrics
 from experiments.magnitude_search_evidence import (
     _requires_event_dates,
@@ -78,6 +79,10 @@ def _timed_shape(result, keys, *, legacy=False, untimed=False):
     if not isinstance(result, dict):
         return False
     observed = set(result)
+    if "failure_reason" in observed:
+        if result.get("event") != "failed" or not valid_reason(result["failure_reason"]):
+            return False
+        observed.discard("failure_reason")
     if untimed:
         return observed == keys
     if observed == keys:

@@ -15,6 +15,7 @@ from engine.v2.models.no_fit import forbid_fitting
 from engine.v2.ops.errors import fail
 from engine.v2.ops.executor import THREAD_VARIABLES
 from engine.v2.research.progress import decision
+from experiments.magnitude_failure_reason import valid_reason
 from experiments.magnitude_search_records import MAX_BYTES
 
 
@@ -104,6 +105,8 @@ def _receive(child, wall_seconds, progress):
                     child.stdin.write(b"continue\n")
                     child.stdin.flush()
                 elif event in ("failed", "succeeded"):
+                    if "failure_reason" in message and (event != "failed" or not valid_reason(message["failure_reason"])):
+                        raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search worker protocol differs")
                     result = message
                 elif event == "resource_limit":
                     raise fail("RESOURCE_LIMIT_EXCEEDED", "search execution exceeded its resource limits")

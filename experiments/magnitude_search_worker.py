@@ -23,6 +23,7 @@ def main():
         from engine.v2.data.errors import DataError
         from engine.v2.foundation import ArtifactStore
         from engine.v2.ops.errors import OpsError
+        from experiments.magnitude_failure_reason import classify, valid_reason
         from experiments.magnitude_fitted import fitted_forecasts
         from experiments.magnitude_search_inputs import load_fit_inputs
 
@@ -105,7 +106,10 @@ def main():
             timing = ({"score_seconds": max(0.0, time.monotonic() - started),
                        "rss_delta_kib": rss_delta_kib()}
                       if not regression else {})
-            emit({"event": "failed", **timing})
+            reason = getattr(error, "failure_reason", None)
+            if not valid_reason(reason):
+                reason = classify(error)
+            emit({"event": "failed", "failure_reason": reason, **timing})
             return
         column = target["prediction_column"] if regression else "predicted_absolute_move_pct"
         schema_version = request["execution"].get("schema_version")
@@ -128,6 +132,7 @@ def regression_forecasts(fit_inputs, request, progress, diagnostics):
     from engine.v2.models.training.fit_routes import check_fitting_allowed
     from engine.v2.ops.errors import fail
     from engine.v2.research.horizon_fitted import HorizonFitFailure, fitted_forecasts
+    from experiments.magnitude_failure_reason import classify
     check_fitting_allowed("regression_forecasts")
     execution = request["execution"]
     target = execution["target"]
@@ -138,7 +143,9 @@ def regression_forecasts(fit_inputs, request, progress, diagnostics):
     except HorizonFitFailure as failure:
         error = failure.__cause__
         if isinstance(error, (ValueError, ArithmeticError)) or (isinstance(error, DataError) and error.code == "EXPERIMENT_VARIANT_FAILED"):
-            raise fail("EXPERIMENT_VARIANT_FAILED", "fitted regression estimator failed") from None
+            failed = fail("EXPERIMENT_VARIANT_FAILED", "fitted regression estimator failed")
+            failed.failure_reason = classify(error)
+            raise failed from None
         raise error
     return predictions
 
