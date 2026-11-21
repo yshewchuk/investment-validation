@@ -26,9 +26,10 @@ from experiments.native_registration import read_native_registration
 _KEYS = ("catalog", "store_root", "spec", "request", "plan_ref", "snapshot_id", "production_hash")
 _LIMIT = 1 << 20
 MAX_OBJECT_BYTES = 1 << 28
+# same caps as magnitude_search_plan._BOUNDS_CATALOG_LIMITS (the repo's bounded label-bounds admission)
 MAX_SNAPSHOT_TABLES = 256
-MAX_SNAPSHOT_FRAGMENTS = 1_000_000
-MAX_SNAPSHOT_EVIDENCE_BYTES = 1 << 28
+MAX_SNAPSHOT_FRAGMENTS = 65_536
+MAX_SNAPSHOT_EVIDENCE_BYTES = 64 * 1024 * 1024
 _BLEND_NAMES = {"M4": "size_b1_v1", "M5": "size_b2_v1"}
 _INVALID, _CONFLICT = "INVALID_EXPERIMENT_SPEC", "EXPERIMENT_IDENTITY_CONFLICT"
 
@@ -104,11 +105,18 @@ def _bound_snapshot(conn, snapshot_id):
             "SELECT COUNT(*) FROM data_version_fragments vf JOIN data_snapshot_tables st ON st.dataset_version_id = vf.dataset_version_id "
             "WHERE st.snapshot_id = ?", (snapshot_id,)).fetchone()[0]
         evidence = conn.execute(
-            "SELECT COALESCE(SUM(LENGTH(dv.evidence_json) + LENGTH(dv.partition_logical_hashes_json)), 0) "
+            "SELECT COALESCE(SUM(LENGTH(CAST(dv.evidence_json AS BLOB)) + LENGTH(CAST(dv.partition_logical_hashes_json AS BLOB))), 0) "
             "FROM data_dataset_versions dv JOIN data_snapshot_tables st ON st.dataset_version_id = dv.dataset_version_id "
+            "WHERE st.snapshot_id = ?", (snapshot_id,)).fetchone()[0]
+        fragment_bytes = conn.execute(
+            "SELECT COALESCE(SUM(LENGTH(CAST(COALESCE(f.key_bounds_json,'') AS BLOB)) + LENGTH(CAST(COALESCE(f.time_bounds_json,'') AS BLOB)) "
+            "+ LENGTH(CAST(COALESCE(f.input_receipt_refs_json,'') AS BLOB))), 0) "
+            "FROM data_version_fragments vf JOIN data_fragments f ON f.fragment_id = vf.fragment_id "
+            "JOIN data_snapshot_tables st ON st.dataset_version_id = vf.dataset_version_id "
             "WHERE st.snapshot_id = ?", (snapshot_id,)).fetchone()[0]
     except sqlite3.Error:
         raise fail("RESOURCE_UNAVAILABLE", "catalog unavailable", details={"reason": "catalog_unavailable"}) from None
+    evidence += fragment_bytes
     if tables > MAX_SNAPSHOT_TABLES or fragments > MAX_SNAPSHOT_FRAGMENTS or evidence > MAX_SNAPSHOT_EVIDENCE_BYTES:
         raise fail(_CONFLICT, "snapshot catalog metadata is too large", details={"reason": "snapshot_metadata_too_large"})
 
