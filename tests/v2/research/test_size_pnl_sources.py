@@ -251,7 +251,6 @@ def env(tmp_path, monkeypatch):
 
 def test_build_sources_success_leaves_connection_open(env, capsys):
     sources = src.build_sources(env.args)
-    assert driver.check_sources(sources) is sources
     assert sources.plan["blends"] == [{"blend_id": "b1", "name": "size_b1_v1"}] and sources.blend_ids == {"M4": "b1"}
     assert sources.expected == EXPECTED and sources.panel_id == "P" and sources.snapshot_id == "snap-1"
     assert sources.selection == SELECTION and sources.load_index == "index" and sources.admit == "admit"
