@@ -96,7 +96,11 @@ def _open(cfg):
 def _snapshot(repository, snapshot_id):
     try:
         return repository.resolve(snapshot_id)
-    except (DataError, ValueError, KeyError):
+    except DataError as exc:
+        if exc.code != "SNAPSHOT_NOT_FOUND":
+            raise
+        raise fail(_CONFLICT, "pinned snapshot cannot be resolved", details={"reason": "snapshot_missing"}) from None
+    except (ValueError, KeyError):
         raise fail(_CONFLICT, "pinned snapshot cannot be resolved", details={"reason": "snapshot_missing"}) from None
 
 
@@ -116,6 +120,10 @@ def assemble(*, plan, read, selection, expected, panel_id, admit, admitted, snap
 def build_sources(args):
     """Public factory for `run.py --sources`. The connection stays open for the run's `read` closure; it closes on any refusal."""
     cfg = _config(getattr(args, "sources_config", None))
+    expected = getattr(args, "expected_identities", None)
+    if not (isinstance(expected, dict) and all(isinstance(expected.get(k), str) and expected[k].strip()
+                                               for k in ("plan_id", "registration_id", "seal_id", "panel_id"))):
+        raise _refuse("expected_invalid", "expected identities must hold plan_id, registration_id, seal_id and panel_id")
     try:
         spec = experiment_spec_from_document(_read_json(cfg["spec"], "input_unreadable"))
         ref = from_document(ArtifactRef, _read_json(cfg["plan_ref"], "input_unreadable"))
@@ -136,7 +144,6 @@ def build_sources(args):
         admit = size_pnl_inputs.population_admit(repository, snapshot, month, max_object_bytes=MAX_OBJECT_BYTES)
         admitted = size_pnl_readers.admit_events(repository, snapshot, month, max_object_bytes=MAX_OBJECT_BYTES)
         load_index = size_pnl_ladder.default_load_index(repository, snapshot)
-        expected = args.expected_identities
         sources = assemble(plan=plan, read=read, selection=selection, expected=expected, panel_id=expected["panel_id"],
                            admit=admit, admitted=admitted, snapshot_id=cfg["snapshot_id"], load_index=load_index)
     except BaseException:

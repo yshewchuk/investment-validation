@@ -7,6 +7,7 @@ import types
 import pandas as pd
 import pytest
 
+from engine.v2.data.errors import DataError
 from engine.v2.data.errors import fail as data_fail
 from engine.v2.ops.errors import OpsError
 from experiments import size_pnl_driver as driver
@@ -192,13 +193,24 @@ def test_missing_catalog_refused(tmp_path):
 
 class _Repo:
     def resolve(self, snapshot_id):
-        raise data_fail("SNAPSHOT_UNRESOLVED", "snapshot not committed")
+        raise data_fail("SNAPSHOT_NOT_FOUND", "gone")
+
+
+class _CorruptRepo:
+    def resolve(self, snapshot_id):
+        raise data_fail("MANIFEST_CORRUPT", "bad")
 
 
 def test_snapshot_resolve_failure_refused():
     with pytest.raises(OpsError) as exc:
         src._snapshot(_Repo(), "snap-1")
     assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "snapshot_missing")
+
+
+def test_snapshot_other_data_error_reraised():
+    with pytest.raises(DataError) as exc:
+        src._snapshot(_CorruptRepo(), "snap-1")
+    assert exc.value.code == "MANIFEST_CORRUPT"
 
 
 # --- (5) assemble ------------------------------------------------------------
@@ -270,3 +282,14 @@ def test_build_sources_without_config_refuses(env):
     with pytest.raises(OpsError) as exc:
         src.build_sources(types.SimpleNamespace(expected_identities=EXPECTED))
     assert _refusal(exc) == ("INVALID_EXPERIMENT_SPEC", "sources_config_invalid")
+
+
+@pytest.mark.parametrize("expected", [{k: v for k, v in EXPECTED.items() if k != "seal_id"}, "not-a-dict"])
+def test_build_sources_expected_invalid_refuses_before_open(env, monkeypatch, expected):
+    flags = []
+    monkeypatch.setattr(src, "_open", lambda cfg: flags.append(cfg))
+    env.args.expected_identities = expected
+    with pytest.raises(OpsError) as exc:
+        src.build_sources(env.args)
+    assert _refusal(exc) == ("INVALID_EXPERIMENT_SPEC", "expected_invalid")
+    assert flags == []
