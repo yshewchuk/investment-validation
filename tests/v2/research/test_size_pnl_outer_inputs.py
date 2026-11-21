@@ -329,3 +329,34 @@ def test_execution_status_running_refuses():
     key = put(slots, "c1")
     slots["outer-execution:" + key]["status"] = "running"
     assert_identity_mismatch(slots)
+
+
+def test_execution_and_forecasts_without_start_refuses_before_hash_check():
+    slots = {}
+    key = put(slots, "c1")
+    del slots["outer-start:" + key]
+    slots["outer-execution:" + key]["forecasts_id"] = "sha256:corrupt"
+    assert_identity_mismatch(slots)
+
+
+def test_forecasts_without_execution_refuses():
+    slots = {}
+    key = put(slots, "c1")
+    del slots["outer-execution:" + key]
+    assert_identity_mismatch(slots)
+
+
+def test_execution_without_start_refuses():
+    slots = {}
+    key = put(slots, "c1")
+    del slots["outer-start:" + key]
+    assert_identity_mismatch(slots)
+
+
+def test_start_only_is_outer_missing():
+    slots = {}
+    key = put(slots, "c1")
+    del slots["outer-execution:" + key]
+    del slots["outer-forecasts:" + key]
+    out, _ = run(slots)
+    assert out["m_c1"] == {"status": "excluded", "reason": "outer_missing"}

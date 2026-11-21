@@ -57,12 +57,18 @@ def _bind_unit(plan, read, cid, sealed_ids, admit, year):
     if isinstance(forecasts, list) and not all(_valid_forecast(row) for row in forecasts):
         raise _conflict("outer_identity_mismatch", "an outer forecast row is malformed")
     if isinstance(start, dict): _check_start(plan, start, cid, year, key)  # before the exclusions: a failed run must still name this plan
+    # The producer writes start, then execution, then forecasts: a later slot without an earlier one is corruption, not a gap.
+    if start is None and (execution is not None or forecasts is not None):
+        raise _conflict("outer_identity_mismatch", "the outer start record is missing under a later outer slot")
+    if execution is None and forecasts is not None:
+        raise _conflict("outer_identity_mismatch", "the outer forecasts are present without an execution record")
+    if isinstance(execution, dict) and execution["status"] == "succeeded" and isinstance(forecasts, list) \
+            and execution["forecasts_id"] != content_hash(forecasts):
+        raise _conflict("outer_forecasts_hash_mismatch", "the outer forecasts differ from the recorded hash")
     if isinstance(execution, dict) and execution["status"] == "failed":
         return {"status": "excluded", "reason": "outer_failed"}
     if start is None or execution is None or forecasts is None:
         return {"status": "excluded", "reason": "outer_missing"}
-    if execution["forecasts_id"] != content_hash(forecasts):
-        raise _conflict("outer_forecasts_hash_mismatch", "the outer forecasts differ from the recorded hash")
     try:
         array = inputs.bind_array({"predictions": forecasts}, sealed_ids, admit)
     except OpsError as exc:
