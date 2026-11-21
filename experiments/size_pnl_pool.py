@@ -36,6 +36,10 @@ def build_pool(table, labels, *, floor=COMMON_START):
     if floor is not None:
         keep = dates >= pd.Timestamp(floor)
         frame, dates = frame[keep], dates[keep]
+    # Canonical input order (date, then event id): ResidualPool's own date sort is unstable, so ties follow
+    # that sort, but it is a deterministic function of its input, so the pool no longer depends on row order.
+    order = np.lexsort((frame.index.astype(str).to_numpy(), dates.to_numpy()))
+    frame, dates = frame.iloc[order], dates.iloc[order]
     history = pd.DataFrame({
         "event_date": dates.to_numpy(),
         "pred_abs_move": frame["pred_move"].to_numpy(dtype=float),

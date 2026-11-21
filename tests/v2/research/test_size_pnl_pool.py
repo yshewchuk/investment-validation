@@ -108,6 +108,54 @@ def test_build_pool_residuals_pair_by_event_id():
     assert np.allclose(pool._crush, [3.0, -4.0, 1.5])
 
 
+def test_build_pool_is_independent_of_row_order():
+    # E1, E2, E3 share 2023-06-01; every residual is distinct so any reordering shows up.
+    index = pd.Index([f"E{i}" for i in range(6)], name="event_id")
+    table = pd.DataFrame({"event_date": pd.to_datetime(["2023-03-01", "2023-06-01", "2023-06-01",
+                                                        "2023-06-01", "2023-09-01", "2023-11-01"]),
+                          "pred_move": [5.0, 4.0, 6.0, 3.0, 7.0, 2.5],
+                          "pred_crush": [-15.0, -10.0, -20.0, -12.0, -16.0, -8.0]}, index=index)
+    labels = pd.DataFrame({"abs_move": [6.5, 3.0, 7.0, 9.0, 4.5, 4.25],
+                           "crush_pct_iv30": [-18.5, -14.0, -12.0, -17.0, -13.0, -9.5]},
+                          index=index)
+    base = build_pool(table, labels, floor=None)
+    reversed_rows = build_pool(table.iloc[::-1], labels, floor=None)
+    shuffled = build_pool(table, labels.iloc[[3, 0, 5, 1, 4, 2]], floor=None)
+    for other in (reversed_rows, shuffled):
+        assert np.array_equal(base._move, other._move)
+        assert np.array_equal(base._crush, other._crush)
+        assert np.array_equal(base._pred, other._pred)
+        assert np.array_equal(base._dates, other._dates)
+    # Pool order: E0, then the tied block E1, E2, E3 in id order, then E4, E5.
+    # Residuals: E0 1.5, E1 -1.0, E2 1.0, E3 6.0, E4 -2.5, E5 1.75.
+    assert np.allclose(base._move, [1.5, -1.0, 1.0, 6.0, -2.5, 1.75])
+    assert np.allclose(base._move[1:4], [-1.0, 1.0, 6.0])
+    assert np.allclose(base._pred, [5.0, 4.0, 6.0, 3.0, 7.0, 2.5])
+    assert np.allclose(base._crush, [-3.5, -4.0, 8.0, -5.0, 3.0, -1.5])
+    assert np.array_equal(base._dates, np.array(["2023-03-01", "2023-06-01", "2023-06-01", "2023-06-01",
+                                                 "2023-09-01", "2023-11-01"], dtype="datetime64[ns]"))
+
+
+def test_build_pool_order_independent_at_production_size():
+    rng = np.random.default_rng(0)
+    n = 300
+    base_date = pd.Timestamp("2024-01-01")
+    index = pd.Index([f"E{i:04d}" for i in range(n)], name="event_id")
+    table = pd.DataFrame({"event_date": [base_date + pd.Timedelta(days=i % 10) for i in range(n)],
+                          "pred_move": rng.uniform(2, 8, n),
+                          "pred_crush": rng.normal(-15, 3, n)}, index=index)
+    labels = pd.DataFrame({"abs_move": rng.uniform(0, 10, n),
+                           "crush_pct_iv30": rng.normal(-15, 6, n)}, index=index)
+    expected = build_pool(table, labels, floor=None)
+    others = [build_pool(table.sample(frac=1, random_state=1), labels, floor=None),
+              build_pool(table.iloc[::-1], labels, floor=None)]
+    for other in others:
+        assert np.array_equal(expected._move, other._move)
+        assert np.array_equal(expected._crush, other._crush)
+        assert np.array_equal(expected._pred, other._pred)
+        assert np.array_equal(expected._dates, other._dates)
+
+
 def test_floor_drops_pre_2023_rows():
     index = pd.Index(["before", "boundary"], name="event_id")
     table = pd.DataFrame({"event_date": [pd.Timestamp("2022-12-31"), pd.Timestamp("2023-01-01")],
