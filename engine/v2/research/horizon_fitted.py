@@ -149,4 +149,4 @@ def _validate_forecasts(values, count, target_domain):
     if (len(values) != count or any(isinstance(value, bool)
             or not isinstance(value, (int, float)) or not math.isfinite(value)
             or (target_domain == "nonnegative" and value < 0) for value in values)):
-        raise ValueError
+        raise ValueError("forecast validation failed")

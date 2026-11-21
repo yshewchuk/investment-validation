@@ -129,7 +129,7 @@ def test_real_signed_child_late_failure_keeps_only_acknowledged_prefix(fold_case
         return execution.run_fitted_trial(source, data.fold, data.plan, fit,
             execution.execution_limits(LIMITS), lambda state, evidence: events.append((state, evidence)))
     if error == "ValueError":
-        assert run() == {"event": "failed"}
+        assert run() == {"event": "failed", "failure_reason": "value_error"}
     else:
         with pytest.raises(OpsError) as caught:
             run()

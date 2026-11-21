@@ -167,6 +167,18 @@ def test_estimator_failures_never_become_fallback(monkeypatch, candidate, phase,
             _run(inputs, fold, execution=execution)
 
 
+def test_candidate_fit_failure_attaches_bounded_reason_without_raw_text(monkeypatch):
+    inputs, fold = _inputs()
+    def fit(*args):
+        raise ValueError("private text")
+    monkeypatch.setattr(comparator, "fit_recipe_estimator", fit)
+    with pytest.raises(OpsError) as caught:
+        _run(inputs, fold)
+    assert caught.value.code == "EXPERIMENT_VARIANT_FAILED"
+    assert caught.value.failure_reason == "value_error"
+    assert "private text" not in str(vars(caught.value))
+
+
 @pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf")])
 @pytest.mark.parametrize("candidate", [False, True])
 def test_nonfinite_estimator_output_is_never_fallback_or_infrastructure(monkeypatch, value, candidate):
@@ -270,7 +282,8 @@ def test_worker_uses_shared_timing_failure_envelope_and_serializes_fallbacks(tmp
         assert result["diagnostics"] == [{"schema_version": "size_v1_4_fit.v1",
             "recipe_id": content_hash(execution["fit_recipe"]), **detail}]
     else:
-        assert set(result) == {"event", "score_seconds", "rss_delta_kib"}
+        assert set(result) == {"event", "score_seconds", "rss_delta_kib", "failure_reason"}
+        assert result["failure_reason"] == "data_error"
 
 
 @pytest.mark.parametrize("changes", [

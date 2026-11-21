@@ -110,10 +110,12 @@ def _candidate_evidence(conn, store, run_id, plan, predictions=None):
                             })
                     evidence_by_key[key] = (
                         terminal_status, score_seconds, rss_delta_kib, inner_metrics,
-                        status, fit_attempt_count, completed_fit_count, diagnostics, fit_seconds)
+                        status, fit_attempt_count, completed_fit_count, diagnostics, fit_seconds,
+                        execution.get("failure_reason") if status == "failed" else None)
                     del raw_execution, execution, terminal
                 (terminal_status, score_seconds, rss_delta_kib, inner_metrics,
-                 status, fit_attempt_count, completed_fit_count, diagnostics, fit_seconds) = evidence_by_key[key]
+                 status, fit_attempt_count, completed_fit_count, diagnostics, fit_seconds,
+                 failure_reason) = evidence_by_key[key]
                 rows.append({
                     "trial_id": key, "run_id": run_id, "outer_year": outer_year,
                     "inner_year": inner_year, "candidate_id": candidate_id,
@@ -125,8 +127,25 @@ def _candidate_evidence(conn, store, run_id, plan, predictions=None):
                     "score_seconds": score_seconds,
                     "rss_delta_kib": rss_delta_kib,
                     "inner_metrics": inner_metrics,
-                    "diagnostics": diagnostics})
+                    "diagnostics": diagnostics,
+                    "failure_reason": failure_reason})
     return rows
+
+
+def failure_counts(rows):
+    """Count failed inner trials by recorded failure_reason, once per distinct trial; legacy records count as unrecorded."""
+    counts = {}
+    seen = set()
+    for row in rows:
+        if row.get("status") == "failed":
+            trial_id = row.get("trial_id")
+            if trial_id is not None:
+                if trial_id in seen:
+                    continue
+                seen.add(trial_id)
+            reason = row.get("failure_reason") or "unrecorded"
+            counts[reason] = counts.get(reason, 0) + 1
+    return {reason: counts[reason] for reason in sorted(counts)}
 
 
 def collect(conn, store, repository, registration, request, plan_ref):
@@ -191,7 +210,8 @@ def collect(conn, store, repository, registration, request, plan_ref):
                      "implied_scales": scales, "label_reasons": label_reasons}
     report = {"plan_id": plan["plan_id"], "search": result,
             "paired": paired_report(events, forecasts, comparisons, targets, **paired_kwargs),
-            "preflight": resource_report(plan), "inner_fits": inner_fits, "comparison_fits": comparison_fits,
+            "preflight": resource_report(plan), "inner_fits": inner_fits, "inner_fit_failures": failure_counts(inner_fits),
+            "comparison_fits": comparison_fits,
             "distribution": distribution,
             "frozen_eligibility": registration.document["size_panel"]["context"]["eligibility_plan"],
             "label_exclusions": [{"outer_year": f["outer_year"], **omission} for f in result["folds"]

@@ -24,6 +24,7 @@ from engine.v2.ops.fingerprints import source_closure
 from engine.v2.ops.migrations import migrate, require_current
 from engine.v2.research.magnitude_inputs import load_magnitude_targets
 from experiments.iv_selection import signed_event_score, training_mean_rows
+from experiments.magnitude_failure_reason import valid_reason
 from experiments.magnitude_report import magnitude_metrics
 from experiments.magnitude_search_blends import best_non_blend_id, score_blends
 from experiments.magnitude_search_evidence import (
@@ -357,7 +358,8 @@ class SearchTrials:
         if (not isinstance(result, dict) or result.get("event") not in ("succeeded", "failed")
                 or (not regression and not _timing(result))
                 or (succeeded and (pending or len(fits) != len(plan["horizons"]) or set(result) != {"event", "forecasts"} | timing | diagnostic_keys(_lean(self.registration))))
-                or (not succeeded and (len(pending) != 1 or set(result) != {"event"} | timing))):
+                or (not succeeded and (len(pending) != 1 or set(result) - {"failure_reason"} != {"event"} | timing
+                                       or ("failure_reason" in result and not valid_reason(result["failure_reason"]))))):
             raise fail("EXPERIMENT_IDENTITY_CONFLICT", "search fit completion differs from admitted attempts")
         # run_fitted_trial has returned only after checking exit and reaping the child.
         # Bind the admitted id (a manifest hash for sharded cohorts), the id reconcile compares.
@@ -372,6 +374,7 @@ class SearchTrials:
                     "completed_fit_count": len(fits), "fits": fits, "status": result["event"],
                     "forecasts_id": forecasts_id,
                     **{name: result[name] for name in timing},
+                    **({"failure_reason": result["failure_reason"]} if "failure_reason" in result else {}),
                     **diagnostic_evidence(result, execution, plan["horizons"], inputs, inner)}
         self._append("execution:" + key, evidence, replay=False)
         self._record(outer_year, inner_year, candidate_id, native=True, **({"forecasts": result["forecasts"]} if succeeded
@@ -428,11 +431,14 @@ class SearchTrials:
             timed = "score_seconds" in result or "rss_delta_kib" in result
             if "target" in plan and timed:
                 raise ValueError
+            if not succeeded and "failure_reason" in result and not valid_reason(result["failure_reason"]):
+                raise ValueError
+            observed = set(result) if succeeded else set(result) - {"failure_reason"}
             if timed:
                 if (not _timing(result)
-                        or set(result) != (({"event", "forecasts"} | timing | diagnostic_keys(_lean(self.registration))) if succeeded else {"event"} | timing)):
+                        or observed != (({"event", "forecasts"} | timing | diagnostic_keys(_lean(self.registration))) if succeeded else {"event"} | timing)):
                     raise ValueError
-            elif set(result) != (({"event", "forecasts"} | diagnostic_keys(_lean(self.registration))) if succeeded else {"event"}):
+            elif observed != (({"event", "forecasts"} | diagnostic_keys(_lean(self.registration))) if succeeded else {"event"}):
                 raise ValueError
             forecasts = None
             if succeeded:
@@ -478,6 +484,8 @@ class SearchTrials:
         if timed:
             receipt.update({"score_seconds": result["score_seconds"],
                             "rss_delta_kib": result["rss_delta_kib"]})
+        if "failure_reason" in result:
+            receipt["failure_reason"] = result["failure_reason"]
         return result, receipt
 
     @staticmethod

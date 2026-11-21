@@ -14,6 +14,7 @@ from engine.v2.models.frozen_state_io import BoundedStateReadError
 from engine.v2.models.training.estimators import fit_recipe_estimator
 from engine.v2.models.training.recipes import RecipeKey, current_recipes
 from engine.v2.ops.errors import fail
+from experiments.magnitude_failure_reason import classify
 from experiments.magnitude_search_evidence import fit_evidence as candidate_evidence
 from experiments.magnitude_search_selection import history_mean_prediction
 
@@ -140,10 +141,12 @@ def forecasts(indexed, train, fold, plan, execution, *, progress, inputs=None):
             complete = [(event, values) for event, values, reason in evaluated if reason is None]
             estimates = {} if model is None or not complete else dict(zip([e for e, _ in complete],
                 model.predict(np.array([v for _, v in complete], dtype=float))))
-        except (ValueError, ArithmeticError):
+        except (ValueError, ArithmeticError) as error:
             if not candidate:
                 raise
-            raise fail("EXPERIMENT_VARIANT_FAILED", "incumbent candidate estimator failed") from None
+            failed = fail("EXPERIMENT_VARIANT_FAILED", "incumbent candidate estimator failed")
+            failed.failure_reason = classify(error)
+            raise failed from None
         elapsed = max(0.0, time.monotonic() - started)
         for event, _, reason in evaluated:
             reason = reason or ("insufficient_training" if model is None else None)
@@ -153,7 +156,9 @@ def forecasts(indexed, train, fold, plan, execution, *, progress, inputs=None):
             value = (history if candidate else None) if reason else float(estimates[event])
             if value is not None and not np.isfinite(value):
                 if candidate:
-                    raise fail("EXPERIMENT_VARIANT_FAILED", "incumbent candidate prediction is nonfinite")
+                    failed = fail("EXPERIMENT_VARIANT_FAILED", "incumbent candidate prediction is nonfinite")
+                    failed.failure_reason = "invalid_prediction"
+                    raise failed
                 raise ValueError("nonfinite incumbent prediction")
             predictions.append({"event_id": event, "horizon_sessions": horizon,
                 "predicted_absolute_move_pct": value, "abstention": None if candidate else reason,
