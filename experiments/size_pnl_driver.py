@@ -545,11 +545,15 @@ def _replay_equal(out, inputs_hash, ladder_hash, frames_hash, declined_hash):
 
 
 def _write_t11(out, text):
-    """Publish the T11 report: a per-process tmp file in ``out``, then ``os.replace``; the tmp is removed on failure (no fsync of the file or directory)."""
+    """Publish the T11 report: a per-process tmp file in ``out`` written and fsynced, ``os.replace``, then ``out`` fsynced; the tmp is removed on failure."""
     tmp = out / f".t11_synthetic.md.{os.getpid()}.tmp"
     try:
-        tmp.write_text(text, encoding="utf-8")
+        with open(tmp, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
         os.replace(tmp, out / "t11_synthetic.md")
+        tuning._fsync_dir(out)
     finally:
         tmp.unlink(missing_ok=True)
 
