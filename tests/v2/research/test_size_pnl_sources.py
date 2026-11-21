@@ -219,19 +219,22 @@ def test_snapshot_other_data_error_reraised():
 def _catalog(tmp_path):
     conn = sqlite3.connect(str(tmp_path / "meta.sqlite"))
     conn.executescript("""
-        create table data_snapshot_tables (snapshot_id, dataset_version_id);
-        create table data_version_fragments (dataset_version_id, fragment_id);
+        create table data_snapshots (snapshot_id, finality_receipt_refs_json, knowledge_mode_by_table_json);
+        create table data_snapshot_tables (snapshot_id, dataset_version_id, table_name);
         create table data_dataset_versions (dataset_version_id, evidence_json, partition_logical_hashes_json);
-        create table data_fragments (fragment_id, key_bounds_json, time_bounds_json, input_receipt_refs_json);
-        create table data_snapshots (snapshot_id, finality_receipt_refs_json);
+        create table data_fragments (fragment_id, partition_key, key_bounds_json, time_bounds_json, input_receipt_refs_json);
+        create table data_version_fragments (dataset_version_id, fragment_id);
+        create table data_objects (fragment_id, storage_key);
     """)
     return conn
 
 
 def _seed(conn, tables=1, fragments=0, evidence="ab", hashes="cd"):
+    # With the defaults each seeded table adds 7 bytes: its snapshot_tables row ('s1', 'dvN', 'tN') and its
+    # dataset_versions row ('dvN', evidence, hashes); 'ab' and 'cd' are 2 bytes each.
     for i in range(tables):
         conn.execute("insert into data_dataset_versions values (?, ?, ?)", (f"dv{i}", evidence, hashes))
-        conn.execute("insert into data_snapshot_tables values ('s1', ?)", (f"dv{i}",))
+        conn.execute("insert into data_snapshot_tables values ('s1', ?, ?)", (f"dv{i}", f"t{i}"))
     for i in range(fragments):
         conn.execute("insert into data_version_fragments values ('dv0', ?)", (f"f{i}",))
     conn.commit()
@@ -278,10 +281,11 @@ def test_bound_snapshot_evidence_over_cap_refused(tmp_path, monkeypatch):
 
 
 def test_bound_snapshot_fragment_json_over_evidence_cap_refused(tmp_path, monkeypatch):
-    monkeypatch.setattr(src, "MAX_SNAPSHOT_EVIDENCE_BYTES", 6)
+    # Tables alone total 14 bytes (under 20); the fragment row adds 'f0' + 8 bytes of key_bounds_json = 24 (over 20).
+    monkeypatch.setattr(src, "MAX_SNAPSHOT_EVIDENCE_BYTES", 20)
     conn = _catalog(tmp_path)
     _seed(conn, tables=1, fragments=1, evidence="ab", hashes="cd")
-    conn.execute("insert into data_fragments values ('f0', ?, NULL, NULL)", ("k" * 8,))
+    conn.execute("insert into data_fragments values ('f0', NULL, ?, NULL, NULL)", ("k" * 8,))
     conn.commit()
     with pytest.raises(OpsError) as exc:
         src._bound_snapshot(conn, "s1")
@@ -290,9 +294,10 @@ def test_bound_snapshot_fragment_json_over_evidence_cap_refused(tmp_path, monkey
 
 
 def test_bound_snapshot_counts_utf8_bytes_not_characters(tmp_path, monkeypatch):
-    monkeypatch.setattr(src, "MAX_SNAPSHOT_EVIDENCE_BYTES", 15)
+    # evidence is 10 characters but 20 UTF-8 bytes: 7 (snapshot_tables) + 3 (dv id) + 20 = 30 bytes, but only 20 characters.
+    monkeypatch.setattr(src, "MAX_SNAPSHOT_EVIDENCE_BYTES", 25)
     conn = _catalog(tmp_path)
-    _seed(conn, tables=1, evidence="é" * 10, hashes="")  # 20 UTF-8 bytes, 10 characters
+    _seed(conn, tables=1, evidence="é" * 10, hashes="")
     with pytest.raises(OpsError) as exc:
         src._bound_snapshot(conn, "s1")
     assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "snapshot_metadata_too_large")
@@ -300,14 +305,64 @@ def test_bound_snapshot_counts_utf8_bytes_not_characters(tmp_path, monkeypatch):
 
 
 def test_bound_snapshot_finality_receipt_refs_over_evidence_cap_refused(tmp_path, monkeypatch):
+    # Without the snapshot row the total is 10 bytes (cap 10, passes); the finality refs add 's1' + 24 bytes.
     monkeypatch.setattr(src, "MAX_SNAPSHOT_EVIDENCE_BYTES", 10)
     conn = _catalog(tmp_path)
     _seed(conn, tables=1, evidence="", hashes="")
-    conn.execute("insert into data_snapshots values ('s1', ?)", ('["' + "r" * 20 + '"]',))
+    conn.execute("insert into data_snapshots values ('s1', ?, NULL)", ('["' + "r" * 20 + '"]',))
     conn.commit()
     with pytest.raises(OpsError) as exc:
         src._bound_snapshot(conn, "s1")
     assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "snapshot_metadata_too_large")
+    conn.close()
+
+
+def test_bound_snapshot_knowledge_mode_json_over_cap_refused(tmp_path, monkeypatch):
+    monkeypatch.setattr(src, "MAX_SNAPSHOT_EVIDENCE_BYTES", 50)
+    conn = _catalog(tmp_path)
+    _seed(conn, tables=1)
+    conn.execute("insert into data_snapshots values ('s1', NULL, ?)", ("k" * 100,))
+    conn.commit()
+    with pytest.raises(OpsError) as exc:
+        src._bound_snapshot(conn, "s1")
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "snapshot_metadata_too_large")
+    conn.close()
+
+
+def test_bound_snapshot_partition_key_over_cap_refused(tmp_path, monkeypatch):
+    monkeypatch.setattr(src, "MAX_SNAPSHOT_EVIDENCE_BYTES", 50)
+    conn = _catalog(tmp_path)
+    _seed(conn, tables=1, fragments=1)
+    conn.execute("insert into data_fragments values ('f0', ?, NULL, NULL, NULL)", ("p" * 100,))
+    conn.commit()
+    with pytest.raises(OpsError) as exc:
+        src._bound_snapshot(conn, "s1")
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "snapshot_metadata_too_large")
+    conn.close()
+
+
+def test_bound_snapshot_object_storage_key_over_cap_refused(tmp_path, monkeypatch):
+    # Without data_objects the total is 16 bytes (under 50); the object row adds 'f0' + 100 bytes of storage_key.
+    monkeypatch.setattr(src, "MAX_SNAPSHOT_EVIDENCE_BYTES", 50)
+    conn = _catalog(tmp_path)
+    _seed(conn, tables=1, fragments=1)
+    conn.execute("insert into data_fragments values ('f0', NULL, NULL, NULL, NULL)")
+    conn.execute("insert into data_objects values ('f0', ?)", ("o" * 100,))
+    conn.commit()
+    with pytest.raises(OpsError) as exc:
+        src._bound_snapshot(conn, "s1")
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "snapshot_metadata_too_large")
+    conn.close()
+
+
+@pytest.mark.parametrize("table", ["data_snapshots", "data_fragments", "data_dataset_versions"])
+def test_bound_snapshot_missing_table_refused(tmp_path, table):
+    conn = _catalog(tmp_path)
+    _seed(conn, tables=1, fragments=1)
+    conn.execute(f"drop table {table}")
+    with pytest.raises(OpsError) as exc:
+        src._bound_snapshot(conn, "s1")
+    assert _refusal(exc) == ("RESOURCE_UNAVAILABLE", "catalog_unavailable")
     conn.close()
 
 
