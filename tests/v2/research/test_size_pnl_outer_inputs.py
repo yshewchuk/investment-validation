@@ -124,12 +124,53 @@ def test_failed_execution_excludes_model():
     assert out["m_c1"] == {"status": "excluded", "reason": "outer_failed"}
 
 
+def test_failed_execution_with_matching_start_is_excluded():
+    slots = {}
+    key = put(slots, "c1")
+    slots["outer-execution:" + key] = {"status": "failed"}
+    out, _ = run(slots)
+    assert out["m_c1"] == {"status": "excluded", "reason": "outer_failed"}
+
+
+def test_failed_execution_with_another_plans_start_refuses():
+    slots = {}
+    key = put(slots, "c1")
+    slots["outer-start:" + key]["plan_id"] = "other-plan"
+    slots["outer-execution:" + key] = {"status": "failed"}
+    with pytest.raises(OpsError) as exc:
+        run(slots)
+    assert exc.value.problem.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert exc.value.problem.details["reason"] == "outer_identity_mismatch"
+
+
+@pytest.mark.parametrize("field, value", [("outer_year", 2024), ("candidate", {"candidate_id": "c9"}), ("outer_id", "wrong-key")])
+def test_start_with_wrong_identity_field_refuses(field, value):
+    slots = {}
+    key = put(slots, "c1")
+    slots["outer-start:" + key][field] = value
+    with pytest.raises(OpsError) as exc:
+        run(slots)
+    assert exc.value.problem.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert exc.value.problem.details["reason"] == "outer_identity_mismatch"
+
+
+def test_execution_status_other_than_succeeded_or_failed_refuses():
+    slots = {}
+    key = put(slots, "c1")
+    slots["outer-execution:" + key]["status"] = "running"
+    with pytest.raises(OpsError) as exc:
+        run(slots)
+    assert exc.value.problem.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert exc.value.problem.details["reason"] == "outer_identity_mismatch"
+
+
 def test_forecasts_hash_mismatch_refuses():
     slots = {}
     key = put(slots, "c1")
     slots["outer-execution:" + key]["forecasts_id"] = "sha256:wrong"
     with pytest.raises(OpsError) as exc:
         run(slots)
+    assert exc.value.problem.code == "EXPERIMENT_IDENTITY_CONFLICT"
     assert exc.value.problem.details["reason"] == "outer_forecasts_hash_mismatch"
 
 
@@ -139,6 +180,7 @@ def test_wrong_plan_id_in_start_refuses():
     slots["outer-start:" + key]["plan_id"] = "other-plan"
     with pytest.raises(OpsError) as exc:
         run(slots)
+    assert exc.value.problem.code == "EXPERIMENT_IDENTITY_CONFLICT"
     assert exc.value.problem.details["reason"] == "outer_identity_mismatch"
 
 
@@ -154,6 +196,7 @@ def test_non_per_candidate_plan_refuses():
     bound = {"m_c1": cand("c1")}
     with pytest.raises(OpsError) as exc:
         run({}, plan=plan, bound=bound)
+    assert exc.value.problem.code == "EXPERIMENT_IDENTITY_CONFLICT"
     assert exc.value.problem.details["reason"] == "outer_plan_unsupported"
 
 

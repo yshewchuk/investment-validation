@@ -134,6 +134,23 @@ def test_outer_receipt_binds_what_it_consumed(tmp_path, outer_stubs, monkeypatch
     assert outer["common_dropped"] == 0
 
 
+def test_outer_gate_passes_a_bound_v14_model_whose_outer_year_is_bound(tmp_path, outer_stubs, monkeypatch):
+    """The inner receipt binds only the inner bindings. The outer run's models carry a 2025 binding (added here by a fake
+    bind_outer), which must not make the gate refuse with inner_inputs_mismatch."""
+    _stub_tables(monkeypatch, {"prod": EVENTS, "cand": EVENTS})
+    inner_bound = {"prod": {"status": "deferred", "reason": "production_bound_by_s2b"}, "cand": {"status": "bound", "binding": "bind-cand"}}
+    monkeypatch.setattr(driver.inputs, "bind_models", lambda *a, **kw: inner_bound)
+
+    def fake_bind_outer(plan, read, bound, roster, admit, *, outer_year):
+        assert outer_year == 2025
+        return {**bound, "cand": {**bound["cand"], "binding": content_hash(["bind-cand", "2025"])}}
+
+    monkeypatch.setattr(driver.outer_inputs, "bind_outer", fake_bind_outer)
+    summary = _run_both(tmp_path, monkeypatch)
+    assert summary["stage"] == "outer"
+    assert (tmp_path / "receipts" / "outer.json").exists()
+
+
 def test_partial_2025_coverage_is_a_recorded_common_drop(tmp_path, outer_stubs, monkeypatch):
     """Candidate has no E4 row: not refused, E4 leaves the common pool and is counted in outer.json."""
     _stub_tables(monkeypatch, {"prod": EVENTS, "cand": {k: v for k, v in EVENTS.items() if k != "E4"}})

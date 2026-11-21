@@ -18,22 +18,32 @@ def _conflict(reason, message):
     return fail(_CONFLICT, message, details={"reason": reason})
 
 
+def _check_start(plan, start, cid, year, key):
+    """A start record must name this plan, outer year, candidate and refit key; a malformed record is a mismatch too."""
+    try:
+        identity_ok = (start["plan_id"] == plan["plan_id"] and start["outer_year"] == year
+                       and start["candidate"]["candidate_id"] == cid and start["outer_id"] == key)
+    except (KeyError, TypeError) as exc:
+        raise _conflict("outer_identity_mismatch", "the outer start record is malformed") from exc
+    if not identity_ok:
+        raise _conflict("outer_identity_mismatch", "the outer refit does not match the sealed plan")
+
+
 def _bind_unit(plan, read, cid, sealed_ids, admit, year):
     """One candidate's 2025 refit: an excluded or bound unit, with the identity checks of design section 12."""
     key = refit_key(plan, year, cid)
     start, execution, forecasts = read("outer-start:" + key), read("outer-execution:" + key), read("outer-forecasts:" + key)
+    if isinstance(start, dict): _check_start(plan, start, cid, year, key)  # before the exclusions: a failed run must still name this plan
     if isinstance(execution, dict) and execution.get("status") == "failed":
         return {"status": "excluded", "reason": "outer_failed"}
     if not isinstance(start, dict) or not isinstance(execution, dict) or not isinstance(forecasts, list):
         return {"status": "excluded", "reason": "outer_missing"}
     try:
-        identity_ok = (start["plan_id"] == plan["plan_id"] and start["outer_year"] == year
-                       and start["candidate"]["candidate_id"] == cid and start["outer_id"] == key)
         status, forecasts_id = execution["status"], execution["forecasts_id"]
     except (KeyError, TypeError) as exc:
-        raise _conflict("outer_identity_mismatch", "the outer start or execution record is malformed") from exc
-    if not identity_ok or status != "succeeded":
-        raise _conflict("outer_identity_mismatch", "the outer refit does not match the sealed plan")
+        raise _conflict("outer_identity_mismatch", "the outer execution record is malformed") from exc
+    if status != "succeeded":
+        raise _conflict("outer_identity_mismatch", "the outer refit did not succeed")
     if forecasts_id != content_hash(forecasts):
         raise _conflict("outer_forecasts_hash_mismatch", "the outer forecasts differ from the recorded hash")
     try:
