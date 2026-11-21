@@ -148,3 +148,39 @@ S1 and S8a can start in parallel (S3 waits for S2b's admitted keys); each slice 
 ## 11. Addendum
 
 A synthetic-predictor calibration arm (controls and power; never part of the roster or judgement) is designed in `guides/size_pnl_synthetic_calibration_design.md`.
+
+## 12. Amendment: outer (2025) prediction binder (issue #2658)
+
+**Problem.** `outer_predictions_unbound` refuses every non-production model because nothing binds v14's 2025 refit predictions. The `outer-terminal:<key>` record cannot be the source: `_result` writes the 2025 target (`absolute_move_pct`) into every prediction row, so reading it would open protected labels.
+
+**Source (deviation from the issue's wording, safer).** v14 commits `outer-forecasts:<key>` (normalised forecasts, before any target opens: "all predictions and successful fit accounting are durable before any outer target opens") with `key = refit_key(plan, 2025, candidate_id)`. It holds only `event_id`, `horizon_sessions` and `predicted_absolute_move_pct` (plus fields the forecast normaliser already admits; none is a target). The binder reads that slot, never `outer-terminal`, `outer-validation` or `outer-inputs`. Labels keep coming from the S2b label reader with its holdout drop; no 2025 label reaches the binder.
+
+**Module.** `experiments/size_pnl_outer_inputs.py`, one function `bind_outer(plan, read, bound, roster, admit, *, outer_year)`, called by `_prepare` for `--stage outer` only (the inner stage is unchanged). It adds `years[str(outer_year)]` to each `bound` candidate (and to each blend component) using the existing `bind_array` (lead-1 rows, duplicate ids, finiteness, admission check, array-object hash), so `_candidate_series` and `_blend_series` pick the year up unchanged. The model's `binding` hash is recomputed over all years, so the consumed-table hash and the receipts change with the outer binding.
+
+**Identity checks per refit unit** (slots `outer-start`, `outer-execution`, `outer-forecasts`, all keyed by `refit_key(plan, 2025, candidate_id)`):
+
+1. `outer-start.plan_id == plan_id`, `outer_year == 2025`, `candidate.candidate_id == candidate_id`.
+2. `outer-execution.status == "succeeded"` (the worker event name; `failed` is a failed refit) and `forecasts_id == content_hash(forecasts)`: the forecasts are the ones the sealed run recorded.
+3. Event ids equal the fold's sealed `evaluation_event_ids` (plan `folds[outer.year == 2025].outer`), through `bind_array`'s existing exact-set check. No label-omission logic is needed here: forecasts cover the whole sealed cohort, and the later labels join drops events without a printed label.
+
+**Failure semantics (R1-R6 template).**
+
+| Case | Result |
+| --- | --- |
+| R1 refit missing for a model (no `outer-forecasts` slot, or no `outer-execution`) | the model is excluded `outer_missing`; its contrasts are `not_testable`; nothing is imputed or retried |
+| `outer-execution` is `failed` (a non-required refit) | excluded `outer_failed` |
+| blend winner: any component missing or failed | the blend is excluded `component_outer_<reason>`; averaging is only over complete components (existing `_blend_series`) |
+| pair member not in `extra_refits` | already `not_in_extra_refits` at the roster; the binder only sees roster models |
+| R1 whole-run: `outer-start` identity mismatch, `forecasts_id` hash mismatch, duplicate or non-finite predictions, ids outside the population, a legacy (non per-candidate) plan | `EXPERIMENT_IDENTITY_CONFLICT` with `details.reason` in `outer_identity_mismatch`, `outer_forecasts_hash_mismatch`, `duplicate_event_id`, `nonfinite_prediction`, `event_ids_outside_population`, `outer_plan_unsupported`; no partial run |
+| partial cohort (ids a strict subset of the sealed 2025 cohort) | excluded `partial` (same as inner) |
+| R2 cost | reads one forecasts record per unit (at most 12 models, a few thousand rows each); no store scan, no chunking needed |
+| R3 | no randomness |
+| R4 | the outer receipts bind the per-model `binding`, so a changed forecasts record refuses at replay (`EXPERIMENT_IDENTITY_CONFLICT`) |
+| R5 | `model_id` unchanged; the roster is already sealed |
+| R6 | forecasts are labels-free; the 2025 decision month still precedes its label read in the driver |
+
+**After the binder.** `_unbound_outer` stays as the safety net (a ready model with no 2025 rows still refuses); a model the binder excludes is simply not ready.
+
+**Tests (synthetic records only).** Bound blend and candidate (the 2025 block present, ids/preds equal the record, no `absolute_move_pct` ever touched: the fake `read` raises for any `outer-terminal`/`outer-validation` slot); missing, failed, hash mismatch, wrong plan id, partial and duplicate cases; an outer-stage `_prepare` smoke with fake sources.
+
+**Runbook step (supervisor, after v14 completes and is collected).** `guides/size_pnl_runbook.md` gains "Verify the outer binder": run the 50-ticker smoke `--stage outer --event-ids <ids.json> --no-ledger` against a fresh `/tmp` out-dir and read stderr `[pnl_outer]`: every roster model is `bound` or excluded with a reason, the production and v14 refit counts match `refit_units`, and no `outer_forecasts_hash_mismatch` appears. Only then the full outer run.

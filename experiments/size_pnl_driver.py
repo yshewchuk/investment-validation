@@ -15,7 +15,7 @@ import pandas as pd
 from engine.v2.foundation import content_hash
 from engine.v2.ops.errors import fail
 from experiments import label_availability, size_pnl_decisions as decisions, size_pnl_inputs as inputs, size_pnl_ladder as ladder, size_pnl_prereg
-from experiments import size_pnl_readers as readers, size_pnl_shortvol as shortvol, size_pnl_straddle as straddle, size_pnl_tuning as tuning, size_pnl_equivalence as equivalence
+from experiments import size_pnl_readers as readers, size_pnl_shortvol as shortvol, size_pnl_straddle as straddle, size_pnl_tuning as tuning, size_pnl_equivalence as equivalence, size_pnl_outer_inputs as outer_inputs
 from experiments.size_pnl_pool import TOLERANCE, build_pool
 from experiments.size_pnl_shortvol import Refusal
 from experiments import size_pnl_report as report, size_pnl_synthetic as synthetic, size_pnl_synthetic_eval as synthetic_eval
@@ -92,6 +92,7 @@ def _prepare(src, stage, ids=None):
     identity = inputs.bind_run(src.plan, src.read, expected=src.expected, panel_id=src.panel_id)
     roster = inputs.resolve_roster(src.plan, src.selection, outer_year=OUTER_YEAR, pair_candidates=src.pair_candidates, blend_ids=src.blend_ids)
     bound = inputs.bind_models(src.plan, src.read, roster, src.admit)
+    if stage == "outer": bound = outer_inputs.bind_outer(src.plan, src.read, bound, roster, src.admit, outer_year=OUTER_YEAR)
     production = readers.read_production(src.fetch, src.admitted, expected_hash=src.production_hash, table_hash=src.production_table_hash, start=start, end=end, event_ids=ids)
     return roster, {"identity": identity, "bound": bound, "tables": readers.model_tables(bound, roster, src.admitted, production, start=start, end=end)}, production
 
@@ -127,6 +128,13 @@ def _restrict(table, ids):
 def _ready(tables, ids):
     """The ready entries of a stage's bound tables, each restricted to the smoke ids."""
     return {mid: {**e, "table": _restrict(e["table"], ids)} for mid, e in tables.items() if e["status"] == "ready"}
+
+
+def _models_body(bound, ready):
+    """The inputs receipt's ``models``: a ready deferred model is ``{"status": "ready"}``, else its status, reason and binding."""
+    return {mid: ({"status": "ready"} if mid in ready and m["status"] == "deferred"
+                  else {k: m[k] for k in ("status", "reason", "binding") if k in m})
+            for mid, m in bound.items()}
 
 
 def _plan_window(plan, window, ids):
@@ -273,7 +281,7 @@ def _equivalence_ok(entry):
             and isinstance(entry.get("max_abs_diff"), (int, float)) and not isinstance(entry.get("max_abs_diff"), bool) and entry["max_abs_diff"] <= TOLERANCE)
 
 
-def _outer_gate(out, ready, scope, body, inner_tables, inner_production, inner_plan, inner_facts):
+def _outer_gate(out, ready, scope, body, inner_tables, inner_production, inner_plan, inner_facts, inner_models):
     """Refuses before any chunk is built: every ready model needs its tuning receipt, and inner.json must bind those
     receipts, have been tuned on this run's event scope, carry every ready model's fast-path equivalence evidence, and
     bind the inner window's inputs. The inner window's inputs, plan and facts are re-bound here from this run's own
@@ -286,7 +294,7 @@ def _outer_gate(out, ready, scope, body, inner_tables, inner_production, inner_p
     evidence = inner.get("equivalence")
     if not isinstance(evidence, dict) or not all(_equivalence_ok(evidence.get(mid)) for mid in ready):
         raise Refusal(_CONFLICT, "inner.json lacks the fast-path equivalence evidence for a ready model", {"reason": "inner_equivalence_missing"})
-    inputs_inner, now = tuning.load_receipt(out / "receipts" / "inputs_inner.json"), json.loads(json.dumps(body))
+    inputs_inner, now = tuning.load_receipt(out / "receipts" / "inputs_inner.json"), json.loads(json.dumps({**body, "models": inner_models}))
     if any(inputs_inner.get(k) != now[k] for k in _BOUND): raise Refusal(_CONFLICT, "inputs_inner.json was bound to different inputs", {"reason": "inner_inputs_mismatch"})
     if inputs_inner.get("plan") != inner_plan: raise Refusal(_CONFLICT, "inputs_inner.json was bound to a different inner plan", {"reason": "inner_plan_mismatch"})
     if inputs_inner.get("facts") != inner_facts: raise Refusal(_CONFLICT, "inputs_inner.json was bound to different inner facts", {"reason": "inner_facts_mismatch"})
@@ -438,9 +446,7 @@ def run(src, stage, out_dir, *, event_ids=None, prereg=size_pnl_prereg.require_p
     scope = _scope(ids)
     body = {"stage": "inputs", "spec_hash": receipt["spec_hash"], "identity": bound_tables["identity"],
             "roster": roster,  # inputs-level status per model: arrays are not receipted
-            "models": {mid: ({"status": "ready"} if mid in ready and m["status"] == "deferred"
-                             else {k: m[k] for k in ("status", "reason", "binding") if k in m})
-                       for mid, m in bound_tables["bound"].items()},
+            "models": _models_body(bound_tables["bound"], ready),
             "tables": {mid: _table_binding(e, ids) for mid, e in ready.items()},
             "production": production["binding"], "scope": scope, "plan": content_hash(_plan_rows(plan)),
             "facts": content_hash(facts_rows), "labels": content_hash(_label_rows([labels])), "snapshot": src.snapshot_id}
@@ -448,10 +454,12 @@ def run(src, stage, out_dir, *, event_ids=None, prereg=size_pnl_prereg.require_p
     if stage == "outer":  # preflight: a refusal here leaves no outer input receipt, and no chunk is built
         if not ready: raise _no_ready()
         _, inner_bound, inner_production = _prepare(src, "inner", ids)  # the inner window's bindings, to match inputs_inner.json
-        inner_tables = {mid: _table_binding(e, ids) for mid, e in _ready(inner_bound["tables"], ids).items()}
+        inner_ready = _ready(inner_bound["tables"], ids)
+        inner_tables = {mid: _table_binding(e, ids) for mid, e in inner_ready.items()}
+        inner_models = _models_body(inner_bound["bound"], inner_ready)  # inner bindings only: the outer year is not in inputs_inner.json
         inner_plan = content_hash(_plan_rows(inner_window))
         inner_facts = content_hash(_facts_rows(facts_all, {str(e) for e in inner_window["event_id"]}))
-        receipts = _outer_gate(out, ready, scope, body, inner_tables, inner_production["binding"], inner_plan, inner_facts)
+        receipts = _outer_gate(out, ready, scope, body, inner_tables, inner_production["binding"], inner_plan, inner_facts, inner_models)
         _unbound_outer(ready)
     inputs_receipt = _receipt(out / "receipts" / f"inputs_{stage}.json", body, "inputs_receipt_changed")
     if not ready: raise _no_ready()

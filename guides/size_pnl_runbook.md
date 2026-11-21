@@ -4,8 +4,8 @@ Operating steps for `experiments/EXP-188_size_decision_pnl_rescore/run.py --stag
 `guides/size_decision_pnl_design.md`. Only the supervisor runs these steps (one heavy job at a time, never
 beside the v14 run, container 12 GiB). Agents never run them.
 
-`--stage` is `inner` (2023-24 tuning) then `outer` (2025 decisions). A full outer run also needs the v14 2025
-refit-prediction binder (#2658); until it lands, any ready model with no 2025 rows (production included) refuses
+`--stage` is `inner` (2023-24 tuning) then `outer` (2025 decisions). The v14 2025 refit predictions are bound by
+`size_pnl_outer_inputs` (design section 12, #2658). A ready model with no 2025 rows still refuses
 `outer_predictions_unbound`.
 
 ## Before any run
@@ -56,6 +56,15 @@ history from 2024-07, decides each 2025 month before reading that month's labels
 event, status, reason, marks, P&L). Rerunning with identical inputs keeps `decisions.parquet` untouched; a changed
 input refuses `EXPERIMENT_IDENTITY_CONFLICT`. A symlinked or oversized `decisions.parquet` refuses
 `decisions_artifact_invalid`.
+
+## Verify the outer binder (after v14 completes and is collected)
+
+Not yet verified on the real store. Before the full outer run, run the 50-ticker smoke `--stage outer
+--event-ids <ids.json> --no-ledger` with a fresh `/tmp` out-dir (same `--expected`, `--sources`). On stderr
+`[pnl_outer]` every roster model must be `bound` or excluded with a reason (`outer_missing`, `outer_failed`,
+`partial`, `component_outer_*`), the bound count must match the v14 `refit_units` for 2025, and no
+`outer_forecasts_hash_mismatch` or `outer_identity_mismatch` may appear. Record the result in #2658, then
+schedule the full run.
 
 ## Exit codes and artifacts
 
