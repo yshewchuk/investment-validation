@@ -159,6 +159,22 @@ def test_transform_mismatch_omitted():
     assert pair_candidates == {"E-log": "c-eraw"}
 
 
+def test_selection_without_extra_refits_omits_all_pairs():
+    plan = _plan(blends=[{"blend_id": "b1", "name": "size_b1_v1"}])
+    plan["selection"] = {}
+    pair_candidates, blend_ids = src.derive_roster_inputs(plan)
+    assert pair_candidates == {}
+    assert blend_ids == {"M4": "b1"}
+
+
+def test_plan_without_selection_omits_all_pairs():
+    plan = _plan(blends=[{"blend_id": "b1", "name": "size_b1_v1"}])
+    del plan["selection"]
+    pair_candidates, blend_ids = src.derive_roster_inputs(plan)
+    assert pair_candidates == {}
+    assert blend_ids == {"M4": "b1"}
+
+
 # --- (3) _open ---------------------------------------------------------------
 
 def test_open_refuses_missing_store(tmp_path):

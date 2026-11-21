@@ -70,7 +70,8 @@ def derive_roster_inputs(plan):
         matches = [b["blend_id"] for b in blends if b.get("name") == name]
         if len(matches) == 1:
             blend_ids[role] = matches[0]
-    extra = set(plan["selection"]["extra_refits"])
+    selection = plan.get("selection")
+    extra = set(selection.get("extra_refits") or ()) if isinstance(selection, dict) else set()
     pool = [c for c in plan["candidates"] if c["candidate_id"] in extra]
     pair_candidates = {}
     for role in size_pnl_inputs.PAIR_ROLES:
