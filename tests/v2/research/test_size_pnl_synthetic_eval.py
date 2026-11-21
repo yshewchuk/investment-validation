@@ -87,6 +87,7 @@ def test_x3_needs_the_sign_in_every_inner_year():
     d.loc[(d["model_id"] == "M06") & (d["event_date"].dt.year == 2023), "pnl_dollars"] = 0.0
     out = ev.evaluate(d, META, TICKERS, ARM, resamples=RESAMPLES)
     assert row(out, "X3", "s=0.6")[2] not in ("clear", "directional")
+    assert next(r for r in out["contrasts"] if r[:2] == ["S1", "s=0.6"])[-1] == "2023:- 2024:+"
 
 
 def test_x4_with_one_straddle_unit_is_not_testable():
@@ -103,16 +104,36 @@ def test_x5_agrees_disagrees_and_zero_only_agrees_with_zero():
 def test_x6_passes_with_constant_width_within_each_quarter():
     out = run(width=[1, 1, 2, 2, 3, 3, 4, 4])
     assert row(out, "X6", "S1")[2] == "pass"
-    assert row(out, "X6", "R_L")[2:] == ["printed", "taken=8"]
+    assert row(out, "X6", "R_L")[2:] == ["pass", "pred_var=0 taken=8"]
 
 
-@pytest.mark.parametrize("pred", [[0.1, 0.1, 0.2, 0.2, 0.3, 0.3, 0.4, 0.4], [0.1, 0.2, 0.2, 0.2, 0.3, 0.3, 0.4, 0.4],
-                                  [0.1, 0.1, 0.2, 0.2, 0.3, 0.3, 0.4, np.nan]])
-def test_x6_straddle_is_printed_and_never_stops_whatever_its_pred_move(pred):
-    """The straddle pred_move check moved to SY2b: the R_L row prints the taken count and cannot stop the run."""
-    out = run(pred=pred)
-    assert row(out, "X6", "R_L")[2:] == ["printed", "taken=8"]
+def test_x6_straddle_passes_with_pred_move_constant_within_each_quarter():
+    out = run(pred=[0.1, 0.1, 0.2, 0.2, 0.3, 0.3, 0.4, 0.4])
+    assert row(out, "X6", "R_L")[2:] == ["pass", "pred_var=0 taken=8"]
     assert "X6 R_L" not in out["stop"]
+
+
+def test_x6_straddle_fails_on_pred_move_variance_within_a_quarter_and_stops():
+    out = run(pred=[0.1, 0.2, 0.2, 0.2, 0.3, 0.3, 0.4, 0.4])
+    assert row(out, "X6", "R_L")[2] == "fail"
+    assert "X6 R_L" in out["stop"]
+
+
+def test_x6_straddle_fails_with_a_nan_pred_move_before_the_variance_test():
+    out = run(pred=[0.1, 0.1, 0.2, 0.2, 0.3, 0.3, 0.4, np.nan])
+    assert row(out, "X6", "R_L")[2:] == ["fail", "missing_pred=1 taken=8"]
+    assert "X6 R_L" in out["stop"]
+
+
+def test_x6_variance_sees_shrinkage_rows_of_an_event_outside_e():
+    """E0 leaves E (undetermined under M02 on S1), but the shrinkage L=1 straddle pred_move on E0 is finite and differs
+    from E1's in the same quarter, so the variance over every scored row fails X6 R_L."""
+    d = frame_of()
+    d.loc[(d["model_id"] == "M02") & (d["event_id"] == "E0") & (d["structure"] == "S1"), "status"] = "undetermined"
+    d.loc[(d["model_id"] == "SH") & (d["book"] == "straddle") & (d["event_id"] == "E0"), "pred_move"] = 0.9
+    out = ev.evaluate(d, META, TICKERS, ARM, resamples=RESAMPLES)
+    assert row(out, "X6", "R_L")[2] == "fail"
+    assert "X6 R_L" in out["stop"]
 
 
 def test_x6_fails_on_within_quarter_width_variance():
@@ -210,3 +231,58 @@ def test_population_drops_an_event_undetermined_under_any_model_or_unit():
     assert len(ev.population(d)) == len(d) - 8 * 3  # E0's rows under all 8 models and 3 units leave E
     assert "E0" not in set(ev.population(d)["event_id"])
     assert ev.evaluate(d, META, TICKERS, ARM, resamples=RESAMPLES)["hash"] == ev.evaluate(d[d["event_id"] != "E0"], META, TICKERS, ARM, resamples=RESAMPLES)["hash"]
+
+
+def test_means_and_contrast_rows_hand_checked():
+    out = run()
+    assert len(out["means"]) == 8 * 3 and all(len(r) == 11 for r in out["means"])
+    # M06 on S1: 8 taken events at a constant 2.0 per event; rmse and mae from META; no declines given, so no share
+    assert ["M06", "median_noise", '{"s": 0.6}', "S1", 8, 8, 0, 2.0, 1.8, 0.9, None] in out["means"]
+    # median M06 (2.0) minus mean N06 (1.0) is +1 on every event, so the mean is 1.0 and every quarter (4 of 4) is positive;
+    # a constant series gives degenerate bootstrap intervals at 1.0; the gap is +1 in both inner years, so the year signs are +
+    assert ["S1", "s=0.6", 1.0, "4/0/0", 1.0, 1.0, 1.0, 1.0, "2023:+ 2024:+"] in out["contrasts"]
+    assert all(len(r) == 9 for r in out["contrasts"])
+
+
+def test_declined_share_and_year_signs_hand_checked():
+    """M06 declines 2 of its 8 S1 candidates: share 2/8 = 0.25. S2 has no declines given and R_L is a straddle unit: both None.
+    The S1 contrast (median M06 minus mean N06, +1 in both inner years) carries the year signs 2023:+ 2024:+."""
+    out = ev.evaluate(frame_of(), META, TICKERS, ARM, resamples=RESAMPLES, declined={"M06": {"S1": [2, 8]}})
+    assert ["M06", "median_noise", '{"s": 0.6}', "S1", 8, 8, 0, 2.0, 1.8, 0.9, 0.25] in out["means"]
+    assert ["M06", "median_noise", '{"s": 0.6}', "S2", 8, 8, 0, 2.0, 1.8, 0.9, None] in out["means"]
+    assert ["M06", "median_noise", '{"s": 0.6}', "R_L", 8, 8, 0, 2.0, 1.8, 0.9, None] in out["means"]
+    assert ["S1", "s=0.6", 1.0, "4/0/0", 1.0, 1.0, 1.0, 1.0, "2023:+ 2024:+"] in out["contrasts"]
+
+
+def test_means_and_contrast_intervals_on_varying_mixed_status_data():
+    """M06 on S1 varies per event: event E_k (k = 0..7, in date order) gets pnl k+1, so [1, 2, ..., 8].
+    E1 and E6 are not_taken with pnl 0, so the S1 M06 pnl vector is [1, 0, 3, 4, 5, 6, 0, 8]. Every other cell is as in frame_of(),
+    so E is unchanged and no event is undetermined.
+
+    Means: taken = 6, not_taken = 2; taken pnl sum = 1+3+4+5+6+8 = 27; mean over n_events = 8 is 27/8 = 3.375.
+    An average over taken rows only would be 27/6 = 4.5.
+
+    Contrast at s=0.6 on S1: d = M06 - N06 (N06 = 1 on every event) = [0, -1, 2, 3, 4, 5, -1, 7], mean 19/8 = 2.375.
+    Quarters (2023Q1 {E0,E1}, 2023Q2 {E2,E3}, 2024Q1 {E4,E5}, 2024Q2 {E6,E7}) have sums -1, 5, 9, 6, so per-event means
+    -0.5, 2.5, 4.5, 3.0: they differ, so the quarter bootstrap is non-degenerate.
+    Tickers: T1 {E0,E2,E4,E6} sum 5 (1.25 per event), T2 {E1,E3,E5,E7} sum 14 (3.5 per event): they differ too."""
+    d = frame_of()
+    m06_s1 = (d["model_id"] == "M06") & (d["structure"] == "S1")
+    ordered = d.loc[m06_s1].sort_values("event_date").index  # 8 rows, E0..E7 in date order
+    d.loc[ordered, "pnl_dollars"] = np.arange(1.0, 9.0)  # event k gets k+1
+    not_taken = d.loc[m06_s1 & d["event_id"].isin(["E1", "E6"])].index
+    d.loc[not_taken, "status"] = "not_taken"
+    d.loc[not_taken, "pnl_dollars"] = 0.0
+    out = ev.evaluate(d, META, TICKERS, ARM, resamples=RESAMPLES)
+
+    means_row = next(r for r in out["means"] if r[0] == "M06" and r[3] == "S1")
+    assert means_row[4] == 8 and means_row[5] == 6 and means_row[6] == 2  # n_events, taken, not_taken
+    assert means_row[7] == pytest.approx(27 / 8)  # 3.375
+    assert means_row[7] != pytest.approx(27 / 6)  # not the taken-only average 4.5
+
+    con = next(r for r in out["contrasts"] if r[:2] == ["S1", "s=0.6"])
+    mean, q_lo, q_hi, t_lo, t_hi = con[2], con[4], con[5], con[6], con[7]
+    assert mean == pytest.approx(19 / 8)
+    assert q_lo < q_hi  # quarter interval non-degenerate
+    assert t_lo < t_hi  # ticker interval non-degenerate
+    assert q_lo <= mean <= q_hi

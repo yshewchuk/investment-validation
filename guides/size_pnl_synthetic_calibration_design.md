@@ -45,7 +45,7 @@ The construction conditions on `y`, whereas a real mean forecast satisfies `E(y 
 For each predictor and each of **9 books** (the 7 put-side short-vol structures, straddle R_L, straddle R_L2; main doc §§5-6), on population E, geometry **as-is** only (no `c` re-tune: nothing here is tuned), alpha 0.5, the same flat-dollar lots rule:
 
 1. flat-dollar P&L per candidate event (non-trades count 0) and the quarterly series behind it;
-2. trade count and declined-by-width share;
+2. trade count and declined-by-width share (declined over candidates in the Pass-A rows before the shared mask, so its denominator includes events later excluded from E; short-vol books only);
 3. realized RMSE and MAE of the predictor on E, in percent points.
 
 Derived, per type (median-unbiased, mean-unbiased, regression-direction) and per book:
