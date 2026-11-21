@@ -15,8 +15,9 @@ beside the v14 run, container 12 GiB). Agents never run them.
 2. The spec is registered: exactly one PLANNED `EXP-188` ledger row whose `spec_hash` equals the spec's
    (`python3 -m experiments.size_pnl_prereg --check`). Without it the runner refuses
    `EXPERIMENT_IDENTITY_CONFLICT` (`planned_row_missing`) before reading anything.
-3. A `--sources MODULE:FUNC` callable builds `size_pnl_driver.Sources` from the parsed args (catalog, store
-   root, v14 run, pinned snapshot, production table hash). The store adapter is not part of this slice.
+3. `--sources experiments.size_pnl_sources:build_sources --sources-config <config.json>` builds
+   `size_pnl_driver.Sources` (design section 13: catalog, store root, v14 spec/request/plan-ref, pinned snapshot,
+   production hash). The adapter lands in two slices; the smoke command is added with the second.
 
 ## Real run
 
