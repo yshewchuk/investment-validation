@@ -218,6 +218,16 @@ class _CorruptRepo:
         raise data_fail("MANIFEST_CORRUPT", "bad")
 
 
+class _ValueErrorRepo:
+    def resolve(self, snapshot_id):
+        raise ValueError("malformed")
+
+
+class _KeyErrorRepo:
+    def resolve(self, snapshot_id):
+        raise KeyError("malformed")
+
+
 def test_snapshot_resolve_failure_refused():
     with pytest.raises(OpsError) as exc:
         src._snapshot(_Repo(), "snap-1")
@@ -230,6 +240,16 @@ def test_snapshot_other_data_error_reraised():
     assert exc.value.code == "MANIFEST_CORRUPT"
 
 
+def test_snapshot_value_error_propagates():
+    with pytest.raises(ValueError):
+        src._snapshot(_ValueErrorRepo(), "snap-1")
+
+
+def test_snapshot_key_error_propagates():
+    with pytest.raises(KeyError):
+        src._snapshot(_KeyErrorRepo(), "snap-1")
+
+
 # --- (4b) _bound_snapshot ----------------------------------------------------
 
 def _catalog(tmp_path):
@@ -237,10 +257,11 @@ def _catalog(tmp_path):
     conn.executescript("""
         create table data_snapshots (snapshot_id, finality_receipt_refs_json, knowledge_mode_by_table_json);
         create table data_snapshot_tables (snapshot_id, dataset_version_id, table_name);
-        create table data_dataset_versions (dataset_version_id, evidence_json, partition_logical_hashes_json);
+        create table data_dataset_versions (dataset_version_id, evidence_json, partition_logical_hashes_json, contract_id);
         create table data_fragments (fragment_id, partition_key, key_bounds_json, time_bounds_json, input_receipt_refs_json, object_id);
         create table data_version_fragments (dataset_version_id, fragment_id);
         create table data_objects (object_id, storage_key);
+        create table data_contracts (contract_id, definition_json);
     """)
     return conn
 
@@ -249,7 +270,9 @@ def _seed(conn, tables=1, fragments=0, evidence="ab", hashes="cd"):
     # With the defaults each seeded table adds 7 bytes: its snapshot_tables row ('s1', 'dvN', 'tN') and its
     # dataset_versions row ('dvN', evidence, hashes); 'ab' and 'cd' are 2 bytes each.
     for i in range(tables):
-        conn.execute("insert into data_dataset_versions values (?, ?, ?)", (f"dv{i}", evidence, hashes))
+        conn.execute(
+            "insert into data_dataset_versions (dataset_version_id, evidence_json, partition_logical_hashes_json) values (?, ?, ?)",
+            (f"dv{i}", evidence, hashes))
         conn.execute("insert into data_snapshot_tables values ('s1', ?, ?)", (f"dv{i}", f"t{i}"))
     for i in range(fragments):
         conn.execute("insert into data_version_fragments values ('dv0', ?)", (f"f{i}",))
@@ -364,6 +387,20 @@ def test_bound_snapshot_object_storage_key_over_cap_refused(tmp_path, monkeypatc
     _seed(conn, tables=1, fragments=1)
     conn.execute("insert into data_fragments values ('f0', NULL, NULL, NULL, NULL, 'o0')")
     conn.execute("insert into data_objects values ('o0', ?)", ("o" * 100,))
+    conn.commit()
+    with pytest.raises(OpsError) as exc:
+        src._bound_snapshot(conn, "s1")
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "snapshot_metadata_too_large")
+    conn.close()
+
+
+def test_bound_snapshot_contract_definition_over_cap_refused(tmp_path, monkeypatch):
+    # Without data_contracts the total is 16 bytes (under 50: 7 + 7 + the 'c0' contract_id on dv0); the contract row linked through dv0 adds 'c0' + 100 bytes of definition_json.
+    monkeypatch.setattr(src, "MAX_SNAPSHOT_EVIDENCE_BYTES", 50)
+    conn = _catalog(tmp_path)
+    _seed(conn, tables=1)
+    conn.execute("update data_dataset_versions set contract_id = 'c0' where dataset_version_id = 'dv0'")
+    conn.execute("insert into data_contracts values ('c0', ?)", ("k" * 100,))
     conn.commit()
     with pytest.raises(OpsError) as exc:
         src._bound_snapshot(conn, "s1")

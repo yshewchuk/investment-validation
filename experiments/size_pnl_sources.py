@@ -147,6 +147,10 @@ def _bound_snapshot(conn, snapshot_id):
             "data_objects o JOIN data_fragments f ON f.object_id = o.object_id "
             "JOIN data_version_fragments vf ON vf.fragment_id = f.fragment_id "
             "JOIN data_snapshot_tables st ON st.dataset_version_id = vf.dataset_version_id WHERE st.snapshot_id = ?")
+        add(
+            "data_contracts", "c",
+            "data_contracts c JOIN data_dataset_versions dv ON dv.contract_id = c.contract_id "
+            "JOIN data_snapshot_tables st ON st.dataset_version_id = dv.dataset_version_id WHERE st.snapshot_id = ?")
     except sqlite3.Error:
         raise fail("RESOURCE_UNAVAILABLE", "catalog unavailable", details={"reason": "catalog_unavailable"}) from None
 
@@ -157,8 +161,6 @@ def _snapshot(repository, snapshot_id):
     except DataError as exc:
         if exc.code != "SNAPSHOT_NOT_FOUND":
             raise
-        raise fail(_CONFLICT, "pinned snapshot cannot be resolved", details={"reason": "snapshot_missing"}) from None
-    except (ValueError, KeyError):
         raise fail(_CONFLICT, "pinned snapshot cannot be resolved", details={"reason": "snapshot_missing"}) from None
 
 
