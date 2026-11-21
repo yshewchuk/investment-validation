@@ -124,27 +124,31 @@ def _bound_snapshot(conn, snapshot_id):
         if tables > MAX_SNAPSHOT_TABLES or fragments > MAX_SNAPSHOT_FRAGMENTS:
             raise fail(_CONFLICT, "snapshot catalog metadata is too large", details={"reason": "snapshot_metadata_too_large"})
         params = (snapshot_id,)
-        evidence = _row_bytes(conn, "data_snapshots", "s", "data_snapshots s WHERE s.snapshot_id = ?", params)
-        evidence += _row_bytes(conn, "data_snapshot_tables", "st", "data_snapshot_tables st WHERE st.snapshot_id = ?", params)
-        evidence += _row_bytes(
-            conn, "data_dataset_versions", "dv",
-            "data_dataset_versions dv JOIN data_snapshot_tables st ON st.dataset_version_id = dv.dataset_version_id WHERE st.snapshot_id = ?",
-            params)
-        evidence += _row_bytes(
-            conn, "data_fragments", "f",
+        evidence = 0
+
+        def add(table, alias, join_where):
+            # Check the cap after every table so a refusal never waits for the remaining scans.
+            nonlocal evidence
+            evidence += _row_bytes(conn, table, alias, join_where, params)
+            if evidence > MAX_SNAPSHOT_EVIDENCE_BYTES:
+                raise fail(_CONFLICT, "snapshot catalog metadata is too large", details={"reason": "snapshot_metadata_too_large"})
+
+        add("data_snapshots", "s", "data_snapshots s WHERE s.snapshot_id = ?")
+        add("data_snapshot_tables", "st", "data_snapshot_tables st WHERE st.snapshot_id = ?")
+        add(
+            "data_dataset_versions", "dv",
+            "data_dataset_versions dv JOIN data_snapshot_tables st ON st.dataset_version_id = dv.dataset_version_id WHERE st.snapshot_id = ?")
+        add(
+            "data_fragments", "f",
             "data_fragments f JOIN data_version_fragments vf ON vf.fragment_id = f.fragment_id "
-            "JOIN data_snapshot_tables st ON st.dataset_version_id = vf.dataset_version_id WHERE st.snapshot_id = ?",
-            params)
-        evidence += _row_bytes(
-            conn, "data_objects", "o",
+            "JOIN data_snapshot_tables st ON st.dataset_version_id = vf.dataset_version_id WHERE st.snapshot_id = ?")
+        add(
+            "data_objects", "o",
             "data_objects o JOIN data_fragments f ON f.object_id = o.object_id "
             "JOIN data_version_fragments vf ON vf.fragment_id = f.fragment_id "
-            "JOIN data_snapshot_tables st ON st.dataset_version_id = vf.dataset_version_id WHERE st.snapshot_id = ?",
-            params)
+            "JOIN data_snapshot_tables st ON st.dataset_version_id = vf.dataset_version_id WHERE st.snapshot_id = ?")
     except sqlite3.Error:
         raise fail("RESOURCE_UNAVAILABLE", "catalog unavailable", details={"reason": "catalog_unavailable"}) from None
-    if evidence > MAX_SNAPSHOT_EVIDENCE_BYTES:
-        raise fail(_CONFLICT, "snapshot catalog metadata is too large", details={"reason": "snapshot_metadata_too_large"})
 
 
 def _snapshot(repository, snapshot_id):

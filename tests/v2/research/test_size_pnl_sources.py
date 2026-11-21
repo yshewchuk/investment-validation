@@ -456,6 +456,24 @@ def test_bound_snapshot_at_exact_caps_reaches_byte_sums(tmp_path, monkeypatch):
     conn.close()
 
 
+def test_bound_snapshot_refuses_after_first_table_without_scanning_later_tables(tmp_path, monkeypatch):
+    monkeypatch.setattr(src, "MAX_SNAPSHOT_EVIDENCE_BYTES", 100)
+    conn = _catalog(tmp_path)
+    _seed(conn, tables=1)
+    calls = []
+
+    def big_first_row_bytes(conn_, table, alias, join_where, params):
+        calls.append(table)
+        return 10**6
+
+    monkeypatch.setattr(src, "_row_bytes", big_first_row_bytes)
+    with pytest.raises(OpsError) as exc:
+        src._bound_snapshot(conn, "s1")
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "snapshot_metadata_too_large")
+    assert len(calls) == 1
+    conn.close()
+
+
 # --- (5) assemble ------------------------------------------------------------
 
 def test_assemble_returns_sources_accepted_by_check_sources():
