@@ -184,3 +184,44 @@ A synthetic-predictor calibration arm (controls and power; never part of the ros
 **Tests (synthetic records only).** Bound blend and candidate (the 2025 block present, ids/preds equal the record, no `absolute_move_pct` ever touched: the fake `read` raises for any `outer-terminal`/`outer-validation` slot); missing, failed, hash mismatch, wrong plan id, partial and duplicate cases; an outer-stage `_prepare` smoke with fake sources.
 
 **Runbook step (supervisor, after v14 completes and is collected).** `guides/size_pnl_runbook.md` gains "Verify the outer binder": run the 50-ticker smoke `--stage outer --event-ids <ids.json> --no-ledger` against a fresh `/tmp` out-dir and read stderr `[pnl_outer]`: every roster model is `bound` or excluded with a reason, the production and v14 refit counts match `refit_units`, and no `outer_forecasts_hash_mismatch` appears. Only then the full outer run.
+
+## 13. Amendment: real-store `--sources` adapter (issue #2659, first item)
+
+**Problem.** Nothing builds `size_pnl_driver.Sources` for the real store, so EXP-188 cannot run, not even the smoke. `run.py` calls `--sources MODULE:FUNC` with only the parsed args.
+
+**Interface.** `experiments/size_pnl_sources.py`, `build_sources(args) -> Sources`. `run.py` gains one optional argument, `--sources-config <json>` (a regular file of at most 1 MiB, read like `--expected`); the factory refuses `sources_config_invalid` without it. Config keys: `catalog`, `store_root`, `spec`, `request`, `plan_ref` (the v14 rerun's documents, as for `size_search.py`), `snapshot_id` (the pinned v2 snapshot) and `production_hash`. Identities come from `args.expected_identities`; nothing else is configured. The catalog opens read-only (`file:...?mode=ro`), the store through `ArtifactStore`, records through `read_record`, the plan through `read_search_plan`, admission through `population_admit` and `admit_events`, chains through `default_load_index`. No record parsing is re-implemented.
+
+**Roster inputs from the sealed plan (no config).** `blend_ids = {M4: the plan blend named size_b1_v1, M5: named size_b2_v1}`. `pair_candidates[role]` is the unique `plan.selection.extra_refits` candidate matching `PAIR_RECIPES[role]` and `PAIR_TRANSFORM[role]` (`_recipe_matches`, `_transform`). Zero or several matches omit the role, and `resolve_roster` marks it `not_testable`.
+
+**Table sources (read at the pinned snapshot; slice 2).**
+
+| Input | Source |
+| --- | --- |
+| Production `pred_abs_move`, `pred_iv_crush_30` | `tier4_forecasts`, keyed (ticker, event_date), joined to `earnings_events` for `event_id`. `horizon_sessions` is not stored there; the adapter sets it to `LEAD` (1), the lead-horizon forecast. |
+| `production_hash`, `production_table_hash` | the `tier4_forecasts` dataset-version `manifest_hash` in the snapshot (`data_snapshot_tables` to `data_dataset_versions`). The expected value is run config. |
+| Label `crush_pct_iv30` | `iv_crush_targets`; skipped or NaN rows drop in `read_labels`. |
+| Label `abs_move` | **Supervisor default, the user may override:** absolute `computed_moves.realized_move_pct`, the labels v14 was selected on (price_source `computed_moves`). |
+| Facts `pre_iv30`, `mcap_usd` | `feature_panel` event row. Non-finite values refuse, and so does the FLT_MAX sentinel (finite, so it needs its own equality check); the mcap-unit check is specified with slice 2's code. Nothing is imputed. |
+| Fact `implied_move` | the source the short-vol sizing path uses; if that is ambiguous, **supervisor default** `computed_moves.implied_move_pct`. |
+| `plan_frame` | `event_id`, `ticker`, `event_date`, `session` from `earnings_events`. Entry is the last pre-print close, exit the first post-print close, on the snapshot calendar: AMC entry = event-day close, exit = next session close; BMO entry = prior session close, exit = event-day close. An existing calendar helper is reused. |
+
+**Holdouts.** `admit_events` (`load_population`, `_exclude_holdouts`) drops holdout and conflicting-sibling events before any fetch; `fetch` does not filter. 2025 targets are reachable only through the label reader; from 2025 records the adapter reads predictions and ids only.
+
+**Failure semantics (R1-R6).** Refusals use `EXPERIMENT_IDENTITY_CONFLICT` or `INVALID_EXPERIMENT_SPEC` with `details.reason`.
+
+| Case | Result |
+| --- | --- |
+| R1 config missing, oversized, unknown key | `sources_config_invalid` |
+| R1 snapshot missing or not committed | `snapshot_missing` |
+| R1 registration, plan, driver seal or `--expected` mismatch | existing `bind_run` reasons; no receipt |
+| R1 a record the roster needs is absent | existing per-model exclusions; a missing seal is `seal_unavailable` |
+| hash mismatch (`tier4_forecasts` manifest hash vs `production_hash`) | `production_hash_mismatch` before any row is read |
+| a table, column or event missing from the snapshot | `source_table_missing`; no imputation |
+| R2 cost | each fetch is by sorted event ids, once per window or month; progress to stderr |
+| R3, R5 | no randomness; model ids unchanged |
+| R4 | receipts already bind the production rows, so a changed snapshot refuses at replay |
+| R6 | labels are read per month through `read_labels`; the adapter adds no earlier read |
+
+**Split list (estimates).** Slice 1: config, catalog and store open, `read`, `plan`, `selection`, `admit`, `load_index`, roster inputs, refusals (table-backed fields are providers that refuse `source_table_missing`): about 150 code lines (`size_pnl_sources.py` plus the one-line `run.py` argument), about 200 test lines, about 100 doc words (runbook). Slice 2: `fetch`, `facts`, `plan_frame`, hashes, and the runbook smoke command: about 200 code lines, about 250 test lines, about 200 doc words. Tests use synthetic fixtures only.
+
+**Notes.** `--sources-config` is optional for `run.py` (other `--sources` factories ignore it) but required by `build_sources`. The `tier4_forecasts` row is the only `production_hash` source; `LEAD` makes the reader's `lead_unavailable` guard vacuous for this table, which is accepted because the walk-forward forecast is lead-1 by construction. The config file is read with the hostile-input pattern of `run.py` `_read_input`. Until slice 1 merges the runbook commands are the planned form, and each invocation adds `--sources-config <config.json>`.

@@ -15,14 +15,15 @@ beside the v14 run, container 12 GiB). Agents never run them.
 2. The spec is registered: exactly one PLANNED `EXP-188` ledger row whose `spec_hash` equals the spec's
    (`python3 -m experiments.size_pnl_prereg --check`). Without it the runner refuses
    `EXPERIMENT_IDENTITY_CONFLICT` (`planned_row_missing`) before reading anything.
-3. A `--sources MODULE:FUNC` callable builds `size_pnl_driver.Sources` from the parsed args (catalog, store
-   root, v14 run, pinned snapshot, production table hash). The store adapter is not part of this slice.
+3. `--sources experiments.size_pnl_sources:build_sources --sources-config <config.json>` builds
+   `size_pnl_driver.Sources` (design section 13: catalog, store root, v14 spec/request/plan-ref, pinned snapshot,
+   production hash). The adapter lands in two slices; the smoke command is added with the second.
 
 ## Real run
 
 ```
 python3 tools/bounded_run.py --heavy --cores 8 -- python3 experiments/EXP-188_size_decision_pnl_rescore/run.py \
-  --stage inner --no-ledger --expected <expected.json> --sources <module>:<func> --out-dir <out-dir>
+  --stage inner --no-ledger --expected <expected.json> --sources <module>:<func> --sources-config <config.json> --out-dir <out-dir>
 ```
 
 Use an `--out-dir` under `experiments/EXP-188_*/results/`. The run writes `receipts/inputs_inner.json`, one
@@ -38,7 +39,7 @@ with the same file and a fresh `--out-dir` under `/tmp` (smoke output is disposa
 
 ```
 python3 tools/bounded_run.py --heavy --cores 8 -- python3 experiments/EXP-188_size_decision_pnl_rescore/run.py \
-  --stage inner --event-ids <ids.json> --no-ledger --expected <expected.json> --sources <module>:<func> --out-dir <smoke-dir>
+  --stage inner --event-ids <ids.json> --no-ledger --expected <expected.json> --sources <module>:<func> --sources-config <config.json> --out-dir <smoke-dir>
 ```
 
 Then repeat with `--stage outer` and the same `--event-ids`. The ids are receipted as `scope`; a full-population
