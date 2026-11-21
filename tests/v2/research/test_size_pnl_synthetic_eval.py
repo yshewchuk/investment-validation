@@ -125,6 +125,17 @@ def test_x6_straddle_fails_with_a_nan_pred_move_before_the_variance_test():
     assert "X6 R_L" in out["stop"]
 
 
+def test_x6_variance_sees_shrinkage_rows_of_an_event_outside_e():
+    """E0 leaves E (undetermined under M02 on S1), but the shrinkage L=1 straddle pred_move on E0 is finite and differs
+    from E1's in the same quarter, so the variance over every scored row fails X6 R_L."""
+    d = frame_of()
+    d.loc[(d["model_id"] == "M02") & (d["event_id"] == "E0") & (d["structure"] == "S1"), "status"] = "undetermined"
+    d.loc[(d["model_id"] == "SH") & (d["book"] == "straddle") & (d["event_id"] == "E0"), "pred_move"] = 0.9
+    out = ev.evaluate(d, META, TICKERS, ARM, resamples=RESAMPLES)
+    assert row(out, "X6", "R_L")[2] == "fail"
+    assert "X6 R_L" in out["stop"]
+
+
 def test_x6_fails_on_within_quarter_width_variance():
     out = run(width=[1, 2, 2, 2, 3, 3, 4, 4])
     assert row(out, "X6", "S1")[2] == "fail"

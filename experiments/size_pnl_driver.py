@@ -596,7 +596,7 @@ def run_synthetic(src, out_dir, *, event_ids=None, replay=False, prereg=size_pnl
     inputs_receipt = _receipt(out / "receipts" / "inputs_synthetic.json", body, "inputs_receipt_changed")  # after both population refusals: a refused run pins nothing
     if replay:  # X7 evidence: the replay verdict is receipted, so a later plain run can read it
         again = _synthetic_scores(src, ready, plan, facts_all, labels)
-        equal = _frames_digest(frames) == _frames_digest(again[0]) and declined == again[4]
+        equal = (_frames_digest(frames) == _frames_digest(again[0]) and declined == again[4] and ladder_hash == again[2])
         _receipt(out / "receipts" / "synthetic_replay.json", {"stage": "synthetic_replay", "scope": scope, "inputs": inputs_receipt["content_hash"],
                                                              "ladder": ladder_hash, "frames": _frames_digest(frames), "declined": content_hash(declined), "equal": equal}, "synthetic_replay_changed")
     replay_equal = _replay_equal(out, inputs_receipt["content_hash"], ladder_hash, _frames_digest(frames), content_hash(declined))
@@ -606,7 +606,7 @@ def run_synthetic(src, out_dir, *, event_ids=None, replay=False, prereg=size_pnl
     no_prediction = {str(e) for e in plan["event_id"]} - set().union(*(set(e["table"].index.astype(str)) for e in ready.values()))  # in no model table
     _log(f"synthetic common_dropped={common} events={len(kept)} undetermined={undetermined} scoreability_dropped={dropped}")
     meta = {mid: {"family": e["family"], "params": e["params"], "rmse": fits[mid]["rmse"], "mae": fits[mid]["mae"]} for mid, e in ready.items()}
-    result = synthetic_eval.evaluate(pop, meta, tickers, arm, replay_equal=replay_equal, declined=declined)
+    result = synthetic_eval.evaluate(full, meta, tickers, arm, replay_equal=replay_equal, declined=declined)
     body = {"stage": "synthetic", "models": sorted(ready), "scope": scope, "inputs": inputs_receipt["content_hash"], "arm": content_hash(arm),
             "ladder_skipped": skipped, "ladder": ladder_hash, "scoreability_dropped": dropped, "common_dropped": common, "events": len(kept), "declined": declined,
             "events_undetermined": undetermined, "planned": len(plan), "events_no_prediction": len(no_prediction),

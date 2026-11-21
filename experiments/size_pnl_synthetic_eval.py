@@ -123,6 +123,7 @@ def evaluate(decisions, meta, tickers, arm, *, replay_equal=None, resamples=cont
     and contrasts, and the stop ids. ``declined`` is {model: {short-vol unit: [declined, candidates]}}, the width declines."""
     if replay_equal is not None and not isinstance(replay_equal, bool):
         raise ValueError("replay_equal must be a bool or None")
+    everything = decisions  # every scored row, including events outside E (the X6 variance)
     decisions = population(decisions)
     units, slopes, x = _units(decisions, tickers), [], []
     for unit, u in units.items():
@@ -162,12 +163,15 @@ def evaluate(decisions, meta, tickers, arm, *, replay_equal=None, resamples=cont
         if shr is not None:
             sub = u["rows"][u["rows"]["model_id"] == shr]
             taken = int((sub["status"] == "taken").sum())
+            # variance over every scored row of the predictor, including events outside E; NaN checks on E
             if u["book"] == SHORT:  # completeness first: any NaN width fails, before the variance test
-                missing, var = int(sub["width"].isna().sum()), _quarter_var(sub)
+                full_sub = everything[(everything["model_id"] == shr) & (everything["book"] == SHORT) & (everything["arm_or_rule"] == "as_is") & (everything["structure"] == unit)]
+                missing, var = int(sub["width"].isna().sum()), _quarter_var(full_sub)
                 if missing: x.append(["X6", unit, "fail", f"missing_widths={missing} taken={taken}"])
                 else: x.append(["X6", unit, "pass" if var <= 1e-12 else "fail", f"var={var:.3g} taken={taken}"])
             else:  # straddle edge = pred_move - implied_move: constant pred_move per quarter ranks by implied move alone
-                missing, var = int(sub["pred_move"].isna().sum()), _quarter_var(sub, "pred_move")
+                full_sub = everything[(everything["model_id"] == shr) & (everything["book"] == STRADDLE) & (everything["arm_or_rule"] == unit)]
+                missing, var = int(sub["pred_move"].isna().sum()), _quarter_var(full_sub, "pred_move")
                 if missing: x.append(["X6", unit, "fail", f"missing_pred={missing} taken={taken}"])
                 else: x.append(["X6", unit, "pass" if var <= 1e-12 else "fail", f"pred_var={var:.3g} taken={taken}"])
     short = [n for n, u in units.items() if u["book"] == SHORT]
