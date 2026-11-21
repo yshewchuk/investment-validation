@@ -119,7 +119,7 @@ def test_blend_with_missing_component_is_excluded():
 def test_failed_execution_excludes_model():
     slots = {}
     key = put(slots, "c1")
-    slots["outer-execution:" + key] = {"status": "failed"}
+    slots["outer-execution:" + key] = {"status": "failed", "forecasts_id": None}
     out, _ = run(slots)
     assert out["m_c1"] == {"status": "excluded", "reason": "outer_failed"}
 
@@ -127,7 +127,7 @@ def test_failed_execution_excludes_model():
 def test_failed_execution_with_matching_start_is_excluded():
     slots = {}
     key = put(slots, "c1")
-    slots["outer-execution:" + key] = {"status": "failed"}
+    slots["outer-execution:" + key] = {"status": "failed", "forecasts_id": None}
     out, _ = run(slots)
     assert out["m_c1"] == {"status": "excluded", "reason": "outer_failed"}
 
@@ -136,7 +136,7 @@ def test_failed_execution_with_another_plans_start_refuses():
     slots = {}
     key = put(slots, "c1")
     slots["outer-start:" + key]["plan_id"] = "other-plan"
-    slots["outer-execution:" + key] = {"status": "failed"}
+    slots["outer-execution:" + key] = {"status": "failed", "forecasts_id": None}
     with pytest.raises(OpsError) as exc:
         run(slots)
     assert exc.value.problem.code == "EXPERIMENT_IDENTITY_CONFLICT"
@@ -271,3 +271,61 @@ def test_forecast_row_without_predicted_move_refuses():
 def test_all_three_outer_slots_missing_excludes_model():
     out, _ = run({})
     assert out["m_c1"] == {"status": "excluded", "reason": "outer_missing"}
+
+
+def assert_identity_mismatch(slots):
+    with pytest.raises(OpsError) as exc:
+        run(slots)
+    assert exc.value.problem.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert exc.value.problem.details["reason"] == "outer_identity_mismatch"
+
+
+def test_empty_execution_with_valid_start_refuses():
+    slots = {}
+    key = put(slots, "c1")
+    slots["outer-execution:" + key] = {}
+    del slots["outer-forecasts:" + key]
+    assert_identity_mismatch(slots)
+
+
+def test_succeeded_execution_without_forecasts_is_outer_missing():
+    slots = {}
+    key = put(slots, "c1")
+    del slots["outer-forecasts:" + key]
+    out, _ = run(slots)
+    assert out["m_c1"] == {"status": "excluded", "reason": "outer_missing"}
+
+
+def test_bad_forecast_row_with_missing_execution_refuses():
+    slots = {}
+    key = put(slots, "c1")
+    del slots["outer-execution:" + key]
+    del slots["outer-forecasts:" + key][1]["predicted_absolute_move_pct"]
+    assert_identity_mismatch(slots)
+
+
+def test_forecast_row_carrying_target_field_refuses():
+    slots = {}
+    key = put(slots, "c1")
+    rows = forecasts(IDS, 1.0)
+    rows[0]["absolute_move_pct"] = 1.5
+    slots["outer-forecasts:" + key] = rows
+    slots["outer-execution:" + key]["forecasts_id"] = content_hash(rows)
+    assert_identity_mismatch(slots)
+
+
+def test_nonfinite_prediction_in_partial_cohort_refuses():
+    slots = {}
+    key = put(slots, "c1", ids=IDS[:2])
+    rows = forecasts(IDS[:2], 1.0)
+    rows[0]["predicted_absolute_move_pct"] = float("nan")
+    slots["outer-forecasts:" + key] = rows
+    slots["outer-execution:" + key]["forecasts_id"] = "sha256:not-checked"  # shape check runs before the hash check
+    assert_identity_mismatch(slots)
+
+
+def test_execution_status_running_refuses():
+    slots = {}
+    key = put(slots, "c1")
+    slots["outer-execution:" + key]["status"] = "running"
+    assert_identity_mismatch(slots)

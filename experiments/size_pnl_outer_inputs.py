@@ -3,6 +3,7 @@
 Reads only the outer-start, outer-execution and outer-forecasts slots of each refit unit; never a 2025 target slot.
 A missing or failed refit excludes its model; an identity or hash mismatch refuses the whole run.
 """
+import math
 import sys
 import time
 
@@ -30,8 +31,18 @@ def _check_start(plan, start, cid, year, key):
         raise _conflict("outer_identity_mismatch", "the outer refit does not match the sealed plan")
 
 
+def _valid_forecast(row):
+    """A forecast row names a str event and a finite predicted move, and carries no target field."""
+    if not (isinstance(row, dict) and _FORECAST_KEYS <= row.keys() and "absolute_move_pct" not in row):
+        return False
+    pred = row["predicted_absolute_move_pct"]
+    return (isinstance(row["event_id"], str) and isinstance(pred, (int, float)) and not isinstance(pred, bool)
+            and math.isfinite(pred))
+
+
 def _bind_unit(plan, read, cid, sealed_ids, admit, year):
-    """One candidate's 2025 refit: an excluded or bound unit, with the identity checks of design section 12."""
+    """One candidate's 2025 refit: an excluded or bound unit, with the identity checks of design section 12.
+    Every present record is validated before any exclusion."""
     key = refit_key(plan, year, cid)
     start, execution, forecasts = read("outer-start:" + key), read("outer-execution:" + key), read("outer-forecasts:" + key)
     if start is not None and not isinstance(start, dict):
@@ -40,20 +51,17 @@ def _bind_unit(plan, read, cid, sealed_ids, admit, year):
         raise _conflict("outer_identity_mismatch", "the outer execution record is malformed")
     if forecasts is not None and not isinstance(forecasts, list):
         raise _conflict("outer_identity_mismatch", "the outer forecasts record is malformed")
+    if isinstance(execution, dict) and not ({"status", "forecasts_id"} <= execution.keys()
+                                            and execution["status"] in ("succeeded", "failed")):
+        raise _conflict("outer_identity_mismatch", "the outer execution record is malformed")
+    if isinstance(forecasts, list) and not all(_valid_forecast(row) for row in forecasts):
+        raise _conflict("outer_identity_mismatch", "an outer forecast row is malformed")
     if isinstance(start, dict): _check_start(plan, start, cid, year, key)  # before the exclusions: a failed run must still name this plan
-    if isinstance(execution, dict) and execution.get("status") == "failed":
+    if isinstance(execution, dict) and execution["status"] == "failed":
         return {"status": "excluded", "reason": "outer_failed"}
     if start is None or execution is None or forecasts is None:
         return {"status": "excluded", "reason": "outer_missing"}
-    try:
-        status, forecasts_id = execution["status"], execution["forecasts_id"]
-    except (KeyError, TypeError) as exc:
-        raise _conflict("outer_identity_mismatch", "the outer execution record is malformed") from exc
-    if status != "succeeded":
-        raise _conflict("outer_identity_mismatch", "the outer refit did not succeed")
-    if not all(isinstance(row, dict) and _FORECAST_KEYS <= row.keys() for row in forecasts):
-        raise _conflict("outer_identity_mismatch", "an outer forecast row is malformed")
-    if forecasts_id != content_hash(forecasts):
+    if execution["forecasts_id"] != content_hash(forecasts):
         raise _conflict("outer_forecasts_hash_mismatch", "the outer forecasts differ from the recorded hash")
     try:
         array = inputs.bind_array({"predictions": forecasts}, sealed_ids, admit)
