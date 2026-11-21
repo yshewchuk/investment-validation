@@ -103,11 +103,21 @@ def _columns(conn, table):
     return [row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()]
 
 
-def _row_bytes(conn, table, alias, join_where, params):
-    """UTF-8 bytes of every column of `table` (read as `alias`) over the rows `join_where` selects. NULL counts as 0."""
+def _scan_bytes(conn, table, alias, join_where, params, budget):
+    """UTF-8 bytes of every column of `table` (read as `alias`) over the rows `join_where` selects. NULL counts as 0.
+
+    Streams one row at a time and stops at the first row that takes the total past `budget`, closing the cursor; the returned total is then over budget.
+    """
     terms = ['COALESCE(LENGTH(CAST(%s."%s" AS BLOB)), 0)' % (alias, c.replace('"', '""')) for c in _columns(conn, table)]
-    total = " + ".join(terms) or "0"
-    return conn.execute("SELECT COALESCE(SUM(%s), 0) FROM %s" % (total, join_where), params).fetchone()[0]
+    expr = " + ".join(terms) or "0"
+    cursor = conn.execute("SELECT %s FROM %s" % (expr, join_where), params)
+    total = 0
+    for (row_bytes,) in cursor:
+        total += row_bytes
+        if total > budget:
+            cursor.close()
+            return total
+    return total
 
 
 def _bound_snapshot(conn, snapshot_id):
@@ -127,9 +137,9 @@ def _bound_snapshot(conn, snapshot_id):
         evidence = 0
 
         def add(table, alias, join_where):
-            # Check the cap after every table so a refusal never waits for the remaining scans.
+            # The running budget makes each scan stop at the first row that crosses the cap; the check then refuses.
             nonlocal evidence
-            evidence += _row_bytes(conn, table, alias, join_where, params)
+            evidence += _scan_bytes(conn, table, alias, join_where, params, MAX_SNAPSHOT_EVIDENCE_BYTES - evidence)
             if evidence > MAX_SNAPSHOT_EVIDENCE_BYTES:
                 raise fail(_CONFLICT, "snapshot catalog metadata is too large", details={"reason": "snapshot_metadata_too_large"})
 

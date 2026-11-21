@@ -446,7 +446,7 @@ def test_bound_snapshot_unknown_snapshot_passes_with_zero_counts(tmp_path, monke
 def _no_byte_scan(monkeypatch):
     def fail_if_called(*args, **kwargs):
         raise AssertionError("byte sum ran before the row-count refusal")
-    monkeypatch.setattr(src, "_row_bytes", fail_if_called)
+    monkeypatch.setattr(src, "_scan_bytes", fail_if_called)
     monkeypatch.setattr(src, "_columns", fail_if_called)
 
 
@@ -481,13 +481,13 @@ def test_bound_snapshot_at_exact_caps_reaches_byte_sums(tmp_path, monkeypatch):
     conn = _catalog(tmp_path)
     _seed(conn, tables=2, fragments=3)
     calls = []
-    real_row_bytes = src._row_bytes
+    real_scan_bytes = src._scan_bytes
 
-    def counting_row_bytes(*args, **kwargs):
+    def counting_scan_bytes(*args, **kwargs):
         calls.append(args[1])
-        return real_row_bytes(*args, **kwargs)
+        return real_scan_bytes(*args, **kwargs)
 
-    monkeypatch.setattr(src, "_row_bytes", counting_row_bytes)
+    monkeypatch.setattr(src, "_scan_bytes", counting_scan_bytes)
     assert src._bound_snapshot(conn, "s1") is None
     assert calls, "expected the byte sums to run at exactly the caps"
     conn.close()
@@ -499,15 +499,92 @@ def test_bound_snapshot_refuses_after_first_table_without_scanning_later_tables(
     _seed(conn, tables=1)
     calls = []
 
-    def big_first_row_bytes(conn_, table, alias, join_where, params):
+    def big_first_scan_bytes(conn_, table, alias, join_where, params, budget):
         calls.append(table)
         return 10**6
 
-    monkeypatch.setattr(src, "_row_bytes", big_first_row_bytes)
+    monkeypatch.setattr(src, "_scan_bytes", big_first_scan_bytes)
     with pytest.raises(OpsError) as exc:
         src._bound_snapshot(conn, "s1")
     assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "snapshot_metadata_too_large")
     assert len(calls) == 1
+    conn.close()
+
+
+class _CountingCursor:
+    """Yields real sqlite3 rows and counts each one into its scan's slot of the proxy's rows_read."""
+    def __init__(self, cursor, rows_read, slot):
+        self._cursor = cursor
+        self._rows_read = rows_read
+        self._slot = slot
+        self.closed = False
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        row = next(self._cursor)
+        self._rows_read[self._slot] += 1
+        return row
+
+    def close(self):
+        self.closed = True
+        self._cursor.close()
+
+
+class _CountingConn:
+    """Wraps the real connection. Only the data_fragments byte scan is counted (rows_read holds one entry per such scan); every other call delegates."""
+    def __init__(self, conn):
+        self._conn = conn
+        self.rows_read = []
+        self.cursors = []
+
+    def execute(self, sql, params=()):
+        cursor = self._conn.execute(sql, params)
+        if "COALESCE(LENGTH(CAST" in sql and "FROM data_fragments f " in sql:
+            self.rows_read.append(0)
+            wrapped = _CountingCursor(cursor, self.rows_read, len(self.rows_read) - 1)
+            self.cursors.append(wrapped)
+            return wrapped
+        return cursor
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+
+def _seed_fragments(conn, count, size):
+    # Each fragment is linked to dataset version dv0 (the snapshot's table) and carries a partition_key of `size` bytes.
+    for i in range(count):
+        conn.execute("insert into data_fragments values (?, ?, NULL, NULL, NULL, NULL)", (f"f{i}", "p" * size))
+        conn.execute("insert into data_version_fragments values ('dv0', ?)", (f"f{i}",))
+    conn.commit()
+
+
+def test_bound_snapshot_fragment_scan_stops_at_cap_crossing_row(tmp_path, monkeypatch):
+    # Tables add 14 bytes (under 250); each fragment adds 102-103 bytes, so the cap is crossed on the third fragment row.
+    monkeypatch.setattr(src, "MAX_SNAPSHOT_FRAGMENTS", 100)
+    monkeypatch.setattr(src, "MAX_SNAPSHOT_EVIDENCE_BYTES", 250)
+    conn = _catalog(tmp_path)
+    _seed(conn, tables=1)
+    _seed_fragments(conn, 50, 100)
+    proxy = _CountingConn(conn)
+    with pytest.raises(OpsError) as exc:
+        src._bound_snapshot(proxy, "s1")
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "snapshot_metadata_too_large")
+    assert proxy.rows_read[0] <= 5
+    assert proxy.cursors[0].closed is True
+    conn.close()
+
+
+def test_bound_snapshot_table_under_cap_scanned_fully(tmp_path, monkeypatch):
+    monkeypatch.setattr(src, "MAX_SNAPSHOT_FRAGMENTS", 100)
+    monkeypatch.setattr(src, "MAX_SNAPSHOT_EVIDENCE_BYTES", 10_000)
+    conn = _catalog(tmp_path)
+    _seed(conn, tables=1)
+    _seed_fragments(conn, 50, 100)
+    proxy = _CountingConn(conn)
+    assert src._bound_snapshot(proxy, "s1") is None
+    assert proxy.rows_read == [50]
     conn.close()
 
 
