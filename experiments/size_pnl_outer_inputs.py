@@ -66,6 +66,9 @@ def _bind_unit(plan, read, cid, sealed_ids, admit, year):
             and execution["forecasts_id"] != content_hash(forecasts):
         raise _conflict("outer_forecasts_hash_mismatch", "the outer forecasts differ from the recorded hash")
     if isinstance(execution, dict) and execution["status"] == "failed":
+        # The producer records a failed run with forecasts_id None and writes no forecasts slot.
+        if execution["forecasts_id"] is not None or forecasts is not None:
+            raise _conflict("outer_identity_mismatch", "a failed outer refit carries forecasts")
         return {"status": "excluded", "reason": "outer_failed"}
     if start is None or execution is None or forecasts is None:
         return {"status": "excluded", "reason": "outer_missing"}

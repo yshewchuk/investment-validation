@@ -120,6 +120,7 @@ def test_failed_execution_excludes_model():
     slots = {}
     key = put(slots, "c1")
     slots["outer-execution:" + key] = {"status": "failed", "forecasts_id": None}
+    del slots["outer-forecasts:" + key]
     out, _ = run(slots)
     assert out["m_c1"] == {"status": "excluded", "reason": "outer_failed"}
 
@@ -128,8 +129,24 @@ def test_failed_execution_with_matching_start_is_excluded():
     slots = {}
     key = put(slots, "c1")
     slots["outer-execution:" + key] = {"status": "failed", "forecasts_id": None}
+    del slots["outer-forecasts:" + key]
     out, _ = run(slots)
     assert out["m_c1"] == {"status": "excluded", "reason": "outer_failed"}
+
+
+def test_failed_execution_with_non_null_forecasts_id_refuses():
+    slots = {}
+    key = put(slots, "c1")
+    slots["outer-execution:" + key] = {"status": "failed", "forecasts_id": "sha256:x"}
+    del slots["outer-forecasts:" + key]
+    assert_identity_mismatch(slots)
+
+
+def test_failed_execution_with_forecasts_list_refuses():
+    slots = {}
+    key = put(slots, "c1")
+    slots["outer-execution:" + key] = {"status": "failed", "forecasts_id": None}
+    assert_identity_mismatch(slots)
 
 
 def test_failed_execution_with_another_plans_start_refuses():
