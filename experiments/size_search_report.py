@@ -133,10 +133,16 @@ def _candidate_evidence(conn, store, run_id, plan, predictions=None):
 
 
 def failure_counts(rows):
-    """Count failed inner trials by recorded failure_reason; legacy records count as unrecorded."""
+    """Count failed inner trials by recorded failure_reason, once per distinct trial; legacy records count as unrecorded."""
     counts = {}
+    seen = set()
     for row in rows:
         if row.get("status") == "failed":
+            trial_id = row.get("trial_id")
+            if trial_id is not None:
+                if trial_id in seen:
+                    continue
+                seen.add(trial_id)
             reason = row.get("failure_reason") or "unrecorded"
             counts[reason] = counts.get(reason, 0) + 1
     return {reason: counts[reason] for reason in sorted(counts)}

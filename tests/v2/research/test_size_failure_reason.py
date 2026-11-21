@@ -53,9 +53,18 @@ def test_timed_shape_rejects_reason_on_succeeded_event():
 
 def test_failure_counts_groups_failed_rows_and_marks_legacy_unrecorded():
     rows = [
-        {"status": "failed", "failure_reason": "nonconvergence"},
-        {"status": "failed", "failure_reason": "nonconvergence"},
-        {"status": "failed", "failure_reason": None},
-        {"status": "succeeded", "failure_reason": None},
+        {"status": "failed", "trial_id": "t1", "failure_reason": "nonconvergence"},
+        {"status": "failed", "trial_id": "t2", "failure_reason": "nonconvergence"},
+        {"status": "failed", "trial_id": "t3", "failure_reason": None},
+        {"status": "succeeded", "trial_id": "t4", "failure_reason": None},
     ]
     assert failure_counts(rows) == {"nonconvergence": 2, "unrecorded": 1}
+
+
+def test_failure_counts_counts_shared_trial_once():
+    rows = [
+        {"status": "failed", "trial_id": "t1", "failure_reason": "nonconvergence"},
+        {"status": "failed", "trial_id": "t1", "failure_reason": "nonconvergence"},
+        {"status": "failed", "trial_id": "t2", "failure_reason": None},
+    ]
+    assert failure_counts(rows) == {"nonconvergence": 1, "unrecorded": 1}
