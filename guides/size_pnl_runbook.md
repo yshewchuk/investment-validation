@@ -23,7 +23,7 @@ beside the v14 run, container 12 GiB). Agents never run them.
 
 ```
 python3 tools/bounded_run.py --heavy --cores 8 -- python3 experiments/EXP-188_size_decision_pnl_rescore/run.py \
-  --stage inner --no-ledger --expected <expected.json> --sources <module>:<func> --out-dir <out-dir>
+  --stage inner --no-ledger --expected <expected.json> --sources <module>:<func> --sources-config <config.json> --out-dir <out-dir>
 ```
 
 Use an `--out-dir` under `experiments/EXP-188_*/results/`. The run writes `receipts/inputs_inner.json`, one
@@ -39,7 +39,7 @@ with the same file and a fresh `--out-dir` under `/tmp` (smoke output is disposa
 
 ```
 python3 tools/bounded_run.py --heavy --cores 8 -- python3 experiments/EXP-188_size_decision_pnl_rescore/run.py \
-  --stage inner --event-ids <ids.json> --no-ledger --expected <expected.json> --sources <module>:<func> --out-dir <smoke-dir>
+  --stage inner --event-ids <ids.json> --no-ledger --expected <expected.json> --sources <module>:<func> --sources-config <config.json> --out-dir <smoke-dir>
 ```
 
 Then repeat with `--stage outer` and the same `--event-ids`. The ids are receipted as `scope`; a full-population

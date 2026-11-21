@@ -201,7 +201,7 @@ A synthetic-predictor calibration arm (controls and power; never part of the ros
 | `production_hash`, `production_table_hash` | the `tier4_forecasts` dataset-version `manifest_hash` in the snapshot (`data_snapshot_tables` to `data_dataset_versions`). The expected value is run config. |
 | Label `crush_pct_iv30` | `iv_crush_targets`; skipped or NaN rows drop in `read_labels`. |
 | Label `abs_move` | **Supervisor default, the user may override:** absolute `computed_moves.realized_move_pct`, the labels v14 was selected on (price_source `computed_moves`). |
-| Facts `pre_iv30`, `mcap_usd` | `feature_panel` event row. Non-finite values (the FLT_MAX sentinel) and a wrong mcap unit refuse; nothing is imputed. |
+| Facts `pre_iv30`, `mcap_usd` | `feature_panel` event row. Non-finite values refuse, and so does the FLT_MAX sentinel (finite, so it needs its own equality check); the mcap-unit check is specified with slice 2's code. Nothing is imputed. |
 | Fact `implied_move` | the source the short-vol sizing path uses; if that is ambiguous, **supervisor default** `computed_moves.implied_move_pct`. |
 | `plan_frame` | `event_id`, `ticker`, `event_date`, `session` from `earnings_events`. Entry is the last pre-print close, exit the first post-print close, on the snapshot calendar: AMC entry = event-day close, exit = next session close; BMO entry = prior session close, exit = event-day close. An existing calendar helper is reused. |
 
