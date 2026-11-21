@@ -238,3 +238,36 @@ def test_shared_component_is_read_once():
     assert reads["outer-forecasts:" + key1] == 1
     assert reads["outer-forecasts:" + key2] == 1
     assert out["m_b2"]["components"]["c1"]["years"]["2025"] is out["m_c1"]["years"]["2025"]
+
+
+@pytest.mark.parametrize("slot, value", [
+    ("outer-start", ["not", "a", "dict"]),
+    ("outer-execution", "succeeded"),
+    ("outer-forecasts", {"event_id": "e1", "horizon_sessions": 1, "predicted_absolute_move_pct": 1.0}),
+])
+def test_wrong_shape_slot_refuses(slot, value):
+    slots = {}
+    key = put(slots, "c1")
+    slots[slot + ":" + key] = value
+    with pytest.raises(OpsError) as exc:
+        run(slots)
+    assert exc.value.problem.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert exc.value.problem.details["reason"] == "outer_identity_mismatch"
+
+
+def test_forecast_row_without_predicted_move_refuses():
+    slots = {}
+    key = put(slots, "c1")
+    rows = forecasts(IDS, 1.0)
+    del rows[1]["predicted_absolute_move_pct"]
+    slots["outer-forecasts:" + key] = rows
+    slots["outer-execution:" + key]["forecasts_id"] = content_hash(rows)
+    with pytest.raises(OpsError) as exc:
+        run(slots)
+    assert exc.value.problem.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert exc.value.problem.details["reason"] == "outer_identity_mismatch"
+
+
+def test_all_three_outer_slots_missing_excludes_model():
+    out, _ = run({})
+    assert out["m_c1"] == {"status": "excluded", "reason": "outer_missing"}

@@ -12,6 +12,7 @@ from experiments import size_pnl_inputs as inputs
 from experiments.magnitude_search_refits import blend_components, per_candidate, refit_key
 
 _CONFLICT = "EXPERIMENT_IDENTITY_CONFLICT"
+_FORECAST_KEYS = {"event_id", "horizon_sessions", "predicted_absolute_move_pct"}
 
 
 def _conflict(reason, message):
@@ -33,10 +34,16 @@ def _bind_unit(plan, read, cid, sealed_ids, admit, year):
     """One candidate's 2025 refit: an excluded or bound unit, with the identity checks of design section 12."""
     key = refit_key(plan, year, cid)
     start, execution, forecasts = read("outer-start:" + key), read("outer-execution:" + key), read("outer-forecasts:" + key)
+    if start is not None and not isinstance(start, dict):
+        raise _conflict("outer_identity_mismatch", "the outer start record is malformed")
+    if execution is not None and not isinstance(execution, dict):
+        raise _conflict("outer_identity_mismatch", "the outer execution record is malformed")
+    if forecasts is not None and not isinstance(forecasts, list):
+        raise _conflict("outer_identity_mismatch", "the outer forecasts record is malformed")
     if isinstance(start, dict): _check_start(plan, start, cid, year, key)  # before the exclusions: a failed run must still name this plan
     if isinstance(execution, dict) and execution.get("status") == "failed":
         return {"status": "excluded", "reason": "outer_failed"}
-    if not isinstance(start, dict) or not isinstance(execution, dict) or not isinstance(forecasts, list):
+    if start is None or execution is None or forecasts is None:
         return {"status": "excluded", "reason": "outer_missing"}
     try:
         status, forecasts_id = execution["status"], execution["forecasts_id"]
@@ -44,6 +51,8 @@ def _bind_unit(plan, read, cid, sealed_ids, admit, year):
         raise _conflict("outer_identity_mismatch", "the outer execution record is malformed") from exc
     if status != "succeeded":
         raise _conflict("outer_identity_mismatch", "the outer refit did not succeed")
+    if not all(isinstance(row, dict) and _FORECAST_KEYS <= row.keys() for row in forecasts):
+        raise _conflict("outer_identity_mismatch", "an outer forecast row is malformed")
     if forecasts_id != content_hash(forecasts):
         raise _conflict("outer_forecasts_hash_mismatch", "the outer forecasts differ from the recorded hash")
     try:
