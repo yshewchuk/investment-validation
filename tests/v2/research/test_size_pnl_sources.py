@@ -533,3 +533,22 @@ def test_build_sources_expected_invalid_refuses_before_open(env, monkeypatch, ex
         src.build_sources(env.args)
     assert _refusal(exc) == ("INVALID_EXPERIMENT_SPEC", "expected_invalid")
     assert flags == []
+
+
+def test_read_json_deeply_nested_refuses(tmp_path):
+    path = tmp_path / "deep.json"
+    path.write_text("[" * 100000 + "]" * 100000)
+    with pytest.raises(OpsError) as exc:
+        src._read_json(str(path), "input_unreadable")
+    assert _refusal(exc) == ("INVALID_EXPERIMENT_SPEC", "input_unreadable")
+
+
+def test_build_sources_sqlite_error_refuses_catalog_unavailable_and_closes(env, monkeypatch):
+    def boom(conn, store, spec):
+        raise sqlite3.OperationalError("boom")
+
+    monkeypatch.setattr(src, "read_native_registration", boom)
+    with pytest.raises(OpsError) as exc:
+        src.build_sources(env.args)
+    assert _refusal(exc) == ("RESOURCE_UNAVAILABLE", "catalog_unavailable")
+    assert env.conn.closed is True

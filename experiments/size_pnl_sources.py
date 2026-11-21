@@ -49,7 +49,7 @@ def _read_json(path, reason):
         if len(data) > _LIMIT:
             raise ValueError("oversize")
         return json.loads(data.decode("utf-8"))
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         raise _refuse(reason, "input is unreadable or not valid JSON") from None
 
 
@@ -204,6 +204,9 @@ def build_sources(args):
         load_index = size_pnl_ladder.default_load_index(repository, snapshot)
         sources = assemble(plan=plan, read=read, selection=selection, expected=expected, panel_id=expected["panel_id"],
                            admit=admit, admitted=admitted, snapshot_id=cfg["snapshot_id"], load_index=load_index)
+    except sqlite3.Error:
+        conn.close()
+        raise fail("RESOURCE_UNAVAILABLE", "catalog unavailable", details={"reason": "catalog_unavailable"}) from None
     except BaseException:
         conn.close()
         raise
