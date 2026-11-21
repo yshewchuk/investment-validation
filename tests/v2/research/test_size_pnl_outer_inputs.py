@@ -313,6 +313,28 @@ def test_succeeded_execution_without_forecasts_is_outer_missing():
     assert out["m_c1"] == {"status": "excluded", "reason": "outer_missing"}
 
 
+@pytest.mark.parametrize("forecasts_id", [None, 123, "not-a-hash"])
+def test_succeeded_execution_without_valid_hash_refuses_even_without_forecasts(forecasts_id):
+    slots = {}
+    key = put(slots, "c1")
+    slots["outer-execution:" + key]["forecasts_id"] = forecasts_id
+    del slots["outer-forecasts:" + key]
+    with pytest.raises(OpsError) as exc:
+        run(slots)
+    assert exc.value.problem.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert exc.value.problem.details["reason"] == "outer_identity_mismatch"
+
+
+@pytest.mark.parametrize("forecasts_id", ["sha256:" + "0" * 64, "sha256:" + "a" * 64])
+def test_succeeded_execution_with_valid_hash_and_no_forecasts_is_outer_missing(forecasts_id):
+    slots = {}
+    key = put(slots, "c1")
+    slots["outer-execution:" + key]["forecasts_id"] = forecasts_id
+    del slots["outer-forecasts:" + key]
+    out, _ = run(slots)
+    assert out["m_c1"] == {"status": "excluded", "reason": "outer_missing"}
+
+
 def test_bad_forecast_row_with_missing_execution_refuses():
     slots = {}
     key = put(slots, "c1")

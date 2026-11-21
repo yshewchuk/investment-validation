@@ -54,6 +54,9 @@ def _bind_unit(plan, read, cid, sealed_ids, admit, year):
     if isinstance(execution, dict) and not ({"status", "forecasts_id"} <= execution.keys()
                                             and execution["status"] in ("succeeded", "failed")):
         raise _conflict("outer_identity_mismatch", "the outer execution record is malformed")
+    if isinstance(execution, dict) and execution["status"] == "succeeded" \
+            and not (isinstance(execution["forecasts_id"], str) and execution["forecasts_id"].startswith("sha256:")):
+        raise _conflict("outer_identity_mismatch", "a succeeded outer refit has no forecasts hash")  # before any exclusion
     if isinstance(forecasts, list) and not all(_valid_forecast(row) for row in forecasts):
         raise _conflict("outer_identity_mismatch", "an outer forecast row is malformed")
     if isinstance(start, dict): _check_start(plan, start, cid, year, key)  # before the exclusions: a failed run must still name this plan
