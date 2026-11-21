@@ -564,3 +564,45 @@ def test_the_real_loop_drops_a_planned_event_one_model_lacks_from_every_model(mo
     seen = pd.concat(frames, ignore_index=True)
     assert set(seen["model_id"]) == {"m1", "m2"}
     assert "E3" not in set(seen["event_id"].astype(str))  # absent for every model, m1 included
+
+
+def test_the_real_loop_counts_width_declined_rows_per_model_and_unit(monkeypatch):
+    """Same setup as the test above, but shortvol.score_events declines rows: for NAMES[0] E4 and E6 are declined with reason
+    width_declined; for NAMES[1] E5 is declined with reason other_reason, which must not be counted. Hand count: m1 sees E1..E6 (6
+    candidates), m2 sees E1, E2, E4, E5, E6 (5 candidates, E3 absent). So NAMES[0] is [2, 6] for m1 and [2, 5] for m2, NAMES[1] and
+    every other unit is [0, 6] for m1 and [0, 5] for m2."""
+    monkeypatch.setattr(driver.shortvol, "MIN_WINDOW", 1)
+    full = pd.DataFrame({"event_date": DATES3, "pred_move": 5.0, "pred_crush": -10.0}, index=pd.Index(list(EVENTS3), name="event_id"))
+    short = full.drop(index=["E3"])
+    ready = {mid: {"status": "ready", "family": "oracle", "params": {}, "table": full} for mid in ("m1", "m2")}
+    monkeypatch.setattr(driver, "_pool_tables", lambda ready_: {mid: (short if mid == "m2" else full) for mid in ready_})
+    labels = pd.DataFrame({"abs_move": 4.0, "crush_pct_iv30": -10.0}, index=pd.Index(list(EVENTS3), name="event_id"))
+    monkeypatch.setattr(driver, "build_pool", lambda table, labels: table)
+    monkeypatch.setattr(driver.shortvol, "simulate", lambda chunk_, events, pool, **kw: {e: "sim" for e in events["event_id"]})
+
+    def declining(chunk_, events, sims, name, **kwargs):
+        out = _scored(chunk_, events, sims, name, **kwargs)
+        if name == driver.shortvol.NAMES[0]:
+            hit = out["event_id"].astype(str).isin(["E4", "E6"]).to_numpy()
+            out.loc[hit, "status"] = "declined"
+            out.loc[hit, "reason"] = "width_declined"
+        elif name == driver.shortvol.NAMES[1]:
+            hit = (out["event_id"].astype(str) == "E5").to_numpy()
+            out.loc[hit, "status"] = "declined"
+            out.loc[hit, "reason"] = "other_reason"
+        return out
+
+    monkeypatch.setattr(driver.shortvol, "score_events", declining)
+    monkeypatch.setattr(driver.shortvol, "score", _marks)
+    monkeypatch.setattr(driver.straddle, "decide", _straddle_decide)
+    monkeypatch.setattr(driver.straddle, "score", _marks)
+    use_chunks(monkeypatch, [("2023Q2", chunk("E1")), ("2023Q3", chunk("E2")), ("2023Q4", chunk("E4")), ("2024Q1", chunk("E5")),
+                             ("2024Q3", chunk("E3")), ("2024Q4", chunk("E6"))])
+    src = sources(plan_frame=PLAN3, admitted=ADMITTED3)
+    *_, declined = driver._synthetic_scores(src, ready, PLAN3, FACTS3, labels)
+    assert declined["m1"][driver.shortvol.NAMES[0]] == [2, 6]
+    assert declined["m2"][driver.shortvol.NAMES[0]] == [2, 5]
+    assert declined["m1"][driver.shortvol.NAMES[1]] == [0, 6]
+    assert declined["m2"][driver.shortvol.NAMES[1]] == [0, 5]
+    for name in driver.shortvol.NAMES[2:]:
+        assert declined["m1"][name] == [0, 6] and declined["m2"][name] == [0, 5]
