@@ -406,6 +406,56 @@ def test_bound_snapshot_unknown_snapshot_passes_with_zero_counts(tmp_path, monke
     conn.close()
 
 
+def _no_byte_scan(monkeypatch):
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("byte sum ran before the row-count refusal")
+    monkeypatch.setattr(src, "_row_bytes", fail_if_called)
+    monkeypatch.setattr(src, "_columns", fail_if_called)
+
+
+def test_bound_snapshot_table_count_over_cap_refuses_before_byte_sums(tmp_path, monkeypatch):
+    monkeypatch.setattr(src, "MAX_SNAPSHOT_TABLES", 2)
+    monkeypatch.setattr(src, "MAX_SNAPSHOT_FRAGMENTS", 100)
+    conn = _catalog(tmp_path)
+    _seed(conn, tables=3)
+    _no_byte_scan(monkeypatch)
+    with pytest.raises(OpsError) as exc:
+        src._bound_snapshot(conn, "s1")
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "snapshot_metadata_too_large")
+    conn.close()
+
+
+def test_bound_snapshot_fragment_count_over_cap_refuses_before_byte_sums(tmp_path, monkeypatch):
+    monkeypatch.setattr(src, "MAX_SNAPSHOT_TABLES", 100)
+    monkeypatch.setattr(src, "MAX_SNAPSHOT_FRAGMENTS", 2)
+    conn = _catalog(tmp_path)
+    _seed(conn, tables=1, fragments=3)
+    _no_byte_scan(monkeypatch)
+    with pytest.raises(OpsError) as exc:
+        src._bound_snapshot(conn, "s1")
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "snapshot_metadata_too_large")
+    conn.close()
+
+
+def test_bound_snapshot_at_exact_caps_reaches_byte_sums(tmp_path, monkeypatch):
+    monkeypatch.setattr(src, "MAX_SNAPSHOT_TABLES", 2)
+    monkeypatch.setattr(src, "MAX_SNAPSHOT_FRAGMENTS", 3)
+    monkeypatch.setattr(src, "MAX_SNAPSHOT_EVIDENCE_BYTES", 10**9)
+    conn = _catalog(tmp_path)
+    _seed(conn, tables=2, fragments=3)
+    calls = []
+    real_row_bytes = src._row_bytes
+
+    def counting_row_bytes(*args, **kwargs):
+        calls.append(args[1])
+        return real_row_bytes(*args, **kwargs)
+
+    monkeypatch.setattr(src, "_row_bytes", counting_row_bytes)
+    assert src._bound_snapshot(conn, "s1") is None
+    assert calls, "expected the byte sums to run at exactly the caps"
+    conn.close()
+
+
 # --- (5) assemble ------------------------------------------------------------
 
 def test_assemble_returns_sources_accepted_by_check_sources():

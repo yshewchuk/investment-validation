@@ -113,10 +113,16 @@ def _row_bytes(conn, table, alias, join_where, params):
 def _bound_snapshot(conn, snapshot_id):
     """Refuse a pinned snapshot whose catalog metadata exceeds the table, fragment or evidence caps. Read-only counts only."""
     try:
-        tables = conn.execute("SELECT COUNT(*) FROM data_snapshot_tables WHERE snapshot_id = ?", (snapshot_id,)).fetchone()[0]
+        # Each count stops at cap + 1 rows, so the scan work is bounded by the caps.
+        tables = conn.execute(
+            "SELECT COUNT(*) FROM (SELECT 1 FROM data_snapshot_tables WHERE snapshot_id = ? LIMIT ?)",
+            (snapshot_id, MAX_SNAPSHOT_TABLES + 1)).fetchone()[0]
         fragments = conn.execute(
-            "SELECT COUNT(*) FROM data_version_fragments vf JOIN data_snapshot_tables st ON st.dataset_version_id = vf.dataset_version_id "
-            "WHERE st.snapshot_id = ?", (snapshot_id,)).fetchone()[0]
+            "SELECT COUNT(*) FROM (SELECT 1 FROM data_version_fragments vf JOIN data_snapshot_tables st "
+            "ON st.dataset_version_id = vf.dataset_version_id WHERE st.snapshot_id = ? LIMIT ?)",
+            (snapshot_id, MAX_SNAPSHOT_FRAGMENTS + 1)).fetchone()[0]
+        if tables > MAX_SNAPSHOT_TABLES or fragments > MAX_SNAPSHOT_FRAGMENTS:
+            raise fail(_CONFLICT, "snapshot catalog metadata is too large", details={"reason": "snapshot_metadata_too_large"})
         params = (snapshot_id,)
         evidence = _row_bytes(conn, "data_snapshots", "s", "data_snapshots s WHERE s.snapshot_id = ?", params)
         evidence += _row_bytes(conn, "data_snapshot_tables", "st", "data_snapshot_tables st WHERE st.snapshot_id = ?", params)
@@ -137,7 +143,7 @@ def _bound_snapshot(conn, snapshot_id):
             params)
     except sqlite3.Error:
         raise fail("RESOURCE_UNAVAILABLE", "catalog unavailable", details={"reason": "catalog_unavailable"}) from None
-    if tables > MAX_SNAPSHOT_TABLES or fragments > MAX_SNAPSHOT_FRAGMENTS or evidence > MAX_SNAPSHOT_EVIDENCE_BYTES:
+    if evidence > MAX_SNAPSHOT_EVIDENCE_BYTES:
         raise fail(_CONFLICT, "snapshot catalog metadata is too large", details={"reason": "snapshot_metadata_too_large"})
 
 
