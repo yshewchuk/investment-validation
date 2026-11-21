@@ -206,7 +206,8 @@ def resolve_roster(plan, selection, *, outer_year, pair_candidates, blend_ids):
     """Pre-registered roster for one outer year. No P&L is read."""
     cands = {c["candidate_id"]: c for c in plan["candidates"]}
     blends = {b["blend_id"] for b in plan.get("blends", [])}
-    extra = set(plan["selection"]["extra_refits"])
+    selection_block = plan.get("selection")
+    extra = set(selection_block.get("extra_refits") or ()) if isinstance(selection_block, dict) else set()
     items = [s for s in selection["selections"] if str(s["outer_year"]) == str(outer_year)]
     item = items[0] if items else {}
     winners = item.get("winners", {})

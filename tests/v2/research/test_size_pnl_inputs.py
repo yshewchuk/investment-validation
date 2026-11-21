@@ -398,6 +398,18 @@ def test_winner_neither_candidate_nor_blend_is_not_in_plan():
     assert reasons == {"M2": "not_in_plan"}
 
 
+def test_missing_selection_or_extra_refits_refuses_no_pair_without_keyerror():
+    no_key = _plan()
+    del no_key["selection"]
+    no_list = dict(_plan())
+    no_list["selection"] = {}
+    for plan in (no_key, no_list):
+        roster = _roster(plan)
+        reasons = {r["role"]: r["reason"] for r in roster["not_testable"]}
+        assert all(reasons[role] == "not_in_extra_refits" for role in PAIR_MAP)
+        assert roster["pairs"] == {"H": "not_testable", "E": "not_testable", "N": "not_testable"}
+
+
 def test_pair_not_in_extra_refits_or_unmapped_is_not_testable():
     roster = _roster(_plan(selection={"extra_refits": ["c1", "c2", "c-hsq", "c-eraw", "c-nraw"]}))
     reasons = {r["role"]: r["reason"] for r in roster["not_testable"]}
