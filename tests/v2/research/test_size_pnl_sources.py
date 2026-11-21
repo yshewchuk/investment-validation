@@ -421,6 +421,19 @@ def test_assemble_returns_sources_accepted_by_check_sources():
         assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "source_table_missing")
 
 
+def test_assemble_plan_frame_refuses_source_table_missing():
+    admitted = readers.Admitted({"events": pd.DataFrame({"event_id": ["e1"], "event_date": pd.to_datetime(["2025-01-02"])}), "excluded": {}})
+    sources = src.assemble(plan=_plan(), read=lambda slot: None, selection=SELECTION, expected=EXPECTED, panel_id="P",
+                           admit=lambda ids: {"admitted": sorted(ids), "dropped": []}, admitted=admitted,
+                           snapshot_id="snap-1", load_index=lambda keys: None)
+    with pytest.raises(OpsError) as exc:
+        sources.plan_frame.columns
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "source_table_missing")
+    with pytest.raises(OpsError) as exc:
+        ladder.check_plan(admitted, sources.plan_frame)
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "source_table_missing")
+
+
 # --- (6) build_sources end to end (every store touch monkeypatched) -----------
 
 class _Conn:

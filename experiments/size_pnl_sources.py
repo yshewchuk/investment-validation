@@ -160,12 +160,19 @@ def _table_missing(*_a, **_k):
     raise fail(_CONFLICT, "source tables arrive in slice 2", details={"reason": "source_table_missing"})
 
 
+class _MissingPlan(pd.DataFrame):
+    """Slice-1 placeholder: a DataFrame (so check_sources accepts it) that refuses `source_table_missing` on first column access, before any plan check can report plan_malformed."""
+    @property
+    def columns(self):
+        _table_missing()
+
+
 def assemble(*, plan, read, selection, expected, panel_id, admit, admitted, snapshot_id, load_index):
     pair_candidates, blend_ids = derive_roster_inputs(plan)
     return size_pnl_driver.Sources(
         plan=plan, read=read, selection=selection, pair_candidates=pair_candidates, blend_ids=blend_ids,
         expected=expected, panel_id=panel_id, admit=admit, admitted=admitted, fetch=_table_missing,
-        production_hash="", production_table_hash="", plan_frame=pd.DataFrame({"event_id": [], "exit_date": []}),
+        production_hash="", production_table_hash="", plan_frame=_MissingPlan(),
         load_index=load_index, facts=_table_missing, snapshot_id=snapshot_id)
 
 
