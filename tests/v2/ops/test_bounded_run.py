@@ -147,8 +147,10 @@ def test_swap_breach_kills_the_job_and_names_swap():
     # The swap reading is faked in the watchdog: both swap probes report
     # 40 MB, which must breach a 20 MB (0.02G) swap cap while the real child
     # is far under the 4G RSS cap, so the kill is attributable to swap alone.
-    # The watchdog still runs end to end (real child, real kill). The
-    # madvise-based tests below keep covering real swap.
+    # The watchdog still runs end to end (real child, real kill).
+    # The madvise-based tests below assert only that no breach happens under
+    # the cap or when disabled; they do not assert real-swap breach detection
+    # (tracked in a follow-up issue).
     code, out, took = _run_with_fake_swap(
         40.0, "--max-rss-gb", "4", "--min-free-gb", "0",
         "--max-swap-gb", "0.02", "--poll-s", "0.1", "--kill-grace-s", "2",
