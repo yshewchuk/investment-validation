@@ -213,6 +213,77 @@ def test_snapshot_other_data_error_reraised():
     assert exc.value.code == "MANIFEST_CORRUPT"
 
 
+# --- (4b) _bound_snapshot ----------------------------------------------------
+
+def _catalog(tmp_path):
+    conn = sqlite3.connect(str(tmp_path / "meta.sqlite"))
+    conn.executescript("""
+        create table data_snapshot_tables (snapshot_id, dataset_version_id);
+        create table data_version_fragments (dataset_version_id, fragment_id);
+        create table data_dataset_versions (dataset_version_id, evidence_json, partition_logical_hashes_json);
+    """)
+    return conn
+
+
+def _seed(conn, tables=1, fragments=0, evidence="ab", hashes="cd"):
+    for i in range(tables):
+        conn.execute("insert into data_dataset_versions values (?, ?, ?)", (f"dv{i}", evidence, hashes))
+        conn.execute("insert into data_snapshot_tables values ('s1', ?)", (f"dv{i}",))
+    for i in range(fragments):
+        conn.execute("insert into data_version_fragments values ('dv0', ?)", (f"f{i}",))
+    conn.commit()
+
+
+def test_bound_snapshot_within_caps_passes(tmp_path, monkeypatch):
+    monkeypatch.setattr(src, "MAX_SNAPSHOT_TABLES", 2)
+    monkeypatch.setattr(src, "MAX_SNAPSHOT_FRAGMENTS", 3)
+    monkeypatch.setattr(src, "MAX_SNAPSHOT_EVIDENCE_BYTES", 100)
+    conn = _catalog(tmp_path)
+    _seed(conn, tables=2, fragments=3)
+    assert src._bound_snapshot(conn, "s1") is None
+    conn.close()
+
+
+def test_bound_snapshot_too_many_tables_refused(tmp_path, monkeypatch):
+    monkeypatch.setattr(src, "MAX_SNAPSHOT_TABLES", 2)
+    conn = _catalog(tmp_path)
+    _seed(conn, tables=3)
+    with pytest.raises(OpsError) as exc:
+        src._bound_snapshot(conn, "s1")
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "snapshot_metadata_too_large")
+    conn.close()
+
+
+def test_bound_snapshot_too_many_fragments_refused(tmp_path, monkeypatch):
+    monkeypatch.setattr(src, "MAX_SNAPSHOT_FRAGMENTS", 2)
+    conn = _catalog(tmp_path)
+    _seed(conn, tables=1, fragments=3)
+    with pytest.raises(OpsError) as exc:
+        src._bound_snapshot(conn, "s1")
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "snapshot_metadata_too_large")
+    conn.close()
+
+
+def test_bound_snapshot_evidence_over_cap_refused(tmp_path, monkeypatch):
+    monkeypatch.setattr(src, "MAX_SNAPSHOT_EVIDENCE_BYTES", 3)
+    conn = _catalog(tmp_path)
+    _seed(conn, tables=1, evidence="ab", hashes="cd")
+    with pytest.raises(OpsError) as exc:
+        src._bound_snapshot(conn, "s1")
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "snapshot_metadata_too_large")
+    conn.close()
+
+
+def test_bound_snapshot_unknown_snapshot_passes_with_zero_counts(tmp_path, monkeypatch):
+    monkeypatch.setattr(src, "MAX_SNAPSHOT_TABLES", 0)
+    monkeypatch.setattr(src, "MAX_SNAPSHOT_FRAGMENTS", 0)
+    monkeypatch.setattr(src, "MAX_SNAPSHOT_EVIDENCE_BYTES", 0)
+    conn = _catalog(tmp_path)
+    _seed(conn, tables=2, fragments=2)
+    assert src._bound_snapshot(conn, "nope") is None
+    conn.close()
+
+
 # --- (5) assemble ------------------------------------------------------------
 
 def test_assemble_returns_sources_accepted_by_check_sources():
@@ -250,6 +321,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(src, "read_native_registration", lambda conn, store, spec: types.SimpleNamespace(
         run_id="r1", document={"holdouts": {"holdout_as_of_month": "2025-01-01"}}))
     monkeypatch.setattr(src, "Repository", lambda conn, store, pin_snapshots: "repo")
+    monkeypatch.setattr(src, "_bound_snapshot", lambda conn, snapshot_id: None)
     monkeypatch.setattr(src, "_snapshot", lambda repository, snapshot_id: ("snap", snapshot_id))
     monkeypatch.setattr(src, "read_search_plan", lambda conn, store, registration, request, ref: _plan(blends=[{"blend_id": "b1", "name": "size_b1_v1"}]))
     monkeypatch.setattr(src, "read_record", lambda conn, store, run_id, slot: slots.get(slot))
@@ -276,6 +348,31 @@ def test_build_sources_selection_missing_refuses_and_closes(env):
         src.build_sources(env.args)
     assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "selection_missing")
     assert env.conn.closed is True
+
+
+@pytest.mark.parametrize("record", [{"other": []}, {"selections": {"a": 1}}])
+def test_build_sources_selection_without_list_refuses_and_closes(env, record):
+    env.slots["selection"] = record
+    with pytest.raises(OpsError) as exc:
+        src.build_sources(env.args)
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "selection_missing")
+    assert env.conn.closed is True
+
+
+def test_build_sources_snapshot_too_large_refuses_and_closes(env, monkeypatch):
+    calls = []
+
+    def refuse(conn, snapshot_id):
+        raise src.fail("EXPERIMENT_IDENTITY_CONFLICT", "snapshot catalog metadata is too large",
+                       details={"reason": "snapshot_metadata_too_large"})
+
+    monkeypatch.setattr(src, "_bound_snapshot", refuse)
+    monkeypatch.setattr(src, "_snapshot", lambda repository, snapshot_id: calls.append(snapshot_id))
+    with pytest.raises(OpsError) as exc:
+        src.build_sources(env.args)
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "snapshot_metadata_too_large")
+    assert env.conn.closed is True
+    assert calls == []
 
 
 def test_build_sources_without_config_refuses(env):

@@ -26,6 +26,9 @@ from experiments.native_registration import read_native_registration
 _KEYS = ("catalog", "store_root", "spec", "request", "plan_ref", "snapshot_id", "production_hash")
 _LIMIT = 1 << 20
 MAX_OBJECT_BYTES = 1 << 28
+MAX_SNAPSHOT_TABLES = 256
+MAX_SNAPSHOT_FRAGMENTS = 1_000_000
+MAX_SNAPSHOT_EVIDENCE_BYTES = 1 << 28
 _BLEND_NAMES = {"M4": "size_b1_v1", "M5": "size_b2_v1"}
 _INVALID, _CONFLICT = "INVALID_EXPERIMENT_SPEC", "EXPERIMENT_IDENTITY_CONFLICT"
 
@@ -93,6 +96,23 @@ def _open(cfg):
         raise
 
 
+def _bound_snapshot(conn, snapshot_id):
+    """Refuse a pinned snapshot whose catalog metadata exceeds the table, fragment or evidence caps. Read-only counts only."""
+    try:
+        tables = conn.execute("SELECT COUNT(*) FROM data_snapshot_tables WHERE snapshot_id = ?", (snapshot_id,)).fetchone()[0]
+        fragments = conn.execute(
+            "SELECT COUNT(*) FROM data_version_fragments vf JOIN data_snapshot_tables st ON st.dataset_version_id = vf.dataset_version_id "
+            "WHERE st.snapshot_id = ?", (snapshot_id,)).fetchone()[0]
+        evidence = conn.execute(
+            "SELECT COALESCE(SUM(LENGTH(dv.evidence_json) + LENGTH(dv.partition_logical_hashes_json)), 0) "
+            "FROM data_dataset_versions dv JOIN data_snapshot_tables st ON st.dataset_version_id = dv.dataset_version_id "
+            "WHERE st.snapshot_id = ?", (snapshot_id,)).fetchone()[0]
+    except sqlite3.Error:
+        raise fail("RESOURCE_UNAVAILABLE", "catalog unavailable", details={"reason": "catalog_unavailable"}) from None
+    if tables > MAX_SNAPSHOT_TABLES or fragments > MAX_SNAPSHOT_FRAGMENTS or evidence > MAX_SNAPSHOT_EVIDENCE_BYTES:
+        raise fail(_CONFLICT, "snapshot catalog metadata is too large", details={"reason": "snapshot_metadata_too_large"})
+
+
 def _snapshot(repository, snapshot_id):
     try:
         return repository.resolve(snapshot_id)
@@ -134,11 +154,12 @@ def build_sources(args):
     try:
         registration = read_native_registration(conn, store, spec)
         repository = Repository(conn, store, pin_snapshots=True)
+        _bound_snapshot(conn, cfg["snapshot_id"])
         snapshot = _snapshot(repository, cfg["snapshot_id"])
         plan = read_search_plan(conn, store, registration, request, ref)
         read = functools.partial(read_record, conn, store, registration.run_id)
         selection = read("selection")
-        if not isinstance(selection, dict):
+        if not (isinstance(selection, dict) and isinstance(selection.get("selections"), list)):
             raise fail(_CONFLICT, "the selection record is missing", details={"reason": "selection_missing"})
         month = registration.document["holdouts"]["holdout_as_of_month"]
         admit = size_pnl_inputs.population_admit(repository, snapshot, month, max_object_bytes=MAX_OBJECT_BYTES)
