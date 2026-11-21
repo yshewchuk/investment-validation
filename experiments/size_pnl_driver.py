@@ -15,7 +15,7 @@ import pandas as pd
 from engine.v2.foundation import content_hash
 from engine.v2.ops.errors import fail
 from experiments import label_availability, size_pnl_decisions as decisions, size_pnl_inputs as inputs, size_pnl_ladder as ladder, size_pnl_prereg
-from experiments import size_pnl_readers as readers, size_pnl_shortvol as shortvol, size_pnl_straddle as straddle, size_pnl_tuning as tuning, size_pnl_equivalence as equivalence
+from experiments import size_pnl_readers as readers, size_pnl_shortvol as shortvol, size_pnl_straddle as straddle, size_pnl_tuning as tuning, size_pnl_equivalence as equivalence, size_pnl_outer_inputs as outer_inputs
 from experiments.size_pnl_pool import TOLERANCE, build_pool
 from experiments.size_pnl_shortvol import Refusal
 from experiments import size_pnl_report as report, size_pnl_synthetic as synthetic, size_pnl_synthetic_eval as synthetic_eval
@@ -92,6 +92,7 @@ def _prepare(src, stage, ids=None):
     identity = inputs.bind_run(src.plan, src.read, expected=src.expected, panel_id=src.panel_id)
     roster = inputs.resolve_roster(src.plan, src.selection, outer_year=OUTER_YEAR, pair_candidates=src.pair_candidates, blend_ids=src.blend_ids)
     bound = inputs.bind_models(src.plan, src.read, roster, src.admit)
+    if stage == "outer": bound = outer_inputs.bind_outer(src.plan, src.read, bound, roster, src.admit, outer_year=OUTER_YEAR)
     production = readers.read_production(src.fetch, src.admitted, expected_hash=src.production_hash, table_hash=src.production_table_hash, start=start, end=end, event_ids=ids)
     return roster, {"identity": identity, "bound": bound, "tables": readers.model_tables(bound, roster, src.admitted, production, start=start, end=end)}, production
 
