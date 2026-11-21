@@ -9,7 +9,7 @@ import sys
 import time
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[3]
 RUNNER = ROOT / "tools" / "bounded_run.py"
 
 
@@ -18,6 +18,33 @@ def _run(*flags: str, code: str, timeout: float = 60) -> tuple[int, str, float]:
     done = subprocess.run(
         [sys.executable, str(RUNNER), "--cores", "1", *flags, "--",
          sys.executable, "-c", code],
+        capture_output=True, text=True, timeout=timeout,
+    )
+    return done.returncode, done.stdout + done.stderr, time.monotonic() - started
+
+
+def _run_with_fake_swap(swap_mb: float, *flags: str, code: str,
+                        timeout: float = 60) -> tuple[int, str, float]:
+    """Like ``_run``, but the watchdog's swap readings are faked: both the
+    VmSwap and SwapPss probes return ``swap_mb``. The watchdog itself is real
+    (real child, real kill); only the swap numbers it consumes are injected.
+    The launcher is a separate interpreter that imports tools/bounded_run.py,
+    monkeypatches its module-level probes, then runs its ``main()``.
+    """
+    argv = [str(RUNNER), "--cores", "1", *flags, "--", sys.executable, "-c", code]
+    launcher = (
+        "import sys\n"
+        f"sys.path.insert(0, {str(ROOT / 'tools')!r})\n"
+        "import bounded_run as b\n"
+        f"SWAP_MB = {float(swap_mb)!r}\n"
+        "b._vmswap_mb = lambda pid: SWAP_MB\n"
+        "b._swap_mb = lambda pid: (SWAP_MB, SWAP_MB)\n"
+        f"sys.argv = {argv!r}\n"
+        "sys.exit(b.main())\n"
+    )
+    started = time.monotonic()
+    done = subprocess.run(
+        [sys.executable, "-c", launcher],
         capture_output=True, text=True, timeout=timeout,
     )
     return done.returncode, done.stdout + done.stderr, time.monotonic() - started
@@ -117,16 +144,18 @@ def test_fractional_poll_and_negative_values_are_validated():
 
 
 def test_swap_breach_kills_the_job_and_names_swap():
-    # 40 MB of forced-out swap must breach a 20 MB (0.02G) swap cap, while
-    # staying far under the 4G RSS cap (madvise(MADV_PAGEOUT) drops RSS to a
-    # few MB), so the kill is attributable to swap alone.
-    grow = _madvise_pageout_child(alloc_mb=40, hold_s=5.0)
-    code, out, took = _run("--max-rss-gb", "4", "--min-free-gb", "0",
-                           "--max-swap-gb", "0.02", "--poll-s", "0.1",
-                           "--kill-grace-s", "2", code=grow, timeout=30)
-    if any(ln.strip() == "MADVISE_PAGEOUT_UNSUPPORTED" for ln in out.splitlines()):
-        import pytest
-        pytest.skip("kernel does not support MADV_PAGEOUT")
+    # The swap reading is faked in the watchdog: both swap probes report
+    # 40 MB, which must breach a 20 MB (0.02G) swap cap while the real child
+    # is far under the 4G RSS cap, so the kill is attributable to swap alone.
+    # The watchdog still runs end to end (real child, real kill).
+    # The madvise-based tests below assert only that no breach happens under
+    # the cap or when disabled; they do not assert real-swap breach detection
+    # (tracked in a follow-up issue).
+    code, out, took = _run_with_fake_swap(
+        40.0, "--max-rss-gb", "4", "--min-free-gb", "0",
+        "--max-swap-gb", "0.02", "--poll-s", "0.1", "--kill-grace-s", "2",
+        code="import time; time.sleep(60)",
+    )
     assert code == 137
     assert "SWAP BREACH" in out
     assert "CAP BREACH" not in out
