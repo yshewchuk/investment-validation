@@ -360,6 +360,7 @@ def test_strict_fit_failure_policy_is_opt_in(native, monkeypatch, error):
     with pytest.raises(OpsError) as caught:
         magnitude_fitted.fitted_forecasts(*arguments)
     assert caught.value.problem == fail("EXPERIMENT_VARIANT_FAILED", "fitted magnitude estimator failed").problem
+    assert caught.value.failure_reason == ("arithmetic_error" if isinstance(error, ArithmeticError) else "other")
     if isinstance(error, ArithmeticError):
         with pytest.raises(OpsError) as caught:
             magnitude_fitted.fitted_forecasts(*arguments, strict_failures=True)

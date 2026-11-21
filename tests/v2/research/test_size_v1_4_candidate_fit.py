@@ -167,6 +167,18 @@ def test_estimator_failures_never_become_fallback(monkeypatch, candidate, phase,
             _run(inputs, fold, execution=execution)
 
 
+def test_candidate_fit_failure_attaches_bounded_reason_without_raw_text(monkeypatch):
+    inputs, fold = _inputs()
+    def fit(*args):
+        raise ValueError("private text")
+    monkeypatch.setattr(comparator, "fit_recipe_estimator", fit)
+    with pytest.raises(OpsError) as caught:
+        _run(inputs, fold)
+    assert caught.value.code == "EXPERIMENT_VARIANT_FAILED"
+    assert caught.value.failure_reason == "value_error"
+    assert "private text" not in str(vars(caught.value))
+
+
 @pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf")])
 @pytest.mark.parametrize("candidate", [False, True])
 def test_nonfinite_estimator_output_is_never_fallback_or_infrastructure(monkeypatch, value, candidate):
