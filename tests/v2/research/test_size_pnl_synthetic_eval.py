@@ -252,3 +252,37 @@ def test_declined_share_and_year_signs_hand_checked():
     assert ["M06", "median_noise", '{"s": 0.6}', "S2", 8, 8, 0, 2.0, 1.8, 0.9, None] in out["means"]
     assert ["M06", "median_noise", '{"s": 0.6}', "R_L", 8, 8, 0, 2.0, 1.8, 0.9, None] in out["means"]
     assert ["S1", "s=0.6", 1.0, "4/0/0", 1.0, 1.0, 1.0, 1.0, "2023:+ 2024:+"] in out["contrasts"]
+
+
+def test_means_and_contrast_intervals_on_varying_mixed_status_data():
+    """M06 on S1 varies per event: event E_k (k = 0..7, in date order) gets pnl k+1, so [1, 2, ..., 8].
+    E1 and E6 are not_taken with pnl 0, so the S1 M06 pnl vector is [1, 0, 3, 4, 5, 6, 0, 8]. Every other cell is as in frame_of(),
+    so E is unchanged and no event is undetermined.
+
+    Means: taken = 6, not_taken = 2; taken pnl sum = 1+3+4+5+6+8 = 27; mean over n_events = 8 is 27/8 = 3.375.
+    An average over taken rows only would be 27/6 = 4.5.
+
+    Contrast at s=0.6 on S1: d = M06 - N06 (N06 = 1 on every event) = [0, -1, 2, 3, 4, 5, -1, 7], mean 19/8 = 2.375.
+    Quarters (2023Q1 {E0,E1}, 2023Q2 {E2,E3}, 2024Q1 {E4,E5}, 2024Q2 {E6,E7}) have sums -1, 5, 9, 6, so per-event means
+    -0.5, 2.5, 4.5, 3.0: they differ, so the quarter bootstrap is non-degenerate.
+    Tickers: T1 {E0,E2,E4,E6} sum 5 (1.25 per event), T2 {E1,E3,E5,E7} sum 14 (3.5 per event): they differ too."""
+    d = frame_of()
+    m06_s1 = (d["model_id"] == "M06") & (d["structure"] == "S1")
+    ordered = d.loc[m06_s1].sort_values("event_date").index  # 8 rows, E0..E7 in date order
+    d.loc[ordered, "pnl_dollars"] = np.arange(1.0, 9.0)  # event k gets k+1
+    not_taken = d.loc[m06_s1 & d["event_id"].isin(["E1", "E6"])].index
+    d.loc[not_taken, "status"] = "not_taken"
+    d.loc[not_taken, "pnl_dollars"] = 0.0
+    out = ev.evaluate(d, META, TICKERS, ARM, resamples=RESAMPLES)
+
+    means_row = next(r for r in out["means"] if r[0] == "M06" and r[3] == "S1")
+    assert means_row[4] == 8 and means_row[5] == 6 and means_row[6] == 2  # n_events, taken, not_taken
+    assert means_row[7] == pytest.approx(27 / 8)  # 3.375
+    assert means_row[7] != pytest.approx(27 / 6)  # not the taken-only average 4.5
+
+    con = next(r for r in out["contrasts"] if r[:2] == ["S1", "s=0.6"])
+    mean, q_lo, q_hi, t_lo, t_hi = con[2], con[4], con[5], con[6], con[7]
+    assert mean == pytest.approx(19 / 8)
+    assert q_lo < q_hi  # quarter interval non-degenerate
+    assert t_lo < t_hi  # ticker interval non-degenerate
+    assert q_lo <= mean <= q_hi
