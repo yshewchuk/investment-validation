@@ -222,6 +222,7 @@ def _catalog(tmp_path):
         create table data_version_fragments (dataset_version_id, fragment_id);
         create table data_dataset_versions (dataset_version_id, evidence_json, partition_logical_hashes_json);
         create table data_fragments (fragment_id, key_bounds_json, time_bounds_json, input_receipt_refs_json);
+        create table data_snapshots (snapshot_id, finality_receipt_refs_json);
     """)
     return conn
 
@@ -291,6 +292,18 @@ def test_bound_snapshot_counts_utf8_bytes_not_characters(tmp_path, monkeypatch):
     monkeypatch.setattr(src, "MAX_SNAPSHOT_EVIDENCE_BYTES", 15)
     conn = _catalog(tmp_path)
     _seed(conn, tables=1, evidence="é" * 10, hashes="")  # 20 UTF-8 bytes, 10 characters
+    with pytest.raises(OpsError) as exc:
+        src._bound_snapshot(conn, "s1")
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "snapshot_metadata_too_large")
+    conn.close()
+
+
+def test_bound_snapshot_finality_receipt_refs_over_evidence_cap_refused(tmp_path, monkeypatch):
+    monkeypatch.setattr(src, "MAX_SNAPSHOT_EVIDENCE_BYTES", 10)
+    conn = _catalog(tmp_path)
+    _seed(conn, tables=1, evidence="", hashes="")
+    conn.execute("insert into data_snapshots values ('s1', ?)", ('["' + "r" * 20 + '"]',))
+    conn.commit()
     with pytest.raises(OpsError) as exc:
         src._bound_snapshot(conn, "s1")
     assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "snapshot_metadata_too_large")

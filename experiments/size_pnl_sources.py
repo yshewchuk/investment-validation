@@ -114,9 +114,13 @@ def _bound_snapshot(conn, snapshot_id):
             "FROM data_version_fragments vf JOIN data_fragments f ON f.fragment_id = vf.fragment_id "
             "JOIN data_snapshot_tables st ON st.dataset_version_id = vf.dataset_version_id "
             "WHERE st.snapshot_id = ?", (snapshot_id,)).fetchone()[0]
+        finality_bytes = conn.execute(
+            "SELECT COALESCE(SUM(LENGTH(CAST(finality_receipt_refs_json AS BLOB))), 0) FROM data_snapshots WHERE snapshot_id = ?",
+            (snapshot_id,)).fetchone()[0]
     except sqlite3.Error:
         raise fail("RESOURCE_UNAVAILABLE", "catalog unavailable", details={"reason": "catalog_unavailable"}) from None
     evidence += fragment_bytes
+    evidence += finality_bytes
     if tables > MAX_SNAPSHOT_TABLES or fragments > MAX_SNAPSHOT_FRAGMENTS or evidence > MAX_SNAPSHOT_EVIDENCE_BYTES:
         raise fail(_CONFLICT, "snapshot catalog metadata is too large", details={"reason": "snapshot_metadata_too_large"})
 
