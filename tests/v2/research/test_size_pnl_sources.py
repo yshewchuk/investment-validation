@@ -18,6 +18,7 @@ from experiments import size_pnl_sources as src
 
 EXPECTED = {"plan_id": "p1", "registration_id": "r1", "seal_id": "s1", "panel_id": "P"}
 SELECTION = {"selections": []}
+PINNED = {"snapshot_id": "snap-1"}
 
 
 def _refusal(exc):
@@ -355,10 +356,11 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(src, "from_document", lambda cls, doc: ("ref", doc))
     monkeypatch.setattr(src, "_open", lambda cfg: (conn, "store"))
     monkeypatch.setattr(src, "read_native_registration", lambda conn, store, spec: types.SimpleNamespace(
-        run_id="r1", document={"holdouts": {"holdout_as_of_month": "2025-01-01"}}))
+        run_id="r1", document={"holdouts": {"holdout_as_of_month": "2025-01-01"}, "snapshot": PINNED}))
+    monkeypatch.setattr(src, "to_document", lambda snapshot: snapshot)
     monkeypatch.setattr(src, "Repository", lambda conn, store, pin_snapshots: "repo")
     monkeypatch.setattr(src, "_bound_snapshot", lambda conn, snapshot_id: None)
-    monkeypatch.setattr(src, "_snapshot", lambda repository, snapshot_id: ("snap", snapshot_id))
+    monkeypatch.setattr(src, "_snapshot", lambda repository, snapshot_id: dict(PINNED))
     monkeypatch.setattr(src, "read_search_plan", lambda conn, store, registration, request, ref: _plan(blends=[{"blend_id": "b1", "name": "size_b1_v1"}]))
     monkeypatch.setattr(src, "read_record", lambda conn, store, run_id, slot: slots.get(slot))
     monkeypatch.setattr(inputs, "population_admit", lambda repository, snapshot, as_of_month, *, max_object_bytes: "admit")
@@ -409,6 +411,26 @@ def test_build_sources_snapshot_too_large_refuses_and_closes(env, monkeypatch):
     assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "snapshot_metadata_too_large")
     assert env.conn.closed is True
     assert calls == []
+
+
+def test_build_sources_configured_snapshot_not_pinned_refuses_and_closes(env, monkeypatch, tmp_path):
+    calls, resolved = [], []
+    _write(tmp_path / "config.json", {**_cfg(tmp_path), "snapshot_id": "snap-2"})
+    monkeypatch.setattr(src, "_bound_snapshot", lambda conn, snapshot_id: calls.append(snapshot_id))
+    monkeypatch.setattr(src, "_snapshot", lambda repository, snapshot_id: resolved.append(snapshot_id))
+    with pytest.raises(OpsError) as exc:
+        src.build_sources(env.args)
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "snapshot_mismatch")
+    assert env.conn.closed is True
+    assert calls == [] and resolved == []
+
+
+def test_build_sources_resolved_snapshot_differing_from_pin_refuses_and_closes(env, monkeypatch):
+    monkeypatch.setattr(src, "_snapshot", lambda repository, snapshot_id: {"snapshot_id": "snap-1", "extra": True})
+    with pytest.raises(OpsError) as exc:
+        src.build_sources(env.args)
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "snapshot_mismatch")
+    assert env.conn.closed is True
 
 
 def test_build_sources_without_config_refuses(env):

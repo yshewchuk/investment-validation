@@ -15,7 +15,7 @@ import pandas as pd
 from engine.v2.contracts import ArtifactRef
 from engine.v2.data.errors import DataError
 from engine.v2.data.repository import Repository
-from engine.v2.foundation import ArtifactStore, DocumentError, from_document
+from engine.v2.foundation import ArtifactStore, DocumentError, from_document, to_document
 from engine.v2.ops.errors import fail
 from engine.v2.ops.experiments import experiment_spec_from_document
 from experiments import size_pnl_driver, size_pnl_inputs, size_pnl_ladder, size_pnl_readers
@@ -136,6 +136,10 @@ def _snapshot(repository, snapshot_id):
         raise fail(_CONFLICT, "pinned snapshot cannot be resolved", details={"reason": "snapshot_missing"}) from None
 
 
+def _snapshot_mismatch():
+    return fail(_CONFLICT, "the configured snapshot is not the registration's pinned snapshot", details={"reason": "snapshot_mismatch"})
+
+
 def _table_missing(*_a, **_k):
     raise fail(_CONFLICT, "source tables arrive in slice 2", details={"reason": "source_table_missing"})
 
@@ -165,9 +169,14 @@ def build_sources(args):
     conn, store = _open(cfg)
     try:
         registration = read_native_registration(conn, store, spec)
+        pinned = registration.document.get("snapshot")
+        if not (isinstance(pinned, dict) and pinned.get("snapshot_id") == cfg["snapshot_id"]):
+            raise _snapshot_mismatch()
         repository = Repository(conn, store, pin_snapshots=True)
         _bound_snapshot(conn, cfg["snapshot_id"])
         snapshot = _snapshot(repository, cfg["snapshot_id"])
+        if to_document(snapshot) != pinned:
+            raise _snapshot_mismatch()
         plan = read_search_plan(conn, store, registration, request, ref)
         read = functools.partial(read_record, conn, store, registration.run_id)
         selection = read("selection")
