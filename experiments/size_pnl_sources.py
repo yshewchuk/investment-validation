@@ -128,13 +128,12 @@ def _bound_snapshot(conn, snapshot_id):
             "data_fragments f JOIN data_version_fragments vf ON vf.fragment_id = f.fragment_id "
             "JOIN data_snapshot_tables st ON st.dataset_version_id = vf.dataset_version_id WHERE st.snapshot_id = ?",
             params)
-        if "fragment_id" in _columns(conn, "data_objects"):
-            evidence += _row_bytes(
-                conn, "data_objects", "o",
-                "data_objects o JOIN data_fragments f ON f.fragment_id = o.fragment_id "
-                "JOIN data_version_fragments vf ON vf.fragment_id = f.fragment_id "
-                "JOIN data_snapshot_tables st ON st.dataset_version_id = vf.dataset_version_id WHERE st.snapshot_id = ?",
-                params)
+        evidence += _row_bytes(
+            conn, "data_objects", "o",
+            "data_objects o JOIN data_fragments f ON f.object_id = o.object_id "
+            "JOIN data_version_fragments vf ON vf.fragment_id = f.fragment_id "
+            "JOIN data_snapshot_tables st ON st.dataset_version_id = vf.dataset_version_id WHERE st.snapshot_id = ?",
+            params)
     except sqlite3.Error:
         raise fail("RESOURCE_UNAVAILABLE", "catalog unavailable", details={"reason": "catalog_unavailable"}) from None
     if tables > MAX_SNAPSHOT_TABLES or fragments > MAX_SNAPSHOT_FRAGMENTS or evidence > MAX_SNAPSHOT_EVIDENCE_BYTES:
