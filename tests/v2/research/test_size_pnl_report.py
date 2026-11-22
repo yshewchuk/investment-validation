@@ -247,6 +247,11 @@ def test_t7_real_summary_and_none_row():
     assert "| H1 | p1 | as_is | not_testable |" in out
 
 
+def test_t7_string_reason_renders_status():
+    out = t7_contrasts({("H1", "p9", "as_is"): "too_few_quarters_or_tickers"})
+    assert "| H1 | p9 | as_is | not_testable: too_few_quarters_or_tickers | - | - | - | - | - | - | - |" in out
+
+
 def test_t7_interval_strings_exact():
     s = {"n_events": 4, "mean": 0.5, "quarter_signs": {"2024Q1": 1},
          "year_signs": {2024: 1, 2025: -1}, "quarter_interval": (-0.5, 1.2),

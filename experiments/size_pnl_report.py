@@ -8,8 +8,8 @@ Input contract: the frames are the S5/S7 scored outputs concatenated by the S9 d
 `model_id`, `structure`/`rule`, `arm` and `taken` columns the producers do not carry themselves
 (`size_pnl_shortvol.score`, `size_pnl_straddle.score`/`decide`), plus `quarter`/`ticker` labels.
 
-Not wired to a production caller yet: the S9 driver (guides/size_decision_pnl_design.md section 9)
-builds these inputs, calls each `t*` function and writes `REPORT.md` via `build_report`.
+Not wired to a production caller: `size_pnl_assemble` (run.py --stage report) builds the inputs, calls each `t*`
+function and writes `REPORT.md` via `build_report` (guides/size_decision_pnl_design.md section 9).
 """
 
 import math
@@ -211,6 +211,9 @@ def t7_contrasts(contrasts):
         s = contrasts[key]
         if s is None:
             rows.append([hyp, pair_id, arm, "not_testable"] + [None] * 7)
+            continue
+        if isinstance(s, str):
+            rows.append([hyp, pair_id, arm, f"not_testable: {s}"] + [None] * 7)
             continue
         qc = s["quarter_counts"]
         total = sum(qc.values())

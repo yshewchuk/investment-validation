@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""EXP-188 runner: the S1 pre-registration gate, then the S9b driver (inner and outer stages, optional smoke ids) and the SY2 synthetic stage (optional X7 replay)."""
+"""EXP-188 runner: the S1 pre-registration gate, then the S9b driver (inner and outer stages, optional smoke ids), the SY2 synthetic stage (optional X7 replay), and the S9c report stage (`--stage report`: assembles REPORT.md from the outer receipts; read-only)."""
 from __future__ import annotations
 
 import argparse
@@ -26,7 +26,7 @@ _INVALID, _CONFLICT, _INPUT_LIMIT = "INVALID_EXPERIMENT_SPEC", "EXPERIMENT_IDENT
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--stage", required=True, choices=("inner", "outer", "synthetic"))
+    parser.add_argument("--stage", required=True, choices=("inner", "outer", "synthetic", "report"))
     parser.add_argument("--replay", action="store_true", help="synthetic stage only: re-score and compare (X7); other stages ignore it")
     parser.add_argument("--event-ids", default=None, help="optional smoke set: a JSON array of event id strings (validated by the driver)")
     parser.add_argument("--out-dir", required=True)
@@ -70,7 +70,7 @@ def main(argv: list[str] | None = None) -> int:
                 raise fail(_INVALID, "--expected must be a JSON object with plan_id, registration_id, seal_id, panel_id", details={"reason": "input_unreadable"})
             event_ids = _read_json(args.event_ids) if args.event_ids is not None else None
             if args.event_ids is not None and not (isinstance(event_ids, list) and all(isinstance(e, str) for e in event_ids)): raise fail(_INVALID, "--event-ids must be a JSON array of strings", details={"reason": "event_ids_invalid"})
-            from experiments import size_pnl_driver  # after the gates, so a missing PLANNED row refuses first
+            from experiments import size_pnl_assemble, size_pnl_driver  # after the gates, so a missing PLANNED row refuses first
             module_name, _, func = args.sources.partition(":")
             try:  # no colon gives func "", not an attribute; a bad module raises ImportError
                 factory = getattr(importlib.import_module(module_name), func)
@@ -82,7 +82,8 @@ def main(argv: list[str] | None = None) -> int:
             sources = size_pnl_driver.check_sources(made)
             if sources.expected != args.expected_identities:
                 raise fail(_CONFLICT, "--expected differs from the sources' expected identities", details={"reason": "expected_mismatch"})
-            if args.stage == "synthetic": summary = size_pnl_driver.run_synthetic(sources, args.out_dir, event_ids=event_ids, replay=args.replay, prereg=lambda: receipt)
+            if args.stage == "report": summary = size_pnl_assemble.assemble(args.out_dir, dict(zip(sources.plan_frame["event_id"].astype(str), sources.plan_frame["ticker"].astype(str))))
+            elif args.stage == "synthetic": summary = size_pnl_driver.run_synthetic(sources, args.out_dir, event_ids=event_ids, replay=args.replay, prereg=lambda: receipt)
             else: summary = size_pnl_driver.run(sources, args.stage, args.out_dir, event_ids=event_ids, prereg=lambda: receipt)
     except (OpsError, Refusal, DataError) as exc:
         details = exc.details if isinstance(exc, Refusal) else exc.problem.details
