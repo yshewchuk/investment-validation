@@ -14,10 +14,12 @@ from experiments import size_pnl_ladder as ladder
 from experiments import size_pnl_readers as readers
 from experiments import size_pnl_tables as tbl
 
-REPO = object()
 MAX = 1 << 20
 HASH = "tier4-manifest-9c2e41"  # literal manifest hash; deliberately unlike any other fake value
+CRUSH_HASH = "iv-crush-manifest-4b7d10"  # the crush snapshot's iv_crush_targets manifest; also unlike any other fake value
 SNAP = types.SimpleNamespace(table_versions={"tier4_forecasts": types.SimpleNamespace(manifest_hash=HASH)})
+CRUSH = types.SimpleNamespace(table_versions={"iv_crush_targets": types.SimpleNamespace(manifest_hash=CRUSH_HASH)})
+CRUSH_TABLES = ("earnings_events", "iv_crush_targets")
 D1, D2 = pd.Timestamp("2025-01-02"), pd.Timestamp("2025-02-03")
 DAY = pd.Timedelta(days=1)
 PROD = tuple(readers.PRODUCTION_COLUMNS)
@@ -52,22 +54,58 @@ def _frames(**over):
     return frames
 
 
+def _served(snapshot, table):
+    """Two-snapshot split: the crush snapshot serves only its own tables, and iv_crush_targets is never served by the main snapshot."""
+    if snapshot is CRUSH:
+        return table in CRUSH_TABLES
+    return table != "iv_crush_targets"
+
+
+def _crush_of(frames, **over):
+    """The crush snapshot's frames for a test: the same earnings_events and iv_crush_targets unless overridden."""
+    crush = {k: frames[k] for k in ("earnings_events", "iv_crush_targets") if k in frames}
+    crush.update(over)
+    return crush
+
+
+def _crush_keys(crush_frames):
+    frame = crush_frames.get("iv_crush_targets")
+    return [] if frame is None else [(t, d.date().isoformat()) for t, d in zip(frame["ticker"], frame["event_date"])]
+
+
+class _Repo:
+    """Fake repository: fragment_records lists one iv_crush_targets fragment per (ticker, date text) key."""
+    def __init__(self, keys=()):
+        self.keys = list(keys)
+
+    def fragment_records(self, snapshot, table_name):
+        assert table_name == "iv_crush_targets"
+        return [types.SimpleNamespace(partition_key=t, time_min=d) for t, d in self.keys]
+
+
+REPO = _Repo([("AAA", "2025-01-02"), ("BBB", "2025-02-03")])
+
+
 class _Read:
     """In-memory stand-in for read_table. Takes no partition_keys (passing one raises TypeError), applies ticker `in`
-    key_filters, then batch_filter, and records what the caller kept."""
-    def __init__(self, frames):
+    key_filters, then batch_filter, and records what the caller kept. The crush snapshot reads from `crush_frames`."""
+    def __init__(self, frames, crush_frames=None):
         self.frames = frames
+        self.crush_frames = frames if crush_frames is None else crush_frames
         self.kept = []
         self.calls = []
         self.labels = None
 
     def __call__(self, repository, snapshot, table, columns, *, key_filter=(), batch_filter=None, max_object_bytes=None):
-        self.calls.append({"table": table, "key_filter": key_filter, "max_object_bytes": max_object_bytes})
-        if table not in self.frames:
+        self.calls.append({"table": table, "key_filter": key_filter, "max_object_bytes": max_object_bytes, "crush": snapshot is CRUSH})
+        if not _served(snapshot, table):
             raise data_fail("CONTRACT_MISMATCH", "table is not part of this snapshot", details={"table_name": table})
-        if any(c not in self.frames[table].columns for c in columns):
+        source = self.crush_frames if snapshot is CRUSH else self.frames
+        if table not in source:
+            raise data_fail("CONTRACT_MISMATCH", "table is not part of this snapshot", details={"table_name": table})
+        if any(c not in source[table].columns for c in columns):
             raise data_fail("CONTRACT_MISMATCH", "a requested column is not in the table", details={"table_name": table})
-        frame = self.frames[table]
+        frame = source[table]
         for pred in key_filter:
             assert pred.operator == "in" and pred.column == "ticker"
             frame = frame[frame["ticker"].isin(pred.values).to_numpy()]
@@ -80,15 +118,20 @@ class _Read:
 
 class _Labels:
     """Stand-in for label_rows: returns only the requested events' rows of the table frame, and records each call."""
-    def __init__(self, frames):
+    def __init__(self, frames, crush_frames=None):
         self.frames = frames
+        self.crush_frames = frames if crush_frames is None else crush_frames
         self.calls = []
 
     def __call__(self, repository, snapshot, table, columns, want, *, max_object_bytes):
-        self.calls.append({"table": table, "events": list(want["event_id"]), "max_object_bytes": max_object_bytes})
-        if table not in self.frames:
+        self.calls.append({"table": table, "events": list(want["event_id"]), "max_object_bytes": max_object_bytes,
+                           "crush": snapshot is CRUSH})
+        if not _served(snapshot, table):
             raise data_fail("CONTRACT_MISMATCH", "table is not part of this snapshot", details={"table_name": table})
-        frame = self.frames[table]
+        source = self.crush_frames if snapshot is CRUSH else self.frames
+        if table not in source:
+            raise data_fail("CONTRACT_MISMATCH", "table is not part of this snapshot", details={"table_name": table})
+        frame = source[table]
         if any(c not in frame.columns for c in columns):
             raise data_fail("CONTRACT_MISMATCH", "a requested column is not in the table", details={"table_name": table})
         keys = set(zip(want["ticker"], want["event_date"]))
@@ -112,11 +155,14 @@ class _Cal:
         return day + DAY
 
 
-def _build(frames=None, *, cal=None, admitted=ADMITTED, snapshot=SNAP, expected_hash=HASH):
+def _build(frames=None, *, cal=None, admitted=ADMITTED, snapshot=SNAP, expected_hash=HASH, crush=CRUSH, crush_frames=None,
+           repository=None):
     frames = _frames() if frames is None else frames
-    read, labels = _Read(frames), _Labels(frames)
+    crush_frames = _crush_of(frames) if crush_frames is None else crush_frames
+    read, labels = _Read(frames, crush_frames), _Labels(frames, crush_frames)
     cal = _Cal() if cal is None else cal
-    ns = tbl.tables(REPO, snapshot, admitted, max_object_bytes=MAX, expected_hash=expected_hash, read=read,
+    repo = _Repo(_crush_keys(crush_frames)) if repository is None else repository
+    ns = tbl.tables(repo, snapshot, admitted, crush_snapshot=crush, max_object_bytes=MAX, expected_hash=expected_hash, read=read,
                     label_rows=labels, calendar=lambda repository, snap, *, max_object_bytes: cal)
     read.labels = labels
     return ns, read
@@ -138,7 +184,7 @@ def test_table_hash_is_forecast_manifest_hash():
 def test_hash_mismatch_refused_before_any_read():
     read = _Read(_frames())
     with pytest.raises(OpsError) as exc:
-        tbl.tables(REPO, SNAP, ADMITTED, max_object_bytes=MAX, expected_hash="OTHER", read=read,
+        tbl.tables(REPO, SNAP, ADMITTED, crush_snapshot=CRUSH, max_object_bytes=MAX, expected_hash="OTHER", read=read,
                    calendar=lambda r, s, *, max_object_bytes: _Cal())
     assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "production_hash_mismatch")
     assert read.calls == []
@@ -151,7 +197,7 @@ def test_calendar_receives_max_object_bytes():
         seen["max_object_bytes"] = max_object_bytes
         return _Cal()
 
-    tbl.tables(REPO, SNAP, ADMITTED, max_object_bytes=MAX, expected_hash=HASH, read=_Read(_frames()), calendar=calendar)
+    tbl.tables(REPO, SNAP, ADMITTED, crush_snapshot=CRUSH, max_object_bytes=MAX, expected_hash=HASH, read=_Read(_frames()), calendar=calendar)
     assert seen == {"max_object_bytes": MAX}
 
 
@@ -160,7 +206,7 @@ def test_calendar_contract_mismatch_refused_as_missing():
         raise data_fail("CONTRACT_MISMATCH", "calendar table is absent")
 
     with pytest.raises(OpsError) as exc:
-        tbl.tables(REPO, SNAP, ADMITTED, max_object_bytes=MAX, expected_hash=HASH, read=_Read(_frames()),
+        tbl.tables(REPO, SNAP, ADMITTED, crush_snapshot=CRUSH, max_object_bytes=MAX, expected_hash=HASH, read=_Read(_frames()),
                    label_rows=_Labels(_frames()), calendar=calendar)
     assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "source_table_missing")
 
@@ -169,7 +215,7 @@ def test_missing_forecast_table_refused_before_any_read():
     read = _Read(_frames())
     snap = types.SimpleNamespace(table_versions={})
     with pytest.raises(OpsError) as exc:
-        tbl.tables(REPO, snap, ADMITTED, max_object_bytes=MAX, expected_hash=HASH, read=read,
+        tbl.tables(REPO, snap, ADMITTED, crush_snapshot=CRUSH, max_object_bytes=MAX, expected_hash=HASH, read=read,
                    calendar=lambda r, s, *, max_object_bytes: _Cal())
     assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "source_table_missing")
     assert read.kept == [] and read.calls == []
@@ -323,7 +369,7 @@ def test_plan_refusal_from_label_rows_propagates_unchanged():
     def refuse(repository, snapshot, table, columns, want, *, max_object_bytes):
         raise data_fail("HOLDOUT_ACCESS_DENIED", "event is not isolated")
 
-    ns = tbl.tables(REPO, SNAP, ADMITTED, max_object_bytes=MAX, expected_hash=HASH, read=_Read(_frames()),
+    ns = tbl.tables(REPO, SNAP, ADMITTED, crush_snapshot=CRUSH, max_object_bytes=MAX, expected_hash=HASH, read=_Read(_frames()),
                     label_rows=refuse, calendar=lambda r, s, *, max_object_bytes: _Cal())
     with pytest.raises(DataError) as exc:
         ns.fetch(LABEL, ["e1"])
@@ -380,6 +426,9 @@ class _PlanRepo:
 
     def table_contract(self, snapshot, table):
         return ("contract", table)
+
+    def fragment_records(self, snapshot, table_name):
+        return []
 
     def scan(self, request, *, table_name, max_object_bytes):
         self.scans.append((request, table_name, max_object_bytes))
@@ -606,7 +655,7 @@ def test_label_fetch_planner_denial_propagates_unchanged(monkeypatch):
         raise refusal
 
     monkeypatch.setattr(tbl, "plan_event_targets", plan)
-    ns = tbl.tables(_PlanRepo(), SNAP, ADMITTED, max_object_bytes=MAX, expected_hash=HASH, read=_Read(_frames()),
+    ns = tbl.tables(_PlanRepo(), SNAP, ADMITTED, crush_snapshot=CRUSH, max_object_bytes=MAX, expected_hash=HASH, read=_Read(_frames()),
                     calendar=lambda r, s, *, max_object_bytes: _Cal())
     with pytest.raises(DataError) as exc:
         ns.fetch(LABEL, ["e1"])
@@ -627,3 +676,77 @@ def test_label_rows_prints_one_scan_line_per_2000_planned_events(monkeypatch, ca
     lines = [line for line in capsys.readouterr().err.splitlines() if line.startswith("[pnl_tables] scan ")]
     assert len(lines) == 1
     assert re.fullmatch(r"\[pnl_tables\] scan computed_moves 2000/2001 events, \d+\.\d+/s, ETA \d+s", lines[0])
+
+
+# --- two snapshots: iv_crush_targets comes only from the crush snapshot --------------
+
+def test_iv_crush_targets_read_only_from_crush_snapshot():
+    ns, read = _build()
+    out = ns.fetch(LABEL, ["e1", "e2"]).set_index("event_id")
+    assert out.loc["e1", "crush_pct_iv30"] == -10.0
+    assert [(c["table"], c["crush"]) for c in read.labels.calls] == [("computed_moves", False), ("iv_crush_targets", True)]
+    assert {c["table"] for c in read.calls if c["crush"]} == {"earnings_events"}
+
+
+def test_crush_table_hash_is_the_crush_manifest_hash():
+    ns, _ = _build()
+    assert ns.crush_table_hash == CRUSH_HASH
+    assert ns.table_hash == HASH
+
+
+def test_crush_snapshot_without_table_refused_before_any_read():
+    read = _Read(_frames())
+    with pytest.raises(OpsError) as exc:
+        tbl.tables(REPO, SNAP, ADMITTED, crush_snapshot=types.SimpleNamespace(table_versions={}), max_object_bytes=MAX,
+                   expected_hash=HASH, read=read, calendar=lambda r, s, *, max_object_bytes: _Cal())
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "crush_snapshot_invalid")
+    assert read.calls == []
+
+
+def test_all_usable_counts_zero_missing(capsys):
+    _build()
+    assert "[pnl_tables] crush_label_missing=0 of 2" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("crush_events", [
+    _events().assign(event_date=[D2, D2]),  # e1's crush row carries a different date
+    _events().iloc[[1]],                    # e1 is absent from the crush earnings_events
+], ids=["date_differs", "absent_from_crush_events"])
+def test_crush_event_mismatch_excludes_the_event(crush_events, capsys):
+    ns, _ = _build(crush_frames=_crush_of(_frames(), earnings_events=crush_events))
+    out = ns.fetch(LABEL, ["e1"]).set_index("event_id")
+    assert np.isnan(out.loc["e1", "crush_pct_iv30"]) and out.loc["e1", AVAILABLE] is None
+    assert out.loc["e1", "abs_move"] == 3.0
+    assert "[pnl_tables] crush_label_missing=1 of 2" in capsys.readouterr().err
+
+
+def test_event_without_iv_crush_fragment_is_excluded_not_imputed(capsys):
+    ns, _ = _build(repository=_Repo([("BBB", "2025-02-03")]))
+    out = ns.fetch(LABEL, ["e1"]).set_index("event_id")
+    assert np.isnan(out.loc["e1", "crush_pct_iv30"]) and out.loc["e1", AVAILABLE] is None
+    assert "[pnl_tables] crush_label_missing=1 of 2" in capsys.readouterr().err
+
+
+def test_excluded_crush_event_never_reads_main_snapshot_for_crush():
+    ns, read = _build(repository=_Repo([]))
+    out = ns.fetch(LABEL, ["e1", "e2"]).set_index("event_id")
+    assert out["crush_pct_iv30"].isna().all() and out[AVAILABLE].isna().all()
+    assert all(c["table"] != "iv_crush_targets" for c in read.labels.calls if not c["crush"])
+    assert [c for c in read.labels.calls if c["table"] == "iv_crush_targets"] == []
+
+
+# --- pricing pass-through ----------------------------------------------------------
+
+def test_trading_calendar_forwards_max_object_bytes(monkeypatch):
+    import engine.v2.research._scan as scan
+    from engine.v2.research._pricing import trading_calendar_from_snapshot
+
+    seen = {}
+
+    def fake_read_table(repository, snapshot_ref, table, columns, *, max_object_bytes=None, **kwargs):
+        seen.update(table=table, columns=list(columns), max_object_bytes=max_object_bytes)
+        return pd.DataFrame({"date": pd.to_datetime(["2025-01-02", "2025-01-03", "2025-01-06"])})
+
+    monkeypatch.setattr(scan, "read_table", fake_read_table)
+    trading_calendar_from_snapshot(REPO, SNAP, max_object_bytes=4096)
+    assert seen == {"table": "daily_market", "columns": ["date"], "max_object_bytes": 4096}

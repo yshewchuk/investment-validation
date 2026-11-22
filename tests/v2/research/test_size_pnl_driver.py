@@ -64,7 +64,7 @@ def sources(**over):
                 panel_id="P", admit=lambda ids: {"admitted": sorted(ids), "dropped": []},
                 admitted=ADMITTED, fetch=fetch, production_hash="H", production_table_hash="H",
                 plan_frame=PLAN_FRAME, load_index=lambda keys: None,
-                facts=lambda ids: FACTS.reindex(list(ids)), snapshot_id="snap-1")
+                facts=lambda ids: FACTS.reindex(list(ids)), snapshot_id="snap-1", crush_table_hash="CTH")
     base.update(over)
     return driver.Sources(**base)
 
@@ -200,6 +200,7 @@ def test_inner_receipts_bind_scope_none_and_the_snapshot(tmp_path, stubs, monkey
     tuned = tuning.load_receipt(tmp_path / "receipts" / f"tuning_{mid}.json")
     assert inputs["scope"] is None and inner["scope"] is None
     assert inputs["snapshot"] == "snap-1"
+    assert inputs["crush_table_hash"] == "CTH"
     production = next(m["model_id"] for m in inputs["roster"]["models"] if m["kind"] == "production")
     assert inputs["models"][production] == {"status": "ready"}
     # Literal content of each receipt (the tune stub's fields, and the bindings between receipts).
@@ -412,6 +413,19 @@ def test_label_printed_after_the_month_start_is_not_admitted_though_exit_plus_on
 
 def test_label_printed_before_the_month_start_is_admitted(tmp_path, stubs, monkeypatch):
     pools = _cutoff_pools(tmp_path, monkeypatch, "2024-07-25")  # the same label, printed before 2024-08-01
+    labelled = [ids for tabled, ids in pools if "E1" in tabled]
+    assert labelled and all(ids == {"E1"} for ids in labelled)
+
+
+def test_label_available_on_the_month_start_is_not_admitted(tmp_path, stubs, monkeypatch):
+    """The cutoff is strictly before the month start: a label available on 2024-08-01 itself is not in the pool."""
+    pools = _cutoff_pools(tmp_path, monkeypatch, "2024-08-01")
+    labelled = [ids for tabled, ids in pools if "E1" in tabled]
+    assert labelled and all(ids == set() for ids in labelled)
+
+
+def test_label_available_one_day_before_the_month_start_is_admitted(tmp_path, stubs, monkeypatch):
+    pools = _cutoff_pools(tmp_path, monkeypatch, "2024-07-31")
     labelled = [ids for tabled, ids in pools if "E1" in tabled]
     assert labelled and all(ids == {"E1"} for ids in labelled)
 

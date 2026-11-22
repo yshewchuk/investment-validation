@@ -31,7 +31,7 @@ _FACTS = ("pre_iv30", "mcap_usd", "implied_move")
 _MARKS = ["exit_value", "rung", "lots", "pnl_dollars"]
 # The inputs receipt binds only what is the same in both stages. Production and tables are excluded because their windows
 # differ by stage (the production binding hashes the windowed frame), so each stage's receipts bind them instead.
-_BOUND = ("spec_hash", "identity", "roster", "models", "snapshot", "labels")  # the pre-2025 labels read is identical in both
+_BOUND = ("spec_hash", "identity", "roster", "models", "snapshot", "crush_table_hash", "labels")  # the pre-2025 labels read is identical in both
 
 
 @dataclass(frozen=True)
@@ -53,12 +53,13 @@ class Sources:
     load_index: Callable
     facts: Callable
     snapshot_id: str
+    crush_table_hash: str = ""
 
 
 def check_sources(src):
     if not (isinstance(src, Sources) and isinstance(src.expected, dict) and {"plan_id", "registration_id", "seal_id", "panel_id"} <= set(src.expected) and isinstance(src.plan_frame, pd.DataFrame)
             and isinstance(src.plan, dict) and {"plan_id", "horizons"} <= set(src.plan) and isinstance(src.plan.get("anchor"), dict) and "run_id" in src.plan["anchor"]
-            and all(isinstance(getattr(src, f), dict) for f in ("selection", "pair_candidates", "blend_ids")) and isinstance(src.snapshot_id, str) and src.snapshot_id.strip() and all(callable(getattr(src, f)) for f in ("read", "admit", "fetch", "load_index", "facts"))):
+            and all(isinstance(getattr(src, f), dict) for f in ("selection", "pair_candidates", "blend_ids")) and isinstance(src.snapshot_id, str) and src.snapshot_id.strip() and isinstance(src.crush_table_hash, str) and all(callable(getattr(src, f)) for f in ("read", "admit", "fetch", "load_index", "facts"))):
         raise fail("INVALID_EXPERIMENT_SPEC", "sources must be a Sources with an object `expected`", details={"reason": "sources_invalid"})
     return src
 
@@ -450,7 +451,8 @@ def run(src, stage, out_dir, *, event_ids=None, prereg=size_pnl_prereg.require_p
             "models": _models_body(bound_tables["bound"], ready),
             "tables": {mid: _table_binding(e, ids) for mid, e in ready.items()},
             "production": production["binding"], "scope": scope, "plan": content_hash(_plan_rows(plan)),
-            "facts": content_hash(facts_rows), "labels": content_hash(_label_rows([labels])), "snapshot": src.snapshot_id}
+            "facts": content_hash(facts_rows), "labels": content_hash(_label_rows([labels])), "snapshot": src.snapshot_id,
+            "crush_table_hash": src.crush_table_hash}
     receipts = {}
     if stage == "outer":  # preflight: a refusal here leaves no outer input receipt, and no chunk is built
         if not ready: raise _no_ready()

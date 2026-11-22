@@ -120,7 +120,7 @@ def label_rows(repository, snapshot, table, columns, want, *, max_object_bytes):
     return rows
 
 
-def tables(repository, snapshot, admitted, *, max_object_bytes, expected_hash,
+def tables(repository, snapshot, admitted, *, crush_snapshot, max_object_bytes, expected_hash,
            read=read_table, calendar=trading_calendar_from_snapshot, label_rows=label_rows):
     if "tier4_forecasts" not in snapshot.table_versions:
         raise _missing("the forecast table is absent from the snapshot")
@@ -128,9 +128,13 @@ def tables(repository, snapshot, admitted, *, max_object_bytes, expected_hash,
     if table_hash != expected_hash:
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "the production table does not match the expected hash",
                    details={"reason": "production_hash_mismatch"})
+    if "iv_crush_targets" not in crush_snapshot.table_versions:
+        raise fail("EXPERIMENT_IDENTITY_CONFLICT", "the crush snapshot has no iv_crush_targets",
+                   details={"reason": "crush_snapshot_invalid"})
+    crush_table_hash = crush_snapshot.table_versions["iv_crush_targets"].manifest_hash
 
-    def _call(table, columns, batch_filter, *, key_filter=()):
-        return _guarded(table, read, repository, snapshot, table, list(columns), batch_filter=batch_filter,
+    def _call(table, columns, batch_filter, *, key_filter=(), snap=snapshot):
+        return _guarded(table, read, repository, snap, table, list(columns), batch_filter=batch_filter,
                         key_filter=key_filter, max_object_bytes=max_object_bytes)
 
     def _read(table, columns, keys, date_col="event_date"):
@@ -164,14 +168,25 @@ def tables(repository, snapshot, admitted, *, max_object_bytes, expected_hash,
         raise _missing("admitted events are absent from earnings_events")
     events = events[_EVENT_COLUMNS]
 
-    def _labels(table, value, want):
+    # Crush usability: the crush snapshot must carry the same event (id, ticker, date) and an iv_crush_targets fragment for its key.
+    # The main snapshot is never used for crush labels.
+    crush_raw = _call("earnings_events", ["event_id", "ticker", "event_date"],
+                      lambda batch: batch.loc[batch["event_id"].astype(str).isin(admitted_ids).to_numpy()], snap=crush_snapshot)
+    crush_events = _norm(crush_raw, "event_date").assign(event_id=lambda f: f["event_id"].astype(str))
+    crush_set = set(zip(crush_events["event_id"], crush_events["ticker"], crush_events["event_date"]))
+    have = {(r.partition_key, r.time_min) for r in repository.fragment_records(crush_snapshot, "iv_crush_targets")}
+    usable_crush = {eid for eid, ticker, day in zip(events["event_id"], events["ticker"], events["event_date"])
+                    if pd.notna(day) and (eid, ticker, day) in crush_set and (ticker, day.date().isoformat()) in have}
+    print(f"[pnl_tables] crush_label_missing={len(events) - len(usable_crush)} of {len(events)}", file=sys.stderr)
+
+    def _labels(table, value, want, snap):
         """`value` and the availability (column `available`, ISO text or None) for each requested event from one outcome table:
         exactly one row per event, NaN value where skipped. An event with no row refuses `source_table_missing`."""
         columns = [*_KEY, value, "skipped", AVAILABLE]
         if want.empty:
             rows = _norm(pd.DataFrame(columns=columns), "event_date")
         else:
-            fetched = _guarded(table, label_rows, repository, snapshot, table, columns, want, max_object_bytes=max_object_bytes)
+            fetched = _guarded(table, label_rows, repository, snap, table, columns, want, max_object_bytes=max_object_bytes)
             rows = _norm(pd.DataFrame(fetched, columns=columns), "event_date")
             if rows.duplicated(_KEY).any() or not _keys(rows) <= _keys(want):
                 raise _invalid(f"{table} must hold at most one row per requested event")
@@ -189,10 +204,11 @@ def tables(repository, snapshot, admitted, *, max_object_bytes, expected_hash,
         keys = _keys(want)
         if set(columns) == set(LABEL_FETCH):
             kind = "labels"
-            moves = _labels("computed_moves", "realized_move_pct", want)
+            moves = _labels("computed_moves", "realized_move_pct", want, snapshot)
             moves = (moves.assign(value=moves["value"].abs())
                      .rename(columns={"value": "abs_move", "available": "available_moves"}))
-            crush = (_labels("iv_crush_targets", "crush_pct_iv30", want)
+            # Requested events without a usable crush label get no crush row: the left merge leaves them NaN with no availability.
+            crush = (_labels("iv_crush_targets", "crush_pct_iv30", want[want["event_id"].isin(usable_crush)], crush_snapshot)
                      .rename(columns={"value": "crush_pct_iv30", "available": "available_crush"}))
             out = (want[["event_id", *_KEY]].merge(moves, on=_KEY, how="left")
                    .merge(crush, on=_KEY, how="left"))
@@ -252,4 +268,5 @@ def tables(repository, snapshot, admitted, *, max_object_bytes, expected_hash,
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "no admitted event has an AMC/BMO session with a calendar print window",
                    details={"reason": "plan_frame_empty"})
     plan_frame = pd.DataFrame(kept, columns=_PLAN_COLUMNS).sort_values("event_id", kind="mergesort").reset_index(drop=True)
-    return types.SimpleNamespace(fetch=fetch, facts=facts, plan_frame=plan_frame, table_hash=table_hash)
+    return types.SimpleNamespace(fetch=fetch, facts=facts, plan_frame=plan_frame, table_hash=table_hash,
+                                 crush_table_hash=crush_table_hash)

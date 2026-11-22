@@ -15,7 +15,7 @@ from pathlib import Path
 from engine.v2.contracts import ArtifactRef
 from engine.v2.data.errors import DataError
 from engine.v2.data.repository import Repository
-from engine.v2.foundation import ArtifactError, ArtifactStore, DocumentError, from_document, to_document
+from engine.v2.foundation import ArtifactError, ArtifactStore, DocumentError, content_hash, from_document, to_document
 from engine.v2.ops.errors import fail
 from engine.v2.ops.experiments import experiment_spec_from_document
 from experiments import size_pnl_driver, size_pnl_inputs, size_pnl_ladder, size_pnl_readers, size_pnl_tables
@@ -23,15 +23,16 @@ from experiments.magnitude_search_plan import PLAN_V2, PLAN_V3
 from experiments.magnitude_search_records import read_record
 from experiments.native_registration import read_native_registration
 
-_KEYS = ("catalog", "store_root", "spec", "plan_ref", "snapshot_id", "production_hash")
+_KEYS = ("catalog", "store_root", "spec", "plan_ref", "snapshot_id", "crush_snapshot_id", "production_hash")
 _LIMIT = 1 << 20
 MAX_OBJECT_BYTES = 1 << 28
 MAX_PLAN_BYTES = 64 * 1024 * 1024
 _PLAN_SCHEMAS = (PLAN_V2, PLAN_V3)
-# same caps as magnitude_search_plan._BOUNDS_CATALOG_LIMITS (the repo's bounded label-bounds admission)
+# Measured on the real v14 snapshot (11 tables): 256,680 fragments (computed_moves 249,177), about 120 MB of data_fragments rows
+# and 59 MB of data_objects rows. These caps leave about 4x headroom; scans still stop at cap + 1.
 MAX_SNAPSHOT_TABLES = 256
-MAX_SNAPSHOT_FRAGMENTS = 65_536
-MAX_SNAPSHOT_EVIDENCE_BYTES = 64 * 1024 * 1024
+MAX_SNAPSHOT_FRAGMENTS = 1_048_576
+MAX_SNAPSHOT_EVIDENCE_BYTES = 512 * 1024 * 1024
 # OCTET_LENGTH reads the length from the record header without loading the value (SQLite 3.43+). Measured on SQLite 3.46.1
 # with a 60 MiB TEXT value: octet_length 0.0001 s vs cast+length 0.03 s. The CAST(... AS BLOB) fallback only applies on SQLite older than 3.43.
 _FAST_OCTETS = sqlite3.sqlite_version_info >= (3, 43, 0)
@@ -105,8 +106,10 @@ def load_plan(store, registration, ref):
         raise fail(_CONFLICT, "the sealed plan is too large", details={"reason": "plan_too_large"})
     try:
         data = store.read_verified(ref)
-    except ArtifactError:
-        raise fail(_CONFLICT, "the sealed plan failed content verification", details={"reason": "plan_hash_mismatch"}) from None
+    except ArtifactError as exc:
+        if exc.code == "INTEGRITY_FAILED":
+            raise fail(_CONFLICT, "the sealed plan failed content verification", details={"reason": "plan_hash_mismatch"}) from None
+        raise fail("RESOURCE_UNAVAILABLE", "the sealed plan could not be read", details={"reason": "plan_unreadable"}) from None
     try:
         plan = json.loads(data)
     except (ValueError, RecursionError, UnicodeDecodeError):
@@ -116,6 +119,16 @@ def load_plan(store, registration, ref):
     anchor = plan.get("anchor")
     if not (isinstance(anchor, dict) and anchor.get("run_id") == registration.run_id):
         raise fail(_CONFLICT, "the sealed plan is anchored to another run", details={"reason": "plan_anchor_mismatch"})
+    if anchor.get("variant_id") != registration.variant_id:
+        raise fail(_CONFLICT, "the sealed plan is anchored to another variant", details={"reason": "plan_anchor_mismatch"})
+    implementation = plan.get("implementation")
+    expected_implementation = {"source_closure": registration.document.get("source_closure"),
+                               "environment": registration.document.get("environment")}
+    if not (isinstance(implementation, dict) and implementation == expected_implementation):
+        raise fail(_CONFLICT, "the sealed plan implementation is not the registration's", details={"reason": "plan_registration_mismatch"})
+    plan_id = plan.get("plan_id")
+    if not (isinstance(plan_id, str) and plan_id == content_hash({k: v for k, v in plan.items() if k != "plan_id"})):
+        raise fail(_CONFLICT, "the sealed plan body does not match its plan_id", details={"reason": "plan_id_mismatch"})
     return plan
 
 
@@ -223,13 +236,14 @@ def _snapshot_mismatch():
     return fail(_CONFLICT, "the configured snapshot is not the registration's pinned snapshot", details={"reason": "snapshot_mismatch"})
 
 
-def assemble(*, plan, read, selection, expected, panel_id, admit, admitted, snapshot_id, load_index, tables, production_hash):
+def assemble(*, plan, read, selection, expected, panel_id, admit, admitted, snapshot_id, load_index, tables, production_hash,
+             crush_table_hash):
     pair_candidates, blend_ids = derive_roster_inputs(plan)
     return size_pnl_driver.Sources(
         plan=plan, read=read, selection=selection, pair_candidates=pair_candidates, blend_ids=blend_ids,
         expected=expected, panel_id=panel_id, admit=admit, admitted=admitted, fetch=tables.fetch,
         production_hash=production_hash, production_table_hash=tables.table_hash, plan_frame=tables.plan_frame,
-        load_index=load_index, facts=tables.facts, snapshot_id=snapshot_id)
+        load_index=load_index, facts=tables.facts, snapshot_id=snapshot_id, crush_table_hash=crush_table_hash)
 
 
 def build_sources(args):
@@ -255,6 +269,8 @@ def build_sources(args):
         snapshot = _snapshot(repository, cfg["snapshot_id"])
         if to_document(snapshot) != pinned:
             raise _snapshot_mismatch()
+        _bound_snapshot(conn, cfg["crush_snapshot_id"])
+        crush_snapshot = _snapshot(repository, cfg["crush_snapshot_id"])
         plan = load_plan(store, registration, ref)
         panel_id = derive_panel_id(plan)
         read = functools.partial(read_record, conn, store, registration.run_id)
@@ -264,17 +280,19 @@ def build_sources(args):
         month = registration.document["holdouts"]["holdout_as_of_month"]
         admit = size_pnl_inputs.population_admit(repository, snapshot, month, max_object_bytes=MAX_OBJECT_BYTES)
         admitted = size_pnl_readers.admit_events(repository, snapshot, month, max_object_bytes=MAX_OBJECT_BYTES)
-        tables = size_pnl_tables.tables(repository, snapshot, admitted, max_object_bytes=MAX_OBJECT_BYTES,
-                                        expected_hash=cfg["production_hash"])
+        tables = size_pnl_tables.tables(repository, snapshot, admitted, crush_snapshot=crush_snapshot,
+                                        max_object_bytes=MAX_OBJECT_BYTES, expected_hash=cfg["production_hash"])
         load_index = size_pnl_ladder.default_load_index(repository, snapshot)
         sources = assemble(plan=plan, read=read, selection=selection, expected=expected, panel_id=panel_id,
                            admit=admit, admitted=admitted, snapshot_id=cfg["snapshot_id"], load_index=load_index,
-                           tables=tables, production_hash=cfg["production_hash"])
+                           tables=tables, production_hash=cfg["production_hash"],
+                           crush_table_hash=tables.crush_table_hash)
     except sqlite3.Error:
         conn.close()
         raise fail("RESOURCE_UNAVAILABLE", "catalog unavailable", details={"reason": "catalog_unavailable"}) from None
     except BaseException:
         conn.close()
         raise
-    print(f"[pnl_sources] opened snapshot={cfg['snapshot_id']} admitted={len(admitted['events'])}", file=sys.stderr)
+    print(f"[pnl_sources] opened snapshot={cfg['snapshot_id']} crush_snapshot={cfg['crush_snapshot_id']} admitted={len(admitted['events'])}",
+          file=sys.stderr)
     return sources

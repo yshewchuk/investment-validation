@@ -176,6 +176,17 @@ def test_changed_pre_2025_label_between_stages_refuses_inner_inputs(tmp_path, ou
     assert not (tmp_path / "receipts" / "inputs_outer.json").exists()
 
 
+def test_changed_crush_table_between_stages_refuses_inner_inputs(tmp_path, outer_stubs, monkeypatch):
+    use_chunks(monkeypatch, [("2024Q3", chunk("E2"))])
+    driver.run(sources(), "inner", tmp_path, prereg=OK)
+    use_chunks(monkeypatch, [("2024Q3", chunk("E2")), ("2025Q1", chunk("E3", "E4"))])
+    with pytest.raises(Refusal) as caught:
+        driver.run(sources(crush_table_hash="OTHER-CRUSH"), "outer", tmp_path, prereg=OK)
+    assert caught.value.code == CONFLICT
+    assert caught.value.details["reason"] == "inner_inputs_mismatch"
+    assert not (tmp_path / "receipts" / "inputs_outer.json").exists()
+
+
 def test_changed_inner_window_prediction_between_stages_refuses_inner_tables(tmp_path, outer_stubs, monkeypatch):
     """Labels are unchanged, but one inner-window production value moved: the re-bound inner tables and production differ."""
     use_chunks(monkeypatch, [("2024Q3", chunk("E2"))])
