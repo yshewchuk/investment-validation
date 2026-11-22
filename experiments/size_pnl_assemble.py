@@ -15,6 +15,7 @@ import pandas as pd
 import pyarrow.parquet as pq
 
 from experiments import size_pnl_decisions as decisions, size_pnl_tuning as tuning, size_pnl_report as report, size_pnl_contrast as contrast
+from experiments import size_pnl_synthetic_eval as synthetic_eval
 from experiments.size_pnl_inputs import PAIRS
 from experiments.size_pnl_shortvol import Refusal
 from experiments.size_pnl_straddle import RULES
@@ -120,11 +121,12 @@ def _shares(frame):
     return shares
 
 
-def _run_section(outer):
+def _run_section(outer, undetermined_excluded):
     scope = "full" if outer["scope"] is None else f"SMOKE scope {outer['scope']}, not a full-population result"
     items = [("content_hash", outer["content_hash"]), ("decisions_sha256", outer["decisions_sha256"]), ("rows", outer["rows"]),
              ("scope", scope), ("common_dropped", outer["common_dropped"]),
-             ("scoreability_dropped", outer["scoreability_dropped"]), ("ladder_skipped", outer["ladder_skipped"])]
+             ("scoreability_dropped", outer["scoreability_dropped"]), ("ladder_skipped", outer["ladder_skipped"]),
+             ("undetermined_events_excluded", undetermined_excluded)]
     return "### Run\n\n" + "\n".join(f"- {key}: {value}" for key, value in items)
 
 
@@ -211,7 +213,11 @@ def _tickers_ok(tickers):
 
 def _sections(out, outer, inputs, inner, tuned, tickers):
     """The report's sections in order. Reads receipt fields throughout; the caller maps a missing or mistyped field to a refusal."""
-    frame = _load_decisions(out, outer)
+    raw = _load_decisions(out, outer)
+    frame = synthetic_eval.population(raw)  # E: the events with no undetermined row under any model, book or rule
+    if frame.empty:
+        raise _refuse("report_decisions_empty", "no event in decisions.parquet is determined under every model")
+    undetermined_events = raw["event_id"].nunique() - frame["event_id"].nunique()
     tick = {str(e): str(t) for e, t in tickers.items()}
     if not set(frame["event_id"]) <= set(tick):
         raise _refuse("report_ticker_missing", "an event in decisions.parquet has no ticker")
@@ -236,14 +242,15 @@ def _sections(out, outer, inputs, inner, tuned, tickers):
     shown, classify_in = _contrasts(frame, events, roster, role_model, label_of, outer_models, quarter_of, tick)
     short = frame[frame["book"] == "short_vol"].rename(columns={"arm_or_rule": "arm"})
     long_rows = frame[frame["book"] == "straddle"].rename(columns={"arm_or_rule": "rule"})
-    note = (f"per-quarter candidates and dropped counts are not recorded in decisions.parquet (not_testable); run totals from the receipt: "
+    note = (f"events undetermined under some model are excluded from E: {undetermined_events}. "
+            f"per-quarter candidates and dropped counts are not recorded in decisions.parquet (not_testable); run totals from the receipt: "
             f"common_dropped={outer['common_dropped']}, scoreability_dropped={outer['scoreability_dropped']}.")
     verdicts = report.t10_verdicts(classify_in)
     if missing_years:
         verdicts += "\n\n" + (f"not_testable because the required full year(s) {missing_years} are absent from the outer decisions; "
                               "the inner window publishes no decisions, so this verdict needs inner evidence (design question, see PR).")
     return [
-        _run_section(outer),
+        _run_section(outer, undetermined_events),
         report.t1_roster(_roster_rows(roster, outer_models, inputs, inner, label_of)),
         report.t2_in_e(frame[["event_id", "quarter"]].drop_duplicates(), note),
         _not_testable("T3 Forecast calibration", "labels_not_in_decisions"),

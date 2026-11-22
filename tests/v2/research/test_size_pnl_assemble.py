@@ -394,3 +394,45 @@ def test_decisions_bytes_consumed_are_the_bytes_hashed(tmp_path, monkeypatch):
     assert swapped == [True]
     text = (out / "REPORT.md").read_text(encoding="utf-8")
     assert "| H1 | H | as_is | ok | 4 | 1 |" in text
+
+
+def _e01_undetermined_for_m_hsq(rows):
+    """E01 is undetermined for m-hsq's short-vol rows; every other model takes E01 at 1000 on the same rows."""
+    out = []
+    for row in rows:
+        if row["event_id"] == "E01" and row["book"] == "short_vol":
+            if row["model_id"] == "m-hsq":
+                out.append({**row, "status": "undetermined", "pnl_dollars": float("nan")})
+            else:
+                out.append({**row, "pnl_dollars": 1000.0})
+        else:
+            out.append(row)
+    return out
+
+
+def test_event_undetermined_under_one_model_is_excluded_from_e(tmp_path):
+    clean_dir = tmp_path / "clean"
+    clean_dir.mkdir()
+    # The clean comparison is the fixture without E01 at all, so its pnl values for the other events are identical.
+    clean = build(clean_dir, rows_fn=lambda rows: [row for row in rows if row["event_id"] != "E01"])
+    assemble_mod.assemble(clean, TICKERS, plan_binding=PLAN)
+    clean_text = (clean / "REPORT.md").read_text(encoding="utf-8")
+    dirty_dir = tmp_path / "dirty"
+    dirty_dir.mkdir()
+    out = build(dirty_dir, rows_fn=_e01_undetermined_for_m_hsq)
+    assemble_mod.assemble(out, TICKERS, plan_binding=PLAN)
+    text = (out / "REPORT.md").read_text(encoding="utf-8")
+    assert "| H1 | H | as_is | ok | 3 | 1 |" in text  # n is one smaller than the four-event fixture's 4
+    assert "| H1 | H | as_is | ok | 4 | 1 |" not in text
+    assert _section_lines(text, "### T7") == _section_lines(clean_text, "### T7")  # same mean and statistics as without E01
+    assert "undetermined_events_excluded: 1" in text
+    assert "events undetermined under some model are excluded from E: 1" in text
+
+
+def test_all_undetermined_decisions_refuse_as_empty(tmp_path):
+    out = build(tmp_path, rows_fn=lambda rows: [{**row, "status": "undetermined", "pnl_dollars": float("nan")} for row in rows])
+    with pytest.raises(Refusal) as caught:
+        assemble_mod.assemble(out, TICKERS, plan_binding=PLAN)
+    assert caught.value.code == CONFLICT
+    assert caught.value.details["reason"] == "report_decisions_empty"
+    assert not (out / "REPORT.md").exists()

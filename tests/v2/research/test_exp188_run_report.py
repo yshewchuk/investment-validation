@@ -31,6 +31,19 @@ def test_run_py_report_stage_refuses_event_ids_and_malformed_plans(tmp_path, mon
     ids.write_text('["E1"]', encoding="utf-8")
     assert run_py.main(_argv_for(tmp_path, "report", "--event-ids", str(ids))) == 2
     assert json.loads(capsys.readouterr().out)["reason"] == "event_ids_not_supported"
-    _install_sources(monkeypatch, sources(plan_frame=pd.concat([PLAN_FRAME, PLAN_FRAME.iloc[:1]])))  # a duplicated event id
-    assert run_py.main(_argv_for(tmp_path, "report")) == 2
-    assert json.loads(capsys.readouterr().out)["reason"] == "plan_malformed"
+    calls = []
+    monkeypatch.setattr(size_pnl_assemble, "assemble", lambda *args, **kwargs: calls.append(args) or {"report": "r", "sections": 0, "rows": 0})
+    # The real check_plan runs on the report path (the admission fixture is the one the scoring path accepts).
+    malformed = {
+        "missing_ticker_column": (PLAN_FRAME.drop(columns=["ticker"]), "plan_malformed"),
+        "invalid_event_date": (PLAN_FRAME.assign(event_date="not a date"), "plan_malformed"),
+        "numeric_ticker": (PLAN_FRAME.assign(ticker=1), "plan_malformed"),
+        "duplicate_event_id": (pd.concat([PLAN_FRAME, PLAN_FRAME.iloc[:1]]), "duplicate_event_id"),
+    }
+    for name, (plan, reason) in malformed.items():
+        _install_sources(monkeypatch, sources(plan_frame=plan))
+        assert run_py.main(_argv_for(tmp_path, "report")) == 2, name
+        printed = json.loads(capsys.readouterr().out)
+        assert printed["refused"] == "EXPERIMENT_IDENTITY_CONFLICT", name
+        assert printed["reason"] == reason, name
+    assert calls == []  # no refused plan reaches assemble
