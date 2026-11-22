@@ -205,12 +205,12 @@ def tables(repository, snapshot, admitted, *, crush_snapshot, max_object_bytes, 
     flagged = crush_events["date_conflict"].map(_flag).astype(bool).to_numpy() | crush_events.duplicated(_KEY, keep=False).to_numpy()
     clean = crush_events.loc[~flagged]
     crush_set = set(zip(clean["event_id"], clean["ticker"], clean["event_date"], clean["session"]))
-    have = {(r.partition_key, r.time_min) for r in repository.fragment_records(crush_snapshot, "iv_crush_targets")}
+    have = {(r.partition_key, r.time_min) for r in _guarded("iv_crush_targets", repository.fragment_records, crush_snapshot, "iv_crush_targets")}
     usable_crush = {eid for eid, ticker, day, session in zip(events["event_id"], events["ticker"], events["event_date"], events["session"])
                     if pd.notna(day) and (eid, ticker, day, _session(session)) in crush_set and (ticker, day.date().isoformat()) in have}
     print(f"[pnl_tables] crush_label_missing={len(events) - len(usable_crush)} of {len(events)}", file=sys.stderr)
     # Move usability: the main snapshot's computed_moves fragment must hold the event's key; the planner never sees the others.
-    have_moves = {(r.partition_key, r.time_min) for r in repository.fragment_records(snapshot, "computed_moves")}
+    have_moves = {(r.partition_key, r.time_min) for r in _guarded("computed_moves", repository.fragment_records, snapshot, "computed_moves")}
     usable_moves = {eid for eid, ticker, day in zip(events["event_id"], events["ticker"], events["event_date"])
                     if pd.notna(day) and (ticker, day.date().isoformat()) in have_moves}
 

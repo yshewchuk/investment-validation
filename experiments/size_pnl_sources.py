@@ -238,9 +238,16 @@ def _snapshot_mismatch():
     return fail(_CONFLICT, "the configured snapshot is not the registration's pinned snapshot", details={"reason": "snapshot_mismatch"})
 
 
+def _derived(derive, plan):
+    try:
+        return derive(plan)
+    except (KeyError, TypeError, AttributeError, ValueError):
+        raise fail(_CONFLICT, "the sealed plan has malformed candidates or selection", details={"reason": "plan_malformed"}) from None
+
+
 def assemble(*, plan, read, selection, expected, panel_id, admit, admitted, snapshot_id, load_index, tables, production_hash,
              crush_table_hash):
-    pair_candidates, blend_ids = derive_roster_inputs(plan)
+    pair_candidates, blend_ids = _derived(derive_roster_inputs, plan)
     return size_pnl_driver.Sources(
         plan=plan, read=read, selection=selection, pair_candidates=pair_candidates, blend_ids=blend_ids,
         expected=expected, panel_id=panel_id, admit=admit, admitted=admitted, fetch=tables.fetch,
@@ -274,7 +281,7 @@ def build_sources(args):
         _bound_snapshot(conn, cfg["crush_snapshot_id"])
         crush_snapshot = _snapshot(repository, cfg["crush_snapshot_id"])
         plan = load_plan(store, registration, ref)
-        panel_id = derive_panel_id(plan)
+        panel_id = _derived(derive_panel_id, plan)
         read = functools.partial(read_record, conn, store, registration.run_id)
         selection = read("selection")
         if not (isinstance(selection, dict) and isinstance(selection.get("selections"), list)):

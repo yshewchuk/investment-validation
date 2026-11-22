@@ -1,4 +1,5 @@
 """EXP-188 real-store Sources adapter, slice 2: synthetic in-memory frames only (no store, no network)."""
+import datetime as dt
 import re
 import types
 
@@ -430,6 +431,25 @@ def test_contract_mismatch_from_label_read_maps_to_source_table_missing():
     assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "source_table_missing")
 
 
+class _UnlistedRepo(_Repo):
+    """Fake repository whose fragment listing for one table raises CONTRACT_MISMATCH, as a snapshot without that table does."""
+    def __init__(self, table):
+        super().__init__()
+        self.table = table
+
+    def fragment_records(self, snapshot, table_name):
+        if table_name == self.table:
+            raise data_fail("CONTRACT_MISMATCH", "table is not part of this snapshot", details={"table_name": table_name})
+        return super().fragment_records(snapshot, table_name)
+
+
+@pytest.mark.parametrize("table", ["computed_moves", "iv_crush_targets"])
+def test_fragment_listing_contract_mismatch_refused_as_source_table_missing(table):
+    with pytest.raises(OpsError) as exc:
+        _build(repository=_UnlistedRepo(table))
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "source_table_missing")
+
+
 class _Batch:
     def __init__(self, rows):
         self._rows = rows
@@ -647,7 +667,13 @@ def test_plan_frame_refuses_when_no_event_survives():
 
 def test_plan_frame_passes_check_plan():
     ns, _ = _build()
-    ladder.check_plan(ADMITTED, ns.plan_frame)
+    plan = ns.plan_frame
+    assert list(plan.columns) == ["event_id", "ticker", "event_date", "session", "entry_date", "exit_date"]
+    assert plan.to_dict("records") == [
+        {"event_id": "e1", "ticker": "AAA", "event_date": D1, "session": "AMC", "entry_date": D1 - DAY, "exit_date": D1 + DAY},
+        {"event_id": "e2", "ticker": "BBB", "event_date": D2, "session": "BMO", "entry_date": D2 - DAY, "exit_date": D2 + DAY},
+    ]
+    assert ladder.check_plan(ADMITTED, plan) is None
 
 
 class _SessionCal:
@@ -666,6 +692,16 @@ def test_plan_frame_windows_are_session_specific_for_amc_and_bmo():
     assert plan.loc["e1", "entry_date"] == pd.Timestamp("2025-01-02") and plan.loc["e1", "exit_date"] == pd.Timestamp("2025-01-03")
     assert plan.loc["e2", "session"] == "BMO"
     assert plan.loc["e2", "entry_date"] == pd.Timestamp("2025-02-02") and plan.loc["e2", "exit_date"] == pd.Timestamp("2025-02-03")
+
+
+# --- availability conversion -------------------------------------------------
+
+def test_iso_day_converts_dates_keeps_text_and_null_and_passes_other_types_through():
+    assert tbl._iso_day(dt.date(2025, 1, 3)) == "2025-01-03"
+    assert tbl._iso_day(pd.Timestamp("2025-01-03 15:30")) == "2025-01-03"
+    assert tbl._iso_day("2025-01-03") == "2025-01-03"
+    assert tbl._iso_day(None) is None and tbl._iso_day(pd.NaT) is None and tbl._iso_day(np.nan) is None
+    assert tbl._iso_day(3) == 3
 
 
 # --- read errors -------------------------------------------------------------

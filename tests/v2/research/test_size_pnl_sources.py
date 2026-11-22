@@ -1118,6 +1118,29 @@ def test_load_plan_bad_shape_refused_before_roster_derivation(env, monkeypatch, 
     assert env.conn.closed is True
 
 
+def test_build_sources_candidate_not_a_dict_refuses_plan_malformed_and_closes(env, monkeypatch):
+    _no_rederivation(monkeypatch)
+    plan = _plan()
+    plan["candidates"].append("not-a-dict")
+    _store_plan(env, _seal(plan))
+    with pytest.raises(OpsError) as exc:
+        src.build_sources(env.args)
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "plan_malformed")
+    assert env.conn.closed is True
+
+
+@pytest.mark.parametrize("extra", [5, [{"bad": 1}]], ids=["not_iterable", "unhashable_entry"])
+def test_build_sources_extra_refits_bad_shape_refuses_plan_malformed_and_closes(env, monkeypatch, extra):
+    _no_rederivation(monkeypatch)
+    plan = _plan()
+    plan["selection"] = {"extra_refits": extra}
+    _store_plan(env, _seal(plan))
+    with pytest.raises(OpsError) as exc:
+        src.build_sources(env.args)
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "plan_malformed")
+    assert env.conn.closed is True
+
+
 def test_load_plan_registration_without_closure_refuses_typed(env, monkeypatch):
     _no_rederivation(monkeypatch)
     monkeypatch.setattr(src, "read_native_registration", lambda conn, store, spec: types.SimpleNamespace(
