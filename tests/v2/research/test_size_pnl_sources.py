@@ -1,4 +1,5 @@
 """EXP-188 real-store Sources adapter, slice 1: synthetic fixtures only (no store, no network, no sqlite file outside tmp_path)."""
+import dataclasses
 import json
 import os
 import sqlite3
@@ -9,18 +10,26 @@ import pytest
 
 from engine.v2.data.errors import DataError
 from engine.v2.data.errors import fail as data_fail
-from engine.v2.foundation import content_hash
+from engine.v2.foundation import ArtifactError, content_hash
+from engine.v2.foundation.artifacts import artifact_reference
+from engine.v2.foundation.canonical import canonical_json
 from engine.v2.ops.errors import OpsError
+from experiments import magnitude_search_plan as plan_mod
 from experiments import size_pnl_driver as driver
 from experiments import size_pnl_inputs as inputs
 from experiments import size_pnl_ladder as ladder
 from experiments import size_pnl_readers as readers
 from experiments import size_pnl_sources as src
+from experiments import size_search_binding as binding_mod
+from experiments.magnitude_search_plan import PLAN_V2, PLAN_V3
 
-EXPECTED = {"plan_id": "p1", "registration_id": "r1", "seal_id": "s1", "panel_id": "P"}
 SELECTION = {"selections": []}
 PINNED = {"snapshot_id": "snap-1"}
 SOURCE_BINDING = "bind-src-1"
+VARIANT_ID = "v1"
+SOURCE_CLOSURE = {"closure": "sc-1"}
+ENVIRONMENT = {"python": "3.12"}
+REAL_SNAPSHOT = src._snapshot  # the unpatched resolver, for tests that drive it through a fake repository
 
 
 def _refusal(exc):
@@ -34,8 +43,8 @@ def _write(path, doc):
 
 def _cfg(tmp_path):
     return {"catalog": str(tmp_path / "catalog.sqlite"), "store_root": str(tmp_path), "spec": str(tmp_path / "spec.json"),
-            "request": str(tmp_path / "request.json"), "plan_ref": str(tmp_path / "plan_ref.json"),
-            "snapshot_id": "snap-1", "production_hash": "h"}
+            "plan_ref": str(tmp_path / "plan_ref.json"), "snapshot_id": "snap-1", "crush_snapshot_id": "snap-crush",
+            "production_hash": "h"}
 
 
 def _hgb(loss):
@@ -63,11 +72,22 @@ PAIR_CANDIDATES = [
 FULL_PAIR_MAP = {"H-sq": "c-hsq", "H-abs": "c-habs", "E-raw": "c-eraw", "E-log": "c-elog", "N-raw": "c-nraw", "N-log": "c-nlog"}
 
 
+def _seal(plan):
+    """Give a plan the plan_id that its body hashes to (every other key included)."""
+    plan["plan_id"] = content_hash({k: v for k, v in plan.items() if k != "plan_id"})
+    return plan
+
+
 def _plan(candidates=PAIR_CANDIDATES, blends=(), extra=None):
     ids = [c["candidate_id"] for c in candidates]
     stamped = [{"source_binding_id": SOURCE_BINDING, **c} for c in candidates]
-    return {"plan_id": "p1", "anchor": {"run_id": "r1"}, "horizons": [5, 3, 1], "candidates": stamped,
-            "blends": list(blends), "selection": {"extra_refits": ids if extra is None else extra}}
+    return _seal({"schema_version": PLAN_V3, "plan_id": "", "anchor": {"run_id": "r1", "variant_id": VARIANT_ID},
+                  "implementation": {"source_closure": SOURCE_CLOSURE, "environment": ENVIRONMENT},
+                  "horizons": [5, 3, 1], "candidates": stamped,
+                  "blends": list(blends), "selection": {"extra_refits": ids if extra is None else extra}})
+
+
+EXPECTED = {"plan_id": _plan()["plan_id"], "registration_id": "r1", "seal_id": "s1", "panel_id": "P"}
 
 
 # --- (1) _config -------------------------------------------------------------
@@ -83,18 +103,27 @@ def test_config_refuses_missing_argument():
     assert _refusal(exc) == ("INVALID_EXPERIMENT_SPEC", "sources_config_invalid")
 
 
-@pytest.mark.parametrize("case", ["unknown_key", "missing_key", "blank_value", "non_str_value", "not_dict"])
+@pytest.mark.parametrize("case", ["unknown_key", "missing_key", "missing_crush_snapshot", "blank_value", "non_str_value", "not_dict"])
 def test_config_refuses_bad_documents(tmp_path, case):
     cfg = _cfg(tmp_path)
     doc = {
         "unknown_key": {**cfg, "extra": "x"},
         "missing_key": {k: v for k, v in cfg.items() if k != "spec"},
+        "missing_crush_snapshot": {k: v for k, v in cfg.items() if k != "crush_snapshot_id"},
         "blank_value": {**cfg, "spec": "   "},
         "non_str_value": {**cfg, "snapshot_id": 3},
         "not_dict": [cfg],
     }[case]
     with pytest.raises(OpsError) as exc:
         src._config(_write(tmp_path / "c.json", doc))
+    assert _refusal(exc) == ("INVALID_EXPERIMENT_SPEC", "sources_config_invalid")
+
+
+def test_config_refuses_retired_request_key(tmp_path):
+    # The plan is consumed from the store; a config that still carries `request` is an unknown key.
+    cfg = {**_cfg(tmp_path), "request": str(tmp_path / "request.json")}
+    with pytest.raises(OpsError) as exc:
+        src._config(_write(tmp_path / "c.json", cfg))
     assert _refusal(exc) == ("INVALID_EXPERIMENT_SPEC", "sources_config_invalid")
 
 
@@ -286,6 +315,12 @@ def test_snapshot_key_error_propagates():
 
 
 # --- (4b) _bound_snapshot ----------------------------------------------------
+
+def test_snapshot_caps_have_their_measured_values():
+    assert src.MAX_SNAPSHOT_TABLES == 256
+    assert src.MAX_SNAPSHOT_FRAGMENTS == 1_048_576
+    assert src.MAX_SNAPSHOT_EVIDENCE_BYTES == 512 * 1024 * 1024
+
 
 def _catalog(tmp_path):
     conn = sqlite3.connect(str(tmp_path / "meta.sqlite"))
@@ -702,30 +737,25 @@ def test_bound_snapshot_table_under_cap_scanned_fully(tmp_path, monkeypatch):
 
 # --- (5) assemble ------------------------------------------------------------
 
+def _fake_tables(table_hash="TH", crush_table_hash="CTH"):
+    return types.SimpleNamespace(fetch=lambda columns, ids: None, facts=lambda ids: None,
+                                 plan_frame=pd.DataFrame({"event_id": ["e1"]}), table_hash=table_hash,
+                                 crush_table_hash=crush_table_hash, exclusions={})
+
+
 def test_assemble_returns_sources_accepted_by_check_sources():
     admitted = readers.Admitted({"events": pd.DataFrame({"event_id": ["e1"], "event_date": pd.to_datetime(["2025-01-02"])}), "excluded": {}})
+    tables = _fake_tables()
     sources = src.assemble(plan=_plan(), read=lambda slot: None, selection=SELECTION, expected=EXPECTED, panel_id="P",
                            admit=lambda ids: {"admitted": sorted(ids), "dropped": []}, admitted=admitted,
-                           snapshot_id="snap-1", load_index=lambda keys: None)
+                           snapshot_id="snap-1", load_index=lambda keys: None, tables=tables, production_hash="PH",
+                           crush_table_hash=tables.crush_table_hash)
     assert driver.check_sources(sources) is sources
-    assert sources.pair_candidates == FULL_PAIR_MAP and sources.production_hash == "" and sources.production_table_hash == ""
-    for call in (lambda: sources.fetch(["event_id"], ["e1"]), lambda: sources.facts(["e1"])):
-        with pytest.raises(OpsError) as exc:
-            call()
-        assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "source_table_missing")
-
-
-def test_assemble_plan_frame_refuses_source_table_missing():
-    admitted = readers.Admitted({"events": pd.DataFrame({"event_id": ["e1"], "event_date": pd.to_datetime(["2025-01-02"])}), "excluded": {}})
-    sources = src.assemble(plan=_plan(), read=lambda slot: None, selection=SELECTION, expected=EXPECTED, panel_id="P",
-                           admit=lambda ids: {"admitted": sorted(ids), "dropped": []}, admitted=admitted,
-                           snapshot_id="snap-1", load_index=lambda keys: None)
-    with pytest.raises(OpsError) as exc:
-        sources.plan_frame.columns
-    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "source_table_missing")
-    with pytest.raises(OpsError) as exc:
-        ladder.check_plan(admitted, sources.plan_frame)
-    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "source_table_missing")
+    assert sources.pair_candidates == FULL_PAIR_MAP
+    assert sources.fetch is tables.fetch and sources.facts is tables.facts and sources.plan_frame is tables.plan_frame
+    assert sources.production_hash == "PH" and sources.production_table_hash == "TH"
+    assert sources.crush_table_hash == "CTH"
+    assert sources.exclusions is tables.exclusions and isinstance(sources.exclusions, dict)
 
 
 # --- (6) build_sources end to end (every store touch monkeypatched) -----------
@@ -738,29 +768,65 @@ class _Conn:
         self.closed = True
 
 
+class _Store:
+    """Fake artifact store: read_verified returns the stored bytes, or raises the configured error."""
+    def __init__(self, plan):
+        self.data = _bytes(plan)
+        self.error = None
+        self.reads = []
+
+    def read_verified(self, ref):
+        self.reads.append(ref)
+        if self.error is not None:
+            raise self.error
+        return self.data
+
+
+def _bytes(plan):
+    return canonical_json(plan).encode()
+
+
+def _store_plan(env, plan):
+    """Replace the stored plan bytes and the reference that points at them."""
+    env.store.data = _bytes(plan)
+    env.state.ref = artifact_reference(env.store.data, PLAN_V3)
+
+
+def _no_rederivation(monkeypatch):
+    def refuse(*args, **kwargs):
+        raise AssertionError("the sealed plan must be consumed, not re-derived")
+    monkeypatch.setattr(plan_mod, "read_search_plan", refuse)
+    monkeypatch.setattr(binding_mod, "verify_installation", refuse)
+
+
 @pytest.fixture
 def env(tmp_path, monkeypatch):
     conn, slots = _Conn(), {"selection": SELECTION}
-    for name in ("spec.json", "request.json", "plan_ref.json"):
+    store = _Store(_plan(blends=[{"blend_id": "b1", "name": "size_b1_v1"}]))
+    state = types.SimpleNamespace(ref=artifact_reference(store.data, PLAN_V3))
+    for name in ("spec.json", "plan_ref.json"):
         _write(tmp_path / name, {"doc": name})
     config = _write(tmp_path / "config.json", _cfg(tmp_path))
     monkeypatch.setattr(src, "experiment_spec_from_document", lambda doc: ("spec", doc))
-    monkeypatch.setattr(src, "from_document", lambda cls, doc: ("ref", doc))
-    monkeypatch.setattr(src, "_open", lambda cfg: (conn, "store"))
+    monkeypatch.setattr(src, "from_document", lambda cls, doc: state.ref)
+    monkeypatch.setattr(src, "_open", lambda cfg: (conn, store))
     monkeypatch.setattr(src, "read_native_registration", lambda conn, store, spec: types.SimpleNamespace(
-        run_id="r1", document={"holdouts": {"holdout_as_of_month": "2025-01-01"}, "snapshot": PINNED}))
+        run_id="r1", variant_id=VARIANT_ID,
+        document={"holdouts": {"holdout_as_of_month": "2025-01-01"}, "snapshot": PINNED,
+                  "source_closure": SOURCE_CLOSURE, "environment": ENVIRONMENT}))
     monkeypatch.setattr(src, "to_document", lambda snapshot: snapshot)
     monkeypatch.setattr(src, "Repository", lambda conn, store, pin_snapshots: "repo")
     monkeypatch.setattr(src, "_bound_snapshot", lambda conn, snapshot_id: None)
     monkeypatch.setattr(src, "_snapshot", lambda repository, snapshot_id: dict(PINNED))
-    monkeypatch.setattr(src, "read_search_plan", lambda conn, store, registration, request, ref: _plan(blends=[{"blend_id": "b1", "name": "size_b1_v1"}]))
     monkeypatch.setattr(src, "read_record", lambda conn, store, run_id, slot: slots.get(slot))
     monkeypatch.setattr(inputs, "population_admit", lambda repository, snapshot, as_of_month, *, max_object_bytes: "admit")
     monkeypatch.setattr(readers, "admit_events", lambda repository, snapshot, as_of_month, *, max_object_bytes: readers.Admitted(
         {"events": pd.DataFrame({"event_id": ["e1"], "event_date": pd.to_datetime(["2025-01-02"])}), "excluded": {}}))
     monkeypatch.setattr(ladder, "default_load_index", lambda repository, snapshot: "index")
+    monkeypatch.setattr(src.size_pnl_tables, "tables",
+                        lambda repository, snapshot, admitted, *, crush_snapshot, max_object_bytes, expected_hash: _fake_tables())
     args = types.SimpleNamespace(sources_config=config, expected_identities=EXPECTED)
-    return types.SimpleNamespace(conn=conn, slots=slots, args=args)
+    return types.SimpleNamespace(conn=conn, slots=slots, args=args, store=store, state=state)
 
 
 def test_build_sources_success_leaves_connection_open(env, capsys):
@@ -769,15 +835,38 @@ def test_build_sources_success_leaves_connection_open(env, capsys):
     assert sources.expected == EXPECTED and sources.snapshot_id == "snap-1"
     assert sources.panel_id == SOURCE_BINDING and sources.panel_id != EXPECTED["panel_id"]
     assert sources.selection == SELECTION and sources.load_index == "index" and sources.admit == "admit"
+    assert sources.production_hash == "h" and sources.production_table_hash == "TH"
+    assert sources.crush_table_hash == "CTH"
     assert env.conn.closed is False
-    assert "[pnl_sources] opened snapshot=snap-1 admitted=1" in capsys.readouterr().err
+    assert "[pnl_sources] opened snapshot=snap-1 crush_snapshot=snap-crush admitted=1" in capsys.readouterr().err
+
+
+def test_build_sources_passes_config_production_hash_as_expected_hash(env, monkeypatch, tmp_path):
+    seen = []
+
+    def fake_tables(repository, snapshot, admitted, *, crush_snapshot, max_object_bytes, expected_hash):
+        seen.append(expected_hash)
+        return _fake_tables()
+
+    _write(tmp_path / "config.json", {**_cfg(tmp_path), "production_hash": "PH-CFG"})
+    monkeypatch.setattr(src.size_pnl_tables, "tables", fake_tables)
+    sources = src.build_sources(env.args)
+    assert seen == ["PH-CFG"]
+    assert sources.production_hash == "PH-CFG"
+
+
+def test_build_sources_wires_tables_exclusions_by_identity(env, monkeypatch):
+    fake = _fake_tables()
+    monkeypatch.setattr(src.size_pnl_tables, "tables", lambda *args, **kwargs: fake)
+    sources = src.build_sources(env.args)
+    assert sources.exclusions is fake.exclusions and isinstance(sources.exclusions, dict)
 
 
 def test_build_sources_panel_id_checked_by_bind_run(env):
     seal = {"seal": "s1"}
     env.slots["driver-seal"] = seal
     sources = src.build_sources(env.args)
-    matching = {"plan_id": "p1", "registration_id": "r1", "seal_id": content_hash(seal), "panel_id": sources.panel_id}
+    matching = {"plan_id": sources.plan["plan_id"], "registration_id": "r1", "seal_id": content_hash(seal), "panel_id": sources.panel_id}
     assert inputs.bind_run(sources.plan, sources.read, expected=matching, panel_id=sources.panel_id) == matching
     with pytest.raises(OpsError) as exc:
         inputs.bind_run(sources.plan, sources.read, expected={**matching, "panel_id": "P"}, panel_id=sources.panel_id)
@@ -787,7 +876,7 @@ def test_build_sources_panel_id_checked_by_bind_run(env):
 def test_build_sources_ambiguous_panel_binding_refuses_and_closes(env, monkeypatch):
     plan = _plan(candidates=[{**PAIR_CANDIDATES[0], "source_binding_id": "A"}]
                  + [{**c, "source_binding_id": "B"} for c in PAIR_CANDIDATES[1:]])
-    monkeypatch.setattr(src, "read_search_plan", lambda conn, store, registration, request, ref: plan)
+    _store_plan(env, _seal(plan))
     with pytest.raises(OpsError) as exc:
         src.build_sources(env.args)
     assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "panel_binding_ambiguous")
@@ -864,6 +953,68 @@ def test_build_sources_expected_invalid_refuses_before_open(env, monkeypatch, ex
     assert flags == []
 
 
+def test_build_sources_loads_plan_without_rederivation(env, monkeypatch):
+    # Installed-code re-derivation is patched to raise; the stored plan is still consumed as-is.
+    _no_rederivation(monkeypatch)
+    sources = src.build_sources(env.args)
+    assert sources.plan == json.loads(env.store.data)
+    assert sources.blend_ids == {"M4": "b1"}
+    assert env.store.reads == [env.state.ref]
+
+
+def test_build_sources_tampered_plan_bytes_refused_and_closes(env, monkeypatch):
+    _no_rederivation(monkeypatch)
+    env.store.error = ArtifactError("INTEGRITY_FAILED", "content hash differs")
+    with pytest.raises(OpsError) as exc:
+        src.build_sources(env.args)
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "plan_hash_mismatch")
+    assert env.conn.closed is True
+
+
+def test_build_sources_wrong_anchor_run_id_refused_and_closes(env, monkeypatch):
+    _no_rederivation(monkeypatch)
+    _store_plan(env, _seal({**_plan(), "anchor": {"run_id": "other-run", "variant_id": VARIANT_ID}}))
+    with pytest.raises(OpsError) as exc:
+        src.build_sources(env.args)
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "plan_anchor_mismatch")
+    assert env.conn.closed is True
+
+
+def test_build_sources_unknown_plan_schema_refused_without_read(env, monkeypatch):
+    _no_rederivation(monkeypatch)
+    env.state.ref = artifact_reference(env.store.data, "magnitude_search_plan.v1")
+    with pytest.raises(OpsError) as exc:
+        src.build_sources(env.args)
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "plan_schema_unknown")
+    assert env.store.reads == []
+    assert env.conn.closed is True
+
+
+def test_build_sources_plan_over_byte_cap_refused_without_read(env, monkeypatch):
+    _no_rederivation(monkeypatch)
+    env.state.ref = dataclasses.replace(env.state.ref, byte_size=src.MAX_PLAN_BYTES + 1)
+    with pytest.raises(OpsError) as exc:
+        src.build_sources(env.args)
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "plan_too_large")
+    assert env.store.reads == []
+    assert env.conn.closed is True
+
+
+@pytest.mark.parametrize("payload", [
+    pytest.param(b"{not json", id="not_json"),
+    pytest.param(b"[1, 2]", id="json_list"),
+    pytest.param(_bytes({**_plan(), "schema_version": PLAN_V2}), id="schema_version_differs_from_ref"),
+])
+def test_build_sources_malformed_plan_refused_and_closes(env, monkeypatch, payload):
+    _no_rederivation(monkeypatch)
+    env.store.data = payload
+    env.state.ref = artifact_reference(payload, PLAN_V3)
+    with pytest.raises(OpsError) as exc:
+        src.build_sources(env.args)
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "plan_malformed")
+    assert env.conn.closed is True
+
+
 def test_read_json_deeply_nested_refuses(tmp_path):
     path = tmp_path / "deep.json"
     path.write_text("[" * 100000 + "]" * 100000)
@@ -880,4 +1031,150 @@ def test_build_sources_sqlite_error_refuses_catalog_unavailable_and_closes(env, 
     with pytest.raises(OpsError) as exc:
         src.build_sources(env.args)
     assert _refusal(exc) == ("RESOURCE_UNAVAILABLE", "catalog_unavailable")
+    assert env.conn.closed is True
+
+
+# --- (7) two snapshots and the sealed plan's binding ----------------------------
+
+def test_build_sources_resolves_both_snapshots_and_passes_crush_to_tables(env, monkeypatch):
+    bounded, resolved, seen = [], [], {}
+    crush_snapshot = {"snapshot_id": "snap-crush", "crush": True}
+
+    def resolve(repository, snapshot_id):
+        resolved.append(snapshot_id)
+        return dict(PINNED) if snapshot_id == "snap-1" else crush_snapshot
+
+    def fake_tables(repository, snapshot, admitted, *, crush_snapshot, max_object_bytes, expected_hash):
+        seen.update(snapshot=snapshot, crush_snapshot=crush_snapshot)
+        return _fake_tables()
+
+    monkeypatch.setattr(src, "_bound_snapshot", lambda conn, snapshot_id: bounded.append(snapshot_id))
+    monkeypatch.setattr(src, "_snapshot", resolve)
+    monkeypatch.setattr(src.size_pnl_tables, "tables", fake_tables)
+    sources = src.build_sources(env.args)
+    assert bounded == ["snap-1", "snap-crush"] and resolved == ["snap-1", "snap-crush"]
+    assert seen == {"snapshot": dict(PINNED), "crush_snapshot": crush_snapshot}
+    assert sources.crush_table_hash == "CTH"
+
+
+def test_build_sources_unknown_crush_snapshot_refused_and_closes(env, monkeypatch):
+    monkeypatch.setattr(src, "_snapshot", lambda repository, snapshot_id: dict(PINNED) if snapshot_id == "snap-1"
+                        else REAL_SNAPSHOT(_Repo(), snapshot_id))
+    with pytest.raises(OpsError) as exc:
+        src.build_sources(env.args)
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "snapshot_missing")
+    assert env.conn.closed is True
+
+
+def test_load_plan_other_read_error_is_plan_unreadable(env, monkeypatch):
+    _no_rederivation(monkeypatch)
+    env.store.error = ArtifactError("STORAGE_IO", "disk read failed")
+    with pytest.raises(OpsError) as exc:
+        src.build_sources(env.args)
+    assert exc.value.problem.code == "RESOURCE_UNAVAILABLE"
+    assert _refusal(exc) == ("RESOURCE_UNAVAILABLE", "plan_unreadable")
+    assert env.conn.closed is True
+
+
+def test_load_plan_os_error_is_plan_unreadable(env, monkeypatch):
+    _no_rederivation(monkeypatch)
+    env.store.error = OSError("disk read failed")
+    with pytest.raises(OpsError) as exc:
+        src.build_sources(env.args)
+    assert exc.value.problem.code == "RESOURCE_UNAVAILABLE"
+    assert _refusal(exc) == ("RESOURCE_UNAVAILABLE", "plan_unreadable")
+    assert env.conn.closed is True
+
+
+def test_load_plan_variant_mismatch_refused(env, monkeypatch):
+    _no_rederivation(monkeypatch)
+    _store_plan(env, _seal({**_plan(), "anchor": {"run_id": "r1", "variant_id": "other-variant"}}))
+    with pytest.raises(OpsError) as exc:
+        src.build_sources(env.args)
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "plan_anchor_mismatch")
+    assert env.conn.closed is True
+
+
+def test_load_plan_implementation_differing_from_registration_refused(env, monkeypatch):
+    _no_rederivation(monkeypatch)
+    plan = _plan()
+    plan["implementation"] = {"source_closure": {"closure": "other"}, "environment": ENVIRONMENT}
+    _store_plan(env, _seal(plan))
+    with pytest.raises(OpsError) as exc:
+        src.build_sources(env.args)
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "plan_registration_mismatch")
+    assert env.conn.closed is True
+
+
+def test_load_plan_environment_differing_from_registration_refused(env, monkeypatch):
+    _no_rederivation(monkeypatch)
+    plan = _plan()
+    plan["implementation"] = {"source_closure": SOURCE_CLOSURE, "environment": {"python": "3.13"}}
+    _store_plan(env, _seal(plan))
+    with pytest.raises(OpsError) as exc:
+        src.build_sources(env.args)
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "plan_registration_mismatch")
+    assert env.conn.closed is True
+
+
+@pytest.mark.parametrize("edit", [
+    pytest.param(lambda plan: plan.pop("selection"), id="no_selection"),
+    pytest.param(lambda plan: plan.update(candidates={"candidate_id": "c-hsq"}), id="candidates_not_list"),
+])
+def test_load_plan_bad_shape_refused_before_roster_derivation(env, monkeypatch, edit):
+    _no_rederivation(monkeypatch)
+
+    def refuse(plan):
+        raise AssertionError("the plan shape must be checked before roster derivation")
+    monkeypatch.setattr(src, "derive_roster_inputs", refuse)
+    plan = _plan()
+    edit(plan)
+    _store_plan(env, _seal(plan))
+    with pytest.raises(OpsError) as exc:
+        src.build_sources(env.args)
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "plan_malformed")
+    assert env.conn.closed is True
+
+
+def test_build_sources_candidate_not_a_dict_refuses_plan_malformed_and_closes(env, monkeypatch):
+    _no_rederivation(monkeypatch)
+    plan = _plan()
+    plan["candidates"].append("not-a-dict")
+    _store_plan(env, _seal(plan))
+    with pytest.raises(OpsError) as exc:
+        src.build_sources(env.args)
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "plan_malformed")
+    assert env.conn.closed is True
+
+
+@pytest.mark.parametrize("extra", [5, [{"bad": 1}]], ids=["not_iterable", "unhashable_entry"])
+def test_build_sources_extra_refits_bad_shape_refuses_plan_malformed_and_closes(env, monkeypatch, extra):
+    _no_rederivation(monkeypatch)
+    plan = _plan()
+    plan["selection"] = {"extra_refits": extra}
+    _store_plan(env, _seal(plan))
+    with pytest.raises(OpsError) as exc:
+        src.build_sources(env.args)
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "plan_malformed")
+    assert env.conn.closed is True
+
+
+def test_load_plan_registration_without_closure_refuses_typed(env, monkeypatch):
+    _no_rederivation(monkeypatch)
+    monkeypatch.setattr(src, "read_native_registration", lambda conn, store, spec: types.SimpleNamespace(
+        run_id="r1", variant_id=VARIANT_ID, document={"snapshot": PINNED, "environment": ENVIRONMENT}))
+    with pytest.raises(OpsError) as exc:
+        src.build_sources(env.args)
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "plan_registration_mismatch")
+    assert env.conn.closed is True
+
+
+def test_load_plan_body_changed_under_unchanged_plan_id_refused(env, monkeypatch):
+    _no_rederivation(monkeypatch)
+    plan = _plan()
+    plan["horizons"] = [1]  # the body changes; plan_id still names the original body
+    _store_plan(env, plan)
+    with pytest.raises(OpsError) as exc:
+        src.build_sources(env.args)
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "plan_id_mismatch")
     assert env.conn.closed is True

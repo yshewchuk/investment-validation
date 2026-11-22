@@ -118,14 +118,16 @@ def bind_outer(plan, read, bound, roster, admit, *, outer_year):
         return dict(bound)
     if not per_candidate(plan):
         raise _conflict("outer_plan_unsupported", "the outer binder needs a per-candidate plan")
-    fold = next((g for g in plan["folds"] if g["outer"]["year"] == outer_year), None)
+    # The store may hold the plan's year as a string ("2025"): match on str, then use the plan's own value everywhere.
+    fold = next((g for g in plan["folds"] if str(g["outer"]["year"]) == str(outer_year)), None)
     if fold is None:
         raise _conflict("outer_identity_mismatch", "the plan seals no fold for the outer year")
+    year = fold["outer"]["year"]
     sealed, cache = fold["outer"]["evaluation_event_ids"], {}
 
     def unit(cid):
         if cid not in cache:
-            cache[cid] = _bind_unit(plan, read, cid, sealed, admit, outer_year)
+            cache[cid] = _bind_unit(plan, read, cid, sealed, admit, year)
         return cache[cid]
 
     out = {}
@@ -133,9 +135,9 @@ def bind_outer(plan, read, bound, roster, admit, *, outer_year):
         if entry.get("status") != "bound" or models[model_id]["kind"] == "production":
             out[model_id] = entry
         elif models[model_id]["kind"] == "blend":
-            out[model_id] = _blend(entry, plan, models[model_id]["candidate_id"], unit, outer_year)
+            out[model_id] = _blend(entry, plan, models[model_id]["candidate_id"], unit, year)
         else:
-            out[model_id] = _candidate(entry, unit(models[model_id]["candidate_id"]), outer_year)
+            out[model_id] = _candidate(entry, unit(models[model_id]["candidate_id"]), year)
     for model_id, entry in out.items():
         if entry.get("status") == "excluded":
             print(f"[pnl_outer] excluded {model_id} {entry['reason']}", file=sys.stderr)

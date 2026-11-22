@@ -43,11 +43,11 @@ def forecasts(ids, base):
     return [{"event_id": e, "horizon_sessions": 1, "predicted_absolute_move_pct": base + i} for i, e in enumerate(ids)]
 
 
-def put(slots, cid, *, ids=IDS, base=1.0, plan=PLAN):
+def put(slots, cid, *, ids=IDS, base=1.0, plan=PLAN, year=2025):
     """Store one refit unit's start, execution and forecasts slots, keyed by the real refit_key."""
-    key = refit_key(plan, 2025, cid)
+    key = refit_key(plan, year, cid)
     rows = forecasts(ids, base)
-    slots["outer-start:" + key] = {"plan_id": plan["plan_id"], "outer_year": 2025,
+    slots["outer-start:" + key] = {"plan_id": plan["plan_id"], "outer_year": year,
                                    "candidate": {"candidate_id": cid}, "outer_id": key}
     slots["outer-execution:" + key] = {"status": "succeeded", "forecasts_id": content_hash(rows)}
     slots["outer-forecasts:" + key] = rows
@@ -399,3 +399,50 @@ def test_start_only_is_outer_missing():
     del slots["outer-forecasts:" + key]
     out, _ = run(slots)
     assert out["m_c1"] == {"status": "excluded", "reason": "outer_missing"}
+
+
+# The real v14 store holds the plan's years as strings ("2025" outer, "2023"/"2024" inner); the driver's OUTER_YEAR is int 2025.
+STR_PLAN = dict(PLAN, folds=[{"outer": {"year": "2025", "evaluation_event_ids": IDS},
+                              "inner": [{"year": "2023", "evaluation_event_ids": IDS}, {"year": "2024", "evaluation_event_ids": IDS}]}])
+C1_ROSTER = {"models": [{"model_id": "m_c1", "kind": "candidate", "candidate_id": "c1"}]}
+
+
+def test_string_year_plan_binds_outer_year_with_int_outer_year():
+    slots = {}
+    key = put(slots, "c1", plan=STR_PLAN, year="2025")
+    out, reads = run_str(slots, STR_PLAN, {"m_c1": cand("c1")}, C1_ROSTER)
+    assert out["m_c1"]["status"] == "bound"
+    assert list(out["m_c1"]["years"]["2025"]["pred"]) == [1.0, 2.0, 3.0]
+    assert out["m_c1"]["binding"] == content_hash([[y, out["m_c1"]["years"][y]["binding"]] for y in ["2024", "2025"]])
+    assert set(reads) == {"outer-start:" + key, "outer-execution:" + key, "outer-forecasts:" + key}
+
+
+def test_string_year_plan_reads_slots_keyed_by_the_string_year():
+    slots = {}
+    key = put(slots, "c1", plan=STR_PLAN, year="2025")
+    _out, reads = run_str(slots, STR_PLAN, {"m_c1": cand("c1")}, C1_ROSTER)
+    assert key == refit_key(STR_PLAN, "2025", "c1")
+    assert key != refit_key(STR_PLAN, 2025, "c1")
+    assert all(count == 1 for count in reads.values()) and len(reads) == 3
+
+
+def test_string_year_plan_with_int_start_year_is_a_mismatch():
+    slots = {}
+    key = put(slots, "c1", plan=STR_PLAN, year="2025")
+    slots["outer-start:" + key]["outer_year"] = 2025
+    with pytest.raises(OpsError) as exc:
+        run_str(slots, STR_PLAN, {"m_c1": cand("c1")}, C1_ROSTER)
+    assert exc.value.problem.code == "EXPERIMENT_IDENTITY_CONFLICT"
+    assert exc.value.problem.details["reason"] == "outer_identity_mismatch"
+
+
+def test_string_year_plan_refuses_a_seal_missing_the_outer_year():
+    plan = dict(STR_PLAN, folds=[{"outer": {"year": "2024", "evaluation_event_ids": IDS}, "inner": []}])
+    with pytest.raises(OpsError) as exc:
+        run_str({}, plan, {"m_c1": cand("c1")}, C1_ROSTER)
+    assert exc.value.problem.details["reason"] == "outer_identity_mismatch"
+
+
+def run_str(slots, plan, bound, roster):
+    read, reads = make_read(slots)
+    return bind_outer(plan, read, bound, roster, admit, outer_year=2025), reads

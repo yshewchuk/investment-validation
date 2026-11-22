@@ -31,10 +31,15 @@ EXPECTED = {"plan_id": "PLAN", "registration_id": "REG", "seal_id": content_hash
 OK = lambda: {"spec_hash": "SPEC", "spec_hash_checked": True}  # noqa: E731
 
 
+def _avail(event_iso):
+    """A label's native available_as_of_date by default: one calendar day after its event date (ISO text)."""
+    return (pd.Timestamp(event_iso) + pd.Timedelta(days=1)).date().isoformat()
+
+
 def _base():
-    """One row per event: production columns and label columns, for the fake fetch."""
+    """One row per event: production columns and label columns (with availability), for the fake fetch."""
     rows = [{"event_id": e, "pred_abs_move": 5.0, "pred_iv_crush_30": -12.0, "horizon_sessions": 1,
-             "abs_move": 4.0, "crush_pct_iv30": -10.0} for e in EVENTS]
+             "abs_move": 4.0, "crush_pct_iv30": -10.0, "available_as_of_date": _avail(EVENTS[e])} for e in EVENTS]
     return pd.DataFrame(rows)
 
 
@@ -59,7 +64,7 @@ def sources(**over):
                 panel_id="P", admit=lambda ids: {"admitted": sorted(ids), "dropped": []},
                 admitted=ADMITTED, fetch=fetch, production_hash="H", production_table_hash="H",
                 plan_frame=PLAN_FRAME, load_index=lambda keys: None,
-                facts=lambda ids: FACTS.reindex(list(ids)), snapshot_id="snap-1")
+                facts=lambda ids: FACTS.reindex(list(ids)), snapshot_id="snap-1", crush_table_hash="CTH")
     base.update(over)
     return driver.Sources(**base)
 
@@ -195,6 +200,7 @@ def test_inner_receipts_bind_scope_none_and_the_snapshot(tmp_path, stubs, monkey
     tuned = tuning.load_receipt(tmp_path / "receipts" / f"tuning_{mid}.json")
     assert inputs["scope"] is None and inner["scope"] is None
     assert inputs["snapshot"] == "snap-1"
+    assert inputs["crush_table_hash"] == "CTH"
     production = next(m["model_id"] for m in inputs["roster"]["models"] if m["kind"] == "production")
     assert inputs["models"][production] == {"status": "ready"}
     # Literal content of each receipt (the tune stub's fields, and the bindings between receipts).
@@ -305,7 +311,7 @@ def test_an_event_unsimulable_under_one_model_leaves_for_every_model(tmp_path, s
         seen["twin"].attrs["twin"] = True
         return {mid: tables[mid], "twin": {**tables[mid], "table": seen["twin"]}}
 
-    def sims_of(chunk_, events, table, labels, exits):
+    def sims_of(chunk_, events, table, labels):
         return {e: (None if table.attrs.get("twin") and e == "E2" else "sim") for e in events["event_id"]}
 
     monkeypatch.setattr(readers, "model_tables", twinned)
@@ -348,7 +354,7 @@ def test_an_event_undetermined_only_off_unity_leaves_the_taken_population_for_ev
         seen["twin"].attrs["twin"] = True
         return {mid: tables[mid], "twin": {**tables[mid], "table": seen["twin"]}}
 
-    def sims_of(chunk_, events, table, labels, exits):  # the twin's E2 is marked undetermined
+    def sims_of(chunk_, events, table, labels):  # the twin's E2 is marked undetermined
         return {e: ("undetermined" if table.attrs.get("twin") and e == "E2" else "sim") for e in events["event_id"]}
 
     def scored_of(chunk_, events, sims, name, c, **kw):
@@ -380,16 +386,48 @@ def test_inner_refuses_a_changed_plan_window_on_replay(tmp_path, stubs, monkeypa
     assert caught.value.details["reason"] == "inputs_receipt_changed"
 
 
-def test_inner_month_pool_drops_a_label_printed_after_a_later_month_starts(tmp_path, stubs, monkeypatch):
-    """E1's exit (2024-08-03) falls after E2's month starts (2024-08-01): E1 is in E2's month table but not its labels."""
+def _cutoff_pools(tmp_path, monkeypatch, e1_available):
+    """Inner run over 2023 Q2 with E1 and E2 (E2 in 2024-08). E1's exit is 2024-07-20, so exit_date + 1 is before the 2024-08
+    month start; only E1's native ``available_as_of_date`` differs between calls. Returns (table ids, label ids) per pool."""
     plan = PLAN_FRAME.copy()
-    plan.loc[plan["event_id"] == "E1", "exit_date"] = pd.Timestamp("2024-08-03")
+    plan.loc[plan["event_id"] == "E1", "exit_date"] = pd.Timestamp("2024-07-20")
+
+    def fetch(columns, ids):
+        rows = BASE[BASE["event_id"].isin(list(ids))].copy()
+        rows.loc[rows["event_id"] == "E1", "available_as_of_date"] = e1_available
+        return rows
+
     pools = []
     monkeypatch.setattr(driver, "build_pool",
                         lambda table, labels: pools.append((set(table.index.astype(str)), set(labels.index.astype(str)))))
     use_chunks(monkeypatch, [("2023Q2", chunk("E1", "E2"))])
-    driver.run(sources(plan_frame=plan), "inner", tmp_path, prereg=OK)
-    assert any("E1" in tabled and "E1" not in labelled for tabled, labelled in pools)
+    driver.run(sources(plan_frame=plan, fetch=fetch), "inner", tmp_path, prereg=OK)
+    return pools
+
+
+def test_label_printed_after_the_month_start_is_not_admitted_though_exit_plus_one_is_before(tmp_path, stubs, monkeypatch):
+    pools = _cutoff_pools(tmp_path, monkeypatch, "2024-08-05")  # printed after 2024-08-01, the 2024-08 month start
+    labelled = [ids for tabled, ids in pools if "E1" in tabled]  # the 2024-08 month: E1 is in its table
+    assert labelled and all(ids == set() for ids in labelled)
+
+
+def test_label_printed_before_the_month_start_is_admitted(tmp_path, stubs, monkeypatch):
+    pools = _cutoff_pools(tmp_path, monkeypatch, "2024-07-25")  # the same label, printed before 2024-08-01
+    labelled = [ids for tabled, ids in pools if "E1" in tabled]
+    assert labelled and all(ids == {"E1"} for ids in labelled)
+
+
+def test_label_available_on_the_month_start_is_not_admitted(tmp_path, stubs, monkeypatch):
+    """The cutoff is strictly before the month start: a label available on 2024-08-01 itself is not in the pool."""
+    pools = _cutoff_pools(tmp_path, monkeypatch, "2024-08-01")
+    labelled = [ids for tabled, ids in pools if "E1" in tabled]
+    assert labelled and all(ids == set() for ids in labelled)
+
+
+def test_label_available_one_day_before_the_month_start_is_admitted(tmp_path, stubs, monkeypatch):
+    pools = _cutoff_pools(tmp_path, monkeypatch, "2024-07-31")
+    labelled = [ids for tabled, ids in pools if "E1" in tabled]
+    assert labelled and all(ids == {"E1"} for ids in labelled)
 
 
 def test_residual_pool_excludes_history_missing_from_any_ready_model(tmp_path, stubs, monkeypatch):
@@ -593,6 +631,34 @@ def test_changed_label_value_refuses_an_inner_replay(tmp_path, stubs, monkeypatc
         driver.run(sources(fetch=relabelled), "inner", tmp_path, prereg=OK)
     assert caught.value.code == CONFLICT
     assert caught.value.details["reason"] == "inputs_receipt_changed"
+
+
+def test_label_rows_carry_availability_so_a_changed_date_changes_the_row():
+    frame = pd.DataFrame({"abs_move": [4.0], "crush_pct_iv30": [-10.0], "available": ["2024-08-08"]},
+                         index=pd.Index(["E2"], name="event_id"))
+    moved = frame.assign(available=["2024-09-01"])
+    assert driver._label_rows([frame]) == [["E2", 4.0, -10.0, "2024-08-08"]]
+    assert driver._label_rows([frame]) != driver._label_rows([moved])
+    assert content_hash(driver._label_rows([frame])) != content_hash(driver._label_rows([moved]))
+
+
+def _inner_labels_receipt(out, monkeypatch, e2_available):
+    """Inner run over E1 (2023 Q2) and E2 (2024 Q3); only E2's native ``available_as_of_date`` differs between calls."""
+    base = BASE.copy()
+    base.loc[base["event_id"] == "E2", "available_as_of_date"] = e2_available
+
+    def fetch(columns, ids):
+        return base[base["event_id"].isin(list(ids))].copy()
+
+    use_chunks(monkeypatch, [("2023Q2", chunk("E1")), ("2024Q3", chunk("E2"))])
+    driver.run(sources(fetch=fetch), "inner", out, prereg=OK)
+    return tuning.load_receipt(out / "receipts" / "inputs_inner.json")["labels"]
+
+
+def test_changed_label_availability_changes_the_inputs_labels_receipt(tmp_path, stubs, monkeypatch):
+    first = _inner_labels_receipt(tmp_path / "a", monkeypatch, "2024-08-08")
+    second = _inner_labels_receipt(tmp_path / "b", monkeypatch, "2024-09-01")
+    assert first != second
 
 
 def test_changed_ladder_quote_refuses_an_inner_replay(tmp_path, stubs, monkeypatch):
@@ -1051,3 +1117,79 @@ def test_frames_digest_binds_column_names_and_dtypes():
     assert driver._frames_digest([base]) == driver._frames_digest([base.copy()])
     assert driver._frames_digest([base]) != driver._frames_digest([renamed])
     assert driver._frames_digest([base]) != driver._frames_digest([retyped])
+
+
+# ---- facts exclusion, the population requested from facts, and the funnel -----------
+
+def test_facts_missing_event_leaves_every_table_and_the_facts_receipt(tmp_path, stubs, monkeypatch, capsys):
+    use_chunks(monkeypatch, [("2023Q2", chunk("E1")), ("2024Q3", chunk("E2"))])
+    requested = []
+
+    def facts(ids):
+        requested.append(sorted(ids))
+        return FACTS.reindex(list(ids)).assign(pre_iv30=lambda f: f["pre_iv30"].where(f.index != "E2"))
+
+    src = sources(facts=facts)
+    summary = driver.run(src, "inner", tmp_path, prereg=OK)
+    assert requested == [["E1", "E2"]]
+    assert src.exclusions["facts_missing"] == {"E2"}
+    inputs = tuning.load_receipt(tmp_path / "receipts" / "inputs_inner.json")
+    inner = tuning.load_receipt(tmp_path / "receipts" / "inner.json")
+    assert inner["events_by_model"] == {summary["models"][0]: 1}  # E2 is in no model's events
+    assert inputs["facts"] == content_hash(driver._facts_rows(FACTS.loc[["E1"]], {"E1"}))
+    err = capsys.readouterr().err
+    assert "[pnl_driver] facts_missing=1" in err
+    assert "[pnl_driver] funnel admitted=4 paired=1 excluded: facts_missing=1 common_dropped=0" in err
+
+
+def test_event_excluded_before_facts_is_never_requested(tmp_path, stubs, monkeypatch):
+    use_chunks(monkeypatch, [("2023Q2", chunk("E1")), ("2024Q3", chunk("E2"))])
+    requested = []
+
+    def fetch(columns, ids):  # E2 has no production row, so it leaves the population before any facts request
+        return BASE[BASE["event_id"].isin(list(ids)) & (BASE["event_id"] != "E2")]
+
+    def facts(ids):
+        requested.append(sorted(ids))
+        return FACTS.reindex(list(ids))
+
+    summary = driver.run(sources(fetch=fetch, facts=facts), "inner", tmp_path, prereg=OK)
+    assert requested == [["E1"]]
+    assert summary["models"]
+
+
+def test_every_event_dropped_by_facts_refuses_empty_population(tmp_path, stubs, monkeypatch):
+    use_chunks(monkeypatch, [("2023Q2", chunk("E1")), ("2024Q3", chunk("E2"))])
+    facts = lambda ids: FACTS.reindex(list(ids)).assign(pre_iv30=np.nan)  # noqa: E731
+    with pytest.raises(Refusal) as caught:
+        driver.run(sources(facts=facts), "inner", tmp_path, prereg=OK)
+    assert caught.value.details["reason"] == "empty_population"
+    assert not (tmp_path / "receipts").exists()
+
+
+# ---- pre-2025 events without a label leave the paired population -----------------
+
+def _labels_blanked(*eids):
+    """A fetch that serves BASE with the label NaN for ``eids``: each keeps its forecast and facts but has no label row."""
+    def fetch(columns, ids):
+        out = BASE[BASE["event_id"].isin(list(ids))].copy()
+        out.loc[out["event_id"].isin(list(eids)), "abs_move"] = np.nan
+        return out
+    return fetch
+
+
+def test_inner_event_without_a_label_leaves_every_model_table_and_the_receipts(tmp_path, stubs, monkeypatch):
+    use_chunks(monkeypatch, [("2023Q2", chunk("E1")), ("2024Q3", chunk("E2"))])
+    summary = driver.run(sources(fetch=_labels_blanked("E2")), "inner", tmp_path, prereg=OK)
+    assert sorted(stubs) == sorted(("tune", mid, ("E1",)) for mid in summary["models"])  # E1 alone is tuned; E2 is in no table
+    inner = tuning.load_receipt(tmp_path / "receipts" / "inner.json")
+    assert inner["events_by_model"] == {mid: 1 for mid in summary["models"]}
+    assert inner["events"] == 1
+
+
+def test_every_inner_event_without_a_label_refuses_empty_population(tmp_path, stubs, monkeypatch):
+    use_chunks(monkeypatch, [("2023Q2", chunk("E1")), ("2024Q3", chunk("E2"))])
+    with pytest.raises(Refusal) as caught:
+        driver.run(sources(fetch=_labels_blanked("E1", "E2")), "inner", tmp_path, prereg=OK)
+    assert caught.value.details["reason"] == "empty_population"
+    assert not (tmp_path / "receipts").exists()
