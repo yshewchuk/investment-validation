@@ -564,7 +564,7 @@ def _synthetic_scores(src, ready, plan, facts_all, labels):
             start_m, month_frames = period.start_time, []
             at = {mid: events[mid][events[mid]["event_date"].dt.to_period("M") == period] for mid in ready}
             scored = {mid: _month_scores(mid, pools[mid], at[mid], chunk, labels, start_m, state[mid], arms=_AS_IS) for mid in ready}
-            for mid in ready:  # Pass A rows, before the shared mask: a non-"scored" row is counted here only when its reason is width_declined (other reasons are other non-trades)
+            for mid in ready:  # Pass A rows, before the shared mask: only a width_declined row is counted as a width decline (other non-scored reasons are other non-trades or missing facts)
                 for name in shortvol.NAMES:
                     f = scored[mid][0][("as_is", name)]
                     declined[mid][name][0] += int(((f["status"] != "scored") & (f["reason"] == "width_declined")).sum())

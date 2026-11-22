@@ -708,7 +708,7 @@ def test_one_model_simulation_failure_drops_the_event_for_every_model(tmp_path, 
 
 
 def test_one_model_structure_refusal_leaves_the_event_in_every_models_history(tmp_path, outer_stubs, monkeypatch):
-    """A structure refusal is a non-trade for that (model, structure, c): P&L 0, so E3 stays in every model's history and rows."""
+    """A non-trade outcome (a structure refusal that is not a missing fact) for one (model, structure, c) is P&L 0, so E3 stays in every model's history and rows."""
     decide_inputs = _shared_drop_run(tmp_path, monkeypatch)
     first = driver.shortvol.NAMES[0]
 

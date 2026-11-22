@@ -75,7 +75,7 @@ Reusing production's pool would bias the test: its residuals pair with productio
 
 ## 5. Short-vol scoring and geometry divisors
 
-Per (model, event, structure): forecast, width by `forecast_sizing` (declined if out of range), strikes snapped to the listed ladder in dollars, zero floor re-checked on listed strikes (EXP-133 rule; a negative-floor candidate is dropped), entry cost at the alpha mark, `exp_pnl_sim` through the model's pool, trailing cutoff on that (model, structure)'s own prior scores, spread and mcap terms exactly as `_short_vol_rule`, then realized exit value at marks. Entry/exit conventions are the board's for each structure; S5 pins them from the factories and refuses if a factory default disagrees.
+Per (model, event, structure): forecast, width by `forecast_sizing` (declined if out of range), strikes snapped to the listed ladder in dollars, zero floor re-checked on listed strikes (EXP-133 rule; a negative-floor candidate is dropped, meaning not traded: a non-trade at P&L 0 that keeps its event in E), entry cost at the alpha mark, `exp_pnl_sim` through the model's pool, trailing cutoff on that (model, structure)'s own prior scores, spread and mcap terms exactly as `_short_vol_rule`, then realized exit value at marks. Entry/exit conventions are the board's for each structure; S5 pins them from the factories and refuses if a factory default disagrees.
 
 Two geometry arms, both pre-registered:
 - **As-is.** Registered divisors and bounds: what the board does.
