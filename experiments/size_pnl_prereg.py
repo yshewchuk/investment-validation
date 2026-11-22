@@ -10,6 +10,10 @@ receipt that says the check was skipped.
 
     python3 -m experiments.size_pnl_prereg --check      # verify, print receipt
     python3 -m experiments.size_pnl_prereg --register   # append PLANNED row once
+
+The spec may declare a top-level ``amendments`` list (default empty). With n
+amendments the ledger must hold exactly n+1 PLANNED rows for EXP-188, and the
+last one must equal the spec hash. Without the key this is the single-row rule.
 """
 from __future__ import annotations
 
@@ -80,11 +84,18 @@ def _load(spec_path):
         raise _refuse("spec_unreadable", "spec is missing, unparseable or not a mapping") from None
     if spec.get("id") != EXPERIMENT_ID:
         raise _refuse("spec_id_mismatch", f"spec id is not {EXPERIMENT_ID}")
+    if not isinstance(spec.get("amendments", []), list):
+        raise _refuse("spec_unreadable", "spec amendments is not a list")
     return spec, lib.spec_hash(spec)
 
 
 def load_spec(spec_path=SPEC_PATH):
     return _load(spec_path)
+
+
+def _expected_rows(spec):
+    """PLANNED rows the ledger must hold: one for the spec plus one per declared amendment."""
+    return len(spec.get("amendments", [])) + 1
 
 
 def _planned_hashes(ledger_path):
@@ -164,7 +175,9 @@ def _chronology(spec, spec_path, run_log_path):
 def require_preregistration(spec_path=SPEC_PATH, ledger_path=None, run_log_path=None) -> dict:
     """Verify the spec is registered before any run; return a receipt or raise.
 
-    ``lib.LEDGER_PATH`` is read at call time, so tests can monkeypatch it.
+    The ledger must hold n+1 PLANNED rows for n declared amendments, the last one
+    equal to the spec hash. ``lib.LEDGER_PATH`` is read at call time, so tests can
+    monkeypatch it.
     """
     spec_path = Path(spec_path)
     ledger = lib.LEDGER_PATH if ledger_path is None else ledger_path
@@ -172,12 +185,14 @@ def require_preregistration(spec_path=SPEC_PATH, ledger_path=None, run_log_path=
                else Path(run_log_path))
 
     spec, digest = _load(spec_path)
+    expected = _expected_rows(spec)
     planned = _planned_hashes(ledger)
     if not planned:
         raise _refuse("planned_row_missing", f"no PLANNED row for {EXPERIMENT_ID} in the ledger")
-    if len(planned) > 1:
-        raise _refuse("planned_row_ambiguous", f"{len(planned)} PLANNED rows for {EXPERIMENT_ID}")
-    if planned[0] != digest:
+    if len(planned) != expected:
+        raise _refuse("planned_row_ambiguous", f"{len(planned)} PLANNED rows for {EXPERIMENT_ID}, "
+                      f"expected {expected} (one per amendment plus the spec)")
+    if planned[-1] != digest:
         raise _refuse("spec_hash_mismatch", "spec differs from its PLANNED row")
 
     prereg, first_ts = _chronology(spec, spec_path, run_log)
@@ -195,7 +210,9 @@ def register_planned(spec_path=SPEC_PATH, ledger_path=None, today=None,
     """Append the PLANNED row once. True if appended, False if already registered.
 
     Runs the same stamp and run-log chronology check as ``require_preregistration``
-    before any ledger write.
+    before any ledger write. With n amendments the ledger must hold n PLANNED rows
+    (the amendment chain) before the spec row is appended; a row already holding
+    the spec hash is never appended twice.
     """
     ledger = lib.LEDGER_PATH if ledger_path is None else ledger_path
     spec_path = Path(spec_path)
@@ -203,10 +220,11 @@ def register_planned(spec_path=SPEC_PATH, ledger_path=None, today=None,
                else Path(run_log_path))
     spec, digest = _load(spec_path)
     _chronology(spec, spec_path, run_log)
+    expected = _expected_rows(spec)
     planned = _planned_hashes(ledger)
-    if planned == [digest]:
+    if len(planned) == expected and planned[-1] == digest:
         return False
-    if planned:
+    if len(planned) != expected - 1 or digest in planned:
         raise _refuse("planned_row_conflict", f"ledger holds a different PLANNED hash for "
                       f"{EXPERIMENT_ID}")
     lib.ledger_append([{

@@ -71,6 +71,13 @@ marks:
   - "1 valid non-wide non-zero-bid quote: alpha mark"
   - "2 zero-bid or wide: alpha 0 for that leg"
   - "3 no usable exit quote incl. crossed: structure marked at worst-case payoff, labelled exit_unquoted_worst_case; a locked quote is valid"
+marks_mid_sensitivity:
+  amendment: "Amendment 1 (2026-11-22), guides/size_decision_pnl_design.md section 14"
+  label: "sensitivity (Amendment 1), not the pre-registered verdict"
+  rule: "identical decisions and c (primary tuning receipt); exit valuation only: rung-2 legs marked at the run's alpha like rung 1; rung 3 unchanged; both short-vol books and the straddle"
+  stored: "decisions.parquet exit_value_mid, pnl_dollars_mid"
+  t10: "the pre-registered T10 verdict uses the primary marks only"
+amendments: ["Amendment 1 (2026-11-22): marks_mid sensitivity arm, guides/size_decision_pnl_design.md section 14"]
 rung3_sensitivity: "a sensitivity row drops rung 3"
 hypotheses:
   H1: "H1 (short vol): for each matched pair, d = P&L(median-type) - P&L(mean-type) > 0 on the seven put-side short-vol structures."

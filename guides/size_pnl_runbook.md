@@ -12,7 +12,7 @@ beside the v14 run, container 12 GiB). Agents never run them.
 
 1. The v14 **rerun** (not the killed `v2full14` run) has completed and been collected. Record its `plan_id`,
    `registration_id`, driver-seal id and `panel_id` in a JSON file (`--expected`). `panel_id` is the plan's candidate `source_binding_id` (the one value every `plan.candidates[i].source_binding_id` shares); the factory derives it from the sealed plan and `bind_run` refuses `panel_id_mismatch` if `--expected` differs.
-2. The spec is registered: exactly one PLANNED `EXP-188` ledger row whose `spec_hash` equals the spec's
+2. The spec is registered: one PLANNED `EXP-188` ledger row, plus one per entry of the spec's `amendments`, the last with a `spec_hash` equal to the spec's
    (`python3 -m experiments.size_pnl_prereg --check`). Without it the runner refuses
    `EXPERIMENT_IDENTITY_CONFLICT` (`planned_row_missing`) before reading anything.
 3. `--sources experiments.size_pnl_sources:build_sources --sources-config <config.json>` builds

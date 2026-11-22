@@ -89,16 +89,17 @@ def entry_state(chunk, i, *, mcap):
     return out
 
 
-def exit_value(chunk, c, p, alpha):
+def exit_value(chunk, c, p, alpha, mid_marks=False):
     """(value_per_share, rung_label) for the straddle at exit. A rung-3 leg marks the whole
-    structure at worst-case payoff 0.0; rung-2 legs fill at alpha 0 (the bid)."""
+    structure at worst-case payoff 0.0; rung-2 legs fill at alpha 0 (the bid), or at ``alpha`` when ``mid_marks``
+    (the Amendment 1 sensitivity arm)."""
     FillModel(alpha)  # validate alpha up front, whatever the rungs
     rungs =(int(chunk["exit_rung"][c]), int(chunk["exit_rung"][p]))
     if 3 in rungs:
         return 0.0, EXIT_UNQUOTED
     total = 0.0
     for leg, rung in ((c, rungs[0]), (p, rungs[1])):
-        model = FillModel(alpha if rung == 1 else 0.0)
+        model = FillModel(alpha if (mid_marks or rung == 1) else 0.0)
         total += float(model.sell(chunk["bid_x"][leg], chunk["ask_x"][leg]))
     return total, "rung1" if rungs == (1, 1) else "rung2"
 
@@ -166,8 +167,9 @@ def decide(events, history, rule, chunk):
     return pd.DataFrame(rows, columns=DECISION_COLS)
 
 
-def score(chunk, events, decisions, alpha, *, drop_unquoted=False):
-    """Marked P&L for TAKEN events only. ``drop_unquoted`` removes the worst-case rung-3 rows."""
+def score(chunk, events, decisions, alpha, *, drop_unquoted=False, mid_marks=False):
+    """Marked P&L for TAKEN events only. ``drop_unquoted`` removes the worst-case rung-3 rows. ``mid_marks`` values
+    rung-2 legs at ``alpha`` (Amendment 1 sensitivity); the taken set and rung labels are unchanged."""
     FillModel(alpha)  # validate alpha up front, even when nothing is taken
     known = set(events["event_id"].astype(str))
     pos = {str(e): i for i, e in enumerate(chunk["event_id"])}
@@ -180,7 +182,7 @@ def score(chunk, events, decisions, alpha, *, drop_unquoted=False):
             raise ValueError(f"taken event {eid!r} has no ATM straddle")
         c, p = legs
         cost = entry_cost(chunk, c, p, alpha)
-        value, rung = exit_value(chunk, c, p, alpha)
+        value, rung = exit_value(chunk, c, p, alpha, mid_marks)
         if drop_unquoted and rung == EXIT_UNQUOTED:
             continue
         n, per_share = lots(cost), value - cost

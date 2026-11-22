@@ -448,3 +448,36 @@ def test_missing_exit_chain_decides_as_covered_and_scores_worst_case():
     scored = sd.score(missing, events, sd.decide(events, EMPTY, "R_L2", missing), 0.5).set_index("event_id")
     assert scored.loc["E", "exit_value"] == 0.0
     assert scored.loc["E", "rung"] == sd.EXIT_UNQUOTED
+
+
+# ---- Amendment 1 sensitivity: rung-2 legs marked at alpha (mid_marks) ----
+
+def test_mid_marks_values_a_rung2_leg_at_alpha_and_keeps_the_label():
+    chunk = one(call_x=(0.0, 0.5, 2))  # call rung 2 (bid 0.0), put rung 1 (mid 0.8)
+    c, p = sd.atm_legs(chunk, 0)
+    assert sd.exit_value(chunk, c, p, 0.5) == (pytest.approx(0.8), "rung2")
+    value, label = sd.exit_value(chunk, c, p, 0.5, True)
+    assert value == pytest.approx(0.25 + 0.8) and label == "rung2"  # the call sells at its mid, 0.25
+
+
+def test_mid_marks_keeps_rung3_and_equals_the_primary_when_rung1():
+    chunk = one(call_x=(NAN, NAN, 3))
+    c, p = sd.atm_legs(chunk, 0)
+    assert sd.exit_value(chunk, c, p, 0.5, True) == (0.0, sd.EXIT_UNQUOTED)
+    healthy = one()
+    c, p = sd.atm_legs(healthy, 0)
+    assert sd.exit_value(healthy, c, p, 0.5, True) == sd.exit_value(healthy, c, p, 0.5)
+
+
+def test_mid_marks_score_keeps_the_taken_set_and_changes_only_the_rung2_row():
+    chunk = lad._pack([rec("A", 100.0, pair(100, call_x=(0.0, 0.5, 2))),
+                       rec("B", 100.0, pair(100, call_x=(NAN, NAN, 3)))], {})
+    events = pd.DataFrame([ev("A", 1.0), ev("B", 1.0)])
+    decisions = sd.decide(events, EMPTY, "R_L2", chunk)
+    primary = sd.score(chunk, events, decisions, 0.5).set_index("event_id")
+    pd.testing.assert_frame_equal(sd.score(chunk, events, decisions, 0.5, mid_marks=False).set_index("event_id"), primary)
+    mid = sd.score(chunk, events, decisions, 0.5, mid_marks=True).set_index("event_id")
+    assert list(mid.index) == list(primary.index) == ["A", "B"]
+    assert mid.loc["A", "exit_value"] == pytest.approx(primary.loc["A", "exit_value"] + 0.25)
+    assert mid.loc["A", "pnl_dollars"] == pytest.approx(primary.loc["A", "pnl_dollars"] + 0.25 * 100 * primary.loc["A", "lots"])
+    assert mid.loc["B", "exit_value"] == 0.0 and mid.loc["B", "rung"] == sd.EXIT_UNQUOTED

@@ -312,6 +312,76 @@ def test_register_planned_with_later_run_log_registers(tmp_path):
 
 
 # --------------------------------------------------------------------------
+# declared amendments: the ledger holds n+1 PLANNED rows, the last is the spec hash
+# --------------------------------------------------------------------------
+
+AMENDMENT = "Amendment 1 (2026-11-22): test amendment"
+
+
+def _old_and_amended(case):
+    """Digests of the spec before and after declaring one amendment (the file is rewritten)."""
+    old = _digest(_write_spec(case))
+    spec = _write_spec(case, amendments=[AMENDMENT])
+    return old, _digest(spec), spec
+
+
+def test_amended_spec_with_old_and_new_rows_passes(tmp_path):
+    old, new, spec = _old_and_amended(tmp_path)
+    assert new != old
+    ledger = _write_ledger(tmp_path / "LEDGER.csv",
+                           [_planned_row(old), _planned_row(new, date="2026-11-22")])
+    receipt = _check(tmp_path, spec, ledger)
+    assert receipt["spec_hash_checked"] is True
+    assert receipt["spec_hash"] == new
+
+
+def test_amended_spec_with_only_the_old_row_is_ambiguous(tmp_path):
+    old, _new, spec = _old_and_amended(tmp_path)
+    ledger = _write_ledger(tmp_path / "LEDGER.csv", [_planned_row(old)])
+    assert refusal(lambda: _check(tmp_path, spec, ledger)) == "planned_row_ambiguous"
+
+
+def test_amended_spec_with_a_stale_last_row_is_hash_mismatch(tmp_path):
+    old, new, spec = _old_and_amended(tmp_path)
+    ledger = _write_ledger(tmp_path / "LEDGER.csv",
+                           [_planned_row(new), _planned_row(old, date="2026-11-22")])
+    assert refusal(lambda: _check(tmp_path, spec, ledger)) == "spec_hash_mismatch"
+
+
+def test_register_planned_appends_the_amendment_row_then_is_idempotent(tmp_path):
+    old, new, spec = _old_and_amended(tmp_path)
+    ledger = _write_ledger(tmp_path / "LEDGER.csv", [_planned_row(old)])
+    assert size_pnl_prereg.register_planned(spec_path=spec, ledger_path=ledger,
+                                            today="2026-11-22") is True
+    assert size_pnl_prereg._planned_hashes(ledger) == [old, new]
+    assert size_pnl_prereg.register_planned(spec_path=spec, ledger_path=ledger,
+                                            today="2026-11-22") is False
+    assert _check(tmp_path, spec, ledger)["spec_hash"] == new
+
+
+def test_register_planned_refuses_the_new_hash_without_the_old_row(tmp_path):
+    _old, new, spec = _old_and_amended(tmp_path)
+    ledger = _write_ledger(tmp_path / "LEDGER.csv", [_planned_row(new)])
+    reason = refusal(lambda: size_pnl_prereg.register_planned(
+        spec_path=spec, ledger_path=ledger, today="2026-11-22"))
+    assert reason == "planned_row_conflict"
+    assert size_pnl_prereg._planned_hashes(ledger) == [new]
+
+
+def test_malformed_amendments_is_spec_unreadable(tmp_path):
+    spec = _write_spec(tmp_path, amendments="Amendment 1")
+    assert refusal(lambda: _check(tmp_path, spec, tmp_path / "LEDGER.csv")) == "spec_unreadable"
+
+
+def test_no_amendments_with_two_rows_is_still_ambiguous(tmp_path):
+    spec = _write_spec(tmp_path)
+    digest = _digest(spec)
+    ledger = _write_ledger(tmp_path / "LEDGER.csv",
+                           [_planned_row("0" * 64), _planned_row(digest)])
+    assert refusal(lambda: _check(tmp_path, spec, ledger)) == "planned_row_ambiguous"
+
+
+# --------------------------------------------------------------------------
 # no-op regression: no failure setup may ever return a receipt
 # --------------------------------------------------------------------------
 

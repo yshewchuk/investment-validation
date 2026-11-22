@@ -499,3 +499,45 @@ def test_score_needs_alpha_and_c_columns():
     decisions = taken(chunk, "A").drop(columns="c")
     with pytest.raises(ValueError, match="alpha and c columns"):
         sv.score(chunk, events, decisions, "CND-PS", 0.5)
+
+
+# ---- Amendment 1 sensitivity: rung-2 legs marked at alpha (mid_marks) ----
+
+def test_mid_marks_keeps_the_taken_set_and_changes_only_the_rung2_marks():
+    chunk = chunk_of(("A", {94: (1.0, 2.0, 2)}), ("B", {}))
+    events, decisions = events_for("A", "B"), taken(chunk, "A", "B")
+    primary = sv.score(chunk, events, decisions, "CND-PS", 0.5)
+    pd.testing.assert_frame_equal(primary, sv.score(chunk, events, decisions, "CND-PS", 0.5, mid_marks=False))  # default unchanged
+    mid = sv.score(chunk, events, decisions, "CND-PS", 0.5, mid_marks=True).set_index("event_id")
+    primary = primary.set_index("event_id")
+    assert list(mid.index) == list(primary.index) == ["A", "B"]
+    # Event A, by hand. CND-PS legs (one contract each): BUY 94, SELL 97, SELL 103, BUY 106. Only 94 is rung 2 (bid 1.0, ask 2.0);
+    # every other leg has bid = ask = 1.0 at exit, so any alpha marks it at 1.0.
+    # Entry at alpha 0.5 (mid): 1.36 - 1.09 - 1.09 + 1.36 = 0.54. lots = floor(10000 / (0.54 * 100)) = 185.
+    # Primary: the BUY 94 closes by selling at its bid (alpha 0): +1.0; exit = 1.0 - 1.0 - 1.0 + 1.0 = 0.0.
+    # Mid: the BUY 94 closes by selling at bid + 0.5 * (ask - bid) = 1.5; exit = 1.5 - 1.0 - 1.0 + 1.0 = 0.5.
+    # pnl_per_share = exit - 0.54; pnl_dollars = pnl_per_share * 100 * 185.
+    assert primary.loc["A", "rung"] == "rung2" and mid.loc["A", "rung"] == "rung2"
+    assert primary.loc["A", "entry_cost"] == pytest.approx(0.54) and mid.loc["A", "entry_cost"] == pytest.approx(0.54)
+    assert primary.loc["A", "exit_value"] == pytest.approx(0.0)
+    assert mid.loc["A", "exit_value"] == pytest.approx(0.5)
+    assert primary.loc["A", "pnl_per_share"] == pytest.approx(-0.54)
+    assert mid.loc["A", "pnl_per_share"] == pytest.approx(-0.04)
+    assert primary.loc["A", "pnl_dollars"] == pytest.approx(-9990.0)  # -0.54 * 100 * 185
+    assert mid.loc["A", "pnl_dollars"] == pytest.approx(-740.0)  # -0.04 * 100 * 185
+    assert mid.loc["B", "exit_value"] == pytest.approx(primary.loc["B", "exit_value"])  # rung 1 is marked the same under both
+
+
+def test_mid_marks_equals_the_primary_when_every_leg_is_rung1():
+    chunk, events = chunk_of(("A", {})), events_for("A")
+    decisions = taken(chunk, "A")
+    pd.testing.assert_frame_equal(sv.score(chunk, events, decisions, "CND-PS", 0.5, mid_marks=True),
+                                  sv.score(chunk, events, decisions, "CND-PS", 0.5))
+
+
+def test_mid_marks_keeps_a_rung3_row_at_zero_with_its_label():
+    chunk, events = chunk_of(("A", {106: (NAN, NAN, 3)})), events_for("A")
+    decisions = taken(chunk, "A")
+    for mid_marks in (False, True):
+        row = sv.score(chunk, events, decisions, "CND-PS", 0.5, mid_marks=mid_marks).iloc[0]
+        assert row["exit_value"] == 0.0 and row["rung"] == EXIT_UNQUOTED

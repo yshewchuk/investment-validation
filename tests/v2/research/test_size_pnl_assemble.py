@@ -154,7 +154,7 @@ def test_happy_path_writes_every_section_in_order(tmp_path):
     out = build(tmp_path)
     summary = assemble_mod.assemble(out, plan_frame(), admitted=None)
     text = (out / "REPORT.md").read_text(encoding="utf-8")
-    assert summary["report"] == str(out / "REPORT.md") and summary["sections"] == 11 and summary["rows"] > 0
+    assert summary["report"] == str(out / "REPORT.md") and summary["sections"] == 12 and summary["rows"] > 0  # 11 + the not_testable sensitivity note
     assert text.startswith("# EXP-188 REPORT")
     heads = ["### T1", "### T2", "### T3", "### T4", "### T5", "### T6", "### T7", "### T8", "### T9", "### T10"]
     positions = [next(i for i, line in enumerate(_sections(text)) if line.startswith(h)) for h in heads]
@@ -638,3 +638,120 @@ def test_real_check_plan_admits_the_fixture_plan_and_the_report_is_written(tmp_p
     out = build(tmp_path)
     assemble_mod.assemble(out, plan_frame(), admitted=admitted_for())
     assert (out / "REPORT.md").exists()
+
+
+# ---- Amendment 1 sensitivity: pnl_dollars_mid, after the primary verdicts ----
+
+def _with_mid(rows, *, delta=0.0):
+    """The rows with a ``pnl_dollars_mid`` column: each primary P&L plus ``delta``."""
+    return [{**row, "pnl_dollars_mid": row["pnl_dollars"] + delta} for row in rows]
+
+
+def test_mid_column_adds_the_sensitivity_sections_after_the_primary_verdicts(tmp_path):
+    out = build(tmp_path, rows_fn=_with_mid)
+    summary = assemble_mod.assemble(out, plan_frame(), admitted=None)
+    text = (out / "REPORT.md").read_text(encoding="utf-8")
+    sens = [line for line in _sections(text) if "not the pre-registered verdict" in line]
+    assert summary["sections"] == 16  # the 11 primary sections and 5 sensitivity sections
+    assert [line.rsplit(": ", 1)[1] for line in sens] == ["T4 Short-vol, as is", "T5 Short-vol, retuned", "T6 Straddle buy rules",
+                                                          "T7 Contrasts", "T10 Verdicts"]
+    assert all(line.startswith("### Sensitivity (Amendment 1), not the pre-registered verdict: ") for line in sens)
+    assert text.index(sens[0]) > text.index("### T10 Verdicts")
+    mid_verdicts = [_cells(line) for line in _section_lines(text, sens[-1]) if line.startswith("| H")]
+    assert mid_verdicts == [["H1", "+1", "clear"], ["H2", "-1", "reversed"], ["H3", "+1", "no_difference"]]
+
+
+def test_primary_sections_do_not_depend_on_the_mid_column(tmp_path):
+    texts = {}
+    for name, rows_fn in (("plain", None), ("mid", _with_mid), ("shifted", lambda rows: _with_mid(rows, delta=500.0))):
+        (tmp_path / name).mkdir()
+        out = build(tmp_path / name, rows_fn=rows_fn)
+        assemble_mod.assemble(out, plan_frame(), admitted=None)
+        texts[name] = (out / "REPORT.md").read_text(encoding="utf-8")
+    for title in ("### T4", "### T10"):
+        assert _section_lines(texts["plain"], title) == _section_lines(texts["mid"], title) == _section_lines(texts["shifted"], title)
+    sens = "### Sensitivity (Amendment 1), not the pre-registered verdict: T4 Short-vol, as is"
+    assert _section_lines(texts["mid"], sens) != _section_lines(texts["shifted"], sens)  # the sensitivity reads the mid marks
+    # Rendered values. H-sq (no median role, so no bump) takes four as-is trades of 10, 20, 30, 40: total 100.00 over
+    # 4 events = 25 per event, hit rate 1. The shifted run adds 500 to every taken row, so the sensitivity total is
+    # 100 + 4 * 500 = 2100.00 and the per-event value is 2100 / 4 = 525.
+    plain_row = next(line for line in _section_lines(texts["plain"], "### T4") if line.startswith("| H-sq |"))
+    assert plain_row == "| H-sq | 1 | 4 | 100.00 | 25 | 1 |"
+    shifted_row = next(line for line in _section_lines(texts["shifted"], sens) if line.startswith("| H-sq |"))
+    assert shifted_row == "| H-sq | 1 | 4 | 2100.00 | 525 | 1 |"
+    # No verdict flip is asserted here. A uniform per-trade shift cancels in a paired contrast only when both models of the
+    # pair take the same number of trades per event (the shift then enters both legs equally and subtracts out). This
+    # fixture has equal counts (every model takes every row), so the uniform shift leaves the sensitivity verdicts unchanged;
+    # the test after this one uses a non-uniform mid column that does change them.
+
+
+SENS_T7 = "### Sensitivity (Amendment 1), not the pre-registered verdict: T7 Contrasts"
+SENS_T10 = "### Sensitivity (Amendment 1), not the pre-registered verdict: T10 Verdicts"
+
+
+def _negate_median_mid(rows):
+    """Non-uniform marks: the median-type model m-habs (H-abs) carries its negated P&L as the mid mark; every other model keeps its P&L."""
+    return [{**row, "pnl_dollars_mid": -row["pnl_dollars"] if row["model_id"] == "m-habs" else row["pnl_dollars"]} for row in rows]
+
+
+def test_non_uniform_mid_changes_the_sensitivity_verdicts_and_not_the_primary(tmp_path):
+    texts = {}
+    for name, rows_fn in (("plain", None), ("mid", _negate_median_mid)):
+        (tmp_path / name).mkdir()
+        out = build(tmp_path / name, rows_fn=rows_fn)
+        assemble_mod.assemble(out, plan_frame(), admitted=None)
+        texts[name] = (out / "REPORT.md").read_text(encoding="utf-8")
+    plain, mid = texts["plain"], texts["mid"]
+    # Primary T10 is byte-for-byte the plain run's, and still the pinned literals.
+    assert _section_lines(mid, "### T10 Verdicts") == _section_lines(plain, "### T10 Verdicts")
+    primary = [_cells(line) for line in _section_lines(mid, "### T10 Verdicts") if line.startswith("| H")]
+    assert primary == [["H1", "+1", "clear"], ["H2", "-1", "reversed"], ["H3", "+1", "no_difference"]]
+    # Pair H's mid contrast per event is -(10k + 1) - 10k = -21, -41, -61, -81 on the short-vol and straddle legs alike.
+    # H1 (short-vol, +1): pair H is clearly opposite, which blocks clear and directional -> no_difference.
+    # H2 (straddle, -1): pairs E and N are clearly opposite to -1, pair H is clearly opposite to +1 -> no_difference.
+    # H3 (short-vol minus R_L): the two legs cancel per event for every pair, so d = 0 -> no_difference.
+    sens = [_cells(line) for line in _section_lines(mid, SENS_T10) if line.startswith("| H")]
+    assert sens == [["H1", "+1", "no_difference"], ["H2", "-1", "no_difference"], ["H3", "+1", "no_difference"]]
+    # The sensitivity T7 differs from the primary T7. Pair H, H1, as_is: d = -21, -41, -61, -81, so mean -51, quarters 0/4/0.
+    assert _section_lines(mid, SENS_T7) != _section_lines(mid, "### T7 Contrasts")
+    sens_h1 = _cells(next(line for line in _section_lines(mid, SENS_T7) if line.startswith("| H1 | H | as_is |")))
+    assert sens_h1[:4] == ["H1", "H", "as_is", "ok"] and sens_h1[4] == "4"
+    assert float(sens_h1[5]) == -51 and sens_h1[6] == "0/4/0" and float(sens_h1[7]) == 0 and sens_h1[8] == "2024:- 2025:-"
+    primary_h1 = _cells(next(line for line in _section_lines(mid, "### T7 Contrasts") if line.startswith("| H1 | H | as_is |")))
+    assert primary_h1[:4] == ["H1", "H", "as_is", "ok"] and primary_h1[4] == "4"
+    assert float(primary_h1[5]) == 1 and primary_h1[6] == "4/0/0" and primary_h1[8] == "2024:+ 2025:+"
+
+
+def test_decisions_without_the_mid_column_get_a_not_testable_sensitivity_note(tmp_path):
+    out = build(tmp_path)
+    assemble_mod.assemble(out, plan_frame(), admitted=None)
+    text = (out / "REPORT.md").read_text(encoding="utf-8")
+    assert "### Sensitivity (Amendment 1)\n\nnot_testable: pnl_dollars_mid_not_in_decisions" in text
+    assert "not the pre-registered verdict" not in text
+
+
+def test_non_finite_mid_pnl_on_a_taken_row_refuses(tmp_path):
+    def make(rows):
+        mid = _with_mid(rows)
+        return [{**mid[0], "pnl_dollars_mid": float("nan")}, *mid[1:]]
+
+    out = build(tmp_path, rows_fn=make)
+    with pytest.raises(Refusal) as caught:
+        assemble_mod.assemble(out, plan_frame(), admitted=None)
+    assert caught.value.details["reason"] == "report_nonfinite_pnl"
+    assert not (out / "REPORT.md").exists()
+
+
+def test_non_numeric_mid_pnl_on_a_non_taken_row_refuses_as_decisions_invalid(tmp_path):
+    def make(rows):
+        # Every mid value is text, so the column is still writable; one value on a non-taken row is not a number.
+        out = [{**row, "pnl_dollars_mid": str(row["pnl_dollars"])} for row in rows]
+        out[0] = {**out[0], "status": "not_taken", "reason": "width_declined", "pnl_dollars": 0.0, "pnl_dollars_mid": "n/a"}
+        return out
+
+    out = build(tmp_path, rows_fn=make)
+    with pytest.raises(Refusal) as caught:
+        assemble_mod.assemble(out, plan_frame(), admitted=None)
+    assert caught.value.code == CONFLICT
+    assert caught.value.details["reason"] == "report_decisions_invalid"
+    assert not (out / "REPORT.md").exists()
