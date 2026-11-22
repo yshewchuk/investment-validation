@@ -1,5 +1,6 @@
 """EXP-188 S9c: REPORT.md assembly over synthetic receipts and decisions (tmp_path only; no store, no data/)."""
 import os
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -15,6 +16,8 @@ from experiments.size_pnl_straddle import RULES
 CONFLICT = "EXPERIMENT_IDENTITY_CONFLICT"
 EVENT_DATES = {"E01": "2024-02-15", "E02": "2024-05-15", "E03": "2025-02-15", "E04": "2025-05-15"}
 TICKERS = {"E01": "AAA", "E02": "BBB", "E03": "CCC", "E04": "AAA"}
+IDENTITY = {"plan_id": "plan-1", "registration_id": "reg-1", "seal_id": "seal-1", "panel_id": "panel-1"}
+SPEC_HASH, SNAPSHOT = "a" * 64, "snap-1"
 ROLES = {"m-hsq": "H-sq", "m-habs": "H-abs", "m-eraw": "E-raw", "m-elog": "E-log", "m-nraw": "N-raw", "m-nlog": "N-log"}
 MEDIAN_ROLES = ("H-abs", "E-log", "N-log")  # each pays one dollar more per event than its mean-type partner
 PAIRS_OK = {"H": "testable", "E": "testable", "N": "testable"}
@@ -55,7 +58,8 @@ def build(tmp_path, *, rows_fn=None, pairs=None, dates=None, scope=None):
         hashes[mid] = tuning.write_receipt(rdir / f"tuning_{mid}.json", body)["content_hash"]
     tuning.write_receipt(rdir / "inner.json", {"stage": "inner", "models": hashes, "excluded": {}})
     inputs = tuning.write_receipt(rdir / "inputs_outer.json", {
-        "stage": "inputs", "roster": _roster(pairs or PAIRS_OK), "models": {mid: {"status": "ready"} for mid in ROLES}})
+        "stage": "inputs", "roster": _roster(pairs or PAIRS_OK), "models": {mid: {"status": "ready"} for mid in ROLES},
+        "identity": IDENTITY, "spec_hash": SPEC_HASH, "snapshot": SNAPSHOT})
     rows = _rows(dates or EVENT_DATES)
     rows = rows_fn(rows) if rows_fn else rows
     frame = rows if isinstance(rows, pd.DataFrame) else pd.DataFrame(rows)
@@ -231,6 +235,93 @@ def test_failed_replace_keeps_the_old_report_and_leaves_no_tmp(tmp_path, monkeyp
         assemble_mod.assemble(out, TICKERS)
     assert (out / "REPORT.md").read_text(encoding="utf-8") == "OLD"
     assert not list(out.glob("*.tmp"))
+
+
+def test_t10_verdicts_are_classify_of_the_summaries_it_is_given(tmp_path, monkeypatch):
+    seen = []
+    real_t10 = assemble_mod.report.t10_verdicts
+    monkeypatch.setattr(assemble_mod.report, "t10_verdicts", lambda hypotheses: seen.append(hypotheses) or real_t10(hypotheses))
+    out = build(tmp_path)
+    assemble_mod.assemble(out, TICKERS)
+    sign, pairs = seen[0]["H1"]
+    text = (out / "REPORT.md").read_text(encoding="utf-8")
+    assert f"| H1 | +1 | {contrast.classify(pairs, sign)} |" in text
+    assert "not_testable because the required full year" not in text
+
+
+def test_2025_only_decisions_are_not_testable_and_t7_still_shows_stats(tmp_path):
+    dates = {"E01": "2025-02-15", "E02": "2025-05-15", "E03": "2025-08-15", "E04": "2025-11-15"}
+    out = build(tmp_path, dates=dates)
+    assemble_mod.assemble(out, TICKERS)
+    text = (out / "REPORT.md").read_text(encoding="utf-8")
+    verdicts = [_cells(line) for line in _section_lines(text, "### T10") if line.startswith("| H")]
+    assert verdicts == [["H1", "+1", "not_testable"], ["H2", "-1", "not_testable"], ["H3", "+1", "not_testable"]]
+    assert ("not_testable because the required full year(s) [2024] are absent from the outer decisions; "
+            "the inner window publishes no decisions") in text
+    assert "| H1 | H | as_is | ok | 4 | 1 |" in text
+
+
+@pytest.mark.parametrize("tickers", [None, ["x"], {"E01": " "}, {" ": "AAA"}, {"E01": None}])
+def test_tickers_must_be_a_mapping_of_nonblank_strings(tmp_path, tickers):
+    out = build(tmp_path)
+    with pytest.raises(Refusal) as caught:
+        assemble_mod.assemble(out, tickers)
+    assert caught.value.details["reason"] == "report_tickers_invalid"
+    assert not (out / "REPORT.md").exists()
+
+
+def test_requested_identity_matches_the_receipts(tmp_path):
+    out = build(tmp_path)
+    assemble_mod.assemble(out, TICKERS, expected=IDENTITY, spec_hash=SPEC_HASH, snapshot=SNAPSHOT)
+    assert (out / "REPORT.md").exists()
+
+
+@pytest.mark.parametrize("change", [{"expected": {**IDENTITY, "plan_id": "other"}}, {"spec_hash": "b" * 64}, {"snapshot": "snap-2"}])
+def test_requested_identity_mismatch_refuses(tmp_path, change):
+    out = build(tmp_path)
+    with pytest.raises(Refusal) as caught:
+        assemble_mod.assemble(out, TICKERS, **{"expected": IDENTITY, "spec_hash": SPEC_HASH, "snapshot": SNAPSHOT, **change})
+    assert caught.value.details["reason"] == "report_inputs_mismatch"
+    assert not (out / "REPORT.md").exists()
+
+
+def test_outer_receipt_without_rows_is_malformed(tmp_path):
+    out = build(tmp_path)
+    _rewrite(out / "receipts" / "outer.json", lambda body: {k: v for k, v in body.items() if k != "rows"})
+    with pytest.raises(Refusal) as caught:
+        assemble_mod.assemble(out, TICKERS)
+    assert caught.value.details["reason"] == "report_receipt_malformed"
+    assert not (out / "REPORT.md").exists()
+
+
+def test_non_date_event_date_refuses_as_decisions_invalid(tmp_path):
+    out = build(tmp_path, rows_fn=lambda rows: [{**row, "event_date": "not a date"} for row in rows])
+    with pytest.raises(Refusal) as caught:
+        assemble_mod.assemble(out, TICKERS)
+    assert caught.value.details["reason"] == "report_decisions_invalid"
+
+
+def test_decisions_one_byte_over_the_cap_refuses(tmp_path, monkeypatch):
+    out = build(tmp_path)
+    monkeypatch.setattr(decisions, "MAX_DECISIONS_BYTES", (out / "decisions.parquet").stat().st_size - 1)
+    with pytest.raises(Refusal) as caught:
+        assemble_mod.assemble(out, TICKERS)
+    assert caught.value.details["reason"] == "report_decisions_mismatch"
+
+
+def test_hash_loop_refuses_when_fstat_understates_the_size(tmp_path, monkeypatch):
+    out = build(tmp_path)
+    target, real_fstat = os.stat(out / "decisions.parquet"), os.fstat
+
+    def understated(fd):  # the decisions descriptor reports size 0 and keeps its regular-file mode
+        st = real_fstat(fd)
+        return SimpleNamespace(st_mode=st.st_mode, st_size=0) if os.path.samestat(st, target) else st
+
+    monkeypatch.setattr(os, "fstat", understated)
+    monkeypatch.setattr(decisions, "MAX_DECISIONS_BYTES", 16)
+    with pytest.raises(Refusal) as caught:
+        assemble_mod.assemble(out, TICKERS)
+    assert caught.value.details["reason"] == "report_decisions_mismatch"
 
 
 def test_decisions_bytes_consumed_are_the_bytes_hashed(tmp_path, monkeypatch):

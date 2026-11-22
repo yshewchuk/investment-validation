@@ -70,6 +70,7 @@ def main(argv: list[str] | None = None) -> int:
                 raise fail(_INVALID, "--expected must be a JSON object with plan_id, registration_id, seal_id, panel_id", details={"reason": "input_unreadable"})
             event_ids = _read_json(args.event_ids) if args.event_ids is not None else None
             if args.event_ids is not None and not (isinstance(event_ids, list) and all(isinstance(e, str) for e in event_ids)): raise fail(_INVALID, "--event-ids must be a JSON array of strings", details={"reason": "event_ids_invalid"})
+            if args.stage == "report" and args.event_ids is not None: raise fail(_INVALID, "--event-ids is not supported by the report stage", details={"reason": "event_ids_not_supported"})
             from experiments import size_pnl_assemble, size_pnl_driver  # after the gates, so a missing PLANNED row refuses first
             module_name, _, func = args.sources.partition(":")
             try:  # no colon gives func "", not an attribute; a bad module raises ImportError
@@ -82,7 +83,11 @@ def main(argv: list[str] | None = None) -> int:
             sources = size_pnl_driver.check_sources(made)
             if sources.expected != args.expected_identities:
                 raise fail(_CONFLICT, "--expected differs from the sources' expected identities", details={"reason": "expected_mismatch"})
-            if args.stage == "report": summary = size_pnl_assemble.assemble(args.out_dir, dict(zip(sources.plan_frame["event_id"].astype(str), sources.plan_frame["ticker"].astype(str))))
+            if args.stage == "report":
+                ids, tickers = sources.plan_frame["event_id"].astype(str), sources.plan_frame["ticker"]
+                if not ids.is_unique or (tickers.isna() | (tickers.astype(str).str.strip() == "")).any():
+                    raise fail(_INVALID, "the plan has duplicate event ids or blank tickers", details={"reason": "plan_malformed"})
+                summary = size_pnl_assemble.assemble(args.out_dir, dict(zip(ids, tickers.astype(str))), expected=sources.expected, spec_hash=receipt["spec_hash"], snapshot=sources.snapshot_id)
             elif args.stage == "synthetic": summary = size_pnl_driver.run_synthetic(sources, args.out_dir, event_ids=event_ids, replay=args.replay, prereg=lambda: receipt)
             else: summary = size_pnl_driver.run(sources, args.stage, args.out_dir, event_ids=event_ids, prereg=lambda: receipt)
     except (OpsError, Refusal, DataError) as exc:
