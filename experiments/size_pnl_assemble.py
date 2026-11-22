@@ -257,10 +257,12 @@ def _sections(out, outer, inputs, inner, tuned, tickers):
     ]
 
 
-def assemble(out_dir, tickers, *, expected=None, spec_hash=None, snapshot=None, plan_binding=None):
+def assemble(out_dir, tickers, *, plan_binding, expected=None, spec_hash=None, snapshot=None):
     """Write ``out_dir/REPORT.md`` from the outer receipts and decisions.parquet; returns a JSON-safe summary.
     Each of expected, spec_hash and snapshot that is given must equal the matching field of inputs_outer.json.
-    ``plan_binding`` (the receipted plan hash) binds the ticker map to a full run's plan."""
+    ``plan_binding`` (the receipted plan hash, required) binds the ticker map to a full run's plan."""
+    if not (isinstance(plan_binding, str) and plan_binding):
+        raise _refuse("report_inputs_mismatch", "plan_binding must be the receipted plan hash")
     if not _tickers_ok(tickers):
         raise _refuse("report_tickers_invalid", "tickers must map non-blank event ids to non-blank tickers")
     started, out = time.monotonic(), Path(out_dir)
@@ -270,7 +272,7 @@ def assemble(out_dir, tickers, *, expected=None, spec_hash=None, snapshot=None, 
     with _admit("report_receipt_malformed", "inputs_outer.json lacks a bound identity field"):
         mismatched = [key for key, want in requested.items() if want is not None and inputs[key] != want]
         # A smoke scope skips this: the smoke receipt binds a restricted plan, so its plan hash cannot match the full one.
-        plan_bad = plan_binding is not None and outer["scope"] is None and inputs.get("plan") != plan_binding
+        plan_bad = outer["scope"] is None and inputs.get("plan") != plan_binding
     if mismatched:
         raise _refuse("report_inputs_mismatch", f"inputs_outer.json differs from the requested {', '.join(mismatched)}")
     if plan_bad:
