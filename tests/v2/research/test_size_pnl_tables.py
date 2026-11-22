@@ -1,13 +1,17 @@
 """EXP-188 real-store Sources adapter, slice 2: synthetic in-memory frames only (no store, no network)."""
 import datetime as dt
 import re
+import tracemalloc
 import types
+from dataclasses import replace
 
 import numpy as np
 import pandas as pd
 import pytest
 
 from engine.v2.contracts import KeyPredicate
+from engine.v2.contracts.data import FragmentRecord, ObjectRef, TableContractRef
+from engine.v2.data.computed_moves_table import COMPUTED_MOVES_CONTRACT
 from engine.v2.data.errors import DataError
 from engine.v2.data.errors import fail as data_fail
 from engine.v2.ops.errors import OpsError
@@ -18,8 +22,8 @@ from experiments import size_pnl_tables as tbl
 MAX = 1 << 20
 HASH = "tier4-manifest-9c2e41"  # literal manifest hash; deliberately unlike any other fake value
 CRUSH_HASH = "iv-crush-manifest-4b7d10"  # the crush snapshot's iv_crush_targets manifest; also unlike any other fake value
-SNAP = types.SimpleNamespace(table_versions={"tier4_forecasts": types.SimpleNamespace(manifest_hash=HASH)})
-CRUSH = types.SimpleNamespace(table_versions={"iv_crush_targets": types.SimpleNamespace(manifest_hash=CRUSH_HASH)})
+SNAP = types.SimpleNamespace(snapshot_id="main-snap", table_versions={"tier4_forecasts": types.SimpleNamespace(manifest_hash=HASH)})
+CRUSH = types.SimpleNamespace(snapshot_id="crush-snap", table_versions={"iv_crush_targets": types.SimpleNamespace(manifest_hash=CRUSH_HASH)})
 CRUSH_TABLES = ("earnings_events", "iv_crush_targets")
 D1, D2 = pd.Timestamp("2025-01-02"), pd.Timestamp("2025-02-03")
 DAY = pd.Timedelta(days=1)
@@ -1117,3 +1121,233 @@ def test_skipped_move_with_failing_crush_context_is_counted_once_under_move_only
     reasons = {name: ns.exclusions.get(name, set()) for name in ("move_label_missing", "crush_context_conflict", "crush_label_missing")}
     assert reasons == {"move_label_missing": {"e1"}, "crush_context_conflict": set(), "crush_label_missing": set()}
     assert sum(len(ids) for ids in reasons.values()) == 1 == 2 - len(labels)
+
+
+# --- run-scoped fragment-record memo for label reads ---------------------------------
+
+MEMO_MONTHS = ["2025-01", "2025-02", "2025-03", "2025-04"]
+MEMO_TICKERS = ["AAA", "BBB", "CCC"]
+MOVE_COLS = ["ticker", "event_date", "realized_move_pct", "skipped", AVAILABLE]
+CRUSH_COLS = ["ticker", "event_date", "crush_pct_iv30", "skipped", AVAILABLE]
+MEMO_VALUE = {"AAA": 1.5, "BBB": -2.0, "CCC": 3.25}
+MEMO_LOG = r"^\[pnl_tables\] fragment_records table=(\w+) snapshot=(\S+) records=(\d+) elapsed=\d+\.\d+s rss=\d+MiB$"
+REF = TableContractRef(contract_id=COMPUTED_MOVES_CONTRACT.contract_id, definition_hash=COMPUTED_MOVES_CONTRACT.definition_hash)
+CRUSH_CONTRACT = replace(COMPUTED_MOVES_CONTRACT, table_name="iv_crush_targets")
+MSNAP = types.SimpleNamespace(snapshot_id="memo-main", table_versions={
+    "tier4_forecasts": types.SimpleNamespace(manifest_hash=HASH),
+    "computed_moves": types.SimpleNamespace(table_contract_ref=REF)})
+MCRUSH = types.SimpleNamespace(snapshot_id="memo-crush", table_versions={
+    "iv_crush_targets": types.SimpleNamespace(manifest_hash=CRUSH_HASH, table_contract_ref=REF)})
+
+
+def _day(month):
+    return f"{month}-10"
+
+
+def _want(month):
+    return pd.DataFrame({"event_id": [f"{t}-{month}" for t in MEMO_TICKERS], "ticker": MEMO_TICKERS,
+                         "event_date": [pd.Timestamp(_day(month))] * len(MEMO_TICKERS)})
+
+
+def _month_events():
+    rows = [(f"{t}-{m}", t, pd.Timestamp(_day(m)), "AMC") for m in MEMO_MONTHS for t in MEMO_TICKERS]
+    return pd.DataFrame(rows, columns=["event_id", "ticker", "event_date", "session"])
+
+
+def _fragment(table, ticker, day, n=0):
+    """A real FragmentRecord for one event-isolated outcome: one row, primary key (ticker, day), time bounds = day."""
+    tag = f"{table}-{ticker}-{day}-{n}"
+    return FragmentRecord(
+        fragment_id=f"frag-{tag}", manifest_hash=f"manifest-{table}",
+        object_ref=ObjectRef(kind="outcome", object_id=f"obj-{tag}", content_hash=f"chash-{tag}", byte_size=4096),
+        table_contract_ref=REF, partition_key=ticker, row_count=1,
+        byte_hash=f"bhash-{tag}", logical_content_hash=f"lhash-{tag}",
+        primary_key_min=(ticker, day), primary_key_max=(ticker, day),
+        time_min=day, time_max=day, input_receipt_refs=(), import_request_hash=f"import-{tag}")
+
+
+class _MonthRepo:
+    """Fake repository over real FragmentRecords: one event-isolated fragment per (ticker, event day) in each table, and a scan
+    that returns that fragment's one row. `listed` counts fragment_records calls per table; `scans` records each scan's
+    (table, ticker, day); a scan of a month outside `allowed_months` (None: any month) raises AssertionError."""
+
+    def __init__(self, *, omit=(), extra=()):
+        self.listed, self.scans, self.allowed_months = {}, [], None
+        self._records = {"computed_moves": [], "iv_crush_targets": []}
+        self._rows = {"computed_moves": {}, "iv_crush_targets": {}}
+        self._contracts = {"computed_moves": COMPUTED_MOVES_CONTRACT, "iv_crush_targets": CRUSH_CONTRACT}
+        for month in MEMO_MONTHS:
+            for ticker in MEMO_TICKERS:
+                day = _day(month)
+                for table, column in (("computed_moves", "realized_move_pct"), ("iv_crush_targets", "crush_pct_iv30")):
+                    if (table, ticker, day) in omit:
+                        continue
+                    self._records[table].append(_fragment(table, ticker, day))
+                    self._rows[table][(ticker, day)] = {"ticker": ticker, "event_date": day, column: MEMO_VALUE[ticker] + MEMO_MONTHS.index(month),
+                                                        "skipped": False, AVAILABLE: f"{month}-12"}
+        for table, ticker, day in extra:
+            self._records[table].append(_fragment(table, ticker, day, n=1))
+
+    def table_contract(self, snapshot, table):
+        if table not in self._contracts:
+            raise data_fail("CONTRACT_MISMATCH", "table is not part of this snapshot", details={"table_name": table})
+        return self._contracts[table]
+
+    def fragment_records(self, snapshot, table_name):
+        self.listed[table_name] = self.listed.get(table_name, 0) + 1
+        if table_name not in self._records:
+            raise data_fail("CONTRACT_MISMATCH", "table is not part of this snapshot", details={"table_name": table_name})
+        expected_snapshot = {"computed_moves": "memo-main", "iv_crush_targets": "memo-crush"}[table_name]
+        assert snapshot is not None and snapshot.snapshot_id == expected_snapshot, f"{table_name} listed against the wrong snapshot"
+        return list(self._records[table_name])
+
+    def scan(self, request, *, table_name, max_object_bytes):
+        ticker, day = request.key_filter[0].values[0], request.time_interval.start_inclusive
+        self.scans.append((table_name, ticker, day))
+        assert self.allowed_months is None or day[:7] in self.allowed_months, f"{day} was read before its month was requested"
+        row = self._rows[table_name].get((ticker, day))
+        return [] if row is None else [_Batch([row])]
+
+
+class _NoMemo:
+    """Pass-through stand-in for _RecordMemo: no cache, so every fragment_records call lists the repository again."""
+
+    def __init__(self, repository):
+        self._repository = repository
+
+    def __getattr__(self, name):
+        return getattr(self._repository, name)
+
+    def fragment_records(self, snapshot, table_name):
+        return self._repository.fragment_records(snapshot, table_name)
+
+    def summary(self):
+        return "[pnl_tables] fragment_records not memoised"
+
+
+class _ListRepo:
+    """Fake repository whose one table's records are a single list, handed back on every listing."""
+
+    def __init__(self, records):
+        self._records = records
+
+    def fragment_records(self, snapshot, table_name):
+        return self._records
+
+
+def _tables_for(monkeypatch, repo, memo_cls, events=None):
+    """tables() over the synthetic months, with `memo_cls` standing in for _RecordMemo; the real label_rows runs.
+    The crush earnings_events read is served from the same frames as the main one, so those frames carry the crush-context
+    columns (date_conflict False, event_cluster_id = event_id) that _CRUSH_EVENT_COLUMNS requests."""
+    monkeypatch.setattr(tbl, "_RecordMemo", memo_cls)
+    events = _month_events() if events is None else events
+    admitted = readers.Admitted({"events": events[["event_id", "event_date"]], "excluded": {}})
+    frames = _crush_of({"earnings_events": events})
+    return tbl.tables(repo, MSNAP, admitted, crush_snapshot=MCRUSH, max_object_bytes=MAX, expected_hash=HASH,
+                      read=_Read(frames), calendar=lambda r, s, *, max_object_bytes: _Cal())
+
+
+def _fetch_months(ns):
+    return {month: ns.fetch(LABEL, [f"{t}-{month}" for t in MEMO_TICKERS]) for month in MEMO_MONTHS}
+
+
+def test_memo_label_rows_identical_to_unindexed(monkeypatch):
+    repo = _MonthRepo()
+    shared = tbl._RecordMemo(repo)  # one memo across all months
+    for month in MEMO_MONTHS:
+        for snap, table, cols in ((MSNAP, "computed_moves", MOVE_COLS), (MCRUSH, "iv_crush_targets", CRUSH_COLS)):
+            memoed = tbl.label_rows(shared, snap, table, cols, _want(month), max_object_bytes=MAX)
+            plain = tbl.label_rows(repo, snap, table, cols, _want(month), max_object_bytes=MAX)
+            assert memoed == plain and len(plain) == len(MEMO_TICKERS)
+    # End to end: an event with no move fragment is excluded the same way with and without the memo.
+    omit = [("computed_moves", "BBB", _day("2025-02"))]
+    ns_memo = _tables_for(monkeypatch, _MonthRepo(omit=omit), tbl._RecordMemo)
+    out_memo = _fetch_months(ns_memo)
+    ns_plain = _tables_for(monkeypatch, _MonthRepo(omit=omit), _NoMemo)
+    out_plain = _fetch_months(ns_plain)
+    assert ns_memo.exclusions == ns_plain.exclusions
+    assert ns_memo.exclusions["move_label_missing"] == {"BBB-2025-02"}
+    assert ns_memo.table_hash == ns_plain.table_hash and ns_memo.crush_table_hash == ns_plain.crush_table_hash
+    pd.testing.assert_frame_equal(ns_memo.plan_frame, ns_plain.plan_frame)
+    for month in MEMO_MONTHS:
+        pd.testing.assert_frame_equal(out_memo[month], out_plain[month])
+
+
+@pytest.mark.parametrize("memo_cls", [tbl._RecordMemo, _NoMemo], ids=["memo", "no_memo"])
+def test_memo_non_isolated_event_refused_identically(monkeypatch, memo_cls):
+    # CCC's day in March has two computed_moves fragments: the planner refuses it with the same error either way.
+    repo = _MonthRepo(extra=[("computed_moves", "CCC", _day("2025-03"))])
+    ns = _tables_for(monkeypatch, repo, memo_cls)
+    with pytest.raises(DataError) as exc:
+        ns.fetch(LABEL, ["CCC-2025-03"])
+    assert exc.value.code == "HOLDOUT_ACCESS_DENIED"
+    assert "event-isolated outcome fragments" in str(exc.value)
+
+
+def test_memo_end_to_end_lists_each_table_once_and_prints_the_summary(monkeypatch, capsys):
+    repo = _MonthRepo()
+    ns = _tables_for(monkeypatch, repo, tbl._RecordMemo)
+    _fetch_months(ns)
+    assert repo.listed == {"computed_moves": 1, "iv_crush_targets": 1}  # one listing per table, construction and labels together
+    err = capsys.readouterr().err
+    assert re.findall(MEMO_LOG, err, re.M) == [("iv_crush_targets", "memo-crush", "12"), ("computed_moves", "memo-main", "12")]
+    summaries = [line for line in err.splitlines() if line.startswith("[pnl_tables] fragment_records calls=")]
+    assert len(summaries) == len(MEMO_MONTHS)
+    assert summaries[-1] == "[pnl_tables] fragment_records calls=10 listed=2 (expected: one per table per run)"
+
+
+def test_memo_lists_once_per_table_and_logs_counter(capsys):
+    repo = _MonthRepo()
+    memo = tbl._RecordMemo(repo)
+    for month in MEMO_MONTHS:
+        tbl.label_rows(memo, MSNAP, "computed_moves", MOVE_COLS, _want(month), max_object_bytes=MAX)
+        tbl.label_rows(memo, MCRUSH, "iv_crush_targets", CRUSH_COLS, _want(month), max_object_bytes=MAX)
+    assert repo.listed == {"computed_moves": 1, "iv_crush_targets": 1}
+    assert memo.calls == 2 * len(MEMO_MONTHS) and memo.misses == 2
+    err = capsys.readouterr().err
+    assert re.findall(MEMO_LOG, err, re.M) == [("computed_moves", "memo-main", "12"), ("iv_crush_targets", "memo-crush", "12")]
+    assert memo.summary() == "[pnl_tables] fragment_records calls=8 listed=2 (expected: one per table per run)"
+    # A failed listing (table absent from the snapshot) is not cached: the second call lists again.
+    for _ in range(2):
+        with pytest.raises(DataError) as exc:
+            memo.fragment_records(MSNAP, "absent_table")
+        assert exc.value.code == "CONTRACT_MISMATCH"
+    assert repo.listed["absent_table"] == 2
+    assert memo.calls == 2 * len(MEMO_MONTHS) + 2 and memo.misses == 2
+    assert ("memo-main", "absent_table") not in memo._records
+
+
+def test_memo_never_exposes_later_month_before_its_month():
+    repo = _MonthRepo()
+    repo.allowed_months = {"2025-01"}
+    memo = tbl._RecordMemo(repo)
+    rows = tbl.label_rows(memo, MSNAP, "computed_moves", MOVE_COLS, _want("2025-01"), max_object_bytes=MAX)
+    assert len(rows) == len(MEMO_TICKERS) and all(row["event_date"].startswith("2025-01") for row in rows)
+    assert repo.scans and all(day[:7] == "2025-01" for _, _, day in repo.scans)
+    assert {ticker for _, ticker, _ in repo.scans} == set(MEMO_TICKERS)
+    # The memo warmed on month 1 holds the listing of all four months, and only FragmentRecord objects in it.
+    assert len(memo._records[("memo-main", "computed_moves")]) == len(MEMO_MONTHS) * len(MEMO_TICKERS)
+    assert all(isinstance(record, FragmentRecord) for records in memo._records.values() for record in records)
+    repo.allowed_months.add("2025-02")
+    later = tbl.label_rows(memo, MSNAP, "computed_moves", MOVE_COLS, _want("2025-02"), max_object_bytes=MAX)
+    assert all(row["event_date"].startswith("2025-02") for row in later) and memo.misses == 1
+    assert repo.listed == {"computed_moves": 1}
+
+
+def test_memo_memory_with_realistic_record_count():
+    count = 257_000
+    gib = 1 << 30
+    tracemalloc.start()
+    try:
+        repo = _ListRepo([_fragment("computed_moves", f"S{i:06d}", "2025-01-10") for i in range(count)])
+        before, build_peak = tracemalloc.get_traced_memory()  # the repository's own records are already in `before`
+        tracemalloc.reset_peak()
+        memo = tbl._RecordMemo(repo)
+        got = memo.fragment_records(MSNAP, "computed_moves")
+        _, memo_peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    memo_added, total_peak = memo_peak - before, max(build_peak, memo_peak)
+    print(f"[memo memory] records={count} memo_added={memo_added / (1 << 20):.1f}MiB total_peak={total_peak / (1 << 20):.1f}MiB")
+    assert len(got) == count and memo.misses == 1
+    assert memo_added < gib and total_peak < gib
