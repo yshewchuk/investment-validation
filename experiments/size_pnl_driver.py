@@ -213,7 +213,7 @@ def _drop_facts_missing(src, ready, facts_all):
 
 def _unlabelled(inner_window, labels):
     """Pre-2025 window ids (str) with no label row. Their ids are already recorded by the fetch's exclusions, so this only drops.
-    2025 events cannot be pre-filtered: decisions are frozen before that month's labels are read (R6), so ``_unscoreable`` governs them."""
+    2025 events cannot be pre-filtered: decisions are frozen before that month's labels are read (R6), so the outer stage's no-simulation drop governs them."""
     return {str(e) for e in inner_window["event_id"]} - set(labels.index.astype(str))
 
 
@@ -296,14 +296,12 @@ def _inner(src, out, ready, plan, facts_all, labels):
         elapsed = max(time.monotonic() - started, 1e-9)
         _log(f"inner quarter {number}/{quarters} {label} events={len(chunk['event_id'])} " f"rate={kept / elapsed:.2f}/s eta={(quarters - number) * elapsed / number:.0f}s rss={_rss_mb():.0f}MB")
     if pending: raise fail(_CONFLICT, "no simulable sample for the fast-path equivalence check", details={"reason": "equivalence_empty", "models": sorted(pending)})
-    bad = set()  # structure-level refusal at ANY c, name or model: the event leaves every model's items, history included
+    nontrades = {}  # per model at c=1.0: non-"scored" rows by reason; they are P&L 0 and stay in every model's and c's items
     for mid in ready:
-        for c in tuning.C_GRID:
-            for name in shortvol.NAMES:
-                rows = pd.concat([shortvol.score_events(chunk, events, sims, name, alpha=tuning.ALPHA, c=c) for chunk, events, sims in items[mid]], ignore_index=True)
-                bad |= set(rows.loc[rows["status"] != "scored", "event_id"].astype(str))
-    for mid in ready:  # the common population is one event set for history and trades alike (design section 4)
-        items[mid] = [(chunk, events[~events["event_id"].isin(bad)], {e: s for e, s in sims.items() if e not in bad}) for chunk, events, sims in items[mid]]
+        rows = pd.concat([shortvol.score_events(chunk, events, sims, name, alpha=tuning.ALPHA, c=1.0) for chunk, events, sims in items[mid] for name in shortvol.NAMES], ignore_index=True)
+        missed = rows.loc[rows["status"] != "scored"]
+        counts = missed["reason"].fillna(missed["status"]).astype(str).value_counts()
+        nontrades[mid] = {str(key): int(counts[key]) for key in sorted(counts.index)}
     by_model = {mid: sum(len(events) for _c, events, _s in items[mid]) for mid in ready}
     hashes = {}
     for i, mid in enumerate(ready, start=1):
@@ -311,7 +309,7 @@ def _inner(src, out, ready, plan, facts_all, labels):
         body = tuning.tune(items[mid], mid)
         hashes[mid] = tuning.write_receipt(out / "receipts" / f"tuning_{mid}.json", body)["content_hash"]
         _log(f"tuning model {i}/{len(ready)} {mid} elapsed={time.monotonic() - started:.1f}s " f"c={body['c']} skipped={body['skipped']}")
-    return hashes, max(by_model.values(), default=0), skipped, by_model, common, len(bad), "sha256:" + digest.hexdigest(), checked
+    return hashes, max(by_model.values(), default=0), skipped, by_model, common, nontrades, "sha256:" + digest.hexdigest(), checked
 
 
 def _equivalence_ok(entry):
@@ -379,11 +377,6 @@ def _month_scores(mid, table, events, chunk, labels, start_m, st, *, arms=None):
     return scored, {str(e) for e in events["event_id"] if sims.get(e) is None}
 
 
-def _unscoreable(scored, missing):
-    """Ids a model cannot score this month: no simulation, or a non-"scored" row at any (arm, name)."""
-    return set(missing) | {str(e) for f in scored.values() for e in f.loc[f["status"] != "scored", "event_id"]}
-
-
 def _kept(frame, bad):
     return frame[~frame["event_id"].astype(str).isin(bad)]
 
@@ -427,7 +420,7 @@ def _outer(src, out, ready, receipts, plan, ids, facts_all, labels):
             start_m, month_frames = period.start_time, []
             at = {mid: events[mid][events[mid]["event_date"].dt.to_period("M") == period] for mid in ready}
             scored = {mid: _month_scores(mid, pools[mid], at[mid], chunk, labels, start_m, state[mid]) for mid in ready}
-            bad = set().union(*(_unscoreable(s, m) for s, m in scored.values()))  # one shared population for all models (design section 4)
+            bad = set().union(*(m for _s, m in scored.values()))  # one shared population for all models (design section 4): ids with no simulation
             dropped |= bad
             for mid in ready:
                 month_frames += _month(mid, at[mid], scored[mid][0], bad, chunk, start_m, state[mid])
@@ -513,14 +506,14 @@ def run(src, stage, out_dir, *, event_ids=None, prereg=size_pnl_prereg.require_p
     inputs_receipt = _receipt(out / "receipts" / f"inputs_{stage}.json", body, "inputs_receipt_changed")
     if not ready: raise _no_ready()
     if stage == "inner":
-        hashes, rows, skipped, by_model, common, structure, ladder_hash, checked = _inner(src, out, ready, plan, facts_all, labels)
+        hashes, rows, skipped, by_model, common, non_trades, ladder_hash, checked = _inner(src, out, ready, plan, facts_all, labels)
         _receipt(out / "receipts" / "inner.json",
                  {"stage": "inner", "models": hashes, "events": rows, "events_by_model": by_model, "ladder": ladder_hash,
                   "excluded": excluded, "scope": scope, "inputs": inputs_receipt["content_hash"],
-                  "ladder_skipped": skipped, "common_dropped": common, "common_dropped_structure": structure,
+                  "ladder_skipped": skipped, "common_dropped": common, "non_trades": non_trades,
                   "equivalence": checked}, "inner_receipt_changed")
         _log(f"stage={stage} end elapsed={time.monotonic() - started:.1f}s rss={_rss_mb():.0f}MB "
-             f"ladder_skipped={skipped} common_dropped={common} common_dropped_structure={structure}")
+             f"ladder_skipped={skipped} common_dropped={common} non_trades={non_trades}")
     else:
         rows, skipped = _outer(src, out, ready, receipts, plan, ids, facts_all, labels)
         _log(f"stage={stage} end elapsed={time.monotonic() - started:.1f}s rss={_rss_mb():.0f}MB ladder_skipped={skipped}")
@@ -566,7 +559,7 @@ def _synthetic_scores(src, ready, plan, facts_all, labels):
                     f = scored[mid][0][("as_is", name)]
                     declined[mid][name][0] += int(((f["status"] != "scored") & (f["reason"] == "width_declined")).sum())
                     declined[mid][name][1] += len(f)
-            bad = set().union(*(_unscoreable(s, m) for s, m in scored.values()))  # one shared population for all models
+            bad = set().union(*(m for _s, m in scored.values()))  # one shared population for all models: ids with no simulation
             ids = [set(at[mid]["event_id"].astype(str)) for mid in ready]  # an id missing from any model's month frame leaves for all
             bad |= set().union(*ids) - set.intersection(*ids)
             dropped |= bad

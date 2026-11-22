@@ -702,7 +702,8 @@ def test_one_model_simulation_failure_drops_the_event_for_every_model(tmp_path, 
     _assert_e3_shared_dropped(tmp_path, decide_inputs)
 
 
-def test_one_model_structure_refusal_drops_the_event_for_every_model(tmp_path, outer_stubs, monkeypatch):
+def test_one_model_structure_refusal_leaves_the_event_in_every_models_history(tmp_path, outer_stubs, monkeypatch):
+    """A structure refusal is a non-trade for that (model, structure, c): P&L 0, so E3 stays in every model's history and rows."""
     decide_inputs = _shared_drop_run(tmp_path, monkeypatch)
     first = driver.shortvol.NAMES[0]
 
@@ -715,7 +716,11 @@ def test_one_model_structure_refusal_drops_the_event_for_every_model(tmp_path, o
 
     monkeypatch.setattr(driver.shortvol, "score_events", refuse_e3_for_cand)
     driver.run(sources(), "outer", tmp_path, prereg=OK)
-    _assert_e3_shared_dropped(tmp_path, decide_inputs)
+    frame = pd.read_parquet(tmp_path / "decisions.parquet")
+    assert set(frame["model_id"]) == {"prod", "cand"}
+    assert set(frame.loc[frame["event_id"].astype(str) == "E3", "model_id"]) == {"prod", "cand"}  # E3 keeps its rows
+    assert any("E3" in set(d["event_id"].astype(str)) for d in decide_inputs)  # and every model's history
+    assert tuning.load_receipt(tmp_path / "receipts" / "outer.json")["scoreability_dropped"] == 0  # no no-simulation drop
 
 
 def test_oversized_decisions_tmp_refuses_before_outer_json(tmp_path, outer_stubs, monkeypatch):
