@@ -375,13 +375,50 @@ def test_an_event_declined_at_unity_stays_in_every_models_items_as_a_non_trade(t
     inner = tuning.load_receipt(tmp_path / "receipts" / "inner.json")
     primary = next(mid for mid in tuned if mid != "twin")
     assert inner["non_trades"] == {primary: {}, "twin": {"width_declined": len(driver.shortvol.NAMES)}}  # 7 == len(NAMES)
+    assert inner["missing_facts"] == {primary: {}, "twin": {}}  # a width decline is a non-trade, never a missing fact
     assert inner["common_dropped"] == {"2023Q2": 0}  # the quarter-level count is unchanged; no model-level drop here
 
 
+def test_an_entry_quote_unusable_event_is_a_missing_fact_and_stays_in_tune_items(tmp_path, stubs, monkeypatch):
+    """The twin's E2 is non-"scored" with reason entry_quote_unusable at c == 1.0 only. That is a missing fact, not a non-trade:
+    it is counted under missing_facts and not under non_trades, and the driver keeps E2 in every model's tuned items."""
+    real, seen = readers.model_tables, {}
+
+    def twinned(bound, roster, admitted, production, **kw):
+        tables = real(bound, roster, admitted, production, **kw)
+        mid = next(iter(tables))
+        seen["twin"] = tables[mid]["table"].copy()
+        seen["twin"].attrs["twin"] = True
+        return {mid: tables[mid], "twin": {**tables[mid], "table": seen["twin"]}}
+
+    def sims_of(chunk_, events, table, labels):  # the twin's E2 is marked; a marked sim is still a simulation
+        return {e: ("undetermined" if table.attrs.get("twin") and e == "E2" else "sim") for e in events["event_id"]}
+
+    def scored_of(chunk_, events, sims, name, c, **kw):  # the twin's E2 has no usable entry quote at c == 1.0 only
+        missing = [sims.get(e) == "undetermined" and c == 1.0 for e in events["event_id"]]
+        return pd.DataFrame({"event_id": events["event_id"].to_numpy(),
+                             "status": ["undetermined" if m else "scored" for m in missing],
+                             "reason": ["entry_quote_unusable" if m else None for m in missing]})
+
+    monkeypatch.setattr(readers, "model_tables", twinned)
+    monkeypatch.setattr(driver, "_sims", sims_of)
+    monkeypatch.setattr(driver.shortvol, "score_events", scored_of)
+    use_chunks(monkeypatch, [("2023Q2", chunk("E1", "E2"))])
+    summary = driver.run(sources(), "inner", tmp_path, prereg=OK)
+    tuned = {mid: ids for kind, mid, ids in stubs if kind == "tune"}
+    assert set(tuned) == set(summary["models"]) and len(tuned) == 2
+    assert all(ids == ("E1", "E2") for ids in tuned.values())  # E2 stays in every model's items
+    inner = tuning.load_receipt(tmp_path / "receipts" / "inner.json")
+    primary = next(mid for mid in tuned if mid != "twin")
+    assert inner["missing_facts"] == {primary: {}, "twin": {"entry_quote_unusable": len(driver.shortvol.NAMES)}}  # 7 == len(NAMES)
+    assert inner["non_trades"] == {primary: {}, "twin": {}}  # the missing fact is not counted as a non-trade
+
+
 def test_a_declined_off_unity_event_stays_in_every_models_items_for_the_real_tune(tmp_path, monkeypatch):
-    """No fake tune: the real ``tuning.tune`` and ``choose_c`` run on 60 events in 2023-2024 across 7 structures. Every event
-    is taken at every c (P&L 1.0 each), so trades[1.0] == 7 * 60 == 420 >= MIN_TRADES. The twin declines one event (V07) at
-    c == 1.5 only: a non-trade for that (model, structure, c), so it stays in both items and only the twin's c == 1.5 total drops."""
+    """tuning.decide and tuning.score are stubbed. The real ``tuning.tune`` and ``choose_c`` run on 60 events in 2023-2024 across
+    7 structures. Every event is taken at every c (P&L 1.0 each), so trades[1.0] == 7 * 60 == 420 >= MIN_TRADES. The twin declines
+    one event (V07) at c == 1.5 only: a non-trade for that (model, structure, c), so it stays in both items and only the twin's
+    c == 1.5 total drops. This test covers real tune/choose_c and item retention only."""
     ids = [f"V{i:02d}" for i in range(60)]
     dates = [pd.Timestamp("2023-01-10") + pd.Timedelta(days=12 * i) for i in range(60)]  # 2023-01 .. 2024-12
     base = pd.DataFrame([{"event_id": e, "pred_abs_move": 5.0, "pred_iv_crush_30": -12.0, "horizon_sessions": 1, "abs_move": 4.0,

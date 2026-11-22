@@ -728,6 +728,8 @@ def test_one_model_structure_refusal_leaves_the_event_in_every_models_history(tm
     declined = frame[(frame["event_id"].astype(str) == "E3") & (frame["model_id"] == "cand")
                      & (frame["status"] == "undetermined") & (frame["reason"] == "width_declined")]
     assert len(declined) >= 1  # the candidate's declined E3 row is published, as the stub sets it
+    # One row per (model, book, arm, structure, event): the arm is part of the key, so the as_is and retuned arms may each hold one
+    assert not declined.duplicated(["model_id", "book", "arm_or_rule", "structure", "event_id"]).any()
     for mid in ("prod", "cand"):  # E3 is in each model's own decide history
         assert any("E3" in set(d["event_id"].astype(str)) for d in decide_inputs if set(d["model_id"]) == {mid})
     assert tuning.load_receipt(tmp_path / "receipts" / "outer.json")["scoreability_dropped"] == 0  # no no-simulation drop

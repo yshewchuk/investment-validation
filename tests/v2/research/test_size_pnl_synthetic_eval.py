@@ -233,6 +233,23 @@ def test_population_drops_an_event_undetermined_under_any_model_or_unit():
     assert ev.evaluate(d, META, TICKERS, ARM, resamples=RESAMPLES)["hash"] == ev.evaluate(d[d["event_id"] != "E0"], META, TICKERS, ARM, resamples=RESAMPLES)["hash"]
 
 
+def test_population_without_a_reason_column_drops_every_event_with_an_undetermined_row():
+    d = frame_of()
+    assert "reason" not in d.columns
+    at = (d["model_id"] == "M02") & (d["event_id"] == "E0") & (d["structure"] == "S1")
+    d.loc[at, "status"] = "undetermined"
+    assert "E0" not in set(ev.population(d)["event_id"].astype(str))
+    assert len(ev.population(d)) == len(d) - 8 * 3  # E0's rows under all 8 models and 3 units leave E: nothing is exempt
+
+
+def test_x6_without_a_reason_column_counts_a_nan_width_as_missing():
+    d = frame_of(width=[1, 1, 2, 2, 3, 3, 4, np.nan])
+    assert "reason" not in d.columns
+    out = ev.evaluate(d, META, TICKERS, ARM, resamples=RESAMPLES)
+    assert row(out, "X6", "S1")[2:] == ["fail", "missing_widths=1 taken=8"]  # no declined widths exist, so the NaN is missing
+    assert "X6 S1" in out["stop"]
+
+
 def test_population_keeps_non_trades_and_drops_burn_in_or_missing_data():
     d = frame_of()
     d["reason"] = "scored"
@@ -270,7 +287,7 @@ def test_short_vol_non_trade_keeps_its_event_and_straddle_non_trade_drops_it(rea
     assert "E0" in set(ev.population(d)["event_id"].astype(str))
     d = frame_of()
     d["reason"] = "scored"
-    _mark_one(d, "M02", "E0", "R_L", "straddle", reason)  # missing fact = undetermined (design section 6)
+    _mark_one(d, "M02", "E0", "R_L", "straddle", reason)  # missing fact = undetermined (design section 4)
     assert "E0" not in set(ev.population(d)["event_id"].astype(str))
 
 

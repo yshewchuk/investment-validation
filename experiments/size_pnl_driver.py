@@ -267,6 +267,12 @@ def _equivalence(table, events, sims, chunk, labels):
     return equivalence.check_chunk(chunk, month, sims, pool, alpha=ALPHA)
 
 
+def _reason_counts(reasons):
+    """{reason: n} of a reason Series, sorted by reason."""
+    counts = reasons.value_counts()
+    return {str(key): int(counts[key]) for key in sorted(counts.index)}
+
+
 def _inner(src, out, ready, plan, facts_all, labels):
     exits = _exits(src)
     items, quarters = {mid: [] for mid in ready}, pd.to_datetime(plan["event_date"]).dt.to_period("Q").nunique()
@@ -296,13 +302,15 @@ def _inner(src, out, ready, plan, facts_all, labels):
         elapsed = max(time.monotonic() - started, 1e-9)
         _log(f"inner quarter {number}/{quarters} {label} events={len(chunk['event_id'])} " f"rate={kept / elapsed:.2f}/s eta={(quarters - number) * elapsed / number:.0f}s rss={_rss_mb():.0f}MB")
     if pending: raise fail(_CONFLICT, "no simulable sample for the fast-path equivalence check", details={"reason": "equivalence_empty", "models": sorted(pending)})
-    nontrades = {}  # per model, counts at c=1.0 only: non-"scored" rows by reason (short-vol non-trades are P&L 0 and stay in every model's and c's items)
+    nontrades, missing_facts = {}, {}  # per model, counts at c=1.0 only: non-"scored" rows by reason. A non-trade reason (short-vol, P&L 0) stays in every model's and c's items; any other reason is a missing fact, counted apart
     for i, mid in enumerate(ready, start=1):
         started = time.monotonic()
         rows = pd.concat([shortvol.score_events(chunk, events, sims, name, alpha=tuning.ALPHA, c=1.0) for chunk, events, sims in items[mid] for name in shortvol.NAMES], ignore_index=True)
         missed = rows.loc[rows["status"] != "scored"]
-        counts = missed["reason"].fillna(missed["status"]).astype(str).value_counts()
-        nontrades[mid] = {str(key): int(counts[key]) for key in sorted(counts.index)}
+        reasons = missed["reason"].fillna(missed["status"]).astype(str)
+        is_non_trade = reasons.isin(synthetic_eval.NON_TRADE_REASONS)
+        nontrades[mid] = _reason_counts(reasons[is_non_trade])
+        missing_facts[mid] = _reason_counts(reasons[~is_non_trade])
         _log(f"non-trade recount model {i}/{len(ready)} {mid} elapsed={time.monotonic() - started:.1f}s rss={_rss_mb():.0f}MB")
     by_model = {mid: sum(len(events) for _c, events, _s in items[mid]) for mid in ready}
     hashes = {}
@@ -311,7 +319,7 @@ def _inner(src, out, ready, plan, facts_all, labels):
         body = tuning.tune(items[mid], mid)
         hashes[mid] = tuning.write_receipt(out / "receipts" / f"tuning_{mid}.json", body)["content_hash"]
         _log(f"tuning model {i}/{len(ready)} {mid} elapsed={time.monotonic() - started:.1f}s " f"c={body['c']} skipped={body['skipped']}")
-    return hashes, max(by_model.values(), default=0), skipped, by_model, common, nontrades, "sha256:" + digest.hexdigest(), checked
+    return hashes, max(by_model.values(), default=0), skipped, by_model, common, nontrades, missing_facts, "sha256:" + digest.hexdigest(), checked
 
 
 def _equivalence_ok(entry):
@@ -508,14 +516,14 @@ def run(src, stage, out_dir, *, event_ids=None, prereg=size_pnl_prereg.require_p
     inputs_receipt = _receipt(out / "receipts" / f"inputs_{stage}.json", body, "inputs_receipt_changed")
     if not ready: raise _no_ready()
     if stage == "inner":
-        hashes, rows, skipped, by_model, common, non_trades, ladder_hash, checked = _inner(src, out, ready, plan, facts_all, labels)
+        hashes, rows, skipped, by_model, common, non_trades, missing_facts, ladder_hash, checked = _inner(src, out, ready, plan, facts_all, labels)
         _receipt(out / "receipts" / "inner.json",
                  {"stage": "inner", "models": hashes, "events": rows, "events_by_model": by_model, "ladder": ladder_hash,
                   "excluded": excluded, "scope": scope, "inputs": inputs_receipt["content_hash"],
-                  "ladder_skipped": skipped, "common_dropped": common, "non_trades": non_trades,
+                  "ladder_skipped": skipped, "common_dropped": common, "non_trades": non_trades, "missing_facts": missing_facts,
                   "equivalence": checked}, "inner_receipt_changed")
         _log(f"stage={stage} end elapsed={time.monotonic() - started:.1f}s rss={_rss_mb():.0f}MB "
-             f"ladder_skipped={skipped} common_dropped={common} non_trades={non_trades}")
+             f"ladder_skipped={skipped} common_dropped={common} non_trades={non_trades} missing_facts={missing_facts}")
     else:
         rows, skipped = _outer(src, out, ready, receipts, plan, ids, facts_all, labels)
         _log(f"stage={stage} end elapsed={time.monotonic() - started:.1f}s rss={_rss_mb():.0f}MB ladder_skipped={skipped}")
