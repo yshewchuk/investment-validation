@@ -16,8 +16,9 @@ beside the v14 run, container 12 GiB). Agents never run them.
    (`python3 -m experiments.size_pnl_prereg --check`). Without it the runner refuses
    `EXPERIMENT_IDENTITY_CONFLICT` (`planned_row_missing`) before reading anything.
 3. `--sources experiments.size_pnl_sources:build_sources --sources-config <config.json>` builds
-   `size_pnl_driver.Sources` (design section 13: catalog, store root, v14 spec/request/plan-ref, pinned snapshot,
-   production hash). `production_hash` must equal the `tier4_forecasts` dataset-version manifest hash of the pinned
+   `size_pnl_driver.Sources` (design section 13: catalog, store root, v14 spec and plan-ref, pinned snapshot,
+   production hash). The sealed v14 plan is loaded by its content hash and run id, never re-derived (a later checkout
+   cannot match v14's source closure): `plan_hash_mismatch`, `plan_schema_unknown`, `plan_anchor_mismatch`. `production_hash` must equal the `tier4_forecasts` dataset-version manifest hash of the pinned
    snapshot, else `production_hash_mismatch` before `size_pnl_tables` reads any table. A missing table, column or event refuses
    `source_table_missing`; a non-finite, FLT_MAX or non-USD-scale `mcap_usd` refuses `source_value_invalid`.
 
@@ -45,7 +46,7 @@ python3 tools/bounded_run.py --heavy --cores 8 -- python3 experiments/EXP-188_si
   --sources experiments.size_pnl_sources:build_sources --sources-config <config.json> --out-dir <smoke-dir>
 ```
 
-Here `<config.json>` holds `catalog`, `store_root`, `spec`, `request`, `plan_ref`, `snapshot_id`, `production_hash`
+Here `<config.json>` holds `catalog`, `store_root`, `spec`, `plan_ref`, `snapshot_id`, `production_hash`
 (design section 13); a real run uses the same `--sources` and `--sources-config`.
 
 Then repeat with `--stage outer` and the same `--event-ids`. The ids are receipted as `scope`; a full-population

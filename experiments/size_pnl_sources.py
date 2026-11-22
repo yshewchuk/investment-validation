@@ -1,6 +1,8 @@
 """EXP-188 real-store Sources adapter, slices 1 and 2 (design section 13).
 
 Slice 1 opens the catalog read-only, the artifact store, the sealed plan, the selection record, the admission and the chain index, and derives the roster inputs from the plan. Slice 2 adds the table-backed providers (`fetch`, `facts`, `plan_frame`, `table_hash`) from `size_pnl_tables`.
+
+The sealed plan is consumed, not re-derived: it is loaded from the store and verified by content hash and by run id. No installed-code re-derivation runs here.
 """
 import functools
 import json
@@ -13,17 +15,19 @@ from pathlib import Path
 from engine.v2.contracts import ArtifactRef
 from engine.v2.data.errors import DataError
 from engine.v2.data.repository import Repository
-from engine.v2.foundation import ArtifactStore, DocumentError, from_document, to_document
+from engine.v2.foundation import ArtifactError, ArtifactStore, DocumentError, from_document, to_document
 from engine.v2.ops.errors import fail
 from engine.v2.ops.experiments import experiment_spec_from_document
 from experiments import size_pnl_driver, size_pnl_inputs, size_pnl_ladder, size_pnl_readers, size_pnl_tables
-from experiments.magnitude_search_plan import read_search_plan
+from experiments.magnitude_search_plan import PLAN_V2, PLAN_V3
 from experiments.magnitude_search_records import read_record
 from experiments.native_registration import read_native_registration
 
-_KEYS = ("catalog", "store_root", "spec", "request", "plan_ref", "snapshot_id", "production_hash")
+_KEYS = ("catalog", "store_root", "spec", "plan_ref", "snapshot_id", "production_hash")
 _LIMIT = 1 << 20
 MAX_OBJECT_BYTES = 1 << 28
+MAX_PLAN_BYTES = 64 * 1024 * 1024
+_PLAN_SCHEMAS = (PLAN_V2, PLAN_V3)
 # same caps as magnitude_search_plan._BOUNDS_CATALOG_LIMITS (the repo's bounded label-bounds admission)
 MAX_SNAPSHOT_TABLES = 256
 MAX_SNAPSHOT_FRAGMENTS = 65_536
@@ -91,6 +95,28 @@ def derive_panel_id(plan):
     if not (isinstance(value, str) and value.strip()):
         raise fail(_CONFLICT, "the sealed plan has no single panel source binding", details={"reason": "panel_binding_ambiguous"})
     return value
+
+
+def load_plan(store, registration, ref):
+    """Load the sealed plan from the store. The bytes are verified by content hash (read_verified) and the anchor by run id; nothing is re-derived."""
+    if ref.schema_ref not in _PLAN_SCHEMAS:
+        raise fail(_CONFLICT, "the sealed plan has an unknown schema", details={"reason": "plan_schema_unknown"})
+    if ref.byte_size > MAX_PLAN_BYTES:
+        raise fail(_CONFLICT, "the sealed plan is too large", details={"reason": "plan_too_large"})
+    try:
+        data = store.read_verified(ref)
+    except ArtifactError:
+        raise fail(_CONFLICT, "the sealed plan failed content verification", details={"reason": "plan_hash_mismatch"}) from None
+    try:
+        plan = json.loads(data)
+    except (ValueError, RecursionError, UnicodeDecodeError):
+        raise fail(_CONFLICT, "the sealed plan is not valid JSON", details={"reason": "plan_malformed"}) from None
+    if not isinstance(plan, dict) or plan.get("schema_version") != ref.schema_ref:
+        raise fail(_CONFLICT, "the sealed plan does not match its reference schema", details={"reason": "plan_malformed"})
+    anchor = plan.get("anchor")
+    if not (isinstance(anchor, dict) and anchor.get("run_id") == registration.run_id):
+        raise fail(_CONFLICT, "the sealed plan is anchored to another run", details={"reason": "plan_anchor_mismatch"})
+    return plan
 
 
 def _open(cfg):
@@ -218,7 +244,6 @@ def build_sources(args):
         ref = from_document(ArtifactRef, _read_json(cfg["plan_ref"], "input_unreadable"))
     except (DocumentError, TypeError):
         raise _refuse("input_unreadable", "a SIZE input document is invalid") from None
-    request = _read_json(cfg["request"], "input_unreadable")
     conn, store = _open(cfg)
     try:
         registration = read_native_registration(conn, store, spec)
@@ -230,7 +255,7 @@ def build_sources(args):
         snapshot = _snapshot(repository, cfg["snapshot_id"])
         if to_document(snapshot) != pinned:
             raise _snapshot_mismatch()
-        plan = read_search_plan(conn, store, registration, request, ref)
+        plan = load_plan(store, registration, ref)
         panel_id = derive_panel_id(plan)
         read = functools.partial(read_record, conn, store, registration.run_id)
         selection = read("selection")
