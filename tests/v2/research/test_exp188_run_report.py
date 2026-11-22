@@ -19,6 +19,7 @@ def test_run_py_report_stage_calls_assemble_with_the_plan_ticker_map(tmp_path, m
     assert run_py.main(_argv_for(tmp_path, "report")) == 0
     out_dir, tickers, kwargs = calls[0]
     assert tickers == {e: "T" for e in PLAN_FRAME["event_id"].astype(str)}  # the plan's ticker for every event
+    assert isinstance(kwargs.pop("plan_binding"), str)  # the receipted plan hash, passed as a non-None string
     assert kwargs == {"expected": sources().expected, "spec_hash": "SPEC", "snapshot": "snap-1"}  # the requested identity
     assert json.loads(capsys.readouterr().out)["sections"] == 0
 

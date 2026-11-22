@@ -17,7 +17,7 @@ CONFLICT = "EXPERIMENT_IDENTITY_CONFLICT"
 EVENT_DATES = {"E01": "2024-02-15", "E02": "2024-05-15", "E03": "2025-02-15", "E04": "2025-05-15"}
 TICKERS = {"E01": "AAA", "E02": "BBB", "E03": "CCC", "E04": "AAA"}
 IDENTITY = {"plan_id": "plan-1", "registration_id": "reg-1", "seal_id": "seal-1", "panel_id": "panel-1"}
-SPEC_HASH, SNAPSHOT = "a" * 64, "snap-1"
+SPEC_HASH, SNAPSHOT, PLAN = "a" * 64, "snap-1", "p" * 64  # PLAN: the receipted plan hash of the fixture's inputs_outer
 ROLES = {"m-hsq": "H-sq", "m-habs": "H-abs", "m-eraw": "E-raw", "m-elog": "E-log", "m-nraw": "N-raw", "m-nlog": "N-log"}
 MEDIAN_ROLES = ("H-abs", "E-log", "N-log")  # each pays one dollar more per event than its mean-type partner
 PAIRS_OK = {"H": "testable", "E": "testable", "N": "testable"}
@@ -59,7 +59,7 @@ def build(tmp_path, *, rows_fn=None, pairs=None, dates=None, scope=None):
     tuning.write_receipt(rdir / "inner.json", {"stage": "inner", "models": hashes, "excluded": {}})
     inputs = tuning.write_receipt(rdir / "inputs_outer.json", {
         "stage": "inputs", "roster": _roster(pairs or PAIRS_OK), "models": {mid: {"status": "ready"} for mid in ROLES},
-        "identity": IDENTITY, "spec_hash": SPEC_HASH, "snapshot": SNAPSHOT})
+        "identity": IDENTITY, "spec_hash": SPEC_HASH, "snapshot": SNAPSHOT, "plan": PLAN})
     rows = _rows(dates or EVENT_DATES)
     rows = rows_fn(rows) if rows_fn else rows
     frame = rows if isinstance(rows, pd.DataFrame) else pd.DataFrame(rows)
@@ -118,7 +118,8 @@ def test_happy_path_writes_every_section_in_order(tmp_path):
     assert positions == sorted(positions) and len(set(positions)) == len(heads)
     assert "not_testable: labels_not_in_decisions" in text
     assert "not_testable: native_pool_arm_not_produced" in text
-    assert "| H1 | +1 |" in text
+    assert "| H1 | +1 | clear |" in text and "| H2 | -1 | reversed |" in text and "| H3 | +1 | no_difference |" in text
+    assert "| H3 | E | as_is | ok | 4 | 0 | 0/0/4 | 0 | 2024:0 2025:0 | [0, 0] | [0, 0] |" in text  # d = 0 per event
     assert "| H1 | H | as_is | ok | 4 | 1 |" in text  # the median-minus-mean P&L is exactly 1 per event
     assert "### T2 Population (events in E)" in text
     assert "not recorded in decisions.parquet" in text
@@ -237,16 +238,42 @@ def test_failed_replace_keeps_the_old_report_and_leaves_no_tmp(tmp_path, monkeyp
     assert not list(out.glob("*.tmp"))
 
 
-def test_t10_verdicts_are_classify_of_the_summaries_it_is_given(tmp_path, monkeypatch):
-    seen = []
-    real_t10 = assemble_mod.report.t10_verdicts
-    monkeypatch.setattr(assemble_mod.report, "t10_verdicts", lambda hypotheses: seen.append(hypotheses) or real_t10(hypotheses))
+def test_t10_verdicts_are_the_pinned_literals(tmp_path):
     out = build(tmp_path)
     assemble_mod.assemble(out, TICKERS)
-    sign, pairs = seen[0]["H1"]
     text = (out / "REPORT.md").read_text(encoding="utf-8")
-    assert f"| H1 | +1 | {contrast.classify(pairs, sign)} |" in text
+    verdicts = [_cells(line) for line in _section_lines(text, "### T10") if line.startswith("| H")]
+    assert verdicts == [["H1", "+1", "clear"], ["H2", "-1", "reversed"], ["H3", "+1", "no_difference"]]
     assert "not_testable because the required full year" not in text
+
+
+def test_plan_binding_matching_the_receipt_succeeds(tmp_path):
+    out = build(tmp_path)
+    assemble_mod.assemble(out, TICKERS, plan_binding=PLAN)
+    assert (out / "REPORT.md").exists()
+
+
+def test_plan_binding_mismatch_refuses_a_full_run(tmp_path):
+    out = build(tmp_path)
+    with pytest.raises(Refusal) as caught:
+        assemble_mod.assemble(out, TICKERS, plan_binding="q" * 64)
+    assert caught.value.code == CONFLICT
+    assert caught.value.details["reason"] == "report_inputs_mismatch"
+    assert not (out / "REPORT.md").exists()
+
+
+def test_plan_binding_is_skipped_for_a_smoke_scope(tmp_path):
+    out = build(tmp_path, scope="f" * 64)
+    assemble_mod.assemble(out, TICKERS, plan_binding="q" * 64)
+    assert (out / "REPORT.md").exists()
+
+
+def test_unknown_decision_status_refuses_as_decisions_invalid(tmp_path):
+    out = build(tmp_path, rows_fn=lambda rows: [{**rows[0], "status": "weird"}, *rows[1:]])
+    with pytest.raises(Refusal) as caught:
+        assemble_mod.assemble(out, TICKERS)
+    assert caught.value.details["reason"] == "report_decisions_invalid"
+    assert not (out / "REPORT.md").exists()
 
 
 def test_2025_only_decisions_are_not_testable_and_t7_still_shows_stats(tmp_path):

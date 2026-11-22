@@ -87,7 +87,8 @@ def main(argv: list[str] | None = None) -> int:
                 ids, tickers = sources.plan_frame["event_id"].astype(str), sources.plan_frame["ticker"]
                 if not ids.is_unique or (tickers.isna() | (tickers.astype(str).str.strip() == "")).any():
                     raise fail(_INVALID, "the plan has duplicate event ids or blank tickers", details={"reason": "plan_malformed"})
-                summary = size_pnl_assemble.assemble(args.out_dir, dict(zip(ids, tickers.astype(str))), expected=sources.expected, spec_hash=receipt["spec_hash"], snapshot=sources.snapshot_id)
+                summary = size_pnl_assemble.assemble(args.out_dir, dict(zip(ids, tickers.astype(str))), expected=sources.expected, spec_hash=receipt["spec_hash"], snapshot=sources.snapshot_id,
+                                                       plan_binding=size_pnl_driver.plan_binding(sources.plan_frame))
             elif args.stage == "synthetic": summary = size_pnl_driver.run_synthetic(sources, args.out_dir, event_ids=event_ids, replay=args.replay, prereg=lambda: receipt)
             else: summary = size_pnl_driver.run(sources, args.stage, args.out_dir, event_ids=event_ids, prereg=lambda: receipt)
     except (OpsError, Refusal, DataError) as exc:

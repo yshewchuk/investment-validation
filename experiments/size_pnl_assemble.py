@@ -200,6 +200,8 @@ def _load_decisions(out, outer):
                              pnl_dollars=pd.to_numeric(frame["pnl_dollars"], errors="raise"))
     if frame["event_date"].isna().any():
         raise _refuse("report_decisions_invalid", "decisions.parquet has a blank event_date")
+    if not frame["status"].isin(report.STATUSES).all():
+        raise _refuse("report_decisions_invalid", "decisions.parquet has a status outside report.STATUSES")
     return frame
 
 
@@ -255,9 +257,10 @@ def _sections(out, outer, inputs, inner, tuned, tickers):
     ]
 
 
-def assemble(out_dir, tickers, *, expected=None, spec_hash=None, snapshot=None):
+def assemble(out_dir, tickers, *, expected=None, spec_hash=None, snapshot=None, plan_binding=None):
     """Write ``out_dir/REPORT.md`` from the outer receipts and decisions.parquet; returns a JSON-safe summary.
-    Each of expected, spec_hash and snapshot that is given must equal the matching field of inputs_outer.json."""
+    Each of expected, spec_hash and snapshot that is given must equal the matching field of inputs_outer.json.
+    ``plan_binding`` (the receipted plan hash) binds the ticker map to a full run's plan."""
     if not _tickers_ok(tickers):
         raise _refuse("report_tickers_invalid", "tickers must map non-blank event ids to non-blank tickers")
     started, out = time.monotonic(), Path(out_dir)
@@ -266,8 +269,12 @@ def assemble(out_dir, tickers, *, expected=None, spec_hash=None, snapshot=None):
     requested = {"identity": expected, "spec_hash": spec_hash, "snapshot": snapshot}
     with _admit("report_receipt_malformed", "inputs_outer.json lacks a bound identity field"):
         mismatched = [key for key, want in requested.items() if want is not None and inputs[key] != want]
+        # A smoke scope skips this: the smoke receipt binds a restricted plan, so its plan hash cannot match the full one.
+        plan_bad = plan_binding is not None and outer["scope"] is None and inputs.get("plan") != plan_binding
     if mismatched:
         raise _refuse("report_inputs_mismatch", f"inputs_outer.json differs from the requested {', '.join(mismatched)}")
+    if plan_bad:
+        raise _refuse("report_inputs_mismatch", "the plan's tickers do not match the receipted plan")
     with _admit("report_receipt_malformed", "a receipt or decisions row lacks a required field"):
         sections = _sections(out, outer, inputs, inner, tuned, tickers)
     text = report.build_report(sections)
