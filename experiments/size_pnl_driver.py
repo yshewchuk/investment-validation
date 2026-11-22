@@ -368,11 +368,14 @@ def _model_state(c):
     return {"c": float(c), "scored": {"as_is": [], "retuned": []}, "edges": edges}
 
 
-def _rows(mid, book, arm, dec, taken, events):
-    """Decision rows of one (model, book, arm), with the marks of the taken rows and the model's forecast (pred_move, pred_crush) merged on event_id."""
+def _rows(mid, book, arm, dec, taken, events, taken_mid=None):
+    """Decision rows of one (model, book, arm), with the marks of the taken rows, the Amendment 1 sensitivity marks (``exit_value_mid``,
+    ``pnl_dollars_mid``: NaN when ``taken_mid`` is None) and the model's forecast (pred_move, pred_crush) merged on event_id."""
     take = [c for c in [*_MARKS, "entry_cost", "pnl_per_share"] if c not in dec.columns]
     fc = events[["event_id", "pred_move", "pred_crush"]].assign(event_id=events["event_id"].astype(str))
     frame = dec.merge(taken[["event_id", *take]], on="event_id", how="left").merge(fc, on="event_id", how="left")
+    if taken_mid is None: frame = frame.assign(exit_value_mid=np.nan, pnl_dollars_mid=np.nan)
+    else: frame = frame.merge(taken_mid[["event_id", "exit_value", "pnl_dollars"]].rename(columns={"exit_value": "exit_value_mid", "pnl_dollars": "pnl_dollars_mid"}), on="event_id", how="left")
     if "structure" not in frame.columns: frame = frame.assign(structure=None)
     return frame.assign(model_id=mid, book=book, arm_or_rule=arm)
 
@@ -404,12 +407,14 @@ def _month(mid, events, scored, bad, chunk, start_m, st, *, arms=None, emit_from
             if not output: continue
             decided = shortvol.decide(pd.concat(st["scored"][arm], ignore_index=True))
             mine = decided[decided["event_id"].astype(str).isin(ids) & (decided["structure"] == name)]
-            frames.append(_rows(mid, "short_vol", arm, mine, shortvol.score(chunk, events, mine, name, ALPHA, c=c), events))
+            taken_mid = shortvol.score(chunk, events, mine, name, ALPHA, c=c, mid_marks=True)  # Amendment 1 sensitivity marks
+            frames.append(_rows(mid, "short_vol", arm, mine, shortvol.score(chunk, events, mine, name, ALPHA, c=c), events, taken_mid=taken_mid))
     first = None
     for rule in straddle.RULES:
         dec = straddle.decide(events, st["edges"], rule, chunk)
         first = dec if first is None else first
-        if output: frames.append(_rows(mid, "straddle", rule, dec, straddle.score(chunk, events, dec, ALPHA), events))
+        if output: frames.append(_rows(mid, "straddle", rule, dec, straddle.score(chunk, events, dec, ALPHA), events,
+                                       taken_mid=straddle.score(chunk, events, dec, ALPHA, mid_marks=True)))
     st["edges"] = pd.concat([st["edges"], first[["event_date", "edge"]]], ignore_index=True)
     return frames
 

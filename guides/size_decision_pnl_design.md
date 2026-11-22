@@ -235,3 +235,17 @@ A synthetic-predictor calibration arm (controls and power; never part of the ros
 **Split list (estimates).** Slice 1: config, catalog and store open, `read`, `plan`, `selection`, `admit`, `load_index`, roster inputs, refusals (slice 2 replaced the `source_table_missing` stubs of `fetch`, `facts` and `plan_frame`): about 150 code lines (`size_pnl_sources.py` plus the one-line `run.py` argument), about 200 test lines, about 100 doc words (runbook). Slice 2: `fetch`, `facts`, `plan_frame`, hashes, and the runbook smoke command: about 200 code lines, about 250 test lines, about 200 doc words. Tests use synthetic fixtures only.
 
 **Notes.** `--sources-config` is optional for `run.py` (other `--sources` factories ignore it) but required by `build_sources`. The `tier4_forecasts` row is the only `production_hash` source; `LEAD` makes the reader's `lead_unavailable` guard vacuous for this table, which is accepted because the walk-forward forecast is lead-1 by construction. The config file is read with the hostile-input pattern of `run.py` `_read_input`. Every runbook invocation adds `--sources-config <config.json>`.
+
+## 14. Amendment 1 (2026-11-22): labelled exit-marking sensitivity arm `marks_mid`
+
+**Reason.** User decision 2026-11-22, taken after a diagnostic on inner data only. **What was seen, verbatim:** a 500-ticker 2023-24 inner diagnostic (no 2025 data read) showed that design section 5's per-leg fallback rung 2 (a zero-bid or wide exit leg marked at alpha 0) fires on about 62% of taken short-vol trades and produces negative structure exit values on about 20% of them. Taken-trade mean return on debit was about -7% to -29% per model under the pre-registered marks vs about -14% to +27% with every leg at the alpha mark; EXP-133 marked every leg at the alpha mark.
+
+**Unchanged.** No 2025 data was read for this amendment. The primary marks (section 6), primary metrics, hypotheses H1-H3, the verdict rules and the judgement thresholds, the roster, the tuning (the grid and `c` per model, frozen in the primary tuning receipts) and the T10 verdict are exactly as pre-registered. T10 is computed from the primary marks only.
+
+**The arm.** `marks_mid` changes only the exit valuation of taken trades. Decisions are identical to the primary: same taken set, same `c` from the primary tuning receipt (no re-tuning), no change to entry, selection, cutoff or sizing. Rung-2 legs are marked at the run's alpha, like rung-1 legs; rung 3 (no usable exit quote: structure at its worst-case payoff) is unchanged. It applies to all seven short-vol structures and to the straddle (both rules), wherever the rung-2 rule applies.
+
+**Storage.** Each taken row of `decisions.parquet` carries `exit_value` and `pnl_dollars` (primary) and `exit_value_mid` and `pnl_dollars_mid` (`marks_mid`); non-taken rows hold NaN in both mid columns. The rung label is the primary's.
+
+**Report.** `REPORT.md` repeats the short-vol P&L tables (T4/T5, both arms), the straddle table (T6), the T7 contrasts and the T10 verdict computation on `pnl_dollars_mid`, each titled "Sensitivity (Amendment 1), not the pre-registered verdict". A `decisions.parquet` without the mid columns omits these sections with a not_testable note.
+
+**Receipts.** Inner receipts keep their content apart from the spec hash binding: the spec change necessarily changes `spec_hash`, which the inputs receipts bind, so the amended spec needs a new PLANNED row and a new run. The outer receipt's `decisions_sha256` covers the added columns.

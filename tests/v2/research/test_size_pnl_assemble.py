@@ -154,7 +154,7 @@ def test_happy_path_writes_every_section_in_order(tmp_path):
     out = build(tmp_path)
     summary = assemble_mod.assemble(out, plan_frame(), admitted=None)
     text = (out / "REPORT.md").read_text(encoding="utf-8")
-    assert summary["report"] == str(out / "REPORT.md") and summary["sections"] == 11 and summary["rows"] > 0
+    assert summary["report"] == str(out / "REPORT.md") and summary["sections"] == 12 and summary["rows"] > 0  # 11 + the not_testable sensitivity note
     assert text.startswith("# EXP-188 REPORT")
     heads = ["### T1", "### T2", "### T3", "### T4", "### T5", "### T6", "### T7", "### T8", "### T9", "### T10"]
     positions = [next(i for i, line in enumerate(_sections(text)) if line.startswith(h)) for h in heads]
@@ -638,3 +638,57 @@ def test_real_check_plan_admits_the_fixture_plan_and_the_report_is_written(tmp_p
     out = build(tmp_path)
     assemble_mod.assemble(out, plan_frame(), admitted=admitted_for())
     assert (out / "REPORT.md").exists()
+
+
+# ---- Amendment 1 sensitivity: pnl_dollars_mid, after the primary verdicts ----
+
+def _with_mid(rows, *, delta=0.0):
+    """The rows with a ``pnl_dollars_mid`` column: each primary P&L plus ``delta``."""
+    return [{**row, "pnl_dollars_mid": row["pnl_dollars"] + delta} for row in rows]
+
+
+def test_mid_column_adds_the_sensitivity_sections_after_the_primary_verdicts(tmp_path):
+    out = build(tmp_path, rows_fn=_with_mid)
+    summary = assemble_mod.assemble(out, plan_frame(), admitted=None)
+    text = (out / "REPORT.md").read_text(encoding="utf-8")
+    sens = [line for line in _sections(text) if "not the pre-registered verdict" in line]
+    assert summary["sections"] == 16  # the 11 primary sections and 5 sensitivity sections
+    assert [line.rsplit(": ", 1)[1] for line in sens] == ["T4 Short-vol, as is", "T5 Short-vol, retuned", "T6 Straddle buy rules",
+                                                          "T7 Contrasts", "T10 Verdicts"]
+    assert all(line.startswith("### Sensitivity (Amendment 1), not the pre-registered verdict: ") for line in sens)
+    assert text.index(sens[0]) > text.index("### T10 Verdicts")
+    mid_verdicts = [_cells(line) for line in _section_lines(text, sens[-1]) if line.startswith("| H")]
+    assert mid_verdicts == [["H1", "+1", "clear"], ["H2", "-1", "reversed"], ["H3", "+1", "no_difference"]]
+
+
+def test_primary_sections_do_not_depend_on_the_mid_column(tmp_path):
+    texts = {}
+    for name, rows_fn in (("plain", None), ("mid", _with_mid), ("shifted", lambda rows: _with_mid(rows, delta=500.0))):
+        (tmp_path / name).mkdir()
+        out = build(tmp_path / name, rows_fn=rows_fn)
+        assemble_mod.assemble(out, plan_frame(), admitted=None)
+        texts[name] = (out / "REPORT.md").read_text(encoding="utf-8")
+    for title in ("### T4", "### T10"):
+        assert _section_lines(texts["plain"], title) == _section_lines(texts["mid"], title) == _section_lines(texts["shifted"], title)
+    sens = "### Sensitivity (Amendment 1), not the pre-registered verdict: T4 Short-vol, as is"
+    assert _section_lines(texts["mid"], sens) != _section_lines(texts["shifted"], sens)  # the sensitivity reads the mid marks
+
+
+def test_decisions_without_the_mid_column_get_a_not_testable_sensitivity_note(tmp_path):
+    out = build(tmp_path)
+    assemble_mod.assemble(out, plan_frame(), admitted=None)
+    text = (out / "REPORT.md").read_text(encoding="utf-8")
+    assert "### Sensitivity (Amendment 1)\n\nnot_testable: pnl_dollars_mid_not_in_decisions" in text
+    assert "not the pre-registered verdict" not in text
+
+
+def test_non_finite_mid_pnl_on_a_taken_row_refuses(tmp_path):
+    def make(rows):
+        mid = _with_mid(rows)
+        return [{**mid[0], "pnl_dollars_mid": float("nan")}, *mid[1:]]
+
+    out = build(tmp_path, rows_fn=make)
+    with pytest.raises(Refusal) as caught:
+        assemble_mod.assemble(out, plan_frame(), admitted=None)
+    assert caught.value.details["reason"] == "report_nonfinite_pnl"
+    assert not (out / "REPORT.md").exists()

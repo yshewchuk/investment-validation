@@ -264,23 +264,26 @@ def decide(scored):
     return out
 
 
-def _exit_value(chunk, traded, alpha):
+def _exit_value(chunk, traded, alpha, mid=False):
     """Value of the traded legs at exit. A BUY leg closes by selling (``FillModel.sell``, at the bid for alpha 0);
-    a SELL leg closes by buying (``FillModel.buy``, at the ask for alpha 0). Rung-2 legs use alpha 0."""
+    a SELL leg closes by buying (``FillModel.buy``, at the ask for alpha 0). Rung-2 legs use alpha 0, or ``alpha``
+    when ``mid`` (the Amendment 1 sensitivity arm)."""
     total = 0.0
     for leg in traded:
         k = leg["idx"]
-        model = FillModel(alpha if int(chunk["exit_rung"][k]) == 1 else 0.0)
+        model = FillModel(alpha if (mid or int(chunk["exit_rung"][k]) == 1) else 0.0)
         bid, ask = float(chunk["bid_x"][k]), float(chunk["ask_x"][k])
         price = model.sell(bid, ask) if leg["side"] == BUY else model.buy(bid, ask)
         total += _sign(leg["side"]) * leg["qty"] * float(price)
     return total
 
 
-def score(chunk, events, decisions, name, alpha, *, c=1.0, drop_unquoted=False):
+def score(chunk, events, decisions, name, alpha, *, c=1.0, drop_unquoted=False, mid_marks=False):
     """Marked P&L of the TAKEN events of ``name`` only; ``drop_unquoted`` removes the worst-case rung-3 rows.
 
-    A decision priced at a different alpha or c than this call is refused, not silently re-marked.
+    ``mid_marks`` values rung-2 legs at ``alpha``, as rung-1 legs are (the Amendment 1 sensitivity arm); the taken set,
+    rung-3 rows and rung labels are unchanged. A decision priced at a different alpha or c than this call is refused,
+    not silently re-marked.
     """
     FillModel(alpha)  # validate up front, even when nothing is taken
     pinned(name)
@@ -317,7 +320,7 @@ def score(chunk, events, decisions, name, alpha, *, c=1.0, drop_unquoted=False):
         if 3 in rungs:  # defined-risk floor: the whole structure is marked at zero
             value, rung = 0.0, EXIT_UNQUOTED
         else:
-            value = _exit_value(chunk, traded, alpha)
+            value = _exit_value(chunk, traded, alpha, mid=mid_marks)
             rung = "rung1" if all(r == 1 for r in rungs) else "rung2"
         if drop_unquoted and rung == EXIT_UNQUOTED:
             continue

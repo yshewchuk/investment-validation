@@ -201,13 +201,16 @@ def _load_decisions(out, outer):
         if decoded > MAX_DECODED_BYTES:
             raise _refuse("report_decisions_invalid", "decisions.parquet decodes to more than MAX_DECODED_BYTES")
         # "reason" is optional: population() needs it to exempt short-vol non-trades; published decisions always carry it.
-        read_columns = COLUMNS + (["reason"] if "reason" in parquet.schema_arrow.names else [])
+        # "pnl_dollars_mid" is optional too: the Amendment 1 sensitivity marks, present only in runs that stored them.
+        mid = ["pnl_dollars_mid"] if "pnl_dollars_mid" in parquet.schema_arrow.names else []
+        read_columns = COLUMNS + (["reason"] if "reason" in parquet.schema_arrow.names else []) + mid
         frame = parquet.read(columns=read_columns).to_pandas()
     if frame.empty:
         raise _refuse("report_decisions_empty", "decisions.parquet holds no rows")
     with _admit("report_decisions_invalid", "decisions.parquet has a non-date event_date or a non-numeric pnl_dollars"):
         frame = frame.assign(event_id=frame["event_id"].astype(str), event_date=pd.to_datetime(frame["event_date"]),
                              pnl_dollars=pd.to_numeric(frame["pnl_dollars"], errors="raise"))
+        if mid: frame = frame.assign(pnl_dollars_mid=pd.to_numeric(frame["pnl_dollars_mid"], errors="raise"))
     if frame["event_date"].isna().any():
         raise _refuse("report_decisions_invalid", "decisions.parquet has a blank event_date")
     if not frame["status"].isin(report.STATUSES).all():
@@ -217,6 +220,20 @@ def _load_decisions(out, outer):
 
 def _tickers_ok(tickers):
     return isinstance(tickers, Mapping) and all(isinstance(k, str) and k.strip() and isinstance(v, str) and v.strip() for k, v in tickers.items())
+
+
+def _sens(text):
+    """A sensitivity section, titled as Amendment 1 and never as the pre-registered verdict."""
+    return "### Sensitivity (Amendment 1), not the pre-registered verdict: " + text[len("### "):]
+
+
+def _verdicts(classify_in, missing_years):
+    """The T10 section, with the note that a missing full year makes its verdicts not testable."""
+    verdicts = report.t10_verdicts(classify_in)
+    if missing_years:
+        verdicts += "\n\n" + (f"not_testable because the required full year(s) {missing_years} are absent from the outer decisions; "
+                              "the inner window publishes no decisions, so this verdict needs inner evidence (design question, see PR).")
+    return verdicts
 
 
 def _sections(out, outer, inputs, inner, tuned, tickers):
@@ -231,6 +248,8 @@ def _sections(out, outer, inputs, inner, tuned, tickers):
         raise _refuse("report_ticker_missing", "an event in decisions.parquet has no ticker")
     if not np.isfinite(raw.loc[raw["status"] == "taken", "pnl_dollars"].to_numpy(dtype=float)).all():
         raise _refuse("report_nonfinite_pnl", "a taken row has a non-finite pnl_dollars")
+    if "pnl_dollars_mid" in raw.columns and not np.isfinite(raw.loc[raw["status"] == "taken", "pnl_dollars_mid"].to_numpy(dtype=float)).all():
+        raise _refuse("report_nonfinite_pnl", "a taken row has a non-finite pnl_dollars_mid")
     if (set(raw["model_id"]) | outer_models) - set(label_of):
         raise _refuse("report_receipt_chain_mismatch", "a model in the decisions has no roster entry")
     frame = synthetic_eval.population(raw)  # E: no undetermined row that leaves E under any model; short-vol non-trades stay in E at P&L 0
@@ -248,30 +267,36 @@ def _sections(out, outer, inputs, inner, tuned, tickers):
     n_short = {lab: len(events.get((lab, "short_vol"), ())) for lab in labels}
     n_long = {lab: len(events.get((lab, "straddle"), ())) for lab in labels}
     tuning_by_label = {label_of[mid]: {k: v for k, v in receipt.items() if k != "content_hash"} for mid, receipt in tuned.items()}
-    shown, classify_in = _contrasts(frame, events, roster, role_model, label_of, outer_models, quarter_of, tick)
-    short = frame[frame["book"] == "short_vol"].rename(columns={"arm_or_rule": "arm"})
-    long_rows = frame[frame["book"] == "straddle"].rename(columns={"arm_or_rule": "rule"})
+
+    def tables(scored):
+        """T4, T5, T6 and T7 of ``scored`` (its ``pnl_dollars`` is the P&L under test), and the T10 input."""
+        shown, classify_in = _contrasts(scored, events, roster, role_model, label_of, outer_models, quarter_of, tick)
+        short = scored[scored["book"] == "short_vol"].rename(columns={"arm_or_rule": "arm"})
+        long_rows = scored[scored["book"] == "straddle"].rename(columns={"arm_or_rule": "rule"})
+        return [report.t4_t5_shortvol(short, n_short, tuning_by_label, arm="as_is"),
+                report.t4_t5_shortvol(short, n_short, tuning_by_label, arm="retuned"),
+                report.t6_straddle(long_rows[long_rows["taken"]], long_rows, n_long),
+                report.t7_contrasts(shown)], classify_in
+
+    primary, classify_in = tables(frame)
     note = (f"events with an undetermined burn-in or missing-data row (any book) or an undetermined straddle row are excluded from E: {undetermined_events}. "
             f"short-vol non-trades (e.g. width_declined) stay in E at P&L 0. "
             f"per-quarter candidates and dropped counts are not recorded in decisions.parquet (not_testable); run totals from the receipt: "
             f"common_dropped={outer['common_dropped']}, scoreability_dropped={outer['scoreability_dropped']}.")
-    verdicts = report.t10_verdicts(classify_in)
-    if missing_years:
-        verdicts += "\n\n" + (f"not_testable because the required full year(s) {missing_years} are absent from the outer decisions; "
-                              "the inner window publishes no decisions, so this verdict needs inner evidence (design question, see PR).")
-    return [
+    sections = [
         _run_section(outer, undetermined_events),
         report.t1_roster(_roster_rows(roster, outer_models, inputs, inner, label_of)),
         report.t2_in_e(frame[["event_id", "quarter"]].drop_duplicates(), note),
         _not_testable("T3 Forecast calibration", "labels_not_in_decisions"),
-        report.t4_t5_shortvol(short, n_short, tuning_by_label, arm="as_is"),
-        report.t4_t5_shortvol(short, n_short, tuning_by_label, arm="retuned"),
-        report.t6_straddle(long_rows[long_rows["taken"]], long_rows, n_long),
-        report.t7_contrasts(shown),
+        *primary,
         report.t8_rungs(_shares(frame), models=[label_of[m] for m in outer["models"]]),
         _not_testable("T9 Pool sensitivity", "native_pool_arm_not_produced"),
-        verdicts,
+        _verdicts(classify_in, missing_years),
     ]
+    if "pnl_dollars_mid" not in frame.columns:
+        return sections + [_not_testable("Sensitivity (Amendment 1)", "pnl_dollars_mid_not_in_decisions")]
+    mid, classify_mid = tables(frame.assign(pnl_dollars=frame["pnl_dollars_mid"]))  # the Amendment 1 marks; the T10 verdict stays primary
+    return sections + [_sens(text) for text in (*mid, _verdicts(classify_mid, missing_years))]
 
 
 def assemble(out_dir, plan, *, admitted, expected=None, spec_hash=None, snapshot=None):
