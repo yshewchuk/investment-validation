@@ -233,6 +233,39 @@ def test_population_drops_an_event_undetermined_under_any_model_or_unit():
     assert ev.evaluate(d, META, TICKERS, ARM, resamples=RESAMPLES)["hash"] == ev.evaluate(d[d["event_id"] != "E0"], META, TICKERS, ARM, resamples=RESAMPLES)["hash"]
 
 
+def test_population_keeps_non_trades_and_drops_burn_in_or_missing_data():
+    d = frame_of()
+    d["reason"] = "scored"
+
+    def mark(event, reason):  # the S1 row of the event under M02 only
+        at = (d["model_id"] == "M02") & (d["event_id"] == event) & (d["structure"] == "S1")
+        d.loc[at, "status"] = "undetermined"
+        d.loc[at, "reason"] = reason
+
+    mark("E0", "width_declined")  # A: a non-trade under one model, scored elsewhere: stays in E
+    mark("E1", "thin_history")  # B: burn-in: leaves E
+    mark("E2", "unsimulable")  # C: data missing: leaves E
+    kept = set(ev.population(d)["event_id"].astype(str))
+    assert "E0" in kept and "E1" not in kept and "E2" not in kept
+    assert len(ev.population(d)) == len(d) - 2 * 8 * 3  # B and C leave with their rows under 8 models and 3 units
+
+
+def test_width_declined_row_keeps_its_event_with_zero_pnl_and_no_missing_width():
+    """E0's M06 and SH rows on S1 are width_declined non-trades (P&L NaN, width NaN): E0 stays in E, so the mean over the
+    8 events counts its P&L as 0 (7 taken at 2.0: 14 / 8), and X6 does not count the declined widths as missing."""
+    d = frame_of()
+    d["reason"] = "scored"
+    for mid in ("M06", "SH"):
+        at = (d["model_id"] == mid) & (d["event_id"] == "E0") & (d["structure"] == "S1")
+        d.loc[at, "status"] = "undetermined"
+        d.loc[at, "reason"] = "width_declined"
+        d.loc[at, "pnl_dollars"] = np.nan
+        d.loc[at, "width"] = np.nan
+    out = ev.evaluate(d, META, TICKERS, ARM, resamples=RESAMPLES)
+    assert ["M06", "median_noise", '{"s": 0.6}', "S1", 8, 7, 0, 1.75, 1.8, 0.9, None] in out["means"]
+    assert row(out, "X6", "S1")[2:] == ["pass", "var=0 taken=7"]
+
+
 def test_means_and_contrast_rows_hand_checked():
     out = run()
     assert len(out["means"]) == 8 * 3 and all(len(r) == 11 for r in out["means"])

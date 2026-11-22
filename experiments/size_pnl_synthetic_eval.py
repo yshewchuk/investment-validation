@@ -13,6 +13,7 @@ STOP_IDS = ("X1", "X2", "X6", "X7")  # spec.yaml:129 and design section 5; I1 is
 SHORT, STRADDLE = "short_vol", "straddle"
 SHIFTS, RATIO_S = (0.1, -0.1), 0.6
 TAIL = 100 * (1 - contrast.INTERVAL) / 2
+NON_TRADE_REASONS = frozenset({"width_declined", "ladder_too_coarse", "structure_unresolved", "negative_floor", "entry_quote_unusable", "entry_not_debit"})  # score_events non-trades (design sections 4-5): P&L 0, the event stays in E
 
 
 def _wide(g):
@@ -98,8 +99,14 @@ def _safe(rows):
 
 
 def population(decisions):
-    """The evaluated population E: the events with no undetermined row under any (model, unit) (design section 4)."""
-    bad = set(decisions.loc[decisions["status"] == "undetermined", "event_id"].astype(str))
+    """The evaluated population E (design sections 4-5): the events with no undetermined row under any (model, unit) whose
+    reason is not a NON_TRADE_REASONS non-trade. Non-trades (e.g. width_declined) stay in E with P&L 0; burn-in and
+    data-missing rows (unsimulable, thin_history, missing_spread, missing_mcap, straddle undetermined) drop the event.
+    A missing "reason" column exempts nothing."""
+    undetermined = decisions["status"] == "undetermined"
+    reason = decisions.get("reason")
+    if reason is not None: undetermined &= ~reason.isin(NON_TRADE_REASONS)
+    bad = set(decisions.loc[undetermined, "event_id"].astype(str))
     return decisions[~decisions["event_id"].astype(str).isin(bad)]
 
 
@@ -166,7 +173,8 @@ def evaluate(decisions, meta, tickers, arm, *, replay_equal=None, resamples=cont
             # variance over every scored row of the predictor, including events outside E; NaN checks on E
             if u["book"] == SHORT:  # completeness first: any NaN width fails, before the variance test
                 full_sub = everything[(everything["model_id"] == shr) & (everything["book"] == SHORT) & (everything["arm_or_rule"] == "as_is") & (everything["structure"] == unit)]
-                missing, var = int(sub["width"].isna().sum()), _quarter_var(full_sub)
+                declined_width = (sub["reason"] == "width_declined") if "reason" in sub.columns else pd.Series(False, index=sub.index)  # a declined width is never defined
+                missing, var = int((sub["width"].isna() & ~declined_width).sum()), _quarter_var(full_sub)
                 if missing: x.append(["X6", unit, "fail", f"missing_widths={missing} taken={taken}"])
                 else: x.append(["X6", unit, "pass" if var <= 1e-12 else "fail", f"var={var:.3g} taken={taken}"])
             else:  # straddle edge = pred_move - implied_move: constant pred_move per quarter ranks by implied move alone
