@@ -1,6 +1,6 @@
 """EXP-188 real-store Sources adapter, slice 2: table-backed providers for `size_pnl_driver.Sources` (design section 13).
 
-`tables` returns `fetch` (labels and lead production forecasts), `facts` (sizing inputs), `plan_frame` (print windows) and `table_hash`. Labels (`computed_moves`, `iv_crush_targets`) are read event-isolated through `label_rows`, one proven fragment per requested event. Each label carries the later of the two tables' `available_as_of_date` (both must be text, else None, and the reader refuses it). `feature_panel` and `tier4_forecasts` are single logical partitions read for the requested keys' tickers. `earnings_events` is read in full (only admitted ids are kept). A session other than AMC/BMO, or an event with no calendar window, is dropped from `plan_frame` and counted on stderr. Refusals are typed OpsErrors with a `reason`: `source_table_missing` (a table has no row for a requested event), `source_value_invalid` (more than one row, or a bad value), `plan_frame_empty` or `production_hash_mismatch`. A DataError other than CONTRACT_MISMATCH, including a planner HOLDOUT_ACCESS_DENIED, propagates unchanged (the `_guarded` behaviour). Nothing is imputed here.
+`tables` returns `fetch` (labels and lead production forecasts), `facts` (sizing inputs), `plan_frame` (print windows) and `table_hash`. Labels (`computed_moves`, `iv_crush_targets`) are read event-isolated through `label_rows`, one proven fragment per requested event. Each label carries the later of the two tables' `available_as_of_date` (text compare), or None when either is None. Every non-null `available_as_of_date` is validated as ISO text that round-trips: when both of a label's dates are non-null, a malformed one refuses `source_value_invalid`, even on a skipped label; when either is null the label's availability is None and the other date is not checked here. A null date is allowed only where the label itself is absent or skipped, since `read_labels` refuses a kept label without a valid one. `feature_panel` and `tier4_forecasts` are single logical partitions read for the requested keys' tickers. `earnings_events` is read in full (only admitted ids are kept). A session other than AMC/BMO, or an event with no calendar window, is dropped from `plan_frame` and counted on stderr. Refusals are typed OpsErrors with a `reason`: `source_table_missing` (a table has no row for a requested event), `source_value_invalid` (more than one row, or a bad value), `plan_frame_empty`, `production_hash_mismatch` or `max_object_bytes_invalid`. A DataError other than CONTRACT_MISMATCH, including a planner HOLDOUT_ACCESS_DENIED, propagates unchanged (the `_guarded` behaviour). Nothing is imputed here.
 """
 import datetime as dt
 import math
@@ -85,11 +85,19 @@ def _iso_day(value):
     return value
 
 
+def _iso_text(value):
+    """True when value is ISO date text that round-trips (`date.fromisoformat(v).isoformat() == v`)."""
+    try:
+        return isinstance(value, str) and dt.date.fromisoformat(value).isoformat() == value
+    except ValueError:
+        return False
+
+
 def _later(first, second):
-    """The later of two ISO dates (text compare); None unless both are text."""
-    if isinstance(first, str) and isinstance(second, str):
-        return max(first, second)
-    return None
+    """The later of two ISO dates (text compare); None when either is None. Each non-None date must be ISO text that round-trips."""
+    if any(v is not None and not _iso_text(v) for v in (first, second)):
+        raise fail("EXPERIMENT_IDENTITY_CONFLICT", "a label table holds a malformed available_as_of_date", details={"reason": "source_value_invalid"})
+    return None if first is None or second is None else max(first, second)
 
 
 def _log_read(table, keys, rows, started):

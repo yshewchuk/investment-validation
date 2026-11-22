@@ -608,7 +608,7 @@ def run_synthetic(src, out_dir, *, event_ids=None, replay=False, prereg=size_pnl
     body = {"stage": "inputs_synthetic", "spec_hash": receipt["spec_hash"], "identity": identity, "arm": content_hash(arm), "snapshot": src.snapshot_id, "scope": scope,
             "plan": content_hash(_plan_rows(plan)),
             "facts": content_hash(_facts_rows(facts_all, stage_ids)), "labels": content_hash(_label_rows([labels])),
-            "production": production["binding"], "tables": {mid: _table_binding(e, ids) for mid, e in ready.items()}}
+            "production": production["binding"], "tables": {mid: _table_binding(e, ids) for mid, e in ready.items()}, "crush_table_hash": src.crush_table_hash}
     inputs_receipt = _receipt(out / "receipts" / "inputs_synthetic.json", body, "inputs_receipt_changed")  # after both population refusals: a refused run pins nothing
     if replay:  # X7 evidence: the replay verdict is receipted, so a later plain run can read it
         again = _synthetic_scores(src, ready, plan, facts_all, labels)

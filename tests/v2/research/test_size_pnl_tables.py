@@ -648,6 +648,18 @@ def test_label_availability_is_none_when_either_table_has_none():
     assert out.loc["e1", AVAILABLE] is None
 
 
+@pytest.mark.parametrize("bad_table", ["iv_crush_targets", "computed_moves"])
+def test_a_malformed_availability_date_is_not_masked_by_a_later_valid_date(bad_table):
+    frames = _frames()
+    frames[bad_table] = _set(frames[bad_table], AVAILABLE, "2024-12-1")  # malformed, sorts before the valid date
+    good = "computed_moves" if bad_table == "iv_crush_targets" else "iv_crush_targets"
+    frames[good] = _set(frames[good], AVAILABLE, "2025-01-12")
+    ns, _ = _build(frames)
+    with pytest.raises(OpsError) as exc:
+        ns.fetch(LABEL, ["e1"])
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "source_value_invalid")
+
+
 def test_label_fetch_planner_denial_propagates_unchanged(monkeypatch):
     refusal = data_fail("HOLDOUT_ACCESS_DENIED", "event is not isolated")
 

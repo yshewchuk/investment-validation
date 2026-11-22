@@ -298,6 +298,18 @@ def test_changed_inputs_refuse_and_leave_the_receipts_as_they_were(tmp_path, fak
     assert snapshot(tmp_path) == before
 
 
+def test_a_changed_crush_table_hash_changes_the_synthetic_inputs_receipt_and_refuses_a_replay(tmp_path, fakes):
+    driver.run_synthetic(sources(), tmp_path / "a", prereg=OK)
+    driver.run_synthetic(sources(crush_table_hash="OTHER-CRUSH"), tmp_path / "b", prereg=OK)
+    first = (tmp_path / "a" / "receipts" / "inputs_synthetic.json").read_bytes()
+    assert first != (tmp_path / "b" / "receipts" / "inputs_synthetic.json").read_bytes()
+    with pytest.raises(Refusal) as caught:
+        driver.run_synthetic(sources(crush_table_hash="OTHER-CRUSH"), tmp_path / "a", prereg=OK)
+    assert caught.value.code == CONFLICT
+    assert caught.value.details["reason"] == "inputs_receipt_changed"
+    assert (tmp_path / "a" / "receipts" / "inputs_synthetic.json").read_bytes() == first
+
+
 def test_the_stage_reads_no_2025_event(tmp_path, monkeypatch, fakes):
     ends, real_prod, real_labels = [], readers.read_production, readers.read_labels
 
