@@ -22,8 +22,8 @@ from experiments import size_pnl_tables as tbl
 MAX = 1 << 20
 HASH = "tier4-manifest-9c2e41"  # literal manifest hash; deliberately unlike any other fake value
 CRUSH_HASH = "iv-crush-manifest-4b7d10"  # the crush snapshot's iv_crush_targets manifest; also unlike any other fake value
-SNAP = types.SimpleNamespace(table_versions={"tier4_forecasts": types.SimpleNamespace(manifest_hash=HASH)})
-CRUSH = types.SimpleNamespace(table_versions={"iv_crush_targets": types.SimpleNamespace(manifest_hash=CRUSH_HASH)})
+SNAP = types.SimpleNamespace(snapshot_id="main-snap", table_versions={"tier4_forecasts": types.SimpleNamespace(manifest_hash=HASH)})
+CRUSH = types.SimpleNamespace(snapshot_id="crush-snap", table_versions={"iv_crush_targets": types.SimpleNamespace(manifest_hash=CRUSH_HASH)})
 CRUSH_TABLES = ("earnings_events", "iv_crush_targets")
 D1, D2 = pd.Timestamp("2025-01-02"), pd.Timestamp("2025-02-03")
 DAY = pd.Timedelta(days=1)
@@ -1197,6 +1197,8 @@ class _MonthRepo:
         self.listed[table_name] = self.listed.get(table_name, 0) + 1
         if table_name not in self._records:
             raise data_fail("CONTRACT_MISMATCH", "table is not part of this snapshot", details={"table_name": table_name})
+        expected_snapshot = {"computed_moves": "memo-main", "iv_crush_targets": "memo-crush"}[table_name]
+        assert snapshot is not None and snapshot.snapshot_id == expected_snapshot, f"{table_name} listed against the wrong snapshot"
         return list(self._records[table_name])
 
     def scan(self, request, *, table_name, max_object_bytes):
@@ -1279,16 +1281,19 @@ def test_memo_non_isolated_event_refused_identically(monkeypatch, memo_cls):
     with pytest.raises(DataError) as exc:
         ns.fetch(LABEL, ["CCC-2025-03"])
     assert exc.value.code == "HOLDOUT_ACCESS_DENIED"
+    assert "event-isolated outcome fragments" in str(exc.value)
 
 
 def test_memo_end_to_end_lists_each_table_once_and_prints_the_summary(monkeypatch, capsys):
-    ns = _tables_for(monkeypatch, _MonthRepo(), tbl._RecordMemo)
+    repo = _MonthRepo()
+    ns = _tables_for(monkeypatch, repo, tbl._RecordMemo)
     _fetch_months(ns)
+    assert repo.listed == {"computed_moves": 1, "iv_crush_targets": 1}  # one listing per table, construction and labels together
     err = capsys.readouterr().err
-    assert re.findall(MEMO_LOG, err, re.M) == [("computed_moves", "memo-main", "12"), ("iv_crush_targets", "memo-crush", "12")]
+    assert re.findall(MEMO_LOG, err, re.M) == [("iv_crush_targets", "memo-crush", "12"), ("computed_moves", "memo-main", "12")]
     summaries = [line for line in err.splitlines() if line.startswith("[pnl_tables] fragment_records calls=")]
     assert len(summaries) == len(MEMO_MONTHS)
-    assert summaries[-1] == "[pnl_tables] fragment_records calls=8 listed=2 (expected: one per table per run)"
+    assert summaries[-1] == "[pnl_tables] fragment_records calls=10 listed=2 (expected: one per table per run)"
 
 
 def test_memo_lists_once_per_table_and_logs_counter(capsys):
