@@ -1,6 +1,6 @@
-"""EXP-188 real-store Sources adapter, slice 1 (design section 13).
+"""EXP-188 real-store Sources adapter, slices 1 and 2 (design section 13).
 
-Slice 1 opens the catalog read-only, the artifact store, the sealed plan, the selection record, the admission and the chain index, and derives the roster inputs from the plan. Table-backed fields (`fetch`, `facts`) refuse `source_table_missing` until slice 2.
+Slice 1 opens the catalog read-only, the artifact store, the sealed plan, the selection record, the admission and the chain index, and derives the roster inputs from the plan. Slice 2 adds the table-backed providers (`fetch`, `facts`, `plan_frame`, `table_hash`) from `size_pnl_tables`.
 """
 import functools
 import json
@@ -10,15 +10,13 @@ import stat
 import sys
 from pathlib import Path
 
-import pandas as pd
-
 from engine.v2.contracts import ArtifactRef
 from engine.v2.data.errors import DataError
 from engine.v2.data.repository import Repository
 from engine.v2.foundation import ArtifactStore, DocumentError, from_document, to_document
 from engine.v2.ops.errors import fail
 from engine.v2.ops.experiments import experiment_spec_from_document
-from experiments import size_pnl_driver, size_pnl_inputs, size_pnl_ladder, size_pnl_readers
+from experiments import size_pnl_driver, size_pnl_inputs, size_pnl_ladder, size_pnl_readers, size_pnl_tables
 from experiments.magnitude_search_plan import read_search_plan
 from experiments.magnitude_search_records import read_record
 from experiments.native_registration import read_native_registration
@@ -199,24 +197,13 @@ def _snapshot_mismatch():
     return fail(_CONFLICT, "the configured snapshot is not the registration's pinned snapshot", details={"reason": "snapshot_mismatch"})
 
 
-def _table_missing(*_a, **_k):
-    raise fail(_CONFLICT, "source tables arrive in slice 2", details={"reason": "source_table_missing"})
-
-
-class _MissingPlan(pd.DataFrame):
-    """Slice-1 placeholder: a DataFrame (so check_sources accepts it) that refuses `source_table_missing` on first column access, before any plan check can report plan_malformed."""
-    @property
-    def columns(self):
-        _table_missing()
-
-
-def assemble(*, plan, read, selection, expected, panel_id, admit, admitted, snapshot_id, load_index):
+def assemble(*, plan, read, selection, expected, panel_id, admit, admitted, snapshot_id, load_index, tables, production_hash):
     pair_candidates, blend_ids = derive_roster_inputs(plan)
     return size_pnl_driver.Sources(
         plan=plan, read=read, selection=selection, pair_candidates=pair_candidates, blend_ids=blend_ids,
-        expected=expected, panel_id=panel_id, admit=admit, admitted=admitted, fetch=_table_missing,
-        production_hash="", production_table_hash="", plan_frame=_MissingPlan(),
-        load_index=load_index, facts=_table_missing, snapshot_id=snapshot_id)
+        expected=expected, panel_id=panel_id, admit=admit, admitted=admitted, fetch=tables.fetch,
+        production_hash=production_hash, production_table_hash=tables.table_hash, plan_frame=tables.plan_frame,
+        load_index=load_index, facts=tables.facts, snapshot_id=snapshot_id)
 
 
 def build_sources(args):
@@ -252,9 +239,11 @@ def build_sources(args):
         month = registration.document["holdouts"]["holdout_as_of_month"]
         admit = size_pnl_inputs.population_admit(repository, snapshot, month, max_object_bytes=MAX_OBJECT_BYTES)
         admitted = size_pnl_readers.admit_events(repository, snapshot, month, max_object_bytes=MAX_OBJECT_BYTES)
+        tables = size_pnl_tables.tables(repository, snapshot, admitted, max_object_bytes=MAX_OBJECT_BYTES)
         load_index = size_pnl_ladder.default_load_index(repository, snapshot)
         sources = assemble(plan=plan, read=read, selection=selection, expected=expected, panel_id=panel_id,
-                           admit=admit, admitted=admitted, snapshot_id=cfg["snapshot_id"], load_index=load_index)
+                           admit=admit, admitted=admitted, snapshot_id=cfg["snapshot_id"], load_index=load_index,
+                           tables=tables, production_hash=cfg["production_hash"])
     except sqlite3.Error:
         conn.close()
         raise fail("RESOURCE_UNAVAILABLE", "catalog unavailable", details={"reason": "catalog_unavailable"}) from None

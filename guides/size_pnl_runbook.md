@@ -17,7 +17,9 @@ beside the v14 run, container 12 GiB). Agents never run them.
    `EXPERIMENT_IDENTITY_CONFLICT` (`planned_row_missing`) before reading anything.
 3. `--sources experiments.size_pnl_sources:build_sources --sources-config <config.json>` builds
    `size_pnl_driver.Sources` (design section 13: catalog, store root, v14 spec/request/plan-ref, pinned snapshot,
-   production hash). The adapter lands in two slices; the smoke command is added with the second.
+   production hash). `production_hash` must equal the `tier4_forecasts` dataset-version manifest hash of the pinned
+   snapshot, else `production_hash_mismatch` before any row is read. A missing table, column or event refuses
+   `source_table_missing`; a non-finite, FLT_MAX or non-USD-scale `mcap_usd` refuses `source_value_invalid`.
 
 ## Real run
 
@@ -39,8 +41,12 @@ with the same file and a fresh `--out-dir` under `/tmp` (smoke output is disposa
 
 ```
 python3 tools/bounded_run.py --heavy --cores 8 -- python3 experiments/EXP-188_size_decision_pnl_rescore/run.py \
-  --stage inner --event-ids <ids.json> --no-ledger --expected <expected.json> --sources <module>:<func> --sources-config <config.json> --out-dir <smoke-dir>
+  --stage inner --event-ids <ids.json> --no-ledger --expected <expected.json> \
+  --sources experiments.size_pnl_sources:build_sources --sources-config <config.json> --out-dir <smoke-dir>
 ```
+
+Here `<config.json>` holds `catalog`, `store_root`, `spec`, `request`, `plan_ref`, `snapshot_id`, `production_hash`
+(design section 13); a real run uses the same `--sources` and `--sources-config`.
 
 Then repeat with `--stage outer` and the same `--event-ids`. The ids are receipted as `scope`; a full-population
 `inner.json` cannot feed a smoke outer run (or the reverse): `scope_mismatch`. An id outside the admitted

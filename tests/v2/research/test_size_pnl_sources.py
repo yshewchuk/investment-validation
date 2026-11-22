@@ -702,30 +702,21 @@ def test_bound_snapshot_table_under_cap_scanned_fully(tmp_path, monkeypatch):
 
 # --- (5) assemble ------------------------------------------------------------
 
+def _fake_tables(table_hash="TH"):
+    return types.SimpleNamespace(fetch=lambda columns, ids: None, facts=lambda ids: None,
+                                 plan_frame=pd.DataFrame({"event_id": ["e1"]}), table_hash=table_hash)
+
+
 def test_assemble_returns_sources_accepted_by_check_sources():
     admitted = readers.Admitted({"events": pd.DataFrame({"event_id": ["e1"], "event_date": pd.to_datetime(["2025-01-02"])}), "excluded": {}})
+    tables = _fake_tables()
     sources = src.assemble(plan=_plan(), read=lambda slot: None, selection=SELECTION, expected=EXPECTED, panel_id="P",
                            admit=lambda ids: {"admitted": sorted(ids), "dropped": []}, admitted=admitted,
-                           snapshot_id="snap-1", load_index=lambda keys: None)
+                           snapshot_id="snap-1", load_index=lambda keys: None, tables=tables, production_hash="PH")
     assert driver.check_sources(sources) is sources
-    assert sources.pair_candidates == FULL_PAIR_MAP and sources.production_hash == "" and sources.production_table_hash == ""
-    for call in (lambda: sources.fetch(["event_id"], ["e1"]), lambda: sources.facts(["e1"])):
-        with pytest.raises(OpsError) as exc:
-            call()
-        assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "source_table_missing")
-
-
-def test_assemble_plan_frame_refuses_source_table_missing():
-    admitted = readers.Admitted({"events": pd.DataFrame({"event_id": ["e1"], "event_date": pd.to_datetime(["2025-01-02"])}), "excluded": {}})
-    sources = src.assemble(plan=_plan(), read=lambda slot: None, selection=SELECTION, expected=EXPECTED, panel_id="P",
-                           admit=lambda ids: {"admitted": sorted(ids), "dropped": []}, admitted=admitted,
-                           snapshot_id="snap-1", load_index=lambda keys: None)
-    with pytest.raises(OpsError) as exc:
-        sources.plan_frame.columns
-    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "source_table_missing")
-    with pytest.raises(OpsError) as exc:
-        ladder.check_plan(admitted, sources.plan_frame)
-    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "source_table_missing")
+    assert sources.pair_candidates == FULL_PAIR_MAP
+    assert sources.fetch is tables.fetch and sources.facts is tables.facts and sources.plan_frame is tables.plan_frame
+    assert sources.production_hash == "PH" and sources.production_table_hash == "TH"
 
 
 # --- (6) build_sources end to end (every store touch monkeypatched) -----------
@@ -759,6 +750,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(readers, "admit_events", lambda repository, snapshot, as_of_month, *, max_object_bytes: readers.Admitted(
         {"events": pd.DataFrame({"event_id": ["e1"], "event_date": pd.to_datetime(["2025-01-02"])}), "excluded": {}}))
     monkeypatch.setattr(ladder, "default_load_index", lambda repository, snapshot: "index")
+    monkeypatch.setattr(src.size_pnl_tables, "tables", lambda repository, snapshot, admitted, *, max_object_bytes: _fake_tables())
     args = types.SimpleNamespace(sources_config=config, expected_identities=EXPECTED)
     return types.SimpleNamespace(conn=conn, slots=slots, args=args)
 
@@ -769,6 +761,7 @@ def test_build_sources_success_leaves_connection_open(env, capsys):
     assert sources.expected == EXPECTED and sources.snapshot_id == "snap-1"
     assert sources.panel_id == SOURCE_BINDING and sources.panel_id != EXPECTED["panel_id"]
     assert sources.selection == SELECTION and sources.load_index == "index" and sources.admit == "admit"
+    assert sources.production_hash == "h" and sources.production_table_hash == "TH"
     assert env.conn.closed is False
     assert "[pnl_sources] opened snapshot=snap-1 admitted=1" in capsys.readouterr().err
 
