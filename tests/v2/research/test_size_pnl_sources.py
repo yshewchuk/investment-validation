@@ -258,8 +258,8 @@ def _catalog(tmp_path):
         create table data_snapshots (snapshot_id, finality_receipt_refs_json, knowledge_mode_by_table_json);
         create table data_snapshot_tables (snapshot_id, dataset_version_id, table_name);
         create table data_dataset_versions (dataset_version_id, evidence_json, partition_logical_hashes_json, contract_id);
-        create table data_fragments (fragment_id, partition_key, key_bounds_json, time_bounds_json, input_receipt_refs_json, object_id);
-        create table data_version_fragments (dataset_version_id, fragment_id);
+        create table data_fragments (fragment_id, partition_key, key_bounds_json, time_bounds_json, input_receipt_refs_json, object_id, contract_id);
+        create table data_version_fragments (dataset_version_id, fragment_id, ordinal, note);
         create table data_objects (object_id, storage_key);
         create table data_contracts (contract_id, definition_json);
     """)
@@ -275,7 +275,7 @@ def _seed(conn, tables=1, fragments=0, evidence="ab", hashes="cd"):
             (f"dv{i}", evidence, hashes))
         conn.execute("insert into data_snapshot_tables values ('s1', ?, ?)", (f"dv{i}", f"t{i}"))
     for i in range(fragments):
-        conn.execute("insert into data_version_fragments values ('dv0', ?)", (f"f{i}",))
+        conn.execute("insert into data_version_fragments (dataset_version_id, fragment_id) values ('dv0', ?)", (f"f{i}",))
     conn.commit()
 
 
@@ -324,7 +324,7 @@ def test_bound_snapshot_fragment_json_over_evidence_cap_refused(tmp_path, monkey
     monkeypatch.setattr(src, "MAX_SNAPSHOT_EVIDENCE_BYTES", 20)
     conn = _catalog(tmp_path)
     _seed(conn, tables=1, fragments=1, evidence="ab", hashes="cd")
-    conn.execute("insert into data_fragments values ('f0', NULL, ?, NULL, NULL, NULL)", ("k" * 8,))
+    conn.execute("insert into data_fragments values ('f0', NULL, ?, NULL, NULL, NULL, NULL)", ("k" * 8,))
     conn.commit()
     with pytest.raises(OpsError) as exc:
         src._bound_snapshot(conn, "s1")
@@ -407,7 +407,7 @@ def test_bound_snapshot_partition_key_over_cap_refused(tmp_path, monkeypatch):
     monkeypatch.setattr(src, "MAX_SNAPSHOT_EVIDENCE_BYTES", 50)
     conn = _catalog(tmp_path)
     _seed(conn, tables=1, fragments=1)
-    conn.execute("insert into data_fragments values ('f0', ?, NULL, NULL, NULL, NULL)", ("p" * 100,))
+    conn.execute("insert into data_fragments values ('f0', ?, NULL, NULL, NULL, NULL, NULL)", ("p" * 100,))
     conn.commit()
     with pytest.raises(OpsError) as exc:
         src._bound_snapshot(conn, "s1")
@@ -420,7 +420,7 @@ def test_bound_snapshot_object_storage_key_over_cap_refused(tmp_path, monkeypatc
     monkeypatch.setattr(src, "MAX_SNAPSHOT_EVIDENCE_BYTES", 50)
     conn = _catalog(tmp_path)
     _seed(conn, tables=1, fragments=1)
-    conn.execute("insert into data_fragments values ('f0', NULL, NULL, NULL, NULL, 'o0')")
+    conn.execute("insert into data_fragments values ('f0', NULL, NULL, NULL, NULL, 'o0', NULL)")
     conn.execute("insert into data_objects values ('o0', ?)", ("o" * 100,))
     conn.commit()
     with pytest.raises(OpsError) as exc:
@@ -443,14 +443,55 @@ def test_bound_snapshot_contract_definition_over_cap_refused(tmp_path, monkeypat
     conn.close()
 
 
+def test_bound_snapshot_version_fragment_text_over_cap_refused(tmp_path, monkeypatch):
+    # Tables (14 bytes) and the fragment link (5 bytes) total 19 (under 50); only the 100-byte vf note pushes the total over.
+    monkeypatch.setattr(src, "MAX_SNAPSHOT_EVIDENCE_BYTES", 50)
+    conn = _catalog(tmp_path)
+    _seed(conn, tables=1, fragments=1)
+    conn.execute("update data_version_fragments set note = ? where fragment_id = 'f0'", ("n" * 100,))
+    conn.commit()
+    with pytest.raises(OpsError) as exc:
+        src._bound_snapshot(conn, "s1")
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "snapshot_metadata_too_large")
+    conn.close()
+
+
+def test_bound_snapshot_contract_reached_only_via_fragment_over_cap_refused(tmp_path, monkeypatch):
+    # dv0 has no contract, so c0 is reachable only through data_fragments.contract_id; before c0 the total is 23 (under 50), c0 adds 'c0' + 100 bytes.
+    monkeypatch.setattr(src, "MAX_SNAPSHOT_EVIDENCE_BYTES", 50)
+    conn = _catalog(tmp_path)
+    _seed(conn, tables=1, fragments=1)
+    conn.execute("insert into data_fragments values ('f0', NULL, NULL, NULL, NULL, NULL, 'c0')")
+    conn.execute("insert into data_contracts values ('c0', ?)", ("k" * 100,))
+    conn.commit()
+    with pytest.raises(OpsError) as exc:
+        src._bound_snapshot(conn, "s1")
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "snapshot_metadata_too_large")
+    conn.close()
+
+
+def test_bound_snapshot_shared_contract_counted_once(tmp_path, monkeypatch):
+    # Exact total with c0 counted once: tables 10 (snapshot_tables 7 + dataset_versions 3), two fragment rows 4 + 4,
+    # two version-fragment links 5 + 5, contract 'c0' + 100 bytes = 130. Counting c0 once per fragment would reach 232.
+    monkeypatch.setattr(src, "MAX_SNAPSHOT_EVIDENCE_BYTES", 130)
+    conn = _catalog(tmp_path)
+    _seed(conn, tables=1, fragments=2, evidence="", hashes="")
+    conn.execute("insert into data_fragments values ('f0', NULL, NULL, NULL, NULL, NULL, 'c0')")
+    conn.execute("insert into data_fragments values ('f1', NULL, NULL, NULL, NULL, NULL, 'c0')")
+    conn.execute("insert into data_contracts values ('c0', ?)", ("k" * 100,))
+    conn.commit()
+    assert src._bound_snapshot(conn, "s1") is None
+    conn.close()
+
+
 def test_bound_snapshot_object_not_linked_to_snapshot_not_counted(tmp_path, monkeypatch):
     # Snapshot total is 21 bytes (under 50). Object o1 is oversized but its fragment f1 is not in the snapshot's version fragments, so it is not counted.
     monkeypatch.setattr(src, "MAX_SNAPSHOT_EVIDENCE_BYTES", 50)
     conn = _catalog(tmp_path)
     _seed(conn, tables=1, fragments=1)
-    conn.execute("insert into data_fragments values ('f0', NULL, NULL, NULL, NULL, 'o0')")
+    conn.execute("insert into data_fragments values ('f0', NULL, NULL, NULL, NULL, 'o0', NULL)")
     conn.execute("insert into data_objects values ('o0', 's')")
-    conn.execute("insert into data_fragments values ('f1', NULL, NULL, NULL, NULL, 'o1')")
+    conn.execute("insert into data_fragments values ('f1', NULL, NULL, NULL, NULL, 'o1', NULL)")
     conn.execute("insert into data_objects values ('o1', ?)", ("o" * 100,))
     conn.commit()
     assert src._bound_snapshot(conn, "s1") is None
@@ -576,7 +617,8 @@ class _CountingConn:
 
     def execute(self, sql, params=()):
         cursor = self._conn.execute(sql, params)
-        if ("COALESCE(LENGTH(CAST" in sql or "COALESCE(OCTET_LENGTH(" in sql) and "FROM data_fragments f " in sql:
+        outer_from = sql.split(" FROM ", 1)[1] if " FROM " in sql else ""
+        if ("COALESCE(LENGTH(CAST" in sql or "COALESCE(OCTET_LENGTH(" in sql) and outer_from.startswith("data_fragments f "):
             self.rows_read.append(0)
             wrapped = _CountingCursor(cursor, self.rows_read, len(self.rows_read) - 1)
             self.cursors.append(wrapped)
@@ -590,8 +632,8 @@ class _CountingConn:
 def _seed_fragments(conn, count, size):
     # Each fragment is linked to dataset version dv0 (the snapshot's table) and carries a partition_key of `size` bytes.
     for i in range(count):
-        conn.execute("insert into data_fragments values (?, ?, NULL, NULL, NULL, NULL)", (f"f{i}", "p" * size))
-        conn.execute("insert into data_version_fragments values ('dv0', ?)", (f"f{i}",))
+        conn.execute("insert into data_fragments values (?, ?, NULL, NULL, NULL, NULL, NULL)", (f"f{i}", "p" * size))
+        conn.execute("insert into data_version_fragments (dataset_version_id, fragment_id) values ('dv0', ?)", (f"f{i}",))
     conn.commit()
 
 

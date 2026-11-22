@@ -165,6 +165,14 @@ def _bound_snapshot(conn, snapshot_id):
             "data_contracts", "c",
             "data_contracts c JOIN data_dataset_versions dv ON dv.contract_id = c.contract_id "
             "JOIN data_snapshot_tables st ON st.dataset_version_id = dv.dataset_version_id WHERE st.snapshot_id = ?")
+        add(
+            "data_version_fragments", "vf",
+            "data_version_fragments vf JOIN data_snapshot_tables st ON st.dataset_version_id = vf.dataset_version_id WHERE st.snapshot_id = ?")
+        add(
+            "data_contracts", "c",
+            "data_contracts c WHERE c.contract_id IN (SELECT f.contract_id FROM data_fragments f "
+            "JOIN data_version_fragments vf ON vf.fragment_id = f.fragment_id "
+            "JOIN data_snapshot_tables st ON st.dataset_version_id = vf.dataset_version_id WHERE st.snapshot_id = ?)")
     except sqlite3.Error:
         raise fail("RESOURCE_UNAVAILABLE", "catalog unavailable", details={"reason": "catalog_unavailable"}) from None
 
