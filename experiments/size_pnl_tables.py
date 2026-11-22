@@ -1,6 +1,6 @@
 """EXP-188 real-store Sources adapter, slice 2: table-backed providers for `size_pnl_driver.Sources` (design section 13).
 
-`tables` returns `fetch` (labels and lead production forecasts), `facts` (sizing inputs), `plan_frame` (print windows) and `table_hash`. `earnings_events` is read in full (only admitted ids are kept); every other table is read only for the requested keys' tickers and event years. A session other than AMC/BMO, or an event with no calendar window, is dropped from `plan_frame` and counted on stderr. Refusals are typed OpsErrors with a `reason`: `source_table_missing`, `source_value_invalid`, `plan_frame_empty` or `production_hash_mismatch`. Nothing is imputed here.
+`tables` returns `fetch` (labels and lead production forecasts), `facts` (sizing inputs), `plan_frame` (print windows) and `table_hash`. Labels (`computed_moves`, `iv_crush_targets`) are read event-isolated through `label_rows`, one proven fragment per requested event. `feature_panel` and `tier4_forecasts` are single logical partitions read for the requested keys' tickers. `earnings_events` is read in full (only admitted ids are kept). A session other than AMC/BMO, or an event with no calendar window, is dropped from `plan_frame` and counted on stderr. Refusals are typed OpsErrors with a `reason`: `source_table_missing`, `source_value_invalid`, `plan_frame_empty` or `production_hash_mismatch`. Nothing is imputed here.
 """
 import resource
 import sys
@@ -15,6 +15,7 @@ from engine.v2.data.errors import DataError
 from engine.v2.ops.errors import fail
 from engine.v2.research._pricing import AMC, BMO, trading_calendar_from_snapshot
 from engine.v2.research._scan import read_table
+from engine.v2.research.event_history import plan_event_targets
 from experiments import size_pnl_inputs
 from experiments.size_pnl_readers import LABEL_COLUMNS, PRODUCTION_COLUMNS
 
@@ -31,6 +32,30 @@ def _missing(msg):
 
 def _invalid(msg):
     return fail("EXPERIMENT_IDENTITY_CONFLICT", msg, details={"reason": "source_value_invalid"})
+
+
+def _guarded(name, call, *args, **kwargs):
+    """Map a CONTRACT_MISMATCH read failure to `source_table_missing`; other errors propagate."""
+    try:
+        return call(*args, **kwargs)
+    except DataError as exc:
+        if exc.code != "CONTRACT_MISMATCH":
+            raise
+        raise _missing(f"{name} or a requested column is absent from the snapshot") from None
+
+
+def _values_ok(values, *, allow_nan):
+    """True when every value is finite (NaN too, if allowed) and below the FLT_MAX sentinel."""
+    arr = np.asarray(values, dtype=float)
+    ok = np.isfinite(arr) & (np.abs(arr) < _FLT_MAX_BOUND)
+    return bool((ok | np.isnan(arr)).all() if allow_nan else ok.all())
+
+
+def _floats(frame, column):
+    try:
+        return pd.to_numeric(frame[column]).astype(float)
+    except (TypeError, ValueError):
+        raise _invalid(f"{column} must be numeric") from None
 
 
 def _norm(frame, date_col):
@@ -51,8 +76,25 @@ def _log_read(table, keys, rows, started):
           file=sys.stderr)
 
 
+def label_rows(repository, snapshot, table, columns, want, *, max_object_bytes):
+    """Rows of an outcome table for the requested events only, one event-isolated fragment per event.
+
+    `want` holds event_id, ticker and event_date (Timestamp) for the requested events; the plan refuses unless each has one fragment.
+    """
+    started = time.monotonic()
+    contract = repository.table_contract(snapshot, table)
+    plan = plan_event_targets(repository, snapshot, want, contract, columns=tuple(columns))
+    rows = [row for _, request, _ in plan
+            for batch in repository.scan(request, table_name=table, max_object_bytes=max_object_bytes)
+            for row in batch.to_pylist()]
+    rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+    print(f"[pnl_tables] read {table} events={len(want)} rows={len(rows)} elapsed={time.monotonic() - started:.1f}s rss={rss:.0f}MiB",
+          file=sys.stderr)
+    return rows
+
+
 def tables(repository, snapshot, admitted, *, max_object_bytes, expected_hash,
-           read=read_table, calendar=trading_calendar_from_snapshot):
+           read=read_table, calendar=trading_calendar_from_snapshot, label_rows=label_rows):
     if "tier4_forecasts" not in snapshot.table_versions:
         raise _missing("the forecast table is absent from the snapshot")
     table_hash = snapshot.table_versions["tier4_forecasts"].manifest_hash
@@ -60,14 +102,9 @@ def tables(repository, snapshot, admitted, *, max_object_bytes, expected_hash,
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "the production table does not match the expected hash",
                    details={"reason": "production_hash_mismatch"})
 
-    def _call(table, columns, batch_filter, *, partition_keys=None, key_filter=()):
-        try:
-            return read(repository, snapshot, table, list(columns), batch_filter=batch_filter,
-                        partition_keys=partition_keys, key_filter=key_filter, max_object_bytes=max_object_bytes)
-        except DataError as exc:
-            if exc.code != "CONTRACT_MISMATCH":
-                raise
-            raise _missing(f"{table} or a requested column is absent from the snapshot") from None
+    def _call(table, columns, batch_filter, *, key_filter=()):
+        return _guarded(table, read, repository, snapshot, table, list(columns), batch_filter=batch_filter,
+                        key_filter=key_filter, max_object_bytes=max_object_bytes)
 
     def _read(table, columns, keys, date_col="event_date"):
         started = time.monotonic()
@@ -79,18 +116,16 @@ def tables(repository, snapshot, admitted, *, max_object_bytes, expected_hash,
                 norm = _norm(batch, date_col)
                 hit = [key in keys for key in zip(norm["ticker"], norm[date_col])]
                 return batch.loc[np.asarray(hit, dtype=bool)]
-            # tables are partitioned by the year of their event date, so reading the keys' years loses no key
-            partition_keys = sorted({str(day.year) for _, day in keys})
+            # Logical single partitions: the requested keys' tickers bound the read; the batch filter keeps only the keys.
             key_filter = (KeyPredicate(column="ticker", operator="in", values=tuple(sorted({t for t, _ in keys}))),)
-            out = _norm(_call(table, columns, keep, partition_keys=partition_keys, key_filter=key_filter), date_col)
+            out = _norm(_call(table, columns, keep, key_filter=key_filter), date_col)
         _log_read(table, len(keys), len(out), started)
         return out
 
     admitted_ids = {str(eid) for eid in admitted["events"]["event_id"]}
     started = time.monotonic()
     raw = _call("earnings_events", _EVENT_COLUMNS,
-                lambda batch: batch.loc[batch["event_id"].astype(str).isin(admitted_ids).to_numpy()],
-                partition_keys=None, key_filter=())
+                lambda batch: batch.loc[batch["event_id"].astype(str).isin(admitted_ids).to_numpy()])
     events = _norm(raw, "event_date").assign(event_id=lambda f: f["event_id"].astype(str))
     _log_read("earnings_events", len(admitted_ids), len(events), started)
     dupes = int(events["event_id"].duplicated().sum())
@@ -102,25 +137,43 @@ def tables(repository, snapshot, admitted, *, max_object_bytes, expected_hash,
         raise _missing("admitted events are absent from earnings_events")
     events = events[_EVENT_COLUMNS]
 
+    def _labels(table, value, want):
+        """`value` for each requested event from one outcome table: exactly one row per event, NaN where skipped."""
+        columns = [*_KEY, value, "skipped"]
+        if want.empty:
+            rows = _norm(pd.DataFrame(columns=columns), "event_date")
+        else:
+            fetched = _guarded(table, label_rows, repository, snapshot, table, columns, want, max_object_bytes=max_object_bytes)
+            rows = _norm(pd.DataFrame(fetched, columns=columns), "event_date")
+            if len(rows) != len(want) or rows.duplicated(_KEY).any() or _keys(rows) != _keys(want):
+                raise _invalid(f"{table} must hold exactly one row per requested event")
+        vals = _floats(rows, value)
+        if not _values_ok(vals, allow_nan=True):
+            raise _invalid(f"{table}.{value} must be finite or NaN and below the FLT_MAX sentinel")
+        return rows[_KEY].assign(value=vals.where(~rows["skipped"].astype(bool)).to_numpy())
+
     def fetch(columns, ids):
         columns = tuple(columns)
         want = events[events["event_id"].isin(ids)]
         keys = _keys(want)
         if set(columns) == set(LABEL_COLUMNS):
             kind = "labels"
-            moves = _read("computed_moves", (*_KEY, "realized_move_pct"), keys)
-            moves = moves.assign(abs_move=moves["realized_move_pct"].abs())
-            crush = _read("iv_crush_targets", (*_KEY, "crush_pct_iv30", "skipped"), keys)
-            crush = crush.assign(crush_pct_iv30=crush["crush_pct_iv30"].where(~crush["skipped"].astype(bool)))
-            out = (want[["event_id", *_KEY]].merge(moves[[*_KEY, "abs_move"]], on=_KEY, how="left")
-                   .merge(crush[[*_KEY, "crush_pct_iv30"]], on=_KEY, how="left"))
+            moves = _labels("computed_moves", "realized_move_pct", want)
+            moves = moves.assign(value=moves["value"].abs()).rename(columns={"value": "abs_move"})
+            crush = _labels("iv_crush_targets", "crush_pct_iv30", want).rename(columns={"value": "crush_pct_iv30"})
+            out = (want[["event_id", *_KEY]].merge(moves, on=_KEY, how="left")
+                   .merge(crush, on=_KEY, how="left"))
             out = out[["event_id", "abs_move", "crush_pct_iv30"]]
         elif set(columns) == set(PRODUCTION_COLUMNS):
             kind = "production"
             fc = _read("tier4_forecasts", (*_KEY, "pred_abs_move", "pred_iv_crush_30"), keys)
             if fc.duplicated(_KEY).any():
                 raise _invalid("the forecast table repeats a (ticker, event_date) key")
+            if not keys <= _keys(fc):
+                raise _missing("an admitted event has no forecast")
             out = want[["event_id", *_KEY]].merge(fc, on=_KEY, how="inner").assign(horizon_sessions=size_pnl_inputs.LEAD)
+            if not all(_values_ok(_floats(out, col), allow_nan=False) for col in ("pred_abs_move", "pred_iv_crush_30")):
+                raise _invalid("forecast values must be finite and below the FLT_MAX sentinel")
             out = out[["event_id", "pred_abs_move", "pred_iv_crush_30", "horizon_sessions"]]
         else:
             raise _invalid("unsupported column set for a source fetch")
@@ -130,25 +183,24 @@ def tables(repository, snapshot, admitted, *, max_object_bytes, expected_hash,
     def facts(ids):
         want = events[events["event_id"].isin(ids)]
         keys = _keys(want)
-        panel = _read("feature_panel", ("ticker", "date", "pre_iv30", "mcap_usd"), keys, "date").rename(columns={"date": "event_date"})
-        moves = _read("computed_moves", (*_KEY, "implied_move_pct"), keys)
-        if not (keys <= _keys(panel) and keys <= _keys(moves)):
-            raise _missing("a requested event has no feature_panel or computed_moves row")
-        if panel.duplicated(_KEY).any() or moves.duplicated(_KEY).any():
+        # `or_implied` is the pre-print ORATS quote the panel carries as its own implied move.
+        panel = _read("feature_panel", ("ticker", "date", "pre_iv30", "mcap_usd", "or_implied"), keys, "date").rename(columns={"date": "event_date"})
+        if not keys <= _keys(panel):
+            raise _missing("a requested event has no feature_panel row")
+        if panel.duplicated(_KEY).any():
             raise _invalid("facts repeat a (ticker, event_date) key")
-        out = (want[["event_id", *_KEY]].merge(panel, on=_KEY, how="left")
-               .merge(moves, on=_KEY, how="left").set_index("event_id"))
+        out = want[["event_id", *_KEY]].merge(panel, on=_KEY, how="left").set_index("event_id")
         vals = pd.DataFrame({"pre_iv30": pd.to_numeric(out["pre_iv30"], errors="coerce"),
                              "mcap_usd": pd.to_numeric(out["mcap_usd"], errors="coerce"),
-                             "implied_move": pd.to_numeric(out["implied_move_pct"], errors="coerce")}).astype(float)
-        if not (np.isfinite(vals) & (vals.abs() < _FLT_MAX_BOUND)).all().all():
+                             "implied_move": pd.to_numeric(out["or_implied"], errors="coerce")}).astype(float)
+        if not _values_ok(vals, allow_nan=False):
             raise _invalid("facts values must be finite and below the FLT_MAX sentinel")
         if not ((vals["mcap_usd"] >= 1e6) & (vals["pre_iv30"] > 0) & (vals["implied_move"] > 0)).all():
             raise _invalid("mcap_usd must be USD, not thousands or millions; pre_iv30 and implied_move must be positive")
         print(f"[pnl_tables] facts ids={len(ids)}", file=sys.stderr)
         return vals
 
-    cal = calendar(repository, snapshot, max_object_bytes=max_object_bytes)
+    cal = _guarded("the trading calendar", calendar, repository, snapshot, max_object_bytes=max_object_bytes)
     kept, dropped = [], 0
     for eid, ticker, day, session in zip(events["event_id"], events["ticker"], events["event_date"], events["session"]):
         sess = str(session).upper()
