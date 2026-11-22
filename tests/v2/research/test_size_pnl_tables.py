@@ -217,6 +217,18 @@ def test_calendar_receives_max_object_bytes():
     assert seen == {"max_object_bytes": MAX}
 
 
+def test_every_main_snapshot_table_read_receives_the_exact_byte_cap():
+    cap = 12345
+    read, labels = _Read(_frames()), _Labels(_frames())
+    ns = tbl.tables(REPO, SNAP, ADMITTED, crush_snapshot=CRUSH, max_object_bytes=cap, expected_hash=HASH, read=read,
+                    label_rows=labels, calendar=lambda r, s, *, max_object_bytes: _Cal())
+    ns.fetch(PROD, ["e1", "e2"])
+    ns.facts(["e1", "e2"])
+    main = [c for c in read.calls if not c["crush"]]
+    assert {c["table"] for c in main} == {"earnings_events", "tier4_forecasts", "feature_panel"}
+    assert [c["max_object_bytes"] for c in main] == [cap] * len(main)
+
+
 def test_calendar_contract_mismatch_refused_as_missing():
     def calendar(repository, snap, *, max_object_bytes):
         raise data_fail("CONTRACT_MISMATCH", "calendar table is absent")
@@ -797,6 +809,7 @@ def test_tables_refuses_an_invalid_cap_before_any_read(bad):
         tbl.tables(REPO, SNAP, ADMITTED, crush_snapshot=CRUSH, max_object_bytes=bad, expected_hash=HASH, read=read,
                    label_rows=labels, calendar=lambda r, s, *, max_object_bytes: _Cal())
     assert _refusal(exc) == ("INVALID_EXPERIMENT_SPEC", "max_object_bytes_invalid")
+    assert exc.value.problem.message == "max_object_bytes must be a positive integer"
     assert read.calls == [] and labels.calls == []
 
 
@@ -809,6 +822,7 @@ def test_label_rows_refuses_an_invalid_cap_before_any_plan_or_scan(monkeypatch, 
     with pytest.raises(OpsError) as exc:
         tbl.label_rows(repo, SNAP, "computed_moves", ["ticker", "event_date"], want, max_object_bytes=bad)
     assert _refusal(exc) == ("INVALID_EXPERIMENT_SPEC", "max_object_bytes_invalid")
+    assert exc.value.problem.message == "max_object_bytes must be a positive integer"
     assert planned == [] and repo.scans == []
 
 
@@ -894,6 +908,45 @@ def test_crush_context_exclusions_leave_crush_nan_and_never_read_the_main_snapsh
     assert out.loc["e1", "abs_move"] == 3.0
     assert "[pnl_tables] crush_label_missing=1 of 2" in capsys.readouterr().err
     assert [c["crush"] for c in read.labels.calls if c["table"] == "iv_crush_targets"] == [True]
+
+
+def _crush_kept(read):
+    """The one crush-side earnings_events frame the fake read kept (the only read carrying the crush-context columns)."""
+    frames = [f for t, f in read.kept if t == "earnings_events" and "date_conflict" in f.columns]
+    assert len(frames) == 1
+    return frames[0]
+
+
+def test_crush_read_drops_an_unrelated_unadmitted_event_before_it_matters(capsys):
+    # e9 is unadmitted and its (ZZZ, 2024-01-05) key matches no admitted event: the batch filter must drop it.
+    unrelated = pd.concat([_events(), pd.DataFrame({"event_id": ["e9"], "ticker": ["ZZZ"], "event_date": [pd.Timestamp("2024-01-05")],
+                                                     "session": ["AMC"]})], ignore_index=True)
+    ns, read = _build(crush_frames=_crush_of(_frames(), earnings_events=unrelated))
+    out = ns.fetch(LABEL, ["e1", "e2"]).set_index("event_id")
+    assert _crush_kept(read)["event_id"].tolist() == ["e1", "e2"]
+    assert out.loc["e1", "crush_pct_iv30"] == -10.0
+    assert "[pnl_tables] crush_label_missing=0 of 2" in capsys.readouterr().err
+
+
+def test_duplicate_key_under_an_unadmitted_id_is_kept_and_flags_the_admitted_event(capsys):
+    # e9 is unadmitted but shares AAA/D1 with admitted e1: the row is kept, both rows are flagged, and e1 is excluded.
+    dup = pd.concat([_events(), _events().iloc[[0]].assign(event_id="e9")], ignore_index=True)
+    ns, read = _build(crush_frames=_crush_of(_frames(), earnings_events=dup))
+    out = ns.fetch(LABEL, ["e1", "e2"]).set_index("event_id")
+    assert _crush_kept(read)["event_id"].tolist() == ["e1", "e2", "e9"]
+    assert np.isnan(out.loc["e1", "crush_pct_iv30"]) and pd.isna(out.loc["e1", AVAILABLE])
+    assert "[pnl_tables] crush_label_missing=1 of 2" in capsys.readouterr().err
+
+
+def test_held_out_looking_unrelated_event_never_appears_in_the_kept_crush_frame():
+    # e9 is unadmitted with a ticker the admitted set uses (AAA) but a date no admitted event has: it is never kept.
+    looking = pd.concat([_events(), pd.DataFrame({"event_id": ["e9"], "ticker": ["AAA"], "event_date": [D2],
+                                                   "session": ["AMC"]})], ignore_index=True)
+    ns, read = _build(crush_frames=_crush_of(_frames(), earnings_events=looking))
+    ns.fetch(LABEL, ["e1", "e2"])
+    kept = _crush_kept(read)
+    assert "e9" not in set(kept["event_id"])
+    assert kept["event_id"].tolist() == ["e1", "e2"]
 
 
 # --- pricing pass-through ----------------------------------------------------------

@@ -1,6 +1,6 @@
 """EXP-188 real-store Sources adapter, slice 2: table-backed providers for `size_pnl_driver.Sources` (design section 13).
 
-`tables` returns `fetch` (labels and lead production forecasts), `facts` (sizing inputs), `plan_frame` (print windows) and `table_hash`. Labels (`computed_moves`, `iv_crush_targets`) are read event-isolated through `label_rows`, one proven fragment per requested event. Each label carries the later of the two tables' `available_as_of_date` (text compare), or None when either is None. Every non-null `available_as_of_date` is validated as ISO text that round-trips: when both of a label's dates are non-null, a malformed one refuses `source_value_invalid`, even on a skipped label; when either is null the label's availability is None and the other date is not checked here. A null date is allowed only where the label itself is absent or skipped, since `read_labels` refuses a kept label without a valid one. `feature_panel` and `tier4_forecasts` are single logical partitions read for the requested keys' tickers. `earnings_events` is read in full (only admitted ids are kept). A session other than AMC/BMO, or an event with no calendar window, is dropped from `plan_frame` and counted on stderr. A requested event with no production forecast (or a NaN one), or with no label row, is excluded and counted on stderr; `empty_population` refuses when no requested event has a forecast. Refusals are typed OpsErrors with a `reason`: `source_table_missing` (a table or column is absent), `source_value_invalid` (more than one row, or a bad value), `empty_population`, `plan_frame_empty`, `production_hash_mismatch` or `max_object_bytes_invalid`. A DataError other than CONTRACT_MISMATCH, including a planner HOLDOUT_ACCESS_DENIED, propagates unchanged (the `_guarded` behaviour). Nothing is imputed here.
+`tables` returns `fetch` (labels and lead production forecasts), `facts` (sizing inputs), `plan_frame` (print windows) and `table_hash`. Labels (`computed_moves`, `iv_crush_targets`) are read event-isolated through `label_rows`, one proven fragment per requested event. Each label carries the later of the two tables' `available_as_of_date` (text compare), or None when either is None. Both dates are validated as ISO text that round-trips, and a malformed one refuses `source_value_invalid`, only when both are non-null; when either is null the label's availability is None and the other date is not checked, so a kept label without one is refused by `read_labels` as `label_availability_missing`. `feature_panel` and `tier4_forecasts` are single logical partitions read for the requested keys' tickers. The main snapshot's `earnings_events` is scanned and only admitted event ids are kept. The crush snapshot's `earnings_events` is scanned and only rows of admitted events (by event id or by an admitted event's ticker and date) are kept. A session other than AMC/BMO, or an event with no calendar window, is dropped from `plan_frame` and counted on stderr. A requested event with no production forecast (or a NaN one), or with no label row, is excluded and counted on stderr; `empty_population` refuses when no requested event has a forecast. Refusals are typed OpsErrors with a `reason`: `source_table_missing` (a table or column is absent), `source_value_invalid` (more than one row, or a bad value), `empty_population`, `plan_frame_empty`, `production_hash_mismatch` or `max_object_bytes_invalid`. A DataError other than CONTRACT_MISMATCH, including a planner HOLDOUT_ACCESS_DENIED, propagates unchanged (the `_guarded` behaviour). Nothing is imputed here.
 """
 import datetime as dt
 import math
@@ -197,10 +197,16 @@ def tables(repository, snapshot, admitted, *, crush_snapshot, max_object_bytes, 
         raise _missing("admitted events are absent from earnings_events")
     events = events[_EVENT_COLUMNS]
 
-    # Crush usability: the crush snapshot's earnings_events (read in full) must carry the event id with the same ticker, date and session,
+    # Crush usability: the crush snapshot's earnings_events is scanned, keeping only rows of admitted events (by event id or by an admitted event's ticker and date); the kept rows must carry the event id with the same ticker, date and session,
     # unflagged for date conflicts (a (ticker, date) under two ids is flagged on both rows), and an iv_crush_targets fragment for its key.
     # The main snapshot is never used for crush labels.
-    crush_events = _norm(_call("earnings_events", _CRUSH_EVENT_COLUMNS, lambda batch: batch, snap=crush_snapshot), "event_date")
+    admitted_keys = _keys(events)
+
+    def keep_crush(batch):
+        norm = _norm(batch, "event_date")
+        hit = [eid in admitted_ids or key in admitted_keys for eid, key in zip(norm["event_id"].astype(str), zip(norm["ticker"], norm["event_date"]))]
+        return batch.loc[np.asarray(hit, dtype=bool)]
+    crush_events = _norm(_call("earnings_events", _CRUSH_EVENT_COLUMNS, keep_crush, snap=crush_snapshot), "event_date")
     crush_events = crush_events.assign(event_id=lambda f: f["event_id"].astype(str), session=lambda f: f["session"].map(_session))
     flagged = crush_events["date_conflict"].map(_flag).astype(bool).to_numpy() | crush_events.duplicated(_KEY, keep=False).to_numpy()
     clean = crush_events.loc[~flagged]
