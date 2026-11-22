@@ -1,6 +1,6 @@
 """EXP-188 real-store Sources adapter, slice 2: table-backed providers for `size_pnl_driver.Sources` (design section 13).
 
-`tables` returns `fetch` (labels and lead production forecasts), `facts` (sizing inputs), `plan_frame` (print windows) and `table_hash`. Labels (`computed_moves`, `iv_crush_targets`) are read event-isolated through `label_rows`, one proven fragment per requested event. Each label carries the later of the two tables' `available_as_of_date` (text compare), or None when either is None. Every non-null `available_as_of_date` is validated as ISO text that round-trips: when both of a label's dates are non-null, a malformed one refuses `source_value_invalid`, even on a skipped label; when either is null the label's availability is None and the other date is not checked here. A null date is allowed only where the label itself is absent or skipped, since `read_labels` refuses a kept label without a valid one. `feature_panel` and `tier4_forecasts` are single logical partitions read for the requested keys' tickers. `earnings_events` is read in full (only admitted ids are kept). A session other than AMC/BMO, or an event with no calendar window, is dropped from `plan_frame` and counted on stderr. Refusals are typed OpsErrors with a `reason`: `source_table_missing` (a table has no row for a requested event), `source_value_invalid` (more than one row, or a bad value), `plan_frame_empty`, `production_hash_mismatch` or `max_object_bytes_invalid`. A DataError other than CONTRACT_MISMATCH, including a planner HOLDOUT_ACCESS_DENIED, propagates unchanged (the `_guarded` behaviour). Nothing is imputed here.
+`tables` returns `fetch` (labels and lead production forecasts), `facts` (sizing inputs), `plan_frame` (print windows) and `table_hash`. Labels (`computed_moves`, `iv_crush_targets`) are read event-isolated through `label_rows`, one proven fragment per requested event. Each label carries the later of the two tables' `available_as_of_date` (text compare), or None when either is None. Every non-null `available_as_of_date` is validated as ISO text that round-trips: when both of a label's dates are non-null, a malformed one refuses `source_value_invalid`, even on a skipped label; when either is null the label's availability is None and the other date is not checked here. A null date is allowed only where the label itself is absent or skipped, since `read_labels` refuses a kept label without a valid one. `feature_panel` and `tier4_forecasts` are single logical partitions read for the requested keys' tickers. `earnings_events` is read in full (only admitted ids are kept). A session other than AMC/BMO, or an event with no calendar window, is dropped from `plan_frame` and counted on stderr. A requested event with no production forecast (or a NaN one), or with no label row, is excluded and counted on stderr; `empty_population` refuses when no requested event has a forecast. Refusals are typed OpsErrors with a `reason`: `source_table_missing` (a table or column is absent), `source_value_invalid` (more than one row, or a bad value), `empty_population`, `plan_frame_empty`, `production_hash_mismatch` or `max_object_bytes_invalid`. A DataError other than CONTRACT_MISMATCH, including a planner HOLDOUT_ACCESS_DENIED, propagates unchanged (the `_guarded` behaviour). Nothing is imputed here.
 """
 import datetime as dt
 import math
@@ -24,6 +24,7 @@ from experiments.size_pnl_readers import AVAILABLE, LABEL_FETCH, PRODUCTION_COLU
 _EVENT_COLUMNS = ["event_id", "ticker", "event_date", "session"]
 _PLAN_COLUMNS = ["event_id", "ticker", "event_date", "session", "entry_date", "exit_date"]
 _KEY = ["ticker", "event_date"]
+_CRUSH_EVENT_COLUMNS = [*_EVENT_COLUMNS, "date_conflict", "event_cluster_id"]
 # FLT_MAX-style placeholder: any |value| at or above this is a sentinel, not a measurement.
 _FLT_MAX_BOUND = 3.0e38
 # One stderr progress line per this many planned events scanned by label_rows.
@@ -72,6 +73,15 @@ def _norm(frame, date_col):
 
 def _keys(frame):
     return set(zip(frame["ticker"], frame["event_date"]))
+
+
+def _session(value):
+    return str(value).strip().upper()
+
+
+def _flag(value):
+    """A date_conflict flag as a bool; a null flag counts as not conflicting."""
+    return False if pd.isna(value) else bool(value)
 
 
 def _iso_day(value):
@@ -187,20 +197,26 @@ def tables(repository, snapshot, admitted, *, crush_snapshot, max_object_bytes, 
         raise _missing("admitted events are absent from earnings_events")
     events = events[_EVENT_COLUMNS]
 
-    # Crush usability: the crush snapshot must carry the same event (id, ticker, date) and an iv_crush_targets fragment for its key.
+    # Crush usability: the crush snapshot's earnings_events (read in full) must carry the event id with the same ticker, date and session,
+    # unflagged for date conflicts (a (ticker, date) under two ids is flagged on both rows), and an iv_crush_targets fragment for its key.
     # The main snapshot is never used for crush labels.
-    crush_raw = _call("earnings_events", ["event_id", "ticker", "event_date"],
-                      lambda batch: batch.loc[batch["event_id"].astype(str).isin(admitted_ids).to_numpy()], snap=crush_snapshot)
-    crush_events = _norm(crush_raw, "event_date").assign(event_id=lambda f: f["event_id"].astype(str))
-    crush_set = set(zip(crush_events["event_id"], crush_events["ticker"], crush_events["event_date"]))
+    crush_events = _norm(_call("earnings_events", _CRUSH_EVENT_COLUMNS, lambda batch: batch, snap=crush_snapshot), "event_date")
+    crush_events = crush_events.assign(event_id=lambda f: f["event_id"].astype(str), session=lambda f: f["session"].map(_session))
+    flagged = crush_events["date_conflict"].map(_flag).astype(bool).to_numpy() | crush_events.duplicated(_KEY, keep=False).to_numpy()
+    clean = crush_events.loc[~flagged]
+    crush_set = set(zip(clean["event_id"], clean["ticker"], clean["event_date"], clean["session"]))
     have = {(r.partition_key, r.time_min) for r in repository.fragment_records(crush_snapshot, "iv_crush_targets")}
-    usable_crush = {eid for eid, ticker, day in zip(events["event_id"], events["ticker"], events["event_date"])
-                    if pd.notna(day) and (eid, ticker, day) in crush_set and (ticker, day.date().isoformat()) in have}
+    usable_crush = {eid for eid, ticker, day, session in zip(events["event_id"], events["ticker"], events["event_date"], events["session"])
+                    if pd.notna(day) and (eid, ticker, day, _session(session)) in crush_set and (ticker, day.date().isoformat()) in have}
     print(f"[pnl_tables] crush_label_missing={len(events) - len(usable_crush)} of {len(events)}", file=sys.stderr)
+    # Move usability: the main snapshot's computed_moves fragment must hold the event's key; the planner never sees the others.
+    have_moves = {(r.partition_key, r.time_min) for r in repository.fragment_records(snapshot, "computed_moves")}
+    usable_moves = {eid for eid, ticker, day in zip(events["event_id"], events["ticker"], events["event_date"])
+                    if pd.notna(day) and (ticker, day.date().isoformat()) in have_moves}
 
     def _labels(table, value, want, snap):
         """`value` and the availability (column `available`, ISO text or None) for each requested event from one outcome table:
-        exactly one row per event, NaN value where skipped. An event with no row refuses `source_table_missing`."""
+        at most one row per event. An event with no row (or a skipped one) gets NaN and None availability: excluded, not refused."""
         columns = [*_KEY, value, "skipped", AVAILABLE]
         if want.empty:
             rows = _norm(pd.DataFrame(columns=columns), "event_date")
@@ -209,8 +225,6 @@ def tables(repository, snapshot, admitted, *, crush_snapshot, max_object_bytes, 
             rows = _norm(pd.DataFrame(fetched, columns=columns), "event_date")
             if rows.duplicated(_KEY).any() or not _keys(rows) <= _keys(want):
                 raise _invalid(f"{table} must hold at most one row per requested event")
-            if _keys(want) - _keys(rows):
-                raise _missing(f"{table} has no row for a requested event")
         vals = _floats(rows, value)
         if not _values_ok(vals, allow_nan=True):
             raise _invalid(f"{table}.{value} must be finite or NaN and below the FLT_MAX sentinel")
@@ -223,7 +237,7 @@ def tables(repository, snapshot, admitted, *, crush_snapshot, max_object_bytes, 
         keys = _keys(want)
         if set(columns) == set(LABEL_FETCH):
             kind = "labels"
-            moves = _labels("computed_moves", "realized_move_pct", want, snapshot)
+            moves = _labels("computed_moves", "realized_move_pct", want[want["event_id"].isin(usable_moves)], snapshot)
             moves = (moves.assign(value=moves["value"].abs())
                      .rename(columns={"value": "abs_move", "available": "available_moves"}))
             # Requested events without a usable crush label get no crush row: the left merge leaves them NaN with no availability.
@@ -235,17 +249,24 @@ def tables(repository, snapshot, admitted, *, crush_snapshot, max_object_bytes, 
             out[AVAILABLE] = [_later(a, b) if ok else None
                               for a, b, ok in zip(out["available_moves"], out["available_crush"], both)]
             out = out[["event_id", "abs_move", "crush_pct_iv30", AVAILABLE]]
+            print(f"[pnl_tables] excluded move_label_missing={int(out['abs_move'].isna().sum())} "
+                  f"crush_label_missing={int(out['crush_pct_iv30'].isna().sum())} of {len(want)}", file=sys.stderr)
         elif set(columns) == set(PRODUCTION_COLUMNS):
             kind = "production"
             fc = _read("tier4_forecasts", (*_KEY, "pred_abs_move", "pred_iv_crush_30"), keys)
             if fc.duplicated(_KEY).any():
                 raise _invalid("the forecast table repeats a (ticker, event_date) key")
-            if not keys <= _keys(fc):
-                raise _missing("an admitted event has no forecast")
-            out = want[["event_id", *_KEY]].merge(fc, on=_KEY, how="inner").assign(horizon_sessions=size_pnl_inputs.LEAD)
-            if not all(_values_ok(_floats(out, col), allow_nan=False) for col in ("pred_abs_move", "pred_iv_crush_30")):
+            out = want[["event_id", *_KEY]].merge(fc, on=_KEY, how="inner")
+            out = out.assign(pred_abs_move=_floats(out, "pred_abs_move"), pred_iv_crush_30=_floats(out, "pred_iv_crush_30"))
+            if not all(_values_ok(out[col], allow_nan=True) for col in ("pred_abs_move", "pred_iv_crush_30")):
                 raise _invalid("forecast values must be finite and below the FLT_MAX sentinel")
-            out = out[["event_id", "pred_abs_move", "pred_iv_crush_30", "horizon_sessions"]]
+            # A requested event with no forecast row, or a NaN/None prediction, is excluded (never imputed); the rest are kept.
+            out = out[out[["pred_abs_move", "pred_iv_crush_30"]].notna().all(axis=1)]
+            print(f"[pnl_tables] excluded production_forecast_missing={len(want) - len(out)} of {len(want)}", file=sys.stderr)
+            if len(want) and out.empty:
+                raise fail("EXPERIMENT_IDENTITY_CONFLICT", "no requested event has a production forecast",
+                           details={"reason": "empty_population"})
+            out = out.assign(horizon_sessions=size_pnl_inputs.LEAD)[["event_id", "pred_abs_move", "pred_iv_crush_30", "horizon_sessions"]]
         else:
             raise _invalid("unsupported column set for a source fetch")
         print(f"[pnl_tables] fetch {kind} ids={len(ids)} rows={len(out)}", file=sys.stderr)

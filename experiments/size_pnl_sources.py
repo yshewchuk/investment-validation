@@ -129,6 +129,8 @@ def load_plan(store, registration, ref):
     plan_id = plan.get("plan_id")
     if not (isinstance(plan_id, str) and plan_id == content_hash({k: v for k, v in plan.items() if k != "plan_id"})):
         raise fail(_CONFLICT, "the sealed plan body does not match its plan_id", details={"reason": "plan_id_mismatch"})
+    if not (isinstance(plan.get("candidates"), list) and isinstance(plan.get("selection"), dict)):
+        raise fail(_CONFLICT, "the sealed plan lacks a candidate list or a selection", details={"reason": "plan_malformed"})
     return plan
 
 

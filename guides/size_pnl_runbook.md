@@ -19,8 +19,9 @@ beside the v14 run, container 12 GiB). Agents never run them.
    `size_pnl_driver.Sources` (design section 13: catalog, store root, v14 spec and plan-ref, pinned snapshot,
    production hash). The sealed v14 plan is loaded by its content hash and run id, never re-derived (a later checkout
    cannot match v14's source closure): `plan_hash_mismatch`, `plan_schema_unknown`, `plan_anchor_mismatch`, `plan_registration_mismatch`, `plan_id_mismatch`, `plan_malformed`, `plan_too_large`, `plan_unreadable`. `crush_snapshot_id` names the second pinned snapshot that holds `iv_crush_targets` (the v14 snapshot has none; `crush_snapshot_invalid` otherwise; events without a crush label are excluded and counted `crush_label_missing`). `production_hash` must equal the `tier4_forecasts` dataset-version manifest hash of the pinned
-   snapshot, else `production_hash_mismatch` before `size_pnl_tables` reads any table. A missing table, column or event refuses
-   `source_table_missing`; a non-finite, FLT_MAX or non-USD-scale `mcap_usd` refuses `source_value_invalid`.
+   snapshot, else `production_hash_mismatch` before `size_pnl_tables` reads any table. A missing table or column refuses
+   `source_table_missing`; an event without a forecast or label is excluded and counted on stderr
+   (`production_forecast_missing`, `move_label_missing`, `crush_label_missing`); a non-finite, FLT_MAX or non-USD-scale `mcap_usd` refuses `source_value_invalid`.
 
 ## Real run
 

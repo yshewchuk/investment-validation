@@ -26,6 +26,11 @@ PROD = tuple(readers.PRODUCTION_COLUMNS)
 LABEL = tuple(readers.LABEL_FETCH)
 AVAILABLE = readers.AVAILABLE
 ADMITTED = readers.Admitted({"events": pd.DataFrame({"event_id": ["e1", "e2"], "event_date": [D1, D2]}), "excluded": {}})
+# Three admitted events: e1 AAA/D1 (AMC, forecast present), e2 BBB/D2 (BMO, NaN forecast), e3 CCC/D1 (AMC, no forecast row).
+E3 = pd.DataFrame({"event_id": ["e1", "e2", "e3"], "ticker": ["AAA", "BBB", "CCC"], "event_date": [D1, D2, D1],
+                   "session": ["AMC", "BMO", "AMC"]})
+FC3 = pd.DataFrame({"ticker": ["AAA", "BBB"], "event_date": [D1, D2], "pred_abs_move": [4.0, np.nan], "pred_iv_crush_30": [-1.0, -2.0]})
+ADMITTED3 = readers.Admitted({"events": E3[["event_id", "event_date"]], "excluded": {}})
 
 
 def _refusal(exc):
@@ -62,9 +67,14 @@ def _served(snapshot, table):
 
 
 def _crush_of(frames, **over):
-    """The crush snapshot's frames for a test: the same earnings_events and iv_crush_targets unless overridden."""
+    """The crush snapshot's frames for a test: the same earnings_events and iv_crush_targets unless overridden.
+    Its earnings_events carries the crush-context columns (date_conflict defaults to False, event_cluster_id to event_id)."""
     crush = {k: frames[k] for k in ("earnings_events", "iv_crush_targets") if k in frames}
     crush.update(over)
+    if "earnings_events" in crush:
+        events = crush["earnings_events"]
+        crush["earnings_events"] = events.assign(date_conflict=events.get("date_conflict", False),
+                                                 event_cluster_id=events.get("event_cluster_id", events["event_id"]))
     return crush
 
 
@@ -73,17 +83,22 @@ def _crush_keys(crush_frames):
     return [] if frame is None else [(t, d.date().isoformat()) for t, d in zip(frame["ticker"], frame["event_date"])]
 
 
+ALL_KEYS = [("AAA", "2025-01-02"), ("BBB", "2025-02-03")]
+
+
 class _Repo:
-    """Fake repository: fragment_records lists one iv_crush_targets fragment per (ticker, date text) key."""
-    def __init__(self, keys=()):
+    """Fake repository: fragment_records lists one fragment per (ticker, date text) key, for iv_crush_targets (`keys`) and
+    computed_moves (`moves`; every admitted event unless given)."""
+    def __init__(self, keys=ALL_KEYS, moves=ALL_KEYS):
         self.keys = list(keys)
+        self.moves = list(moves)
 
     def fragment_records(self, snapshot, table_name):
-        assert table_name == "iv_crush_targets"
-        return [types.SimpleNamespace(partition_key=t, time_min=d) for t, d in self.keys]
+        keys = {"iv_crush_targets": self.keys, "computed_moves": self.moves}[table_name]
+        return [types.SimpleNamespace(partition_key=t, time_min=d) for t, d in keys]
 
 
-REPO = _Repo([("AAA", "2025-01-02"), ("BBB", "2025-02-03")])
+REPO = _Repo()
 
 
 class _Read:
@@ -91,7 +106,7 @@ class _Read:
     key_filters, then batch_filter, and records what the caller kept. The crush snapshot reads from `crush_frames`."""
     def __init__(self, frames, crush_frames=None):
         self.frames = frames
-        self.crush_frames = frames if crush_frames is None else crush_frames
+        self.crush_frames = _crush_of(frames) if crush_frames is None else crush_frames
         self.kept = []
         self.calls = []
         self.labels = None
@@ -249,22 +264,34 @@ def test_admitted_event_absent_from_earnings_events_refused():
 
 def test_production_fetch_joins_to_event_id_and_restricts_to_requested():
     ns, _ = _build()
-    out = ns.fetch(PROD, ["e1"])
-    assert list(out["event_id"]) == ["e1"]
-    assert out.loc[0, "pred_abs_move"] == 4.0 and out.loc[0, "pred_iv_crush_30"] == -1.0
-    assert out["horizon_sessions"].tolist() == [1]
-    both = ns.fetch(PROD, ["e1", "e2"])
-    assert sorted(both["event_id"]) == ["e1", "e2"]
-    assert "CCC" not in set(both["event_id"])
+    out = ns.fetch(PROD, ["e1"]).to_dict("records")
+    assert out == [{"event_id": "e1", "pred_abs_move": 4.0, "pred_iv_crush_30": -1.0, "horizon_sessions": 1}]
+    both = ns.fetch(PROD, ["e1", "e2"]).set_index("event_id")
+    assert both.loc["e1"].tolist() == [4.0, -1.0, 1]
+    assert both.loc["e2"].tolist() == [5.0, -2.0, 1]
 
 
-def test_production_missing_forecast_refused():
-    frames = _frames(tier4_forecasts=pd.DataFrame({"ticker": ["AAA"], "event_date": [D1],
-                                                   "pred_abs_move": [4.0], "pred_iv_crush_30": [-1.0]}))
-    ns, _ = _build(frames)
+def test_production_absent_and_nan_forecasts_are_excluded_not_refused(capsys):
+    frames = _frames(earnings_events=E3, tier4_forecasts=FC3)  # e1 forecast; e2 NaN; e3 no forecast row
+    ns, _ = _build(frames, admitted=ADMITTED3)
+    out = ns.fetch(PROD, ["e1", "e2", "e3"])
+    assert out.to_dict("list") == {"event_id": ["e1"], "pred_abs_move": [4.0], "pred_iv_crush_30": [-1.0], "horizon_sessions": [1]}
+    assert "[pnl_tables] excluded production_forecast_missing=2 of 3" in capsys.readouterr().err
+
+
+def test_production_no_requested_event_with_a_forecast_refuses_empty_population():
+    ns, _ = _build(_frames(earnings_events=E3, tier4_forecasts=FC3), admitted=ADMITTED3)
     with pytest.raises(OpsError) as exc:
-        ns.fetch(PROD, ["e1", "e2"])
-    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "source_table_missing")
+        ns.fetch(PROD, ["e2", "e3"])
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "empty_population")
+
+
+def test_readers_drop_absent_and_nan_forecast_events_end_to_end(capsys):
+    ns, _ = _build(_frames(earnings_events=E3, tier4_forecasts=FC3), admitted=ADMITTED3)
+    prod = readers.read_production(ns.fetch, ADMITTED3, expected_hash=HASH, table_hash=ns.table_hash)
+    assert list(prod["frame"].index) == ["e1"]
+    assert prod["frame"].loc["e1", "pred_move"] == 4.0 and prod["frame"].loc["e1", "pred_crush"] == -1.0
+    assert "[pnl_readers] production rows=1 production_missing=2" in capsys.readouterr().err
 
 
 def test_production_duplicate_key_refused():
@@ -277,11 +304,10 @@ def test_production_duplicate_key_refused():
 
 
 @pytest.mark.parametrize("column, value", [
-    ("pred_abs_move", np.nan),
     ("pred_abs_move", np.inf),
     ("pred_abs_move", 3.4028235e38),
     ("pred_iv_crush_30", 3.0e38),
-], ids=["nan", "inf", "flt_max", "at_bound"])
+], ids=["inf", "flt_max", "at_bound"])
 def test_production_sentinel_or_nonfinite_prediction_refused(column, value):
     frames = _frames()
     frames["tier4_forecasts"] = _set(frames["tier4_forecasts"], column, value)  # row 0 is AAA/D1, event e1
@@ -316,16 +342,35 @@ def test_label_nan_value_allowed_and_comes_back_nan():
     assert np.isnan(out.loc["e1", "abs_move"])
 
 
-def test_label_missing_row_refused():
+def test_label_with_no_returned_row_is_excluded_not_refused(capsys):
+    # e2 has a move fragment but its label read returns no row: NaN value, None availability, counted on stderr.
     frames = _frames(
         computed_moves=pd.DataFrame({"ticker": ["AAA"], "event_date": [D1], "realized_move_pct": [-3.0], "skipped": [False],
                                      "available_as_of_date": ["2025-01-03"]}),
         iv_crush_targets=pd.DataFrame({"ticker": ["AAA"], "event_date": [D1], "crush_pct_iv30": [-10.0], "skipped": [False],
                                        "available_as_of_date": ["2025-01-03"]}))
     ns, _ = _build(frames)
-    with pytest.raises(OpsError) as exc:
-        ns.fetch(LABEL, ["e2"])
-    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "source_table_missing")
+    out = ns.fetch(LABEL, ["e2"]).set_index("event_id")
+    assert np.isnan(out.loc["e2", "abs_move"]) and np.isnan(out.loc["e2", "crush_pct_iv30"]) and out.loc["e2", AVAILABLE] is None
+    assert "[pnl_tables] excluded move_label_missing=1 crush_label_missing=1 of 1" in capsys.readouterr().err
+
+
+def test_event_without_move_fragment_is_excluded_and_never_planned(capsys):
+    ns, read = _build(repository=_Repo(moves=[("AAA", "2025-01-02")]))
+    out = ns.fetch(LABEL, ["e1", "e2"]).set_index("event_id")
+    assert out.loc["e1", "abs_move"] == 3.0
+    assert np.isnan(out.loc["e2", "abs_move"]) and pd.isna(out.loc["e2", AVAILABLE])
+    assert [c["events"] for c in read.labels.calls if c["table"] == "computed_moves"] == [["e1"]]
+    assert "[pnl_tables] excluded move_label_missing=1 crush_label_missing=1 of 2" in capsys.readouterr().err
+
+
+def test_readers_drop_move_label_missing_event_end_to_end(capsys):
+    ns, _ = _build(repository=_Repo(moves=[("AAA", "2025-01-02")]))
+    labels = readers.read_labels(ns.fetch, ADMITTED)
+    assert list(labels.index) == ["e1"] and labels.loc["e1", "abs_move"] == 3.0
+    err = capsys.readouterr().err
+    assert "[pnl_tables] excluded move_label_missing=1 crush_label_missing=1 of 2" in err
+    assert "[pnl_readers] labels requested=2 label_missing=1" in err
 
 
 def test_label_two_rows_for_one_event_refused():
@@ -428,7 +473,7 @@ class _PlanRepo:
         return ("contract", table)
 
     def fragment_records(self, snapshot, table_name):
-        return []
+        return [types.SimpleNamespace(partition_key=t, time_min=d) for t, d in ALL_KEYS]
 
     def scan(self, request, *, table_name, max_object_bytes):
         self.scans.append((request, table_name, max_object_bytes))
@@ -605,6 +650,24 @@ def test_plan_frame_passes_check_plan():
     ladder.check_plan(ADMITTED, ns.plan_frame)
 
 
+class _SessionCal:
+    """Distinct windows per session: AMC enters on the event day and exits the next day; BMO enters the day before and exits on the event day."""
+    def last_pre_print(self, day, session):
+        return day if session == "AMC" else day - DAY
+
+    def first_post_print(self, day, session):
+        return day + DAY if session == "AMC" else day
+
+
+def test_plan_frame_windows_are_session_specific_for_amc_and_bmo():
+    ns, _ = _build(cal=_SessionCal())
+    plan = ns.plan_frame.set_index("event_id")
+    assert plan.loc["e1", "session"] == "AMC"
+    assert plan.loc["e1", "entry_date"] == pd.Timestamp("2025-01-02") and plan.loc["e1", "exit_date"] == pd.Timestamp("2025-01-03")
+    assert plan.loc["e2", "session"] == "BMO"
+    assert plan.loc["e2", "entry_date"] == pd.Timestamp("2025-02-02") and plan.loc["e2", "exit_date"] == pd.Timestamp("2025-02-03")
+
+
 # --- read errors -------------------------------------------------------------
 
 def test_contract_mismatch_from_forecast_read_maps_to_source_table_missing():
@@ -778,6 +841,23 @@ def test_excluded_crush_event_never_reads_main_snapshot_for_crush():
     assert out["crush_pct_iv30"].isna().all() and out[AVAILABLE].isna().all()
     assert all(c["table"] != "iv_crush_targets" for c in read.labels.calls if not c["crush"])
     assert [c for c in read.labels.calls if c["table"] == "iv_crush_targets"] == []
+
+
+CRUSH_CONTEXT_CASES = {
+    "session_mismatch": _events(sessions=("BMO", "BMO")),                                              # e1 is AMC in the main snapshot
+    "crush_date_conflict": _events().assign(date_conflict=[True, False]),                              # e1 flagged on the crush side
+    "crush_duplicate_key": pd.concat([_events(), _events().iloc[[0]].assign(event_id="e9")], ignore_index=True),  # e1 and e9 share AAA/D1
+}
+
+
+@pytest.mark.parametrize("case", list(CRUSH_CONTEXT_CASES))
+def test_crush_context_exclusions_leave_crush_nan_and_never_read_the_main_snapshot(case, capsys):
+    ns, read = _build(crush_frames=_crush_of(_frames(), earnings_events=CRUSH_CONTEXT_CASES[case]))
+    out = ns.fetch(LABEL, ["e1", "e2"]).set_index("event_id")
+    assert np.isnan(out.loc["e1", "crush_pct_iv30"]) and pd.isna(out.loc["e1", AVAILABLE])
+    assert out.loc["e1", "abs_move"] == 3.0
+    assert "[pnl_tables] crush_label_missing=1 of 2" in capsys.readouterr().err
+    assert [c["crush"] for c in read.labels.calls if c["table"] == "iv_crush_targets"] == [True]
 
 
 # --- pricing pass-through ----------------------------------------------------------

@@ -1088,6 +1088,36 @@ def test_load_plan_implementation_differing_from_registration_refused(env, monke
     assert env.conn.closed is True
 
 
+def test_load_plan_environment_differing_from_registration_refused(env, monkeypatch):
+    _no_rederivation(monkeypatch)
+    plan = _plan()
+    plan["implementation"] = {"source_closure": SOURCE_CLOSURE, "environment": {"python": "3.13"}}
+    _store_plan(env, _seal(plan))
+    with pytest.raises(OpsError) as exc:
+        src.build_sources(env.args)
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "plan_registration_mismatch")
+    assert env.conn.closed is True
+
+
+@pytest.mark.parametrize("edit", [
+    pytest.param(lambda plan: plan.pop("selection"), id="no_selection"),
+    pytest.param(lambda plan: plan.update(candidates={"candidate_id": "c-hsq"}), id="candidates_not_list"),
+])
+def test_load_plan_bad_shape_refused_before_roster_derivation(env, monkeypatch, edit):
+    _no_rederivation(monkeypatch)
+
+    def refuse(plan):
+        raise AssertionError("the plan shape must be checked before roster derivation")
+    monkeypatch.setattr(src, "derive_roster_inputs", refuse)
+    plan = _plan()
+    edit(plan)
+    _store_plan(env, _seal(plan))
+    with pytest.raises(OpsError) as exc:
+        src.build_sources(env.args)
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "plan_malformed")
+    assert env.conn.closed is True
+
+
 def test_load_plan_registration_without_closure_refuses_typed(env, monkeypatch):
     _no_rederivation(monkeypatch)
     monkeypatch.setattr(src, "read_native_registration", lambda conn, store, spec: types.SimpleNamespace(
