@@ -86,6 +86,15 @@ def derive_roster_inputs(plan):
     return pair_candidates, blend_ids
 
 
+def derive_panel_id(plan):
+    """The panel id is the sealed plan's candidate source binding (the size_panel registration binding). Refuses unless every candidate carries the same non-blank string."""
+    ids = {c.get("source_binding_id") for c in plan.get("candidates", []) if isinstance(c, dict)}
+    value = next(iter(ids)) if len(ids) == 1 else None
+    if not (isinstance(value, str) and value.strip()):
+        raise fail(_CONFLICT, "the sealed plan has no single panel source binding", details={"reason": "panel_binding_ambiguous"})
+    return value
+
+
 def _open(cfg):
     if not Path(cfg["store_root"]).is_dir():
         raise fail("RESOURCE_UNAVAILABLE", "existing artifact store required", details={"reason": "store_missing"})
@@ -235,6 +244,7 @@ def build_sources(args):
         if to_document(snapshot) != pinned:
             raise _snapshot_mismatch()
         plan = read_search_plan(conn, store, registration, request, ref)
+        panel_id = derive_panel_id(plan)
         read = functools.partial(read_record, conn, store, registration.run_id)
         selection = read("selection")
         if not (isinstance(selection, dict) and isinstance(selection.get("selections"), list)):
@@ -243,7 +253,7 @@ def build_sources(args):
         admit = size_pnl_inputs.population_admit(repository, snapshot, month, max_object_bytes=MAX_OBJECT_BYTES)
         admitted = size_pnl_readers.admit_events(repository, snapshot, month, max_object_bytes=MAX_OBJECT_BYTES)
         load_index = size_pnl_ladder.default_load_index(repository, snapshot)
-        sources = assemble(plan=plan, read=read, selection=selection, expected=expected, panel_id=expected["panel_id"],
+        sources = assemble(plan=plan, read=read, selection=selection, expected=expected, panel_id=panel_id,
                            admit=admit, admitted=admitted, snapshot_id=cfg["snapshot_id"], load_index=load_index)
     except sqlite3.Error:
         conn.close()

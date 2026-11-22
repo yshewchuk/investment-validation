@@ -9,6 +9,7 @@ import pytest
 
 from engine.v2.data.errors import DataError
 from engine.v2.data.errors import fail as data_fail
+from engine.v2.foundation import content_hash
 from engine.v2.ops.errors import OpsError
 from experiments import size_pnl_driver as driver
 from experiments import size_pnl_inputs as inputs
@@ -19,6 +20,7 @@ from experiments import size_pnl_sources as src
 EXPECTED = {"plan_id": "p1", "registration_id": "r1", "seal_id": "s1", "panel_id": "P"}
 SELECTION = {"selections": []}
 PINNED = {"snapshot_id": "snap-1"}
+SOURCE_BINDING = "bind-src-1"
 
 
 def _refusal(exc):
@@ -63,7 +65,8 @@ FULL_PAIR_MAP = {"H-sq": "c-hsq", "H-abs": "c-habs", "E-raw": "c-eraw", "E-log":
 
 def _plan(candidates=PAIR_CANDIDATES, blends=(), extra=None):
     ids = [c["candidate_id"] for c in candidates]
-    return {"plan_id": "p1", "anchor": {"run_id": "r1"}, "horizons": [5, 3, 1], "candidates": list(candidates),
+    stamped = [{"source_binding_id": SOURCE_BINDING, **c} for c in candidates]
+    return {"plan_id": "p1", "anchor": {"run_id": "r1"}, "horizons": [5, 3, 1], "candidates": stamped,
             "blends": list(blends), "selection": {"extra_refits": ids if extra is None else extra}}
 
 
@@ -173,6 +176,38 @@ def test_plan_without_selection_omits_all_pairs():
     pair_candidates, blend_ids = src.derive_roster_inputs(plan)
     assert pair_candidates == {}
     assert blend_ids == {"M4": "b1"}
+
+
+# --- (2b) derive_panel_id ----------------------------------------------------
+
+def test_derive_panel_id_returns_shared_source_binding():
+    assert src.derive_panel_id(_plan()) == SOURCE_BINDING
+
+
+def test_derive_panel_id_zero_candidates_refused():
+    with pytest.raises(OpsError) as exc:
+        src.derive_panel_id(_plan(candidates=[]))
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "panel_binding_ambiguous")
+
+
+@pytest.mark.parametrize("value", ["missing", None, "   "])
+def test_derive_panel_id_bad_id_on_any_candidate_refused(value):
+    plan = _plan()
+    if value == "missing":
+        del plan["candidates"][-1]["source_binding_id"]
+    else:
+        plan["candidates"][-1]["source_binding_id"] = value
+    with pytest.raises(OpsError) as exc:
+        src.derive_panel_id(plan)
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "panel_binding_ambiguous")
+
+
+def test_derive_panel_id_two_distinct_ids_refused():
+    plan = _plan()
+    plan["candidates"][0]["source_binding_id"] = "other-binding"
+    with pytest.raises(OpsError) as exc:
+        src.derive_panel_id(plan)
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "panel_binding_ambiguous")
 
 
 # --- (3) _open ---------------------------------------------------------------
@@ -731,10 +766,32 @@ def env(tmp_path, monkeypatch):
 def test_build_sources_success_leaves_connection_open(env, capsys):
     sources = src.build_sources(env.args)
     assert sources.plan["blends"] == [{"blend_id": "b1", "name": "size_b1_v1"}] and sources.blend_ids == {"M4": "b1"}
-    assert sources.expected == EXPECTED and sources.panel_id == "P" and sources.snapshot_id == "snap-1"
+    assert sources.expected == EXPECTED and sources.snapshot_id == "snap-1"
+    assert sources.panel_id == SOURCE_BINDING and sources.panel_id != EXPECTED["panel_id"]
     assert sources.selection == SELECTION and sources.load_index == "index" and sources.admit == "admit"
     assert env.conn.closed is False
     assert "[pnl_sources] opened snapshot=snap-1 admitted=1" in capsys.readouterr().err
+
+
+def test_build_sources_panel_id_checked_by_bind_run(env):
+    seal = {"seal": "s1"}
+    env.slots["driver-seal"] = seal
+    sources = src.build_sources(env.args)
+    matching = {"plan_id": "p1", "registration_id": "r1", "seal_id": content_hash(seal), "panel_id": sources.panel_id}
+    assert inputs.bind_run(sources.plan, sources.read, expected=matching, panel_id=sources.panel_id) == matching
+    with pytest.raises(OpsError) as exc:
+        inputs.bind_run(sources.plan, sources.read, expected={**matching, "panel_id": "P"}, panel_id=sources.panel_id)
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "panel_id_mismatch")
+
+
+def test_build_sources_ambiguous_panel_binding_refuses_and_closes(env, monkeypatch):
+    plan = _plan(candidates=[{**PAIR_CANDIDATES[0], "source_binding_id": "A"}]
+                 + [{**c, "source_binding_id": "B"} for c in PAIR_CANDIDATES[1:]])
+    monkeypatch.setattr(src, "read_search_plan", lambda conn, store, registration, request, ref: plan)
+    with pytest.raises(OpsError) as exc:
+        src.build_sources(env.args)
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "panel_binding_ambiguous")
+    assert env.conn.closed is True
 
 
 def test_build_sources_selection_missing_refuses_and_closes(env):
