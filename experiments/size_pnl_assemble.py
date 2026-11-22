@@ -123,9 +123,8 @@ def _shares(frame):
 
 
 def _run_section(outer, undetermined_excluded):
-    scope = "full" if outer["scope"] is None else f"SMOKE scope {outer['scope']}, not a full-population result"
     items = [("content_hash", outer["content_hash"]), ("decisions_sha256", outer["decisions_sha256"]), ("rows", outer["rows"]),
-             ("scope", scope), ("common_dropped", outer["common_dropped"]),
+             ("scope", "full"), ("common_dropped", outer["common_dropped"]),
              ("scoreability_dropped", outer["scoreability_dropped"]), ("ladder_skipped", outer["ladder_skipped"]),
              ("undetermined_events_excluded", undetermined_excluded)]
     return "### Run\n\n" + "\n".join(f"- {key}: {value}" for key, value in items)
@@ -215,24 +214,25 @@ def _tickers_ok(tickers):
 def _sections(out, outer, inputs, inner, tuned, tickers):
     """The report's sections in order. Reads receipt fields throughout; the caller maps a missing or mistyped field to a refusal."""
     raw = _load_decisions(out, outer)
+    tick = {str(e): str(t) for e, t in tickers.items()}
+    roster = inputs["roster"]
+    label_of = {m["model_id"]: "+".join(m["roles"]) for m in roster["models"]}
+    outer_models = set(outer["models"])
+    # Checked on the raw rows, before population drops every event that has an undetermined row: a bad row refuses, it is never skipped.
+    if not set(raw["event_id"]) <= set(tick):
+        raise _refuse("report_ticker_missing", "an event in decisions.parquet has no ticker")
+    if not np.isfinite(raw.loc[raw["status"] == "taken", "pnl_dollars"].to_numpy(dtype=float)).all():
+        raise _refuse("report_nonfinite_pnl", "a taken row has a non-finite pnl_dollars")
+    if (set(raw["model_id"]) | outer_models) - set(label_of):
+        raise _refuse("report_receipt_chain_mismatch", "a model in the decisions has no roster entry")
     frame = synthetic_eval.population(raw)  # E: the events with no undetermined row under any model, book or rule
     if frame.empty:
         raise _refuse("report_decisions_empty", "no event in decisions.parquet is determined under every model")
     undetermined_events = raw["event_id"].nunique() - frame["event_id"].nunique()
-    tick = {str(e): str(t) for e, t in tickers.items()}
-    if not set(frame["event_id"]) <= set(tick):
-        raise _refuse("report_ticker_missing", "an event in decisions.parquet has no ticker")
     frame = frame.assign(taken=frame["status"] == "taken")
-    if not np.isfinite(frame.loc[frame["taken"], "pnl_dollars"].to_numpy(dtype=float)).all():
-        raise _refuse("report_nonfinite_pnl", "a taken row has a non-finite pnl_dollars")
     frame = frame.assign(quarter=frame["event_date"].dt.to_period("Q").astype(str))
     missing_years = sorted(set(contrast.FULL_YEARS) - {int(y) for y in frame["event_date"].dt.year})
-    roster = inputs["roster"]
-    label_of = {m["model_id"]: "+".join(m["roles"]) for m in roster["models"]}
     role_model = {role: m["model_id"] for m in roster["models"] for role in m["roles"]}
-    outer_models = set(outer["models"])
-    if (set(frame["model_id"]) | outer_models) - set(label_of):
-        raise _refuse("report_receipt_chain_mismatch", "a model in the decisions has no roster entry")
     frame = frame.assign(model_id=frame["model_id"].map(label_of))  # tables show labels such as M0 or H-sq+H-abs
     quarter_of = frame.drop_duplicates("event_id").set_index("event_id")["quarter"].to_dict()
     events = {key: sorted(set(group)) for key, group in frame.groupby(["model_id", "book"])["event_id"]}
@@ -280,13 +280,15 @@ def assemble(out_dir, plan, *, expected=None, spec_hash=None, snapshot=None):
     started, out = time.monotonic(), Path(out_dir)
     _log(f"start rss={_rss_mb():.0f}MB")
     outer, inputs, inner, tuned = _load_receipts(out / "receipts")
+    with _admit("report_receipt_malformed", "outer.json lacks a scope field"):
+        if outer["scope"] is not None:  # a smoke receipt binds a restricted plan that this report cannot recover
+            raise _refuse("report_scope_unsupported", "the report covers full-population outer runs only; this receipt is a smoke scope")
     requested = {"identity": expected, "spec_hash": spec_hash, "snapshot": snapshot}
     with _admit("report_receipt_malformed", "inputs_outer.json lacks a bound identity field"):
         mismatched = [key for key, want in requested.items() if want is not None and inputs[key] != want]
         with _admit("report_tickers_invalid", "the plan frame cannot be bound"):
             binding = size_pnl_driver.plan_binding(plan)
-        # A smoke scope skips this: the smoke receipt binds a restricted plan, so its plan hash cannot match the full one.
-        plan_bad = outer["scope"] is None and inputs.get("plan") != binding
+        plan_bad = inputs.get("plan") != binding
     if mismatched:
         raise _refuse("report_inputs_mismatch", f"inputs_outer.json differs from the requested {', '.join(mismatched)}")
     if plan_bad:

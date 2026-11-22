@@ -242,12 +242,13 @@ def test_shares_exclude_untaken_and_null_rung_rows():
     assert assemble_mod._shares(frame) == {"m1": {"1": 1 / 3, "2": 2 / 3}, "m2": {"1": 1.0}}
 
 
-def test_smoke_scope_is_labelled_in_the_run_section(tmp_path):
-    scope = "f" * 64
-    out = build(tmp_path, scope=scope)
-    assemble_mod.assemble(out, plan_frame())
-    text = (out / "REPORT.md").read_text(encoding="utf-8")
-    assert f"SMOKE scope {scope}, not a full-population result" in text
+def test_smoke_scope_refuses_as_unsupported_and_writes_no_report(tmp_path):
+    out = build(tmp_path, scope="abc")
+    with pytest.raises(Refusal) as caught:
+        assemble_mod.assemble(out, plan_frame())
+    assert caught.value.code == CONFLICT
+    assert caught.value.details["reason"] == "report_scope_unsupported"
+    assert not (out / "REPORT.md").exists()
 
 
 def test_failed_replace_keeps_the_old_report_and_leaves_no_tmp(tmp_path, monkeypatch):
@@ -286,12 +287,6 @@ def test_changed_ticker_in_the_plan_refuses_a_full_run(tmp_path):
     assert caught.value.code == CONFLICT
     assert caught.value.details["reason"] == "report_inputs_mismatch"
     assert not (out / "REPORT.md").exists()
-
-
-def test_changed_ticker_is_skipped_for_a_smoke_scope(tmp_path):
-    out = build(tmp_path, scope="f" * 64)
-    assemble_mod.assemble(out, plan_frame({**TICKERS, "E03": "ZZZ"}))
-    assert (out / "REPORT.md").exists()
 
 
 @pytest.mark.parametrize("name", list(BAD_PLANS), ids=list(BAD_PLANS))
@@ -438,6 +433,47 @@ def test_event_undetermined_under_one_model_is_excluded_from_e(tmp_path):
     assert _section_lines(text, "### T7") == _section_lines(clean_text, "### T7")  # same mean and statistics as without E01
     assert "undetermined_events_excluded: 1" in text
     assert "events undetermined under some model are excluded from E: 1" in text
+
+
+def _e01_index(rows, model_id):
+    """Index of E01's as_is short-vol row for ``model_id``."""
+    return next(i for i, row in enumerate(rows) if (row["event_id"], row["model_id"], row["book"], row["arm_or_rule"])
+                == ("E01", model_id, "short_vol", "as_is"))
+
+
+def test_taken_nan_pnl_on_an_event_with_an_undetermined_row_refuses(tmp_path):
+    def make(rows):
+        out = _e01_undetermined_for_m_hsq(rows)
+        i = _e01_index(out, "m-eraw")
+        out[i] = {**out[i], "pnl_dollars": float("nan")}
+        return out
+
+    out = build(tmp_path, rows_fn=make)
+    with pytest.raises(Refusal) as caught:
+        assemble_mod.assemble(out, plan_frame())
+    assert caught.value.details["reason"] == "report_nonfinite_pnl"
+    assert not (out / "REPORT.md").exists()
+
+
+def test_row_for_an_event_missing_from_the_plan_refuses_even_with_an_undetermined_row(tmp_path):
+    no_e01 = {k: v for k, v in TICKERS.items() if k != "E01"}
+    out = build(tmp_path, rows_fn=_e01_undetermined_for_m_hsq, plan_tickers=no_e01)
+    with pytest.raises(Refusal) as caught:
+        assemble_mod.assemble(out, plan_frame(no_e01))
+    assert caught.value.details["reason"] == "report_ticker_missing"
+    assert not (out / "REPORT.md").exists()
+
+
+def test_unknown_model_on_an_event_with_an_undetermined_row_refuses(tmp_path):
+    def make(rows):
+        out = _e01_undetermined_for_m_hsq(rows)
+        return [*out, {**out[_e01_index(out, "m-eraw")], "model_id": "m-zzz"}]
+
+    out = build(tmp_path, rows_fn=make)
+    with pytest.raises(Refusal) as caught:
+        assemble_mod.assemble(out, plan_frame())
+    assert caught.value.details["reason"] == "report_receipt_chain_mismatch"
+    assert not (out / "REPORT.md").exists()
 
 
 def test_all_undetermined_decisions_refuse_as_empty(tmp_path):
