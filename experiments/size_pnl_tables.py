@@ -1,6 +1,6 @@
 """EXP-188 real-store Sources adapter, slice 2: table-backed providers for `size_pnl_driver.Sources` (design section 13).
 
-`tables` returns `fetch` (labels and lead production forecasts), `facts` (sizing inputs), `plan_frame` (print windows) and `table_hash`. Labels (`computed_moves`, `iv_crush_targets`) are read event-isolated through `label_rows`, one proven fragment per requested event. Each label carries the later of the two tables' `available_as_of_date` (text compare), or None when either is None. Both dates are validated as ISO text that round-trips, and a malformed one refuses `source_value_invalid`, only when both are non-null; when either is null the label's availability is None and the other date is not checked, so a kept label without one is refused by `read_labels` as `label_availability_missing`. `feature_panel` and `tier4_forecasts` are single logical partitions read for the requested keys' tickers. The main snapshot's `earnings_events` is scanned and only admitted event ids are kept. The crush snapshot's `earnings_events` is scanned and only rows of admitted events (by event id or by an admitted event's ticker and date) are kept. A session other than AMC/BMO, or an event with no calendar window, is dropped from `plan_frame` and counted on stderr. A requested event with no production forecast (or a NaN one), or with no label row, is excluded and counted on stderr; `empty_population` refuses when no requested event has a forecast. Refusals are typed OpsErrors with a `reason`: `source_table_missing` (a table or column is absent), `source_value_invalid` (more than one row, or a bad value), `empty_population`, `plan_frame_empty`, `production_hash_mismatch` or `max_object_bytes_invalid`. A DataError other than CONTRACT_MISMATCH, including a planner HOLDOUT_ACCESS_DENIED, propagates unchanged (the `_guarded` behaviour). Nothing is imputed here.
+`tables` returns `fetch` (labels and lead production forecasts), `facts` (sizing inputs), `plan_frame` (print windows) and `table_hash`. Labels (`computed_moves`, `iv_crush_targets`) are read event-isolated through `label_rows`, one proven fragment per requested event. Each label carries the later of the two tables' `available_as_of_date` (text compare), or None when either is None. Both dates are validated as ISO text that round-trips, and a malformed one refuses `source_value_invalid`, only when both are non-null; when either is null the label's availability is None and the other date is not checked, so a kept label without one is refused by `read_labels` as `label_availability_missing`. `feature_panel` and `tier4_forecasts` are single logical partitions read for the requested keys' tickers. The main snapshot's `earnings_events` is scanned and only admitted event ids are kept. The crush snapshot's `earnings_events` is scanned and only rows of admitted events (by event id or by an admitted event's ticker and date) are kept. A session other than AMC/BMO, or an event with no calendar window, is dropped from `plan_frame` and counted on stderr. A requested event with no production forecast (or a NaN one), or with no label row, is excluded and counted on stderr; `empty_population` refuses when no requested event has a forecast. Refusals are typed OpsErrors with a `reason`: `source_table_missing` (a table or column is absent), `source_value_invalid` (more than one row, or a bad value), `empty_population`, `plan_frame_empty`, `production_hash_mismatch` or `max_object_bytes_invalid`. A DataError other than CONTRACT_MISMATCH, including a planner HOLDOUT_ACCESS_DENIED, propagates unchanged (the `_guarded` behaviour). Nothing is imputed here. Label reads share one run-scoped fragment-record listing per (snapshot, table); event isolation and the planner's HOLDOUT_ACCESS_DENIED checks still run per event.
 """
 import datetime as dt
 import math
@@ -135,6 +135,40 @@ def _cap(value):
     return value
 
 
+class _RecordMemo:
+    """Run-scoped memo of `fragment_records` over one repository: each (snapshot, table) is listed once, since the snapshot is immutable for the run.
+
+    It holds only the catalog FragmentRecord tuples, never object bytes. Every other attribute (table_contract, scan, ...) is the wrapped repository's.
+    """
+
+    def __init__(self, repository):
+        self._repository = repository
+        self._records = {}
+        self.calls = 0
+        self.misses = 0
+
+    def fragment_records(self, snapshot, table_name):
+        self.calls += 1
+        key = (snapshot.snapshot_id, table_name)
+        if key not in self._records:
+            started = time.monotonic()
+            records = tuple(self._repository.fragment_records(snapshot, table_name))
+            self._records[key] = records
+            self.misses += 1
+            rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+            print(f"[pnl_tables] fragment_records table={table_name} snapshot={snapshot.snapshot_id} records={len(records)} "
+                  f"elapsed={time.monotonic() - started:.1f}s rss={rss:.0f}MiB", file=sys.stderr)
+        return self._records[key]
+
+    def __getattr__(self, name):
+        if name == "_repository":  # not yet set: never delegate, so a partly built instance cannot recurse
+            raise AttributeError(name)
+        return getattr(self._repository, name)
+
+    def summary(self):
+        return f"[pnl_tables] fragment_records calls={self.calls} listed={self.misses} (expected: one per table per run)"
+
+
 def label_rows(repository, snapshot, table, columns, want, *, max_object_bytes):
     """Rows of an outcome table for the requested events only, one event-isolated fragment per event.
 
@@ -163,6 +197,7 @@ def label_rows(repository, snapshot, table, columns, want, *, max_object_bytes):
 def tables(repository, snapshot, admitted, *, crush_snapshot, max_object_bytes, expected_hash,
            read=read_table, calendar=trading_calendar_from_snapshot, label_rows=label_rows):
     _cap(max_object_bytes)
+    memo = _RecordMemo(repository)  # one per run: label reads share each table's fragment listing
     if "tier4_forecasts" not in snapshot.table_versions:
         raise _missing("the forecast table is absent from the snapshot")
     table_hash = snapshot.table_versions["tier4_forecasts"].manifest_hash
@@ -247,7 +282,7 @@ def tables(repository, snapshot, admitted, *, crush_snapshot, max_object_bytes, 
         if want.empty:
             rows = _norm(pd.DataFrame(columns=columns), "event_date")
         else:
-            fetched = _guarded(table, label_rows, repository, snap, table, columns, want, max_object_bytes=max_object_bytes)
+            fetched = _guarded(table, label_rows, memo, snap, table, columns, want, max_object_bytes=max_object_bytes)
             rows = _norm(pd.DataFrame(fetched, columns=columns), "event_date")
             if rows.duplicated(_KEY).any() or not _keys(rows) <= _keys(want):
                 raise _invalid(f"{table} must hold at most one row per requested event")
@@ -285,6 +320,7 @@ def tables(repository, snapshot, admitted, *, crush_snapshot, max_object_bytes, 
             exclusions.setdefault("crush_label_missing", set()).update(lab_bad)
             print(f"[pnl_tables] excluded move_label_missing={len(move_bad)} crush_context_conflict={len(ctx_bad)} "
                   f"crush_label_missing={len(lab_bad)} of {len(want)}", file=sys.stderr)
+            print(memo.summary(), file=sys.stderr)
         elif set(columns) == set(PRODUCTION_COLUMNS):
             kind = "production"
             fc = _read("tier4_forecasts", (*_KEY, "pred_abs_move", "pred_iv_crush_30"), keys)
