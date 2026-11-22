@@ -297,11 +297,13 @@ def _inner(src, out, ready, plan, facts_all, labels):
         _log(f"inner quarter {number}/{quarters} {label} events={len(chunk['event_id'])} " f"rate={kept / elapsed:.2f}/s eta={(quarters - number) * elapsed / number:.0f}s rss={_rss_mb():.0f}MB")
     if pending: raise fail(_CONFLICT, "no simulable sample for the fast-path equivalence check", details={"reason": "equivalence_empty", "models": sorted(pending)})
     nontrades = {}  # per model, counts at c=1.0 only: non-"scored" rows by reason (short-vol non-trades are P&L 0 and stay in every model's and c's items)
-    for mid in ready:
+    for i, mid in enumerate(ready, start=1):
+        started = time.monotonic()
         rows = pd.concat([shortvol.score_events(chunk, events, sims, name, alpha=tuning.ALPHA, c=1.0) for chunk, events, sims in items[mid] for name in shortvol.NAMES], ignore_index=True)
         missed = rows.loc[rows["status"] != "scored"]
         counts = missed["reason"].fillna(missed["status"]).astype(str).value_counts()
         nontrades[mid] = {str(key): int(counts[key]) for key in sorted(counts.index)}
+        _log(f"non-trade recount model {i}/{len(ready)} {mid} elapsed={time.monotonic() - started:.1f}s rss={_rss_mb():.0f}MB")
     by_model = {mid: sum(len(events) for _c, events, _s in items[mid]) for mid in ready}
     hashes = {}
     for i, mid in enumerate(ready, start=1):

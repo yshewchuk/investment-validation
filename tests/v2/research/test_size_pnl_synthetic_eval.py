@@ -258,7 +258,11 @@ def _mark_one(d, mid, event, unit, book, reason):
     d.loc[at, "reason"] = reason
 
 
-@pytest.mark.parametrize("reason", sorted(ev.NON_TRADE_REASONS))
+def test_non_trade_reasons_are_the_pinned_literals():
+    assert ev.NON_TRADE_REASONS == frozenset(["entry_not_debit", "entry_quote_unusable", "ladder_too_coarse", "negative_floor", "structure_unresolved", "width_declined"])
+
+
+@pytest.mark.parametrize("reason", ["entry_not_debit", "entry_quote_unusable", "ladder_too_coarse", "negative_floor", "structure_unresolved", "width_declined"])
 def test_short_vol_non_trade_keeps_its_event_and_straddle_non_trade_drops_it(reason):
     d = frame_of()
     d["reason"] = "scored"

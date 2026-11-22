@@ -99,7 +99,7 @@ def _safe(rows):
 
 
 def population(decisions):
-    """The evaluated population E (design sections 4-5): the events with no undetermined row under any (model, unit).
+    """The evaluated population E (design sections 4-5): the events with no undetermined row under any (model, unit), except short-vol non-trades.
     Only a short-vol row (book == SHORT) whose reason is in NON_TRADE_REASONS is exempt: a short-vol non-trade (e.g.
     width_declined) stays in E with P&L 0. Every other undetermined row drops its event, including a straddle row with
     a non-trade reason (missing fact = undetermined, design section 6), and burn-in or data-missing short-vol rows

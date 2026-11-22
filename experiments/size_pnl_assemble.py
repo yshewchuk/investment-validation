@@ -200,7 +200,9 @@ def _load_decisions(out, outer):
         decoded = sum(meta.row_group(i).total_byte_size for i in range(meta.num_row_groups))
         if decoded > MAX_DECODED_BYTES:
             raise _refuse("report_decisions_invalid", "decisions.parquet decodes to more than MAX_DECODED_BYTES")
-        frame = parquet.read(columns=COLUMNS).to_pandas()
+        # "reason" is optional: population() needs it to exempt short-vol non-trades; published decisions always carry it.
+        read_columns = COLUMNS + (["reason"] if "reason" in parquet.schema_arrow.names else [])
+        frame = parquet.read(columns=read_columns).to_pandas()
     if frame.empty:
         raise _refuse("report_decisions_empty", "decisions.parquet holds no rows")
     with _admit("report_decisions_invalid", "decisions.parquet has a non-date event_date or a non-numeric pnl_dollars"):
@@ -233,7 +235,7 @@ def _sections(out, outer, inputs, inner, tuned, tickers):
         raise _refuse("report_receipt_chain_mismatch", "a model in the decisions has no roster entry")
     frame = synthetic_eval.population(raw)  # E: no undetermined row that leaves E under any model; short-vol non-trades stay in E at P&L 0
     if frame.empty:
-        raise _refuse("report_decisions_empty", "no event in decisions.parquet is determined under every model")
+        raise _refuse("report_decisions_empty", "no event in decisions.parquet is in the evaluated population")
     undetermined_events = raw["event_id"].nunique() - frame["event_id"].nunique()
     frame = frame.assign(taken=frame["status"] == "taken")
     frame = frame.assign(quarter=frame["event_date"].dt.to_period("Q").astype(str))

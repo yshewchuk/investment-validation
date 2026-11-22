@@ -133,7 +133,8 @@ def undetermined_reason(pool, history, event_date):
 def paired_events(undetermined, event_dates):
     """Kept event ids and dropped counts by quarter.
 
-    An event undetermined under ANY model leaves for ALL, so every model is scored on one population.
+    An event with a burn-in or missing-data undetermined result under ANY model leaves for ALL, so every model is scored on
+    one population. Per-(model, structure, c) non-trades do not leave: they are P&L 0 rows, not population drops.
     """
     dropped = set()
     for ids in undetermined.values():
