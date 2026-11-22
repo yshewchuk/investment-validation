@@ -106,8 +106,8 @@ def load_plan(store, registration, ref):
         raise fail(_CONFLICT, "the sealed plan is too large", details={"reason": "plan_too_large"})
     try:
         data = store.read_verified(ref)
-    except ArtifactError as exc:
-        if exc.code == "INTEGRITY_FAILED":
+    except (ArtifactError, OSError) as exc:
+        if getattr(exc, "code", None) == "INTEGRITY_FAILED":
             raise fail(_CONFLICT, "the sealed plan failed content verification", details={"reason": "plan_hash_mismatch"}) from None
         raise fail("RESOURCE_UNAVAILABLE", "the sealed plan could not be read", details={"reason": "plan_unreadable"}) from None
     try:

@@ -271,9 +271,9 @@ def tables(repository, snapshot, admitted, *, crush_snapshot, max_object_bytes, 
                      .rename(columns={"value": "crush_pct_iv30", "available": "available_crush"}))
             out = (want[["event_id", *_KEY]].merge(moves, on=_KEY, how="left")
                    .merge(crush, on=_KEY, how="left"))
-            both = out["available_moves"].notna() & out["available_crush"].notna()
-            out[AVAILABLE] = [_later(a, b) if ok else None
-                              for a, b, ok in zip(out["available_moves"], out["available_crush"], both)]
+            # Validate each present date before the null-pair check: a malformed date refuses even when the other side is absent.
+            out[AVAILABLE] = [_later(None if pd.isna(a) else a, None if pd.isna(b) else b)
+                              for a, b in zip(out["available_moves"], out["available_crush"])]
             out = out[["event_id", "abs_move", "crush_pct_iv30", AVAILABLE]]
             # One reason per excluded event, by priority: no move label, then a crush context conflict, then no crush label.
             move_bad = set(out.loc[out["abs_move"].isna(), "event_id"])

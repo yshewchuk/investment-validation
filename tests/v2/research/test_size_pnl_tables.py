@@ -411,6 +411,34 @@ def test_label_sentinel_or_inf_refused(table, column, value):
     assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "source_value_invalid")
 
 
+def test_malformed_move_availability_with_null_crush_availability_refused():
+    frames = _frames()
+    frames["computed_moves"] = _set(frames["computed_moves"], "available_as_of_date", "not-a-date")  # e1 row
+    frames["iv_crush_targets"] = _set(frames["iv_crush_targets"], "available_as_of_date", None)  # e1 row
+    ns, _ = _build(frames)
+    with pytest.raises(OpsError) as exc:
+        ns.fetch(LABEL, ["e1"])
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "source_value_invalid")
+
+
+def test_malformed_crush_availability_with_valid_move_availability_refused():
+    frames = _frames()
+    frames["iv_crush_targets"] = _set(frames["iv_crush_targets"], "available_as_of_date", "not-a-date")  # e1 row
+    ns, _ = _build(frames)
+    with pytest.raises(OpsError) as exc:
+        ns.fetch(LABEL, ["e1"])
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "source_value_invalid")
+
+
+def test_valid_availability_pair_takes_the_later_date():
+    frames = _frames()
+    frames["iv_crush_targets"] = _set(frames["iv_crush_targets"], "available_as_of_date", "2025-01-05")  # e1 row
+    ns, _ = _build(frames)
+    out = ns.fetch(LABEL, ["e1", "e2"]).set_index("event_id")
+    assert out.loc["e1", AVAILABLE] == "2025-01-05"  # later of move 2025-01-03 and crush 2025-01-05
+    assert out.loc["e2", AVAILABLE] == "2025-02-04"  # later of move 2025-02-04 and crush 2025-01-05
+
+
 def test_label_read_is_called_only_with_requested_events_once_per_table():
     frames = _frames(computed_moves=pd.DataFrame({
         "ticker": ["AAA", "AAA", "BBB"], "event_date": [D1, pd.Timestamp("2024-06-03"), D2],

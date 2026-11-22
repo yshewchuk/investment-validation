@@ -1076,6 +1076,16 @@ def test_load_plan_other_read_error_is_plan_unreadable(env, monkeypatch):
     assert env.conn.closed is True
 
 
+def test_load_plan_os_error_is_plan_unreadable(env, monkeypatch):
+    _no_rederivation(monkeypatch)
+    env.store.error = OSError("disk read failed")
+    with pytest.raises(OpsError) as exc:
+        src.build_sources(env.args)
+    assert exc.value.problem.code == "RESOURCE_UNAVAILABLE"
+    assert _refusal(exc) == ("RESOURCE_UNAVAILABLE", "plan_unreadable")
+    assert env.conn.closed is True
+
+
 def test_load_plan_variant_mismatch_refused(env, monkeypatch):
     _no_rederivation(monkeypatch)
     _store_plan(env, _seal({**_plan(), "anchor": {"run_id": "r1", "variant_id": "other-variant"}}))
