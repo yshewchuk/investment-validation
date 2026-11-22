@@ -8,8 +8,8 @@ Input contract: the frames are the S5/S7 scored outputs concatenated by the S9 d
 `model_id`, `structure`/`rule`, `arm` and `taken` columns the producers do not carry themselves
 (`size_pnl_shortvol.score`, `size_pnl_straddle.score`/`decide`), plus `quarter`/`ticker` labels.
 
-Not wired to a production caller yet: the S9 driver (guides/size_decision_pnl_design.md section 9)
-builds these inputs, calls each `t*` function and writes `REPORT.md` via `build_report`.
+Not wired to a production caller: `size_pnl_assemble` (run.py --stage report) builds the inputs, calls each `t*`
+function and writes `REPORT.md` via `build_report` (guides/size_decision_pnl_design.md section 9).
 """
 
 import math
@@ -119,6 +119,16 @@ def t2_population(events):
                     note="dropped = candidates not in E (undetermined under some model).")
 
 
+def t2_in_e(events, note):
+    _require(events, ["quarter", "event_id"], "t2_in_e")
+    rows = []
+    for quarter, g in events.groupby("quarter"):
+        rows.append([quarter, int(g["event_id"].nunique())])
+    if rows:
+        rows.append(["total", sum(r[1] for r in rows)])
+    return _section("T2 Population (events in E)", ["quarter", "in_E"], rows, note=note)
+
+
 def t3_forecast(frame, pairs):
     _require(frame, ["model_id", "pred", "actual"], "t3_forecast")
     _finite(frame["pred"], "t3_forecast", "pred")
@@ -211,6 +221,9 @@ def t7_contrasts(contrasts):
         s = contrasts[key]
         if s is None:
             rows.append([hyp, pair_id, arm, "not_testable"] + [None] * 7)
+            continue
+        if isinstance(s, str):
+            rows.append([hyp, pair_id, arm, f"not_testable: {s}"] + [None] * 7)
             continue
         qc = s["quarter_counts"]
         total = sum(qc.values())

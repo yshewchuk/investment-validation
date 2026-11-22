@@ -683,3 +683,8 @@ def run_synthetic(src, out_dir, *, event_ids=None, replay=False, prereg=size_pnl
     _log(f"stage=synthetic end elapsed={time.monotonic() - started:.1f}s rss={_rss_mb():.0f}MB ladder_skipped={skipped} stop={result['stop']} "
          f"planned={len(plan)} events_no_prediction={len(no_prediction)}")
     return {"stage": "synthetic", "models": sorted(ready), "rows": rows, "stop": result["stop"]}
+
+
+def plan_binding(plan_frame):
+    """The outer input receipt's ``plan`` hash for the full (unsmoked) outer window: what ``run`` receipts, so the report can bind its ticker map to it."""
+    return content_hash(_plan_rows(_plan_window(plan_frame, _window("outer"), None)))

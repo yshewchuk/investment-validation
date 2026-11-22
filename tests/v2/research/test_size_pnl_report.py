@@ -13,6 +13,7 @@ from experiments.size_pnl_report import (
     _per_event,
     build_report,
     t1_roster,
+    t2_in_e,
     t2_population,
     t3_forecast,
     t4_t5_shortvol,
@@ -86,6 +87,31 @@ def test_t2_empty_object_frame():
     out = t2_population(pd.DataFrame([], columns=["quarter", "in_e"]))
     assert "(no rows)" in out
     assert "total" not in out
+
+
+def test_t2_in_e_unique_counts_per_quarter_and_total():
+    ev = pd.DataFrame({"quarter": ["2024Q2", "2024Q1", "2024Q1", "2024Q1"],
+                       "event_id": ["E03", "E01", "E01", "E02"]})
+    out = t2_in_e(ev, "NOTE_TEXT")
+    assert out.startswith("### T2 Population (events in E)")
+    assert "| quarter | in_E |" in out
+    lines = out.split("\n")
+    assert lines.index("| 2024Q1 | 2 |") < lines.index("| 2024Q2 | 1 |") < lines.index("| total | 3 |")
+    assert "NOTE_TEXT" in out
+    assert "candidates" not in out and "dropped" not in out
+
+
+def test_t2_in_e_empty_frame_gives_no_rows():
+    out = t2_in_e(pd.DataFrame([], columns=["quarter", "event_id"]), "NOTE_TEXT")
+    assert out.startswith("### T2 Population (events in E)")
+    assert "(no rows)" in out
+    assert "total" not in out
+    assert "NOTE_TEXT" in out
+
+
+def test_t2_in_e_refuses_missing_column():
+    with pytest.raises(ValueError, match="t2_in_e"):
+        t2_in_e(pd.DataFrame({"quarter": ["2024Q1"]}), "NOTE_TEXT")
 
 
 def test_t3_share_and_not_testable_ratio():
@@ -245,6 +271,11 @@ def test_t7_real_summary_and_none_row():
     out = t7_contrasts({("H1", "p0", "as_is"): s, ("H1", "p1", "as_is"): None})
     assert "| H1 | p0 | as_is | ok | 4 | 1 | 2/0/0 | 1 | 2024:+ |" in out
     assert "| H1 | p1 | as_is | not_testable |" in out
+
+
+def test_t7_string_reason_renders_status():
+    out = t7_contrasts({("H1", "p9", "as_is"): "too_few_quarters_or_tickers"})
+    assert "| H1 | p9 | as_is | not_testable: too_few_quarters_or_tickers | - | - | - | - | - | - | - |" in out
 
 
 def test_t7_interval_strings_exact():
