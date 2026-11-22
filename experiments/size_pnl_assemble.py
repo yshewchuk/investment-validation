@@ -1,6 +1,8 @@
 """EXP-188 S9c: assemble REPORT.md from the outer stage's receipts and decisions.parquet. Research-only: reached from `run.py --stage report`. Read-only over receipts; never rescores."""
+import hashlib
 import os
 import resource
+import stat
 import sys
 import tempfile
 import time
@@ -141,15 +143,32 @@ def _load_receipts(rdir):
     return outer, inputs, inner, tuned
 
 
+_HASH_BLOCK = 1 << 20
+
+
 def _load_decisions(out, outer):
     path = out / "decisions.parquet"
     if not path.is_file():
         raise _refuse("report_decisions_missing", "decisions.parquet is missing")
-    if decisions._file_sha256(path) != outer.get("decisions_sha256"):
-        raise _refuse("report_decisions_mismatch", "decisions.parquet does not match the outer receipt's decisions_sha256")
-    if not set(COLUMNS) <= set(pq.read_schema(path).names):
-        raise _refuse("report_decisions_columns", "decisions.parquet lacks a required column")
-    frame = pd.read_parquet(path, columns=COLUMNS)
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError as exc:
+        raise _refuse("report_decisions_missing", f"decisions.parquet cannot be opened safely: {exc}") from exc
+    # One descriptor for the hash, the schema check and the read: the bytes hashed are the bytes parsed.
+    with os.fdopen(fd, "rb") as handle:
+        st = os.fstat(handle.fileno())
+        if not stat.S_ISREG(st.st_mode) or st.st_size > decisions.MAX_DECISIONS_BYTES:
+            raise _refuse("report_decisions_mismatch", "decisions.parquet must be a regular file of at most MAX_DECISIONS_BYTES")
+        digest = hashlib.sha256()
+        for block in iter(lambda: handle.read(_HASH_BLOCK), b""):
+            digest.update(block)
+        if digest.hexdigest() != outer.get("decisions_sha256"):
+            raise _refuse("report_decisions_mismatch", "decisions.parquet does not match the outer receipt's decisions_sha256")
+        handle.seek(0)
+        parquet = pq.ParquetFile(handle)
+        if not set(COLUMNS) <= set(parquet.schema_arrow.names):
+            raise _refuse("report_decisions_columns", "decisions.parquet lacks a required column")
+        frame = parquet.read(columns=COLUMNS).to_pandas()
     if len(frame) != outer["rows"]:
         raise _refuse("report_decisions_mismatch", "decisions.parquet row count differs from the outer receipt")
     if frame.empty:

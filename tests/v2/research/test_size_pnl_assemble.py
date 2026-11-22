@@ -231,3 +231,24 @@ def test_failed_replace_keeps_the_old_report_and_leaves_no_tmp(tmp_path, monkeyp
         assemble_mod.assemble(out, TICKERS)
     assert (out / "REPORT.md").read_text(encoding="utf-8") == "OLD"
     assert not list(out.glob("*.tmp"))
+
+
+def test_decisions_bytes_consumed_are_the_bytes_hashed(tmp_path, monkeypatch):
+    out = build(tmp_path)
+    other = tmp_path / "other.bin"
+    other.write_bytes(b"different bytes, not the receipted decisions")
+    real_parquet_file = assemble_mod.pq.ParquetFile
+    swapped = []
+
+    def swapping_parquet_file(handle, *args, **kwargs):
+        # Runs after the hash check: replace the path on disk, then parse the handle opened before the swap.
+        if not swapped:
+            swapped.append(True)
+            os.replace(other, out / "decisions.parquet")
+        return real_parquet_file(handle, *args, **kwargs)
+
+    monkeypatch.setattr(assemble_mod.pq, "ParquetFile", swapping_parquet_file)
+    assemble_mod.assemble(out, TICKERS)
+    assert swapped == [True]
+    text = (out / "REPORT.md").read_text(encoding="utf-8")
+    assert "| H1 | H | as_is | ok | 4 | 1 |" in text
