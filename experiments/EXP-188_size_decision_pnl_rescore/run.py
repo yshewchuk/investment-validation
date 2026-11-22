@@ -32,6 +32,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--out-dir", required=True)
     parser.add_argument("--expected", required=True, help="JSON with plan_id, registration_id, seal_id, panel_id of the v14 RERUN")
     parser.add_argument("--sources", required=True, help="MODULE:FUNC, called with the parsed args, returns a size_pnl_driver.Sources")
+    parser.add_argument("--sources-config", default=None, help="JSON config read by the --sources factory (design section 13)")
     parser.add_argument("--no-ledger", action="store_true", required=True, help="required: every non-recorded run uses --no-ledger")
     return parser
 
