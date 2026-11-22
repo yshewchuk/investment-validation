@@ -1,4 +1,4 @@
-"""EXP-188 S9c: run.py --stage report hands the plan's ticker map to size_pnl_assemble.assemble (the assembler is stubbed)."""
+"""EXP-188 S9c: run.py --stage report hands the plan frame to size_pnl_assemble.assemble (the assembler is stubbed)."""
 import json
 
 import pandas as pd
@@ -9,18 +9,17 @@ from tests.v2.research.test_size_pnl_driver import (  # noqa: F401  (bounded is 
 from tests.v2.research.test_size_pnl_driver_outer import _argv_for
 
 
-def test_run_py_report_stage_calls_assemble_with_the_plan_ticker_map(tmp_path, monkeypatch, capsys):
+def test_run_py_report_stage_calls_assemble_with_the_plan_frame(tmp_path, monkeypatch, capsys):
     run_py = _run_main()
     monkeypatch.setattr(run_py.size_pnl_prereg, "require_preregistration", OK)
     calls = []
     monkeypatch.setattr(size_pnl_assemble, "assemble",
-                        lambda out_dir, tickers, **kwargs: calls.append((out_dir, tickers, kwargs)) or {"report": "r", "sections": 0, "rows": 0})
+                        lambda out_dir, plan, **kwargs: calls.append((out_dir, plan, kwargs)) or {"report": "r", "sections": 0, "rows": 0})
     _install_sources(monkeypatch, sources())
     assert run_py.main(_argv_for(tmp_path, "report")) == 0
-    out_dir, tickers, kwargs = calls[0]
-    assert tickers == {e: "T" for e in PLAN_FRAME["event_id"].astype(str)}  # the plan's ticker for every event
-    assert isinstance(kwargs.pop("plan_binding"), str)  # the receipted plan hash, passed as a non-None string
-    assert kwargs == {"expected": sources().expected, "spec_hash": "SPEC", "snapshot": "snap-1"}  # the requested identity
+    out_dir, plan, kwargs = calls[0]
+    pd.testing.assert_frame_equal(plan, PLAN_FRAME)  # the plan frame itself: assemble derives the tickers and the binding from it
+    assert kwargs == {"expected": sources().expected, "spec_hash": "SPEC", "snapshot": "snap-1"}  # the requested identity; no tickers or binding
     assert json.loads(capsys.readouterr().out)["sections"] == 0
 
 

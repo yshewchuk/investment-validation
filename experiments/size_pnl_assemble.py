@@ -15,6 +15,7 @@ import pandas as pd
 import pyarrow.parquet as pq
 
 from experiments import size_pnl_decisions as decisions, size_pnl_tuning as tuning, size_pnl_report as report, size_pnl_contrast as contrast
+from experiments import size_pnl_driver
 from experiments import size_pnl_synthetic_eval as synthetic_eval
 from experiments.size_pnl_inputs import PAIRS
 from experiments.size_pnl_shortvol import Refusal
@@ -264,22 +265,28 @@ def _sections(out, outer, inputs, inner, tuned, tickers):
     ]
 
 
-def assemble(out_dir, tickers, *, plan_binding, expected=None, spec_hash=None, snapshot=None):
+def assemble(out_dir, plan, *, expected=None, spec_hash=None, snapshot=None):
     """Write ``out_dir/REPORT.md`` from the outer receipts and decisions.parquet; returns a JSON-safe summary.
     Each of expected, spec_hash and snapshot that is given must equal the matching field of inputs_outer.json.
-    ``plan_binding`` (the receipted plan hash, required) binds the ticker map to a full run's plan."""
-    if not (isinstance(plan_binding, str) and plan_binding):
-        raise _refuse("report_inputs_mismatch", "plan_binding must be the receipted plan hash")
-    if not _tickers_ok(tickers):
-        raise _refuse("report_tickers_invalid", "tickers must map non-blank event ids to non-blank tickers")
+    ``plan`` is the plan frame (sources.plan_frame). The ticker map and the plan binding (the receipted plan hash that a
+    full run must match) are both derived from this one frame, so a changed ticker changes the binding and refuses."""
+    if not isinstance(plan, pd.DataFrame) or not {"event_id", "ticker"} <= set(plan.columns):
+        raise _refuse("report_tickers_invalid", "plan must be a DataFrame with event_id and ticker columns")
+    with _admit("report_tickers_invalid", "the plan's event ids or tickers cannot be read"):
+        tickers = dict(zip(plan["event_id"].astype(str), plan["ticker"]))
+        event_ids_unique = plan["event_id"].astype(str).is_unique
+    if not (event_ids_unique and _tickers_ok(tickers)):
+        raise _refuse("report_tickers_invalid", "tickers must map unique non-blank event ids to non-blank tickers")
     started, out = time.monotonic(), Path(out_dir)
     _log(f"start rss={_rss_mb():.0f}MB")
     outer, inputs, inner, tuned = _load_receipts(out / "receipts")
     requested = {"identity": expected, "spec_hash": spec_hash, "snapshot": snapshot}
     with _admit("report_receipt_malformed", "inputs_outer.json lacks a bound identity field"):
         mismatched = [key for key, want in requested.items() if want is not None and inputs[key] != want]
+        with _admit("report_tickers_invalid", "the plan frame cannot be bound"):
+            binding = size_pnl_driver.plan_binding(plan)
         # A smoke scope skips this: the smoke receipt binds a restricted plan, so its plan hash cannot match the full one.
-        plan_bad = outer["scope"] is None and inputs.get("plan") != plan_binding
+        plan_bad = outer["scope"] is None and inputs.get("plan") != binding
     if mismatched:
         raise _refuse("report_inputs_mismatch", f"inputs_outer.json differs from the requested {', '.join(mismatched)}")
     if plan_bad:

@@ -85,9 +85,7 @@ def main(argv: list[str] | None = None) -> int:
                 raise fail(_CONFLICT, "--expected differs from the sources' expected identities", details={"reason": "expected_mismatch"})
             if args.stage == "report":
                 size_pnl_ladder.check_plan(sources.admitted, sources.plan_frame)  # the shared plan admission the scoring path uses; raises a typed refusal
-                plan = sources.plan_frame
-                summary = size_pnl_assemble.assemble(args.out_dir, dict(zip(plan["event_id"].astype(str), plan["ticker"])), expected=sources.expected, spec_hash=receipt["spec_hash"], snapshot=sources.snapshot_id,
-                                                       plan_binding=size_pnl_driver.plan_binding(plan))
+                summary = size_pnl_assemble.assemble(args.out_dir, sources.plan_frame, expected=sources.expected, spec_hash=receipt["spec_hash"], snapshot=sources.snapshot_id)
             elif args.stage == "synthetic": summary = size_pnl_driver.run_synthetic(sources, args.out_dir, event_ids=event_ids, replay=args.replay, prereg=lambda: receipt)
             else: summary = size_pnl_driver.run(sources, args.stage, args.out_dir, event_ids=event_ids, prereg=lambda: receipt)
     except (OpsError, Refusal, DataError) as exc:
