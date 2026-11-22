@@ -61,7 +61,12 @@ def _row(i):
             "pred_iv_crush_30": -1.0, "horizon_sessions": 1}
 
 
-TABLE = {eid: _row(i) for i, eid in enumerate(LABEL_IDS + PLAIN + [HOLD])}
+AVAILABLE = rd.AVAILABLE
+# Each event's native available_as_of_date: one calendar day after its event date (the admitted date above).
+AVAIL = {"a1": "2023-03-02", "a2": "2023-07-02", "a3": "2024-02-02", "a4": "2024-03-16", "a5": "2025-02-02",
+         PLAIN[0]: "2023-05-02", PLAIN[1]: "2024-06-02", PLAIN[2]: "2024-09-02",
+         PLAIN[3]: "2025-03-02", PLAIN[4]: "2025-08-02", HOLD: "2025-03-02"}
+TABLE = {eid: {**_row(i), AVAILABLE: AVAIL[eid]} for i, eid in enumerate(LABEL_IDS + PLAIN + [HOLD])}
 
 
 def _spy(table, extra=()):
@@ -103,11 +108,18 @@ def test_read_labels_window_and_month_reads_only_admitted_ids():
     fetch, log = _spy(TABLE)
     out = rd.read_labels(fetch, ADM, start="2023-01-01", end="2025-01-01")
     assert list(out.index) == ["a1", "a2", "a3", "a4"]
-    assert list(out.columns) == ["abs_move", "crush_pct_iv30", "event_date"]
+    assert list(out.columns) == ["abs_move", "crush_pct_iv30", "event_date", "available"]
     assert out.loc["a3", "abs_move"] == 3.0
     assert log == [["a1", "a2", "a3", "a4"]]
     rd.read_labels(fetch, ADM, start="2024-03-01", end="2024-04-01")
     assert log[-1] == ["a4"]
+
+
+def test_read_labels_returns_the_fetched_availability_per_label():
+    fetch, _ = _spy(TABLE)
+    out = rd.read_labels(fetch, ADM, start="2023-01-01", end="2025-01-01")
+    assert out["available"].to_dict() == {eid: AVAIL[eid] for eid in ["a1", "a2", "a3", "a4"]}
+    assert all(isinstance(value, str) for value in out["available"])
 
 
 @pytest.mark.parametrize("bad", [0, "E1", [["E1"]], [1]])
@@ -206,6 +218,28 @@ def test_label_missing_counts_unreturned_ids_and_null_labels(capsys):
     out = rd.read_labels(fetch, ADM, event_ids=["a1", "a2", "a3"])
     assert list(out.index) == ["a1"]
     assert "requested=3 label_missing=2" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("bad", [
+    None, np.nan, "not-a-date", "2023-03-02T00:00:00", 20230302,
+    "2023-03-01",  # equal to a1's event date: not strictly after
+    "2023-02-28",  # before a1's event date
+], ids=["none", "nan", "not_iso", "datetime_text", "int", "equal_to_event", "before_event"])
+def test_kept_label_without_a_valid_availability_refuses(bad):
+    table = {**TABLE, "a1": {**TABLE["a1"], AVAILABLE: bad}}  # a1 is kept: both labels present
+    fetch, _ = _spy(table)
+    with pytest.raises(OpsError) as exc:
+        rd.read_labels(fetch, ADM)
+    assert _refusal(exc) == (CONFLICT, "label_availability_missing")
+    assert exc.value.problem.message == "a label has no valid available_as_of_date"
+
+
+def test_skipped_label_with_null_availability_is_dropped_not_refused(capsys):
+    table = {**TABLE, "a2": {**TABLE["a2"], "abs_move": np.nan, AVAILABLE: None}}
+    fetch, _ = _spy(table)
+    out = rd.read_labels(fetch, ADM, start="2023-01-01", end="2025-01-01")
+    assert list(out.index) == ["a1", "a3", "a4"]
+    assert "label_missing=1" in capsys.readouterr().err
 
 
 PROD_ADM =_admitted([("p0", "2018-06-01"), ("p1", "2023-02-01"), ("p2", "2023-06-01"), ("p3", "2024-01-10")])

@@ -21,7 +21,8 @@ SNAP = types.SimpleNamespace(table_versions={"tier4_forecasts": types.SimpleName
 D1, D2 = pd.Timestamp("2025-01-02"), pd.Timestamp("2025-02-03")
 DAY = pd.Timedelta(days=1)
 PROD = tuple(readers.PRODUCTION_COLUMNS)
-LABEL = tuple(readers.LABEL_COLUMNS)
+LABEL = tuple(readers.LABEL_FETCH)
+AVAILABLE = readers.AVAILABLE
 ADMITTED = readers.Admitted({"events": pd.DataFrame({"event_id": ["e1", "e2"], "event_date": [D1, D2]}), "excluded": {}})
 
 
@@ -39,9 +40,11 @@ def _frames(**over):
         "tier4_forecasts": pd.DataFrame({"ticker": ["AAA", "BBB", "CCC"], "event_date": [D1, D2, D1],
                                          "pred_abs_move": [4.0, 5.0, 6.0], "pred_iv_crush_30": [-1.0, -2.0, -3.0]}),
         "computed_moves": pd.DataFrame({"ticker": ["AAA", "BBB"], "event_date": [D1, D2],
-                                        "realized_move_pct": [-3.0, 2.0], "skipped": [False, False]}),
+                                        "realized_move_pct": [-3.0, 2.0], "skipped": [False, False],
+                                        "available_as_of_date": ["2025-01-03", "2025-02-04"]}),
         "iv_crush_targets": pd.DataFrame({"ticker": ["AAA", "BBB"], "event_date": [D1, D2],
-                                          "crush_pct_iv30": [-10.0, -20.0], "skipped": [False, True]}),
+                                          "crush_pct_iv30": [-10.0, -20.0], "skipped": [False, True],
+                                          "available_as_of_date": ["2025-01-03", "2025-02-04"]}),
         "feature_panel": pd.DataFrame({"ticker": ["AAA", "BBB"], "date": [D1, D2], "pre_iv30": [0.3, 0.4],
                                        "mcap_usd": [5e9, 2e9], "or_implied": [4.0, 5.0]}),
     }
@@ -269,17 +272,20 @@ def test_label_nan_value_allowed_and_comes_back_nan():
 
 def test_label_missing_row_refused():
     frames = _frames(
-        computed_moves=pd.DataFrame({"ticker": ["AAA"], "event_date": [D1], "realized_move_pct": [-3.0], "skipped": [False]}),
-        iv_crush_targets=pd.DataFrame({"ticker": ["AAA"], "event_date": [D1], "crush_pct_iv30": [-10.0], "skipped": [False]}))
+        computed_moves=pd.DataFrame({"ticker": ["AAA"], "event_date": [D1], "realized_move_pct": [-3.0], "skipped": [False],
+                                     "available_as_of_date": ["2025-01-03"]}),
+        iv_crush_targets=pd.DataFrame({"ticker": ["AAA"], "event_date": [D1], "crush_pct_iv30": [-10.0], "skipped": [False],
+                                       "available_as_of_date": ["2025-01-03"]}))
     ns, _ = _build(frames)
     with pytest.raises(OpsError) as exc:
         ns.fetch(LABEL, ["e2"])
-    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "source_value_invalid")
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "source_table_missing")
 
 
 def test_label_two_rows_for_one_event_refused():
     frames = _frames(computed_moves=pd.DataFrame({
-        "ticker": ["AAA", "AAA"], "event_date": [D1, D1], "realized_move_pct": [-3.0, -4.0], "skipped": [False, False]}))
+        "ticker": ["AAA", "AAA"], "event_date": [D1, D1], "realized_move_pct": [-3.0, -4.0], "skipped": [False, False],
+        "available_as_of_date": ["2025-01-03", "2025-01-03"]}))
     ns, _ = _build(frames)
     with pytest.raises(OpsError) as exc:
         ns.fetch(LABEL, ["e1"])
@@ -304,7 +310,8 @@ def test_label_sentinel_or_inf_refused(table, column, value):
 def test_label_read_is_called_only_with_requested_events_once_per_table():
     frames = _frames(computed_moves=pd.DataFrame({
         "ticker": ["AAA", "AAA", "BBB"], "event_date": [D1, pd.Timestamp("2024-06-03"), D2],
-        "realized_move_pct": [-3.0, 9.0, 2.0], "skipped": [False, False, False]}))
+        "realized_move_pct": [-3.0, 9.0, 2.0], "skipped": [False, False, False],
+        "available_as_of_date": ["2025-01-03", "2024-06-04", "2025-02-04"]}))
     ns, read = _build(frames)
     out = ns.fetch(LABEL, ["e1"])
     assert [c["table"] for c in read.labels.calls] == ["computed_moves", "iv_crush_targets"]
@@ -571,3 +578,52 @@ def test_readers_accept_production_and_label_frames():
     assert list(prod["frame"].index) == ["e1", "e2"]
     labels = readers.read_labels(ns.fetch, ADMITTED)
     assert list(labels.index) == ["e1"] and labels.loc["e1", "abs_move"] == 3.0
+
+
+# --- label availability, zero rows, planner denial and scan progress ---------------
+
+def test_label_availability_is_the_later_of_the_two_tables():
+    frames = _frames()
+    frames["iv_crush_targets"] = _set(frames["iv_crush_targets"], AVAILABLE, "2025-01-09")  # row 0 is AAA/D1, event e1
+    out = _build(frames)[0].fetch(LABEL, ["e1"]).set_index("event_id")
+    assert out.loc["e1", AVAILABLE] == "2025-01-09"  # crush later than moves ("2025-01-03")
+    frames["computed_moves"] = _set(frames["computed_moves"], AVAILABLE, "2025-01-12")
+    out = _build(frames)[0].fetch(LABEL, ["e1"]).set_index("event_id")
+    assert out.loc["e1", AVAILABLE] == "2025-01-12"  # moves later than crush ("2025-01-09")
+
+
+def test_label_availability_is_none_when_either_table_has_none():
+    frames = _frames()
+    frames["iv_crush_targets"] = _set(frames["iv_crush_targets"], AVAILABLE, None)
+    out = _build(frames)[0].fetch(LABEL, ["e1"]).set_index("event_id")
+    assert out.loc["e1", AVAILABLE] is None
+
+
+def test_label_fetch_planner_denial_propagates_unchanged(monkeypatch):
+    refusal = data_fail("HOLDOUT_ACCESS_DENIED", "event is not isolated")
+
+    def plan(repository, snapshot, candidates, contract, *, columns):
+        raise refusal
+
+    monkeypatch.setattr(tbl, "plan_event_targets", plan)
+    ns = tbl.tables(_PlanRepo(), SNAP, ADMITTED, max_object_bytes=MAX, expected_hash=HASH, read=_Read(_frames()),
+                    calendar=lambda r, s, *, max_object_bytes: _Cal())
+    with pytest.raises(DataError) as exc:
+        ns.fetch(LABEL, ["e1"])
+    assert exc.value is refusal
+    assert exc.value.code == "HOLDOUT_ACCESS_DENIED"
+
+
+def test_label_rows_prints_one_scan_line_per_2000_planned_events(monkeypatch, capsys):
+    n = 2001
+
+    def plan(repository, snapshot, candidates, contract, *, columns):
+        return [(f"e{i}", ("AAA", D1), None) for i in range(n)]
+
+    monkeypatch.setattr(tbl, "plan_event_targets", plan)
+    want = pd.DataFrame({"event_id": [f"e{i}" for i in range(n)], "ticker": ["AAA"] * n, "event_date": [D1] * n})
+    rows = tbl.label_rows(_PlanRepo(), SNAP, "computed_moves", ["ticker", "event_date"], want, max_object_bytes=MAX)
+    assert len(rows) == n
+    lines = [line for line in capsys.readouterr().err.splitlines() if line.startswith("[pnl_tables] scan ")]
+    assert len(lines) == 1
+    assert re.fullmatch(r"\[pnl_tables\] scan computed_moves 2000/2001 events, \d+\.\d+/s, ETA \d+s", lines[0])

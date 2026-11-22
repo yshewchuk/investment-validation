@@ -1,7 +1,9 @@
 """EXP-188 real-store Sources adapter, slice 2: table-backed providers for `size_pnl_driver.Sources` (design section 13).
 
-`tables` returns `fetch` (labels and lead production forecasts), `facts` (sizing inputs), `plan_frame` (print windows) and `table_hash`. Labels (`computed_moves`, `iv_crush_targets`) are read event-isolated through `label_rows`, one proven fragment per requested event. `feature_panel` and `tier4_forecasts` are single logical partitions read for the requested keys' tickers. `earnings_events` is read in full (only admitted ids are kept). A session other than AMC/BMO, or an event with no calendar window, is dropped from `plan_frame` and counted on stderr. Refusals are typed OpsErrors with a `reason`: `source_table_missing`, `source_value_invalid`, `plan_frame_empty` or `production_hash_mismatch`. Nothing is imputed here.
+`tables` returns `fetch` (labels and lead production forecasts), `facts` (sizing inputs), `plan_frame` (print windows) and `table_hash`. Labels (`computed_moves`, `iv_crush_targets`) are read event-isolated through `label_rows`, one proven fragment per requested event. Each label carries the later of the two tables' `available_as_of_date` (both must be text, else None, and the reader refuses it). `feature_panel` and `tier4_forecasts` are single logical partitions read for the requested keys' tickers. `earnings_events` is read in full (only admitted ids are kept). A session other than AMC/BMO, or an event with no calendar window, is dropped from `plan_frame` and counted on stderr. Refusals are typed OpsErrors with a `reason`: `source_table_missing` (a table has no row for a requested event), `source_value_invalid` (more than one row, or a bad value), `plan_frame_empty` or `production_hash_mismatch`. A DataError other than CONTRACT_MISMATCH, including a planner HOLDOUT_ACCESS_DENIED, propagates unchanged (the `_guarded` behaviour). Nothing is imputed here.
 """
+import datetime as dt
+import math
 import resource
 import sys
 import time
@@ -17,13 +19,15 @@ from engine.v2.research._pricing import AMC, BMO, trading_calendar_from_snapshot
 from engine.v2.research._scan import read_table
 from engine.v2.research.event_history import plan_event_targets
 from experiments import size_pnl_inputs
-from experiments.size_pnl_readers import LABEL_COLUMNS, PRODUCTION_COLUMNS
+from experiments.size_pnl_readers import AVAILABLE, LABEL_FETCH, PRODUCTION_COLUMNS
 
 _EVENT_COLUMNS = ["event_id", "ticker", "event_date", "session"]
 _PLAN_COLUMNS = ["event_id", "ticker", "event_date", "session", "entry_date", "exit_date"]
 _KEY = ["ticker", "event_date"]
 # FLT_MAX-style placeholder: any |value| at or above this is a sentinel, not a measurement.
 _FLT_MAX_BOUND = 3.0e38
+# One stderr progress line per this many planned events scanned by label_rows.
+SCAN_PROGRESS_EVERY = 2000
 
 
 def _missing(msg):
@@ -70,6 +74,24 @@ def _keys(frame):
     return set(zip(frame["ticker"], frame["event_date"]))
 
 
+def _iso_day(value):
+    """A label's availability as ISO date text, or None when null. Dates are cut to their day; any other value passes through for the reader to refuse."""
+    if value is None or value is pd.NaT or (isinstance(value, float) and math.isnan(value)):
+        return None
+    if isinstance(value, dt.datetime):
+        return value.date().isoformat()
+    if isinstance(value, dt.date):
+        return value.isoformat()
+    return value
+
+
+def _later(first, second):
+    """The later of two ISO dates (text compare); None unless both are text."""
+    if isinstance(first, str) and isinstance(second, str):
+        return max(first, second)
+    return None
+
+
 def _log_read(table, keys, rows, started):
     rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
     print(f"[pnl_tables] read {table} keys={keys} rows={rows} elapsed={time.monotonic() - started:.1f}s rss={rss:.0f}MiB",
@@ -83,10 +105,15 @@ def label_rows(repository, snapshot, table, columns, want, *, max_object_bytes):
     """
     started = time.monotonic()
     contract = repository.table_contract(snapshot, table)
-    plan = plan_event_targets(repository, snapshot, want, contract, columns=tuple(columns))
-    rows = [row for _, request, _ in plan
-            for batch in repository.scan(request, table_name=table, max_object_bytes=max_object_bytes)
-            for row in batch.to_pylist()]
+    plan = list(plan_event_targets(repository, snapshot, want, contract, columns=tuple(columns)))
+    total, rows = len(plan), []
+    for done, (_, request, _) in enumerate(plan, start=1):
+        for batch in repository.scan(request, table_name=table, max_object_bytes=max_object_bytes):
+            rows.extend(batch.to_pylist())
+        if done % SCAN_PROGRESS_EVERY == 0:
+            rate = done / max(time.monotonic() - started, 1e-9)
+            print(f"[pnl_tables] scan {table} {done}/{total} events, {rate:.1f}/s, ETA {(total - done) / rate:.0f}s",
+                  file=sys.stderr)
     rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
     print(f"[pnl_tables] read {table} events={len(want)} rows={len(rows)} elapsed={time.monotonic() - started:.1f}s rss={rss:.0f}MiB",
           file=sys.stderr)
@@ -138,32 +165,41 @@ def tables(repository, snapshot, admitted, *, max_object_bytes, expected_hash,
     events = events[_EVENT_COLUMNS]
 
     def _labels(table, value, want):
-        """`value` for each requested event from one outcome table: exactly one row per event, NaN where skipped."""
-        columns = [*_KEY, value, "skipped"]
+        """`value` and the availability (column `available`, ISO text or None) for each requested event from one outcome table:
+        exactly one row per event, NaN value where skipped. An event with no row refuses `source_table_missing`."""
+        columns = [*_KEY, value, "skipped", AVAILABLE]
         if want.empty:
             rows = _norm(pd.DataFrame(columns=columns), "event_date")
         else:
             fetched = _guarded(table, label_rows, repository, snapshot, table, columns, want, max_object_bytes=max_object_bytes)
             rows = _norm(pd.DataFrame(fetched, columns=columns), "event_date")
-            if len(rows) != len(want) or rows.duplicated(_KEY).any() or _keys(rows) != _keys(want):
-                raise _invalid(f"{table} must hold exactly one row per requested event")
+            if rows.duplicated(_KEY).any() or not _keys(rows) <= _keys(want):
+                raise _invalid(f"{table} must hold at most one row per requested event")
+            if _keys(want) - _keys(rows):
+                raise _missing(f"{table} has no row for a requested event")
         vals = _floats(rows, value)
         if not _values_ok(vals, allow_nan=True):
             raise _invalid(f"{table}.{value} must be finite or NaN and below the FLT_MAX sentinel")
-        return rows[_KEY].assign(value=vals.where(~rows["skipped"].astype(bool)).to_numpy())
+        return rows[_KEY].assign(value=vals.where(~rows["skipped"].astype(bool)).to_numpy(),
+                                 available=rows[AVAILABLE].map(_iso_day).to_numpy())
 
     def fetch(columns, ids):
         columns = tuple(columns)
         want = events[events["event_id"].isin(ids)]
         keys = _keys(want)
-        if set(columns) == set(LABEL_COLUMNS):
+        if set(columns) == set(LABEL_FETCH):
             kind = "labels"
             moves = _labels("computed_moves", "realized_move_pct", want)
-            moves = moves.assign(value=moves["value"].abs()).rename(columns={"value": "abs_move"})
-            crush = _labels("iv_crush_targets", "crush_pct_iv30", want).rename(columns={"value": "crush_pct_iv30"})
+            moves = (moves.assign(value=moves["value"].abs())
+                     .rename(columns={"value": "abs_move", "available": "available_moves"}))
+            crush = (_labels("iv_crush_targets", "crush_pct_iv30", want)
+                     .rename(columns={"value": "crush_pct_iv30", "available": "available_crush"}))
             out = (want[["event_id", *_KEY]].merge(moves, on=_KEY, how="left")
                    .merge(crush, on=_KEY, how="left"))
-            out = out[["event_id", "abs_move", "crush_pct_iv30"]]
+            both = out["available_moves"].notna() & out["available_crush"].notna()
+            out[AVAILABLE] = [_later(a, b) if ok else None
+                              for a, b, ok in zip(out["available_moves"], out["available_crush"], both)]
+            out = out[["event_id", "abs_move", "crush_pct_iv30", AVAILABLE]]
         elif set(columns) == set(PRODUCTION_COLUMNS):
             kind = "production"
             fc = _read("tier4_forecasts", (*_KEY, "pred_abs_move", "pred_iv_crush_30"), keys)

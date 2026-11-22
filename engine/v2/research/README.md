@@ -336,7 +336,8 @@ leaves `tools/v2_signal_screen.py`, `tools/v2_fill_quality.py`,
 `tools/v2_build_trades.py` and `tools/v2_reconcile_trades.py`, plus
 `experiments/common_v2.py` (for `experiment_trades.load_trades`,
 `_pricing.trading_calendar_from_snapshot` and `_chains.load_chain_index`),
-the pinned
+`experiments/size_pnl_tables.py` (for `_pricing.trading_calendar_from_snapshot`,
+`_scan.read_table` and `event_history.plan_event_targets`), the pinned
 `experiments/EXP-147_str_thru_gate_promotion_confirmatory_val/run.py` runner
 (for `experiment_trades.PROVENANCE`), `experiments/v2_candidate_grid.py`
 (`price_candidate_grid`, issue #266 slice 2 — for

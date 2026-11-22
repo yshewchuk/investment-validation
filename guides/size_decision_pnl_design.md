@@ -197,13 +197,15 @@ A synthetic-predictor calibration arm (controls and power; never part of the ros
 
 | Input | Source |
 | --- | --- |
-| Production `pred_abs_move`, `pred_iv_crush_30` | `tier4_forecasts`, keyed (ticker, event_date), joined to `earnings_events` for `event_id`. `horizon_sessions` is not stored there; the adapter sets it to `LEAD` (1), the lead-horizon forecast. |
+| Production `pred_abs_move`, `pred_iv_crush_30` | `tier4_forecasts`, keyed (ticker, event_date), joined to `earnings_events` for `event_id`. `horizon_sessions` is not stored there; the adapter sets it to `LEAD` (1), the lead-horizon forecast. An admitted event with no forecast row refuses `source_table_missing`; nothing is omitted. |
 | `production_hash`, `production_table_hash` | the `tier4_forecasts` dataset-version `manifest_hash` in the snapshot (`data_snapshot_tables` to `data_dataset_versions`). The expected value is run config. |
 | Label `crush_pct_iv30` | `iv_crush_targets`; skipped or NaN rows drop in `read_labels`. |
 | Label `abs_move` | **Supervisor default, the user may override:** absolute `computed_moves.realized_move_pct`, the labels v14 was selected on (price_source `computed_moves`). |
-| Facts `pre_iv30`, `mcap_usd` | `feature_panel` event row. Non-finite values refuse, and so does the FLT_MAX sentinel (finite, so it needs its own equality check); the mcap-unit check is specified with slice 2's code. Nothing is imputed. |
-| Fact `implied_move` | the source the short-vol sizing path uses; if that is ambiguous, **supervisor default** `computed_moves.implied_move_pct`. |
-| `plan_frame` | `event_id`, `ticker`, `event_date`, `session` from `earnings_events`. Entry is the last pre-print close, exit the first post-print close, on the snapshot calendar: AMC entry = event-day close, exit = next session close; BMO entry = prior session close, exit = event-day close. An existing calendar helper is reused. |
+| Label availability | `available_as_of_date` of the same `computed_moves` and `iv_crush_targets` rows (a native data date). `read_labels` returns it per label and the driver admits a label to a month's pool only when it is strictly before the month start; this replaces `plan_frame.exit_date + 1`, which can precede it. A label with values but no valid `available_as_of_date` refuses `label_availability_missing`; there is no fallback to `exit_date`. |
+| Label reads | both label tables are read event-isolated (`event_history.plan_event_targets` plus one scan per event); a label fragment that is absent or not isolated refuses `HOLDOUT_ACCESS_DENIED` from the planner, and a planned event with no row refuses `source_table_missing`. |
+| Facts `pre_iv30`, `mcap_usd` | `feature_panel` event row. Non-finite values refuse, and so does the FLT_MAX sentinel (`abs >= 3e38`); `mcap_usd` must be at least 1e6 (USD, not thousands or millions). Nothing is imputed. |
+| Fact `implied_move` | `feature_panel.or_implied`, the panel's own `implied_move` column (`engine/data/features/panel.py:77`), a pre-print quote; no outcome table is read for facts. |
+| `plan_frame` | `event_id`, `ticker`, `event_date`, `session` from `earnings_events`. Entry is the last pre-print close, exit the first post-print close, on the snapshot calendar: AMC entry = event-day close, exit = next session close; BMO entry = prior session close, exit = event-day close. An existing calendar helper is reused. An event whose session is not AMC/BMO or that has no calendar window is dropped and counted on stderr; no surviving event refuses `plan_frame_empty`. `exit_date` dates the model rows only, never label availability. |
 
 **Holdouts.** `admit_events` (`load_population`, `_exclude_holdouts`) drops holdout and conflicting-sibling events before any fetch; `fetch` does not filter. 2025 targets are reachable only through the label reader; from 2025 records the adapter reads predictions and ids only.
 

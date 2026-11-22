@@ -197,10 +197,11 @@ def _common_dropped(ready):
     return len(set.union(*sets) - set.intersection(*sets))
 
 
-def _printed(labels, exits, cutoff):
-    """The labels whose event's exit_date is printed before ``cutoff`` (an ISO date)."""
-    ids = labels.index.astype(str)
-    return labels[ids.isin([e for e in ids if e in exits and label_availability.available_before(exits[e], cutoff)])]
+def _printed(labels, cutoff):
+    """The labels in the pool for a month starting at ``cutoff`` (an ISO date): a label enters a month's pool only when its
+    native ``available_as_of_date`` (the label frame's ``available`` column) is strictly before the month start. The plan's
+    exit_date is not used, since it can precede the label's availability."""
+    return labels[label_availability.printed_before(labels["available"], cutoff)]
 
 
 def _tally(total, chunk):
@@ -208,23 +209,23 @@ def _tally(total, chunk):
     return total
 
 
-def _sims(chunk, events, table, labels, exits):
+def _sims(chunk, events, table, labels):
     """One model's simulations per calendar month; each month's pool uses only rows and labels known before it."""
     sims, months = {}, events["event_date"].dt.to_period("M")
     for period in sorted(set(months)):
-        pool = build_pool(table[table["event_date"] < period.start_time], _printed(labels, exits, period.start_time.date().isoformat()))
+        pool = build_pool(table[table["event_date"] < period.start_time], _printed(labels, period.start_time.date().isoformat()))
         sims.update(shortvol.simulate(chunk, events[months == period], pool))
     return sims
 
 
-def _equivalence(table, events, sims, chunk, labels, exits):
+def _equivalence(table, events, sims, chunk, labels):
     """The fast-path check of one model on one chunk, run on the first simulable event's calendar month; None when nothing is simulable."""
     simable = sorted(str(e) for e in events["event_id"] if sims.get(str(e)) is not None)
     if not simable: return None
     first = events[events["event_id"].astype(str) == simable[0]]
     period = pd.Timestamp(first["event_date"].iloc[0]).to_period("M")
     month = events[events["event_date"].dt.to_period("M") == period]
-    pool = build_pool(table[table["event_date"] < period.start_time], _printed(labels, exits, period.start_time.date().isoformat()))
+    pool = build_pool(table[table["event_date"] < period.start_time], _printed(labels, period.start_time.date().isoformat()))
     return equivalence.check_chunk(chunk, month, sims, pool, alpha=ALPHA)
 
 
@@ -241,9 +242,9 @@ def _inner(src, out, ready, plan, facts_all, labels):
         built = {}
         for mid, entry in ready.items():
             events = model_events(entry["table"], facts_all, chunk, exits)  # facts_all: the run's only facts call
-            built[mid] = (events, _sims(chunk, events, pool_tables[mid], labels, exits))
+            built[mid] = (events, _sims(chunk, events, pool_tables[mid], labels))
         for mid in sorted(pending):
-            got = _equivalence(pool_tables[mid], *built[mid], chunk, labels, exits)
+            got = _equivalence(pool_tables[mid], *built[mid], chunk, labels)
             if got is None: continue
             checked[mid] = got
             pending.discard(mid)
@@ -330,10 +331,10 @@ def _rows(mid, book, arm, dec, taken, events):
     return frame.assign(model_id=mid, book=book, arm_or_rule=arm)
 
 
-def _month_scores(mid, table, events, chunk, labels, exits, start_m, st, *, arms=None):
+def _month_scores(mid, table, events, chunk, labels, start_m, st, *, arms=None):
     """Pass A for one model and calendar month: simulate once and score every (arm, name), with the pool of rows and
     labels known before the month (R6). Returns the scored frames by (arm, name) and the ids with no simulation."""
-    pool = build_pool(table[table["event_date"] < start_m], _printed(labels, exits, start_m.date().isoformat()))
+    pool = build_pool(table[table["event_date"] < start_m], _printed(labels, start_m.date().isoformat()))
     sims = shortvol.simulate(chunk, events, pool)
     scored = {(arm, name): shortvol.score_events(chunk, events, sims, name, alpha=ALPHA, c=c)
               for arm, c in (arms or (("as_is", 1.0), ("retuned", st["c"]))) for name in shortvol.NAMES}
@@ -387,7 +388,7 @@ def _outer(src, out, ready, receipts, plan, ids, facts_all, labels):
         for period in sorted({m for m, q in zip(month, quarter) if q == label}):
             start_m, month_frames = period.start_time, []
             at = {mid: events[mid][events[mid]["event_date"].dt.to_period("M") == period] for mid in ready}
-            scored = {mid: _month_scores(mid, pools[mid], at[mid], chunk, labels, exits, start_m, state[mid]) for mid in ready}
+            scored = {mid: _month_scores(mid, pools[mid], at[mid], chunk, labels, start_m, state[mid]) for mid in ready}
             bad = set().union(*(_unscoreable(s, m) for s, m in scored.values()))  # one shared population for all models (design section 4)
             dropped |= bad
             for mid in ready:
@@ -509,7 +510,7 @@ def _synthetic_scores(src, ready, plan, facts_all, labels):
         for period in sorted({m for m, q in zip(month, quarter) if q == label}):
             start_m, month_frames = period.start_time, []
             at = {mid: events[mid][events[mid]["event_date"].dt.to_period("M") == period] for mid in ready}
-            scored = {mid: _month_scores(mid, pools[mid], at[mid], chunk, labels, exits, start_m, state[mid], arms=_AS_IS) for mid in ready}
+            scored = {mid: _month_scores(mid, pools[mid], at[mid], chunk, labels, start_m, state[mid], arms=_AS_IS) for mid in ready}
             for mid in ready:  # Pass A rows, before the shared mask: a non-"scored" row is a width decline
                 for name in shortvol.NAMES:
                     f = scored[mid][0][("as_is", name)]

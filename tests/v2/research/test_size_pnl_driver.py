@@ -31,10 +31,15 @@ EXPECTED = {"plan_id": "PLAN", "registration_id": "REG", "seal_id": content_hash
 OK = lambda: {"spec_hash": "SPEC", "spec_hash_checked": True}  # noqa: E731
 
 
+def _avail(event_iso):
+    """A label's native available_as_of_date by default: one calendar day after its event date (ISO text)."""
+    return (pd.Timestamp(event_iso) + pd.Timedelta(days=1)).date().isoformat()
+
+
 def _base():
-    """One row per event: production columns and label columns, for the fake fetch."""
+    """One row per event: production columns and label columns (with availability), for the fake fetch."""
     rows = [{"event_id": e, "pred_abs_move": 5.0, "pred_iv_crush_30": -12.0, "horizon_sessions": 1,
-             "abs_move": 4.0, "crush_pct_iv30": -10.0} for e in EVENTS]
+             "abs_move": 4.0, "crush_pct_iv30": -10.0, "available_as_of_date": _avail(EVENTS[e])} for e in EVENTS]
     return pd.DataFrame(rows)
 
 
@@ -305,7 +310,7 @@ def test_an_event_unsimulable_under_one_model_leaves_for_every_model(tmp_path, s
         seen["twin"].attrs["twin"] = True
         return {mid: tables[mid], "twin": {**tables[mid], "table": seen["twin"]}}
 
-    def sims_of(chunk_, events, table, labels, exits):
+    def sims_of(chunk_, events, table, labels):
         return {e: (None if table.attrs.get("twin") and e == "E2" else "sim") for e in events["event_id"]}
 
     monkeypatch.setattr(readers, "model_tables", twinned)
@@ -348,7 +353,7 @@ def test_an_event_undetermined_only_off_unity_leaves_the_taken_population_for_ev
         seen["twin"].attrs["twin"] = True
         return {mid: tables[mid], "twin": {**tables[mid], "table": seen["twin"]}}
 
-    def sims_of(chunk_, events, table, labels, exits):  # the twin's E2 is marked undetermined
+    def sims_of(chunk_, events, table, labels):  # the twin's E2 is marked undetermined
         return {e: ("undetermined" if table.attrs.get("twin") and e == "E2" else "sim") for e in events["event_id"]}
 
     def scored_of(chunk_, events, sims, name, c, **kw):
@@ -380,16 +385,35 @@ def test_inner_refuses_a_changed_plan_window_on_replay(tmp_path, stubs, monkeypa
     assert caught.value.details["reason"] == "inputs_receipt_changed"
 
 
-def test_inner_month_pool_drops_a_label_printed_after_a_later_month_starts(tmp_path, stubs, monkeypatch):
-    """E1's exit (2024-08-03) falls after E2's month starts (2024-08-01): E1 is in E2's month table but not its labels."""
+def _cutoff_pools(tmp_path, monkeypatch, e1_available):
+    """Inner run over 2023 Q2 with E1 and E2 (E2 in 2024-08). E1's exit is 2024-07-20, so exit_date + 1 is before the 2024-08
+    month start; only E1's native ``available_as_of_date`` differs between calls. Returns (table ids, label ids) per pool."""
     plan = PLAN_FRAME.copy()
-    plan.loc[plan["event_id"] == "E1", "exit_date"] = pd.Timestamp("2024-08-03")
+    plan.loc[plan["event_id"] == "E1", "exit_date"] = pd.Timestamp("2024-07-20")
+
+    def fetch(columns, ids):
+        rows = BASE[BASE["event_id"].isin(list(ids))].copy()
+        rows.loc[rows["event_id"] == "E1", "available_as_of_date"] = e1_available
+        return rows
+
     pools = []
     monkeypatch.setattr(driver, "build_pool",
                         lambda table, labels: pools.append((set(table.index.astype(str)), set(labels.index.astype(str)))))
     use_chunks(monkeypatch, [("2023Q2", chunk("E1", "E2"))])
-    driver.run(sources(plan_frame=plan), "inner", tmp_path, prereg=OK)
-    assert any("E1" in tabled and "E1" not in labelled for tabled, labelled in pools)
+    driver.run(sources(plan_frame=plan, fetch=fetch), "inner", tmp_path, prereg=OK)
+    return pools
+
+
+def test_label_printed_after_the_month_start_is_not_admitted_though_exit_plus_one_is_before(tmp_path, stubs, monkeypatch):
+    pools = _cutoff_pools(tmp_path, monkeypatch, "2024-08-05")  # printed after 2024-08-01, the 2024-08 month start
+    labelled = [ids for tabled, ids in pools if "E1" in tabled]  # the 2024-08 month: E1 is in its table
+    assert labelled and all(ids == set() for ids in labelled)
+
+
+def test_label_printed_before_the_month_start_is_admitted(tmp_path, stubs, monkeypatch):
+    pools = _cutoff_pools(tmp_path, monkeypatch, "2024-07-25")  # the same label, printed before 2024-08-01
+    labelled = [ids for tabled, ids in pools if "E1" in tabled]
+    assert labelled and all(ids == {"E1"} for ids in labelled)
 
 
 def test_residual_pool_excludes_history_missing_from_any_ready_model(tmp_path, stubs, monkeypatch):

@@ -21,8 +21,13 @@ EXPECTED = {"plan_id": "PLAN", "registration_id": "REG", "seal_id": content_hash
 OK = lambda: {"spec_hash": "SPEC", "spec_hash_checked": True}  # noqa: E731
 SPEC = {"synthetic_arm": {"seed_tag": "sy2-test", "inner_years": [2023, 2024], "families": ["oracle", "median_noise", "shrinkage"],
                           "spread_ladder": [0.6], "shrinkage_L": [1.0], "level_gap_min_s": 0.4}}
+def _avail(day):
+    """A label's native available_as_of_date by default: one calendar day after its event date (ISO text)."""
+    return (pd.Timestamp(day) + pd.Timedelta(days=1)).date().isoformat()
+
+
 BASE = pd.DataFrame([{"event_id": e, "pred_abs_move": 5.0, "pred_iv_crush_30": -12.0, "horizon_sessions": 1,
-                      "abs_move": 4.0, "crush_pct_iv30": -10.0} for e in EVENTS])
+                      "abs_move": 4.0, "crush_pct_iv30": -10.0, "available_as_of_date": _avail(EVENTS[e])} for e in EVENTS])
 ADMITTED = readers.Admitted({"events": pd.DataFrame({"event_id": list(EVENTS), "event_date": pd.to_datetime(list(EVENTS.values()))}),
                              "excluded": {}})
 DATES = pd.to_datetime(list(EVENTS.values()))
@@ -325,7 +330,7 @@ def test_deleting_the_synthetic_files_leaves_the_inner_receipts_byte_identical(t
 def test_month_scores_and_month_take_arms_and_emit_from(monkeypatch):
     """The arms= and emit_from= keywords of _month_scores and _month: only the as-is arm is scored, and no rows emit before emit_from."""
     monkeypatch.setattr(driver, "build_pool", lambda table, labels: None)
-    monkeypatch.setattr(driver, "_printed", lambda labels, exits, cutoff: labels)
+    monkeypatch.setattr(driver, "_printed", lambda labels, cutoff: labels)
     monkeypatch.setattr(driver.shortvol, "simulate", lambda chunk_, events, pool, **kw: {e: "sim" for e in events["event_id"]})
     monkeypatch.setattr(driver.shortvol, "score_events", lambda chunk_, events, sims, name, **kw: pd.DataFrame(
         {"event_id": events["event_id"].to_numpy(), "status": "scored"}))
@@ -334,7 +339,7 @@ def test_month_scores_and_month_take_arms_and_emit_from(monkeypatch):
     events = pd.DataFrame({"event_id": ["E1", "E2"], "event_date": pd.to_datetime(["2023-06-10", "2023-06-20"])})
     table = pd.DataFrame({"event_date": pd.to_datetime(["2023-01-05"])}, index=pd.Index(["H0"]))
     start, st = pd.Timestamp("2023-06-01"), driver._model_state(1.0)
-    scored, missing = driver._month_scores("m", table, events, chunk("E1", "E2"), None, {}, start, st, arms=(("as_is", 1.0),))
+    scored, missing = driver._month_scores("m", table, events, chunk("E1", "E2"), None, start, st, arms=(("as_is", 1.0),))
     assert set(scored) == {("as_is", name) for name in driver.shortvol.NAMES} and missing == set()
     frames = driver._month("m", events, scored, set(), chunk("E1", "E2"), start, st, arms=(("as_is", 1.0),),
                            emit_from=pd.Timestamp("2099-01-01"))
@@ -420,7 +425,7 @@ ADMITTED3 = readers.Admitted({"events": pd.DataFrame({"event_id": list(EVENTS3),
 PLAN3 = pd.DataFrame({"event_id": list(EVENTS3), "ticker": [TICKERS3[e] for e in EVENTS3], "event_date": DATES3, "session": "AMC",
                       "entry_date": DATES3 - pd.Timedelta(days=1), "exit_date": DATES3 + pd.Timedelta(days=1)})
 BASE3 = pd.DataFrame([{"event_id": e, "pred_abs_move": 5.0, "pred_iv_crush_30": -12.0, "horizon_sessions": 1,
-                       "abs_move": 4.0, "crush_pct_iv30": -10.0} for e in EVENTS3])
+                       "abs_move": 4.0, "crush_pct_iv30": -10.0, "available_as_of_date": _avail(EVENTS3[e])} for e in EVENTS3])
 FACTS3 = pd.DataFrame({"pre_iv30": 40.0, "mcap_usd": 2e10, "implied_move": 5.0}, index=pd.Index(list(EVENTS3), name="event_id"))
 
 
@@ -549,7 +554,10 @@ def test_the_real_loop_drops_a_planned_event_one_model_lacks_from_every_model(mo
     short = full.drop(index=["E3"])
     ready = {mid: {"status": "ready", "family": "oracle", "params": {}, "table": full} for mid in ("m1", "m2")}
     monkeypatch.setattr(driver, "_pool_tables", lambda ready_: {mid: (short if mid == "m2" else full) for mid in ready_})
-    labels = pd.DataFrame({"abs_move": 4.0, "crush_pct_iv30": -10.0}, index=pd.Index(list(EVENTS3), name="event_id"))
+    labels = pd.DataFrame(
+        {"abs_move": 4.0, "crush_pct_iv30": -10.0, "available": [_avail(EVENTS3[e]) for e in EVENTS3]},
+        index=pd.Index(list(EVENTS3), name="event_id"),
+    )
     monkeypatch.setattr(driver, "build_pool", lambda table, labels: table)
     monkeypatch.setattr(driver.shortvol, "simulate", lambda chunk_, events, pool, **kw: {e: "sim" for e in events["event_id"]})
     monkeypatch.setattr(driver.shortvol, "score_events", _scored)
@@ -576,7 +584,10 @@ def test_the_real_loop_counts_width_declined_rows_per_model_and_unit(monkeypatch
     short = full.drop(index=["E3"])
     ready = {mid: {"status": "ready", "family": "oracle", "params": {}, "table": full} for mid in ("m1", "m2")}
     monkeypatch.setattr(driver, "_pool_tables", lambda ready_: {mid: (short if mid == "m2" else full) for mid in ready_})
-    labels = pd.DataFrame({"abs_move": 4.0, "crush_pct_iv30": -10.0}, index=pd.Index(list(EVENTS3), name="event_id"))
+    labels = pd.DataFrame(
+        {"abs_move": 4.0, "crush_pct_iv30": -10.0, "available": [_avail(EVENTS3[e]) for e in EVENTS3]},
+        index=pd.Index(list(EVENTS3), name="event_id"),
+    )
     monkeypatch.setattr(driver, "build_pool", lambda table, labels: table)
     monkeypatch.setattr(driver.shortvol, "simulate", lambda chunk_, events, pool, **kw: {e: "sim" for e in events["event_id"]})
 
