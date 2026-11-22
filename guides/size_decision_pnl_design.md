@@ -238,7 +238,7 @@ A synthetic-predictor calibration arm (controls and power; never part of the ros
 
 ## 14. Amendment 1 (2026-11-22): labelled exit-marking sensitivity arm `marks_mid`
 
-**Reason.** User decision 2026-11-22, taken after a diagnostic on inner data only. **What was seen, verbatim:** a 500-ticker 2023-24 inner diagnostic (no 2025 data read) showed that design section 5's per-leg fallback rung 2 (a zero-bid or wide exit leg marked at alpha 0) fires on about 62% of taken short-vol trades and produces negative structure exit values on about 20% of them. Taken-trade mean return on debit was about -7% to -29% per model under the pre-registered marks vs about -14% to +27% with every leg at the alpha mark; EXP-133 marked every leg at the alpha mark.
+**Reason.** User decision 2026-11-22, taken after a diagnostic on inner data only. **What was seen, verbatim:** a 500-ticker 2023-24 inner diagnostic (no 2025 data read) showed that design section 6's per-leg fallback rung 2 (a zero-bid or wide exit leg marked at alpha 0) fires on about 62% of taken short-vol trades and produces negative structure exit values on about 20% of them. Taken-trade mean return on debit was about -7% to -29% per model under the pre-registered marks vs about -14% to +27% with every leg at the alpha mark; EXP-133 marked every leg at the alpha mark.
 
 **Unchanged.** No 2025 data was read for this amendment. The primary marks (section 6), primary metrics, hypotheses H1-H3, the verdict rules and the judgement thresholds, the roster, the tuning (the grid and `c` per model, frozen in the primary tuning receipts) and the T10 verdict are exactly as pre-registered. T10 is computed from the primary marks only.
 

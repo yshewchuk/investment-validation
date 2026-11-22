@@ -672,6 +672,15 @@ def test_primary_sections_do_not_depend_on_the_mid_column(tmp_path):
         assert _section_lines(texts["plain"], title) == _section_lines(texts["mid"], title) == _section_lines(texts["shifted"], title)
     sens = "### Sensitivity (Amendment 1), not the pre-registered verdict: T4 Short-vol, as is"
     assert _section_lines(texts["mid"], sens) != _section_lines(texts["shifted"], sens)  # the sensitivity reads the mid marks
+    # Rendered values. H-sq (no median role, so no bump) takes four as-is trades of 10, 20, 30, 40: total 100.00 over
+    # 4 events = 25 per event, hit rate 1. The shifted run adds 500 to every taken row, so the sensitivity total is
+    # 100 + 4 * 500 = 2100.00 and the per-event value is 2100 / 4 = 525.
+    plain_row = next(line for line in _section_lines(texts["plain"], "### T4") if line.startswith("| H-sq |"))
+    assert plain_row == "| H-sq | 1 | 4 | 100.00 | 25 | 1 |"
+    shifted_row = next(line for line in _section_lines(texts["shifted"], sens) if line.startswith("| H-sq |"))
+    assert shifted_row == "| H-sq | 1 | 4 | 2100.00 | 525 | 1 |"
+    # No verdict flip is asserted: a uniform shift leaves every contrast unchanged (each is a difference of paired
+    # values that both move by 500), so under this fixture the sensitivity verdicts cannot differ from the primary ones.
 
 
 def test_decisions_without_the_mid_column_get_a_not_testable_sensitivity_note(tmp_path):

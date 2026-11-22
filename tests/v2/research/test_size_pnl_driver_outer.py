@@ -255,15 +255,27 @@ def test_outer_makes_one_facts_call_for_the_stage_and_inner_window(tmp_path, out
 
 
 def test_oracle_one_taken_2025_event_carries_its_literal_marks(tmp_path, outer_stubs, monkeypatch):
-    """Only E3 is taken; its scorer marks are literal, so its decision rows must carry exactly those values."""
-    monkeypatch.setattr(driver.shortvol, "decide", lambda scored: scored[scored["event_id"].astype(str) == "E3"].assign(status="taken", reason="taken"))
+    """Only E3 is taken; its scorer marks are literal, so its decision rows must carry exactly those values. E4 is
+    not taken, so it supplies the non-taken short-vol rows, whose mid columns must be NaN."""
+    def decide_e3_only(scored):
+        is_e3 = scored["event_id"].astype(str) == "E3"
+        return scored.assign(cutoff=np.nan, status=np.where(is_e3, "taken", "not_taken"), reason=np.where(is_e3, "taken", "below_cutoff"))
+
     marks = {"event_id": ["E3"], "exit_value": [101.5], "rung": [2], "lots": [3], "pnl_dollars": [-42.25], "entry_cost": [10.0], "pnl_per_share": [-0.5]}
-    monkeypatch.setattr(driver.shortvol, "score", lambda chunk_, events, decisions, name, alpha, *, c=1.0, drop_unquoted=False, mid_marks=False: pd.DataFrame(marks))
+    mid_marks_values = {**marks, "exit_value": [105.0], "pnl_dollars": [-10.5]}  # the sensitivity arm: other columns as the primary
+    monkeypatch.setattr(driver.shortvol, "decide", decide_e3_only)
+    monkeypatch.setattr(driver.shortvol, "score", lambda chunk_, events, decisions, name, alpha, *, c=1.0, drop_unquoted=False, mid_marks=False:
+                        pd.DataFrame(mid_marks_values if mid_marks else marks))
     _run_both(tmp_path, monkeypatch)
     frame = pd.read_parquet(tmp_path / "decisions.parquet")
-    taken = frame[(frame["book"] == "short_vol") & (frame["event_id"] == "E3")]
+    short = frame[frame["book"] == "short_vol"]
+    taken = short[(short["event_id"] == "E3") & (short["status"] == "taken")]
     assert len(taken) == 2 * len(driver.shortvol.NAMES)  # both arms, every short-vol structure
     assert (taken["pnl_dollars"] == -42.25).all() and (taken["rung"] == 2).all()
+    assert (taken["exit_value_mid"] == 105.0).all() and (taken["pnl_dollars_mid"] == -10.5).all()
+    untaken = short[short["status"] != "taken"]
+    assert len(untaken) == 2 * len(driver.shortvol.NAMES)  # E4, both arms, every short-vol structure
+    assert untaken["exit_value_mid"].isna().all() and untaken["pnl_dollars_mid"].isna().all()
 
 
 def test_outer_refuses_when_inner_json_names_another_model_hash(tmp_path, stubs, monkeypatch):
