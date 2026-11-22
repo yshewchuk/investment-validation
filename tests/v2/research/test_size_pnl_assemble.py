@@ -384,6 +384,30 @@ def test_decisions_one_byte_over_the_cap_refuses(tmp_path, monkeypatch):
     assert caught.value.details["reason"] == "report_decisions_mismatch"
 
 
+def _no_decode(*_args, **_kwargs):
+    raise AssertionError("decisions.parquet was decoded before the metadata checks")
+
+
+def test_declared_decoded_size_over_the_cap_refuses_before_any_decode(tmp_path, monkeypatch):
+    out = build(tmp_path)
+    monkeypatch.setattr(assemble_mod, "MAX_DECODED_BYTES", 1)
+    monkeypatch.setattr(assemble_mod.pq.ParquetFile, "read", _no_decode)
+    with pytest.raises(Refusal) as caught:
+        assemble_mod.assemble(out, plan_frame(), admitted=None)
+    assert caught.value.details["reason"] == "report_decisions_invalid"
+    assert not (out / "REPORT.md").exists()
+
+
+def test_outer_rows_differing_from_parquet_rows_refuses_before_any_decode(tmp_path, monkeypatch):
+    out = build(tmp_path)
+    _rewrite(out / "receipts" / "outer.json", lambda b: {**b, "rows": b["rows"] + 1})  # decisions_sha256 still matches
+    monkeypatch.setattr(assemble_mod.pq.ParquetFile, "read", _no_decode)
+    with pytest.raises(Refusal) as caught:
+        assemble_mod.assemble(out, plan_frame(), admitted=None)
+    assert caught.value.details["reason"] == "report_decisions_mismatch"
+    assert not (out / "REPORT.md").exists()
+
+
 def test_hash_loop_refuses_when_fstat_understates_the_size(tmp_path, monkeypatch):
     out = build(tmp_path)
     target, real_fstat = os.stat(out / "decisions.parquet"), os.fstat

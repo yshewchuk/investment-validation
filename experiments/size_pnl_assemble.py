@@ -162,6 +162,7 @@ def _load_receipts(rdir):
 
 
 _HASH_BLOCK = 1 << 20
+MAX_DECODED_BYTES = 1 << 31  # the uncompressed size decisions.parquet may declare in its row groups, checked before any decode
 
 
 def _load_decisions(out, outer):
@@ -192,9 +193,14 @@ def _load_decisions(out, outer):
         parquet = pq.ParquetFile(handle)
         if not set(COLUMNS) <= set(parquet.schema_arrow.names):
             raise _refuse("report_decisions_columns", "decisions.parquet lacks a required column")
+        # Metadata only, before any decode: a highly compressed artifact must not exhaust memory on read.
+        meta = parquet.metadata
+        if meta.num_rows != outer["rows"]:
+            raise _refuse("report_decisions_mismatch", "decisions.parquet row count differs from the outer receipt")
+        decoded = sum(meta.row_group(i).total_byte_size for i in range(meta.num_row_groups))
+        if decoded > MAX_DECODED_BYTES:
+            raise _refuse("report_decisions_invalid", "decisions.parquet decodes to more than MAX_DECODED_BYTES")
         frame = parquet.read(columns=COLUMNS).to_pandas()
-    if len(frame) != outer["rows"]:
-        raise _refuse("report_decisions_mismatch", "decisions.parquet row count differs from the outer receipt")
     if frame.empty:
         raise _refuse("report_decisions_empty", "decisions.parquet holds no rows")
     with _admit("report_decisions_invalid", "decisions.parquet has a non-date event_date or a non-numeric pnl_dollars"):
