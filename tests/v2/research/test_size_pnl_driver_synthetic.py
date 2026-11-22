@@ -678,3 +678,24 @@ def test_a_synthetic_run_whose_every_event_has_a_missing_fact_refuses_empty_popu
     assert src.exclusions["facts_missing"] == set(EVENTS3)
     assert not (tmp_path / "out" / "receipts" / "inputs_synthetic.json").exists()
     assert not (tmp_path / "out" / "decisions_synthetic.parquet").exists()
+
+
+def test_a_synthetic_event_without_a_forecast_is_never_requested_from_facts(tmp_path, monkeypatch):
+    """E3 has no production forecast (its fetch rows are withheld) and an invalid mcap_usd of 5000. Facts are requested only for the
+    events that have a forecast, so the run completes, E3 is in no table and no decision, and facts never receive its id."""
+    _real_month_loop(monkeypatch)
+    requested = []
+    facts = FACTS3.assign(mcap_usd=[5000.0 if e == "E3" else 2e10 for e in FACTS3.index])
+
+    def fact_source(ids):
+        requested.append(sorted(ids))
+        return facts.reindex(list(ids))
+
+    src = sources(plan_frame=PLAN3, admitted=ADMITTED3, facts=fact_source,
+                  fetch=lambda columns, ids: BASE3[BASE3["event_id"].isin(list(ids)) & (BASE3["event_id"] != "E3")])
+    result = driver.run_synthetic(src, tmp_path / "out", prereg=OK)
+    assert result["stage"] == "synthetic"
+    assert requested == [sorted(set(EVENTS3) - {"E3"})]
+    assert "E3" not in set(pd.read_parquet(tmp_path / "out" / "decisions_synthetic.parquet")["event_id"].astype(str))
+    receipt = json.loads((tmp_path / "out" / "receipts" / "synthetic.json").read_text(encoding="utf-8"))
+    assert receipt["planned"] == 6 and receipt["events_no_prediction"] == 1

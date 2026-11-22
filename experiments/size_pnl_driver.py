@@ -192,18 +192,29 @@ def _facts_missing(facts):
     return set(facts.index[facts[list(_FACTS)].isna().any(axis=1).to_numpy()].astype(str))
 
 
+def _drop_ids(ready, missing):
+    """Drops the ``missing`` ids from every ready model's table. A table that loses no row is passed through as the same object
+    (its binding stays the model_tables binding); a table that loses a row is marked ``restricted``."""
+    out = {}
+    for mid, e in ready.items():
+        keep = ~e["table"].index.astype(str).isin(missing)
+        out[mid] = e if keep.all() else {**e, "table": e["table"][keep], "restricted": True}
+    return out
+
+
 def _drop_facts_missing(src, ready, facts_all):
     """Drops each event with a NaN fact from every ready model's table, before any binding or receipt; records the ids under
     ``facts_missing`` in ``src.exclusions`` and returns the ready entries."""
     missing = _facts_missing(facts_all)
     src.exclusions.setdefault("facts_missing", set()).update(missing)
     _log(f"facts_missing={len(missing)}")
-    out = {}
-    for mid, e in ready.items():
-        keep = ~e["table"].index.astype(str).isin(missing)
-        # A table that loses no row is passed through as the same object: its binding stays the model_tables binding.
-        out[mid] = e if keep.all() else {**e, "table": e["table"][keep], "restricted": True}
-    return out
+    return _drop_ids(ready, missing)
+
+
+def _unlabelled(inner_window, labels):
+    """Pre-2025 window ids (str) with no label row. Their ids are already recorded by the fetch's exclusions, so this only drops.
+    2025 events cannot be pre-filtered: decisions are frozen before that month's labels are read (R6), so ``_unscoreable`` governs them."""
+    return {str(e) for e in inner_window["event_id"]} - set(labels.index.astype(str))
 
 
 def _pool_tables(ready):
@@ -476,6 +487,9 @@ def run(src, stage, out_dir, *, event_ids=None, prereg=size_pnl_prereg.require_p
     survivors = facts_all[~facts_all.index.astype(str).isin(_facts_missing(facts_all))]  # the facts receipts cover facts-complete events only
     facts_rows = _facts_rows(survivors, stage_ids)
     labels = readers.read_labels(src.fetch, src.admitted, start=INNER[0], end=OUTER[0], event_ids=ids)  # the pre-2025 labels; outer adds each month's
+    ready = _drop_ids(ready, _unlabelled(inner_window, labels))  # before the body: a pre-2025 event with no label leaves every table
+    if ready and not _common_ids(ready):
+        raise shortvol.Refusal(_CONFLICT, "no event survives the exclusions", {"reason": "empty_population"})
     scope = _scope(ids)
     body = {"stage": "inputs", "spec_hash": receipt["spec_hash"], "identity": bound_tables["identity"],
             "roster": roster,  # inputs-level status per model: arrays are not receipted
@@ -489,6 +503,7 @@ def run(src, stage, out_dir, *, event_ids=None, prereg=size_pnl_prereg.require_p
         if not ready: raise _no_ready()
         _, inner_bound, inner_production = _prepare(src, "inner", ids)  # the inner window's bindings, to match inputs_inner.json
         inner_ready = _drop_facts_missing(src, _ready(inner_bound["tables"], ids), facts_all)
+        inner_ready = _drop_ids(inner_ready, _unlabelled(inner_window, labels))  # the same label drop as the inner run
         inner_tables = {mid: _table_binding(e, ids) for mid, e in inner_ready.items()}
         inner_models = _models_body(inner_bound["bound"], inner_ready)  # inner bindings only: the outer year is not in inputs_inner.json
         inner_plan = content_hash(_plan_rows(inner_window))
@@ -624,12 +639,13 @@ def run_synthetic(src, out_dir, *, event_ids=None, replay=False, prereg=size_pnl
     if plan.empty: raise shortvol.Refusal(_CONFLICT, "the plan window holds no events", {"reason": "empty_population"})
     planned = {str(e) for e in plan["event_id"]}  # the reads take only planned events, never an admitted key outside the plan
     stage_ids = {str(e) for e in plan["event_id"]}
-    facts_all = _load_facts(src, sorted(stage_ids))
     production =readers.read_production(src.fetch, src.admitted, expected_hash=src.production_hash, table_hash=src.production_table_hash, start=INNER[0], end=INNER[1], event_ids=planned)
     labels = readers.read_labels(src.fetch, src.admitted, start=INNER[0], end=INNER[1], event_ids=planned)
     ready = _ready(synthetic.generate(src.admitted, labels, production, arm), ids)
     if not ready: raise _no_ready()
+    facts_all = _load_facts(src, stage_ids & _common_ids(ready))  # facts only for events that have a forecast, as in the real run
     ready = _drop_facts_missing(src, ready, facts_all)  # before any table binding, scoring or receipt, as in the real run
+    survivors = facts_all[~facts_all.index.astype(str).isin(_facts_missing(facts_all))]  # the facts receipt covers surviving events only
     scope = _scope(ids)
     frames, skipped, ladder_hash, dropped, declined = _synthetic_scores(src, ready, plan, facts_all, labels)
     full = pd.concat(frames, ignore_index=True)
@@ -640,7 +656,7 @@ def run_synthetic(src, out_dir, *, event_ids=None, replay=False, prereg=size_pnl
         raise Refusal(_CONFLICT, "too few quarters or tickers to bootstrap", {"reason": "underclustered_population"})
     body = {"stage": "inputs_synthetic", "spec_hash": receipt["spec_hash"], "identity": identity, "arm": content_hash(arm), "snapshot": src.snapshot_id, "scope": scope,
             "plan": content_hash(_plan_rows(plan)),
-            "facts": content_hash(_facts_rows(facts_all, stage_ids)), "labels": content_hash(_label_rows([labels])),
+            "facts": content_hash(_facts_rows(survivors, stage_ids)), "labels": content_hash(_label_rows([labels])),
             "production": production["binding"], "tables": {mid: _table_binding(e, ids) for mid, e in ready.items()}, "crush_table_hash": src.crush_table_hash}
     inputs_receipt = _receipt(out / "receipts" / "inputs_synthetic.json", body, "inputs_receipt_changed")  # after both population refusals: a refused run pins nothing
     if replay:  # X7 evidence: the replay verdict is receipted, so a later plain run can read it

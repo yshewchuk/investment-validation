@@ -477,6 +477,17 @@ def test_outer_smoke_after_inner_smoke_with_the_same_ids_passes_the_gate(tmp_pat
     assert (tmp_path / "receipts" / "outer.json").exists()
 
 
+def test_outer_smoke_with_an_inner_event_lacking_a_label_passes_the_gate(tmp_path, outer_stubs, monkeypatch):
+    """E2 (2024, inner window) has no label. Both stages drop it from every table, so the outer preflight still matches inputs_inner.json."""
+    def fetch(columns, ids):
+        out = BASE[BASE["event_id"].isin([str(e) for e in ids])].copy()
+        out.loc[out["event_id"] == "E2", "abs_move"] = np.nan
+        return out
+    summary = _run_both(tmp_path, monkeypatch, sources(fetch=fetch))
+    assert summary["stage"] == "outer"
+    assert (tmp_path / "receipts" / "outer.json").exists()
+
+
 # ---- outer stage: R6 ordering, the warm-up and the pool ---------------------------
 
 def test_outer_reads_a_month_s_labels_only_after_its_rows_are_complete(tmp_path, outer_stubs, monkeypatch):

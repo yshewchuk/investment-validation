@@ -1165,3 +1165,31 @@ def test_every_event_dropped_by_facts_refuses_empty_population(tmp_path, stubs, 
         driver.run(sources(facts=facts), "inner", tmp_path, prereg=OK)
     assert caught.value.details["reason"] == "empty_population"
     assert not (tmp_path / "receipts").exists()
+
+
+# ---- pre-2025 events without a label leave the paired population -----------------
+
+def _labels_blanked(*eids):
+    """A fetch that serves BASE with the label NaN for ``eids``: each keeps its forecast and facts but has no label row."""
+    def fetch(columns, ids):
+        out = BASE[BASE["event_id"].isin(list(ids))].copy()
+        out.loc[out["event_id"].isin(list(eids)), "abs_move"] = np.nan
+        return out
+    return fetch
+
+
+def test_inner_event_without_a_label_leaves_every_model_table_and_the_receipts(tmp_path, stubs, monkeypatch):
+    use_chunks(monkeypatch, [("2023Q2", chunk("E1")), ("2024Q3", chunk("E2"))])
+    summary = driver.run(sources(fetch=_labels_blanked("E2")), "inner", tmp_path, prereg=OK)
+    assert sorted(stubs) == sorted(("tune", mid, ("E1",)) for mid in summary["models"])  # E1 alone is tuned; E2 is in no table
+    inner = tuning.load_receipt(tmp_path / "receipts" / "inner.json")
+    assert inner["events_by_model"] == {mid: 1 for mid in summary["models"]}
+    assert inner["events"] == 1
+
+
+def test_every_inner_event_without_a_label_refuses_empty_population(tmp_path, stubs, monkeypatch):
+    use_chunks(monkeypatch, [("2023Q2", chunk("E1")), ("2024Q3", chunk("E2"))])
+    with pytest.raises(Refusal) as caught:
+        driver.run(sources(fetch=_labels_blanked("E1", "E2")), "inner", tmp_path, prereg=OK)
+    assert caught.value.details["reason"] == "empty_population"
+    assert not (tmp_path / "receipts").exists()
