@@ -259,10 +259,10 @@ def _mark_one(d, mid, event, unit, book, reason):
 
 
 def test_non_trade_reasons_are_the_pinned_literals():
-    assert ev.NON_TRADE_REASONS == frozenset(["entry_not_debit", "entry_quote_unusable", "ladder_too_coarse", "negative_floor", "structure_unresolved", "width_declined"])
+    assert ev.NON_TRADE_REASONS == frozenset(["entry_not_debit", "ladder_too_coarse", "negative_floor", "width_declined"])
 
 
-@pytest.mark.parametrize("reason", ["entry_not_debit", "entry_quote_unusable", "ladder_too_coarse", "negative_floor", "structure_unresolved", "width_declined"])
+@pytest.mark.parametrize("reason", ["entry_not_debit", "ladder_too_coarse", "negative_floor", "width_declined"])
 def test_short_vol_non_trade_keeps_its_event_and_straddle_non_trade_drops_it(reason):
     d = frame_of()
     d["reason"] = "scored"
@@ -271,6 +271,15 @@ def test_short_vol_non_trade_keeps_its_event_and_straddle_non_trade_drops_it(rea
     d = frame_of()
     d["reason"] = "scored"
     _mark_one(d, "M02", "E0", "R_L", "straddle", reason)  # missing fact = undetermined (design section 6)
+    assert "E0" not in set(ev.population(d)["event_id"].astype(str))
+
+
+@pytest.mark.parametrize("reason", ["entry_quote_unusable", "structure_unresolved"])
+def test_short_vol_missing_fact_drops_its_event(reason):
+    """A missing quote or listed strike is a missing fact, not a model-dependent non-trade: the event leaves E."""
+    d = frame_of()
+    d["reason"] = "scored"
+    _mark_one(d, "M02", "E0", "S1", "short_vol", reason)
     assert "E0" not in set(ev.population(d)["event_id"].astype(str))
 
 
