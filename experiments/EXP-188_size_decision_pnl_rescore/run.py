@@ -71,7 +71,7 @@ def main(argv: list[str] | None = None) -> int:
             event_ids = _read_json(args.event_ids) if args.event_ids is not None else None
             if args.event_ids is not None and not (isinstance(event_ids, list) and all(isinstance(e, str) for e in event_ids)): raise fail(_INVALID, "--event-ids must be a JSON array of strings", details={"reason": "event_ids_invalid"})
             if args.stage == "report" and args.event_ids is not None: raise fail(_INVALID, "--event-ids is not supported by the report stage", details={"reason": "event_ids_not_supported"})
-            from experiments import size_pnl_assemble, size_pnl_driver, size_pnl_ladder  # after the gates, so a missing PLANNED row refuses first
+            from experiments import size_pnl_assemble, size_pnl_driver  # after the gates, so a missing PLANNED row refuses first
             module_name, _, func = args.sources.partition(":")
             try:  # no colon gives func "", not an attribute; a bad module raises ImportError
                 factory = getattr(importlib.import_module(module_name), func)
@@ -84,8 +84,7 @@ def main(argv: list[str] | None = None) -> int:
             if sources.expected != args.expected_identities:
                 raise fail(_CONFLICT, "--expected differs from the sources' expected identities", details={"reason": "expected_mismatch"})
             if args.stage == "report":
-                size_pnl_ladder.check_plan(sources.admitted, sources.plan_frame)  # the shared plan admission the scoring path uses; raises a typed refusal
-                summary = size_pnl_assemble.assemble(args.out_dir, sources.plan_frame, expected=sources.expected, spec_hash=receipt["spec_hash"], snapshot=sources.snapshot_id)
+                summary = size_pnl_assemble.assemble(args.out_dir, sources.plan_frame, admitted=sources.admitted, expected=sources.expected, spec_hash=receipt["spec_hash"], snapshot=sources.snapshot_id)
             elif args.stage == "synthetic": summary = size_pnl_driver.run_synthetic(sources, args.out_dir, event_ids=event_ids, replay=args.replay, prereg=lambda: receipt)
             else: summary = size_pnl_driver.run(sources, args.stage, args.out_dir, event_ids=event_ids, prereg=lambda: receipt)
     except (OpsError, Refusal, DataError) as exc:

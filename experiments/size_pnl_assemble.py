@@ -15,7 +15,7 @@ import pandas as pd
 import pyarrow.parquet as pq
 
 from experiments import size_pnl_decisions as decisions, size_pnl_tuning as tuning, size_pnl_report as report, size_pnl_contrast as contrast
-from experiments import size_pnl_driver
+from experiments import size_pnl_driver, size_pnl_ladder
 from experiments import size_pnl_synthetic_eval as synthetic_eval
 from experiments.size_pnl_inputs import PAIRS
 from experiments.size_pnl_shortvol import Refusal
@@ -265,12 +265,22 @@ def _sections(out, outer, inputs, inner, tuned, tickers):
     ]
 
 
-def assemble(out_dir, plan, *, expected=None, spec_hash=None, snapshot=None):
+def assemble(out_dir, plan, *, admitted, expected=None, spec_hash=None, snapshot=None):
     """Write ``out_dir/REPORT.md`` from the outer receipts and decisions.parquet; returns a JSON-safe summary.
     Each of expected, spec_hash and snapshot that is given must equal the matching field of inputs_outer.json.
-    ``plan`` is the plan frame (sources.plan_frame). The ticker map and the plan binding (the receipted plan hash that a
-    full run must match) are both derived from this one frame, so a changed ticker changes the binding and refuses."""
-    if not isinstance(plan, pd.DataFrame) or not {"event_id", "ticker"} <= set(plan.columns):
+    ``plan`` is the plan frame (sources.plan_frame) and ``admitted`` the sources' admitted events; the shared plan
+    admission (size_pnl_ladder.check_plan) runs here, so every caller gets the same refusals as the scoring path.
+    The ticker map and the plan binding (the receipted plan hash that a full run must match) are both derived from
+    this one frame, so a changed ticker changes the binding and refuses."""
+    if not isinstance(out_dir, (str, os.PathLike)):
+        raise _refuse("report_out_dir_invalid", "out_dir must be a path")
+    if not isinstance(plan, pd.DataFrame) or plan.columns.empty:
+        raise _refuse("report_tickers_invalid", "plan must be a DataFrame with columns")
+    try:
+        size_pnl_ladder.check_plan(admitted, plan)  # raises its own typed refusals (OpsError, Refusal); those pass through
+    except (KeyError, TypeError, AttributeError) as exc:
+        raise _refuse("report_tickers_invalid", "the plan frame cannot be admitted") from exc
+    if not {"event_id", "ticker"} <= set(plan.columns):
         raise _refuse("report_tickers_invalid", "plan must be a DataFrame with event_id and ticker columns")
     with _admit("report_tickers_invalid", "the plan's event ids or tickers cannot be read"):
         tickers = dict(zip(plan["event_id"].astype(str), plan["ticker"]))
