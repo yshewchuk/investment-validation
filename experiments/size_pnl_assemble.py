@@ -186,13 +186,12 @@ def assemble(out_dir, tickers):
     shown, classify_in = _contrasts(frame, events, roster, role_model, label_of, outer_models, quarter_of, tick)
     short = frame[frame["book"] == "short_vol"].rename(columns={"arm_or_rule": "arm"})
     long_rows = frame[frame["book"] == "straddle"].rename(columns={"arm_or_rule": "rule"})
-    t2_events = frame[["event_id", "quarter"]].drop_duplicates().assign(in_e=True)
-    t2_note = (f"dropped counts only candidates present in decisions.parquet and is therefore 0 here; run totals from the receipt: "
-               f"common_dropped={outer['common_dropped']}, scoreability_dropped={outer['scoreability_dropped']}.")
+    note = (f"per-quarter candidates and dropped counts are not recorded in decisions.parquet (not_testable); run totals from the receipt: "
+            f"common_dropped={outer['common_dropped']}, scoreability_dropped={outer['scoreability_dropped']}.")
     sections = [
         _run_section(outer),
         report.t1_roster(_roster_rows(roster, outer_models, inputs, inner, label_of)),
-        report.t2_population(t2_events) + "\n\n" + t2_note,
+        report.t2_in_e(frame[["event_id", "quarter"]].drop_duplicates(), note),
         _not_testable("T3 Forecast calibration", "labels_not_in_decisions"),
         report.t4_t5_shortvol(short, n_short, tuning_by_label, arm="as_is"),
         report.t4_t5_shortvol(short, n_short, tuning_by_label, arm="retuned"),

@@ -119,6 +119,16 @@ def t2_population(events):
                     note="dropped = candidates not in E (undetermined under some model).")
 
 
+def t2_in_e(events, note):
+    _require(events, ["quarter", "event_id"], "t2_in_e")
+    rows = []
+    for quarter, g in events.groupby("quarter"):
+        rows.append([quarter, int(g["event_id"].nunique())])
+    if rows:
+        rows.append(["total", sum(r[1] for r in rows)])
+    return _section("T2 Population (events in E)", ["quarter", "in_E"], rows, note=note)
+
+
 def t3_forecast(frame, pairs):
     _require(frame, ["model_id", "pred", "actual"], "t3_forecast")
     _finite(frame["pred"], "t3_forecast", "pred")

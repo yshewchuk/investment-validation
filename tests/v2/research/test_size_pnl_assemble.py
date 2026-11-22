@@ -58,7 +58,8 @@ def build(tmp_path, *, rows_fn=None, pairs=None, dates=None, scope=None):
         "stage": "inputs", "roster": _roster(pairs or PAIRS_OK), "models": {mid: {"status": "ready"} for mid in ROLES}})
     rows = _rows(dates or EVENT_DATES)
     rows = rows_fn(rows) if rows_fn else rows
-    decisions.publish(out, [pd.DataFrame(rows)], {
+    frame = rows if isinstance(rows, pd.DataFrame) else pd.DataFrame(rows)
+    decisions.publish(out, [frame], {
         "stage": "outer", "models": list(ROLES), "scope": scope, "inputs": inputs["content_hash"], "tuning": hashes,
         "c": {mid: 1.0 for mid in ROLES}, "labels": "x", "common_dropped": 0, "scoreability_dropped": 0,
         "ladder_skipped": {}, "ladder": "x"})
@@ -94,6 +95,7 @@ CASES = [
     ("report_ticker_missing", lambda tmp_path: (build(tmp_path), {k: v for k, v in TICKERS.items() if k != "E04"})),
     ("report_nonfinite_pnl", lambda tmp_path: (build(tmp_path, rows_fn=lambda rows: [{**rows[0], "pnl_dollars": float("nan")}, *rows[1:]]), TICKERS)),
     ("report_decisions_columns", lambda tmp_path: (build(tmp_path, rows_fn=lambda rows: [{k: v for k, v in r.items() if k != "rung"} for r in rows]), TICKERS)),
+    ("report_decisions_empty", lambda tmp_path: (build(tmp_path, rows_fn=lambda rows: pd.DataFrame(rows).iloc[0:0]), TICKERS)),
 ]
 
 
@@ -114,6 +116,9 @@ def test_happy_path_writes_every_section_in_order(tmp_path):
     assert "not_testable: native_pool_arm_not_produced" in text
     assert "| H1 | +1 |" in text
     assert "| H1 | H | as_is | ok | 4 | 1 |" in text  # the median-minus-mean P&L is exactly 1 per event
+    assert "### T2 Population (events in E)" in text
+    assert "not recorded in decisions.parquet" in text
+    assert "dropped |" not in text
     assert not list(out.glob("*.tmp"))
 
 
@@ -160,6 +165,50 @@ def test_fewer_than_two_quarters_is_not_testable(tmp_path):
     assemble_mod.assemble(out, TICKERS)
     text = (out / "REPORT.md").read_text(encoding="utf-8")
     assert "| H1 | H | as_is | not_testable: too_few_quarters_or_tickers |" in text
+
+
+def test_single_ticker_across_quarters_is_not_testable(tmp_path):
+    out = build(tmp_path)
+    assemble_mod.assemble(out, {event: "AAA" for event in EVENT_DATES})
+    text = (out / "REPORT.md").read_text(encoding="utf-8")
+    assert "| H1 | H | as_is | not_testable: too_few_quarters_or_tickers |" in text
+    assert "| H1 | H | retuned | not_testable: too_few_quarters_or_tickers |" in text
+
+
+def _section_lines(text, title):
+    lines = text.split("\n")
+    start = next(i for i, line in enumerate(lines) if line.startswith(title))
+    end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith("### ")), len(lines))
+    return lines[start:end]
+
+
+def _cells(line):
+    return [cell.strip() for cell in line.strip().strip("|").split("|")]
+
+
+def test_t8_exact_rung_shares_for_the_fixture(tmp_path):
+    out = build(tmp_path)
+    assemble_mod.assemble(out, TICKERS)
+    lines = _section_lines((out / "REPORT.md").read_text(encoding="utf-8"), "### T8")
+    # Per model: short_vol rung 2 on 2 arms x N events; straddle rung 1 on len(RULES) x N events.
+    n = len(EVENT_DATES)
+    short, long = 2 * n, len(RULES) * n
+    share_rung1, share_rung2 = f"{long / (short + long):.4g}", f"{short / (short + long):.4g}"
+    assert (share_rung1, share_rung2) == ("0.5", "0.5")
+    header = _cells(next(line for line in lines if line.startswith("| model_id")))
+    assert header == ["model_id", "1", "2", "exit_unquoted_worst_case"]
+    for label in ROLES.values():
+        row = _cells(next(line for line in lines if line.startswith(f"| {label} |")))
+        assert row == [label, share_rung1, share_rung2, "-"]
+
+
+def test_shares_exclude_untaken_and_null_rung_rows():
+    frame = pd.DataFrame({
+        "model_id": ["m1", "m1", "m1", "m1", "m1", "m2"],
+        "taken": [True, True, True, False, True, True],
+        "rung": [1.0, 2.0, 2.0, 1.0, np.nan, 1.0],
+    })
+    assert assemble_mod._shares(frame) == {"m1": {"1": 1 / 3, "2": 2 / 3}, "m2": {"1": 1.0}}
 
 
 def test_smoke_scope_is_labelled_in_the_run_section(tmp_path):
