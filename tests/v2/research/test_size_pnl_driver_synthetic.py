@@ -77,7 +77,7 @@ def preregistered_spec(monkeypatch):
 @pytest.fixture(autouse=True)
 def structure_gate_passes(monkeypatch):
     monkeypatch.setattr(driver.shortvol, "score_events", lambda chunk_, events, sims, name, **kw: pd.DataFrame(
-        {"event_id": events["event_id"].to_numpy(), "status": "scored"}))
+        {"event_id": events["event_id"].to_numpy(), "status": "scored", "reason": None}))
 
 
 @pytest.fixture(autouse=True)
@@ -345,7 +345,7 @@ def test_month_scores_and_month_take_arms_and_emit_from(monkeypatch):
     monkeypatch.setattr(driver, "_printed", lambda labels, cutoff: labels)
     monkeypatch.setattr(driver.shortvol, "simulate", lambda chunk_, events, pool, **kw: {e: "sim" for e in events["event_id"]})
     monkeypatch.setattr(driver.shortvol, "score_events", lambda chunk_, events, sims, name, **kw: pd.DataFrame(
-        {"event_id": events["event_id"].to_numpy(), "status": "scored"}))
+        {"event_id": events["event_id"].to_numpy(), "status": "scored", "reason": None}))
     monkeypatch.setattr(driver.straddle, "decide", lambda events, edges, rule, chunk_: pd.DataFrame(
         {"event_date": events["event_date"].to_numpy(), "edge": np.ones(len(events))}))
     events = pd.DataFrame({"event_id": ["E1", "E2"], "event_date": pd.to_datetime(["2023-06-10", "2023-06-20"])})

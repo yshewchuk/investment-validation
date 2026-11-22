@@ -474,7 +474,8 @@ def test_event_undetermined_under_one_model_is_excluded_from_e(tmp_path):
     assert "| H1 | H | as_is | ok | 4 | 1 |" not in text
     assert _section_lines(text, "### T7") == _section_lines(clean_text, "### T7")  # same mean and statistics as without E01
     assert "undetermined_events_excluded: 1" in text
-    assert "events undetermined under some model are excluded from E: 1" in text
+    assert "events with an undetermined burn-in or missing-data row (any book) or an undetermined straddle row are excluded from E: 1" in text
+    assert "short-vol non-trades (e.g. width_declined) stay in E at P&L 0" in text
 
 
 def _e01_index(rows, model_id):
@@ -525,6 +526,29 @@ def test_all_undetermined_decisions_refuse_as_empty(tmp_path):
     assert caught.value.code == CONFLICT
     assert caught.value.details["reason"] == "report_decisions_empty"
     assert not (out / "REPORT.md").exists()
+
+
+def test_load_decisions_keeps_a_short_vol_non_trade_in_e_and_drops_a_burn_in_row(tmp_path):
+    """The optional reason column must reach population(): a short-vol width_declined row keeps its event in E,
+    while a short-vol thin_history row (burn-in, not a non-trade) drops its event."""
+    def make(rows):
+        out = []
+        for row in rows:
+            if row["book"] == "short_vol" and row["model_id"] == "m-hsq" and row["arm_or_rule"] == "as_is":
+                if row["event_id"] == "E01":
+                    row = {**row, "status": "undetermined", "reason": "width_declined", "pnl_dollars": float("nan")}
+                elif row["event_id"] == "E02":
+                    row = {**row, "status": "undetermined", "reason": "thin_history", "pnl_dollars": float("nan")}
+            out.append(row)
+        return out
+
+    out = build(tmp_path, rows_fn=make)
+    outer = tuning.load_receipt(out / "receipts" / "outer.json")
+    raw = assemble_mod._load_decisions(out, outer)
+    assert "reason" in raw.columns
+    in_e = set(assemble_mod.synthetic_eval.population(raw)["event_id"].astype(str))
+    assert "E01" in in_e
+    assert "E02" not in in_e
 
 
 # ---- out_dir, plan admission (check_plan now runs inside assemble) ----

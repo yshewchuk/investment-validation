@@ -664,16 +664,21 @@ def test_changed_ladder_quote_refuses_an_outer_replay(tmp_path, outer_stubs, mon
 
 def _shared_drop_run(tmp_path, monkeypatch):
     """Inner over 2024 Q3, then outer over 2024 Q3 and 2025 Q1 with the candidate's pred_move at 6.0 (the production's 5.0).
-    Returns the decide inputs, recorded in call order."""
+    Returns the decide inputs, recorded in call order; each carries the ``model_id`` of the model that decided it."""
     _stub_tables(monkeypatch, {"prod": EVENTS, "cand": EVENTS}, moves={"cand": 6.0})
     use_chunks(monkeypatch, [("2024Q3", chunk("E2"))])
     driver.run(sources(), "inner", tmp_path, prereg=OK)
-    decide_inputs, passthrough = [], driver.shortvol.decide
+    decide_inputs, passthrough, deciding, real_month = [], driver.shortvol.decide, {}, driver._month
+
+    def recording_month(mid, *args, **kwargs):
+        deciding["mid"] = mid
+        return real_month(mid, *args, **kwargs)
 
     def recording_decide(scored):
-        decide_inputs.append(scored.copy())
+        decide_inputs.append(scored.assign(model_id=deciding["mid"]))
         return passthrough(scored)
 
+    monkeypatch.setattr(driver, "_month", recording_month)
     monkeypatch.setattr(driver.shortvol, "decide", recording_decide)
     use_chunks(monkeypatch, [("2024Q3", chunk("E2")), ("2025Q1", chunk("E3", "E4"))])
     return decide_inputs
@@ -702,7 +707,8 @@ def test_one_model_simulation_failure_drops_the_event_for_every_model(tmp_path, 
     _assert_e3_shared_dropped(tmp_path, decide_inputs)
 
 
-def test_one_model_structure_refusal_drops_the_event_for_every_model(tmp_path, outer_stubs, monkeypatch):
+def test_one_model_structure_refusal_leaves_the_event_in_every_models_history(tmp_path, outer_stubs, monkeypatch):
+    """A non-trade outcome (a structure refusal that is not a missing fact) for one (model, structure, c) is P&L 0, so E3 stays in every model's history and rows."""
     decide_inputs = _shared_drop_run(tmp_path, monkeypatch)
     first = driver.shortvol.NAMES[0]
 
@@ -710,12 +716,23 @@ def test_one_model_structure_refusal_drops_the_event_for_every_model(tmp_path, o
         ids = events["event_id"].astype(str).to_numpy()
         cand = set(events["pred_move"]) == {6.0} and name == first
         status = ["undetermined" if cand and e == "E3" else "scored" for e in ids]
+        reason = ["width_declined" if cand and e == "E3" else "scored" for e in ids]
         return pd.DataFrame({"event_id": ids, "event_date": events["event_date"].to_numpy(), "structure": name,
-                             "status": status, "reason": "scored"})
+                             "status": status, "reason": reason})
 
     monkeypatch.setattr(driver.shortvol, "score_events", refuse_e3_for_cand)
     driver.run(sources(), "outer", tmp_path, prereg=OK)
-    _assert_e3_shared_dropped(tmp_path, decide_inputs)
+    frame = pd.read_parquet(tmp_path / "decisions.parquet")
+    assert set(frame["model_id"]) == {"prod", "cand"}
+    assert set(frame.loc[frame["event_id"].astype(str) == "E3", "model_id"]) == {"prod", "cand"}  # E3 keeps its rows
+    declined = frame[(frame["event_id"].astype(str) == "E3") & (frame["model_id"] == "cand")
+                     & (frame["status"] == "undetermined") & (frame["reason"] == "width_declined")]
+    assert len(declined) >= 1  # the candidate's declined E3 row is published, as the stub sets it
+    # One row per (model, book, arm, structure, event): the arm is part of the key, so the as_is and retuned arms may each hold one
+    assert not declined.duplicated(["model_id", "book", "arm_or_rule", "structure", "event_id"]).any()
+    for mid in ("prod", "cand"):  # E3 is in each model's own decide history
+        assert any("E3" in set(d["event_id"].astype(str)) for d in decide_inputs if set(d["model_id"]) == {mid})
+    assert tuning.load_receipt(tmp_path / "receipts" / "outer.json")["scoreability_dropped"] == 0  # no no-simulation drop
 
 
 def test_oversized_decisions_tmp_refuses_before_outer_json(tmp_path, outer_stubs, monkeypatch):

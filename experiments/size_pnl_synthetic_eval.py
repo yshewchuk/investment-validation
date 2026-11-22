@@ -13,6 +13,10 @@ STOP_IDS = ("X1", "X2", "X6", "X7")  # spec.yaml:129 and design section 5; I1 is
 SHORT, STRADDLE = "short_vol", "straddle"
 SHIFTS, RATIO_S = (0.1, -0.1), 0.6
 TAIL = 100 * (1 - contrast.INTERVAL) / 2
+# Model-dependent geometry/economics outcomes (design sections 4-5): width declined, ladder too coarse, negative floor, entry not a debit.
+# On a short-vol row these are non-trades: P&L 0 and the event stays in E; on a straddle row the event leaves E.
+# Missing quotes or strikes (entry_quote_unusable, structure_unresolved) are missing facts, not non-trades: they stay undetermined and drop the event.
+NON_TRADE_REASONS = frozenset({"width_declined", "ladder_too_coarse", "negative_floor", "entry_not_debit"})
 
 
 def _wide(g):
@@ -98,8 +102,17 @@ def _safe(rows):
 
 
 def population(decisions):
-    """The evaluated population E: the events with no undetermined row under any (model, unit) (design section 4)."""
-    bad = set(decisions.loc[decisions["status"] == "undetermined", "event_id"].astype(str))
+    """The evaluated population E (design sections 4-5): the events with no undetermined row under any (model, unit), except short-vol non-trades.
+    Only a short-vol row (book == SHORT) whose reason is in NON_TRADE_REASONS is exempt: model-dependent geometry/economics
+    outcomes (width declined, ladder too coarse, negative floor, entry not a debit) are non-trades and stay in E with P&L 0.
+    Missing quotes or strikes (entry_quote_unusable, structure_unresolved) are undetermined and drop the event under any book.
+    Every other undetermined row drops its event, including a straddle row with a non-trade reason (missing fact = undetermined,
+    design section 4 (a missing fact is undetermined)), and burn-in or data-missing short-vol rows (unsimulable, thin_history, missing_spread, missing_mcap).
+    A missing "book" or "reason" column exempts nothing."""
+    undetermined = decisions["status"] == "undetermined"
+    if "book" in decisions.columns and "reason" in decisions.columns:
+        undetermined &= ~((decisions["book"] == SHORT) & decisions["reason"].isin(NON_TRADE_REASONS))
+    bad = set(decisions.loc[undetermined, "event_id"].astype(str))
     return decisions[~decisions["event_id"].astype(str).isin(bad)]
 
 
@@ -166,7 +179,8 @@ def evaluate(decisions, meta, tickers, arm, *, replay_equal=None, resamples=cont
             # variance over every scored row of the predictor, including events outside E; NaN checks on E
             if u["book"] == SHORT:  # completeness first: any NaN width fails, before the variance test
                 full_sub = everything[(everything["model_id"] == shr) & (everything["book"] == SHORT) & (everything["arm_or_rule"] == "as_is") & (everything["structure"] == unit)]
-                missing, var = int(sub["width"].isna().sum()), _quarter_var(full_sub)
+                declined_width = (sub["reason"] == "width_declined") if "reason" in sub.columns else pd.Series(False, index=sub.index)  # a declined width is never defined
+                missing, var = int((sub["width"].isna() & ~declined_width).sum()), _quarter_var(full_sub)
                 if missing: x.append(["X6", unit, "fail", f"missing_widths={missing} taken={taken}"])
                 else: x.append(["X6", unit, "pass" if var <= 1e-12 else "fail", f"var={var:.3g} taken={taken}"])
             else:  # straddle edge = pred_move - implied_move: constant pred_move per quarter ranks by implied move alone

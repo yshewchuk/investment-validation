@@ -87,7 +87,7 @@ def bounded(monkeypatch):
 def structure_gate_passes(monkeypatch):
     """The structure gate passes every event (no structure undetermined) unless a test replaces these."""
     monkeypatch.setattr(driver.shortvol, "score_events", lambda chunk_, events, sims, name, **kw: pd.DataFrame(
-        {"event_id": events["event_id"].to_numpy(), "status": "scored"}))
+        {"event_id": events["event_id"].to_numpy(), "status": "scored", "reason": None}))
 
 
 @pytest.fixture(autouse=True)
@@ -343,8 +343,9 @@ def test_an_event_missing_from_one_table_leaves_for_every_model(tmp_path, stubs,
     assert tuning.load_receipt(tmp_path / "receipts" / "inner.json")["common_dropped"] == {"2023Q2": 1}
 
 
-def test_an_event_undetermined_only_off_unity_leaves_the_taken_population_for_every_model(tmp_path, stubs, monkeypatch):
-    """The twin's E2 is undetermined at c != 1.0 only: it is still excluded from every model's taken population."""
+def test_an_event_declined_at_unity_stays_in_every_models_items_as_a_non_trade(tmp_path, stubs, monkeypatch):
+    """The twin's E2 is non-"scored" (width_declined) at c == 1.0 only. A non-trade is P&L 0 for that (model, structure, c):
+    E2 stays in both models' tuned items, and the receipt counts the twin's declines (one per structure) under its own model."""
     real, seen = readers.model_tables, {}
 
     def twinned(bound, roster, admitted, production, **kw):
@@ -354,25 +355,128 @@ def test_an_event_undetermined_only_off_unity_leaves_the_taken_population_for_ev
         seen["twin"].attrs["twin"] = True
         return {mid: tables[mid], "twin": {**tables[mid], "table": seen["twin"]}}
 
-    def sims_of(chunk_, events, table, labels):  # the twin's E2 is marked undetermined
+    def sims_of(chunk_, events, table, labels):  # the twin's E2 is marked; a marked sim is still a simulation
         return {e: ("undetermined" if table.attrs.get("twin") and e == "E2" else "sim") for e in events["event_id"]}
 
-    def scored_of(chunk_, events, sims, name, c, **kw):
+    def scored_of(chunk_, events, sims, name, c, **kw):  # the twin's E2 is declined at c == 1.0 only
+        declined = [sims.get(e) == "undetermined" and c == 1.0 for e in events["event_id"]]
         return pd.DataFrame({"event_id": events["event_id"].to_numpy(),
-                             "status": ["undetermined" if sims.get(e) == "undetermined" and c != 1.0 else "scored"
-                                        for e in events["event_id"]]})
+                             "status": ["undetermined" if d else "scored" for d in declined],
+                             "reason": ["width_declined" if d else None for d in declined]})
 
     monkeypatch.setattr(readers, "model_tables", twinned)
     monkeypatch.setattr(driver, "_sims", sims_of)
     monkeypatch.setattr(driver.shortvol, "score_events", scored_of)
     use_chunks(monkeypatch, [("2023Q2", chunk("E1", "E2"))])
-    driver.run(sources(), "inner", tmp_path, prereg=OK)
-    tuned = [ids for kind, _mid, ids in stubs if kind == "tune"]
-    assert len(tuned) == 2 and all(ids == ("E1",) for ids in tuned)  # E2 is excluded from both taken populations
-    assert not any("E2" in ids for ids in tuned)  # E2 is absent from every model's items, history included
+    summary = driver.run(sources(), "inner", tmp_path, prereg=OK)
+    tuned = {mid: ids for kind, mid, ids in stubs if kind == "tune"}
+    assert set(tuned) == set(summary["models"]) and len(tuned) == 2
+    assert all(ids == ("E1", "E2") for ids in tuned.values())  # E2 stays in every model's items
     inner = tuning.load_receipt(tmp_path / "receipts" / "inner.json")
-    assert inner["common_dropped_structure"] == 1
-    assert inner["common_dropped"] == {"2023Q2": 0}  # the quarter-level count is unchanged
+    primary = next(mid for mid in tuned if mid != "twin")
+    assert inner["non_trades"] == {primary: {}, "twin": {"width_declined": len(driver.shortvol.NAMES)}}  # 7 == len(NAMES)
+    assert inner["missing_facts"] == {primary: {}, "twin": {}}  # a width decline is a non-trade, never a missing fact
+    assert inner["common_dropped"] == {"2023Q2": 0}  # the quarter-level count is unchanged; no model-level drop here
+
+
+def test_an_entry_quote_unusable_event_is_a_missing_fact_and_stays_in_tune_items(tmp_path, stubs, monkeypatch):
+    """The twin's E2 is non-"scored" with reason entry_quote_unusable at c == 1.0 only. That is a missing fact, not a non-trade:
+    it is counted under missing_facts and not under non_trades, and the driver keeps E2 in every model's tuned items."""
+    real, seen = readers.model_tables, {}
+
+    def twinned(bound, roster, admitted, production, **kw):
+        tables = real(bound, roster, admitted, production, **kw)
+        mid = next(iter(tables))
+        seen["twin"] = tables[mid]["table"].copy()
+        seen["twin"].attrs["twin"] = True
+        return {mid: tables[mid], "twin": {**tables[mid], "table": seen["twin"]}}
+
+    def sims_of(chunk_, events, table, labels):  # the twin's E2 is marked; a marked sim is still a simulation
+        return {e: ("undetermined" if table.attrs.get("twin") and e == "E2" else "sim") for e in events["event_id"]}
+
+    def scored_of(chunk_, events, sims, name, c, **kw):  # the twin's E2 has no usable entry quote at c == 1.0 only
+        missing = [sims.get(e) == "undetermined" and c == 1.0 for e in events["event_id"]]
+        return pd.DataFrame({"event_id": events["event_id"].to_numpy(),
+                             "status": ["undetermined" if m else "scored" for m in missing],
+                             "reason": ["entry_quote_unusable" if m else None for m in missing]})
+
+    monkeypatch.setattr(readers, "model_tables", twinned)
+    monkeypatch.setattr(driver, "_sims", sims_of)
+    monkeypatch.setattr(driver.shortvol, "score_events", scored_of)
+    use_chunks(monkeypatch, [("2023Q2", chunk("E1", "E2"))])
+    summary = driver.run(sources(), "inner", tmp_path, prereg=OK)
+    tuned = {mid: ids for kind, mid, ids in stubs if kind == "tune"}
+    assert set(tuned) == set(summary["models"]) and len(tuned) == 2
+    assert all(ids == ("E1", "E2") for ids in tuned.values())  # E2 stays in every model's items
+    inner = tuning.load_receipt(tmp_path / "receipts" / "inner.json")
+    primary = next(mid for mid in tuned if mid != "twin")
+    assert inner["missing_facts"] == {primary: {}, "twin": {"entry_quote_unusable": len(driver.shortvol.NAMES)}}  # 7 == len(NAMES)
+    assert inner["non_trades"] == {primary: {}, "twin": {}}  # the missing fact is not counted as a non-trade
+
+
+def test_a_declined_off_unity_event_stays_in_every_models_items_for_the_real_tune(tmp_path, monkeypatch):
+    """tuning.decide and tuning.score are stubbed. The real ``tuning.tune`` and ``choose_c`` run on 60 events in 2023-2024 across
+    7 structures. Every event is taken at every c (P&L 1.0 each), so trades[1.0] == 7 * 60 == 420 >= MIN_TRADES. The twin declines
+    one event (V07) at c == 1.5 only: a non-trade for that (model, structure, c), so it stays in both items and only the twin's
+    c == 1.5 total drops. This test covers real tune/choose_c and item retention only."""
+    ids = [f"V{i:02d}" for i in range(60)]
+    dates = [pd.Timestamp("2023-01-10") + pd.Timedelta(days=12 * i) for i in range(60)]  # 2023-01 .. 2024-12
+    base = pd.DataFrame([{"event_id": e, "pred_abs_move": 5.0, "pred_iv_crush_30": -12.0, "horizon_sessions": 1, "abs_move": 4.0,
+                          "crush_pct_iv30": -10.0, "available_as_of_date": (d + pd.Timedelta(days=1)).date().isoformat()}
+                         for e, d in zip(ids, dates)])
+    plan = pd.DataFrame({"event_id": ids, "ticker": "T", "event_date": dates, "session": "AMC",
+                         "entry_date": [d - pd.Timedelta(days=1) for d in dates], "exit_date": [d + pd.Timedelta(days=1) for d in dates]})
+    admitted = readers.Admitted({"events": pd.DataFrame({"event_id": ids, "event_date": pd.DatetimeIndex(dates)}), "excluded": {}})
+    facts = pd.DataFrame({"pre_iv30": 40.0, "mcap_usd": 2e10, "implied_move": 5.0}, index=pd.Index(ids, name="event_id"))
+    src = sources(plan_frame=plan, admitted=admitted, facts=lambda want: facts.reindex(list(want)),
+                  fetch=lambda columns, want: base[base["event_id"].isin(list(want))])
+    real, real_tune, declined, spied = readers.model_tables, tuning.tune, "V07", {}
+
+    def twinned(bound, roster, admitted_, production, **kw):
+        tables = real(bound, roster, admitted_, production, **kw)
+        mid = next(iter(tables))
+        twin = tables[mid]["table"].copy()
+        twin.attrs["twin"] = True
+        return {mid: tables[mid], "twin": {**tables[mid], "table": twin}}
+
+    def sims_of(chunk_, events, table, labels):  # the marker rides in the sims, so score_events can see which model asks
+        return {e: ("twin" if table.attrs.get("twin") else "sim") for e in events["event_id"]}
+
+    def scored_of(chunk_, events, sims, name, alpha=0.5, c=1.0):
+        hit = [sims.get(e) == "twin" and e == declined and c == 1.5 for e in events["event_id"]]
+        return pd.DataFrame({"event_id": events["event_id"].to_numpy(),
+                             "status": ["undetermined" if h else "scored" for h in hit],
+                             "reason": ["width_declined" if h else None for h in hit]})
+
+    def spy(items, mid, **kwargs):  # records the event ids the driver hands tune, then runs the real tune
+        spied[mid] = tuple(sorted(str(e) for _c, events, _s in items for e in events["event_id"]))
+        return real_tune(items, mid, **kwargs)
+
+    groups = {}
+    for eid, d in zip(ids, dates):
+        groups.setdefault(f"{d.year}Q{(d.month - 1) // 3 + 1}", []).append(eid)
+    monkeypatch.setattr(readers, "model_tables", twinned)
+    monkeypatch.setattr(driver, "_sims", sims_of)
+    monkeypatch.setattr(driver.shortvol, "score_events", scored_of)  # the non-trade count in _inner
+    monkeypatch.setattr(tuning, "score_events", scored_of)  # tune's own bound names
+    monkeypatch.setattr(tuning, "decide", lambda scored: scored[scored["status"] == "scored"])
+    monkeypatch.setattr(tuning, "score", lambda chunk_, events, mine, name, alpha, c: pd.DataFrame(
+        {"pnl_dollars": np.ones(len(mine))}))
+    monkeypatch.setattr(tuning, "tune", spy)
+    use_chunks(monkeypatch, [(label, chunk(*eids)) for label, eids in sorted(groups.items())])
+    summary = driver.run(src, "inner", tmp_path, prereg=OK)
+    primary = next(mid for mid in summary["models"] if mid != "twin")
+    assert sorted(summary["models"]) == sorted([primary, "twin"])
+    assert spied == {mid: tuple(sorted(ids)) for mid in summary["models"]}  # V07 is in every model's items
+    tuned = {mid: tuning.load_receipt(tmp_path / "receipts" / f"tuning_{mid}.json") for mid in summary["models"]}
+    for body in tuned.values():
+        assert body["skipped"] is False and body["skip_reason"] is None
+        assert body["trades"] == 7 * 60 and body["c"] == 1.0
+    assert tuned["twin"]["totals"]["1.5"] == 7 * 60 - 7  # the declined event's 7 structure rows are non-trades at c == 1.5
+    assert tuned[primary]["totals"]["1.5"] == 7 * 60
+    inner = tuning.load_receipt(tmp_path / "receipts" / "inner.json")
+    assert inner["non_trades"] == {primary: {}, "twin": {}}  # the count is c == 1.0 only, and nothing is declined at 1.0
+    assert inner["events"] == 60 and inner["events_by_model"] == {primary: 60, "twin": 60}
 
 
 def test_inner_refuses_a_changed_plan_window_on_replay(tmp_path, stubs, monkeypatch):

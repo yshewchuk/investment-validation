@@ -233,6 +233,104 @@ def test_population_drops_an_event_undetermined_under_any_model_or_unit():
     assert ev.evaluate(d, META, TICKERS, ARM, resamples=RESAMPLES)["hash"] == ev.evaluate(d[d["event_id"] != "E0"], META, TICKERS, ARM, resamples=RESAMPLES)["hash"]
 
 
+def test_population_without_a_reason_column_drops_every_event_with_an_undetermined_row():
+    d = frame_of()
+    assert "reason" not in d.columns
+    at = (d["model_id"] == "M02") & (d["event_id"] == "E0") & (d["structure"] == "S1")
+    d.loc[at, "status"] = "undetermined"
+    assert "E0" not in set(ev.population(d)["event_id"].astype(str))
+    assert len(ev.population(d)) == len(d) - 8 * 3  # E0's rows under all 8 models and 3 units leave E: nothing is exempt
+
+
+def test_x6_without_a_reason_column_counts_a_nan_width_as_missing():
+    d = frame_of(width=[1, 1, 2, 2, 3, 3, 4, np.nan])
+    assert "reason" not in d.columns
+    out = ev.evaluate(d, META, TICKERS, ARM, resamples=RESAMPLES)
+    assert row(out, "X6", "S1")[2:] == ["fail", "missing_widths=1 taken=8"]  # no declined widths exist, so the NaN is missing
+    assert "X6 S1" in out["stop"]
+
+
+def test_population_keeps_non_trades_and_drops_burn_in_or_missing_data():
+    d = frame_of()
+    d["reason"] = "scored"
+
+    def mark(event, reason):  # the S1 row of the event under M02 only
+        at = (d["model_id"] == "M02") & (d["event_id"] == event) & (d["structure"] == "S1")
+        d.loc[at, "status"] = "undetermined"
+        d.loc[at, "reason"] = reason
+
+    mark("E0", "width_declined")  # A: a non-trade under one model, scored elsewhere: stays in E
+    mark("E1", "thin_history")  # B: burn-in: leaves E
+    mark("E2", "unsimulable")  # C: data missing: leaves E
+    kept = set(ev.population(d)["event_id"].astype(str))
+    assert "E0" in kept and "E1" not in kept and "E2" not in kept
+    assert len(ev.population(d)) == len(d) - 2 * 8 * 3  # B and C leave with their rows under 8 models and 3 units
+
+
+def _mark_one(d, mid, event, unit, book, reason):
+    """Make one (model, event, unit) row undetermined with ``reason``; unit is the short-vol structure or the straddle rule."""
+    at = (d["model_id"] == mid) & (d["event_id"] == event) & (d["book"] == book)
+    at &= (d["structure"] == unit) if book == "short_vol" else (d["arm_or_rule"] == unit)
+    d.loc[at, "status"] = "undetermined"
+    d.loc[at, "reason"] = reason
+
+
+def test_non_trade_reasons_are_the_pinned_literals():
+    assert ev.NON_TRADE_REASONS == frozenset(["entry_not_debit", "ladder_too_coarse", "negative_floor", "width_declined"])
+
+
+@pytest.mark.parametrize("reason", ["entry_not_debit", "ladder_too_coarse", "negative_floor", "width_declined"])
+def test_short_vol_non_trade_keeps_its_event_and_straddle_non_trade_drops_it(reason):
+    d = frame_of()
+    d["reason"] = "scored"
+    _mark_one(d, "M02", "E0", "S1", "short_vol", reason)
+    assert "E0" in set(ev.population(d)["event_id"].astype(str))
+    d = frame_of()
+    d["reason"] = "scored"
+    _mark_one(d, "M02", "E0", "R_L", "straddle", reason)  # missing fact = undetermined (design section 4)
+    assert "E0" not in set(ev.population(d)["event_id"].astype(str))
+
+
+@pytest.mark.parametrize("reason", ["entry_quote_unusable", "structure_unresolved"])
+def test_short_vol_missing_fact_drops_its_event(reason):
+    """A missing quote or listed strike is a missing fact, not a model-dependent non-trade: the event leaves E."""
+    d = frame_of()
+    d["reason"] = "scored"
+    _mark_one(d, "M02", "E0", "S1", "short_vol", reason)
+    assert "E0" not in set(ev.population(d)["event_id"].astype(str))
+
+
+@pytest.mark.parametrize("reason", ["thin_history", "missing_spread", "missing_mcap", "unsimulable"])
+def test_short_vol_burn_in_or_missing_data_drops_its_event(reason):
+    d = frame_of()
+    d["reason"] = "scored"
+    _mark_one(d, "M02", "E0", "S1", "short_vol", reason)
+    assert "E0" not in set(ev.population(d)["event_id"].astype(str))
+
+
+def test_population_without_a_book_column_exempts_nothing():
+    d = frame_of()
+    d["reason"] = "scored"
+    _mark_one(d, "M02", "E0", "S1", "short_vol", "width_declined")
+    assert "E0" not in set(ev.population(d.drop(columns="book"))["event_id"].astype(str))
+
+
+def test_width_declined_row_keeps_its_event_with_zero_pnl_and_no_missing_width():
+    """E0's M06 and SH rows on S1 are width_declined non-trades (P&L NaN, width NaN): E0 stays in E, so the mean over the
+    8 events counts its P&L as 0 (7 taken at 2.0: 14 / 8), and X6 does not count the declined widths as missing."""
+    d = frame_of()
+    d["reason"] = "scored"
+    for mid in ("M06", "SH"):
+        at = (d["model_id"] == mid) & (d["event_id"] == "E0") & (d["structure"] == "S1")
+        d.loc[at, "status"] = "undetermined"
+        d.loc[at, "reason"] = "width_declined"
+        d.loc[at, "pnl_dollars"] = np.nan
+        d.loc[at, "width"] = np.nan
+    out = ev.evaluate(d, META, TICKERS, ARM, resamples=RESAMPLES)
+    assert ["M06", "median_noise", '{"s": 0.6}', "S1", 8, 7, 0, 1.75, 1.8, 0.9, None] in out["means"]
+    assert row(out, "X6", "S1")[2:] == ["pass", "var=0 taken=7"]
+
+
 def test_means_and_contrast_rows_hand_checked():
     out = run()
     assert len(out["means"]) == 8 * 3 and all(len(r) == 11 for r in out["means"])
