@@ -629,3 +629,52 @@ def test_the_real_loop_counts_width_declined_rows_per_model_and_unit(monkeypatch
     assert declined["m2"][driver.shortvol.NAMES[1]] == [0, 5]
     for name in driver.shortvol.NAMES[2:]:
         assert declined["m1"][name] == [0, 6] and declined["m2"][name] == [0, 5]
+
+
+def _real_month_loop(monkeypatch):
+    """The real synthetic month loop on the six inner events, with the shortvol and straddle scorers stood in for as in the tests above."""
+    monkeypatch.setattr(driver.shortvol, "MIN_WINDOW", 1)
+    monkeypatch.setattr(synthetic, "generate", lambda admitted, labels, production, arm: fake_entries(labels, arm))
+    monkeypatch.setattr(driver, "build_pool", lambda table, labels: table)
+    monkeypatch.setattr(driver.shortvol, "simulate", lambda chunk_, events, pool, **kw: {e: "sim" for e in events["event_id"]})
+    monkeypatch.setattr(driver.shortvol, "score_events", _scored)
+    monkeypatch.setattr(driver.shortvol, "score", _marks)
+    monkeypatch.setattr(driver.straddle, "decide", _straddle_decide)
+    monkeypatch.setattr(driver.straddle, "score", _marks)
+    use_chunks(monkeypatch, [("2023Q2", chunk("E1")), ("2023Q3", chunk("E2")), ("2023Q4", chunk("E4")), ("2024Q1", chunk("E5")),
+                             ("2024Q3", chunk("E3")), ("2024Q4", chunk("E6"))])
+
+
+def test_a_synthetic_event_with_a_missing_implied_move_leaves_every_model_table_and_the_decisions(tmp_path, monkeypatch):
+    """E2 has finite pre_iv30 and mcap_usd but a NaN implied_move. It is dropped before scoring: absent from every decisions_synthetic
+    row, from every table binding (the receipt's binding is recomputed for each model, so none is the unrestricted one), and recorded
+    as the only id under facts_missing. Per the receipt, E2 is in no model table: events_no_prediction is 1 and common_dropped is 0."""
+    _real_month_loop(monkeypatch)
+    facts = FACTS3.assign(implied_move=[np.nan if e == "E2" else 5.0 for e in FACTS3.index])
+    src = sources(plan_frame=PLAN3, admitted=ADMITTED3, facts=lambda ids: facts.reindex(list(ids)),
+                  fetch=lambda columns, ids: BASE3[BASE3["event_id"].isin(list(ids))])
+    out = tmp_path / "out"
+    driver.run_synthetic(src, out, prereg=OK)
+    frame = pd.read_parquet(out / "decisions_synthetic.parquet")
+    assert "E2" not in set(frame["event_id"].astype(str))
+    assert src.exclusions["facts_missing"] == {"E2"}
+    inputs = json.loads((out / "receipts" / "inputs_synthetic.json").read_text(encoding="utf-8"))
+    assert len(inputs["tables"]) == 3
+    assert all(binding != content_hash({"model": mid}) for mid, binding in inputs["tables"].items())
+    receipt = json.loads((out / "receipts" / "synthetic.json").read_text(encoding="utf-8"))
+    assert receipt["planned"] == 6 and receipt["events_no_prediction"] == 1 and receipt["common_dropped"] == 0
+
+
+def test_a_synthetic_run_whose_every_event_has_a_missing_fact_refuses_empty_population(tmp_path, monkeypatch):
+    """Every event has a NaN implied_move, so every model table is empty after the facts exclusion. The run refuses empty_population
+    before any inputs receipt or decision is written, and nothing earlier in the run crashes on the empty tables."""
+    _real_month_loop(monkeypatch)
+    facts = FACTS3.assign(implied_move=np.nan)
+    src = sources(plan_frame=PLAN3, admitted=ADMITTED3, facts=lambda ids: facts.reindex(list(ids)),
+                  fetch=lambda columns, ids: BASE3[BASE3["event_id"].isin(list(ids))])
+    with pytest.raises(Refusal) as caught:
+        driver.run_synthetic(src, tmp_path / "out", prereg=OK)
+    assert caught.value.code == CONFLICT and caught.value.details["reason"] == "empty_population"
+    assert src.exclusions["facts_missing"] == set(EVENTS3)
+    assert not (tmp_path / "out" / "receipts" / "inputs_synthetic.json").exists()
+    assert not (tmp_path / "out" / "decisions_synthetic.parquet").exists()

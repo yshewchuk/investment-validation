@@ -629,6 +629,7 @@ def run_synthetic(src, out_dir, *, event_ids=None, replay=False, prereg=size_pnl
     labels = readers.read_labels(src.fetch, src.admitted, start=INNER[0], end=INNER[1], event_ids=planned)
     ready = _ready(synthetic.generate(src.admitted, labels, production, arm), ids)
     if not ready: raise _no_ready()
+    ready = _drop_facts_missing(src, ready, facts_all)  # before any table binding, scoring or receipt, as in the real run
     scope = _scope(ids)
     frames, skipped, ladder_hash, dropped, declined = _synthetic_scores(src, ready, plan, facts_all, labels)
     full = pd.concat(frames, ignore_index=True)
