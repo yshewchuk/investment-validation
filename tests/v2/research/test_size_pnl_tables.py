@@ -365,7 +365,7 @@ def test_label_with_no_returned_row_is_excluded_not_refused(capsys):
     ns, _ = _build(frames)
     out = ns.fetch(LABEL, ["e2"]).set_index("event_id")
     assert np.isnan(out.loc["e2", "abs_move"]) and np.isnan(out.loc["e2", "crush_pct_iv30"]) and out.loc["e2", AVAILABLE] is None
-    assert "[pnl_tables] excluded move_label_missing=1 crush_label_missing=1 of 1" in capsys.readouterr().err
+    assert "[pnl_tables] excluded move_label_missing=1 crush_context_conflict=0 crush_label_missing=0 of 1" in capsys.readouterr().err
 
 
 def test_event_without_move_fragment_is_excluded_and_never_planned(capsys):
@@ -374,7 +374,7 @@ def test_event_without_move_fragment_is_excluded_and_never_planned(capsys):
     assert out.loc["e1", "abs_move"] == 3.0
     assert np.isnan(out.loc["e2", "abs_move"]) and pd.isna(out.loc["e2", AVAILABLE])
     assert [c["events"] for c in read.labels.calls if c["table"] == "computed_moves"] == [["e1"]]
-    assert "[pnl_tables] excluded move_label_missing=1 crush_label_missing=1 of 2" in capsys.readouterr().err
+    assert "[pnl_tables] excluded move_label_missing=1 crush_context_conflict=0 crush_label_missing=0 of 2" in capsys.readouterr().err
 
 
 def test_readers_drop_move_label_missing_event_end_to_end(capsys):
@@ -382,7 +382,7 @@ def test_readers_drop_move_label_missing_event_end_to_end(capsys):
     labels = readers.read_labels(ns.fetch, ADMITTED)
     assert list(labels.index) == ["e1"] and labels.loc["e1", "abs_move"] == 3.0
     err = capsys.readouterr().err
-    assert "[pnl_tables] excluded move_label_missing=1 crush_label_missing=1 of 2" in err
+    assert "[pnl_tables] excluded move_label_missing=1 crush_context_conflict=0 crush_label_missing=0 of 2" in err
     assert "[pnl_readers] labels requested=2 label_missing=1" in err
 
 
@@ -602,22 +602,36 @@ def test_facts_never_reads_labels_or_computed_moves():
     assert read.labels.calls == []
 
 
-def test_facts_missing_feature_panel_row_refused():
-    frames = _frames(feature_panel=pd.DataFrame({"ticker": ["AAA"], "date": [D1], "pre_iv30": [0.3],
-                                                 "mcap_usd": [5e9], "or_implied": [4.0]}))
-    with pytest.raises(OpsError) as exc:
-        _build(frames)[0].facts(["e1", "e2"])
-    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "source_table_missing")
+def test_facts_missing_row_and_nan_fact_return_nan_rows_and_are_recorded(capsys):
+    panel = pd.DataFrame({"ticker": ["AAA", "BBB"], "date": [D1, D2], "pre_iv30": [0.3, np.nan],
+                          "mcap_usd": [5e9, 2e9], "or_implied": [4.0, 5.0]})
+    ns, _ = _build(_frames(earnings_events=E3, feature_panel=panel), admitted=ADMITTED3)
+    out = ns.facts(["e1", "e2", "e3"])  # e2 has a NaN pre_iv30; e3 (CCC) has no panel row
+    assert list(out.index) == ["e1", "e2", "e3"]
+    assert out.loc["e1"].tolist() == [0.3, 5e9, 4.0]
+    assert np.isnan(out.loc["e2", "pre_iv30"]) and out.loc["e2", "mcap_usd"] == 2e9
+    assert out.loc["e3"].isna().all()
+    assert ns.exclusions["facts_missing"] == {"e2", "e3"}
+    assert "[pnl_tables] facts ids=3 facts_missing=2" in capsys.readouterr().err
+
+
+def test_facts_missing_table_or_column_still_refused():
+    no_table = _frames()
+    del no_table["feature_panel"]
+    no_column = _frames(feature_panel=pd.DataFrame({"ticker": ["AAA"], "date": [D1], "pre_iv30": [0.3], "mcap_usd": [5e9]}))
+    for frames in (no_table, no_column):
+        with pytest.raises(OpsError) as exc:
+            _build(frames)[0].facts(["e1"])
+        assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "source_table_missing")
 
 
 @pytest.mark.parametrize("column, value", [
-    ("pre_iv30", np.nan),
     ("mcap_usd", np.inf),
     ("pre_iv30", 3.4028235e38),
     ("mcap_usd", 5e3),
     ("pre_iv30", "abc"),
     ("or_implied", 0.0),
-], ids=["nan", "inf", "flt_max", "mcap_thousands", "non_numeric", "implied_not_positive"])
+], ids=["inf", "flt_max", "mcap_thousands", "non_numeric", "implied_not_positive"])
 def test_facts_invalid_values_refused(column, value):
     frames = _frames()
     frames["feature_panel"] = _set(frames["feature_panel"], column, value)
@@ -663,7 +677,48 @@ def test_plan_frame_uses_calendar_windows_per_session_and_normalises_session():
 def test_plan_frame_drops_bad_session_and_logs_counts(capsys):
     ns, _ = _build(_frames(earnings_events=_events(sessions=("AMC", "XYZ"))))
     assert ns.plan_frame["event_id"].tolist() == ["e1"]
-    assert "[pnl_tables] plan_frame events=2 dropped=1" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert ("[pnl_tables] plan_frame events=2 dropped=1 by reason: date_missing=0 session_missing=0 session_unknown=1 "
+            "no_entry_close=0 no_exit_close=0") in err
+    assert "[pnl_tables] plan_frame session_unknown values: XYZ=1" in err
+    assert ns.exclusions["plan_frame_session_unknown"] == {"e2"}
+
+
+class _ExitCal(_Cal):
+    """Entry closes exist for every day; the exit close is missing for the `missing` days."""
+    def last_pre_print(self, day, session):
+        return day - DAY
+
+    def first_post_print(self, day, session):
+        if day in self.missing:
+            raise KeyError(f"no trading day after {day.date()}")
+        return day + DAY
+
+
+PLAN_REASONS = ("date_missing", "session_missing", "session_unknown", "no_entry_close", "no_exit_close")
+
+
+@pytest.mark.parametrize("events, cal, reason", [
+    (_events().assign(event_date=[pd.NaT, D2]), None, "date_missing"),
+    (_events(sessions=(None, "BMO")), None, "session_missing"),
+    (_events(sessions=("", "BMO")), None, "session_missing"),
+    (_events(sessions=("XYZ", "BMO")), None, "session_unknown"),
+    (_events(), _Cal(missing=[D1]), "no_entry_close"),
+    (_events(), _ExitCal(missing=[D1]), "no_exit_close"),
+], ids=["nat_date", "none_session", "empty_session", "xyz_session", "entry_key_error", "exit_key_error"])
+def test_plan_frame_each_drop_reason_is_counted_exactly_once(events, cal, reason, capsys):
+    ns, _ = _build(_frames(earnings_events=events), cal=cal)
+    assert ns.plan_frame["event_id"].tolist() == ["e2"]
+    counts = {name: int(name == reason) for name in PLAN_REASONS}
+    assert ("[pnl_tables] plan_frame events=2 dropped=1 by reason: "
+            + " ".join(f"{name}={counts[name]}" for name in PLAN_REASONS)) in capsys.readouterr().err
+    assert ns.exclusions[f"plan_frame_{reason}"] == {"e1"}
+
+
+def test_plan_frame_keeps_a_padded_lowercase_session():
+    ns, _ = _build(_frames(earnings_events=_events(sessions=(" amc ", "bmo"))))
+    assert ns.plan_frame["event_id"].tolist() == ["e1", "e2"]
+    assert ns.plan_frame.set_index("event_id").loc["e1", "session"] == "AMC"
 
 
 def test_plan_frame_drops_calendar_key_error():
@@ -863,7 +918,7 @@ def test_crush_snapshot_without_table_refused_before_any_read():
 
 def test_all_usable_counts_zero_missing(capsys):
     _build()
-    assert "[pnl_tables] crush_label_missing=0 of 2" in capsys.readouterr().err
+    assert "[pnl_tables] crush_context_conflict=0 crush_label_missing=0 of 2" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("crush_events", [
@@ -875,14 +930,16 @@ def test_crush_event_mismatch_excludes_the_event(crush_events, capsys):
     out = ns.fetch(LABEL, ["e1"]).set_index("event_id")
     assert np.isnan(out.loc["e1", "crush_pct_iv30"]) and out.loc["e1", AVAILABLE] is None
     assert out.loc["e1", "abs_move"] == 3.0
-    assert "[pnl_tables] crush_label_missing=1 of 2" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "[pnl_tables] crush_context_conflict=1 crush_label_missing=0 of 2" in err
+    assert "[pnl_tables] excluded move_label_missing=0 crush_context_conflict=1 crush_label_missing=0 of 1" in err
 
 
 def test_event_without_iv_crush_fragment_is_excluded_not_imputed(capsys):
     ns, _ = _build(repository=_Repo([("BBB", "2025-02-03")]))
     out = ns.fetch(LABEL, ["e1"]).set_index("event_id")
     assert np.isnan(out.loc["e1", "crush_pct_iv30"]) and out.loc["e1", AVAILABLE] is None
-    assert "[pnl_tables] crush_label_missing=1 of 2" in capsys.readouterr().err
+    assert "[pnl_tables] crush_context_conflict=0 crush_label_missing=1 of 2" in capsys.readouterr().err
 
 
 def test_excluded_crush_event_never_reads_main_snapshot_for_crush():
@@ -906,7 +963,7 @@ def test_crush_context_exclusions_leave_crush_nan_and_never_read_the_main_snapsh
     out = ns.fetch(LABEL, ["e1", "e2"]).set_index("event_id")
     assert np.isnan(out.loc["e1", "crush_pct_iv30"]) and pd.isna(out.loc["e1", AVAILABLE])
     assert out.loc["e1", "abs_move"] == 3.0
-    assert "[pnl_tables] crush_label_missing=1 of 2" in capsys.readouterr().err
+    assert "[pnl_tables] crush_context_conflict=1 crush_label_missing=0 of 2" in capsys.readouterr().err
     assert [c["crush"] for c in read.labels.calls if c["table"] == "iv_crush_targets"] == [True]
 
 
@@ -925,7 +982,7 @@ def test_crush_read_drops_an_unrelated_unadmitted_event_before_it_matters(capsys
     out = ns.fetch(LABEL, ["e1", "e2"]).set_index("event_id")
     assert _crush_kept(read)["event_id"].tolist() == ["e1", "e2"]
     assert out.loc["e1", "crush_pct_iv30"] == -10.0
-    assert "[pnl_tables] crush_label_missing=0 of 2" in capsys.readouterr().err
+    assert "[pnl_tables] crush_context_conflict=0 crush_label_missing=0 of 2" in capsys.readouterr().err
 
 
 def test_duplicate_key_under_an_unadmitted_id_is_kept_and_flags_the_admitted_event(capsys):
@@ -935,7 +992,7 @@ def test_duplicate_key_under_an_unadmitted_id_is_kept_and_flags_the_admitted_eve
     out = ns.fetch(LABEL, ["e1", "e2"]).set_index("event_id")
     assert _crush_kept(read)["event_id"].tolist() == ["e1", "e2", "e9"]
     assert np.isnan(out.loc["e1", "crush_pct_iv30"]) and pd.isna(out.loc["e1", AVAILABLE])
-    assert "[pnl_tables] crush_label_missing=1 of 2" in capsys.readouterr().err
+    assert "[pnl_tables] crush_context_conflict=1 crush_label_missing=0 of 2" in capsys.readouterr().err
 
 
 def test_held_out_looking_unrelated_event_never_appears_in_the_kept_crush_frame():
@@ -964,3 +1021,71 @@ def test_trading_calendar_forwards_max_object_bytes(monkeypatch):
     monkeypatch.setattr(scan, "read_table", fake_read_table)
     trading_calendar_from_snapshot(REPO, SNAP, max_object_bytes=4096)
     assert seen == {"table": "daily_market", "columns": ["date"], "max_object_bytes": 4096}
+
+
+# --- crush reasons: normalised context, exclusive reasons, sum to the labels read drops -------------
+
+@pytest.mark.parametrize("over, conflict", [
+    ({"session": "amc"}, 0),
+    ({"session": " AMC "}, 0),
+    ({"session": "BMO"}, 1),
+    ({"ticker": "ZZZ"}, 1),
+    ({"event_date": D2}, 1),
+    ({"event_date": pd.NaT}, 1),
+], ids=["lower_case", "padded", "session_differs", "ticker_differs", "date_differs", "date_nat"])
+def test_crush_context_matches_only_on_a_genuine_identity_difference(over, conflict, capsys):
+    rows = _events()  # e1 is the row changed; the crush snapshot holds e1 and e2
+    for column, value in over.items():
+        rows.at[0, column] = value
+    _build(crush_frames=_crush_of(_frames(), earnings_events=rows))
+    assert f"[pnl_tables] crush_context_conflict={conflict} crush_label_missing=0 of 2" in capsys.readouterr().err
+
+
+EIGHT = [f"e{i}" for i in range(1, 9)]
+ADMITTED8 = readers.Admitted({"events": pd.DataFrame({"event_id": EIGHT, "event_date": [D1] * 8}), "excluded": {}})
+EIGHT_EVENTS = pd.DataFrame({"event_id": EIGHT, "ticker": [f"T{i}" for i in range(1, 9)], "event_date": [D1] * 8, "session": ["AMC"] * 8})
+EIGHT_MOVES = pd.DataFrame({"ticker": [f"T{i}" for i in range(1, 7)], "event_date": [D1] * 6, "realized_move_pct": [-1.0, 2.0, -3.0, 4.0, -5.0, 6.0],
+                            "skipped": [False] * 6, "available_as_of_date": ["2025-01-03"] * 6})
+# Crush snapshot: e2 differs only by case and padding (matches); e3 is BMO (conflict); e4 has a NaT date (conflict); e8 is absent (conflict).
+EIGHT_CRUSH = pd.DataFrame({"event_id": ["e1", "e2", "e3", "e4", "e5", "e6", "e7"], "ticker": ["T1", "T2", "T3", "T4", "T5", "T6", "T7"],
+                            "event_date": [D1, D1, D1, pd.NaT, D1, D1, D1], "session": ["AMC", "  amc ", "BMO", "AMC", "AMC", "AMC", "AMC"]})
+# T5's target is skipped (a skipped target); T6 has no fragment at all; T7 has a target but no move label (move priority).
+EIGHT_TARGETS = pd.DataFrame({"ticker": ["T1", "T2", "T3", "T4", "T5", "T7"], "event_date": [D1] * 6,
+                              "crush_pct_iv30": [-10.0, -5.0, -7.0, -8.0, -9.0, -3.0], "skipped": [False, False, False, False, True, False],
+                              "available_as_of_date": ["2025-01-03"] * 6})
+
+
+def test_crush_reasons_are_exclusive_and_sum_to_the_labels_read_drops(capsys):
+    crush = _crush_of(_frames(), earnings_events=EIGHT_CRUSH, iv_crush_targets=EIGHT_TARGETS)
+    repo = _Repo(_crush_keys(crush), moves=[(f"T{i}", "2025-01-02") for i in range(1, 7)])  # no move fragment for T7 or T8
+    ns, _ = _build(_frames(earnings_events=EIGHT_EVENTS, computed_moves=EIGHT_MOVES), crush_frames=crush, repository=repo, admitted=ADMITTED8)
+    assert "[pnl_tables] crush_context_conflict=2 crush_label_missing=1 of 8" in capsys.readouterr().err
+    labels = readers.read_labels(ns.fetch, ADMITTED8)
+    assert list(labels.index) == ["e1", "e2"]
+    err = capsys.readouterr().err
+    assert "[pnl_tables] excluded move_label_missing=2 crush_context_conflict=2 crush_label_missing=2 of 8" in err
+    assert "[pnl_readers] labels requested=8 label_missing=6" in err
+    reasons = {name: ns.exclusions[name] for name in ("move_label_missing", "crush_context_conflict", "crush_label_missing")}
+    assert reasons == {"move_label_missing": {"e7", "e8"}, "crush_context_conflict": {"e3", "e4"}, "crush_label_missing": {"e5", "e6"}}
+    assert sum(len(ids) for ids in reasons.values()) == 6 == len(set().union(*reasons.values()))
+
+
+def test_skipped_move_with_failing_crush_context_is_counted_once_under_move_only(capsys):
+    # e1 (AAA, AMC): its move row is skipped (NaN) and its crush context is BMO (a conflict); the move reason takes priority.
+    # e2 (BBB, BMO): keeps both labels, so it survives.
+    frames = _frames(
+        computed_moves=pd.DataFrame({"ticker": ["AAA", "BBB"], "event_date": [D1, D2], "realized_move_pct": [-3.0, 2.0],
+                                     "skipped": [True, False], "available_as_of_date": ["2025-01-03", "2025-02-04"]}),
+        iv_crush_targets=pd.DataFrame({"ticker": ["AAA", "BBB"], "event_date": [D1, D2], "crush_pct_iv30": [-10.0, -20.0],
+                                       "skipped": [False, False], "available_as_of_date": ["2025-01-03", "2025-02-04"]}))
+    crush_events = _events()
+    crush_events.at[0, "session"] = "BMO"
+    ns, _ = _build(frames, crush_frames=_crush_of(frames, earnings_events=crush_events))
+    labels = readers.read_labels(ns.fetch, ADMITTED)
+    assert list(labels.index) == ["e2"]
+    err = capsys.readouterr().err
+    assert "[pnl_tables] excluded move_label_missing=1 crush_context_conflict=0 crush_label_missing=0 of 2" in err
+    assert "[pnl_readers] labels requested=2 label_missing=1" in err
+    reasons = {name: ns.exclusions.get(name, set()) for name in ("move_label_missing", "crush_context_conflict", "crush_label_missing")}
+    assert reasons == {"move_label_missing": {"e1"}, "crush_context_conflict": set(), "crush_label_missing": set()}
+    assert sum(len(ids) for ids in reasons.values()) == 1 == 2 - len(labels)

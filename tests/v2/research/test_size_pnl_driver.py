@@ -1117,3 +1117,51 @@ def test_frames_digest_binds_column_names_and_dtypes():
     assert driver._frames_digest([base]) == driver._frames_digest([base.copy()])
     assert driver._frames_digest([base]) != driver._frames_digest([renamed])
     assert driver._frames_digest([base]) != driver._frames_digest([retyped])
+
+
+# ---- facts exclusion, the population requested from facts, and the funnel -----------
+
+def test_facts_missing_event_leaves_every_table_and_the_facts_receipt(tmp_path, stubs, monkeypatch, capsys):
+    use_chunks(monkeypatch, [("2023Q2", chunk("E1")), ("2024Q3", chunk("E2"))])
+    requested = []
+
+    def facts(ids):
+        requested.append(sorted(ids))
+        return FACTS.reindex(list(ids)).assign(pre_iv30=lambda f: f["pre_iv30"].where(f.index != "E2"))
+
+    src = sources(facts=facts)
+    summary = driver.run(src, "inner", tmp_path, prereg=OK)
+    assert requested == [["E1", "E2"]]
+    assert src.exclusions["facts_missing"] == {"E2"}
+    inputs = tuning.load_receipt(tmp_path / "receipts" / "inputs_inner.json")
+    inner = tuning.load_receipt(tmp_path / "receipts" / "inner.json")
+    assert inner["events_by_model"] == {summary["models"][0]: 1}  # E2 is in no model's events
+    assert inputs["facts"] == content_hash(driver._facts_rows(FACTS.loc[["E1"]], {"E1"}))
+    err = capsys.readouterr().err
+    assert "[pnl_driver] facts_missing=1" in err
+    assert "[pnl_driver] funnel admitted=4 paired=1 excluded: facts_missing=1 common_dropped=0" in err
+
+
+def test_event_excluded_before_facts_is_never_requested(tmp_path, stubs, monkeypatch):
+    use_chunks(monkeypatch, [("2023Q2", chunk("E1")), ("2024Q3", chunk("E2"))])
+    requested = []
+
+    def fetch(columns, ids):  # E2 has no production row, so it leaves the population before any facts request
+        return BASE[BASE["event_id"].isin(list(ids)) & (BASE["event_id"] != "E2")]
+
+    def facts(ids):
+        requested.append(sorted(ids))
+        return FACTS.reindex(list(ids))
+
+    summary = driver.run(sources(fetch=fetch, facts=facts), "inner", tmp_path, prereg=OK)
+    assert requested == [["E1"]]
+    assert summary["models"]
+
+
+def test_every_event_dropped_by_facts_refuses_empty_population(tmp_path, stubs, monkeypatch):
+    use_chunks(monkeypatch, [("2023Q2", chunk("E1")), ("2024Q3", chunk("E2"))])
+    facts = lambda ids: FACTS.reindex(list(ids)).assign(pre_iv30=np.nan)  # noqa: E731
+    with pytest.raises(Refusal) as caught:
+        driver.run(sources(facts=facts), "inner", tmp_path, prereg=OK)
+    assert caught.value.details["reason"] == "empty_population"
+    assert not (tmp_path / "receipts").exists()

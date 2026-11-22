@@ -84,6 +84,18 @@ def _flag(value):
     return False if pd.isna(value) else bool(value)
 
 
+def _windows(cal, day, sess):
+    """(entry, exit, None) for a calendar print window, or (None, None, reason) when the calendar has no entry or exit close."""
+    try:
+        entry = cal.last_pre_print(day, sess)
+    except KeyError:
+        return None, None, "no_entry_close"
+    try:
+        return entry, cal.first_post_print(day, sess), None
+    except KeyError:
+        return None, None, "no_exit_close"
+
+
 def _iso_day(value):
     """A label's availability as ISO date text, or None when null. Dates are cut to their day; any other value passes through for the reader to refuse."""
     if value is None or value is pd.NaT or (isinstance(value, float) and math.isnan(value)):
@@ -161,6 +173,7 @@ def tables(repository, snapshot, admitted, *, crush_snapshot, max_object_bytes, 
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "the crush snapshot has no iv_crush_targets",
                    details={"reason": "crush_snapshot_invalid"})
     crush_table_hash = crush_snapshot.table_versions["iv_crush_targets"].manifest_hash
+    exclusions = {}  # reason -> set of event ids; every path below fills it (counts are distinct ids)
 
     def _call(table, columns, batch_filter, *, key_filter=(), snap=snapshot):
         return _guarded(table, read, repository, snap, table, list(columns), batch_filter=batch_filter,
@@ -212,13 +225,20 @@ def tables(repository, snapshot, admitted, *, crush_snapshot, max_object_bytes, 
     clean = crush_events.loc[~flagged]
     crush_set = set(zip(clean["event_id"], clean["ticker"], clean["event_date"], clean["session"]))
     have = {(r.partition_key, r.time_min) for r in _guarded("iv_crush_targets", repository.fragment_records, crush_snapshot, "iv_crush_targets")}
-    usable_crush = {eid for eid, ticker, day, session in zip(events["event_id"], events["ticker"], events["event_date"], events["session"])
-                    if pd.notna(day) and (eid, ticker, day, _session(session)) in crush_set and (ticker, day.date().isoformat()) in have}
-    print(f"[pnl_tables] crush_label_missing={len(events) - len(usable_crush)} of {len(events)}", file=sys.stderr)
+    crush_ok = {eid for eid, ticker, day, session in zip(events["event_id"], events["ticker"], events["event_date"], events["session"])
+                if pd.notna(day) and (eid, ticker, day, _session(session)) in crush_set}  # the crush context check
+    usable_crush = {eid for eid, ticker, day in zip(events["event_id"], events["ticker"], events["event_date"])
+                    if eid in crush_ok and (ticker, day.date().isoformat()) in have}
     # Move usability: the main snapshot's computed_moves fragment must hold the event's key; the planner never sees the others.
     have_moves = {(r.partition_key, r.time_min) for r in _guarded("computed_moves", repository.fragment_records, snapshot, "computed_moves")}
     usable_moves = {eid for eid, ticker, day in zip(events["event_id"], events["ticker"], events["event_date"])
                     if pd.notna(day) and (ticker, day.date().isoformat()) in have_moves}
+    # Informational only (stderr): these construction counts are never recorded in `exclusions`; read_labels' fetch-level
+    # classification is the sole source of the crush and move reasons. An event with no move label is left out of the crush counts.
+    conflict, label_missing = set(events["event_id"]) - crush_ok, crush_ok - usable_crush
+    move_less = set(events["event_id"]) - usable_moves
+    print(f"[pnl_tables] crush_context_conflict={len(conflict - move_less)} crush_label_missing={len(label_missing - move_less)} of {len(events)}",
+          file=sys.stderr)
 
     def _labels(table, value, want, snap):
         """`value` and the availability (column `available`, ISO text or None) for each requested event from one outcome table:
@@ -255,8 +275,16 @@ def tables(repository, snapshot, admitted, *, crush_snapshot, max_object_bytes, 
             out[AVAILABLE] = [_later(a, b) if ok else None
                               for a, b, ok in zip(out["available_moves"], out["available_crush"], both)]
             out = out[["event_id", "abs_move", "crush_pct_iv30", AVAILABLE]]
-            print(f"[pnl_tables] excluded move_label_missing={int(out['abs_move'].isna().sum())} "
-                  f"crush_label_missing={int(out['crush_pct_iv30'].isna().sum())} of {len(want)}", file=sys.stderr)
+            # One reason per excluded event, by priority: no move label, then a crush context conflict, then no crush label.
+            move_bad = set(out.loc[out["abs_move"].isna(), "event_id"])
+            crush_bad = set(out.loc[out["crush_pct_iv30"].isna(), "event_id"]) - move_bad
+            ctx_bad = crush_bad & conflict
+            lab_bad = crush_bad - ctx_bad
+            exclusions.setdefault("move_label_missing", set()).update(move_bad)
+            exclusions.setdefault("crush_context_conflict", set()).update(ctx_bad)
+            exclusions.setdefault("crush_label_missing", set()).update(lab_bad)
+            print(f"[pnl_tables] excluded move_label_missing={len(move_bad)} crush_context_conflict={len(ctx_bad)} "
+                  f"crush_label_missing={len(lab_bad)} of {len(want)}", file=sys.stderr)
         elif set(columns) == set(PRODUCTION_COLUMNS):
             kind = "production"
             fc = _read("tier4_forecasts", (*_KEY, "pred_abs_move", "pred_iv_crush_30"), keys)
@@ -268,6 +296,7 @@ def tables(repository, snapshot, admitted, *, crush_snapshot, max_object_bytes, 
                 raise _invalid("forecast values must be finite and below the FLT_MAX sentinel")
             # A requested event with no forecast row, or a NaN/None prediction, is excluded (never imputed); the rest are kept.
             out = out[out[["pred_abs_move", "pred_iv_crush_30"]].notna().all(axis=1)]
+            exclusions.setdefault("production_forecast_missing", set()).update(set(want["event_id"]) - set(out["event_id"]))
             print(f"[pnl_tables] excluded production_forecast_missing={len(want) - len(out)} of {len(want)}", file=sys.stderr)
             if len(want) and out.empty:
                 raise fail("EXPERIMENT_IDENTITY_CONFLICT", "no requested event has a production forecast",
@@ -283,36 +312,51 @@ def tables(repository, snapshot, admitted, *, crush_snapshot, max_object_bytes, 
         keys = _keys(want)
         # `or_implied` is the pre-print ORATS quote the panel carries as its own implied move.
         panel = _read("feature_panel", ("ticker", "date", "pre_iv30", "mcap_usd", "or_implied"), keys, "date").rename(columns={"date": "event_date"})
-        if not keys <= _keys(panel):
-            raise _missing("a requested event has no feature_panel row")
         if panel.duplicated(_KEY).any():
             raise _invalid("facts repeat a (ticker, event_date) key")
+        # A requested event with no panel row merges to NaN facts; a NaN fact is never imputed and is excluded by the driver.
         out = want[["event_id", *_KEY]].merge(panel, on=_KEY, how="left").set_index("event_id")
-        vals = pd.DataFrame({"pre_iv30": pd.to_numeric(out["pre_iv30"], errors="coerce"),
-                             "mcap_usd": pd.to_numeric(out["mcap_usd"], errors="coerce"),
-                             "implied_move": pd.to_numeric(out["or_implied"], errors="coerce")}).astype(float)
-        if not _values_ok(vals, allow_nan=False):
+        cols = {"pre_iv30": "pre_iv30", "mcap_usd": "mcap_usd", "implied_move": "or_implied"}
+        vals = pd.DataFrame({name: pd.to_numeric(out[col], errors="coerce") for name, col in cols.items()}).astype(float)
+        if any((vals[name].isna() & out[col].notna()).any() for name, col in cols.items()):
+            raise _invalid("facts values must be numeric")
+        if not _values_ok(vals, allow_nan=True):
             raise _invalid("facts values must be finite and below the FLT_MAX sentinel")
-        if not ((vals["mcap_usd"] >= 1e6) & (vals["pre_iv30"] > 0) & (vals["implied_move"] > 0)).all():
+        if not ((vals["mcap_usd"].dropna() >= 1e6).all() and (vals["pre_iv30"].dropna() > 0).all() and (vals["implied_move"].dropna() > 0).all()):
             raise _invalid("mcap_usd must be USD, not thousands or millions; pre_iv30 and implied_move must be positive")
-        print(f"[pnl_tables] facts ids={len(ids)}", file=sys.stderr)
+        missing = set(vals.index[vals.isna().any(axis=1).to_numpy()])
+        exclusions.setdefault("facts_missing", set()).update(missing)
+        print(f"[pnl_tables] facts ids={len(ids)} facts_missing={len(missing)}", file=sys.stderr)
         return vals
 
     cal = _guarded("the trading calendar", calendar, repository, snapshot, max_object_bytes=max_object_bytes)
-    kept, dropped = [], 0
+    kept, reasons, unknown = [], {"date_missing": [], "session_missing": [], "session_unknown": [], "no_entry_close": [], "no_exit_close": []}, {}
     for eid, ticker, day, session in zip(events["event_id"], events["ticker"], events["event_date"], events["session"]):
-        sess = str(session).upper()
-        if sess not in (AMC, BMO):
-            dropped += 1
-            continue
-        try:
-            kept.append((eid, ticker, day, sess, cal.last_pre_print(day, sess), cal.first_post_print(day, sess)))
-        except KeyError:
-            dropped += 1
-    print(f"[pnl_tables] plan_frame events={len(events)} dropped={dropped}", file=sys.stderr)
+        sess = _session(session)
+        if pd.isna(day):
+            reasons["date_missing"].append(eid)
+        elif pd.isna(session) or sess == "":
+            reasons["session_missing"].append(eid)
+        elif sess not in (AMC, BMO):
+            reasons["session_unknown"].append(eid)
+            unknown[str(session)] = unknown.get(str(session), 0) + 1
+        else:
+            entry, exit_, reason = _windows(cal, day, sess)
+            if reason is None:
+                kept.append((eid, ticker, day, sess, entry, exit_))
+            else:
+                reasons[reason].append(eid)
+    for reason, ids in reasons.items():
+        exclusions.setdefault(f"plan_frame_{reason}", set()).update(ids)
+    dropped = sum(len(ids) for ids in reasons.values())
+    print(f"[pnl_tables] plan_frame events={len(events)} dropped={dropped} by reason: "
+          + " ".join(f"{reason}={len(ids)}" for reason, ids in reasons.items()), file=sys.stderr)
+    if unknown:
+        top = sorted(unknown.items(), key=lambda kv: (-kv[1], kv[0]))[:5]
+        print("[pnl_tables] plan_frame session_unknown values: " + ", ".join(f"{value}={n}" for value, n in top), file=sys.stderr)
     if not kept:
         raise fail("EXPERIMENT_IDENTITY_CONFLICT", "no admitted event has an AMC/BMO session with a calendar print window",
                    details={"reason": "plan_frame_empty"})
     plan_frame = pd.DataFrame(kept, columns=_PLAN_COLUMNS).sort_values("event_id", kind="mergesort").reset_index(drop=True)
     return types.SimpleNamespace(fetch=fetch, facts=facts, plan_frame=plan_frame, table_hash=table_hash,
-                                 crush_table_hash=crush_table_hash)
+                                 crush_table_hash=crush_table_hash, exclusions=exclusions)

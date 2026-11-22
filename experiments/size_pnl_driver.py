@@ -5,7 +5,7 @@ import os
 import resource
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
@@ -54,10 +54,11 @@ class Sources:
     facts: Callable
     snapshot_id: str
     crush_table_hash: str = ""
+    exclusions: dict = field(default_factory=dict)  # reason -> set of event ids, filled by the table providers
 
 
 def check_sources(src):
-    if not (isinstance(src, Sources) and isinstance(src.expected, dict) and {"plan_id", "registration_id", "seal_id", "panel_id"} <= set(src.expected) and isinstance(src.plan_frame, pd.DataFrame)
+    if not (isinstance(src, Sources) and isinstance(src.expected, dict) and isinstance(src.exclusions, dict) and {"plan_id", "registration_id", "seal_id", "panel_id"} <= set(src.expected) and isinstance(src.plan_frame, pd.DataFrame)
             and isinstance(src.plan, dict) and {"plan_id", "horizons"} <= set(src.plan) and isinstance(src.plan.get("anchor"), dict) and "run_id" in src.plan["anchor"]
             and all(isinstance(getattr(src, f), dict) for f in ("selection", "pair_candidates", "blend_ids")) and isinstance(src.snapshot_id, str) and src.snapshot_id.strip() and isinstance(src.crush_table_hash, str) and all(callable(getattr(src, f)) for f in ("read", "admit", "fetch", "load_index", "facts"))):
         raise fail("INVALID_EXPERIMENT_SPEC", "sources must be a Sources with an object `expected`", details={"reason": "sources_invalid"})
@@ -156,8 +157,8 @@ def _scope(ids):
 
 
 def _table_binding(entry, ids):
-    """A ready model's binding. A smoke run (``ids``) binds the restricted rows it consumed, so its receipt cannot pass for a full one."""
-    if ids is None: return entry["binding"]
+    """A ready model's binding. A smoke run (``ids``), or a table restricted by the facts exclusion, binds the rows it consumed, so its receipt cannot pass for a full one."""
+    if ids is None and not entry.get("restricted"): return entry["binding"]
     rows = sorted([str(i), str(d), float(m), float(c)] for i, d, m, c in zip(entry["table"].index, entry["table"]["event_date"], entry["table"]["pred_move"], entry["table"]["pred_crush"]))
     return content_hash({"binding": entry["binding"], "scope": _scope(ids), "rows": rows})
 
@@ -181,9 +182,33 @@ def _exits(src):
     return {str(e): pd.Timestamp(x).date().isoformat() for e, x in zip(src.plan_frame["event_id"], src.plan_frame["exit_date"]) if pd.notna(x)}
 
 
+def _common_ids(ready):
+    """The ids every ready model's table holds: the paired population E (design section 4). Callers guard an empty ``ready``."""
+    return set.intersection(*(set(e["table"].index.astype(str)) for e in ready.values()))
+
+
+def _facts_missing(facts):
+    """Ids (str) with any NaN fact: the events the driver drops from every model table (never imputed)."""
+    return set(facts.index[facts[list(_FACTS)].isna().any(axis=1).to_numpy()].astype(str))
+
+
+def _drop_facts_missing(src, ready, facts_all):
+    """Drops each event with a NaN fact from every ready model's table, before any binding or receipt; records the ids under
+    ``facts_missing`` in ``src.exclusions`` and returns the ready entries."""
+    missing = _facts_missing(facts_all)
+    src.exclusions.setdefault("facts_missing", set()).update(missing)
+    _log(f"facts_missing={len(missing)}")
+    out = {}
+    for mid, e in ready.items():
+        keep = ~e["table"].index.astype(str).isin(missing)
+        # A table that loses no row is passed through as the same object: its binding stays the model_tables binding.
+        out[mid] = e if keep.all() else {**e, "table": e["table"][keep], "restricted": True}
+    return out
+
+
 def _pool_tables(ready):
     """Each ready model's table on the ids every ready model has: one population rule for both stages (design section 4)."""
-    common = set.intersection(*(set(e["table"].index.astype(str)) for e in ready.values()))
+    common = _common_ids(ready)
     return {mid: e["table"][e["table"].index.astype(str).isin(common)] for mid, e in ready.items()}
 
 
@@ -442,9 +467,14 @@ def run(src, stage, out_dir, *, event_ids=None, prereg=size_pnl_prereg.require_p
     inner_window = _plan_window(full, INNER, ids)  # the inner window's plan: the outer gate re-binds its facts and plan
     stage_ids = {str(e) for e in plan["event_id"]}
     wanted = stage_ids | {str(e) for e in inner_window["event_id"]}
+    if ready: wanted &= _common_ids(ready)  # facts only for events that survived the earlier exclusions
     facts_all = _load_facts(src, wanted)  # the only facts call of the run: the stage plan's ids and the inner window's
     _log(f"facts_nan_rows={int(facts_all[list(_FACTS)].isna().any(axis=1).sum())}")
-    facts_rows = _facts_rows(facts_all, stage_ids)
+    ready = _drop_facts_missing(src, ready, facts_all)  # before any table binding or receipt
+    if ready and not _common_ids(ready):
+        raise shortvol.Refusal(_CONFLICT, "no event survives the exclusions", {"reason": "empty_population"})
+    survivors = facts_all[~facts_all.index.astype(str).isin(_facts_missing(facts_all))]  # the facts receipts cover facts-complete events only
+    facts_rows = _facts_rows(survivors, stage_ids)
     labels = readers.read_labels(src.fetch, src.admitted, start=INNER[0], end=OUTER[0], event_ids=ids)  # the pre-2025 labels; outer adds each month's
     scope = _scope(ids)
     body = {"stage": "inputs", "spec_hash": receipt["spec_hash"], "identity": bound_tables["identity"],
@@ -458,11 +488,11 @@ def run(src, stage, out_dir, *, event_ids=None, prereg=size_pnl_prereg.require_p
     if stage == "outer":  # preflight: a refusal here leaves no outer input receipt, and no chunk is built
         if not ready: raise _no_ready()
         _, inner_bound, inner_production = _prepare(src, "inner", ids)  # the inner window's bindings, to match inputs_inner.json
-        inner_ready = _ready(inner_bound["tables"], ids)
+        inner_ready = _drop_facts_missing(src, _ready(inner_bound["tables"], ids), facts_all)
         inner_tables = {mid: _table_binding(e, ids) for mid, e in inner_ready.items()}
         inner_models = _models_body(inner_bound["bound"], inner_ready)  # inner bindings only: the outer year is not in inputs_inner.json
         inner_plan = content_hash(_plan_rows(inner_window))
-        inner_facts = content_hash(_facts_rows(facts_all, {str(e) for e in inner_window["event_id"]}))
+        inner_facts = content_hash(_facts_rows(survivors, {str(e) for e in inner_window["event_id"]}))
         receipts = _outer_gate(out, ready, scope, body, inner_tables, inner_production["binding"], inner_plan, inner_facts, inner_models)
         _unbound_outer(ready)
     inputs_receipt = _receipt(out / "receipts" / f"inputs_{stage}.json", body, "inputs_receipt_changed")
@@ -479,6 +509,8 @@ def run(src, stage, out_dir, *, event_ids=None, prereg=size_pnl_prereg.require_p
     else:
         rows, skipped = _outer(src, out, ready, receipts, plan, ids, facts_all, labels)
         _log(f"stage={stage} end elapsed={time.monotonic() - started:.1f}s rss={_rss_mb():.0f}MB ladder_skipped={skipped}")
+    _log(f"funnel admitted={len(src.admitted['events'])} paired={len(_common_ids(ready) & stage_ids)} excluded: "
+         + " ".join(f"{reason}={len(ids_)}" for reason, ids_ in sorted(src.exclusions.items())) + f" common_dropped={_common_dropped(ready)}")
     return {"stage": stage, "models": sorted(ready), "excluded": excluded, "rows": rows, "ladder_skipped": skipped}
 
 

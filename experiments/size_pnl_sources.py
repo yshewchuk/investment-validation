@@ -252,7 +252,8 @@ def assemble(*, plan, read, selection, expected, panel_id, admit, admitted, snap
         plan=plan, read=read, selection=selection, pair_candidates=pair_candidates, blend_ids=blend_ids,
         expected=expected, panel_id=panel_id, admit=admit, admitted=admitted, fetch=tables.fetch,
         production_hash=production_hash, production_table_hash=tables.table_hash, plan_frame=tables.plan_frame,
-        load_index=load_index, facts=tables.facts, snapshot_id=snapshot_id, crush_table_hash=crush_table_hash)
+        load_index=load_index, facts=tables.facts, snapshot_id=snapshot_id, crush_table_hash=crush_table_hash,
+        exclusions=tables.exclusions)
 
 
 def build_sources(args):

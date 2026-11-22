@@ -740,7 +740,7 @@ def test_bound_snapshot_table_under_cap_scanned_fully(tmp_path, monkeypatch):
 def _fake_tables(table_hash="TH", crush_table_hash="CTH"):
     return types.SimpleNamespace(fetch=lambda columns, ids: None, facts=lambda ids: None,
                                  plan_frame=pd.DataFrame({"event_id": ["e1"]}), table_hash=table_hash,
-                                 crush_table_hash=crush_table_hash)
+                                 crush_table_hash=crush_table_hash, exclusions={})
 
 
 def test_assemble_returns_sources_accepted_by_check_sources():
@@ -755,6 +755,7 @@ def test_assemble_returns_sources_accepted_by_check_sources():
     assert sources.fetch is tables.fetch and sources.facts is tables.facts and sources.plan_frame is tables.plan_frame
     assert sources.production_hash == "PH" and sources.production_table_hash == "TH"
     assert sources.crush_table_hash == "CTH"
+    assert sources.exclusions is tables.exclusions and isinstance(sources.exclusions, dict)
 
 
 # --- (6) build_sources end to end (every store touch monkeypatched) -----------
@@ -852,6 +853,13 @@ def test_build_sources_passes_config_production_hash_as_expected_hash(env, monke
     sources = src.build_sources(env.args)
     assert seen == ["PH-CFG"]
     assert sources.production_hash == "PH-CFG"
+
+
+def test_build_sources_wires_tables_exclusions_by_identity(env, monkeypatch):
+    fake = _fake_tables()
+    monkeypatch.setattr(src.size_pnl_tables, "tables", lambda *args, **kwargs: fake)
+    sources = src.build_sources(env.args)
+    assert sources.exclusions is fake.exclusions and isinstance(sources.exclusions, dict)
 
 
 def test_build_sources_panel_id_checked_by_bind_run(env):
