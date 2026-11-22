@@ -750,7 +750,8 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(readers, "admit_events", lambda repository, snapshot, as_of_month, *, max_object_bytes: readers.Admitted(
         {"events": pd.DataFrame({"event_id": ["e1"], "event_date": pd.to_datetime(["2025-01-02"])}), "excluded": {}}))
     monkeypatch.setattr(ladder, "default_load_index", lambda repository, snapshot: "index")
-    monkeypatch.setattr(src.size_pnl_tables, "tables", lambda repository, snapshot, admitted, *, max_object_bytes: _fake_tables())
+    monkeypatch.setattr(src.size_pnl_tables, "tables",
+                        lambda repository, snapshot, admitted, *, max_object_bytes, expected_hash: _fake_tables())
     args = types.SimpleNamespace(sources_config=config, expected_identities=EXPECTED)
     return types.SimpleNamespace(conn=conn, slots=slots, args=args)
 
@@ -764,6 +765,20 @@ def test_build_sources_success_leaves_connection_open(env, capsys):
     assert sources.production_hash == "h" and sources.production_table_hash == "TH"
     assert env.conn.closed is False
     assert "[pnl_sources] opened snapshot=snap-1 admitted=1" in capsys.readouterr().err
+
+
+def test_build_sources_passes_config_production_hash_as_expected_hash(env, monkeypatch, tmp_path):
+    seen = []
+
+    def fake_tables(repository, snapshot, admitted, *, max_object_bytes, expected_hash):
+        seen.append(expected_hash)
+        return _fake_tables()
+
+    _write(tmp_path / "config.json", {**_cfg(tmp_path), "production_hash": "PH-CFG"})
+    monkeypatch.setattr(src.size_pnl_tables, "tables", fake_tables)
+    sources = src.build_sources(env.args)
+    assert seen == ["PH-CFG"]
+    assert sources.production_hash == "PH-CFG"
 
 
 def test_build_sources_panel_id_checked_by_bind_run(env):

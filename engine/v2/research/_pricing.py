@@ -480,8 +480,12 @@ def trading_calendar(extend_days: int = 400) -> TradingCalendar:
 
 
 def trading_calendar_from_snapshot(repository, snapshot_ref, *,
-                                   extend_days: int = 400) -> TradingCalendar:
+                                   extend_days: int = 400,
+                                   max_object_bytes=None) -> TradingCalendar:
     """The pinned snapshot's own trading-day calendar, from ``daily_market``.
+
+    ``max_object_bytes``, when given, bounds each fragment's decoded bytes in
+    the read (passed through to ``_scan.read_table``); ``None`` changes nothing.
 
     Every date any ticker in ``daily_market`` carries a row for, unioned
     across the whole panel, for exactly this ``snapshot_ref`` — never the
@@ -499,7 +503,8 @@ def trading_calendar_from_snapshot(repository, snapshot_ref, *,
     """
     import engine.v2.research._scan as _scan
 
-    dates = _scan.read_table(repository, snapshot_ref, "daily_market", ["date"])["date"]
+    dates = _scan.read_table(repository, snapshot_ref, "daily_market", ["date"],
+                             max_object_bytes=max_object_bytes)["date"]
     return _calendar_from_dates(dates, extend_days=extend_days)
 
 

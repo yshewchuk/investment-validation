@@ -1,13 +1,16 @@
 """EXP-188 real-store Sources adapter, slice 2: table-backed providers for `size_pnl_driver.Sources` (design section 13).
 
-`tables` reads only the admitted events' keys and returns `fetch` (labels and lead production forecasts), `facts` (sizing inputs), `plan_frame` (print windows) and `table_hash`. Refusals are typed OpsErrors: `source_table_missing` when a table, column, row or event is absent, `source_value_invalid` when a value is unusable. Nothing is imputed here.
+`tables` returns `fetch` (labels and lead production forecasts), `facts` (sizing inputs), `plan_frame` (print windows) and `table_hash`. `earnings_events` is read in full (only admitted ids are kept); every other table is read only for the requested keys' tickers and event years. A session other than AMC/BMO, or an event with no calendar window, is dropped from `plan_frame` and counted on stderr. Refusals are typed OpsErrors with a `reason`: `source_table_missing`, `source_value_invalid`, `plan_frame_empty` or `production_hash_mismatch`. Nothing is imputed here.
 """
+import resource
 import sys
+import time
 import types
 
 import numpy as np
 import pandas as pd
 
+from engine.v2.contracts import KeyPredicate
 from engine.v2.data.errors import DataError
 from engine.v2.ops.errors import fail
 from engine.v2.research._pricing import AMC, BMO, trading_calendar_from_snapshot
@@ -42,35 +45,61 @@ def _keys(frame):
     return set(zip(frame["ticker"], frame["event_date"]))
 
 
-def tables(repository, snapshot, admitted, *, max_object_bytes, read=read_table, calendar=trading_calendar_from_snapshot):
+def _log_read(table, keys, rows, started):
+    rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+    print(f"[pnl_tables] read {table} keys={keys} rows={rows} elapsed={time.monotonic() - started:.1f}s rss={rss:.0f}MiB",
+          file=sys.stderr)
+
+
+def tables(repository, snapshot, admitted, *, max_object_bytes, expected_hash,
+           read=read_table, calendar=trading_calendar_from_snapshot):
     if "tier4_forecasts" not in snapshot.table_versions:
         raise _missing("the forecast table is absent from the snapshot")
     table_hash = snapshot.table_versions["tier4_forecasts"].manifest_hash
+    if table_hash != expected_hash:
+        raise fail("EXPERIMENT_IDENTITY_CONFLICT", "the production table does not match the expected hash",
+                   details={"reason": "production_hash_mismatch"})
 
-    def _call(table, columns, batch_filter):
+    def _call(table, columns, batch_filter, *, partition_keys=None, key_filter=()):
         try:
-            return read(repository, snapshot, table, list(columns), batch_filter=batch_filter, max_object_bytes=max_object_bytes)
+            return read(repository, snapshot, table, list(columns), batch_filter=batch_filter,
+                        partition_keys=partition_keys, key_filter=key_filter, max_object_bytes=max_object_bytes)
         except DataError as exc:
             if exc.code != "CONTRACT_MISMATCH":
                 raise
             raise _missing(f"{table} or a requested column is absent from the snapshot") from None
 
     def _read(table, columns, keys, date_col="event_date"):
-        def keep(batch):
-            norm = _norm(batch, date_col)
-            hit = [key in keys for key in zip(norm["ticker"], norm[date_col])]
-            return batch.loc[np.asarray(hit, dtype=bool)]
-        return _norm(_call(table, columns, keep), date_col)
+        started = time.monotonic()
+        columns = list(columns)
+        if not keys:
+            out = _norm(pd.DataFrame(columns=columns), date_col)
+        else:
+            def keep(batch):
+                norm = _norm(batch, date_col)
+                hit = [key in keys for key in zip(norm["ticker"], norm[date_col])]
+                return batch.loc[np.asarray(hit, dtype=bool)]
+            # tables are partitioned by the year of their event date, so reading the keys' years loses no key
+            partition_keys = sorted({str(day.year) for _, day in keys})
+            key_filter = (KeyPredicate(column="ticker", operator="in", values=tuple(sorted({t for t, _ in keys}))),)
+            out = _norm(_call(table, columns, keep, partition_keys=partition_keys, key_filter=key_filter), date_col)
+        _log_read(table, len(keys), len(out), started)
+        return out
 
     admitted_ids = {str(eid) for eid in admitted["events"]["event_id"]}
+    started = time.monotonic()
     raw = _call("earnings_events", _EVENT_COLUMNS,
-                lambda batch: batch.loc[batch["event_id"].astype(str).isin(admitted_ids).to_numpy()])
+                lambda batch: batch.loc[batch["event_id"].astype(str).isin(admitted_ids).to_numpy()],
+                partition_keys=None, key_filter=())
     events = _norm(raw, "event_date").assign(event_id=lambda f: f["event_id"].astype(str))
+    _log_read("earnings_events", len(admitted_ids), len(events), started)
     dupes = int(events["event_id"].duplicated().sum())
     absent = len(admitted_ids - set(events["event_id"]))
     if dupes or absent:
         print(f"[pnl_tables] earnings_events duplicated={dupes} absent={absent}", file=sys.stderr)
-        raise _missing("admitted events are absent from or repeated in earnings_events")
+        if dupes:
+            raise _invalid("earnings_events repeats an admitted event id")
+        raise _missing("admitted events are absent from earnings_events")
     events = events[_EVENT_COLUMNS]
 
     def fetch(columns, ids):
@@ -119,7 +148,7 @@ def tables(repository, snapshot, admitted, *, max_object_bytes, read=read_table,
         print(f"[pnl_tables] facts ids={len(ids)}", file=sys.stderr)
         return vals
 
-    cal = calendar(repository, snapshot)
+    cal = calendar(repository, snapshot, max_object_bytes=max_object_bytes)
     kept, dropped = [], 0
     for eid, ticker, day, session in zip(events["event_id"], events["ticker"], events["event_date"], events["session"]):
         sess = str(session).upper()
@@ -132,6 +161,7 @@ def tables(repository, snapshot, admitted, *, max_object_bytes, read=read_table,
             dropped += 1
     print(f"[pnl_tables] plan_frame events={len(events)} dropped={dropped}", file=sys.stderr)
     if not kept:
-        raise _missing("no admitted event has an AMC/BMO session with a calendar print window")
+        raise fail("EXPERIMENT_IDENTITY_CONFLICT", "no admitted event has an AMC/BMO session with a calendar print window",
+                   details={"reason": "plan_frame_empty"})
     plan_frame = pd.DataFrame(kept, columns=_PLAN_COLUMNS).sort_values("event_id", kind="mergesort").reset_index(drop=True)
     return types.SimpleNamespace(fetch=fetch, facts=facts, plan_frame=plan_frame, table_hash=table_hash)

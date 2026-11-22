@@ -239,7 +239,8 @@ def build_sources(args):
         month = registration.document["holdouts"]["holdout_as_of_month"]
         admit = size_pnl_inputs.population_admit(repository, snapshot, month, max_object_bytes=MAX_OBJECT_BYTES)
         admitted = size_pnl_readers.admit_events(repository, snapshot, month, max_object_bytes=MAX_OBJECT_BYTES)
-        tables = size_pnl_tables.tables(repository, snapshot, admitted, max_object_bytes=MAX_OBJECT_BYTES)
+        tables = size_pnl_tables.tables(repository, snapshot, admitted, max_object_bytes=MAX_OBJECT_BYTES,
+                                        expected_hash=cfg["production_hash"])
         load_index = size_pnl_ladder.default_load_index(repository, snapshot)
         sources = assemble(plan=plan, read=read, selection=selection, expected=expected, panel_id=panel_id,
                            admit=admit, admitted=admitted, snapshot_id=cfg["snapshot_id"], load_index=load_index,

@@ -1,10 +1,12 @@
 """EXP-188 real-store Sources adapter, slice 2: synthetic in-memory frames only (no store, no network)."""
+import re
 import types
 
 import numpy as np
 import pandas as pd
 import pytest
 
+from engine.v2.contracts import KeyPredicate
 from engine.v2.data.errors import fail as data_fail
 from engine.v2.ops.errors import OpsError
 from experiments import size_pnl_ladder as ladder
@@ -46,17 +48,30 @@ def _frames(**over):
 
 
 class _Read:
-    """In-memory stand-in for read_table: projects columns, applies batch_filter, and records what the caller kept."""
+    """In-memory stand-in for read_table. Records every call's kwargs, applies partition_keys (by year of the date column)
+    and ticker `in` key_filters, then batch_filter, and records what the caller kept."""
     def __init__(self, frames):
         self.frames = frames
         self.kept = []
+        self.calls = []
 
-    def __call__(self, repository, snapshot, table, columns, *, batch_filter=None, max_object_bytes=None):
+    def __call__(self, repository, snapshot, table, columns, *, partition_keys=None, key_filter=(),
+                 batch_filter=None, max_object_bytes=None):
+        self.calls.append({"table": table, "partition_keys": partition_keys, "key_filter": key_filter,
+                           "max_object_bytes": max_object_bytes})
         if table not in self.frames:
             raise data_fail("CONTRACT_MISMATCH", "table is not part of this snapshot", details={"table_name": table})
         if any(c not in self.frames[table].columns for c in columns):
             raise data_fail("CONTRACT_MISMATCH", "a requested column is not in the table", details={"table_name": table})
-        frame = self.frames[table][list(columns)].copy()
+        frame = self.frames[table]
+        if partition_keys is not None:
+            date_col = "date" if "date" in frame.columns else "event_date"
+            years = pd.to_datetime(frame[date_col]).dt.year.astype(str)
+            frame = frame[years.isin(partition_keys).to_numpy()]
+        for pred in key_filter:
+            assert pred.operator == "in" and pred.column == "ticker"
+            frame = frame[frame["ticker"].isin(pred.values).to_numpy()]
+        frame = frame[list(columns)].copy()
         if batch_filter is not None:
             frame = batch_filter(frame)
         self.kept.append((table, frame.copy()))
@@ -79,10 +94,11 @@ class _Cal:
         return day + DAY
 
 
-def _build(frames=None, *, cal=None, admitted=ADMITTED, snapshot=SNAP):
+def _build(frames=None, *, cal=None, admitted=ADMITTED, snapshot=SNAP, expected_hash="H"):
     read = _Read(_frames() if frames is None else frames)
     cal = _Cal() if cal is None else cal
-    ns = tbl.tables(REPO, snapshot, admitted, max_object_bytes=MAX, read=read, calendar=lambda repository, snap: cal)
+    ns = tbl.tables(REPO, snapshot, admitted, max_object_bytes=MAX, expected_hash=expected_hash, read=read,
+                    calendar=lambda repository, snap, *, max_object_bytes: cal)
     return ns, read
 
 
@@ -99,13 +115,34 @@ def test_table_hash_is_forecast_manifest_hash():
     assert ns.table_hash == "H"
 
 
+def test_hash_mismatch_refused_before_any_read():
+    read = _Read(_frames())
+    with pytest.raises(OpsError) as exc:
+        tbl.tables(REPO, SNAP, ADMITTED, max_object_bytes=MAX, expected_hash="OTHER", read=read,
+                   calendar=lambda r, s, *, max_object_bytes: _Cal())
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "production_hash_mismatch")
+    assert read.calls == []
+
+
+def test_calendar_receives_max_object_bytes():
+    seen = {}
+
+    def calendar(repository, snap, *, max_object_bytes):
+        seen["max_object_bytes"] = max_object_bytes
+        return _Cal()
+
+    tbl.tables(REPO, SNAP, ADMITTED, max_object_bytes=MAX, expected_hash="H", read=_Read(_frames()), calendar=calendar)
+    assert seen == {"max_object_bytes": MAX}
+
+
 def test_missing_forecast_table_refused_before_any_read():
     read = _Read(_frames())
     snap = types.SimpleNamespace(table_versions={})
     with pytest.raises(OpsError) as exc:
-        tbl.tables(REPO, snap, ADMITTED, max_object_bytes=MAX, read=read, calendar=lambda r, s: _Cal())
+        tbl.tables(REPO, snap, ADMITTED, max_object_bytes=MAX, expected_hash="H", read=read,
+                   calendar=lambda r, s, *, max_object_bytes: _Cal())
     assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "source_table_missing")
-    assert read.kept == []
+    assert read.kept == [] and read.calls == []
 
 
 def test_missing_earnings_events_refused_at_construction():
@@ -122,7 +159,7 @@ def test_missing_earnings_events_refused_at_construction():
 def test_duplicate_event_id_refused(events):
     with pytest.raises(OpsError) as exc:
         _build(_frames(earnings_events=events))
-    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "source_table_missing")
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "source_value_invalid")
 
 
 def test_admitted_event_absent_from_earnings_events_refused():
@@ -188,6 +225,39 @@ def test_label_read_is_given_only_requested_keys():
         assert set(zip(seen["ticker"], seen["event_date"])) == {("AAA", D1)}
 
 
+def test_label_read_passes_year_partition_and_ticker_filter():
+    frames = _frames(computed_moves=pd.DataFrame({
+        "ticker": ["AAA", "AAA", "BBB"], "event_date": [D1, pd.Timestamp("2024-06-03"), D2],
+        "realized_move_pct": [-3.0, 9.0, 2.0], "implied_move_pct": [4.0, 4.0, 5.0]}))
+    ns, read = _build(frames)
+    out = ns.fetch(LABEL, ["e1"])
+    by_table = {c["table"]: c for c in read.calls if c["table"] in ("computed_moves", "iv_crush_targets")}
+    for table in ("computed_moves", "iv_crush_targets"):
+        assert by_table[table]["partition_keys"] == ["2025"]
+        assert by_table[table]["key_filter"] == (KeyPredicate(column="ticker", operator="in", values=("AAA",)),)
+    seen = [frame for name, frame in read.kept if name == "computed_moves"][-1]
+    assert list(zip(seen["ticker"], seen["event_date"])) == [("AAA", D1)]
+    assert out.set_index("event_id").loc["e1", "abs_move"] == 3.0
+
+
+def test_empty_keys_read_nothing():
+    ns, read = _build()
+    before = len(read.calls)
+    assert ns.fetch(LABEL, []).empty
+    assert ns.fetch(PROD, []).empty
+    assert read.calls[before:] == []
+
+
+READ_LOG = re.compile(r"^\[pnl_tables\] read (\w+) keys=(\d+) rows=(\d+) elapsed=\d+\.\d+s rss=\d+MiB$", re.M)
+
+
+def test_read_progress_logged_once_per_read(capsys):
+    ns, _ = _build()
+    ns.fetch(LABEL, ["e1"])
+    logged = READ_LOG.findall(capsys.readouterr().err)
+    assert logged == [("earnings_events", "2", "2"), ("computed_moves", "1", "1"), ("iv_crush_targets", "1", "1")]
+
+
 def test_unsupported_column_set_refused():
     ns, _ = _build()
     with pytest.raises(OpsError) as exc:
@@ -235,6 +305,25 @@ def test_facts_invalid_values_refused(table, column, value):
     assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "source_value_invalid")
 
 
+@pytest.mark.parametrize("column, value, passes", [
+    ("mcap_usd", 1e6, True),
+    ("mcap_usd", 999999.99, False),
+    ("pre_iv30", 2.9e38, True),
+    ("pre_iv30", 3.0e38, False),
+    ("pre_iv30", 0.0, False),
+], ids=["mcap_exactly_1e6", "mcap_just_below_1e6", "pre_iv30_below_flt_max", "pre_iv30_at_flt_max", "pre_iv30_zero"])
+def test_facts_boundaries(column, value, passes):
+    frames = _frames()
+    frames["feature_panel"] = _set(frames["feature_panel"], column, value)
+    ns, _ = _build(frames)
+    if passes:
+        assert ns.facts(["e1", "e2"]).loc["e1", column] == value
+    else:
+        with pytest.raises(OpsError) as exc:
+            ns.facts(["e1", "e2"])
+        assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "source_value_invalid")
+
+
 # --- plan_frame --------------------------------------------------------------
 
 def test_plan_frame_uses_calendar_windows_per_session_and_normalises_session():
@@ -263,7 +352,7 @@ def test_plan_frame_drops_calendar_key_error():
 def test_plan_frame_refuses_when_no_event_survives():
     with pytest.raises(OpsError) as exc:
         _build(_frames(earnings_events=_events(sessions=("XYZ", "XYZ"))))
-    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "source_table_missing")
+    assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "plan_frame_empty")
 
 
 def test_plan_frame_passes_check_plan():
@@ -286,7 +375,10 @@ def test_contract_mismatch_from_read_maps_to_source_table_missing():
 
 def test_readers_accept_production_and_label_frames():
     ns, _ = _build()
+    assert ns.table_hash == "H"
     prod = readers.read_production(ns.fetch, ADMITTED, expected_hash="H", table_hash=ns.table_hash)
+    assert prod["table_hash"] == "H"
+    assert prod["binding"] == readers._production_binding("H", prod["frame"])
     assert list(prod["frame"].index) == ["e1", "e2"]
     labels = readers.read_labels(ns.fetch, ADMITTED)
     assert list(labels.index) == ["e1"] and labels.loc["e1", "abs_move"] == 3.0
