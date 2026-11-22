@@ -250,6 +250,41 @@ def test_population_keeps_non_trades_and_drops_burn_in_or_missing_data():
     assert len(ev.population(d)) == len(d) - 2 * 8 * 3  # B and C leave with their rows under 8 models and 3 units
 
 
+def _mark_one(d, mid, event, unit, book, reason):
+    """Make one (model, event, unit) row undetermined with ``reason``; unit is the short-vol structure or the straddle rule."""
+    at = (d["model_id"] == mid) & (d["event_id"] == event) & (d["book"] == book)
+    at &= (d["structure"] == unit) if book == "short_vol" else (d["arm_or_rule"] == unit)
+    d.loc[at, "status"] = "undetermined"
+    d.loc[at, "reason"] = reason
+
+
+@pytest.mark.parametrize("reason", sorted(ev.NON_TRADE_REASONS))
+def test_short_vol_non_trade_keeps_its_event_and_straddle_non_trade_drops_it(reason):
+    d = frame_of()
+    d["reason"] = "scored"
+    _mark_one(d, "M02", "E0", "S1", "short_vol", reason)
+    assert "E0" in set(ev.population(d)["event_id"].astype(str))
+    d = frame_of()
+    d["reason"] = "scored"
+    _mark_one(d, "M02", "E0", "R_L", "straddle", reason)  # missing fact = undetermined (design section 6)
+    assert "E0" not in set(ev.population(d)["event_id"].astype(str))
+
+
+@pytest.mark.parametrize("reason", ["thin_history", "missing_spread", "missing_mcap", "unsimulable"])
+def test_short_vol_burn_in_or_missing_data_drops_its_event(reason):
+    d = frame_of()
+    d["reason"] = "scored"
+    _mark_one(d, "M02", "E0", "S1", "short_vol", reason)
+    assert "E0" not in set(ev.population(d)["event_id"].astype(str))
+
+
+def test_population_without_a_book_column_exempts_nothing():
+    d = frame_of()
+    d["reason"] = "scored"
+    _mark_one(d, "M02", "E0", "S1", "short_vol", "width_declined")
+    assert "E0" not in set(ev.population(d.drop(columns="book"))["event_id"].astype(str))
+
+
 def test_width_declined_row_keeps_its_event_with_zero_pnl_and_no_missing_width():
     """E0's M06 and SH rows on S1 are width_declined non-trades (P&L NaN, width NaN): E0 stays in E, so the mean over the
     8 events counts its P&L as 0 (7 taken at 2.0: 14 / 8), and X6 does not count the declined widths as missing."""

@@ -296,7 +296,7 @@ def _inner(src, out, ready, plan, facts_all, labels):
         elapsed = max(time.monotonic() - started, 1e-9)
         _log(f"inner quarter {number}/{quarters} {label} events={len(chunk['event_id'])} " f"rate={kept / elapsed:.2f}/s eta={(quarters - number) * elapsed / number:.0f}s rss={_rss_mb():.0f}MB")
     if pending: raise fail(_CONFLICT, "no simulable sample for the fast-path equivalence check", details={"reason": "equivalence_empty", "models": sorted(pending)})
-    nontrades = {}  # per model at c=1.0: non-"scored" rows by reason; they are P&L 0 and stay in every model's and c's items
+    nontrades = {}  # per model, counts at c=1.0 only: non-"scored" rows by reason (short-vol non-trades are P&L 0 and stay in every model's and c's items)
     for mid in ready:
         rows = pd.concat([shortvol.score_events(chunk, events, sims, name, alpha=tuning.ALPHA, c=1.0) for chunk, events, sims in items[mid] for name in shortvol.NAMES], ignore_index=True)
         missed = rows.loc[rows["status"] != "scored"]
@@ -554,7 +554,7 @@ def _synthetic_scores(src, ready, plan, facts_all, labels):
             start_m, month_frames = period.start_time, []
             at = {mid: events[mid][events[mid]["event_date"].dt.to_period("M") == period] for mid in ready}
             scored = {mid: _month_scores(mid, pools[mid], at[mid], chunk, labels, start_m, state[mid], arms=_AS_IS) for mid in ready}
-            for mid in ready:  # Pass A rows, before the shared mask: a non-"scored" row is a width decline
+            for mid in ready:  # Pass A rows, before the shared mask: a non-"scored" row is counted here only when its reason is width_declined (other reasons are other non-trades)
                 for name in shortvol.NAMES:
                     f = scored[mid][0][("as_is", name)]
                     declined[mid][name][0] += int(((f["status"] != "scored") & (f["reason"] == "width_declined")).sum())

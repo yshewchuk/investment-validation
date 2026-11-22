@@ -116,7 +116,7 @@ def t2_population(events):
     if rows:
         rows.append(["total"] + [sum(r[i] for r in rows) for i in (1, 2, 3)])
     return _section("T2 Population", ["quarter", "candidates", "in_E", "dropped"], rows,
-                    note="dropped = candidates not in E (undetermined under some model).")
+                    note="dropped = candidates not in E: a burn-in or missing-data row (any book) or a straddle undetermined row under some model. Short-vol non-trades (e.g. width_declined) stay in E at P&L 0.")
 
 
 def t2_in_e(events, note):

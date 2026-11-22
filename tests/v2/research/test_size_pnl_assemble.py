@@ -474,7 +474,8 @@ def test_event_undetermined_under_one_model_is_excluded_from_e(tmp_path):
     assert "| H1 | H | as_is | ok | 4 | 1 |" not in text
     assert _section_lines(text, "### T7") == _section_lines(clean_text, "### T7")  # same mean and statistics as without E01
     assert "undetermined_events_excluded: 1" in text
-    assert "events undetermined under some model are excluded from E: 1" in text
+    assert "events with an undetermined burn-in or missing-data row (any book) or an undetermined straddle row are excluded from E: 1" in text
+    assert "short-vol non-trades (e.g. width_declined) stay in E at P&L 0" in text
 
 
 def _e01_index(rows, model_id):

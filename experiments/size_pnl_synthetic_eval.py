@@ -13,7 +13,7 @@ STOP_IDS = ("X1", "X2", "X6", "X7")  # spec.yaml:129 and design section 5; I1 is
 SHORT, STRADDLE = "short_vol", "straddle"
 SHIFTS, RATIO_S = (0.1, -0.1), 0.6
 TAIL = 100 * (1 - contrast.INTERVAL) / 2
-NON_TRADE_REASONS = frozenset({"width_declined", "ladder_too_coarse", "structure_unresolved", "negative_floor", "entry_quote_unusable", "entry_not_debit"})  # score_events non-trades (design sections 4-5): P&L 0, the event stays in E
+NON_TRADE_REASONS = frozenset({"width_declined", "ladder_too_coarse", "structure_unresolved", "negative_floor", "entry_quote_unusable", "entry_not_debit"})  # score_events non-trades (design sections 4-5): on a short-vol row, P&L 0 and the event stays in E; on a straddle row the event leaves E
 
 
 def _wide(g):
@@ -99,13 +99,14 @@ def _safe(rows):
 
 
 def population(decisions):
-    """The evaluated population E (design sections 4-5): the events with no undetermined row under any (model, unit) whose
-    reason is not a NON_TRADE_REASONS non-trade. Non-trades (e.g. width_declined) stay in E with P&L 0; burn-in and
-    data-missing rows (unsimulable, thin_history, missing_spread, missing_mcap, straddle undetermined) drop the event.
-    A missing "reason" column exempts nothing."""
+    """The evaluated population E (design sections 4-5): the events with no undetermined row under any (model, unit).
+    Only a short-vol row (book == SHORT) whose reason is in NON_TRADE_REASONS is exempt: a short-vol non-trade (e.g.
+    width_declined) stays in E with P&L 0. Every other undetermined row drops its event, including a straddle row with
+    a non-trade reason (missing fact = undetermined, design section 6), and burn-in or data-missing short-vol rows
+    (unsimulable, thin_history, missing_spread, missing_mcap). A missing "book" or "reason" column exempts nothing."""
     undetermined = decisions["status"] == "undetermined"
-    reason = decisions.get("reason")
-    if reason is not None: undetermined &= ~reason.isin(NON_TRADE_REASONS)
+    if "book" in decisions.columns and "reason" in decisions.columns:
+        undetermined &= ~((decisions["book"] == SHORT) & decisions["reason"].isin(NON_TRADE_REASONS))
     bad = set(decisions.loc[undetermined, "event_id"].astype(str))
     return decisions[~decisions["event_id"].astype(str).isin(bad)]
 

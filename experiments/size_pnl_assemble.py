@@ -224,14 +224,14 @@ def _sections(out, outer, inputs, inner, tuned, tickers):
     roster = inputs["roster"]
     label_of = {m["model_id"]: "+".join(m["roles"]) for m in roster["models"]}
     outer_models = set(outer["models"])
-    # Checked on the raw rows, before population drops every event that has an undetermined row: a bad row refuses, it is never skipped.
+    # Checked on the raw rows, before population drops the events with an undetermined row that leaves E: a bad row refuses, it is never skipped.
     if not set(raw["event_id"]) <= set(tick):
         raise _refuse("report_ticker_missing", "an event in decisions.parquet has no ticker")
     if not np.isfinite(raw.loc[raw["status"] == "taken", "pnl_dollars"].to_numpy(dtype=float)).all():
         raise _refuse("report_nonfinite_pnl", "a taken row has a non-finite pnl_dollars")
     if (set(raw["model_id"]) | outer_models) - set(label_of):
         raise _refuse("report_receipt_chain_mismatch", "a model in the decisions has no roster entry")
-    frame = synthetic_eval.population(raw)  # E: the events with no undetermined row under any model, book or rule
+    frame = synthetic_eval.population(raw)  # E: no undetermined row that leaves E under any model; short-vol non-trades stay in E at P&L 0
     if frame.empty:
         raise _refuse("report_decisions_empty", "no event in decisions.parquet is determined under every model")
     undetermined_events = raw["event_id"].nunique() - frame["event_id"].nunique()
@@ -249,7 +249,8 @@ def _sections(out, outer, inputs, inner, tuned, tickers):
     shown, classify_in = _contrasts(frame, events, roster, role_model, label_of, outer_models, quarter_of, tick)
     short = frame[frame["book"] == "short_vol"].rename(columns={"arm_or_rule": "arm"})
     long_rows = frame[frame["book"] == "straddle"].rename(columns={"arm_or_rule": "rule"})
-    note = (f"events undetermined under some model are excluded from E: {undetermined_events}. "
+    note = (f"events with an undetermined burn-in or missing-data row (any book) or an undetermined straddle row are excluded from E: {undetermined_events}. "
+            f"short-vol non-trades (e.g. width_declined) stay in E at P&L 0. "
             f"per-quarter candidates and dropped counts are not recorded in decisions.parquet (not_testable); run totals from the receipt: "
             f"common_dropped={outer['common_dropped']}, scoreability_dropped={outer['scoreability_dropped']}.")
     verdicts = report.t10_verdicts(classify_in)
