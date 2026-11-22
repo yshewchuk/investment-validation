@@ -249,3 +249,5 @@ A synthetic-predictor calibration arm (controls and power; never part of the ros
 **Report.** `REPORT.md` repeats the short-vol P&L tables (T4/T5, both arms), the straddle table (T6), the T7 contrasts and the T10 verdict computation on `pnl_dollars_mid`, each titled "Sensitivity (Amendment 1), not the pre-registered verdict". A `decisions.parquet` without the mid columns omits these sections with a not_testable note.
 
 **Receipts.** Inner receipts keep their content apart from the spec hash binding: the spec change necessarily changes `spec_hash`, which the inputs receipts bind, so the amended spec needs a new PLANNED row and a new run. The outer receipt's `decisions_sha256` covers the added columns.
+
+**Registration.** The spec declares the amendment in a top-level `amendments` list. The prereg guard then expects exactly one more PLANNED row than there are amendments, and the last must equal the spec hash (`--check` otherwise refuses `planned_row_ambiguous` or `spec_hash_mismatch`). `--register` appends the amendment's PLANNED row after the original one; the original row is kept.

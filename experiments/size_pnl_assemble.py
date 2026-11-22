@@ -207,7 +207,7 @@ def _load_decisions(out, outer):
         frame = parquet.read(columns=read_columns).to_pandas()
     if frame.empty:
         raise _refuse("report_decisions_empty", "decisions.parquet holds no rows")
-    with _admit("report_decisions_invalid", "decisions.parquet has a non-date event_date or a non-numeric pnl_dollars"):
+    with _admit("report_decisions_invalid", "decisions.parquet has a non-date event_date or a non-numeric pnl_dollars or pnl_dollars_mid"):
         frame = frame.assign(event_id=frame["event_id"].astype(str), event_date=pd.to_datetime(frame["event_date"]),
                              pnl_dollars=pd.to_numeric(frame["pnl_dollars"], errors="raise"))
         if mid: frame = frame.assign(pnl_dollars_mid=pd.to_numeric(frame["pnl_dollars_mid"], errors="raise"))

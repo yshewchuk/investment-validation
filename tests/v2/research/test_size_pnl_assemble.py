@@ -679,8 +679,8 @@ def test_primary_sections_do_not_depend_on_the_mid_column(tmp_path):
     assert plain_row == "| H-sq | 1 | 4 | 100.00 | 25 | 1 |"
     shifted_row = next(line for line in _section_lines(texts["shifted"], sens) if line.startswith("| H-sq |"))
     assert shifted_row == "| H-sq | 1 | 4 | 2100.00 | 525 | 1 |"
-    # No verdict flip is asserted: a uniform shift leaves every contrast unchanged (each is a difference of paired
-    # values that both move by 500), so under this fixture the sensitivity verdicts cannot differ from the primary ones.
+    # No verdict flip is asserted: a uniform shift cannot change paired contrasts (each is a difference of paired
+    # values that both move by 500), so under this fixture the sensitivity verdicts are not expected to differ from the primary ones.
 
 
 def test_decisions_without_the_mid_column_get_a_not_testable_sensitivity_note(tmp_path):
