@@ -188,8 +188,9 @@ def _pool_tables(ready):
 
 
 def _label_rows(frames):
-    """Label rows [event_id, abs_move, crush_pct_iv30] of the label frames, sorted by event_id (the receipts' shape)."""
-    return sorted([[str(e), float(a), float(c)] for f in frames for e, a, c in zip(f.index, f["abs_move"], f["crush_pct_iv30"])], key=lambda r: r[0])
+    """Label rows [event_id, abs_move, crush_pct_iv30, available] of the label frames, sorted by event_id (the receipts' shape).
+    ``available`` is the frame's ISO availability text: pool membership depends on it, so a changed date changes the receipt."""
+    return sorted([[str(e), float(a), float(c), str(v)] for f in frames for e, a, c, v in zip(f.index, f["abs_move"], f["crush_pct_iv30"], f["available"])], key=lambda r: r[0])
 
 
 def _common_dropped(ready):

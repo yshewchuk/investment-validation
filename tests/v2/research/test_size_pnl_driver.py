@@ -633,6 +633,34 @@ def test_changed_label_value_refuses_an_inner_replay(tmp_path, stubs, monkeypatc
     assert caught.value.details["reason"] == "inputs_receipt_changed"
 
 
+def test_label_rows_carry_availability_so_a_changed_date_changes_the_row():
+    frame = pd.DataFrame({"abs_move": [4.0], "crush_pct_iv30": [-10.0], "available": ["2024-08-08"]},
+                         index=pd.Index(["E2"], name="event_id"))
+    moved = frame.assign(available=["2024-09-01"])
+    assert driver._label_rows([frame]) == [["E2", 4.0, -10.0, "2024-08-08"]]
+    assert driver._label_rows([frame]) != driver._label_rows([moved])
+    assert content_hash(driver._label_rows([frame])) != content_hash(driver._label_rows([moved]))
+
+
+def _inner_labels_receipt(out, monkeypatch, e2_available):
+    """Inner run over E1 (2023 Q2) and E2 (2024 Q3); only E2's native ``available_as_of_date`` differs between calls."""
+    base = BASE.copy()
+    base.loc[base["event_id"] == "E2", "available_as_of_date"] = e2_available
+
+    def fetch(columns, ids):
+        return base[base["event_id"].isin(list(ids))].copy()
+
+    use_chunks(monkeypatch, [("2023Q2", chunk("E1")), ("2024Q3", chunk("E2"))])
+    driver.run(sources(fetch=fetch), "inner", out, prereg=OK)
+    return tuning.load_receipt(out / "receipts" / "inputs_inner.json")["labels"]
+
+
+def test_changed_label_availability_changes_the_inputs_labels_receipt(tmp_path, stubs, monkeypatch):
+    first = _inner_labels_receipt(tmp_path / "a", monkeypatch, "2024-08-08")
+    second = _inner_labels_receipt(tmp_path / "b", monkeypatch, "2024-09-01")
+    assert first != second
+
+
 def test_changed_ladder_quote_refuses_an_inner_replay(tmp_path, stubs, monkeypatch):
     """The ladder digest binds the consumed quotes: one quote value changed under the same snapshot and plan is refused."""
     def quoted(bid):

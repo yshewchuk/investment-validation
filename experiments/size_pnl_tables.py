@@ -98,15 +98,25 @@ def _log_read(table, keys, rows, started):
           file=sys.stderr)
 
 
+def _cap(value):
+    """The read byte cap: a positive int. A missing cap would reach the store as None, so it is refused before any read."""
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise fail("INVALID_EXPERIMENT_SPEC", "max_object_bytes must be a positive integer", details={"reason": "max_object_bytes_invalid"})
+    return value
+
+
 def label_rows(repository, snapshot, table, columns, want, *, max_object_bytes):
     """Rows of an outcome table for the requested events only, one event-isolated fragment per event.
 
     `want` holds event_id, ticker and event_date (Timestamp) for the requested events; the plan refuses unless each has one fragment.
     """
+    _cap(max_object_bytes)
     started = time.monotonic()
     contract = repository.table_contract(snapshot, table)
     plan = list(plan_event_targets(repository, snapshot, want, contract, columns=tuple(columns)))
     total, rows = len(plan), []
+    print(f"[pnl_tables] scan {table} start events={total} rss={resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024:.0f}MiB",
+          file=sys.stderr)
     for done, (_, request, _) in enumerate(plan, start=1):
         for batch in repository.scan(request, table_name=table, max_object_bytes=max_object_bytes):
             rows.extend(batch.to_pylist())
@@ -122,6 +132,7 @@ def label_rows(repository, snapshot, table, columns, want, *, max_object_bytes):
 
 def tables(repository, snapshot, admitted, *, crush_snapshot, max_object_bytes, expected_hash,
            read=read_table, calendar=trading_calendar_from_snapshot, label_rows=label_rows):
+    _cap(max_object_bytes)
     if "tier4_forecasts" not in snapshot.table_versions:
         raise _missing("the forecast table is absent from the snapshot")
     table_hash = snapshot.table_versions["tier4_forecasts"].manifest_hash

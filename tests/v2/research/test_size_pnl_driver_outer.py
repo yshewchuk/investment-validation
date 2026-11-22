@@ -130,7 +130,7 @@ def test_outer_receipt_binds_what_it_consumed(tmp_path, outer_stubs, monkeypatch
     tuned = {mid: tuning.load_receipt(tmp_path / "receipts" / f"tuning_{mid}.json") for mid in outer["models"]}
     assert outer["tuning"] == {mid: t["content_hash"] for mid, t in tuned.items()}
     assert outer["c"] == {mid: t["c"] for mid, t in tuned.items()}
-    assert outer["labels"] == content_hash([["E3", 4.0, -10.0], ["E4", 4.0, -10.0]])  # the 2025 month reads, in order
+    assert outer["labels"] == content_hash([["E3", 4.0, -10.0, "2025-01-16"], ["E4", 4.0, -10.0, "2025-02-13"]])  # the 2025 month reads, in order
     assert outer["common_dropped"] == 0
 
 

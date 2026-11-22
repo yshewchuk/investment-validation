@@ -674,8 +674,41 @@ def test_label_rows_prints_one_scan_line_per_2000_planned_events(monkeypatch, ca
     rows = tbl.label_rows(_PlanRepo(), SNAP, "computed_moves", ["ticker", "event_date"], want, max_object_bytes=MAX)
     assert len(rows) == n
     lines = [line for line in capsys.readouterr().err.splitlines() if line.startswith("[pnl_tables] scan ")]
-    assert len(lines) == 1
-    assert re.fullmatch(r"\[pnl_tables\] scan computed_moves 2000/2001 events, \d+\.\d+/s, ETA \d+s", lines[0])
+    assert len(lines) == 2  # the stage-start line, then one progress line
+    assert re.fullmatch(r"\[pnl_tables\] scan computed_moves start events=2001 rss=\d+MiB", lines[0])
+    assert re.fullmatch(r"\[pnl_tables\] scan computed_moves 2000/2001 events, \d+\.\d+/s, ETA \d+s", lines[1])
+
+
+@pytest.mark.parametrize("bad", [None, 0, True, 1.0], ids=["none", "zero", "bool", "float"])
+def test_tables_refuses_an_invalid_cap_before_any_read(bad):
+    read, labels = _Read(_frames()), _Labels(_frames())
+    with pytest.raises(OpsError) as exc:
+        tbl.tables(REPO, SNAP, ADMITTED, crush_snapshot=CRUSH, max_object_bytes=bad, expected_hash=HASH, read=read,
+                   label_rows=labels, calendar=lambda r, s, *, max_object_bytes: _Cal())
+    assert _refusal(exc) == ("INVALID_EXPERIMENT_SPEC", "max_object_bytes_invalid")
+    assert read.calls == [] and labels.calls == []
+
+
+@pytest.mark.parametrize("bad", [None, 0, True, 1.0], ids=["none", "zero", "bool", "float"])
+def test_label_rows_refuses_an_invalid_cap_before_any_plan_or_scan(monkeypatch, bad):
+    planned = []
+    monkeypatch.setattr(tbl, "plan_event_targets", lambda *a, **k: planned.append(True) or [])
+    repo = _PlanRepo()
+    want = pd.DataFrame({"event_id": ["e1"], "ticker": ["AAA"], "event_date": [D1]})
+    with pytest.raises(OpsError) as exc:
+        tbl.label_rows(repo, SNAP, "computed_moves", ["ticker", "event_date"], want, max_object_bytes=bad)
+    assert _refusal(exc) == ("INVALID_EXPERIMENT_SPEC", "max_object_bytes_invalid")
+    assert planned == [] and repo.scans == []
+
+
+@pytest.mark.parametrize("ids", [[], ["nope"]], ids=["no_ids", "no_matching_rows"])
+def test_empty_label_and_production_fetch_keep_the_expected_columns(ids):
+    ns, _ = _build()
+    labels, prod = ns.fetch(LABEL, ids), ns.fetch(PROD, ids)
+    assert list(labels.columns) == ["event_id", "abs_move", "crush_pct_iv30", AVAILABLE]
+    assert list(prod.columns) == ["event_id", "pred_abs_move", "pred_iv_crush_30", "horizon_sessions"]
+    assert len(labels) == 0 and len(prod) == 0
+    assert labels["abs_move"].dtype == float and labels["crush_pct_iv30"].dtype == float
 
 
 # --- two snapshots: iv_crush_targets comes only from the crush snapshot --------------
