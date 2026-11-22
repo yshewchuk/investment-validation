@@ -332,14 +332,49 @@ def test_bound_snapshot_fragment_json_over_evidence_cap_refused(tmp_path, monkey
     conn.close()
 
 
-def test_bound_snapshot_counts_utf8_bytes_not_characters(tmp_path, monkeypatch):
+@pytest.mark.parametrize("fast", [
+    pytest.param(True, marks=pytest.mark.skipif(sqlite3.sqlite_version_info < (3, 43, 0), reason="OCTET_LENGTH needs SQLite 3.43+")),
+    False,
+])
+def test_bound_snapshot_counts_utf8_bytes_not_characters(tmp_path, monkeypatch, fast):
     # evidence is 10 characters but 20 UTF-8 bytes: 7 (snapshot_tables) + 3 (dv id) + 20 = 30 bytes, but only 20 characters.
+    monkeypatch.setattr(src, "_FAST_OCTETS", fast)
     monkeypatch.setattr(src, "MAX_SNAPSHOT_EVIDENCE_BYTES", 25)
     conn = _catalog(tmp_path)
     _seed(conn, tables=1, evidence="é" * 10, hashes="")
     with pytest.raises(OpsError) as exc:
         src._bound_snapshot(conn, "s1")
     assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "snapshot_metadata_too_large")
+    conn.close()
+
+
+class _RecordingConn:
+    """Wraps the real connection and records every SQL string passed to execute; results are the real cursors."""
+    def __init__(self, conn):
+        self._conn = conn
+        self.sql = []
+
+    def execute(self, sql, params=()):
+        self.sql.append(sql)
+        return self._conn.execute(sql, params)
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+
+@pytest.mark.parametrize("fast", [True, False])
+def test_byte_scan_sql_form_follows_fast_octets(tmp_path, monkeypatch, fast):
+    monkeypatch.setattr(src, "_FAST_OCTETS", fast)
+    conn = _catalog(tmp_path)
+    _seed(conn, tables=1, fragments=1)
+    proxy = _RecordingConn(conn)
+    assert src._bound_snapshot(proxy, "s1") is None
+    scans = [s for s in proxy.sql if "COALESCE(" in s]
+    assert scans, "expected the byte scans to run"
+    if fast:
+        assert all("OCTET_LENGTH(" in s and "CAST(" not in s for s in scans)
+    else:
+        assert all("LENGTH(CAST(" in s and "OCTET_LENGTH(" not in s for s in scans)
     conn.close()
 
 
@@ -541,7 +576,7 @@ class _CountingConn:
 
     def execute(self, sql, params=()):
         cursor = self._conn.execute(sql, params)
-        if "COALESCE(LENGTH(CAST" in sql and "FROM data_fragments f " in sql:
+        if ("COALESCE(LENGTH(CAST" in sql or "COALESCE(OCTET_LENGTH(" in sql) and "FROM data_fragments f " in sql:
             self.rows_read.append(0)
             wrapped = _CountingCursor(cursor, self.rows_read, len(self.rows_read) - 1)
             self.cursors.append(wrapped)
