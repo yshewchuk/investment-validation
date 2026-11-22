@@ -21,8 +21,13 @@ EXPECTED = {"plan_id": "PLAN", "registration_id": "REG", "seal_id": content_hash
 OK = lambda: {"spec_hash": "SPEC", "spec_hash_checked": True}  # noqa: E731
 SPEC = {"synthetic_arm": {"seed_tag": "sy2-test", "inner_years": [2023, 2024], "families": ["oracle", "median_noise", "shrinkage"],
                           "spread_ladder": [0.6], "shrinkage_L": [1.0], "level_gap_min_s": 0.4}}
+def _avail(day):
+    """A label's native available_as_of_date by default: one calendar day after its event date (ISO text)."""
+    return (pd.Timestamp(day) + pd.Timedelta(days=1)).date().isoformat()
+
+
 BASE = pd.DataFrame([{"event_id": e, "pred_abs_move": 5.0, "pred_iv_crush_30": -12.0, "horizon_sessions": 1,
-                      "abs_move": 4.0, "crush_pct_iv30": -10.0} for e in EVENTS])
+                      "abs_move": 4.0, "crush_pct_iv30": -10.0, "available_as_of_date": _avail(EVENTS[e])} for e in EVENTS])
 ADMITTED = readers.Admitted({"events": pd.DataFrame({"event_id": list(EVENTS), "event_date": pd.to_datetime(list(EVENTS.values()))}),
                              "excluded": {}})
 DATES = pd.to_datetime(list(EVENTS.values()))
@@ -293,6 +298,18 @@ def test_changed_inputs_refuse_and_leave_the_receipts_as_they_were(tmp_path, fak
     assert snapshot(tmp_path) == before
 
 
+def test_a_changed_crush_table_hash_changes_the_synthetic_inputs_receipt_and_refuses_a_replay(tmp_path, fakes):
+    driver.run_synthetic(sources(), tmp_path / "a", prereg=OK)
+    driver.run_synthetic(sources(crush_table_hash="OTHER-CRUSH"), tmp_path / "b", prereg=OK)
+    first = (tmp_path / "a" / "receipts" / "inputs_synthetic.json").read_bytes()
+    assert first != (tmp_path / "b" / "receipts" / "inputs_synthetic.json").read_bytes()
+    with pytest.raises(Refusal) as caught:
+        driver.run_synthetic(sources(crush_table_hash="OTHER-CRUSH"), tmp_path / "a", prereg=OK)
+    assert caught.value.code == CONFLICT
+    assert caught.value.details["reason"] == "inputs_receipt_changed"
+    assert (tmp_path / "a" / "receipts" / "inputs_synthetic.json").read_bytes() == first
+
+
 def test_the_stage_reads_no_2025_event(tmp_path, monkeypatch, fakes):
     ends, real_prod, real_labels = [], readers.read_production, readers.read_labels
 
@@ -325,7 +342,7 @@ def test_deleting_the_synthetic_files_leaves_the_inner_receipts_byte_identical(t
 def test_month_scores_and_month_take_arms_and_emit_from(monkeypatch):
     """The arms= and emit_from= keywords of _month_scores and _month: only the as-is arm is scored, and no rows emit before emit_from."""
     monkeypatch.setattr(driver, "build_pool", lambda table, labels: None)
-    monkeypatch.setattr(driver, "_printed", lambda labels, exits, cutoff: labels)
+    monkeypatch.setattr(driver, "_printed", lambda labels, cutoff: labels)
     monkeypatch.setattr(driver.shortvol, "simulate", lambda chunk_, events, pool, **kw: {e: "sim" for e in events["event_id"]})
     monkeypatch.setattr(driver.shortvol, "score_events", lambda chunk_, events, sims, name, **kw: pd.DataFrame(
         {"event_id": events["event_id"].to_numpy(), "status": "scored"}))
@@ -334,7 +351,7 @@ def test_month_scores_and_month_take_arms_and_emit_from(monkeypatch):
     events = pd.DataFrame({"event_id": ["E1", "E2"], "event_date": pd.to_datetime(["2023-06-10", "2023-06-20"])})
     table = pd.DataFrame({"event_date": pd.to_datetime(["2023-01-05"])}, index=pd.Index(["H0"]))
     start, st = pd.Timestamp("2023-06-01"), driver._model_state(1.0)
-    scored, missing = driver._month_scores("m", table, events, chunk("E1", "E2"), None, {}, start, st, arms=(("as_is", 1.0),))
+    scored, missing = driver._month_scores("m", table, events, chunk("E1", "E2"), None, start, st, arms=(("as_is", 1.0),))
     assert set(scored) == {("as_is", name) for name in driver.shortvol.NAMES} and missing == set()
     frames = driver._month("m", events, scored, set(), chunk("E1", "E2"), start, st, arms=(("as_is", 1.0),),
                            emit_from=pd.Timestamp("2099-01-01"))
@@ -420,7 +437,7 @@ ADMITTED3 = readers.Admitted({"events": pd.DataFrame({"event_id": list(EVENTS3),
 PLAN3 = pd.DataFrame({"event_id": list(EVENTS3), "ticker": [TICKERS3[e] for e in EVENTS3], "event_date": DATES3, "session": "AMC",
                       "entry_date": DATES3 - pd.Timedelta(days=1), "exit_date": DATES3 + pd.Timedelta(days=1)})
 BASE3 = pd.DataFrame([{"event_id": e, "pred_abs_move": 5.0, "pred_iv_crush_30": -12.0, "horizon_sessions": 1,
-                       "abs_move": 4.0, "crush_pct_iv30": -10.0} for e in EVENTS3])
+                       "abs_move": 4.0, "crush_pct_iv30": -10.0, "available_as_of_date": _avail(EVENTS3[e])} for e in EVENTS3])
 FACTS3 = pd.DataFrame({"pre_iv30": 40.0, "mcap_usd": 2e10, "implied_move": 5.0}, index=pd.Index(list(EVENTS3), name="event_id"))
 
 
@@ -549,7 +566,10 @@ def test_the_real_loop_drops_a_planned_event_one_model_lacks_from_every_model(mo
     short = full.drop(index=["E3"])
     ready = {mid: {"status": "ready", "family": "oracle", "params": {}, "table": full} for mid in ("m1", "m2")}
     monkeypatch.setattr(driver, "_pool_tables", lambda ready_: {mid: (short if mid == "m2" else full) for mid in ready_})
-    labels = pd.DataFrame({"abs_move": 4.0, "crush_pct_iv30": -10.0}, index=pd.Index(list(EVENTS3), name="event_id"))
+    labels = pd.DataFrame(
+        {"abs_move": 4.0, "crush_pct_iv30": -10.0, "available": [_avail(EVENTS3[e]) for e in EVENTS3]},
+        index=pd.Index(list(EVENTS3), name="event_id"),
+    )
     monkeypatch.setattr(driver, "build_pool", lambda table, labels: table)
     monkeypatch.setattr(driver.shortvol, "simulate", lambda chunk_, events, pool, **kw: {e: "sim" for e in events["event_id"]})
     monkeypatch.setattr(driver.shortvol, "score_events", _scored)
@@ -576,7 +596,10 @@ def test_the_real_loop_counts_width_declined_rows_per_model_and_unit(monkeypatch
     short = full.drop(index=["E3"])
     ready = {mid: {"status": "ready", "family": "oracle", "params": {}, "table": full} for mid in ("m1", "m2")}
     monkeypatch.setattr(driver, "_pool_tables", lambda ready_: {mid: (short if mid == "m2" else full) for mid in ready_})
-    labels = pd.DataFrame({"abs_move": 4.0, "crush_pct_iv30": -10.0}, index=pd.Index(list(EVENTS3), name="event_id"))
+    labels = pd.DataFrame(
+        {"abs_move": 4.0, "crush_pct_iv30": -10.0, "available": [_avail(EVENTS3[e]) for e in EVENTS3]},
+        index=pd.Index(list(EVENTS3), name="event_id"),
+    )
     monkeypatch.setattr(driver, "build_pool", lambda table, labels: table)
     monkeypatch.setattr(driver.shortvol, "simulate", lambda chunk_, events, pool, **kw: {e: "sim" for e in events["event_id"]})
 
@@ -606,3 +629,73 @@ def test_the_real_loop_counts_width_declined_rows_per_model_and_unit(monkeypatch
     assert declined["m2"][driver.shortvol.NAMES[1]] == [0, 5]
     for name in driver.shortvol.NAMES[2:]:
         assert declined["m1"][name] == [0, 6] and declined["m2"][name] == [0, 5]
+
+
+def _real_month_loop(monkeypatch):
+    """The real synthetic month loop on the six inner events, with the shortvol and straddle scorers stood in for as in the tests above."""
+    monkeypatch.setattr(driver.shortvol, "MIN_WINDOW", 1)
+    monkeypatch.setattr(synthetic, "generate", lambda admitted, labels, production, arm: fake_entries(labels, arm))
+    monkeypatch.setattr(driver, "build_pool", lambda table, labels: table)
+    monkeypatch.setattr(driver.shortvol, "simulate", lambda chunk_, events, pool, **kw: {e: "sim" for e in events["event_id"]})
+    monkeypatch.setattr(driver.shortvol, "score_events", _scored)
+    monkeypatch.setattr(driver.shortvol, "score", _marks)
+    monkeypatch.setattr(driver.straddle, "decide", _straddle_decide)
+    monkeypatch.setattr(driver.straddle, "score", _marks)
+    use_chunks(monkeypatch, [("2023Q2", chunk("E1")), ("2023Q3", chunk("E2")), ("2023Q4", chunk("E4")), ("2024Q1", chunk("E5")),
+                             ("2024Q3", chunk("E3")), ("2024Q4", chunk("E6"))])
+
+
+def test_a_synthetic_event_with_a_missing_implied_move_leaves_every_model_table_and_the_decisions(tmp_path, monkeypatch):
+    """E2 has finite pre_iv30 and mcap_usd but a NaN implied_move. It is dropped before scoring: absent from every decisions_synthetic
+    row, from every table binding (the receipt's binding is recomputed for each model, so none is the unrestricted one), and recorded
+    as the only id under facts_missing. Per the receipt, E2 is in no model table: events_no_prediction is 1 and common_dropped is 0."""
+    _real_month_loop(monkeypatch)
+    facts = FACTS3.assign(implied_move=[np.nan if e == "E2" else 5.0 for e in FACTS3.index])
+    src = sources(plan_frame=PLAN3, admitted=ADMITTED3, facts=lambda ids: facts.reindex(list(ids)),
+                  fetch=lambda columns, ids: BASE3[BASE3["event_id"].isin(list(ids))])
+    out = tmp_path / "out"
+    driver.run_synthetic(src, out, prereg=OK)
+    frame = pd.read_parquet(out / "decisions_synthetic.parquet")
+    assert "E2" not in set(frame["event_id"].astype(str))
+    assert src.exclusions["facts_missing"] == {"E2"}
+    inputs = json.loads((out / "receipts" / "inputs_synthetic.json").read_text(encoding="utf-8"))
+    assert len(inputs["tables"]) == 3
+    assert all(binding != content_hash({"model": mid}) for mid, binding in inputs["tables"].items())
+    receipt = json.loads((out / "receipts" / "synthetic.json").read_text(encoding="utf-8"))
+    assert receipt["planned"] == 6 and receipt["events_no_prediction"] == 1 and receipt["common_dropped"] == 0
+
+
+def test_a_synthetic_run_whose_every_event_has_a_missing_fact_refuses_empty_population(tmp_path, monkeypatch):
+    """Every event has a NaN implied_move, so every model table is empty after the facts exclusion. The run refuses empty_population
+    before any inputs receipt or decision is written, and nothing earlier in the run crashes on the empty tables."""
+    _real_month_loop(monkeypatch)
+    facts = FACTS3.assign(implied_move=np.nan)
+    src = sources(plan_frame=PLAN3, admitted=ADMITTED3, facts=lambda ids: facts.reindex(list(ids)),
+                  fetch=lambda columns, ids: BASE3[BASE3["event_id"].isin(list(ids))])
+    with pytest.raises(Refusal) as caught:
+        driver.run_synthetic(src, tmp_path / "out", prereg=OK)
+    assert caught.value.code == CONFLICT and caught.value.details["reason"] == "empty_population"
+    assert src.exclusions["facts_missing"] == set(EVENTS3)
+    assert not (tmp_path / "out" / "receipts" / "inputs_synthetic.json").exists()
+    assert not (tmp_path / "out" / "decisions_synthetic.parquet").exists()
+
+
+def test_a_synthetic_event_without_a_forecast_is_never_requested_from_facts(tmp_path, monkeypatch):
+    """E3 has no production forecast (its fetch rows are withheld) and an invalid mcap_usd of 5000. Facts are requested only for the
+    events that have a forecast, so the run completes, E3 is in no table and no decision, and facts never receive its id."""
+    _real_month_loop(monkeypatch)
+    requested = []
+    facts = FACTS3.assign(mcap_usd=[5000.0 if e == "E3" else 2e10 for e in FACTS3.index])
+
+    def fact_source(ids):
+        requested.append(sorted(ids))
+        return facts.reindex(list(ids))
+
+    src = sources(plan_frame=PLAN3, admitted=ADMITTED3, facts=fact_source,
+                  fetch=lambda columns, ids: BASE3[BASE3["event_id"].isin(list(ids)) & (BASE3["event_id"] != "E3")])
+    result = driver.run_synthetic(src, tmp_path / "out", prereg=OK)
+    assert result["stage"] == "synthetic"
+    assert requested == [sorted(set(EVENTS3) - {"E3"})]
+    assert "E3" not in set(pd.read_parquet(tmp_path / "out" / "decisions_synthetic.parquet")["event_id"].astype(str))
+    receipt = json.loads((tmp_path / "out" / "receipts" / "synthetic.json").read_text(encoding="utf-8"))
+    assert receipt["planned"] == 6 and receipt["events_no_prediction"] == 1

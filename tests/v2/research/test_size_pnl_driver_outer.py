@@ -130,7 +130,7 @@ def test_outer_receipt_binds_what_it_consumed(tmp_path, outer_stubs, monkeypatch
     tuned = {mid: tuning.load_receipt(tmp_path / "receipts" / f"tuning_{mid}.json") for mid in outer["models"]}
     assert outer["tuning"] == {mid: t["content_hash"] for mid, t in tuned.items()}
     assert outer["c"] == {mid: t["c"] for mid, t in tuned.items()}
-    assert outer["labels"] == content_hash([["E3", 4.0, -10.0], ["E4", 4.0, -10.0]])  # the 2025 month reads, in order
+    assert outer["labels"] == content_hash([["E3", 4.0, -10.0, "2025-01-16"], ["E4", 4.0, -10.0, "2025-02-13"]])  # the 2025 month reads, in order
     assert outer["common_dropped"] == 0
 
 
@@ -171,6 +171,17 @@ def test_changed_pre_2025_label_between_stages_refuses_inner_inputs(tmp_path, ou
     use_chunks(monkeypatch, [("2024Q3", chunk("E2")), ("2025Q1", chunk("E3", "E4"))])
     with pytest.raises(Refusal) as caught:
         driver.run(sources(fetch=changed), "outer", tmp_path, prereg=OK)
+    assert caught.value.code == CONFLICT
+    assert caught.value.details["reason"] == "inner_inputs_mismatch"
+    assert not (tmp_path / "receipts" / "inputs_outer.json").exists()
+
+
+def test_changed_crush_table_between_stages_refuses_inner_inputs(tmp_path, outer_stubs, monkeypatch):
+    use_chunks(monkeypatch, [("2024Q3", chunk("E2"))])
+    driver.run(sources(), "inner", tmp_path, prereg=OK)
+    use_chunks(monkeypatch, [("2024Q3", chunk("E2")), ("2025Q1", chunk("E3", "E4"))])
+    with pytest.raises(Refusal) as caught:
+        driver.run(sources(crush_table_hash="OTHER-CRUSH"), "outer", tmp_path, prereg=OK)
     assert caught.value.code == CONFLICT
     assert caught.value.details["reason"] == "inner_inputs_mismatch"
     assert not (tmp_path / "receipts" / "inputs_outer.json").exists()
@@ -462,6 +473,17 @@ def test_outer_smoke_after_inner_smoke_with_the_same_ids_passes_the_gate(tmp_pat
     driver.run(sources(), "inner", tmp_path, event_ids=ids, prereg=OK)
     use_chunks(monkeypatch, [("2024Q3", chunk("E2")), ("2025Q1", chunk("E3"))])
     summary = driver.run(sources(), "outer", tmp_path, event_ids=ids, prereg=OK)
+    assert summary["stage"] == "outer"
+    assert (tmp_path / "receipts" / "outer.json").exists()
+
+
+def test_outer_smoke_with_an_inner_event_lacking_a_label_passes_the_gate(tmp_path, outer_stubs, monkeypatch):
+    """E2 (2024, inner window) has no label. Both stages drop it from every table, so the outer preflight still matches inputs_inner.json."""
+    def fetch(columns, ids):
+        out = BASE[BASE["event_id"].isin([str(e) for e in ids])].copy()
+        out.loc[out["event_id"] == "E2", "abs_move"] = np.nan
+        return out
+    summary = _run_both(tmp_path, monkeypatch, sources(fetch=fetch))
     assert summary["stage"] == "outer"
     assert (tmp_path / "receipts" / "outer.json").exists()
 

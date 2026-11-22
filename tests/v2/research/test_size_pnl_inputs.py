@@ -556,3 +556,50 @@ def test_module_source_never_names_outcome_key():
     text = Path(sp.__file__).read_text(encoding="utf-8")
     assert '"absolute_move_pct"' not in text
     assert "'absolute_move_pct'" not in text
+
+
+# The real v14 store holds every plan year as a string; the selection and the driver's outer year may be int or str.
+def _string_plan():
+    plan = _plan()
+    plan["folds"] = [{"outer": {"year": "2025"}, "inner": [
+        {"year": "2023", "evaluation_event_ids": E23},
+        {"year": "2024", "evaluation_event_ids": E24}]}]
+    return plan
+
+
+STR_SELECTION = {"selections": [{"outer_year": "2025", "selected_candidate_id": "c1",
+                                 "winners": {"rmse": {"candidate_id": "c2"}, "mae": {"candidate_id": "c1"}}}]}
+
+
+def test_string_year_bind_candidate_binds_both_inner_years_and_reads_string_keys():
+    plan = _string_plan()
+    store = _store(plan)
+    calls = []
+
+    def read(slot):
+        calls.append(slot)
+        return store.get(slot)
+
+    out = sp.bind_candidate(plan, read, "c1", _admit_all)
+    assert out["status"] == "bound"
+    assert sorted(out["years"]) == ["2023", "2024"]
+    assert list(out["years"]["2023"]["event_ids"]) == E23
+    assert calls == [_key_str(plan, 2023, "c1"), _key_str(plan, 2024, "c1")]
+
+
+def _key_str(plan, inner_year, cid):
+    return "terminal:" + trial_key(plan, "2025", str(inner_year), cid)
+
+
+def test_string_year_resolve_roster_matches_the_int_year_roster():
+    assert _roster(plan=_string_plan(), selection=STR_SELECTION, outer="2025") == _roster()
+    assert _roster(plan=_string_plan(), selection=STR_SELECTION, outer=2025) == _roster()
+
+
+def test_string_year_bind_models_binds_the_blend_and_its_components():
+    plan = _string_plan()
+    roster = _roster(plan, selection=STR_SELECTION, outer="2025")
+    model_id = [m["model_id"] for m in roster["models"] if m["kind"] == "blend"][0]
+    out = sp.bind_models(plan, _store(plan).get, roster, _admit_all)
+    assert out[model_id]["status"] == "bound"
+    assert sorted(out[model_id]["components"]) == ["c1", "c2"]

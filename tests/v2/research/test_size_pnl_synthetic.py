@@ -70,10 +70,13 @@ def _by(out, family, **params):
 
 
 def _fetch_from(labels, calls=None):
+    """Label fake: each label's native available_as_of_date is one calendar day after its event date (ISO text)."""
     def fetch(columns, ids):
         if calls is not None:
             calls.append(list(ids))
-        return labels.loc[list(ids), list(columns)].reset_index()
+        frame = labels.assign(available_as_of_date=(pd.to_datetime(labels["event_date"]) + pd.Timedelta(days=1))
+                              .dt.strftime("%Y-%m-%d").to_numpy())
+        return frame.loc[list(ids), list(columns)].reset_index()
     return fetch
 
 

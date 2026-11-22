@@ -8,6 +8,7 @@ read inner years only. No production caller yet (S3/S4/S9). Progress: one stderr
 call with counts (never per item).
 """
 import sys
+from datetime import date
 
 import numpy as np
 import pandas as pd
@@ -19,6 +20,8 @@ from experiments.size_pnl_inputs import LEAD
 _CONFLICT = "EXPERIMENT_IDENTITY_CONFLICT"
 _DENIED = "HOLDOUT_ACCESS_DENIED"
 LABEL_COLUMNS = ("abs_move", "crush_pct_iv30")
+AVAILABLE = "available_as_of_date"
+LABEL_FETCH = (*LABEL_COLUMNS, AVAILABLE)
 PRODUCTION_COLUMNS = ("pred_abs_move", "pred_iv_crush_30", "horizon_sessions")
 
 
@@ -134,14 +137,28 @@ def _window_ids(admitted, start, end, event_ids=None):
     return sorted(ids)
 
 
+def _available_ok(value, event_day):
+    """True when ``value`` is an ISO date string that round-trips and is strictly after the event's date."""
+    if not isinstance(value, str):
+        return False
+    try:
+        day = date.fromisoformat(value)
+    except ValueError:
+        return False
+    return day.isoformat() == value and day > event_day
+
+
 def read_labels(fetch, admitted, *, start=None, end=None, event_ids=None):
     """Labels for admitted events in the window; NaN labels are dropped, never imputed.
+
+    Each kept label carries its native ``available_as_of_date`` (column ``available``, ISO text). A kept label without a
+    valid one, strictly after its event date, refuses; there is no fallback. Dropped (NaN) labels need no availability.
 
     Month-by-month calls (start = month start, end = next month start) are how a caller keeps
     R6; this interface is what the synthetic arm reuses for inner years.
     """
     ids = _window_ids(admitted, start, end, event_ids)
-    frame = _fetch(fetch, admitted, LABEL_COLUMNS, ids)
+    frame = _fetch(fetch, admitted, LABEL_FETCH, ids)
     raw = frame[list(LABEL_COLUMNS)]
     coerced = pd.DataFrame({col: pd.to_numeric(raw[col], errors="coerce") for col in LABEL_COLUMNS},
                            index=raw.index).astype(float)
@@ -150,7 +167,11 @@ def read_labels(fetch, admitted, *, start=None, end=None, event_ids=None):
         raise _conflict("label_not_finite", "a label is non-numeric or infinite")
     out = coerced.copy()
     out["event_date"] = _dates(admitted).reindex(out.index)
+    out["available"] = frame[AVAILABLE].reindex(out.index)
     keep = out[list(LABEL_COLUMNS)].notna().all(axis=1)
+    for eid in out.index[keep.to_numpy()]:
+        if not _available_ok(out.at[eid, "available"], out.at[eid, "event_date"].date()):
+            raise _conflict("label_availability_missing", "a label has no valid available_as_of_date")
     print(f"[pnl_readers] labels requested={len(ids)} label_missing={len(ids) - int(keep.sum())}", file=sys.stderr)
     return out[keep]
 

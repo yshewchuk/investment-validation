@@ -147,6 +147,18 @@ def test_outer_year_boundary_refuses(monkeypatch, date):
     assert caught.value.code == HOLDOUT
 
 
+@pytest.mark.parametrize("date", ["2025-01-01", "2025-12-31"])
+def test_outer_year_guard_refuses_string_year_2025_events(monkeypatch, date):
+    # The guard reads each event's calendar year (an int), so a plan's string year "2025" cannot slip past it.
+    def boom(*args, **kwargs):
+        raise AssertionError("scoring must not run")
+    monkeypatch.setattr(tuning, "score_events", boom)
+    with pytest.raises(sv.Refusal) as caught:
+        tuning.tune([(chunk_of("A"), events_for("A", date=date), {})], "M")
+    assert caught.value.code == HOLDOUT
+    assert caught.value.details == {"reason": "outer_year_in_tuning", "year": 2025}
+
+
 class _Reached(Exception):
     """Raised by a stub scorer to show that the year guard let the items through."""
 
