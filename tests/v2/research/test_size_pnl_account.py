@@ -131,3 +131,48 @@ def test_same_date_offsetting_exits_give_no_intra_date_drawdown(order):
     assert metrics["wanted"] == 2 and metrics["funded"] == 2
     assert metrics["final_equity"] == pytest.approx(100_000.0)
     assert metrics["max_drawdown"] == pytest.approx(0.0, abs=1e-12)  # the per-date sum is 0, so the curve is flat
+
+
+# Exact oracle, hand-derived (not computed from the code). Policy: start 100,000, cap .66, target .25.
+# Each trade is one contract: 0.25 * headroom / 10,000 = 1.65 (A, flat book), 1.4 (B, A still open), 1.65 (C), floored to 1.
+# Primary pnl per contract: A +100, B -50, C +50. Mid pnl per contract: A +200, B 0, C 0.
+ORACLE_COLS = ["entry_date", "exit_date", "entry_cost", "exit_value", "exit_value_mid", "secured_per_contract"]
+
+
+def _oracle_frame():
+    return pd.DataFrame([
+        ["2024-01-02", "2024-01-10", 1.0, 2.0, 3.0, 10000.0],  # A
+        ["2024-01-05", "2024-01-12", 1.0, 0.5, 1.0, 10000.0],  # B
+        ["2024-02-01", "2024-02-05", 1.0, 1.5, 1.0, 10000.0],  # C
+    ], columns=ORACLE_COLS)
+
+
+def test_oracle_primary_marks():
+    # Realised curve at exit dates: 100000 -> 100100 (01-10) -> 100050 (01-12) -> 100100 (02-05).
+    metrics = account.simulate_account(_oracle_frame(), "primary")
+    assert metrics["wanted"] == 3 and metrics["funded"] == 3
+    assert metrics["final_equity"] == pytest.approx(100100.0)
+    assert metrics["total_return"] == pytest.approx(0.001)
+    assert metrics["peak_open"] == 2
+    assert metrics["max_drawdown"] == pytest.approx(100050 / 100100 - 1)
+
+
+def test_oracle_mid_marks_use_exit_value_mid():
+    # Mid pnl: +200, 0, 0 -> the curve only rises, so no drawdown.
+    metrics = account.simulate_account(_oracle_frame(), "mid")
+    assert metrics["wanted"] == 3 and metrics["funded"] == 3
+    assert metrics["final_equity"] == pytest.approx(100200.0)
+    assert metrics["total_return"] == pytest.approx(0.002)
+    assert metrics["max_drawdown"] == 0.0
+    assert metrics["peak_open"] == 2
+    assert account.simulate_account(_oracle_frame(), "primary")["final_equity"] != pytest.approx(metrics["final_equity"])
+
+
+def test_oracle_accounts_book_rows_for_both_marks():
+    frame = _oracle_frame().assign(model_id="M1", book="short_vol", arm_or_rule="as_is", structure="TWIN-P",
+                                   event_id=["a", "b", "c"])
+    book = {r["mark"]: r for r in account.accounts(frame) if r["kind"] == "book"}
+    assert set(book) == {"primary", "mid"}
+    assert book["primary"]["model"] == "M1" and book["primary"]["key"] == "as_is"
+    assert book["primary"]["final_equity"] == pytest.approx(100100.0)
+    assert book["mid"]["final_equity"] == pytest.approx(100200.0)
