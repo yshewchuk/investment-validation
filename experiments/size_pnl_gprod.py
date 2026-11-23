@@ -1,4 +1,4 @@
-"""EXP-188 Amendment 3 G_PROD: production's STR-THRU gate, refit ONCE through 2024 (`size_pnl_gate_fold fit`), applied per model to 2025 straddle candidates; design section 'Amendment 3'. Sensitivity only, never a verdict; no refit, no threshold change. The fold artifact and the inputs table are read only after their sha256 matches the expected one.
+"""EXP-188 Amendment 3 G_PROD: production's STR-THRU gate, refit ONCE through 2024 (`size_pnl_gate_fold fit`), applied per model to 2025 straddle candidates; design section 'Amendment 3'. Sensitivity only, never a verdict; no refit, no threshold change. Both files are verified against their expected sha256 before either is parsed.
 """
 import io
 import os
@@ -89,7 +89,9 @@ def load_gate(binding):
     raw_fold = _read_verified(binding["gate_fold"], "fold", MAX_FOLD_BYTES)
     raw_inputs = _read_verified(binding["gate_inputs"], "inputs", MAX_INPUTS_BYTES)
     import joblib  # lazy: only a configured gate needs it
-    # The fold is sha256-pinned and capped at MAX_FOLD_BYTES. A zlib-compressed joblib dump is decompressed here with an output cap, so the decode is bounded; joblib then loads the plain bytes.
+    # The fold is sha256-pinned. Only two containers are accepted: a raw zlib stream (first byte 0x78), decoded here under
+    # MAX_FOLD_DECODED_BYTES, or a plain pickle stream (first byte 0x80), already capped by MAX_FOLD_BYTES. Any other container
+    # (gzip, bz2, xz, lzma, lz4, legacy) is refused before joblib sees it.
     try:
         data = raw_fold
         if raw_fold[:1] == b"\x78":  # zlib header (joblib compress=1..9 with zlib)
@@ -97,9 +99,11 @@ def load_gate(binding):
             data = inflater.decompress(raw_fold, MAX_FOLD_DECODED_BYTES + 1)
             if len(data) > MAX_FOLD_DECODED_BYTES or inflater.unconsumed_tail:
                 raise ValueError("decoded fold over the cap")
+        elif raw_fold[:1] != b"\x80":
+            raise ValueError("unsupported fold container")
         payload = joblib.load(io.BytesIO(data))
     except Exception:
-        raise _refuse("gate_fold_invalid", "the gate fold artifact cannot be loaded within its decoded size cap") from None
+        raise _refuse("gate_fold_invalid", "the gate fold artifact cannot be loaded (unsupported container, unreadable content or decoded size over the cap)") from None
     if not _valid_fold(payload):
         raise _refuse("gate_fold_invalid", "the gate fold artifact is not the registered gate (features, threshold or train_through)")
     features = list(payload["features"])
