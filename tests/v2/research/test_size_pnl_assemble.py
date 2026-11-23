@@ -755,3 +755,28 @@ def test_non_numeric_mid_pnl_on_a_non_taken_row_refuses_as_decisions_invalid(tmp
     assert caught.value.code == CONFLICT
     assert caught.value.details["reason"] == "report_decisions_invalid"
     assert not (out / "REPORT.md").exists()
+
+
+# ---- Amendment 2 account: the taken rows of every event, not only E ----
+
+
+def _with_account(rows):
+    """Every row carries the account columns: entry the day before its event, exit the day after, debit 0.5, exit 0.6,
+    and 9,500 secured per contract (so each short-vol trade funds one contract on a $100,000 account)."""
+    out = []
+    for row in rows:
+        day = pd.Timestamp(EVENT_DATES[row["event_id"]])
+        out.append({**row, "entry_date": day - pd.Timedelta(days=1), "exit_date": day + pd.Timedelta(days=1),
+                    "entry_cost": 0.5, "exit_value": 0.6, "secured_per_contract": 9500.0})
+    return out
+
+
+def test_account_wanted_counts_a_taken_row_of_an_event_removed_from_e(tmp_path):
+    # E01 is undetermined for m-hsq, so it leaves E for every model; m-eraw still takes E01 as_is, and that row must be counted.
+    out = build(tmp_path, rows_fn=lambda rows: _with_account(_e01_undetermined_for_m_hsq(rows)))
+    assemble_mod.assemble(out, plan_frame(), admitted=None)
+    text = (out / "REPORT.md").read_text(encoding="utf-8")
+    assert "| H1 | H | as_is | ok | 3 | 1 |" in text  # the T7 population is still three events
+    account = _section_lines(text, "### Sensitivity (Amendment 2)")
+    wanted = _cells(next(line for line in account if line.startswith("| book | E-raw | as_is |")))[3]
+    assert wanted == "4"  # four taken short-vol as_is rows for E-raw: E01 included, not the three events of E

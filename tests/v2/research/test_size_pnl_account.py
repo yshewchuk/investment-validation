@@ -119,3 +119,15 @@ def test_differences_signs_median_minus_mean_and_other_minus_m0():
     assert "E" not in diffs  # a pair with an absent member is skipped
     text = account.tables(results, list(diffs.values()))[0]
     assert "not the pre-registered verdict" in text and "primary marks" in text
+
+
+@pytest.mark.parametrize("order", ["gain_first", "loss_first"])
+def test_same_date_offsetting_exits_give_no_intra_date_drawdown(order):
+    """Two funded trades (one contract each) exit on one date with +10 and -10: the date-level curve never dips, in either row order."""
+    gain = ["2025-03-03", "2025-03-31", 0.4, 0.5, 9500.0]  # +10 per contract
+    loss = ["2025-03-03", "2025-03-31", 0.5, 0.4, 9500.0]  # -10 per contract
+    rows = _trades([gain, loss] if order == "gain_first" else [loss, gain])
+    metrics = account.simulate_account(rows, "primary")
+    assert metrics["wanted"] == 2 and metrics["funded"] == 2
+    assert metrics["final_equity"] == pytest.approx(100_000.0)
+    assert metrics["max_drawdown"] == pytest.approx(0.0, abs=1e-12)  # the per-date sum is 0, so the curve is flat

@@ -51,9 +51,9 @@ def simulate_account(rows, mark):
     t = margin.simulate(frame[["entry_date", "exit_date", "entry_cost", "exit_value", "secured_per_contract"]], **POLICY)
     final = float(t.attrs["final_equity"])
     done, max_dd = t[t["funded"]], 0.0
-    if not done.empty:  # the realised curve, ordered by exit date
-        order = np.argsort(pd.to_datetime(done["exit_date"]).to_numpy(), kind="stable")
-        curve = start + np.concatenate([[0.0], np.cumsum(done["pnl_usd"].to_numpy(dtype=float)[order])])
+    if not done.empty:  # the realised curve at EXIT DATES: same-date P&L is summed before any peak is taken
+        per_date = done.assign(exit_date=pd.to_datetime(done["exit_date"])).groupby("exit_date")["pnl_usd"].sum().sort_index()
+        curve = start + np.concatenate([[0.0], np.cumsum(per_date.to_numpy(dtype=float))])
         max_dd = float(np.min(curve / np.maximum.accumulate(curve) - 1.0))
     return {"wanted": len(t), "funded": int(t["funded"].sum()), "final_equity": final, "total_return": final / start - 1.0,
             "max_drawdown": max_dd, "peak_open": int(t["concurrency"].max()) if len(t) else 0}

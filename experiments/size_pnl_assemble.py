@@ -240,13 +240,13 @@ def _verdicts(classify_in, missing_years):
 
 
 def _account_sections(frame, role_model, label_of):
-    """The Amendment 2 sensitivity sections over the taken rows of the population ``frame`` (model_id already labelled), or
-    not_testable when no taken short-vol row carries a secured_per_contract."""
+    """The Amendment 2 sensitivity sections over ``frame``, which holds ALL taken rows of decisions.parquet (model_id already
+    labelled), or not_testable when no taken short-vol row carries a secured_per_contract."""
     title = "Sensitivity (Amendment 2)"
-    taken_short = frame["taken"] & (frame["book"] == "short_vol")
+    taken_short = frame["book"] == "short_vol"
     if "secured_per_contract" not in frame.columns or not frame.loc[taken_short, "secured_per_contract"].notna().any():
         return [_not_testable(title, "account_columns_not_in_decisions")]
-    results = size_pnl_account.accounts(frame[frame["taken"]])
+    results = size_pnl_account.accounts(frame)
     _log(f"accounts n={len(results)}")
     pairs = {pid: (label_of[role_model[mean]], label_of[role_model[median]]) for pid, (mean, median) in PAIRS.items()
              if mean in role_model and median in role_model}  # (mean, median) labels; a pair with an absent member is skipped downstream
@@ -318,7 +318,8 @@ def _sections(out, outer, inputs, inner, tuned, tickers):
     else:
         mid, classify_mid = tables(frame.assign(pnl_dollars=frame["pnl_dollars_mid"]))  # the Amendment 1 marks; the T10 verdict stays primary
         sections += [_sens(text) for text in (*mid, _verdicts(classify_mid, missing_years))]
-    return sections + _account_sections(frame, role_model, label_of)  # Amendment 2, on both paths
+    taken_all = raw[raw["status"] == "taken"].assign(model_id=raw["model_id"].map(label_of), taken=True)  # Amendment 2: every taken row, not only E
+    return sections + _account_sections(taken_all, role_model, label_of)  # Amendment 2, on both paths
 
 
 def assemble(out_dir, plan, *, admitted, expected=None, spec_hash=None, snapshot=None):
