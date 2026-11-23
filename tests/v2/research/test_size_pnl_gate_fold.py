@@ -1,0 +1,166 @@
+"""EXP-188 Amendment 3: size_pnl_gate_fold on synthetic fixtures only (no real data, no real wiring, no network)."""
+import json
+
+import joblib
+import numpy as np
+import pandas as pd
+import pytest
+from sklearn.ensemble import HistGradientBoostingRegressor
+
+from experiments import size_pnl_gate_fold as fold
+
+FEATS = ("f1", "f2")
+SEED = fold.SEED
+
+
+def _trades():
+    # 692 events on consecutive days in 2023-2024, one Dec-30-2024 event whose exit is 2025-01-02,
+    # and 7 events in 2025.
+    base = pd.Timestamp("2023-01-01")
+    events = [base + pd.Timedelta(days=i) for i in range(692)]
+    events += [pd.Timestamp("2024-12-30")]
+    events += [pd.Timestamp("2025-01-10") + pd.Timedelta(days=i) for i in range(7)]
+    exits = [e + pd.Timedelta(days=5) for e in events]
+    exits[692] = pd.Timestamp("2025-01-02")
+    return pd.DataFrame({
+        "event_id": np.arange(len(events)),
+        "ticker": "T",
+        "event_date": pd.to_datetime(events),
+        "entry_date": pd.to_datetime(events),
+        "exit_date": pd.to_datetime(exits),
+    })
+
+
+def _build(t):
+    rng = np.random.default_rng(7)
+    n = len(t)
+    f1 = rng.normal(size=n)
+    f2 = rng.normal(size=n)
+    ret = 0.5 * f1 + 0.01 * rng.normal(size=n)
+    return pd.DataFrame({"event_id": t["event_id"].to_numpy(), "event_date": t["event_date"].to_numpy(),
+                         "f1": f1, "f2": f2, "ret": ret})
+
+
+def _fit(X, y, seed):
+    return HistGradientBoostingRegressor(max_iter=20, random_state=seed).fit(X, y)
+
+
+def _train(trades, through=2024, seed=SEED, fit=_fit):
+    return fold.train_fold(trades, through=through, build=_build, fit=fit, features=FEATS, target="ret",
+                           seed=seed, threshold=fold.REGISTERED_THRESHOLD)
+
+
+def _wiring(trades=None):
+    t = _trades() if trades is None else trades
+    return (lambda: t, _build, _fit, list(FEATS), "ret")
+
+
+def test_cut_trades_drops_2025_events_and_dec30_with_2025_exit():
+    kept, stats = fold.cut_trades(_trades(), 2024)
+    assert stats == {"rows_in": 700, "rows_kept": 692,
+                     "dropped_event_after_cutoff": 7, "dropped_exit_after_cutoff": 1}
+    assert len(kept) == 692
+    assert kept["event_date"].max() <= pd.Timestamp("2024-12-31")
+
+
+def test_train_fold_happy_path(monkeypatch):
+    trades = _trades()
+    calls = []
+
+    def counting_fit(X, y, seed):
+        calls.append(seed)
+        return _fit(X, y, seed)
+
+    model, rec = _train(trades, fit=counting_fit)
+    assert hasattr(model, "predict")
+    assert calls == [SEED]
+    assert rec["fit_count"] == 1
+    assert rec["training_rows"] == 692
+    assert pd.Timestamp(rec["event_date_max"]) <= pd.Timestamp("2024-12-31")
+    assert pd.Timestamp(rec["exit_date_max"]) <= pd.Timestamp("2024-12-31")
+    _, again = _train(trades)
+    assert again["recipe_hash"] == rec["recipe_hash"]
+    _, other_seed = _train(trades, seed=SEED + 1)
+    assert other_seed["recipe_hash"] != rec["recipe_hash"]
+    monkeypatch.setattr(fold, "MIN_TRAIN_ROWS", 100)  # 2023-only fold has fewer rows than the production minimum
+    _, other_through = _train(trades, through=2023)
+    assert other_through["recipe_hash"] != rec["recipe_hash"]
+
+
+def test_train_fold_refuses_dataset_dated_after_cutoff():
+    def leaky_build(t):
+        ds = _build(t)
+        extra = ds.iloc[[0]].copy()
+        extra["event_date"] = pd.Timestamp("2025-01-03")
+        extra["event_id"] = 99999
+        return pd.concat([ds, extra], ignore_index=True)
+
+    with pytest.raises(ValueError):
+        fold.train_fold(_trades(), through=2024, build=leaky_build, fit=_fit, features=FEATS, target="ret",
+                        seed=SEED, threshold=fold.REGISTERED_THRESHOLD)
+
+
+def test_train_fold_refuses_below_min_train_rows():
+    with pytest.raises(ValueError):
+        _train(_trades().iloc[:100])
+
+
+def test_refuse_protected(tmp_path):
+    protected = tmp_path / "data" / "models"
+    protected.mkdir(parents=True)
+    with pytest.raises(SystemExit, match="refused"):
+        fold.refuse_protected(protected / "x.joblib", tmp_path)
+    registry = tmp_path / "engine" / "models" / "registry.json"
+    registry.parent.mkdir(parents=True)
+    with pytest.raises(SystemExit, match="refused"):
+        fold.refuse_protected(registry, tmp_path)
+    existing = tmp_path / "exists.txt"
+    existing.write_text("x")
+    with pytest.raises(SystemExit, match="refused"):
+        fold.refuse_protected(existing, tmp_path)
+    fresh = tmp_path / "fresh.joblib"
+    assert fold.refuse_protected(fresh, tmp_path) == fresh.resolve()
+
+
+def test_build_inputs_2025_only_no_labels_and_nan_kept():
+    def nan_build(t):
+        ds = _build(t)
+        ds.loc[(ds["event_date"] >= pd.Timestamp("2025-01-01")).to_numpy().argmax(), "f1"] = np.nan
+        return ds
+
+    out, receipt = fold.build_inputs(_trades(), year=2025, build=nan_build, features=FEATS)
+    assert list(out.columns) == ["event_id", "f1", "f2"]
+    assert not set(out.columns) & set(fold.LABEL_COLUMNS)
+    assert receipt["rows"] == 7 and len(out) == 7
+    assert receipt["incomplete_rows"] == 1
+    assert int(out["f1"].isna().sum()) == 1
+    assert set(out["event_id"]) == set(range(693, 700))
+    with pytest.raises(ValueError):
+        fold.build_inputs(_trades(), year=2025, build=_build, features=("f1", "ret"))
+
+
+def test_main_fit_end_to_end(tmp_path):
+    out = tmp_path / "gate_fold_2024.joblib"
+    rc = fold.main(["fit", "--train-through", "2024", "--out", str(out)], wiring=_wiring(), root=tmp_path)
+    assert rc == 0
+    receipt = json.loads((tmp_path / "gate_fold_2024.joblib.receipt.json").read_text())
+    assert receipt["artifact_sha256"] == fold.file_sha256(out)
+    art = joblib.load(out)
+    assert {"model", "features", "threshold"} <= set(art)
+    assert art["threshold"] == fold.REGISTERED_THRESHOLD
+
+
+def test_main_inputs_end_to_end(tmp_path):
+    out = tmp_path / "inputs_2025.parquet"
+    rc = fold.main(["inputs", "--year", "2025", "--out", str(out)], wiring=_wiring(), root=tmp_path)
+    assert rc == 0
+    assert len(pd.read_parquet(out)) == 7
+    receipt = json.loads((tmp_path / "inputs_2025.parquet.receipt.json").read_text())
+    assert receipt["inputs_sha256"] == fold.file_sha256(out)
+
+
+def test_main_fit_refuses_out_under_data_models(tmp_path):
+    out = tmp_path / "data" / "models" / "x.joblib"
+    with pytest.raises(SystemExit, match="refused"):
+        fold.main(["fit", "--train-through", "2024", "--out", str(out)], wiring=_wiring(), root=tmp_path)
+    assert list(tmp_path.iterdir()) == []
