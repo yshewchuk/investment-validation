@@ -21,6 +21,12 @@ def _refusal(exc):
     return exc.value.problem.code, exc.value.problem.details.get("reason")
 
 
+@pytest.fixture(autouse=True)
+def _registered(monkeypatch):
+    """The registered feature sequence is this module's FEATURES, so production's module is never imported here."""
+    monkeypatch.setattr(gp, "registered_features", lambda: list(FEATURES))
+
+
 # ---- chunk helpers (as in test_size_pnl_straddle.py) -----------------------
 
 def pair(k, *, call_e=(2.0, 2.2), put_e=(1.8, 2.0), call_x=(1.0, 1.4, 1), put_x=(0.6, 1.0, 1)):
@@ -121,6 +127,24 @@ def test_load_gate_loads_a_verified_pair(tmp_path):
     assert list(gate.inputs.index) == ["E1", "E2"]
     assert gp.receipt_body(gate) == {"rule": "G_PROD", "fold_sha256": binding["gate_fold"]["sha256"],
                                      "inputs_sha256": binding["gate_inputs"]["sha256"], "threshold": fold.REGISTERED_THRESHOLD}
+
+
+@pytest.mark.parametrize("features, inputs", [
+    pytest.param([FEATURES[1], FEATURES[0]] + FEATURES[2:], inputs_frame(["E1", "E2"]), id="reversed_first_two"),
+    pytest.param([("y0" if f == "x0" else f) for f in FEATURES], inputs_frame(["E1", "E2"]).rename(columns={"x0": "y0"}), id="renamed_x0"),
+])
+def test_load_gate_refuses_an_unregistered_feature_sequence(tmp_path, features, inputs):
+    payload = {**fold_payload(), "features": features}  # the fit data columns are unchanged; only the stored list differs
+    with pytest.raises(OpsError) as exc:
+        gp.load_gate(write_gate_files(tmp_path, payload=payload, inputs=inputs))
+    assert _refusal(exc) == ("INVALID_EXPERIMENT_SPEC", "gate_fold_invalid")
+
+
+def test_registered_features_are_production_s(monkeypatch):
+    monkeypatch.undo()  # the autouse patch is undone: the real production sequence
+    features = gp.registered_features()
+    assert len(features) == 50
+    assert set(gp.MODEL_COLS) <= set(features)
 
 
 def _write_compressed_fold(tmp_path):

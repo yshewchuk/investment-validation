@@ -63,8 +63,14 @@ def _read_verified(item, what, max_bytes):
     return data
 
 
+def registered_features():
+    """The registered gate's feature sequence (production's `gate_forecast_analog.FEATURES`, the order the fold was fit in)."""
+    from engine.models.training import gate_forecast_analog as ga  # lazy: only a configured gate needs production's module
+    return list(ga.FEATURES)
+
+
 def _valid_fold(payload):
-    """True when the fold payload is a registered G_PROD gate: features include MODEL_COLS, the registered threshold, a legal train_through."""
+    """True when the fold payload is a registered G_PROD gate: features are the registered sequence, the registered threshold, a legal train_through."""
     if not (isinstance(payload, dict) and {"model", "features", "threshold", "train_through"} <= set(payload)):
         return False
     features, through = payload["features"], payload["train_through"]
@@ -73,7 +79,7 @@ def _valid_fold(payload):
     except (TypeError, ValueError):
         return False
     return (isinstance(features, (list, tuple)) and all(isinstance(f, str) and f.strip() for f in features)
-            and len(set(features)) == len(features) and set(MODEL_COLS) <= set(features)
+            and list(features) == registered_features()
             and threshold == fold.REGISTERED_THRESHOLD
             and isinstance(through, int) and not isinstance(through, bool) and through == fold.MAX_TRAIN_THROUGH
             and callable(getattr(payload["model"], "predict", None)))
