@@ -662,8 +662,7 @@ def test_facts_missing_table_or_column_still_refused():
     ("pre_iv30", 3.4028235e38),
     ("mcap_usd", 5e3),
     ("pre_iv30", "abc"),
-    ("or_implied", 0.0),
-], ids=["inf", "flt_max", "mcap_thousands", "non_numeric", "implied_not_positive"])
+], ids=["inf", "flt_max", "mcap_thousands", "non_numeric"])
 def test_facts_invalid_values_refused(column, value):
     frames = _frames()
     frames["feature_panel"] = _set(frames["feature_panel"], column, value)
@@ -678,8 +677,7 @@ def test_facts_invalid_values_refused(column, value):
     ("mcap_usd", 999999.99, False),
     ("pre_iv30", 2.9e38, True),
     ("pre_iv30", 3.0e38, False),
-    ("pre_iv30", 0.0, False),
-], ids=["mcap_exactly_1e6", "mcap_just_below_1e6", "pre_iv30_below_flt_max", "pre_iv30_at_flt_max", "pre_iv30_zero"])
+], ids=["mcap_exactly_1e6", "mcap_just_below_1e6", "pre_iv30_below_flt_max", "pre_iv30_at_flt_max"])
 def test_facts_boundaries(column, value, passes):
     frames = _frames()
     frames["feature_panel"] = _set(frames["feature_panel"], column, value)
@@ -690,6 +688,50 @@ def test_facts_boundaries(column, value, passes):
         with pytest.raises(OpsError) as exc:
             ns.facts(["e1", "e2"])
         assert _refusal(exc) == ("EXPERIMENT_IDENTITY_CONFLICT", "source_value_invalid")
+
+
+def test_facts_mcap_below_1e6_refusal_message():
+    frames = _frames()
+    frames["feature_panel"] = _set(frames["feature_panel"], "mcap_usd", 5e3)
+    ns, _ = _build(frames)
+    with pytest.raises(OpsError) as exc:
+        ns.facts(["e1", "e2"])
+    assert "mcap_usd must be USD" in str(exc.value)
+
+
+def test_facts_non_positive_pre_iv30_or_implied_excluded_not_refused(capsys):
+    frames = _frames()
+    frames["feature_panel"] = pd.DataFrame({"ticker": ["AAA", "BBB"], "date": [D1, D2], "pre_iv30": [0.0, 0.4], "mcap_usd": [5e9, 2e9], "or_implied": [4.0, -1.0]})
+    ns, _ = _build(frames)
+    out = ns.facts(["e1", "e2"])
+    assert np.isnan(out.loc["e1", "pre_iv30"]) and out.loc["e1", "mcap_usd"] == 5e9 and out.loc["e1", "implied_move"] == 4.0
+    assert np.isnan(out.loc["e2", "implied_move"]) and out.loc["e2", "pre_iv30"] == 0.4 and out.loc["e2", "mcap_usd"] == 2e9
+    assert ns.exclusions["facts_missing"] == {"e1", "e2"}
+
+
+def test_facts_single_non_positive_row_excludes_only_that_event():
+    frames = _frames()
+    frames["feature_panel"] = _set(frames["feature_panel"], "pre_iv30", 0.0)
+    ns, _ = _build(frames)
+    out = ns.facts(["e1", "e2"])
+    assert np.isnan(out.loc["e1", "pre_iv30"]) and out.loc["e1", "mcap_usd"] == 5e9 and out.loc["e1", "implied_move"] == 4.0
+    assert out.loc["e2", "pre_iv30"] == 0.4 and out.loc["e2", "mcap_usd"] == 2e9 and out.loc["e2", "implied_move"] == 5.0
+    assert ns.exclusions["facts_missing"] == {"e1"}
+
+
+@pytest.mark.parametrize("column, value", [
+    ("pre_iv30", -0.5),
+    ("or_implied", 0.0),
+], ids=["pre_iv30_negative", "or_implied_zero"])
+def test_facts_other_non_positive_excluded(column, value):
+    frames = _frames()
+    frames["feature_panel"] = _set(frames["feature_panel"], column, value)  # row 0 is AAA/D1, event e1
+    ns, _ = _build(frames)
+    out = ns.facts(["e1", "e2"])
+    target = "implied_move" if column == "or_implied" else column
+    assert np.isnan(out.loc["e1", target])
+    assert not out.loc["e2"].isna().any()
+    assert ns.exclusions["facts_missing"] == {"e1"}
 
 
 # --- plan_frame --------------------------------------------------------------
