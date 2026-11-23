@@ -6,8 +6,9 @@ Subcommands:
   fit     --train-through YEAR --out PATH [--receipt PATH]
           Refit gate_midfill_str_thru_forecast_analog on trades dated through
           Dec 31 of YEAR only. Writes a joblib artifact and a JSON receipt.
-  inputs  --year YEAR --out PATH [--receipt PATH]
-          Build the gate's feature table for events dated in YEAR. Writes a
+  inputs  --year YEAR --admitted-events PATH --out PATH [--receipt PATH]
+          Build the gate's feature table for the EXP-188 admitted events dated in
+          YEAR. Non-admitted events of YEAR are dropped before the build. Writes a
           parquet file and a JSON receipt.
 
 Nothing here touches data/models/, engine/models/registry.json or the
@@ -35,6 +36,7 @@ REGISTERED_THRESHOLD = 0.0508851760203979
 SEED = 20260829
 MAX_TRAIN_THROUGH = 2024
 MIN_TRAIN_ROWS = 500
+ADMITTED_MAX_BYTES = 64 << 20
 LABEL_COLUMNS = ("ret", "exit_value", "exit_date")
 
 _T0 = time.time()
@@ -138,8 +140,15 @@ def train_fold(trades, *, through, build, fit, features, target, seed, threshold
     # Dates come from the rows that were actually fitted, not from every kept trade.
     fitted = dataset.loc[complete]
     fit_events = pd.to_datetime(fitted["event_date"]).dropna()
-    fit_ids = set(fitted["event_id"].tolist())
-    exit_rows = kept["event_id"].isin(fit_ids).to_numpy()
+    if "trade_id" in dataset.columns and "trade_id" in kept.columns:
+        # Exact rows: one event can carry several trades, so match on the fitted trade itself.
+        fit_trade_ids = set(fitted["trade_id"].tolist())
+        exit_rows = kept["trade_id"].isin(fit_trade_ids).to_numpy()
+        exit_basis = "trade_id"
+    else:
+        fit_ids = set(fitted["event_id"].tolist())
+        exit_rows = kept["event_id"].isin(fit_ids).to_numpy()
+        exit_basis = "event_id"
     if "fill_alpha" in kept.columns:
         exit_rows = exit_rows & np.isclose(kept["fill_alpha"].to_numpy(dtype=float), 0.5)
     fit_exits = pd.to_datetime(kept.loc[exit_rows, "exit_date"]).dropna()
@@ -151,6 +160,7 @@ def train_fold(trades, *, through, build, fit, features, target, seed, threshold
         "event_date_min": _iso_or_none(fit_events.min()),
         "event_date_max": _iso_or_none(fit_events.max()),
         "exit_date_max": _iso_or_none(fit_exits.max()),
+        "exit_date_basis": exit_basis,
         "cut": cut,
         "seed": seed,
         "threshold": threshold,
@@ -161,10 +171,19 @@ def train_fold(trades, *, through, build, fit, features, target, seed, threshold
     return model, receipt
 
 
-def build_inputs(trades, *, year, build, features):
+def build_inputs(trades, *, year, build, features, admitted_ids):
     cutoff = pd.Timestamp(f"{year}-12-31")
     features = list(features)
-    kept = trades.loc[(pd.to_datetime(trades["event_date"]) <= cutoff).to_numpy()]
+    # Admission happens before the build: non-admitted events of `year` never reach `build`.
+    # Earlier years are not filtered; they are the analog pool.
+    admitted = {str(x) for x in admitted_ids}
+    event_dt = pd.to_datetime(trades["event_date"])
+    in_year = (event_dt.dt.year == int(year)).to_numpy()
+    not_admitted = ~trades["event_id"].astype(str).isin(admitted).to_numpy()
+    drop = in_year & not_admitted
+    excluded_events = int(trades.loc[drop, "event_id"].nunique())
+    keep = (event_dt <= cutoff).to_numpy() & ~drop
+    kept = trades.loc[keep]
     dataset = build(kept)
     if (pd.to_datetime(dataset["event_date"]) > cutoff).any():
         raise ValueError(f"dataset has an event dated after {year}-12-31")
@@ -180,8 +199,38 @@ def build_inputs(trades, *, year, build, features):
         "rows": int(len(out)),
         "n_features": len(features),
         "incomplete_rows": int(incomplete.sum()),
+        "excluded_events": excluded_events,
+        "admitted_events": len(admitted_ids),
     }
     return out, receipt
+
+
+def read_admitted_events(path, max_bytes=ADMITTED_MAX_BYTES):
+    """Read the EXP-188 admitted event ids: a JSON list of non-empty strings.
+
+    Opens with O_NOFOLLOW, checks S_ISREG on the open descriptor, and reads at most
+    max_bytes. Returns (set of ids, sha256 of the exact bytes read); the sha256 equals
+    file_sha256(path) for the same file.
+    """
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError as e:
+        raise SystemExit(f"refused: cannot open admitted events {path}: {e.strerror}") from None
+    with os.fdopen(fd, "rb") as f:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise SystemExit(f"refused: admitted events {path} is not a regular file")
+        raw = f.read(max_bytes + 1)
+    if len(raw) > max_bytes:
+        raise SystemExit(f"refused: admitted events {path} exceeds {max_bytes} bytes")
+    try:
+        ids = json.loads(raw.decode("utf-8"))
+    except ValueError:
+        raise SystemExit(f"refused: admitted events {path} is not valid JSON") from None
+    if not isinstance(ids, list) or not all(isinstance(x, str) and x for x in ids):
+        raise SystemExit(f"refused: admitted events {path} must be a JSON list of non-empty strings")
+    if not ids:
+        raise SystemExit(f"refused: admitted events {path} is empty")
+    return set(ids), hashlib.sha256(raw).hexdigest()
 
 
 def _unlink_quiet(path):
@@ -326,6 +375,8 @@ def _run_fit(args, wiring, root):
 
 
 def _run_inputs(args, wiring, root):
+    # Admission is read first so a refused admitted-events file writes nothing.
+    admitted_ids, admitted_sha = read_admitted_events(args.admitted_events)
     out, receipt_path = _resolve_outputs(args.out, args.receipt, root)
     t0 = time.time()
     # Builder progress prints go to stderr; stdout carries only the receipt JSON.
@@ -333,8 +384,10 @@ def _run_inputs(args, wiring, root):
         if wiring is None:
             wiring = _real_wiring(args.year)
         load_trades, build, _fit, features, _target = wiring
-        _log(f"inputs start: year={args.year}")
-        table, receipt = build_inputs(load_trades(args.year), year=args.year, build=build, features=features)
+        _log(f"inputs start: year={args.year} admitted={len(admitted_ids)}")
+        table, receipt = build_inputs(load_trades(args.year), year=args.year, build=build, features=features,
+                                      admitted_ids=admitted_ids)
+        receipt["admitted_events_sha256"] = admitted_sha
         text = _publish_pair(out, receipt_path, lambda p: table.to_parquet(p, index=False), receipt,
                              "inputs_sha256")
     print(text)
@@ -351,6 +404,7 @@ def main(argv=None, *, wiring=None, root=None):
     fit_p.add_argument("--receipt")
     inputs_p = sub.add_parser("inputs")
     inputs_p.add_argument("--year", type=int, required=True)
+    inputs_p.add_argument("--admitted-events", required=True)
     inputs_p.add_argument("--out", required=True)
     inputs_p.add_argument("--receipt")
     args = parser.parse_args(argv)

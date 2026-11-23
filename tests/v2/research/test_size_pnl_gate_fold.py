@@ -17,14 +17,21 @@ SEED = fold.SEED
 
 
 def _trades():
-    # 692 events on consecutive days in 2023-2024, one Dec-30-2024 event whose exit is 2025-01-02,
-    # and 7 events in 2025.
+    # 692 events on consecutive days in 2023-2024, then the cutoff boundary rows:
+    #   692: 2024-12-30, exit 2025-01-02  dropped (exit after cutoff)
+    #   693: 2024-12-31, exit 2024-12-31  kept (event and exit exactly on the cutoff)
+    #   694: 2024-12-31, exit 2025-01-02  dropped (exit after cutoff)
+    #   695: 2025-01-01                   dropped (event after cutoff)
+    #   696-702: seven events from 2025-01-10 (dropped by cutoff)
     base = pd.Timestamp("2023-01-01")
     events = [base + pd.Timedelta(days=i) for i in range(692)]
-    events += [pd.Timestamp("2024-12-30")]
+    events += [pd.Timestamp("2024-12-30"), pd.Timestamp("2024-12-31"), pd.Timestamp("2024-12-31"),
+               pd.Timestamp("2025-01-01")]
     events += [pd.Timestamp("2025-01-10") + pd.Timedelta(days=i) for i in range(7)]
     exits = [e + pd.Timedelta(days=5) for e in events]
     exits[692] = pd.Timestamp("2025-01-02")
+    exits[693] = pd.Timestamp("2024-12-31")
+    exits[694] = pd.Timestamp("2025-01-02")
     return pd.DataFrame({
         "event_id": np.arange(len(events)),
         "ticker": "T",
@@ -58,22 +65,46 @@ def _wiring(trades=None):
     return (lambda max_year: t, _build, _fit, list(FEATS), "ret")
 
 
+def _without_cutoff_day(trades):
+    """Drop the 2024-12-31 boundary rows: their exits sit on the cutoff, so no later exit can follow them."""
+    return trades[trades["event_date"] != pd.Timestamp("2024-12-31")].reset_index(drop=True)
+
+
+ADMITTED_2025 = {str(i) for i in range(695, 703)}  # every 2025 event in _trades()
+
+
+def _admitted_file(dirpath, ids=ADMITTED_2025):
+    dirpath.mkdir(parents=True, exist_ok=True)
+    path = dirpath / "admitted.json"
+    path.write_text(json.dumps(sorted(ids)))
+    return path
+
+
 def test_cut_trades_drops_2025_events_and_dec30_with_2025_exit():
     kept, stats = fold.cut_trades(_trades(), 2024)
-    assert stats == {"rows_in": 700, "rows_kept": 692,
-                     "dropped_event_after_cutoff": 7, "dropped_exit_null": 0, "dropped_exit_after_cutoff": 1}
-    assert len(kept) == 692
+    assert stats == {"rows_in": 703, "rows_kept": 693,
+                     "dropped_event_after_cutoff": 8, "dropped_exit_null": 0, "dropped_exit_after_cutoff": 2}
+    assert len(kept) == 693
     assert kept["event_date"].max() <= pd.Timestamp("2024-12-31")
+
+
+def test_cut_trades_boundary_rows():
+    kept, _ = fold.cut_trades(_trades(), 2024)
+    ids = set(kept["event_id"])
+    assert 693 in ids  # 2024-12-31 event with exit 2024-12-31: kept
+    assert 694 not in ids  # 2024-12-31 event with exit 2025-01-02: dropped
+    assert 695 not in ids  # 2025-01-01 event: dropped
+    assert kept.set_index("event_id").loc[693, "exit_date"] == pd.Timestamp("2024-12-31")
 
 
 def test_cut_trades_counts_null_exit_separately():
     trades = _trades()
     trades.loc[0, "exit_date"] = pd.NaT  # 2023 event, exit unknown: counted as null, not after cutoff
-    trades.loc[693, "exit_date"] = pd.NaT  # 2025 event: event-dropped takes precedence over exit stats
+    trades.loc[696, "exit_date"] = pd.NaT  # 2025 event: event-dropped takes precedence over exit stats
     kept, stats = fold.cut_trades(trades, 2024)
-    assert stats == {"rows_in": 700, "rows_kept": 691,
-                     "dropped_event_after_cutoff": 7, "dropped_exit_null": 1, "dropped_exit_after_cutoff": 1}
-    assert len(kept) == 691
+    assert stats == {"rows_in": 703, "rows_kept": 692,
+                     "dropped_event_after_cutoff": 8, "dropped_exit_null": 1, "dropped_exit_after_cutoff": 2}
+    assert len(kept) == 692
     assert 0 not in set(kept["event_id"])
     assert kept["exit_date"].notna().all()
 
@@ -112,7 +143,8 @@ def test_train_fold_happy_path(monkeypatch):
     assert hasattr(model, "predict")
     assert calls == [SEED]
     assert rec["fit_count"] == 1
-    assert rec["training_rows"] == 692
+    assert rec["training_rows"] == 693
+    assert rec["exit_date_basis"] == "event_id"  # no trade_id column in this fixture
     assert pd.Timestamp(rec["event_date_max"]) <= pd.Timestamp("2024-12-31")
     assert pd.Timestamp(rec["exit_date_max"]) <= pd.Timestamp("2024-12-31")
     _, again = _train(trades)
@@ -210,15 +242,84 @@ def test_build_inputs_2025_only_no_labels_and_nan_kept():
         ds.loc[(ds["event_date"] >= pd.Timestamp("2025-01-01")).to_numpy().argmax(), "f1"] = np.nan
         return ds
 
-    out, receipt = fold.build_inputs(_trades(), year=2025, build=nan_build, features=FEATS)
+    out, receipt = fold.build_inputs(_trades(), year=2025, build=nan_build, features=FEATS,
+                                     admitted_ids=ADMITTED_2025)
     assert list(out.columns) == ["event_id", "f1", "f2"]
     assert not set(out.columns) & set(fold.LABEL_COLUMNS)
-    assert receipt["rows"] == 7 and len(out) == 7
+    assert receipt["rows"] == 8 and len(out) == 8
     assert receipt["incomplete_rows"] == 1
     assert int(out["f1"].isna().sum()) == 1
-    assert set(out["event_id"]) == set(range(693, 700))
+    assert set(out["event_id"]) == set(range(695, 703))
+    assert receipt["excluded_events"] == 0 and receipt["admitted_events"] == 8
     with pytest.raises(ValueError):
-        fold.build_inputs(_trades(), year=2025, build=_build, features=("f1", "ret"))
+        fold.build_inputs(_trades(), year=2025, build=_build, features=("f1", "ret"), admitted_ids=ADMITTED_2025)
+
+
+def test_build_inputs_drops_non_admitted_2025_before_build():
+    seen = []
+
+    def recording_build(t):
+        seen.append(t.copy())
+        return _build(t)
+
+    admitted = {str(i) for i in range(695, 702)}  # event 702 (a 2025-01-16 event) is not admitted
+    out, receipt = fold.build_inputs(_trades(), year=2025, build=recording_build, features=FEATS,
+                                     admitted_ids=admitted)
+    assert len(seen) == 1
+    fed = set(seen[0]["event_id"])
+    assert 702 not in fed  # the non-admitted 2025 event never reaches build
+    assert set(range(695, 702)) <= fed
+    assert {0, 692, 693} <= fed  # earlier years stay in the analog pool
+    assert set(out["event_id"]) == set(range(695, 702))
+    assert receipt["rows"] == 7
+    assert receipt["excluded_events"] == 1
+    assert receipt["admitted_events"] == 7
+
+
+def test_read_admitted_events_accepts_list_of_strings(tmp_path):
+    path = _admitted_file(tmp_path, ids=["695", "696"])
+    ids, sha = fold.read_admitted_events(path)
+    assert ids == {"695", "696"}
+    assert sha == fold.file_sha256(path)
+
+
+@pytest.mark.parametrize("body", ['{"a": 1}', "[695]", '["695", ""]', "[]", "not json"])
+def test_read_admitted_events_refuses_bad_contents(tmp_path, body):
+    path = tmp_path / "admitted.json"
+    path.write_text(body)
+    with pytest.raises(SystemExit, match="refused"):
+        fold.read_admitted_events(path)
+
+
+def test_read_admitted_events_refuses_missing_and_symlink(tmp_path):
+    with pytest.raises(SystemExit, match="refused"):
+        fold.read_admitted_events(tmp_path / "missing.json")
+    real = _admitted_file(tmp_path / "real")
+    link = tmp_path / "link.json"
+    link.symlink_to(real)
+    with pytest.raises(SystemExit, match="refused"):
+        fold.read_admitted_events(link)
+
+
+def test_read_admitted_events_refuses_oversized_file(tmp_path):
+    path = _admitted_file(tmp_path, ids=["695"])
+    with pytest.raises(SystemExit, match="refused"):
+        fold.read_admitted_events(path, max_bytes=4)
+
+
+def test_main_inputs_refuses_bad_admitted_events_before_writing(tmp_path):
+    out = tmp_path / "out" / "inputs.parquet"
+    with pytest.raises(SystemExit, match="refused"):
+        fold.main(["inputs", "--year", "2025", "--out", str(out), "--admitted-events", str(tmp_path / "nope.json")],
+                  wiring=_wiring(), root=tmp_path)
+    assert not (tmp_path / "out").exists()
+
+
+def test_main_inputs_requires_admitted_events(tmp_path):
+    with pytest.raises(SystemExit):
+        fold.main(["inputs", "--year", "2025", "--out", str(tmp_path / "inputs.parquet")],
+                  wiring=_wiring(), root=tmp_path)
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_main_fit_end_to_end(tmp_path):
@@ -320,7 +421,7 @@ def test_main_fit_stdout_is_only_receipt_json(tmp_path, capsys):
 
 
 def test_train_fold_exit_date_uses_fill_alpha_half_rows_only():
-    base = _trades()
+    base = _without_cutoff_day(_trades())
     half = base.assign(fill_alpha=0.5)
     late = base.assign(fill_alpha=0.9, exit_date=base["event_date"] + pd.Timedelta(days=9))
     trades = pd.concat([half, late], ignore_index=True)
@@ -334,20 +435,46 @@ def test_train_fold_exit_date_uses_fill_alpha_half_rows_only():
 
 def test_main_inputs_end_to_end(tmp_path):
     out = tmp_path / "inputs_2025.parquet"
-    rc = fold.main(["inputs", "--year", "2025", "--out", str(out)], wiring=_wiring(), root=tmp_path)
+    adm = _admitted_file(tmp_path / "adm")
+    rc = fold.main(["inputs", "--year", "2025", "--out", str(out), "--admitted-events", str(adm)],
+                   wiring=_wiring(), root=tmp_path)
     assert rc == 0
-    assert len(pd.read_parquet(out)) == 7
+    assert len(pd.read_parquet(out)) == 8
     receipt = json.loads((tmp_path / "inputs_2025.parquet.receipt.json").read_text())
     assert receipt["inputs_sha256"] == fold.file_sha256(out)
+    assert receipt["admitted_events_sha256"] == fold.file_sha256(adm)
+    assert receipt["excluded_events"] == 0 and receipt["admitted_events"] == 8
 
 
 def test_main_inputs_parquet_has_no_pandas_index(tmp_path):
     import pyarrow.parquet as pq
 
     out = tmp_path / "inputs_2025.parquet"
-    rc = fold.main(["inputs", "--year", "2025", "--out", str(out)], wiring=_wiring(), root=tmp_path)
+    adm = _admitted_file(tmp_path / "adm")
+    rc = fold.main(["inputs", "--year", "2025", "--out", str(out), "--admitted-events", str(adm)],
+                   wiring=_wiring(), root=tmp_path)
     assert rc == 0
     assert pq.read_table(out).column_names == ["event_id", "f1", "f2"]  # no __index_level_0__
+
+
+def test_train_fold_exit_date_uses_trade_id_when_present():
+    base = _without_cutoff_day(_trades()).assign(fill_alpha=0.5, trade_id=lambda d: d["event_id"] * 10)
+    fitted = base[base["event_id"] == 691]  # 2024-11-22 event, fitted trade exits 2024-11-27
+    # Same event_id, alpha 0.5, but NaN feature (not fitted) and a later exit that is still before the cutoff.
+    dup = fitted.assign(trade_id=6919, exit_date=pd.Timestamp("2024-12-31"))
+    trades = pd.concat([base, dup], ignore_index=True)
+
+    def build_with_trade_id(t):
+        ds = _build(t)
+        ds["trade_id"] = t["trade_id"].to_numpy()
+        ds.loc[ds["trade_id"] == 6919, "f1"] = np.nan
+        return ds
+
+    _, rec = fold.train_fold(trades, through=2024, build=build_with_trade_id, fit=_fit, features=FEATS,
+                             target="ret", seed=SEED, threshold=fold.REGISTERED_THRESHOLD)
+    assert rec["exit_date_basis"] == "trade_id"
+    assert rec["training_rows"] == 692
+    assert rec["exit_date_max"] == pd.Timestamp("2024-11-27").date().isoformat()  # the fitted trade's exit
 
 
 def test_main_fit_fsyncs_artifact_receipt_and_dir(tmp_path, monkeypatch):
