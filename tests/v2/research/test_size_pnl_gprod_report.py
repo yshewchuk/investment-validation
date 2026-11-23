@@ -4,6 +4,7 @@ Synthetic frames only; sections and _agreement are called directly.
 """
 
 import pandas as pd
+import pytest
 
 from experiments import size_pnl_gprod_report as gprod_report
 from experiments.size_pnl_gprod_report import _agreement
@@ -171,3 +172,21 @@ def test_m0_absent_from_the_run_is_not_available():
     secs = _run(_gate(_cells()), outer=outer)
     assert "not_available: M0_not_in_run" in secs[2]
     assert not any(r["pair_id"].startswith("M0-") for r in _rows(secs[1]))
+
+
+def test_stored_gate_valid_accepts_a_well_formed_gate():
+    assert gprod_report.stored_gate_valid({"scored": ["E1"], "selected": ["E1"]}) is True
+    assert gprod_report.stored_gate_valid(STORED) is True
+
+
+@pytest.mark.parametrize("value", [
+    None,
+    {},
+    {"scored": ["E1"]},
+    {"scored": ["E1"], "selected": ["E2"]},
+    {"scored": [1], "selected": []},
+    {"scored": ["E1"], "selected": [], "extra": []},
+    {"scored": "E1", "selected": []},
+], ids=["none", "empty", "missing_selected", "selected_outside_scored", "non_string_id", "extra_key", "string_not_list"])
+def test_stored_gate_valid_rejects_malformed_values(value):
+    assert gprod_report.stored_gate_valid(value) is False

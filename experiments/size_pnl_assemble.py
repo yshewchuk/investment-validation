@@ -440,6 +440,8 @@ def assemble(out_dir, plan, *, admitted, expected=None, spec_hash=None, snapshot
     this one frame, so a changed ticker changes the binding and refuses."""
     if not isinstance(out_dir, (str, os.PathLike)):
         raise _refuse("report_out_dir_invalid", "out_dir must be a path")
+    if stored_gate is not None and not gprod_report.stored_gate_valid(stored_gate):
+        raise _refuse("report_stored_gate_invalid", "stored_gate must be {scored, selected} lists of event id strings, selected within scored")
     if not isinstance(plan, pd.DataFrame) or plan.columns.empty:
         raise _refuse("report_tickers_invalid", "plan must be a DataFrame with columns")
     try:

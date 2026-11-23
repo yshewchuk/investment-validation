@@ -58,15 +58,6 @@ def _read_json(path: str):
         raise fail(_INVALID, f"{path} is unreadable", details={"reason": "input_unreadable"}) from exc
 
 
-def _stored_gate_valid(value) -> bool:
-    """True when ``value`` is {"scored": [ids], "selected": [ids]} with non-empty string ids and every selected id scored."""
-    if not (isinstance(value, dict) and set(value) == {"scored", "selected"}):
-        return False
-    if not all(isinstance(v, list) and all(isinstance(e, str) and e for e in v) for v in value.values()):
-        return False
-    return set(value["selected"]) <= set(value["scored"])
-
-
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
@@ -82,7 +73,7 @@ def main(argv: list[str] | None = None) -> int:
             if args.event_ids is not None and not (isinstance(event_ids, list) and all(isinstance(e, str) for e in event_ids)): raise fail(_INVALID, "--event-ids must be a JSON array of strings", details={"reason": "event_ids_invalid"})
             if args.stage == "report" and args.event_ids is not None: raise fail(_INVALID, "--event-ids is not supported by the report stage", details={"reason": "event_ids_not_supported"})
             if args.stage != "report" and args.stored_gate is not None: raise fail(_INVALID, "--stored-gate is for the report stage only", details={"reason": "stored_gate_not_supported"})
-            from experiments import size_pnl_assemble, size_pnl_driver  # after the gates, so a missing PLANNED row refuses first
+            from experiments import size_pnl_assemble, size_pnl_driver, size_pnl_gprod_report  # after the gates, so a missing PLANNED row refuses first
             module_name, _, func = args.sources.partition(":")
             try:  # no colon gives func "", not an attribute; a bad module raises ImportError
                 factory = getattr(importlib.import_module(module_name), func)
@@ -98,7 +89,7 @@ def main(argv: list[str] | None = None) -> int:
                 stored = None
                 if args.stored_gate is not None:
                     stored = _read_json(args.stored_gate)
-                    if not _stored_gate_valid(stored):
+                    if not size_pnl_gprod_report.stored_gate_valid(stored):
                         raise fail(_INVALID, "--stored-gate must be {scored, selected} lists of event id strings, selected within scored", details={"reason": "stored_gate_invalid"})
                 summary = size_pnl_assemble.assemble(args.out_dir, sources.plan_frame, admitted=sources.admitted, expected=sources.expected, spec_hash=receipt["spec_hash"], snapshot=sources.snapshot_id, stored_gate=stored)
             elif args.stage == "synthetic": summary = size_pnl_driver.run_synthetic(sources, args.out_dir, event_ids=event_ids, replay=args.replay, prereg=lambda: receipt)

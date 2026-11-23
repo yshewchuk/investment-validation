@@ -6,7 +6,17 @@ import pandas as pd
 from experiments import size_pnl_contrast as contrast, size_pnl_report as report
 from experiments.size_pnl_inputs import PAIRS
 
-LABEL = ("Sensitivity (Amendment 3): production gate refit once through 2024, not refit per model "
+
+def stored_gate_valid(value) -> bool:
+    """True when ``value`` is {"scored": [ids], "selected": [ids]} with non-empty string ids and every selected id scored."""
+    if not (isinstance(value, dict) and set(value) == {"scored", "selected"}):
+        return False
+    if not all(isinstance(v, list) and all(isinstance(e, str) and e for e in v) for v in value.values()):
+        return False
+    return set(value["selected"]) <= set(value["scored"])
+
+
+LABEL =("Sensitivity (Amendment 3): production gate refit once through 2024, not refit per model "
          "(favours M0 forecast scale); not the pre-registered verdict")
 MARKS = (("primary", "pnl_dollars"), ("mid", "pnl_dollars_mid"))
 NOT_AVAILABLE = ("not_available: production's stored walk-forward gate decisions (EXP-187 arm B, gitignored champion/results/transactions_*.csv) "
