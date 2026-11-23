@@ -61,9 +61,43 @@ def _wiring(trades=None):
 def test_cut_trades_drops_2025_events_and_dec30_with_2025_exit():
     kept, stats = fold.cut_trades(_trades(), 2024)
     assert stats == {"rows_in": 700, "rows_kept": 692,
-                     "dropped_event_after_cutoff": 7, "dropped_exit_after_cutoff": 1}
+                     "dropped_event_after_cutoff": 7, "dropped_exit_null": 0, "dropped_exit_after_cutoff": 1}
     assert len(kept) == 692
     assert kept["event_date"].max() <= pd.Timestamp("2024-12-31")
+
+
+def test_cut_trades_counts_null_exit_separately():
+    trades = _trades()
+    trades.loc[0, "exit_date"] = pd.NaT  # 2023 event, exit unknown: counted as null, not after cutoff
+    trades.loc[693, "exit_date"] = pd.NaT  # 2025 event: event-dropped takes precedence over exit stats
+    kept, stats = fold.cut_trades(trades, 2024)
+    assert stats == {"rows_in": 700, "rows_kept": 691,
+                     "dropped_event_after_cutoff": 7, "dropped_exit_null": 1, "dropped_exit_after_cutoff": 1}
+    assert len(kept) == 691
+    assert 0 not in set(kept["event_id"])
+    assert kept["exit_date"].notna().all()
+
+
+def test_select_trades_matches_production_engine_trades(monkeypatch):
+    from engine.models.training import train_all
+
+    frame = pd.DataFrame({
+        "strategy": ["S", "S", "S", "OTHER", "S", "S"],
+        "provenance": ["engine.replay", "engine.replay", "engine.replay", "engine.replay", "manual", "engine.replay"],
+        "decision_date": pd.to_datetime(["2024-01-03", "2024-01-03", "2024-01-01", "2024-01-03", "2024-01-03", None]),
+        "entry_date": pd.to_datetime(["2024-01-02", "2024-01-02", "2024-01-05", "2024-01-02", "2024-01-02", "2024-01-02"]),
+        "variant": ["d+0", "d+0", "d+0", "d+0", "d+0", "d+0"],
+        "event_id": [1, 2, 3, 4, 5, 6],
+    })
+    monkeypatch.setattr(train_all.store, "read_table", lambda *a, **k: frame)
+    expected = train_all._engine_trades("S")
+    got = fold.select_trades(frame, "S")
+    pd.testing.assert_frame_equal(got, expected)
+    assert list(got["event_id"]) == [1, 2, 6]  # decision<entry row dropped; NaT decision kept as production does
+
+    no_decision = frame.drop(columns=["decision_date"])
+    monkeypatch.setattr(train_all.store, "read_table", lambda *a, **k: no_decision)
+    pd.testing.assert_frame_equal(fold.select_trades(no_decision, "S"), train_all._engine_trades("S"))
 
 
 def test_train_fold_happy_path(monkeypatch):

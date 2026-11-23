@@ -93,14 +93,17 @@ def refuse_protected(out, root):
 def cut_trades(trades, through):
     cutoff = pd.Timestamp(f"{through}-12-31")
     event_ok = pd.to_datetime(trades["event_date"]) <= cutoff
-    exit_ok = pd.to_datetime(trades["exit_date"]) <= cutoff  # NaT compares False: dropped
+    exit_dt = pd.to_datetime(trades["exit_date"])
+    exit_null = exit_dt.isna()
+    exit_ok = exit_dt <= cutoff  # NaT compares False: dropped
     keep = event_ok & exit_ok
     kept = trades.loc[keep.to_numpy()].copy()
     stats = {
         "rows_in": int(len(trades)),
         "rows_kept": int(keep.sum()),
         "dropped_event_after_cutoff": int((~event_ok).sum()),
-        "dropped_exit_after_cutoff": int((event_ok & ~exit_ok).sum()),
+        "dropped_exit_null": int((event_ok & exit_null).sum()),
+        "dropped_exit_after_cutoff": int((event_ok & ~exit_null & ~exit_ok).sum()),
     }
     if not kept.empty:
         if pd.to_datetime(kept["event_date"]).max() > cutoff or pd.to_datetime(kept["exit_date"]).max() > cutoff:
@@ -226,14 +229,38 @@ def _publish_pair(out, receipt_path, write_artifact, receipt, sha_key):
     return text
 
 
+def select_trades(frame, strategy):
+    """Same selection as train_all._engine_trades(strategy) with decision_offset=None."""
+    rows = frame[(frame["strategy"] == strategy) & (frame["provenance"].astype(str) == "engine.replay")]
+    if "decision_date" in rows.columns:
+        decision = pd.to_datetime(rows["decision_date"], errors="coerce")
+        entry = pd.to_datetime(rows["entry_date"], errors="coerce")
+        rows = rows[~(decision < entry)]
+    return rows.reset_index(drop=True)
+
+
 def _real_wiring(through_year):
     # through_year is accepted for symmetry with the CLI; the loaders derive their own years.
     import engine.models.training.gate_forecast_analog as ga
     from engine.features import FeatureContext
-    from engine.models.training.train_all import _engine_trades
 
     def load_trades():
-        return _engine_trades(ga.STRATEGY)
+        from engine.data import store
+
+        kept = []
+        cols = None
+        partitions = 0
+        for part in store.iter_table("trades"):  # one year partition at a time
+            partitions += 1
+            if cols is None:
+                cols = list(part.columns)
+            kept.append(select_trades(part, ga.STRATEGY))
+        if kept:
+            rows = pd.concat(kept, ignore_index=True)
+        else:
+            rows = pd.DataFrame(columns=cols or [])
+        _log(f"trades partitions={partitions} kept_rows={len(rows)}")
+        return rows
 
     def build(t):
         entry_years = pd.to_datetime(t["entry_date"]).dt.year
