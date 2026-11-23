@@ -85,6 +85,12 @@ def equivalence_passes(monkeypatch):
     monkeypatch.setattr(driver, "_equivalence", lambda *args, **kwargs: {"checked": 1, "skipped": 0, "max_abs_diff": 0.0})
 
 
+@pytest.fixture(autouse=True)
+def secured_stubbed(monkeypatch):
+    """The Amendment 2 secured-cash lookup needs a real ladder chunk; these tests stub the chunk."""
+    monkeypatch.setattr(driver.shortvol, "secured", lambda chunk_, events, decisions, name, c=1.0: pd.DataFrame({"event_id": pd.Series([], dtype=object), "secured_per_contract": pd.Series([], dtype=float)}))
+
+
 @pytest.fixture
 def stubs(monkeypatch):
     """Pool, simulation and tuning stubbed, as in the inner-stage driver tests."""
@@ -678,6 +684,23 @@ def test_a_synthetic_run_whose_every_event_has_a_missing_fact_refuses_empty_popu
     assert src.exclusions["facts_missing"] == set(EVENTS3)
     assert not (tmp_path / "out" / "receipts" / "inputs_synthetic.json").exists()
     assert not (tmp_path / "out" / "decisions_synthetic.parquet").exists()
+
+
+def test_the_synthetic_decisions_carry_no_account_columns_and_secured_is_never_called(tmp_path, monkeypatch):
+    """Amendment 2 account fields stay out of the synthetic run: its published decisions have no entry_date, exit_date or
+    secured_per_contract column, and shortvol.secured is never called (it raises here, overriding the autouse stub)."""
+    _real_month_loop(monkeypatch)
+
+    def never_secured(*args, **kwargs):
+        raise AssertionError("the synthetic run must never call shortvol.secured")
+
+    monkeypatch.setattr(driver.shortvol, "secured", never_secured)
+    src = sources(plan_frame=PLAN3, admitted=ADMITTED3,
+                  fetch=lambda columns, ids: BASE3[BASE3["event_id"].isin(list(ids))])
+    driver.run_synthetic(src, tmp_path / "out", prereg=OK)
+    frame = pd.read_parquet(tmp_path / "out" / "decisions_synthetic.parquet")
+    assert frame["status"].eq("taken").any()  # the rows are real, so the column check is not vacuous
+    assert not {"entry_date", "exit_date", "secured_per_contract"} & set(frame.columns)
 
 
 def test_a_synthetic_event_without_a_forecast_is_never_requested_from_facts(tmp_path, monkeypatch):

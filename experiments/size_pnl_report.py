@@ -62,7 +62,7 @@ def _cell(x):
     return str(x).replace("|", "\\|")
 
 
-def _md_table(headers, rows):
+def md_table(headers, rows):
     if not rows:
         return "(no rows)"
     head = [_cell(h) for h in headers]
@@ -71,11 +71,15 @@ def _md_table(headers, rows):
     return "\n".join(lines)
 
 
+# Private alias kept: tests/v2/research/test_size_pnl_report.py imports _md_table.
+_md_table = md_table
+
+
 def _section(title, headers, rows, note=None):
     parts = [f"### {title}"]
     if note:
         parts.append(note)
-    parts.append(_md_table(headers, rows))
+    parts.append(md_table(headers, rows))
     return "\n\n".join(parts)
 
 
