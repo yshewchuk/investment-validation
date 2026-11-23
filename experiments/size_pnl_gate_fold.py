@@ -44,6 +44,8 @@ PROGRESS_INTERVAL_S = 30
 MAX_FORECAST_BYTES = 4 << 30
 MAX_PARTITION_BYTES = 4 << 30
 MAX_PARTITION_ROWS = 50_000_000  # post-decode sanity cap on rows per trades partition; not a memory bound
+DEFAULT_MAX_PANEL_BYTES = 2 << 30
+DEFAULT_MAX_DAILY_PARTITION_BYTES = 4 << 30
 
 _T0 = time.time()
 
@@ -81,11 +83,16 @@ def _check_max_bytes(max_bytes):
         raise ValueError("max_bytes must be positive")
 
 
+class InputTooLarge(SystemExit):
+    """An input file is over its byte cap. The message starts with "refused: "."""
+
+
 def check_input_file(path, max_bytes):
     """Refuse an input unless it is a regular file (no symlinks) of at most max_bytes.
 
     A missing .parquet is looked up as .csv.gz, as tier4.load_forecasts does. Returns the
-    path that was checked; raises SystemExit("refused: ...") otherwise. max_bytes is validated
+    path that was checked; raises SystemExit("refused: ...") otherwise, and InputTooLarge
+    (a SystemExit subclass) when the file is over max_bytes. max_bytes is validated
     first with _check_max_bytes, before any filesystem access.
     """
     _check_max_bytes(max_bytes)
@@ -101,9 +108,32 @@ def check_input_file(path, max_bytes):
         if not stat.S_ISREG(st.st_mode):
             raise SystemExit(f"refused: {cand} is not a regular file")
         if st.st_size > max_bytes:
-            raise SystemExit(f"refused: {cand} is {st.st_size} bytes, over the {max_bytes} byte limit")
+            raise InputTooLarge(f"refused: {cand} is {st.st_size} bytes, over the {max_bytes} byte limit")
         return cand
     raise SystemExit(f"refused: {path} not found (no .csv.gz fallback either)")
+
+
+def check_context_inputs(panel_path, daily_files_for_year, years, max_panel_bytes, max_daily_bytes):
+    """Size-check every file FeatureContext.load will read, before it is called.
+
+    Checks the panel file against max_panel_bytes, then every daily partition file for each year in
+    years against max_daily_bytes. Raises InputTooLarge on the first oversize file; a daily partition
+    refusal names its year. Logs one stderr line with the number of files checked.
+    """
+    years = list(years)
+    check_input_file(panel_path, max_panel_bytes)
+    daily_checked = 0
+    for year in years:
+        for p in daily_files_for_year(year):
+            try:
+                check_input_file(p, max_daily_bytes)
+            except InputTooLarge as e:
+                detail = str(e.code)
+                if detail.startswith("refused: "):
+                    detail = detail[len("refused: "):]
+                raise InputTooLarge(f"refused: daily partition for year {year}: {detail}") from None
+            daily_checked += 1
+    _log(f"input size check passed: panel=1 daily_partitions={daily_checked} years={len(years)}")
 
 
 def load_forecasts_bounded(path, max_bytes):
@@ -477,16 +507,16 @@ def _progress_fields(done, kept_rows, elapsed):
     return f"done={done} kept_rows={kept_rows} rate={done / max(elapsed, 1e-9):.2f}/s"
 
 
-def _real_wiring(through_year):
+def _real_wiring(through_year, max_panel_bytes=DEFAULT_MAX_PANEL_BYTES,
+                 max_daily_bytes=DEFAULT_MAX_DAILY_PARTITION_BYTES):
     # through_year is accepted for symmetry with the CLI; the loaders derive their own years.
     import engine.data.features.tier4 as tier4
     import engine.models.training.gate_forecast_analog as ga
     import engine.paths as paths
+    from engine.data import store
     from engine.features import FeatureContext
 
     def load_trades(max_year):
-        from engine.data import store
-
         def partition_files(year):
             return store._partition_files(paths.curated_partition("trades", year))
 
@@ -498,6 +528,8 @@ def _real_wiring(through_year):
     def build(t):
         entry_years = pd.to_datetime(t["entry_date"]).dt.year
         years = range(int(entry_years.min()) - 1, int(entry_years.max()) + 1)
+        check_context_inputs(paths.PANEL, lambda y: store._partition_files(paths.curated_partition("daily_market", y)),
+                             years, max_panel_bytes, max_daily_bytes)
         ctx = FeatureContext.load(sorted(t["ticker"].unique()), years=years)
         # The builder's own tier4.load_forecasts() call decodes through the bounded handle.
         with _patched_forecasts(tier4, bounded_forecasts):
@@ -527,7 +559,8 @@ def _run_fit(args, wiring, root):
     # Builder progress prints go to stderr; stdout carries only the receipt JSON.
     with contextlib.redirect_stdout(sys.stderr):
         if wiring is None:
-            wiring = _real_wiring(args.train_through)
+            wiring = _real_wiring(args.train_through, max_panel_bytes=args.max_panel_bytes,
+                                  max_daily_bytes=args.max_daily_partition_bytes)
         load_trades, build, fit, features, target = wiring
         _log(f"fit start: train_through={args.train_through}")
         t_load = time.time()
@@ -554,7 +587,8 @@ def _run_inputs(args, wiring, root):
     # Builder progress prints go to stderr; stdout carries only the receipt JSON.
     with contextlib.redirect_stdout(sys.stderr):
         if wiring is None:
-            wiring = _real_wiring(args.year)
+            wiring = _real_wiring(args.year, max_panel_bytes=args.max_panel_bytes,
+                                  max_daily_bytes=args.max_daily_partition_bytes)
         load_trades, build, _fit, features, _target = wiring
         _log(f"inputs start: year={args.year} admitted={len(admitted_ids)}")
         t_load = time.time()
@@ -581,12 +615,22 @@ def main(argv=None, *, wiring=None, root=None):
     fit_p.add_argument("--train-through", type=int, required=True)
     fit_p.add_argument("--out", required=True)
     fit_p.add_argument("--receipt")
+    fit_p.add_argument("--max-panel-bytes", type=int, default=DEFAULT_MAX_PANEL_BYTES)
+    fit_p.add_argument("--max-daily-partition-bytes", type=int, default=DEFAULT_MAX_DAILY_PARTITION_BYTES)
     inputs_p = sub.add_parser("inputs")
     inputs_p.add_argument("--year", type=int, required=True)
     inputs_p.add_argument("--admitted-events", required=True)
     inputs_p.add_argument("--out", required=True)
     inputs_p.add_argument("--receipt")
+    inputs_p.add_argument("--max-panel-bytes", type=int, default=DEFAULT_MAX_PANEL_BYTES)
+    inputs_p.add_argument("--max-daily-partition-bytes", type=int, default=DEFAULT_MAX_DAILY_PARTITION_BYTES)
     args = parser.parse_args(argv)
+    for flag, value in (("--max-panel-bytes", args.max_panel_bytes),
+                        ("--max-daily-partition-bytes", args.max_daily_partition_bytes)):
+        try:
+            _check_max_bytes(value)
+        except ValueError:
+            raise SystemExit(f"refused: {flag} must be a positive integer") from None
     if root is None:
         roots = [Path(__file__).resolve().parents[1]]
         plan_root = os.environ.get("INVESTING_PLAN_ROOT")

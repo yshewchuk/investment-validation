@@ -881,3 +881,69 @@ def test_load_trades_streaming_refuses_oversize_partition_file_before_iterating(
 
     with pytest.raises(SystemExit, match="refused"):
         fold.load_trades_streaming(_NoIterStore(), "STR-THRU", 2024, partition_files=lambda year: [part])
+
+
+def test_check_context_inputs_refuses_oversize_panel_before_daily(tmp_path):
+    panel = tmp_path / "panel.parquet"
+    panel.write_bytes(b"0123456789")  # 10 bytes
+    calls = []
+
+    def daily(year):
+        calls.append(year)
+        return []
+
+    with pytest.raises(fold.InputTooLarge, match="refused"):
+        fold.check_context_inputs(panel, daily, [2023, 2024], max_panel_bytes=4, max_daily_bytes=1 << 20)
+    assert calls == []  # the panel refusal stops the check before any daily partition is listed
+
+
+def test_check_context_inputs_refuses_oversize_daily_naming_year(tmp_path):
+    panel = tmp_path / "panel.parquet"
+    panel.write_bytes(b"abc")
+    small = tmp_path / "daily_2023.parquet"
+    small.write_bytes(b"abc")
+    big = tmp_path / "daily_2024.parquet"
+    big.write_bytes(b"0123456789")  # 10 bytes, over the 4-byte daily cap
+    files = {2023: [small], 2024: [big]}
+    with pytest.raises(fold.InputTooLarge, match="year 2024") as info:
+        fold.check_context_inputs(panel, lambda y: files[y], [2023, 2024],
+                                  max_panel_bytes=1 << 20, max_daily_bytes=4)
+    assert str(big) in str(info.value)
+
+
+def test_check_context_inputs_passes_with_missing_daily_partitions(tmp_path, capsys):
+    panel = tmp_path / "panel.parquet"
+    panel.write_bytes(b"abc")
+    fold.check_context_inputs(panel, lambda y: [], [2023, 2024], max_panel_bytes=1 << 20, max_daily_bytes=1 << 20)
+    assert "daily_partitions=0" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("flag", ["--max-panel-bytes", "--max-daily-partition-bytes"])
+def test_main_fit_refuses_nonpositive_byte_cap(tmp_path, flag):
+    out = tmp_path / "gate.joblib"
+    with pytest.raises(SystemExit, match="refused"):
+        fold.main(["fit", "--train-through", "2024", "--out", str(out), flag, "0"],
+                  wiring=_wiring(), root=tmp_path)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_real_wiring_build_refuses_oversize_panel_before_load(monkeypatch, tmp_path):
+    import engine.data.store as store
+    import engine.features as features
+    import engine.paths as paths
+
+    panel = tmp_path / "panel.parquet"
+    panel.write_bytes(b"0123456789")  # 10 bytes, over the 4-byte panel cap
+    monkeypatch.setattr(paths, "PANEL", panel)
+
+    def load_must_not_run(*args, **kwargs):
+        raise AssertionError("FeatureContext.load must not be called when the panel is refused")
+
+    def partitions_must_not_run(*args, **kwargs):
+        raise AssertionError("daily partitions must not be listed when the panel is refused")
+
+    monkeypatch.setattr(features.FeatureContext, "load", load_must_not_run)
+    monkeypatch.setattr(store, "_partition_files", partitions_must_not_run)
+    _, build, *_ = fold._real_wiring(2024, max_panel_bytes=4)
+    with pytest.raises(fold.InputTooLarge):
+        build(_entry_trades())
