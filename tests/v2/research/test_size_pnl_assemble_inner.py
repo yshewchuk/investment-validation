@@ -10,7 +10,7 @@ from experiments import size_pnl_decisions as decisions
 from experiments import size_pnl_tuning as tuning
 from experiments.size_pnl_shortvol import Refusal
 from tests.v2.research.test_size_pnl_assemble import (  # noqa: F401 (imported so the autouse check_plan no-op applies here)
-    EVENT_DATES, ROLES, TICKERS, _no_plan_admission, _rewrite, _rows, _section_lines, build, plan_frame)
+    EVENT_DATES, ROLES, TICKERS, _cells, _no_plan_admission, _rewrite, _rows, _section_lines, build, plan_frame)
 
 NEW_EVENTS = {"E05": "2025-08-15", "E06": "2025-11-15", "E11": "2023-08-15", "E12": "2024-02-15",
               "E13": "2024-05-15", "E14": "2024-08-15", "E15": "2023-11-15"}
@@ -37,12 +37,14 @@ def _corrupt_inner(out):
 HASH = "h" * 64  # the inputs the inner receipt and the inner_decisions body share; build writes inner.json without them
 
 
-def build_inner(tmp_path, inner_dates, *, outer_dates, tuning_override=None, stage="inner_decisions", mutate=None, body_override=None):
-    """A full outer run over every event in TICKERS, plus its inner decisions (decisions_inner.parquet and receipt)."""
+def build_inner(tmp_path, inner_dates, *, outer_dates, tuning_override=None, stage="inner_decisions", mutate=None, body_override=None,
+                pnl_scale=1.0):
+    """A full outer run over every event in TICKERS, plus its inner decisions (decisions_inner.parquet and receipt).
+    ``pnl_scale`` multiplies the inner rows' pnl_dollars, so the inner window's values differ from the outer's."""
     out = build(tmp_path, dates=outer_dates, plan_tickers=TICKERS)
     _rewrite(out / "receipts" / "inner.json", lambda body: {**body, "inputs": HASH, "scope": None})
     outer = tuning.load_receipt(out / "receipts" / "outer.json")
-    rows = [{**row, "in_sample": row["arm_or_rule"] == "retuned"} for row in _rows(inner_dates)]
+    rows = [{**row, "in_sample": row["arm_or_rule"] == "retuned", "pnl_dollars": row["pnl_dollars"] * pnl_scale} for row in _rows(inner_dates)]
     body = {"stage": stage, "models": list(ROLES),
             "tuning": outer["tuning"] if tuning_override is None else tuning_override,
             "c": {mid: 1.0 for mid in ROLES}, "emit_from": "2023-07-01", "ladder": "x", "scope": None, "inputs": HASH,
@@ -108,6 +110,33 @@ def test_inner_tables_print_separately_and_the_retuned_rows_are_marked_in_sample
     assert "IN-SAMPLE" in "\n".join(_section_lines(text, f"{INNER_PREFIX}T5"))
     insample = [line for line in _section_lines(text, "### T10") if "retuned: year_signs" in line]
     assert insample and any("2024*" in line for line in insample)
+
+
+def _model_rows(text, title, label):
+    return [_cells(line) for line in _section_lines(text, title) if line.startswith(f"| {label} |")]
+
+
+def test_inner_tables_carry_the_inner_windows_own_values(tmp_path, inner_events):
+    # Oracle by hand. Outer (2025): H-sq pays 10, 20, 30, 40 per event; H-abs pays one dollar more per event.
+    # Inner (pnl_scale=3, INNER_2024): the final pnl_dollars are 3x, so the bump is scaled too. H-sq takes 3*(10+20+30+40)=300
+    # (per event 75); H-abs takes 3*(11+21+31+41)=312 (per event 78). The H1 pair H difference is 3 per event inner, 1 outer.
+    out = build_inner(tmp_path, INNER_2024, outer_dates=OUTER_2025, pnl_scale=3.0)
+    assemble_mod.assemble(out, plan_frame(TICKERS), admitted=None)
+    text = (out / "REPORT.md").read_text(encoding="utf-8")
+    t2 = [_cells(line) for line in _section_lines(text, INNER_PREFIX + "T2") if line.startswith("| 20")]
+    assert t2 == [["2023Q3", "1"], ["2024Q1", "1"], ["2024Q2", "1"], ["2024Q3", "1"]]  # no 2025 quarter
+    t4 = _model_rows(text, INNER_PREFIX + "T4", "H-sq")
+    assert t4 == [["H-sq", "1", "4", "300.00", "75", "1"]]
+    assert _model_rows(text, INNER_PREFIX + "T4", "H-abs") == [["H-abs", "1", "4", "312.00", "78", "1"]]
+    assert _model_rows(text, INNER_PREFIX + "T5", "H-sq")[0][:6] == t4[0]  # the fixture pays the same under both arms
+    assert _model_rows(text, INNER_PREFIX + "T6", "H-sq") == [["H-sq", "R_L", "4", "0", "0", "75"], ["H-sq", "R_L2", "4", "0", "0", "75"]]
+    assert _model_rows(text, INNER_PREFIX + "T6", "H-abs")[0] == ["H-abs", "R_L", "4", "0", "0", "78"]
+    inner7 = next(_cells(line) for line in _section_lines(text, INNER_PREFIX + "T7") if line.startswith("| H1 | H | as_is |"))
+    outer7 = next(_cells(line) for line in _section_lines(text, "### T7") if line.startswith("| H1 | H | as_is |"))
+    assert inner7[3:6] == ["ok", "4", "3"]  # n 4, mean 3 * (+1) per event
+    assert outer7[3:6] == ["ok", "4", "1"]  # the outer window is unscaled: mean +1
+    assert _model_rows(text, "### T4", "H-sq") == [["H-sq", "1", "4", "100.00", "25", "1"]]  # the outer 25 per event
+    assert t4 != _model_rows(text, "### T4", "H-sq")
 
 
 INNER_REFUSALS = [
