@@ -328,6 +328,48 @@ def test_wide_spread_name_in_universe_is_now_taken():
     assert out.loc[0, "status"] == "taken" and pd.isna(out.loc[0, "reason"])
 
 
+def _bad_quote_chunk(eid):
+    """Spot 10, ATM call mid 2.0 and put mid 1.5: entry cost 3.5 is 35% of spot, above production's 30% ceiling."""
+    return lad._pack([rec(eid, 10.0, pair(10, call_e=(1.5, 2.5), put_e=(1.0, 2.0)))], {})
+
+
+@pytest.mark.parametrize("rule", ["R_L", "R_L2"])
+def test_bad_quote_straddle_is_not_taken(rule):
+    out = sd.decide(pd.DataFrame([ev("bq", 1.0)]), prior(), rule, _bad_quote_chunk("bq"))
+    assert out.loc[0, "status"] == "not_taken" and out.loc[0, "reason"] == "bad_quote"
+
+
+def test_bad_quote_exactly_30_percent_is_not_refused():
+    # Mids 1.5 + 1.5 = 3.0 at spot 10 is exactly 30.0%, which production allows (strictly greater is refused).
+    chunk = lad._pack([rec("eq", 10.0, pair(10, call_e=(1.0, 2.0), put_e=(1.0, 2.0)))], {})
+    out = sd.decide(pd.DataFrame([ev("eq", 1.0)]), EMPTY, "R_L2", chunk)
+    assert out.loc[0, "status"] == "taken" and pd.isna(out.loc[0, "reason"])
+
+
+def test_bad_quote_skips_the_gate_callable():
+    calls = []
+
+    def gate(event):
+        calls.append(event["event_id"])
+        return "taken", None
+
+    out = sd.decide(pd.DataFrame([ev("bq", 1.0)]), EMPTY, sd.GATE_RULE, _bad_quote_chunk("bq"), gate=gate)
+    assert calls == []
+    assert out.loc[0, "status"] == "not_taken" and out.loc[0, "reason"] == "bad_quote"
+
+
+def test_normal_chunk_still_reaches_the_gate_callable():
+    calls = []
+
+    def gate(event):
+        calls.append(event["event_id"])
+        return "taken", None
+
+    out = sd.decide(pd.DataFrame([ev("g", 1.0)]), EMPTY, sd.GATE_RULE, good("g"), gate=gate)
+    assert calls == ["g"]
+    assert out.loc[0, "status"] == "taken" and pd.isna(out.loc[0, "reason"])
+
+
 def test_history_rows_keeps_only_the_straddle_universe():
     events = pd.DataFrame([ev("lo", 2.0, mcap=0.5e9), ev("hi", 0.5, mcap=20e9), ev("nan", 3.0, mcap=NAN)])
     decisions = sd.decide(events, EMPTY, "R_L2", good("lo", "hi", "nan"))
