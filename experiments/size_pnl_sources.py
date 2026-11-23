@@ -18,12 +18,13 @@ from engine.v2.data.repository import Repository
 from engine.v2.foundation import ArtifactError, ArtifactStore, DocumentError, content_hash, from_document, to_document
 from engine.v2.ops.errors import fail
 from engine.v2.ops.experiments import experiment_spec_from_document
-from experiments import size_pnl_driver, size_pnl_inputs, size_pnl_ladder, size_pnl_readers, size_pnl_tables
+from experiments import size_pnl_driver, size_pnl_gprod, size_pnl_inputs, size_pnl_ladder, size_pnl_readers, size_pnl_tables
 from experiments.magnitude_search_plan import PLAN_V2, PLAN_V3
 from experiments.magnitude_search_records import read_record
 from experiments.native_registration import read_native_registration
 
 _KEYS = ("catalog", "store_root", "spec", "plan_ref", "snapshot_id", "crush_snapshot_id", "production_hash")
+_GATE_KEYS = ("gate_fold", "gate_inputs")
 _LIMIT = 1 << 20
 MAX_OBJECT_BYTES = 1 << 28
 MAX_PLAN_BYTES = 64 * 1024 * 1024
@@ -63,8 +64,9 @@ def _config(path):
     if path is None:
         raise _refuse("sources_config_invalid", "--sources-config is required")
     doc = _read_json(path, "sources_config_invalid")
-    if not isinstance(doc, dict) or set(doc) != set(_KEYS) or not all(isinstance(v, str) and v.strip() for v in doc.values()):
-        raise _refuse("sources_config_invalid", "sources config must map exactly the required keys to non-blank strings")
+    if not (isinstance(doc, dict) and set(_KEYS) <= set(doc) <= set(_KEYS) | set(_GATE_KEYS)
+            and all(isinstance(doc[k], str) and doc[k].strip() for k in _KEYS)):
+        raise _refuse("sources_config_invalid", "sources config must map the required keys to non-blank strings; gate_fold and gate_inputs are optional {path, sha256} objects, given together")
     return doc
 
 
@@ -246,14 +248,14 @@ def _derived(derive, plan):
 
 
 def assemble(*, plan, read, selection, expected, panel_id, admit, admitted, snapshot_id, load_index, tables, production_hash,
-             crush_table_hash):
+             crush_table_hash, gate=None):
     pair_candidates, blend_ids = _derived(derive_roster_inputs, plan)
     return size_pnl_driver.Sources(
         plan=plan, read=read, selection=selection, pair_candidates=pair_candidates, blend_ids=blend_ids,
         expected=expected, panel_id=panel_id, admit=admit, admitted=admitted, fetch=tables.fetch,
         production_hash=production_hash, production_table_hash=tables.table_hash, plan_frame=tables.plan_frame,
         load_index=load_index, facts=tables.facts, snapshot_id=snapshot_id, crush_table_hash=crush_table_hash,
-        exclusions=tables.exclusions)
+        exclusions=tables.exclusions, gate=gate)
 
 
 def build_sources(args):
@@ -268,6 +270,7 @@ def build_sources(args):
         ref = from_document(ArtifactRef, _read_json(cfg["plan_ref"], "input_unreadable"))
     except (DocumentError, TypeError):
         raise _refuse("input_unreadable", "a SIZE input document is invalid") from None
+    gate = size_pnl_gprod.load_gate({k: cfg[k] for k in _GATE_KEYS if k in cfg})  # before the catalog opens: a refused gate leaves no connection
     conn, store = _open(cfg)
     try:
         registration = read_native_registration(conn, store, spec)
@@ -296,13 +299,13 @@ def build_sources(args):
         sources = assemble(plan=plan, read=read, selection=selection, expected=expected, panel_id=panel_id,
                            admit=admit, admitted=admitted, snapshot_id=cfg["snapshot_id"], load_index=load_index,
                            tables=tables, production_hash=cfg["production_hash"],
-                           crush_table_hash=tables.crush_table_hash)
+                           crush_table_hash=tables.crush_table_hash, gate=gate)
     except sqlite3.Error:
         conn.close()
         raise fail("RESOURCE_UNAVAILABLE", "catalog unavailable", details={"reason": "catalog_unavailable"}) from None
     except BaseException:
         conn.close()
         raise
-    print(f"[pnl_sources] opened snapshot={cfg['snapshot_id']} crush_snapshot={cfg['crush_snapshot_id']} admitted={len(admitted['events'])}",
+    print(f"[pnl_sources] opened snapshot={cfg['snapshot_id']} crush_snapshot={cfg['crush_snapshot_id']} admitted={len(admitted['events'])} gate={'G_PROD' if gate else 'none'}",
           file=sys.stderr)
     return sources

@@ -1,5 +1,6 @@
 """EXP-188 S9b: the outer stage and the smoke ids (``--event-ids``) with small fakes. Real inputs and readers; pool,
 simulation, scorers and tuning stubbed."""
+import dataclasses
 import json
 import shutil
 import sys
@@ -12,6 +13,7 @@ import pytest
 from engine.v2.foundation import content_hash
 from engine.v2.ops.errors import OpsError
 from experiments import size_pnl_driver as driver
+from experiments import size_pnl_gprod as gp
 from experiments import size_pnl_readers as readers
 from experiments import size_pnl_tuning as tuning
 from experiments.size_pnl_shortvol import Refusal
@@ -705,6 +707,51 @@ def test_changed_ladder_quote_refuses_an_outer_replay(tmp_path, outer_stubs, mon
     after = (tmp_path / "decisions.parquet").stat()
     assert (after.st_ino, after.st_mtime_ns) == (before.st_ino, before.st_mtime_ns)
     assert not list(tmp_path.glob("*.tmp"))
+
+
+# ---- G_PROD (Amendment 3): the gate's straddle rows and the receipt ------------------
+
+def _gprod_fake(monkeypatch):
+    """Replaces the per-model decider: every event is a not_taken row. Records the month start and the labels it was built with."""
+    built, seen_labels = [], []
+
+    def fake(gate_, table, labels, start_m):
+        built.append(start_m)
+        seen_labels.append(labels)
+
+        def decide(events, chunk_):
+            ids = events["event_id"].astype(str).to_numpy()
+            return pd.DataFrame({"event_id": ids, "event_date": events["event_date"].to_numpy(), "edge": 0.0, "cutoff": np.nan,
+                                 "rel_spread": 0.1, "status": "not_taken", "reason": "below_gate_threshold"})[driver.straddle.DECISION_COLS]
+        return decide
+
+    monkeypatch.setattr(driver.gprod, "month_decider", fake)
+    return built, seen_labels
+
+
+def test_outer_with_a_gate_adds_g_prod_rows_and_binds_the_gate_in_the_receipt(tmp_path, outer_stubs, monkeypatch):
+    gate = gp.Gate(None, ("f",), 0.05, pd.DataFrame({"f": [0.0]}, index=["x"]), "a" * 64, "b" * 64)
+    built, seen_labels = _gprod_fake(monkeypatch)
+    _run_both(tmp_path, monkeypatch, dataclasses.replace(sources(), gate=gate))
+    receipt = tuning.load_receipt(tmp_path / "receipts" / "outer.json")
+    frame = pd.read_parquet(tmp_path / "decisions.parquet")
+    gated = frame[(frame["book"] == "straddle") & (frame["arm_or_rule"] == "G_PROD")]
+    assert len(gated) > 0
+    assert set(gated["model_id"]) == set(receipt["models"])  # every model in the run
+    for mid in receipt["models"]:
+        assert set(gated.loc[gated["model_id"] == mid, "event_id"].astype(str)) == {"E3", "E4"}  # one decision per 2025 event
+    assert (pd.to_datetime(gated["event_date"]) >= pd.Timestamp("2025-01-01")).all()  # output months only
+    assert set(built) == {pd.Timestamp("2025-01-01"), pd.Timestamp("2025-02-01")}  # built for the outer months only
+    assert seen_labels and all(isinstance(labels, pd.DataFrame) and len(labels) > 0 for labels in seen_labels)
+    assert receipt["gate"] == gp.receipt_body(gate)
+
+
+def test_outer_without_a_gate_has_no_g_prod_rows_and_no_gate_key(tmp_path, outer_stubs, monkeypatch):
+    monkeypatch.setattr(driver.gprod, "month_decider", lambda *a, **kw: pytest.fail("no gate: the G_PROD decider must not be built"))
+    _run_both(tmp_path, monkeypatch, sources(gate=None))
+    frame = pd.read_parquet(tmp_path / "decisions.parquet")
+    assert not (frame["arm_or_rule"] == "G_PROD").any()
+    assert "gate" not in tuning.load_receipt(tmp_path / "receipts" / "outer.json")
 
 
 # ---- shared scoreability (design section 4) and the decisions cap ---------------------
