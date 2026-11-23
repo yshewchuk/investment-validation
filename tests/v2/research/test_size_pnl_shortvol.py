@@ -541,3 +541,37 @@ def test_mid_marks_keeps_a_rung3_row_at_zero_with_its_label():
     for mid_marks in (False, True):
         row = sv.score(chunk, events, decisions, "CND-PS", 0.5, mid_marks=mid_marks).iloc[0]
         assert row["exit_value"] == 0.0 and row["rung"] == EXIT_UNQUOTED
+
+
+# ---- secured cash (Amendment 2) -------------------------------------------
+
+def test_secured_matches_the_sold_put_legs_and_ignores_score_lots():
+    from experiments import size_pnl_account as acct
+
+    chunk = chunk_of(("A", {94: (2.0, 2.0, 1), 106: (2.0, 2.0, 1)}))
+    out = sv.secured(chunk, events_for("A"), taken(chunk, "A"), "CND-PS")
+    legs, _ = sv.resolve(chunk, 0, "CND-PS", PRED, 1.0)
+    expected = sum(leg["qty"] * leg["strike"] * 100 for leg in legs if leg["side"] == "sell" and leg["qty"] > 0)
+    assert len(out) == 1 and out.iloc[0]["event_id"] == "A"
+    assert out.iloc[0]["secured_per_contract"] == pytest.approx(expected) and expected > 0
+    assert out.iloc[0]["secured_per_contract"] == pytest.approx(acct.secured_per_contract(legs))
+
+
+def test_secured_returns_only_taken_rows():
+    chunk = chunk_of(("A", {}))
+    decisions = taken(chunk, "A").assign(status="not_taken")
+    assert len(sv.secured(chunk, events_for("A"), decisions, "CND-PS")) == 0
+
+
+def test_secured_refuses_a_decision_priced_at_another_c():
+    chunk = chunk_of(("A", {}))
+    decisions = taken(chunk, "A", c=2.0)  # priced at c = 2.0; the call asks for c = 1.0
+    with pytest.raises(ValueError, match="decision was not priced at this c"):
+        sv.secured(chunk, events_for("A"), decisions, "CND-PS", c=1.0)
+
+
+def test_secured_needs_a_c_column():
+    chunk, events = chunk_of(("A", {})), events_for("A")
+    decisions = taken(chunk, "A").drop(columns="c")
+    with pytest.raises(ValueError, match="alpha and c columns"):
+        sv.secured(chunk, events, decisions, "CND-PS")
