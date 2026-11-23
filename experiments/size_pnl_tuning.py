@@ -19,7 +19,7 @@ import pandas as pd
 
 from experiments.size_pnl_shortvol import NAMES, Refusal, decide, score, score_events
 
-C_GRID = (0.5, 0.6, 0.67, 0.75, 0.9, 1.0, 1.1, 1.25, 1.5)
+C_GRID = (0.5, 0.6, 0.67, 0.75, 0.9, 1.0)
 INNER_YEARS = (2023, 2024)
 MIN_TRADES = 300
 ALPHA = 0.5
