@@ -80,7 +80,8 @@ def history(n=300):
     table = pd.DataFrame({"event_date": pd.Timestamp("2024-03-01") + pd.to_timedelta(np.arange(n) % 300, unit="D"),
                           "pred_move": pred_move, "pred_crush": -15.0}, index=index)
     rng = np.random.default_rng(3)
-    labels = pd.DataFrame({"abs_move": pred_move + rng.normal(0, 1.5, n), "crush_pct_iv30": -15.0}, index=index)
+    labels = pd.DataFrame({"abs_move": pred_move + rng.normal(0, 1.5, n), "crush_pct_iv30": -15.0,
+                           "available": (table["event_date"] + pd.Timedelta(days=1)).dt.date.astype(str)}, index=index)  # printed the day after the event
     return table, labels
 
 
@@ -179,6 +180,28 @@ def test_load_gate_refuses_inputs_with_wrong_columns(tmp_path, inputs):
     assert _refusal(exc) == ("INVALID_EXPERIMENT_SPEC", "gate_inputs_invalid")
 
 
+def test_load_gate_refuses_a_nul_path(tmp_path):
+    binding = write_gate_files(tmp_path)
+    binding["gate_fold"] = {"path": "a\0b", "sha256": "0" * 64}  # os.open raises ValueError on a NUL byte
+    with pytest.raises(OpsError) as exc:
+        gp.load_gate(binding)
+    assert _refusal(exc) == ("INVALID_EXPERIMENT_SPEC", "gate_fold_missing")
+
+
+def test_load_gate_refuses_inputs_over_the_decoded_cap(tmp_path, monkeypatch):
+    monkeypatch.setattr(gp, "MAX_INPUT_ROWS", 1)
+    with pytest.raises(OpsError) as exc:
+        gp.load_gate(write_gate_files(tmp_path, inputs=inputs_frame(["E1", "E2"])))  # two rows against a cap of one
+    assert _refusal(exc) == ("INVALID_EXPERIMENT_SPEC", "gate_inputs_invalid")
+
+
+def test_load_gate_refuses_an_oversize_file(tmp_path, monkeypatch):
+    monkeypatch.setattr(gp, "MAX_FOLD_BYTES", 10)
+    with pytest.raises(OpsError) as exc:
+        gp.load_gate(write_gate_files(tmp_path))
+    assert _refusal(exc) == ("INVALID_EXPERIMENT_SPEC", "gate_fold_invalid")
+
+
 # ---- scoring ----------------------------------------------------------------
 
 def test_scores_replace_only_the_five_model_columns():
@@ -231,23 +254,20 @@ def test_thin_pool_is_undetermined_not_no(tmp_path):
     assert out.loc["hi", "status"] == "undetermined" and out.loc["hi", "reason"] == "thin_pool"
 
 
-def test_pool_excludes_events_on_or_after_the_month_start(tmp_path):
+def test_month_decider_enforces_label_availability():
     table, labels = history()
-    late = [f"L{i}" for i in range(5)]
-    late_rows = pd.DataFrame({"event_date": START + pd.to_timedelta(np.arange(5), unit="D"), "pred_move": 5.0, "pred_crush": -15.0},
-                             index=late)
-    table = pd.concat([table, late_rows])
-    labels = pd.concat([labels, pd.DataFrame({"abs_move": 500.0, "crush_pct_iv30": -15.0}, index=late)])
-    gate = gp.load_gate(write_gate_files(tmp_path, inputs=inputs_frame(["hi"])))
-    out = gp.month_decider(gate, table, labels, START)(pd.DataFrame([ev("hi", 3.0)]), good("hi")).set_index("event_id")
-    assert out.loc["hi", "status"] == "taken"
-    before = gp.pool.pool_history(table[table["event_date"] < START], labels)
-    assert before["err_move"].abs().max() < 50
+    late = [f"L{i}" for i in range(5)]  # event before START, outcome printed only after the month start
+    table = pd.concat([table, pd.DataFrame({"event_date": pd.Timestamp("2024-12-30"), "pred_move": 5.0, "pred_crush": -15.0}, index=late)])
+    labels = pd.concat([labels, pd.DataFrame({"abs_move": 500.0, "crush_pct_iv30": -15.0, "available": "2025-01-05"}, index=late)])
     recorder = Recorder()
-    probe = gp.Gate(recorder, tuple(FEATURES), fold.REGISTERED_THRESHOLD,
-                    inputs_frame(["hi"]).set_index("event_id")[FEATURES].astype(float), "a", "b")
-    gp._scores(probe, pd.DataFrame([ev("hi", 3.0)]), before["pred_abs_move"].to_numpy(), before["err_move"].to_numpy())
-    assert dict(zip(FEATURES, recorder.seen[0]))["pred_abs_move_sd"] < 5
+    gate = gp.Gate(recorder, tuple(FEATURES), fold.REGISTERED_THRESHOLD,
+                   inputs_frame(["hi"]).set_index("event_id")[FEATURES].astype(float), "a", "b")
+    gp.month_decider(gate, table, labels, START)(pd.DataFrame([ev("hi", 3.0)]), good("hi"))
+    assert dict(zip(FEATURES, recorder.seen[0]))["pred_abs_move_sd"] < 5  # the unprinted 500.0 outcomes are not in the pool
+    printed = labels.copy()
+    printed.loc[late, "available"] = "2024-12-31"  # now printed before the month start
+    gp.month_decider(gate, table, printed, START)(pd.DataFrame([ev("hi", 3.0)]), good("hi"))
+    assert dict(zip(FEATURES, recorder.seen[0]))["pred_abs_move_sd"] > 5  # the filter, not the data, decides
 
 
 # ---- straddle contract ------------------------------------------------------

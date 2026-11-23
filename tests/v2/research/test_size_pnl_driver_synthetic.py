@@ -407,6 +407,8 @@ def test_month_gate_adds_g_prod_rows_on_output_months_only(monkeypatch):
     frames, st = run(pd.Timestamp("2023-01-01"), gate_stub)
     gated = [f for f in frames if (f["arm_or_rule"] == "G_PROD").any()]
     assert len(gated) == 1 and (gated[0]["book"] == "straddle").all() and len(gated[0]) == 2
+    assert (gated[0]["status"] == "not_taken").all() and (gated[0]["reason"] == "below_gate_threshold").all()
+    assert set(gated[0]["event_id"].astype(str)) == {"E1", "E2"}
     assert len(st["edges"]) == 2
 
 

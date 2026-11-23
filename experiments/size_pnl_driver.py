@@ -485,7 +485,7 @@ def _outer(src, out, ready, receipts, plan, ids, facts_all, labels):
             dropped |= bad
             for mid in ready:
                 month_frames += _month(mid, at[mid], scored[mid][0], bad, chunk, start_m, state[mid], sessions=sessions,
-                                       gate=None if gate is None else gprod.month_decider(gate, pools[mid], _printed(labels, start_m.date().isoformat()), start_m))
+                                       gate=None if gate is None else gprod.month_decider(gate, pools[mid], labels, start_m))
             frames += month_frames
             done += 1
             rate = done / max(time.monotonic() - started, 1e-9)

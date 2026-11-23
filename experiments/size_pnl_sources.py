@@ -66,7 +66,7 @@ def _config(path):
     doc = _read_json(path, "sources_config_invalid")
     if not (isinstance(doc, dict) and set(_KEYS) <= set(doc) <= set(_KEYS) | set(_GATE_KEYS)
             and all(isinstance(doc[k], str) and doc[k].strip() for k in _KEYS)):
-        raise _refuse("sources_config_invalid", "sources config must map the required keys (and optionally gate_fold and gate_inputs) to non-blank strings")
+        raise _refuse("sources_config_invalid", "sources config must map the required keys to non-blank strings; gate_fold and gate_inputs are optional {path, sha256} objects, given together")
     return doc
 
 

@@ -9,14 +9,17 @@ from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
+import pyarrow.parquet as pq
 
 from engine.v2.ops.errors import fail
-from experiments import size_pnl_gate_fold as fold, size_pnl_pool as pool, size_pnl_straddle as straddle
+from experiments import label_availability, size_pnl_gate_fold as fold, size_pnl_pool as pool, size_pnl_straddle as straddle
 
 RULE = straddle.GATE_RULE
 MODEL_COLS = ("pred_abs_move", "pred_abs_move_p10", "pred_abs_move_p90", "pred_abs_move_sd", "forecast_edge")
-MAX_FOLD_BYTES = 1 << 30
-MAX_INPUTS_BYTES = 1 << 30
+MAX_FOLD_BYTES = 256 << 20
+MAX_INPUTS_BYTES = 256 << 20
+MAX_INPUT_ROWS = 5_000_000
+MAX_INPUT_DECODED_BYTES = 2 << 30
 _INVALID = "INVALID_EXPERIMENT_SPEC"
 _BINDING_KEYS = ("gate_fold", "gate_inputs")
 _SHA = re.compile(r"[0-9a-f]{64}")
@@ -44,7 +47,7 @@ def _read_verified(item, what, max_bytes):
         raise _refuse("gate_binding_invalid", f"gate_{what} must hold exactly a path and a sha256")
     try:
         fd = os.open(item["path"], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    except OSError:
+    except (OSError, ValueError):  # a NUL byte in the path raises ValueError
         raise _refuse(f"gate_{what}_missing", f"the gate {what} is missing or not a plain file") from None
     with os.fdopen(fd, "rb") as handle:
         info = os.fstat(handle.fileno())
@@ -84,6 +87,7 @@ def load_gate(binding):
     raw_fold = _read_verified(binding["gate_fold"], "fold", MAX_FOLD_BYTES)
     raw_inputs = _read_verified(binding["gate_inputs"], "inputs", MAX_INPUTS_BYTES)
     import joblib  # lazy: only a configured gate needs it
+    # the fold is sha256-pinned and capped at MAX_FOLD_BYTES; joblib has no pre-decode size bound
     try:
         payload = joblib.load(io.BytesIO(raw_fold))
     except Exception:
@@ -91,6 +95,12 @@ def load_gate(binding):
     if not _valid_fold(payload):
         raise _refuse("gate_fold_invalid", "the gate fold artifact is not the registered gate (features, threshold or train_through)")
     features = list(payload["features"])
+    try:
+        meta = pq.ParquetFile(io.BytesIO(raw_inputs)).metadata
+    except Exception:
+        raise _refuse("gate_inputs_invalid", "the gate inputs cannot be read as parquet") from None
+    if meta.num_rows > MAX_INPUT_ROWS or sum(meta.row_group(i).total_byte_size for i in range(meta.num_row_groups)) > MAX_INPUT_DECODED_BYTES:
+        raise _refuse("gate_inputs_invalid", "the gate inputs decode to more than the size cap")
     try:
         table = pd.read_parquet(io.BytesIO(raw_inputs))
     except Exception:
@@ -142,9 +152,11 @@ def _scores(gate, events, pool_pred, pool_res):
 def month_decider(gate, table, labels, start_m):
     """The per-model, per-month decision callable: decide(events, chunk) -> decision rows for G_PROD.
 
-    The pool is the model's own strictly-earlier, printed-label pool. Undetermined (a missing input, a NaN input,
+    The pool is the model's own strictly-earlier, printed-label pool. ``labels`` carries the `available` column; only labels
+    printed strictly before the month start enter the pool. Undetermined (a missing input, a NaN input,
     a thin pool) is never counted as "no".
     """
+    labels = labels[label_availability.printed_before(labels["available"], start_m.date().isoformat())]
     history = pool.pool_history(table[table["event_date"] < start_m], labels).dropna(subset=["pred_abs_move", "err_move"])
     pred = history["pred_abs_move"].to_numpy(dtype=float)
     res = history["err_move"].to_numpy(dtype=float)
