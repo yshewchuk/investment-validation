@@ -86,7 +86,10 @@ def _contrast_cell(frame, events, pair, legs, quarter_of, tick):
     """The contrast summary, or the reason it is not testable. ``pair`` is (median, mean) as labels."""
     median, mean = pair
     books = {book for book, _value, _sign in legs}
-    ev = sorted({e for label in pair for book in books for e in events.get((label, book), ())})
+    # The paired events: for each book, the union over the pair's labels of that book's events; then the intersection over the books.
+    # One book gives that book's paired population (H1, H2); H3 crosses both books, so it uses E intersect E_str (Amendment 5).
+    per_book = [set().union(*(set(events.get((label, book), ())) for label in pair)) for book in books]
+    ev = sorted(set.intersection(*per_book))
     d = sum(sign * (_pnl(frame, median, book, value, ev) - _pnl(frame, mean, book, value, ev)) for book, value, sign in legs)
     quarters = np.array([quarter_of[e] for e in ev])
     tickers = np.array([tick[e] for e in ev])
@@ -125,11 +128,12 @@ def _shares(frame):
     return shares
 
 
-def _run_section(outer, undetermined_excluded):
+def _run_section(outer, undetermined_excluded, undetermined_straddle_excluded):
     items = [("content_hash", outer["content_hash"]), ("decisions_sha256", outer["decisions_sha256"]), ("rows", outer["rows"]),
              ("scope", "full"), ("common_dropped", outer["common_dropped"]),
              ("scoreability_dropped", outer["scoreability_dropped"]), ("ladder_skipped", outer["ladder_skipped"]),
-             ("undetermined_events_excluded", undetermined_excluded)]
+             ("undetermined_events_excluded", undetermined_excluded),
+             ("undetermined_straddle_events_excluded", undetermined_straddle_excluded)]
     return "### Run\n\n" + "\n".join(f"- {key}: {value}" for key, value in items)
 
 
@@ -309,7 +313,7 @@ def _sections(out, outer, inputs, inner, tuned, tickers, stored_gate=None):
     """The report's sections in order. Reads receipt fields throughout; the caller maps a missing or mistyped field to a refusal.
     Returns (sections, inner row count)."""
     raw = _load_decisions(out, outer)
-    gate_rows = raw["arm_or_rule"] == GATE_RULE  # Amendment 3: G_PROD rows never enter E, T1-T10 or the verdicts; only the Amendment 2 accounts read them
+    gate_rows = raw["arm_or_rule"] == GATE_RULE  # Amendment 3: G_PROD rows never enter E, E_str, T1-T10 or the verdicts; only the Amendment 2 accounts read them
     raw, gate_raw = raw[~gate_rows], raw[gate_rows]
     inner_raw = _load_inner(out, outer, inner, tuned)
     tick = {str(e): str(t) for e, t in tickers.items()}
@@ -339,15 +343,20 @@ def _sections(out, outer, inputs, inner, tuned, tickers, stored_gate=None):
     _check(gate_raw)
 
     def _window(raw):
-        """One window's evaluated frame (E) with its undetermined count; the checks run on the raw rows."""
-        # Checked on the raw rows, before population drops the events with an undetermined row that leaves E: a bad row refuses, it is never skipped.
+        """One window's evaluated frame and its two undetermined counts: short-vol E and straddle E_str (Amendment 5).
+        Each population is computed from its own book's rows, so a straddle row never removes an event from E and a short-vol row never
+        removes one from E_str. The checks run on the raw rows."""
+        # Checked on the raw rows, before population drops the events with an undetermined row that leaves its population: a bad row refuses, it is never skipped.
         _check(raw)
-        frame = synthetic_eval.population(raw)  # E: no undetermined row that leaves E under any model; short-vol non-trades stay in E at P&L 0
+        short = synthetic_eval.population(raw[raw["book"] == "short_vol"])  # E: no undetermined short-vol row that leaves E; short-vol non-trades stay in E at P&L 0
+        long = synthetic_eval.population(raw[raw["book"] == "straddle"])  # E_str: no undetermined straddle row that leaves E_str under R_L or R_L2 (G_PROD rows are already stripped)
+        frame = pd.concat([short, long])
         if frame.empty:
             raise _refuse("report_decisions_empty", "no event in decisions.parquet is in the evaluated population")
-        undetermined = raw["event_id"].nunique() - frame["event_id"].nunique()
+        undet_e = raw.loc[raw["book"] == "short_vol", "event_id"].nunique() - short["event_id"].nunique()
+        undet_str = raw.loc[raw["book"] == "straddle", "event_id"].nunique() - long["event_id"].nunique()
         frame = frame.assign(taken=frame["status"] == "taken", quarter=frame["event_date"].dt.to_period("Q").astype(str))
-        return frame.assign(model_id=frame["model_id"].map(label_of)), undetermined  # tables show labels such as M0 or H-sq+H-abs
+        return frame.assign(model_id=frame["model_id"].map(label_of)), undet_e, undet_str  # tables show labels such as M0 or H-sq+H-abs
 
     def _context(frame):
         """The per-window inputs of the contrasts and the rung counts: events by (model, book), quarter of each event, and the counts."""
@@ -372,12 +381,12 @@ def _sections(out, outer, inputs, inner, tuned, tickers, stored_gate=None):
                     report.t7_contrasts(shown)]
         return sections, shown, classify
 
-    frame, undetermined_events = _window(raw)
+    frame, undet_e, undet_str = _window(raw)
     ctx_o = _context(frame)
     if inner_raw is not None:
         _check(inner_raw)  # every inner row, the outer-excluded models' included, is checked before the filter
         inner_raw = inner_raw[inner_raw["model_id"].isin(outer["models"])]  # the inner window of the models the outer ran; an empty result refuses in _window
-    inner_frame, inner_undetermined = _window(inner_raw) if inner_raw is not None else (None, 0)
+    inner_frame, inner_undet_e, inner_undet_str = _window(inner_raw) if inner_raw is not None else (None, 0, 0)
     inner_present = inner_frame is not None
     combined = pd.concat([inner_frame, frame]) if inner_present else frame  # T10 pools the windows by the registered rule
     ctx_c = _context(combined)
@@ -386,14 +395,16 @@ def _sections(out, outer, inputs, inner, tuned, tickers, stored_gate=None):
     # Without an inner window the pooled frame is the outer frame: reuse its contrasts rather than bootstrapping them again.
     shown_c, classify_c = (_contrasts(combined, ctx_c["events"], roster, role_model, label_of, outer_models, ctx_c["quarter_of"], tick)
                            if inner_present else (shown_o, classify_o))
-    note = (f"events with an undetermined burn-in or missing-data row (any book) or an undetermined straddle row are excluded from E: {undetermined_events}. "
+    note = (f"short-vol undetermined rows exclude events from E: {undet_e}; "
+            f"straddle undetermined rows exclude events from E_str (H2, T6, straddle T7, G_PROD, the H2 verdict): {undet_str}; "
+            f"H3 uses E intersect E_str. "
             f"short-vol non-trades (e.g. width_declined) stay in E at P&L 0. "
             f"per-quarter candidates and dropped counts are not recorded in decisions.parquet (not_testable); run totals from the receipt: "
             f"common_dropped={outer['common_dropped']}, scoreability_dropped={outer['scoreability_dropped']}.")
     sections = [
-        _run_section(outer, undetermined_events),
+        _run_section(outer, undet_e, undet_str),
         report.t1_roster(_roster_rows(roster, outer_models, inputs, inner, label_of)),
-        report.t2_in_e(frame[["event_id", "quarter"]].drop_duplicates(), note),
+        report.t2_in_e(frame[frame["book"] == "short_vol"][["event_id", "quarter"]].drop_duplicates(), note),
         _not_testable("T3 Forecast calibration", "labels_not_in_decisions"),
         *o_tables,
         report.t8_rungs(_shares(frame), models=[label_of[m] for m in outer["models"]]),
@@ -402,10 +413,11 @@ def _sections(out, outer, inputs, inner, tuned, tickers, stored_gate=None):
     ]
     if inner_present:  # the inner window, after the outer tables: never the headline
         ctx_i = _context(inner_frame)
-        inner_note = (f"events with an undetermined burn-in or missing-data row (any book) or an undetermined straddle row are excluded from E: "
-                      f"{inner_undetermined}. Inner window only; run totals are the outer receipt's.")
+        inner_note = (f"short-vol undetermined rows exclude events from E: {inner_undet_e}; "
+                      f"straddle undetermined rows exclude events from E_str (H2, T6, straddle T7, G_PROD, the H2 verdict): {inner_undet_str}; "
+                      f"H3 uses E intersect E_str. Inner window only; run totals are the outer receipt's.")
         (t4_as_is, t5_retuned, t6, t7), _shown_i, _classify_i = tables(inner_frame, ctx_i)
-        t2_inner = report.t2_in_e(inner_frame[["event_id", "quarter"]].drop_duplicates(), inner_note)
+        t2_inner = report.t2_in_e(inner_frame[inner_frame["book"] == "short_vol"][["event_id", "quarter"]].drop_duplicates(), inner_note)
         t5_retuned += "\n\nretuned rows are IN-SAMPLE: each model's c was chosen on these same years."
         sections += [_inner_title(text) for text in (t2_inner, t4_as_is, t5_retuned, t6, t7)]
     inner_rows = len(inner_raw) if inner_present else 0
@@ -421,7 +433,7 @@ def _sections(out, outer, inputs, inner, tuned, tickers, stored_gate=None):
             shown_m, classify_mid = shown_mo, classify_mo
         sections += [_sens(text) for text in (*mid, _verdicts(classify_mid, missing_years, inner_present, shown_m))]
     if not gate_raw.empty:  # Amendment 3: the G_PROD sections, after the Amendment 1 ones and before the accounts
-        sections += gprod_report.sections(gate_raw, frame, label_of=label_of, role_model=role_model, roster=roster, outer_models=outer_models,
+        sections += gprod_report.sections(gate_raw, frame[frame["book"] == "straddle"], label_of=label_of, role_model=role_model, roster=roster, outer_models=outer_models,
                                           quarter_of=ctx_o["quarter_of"], tick=tick, stored_gate=stored_gate)
     every = pd.concat([raw, gate_raw])  # Amendment 2 accounts read every row, G_PROD included
     taken_all = every[every["status"] == "taken"].assign(model_id=every["model_id"].map(label_of), taken=True)  # Amendment 2: every taken row, not only E

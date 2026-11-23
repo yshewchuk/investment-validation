@@ -6,8 +6,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from engine.entry_rules import MCAP_FLOOR
 from engine.portfolio import CAPITAL_PER_TRADE, CONTRACT_MULTIPLIER
+from engine.score import GATE_MCAP_FLOOR
 from experiments import size_pnl_ladder as lad
 from experiments import size_pnl_readers as rd
 from experiments import size_pnl_straddle as sd
@@ -295,18 +295,58 @@ def test_spread_exactly_max_is_not_filtered():
 
 
 def test_mcap_exactly_floor_is_not_filtered():
-    out = sd.decide(pd.DataFrame([ev("m", 1.0, mcap=MCAP_FLOOR)]), EMPTY, "R_L2", good("m"))
+    out = sd.decide(pd.DataFrame([ev("m", 1.0, mcap=GATE_MCAP_FLOOR)]), EMPTY, "R_L2", good("m"))
     assert out.loc[0, "status"] == "taken"
 
 
 def test_universe_filters_are_not_taken():
-    chunk = lad._pack([rec("small", 100.0, pair(100)),
-                       rec("wide", 100.0, pair(100, put_e=(1.0, 2.0), call_e=(1.0, 2.0)))], {})
-    events = pd.DataFrame([ev("small", 1.0, mcap=5e9), ev("wide", 1.0)])
+    chunk = lad._pack([rec("small", 100.0, pair(100))], {})
+    events = pd.DataFrame([ev("small", 1.0, mcap=0.5e9)])
     out = sd.decide(events, prior(), "R_L", chunk).set_index("event_id")
-    assert set(out.index) == {"small", "wide"}
-    assert (out["status"] == "not_taken").all()
-    assert (out["reason"] == "universe_filter").all()
+    assert set(out.index) == {"small"}
+    assert out.loc["small", "status"] == "not_taken" and out.loc["small", "reason"] == "universe_filter"
+
+
+def test_in_universe_is_production_gate_floor_only():
+    assert sd.in_universe(GATE_MCAP_FLOOR) and sd.in_universe(GATE_MCAP_FLOOR * 1.5)
+    assert not sd.in_universe(0.5e9) and not sd.in_universe(0.0)
+    for null in (NAN, None, pd.NA):
+        assert not sd.in_universe(null)
+
+
+def test_five_billion_name_is_now_in_the_universe():
+    # Under the old $10B short-vol floor this name was filtered; production's STR-THRU universe takes it.
+    out = sd.decide(pd.DataFrame([ev("five", 1.0, mcap=5e9)]), EMPTY, "R_L2", good("five"))
+    assert out.loc[0, "status"] == "taken" and pd.isna(out.loc[0, "reason"])
+
+
+def test_wide_spread_name_in_universe_is_now_taken():
+    # Rel spread 0.67 (> the old 25% term): production applies no spread term, so the straddle takes it; rel_spread is still recorded.
+    chunk = lad._pack([rec("wide", 100.0, pair(100, put_e=(1.0, 2.0), call_e=(1.0, 2.0)))], {})
+    out = sd.decide(pd.DataFrame([ev("wide", 1.0, mcap=5e9)]), EMPTY, "R_L2", chunk)
+    assert out.loc[0, "rel_spread"] > 0.25
+    assert out.loc[0, "status"] == "taken" and pd.isna(out.loc[0, "reason"])
+
+
+def test_history_rows_keeps_only_the_straddle_universe():
+    events = pd.DataFrame([ev("lo", 2.0, mcap=0.5e9), ev("hi", 0.5, mcap=20e9), ev("nan", 3.0, mcap=NAN)])
+    decisions = sd.decide(events, EMPTY, "R_L2", good("lo", "hi", "nan"))
+    rows = sd.history_rows(decisions, events)
+    assert list(rows.columns) == ["event_date", "edge"]
+    assert list(rows["edge"]) == [0.5]
+
+
+def test_subfloor_history_does_not_move_the_rl_cutoff():
+    # 120 in-universe edges 0.00..1.19 and 120 sub-floor edges of 100.0, all dated in the same prior month.
+    hist = pd.DataFrame([ev(f"in{i}", i / 100.0, date="2024-01-15", mcap=20e9) for i in range(120)]
+                        + [ev(f"lo{i}", 100.0, date="2024-01-15", mcap=0.5e9) for i in range(120)])
+    decisions = sd.decide(hist, EMPTY, "R_L2", good(*hist["event_id"]))
+    target = pd.DataFrame([ev("hi", 1.0)])
+    with_floor = sd.decide(target, sd.history_rows(decisions, hist), "R_L", good("hi")).loc[0, "cutoff"]
+    absent = sd.decide(target, decisions.iloc[:120][["event_date", "edge"]], "R_L", good("hi")).loc[0, "cutoff"]
+    unfiltered = sd.decide(target, decisions[["event_date", "edge"]], "R_L", good("hi")).loc[0, "cutoff"]
+    assert with_floor == pytest.approx(0.952) and with_floor == absent
+    assert unfiltered > 1.0  # the sub-floor edges would have moved the cutoff
 
 
 def test_rl2_takes_zero_and_ignores_history():

@@ -460,7 +460,7 @@ def _month(mid, events, scored, bad, chunk, start_m, st, *, arms=None, emit_from
         dec = gate(events, chunk)
         frames.append(_rows(mid, "straddle", straddle.GATE_RULE, dec, straddle.score(chunk, events, dec, ALPHA),
                             events, taken_mid=straddle.score(chunk, events, dec, ALPHA, mid_marks=True), sessions=sessions))
-    st["edges"] = pd.concat([st["edges"], first[["event_date", "edge"]]], ignore_index=True)
+    st["edges"] = pd.concat([st["edges"], straddle.history_rows(first, events)], ignore_index=True)  # Amendment 5: the cutoff history is the straddle universe only
     return frames
 
 

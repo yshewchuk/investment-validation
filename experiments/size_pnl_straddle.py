@@ -13,8 +13,8 @@ import math
 import numpy as np
 import pandas as pd
 
-from engine.entry_rules import MAX_REL_SPREAD, MCAP_FLOOR
 from engine.fills import FillModel
+from engine.score import GATE_MCAP_FLOOR
 from engine.pnl_sim import trailing_cutoff
 from engine.portfolio import CAPITAL_PER_TRADE, CONTRACT_MULTIPLIER
 
@@ -30,6 +30,11 @@ def _num(x):
     if x is None or pd.isna(x):
         return float("nan")
     return float(x)
+
+
+def in_universe(mcap):
+    """Production's STR-THRU universe: market cap at or above engine.score GATE_MCAP_FLOOR (Amendment 5). No spread term: production applies none."""
+    return math.isfinite(_num(mcap)) and _num(mcap) >= GATE_MCAP_FLOOR
 
 
 def _edge(pred, implied):
@@ -152,8 +157,8 @@ def decide(events, history, rule, chunk, gate=None):
                 row["reason"] = state["reason"]
             else:
                 rel = state["rel_spread"]
-                row["rel_spread"] = rel
-                if mcap < MCAP_FLOOR or rel > MAX_REL_SPREAD:
+                row["rel_spread"] = rel  # recorded for every ok entry; the spread is not a universe term (Amendment 5)
+                if not in_universe(mcap):
                     row.update(status="not_taken", reason="universe_filter")
                 elif rule == GATE_RULE:
                     row["status"], row["reason"] = gate(ev)
@@ -172,6 +177,13 @@ def decide(events, history, rule, chunk, gate=None):
                         row["status"], row["reason"] = _verdict(edge >= cut, "below_cutoff")
         rows.append(row)
     return pd.DataFrame(rows, columns=DECISION_COLS)
+
+
+def history_rows(decisions, events):
+    """The (event_date, edge) rows that feed the R_L trailing cutoff: only events in the straddle universe (Amendment 5).
+    ``decisions`` rows are in the same order as ``events`` (``decide`` emits one row per event, in order)."""
+    mask = events["mcap_usd"].map(in_universe).to_numpy(dtype=bool)
+    return decisions.loc[mask, ["event_date", "edge"]]
 
 
 def score(chunk, events, decisions, alpha, *, drop_unquoted=False, mid_marks=False):
