@@ -15,7 +15,7 @@ import pandas as pd
 import pyarrow.parquet as pq
 
 from experiments import size_pnl_decisions as decisions, size_pnl_tuning as tuning, size_pnl_report as report, size_pnl_contrast as contrast
-from experiments import size_pnl_driver, size_pnl_ladder
+from experiments import size_pnl_account, size_pnl_driver, size_pnl_ladder
 from experiments import size_pnl_synthetic_eval as synthetic_eval
 from experiments.size_pnl_inputs import PAIRS
 from experiments.size_pnl_shortvol import Refusal
@@ -23,6 +23,8 @@ from experiments.size_pnl_straddle import RULES
 
 _CONFLICT = "EXPERIMENT_IDENTITY_CONFLICT"
 COLUMNS = ["model_id", "book", "arm_or_rule", "structure", "event_id", "event_date", "status", "rung", "pnl_dollars"]
+# Amendment 2 account columns: optional, read only when the run stored them.
+ACCOUNT_COLS = ["entry_date", "exit_date", "entry_cost", "exit_value", "exit_value_mid", "secured_per_contract"]
 ARMS = ("as_is", "retuned")
 LONG_RULE = "R_L"
 # name -> (predicted sign, arm -> legs, arms). A leg is (book, arm_or_rule value, sign); d = sum(sign * (median - mean)).
@@ -193,6 +195,8 @@ def _load_decisions(out, receipt, name="decisions.parquet"):
         parquet = pq.ParquetFile(handle)
         if not set(COLUMNS) <= set(parquet.schema_arrow.names):
             raise _refuse("report_decisions_columns", f"{name} lacks a required column")
+        if "secured_per_contract" in parquet.schema_arrow.names and not {"entry_date", "exit_date", "entry_cost", "exit_value"} <= set(parquet.schema_arrow.names):
+            raise _refuse("report_decisions_columns", f"{name} has secured_per_contract but lacks entry_date, exit_date, entry_cost or exit_value")
         # Metadata only, before any decode: a highly compressed artifact must not exhaust memory on read.
         meta = parquet.metadata
         if meta.num_rows != receipt["rows"]:
@@ -203,7 +207,8 @@ def _load_decisions(out, receipt, name="decisions.parquet"):
         # Optional columns, read only when the schema has them. "reason": population() exempts short-vol non-trades (published
         # decisions always carry it). "pnl_dollars_mid": the Amendment 1 sensitivity marks. "in_sample": the inner retuned arm.
         optional = [c for c in ("reason", "pnl_dollars_mid", "in_sample") if c in parquet.schema_arrow.names]
-        frame = parquet.read(columns=COLUMNS + optional).to_pandas()
+        account = [c for c in ACCOUNT_COLS if c in parquet.schema_arrow.names]  # Amendment 2 account columns, when the run stored them
+        frame = parquet.read(columns=COLUMNS + optional + account).to_pandas()
     if frame.empty:
         raise _refuse("report_decisions_empty", f"{name} holds no rows")
     mid = "pnl_dollars_mid" in optional
@@ -279,6 +284,24 @@ def _verdicts(classify_in, missing_years, inner_present=False, shown_c=None):
     return verdicts
 
 
+def _account_sections(frame, role_model, label_of, universe):
+    """The Amendment 2 sensitivity sections over ``frame``, which holds ALL taken rows of decisions.parquet (model_id already
+    labelled), or not_testable when the frame has no secured_per_contract column, or when the frame is non-empty and no taken
+    row carries a non-null secured_per_contract. An empty frame that has the column is testable: every account in ``universe``
+    is reported at its empty-account metrics ($100,000). A straddle-only run is testable: its taken straddle rows carry 0.0
+    secured cash, which is non-null. ``universe`` holds every decision row (model_id labelled) and supplies the account keys,
+    so a model that takes no trade is still reported."""
+    title = "Sensitivity (Amendment 2)"
+    if "secured_per_contract" not in frame.columns or (not frame.empty and not frame["secured_per_contract"].notna().any()):
+        return [_not_testable(title, "account_columns_not_in_decisions")]
+    results = size_pnl_account.accounts(frame, universe)
+    _log(f"accounts n={len(results)}")
+    pairs = {pid: (label_of[role_model[mean]], label_of[role_model[median]]) for pid, (mean, median) in PAIRS.items()
+             if mean in role_model and median in role_model}  # (mean, median) labels; a pair with an absent member is skipped downstream
+    diffs = size_pnl_account.differences(results, pairs, sorted(set(universe["model_id"])))
+    return size_pnl_account.tables(results, diffs)
+
+
 def _sections(out, outer, inputs, inner, tuned, tickers):
     """The report's sections in order. Reads receipt fields throughout; the caller maps a missing or mistyped field to a refusal.
     Returns (sections, inner row count)."""
@@ -293,13 +316,18 @@ def _sections(out, outer, inputs, inner, tuned, tickers):
     role_model = {role: m["model_id"] for m in roster["models"] for role in m["roles"]}
 
     def _check(raw):
-        """The raw-row checks: ticker present, finite taken P&L, model ids in the roster. They run before population drops any event."""
+        """The raw-row checks: ticker present, finite taken P&L and account cash, valid account dates, model ids in the roster. They run before population drops any event."""
         if not set(raw["event_id"]) <= set(tick):
             raise _refuse("report_ticker_missing", "an event in decisions.parquet has no ticker")
         if not np.isfinite(raw.loc[raw["status"] == "taken", "pnl_dollars"].to_numpy(dtype=float)).all():
             raise _refuse("report_nonfinite_pnl", "a taken row has a non-finite pnl_dollars")
         if "pnl_dollars_mid" in raw.columns and not np.isfinite(raw.loc[raw["status"] == "taken", "pnl_dollars_mid"].to_numpy(dtype=float)).all():
             raise _refuse("report_nonfinite_pnl", "a taken row has a non-finite pnl_dollars_mid")
+        if any(not np.isfinite(raw.loc[raw["status"] == "taken", col].to_numpy(dtype=float)).all() for col in ("secured_per_contract", "entry_cost", "exit_value", "exit_value_mid") if col in raw.columns):
+            raise _refuse("report_nonfinite_pnl", "a taken row has a non-finite secured_per_contract, entry_cost, exit_value or exit_value_mid")
+        for col in ("entry_date", "exit_date"):  # Amendment 2 account dates: a taken row with a null or unparseable date refuses
+            if col in raw.columns and pd.to_datetime(raw.loc[raw["status"] == "taken", col], errors="coerce").isna().any():
+                raise _refuse("report_decisions_invalid", "a taken row has a missing or invalid entry_date or exit_date")
         if set(raw["model_id"]) - set(label_of):
             raise _refuse("report_receipt_chain_mismatch", "a model in the decisions has no roster entry")
 
@@ -375,15 +403,20 @@ def _sections(out, outer, inputs, inner, tuned, tickers):
         sections += [_inner_title(text) for text in (t2_inner, t4_as_is, t5_retuned, t6, t7)]
     inner_rows = len(inner_raw) if inner_present else 0
     if "pnl_dollars_mid" not in frame.columns:
-        return sections + [_not_testable("Sensitivity (Amendment 1)", "pnl_dollars_mid_not_in_decisions")], inner_rows
-    # The Amendment 1 marks: T4-T7 on the outer window, and T10 pooled over the same windows as the primary verdict.
-    mid, shown_mo, classify_mo = tables(frame.assign(pnl_dollars=frame["pnl_dollars_mid"]), ctx_o)
-    if inner_present:
-        combined_mid = pd.concat([w.assign(pnl_dollars=w["pnl_dollars_mid"]) for w in (inner_frame, frame)])
-        shown_m, classify_mid = _contrasts(combined_mid, ctx_c["events"], roster, role_model, label_of, outer_models, ctx_c["quarter_of"], tick)
-    else:  # no inner window: the pooled mid frame is the outer one, so reuse its contrasts
-        shown_m, classify_mid = shown_mo, classify_mo
-    return sections + [_sens(text) for text in (*mid, _verdicts(classify_mid, missing_years, inner_present, shown_m))], inner_rows
+        sections += [_not_testable("Sensitivity (Amendment 1)", "pnl_dollars_mid_not_in_decisions")]
+    else:
+        # The Amendment 1 marks: T4-T7 on the outer window, and T10 pooled over the same windows as the primary verdict.
+        mid, shown_mo, classify_mo = tables(frame.assign(pnl_dollars=frame["pnl_dollars_mid"]), ctx_o)
+        if inner_present:
+            combined_mid = pd.concat([w.assign(pnl_dollars=w["pnl_dollars_mid"]) for w in (inner_frame, frame)])
+            shown_m, classify_mid = _contrasts(combined_mid, ctx_c["events"], roster, role_model, label_of, outer_models, ctx_c["quarter_of"], tick)
+        else:  # no inner window: the pooled mid frame is the outer one, so reuse its contrasts
+            shown_m, classify_mid = shown_mo, classify_mo
+        sections += [_sens(text) for text in (*mid, _verdicts(classify_mid, missing_years, inner_present, shown_m))]
+    taken_all = raw[raw["status"] == "taken"].assign(model_id=raw["model_id"].map(label_of), taken=True)  # Amendment 2: every taken row, not only E
+    universe = raw.assign(model_id=raw["model_id"].map(label_of))  # Amendment 2: every decision row, of any status, discovers the account keys
+    sections += _account_sections(taken_all, role_model, label_of, universe)  # Amendment 2, on both paths
+    return sections, inner_rows
 
 
 def assemble(out_dir, plan, *, admitted, expected=None, spec_hash=None, snapshot=None):

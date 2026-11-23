@@ -154,7 +154,7 @@ def test_happy_path_writes_every_section_in_order(tmp_path):
     out = build(tmp_path)
     summary = assemble_mod.assemble(out, plan_frame(), admitted=None)
     text = (out / "REPORT.md").read_text(encoding="utf-8")
-    assert summary["report"] == str(out / "REPORT.md") and summary["sections"] == 12 and summary["rows"] > 0  # 11 + the not_testable sensitivity note
+    assert summary["report"] == str(out / "REPORT.md") and summary["sections"] == 13 and summary["rows"] > 0  # 11 + two not_testable sensitivity notes (Amendment 1 and 2)
     assert text.startswith("# EXP-188 REPORT")
     heads = ["### T1", "### T2", "### T3", "### T4", "### T5", "### T6", "### T7", "### T8", "### T9", "### T10"]
     positions = [next(i for i, line in enumerate(_sections(text)) if line.startswith(h)) for h in heads]
@@ -652,7 +652,7 @@ def test_mid_column_adds_the_sensitivity_sections_after_the_primary_verdicts(tmp
     summary = assemble_mod.assemble(out, plan_frame(), admitted=None)
     text = (out / "REPORT.md").read_text(encoding="utf-8")
     sens = [line for line in _sections(text) if "not the pre-registered verdict" in line]
-    assert summary["sections"] == 16  # the 11 primary sections and 5 sensitivity sections
+    assert summary["sections"] == 17  # the 11 primary sections and 5 sensitivity sections plus the Amendment 2 not_testable note
     assert [line.rsplit(": ", 1)[1] for line in sens] == ["T4 Short-vol, as is", "T5 Short-vol, retuned", "T6 Straddle buy rules",
                                                           "T7 Contrasts", "T10 Verdicts"]
     assert all(line.startswith("### Sensitivity (Amendment 1), not the pre-registered verdict: ") for line in sens)
@@ -754,4 +754,94 @@ def test_non_numeric_mid_pnl_on_a_non_taken_row_refuses_as_decisions_invalid(tmp
         assemble_mod.assemble(out, plan_frame(), admitted=None)
     assert caught.value.code == CONFLICT
     assert caught.value.details["reason"] == "report_decisions_invalid"
+    assert not (out / "REPORT.md").exists()
+
+
+# ---- Amendment 2 account: the taken rows of every event, not only E ----
+
+
+def _with_account(rows):
+    """Every row carries the account columns: entry the day before its event, exit the day after, debit 0.5, exit 0.6,
+    and 9,500 secured per contract (so each short-vol trade funds one contract on a $100,000 account)."""
+    out = []
+    for row in rows:
+        day = pd.Timestamp(EVENT_DATES[row["event_id"]])
+        out.append({**row, "entry_date": day - pd.Timedelta(days=1), "exit_date": day + pd.Timedelta(days=1),
+                    "entry_cost": 0.5, "exit_value": 0.6, "secured_per_contract": 9500.0})
+    return out
+
+
+def test_account_wanted_counts_a_taken_row_of_an_event_removed_from_e(tmp_path):
+    # E01 is undetermined for m-hsq, so it leaves E for every model; m-eraw still takes E01 as_is, and that row must be counted.
+    out = build(tmp_path, rows_fn=lambda rows: _with_account(_e01_undetermined_for_m_hsq(rows)))
+    assemble_mod.assemble(out, plan_frame(), admitted=None)
+    text = (out / "REPORT.md").read_text(encoding="utf-8")
+    assert "| H1 | H | as_is | ok | 3 | 1 |" in text  # the T7 population is still three events
+    account = _section_lines(text, "### Sensitivity (Amendment 2)")
+    wanted = _cells(next(line for line in account if line.startswith("| book | E-raw | as_is |")))[3]
+    assert wanted == "4"  # four taken short-vol as_is rows for E-raw: E01 included, not the three events of E
+
+
+def _straddle_only(rows):
+    """A straddle-only run: every short-vol row is a non-trade at P&L 0 with NaN secured cash; the taken straddle rows carry 0.0 secured."""
+    out = []
+    for row in _with_account(rows):
+        if row["book"] == "short_vol":
+            row = {**row, "status": "not_taken", "reason": "below_cutoff", "pnl_dollars": 0.0, "secured_per_contract": np.nan}
+        else:
+            row = {**row, "secured_per_contract": 0.0}
+        out.append(row)
+    return out
+
+
+def test_straddle_only_run_is_testable_for_the_account(tmp_path):
+    out = build(tmp_path, rows_fn=_straddle_only)
+    assemble_mod.assemble(out, plan_frame(), admitted=None)
+    text = (out / "REPORT.md").read_text(encoding="utf-8")
+    assert "not_testable: account_columns_not_in_decisions" not in text  # the Amendment 2 table is produced, not the note
+    account = _section_lines(text, "### Sensitivity (Amendment 2)")
+    assert account[0].startswith("### Sensitivity (Amendment 2), not the pre-registered verdict")
+    # Hand-derived from this fixture: debit 0.5 restated to secured 50 (debit x 100); four non-overlapping events, each
+    # funded at floor(0.25 * 0.66 * equity / 50) contracts: 330, 340, 352, 363 as equity goes 100000, 103300, 106700,
+    # 110220. Each contract nets (0.6 - 0.5) x 100 = 10, so final = 100000 + 10 * 1385 = 113850; drawdown 0 (equity only
+    # rises); one position open at a time. The first straddle row in sorted order is E-log (m-elog) with rule R_L.
+    assert "| straddle | E-log | R_L | 4 | 4 | 113850.00 | 0.1385 | 0 | 1 |" in account
+
+
+def test_empty_taken_frame_with_the_column_reports_zero_trade_accounts(tmp_path):
+    # One model, every row not_taken: the taken frame is empty but keeps secured_per_contract, so the account table
+    # (zero-trade accounts at $100,000) is produced and the not_testable note is not.
+    rows = [_row("m-hsq", "short_vol", arm, NAMES[0], "E01", "2024-02-15", 2, 0.0) for arm in ("as_is", "retuned")]
+    rows += [_row("m-hsq", "straddle", rule, "straddle", "E01", "2024-02-15", 1, 0.0) for rule in RULES]
+    universe = pd.DataFrame(_with_account([{**row, "status": "not_taken", "reason": "below_cutoff"} for row in rows]))
+    taken = universe[universe["status"] == "taken"]
+    assert taken.empty and "secured_per_contract" in taken.columns
+    sections = assemble_mod._account_sections(taken, {"H-sq": "m-hsq"}, {"m-hsq": "H-sq"}, universe)
+    text = "\n".join(sections)
+    assert any("| 0 | 0 | 100000.00 |" in line for line in text.splitlines())
+    assert "not_testable" not in text
+
+
+def test_taken_row_with_null_exit_date_refuses_as_decisions_invalid(tmp_path):
+    def make(rows):
+        out = _with_account(rows)
+        return [{**out[0], "exit_date": None}, *out[1:]]  # out[0] is a taken short-vol row
+
+    out = build(tmp_path, rows_fn=make)
+    with pytest.raises(Refusal) as caught:
+        assemble_mod.assemble(out, plan_frame(), admitted=None)
+    assert caught.value.code == CONFLICT
+    assert caught.value.details["reason"] == "report_decisions_invalid"
+    assert not (out / "REPORT.md").exists()
+
+
+def test_secured_column_without_exit_date_refuses_as_decisions_columns(tmp_path):
+    def make(rows):
+        return [{k: v for k, v in row.items() if k != "exit_date"} for row in _with_account(rows)]
+
+    out = build(tmp_path, rows_fn=make)
+    with pytest.raises(Refusal) as caught:
+        assemble_mod.assemble(out, plan_frame(), admitted=None)
+    assert caught.value.code == CONFLICT
+    assert caught.value.details["reason"] == "report_decisions_columns"
     assert not (out / "REPORT.md").exists()
