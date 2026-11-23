@@ -19,7 +19,7 @@ import pandas as pd
 
 from experiments.size_pnl_shortvol import NAMES, Refusal, decide, score, score_events
 
-C_GRID = (0.75, 0.9, 1.0, 1.1, 1.25, 1.5)
+C_GRID = (0.5, 0.6, 0.67, 0.75, 0.9, 1.0, 1.1, 1.25, 1.5)
 INNER_YEARS = (2023, 2024)
 MIN_TRADES = 300
 ALPHA = 0.5
@@ -64,12 +64,15 @@ def tune(items, model_id, *, alpha=ALPHA, grid=C_GRID):
             if year not in INNER_YEARS:
                 raise Refusal(_HOLDOUT, f"event year {year} is outside the inner tuning years {INNER_YEARS}",
                               {"reason": "outer_year_in_tuning", "year": year})
-    totals, trades = {}, {}
+    totals, trades, declined = {}, {}, {}
     for c in grid:
         total, count = 0.0, 0
+        dec, cand = 0, 0
         for name in NAMES:
             scored = pd.concat([score_events(chunk, events, sims, name, alpha=alpha, c=c)
                                 for chunk, events, sims in items], ignore_index=True)
+            dec += int((scored["reason"] == "width_declined").sum())
+            cand += len(scored)
             decisions = decide(scored)  # the cutoff history spans quarters, recomputed per c
             for chunk, events, _sims in items:
                 ids = {str(e) for e in chunk["event_id"]}
@@ -78,10 +81,12 @@ def tune(items, model_id, *, alpha=ALPHA, grid=C_GRID):
                 total += float(taken["pnl_dollars"].sum())
                 count += len(taken)
         totals[float(c)], trades[float(c)] = total, count
+        declined[float(c)] = dec / cand if cand else 0.0
     chosen, skip_reason = choose_c(totals, trades[1.0])
     return {"stage": "tuning", "model_id": model_id, "alpha": alpha, "grid": list(grid), "c": chosen,
             "skipped": skip_reason is not None, "skip_reason": skip_reason, "trades": trades[1.0],
-            "totals": {str(c): total for c, total in totals.items()}}
+            "totals": {str(c): total for c, total in totals.items()},
+            "declined": {str(c): share for c, share in declined.items()}}
 
 
 def _admit(body):

@@ -19,7 +19,7 @@ from experiments.size_pnl_straddle import lots
 DRAW = 200
 PRED = 6.0
 BODY = {"stage": "tuning", "model_id": "M", "c": 1.1}
-PNL = {0.75: 1.0, 0.9: 2.0, 1.0: 3.0, 1.1: 9.0, 1.25: 4.0, 1.5: 0.5}
+PNL = {0.5: 0.1, 0.6: 0.2, 0.67: 0.3, 0.75: 1.0, 0.9: 2.0, 1.0: 3.0, 1.1: 9.0, 1.25: 4.0, 1.5: 0.5}
 CONFLICT = "EXPERIMENT_IDENTITY_CONFLICT"
 HOLDOUT = "HOLDOUT_ACCESS_DENIED"
 UNREADABLE = "tuning_receipt_unreadable"
@@ -183,7 +183,8 @@ def test_tune_on_a_tiny_fixture_is_skipped_at_unity(pool):
     chunk, events = chunk_of("A"), events_for("A")
     sims = sv.simulate(chunk, events, pool, draws=DRAW)
     out = tuning.tune([(chunk, events, sims)], "M1")
-    assert set(out) == {"stage", "model_id", "alpha", "grid", "c", "skipped", "skip_reason", "trades", "totals"}
+    assert set(out) == {"stage", "model_id", "alpha", "grid", "c", "skipped", "skip_reason", "trades", "totals",
+                        "declined"}
     assert out["stage"] == "tuning" and out["model_id"] == "M1" and out["alpha"] == 0.5
     assert out["grid"] == list(tuning.C_GRID)
     assert set(out["totals"]) == {str(c) for c in tuning.C_GRID}
@@ -198,7 +199,7 @@ def test_tune_picks_the_argmax_and_recomputes_decisions_per_c(monkeypatch):
     calls = []  # (structure, c) of every decide call
 
     def fake_score_events(chunk, events, sims, name, *, alpha=0.5, c=1.0):
-        return pd.DataFrame({"event_id": events["event_id"].astype(str), "structure": name, "c": c})
+        return pd.DataFrame({"event_id": events["event_id"].astype(str), "structure": name, "c": c, "reason": None})
 
     def fake_decide(scored):
         calls.append((scored["structure"].iloc[0], scored["c"].iloc[0]))
@@ -216,6 +217,30 @@ def test_tune_picks_the_argmax_and_recomputes_decisions_per_c(monkeypatch):
     assert out["c"] == 1.1 and out["skipped"] is False and out["skip_reason"] is None
     assert out["trades"] == 2 * len(tuning.NAMES)
     assert out["totals"]["1.1"] == pytest.approx(9.0 * 2 * len(tuning.NAMES))
+    assert out["declined"] == {str(c): 0.0 for c in tuning.C_GRID}
+
+
+# ---- grid, tie rule and width declines --------------------------------------
+
+def test_grid_includes_the_wider_points():
+    assert tuning.C_GRID == (0.5, 0.6, 0.67, 0.75, 0.9, 1.0, 1.1, 1.25, 1.5)
+
+
+def test_choose_c_tie_rule_with_new_points():
+    assert tuning.choose_c({0.5: 5.0, 1.5: 5.0}, 300) == (0.5, None)  # both 0.5 from 1: smaller c wins
+    assert tuning.choose_c({0.67: 5.0, 1.25: 5.0}, 300) == (1.25, None)  # 0.25 from 1 beats 0.33
+    assert tuning.choose_c({0.5: 9.0, 1.0: 1.0}, 300) == (0.5, None)
+
+
+def test_c_half_declines_widths_beyond_width_max_and_counts_them(pool):
+    chunk, events = chunk_of("A"), events_for("A", pred=12.0)
+    assert sv.resolve(chunk, 0, "TWIN-P", 12.0, c=0.5) == (None, "width_declined")  # width 0.16 > WIDTH_MAX 0.15
+    sims = sv.simulate(chunk, events, pool, draws=DRAW)
+    scored = sv.score_events(chunk, events, sims, "TWIN-P", c=0.5)
+    assert "width_declined" in set(scored["reason"])
+    out = tuning.tune([(chunk, events, sims)], "M")
+    assert out["declined"]["0.5"] > 0
+    assert out["declined"]["1.0"] < out["declined"]["0.5"]
 
 
 # ---- tune: real scorers against a hand-computed oracle ----------------------

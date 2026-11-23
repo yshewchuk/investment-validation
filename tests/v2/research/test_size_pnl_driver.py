@@ -221,7 +221,7 @@ def test_real_tune_skips_with_no_trades_and_binds_the_receipt(tmp_path, monkeypa
     """The real ``tune`` (not stubbed) on a fixture where nothing is taken: the S6 fallback is persisted and bound."""
     monkeypatch.setattr(driver, "build_pool", lambda table, labels: None)
     monkeypatch.setattr(driver.shortvol, "simulate", SIMS)
-    scored_ids = lambda chunk_, events, sims, name, **kw: pd.DataFrame({"event_id": events["event_id"].to_numpy()})  # noqa: E731
+    scored_ids = lambda chunk_, events, sims, name, **kw: pd.DataFrame({"event_id": events["event_id"].to_numpy(), "reason": None})  # noqa: E731
     monkeypatch.setattr(tuning, "score_events", scored_ids)
     monkeypatch.setattr(tuning, "decide", lambda scored: scored.iloc[:0])  # every row undetermined, none taken
     monkeypatch.setattr(tuning, "score", lambda chunk_, events, mine, name, alpha, c: pd.DataFrame(
@@ -244,7 +244,7 @@ def test_real_tune_selects_the_argmax_and_binds_the_receipt(tmp_path, monkeypatc
     """
     monkeypatch.setattr(driver, "build_pool", lambda table, labels: None)
     monkeypatch.setattr(driver.shortvol, "simulate", SIMS)
-    scored_ids = lambda chunk_, events, sims, name, **kw: pd.DataFrame({"event_id": events["event_id"].to_numpy()})  # noqa: E731
+    scored_ids = lambda chunk_, events, sims, name, **kw: pd.DataFrame({"event_id": events["event_id"].to_numpy(), "reason": None})  # noqa: E731
     monkeypatch.setattr(tuning, "score_events", scored_ids)
     monkeypatch.setattr(tuning, "decide", lambda scored: scored)  # every row taken; score below sets the trades
 
@@ -260,7 +260,8 @@ def test_real_tune_selects_the_argmax_and_binds_the_receipt(tmp_path, monkeypatc
     inner = tuning.load_receipt(tmp_path / "receipts" / "inner.json")
     assert tuned["c"] == 1.1 and tuned["skipped"] is False and tuned["skip_reason"] is None
     assert tuned["trades"] == 350
-    assert tuned["totals"] == {"0.75": 350.0, "0.9": 350.0, "1.0": 350.0, "1.1": 700.0, "1.25": 350.0, "1.5": 350.0}
+    assert tuned["totals"] == {"0.5": 350.0, "0.6": 350.0, "0.67": 350.0, "0.75": 350.0, "0.9": 350.0,
+                               "1.0": 350.0, "1.1": 700.0, "1.25": 350.0, "1.5": 350.0}
     assert inner["models"][mid] == tuned["content_hash"]
 
 
