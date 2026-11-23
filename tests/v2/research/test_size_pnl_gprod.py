@@ -122,6 +122,27 @@ def test_load_gate_loads_a_verified_pair(tmp_path):
                                      "inputs_sha256": binding["gate_inputs"]["sha256"], "threshold": fold.REGISTERED_THRESHOLD}
 
 
+def _write_compressed_fold(tmp_path):
+    binding = write_gate_files(tmp_path)
+    joblib.dump(fold_payload(), binding["gate_fold"]["path"], compress=3)
+    binding["gate_fold"]["sha256"] = _sha(binding["gate_fold"]["path"])
+    return binding
+
+
+def test_load_gate_loads_a_compressed_fold(tmp_path):
+    binding = _write_compressed_fold(tmp_path)
+    gate = gp.load_gate(binding)
+    assert gate.threshold == fold.REGISTERED_THRESHOLD
+
+
+def test_load_gate_refuses_a_fold_over_the_decoded_cap(tmp_path, monkeypatch):
+    binding = _write_compressed_fold(tmp_path)
+    monkeypatch.setattr(gp, "MAX_FOLD_DECODED_BYTES", 10)
+    with pytest.raises(OpsError) as exc:
+        gp.load_gate(binding)
+    assert _refusal(exc) == ("INVALID_EXPERIMENT_SPEC", "gate_fold_invalid")
+
+
 @pytest.mark.parametrize("key, what", [("gate_fold", "fold"), ("gate_inputs", "inputs")])
 def test_load_gate_refuses_a_sha_mismatch_before_parsing(tmp_path, key, what):
     binding = write_gate_files(tmp_path)

@@ -5,6 +5,7 @@ import os
 import stat
 import hashlib
 import re
+import zlib
 from dataclasses import dataclass
 
 import numpy as np
@@ -17,6 +18,7 @@ from experiments import label_availability, size_pnl_gate_fold as fold, size_pnl
 RULE = straddle.GATE_RULE
 MODEL_COLS = ("pred_abs_move", "pred_abs_move_p10", "pred_abs_move_p90", "pred_abs_move_sd", "forecast_edge")
 MAX_FOLD_BYTES = 16 << 20
+MAX_FOLD_DECODED_BYTES = 256 << 20
 MAX_INPUTS_BYTES = 256 << 20
 MAX_INPUT_ROWS = 5_000_000
 MAX_INPUT_DECODED_BYTES = 2 << 30
@@ -87,11 +89,17 @@ def load_gate(binding):
     raw_fold = _read_verified(binding["gate_fold"], "fold", MAX_FOLD_BYTES)
     raw_inputs = _read_verified(binding["gate_inputs"], "inputs", MAX_INPUTS_BYTES)
     import joblib  # lazy: only a configured gate needs it
-    # the fold is sha256-pinned (a supervisor-built HGB artifact of a few hundred KB) and capped at 16 MiB; zlib bounds the decoded size at about 1032x the file, and joblib has no pre-decode limit
+    # The fold is sha256-pinned and capped at MAX_FOLD_BYTES. A zlib-compressed joblib dump is decompressed here with an output cap, so the decode is bounded; joblib then loads the plain bytes.
     try:
-        payload = joblib.load(io.BytesIO(raw_fold))
+        data = raw_fold
+        if raw_fold[:1] == b"\x78":  # zlib header (joblib compress=1..9 with zlib)
+            inflater = zlib.decompressobj()
+            data = inflater.decompress(raw_fold, MAX_FOLD_DECODED_BYTES + 1)
+            if len(data) > MAX_FOLD_DECODED_BYTES or inflater.unconsumed_tail:
+                raise ValueError("decoded fold over the cap")
+        payload = joblib.load(io.BytesIO(data))
     except Exception:
-        raise _refuse("gate_fold_invalid", "the gate fold artifact cannot be loaded") from None
+        raise _refuse("gate_fold_invalid", "the gate fold artifact cannot be loaded within its decoded size cap") from None
     if not _valid_fold(payload):
         raise _refuse("gate_fold_invalid", "the gate fold artifact is not the registered gate (features, threshold or train_through)")
     features = list(payload["features"])

@@ -139,7 +139,7 @@ Saved identity and later outcome/worker APIs' separate read policies do not chan
 
 `size_pnl_sources.build_sources` is the EXP-188 `run.py` `--sources` factory (`--sources-config`); it consumes `size_pnl_inputs`, `size_pnl_readers`, `size_pnl_ladder`, `size_pnl_tables` (table-backed `fetch`/`facts`/`plan_frame`), `size_pnl_gprod.load_gate` (optional gate entries), `ArtifactStore.read_verified` (the sealed plan, not re-derived), `magnitude_search_records.read_record` and `native_registration.read_native_registration`.
 
-`size_pnl_gate_fold` is a supervisor CLI, outside CI and `run.py`: it refits production's STR-THRU gate through 2024 and builds the admitted-2025 gate input table.
+`size_pnl_gate_fold` is a supervisor CLI, outside CI and `run.py` (its outputs are consumed by `run.py --sources-config` through `size_pnl_gprod`): it refits production's STR-THRU gate through 2024 and builds the admitted-2025 gate input table.
 
 `size_pnl_gprod` (Amendment 3, G_PROD) is consumed only by `size_pnl_driver` (`Sources.gate`, the outer stage) and `size_pnl_sources.build_sources` (`load_gate`); it calls `size_pnl_gate_fold` (constants), `size_pnl_pool.pool_history`, `size_pnl_straddle.decide`, `label_availability` and production's `tier4.interval_for`, and has no other caller.
 
