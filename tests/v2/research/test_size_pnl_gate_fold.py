@@ -4,6 +4,7 @@ import json
 import os
 import stat
 from pathlib import Path
+from types import SimpleNamespace
 
 import joblib
 import numpy as np
@@ -679,30 +680,129 @@ def test_run_fit_logs_cut_stats_line(tmp_path, capsys):
     assert "fit training_rows=693" in err
 
 
-def _forecast_wiring_load_trades(monkeypatch, tmp_path, path):
-    import engine.paths as paths
+def _forecast_wiring_build(monkeypatch, path):
+    """Return the real _real_wiring build closure with every store and feature access stubbed out.
+
+    The stubbed builder calls tier4.load_forecasts() exactly as the real gate builder does, so the
+    forecast refusal must come from the bounded handle before any store access.
+    """
+    import engine.data.features.tier4 as tier4
     import engine.data.store as store
+    import engine.features as features
+    import engine.models.training.gate_forecast_analog as ga
+    import engine.paths as paths
 
     def no_store_access(*args, **kwargs):
         raise AssertionError("store.iter_table must not be called when the forecast file is refused")
 
+    class _NoContext:
+        @staticmethod
+        def load(*args, **kwargs):
+            return SimpleNamespace(panel=None, daily=None, context=None)
+
+    def builder_reads_forecasts(t, *, panel, daily, context):
+        tier4.load_forecasts()
+        raise AssertionError("the forecast refusal must stop the build")
+
     monkeypatch.setattr(paths, "TIER4", path)
     monkeypatch.setattr(store, "iter_table", no_store_access)
-    load_trades, *_ = fold._real_wiring(2024)
-    return load_trades
+    monkeypatch.setattr(features, "FeatureContext", _NoContext)
+    monkeypatch.setattr(ga, "build_dataset", builder_reads_forecasts)
+    _, build, *_ = fold._real_wiring(2024)
+    return build
 
 
-def test_real_wiring_load_trades_refuses_oversize_forecast_before_store(monkeypatch, tmp_path):
+def _entry_trades():
+    return pd.DataFrame({"ticker": ["T"], "entry_date": pd.to_datetime(["2024-03-01"])})
+
+
+def test_real_wiring_build_refuses_oversize_forecast_before_store(monkeypatch, tmp_path):
     f = tmp_path / "tier4.parquet"
     f.write_bytes(b"0123456789")  # 10 bytes
     monkeypatch.setattr(fold, "MAX_FORECAST_BYTES", 4)
-    load_trades = _forecast_wiring_load_trades(monkeypatch, tmp_path, f)
+    build = _forecast_wiring_build(monkeypatch, f)
     with pytest.raises(SystemExit, match="refused"):
-        load_trades(2024)
+        build(_entry_trades())
 
 
-def test_real_wiring_load_trades_refuses_missing_forecast_before_store(monkeypatch, tmp_path):
+def test_real_wiring_build_refuses_missing_forecast_before_store(monkeypatch, tmp_path):
     # Neither tier4.parquet nor tier4.csv.gz exists.
-    load_trades = _forecast_wiring_load_trades(monkeypatch, tmp_path, tmp_path / "tier4.parquet")
+    build = _forecast_wiring_build(monkeypatch, tmp_path / "tier4.parquet")
     with pytest.raises(SystemExit, match="refused"):
-        load_trades(2024)
+        build(_entry_trades())
+
+
+def test_real_wiring_still_returns_five_tuple():
+    wiring = fold._real_wiring(2024)
+    assert len(wiring) == 5
+
+
+def test_patched_forecasts_restores_original_when_body_raises():
+    original = lambda path=None: "original"  # noqa: E731
+    holder = SimpleNamespace(load_forecasts=original)
+    with pytest.raises(RuntimeError, match="boom"):
+        with fold._patched_forecasts(holder, lambda path=None: "patched"):
+            assert holder.load_forecasts() == "patched"
+            raise RuntimeError("boom")
+    assert holder.load_forecasts is original
+
+
+def test_load_forecasts_bounded_refuses_symlink(tmp_path):
+    real = tmp_path / "real.parquet"
+    pd.DataFrame({"a": [1]}).to_parquet(real)
+    link = tmp_path / "tier4.parquet"
+    link.symlink_to(real)
+    with pytest.raises(SystemExit, match="refused"):
+        fold.load_forecasts_bounded(link, 1 << 20)
+
+
+def test_load_forecasts_bounded_refuses_directory(tmp_path):
+    d = tmp_path / "tier4.parquet"
+    d.mkdir()
+    with pytest.raises(SystemExit, match="not a regular file"):
+        fold.load_forecasts_bounded(d, 1 << 20)
+
+
+def test_load_forecasts_bounded_refuses_oversize(tmp_path):
+    f = tmp_path / "tier4.parquet"
+    pd.DataFrame({"a": list(range(100))}).to_parquet(f)
+    with pytest.raises(SystemExit, match="over the 4 byte limit"):
+        fold.load_forecasts_bounded(f, 4)
+
+
+def test_load_forecasts_bounded_refuses_missing(tmp_path):
+    with pytest.raises(SystemExit, match="only the parquet forecast table"):
+        fold.load_forecasts_bounded(tmp_path / "missing.parquet", 1 << 20)
+
+
+def test_load_forecasts_bounded_refuses_csv_gz(tmp_path):
+    gz = tmp_path / "tier4.csv.gz"
+    gz.write_bytes(b"x")
+    with pytest.raises(SystemExit, match="only the parquet forecast table"):
+        fold.load_forecasts_bounded(gz, 1 << 20)
+
+
+def test_load_forecasts_bounded_reads_small_parquet(tmp_path, monkeypatch):
+    import engine.data.features.tier4 as tier4
+
+    monkeypatch.setattr(tier4, "normalize", lambda frame: frame)
+    monkeypatch.setattr(tier4, "_assert_current_schema", lambda frame, path: frame)
+    df = pd.DataFrame({"ticker": ["A", "B"], "event_date": pd.to_datetime(["2024-01-02", "2024-01-03"]),
+                       "forecast_edge": [0.1, -0.2]})
+    f = tmp_path / "tier4.parquet"
+    df.to_parquet(f)
+    out = fold.load_forecasts_bounded(f, 1 << 20)
+    pd.testing.assert_frame_equal(out, df)
+
+
+def test_load_trades_streaming_refuses_oversize_partition_file_before_iterating(monkeypatch, tmp_path):
+    part = tmp_path / "part.parquet"
+    part.write_bytes(b"0123456789")  # 10 bytes
+    monkeypatch.setattr(fold, "MAX_PARTITION_BYTES", 1)
+
+    class _NoIterStore:
+        def iter_table(self, name, years=None):
+            raise AssertionError("iter_table must not be called when a partition file is refused")
+
+    with pytest.raises(SystemExit, match="refused"):
+        fold.load_trades_streaming(_NoIterStore(), "STR-THRU", 2024, partition_files=lambda year: [part])

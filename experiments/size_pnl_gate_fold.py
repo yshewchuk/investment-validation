@@ -41,6 +41,7 @@ ADMITTED_MAX_BYTES = 64 << 20
 LABEL_COLUMNS = ("ret", "exit_value", "exit_date")
 PROGRESS_INTERVAL_S = 30
 MAX_FORECAST_BYTES = 4 << 30
+MAX_PARTITION_BYTES = 4 << 30
 MAX_PARTITION_ROWS = 50_000_000  # post-decode sanity cap on rows per trades partition; not a memory bound
 
 _T0 = time.time()
@@ -100,6 +101,50 @@ def check_input_file(path, max_bytes):
             raise SystemExit(f"refused: {cand} is {st.st_size} bytes, over the {max_bytes} byte limit")
         return cand
     raise SystemExit(f"refused: {path} not found (no .csv.gz fallback either)")
+
+
+def load_forecasts_bounded(path, max_bytes):
+    """Decode the Tier-4 forecast parquet table through one bounded, non-following descriptor.
+
+    The type and size checks run on the same descriptor that is decoded, so the bytes checked
+    are the bytes read. Only the parquet table is supported: a .csv.gz or a missing file is refused.
+    """
+    _check_max_bytes(max_bytes)
+    path = str(path)
+    if not path.endswith(".parquet"):
+        raise SystemExit(f"refused: {path} is not a .parquet file; only the parquet forecast table is supported")
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        raise SystemExit(f"refused: {path} not found; only the parquet forecast table is supported "
+                         "(no .csv.gz fallback)") from None
+    except OSError as e:
+        raise SystemExit(f"refused: cannot open forecast table {path}: {e.strerror}") from None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise SystemExit(f"refused: {path} is not a regular file")
+        if st.st_size > max_bytes:
+            raise SystemExit(f"refused: {path} is {st.st_size} bytes, over the {max_bytes} byte limit")
+    except BaseException:
+        os.close(fd)
+        raise
+    with os.fdopen(fd, "rb") as fh:
+        frame = pd.read_parquet(fh)
+    import engine.data.features.tier4 as tier4
+
+    return tier4.normalize(tier4._assert_current_schema(frame, Path(path)))
+
+
+@contextlib.contextmanager
+def _patched_forecasts(tier4, loader):
+    """Temporarily replace tier4.load_forecasts with loader; restore the original even on error."""
+    original = tier4.load_forecasts
+    tier4.load_forecasts = loader
+    try:
+        yield
+    finally:
+        tier4.load_forecasts = original
 
 
 def file_sha256(path, max_bytes=8 << 30):
@@ -370,11 +415,17 @@ def select_trades(frame, strategy):
     return rows.reset_index(drop=True)
 
 
-def load_trades_streaming(store, strategy, max_year):
+def load_trades_streaming(store, strategy, max_year, partition_files=None):
     """Stream trades one year partition at a time, keeping only select_trades() rows.
 
     store.iter_table yields (year, frame) tuples; only partitions through max_year are requested.
+    When partition_files(year) -> list[Path] is given, every partition file for 2000..max_year is
+    size-checked before any partition is decoded.
     """
+    if partition_files is not None:
+        for year in range(2000, int(max_year) + 1):
+            for part_file in partition_files(year):
+                check_input_file(part_file, MAX_PARTITION_BYTES)
     kept = []
     cols = None
     partitions = 0
@@ -411,6 +462,7 @@ def _progress_fields(done, kept_rows, elapsed):
 
 def _real_wiring(through_year):
     # through_year is accepted for symmetry with the CLI; the loaders derive their own years.
+    import engine.data.features.tier4 as tier4
     import engine.models.training.gate_forecast_analog as ga
     import engine.paths as paths
     from engine.features import FeatureContext
@@ -418,14 +470,21 @@ def _real_wiring(through_year):
     def load_trades(max_year):
         from engine.data import store
 
-        check_input_file(paths.TIER4, MAX_FORECAST_BYTES)
-        return load_trades_streaming(store, ga.STRATEGY, max_year)
+        def partition_files(year):
+            return store._partition_files(paths.curated_partition("trades", year))
+
+        return load_trades_streaming(store, ga.STRATEGY, max_year, partition_files=partition_files)
+
+    def bounded_forecasts(path=None):
+        return load_forecasts_bounded(paths.TIER4, MAX_FORECAST_BYTES)
 
     def build(t):
         entry_years = pd.to_datetime(t["entry_date"]).dt.year
         years = range(int(entry_years.min()) - 1, int(entry_years.max()) + 1)
         ctx = FeatureContext.load(sorted(t["ticker"].unique()), years=years)
-        return ga.build_dataset(t, panel=ctx.panel, daily=ctx.daily, context=ctx)
+        # The builder's own tier4.load_forecasts() call decodes through the bounded handle.
+        with _patched_forecasts(tier4, bounded_forecasts):
+            return ga.build_dataset(t, panel=ctx.panel, daily=ctx.daily, context=ctx)
 
     return load_trades, build, ga.fit, list(ga.FEATURES), ga.TARGET
 
