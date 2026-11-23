@@ -19,6 +19,7 @@ from engine.pnl_sim import trailing_cutoff
 from engine.portfolio import CAPITAL_PER_TRADE, CONTRACT_MULTIPLIER
 
 RULES = ("R_L", "R_L2")
+GATE_RULE = "G_PROD"  # Amendment 3 sensitivity arm; not in RULES, so no hypothesis or default path reaches it. Decided only with a gate callable.
 EXIT_UNQUOTED = "exit_unquoted_worst_case"
 STATUSES = ("taken", "not_taken", "undetermined")
 DECISION_COLS = ["event_id", "event_date", "edge", "cutoff", "rel_spread", "status", "reason"]
@@ -123,10 +124,14 @@ def _verdict(clears, why):
     return ("taken", None) if clears else ("not_taken", why)
 
 
-def decide(events, history, rule, chunk):
+def decide(events, history, rule, chunk, gate=None):
     """One decision row per event. ``history`` holds the model's own ``edge`` for all its events;
-    ``chunk`` is the S3 ladder chunk that carries each event's entry quotes at the true ATM."""
-    if rule not in RULES:
+    ``chunk`` is the S3 ladder chunk that carries each event's entry quotes at the true ATM.
+    ``gate`` (G_PROD only) maps an event record to (status, reason) and is called only after the universe filters pass."""
+    if rule == GATE_RULE:
+        if gate is None:
+            raise ValueError("G_PROD needs a gate callable")
+    elif rule not in RULES or gate is not None:
         raise ValueError(f"unknown rule {rule!r}; expected one of {RULES}")
     frame = history[["event_date", "edge"]].rename(columns={"edge": "exp_pnl_sim"})
     cache = {}  # trailing cutoff depends only on the month, so compute it once per month
@@ -150,6 +155,8 @@ def decide(events, history, rule, chunk):
                 row["rel_spread"] = rel
                 if mcap < MCAP_FLOOR or rel > MAX_REL_SPREAD:
                     row.update(status="not_taken", reason="universe_filter")
+                elif rule == GATE_RULE:
+                    row["status"], row["reason"] = gate(ev)
                 elif rule == "R_L2":
                     row["status"], row["reason"] = _verdict(edge >= 0, "below_zero")
                 else:

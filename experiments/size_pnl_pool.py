@@ -24,8 +24,8 @@ _TABLE_COLS = ("event_date", "pred_move", "pred_crush")
 _LABEL_COLS = ("abs_move", "crush_pct_iv30")
 
 
-def build_pool(table, labels, *, floor=COMMON_START):
-    """Residual pool for one model: paired move and crush errors, from ``floor`` on if given."""
+def pool_history(table, labels, *, floor=COMMON_START):
+    """The paired-error history ``build_pool`` feeds to ``ResidualPool`` (columns event_date, pred_abs_move, err_move, err_crush)."""
     missing = [c for c in _TABLE_COLS if c not in table.columns]
     missing += [c for c in _LABEL_COLS if c not in labels.columns]
     if missing:
@@ -46,6 +46,12 @@ def build_pool(table, labels, *, floor=COMMON_START):
         "err_move": (frame["abs_move"] - frame["pred_move"]).to_numpy(dtype=float),
         "err_crush": (frame["crush_pct_iv30"] - frame["pred_crush"]).to_numpy(dtype=float),
     })
+    return history
+
+
+def build_pool(table, labels, *, floor=COMMON_START):
+    """Residual pool for one model: paired move and crush errors, from ``floor`` on if given."""
+    history = pool_history(table, labels, floor=floor)
     pool = ResidualPool(history)
     floor_text = "none" if floor is None else pd.Timestamp(floor).date()
     print(f"[pnl_pool] pool rows={len(pool)} floor={floor_text}", file=sys.stderr)
