@@ -131,6 +131,14 @@ def test_differences_signs_median_minus_mean_and_other_minus_m0():
     assert "not the pre-registered verdict" in text and "primary marks" in text
 
 
+def test_final_equity_near_100000_renders_with_cents_and_stays_distinct():
+    metrics = {"wanted": 1, "funded": 1, "total_return": 0.0, "max_drawdown": 0.0, "peak_open": 1}
+    results = [{"mark": "primary", "kind": "book", "key": "as_is", "model": model, "final_equity": equity, **metrics}
+               for model, equity in (("A", 100049.0), ("B", 100000.0))]
+    text = account.tables(results, [])[0]
+    assert "| book | A | as_is | 1 | 1 | 100049.00 |" in text and "| book | B | as_is | 1 | 1 | 100000.00 |" in text
+
+
 @pytest.mark.parametrize("order", ["gain_first", "loss_first"])
 def test_same_date_offsetting_exits_give_no_intra_date_drawdown(order):
     """Two funded trades (one contract each) exit on one date with +10 and -10: the date-level curve never dips, in either row order."""

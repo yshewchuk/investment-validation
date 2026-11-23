@@ -814,7 +814,7 @@ def test_empty_taken_frame_with_the_column_reports_zero_trade_accounts(tmp_path)
     assert taken.empty and "secured_per_contract" in taken.columns
     sections = assemble_mod._account_sections(taken, {"H-sq": "m-hsq"}, {"m-hsq": "H-sq"}, universe)
     text = "\n".join(sections)
-    assert any("| 0 | 0 | 1e+05 |" in line for line in text.splitlines())
+    assert any("| 0 | 0 | 100000.00 |" in line for line in text.splitlines())
     assert "not_testable" not in text
 
 

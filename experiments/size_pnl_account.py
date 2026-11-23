@@ -125,7 +125,8 @@ def tables(results, diffs):
         if not rows:
             continue
         title = f"### Sensitivity (Amendment 2), not the pre-registered verdict: cash-secured $100,000 accounts, {mark} marks"
-        account = _md_table(_ACCOUNT_HEADERS, [[r[h] for h in _ACCOUNT_HEADERS] for r in rows])
-        diff_rows = [[d[h] for h in ("mark", "kind", "key", "contrast", "diff")] for d in diffs if d["mark"] == mark]
+        # Dollar values are pre-formatted with cents: _cell would render a float at 4 significant digits (100049.0 -> "1e+05").
+        account = _md_table(_ACCOUNT_HEADERS, [[f"{r[h]:.2f}" if h == "final_equity" else r[h] for h in _ACCOUNT_HEADERS] for r in rows])
+        diff_rows = [[f"{d[h]:.2f}" if h == "diff" else d[h] for h in ("mark", "kind", "key", "contrast", "diff")] for d in diffs if d["mark"] == mark]
         out.append("\n\n".join([title, NOTE, account, _md_table(["mark", "kind", "key", "contrast", "diff"], diff_rows)]))
     return out
