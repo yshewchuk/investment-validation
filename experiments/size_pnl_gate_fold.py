@@ -25,6 +25,7 @@ import os
 import resource
 import stat
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -38,13 +39,37 @@ MAX_TRAIN_THROUGH = 2024
 MIN_TRAIN_ROWS = 500
 ADMITTED_MAX_BYTES = 64 << 20
 LABEL_COLUMNS = ("ret", "exit_value", "exit_date")
+PROGRESS_INTERVAL_S = 30
 
 _T0 = time.time()
 
 
+def _rss_mib():
+    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+
+
 def _log(msg):
-    rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
-    print(f"[gate_fold] {msg} (elapsed={time.time() - _T0:.1f}s rss={rss:.0f}MiB)", file=sys.stderr)
+    print(f"[gate_fold] {msg} (elapsed={time.time() - _T0:.1f}s rss={_rss_mib():.0f}MiB)", file=sys.stderr)
+
+
+@contextlib.contextmanager
+def _heartbeat(label, interval=60):
+    """Log `running elapsed=<s>s rss=<MiB>` every `interval` seconds while the body runs."""
+    stop = threading.Event()
+    start = time.time()
+
+    def beat():
+        while not stop.wait(interval):
+            print(f"[gate_fold] {label} running elapsed={time.time() - start:.1f}s rss={_rss_mib():.0f}MiB",
+                  file=sys.stderr, flush=True)
+
+    thread = threading.Thread(target=beat, daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        thread.join()
 
 
 def _check_max_bytes(max_bytes):
@@ -131,7 +156,10 @@ def train_fold(trades, *, through, build, fit, features, target, seed, threshold
     kept, cut = cut_trades(trades, through)
     if kept.empty:
         raise ValueError(f"no trades left after cutoff {through}-12-31")
-    dataset = build(kept)
+    with _heartbeat("fold build"):
+        t_build = time.time()
+        dataset = build(kept)
+    _log(f"fold build done: {time.time() - t_build:.1f}s")
     if (pd.to_datetime(dataset["event_date"]) > cutoff).any():
         raise ValueError(f"dataset has an event dated after {through}-12-31")
     vals = dataset[[*features, target]].to_numpy(dtype=float)
@@ -141,7 +169,10 @@ def train_fold(trades, *, through, build, fit, features, target, seed, threshold
         raise ValueError(f"only {n_complete} complete rows; need {MIN_TRAIN_ROWS}")
     X = vals[complete, :len(features)]
     y = vals[complete, len(features)]
-    model = fit(X, y, seed)
+    with _heartbeat("fold fit"):
+        t_fit = time.time()
+        model = fit(X, y, seed)
+    _log(f"fold fit done: {time.time() - t_fit:.1f}s")
     params = model.get_params() if hasattr(model, "get_params") else {}
     # Dates come from the rows that were actually fitted, not from every kept trade.
     fitted = dataset.loc[complete]
@@ -194,7 +225,8 @@ def build_inputs(trades, *, year, build, features, admitted_ids):
     excluded_events = int(trades.loc[drop, "event_id"].nunique())
     keep = (event_dt <= cutoff).to_numpy() & ~drop
     kept = trades.loc[keep]
-    dataset = build(kept)
+    with _heartbeat("inputs build"):
+        dataset = build(kept)
     if (pd.to_datetime(dataset["event_date"]) > cutoff).any():
         raise ValueError(f"dataset has an event dated after {year}-12-31")
     in_year =(pd.to_datetime(dataset["event_date"]).dt.year == int(year)).to_numpy()
@@ -321,6 +353,9 @@ def load_trades_streaming(store, strategy, max_year):
     kept = []
     cols = None
     partitions = 0
+    kept_rows = 0
+    t0 = time.monotonic()
+    last_progress = t0
     for year, part in store.iter_table("trades", years=range(2000, int(max_year) + 1)):
         partitions += 1
         if cols is None:
@@ -328,12 +363,22 @@ def load_trades_streaming(store, strategy, max_year):
         selected = select_trades(part, strategy)
         if not selected.empty:
             kept.append(selected)
+            kept_rows += len(selected)
+        now = time.monotonic()
+        if now - last_progress >= PROGRESS_INTERVAL_S:
+            last_progress = now
+            _log(f"trades progress: {_progress_fields(partitions, kept_rows, now - t0)}")
     if kept:
         rows = pd.concat(kept, ignore_index=True)
     else:
         rows = pd.DataFrame(columns=cols or [])
-    _log(f"trades partitions={partitions} kept_rows={len(rows)}")
+    _log(f"trades end: {_progress_fields(partitions, kept_rows, time.monotonic() - t0)}")
     return rows
+
+
+def _progress_fields(done, kept_rows, elapsed):
+    # No total or ETA: the requested range is not a reliable partition count.
+    return f"done={done} kept_rows={kept_rows} rate={done / max(elapsed, 1e-9):.2f}/s"
 
 
 def _real_wiring(through_year):
@@ -379,8 +424,13 @@ def _run_fit(args, wiring, root):
             wiring = _real_wiring(args.train_through)
         load_trades, build, fit, features, target = wiring
         _log(f"fit start: train_through={args.train_through}")
-        model, receipt = train_fold(load_trades(args.train_through), through=args.train_through, build=build, fit=fit,
+        t_load = time.time()
+        trades = load_trades(args.train_through)
+        _log(f"fit load done: {time.time() - t_load:.1f}s")
+        model, receipt = train_fold(trades, through=args.train_through, build=build, fit=fit,
                                     features=features, target=target, seed=SEED, threshold=REGISTERED_THRESHOLD)
+        _log("fit cut " + " ".join(f"{k}={v}" for k, v in receipt["cut"].items()))
+        _log(f"fit training_rows={receipt['training_rows']}")
         payload = {"model": model, "features": list(features), "threshold": REGISTERED_THRESHOLD,
                    "seed": SEED, "train_through": args.train_through, "recipe_hash": receipt["recipe_hash"]}
         text = _publish_pair(out, receipt_path, lambda p: joblib.dump(payload, p, compress=3), receipt,
@@ -401,8 +451,15 @@ def _run_inputs(args, wiring, root):
             wiring = _real_wiring(args.year)
         load_trades, build, _fit, features, _target = wiring
         _log(f"inputs start: year={args.year} admitted={len(admitted_ids)}")
-        table, receipt = build_inputs(load_trades(args.year), year=args.year, build=build, features=features,
+        t_load = time.time()
+        trades = load_trades(args.year)
+        _log(f"inputs load done: {time.time() - t_load:.1f}s")
+        t_build = time.time()
+        table, receipt = build_inputs(trades, year=args.year, build=build, features=features,
                                       admitted_ids=admitted_ids)
+        _log(f"inputs build done: {time.time() - t_build:.1f}s")
+        _log(f"inputs excluded_events={receipt['excluded_events']} admitted_events={receipt['admitted_events']} "
+             f"admitted_matched={receipt['admitted_matched']} rows={receipt['rows']}")
         receipt["admitted_events_sha256"] = admitted_sha
         text = _publish_pair(out, receipt_path, lambda p: table.to_parquet(p, index=False), receipt,
                              "inputs_sha256")

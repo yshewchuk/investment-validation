@@ -601,3 +601,23 @@ def test_main_fit_refuses_receipt_equal_to_out_and_writes_nothing(tmp_path):
         fold.main(["fit", "--train-through", "2024", "--out", str(out), "--receipt", str(out)],
                   wiring=_wiring(), root=tmp_path)
     assert list(tmp_path.iterdir()) == []  # refused before any directory is created or file written
+
+
+def test_heartbeat_logs_while_body_runs(capsys):
+    import time
+
+    with fold._heartbeat("unit body", interval=0.05):
+        time.sleep(0.2)
+    beats = [line for line in capsys.readouterr().err.splitlines() if "unit body running elapsed=" in line]
+    assert len(beats) >= 2
+    assert all("rss=" in line and line.startswith("[gate_fold]") for line in beats)
+
+
+def test_run_fit_logs_cut_stats_line(tmp_path, capsys):
+    out = tmp_path / "gate.joblib"
+    rc = fold.main(["fit", "--train-through", "2024", "--out", str(out)], wiring=_wiring(), root=tmp_path)
+    assert rc == 0
+    err = capsys.readouterr().err
+    assert ("fit cut rows_in=703 rows_kept=693 dropped_event_after_cutoff=8 "
+            "dropped_exit_null=0 dropped_exit_after_cutoff=2") in err
+    assert "fit training_rows=693" in err
