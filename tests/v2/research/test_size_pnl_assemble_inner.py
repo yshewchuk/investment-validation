@@ -10,7 +10,7 @@ from experiments import size_pnl_decisions as decisions
 from experiments import size_pnl_tuning as tuning
 from experiments.size_pnl_shortvol import Refusal
 from tests.v2.research.test_size_pnl_assemble import (  # noqa: F401 (imported so the autouse check_plan no-op applies here)
-    EVENT_DATES, ROLES, TICKERS, _cells, _no_plan_admission, _rewrite, _rows, _section_lines, build, plan_frame)
+    EVENT_DATES, ROLES, TICKERS, _cells, _no_plan_admission, _rewrite, _rows, _section_lines, _with_mid, build, plan_frame)
 
 NEW_EVENTS = {"E05": "2025-08-15", "E06": "2025-11-15", "E11": "2023-08-15", "E12": "2024-02-15",
               "E13": "2024-05-15", "E14": "2024-08-15", "E15": "2023-11-15"}
@@ -38,13 +38,16 @@ HASH = "h" * 64  # the inputs the inner receipt and the inner_decisions body sha
 
 
 def build_inner(tmp_path, inner_dates, *, outer_dates, tuning_override=None, stage="inner_decisions", mutate=None, body_override=None,
-                pnl_scale=1.0):
+                pnl_scale=1.0, mid=False):
     """A full outer run over every event in TICKERS, plus its inner decisions (decisions_inner.parquet and receipt).
-    ``pnl_scale`` multiplies the inner rows' pnl_dollars, so the inner window's values differ from the outer's."""
-    out = build(tmp_path, dates=outer_dates, plan_tickers=TICKERS)
+    ``pnl_scale`` multiplies the inner rows' pnl_dollars, so the inner window's values differ from the outer's.
+    ``mid`` adds the Amendment 1 column (pnl_dollars_mid = pnl_dollars) to the outer and the inner rows."""
+    out = build(tmp_path, dates=outer_dates, plan_tickers=TICKERS, rows_fn=_with_mid if mid else None)
     _rewrite(out / "receipts" / "inner.json", lambda body: {**body, "inputs": HASH, "scope": None})
     outer = tuning.load_receipt(out / "receipts" / "outer.json")
     rows = [{**row, "in_sample": row["arm_or_rule"] == "retuned", "pnl_dollars": row["pnl_dollars"] * pnl_scale} for row in _rows(inner_dates)]
+    if mid:
+        rows = [{**row, "pnl_dollars_mid": row["pnl_dollars"]} for row in rows]
     body = {"stage": stage, "models": list(ROLES),
             "tuning": outer["tuning"] if tuning_override is None else tuning_override,
             "c": {mid: 1.0 for mid in ROLES}, "emit_from": "2023-07-01", "ladder": "x", "scope": None, "inputs": HASH,
@@ -90,6 +93,20 @@ def test_t10_is_computable_with_inner_2024_and_outer_2025(tmp_path, inner_events
     assert len(pooled) == 18 and pooled[0]["n_events"] == 8
     assert {2024, 2025} <= set(pooled[0]["year_signs"]) and pooled[0]["year_signs"][2024] == pooled[0]["year_signs"][2025] == 1
     assert pooled[0]["mean"] == 1.0
+
+
+SENS_T10_TITLE = "### Sensitivity (Amendment 1), not the pre-registered verdict: T10"
+
+
+def test_sensitivity_t10_pools_the_inner_window_too(tmp_path, inner_events):
+    # Same hand derivation as test_t10_is_computable_with_inner_2024_and_outer_2025: the mid column equals the primary P&L here,
+    # so the sensitivity verdicts are the primary ones. Outer 2025 alone has no full 2024 year, so only the pooled inner rows make them testable.
+    out = build_inner(tmp_path, INNER_2024, outer_dates=OUTER_2025, mid=True)
+    assemble_mod.assemble(out, plan_frame(TICKERS), admitted=None)
+    text = (out / "REPORT.md").read_text(encoding="utf-8")
+    sens = [_cells(line) for line in _section_lines(text, SENS_T10_TITLE) if line.startswith("| H")]
+    assert sens == [["H1", "+1", "clear"], ["H2", "-1", "reversed"], ["H3", "+1", "no_difference"]]
+    assert not all(row[2] == "not_testable" for row in sens)
 
 
 def test_t10_still_refuses_when_a_full_year_is_missing(tmp_path, inner_events):
@@ -145,6 +162,7 @@ INNER_REFUSALS = [
     ("report_receipt_chain_mismatch", {"body_override": {"scope": "full"}}),
     ("report_receipt_chain_mismatch", {"body_override": {"models": list(ROLES)[:-1]}}),
     ("report_receipt_stage", {"stage": "inner"}),
+    ("report_receipt_chain_mismatch", {"body_override": {"c": {"m-hsq": 9.0, **{m: 1.0 for m in ROLES if m != "m-hsq"}}}}),
     ("report_decisions_mismatch", {"mutate": _corrupt_inner}),
 ]
 

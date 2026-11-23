@@ -3,6 +3,7 @@ Real readers and driver; pool, simulation, scorers and tuning stubbed through ``
 import hashlib
 import json
 
+import numpy as np
 import pandas as pd
 
 from experiments import size_pnl_driver as driver, size_pnl_tuning as tuning
@@ -89,3 +90,41 @@ def test_exact_inner_replay_keeps_decisions_inner(tmp_path, outer_stubs, monkeyp
     second = _inner(tmp_path, monkeypatch)
     assert second == first
     assert (tmp_path / "decisions_inner.parquet").read_bytes() == before
+
+
+def _marks(ids, pnl, mid_marks):
+    """Literal marks of a taken row: one lot at rung 2, exit 2.0 (3.0 under mid_marks); ``pnl`` is (primary, mid) P&L."""
+    primary, mid = pnl
+    return pd.DataFrame({"event_id": ids, "entry_cost": 1.0, "exit_value": 3.0 if mid_marks else 2.0, "rung": 2, "lots": 1,
+                         "pnl_per_share": 1.0, "pnl_dollars": mid if mid_marks else primary})
+
+
+def test_inner_decisions_carry_the_scored_pnl_and_taken_rows(tmp_path, stubs, monkeypatch):
+    def scored_rows(chunk_, events, sims, name, *, alpha=0.5, c=1.0):
+        return pd.DataFrame({"event_id": events["event_id"].astype(str).to_numpy(), "event_date": events["event_date"].to_numpy(),
+                             "structure": name, "status": "scored", "reason": "scored"})
+
+    def taken_straddle(events, history, rule, chunk_):
+        ids = events["event_id"].astype(str).to_numpy()
+        edge = events["pred_abs_move"].to_numpy(dtype=float) - events["implied_move"].to_numpy(dtype=float)
+        return pd.DataFrame({"event_id": ids, "event_date": events["event_date"].to_numpy(), "edge": edge, "cutoff": np.nan,
+                             "rel_spread": np.nan, "status": "taken", "reason": "taken"})
+
+    monkeypatch.setattr(driver.shortvol, "score_events", scored_rows)
+    monkeypatch.setattr(driver.shortvol, "decide", lambda scored: scored.assign(cutoff=np.nan, status="taken", reason="taken"))
+    monkeypatch.setattr(driver.shortvol, "score", lambda chunk_, events, mine, name, alpha, *, c=1.0, drop_unquoted=False, mid_marks=False:
+                        _marks(mine["event_id"].astype(str).to_numpy(), (7.0, 9.0), mid_marks))
+    monkeypatch.setattr(driver.straddle, "decide", taken_straddle)
+    monkeypatch.setattr(driver.straddle, "score", lambda chunk_, events, dec, alpha, mid_marks=False, **kw:
+                        _marks(dec["event_id"].astype(str).to_numpy(), (5.0, 6.0), mid_marks))
+    _inner(tmp_path, monkeypatch)
+    frame = _frame(tmp_path)
+    models = frame["model_id"].nunique()
+    assert models >= 1
+    assert set(frame["event_id"].astype(str)) == {"E2"}  # E1 is burn-in: no rows
+    short, long = frame[frame["book"] == "short_vol"], frame[frame["book"] == "straddle"]
+    assert not short.empty and not long.empty
+    assert (short["status"] == "taken").all() and (short["pnl_dollars"] == 7.0).all()
+    assert (short["pnl_dollars_mid"] == 9.0).all() and (short["rung"] == 2).all()
+    assert (long["pnl_dollars"] == 5.0).all() and (long["pnl_dollars_mid"] == 6.0).all()
+    assert len(frame) == models * (2 * len(driver.shortvol.NAMES) + len(driver.straddle.RULES))

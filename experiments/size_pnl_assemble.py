@@ -232,6 +232,8 @@ def _load_inner(out, outer, inner, tuned):
         if not (receipt["inputs"] == inner["inputs"] and receipt["scope"] == inner["scope"]
                 and sorted(receipt["models"]) == sorted(outer["models"])):
             raise _refuse("report_receipt_chain_mismatch", "inner_decisions.json is not bound to inner.json's inputs, scope or models")
+        if receipt["c"] != {mid: tuned[mid]["c"] for mid in outer["models"]}:
+            raise _refuse("report_receipt_chain_mismatch", "inner_decisions.json's c does not match the tuning receipts' c")
     return _load_decisions(out, receipt, "decisions_inner.parquet")
 
 
