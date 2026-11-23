@@ -568,3 +568,10 @@ def test_secured_refuses_a_decision_priced_at_another_c():
     decisions = taken(chunk, "A", c=2.0)  # priced at c = 2.0; the call asks for c = 1.0
     with pytest.raises(ValueError, match="decision was not priced at this c"):
         sv.secured(chunk, events_for("A"), decisions, "CND-PS", c=1.0)
+
+
+def test_secured_needs_a_c_column():
+    chunk, events = chunk_of(("A", {})), events_for("A")
+    decisions = taken(chunk, "A").drop(columns="c")
+    with pytest.raises(ValueError, match="alpha and c columns"):
+        sv.secured(chunk, events, decisions, "CND-PS")

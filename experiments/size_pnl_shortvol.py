@@ -340,7 +340,9 @@ def secured(chunk, events, decisions, name, c=1.0):
     pred = dict(zip(events["event_id"].astype(str), events["pred_move"]))
     pos = {str(e): i for i, e in enumerate(chunk["event_id"])}
     mine = decisions[(decisions["status"] == "taken") & (decisions["structure"] == name)]
-    if "c" in decisions.columns and any(float(c_col) != float(c) for c_col in mine["c"]):  # refused, not silently re-resolved
+    if not mine.empty and "c" not in decisions.columns:
+        raise ValueError("decisions must carry alpha and c columns")
+    if not mine.empty and any(float(c_col) != float(c) for c_col in mine["c"]):  # refused, not silently re-resolved
         raise ValueError("decision was not priced at this c")
     rows = []
     for dec in mine.to_dict("records"):

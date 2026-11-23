@@ -33,7 +33,7 @@ def _fixture():
 
 
 def test_secured_per_contract_bfly_like_and_empty():
-    legs = [_leg(BUY, 100, 1), _leg(SELL, 95, 2), _leg(BUY, 90, 1), _leg(SELL, 85, 0)]  # the last is a reference leg
+    legs = [_leg(BUY, 100, 1), _leg(SELL, 95, 2), _leg(BUY, 90, 1), _leg(SELL, 200, 0)]  # the last is a reference leg
     assert account.secured_per_contract(legs) == 2 * 95 * 100 == 19000.0
     blob = {"entry": [{"side": "buy", "qty": 1, "strike": 100}, {"side": "sell", "qty": 2, "strike": 95}, {"side": "buy", "qty": 1, "strike": 90}]}
     assert account.secured_per_contract(legs) == margin.secured_per_contract(blob)
