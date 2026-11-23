@@ -192,9 +192,15 @@ def decide(events, history, rule, chunk, gate=None):
 
 
 def history_rows(decisions, events):
-    """The (event_date, edge) rows that feed the R_L trailing cutoff: only events in the straddle universe (Amendment 5).
+    """The (event_date, edge) rows that feed the R_L trailing cutoff (Amendment 5).
+
+    The history universe is the market-cap floor and not BAD_QUOTE: an event whose ``decisions`` reason is ``bad_quote``
+    leaves the history as well as the straddle book. An event whose entry quote is undetermined stays in the history
+    when its mcap qualifies, since its BAD_QUOTE status is unknown.
     ``decisions`` rows are in the same order as ``events`` (``decide`` emits one row per event, in order)."""
-    mask = events["mcap_usd"].map(in_universe).to_numpy(dtype=bool)
+    in_mcap = events["mcap_usd"].map(in_universe).to_numpy(dtype=bool)
+    not_bad = decisions["reason"].to_numpy() != "bad_quote"
+    mask = in_mcap & not_bad
     return decisions.loc[mask, ["event_date", "edge"]]
 
 

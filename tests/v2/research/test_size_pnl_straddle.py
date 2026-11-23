@@ -391,6 +391,41 @@ def test_subfloor_history_does_not_move_the_rl_cutoff():
     assert unfiltered > 1.0  # the sub-floor edges would have moved the cutoff
 
 
+def _mixed_chunk(bad_id, good_ids):
+    """One BAD_QUOTE event (spot 10, entry cost 35% of spot) and healthy ATM straddles at spot 100."""
+    recs = [rec(bad_id, 10.0, pair(10, call_e=(1.5, 2.5), put_e=(1.0, 2.0)))]
+    recs += [rec(e, 100.0, pair(100)) for e in good_ids]
+    return lad._pack(recs, {})
+
+
+def test_history_rows_drops_bad_quote_events():
+    events = pd.DataFrame([ev("n1", 0.5, date="2024-01-15"), ev("bq", 100.0, date="2024-01-16"),
+                           ev("n2", 1.0, date="2024-01-17")])
+    decisions = sd.decide(events, EMPTY, "R_L2", _mixed_chunk("bq", ["n1", "n2"]))
+    assert decisions.set_index("event_id").loc["bq", "reason"] == "bad_quote"
+    rows = sd.history_rows(decisions, events)
+    assert list(rows.columns) == ["event_date", "edge"]
+    assert list(rows["event_date"]) == ["2024-01-15", "2024-01-17"]
+    assert list(rows["edge"]) == pytest.approx([0.5, 1.0])
+
+
+def test_bad_quote_event_does_not_move_the_rl_cutoff():
+    # 120 healthy edges 0.00..1.19 in one prior month, plus one BAD_QUOTE event with a huge edge in the same month.
+    normal = [ev(f"in{i}", i / 100.0, date="2024-01-15") for i in range(120)]
+    bad = ev("bq", 100.0, date="2024-01-16")
+    hist = pd.DataFrame(normal + [bad])
+    chunk = _mixed_chunk("bq", [f"in{i}" for i in range(120)])
+    decisions = sd.decide(hist, EMPTY, "R_L2", chunk)
+    assert decisions.loc[len(hist) - 1, "reason"] == "bad_quote"
+    target = pd.DataFrame([ev("hi", 1.0)])
+    filtered = sd.decide(target, sd.history_rows(decisions, hist), "R_L", good("hi")).loc[0, "cutoff"]
+    without = sd.decide(pd.DataFrame(normal), EMPTY, "R_L2", good(*[f"in{i}" for i in range(120)]))
+    without_cut = sd.decide(target, sd.history_rows(without, pd.DataFrame(normal)), "R_L", good("hi")).loc[0, "cutoff"]
+    unfiltered = sd.decide(target, decisions[["event_date", "edge"]], "R_L", good("hi")).loc[0, "cutoff"]
+    assert filtered == pytest.approx(0.952) and filtered == without_cut
+    assert unfiltered > filtered  # the BAD_QUOTE edge would have moved the cutoff (0.96 against 0.952)
+
+
 def test_rl2_takes_zero_and_ignores_history():
     events = pd.DataFrame([ev("zero", 0.0), ev("neg", -0.1)])
     out = sd.decide(events, EMPTY, "R_L2", good("zero", "neg")).set_index("event_id")
