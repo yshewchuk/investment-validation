@@ -21,6 +21,7 @@ import hashlib
 import json
 import os
 import resource
+import stat
 import sys
 import time
 from pathlib import Path
@@ -42,10 +43,26 @@ def _log(msg):
     print(f"[gate_fold] {msg} (elapsed={time.time() - _T0:.1f}s rss={rss:.0f}MiB)", file=sys.stderr)
 
 
-def file_sha256(path):
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
+def file_sha256(path, max_bytes=8 << 30):
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except IsADirectoryError:
+        raise ValueError("not a regular file") from None
+    try:
+        is_regular = stat.S_ISREG(os.fstat(fd).st_mode)
+    except BaseException:
+        os.close(fd)
+        raise
+    if not is_regular:
+        os.close(fd)
+        raise ValueError(f"not a regular file: {path}")
+    with os.fdopen(fd, "rb") as f:
+        h = hashlib.sha256()
+        total = 0
         for chunk in iter(lambda: f.read(1 << 20), b""):
+            total += len(chunk)
+            if total > max_bytes:
+                raise ValueError(f"{path} exceeds max_bytes={max_bytes}")
             h.update(chunk)
     return h.hexdigest()
 
@@ -58,12 +75,14 @@ def recipe_hash(features, params, seed, target, threshold, through):
 
 def refuse_protected(out, root):
     out = Path(out).resolve()
-    protected_dir = (Path(root) / "data" / "models").resolve()
-    registry = (Path(root) / "engine" / "models" / "registry.json").resolve()
-    if out == protected_dir or protected_dir in out.parents:
-        raise SystemExit(f"refused: {out} is inside {protected_dir}")
-    if out == registry:
-        raise SystemExit(f"refused: {out} is the production registry")
+    roots = [root] if isinstance(root, (str, os.PathLike)) else list(root)
+    for r in roots:
+        protected_dir = (Path(r) / "data" / "models").resolve()
+        registry = (Path(r) / "engine" / "models" / "registry.json").resolve()
+        if out == protected_dir or protected_dir in out.parents:
+            raise SystemExit(f"refused: {out} is inside {protected_dir}")
+        if out == registry:
+            raise SystemExit(f"refused: {out} is the production registry")
     if out.exists():
         raise SystemExit(f"refused: {out} already exists (never overwrite)")
     return out
@@ -178,7 +197,7 @@ def _real_wiring(through_year):
         entry_years = pd.to_datetime(t["entry_date"]).dt.year
         years = range(int(entry_years.min()) - 1, int(entry_years.max()) + 1)
         ctx = FeatureContext.load(sorted(t["ticker"].unique()), years=years)
-        return ga.build_dataset(t, context=ctx)
+        return ga.build_dataset(t, panel=ctx.panel, daily=ctx.daily, context=ctx)
 
     return load_trades, build, ga.fit, list(ga.FEATURES), ga.TARGET
 
@@ -241,7 +260,14 @@ def main(argv=None, *, wiring=None, root=None):
     inputs_p.add_argument("--out", required=True)
     inputs_p.add_argument("--receipt")
     args = parser.parse_args(argv)
-    root = Path(root) if root is not None else Path(__file__).resolve().parents[1]
+    if root is None:
+        roots = [Path(__file__).resolve().parents[1]]
+        plan_root = os.environ.get("INVESTING_PLAN_ROOT")
+        if plan_root:
+            roots.append(Path(plan_root))
+    else:
+        roots = [Path(root)]
+    root = roots
     if args.cmd == "fit":
         return _run_fit(args, wiring, root)
     return _run_inputs(args, wiring, root)

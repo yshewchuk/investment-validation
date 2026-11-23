@@ -1,4 +1,5 @@
 """EXP-188 Amendment 3: size_pnl_gate_fold on synthetic fixtures only (no real data, no real wiring, no network)."""
+import hashlib
 import json
 
 import joblib
@@ -140,6 +141,31 @@ def test_refuse_protected(tmp_path):
         fold.refuse_protected(existing, tmp_path)
     fresh = tmp_path / "fresh.joblib"
     assert fold.refuse_protected(fresh, tmp_path) == fresh.resolve()
+
+
+def test_refuse_protected_checks_every_root(tmp_path):
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    (second / "data" / "models").mkdir(parents=True)
+    with pytest.raises(SystemExit, match="refused"):
+        fold.refuse_protected(second / "data" / "models" / "x.joblib", [first, second])
+    fresh = tmp_path / "fresh.joblib"
+    assert fold.refuse_protected(fresh, [first, second]) == fresh.resolve()
+
+
+def test_file_sha256(tmp_path):
+    f = tmp_path / "blob.bin"
+    data = b"gate fold bytes" * 1000
+    f.write_bytes(data)
+    assert fold.file_sha256(f) == hashlib.sha256(data).hexdigest()
+    link = tmp_path / "link.bin"
+    link.symlink_to(f)
+    with pytest.raises((ValueError, OSError)):  # O_NOFOLLOW refuses to open a symlink
+        fold.file_sha256(link)
+    with pytest.raises(ValueError):
+        fold.file_sha256(tmp_path)  # a directory is not a regular file
+    with pytest.raises(ValueError):
+        fold.file_sha256(f, max_bytes=10)
 
 
 def test_build_inputs_2025_only_no_labels_and_nan_kept():
