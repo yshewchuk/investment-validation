@@ -186,3 +186,17 @@ def test_oracle_accounts_book_rows_for_both_marks():
     assert book["primary"]["model"] == "M1" and book["primary"]["key"] == "as_is"
     assert book["primary"]["final_equity"] == pytest.approx(100100.0)
     assert book["mid"]["final_equity"] == pytest.approx(100200.0)
+
+
+def test_universe_reports_a_valid_account_that_takes_no_trade():
+    """M2 has a short_vol decision row (not_taken) and no taken row: its account is reported at the empty metrics."""
+    taken = _taken()
+    m2 = taken.iloc[[0]].assign(model_id="M2", status="not_taken")
+    universe = pd.concat([taken.assign(status="taken"), m2], ignore_index=True)
+    results = account.accounts(taken, universe)
+    book = {(r["mark"], r["model"]): r for r in results if r["kind"] == "book"}
+    assert book[("primary", "M2")]["wanted"] == 0 and book[("primary", "M2")]["funded"] == 0
+    assert book[("primary", "M2")]["final_equity"] == 100000.0
+    diffs = {d["contrast"]: d for d in account.differences(results, {}, ["M0", "M1", "M2"])
+             if d["mark"] == "primary" and d["kind"] == "book"}
+    assert diffs["M0-vs-M2"]["diff"] == pytest.approx(100000.0 - book[("primary", "M0")]["final_equity"])

@@ -70,23 +70,25 @@ def straddle_rows(rows):
     return out
 
 
-def accounts(taken, label_of_unused=None):
-    """Account metrics per (mark, kind, model, key). ``taken`` holds the taken rows. ``label_of_unused`` is accepted for the
-    spec's signature and ignored: model labels are already applied to ``model_id``. The mid mark is skipped when the
-    exit_value_mid column is absent or all NaN."""
+def accounts(taken, universe=None):
+    """Account metrics per (mark, kind, model, key). ``taken`` holds the taken rows. ``universe`` holds ALL decision rows of
+    any status and discovers the account keys, so a valid account that takes no trade is reported with its empty metrics;
+    None takes the keys from ``taken``. The mid mark is skipped when the exit_value_mid column is absent or all NaN."""
+    universe = taken if universe is None else universe
     marks = ["primary"]
     if "exit_value_mid" in taken.columns and taken["exit_value_mid"].notna().any():
         marks.append("mid")
     short, long = taken[taken["book"] == "short_vol"], straddle_rows(taken[taken["book"] == "straddle"])
-    plans = [("book", short, ["model_id", "arm_or_rule"], lambda k: k[1]),
-             ("structure", short, ["model_id", "arm_or_rule", "structure"], lambda k: f"{k[1]}/{k[2]}"),
-             ("straddle", long, ["model_id", "arm_or_rule"], lambda k: k[1])]
+    plans = [("book", "short_vol", short, ["model_id", "arm_or_rule"], lambda k: k[1]),
+             ("structure", "short_vol", short, ["model_id", "arm_or_rule", "structure"], lambda k: f"{k[1]}/{k[2]}"),
+             ("straddle", "straddle", long, ["model_id", "arm_or_rule"], lambda k: k[1])]
     out = []
     for mark in marks:
-        for kind, rows, keys, key_of in plans:
-            if rows.empty:
-                continue
-            for k, group in rows.groupby(keys):
+        for kind, book, rows, keys, key_of in plans:
+            keyed = universe[universe["book"] == book]
+            taken_by_key = {k: g for k, g in rows.groupby(keys)}
+            for k, _ in keyed.groupby(keys):  # keys from the universe; a key with no taken row simulates the empty account
+                group = taken_by_key.get(k, rows.iloc[:0])
                 out.append({"mark": mark, "kind": kind, "model": k[0], "key": key_of(k), **simulate_account(group, mark)})
     return out
 

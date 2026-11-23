@@ -239,18 +239,19 @@ def _verdicts(classify_in, missing_years):
     return verdicts
 
 
-def _account_sections(frame, role_model, label_of):
+def _account_sections(frame, role_model, label_of, universe):
     """The Amendment 2 sensitivity sections over ``frame``, which holds ALL taken rows of decisions.parquet (model_id already
     labelled), or not_testable when the frame is empty or no taken row carries a secured_per_contract. A straddle-only run is
-    testable: its taken straddle rows carry 0.0 secured cash, which is non-null."""
+    testable: its taken straddle rows carry 0.0 secured cash, which is non-null. ``universe`` holds every decision row
+    (model_id labelled) and supplies the account keys, so a model that takes no trade is still reported."""
     title = "Sensitivity (Amendment 2)"
     if "secured_per_contract" not in frame.columns or frame.empty or not frame["secured_per_contract"].notna().any():
         return [_not_testable(title, "account_columns_not_in_decisions")]
-    results = size_pnl_account.accounts(frame)
+    results = size_pnl_account.accounts(frame, universe)
     _log(f"accounts n={len(results)}")
     pairs = {pid: (label_of[role_model[mean]], label_of[role_model[median]]) for pid, (mean, median) in PAIRS.items()
              if mean in role_model and median in role_model}  # (mean, median) labels; a pair with an absent member is skipped downstream
-    diffs = size_pnl_account.differences(results, pairs, sorted(set(frame["model_id"])))
+    diffs = size_pnl_account.differences(results, pairs, sorted(set(universe["model_id"])))
     return size_pnl_account.tables(results, diffs)
 
 
@@ -319,7 +320,8 @@ def _sections(out, outer, inputs, inner, tuned, tickers):
         mid, classify_mid = tables(frame.assign(pnl_dollars=frame["pnl_dollars_mid"]))  # the Amendment 1 marks; the T10 verdict stays primary
         sections += [_sens(text) for text in (*mid, _verdicts(classify_mid, missing_years))]
     taken_all = raw[raw["status"] == "taken"].assign(model_id=raw["model_id"].map(label_of), taken=True)  # Amendment 2: every taken row, not only E
-    return sections + _account_sections(taken_all, role_model, label_of)  # Amendment 2, on both paths
+    universe = raw.assign(model_id=raw["model_id"].map(label_of))  # Amendment 2: every decision row, of any status, discovers the account keys
+    return sections + _account_sections(taken_all, role_model, label_of, universe)  # Amendment 2, on both paths
 
 
 def assemble(out_dir, plan, *, admitted, expected=None, spec_hash=None, snapshot=None):
