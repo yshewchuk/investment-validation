@@ -25,6 +25,7 @@ import os
 import resource
 import stat
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -365,19 +366,25 @@ def _fsync_path(path):
 
 
 def _publish_pair(out, receipt_path, write_artifact, receipt, sha_key):
-    """Publish artifact + receipt so that a receipt-less artifact never remains on a handled failure.
+    """Publish artifact + receipt as a verified pair, without overwriting anything.
 
-    The artifact goes to <out>.tmp and the receipt to <receipt_path>.tmp. Both tmp files are
-    fsynced, then the artifact is renamed into place and then the receipt, and the parent
-    directory is fsynced after both replaces. If the receipt step fails, the published
-    artifact is removed; tmp files are removed on any failure. A crash between the two
-    replaces can leave an artifact without a receipt, which the supervisor must treat as failed.
+    Each run writes its artifact and receipt to uniquely named temp files (created with mkstemp
+    in the target directories), fsyncs them, and publishes each with os.link, which fails if the
+    final path already exists, so a run never overwrites another run's output. A FileExistsError
+    on the artifact is re-raised as SystemExit. After both links the published artifact is
+    re-hashed and compared with receipt[sha_key]; a mismatch raises RuntimeError. The finals this
+    run created are removed on any failure, and this run's temp files are removed on any failure.
+    The parent directory is fsynced after both links. A crash between the two links can still
+    leave an artifact without a receipt, which the supervisor must treat as failed.
     """
     out = Path(out)
     receipt_path = Path(receipt_path)
-    art_tmp = f"{out}.tmp"
-    rec_tmp = f"{receipt_path}.tmp"
-    published = False
+    art_fd, art_tmp = tempfile.mkstemp(dir=out.parent, prefix=out.name + ".", suffix=".tmp")
+    os.close(art_fd)
+    rec_fd, rec_tmp = tempfile.mkstemp(dir=receipt_path.parent, prefix=receipt_path.name + ".", suffix=".tmp")
+    os.close(rec_fd)
+    tmps = (art_tmp, rec_tmp)
+    created = []
     try:
         write_artifact(art_tmp)
         _fsync_path(art_tmp)
@@ -385,14 +392,22 @@ def _publish_pair(out, receipt_path, write_artifact, receipt, sha_key):
         text = json.dumps(receipt, indent=2, sort_keys=True)
         Path(rec_tmp).write_text(text + "\n")
         _fsync_path(rec_tmp)
-        os.replace(art_tmp, out)
-        published = True
-        os.replace(rec_tmp, receipt_path)
-    except BaseException:
+        try:
+            os.link(art_tmp, out)
+        except FileExistsError:
+            raise SystemExit(f"refused: {out} already exists") from None
+        created.append(out)
         _unlink_quiet(art_tmp)
+        os.link(rec_tmp, receipt_path)
+        created.append(receipt_path)
         _unlink_quiet(rec_tmp)
-        if published:
-            _unlink_quiet(out)
+        if file_sha256(out) != receipt[sha_key]:
+            raise RuntimeError("published artifact does not match its receipt")
+    except BaseException:
+        for tmp in tmps:
+            _unlink_quiet(tmp)
+        for final in created:
+            _unlink_quiet(final)
         raise
     # Fsync each distinct parent directory once (artifact and receipt may share one).
     parents = {}

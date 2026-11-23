@@ -596,19 +596,86 @@ def test_main_fit_fsyncs_artifact_receipt_and_dir(tmp_path, monkeypatch):
     assert len(calls) >= 3  # artifact tmp, receipt tmp, parent directory
 
 
-def test_publish_pair_receipt_replace_failure_leaves_nothing(tmp_path, monkeypatch):
+def test_publish_pair_receipt_link_failure_leaves_nothing(tmp_path, monkeypatch):
     out = tmp_path / "a.bin"
     rec = tmp_path / "a.bin.receipt.json"
-    real_replace = os.replace
+    real_link = os.link
 
-    def failing_replace(src, dst):
+    def failing_link(src, dst, *args, **kwargs):
         if os.fspath(dst) == os.fspath(rec):
-            raise OSError("simulated receipt replace failure")
-        return real_replace(src, dst)
+            raise OSError("simulated receipt link failure")
+        return real_link(src, dst, *args, **kwargs)
 
-    monkeypatch.setattr(fold.os, "replace", failing_replace)
+    monkeypatch.setattr(fold.os, "link", failing_link)
     with pytest.raises(OSError, match="simulated"):
         fold._publish_pair(out, rec, lambda p: Path(p).write_bytes(b"payload"), {"kind": "t"}, "sha")
+    assert not out.exists()  # the artifact this run linked is removed again
+    assert not rec.exists()
+    assert list(tmp_path.iterdir()) == []
+    assert not [p for p in tmp_path.iterdir() if p.name.endswith(".tmp")]
+
+
+def test_publish_pair_second_run_refuses_existing_and_leaves_first_intact(tmp_path):
+    out = tmp_path / "a.bin"
+    rec = tmp_path / "a.bin.receipt.json"
+    first_tmps = []
+
+    def first_writer(p):
+        first_tmps.append(str(p))
+        Path(p).write_bytes(b"first")
+
+    fold._publish_pair(out, rec, first_writer, {"kind": "t"}, "sha")
+    first_receipt = rec.read_text()
+
+    def second_writer(p):
+        # Sequential stand-in for a concurrent second run: its temp file is its own, not the first run's.
+        assert str(p) != first_tmps[0]
+        assert Path(p).exists()
+        Path(p).write_bytes(b"second")
+
+    with pytest.raises(SystemExit, match="already exists"):
+        fold._publish_pair(out, rec, second_writer, {"kind": "t"}, "sha")
+    assert out.read_bytes() == b"first"
+    assert rec.read_text() == first_receipt
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["a.bin", "a.bin.receipt.json"]
+
+
+def test_publish_pair_uses_unique_temp_names_not_fixed_tmp(tmp_path):
+    out = tmp_path / "a.bin"
+    rec = tmp_path / "a.bin.receipt.json"
+    seen = []
+
+    def writer(p):
+        seen.append(str(p))
+        Path(p).write_bytes(b"payload")
+
+    fold._publish_pair(out, rec, writer, {"kind": "t"}, "sha")
+    assert not seen[0].endswith(f"{out.name}.tmp")
+    assert Path(seen[0]).parent == tmp_path
+
+
+def test_publish_pair_success_leaves_no_tmp_files(tmp_path):
+    out = tmp_path / "a.bin"
+    rec = tmp_path / "a.bin.receipt.json"
+    fold._publish_pair(out, rec, lambda p: Path(p).write_bytes(b"payload"), {"kind": "t"}, "sha")
+    assert not [p for p in tmp_path.iterdir() if p.name.endswith(".tmp")]
+
+
+def test_publish_pair_post_publish_hash_mismatch_removes_both_finals(tmp_path, monkeypatch):
+    out = tmp_path / "a.bin"
+    rec = tmp_path / "a.bin.receipt.json"
+    real_sha = fold.file_sha256
+    calls = []
+
+    def second_call_differs(path, max_bytes=8 << 30):
+        calls.append(str(path))
+        digest = real_sha(path, max_bytes)
+        return digest if len(calls) == 1 else "0" * 64  # first call hashes the temp file; second re-hashes the final
+
+    monkeypatch.setattr(fold, "file_sha256", second_call_differs)
+    with pytest.raises(RuntimeError, match="published artifact does not match its receipt"):
+        fold._publish_pair(out, rec, lambda p: Path(p).write_bytes(b"payload"), {"kind": "t"}, "sha")
+    assert len(calls) == 2
     assert not out.exists()
     assert not rec.exists()
     assert list(tmp_path.iterdir()) == []
