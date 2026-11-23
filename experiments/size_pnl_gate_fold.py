@@ -33,6 +33,7 @@ import pandas as pd
 REGISTERED_ID = "gate_midfill_str_thru_forecast_analog"
 REGISTERED_THRESHOLD = 0.0508851760203979
 SEED = 20260829
+MAX_TRAIN_THROUGH = 2024
 MIN_TRAIN_ROWS = 500
 LABEL_COLUMNS = ("ret", "exit_value", "exit_date")
 
@@ -244,6 +245,8 @@ def _resolve_outputs(out_arg, receipt_arg, root):
 def _run_fit(args, wiring, root):
     import joblib  # fit handling only
 
+    if args.train_through > MAX_TRAIN_THROUGH:
+        raise SystemExit(f"refused: --train-through must be <= {MAX_TRAIN_THROUGH}")
     out, receipt_path = _resolve_outputs(args.out, args.receipt, root)
     t0 = time.time()
     # Builder progress prints go to stderr; stdout carries only the receipt JSON.

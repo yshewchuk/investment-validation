@@ -189,13 +189,50 @@ def test_build_inputs_2025_only_no_labels_and_nan_kept():
 
 def test_main_fit_end_to_end(tmp_path):
     out = tmp_path / "gate_fold_2024.joblib"
-    rc = fold.main(["fit", "--train-through", "2024", "--out", str(out)], wiring=_wiring(), root=tmp_path)
+    stub = {}
+
+    def recording_fit(X, y, seed):
+        model = _fit(X, y, seed)
+        stub["model"], stub["X"] = model, X
+        return model
+
+    wiring = (lambda: _trades(), _build, recording_fit, list(FEATS), "ret")
+    rc = fold.main(["fit", "--train-through", "2024", "--out", str(out)], wiring=wiring, root=tmp_path)
     assert rc == 0
     receipt = json.loads((tmp_path / "gate_fold_2024.joblib.receipt.json").read_text())
     assert receipt["artifact_sha256"] == fold.file_sha256(out)
     art = joblib.load(out)
     assert {"model", "features", "threshold"} <= set(art)
     assert art["threshold"] == fold.REGISTERED_THRESHOLD
+    assert art["train_through"] == 2024
+    np.testing.assert_allclose(art["model"].predict(stub["X"]), stub["model"].predict(stub["X"]))
+
+
+def test_main_fit_refuses_train_through_after_2024(tmp_path):
+    out = tmp_path / "gate_fold_2025.joblib"
+    with pytest.raises(SystemExit, match="refused: --train-through must be <= 2024"):
+        fold.main(["fit", "--train-through", "2025", "--out", str(out)], wiring=_wiring(), root=tmp_path)
+    assert list(tmp_path.iterdir()) == []
+
+
+REGISTRY = Path(__file__).resolve().parents[3] / "engine" / "models" / "registry.json"
+
+
+def _registry_entry(entry_id):
+    data = json.loads(REGISTRY.read_text())
+    if isinstance(data, dict):
+        data = next(data[k] for k in ("entries", "models") if k in data)
+    return next(e for e in data if e.get("id") == entry_id)
+
+
+def test_real_wiring_matches_registered_entry():
+    _, _, _, features, target = fold._real_wiring(2024)
+    entry = _registry_entry(fold.REGISTERED_ID)
+    assert target == "ret"
+    assert len(features) == 50
+    assert list(features) == list(entry["features"])
+    assert fold.REGISTERED_THRESHOLD == entry["threshold"]
+    assert fold.SEED == entry["seed"]
 
 
 def test_main_fit_stdout_is_only_receipt_json(tmp_path, capsys):
