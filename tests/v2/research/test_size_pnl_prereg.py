@@ -13,6 +13,7 @@ import yaml
 from engine.v2.ops.errors import OpsError
 from engine.v2.ops.fingerprints import source_closure
 from experiments import lib, size_pnl_prereg
+from experiments import size_pnl_tuning as tuning_module
 
 ROOT = Path(__file__).resolve().parents[3]
 PREREG_PATH = ROOT / "experiments" / "size_pnl_prereg.py"
@@ -472,7 +473,8 @@ def test_real_spec_is_well_formed():
     assert len(spec["roster"]) == 12
     assert len(spec["pairs"]) == 3
     retuned = spec["short_vol"]["arms"]["retuned"]
-    assert retuned["c_grid"] == [0.75, 0.9, 1.0, 1.1, 1.25, 1.5]
+    assert retuned["c_grid"] == [0.5, 0.6, 0.67, 0.75, 0.9, 1.0]
+    assert retuned["c_grid"] == list(tuning_module.C_GRID)
     assert "ONE multiplier" in retuned["breadth"]
     assert spec["judgement"]["bootstrap"]["resamples"] == 10000
     assert set(spec["decisions"]) == {"d1", "d2", "d3", "d4", "d5"}

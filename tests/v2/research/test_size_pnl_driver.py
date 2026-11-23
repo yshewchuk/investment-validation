@@ -237,7 +237,7 @@ def test_real_tune_skips_with_no_trades_and_binds_the_receipt(tmp_path, monkeypa
     monkeypatch.setattr(driver, "_inner_decisions", lambda *a, **k: 0)  # the decisions pass is tested in test_size_pnl_inner_decisions.py
     monkeypatch.setattr(driver, "build_pool", lambda table, labels: None)
     monkeypatch.setattr(driver.shortvol, "simulate", SIMS)
-    scored_ids = lambda chunk_, events, sims, name, **kw: pd.DataFrame({"event_id": events["event_id"].to_numpy()})  # noqa: E731
+    scored_ids = lambda chunk_, events, sims, name, **kw: pd.DataFrame({"event_id": events["event_id"].to_numpy(), "reason": None})  # noqa: E731
     monkeypatch.setattr(tuning, "score_events", scored_ids)
     monkeypatch.setattr(tuning, "decide", lambda scored: scored.iloc[:0])  # every row undetermined, none taken
     monkeypatch.setattr(tuning, "score", lambda chunk_, events, mine, name, alpha, c: pd.DataFrame(
@@ -256,17 +256,17 @@ def test_real_tune_skips_with_no_trades_and_binds_the_receipt(tmp_path, monkeypa
 def test_real_tune_selects_the_argmax_and_binds_the_receipt(tmp_path, monkeypatch):
     """The real ``tune`` (not stubbed) with taken trades: 7 structures x 50 trades per c, so 350 >= MIN_TRADES.
 
-    Only c == 1.1 earns 2.0 per trade, so it has the largest total (700.0); every other c totals 350.0.
+    Only c == 0.75 earns 2.0 per trade, so it has the largest total (700.0); every other c totals 350.0.
     """
     monkeypatch.setattr(driver, "_inner_decisions", lambda *a, **k: 0)  # the decisions pass is tested in test_size_pnl_inner_decisions.py
     monkeypatch.setattr(driver, "build_pool", lambda table, labels: None)
     monkeypatch.setattr(driver.shortvol, "simulate", SIMS)
-    scored_ids = lambda chunk_, events, sims, name, **kw: pd.DataFrame({"event_id": events["event_id"].to_numpy()})  # noqa: E731
+    scored_ids = lambda chunk_, events, sims, name, **kw: pd.DataFrame({"event_id": events["event_id"].to_numpy(), "reason": None})  # noqa: E731
     monkeypatch.setattr(tuning, "score_events", scored_ids)
     monkeypatch.setattr(tuning, "decide", lambda scored: scored)  # every row taken; score below sets the trades
 
     def taken_50(chunk_, events, mine, name, alpha, c):
-        pnl = 2.0 if c == 1.1 else 1.0
+        pnl = 2.0 if c == 0.75 else 1.0
         return pd.DataFrame({"pnl_dollars": np.full(50, pnl)})
 
     monkeypatch.setattr(tuning, "score", taken_50)
@@ -275,9 +275,10 @@ def test_real_tune_selects_the_argmax_and_binds_the_receipt(tmp_path, monkeypatc
     mid = summary["models"][0]
     tuned = tuning.load_receipt(tmp_path / "receipts" / f"tuning_{mid}.json")
     inner = tuning.load_receipt(tmp_path / "receipts" / "inner.json")
-    assert tuned["c"] == 1.1 and tuned["skipped"] is False and tuned["skip_reason"] is None
+    assert tuned["c"] == 0.75 and tuned["skipped"] is False and tuned["skip_reason"] is None
     assert tuned["trades"] == 350
-    assert tuned["totals"] == {"0.75": 350.0, "0.9": 350.0, "1.0": 350.0, "1.1": 700.0, "1.25": 350.0, "1.5": 350.0}
+    assert tuned["totals"] == {"0.5": 350.0, "0.6": 350.0, "0.67": 350.0, "0.75": 700.0, "0.9": 350.0,
+                               "1.0": 350.0}
     assert inner["models"][mid] == tuned["content_hash"]
 
 
@@ -434,8 +435,8 @@ def test_an_entry_quote_unusable_event_is_a_missing_fact_and_stays_in_tune_items
 def test_a_declined_off_unity_event_stays_in_every_models_items_for_the_real_tune(tmp_path, monkeypatch):
     """tuning.decide and tuning.score are stubbed. The real ``tuning.tune`` and ``choose_c`` run on 60 events in 2023-2024 across
     7 structures. Every event is taken at every c (P&L 1.0 each), so trades[1.0] == 7 * 60 == 420 >= MIN_TRADES. The twin declines
-    one event (V07) at c == 1.5 only: a non-trade for that (model, structure, c), so it stays in both items and only the twin's
-    c == 1.5 total drops. This test covers real tune/choose_c and item retention only."""
+    one event (V07) at c == 0.5 only: a non-trade for that (model, structure, c), so it stays in both items and only the twin's
+    c == 0.5 total drops. This test covers real tune/choose_c and item retention only."""
     monkeypatch.setattr(driver, "_inner_decisions", lambda *a, **k: 0)  # the decisions pass is tested in test_size_pnl_inner_decisions.py
     ids = [f"V{i:02d}" for i in range(60)]
     dates = [pd.Timestamp("2023-01-10") + pd.Timedelta(days=12 * i) for i in range(60)]  # 2023-01 .. 2024-12
@@ -461,7 +462,7 @@ def test_a_declined_off_unity_event_stays_in_every_models_items_for_the_real_tun
         return {e: ("twin" if table.attrs.get("twin") else "sim") for e in events["event_id"]}
 
     def scored_of(chunk_, events, sims, name, alpha=0.5, c=1.0):
-        hit = [sims.get(e) == "twin" and e == declined and c == 1.5 for e in events["event_id"]]
+        hit = [sims.get(e) == "twin" and e == declined and c == 0.5 for e in events["event_id"]]
         return pd.DataFrame({"event_id": events["event_id"].to_numpy(),
                              "status": ["undetermined" if h else "scored" for h in hit],
                              "reason": ["width_declined" if h else None for h in hit]})
@@ -490,8 +491,8 @@ def test_a_declined_off_unity_event_stays_in_every_models_items_for_the_real_tun
     for body in tuned.values():
         assert body["skipped"] is False and body["skip_reason"] is None
         assert body["trades"] == 7 * 60 and body["c"] == 1.0
-    assert tuned["twin"]["totals"]["1.5"] == 7 * 60 - 7  # the declined event's 7 structure rows are non-trades at c == 1.5
-    assert tuned[primary]["totals"]["1.5"] == 7 * 60
+    assert tuned["twin"]["totals"]["0.5"] == 7 * 60 - 7  # the declined event's 7 structure rows are non-trades at c == 0.5
+    assert tuned[primary]["totals"]["0.5"] == 7 * 60
     inner = tuning.load_receipt(tmp_path / "receipts" / "inner.json")
     assert inner["non_trades"] == {primary: {}, "twin": {}}  # the count is c == 1.0 only, and nothing is declined at 1.0
     assert inner["events"] == 60 and inner["events_by_model"] == {primary: 60, "twin": 60}
