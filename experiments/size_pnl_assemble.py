@@ -165,19 +165,19 @@ _HASH_BLOCK = 1 << 20
 MAX_DECODED_BYTES = 1 << 31  # the uncompressed size decisions.parquet may declare in its row groups, checked before any decode
 
 
-def _load_decisions(out, outer):
-    path = out / "decisions.parquet"
+def _load_decisions(out, receipt, name="decisions.parquet"):
+    path = out / name
     if not path.is_file():
-        raise _refuse("report_decisions_missing", "decisions.parquet is missing")
+        raise _refuse("report_decisions_missing", f"{name} is missing")
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except OSError as exc:
-        raise _refuse("report_decisions_missing", f"decisions.parquet cannot be opened safely: {exc}") from exc
+        raise _refuse("report_decisions_missing", f"{name} cannot be opened safely: {exc}") from exc
     # One descriptor for the hash, the schema check and the read: the bytes hashed are the bytes parsed.
     with os.fdopen(fd, "rb") as handle:
         st = os.fstat(handle.fileno())
         if not stat.S_ISREG(st.st_mode) or st.st_size > decisions.MAX_DECISIONS_BYTES:
-            raise _refuse("report_decisions_mismatch", "decisions.parquet must be a regular file of at most MAX_DECISIONS_BYTES")
+            raise _refuse("report_decisions_mismatch", f"{name} must be a regular file of at most MAX_DECISIONS_BYTES")
         digest, total = hashlib.sha256(), 0
         while True:  # bounded by the cap, whatever fstat reported: never reads past MAX_DECISIONS_BYTES + 1 bytes
             block = handle.read(min(_HASH_BLOCK, decisions.MAX_DECISIONS_BYTES + 1 - total))
@@ -185,37 +185,51 @@ def _load_decisions(out, outer):
                 break
             total += len(block)
             if total > decisions.MAX_DECISIONS_BYTES:
-                raise _refuse("report_decisions_mismatch", "decisions.parquet is larger than MAX_DECISIONS_BYTES")
+                raise _refuse("report_decisions_mismatch", f"{name} is larger than MAX_DECISIONS_BYTES")
             digest.update(block)
-        if digest.hexdigest() != outer.get("decisions_sha256"):
-            raise _refuse("report_decisions_mismatch", "decisions.parquet does not match the outer receipt's decisions_sha256")
+        if digest.hexdigest() != receipt["decisions_sha256"]:
+            raise _refuse("report_decisions_mismatch", f"{name} does not match its receipt's decisions_sha256")
         handle.seek(0)
         parquet = pq.ParquetFile(handle)
         if not set(COLUMNS) <= set(parquet.schema_arrow.names):
-            raise _refuse("report_decisions_columns", "decisions.parquet lacks a required column")
+            raise _refuse("report_decisions_columns", f"{name} lacks a required column")
         # Metadata only, before any decode: a highly compressed artifact must not exhaust memory on read.
         meta = parquet.metadata
-        if meta.num_rows != outer["rows"]:
-            raise _refuse("report_decisions_mismatch", "decisions.parquet row count differs from the outer receipt")
+        if meta.num_rows != receipt["rows"]:
+            raise _refuse("report_decisions_mismatch", f"{name} row count differs from its receipt")
         decoded = sum(meta.row_group(i).total_byte_size for i in range(meta.num_row_groups))
         if decoded > MAX_DECODED_BYTES:
-            raise _refuse("report_decisions_invalid", "decisions.parquet decodes to more than MAX_DECODED_BYTES")
-        # "reason" is optional: population() needs it to exempt short-vol non-trades; published decisions always carry it.
-        # "pnl_dollars_mid" is optional too: the Amendment 1 sensitivity marks, present only in runs that stored them.
-        mid = ["pnl_dollars_mid"] if "pnl_dollars_mid" in parquet.schema_arrow.names else []
-        read_columns = COLUMNS + (["reason"] if "reason" in parquet.schema_arrow.names else []) + mid
-        frame = parquet.read(columns=read_columns).to_pandas()
+            raise _refuse("report_decisions_invalid", f"{name} decodes to more than MAX_DECODED_BYTES")
+        # Optional columns, read only when the schema has them. "reason": population() exempts short-vol non-trades (published
+        # decisions always carry it). "pnl_dollars_mid": the Amendment 1 sensitivity marks. "in_sample": the inner retuned arm.
+        optional = [c for c in ("reason", "pnl_dollars_mid", "in_sample") if c in parquet.schema_arrow.names]
+        frame = parquet.read(columns=COLUMNS + optional).to_pandas()
     if frame.empty:
-        raise _refuse("report_decisions_empty", "decisions.parquet holds no rows")
-    with _admit("report_decisions_invalid", "decisions.parquet has a non-date event_date or a non-numeric pnl_dollars or pnl_dollars_mid"):
+        raise _refuse("report_decisions_empty", f"{name} holds no rows")
+    mid = "pnl_dollars_mid" in optional
+    with _admit("report_decisions_invalid", f"{name} has a non-date event_date or a non-numeric pnl_dollars or pnl_dollars_mid"):
         frame = frame.assign(event_id=frame["event_id"].astype(str), event_date=pd.to_datetime(frame["event_date"]),
                              pnl_dollars=pd.to_numeric(frame["pnl_dollars"], errors="raise"))
         if mid: frame = frame.assign(pnl_dollars_mid=pd.to_numeric(frame["pnl_dollars_mid"], errors="raise"))
     if frame["event_date"].isna().any():
-        raise _refuse("report_decisions_invalid", "decisions.parquet has a blank event_date")
+        raise _refuse("report_decisions_invalid", f"{name} has a blank event_date")
     if not frame["status"].isin(report.STATUSES).all():
-        raise _refuse("report_decisions_invalid", "decisions.parquet has a status outside report.STATUSES")
+        raise _refuse("report_decisions_invalid", f"{name} has a status outside report.STATUSES")
     return frame
+
+
+def _load_inner(out, outer, tuned):
+    """The inner stage's decisions, or None when the run has no inner_decisions receipt (older runs)."""
+    path = out / "receipts" / "inner_decisions.json"
+    if not path.exists():
+        return None
+    with _admit("report_receipt_malformed", "inner_decisions.json lacks a required field"):
+        receipt = tuning.load_receipt(path)
+        if receipt["stage"] != "inner_decisions":
+            raise _refuse("report_receipt_stage", "inner_decisions.json is not the inner decisions stage's receipt")
+        if receipt["tuning"] != outer["tuning"]:
+            raise _refuse("report_receipt_chain_mismatch", "inner_decisions.json's tuning does not match outer.json's")
+    return _load_decisions(out, receipt, "decisions_inner.parquet")
 
 
 def _tickers_ok(tickers):
@@ -227,58 +241,103 @@ def _sens(text):
     return "### Sensitivity (Amendment 1), not the pre-registered verdict: " + text[len("### "):]
 
 
-def _verdicts(classify_in, missing_years):
-    """The T10 section, with the note that a missing full year makes its verdicts not testable."""
+def _inner_title(text):
+    """An inner-window section, titled as the inner window and never as the headline."""
+    return "### Inner window (2023H2-2024), not the headline: " + text[len("### "):]
+
+
+def _insample_lines(shown):
+    """One bullet per retuned (hyp, pair) cell that is a summary; 2024 is marked * because the retuned c was chosen on it."""
+    lines = []
+    for (hyp, pid, arm), cell in shown.items():
+        if arm != "retuned" or not isinstance(cell, dict):
+            continue
+        signs = ", ".join(f"{year}{'*' if year == 2024 else ''} {int(np.sign(v)):+d}" for year, v in sorted(cell["year_signs"].items()))
+        lines.append(f"- {hyp} {pid} retuned: year_signs {signs}")
+    return "\n".join(lines)
+
+
+def _verdicts(classify_in, missing_years, inner_present=False, shown_c=None):
+    """The T10 section, with the note that a missing full year makes its verdicts not testable. With inner decisions it pools
+    them with the outer ones and notes the in-sample retuned rows."""
     verdicts = report.t10_verdicts(classify_in)
-    if missing_years:
+    if missing_years and inner_present:
+        verdicts += "\n\n" + f"not_testable because the required full year(s) {missing_years} are absent from the inner and outer decisions."
+    elif missing_years:
         verdicts += "\n\n" + (f"not_testable because the required full year(s) {missing_years} are absent from the outer decisions; "
                               "the inner window publishes no decisions, so this verdict needs inner evidence (design question, see PR).")
+    if inner_present:
+        verdicts += ("\n\nT10 pools the inner (2023H2-2024) and outer (2025) decisions by the registered rule: predicted sign in every full year "
+                     "(2024, 2025; 2023 partial). The retuned arm's 2023H2 and 2024 rows are in-sample (each c was chosen on those years), "
+                     "so its 2024 sign is in-sample.\n" + _insample_lines(shown_c))
     return verdicts
 
 
 def _sections(out, outer, inputs, inner, tuned, tickers):
-    """The report's sections in order. Reads receipt fields throughout; the caller maps a missing or mistyped field to a refusal."""
+    """The report's sections in order. Reads receipt fields throughout; the caller maps a missing or mistyped field to a refusal.
+    Returns (sections, inner row count)."""
     raw = _load_decisions(out, outer)
+    inner_raw = _load_inner(out, outer, tuned)
     tick = {str(e): str(t) for e, t in tickers.items()}
     roster = inputs["roster"]
     label_of = {m["model_id"]: "+".join(m["roles"]) for m in roster["models"]}
     outer_models = set(outer["models"])
-    # Checked on the raw rows, before population drops the events with an undetermined row that leaves E: a bad row refuses, it is never skipped.
-    if not set(raw["event_id"]) <= set(tick):
-        raise _refuse("report_ticker_missing", "an event in decisions.parquet has no ticker")
-    if not np.isfinite(raw.loc[raw["status"] == "taken", "pnl_dollars"].to_numpy(dtype=float)).all():
-        raise _refuse("report_nonfinite_pnl", "a taken row has a non-finite pnl_dollars")
-    if "pnl_dollars_mid" in raw.columns and not np.isfinite(raw.loc[raw["status"] == "taken", "pnl_dollars_mid"].to_numpy(dtype=float)).all():
-        raise _refuse("report_nonfinite_pnl", "a taken row has a non-finite pnl_dollars_mid")
-    if (set(raw["model_id"]) | outer_models) - set(label_of):
+    if outer_models - set(label_of):
         raise _refuse("report_receipt_chain_mismatch", "a model in the decisions has no roster entry")
-    frame = synthetic_eval.population(raw)  # E: no undetermined row that leaves E under any model; short-vol non-trades stay in E at P&L 0
-    if frame.empty:
-        raise _refuse("report_decisions_empty", "no event in decisions.parquet is in the evaluated population")
-    undetermined_events = raw["event_id"].nunique() - frame["event_id"].nunique()
-    frame = frame.assign(taken=frame["status"] == "taken")
-    frame = frame.assign(quarter=frame["event_date"].dt.to_period("Q").astype(str))
-    missing_years = sorted(set(contrast.FULL_YEARS) - {int(y) for y in frame["event_date"].dt.year})
     role_model = {role: m["model_id"] for m in roster["models"] for role in m["roles"]}
-    frame = frame.assign(model_id=frame["model_id"].map(label_of))  # tables show labels such as M0 or H-sq+H-abs
-    quarter_of = frame.drop_duplicates("event_id").set_index("event_id")["quarter"].to_dict()
-    events = {key: sorted(set(group)) for key, group in frame.groupby(["model_id", "book"])["event_id"]}
-    labels = sorted({label_of[m] for m in outer_models} | set(frame["model_id"]))
-    n_short = {lab: len(events.get((lab, "short_vol"), ())) for lab in labels}
-    n_long = {lab: len(events.get((lab, "straddle"), ())) for lab in labels}
+
+    def _window(raw):
+        """One window's evaluated frame (E) with its undetermined count; the checks run on the raw rows."""
+        # Checked on the raw rows, before population drops the events with an undetermined row that leaves E: a bad row refuses, it is never skipped.
+        if not set(raw["event_id"]) <= set(tick):
+            raise _refuse("report_ticker_missing", "an event in decisions.parquet has no ticker")
+        if not np.isfinite(raw.loc[raw["status"] == "taken", "pnl_dollars"].to_numpy(dtype=float)).all():
+            raise _refuse("report_nonfinite_pnl", "a taken row has a non-finite pnl_dollars")
+        if "pnl_dollars_mid" in raw.columns and not np.isfinite(raw.loc[raw["status"] == "taken", "pnl_dollars_mid"].to_numpy(dtype=float)).all():
+            raise _refuse("report_nonfinite_pnl", "a taken row has a non-finite pnl_dollars_mid")
+        if set(raw["model_id"]) - set(label_of):
+            raise _refuse("report_receipt_chain_mismatch", "a model in the decisions has no roster entry")
+        frame = synthetic_eval.population(raw)  # E: no undetermined row that leaves E under any model; short-vol non-trades stay in E at P&L 0
+        if frame.empty:
+            raise _refuse("report_decisions_empty", "no event in decisions.parquet is in the evaluated population")
+        undetermined = raw["event_id"].nunique() - frame["event_id"].nunique()
+        frame = frame.assign(taken=frame["status"] == "taken", quarter=frame["event_date"].dt.to_period("Q").astype(str))
+        return frame.assign(model_id=frame["model_id"].map(label_of)), undetermined  # tables show labels such as M0 or H-sq+H-abs
+
+    def _context(frame):
+        """The per-window inputs of the contrasts and the rung counts: events by (model, book), quarter of each event, and the counts."""
+        quarter_of = frame.drop_duplicates("event_id").set_index("event_id")["quarter"].to_dict()
+        events = {key: sorted(set(group)) for key, group in frame.groupby(["model_id", "book"])["event_id"]}
+        labels = sorted({label_of[m] for m in outer_models} | set(frame["model_id"]))
+        n_short = {lab: len(events.get((lab, "short_vol"), ())) for lab in labels}
+        n_long = {lab: len(events.get((lab, "straddle"), ())) for lab in labels}
+        return {"events": events, "quarter_of": quarter_of, "n_short": n_short, "n_long": n_long}
+
     tuning_by_label = {label_of[mid]: {k: v for k, v in receipt.items() if k != "content_hash"} for mid, receipt in tuned.items()}
 
-    def tables(scored):
-        """T4, T5, T6 and T7 of ``scored`` (its ``pnl_dollars`` is the P&L under test), and the T10 input."""
-        shown, classify_in = _contrasts(scored, events, roster, role_model, label_of, outer_models, quarter_of, tick)
+    def tables(scored, ctx):
+        """T4, T5, T6 and T7 of ``scored`` (its ``pnl_dollars`` is the P&L under test) in the window's context ``ctx``,
+        with the contrast summaries ``shown`` and the T10 input ``classify`` that the same call computed."""
+        shown, classify = _contrasts(scored, ctx["events"], roster, role_model, label_of, outer_models, ctx["quarter_of"], tick)
         short = scored[scored["book"] == "short_vol"].rename(columns={"arm_or_rule": "arm"})
         long_rows = scored[scored["book"] == "straddle"].rename(columns={"arm_or_rule": "rule"})
-        return [report.t4_t5_shortvol(short, n_short, tuning_by_label, arm="as_is"),
-                report.t4_t5_shortvol(short, n_short, tuning_by_label, arm="retuned"),
-                report.t6_straddle(long_rows[long_rows["taken"]], long_rows, n_long),
-                report.t7_contrasts(shown)], classify_in
+        sections = [report.t4_t5_shortvol(short, ctx["n_short"], tuning_by_label, arm="as_is"),
+                    report.t4_t5_shortvol(short, ctx["n_short"], tuning_by_label, arm="retuned"),
+                    report.t6_straddle(long_rows[long_rows["taken"]], long_rows, ctx["n_long"]),
+                    report.t7_contrasts(shown)]
+        return sections, shown, classify
 
-    primary, classify_in = tables(frame)
+    frame, undetermined_events = _window(raw)
+    ctx_o = _context(frame)
+    inner_frame, inner_undetermined = _window(inner_raw) if inner_raw is not None else (None, 0)
+    inner_present = inner_frame is not None
+    combined = pd.concat([inner_frame, frame]) if inner_present else frame  # T10 pools the windows by the registered rule
+    ctx_c = _context(combined)
+    missing_years = sorted(set(contrast.FULL_YEARS) - {int(y) for y in combined["event_date"].dt.year})
+    o_tables, shown_o, classify_o = tables(frame, ctx_o)
+    # Without an inner window the pooled frame is the outer frame: reuse its contrasts rather than bootstrapping them again.
+    shown_c, classify_c = (_contrasts(combined, ctx_c["events"], roster, role_model, label_of, outer_models, ctx_c["quarter_of"], tick)
+                           if inner_present else (shown_o, classify_o))
     note = (f"events with an undetermined burn-in or missing-data row (any book) or an undetermined straddle row are excluded from E: {undetermined_events}. "
             f"short-vol non-trades (e.g. width_declined) stay in E at P&L 0. "
             f"per-quarter candidates and dropped counts are not recorded in decisions.parquet (not_testable); run totals from the receipt: "
@@ -288,15 +347,30 @@ def _sections(out, outer, inputs, inner, tuned, tickers):
         report.t1_roster(_roster_rows(roster, outer_models, inputs, inner, label_of)),
         report.t2_in_e(frame[["event_id", "quarter"]].drop_duplicates(), note),
         _not_testable("T3 Forecast calibration", "labels_not_in_decisions"),
-        *primary,
+        *o_tables,
         report.t8_rungs(_shares(frame), models=[label_of[m] for m in outer["models"]]),
         _not_testable("T9 Pool sensitivity", "native_pool_arm_not_produced"),
-        _verdicts(classify_in, missing_years),
+        _verdicts(classify_c, missing_years, inner_present, shown_c),
     ]
+    if inner_present:  # the inner window, after the outer tables: never the headline
+        ctx_i = _context(inner_frame)
+        inner_note = (f"events with an undetermined burn-in or missing-data row (any book) or an undetermined straddle row are excluded from E: "
+                      f"{inner_undetermined}. Inner window only; run totals are the outer receipt's.")
+        (t4_as_is, t5_retuned, t6, t7), _shown_i, _classify_i = tables(inner_frame, ctx_i)
+        t2_inner = report.t2_in_e(inner_frame[["event_id", "quarter"]].drop_duplicates(), inner_note)
+        t5_retuned += "\n\nretuned rows are IN-SAMPLE: each model's c was chosen on these same years."
+        sections += [_inner_title(text) for text in (t2_inner, t4_as_is, t5_retuned, t6, t7)]
+    inner_rows = len(inner_raw) if inner_present else 0
     if "pnl_dollars_mid" not in frame.columns:
-        return sections + [_not_testable("Sensitivity (Amendment 1)", "pnl_dollars_mid_not_in_decisions")]
-    mid, classify_mid = tables(frame.assign(pnl_dollars=frame["pnl_dollars_mid"]))  # the Amendment 1 marks; the T10 verdict stays primary
-    return sections + [_sens(text) for text in (*mid, _verdicts(classify_mid, missing_years))]
+        return sections + [_not_testable("Sensitivity (Amendment 1)", "pnl_dollars_mid_not_in_decisions")], inner_rows
+    # The Amendment 1 marks: T4-T7 on the outer window, and T10 pooled over the same windows as the primary verdict.
+    mid, shown_mo, classify_mo = tables(frame.assign(pnl_dollars=frame["pnl_dollars_mid"]), ctx_o)
+    if inner_present:
+        combined_mid = pd.concat([w.assign(pnl_dollars=w["pnl_dollars_mid"]) for w in (inner_frame, frame)])
+        shown_m, classify_mid = _contrasts(combined_mid, ctx_c["events"], roster, role_model, label_of, outer_models, ctx_c["quarter_of"], tick)
+    else:  # no inner window: the pooled mid frame is the outer one, so reuse its contrasts
+        shown_m, classify_mid = shown_mo, classify_mo
+    return sections + [_sens(text) for text in (*mid, _verdicts(classify_mid, missing_years, inner_present, shown_m))], inner_rows
 
 
 def assemble(out_dir, plan, *, admitted, expected=None, spec_hash=None, snapshot=None):
@@ -338,7 +412,7 @@ def assemble(out_dir, plan, *, admitted, expected=None, spec_hash=None, snapshot
     if plan_bad:
         raise _refuse("report_inputs_mismatch", "the plan's tickers do not match the receipted plan")
     with _admit("report_receipt_malformed", "a receipt or decisions row lacks a required field"):
-        sections = _sections(out, outer, inputs, inner, tuned, tickers)
+        sections, inner_rows = _sections(out, outer, inputs, inner, tuned, tickers)
     text = report.build_report(sections)
     path = out / "REPORT.md"
     handle = tempfile.NamedTemporaryFile("w", dir=out, delete=False, suffix=".tmp", encoding="utf-8")
@@ -352,5 +426,5 @@ def assemble(out_dir, plan, *, admitted, expected=None, spec_hash=None, snapshot
         tuning._fsync_dir(out)
     finally:
         tmp.unlink(missing_ok=True)
-    _log(f"end elapsed={time.monotonic() - started:.1f}s rss={_rss_mb():.0f}MB sections={len(sections)}")
+    _log(f"end elapsed={time.monotonic() - started:.1f}s rss={_rss_mb():.0f}MB sections={len(sections)} inner_rows={inner_rows}")
     return {"report": str(path), "sections": len(sections), "rows": outer["rows"]}

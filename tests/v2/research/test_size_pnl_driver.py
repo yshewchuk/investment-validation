@@ -29,6 +29,7 @@ PLAN = {"plan_id": "PLAN", "anchor": {"run_id": "REG"}, "horizons": [1, 5], "can
         "selection": {"extra_refits": []}}
 EXPECTED = {"plan_id": "PLAN", "registration_id": "REG", "seal_id": content_hash(SEAL), "panel_id": "P"}
 OK = lambda: {"spec_hash": "SPEC", "spec_hash_checked": True}  # noqa: E731
+EMPTY_MARKS = ["event_id", "entry_cost", "exit_value", "rung", "lots", "pnl_per_share", "pnl_dollars"]
 
 
 def _avail(event_iso):
@@ -109,9 +110,23 @@ def stubs(monkeypatch):
         return {"stage": "tuning", "model_id": mid, "c": 1.0, "skipped": False,
                 "events": sum(len(ev) for _c, ev, _s in items)}
 
+    def fake_scored(chunk_, events, sims, name, *, alpha=0.5, c=1.0):
+        return pd.DataFrame({"event_id": events["event_id"].astype(str).to_numpy(), "event_date": events["event_date"].to_numpy(),
+                             "structure": name, "status": "scored", "reason": "scored"})
+
+    def fake_straddle(events, history, rule, chunk_):
+        return pd.DataFrame({"event_id": events["event_id"].astype(str), "event_date": events["event_date"],
+                             "edge": events["pred_abs_move"] - events["implied_move"], "cutoff": np.nan, "rel_spread": np.nan,
+                             "status": "undetermined", "reason": "thin_history"})
+
     monkeypatch.setattr(driver, "build_pool", lambda table, labels: None)
     monkeypatch.setattr(tuning, "tune", fake_tune)
     monkeypatch.setattr(driver.shortvol, "simulate", SIMS)
+    monkeypatch.setattr(driver.shortvol, "score_events", fake_scored)
+    monkeypatch.setattr(driver.shortvol, "decide", lambda scored: scored.assign(cutoff=np.nan))
+    monkeypatch.setattr(driver.shortvol, "score", lambda chunk_, events, decisions, name, alpha, *, c=1.0, drop_unquoted=False, mid_marks=False: pd.DataFrame(columns=EMPTY_MARKS))
+    monkeypatch.setattr(driver.straddle, "decide", fake_straddle)
+    monkeypatch.setattr(driver.straddle, "score", lambda chunk_, events, dec, alpha, **kw: pd.DataFrame(columns=EMPTY_MARKS))
     return log
 
 
@@ -180,7 +195,7 @@ def test_inner_writes_receipts_replays_read_only_and_refuses_a_changed_binding(t
     summary = driver.run(src, "inner", out, prereg=OK)
     mid = summary["models"][0]
     assert sorted(p.name for p in (out / "receipts").iterdir()) == sorted(
-        ["inputs_inner.json", f"tuning_{mid}.json", "inner.json"])
+        ["inputs_inner.json", f"tuning_{mid}.json", "inner.json", "inner_decisions.json"])
     before = {p: (p.stat().st_ino, p.stat().st_mtime_ns) for p in (out / "receipts").iterdir()}
     assert driver.run(src, "inner", out, prereg=OK) == summary  # exact replay succeeds
     assert {p: (p.stat().st_ino, p.stat().st_mtime_ns) for p in (out / "receipts").iterdir()} == before
@@ -219,6 +234,7 @@ def test_inner_receipts_bind_scope_none_and_the_snapshot(tmp_path, stubs, monkey
 
 def test_real_tune_skips_with_no_trades_and_binds_the_receipt(tmp_path, monkeypatch):
     """The real ``tune`` (not stubbed) on a fixture where nothing is taken: the S6 fallback is persisted and bound."""
+    monkeypatch.setattr(driver, "_inner_decisions", lambda *a, **k: 0)  # the decisions pass is tested in test_size_pnl_inner_decisions.py
     monkeypatch.setattr(driver, "build_pool", lambda table, labels: None)
     monkeypatch.setattr(driver.shortvol, "simulate", SIMS)
     scored_ids = lambda chunk_, events, sims, name, **kw: pd.DataFrame({"event_id": events["event_id"].to_numpy()})  # noqa: E731
@@ -242,6 +258,7 @@ def test_real_tune_selects_the_argmax_and_binds_the_receipt(tmp_path, monkeypatc
 
     Only c == 1.1 earns 2.0 per trade, so it has the largest total (700.0); every other c totals 350.0.
     """
+    monkeypatch.setattr(driver, "_inner_decisions", lambda *a, **k: 0)  # the decisions pass is tested in test_size_pnl_inner_decisions.py
     monkeypatch.setattr(driver, "build_pool", lambda table, labels: None)
     monkeypatch.setattr(driver.shortvol, "simulate", SIMS)
     scored_ids = lambda chunk_, events, sims, name, **kw: pd.DataFrame({"event_id": events["event_id"].to_numpy()})  # noqa: E731
@@ -419,6 +436,7 @@ def test_a_declined_off_unity_event_stays_in_every_models_items_for_the_real_tun
     7 structures. Every event is taken at every c (P&L 1.0 each), so trades[1.0] == 7 * 60 == 420 >= MIN_TRADES. The twin declines
     one event (V07) at c == 1.5 only: a non-trade for that (model, structure, c), so it stays in both items and only the twin's
     c == 1.5 total drops. This test covers real tune/choose_c and item retention only."""
+    monkeypatch.setattr(driver, "_inner_decisions", lambda *a, **k: 0)  # the decisions pass is tested in test_size_pnl_inner_decisions.py
     ids = [f"V{i:02d}" for i in range(60)]
     dates = [pd.Timestamp("2023-01-10") + pd.Timedelta(days=12 * i) for i in range(60)]  # 2023-01 .. 2024-12
     base = pd.DataFrame([{"event_id": e, "pred_abs_move": 5.0, "pred_iv_crush_30": -12.0, "horizon_sessions": 1, "abs_move": 4.0,
