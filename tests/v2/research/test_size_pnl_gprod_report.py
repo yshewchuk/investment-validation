@@ -22,6 +22,8 @@ ROSTER = {"pairs": {"H": "testable", "E": "testable", "N": "testable"}}
 FRAME = pd.DataFrame({"event_id": EVENTS})
 RAW = list(LABEL_OF)
 STORED = {"scored": ["E1", "E2", "E3", "E4", "E5", "E6", "E9"], "selected": ["E1", "E2", "E4", "E9"]}
+IN_E = set(EVENTS)  # the fixture frame's events E1..E8
+IN_E_WITH_E9 = IN_E | {"E9"}  # E9 counted as an event of E
 
 
 def _cells(over=None):
@@ -144,16 +146,23 @@ def test_agreement_not_available_without_stored_decisions():
 
 
 def test_agreement_counts_by_hand():
-    text = _agreement(_det(_agreement_gate()), ROLE_MODEL, LABEL_OF, set(LABEL_OF), STORED)
+    text = _agreement(_det(_agreement_gate()), ROLE_MODEL, LABEL_OF, set(LABEL_OF), IN_E_WITH_E9, STORED)
     (row,) = _rows(text)
     assert row == {"events": "6", "both_taken": "2", "m0_only": "1", "production_only": "1", "neither": "2",
                    "agreement_rate": "0.6667", "production_scored_outside_m0": "1"}
 
 
+def test_agreement_outside_m0_counts_only_events_in_e():
+    text = _agreement(_det(_agreement_gate()), ROLE_MODEL, LABEL_OF, set(LABEL_OF), IN_E, STORED)
+    (row,) = _rows(text)
+    assert row == {"events": "6", "both_taken": "2", "m0_only": "1", "production_only": "1", "neither": "2",
+                   "agreement_rate": "0.6667", "production_scored_outside_m0": "0"}
+
+
 def test_agreement_excludes_m0_rows_dated_outside_2025():
     gate = _agreement_gate()
     gate.loc[(gate["model_id"] == "m0") & (gate["event_id"] == "E6"), "event_date"] = pd.Timestamp("2024-06-15")
-    text = _agreement(_det(gate), ROLE_MODEL, LABEL_OF, set(LABEL_OF), STORED)
+    text = _agreement(_det(gate), ROLE_MODEL, LABEL_OF, set(LABEL_OF), IN_E_WITH_E9, STORED)
     (row,) = _rows(text)
     assert row == {"events": "5", "both_taken": "2", "m0_only": "1", "production_only": "1", "neither": "1",
                    "agreement_rate": "0.6", "production_scored_outside_m0": "2"}
@@ -161,7 +170,7 @@ def test_agreement_excludes_m0_rows_dated_outside_2025():
 
 def test_agreement_rate_excludes_events_production_never_scored():
     stored = {"scored": ["E1", "E2", "E3", "E4"], "selected": ["E1", "E2", "E4"]}
-    text = _agreement(_det(_agreement_gate()), ROLE_MODEL, LABEL_OF, set(LABEL_OF), stored)
+    text = _agreement(_det(_agreement_gate()), ROLE_MODEL, LABEL_OF, set(LABEL_OF), IN_E, stored)
     (row,) = _rows(text)
     assert row == {"events": "4", "both_taken": "2", "m0_only": "1", "production_only": "1", "neither": "0",
                    "agreement_rate": "0.5", "production_scored_outside_m0": "0"}

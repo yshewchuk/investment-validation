@@ -26,8 +26,8 @@ COVERAGE_NOTE = ("covered = events with a determined G_PROD decision (taken or n
                  "covered subset of each pair: the events both members have a determined decision on.")
 CONTRAST_NOTE = "d = median-type minus mean-type for the H2 pairs; M0 minus the named model for the M0 rows. arm primary = primary marks; arm mid = marks_mid."
 AGREEMENT_NOTE = ("Events are M0's determined 2025 G_PROD events in E that production also scored (the stored `scored` set); an M0 event "
-                  "production never scored is outside the rate, and production_scored_outside_m0 counts events production scored that M0 has "
-                  "no determined 2025 decision for in E. selected is the stored EXP-187 arm B selected "
+                  "production never scored is outside the rate, and production_scored_outside_m0 counts events in E that production scored and M0 has "
+                  "no determined 2025 decision for. selected is the stored EXP-187 arm B selected "
                   "set (served gate, threshold refit per walk-forward fold, on v2-snapshot trades); the fold CLI refits on the legacy store's "
                   "trades (known difference). A low rate is a finding, never a reason to tune.")
 
@@ -61,7 +61,7 @@ def _total(series_by_label, label):
     return float(series_by_label[label].sum()) if label in series_by_label else 0.0
 
 
-def _agreement(det, role_model, label_of, outer_models, stored_gate):
+def _agreement(det, role_model, label_of, outer_models, in_e, stored_gate):
     """M0's agreement with production's stored 2025 gate decisions, as a Markdown section (titled by the caller)."""
     heading = "### G_PROD M0 agreement with production's stored 2025 gate decisions"
     m0_raw = role_model.get("M0")
@@ -81,7 +81,7 @@ def _agreement(det, role_model, label_of, outer_models, stored_gate):
     n = len(events)
     rate = (len(both) + len(neither)) / n if n else None
     headers = ["events", "both_taken", "m0_only", "production_only", "neither", "agreement_rate", "production_scored_outside_m0"]
-    table = report.md_table(headers, [[n, len(both), len(m0_only), len(prod_only), len(neither), rate, len(scored - all_m0)]])
+    table = report.md_table(headers, [[n, len(both), len(m0_only), len(prod_only), len(neither), rate, len((scored & in_e) - all_m0)]])
     return f"{heading}\n\n{AGREEMENT_NOTE}\n\n{table}"
 
 
@@ -139,5 +139,5 @@ def sections(gate_raw, frame, *, label_of, role_model, roster, outer_models, qua
     contrast_text = report.t7_contrasts(shown).replace("### T7 Contrasts", "### G_PROD contrasts (covered subset)", 1)
     contrast_text += "\n\n" + CONTRAST_NOTE
 
-    agreement = _agreement(det, role_model, label_of, outer_models, stored_gate)
+    agreement = _agreement(det, role_model, label_of, outer_models, in_e, stored_gate)
     return [_title(table1), _title(contrast_text), _title(agreement)]
