@@ -91,7 +91,8 @@ def load_gate(binding):
     import joblib  # lazy: only a configured gate needs it
     # The fold is sha256-pinned. Only two containers are accepted: a raw zlib stream (first byte 0x78), decoded here under
     # MAX_FOLD_DECODED_BYTES, or a plain pickle stream (first byte 0x80), already capped by MAX_FOLD_BYTES. Any other container
-    # (gzip, bz2, xz, lzma, lz4, legacy) is refused before joblib sees it.
+    # (gzip, bz2, xz, lzma, lz4, legacy) is refused before joblib sees it. The decoded bytes must be a plain pickle stream too,
+    # so a zlib stream wrapping another container is refused as well.
     try:
         data = raw_fold
         if raw_fold[:1] == b"\x78":  # zlib header (joblib compress=1..9 with zlib)
@@ -101,6 +102,8 @@ def load_gate(binding):
                 raise ValueError("decoded fold over the cap")
         elif raw_fold[:1] != b"\x80":
             raise ValueError("unsupported fold container")
+        if data[:1] != b"\x80":
+            raise ValueError("nested or unsupported fold container")
         payload = joblib.load(io.BytesIO(data))
     except Exception:
         raise _refuse("gate_fold_invalid", "the gate fold artifact cannot be loaded (unsupported container, unreadable content or decoded size over the cap)") from None

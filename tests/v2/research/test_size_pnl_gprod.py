@@ -1,6 +1,7 @@
 """EXP-188 Amendment 3: the G_PROD gate arm. Synthetic fixtures only; no repository, no real artifact."""
 import hashlib
 import os
+import zlib
 
 import joblib
 import numpy as np
@@ -146,6 +147,19 @@ def test_load_gate_refuses_a_fold_over_the_decoded_cap(tmp_path, monkeypatch):
 def test_load_gate_refuses_a_gzip_fold(tmp_path):
     binding = write_gate_files(tmp_path)
     joblib.dump(fold_payload(), binding["gate_fold"]["path"], compress=("gzip", 3))
+    binding["gate_fold"]["sha256"] = _sha(binding["gate_fold"]["path"])
+    with pytest.raises(OpsError) as exc:
+        gp.load_gate(binding)
+    assert _refusal(exc) == ("INVALID_EXPERIMENT_SPEC", "gate_fold_invalid")
+
+
+def test_load_gate_refuses_a_nested_compressed_fold(tmp_path):
+    binding = write_gate_files(tmp_path)
+    nested_path = tmp_path / "nested.joblib"
+    joblib.dump(fold_payload(), str(nested_path), compress=("gzip", 3))
+    fold_bytes = zlib.compress(nested_path.read_bytes())  # a zlib stream whose decoded bytes are gzip
+    with open(binding["gate_fold"]["path"], "wb") as handle:
+        handle.write(fold_bytes)
     binding["gate_fold"]["sha256"] = _sha(binding["gate_fold"]["path"])
     with pytest.raises(OpsError) as exc:
         gp.load_gate(binding)
