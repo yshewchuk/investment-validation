@@ -77,7 +77,9 @@ marks_mid_sensitivity:
   rule: "identical decisions and c (primary tuning receipt); exit valuation only: rung-2 legs marked at the run's alpha like rung 1; rung 3 unchanged; both short-vol books and the straddle"
   stored: "decisions.parquet exit_value_mid, pnl_dollars_mid"
   t10: "the pre-registered T10 verdict uses the primary marks only"
-amendments: ["Amendment 1 (2026-11-22): marks_mid sensitivity arm, guides/size_decision_pnl_design.md section 14"]
+amendments:
+  - "Amendment 1 (2026-11-22): marks_mid sensitivity arm, guides/size_decision_pnl_design.md section 14"
+  - "Amendment 2 (2026-11-22): cash-secured $100,000 account sensitivity, guides/size_decision_pnl_design.md section 15"
 rung3_sensitivity: "a sensitivity row drops rung 3"
 hypotheses:
   H1: "H1 (short vol): for each matched pair, d = P&L(median-type) - P&L(mean-type) > 0 on the seven put-side short-vol structures."

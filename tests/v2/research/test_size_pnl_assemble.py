@@ -154,7 +154,7 @@ def test_happy_path_writes_every_section_in_order(tmp_path):
     out = build(tmp_path)
     summary = assemble_mod.assemble(out, plan_frame(), admitted=None)
     text = (out / "REPORT.md").read_text(encoding="utf-8")
-    assert summary["report"] == str(out / "REPORT.md") and summary["sections"] == 12 and summary["rows"] > 0  # 11 + the not_testable sensitivity note
+    assert summary["report"] == str(out / "REPORT.md") and summary["sections"] == 13 and summary["rows"] > 0  # 11 + two not_testable sensitivity notes (Amendment 1 and 2)
     assert text.startswith("# EXP-188 REPORT")
     heads = ["### T1", "### T2", "### T3", "### T4", "### T5", "### T6", "### T7", "### T8", "### T9", "### T10"]
     positions = [next(i for i, line in enumerate(_sections(text)) if line.startswith(h)) for h in heads]
@@ -652,7 +652,7 @@ def test_mid_column_adds_the_sensitivity_sections_after_the_primary_verdicts(tmp
     summary = assemble_mod.assemble(out, plan_frame(), admitted=None)
     text = (out / "REPORT.md").read_text(encoding="utf-8")
     sens = [line for line in _sections(text) if "not the pre-registered verdict" in line]
-    assert summary["sections"] == 16  # the 11 primary sections and 5 sensitivity sections
+    assert summary["sections"] == 17  # the 11 primary sections and 5 sensitivity sections plus the Amendment 2 not_testable note
     assert [line.rsplit(": ", 1)[1] for line in sens] == ["T4 Short-vol, as is", "T5 Short-vol, retuned", "T6 Straddle buy rules",
                                                           "T7 Contrasts", "T10 Verdicts"]
     assert all(line.startswith("### Sensitivity (Amendment 1), not the pre-registered verdict: ") for line in sens)

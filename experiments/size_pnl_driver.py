@@ -182,6 +182,14 @@ def _exits(src):
     return {str(e): pd.Timestamp(x).date().isoformat() for e, x in zip(src.plan_frame["event_id"], src.plan_frame["exit_date"]) if pd.notna(x)}
 
 
+def _sessions(src):
+    """Event id -> (entry_date, exit_date) as ISO dates, where both are known: the Amendment 2 account dates. Empty without the columns."""
+    plan = src.plan_frame
+    if not {"entry_date", "exit_date"} <= set(plan.columns): return {}
+    return {str(e): (pd.Timestamp(en).date().isoformat(), pd.Timestamp(x).date().isoformat())
+            for e, en, x in zip(plan["event_id"], plan["entry_date"], plan["exit_date"]) if pd.notna(en) and pd.notna(x)}
+
+
 def _common_ids(ready):
     """The ids every ready model's table holds: the paired population E (design section 4). Callers guard an empty ``ready``."""
     return set.intersection(*(set(e["table"].index.astype(str)) for e in ready.values()))
@@ -368,15 +376,25 @@ def _model_state(c):
     return {"c": float(c), "scored": {"as_is": [], "retuned": []}, "edges": edges}
 
 
-def _rows(mid, book, arm, dec, taken, events, taken_mid=None):
+def _rows(mid, book, arm, dec, taken, events, taken_mid=None, secured=None, sessions=None):
     """Decision rows of one (model, book, arm), with the marks of the taken rows, the Amendment 1 sensitivity marks (``exit_value_mid``,
-    ``pnl_dollars_mid``: NaN when ``taken_mid`` is None) and the model's forecast (pred_move, pred_crush) merged on event_id."""
+    ``pnl_dollars_mid``: NaN when ``taken_mid`` is None) and the model's forecast (pred_move, pred_crush) merged on event_id.
+    Amendment 2 columns, filled on taken rows only: entry_date and exit_date (ISO, from ``sessions``) and secured_per_contract
+    (from ``secured``; 0.0 for the straddle, which size_pnl_account.straddle_rows later restates as debit x 100, and NaN for short vol without ``secured``)."""
     take = [c for c in [*_MARKS, "entry_cost", "pnl_per_share"] if c not in dec.columns]
     fc = events[["event_id", "pred_move", "pred_crush"]].assign(event_id=events["event_id"].astype(str))
     frame = dec.merge(taken[["event_id", *take]], on="event_id", how="left").merge(fc, on="event_id", how="left")
     if taken_mid is None: frame = frame.assign(exit_value_mid=np.nan, pnl_dollars_mid=np.nan)
     else: frame = frame.merge(taken_mid[["event_id", "exit_value", "pnl_dollars"]].rename(columns={"exit_value": "exit_value_mid", "pnl_dollars": "pnl_dollars_mid"}), on="event_id", how="left")
     if "structure" not in frame.columns: frame = frame.assign(structure=None)
+    if secured is None: frame = frame.assign(secured_per_contract=np.nan)
+    else: frame = frame.merge(secured[["event_id", "secured_per_contract"]], on="event_id", how="left")
+    sess, ids = sessions or {}, frame["event_id"].astype(str)
+    taken_row = (frame["status"] == "taken").to_numpy()
+    sec = pd.Series(0.0, index=frame.index) if book == "straddle" else frame["secured_per_contract"]
+    frame = frame.assign(entry_date=ids.map(lambda e: sess.get(e, (np.nan, np.nan))[0]).where(taken_row),
+                         exit_date=ids.map(lambda e: sess.get(e, (np.nan, np.nan))[1]).where(taken_row),
+                         secured_per_contract=sec.where(taken_row))
     return frame.assign(model_id=mid, book=book, arm_or_rule=arm)
 
 
@@ -394,7 +412,7 @@ def _kept(frame, bad):
     return frame[~frame["event_id"].astype(str).isin(bad)]
 
 
-def _month(mid, events, scored, bad, chunk, start_m, st, *, arms=None, emit_from=None):
+def _month(mid, events, scored, bad, chunk, start_m, st, *, arms=None, emit_from=None, sessions=None):
     """Pass B for one model and calendar month: drop the ``bad`` ids from the events, the scored frames and the straddle
     inputs, then steps 7a-7d on Pass A's frames. Warm-up months (before OUTER[0]) apply the same mask (they feed history)
     but only add history and emit no rows."""
@@ -408,20 +426,21 @@ def _month(mid, events, scored, bad, chunk, start_m, st, *, arms=None, emit_from
             decided = shortvol.decide(pd.concat(st["scored"][arm], ignore_index=True))
             mine = decided[decided["event_id"].astype(str).isin(ids) & (decided["structure"] == name)]
             taken_mid = shortvol.score(chunk, events, mine, name, ALPHA, c=c, mid_marks=True)  # Amendment 1 sensitivity marks
-            frames.append(_rows(mid, "short_vol", arm, mine, shortvol.score(chunk, events, mine, name, ALPHA, c=c), events, taken_mid=taken_mid))
+            frames.append(_rows(mid, "short_vol", arm, mine, shortvol.score(chunk, events, mine, name, ALPHA, c=c), events, taken_mid=taken_mid,
+                                secured=shortvol.secured(chunk, events, mine, name, c), sessions=sessions))
     first = None
     for rule in straddle.RULES:
         dec = straddle.decide(events, st["edges"], rule, chunk)
         first = dec if first is None else first
         if output: frames.append(_rows(mid, "straddle", rule, dec, straddle.score(chunk, events, dec, ALPHA), events,
-                                       taken_mid=straddle.score(chunk, events, dec, ALPHA, mid_marks=True)))
+                                       taken_mid=straddle.score(chunk, events, dec, ALPHA, mid_marks=True), sessions=sessions))
     st["edges"] = pd.concat([st["edges"], first[["event_date", "edge"]]], ignore_index=True)
     return frames
 
 
 def _outer(src, out, ready, receipts, plan, ids, facts_all, labels):
     """The outer stage: per ladder chunk and calendar month, decide, then read that month's labels (R6). Publishes decisions."""
-    exits, pools = _exits(src), _pool_tables(ready)
+    exits, pools, sessions = _exits(src), _pool_tables(ready), _sessions(src)
     dates = pd.to_datetime(plan["event_date"])
     quarter, month = dates.dt.to_period("Q").astype(str).to_numpy(), dates.dt.to_period("M").to_numpy()
     total, state = len(set(month)), {mid: _model_state(receipts[mid]["c"]) for mid in ready}
@@ -438,7 +457,7 @@ def _outer(src, out, ready, receipts, plan, ids, facts_all, labels):
             bad = set().union(*(m for _s, m in scored.values()))  # one shared population for all models (design section 4): ids with no simulation
             dropped |= bad
             for mid in ready:
-                month_frames += _month(mid, at[mid], scored[mid][0], bad, chunk, start_m, state[mid])
+                month_frames += _month(mid, at[mid], scored[mid][0], bad, chunk, start_m, state[mid], sessions=sessions)
             frames += month_frames
             done += 1
             rate = done / max(time.monotonic() - started, 1e-9)

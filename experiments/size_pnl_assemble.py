@@ -15,7 +15,7 @@ import pandas as pd
 import pyarrow.parquet as pq
 
 from experiments import size_pnl_decisions as decisions, size_pnl_tuning as tuning, size_pnl_report as report, size_pnl_contrast as contrast
-from experiments import size_pnl_driver, size_pnl_ladder
+from experiments import size_pnl_account, size_pnl_driver, size_pnl_ladder
 from experiments import size_pnl_synthetic_eval as synthetic_eval
 from experiments.size_pnl_inputs import PAIRS
 from experiments.size_pnl_shortvol import Refusal
@@ -23,6 +23,8 @@ from experiments.size_pnl_straddle import RULES
 
 _CONFLICT = "EXPERIMENT_IDENTITY_CONFLICT"
 COLUMNS = ["model_id", "book", "arm_or_rule", "structure", "event_id", "event_date", "status", "rung", "pnl_dollars"]
+# Amendment 2 account columns: optional, read only when the run stored them.
+ACCOUNT_COLS = ["entry_date", "exit_date", "entry_cost", "exit_value", "exit_value_mid", "secured_per_contract"]
 ARMS = ("as_is", "retuned")
 LONG_RULE = "R_L"
 # name -> (predicted sign, arm -> legs, arms). A leg is (book, arm_or_rule value, sign); d = sum(sign * (median - mean)).
@@ -203,7 +205,8 @@ def _load_decisions(out, outer):
         # "reason" is optional: population() needs it to exempt short-vol non-trades; published decisions always carry it.
         # "pnl_dollars_mid" is optional too: the Amendment 1 sensitivity marks, present only in runs that stored them.
         mid = ["pnl_dollars_mid"] if "pnl_dollars_mid" in parquet.schema_arrow.names else []
-        read_columns = COLUMNS + (["reason"] if "reason" in parquet.schema_arrow.names else []) + mid
+        account = [c for c in ACCOUNT_COLS if c in parquet.schema_arrow.names]
+        read_columns = COLUMNS + (["reason"] if "reason" in parquet.schema_arrow.names else []) + mid + account
         frame = parquet.read(columns=read_columns).to_pandas()
     if frame.empty:
         raise _refuse("report_decisions_empty", "decisions.parquet holds no rows")
@@ -236,6 +239,21 @@ def _verdicts(classify_in, missing_years):
     return verdicts
 
 
+def _account_sections(frame, role_model, label_of):
+    """The Amendment 2 sensitivity sections over the taken rows of the population ``frame`` (model_id already labelled), or
+    not_testable when no taken short-vol row carries a secured_per_contract."""
+    title = "Sensitivity (Amendment 2)"
+    taken_short = frame["taken"] & (frame["book"] == "short_vol")
+    if "secured_per_contract" not in frame.columns or not frame.loc[taken_short, "secured_per_contract"].notna().any():
+        return [_not_testable(title, "account_columns_not_in_decisions")]
+    results = size_pnl_account.accounts(frame[frame["taken"]])
+    _log(f"accounts n={len(results)}")
+    pairs = {pid: (label_of[role_model[mean]], label_of[role_model[median]]) for pid, (mean, median) in PAIRS.items()
+             if mean in role_model and median in role_model}  # (mean, median) labels; a pair with an absent member is skipped downstream
+    diffs = size_pnl_account.differences(results, pairs, sorted(set(frame["model_id"])))
+    return size_pnl_account.tables(results, diffs)
+
+
 def _sections(out, outer, inputs, inner, tuned, tickers):
     """The report's sections in order. Reads receipt fields throughout; the caller maps a missing or mistyped field to a refusal."""
     raw = _load_decisions(out, outer)
@@ -250,6 +268,8 @@ def _sections(out, outer, inputs, inner, tuned, tickers):
         raise _refuse("report_nonfinite_pnl", "a taken row has a non-finite pnl_dollars")
     if "pnl_dollars_mid" in raw.columns and not np.isfinite(raw.loc[raw["status"] == "taken", "pnl_dollars_mid"].to_numpy(dtype=float)).all():
         raise _refuse("report_nonfinite_pnl", "a taken row has a non-finite pnl_dollars_mid")
+    if any(not np.isfinite(raw.loc[raw["status"] == "taken", col].to_numpy(dtype=float)).all() for col in ("secured_per_contract", "entry_cost", "exit_value") if col in raw.columns):
+        raise _refuse("report_nonfinite_pnl", "a taken row has a non-finite secured_per_contract, entry_cost or exit_value")
     if (set(raw["model_id"]) | outer_models) - set(label_of):
         raise _refuse("report_receipt_chain_mismatch", "a model in the decisions has no roster entry")
     frame = synthetic_eval.population(raw)  # E: no undetermined row that leaves E under any model; short-vol non-trades stay in E at P&L 0
@@ -294,9 +314,11 @@ def _sections(out, outer, inputs, inner, tuned, tickers):
         _verdicts(classify_in, missing_years),
     ]
     if "pnl_dollars_mid" not in frame.columns:
-        return sections + [_not_testable("Sensitivity (Amendment 1)", "pnl_dollars_mid_not_in_decisions")]
-    mid, classify_mid = tables(frame.assign(pnl_dollars=frame["pnl_dollars_mid"]))  # the Amendment 1 marks; the T10 verdict stays primary
-    return sections + [_sens(text) for text in (*mid, _verdicts(classify_mid, missing_years))]
+        sections += [_not_testable("Sensitivity (Amendment 1)", "pnl_dollars_mid_not_in_decisions")]
+    else:
+        mid, classify_mid = tables(frame.assign(pnl_dollars=frame["pnl_dollars_mid"]))  # the Amendment 1 marks; the T10 verdict stays primary
+        sections += [_sens(text) for text in (*mid, _verdicts(classify_mid, missing_years))]
+    return sections + _account_sections(frame, role_model, label_of)  # Amendment 2, on both paths
 
 
 def assemble(out_dir, plan, *, admitted, expected=None, spec_hash=None, snapshot=None):

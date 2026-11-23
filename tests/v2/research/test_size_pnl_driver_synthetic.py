@@ -85,6 +85,12 @@ def equivalence_passes(monkeypatch):
     monkeypatch.setattr(driver, "_equivalence", lambda *args, **kwargs: {"checked": 1, "skipped": 0, "max_abs_diff": 0.0})
 
 
+@pytest.fixture(autouse=True)
+def secured_stubbed(monkeypatch):
+    """The Amendment 2 secured-cash lookup needs a real ladder chunk; these tests stub the chunk."""
+    monkeypatch.setattr(driver.shortvol, "secured", lambda chunk_, events, decisions, name, c=1.0: pd.DataFrame({"event_id": pd.Series([], dtype=object), "secured_per_contract": pd.Series([], dtype=float)}))
+
+
 @pytest.fixture
 def stubs(monkeypatch):
     """Pool, simulation and tuning stubbed, as in the inner-stage driver tests."""

@@ -266,6 +266,7 @@ def test_oracle_one_taken_2025_event_carries_its_literal_marks(tmp_path, outer_s
     monkeypatch.setattr(driver.shortvol, "decide", decide_e3_only)
     monkeypatch.setattr(driver.shortvol, "score", lambda chunk_, events, decisions, name, alpha, *, c=1.0, drop_unquoted=False, mid_marks=False:
                         pd.DataFrame(mid_marks_values if mid_marks else marks))
+    monkeypatch.setattr(driver.shortvol, "secured", lambda chunk_, events, decisions, name, c=1.0: pd.DataFrame({"event_id": ["E3"], "secured_per_contract": [9500.0]}))
     _run_both(tmp_path, monkeypatch)
     frame = pd.read_parquet(tmp_path / "decisions.parquet")
     short = frame[frame["book"] == "short_vol"]
@@ -276,6 +277,12 @@ def test_oracle_one_taken_2025_event_carries_its_literal_marks(tmp_path, outer_s
     untaken = short[short["status"] != "taken"]
     assert len(untaken) == 2 * len(driver.shortvol.NAMES)  # E4, both arms, every short-vol structure
     assert untaken["exit_value_mid"].isna().all() and untaken["pnl_dollars_mid"].isna().all()
+    taken_short = short[short["status"] == "taken"]
+    assert (taken_short["secured_per_contract"] == 9500.0).all()
+    assert taken_short["entry_date"].map(lambda v: isinstance(v, str)).all() and taken_short["exit_date"].map(lambda v: isinstance(v, str)).all()
+    assert untaken["secured_per_contract"].isna().all() and untaken["entry_date"].isna().all() and untaken["exit_date"].isna().all()
+    straddle_taken = frame[(frame["book"] == "straddle") & (frame["status"] == "taken")]  # none in this fixture; checked if any appear
+    assert (straddle_taken["secured_per_contract"] == 0.0).all()
 
 
 def test_outer_refuses_when_inner_json_names_another_model_hash(tmp_path, stubs, monkeypatch):

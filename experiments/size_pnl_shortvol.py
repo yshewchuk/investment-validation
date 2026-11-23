@@ -18,6 +18,7 @@ from engine.forecast_sizing import FORECAST_SIZED, forecast_params
 from engine.portfolio import CONTRACT_MULTIPLIER
 from engine.pnl_sim import DRAWS, trailing_cutoff
 from engine.structures import BUY, PUT, SELL, STRUCTURES, StructureError
+from experiments.size_pnl_account import secured_per_contract
 from experiments.size_pnl_pool import MIN_WINDOW, put_means, structure_pnl
 from experiments.size_pnl_straddle import EXIT_UNQUOTED, lots
 
@@ -329,6 +330,26 @@ def score(chunk, events, decisions, name, alpha, *, c=1.0, drop_unquoted=False, 
                      "rung": rung, "lots": n, "pnl_per_share": per_share,
                      "pnl_dollars": per_share * CONTRACT_MULTIPLIER * n})
     return pd.DataFrame(rows, columns=_OUT_COLS)
+
+
+def secured(chunk, events, decisions, name, c=1.0):
+    """[event_id, secured_per_contract] of the TAKEN rows of ``name``: the cash one contract ties up (Amendment 2).
+    Legs are resolved exactly as ``score`` resolves them, so the secured cash is the one the traded legs imply."""
+    pinned(name)
+    _check_c(c)
+    pred = dict(zip(events["event_id"].astype(str), events["pred_move"]))
+    pos = {str(e): i for i, e in enumerate(chunk["event_id"])}
+    mine = decisions[(decisions["status"] == "taken") & (decisions["structure"] == name)]
+    rows = []
+    for dec in mine.to_dict("records"):
+        eid = str(dec["event_id"])
+        if eid not in pred or eid not in pos:
+            raise ValueError(f"taken event {eid!r} is missing from the chunk or events")
+        legs, reason = resolve(chunk, pos[eid], name, pred[eid], c)
+        if legs is None:
+            raise ValueError(f"taken event {eid!r} has no resolvable {name} structure ({reason})")
+        rows.append({"event_id": eid, "secured_per_contract": secured_per_contract(legs)})
+    return pd.DataFrame(rows, columns=["event_id", "secured_per_contract"]).astype({"secured_per_contract": float})
 
 
 def rung_shares(scored):
