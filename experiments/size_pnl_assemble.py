@@ -227,6 +227,8 @@ def _load_inner(out, outer, inner, tuned):
     """The inner stage's decisions, or None when the run has no inner_decisions receipt (older runs)."""
     path = out / "receipts" / "inner_decisions.json"
     if not path.exists():
+        if (out / "decisions_inner.parquet").exists():
+            raise _refuse("report_receipt_chain_mismatch", "decisions_inner.parquet has no inner_decisions.json receipt")
         return None
     with _admit("report_receipt_malformed", "inner_decisions.json lacks a required field"):
         receipt = tuning.load_receipt(path)

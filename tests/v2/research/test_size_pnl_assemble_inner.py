@@ -244,6 +244,16 @@ def test_excluded_models_rows_are_still_validated(tmp_path, inner_events):
     assert not (out / "REPORT.md").exists()
 
 
+def test_a_deleted_inner_receipt_refuses_instead_of_demoting_to_the_legacy_shape(tmp_path, inner_events):
+    # decisions_inner.parquet still exists, so a missing inner_decisions.json is a broken chain, not an older run without inner decisions.
+    out = build_inner(tmp_path, INNER_2024, outer_dates=OUTER_2025)
+    (out / "receipts" / "inner_decisions.json").unlink()
+    with pytest.raises(Refusal) as caught:
+        assemble_mod.assemble(out, plan_frame(TICKERS), admitted=None)
+    assert caught.value.details["reason"] == "report_receipt_chain_mismatch"
+    assert not (out / "REPORT.md").exists()
+
+
 def test_without_inner_decisions_the_report_is_unchanged_in_shape(tmp_path):
     out = build(tmp_path)
     summary = assemble_mod.assemble(out, plan_frame(), admitted=None)
