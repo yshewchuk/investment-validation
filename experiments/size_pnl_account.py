@@ -51,6 +51,13 @@ def simulate_account(rows, mark):
     for col in ("entry_cost", "secured_per_contract", exit_col):  # a missing or non-finite input is refused, never simulated
         if col not in rows.columns or not np.isfinite(rows[col].to_numpy(dtype=float)).all():
             raise ValueError(f"account inputs must be finite: {col}")
+    for col in ("entry_date", "exit_date"):  # a missing or unparseable date, or NaT for any row, is refused, never simulated
+        try:
+            parsed = pd.to_datetime(rows[col])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("account inputs must carry valid entry_date and exit_date") from exc
+        if parsed.isna().any():
+            raise ValueError("account inputs must carry valid entry_date and exit_date")
     frame = rows.drop(columns=["exit_value"]).rename(columns={"exit_value_mid": "exit_value"}) if mark == "mid" else rows
     t = margin.simulate(frame[["entry_date", "exit_date", "entry_cost", "exit_value", "secured_per_contract"]], **POLICY)
     final = float(t.attrs["final_equity"])

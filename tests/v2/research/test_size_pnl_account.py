@@ -200,3 +200,22 @@ def test_universe_reports_a_valid_account_that_takes_no_trade():
     diffs = {d["contrast"]: d for d in account.differences(results, {}, ["M0", "M1", "M2"])
              if d["mark"] == "primary" and d["kind"] == "book"}
     assert diffs["M0-vs-M2"]["diff"] == pytest.approx(100000.0 - book[("primary", "M0")]["final_equity"])
+
+
+def test_simulate_account_with_a_nat_exit_date_raises():
+    rows = _fixture().assign(exit_date=["2025-03-31", pd.NaT, "2025-03-31", "2025-03-31"])
+    with pytest.raises(ValueError, match="account inputs must carry valid entry_date and exit_date"):
+        account.simulate_account(rows, "primary")
+
+
+def test_oracle_one_taken_straddle_row_is_funded_at_the_debit_secured_amount():
+    # Hand-derived: secured restated to debit x 100 = 50; contracts = floor(0.25 * 66,000 / 50) = 330; pnl = 330 * (1.0 - 0.5) * 100 = 16,500.
+    taken = pd.DataFrame({
+        "model_id": ["M1"], "book": ["straddle"], "arm_or_rule": ["R_L"], "structure": ["straddle"], "event_id": ["S1"], "status": ["taken"],
+        "entry_date": ["2024-01-02"], "exit_date": ["2024-01-10"], "entry_cost": [0.5], "exit_value": [1.0], "exit_value_mid": [1.0],
+        "secured_per_contract": [0.0]})
+    results = account.accounts(taken)
+    straddle = [r for r in results if r["kind"] == "straddle" and r["mark"] == "primary"]
+    assert len(straddle) == 1
+    assert straddle[0]["wanted"] == 1 and straddle[0]["funded"] == 1
+    assert straddle[0]["final_equity"] == pytest.approx(116500.0)

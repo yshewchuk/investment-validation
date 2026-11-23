@@ -285,6 +285,29 @@ def test_oracle_one_taken_2025_event_carries_its_literal_marks(tmp_path, outer_s
     assert (straddle_taken["secured_per_contract"] == 0.0).all()
 
 
+def test_oracle_one_taken_2025_straddle_event_carries_zero_secured_and_dates(tmp_path, outer_stubs, monkeypatch):
+    """Only E3 is taken on the straddle book; its scorer marks are literal. Every taken straddle row must carry
+    secured_per_contract 0.0 (the account restates it as debit x 100 later) and non-null entry and exit dates."""
+    def decide_e3_taken(events, history, rule, chunk_):
+        ids = events["event_id"].astype(str)
+        is_e3 = (ids == "E3").to_numpy()
+        return pd.DataFrame({"event_id": ids, "event_date": events["event_date"], "edge": events["pred_abs_move"] - events["implied_move"],
+                             "cutoff": np.nan, "rel_spread": np.nan, "status": np.where(is_e3, "taken", "undetermined"),
+                             "reason": np.where(is_e3, "taken", "thin_history")})
+
+    marks = {"event_id": ["E3"], "exit_value": [101.5], "rung": [2], "lots": [3], "pnl_dollars": [-42.25], "entry_cost": [10.0], "pnl_per_share": [-0.5]}
+    mid_marks_values = {**marks, "exit_value": [105.0], "pnl_dollars": [-10.5]}  # the sensitivity arm: other columns as the primary
+    monkeypatch.setattr(driver.straddle, "decide", decide_e3_taken)
+    monkeypatch.setattr(driver.straddle, "score", lambda chunk_, events, dec, alpha, **kw:
+                        pd.DataFrame(mid_marks_values if kw.get("mid_marks") else marks))
+    _run_both(tmp_path, monkeypatch)
+    frame = pd.read_parquet(tmp_path / "decisions.parquet")
+    straddle_taken = frame[(frame["book"] == "straddle") & (frame["status"] == "taken")]
+    assert len(straddle_taken) > 0
+    assert (straddle_taken["secured_per_contract"] == 0.0).all()
+    assert straddle_taken["entry_date"].notna().all() and straddle_taken["exit_date"].notna().all()
+
+
 def test_outer_refuses_when_inner_json_names_another_model_hash(tmp_path, stubs, monkeypatch):
     use_chunks(monkeypatch, [("2024Q3", chunk("E2"))])
     driver.run(sources(), "inner", tmp_path / "inner", prereg=OK)

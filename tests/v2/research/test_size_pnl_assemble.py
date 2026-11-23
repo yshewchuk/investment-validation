@@ -816,3 +816,16 @@ def test_empty_taken_frame_with_the_column_reports_zero_trade_accounts(tmp_path)
     text = "\n".join(sections)
     assert any("| 0 | 0 | 1e+05 |" in line for line in text.splitlines())
     assert "not_testable" not in text
+
+
+def test_taken_row_with_null_exit_date_refuses_as_decisions_invalid(tmp_path):
+    def make(rows):
+        out = _with_account(rows)
+        return [{**out[0], "exit_date": None}, *out[1:]]  # out[0] is a taken short-vol row
+
+    out = build(tmp_path, rows_fn=make)
+    with pytest.raises(Refusal) as caught:
+        assemble_mod.assemble(out, plan_frame(), admitted=None)
+    assert caught.value.code == CONFLICT
+    assert caught.value.details["reason"] == "report_decisions_invalid"
+    assert not (out / "REPORT.md").exists()

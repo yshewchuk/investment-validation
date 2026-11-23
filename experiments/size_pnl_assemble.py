@@ -273,6 +273,9 @@ def _sections(out, outer, inputs, inner, tuned, tickers):
         raise _refuse("report_nonfinite_pnl", "a taken row has a non-finite pnl_dollars_mid")
     if any(not np.isfinite(raw.loc[raw["status"] == "taken", col].to_numpy(dtype=float)).all() for col in ("secured_per_contract", "entry_cost", "exit_value", "exit_value_mid") if col in raw.columns):
         raise _refuse("report_nonfinite_pnl", "a taken row has a non-finite secured_per_contract, entry_cost, exit_value or exit_value_mid")
+    for col in ("entry_date", "exit_date"):  # Amendment 2 account dates: a taken row with a null or unparseable date refuses
+        if col in raw.columns and pd.to_datetime(raw.loc[raw["status"] == "taken", col], errors="coerce").isna().any():
+            raise _refuse("report_decisions_invalid", "a taken row has a missing or invalid entry_date or exit_date")
     if (set(raw["model_id"]) | outer_models) - set(label_of):
         raise _refuse("report_receipt_chain_mismatch", "a model in the decisions has no roster entry")
     frame = synthetic_eval.population(raw)  # E: no undetermined row that leaves E under any model; short-vol non-trades stay in E at P&L 0
