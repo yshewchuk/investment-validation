@@ -409,6 +409,62 @@ def test_load_trades_streaming_never_asks_past_max_year():
     assert set(rows["strategy"]) == {"STR-THRU"}
 
 
+class _OversizePartitionStore:
+    """Yields one partition of three rows, which exceeds a monkeypatched MAX_PARTITION_ROWS=2."""
+
+    def iter_table(self, name, years=None):
+        yield 2024, pd.DataFrame({
+            "event_id": [1, 2, 3],
+            "strategy": ["STR-THRU", "STR-THRU", "STR-THRU"],
+            "provenance": ["engine.replay"] * 3,
+            "entry_date": pd.to_datetime(["2024-03-01"] * 3),
+        })
+
+
+def test_load_trades_streaming_refuses_oversize_partition(monkeypatch):
+    monkeypatch.setattr(fold, "MAX_PARTITION_ROWS", 2)
+    with pytest.raises(SystemExit, match="refused: partition 2024 has 3 rows"):
+        fold.load_trades_streaming(_OversizePartitionStore(), "STR-THRU", 2024)
+
+
+def test_check_input_file_refuses_symlink(tmp_path):
+    real = tmp_path / "real.bin"
+    real.write_bytes(b"x")
+    link = tmp_path / "link.bin"
+    link.symlink_to(real)
+    with pytest.raises(SystemExit, match="refused"):
+        fold.check_input_file(link, 1 << 20)
+
+
+def test_check_input_file_refuses_directory(tmp_path):
+    with pytest.raises(SystemExit, match="refused"):
+        fold.check_input_file(tmp_path, 1 << 20)
+
+
+def test_check_input_file_refuses_oversize(tmp_path):
+    f = tmp_path / "big.bin"
+    f.write_bytes(b"0123456789")
+    with pytest.raises(SystemExit, match="refused"):
+        fold.check_input_file(f, 4)
+
+
+def test_check_input_file_accepts_small_regular_file(tmp_path):
+    f = tmp_path / "small.bin"
+    f.write_bytes(b"abc")
+    assert fold.check_input_file(f, 1 << 20) == str(f)
+
+
+def test_check_input_file_csv_gz_fallback(tmp_path):
+    gz = tmp_path / "tier4.csv.gz"
+    gz.write_bytes(b"x")
+    assert fold.check_input_file(tmp_path / "tier4.parquet", 1 << 20) == str(gz)
+
+
+def test_check_input_file_refuses_when_neither_exists(tmp_path):
+    with pytest.raises(SystemExit, match="refused"):
+        fold.check_input_file(tmp_path / "tier4.parquet", 1 << 20)
+
+
 def test_train_fold_refuses_through_after_2024():
     with pytest.raises(ValueError, match="through must be <= 2024"):
         _train(_trades(), through=2025)

@@ -40,6 +40,8 @@ MIN_TRAIN_ROWS = 500
 ADMITTED_MAX_BYTES = 64 << 20
 LABEL_COLUMNS = ("ret", "exit_value", "exit_date")
 PROGRESS_INTERVAL_S = 30
+MAX_FORECAST_BYTES = 4 << 30
+MAX_PARTITION_ROWS = 50_000_000
 
 _T0 = time.time()
 
@@ -75,6 +77,29 @@ def _heartbeat(label, interval=60):
 def _check_max_bytes(max_bytes):
     if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes <= 0:
         raise ValueError("max_bytes must be positive")
+
+
+def check_input_file(path, max_bytes):
+    """Refuse an input unless it is a regular file (no symlinks) of at most max_bytes.
+
+    A missing .parquet is looked up as .csv.gz, as tier4.load_forecasts does. Returns the
+    path that was checked; raises SystemExit("refused: ...") otherwise.
+    """
+    path = str(path)
+    candidates = [path]
+    if path.endswith(".parquet"):
+        candidates.append(path[: -len(".parquet")] + ".csv.gz")
+    for cand in candidates:
+        try:
+            st = os.lstat(cand)  # lstat: a symlink is seen as itself and refused below
+        except FileNotFoundError:
+            continue
+        if not stat.S_ISREG(st.st_mode):
+            raise SystemExit(f"refused: {cand} is not a regular file")
+        if st.st_size > max_bytes:
+            raise SystemExit(f"refused: {cand} is {st.st_size} bytes, over the {max_bytes} byte limit")
+        return cand
+    raise SystemExit(f"refused: {path} not found (no .csv.gz fallback either)")
 
 
 def file_sha256(path, max_bytes=8 << 30):
@@ -358,6 +383,8 @@ def load_trades_streaming(store, strategy, max_year):
     last_progress = t0
     for year, part in store.iter_table("trades", years=range(2000, int(max_year) + 1)):
         partitions += 1
+        if len(part) > MAX_PARTITION_ROWS:
+            raise SystemExit(f"refused: partition {year} has {len(part)} rows")
         if cols is None:
             cols = list(part.columns)
         selected = select_trades(part, strategy)
@@ -384,11 +411,13 @@ def _progress_fields(done, kept_rows, elapsed):
 def _real_wiring(through_year):
     # through_year is accepted for symmetry with the CLI; the loaders derive their own years.
     import engine.models.training.gate_forecast_analog as ga
+    import engine.paths as paths
     from engine.features import FeatureContext
 
     def load_trades(max_year):
         from engine.data import store
 
+        check_input_file(paths.TIER4, MAX_FORECAST_BYTES)
         return load_trades_streaming(store, ga.STRATEGY, max_year)
 
     def build(t):
