@@ -291,6 +291,13 @@ def test_t10_verdicts_are_the_pinned_literals(tmp_path):
     assert "not_testable because the required full year" not in text
 
 
+def test_t10_section_discloses_amendment_5(tmp_path):
+    out = build(tmp_path)
+    assemble_mod.assemble(out, plan_frame(), admitted=None)
+    text = (out / "REPORT.md").read_text(encoding="utf-8")
+    assert "Amendment 5 (2026-11-23): the straddle universe" in "\n".join(_section_lines(text, "### T10"))
+
+
 def test_same_plan_frame_as_the_receipt_succeeds(tmp_path):
     out = build(tmp_path)
     assemble_mod.assemble(out, plan_frame(), admitted=None)

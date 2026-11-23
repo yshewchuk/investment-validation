@@ -28,6 +28,9 @@ COLUMNS = ["model_id", "book", "arm_or_rule", "structure", "event_id", "event_da
 ACCOUNT_COLS = ["entry_date", "exit_date", "entry_cost", "exit_value", "exit_value_mid", "secured_per_contract"]
 ARMS = ("as_is", "retuned")
 LONG_RULE = "R_L"
+AMENDMENT_5_NOTE = ("Amendment 5 (2026-11-23): the straddle universe was changed to production's (market cap at or above engine.score "
+                    "GATE_MCAP_FLOOR, no spread term) after the 2025 outputs of the pre-registered run were inspected; the H2 verdict, "
+                    "T6 and the straddle T7 rows are computed on E_str and are labelled as run under Amendment 5.")
 # name -> (predicted sign, arm -> legs, arms). A leg is (book, arm_or_rule value, sign); d = sum(sign * (median - mean)).
 # Judgement call: H3 crosses each short-vol arm with the long rule R_L only; R_L2 is not in H3.
 HYPOTHESES = {
@@ -288,6 +291,7 @@ def _verdicts(classify_in, missing_years, inner_present=False, shown_c=None):
         verdicts += ("\n\nT10 pools the inner (2023H2-2024) and outer (2025) decisions by the registered rule: predicted sign in every full year "
                      "(2024, 2025; 2023 partial). The retuned arm's 2023H2 and 2024 rows are in-sample (each c was chosen on those years), "
                      "so its 2024 sign is in-sample.\n" + _insample_lines(shown_c))
+    verdicts += "\n\n" + AMENDMENT_5_NOTE
     return verdicts
 
 
