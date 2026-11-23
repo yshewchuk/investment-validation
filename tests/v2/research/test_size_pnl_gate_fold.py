@@ -677,3 +677,32 @@ def test_run_fit_logs_cut_stats_line(tmp_path, capsys):
     assert ("fit cut rows_in=703 rows_kept=693 dropped_event_after_cutoff=8 "
             "dropped_exit_null=0 dropped_exit_after_cutoff=2") in err
     assert "fit training_rows=693" in err
+
+
+def _forecast_wiring_load_trades(monkeypatch, tmp_path, path):
+    import engine.paths as paths
+    import engine.data.store as store
+
+    def no_store_access(*args, **kwargs):
+        raise AssertionError("store.iter_table must not be called when the forecast file is refused")
+
+    monkeypatch.setattr(paths, "TIER4", path)
+    monkeypatch.setattr(store, "iter_table", no_store_access)
+    load_trades, *_ = fold._real_wiring(2024)
+    return load_trades
+
+
+def test_real_wiring_load_trades_refuses_oversize_forecast_before_store(monkeypatch, tmp_path):
+    f = tmp_path / "tier4.parquet"
+    f.write_bytes(b"0123456789")  # 10 bytes
+    monkeypatch.setattr(fold, "MAX_FORECAST_BYTES", 4)
+    load_trades = _forecast_wiring_load_trades(monkeypatch, tmp_path, f)
+    with pytest.raises(SystemExit, match="refused"):
+        load_trades(2024)
+
+
+def test_real_wiring_load_trades_refuses_missing_forecast_before_store(monkeypatch, tmp_path):
+    # Neither tier4.parquet nor tier4.csv.gz exists.
+    load_trades = _forecast_wiring_load_trades(monkeypatch, tmp_path, tmp_path / "tier4.parquet")
+    with pytest.raises(SystemExit, match="refused"):
+        load_trades(2024)

@@ -41,7 +41,7 @@ ADMITTED_MAX_BYTES = 64 << 20
 LABEL_COLUMNS = ("ret", "exit_value", "exit_date")
 PROGRESS_INTERVAL_S = 30
 MAX_FORECAST_BYTES = 4 << 30
-MAX_PARTITION_ROWS = 50_000_000
+MAX_PARTITION_ROWS = 50_000_000  # post-decode sanity cap on rows per trades partition; not a memory bound
 
 _T0 = time.time()
 
@@ -384,7 +384,8 @@ def load_trades_streaming(store, strategy, max_year):
     for year, part in store.iter_table("trades", years=range(2000, int(max_year) + 1)):
         partitions += 1
         if len(part) > MAX_PARTITION_ROWS:
-            raise SystemExit(f"refused: partition {year} has {len(part)} rows")
+            raise SystemExit(f"refused: partition {year} has {len(part)} rows, over the "
+                             f"{MAX_PARTITION_ROWS} post-decode sanity cap (not a memory bound)")
         if cols is None:
             cols = list(part.columns)
         selected = select_trades(part, strategy)
