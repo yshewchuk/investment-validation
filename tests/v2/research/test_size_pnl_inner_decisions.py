@@ -1,5 +1,6 @@
 """EXP-188: the inner stage's decisions pass (``_inner_decisions``): decisions_inner.parquet, its receipt and its replay.
 Real readers and driver; pool, simulation, scorers and tuning stubbed through ``outer_stubs``."""
+import hashlib
 import json
 
 import pandas as pd
@@ -61,7 +62,8 @@ def test_inner_retuned_rows_use_the_frozen_c_and_the_receipt_binds_it(tmp_path, 
     assert rec["stage"] == "inner_decisions"
     assert rec["c"] == {mid: 1.25 for mid in summary["models"]}
     assert rec["tuning"] == inner["models"]
-    assert rec["decisions_sha256"] and rec["rows"] > 0 and rec["rows"] == summary["inner_decisions_rows"]
+    assert rec["decisions_sha256"] == hashlib.sha256((tmp_path / "decisions_inner.parquet").read_bytes()).hexdigest()
+    assert rec["rows"] > 0 and rec["rows"] == summary["inner_decisions_rows"]
     assert rec["emit_from"] == "2023-07-01"
 
 

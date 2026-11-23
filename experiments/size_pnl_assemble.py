@@ -218,7 +218,7 @@ def _load_decisions(out, receipt, name="decisions.parquet"):
     return frame
 
 
-def _load_inner(out, outer, tuned):
+def _load_inner(out, outer, inner, tuned):
     """The inner stage's decisions, or None when the run has no inner_decisions receipt (older runs)."""
     path = out / "receipts" / "inner_decisions.json"
     if not path.exists():
@@ -229,6 +229,9 @@ def _load_inner(out, outer, tuned):
             raise _refuse("report_receipt_stage", "inner_decisions.json is not the inner decisions stage's receipt")
         if receipt["tuning"] != outer["tuning"]:
             raise _refuse("report_receipt_chain_mismatch", "inner_decisions.json's tuning does not match outer.json's")
+        if not (receipt["inputs"] == inner["inputs"] and receipt["scope"] == inner["scope"]
+                and sorted(receipt["models"]) == sorted(outer["models"])):
+            raise _refuse("report_receipt_chain_mismatch", "inner_decisions.json is not bound to inner.json's inputs, scope or models")
     return _load_decisions(out, receipt, "decisions_inner.parquet")
 
 
@@ -277,7 +280,7 @@ def _sections(out, outer, inputs, inner, tuned, tickers):
     """The report's sections in order. Reads receipt fields throughout; the caller maps a missing or mistyped field to a refusal.
     Returns (sections, inner row count)."""
     raw = _load_decisions(out, outer)
-    inner_raw = _load_inner(out, outer, tuned)
+    inner_raw = _load_inner(out, outer, inner, tuned)
     tick = {str(e): str(t) for e, t in tickers.items()}
     roster = inputs["roster"]
     label_of = {m["model_id"]: "+".join(m["roles"]) for m in roster["models"]}
