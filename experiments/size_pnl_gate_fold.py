@@ -172,15 +172,39 @@ def build_inputs(trades, *, year, build, features):
     return out, receipt
 
 
-def _write_atomic(path, writer):
-    tmp = f"{path}.tmp"
-    writer(tmp)
-    os.replace(tmp, path)
+def _unlink_quiet(path):
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        pass
 
 
-def _write_receipt(path, receipt):
-    text = json.dumps(receipt, indent=2, sort_keys=True)
-    _write_atomic(path, lambda p: Path(p).write_text(text + "\n"))
+def _publish_pair(out, receipt_path, write_artifact, receipt, sha_key):
+    """Publish artifact + receipt so that a receipt-less artifact never remains.
+
+    The artifact goes to <out>.tmp and the receipt to <receipt_path>.tmp. The artifact is
+    renamed into place first, then the receipt. If the receipt step fails, the published
+    artifact is removed; tmp files are removed on any failure.
+    """
+    out = Path(out)
+    receipt_path = Path(receipt_path)
+    art_tmp = f"{out}.tmp"
+    rec_tmp = f"{receipt_path}.tmp"
+    published = False
+    try:
+        write_artifact(art_tmp)
+        receipt[sha_key] = file_sha256(art_tmp)
+        text = json.dumps(receipt, indent=2, sort_keys=True)
+        Path(rec_tmp).write_text(text + "\n")
+        os.replace(art_tmp, out)
+        published = True
+        os.replace(rec_tmp, receipt_path)
+    except BaseException:
+        _unlink_quiet(art_tmp)
+        _unlink_quiet(rec_tmp)
+        if published:
+            _unlink_quiet(out)
+        raise
     print(text)
 
 
@@ -226,9 +250,7 @@ def _run_fit(args, wiring, root):
                                 features=features, target=target, seed=SEED, threshold=REGISTERED_THRESHOLD)
     payload = {"model": model, "features": list(features), "threshold": REGISTERED_THRESHOLD,
                "seed": SEED, "train_through": args.train_through, "recipe_hash": receipt["recipe_hash"]}
-    _write_atomic(out, lambda p: joblib.dump(payload, p, compress=3))
-    receipt["artifact_sha256"] = file_sha256(out)
-    _write_receipt(receipt_path, receipt)
+    _publish_pair(out, receipt_path, lambda p: joblib.dump(payload, p, compress=3), receipt, "artifact_sha256")
     _log(f"fit end: {time.time() - t0:.1f}s")
     return 0
 
@@ -241,9 +263,7 @@ def _run_inputs(args, wiring, root):
     t0 = time.time()
     _log(f"inputs start: year={args.year}")
     table, receipt = build_inputs(load_trades(), year=args.year, build=build, features=features)
-    _write_atomic(out, table.to_parquet)
-    receipt["inputs_sha256"] = file_sha256(out)
-    _write_receipt(receipt_path, receipt)
+    _publish_pair(out, receipt_path, table.to_parquet, receipt, "inputs_sha256")
     _log(f"inputs end: {time.time() - t0:.1f}s")
     return 0
 

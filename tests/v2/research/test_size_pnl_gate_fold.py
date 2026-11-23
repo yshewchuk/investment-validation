@@ -1,6 +1,8 @@
 """EXP-188 Amendment 3: size_pnl_gate_fold on synthetic fixtures only (no real data, no real wiring, no network)."""
 import hashlib
 import json
+import os
+from pathlib import Path
 
 import joblib
 import numpy as np
@@ -203,6 +205,35 @@ def test_main_inputs_end_to_end(tmp_path):
     assert len(pd.read_parquet(out)) == 7
     receipt = json.loads((tmp_path / "inputs_2025.parquet.receipt.json").read_text())
     assert receipt["inputs_sha256"] == fold.file_sha256(out)
+
+
+def test_publish_pair_receipt_replace_failure_leaves_nothing(tmp_path, monkeypatch):
+    out = tmp_path / "a.bin"
+    rec = tmp_path / "a.bin.receipt.json"
+    real_replace = os.replace
+
+    def failing_replace(src, dst):
+        if os.fspath(dst) == os.fspath(rec):
+            raise OSError("simulated receipt replace failure")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(fold.os, "replace", failing_replace)
+    with pytest.raises(OSError, match="simulated"):
+        fold._publish_pair(out, rec, lambda p: Path(p).write_bytes(b"payload"), {"kind": "t"}, "sha")
+    assert not out.exists()
+    assert not rec.exists()
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_publish_pair_success_leaves_both_and_no_tmp(tmp_path, capsys):
+    out = tmp_path / "a.bin"
+    rec = tmp_path / "a.bin.receipt.json"
+    fold._publish_pair(out, rec, lambda p: Path(p).write_bytes(b"payload"), {"kind": "t"}, "sha")
+    assert out.read_bytes() == b"payload"
+    receipt = json.loads(rec.read_text())
+    assert receipt["sha"] == fold.file_sha256(out)
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["a.bin", "a.bin.receipt.json"]
+    assert json.loads(capsys.readouterr().out) == receipt
 
 
 def test_main_fit_refuses_out_under_data_models(tmp_path):
