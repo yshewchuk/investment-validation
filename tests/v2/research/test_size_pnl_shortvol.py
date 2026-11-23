@@ -561,3 +561,10 @@ def test_secured_returns_only_taken_rows():
     chunk = chunk_of(("A", {}))
     decisions = taken(chunk, "A").assign(status="not_taken")
     assert len(sv.secured(chunk, events_for("A"), decisions, "CND-PS")) == 0
+
+
+def test_secured_refuses_a_decision_priced_at_another_c():
+    chunk = chunk_of(("A", {}))
+    decisions = taken(chunk, "A", c=2.0)  # priced at c = 2.0; the call asks for c = 1.0
+    with pytest.raises(ValueError, match="decision was not priced at this c"):
+        sv.secured(chunk, events_for("A"), decisions, "CND-PS", c=1.0)

@@ -93,6 +93,16 @@ def test_empty_rows_give_the_empty_metrics():
         "wanted": 0, "funded": 0, "final_equity": 100_000.0, "total_return": 0.0, "max_drawdown": 0.0, "peak_open": 0}
 
 
+def test_simulate_account_refuses_non_finite_inputs():
+    mid_nan = _fixture().assign(exit_value_mid=[0.45, np.nan, 0.55, 0.9])
+    with pytest.raises(ValueError, match="account inputs must be finite: exit_value_mid"):
+        account.simulate_account(mid_nan, "mid")
+    assert math.isfinite(account.simulate_account(mid_nan, "primary")["final_equity"])  # primary marks do not read exit_value_mid
+    secured_nan = _fixture().assign(secured_per_contract=[20000.0, np.nan, 30000.0, 80000.0])
+    with pytest.raises(ValueError, match="account inputs must be finite: secured_per_contract"):
+        account.simulate_account(secured_nan, "primary")
+
+
 def _taken():
     return pd.DataFrame({
         "model_id": ["M0", "M0", "M1"], "book": ["short_vol"] * 3, "arm_or_rule": ["as_is"] * 3,

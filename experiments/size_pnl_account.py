@@ -47,6 +47,10 @@ def simulate_account(rows, mark):
     start = POLICY["start_equity"]
     if rows.empty:
         return {"wanted": 0, "funded": 0, "final_equity": start, "total_return": 0.0, "max_drawdown": 0.0, "peak_open": 0}
+    exit_col = "exit_value_mid" if mark == "mid" else "exit_value"
+    for col in ("entry_cost", "secured_per_contract", exit_col):  # a missing or non-finite input is refused, never simulated
+        if col not in rows.columns or not np.isfinite(rows[col].to_numpy(dtype=float)).all():
+            raise ValueError(f"account inputs must be finite: {col}")
     frame = rows.drop(columns=["exit_value"]).rename(columns={"exit_value_mid": "exit_value"}) if mark == "mid" else rows
     t = margin.simulate(frame[["entry_date", "exit_date", "entry_cost", "exit_value", "secured_per_contract"]], **POLICY)
     final = float(t.attrs["final_equity"])

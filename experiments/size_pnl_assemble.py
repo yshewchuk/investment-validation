@@ -241,10 +241,10 @@ def _verdicts(classify_in, missing_years):
 
 def _account_sections(frame, role_model, label_of):
     """The Amendment 2 sensitivity sections over ``frame``, which holds ALL taken rows of decisions.parquet (model_id already
-    labelled), or not_testable when no taken short-vol row carries a secured_per_contract."""
+    labelled), or not_testable when the frame is empty or no taken row carries a secured_per_contract. A straddle-only run is
+    testable: its taken straddle rows carry 0.0 secured cash, which is non-null."""
     title = "Sensitivity (Amendment 2)"
-    taken_short = frame["book"] == "short_vol"
-    if "secured_per_contract" not in frame.columns or not frame.loc[taken_short, "secured_per_contract"].notna().any():
+    if "secured_per_contract" not in frame.columns or frame.empty or not frame["secured_per_contract"].notna().any():
         return [_not_testable(title, "account_columns_not_in_decisions")]
     results = size_pnl_account.accounts(frame)
     _log(f"accounts n={len(results)}")
@@ -268,8 +268,8 @@ def _sections(out, outer, inputs, inner, tuned, tickers):
         raise _refuse("report_nonfinite_pnl", "a taken row has a non-finite pnl_dollars")
     if "pnl_dollars_mid" in raw.columns and not np.isfinite(raw.loc[raw["status"] == "taken", "pnl_dollars_mid"].to_numpy(dtype=float)).all():
         raise _refuse("report_nonfinite_pnl", "a taken row has a non-finite pnl_dollars_mid")
-    if any(not np.isfinite(raw.loc[raw["status"] == "taken", col].to_numpy(dtype=float)).all() for col in ("secured_per_contract", "entry_cost", "exit_value") if col in raw.columns):
-        raise _refuse("report_nonfinite_pnl", "a taken row has a non-finite secured_per_contract, entry_cost or exit_value")
+    if any(not np.isfinite(raw.loc[raw["status"] == "taken", col].to_numpy(dtype=float)).all() for col in ("secured_per_contract", "entry_cost", "exit_value", "exit_value_mid") if col in raw.columns):
+        raise _refuse("report_nonfinite_pnl", "a taken row has a non-finite secured_per_contract, entry_cost, exit_value or exit_value_mid")
     if (set(raw["model_id"]) | outer_models) - set(label_of):
         raise _refuse("report_receipt_chain_mismatch", "a model in the decisions has no roster entry")
     frame = synthetic_eval.population(raw)  # E: no undetermined row that leaves E under any model; short-vol non-trades stay in E at P&L 0

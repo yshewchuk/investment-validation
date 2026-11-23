@@ -780,3 +780,25 @@ def test_account_wanted_counts_a_taken_row_of_an_event_removed_from_e(tmp_path):
     account = _section_lines(text, "### Sensitivity (Amendment 2)")
     wanted = _cells(next(line for line in account if line.startswith("| book | E-raw | as_is |")))[3]
     assert wanted == "4"  # four taken short-vol as_is rows for E-raw: E01 included, not the three events of E
+
+
+def _straddle_only(rows):
+    """A straddle-only run: every short-vol row is a non-trade at P&L 0 with NaN secured cash; the taken straddle rows carry 0.0 secured."""
+    out = []
+    for row in _with_account(rows):
+        if row["book"] == "short_vol":
+            row = {**row, "status": "not_taken", "reason": "below_cutoff", "pnl_dollars": 0.0, "secured_per_contract": np.nan}
+        else:
+            row = {**row, "secured_per_contract": 0.0}
+        out.append(row)
+    return out
+
+
+def test_straddle_only_run_is_testable_for_the_account(tmp_path):
+    out = build(tmp_path, rows_fn=_straddle_only)
+    assemble_mod.assemble(out, plan_frame(), admitted=None)
+    text = (out / "REPORT.md").read_text(encoding="utf-8")
+    assert "not_testable: account_columns_not_in_decisions" not in text  # the Amendment 2 table is produced, not the note
+    account = _section_lines(text, "### Sensitivity (Amendment 2)")
+    assert account[0].startswith("### Sensitivity (Amendment 2), not the pre-registered verdict")
+    assert any(line.startswith("| straddle |") for line in account)
