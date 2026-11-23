@@ -149,6 +149,14 @@ def test_load_gate_refuses_a_missing_file_and_a_symlink(tmp_path):
     assert _refusal(exc) == ("INVALID_EXPERIMENT_SPEC", "gate_fold_missing")
 
 
+def test_load_gate_refuses_a_missing_inputs_file(tmp_path):
+    binding = write_gate_files(tmp_path)
+    os.remove(binding["gate_inputs"]["path"])
+    with pytest.raises(OpsError) as exc:
+        gp.load_gate(binding)
+    assert _refusal(exc) == ("INVALID_EXPERIMENT_SPEC", "gate_inputs_missing")
+
+
 def test_load_gate_refuses_a_bad_binding():
     good_inputs = {"path": "i", "sha256": "0" * 64}
     with pytest.raises(OpsError) as exc:
@@ -165,6 +173,17 @@ def test_load_gate_refuses_a_bad_binding():
     pytest.param({**fold_payload(), "features": [f for f in FEATURES if f != "forecast_edge"]}, id="no_forecast_edge"),
 ])
 def test_load_gate_refuses_a_changed_threshold_or_late_fold(tmp_path, payload):
+    with pytest.raises(OpsError) as exc:
+        gp.load_gate(write_gate_files(tmp_path, payload=payload))
+    assert _refusal(exc) == ("INVALID_EXPERIMENT_SPEC", "gate_fold_invalid")
+
+
+@pytest.mark.parametrize("payload", [
+    pytest.param({**fold_payload(), "train_through": True}, id="bool_train_through"),
+    pytest.param({**fold_payload(), "model": "x"}, id="model_without_predict"),
+    pytest.param({**fold_payload(), "threshold": "high"}, id="threshold_not_a_number"),
+])
+def test_load_gate_refuses_a_malformed_fold_payload(tmp_path, payload):
     with pytest.raises(OpsError) as exc:
         gp.load_gate(write_gate_files(tmp_path, payload=payload))
     assert _refusal(exc) == ("INVALID_EXPERIMENT_SPEC", "gate_fold_invalid")
@@ -268,6 +287,39 @@ def test_month_decider_enforces_label_availability():
     printed.loc[late, "available"] = "2024-12-31"  # now printed before the month start
     gp.month_decider(gate, table, printed, START)(pd.DataFrame([ev("hi", 3.0)]), good("hi"))
     assert dict(zip(FEATURES, recorder.seen[0]))["pred_abs_move_sd"] > 5  # the filter, not the data, decides
+
+
+def test_label_availability_boundary_is_the_month_start():
+    table, labels = history()
+    edge = [f"B{i}" for i in range(5)]
+    table = pd.concat([table, pd.DataFrame({"event_date": pd.Timestamp("2024-12-30"), "pred_move": 5.0, "pred_crush": -15.0}, index=edge)])
+    labels = pd.concat([labels, pd.DataFrame({"abs_move": 500.0, "crush_pct_iv30": -15.0, "available": "2025-01-01"}, index=edge)])
+    recorder = Recorder()
+    gate = gp.Gate(recorder, tuple(FEATURES), fold.REGISTERED_THRESHOLD,
+                   inputs_frame(["hi"]).set_index("event_id")[FEATURES].astype(float), "a", "b")
+    gp.month_decider(gate, table, labels, START)(pd.DataFrame([ev("hi", 3.0)]), good("hi"))
+    assert dict(zip(FEATURES, recorder.seen[0]))["pred_abs_move_sd"] < 5  # printed on the month start: not yet known
+    labels.loc[edge, "available"] = "2024-12-31"  # printed the day before the month start: in the pool
+    gp.month_decider(gate, table, labels, START)(pd.DataFrame([ev("hi", 3.0)]), good("hi"))
+    assert dict(zip(FEATURES, recorder.seen[0]))["pred_abs_move_sd"] > 5
+
+
+def test_band_matches_the_flat_pool_formula():
+    n = 300
+    index = pd.Index([f"P{i}" for i in range(n)])
+    table = pd.DataFrame({"event_date": pd.Timestamp("2024-03-01") + pd.to_timedelta(np.arange(n) % 300, unit="D"),
+                          "pred_move": 5.0, "pred_crush": -15.0}, index=index)  # one prediction value: only the flat statistics apply
+    res = np.linspace(-3, 3, n)
+    labels = pd.DataFrame({"abs_move": 5.0 + res, "crush_pct_iv30": -15.0,
+                           "available": (table["event_date"] + pd.Timedelta(days=1)).dt.date.astype(str)}, index=index)
+    recorder = Recorder()
+    gate = gp.Gate(recorder, tuple(FEATURES), fold.REGISTERED_THRESHOLD,
+                   inputs_frame(["hi"]).set_index("event_id")[FEATURES].astype(float), "a", "b")
+    gp.month_decider(gate, table, labels, START)(pd.DataFrame([ev("hi", 3.0)]), good("hi"))
+    row = dict(zip(FEATURES, recorder.seen[0]))
+    assert row["pred_abs_move_p10"] == pytest.approx(max(8.0 + np.quantile(res, 0.10), 0.0))
+    assert row["pred_abs_move_p90"] == pytest.approx(8.0 + np.quantile(res, 0.90))
+    assert row["pred_abs_move_sd"] == pytest.approx(res.std(ddof=1))
 
 
 # ---- straddle contract ------------------------------------------------------

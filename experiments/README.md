@@ -135,9 +135,9 @@ Saved identity and later outcome/worker APIs' separate read policies do not chan
 
 `record_export` (run-record export) is consumed by `v2_gate` and `v2_prediction` `run`; it depends on `lib` (EXP numbering) and ops errors only.
 
-`size_pnl_driver.run` and `run_synthetic` are consumed only by the EXP-188 `run.py` (`--stage inner`, `outer` or `synthetic`); it calls the `size_pnl_inputs`, `size_pnl_outer_inputs`, `size_pnl_readers`, `size_pnl_ladder`, `size_pnl_shortvol`, `size_pnl_straddle`, `size_pnl_decisions` and `size_pnl_tuning` slices and `label_availability`, and has no other caller.
+`size_pnl_driver.run` and `run_synthetic` are consumed only by the EXP-188 `run.py` (`--stage inner`, `outer` or `synthetic`); it calls the `size_pnl_inputs`, `size_pnl_outer_inputs`, `size_pnl_readers`, `size_pnl_ladder`, `size_pnl_shortvol`, `size_pnl_straddle`, `size_pnl_decisions`, `size_pnl_tuning` and `size_pnl_gprod` (the optional G_PROD arm, `Sources.gate`) slices and `label_availability`, and has no other caller.
 
-`size_pnl_sources.build_sources` is the EXP-188 `run.py` `--sources` factory (`--sources-config`); it consumes `size_pnl_inputs`, `size_pnl_readers`, `size_pnl_ladder`, `size_pnl_tables` (table-backed `fetch`/`facts`/`plan_frame`), `ArtifactStore.read_verified` (the sealed plan, not re-derived), `magnitude_search_records.read_record` and `native_registration.read_native_registration`.
+`size_pnl_sources.build_sources` is the EXP-188 `run.py` `--sources` factory (`--sources-config`); it consumes `size_pnl_inputs`, `size_pnl_readers`, `size_pnl_ladder`, `size_pnl_tables` (table-backed `fetch`/`facts`/`plan_frame`), `size_pnl_gprod.load_gate` (optional gate entries), `ArtifactStore.read_verified` (the sealed plan, not re-derived), `magnitude_search_records.read_record` and `native_registration.read_native_registration`.
 
 `size_pnl_gate_fold` is a supervisor CLI, outside CI and `run.py`: it refits production's STR-THRU gate through 2024 and builds the admitted-2025 gate input table.
 

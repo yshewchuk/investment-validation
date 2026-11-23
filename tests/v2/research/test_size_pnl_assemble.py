@@ -878,5 +878,10 @@ def test_g_prod_rows_never_enter_e_or_the_primary_tables_but_reach_the_accounts(
         assert _section_lines(plain_text, title) == _section_lines(gated_text, title)  # G_PROD does not change E or the tables
     assert "G_PROD" not in "\n".join(_section_lines(gated_text, "### T6"))
     account = "### Sensitivity (Amendment 2)"
-    assert any(line.startswith("| straddle | E-log | G_PROD |") for line in _section_lines(gated_text, account))
+    gated_account = _section_lines(gated_text, account)
+    assert any(line.startswith("| straddle | E-log | G_PROD |") for line in gated_account)
+    # Hand-derived: G_PROD has three taken events (E02, E03, E04; E01 is undetermined). Debit 0.5 restates to secured 50 per
+    # contract; contracts funded floor(0.25 * 0.66 * equity / 50) = 330 at 100000, 340 at 103300, 352 at 106700. Each contract
+    # nets (0.6 - 0.5) x 100 = 10, so final = 100000 + 3300 + 3400 + 3520 = 110220.
+    assert "| straddle | E-log | G_PROD | 3 | 3 | 110220.00 | 0.1022 | 0 | 1 |" in gated_account
     assert not any(line.startswith("| straddle | E-log | G_PROD |") for line in _section_lines(plain_text, account))

@@ -279,7 +279,7 @@ python3 -m experiments.size_pnl_gate_fold inputs --year 2025 --admitted-events /
 
 `fit` writes the joblib artifact at `--out` and its receipt at `<out>.receipt.json` (or `--receipt`); `inputs` writes the parquet at `--out` and its receipt the same way. Both commands create the output directory (and the receipt's directory) if it is missing, and refuse a receipt path equal to the out path. Each prints its receipt. Estimate from code (not measured): the cost is `gate_forecast_analog.build_dataset` (replay-trade features plus one analog match per event, logged every 2,000), with the daily context bounded to the trades' tickers and years (`engine/dashboard/model_evidence.py` measured a bounded context at about 5 GiB peak, and the unbounded one at 6.9 GiB) and the HGB fit on a few thousand rows in seconds: tens of minutes and about 5-8 GiB peak per command. Do not run beside another heavy job.
 
-**Registration.** The spec's `amendments` list gains Amendment 3 with the G_PROD rule (follow-up PR); the spec hash changes and the supervisor must register a new PLANNED row. `experiments/LEDGER.csv` is not touched here.
+**Registration.** The spec's `amendments` list gains Amendment 3 with the G_PROD rule (slice 2a); the spec hash changes and the supervisor must register a new PLANNED row. `experiments/LEDGER.csv` is not touched here.
 
 ## 15. Amendment 4 (2026-11-23): wider re-tune grid
 
