@@ -54,6 +54,28 @@ def test_run_py_report_stage_refuses_a_stored_gate_with_selected_outside_scored(
     assert calls == []
 
 
+def test_run_py_report_stage_refuses_a_stored_gate_file_holding_json_null_before_assemble(tmp_path, monkeypatch, capsys):
+    run_py = _run_main()
+    monkeypatch.setattr(run_py.size_pnl_prereg, "require_preregistration", OK)
+    path = tmp_path / "stored.json"
+    path.write_text("null", encoding="utf-8")
+    calls = []
+    monkeypatch.setattr(size_pnl_assemble, "assemble", lambda *args, **kwargs: calls.append(args) or {"report": "r", "sections": 0, "rows": 0})
+    _install_sources(monkeypatch, sources())
+    assert run_py.main(_argv_for(tmp_path, "report", "--stored-gate", str(path))) == 2
+    assert json.loads(capsys.readouterr().out)["reason"] == "stored_gate_invalid"
+    assert calls == []
+
+
+def test_run_py_refuses_a_stored_gate_on_the_outer_stage_before_importing_sources(tmp_path, monkeypatch, capsys):
+    run_py = _run_main()
+    monkeypatch.setattr(run_py.size_pnl_prereg, "require_preregistration", OK)
+    path = tmp_path / "stored.json"
+    path.write_text(json.dumps({"scored": ["E1"], "selected": ["E1"]}), encoding="utf-8")
+    assert run_py.main(_argv_for(tmp_path, "outer", "--stored-gate", str(path))) == 2
+    assert json.loads(capsys.readouterr().out)["reason"] == "stored_gate_not_supported"
+
+
 def test_run_py_report_stage_refuses_event_ids_before_assemble(tmp_path, monkeypatch, capsys):
     run_py = _run_main()
     monkeypatch.setattr(run_py.size_pnl_prereg, "require_preregistration", OK)

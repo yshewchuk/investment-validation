@@ -15,8 +15,9 @@ COVERAGE_NOTE = ("covered = events with a determined G_PROD decision (taken or n
                  "a thin residual pool) is never counted as no. P&L per covered event counts untaken rows as 0. Contrasts below use the "
                  "covered subset of each pair: the events both members have a determined decision on.")
 CONTRAST_NOTE = "d = median-type minus mean-type for the H2 pairs; M0 minus the named model for the M0 rows. arm primary = primary marks; arm mid = marks_mid."
-AGREEMENT_NOTE = ("Events are M0's determined 2025 G_PROD events that production also scored (the stored `scored` set); an event production "
-                  "never scored is outside the rate and counted in production_scored_outside_m0. selected is the stored EXP-187 arm B selected "
+AGREEMENT_NOTE = ("Events are M0's determined 2025 G_PROD events in E that production also scored (the stored `scored` set); an M0 event "
+                  "production never scored is outside the rate, and production_scored_outside_m0 counts events production scored that M0 has "
+                  "no determined 2025 decision for in E. selected is the stored EXP-187 arm B selected "
                   "set (served gate, threshold refit per walk-forward fold, on v2-snapshot trades); the fold CLI refits on the legacy store's "
                   "trades (known difference). A low rate is a finding, never a reason to tune.")
 

@@ -95,9 +95,11 @@ def main(argv: list[str] | None = None) -> int:
             if sources.expected != args.expected_identities:
                 raise fail(_CONFLICT, "--expected differs from the sources' expected identities", details={"reason": "expected_mismatch"})
             if args.stage == "report":
-                stored = _read_json(args.stored_gate) if args.stored_gate is not None else None
-                if stored is not None and not _stored_gate_valid(stored):
-                    raise fail(_INVALID, "--stored-gate must be {scored, selected} lists of event id strings, selected within scored", details={"reason": "stored_gate_invalid"})
+                stored = None
+                if args.stored_gate is not None:
+                    stored = _read_json(args.stored_gate)
+                    if not _stored_gate_valid(stored):
+                        raise fail(_INVALID, "--stored-gate must be {scored, selected} lists of event id strings, selected within scored", details={"reason": "stored_gate_invalid"})
                 summary = size_pnl_assemble.assemble(args.out_dir, sources.plan_frame, admitted=sources.admitted, expected=sources.expected, spec_hash=receipt["spec_hash"], snapshot=sources.snapshot_id, stored_gate=stored)
             elif args.stage == "synthetic": summary = size_pnl_driver.run_synthetic(sources, args.out_dir, event_ids=event_ids, replay=args.replay, prereg=lambda: receipt)
             else: summary = size_pnl_driver.run(sources, args.stage, args.out_dir, event_ids=event_ids, prereg=lambda: receipt)
