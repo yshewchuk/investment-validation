@@ -772,3 +772,8 @@ def run_synthetic(src, out_dir, *, event_ids=None, replay=False, prereg=size_pnl
 def plan_binding(plan_frame):
     """The outer input receipt's ``plan`` hash for the full (unsmoked) outer window: what ``run`` receipts, so the report can bind its ticker map to it."""
     return content_hash(_plan_rows(_plan_window(plan_frame, _window("outer"), None)))
+
+
+def inner_plan_binding(plan_frame):
+    """The inner input receipt's ``plan`` hash for the full inner window: what the report binds the pooled inner tickers to."""
+    return content_hash(_plan_rows(_plan_window(plan_frame, INNER, None)))

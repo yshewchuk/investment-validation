@@ -7,6 +7,7 @@ import pytest
 from experiments import size_pnl_assemble as assemble_mod
 from experiments import size_pnl_contrast as contrast
 from experiments import size_pnl_decisions as decisions
+from experiments import size_pnl_driver
 from experiments import size_pnl_tuning as tuning
 from experiments.size_pnl_shortvol import Refusal
 from tests.v2.research.test_size_pnl_assemble import (  # noqa: F401 (imported so the autouse check_plan no-op applies here)
@@ -66,6 +67,8 @@ def build_inner(tmp_path, inner_dates, *, outer_dates, tuning_override=None, sta
         rows = [{**row, "pnl_dollars_mid": 2 * row["pnl_dollars"]} for row in rows]
     if inner_rows_fn:
         rows = inner_rows_fn(rows)
+    tuning.write_receipt(out / "receipts" / "inputs_inner.json",
+                         {"stage": "inputs", "plan": size_pnl_driver.inner_plan_binding(plan_frame(TICKERS))})
     body = {"stage": stage, "models": list(ROLES),
             "tuning": outer["tuning"] if tuning_override is None else tuning_override,
             "c": {mid: 1.0 for mid in ROLES}, "emit_from": "2023-07-01", "ladder": "x", "scope": None, "inputs": HASH,
@@ -251,6 +254,25 @@ def test_a_deleted_inner_receipt_refuses_instead_of_demoting_to_the_legacy_shape
     with pytest.raises(Refusal) as caught:
         assemble_mod.assemble(out, plan_frame(TICKERS), admitted=None)
     assert caught.value.details["reason"] == "report_receipt_chain_mismatch"
+    assert not (out / "REPORT.md").exists()
+
+
+def test_a_changed_inner_ticker_refuses_the_report(tmp_path, inner_events):
+    # E12 (2024-02-15) is inside the inner window only, so the outer binding still passes; the inner binding must refuse.
+    out = build_inner(tmp_path, INNER_2024, outer_dates=OUTER_2025)
+    changed = {**TICKERS, "E12": "ZZZ"}
+    with pytest.raises(Refusal) as caught:
+        assemble_mod.assemble(out, plan_frame(changed), admitted=None)
+    assert caught.value.details["reason"] == "report_inputs_mismatch"
+    assert not (out / "REPORT.md").exists()
+
+
+def test_missing_inputs_inner_refuses_when_inner_decisions_are_present(tmp_path, inner_events):
+    out = build_inner(tmp_path, INNER_2024, outer_dates=OUTER_2025)
+    (out / "receipts" / "inputs_inner.json").unlink()
+    with pytest.raises(Refusal) as caught:
+        assemble_mod.assemble(out, plan_frame(TICKERS), admitted=None)
+    assert caught.value.details["reason"] == "report_receipt_malformed"
     assert not (out / "REPORT.md").exists()
 
 

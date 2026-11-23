@@ -459,6 +459,17 @@ def assemble(out_dir, plan, *, admitted, expected=None, spec_hash=None, snapshot
         raise _refuse("report_inputs_mismatch", f"inputs_outer.json differs from the requested {', '.join(mismatched)}")
     if plan_bad:
         raise _refuse("report_inputs_mismatch", "the plan's tickers do not match the receipted plan")
+    if (out / "receipts" / "inner_decisions.json").exists():  # the inner window's tickers feed the pooled T10 bootstrap: bind them too
+        with _admit("report_receipt_malformed", "inputs_inner.json is missing or malformed"):
+            inner_path = out / "receipts" / "inputs_inner.json"
+            if not inner_path.exists():
+                raise _refuse("report_receipt_malformed", "inputs_inner.json is missing")
+            inner_inputs = tuning.load_receipt(inner_path)
+            with _admit("report_tickers_invalid", "the plan frame cannot be bound"):
+                inner_binding = size_pnl_driver.inner_plan_binding(plan)
+            inner_bad = inner_inputs.get("plan") != inner_binding
+        if inner_bad:
+            raise _refuse("report_inputs_mismatch", "the plan's inner-window rows do not match inputs_inner.json")
     with _admit("report_receipt_malformed", "a receipt or decisions row lacks a required field"):
         sections, inner_rows = _sections(out, outer, inputs, inner, tuned, tickers)
     text = report.build_report(sections)
