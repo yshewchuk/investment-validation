@@ -184,12 +184,22 @@ def _unlink_quiet(path):
         pass
 
 
-def _publish_pair(out, receipt_path, write_artifact, receipt, sha_key):
-    """Publish artifact + receipt so that a receipt-less artifact never remains.
+def _fsync_path(path):
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
-    The artifact goes to <out>.tmp and the receipt to <receipt_path>.tmp. The artifact is
-    renamed into place first, then the receipt. If the receipt step fails, the published
-    artifact is removed; tmp files are removed on any failure.
+
+def _publish_pair(out, receipt_path, write_artifact, receipt, sha_key):
+    """Publish artifact + receipt so that a receipt-less artifact never remains on a handled failure.
+
+    The artifact goes to <out>.tmp and the receipt to <receipt_path>.tmp. Both tmp files are
+    fsynced, then the artifact is renamed into place and then the receipt, and the parent
+    directory is fsynced after both replaces. If the receipt step fails, the published
+    artifact is removed; tmp files are removed on any failure. A crash between the two
+    replaces can leave an artifact without a receipt, which the supervisor must treat as failed.
     """
     out = Path(out)
     receipt_path = Path(receipt_path)
@@ -198,9 +208,11 @@ def _publish_pair(out, receipt_path, write_artifact, receipt, sha_key):
     published = False
     try:
         write_artifact(art_tmp)
+        _fsync_path(art_tmp)
         receipt[sha_key] = file_sha256(art_tmp)
         text = json.dumps(receipt, indent=2, sort_keys=True)
         Path(rec_tmp).write_text(text + "\n")
+        _fsync_path(rec_tmp)
         os.replace(art_tmp, out)
         published = True
         os.replace(rec_tmp, receipt_path)
@@ -210,6 +222,7 @@ def _publish_pair(out, receipt_path, write_artifact, receipt, sha_key):
         if published:
             _unlink_quiet(out)
         raise
+    _fsync_path(out.parent)
     return text
 
 
@@ -276,7 +289,8 @@ def _run_inputs(args, wiring, root):
         load_trades, build, _fit, features, _target = wiring
         _log(f"inputs start: year={args.year}")
         table, receipt = build_inputs(load_trades(), year=args.year, build=build, features=features)
-        text = _publish_pair(out, receipt_path, table.to_parquet, receipt, "inputs_sha256")
+        text = _publish_pair(out, receipt_path, lambda p: table.to_parquet(p, index=False), receipt,
+                             "inputs_sha256")
     print(text)
     _log(f"inputs end: {time.time() - t0:.1f}s")
     return 0

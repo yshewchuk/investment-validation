@@ -273,6 +273,30 @@ def test_main_inputs_end_to_end(tmp_path):
     assert receipt["inputs_sha256"] == fold.file_sha256(out)
 
 
+def test_main_inputs_parquet_has_no_pandas_index(tmp_path):
+    import pyarrow.parquet as pq
+
+    out = tmp_path / "inputs_2025.parquet"
+    rc = fold.main(["inputs", "--year", "2025", "--out", str(out)], wiring=_wiring(), root=tmp_path)
+    assert rc == 0
+    assert pq.read_table(out).column_names == ["event_id", "f1", "f2"]  # no __index_level_0__
+
+
+def test_main_fit_fsyncs_artifact_receipt_and_dir(tmp_path, monkeypatch):
+    out = tmp_path / "gate.joblib"
+    real_fsync = os.fsync
+    calls = []
+
+    def counting_fsync(fd):
+        calls.append(fd)
+        return real_fsync(fd)
+
+    monkeypatch.setattr(fold.os, "fsync", counting_fsync)
+    rc = fold.main(["fit", "--train-through", "2024", "--out", str(out)], wiring=_wiring(), root=tmp_path)
+    assert rc == 0
+    assert len(calls) >= 3  # artifact tmp, receipt tmp, parent directory
+
+
 def test_publish_pair_receipt_replace_failure_leaves_nothing(tmp_path, monkeypatch):
     out = tmp_path / "a.bin"
     rec = tmp_path / "a.bin.receipt.json"
