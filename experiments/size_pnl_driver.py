@@ -341,10 +341,13 @@ def _outer_gate(out, ready, scope, body, inner_tables, inner_production, inner_p
     if not (out / "receipts" / "inner_decisions.json").exists() or not (out / "decisions_inner.parquet").exists():
         raise Refusal(_CONFLICT, "inner decisions are missing or not bound to inner.json", {"reason": "inner_decisions_missing"})
     idec = tuning.load_receipt(out / "receipts" / "inner_decisions.json")
-    if idec.get("stage") != "inner_decisions" or idec.get("tuning") != inner["models"] or idec.get("inputs") != inner["inputs"] or idec.get("scope") != inner["scope"] \
-            or idec.get("c") != {mid: receipts[mid]["c"] for mid in ready}:
+    if idec.get("stage") != "inner_decisions" or idec.get("inputs") != inner["inputs"] or idec.get("scope") != inner["scope"]:
         raise Refusal(_CONFLICT, "inner decisions are missing or not bound to inner.json", {"reason": "inner_decisions_mismatch"})
-    if sorted(idec.get("models", [])) != sorted(ready) or decisions._file_sha256(out / "decisions_inner.parquet") != idec.get("decisions_sha256"):
+    # Subset semantics: the inner stage may have tuned models the outer excluded (a missing or partial 2025 refit), so the
+    # receipt may cover a superset of the ready models; every ready model must match on tuning and c.
+    if not set(ready) <= set(idec.get("models", [])) \
+            or any(idec.get("tuning", {}).get(mid) != inner["models"][mid] or idec.get("c", {}).get(mid) != receipts[mid]["c"] for mid in ready) \
+            or decisions._file_sha256(out / "decisions_inner.parquet") != idec.get("decisions_sha256"):
         raise Refusal(_CONFLICT, "inner decisions are missing or not bound to inner.json", {"reason": "inner_decisions_mismatch"})
     if "scope" not in inner or inner["scope"] != scope: raise Refusal(_CONFLICT, "inner.json was tuned on a different event scope", {"reason": "scope_mismatch"})
     evidence = inner.get("equivalence")

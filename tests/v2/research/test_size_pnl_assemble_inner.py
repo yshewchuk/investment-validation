@@ -43,12 +43,19 @@ def _with_doubled_mid(rows):
 
 
 def build_inner(tmp_path, inner_dates, *, outer_dates, tuning_override=None, stage="inner_decisions", mutate=None, body_override=None,
-                pnl_scale=1.0, retuned_bump=0.0, mid=False):
+                pnl_scale=1.0, retuned_bump=0.0, mid=False, outer_rows_fn=None):
     """A full outer run over every event in TICKERS, plus its inner decisions (decisions_inner.parquet and receipt).
     ``pnl_scale`` multiplies the inner rows' pnl_dollars, so the inner window's values differ from the outer's.
     ``retuned_bump`` is added to the inner retuned short-vol rows only (both median and mean types, so contrasts are unchanged).
-    ``mid`` adds the Amendment 1 column (pnl_dollars_mid = 2 * pnl_dollars) to the outer and the inner rows."""
-    out = build(tmp_path, dates=outer_dates, plan_tickers=TICKERS, rows_fn=_with_doubled_mid if mid else None)
+    ``mid`` adds the Amendment 1 column (pnl_dollars_mid = 2 * pnl_dollars) to the outer and the inner rows.
+    ``outer_rows_fn`` transforms the outer decisions rows (passed as ``rows_fn`` to build), e.g. to drop a model the outer excluded."""
+    if outer_rows_fn is None and not mid:
+        rows_fn = None
+    else:
+        def rows_fn(rows):
+            rows = outer_rows_fn(rows) if outer_rows_fn else rows
+            return _with_doubled_mid(rows) if mid else rows
+    out = build(tmp_path, dates=outer_dates, plan_tickers=TICKERS, rows_fn=rows_fn)
     _rewrite(out / "receipts" / "inner.json", lambda body: {**body, "inputs": HASH, "scope": None})
     outer = tuning.load_receipt(out / "receipts" / "outer.json")
     rows = [{**row, "in_sample": row["arm_or_rule"] == "retuned",
@@ -190,6 +197,26 @@ def test_inner_receipt_refusals(tmp_path, inner_events, reason, kwargs):
         assemble_mod.assemble(out, plan_frame(TICKERS), admitted=None)
     assert caught.value.details["reason"] == reason
     assert not (out / "REPORT.md").exists()
+
+
+def test_inner_decisions_for_a_model_the_outer_excluded_are_accepted_and_filtered(tmp_path, inner_events):
+    # The inner stage tuned N-log, but the outer run excluded it (a missing or partial 2025 refit): the inner receipt covers a
+    # superset of the outer's models, and the report keeps only the models the outer ran.
+    out = build_inner(tmp_path, INNER_2024, outer_dates=OUTER_2025,
+                      outer_rows_fn=lambda rows: [r for r in rows if r["model_id"] != "m-nlog"])
+
+    def drop_n_log(body):
+        return {**body, "models": [m for m in body["models"] if m != "m-nlog"],
+                "tuning": {m: v for m, v in body["tuning"].items() if m != "m-nlog"},
+                "c": {m: v for m, v in body["c"].items() if m != "m-nlog"}}
+
+    _rewrite(out / "receipts" / "outer.json", drop_n_log)
+    assemble_mod.assemble(out, plan_frame(TICKERS), admitted=None)
+    text = (out / "REPORT.md").read_text(encoding="utf-8")
+    assert not any("N-log" in line for line in _section_lines(text, INNER_PREFIX + "T4"))
+    assert _model_rows(text, INNER_PREFIX + "T4", "H-sq")  # the models the outer ran are still shown
+    inner_decisions = pd.read_parquet(out / "decisions_inner.parquet")
+    assert "m-nlog" in set(inner_decisions["model_id"])  # the inner decisions still hold its rows
 
 
 def test_without_inner_decisions_the_report_is_unchanged_in_shape(tmp_path):
