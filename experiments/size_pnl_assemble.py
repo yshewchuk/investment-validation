@@ -17,6 +17,7 @@ import pyarrow.parquet as pq
 from experiments import size_pnl_decisions as decisions, size_pnl_tuning as tuning, size_pnl_report as report, size_pnl_contrast as contrast
 from experiments import size_pnl_account, size_pnl_driver, size_pnl_ladder
 from experiments import size_pnl_synthetic_eval as synthetic_eval
+from experiments import size_pnl_gprod_report as gprod_report
 from experiments.size_pnl_inputs import PAIRS
 from experiments.size_pnl_shortvol import Refusal
 from experiments.size_pnl_straddle import RULES, GATE_RULE
@@ -304,7 +305,7 @@ def _account_sections(frame, role_model, label_of, universe):
     return size_pnl_account.tables(results, diffs)
 
 
-def _sections(out, outer, inputs, inner, tuned, tickers):
+def _sections(out, outer, inputs, inner, tuned, tickers, stored_gate=None):
     """The report's sections in order. Reads receipt fields throughout; the caller maps a missing or mistyped field to a refusal.
     Returns (sections, inner row count)."""
     raw = _load_decisions(out, outer)
@@ -419,6 +420,9 @@ def _sections(out, outer, inputs, inner, tuned, tickers):
         else:  # no inner window: the pooled mid frame is the outer one, so reuse its contrasts
             shown_m, classify_mid = shown_mo, classify_mo
         sections += [_sens(text) for text in (*mid, _verdicts(classify_mid, missing_years, inner_present, shown_m))]
+    if not gate_raw.empty:  # Amendment 3: the G_PROD sections, after the Amendment 1 ones and before the accounts
+        sections += gprod_report.sections(gate_raw, frame, label_of=label_of, role_model=role_model, roster=roster, outer_models=outer_models,
+                                          quarter_of=ctx_o["quarter_of"], tick=tick, stored_gate=stored_gate)
     every = pd.concat([raw, gate_raw])  # Amendment 2 accounts read every row, G_PROD included
     taken_all = every[every["status"] == "taken"].assign(model_id=every["model_id"].map(label_of), taken=True)  # Amendment 2: every taken row, not only E
     universe = every.assign(model_id=every["model_id"].map(label_of))  # Amendment 2: every decision row, of any status, discovers the account keys
@@ -426,15 +430,18 @@ def _sections(out, outer, inputs, inner, tuned, tickers):
     return sections, inner_rows
 
 
-def assemble(out_dir, plan, *, admitted, expected=None, spec_hash=None, snapshot=None):
+def assemble(out_dir, plan, *, admitted, expected=None, spec_hash=None, snapshot=None, stored_gate=None):
     """Write ``out_dir/REPORT.md`` from the outer receipts and decisions.parquet; returns a JSON-safe summary.
     Each of expected, spec_hash and snapshot that is given must equal the matching field of inputs_outer.json.
+    ``stored_gate`` is optional {'scored': ids, 'selected': ids} from production's stored walk-forward 2025 gate decisions; None reports the M0 agreement as not_available.
     ``plan`` is the plan frame (sources.plan_frame) and ``admitted`` the sources' admitted events; the shared plan
     admission (size_pnl_ladder.check_plan) runs here, so every caller gets the same refusals as the scoring path.
     The ticker map and the plan binding (the receipted plan hash that a full run must match) are both derived from
     this one frame, so a changed ticker changes the binding and refuses."""
     if not isinstance(out_dir, (str, os.PathLike)):
         raise _refuse("report_out_dir_invalid", "out_dir must be a path")
+    if stored_gate is not None and not gprod_report.stored_gate_valid(stored_gate):
+        raise _refuse("report_stored_gate_invalid", "stored_gate must be {scored, selected} lists of event id strings, selected within scored")
     if not isinstance(plan, pd.DataFrame) or plan.columns.empty:
         raise _refuse("report_tickers_invalid", "plan must be a DataFrame with columns")
     try:
@@ -480,7 +487,7 @@ def assemble(out_dir, plan, *, admitted, expected=None, spec_hash=None, snapshot
         if inner_bad:
             raise _refuse("report_inputs_mismatch", "the plan's inner-window rows do not match inputs_inner.json")
     with _admit("report_receipt_malformed", "a receipt or decisions row lacks a required field"):
-        sections, inner_rows = _sections(out, outer, inputs, inner, tuned, tickers)
+        sections, inner_rows = _sections(out, outer, inputs, inner, tuned, tickers, stored_gate)
     text = report.build_report(sections)
     path = out / "REPORT.md"
     handle = tempfile.NamedTemporaryFile("w", dir=out, delete=False, suffix=".tmp", encoding="utf-8")
