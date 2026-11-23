@@ -845,3 +845,38 @@ def test_secured_column_without_exit_date_refuses_as_decisions_columns(tmp_path)
     assert caught.value.code == CONFLICT
     assert caught.value.details["reason"] == "report_decisions_columns"
     assert not (out / "REPORT.md").exists()
+
+
+# ---- Amendment 3: G_PROD rows (the gate arm) reach the accounts only ----
+
+
+def _with_gate_rows(rows):
+    """The account rows plus the G_PROD rows: a copy of every straddle R_L row under G_PROD (funded at 0.0), and, for the
+    first event id (sorted) under every model, an undetermined G_PROD row with P&L 0.0 (it would drop the event from E
+    if it were a pre-registered row)."""
+    out = _with_account(rows)
+    first = sorted({row["event_id"] for row in out})[0]
+    for row in list(out):
+        if row["book"] == "straddle" and row["arm_or_rule"] == "R_L":
+            copy = {**row, "arm_or_rule": "G_PROD", "secured_per_contract": 0.0}
+            if row["event_id"] == first:
+                copy.update(status="undetermined", reason="thin_pool", pnl_dollars=0.0)
+            out.append(copy)
+    return out
+
+
+def test_g_prod_rows_never_enter_e_or_the_primary_tables_but_reach_the_accounts(tmp_path):
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    plain = build(tmp_path / "a", rows_fn=_with_account)
+    gated = build(tmp_path / "b", rows_fn=_with_gate_rows)
+    assemble_mod.assemble(plain, plan_frame(), admitted=None)
+    assemble_mod.assemble(gated, plan_frame(), admitted=None)
+    plain_text = (plain / "REPORT.md").read_text(encoding="utf-8")
+    gated_text = (gated / "REPORT.md").read_text(encoding="utf-8")
+    for title in ("### T2", "### T6", "### T7"):
+        assert _section_lines(plain_text, title) == _section_lines(gated_text, title)  # G_PROD does not change E or the tables
+    assert "G_PROD" not in "\n".join(_section_lines(gated_text, "### T6"))
+    account = "### Sensitivity (Amendment 2)"
+    assert any(line.startswith("| straddle | E-log | G_PROD |") for line in _section_lines(gated_text, account))
+    assert not any(line.startswith("| straddle | E-log | G_PROD |") for line in _section_lines(plain_text, account))

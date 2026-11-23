@@ -15,7 +15,7 @@ import pandas as pd
 from engine.v2.foundation import content_hash
 from engine.v2.ops.errors import fail
 from experiments import label_availability, size_pnl_decisions as decisions, size_pnl_inputs as inputs, size_pnl_ladder as ladder, size_pnl_prereg
-from experiments import size_pnl_readers as readers, size_pnl_shortvol as shortvol, size_pnl_straddle as straddle, size_pnl_tuning as tuning, size_pnl_equivalence as equivalence, size_pnl_outer_inputs as outer_inputs
+from experiments import size_pnl_readers as readers, size_pnl_shortvol as shortvol, size_pnl_straddle as straddle, size_pnl_tuning as tuning, size_pnl_equivalence as equivalence, size_pnl_outer_inputs as outer_inputs, size_pnl_gprod as gprod
 from experiments.size_pnl_pool import TOLERANCE, build_pool
 from experiments.size_pnl_shortvol import Refusal
 from experiments import size_pnl_report as report, size_pnl_synthetic as synthetic, size_pnl_synthetic_eval as synthetic_eval
@@ -56,6 +56,7 @@ class Sources:
     snapshot_id: str
     crush_table_hash: str = ""
     exclusions: dict = field(default_factory=dict)  # reason -> set of event ids, filled by the table providers
+    gate: object = None  # Amendment 3: a size_pnl_gprod.Gate, or None (the pre-registered run)
 
 
 def check_sources(src):
@@ -430,11 +431,12 @@ def _kept(frame, bad):
     return frame[~frame["event_id"].astype(str).isin(bad)]
 
 
-def _month(mid, events, scored, bad, chunk, start_m, st, *, arms=None, emit_from=None, sessions=None):
+def _month(mid, events, scored, bad, chunk, start_m, st, *, arms=None, emit_from=None, sessions=None, gate=None):
     """Pass B for one model and calendar month: drop the ``bad`` ids from the events, the scored frames and the straddle
     inputs, then steps 7a-7d on Pass A's frames. Warm-up months (before OUTER[0]) apply the same mask (they feed history)
     but only add history and emit no rows. ``sessions`` (the Amendment 2 account dates) is None in the synthetic run: then the
-    secured-cash lookup is not called and the rows carry no account columns; a dict (possibly empty) keeps them."""
+    secured-cash lookup is not called and the rows carry no account columns; a dict (possibly empty) keeps them.
+    ``gate`` (Amendment 3) is a per-model month decider from size_pnl_gprod.month_decider; it adds the G_PROD straddle rows on output months only; it never touches ``st['edges']`` or the short-vol frames."""
     output = start_m >= (pd.Timestamp(OUTER[0]) if emit_from is None else emit_from)
     events = _kept(events, bad)
     ids, frames = set(events["event_id"].astype(str)), []
@@ -454,18 +456,23 @@ def _month(mid, events, scored, bad, chunk, start_m, st, *, arms=None, emit_from
         first = dec if first is None else first
         if output: frames.append(_rows(mid, "straddle", rule, dec, straddle.score(chunk, events, dec, ALPHA), events,
                                        taken_mid=straddle.score(chunk, events, dec, ALPHA, mid_marks=True), sessions=sessions))
+    if gate is not None and output:
+        dec = gate(events, chunk)
+        frames.append(_rows(mid, "straddle", straddle.GATE_RULE, dec, straddle.score(chunk, events, dec, ALPHA),
+                            events, taken_mid=straddle.score(chunk, events, dec, ALPHA, mid_marks=True), sessions=sessions))
     st["edges"] = pd.concat([st["edges"], first[["event_date", "edge"]]], ignore_index=True)
     return frames
 
 
 def _outer(src, out, ready, receipts, plan, ids, facts_all, labels):
     """The outer stage: per ladder chunk and calendar month, decide, then read that month's labels (R6). Publishes decisions."""
+    gate = src.gate
     exits, pools, sessions = _exits(src), _pool_tables(ready), _sessions(src)
     dates = pd.to_datetime(plan["event_date"])
     quarter, month = dates.dt.to_period("Q").astype(str).to_numpy(), dates.dt.to_period("M").to_numpy()
     total, state = len(set(month)), {mid: _model_state(receipts[mid]["c"]) for mid in ready}
     frames, done, started, skipped, fresh, digest, dropped = [], 0, time.monotonic(), {}, [], hashlib.sha256(), set()
-    _log(f"outer start months={total} models={len(ready)}")
+    _log(f"outer start months={total} models={len(ready)} gate={'G_PROD' if gate else 'none'}")
     for label, chunk in ladder.ladder_chunks(src.admitted, plan, src.load_index):
         _bind_chunk(digest, label, chunk)
         skipped = _tally(skipped, chunk)
@@ -477,7 +484,8 @@ def _outer(src, out, ready, receipts, plan, ids, facts_all, labels):
             bad = set().union(*(m for _s, m in scored.values()))  # one shared population for all models (design section 4): ids with no simulation
             dropped |= bad
             for mid in ready:
-                month_frames += _month(mid, at[mid], scored[mid][0], bad, chunk, start_m, state[mid], sessions=sessions)
+                month_frames += _month(mid, at[mid], scored[mid][0], bad, chunk, start_m, state[mid], sessions=sessions,
+                                       gate=None if gate is None else gprod.month_decider(gate, pools[mid], _printed(labels, start_m.date().isoformat()), start_m))
             frames += month_frames
             done += 1
             rate = done / max(time.monotonic() - started, 1e-9)
@@ -493,6 +501,7 @@ def _outer(src, out, ready, receipts, plan, ids, facts_all, labels):
             "tuning": {mid: receipts[mid]["content_hash"] for mid in ready}, "c": {mid: receipts[mid]["c"] for mid in ready},
             "labels": content_hash(_label_rows(fresh)), "common_dropped": _common_dropped(ready),
             "scoreability_dropped": len(dropped), "ladder": "sha256:" + digest.hexdigest()}
+    if gate is not None: body["gate"] = gprod.receipt_body(gate)
     rows = decisions.publish(out, frames, body)
     return rows, skipped
 

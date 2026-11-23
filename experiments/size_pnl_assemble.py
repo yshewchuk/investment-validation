@@ -19,7 +19,7 @@ from experiments import size_pnl_account, size_pnl_driver, size_pnl_ladder
 from experiments import size_pnl_synthetic_eval as synthetic_eval
 from experiments.size_pnl_inputs import PAIRS
 from experiments.size_pnl_shortvol import Refusal
-from experiments.size_pnl_straddle import RULES
+from experiments.size_pnl_straddle import RULES, GATE_RULE
 
 _CONFLICT = "EXPERIMENT_IDENTITY_CONFLICT"
 COLUMNS = ["model_id", "book", "arm_or_rule", "structure", "event_id", "event_date", "status", "rung", "pnl_dollars"]
@@ -308,6 +308,8 @@ def _sections(out, outer, inputs, inner, tuned, tickers):
     """The report's sections in order. Reads receipt fields throughout; the caller maps a missing or mistyped field to a refusal.
     Returns (sections, inner row count)."""
     raw = _load_decisions(out, outer)
+    gate_rows = raw["arm_or_rule"] == GATE_RULE  # Amendment 3: G_PROD rows never enter E, T1-T10 or the verdicts; only the Amendment 2 accounts read them
+    raw, gate_raw = raw[~gate_rows], raw[gate_rows]
     inner_raw = _load_inner(out, outer, inner, tuned)
     tick = {str(e): str(t) for e, t in tickers.items()}
     roster = inputs["roster"]
@@ -332,6 +334,8 @@ def _sections(out, outer, inputs, inner, tuned, tickers):
                 raise _refuse("report_decisions_invalid", "a taken row has a missing or invalid entry_date or exit_date")
         if set(raw["model_id"]) - set(label_of):
             raise _refuse("report_receipt_chain_mismatch", "a model in the decisions has no roster entry")
+
+    _check(gate_raw)
 
     def _window(raw):
         """One window's evaluated frame (E) with its undetermined count; the checks run on the raw rows."""
@@ -415,8 +419,9 @@ def _sections(out, outer, inputs, inner, tuned, tickers):
         else:  # no inner window: the pooled mid frame is the outer one, so reuse its contrasts
             shown_m, classify_mid = shown_mo, classify_mo
         sections += [_sens(text) for text in (*mid, _verdicts(classify_mid, missing_years, inner_present, shown_m))]
-    taken_all = raw[raw["status"] == "taken"].assign(model_id=raw["model_id"].map(label_of), taken=True)  # Amendment 2: every taken row, not only E
-    universe = raw.assign(model_id=raw["model_id"].map(label_of))  # Amendment 2: every decision row, of any status, discovers the account keys
+    every = pd.concat([raw, gate_raw])  # Amendment 2 accounts read every row, G_PROD included
+    taken_all = every[every["status"] == "taken"].assign(model_id=every["model_id"].map(label_of), taken=True)  # Amendment 2: every taken row, not only E
+    universe = every.assign(model_id=every["model_id"].map(label_of))  # Amendment 2: every decision row, of any status, discovers the account keys
     sections += _account_sections(taken_all, role_model, label_of, universe)  # Amendment 2, on both paths
     return sections, inner_rows
 

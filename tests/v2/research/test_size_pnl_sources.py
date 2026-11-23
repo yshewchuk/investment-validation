@@ -97,6 +97,19 @@ def test_config_accepts_valid_file(tmp_path):
     assert src._config(_write(tmp_path / "c.json", cfg)) == cfg
 
 
+def test_config_accepts_the_two_optional_gate_entries(tmp_path):
+    cfg = {**_cfg(tmp_path), "gate_fold": {"path": "f", "sha256": "0" * 64}, "gate_inputs": {"path": "i", "sha256": "0" * 64}}
+    assert src._config(_write(tmp_path / "c.json", cfg)) == cfg
+
+
+def test_config_refuses_a_non_string_required_value_with_gate_entries(tmp_path):
+    cfg = {**_cfg(tmp_path), "gate_fold": {"path": "f", "sha256": "0" * 64}, "gate_inputs": {"path": "i", "sha256": "0" * 64},
+           "snapshot_id": 3}
+    with pytest.raises(OpsError) as exc:
+        src._config(_write(tmp_path / "c.json", cfg))
+    assert _refusal(exc) == ("INVALID_EXPERIMENT_SPEC", "sources_config_invalid")
+
+
 def test_config_refuses_missing_argument():
     with pytest.raises(OpsError) as exc:
         src._config(None)

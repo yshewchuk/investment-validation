@@ -10,7 +10,7 @@ from engine.structures import ResolvedLeg
 from engine.v2.ops.errors import OpsError
 from experiments import size_pnl_pool as pool_mod
 from experiments.size_pnl_pool import (build_pool, check_equivalence, event_seed, paired_events,
-                                       put_means, structure_pnl, structure_value,
+                                       pool_history, put_means, structure_pnl, structure_value,
                                        undetermined_reason)
 
 DRAW = 200
@@ -430,3 +430,11 @@ def test_one_below_min_pool_is_thin_pool():
     below = _pool_of(MIN_POOL - 1)
     assert below.before(LATE) == MIN_POOL - 1
     assert undetermined_reason(below, _history(100), LATE) == "thin_pool"
+
+
+def test_pool_history_is_what_build_pool_feeds_the_pool(data):
+    table, labels = data
+    history = pool_history(table, labels, floor=None)
+    assert list(history.columns) == ["event_date", "pred_abs_move", "err_move", "err_crush"]
+    assert len(history) == len(table)
+    assert np.allclose(np.sort(history["err_move"].to_numpy()), np.sort((labels.abs_move - table.pred_move).to_numpy()))
