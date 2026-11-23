@@ -343,6 +343,9 @@ def _outer_gate(out, ready, scope, body, inner_tables, inner_production, inner_p
     idec = tuning.load_receipt(out / "receipts" / "inner_decisions.json")
     if idec.get("stage") != "inner_decisions" or idec.get("inputs") != inner["inputs"] or idec.get("scope") != inner["scope"]:
         raise Refusal(_CONFLICT, "inner decisions are missing or not bound to inner.json", {"reason": "inner_decisions_mismatch"})
+    # A hash-valid receipt can still carry the wrong shapes: refuse them here rather than raise a builtin exception below.
+    if not (isinstance(idec.get("models"), list) and isinstance(idec.get("tuning"), dict) and isinstance(idec.get("c"), dict)):
+        raise Refusal(_CONFLICT, "inner decisions are missing or not bound to inner.json", {"reason": "inner_decisions_mismatch"})
     # Subset semantics: the inner stage may have tuned models the outer excluded (a missing or partial 2025 refit), so the
     # receipt may cover a superset of the ready models; every ready model must match on tuning and c.
     if not set(ready) <= set(idec.get("models", [])) \

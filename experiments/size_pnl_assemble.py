@@ -227,14 +227,15 @@ def _load_inner(out, outer, inner, tuned):
         receipt = tuning.load_receipt(path)
         if receipt["stage"] != "inner_decisions":
             raise _refuse("report_receipt_stage", "inner_decisions.json is not the inner decisions stage's receipt")
+        if not (isinstance(receipt["models"], list) and isinstance(receipt["tuning"], dict) and isinstance(receipt["c"], dict)):
+            raise _refuse("report_receipt_malformed", "inner_decisions.json's models, tuning or c has the wrong type")
         # Subset semantics: the inner stage may have tuned models the outer excluded, so the receipt may cover a superset.
         if not (receipt["inputs"] == inner["inputs"] and receipt["scope"] == inner["scope"]
                 and set(outer["models"]) <= set(receipt["models"])):
             raise _refuse("report_receipt_chain_mismatch", "inner_decisions.json is not bound to inner.json's inputs, scope or models")
         if any(receipt["tuning"].get(mid) != outer["tuning"][mid] or receipt["c"].get(mid) != tuned[mid]["c"] for mid in outer["models"]):
             raise _refuse("report_receipt_chain_mismatch", "inner_decisions.json's tuning or c does not match outer.json's or the tuning receipts'")
-    frame = _load_decisions(out, receipt, "decisions_inner.parquet")
-    return frame[frame["model_id"].isin(outer["models"])]  # the inner window of the models the outer ran; an empty result refuses in _window
+    return _load_decisions(out, receipt, "decisions_inner.parquet")  # the FULL inner frame: the caller checks every row before filtering to the outer's models
 
 
 def _tickers_ok(tickers):
@@ -291,9 +292,8 @@ def _sections(out, outer, inputs, inner, tuned, tickers):
         raise _refuse("report_receipt_chain_mismatch", "a model in the decisions has no roster entry")
     role_model = {role: m["model_id"] for m in roster["models"] for role in m["roles"]}
 
-    def _window(raw):
-        """One window's evaluated frame (E) with its undetermined count; the checks run on the raw rows."""
-        # Checked on the raw rows, before population drops the events with an undetermined row that leaves E: a bad row refuses, it is never skipped.
+    def _check(raw):
+        """The raw-row checks: ticker present, finite taken P&L, model ids in the roster. They run before population drops any event."""
         if not set(raw["event_id"]) <= set(tick):
             raise _refuse("report_ticker_missing", "an event in decisions.parquet has no ticker")
         if not np.isfinite(raw.loc[raw["status"] == "taken", "pnl_dollars"].to_numpy(dtype=float)).all():
@@ -302,6 +302,11 @@ def _sections(out, outer, inputs, inner, tuned, tickers):
             raise _refuse("report_nonfinite_pnl", "a taken row has a non-finite pnl_dollars_mid")
         if set(raw["model_id"]) - set(label_of):
             raise _refuse("report_receipt_chain_mismatch", "a model in the decisions has no roster entry")
+
+    def _window(raw):
+        """One window's evaluated frame (E) with its undetermined count; the checks run on the raw rows."""
+        # Checked on the raw rows, before population drops the events with an undetermined row that leaves E: a bad row refuses, it is never skipped.
+        _check(raw)
         frame = synthetic_eval.population(raw)  # E: no undetermined row that leaves E under any model; short-vol non-trades stay in E at P&L 0
         if frame.empty:
             raise _refuse("report_decisions_empty", "no event in decisions.parquet is in the evaluated population")
@@ -334,6 +339,9 @@ def _sections(out, outer, inputs, inner, tuned, tickers):
 
     frame, undetermined_events = _window(raw)
     ctx_o = _context(frame)
+    if inner_raw is not None:
+        _check(inner_raw)  # every inner row, the outer-excluded models' included, is checked before the filter
+        inner_raw = inner_raw[inner_raw["model_id"].isin(outer["models"])]  # the inner window of the models the outer ran; an empty result refuses in _window
     inner_frame, inner_undetermined = _window(inner_raw) if inner_raw is not None else (None, 0)
     inner_present = inner_frame is not None
     combined = pd.concat([inner_frame, frame]) if inner_present else frame  # T10 pools the windows by the registered rule

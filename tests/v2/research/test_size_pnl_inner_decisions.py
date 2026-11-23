@@ -125,6 +125,21 @@ def test_outer_refuses_when_inner_decisions_binds_a_different_c(tmp_path, outer_
     assert caught.value.details["reason"] == "inner_decisions_mismatch"
 
 
+def test_outer_refuses_when_inner_decisions_models_is_null(tmp_path, outer_stubs, monkeypatch):
+    # A hash-valid receipt with models=null must refuse as a mismatch, not raise a builtin exception.
+    _inner(tmp_path, monkeypatch)
+    rec = tuning.load_receipt(tmp_path / "receipts" / "inner_decisions.json")
+    tampered = {k: v for k, v in rec.items() if k != "content_hash"}
+    tampered["models"] = None
+    (tmp_path / "receipts" / "inner_decisions.json").unlink()
+    tuning.write_receipt(tmp_path / "receipts" / "inner_decisions.json", tampered)
+    use_chunks(monkeypatch, [("2024Q3", chunk("E2")), ("2025Q1", chunk("E3", "E4"))])
+    with pytest.raises(Refusal) as caught:
+        driver.run(sources(), "outer", tmp_path, prereg=OK)
+    assert caught.value.code == CONFLICT
+    assert caught.value.details["reason"] == "inner_decisions_mismatch"
+
+
 def test_outer_refuses_when_decisions_inner_bytes_changed_after_publish(tmp_path, outer_stubs, monkeypatch):
     _inner(tmp_path, monkeypatch)
     with open(tmp_path / "decisions_inner.parquet", "ab") as handle:

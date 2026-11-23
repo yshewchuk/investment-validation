@@ -43,12 +43,13 @@ def _with_doubled_mid(rows):
 
 
 def build_inner(tmp_path, inner_dates, *, outer_dates, tuning_override=None, stage="inner_decisions", mutate=None, body_override=None,
-                pnl_scale=1.0, retuned_bump=0.0, mid=False, outer_rows_fn=None):
+                pnl_scale=1.0, retuned_bump=0.0, mid=False, outer_rows_fn=None, inner_rows_fn=None):
     """A full outer run over every event in TICKERS, plus its inner decisions (decisions_inner.parquet and receipt).
     ``pnl_scale`` multiplies the inner rows' pnl_dollars, so the inner window's values differ from the outer's.
     ``retuned_bump`` is added to the inner retuned short-vol rows only (both median and mean types, so contrasts are unchanged).
     ``mid`` adds the Amendment 1 column (pnl_dollars_mid = 2 * pnl_dollars) to the outer and the inner rows.
-    ``outer_rows_fn`` transforms the outer decisions rows (passed as ``rows_fn`` to build), e.g. to drop a model the outer excluded."""
+    ``outer_rows_fn`` transforms the outer decisions rows (passed as ``rows_fn`` to build), e.g. to drop a model the outer excluded.
+    ``inner_rows_fn`` transforms the inner decisions rows last, before they are published."""
     if outer_rows_fn is None and not mid:
         rows_fn = None
     else:
@@ -63,6 +64,8 @@ def build_inner(tmp_path, inner_dates, *, outer_dates, tuning_override=None, sta
             for row in _rows(inner_dates)]
     if mid:
         rows = [{**row, "pnl_dollars_mid": 2 * row["pnl_dollars"]} for row in rows]
+    if inner_rows_fn:
+        rows = inner_rows_fn(rows)
     body = {"stage": stage, "models": list(ROLES),
             "tuning": outer["tuning"] if tuning_override is None else tuning_override,
             "c": {mid: 1.0 for mid in ROLES}, "emit_from": "2023-07-01", "ladder": "x", "scope": None, "inputs": HASH,
@@ -185,6 +188,9 @@ INNER_REFUSALS = [
     ("report_receipt_chain_mismatch", {"body_override": {"scope": "full"}}),
     ("report_receipt_chain_mismatch", {"body_override": {"models": list(ROLES)[:-1]}}),
     ("report_receipt_stage", {"stage": "inner"}),
+    # Shape checks run before the chain comparison, so a null models or a list tuning is malformed, not a chain mismatch.
+    ("report_receipt_malformed", {"body_override": {"models": None}}),
+    ("report_receipt_malformed", {"body_override": {"tuning": []}}),
     ("report_receipt_chain_mismatch", {"body_override": {"c": {"m-hsq": 9.0, **{m: 1.0 for m in ROLES if m != "m-hsq"}}}}),
     ("report_decisions_mismatch", {"mutate": _corrupt_inner}),
 ]
@@ -217,6 +223,25 @@ def test_inner_decisions_for_a_model_the_outer_excluded_are_accepted_and_filtere
     assert _model_rows(text, INNER_PREFIX + "T4", "H-sq")  # the models the outer ran are still shown
     inner_decisions = pd.read_parquet(out / "decisions_inner.parquet")
     assert "m-nlog" in set(inner_decisions["model_id"])  # the inner decisions still hold its rows
+
+
+def test_excluded_models_rows_are_still_validated(tmp_path, inner_events):
+    # The outer excluded m-nlog, but its inner rows are still checked before the filter: a NaN P&L on a taken row refuses.
+    def nan_taken_n_log(rows):
+        return [{**row, "pnl_dollars": float("nan")} if row["model_id"] == "m-nlog" and row["status"] == "taken" else row for row in rows]
+
+    def drop_n_log(body):
+        return {**body, "models": [m for m in body["models"] if m != "m-nlog"],
+                "tuning": {m: v for m, v in body["tuning"].items() if m != "m-nlog"},
+                "c": {m: v for m, v in body["c"].items() if m != "m-nlog"}}
+
+    out = build_inner(tmp_path, INNER_2024, outer_dates=OUTER_2025, inner_rows_fn=nan_taken_n_log,
+                      outer_rows_fn=lambda rows: [r for r in rows if r["model_id"] != "m-nlog"])
+    _rewrite(out / "receipts" / "outer.json", drop_n_log)
+    with pytest.raises(Refusal) as caught:
+        assemble_mod.assemble(out, plan_frame(TICKERS), admitted=None)
+    assert caught.value.details["reason"] == "report_nonfinite_pnl"
+    assert not (out / "REPORT.md").exists()
 
 
 def test_without_inner_decisions_the_report_is_unchanged_in_shape(tmp_path):
