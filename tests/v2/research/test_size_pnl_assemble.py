@@ -802,3 +802,17 @@ def test_straddle_only_run_is_testable_for_the_account(tmp_path):
     account = _section_lines(text, "### Sensitivity (Amendment 2)")
     assert account[0].startswith("### Sensitivity (Amendment 2), not the pre-registered verdict")
     assert any(line.startswith("| straddle |") for line in account)
+
+
+def test_empty_taken_frame_with_the_column_reports_zero_trade_accounts(tmp_path):
+    # One model, every row not_taken: the taken frame is empty but keeps secured_per_contract, so the account table
+    # (zero-trade accounts at $100,000) is produced and the not_testable note is not.
+    rows = [_row("m-hsq", "short_vol", arm, NAMES[0], "E01", "2024-02-15", 2, 0.0) for arm in ("as_is", "retuned")]
+    rows += [_row("m-hsq", "straddle", rule, "straddle", "E01", "2024-02-15", 1, 0.0) for rule in RULES]
+    universe = pd.DataFrame(_with_account([{**row, "status": "not_taken", "reason": "below_cutoff"} for row in rows]))
+    taken = universe[universe["status"] == "taken"]
+    assert taken.empty and "secured_per_contract" in taken.columns
+    sections = assemble_mod._account_sections(taken, {"H-sq": "m-hsq"}, {"m-hsq": "H-sq"}, universe)
+    text = "\n".join(sections)
+    assert any("| 0 | 0 | 1e+05 |" in line for line in text.splitlines())
+    assert "not_testable" not in text

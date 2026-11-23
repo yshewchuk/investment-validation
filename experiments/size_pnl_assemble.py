@@ -241,11 +241,13 @@ def _verdicts(classify_in, missing_years):
 
 def _account_sections(frame, role_model, label_of, universe):
     """The Amendment 2 sensitivity sections over ``frame``, which holds ALL taken rows of decisions.parquet (model_id already
-    labelled), or not_testable when the frame is empty or no taken row carries a secured_per_contract. A straddle-only run is
-    testable: its taken straddle rows carry 0.0 secured cash, which is non-null. ``universe`` holds every decision row
-    (model_id labelled) and supplies the account keys, so a model that takes no trade is still reported."""
+    labelled), or not_testable when the frame has no secured_per_contract column, or when the frame is non-empty and no taken
+    row carries a non-null secured_per_contract. An empty frame that has the column is testable: every account in ``universe``
+    is reported at its empty-account metrics ($100,000). A straddle-only run is testable: its taken straddle rows carry 0.0
+    secured cash, which is non-null. ``universe`` holds every decision row (model_id labelled) and supplies the account keys,
+    so a model that takes no trade is still reported."""
     title = "Sensitivity (Amendment 2)"
-    if "secured_per_contract" not in frame.columns or frame.empty or not frame["secured_per_contract"].notna().any():
+    if "secured_per_contract" not in frame.columns or (not frame.empty and not frame["secured_per_contract"].notna().any()):
         return [_not_testable(title, "account_columns_not_in_decisions")]
     results = size_pnl_account.accounts(frame, universe)
     _log(f"accounts n={len(results)}")
