@@ -2,6 +2,7 @@
 import hashlib
 import json
 import os
+import stat
 from pathlib import Path
 
 import joblib
@@ -236,6 +237,21 @@ def test_file_sha256(tmp_path):
         fold.file_sha256(f, max_bytes=10)
 
 
+@pytest.mark.parametrize("bad", [0, -2])
+def test_file_sha256_rejects_nonpositive_max_bytes(tmp_path, bad):
+    f = tmp_path / "blob.bin"
+    f.write_bytes(b"x")
+    with pytest.raises(ValueError, match="max_bytes must be positive"):
+        fold.file_sha256(f, max_bytes=bad)
+
+
+@pytest.mark.parametrize("bad", [0, -2])
+def test_read_admitted_events_rejects_nonpositive_max_bytes(tmp_path, bad):
+    path = _admitted_file(tmp_path, ids=["695"])
+    with pytest.raises(ValueError, match="max_bytes must be positive"):
+        fold.read_admitted_events(path, max_bytes=bad)
+
+
 def test_build_inputs_2025_only_no_labels_and_nan_kept():
     def nan_build(t):
         ds = _build(t)
@@ -253,6 +269,20 @@ def test_build_inputs_2025_only_no_labels_and_nan_kept():
     assert receipt["excluded_events"] == 0 and receipt["admitted_events"] == 8
     with pytest.raises(ValueError):
         fold.build_inputs(_trades(), year=2025, build=_build, features=("f1", "ret"), admitted_ids=ADMITTED_2025)
+
+
+def test_build_inputs_counts_admitted_matched_in_receipt():
+    # 695 and 696 are 2025 trades; "99999" is admitted but absent from the trades.
+    _, receipt = fold.build_inputs(_trades(), year=2025, build=_build, features=FEATS,
+                                   admitted_ids={"695", "696", "99999"})
+    assert receipt["admitted_matched"] == 2
+    assert receipt["admitted_events"] == 3
+
+
+def test_build_inputs_refuses_when_no_admitted_event_matches_year():
+    # Admitted ids exist only in 2023, so none matches a 2025 trade.
+    with pytest.raises(ValueError, match="no admitted event matches the year's trades"):
+        fold.build_inputs(_trades(), year=2025, build=_build, features=FEATS, admitted_ids={"0", "1"})
 
 
 def test_build_inputs_drops_non_admitted_2025_before_build():
@@ -387,8 +417,17 @@ def test_train_fold_refuses_through_after_2024():
 REGISTRY = Path(__file__).resolve().parents[3] / "engine" / "models" / "registry.json"
 
 
+REGISTRY_MAX_BYTES = 8 << 20
+
+
 def _registry_entry(entry_id):
-    data = json.loads(REGISTRY.read_text())
+    fd = os.open(REGISTRY, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, "rb") as f:
+        assert stat.S_ISREG(os.fstat(fd).st_mode), "registry.json is not a regular file"
+        assert os.fstat(fd).st_size <= REGISTRY_MAX_BYTES, "registry.json exceeds 8 MiB"
+        raw = f.read(REGISTRY_MAX_BYTES + 1)
+    assert len(raw) <= REGISTRY_MAX_BYTES, "registry.json exceeds 8 MiB"
+    data = json.loads(raw.decode("utf-8"))
     if isinstance(data, dict):
         data = next(data[k] for k in ("entries", "models") if k in data)
     return next(e for e in data if e.get("id") == entry_id)
@@ -508,6 +547,25 @@ def test_publish_pair_receipt_replace_failure_leaves_nothing(tmp_path, monkeypat
     assert not out.exists()
     assert not rec.exists()
     assert list(tmp_path.iterdir()) == []
+
+
+def test_publish_pair_dir_fsync_failure_keeps_published_files(tmp_path, monkeypatch):
+    out = tmp_path / "a.bin"
+    rec = tmp_path / "a.bin.receipt.json"
+    real_fsync = os.fsync
+
+    def fsync_fails_for_dirs(fd):
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise OSError("simulated directory fsync failure")
+        return real_fsync(fd)
+
+    monkeypatch.setattr(fold.os, "fsync", fsync_fails_for_dirs)
+    with pytest.raises(RuntimeError, match=r"published but directory fsync failed: ") as info:
+        fold._publish_pair(out, rec, lambda p: Path(p).write_bytes(b"payload"), {"kind": "t"}, "sha")
+    assert str(tmp_path) in str(info.value)
+    assert out.read_bytes() == b"payload"  # complete published files are not removed
+    assert json.loads(rec.read_text())["sha"] == fold.file_sha256(out)
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["a.bin", "a.bin.receipt.json"]
 
 
 def test_publish_pair_success_leaves_both_and_no_tmp(tmp_path, capsys):

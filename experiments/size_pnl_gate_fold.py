@@ -47,7 +47,13 @@ def _log(msg):
     print(f"[gate_fold] {msg} (elapsed={time.time() - _T0:.1f}s rss={rss:.0f}MiB)", file=sys.stderr)
 
 
+def _check_max_bytes(max_bytes):
+    if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes <= 0:
+        raise ValueError("max_bytes must be positive")
+
+
 def file_sha256(path, max_bytes=8 << 30):
+    _check_max_bytes(max_bytes)
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except IsADirectoryError:
@@ -179,6 +185,10 @@ def build_inputs(trades, *, year, build, features, admitted_ids):
     admitted = {str(x) for x in admitted_ids}
     event_dt = pd.to_datetime(trades["event_date"])
     in_year = (event_dt.dt.year == int(year)).to_numpy()
+    year_ids = set(trades.loc[in_year, "event_id"].astype(str))
+    admitted_matched = len(admitted & year_ids)
+    if admitted_matched == 0:
+        raise ValueError("no admitted event matches the year's trades")
     not_admitted = ~trades["event_id"].astype(str).isin(admitted).to_numpy()
     drop = in_year & not_admitted
     excluded_events = int(trades.loc[drop, "event_id"].nunique())
@@ -201,6 +211,7 @@ def build_inputs(trades, *, year, build, features, admitted_ids):
         "incomplete_rows": int(incomplete.sum()),
         "excluded_events": excluded_events,
         "admitted_events": len(admitted_ids),
+        "admitted_matched": admitted_matched,
     }
     return out, receipt
 
@@ -212,6 +223,7 @@ def read_admitted_events(path, max_bytes=ADMITTED_MAX_BYTES):
     max_bytes. Returns (set of ids, sha256 of the exact bytes read); the sha256 equals
     file_sha256(path) for the same file.
     """
+    _check_max_bytes(max_bytes)
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except OSError as e:
@@ -282,8 +294,12 @@ def _publish_pair(out, receipt_path, write_artifact, receipt, sha_key):
     parents = {}
     for d in (out.parent, receipt_path.parent):
         parents.setdefault(d.resolve(), d)
+    # Both files are already published and complete here, so a directory fsync failure keeps them.
     for d in parents.values():
-        _fsync_path(d)
+        try:
+            _fsync_path(d)
+        except Exception as e:
+            raise RuntimeError(f"published but directory fsync failed: {d}") from e
     return text
 
 
