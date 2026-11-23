@@ -239,8 +239,12 @@ def test_c_half_declines_widths_beyond_width_max_and_counts_them(pool):
     scored = sv.score_events(chunk, events, sims, "TWIN-P", c=0.5)
     assert "width_declined" in set(scored["reason"])
     out = tuning.tune([(chunk, events, sims)], "M")
-    assert out["declined"]["0.5"] > 0
-    assert out["declined"]["1.0"] < out["declined"]["0.5"]
+    for c in (0.5, 1.0):
+        rows = [sv.score_events(chunk, events, sims, name, c=c) for name in tuning.NAMES]
+        expected = sum((r["reason"] == "width_declined").sum() for r in rows) / sum(len(r) for r in rows)
+        assert out["declined"][str(c)] == pytest.approx(expected)
+    assert 0 < out["declined"]["0.5"] <= 1
+    assert out["declined"]["0.5"] > out["declined"]["1.0"]
 
 
 # ---- tune: real scorers against a hand-computed oracle ----------------------
