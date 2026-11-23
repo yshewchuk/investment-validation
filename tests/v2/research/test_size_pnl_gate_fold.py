@@ -428,6 +428,14 @@ def test_load_trades_streaming_refuses_oversize_partition(monkeypatch):
         fold.load_trades_streaming(_OversizePartitionStore(), "STR-THRU", 2024)
 
 
+@pytest.mark.parametrize("bad", [None, True, 0, -1])
+def test_check_input_file_rejects_bad_max_bytes_before_filesystem(tmp_path, bad):
+    # The path does not exist: if max_bytes were checked after the filesystem lookup, this would be
+    # a SystemExit "not found" refusal instead of the ValueError from _check_max_bytes.
+    with pytest.raises(ValueError, match="max_bytes must be positive"):
+        fold.check_input_file(tmp_path / "missing.bin", bad)
+
+
 def test_check_input_file_refuses_symlink(tmp_path):
     real = tmp_path / "real.bin"
     real.write_bytes(b"x")

@@ -84,8 +84,10 @@ def check_input_file(path, max_bytes):
     """Refuse an input unless it is a regular file (no symlinks) of at most max_bytes.
 
     A missing .parquet is looked up as .csv.gz, as tier4.load_forecasts does. Returns the
-    path that was checked; raises SystemExit("refused: ...") otherwise.
+    path that was checked; raises SystemExit("refused: ...") otherwise. max_bytes is validated
+    first with _check_max_bytes, before any filesystem access.
     """
+    _check_max_bytes(max_bytes)
     path = str(path)
     candidates = [path]
     if path.endswith(".parquet"):
