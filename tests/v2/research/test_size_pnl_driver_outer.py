@@ -303,6 +303,11 @@ def test_outer_refuses_when_inner_json_names_other_inner_tables(tmp_path, stubs,
     tampered["inputs"] = "0" * 64
     (copy / "receipts" / "inner.json").unlink()
     tuning.write_receipt(copy / "receipts" / "inner.json", tampered)
+    decisions = tuning.load_receipt(copy / "receipts" / "inner_decisions.json")
+    dec_tampered = {k: v for k, v in decisions.items() if k != "content_hash"}
+    dec_tampered["inputs"] = "0" * 64  # keeps inner_decisions bound to inner.json, so the tables check is what refuses
+    (copy / "receipts" / "inner_decisions.json").unlink()
+    tuning.write_receipt(copy / "receipts" / "inner_decisions.json", dec_tampered)
     use_chunks(monkeypatch, [("2024Q3", chunk("E2"))])
     with pytest.raises(Refusal) as caught:
         driver.run(sources(), "outer", copy, prereg=OK)

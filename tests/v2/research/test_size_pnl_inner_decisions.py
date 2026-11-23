@@ -5,10 +5,12 @@ import json
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from experiments import size_pnl_driver as driver, size_pnl_tuning as tuning
+from experiments.size_pnl_shortvol import Refusal
 from tests.v2.research.test_size_pnl_driver import (  # noqa: F401  (bounded, stubs, structure_gate_passes, equivalence_passes are fixtures)
-    OK, bounded, chunk, sources, stubs, structure_gate_passes, equivalence_passes)
+    CONFLICT, OK, bounded, chunk, sources, stubs, structure_gate_passes, equivalence_passes)
 from tests.v2.research.test_size_pnl_driver_outer import outer_stubs, use_chunks  # noqa: F401
 
 FRONT = ["model_id", "book", "arm_or_rule", "structure", "event_id", "event_date", "status", "reason"]
@@ -82,6 +84,30 @@ def test_inner_json_and_tuning_receipts_do_not_change_content(tmp_path, outer_st
     assert "inner.json" in names and any(n.startswith("tuning_") for n in names)
     assert {n: stubbed[n] for n in names} == {n: actual[n] for n in names}
     assert "decisions_sha256" not in json.loads(actual["inner.json"])
+
+
+def test_outer_refuses_when_inner_decisions_receipt_is_missing(tmp_path, outer_stubs, monkeypatch):
+    _inner(tmp_path, monkeypatch)
+    (tmp_path / "receipts" / "inner_decisions.json").unlink()
+    use_chunks(monkeypatch, [("2024Q3", chunk("E2")), ("2025Q1", chunk("E3", "E4"))])
+    with pytest.raises(Refusal) as caught:
+        driver.run(sources(), "outer", tmp_path, prereg=OK)
+    assert caught.value.code == CONFLICT
+    assert caught.value.details["reason"] == "inner_decisions_missing"
+
+
+def test_outer_refuses_when_inner_decisions_is_bound_to_other_inputs(tmp_path, outer_stubs, monkeypatch):
+    _inner(tmp_path, monkeypatch)
+    rec = tuning.load_receipt(tmp_path / "receipts" / "inner_decisions.json")
+    tampered = {k: v for k, v in rec.items() if k != "content_hash"}
+    tampered["inputs"] = "0" * 64
+    (tmp_path / "receipts" / "inner_decisions.json").unlink()
+    tuning.write_receipt(tmp_path / "receipts" / "inner_decisions.json", tampered)
+    use_chunks(monkeypatch, [("2024Q3", chunk("E2")), ("2025Q1", chunk("E3", "E4"))])
+    with pytest.raises(Refusal) as caught:
+        driver.run(sources(), "outer", tmp_path, prereg=OK)
+    assert caught.value.code == CONFLICT
+    assert caught.value.details["reason"] == "inner_decisions_mismatch"
 
 
 def test_exact_inner_replay_keeps_decisions_inner(tmp_path, outer_stubs, monkeypatch):
