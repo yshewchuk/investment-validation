@@ -51,11 +51,20 @@ def _read_verified(item, what, max_bytes):
         fd = os.open(item["path"], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except (OSError, ValueError):  # a NUL byte in the path raises ValueError
         raise _refuse(f"gate_{what}_missing", f"the gate {what} is missing or not a plain file") from None
-    with os.fdopen(fd, "rb") as handle:
-        info = os.fstat(handle.fileno())
-        if not stat.S_ISREG(info.st_mode) or info.st_size > max_bytes:
-            raise _refuse(f"gate_{what}_invalid", f"the gate {what} is not a regular file within its size cap")
-        data = handle.read(max_bytes + 1)
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode) or info.st_size > max_bytes:
+        os.close(fd)
+        raise _refuse(f"gate_{what}_invalid", f"the gate {what} is not a regular file within its size cap")
+    try:
+        handle = os.fdopen(fd, "rb")  # takes ownership of fd from here on
+    except OSError:
+        os.close(fd)
+        raise _refuse(f"gate_{what}_invalid", f"the gate {what} could not be read") from None
+    try:
+        with handle:
+            data = handle.read(max_bytes + 1)
+    except OSError:
+        raise _refuse(f"gate_{what}_invalid", f"the gate {what} could not be read") from None
     if len(data) > max_bytes:
         raise _refuse(f"gate_{what}_invalid", f"the gate {what} is larger than its size cap")
     if hashlib.sha256(data).hexdigest() != item["sha256"]:

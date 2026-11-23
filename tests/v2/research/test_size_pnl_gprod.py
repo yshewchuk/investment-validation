@@ -290,6 +290,23 @@ def test_load_gate_refuses_an_oversize_file(tmp_path, monkeypatch):
     assert _refusal(exc) == ("INVALID_EXPERIMENT_SPEC", "gate_fold_invalid")
 
 
+def test_load_gate_refuses_inputs_over_the_decoded_byte_cap(tmp_path, monkeypatch):
+    monkeypatch.setattr(gp, "MAX_INPUT_DECODED_BYTES", 1)
+    with pytest.raises(OpsError) as exc:
+        gp.load_gate(write_gate_files(tmp_path))
+    assert _refusal(exc) == ("INVALID_EXPERIMENT_SPEC", "gate_inputs_invalid")
+
+
+@pytest.mark.parametrize("key, reason", [("gate_fold", "gate_fold_invalid"), ("gate_inputs", "gate_inputs_invalid")])
+def test_load_gate_refuses_a_directory_path(tmp_path, key, reason):
+    """A directory opens read-only but is not a regular file: refused as invalid, before any hash or parse."""
+    binding = write_gate_files(tmp_path)
+    binding[key] = {"path": str(tmp_path), "sha256": "0" * 64}
+    with pytest.raises(OpsError) as exc:
+        gp.load_gate(binding)
+    assert _refusal(exc) == ("INVALID_EXPERIMENT_SPEC", reason)
+
+
 # ---- scoring ----------------------------------------------------------------
 
 def test_scores_replace_only_the_five_model_columns():
