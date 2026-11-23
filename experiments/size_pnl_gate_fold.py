@@ -17,6 +17,7 @@ overwritten.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import os
@@ -132,7 +133,10 @@ def train_fold(trades, *, through, build, fit, features, target, seed, threshold
     fitted = dataset.loc[complete]
     fit_events = pd.to_datetime(fitted["event_date"]).dropna()
     fit_ids = set(fitted["event_id"].tolist())
-    fit_exits = pd.to_datetime(kept.loc[kept["event_id"].isin(fit_ids), "exit_date"]).dropna()
+    exit_rows = kept["event_id"].isin(fit_ids).to_numpy()
+    if "fill_alpha" in kept.columns:
+        exit_rows = exit_rows & np.isclose(kept["fill_alpha"].to_numpy(dtype=float), 0.5)
+    fit_exits = pd.to_datetime(kept.loc[exit_rows, "exit_date"]).dropna()
     receipt = {
         "kind": "gate_fold_receipt",
         "registered_id": REGISTERED_ID,
@@ -205,7 +209,7 @@ def _publish_pair(out, receipt_path, write_artifact, receipt, sha_key):
         if published:
             _unlink_quiet(out)
         raise
-    print(text)
+    return text
 
 
 def _real_wiring(through_year):
@@ -241,29 +245,36 @@ def _run_fit(args, wiring, root):
     import joblib  # fit handling only
 
     out, receipt_path = _resolve_outputs(args.out, args.receipt, root)
-    if wiring is None:
-        wiring = _real_wiring(args.train_through)
-    load_trades, build, fit, features, target = wiring
     t0 = time.time()
-    _log(f"fit start: train_through={args.train_through}")
-    model, receipt = train_fold(load_trades(), through=args.train_through, build=build, fit=fit,
-                                features=features, target=target, seed=SEED, threshold=REGISTERED_THRESHOLD)
-    payload = {"model": model, "features": list(features), "threshold": REGISTERED_THRESHOLD,
-               "seed": SEED, "train_through": args.train_through, "recipe_hash": receipt["recipe_hash"]}
-    _publish_pair(out, receipt_path, lambda p: joblib.dump(payload, p, compress=3), receipt, "artifact_sha256")
+    # Builder progress prints go to stderr; stdout carries only the receipt JSON.
+    with contextlib.redirect_stdout(sys.stderr):
+        if wiring is None:
+            wiring = _real_wiring(args.train_through)
+        load_trades, build, fit, features, target = wiring
+        _log(f"fit start: train_through={args.train_through}")
+        model, receipt = train_fold(load_trades(), through=args.train_through, build=build, fit=fit,
+                                    features=features, target=target, seed=SEED, threshold=REGISTERED_THRESHOLD)
+        payload = {"model": model, "features": list(features), "threshold": REGISTERED_THRESHOLD,
+                   "seed": SEED, "train_through": args.train_through, "recipe_hash": receipt["recipe_hash"]}
+        text = _publish_pair(out, receipt_path, lambda p: joblib.dump(payload, p, compress=3), receipt,
+                             "artifact_sha256")
+    print(text)
     _log(f"fit end: {time.time() - t0:.1f}s")
     return 0
 
 
 def _run_inputs(args, wiring, root):
     out, receipt_path = _resolve_outputs(args.out, args.receipt, root)
-    if wiring is None:
-        wiring = _real_wiring(args.year)
-    load_trades, build, _fit, features, _target = wiring
     t0 = time.time()
-    _log(f"inputs start: year={args.year}")
-    table, receipt = build_inputs(load_trades(), year=args.year, build=build, features=features)
-    _publish_pair(out, receipt_path, table.to_parquet, receipt, "inputs_sha256")
+    # Builder progress prints go to stderr; stdout carries only the receipt JSON.
+    with contextlib.redirect_stdout(sys.stderr):
+        if wiring is None:
+            wiring = _real_wiring(args.year)
+        load_trades, build, _fit, features, _target = wiring
+        _log(f"inputs start: year={args.year}")
+        table, receipt = build_inputs(load_trades(), year=args.year, build=build, features=features)
+        text = _publish_pair(out, receipt_path, table.to_parquet, receipt, "inputs_sha256")
+    print(text)
     _log(f"inputs end: {time.time() - t0:.1f}s")
     return 0
 

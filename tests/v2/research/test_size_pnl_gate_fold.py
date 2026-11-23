@@ -198,6 +198,35 @@ def test_main_fit_end_to_end(tmp_path):
     assert art["threshold"] == fold.REGISTERED_THRESHOLD
 
 
+def test_main_fit_stdout_is_only_receipt_json(tmp_path, capsys):
+    out = tmp_path / "gate.joblib"
+
+    def noisy_build(t):
+        print("engine analog matching 1/2")  # builder progress must not reach stdout
+        return _build(t)
+
+    wiring = (lambda: _trades(), noisy_build, _fit, list(FEATS), "ret")
+    rc = fold.main(["fit", "--train-through", "2024", "--out", str(out)], wiring=wiring, root=tmp_path)
+    assert rc == 0
+    captured = capsys.readouterr()
+    receipt = json.loads((tmp_path / "gate.joblib.receipt.json").read_text())
+    assert json.loads(captured.out) == receipt
+    assert "engine analog matching" in captured.err
+
+
+def test_train_fold_exit_date_uses_fill_alpha_half_rows_only():
+    base = _trades()
+    half = base.assign(fill_alpha=0.5)
+    late = base.assign(fill_alpha=0.9, exit_date=base["event_date"] + pd.Timedelta(days=9))
+    trades = pd.concat([half, late], ignore_index=True)
+    kept, _ = fold.cut_trades(trades, 2024)
+    is_half = np.isclose(kept["fill_alpha"].to_numpy(dtype=float), 0.5)
+    half_max = kept.loc[is_half, "exit_date"].max()
+    assert kept.loc[~is_half, "exit_date"].max() > half_max  # the 0.9 rows really do exit later
+    _, rec = _train(trades)
+    assert rec["exit_date_max"] == half_max.date().isoformat()
+
+
 def test_main_inputs_end_to_end(tmp_path):
     out = tmp_path / "inputs_2025.parquet"
     rc = fold.main(["inputs", "--year", "2025", "--out", str(out)], wiring=_wiring(), root=tmp_path)
@@ -228,12 +257,13 @@ def test_publish_pair_receipt_replace_failure_leaves_nothing(tmp_path, monkeypat
 def test_publish_pair_success_leaves_both_and_no_tmp(tmp_path, capsys):
     out = tmp_path / "a.bin"
     rec = tmp_path / "a.bin.receipt.json"
-    fold._publish_pair(out, rec, lambda p: Path(p).write_bytes(b"payload"), {"kind": "t"}, "sha")
+    text = fold._publish_pair(out, rec, lambda p: Path(p).write_bytes(b"payload"), {"kind": "t"}, "sha")
     assert out.read_bytes() == b"payload"
     receipt = json.loads(rec.read_text())
     assert receipt["sha"] == fold.file_sha256(out)
     assert sorted(p.name for p in tmp_path.iterdir()) == ["a.bin", "a.bin.receipt.json"]
-    assert json.loads(capsys.readouterr().out) == receipt
+    assert json.loads(text) == receipt
+    assert capsys.readouterr().out == ""  # the caller prints the receipt, not the publisher
 
 
 def test_main_fit_refuses_out_under_data_models(tmp_path):
