@@ -829,3 +829,15 @@ def test_taken_row_with_null_exit_date_refuses_as_decisions_invalid(tmp_path):
     assert caught.value.code == CONFLICT
     assert caught.value.details["reason"] == "report_decisions_invalid"
     assert not (out / "REPORT.md").exists()
+
+
+def test_secured_column_without_exit_date_refuses_as_decisions_columns(tmp_path):
+    def make(rows):
+        return [{k: v for k, v in row.items() if k != "exit_date"} for row in _with_account(rows)]
+
+    out = build(tmp_path, rows_fn=make)
+    with pytest.raises(Refusal) as caught:
+        assemble_mod.assemble(out, plan_frame(), admitted=None)
+    assert caught.value.code == CONFLICT
+    assert caught.value.details["reason"] == "report_decisions_columns"
+    assert not (out / "REPORT.md").exists()

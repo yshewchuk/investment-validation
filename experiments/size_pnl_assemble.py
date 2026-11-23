@@ -195,6 +195,8 @@ def _load_decisions(out, outer):
         parquet = pq.ParquetFile(handle)
         if not set(COLUMNS) <= set(parquet.schema_arrow.names):
             raise _refuse("report_decisions_columns", "decisions.parquet lacks a required column")
+        if "secured_per_contract" in parquet.schema_arrow.names and not {"entry_date", "exit_date", "entry_cost", "exit_value"} <= set(parquet.schema_arrow.names):
+            raise _refuse("report_decisions_columns", "decisions.parquet has secured_per_contract but lacks entry_date, exit_date, entry_cost or exit_value")
         # Metadata only, before any decode: a highly compressed artifact must not exhaust memory on read.
         meta = parquet.metadata
         if meta.num_rows != outer["rows"]:
