@@ -87,6 +87,26 @@ def test_train_fold_happy_path(monkeypatch):
     assert other_through["recipe_hash"] != rec["recipe_hash"]
 
 
+def test_train_fold_receipt_dates_come_from_complete_rows():
+    trades = _trades()
+    kept, _ = fold.cut_trades(trades, 2024)
+    first, last = kept["event_date"].min(), kept["event_date"].max()
+
+    def nan_at_edges(t):
+        ds = _build(t)
+        ds.loc[ds["event_date"].isin([first, last]), "f1"] = np.nan  # earliest and latest kept events are incomplete
+        return ds
+
+    _, rec = fold.train_fold(trades, through=2024, build=nan_at_edges, fit=_fit, features=FEATS, target="ret",
+                             seed=SEED, threshold=fold.REGISTERED_THRESHOLD)
+    complete_dates = kept.loc[~kept["event_date"].isin([first, last]), "event_date"]
+    assert rec["training_rows"] == len(kept) - 2
+    assert rec["event_date_min"] == complete_dates.min().date().isoformat()
+    assert rec["event_date_max"] == complete_dates.max().date().isoformat()
+    # exit_date_max is taken over the fitted rows only: the dropped latest event's exit must not count.
+    assert rec["exit_date_max"] == (complete_dates.max() + pd.Timedelta(days=5)).date().isoformat()
+
+
 def test_train_fold_refuses_dataset_dated_after_cutoff():
     def leaky_build(t):
         ds = _build(t)
@@ -164,3 +184,19 @@ def test_main_fit_refuses_out_under_data_models(tmp_path):
     with pytest.raises(SystemExit, match="refused"):
         fold.main(["fit", "--train-through", "2024", "--out", str(out)], wiring=_wiring(), root=tmp_path)
     assert list(tmp_path.iterdir()) == []
+
+
+def test_main_fit_creates_nested_missing_output_dir(tmp_path):
+    out = tmp_path / "a" / "b" / "gate.joblib"
+    rc = fold.main(["fit", "--train-through", "2024", "--out", str(out)], wiring=_wiring(), root=tmp_path)
+    assert rc == 0
+    assert out.exists()
+    assert (tmp_path / "a" / "b" / "gate.joblib.receipt.json").exists()
+
+
+def test_main_fit_refuses_receipt_equal_to_out_and_writes_nothing(tmp_path):
+    out = tmp_path / "nested" / "gate.joblib"
+    with pytest.raises(SystemExit, match="refused"):
+        fold.main(["fit", "--train-through", "2024", "--out", str(out), "--receipt", str(out)],
+                  wiring=_wiring(), root=tmp_path)
+    assert list(tmp_path.iterdir()) == []  # refused before any directory is created or file written

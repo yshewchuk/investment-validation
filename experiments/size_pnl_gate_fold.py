@@ -87,6 +87,10 @@ def cut_trades(trades, through):
     return kept, stats
 
 
+def _iso_or_none(ts):
+    return None if pd.isna(ts) else pd.Timestamp(ts).date().isoformat()
+
+
 def train_fold(trades, *, through, build, fit, features, target, seed, threshold):
     cutoff = pd.Timestamp(f"{through}-12-31")
     features = list(features)
@@ -105,14 +109,19 @@ def train_fold(trades, *, through, build, fit, features, target, seed, threshold
     y = vals[complete, len(features)]
     model = fit(X, y, seed)
     params = model.get_params() if hasattr(model, "get_params") else {}
+    # Dates come from the rows that were actually fitted, not from every kept trade.
+    fitted = dataset.loc[complete]
+    fit_events = pd.to_datetime(fitted["event_date"]).dropna()
+    fit_ids = set(fitted["event_id"].tolist())
+    fit_exits = pd.to_datetime(kept.loc[kept["event_id"].isin(fit_ids), "exit_date"]).dropna()
     receipt = {
         "kind": "gate_fold_receipt",
         "registered_id": REGISTERED_ID,
         "train_through": through,
         "training_rows": n_complete,
-        "event_date_min": pd.to_datetime(kept["event_date"]).min().date().isoformat(),
-        "event_date_max": pd.to_datetime(kept["event_date"]).max().date().isoformat(),
-        "exit_date_max": pd.to_datetime(kept["exit_date"]).max().date().isoformat(),
+        "event_date_min": _iso_or_none(fit_events.min()),
+        "event_date_max": _iso_or_none(fit_events.max()),
+        "exit_date_max": _iso_or_none(fit_exits.max()),
         "cut": cut,
         "seed": seed,
         "threshold": threshold,
@@ -174,11 +183,21 @@ def _real_wiring(through_year):
     return load_trades, build, ga.fit, list(ga.FEATURES), ga.TARGET
 
 
+def _resolve_outputs(out_arg, receipt_arg, root):
+    out = refuse_protected(out_arg, root)
+    receipt_path = refuse_protected(receipt_arg or f"{out}.receipt.json", root)
+    if receipt_path == out:
+        raise SystemExit(f"refused: receipt path {receipt_path} equals out path {out}")
+    # Create directories only after every refusal has passed, so a refused run writes nothing.
+    out.parent.mkdir(parents=True, exist_ok=True)
+    receipt_path.parent.mkdir(parents=True, exist_ok=True)
+    return out, receipt_path
+
+
 def _run_fit(args, wiring, root):
     import joblib  # fit handling only
 
-    out = refuse_protected(args.out, root)
-    receipt_path = refuse_protected(args.receipt or f"{out}.receipt.json", root)
+    out, receipt_path = _resolve_outputs(args.out, args.receipt, root)
     if wiring is None:
         wiring = _real_wiring(args.train_through)
     load_trades, build, fit, features, target = wiring
@@ -196,8 +215,7 @@ def _run_fit(args, wiring, root):
 
 
 def _run_inputs(args, wiring, root):
-    out = refuse_protected(args.out, root)
-    receipt_path = refuse_protected(args.receipt or f"{out}.receipt.json", root)
+    out, receipt_path = _resolve_outputs(args.out, args.receipt, root)
     if wiring is None:
         wiring = _real_wiring(args.year)
     load_trades, build, _fit, features, _target = wiring
