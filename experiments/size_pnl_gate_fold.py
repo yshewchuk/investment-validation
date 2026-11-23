@@ -116,6 +116,8 @@ def _iso_or_none(ts):
 
 
 def train_fold(trades, *, through, build, fit, features, target, seed, threshold):
+    if through > MAX_TRAIN_THROUGH:
+        raise ValueError(f"through must be <= {MAX_TRAIN_THROUGH}")
     cutoff = pd.Timestamp(f"{through}-12-31")
     features = list(features)
     kept, cut = cut_trades(trades, through)
@@ -164,7 +166,9 @@ def build_inputs(trades, *, year, build, features):
     features = list(features)
     kept = trades.loc[(pd.to_datetime(trades["event_date"]) <= cutoff).to_numpy()]
     dataset = build(kept)
-    in_year = (pd.to_datetime(dataset["event_date"]).dt.year == int(year)).to_numpy()
+    if (pd.to_datetime(dataset["event_date"]) > cutoff).any():
+        raise ValueError(f"dataset has an event dated after {year}-12-31")
+    in_year =(pd.to_datetime(dataset["event_date"]).dt.year == int(year)).to_numpy()
     out = dataset.loc[in_year, ["event_id", *features]].drop_duplicates("event_id")
     bad = [c for c in out.columns if c in LABEL_COLUMNS]
     if bad:
@@ -225,7 +229,12 @@ def _publish_pair(out, receipt_path, write_artifact, receipt, sha_key):
         if published:
             _unlink_quiet(out)
         raise
-    _fsync_path(out.parent)
+    # Fsync each distinct parent directory once (artifact and receipt may share one).
+    parents = {}
+    for d in (out.parent, receipt_path.parent):
+        parents.setdefault(d.resolve(), d)
+    for d in parents.values():
+        _fsync_path(d)
     return text
 
 
@@ -239,28 +248,38 @@ def select_trades(frame, strategy):
     return rows.reset_index(drop=True)
 
 
+def load_trades_streaming(store, strategy, max_year):
+    """Stream trades one year partition at a time, keeping only select_trades() rows.
+
+    store.iter_table yields (year, frame) tuples; only partitions through max_year are requested.
+    """
+    kept = []
+    cols = None
+    partitions = 0
+    for year, part in store.iter_table("trades", years=range(2000, int(max_year) + 1)):
+        partitions += 1
+        if cols is None:
+            cols = list(part.columns)
+        selected = select_trades(part, strategy)
+        if not selected.empty:
+            kept.append(selected)
+    if kept:
+        rows = pd.concat(kept, ignore_index=True)
+    else:
+        rows = pd.DataFrame(columns=cols or [])
+    _log(f"trades partitions={partitions} kept_rows={len(rows)}")
+    return rows
+
+
 def _real_wiring(through_year):
     # through_year is accepted for symmetry with the CLI; the loaders derive their own years.
     import engine.models.training.gate_forecast_analog as ga
     from engine.features import FeatureContext
 
-    def load_trades():
+    def load_trades(max_year):
         from engine.data import store
 
-        kept = []
-        cols = None
-        partitions = 0
-        for part in store.iter_table("trades"):  # one year partition at a time
-            partitions += 1
-            if cols is None:
-                cols = list(part.columns)
-            kept.append(select_trades(part, ga.STRATEGY))
-        if kept:
-            rows = pd.concat(kept, ignore_index=True)
-        else:
-            rows = pd.DataFrame(columns=cols or [])
-        _log(f"trades partitions={partitions} kept_rows={len(rows)}")
-        return rows
+        return load_trades_streaming(store, ga.STRATEGY, max_year)
 
     def build(t):
         entry_years = pd.to_datetime(t["entry_date"]).dt.year
@@ -295,7 +314,7 @@ def _run_fit(args, wiring, root):
             wiring = _real_wiring(args.train_through)
         load_trades, build, fit, features, target = wiring
         _log(f"fit start: train_through={args.train_through}")
-        model, receipt = train_fold(load_trades(), through=args.train_through, build=build, fit=fit,
+        model, receipt = train_fold(load_trades(args.train_through), through=args.train_through, build=build, fit=fit,
                                     features=features, target=target, seed=SEED, threshold=REGISTERED_THRESHOLD)
         payload = {"model": model, "features": list(features), "threshold": REGISTERED_THRESHOLD,
                    "seed": SEED, "train_through": args.train_through, "recipe_hash": receipt["recipe_hash"]}
@@ -315,7 +334,7 @@ def _run_inputs(args, wiring, root):
             wiring = _real_wiring(args.year)
         load_trades, build, _fit, features, _target = wiring
         _log(f"inputs start: year={args.year}")
-        table, receipt = build_inputs(load_trades(), year=args.year, build=build, features=features)
+        table, receipt = build_inputs(load_trades(args.year), year=args.year, build=build, features=features)
         text = _publish_pair(out, receipt_path, lambda p: table.to_parquet(p, index=False), receipt,
                              "inputs_sha256")
     print(text)

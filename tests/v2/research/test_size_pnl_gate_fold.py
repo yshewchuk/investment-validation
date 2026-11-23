@@ -55,7 +55,7 @@ def _train(trades, through=2024, seed=SEED, fit=_fit):
 
 def _wiring(trades=None):
     t = _trades() if trades is None else trades
-    return (lambda: t, _build, _fit, list(FEATS), "ret")
+    return (lambda max_year: t, _build, _fit, list(FEATS), "ret")
 
 
 def test_cut_trades_drops_2025_events_and_dec30_with_2025_exit():
@@ -230,7 +230,7 @@ def test_main_fit_end_to_end(tmp_path):
         stub["model"], stub["X"] = model, X
         return model
 
-    wiring = (lambda: _trades(), _build, recording_fit, list(FEATS), "ret")
+    wiring = (lambda max_year: _trades(), _build, recording_fit, list(FEATS), "ret")
     rc = fold.main(["fit", "--train-through", "2024", "--out", str(out)], wiring=wiring, root=tmp_path)
     assert rc == 0
     receipt = json.loads((tmp_path / "gate_fold_2024.joblib.receipt.json").read_text())
@@ -247,6 +247,40 @@ def test_main_fit_refuses_train_through_after_2024(tmp_path):
     with pytest.raises(SystemExit, match="refused: --train-through must be <= 2024"):
         fold.main(["fit", "--train-through", "2025", "--out", str(out)], wiring=_wiring(), root=tmp_path)
     assert list(tmp_path.iterdir()) == []
+
+
+class _FakeStore:
+    """Yields (year, frame) for the requested years only; records every call."""
+
+    def __init__(self):
+        self.calls = []
+
+    def iter_table(self, name, years=None):
+        self.calls.append((name, years))
+        for year in range(2023, 2027):
+            if years is not None and year not in years:
+                continue
+            yield year, pd.DataFrame({
+                "event_id": [year * 10 + 1, year * 10 + 2],
+                "strategy": ["STR-THRU", "OTHER"],
+                "provenance": ["engine.replay", "engine.replay"],
+                "entry_date": pd.to_datetime([f"{year}-03-01", f"{year}-03-01"]),
+            })
+
+
+def test_load_trades_streaming_never_asks_past_max_year():
+    store = _FakeStore()
+    rows = fold.load_trades_streaming(store, "STR-THRU", 2024)
+    assert [name for name, _ in store.calls] == ["trades"]
+    years = store.calls[0][1]
+    assert max(years) == 2024
+    assert list(rows["event_id"]) == [20231, 20241]  # 2023-2024 selected rows only, OTHER dropped
+    assert set(rows["strategy"]) == {"STR-THRU"}
+
+
+def test_train_fold_refuses_through_after_2024():
+    with pytest.raises(ValueError, match="through must be <= 2024"):
+        _train(_trades(), through=2025)
 
 
 REGISTRY = Path(__file__).resolve().parents[3] / "engine" / "models" / "registry.json"
@@ -276,7 +310,7 @@ def test_main_fit_stdout_is_only_receipt_json(tmp_path, capsys):
         print("engine analog matching 1/2")  # builder progress must not reach stdout
         return _build(t)
 
-    wiring = (lambda: _trades(), noisy_build, _fit, list(FEATS), "ret")
+    wiring = (lambda max_year: _trades(), noisy_build, _fit, list(FEATS), "ret")
     rc = fold.main(["fit", "--train-through", "2024", "--out", str(out)], wiring=wiring, root=tmp_path)
     assert rc == 0
     captured = capsys.readouterr()
