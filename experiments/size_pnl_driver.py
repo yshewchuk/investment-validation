@@ -23,6 +23,7 @@ from experiments import size_pnl_report as report, size_pnl_synthetic as synthet
 INNER = ("2023-01-01", "2025-01-01")
 OUTER = ("2025-01-01", "2026-01-01")
 WARMUP_START = "2024-07-01"  # six months of inner history so the trailing cutoff is defined in 2025-01
+INNER_EMIT_FROM = pd.Timestamp("2023-07-01")  # six months of 2023 history (burn-in) feed the trailing cutoffs; rows are emitted from 2023H2 through 2024
 OUTER_YEAR = 2025  # the roster is resolved for this year
 STAGES = ("inner", "outer")
 ALPHA = tuning.ALPHA
@@ -345,6 +346,20 @@ def _outer_gate(out, ready, scope, body, inner_tables, inner_production, inner_p
     inner = tuning.load_receipt(out / "receipts" / "inner.json")
     if any(inner["models"].get(mid) != receipts[mid]["content_hash"] for mid in ready):
         raise Refusal(_CONFLICT, "inner.json does not bind every ready model's tuning receipt", {"reason": "inner_receipt_mismatch"})
+    if not (out / "receipts" / "inner_decisions.json").exists() or not (out / "decisions_inner.parquet").exists():
+        raise Refusal(_CONFLICT, "inner decisions are missing or not bound to inner.json", {"reason": "inner_decisions_missing"})
+    idec = tuning.load_receipt(out / "receipts" / "inner_decisions.json")
+    if idec.get("stage") != "inner_decisions" or idec.get("inputs") != inner["inputs"] or idec.get("scope") != inner["scope"]:
+        raise Refusal(_CONFLICT, "inner decisions are missing or not bound to inner.json", {"reason": "inner_decisions_mismatch"})
+    # A hash-valid receipt can still carry the wrong shapes: refuse them here rather than raise a builtin exception below.
+    if not (isinstance(idec.get("models"), list) and isinstance(idec.get("tuning"), dict) and isinstance(idec.get("c"), dict)):
+        raise Refusal(_CONFLICT, "inner decisions are missing or not bound to inner.json", {"reason": "inner_decisions_mismatch"})
+    # Subset semantics: the inner stage may have tuned models the outer excluded (a missing or partial 2025 refit), so the
+    # receipt may cover a superset of the ready models; every ready model must match on tuning and c.
+    if not set(ready) <= set(idec.get("models", [])) \
+            or any(idec.get("tuning", {}).get(mid) != inner["models"][mid] or idec.get("c", {}).get(mid) != receipts[mid]["c"] for mid in ready) \
+            or decisions._file_sha256(out / "decisions_inner.parquet") != idec.get("decisions_sha256"):
+        raise Refusal(_CONFLICT, "inner decisions are missing or not bound to inner.json", {"reason": "inner_decisions_mismatch"})
     if "scope" not in inner or inner["scope"] != scope: raise Refusal(_CONFLICT, "inner.json was tuned on a different event scope", {"reason": "scope_mismatch"})
     evidence = inner.get("equivalence")
     if not isinstance(evidence, dict) or not all(_equivalence_ok(evidence.get(mid)) for mid in ready):
@@ -482,6 +497,39 @@ def _outer(src, out, ready, receipts, plan, ids, facts_all, labels):
     return rows, skipped
 
 
+def _inner_decisions(src, out, ready, receipts, plan, facts_all, labels, inputs_hash, scope):
+    """Publishes the inner stage's decisions (``decisions_inner.parquet``, receipt ``inner_decisions``) for the pre-registered
+    verdict, which reads 2024. A second pass over the inner plan, the same per-chunk, per-month loop as ``_outer``: it costs a
+    second simulation of the inner window. Retuned rows use each model's frozen c from its tuning receipt. ``labels`` is read-only."""
+    exits, pools = _exits(src), _pool_tables(ready)
+    dates = pd.to_datetime(plan["event_date"])
+    quarter, month = dates.dt.to_period("Q").astype(str).to_numpy(), dates.dt.to_period("M").to_numpy()
+    total, state = len(set(month)), {mid: _model_state(receipts[mid]["c"]) for mid in ready}
+    frames, done, started, skipped, digest, dropped = [], 0, time.monotonic(), {}, hashlib.sha256(), set()
+    _log(f"inner-decisions start months={total} models={len(ready)}")
+    for label, chunk in ladder.ladder_chunks(src.admitted, plan, src.load_index):
+        _bind_chunk(digest, label, chunk)
+        skipped = _tally(skipped, chunk)
+        events = {mid: model_events(pools[mid], facts_all, chunk, exits) for mid in ready}
+        for period in sorted({m for m, q in zip(month, quarter) if q == label}):
+            start_m, month_frames = period.start_time, []
+            at = {mid: events[mid][events[mid]["event_date"].dt.to_period("M") == period] for mid in ready}
+            scored = {mid: _month_scores(mid, pools[mid], at[mid], chunk, labels, start_m, state[mid]) for mid in ready}
+            bad = set().union(*(m for _s, m in scored.values()))  # one shared population for all models, as in _outer
+            dropped |= bad
+            for mid in ready:
+                month_frames += _month(mid, at[mid], scored[mid][0], bad, chunk, start_m, state[mid], emit_from=INNER_EMIT_FROM)
+            frames += [f.assign(in_sample=f["arm_or_rule"] == "retuned") for f in month_frames]  # only the retuned arm uses the chosen c
+            done += 1
+            rate = done / max(time.monotonic() - started, 1e-9)
+            _log(f"inner-decisions month {period} {done}/{total} rate={rate:.2f}/s eta={(total - done) / rate:.0f}s scoreability_dropped={len(dropped)} rss={_rss_mb():.0f}MB")
+    body = {"stage": "inner_decisions", "models": list(ready), "scope": scope, "inputs": inputs_hash,
+            "tuning": {mid: receipts[mid]["content_hash"] for mid in ready}, "c": {mid: receipts[mid]["c"] for mid in ready},
+            "emit_from": INNER_EMIT_FROM.date().isoformat(), "scoreability_dropped": len(dropped),
+            "ladder_skipped": skipped, "ladder": "sha256:" + digest.hexdigest()}
+    return decisions.publish(out, frames, body, stem="decisions_inner", receipt="inner_decisions")
+
+
 def run(src, stage, out_dir, *, event_ids=None, prereg=size_pnl_prereg.require_preregistration):
     """Run one stage, write its receipts under ``out_dir``, and return a JSON-safe summary.
 
@@ -551,14 +599,18 @@ def run(src, stage, out_dir, *, event_ids=None, prereg=size_pnl_prereg.require_p
                   "excluded": excluded, "scope": scope, "inputs": inputs_receipt["content_hash"],
                   "ladder_skipped": skipped, "common_dropped": common, "non_trades": non_trades, "missing_facts": missing_facts,
                   "equivalence": checked}, "inner_receipt_changed")
+        tuned = {mid: tuning.load_receipt(out / "receipts" / f"tuning_{mid}.json") for mid in ready}
+        inner_decisions_rows = _inner_decisions(src, out, ready, tuned, plan, facts_all, labels, inputs_receipt["content_hash"], scope)
         _log(f"stage={stage} end elapsed={time.monotonic() - started:.1f}s rss={_rss_mb():.0f}MB "
-             f"ladder_skipped={skipped} common_dropped={common} non_trades={non_trades} missing_facts={missing_facts}")
+             f"ladder_skipped={skipped} common_dropped={common} non_trades={non_trades} missing_facts={missing_facts} inner_decisions_rows={inner_decisions_rows}")
     else:
         rows, skipped = _outer(src, out, ready, receipts, plan, ids, facts_all, labels)
         _log(f"stage={stage} end elapsed={time.monotonic() - started:.1f}s rss={_rss_mb():.0f}MB ladder_skipped={skipped}")
     _log(f"funnel admitted={len(src.admitted['events'])} paired={len(_common_ids(ready) & stage_ids)} excluded: "
          + " ".join(f"{reason}={len(ids_)}" for reason, ids_ in sorted(src.exclusions.items())) + f" common_dropped={_common_dropped(ready)}")
-    return {"stage": stage, "models": sorted(ready), "excluded": excluded, "rows": rows, "ladder_skipped": skipped}
+    summary = {"stage": stage, "models": sorted(ready), "excluded": excluded, "rows": rows, "ladder_skipped": skipped}
+    if stage == "inner": summary["inner_decisions_rows"] = inner_decisions_rows
+    return summary
 
 
 def _load_facts(src, wanted):
@@ -720,3 +772,8 @@ def run_synthetic(src, out_dir, *, event_ids=None, replay=False, prereg=size_pnl
 def plan_binding(plan_frame):
     """The outer input receipt's ``plan`` hash for the full (unsmoked) outer window: what ``run`` receipts, so the report can bind its ticker map to it."""
     return content_hash(_plan_rows(_plan_window(plan_frame, _window("outer"), None)))
+
+
+def inner_plan_binding(plan_frame):
+    """The inner input receipt's ``plan`` hash for the full inner window: what the report binds the pooled inner tickers to."""
+    return content_hash(_plan_rows(_plan_window(plan_frame, INNER, None)))

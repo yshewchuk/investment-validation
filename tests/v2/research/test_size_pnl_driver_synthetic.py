@@ -333,6 +333,7 @@ def test_the_stage_reads_no_2025_event(tmp_path, monkeypatch, fakes):
 
 
 def test_deleting_the_synthetic_files_leaves_the_inner_receipts_byte_identical(tmp_path, monkeypatch, stubs, fakes):
+    monkeypatch.setattr(driver, "_inner_decisions", lambda *a, **k: 0)  # the decisions pass is tested in test_size_pnl_inner_decisions.py
     use_chunks(monkeypatch, [("2023Q2", chunk("E1")), ("2024Q3", chunk("E2"))])
     out = tmp_path / "out"
     driver.run(sources(), "inner", out, prereg=OK)
