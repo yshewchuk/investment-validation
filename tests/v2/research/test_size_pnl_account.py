@@ -46,7 +46,7 @@ def test_straddle_rows_secured_zero_on_taken_and_nan_otherwise():
     taken = pd.DataFrame({"event_id": ["e1"], "exit_value": [0.1], "rung": ["rung1"], "lots": [1], "pnl_dollars": [8.5],
                           "entry_cost": [0.015], "pnl_per_share": [0.085]})
     events = pd.DataFrame({"event_id": ["e1", "e2"], "pred_move": [3.0, 4.0], "pred_crush": [1.0, 2.0]})
-    out = driver._rows("M0", "straddle", "R_L", dec, taken, events).set_index("event_id")
+    out = driver._rows("M0", "straddle", "R_L", dec, taken, events, sessions={}).set_index("event_id")
     assert out.loc["e1", "secured_per_contract"] == 0.0
     assert math.isnan(out.loc["e2", "secured_per_contract"])
 

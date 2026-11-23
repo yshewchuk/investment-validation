@@ -686,6 +686,23 @@ def test_a_synthetic_run_whose_every_event_has_a_missing_fact_refuses_empty_popu
     assert not (tmp_path / "out" / "decisions_synthetic.parquet").exists()
 
 
+def test_the_synthetic_decisions_carry_no_account_columns_and_secured_is_never_called(tmp_path, monkeypatch):
+    """Amendment 2 account fields stay out of the synthetic run: its published decisions have no entry_date, exit_date or
+    secured_per_contract column, and shortvol.secured is never called (it raises here, overriding the autouse stub)."""
+    _real_month_loop(monkeypatch)
+
+    def never_secured(*args, **kwargs):
+        raise AssertionError("the synthetic run must never call shortvol.secured")
+
+    monkeypatch.setattr(driver.shortvol, "secured", never_secured)
+    src = sources(plan_frame=PLAN3, admitted=ADMITTED3,
+                  fetch=lambda columns, ids: BASE3[BASE3["event_id"].isin(list(ids))])
+    driver.run_synthetic(src, tmp_path / "out", prereg=OK)
+    frame = pd.read_parquet(tmp_path / "out" / "decisions_synthetic.parquet")
+    assert frame["status"].eq("taken").any()  # the rows are real, so the column check is not vacuous
+    assert not {"entry_date", "exit_date", "secured_per_contract"} & set(frame.columns)
+
+
 def test_a_synthetic_event_without_a_forecast_is_never_requested_from_facts(tmp_path, monkeypatch):
     """E3 has no production forecast (its fetch rows are withheld) and an invalid mcap_usd of 5000. Facts are requested only for the
     events that have a forecast, so the run completes, E3 is in no table and no decision, and facts never receive its id."""

@@ -379,17 +379,20 @@ def _model_state(c):
 def _rows(mid, book, arm, dec, taken, events, taken_mid=None, secured=None, sessions=None):
     """Decision rows of one (model, book, arm), with the marks of the taken rows, the Amendment 1 sensitivity marks (``exit_value_mid``,
     ``pnl_dollars_mid``: NaN when ``taken_mid`` is None) and the model's forecast (pred_move, pred_crush) merged on event_id.
-    Amendment 2 columns, filled on taken rows only: entry_date and exit_date (ISO, from ``sessions``) and secured_per_contract
-    (from ``secured``; 0.0 for the straddle, which size_pnl_account.straddle_rows later restates as debit x 100, and NaN for short vol without ``secured``)."""
+    Amendment 2 account columns (entry_date, exit_date, secured_per_contract) are added only when ``sessions`` is not None: entry_date
+    and exit_date (ISO, from ``sessions``) and secured_per_contract (from ``secured``; 0.0 for the straddle, which
+    size_pnl_account.straddle_rows later restates as debit x 100, and NaN for short vol without ``secured``), filled on taken rows only.
+    With ``sessions`` None the frame has exactly the pre-Amendment 2 columns, so the synthetic run's decisions carry no account columns."""
     take = [c for c in [*_MARKS, "entry_cost", "pnl_per_share"] if c not in dec.columns]
     fc = events[["event_id", "pred_move", "pred_crush"]].assign(event_id=events["event_id"].astype(str))
     frame = dec.merge(taken[["event_id", *take]], on="event_id", how="left").merge(fc, on="event_id", how="left")
     if taken_mid is None: frame = frame.assign(exit_value_mid=np.nan, pnl_dollars_mid=np.nan)
     else: frame = frame.merge(taken_mid[["event_id", "exit_value", "pnl_dollars"]].rename(columns={"exit_value": "exit_value_mid", "pnl_dollars": "pnl_dollars_mid"}), on="event_id", how="left")
     if "structure" not in frame.columns: frame = frame.assign(structure=None)
+    if sessions is None: return frame.assign(model_id=mid, book=book, arm_or_rule=arm)
     if secured is None: frame = frame.assign(secured_per_contract=np.nan)
     else: frame = frame.merge(secured[["event_id", "secured_per_contract"]], on="event_id", how="left")
-    sess, ids = sessions or {}, frame["event_id"].astype(str)
+    sess, ids = sessions, frame["event_id"].astype(str)
     taken_row = (frame["status"] == "taken").to_numpy()
     sec = pd.Series(0.0, index=frame.index) if book == "straddle" else frame["secured_per_contract"]
     frame = frame.assign(entry_date=ids.map(lambda e: sess.get(e, (np.nan, np.nan))[0]).where(taken_row),
@@ -415,7 +418,8 @@ def _kept(frame, bad):
 def _month(mid, events, scored, bad, chunk, start_m, st, *, arms=None, emit_from=None, sessions=None):
     """Pass B for one model and calendar month: drop the ``bad`` ids from the events, the scored frames and the straddle
     inputs, then steps 7a-7d on Pass A's frames. Warm-up months (before OUTER[0]) apply the same mask (they feed history)
-    but only add history and emit no rows."""
+    but only add history and emit no rows. ``sessions`` (the Amendment 2 account dates) is None in the synthetic run: then the
+    secured-cash lookup is not called and the rows carry no account columns; a dict (possibly empty) keeps them."""
     output = start_m >= (pd.Timestamp(OUTER[0]) if emit_from is None else emit_from)
     events = _kept(events, bad)
     ids, frames = set(events["event_id"].astype(str)), []
@@ -426,8 +430,9 @@ def _month(mid, events, scored, bad, chunk, start_m, st, *, arms=None, emit_from
             decided = shortvol.decide(pd.concat(st["scored"][arm], ignore_index=True))
             mine = decided[decided["event_id"].astype(str).isin(ids) & (decided["structure"] == name)]
             taken_mid = shortvol.score(chunk, events, mine, name, ALPHA, c=c, mid_marks=True)  # Amendment 1 sensitivity marks
+            secured = None if sessions is None else shortvol.secured(chunk, events, mine, name, c)
             frames.append(_rows(mid, "short_vol", arm, mine, shortvol.score(chunk, events, mine, name, ALPHA, c=c), events, taken_mid=taken_mid,
-                                secured=shortvol.secured(chunk, events, mine, name, c), sessions=sessions))
+                                secured=secured, sessions=sessions))
     first = None
     for rule in straddle.RULES:
         dec = straddle.decide(events, st["edges"], rule, chunk)
