@@ -343,6 +343,8 @@ def _outer_gate(out, ready, scope, body, inner_tables, inner_production, inner_p
     idec = tuning.load_receipt(out / "receipts" / "inner_decisions.json")
     if idec.get("stage") != "inner_decisions" or idec.get("tuning") != inner["models"] or idec.get("inputs") != inner["inputs"] or idec.get("scope") != inner["scope"]:
         raise Refusal(_CONFLICT, "inner decisions are missing or not bound to inner.json", {"reason": "inner_decisions_mismatch"})
+    if sorted(idec.get("models", [])) != sorted(ready) or decisions._file_sha256(out / "decisions_inner.parquet") != idec.get("decisions_sha256"):
+        raise Refusal(_CONFLICT, "inner decisions are missing or not bound to inner.json", {"reason": "inner_decisions_mismatch"})
     if "scope" not in inner or inner["scope"] != scope: raise Refusal(_CONFLICT, "inner.json was tuned on a different event scope", {"reason": "scope_mismatch"})
     evidence = inner.get("equivalence")
     if not isinstance(evidence, dict) or not all(_equivalence_ok(evidence.get(mid)) for mid in ready):

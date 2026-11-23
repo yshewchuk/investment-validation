@@ -110,6 +110,17 @@ def test_outer_refuses_when_inner_decisions_is_bound_to_other_inputs(tmp_path, o
     assert caught.value.details["reason"] == "inner_decisions_mismatch"
 
 
+def test_outer_refuses_when_decisions_inner_bytes_changed_after_publish(tmp_path, outer_stubs, monkeypatch):
+    _inner(tmp_path, monkeypatch)
+    with open(tmp_path / "decisions_inner.parquet", "ab") as handle:
+        handle.write(b"X")
+    use_chunks(monkeypatch, [("2024Q3", chunk("E2")), ("2025Q1", chunk("E3", "E4"))])
+    with pytest.raises(Refusal) as caught:
+        driver.run(sources(), "outer", tmp_path, prereg=OK)
+    assert caught.value.code == CONFLICT
+    assert caught.value.details["reason"] == "inner_decisions_mismatch"
+
+
 def test_exact_inner_replay_keeps_decisions_inner(tmp_path, outer_stubs, monkeypatch):
     first = _inner(tmp_path, monkeypatch)
     before = (tmp_path / "decisions_inner.parquet").read_bytes()

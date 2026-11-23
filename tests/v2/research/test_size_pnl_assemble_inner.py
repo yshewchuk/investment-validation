@@ -10,7 +10,7 @@ from experiments import size_pnl_decisions as decisions
 from experiments import size_pnl_tuning as tuning
 from experiments.size_pnl_shortvol import Refusal
 from tests.v2.research.test_size_pnl_assemble import (  # noqa: F401 (imported so the autouse check_plan no-op applies here)
-    EVENT_DATES, ROLES, TICKERS, _cells, _no_plan_admission, _rewrite, _rows, _section_lines, _with_mid, build, plan_frame)
+    EVENT_DATES, ROLES, TICKERS, _cells, _no_plan_admission, _rewrite, _rows, _section_lines, build, plan_frame)
 
 NEW_EVENTS = {"E05": "2025-08-15", "E06": "2025-11-15", "E11": "2023-08-15", "E12": "2024-02-15",
               "E13": "2024-05-15", "E14": "2024-08-15", "E15": "2023-11-15"}
@@ -37,17 +37,25 @@ def _corrupt_inner(out):
 HASH = "h" * 64  # the inputs the inner receipt and the inner_decisions body share; build writes inner.json without them
 
 
+def _with_doubled_mid(rows):
+    """The rows with a ``pnl_dollars_mid`` column of twice each primary P&L, so the sensitivity values differ from the primary ones."""
+    return [{**row, "pnl_dollars_mid": 2 * row["pnl_dollars"]} for row in rows]
+
+
 def build_inner(tmp_path, inner_dates, *, outer_dates, tuning_override=None, stage="inner_decisions", mutate=None, body_override=None,
-                pnl_scale=1.0, mid=False):
+                pnl_scale=1.0, retuned_bump=0.0, mid=False):
     """A full outer run over every event in TICKERS, plus its inner decisions (decisions_inner.parquet and receipt).
     ``pnl_scale`` multiplies the inner rows' pnl_dollars, so the inner window's values differ from the outer's.
-    ``mid`` adds the Amendment 1 column (pnl_dollars_mid = pnl_dollars) to the outer and the inner rows."""
-    out = build(tmp_path, dates=outer_dates, plan_tickers=TICKERS, rows_fn=_with_mid if mid else None)
+    ``retuned_bump`` is added to the inner retuned short-vol rows only (both median and mean types, so contrasts are unchanged).
+    ``mid`` adds the Amendment 1 column (pnl_dollars_mid = 2 * pnl_dollars) to the outer and the inner rows."""
+    out = build(tmp_path, dates=outer_dates, plan_tickers=TICKERS, rows_fn=_with_doubled_mid if mid else None)
     _rewrite(out / "receipts" / "inner.json", lambda body: {**body, "inputs": HASH, "scope": None})
     outer = tuning.load_receipt(out / "receipts" / "outer.json")
-    rows = [{**row, "in_sample": row["arm_or_rule"] == "retuned", "pnl_dollars": row["pnl_dollars"] * pnl_scale} for row in _rows(inner_dates)]
+    rows = [{**row, "in_sample": row["arm_or_rule"] == "retuned",
+             "pnl_dollars": row["pnl_dollars"] * pnl_scale + (retuned_bump if row["book"] == "short_vol" and row["arm_or_rule"] == "retuned" else 0.0)}
+            for row in _rows(inner_dates)]
     if mid:
-        rows = [{**row, "pnl_dollars_mid": row["pnl_dollars"]} for row in rows]
+        rows = [{**row, "pnl_dollars_mid": 2 * row["pnl_dollars"]} for row in rows]
     body = {"stage": stage, "models": list(ROLES),
             "tuning": outer["tuning"] if tuning_override is None else tuning_override,
             "c": {mid: 1.0 for mid in ROLES}, "emit_from": "2023-07-01", "ladder": "x", "scope": None, "inputs": HASH,
@@ -96,17 +104,22 @@ def test_t10_is_computable_with_inner_2024_and_outer_2025(tmp_path, inner_events
 
 
 SENS_T10_TITLE = "### Sensitivity (Amendment 1), not the pre-registered verdict: T10"
+SENS_T7_TITLE = "### Sensitivity (Amendment 1), not the pre-registered verdict: T7"
 
 
 def test_sensitivity_t10_pools_the_inner_window_too(tmp_path, inner_events):
-    # Same hand derivation as test_t10_is_computable_with_inner_2024_and_outer_2025: the mid column equals the primary P&L here,
-    # so the sensitivity verdicts are the primary ones. Outer 2025 alone has no full 2024 year, so only the pooled inner rows make them testable.
+    # Same hand derivation as test_t10_is_computable_with_inner_2024_and_outer_2025: the mid column is twice the primary P&L,
+    # so every mid difference doubles and the signs and categories are the primary ones. Outer 2025 alone has no full 2024 year,
+    # so only the pooled inner rows make them testable.
     out = build_inner(tmp_path, INNER_2024, outer_dates=OUTER_2025, mid=True)
     assemble_mod.assemble(out, plan_frame(TICKERS), admitted=None)
     text = (out / "REPORT.md").read_text(encoding="utf-8")
     sens = [_cells(line) for line in _section_lines(text, SENS_T10_TITLE) if line.startswith("| H")]
     assert sens == [["H1", "+1", "clear"], ["H2", "-1", "reversed"], ["H3", "+1", "no_difference"]]
     assert not all(row[2] == "not_testable" for row in sens)
+    # The sensitivity T7 is the outer window's mid contrast alone: mean 2 (the primary T7 shows 1), so primary values cannot pass.
+    sens7 = next(_cells(line) for line in _section_lines(text, SENS_T7_TITLE) if line.startswith("| H1 | H | as_is |"))
+    assert sens7[3:6] == ["ok", "4", "2"]
 
 
 def test_t10_still_refuses_when_a_full_year_is_missing(tmp_path, inner_events):
@@ -135,9 +148,10 @@ def _model_rows(text, title, label):
 
 def test_inner_tables_carry_the_inner_windows_own_values(tmp_path, inner_events):
     # Oracle by hand. Outer (2025): H-sq pays 10, 20, 30, 40 per event; H-abs pays one dollar more per event.
-    # Inner (pnl_scale=3, INNER_2024): the final pnl_dollars are 3x, so the bump is scaled too. H-sq takes 3*(10+20+30+40)=300
-    # (per event 75); H-abs takes 3*(11+21+31+41)=312 (per event 78). The H1 pair H difference is 3 per event inner, 1 outer.
-    out = build_inner(tmp_path, INNER_2024, outer_dates=OUTER_2025, pnl_scale=3.0)
+    # Inner (pnl_scale=3, retuned_bump=5, INNER_2024): as_is rows pay 3x, so H-sq as_is takes 3*(10+20+30+40)=300 (per event 75);
+    # H-abs takes 3*(11+21+31+41)=312 (per event 78). Retuned short-vol rows pay 3x + 5, so H-sq retuned takes 300 + 4*5 = 320
+    # (per event 80). The H1 pair H difference is 3 per event inner, 1 outer.
+    out = build_inner(tmp_path, INNER_2024, outer_dates=OUTER_2025, pnl_scale=3.0, retuned_bump=5.0)
     assemble_mod.assemble(out, plan_frame(TICKERS), admitted=None)
     text = (out / "REPORT.md").read_text(encoding="utf-8")
     t2 = [_cells(line) for line in _section_lines(text, INNER_PREFIX + "T2") if line.startswith("| 20")]
@@ -145,7 +159,9 @@ def test_inner_tables_carry_the_inner_windows_own_values(tmp_path, inner_events)
     t4 = _model_rows(text, INNER_PREFIX + "T4", "H-sq")
     assert t4 == [["H-sq", "1", "4", "300.00", "75", "1"]]
     assert _model_rows(text, INNER_PREFIX + "T4", "H-abs") == [["H-abs", "1", "4", "312.00", "78", "1"]]
-    assert _model_rows(text, INNER_PREFIX + "T5", "H-sq")[0][:6] == t4[0]  # the fixture pays the same under both arms
+    t5 = _model_rows(text, INNER_PREFIX + "T5", "H-sq")
+    assert t5[0][3:5] == ["320.00", "80"]  # the retuned arm: 300 + 4 * 5 bump, per event 80
+    assert t5[0][3:5] != t4[0][3:5]  # not the as_is values
     assert _model_rows(text, INNER_PREFIX + "T6", "H-sq") == [["H-sq", "R_L", "4", "0", "0", "75"], ["H-sq", "R_L2", "4", "0", "0", "75"]]
     assert _model_rows(text, INNER_PREFIX + "T6", "H-abs")[0] == ["H-abs", "R_L", "4", "0", "0", "78"]
     inner7 = next(_cells(line) for line in _section_lines(text, INNER_PREFIX + "T7") if line.startswith("| H1 | H | as_is |"))
