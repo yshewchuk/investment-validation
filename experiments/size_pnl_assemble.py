@@ -465,9 +465,13 @@ def assemble(out_dir, plan, *, admitted, expected=None, spec_hash=None, snapshot
             if not inner_path.exists():
                 raise _refuse("report_receipt_malformed", "inputs_inner.json is missing")
             inner_inputs = tuning.load_receipt(inner_path)
+            bound_inputs = inner.get("inputs")
+            inner_unchained = bound_inputs is None or inner_inputs.get("content_hash") != bound_inputs
             with _admit("report_tickers_invalid", "the plan frame cannot be bound"):
                 inner_binding = size_pnl_driver.inner_plan_binding(plan)
             inner_bad = inner_inputs.get("plan") != inner_binding
+        if inner_unchained:
+            raise _refuse("report_receipt_chain_mismatch", "inputs_inner.json is not the receipt inner.json binds")
         if inner_bad:
             raise _refuse("report_inputs_mismatch", "the plan's inner-window rows do not match inputs_inner.json")
     with _admit("report_receipt_malformed", "a receipt or decisions row lacks a required field"):

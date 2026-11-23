@@ -35,9 +35,6 @@ def _corrupt_inner(out):
     path.write_bytes(b"CORRUPT" + path.read_bytes())
 
 
-HASH = "h" * 64  # the inputs the inner receipt and the inner_decisions body share; build writes inner.json without them
-
-
 def _with_doubled_mid(rows):
     """The rows with a ``pnl_dollars_mid`` column of twice each primary P&L, so the sensitivity values differ from the primary ones."""
     return [{**row, "pnl_dollars_mid": 2 * row["pnl_dollars"]} for row in rows]
@@ -58,7 +55,6 @@ def build_inner(tmp_path, inner_dates, *, outer_dates, tuning_override=None, sta
             rows = outer_rows_fn(rows) if outer_rows_fn else rows
             return _with_doubled_mid(rows) if mid else rows
     out = build(tmp_path, dates=outer_dates, plan_tickers=TICKERS, rows_fn=rows_fn)
-    _rewrite(out / "receipts" / "inner.json", lambda body: {**body, "inputs": HASH, "scope": None})
     outer = tuning.load_receipt(out / "receipts" / "outer.json")
     rows = [{**row, "in_sample": row["arm_or_rule"] == "retuned",
              "pnl_dollars": row["pnl_dollars"] * pnl_scale + (retuned_bump if row["book"] == "short_vol" and row["arm_or_rule"] == "retuned" else 0.0)}
@@ -67,11 +63,14 @@ def build_inner(tmp_path, inner_dates, *, outer_dates, tuning_override=None, sta
         rows = [{**row, "pnl_dollars_mid": 2 * row["pnl_dollars"]} for row in rows]
     if inner_rows_fn:
         rows = inner_rows_fn(rows)
-    tuning.write_receipt(out / "receipts" / "inputs_inner.json",
+    inputs_inner_path = out / "receipts" / "inputs_inner.json"
+    tuning.write_receipt(inputs_inner_path,
                          {"stage": "inputs", "plan": size_pnl_driver.inner_plan_binding(plan_frame(TICKERS))})
+    inputs_hash = tuning.load_receipt(inputs_inner_path)["content_hash"]  # inner.json and the inner_decisions body bind this receipt
+    _rewrite(out / "receipts" / "inner.json", lambda body: {**body, "inputs": inputs_hash, "scope": None})
     body = {"stage": stage, "models": list(ROLES),
             "tuning": outer["tuning"] if tuning_override is None else tuning_override,
-            "c": {mid: 1.0 for mid in ROLES}, "emit_from": "2023-07-01", "ladder": "x", "scope": None, "inputs": HASH,
+            "c": {mid: 1.0 for mid in ROLES}, "emit_from": "2023-07-01", "ladder": "x", "scope": None, "inputs": inputs_hash,
             **(body_override or {})}
     decisions.publish(out, [pd.DataFrame(rows)], body, stem="decisions_inner", receipt="inner_decisions")
     receipt = tuning.load_receipt(out / "receipts" / "inner_decisions.json")
@@ -273,6 +272,18 @@ def test_missing_inputs_inner_refuses_when_inner_decisions_are_present(tmp_path,
     with pytest.raises(Refusal) as caught:
         assemble_mod.assemble(out, plan_frame(TICKERS), admitted=None)
     assert caught.value.details["reason"] == "report_receipt_malformed"
+    assert not (out / "REPORT.md").exists()
+
+
+def test_a_swapped_inputs_inner_receipt_refuses(tmp_path, inner_events):
+    # A different but valid inputs_inner.json (same plan binding, an extra field, so another content_hash) replaces the bound one.
+    out = build_inner(tmp_path, INNER_2024, outer_dates=OUTER_2025)
+    path = out / "receipts" / "inputs_inner.json"
+    path.unlink()
+    tuning.write_receipt(path, {"stage": "inputs", "plan": size_pnl_driver.inner_plan_binding(plan_frame(TICKERS)), "extra": "swapped"})
+    with pytest.raises(Refusal) as caught:
+        assemble_mod.assemble(out, plan_frame(TICKERS), admitted=None)
+    assert caught.value.details["reason"] == "report_receipt_chain_mismatch"
     assert not (out / "REPORT.md").exists()
 
 
