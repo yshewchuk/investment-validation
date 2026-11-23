@@ -46,6 +46,9 @@ MAX_PARTITION_BYTES = 4 << 30
 MAX_PARTITION_ROWS = 50_000_000  # post-decode sanity cap on rows per trades partition; not a memory bound
 DEFAULT_MAX_PANEL_BYTES = 2 << 30
 DEFAULT_MAX_DAILY_PARTITION_BYTES = 4 << 30
+MAX_ANCILLARY_GSPC_BYTES = 512 << 20  # engine/calendar.trading_calendar reads paths.GSPC_DAILY (required)
+MAX_ANCILLARY_REGISTRY_BYTES = 64 << 20  # engine/models/registry.json (optional: load_registry missing_ok=True)
+MAX_ANCILLARY_MANIFEST_BYTES = 64 << 20  # engine/paths.SNAPSHOT_FILE snapshot manifest JSON (optional: read_snapshot treats a missing file as None)
 
 _T0 = time.time()
 
@@ -113,15 +116,25 @@ def check_input_file(path, max_bytes):
     raise SystemExit(f"refused: {path} not found (no .csv.gz fallback either)")
 
 
-def check_context_inputs(panel_path, daily_files_for_year, years, max_panel_bytes, max_daily_bytes):
+def check_context_inputs(panel_path, daily_files_for_year, years, max_panel_bytes, max_daily_bytes,
+                         extra_files=()):
     """Size-check every file FeatureContext.load will read, before it is called.
 
-    Checks the panel file against max_panel_bytes, then every daily partition file for each year in
-    years against max_daily_bytes. Raises InputTooLarge on the first oversize file; a daily partition
-    refusal names its year. Logs one stderr line with the number of files checked.
+    All caps (max_panel_bytes, max_daily_bytes and each extra cap) are validated with _check_max_bytes
+    first, whether or not any file exists. Then the panel file is checked against max_panel_bytes, each
+    (path, max_bytes) in extra_files is checked with check_input_file, and every daily partition file
+    for each year in years is checked against max_daily_bytes. Raises InputTooLarge on the first oversize
+    file; a daily partition refusal names its year. Logs one stderr line with the number of files checked.
     """
+    _check_max_bytes(max_panel_bytes)
+    _check_max_bytes(max_daily_bytes)
+    extra_files = list(extra_files)
+    for _, extra_max in extra_files:
+        _check_max_bytes(extra_max)
     years = list(years)
     check_input_file(panel_path, max_panel_bytes)
+    for extra_path, extra_max in extra_files:
+        check_input_file(extra_path, extra_max)
     daily_checked = 0
     for year in years:
         for p in daily_files_for_year(year):
@@ -133,7 +146,8 @@ def check_context_inputs(panel_path, daily_files_for_year, years, max_panel_byte
                     detail = detail[len("refused: "):]
                 raise InputTooLarge(f"refused: daily partition for year {year}: {detail}") from None
             daily_checked += 1
-    _log(f"input size check passed: panel=1 daily_partitions={daily_checked} years={len(years)}")
+    _log(f"input size check passed: panel=1 ancillary={len(extra_files)} daily_partitions={daily_checked} "
+         f"years={len(years)}")
 
 
 def load_forecasts_bounded(path, max_bytes):
@@ -411,11 +425,13 @@ def _publish_pair(out, receipt_path, write_artifact, receipt, sha_key):
     receipt_path = Path(receipt_path)
     art_fd, art_tmp = tempfile.mkstemp(dir=out.parent, prefix=out.name + ".", suffix=".tmp")
     os.close(art_fd)
-    rec_fd, rec_tmp = tempfile.mkstemp(dir=receipt_path.parent, prefix=receipt_path.name + ".", suffix=".tmp")
-    os.close(rec_fd)
-    tmps = (art_tmp, rec_tmp)
+    tmps = [art_tmp]
     created = []
     try:
+        # Inside the try: if this fails, the artifact temp file above is still removed by the cleanup below.
+        rec_fd, rec_tmp = tempfile.mkstemp(dir=receipt_path.parent, prefix=receipt_path.name + ".", suffix=".tmp")
+        tmps.append(rec_tmp)
+        os.close(rec_fd)
         write_artifact(art_tmp)
         _fsync_path(art_tmp)
         receipt[sha_key] = file_sha256(art_tmp)
@@ -511,6 +527,7 @@ def _real_wiring(through_year, max_panel_bytes=DEFAULT_MAX_PANEL_BYTES,
                  max_daily_bytes=DEFAULT_MAX_DAILY_PARTITION_BYTES):
     # through_year is accepted for symmetry with the CLI; the loaders derive their own years.
     import engine.data.features.tier4 as tier4
+    import engine.models.registry as registry_mod
     import engine.models.training.gate_forecast_analog as ga
     import engine.paths as paths
     from engine.data import store
@@ -528,8 +545,16 @@ def _real_wiring(through_year, max_panel_bytes=DEFAULT_MAX_PANEL_BYTES,
     def build(t):
         entry_years = pd.to_datetime(t["entry_date"]).dt.year
         years = range(int(entry_years.min()) - 1, int(entry_years.max()) + 1)
+        # GSPC daily is required by trading_calendar(), so it is always checked (a missing file refuses).
+        extra_files = [(paths.GSPC_DAILY, MAX_ANCILLARY_GSPC_BYTES)]
+        # load_registry() treats a missing registry as empty (missing_ok=True), so it is checked only when present.
+        if os.path.lexists(registry_mod.REGISTRY_PATH):
+            extra_files.append((registry_mod.REGISTRY_PATH, MAX_ANCILLARY_REGISTRY_BYTES))
+        # engine/data/manifest.read_snapshot treats a missing snapshot manifest as None, so it is checked only when present.
+        if paths.SNAPSHOT_FILE.exists():
+            extra_files.append((paths.SNAPSHOT_FILE, MAX_ANCILLARY_MANIFEST_BYTES))
         check_context_inputs(paths.PANEL, lambda y: store._partition_files(paths.curated_partition("daily_market", y)),
-                             years, max_panel_bytes, max_daily_bytes)
+                             years, max_panel_bytes, max_daily_bytes, extra_files=extra_files)
         ctx = FeatureContext.load(sorted(t["ticker"].unique()), years=years)
         # The builder's own tier4.load_forecasts() call decodes through the bounded handle.
         with _patched_forecasts(tier4, bounded_forecasts):

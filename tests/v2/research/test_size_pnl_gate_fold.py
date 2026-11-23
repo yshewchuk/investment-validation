@@ -947,3 +947,107 @@ def test_real_wiring_build_refuses_oversize_panel_before_load(monkeypatch, tmp_p
     _, build, *_ = fold._real_wiring(2024, max_panel_bytes=4)
     with pytest.raises(fold.InputTooLarge):
         build(_entry_trades())
+
+
+def _small_ancillary_setup(monkeypatch, tmp_path):
+    """Patch a valid small panel and a stubbed store/partition listing; FeatureContext.load must never run."""
+    import engine.data.store as store
+    import engine.features as features
+    import engine.paths as paths
+
+    panel = tmp_path / "panel.parquet"
+    panel.write_bytes(b"abc")
+    monkeypatch.setattr(paths, "PANEL", panel)
+    monkeypatch.setattr(store, "_partition_files", lambda path: [])
+
+    def load_must_not_run(*args, **kwargs):
+        raise AssertionError("FeatureContext.load must not be called when an ancillary file is refused")
+
+    monkeypatch.setattr(features.FeatureContext, "load", load_must_not_run)
+
+
+def test_real_wiring_build_refuses_oversize_gspc_before_load(monkeypatch, tmp_path):
+    import engine.paths as paths
+
+    _small_ancillary_setup(monkeypatch, tmp_path)
+    gspc = tmp_path / "gspc_daily.csv"
+    gspc.write_bytes(b"0123456789")  # 10 bytes
+    monkeypatch.setattr(paths, "GSPC_DAILY", gspc)
+    monkeypatch.setattr(fold, "MAX_ANCILLARY_GSPC_BYTES", 4)
+    _, build, *_ = fold._real_wiring(2024)
+    with pytest.raises(fold.InputTooLarge, match="refused.*gspc_daily.csv"):
+        build(_entry_trades())
+
+
+def test_real_wiring_build_refuses_oversize_registry_before_load(monkeypatch, tmp_path):
+    import engine.paths as paths
+    import engine.models.registry as registry_mod
+
+    _small_ancillary_setup(monkeypatch, tmp_path)
+    gspc = tmp_path / "gspc_daily.csv"
+    gspc.write_bytes(b"abc")
+    monkeypatch.setattr(paths, "GSPC_DAILY", gspc)
+    registry = tmp_path / "registry.json"
+    registry.write_bytes(b"0123456789")  # 10 bytes
+    monkeypatch.setattr(registry_mod, "REGISTRY_PATH", registry)
+    monkeypatch.setattr(fold, "MAX_ANCILLARY_REGISTRY_BYTES", 4)
+    _, build, *_ = fold._real_wiring(2024)
+    with pytest.raises(fold.InputTooLarge, match="refused.*registry.json"):
+        build(_entry_trades())
+
+
+def test_real_wiring_build_refuses_oversize_snapshot_manifest_before_load(monkeypatch, tmp_path):
+    import engine.paths as paths
+    import engine.models.registry as registry_mod
+
+    _small_ancillary_setup(monkeypatch, tmp_path)
+    gspc = tmp_path / "gspc_daily.csv"
+    gspc.write_bytes(b"abc")
+    monkeypatch.setattr(paths, "GSPC_DAILY", gspc)
+    monkeypatch.setattr(registry_mod, "REGISTRY_PATH", tmp_path / "absent_registry.json")  # missing: not checked
+    snapshot = tmp_path / "SNAPSHOT"
+    snapshot.write_bytes(b"0123456789")  # 10 bytes
+    monkeypatch.setattr(paths, "SNAPSHOT_FILE", snapshot)
+    monkeypatch.setattr(fold, "MAX_ANCILLARY_MANIFEST_BYTES", 4)
+    _, build, *_ = fold._real_wiring(2024)
+    with pytest.raises(fold.InputTooLarge, match="refused.*SNAPSHOT"):
+        build(_entry_trades())
+
+
+@pytest.mark.parametrize("bad", [0, None])
+def test_check_context_inputs_validates_daily_cap_even_with_no_partitions(tmp_path, bad):
+    panel = tmp_path / "panel.parquet"
+    panel.write_bytes(b"abc")
+    with pytest.raises(ValueError, match="max_bytes must be positive"):
+        fold.check_context_inputs(panel, lambda y: [], [2023], max_panel_bytes=1 << 20, max_daily_bytes=bad)
+
+
+def test_check_context_inputs_validates_extra_cap_even_with_no_partitions(tmp_path):
+    panel = tmp_path / "panel.parquet"
+    panel.write_bytes(b"abc")
+    extra = tmp_path / "gspc_daily.csv"
+    extra.write_bytes(b"abc")
+    with pytest.raises(ValueError, match="max_bytes must be positive"):
+        fold.check_context_inputs(panel, lambda y: [], [2023], max_panel_bytes=1 << 20, max_daily_bytes=1 << 20,
+                                  extra_files=[(extra, 0)])
+
+
+def test_publish_pair_receipt_mkstemp_failure_removes_artifact_tmp(tmp_path, monkeypatch):
+    out = tmp_path / "a.bin"
+    rec = tmp_path / "a.bin.receipt.json"
+    real_mkstemp = fold.tempfile.mkstemp
+    calls = []
+
+    def second_call_fails(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 2:
+            raise OSError("simulated receipt mkstemp failure")
+        return real_mkstemp(*args, **kwargs)
+
+    monkeypatch.setattr(fold.tempfile, "mkstemp", second_call_fails)
+    with pytest.raises(OSError, match="simulated receipt mkstemp failure"):
+        fold._publish_pair(out, rec, lambda p: Path(p).write_bytes(b"payload"), {"kind": "t"}, "sha")
+    assert len(calls) == 2
+    assert not [p for p in tmp_path.iterdir() if p.name.endswith(".tmp")]
+    assert list(tmp_path.iterdir()) == []
+    assert not out.exists() and not rec.exists()
