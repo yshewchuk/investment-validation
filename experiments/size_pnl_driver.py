@@ -341,7 +341,8 @@ def _outer_gate(out, ready, scope, body, inner_tables, inner_production, inner_p
     if not (out / "receipts" / "inner_decisions.json").exists() or not (out / "decisions_inner.parquet").exists():
         raise Refusal(_CONFLICT, "inner decisions are missing or not bound to inner.json", {"reason": "inner_decisions_missing"})
     idec = tuning.load_receipt(out / "receipts" / "inner_decisions.json")
-    if idec.get("stage") != "inner_decisions" or idec.get("tuning") != inner["models"] or idec.get("inputs") != inner["inputs"] or idec.get("scope") != inner["scope"]:
+    if idec.get("stage") != "inner_decisions" or idec.get("tuning") != inner["models"] or idec.get("inputs") != inner["inputs"] or idec.get("scope") != inner["scope"] \
+            or idec.get("c") != {mid: receipts[mid]["c"] for mid in ready}:
         raise Refusal(_CONFLICT, "inner decisions are missing or not bound to inner.json", {"reason": "inner_decisions_mismatch"})
     if sorted(idec.get("models", [])) != sorted(ready) or decisions._file_sha256(out / "decisions_inner.parquet") != idec.get("decisions_sha256"):
         raise Refusal(_CONFLICT, "inner decisions are missing or not bound to inner.json", {"reason": "inner_decisions_mismatch"})
