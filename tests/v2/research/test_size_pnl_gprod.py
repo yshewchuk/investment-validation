@@ -182,6 +182,7 @@ def test_load_gate_refuses_a_changed_threshold_or_late_fold(tmp_path, payload):
     pytest.param({**fold_payload(), "train_through": True}, id="bool_train_through"),
     pytest.param({**fold_payload(), "model": "x"}, id="model_without_predict"),
     pytest.param({**fold_payload(), "threshold": "high"}, id="threshold_not_a_number"),
+    pytest.param({**fold_payload(), "train_through": 2023}, id="train_through"),
 ])
 def test_load_gate_refuses_a_malformed_fold_payload(tmp_path, payload):
     with pytest.raises(OpsError) as exc:
@@ -271,6 +272,27 @@ def test_thin_pool_is_undetermined_not_no(tmp_path):
     table, labels = history(n=10)
     out = gp.month_decider(gate, table, labels, START)(pd.DataFrame([ev("hi", 3.0)]), good("hi")).set_index("event_id")
     assert out.loc["hi", "status"] == "undetermined" and out.loc["hi", "reason"] == "thin_pool"
+
+
+class Constant:
+    """A stub fold model returning one constant for every row."""
+    def __init__(self, value):
+        self.value = value
+
+    def predict(self, X):
+        return np.full(len(X), self.value)
+
+
+def test_threshold_boundary():
+    table, labels = history()
+    inputs = inputs_frame(["hi"]).set_index("event_id")[FEATURES].astype(float)
+    at = gp.Gate(Constant(fold.REGISTERED_THRESHOLD), tuple(FEATURES), fold.REGISTERED_THRESHOLD, inputs, "a", "b")
+    out = gp.month_decider(at, table, labels, START)(pd.DataFrame([ev("hi", 3.0)]), good("hi")).set_index("event_id")
+    assert out.loc["hi", "status"] == "taken" and pd.isna(out.loc["hi", "reason"])
+    below = np.nextafter(fold.REGISTERED_THRESHOLD, 0)
+    gate = gp.Gate(Constant(below), tuple(FEATURES), fold.REGISTERED_THRESHOLD, inputs, "a", "b")
+    out = gp.month_decider(gate, table, labels, START)(pd.DataFrame([ev("hi", 3.0)]), good("hi")).set_index("event_id")
+    assert out.loc["hi", "status"] == "not_taken" and out.loc["hi", "reason"] == "below_gate_threshold"
 
 
 def test_month_decider_enforces_label_availability():

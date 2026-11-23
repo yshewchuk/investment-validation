@@ -16,7 +16,7 @@ from experiments import label_availability, size_pnl_gate_fold as fold, size_pnl
 
 RULE = straddle.GATE_RULE
 MODEL_COLS = ("pred_abs_move", "pred_abs_move_p10", "pred_abs_move_p90", "pred_abs_move_sd", "forecast_edge")
-MAX_FOLD_BYTES = 256 << 20
+MAX_FOLD_BYTES = 16 << 20
 MAX_INPUTS_BYTES = 256 << 20
 MAX_INPUT_ROWS = 5_000_000
 MAX_INPUT_DECODED_BYTES = 2 << 30
@@ -73,7 +73,7 @@ def _valid_fold(payload):
     return (isinstance(features, (list, tuple)) and all(isinstance(f, str) and f.strip() for f in features)
             and len(set(features)) == len(features) and set(MODEL_COLS) <= set(features)
             and threshold == fold.REGISTERED_THRESHOLD
-            and isinstance(through, int) and not isinstance(through, bool) and through <= fold.MAX_TRAIN_THROUGH
+            and isinstance(through, int) and not isinstance(through, bool) and through == fold.MAX_TRAIN_THROUGH
             and callable(getattr(payload["model"], "predict", None)))
 
 
@@ -87,7 +87,7 @@ def load_gate(binding):
     raw_fold = _read_verified(binding["gate_fold"], "fold", MAX_FOLD_BYTES)
     raw_inputs = _read_verified(binding["gate_inputs"], "inputs", MAX_INPUTS_BYTES)
     import joblib  # lazy: only a configured gate needs it
-    # the fold is sha256-pinned and capped at MAX_FOLD_BYTES; joblib has no pre-decode size bound
+    # the fold is sha256-pinned (a supervisor-built HGB artifact of a few hundred KB) and capped at 16 MiB; zlib bounds the decoded size at about 1032x the file, and joblib has no pre-decode limit
     try:
         payload = joblib.load(io.BytesIO(raw_fold))
     except Exception:
