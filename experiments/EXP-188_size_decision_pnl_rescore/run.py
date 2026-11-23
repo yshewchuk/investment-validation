@@ -29,6 +29,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--stage", required=True, choices=("inner", "outer", "synthetic", "report"))
     parser.add_argument("--replay", action="store_true", help="synthetic stage only: re-score and compare (X7); other stages ignore it")
     parser.add_argument("--event-ids", default=None, help="optional smoke set: a JSON array of event id strings (validated by the driver)")
+    parser.add_argument("--stored-gate", default=None, help="report stage only: JSON object {\"scored\": [event ids], \"selected\": [event ids]} from production's stored walk-forward 2025 gate decisions (EXP-187 arm B); omitted: the M0 agreement is not_available")
     parser.add_argument("--out-dir", required=True)
     parser.add_argument("--expected", required=True, help="JSON with plan_id, registration_id, seal_id, panel_id of the v14 RERUN")
     parser.add_argument("--sources", required=True, help="MODULE:FUNC, called with the parsed args, returns a size_pnl_driver.Sources")
@@ -57,6 +58,15 @@ def _read_json(path: str):
         raise fail(_INVALID, f"{path} is unreadable", details={"reason": "input_unreadable"}) from exc
 
 
+def _stored_gate_valid(value) -> bool:
+    """True when ``value`` is {"scored": [ids], "selected": [ids]} with non-empty string ids and every selected id scored."""
+    if not (isinstance(value, dict) and set(value) == {"scored", "selected"}):
+        return False
+    if not all(isinstance(v, list) and all(isinstance(e, str) and e for e in v) for v in value.values()):
+        return False
+    return set(value["selected"]) <= set(value["scored"])
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
@@ -71,6 +81,7 @@ def main(argv: list[str] | None = None) -> int:
             event_ids = _read_json(args.event_ids) if args.event_ids is not None else None
             if args.event_ids is not None and not (isinstance(event_ids, list) and all(isinstance(e, str) for e in event_ids)): raise fail(_INVALID, "--event-ids must be a JSON array of strings", details={"reason": "event_ids_invalid"})
             if args.stage == "report" and args.event_ids is not None: raise fail(_INVALID, "--event-ids is not supported by the report stage", details={"reason": "event_ids_not_supported"})
+            if args.stage != "report" and args.stored_gate is not None: raise fail(_INVALID, "--stored-gate is for the report stage only", details={"reason": "stored_gate_not_supported"})
             from experiments import size_pnl_assemble, size_pnl_driver  # after the gates, so a missing PLANNED row refuses first
             module_name, _, func = args.sources.partition(":")
             try:  # no colon gives func "", not an attribute; a bad module raises ImportError
@@ -84,7 +95,10 @@ def main(argv: list[str] | None = None) -> int:
             if sources.expected != args.expected_identities:
                 raise fail(_CONFLICT, "--expected differs from the sources' expected identities", details={"reason": "expected_mismatch"})
             if args.stage == "report":
-                summary = size_pnl_assemble.assemble(args.out_dir, sources.plan_frame, admitted=sources.admitted, expected=sources.expected, spec_hash=receipt["spec_hash"], snapshot=sources.snapshot_id)
+                stored = _read_json(args.stored_gate) if args.stored_gate is not None else None
+                if stored is not None and not _stored_gate_valid(stored):
+                    raise fail(_INVALID, "--stored-gate must be {scored, selected} lists of event id strings, selected within scored", details={"reason": "stored_gate_invalid"})
+                summary = size_pnl_assemble.assemble(args.out_dir, sources.plan_frame, admitted=sources.admitted, expected=sources.expected, spec_hash=receipt["spec_hash"], snapshot=sources.snapshot_id, stored_gate=stored)
             elif args.stage == "synthetic": summary = size_pnl_driver.run_synthetic(sources, args.out_dir, event_ids=event_ids, replay=args.replay, prereg=lambda: receipt)
             else: summary = size_pnl_driver.run(sources, args.stage, args.out_dir, event_ids=event_ids, prereg=lambda: receipt)
     except (OpsError, Refusal, DataError) as exc:

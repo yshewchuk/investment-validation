@@ -20,6 +20,7 @@ LABEL_OF = {"m0": "M0", "hsq": "H-sq", "habs": "H-abs", "eraw": "E-raw", "elog":
 ROSTER = {"pairs": {"H": "testable", "E": "testable", "N": "testable"}}
 FRAME = pd.DataFrame({"event_id": EVENTS})
 RAW = list(LABEL_OF)
+STORED = {"scored": ["E1", "E2", "E3", "E4", "E5", "E6", "E9"], "selected": ["E1", "E2", "E4", "E9"]}
 
 
 def _cells(over=None):
@@ -43,7 +44,7 @@ def _det(gate):
 def _run(gate, *, outer=None, stored=None, quarter=QUARTER):
     return gprod_report.sections(gate, FRAME, label_of=LABEL_OF, role_model=ROLE_MODEL, roster=ROSTER,
                                  outer_models=set(LABEL_OF) if outer is None else outer,
-                                 quarter_of=quarter, tick=TICK, stored_selected=stored)
+                                 quarter_of=quarter, tick=TICK, stored_gate=stored)
 
 
 def _rows(section):
@@ -142,19 +143,27 @@ def test_agreement_not_available_without_stored_decisions():
 
 
 def test_agreement_counts_by_hand():
-    text = _agreement(_det(_agreement_gate()), ROLE_MODEL, LABEL_OF, set(LABEL_OF), ["E1", "E2", "E4", "E9"])
+    text = _agreement(_det(_agreement_gate()), ROLE_MODEL, LABEL_OF, set(LABEL_OF), STORED)
     (row,) = _rows(text)
     assert row == {"events": "6", "both_taken": "2", "m0_only": "1", "production_only": "1", "neither": "2",
-                   "agreement_rate": "0.6667", "production_selected_outside_m0": "1"}
+                   "agreement_rate": "0.6667", "production_scored_outside_m0": "1"}
 
 
 def test_agreement_excludes_m0_rows_dated_outside_2025():
     gate = _agreement_gate()
     gate.loc[(gate["model_id"] == "m0") & (gate["event_id"] == "E6"), "event_date"] = pd.Timestamp("2024-06-15")
-    text = _agreement(_det(gate), ROLE_MODEL, LABEL_OF, set(LABEL_OF), ["E1", "E2", "E4", "E9"])
+    text = _agreement(_det(gate), ROLE_MODEL, LABEL_OF, set(LABEL_OF), STORED)
     (row,) = _rows(text)
     assert row == {"events": "5", "both_taken": "2", "m0_only": "1", "production_only": "1", "neither": "1",
-                   "agreement_rate": "0.6", "production_selected_outside_m0": "1"}
+                   "agreement_rate": "0.6", "production_scored_outside_m0": "2"}
+
+
+def test_agreement_rate_excludes_events_production_never_scored():
+    stored = {"scored": ["E1", "E2", "E3", "E4"], "selected": ["E1", "E2", "E4"]}
+    text = _agreement(_det(_agreement_gate()), ROLE_MODEL, LABEL_OF, set(LABEL_OF), stored)
+    (row,) = _rows(text)
+    assert row == {"events": "4", "both_taken": "2", "m0_only": "1", "production_only": "1", "neither": "0",
+                   "agreement_rate": "0.5", "production_scored_outside_m0": "0"}
 
 
 def test_m0_absent_from_the_run_is_not_available():

@@ -9,15 +9,15 @@ from experiments.size_pnl_inputs import PAIRS
 LABEL = ("Sensitivity (Amendment 3): production gate refit once through 2024, not refit per model "
          "(favours M0 forecast scale); not the pre-registered verdict")
 MARKS = (("primary", "pnl_dollars"), ("mid", "pnl_dollars_mid"))
-NOT_AVAILABLE = ("not_available: production's stored walk-forward gate decisions (EXP-187 arm B, champion/results/transactions_*.csv, "
-                 "gitignored) are not in the run's Sources or receipts, and the report stage reads published decisions only")
+NOT_AVAILABLE = ("not_available: production's stored walk-forward gate decisions (EXP-187 arm B, gitignored champion/results/transactions_*.csv) "
+                 "were not supplied: pass --stored-gate to run.py --stage report (a JSON object with the event ids production scored and selected)")
 COVERAGE_NOTE = ("covered = events with a determined G_PROD decision (taken or not_taken) in E; undetermined (a missing or NaN gate input, "
                  "a thin residual pool) is never counted as no. P&L per covered event counts untaken rows as 0. Contrasts below use the "
                  "covered subset of each pair: the events both members have a determined decision on.")
 CONTRAST_NOTE = "d = median-type minus mean-type for the H2 pairs; M0 minus the named model for the M0 rows. arm primary = primary marks; arm mid = marks_mid."
-AGREEMENT_NOTE = ("Events are M0's determined 2025 G_PROD events. production_selected is the stored EXP-187 arm B selected set (served gate, "
-                  "threshold refit per walk-forward fold, on v2-snapshot trades); the stored output holds selected trades only, so an event it "
-                  "did not select counts as not selected even when production never scored it. The fold CLI refits on the legacy store's "
+AGREEMENT_NOTE = ("Events are M0's determined 2025 G_PROD events that production also scored (the stored `scored` set); an event production "
+                  "never scored is outside the rate and counted in production_scored_outside_m0. selected is the stored EXP-187 arm B selected "
+                  "set (served gate, threshold refit per walk-forward fold, on v2-snapshot trades); the fold CLI refits on the legacy store's "
                   "trades (known difference). A low rate is a finding, never a reason to tune.")
 
 
@@ -50,29 +50,31 @@ def _total(series_by_label, label):
     return float(series_by_label[label].sum()) if label in series_by_label else 0.0
 
 
-def _agreement(det, role_model, label_of, outer_models, stored_selected):
+def _agreement(det, role_model, label_of, outer_models, stored_gate):
     """M0's agreement with production's stored 2025 gate decisions, as a Markdown section (titled by the caller)."""
     heading = "### G_PROD M0 agreement with production's stored 2025 gate decisions"
     m0_raw = role_model.get("M0")
     m0 = label_of.get(m0_raw)
     if m0 is None or m0_raw not in outer_models:
         return f"{heading}\n\nnot_available: M0_not_in_run"
-    if stored_selected is None:
+    if stored_gate is None:
         return f"{heading}\n\n{NOT_AVAILABLE}"
+    scored = {str(e) for e in stored_gate["scored"]}
+    sel = {str(e) for e in stored_gate["selected"]} & scored
     rows = det[(det["model_id"] == m0) & (det["event_date"].dt.year == 2025)]
-    events = set(rows["event_id"])
-    taken = set(rows.loc[rows["status"] == "taken", "event_id"])
-    sel = {str(e) for e in stored_selected}
+    all_m0 = set(rows["event_id"])
+    events = all_m0 & scored
+    taken = set(rows.loc[rows["status"] == "taken", "event_id"]) & events
     both, m0_only = taken & sel, taken - sel
     prod_only, neither = (events & sel) - taken, events - taken - sel
     n = len(events)
     rate = (len(both) + len(neither)) / n if n else None
-    headers = ["events", "both_taken", "m0_only", "production_only", "neither", "agreement_rate", "production_selected_outside_m0"]
-    table = report.md_table(headers, [[n, len(both), len(m0_only), len(prod_only), len(neither), rate, len(sel - events)]])
+    headers = ["events", "both_taken", "m0_only", "production_only", "neither", "agreement_rate", "production_scored_outside_m0"]
+    table = report.md_table(headers, [[n, len(both), len(m0_only), len(prod_only), len(neither), rate, len(scored - all_m0)]])
     return f"{heading}\n\n{AGREEMENT_NOTE}\n\n{table}"
 
 
-def sections(gate_raw, frame, *, label_of, role_model, roster, outer_models, quarter_of, tick, stored_selected=None):
+def sections(gate_raw, frame, *, label_of, role_model, roster, outer_models, quarter_of, tick, stored_gate=None):
     """The G_PROD sections over the events of E (``frame``): per-model coverage and P&L, the covered-subset contrasts, and M0's
     agreement with production's stored 2025 decisions. [] when there are no gate rows."""
     if gate_raw.empty:
@@ -126,5 +128,5 @@ def sections(gate_raw, frame, *, label_of, role_model, roster, outer_models, qua
     contrast_text = report.t7_contrasts(shown).replace("### T7 Contrasts", "### G_PROD contrasts (covered subset)", 1)
     contrast_text += "\n\n" + CONTRAST_NOTE
 
-    agreement = _agreement(det, role_model, label_of, outer_models, stored_selected)
+    agreement = _agreement(det, role_model, label_of, outer_models, stored_gate)
     return [_title(table1), _title(contrast_text), _title(agreement)]

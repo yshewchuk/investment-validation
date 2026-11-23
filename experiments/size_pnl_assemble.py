@@ -305,7 +305,7 @@ def _account_sections(frame, role_model, label_of, universe):
     return size_pnl_account.tables(results, diffs)
 
 
-def _sections(out, outer, inputs, inner, tuned, tickers, stored_gate_selected=None):
+def _sections(out, outer, inputs, inner, tuned, tickers, stored_gate=None):
     """The report's sections in order. Reads receipt fields throughout; the caller maps a missing or mistyped field to a refusal.
     Returns (sections, inner row count)."""
     raw = _load_decisions(out, outer)
@@ -422,7 +422,7 @@ def _sections(out, outer, inputs, inner, tuned, tickers, stored_gate_selected=No
         sections += [_sens(text) for text in (*mid, _verdicts(classify_mid, missing_years, inner_present, shown_m))]
     if not gate_raw.empty:  # Amendment 3: the G_PROD sections, after the Amendment 1 ones and before the accounts
         sections += gprod_report.sections(gate_raw, frame, label_of=label_of, role_model=role_model, roster=roster, outer_models=outer_models,
-                                          quarter_of=ctx_o["quarter_of"], tick=tick, stored_selected=stored_gate_selected)
+                                          quarter_of=ctx_o["quarter_of"], tick=tick, stored_gate=stored_gate)
     every = pd.concat([raw, gate_raw])  # Amendment 2 accounts read every row, G_PROD included
     taken_all = every[every["status"] == "taken"].assign(model_id=every["model_id"].map(label_of), taken=True)  # Amendment 2: every taken row, not only E
     universe = every.assign(model_id=every["model_id"].map(label_of))  # Amendment 2: every decision row, of any status, discovers the account keys
@@ -430,10 +430,10 @@ def _sections(out, outer, inputs, inner, tuned, tickers, stored_gate_selected=No
     return sections, inner_rows
 
 
-def assemble(out_dir, plan, *, admitted, expected=None, spec_hash=None, snapshot=None, stored_gate_selected=None):
+def assemble(out_dir, plan, *, admitted, expected=None, spec_hash=None, snapshot=None, stored_gate=None):
     """Write ``out_dir/REPORT.md`` from the outer receipts and decisions.parquet; returns a JSON-safe summary.
     Each of expected, spec_hash and snapshot that is given must equal the matching field of inputs_outer.json.
-    ``stored_gate_selected`` is optional: the event ids production's stored walk-forward 2025 gate selected; None reports the M0 agreement as not_available.
+    ``stored_gate`` is optional {'scored': ids, 'selected': ids} from production's stored walk-forward 2025 gate decisions; None reports the M0 agreement as not_available.
     ``plan`` is the plan frame (sources.plan_frame) and ``admitted`` the sources' admitted events; the shared plan
     admission (size_pnl_ladder.check_plan) runs here, so every caller gets the same refusals as the scoring path.
     The ticker map and the plan binding (the receipted plan hash that a full run must match) are both derived from
@@ -485,7 +485,7 @@ def assemble(out_dir, plan, *, admitted, expected=None, spec_hash=None, snapshot
         if inner_bad:
             raise _refuse("report_inputs_mismatch", "the plan's inner-window rows do not match inputs_inner.json")
     with _admit("report_receipt_malformed", "a receipt or decisions row lacks a required field"):
-        sections, inner_rows = _sections(out, outer, inputs, inner, tuned, tickers, stored_gate_selected)
+        sections, inner_rows = _sections(out, outer, inputs, inner, tuned, tickers, stored_gate)
     text = report.build_report(sections)
     path = out / "REPORT.md"
     handle = tempfile.NamedTemporaryFile("w", dir=out, delete=False, suffix=".tmp", encoding="utf-8")
