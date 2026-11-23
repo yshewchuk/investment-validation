@@ -40,6 +40,8 @@ MAX_TRAIN_THROUGH = 2024
 MIN_TRAIN_ROWS = 500
 ADMITTED_MAX_BYTES = 64 << 20
 LABEL_COLUMNS = ("ret", "exit_value", "exit_date")
+FIT_TRADE_COLUMNS = ("event_id", "event_date", "entry_date", "exit_date")
+INPUTS_TRADE_COLUMNS = ("event_id", "event_date", "entry_date")
 PROGRESS_INTERVAL_S = 30
 MAX_FORECAST_BYTES = 4 << 30
 MAX_PARTITION_BYTES = 4 << 30
@@ -240,7 +242,25 @@ def refuse_protected(out, root):
     return out
 
 
+def _missing_trade_columns(frame, required):
+    return [c for c in required if c not in frame.columns]
+
+
+def _require_loaded_trades(frame, required, max_year):
+    """Refuse an empty or column-less trades frame straight after load_trades, before any other work."""
+    missing = _missing_trade_columns(frame, required)
+    if frame.empty or missing:
+        raise SystemExit(f"refused: no STR-THRU engine.replay trades loaded for years up to {max_year} "
+                         f"(empty store, wrong root or missing columns: {missing})")
+
+
+def _check_trades_frame(frame, required):
+    if frame.empty or _missing_trade_columns(frame, required):
+        raise ValueError("no trades loaded")
+
+
 def cut_trades(trades, through):
+    _check_trades_frame(trades, FIT_TRADE_COLUMNS)
     cutoff = pd.Timestamp(f"{through}-12-31")
     event_ok = pd.to_datetime(trades["event_date"]) <= cutoff
     exit_dt = pd.to_datetime(trades["exit_date"])
@@ -326,6 +346,7 @@ def train_fold(trades, *, through, build, fit, features, target, seed, threshold
 
 
 def build_inputs(trades, *, year, build, features, admitted_ids):
+    _check_trades_frame(trades, INPUTS_TRADE_COLUMNS)
     cutoff = pd.Timestamp(f"{year}-12-31")
     features = list(features)
     # Admission happens before the build: non-admitted events of `year` never reach `build`.
@@ -590,6 +611,7 @@ def _run_fit(args, wiring, root):
         _log(f"fit start: train_through={args.train_through}")
         t_load = time.time()
         trades = load_trades(args.train_through)
+        _require_loaded_trades(trades, FIT_TRADE_COLUMNS, args.train_through)
         _log(f"fit load done: {time.time() - t_load:.1f}s")
         model, receipt = train_fold(trades, through=args.train_through, build=build, fit=fit,
                                     features=features, target=target, seed=SEED, threshold=REGISTERED_THRESHOLD)
@@ -618,6 +640,7 @@ def _run_inputs(args, wiring, root):
         _log(f"inputs start: year={args.year} admitted={len(admitted_ids)}")
         t_load = time.time()
         trades = load_trades(args.year)
+        _require_loaded_trades(trades, INPUTS_TRADE_COLUMNS, args.year)
         _log(f"inputs load done: {time.time() - t_load:.1f}s")
         t_build = time.time()
         table, receipt = build_inputs(trades, year=args.year, build=build, features=features,

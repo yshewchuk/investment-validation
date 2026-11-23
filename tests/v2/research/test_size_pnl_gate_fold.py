@@ -1051,3 +1051,35 @@ def test_publish_pair_receipt_mkstemp_failure_removes_artifact_tmp(tmp_path, mon
     assert not [p for p in tmp_path.iterdir() if p.name.endswith(".tmp")]
     assert list(tmp_path.iterdir()) == []
     assert not out.exists() and not rec.exists()
+
+
+def _empty_store_wiring():
+    return (lambda max_year: pd.DataFrame(), _build, _fit, list(FEATS), "ret")
+
+
+def test_main_fit_refuses_empty_store_before_any_work(tmp_path):
+    out = tmp_path / "gate.joblib"
+    with pytest.raises(SystemExit, match="no STR-THRU") as info:
+        fold.main(["fit", "--train-through", "2024", "--out", str(out)], wiring=_empty_store_wiring(), root=tmp_path)
+    assert "missing columns" in str(info.value.code)
+    assert list(tmp_path.iterdir()) == []  # nothing written, and the refusal precedes the cut and the build
+
+
+def test_main_inputs_refuses_empty_store_before_any_work(tmp_path):
+    out = tmp_path / "inputs_2025.parquet"
+    adm = _admitted_file(tmp_path / "adm")
+    with pytest.raises(SystemExit, match="no STR-THRU"):
+        fold.main(["inputs", "--year", "2025", "--out", str(out), "--admitted-events", str(adm)],
+                  wiring=_empty_store_wiring(), root=tmp_path)
+    assert not out.exists()
+    assert not (tmp_path / "inputs_2025.parquet.receipt.json").exists()
+
+
+def test_cut_trades_empty_frame_raises_no_trades_loaded():
+    with pytest.raises(ValueError, match="no trades loaded"):
+        fold.cut_trades(pd.DataFrame(), 2024)
+
+
+def test_build_inputs_empty_frame_raises_no_trades_loaded():
+    with pytest.raises(ValueError, match="no trades loaded"):
+        fold.build_inputs(pd.DataFrame(), year=2025, build=_build, features=FEATS, admitted_ids=ADMITTED_2025)
