@@ -129,6 +129,7 @@ CASES = [
     ("report_nonfinite_pnl", lambda tmp_path: (build(tmp_path, rows_fn=lambda rows: [{**rows[0], "pnl_dollars": float("nan")}, *rows[1:]]), plan_frame())),
     ("report_decisions_columns", lambda tmp_path: (build(tmp_path, rows_fn=lambda rows: [{k: v for k, v in r.items() if k != "rung"} for r in rows]), plan_frame())),
     ("report_decisions_empty", lambda tmp_path: (build(tmp_path, rows_fn=lambda rows: pd.DataFrame(rows).iloc[0:0]), plan_frame())),
+    ("report_decisions_invalid", lambda tmp_path: (build(tmp_path, rows_fn=lambda rows: [{**rows[0], "book": "bogus"}, *rows[1:]]), plan_frame())),
 ]
 
 

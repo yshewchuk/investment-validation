@@ -330,6 +330,8 @@ def _sections(out, outer, inputs, inner, tuned, tickers, stored_gate=None):
 
     def _check(raw):
         """The raw-row checks: ticker present, finite taken P&L and account cash, valid account dates, model ids in the roster. They run before population drops any event."""
+        if not raw["book"].isin(["short_vol", "straddle"]).all():  # null is not in the list, so a null book refuses too; an empty frame passes
+            raise _refuse("report_decisions_invalid", "a row in decisions.parquet has a book other than short_vol or straddle")
         if not set(raw["event_id"]) <= set(tick):
             raise _refuse("report_ticker_missing", "an event in decisions.parquet has no ticker")
         if not np.isfinite(raw.loc[raw["status"] == "taken", "pnl_dollars"].to_numpy(dtype=float)).all():
