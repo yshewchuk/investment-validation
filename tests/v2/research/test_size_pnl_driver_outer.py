@@ -279,7 +279,7 @@ def test_oracle_one_taken_2025_event_carries_its_literal_marks(tmp_path, outer_s
     assert untaken["exit_value_mid"].isna().all() and untaken["pnl_dollars_mid"].isna().all()
     taken_short = short[short["status"] == "taken"]
     assert (taken_short["secured_per_contract"] == 9500.0).all()
-    assert taken_short["entry_date"].map(lambda v: isinstance(v, str)).all() and taken_short["exit_date"].map(lambda v: isinstance(v, str)).all()
+    assert (taken_short["entry_date"] == "2025-01-14").all() and (taken_short["exit_date"] == "2025-01-16").all()  # E3's PLAN_FRAME dates: 2025-01-15 -/+ 1 day
     assert untaken["secured_per_contract"].isna().all() and untaken["entry_date"].isna().all() and untaken["exit_date"].isna().all()
     straddle_taken = frame[(frame["book"] == "straddle") & (frame["status"] == "taken")]  # none in this fixture; checked if any appear
     assert (straddle_taken["secured_per_contract"] == 0.0).all()
@@ -287,7 +287,7 @@ def test_oracle_one_taken_2025_event_carries_its_literal_marks(tmp_path, outer_s
 
 def test_oracle_one_taken_2025_straddle_event_carries_zero_secured_and_dates(tmp_path, outer_stubs, monkeypatch):
     """Only E3 is taken on the straddle book; its scorer marks are literal. Every taken straddle row must carry
-    secured_per_contract 0.0 (the account restates it as debit x 100 later) and non-null entry and exit dates."""
+    secured_per_contract 0.0 (the account restates it as debit x 100 later) and E3's literal PLAN_FRAME entry and exit dates."""
     def decide_e3_taken(events, history, rule, chunk_):
         ids = events["event_id"].astype(str)
         is_e3 = (ids == "E3").to_numpy()
@@ -305,7 +305,7 @@ def test_oracle_one_taken_2025_straddle_event_carries_zero_secured_and_dates(tmp
     straddle_taken = frame[(frame["book"] == "straddle") & (frame["status"] == "taken")]
     assert len(straddle_taken) > 0
     assert (straddle_taken["secured_per_contract"] == 0.0).all()
-    assert straddle_taken["entry_date"].notna().all() and straddle_taken["exit_date"].notna().all()
+    assert (straddle_taken["entry_date"] == "2025-01-14").all() and (straddle_taken["exit_date"] == "2025-01-16").all()  # E3's PLAN_FRAME dates
 
 
 def test_outer_refuses_when_inner_json_names_another_model_hash(tmp_path, stubs, monkeypatch):

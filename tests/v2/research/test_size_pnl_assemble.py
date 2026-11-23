@@ -801,7 +801,11 @@ def test_straddle_only_run_is_testable_for_the_account(tmp_path):
     assert "not_testable: account_columns_not_in_decisions" not in text  # the Amendment 2 table is produced, not the note
     account = _section_lines(text, "### Sensitivity (Amendment 2)")
     assert account[0].startswith("### Sensitivity (Amendment 2), not the pre-registered verdict")
-    assert any(line.startswith("| straddle |") for line in account)
+    # Hand-derived from this fixture: debit 0.5 restated to secured 50 (debit x 100); four non-overlapping events, each
+    # funded at floor(0.25 * 0.66 * equity / 50) contracts: 330, 340, 352, 363 as equity goes 100000, 103300, 106700,
+    # 110220. Each contract nets (0.6 - 0.5) x 100 = 10, so final = 100000 + 10 * 1385 = 113850; drawdown 0 (equity only
+    # rises); one position open at a time. The first straddle row in sorted order is E-log (m-elog) with rule R_L.
+    assert "| straddle | E-log | R_L | 4 | 4 | 113850.00 | 0.1385 | 0 | 1 |" in account
 
 
 def test_empty_taken_frame_with_the_column_reports_zero_trade_accounts(tmp_path):

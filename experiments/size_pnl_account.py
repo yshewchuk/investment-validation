@@ -1,4 +1,4 @@
-"""EXP-188 Amendment 2: cash-secured $100,000 account sensitivity (guides/size_decision_pnl_design.md section 15).
+"""EXP-188 Amendment 2: cash-secured $100,000 account sensitivity (guides/size_decision_pnl_design.md section 16).
 
 Research-only and report-only: it reads the taken rows of decisions.parquet and produces sensitivity tables. It is
 not the pre-registered verdict, it computes no interval, and it never changes a decision. The margin rule is EXP-134's
@@ -13,7 +13,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from experiments.size_pnl_report import _md_table
+from experiments.size_pnl_report import md_table
 
 _MARGIN = Path(__file__).resolve().parents[1] / "experiments" / "EXP-134_priced_right_funded_and_held_structure_s" / "margin.py"
 
@@ -71,7 +71,7 @@ def simulate_account(rows, mark):
 
 
 def straddle_rows(rows):
-    """Copy with the straddle's secured cash = debit x 100 (the cash a long straddle needs; a judgement call, design section 15)."""
+    """Copy with the straddle's secured cash = debit x 100 (the cash a long straddle needs; a judgement call, design section 16)."""
     out = rows.copy()
     out["secured_per_contract"] = out["entry_cost"].astype(float) * 100.0
     return out
@@ -126,7 +126,7 @@ def tables(results, diffs):
             continue
         title = f"### Sensitivity (Amendment 2), not the pre-registered verdict: cash-secured $100,000 accounts, {mark} marks"
         # Dollar values are pre-formatted with cents: _cell would render a float at 4 significant digits (100049.0 -> "1e+05").
-        account = _md_table(_ACCOUNT_HEADERS, [[f"{r[h]:.2f}" if h == "final_equity" else r[h] for h in _ACCOUNT_HEADERS] for r in rows])
+        account = md_table(_ACCOUNT_HEADERS, [[f"{r[h]:.2f}" if h == "final_equity" else r[h] for h in _ACCOUNT_HEADERS] for r in rows])
         diff_rows = [[f"{d[h]:.2f}" if h == "diff" else d[h] for h in ("mark", "kind", "key", "contrast", "diff")] for d in diffs if d["mark"] == mark]
-        out.append("\n\n".join([title, NOTE, account, _md_table(["mark", "kind", "key", "contrast", "diff"], diff_rows)]))
+        out.append("\n\n".join([title, NOTE, account, md_table(["mark", "kind", "key", "contrast", "diff"], diff_rows)]))
     return out
