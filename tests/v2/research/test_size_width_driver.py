@@ -308,6 +308,16 @@ def test_inputs_hash_is_stable_on_rerun_and_binds_the_inner_m0_table(m0, monkeyp
     assert driver._load(src, "inner", None, OK())["inputs_hash"] != first
 
 
+def test_inner_and_outer_loads_derive_the_same_inputs_hash(m0, monkeypatch):
+    src = sources()
+    monkeypatch.setattr(base.outer_inputs, "bind_outer", lambda plan, read, bound, roster, admit, **kw: bound)  # outer-only binder, pass-through
+    inner = driver._load(src, "inner", None, OK())
+    outer = driver._load(src, "outer", None, OK())
+    assert outer["inputs_hash"] == inner["inputs_hash"]
+    for key in ("inner_table", "inner_plan", "inner_facts"):
+        assert outer["inputs"][key] == inner["inputs"][key]
+
+
 def test_null_plan_date_refuses_plan_dates_null_in_load(m0):
     plan = PLAN_FRAME.copy()
     plan.loc[plan["event_id"] == "E1", "entry_date"] = pd.NaT

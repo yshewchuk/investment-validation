@@ -181,11 +181,11 @@ def _preflight(out, loaded):
     return arms, by
 
 
-def _outer(src, out, loaded, pre=None):
+def _outer(src, out, loaded):
     """The outer stage. Preflight first: the inner summary and every arm's frozen factors, before any chunk is built. Then each
     2025 month is frozen before its labels are read (R6)."""
     ids, inputs_hash, plan = loaded["ids"], loaded["inputs_hash"], loaded["plan"]
-    arms, by = _preflight(out, loaded) if pre is None else pre
+    arms, by = _preflight(out, loaded)
     sweep, labels, table, sessions = Sweep(ladder=True, pricing=PRICING), loaded["labels"], loaded["table"], loaded["sessions"]
     total, started, count, fresh_labels = _total(plan), time.monotonic(), 0, []
     for count, (chunk, events, output) in enumerate(_months(src, plan, table, loaded["facts_all"], loaded["exits"], pd.Timestamp(base.OUTER[0])), start=1):
@@ -223,9 +223,10 @@ def run(src, stage, out_dir, *, event_ids=None, prereg=size_width_prereg.require
     ids = base._smoke(src, event_ids)
     _log(f"scope={'smoke' if ids is not None else 'full'} events={'all' if ids is None else len(ids)}")
     loaded = _load(src, stage, ids, receipt)
-    pre = _preflight(out, loaded) if stage == "outer" else None
+    if stage == "outer":
+        _preflight(out, loaded)  # before the receipt: a failed preflight leaves no inputs_outer.json
     out.mkdir(parents=True, exist_ok=True)
     base._receipt(out / "receipts" / f"inputs_{stage}.json", loaded["inputs"], "inputs_receipt_changed")
-    summary = _inner(src, out, loaded) if stage == "inner" else _outer(src, out, loaded, pre)
+    summary = _inner(src, out, loaded) if stage == "inner" else _outer(src, out, loaded)
     _log(f"stage={stage} end elapsed={time.monotonic() - started:.1f}s rss={base._rss_mb():.0f}MB")
     return summary
