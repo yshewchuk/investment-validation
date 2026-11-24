@@ -93,6 +93,33 @@ def test_repriced_short_vol_scores_at_the_endpoint_alpha(pool):
     pd.testing.assert_frame_equal(sv.score(chunk, events, decisions, "CND-PS", 0.5, mid_marks=True, repriced=True), at_half)
 
 
+def test_repriced_endpoints_match_a_hand_derived_oracle(pool):
+    # Same fixture as above. Hand-derived, not computed from the scorer:
+    # entry cost = 0.94 - 0.8 * alpha (BUY 94 and 106 at ask - alpha*spread, SELL 97 and 103 at bid + alpha*spread; quotes in the comment above).
+    # A's exit: the rung-2 BUY 94 sells at bid + alpha * (ask - bid) = 1.0 + alpha; the other legs net to 0, so exit value = alpha.
+    # B has no exit quote map, so every leg marks at (1.0, 1.0) and the exit value is 0 at every alpha.
+    chunk = chunk_of(("A", {94: (1.0, 2.0, 2)}), ("B", {}))
+    events, decisions = events_for("A", "B"), taken(chunk, "A", "B")
+    at_zero = sv.score(chunk, events, decisions, "CND-PS", 0.0, mid_marks=True, repriced=True).set_index("event_id")
+    at_one = sv.score(chunk, events, decisions, "CND-PS", 1.0, mid_marks=True, repriced=True).set_index("event_id")
+    assert at_zero.loc["A", "entry_cost"] == pytest.approx(0.94)
+    assert at_zero.loc["B", "entry_cost"] == pytest.approx(0.94)
+    assert at_one.loc["A", "entry_cost"] == pytest.approx(0.14)
+    assert at_one.loc["B", "entry_cost"] == pytest.approx(0.14)
+    assert at_zero.loc["A", "exit_value"] == pytest.approx(0.0)
+    assert at_one.loc["A", "exit_value"] == pytest.approx(1.0)
+    assert at_zero.loc["B", "exit_value"] == pytest.approx(0.0)
+    assert at_one.loc["B", "exit_value"] == pytest.approx(0.0)
+    assert at_zero.loc["A", "pnl_per_share"] == pytest.approx(-0.94)
+    assert at_one.loc["A", "pnl_per_share"] == pytest.approx(0.86)
+    assert at_zero.loc["B", "pnl_per_share"] == pytest.approx(-0.94)
+    assert at_one.loc["B", "pnl_per_share"] == pytest.approx(-0.14)
+    # The endpoints are not the mid score: A's P&L moves across the spread.
+    assert at_zero.loc["A", "pnl_per_share"] != pytest.approx(at_one.loc["A", "pnl_per_share"])
+    # The two endpoints bracket the breakeven: -0.94 + 1.8 * alpha = 0 at alpha = 0.94 / 1.8.
+    assert breakeven_alpha(-0.94, 0.86) == pytest.approx(0.94 / 1.8)
+
+
 def test_ends_is_none_when_the_flag_is_off():
     calls = []
     assert driver._ends(False, lambda a: calls.append(a)) is None
